@@ -1,0 +1,58 @@
+{{- if eq .Values.engine "ferretdb" }}
+{{/*
+FerretDB v2 backend: a CNPG Cluster <id>-pg running FerretDB's
+postgres-documentdb image (PostgreSQL with the Microsoft DocumentDB extension
+baked in — plain postgres images DO NOT work, the extension is a hard
+requirement and ships only in matched image pairs with the frontend).
+
+The operator maintains the <id>-pg-app Secret; the frontend Deployment
+(deployment.yaml next to this file) builds FERRETDB_POSTGRESQL_URL from it.
+That Secret is also the ConnectionSecret tuple internal/cloud/dbaas/engines.go
+reads — customers authenticate to FerretDB with the same app credentials.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ $name }}-pg
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+    {{- with .Values.restartedAt }}
+    # Same CNPG restart mechanism as templates/postgresql/cluster.yaml.
+    kubectl.kubernetes.io/restartedAt: {{ . | quote }}
+    {{- end }}
+spec:
+  instances: {{ int .Values.instances }}
+  imageName: {{ .Values.ferretdb.postgresImage }}
+  # DocumentDB extension requirements. TODO-verify(drill): the FerretDB CNPG
+  # guide's exact bootstrap stanza for the pinned image pair — whether the
+  # extension must be created in the app database or comes preloaded, and the
+  # required shared_preload_libraries set (flagged in the plan's verify list
+  # together with the frontend healthz port).
+  postgresql:
+    shared_preload_libraries:
+      - pg_documentdb_core
+      - pg_documentdb
+  bootstrap:
+    initdb:
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;
+  storage:
+    {{/* Sized from the SAME storage.sizeGi every other engine uses — one knob,
+         so RESIZE_STORAGE (values.storage.sizeGi, grow-only) works uniformly. */}}
+    size: {{ .Values.storage.sizeGi }}Gi
+    {{- with .Values.storage.storageClassName }}
+    storageClass: {{ . }}
+    {{- end }}
+  resources:
+    {{- include "database-cluster.resources" . | nindent 4 }}
+  monitoring:
+    enablePodMonitor: {{ .Values.monitoring.enabled }}
+  # Stamp the NetworkPolicy selector label onto the backend pods too — the
+  # policy covers frontend AND backend via app.kubernetes.io/instance=<id>.
+  inheritedMetadata:
+    labels:
+      app.kubernetes.io/instance: {{ $name }}
+{{- end }}

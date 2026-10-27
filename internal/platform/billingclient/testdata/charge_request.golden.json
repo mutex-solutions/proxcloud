@@ -1,0 +1,64 @@
+{
+  "profileId": "bp-1",
+  "timeUnit": "minute",
+  "cycleStart": "2026-06-01T00:00:00Z",
+  "cycleEnd": "2026-07-01T00:00:00Z",
+  "cycleTimestamp": "2026-06-15T10:00:00Z",
+  "services": [
+    {
+      "serviceId": "svc-x",
+      "resources": [
+        {
+          "resourceId": "instance_traffic-s1",
+          "projectId": "proj-1",
+          "resourceType": "instance_traffic",
+          "createdAt": "2026-06-01T08:30:00Z",
+          "deletedAt": "2026-06-20T12:00:00Z",
+          "displayPrice": true,
+          "values": {
+            "display_name": "vm",
+            "is_bareMetal": false,
+            "total_traffic_mb": "100.5",
+            "usage_bytes": 9007199254740993
+          },
+          "notEligibleForBilling": true,
+          "billingResourceType": {
+            "resourceType": "instance_traffic",
+            "attributes": [
+              {
+                "type": "number",
+                "name": "total_traffic_mb",
+                "isUsage": true
+              },
+              {
+                "type": "string",
+                "name": "display_name"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "catalog": [
+    {
+      "resourceType": "instance_traffic",
+      "attributes": [
+        {
+          "type": "number",
+          "name": "total_traffic_mb",
+          "isUsage": true
+        },
+        {
+          "type": "string",
+          "name": "display_name"
+        }
+      ]
+    }
+  ],
+  "timeUnitLimits": {
+    "hour": 720,
+    "minute": 43200,
+    "month": 1
+  }
+}

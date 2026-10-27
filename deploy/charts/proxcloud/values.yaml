@@ -1,0 +1,444 @@
+# ============================================================================
+# proxcloud — chart values
+#
+# The chart deploys three workloads:
+#   api    the Go binary (proxcloud-api): app port + management port
+#   ui     the customer console SPA (static nginx image)
+#   admin  the operator console SPA (static nginx image)
+#
+# Datastores: PostgreSQL (primary, required) and RabbitMQ (required).
+# Both can be bundled (bitnami subcharts, on by default) or brought
+# externally via the matching external* block. Keycloak is optional.
+# ============================================================================
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Pull secrets applied to every proxcloud workload (not the subcharts —
+# set those on postgresql/rabbitmq/keycloak directly if needed).
+imagePullSecrets: []
+
+# Global values propagated to the bundled bitnami subcharts. allowInsecureImages
+# acknowledges the `bitnamilegacy` image repoint on rabbitmq (and postgresql if you
+# repoint it): recent Bitnami charts hard-fail render on a substituted/non-Bitnami
+# image unless this is set.
+global:
+  security:
+    allowInsecureImages: true
+
+# ----------------------------------------------------------------------------
+# api — the proxcloud-api Go service
+# ----------------------------------------------------------------------------
+api:
+  image:
+    repository: ghcr.io/mutex-solutions/proxcloud-api
+    # Empty tag falls back to the chart appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  replicas: 1
+
+  # App (public API) and management (probes + operator triggers) listeners.
+  # These are the binary's built-in defaults. If you change them you must
+  # also set server.port / management.server.port in `applicationYml` below,
+  # because the binary only reads its listen ports from the config file.
+  port: 8080
+  managementPort: 8081
+
+  # Data-at-rest encryption key (PROXCLOUD_ENCRYPTION_DEFAULT_KEY). REQUIRED — no default:
+  # set a strong random value (e.g. `openssl rand -hex 32`) or point api.existingSecret at a
+  # pre-made Secret. A chart-managed install with this empty FAILS by design (a known key would
+  # let anyone decrypt/forge stored secrets). For a throwaway local dev install use
+  # `-f deploy/charts/proxcloud/values-dev.yaml`.
+  encryptionKey: ""
+
+  # Name of a pre-created Secret that replaces the chart-managed one.
+  # It must carry the keys: db-url, rabbitmq-password, encryption-key.
+  existingSecret: ""
+
+  # Public base URLs the API embeds in mail links, redirects and MCP
+  # metadata (PROXCLOUD_SELF_*). The ui/admin URLs also seed the CORS
+  # allow-list. Leave empty to skip.
+  selfUrls:
+    base: ""
+    api: ""
+    ui: ""
+    admin: ""
+
+  # Extra CORS origins beyond the ones derived from selfUrls.ui/admin
+  # (PROXCLOUD_CORS_ALLOWED_ORIGINS, joined with commas).
+  corsAllowedOrigins: []
+
+  # Scheduled-job gates. All OFF by default on purpose: a plain deploy
+  # stays dormant and never charges bills on a timer.
+  jobs:
+    # Auto-start the charge/metrics crons (charges bills on a timer!).
+    schedulerEnabled: false
+    # Expose the on-demand POST :<managementPort>/debug/run-* triggers
+    # without starting the crons.
+    debugTriggers: false
+    # Fan the NATIVE charge cron out across pods via RabbitMQ (one message per active profile)
+    # instead of charging every profile in a single pod. Ignored by the external provider, which
+    # gets its parallelism from the billing service instead.
+    rabbitFanout: false
+
+  # Which engine charges bills.
+  #
+  #   native   (default) The billing engine built into proxcloud. Needs nothing but PostgreSQL, and
+  #                      is a complete billing system: profiles, rating, bills, credits, savings
+  #                      plans, dunning and suspension. This is what a plain deployment runs.
+  #   external           Delegate rating to a separate billing service. ProxCloud still resolves what
+  #                      to bill (it owns the resource cache) and POSTs the resolved
+  #                      resources to billing.url. Requires url and token.
+  #
+  # Only the charge step differs; every other billing surface behaves identically.
+  billing:
+    provider: native
+    # External provider only. In-cluster URL of the billing service.
+    url: ""
+    # External provider only. Bearer token for that service's internal API.
+    token: ""
+    # Shared secret the billing service presents when calling BACK into proxcloud to suspend/resume
+    # clouds, activate projects or send mail. Empty -> those callbacks are not mounted at all.
+    callbackToken: ""
+
+  # Networking defaults for client-created networks.
+  network:
+    # MTU stamped on every client-created network. 0 (or unset) leaves it to neutron's provider
+    # default (e.g. the geneve/vxlan jumbo value); set e.g. 1500 to force a fixed MTU.
+    defaultMtu: 0
+
+  # Optional literal application.yml mounted at /opt/proxcloud/api/application.yml.
+  # Env injected by this chart always wins over the file. Example:
+  #   applicationYml: |
+  #     logging:
+  #       level:
+  #         root: DEBUG
+  applicationYml: ""
+
+  # Mail gateway (PROXCLOUD_MAIL_*) — the bootstrap/fallback SMTP gateway. Operators can ALSO
+  # configure SMTP under Admin → Integrations → Mail, which is stored in the database and takes
+  # precedence over this env gateway. Leave smtp.host empty to disable the env gateway (a NoopMailer
+  # then drops email until a gateway is configured). from + smtp.host are both required to enable.
+  mail:
+    from: "" # PROXCLOUD_MAIL_FROM, e.g. no-reply@example.com
+    smtp:
+      host: "" # PROXCLOUD_MAIL_SMTP_HOST, e.g. smtp.sendgrid.net
+      port: 587 # PROXCLOUD_MAIL_SMTP_PORT
+      username: "" # PROXCLOUD_MAIL_SMTP_USERNAME (e.g. "apikey" for SendGrid)
+      # Password comes from a pre-created Secret (never inline). Set existingSecret to that Secret's
+      # name and passwordKey to the key holding the SMTP password / API key.
+      existingSecret: ""
+      passwordKey: PROXCLOUD_MAIL_SMTP_PASSWORD
+
+  # Raw extra env entries appended to the api container, e.g.:
+  #   extraEnv:
+  #     - name: PROXCLOUD_MAIL_BUSINESS_NAME
+  #       value: Example Cloud
+  extraEnv: []
+
+  # Extra volumes / mounts on the api container. Use these to trust a private CA
+  # (mount the PEM into a dir and add it to SSL_CERT_DIR via extraEnv) or to mount
+  # any other file/secret. See docs: Self-hosting → Custom CA. Example:
+  #   extraVolumes:
+  #     - name: custom-ca
+  #       secret:
+  #         secretName: internal-ca      # key: ca.crt
+  #   extraVolumeMounts:
+  #     - name: custom-ca
+  #       mountPath: /etc/ssl/extra-certs
+  #       readOnly: true
+  extraVolumes: []
+  extraVolumeMounts: []
+
+  service:
+    type: ClusterIP
+    port: 8080
+
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    path: /
+    annotations: {}
+    tls: []
+
+  resources: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ----------------------------------------------------------------------------
+# ui / admin — the two static SPA images
+# ----------------------------------------------------------------------------
+ui:
+  image:
+    repository: ghcr.io/mutex-solutions/proxcloud-web
+    tag: ""
+    pullPolicy: IfNotPresent
+  replicas: 1
+  port: 80
+  # Browser-facing API URL baked into the SPA runtime config. Empty derives
+  # <api.selfUrls.api>/api/v1 (or a relative /api/v1 when that is unset too).
+  apiUrl: ""
+  service:
+    type: ClusterIP
+    port: 80
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    path: /
+    annotations: {}
+    tls: []
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+admin:
+  image:
+    repository: ghcr.io/mutex-solutions/proxcloud-admin
+    tag: ""
+    pullPolicy: IfNotPresent
+  replicas: 1
+  port: 80
+  apiUrl: ""
+  service:
+    type: ClusterIP
+    port: 80
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    path: /
+    annotations: {}
+    tls: []
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ----------------------------------------------------------------------------
+# auth — the three OIDC realms the API validates tokens against.
+# The ui SPA logs in against `main`; the admin SPA against `admin`;
+# `adminApi` guards the machine-to-machine /admin-api/v1 surface.
+# Empty issuer = that realm is disabled (its tokens are rejected).
+# With the bundled Keycloak, set the issuers to the PUBLIC Keycloak URL
+# (tokens carry a host-derived `iss`, so an in-cluster URL usually won't
+# match) — e.g. https://id.example.com/realms/<realm>.
+# ----------------------------------------------------------------------------
+auth:
+  main:
+    issuer: ""
+    clientId: proxcloud-ui
+  admin:
+    issuer: ""
+    clientId: proxcloud-admin
+  adminApi:
+    issuer: ""
+    clientId: proxcloud-admin-api
+
+# ----------------------------------------------------------------------------
+# PostgreSQL — the primary datastore.
+# Bundled bitnami subchart by default; auth.* below makes the subchart
+# create the `proxcloud` role and database on first boot.
+# ----------------------------------------------------------------------------
+postgresql:
+  enabled: true
+  # ⚠ Bitnami catalog risk (unresolved for PostgreSQL): the subchart pulls PostgreSQL 18.4, but the
+  # frozen `bitnamilegacy` mirror predates PG 18 (frozen ~Aug 2025) — so it has NO PG 18 image, and
+  # repointing there would 404 or downgrade to a PG that can't start on PG-18 data. The subchart
+  # image tag is also `latest` (a moving tag). SAFE STOPGAP: mirror the current `bitnami/postgresql`
+  # into your own registry and pin `image.registry`/`image.repository`/`image.tag` to it. Real exit:
+  # CloudNativePG (operator). Until then this keeps the subchart default (bitnami current `latest`).
+  auth:
+    username: proxcloud
+    # REQUIRED — no default. Set a strong password or use externalPostgresql.existingSecret.
+    # A bundled install with this empty FAILS by design (see values-dev.yaml for a dev value).
+    password: ""
+    database: proxcloud
+
+# Bring-your-own PostgreSQL (used when postgresql.enabled=false).
+externalPostgresql:
+  host: ""
+  port: 5432
+  database: proxcloud
+  username: proxcloud
+  # Plain password: the chart builds the DSN into its own Secret.
+  password: ""
+  sslMode: require
+  # Alternatively, a pre-created Secret whose `secretKey` holds the COMPLETE
+  # DSN (postgres://user:pass@host:port/db?sslmode=...). When set, it is
+  # consumed directly and host/port/database/username/password are ignored.
+  existingSecret: ""
+  secretKey: db-url
+
+# ----------------------------------------------------------------------------
+# CloudNativePG — run PostgreSQL via the CloudNativePG operator (official
+# ghcr.io/cloudnative-pg/postgresql images, NO Bitnami) instead of the bundled
+# bitnami subchart. Set postgresql.enabled=false when cnpg.enabled=true.
+# Two modes:
+#   • Operator ALREADY in the cluster → cnpg.enabled=true, installOperator=false.
+#     The chart renders only the Cluster CR + its owner-credentials Secret.
+#   • Operator NOT installed → also set installOperator=true to bundle the
+#     cloudnative-pg operator subchart (operator + CRDs, cluster-wide).
+#     ⚠ On a FRESH cluster the operator's admission webhook may not be ready when
+#     the Cluster CR is first applied — if `helm install` errors on the Cluster,
+#     re-run `helm upgrade` (idempotent), or install the operator first and use
+#     the operator-present mode.
+# db name / owner / password are taken from postgresql.auth.* (uniform DSN wiring).
+# ----------------------------------------------------------------------------
+cnpg:
+  enabled: false
+  installOperator: false
+  clusterName: ""   # defaults to <fullname>-pg; the app connects to <name>-rw:5432
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:18
+  storage:
+    size: 10Gi
+    storageClass: ""   # "" = cluster default StorageClass
+  # A pre-created kubernetes.io/basic-auth Secret (username+password for the owner).
+  # When empty the chart renders one from postgresql.auth.username/password.
+  existingSecret: ""
+
+# ----------------------------------------------------------------------------
+# RabbitMQ — the message broker (charge fan-out).
+# ----------------------------------------------------------------------------
+rabbitmq:
+  enabled: true
+  # STOPGAP (see postgresql above): pin to the frozen bitnamilegacy mirror so pulls survive the
+  # docker.io/bitnami catalog deletion. Planned exit: the official RabbitMQ Cluster Operator.
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/rabbitmq
+  auth:
+    username: proxcloud
+    # REQUIRED — no default. Set a strong password or use externalRabbitmq.existingSecret.
+    # A bundled install with this empty FAILS by design (see values-dev.yaml for a dev value).
+    password: ""
+
+# Bring-your-own RabbitMQ (used when rabbitmq.enabled=false).
+externalRabbitmq:
+  host: ""
+  port: 5672
+  username: ""
+  # Plain password: rendered into the chart-managed Secret.
+  password: ""
+  # Alternatively, a pre-created Secret whose `secretKey` holds the password.
+  existingSecret: ""
+  secretKey: rabbitmq-password
+
+# ----------------------------------------------------------------------------
+# Keycloak — optional bundled OIDC issuer via codecentric/keycloakx, which runs the OFFICIAL
+# quay.io/keycloak/keycloak image (subchart default; NOT Bitnami). OFF by default — most installs
+# point auth.*.issuer at an external IdP instead. Expose it via keycloakx.ingress.*. Full options:
+# https://github.com/codecentric/helm-charts/tree/master/charts/keycloakx
+# ----------------------------------------------------------------------------
+keycloakx:
+  enabled: false
+  # Serve Keycloak at the root path (keycloakx defaults to the legacy /auth),
+  # so issuers look like https://id.example.com/realms/<realm>.
+  http:
+    relativePath: "/"
+  # Bootstrap admin — REQUIRED when enabled (no default). Prefer a Secret (valueFrom.secretKeyRef)
+  # in any real install.
+  extraEnv: |
+    - name: KC_BOOTSTRAP_ADMIN_USERNAME
+      value: admin
+    - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+      value: ""
+  # kc.sh production start (TLS terminated at the ingress/gateway → http + proxy headers). To
+  # auto-import the realm below, append "--import-realm" here AND mount the ConfigMap via
+  # extraVolumes/extraVolumeMounts (see realmImport).
+  command:
+    - "/opt/keycloak/bin/kc.sh"
+    - "start"
+    - "--http-enabled=true"
+    - "--http-port=8080"
+    - "--hostname-strict=false"
+    - "--proxy-headers=xforwarded"
+  # Keycloak's OWN database — point at the bundled postgresql (create a `keycloak` db + role; do NOT
+  # reuse the proxcloud database) or a managed PG. dbchecker waits for it before boot.
+  dbchecker:
+    enabled: true
+  database:
+    vendor: postgres
+    hostname: ""
+    port: 5432
+    database: keycloak
+    username: keycloak
+    password: ""
+
+# Optional Keycloak realm export. When non-empty it is rendered verbatim
+# into a ConfigMap (<fullname>-realm-import, key realm.json). The chart
+# ships NO baked realm: supply your own export defining the realm(s) and
+# the proxcloud-ui / proxcloud-admin / proxcloud-admin-api clients you configure
+# under `auth` above. For one-shot installs prefer keycloakConfigCli below —
+# unlike kc.sh --import-realm it also updates realms that already exist
+# (e.g. adding the operator clients to `master`).
+realmImport:
+  json: ""
+
+# ----------------------------------------------------------------------------
+# keycloak-config-cli — one-shot realm/client provisioning (adorsys
+# keycloak-config-cli). When enabled, a post-install/post-upgrade Job derives
+# the realm definitions from the values you already set and applies them
+# idempotently once Keycloak is reachable:
+#   • auth.main's realm (last path segment of the issuer) is created/updated
+#     with user registration + email-as-username ON and the auth.main.clientId
+#     public PKCE client (redirect/webOrigins from api.selfUrls.ui).
+#   • auth.admin's realm gets the auth.admin.clientId public PKCE client
+#     (redirect/webOrigins from api.selfUrls.admin); existing realms (master)
+#     are updated in place.
+#   • auth.adminApi's realm gets the auth.adminApi.clientId client
+#     (direct-access grants only).
+# Clients not managed here are never deleted (no-delete mode). Works with the
+# bundled keycloakx (default URL) or any external Keycloak (set url +
+# credentials).
+# ----------------------------------------------------------------------------
+keycloakConfigCli:
+  enabled: false
+  image: docker.io/adorsys/keycloak-config-cli:6.5.1-26.5.5
+  # Target Keycloak base URL; empty derives the bundled keycloakx http service
+  # (http://<keycloakx-fullname>-http:80).
+  url: ""
+  # Keycloak admin credentials (the keycloakx bootstrap admin, or any admin of
+  # the target). Password inline OR from a pre-created Secret — REQUIRED when
+  # enabled.
+  adminUser: admin
+  adminPassword: ""
+  existingSecret: ""
+  passwordKey: admin-password
+  # Additional raw keycloak-config-cli import files (filename -> JSON string),
+  # applied alongside the derived ones.
+  extraRealms: {}
+
+# ----------------------------------------------------------------------------
+# Gateway API — HTTPRoutes as an alternative to Ingress (OFF by default).
+# One HTTPRoute is rendered per component with a non-empty hostname.
+# ----------------------------------------------------------------------------
+gateway:
+  enabled: false
+  # e.g. [{name: shared-gateway, namespace: infra}]
+  parentRefs: []
+  hostnames:
+    api: ""
+    ui: ""
+    admin: ""
+  # Extra annotations merged onto every rendered HTTPRoute (external-dns's hostname
+  # hint is always set).
+  annotations: {}
+  # Optional per-component Gateway API rule timeouts (HTTPRoute rules[].timeouts).
+  # UNSET by default, and that is the safe default: the VNC console holds a long-lived
+  # WebSocket through the `api` route, so a `request` timeout would cut the session.
+  # WebSocket upgrade itself needs no special config — it works through Gateway API as-is.
+  # Only if your Gateway drops IDLE upgraded connections (nginx-based data planes default
+  # to a 60s proxy read timeout) raise the backend read timeout on the api route:
+  #   timeouts:
+  #     api:
+  #       backendRequest: 3600s
+  # The Ingress path (ingress.enabled) gets the equivalent nginx-ingress proxy-read/send
+  # timeout annotations automatically — see templates/api/ingress.yaml.
+  timeouts: {}

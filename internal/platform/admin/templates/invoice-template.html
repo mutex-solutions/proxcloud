@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Invoice {{invoice.series}} {{invoice.number}}</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 50px;
+      color: #333;
+      line-height: 1.4;
+    }
+
+    h1 {
+      text-align: right;
+      color: #8080c0;
+      margin: 0;
+    }
+
+    .top-section {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 40px;
+    }
+
+    .company-info h2 {
+      margin: 0;
+      font-size: 22px;
+    }
+
+    .company-info p {
+      margin: 4px 0;
+      font-size: 14px;
+    }
+
+    .invoice-info p {
+      margin: 4px 0;
+      font-size: 14px;
+    }
+
+    .bill-to {
+      margin-bottom: 40px;
+    }
+
+    .bill-to strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 15px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 40px;
+    }
+
+    table th, table td {
+      border-bottom: 1px solid #ddd;
+      padding: 10px;
+      text-align: left;
+      font-size: 14px;
+    }
+
+    table th {
+      background: #f9f9f9;
+      font-weight: bold;
+    }
+
+    .totals {
+      float: right;
+      width: 320px;
+    }
+
+    .totals table {
+      width: 100%;
+      border: none;
+    }
+
+    .totals td {
+      padding: 6px 0;
+      font-size: 14px;
+    }
+
+    .totals td:last-child {
+      text-align: right;
+      font-weight: bold;
+    }
+
+    .notes {
+      clear: both;
+      margin-top: 40px;
+      padding-top: 20px;
+      border-top: 1px solid #ddd;
+    }
+
+    .paid-stamp {
+      color: #28a745;
+      font-size: 24px;
+      font-weight: bold;
+      text-align: center;
+      margin: 20px 0;
+      padding: 10px;
+      border: 3px solid #28a745;
+      transform: rotate(-5deg);
+      display: inline-block;
+    }
+
+    .overdue-warning {
+      background-color: #f8d7da;
+      border: 1px solid #f5c6cb;
+      color: #721c24;
+      padding: 10px;
+      border-radius: 4px;
+      margin: 20px 0;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="top-section">
+    <div class="company-info">
+      <h2>{{company.businessName}}</h2>
+      {{#company.vatId}}
+      <p>VAT ID: {{company.vatId}}</p>
+      {{/company.vatId}}
+      <p>
+        {{#companyAddress}}
+        {{#companyAddress.address}}{{companyAddress.address}}<br/>{{/companyAddress.address}}
+        {{#companyAddress.city}}{{companyAddress.city}}, {{/companyAddress.city}}{{#companyAddress.country}}{{companyAddress.country}}{{/companyAddress.country}}
+        {{/companyAddress}}
+      </p>
+    </div>
+
+    <div class="invoice-info">
+      <p><strong>Invoice number</strong> {{invoice.series}} {{invoice.number}}</p>
+      <p><strong>Date of issue</strong> {{invoice.dateOfIssue}}</p>
+      {{#invoice.dateOfDue}}
+      <p><strong>Date of due</strong> {{invoice.dateOfDue}}</p>
+      {{/invoice.dateOfDue}}
+    </div>
+  </div>
+
+  <h1>INVOICE</h1>
+
+  <div class="bill-to">
+    <strong>Bill to</strong>
+    <p>
+      {{customer.fullName}}
+      {{#customer.vatId}}
+      <br/>VAT ID: {{customer.vatId}}
+      {{/customer.vatId}}
+      {{#customer.email}}
+      <br/>{{customer.email}}
+      {{/customer.email}}
+      {{#customer.address}}
+      <br/>{{customer.address}}
+      {{/customer.address}}
+    </p>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Description</th>
+        <th>Qty</th>
+        <th>Unit Price</th>
+        <th>Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#items}}
+      <tr>
+        <td>
+          {{description}}
+        </td>
+        <td>{{qty}}</td>
+        <td>{{unitPriceFormatted}}</td>
+        <td>{{amountFormatted}}</td>
+      </tr>
+      {{/items}}
+      {{^items}}
+      <tr>
+        <td>{{item.description}}</td>
+        <td>{{item.qty}}</td>
+        <td>{{item.unitPriceFormatted}}</td>
+        <td>{{item.amountFormatted}}</td>
+      </tr>
+      {{/items}}
+    </tbody>
+  </table>
+
+  <div class="totals">
+    <table>
+      <tr>
+        <td>Subtotal:</td>
+        <td>{{invoice.amount}} {{invoice.currency}}</td>
+      </tr>
+      {{#invoice.taxAmount}}
+      <tr>
+        <td>VAT ({{invoice.taxPercentage}}%):</td>
+        <td>{{invoice.taxAmount}} {{invoice.currency}}</td>
+      </tr>
+      {{/invoice.taxAmount}}
+      <tr style="font-weight: bold; font-size: 16px;">
+        <td>Total:</td>
+        <td>{{invoice.grossAmount}} {{invoice.currency}}</td>
+      </tr>
+    </table>
+  </div>
+</body>
+</html>

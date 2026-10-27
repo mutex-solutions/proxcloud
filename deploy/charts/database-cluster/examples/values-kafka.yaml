@@ -1,0 +1,37 @@
+---
+# =============================================================================
+# Kafka example — 3 dual-role (controller+broker) KRaft nodes on Strimzi.
+# NOTE the LB shape: no chart-owned <id>-lb for kafka — Strimzi creates the
+# external bootstrap LB plus ONE LB PER BROKER, so this example costs 4
+# Octavia amphorae (instances+1), not 1. The <id>-auth Secret (SASL password
+# for KafkaUser <id>-app) is proxcloud-provisioned BEFORE the Application syncs.
+#   helm template test deploy/charts/database-cluster -f examples/values-kafka.yaml
+# =============================================================================
+engine: kafka
+engineVersion: "4.3.0"
+instances: 3
+resources:
+  cpu: "2"
+  memoryGi: 6
+storage:
+  sizeGi: 100
+  storageClassName: csi-cinder-sc-delete
+network:
+  networkId: 11111111-2222-3333-4444-555555555555
+  subnetId: 66666666-7777-8888-9999-aaaaaaaaaaaa
+  memberSubnetId: bbbbbbbb-cccc-dddd-eeee-ffffffffffff
+  allowedCidrs:
+    - 10.60.0.0/24
+proxcloud:
+  projectId: 665f1a2b3c4d5e6f77889900
+  resourceId: std-708192a3
+  displayName: events-bus
+monitoring:
+  enabled: false
+kafka:
+  # Merged ON TOP of the instances-derived replication defaults
+  # (templates/kafka/kafka.yaml).
+  parameters:
+    auto.create.topics.enable: "false"
+    log.retention.hours: "168"
+restartedAt: ""

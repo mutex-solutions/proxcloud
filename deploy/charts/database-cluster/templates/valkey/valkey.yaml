@@ -1,0 +1,52 @@
+{{- if eq .Values.engine "valkey" }}
+{{/*
+=============================================================================
+TODO-VERIFY — UNVERIFIED CRD, BETA-GATED ENGINE (plan: valkey last, behind
+the provider beta flag). This template picks the hyperspike valkey-operator
+(apiVersion hyperspike.io/v1, kind Valkey) as the best-known candidate; the
+group/kind/spec below are UNPINNED best-effort and MUST be verified against
+the actually-installed operator before the beta gate opens:
+
+  kubectl api-resources | grep -i valkey
+  kubectl explain valkey.spec
+
+Things to pin at verification time (all flagged in the plan's verify list):
+  * apiVersion/kind (hyperspike.io/v1 Valkey vs a valkey-io operator CRD)
+  * replica/node field name and semantics (nodes vs shards vs replicas)
+  * pod labels (the LB selector in _helpers.tpl guesses
+    app.kubernetes.io/name=valkey + instance=<id>)
+  * auth secret name + key (engines.go pins <id>-auth — chart-provisioned?
+    operator-provisioned? adjust the ConnectionSecret tuple to match)
+  * whether valkey.parameters can be passed through (schema-only until then)
+  * restartedAt mechanism (none wired — RESTART capability stays off)
+
+Also update: rbac.yaml CRD read grant + argocd-health.yaml Lua placeholder in
+deploy/dbaas-cluster/.
+=============================================================================
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: hyperspike.io/v1
+kind: Valkey
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+spec:
+  nodes: {{ int .Values.instances }}
+  image: {{ include "database-cluster.image" . }}
+  tls: false
+  prometheus: {{ .Values.monitoring.enabled }}
+  resources:
+    {{- include "database-cluster.resources" . | nindent 4 }}
+  storage:
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      {{- with .Values.storage.storageClassName }}
+      storageClassName: {{ . }}
+      {{- end }}
+      resources:
+        requests:
+          storage: {{ .Values.storage.sizeGi }}Gi
+{{- end }}

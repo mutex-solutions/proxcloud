@@ -1,0 +1,152 @@
+# RBAC for the proxcloud service account on the Kamaji MANAGEMENT cluster.
+#
+# Grants exactly the API surface internal/cloud/kamajik8s/client.go uses — nothing more:
+#
+#   verb source (client.go)          resource
+#   ---------------------------      -----------------------------------------------
+#   EnsureNamespace (SSA PATCH)      namespaces: create+patch (+get), delete/list for
+#                                    the sync-driven namespace GC (orphan finalization)
+#   ApplySecret (SSA PATCH)          secrets: create+patch
+#   GetSecretData / DeleteSecret     secrets: get / delete; list for the secret GC leg
+#   Apply/Get/List/DeleteApplication applications.argoproj.io (argocd ns only)
+#   Get/ListTenantControlPlanes      tenantcontrolplanes.kamaji.clastix.io: get/list
+#   ListMachineDeployments           machinedeployments.cluster.x-k8s.io: get/list
+#
+# Server-side apply is a PATCH that CREATES the object when absent — every SSA'd resource
+# therefore needs BOTH `create` and `patch`.
+#
+# ⚠ Why secrets/TCP/MachineDeployment are CLUSTER-wide grants: Kubernetes RBAC cannot
+# wildcard namespaces — a Role binds to exactly one concrete namespace, and the `pc-<projectId>`
+# namespaces are created dynamically by proxcloud itself, so no pre-created namespaced Role can
+# cover them. The ClusterRole below is the honest trade-off: the proxcloud SA can read/write
+# Secrets in ANY namespace of this cluster. Accepted for v1 because the management cluster is
+# single-purpose (Kamaji tenant hosting); if it ever becomes multi-purpose, replace this with a
+# controller that stamps a per-namespace Role into each pc-* namespace on creation.
+#
+# The one surface that CAN be namespace-scoped is the ArgoCD Application CRUD — it lives only
+# in the argocd namespace, so it is a plain Role there (bottom of this file).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: proxcloud-system
+  labels:
+    app.kubernetes.io/managed-by: proxcloud
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxcloud
+  namespace: proxcloud-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxcloud-mgmt
+rules:
+  # pc-<projectId> project namespaces: created via SSA at bootstrap, deleted by the
+  # sync-driven GC once a project's last cluster is finalized. `list` is label-filtered
+  # (app.kubernetes.io/managed-by=proxcloud) by the GC scan.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # Per-cluster clouds.yaml secrets (written by proxcloud) + the Kamaji-generated
+  # <tcp>-admin-kubeconfig secrets (read on kubeconfig download). Cluster-wide — see header.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # Status reads only — proxcloud never writes these; the chart (via ArgoCD) owns them.
+  - apiGroups: ["kamaji.clastix.io"]
+    resources: ["tenantcontrolplanes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["machinedeployments"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-mgmt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxcloud-mgmt
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+# ArgoCD Application CRUD — namespaced to the argocd namespace only. The AppProject
+# (appproject.yaml) further constrains what those Applications may source and where they
+# may deploy. `create` accompanies `patch` because ApplyApplication is SSA (create-on-absent).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: proxcloud-applications
+  namespace: argocd
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: proxcloud-applications
+  namespace: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: proxcloud-applications
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+# Long-lived token for the proxcloud SA. Since k8s 1.24 SAs get no auto-created token; this
+# explicit Secret makes the control plane mint one and keep it populated.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxcloud-token
+  namespace: proxcloud-system
+  annotations:
+    kubernetes.io/service-account.name: proxcloud
+type: kubernetes.io/service-account-token
+---
+# Assemble the kubeconfig that becomes the proxcloud provider secret (secret.kubeconfig on the
+# kamaji externalService document — admin UI "Add provider → Kubernetes" kubeconfig field, or
+# deploy/seed/external-service-dev.json's __MGMT_CLUSTER_KUBECONFIG__).
+#
+# NOTE: the proxcloud kubeconfig parser (internal/cloud/kamajik8s/kubeconfig.go) supports plain
+# token or client-cert auth ONLY — no exec plugins / auth-provider blocks / proxy-url. The
+# token kubeconfig below is exactly what it expects.
+#
+#   SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+#   CA=$(kubectl -n proxcloud-system get secret proxcloud-token -o jsonpath='{.data.ca\.crt}')
+#   TOKEN=$(kubectl -n proxcloud-system get secret proxcloud-token -o jsonpath='{.data.token}' | base64 -d)
+#
+#   cat <<EOF > proxcloud-mgmt-kubeconfig.yaml
+#   apiVersion: v1
+#   kind: Config
+#   current-context: mgmt
+#   clusters:
+#     - name: mgmt
+#       cluster:
+#         server: ${SERVER}
+#         certificate-authority-data: ${CA}
+#   users:
+#     - name: proxcloud
+#       user:
+#         token: ${TOKEN}
+#   contexts:
+#     - name: mgmt
+#       context:
+#         cluster: mgmt
+#         user: proxcloud
+#   EOF
+#
+# Sanity-check before pasting it into the provider form:
+#   kubectl --kubeconfig proxcloud-mgmt-kubeconfig.yaml auth can-i list tenantcontrolplanes.kamaji.clastix.io -A   # yes
+#   kubectl --kubeconfig proxcloud-mgmt-kubeconfig.yaml auth can-i create applications.argoproj.io -n argocd       # yes
+#   kubectl --kubeconfig proxcloud-mgmt-kubeconfig.yaml auth can-i '*' '*' -A                                      # no

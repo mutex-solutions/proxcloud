@@ -1,0 +1,63 @@
+{{- if eq .Values.engine "mariadb" }}
+{{/*
+mariadb-operator MariaDB (operator 26.x, pinned in
+deploy/dbaas-cluster/README.md). The operator generates the root password into
+<id>-root; the write path for the LB is the chart-owned HAProxy next to this
+file (the operator's <id>-primary Service is pod-name-pinned, not selectable
+by the LB).
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: MariaDB
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+spec:
+  replicas: {{ int .Values.instances }}
+  {{- if gt (int .Values.instances) 1 }}
+  replication:
+    enabled: true
+  {{- end }}
+  rootPasswordSecretKeyRef:
+    name: {{ $name }}-root
+    key: password
+    generate: true
+  {{/*
+  The exposed app account (engines.go ConnectionSecret contract: user "app",
+  database "app", password from the PROXCLOUD-provisioned <id>-auth secret —
+  applied before this Application ever syncs, and deliberately outside the
+  chart so an ArgoCD render never re-rolls it; RESET_PASSWORD patches it and
+  the operator reconciles the role from the ref).
+  */}}
+  username: app
+  database: app
+  passwordSecretKeyRef:
+    name: {{ $name }}-auth
+    key: password
+  image: {{ include "database-cluster.image" . }}
+  {{- with .Values.restartedAt }}
+  # RESTART mechanism: a changed pod-template annotation rolls the pods, same
+  # convention as `kubectl rollout restart`. TODO-verify(drill): podMetadata
+  # passthrough on operator 26.x.
+  podMetadata:
+    annotations:
+      kubectl.kubernetes.io/restartedAt: {{ . | quote }}
+  {{- end }}
+  storage:
+    size: {{ .Values.storage.sizeGi }}Gi
+    {{- with .Values.storage.storageClassName }}
+    storageClassName: {{ . }}
+    {{- end }}
+  {{- with .Values.mariadb.parameters }}
+  myCnf: |
+    [mariadb]
+    {{- range $k, $v := . }}
+    {{ $k }}={{ $v }}
+    {{- end }}
+  {{- end }}
+  resources:
+    {{- include "database-cluster.resources" . | nindent 4 }}
+{{- end }}

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Blocks commits that would publish internal notes or provenance strings.
+# Enable once per clone: git config core.hooksPath .githooks
+set -e
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$staged" ] && exit 0
+bad=$(printf '%s\n' "$staged" | grep -E '^(CLAUDE\.md|MIGRATION_PLAN\.md|tasks/|_audit/|\.env$|api$)' || true)
+if [ -n "$bad" ]; then
+  echo "pre-commit: internal files staged — unstage them:" >&2; echo "$bad" >&2; exit 1
+fi
+hits=$(git diff --cached -U0 --diff-filter=ACMR -- . ':!.githooks/pre-commit' | grep -inE '^\+.*(o[s]ie|a[c]vile)' || true)
+if [ -n "$hits" ]; then
+  echo "pre-commit: forbidden provenance string in staged changes:" >&2; echo "$hits" >&2; exit 1
+fi

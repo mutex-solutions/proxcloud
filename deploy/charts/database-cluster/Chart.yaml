@@ -1,0 +1,26 @@
+apiVersion: v2
+appVersion: "0.1.0"
+description: >-
+  Helm chart for a single ProxCloud-managed database cluster on the ops-built
+  DBaaS Kubernetes cluster. One chart, seven engines: values.engine selects
+  which operator CR is rendered (CloudNativePG Cluster, Percona
+  PerconaServerMySQL, mariadb-operator MariaDB + a chart-owned HAProxy,
+  valkey-operator Valkey, FerretDB = CNPG backend + frontend Deployment,
+  opensearch-k8s-operator OpenSearchCluster, or Strimzi Kafka + KafkaNodePool
+  + KafkaUser). Every engine additionally gets an Octavia internal
+  LoadBalancer Service into the tenant network (EXCEPT kafka, where Strimzi
+  creates the bootstrap + per-broker LBs itself) and a NetworkPolicy.
+name: database-cluster
+type: application
+# THE VALUES CONTRACT IS OWNED JOINTLY WITH internal/cloud/dbaas/values.go.
+# ProxCloud never templates this chart itself: BuildValues produces the values
+# document and writes it into an ArgoCD Application (spec.source.helm.valuesObject)
+# pointing at the published chart. TestBuildValues pins every key this chart
+# reads — change a key here and you MUST change BuildValues (and its test) in
+# the same PR, then release a new chart version and move the provider pin
+# (config.argocd.chartVersion). Secrets NEVER travel through values: the
+# Application CR is readable by anyone with argocd access.
+#
+# engineVersion→image maps live in templates/_helpers.tpl and are ops-updatable
+# per chart release (bump images -> bump version -> re-pin).
+version: 0.4.0

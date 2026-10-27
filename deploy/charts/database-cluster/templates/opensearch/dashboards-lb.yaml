@@ -1,0 +1,46 @@
+{{- if and (eq .Values.engine "opensearch") .Values.opensearch.dashboards.enabled }}
+{{/*
+Optional SECOND chart-owned LB <id>-dash-lb: the Dashboards UI on 5601, same
+Octavia internal-LB wiring (and the same allowedCidrs ACL) as the main
+<id>-lb in service-lb.yaml. TCP passthrough — Dashboards serves its own
+operator-generated TLS (spec.dashboards.tls in opensearchcluster.yaml).
+
+TODO-verify(drill): the SELECTOR. The operator labels the Dashboards
+Deployment pods; best-known pair below is the cluster label plus the
+dashboards deployment label (opensearch.cluster.dashboards). If the drill
+shows dashboards pods do NOT carry opster.io/opensearch-cluster, drop that
+line and select on the dashboards label alone — and re-check the
+NetworkPolicy podSelector caveat in templates/networkpolicy.yaml.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-dash-lb
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+    loadbalancer.openstack.org/network-id: {{ .Values.network.networkId | quote }}
+    loadbalancer.openstack.org/subnet-id: {{ .Values.network.subnetId | quote }}
+    loadbalancer.openstack.org/member-subnet-id: {{ .Values.network.memberSubnetId | quote }}
+    # Internal LB — see the annotation note in service-lb.yaml.
+    service.beta.kubernetes.io/openstack-internal-load-balancer: "true"
+    {{- with .Values.network.extraAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: LoadBalancer
+  {{- with .Values.network.allowedCidrs }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  ports:
+    - name: dashboards
+      port: 5601
+      targetPort: 5601
+      protocol: TCP
+  selector:
+    opster.io/opensearch-cluster: {{ $name }}
+    opensearch.cluster.dashboards: {{ $name }}
+{{- end }}

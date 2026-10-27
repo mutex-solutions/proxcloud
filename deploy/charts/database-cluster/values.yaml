@@ -1,0 +1,218 @@
+---
+# =============================================================================
+# ProxCloud Managed Database (database-cluster) — Helm Chart Values
+# =============================================================================
+# FULL values contract. Mirrored 1:1 by internal/cloud/dbaas/values.go
+# (BuildValues / SpecFromValues) — see Chart.yaml header for the change
+# discipline. NO SECRETS EVER: the values document is embedded in an ArgoCD
+# Application CR, which is readable by anyone with argocd read access.
+# Passwords are generated/owned by the operators (or by proxcloud via
+# ApplySecret on RESET_PASSWORD) and only ever live in Secrets.
+#
+# Bare defaults DO NOT render by design: `engine` (and the rest of the
+# required keys) fail the render fast rather than producing a half-formed
+# database. CI renders examples/values-<engine>.yaml instead — one per
+# engine, all seven must template cleanly.
+# =============================================================================
+
+# -- Engine discriminator. REQUIRED. One of:
+#      postgresql | mysql | mariadb | valkey | ferretdb | opensearch | kafka
+# Selects which operator CR (and LB selector / port) is rendered. Unknown or
+# empty values fail the render (templates/_helpers.tpl).
+engine: ""
+
+# -- Engine version, as offered by the provider catalog
+# (config.database.engines in the proxcloud provider doc). REQUIRED.
+# Resolved to a concrete image via the per-engine maps in _helpers.tpl;
+# a version with no mapping fails the render. EXCEPTION: opensearch/kafka
+# have NO image map — both operators resolve images from the version field
+# natively (spec.general.version / spec.kafka.version).
+#   postgresql: "16" | "17" | "18"
+#   mysql:      "8.0" | "8.4"
+#   mariadb:    "10.11" | "11.4"
+#   valkey:     "8.0" | "8.1"
+#   ferretdb:   "2.5" (frontend; the CNPG backend image is ferretdb.postgresImage)
+#   opensearch: "3.3.0"
+#   kafka:      "4.2.0" | "4.2.1" | "4.3.0" (Strimzi 1.1.0 support matrix)
+engineVersion: ""
+
+# -- Number of database instances. REQUIRED.
+# postgresql/mariadb: 1 or 3. mysql: group replication formally wants 3 (a
+# single-node cluster renders the operator's unsafe-size override). ferretdb:
+# this is the CNPG BACKEND instance count; the stateless frontend scales via
+# ferretdb.replicas. opensearch: node-pool replicas (combined
+# cluster_manager+data+ingest roles). kafka: KafkaNodePool replicas
+# (dual-role controller+broker) — ALSO the per-broker Octavia LB count, see
+# templates/kafka/kafka.yaml.
+instances: 1
+
+# -- Per-instance compute. REQUIRED. requests == limits (Guaranteed QoS) — the
+# customer pays for the full size, so the full size is reserved.
+resources:
+  # -- CPU per instance, a Kubernetes quantity ("2", "500m").
+  cpu: ""
+  # -- Memory per instance in Gi (number; rendered as "<n>Gi").
+  memoryGi: ""
+
+# -- Persistent storage per instance.
+storage:
+  # -- Volume size in Gi. REQUIRED for every engine (for ferretdb it sizes the
+  # CNPG backend — one knob, so RESIZE_STORAGE works uniformly). Grow-only:
+  # RESIZE_STORAGE re-applies values with a bigger number, never smaller.
+  sizeGi: ""
+  # -- StorageClass for the data volumes. Empty = cluster default.
+  storageClassName: ""
+
+# -- Octavia LB wiring into the tenant VPC. All three ids REQUIRED — they come
+# from the proxcloud create call (tenant network/subnet, ownership-proven) and
+# the provider config (config.database.memberSubnetId, the DBaaS-cluster-side
+# subnet the amphora reaches members on).
+network:
+  # -- Tenant network the LB VIP lands on (loadbalancer.openstack.org/network-id).
+  networkId: ""
+  # -- Tenant subnet for the VIP (loadbalancer.openstack.org/subnet-id).
+  subnetId: ""
+  # -- DBaaS-cluster member subnet (loadbalancer.openstack.org/member-subnet-id).
+  memberSubnetId: ""
+  # -- Client source CIDRs allowed through the LB (Octavia ACL via
+  # spec.loadBalancerSourceRanges). Empty = no restriction. These are
+  # deliberately NOT mirrored into the NetworkPolicy — see
+  # templates/networkpolicy.yaml.
+  allowedCidrs: []
+  # -- Extra annotations merged onto the LB Service (escape hatch for
+  # provider-specific Octavia knobs).
+  extraAnnotations: {}
+
+# -- ProxCloud identity of this database. projectId + resourceId REQUIRED.
+# resourceId (std-xxxxxxxx) is the base name of EVERY object this chart
+# renders — not the release name, which is an ArgoCD implementation detail.
+proxcloud:
+  # -- Owning proxcloud project id (also the pc-<projectId> namespace suffix).
+  projectId: ""
+  # -- The DATABASE_CLUSTER resource id, e.g. std-1a2b3c4d.
+  resourceId: ""
+  # -- Human display name (annotation only; free-form).
+  displayName: ""
+
+# -- Monitoring toggles. postgresql/ferretdb use CNPG-native
+# monitoring.enablePodMonitor; the other engines get a chart PodMonitor
+# (templates/monitoring/podmonitor.yaml). Requires prometheus-operator CRDs
+# on the DBaaS cluster.
+monitoring:
+  enabled: false
+
+# -- Backup contract. SCHEMA ONLY for now: reserved keys, read by nothing,
+# so BuildValues can stamp them without a chart release when backups land.
+backup:
+  enabled: false
+  s3:
+    endpoint: ""
+    bucket: ""
+    # -- Name of a pre-existing Secret holding the S3 credentials (never the
+    # credentials themselves — no secrets in values).
+    credsSecret: ""
+
+# -- RESTART lever: an RFC3339 timestamp stamped by proxcloud on the RESTART
+# action. A changed value rolls the database pods via each engine's documented
+# restart mechanism (CNPG cluster annotation, Deployment/pod-template
+# annotation). Empty = never restarted.
+restartedAt: ""
+
+# -- Vertical autoscale, stamped by the SET_AUTOSCALE action (absent in real
+# values documents until the customer opts in; enabled:false here so the bare
+# default renders nothing). When enabled the chart renders ONLY a
+# VerticalPodAutoscaler in updateMode "Off" (templates/autoscale/vpa.yaml) —
+# recommendation-only, it must NEVER evict database pods itself. ProxCloud is
+# the actuator: each autoscale tick reads .status.recommendation off the VPA,
+# clamps it into the max* ceilings below and applies the scale-up through this
+# very values document (resources/storage), so the operator performs its own
+# safe rolling change. Grow-only; the max* keys are the customer's ceilings.
+autoscale:
+  enabled: false
+  # -- Ceiling for resources.cpu (whole vCPUs).
+  maxCpu: 0
+  # -- Ceiling for resources.memoryGi.
+  maxMemoryGi: 0
+  # -- Ceiling for storage.sizeGi. 0 = disk leg off (also implied for engines
+  # without RESIZE_STORAGE: valkey, opensearch). Read by the proxcloud tick
+  # only, never by a template.
+  maxStorageGi: 0
+
+# =============================================================================
+# Per-engine sub-blocks. Only the block matching `engine` is read.
+# =============================================================================
+
+postgresql:
+  # -- postgresql.conf parameters (string map), passed to CNPG
+  # spec.postgresql.parameters verbatim.
+  parameters: {}
+  # -- CNPG enableSuperuserAccess: when true the operator maintains the
+  # <id>-superuser Secret. Off by default — the app user is the product.
+  superuserAccess: false
+
+mysql:
+  # -- my.cnf [mysqld] parameters (string map), rendered into the Percona CR's
+  # spec.mysql.configuration.
+  parameters: {}
+  # -- Operator-managed HAProxy in front of group replication (write port
+  # 3306). Size is derived: 2 when instances > 1, else 1.
+  haproxy:
+    cpu: "250m"
+    memoryGi: 1
+
+mariadb:
+  # -- my.cnf [mariadb] parameters (string map), rendered into MariaDB spec.myCnf.
+  parameters: {}
+  # -- The CHART-OWNED HAProxy deployment (the operator's <id>-primary Service
+  # is pod-name-pinned and not LB-selectable, so the chart runs its own TCP
+  # proxy for the LB to target). Replicas forced to 1 when instances == 1.
+  haproxy:
+    replicas: 2
+    image: docker.io/library/haproxy:3.0-alpine
+    cpu: "250m"
+    memoryGi: 1
+
+valkey:
+  # -- SCHEMA ONLY until the valkey operator CRD is pinned (beta gate) — read
+  # by nothing yet. See templates/valkey/valkey.yaml.
+  parameters: {}
+
+ferretdb:
+  # -- Stateless FerretDB frontend replicas (Deployment <id>).
+  replicas: 1
+  # -- FerretDB frontend image. Empty = resolved from engineVersion via the
+  # map in _helpers.tpl.
+  image: ""
+  # -- CNPG backend image: PostgreSQL with the DocumentDB extension baked in.
+  # TODO-verify(drill): tag must match the frontend version — FerretDB
+  # publishes matched pairs (ghcr.io/ferretdb/postgres-documentdb).
+  postgresImage: ghcr.io/ferretdb/postgres-documentdb:17-0.106.0-ferretdb-2.5.0
+
+opensearch:
+  # -- opensearch.yml settings (string map), passed to the OpenSearchCluster's
+  # spec.general.additionalConfig verbatim.
+  parameters: {}
+  # -- OpenSearch Dashboards (1 replica, operator-managed, HTTPS). Off by
+  # default; enabling also renders the chart-owned <id>-dash-lb Service
+  # (templates/opensearch/dashboards-lb.yaml).
+  dashboards:
+    enabled: false
+  # -- Dashboards OIDC SSO, written by the SET_SSO action
+  # (internal/cloud/dbaas/engines.go). PUBLIC IdP client ONLY — there is
+  # deliberately no clientSecret key here and never will be (no secrets in
+  # values, see header). Read only when dashboards.enabled.
+  sso:
+    enabled: false
+    # -- The IdP's OIDC discovery URL (opensearch_security.openid.connect_url).
+    connectUrl: ""
+    clientId: ""
+    scope: "openid profile email"
+    # -- Dashboards external base URL the IdP redirects back to.
+    baseRedirectUrl: ""
+    logoutUrl: ""
+
+kafka:
+  # -- Kafka broker config overrides (string map), merged ON TOP of the
+  # instance-count-derived replication defaults in templates/kafka/kafka.yaml
+  # (spec.kafka.config).
+  parameters: {}

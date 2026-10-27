@@ -1,0 +1,36 @@
+---
+# =============================================================================
+# MariaDB example — 3 replicas with operator-managed replication plus the
+# chart-owned HAProxy pair the LB targets.
+#   helm template test deploy/charts/database-cluster -f examples/values-mariadb.yaml
+# =============================================================================
+engine: mariadb
+engineVersion: "11.4"
+instances: 3
+resources:
+  cpu: "2"
+  memoryGi: 4
+storage:
+  sizeGi: 40
+  storageClassName: csi-cinder-sc-delete
+network:
+  networkId: 11111111-2222-3333-4444-555555555555
+  subnetId: 66666666-7777-8888-9999-aaaaaaaaaaaa
+  memberSubnetId: bbbbbbbb-cccc-dddd-eeee-ffffffffffff
+  allowedCidrs:
+    - 192.168.10.0/24
+proxcloud:
+  projectId: 665f1a2b3c4d5e6f77889900
+  resourceId: std-3c4d5e6f
+  displayName: legacy-mariadb
+monitoring:
+  enabled: false
+mariadb:
+  parameters:
+    max_connections: "300"
+  haproxy:
+    replicas: 2
+    image: docker.io/library/haproxy:3.0-alpine
+    cpu: "250m"
+    memoryGi: 1
+restartedAt: "2026-08-03T00:00:00Z"

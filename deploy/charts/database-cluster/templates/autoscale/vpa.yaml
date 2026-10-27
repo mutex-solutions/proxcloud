@@ -1,0 +1,72 @@
+{{- if and .Values.autoscale .Values.autoscale.enabled }}
+{{/*
+Recommendation-only VerticalPodAutoscaler for the autoscale feature — the
+BRAIN, never the hand. updateMode "Off" is LOAD-BEARING: a VPA that evicts
+database pods on its own schedule is a data-safety hazard, so this object only
+computes .status.recommendation. ProxCloud reads it each autoscale tick
+(internal/cloud/dbaas/autoscale.go, GetVPA on <id>-vpa) and applies bounded
+scale-ups itself through the values document. Requires the VPA recommender on
+the DBaaS cluster (deploy/dbaas-cluster/README.md) — without its CRD the
+Application fails sync, which is why this renders only when the customer
+opted in.
+
+VALIDATE-AT-DRILL: every targetRef below is a best-known guess at the
+controller each operator uses — none is verified against a live operator yet.
+  postgresql/ferretdb: CNPG pods are operator-managed (no StatefulSet), so the
+      targetRef is the CNPG Cluster CR itself — works iff the CRD serves a
+      scale subresource (TODO-verify); if not, fall back to a label-selector-
+      based recommender.
+  mysql:      Percona STS naming <id>-mysql (TODO-verify).
+  mariadb:    the operator names the STS after the CR.
+  valkey:     TODO-verify(beta) — CRD itself is unpinned, see
+              templates/valkey/valkey.yaml.
+  opensearch: operator STS per nodePool = <cluster>-<component> → <id>-nodes
+              (TODO-verify).
+  kafka:      Strimzi pods are StrimziPodSet-managed; KafkaNodePool has a
+              scale subresource → target the KafkaNodePool <id>-pool
+              (TODO-verify).
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: {{ $name }}-vpa
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+spec:
+  targetRef:
+    {{- if eq .Values.engine "postgresql" }}
+    apiVersion: postgresql.cnpg.io/v1
+    kind: Cluster
+    name: {{ $name }}
+    {{- else if eq .Values.engine "ferretdb" }}
+    apiVersion: postgresql.cnpg.io/v1
+    kind: Cluster
+    name: {{ $name }}-pg
+    {{- else if eq .Values.engine "mysql" }}
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ $name }}-mysql
+    {{- else if eq .Values.engine "opensearch" }}
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ $name }}-nodes
+    {{- else if eq .Values.engine "kafka" }}
+    apiVersion: kafka.strimzi.io/v1
+    kind: KafkaNodePool
+    name: {{ $name }}-pool
+    {{- else }}
+    {{- /* mariadb / valkey: the operator names the StatefulSet after the CR */}}
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ $name }}
+    {{- end }}
+  updatePolicy:
+    updateMode: "Off"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        controlledResources: ["cpu", "memory"]
+{{- end }}

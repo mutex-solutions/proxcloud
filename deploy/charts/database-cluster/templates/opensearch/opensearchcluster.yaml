@@ -1,0 +1,149 @@
+{{- if eq .Values.engine "opensearch" }}
+{{/*
+opensearch-k8s-operator OpenSearchCluster (operator 3.0.2, pinned in
+deploy/dbaas-cluster/README.md).
+
+TODO-verify(drill) — API GROUP MIGRATION: operator 3.x is mid-migration from
+api group opensearch.opster.io to opensearch.org. Both are served on 3.0.2;
+opster.io is DEPRECATED but still the widely-documented one, so this template
+(and the rbac/health files in deploy/dbaas-cluster/) uses opensearch.opster.io/v1.
+At the drill: `kubectl api-resources | grep -i opensearch`, and if 3.x has
+flipped the storage/preferred version, move this apiVersion (plus the argocd
+health key and pod-label assumptions) to opensearch.org in one chart release.
+
+Auth: NO spec.security.config on purpose — with the operator's DEFAULT
+securityconfig init, the operator generates the admin credential Secret
+<id>-admin-password (the ConnectionSecret tuple internal/cloud/dbaas/engines.go
+reads; keys username/password). Rendering a custom securityConfigSecret would
+disable exactly that. TODO-verify(drill): the generated Secret's exact name on
+operator 3.x.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+{{/* JVM heap = half the pod memory, in MB — the OpenSearch sizing rule of
+     thumb (leave the other half to the OS page cache / Lucene mmaps). */}}
+{{- $halfMemMi := div (mul (int .Values.resources.memoryGi) 1024) 2 }}
+apiVersion: opensearch.opster.io/v1
+kind: OpenSearchCluster
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+spec:
+  general:
+    httpPort: 9200
+    # serviceName drives every operator-generated Service name (<id>, <id>-discovery, ...).
+    serviceName: {{ $name }}
+    version: {{ .Values.engineVersion | quote }}
+    setVMMaxMapCount: true
+    drainDataNodes: true
+    {{- with .Values.opensearch.parameters }}
+    additionalConfig:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  bootstrap:
+    additionalConfig:
+      # Known-good fix for TLS handshake errors against the generated http
+      # cert chain: clients present no cert, so demand none.
+      plugins.security.ssl.http.clientauth_mode: "NONE"
+      # Let the security plugin initialize the security index from the
+      # operator's default config on first boot.
+      plugins.security.allow_default_init_securityindex: "true"
+  security:
+    # Operator-generated TLS on both layers; the chart LB (service-lb.yaml)
+    # passes 9200 through as TCP — clients speak HTTPS end to end.
+    # NO security.config here — see header (admin secret generation).
+    tls:
+      http:
+        generate: true
+      transport:
+        generate: true
+        perNode: true
+  {{- if .Values.opensearch.dashboards.enabled }}
+  {{/*
+  =============================================================================
+  TODO-verify(drill) — SSO IS DASHBOARDS-SIDE ONLY IN THIS MVP: the block
+  below configures the Dashboards (opensearch_dashboards.yml) half of OIDC.
+  The API-side half — an `openid` authc domain in the security plugin's
+  config.yml (a securityconfig update) — is NOT wired, because rendering a
+  custom securityConfigSecret would disable the operator's default admin
+  secret generation (see header). Browser SSO therefore needs the
+  securityconfig leg verified/decided at the drill: either the operator 3.x
+  securityconfig-merge path, or a post-provision securityadmin.sh run.
+  Until then dashboards SSO values render but logins may fall back to basic
+  auth against the internal user database.
+  =============================================================================
+  */}}
+  dashboards:
+    enable: true
+    replicas: 1
+    version: {{ .Values.engineVersion | quote }}
+    tls:
+      enable: true
+      generate: true
+    # Fixed small size: Dashboards is a stateless UI, not the product the
+    # customer sizes — resources.cpu/memoryGi buy DB nodes only.
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+    {{- if .Values.opensearch.sso.enabled }}
+    additionalConfig:
+      opensearch_security.auth.type: "openid"
+      # PUBLIC IdP client — deliberately NO opensearch_security.openid.client_secret
+      # (no secrets in values, ever; the values doc rides an Application CR).
+      opensearch_security.openid.connect_url: {{ .Values.opensearch.sso.connectUrl | quote }}
+      opensearch_security.openid.client_id: {{ .Values.opensearch.sso.clientId | quote }}
+      opensearch_security.openid.scope: {{ .Values.opensearch.sso.scope | quote }}
+      opensearch_security.openid.base_redirect_url: {{ .Values.opensearch.sso.baseRedirectUrl | quote }}
+      opensearch_security.openid.logout_url: {{ .Values.opensearch.sso.logoutUrl | quote }}
+      opensearch_security.cookie.secure: "true"
+    {{- end }}
+  {{- end }}
+  nodePools:
+    # ponytail: ONE combined pool (cluster_manager+data+ingest) — split
+    # dedicated-manager/data pools when a customer outgrows it; the values
+    # contract stays a single `instances` knob until then.
+    - component: nodes
+      replicas: {{ int .Values.instances }}
+      roles:
+        - cluster_manager
+        - data
+        - ingest
+      # NOTE: diskSize is a SIBLING of persistence in this CRD — the pvc block
+      # carries class/accessModes only, NOT the size.
+      diskSize: {{ .Values.storage.sizeGi }}Gi
+      persistence:
+        pvc:
+          {{- with .Values.storage.storageClassName }}
+          storageClass: {{ . }}
+          {{- end }}
+          accessModes:
+            - ReadWriteOnce
+      resources:
+        {{- include "database-cluster.resources" . | nindent 8 }}
+      jvm: -Xms{{ $halfMemMi }}m -Xmx{{ $halfMemMi }}m
+      # Generous probes: security-index init + shard recovery on a fresh or
+      # restarted node routinely exceed default probe windows (startup alone
+      # gets 60s + 30x10s = 6.5 minutes).
+      probes:
+        startup:
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+        readiness:
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        liveness:
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+{{- end }}

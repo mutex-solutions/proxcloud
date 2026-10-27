@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/brand/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FFFDF6" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c0b09" />
+    <meta name="theme-color" content="#FFFDF6" />
+    <title>ProxCloud Console</title>
+    <script src="/config.js"></script>
+    <script>
+      // Pre-paint theme init: proxcloud.theme = "light" | "dark" | absent(system).
+      // Must run synchronously before the app bundle so there is no flash.
+      (function () {
+        try {
+          var t = localStorage.getItem("proxcloud.theme");
+          var dark =
+            t === "dark" ||
+            (t !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+          var meta = document.querySelector('meta[name="theme-color"]:not([media])');
+          if (meta) meta.setAttribute("content", dark ? "#0c0b09" : "#FFFDF6");
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,56 @@
+{{- if eq .Values.engine "kafka" }}
+{{/*
+Strimzi KafkaUser <id>-app (api v1 — see the apiVersion note in kafka.yaml):
+the ONE credential customers get. The KafkaUser NAME is the SASL username
+(engines.go DefaultUser). The password is BYO from the PROXCLOUD-owned <id>-auth
+Secret (key "password") — provisioned by CreateDatabase BEFORE this
+Application syncs (engines.go NeedsAuthSecret), patched by RESET_PASSWORD;
+the user operator re-derives the SCRAM credential whenever it changes. A
+Strimzi-generated password would live in a Secret proxcloud doesn't own and
+re-roll semantics would be the operator's, not ours.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: {{ $name }}-app
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+    # The binding to the Kafka CR — the user operator matches by this label.
+    strimzi.io/cluster: {{ $name }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+spec:
+  authentication:
+    type: scram-sha-512
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: {{ $name }}-auth
+          key: password
+  # ponytail: literal "*" = full access to every topic/group/transactional id
+  # in this (single-tenant) cluster — the cluster IS the customer's, so this
+  # is admin-of-your-own-box, not a leak. Ceiling: patternType prefix with a
+  # per-app name prefix when multiple credentials per cluster land.
+  authorization:
+    type: simple
+    acls:
+      - resource:
+          type: topic
+          name: "*"
+          patternType: literal
+        operations:
+          - All
+      - resource:
+          type: group
+          name: "*"
+          patternType: literal
+        operations:
+          - All
+      - resource:
+          type: transactionalId
+          name: "*"
+          patternType: literal
+        operations:
+          - All
+{{- end }}

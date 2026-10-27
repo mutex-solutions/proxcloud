@@ -1,0 +1,67 @@
+{{- if eq .Values.engine "ferretdb" }}
+{{/*
+FerretDB v2 frontend: a stateless Deployment speaking the MongoDB wire
+protocol on 27017, translating onto the CNPG backend (<id>-pg, cnpg-cluster.yaml)
+through the operator-managed rw Service and app credentials.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/name: ferretdb
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+spec:
+  replicas: {{ int .Values.ferretdb.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferretdb
+      app.kubernetes.io/instance: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferretdb
+        app.kubernetes.io/instance: {{ $name }}
+      {{- with .Values.restartedAt }}
+      annotations:
+        kubectl.kubernetes.io/restartedAt: {{ . | quote }}
+      {{- end }}
+    spec:
+      containers:
+        - name: ferretdb
+          image: {{ include "database-cluster.ferretdbImage" . }}
+          env:
+            # Password via env indirection so the URL in the pod spec carries
+            # no secret material; the Secret is CNPG's <id>-pg-app.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $name }}-pg-app
+                  key: password
+            - name: FERRETDB_POSTGRESQL_URL
+              value: postgres://app:$(POSTGRES_PASSWORD)@{{ $name }}-pg-rw:5432/app
+          ports:
+            - name: ferretdb
+              containerPort: 27017
+              protocol: TCP
+          # Generous startup window: on first boot this Deployment syncs before
+          # the CNPG backend exists (ArgoCD applies everything at once), so the
+          # frontend must be allowed to sit unready for minutes while the
+          # backend provisions — keeping the Application Progressing, not
+          # Degraded. 30 x 10s = 5 minutes.
+          startupProbe:
+            tcpSocket:
+              port: 27017
+            periodSeconds: 10
+            failureThreshold: 30
+          # TODO-verify(drill): FerretDB exposes /debug healthz (port 8088 by
+          # default) — switch the probes to it once verified; tcpSocket is the
+          # conservative placeholder (plan verify list: "FerretDB healthz port").
+          readinessProbe:
+            tcpSocket:
+              port: 27017
+            periodSeconds: 10
+{{- end }}

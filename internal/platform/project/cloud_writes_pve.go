@@ -1,0 +1,1028 @@
+package project
+
+// cloud_writes_pve.go — the Proxmox VE write surface: create/delete/action/bulk
+// forks off the generic cloud handlers (the kamaji/dbaas precedent — a proxmox
+// provider never reaches the OpenStack WriteService). Everything cloud-touching
+// lives in internal/cloud/pve; this file is the HTTP face + the cache bookkeeping.
+//
+// Tenancy: every op re-verifies pool membership live (pve.Service.ResolveVM)
+// against the project's derived pool — the platform is the PDP; the cached row
+// alone is never trusted for a mutation.
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/internal/platform/pveflavor"
+	"github.com/mutex-solutions/proxcloud/internal/platform/user"
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
+)
+
+// SetPVEFlavors wires the Proxmox flavor catalog (enables the SERVER create path
+// + LIST_FLAVORS for proxmox providers).
+func (h *Handler) SetPVEFlavors(r *pveflavor.Repo) { h.pveFlavors = r }
+
+// pveService builds the pve.Service for a provider, failing the request when the
+// seam is unwired.
+func (h *Handler) pveService(w http.ResponseWriter, es *externalservice.ExternalService) (*pve.Service, bool) {
+	if h.pveFor == nil {
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox service not configured")
+		return nil, false
+	}
+	ps, err := h.pveFor(es)
+	if err != nil {
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox client not ready")
+		return nil, false
+	}
+	return ps, true
+}
+
+// pveRegion resolves the region stamped on created resources.
+func (h *Handler) pveRegion(p *Project, es *externalservice.ExternalService) string {
+	if r := p.ServiceRegion(es.ID); r != "" {
+		return r
+	}
+	if r := es.PVERegion(); r != "" {
+		return r
+	}
+	return h.cloudRegion
+}
+
+// --- create ---
+
+// pveCreate handles POST /project/{id}/cloud for a proxmox provider.
+// Types: SERVER (clone-from-template) and KEYPAIR (platform-only — no cloud call;
+// the public key is injected into VMs via cloud-init at create time).
+func (h *Handler) pveCreate(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, reqType string, data map[string]any) {
+	switch reqType {
+	case cloud.TypeServer:
+		h.pveCreateServer(w, r, u, proj, es, data)
+	case cloud.TypeKeypair:
+		h.pveCreateKeypair(w, r, u, proj, es, data)
+	case cloud.TypeNetwork:
+		h.pveCreateNetwork(w, r, u, proj, es, data)
+	case cloud.TypeVolume:
+		h.pveCreateVolume(w, r, u, proj, es, data)
+	case cloud.TypeSecurityGroup:
+		h.pveCreateSecurityGroup(w, r, u, proj, es, data)
+	case cloud.TypeImage:
+		h.pveCreateImage(w, r, u, proj, es, data)
+	default:
+		h.fail(w, httpx.BadRequest(fmt.Sprintf("resource type %q is not supported on a Proxmox provider", reqType)))
+	}
+}
+
+func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
+	ctx := r.Context()
+	if h.pveFlavors == nil {
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "flavor catalog not configured")
+		return
+	}
+	name := strAny(data["name"])
+	if name == "" {
+		h.fail(w, httpx.BadRequest("name is required"))
+		return
+	}
+	fl, err := h.pveFlavors.Get(ctx, strAny(data["flavorId"]))
+	if err != nil || fl == nil || !fl.Active {
+		h.fail(w, httpx.BadRequest("Unknown flavor"))
+		return
+	}
+	ps, ok := h.pveService(w, es)
+	if !ok {
+		return
+	}
+	tpl, herr := h.pveResolveTemplate(ctx, es, proj, strAny(data["imageId"]))
+	if herr != nil {
+		h.fail(w, herr)
+		return
+	}
+	// GPU quota gate (platform-side; PVE has no quota concept at all).
+	if fl.GPUCount > 0 {
+		if err := h.enforcePVEGPUQuota(ctx, proj, es.ID, fl, nil); err != nil {
+			h.fail(w, err)
+			return
+		}
+	}
+	// Resource quota gate (vcpus/ram/servers/disk — platform-side).
+	if err := h.enforcePVEQuota(ctx, proj, es.ID, pveQuotaDemand{
+		VCPUs: fl.VCPUs, RAMMb: fl.RAMMb, Servers: 1, DiskGb: fl.DiskGb,
+	}); err != nil {
+		h.fail(w, err)
+		return
+	}
+	// GPU: build the alias's device inventory (every mapping carrying it) and its
+	// free slots per node — both feed the scheduler and, after placement, the exact
+	// mappings this VM reserves. An unmapped GPU flavor fails honestly.
+	var gpuInv *pve.GPUInventory
+	var gpuFree map[string]int
+	if fl.GPUCount > 0 {
+		alias := cloud.NormalizeGPUAlias(fl.GPUModel)
+		mappings := es.PVEGPUMappingsFor(alias)
+		if len(mappings) == 0 {
+			h.fail(w, httpx.BadRequest(fmt.Sprintf("GPU model %q has no PCI mapping on this provider", fl.GPUModel)))
+			return
+		}
+		inv, ierr := ps.GPUInventoryFor(ctx, alias, mappings)
+		if ierr != nil {
+			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, ierr.Error()))
+			return
+		}
+		gpuInv, gpuFree = inv, inv.FreeCountByNode()
+	}
+	// Storage profile: the flavor's (else the provider default). Its node map is
+	// the scheduler's placement restriction; local profiles pin the VM honestly.
+	profiles := es.PVEStorageProfiles()
+	profileSlug := fl.StorageProfile
+	if profileSlug == "" {
+		profileSlug = es.PVEDefaultStorageProfile()
+	}
+	var allowedNodes map[string]bool
+	profile, hasProfile := profiles[profileSlug]
+	if hasProfile {
+		allowedNodes = profile.Nodes()
+	}
+	// Scheduler: capacity-ranked node pick over the live cluster snapshot.
+	nodes, nerr := ps.C.Nodes(ctx)
+	vms, verr := ps.C.ClusterResources(ctx, "vm")
+	if nerr != nil || verr != nil {
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox cluster unavailable")
+		return
+	}
+	target, serr := pve.PickNode(nodes, vms, pve.SchedReq{
+		VCPUs: fl.VCPUs, RAMMb: int64(fl.RAMMb), OvercommitCPU: es.PVEOvercommitCPU(),
+		AllowedNodes: allowedNodes, GPUs: fl.GPUCount, GPUFree: gpuFree,
+	})
+	if serr != nil {
+		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "No capacity available for this flavor"))
+		return
+	}
+	cloneStorage := ""
+	if hasProfile {
+		cloneStorage = profile.StorageFor(target)
+	}
+	// Reserve the concrete mappings on the chosen node (distinct ids — two hostpci
+	// entries on one mapping resolve to the same card and the VM refuses to start).
+	var gpuMappings []string
+	if gpuInv != nil {
+		picked, perr := gpuInv.PickGPUSlots(target, fl.GPUCount)
+		if perr != nil {
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, perr.Error()))
+			return
+		}
+		gpuMappings = picked
+	}
+	// SSH key (cloud-init): resolve the user's stored KEYPAIR by name.
+	sshKeys := ""
+	if kn := strAny(data["keyName"]); kn != "" {
+		if pub := h.pveKeypairPublicKey(ctx, es.ID, u, kn); pub != "" {
+			sshKeys = pub
+		} else {
+			h.fail(w, httpx.BadRequest("Keypair not found"))
+			return
+		}
+	}
+	rootGiB := 0
+	if rv, ok := data["rootVolume"].(map[string]any); ok {
+		rootGiB = intAny(rv["sizeGiB"])
+	}
+	if rootGiB > 0 && rootGiB < tpl.MinDiskGb {
+		h.fail(w, httpx.BadRequest(fmt.Sprintf("Root disk must be at least %d GB for this image", tpl.MinDiskGb)))
+		return
+	}
+	cr, cerr := ps.CreateServer(ctx, pve.CreateServerReq{
+		ProjectID: proj.ID,
+		Region:    h.pveRegion(proj, es),
+		Name:      name,
+		Spec: pve.ServerSpec{
+			Slug: fl.Slug, VCPUs: fl.VCPUs, RAMMb: fl.RAMMb, DiskGb: fl.DiskGb,
+			StorageProfile: profileSlug, GPUModel: fl.GPUModel, GPUCount: fl.GPUCount,
+		},
+		TemplateVMID:  tpl.VMID,
+		TemplateNode:  tpl.Node,
+		ImageSlug:     tpl.Slug,
+		TargetNode:    target,
+		Storage:       cloneStorage,
+		Bridge:        h.pveResolveBridge(ctx, proj, data),
+		GPUMappingIDs: gpuMappings,
+		SSHKeys:       sshKeys,
+		Password:      strAny(data["adminPass"]),
+		RootDiskGiB:   rootGiB,
+	})
+	if cerr != nil {
+		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Server create failed: "+cerr.Error()))
+		return
+	}
+	cr.ServiceID = es.ID
+	saved, ierr := h.cloud.Insert(ctx, cr)
+	if ierr != nil {
+		// The VM exists cloud-side; a 500 would invite a duplicate-create retry.
+		// Accept and let the sync reconcile (the WriteService server precedent).
+		saved = cr
+	}
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", saved)
+	httpx.OK(w, *saved)
+}
+
+// pveResolveTemplate maps imageId → a clone source: an admin catalog slug, or a
+// project-owned template (numeric vmid whose cached IMAGE row proves ownership).
+func (h *Handler) pveResolveTemplate(ctx context.Context, es *externalservice.ExternalService, proj *Project, imageID string) (*externalservice.PVETemplate, *httpx.HTTPError) {
+	if imageID == "" {
+		return nil, httpx.BadRequest("imageId is required")
+	}
+	for _, t := range es.PVETemplates() {
+		if t.Slug == imageID {
+			tpl := t
+			return &tpl, nil
+		}
+	}
+	// Project template: the cached IMAGE row is the ownership proof.
+	if vmid, err := strconv.Atoi(imageID); err == nil {
+		cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, imageID)
+		if err == nil && cr != nil && cr.Type == cloud.TypeImage && cr.ProjectID == proj.ID {
+			node := ""
+			if img, ok := cr.Data["image"].(map[string]any); ok {
+				node = strAny(img["node"])
+			}
+			if node == "" {
+				// The sync stamps availabilityZone-less images; fall back to a live pool scan.
+				if ps, err := h.pveFor(es); err == nil {
+					if vm, rerr := ps.ResolveVM(ctx, proj.ID, imageID); rerr == nil && vm != nil {
+						node = vm.Node
+					}
+				}
+			}
+			if node != "" {
+				return &externalservice.PVETemplate{Slug: imageID, Name: strAny(cr.Data["name"]), VMID: vmid, Node: node}, nil
+			}
+		}
+	}
+	return nil, httpx.BadRequest("Unknown image")
+}
+
+// pveResolveBridge maps the wizard's first network interface to a PVE bridge/vnet.
+// Phase 4 stamps data.network.vnet on NETWORK rows; before that, creates keep the
+// template's own NIC ("" = no override).
+func (h *Handler) pveResolveBridge(ctx context.Context, proj *Project, data map[string]any) string {
+	var netID string
+	if ifs, ok := data["networkInterfaces"].([]any); ok && len(ifs) > 0 {
+		if m, ok := ifs[0].(map[string]any); ok {
+			netID = strAny(m["uuid"])
+		}
+	}
+	if netID == "" {
+		if ids, ok := data["networkIds"].([]any); ok && len(ids) > 0 {
+			netID = strAny(ids[0])
+		}
+	}
+	if netID == "" {
+		return ""
+	}
+	cr, err := h.cloud.FindByID(ctx, netID)
+	if err != nil || cr == nil || cr.ProjectID != proj.ID || cr.Type != cloud.TypeNetwork {
+		return ""
+	}
+	if net, ok := cr.Data["network"].(map[string]any); ok {
+		return strAny(net["vnet"])
+	}
+	return ""
+}
+
+// pveKeypairPublicKey resolves a user's stored keypair public key by name.
+func (h *Handler) pveKeypairPublicKey(ctx context.Context, svcID string, u *user.User, name string) string {
+	uid := u.ID
+	if uid == "" {
+		uid = u.Sub
+	}
+	cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, svcID, name+"_"+uid)
+	if err != nil || cr == nil || cr.Type != cloud.TypeKeypair {
+		return ""
+	}
+	if kp, ok := cr.Data["keypair"].(map[string]any); ok {
+		return strAny(kp["public_key"])
+	}
+	return ""
+}
+
+// pveCreateKeypair is platform-only: store (or generate) an SSH keypair as a
+// user-scoped cache row. A generated private key is returned ONCE via
+// ephemeralData (never persisted) — the nova-keypair contract, minus nova.
+func (h *Handler) pveCreateKeypair(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
+	name := strAny(data["name"])
+	if name == "" {
+		h.fail(w, httpx.BadRequest("name is required"))
+		return
+	}
+	uid := u.ID
+	if uid == "" {
+		uid = u.Sub
+	}
+	pubKey := strings.TrimSpace(strAny(data["publicKey"]))
+	var privPEM string
+	if pubKey == "" {
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			h.fail(w, err)
+			return
+		}
+		sshPub, err := ssh.NewPublicKey(pub)
+		if err != nil {
+			h.fail(w, err)
+			return
+		}
+		pubKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub)))
+		block, err := ssh.MarshalPrivateKey(priv, "")
+		if err != nil {
+			h.fail(w, err)
+			return
+		}
+		privPEM = string(pem.EncodeToMemory(block))
+	} else if _, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubKey)); err != nil {
+		h.fail(w, httpx.BadRequest("publicKey is not a valid SSH public key"))
+		return
+	}
+	now := time.Now().UTC()
+	cr := &cloud.CloudResource{
+		ServiceID: es.ID, Region: h.pveRegion(proj, es), Type: cloud.TypeKeypair,
+		UserID: uid, ExternalID: name + "_" + uid,
+		Data: map[string]any{"keypair": map[string]any{
+			"name": name, "public_key": pubKey, "fingerprint": sshFingerprint(pubKey),
+		}},
+		CreatedAt: &now, UpdatedAt: &now,
+	}
+	saved, err := h.cloud.Insert(r.Context(), cr)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if privPEM != "" {
+		saved.EphemeralData = map[string]any{"privateKey": privPEM}
+	}
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", saved)
+	httpx.OK(w, *saved)
+}
+
+// --- delete ---
+
+// pveDeleteResource deletes one cached resource on a proxmox provider.
+func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) error {
+	switch cr.Type {
+	case cloud.TypeServer:
+		if h.pveFor == nil {
+			return fmt.Errorf("proxmox service not configured")
+		}
+		ps, err := h.pveFor(es)
+		if err != nil {
+			return err
+		}
+		return ps.DeleteServer(ctx, proj.ID, cr.ExternalID)
+	case cloud.TypeImage:
+		// A project template is a qemu template VM in the pool — same destroy path.
+		if h.pveFor == nil {
+			return fmt.Errorf("proxmox service not configured")
+		}
+		ps, err := h.pveFor(es)
+		if err != nil {
+			return err
+		}
+		return ps.DeleteServer(ctx, proj.ID, cr.ExternalID)
+	case cloud.TypeKeypair:
+		return nil // platform-only row; the archive below is the whole delete
+	case cloud.TypeNetwork:
+		return errPVENetworkDelete // routed through pveDeleteNetwork (needs the lock + guard)
+	case cloud.TypeSecurityGroup:
+		ps, err := h.pveFor(es)
+		if err != nil {
+			return err
+		}
+		return ps.DeleteSecurityGroup(ctx, proj.ID, cr.ExternalID)
+	case cloud.TypeVolume:
+		return fmt.Errorf("detach or delete the volume from its server (Proxmox disks belong to a VM)")
+	default:
+		return fmt.Errorf("resource type %q is not supported on a Proxmox provider", cr.Type)
+	}
+}
+
+// --- actions ---
+
+// pveAction handles POST /cloud/{id}/action for proxmox resources. Returns true
+// when the action was handled (the caller falls through to 400 otherwise).
+func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
+	ctx := r.Context()
+	if action == "INVOKEACTION" {
+		action = strings.ToUpper(strAny(data["action"]))
+	}
+	ps, err := h.pveFor(es)
+	if err != nil || ps == nil {
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox client not ready")
+		return true
+	}
+	if h.pvePublicNetworkAction(w, r, u, proj, es, cr, action, data) {
+		return true
+	}
+	if h.pveVolumeAction(w, r, u, proj, es, cr, action, data) {
+		return true
+	}
+	if h.pveSecurityGroupAction(w, r, u, proj, es, cr, action, data) {
+		return true
+	}
+	switch action {
+	case "START", "STOP", "SHUTOFF", "SHUTDOWN", "REBOOT", "SOFTREBOOT", "REBOOT_SOFT", "HARDREBOOT", "REBOOT_HARD":
+		if err := ps.PowerAction(ctx, proj.ID, cr.ExternalID, action); err != nil {
+			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			return true
+		}
+		h.pveRefreshServerRow(ctx, ps, proj, cr)
+		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
+		httpx.OK(w, map[string]any{"result": *cr})
+		return true
+
+	case "RESIZE":
+		fl, ferr := h.pveFlavorOf(ctx, strAny(data["flavorId"]))
+		if ferr != nil {
+			h.fail(w, ferr)
+			return true
+		}
+		if fl.GPUCount > 0 {
+			if err := h.enforcePVEGPUQuota(ctx, proj, es.ID, fl, cr); err != nil {
+				h.fail(w, err)
+				return true
+			}
+		}
+		if err := ps.ResizeServer(ctx, proj.ID, cr.ExternalID, pve.ServerSpec{
+			Slug: fl.Slug, VCPUs: fl.VCPUs, RAMMb: fl.RAMMb, DiskGb: fl.DiskGb,
+			StorageProfile: fl.StorageProfile, GPUModel: fl.GPUModel, GPUCount: fl.GPUCount,
+		}); err != nil {
+			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			return true
+		}
+		h.pveRefreshServerRow(ctx, ps, proj, cr)
+		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
+		httpx.OK(w, map[string]any{"result": *cr})
+		return true
+
+	case "RENAME":
+		name := strAny(data["name"])
+		if name == "" {
+			h.fail(w, httpx.BadRequest("name is required"))
+			return true
+		}
+		if err := ps.RenameServer(ctx, proj.ID, cr.ExternalID, name); err != nil {
+			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			return true
+		}
+		if srv, ok := cr.Data["server"].(map[string]any); ok {
+			srv["name"] = name
+		}
+		if saved, err := h.cloud.Insert(ctx, cr); err == nil {
+			cr = saved
+		}
+		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
+		httpx.OK(w, map[string]any{"result": *cr})
+		return true
+
+	case "REMOTECONTROL", "SERIAL_CONSOLE":
+		backendURL, ticket, cerr := ps.Console(ctx, proj.ID, cr.ExternalID, action == "SERIAL_CONSOLE")
+		if cerr != nil {
+			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, cerr.Error()))
+			return true
+		}
+		kind := "novnc"
+		if action == "SERIAL_CONSOLE" {
+			kind = "serial"
+		}
+		// The PVE VNC ticket doubles as the RFB password — the FE passes it as the
+		// noVNC credential (`password` in the result).
+		h.emitPVEConsole(w, r, u, proj, cr, es.ID, cr.ExternalID, action, backendURL, kind, ticket)
+		return true
+
+	case "SHOW_CONSOLE_OUTPUT":
+		// PVE has no console-log API; empty output is the honest graceful answer.
+		httpx.OK(w, map[string]any{"result": ""})
+		return true
+
+	case "LIST_EVENTS":
+		httpx.OK(w, map[string]any{"result": []any{}})
+		return true
+	}
+	return false
+}
+
+// pveRefreshServerRow re-reads live VM state into the cached row (best-effort).
+func (h *Handler) pveRefreshServerRow(ctx context.Context, ps *pve.Service, proj *Project, cr *cloud.CloudResource) {
+	vm, err := ps.ResolveVM(ctx, proj.ID, cr.ExternalID)
+	if err != nil || vm == nil {
+		return
+	}
+	cr.Data = pve.ServerData(*vm, nil, nil)
+	if saved, err := h.cloud.Insert(ctx, cr); err == nil {
+		*cr = *saved
+	}
+}
+
+func (h *Handler) pveFlavorOf(ctx context.Context, flavorID string) (*pveflavor.Flavor, *httpx.HTTPError) {
+	if h.pveFlavors == nil {
+		return nil, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "flavor catalog not configured")
+	}
+	fl, err := h.pveFlavors.Get(ctx, flavorID)
+	if err != nil || fl == nil || !fl.Active {
+		return nil, httpx.BadRequest("Unknown flavor")
+	}
+	return fl, nil
+}
+
+// enforcePVEGPUQuota gates GPU flavors against Project.Quota.gpu (the OpenStack
+// gate's twin; catalog flavors carry the GPU demand directly). replaced (resize)
+// frees its own devices first. Fail-open on missing quota — the OpenStack posture.
+func (h *Handler) enforcePVEGPUQuota(ctx context.Context, proj *Project, svcID string, fl *pveflavor.Flavor, replaced *cloud.CloudResource) *httpx.HTTPError {
+	model := cloud.NormalizeGPUAlias(fl.GPUModel)
+	limit, limited := gpuLimitFor(proj.Quota, model)
+	if !limited {
+		return nil
+	}
+	usage, err := h.cloud.GPUUsageByProject(ctx, proj.ID)
+	if err != nil {
+		return nil // fail-open (cloud hiccup never blocks)
+	}
+	used := usage[model]
+	if replaced != nil {
+		if srv, ok := replaced.Data["server"].(map[string]any); ok {
+			if flv, ok := srv["flavor"].(map[string]any); ok {
+				if m, n := cloud.GPUFromFlavor(flv["extra_specs"]); n > 0 && cloud.NormalizeGPUAlias(m) == model {
+					used -= n
+					if used < 0 {
+						used = 0
+					}
+				}
+			}
+		}
+	}
+	if used+fl.GPUCount > limit {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict,
+			fmt.Sprintf("GPU quota exceeded for %s: %d in use, %d requested, limit %d", model, used, fl.GPUCount, limit))
+	}
+	return nil
+}
+
+// --- bulk (catalog) actions ---
+
+// pveBulkAction serves the wizard catalog feeds for a proxmox provider. Returns
+// true when handled.
+func (h *Handler) pveBulkAction(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, action string) bool {
+	ctx := r.Context()
+	region := h.pveRegion(proj, es)
+	switch action {
+	case "LIST_FLAVORS":
+		var result []map[string]any = []map[string]any{}
+		if h.pveFlavors != nil {
+			if fls, err := h.pveFlavors.List(ctx, true); err == nil {
+				for i := range fls {
+					result = append(result, fls[i].LiveShape(es.ID, region))
+				}
+			}
+		}
+		httpx.OK(w, map[string]any{"result": result})
+		return true
+
+	case "PUBLIC_IMAGES", "PUBLIC_IMAGES_AS_CLOUD_RESOURCE":
+		asResource := action == "PUBLIC_IMAGES_AS_CLOUD_RESOURCE"
+		out := []any{}
+		for _, t := range es.PVETemplates() {
+			img := map[string]any{
+				"id": t.Slug, "name": t.Name, "status": "active", "visibility": "public",
+				"os_distro": t.OSDistro, "min_disk": t.MinDiskGb, "size": int64(t.MinDiskGb) << 30,
+			}
+			if asResource {
+				out = append(out, cloud.CloudResource{
+					Type: cloud.TypeImage, ExternalID: t.Slug, Region: region,
+					ServiceID: es.ID, ProjectID: proj.ID, Data: map[string]any{"image": img},
+				})
+			} else {
+				out = append(out, img)
+			}
+		}
+		httpx.OK(w, map[string]any{"result": out})
+		return true
+
+	case "LIST_AVAILABILITY_ZONES":
+		// Nodes are deliberately hidden from customers (the whole point of the
+		// platform); a single synthetic zone keeps the wizard's AZ step trivial.
+		httpx.OK(w, map[string]any{"result": []map[string]any{{"zoneName": "default", "zoneState": map[string]any{"available": true}}}})
+		return true
+
+	case "LIST_VOLUME_TYPES":
+		out := []map[string]any{}
+		for slug, prof := range es.PVEStorageProfiles() {
+			out = append(out, map[string]any{
+				"name": slug,
+				"extra_specs": map[string]any{
+					"shared": prof.Shared, "snapshots": prof.Snapshots, "thin": prof.Thin,
+					"liveMigrate": prof.LiveMigrate, "replication": prof.Replication,
+				},
+			})
+		}
+		httpx.OK(w, map[string]any{"result": out})
+		return true
+	}
+	return false
+}
+
+// sshFingerprint renders the SHA256 fingerprint of an authorized_keys line
+// (display-only; blank on a parse failure).
+func sshFingerprint(pubKey string) string {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubKey))
+	if err != nil {
+		return ""
+	}
+	return ssh.FingerprintSHA256(pk)
+}
+
+// emitPVEConsole mints the console token for a PVE vncwebsocket/termproxy backend
+// (emitProxiedConsole twin). Metadata carries pve="1" so the proxy dials with the
+// provider's API-token header + pinned TLS; the response carries the VNC ticket as
+// `password` — noVNC must present it as the RFB credential.
+func (h *Handler) emitPVEConsole(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, cr *cloud.CloudResource, svcID, externalID, action, backendURL, kind, password string) {
+	if h.downloads == nil {
+		h.fail(w, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "console not configured"))
+		return
+	}
+	tok, err := h.downloads.CreateWithTTL(r.Context(), &cloud.CloudDownload{
+		Type: cloud.DownloadTypeConsole, ServiceID: svcID, ProjectID: proj.ID, ExternalID: externalID,
+		Metadata: map[string]string{"consoleUrl": backendURL, "pve": "1"},
+	}, cloud.ConsoleTokenTTL)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
+	proto := "vnc"
+	if kind == "serial" {
+		proto = "serial"
+	}
+	httpx.OK(w, map[string]any{"result": map[string]any{
+		"protocol": proto,
+		"type":     kind,
+		"url":      h.consoleWebsocketURL(tok.ID),
+		"password": password,
+	}})
+}
+
+// errPVENetworkDelete signals cloudDelete to route through pveDeleteNetwork.
+var errPVENetworkDelete = fmt.Errorf("pve network delete needs the sdn lock")
+
+// pveCreateVolume adds a data disk to an existing server (there is no standalone
+// volume in the PVE model). Body: {serverId, sizeGiB, type?} — serverId is the
+// SERVER cache id or vmid; type is a storage-profile slug.
+func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
+	ctx := r.Context()
+	sizeGiB := intAny(data["sizeGiB"])
+	if sizeGiB <= 0 {
+		sizeGiB = intAny(data["size"])
+	}
+	if sizeGiB <= 0 {
+		h.fail(w, httpx.BadRequest("sizeGiB is required"))
+		return
+	}
+	serverRef := strAny(data["serverId"])
+	if serverRef == "" {
+		h.fail(w, httpx.BadRequest("serverId is required (Proxmox disks belong to a server)"))
+		return
+	}
+	// Accept the cache id or the vmid.
+	serverExt := serverRef
+	if cr, err := h.cloud.FindByID(ctx, serverRef); err == nil && cr != nil && cr.Type == cloud.TypeServer && cr.ProjectID == proj.ID {
+		serverExt = cr.ExternalID
+	}
+	if err := h.enforcePVEQuota(ctx, proj, es.ID, pveQuotaDemand{DiskGb: sizeGiB}); err != nil {
+		h.fail(w, err)
+		return
+	}
+	profiles := es.PVEStorageProfiles()
+	slug := strAny(data["type"])
+	if slug == "" {
+		slug = es.PVEDefaultStorageProfile()
+	}
+	profile, ok := profiles[slug]
+	if !ok {
+		h.fail(w, httpx.BadRequest("Unknown volume type"))
+		return
+	}
+	ps, ok2 := h.pveService(w, es)
+	if !ok2 {
+		return
+	}
+	vm, verr := ps.ResolveVM(ctx, proj.ID, serverExt)
+	if verr != nil || vm == nil {
+		h.fail(w, httpx.NotFound("Server not found"))
+		return
+	}
+	storage := profile.StorageFor(vm.Node)
+	if storage == "" {
+		h.fail(w, httpx.BadRequest(fmt.Sprintf("Volume type %q is not available on the server's node", slug)))
+		return
+	}
+	if _, err := ps.AddVolume(ctx, proj.ID, serverExt, sizeGiB, storage); err != nil {
+		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+		return
+	}
+	// The volid is named server-side; the volume sync provider picks the new disk
+	// up as its own VOLUME row. Reconcile it now so the FE sees it immediately.
+	h.pveSyncVolumes(ctx, es, proj)
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", &cloud.CloudResource{Type: cloud.TypeVolume, ProjectID: proj.ID})
+	httpx.OK(w, map[string]any{"result": map[string]any{}})
+}
+
+// pveSyncVolumes runs one inline VOLUME reconcile (best-effort, post-mutation).
+func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.ExternalService, proj *Project) {
+	ps, err := h.pveFor(es)
+	if err != nil {
+		return
+	}
+	prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID)
+	if rows, err := prov.List(ctx); err == nil {
+		now := time.Now().UTC()
+		for i := range rows {
+			rows[i].ServiceID = es.ID
+			if existing, _ := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, rows[i].ExternalID); existing == nil {
+				_, _ = h.cloud.Insert(ctx, &rows[i])
+			} else {
+				existing.Data = rows[i].Data
+				existing.UpdatedAt = &now
+				_, _ = h.cloud.Insert(ctx, existing)
+			}
+		}
+	}
+}
+
+// pveVolumeAction handles EXTEND / ATTACH / DETACH on a VOLUME row. Returns handled.
+func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
+	if cr.Type != cloud.TypeVolume {
+		return false
+	}
+	ctx := r.Context()
+	ps, err := h.pveFor(es)
+	if err != nil {
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox client not ready")
+		return true
+	}
+	vol, _ := cr.Data["volume"].(map[string]any)
+	vmid := intAny(vol["vmid"])
+	if vmid == 0 {
+		h.fail(w, httpx.BadRequest("volume row carries no server"))
+		return true
+	}
+	var aerr error
+	switch action {
+	case "EXTEND":
+		size := intAny(data["size"])
+		if size <= 0 {
+			size = intAny(data["sizeGiB"])
+		}
+		if size <= intAny(vol["size"]) {
+			h.fail(w, httpx.BadRequest("New size must be larger (Proxmox cannot shrink a disk)"))
+			return true
+		}
+		if e := h.enforcePVEQuota(ctx, proj, es.ID, pveQuotaDemand{DiskGb: size - intAny(vol["size"])}); e != nil {
+			h.fail(w, e)
+			return true
+		}
+		aerr = ps.ExtendVolume(ctx, proj.ID, vmid, cr.ExternalID, size)
+	case "DETACH":
+		aerr = ps.DetachVolume(ctx, proj.ID, vmid, cr.ExternalID)
+	case "ATTACH":
+		target := strAny(data["serverId"])
+		if target != "" {
+			if scr, err := h.cloud.FindByID(ctx, target); err == nil && scr != nil && scr.Type == cloud.TypeServer && scr.ProjectID == proj.ID {
+				target = scr.ExternalID
+			}
+		}
+		aerr = ps.AttachVolume(ctx, proj.ID, vmid, cr.ExternalID, target)
+	default:
+		return false
+	}
+	if aerr != nil {
+		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, aerr.Error()))
+		return true
+	}
+	h.pveSyncVolumes(ctx, es, proj)
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
+	httpx.OK(w, map[string]any{"result": map[string]any{}})
+	return true
+}
+
+// pveCreateSecurityGroup creates a firewall group (SECURITY_GROUP).
+func (h *Handler) pveCreateSecurityGroup(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
+	name := strAny(data["name"])
+	if name == "" {
+		h.fail(w, httpx.BadRequest("name is required"))
+		return
+	}
+	if strings.ContainsAny(name, ":;") {
+		h.fail(w, httpx.BadRequest("name must not contain ':' or ';'"))
+		return
+	}
+	ps, ok := h.pveService(w, es)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	id, err := ps.CreateSecurityGroup(ctx, proj.ID, name)
+	if err != nil {
+		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+		return
+	}
+	now := time.Now().UTC()
+	cr := &cloud.CloudResource{
+		ServiceID: es.ID, Region: h.pveRegion(proj, es), ProjectID: proj.ID,
+		Type: cloud.TypeSecurityGroup, ExternalID: id,
+		Data: map[string]any{"securityGroup": map[string]any{
+			"id": id, "name": name, "description": "", "security_group_rules": []any{},
+		}},
+		CreatedAt: &now, UpdatedAt: &now,
+		Info: &cloud.Info{CreatedAt: &now, UpdatedAt: &now},
+	}
+	saved, ierr := h.cloud.Insert(ctx, cr)
+	if ierr != nil {
+		saved = cr
+	}
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", saved)
+	httpx.OK(w, *saved)
+}
+
+// pveCreateImage snapshots a server into a project template (IMAGE).
+// Body: {name, serverId} — the wizard's create{type:IMAGE, imageType:snapshot} shape.
+func (h *Handler) pveCreateImage(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
+	ctx := r.Context()
+	name := strAny(data["name"])
+	serverRef := strAny(data["serverId"])
+	if name == "" || serverRef == "" {
+		h.fail(w, httpx.BadRequest("name and serverId are required"))
+		return
+	}
+	serverExt := serverRef
+	if cr, err := h.cloud.FindByID(ctx, serverRef); err == nil && cr != nil && cr.Type == cloud.TypeServer && cr.ProjectID == proj.ID {
+		serverExt = cr.ExternalID
+	}
+	ps, ok := h.pveService(w, es)
+	if !ok {
+		return
+	}
+	vmid, cerr := ps.CreateImage(ctx, proj.ID, serverExt, name)
+	if cerr != nil {
+		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, cerr.Error()))
+		return
+	}
+	now := time.Now().UTC()
+	cr := &cloud.CloudResource{
+		ServiceID: es.ID, Region: h.pveRegion(proj, es), ProjectID: proj.ID,
+		Type: cloud.TypeImage, ExternalID: strconv.Itoa(vmid),
+		Data: map[string]any{"image": map[string]any{
+			"id": strconv.Itoa(vmid), "name": name, "status": "active", "visibility": "private",
+		}},
+		CreatedAt: &now, UpdatedAt: &now,
+		Info: &cloud.Info{CreatedAt: &now, UpdatedAt: &now},
+	}
+	saved, ierr := h.cloud.Insert(ctx, cr)
+	if ierr != nil {
+		saved = cr
+	}
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", saved)
+	httpx.OK(w, *saved)
+}
+
+// pveSecurityGroupAction handles rule CRUD on a SECURITY_GROUP row and the
+// server-side ADD/REMOVE_SECURITY_GROUP attach. Returns handled.
+func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
+	ctx := r.Context()
+	ps, err := h.pveFor(es)
+	if err != nil {
+		return false
+	}
+	// Server-side attach/detach: the group is named in data.
+	if cr.Type == cloud.TypeServer && (action == "ADD_SECURITY_GROUP" || action == "REMOVE_SECURITY_GROUP") {
+		groupID := strAny(data["securityGroup"])
+		if groupID == "" {
+			groupID = strAny(data["name"])
+		}
+		if groupID == "" {
+			groupID = strAny(data["securityGroupName"])
+		}
+		// Accept the cache id too.
+		if g, err := h.cloud.FindByID(ctx, groupID); err == nil && g != nil && g.Type == cloud.TypeSecurityGroup && g.ProjectID == proj.ID {
+			groupID = g.ExternalID
+		}
+		var aerr error
+		if action == "ADD_SECURITY_GROUP" {
+			aerr = ps.AttachSecurityGroup(ctx, proj.ID, cr.ExternalID, groupID)
+		} else {
+			aerr = ps.DetachSecurityGroup(ctx, proj.ID, cr.ExternalID, groupID)
+		}
+		if aerr != nil {
+			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, aerr.Error()))
+			return true
+		}
+		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
+		httpx.OK(w, map[string]any{"result": map[string]any{}})
+		return true
+	}
+	if cr.Type != cloud.TypeSecurityGroup {
+		return false
+	}
+	switch action {
+	case "LIST_RULES":
+		rules := []any{}
+		if sg, ok := cr.Data["securityGroup"].(map[string]any); ok {
+			if rs, ok := sg["security_group_rules"].([]any); ok {
+				rules = rs
+			}
+		}
+		httpx.OK(w, map[string]any{"result": rules})
+		return true
+	case "ADD_RULE":
+		dir := strAny(data["direction"])
+		ruleType := "in"
+		if dir == "egress" {
+			ruleType = "out"
+		}
+		rule := pve.FirewallRule{
+			Type: ruleType, Action: "ACCEPT",
+			Proto:   strAny(data["protocol"]),
+			Source:  strAny(data["remoteIpPrefix"]),
+			DPort:   portRange(data),
+			Comment: strAny(data["description"]),
+		}
+		if err := ps.SGAddRule(ctx, proj.ID, cr.ExternalID, rule); err != nil {
+			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			return true
+		}
+		h.pveSyncSecurityGroups(ctx, es, proj)
+		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
+		httpx.OK(w, map[string]any{"result": map[string]any{}})
+		return true
+	case "DELETE_RULE":
+		pos := intAny(data["pos"])
+		if pos == 0 {
+			// The FE names rules "<group>-<pos>" (the sync id shape).
+			if id := strAny(data["ruleId"]); id != "" {
+				if i := strings.LastIndexByte(id, '-'); i >= 0 {
+					pos, _ = strconv.Atoi(id[i+1:])
+				}
+			}
+		}
+		if err := ps.SGDeleteRule(ctx, proj.ID, cr.ExternalID, pos); err != nil {
+			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			return true
+		}
+		h.pveSyncSecurityGroups(ctx, es, proj)
+		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
+		httpx.OK(w, map[string]any{"result": map[string]any{}})
+		return true
+	}
+	return false
+}
+
+// portRange renders neutron-style port min/max into the PVE dport syntax.
+func portRange(data map[string]any) string {
+	lo, hi := intAny(data["portRangeMin"]), intAny(data["portRangeMax"])
+	switch {
+	case lo == 0 && hi == 0:
+		return ""
+	case hi == 0 || lo == hi:
+		return strconv.Itoa(lo)
+	default:
+		return fmt.Sprintf("%d:%d", lo, hi)
+	}
+}
+
+// pveSyncSecurityGroups reconciles the project's SG rows inline (best-effort).
+func (h *Handler) pveSyncSecurityGroups(ctx context.Context, es *externalservice.ExternalService, proj *Project) {
+	ps, err := h.pveFor(es)
+	if err != nil {
+		return
+	}
+	if rows, err := ps.SecurityGroupSyncProvider(h.pveRegion(proj, es), proj.ID).List(ctx); err == nil {
+		now := time.Now().UTC()
+		for i := range rows {
+			rows[i].ServiceID = es.ID
+			if existing, _ := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, rows[i].ExternalID); existing == nil {
+				_, _ = h.cloud.Insert(ctx, &rows[i])
+			} else {
+				existing.Data = rows[i].Data
+				existing.UpdatedAt = &now
+				_, _ = h.cloud.Insert(ctx, existing)
+			}
+		}
+	}
+}

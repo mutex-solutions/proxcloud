@@ -1,0 +1,31 @@
+{{- if and .Values.monitoring.enabled (not (has .Values.engine (list "postgresql" "ferretdb"))) }}
+{{/*
+Chart PodMonitor for the engines WITHOUT a CNPG-native equivalent
+(postgresql/ferretdb use spec.monitoring.enablePodMonitor on their Cluster CRs
+instead — rendering a second monitor for them would double-scrape).
+
+Requires the prometheus-operator CRDs on the DBaaS cluster (optional prereq in
+deploy/dbaas-cluster/README.md) — monitoring.enabled must stay false on
+clusters without them or the Application fails sync on the unknown kind.
+
+TODO-verify(drill): the metrics port per engine — Percona/mariadb-operator/
+valkey-operator each expose (or don't) an exporter depending on operator
+config; pin the port name (and add per-engine endpoints if they diverge)
+during the engine drills.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $name }}
+  podMetricsEndpoints:
+    - port: metrics
+{{- end }}

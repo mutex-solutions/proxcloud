@@ -1,0 +1,49 @@
+{{- if eq .Values.engine "postgresql" }}
+{{/*
+CloudNativePG Cluster (operator >= 1.29.1, pinned in
+deploy/dbaas-cluster/README.md). The operator provisions the `app` database +
+`app` user and maintains the <id>-app connection Secret — the tuple
+internal/cloud/dbaas/engines.go reads for GET_CONNECTION_INFO.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+    {{- with .Values.restartedAt }}
+    # RESTART mechanism: CNPG's documented rolling-restart trigger is this
+    # annotation on the Cluster — the same one `kubectl cnpg restart` stamps
+    # (utils.ClusterRestartAnnotationName = kubectl.kubernetes.io/restartedAt).
+    # NOT cnpg.io/reloadedAt — that name does not exist upstream; the reload
+    # (config-only) annotation is cnpg.io/reload on Secrets/ConfigMaps.
+    # TODO-verify(drill): confirm a changed value rolls instances on 1.29.
+    kubectl.kubernetes.io/restartedAt: {{ . | quote }}
+    {{- end }}
+spec:
+  instances: {{ int .Values.instances }}
+  imageName: {{ include "database-cluster.image" . }}
+  enableSuperuserAccess: {{ .Values.postgresql.superuserAccess | default false }}
+  {{- with .Values.postgresql.parameters }}
+  postgresql:
+    parameters:
+      {{- toYaml . | nindent 6 }}
+  {{- end }}
+  storage:
+    size: {{ .Values.storage.sizeGi }}Gi
+    {{- with .Values.storage.storageClassName }}
+    storageClass: {{ . }}
+    {{- end }}
+  resources:
+    {{- include "database-cluster.resources" . | nindent 4 }}
+  monitoring:
+    enablePodMonitor: {{ .Values.monitoring.enabled }}
+  # Stamp the NetworkPolicy selector label onto every instance pod (CNPG pods
+  # otherwise only carry cnpg.io/* labels).
+  inheritedMetadata:
+    labels:
+      app.kubernetes.io/instance: {{ $name }}
+{{- end }}

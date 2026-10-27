@@ -1,0 +1,17 @@
+{{- /*
+Optional user-supplied Keycloak realm export. The chart ships no baked
+realm; see values.yaml (`realmImport` + the keycloak block comment) for
+how to feed this ConfigMap into the bundled Keycloak's --import-realm.
+*/ -}}
+{{- if .Values.realmImport.json }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "proxcloud.fullname" . }}-realm-import
+  labels:
+    {{- include "proxcloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+data:
+  realm.json: |
+    {{- .Values.realmImport.json | nindent 4 }}
+{{- end }}

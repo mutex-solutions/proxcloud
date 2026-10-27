@@ -1,0 +1,19 @@
+{{- range $comp := tuple "ui" "admin" }}
+{{- $v := index $.Values $comp }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "proxcloud.fullname" $ }}-{{ $comp }}
+  labels:
+    {{- include "proxcloud.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $comp }}
+spec:
+  type: {{ $v.service.type }}
+  selector:
+    {{- include "proxcloud.selector" (dict "ctx" $ "component" $comp) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $v.service.port }}
+      targetPort: http
+{{- end }}

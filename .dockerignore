@@ -1,0 +1,15 @@
+.git
+bin
+docs
+*.md
+.env
+# Keep the build context to ONLY what the Go build + the chart's wait-script need.
+# Exclude the secret-bearing values overlays, the seed docs, tasks, and tests so the build
+# context (and pushed image) never carries credentials or non-build repo content.
+tasks
+test
+deploy/values-*.yaml
+deploy/*-values.yaml
+deploy/seed
+**/*_test.go
+web

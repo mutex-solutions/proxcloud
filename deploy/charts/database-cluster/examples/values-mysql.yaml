@@ -1,0 +1,35 @@
+---
+# =============================================================================
+# MySQL example — Percona Server 8.4, group replication, 3 nodes (the only HA
+# size the catalog offers; 1 renders the operator's unsafe-size override).
+#   helm template test deploy/charts/database-cluster -f examples/values-mysql.yaml
+# =============================================================================
+engine: mysql
+engineVersion: "8.4"
+instances: 3
+resources:
+  cpu: "4"
+  memoryGi: 8
+storage:
+  sizeGi: 100
+  storageClassName: csi-cinder-sc-delete
+network:
+  networkId: 11111111-2222-3333-4444-555555555555
+  subnetId: 66666666-7777-8888-9999-aaaaaaaaaaaa
+  memberSubnetId: bbbbbbbb-cccc-dddd-eeee-ffffffffffff
+  allowedCidrs:
+    - 10.20.0.0/24
+    - 10.21.0.0/24
+proxcloud:
+  projectId: 665f1a2b3c4d5e6f77889900
+  resourceId: std-2b3c4d5e
+  displayName: shop-mysql
+monitoring:
+  enabled: false
+mysql:
+  parameters:
+    max_connections: "500"
+  haproxy:
+    cpu: "500m"
+    memoryGi: 1
+restartedAt: ""

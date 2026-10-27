@@ -1,0 +1,119 @@
+# Custom ArgoCD health checks for the CRDs the openstack-kamaji-cluster chart renders
+# (design plan D3/§3.0: ArgoCD has NO built-in health for TenantControlPlane /
+# Cluster / MachineDeployment — without these, every customer-cluster Application reports
+# Healthy the moment manifests apply, long before the control plane or workers exist, and the
+# proxcloud status mapping (Argo health → cluster status, internal/cloud/kamaji/syncprovider.go)
+# plus the fleet-upgrade wave gating (plan §9) would be meaningless).
+#
+# This file is a MERGE PATCH for the existing argocd-cm, not a standalone ConfigMap — ArgoCD
+# owns argocd-cm and a plain `kubectl apply` of this partial object would wipe its other keys
+# if applied with --prune or SSA-force. Apply with:
+#
+#   kubectl -n argocd patch configmap argocd-cm --type merge --patch-file argocd-health.yaml
+#
+# (If argocd-cm is itself GitOps-managed, fold the three data keys into that source instead.)
+#
+# ⚠ VALIDATE DURING THE LIVE DRILL (plan §3.0): the status fields below are taken from the
+# upstream CRD sources (kamaji tenantcontrolplane_types.go, cluster-api v1beta1) and from what
+# proxcloud already reads back (syncprovider.go reads status.kubernetesResources.version.status
+# and MachineDeployment status.phase/readyReplicas) — but the exact value sets on OUR pinned
+# operator versions must be confirmed against a real cluster before trusting wave gating.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+data:
+  # Kamaji TenantControlPlane: status.kubernetesResources.version.status is the operator's
+  # own rollup ("Provisioning" → "Ready"; "Upgrading"/"Migrating" during version bumps —
+  # treated as Progressing so an in-flight CP upgrade gates the wave, "NotReady" degraded).
+  resource.customizations.health.kamaji.clastix.io_TenantControlPlane: |
+    hs = {}
+    if obj.status ~= nil and obj.status.kubernetesResources ~= nil and obj.status.kubernetesResources.version ~= nil then
+      local s = obj.status.kubernetesResources.version.status
+      local v = obj.status.kubernetesResources.version.current or ""
+      if s == "Ready" then
+        hs.status = "Healthy"
+        hs.message = "TenantControlPlane ready " .. v
+        return hs
+      end
+      if s == "NotReady" then
+        hs.status = "Degraded"
+        hs.message = "TenantControlPlane not ready"
+        return hs
+      end
+      -- Provisioning / Upgrading / Migrating / CertificateRotating / anything transitional
+      hs.status = "Progressing"
+      hs.message = "TenantControlPlane " .. tostring(s)
+      return hs
+    end
+    hs.status = "Progressing"
+    hs.message = "Waiting for TenantControlPlane status"
+    return hs
+
+  # CAPI Cluster: terminal failure fields first, then phase (Pending/Provisioning →
+  # Progressing, Provisioned → Healthy, Failed → Degraded, Deleting → Progressing so a
+  # cascading delete shows as in-flight rather than broken).
+  resource.customizations.health.cluster.x-k8s.io_Cluster: |
+    hs = {}
+    if obj.status ~= nil then
+      if obj.status.failureReason ~= nil or obj.status.failureMessage ~= nil then
+        hs.status = "Degraded"
+        hs.message = tostring(obj.status.failureMessage or obj.status.failureReason)
+        return hs
+      end
+      local phase = obj.status.phase
+      if phase == "Provisioned" then
+        hs.status = "Healthy"
+        hs.message = "Cluster provisioned"
+        return hs
+      end
+      if phase == "Failed" then
+        hs.status = "Degraded"
+        hs.message = "Cluster failed"
+        return hs
+      end
+      if phase ~= nil then
+        hs.status = "Progressing"
+        hs.message = "Cluster " .. tostring(phase)
+        return hs
+      end
+    end
+    hs.status = "Progressing"
+    hs.message = "Waiting for Cluster status"
+    return hs
+
+  # CAPI MachineDeployment: Healthy only when phase is Running AND every desired replica is
+  # ready. ScalingUp/ScalingDown stay Progressing — that keeps node-group edits and image/
+  # version rotations (the same MachineDeployment-rotation path, plan §9) gating the wave
+  # until the new nodes actually joined. NOTE for autoscaled groups: spec.replicas is managed
+  # by the cluster-autoscaler; the ready==desired comparison still holds at any point in time.
+  resource.customizations.health.cluster.x-k8s.io_MachineDeployment: |
+    hs = {}
+    if obj.status ~= nil and obj.status.phase ~= nil then
+      local phase = obj.status.phase
+      if phase == "Failed" then
+        hs.status = "Degraded"
+        hs.message = "MachineDeployment failed"
+        return hs
+      end
+      if phase == "Running" then
+        local desired = obj.spec ~= nil and obj.spec.replicas or nil
+        local ready = obj.status.readyReplicas or 0
+        if desired == nil or ready >= desired then
+          hs.status = "Healthy"
+          hs.message = tostring(ready) .. " ready"
+          return hs
+        end
+        hs.status = "Progressing"
+        hs.message = tostring(ready) .. "/" .. tostring(desired) .. " ready"
+        return hs
+      end
+      -- ScalingUp / ScalingDown / Unknown
+      hs.status = "Progressing"
+      hs.message = "MachineDeployment " .. tostring(phase)
+      return hs
+    end
+    hs.status = "Progressing"
+    hs.message = "Waiting for MachineDeployment status"
+    return hs

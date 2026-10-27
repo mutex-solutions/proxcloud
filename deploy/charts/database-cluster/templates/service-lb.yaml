@@ -1,0 +1,64 @@
+{{/*
+Chart-owned LoadBalancer Service <id>-lb: the ONE endpoint a customer database
+exposes, an Octavia INTERNAL LB whose VIP lands on the tenant subnet
+(network.networkId/subnetId) while the amphora reaches the DB pods over the
+DBaaS-cluster member subnet (network.memberSubnetId). The tenant network must
+already be neutron-RBAC-shared with the dbaas keystone project — proxcloud does
+that before applying the Application (dbaasEnsureNetShare).
+
+allowedCidrs -> spec.loadBalancerSourceRanges = the Octavia ACL. That is where
+client filtering is ENFORCED; the NetworkPolicy deliberately does not mirror it
+(see templates/networkpolicy.yaml).
+
+This Service is also the READY signal: ArgoCD's built-in Service health keeps
+the Application Progressing until the Octavia VIP exists, so READY implies a
+reachable endpoint (and proxcloud reads status.loadBalancer.ingress[0].ip back
+for connection info).
+
+For opensearch this is TCP PASSTHROUGH of operator-generated TLS: the backend
+speaks HTTPS on 9200 (spec.security.tls.http.generate), the LB does not
+terminate.
+
+KAFKA IS SKIPPED: Strimzi creates the external listener's LB Services itself
+(the <id>-kafka-external-bootstrap Service + one per broker — the guarded
+block below would be a THIRD, selector-less LB). ProxCloud reads the VIP from
+the Strimzi bootstrap Service instead — see LBServiceNameFor in
+internal/cloud/dbaas/engines.go. The validate include stays OUTSIDE the guard
+so the fail-fast contract still covers kafka values documents.
+*/}}
+{{- include "database-cluster.validate" . -}}
+{{- if ne .Values.engine "kafka" }}
+{{- $name := include "database-cluster.name" . }}
+{{- $port := include "database-cluster.port" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-lb
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+    loadbalancer.openstack.org/network-id: {{ .Values.network.networkId | quote }}
+    loadbalancer.openstack.org/subnet-id: {{ .Values.network.subnetId | quote }}
+    loadbalancer.openstack.org/member-subnet-id: {{ .Values.network.memberSubnetId | quote }}
+    # Internal LB: the VIP is a tenant-subnet fixed IP, never a floating IP.
+    # This is OCCM's ServiceAnnotationLoadBalancerInternal — the only annotation
+    # that flips internal (loadbalancer.openstack.org/internal does NOT exist).
+    service.beta.kubernetes.io/openstack-internal-load-balancer: "true"
+    {{- with .Values.network.extraAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: LoadBalancer
+  {{- with .Values.network.allowedCidrs }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  ports:
+    - name: {{ .Values.engine }}
+      port: {{ $port }}
+      targetPort: {{ $port }}
+      protocol: TCP
+  selector:
+    {{- include "database-cluster.serviceSelector" . | nindent 4 }}
+{{- end }}

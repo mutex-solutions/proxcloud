@@ -1,0 +1,44 @@
+{{- /*
+Gateway-API alternative to Ingress: one HTTPRoute per component that has
+a hostname configured under gateway.hostnames.
+*/ -}}
+{{- if .Values.gateway.enabled }}
+{{- range $comp := tuple "api" "ui" "admin" }}
+{{- $host := index $.Values.gateway.hostnames $comp }}
+{{- if $host }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "proxcloud.fullname" $ }}-{{ $comp }}
+  labels:
+    {{- include "proxcloud.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $comp }}
+  annotations:
+    # external-dns creates the A record from this hint; it does not derive DNS
+    # names from HTTPRoute hostnames on its own.
+    external-dns.alpha.kubernetes.io/hostname: {{ $host | quote }}
+    {{- with $.Values.gateway.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml (required "gateway.parentRefs is required when gateway.enabled" $.Values.gateway.parentRefs) | nindent 4 }}
+  hostnames:
+    - {{ $host | quote }}
+  rules:
+    - backendRefs:
+        - name: {{ include "proxcloud.fullname" $ }}-{{ $comp }}
+          port: {{ (index $.Values $comp).service.port }}
+      {{- /*
+        Per-rule Gateway API timeouts. Deliberately UNSET by default: the VNC console holds a
+        long-lived WebSocket through the api route, and a `request` timeout would cut the session.
+        See gateway.timeouts in values.yaml for when to set backendRequest.
+      */}}
+      {{- with index ($.Values.gateway.timeouts | default dict) $comp }}
+      timeouts:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,48 @@
+proxcloud {{ .Chart.Version }} deployed as release "{{ .Release.Name }}".
+
+Components:
+  api    : {{ include "proxcloud.fullname" . }}-api    (app :{{ .Values.api.service.port }}, mgmt :{{ .Values.api.managementPort }})
+  ui     : {{ include "proxcloud.fullname" . }}-ui     (:{{ .Values.ui.service.port }})
+  admin  : {{ include "proxcloud.fullname" . }}-admin  (:{{ .Values.admin.service.port }})
+{{- if .Values.cnpg.enabled }}
+  db     : CloudNativePG cluster ({{ include "proxcloud.cnpgClusterName" . }}-rw, db "{{ .Values.postgresql.auth.database }}"){{ if .Values.cnpg.installOperator }} + bundled operator{{ end }}
+{{- else if .Values.postgresql.enabled }}
+  db     : bundled PostgreSQL ({{ .Release.Name }}-postgresql, db "{{ .Values.postgresql.auth.database }}")
+{{- end }}
+{{- if .Values.rabbitmq.enabled }}
+  broker : bundled RabbitMQ ({{ .Release.Name }}-rabbitmq)
+{{- end }}
+{{- if .Values.keycloakx.enabled }}
+  idp    : bundled Keycloak ({{ .Release.Name }}-keycloakx-http)
+{{- end }}
+
+Check health (management port, cluster-internal):
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "proxcloud.fullname" . }}-api {{ .Values.api.managementPort }}
+  curl localhost:{{ .Values.api.managementPort }}/actuator/health/readiness
+
+{{- if and (not .Values.api.ingress.enabled) (not .Values.gateway.enabled) }}
+
+No Ingress/HTTPRoute is enabled — reach the API with:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "proxcloud.fullname" . }}-api {{ .Values.api.service.port }}
+{{- end }}
+{{- if and .Values.postgresql.enabled (eq .Values.postgresql.auth.password "proxcloud") }}
+
+WARNING: the bundled PostgreSQL is using the default dev password.
+{{- end }}
+{{- if eq .Values.api.encryptionKey "insecure-dev-key-change-me" }}
+WARNING: api.encryptionKey is the insecure dev default — set a real key.
+{{- end }}
+{{- if not .Values.auth.main.issuer }}
+
+Auth realms are unset (auth.*.issuer) — authenticated routes will 401.
+Point them at your IdP (or the bundled Keycloak's public URL).
+{{- end }}
+
+A fresh database needs the base configuration documents seeded before the
+billing/project endpoints work — see deploy/seed/ in the repo.
+
+Adding a kamaji managed-Kubernetes provider additionally requires a prepared
+management cluster (ArgoCD + deploy/mgmt-cluster manifests) — see
+docs/managed-k8s.md in the repo.

@@ -1,0 +1,198 @@
+# RBAC for the proxcloud service account on the DBaaS cluster (the ops-pre-built
+# cluster running the database operator suite — the `dbaas` provider's target).
+#
+# Grants exactly the API surface internal/cloud/kamajik8s/client.go uses for the dbaas
+# provider — nothing more:
+#
+#   verb source (client.go)          resource
+#   ---------------------------      -----------------------------------------------
+#   EnsureNamespace (SSA PATCH)      namespaces: create+patch (+get), delete/list for
+#                                    the sync-driven namespace GC (orphan finalization)
+#   ApplySecret (SSA PATCH)          secrets: create+patch (net-share marker Secrets,
+#                                    RESET_PASSWORD writes onto the engine secret)
+#   GetSecretData / DeleteSecret     secrets: get / delete; list for the orphan sweep
+#                                    (connection-info reads use get)
+#   GetService                       services: get/list (LB VIP read-back — the
+#                                    endpoint proxcloud serves to customers)
+#   Apply/Get/List/DeleteApplication applications.argoproj.io (argocd ns only)
+#   engine CR status reads           the operator CRDs below: get/list
+#
+# Server-side apply is a PATCH that CREATES the object when absent — every SSA'd resource
+# therefore needs BOTH `create` and `patch`.
+#
+# ⚠ Why secrets/services/engine-CRs are CLUSTER-wide grants: Kubernetes RBAC cannot
+# wildcard namespaces — a Role binds to exactly one concrete namespace, and the `pc-<projectId>`
+# namespaces are created dynamically by proxcloud itself, so no pre-created namespaced Role can
+# cover them. The ClusterRole below is the honest trade-off: the proxcloud SA can read/write
+# Secrets in ANY namespace of this cluster. Accepted for v1 because the DBaaS cluster is
+# single-purpose (customer databases); if it ever becomes multi-purpose, replace this with a
+# controller that stamps a per-namespace Role into each pc-* namespace on creation.
+#
+# The one surface that CAN be namespace-scoped is the ArgoCD Application CRUD — it lives only
+# in the argocd namespace, so it is a plain Role there (bottom of this file).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: proxcloud-system
+  labels:
+    app.kubernetes.io/managed-by: proxcloud
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxcloud
+  namespace: proxcloud-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxcloud-dbaas
+rules:
+  # pc-<projectId> project namespaces: created via SSA at bootstrap, deleted by the
+  # sync-driven GC once a project's last database is finalized. `list` is label-filtered
+  # (app.kubernetes.io/managed-by=proxcloud) by the GC scan.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # Net-share marker secrets (the durable neutron-RBAC revoke record, written by proxcloud),
+  # operator-generated connection secrets (read on GET_CONNECTION_INFO), and RESET_PASSWORD
+  # writes onto the engine secret. Cluster-wide — see header.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # LB Service VIP read-back (<id>-lb status.loadBalancer.ingress) — read-only; the chart
+  # (via ArgoCD) owns the Service itself.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+  # Namespace default-deny: proxcloud stamps a "proxcloud-default-deny" NetworkPolicy into every
+  # pc-* namespace it ensures (dbaas.Service.EnsureProjectNamespace) — the chart's per-database
+  # policy is only the additive allow on top.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create", "patch"]
+  # Engine CR status reads only — proxcloud never writes these; the chart (via ArgoCD) owns them.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters"]
+    verbs: ["get", "list"]
+  - apiGroups: ["ps.percona.com"]
+    resources: ["perconaservermysqls"]
+    verbs: ["get", "list"]
+  - apiGroups: ["k8s.mariadb.com"]
+    resources: ["mariadbs"]
+    verbs: ["get", "list"]
+  # TODO-verify(beta): the valkey operator's CRD group/resource is UNPINNED (see the header
+  # of deploy/charts/database-cluster/templates/valkey/valkey.yaml). hyperspike.io/valkeys is
+  # the best-known candidate; correct it here when the operator is pinned, before the valkey
+  # beta gate opens.
+  - apiGroups: ["hyperspike.io"]
+    resources: ["valkeys"]
+    verbs: ["get", "list"]
+  # Strimzi 1.1.0 (kafka engine). Serves ONLY kafka.strimzi.io/v1 — see the
+  # apiVersion note in deploy/charts/database-cluster/templates/kafka/kafka.yaml.
+  - apiGroups: ["kafka.strimzi.io"]
+    resources: ["kafkas", "kafkanodepools", "kafkausers"]
+    verbs: ["get", "list"]
+  # Recommendation read for the autoscale tick (internal/cloud/dbaas/autoscale.go): proxcloud
+  # reads .status.recommendation off the chart-rendered <id>-vpa (updateMode Off) and applies
+  # the bounded scale-up itself via the values patch. Read-only — the chart (via ArgoCD) owns
+  # the VPA object.
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["verticalpodautoscalers"]
+    verbs: ["get", "list"]
+  # opensearch-k8s-operator 3.0.2 (opensearch engine). BOTH api groups granted:
+  # 3.x serves opensearch.opster.io (deprecated, what the chart renders) AND
+  # its successor opensearch.org — granting both keeps status reads working
+  # across the operator's group migration without an RBAC re-roll.
+  - apiGroups: ["opensearch.opster.io", "opensearch.org"]
+    resources: ["opensearchclusters"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-dbaas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxcloud-dbaas
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+# ArgoCD Application CRUD — namespaced to the argocd namespace only. The AppProject
+# (appproject.yaml) further constrains what those Applications may source and where they
+# may deploy. `create` accompanies `patch` because ApplyApplication is SSA (create-on-absent).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: proxcloud-applications
+  namespace: argocd
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: proxcloud-applications
+  namespace: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: proxcloud-applications
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+# Long-lived token for the proxcloud SA. Since k8s 1.24 SAs get no auto-created token; this
+# explicit Secret makes the control plane mint one and keep it populated.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxcloud-token
+  namespace: proxcloud-system
+  annotations:
+    kubernetes.io/service-account.name: proxcloud
+type: kubernetes.io/service-account-token
+---
+# Assemble the kubeconfig that becomes the proxcloud provider secret (secret.kubeconfig on the
+# dbaas externalService document — admin UI "Add provider → Database", or
+# deploy/seed/external-service-dev.json's dbaas entry).
+#
+# NOTE: the proxcloud kubeconfig parser (internal/cloud/kamajik8s/kubeconfig.go) supports plain
+# token or client-cert auth ONLY — no exec plugins / auth-provider blocks / proxy-url. The
+# token kubeconfig below is exactly what it expects.
+#
+#   SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+#   CA=$(kubectl -n proxcloud-system get secret proxcloud-token -o jsonpath='{.data.ca\.crt}')
+#   TOKEN=$(kubectl -n proxcloud-system get secret proxcloud-token -o jsonpath='{.data.token}' | base64 -d)
+#
+#   cat <<EOF > proxcloud-dbaas-kubeconfig.yaml
+#   apiVersion: v1
+#   kind: Config
+#   current-context: dbaas
+#   clusters:
+#     - name: dbaas
+#       cluster:
+#         server: ${SERVER}
+#         certificate-authority-data: ${CA}
+#   users:
+#     - name: proxcloud
+#       user:
+#         token: ${TOKEN}
+#   contexts:
+#     - name: dbaas
+#       context:
+#         cluster: dbaas
+#         user: proxcloud
+#   EOF
+#
+# Sanity-check before pasting it into the provider form:
+#   kubectl --kubeconfig proxcloud-dbaas-kubeconfig.yaml auth can-i list clusters.postgresql.cnpg.io -A       # yes
+#   kubectl --kubeconfig proxcloud-dbaas-kubeconfig.yaml auth can-i create applications.argoproj.io -n argocd  # yes
+#   kubectl --kubeconfig proxcloud-dbaas-kubeconfig.yaml auth can-i '*' '*' -A                                 # no

@@ -1,0 +1,48 @@
+{{- if eq .Values.engine "kafka" }}
+{{/*
+Strimzi KafkaNodePool (api v1 — see the apiVersion note in kafka.yaml).
+ponytail: ONE dual-role pool (controller+broker) — the whole cluster is
+`instances` identical nodes, matching the single-knob values contract; split
+into dedicated controller/broker pools when a customer needs it.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+{{/* Same half-of-memory heap rule as the opensearch template; Strimzi's own
+     guidance is ~50-75% of the container request for a broker. */}}
+{{- $halfMemMi := div (mul (int .Values.resources.memoryGi) 1024) 2 }}
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: {{ $name }}-pool
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+    # The binding to the Kafka CR — Strimzi matches pools by this label.
+    strimzi.io/cluster: {{ $name }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+spec:
+  replicas: {{ int .Values.instances }}
+  roles:
+    - controller
+    - broker
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: {{ .Values.storage.sizeGi }}Gi
+        # KRaft metadata shares the data volume — no separate metadata disk
+        # to size/resize.
+        kraftMetadata: shared
+        # The PVC dies with the database: DELETE removes the Application and
+        # ArgoCD prunes; a retained orphan PVC would leak tenant-paid Cinder
+        # volumes with no owner to bill.
+        deleteClaim: true
+        {{- with .Values.storage.storageClassName }}
+        class: {{ . }}
+        {{- end }}
+  resources:
+    {{- include "database-cluster.resources" . | nindent 4 }}
+  jvmOptions:
+    "-Xms": {{ printf "%dm" (int $halfMemMi) | quote }}
+    "-Xmx": {{ printf "%dm" (int $halfMemMi) | quote }}
+{{- end }}

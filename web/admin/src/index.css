@@ -1,0 +1,504 @@
+/* ============================================================================
+ * ProxCloud Console — design system
+ *
+ * Token source: the upstream design system, ported from the canonical
+ * tokens (colors / typography / spacing / effects). Brand rules that are
+ * binding here: Blaze Orange #FF5C00 is the only accent and never the sole
+ * signal; warm neutrals, never gray; borders do the structural work, shadows
+ * stay gentle (dark mode adds an inset top highlight); hover on solid brand
+ * surfaces is a brightness filter, not a color swap; sentence case; Lucide at
+ * 1.5 stroke; no emoji in product UI.
+ *
+ * Fonts: brand faces (GC Arbiter, SF Mono, …) are licensed and NOT shipped in
+ * this repo. Stacks are declared brand-first so a licensed deployment can
+ * inject the real @font-face rules at runtime (see config.js); everyone else
+ * gets the open substitutes bundled via @fontsource (Space Grotesk display,
+ * Inter body, JetBrains Mono).
+ *
+ * NOTE: this file intentionally shadows a few Tailwind default theme vars
+ * (--text-*, --tracking-*, --shadow-sm) with the design-system scale — that is the
+ * design system's type/elevation ramp taking precedence.
+ * ========================================================================== */
+
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource-variable/jetbrains-mono";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ── Tailwind theme map ──────────────────────────────────────────────────────
+ * `inline` is required: values reference other CSS vars, and utilities must
+ * re-resolve them at the element (so .dark overrides apply). No --color-* vars
+ * are emitted — hand-written CSS references the raw tokens (--primary, …). */
+@theme inline {
+    --font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
+    --font-display: "GC Arbiter", "Space Grotesk Variable", "Inter Variable", sans-serif;
+    --font-heading: var(--font-display);
+    --font-mono: "SF Mono", "JetBrains Mono Variable", ui-monospace, monospace;
+
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    --color-card: var(--card);
+    --color-card-foreground: var(--card-foreground);
+    --color-popover: var(--popover);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-primary: var(--primary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary-text: var(--primary-text);
+    --color-secondary: var(--secondary);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-muted: var(--muted);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-accent: var(--accent);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-destructive: var(--destructive);
+    --color-destructive-foreground: var(--destructive-foreground);
+    --color-destructive-text: var(--destructive-text);
+    --color-success: var(--success);
+    --color-success-foreground: var(--success-foreground);
+    --color-success-text: var(--success-text);
+    --color-warning: var(--warning);
+    --color-warning-foreground: var(--warning-foreground);
+    --color-warning-text: var(--warning-text);
+    --color-info: var(--info);
+    --color-info-foreground: var(--info-foreground);
+    --color-border: var(--border);
+    --color-input: var(--input);
+    --color-ring: var(--ring);
+
+    /* Existing status aliases (status dots, ok/warn badges). */
+    --color-ok: var(--ok);
+    --color-warn: var(--warn);
+
+    --color-chart-1: var(--chart-1);
+    --color-chart-2: var(--chart-2);
+    --color-chart-3: var(--chart-3);
+    --color-chart-4: var(--chart-4);
+    --color-chart-5: var(--chart-5);
+    --color-chart-6: var(--chart-6);
+    --color-chart-7: var(--chart-7);
+    --color-chart-8: var(--chart-8);
+    --color-chart-9: var(--chart-9);
+    --color-chart-other: var(--chart-other);
+
+    --color-sidebar: var(--sidebar);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-ring: var(--sidebar-ring);
+
+    --color-status-backlog: var(--status-backlog);
+    --color-status-planning: var(--status-planning);
+    --color-status-in-progress: var(--status-in-progress);
+    --color-status-blocked: var(--status-blocked);
+    --color-status-in-review: var(--status-in-review);
+    --color-status-done: var(--status-done);
+    --color-status-cancelled: var(--status-cancelled);
+
+    --color-identity-1: var(--identity-1);
+    --color-identity-2: var(--identity-2);
+    --color-identity-3: var(--identity-3);
+    --color-identity-4: var(--identity-4);
+    --color-identity-5: var(--identity-5);
+    --color-identity-6: var(--identity-6);
+    --color-identity-7: var(--identity-7);
+    --color-identity-8: var(--identity-8);
+    --color-identity-9: var(--identity-9);
+
+    /* design-system radius ramp: additive around --radius (0.625rem). */
+    --radius-xs: calc(var(--radius) - 6px);
+    --radius-sm: calc(var(--radius) - 4px);
+    --radius-md: calc(var(--radius) - 2px);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) + 4px);
+    --radius-2xl: 1rem;
+    --radius-3xl: 1.25rem;
+    --radius-4xl: 1.5rem;
+
+    /* Semantic elevation utilities (shadow-card, shadow-popover, …). */
+    --shadow-card: var(--shadow-card);
+    --shadow-card-hover: var(--shadow-card-hover);
+    --shadow-card-drag: var(--shadow-card-drag);
+    --shadow-popover: var(--shadow-popover);
+    --shadow-modal: var(--shadow-modal);
+}
+
+/* ── design-system color tokens — light ─────────────────────────────────────────── */
+:root {
+    /* Interaction states (brightness filters, per design-system motion rules). */
+    --state-hover-brightness: 1.1;
+    --state-active-brightness: 0.95;
+    --state-disabled-opacity: 0.5;
+
+    /* Primitive palette. */
+    --palette-red: #EF4444;
+    --palette-orange: #F97316;
+    --palette-amber: #F59E0B;
+    --palette-green: #10B981;
+    --palette-teal: #14B8A6;
+    --palette-cyan: #06B6D4;
+    --palette-blue: #3B82F6;
+    --palette-blue-light: #60A5FA;
+    --palette-purple: #8B5CF6;
+    --palette-pink: #EC4899;
+    --palette-gray: #6B7280;
+    --palette-gray-light: #9CA3AF;
+    --palette-slate: #64748B;
+
+    /* Surfaces — warm off-white, never gray. #FFFDF6 is frozen as the darkest
+       allowed light surface: the orange focus ring passes 3:1 on it by 0.04. */
+    --background: #FFFDF6;
+    --foreground: #000000;
+    --card: #FFFFFF;
+    --card-foreground: #000000;
+    --popover: #FFFFFF;
+    --popover-foreground: #000000;
+
+    /* Blaze Orange — the one accent. White-on-orange (3.10:1) is the
+       documented brand exception, allowed on primary buttons/fills only.
+       Orange TEXT on light surfaces must use --primary-text instead. */
+    --primary: #FF5C00;
+    --primary-foreground: #FFFFFF;
+    --primary-text: #B34000; /* 5.65:1 on --background — links, orange copy */
+    --secondary: #ECEADE;
+    --secondary-foreground: #000000;
+    --muted: #ECEADE;
+    --muted-foreground: oklch(0.45 0.005 60);
+    --accent: #ECEADE;
+    --accent-foreground: #000000;
+
+    --destructive: #B91C1C;
+    --destructive-foreground: #FFFFFF;
+    --success: var(--palette-green);
+    --success-foreground: #FFFFFF;
+    --warning: var(--palette-amber);
+    --warning-foreground: #000000;
+    --info: var(--palette-blue);
+    --info-foreground: #FFFFFF;
+    /* Text-safe status hues: raw green/amber fail AA as TEXT on the warm
+       off-white (2.49/2.11) — use these for colored copy in light mode. */
+    --success-text: #047857;
+    --warning-text: #B45309;
+    --destructive-text: #B91C1C; /* 6.5:1 on --background — destructive copy */
+
+    /* Status-dot aliases used by the console's status badges. */
+    --ok: var(--palette-green);
+    --warn: var(--palette-amber);
+
+    --border: oklch(0.92 0.005 60);
+    --input: oklch(0.92 0.005 60);
+    --ring: #FF5C00;
+
+    /* Charts: chart-1 is the brand; slots alternate warm/cool so adjacent
+       categories (donut slices, stacked series) never read as near-neighbors
+       — in particular orange and amber are held four slots apart. Beyond ~7
+       categories fold into "Other" (--chart-other), never cycle. */
+    --chart-1: var(--primary);
+    --chart-2: var(--palette-blue);
+    --chart-3: var(--palette-green);
+    --chart-4: var(--palette-purple);
+    --chart-5: var(--palette-amber);
+    --chart-6: var(--palette-teal);
+    --chart-7: var(--palette-pink);
+    --chart-8: var(--palette-red);
+    --chart-9: var(--palette-slate);
+    --chart-other: var(--palette-gray-light);
+
+    /* Sidebar — Satin Linen rail in light mode (design-system convention). */
+    --sidebar: #ECEADE;
+    --sidebar-foreground: #000000;
+    --sidebar-primary: #FF5C00;
+    --sidebar-primary-foreground: #FFFFFF;
+    --sidebar-accent: #FFFDF6;
+    --sidebar-accent-foreground: #000000;
+    --sidebar-border: oklch(0.92 0.005 60);
+    --sidebar-ring: #FF5C00;
+
+    /* Workflow status hues (shared platform vocabulary). */
+    --status-backlog: var(--palette-gray-light);
+    --status-planning: var(--palette-amber);
+    --status-in-progress: var(--palette-blue);
+    --status-blocked: var(--palette-red);
+    --status-in-review: var(--palette-cyan);
+    --status-done: var(--palette-green);
+    --status-cancelled: var(--palette-gray);
+
+    /* Identity hues — avatars, project chips (fixed per-entity assignment). */
+    --identity-1: var(--palette-red);
+    --identity-2: var(--palette-orange);
+    --identity-3: var(--palette-amber);
+    --identity-4: var(--palette-green);
+    --identity-5: var(--palette-teal);
+    --identity-6: var(--palette-blue);
+    --identity-7: var(--palette-purple);
+    --identity-8: var(--palette-pink);
+    --identity-9: var(--palette-slate);
+
+    /* Glass surface (frosted panels — command palette, floating chrome).
+       Gradient value: never map into a Tailwind color namespace. */
+    --card-glass: linear-gradient(180deg, rgba(255, 255, 255, 0.58), rgba(255, 255, 255, 0.45));
+    --card-glass-border: rgba(255, 255, 255, 0.3);
+    --card-glass-shadow: rgba(0, 0, 0, 0.35);
+    --card-glass-shadow-near: rgba(0, 0, 0, 0.18);
+    --card-glass-highlight: rgba(255, 255, 255, 0.4);
+
+    /* Type scale / weights / tracking (design-system ramp; shadows Tailwind defaults
+       deliberately — e.g. text-6xl becomes 4rem). */
+    --weight-light: 300;
+    --weight-regular: 400;
+    --weight-medium: 500;
+    --weight-semibold: 600;
+    --weight-bold: 700;
+    --leading-tight: 1.1;
+    --leading-snug: 1.3;
+    --leading-normal: 1.5;
+    --leading-relaxed: 1.625;
+    --tracking-display: -0.02em;
+    --tracking-tight: -0.01em;
+    --tracking-normal: 0;
+    --tracking-wide: 0.05em;
+
+    /* Radius base (tokamak "industrial" value) + chrome metrics. */
+    --radius: 0.625rem;
+    --navbar-height: 52px;
+    --sidebar-width: 16rem;
+    --sidebar-width-icon: 3rem;
+
+    /* Semantic elevation (light). --shadow-sm deliberately overrides the
+       Tailwind default so shadcn primitives inherit the design-system elevation. */
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.10);
+    --shadow-card-hover: 0 2px 4px rgba(0, 0, 0, 0.10), 0 8px 20px rgba(0, 0, 0, 0.14);
+    --shadow-card-drag: 0 8px 28px rgba(0, 0, 0, 0.20), 0 4px 8px rgba(0, 0, 0, 0.10);
+    --shadow-popover: 0 4px 16px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.08);
+    --shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.10);
+    --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.10), 0 1px 2px -1px rgba(0, 0, 0, 0.10);
+
+    color-scheme: light;
+}
+
+/* ── design-system color tokens — dark (warm dark-olive, Off White text) ─────────── */
+.dark {
+    --background: #0c0b09;
+    --foreground: #FFFDF6;
+    --card: #1e1c15;
+    --card-foreground: #FFFDF6;
+    --popover: #1e1c15;
+    --popover-foreground: #FFFDF6;
+
+    --primary: #FF5C00;
+    --primary-foreground: #FFFFFF;
+    --primary-text: #FF5C00; /* 6.35:1 on the dark bg — raw brand passes */
+    --secondary: #201e16;
+    --secondary-foreground: #FFFDF6;
+    --muted: #201e16;
+    --muted-foreground: hsl(47, 15%, 72%);
+    --accent: hsla(47, 20%, 60%, 0.2);
+    --accent-foreground: #FFFDF6;
+
+    --destructive: #EF4444;
+    --destructive-foreground: #FFFFFF;
+    --success-foreground: #FFFFFF;
+    --warning-foreground: #000000;
+    --info-foreground: #FFFFFF;
+    /* Re-tinted 400-shades pass as text on the dark bg. */
+    --success-text: var(--palette-green);
+    --warning-text: var(--palette-amber);
+    --destructive-text: #F87171; /* 6.9:1 on the dark bg — destructive copy */
+
+    --border: hsla(47, 15%, 70%, 0.18);
+    --input: hsla(47, 15%, 70%, 0.18);
+    --ring: #FF5C00;
+
+    --sidebar: #080706;
+    --sidebar-foreground: #FFFDF6;
+    --sidebar-primary: #FF5C00;
+    --sidebar-primary-foreground: #FFFFFF;
+    --sidebar-accent: hsla(47, 20%, 60%, 0.2);
+    --sidebar-accent-foreground: #FFFDF6;
+    --sidebar-border: hsla(47, 15%, 70%, 0.18);
+    --sidebar-ring: #FF5C00;
+
+    /* Primitives re-tinted lighter for the dark bg — success/warning/info,
+       ok/warn, chart-*, status-*, identity-* re-resolve automatically. */
+    --palette-red: #F87171;
+    --palette-orange: #FB923C;
+    --palette-amber: #FBBF24;
+    --palette-green: #34D399;
+    --palette-teal: #2DD4BF;
+    --palette-cyan: #22D3EE;
+    --palette-blue: #60A5FA;
+    --palette-blue-light: #93C5FD;
+    --palette-purple: #A78BFA;
+    --palette-pink: #F472B6;
+    --palette-gray: #9CA3AF;
+    --palette-gray-light: #B8BEC4;
+    --palette-slate: #94A3B8;
+
+    --card-glass: linear-gradient(180deg, rgba(30, 28, 21, 0.72), rgba(30, 28, 21, 0.58));
+    --card-glass-border: rgba(255, 255, 255, 0.12);
+    --card-glass-shadow: rgba(0, 0, 0, 0.70);
+    --card-glass-shadow-near: rgba(0, 0, 0, 0.45);
+    --card-glass-highlight: rgba(255, 255, 255, 0.08);
+
+    /* Dark elevation keeps an inset top highlight for a beveled feel. */
+    --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    --shadow-card-hover: 0 4px 14px rgba(0, 0, 0, 0.20), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    --shadow-card-drag: 0 12px 32px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.10);
+    --shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.40), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.50), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+    color-scheme: dark;
+}
+
+/* ── Base ────────────────────────────────────────────────────────────────── */
+@layer base {
+  * {
+    /* Full-opacity ring: at 50% the orange composites below 3:1 on the warm
+       off-white and fails WCAG 1.4.11. */
+    @apply border-border outline-ring;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+  h1, h2, h3 {
+    font-family: var(--font-display);
+    letter-spacing: var(--tracking-tight);
+  }
+}
+
+/* ── Brand keyframes (top-level so they always emit) ─────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+
+/* ── design-system utilities (@utility → variant support: hover:, md:, …) ────────── */
+
+/* Frosted-glass panel — floating chrome, command palette, HUD overlays. */
+@utility glass-surface {
+  background: var(--card-glass);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  backdrop-filter: blur(40px) saturate(180%);
+  border: 1px solid var(--card-glass-border);
+  box-shadow:
+    0 24px 48px -16px var(--card-glass-shadow),
+    0 4px 12px -4px var(--card-glass-shadow-near),
+    inset 0 1px 0 var(--card-glass-highlight);
+}
+
+/* Small-caps section label / eyebrow — panel headers, sidebar group labels,
+   settings subsections. NOT body copy or titles. */
+@utility text-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+/* Ambient dot-grid + scanline texture; additive, layer over a soft surface. */
+@utility bg-texture-subtle {
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      transparent, transparent 3px,
+      rgba(0, 0, 0, 0.055) 3px, rgba(0, 0, 0, 0.055) 4px
+    ),
+    radial-gradient(circle, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+  background-size: 100% 100%, 22px 22px;
+}
+
+
+/* Filter-based hover/active — solid brand surfaces (default Button). */
+@utility interactive-brightness {
+  transition-property: filter;
+  transition-duration: 200ms;
+  &:not(:disabled):hover { filter: brightness(var(--state-hover-brightness)); }
+  &:not(:disabled):active { filter: brightness(var(--state-active-brightness)); }
+}
+
+/* Flowing gradient shimmer — progress, loading buttons. */
+@utility animate-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--shimmer-from, var(--primary)) 0%,
+    var(--shimmer-via, oklch(0.8 0.2 50)) 50%,
+    var(--shimmer-from, var(--primary)) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s linear infinite;
+}
+
+/* Blinking cursor — terminal text, typing indicators. */
+@utility animate-cursor-blink {
+  animation: cursor-blink 1s step-end infinite;
+}
+
+/* Signature: the horizon line under page titles — Blaze Orange burning into
+   the warm linen, fading out. */
+@utility horizon {
+  height: 2px;
+  border-radius: 9999px;
+  background: linear-gradient(
+    90deg,
+    var(--primary) 0%,
+    color-mix(in srgb, var(--primary) 45%, var(--secondary)) 45%,
+    transparent 85%
+  );
+}
+
+@utility font-display {
+  font-family: var(--font-display);
+}
+
+/* Status dots with a soft glow — resource tables, health indicators. */
+@utility status-dot {
+  @apply inline-block size-2 rounded-full;
+}
+@utility status-dot-ok {
+  background: var(--ok);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--ok) 70%, transparent);
+}
+@utility status-dot-warn {
+  background: var(--warn);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--warn) 70%, transparent);
+}
+@utility status-dot-error {
+  background: var(--destructive);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--destructive) 70%, transparent);
+}
+@utility status-dot-muted {
+  background: var(--muted-foreground);
+}
+
+/* ── Unlayered overrides (must beat the utilities layer) ─────────────────── */
+.dark .glass-surface {
+  -webkit-backdrop-filter: blur(40px) saturate(140%);
+  backdrop-filter: blur(40px) saturate(140%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-shimmer,
+  .animate-cursor-blink {
+    animation: none !important;
+  }
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}

@@ -1,0 +1,142 @@
+name: helm
+
+# Chart releases — two charts, two independent tag flows:
+#   - PR touching deploy/charts/**:        lint + template all charts, publish nothing.
+#   - tag v*:                              the proxcloud APP chart, versioned by the tag
+#                                          (v0.1.2 -> 0.1.2, shared with the image tags),
+#                                          pushed to oci://ghcr.io/<owner>/charts.
+#   - tag database-cluster-v*:             the managed-database (DBaaS) chart, at its own
+#                                          Chart.yaml version, to the same charts repo.
+#
+# The DBaaS chart is deliberately NOT released off the app tag: a customer database pins a
+# chart version and keeps it until something explicitly moves it, so that chart's lifecycle
+# is its own. For it the tag must MATCH Chart.yaml `version:` (the job fails on drift) —
+# bump Chart.yaml in the PR, then cut the matching tag to release. All publishes are
+# idempotent: an already-published version is skipped.
+#
+on:
+  push:
+    tags:
+      - "v*"
+      - "database-cluster-v*"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'deploy/charts/**'
+
+env:
+  CHART_DIR: deploy/charts/proxcloud
+  CHART_NAME: proxcloud
+  OCI_REPO: oci://ghcr.io/${{ github.repository_owner }}/charts
+  DB_CHART_DIR: deploy/charts/database-cluster
+  DB_CHART_NAME: database-cluster
+
+jobs:
+  # ---- PR: sanity only ------------------------------------------------------
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: ghcr login (for OCI helm deps)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Lint + template
+        run: |
+          set -euo pipefail
+          # dependency build resolves the classic (non-OCI) repos only if they are configured
+          helm repo add codecentric https://codecentric.github.io/helm-charts
+          helm repo add cnpg https://cloudnative-pg.github.io/charts
+          helm dependency build "$CHART_DIR"
+          helm lint "$CHART_DIR"
+          helm template "$CHART_DIR" -f "$CHART_DIR/values-dev.yaml" >/dev/null
+
+      - name: Lint + template the database-cluster chart
+        run: |
+          set -euo pipefail
+          # Bare defaults DO NOT render by design — `engine` (and the rest of the values
+          # contract) is required and the chart fails fast on an empty document. The
+          # examples ARE the render check instead: one per engine, all five must pass.
+          for f in "$DB_CHART_DIR"/examples/values-*.yaml; do
+            echo "==> $f"
+            helm lint "$DB_CHART_DIR" -f "$f"
+            helm template test "$DB_CHART_DIR" -f "$f" >/dev/null
+          done
+
+  # ---- tag v*: the proxcloud app chart at the tag version ----------------------
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push the OCI chart artifact
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: ghcr login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Package + publish chart at the tag version
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"          # v0.1.2 -> 0.1.2
+          if helm show chart "$OCI_REPO/$CHART_NAME" --version "$version" >/dev/null 2>&1; then
+            echo "chart $CHART_NAME $version already published — nothing to do."
+            exit 0
+          fi
+          # dependency build resolves the classic (non-OCI) repos only if they are configured
+          helm repo add codecentric https://codecentric.github.io/helm-charts
+          helm repo add cnpg https://cloudnative-pg.github.io/charts
+          helm dependency build "$CHART_DIR"
+          helm lint "$CHART_DIR"
+          helm template "$CHART_DIR" -f "$CHART_DIR/values-dev.yaml" >/dev/null
+          # app-version keeps the v prefix: it is the image tag the templates fall back to,
+          # and the docker workflow tags images with the tag name verbatim (v0.1.0).
+          helm package "$CHART_DIR" -d /tmp/pkg --version "$version" --app-version "$GITHUB_REF_NAME"
+          helm push "/tmp/pkg/$CHART_NAME-$version.tgz" "$OCI_REPO"
+
+  # ---- tag database-cluster-v*: the DBaaS chart at its own version ------------
+  publish-db-chart:
+    if: github.event_name == 'push' && startsWith(github.ref_name, 'database-cluster-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: ghcr login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Publish at the Chart.yaml version (tag must match)
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#"$DB_CHART_NAME"-v}"
+          version="$(helm show chart "$DB_CHART_DIR" | awk '/^version:/ {print $2}')"
+          if [ "$tag_version" != "$version" ]; then
+            echo "tag says $tag_version but $DB_CHART_DIR/Chart.yaml says $version — bump Chart.yaml (or fix the tag) and re-tag." >&2
+            exit 1
+          fi
+          if helm show chart "$OCI_REPO/$DB_CHART_NAME" --version "$version" >/dev/null 2>&1; then
+            echo "chart $DB_CHART_NAME $version already published — nothing to do."
+            exit 0
+          fi
+          # Bare defaults fail by design (engine required) — render every engine example.
+          for f in "$DB_CHART_DIR"/examples/values-*.yaml; do
+            echo "==> $f"
+            helm lint "$DB_CHART_DIR" -f "$f"
+            helm template test "$DB_CHART_DIR" -f "$f" >/dev/null
+          done
+          helm package "$DB_CHART_DIR" -d /tmp/pkg
+          helm push "/tmp/pkg/$DB_CHART_NAME-$version.tgz" "$OCI_REPO"

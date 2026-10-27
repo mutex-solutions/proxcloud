@@ -1,0 +1,40 @@
+apiVersion: v2
+name: proxcloud
+description: >-
+  ProxCloud — self-service cloud platform on Proxmox VE.
+  Deploys the Go API, the customer console (ui), the operator console (admin),
+  and optionally bundles PostgreSQL, RabbitMQ and Keycloak.
+type: application
+version: 0.3.28
+# appVersion carries the v prefix — it doubles as the default image tag (see the docker workflow).
+appVersion: "v0.3.28"
+kubeVersion: ">=1.25.0-0"
+keywords:
+  - proxcloud
+  - proxmox
+  - cloud
+  - billing
+sources:
+  - https://github.com/mutex-solutions/proxcloud
+dependencies:
+  - name: postgresql
+    version: 18.7.11
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.enabled
+  - name: rabbitmq
+    version: 16.0.14
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: rabbitmq.enabled
+  # Keycloak via codecentric/keycloakx (runs the official quay.io/keycloak/keycloak image),
+  # NOT the Bitnami subchart. Off by default; most installs point auth.*.issuer at an external IdP.
+  - name: keycloakx
+    version: 7.2.0
+    repository: https://codecentric.github.io/helm-charts
+    condition: keycloakx.enabled
+  # CloudNativePG operator — bundled ONLY when cnpg.installOperator=true (installs the operator +
+  # CRDs cluster-wide). If the operator is already in the cluster, leave this off and just render the
+  # Cluster CR (cnpg.enabled=true, installOperator=false). Official ghcr.io PostgreSQL images.
+  - name: cloudnative-pg
+    version: 0.29.0
+    repository: https://cloudnative-pg.github.io/charts
+    condition: cnpg.installOperator

@@ -1,0 +1,119 @@
+{{- if eq .Values.engine "kafka" }}
+{{/*
+Strimzi Kafka (operator 1.1.0, pinned in deploy/dbaas-cluster/README.md),
+KRaft mode with node pools. CRITICAL: Strimzi 1.x serves ONLY
+kafka.strimzi.io/v1 — most published manifests (and our reference recon) use
+v1beta2, which 1.x DROPPED. Spec shapes are identical; only the apiVersion
+moved. Keep v1 on every kafka.strimzi.io object in this directory.
+
+Connectivity: the chart-owned service-lb.yaml SKIPS kafka — the external
+listener below makes STRIMZI create the LB Services itself: ONE bootstrap
+Service (<id>-kafka-external-bootstrap, the endpoint proxcloud reads — see
+LBServiceNameFor in internal/cloud/dbaas/engines.go) plus ONE Service PER
+BROKER, because each broker must be individually addressable (the bootstrap
+LB only hands clients the metadata; producers/consumers then connect to the
+advertised per-broker addresses). Every one of those Services carries the
+Octavia annotation set, so ONE KAFKA DATABASE = instances+1 OCTAVIA LBs
+(= amphora VMs) on the tenant subnet — mind the amphora quota math in
+deploy/dbaas-cluster/README.md, which is 1 LB/database for every other engine.
+
+Auth: SASL/SCRAM-SHA-512 on both listeners; the credential is the KafkaUser
+<id>-app (kafkauser.yaml) whose password is the PROXCLOUD-owned <id>-auth
+Secret — provisioned BEFORE this Application ever syncs, patched by
+RESET_PASSWORD. authorization.type simple activates ACLs cluster-side.
+
+TODO-verify(drill): bootstrap Service name + per-broker LB provisioning on
+Strimzi 1.1.0 with Octavia; VIP read-back should adopt Kafka
+status.listeners[].bootstrapServers if the Service name ever drifts.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+{{/* The Octavia annotation set every Strimzi-created LB Service gets — same
+     trio + internal flag as the chart-owned LBs, plus the extraAnnotations
+     escape hatch so that values knob keeps working for kafka too. */}}
+{{- $lbAnnotations := dict
+      "loadbalancer.openstack.org/network-id" .Values.network.networkId
+      "loadbalancer.openstack.org/subnet-id" .Values.network.subnetId
+      "loadbalancer.openstack.org/member-subnet-id" .Values.network.memberSubnetId
+      "service.beta.kubernetes.io/openstack-internal-load-balancer" "true" }}
+{{- $lbAnnotations = mergeOverwrite $lbAnnotations (.Values.network.extraAnnotations | default dict) }}
+{{/* Replication safety derived from instances: RF = min(instances,3),
+     min.isr = max(1, RF-1) — a 1-node dev cluster degrades to RF 1/ISR 1
+     instead of failing topic creation. values.kafka.parameters overrides. */}}
+{{- $rf := min (int .Values.instances) 3 }}
+{{- $minIsr := max 1 (sub $rf 1) }}
+{{- $config := dict
+      "offsets.topic.replication.factor" $rf
+      "transaction.state.log.replication.factor" $rf
+      "transaction.state.log.min.isr" $minIsr
+      "default.replication.factor" $rf
+      "min.insync.replicas" $minIsr }}
+{{- $config = mergeOverwrite $config (.Values.kafka.parameters | default dict) }}
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+spec:
+  kafka:
+    version: {{ .Values.engineVersion | quote }}
+    # metadataVersion deliberately omitted — Strimzi defaults it per kafka
+    # version, and pinning it here would fight UPGRADE's version bumps.
+    listeners:
+      # In-cluster listener (same-VPC k8s workloads would still come through
+      # the LB; this one serves the entity operator + any future in-cluster
+      # peering). tls false: the SCRAM credential is the protection layer, as
+      # on the external listener.
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+        authentication:
+          type: scram-sha-512
+      # The tenant-facing listener. ponytail: tls false = SASL over plaintext
+      # through an internal-only Octavia LB on the tenant subnet — same
+      # posture as every other engine's LB except opensearch; ceiling is
+      # tls:true + operator CA distribution when in-transit encryption is
+      # asked for.
+      - name: external
+        port: 9094
+        type: loadbalancer
+        tls: false
+        authentication:
+          type: scram-sha-512
+        configuration:
+          createBootstrapService: true
+          {{- with .Values.network.allowedCidrs }}
+          # The Octavia ACL, applied by Strimzi to bootstrap AND per-broker
+          # Services (spec.loadBalancerSourceRanges — same enforcement point
+          # as the chart-owned LBs; the NetworkPolicy deliberately does not
+          # mirror it, see templates/networkpolicy.yaml).
+          loadBalancerSourceRanges:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          bootstrap:
+            annotations:
+              {{- toYaml $lbAnnotations | nindent 14 }}
+          # Every broker gets its OWN Octavia LB (advertised address) — the
+          # N in the N+1 amphora math (see header).
+          brokers:
+            {{- range $i := until (int .Values.instances) }}
+            - broker: {{ $i }}
+              annotations:
+                {{- toYaml $lbAnnotations | nindent 16 }}
+            {{- end }}
+    config:
+      {{- toYaml $config | nindent 6 }}
+    authorization:
+      type: simple
+  entityOperator:
+    topicOperator: {}
+    # userOperator is MANDATORY here: without it KafkaUsers (kafkauser.yaml —
+    # the only credential customers get) are never reconciled and no SCRAM
+    # credential ever exists.
+    userOperator: {}
+{{- end }}

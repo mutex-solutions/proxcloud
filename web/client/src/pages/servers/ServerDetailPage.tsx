@@ -1,0 +1,1178 @@
+// Server detail — Overview / Console log / Metadata (editable) plus Network / Security / Volumes /
+// Events / Snapshots tabs. Action names + data keys verified against
+// internal/platform/project/cloud_writes.go (cloudAction + clusterAction) and
+// internal/cloud/providers/write.go (WriteService.Action TypeServer/TypeVolume):
+//   RENAME{name} · RESIZE{flavorId} + CONFIRMRESIZE/REVERTRESIZE · REBUILD{imageId} ·
+//   SET_PASSWORD{password} · RESCUE (result = generated password) / UNRESCUE ·
+//   REMOTECONTROL (result = remote_console map with .url) ·
+//   ADD/REMOVE_SECURITY_GROUP{name} · ATTACH_PORT/DETACH_PORT{portId} ·
+//   volume ATTACH/DETACH act on the VOLUME resource with data{serverId: <server externalId>} ·
+//   metadata = PUT /project/{pid}/cloud/{id}/metadata with the FULL map[string]string.
+import { useEffect, useState } from "react"
+import { Link, useNavigate, useParams } from "react-router-dom"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { toast } from "sonner"
+import {
+  Camera, HardDrive, MoreVertical, Play, Plus, RotateCw, Square, Trash2, X,
+} from "lucide-react"
+import { PageHeader } from "@/components/layout/PageHeader"
+import { StatusBadge } from "@/components/status-badge"
+import {
+  Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { apiFetch, type CloudScope } from "@/lib/api"
+import { fmtDateTime, timeAgo } from "@/lib/format"
+import { useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
+import type { CloudResource } from "@/lib/types"
+import { serverFlavor, serverIPs, serverName, serverStatus } from "./ServersPage"
+
+type PendingAction = { action: string; title: string; label: string; destructive?: boolean } | null
+type FormDialog = "rename" | "resize" | "rebuild" | "password" | "delete" | null
+
+type Flavor = {
+  externalId?: string
+  data?: { id?: string; name?: string; vcpus?: number; ram?: number; disk?: number }
+}
+type GlanceImage = Record<string, any>
+
+// POST /project/{pid}/cloud/{rid}/action → envelope data = {result}.
+function actionFetch<T = unknown>(
+  pid: string,
+  resourceId: string,
+  scope: CloudScope | undefined,
+  action: string,
+  data?: Record<string, unknown>,
+) {
+  return apiFetch<{ result?: T }>(`/project/${pid}/cloud/${resourceId}/action`, {
+    method: "POST",
+    body: data ? { action, data } : { action },
+    cloud: scope,
+  })
+}
+
+export function ServerDetailPage() {
+  const pid = useProjectId()
+  const { resourceId = "" } = useParams()
+  const navigate = useNavigate()
+  const scope = useCloudScope(pid)
+  const qc = useQueryClient()
+  const { data: server, isLoading } = useCloudResource(pid, resourceId)
+  const [pending, setPending] = useState<PendingAction>(null)
+  const [dialog, setDialog] = useState<FormDialog>(null)
+  const [renameVal, setRenameVal] = useState("")
+  const [resizeFlavor, setResizeFlavor] = useState("")
+  const [rebuildImage, setRebuildImage] = useState("")
+  const [passwordVal, setPasswordVal] = useState("")
+  // Hide the confirm/revert-resize panel as soon as one is clicked, so a second click can't
+  // fire a confirm at an already-confirmed server (which nova 409s). The cached status can lag
+  // the real state for a while (notification/sync delay), so relying on it alone leaves the
+  // buttons live too long. Reset when the status finally moves off VERIFY_RESIZE, or on error.
+  const [resizeActed, setResizeActed] = useState(false)
+  // Re-arm the panel once the server leaves VERIFY_RESIZE (a later resize shows it again).
+  // Kept above any early return so the hook order is stable.
+  useEffect(() => {
+    if (!server || serverStatus(server) !== "VERIFY_RESIZE") setResizeActed(false)
+  }, [server])
+
+  const invalidate = () => {
+    setTimeout(() => {
+      void qc.invalidateQueries({ queryKey: ["cloud-resource", pid, resourceId] })
+      void qc.invalidateQueries({ queryKey: ["cloud", pid, "SERVER"] })
+    }, 1500)
+  }
+
+  const act = useMutation({
+    mutationFn: (p: { action: string; data?: Record<string, unknown> }) =>
+      actionFetch(pid, resourceId, scope, p.action, p.data),
+    onSuccess: (d, p) => {
+      if (p.action === "RESCUE" && typeof d?.result === "string" && d.result) {
+        // RESCUE returns the generated admin password (cloud_writes.go RESCUE case).
+        toast.success(`Rescue started — admin password: ${d.result}`, { duration: 30000 })
+      } else {
+        toast.success(`${p.action} requested`)
+      }
+      invalidate()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  // Console opens OUR page (it renders noVNC against ProxCloud's proxied WebSocket and mints its own
+  // token on mount) — nova's novncproxy URL is never handed to the browser, so that service stays
+  // off the public internet. New tab: a console wants its own window.
+  const openConsole = () =>
+    window.open(`/p/${pid}/servers/${resourceId}/console`, "_blank", "noopener")
+
+  const del = useMutation({
+    mutationFn: () => apiFetch(`/project/${pid}/cloud/${resourceId}`, { method: "DELETE", cloud: scope }),
+    onSuccess: () => {
+      toast.success("Server deletion requested")
+      void qc.invalidateQueries({ queryKey: ["cloud", pid, "SERVER"] })
+      navigate(`/p/${pid}/servers`)
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  // Resize flavors + rebuild images load lazily when their dialog opens.
+  const flavors = useQuery({
+    queryKey: ["bulk-action", pid, "LIST_FLAVORS", scope?.serviceId, scope?.region],
+    queryFn: () =>
+      apiFetch<{ result?: Flavor[] }>(`/project/${pid}/cloud/action`, {
+        method: "POST",
+        body: { action: "LIST_FLAVORS" },
+        cloud: scope,
+      }),
+    enabled: !!pid && !!scope && dialog === "resize",
+    select: (d) => d?.result ?? [],
+  })
+  const images = useQuery({
+    queryKey: ["bulk-action", pid, "PUBLIC_IMAGES", scope?.serviceId, scope?.region],
+    queryFn: () =>
+      apiFetch<{ result?: GlanceImage[] }>(`/project/${pid}/cloud/action`, {
+        method: "POST",
+        body: { action: "PUBLIC_IMAGES" },
+        cloud: scope,
+      }),
+    enabled: !!pid && !!scope && dialog === "rebuild",
+    select: (d) => d?.result ?? [],
+  })
+
+  if (isLoading || !server) {
+    return (
+      <>
+        <PageHeader title="Server" eyebrow="Compute" />
+        <div className="grid gap-4">
+          <div className="flex items-center gap-3">
+            <Skeleton className="h-5 w-24" />
+            <Skeleton className="h-4 w-64" />
+          </div>
+          <Skeleton className="h-9 w-full max-w-xl" />
+          <Skeleton className="h-64" />
+        </div>
+      </>
+    )
+  }
+
+  const s = server.data?.server ?? {}
+  const status = serverStatus(server)
+  const ext = server.externalId ?? ""
+  const name = serverName(server)
+
+  const closeForm = () => setDialog(null)
+
+  return (
+    <>
+      <PageHeader
+        title={name}
+        eyebrow="Compute"
+        breadcrumb={
+          <Breadcrumb>
+            <BreadcrumbList>
+              <BreadcrumbItem>
+                <BreadcrumbLink asChild>
+                  <Link to={`/p/${pid}/servers`}>Servers</Link>
+                </BreadcrumbLink>
+              </BreadcrumbItem>
+              <BreadcrumbSeparator />
+              <BreadcrumbItem>
+                <BreadcrumbPage>{name}</BreadcrumbPage>
+              </BreadcrumbItem>
+            </BreadcrumbList>
+          </Breadcrumb>
+        }
+        description={`${serverFlavor(server)} — ${serverIPs(server).join(", ") || "no addresses"}`}
+        actions={
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPending({ action: "START", title: "Start server", label: "start this server" })}
+              disabled={status === "ACTIVE"}
+            >
+              <Play className="size-4" /> Start
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPending({ action: "STOP", title: "Stop server", label: "stop this server" })}
+              disabled={status === "SHUTOFF"}
+            >
+              <Square className="size-4" /> Stop
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPending({ action: "SOFTREBOOT", title: "Reboot server", label: "reboot this server" })}
+            >
+              <RotateCw className="size-4" /> Reboot
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm">
+                  <MoreVertical className="size-4" /> More actions
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onClick={() => {
+                    setRenameVal(name)
+                    setDialog("rename")
+                  }}
+                >
+                  Rename
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => {
+                    setResizeFlavor("")
+                    setDialog("resize")
+                  }}
+                >
+                  Resize
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => {
+                    setRebuildImage("")
+                    setDialog("rebuild")
+                  }}
+                >
+                  Rebuild
+                </DropdownMenuItem>
+                {status === "RESCUE" ? (
+                  <DropdownMenuItem
+                    onClick={() => setPending({ action: "UNRESCUE", title: "Unrescue server", label: "take this server out of rescue mode" })}
+                  >
+                    Unrescue
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem
+                    onClick={() => setPending({ action: "RESCUE", title: "Rescue server", label: "put this server into rescue mode" })}
+                  >
+                    Rescue
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem
+                  onClick={() => {
+                    setPasswordVal("")
+                    setDialog("password")
+                  }}
+                >
+                  Set password
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={openConsole}>Console (VNC)</DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onClick={() => setDialog("delete")}>
+                  <Trash2 className="size-4" /> Delete
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </>
+        }
+      />
+
+      <div className="mb-4 flex items-center gap-3">
+        <StatusBadge status={status} />
+        <span className="font-mono text-xs text-muted-foreground">{server.externalId}</span>
+      </div>
+
+      {status === "VERIFY_RESIZE" && !resizeActed ? (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md border bg-muted p-3 text-sm">
+          <span>The resize is waiting for verification.</span>
+          <Button
+            size="sm"
+            onClick={() => {
+              setResizeActed(true)
+              act.mutate({ action: "CONFIRMRESIZE" }, { onError: () => setResizeActed(false) })
+            }}
+            disabled={act.isPending}
+          >
+            Confirm resize
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setResizeActed(true)
+              act.mutate({ action: "REVERTRESIZE" }, { onError: () => setResizeActed(false) })
+            }}
+            disabled={act.isPending}
+          >
+            Revert resize
+          </Button>
+        </div>
+      ) : null}
+
+      <Tabs defaultValue="overview">
+        {/* 8 triggers overflow narrow viewports — the wrapper scrolls horizontally
+            instead of wrapping/clipping (thin scrollbar as the affordance). */}
+        <div className="-mx-1 overflow-x-auto px-1 pb-1">
+          <TabsList className="w-max">
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="network">Network</TabsTrigger>
+            <TabsTrigger value="security">Security</TabsTrigger>
+            <TabsTrigger value="volumes">Volumes</TabsTrigger>
+            <TabsTrigger value="events">Events</TabsTrigger>
+            <TabsTrigger value="snapshots">Snapshots</TabsTrigger>
+            <TabsTrigger value="logs">Console log</TabsTrigger>
+            <TabsTrigger value="metadata">Metadata</TabsTrigger>
+          </TabsList>
+        </div>
+
+        <TabsContent value="overview" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Details</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <dl className="grid gap-x-8 gap-y-3 text-sm sm:grid-cols-2">
+                <Row k="Status" v={<StatusBadge status={status} />} />
+                <Row k="Flavor" v={serverFlavor(server)} />
+                <Row k="IP addresses" v={<span className="font-mono">{serverIPs(server).join(", ") || "—"}</span>} />
+                <Row k="Availability zone" v={(s["OS-EXT-AZ:availability_zone"] as string) ?? "—"} />
+                <Row k="Created" v={fmtDateTime((s.created as string) ?? server.info?.createdAt)} />
+                <Row k="Host ID" v={<span className="font-mono text-xs">{(s.hostId as string) ?? "—"}</span>} />
+              </dl>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="network" className="mt-4">
+          <NetworkTab pid={pid} resourceId={resourceId} ext={ext} scope={scope} />
+        </TabsContent>
+
+        <TabsContent value="security" className="mt-4">
+          <SecurityTab pid={pid} resourceId={resourceId} scope={scope} />
+        </TabsContent>
+
+        <TabsContent value="volumes" className="mt-4">
+          <VolumesTab pid={pid} ext={ext} scope={scope} />
+        </TabsContent>
+
+        <TabsContent value="events" className="mt-4">
+          <EventsTab pid={pid} resourceId={resourceId} scope={scope} />
+        </TabsContent>
+
+        <TabsContent value="snapshots" className="mt-4">
+          <SnapshotsTab pid={pid} resourceId={resourceId} ext={ext} scope={scope} />
+        </TabsContent>
+
+        <TabsContent value="logs" className="mt-4">
+          <ConsoleLog pid={pid} resourceId={resourceId} />
+        </TabsContent>
+
+        <TabsContent value="metadata" className="mt-4">
+          <MetadataEditor
+            pid={pid}
+            resourceId={resourceId}
+            scope={scope}
+            initial={(server.data?.instanceMetadata as Record<string, string>) ?? {}}
+          />
+        </TabsContent>
+      </Tabs>
+
+      {/* Confirm dialog for quick + rescue actions */}
+      <Dialog open={!!pending} onOpenChange={(o) => !o && setPending(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{pending?.title ?? "Confirm action"}</DialogTitle>
+            <DialogDescription>Are you sure you want to {pending?.label}?</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPending(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (pending) act.mutate({ action: pending.action })
+                setPending(null)
+              }}
+            >
+              {pending?.title ?? "Confirm"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Rename */}
+      <Dialog open={dialog === "rename"} onOpenChange={(o) => !o && closeForm()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rename server</DialogTitle>
+            <DialogDescription>Set a new name for this server.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="rename-input">Name</Label>
+            <Input id="rename-input" value={renameVal} onChange={(e) => setRenameVal(e.target.value)} />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeForm}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!renameVal.trim()}
+              onClick={() => {
+                act.mutate({ action: "RENAME", data: { name: renameVal.trim() } })
+                closeForm()
+              }}
+            >
+              Rename
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Resize */}
+      <Dialog open={dialog === "resize"} onOpenChange={(o) => !o && closeForm()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Resize server</DialogTitle>
+            <DialogDescription>
+              Pick a new flavor. After the resize you must confirm or revert it from this page.
+            </DialogDescription>
+          </DialogHeader>
+          {flavors.isLoading ? (
+            <Skeleton className="h-9" />
+          ) : (
+            <Select value={resizeFlavor} onValueChange={setResizeFlavor}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Select a flavor" />
+              </SelectTrigger>
+              <SelectContent>
+                {(flavors.data ?? [])
+                  .filter((f) => !!f.externalId)
+                  .map((f) => (
+                    <SelectItem key={f.externalId} value={f.externalId!}>
+                      {f.data?.name ?? f.externalId} · {f.data?.vcpus ?? "?"} vCPU ·{" "}
+                      {f.data?.ram ? `${Math.round(f.data.ram / 1024)} GB` : "?"}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={closeForm}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!resizeFlavor}
+              onClick={() => {
+                act.mutate({ action: "RESIZE", data: { flavorId: resizeFlavor } })
+                closeForm()
+              }}
+            >
+              Resize
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Rebuild */}
+      <Dialog open={dialog === "rebuild"} onOpenChange={(o) => !o && closeForm()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rebuild server</DialogTitle>
+            <DialogDescription>
+              Reinstall this server from an image. All data on the root disk will be lost.
+            </DialogDescription>
+          </DialogHeader>
+          {images.isLoading ? (
+            <Skeleton className="h-9" />
+          ) : (
+            <Select value={rebuildImage} onValueChange={setRebuildImage}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Select an image" />
+              </SelectTrigger>
+              <SelectContent>
+                {(images.data ?? [])
+                  .filter((im) => !!im.id)
+                  .map((im) => (
+                    <SelectItem key={String(im.id)} value={String(im.id)}>
+                      {String(im.name ?? im.id)}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={closeForm}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={!rebuildImage}
+              onClick={() => {
+                act.mutate({ action: "REBUILD", data: { imageId: rebuildImage } })
+                closeForm()
+              }}
+            >
+              Rebuild
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set password */}
+      <Dialog open={dialog === "password"} onOpenChange={(o) => !o && closeForm()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Set admin password</DialogTitle>
+            <DialogDescription>Set a new administrator password for this server.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="password-input">New password</Label>
+            <Input
+              id="password-input"
+              type="password"
+              value={passwordVal}
+              onChange={(e) => setPasswordVal(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeForm}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!passwordVal}
+              onClick={() => {
+                act.mutate({ action: "SET_PASSWORD", data: { password: passwordVal } })
+                setPasswordVal("")
+                closeForm()
+              }}
+            >
+              Set password
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete */}
+      <Dialog open={dialog === "delete"} onOpenChange={(o) => !o && closeForm()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete server</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete "{name}"? This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeForm}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={del.isPending}
+              onClick={() => {
+                del.mutate()
+                closeForm()
+              }}
+            >
+              <Trash2 className="size-4" /> Delete server
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
+function Row({ k, v }: { k: string; v: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-b pb-2 last:border-0 sm:border-0 sm:pb-0">
+      <dt className="text-muted-foreground">{k}</dt>
+      <dd className="text-right">{v}</dd>
+    </div>
+  )
+}
+
+// ── Network tab: the server's ports (live neutron list scoped by deviceId) + attach/detach. ──
+function NetworkTab({
+  pid, resourceId, ext, scope,
+}: { pid: string; resourceId: string; ext: string; scope?: CloudScope }) {
+  const qc = useQueryClient()
+  const ports = useCloudList(pid, "PORT", `&deviceId=${ext}`)
+  const allPorts = useCloudList(pid, "PORT")
+  const [attachId, setAttachId] = useState("")
+
+  const invalidate = () =>
+    setTimeout(() => void qc.invalidateQueries({ queryKey: ["cloud", pid, "PORT"] }), 1500)
+
+  const attach = useMutation({
+    // clusterAction TypeServer ATTACH_PORT reads data{portId} (resolved via extID — a live port id passes through).
+    mutationFn: (portId: string) => actionFetch(pid, resourceId, scope, "ATTACH_PORT", { portId }),
+    onSuccess: () => {
+      toast.success("Port attach requested")
+      setAttachId("")
+      invalidate()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  const detach = useMutation({
+    mutationFn: (portId: string) => actionFetch(pid, resourceId, scope, "DETACH_PORT", { portId }),
+    onSuccess: () => {
+      toast.success("Port detach requested")
+      invalidate()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const freePorts = (allPorts.data ?? []).filter((p) => !(p.data?.port?.device_id as string))
+
+  return (
+    <div className="grid gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Select value={attachId} onValueChange={setAttachId}>
+          <SelectTrigger className="w-72">
+            <SelectValue placeholder={freePorts.length ? "Select an unattached port" : "No unattached ports"} />
+          </SelectTrigger>
+          <SelectContent>
+            {freePorts.map((p) => (
+              <SelectItem key={p.id} value={p.id}>
+                {(p.data?.port?.name as string) || p.id}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          size="sm"
+          disabled={!attachId || attach.isPending}
+          onClick={() => attach.mutate(attachId)}
+        >
+          <Plus className="size-4" /> Attach port
+        </Button>
+      </div>
+
+      {ports.isLoading ? (
+        <Skeleton className="h-40" />
+      ) : !ports.data?.length ? (
+        <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+          No ports attached to this server.
+        </p>
+      ) : (
+        <Card className="overflow-hidden py-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Port</TableHead>
+                <TableHead>MAC address</TableHead>
+                <TableHead>Fixed IPs</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="w-24" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {ports.data.map((p) => {
+                const port = (p.data?.port ?? {}) as Record<string, any>
+                const ips = ((port.fixed_ips as Array<{ ip_address?: string }>) ?? [])
+                  .map((ip) => ip.ip_address)
+                  .filter(Boolean)
+                  .join(", ")
+                return (
+                  <TableRow key={p.id}>
+                    <TableCell className="font-mono text-xs">{(port.name as string) || p.id}</TableCell>
+                    <TableCell className="font-mono text-xs">{(port.mac_address as string) ?? "—"}</TableCell>
+                    <TableCell className="font-mono text-sm">{ips || "—"}</TableCell>
+                    <TableCell>
+                      <StatusBadge status={port.status as string} />
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={detach.isPending}
+                        onClick={() => detach.mutate(p.id)}
+                      >
+                        <X className="size-4" /> Detach
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+// ── Security tab: the server's security groups (LIST_SECURITY_GROUPS action) + add/remove by NAME
+// (clusterAction ADD/REMOVE_SECURITY_GROUP read firstStr(data, "name", ...)). ──
+function SecurityTab({
+  pid, resourceId, scope,
+}: { pid: string; resourceId: string; scope?: CloudScope }) {
+  const qc = useQueryClient()
+  const [addName, setAddName] = useState("")
+
+  const attached = useQuery({
+    queryKey: ["server-action", pid, resourceId, "LIST_SECURITY_GROUPS"],
+    queryFn: () => actionFetch<CloudResource[]>(pid, resourceId, scope, "LIST_SECURITY_GROUPS"),
+    enabled: !!pid && !!resourceId && !!scope,
+    select: (d) => d?.result ?? [],
+  })
+  const available = useCloudList(pid, "SECURITY_GROUP")
+
+  const invalidate = () =>
+    setTimeout(
+      () => void qc.invalidateQueries({ queryKey: ["server-action", pid, resourceId, "LIST_SECURITY_GROUPS"] }),
+      1500,
+    )
+
+  const add = useMutation({
+    mutationFn: (name: string) => actionFetch(pid, resourceId, scope, "ADD_SECURITY_GROUP", { name }),
+    onSuccess: () => {
+      toast.success("Security group added")
+      setAddName("")
+      invalidate()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  const remove = useMutation({
+    mutationFn: (name: string) => actionFetch(pid, resourceId, scope, "REMOVE_SECURITY_GROUP", { name }),
+    onSuccess: () => {
+      toast.success("Security group removed")
+      invalidate()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const sgName = (r: CloudResource) => (r.data?.securityGroup?.name as string) ?? r.name ?? r.id
+  const attachedNames = new Set((attached.data ?? []).map(sgName))
+  const addable = (available.data ?? []).filter((sg) => !attachedNames.has(sgName(sg)))
+
+  return (
+    <div className="grid gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Select value={addName} onValueChange={setAddName}>
+          <SelectTrigger className="w-72">
+            <SelectValue placeholder={addable.length ? "Select a security group" : "No security groups to add"} />
+          </SelectTrigger>
+          <SelectContent>
+            {addable.map((sg) => (
+              <SelectItem key={sg.id} value={sgName(sg)}>
+                {sgName(sg)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button size="sm" disabled={!addName || add.isPending} onClick={() => add.mutate(addName)}>
+          <Plus className="size-4" /> Add group
+        </Button>
+      </div>
+
+      {attached.isLoading ? (
+        <Skeleton className="h-40" />
+      ) : !attached.data?.length ? (
+        <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+          No security groups attached to this server.
+        </p>
+      ) : (
+        <Card className="overflow-hidden py-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Description</TableHead>
+                <TableHead className="w-24" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {attached.data.map((sg) => (
+                <TableRow key={sg.id}>
+                  <TableCell className="font-medium">{sgName(sg)}</TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {(sg.data?.securityGroup?.description as string) || "—"}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={remove.isPending}
+                      onClick={() => remove.mutate(sgName(sg))}
+                    >
+                      <X className="size-4" /> Remove
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+// ── Volumes tab: VOLUME cache list filtered to this server's attachments; ATTACH/DETACH act on the
+// VOLUME resource with data{serverId: <server externalId>} (providers/write.go TypeVolume). ──
+function volumeAttachedTo(v: CloudResource, ext: string): boolean {
+  const cacheAtts = (v.data?.attachments as Array<Record<string, any>>) ?? []
+  if (cacheAtts.some((a) => a?.serverId === ext || a?.server_id === ext)) return true
+  const cinderAtts = (v.data?.volume?.attachments as Array<Record<string, any>>) ?? []
+  return cinderAtts.some((a) => a?.server_id === ext || a?.serverId === ext)
+}
+function volumeIsFree(v: CloudResource): boolean {
+  const cacheAtts = (v.data?.attachments as Array<Record<string, any>>) ?? []
+  const cinderAtts = (v.data?.volume?.attachments as Array<Record<string, any>>) ?? []
+  return cacheAtts.length === 0 && cinderAtts.length === 0
+}
+
+function VolumesTab({ pid, ext, scope }: { pid: string; ext: string; scope?: CloudScope }) {
+  const qc = useQueryClient()
+  const volumes = useCloudList(pid, "VOLUME")
+  const [attachId, setAttachId] = useState("")
+
+  const invalidate = () =>
+    setTimeout(() => void qc.invalidateQueries({ queryKey: ["cloud", pid, "VOLUME"] }), 1500)
+
+  const volAct = useMutation({
+    mutationFn: (p: { volumeId: string; action: "ATTACH" | "DETACH" }) =>
+      actionFetch(pid, p.volumeId, scope, p.action, { serverId: ext }),
+    onSuccess: (_d, p) => {
+      toast.success(p.action === "ATTACH" ? "Volume attach requested" : "Volume detach requested")
+      setAttachId("")
+      invalidate()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const volName = (v: CloudResource) => (v.data?.volume?.name as string) || v.name || v.id
+  const attachedVols = (volumes.data ?? []).filter((v) => volumeAttachedTo(v, ext))
+  const freeVols = (volumes.data ?? []).filter(volumeIsFree)
+
+  return (
+    <div className="grid gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Select value={attachId} onValueChange={setAttachId}>
+          <SelectTrigger className="w-72">
+            <SelectValue placeholder={freeVols.length ? "Select an unattached volume" : "No unattached volumes"} />
+          </SelectTrigger>
+          <SelectContent>
+            {freeVols.map((v) => (
+              <SelectItem key={v.id} value={v.id}>
+                {volName(v)}
+                {v.data?.volume?.size ? ` · ${v.data.volume.size} GB` : ""}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          size="sm"
+          disabled={!attachId || volAct.isPending}
+          onClick={() => volAct.mutate({ volumeId: attachId, action: "ATTACH" })}
+        >
+          <HardDrive className="size-4" /> Attach volume
+        </Button>
+      </div>
+
+      {volumes.isLoading ? (
+        <Skeleton className="h-40" />
+      ) : !attachedVols.length ? (
+        <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+          No volumes attached to this server.
+        </p>
+      ) : (
+        <Card className="overflow-hidden py-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Size</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="w-24" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {attachedVols.map((v) => (
+                <TableRow key={v.id}>
+                  <TableCell className="font-medium">{volName(v)}</TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {v.data?.volume?.size ? `${v.data.volume.size} GB` : "—"}
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge status={(v.data?.volume?.status as string) ?? v.status} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={volAct.isPending}
+                      onClick={() => volAct.mutate({ volumeId: v.id, action: "DETACH" })}
+                    >
+                      <X className="size-4" /> Detach
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+// ── Events tab: LIST_EVENTS → [{date, action, message, requestId, userId}] (cloud_writes.go). ──
+type ServerEvent = { date?: string; action?: string; message?: string; requestId?: string; userId?: string }
+
+function EventsTab({ pid, resourceId, scope }: { pid: string; resourceId: string; scope?: CloudScope }) {
+  const events = useQuery({
+    queryKey: ["server-action", pid, resourceId, "LIST_EVENTS"],
+    queryFn: () => actionFetch<ServerEvent[]>(pid, resourceId, scope, "LIST_EVENTS"),
+    enabled: !!pid && !!resourceId && !!scope,
+    select: (d) => d?.result ?? [],
+  })
+
+  if (events.isLoading) return <Skeleton className="h-40" />
+  if (!events.data?.length) {
+    return (
+      <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+        No events recorded for this server.
+      </p>
+    )
+  }
+  return (
+    <Card className="overflow-hidden py-0">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Time</TableHead>
+            <TableHead>Action</TableHead>
+            <TableHead>Message</TableHead>
+            <TableHead>User</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {events.data.map((e, i) => (
+            <TableRow key={`${e.requestId ?? i}`}>
+              <TableCell className="whitespace-nowrap text-sm text-muted-foreground">{fmtDateTime(e.date)}</TableCell>
+              <TableCell className="font-medium">{e.action ?? "—"}</TableCell>
+              <TableCell className="text-sm text-muted-foreground">{e.message || "—"}</TableCell>
+              <TableCell className="font-mono text-xs">{e.userId ?? "—"}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </Card>
+  )
+}
+
+// ── Snapshots tab: IMAGE list scoped by dataAssociatedTo=<server externalId> (listImages) + create
+// snapshot = POST /cloud {type:IMAGE, data:{name, serverId:<cache id>, imageType:snapshot}}. ──
+function SnapshotsTab({
+  pid, resourceId, ext, scope,
+}: { pid: string; resourceId: string; ext: string; scope?: CloudScope }) {
+  const qc = useQueryClient()
+  const snaps = useCloudList(pid, "IMAGE", `&dataAssociatedTo=${ext}`)
+  const [open, setOpen] = useState(false)
+  const [snapName, setSnapName] = useState("")
+
+  const create = useMutation({
+    mutationFn: () =>
+      apiFetch<CloudResource>(`/project/${pid}/cloud`, {
+        method: "POST",
+        cloud: scope,
+        body: {
+          type: "IMAGE",
+          data: { name: snapName.trim(), serverId: resourceId, imageType: "snapshot" },
+        },
+      }),
+    onSuccess: () => {
+      toast.success(`Snapshot "${snapName.trim()}" is being created`)
+      setOpen(false)
+      setSnapName("")
+      setTimeout(() => void qc.invalidateQueries({ queryKey: ["cloud", pid, "IMAGE"] }), 1500)
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const rows = (snaps.data ?? []).filter((im) => {
+    const iu = im.data?.image?.instance_uuid as string | undefined
+    return !iu || iu === ext
+  })
+
+  return (
+    <div className="grid gap-4">
+      <div>
+        <Button size="sm" onClick={() => setOpen(true)}>
+          <Camera className="size-4" /> Create snapshot
+        </Button>
+      </div>
+
+      {snaps.isLoading ? (
+        <Skeleton className="h-40" />
+      ) : !rows.length ? (
+        <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+          No snapshots of this server yet.
+        </p>
+      ) : (
+        <Card className="overflow-hidden py-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Size</TableHead>
+                <TableHead>Created</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((im) => {
+                const img = (im.data?.image ?? {}) as Record<string, any>
+                const size = img.size as number | undefined
+                return (
+                  <TableRow key={im.id}>
+                    <TableCell className="font-medium">{(img.name as string) ?? im.id}</TableCell>
+                    <TableCell>
+                      <StatusBadge status={img.status as string} />
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {size ? `${(size / 1073741824).toFixed(2)} GB` : "—"}
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {timeAgo(im.info?.createdAt ?? im.createdAt ?? (img.created_at as string))}
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create snapshot</DialogTitle>
+            <DialogDescription>Create a glance image from this server's current disk.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="snap-name">Snapshot name</Label>
+            <Input id="snap-name" value={snapName} onChange={(e) => setSnapName(e.target.value)} placeholder="my-snapshot" />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button disabled={!snapName.trim() || create.isPending} onClick={() => create.mutate()}>
+              <Camera className="size-4" /> Create snapshot
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+// ── Metadata tab: editable key/value rows; Save = PUT /cloud/{id}/metadata with the FULL map
+// (cloudMetadata decodes the raw body as map[string]string). ──
+function MetadataEditor({
+  pid, resourceId, scope, initial,
+}: { pid: string; resourceId: string; scope?: CloudScope; initial: Record<string, string> }) {
+  const qc = useQueryClient()
+  const [rows, setRows] = useState<Array<{ k: string; v: string }>>(() =>
+    Object.entries(initial).map(([k, v]) => ({ k, v: String(v) })),
+  )
+
+  const save = useMutation({
+    mutationFn: () => {
+      const map: Record<string, string> = {}
+      for (const r of rows) {
+        if (r.k.trim()) map[r.k.trim()] = r.v
+      }
+      return apiFetch(`/project/${pid}/cloud/${resourceId}/metadata`, {
+        method: "PUT",
+        body: map,
+        cloud: scope,
+      })
+    },
+    onSuccess: () => {
+      toast.success("Metadata saved")
+      void qc.invalidateQueries({ queryKey: ["cloud-resource", pid, resourceId] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const setRow = (i: number, patch: Partial<{ k: string; v: string }>) =>
+    setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
+
+  return (
+    <Card>
+      <CardContent className="grid gap-3 pt-6">
+        {rows.length === 0 ? (
+          <p className="py-2 text-center text-sm text-muted-foreground">No metadata entries.</p>
+        ) : (
+          rows.map((r, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <Input
+                value={r.k}
+                onChange={(e) => setRow(i, { k: e.target.value })}
+                placeholder="key"
+                className="max-w-56 font-mono text-sm"
+              />
+              <Input
+                value={r.v}
+                onChange={(e) => setRow(i, { v: e.target.value })}
+                placeholder="value"
+                className="max-w-72 font-mono text-sm"
+              />
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                aria-label="Remove entry"
+                onClick={() => setRows((rs) => rs.filter((_, idx) => idx !== i))}
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
+          ))
+        )}
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setRows((rs) => [...rs, { k: "", v: "" }])}>
+            <Plus className="size-4" /> Add entry
+          </Button>
+          <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
+            {save.isPending ? "Saving…" : "Save metadata"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function ConsoleLog({ pid, resourceId }: { pid: string; resourceId: string }) {
+  const scope = useCloudScope(pid)
+  const logs = useMutation({
+    mutationFn: () => actionFetch<string>(pid, resourceId, scope, "SHOW_CONSOLE_OUTPUT"),
+  })
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <Button variant="outline" size="sm" onClick={() => logs.mutate()} disabled={logs.isPending}>
+          {logs.isPending ? "Fetching…" : "Fetch console log"}
+        </Button>
+        {logs.data?.result ? (
+          // Terminal look via tokens: inverted foreground/background reads as a
+          // dark console in light mode and a deep panel in dark mode.
+          <pre className="mt-4 max-h-96 overflow-auto rounded-lg bg-foreground/95 p-4 font-mono text-xs leading-relaxed text-background">
+            {String(logs.data.result)}
+          </pre>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
+}

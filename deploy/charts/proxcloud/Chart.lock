@@ -1,0 +1,15 @@
+dependencies:
+- name: postgresql
+  repository: oci://registry-1.docker.io/bitnamicharts
+  version: 18.7.11
+- name: rabbitmq
+  repository: oci://registry-1.docker.io/bitnamicharts
+  version: 16.0.14
+- name: keycloakx
+  repository: https://codecentric.github.io/helm-charts
+  version: 7.2.0
+- name: cloudnative-pg
+  repository: https://cloudnative-pg.github.io/charts
+  version: 0.29.0
+digest: sha256:c73b53f5485d6358c238b6a68e1482db156f8cbe6daab1a4864a953defa40a41
+generated: "2026-07-07T14:47:12.524848+07:00"

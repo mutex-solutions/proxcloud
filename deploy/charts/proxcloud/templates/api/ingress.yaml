@@ -1,0 +1,40 @@
+{{- if .Values.api.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "proxcloud.fullname" . }}-api
+  labels:
+    {{- include "proxcloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  {{- /*
+    The VNC console proxies a long-lived WebSocket through the API
+    (/api/v1/console/{token}/websockify). nginx-ingress defaults proxy read/send timeouts to 60s,
+    which drops an idle console; raise them. Operator-supplied annotations win on conflict, and
+    these keys are simply inert on non-nginx controllers.
+  */}}
+  {{- $wsDefaults := dict "nginx.ingress.kubernetes.io/proxy-read-timeout" "3600" "nginx.ingress.kubernetes.io/proxy-send-timeout" "3600" }}
+  {{- $annotations := merge (deepCopy (.Values.api.ingress.annotations | default dict)) $wsDefaults }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.api.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ required "api.ingress.host is required when api.ingress.enabled" .Values.api.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.api.ingress.path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "proxcloud.fullname" . }}-api
+                port:
+                  name: http
+  {{- with .Values.api.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

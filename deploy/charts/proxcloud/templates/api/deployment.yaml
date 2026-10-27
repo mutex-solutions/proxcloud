@@ -1,0 +1,217 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "proxcloud.fullname" . }}-api
+  labels:
+    {{- include "proxcloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "proxcloud.selector" (dict "ctx" $ "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "proxcloud.selector" (dict "ctx" $ "component" "api") | nindent 8 }}
+      annotations:
+        checksum/api-secret: {{ include (print $.Template.BasePath "/api/secret.yaml") . | sha256sum }}
+        checksum/api-config: {{ include (print $.Template.BasePath "/api/configmap.yaml") . | sha256sum }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        # The image runs as uid 10001 (see deploy/Dockerfile).
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: api
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.port }}
+            - name: mgmt
+              containerPort: {{ .Values.api.managementPort }}
+          env:
+            - name: PROXCLOUD_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.externalPostgresql.existingSecret }}
+                  name: {{ .Values.externalPostgresql.existingSecret }}
+                  key: {{ .Values.externalPostgresql.secretKey }}
+                  {{- else }}
+                  name: {{ include "proxcloud.apiSecretName" . }}
+                  key: db-url
+                  {{- end }}
+            - name: PROXCLOUD_RABBITMQ_HOST
+              value: {{ include "proxcloud.rabbitHost" . | quote }}
+            - name: PROXCLOUD_RABBITMQ_PORT
+              value: {{ ternary "5672" (toString .Values.externalRabbitmq.port) .Values.rabbitmq.enabled | quote }}
+            - name: PROXCLOUD_RABBITMQ_USERNAME
+              value: {{ ternary .Values.rabbitmq.auth.username .Values.externalRabbitmq.username .Values.rabbitmq.enabled | quote }}
+            - name: PROXCLOUD_RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.externalRabbitmq.existingSecret }}
+                  name: {{ .Values.externalRabbitmq.existingSecret }}
+                  key: {{ .Values.externalRabbitmq.secretKey }}
+                  {{- else }}
+                  name: {{ include "proxcloud.apiSecretName" . }}
+                  key: rabbitmq-password
+                  {{- end }}
+            - name: PROXCLOUD_ENCRYPTION_DEFAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "proxcloud.apiSecretName" . }}
+                  key: encryption-key
+            {{- with .Values.api.selfUrls.base }}
+            - name: PROXCLOUD_SELF_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.api.selfUrls.api }}
+            - name: PROXCLOUD_SELF_API_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.api.selfUrls.ui }}
+            - name: PROXCLOUD_SELF_UI_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.api.selfUrls.admin }}
+            - name: PROXCLOUD_SELF_ADMIN_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.api.corsAllowedOrigins }}
+            - name: PROXCLOUD_CORS_ALLOWED_ORIGINS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.auth.main.issuer }}
+            - name: AUTH_MAIN_OAUTH2_ISSUER_URI
+              value: {{ .Values.auth.main.issuer | quote }}
+            - name: AUTH_MAIN_OAUTH2_CLIENT_ID
+              value: {{ .Values.auth.main.clientId | quote }}
+            {{- end }}
+            {{- if .Values.auth.admin.issuer }}
+            - name: AUTH_ADMIN_OAUTH2_ISSUER_URI
+              value: {{ .Values.auth.admin.issuer | quote }}
+            - name: AUTH_ADMIN_OAUTH2_CLIENT_ID
+              value: {{ .Values.auth.admin.clientId | quote }}
+            {{- end }}
+            {{- if .Values.auth.adminApi.issuer }}
+            - name: AUTH_ADMIN_API_OAUTH2_ISSUER_URI
+              value: {{ .Values.auth.adminApi.issuer | quote }}
+            - name: AUTH_ADMIN_API_OAUTH2_CLIENT_ID
+              value: {{ .Values.auth.adminApi.clientId | quote }}
+            {{- end }}
+            {{- if .Values.api.jobs.schedulerEnabled }}
+            - name: PROXCLOUD_JOBS_SCHEDULER_ENABLED
+              value: "true"
+            {{- end }}
+            {{- if .Values.api.jobs.debugTriggers }}
+            - name: PROXCLOUD_JOBS_DEBUG_TRIGGERS
+              value: "true"
+            {{- end }}
+            {{- if .Values.api.jobs.rabbitFanout }}
+            - name: PROXCLOUD_JOBS_RABBIT_FANOUT
+              value: "true"
+            {{- end }}
+            {{- if .Values.api.billing }}
+            {{- if .Values.api.billing.provider }}
+            - name: PROXCLOUD_BILLING_PROVIDER
+              value: {{ .Values.api.billing.provider | quote }}
+            {{- end }}
+            {{- if .Values.api.billing.url }}
+            - name: PROXCLOUD_BILLING_URL
+              value: {{ .Values.api.billing.url | quote }}
+            {{- end }}
+            {{- if .Values.api.billing.token }}
+            - name: PROXCLOUD_BILLING_TOKEN
+              value: {{ .Values.api.billing.token | quote }}
+            {{- end }}
+            {{- if .Values.api.billing.callbackToken }}
+            - name: PROXCLOUD_BILLING_CALLBACK_TOKEN
+              value: {{ .Values.api.billing.callbackToken | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.api.network.defaultMtu }}
+            - name: PROXCLOUD_DEFAULT_NETWORK_MTU
+              value: {{ .Values.api.network.defaultMtu | quote }}
+            {{- end }}
+            {{- if .Values.api.mail.smtp.host }}
+            - name: PROXCLOUD_MAIL_SMTP_HOST
+              value: {{ .Values.api.mail.smtp.host | quote }}
+            - name: PROXCLOUD_MAIL_SMTP_PORT
+              value: {{ .Values.api.mail.smtp.port | quote }}
+            - name: PROXCLOUD_MAIL_FROM
+              value: {{ .Values.api.mail.from | quote }}
+            {{- if .Values.api.mail.smtp.username }}
+            - name: PROXCLOUD_MAIL_SMTP_USERNAME
+              value: {{ .Values.api.mail.smtp.username | quote }}
+            {{- end }}
+            {{- if .Values.api.mail.smtp.existingSecret }}
+            - name: PROXCLOUD_MAIL_SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.mail.smtp.existingSecret | quote }}
+                  key: {{ .Values.api.mail.smtp.passwordKey | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.api.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: mgmt
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: mgmt
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.api.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or .Values.api.applicationYml .Values.api.extraVolumeMounts }}
+          volumeMounts:
+            {{- if .Values.api.applicationYml }}
+            - name: app-config
+              mountPath: /opt/proxcloud/api/application.yml
+              subPath: application.yml
+              readOnly: true
+            {{- end }}
+            {{- with .Values.api.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.api.applicationYml .Values.api.extraVolumes }}
+      volumes:
+        {{- if .Values.api.applicationYml }}
+        - name: app-config
+          configMap:
+            name: {{ include "proxcloud.fullname" . }}-api-config
+        {{- end }}
+        {{- with .Values.api.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

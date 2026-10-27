@@ -1,0 +1,53 @@
+{{- if eq .Values.engine "mariadb" }}
+{{/*
+Config for the chart-owned HAProxy in front of MariaDB (see
+haproxy-deployment.yaml for why it exists). TCP mode only — TLS/auth stay
+end-to-end between client and MariaDB.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-haproxy
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+data:
+  haproxy.cfg: |
+    global
+      log stdout format raw local0
+      maxconn 1024
+
+    defaults
+      mode tcp
+      log global
+      option tcplog
+      timeout connect 5s
+      # Long-lived DB connections: generous idle timeouts so pools survive.
+      timeout client 8h
+      timeout server 8h
+
+    # Resolve the operator's Service through kube-dns AT RUNTIME (not once at
+    # boot): the primary Service's endpoints flip on failover, and init-addr
+    # none lets haproxy start before the Service resolves at all (first-boot
+    # ordering — the MariaDB pods come up after this Deployment).
+    resolvers kubedns
+      nameserver dns1 kube-dns.kube-system.svc.cluster.local:53
+      resolve_retries 3
+      timeout resolve 2s
+      timeout retry 1s
+      hold valid 10s
+
+    frontend mariadb_write
+      bind *:3306
+      default_backend primary
+
+    backend primary
+      # <id>-primary is the operator-maintained Service that always points at
+      # the current primary (replication mode, instances > 1). A single-instance
+      # MariaDB gets no -primary Service — the plain <id> Service fronts the
+      # only pod. TODO-verify(drill): operator Service naming on 26.x (flagged
+      # in the plan's verify list).
+      server-template primary 1 {{ if gt (int .Values.instances) 1 }}{{ $name }}-primary{{ else }}{{ $name }}{{ end }}.{{ .Release.Namespace }}.svc.cluster.local:3306 check resolvers kubedns init-addr none
+{{- end }}

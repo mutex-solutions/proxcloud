@@ -1,0 +1,136 @@
+{{- /*
+keycloak-config-cli: derive realm/client definitions from auth.* + api.selfUrls
+and apply them with a post-install/post-upgrade Job (idempotent; existing
+realms like master are updated in place, and unmanaged clients are never
+deleted). This is what makes `helm install` a one-shot bring-up when the
+bundled keycloakx is enabled.
+*/ -}}
+{{- if .Values.keycloakConfigCli.enabled }}
+{{- $cli := .Values.keycloakConfigCli }}
+{{- /* Group the derived clients by realm name (admin + adminApi usually share master). */}}
+{{- $realms := dict }}
+{{- if .Values.auth.main.issuer }}
+{{- $name := include "proxcloud.realmName" .Values.auth.main.issuer }}
+{{- $ui := required "api.selfUrls.ui is required to derive the auth.main client's redirect URIs (keycloakConfigCli)" .Values.api.selfUrls.ui }}
+{{- $client := dict
+      "clientId" .Values.auth.main.clientId
+      "enabled" true
+      "publicClient" true
+      "standardFlowEnabled" true
+      "directAccessGrantsEnabled" true
+      "redirectUris" (list (printf "%s/*" $ui))
+      "webOrigins" (list $ui)
+      "attributes" (dict "pkce.code.challenge.method" "S256" "post.logout.redirect.uris" (printf "%s/*" $ui)) }}
+{{- /* The customer realm: registration on, email as the username (ProxCloud keys users by email). */}}
+{{- $_ := set $realms $name (dict
+      "realm" $name
+      "enabled" true
+      "registrationAllowed" true
+      "registrationEmailAsUsername" true
+      "loginWithEmailAllowed" true
+      "resetPasswordAllowed" true
+      "clients" (list $client)) }}
+{{- end }}
+{{- if .Values.auth.admin.issuer }}
+{{- $name := include "proxcloud.realmName" .Values.auth.admin.issuer }}
+{{- $admin := required "api.selfUrls.admin is required to derive the auth.admin client's redirect URIs (keycloakConfigCli)" .Values.api.selfUrls.admin }}
+{{- $client := dict
+      "clientId" .Values.auth.admin.clientId
+      "enabled" true
+      "publicClient" true
+      "standardFlowEnabled" true
+      "directAccessGrantsEnabled" true
+      "redirectUris" (list (printf "%s/*" $admin))
+      "webOrigins" (list $admin)
+      "attributes" (dict "pkce.code.challenge.method" "S256" "post.logout.redirect.uris" (printf "%s/*" $admin)) }}
+{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "clients" (list)) }}
+{{- $_ := set $def "clients" (append (index $def "clients") $client) }}
+{{- $_ := set $realms $name $def }}
+{{- end }}
+{{- if .Values.auth.adminApi.issuer }}
+{{- $name := include "proxcloud.realmName" .Values.auth.adminApi.issuer }}
+{{- $client := dict
+      "clientId" .Values.auth.adminApi.clientId
+      "enabled" true
+      "publicClient" true
+      "standardFlowEnabled" false
+      "directAccessGrantsEnabled" true }}
+{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "clients" (list)) }}
+{{- $_ := set $def "clients" (append (index $def "clients") $client) }}
+{{- $_ := set $realms $name $def }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "proxcloud.fullname" . }}-keycloak-config
+  labels:
+    {{- include "proxcloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak-config-cli
+data:
+  {{- range $name, $def := $realms }}
+  {{ $name }}.json: |
+    {{- toPrettyJson $def | nindent 4 }}
+  {{- end }}
+  {{- range $file, $json := $cli.extraRealms }}
+  {{ $file }}: |
+    {{- $json | nindent 4 }}
+  {{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "proxcloud.fullname" . }}-keycloak-config-cli
+  labels:
+    {{- include "proxcloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak-config-cli
+  annotations:
+    # Re-created and re-run on every install/upgrade (ArgoCD maps helm hooks);
+    # config-cli is idempotent so re-runs are harmless.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "5"
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "proxcloud.labels" . | nindent 8 }}
+        app.kubernetes.io/component: keycloak-config-cli
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: keycloak-config-cli
+          image: {{ $cli.image }}
+          env:
+            - name: KEYCLOAK_URL
+              value: {{ include "proxcloud.kcConfigCliURL" . | quote }}
+            - name: KEYCLOAK_USER
+              value: {{ $cli.adminUser | quote }}
+            - name: KEYCLOAK_PASSWORD
+              {{- if $cli.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cli.existingSecret }}
+                  key: {{ $cli.passwordKey }}
+              {{- else }}
+              value: {{ $cli.adminPassword | required "keycloakConfigCli.adminPassword (or existingSecret) is required when keycloakConfigCli.enabled" | quote }}
+              {{- end }}
+            - name: KEYCLOAK_AVAILABILITYCHECK_ENABLED
+              value: "true"
+            - name: KEYCLOAK_AVAILABILITYCHECK_TIMEOUT
+              value: 300s
+            - name: IMPORT_FILES_LOCATIONS
+              value: /config/*.json
+            # Never delete clients this config does not manage (master's
+            # built-in admin-cli / security-admin-console must survive).
+            - name: IMPORT_MANAGED_CLIENT
+              value: no-delete
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "proxcloud.fullname" . }}-keycloak-config
+{{- end }}

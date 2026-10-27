@@ -1,0 +1,188 @@
+name: docker
+
+# Publishes the 3 ProxCloud images to GitHub Container Registry (ghcr.io):
+#   push to main   -> tag `dev-<short-sha>` (only when image sources changed; a
+#                     docs/README/CHANGELOG/chart-only push is skipped)
+#   push a git tag -> that tag name (e.g. v1.2.3) — always builds
+#   pull request   -> build only, no push — always builds
+#   manual run     -> build + push from any branch (Actions ▸ docker ▸ Run workflow):
+#                     tag `dev-<short-sha>`, or `dev-<image_tag>` if a suffix is given.
+#                     Use it to deploy a PR branch to the test environment.
+#
+# On a `v*` tag, once all three images are built the `release` job creates the
+# matching GitHub Release (the chart is published in parallel by helm.yml). Its
+# notes are the CHANGELOG.md section for that version (if present) followed by
+# GitHub's auto-generated commit list.
+#
+# Auth is the built-in GITHUB_TOKEN (packages: write / contents: write) — no
+# external secrets.
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  # Manual: build + PUSH an on-demand image from any branch (e.g. a PR branch) so it can be
+  # deployed to the test environment. Tag defaults to `dev-<short-sha>` like a push to main;
+  # set `image_tag` to give the build a memorable name (e.g. `test-metrics`) — it is prefixed
+  # with `dev-` so test builds never collide with `v*` release tags.
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Optional tag suffix (published as dev-<suffix>); blank → dev-<short-sha>"
+        required: false
+        default: ""
+
+jobs:
+  # Gate: on a push to main, only rebuild when image-relevant sources changed — a
+  # docs / README / CHANGELOG / chart-only push skips the build. Tags and PRs always
+  # build (this output is ignored for them). Fail-safe: builds when the diff can't be
+  # computed.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: filter
+        run: |
+          set -euo pipefail
+          base="${{ github.event.before }}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "build=true" >> "$GITHUB_OUTPUT"   # new branch / force-push / unknown base → build to be safe
+            exit 0
+          fi
+          if git diff --name-only "$base" "$GITHUB_SHA" | grep -qE '^(cmd/|internal/|pkg/|web/|deploy/Dockerfile$|go\.mod$|go\.sum$|\.github/workflows/docker\.yml$)'; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: changes
+    # Tags (release), PRs, and manual runs always build; a push to main builds only when the
+    # gate saw image-relevant changes.
+    if: github.ref_type == 'tag' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: proxcloud-api
+            dockerfile: deploy/Dockerfile
+            context: .
+            build-args: ""
+          - image: proxcloud-web
+            dockerfile: web/Dockerfile
+            context: web
+            build-args: APP=client
+          - image: proxcloud-admin
+            dockerfile: web/Dockerfile
+            context: web
+            build-args: APP=admin
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tag
+        id: meta
+        env:
+          MANUAL_TAG: ${{ github.event.inputs.image_tag }}   # kept out of the script text (no ${{ }} splice)
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${MANUAL_TAG}" ]; then
+            # Sanitize the operator-supplied suffix: a Docker tag component is [A-Za-z0-9._-];
+            # rejecting anything else also blocks newlines (which would inject extra
+            # $GITHUB_OUTPUT lines). Fail fast with a clear message rather than a cryptic
+            # build error. Always dev-prefixed so it can't shadow a v* release.
+            if ! printf '%s' "${MANUAL_TAG}" | grep -qE '^[A-Za-z0-9._-]+$'; then
+              echo "::error::image_tag must match [A-Za-z0-9._-]+ (got: '${MANUAL_TAG}')"
+              exit 1
+            fi
+            echo "tag=dev-${MANUAL_TAG}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}
+          build-args: ${{ matrix.build-args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---- tag v*: create the GitHub Release once every image is built -----------
+  # Runs only for a tag push and only after all three `build` matrix legs succeed,
+  # so a release never appears before its images exist.
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Assemble release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"          # v0.3.26 -> 0.3.26
+          # Pull the "## [<version>] …" section out of CHANGELOG.md (empty if absent).
+          # Literal index() matching avoids awk's bracket-regex escaping pitfalls; the
+          # section ends at the next "## " header or the trailing "[link]:" definitions.
+          awk -v ver="$version" '
+            index($0, "## [" ver "]") == 1 { flag=1; next }
+            flag && (index($0, "## ") == 1 || index($0, "[") == 1) { flag=0 }
+            flag { print }
+          ' CHANGELOG.md > /tmp/notes.md || true
+          if [ -s /tmp/notes.md ]; then
+            echo "using the CHANGELOG.md section for $version as the release body"
+          else
+            echo "no CHANGELOG.md section for $version — notes will be auto-generated only"
+            : > /tmp/notes.md
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists — nothing to do."
+            exit 0
+          fi
+          # The CHANGELOG body (if any) is pre-pended to GitHub's auto-generated
+          # commit/PR notes (--generate-notes).
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file /tmp/notes.md \
+            --generate-notes \
+            --verify-tag \
+            --latest

@@ -1,0 +1,33 @@
+{{- /*
+CloudNativePG Cluster CR — the PostgreSQL backend when cnpg.enabled=true (an
+alternative to the bundled bitnami postgresql subchart). Requires the CNPG
+operator + CRDs in the cluster: either already installed, or bundled via
+cnpg.installOperator=true. The app connects to the <name>-rw service (see
+proxcloud.pgHost / proxcloud.dbURL). db/owner/creds come from postgresql.auth.*.
+*/ -}}
+{{- if .Values.cnpg.enabled }}
+{{- if .Values.postgresql.enabled }}
+{{- fail "postgresql.enabled and cnpg.enabled are mutually exclusive — set postgresql.enabled=false to run PostgreSQL via CloudNativePG." }}
+{{- end }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ include "proxcloud.cnpgClusterName" . }}
+  labels:
+    {{- include "proxcloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  instances: {{ .Values.cnpg.instances }}
+  imageName: {{ .Values.cnpg.imageName | quote }}
+  bootstrap:
+    initdb:
+      database: {{ .Values.postgresql.auth.database | quote }}
+      owner: {{ .Values.postgresql.auth.username | quote }}
+      secret:
+        name: {{ include "proxcloud.cnpgSecretName" . }}
+  storage:
+    size: {{ .Values.cnpg.storage.size | quote }}
+    {{- with .Values.cnpg.storage.storageClass }}
+    storageClass: {{ . | quote }}
+    {{- end }}
+{{- end }}

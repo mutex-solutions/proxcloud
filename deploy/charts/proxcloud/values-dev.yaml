@@ -1,0 +1,18 @@
+# Throwaway DEV overrides for a local / disposable ProxCloud install.
+#
+#   helm install proxcloud deploy/charts/proxcloud -n proxcloud --create-namespace -f deploy/charts/proxcloud/values-dev.yaml
+#
+# These are INSECURE, well-known values — never use them for anything reachable by others or
+# holding real data. The chart ships NO default secrets on purpose (a known encryption key would
+# let anyone decrypt/forge stored secrets); this file re-supplies dev values so the quickstart
+# still works. For any real install, set your own strong values or api/*.existingSecret instead.
+api:
+  encryptionKey: "insecure-dev-key-change-me"
+
+postgresql:
+  auth:
+    password: "proxcloud"
+
+rabbitmq:
+  auth:
+    password: "proxcloud"

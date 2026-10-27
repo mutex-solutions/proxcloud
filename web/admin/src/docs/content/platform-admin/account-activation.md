@@ -1,0 +1,53 @@
+# Account Activation
+
+A new sign-up can't consume cloud resources until its billing profile is activated. This page covers what activation actually does, how to let ProxCloud activate accounts on its own, and how to approve or reject customers by hand.
+
+## What an account is made of
+
+Three objects together form a customer account:
+
+| Object | Role |
+|---|---|
+| User | The person who logs in — the identity-provider subject, email, and name. |
+| Project | The workspace where cloud resources (servers, volumes, networks, and so on) live. |
+| Billing profile | The financial entity — it holds the balance, bills, and transactions, and links one or more users and projects. |
+
+Activation is a state change on the **billing profile**: it moves to `ACTIVE`. At that instant ProxCloud provisions the account — it creates the real OpenStack project (the Keystone tenant) in each enabled region, grants the user access to it, and issues any configured sign-up credits. Until then the customer can sign in but has no usable cloud project.
+
+## Letting ProxCloud activate automatically
+
+Open **System → Billing configuration** and switch to the **Activation** tab. Turn on **Auto-activation enabled** and choose the conditions a customer must satisfy for ProxCloud to activate them with no admin in the loop.
+
+Each condition is a constraint set to one of three modes:
+
+| Mode | Effect |
+|---|---|
+| `REQUIRED` | Must be met; activation is blocked until it is. |
+| `ALTERNATIVE` | Satisfying any one alternative clears the group, as long as every `REQUIRED` constraint is also met. |
+| `DISABLED` | Ignored completely. |
+
+The constraints on offer:
+
+| Constraint | What the customer has to do |
+|---|---|
+| KYC | Pass identity verification (only meaningful if a KYC integration is installed). |
+| Payment method | Register any accepted payment method. |
+| Payment method — card | Save a card on file (needs a card-capable gateway such as Stripe). |
+| Payment method — deposit | Top up the account by at least the **Minimum deposit amount** set on the same tab. |
+| Billing profile validation | Have an admin approve the profile in the validation queue (below). |
+
+Filling in the billing address is always part of the flow — a profile with an empty billing form is never auto-activated.
+
+## The validation queue
+
+If **Billing profile validation** is enabled, submitted profiles arrive in **Client area → Validations** as `PENDING` entries.
+
+For each entry, review the customer's submitted details and any KYC evidence, then:
+
+- **Approve** — the validation flips to `APPROVED`, the billing profile is activated (kicking off the provisioning described above), and the customer is emailed.
+- **Reject** — the validation flips to `REJECTED`; the customer has to fix their details and resubmit.
+
+## Activating by hand
+
+With auto-activation off — or for one-off cases — you can activate a profile directly. Open it under **Client area → Billing profiles** and use the **Activate** action. Suspend and resume live in the same place.
+

@@ -1,0 +1,45 @@
+# ArgoCD AppProject `proxcloud-dbaas` — the guardrail around every proxcloud-created database
+# Application (byte-level mirror of deploy/mgmt-cluster/appproject.yaml). Every customer-database
+# Application proxcloud applies carries `spec.project: proxcloud-dbaas`
+# (internal/cloud/dbaas/application.go), so even a compromised proxcloud credential can only:
+#   * source charts from OUR pinned OCI registry (never an arbitrary git/helm repo),
+#   * deploy into in-cluster pc-* namespaces (never argocd/kube-system/operator namespaces).
+#
+# The project name and the argocd namespace must match the provider config
+# (config.argocd.project / config.argocd.namespace — deploy/seed/external-service-dev.json).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: proxcloud-dbaas
+  namespace: argocd
+  # Keep the AppProject when the argocd Application managing this manifest is pruned —
+  # deleting it would orphan-block every customer-database Application.
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  description: >-
+    ProxCloud managed-database customer clusters (database-cluster chart).
+    Applications here are written exclusively by the proxcloud API — do not hand-edit.
+
+  # ONLY our OCI chart registry. ArgoCD spells OCI repoURLs WITHOUT the oci:// prefix
+  # (matches config.argocd.chartRepo in the proxcloud provider config).
+  sourceRepos:
+    - ghcr.io/mutex-solutions/charts
+
+  # In-cluster pc-<projectId> namespaces only.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: "pc-*"
+
+  # Cluster-scoped resources the chart may create. Conservative default: NONE — the
+  # database-cluster chart renders only namespaced objects (operator CRs, Service,
+  # NetworkPolicy, ConfigMap, Deployment), and namespaces are pre-created by proxcloud itself
+  # (SSA via its own RBAC, rbac.yaml). Record-on-demand: if a live drill ever fails sync with
+  # "resource <group>/<Kind> is not permitted in project proxcloud-dbaas", add EXACTLY that
+  # group/kind here and record it in docs/managed-dbaas.md. The operator CRDs themselves are
+  # installed by ops (deploy/dbaas-cluster/README.md), NOT by this chart — do not whitelist
+  # CustomResourceDefinition.
+  clusterResourceWhitelist: []
+
+  # Namespaced resources: no blacklist — the AppProject's destination constraint (pc-* only)
+  # is the boundary that matters; the chart renders its objects freely inside it.
