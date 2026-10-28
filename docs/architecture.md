@@ -17,6 +17,8 @@ deep dives live in sibling docs:
 - **[cloud-integration.md](cloud-integration.md)** — OpenStack clients, the resource cache, sync, metrics, notifications.
 - **[jobs-scheduling.md](jobs-scheduling.md)** — the cron catalog, cross-fleet locking, and the RabbitMQ charge fan-out.
 
+**Architecture diagrams (C4):** [architecture/c4/](architecture/c4/README.md) — context, containers, components and code views with Implemented/Planned status, plus a change log of why the architecture changed.
+
 ---
 
 ## 1. System context (containers)

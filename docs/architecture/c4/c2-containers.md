@@ -1,0 +1,224 @@
+# C2: Containers
+
+ProxCloud spans three zones: the **management cluster** (a Kubernetes cluster that
+runs the portal), the **Proxmox cluster** (the hosts, the platform-owned VMs and
+the tenant VMs), and **build and delivery** (CI, registry, charts). Storage comes in
+two tiers, described at the end.
+
+Status legend and maintenance rule: [README.md](README.md).
+
+## C2a. Management cluster
+
+```mermaid
+flowchart TB
+  classDef impl fill:#e6f4ea,stroke:#1e7e34,color:#0b3d1a
+  classDef planned fill:#f2f2f2,stroke:#8a8a8a,stroke-dasharray:5 5,color:#555555
+
+  browser["Browsers, MCP clients, SigV4 callers"]:::impl
+
+  subgraph mgmt["Management cluster (Kubernetes)"]
+    gw["Gateway / Ingress<br/>HTTPRoute or Ingress per host"]:::impl
+    webc["web/client SPA<br/>React, nginx"]:::impl
+    weba["web/admin SPA<br/>React, nginx"]:::impl
+    api["proxcloud-api (Go)<br/>:8080 /api/v1, /admin-api/v1, /mcp, SSE<br/>:8081 health, job triggers, callbacks"]:::impl
+    sched["Scheduler and jobs<br/>in the API process, PostgreSQL lock"]:::impl
+    pg["PostgreSQL<br/>pgdoc JSONB document store"]:::impl
+    mq["RabbitMQ<br/>charge fan-out"]:::impl
+    kc["Keycloak<br/>realms + config-cli import"]:::impl
+    argo["ArgoCD<br/>managed K8s and DBaaS apps"]:::impl
+    capi["Cluster API + CAPMOX"]:::planned
+    mlb["MetalLB"]:::planned
+  end
+
+  pve["Proxmox VE API :8006"]:::impl
+  s3off["Off-site S3 backups"]:::planned
+
+  browser --> gw
+  gw --> webc
+  gw --> weba
+  gw --> api
+  gw --> kc
+  api --- sched
+  api --> pg
+  api --> mq
+  api -->|"JWKS"| kc
+  api -->|"Applications"| argo
+  api -->|"API token"| pve
+  capi -.->|"services cluster VMs"| pve
+  pg -.->|"WAL archive"| s3off
+```
+
+ArgoCD is not deployed by the ProxCloud chart. The managed Kubernetes and DBaaS
+providers expect an ArgoCD instance on a management cluster and write
+`Application` objects to it (see [managed-k8s.md](../../managed-k8s.md) and
+[managed-dbaas.md](../../managed-dbaas.md)). Creating a managed cluster or
+database on a Proxmox provider is Planned; see the C3 managed-services table.
+
+### API surfaces
+
+All surfaces are served by the single `proxcloud-api` binary (`cmd/api/main.go`,
+router in `internal/server/server.go`).
+
+| Surface | Port | Auth | Purpose | Status |
+|---|---|---|---|---|
+| `/api/v1/**` | 8080 | OIDC bearer (customer or admin realm) or personal access key `pk.sk` | Customer API, plus the operator routes under `/api/v1/admin/**` (admin realm, permission-gated) | Implemented |
+| `/admin-api/v1/**` | 8080 | AWS SigV4 (`hmac_keys`) or the admin-api realm | Public admin API for automation | Implemented |
+| `/mcp` + `/.well-known/oauth-protected-resource` | 8080 | OIDC bearer (RFC 9728 discovery) or a `pk.sk` API key | MCP server; tools dispatch in-process through the app router | Implemented |
+| `/api/v1/events/{projectId}` | 8080 | OIDC bearer (a short-lived stream token is not built yet) | Server-sent events per project | Implemented |
+| `/openapi.json` | 8080 | public | Stub document | Implemented |
+| `/actuator/health*`, `/__build` | 8081 | none; not routed by the chart's gateway or ingress | Liveness, readiness, build info | Implemented |
+| `POST /debug/<job>`, `GET /debug/cloud` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (when the scheduler is enabled), cloud probe | Implemented |
+| Billing service callbacks | 8081 | shared token | Suspend/resume and mail callbacks from an external billing service | Implemented |
+| SSO discovery and per-org SSO routes | 8080 | public / OIDC | Email-first login and SSO self-service | Planned |
+
+## C2b. Proxmox cluster and storage tiers
+
+```mermaid
+flowchart TB
+  classDef impl fill:#e6f4ea,stroke:#1e7e34,color:#0b3d1a
+  classDef planned fill:#f2f2f2,stroke:#8a8a8a,stroke-dasharray:5 5,color:#555555
+
+  api["proxcloud-api"]:::impl
+
+  subgraph host["Proxmox VE hosts"]
+    papi["pveproxy REST API :8006"]:::impl
+    sdn["SDN: zones, vnets, subnets<br/>dnsmasq DHCP, SNAT"]:::impl
+    fw["proxmox-firewall (nftables)<br/>datacenter, vnet and VM rules"]:::impl
+    sto["Storage profiles<br/>per-node storage ids"]:::impl
+    pci["PCI mappings (GPU)"]:::impl
+    ha["HA rules and replication"]:::planned
+  end
+
+  subgraph tenantzone["Tenant pools, one per project"]
+    vm["Tenant VMs<br/>full clones, firewall on"]:::impl
+    tpl["Project templates<br/>cloned from a tenant VM"]:::impl
+  end
+
+  subgraph sys["Platform-owned VMs"]
+    mgmtvm["Management cluster VMs"]:::planned
+    svc["Services cluster<br/>Kamaji, DB operators, CSI"]:::planned
+    rfsvm["RustFS VM"]:::planned
+  end
+
+  subgraph tiers["Storage backends"]
+    ceph["Full tier: Ceph<br/>RBD, CephFS, RGW"]:::impl
+    zfs["Standard tier: local ZFS"]:::impl
+    nas["Standard tier: TrueNAS<br/>NFS, SMB, iSCSI"]:::planned
+  end
+
+  pbs["Proxmox Backup Server"]:::planned
+
+  api -->|"API token"| papi
+  papi --> sdn
+  papi --> fw
+  papi --> sto
+  sdn --> vm
+  fw --> vm
+  pci --> vm
+  sto --> ceph
+  sto --> zfs
+  sto -.-> nas
+  ha -.-> vm
+  svc -.-> nas
+  papi -.-> pbs
+```
+
+| Element | What ProxCloud does with it | Status |
+|---|---|---|
+| Project pool (`<poolPrefix><projectId>`, default prefix `pc-`) | Created at project bootstrap; every tenant VM and template lives in it; sync and teardown are scoped to it. | Implemented |
+| Tenant VMs | Full clones of an admin template or a project template; flavor, cloud-init, tags; firewall on before first boot. | Implemented |
+| SDN zones and vnets | One vnet per tenant network, ownership alias `st:<projectId>:<name>`. Isolation mode `shared` (one zone, per-vnet DROP rules) or `evpn-per-project` (one EVPN zone per project). | Implemented |
+| proxmox-firewall | Vnet isolation rules, per-VM anti-spoof (ipfilter, macfilter), security groups as cluster firewall groups. Test connection refuses a cluster with the datacenter firewall off or a node on the legacy iptables firewall. | Implemented |
+| Public networks | Admin-designated bridges with an IPv4 pool; a public NIC (`net1`) gets one address, pinned by ipfilter. The management bridge is refused. | Implemented |
+| PCI mappings | GPU flavors reserve concrete mappings on the scheduled node. | Implemented |
+| HA rules and replication | Protected VMs with replication and node-affinity rules. | Planned |
+| Platform-owned VMs | Management cluster VMs, the services cluster and the RustFS VM in a dedicated system pool. | Planned |
+| Proxmox Backup Server | Operator nightly backups, then tenant backup schedules and restore. | Planned |
+
+### Storage tiers
+
+| Tier | Backend | Used for | Status |
+|---|---|---|---|
+| Full | Ceph RBD / CephFS as Proxmox storage | VM disks on Ceph sites (referenced through storage profiles) | Implemented |
+| Full | Ceph RGW | Tenant buckets: per-project RGW user, keys, quotas, bucket settings | Implemented |
+| Standard | Local ZFS (`zfspool`) | VM disks, pinned to the node holding the storage | Implemented |
+| Standard | TrueNAS NFS / SMB / iSCSI | Capacity disks, templates, backups, tenant file shares, RWX volumes | Planned |
+| Standard | RustFS | Tenant buckets and internal backups on sites without Ceph | Planned |
+| Both | Admin-declared profile flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`) | Shown to tenants as volume-type specs | Implemented |
+| Both | Profile `tier` / `class` and capability detection from the cluster | Gating snapshots, HA and DBaaS by storage type | Planned |
+
+A storage profile today is a slug mapped to a storage id per node (or `*`) plus
+admin-declared capability flags; the scheduler restricts placement to the nodes
+the profile lists. Nothing is gated on the flags yet.
+
+## C2c. Build and delivery
+
+```mermaid
+flowchart LR
+  classDef impl fill:#e6f4ea,stroke:#1e7e34,color:#0b3d1a
+  classDef planned fill:#f2f2f2,stroke:#8a8a8a,stroke-dasharray:5 5,color:#555555
+
+  test["test.yml<br/>go test, rebrand gate"]:::impl
+  docker["docker.yml<br/>api, web, admin images"]:::impl
+  helm["helm.yml<br/>lint, OCI chart publish"]:::impl
+  ghcr["ghcr.io<br/>images and OCI charts"]:::impl
+  chart["Chart proxcloud<br/>api, SPAs, gateway, Keycloak, CNPG"]:::impl
+  dbchart["Chart database-cluster<br/>DBaaS engines"]:::impl
+  inst["Installer (Ansible)"]:::planned
+  vmt["VM template pipeline"]:::planned
+  k8st["K8s node template pipeline"]:::planned
+  mgmt["Management cluster"]:::impl
+  pve["Proxmox cluster"]:::impl
+
+  docker --> ghcr
+  helm --> ghcr
+  chart --> helm
+  dbchart --> helm
+  ghcr -->|"helm install, ArgoCD"| mgmt
+  inst -.-> mgmt
+  inst -.-> pve
+  vmt -.-> pve
+  k8st -.-> pve
+```
+
+## Container table
+
+| Container | Technology | Runs where | Status |
+|---|---|---|---|
+| `web/client` | React, Vite, TypeScript, OIDC PKCE; served by nginx (`web/Dockerfile`) | Management cluster | Implemented |
+| `web/admin` | React, Vite, TypeScript; served by nginx | Management cluster | Implemented |
+| `proxcloud-api` | Go, chi router, one binary (`cmd/api`) | Management cluster | Implemented |
+| Scheduler and jobs | robfig/cron with a PostgreSQL distributed lock (`internal/platform/scheduler`, `lock`); disabled unless `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | Inside the API pod | Implemented |
+| PostgreSQL | JSONB document store via `internal/pgdoc`; bundled subchart, CloudNativePG cluster, or external | Management cluster | Implemented |
+| RabbitMQ | AMQP (`internal/amqp`), optional per-profile charge fan-out | Management cluster | Implemented |
+| Keycloak | codecentric keycloakx subchart + keycloak-config-cli realm import, or an external issuer | Management cluster | Implemented |
+| Gateway / Ingress | Gateway API `HTTPRoute` or `Ingress` per host (`deploy/charts/proxcloud/templates/gateway`, `api`, `web`) | Management cluster | Implemented |
+| ArgoCD | Receives `Application` objects for managed K8s and DBaaS | Management cluster (not deployed by the chart) | Implemented |
+| Cluster API + CAPMOX, MetalLB | Services cluster and tenant K8s workers on Proxmox, load-balancer IPs | Management and services clusters | Planned |
+| Services cluster | Kamaji, DB operators, proxmox-csi, csi-driver-nfs | VMs in a system pool | Planned |
+| Proxmox VE hosts | pveproxy, SDN, proxmox-firewall (nftables), storage, PCI mappings | Proxmox cluster | Implemented |
+| Tenant VMs | QEMU full clones in the project pool | Proxmox cluster | Implemented |
+| HA rules and replication | `ha-manager` rules, `pvesr` | Proxmox cluster | Planned |
+| Ceph (Full tier) | RBD/CephFS for disks, RGW for buckets | Ceph cluster | Implemented |
+| TrueNAS (Standard tier) | NFS, SMB, iSCSI, WebSocket API | Appliance outside the Proxmox cluster | Planned |
+| RustFS (Standard tier) | S3 + admin API | VM or TrueNAS app | Planned |
+| Proxmox Backup Server | vzdump target | Separate machine | Planned |
+| Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
+| Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
+| CI | GitHub Actions `test.yml`, `docker.yml`, `helm.yml` | GitHub | Implemented |
+| Installer | Ansible playbooks and Makefile | Operator workstation | Planned |
+| VM / K8s node template pipelines | Packer, image-builder | Self-hosted runner in the Proxmox network | Planned |
+
+## Trust boundaries
+
+| Boundary | Credential / control | Status |
+|---|---|---|
+| Browser or agent to API | OIDC bearer JWT validated per realm (`azp` bound), or `pk.sk` personal access key | Implemented |
+| Automation to admin API | AWS SigV4 with `hmac_keys`, or the admin-api realm | Implemented |
+| Management port `:8081` | On the cluster Service only, never on the gateway or ingress. Billing callbacks are mounted only when a shared token is configured | Implemented |
+| API to Proxmox | Privilege-separated API token with the `ProxCloudPlatform` role; test connection warns on missing privileges and on `root@pam` | Implemented |
+| Tenant to tenant on the SDN | Vnet isolation rules (forward DROP into the CIDR pool), non-overlapping CIDRs, optional per-project EVPN zone | Implemented |
+| Tenant VM to the network | VM firewall `policy_in DROP`, ipfilter/macfilter anti-spoof, security groups | Implemented |
+| Public NIC to management network | Public networks on the management bridge are refused at test connection and at attach | Implemented |
+| Identity matching by email | Only IdP-verified emails resolve to a user for add-member and invites | Implemented |
+| Tenant IdP to customer realm | Keycloak brokering, domain verification, enforced SSO | Planned |

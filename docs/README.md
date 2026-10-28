@@ -22,6 +22,9 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
   the handler→service→repo layering, the SPAs, and how they fit together.
 - [data-model.md](data-model.md) — the PostgreSQL/JSONB document model, the core
   aggregates and their tables, id and serialization conventions.
+- [Architecture diagrams (C4)](architecture/c4/README.md) — system context,
+  containers, components and code views with Implemented/Planned status, and the
+  architecture change log.
 
 ## Subsystems
 
