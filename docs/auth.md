@@ -138,7 +138,7 @@ vary by auth), but no credential is required.
 | `/mcp` | MCP endpoint (the MCP handler runs its own dual-scheme gate) |
 | `/api/v1/auth/` | Login / auth callbacks (owned by the IdP flow, not bearer-protected) |
 | `/api/v1/download/` | Signed download links |
-| `/api/v1/notifications/` | Cloud notification webhook ingestion |
+| `/api/v1/notifications/` | Stale entry: no route is mounted under it (cloud notification ingestion was removed) |
 | `/api/v1/callbacks/` | Third-party callbacks |
 | `/api/v1/payments/` | Payment gateway callbacks |
 | `/api/v1/admin/job/` | Operator job triggers |

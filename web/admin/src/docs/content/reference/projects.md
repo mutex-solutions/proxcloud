@@ -11,7 +11,7 @@ Manage cloud projects. Base path: `/admin-api/v1/projects`.
 | `status` | string | Project status. Newly created projects are `DISABLED`; provisioning sets `ENABLED`. |
 | `organization_id` | string | Owning organization. |
 | `billing_profile_id` | string | The **effective** billing profile: the project's own, or the owning organization's when the project has none. |
-| `provisioned_services` | array | Always present. Each entry has `service_id` and `openstack.openstack_project_id` (the backing OpenStack/Keystone tenant id). |
+| `provisioned_services` | array | Always present. Each entry has a `service_id` and an `openstack` object. `openstack.openstack_project_id` is a legacy field. It is omitted for Proxmox bindings, which have no external project id, so `openstack` comes back as `{}`. |
 | `members` | array | Always present. Each entry has `sub`. |
 
 ## GET /admin-api/v1/projects
@@ -24,7 +24,7 @@ Lists projects, paginated.
 | `billing_profile_id` | string | no | Filter by the project's own billing profile id. |
 | `member_sub` | string | no | Only projects the given `sub` belongs to. |
 | `status` | string | no | Exact status match (e.g. `ENABLED`, `DISABLED`). |
-| `openstack_project_id` | string | no | Find the project backing a given OpenStack tenant id. |
+| `openstack_project_id` | string | no | Legacy filter on a binding's external project id. Proxmox bindings carry none, so it only matches imported legacy data. |
 | `limit` | integer | no | Page size (default 50, max 500). |
 | `marker` | string | no | Keyset cursor. |
 
@@ -48,9 +48,7 @@ Response `200`:
       "provisioned_services": [
         {
           "service_id": "665f0000b8d34a0012340099",
-          "openstack": {
-            "openstack_project_id": "3e1a9f2b6c8d4e5f9a0b1c2d3e4f5a6b"
-          }
+          "openstack": {}
         }
       ],
       "members": [
@@ -76,7 +74,7 @@ Creates a project. Without a `provision` block the project is stored as `DISABLE
 | `name` | string | yes | Display name. |
 | `organization_id` | string | yes | Owning organization id. |
 | `billing_profile_id` | string | no | Must reference an existing billing profile. |
-| `provision` | array | no | Non-empty ⇒ provision onto the platform cloud immediately after creation (the Keystone tenant is created and the project becomes `ENABLED`). |
+| `provision` | array | no | Non-empty ⇒ provision onto the platform cloud immediately after creation: bootstrap onto the Proxmox provider (project pool, default security group, default quota), then set the project `ENABLED`. |
 
 Response `200`: `{ "data": { ...project } }`.
 
@@ -90,7 +88,7 @@ Errors:
 
 ## POST /admin-api/v1/projects/{id}/provision
 
-Provisions an existing project onto the platform cloud: creates the backing Keystone tenant and sets the project `ENABLED`. Returns the refreshed project, including its new `provisioned_services` entry.
+Provisions an existing project onto the platform cloud. It bootstraps the project onto the Proxmox provider (project pool, default security group, default quota) and sets the project `ENABLED`. Returns the refreshed project, including its new `provisioned_services` entry.
 
 No request body.
 
@@ -104,4 +102,4 @@ Errors:
 | `404 NOT_FOUND` | Project doesn't exist. |
 | `501 NOT_IMPLEMENTED` | No platform cloud is configured on this deployment. |
 
-> Note: per-user cloud credentials aren't granted at provision time; resources are managed under the project's tenant scope.
+> Note: no per-user credentials are created on the cluster. Members reach the project's resources through ProxCloud, which scopes every call to the project's pool.

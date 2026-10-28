@@ -2,7 +2,7 @@
 
 Read-only access to the cloud service providers registered on the platform. Base path: `/admin-api/v1/service_providers`.
 
-Credentials are never exposed — only the provider's identity endpoint and customer domain id come back.
+Credentials are never exposed. Only the provider's id, name and type come back, inside a configuration object whose shape is kept from an earlier backend for compatibility.
 
 ## The service provider object
 
@@ -12,9 +12,8 @@ Credentials are never exposed — only the provider's identity endpoint and cust
 | `name` | string | Display name. |
 | `type` | string | `CLOUD` for cloud providers; omitted for other provider types. |
 | `configuration` | object | Always present. |
-| `configuration.cloud.provider` | string | Always `OPENSTACK`. |
-| `configuration.cloud.openstack.identity_url` | string | The Keystone identity endpoint, as configured. |
-| `configuration.cloud.openstack.domain_id` | string | The customer domain id (omitted when not configured). |
+| `configuration.cloud.provider` | string | Always `OPENSTACK`. This is a fixed legacy value and is returned for Proxmox VE, Ceph S3, Kamaji and DBaaS providers alike. |
+| `configuration.cloud.openstack` | object | Always present. Its legacy fields `identity_url` and `domain_id` are omitted for providers that don't set them, which includes every Proxmox VE provider, so it comes back as `{}`. |
 
 ## GET /admin-api/v1/service_providers
 
@@ -38,15 +37,12 @@ Response `200`:
   "data": [
     {
       "id": "665f0000b8d34a0012340099",
-      "name": "Platform Cloud",
+      "name": "Proxmox Lab",
       "type": "CLOUD",
       "configuration": {
         "cloud": {
           "provider": "OPENSTACK",
-          "openstack": {
-            "identity_url": "https://keystone.example.com:5000",
-            "domain_id": "default"
-          }
+          "openstack": {}
         }
       }
     }

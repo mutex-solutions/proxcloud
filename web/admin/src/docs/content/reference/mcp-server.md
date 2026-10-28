@@ -60,7 +60,7 @@ On top of those, the admin toolset exposes the platform's configuration surfaces
 | Pricing | `list/get/create/update_price_plan`, `list/get/create/update/delete_price_plan_rule`, `get_price_plan_rule_usage`, `list_billing_resource_types`, `list_unpriced_flavors` |
 | Billing config | `get/create/update_billing_configuration`, `list_currencies` |
 | Platform config | `get/update_platform_configuration`, `set_platform_regions` |
-| Cloud providers | `list/get/update_cloud_provider`, `discover_cloud_provider`, `set_provider_default_quota`, `set_provider_features`, `set_gnocchi_granularity`, `get_gpu_capacity`, `list_live_flavors` |
+| Cloud providers | `list/get/update_cloud_provider`, `discover_cloud_provider`, `set_provider_default_quota`, `set_provider_features`, `set_metrics_config`, `test_metrics_config`, `set_gnocchi_granularity` (legacy; the Prometheus metrics source ignores it), `get_gpu_capacity`, `list_live_flavors` |
 | Catalog | `list/get/create/update/delete_flavor_category`, `list/get/create/update/delete_image_category`, `list_image_category_groups`, `get/create/update/delete_image_group`, `list_live_images`, `list/get/create/update/delete/reactivate_instance_metadata_option` |
 | Project ops | `set_project_quota`, `set_project_public_networks`, `sync_project`, `get_project_resource_counts`, `list_project_cloud_resources`, `update_project`, `set_project_status`, `list_project_members_admin` |
 | Transactions | `list_account_credit_transactions`, `list_collect_transactions`, `list_billing_profile_transactions`, `refund_transaction`, `approve/reject_bank_transfer` |

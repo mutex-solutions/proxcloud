@@ -67,7 +67,7 @@ router in `internal/server/server.go`).
 | `/api/v1/events/{projectId}` | 8080 | OIDC bearer (a short-lived stream token is not built yet) | Server-sent events per project | Implemented |
 | `/openapi.json` | 8080 | public | Stub document | Implemented |
 | `/actuator/health*`, `/__build` | 8081 | none; not routed by the chart's gateway or ingress | Liveness, readiness, build info | Implemented |
-| `POST /debug/<job>`, `GET /debug/cloud` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (when the scheduler is enabled), cloud probe | Implemented |
+| `POST /debug/<job>` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (when the scheduler is enabled) | Implemented |
 | Billing service callbacks | 8081 | shared token | Suspend/resume and mail callbacks from an external billing service | Implemented |
 | SSO discovery and per-org SSO routes | 8080 | public / OIDC | Email-first login and SSO self-service | Planned |
 

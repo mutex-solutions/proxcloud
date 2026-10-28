@@ -17,10 +17,8 @@ export const sections: DocSection[] = [
   {
     title: "Cloud providers",
     pages: [
-      { slug: "platform-admin/cloud/connect-a-cloud", title: "Connecting a cloud" },
+      { slug: "platform-admin/cloud/connect-a-cloud", title: "Connecting Proxmox VE" },
       { slug: "platform-admin/cloud/service-availability", title: "Service availability" },
-      { slug: "platform-admin/cloud/instance-metrics", title: "Instance metrics" },
-      { slug: "platform-admin/cloud/reseller-domains", title: "Reseller domains" },
     ],
   },
   {

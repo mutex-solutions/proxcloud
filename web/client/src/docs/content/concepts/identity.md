@@ -48,6 +48,6 @@ On an external IdP the chart provisions **nothing** — you set it up yourself, 
 
 The client IDs stay configurable through `auth.main.clientId`, `auth.admin.clientId`, and `auth.adminApi.clientId` (defaults `proxcloud-ui`, `proxcloud-admin`, `proxcloud-admin-api`).
 
-## One identity across OpenStack too
+## Social, corporate and two-factor logins
 
-The same Keycloak can authenticate users against OpenStack Keystone and Horizon as well, giving customers a single login across ProxCloud and native OpenStack tooling. That federation is an operator setup task — see [Single Sign-On](/docs/self-hosting/sso).
+Social logins, LDAP or SAML directories, and two-factor policies are configured on the identity provider, not in ProxCloud — see [Single Sign-On](/docs/self-hosting/sso).

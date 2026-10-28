@@ -10,7 +10,7 @@ The platform has to do three kinds of work at once and keep doing it reliably:
 
 - serve two browser SPAs and a machine-facing API (customer console, operator
   admin, public admin API);
-- run a large amount of concurrent I/O against an OpenStack cloud — polling
+- run a large amount of concurrent I/O against Proxmox VE clusters and S3 stores — polling
   resource state, reconciling a local cache, driving lifecycle actions across
   many tenants;
 - run scheduled background jobs (rating/charging, metrics ingestion, dunning,

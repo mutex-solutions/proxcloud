@@ -51,7 +51,7 @@ Each domain registers its own `Routes()` under `/api/v1` (see `AppRouter` in
 | `account` | Authenticated user's account/profile |
 | `organizations` | Organizations, custom roles, org audit log |
 | `billing-profile` / `bill` | Billing summaries, bills, payments, cards |
-| `project` | Projects and their cloud resources (servers, volumes, networks, floating IPs, security groups, images, load balancers) |
+| `project` | Projects and their cloud resources (servers, volumes, networks, security groups, keypairs, images (project templates), buckets, public-IP attach) |
 | `platform-configuration` | Public platform config (login bootstrap) |
 | `features` | Available feature set |
 | `promotion` / `affiliate` | Deposit promos, affiliate program |
@@ -59,16 +59,19 @@ Each domain registers its own `Routes()` under `/api/v1` (see `AppRouter` in
 | `order` / `project-invites` | Orders and project invitations |
 | `admin/**` | Operator console surface (permission-gated) |
 | `streaming` | SSE real-time event stream (`/events/{projectId}`) |
-| `os-notification`, `callbacks`, `payments`, `webhooks` | Inbound webhooks (public whitelist) |
+| `callbacks`, `payments`, `webhooks` | Inbound webhooks (public whitelist) |
 
 Project public-network policy: `GET /api/v1/project/{id}/public-networks` lists
 the external (public) networks the project is allowed to use, and
 `PUT /api/v1/admin/project/{id}/public-networks` (operator console surface) sets
 the per-project allow-list — a `null`/absent `publicNetworkIds` means all
-external networks. The cloud create body (`POST /api/v1/project/{id}/cloud`,
-type `SERVER`) additionally accepts optional `assignFloatingIp` /
-`floatingNetworkId` data keys to auto-attach a floating IP once the server has
-a port.
+public networks. There are no floating IPs on Proxmox: public reachability is the
+server action `ATTACH_PUBLIC_NETWORK` / `DETACH_PUBLIC_NETWORK` on
+`POST /api/v1/project/{id}/cloud/{resourceId}/action` (body data `networkId`). It
+adds (or removes) a second NIC (`net1`) on the admin-designated bridge with one
+address from that network's pool, pinned by the VM firewall's ipfilter
+(`internal/platform/project/cloud_network_pve.go`). The network must be in the
+project's allow-list.
 
 ## Admin API — `/admin-api/v1`
 
@@ -123,8 +126,8 @@ A stateless streamable-HTTP Model Context Protocol endpoint
 toolset:
 
 - **client tools** (`clients` realm) — read/act on the caller's own projects and
-  billing (list projects/servers/volumes/networks/floating IPs/security
-  groups/images/load balancers, get cost/billing, run server power actions, create
+  billing (list projects/servers/volumes/networks/security groups/images, get
+  cost/billing, run server power actions, create
   and delete volumes, invite users). See `tools_client.go`.
 - **admin tools** (`master` realm or `pk.sk` API key) — the operator toolset. See
   `tools_admin.go`.

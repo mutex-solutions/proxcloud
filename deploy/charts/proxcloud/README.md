@@ -30,6 +30,10 @@ own). For a throwaway local dev install, pass the insecure sample values with
 A fresh database needs the base configuration documents seeded before the
 billing/project endpoints work — see `deploy/seed/` in the repo.
 
+Proxmox VE clusters (and Ceph RGW stores) are not chart values: register them
+after install in the operator console (System → Cloud providers). See
+`docs/cloud-integration.md` and `docs/proxmox-permissions.md`.
+
 Registering a **kamaji managed-Kubernetes provider** has an out-of-chart
 prerequisite: the Kamaji management cluster must run ArgoCD and be prepared
 with the operator-applied manifests in `deploy/mgmt-cluster/` (proxcloud

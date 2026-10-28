@@ -17,8 +17,8 @@ One PUBLIC plan, rules keyed `(resourceType, timeUnit=hour)`:
 | GPU per model | instance | `gpu_model eq <model>` | `gpu_count` | table below |
 | Public egress | instance_traffic | — | `outgoing_public_traffic_mb` | tier 1: 0 → 1,048,576 MB (1 TiB) = $0; tier 2: beyond = $0.00001/MB ($0.01/GB) |
 | Volume | volume | — | `size` | $0.000137 / GB / hr (≈$0.10/GB-mo) |
-| Floating IP | floating_ip | — | `existence` | $0.005 / hr |
-| Load balancer | load_balancer | — | `existence` | $0.0165 / hr (≈$12/mo) |
+| Public IP (planned) | floating_ip | — | `existence` | $0.005 / hr |
+| Load balancer (no Proxmox resource yet) | load_balancer | — | `existence` | $0.0165 / hr (≈$12/mo) |
 
 GPU rules are ADD_TO_TOTAL **on top of** the CPU/RAM component. RunPod/Lambda headline
 prices bundle CPU+RAM into the per-GPU rate, so either (a) accept our small premium
@@ -60,16 +60,19 @@ pro-6000 is the fleet's flagship (24 devices): anchored to RunPod *community* 2.
 RunPod *secure* is 4.00, so there is room to price higher if positioned as secure-grade —
 operator call. Interpolated/placeholder rows need sign-off before seeding.
 
-Alias vocabulary = the placement trait / pci alias form (`CUSTOM_PCI_NVIDIA_A6000` →
-`nvidia-a6000`) — the same names gpu-info capacity and project GPU quota use. A flavor's
-model+count derive from `pci_passthrough:alias` extra specs (see `internal/cloud/gpu.go`);
-the seed rule filters use exactly the aliases above.
+Alias vocabulary = the normalized GPU alias (`nvidia-a6000`): the alias names in the Proxmox
+provider's `gpus` map and in the flavor catalog's `gpuModel` — the same names gpu-info capacity
+and project GPU quota use. A flavor's model+count come from the flavor catalog
+(`internal/platform/pveflavor`), rendered into the extra-specs shape
+`pci_passthrough:alias` that `internal/cloud/gpu.go` parses; the seed rule filters use exactly
+the aliases above.
 
 ## Other resources — benchmarks
 
 - Volume $0.10/GiB-mo (DO volumes); AWS EBS gp3 $0.08/GB-mo; OVH Classic ≈$0.048/GB-mo.
-- Floating IP: AWS public IPv4 $0.005/hr; DO reserved-unattached $5/mo. Ours $0.005/hr flat
-  (simple; no attached/unattached split in the billing attributes yet).
+- Public IP: AWS public IPv4 $0.005/hr; DO reserved-unattached $5/mo. Ours $0.005/hr flat.
+  The rule keeps the `floating_ip` resource-type name, but no Proxmox resource produces that
+  type yet: public-IP billing is planned, so this rule rates nothing today.
 - LB: DO from $12/mo; AWS ALB $0.0225/hr + LCU. Ours $0.0165/hr flat.
 - Egress: AWS 100 GB free then $0.09/GB; DO pooled 4–8 TiB then $0.01/GiB; OVH free;
   RunPod/Lambda free. Ours: 1 TiB free per server / month, then $0.01/GB (DO-style,

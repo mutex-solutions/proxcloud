@@ -10,9 +10,10 @@ Getting a ProxCloud backend and its SPAs running on your machine.
   `github.com/mutex-solutions/proxcloud`).
 - **Node 20+ / npm** — the two SPAs (`web/client`, `web/admin`) are Vite + React
   19, for running them with hot reload.
-- An **OIDC issuer** (Keycloak or similar) and an **OpenStack region** only if
-  you want to exercise authenticated or cloud-backed endpoints. A lot of local
-  work needs neither — public endpoints and the management port work without them.
+- An **OIDC issuer** for authenticated endpoints (Compose bundles Keycloak on
+  `:8090`) and, for cloud-backed endpoints, a reachable **Proxmox VE** cluster
+  with an API token. A lot of local work needs neither — public endpoints and the
+  management port work without them.
 
 ## Get the code and build
 
@@ -26,7 +27,7 @@ go test ./...       # fast unit tests, no Docker (see testing.md)
 ## Run the whole stack with Docker Compose
 
 The repo ships a `docker-compose.yml` at the root that builds and runs the three
-ProxCloud images plus PostgreSQL and RabbitMQ:
+ProxCloud images plus PostgreSQL, RabbitMQ and a dev Keycloak:
 
 ```sh
 docker compose up --build
@@ -45,30 +46,19 @@ PostgreSQL (`:5432`) and RabbitMQ (`:5672`, management UI `:15672`) come up as
 dependencies. The API starts with `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true`, so you can
 drive jobs on demand (see below) without the crons running.
 
-Compose does **not** bundle an OIDC issuer or an OpenStack region — auth-gated and
-cloud routes need external ones. Put their connection details in a `.env` file
-next to `docker-compose.yml`; the compose file reads them into the containers:
+Keycloak (`:8090`) imports the dev realm `proxcloud` from
+`deploy/dev/keycloak-realm.json`, with two users, `demo`/`demo` and
+`admin`/`admin`. The API and both SPAs are already wired to it. The browser reaches
+Keycloak at `localhost:8090` (that URL becomes the token's `iss`); the API reaches
+the same realm at `keycloak:8080` inside the compose network, hence the
+`*_DISCOVERY_URI` variables in `docker-compose.yml`. No SMTP is configured, so a
+self-registered dev user must be marked "Email verified" in the Keycloak admin
+console.
 
-```sh
-# .env — external OIDC issuer (for the SPAs) and OpenStack region (for the API)
-PROXCLOUD_OAUTH2_ISSUER=https://id.example.com/realms/clients
-PROXCLOUD_OAUTH2_CLIENT_ID=proxcloud-ui
-PROXCLOUD_ADMIN_OAUTH2_ISSUER=https://id.example.com/realms/master
-PROXCLOUD_ADMIN_OAUTH2_CLIENT_ID=proxcloud-admin
-OS_AUTH_URL=https://keystone.example.com:5000/v3
-OS_REGION_NAME=RegionOne
-OS_USERNAME=...
-OS_PASSWORD=...
-OS_USER_DOMAIN_NAME=Default
-OS_PROJECT_NAME=...
-OS_PROJECT_DOMAIN_NAME=Default
-```
-
-To have the **API itself** validate customer/operator tokens (not just wire the
-SPAs), add the `AUTH_MAIN_OAUTH2_ISSUER_URI` / `AUTH_ADMIN_OAUTH2_ISSUER_URI`
-(and client-id) env to the `api` service — see
-[configuration.md](configuration.md) for the full realm table. Without any auth
-env the stack still runs; authenticated and cloud-backed routes stay unavailable.
+To use an external issuer instead, override the `PROXCLOUD_*OAUTH2_*` variables in
+a `.env` file next to `docker-compose.yml`; see
+[configuration.md](configuration.md) for the full realm table. Cloud routes stay
+unavailable until a Proxmox provider is registered (below).
 
 Check the API is up:
 
@@ -121,24 +111,31 @@ psql "$PROXCLOUD_DB_URL" -c \
 
 Repeat for `billingConfiguration` ← `billing-configuration.json`.
 
-## Point at an OpenStack dev cloud
+## Point at a Proxmox VE cluster
 
-Two ways to give ProxCloud a cloud:
+Cloud providers are not configured through env; they are `externalService`
+records.
 
-1. **Dev bootstrap via env** — set the standard `OS_*` variables (`OS_AUTH_URL`,
-   `OS_REGION_NAME`, `OS_USERNAME`, `OS_PASSWORD`, `OS_USER_DOMAIN_NAME`,
-   `OS_PROJECT_NAME`, `OS_PROJECT_DOMAIN_NAME`, or an application credential). The
-   API authenticates in the background and exposes a read-only probe at
-   `GET :8081/debug/cloud`.
-2. **Register an external service** — insert a `CLOUD` `externalService` document
-   (see `deploy/seed/external-service-dev.json` — an array with one example
-   document per provider kind: `openstack` with `config.identityUrl`, regions,
-   per-service enablement and the encrypted admin auth, and `kamaji` with the
-   argocd/cluster blocks and the management kubeconfig secret; insert each
-   element as its own row, replacing the `__…__` placeholders). This is how a
-   real region is configured and supersedes the env bootstrap; sync and
-   per-tenant clients use it. The kamaji provider also needs a prepared
-   management cluster — see `docs/managed-k8s.md`.
+1. **Create a privilege-separated API token** on the cluster with the
+   `ProxCloudPlatform` role. [proxmox-permissions.md](proxmox-permissions.md)
+   has the `pveum` commands. Turn the datacenter firewall on and run every node
+   on proxmox-firewall (nftables); test connection refuses a cluster without
+   them.
+2. **Register it** in the admin console: System → Cloud providers → Add provider →
+   Proxmox, fill in the API URL, token ID and secret (plus a certificate
+   fingerprint for a self-signed cluster), then **Test connection**. Alternatively
+   insert a `CLOUD` `externalService` document with `config.provider =
+   "proxmox"`; the document shape is in
+   [cloud-integration.md](cloud-integration.md#the-proxmox-provider-document).
+3. Enter a project in the customer console: it is bootstrapped onto the provider
+   (pool, default security group, default quota). Drive a sync with
+   `POST :8081/debug/run-sync`.
+
+`deploy/seed/external-service-dev.json` holds example documents for the
+`kamaji` and `dbaas` provider kinds (insert each element as its own row,
+replacing the `__…__` placeholders); they need a prepared management cluster, see
+[managed-k8s.md](managed-k8s.md). Its first element is a leftover example for a
+provider kind that no longer exists, and there is no Proxmox example in it yet.
 
 ## Run the SPAs with hot reload
 
@@ -175,8 +172,8 @@ there when calling cross-origin.
 - `cmd/api` — the server entrypoint and all wiring.
 - `internal/platform/*` — the business domains (org, project, billing, pricing,
   payment, admin, audit, job, promotion, mcp, …), each as handler/service/repo.
-- `internal/cloud` — the OpenStack facade: client, resource cache, providers,
-  sync/metrics/notification pipelines.
+- `internal/cloud` — the Proxmox VE client and services (`pve`), resource cache,
+  providers and sync, metrics, the ceph-s3 client, managed K8s/DBaaS.
 - `internal/{config,server,health,pgdoc,amqp,oidc}` — wiring and infrastructure.
 - `pkg/{auth,httpx,money,audit,textcrypt}` — cross-cutting: auth middleware, the
   response envelope + request context, money⇄decimal string, the audit helper,

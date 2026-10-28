@@ -90,19 +90,20 @@ identity model. Empty issuer = realm disabled (tokens for it are rejected).
 | Operator (`master`) | `AUTH_ADMIN_OAUTH2_ISSUER_URI` / `AUTH_ADMIN_OAUTH2_CLIENT_ID` | `auth.admin.oauth2.issuer-uri` / `.client-id` | issuer: `auth.admin.issuer` (empty ⇒ bundled `master` realm); client: `auth.admin.clientId` (`proxcloud-admin`) |
 | Admin API | `AUTH_ADMIN_API_OAUTH2_ISSUER_URI` / `AUTH_ADMIN_API_OAUTH2_CLIENT_ID` | `auth.admin-api.oauth2.issuer-uri` / `.client-id` | issuer: `auth.adminApi.issuer`; client: `auth.adminApi.clientId` (`proxcloud-admin-api`) |
 
-### OpenStack cloud
+### Cloud providers
 
-Standard `OS_*` env (env-only for credentials). An empty `OS_AUTH_URL` **disables**
-the cloud connection entirely.
+Proxmox VE clusters, Ceph RGW stores and the managed K8s/DBaaS management
+clusters are **not** configured through env. They are external-service records
+created in the admin console (System → Cloud providers) or as `externalService`
+documents; see [cloud-integration.md](cloud-integration.md). One legacy key is
+still read:
 
 | Concern | env | file | Meaning |
 |---------|-----|------|---------|
-| Auth URL | `OS_AUTH_URL` | `openstack.auth-url` | Keystone endpoint. Empty = cloud disabled. |
-| Region | `OS_REGION_NAME` | `openstack.region` | Region name. |
-| Username / Password | `OS_USERNAME` / `OS_PASSWORD` | — | Password auth. |
-| User domain | `OS_USER_DOMAIN_NAME` | — | User domain. |
-| Project name / domain | `OS_PROJECT_NAME` / `OS_PROJECT_DOMAIN_NAME` | — | Scoped project. |
-| App credential | `OS_APPLICATION_CREDENTIAL_ID` / `OS_APPLICATION_CREDENTIAL_SECRET` | — | Application-credential auth (alternative to password). |
+| Default region | `OS_REGION_NAME` | `openstack.region` | Region stamped on a provider binding when the provider sets none (`project/bootstrap.go`), and the admin handlers' region fallback. |
+
+The other `OS_*` / `openstack.*` keys are still parsed by `internal/config/config.go`
+but nothing uses them; they are left over from the previous backend.
 
 ### Scheduled jobs (billing / metrics crons)
 
@@ -114,7 +115,11 @@ unexpectedly.
 | Scheduler | `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | `proxcloud.jobs.scheduler-enabled` | `false` | Auto-start the charge/metrics crons (charges bills on a timer). |
 | Debug triggers | `PROXCLOUD_JOBS_DEBUG_TRIGGERS` | `proxcloud.jobs.debug-triggers` | `false` | Expose on-demand `POST :8081/debug/run-*` triggers **without** starting the crons — for deterministic, manual runs. |
 | Rabbit fanout | `PROXCLOUD_JOBS_RABBIT_FANOUT` | `proxcloud.jobs.rabbit-fanout` | `false` | Fan the **native** charge cron out across pods via RabbitMQ (one message per active profile) instead of charging every profile in one pod. Ignored by the external provider. |
-| Default network MTU | `PROXCLOUD_DEFAULT_NETWORK_MTU` | `api.network.defaultMtu` (Helm) | _unset_ | MTU stamped on client-created networks. Unset/0 leaves it to neutron's provider default (e.g. the geneve/vxlan value); set e.g. `1500` to force a fixed MTU. |
+
+Network MTU is set per EVPN zone on the Proxmox provider
+(`config.network.zones.<zone>.mtu`, default 1450; vlan and simple zones take no MTU). The chart still renders
+`PROXCLOUD_DEFAULT_NETWORK_MTU` from `api.network.defaultMtu`, but the API does not
+read it.
 
 When the scheduler or debug triggers are enabled, the management port also exposes
 operator triggers such as `POST :8081/debug/gen-hmac-key` (mint an Admin API key —
@@ -129,7 +134,7 @@ repository, run it, and billing works.
 
 Some deployments run a separate billing service instead. `external` delegates the
 rating step to it. ProxCloud still resolves *what* to bill, because it owns the
-OpenStack resource cache and nothing else can.
+resource cache and nothing else can.
 
 | Concern | env | file | Default | Meaning |
 |---------|-----|------|---------|---------|

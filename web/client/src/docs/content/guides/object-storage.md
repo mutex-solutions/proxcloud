@@ -6,13 +6,13 @@ Object storage holds unstructured data — backups, media, artifacts, static ass
 
 A **bucket** is a flat container for objects (files), each addressed by a key. Create a bucket, then upload objects into it. Because object storage is reached over an API rather than mounted like a volume, it suits data that many clients read and write independently, that needs to scale without provisioning disks, or that you want to serve directly.
 
-Depending on how your platform is set up, buckets may live on one of two storage backends, shown in the **Storage** column: **Swift** or **S3 (Ceph)**. They are separate systems with separate sets of buckets — a bucket lives on one or the other and can't be moved between them. When both are available the create dialog lets you pick which one a new bucket lands on. The extra S3 features described below apply to **S3 (Ceph)** buckets.
+Buckets are stored on S3-compatible object storage backed by Ceph (the RADOS Gateway) that your operator connects to the platform.
 
-> **S3 bucket names are globally unique.** On the S3 backend a name is shared across the whole platform (just like Amazon S3), so if a name is already taken you'll need to choose another.
+> **Bucket names are globally unique.** A name is shared across the whole platform (just like Amazon S3), so if a name is already taken you'll need to choose another.
 
 ## Working with objects
 
-Within a bucket you upload, download, and delete objects, and organise them into folders. S3 (Ceph) buckets present an S3-compatible surface, so existing S3 tooling and SDKs work against them without change; Swift buckets are managed through ProxCloud.
+Within a bucket you upload, download, and delete objects, and organise them into folders. Buckets present an S3-compatible surface, so existing S3 tooling and SDKs work against them without change.
 
 ## S3 access keys
 
@@ -31,7 +31,7 @@ You can also create **additional access keys** scoped to specific buckets — ha
 
 ## Bucket settings
 
-Open a bucket's menu and choose **Settings** (S3 buckets only):
+Open a bucket's menu and choose **Settings**:
 
 - **Versioning** — keep previous versions of every object, so an overwrite or delete is recoverable. Old versions keep counting toward the storage you're billed for; once enabled, versioning can be suspended but not fully turned off.
 - **Object lock** — protect objects from deletion for a retention period (write-once-read-many). This can only be chosen **when the bucket is created**, and it turns on versioning.
