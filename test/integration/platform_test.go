@@ -203,6 +203,50 @@ func TestUserRepo_FromClaimsGetOrCreate(t *testing.T) {
 	}
 }
 
+// TestUserRepo_EmailVerification covers SSO-0: emailConfirmedAt follows the IdP's
+// email_verified claim for the current email, and email matching (org add-member,
+// project invites) only finds verified users — an unverified look-alike sign-up
+// with the same address never resolves.
+func TestUserRepo_EmailVerification(t *testing.T) {
+	ctx := context.Background()
+	repo := user.NewRepo(freshPG(t))
+	if err := repo.EnsureIndexes(ctx); err != nil {
+		t.Fatal(err)
+	}
+	const email = "victim@example.com"
+	// An attacker signs up first with the victim's address, unverified.
+	att, err := repo.FromClaims(ctx, user.Claims{Sub: "attacker", Email: email})
+	if err != nil || att.EmailConfirmedAt != nil || att.EmailVerified() {
+		t.Fatalf("unverified sign-up must not be confirmed: %+v %v", att, err)
+	}
+	if got, err := repo.FindVerifiedByEmail(ctx, email); err != nil || got != nil {
+		t.Fatalf("unverified user must not match: %+v %v", got, err)
+	}
+	// The real owner signs up, verified.
+	own, err := repo.FromClaims(ctx, user.Claims{Sub: "owner", Email: email, EmailVerified: true})
+	if err != nil || own.EmailConfirmedAt == nil {
+		t.Fatalf("verified sign-up must be confirmed: %+v %v", own, err)
+	}
+	if got, _ := repo.FindVerifiedByEmail(ctx, email); got == nil || got.Sub != "owner" {
+		t.Fatalf("verified match = %+v, want owner", got)
+	}
+	// An existing user becomes verified on a later login.
+	if u, _ := repo.FromClaims(ctx, user.Claims{Sub: "attacker", Email: email, EmailVerified: true}); u.EmailConfirmedAt == nil {
+		t.Fatal("verified claim on login must stamp emailConfirmedAt")
+	}
+	// The owner changes to a new, not yet verified address: confirmation is cleared.
+	if u, _ := repo.FromClaims(ctx, user.Claims{Sub: "owner", Email: "new@example.com"}); u.EmailConfirmedAt != nil {
+		t.Fatal("unverified new email must clear emailConfirmedAt")
+	}
+	if got, _ := repo.FindBySub(ctx, "owner"); got.EmailConfirmedAt != nil || got.Email != "new@example.com" {
+		t.Fatalf("stored owner = %+v, want new email unconfirmed", got)
+	}
+	// No email claim (e.g. a PAT session) leaves verification alone.
+	if u, _ := repo.FromClaims(ctx, user.Claims{Sub: "attacker"}); u.EmailConfirmedAt == nil {
+		t.Fatal("a claim set without email must not clear emailConfirmedAt")
+	}
+}
+
 func ids(evs []audit.AuditEvent) []string {
 	out := make([]string, len(evs))
 	for i, e := range evs {

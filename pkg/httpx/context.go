@@ -10,13 +10,14 @@ import (
 // package global or goroutine-local — so it survives across goroutines without
 // cross-tenant leakage. Populated by auth middleware.
 type RequestContext struct {
-	Sub        string
-	Email      string
-	GivenName  string
-	FamilyName string
-	Issuer     string
-	Azp        string // authorized party (token azp claim) — gates the admin realm/client
-	SigV4KeyID string // set when the request authenticated via AWS SigV4 (hmac_keys) — Admin API
+	Sub           string
+	Email         string
+	EmailVerified bool // OIDC email_verified claim; false when absent (fail closed)
+	GivenName     string
+	FamilyName    string
+	Issuer        string
+	Azp           string // authorized party (token azp claim) — gates the admin realm/client
+	SigV4KeyID    string // set when the request authenticated via AWS SigV4 (hmac_keys) — Admin API
 	// Roles/permissions populate in later slices (Org/Project).
 }
 

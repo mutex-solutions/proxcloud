@@ -16,6 +16,8 @@ package pve
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"math/rand"
 	"net"
@@ -165,7 +167,9 @@ func (s *Service) CreateNetwork(ctx context.Context, req CreateNetworkReq) (*Net
 	maxTag := 0
 	for _, v := range vnets {
 		taken[v.Vnet] = true
-		if v.Zone == req.Zone.Key && v.Tag > maxTag {
+		// VXLAN VNIs are cluster-global (per-project EVPN zones share one VNI
+		// space), so the max spans every zone; vlan tags never reach the floor.
+		if v.Tag > maxTag {
 			maxTag = v.Tag
 		}
 	}
@@ -249,6 +253,10 @@ func (s *Service) DeleteNetwork(ctx context.Context, projectID, vnetID string) e
 	if !found {
 		return nil // already gone
 	}
+	// The vnet's isolation rules go with it (not SDN-staged — removed at once).
+	if err := s.removeVnetIsolation(ctx, vnetID); err != nil {
+		return err
+	}
 	subs, err := s.C.ListSDNSubnets(ctx, vnetID)
 	if err != nil {
 		return err
@@ -259,6 +267,285 @@ func (s *Service) DeleteNetwork(ctx context.Context, projectID, vnetID string) e
 		}
 	}
 	return s.C.DeleteSDNVnet(ctx, vnetID)
+}
+
+// TeardownProjectNetworks stages removal of every vnet the project owns (its
+// isolation rules go at once) and reports whether anything was staged. Project
+// teardown: the pool's VMs are already gone. The caller holds the sdn-apply lock
+// and applies.
+func (s *Service) TeardownProjectNetworks(ctx context.Context, projectID string) (bool, error) {
+	vnets, err := s.C.ListSDNVnets(ctx)
+	if err != nil {
+		return false, err
+	}
+	staged := false
+	for _, v := range vnets {
+		if pid, _, ok := aliasProject(v.Alias); !ok || pid != projectID {
+			continue
+		}
+		if err := s.DeleteNetwork(ctx, projectID, v.Vnet); err != nil {
+			return staged, err
+		}
+		staged = true
+	}
+	return staged, nil
+}
+
+// SubnetCIDRs lists every subnet CIDR on the cluster — all zones, all projects,
+// foreign vnets too: the overlap check's ground truth. Read under the sdn-apply
+// lock it also covers staged-but-unapplied networks (no create race).
+// ponytail: one GET per vnet; fine at lab scale, cache when vnet counts grow.
+func (s *Service) SubnetCIDRs(ctx context.Context) ([]string, error) {
+	vnets, err := s.C.ListSDNVnets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, v := range vnets {
+		if v.State == "deleted" {
+			continue
+		}
+		subs, err := s.C.ListSDNSubnets(ctx, v.Vnet)
+		if err != nil {
+			return nil, err
+		}
+		for _, sub := range subs {
+			out = append(out, sub.CIDR)
+		}
+	}
+	return out, nil
+}
+
+// --- tenant isolation (decision 4) ---
+//
+// Two models, both keyed off config.network.isolation:
+//   - "shared" (default): every tenant vnet lives in the one default zone; each
+//     vnet carries forward rules that ACCEPT the project's own subnets and DROP
+//     anything else inside the cidrPool, so tenants cannot reach each other.
+//     Non-overlapping, in-pool CIDRs are enforced by the platform at create.
+//   - "evpn-per-project": each project gets its own EVPN zone (= its own VRF),
+//     id ZoneIDFor(projectID). The same vnet rules still apply — exit nodes leak
+//     every VRF into the default table, so the VRF alone is not a wall.
+
+const (
+	IsolationShared = "shared"
+	IsolationEVPN   = "evpn-per-project"
+)
+
+// isolationComment marks the platform-managed vnet rules (operator rules are
+// left alone).
+const isolationComment = "proxcloud:isolation"
+
+// ZoneIDFor is the project's EVPN zone id: "p" + 7 base36 chars of
+// sha256(projectID) — 8 chars, PVE's zone-id ceiling. Deterministic, so no DB row.
+func ZoneIDFor(projectID string) string {
+	sum := sha256.Sum256([]byte(projectID))
+	n := binary.BigEndian.Uint64(sum[:8]) % 78364164096 // 36^7
+	id := strconv.FormatUint(n, 36)
+	return "p" + strings.Repeat("0", 7-len(id)) + id
+}
+
+// EnsureProjectZone stages the project's EVPN zone (idempotent). tmpl is the
+// admin's default EVPN zone (asn/peers/exitnodes/mtu); controller overrides its
+// controller so every project zone shares one. The VRF VNI is the next free one.
+// Collision check: an existing zone with our id must be evpn and hold only this
+// project's vnets. The caller holds the sdn-apply lock and applies.
+func (s *Service) EnsureProjectZone(ctx context.Context, projectID string, tmpl ZoneConfig, controller string) (ZoneConfig, error) {
+	switch tmpl.Kind {
+	case "evpn", "overlay", "":
+	default:
+		return ZoneConfig{}, fmt.Errorf("pve: per-project isolation needs an evpn default zone, got %q", tmpl.Kind)
+	}
+	id := ZoneIDFor(projectID)
+	z := tmpl
+	z.Key, z.Kind = id, "evpn"
+	z.Controller = controller
+	if z.Controller == "" {
+		z.Controller = tmpl.Controller
+	}
+	if z.Controller == "" {
+		z.Controller = tmpl.Key // EnsureZone's own default — never the per-project id
+	}
+	zones, err := s.C.ListSDNZones(ctx)
+	if err != nil {
+		return ZoneConfig{}, err
+	}
+	maxVRF := 0
+	for _, existing := range zones {
+		if existing.VRFVxlan > maxVRF {
+			maxVRF = existing.VRFVxlan
+		}
+		if existing.Zone != id {
+			continue
+		}
+		if existing.Type != "evpn" {
+			return ZoneConfig{}, fmt.Errorf("pve zone %s: id collides with a %s zone", id, existing.Type)
+		}
+		vnets, err := s.C.ListSDNVnets(ctx)
+		if err != nil {
+			return ZoneConfig{}, err
+		}
+		for _, v := range vnets {
+			if v.Zone != id {
+				continue
+			}
+			if pid, _, ok := aliasProject(v.Alias); !ok || pid != projectID {
+				return ZoneConfig{}, fmt.Errorf("pve zone %s: id collides with another owner's zone", id)
+			}
+		}
+		z.VRFVxlan = existing.VRFVxlan
+		return z, nil
+	}
+	// VRF VNIs stay below the vnet VNI floor (100000).
+	z.VRFVxlan = max(maxVRF+1, 10000)
+	return z, s.EnsureZone(ctx, z)
+}
+
+// DeleteProjectZoneIfEmpty stages removal of the project's EVPN zone once its
+// last vnet is gone. Returns whether a delete was staged (the caller applies).
+func (s *Service) DeleteProjectZoneIfEmpty(ctx context.Context, projectID string) (bool, error) {
+	id := ZoneIDFor(projectID)
+	vnets, err := s.C.ListSDNVnets(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, v := range vnets {
+		if v.Zone == id && v.State != "deleted" {
+			return false, nil
+		}
+	}
+	zones, err := s.C.ListSDNZones(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, z := range zones {
+		if z.Zone == id && z.Type == "evpn" {
+			return true, s.C.DeleteSDNZone(ctx, id)
+		}
+	}
+	return false, nil
+}
+
+// isolationRules is the managed rule set for one vnet, top to bottom: allow the
+// project's own subnets among themselves, then drop anything else headed into the
+// pool. Rules are FORWARD, so they see guest<->host traffic in both directions:
+// our VM -> another tenant has dest in the pool, and another tenant -> our VM
+// has dest = our subnet, also in the pool — both dropped, on both vnets, so a
+// stale allow-list on one side still cannot open a path. There is deliberately
+// no "DROP source=pool": every tenant source is in the pool, so it would also
+// drop the VM's own egress to the internet (SNAT); replies pass as established.
+// ponytail: a vnet outside the pool (made before the pool was enforced) can
+// still be reached FROM a tenant (not into one); reconcile/migrate those vnets.
+// TODO(verify-lab): on the nftables firewall, (a) routed traffic between two
+// vnets of the shared zone is dropped by these rules, (b) a VM still reaches the
+// internet through SNAT, and (c) rules can be written on a vnet that is staged
+// but not yet applied (create reconciles before the apply).
+func isolationRules(projectCIDRs []string, pool string) []FirewallRule {
+	var out []FirewallRule
+	if len(projectCIDRs) > 0 { // an empty source/dest would mean "any"
+		own := strings.Join(projectCIDRs, ",")
+		out = append(out, FirewallRule{Type: "forward", Action: "ACCEPT", Source: own, Dest: own, Comment: isolationComment})
+	}
+	return append(out, FirewallRule{Type: "forward", Action: "DROP", Dest: pool, Comment: isolationComment})
+}
+
+// ReconcileIsolation brings every vnet of the project to isolationRules(project
+// subnets, pool) and switches its firewall on. Idempotent; call after a vnet of
+// the project is created or deleted (the allow-list spans all its subnets).
+func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string) error {
+	_, poolNet, err := net.ParseCIDR(pool)
+	if err != nil {
+		return fmt.Errorf("pve isolation: invalid cidrPool %q", pool)
+	}
+	vnets, err := s.C.ListSDNVnets(ctx)
+	if err != nil {
+		return err
+	}
+	var own, cidrs []string
+	for _, v := range vnets {
+		if pid, _, ok := aliasProject(v.Alias); !ok || pid != projectID || v.State == "deleted" {
+			continue
+		}
+		own = append(own, v.Vnet)
+		subs, err := s.C.ListSDNSubnets(ctx, v.Vnet)
+		if err != nil {
+			return err
+		}
+		for _, sub := range subs {
+			cidrs = append(cidrs, sub.CIDR)
+		}
+	}
+	want := isolationRules(cidrs, poolNet.String())
+	for _, vnet := range own {
+		if err := s.ensureVnetRules(ctx, vnet, want); err != nil {
+			return fmt.Errorf("pve isolation %s: %w", vnet, err)
+		}
+	}
+	return nil
+}
+
+// ensureVnetRules rewrites the managed rules only when they differ from want.
+func (s *Service) ensureVnetRules(ctx context.Context, vnet string, want []FirewallRule) error {
+	managed, err := s.managedVnetRules(ctx, vnet)
+	if err != nil {
+		return err
+	}
+	same := len(managed) == len(want)
+	for i := 0; same && i < len(want); i++ {
+		m, w := managed[i], want[i]
+		same = m.Type == w.Type && m.Action == w.Action && m.Source == w.Source && m.Dest == w.Dest
+	}
+	if !same {
+		if err := s.deleteVnetRules(ctx, vnet, managed); err != nil {
+			return err
+		}
+		// PVE prepends each new rule, so add bottom-up to land want[0] on top.
+		// Should it append instead, the DROPs end up first: fail closed, not open.
+		for i := len(want) - 1; i >= 0; i-- {
+			if err := s.C.AddVnetFirewallRule(ctx, vnet, want[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return s.C.EnableVnetFirewall(ctx, vnet)
+}
+
+func (s *Service) managedVnetRules(ctx context.Context, vnet string) ([]FirewallRule, error) {
+	rules, err := s.C.ListVnetFirewallRules(ctx, vnet)
+	if err != nil {
+		return nil, err
+	}
+	var out []FirewallRule
+	for _, r := range rules {
+		if r.Comment == isolationComment {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// deleteVnetRules removes rules bottom-up so the remaining positions stay valid
+// (rules arrive in ascending pos order).
+func (s *Service) deleteVnetRules(ctx context.Context, vnet string, rules []FirewallRule) error {
+	for i := len(rules) - 1; i >= 0; i-- {
+		if err := s.C.DeleteVnetFirewallRule(ctx, vnet, rules[i].Pos); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeVnetIsolation drops the vnet's managed rules (idempotent on a vnet with
+// no firewall config).
+func (s *Service) removeVnetIsolation(ctx context.Context, vnet string) error {
+	managed, err := s.managedVnetRules(ctx, vnet)
+	if err != nil {
+		if IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return s.deleteVnetRules(ctx, vnet, managed)
 }
 
 // ApplyAndWait commits pending SDN changes and waits the rollout. Caller holds

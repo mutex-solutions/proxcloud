@@ -183,11 +183,12 @@ func (a *Authenticator) verifyJWT(r *http.Request, raw string) (*httpx.RequestCo
 			continue
 		}
 		var claims struct {
-			Sub        string `json:"sub"`
-			Email      string `json:"email"`
-			GivenName  string `json:"given_name"`
-			FamilyName string `json:"family_name"`
-			Azp        string `json:"azp"`
+			Sub           string `json:"sub"`
+			Email         string `json:"email"`
+			EmailVerified any    `json:"email_verified"`
+			GivenName     string `json:"given_name"`
+			FamilyName    string `json:"family_name"`
+			Azp           string `json:"azp"`
 		}
 		if err := tok.Claims(&claims); err != nil {
 			continue
@@ -205,15 +206,28 @@ func (a *Authenticator) verifyJWT(r *http.Request, raw string) (*httpx.RequestCo
 		// the access token in the header never auto-initializes. Handlers that
 		// need the User look it up and 400 "User is not initialized" if absent.
 		return &httpx.RequestContext{
-			Sub:        claims.Sub,
-			Email:      claims.Email,
-			GivenName:  claims.GivenName,
-			FamilyName: claims.FamilyName,
-			Issuer:     realm.IssuerURI,
-			Azp:        claims.Azp,
+			Sub:           claims.Sub,
+			Email:         claims.Email,
+			EmailVerified: claimTrue(claims.EmailVerified),
+			GivenName:     claims.GivenName,
+			FamilyName:    claims.FamilyName,
+			Issuer:        realm.IssuerURI,
+			Azp:           claims.Azp,
 		}, true
 	}
 	return nil, false
+}
+
+// claimTrue reads a boolean claim. Keycloak sends a JSON bool; some IdPs send the
+// string "true". Anything else, absent included, is false (fail closed).
+func claimTrue(v any) bool {
+	switch b := v.(type) {
+	case bool:
+		return b
+	case string:
+		return strings.EqualFold(b, "true")
+	}
+	return false
 }
 
 // azpAllowed reports whether a token's azp claim is acceptable for a realm: no configured client

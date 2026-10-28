@@ -45,6 +45,9 @@ type CreateServerReq struct {
 	Password      string   // cloud-init user password
 	RootDiskGiB   int      // ≥ template disk; 0 = flavor DiskGb
 	GPUMappingIDs []string // reserved cluster PCI mappings for Spec.GPUModel (nil = no GPU)
+	// SecurityGroups are firewall group ids the VM references (ServerSecurityGroups
+	// resolves them; the platform always passes at least the project default).
+	SecurityGroups []string
 }
 
 // vmTags renders the identity tags for a create/read-back.
@@ -99,14 +102,28 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 		node = req.TemplateNode
 	}
 
+	// Every NIC the platform leaves on the VM carries firewall=1 — the cloned
+	// template's NICs included — or no group / ipfilter applies to it.
+	cloned, err := s.C.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		s.destroyBestEffort(ctx, node, vmid)
+		return nil, fmt.Errorf("pve create: read config: %w", err)
+	}
+	params := nicFirewallParams(cloned)
+	drop := extraNICKeys(cloned)
+	for _, k := range drop {
+		delete(params, k)
+	}
 	// Flavor + cloud-init + identity tags. sshkeys is the PVE quirk: the value must
 	// be URI-encoded ONCE MORE inside the form encoding.
-	params := map[string]string{
+	for k, v := range map[string]string{
 		"cores":     strconv.Itoa(req.Spec.VCPUs),
 		"memory":    strconv.Itoa(req.Spec.RAMMb),
 		"agent":     "1", // guest agent gives the sync its IP addresses
 		"tags":      req.vmTags(),
 		"ipconfig0": "ip=dhcp",
+	} {
+		params[k] = v
 	}
 	if len(req.GPUMappingIDs) > 0 {
 		for k, v := range GPUCreateParams(req.GPUMappingIDs) {
@@ -120,9 +137,9 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 		params["cipassword"] = req.Password
 	}
 	if req.Bridge != "" {
-		params["net0"] = "virtio,bridge=" + req.Bridge
+		params["net0"] = "virtio,bridge=" + req.Bridge + ",firewall=1"
 	}
-	cfgUPID, err := s.C.SetVMConfig(ctx, node, vmid, params)
+	cfgUPID, err := s.C.SetVMConfig(ctx, node, vmid, params, drop...)
 	if err == nil {
 		err = s.C.WaitTask(ctx, cfgUPID)
 	}
@@ -146,6 +163,21 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 			// resize failure is non-fatal: the VM boots with the template disk; the
 			// sync reports the honest size and the user can retry via volume extend.
 		}
+	}
+
+	// Firewall before the first boot: a VM never runs unfiltered. Failure destroys
+	// it rather than start it open.
+	for _, g := range req.SecurityGroups {
+		if err = s.C.AddVMGroupRule(ctx, node, vmid, g); err != nil {
+			break
+		}
+	}
+	if err == nil {
+		err = s.SecureVM(ctx, node, vmid)
+	}
+	if err != nil {
+		s.destroyBestEffort(ctx, node, vmid)
+		return nil, fmt.Errorf("pve create: firewall: %w", err)
 	}
 
 	if up, serr := s.C.StartVM(ctx, node, vmid); serr == nil {

@@ -13,16 +13,17 @@ import (
 
 // SDNZone is one row of GET /cluster/sdn/zones.
 type SDNZone struct {
-	Zone    string `json:"zone"`
-	Type    string `json:"type"` // "simple" | "vlan" | "vxlan" | "evpn"
-	Bridge  string `json:"bridge"`
-	Peers   string `json:"peers"`
-	MTU     int    `json:"mtu"`
-	Nodes   string `json:"nodes"`
-	IPAM    string `json:"ipam"`
-	DHCP    string `json:"dhcp"`
-	Pending any    `json:"pending"` // set when the zone has uncommitted changes
-	State   string `json:"state"`   // "new" | "deleted" | "changed" when pending
+	Zone     string `json:"zone"`
+	Type     string `json:"type"` // "simple" | "vlan" | "vxlan" | "evpn"
+	Bridge   string `json:"bridge"`
+	Peers    string `json:"peers"`
+	MTU      int    `json:"mtu"`
+	VRFVxlan int    `json:"vrf-vxlan"` // evpn: the zone's VRF VNI (unique per zone)
+	Nodes    string `json:"nodes"`
+	IPAM     string `json:"ipam"`
+	DHCP     string `json:"dhcp"`
+	Pending  any    `json:"pending"` // set when the zone has uncommitted changes
+	State    string `json:"state"`   // "new" | "deleted" | "changed" when pending
 }
 
 func (c *Client) ListSDNZones(ctx context.Context) ([]SDNZone, error) {

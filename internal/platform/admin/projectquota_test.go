@@ -21,6 +21,10 @@ func TestValidateProjectQuota(t *testing.T) {
 		{"non numeric", pgdoc.M{"gpu": map[string]any{"h100": "two"}}, false},
 		{"empty model", pgdoc.M{"gpu": map[string]any{" ": float64(1)}}, false},
 		{"canonical collision", pgdoc.M{"gpu": map[string]any{"NVIDIA_A100": float64(1), "nvidia-a100": float64(2)}}, false},
+		{"resource keys", pgdoc.M{"servers": float64(5), "vcpus": float64(0), "ramMb": float64(8192), "floatingIps": float64(1)}, true},
+		{"resource negative", pgdoc.M{"vcpus": float64(-1)}, false},
+		{"resource non integer", pgdoc.M{"diskGb": 10.5}, false},
+		{"resource non numeric", pgdoc.M{"networks": "3"}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

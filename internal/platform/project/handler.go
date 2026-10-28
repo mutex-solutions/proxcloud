@@ -80,6 +80,9 @@ type Handler struct {
 	// sdnLock serializes PVE SDN applies platform-wide (SetSDNLock; nil = proxmox
 	// network writes are unavailable).
 	sdnLock *lock.ShedLock
+	// publicIPs allocates Proxmox public-NIC addresses (SetPublicIPs; nil = public
+	// NICs cannot attach).
+	publicIPs *PublicIPRepo
 }
 
 // SetCustomMenu wires the customMenuItem reader into the /init menu build.

@@ -76,11 +76,12 @@ func computeLanguage(ci map[string]any) string {
 
 // Claims is the minimal principal info extracted from a validated token.
 type Claims struct {
-	Sub        string
-	Email      string
-	GivenName  string
-	FamilyName string
-	Issuer     string
+	Sub           string
+	Email         string
+	EmailVerified bool // the IdP's email_verified claim
+	GivenName     string
+	FamilyName    string
+	Issuer        string
 }
 
 // Repo provides persistence operations for User documents in the `users` collection.
@@ -112,6 +113,21 @@ func (r *Repo) FindByEmail(ctx context.Context, email string) (*User, error) {
 	}
 	return &u, nil
 }
+
+// FindVerifiedByEmail returns the user whose email the IdP has verified, or nil.
+// Matching a person by email (org add-member, project invites) must use this:
+// anyone can sign up with an address they do not own.
+func (r *Repo) FindVerifiedByEmail(ctx context.Context, email string) (*User, error) {
+	var u User
+	found, err := r.col.FindOne(ctx, pgdoc.M{"email": email, "emailConfirmedAt": pgdoc.M{"$ne": nil}}, &u)
+	if err != nil || !found {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// EmailVerified reports whether the IdP has confirmed the user's current email.
+func (u *User) EmailVerified() bool { return u.Email != "" && u.EmailConfirmedAt != nil }
 
 func (r *Repo) FindBySub(ctx context.Context, sub string) (*User, error) {
 	var u User
@@ -145,7 +161,8 @@ func (r *Repo) Require(ctx context.Context, sub string) (*User, error) {
 	// Absent → create from the already-validated access-token claims carried on the context.
 	if rc := httpx.RC(ctx); rc != nil && rc.Sub != "" && rc.Sub == sub {
 		return r.FromClaims(ctx, Claims{
-			Sub: rc.Sub, Email: rc.Email, GivenName: rc.GivenName, FamilyName: rc.FamilyName, Issuer: rc.Issuer,
+			Sub: rc.Sub, Email: rc.Email, EmailVerified: rc.EmailVerified,
+			GivenName: rc.GivenName, FamilyName: rc.FamilyName, Issuer: rc.Issuer,
 		})
 	}
 	return nil, httpx.BadRequest("User is not initialized")
@@ -171,6 +188,9 @@ func (r *Repo) FromClaims(ctx context.Context, c Claims) (*User, error) {
 			CreatedAt:    &now,
 			UpdatedAt:    &now,
 		}
+		if c.Email != "" && c.EmailVerified {
+			u.EmailConfirmedAt = &now
+		}
 		id, err := r.col.InsertOne(ctx, u)
 		if err != nil {
 			// Lost a concurrent first-sight race (sub_unique): another request
@@ -187,9 +207,23 @@ func (r *Repo) FromClaims(ctx context.Context, c Claims) (*User, error) {
 	// changed — FromClaims runs on every request and an unconditional updatedAt bump
 	// would issue a users UPDATE per API call.
 	set := pgdoc.M{}
-	if c.Email != "" && c.Email != existing.Email {
-		set["email"] = c.Email
-		existing.Email = c.Email
+	var unset []string
+	if c.Email != "" {
+		changed := c.Email != existing.Email
+		if changed {
+			set["email"] = c.Email
+			existing.Email = c.Email
+		}
+		// emailConfirmedAt mirrors the claim for the CURRENT email: stamped when it
+		// becomes verified (or changes while verified), cleared when it is not.
+		switch {
+		case c.EmailVerified && (changed || existing.EmailConfirmedAt == nil):
+			set["emailConfirmedAt"] = now
+			existing.EmailConfirmedAt = &now
+		case !c.EmailVerified && existing.EmailConfirmedAt != nil:
+			unset = append(unset, "emailConfirmedAt")
+			existing.EmailConfirmedAt = nil
+		}
 	}
 	if c.GivenName != "" && c.GivenName != existing.FirstName {
 		set["firstName"] = c.GivenName
@@ -199,9 +233,9 @@ func (r *Repo) FromClaims(ctx context.Context, c Claims) (*User, error) {
 		set["lastName"] = c.FamilyName
 		existing.LastName = c.FamilyName
 	}
-	if len(set) > 0 {
+	if len(set) > 0 || len(unset) > 0 {
 		set["updatedAt"] = now
-		if _, err := r.col.SetFieldsOne(ctx, pgdoc.M{"sub": c.Sub}, set, nil); err != nil {
+		if _, err := r.col.SetFieldsOne(ctx, pgdoc.M{"sub": c.Sub}, set, unset); err != nil {
 			return nil, err
 		}
 		existing.UpdatedAt = &now

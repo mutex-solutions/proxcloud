@@ -70,7 +70,7 @@ var adminPlatformTools = []toolDef{
 	},
 	{
 		name:   "set_provider_default_quota",
-		desc:   "Replace the provider's default OpenStack quota config (config.provisioning.quota) — stored config only, not pushed to the cloud. Body example: {instances: 10, cores: 20, ram: 51200, volumes: 10, gigabytes: 500, floatingips: 3, ...}.",
+		desc:   "Replace the provider's default project quota (config.provisioning.quota) — stored config only, not pushed to the cloud. Proxmox: {servers, vcpus, ramMb, diskGb, networks, floatingIps, gpu: {\"<model>\"|\"*\": n}} — seeded onto each new project and enforced for projects without their own quota (OpenStack names instances/cores/ram/gigabytes/floatingips are accepted as aliases). Body example: {servers: 10, vcpus: 20, ramMb: 51200, diskGb: 500, networks: 5, floatingIps: 2}.",
 		method: "PUT",
 		path:   "/api/v1/admin/service/{id}/quota",
 		params: []param{

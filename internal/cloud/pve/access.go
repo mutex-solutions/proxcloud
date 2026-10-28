@@ -58,3 +58,73 @@ func (c *Client) SetACL(ctx context.Context, path, roles string, tokens []string
 	}.values()
 	return c.put(ctx, "/access/acl", form, nil)
 }
+
+// PrivCheck is one ACL path and the privileges the token must hold there.
+type PrivCheck struct {
+	Path  string
+	Privs []string
+}
+
+// PlatformPrivileges is the ProxCloudPlatform role as the portal token needs it,
+// per ACL path (docs/proxmox-permissions.md keeps the pveum commands in sync).
+// /pool stands in for every tenant pool: pools are created at runtime and
+// inherit from it. Names verified against the PVE 9 pveum docs and API schema.
+// TODO(verify-lab): pool inheritance and the NoAccess override on
+// /pool/proxcloud-system are documented behaviour, not yet run on the lab.
+var PlatformPrivileges = []PrivCheck{
+	// cluster status, PCI scan, datacenter firewall options and the cluster
+	// security groups all check "/" itself (granted with propagate=0).
+	{Path: "/", Privs: []string{"Sys.Audit", "Sys.Modify"}},
+	// node firewall options (nftables preflight) and node network list
+	// (management-bridge guard) check /nodes/{node}: PVEAuditor on /nodes.
+	{Path: "/nodes", Privs: []string{"Sys.Audit"}},
+	{Path: "/pool", Privs: []string{
+		"Pool.Allocate", "Pool.Audit",
+		"VM.Allocate", "VM.Audit", "VM.Clone",
+		"VM.Config.CDROM", "VM.Config.CPU", "VM.Config.Cloudinit", "VM.Config.Disk",
+		"VM.Config.HWType", "VM.Config.Memory", "VM.Config.Network", "VM.Config.Options",
+		"VM.Console", "VM.GuestAgent.Audit", "VM.Migrate", "VM.PowerMgmt",
+		"VM.Snapshot", "VM.Snapshot.Rollback",
+	}},
+	{Path: "/sdn", Privs: []string{"SDN.Allocate", "SDN.Audit", "SDN.Use"}},
+	{Path: "/storage", Privs: []string{"Datastore.AllocateSpace", "Datastore.Audit"}},
+	{Path: "/mapping/pci", Privs: []string{"Mapping.Audit", "Mapping.Use"}},
+}
+
+// Permissions returns the calling token's effective privileges on path
+// (GET /access/permissions?path=…; a token may always read its own).
+// TODO(verify-lab): confirm on PVE 9 that a path with no ACL of its own reports
+// the inherited privileges and that a privsep token gets the user∩token set.
+func (c *Client) Permissions(ctx context.Context, path string) (map[string]bool, error) {
+	var out map[string]map[string]any // priv → propagate flag
+	if err := c.get(ctx, "/access/permissions", formVals{"path": path}.values(), &out); err != nil {
+		return nil, err
+	}
+	privs := map[string]bool{}
+	for p := range out[path] {
+		privs[p] = true
+	}
+	return privs, nil
+}
+
+// MissingPrivileges checks each path and returns one line per path that lacks
+// privileges, e.g. "SDN.Allocate, SDN.Use on /sdn". Empty means all present.
+func (c *Client) MissingPrivileges(ctx context.Context, checks []PrivCheck) ([]string, error) {
+	var out []string
+	for _, chk := range checks {
+		have, err := c.Permissions(ctx, chk.Path)
+		if err != nil {
+			return nil, err
+		}
+		var miss []string
+		for _, p := range chk.Privs {
+			if !have[p] {
+				miss = append(miss, p)
+			}
+		}
+		if len(miss) > 0 {
+			out = append(out, strings.Join(miss, ", ")+" on "+chk.Path)
+		}
+	}
+	return out, nil
+}

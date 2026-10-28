@@ -93,7 +93,8 @@ func (h *Handler) getCustomer(w http.ResponseWriter, r *http.Request) {
 		// TODO: the id_token param could be re-decoded here; instead we trust
 		// the already-validated access-token claims (same principal) to create.
 		u, err := h.users.FromClaims(r.Context(), user.Claims{
-			Sub: rc.Sub, Email: rc.Email, GivenName: rc.GivenName, FamilyName: rc.FamilyName, Issuer: rc.Issuer,
+			Sub: rc.Sub, Email: rc.Email, EmailVerified: rc.EmailVerified,
+			GivenName: rc.GivenName, FamilyName: rc.FamilyName, Issuer: rc.Issuer,
 		})
 		if err != nil || u == nil {
 			httpx.Err(w, http.StatusInternalServerError, 500, "user.create.failed")

@@ -6,9 +6,11 @@ package project
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,25 +34,37 @@ const sdnApplyLockName = "sdn-apply"
 // after this long.
 const sdnApplyMaxFor = 3 * time.Minute
 
-// withSDNLock runs fn under the sdn-apply lock; busy → 409.
-func (h *Handler) withSDNLock(ctx context.Context, w http.ResponseWriter, fn func() error) bool {
+// lockSDN takes the sdn-apply lock and returns its release; busy → 409.
+func (h *Handler) lockSDN(ctx context.Context) (func(), error) {
 	if h.sdnLock == nil {
-		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "network service not configured")
-		return false
+		return nil, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "network service not configured")
 	}
 	now := time.Now().UTC()
 	ok, err := h.sdnLock.Lock(ctx, sdnApplyLockName, sdnApplyMaxFor, now)
 	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "Another network change is being applied — retry in a moment")
+	}
+	return func() { _ = h.sdnLock.Unlock(ctx, sdnApplyLockName, 0, now, time.Now().UTC()) }, nil
+}
+
+// withSDNLock runs fn under the sdn-apply lock; busy → 409.
+func (h *Handler) withSDNLock(ctx context.Context, w http.ResponseWriter, fn func() error) bool {
+	unlock, err := h.lockSDN(ctx)
+	if err != nil {
 		h.fail(w, err)
 		return false
 	}
-	if !ok {
-		httpx.Err(w, http.StatusConflict, http.StatusConflict, "Another network change is being applied — retry in a moment")
-		return false
-	}
-	defer func() { _ = h.sdnLock.Unlock(ctx, sdnApplyLockName, 0, now, time.Now().UTC()) }()
+	defer unlock()
 	if err := fn(); err != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+		// Validation done under the lock (CIDR checks) keeps its own status.
+		var he *httpx.HTTPError
+		if !errors.As(err, &he) {
+			he = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+		}
+		h.fail(w, he)
 		return false
 	}
 	return true
@@ -58,7 +72,9 @@ func (h *Handler) withSDNLock(ctx context.Context, w http.ResponseWriter, fn fun
 
 // pveCreateNetwork handles POST /project/{id}/cloud {type:NETWORK} on a proxmox
 // provider. Body: {name, cidr?, enableDhcp?, snat?} — cidr blank auto-carves a
-// /24 from the provider's cidrPool.
+// /24 from the provider's cidrPool; a given cidr must sit inside the pool and
+// overlap no subnet on the cluster (any project). The vnet gets its tenant
+// isolation rules before the SDN apply, so it never goes live unisolated.
 func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
 	ctx := r.Context()
 	name := strAny(data["name"])
@@ -76,22 +92,15 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "No network zone is configured on this provider")
 		return
 	}
+	if herr := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{Networks: 1}); herr != nil {
+		h.fail(w, herr)
+		return
+	}
 	ps, ok2 := h.pveService(w, es)
 	if !ok2 {
 		return
 	}
-	cidr := strAny(data["cidr"])
-	if cidr == "" {
-		carved, cerr := h.pveCarveCIDR(ctx, es.ID, netCfg.CIDRPool)
-		if cerr != nil {
-			h.fail(w, cerr)
-			return
-		}
-		cidr = carved
-	} else if _, _, err := net.ParseCIDR(cidr); err != nil {
-		h.fail(w, httpx.BadRequest("Invalid CIDR"))
-		return
-	}
+	requested := strAny(data["cidr"])
 	dhcp := true
 	if v, ok := data["enableDhcp"].(bool); ok {
 		dhcp = v
@@ -102,7 +111,21 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 	}
 	var result *pve.NetworkResult
 	okRun := h.withSDNLock(ctx, w, func() error {
-		if err := ps.EnsureZone(ctx, zone); err != nil {
+		// CIDR pick under the lock: the live subnet list then includes every staged
+		// network, so two concurrent creates cannot land on the same range.
+		used, err := ps.SubnetCIDRs(ctx)
+		if err != nil {
+			return err
+		}
+		cidr, herr := pvePickCIDR(requested, netCfg.CIDRPool, used)
+		if herr != nil {
+			return herr
+		}
+		if netCfg.Isolation == pve.IsolationEVPN {
+			if zone, err = ps.EnsureProjectZone(ctx, proj.ID, zone, netCfg.EVPNController); err != nil {
+				return fmt.Errorf("ensure project zone: %w", err)
+			}
+		} else if err := ps.EnsureZone(ctx, zone); err != nil {
 			return fmt.Errorf("ensure zone: %w", err)
 		}
 		res, err := ps.CreateNetwork(ctx, pve.CreateNetworkReq{
@@ -111,11 +134,16 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 		if err != nil {
 			return err
 		}
+		if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool); err != nil {
+			_ = ps.DeleteNetwork(ctx, proj.ID, res.Vnet)
+			return fmt.Errorf("isolation: %w", err)
+		}
 		result = res
 		if err := ps.ApplyAndWait(ctx); err != nil {
 			// The apply failed with the vnet staged — unstage and re-apply so the SDN
 			// config never sits pending (risk #2 in the plan).
 			_ = ps.DeleteNetwork(ctx, proj.ID, res.Vnet)
+			_ = ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool)
 			_ = ps.ApplyAndWait(ctx)
 			return fmt.Errorf("apply: %w", err)
 		}
@@ -159,20 +187,74 @@ func (h *Handler) pveDeleteNetwork(ctx context.Context, w http.ResponseWriter, e
 		httpx.Err(w, http.StatusConflict, http.StatusConflict, "Network is in use by a server")
 		return false
 	}
+	netCfg := es.PVENetworkConfig()
 	return h.withSDNLock(ctx, w, func() error {
 		if err := ps.DeleteNetwork(ctx, proj.ID, cr.ExternalID); err != nil {
+			return err
+		}
+		// Shrink the allow-list of the project's remaining vnets (a freed CIDR may
+		// be carved for another tenant next). No pool = nothing was ever isolated.
+		if netCfg.CIDRPool != "" {
+			if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool); err != nil {
+				return fmt.Errorf("isolation: %w", err)
+			}
+		}
+		if err := ps.ApplyAndWait(ctx); err != nil {
+			return err
+		}
+		if netCfg.Isolation != pve.IsolationEVPN {
+			return nil
+		}
+		// Second apply: the zone can only go once its last vnet is applied away.
+		// TODO(verify-lab): PVE may accept zone+vnet removal in one apply.
+		gone, err := ps.DeleteProjectZoneIfEmpty(ctx, proj.ID)
+		if err != nil || !gone {
 			return err
 		}
 		return ps.ApplyAndWait(ctx)
 	})
 }
 
-// pveCarveCIDR finds the first free /24 inside the provider's cidrPool, checked
-// against every cached NETWORK row of the SERVICE (all projects — the pool is
-// shared cluster-wide).
-func (h *Handler) pveCarveCIDR(ctx context.Context, svcID, pool string) (string, *httpx.HTTPError) {
+// pveTeardownNetworks removes what a torn-down project leaves on the SDN and the
+// cluster firewall once its VMs are gone: its vnets (+ isolation rules), its EVPN
+// zone (evpn-per-project; a no-op in shared mode) and its security groups.
+// Idempotent, so a failed teardown can simply be re-run.
+func (h *Handler) pveTeardownNetworks(ctx context.Context, ps *pve.Service, projectID string) error {
+	unlock, err := h.lockSDN(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	staged, err := ps.TeardownProjectNetworks(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if staged {
+		if err := ps.ApplyAndWait(ctx); err != nil {
+			return err
+		}
+	}
+	// The zone only goes once its last vnet is applied away (see pveDeleteNetwork).
+	gone, err := ps.DeleteProjectZoneIfEmpty(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if gone {
+		if err := ps.ApplyAndWait(ctx); err != nil {
+			return err
+		}
+	}
+	return ps.DeleteProjectSecurityGroups(ctx, projectID)
+}
+
+// pvePickCIDR returns the network's CIDR: the requested one (canonicalized)
+// when it sits inside the provider's cidrPool and overlaps nothing in used, or
+// — when requested is blank — the first free /24 of the pool. used is every
+// subnet on the cluster (all projects): non-overlap is what the shared-zone
+// isolation rules rely on.
+func pvePickCIDR(requested, pool string, used []string) (string, *httpx.HTTPError) {
 	if pool == "" {
-		return "", httpx.BadRequest("cidr is required (no cidrPool configured)")
+		return "", httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "No network CIDR pool is configured on this provider")
 	}
 	_, poolNet, err := net.ParseCIDR(pool)
 	if err != nil {
@@ -182,34 +264,54 @@ func (h *Handler) pveCarveCIDR(ctx context.Context, svcID, pool string) (string,
 	if bits != 32 || ones > 24 {
 		return "", httpx.BadRequest("cidrPool must be an IPv4 range of /24 or larger")
 	}
-	rows, err := h.cloud.FindByServiceAndType(ctx, svcID, cloud.TypeNetwork)
-	if err != nil {
-		return "", httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
+	var usedNets []*net.IPNet
+	for _, u := range used {
+		if _, n, err := net.ParseCIDR(u); err == nil {
+			usedNets = append(usedNets, n)
+		}
 	}
-	used := map[string]bool{}
-	for i := range rows {
-		if netMap, ok := rows[i].Data["network"].(map[string]any); ok {
-			if c := strAny(netMap["cidr"]); c != "" {
-				used[c] = true
+	overlaps := func(n *net.IPNet) bool {
+		for _, u := range usedNets {
+			if u.Contains(n.IP) || n.Contains(u.IP) {
+				return true
 			}
 		}
+		return false
+	}
+	if requested != "" {
+		_, want, err := net.ParseCIDR(requested)
+		if err != nil {
+			return "", httpx.BadRequest("Invalid CIDR")
+		}
+		wantOnes, _ := want.Mask.Size()
+		if !poolNet.Contains(want.IP) || wantOnes < ones {
+			return "", httpx.BadRequest("CIDR must be inside the provider's network pool " + poolNet.String())
+		}
+		if wantOnes > 29 {
+			return "", httpx.BadRequest("CIDR must be /29 or larger")
+		}
+		if overlaps(want) {
+			return "", httpx.NewError(http.StatusConflict, http.StatusConflict, "CIDR overlaps an existing network")
+		}
+		return want.String(), nil
 	}
 	base := poolNet.IP.To4()
 	n := uint32(base[0])<<24 | uint32(base[1])<<16 | uint32(base[2])<<8 | uint32(base[3])
 	count := 1 << (24 - ones) // /24s in the pool
 	for i := 0; i < count; i++ {
 		c := n + uint32(i)<<8
-		cidr := fmt.Sprintf("%d.%d.%d.0/24", byte(c>>24), byte(c>>16), byte(c>>8))
-		if !used[cidr] {
-			return cidr, nil
+		cand := &net.IPNet{IP: net.IPv4(byte(c>>24), byte(c>>16), byte(c>>8), 0).To4(), Mask: net.CIDRMask(24, 32)}
+		if !overlaps(cand) {
+			return cand.String(), nil
 		}
 	}
 	return "", httpx.NewError(http.StatusConflict, http.StatusConflict, "The provider's network CIDR pool is exhausted")
 }
 
 // pvePublicNetworkAction handles ATTACH_PUBLIC_NETWORK / DETACH_PUBLIC_NETWORK on
-// a SERVER: inbound reachability = a second NIC on an admin-designated bridge
-// (no floating IPs in the PVE model). Returns handled.
+// a SERVER: inbound reachability = a second NIC (net1) on an admin-designated
+// bridge with one address from that network's pool (no floating IPs in the PVE
+// model). Returns handled.
 func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if action != "ATTACH_PUBLIC_NETWORK" && action != "DETACH_PUBLIC_NETWORK" {
 		return false
@@ -220,43 +322,128 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox client not ready")
 		return true
 	}
+	if h.publicIPs == nil {
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "public IP service not configured")
+		return true
+	}
 	vm, verr := ps.ResolveVM(ctx, proj.ID, cr.ExternalID)
 	if verr != nil || vm == nil {
 		h.fail(w, httpx.NotFound("Server not found"))
 		return true
 	}
 	if action == "DETACH_PUBLIC_NETWORK" {
-		if up, err := ps.C.SetVMConfig(ctx, vm.Node, vm.VMID, nil, "net1"); err == nil {
-			_ = ps.C.WaitTask(ctx, up)
+		// Empty net1's ipfilter first: should the unplug only go pending (no
+		// hotplug), the NIC can no longer use the address once it is reallocated.
+		// The address goes back to the pool only after the NIC is gone.
+		// TODO(verify-lab): an empty ipfilter-net1 set drops all net1 egress, and
+		// deleting an absent net1/ipconfig1 key only warns.
+		derr := ps.SetIPFilter(ctx, vm.Node, vm.VMID, "net1", nil)
+		var up pve.UPID
+		if derr == nil {
+			up, derr = ps.C.SetVMConfig(ctx, vm.Node, vm.VMID, nil, "net1", "ipconfig1")
+		}
+		if derr == nil {
+			derr = ps.C.WaitTask(ctx, up)
+		}
+		if derr == nil {
+			derr = h.publicIPs.ReleaseServer(ctx, es.ID, cr.ExternalID)
+		}
+		if derr != nil {
+			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, derr.Error()))
+			return true
 		}
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 		httpx.OK(w, map[string]any{"result": map[string]any{}})
 		return true
 	}
 	netID := strAny(data["networkId"])
-	allowed := false
-	for _, pn := range es.PVENetworkConfig().PublicNetworks {
-		if pn.ID == netID {
-			allowed = true
+	var pn *externalservice.PVEPublicNetwork
+	for _, n := range es.PVENetworkConfig().PublicNetworks {
+		if n.ID == netID {
+			pn = &n
 			break
 		}
 	}
 	// Per-project restriction rides the same PublicNetworkIds field as OpenStack.
-	if !allowed || !publicNetworkAllowed(proj, netID) {
+	if pn == nil || !publicNetworkAllowed(proj, netID) {
 		h.fail(w, httpx.BadRequest("Public network is not available"))
 		return true
 	}
-	up, serr := ps.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{
-		"net1": "virtio,bridge=" + netID,
-	})
+	// Never the management bridge (test-connection also flags it, but the config
+	// may have changed since).
+	mgmt, merr := ps.C.ManagementBridges(ctx, vm.Node)
+	if merr != nil {
+		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, merr.Error()))
+		return true
+	}
+	if _, bad := mgmt[netID]; bad {
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable,
+			fmt.Sprintf("Public network %s is the Proxmox management bridge and cannot be attached", netID))
+		return true
+	}
+	held, err := h.publicIPs.ForServer(ctx, es.ID, cr.ExternalID)
+	if err != nil {
+		h.fail(w, err)
+		return true
+	}
+	var ip *PublicIP
+	for i := range held {
+		// PVE reuses vmids: a row a failed release left behind for another
+		// project's deleted VM is never handed to this one.
+		if held[i].NIC == "net1" && held[i].ProjectID == proj.ID {
+			ip = &held[i]
+		}
+	}
+	if ip != nil && ip.NetworkID != netID {
+		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "Server already has a public network — detach it first"))
+		return true
+	}
+	fresh := ip == nil // a repeat attach to the same network keeps its address
+	if fresh {
+		if herr := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{FloatingIPs: 1}); herr != nil {
+			h.fail(w, herr)
+			return true
+		}
+		if ip, err = h.publicIPs.Allocate(ctx, es.ID, proj.ID, cr.ExternalID, "net1", *pn); err != nil {
+			h.fail(w, err)
+			return true
+		}
+	}
+	// Anti-spoof first (VMs made before the firewall default get it here), then
+	// pin net1 to its /32, then plug the NIC: it never comes up unfiltered.
+	// TODO(verify-lab): ipconfig1 reaches the guest only when cloud-init re-runs
+	// (next boot), and a second gw= next to net0's DHCP default route needs a
+	// guest route-metric check.
+	ipcfg := "ip=" + ip.IP + "/" + strconv.Itoa(ip.Prefix)
+	if pn.Gateway != "" {
+		ipcfg += ",gw=" + pn.Gateway
+	}
+	plugged := false
+	serr := ps.SecureVM(ctx, vm.Node, vm.VMID)
+	if serr == nil {
+		serr = ps.SetIPFilter(ctx, vm.Node, vm.VMID, "net1", []string{ip.IP + "/32"})
+	}
+	var up pve.UPID
+	if serr == nil {
+		plugged = true
+		up, serr = ps.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{
+			"net1":      "virtio,bridge=" + netID + ",firewall=1",
+			"ipconfig1": ipcfg,
+		})
+	}
 	if serr == nil {
 		serr = ps.C.WaitTask(ctx, up)
 	}
 	if serr != nil {
+		// Only an address no NIC was ever plugged with goes straight back; past
+		// that point it stays held until a detach.
+		if fresh && !plugged {
+			_ = h.publicIPs.ReleaseServer(ctx, es.ID, cr.ExternalID)
+		}
 		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, serr.Error()))
 		return true
 	}
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
-	httpx.OK(w, map[string]any{"result": map[string]any{}})
+	httpx.OK(w, map[string]any{"result": map[string]any{"ip": ip.IP, "networkId": netID}})
 	return true
 }

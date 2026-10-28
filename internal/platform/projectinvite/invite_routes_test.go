@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/platform/project"
+	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -54,5 +56,32 @@ func TestRoutes_inviteCreate(t *testing.T) {
 		if !r.Match(rctx, tc.method, tc.path) {
 			t.Errorf("no route for %s %s", tc.method, tc.path)
 		}
+	}
+}
+
+// TestCallerEmail pins the invite match rule: only an IdP-verified email matches
+// invites; blank (which ByEmail/ByEmailAndToken treat as "no match") otherwise.
+func TestCallerEmail(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name string
+		u    user.User
+		want string
+	}{
+		{"verified", user.User{Email: "a@x.io", EmailConfirmedAt: &now}, "a@x.io"},
+		{"unverified", user.User{Email: "a@x.io"}, ""},
+		{"no email", user.User{EmailConfirmedAt: &now}, ""},
+	}
+	for _, c := range cases {
+		if got := callerEmail(&c.u); got != c.want {
+			t.Errorf("%s: callerEmail = %q, want %q", c.name, got, c.want)
+		}
+	}
+	r := &Repo{} // a blank email returns before touching the store
+	if inv, err := r.ByEmailAndToken(context.Background(), "", "tok"); inv != nil || err != nil {
+		t.Errorf("ByEmailAndToken(\"\") = %v, %v; want nil, nil", inv, err)
+	}
+	if invs, err := r.ByEmail(context.Background(), ""); invs != nil || err != nil {
+		t.Errorf("ByEmail(\"\") = %v, %v; want nil, nil", invs, err)
 	}
 }

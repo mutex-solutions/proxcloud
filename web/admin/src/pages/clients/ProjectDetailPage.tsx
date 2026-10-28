@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Dialog,
   DialogContent,
@@ -57,8 +58,9 @@ type ProjectDoc = {
   publicNetworksVisible?: boolean
   // false/absent = the client dashboard does not show the region GPU capacity; true = it does.
   gpuCapacityVisible?: boolean
-  // Admin-managed per-project quota; gpu = {model alias (or "*") → device limit}.
-  quota?: { gpu?: Record<string, number> }
+  // Admin-managed per-project quota; gpu = {model alias (or "*") → device limit}, plus the
+  // Proxmox resource keys (RESOURCE_QUOTA_KEYS). Other stored keys are preserved on save.
+  quota?: { gpu?: Record<string, number> } & Record<string, unknown>
   createdAt?: string
 }
 
@@ -129,6 +131,16 @@ function normalizeGPUModel(value: string): string {
   const trimmed = value.trim()
   return trimmed === "*" ? "*" : trimmed.toLowerCase().replaceAll("_", "-")
 }
+
+// The resource keys the Proxmox create paths enforce (externalservice.PVEQuotaKeys).
+const RESOURCE_QUOTA_KEYS: Array<{ key: string; label: string }> = [
+  { key: "servers", label: "Servers" },
+  { key: "vcpus", label: "vCPUs" },
+  { key: "ramMb", label: "RAM (MiB)" },
+  { key: "diskGb", label: "Disk (GiB)" },
+  { key: "networks", label: "Networks" },
+  { key: "floatingIps", label: "Public IPs" },
+]
 
 function parseGPUQuotaLimit(value: string): number | undefined {
   if (!/^\d+$/.test(value.trim())) return undefined
@@ -211,6 +223,18 @@ export default function ProjectDetailPage() {
     !!externalServiceId && tab === "quota",
   )
   const [quotaRows, setQuotaRows] = useState<Array<{ model: string; limit: string }>>([])
+  const [resourceQuota, setResourceQuota] = useState<Record<string, string>>({})
+  useEffect(() => {
+    const next: Record<string, string> = {}
+    for (const { key } of RESOURCE_QUOTA_KEYS) {
+      const v = project?.quota?.[key]
+      next[key] = v != null ? String(v) : ""
+    }
+    setResourceQuota(next)
+  }, [project?.quota])
+  const resourceQuotaValid = RESOURCE_QUOTA_KEYS.every(
+    ({ key }) => !(resourceQuota[key] ?? "").trim() || parseGPUQuotaLimit(resourceQuota[key]) !== undefined,
+  )
   const [quotaModel, setQuotaModel] = useState("")
   const [quotaLimit, setQuotaLimit] = useState("")
   useEffect(() => {
@@ -431,21 +455,32 @@ export default function ProjectDetailPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
-  // PUT /admin/project/{id}/quota (projectquota.go) — stores {gpu:{model→limit}}; enforcement is
-  // the server create/resize gate. An empty object clears the quota (unlimited).
+  // PUT /admin/project/{id}/quota (projectquota.go) — replaces the whole quota doc: resource keys +
+  // {gpu:{model→limit}} (other stored keys preserved). Enforcement is the cloud create/resize gate.
+  // An empty object clears the quota; a Proxmox project then uses its provider's default quota.
   const saveQuota = useMutation({
-    mutationFn: (rows: Array<{ model: string; limit: string }>) => {
+    mutationFn: () => {
+      const body: Record<string, unknown> = { ...(project?.quota ?? {}) }
+      delete body.gpu
+      for (const { key, label } of RESOURCE_QUOTA_KEYS) {
+        const raw = (resourceQuota[key] ?? "").trim()
+        if (!raw) {
+          delete body[key]
+          continue
+        }
+        const limit = parseGPUQuotaLimit(raw)
+        if (limit === undefined) throw new Error(`${label} limit must be a non-negative whole number`)
+        body[key] = limit
+      }
       const gpu: Record<string, number> = {}
-      for (const row of rows) {
+      for (const row of quotaRows) {
         const model = normalizeGPUModel(row.model)
         const limit = parseGPUQuotaLimit(row.limit)
         if (!model || limit === undefined) throw new Error("GPU limits must be non-negative whole numbers")
         gpu[model] = limit
       }
-      return apiFetch(`${projectPath}/quota`, {
-        method: "PUT",
-        body: Object.keys(gpu).length ? { gpu } : {},
-      })
+      if (Object.keys(gpu).length) body.gpu = gpu
+      return apiFetch(`${projectPath}/quota`, { method: "PUT", body })
     },
     onSuccess: () => {
       toast.success("Project quota saved")
@@ -897,7 +932,53 @@ export default function ProjectDetailPage() {
             )}
           </TabsContent>
 
-          <TabsContent value="quota" className="mt-4">
+          <TabsContent value="quota" className="mt-4 space-y-4">
+            <Card>
+              <CardHeader>
+                <h2 className="text-base font-semibold">Resource quota</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Enforced when servers, volumes, networks and public IPs are created or resized on Proxmox. Blank =
+                  unlimited. A project with no quota at all uses its provider&apos;s default quota.
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                  {RESOURCE_QUOTA_KEYS.map(({ key, label }) => {
+                    const raw = resourceQuota[key] ?? ""
+                    const invalid = !!raw.trim() && parseGPUQuotaLimit(raw) === undefined
+                    return (
+                      <div key={key} className="grid gap-1">
+                        <Label className="text-xs" htmlFor={`rq-${key}`}>
+                          {label}
+                        </Label>
+                        <Input
+                          id={`rq-${key}`}
+                          type="number"
+                          min={0}
+                          step={1}
+                          placeholder="Unlimited"
+                          aria-invalid={invalid}
+                          aria-describedby={invalid ? `rq-${key}-error` : undefined}
+                          value={raw}
+                          onChange={(e) => setResourceQuota((q) => ({ ...q, [key]: e.target.value }))}
+                        />
+                        {invalid ? (
+                          <p id={`rq-${key}-error`} className="text-xs text-destructive">
+                            Whole number required.
+                          </p>
+                        ) : null}
+                      </div>
+                    )
+                  })}
+                </div>
+                <Button
+                  onClick={() => saveQuota.mutate()}
+                  disabled={saveQuota.isPending || !quotaDraftValid || !resourceQuotaValid}
+                >
+                  {saveQuota.isPending ? "Saving…" : "Save resource quota"}
+                </Button>
+              </CardContent>
+            </Card>
             <Card>
               <CardHeader className="flex flex-row items-start justify-between gap-3">
                 <div>
@@ -1132,8 +1213,8 @@ export default function ProjectDetailPage() {
                     Add limit
                   </Button>
                   <Button
-                    onClick={() => saveQuota.mutate(quotaRows)}
-                    disabled={saveQuota.isPending || !quotaDraftValid}
+                    onClick={() => saveQuota.mutate()}
+                    disabled={saveQuota.isPending || !quotaDraftValid || !resourceQuotaValid}
                   >
                     {saveQuota.isPending ? "Saving…" : "Save quota"}
                   </Button>

@@ -266,6 +266,8 @@ func run() error {
 	projectH.SetPVEFlavors(pveFlavorRepo)
 	// SDN applies are cluster-global on PVE and must be serialized platform-wide.
 	projectH.SetSDNLock(lock.New(pg))
+	// Public-NIC IP allocations (pgdoc `pvePublicIp`).
+	projectH.SetPublicIPs(project.NewPublicIPRepo(pg))
 
 	// Promotion (deposit config) + Affiliate (cfy check + project config/log) — client reads.
 	// The promo-redeem authz gate resolves the bp's org WITH a membership check on the caller

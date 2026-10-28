@@ -32,6 +32,9 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 - [cloud-integration.md](cloud-integration.md) — the OpenStack facade: external
   services, the resource cache, sync, metrics, and notifications; plus the
   Ceph RGW S3 object-store backend that runs alongside it.
+- [proxmox-permissions.md](proxmox-permissions.md) — least-privilege PVE roles
+  (ProxCloudPlatform / ProxCloudCAPI / ProxCloudCSI), ACL paths, privsep tokens
+  and the `pveum` commands to create them.
 - [jobs-scheduling.md](jobs-scheduling.md) — scheduled jobs, the PostgreSQL
   distributed lock, and the optional RabbitMQ charge fan-out.
 

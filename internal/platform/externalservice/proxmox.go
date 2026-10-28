@@ -24,8 +24,14 @@ package externalservice
 //	        "vlan":    {"kind": "vlan", "bridge": "vmbr0", "vlanMin": 100, "vlanMax": 199},
 //	        "simple":  {"kind": "simple"}      // 1-node fallback; DHCP+SNAT need PVE ≥ 8.1
 //	      },
-//	      "publicNetworks": [{"id": "vmbr0", "name": "Lab LAN"}], // admin-designated inbound bridges
-//	      "cidrPool": "10.100.0.0/16"          // auto-carve /24 per tenant network
+//	      "publicNetworks": [{"id": "vmbr1", "name": "Internet",  // admin-designated inbound bridges, never
+//	                          "cidr": "203.0.113.0/24",          // the management bridge; the IP pool
+//	                          "gateway": "203.0.113.1",          // ProxCloud allocates public NICs from
+//	                          "ranges": ["203.0.113.10-203.0.113.200"], // optional (default: whole cidr)
+//	                          "exclude": ["203.0.113.53"]}],     // optional
+//	      "cidrPool": "10.100.0.0/16",         // REQUIRED: every tenant CIDR lives inside it, never overlapping
+//	      "isolation": "shared",               // "shared" (default zone + vnet DROP rules) | "evpn-per-project"
+//	      "evpnController": "proxcloud"        // evpn-per-project: the controller every project zone uses
 //	    },
 //	    "storageProfiles": {                   // Phase 5 — honest capability flags
 //	      "std": {"storages": {"*": "local-zfs"}, "shared": false, "snapshots": true,
@@ -35,7 +41,10 @@ package externalservice
 //	    "templates": {},                       // Phase 3/6 — template catalog {slug: {vmid|perNode}}
 //	    "gpus": {},                            // Phase 6 — {mappingId: {"alias": "nvidia-4090"}}
 //	    "overcommit": {"cpu": 4},              // scheduler capacity multiplier
-//	    "metrics": {"source": "none"}          // until prometheus-pve-exporter is wired
+//	    "metrics": {"source": "none"},         // until prometheus-pve-exporter is wired
+//	    "provisioning": {"quota": {            // default project quota (PVEDefaultQuota), seeded at bootstrap
+//	      "servers": 10, "vcpus": 20, "ramMb": 51200, "diskGb": 500,
+//	      "networks": 5, "floatingIps": 2, "gpu": {"*": 0}}}
 //	  },
 //	  "secret": {"tokenSecret": "<uuid>"}      // encrypted at rest
 //	}
@@ -146,21 +155,37 @@ type PVENetwork struct {
 	Zones          map[string]pve.ZoneConfig
 	CIDRPool       string
 	PublicNetworks []PVEPublicNetwork
+	// Isolation is pve.IsolationShared (default; anything unknown falls back to
+	// it — still isolated) or pve.IsolationEVPN (a zone per project, templated
+	// from DefaultZone, controller EVPNController).
+	Isolation      string
+	EVPNController string
 }
 
-// PVEPublicNetwork is one admin-designated inbound bridge/vnet.
+// PVEPublicNetwork is one admin-designated inbound bridge/vnet plus its IP pool:
+// CIDR (+ Gateway), optionally narrowed to Ranges ("a-b" or a single address),
+// minus Exclude. No CIDR = public NICs cannot attach there.
 type PVEPublicNetwork struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	CIDR    string   `json:"cidr,omitempty"`
+	Gateway string   `json:"gateway,omitempty"`
+	Ranges  []string `json:"ranges,omitempty"`
+	Exclude []string `json:"exclude,omitempty"`
 }
 
 // PVENetworkConfig reads config.network into its typed shape.
 func (e *ExternalService) PVENetworkConfig() PVENetwork {
 	n, _ := e.Config["network"].(map[string]any)
 	out := PVENetwork{
-		DefaultZone: str(n["defaultZone"]),
-		CIDRPool:    str(n["cidrPool"]),
-		Zones:       map[string]pve.ZoneConfig{},
+		DefaultZone:    str(n["defaultZone"]),
+		CIDRPool:       str(n["cidrPool"]),
+		Zones:          map[string]pve.ZoneConfig{},
+		Isolation:      pve.IsolationShared,
+		EVPNController: str(n["evpnController"]),
+	}
+	if str(n["isolation"]) == pve.IsolationEVPN {
+		out.Isolation = pve.IsolationEVPN
 	}
 	if zones, ok := n["zones"].(map[string]any); ok {
 		for key, raw := range zones {
@@ -194,7 +219,10 @@ func (e *ExternalService) PVENetworkConfig() PVENetwork {
 				if name == "" {
 					name = id
 				}
-				out.PublicNetworks = append(out.PublicNetworks, PVEPublicNetwork{ID: id, Name: name})
+				out.PublicNetworks = append(out.PublicNetworks, PVEPublicNetwork{
+					ID: id, Name: name, CIDR: str(pn["cidr"]), Gateway: str(pn["gateway"]),
+					Ranges: strList(pn["ranges"]), Exclude: strList(pn["exclude"]),
+				})
 			}
 		}
 	}
@@ -319,6 +347,43 @@ func (e *ExternalService) PVEGPUAliases() map[string][]string {
 	}
 	for a := range out {
 		sort.Strings(out[a])
+	}
+	return out
+}
+
+// PVEQuotaKeys are the resource quota keys the Proxmox create paths enforce (Project.Quota,
+// plus the "gpu" {model|"*": n} map). Absent key = unlimited.
+var PVEQuotaKeys = []string{"servers", "vcpus", "ramMb", "diskGb", "networks", "floatingIps"}
+
+// pveQuotaAliases maps the OpenStack-named keys the generic provider quota editor (and the
+// set_provider_default_quota MCP tool) write onto the Proxmox keys. ram is MB in both.
+var pveQuotaAliases = map[string]string{
+	"instances": "servers", "cores": "vcpus", "ram": "ramMb", "gigabytes": "diskGb", "floatingips": "floatingIps",
+}
+
+// PVEDefaultQuota is the provider's default project quota (config.provisioning.quota) in
+// Project.Quota keys, or nil when none is set. A Proxmox key wins over its OpenStack alias;
+// negative values (OpenStack's -1) mean unlimited and are dropped, as are non-numbers and keys
+// Proxmox does not enforce (volumes, ports, …). "gpu" is copied as-is.
+func (e *ExternalService) PVEDefaultQuota() map[string]any {
+	prov, _ := e.Config["provisioning"].(map[string]any)
+	q, _ := prov["quota"].(map[string]any)
+	out := map[string]any{}
+	for alias, key := range pveQuotaAliases {
+		if n, ok := intFrom(q[alias]); ok && n >= 0 {
+			out[key] = n
+		}
+	}
+	for _, key := range PVEQuotaKeys {
+		if n, ok := intFrom(q[key]); ok && n >= 0 {
+			out[key] = n
+		}
+	}
+	if gpu, ok := q["gpu"].(map[string]any); ok && len(gpu) > 0 {
+		out["gpu"] = gpu
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

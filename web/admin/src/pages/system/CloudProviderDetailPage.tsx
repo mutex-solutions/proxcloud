@@ -37,6 +37,7 @@ import {
 } from "./kamajiProvider"
 import {
   ProxmoxProviderForm,
+  proxmoxNetworkConfig,
   proxmoxFormFromService,
   proxmoxFormValid,
   type ProxmoxFormState,
@@ -85,6 +86,9 @@ const QUOTA_KEYS = [
   "security_group_rules",
   "key_pairs",
 ]
+// Proxmox providers: the keys the PVE create paths enforce (externalservice.PVEQuotaKeys), seeded onto
+// each new project; "gpu" edits quota.gpu["*"] (any model).
+const PVE_QUOTA_KEYS = ["servers", "vcpus", "ramMb", "diskGb", "networks", "floatingIps", "gpu"]
 
 // useEsSave — the shared PUT/DELETE mutation for every provider tab. On success it invalidates the
 // provider doc (so all tabs re-read the merged config) plus any per-tab live query for this provider.
@@ -296,7 +300,7 @@ function DbaasConnectionTab({ id, provider }: TabProps) {
 function ProxmoxConfigCard({ id, provider }: TabProps) {
   const cfg = asObj(provider.config)
   const blocks: { key: string; label: string; hint: string }[] = [
-    { key: "network", label: "Network", hint: '{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn","peers":["10.0.0.1"],"exitNodes":["pve1"]}},"cidrPool":"10.100.0.0/16","publicNetworks":[{"id":"vmbr0","name":"Lab LAN"}]}' },
+    { key: "network", label: "Network", hint: '{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn","peers":["10.0.0.1"],"exitNodes":["pve1"]}},"cidrPool":"10.100.0.0/16","isolation":"shared","publicNetworks":[{"id":"vmbr1","name":"Internet","cidr":"203.0.113.0/24","gateway":"203.0.113.1","ranges":["203.0.113.10-203.0.113.200"]}]}' },
     { key: "storageProfiles", label: "Storage profiles", hint: '{"std":{"storages":{"*":"local-zfs"},"shared":false,"snapshots":true,"thin":true,"liveMigrate":false,"replication":false}}' },
     { key: "templates", label: "OS templates", hint: '{"ubuntu-24":{"vmid":9000,"node":"pve1","name":"Ubuntu 24.04","osDistro":"ubuntu","minDiskGb":10}}' },
     { key: "gpus", label: "GPU mappings", hint: '{"<pci-mapping-id>":{"alias":"nvidia-4090"}}' },
@@ -343,8 +347,9 @@ function ProxmoxConfigCard({ id, provider }: TabProps) {
 }
 
 // ProxmoxConnectionTab edits a Proxmox VE provider in place. The update route overlays
-// top-level config keys, so only the connection-owned keys are sent — the network /
-// storageProfiles / templates / gpus blocks (their own tabs, later phases) survive a Save.
+// top-level config keys, so only the connection-owned keys are sent — the storageProfiles /
+// templates / gpus blocks (their own tabs, later phases) survive a Save. config.network is
+// sent whole: the stored block with the form's isolation keys merged in.
 function ProxmoxConnectionTab({ id, provider }: TabProps) {
   const [form, setForm] = useState<ProxmoxFormState>(() => proxmoxFormFromService(provider))
   const save = useEsSave(id)
@@ -359,6 +364,9 @@ function ProxmoxConnectionTab({ id, provider }: TabProps) {
           fingerprint: form.fingerprint.trim(),
           insecureTls: form.insecureTls,
           poolPrefix: form.poolPrefix.trim() || "pc-",
+          // Merge into the CURRENT stored network (not the mount-time copy) so a Network-JSON
+          // save made since this tab mounted is not reverted.
+          network: proxmoxNetworkConfig({ ...form, storedConfig: asObj(provider.config) }),
         },
         ...(form.tokenSecret.trim() ? { secret: { tokenSecret: form.tokenSecret.trim() } } : {}),
       },
@@ -836,24 +844,40 @@ function FeaturesTab({ id, provider }: TabProps) {
 // ── 6. Quota (config.provisioning.quota) ─────────────────────────────────────
 function QuotaTab({ id, provider }: TabProps) {
   const quota = asObj(asObj((provider.config as Obj)?.provisioning).quota)
+  const isPve = provider.config?.provider === "proxmox"
+  const keys = isPve ? PVE_QUOTA_KEYS : QUOTA_KEYS
+  // PVE "gpu" is the any-model limit quota.gpu["*"]; every other key is a flat number.
+  const read = (k: string) => (isPve && k === "gpu" ? asObj(quota.gpu)["*"] : quota[k])
   const [vals, setVals] = useState<Record<string, string>>(() => {
     const seed: Record<string, string> = {}
-    for (const k of QUOTA_KEYS) seed[k] = quota[k] != null ? String(quota[k]) : ""
+    for (const k of keys) seed[k] = read(k) != null ? String(read(k)) : ""
     return seed
   })
   const save = useEsSave(id)
   const submit = () => {
     // /quota replaces config.provisioning.quota wholesale → merge over the stored quota (keeps placementQuotas etc).
+    // A blank field removes the key (unlimited).
     const next: Obj = { ...quota }
-    for (const k of QUOTA_KEYS) {
+    for (const k of keys) {
       const v = vals[k].trim()
+      let parsed: number | undefined
       if (v !== "") {
-        const parsed = Number(v)
+        parsed = Number(v)
         // NaN is dropped by JSON serialization — the key would silently keep its old value.
-        if (!Number.isFinite(parsed)) {
+        if (!Number.isFinite(parsed) || (isPve && (parsed < 0 || !Number.isInteger(parsed)))) {
           toast.error(`Invalid quota value for "${k}"`)
           return
         }
+      }
+      if (isPve && k === "gpu") {
+        const gpu: Obj = { ...asObj(quota.gpu) }
+        if (parsed === undefined) delete gpu["*"]
+        else gpu["*"] = parsed
+        if (Object.keys(gpu).length) next.gpu = gpu
+        else delete next.gpu
+      } else if (parsed === undefined) {
+        delete next[k]
+      } else {
         next[k] = parsed
       }
     }
@@ -865,8 +889,14 @@ function QuotaTab({ id, provider }: TabProps) {
         <CardTitle className="text-eyebrow">Default quota</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
+        {isPve ? (
+          <p className="text-sm text-muted-foreground">
+            Copied onto each new project and enforced for projects without their own quota. Blank = unlimited;
+            ramMb in MiB, diskGb in GiB, gpu = devices of any model.
+          </p>
+        ) : null}
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-          {QUOTA_KEYS.map((k) => (
+          {keys.map((k) => (
             <div key={k} className="grid gap-1">
               <Label className="text-xs" htmlFor={`q-${k}`}>
                 {k}
