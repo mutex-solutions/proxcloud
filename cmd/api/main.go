@@ -32,7 +32,6 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metricsjob"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/syncjob"
 	"github.com/mutex-solutions/proxcloud/internal/config"
@@ -587,20 +586,7 @@ func run() error {
 	billSendSvc.SetNotifier(mailSvc)
 	// Project-deletion job: cascade-delete a scheduled project's cloud resources (live
 	// WriteService.Delete per resource) then remove the doc. ⚠ performs LIVE cloud DELETEs.
-	deletionJob := project.NewDeletionJob(projectRepo, projectCloudDeleter{
-		cloudRepo: cloudRepo,
-		client:    func() *client.Client { return cloudCli.Load() },
-		// kamaji rows have no keystone tenant — route them to the management cluster
-		// (Application delete) instead of the OpenStack WriteService (whose KUBERNETES_CLUSTER
-		// branch is the dormant Magnum path and would fail every sweep).
-		esGet: esSvc.Get,
-		kamajiFor: func(es *externalservice.ExternalService) (*kamaji.Service, error) {
-			return kamaji.New(es.KamajiConfig(), es.ID)
-		},
-		dbaasFor: func(es *externalservice.ExternalService) (*dbaas.Service, error) {
-			return dbaas.New(es.DbaasConfig(), es.ID)
-		},
-	}, log)
+	deletionJob := project.NewDeletionJob(projectRepo, projectTeardownDeleter(projectH.TeardownProject), log)
 	sched := scheduler.New(lock.New(pg))
 	// Which engine charges bills. NATIVE (the default) rates in-process with the billing engine in
 	// this repository and needs nothing but PostgreSQL — that is what a plain checkout of proxcloud
@@ -1024,9 +1010,14 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 	}
 }
 
-// projectCloudDeleter implements project.ResourceDeleter: cascade-delete a project's cloud
-// resources via the live CloudClient. ⚠ performs
-// LIVE cloud DELETEs — aborts on the first failure so the caller rolls the project back to ENABLED.
+// projectTeardownDeleter adapts the project teardown (PVE VMs, networks, security groups and
+// public IPs, managed clusters, databases, buckets) to the scheduled deletion job, so a
+// scheduled delete cleans up exactly what delete-project-now does.
+type projectTeardownDeleter func(ctx context.Context, projectID string) error
+
+func (f projectTeardownDeleter) DeleteProjectResources(ctx context.Context, projectID string) error {
+	return f(ctx, projectID)
+}
 
 // billingCloudSuspender is the live OpenStack suspend/resume for a billing profile:
 // resolve the profile's projects (via its orgs — greenfield projects inherit the org's bp), and
@@ -1117,117 +1108,6 @@ func (s billingCloudSuspender) pauseProjectServers(ctx context.Context, p *proje
 			}
 		}
 	}
-}
-
-type projectCloudDeleter struct {
-	cloudRepo *cloud.Repo
-	client    func() *client.Client
-	esGet     func(ctx context.Context, id string) (*externalservice.ExternalService, error)
-	kamajiFor func(es *externalservice.ExternalService) (*kamaji.Service, error)
-	dbaasFor  func(es *externalservice.ExternalService) (*dbaas.Service, error)
-}
-
-func (d projectCloudDeleter) DeleteProjectResources(ctx context.Context, projectID string) error {
-	cc := d.client()
-	if cc == nil {
-		return errors.New("cloud client not ready")
-	}
-	ws := providers.NewWriteService(cc, d.cloudRepo)
-	resources, err := d.cloudRepo.FindAllByProjectID(ctx, projectID)
-	if err != nil {
-		return err
-	}
-	project.SortCloudResourcesForDeletion(resources)
-
-	// kamaji rows: delete via the management cluster (ArgoCD Application cascade), never the
-	// OpenStack WriteService. A successful delete request archives the row immediately — the
-	// cascade is asynchronous and the service-level sweep (syncjob.sweepKamajiOrphans) later
-	// revokes the appcred and reaps secret/namespace, which keeps working after this project's
-	// doc is gone (the sweep scans the management cluster, not proxcloud projects). Failures are
-	// collected (not abort-on-first, so one bad row cannot strand the others) and returned at
-	// the end — the deletion job then cancels this run and the project owner sees it, same as
-	// an OpenStack sweep failure.
-	var kamajiErr error
-	if d.esGet != nil && d.kamajiFor != nil {
-		kept := resources[:0]
-		now := time.Now().UTC()
-		for i := range resources {
-			res := &resources[i]
-			es, gerr := d.esGet(ctx, res.ServiceID)
-			if gerr != nil || es == nil || (!es.IsKamaji() && !es.IsDbaas()) {
-				kept = append(kept, *res)
-				continue
-			}
-			// dbaas rows: same Application-delete route on the DB cluster; the service-level
-			// sweep (syncjob.sweepDbaasOrphans) later revokes the neutron network share and
-			// reaps the marker/auth secrets, which keeps working after this project's doc is
-			// gone.
-			if es.IsDbaas() {
-				if d.dbaasFor == nil {
-					kept = append(kept, *res)
-					continue
-				}
-				ds, derr := d.dbaasFor(es)
-				if derr != nil {
-					kamajiErr = fmt.Errorf("dbaas service %s: %w", res.ServiceID, derr)
-					continue
-				}
-				if derr := ds.DeleteDatabase(ctx, projectID, res.ExternalID); derr != nil {
-					kamajiErr = fmt.Errorf("dbaas database %s: %w", res.ExternalID, derr)
-					continue
-				}
-				if aerr := d.cloudRepo.DeleteAndArchive(ctx, res, now); aerr != nil {
-					kamajiErr = fmt.Errorf("archive dbaas database %s: %w", res.ExternalID, aerr)
-				}
-				continue
-			}
-			ks, kerr := d.kamajiFor(es)
-			if kerr != nil {
-				kamajiErr = fmt.Errorf("kamaji service %s: %w", res.ServiceID, kerr)
-				continue
-			}
-			if derr := ks.DeleteCluster(ctx, projectID, res.ExternalID); derr != nil {
-				kamajiErr = fmt.Errorf("kamaji cluster %s: %w", res.ExternalID, derr)
-				continue
-			}
-			if aerr := d.cloudRepo.DeleteAndArchive(ctx, res, now); aerr != nil {
-				kamajiErr = fmt.Errorf("archive kamaji cluster %s: %w", res.ExternalID, aerr)
-			}
-		}
-		resources = kept
-	}
-
-	remaining := resources
-	var lastErr error
-	for sweep := 0; sweep < 3 && len(remaining) > 0; sweep++ {
-		if sweep > 0 {
-			// Nova server deletion is asynchronous: the boot volume of a
-			// volume-backed server stays in-use until delete_on_termination
-			// finishes (routinely 10-30s). Back-to-back sweeps would burn all
-			// retries inside that window and fail the deletion — which the
-			// deletion job then treats as canceled (project flips back ENABLED).
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(20 * time.Second):
-			}
-		}
-		stillLeft := make([]cloud.CloudResource, 0, len(remaining))
-		for i := range remaining {
-			if err := ws.Delete(ctx, remaining[i].ServiceID, remaining[i].ExternalID); err != nil {
-				lastErr = err
-				stillLeft = append(stillLeft, remaining[i])
-			}
-		}
-		remaining = stillLeft
-	}
-	if len(remaining) > 0 {
-		return fmt.Errorf("scheduled project deletion left %d resource(s): %w", len(remaining), lastErr)
-	}
-	if kamajiErr != nil {
-		return fmt.Errorf("scheduled project deletion: %w", kamajiErr)
-	}
-	return nil
 }
 
 // jobResult writes a debug-trigger response: the result map on success, or a 500 with the error.
