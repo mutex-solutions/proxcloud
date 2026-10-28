@@ -2,7 +2,7 @@ package project
 
 // cloud_writes_pve.go — the Proxmox VE write surface: create/delete/action/bulk
 // forks off the generic cloud handlers (the kamaji/dbaas precedent — a proxmox
-// provider never reaches the OpenStack WriteService). Everything cloud-touching
+// provider never reaches the bucket WriteService). Everything cloud-touching
 // lives in internal/cloud/pve; this file is the HTTP face + the cache bookkeeping.
 //
 // Tenancy: every op re-verifies pool membership live (pve.Service.ResolveVM)
@@ -59,7 +59,7 @@ func (h *Handler) pveRegion(p *Project, es *externalservice.ExternalService) str
 	if r := es.PVERegion(); r != "" {
 		return r
 	}
-	return h.cloudRegion
+	return h.defaultRegion
 }
 
 // --- create ---
@@ -345,7 +345,7 @@ func (h *Handler) pveKeypairPublicKey(ctx context.Context, svcID string, u *user
 
 // pveCreateKeypair is platform-only: store (or generate) an SSH keypair as a
 // user-scoped cache row. A generated private key is returned ONCE via
-// ephemeralData (never persisted) — the nova-keypair contract, minus nova.
+// ephemeralData (never persisted).
 func (h *Handler) pveCreateKeypair(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
 	name := strAny(data["name"])
 	if name == "" {
@@ -672,12 +672,6 @@ func (h *Handler) pveBulkAction(w http.ResponseWriter, r *http.Request, proj *Pr
 		httpx.OK(w, map[string]any{"result": out})
 		return true
 
-	case "LIST_AVAILABILITY_ZONES":
-		// Nodes are deliberately hidden from customers (the whole point of the
-		// platform); a single synthetic zone keeps the wizard's AZ step trivial.
-		httpx.OK(w, map[string]any{"result": []map[string]any{{"zoneName": "default", "zoneState": map[string]any{"available": true}}}})
-		return true
-
 	case "LIST_VOLUME_TYPES":
 		out := []map[string]any{}
 		for slug, prof := range es.PVEStorageProfiles() {
@@ -705,9 +699,8 @@ func sshFingerprint(pubKey string) string {
 	return ssh.FingerprintSHA256(pk)
 }
 
-// emitPVEConsole mints the console token for a PVE vncwebsocket/termproxy backend
-// (emitProxiedConsole twin). Metadata carries pve="1" so the proxy dials with the
-// provider's API-token header + pinned TLS; the response carries the VNC ticket as
+// emitPVEConsole mints the console token for a PVE vncwebsocket/termproxy backend.
+// The proxy dials it with the provider's API-token header + pinned TLS; the response carries the VNC ticket as
 // `password` — noVNC must present it as the RFB credential.
 func (h *Handler) emitPVEConsole(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, cr *cloud.CloudResource, svcID, externalID, action, backendURL, kind, password string) {
 	if h.downloads == nil {
@@ -716,7 +709,7 @@ func (h *Handler) emitPVEConsole(w http.ResponseWriter, r *http.Request, u *user
 	}
 	tok, err := h.downloads.CreateWithTTL(r.Context(), &cloud.CloudDownload{
 		Type: cloud.DownloadTypeConsole, ServiceID: svcID, ProjectID: proj.ID, ExternalID: externalID,
-		Metadata: map[string]string{"consoleUrl": backendURL, "pve": "1"},
+		Metadata: map[string]string{"consoleUrl": backendURL},
 	}, cloud.ConsoleTokenTTL)
 	if err != nil {
 		h.fail(w, err)
@@ -1049,7 +1042,7 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 	return false
 }
 
-// portRange renders neutron-style port min/max into the PVE dport syntax.
+// portRange renders the API's portRangeMin/Max into the PVE dport syntax.
 func portRange(data map[string]any) string {
 	lo, hi := intAny(data["portRangeMin"]), intAny(data["portRangeMax"])
 	switch {

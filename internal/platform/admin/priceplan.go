@@ -240,7 +240,7 @@ func (h *Handler) pricePlanResourceTypesAll(w http.ResponseWriter, r *http.Reque
 }
 
 // pricePlanResourceTypes returns the same catalog for a specific plan (scoped by the plan's external
-// services; OpenStack's billing-resource set is the one catalog).
+// services; there is one billing-resource catalog).
 func (h *Handler) pricePlanResourceTypes(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, pricePlanReadPerm) {
 		return

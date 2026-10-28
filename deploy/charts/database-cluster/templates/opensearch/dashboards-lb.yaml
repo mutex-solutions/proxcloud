@@ -1,7 +1,7 @@
 {{- if and (eq .Values.engine "opensearch") .Values.opensearch.dashboards.enabled }}
 {{/*
 Optional SECOND chart-owned LB <id>-dash-lb: the Dashboards UI on 5601, same
-Octavia internal-LB wiring (and the same allowedCidrs ACL) as the main
+LoadBalancer wiring (and the same allowedCidrs source filter) as the main
 <id>-lb in service-lb.yaml. TCP passthrough — Dashboards serves its own
 operator-generated TLS (spec.dashboards.tls in opensearchcluster.yaml).
 
@@ -21,11 +21,6 @@ metadata:
     {{- include "database-cluster.labels" . | nindent 4 }}
   annotations:
     {{- include "database-cluster.annotations" . | nindent 4 }}
-    loadbalancer.openstack.org/network-id: {{ .Values.network.networkId | quote }}
-    loadbalancer.openstack.org/subnet-id: {{ .Values.network.subnetId | quote }}
-    loadbalancer.openstack.org/member-subnet-id: {{ .Values.network.memberSubnetId | quote }}
-    # Internal LB — see the annotation note in service-lb.yaml.
-    service.beta.kubernetes.io/openstack-internal-load-balancer: "true"
     {{- with .Values.network.extraAnnotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

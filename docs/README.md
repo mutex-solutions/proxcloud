@@ -22,6 +22,9 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
   the handler→service→repo layering, the SPAs, and how they fit together.
 - [data-model.md](data-model.md) — the PostgreSQL/JSONB document model, the core
   aggregates and their tables, id and serialization conventions.
+- [Architecture diagrams (C4)](architecture/c4/README.md) — system context,
+  containers, components and code views with Implemented/Planned status, and the
+  architecture change log.
 
 ## Subsystems
 
@@ -29,9 +32,11 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
   SigV4 keys for the public admin API.
 - [billing.md](billing.md) — price plans and rules, rating and bills,
   transactions, account credit, savings, promotions, activation/suspension.
-- [cloud-integration.md](cloud-integration.md) — the OpenStack facade: external
-  services, the resource cache, sync, metrics, and notifications; plus the
-  Ceph RGW S3 object-store backend that runs alongside it.
+- [cloud-integration.md](cloud-integration.md) — Proxmox VE providers, the
+  resource cache and sync, traffic metrics, the Ceph RGW S3 backend and the
+  managed K8s/DBaaS providers.
+- [managed-k8s.md](managed-k8s.md) and [managed-dbaas.md](managed-dbaas.md) —
+  managed Kubernetes and database clusters delivered through ArgoCD.
 - [proxmox-permissions.md](proxmox-permissions.md) — least-privilege PVE roles
   (ProxCloudPlatform / ProxCloudCAPI / ProxCloudCSI), ACL paths, privsep tokens
   and the `pveum` commands to create them.

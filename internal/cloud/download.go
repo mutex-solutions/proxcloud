@@ -32,18 +32,16 @@ func hashToken(t string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// CloudDownload.Type values. The Swift-object path streams bytes; the CONSOLE type carries a
-// server's nova noVNC URL so the whitelisted console route can reverse-proxy the VNC WebSocket
+// CloudDownload.Type values. The OBJECT path streams bucket-object bytes; the CONSOLE type carries
+// a server's PVE vncwebsocket URL so the whitelisted console route can reverse-proxy the WebSocket
 // (see cloudConsoleProxy) — the object-download handler rejects any non-download type.
 const (
-	DownloadTypeSwiftObject = "OPENSTACK_SWIFT_BUCKET"
-	DownloadTypeS3Object    = "OPENSTACK_S3_OBJECT"
-	DownloadTypeConsole     = "OPENSTACK_CONSOLE"
+	DownloadTypeObject  = "OBJECT"
+	DownloadTypeConsole = "CONSOLE"
 )
 
-// ConsoleTokenTTL bounds a console token's life. Nova's own console token is short-lived
-// ([consoleauth] token_ttl, 600s by default), so a longer ProxCloud token would outlive the
-// backend session it fronts.
+// ConsoleTokenTTL bounds a console token's life. The PVE vncticket it fronts is short-lived,
+// so a longer ProxCloud token would outlive the backend session.
 const ConsoleTokenTTL = 10 * time.Minute
 
 // CloudDownload is the cloudDownload collection document.
@@ -72,7 +70,7 @@ func (r *DownloadRepo) Create(ctx context.Context, d *CloudDownload) (*CloudDown
 	return r.CreateWithTTL(ctx, d, time.Hour)
 }
 
-// CreateWithTTL is Create with an explicit lifetime — console tokens front a short-lived nova
+// CreateWithTTL is Create with an explicit lifetime — console tokens front a short-lived PVE
 // console session and use ConsoleTokenTTL rather than the download default.
 func (r *DownloadRepo) CreateWithTTL(ctx context.Context, d *CloudDownload, ttl time.Duration) (*CloudDownload, error) {
 	now := time.Now().UTC()

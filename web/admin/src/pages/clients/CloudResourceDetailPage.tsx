@@ -30,7 +30,7 @@ import {
 // GET /admin/cloud-resource/{id} — the typed CloudResource doc, or {} when absent (httpx.Empty).
 // GET /admin/cloud-resource/{id}/sync — live re-fetch + cache upsert, returns the refreshed doc
 //   (cloudresourcemut.go registers sync as GET).
-// DELETE /admin/cloud-resource/{id} — deletes the REAL OpenStack resource + archives the cache → 202.
+// DELETE /admin/cloud-resource/{id} — deletes the REAL cloud resource + archives the cache → 202.
 export default function CloudResourceDetailPage() {
   const { id = "" } = useParams()
   const navigate = useNavigate()
@@ -126,7 +126,7 @@ export default function CloudResourceDetailPage() {
         title={name}
         eyebrow="Clients"
         breadcrumb={crumbs}
-        description={`Cloud ${type} — cached copy of the live OpenStack object.`}
+        description={`Cloud ${type} — cached copy of the live cloud object.`}
         actions={
           <>
             <Button variant="outline" size="sm" onClick={() => sync.mutate()} disabled={sync.isPending}>

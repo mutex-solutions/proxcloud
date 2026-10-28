@@ -81,7 +81,7 @@ export default function NetworksPage() {
                 cidr,
                 enableDhcp: true,
                 // A custom gateway points the subnet at a self-hosted router VM (e.g. pfSense);
-                // blank uses neutron's auto gateway.
+                // blank uses the default gateway.
                 gateway: true,
                 ...(gw ? { customGatewayIp: true, gatewayIp: gw } : {}),
                 ...(dnsList.length ? { dnsNameServers: dnsList } : {}),

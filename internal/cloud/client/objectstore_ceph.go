@@ -1,9 +1,8 @@
 package client
 
 // objectstore_ceph.go = the Ceph RGW (S3) object-store backend (provider:"ceph-s3"). It implements the
-// SAME bucket + object surface objectstore.go exposes for Swift, so the higher layers (Writer dispatch,
-// BucketProvider sync, the client object-explore handlers) call the identical CloudClient methods and are
-// blind to whether a bucket rides on Swift or RGW. objectstore.go routes to this backend when c.ceph != nil.
+// bucket + object surface objectstore.go exposes, so the higher layers (Writer dispatch, BucketProvider
+// sync, the client object-explore handlers) call the Client methods and objectstore.go routes here.
 //
 // Two credential planes (see the plan §4.2/§4.4):
 //   - admin keys (Admin Ops REST, SigV4-signed): provision the per-project RGW user + quota, and list/stat
@@ -37,7 +36,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/gophercloud/gophercloud/v2"
 )
 
 // emptyPayloadHash is the SHA-256 of an empty body — the x-amz-content-sha256 for a bodyless admin call.
@@ -87,9 +85,7 @@ type cephBackend struct {
 	quotaBytes      int64
 }
 
-// NewCephS3 builds a *client.Client backed by a Ceph RGW object store. Only the bucket + object surface is
-// valid on it; every other CloudClient method returns ErrNotOpenStack (see the stub provider below).
-// When ProjectAccessKey is set, the S3 data client is built; otherwise it is an admin-only client
+// NewCephS3 builds a *client.Client backed by a Ceph RGW object store. When ProjectAccessKey is set, the S3 data client is built; otherwise it is an admin-only client
 // (list/stat/provision, no data I/O).
 func NewCephS3(_ context.Context, cfg CephConfig) (*Client, error) {
 	if cfg.S3Endpoint == "" && cfg.AdminURL == "" {
@@ -122,14 +118,7 @@ func NewCephS3(_ context.Context, cfg CephConfig) (*Client, error) {
 			ResponseChecksumValidation: awsv2.ResponseChecksumValidationWhenRequired,
 		})
 	}
-	// A ceph client carries a STUB gophercloud provider whose EndpointLocator always errors. Every
-	// OpenStack method funnels through it (openstack.NewXxxV2(c.provider, …) → initClientOpts →
-	// EndpointLocator), so a mis-routed compute/network/image call returns ErrNotOpenStack instead of
-	// dereferencing a nil provider and panicking the request.
-	stub := &gophercloud.ProviderClient{
-		EndpointLocator: func(gophercloud.EndpointOpts) (string, error) { return "", ErrNotOpenStack },
-	}
-	return &Client{region: region, ceph: b, provider: stub}, nil
+	return &Client{ceph: b}, nil
 }
 
 // ErrBucketNameTaken is returned when a bucket name is already in use. RGW's bucket namespace is GLOBAL
@@ -211,7 +200,7 @@ func (b *cephBackend) adminBucketInfo(ctx context.Context, bucket string) (admin
 }
 
 // adminDeleteBucket removes a bucket via Admin Ops, optionally purging its objects first. S3's DeleteBucket
-// refuses a non-empty bucket (as Swift does); this is the teardown path that can actually clear one.
+// refuses a non-empty bucket; this is the teardown path that can actually clear one.
 func (b *cephBackend) adminDeleteBucket(ctx context.Context, bucket string, purgeObjects bool) error {
 	q := urlValues("bucket", bucket)
 	if purgeObjects {
@@ -225,7 +214,7 @@ func (b *cephBackend) adminDeleteBucket(ctx context.Context, bucket string, purg
 }
 
 // totals sums logical size + object count across all usage categories (rgw.main + shadow/multimeta). Uses
-// logical `size` (what the customer stored) to match Swift's BytesUsed semantics; falls back to size_actual.
+// logical `size` (what the customer stored) as the billed usage; falls back to size_actual.
 func (s adminBucketStat) totals() (bytes, objects int64) {
 	for _, u := range s.Usage {
 		sz := u.Size
@@ -373,7 +362,7 @@ func (b *cephBackend) purgeUser(ctx context.Context) error {
 	return b.adminDo(ctx, "DELETE", "/user", url.Values{"uid": {b.uid}, "purge-data": {"true"}}, nil, nil)
 }
 
-// --- bucket surface (mirrors objectstore.go's Swift methods) ---
+// --- bucket surface (behind objectstore.go's Client methods) ---
 
 // createBucket creates the bucket as the project user, which OWNS it (the isolation boundary). The RGW
 // bucket namespace is global, so a name already used by ANY project — or by this one — surfaces as
@@ -395,7 +384,7 @@ func (b *cephBackend) createBucket(ctx context.Context, o CreateBucketOpts) (map
 		}
 		return nil, err
 	}
-	return bucketData(BackendCephS3, o.Name, 0, 0), nil
+	return bucketData(o.Name, 0, 0), nil
 }
 
 // getBucket reads one bucket's stats via Admin Ops (admin keys) → DataBucket. It goes through
@@ -407,7 +396,7 @@ func (b *cephBackend) getBucket(ctx context.Context, name string) (map[string]an
 		return nil, err
 	}
 	bytes, objects := st.totals()
-	return bucketData(BackendCephS3, name, objects, bytes), nil
+	return bucketData(name, objects, bytes), nil
 }
 
 // listBuckets lists the project user's buckets WITH stats (Admin Ops, admin keys) — the sync/billing meter.
@@ -422,12 +411,12 @@ func (b *cephBackend) listBuckets(ctx context.Context) ([]map[string]any, error)
 			continue
 		}
 		bytes, objects := st.totals()
-		out = append(out, bucketData(BackendCephS3, st.Bucket, objects, bytes))
+		out = append(out, bucketData(st.Bucket, objects, bytes))
 	}
 	return out, nil
 }
 
-// deleteBucket removes the (empty) bucket as the project user. RGW rejects a non-empty delete like Swift.
+// deleteBucket removes the (empty) bucket as the project user. RGW rejects a non-empty delete.
 func (b *cephBackend) deleteBucket(ctx context.Context, name string) error {
 	if err := b.needS3(); err != nil {
 		return err
@@ -437,7 +426,7 @@ func (b *cephBackend) deleteBucket(ctx context.Context, name string) error {
 }
 
 // listBucketObjects lists a bucket's objects/folders in the FE display shape (S3 ListObjectsV2 with a "/"
-// delimiter → CommonPrefixes become directory rows), mirroring the Swift ListBucketObjects mapping.
+// delimiter → CommonPrefixes become directory rows).
 func (b *cephBackend) listBucketObjects(ctx context.Context, bucket, prefix string) ([]map[string]any, error) {
 	if err := b.needS3(); err != nil {
 		return nil, err
@@ -520,7 +509,7 @@ func (b *cephBackend) uploadBucketObject(ctx context.Context, bucket, objectName
 	return err
 }
 
-// deleteBucketObject deletes an object — or a folder + everything under it — by prefix (mirrors Swift).
+// deleteBucketObject deletes an object — or a folder + everything under it — by prefix.
 func (b *cephBackend) deleteBucketObject(ctx context.Context, bucket, objectName string) error {
 	if err := b.needS3(); err != nil {
 		return err
@@ -559,7 +548,7 @@ func (b *cephBackend) updateBucketObject(ctx context.Context, bucket, objectName
 	return err
 }
 
-// downloadObject reads an object's bytes + content-type (whole object into memory, like the Swift path).
+// downloadObject reads an object's bytes + content-type (whole object into memory).
 func (b *cephBackend) downloadObject(ctx context.Context, bucket, objectName string) ([]byte, string, error) {
 	if err := b.needS3(); err != nil {
 		return nil, "", err
@@ -582,7 +571,7 @@ func (b *cephBackend) downloadObject(ctx context.Context, bucket, objectName str
 
 // isBucketPublic reports whether the bucket's OBJECTS are anonymously readable. On S3 that is decided by
 // the bucket POLICY, not the ACL: a public-read ACL only allows listing the bucket. Checking the ACL alone
-// (as the Swift path does) would report "public" for a bucket whose objects all 403.
+// would report "public" for a bucket whose objects all 403.
 func (b *cephBackend) isBucketPublic(ctx context.Context, bucket string) (bool, error) {
 	if err := b.needS3(); err != nil {
 		return false, err
@@ -606,12 +595,12 @@ func (b *cephBackend) setBucketRead(ctx context.Context, bucket, acl string) err
 	return b.setPublicRead(ctx, bucket, acl != "")
 }
 
-// bucketAPIs returns the bucket's S3 access URL (path-style). Swift URLs are empty (this is the S3 backend).
-func (b *cephBackend) bucketAPIs(bucket string) (swift, s3urls []string) {
+// bucketAPIs returns the bucket's S3 access URL (path-style).
+func (b *cephBackend) bucketAPIs(bucket string) []string {
 	if b.s3Endpoint == "" {
-		return []string{}, []string{}
+		return []string{}
 	}
-	return []string{}, []string{b.s3Endpoint + "/" + bucket}
+	return []string{b.s3Endpoint + "/" + bucket}
 }
 
 // --- static website hosting (RGW s3website API) ---
@@ -741,7 +730,7 @@ func (c *Client) PurgeCephUser(ctx context.Context) error {
 }
 
 // ForceDeleteCephBucket removes a bucket AND its objects via Admin Ops. TEARDOWN path only — the
-// customer-facing DeleteBucket keeps S3/Swift semantics and refuses a non-empty bucket.
+// customer-facing DeleteBucket keeps S3 semantics and refuses a non-empty bucket.
 //
 // It first verifies the live bucket is still OWNED by this project's user. Because the namespace is global
 // and teardown deletes by cached name, a stale row whose name was recreated by another project must NOT

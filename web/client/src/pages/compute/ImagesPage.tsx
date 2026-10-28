@@ -1,14 +1,12 @@
-// Images: "My images" = the project's own glance images (owner-filtered cache list,
+// Images: "My images" = the project's own templates and server snapshots (cache list,
 // POST /project/{pid}/resource?type=IMAGE → CloudResource with data.image); "Public images" =
-// the PUBLIC_IMAGES bulk action (flat glance image maps). Own images can be deleted.
-// Upload: Go has NO plain IMAGE create (providers/write.go TypeImage = server snapshot only), so
-// there is no "create then upload" flow — instead a per-row "Upload data" appears on images still
-// in glance "queued" status and streams the raw file to POST /project/{pid}/image/{imageId}/upload.
-import { useMemo, useRef, useState } from "react"
+// the project templates from the PUBLIC_IMAGES bulk action (flat image maps). Own images can be
+// deleted. There is no image upload: new images come from server snapshots.
+import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
-import { HardDrive, MoreHorizontal, RefreshCw, Trash2, Upload } from "lucide-react"
+import { HardDrive, MoreHorizontal, RefreshCw, Trash2 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
@@ -33,7 +31,7 @@ function imageName(r: CloudResource): string {
   return (r.data?.image?.name as string) ?? r.name ?? r.id
 }
 
-// Public-catalog rows are flat glance image maps — no mutations, so the
+// Public-catalog rows are flat template image maps — no mutations, so the
 // columns can live at module scope (referentially stable by construction).
 const publicColumns: ColumnDef<Record<string, any>, any>[] = [
   {
@@ -88,30 +86,6 @@ export default function ImagesPage() {
   })
 
   const [toDelete, setToDelete] = useState<CloudResource | null>(null)
-  const uploadTarget = useRef<CloudResource | null>(null)
-  const fileInput = useRef<HTMLInputElement>(null)
-
-  const upload = useMutation({
-    // Raw body to the glance image (10GB guard server-side). imageId = the glance externalId.
-    mutationFn: ({ r, file }: { r: CloudResource; file: File }) =>
-      apiFetch(`/project/${pid}/image/${r.externalId ?? (r.data?.image?.id as string)}/upload`, {
-        method: "POST",
-        cloud: scope,
-        rawBody: file,
-        headers: { "Content-Type": "application/octet-stream" },
-      }),
-    onSuccess: (_d, { file }) => {
-      toast.success(`Uploaded ${file.name}`)
-      void qc.invalidateQueries({ queryKey: ["cloud", pid, "IMAGE"] })
-    },
-    onError: (e: Error) => toast.error(e.message),
-  })
-
-  const pickUpload = (r: CloudResource) => {
-    uploadTarget.current = r
-    fileInput.current?.click()
-  }
-
   const del = useMutation({
     mutationFn: (r: CloudResource) =>
       apiFetch(`/project/${pid}/cloud/${r.id}`, { method: "DELETE", cloud: scope }),
@@ -122,7 +96,6 @@ export default function ImagesPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
-  const uploadPending = upload.isPending
   const mineColumns = useMemo<ColumnDef<CloudResource, any>[]>(
     () => [
       {
@@ -176,11 +149,6 @@ export default function ImagesPage() {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
-                  {(r.data?.image?.status as string) === "queued" && (
-                    <DropdownMenuItem onClick={() => pickUpload(r)} disabled={uploadPending}>
-                      <Upload className="size-4" /> Upload data
-                    </DropdownMenuItem>
-                  )}
                   <DropdownMenuItem variant="destructive" onClick={() => setToDelete(r)}>
                     <Trash2 className="size-4" /> Delete
                   </DropdownMenuItem>
@@ -191,9 +159,8 @@ export default function ImagesPage() {
         },
       },
     ],
-    // pickUpload closes over refs only (stable); setToDelete is a stable setter.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [uploadPending],
+    // setToDelete is a stable setter.
+    [],
   )
 
   return (
@@ -201,7 +168,7 @@ export default function ImagesPage() {
       <PageHeader
         title="Images"
         eyebrow="Compute"
-        description="Your project's images and snapshots, plus the public OS catalog."
+        description="Your project's images and snapshots, plus the project templates."
         actions={
           <Button
             variant="outline"
@@ -229,7 +196,7 @@ export default function ImagesPage() {
             <EmptyState
               icon={HardDrive}
               title="No images yet"
-              hint="Server snapshots and images you upload will show up here."
+              hint="Server snapshots will show up here."
             />
           ) : (
             <>
@@ -266,23 +233,6 @@ export default function ImagesPage() {
           )}
         </TabsContent>
       </Tabs>
-
-      <input
-        ref={fileInput}
-        type="file"
-        className="hidden"
-        onChange={(e) => {
-          const f = e.target.files?.[0]
-          const r = uploadTarget.current
-          e.target.value = ""
-          if (!f || !r) return
-          if (f.size > 10 * 1024 ** 3) {
-            toast.error("Image is larger than 10 GB")
-            return
-          }
-          upload.mutate({ r, file: f })
-        }}
-      />
 
       <Dialog open={!!toDelete} onOpenChange={(o) => !o && setToDelete(null)}>
         <DialogContent>

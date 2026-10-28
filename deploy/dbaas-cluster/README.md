@@ -1,7 +1,7 @@
 # DBaaS-cluster manifests for the ProxCloud `dbaas` provider
 
 Operator-applied, one-time setup on the **DBaaS cluster** — the ops-pre-built Kubernetes
-cluster (nodes on OpenStack VMs) that runs the full database operator suite and hosts every
+cluster that runs the full database operator suite and hosts every
 customer database. ProxCloud does not apply these itself: they create the identity and
 guardrails proxcloud then operates *within* (mirror of `deploy/mgmt-cluster/` for the kamaji
 provider).
@@ -10,11 +10,13 @@ Full operator runbook: [`docs/managed-dbaas.md`](../../docs/managed-dbaas.md).
 
 ## Prerequisites
 
-1. **A pre-built cluster on OpenStack VMs** with the standard cloud plumbing already in
-   place — assumed pre-existing, NOT installed by anything here:
-   - **OpenStack cloud-controller-manager (OCCM)** — it is what turns the chart's
-     `<id>-lb` Services into Octavia internal LBs (the whole connectivity model).
-   - **cinder-csi** with a default StorageClass — every database volume is a PVC.
+1. **A pre-built cluster** with the standard plumbing already in place — assumed
+   pre-existing, NOT installed by anything here:
+   - **A LoadBalancer implementation** — it is what turns the chart's `<id>-lb` Services
+     into reachable endpoints (the whole connectivity model). TODO(P7): MetalLB on the
+     dbaas services subnet.
+   - **A CSI driver** with a default StorageClass — every database volume is a PVC
+     (proxmox-csi on Proxmox).
    - **ArgoCD** on this cluster. Any standard install; the manifests here assume the
      `argocd` namespace.
 2. **The database operator suite**, at PINNED versions — record the installed version next
@@ -29,7 +31,7 @@ Full operator runbook: [`docs/managed-dbaas.md`](../../docs/managed-dbaas.md).
    | valkey-operator | `valkey-operator-system` | **only if the valkey beta gate will open** — CRD unverified, see the chart's `templates/valkey/valkey.yaml` header | valkey |
    | opensearch-k8s-operator | `opensearch-operator-system` | **3.0.2** — 3.x serves both api groups (`opensearch.opster.io` deprecated → `opensearch.org`); the chart renders `opensearch.opster.io/v1`, re-check at the drill (chart's `templates/opensearch/opensearchcluster.yaml` header) | opensearch (+ Dashboards) |
    | Strimzi | `strimzi-system` | **1.1.0**, installed in **watch-all mode** (`watchAnyNamespace: true`) — REQUIRED, databases live in per-project `pc-*` namespaces the operator cannot enumerate up front. 1.x serves ONLY `kafka.strimzi.io/v1`. ⚠ `helm upgrade` does NOT upgrade Strimzi's CRDs — `kubectl apply` the new CRD bundle separately on every operator upgrade | kafka |
-   | prometheus-operator CRDs (+ stack) | `monitoring` | optional — required only when databases run with `monitoring.enabled`; **REQUIRED (full kube-prometheus-stack) for the disk-autoscale leg** — it grows volumes off kubelet volume-stats (`kubelet_volume_stats_*`), and the provider then needs `config.metrics {source: prometheus, prometheus: {url: …}}` (same admin Metrics tab as OpenStack providers) | all |
+   | prometheus-operator CRDs (+ stack) | `monitoring` | optional — required only when databases run with `monitoring.enabled`; **REQUIRED (full kube-prometheus-stack) for the disk-autoscale leg** — it grows volumes off kubelet volume-stats (`kubelet_volume_stats_*`), and the provider then needs `config.metrics {source: prometheus, prometheus: {url: …}}` (same admin Metrics tab as compute providers) | all |
    | Vertical Pod Autoscaler (**autoscaler component only**) | `kube-system` (or upstream default) | install **only if the autoscale feature will be offered**. The **recommender is REQUIRED**; updater and admission-controller are NOT needed — every chart-rendered VPA is `updateMode: Off` (recommendation-only; proxcloud applies the scale-ups itself, a VPA must never evict DB pods) | all (autoscale feature) |
 
    The **namespace column is not a suggestion**: the chart's per-database NetworkPolicy
@@ -43,9 +45,7 @@ Full operator runbook: [`docs/managed-dbaas.md`](../../docs/managed-dbaas.md).
    `database-cluster-v*` tag; see `deploy/charts/README.md`. The version proxcloud deploys is
    pinned per provider (`config.argocd.chartVersion`) and per existing database; the registry
    must keep every version a live database is pinned to.
-4. **OpenStack side**: a dedicated dbaas keystone project (the one tenant networks get
-   neutron-RBAC-shared with), the member subnet id for the provider config
-   (`config.database.memberSubnetId`), and Octavia quota — see the quota math below.
+4. **LB address pool** sized for the databases — see the address math below.
 
 ## Apply order
 
@@ -98,25 +98,12 @@ kubectl -n argocd get appproject proxcloud-dbaas
 kubectl -n argocd get cm argocd-cm -o jsonpath='{.data}' | grep -o 'resource\.customizations\.health\.[^"]*'
 ```
 
-## Amphora quota math
+## LoadBalancer address math
 
-Every customer database is **one Octavia internal LB** — EXCEPT kafka, which is
+Every customer database is **one LoadBalancer Service** — EXCEPT kafka, which is
 **`instances + 1`**: Strimzi provisions one LB per broker (each broker must be individually
 addressable) plus the external bootstrap LB (see the chart's
-`templates/kafka/kafka.yaml` header). Count kafka databases at N+1 in everything below.
-Every Octavia LB is **one
-amphora VM** in the dbaas keystone project (two with an active-standby amphora flavor —
-check `[controller_worker] loadbalancer_topology` in the Octavia config before doing the
-math). Each LB additionally consumes:
-
-- 1 VIP **port on the tenant subnet** (the customer's quota is untouched — the VIP port is
-  owned by Octavia; the tenant network is neutron-RBAC-shared into the dbaas project by
-  proxcloud at DB create),
-- member ports on the **dbaas member subnet** (`config.database.memberSubnetId`) — size that
-  subnet for `#DBs × amphorae`, not `#DBs`.
-
-So for N databases the dbaas keystone project needs, minimum: `loadbalancer` quota ≥ N,
-`instances`/`cores`/`ram` quota for N (or 2N active-standby) amphora VMs of the configured
-amphora flavor, and `port` quota to match. Exhausted amphora quota surfaces as the LB Service
-parked `<pending>` — the Application stays Progressing and the database never goes READY, with
-nothing obviously wrong on the k8s side; check the Octavia quota first.
+`templates/kafka/kafka.yaml` header). Count kafka databases at N+1 when sizing the LB address
+pool. An exhausted pool surfaces as the LB Service parked `<pending>` — the Application stays
+Progressing and the database never goes READY, with nothing obviously wrong on the k8s side;
+check the address pool first.

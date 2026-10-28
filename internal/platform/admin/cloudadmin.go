@@ -1,10 +1,8 @@
 package admin
 
-// cloudadmin.go — the cloud-admin live reads, Proxmox-aware. The OpenStack
-// keystone/nova/glance/cinder surface died with that backend; the same admin
-// routes now answer from the Proxmox provider config + live PVE reads (or empty
-// for concepts this fork does not have), so the admin FE renders without a
-// special case per page.
+// cloudadmin.go — the cloud-admin live reads: answered from the Proxmox provider
+// config + live PVE reads (templates, flavor catalog, storage profiles, GPUs,
+// public networks, regions).
 
 import (
 	"net/http"
@@ -21,9 +19,9 @@ const cloudServiceCollection = "externalService"
 // routeCloudAdmin registers the cloud-admin live reads.
 func (h *Handler) routeCloudAdmin(r chi.Router) {
 	r.Post("/service/proxmox/auth", h.proxmoxAuth)
-	r.Get("/service/os-images", h.osImagesAll)
+	r.Get("/service/os-images", h.imagesAll)
 	r.Get("/service/regions", h.serviceRegionsList)
-	r.Get("/service/{id}/os-images", h.osImagesByService)
+	r.Get("/service/{id}/os-images", h.imagesByService)
 	r.Get("/service/{id}/os-flavors", h.osFlavorsByService)
 	// Kamaji chart-pin surface: list every managed cluster's pin; re-pin one or all onto the
 	// provider's current chartVersion (the operator-side "platform update").
@@ -37,8 +35,6 @@ func (h *Handler) routeCloudAdmin(r chi.Router) {
 	r.Get("/service/{id}/gpu-info", h.gpuInfo)
 	r.Get("/service/{id}/unpriced-flavors", h.unpricedFlavors)
 	r.Get("/service/{id}/volume/types", h.volumeTypes)
-	r.Get("/service/{id}/share/protocols", h.shareProtocols)
-	r.Get("/service/{id}/availability-zones", h.availabilityZones)
 	r.Get("/cloud-resource/public-networks/{id}", h.publicNetworks)
 	// listFlavors — the curated flavor catalog (Proxmox has no live flavors).
 	r.Get("/flavor-categories/flavors", h.flavorsAll)
@@ -49,8 +45,8 @@ func (h *Handler) routeCloudAdmin(r chi.Router) {
 func (h *Handler) serviceRegions(es *externalservice.ExternalService) []string {
 	rs := es.RegionNames()
 	if len(rs) == 0 {
-		if h.region != "" {
-			return []string{h.region}
+		if h.defaultRegion != "" {
+			return []string{h.defaultRegion}
 		}
 		return []string{""}
 	}
@@ -92,9 +88,9 @@ func (h *Handler) loadServiceOr(w http.ResponseWriter, r *http.Request, id strin
 
 // ── DTOs ───────────────────────────────────────────────────────────────────
 
-// OpenstackImagesByLocationDto keeps the admin FE's images-by-location shape;
+// ImagesByLocationDto is the admin FE's images-by-location shape;
 // images are the provider's OS templates rendered image-like.
-type OpenstackImagesByLocationDto struct {
+type ImagesByLocationDto struct {
 	ServiceID         string           `json:"serviceId"`
 	ServiceName       string           `json:"serviceName"`
 	Region            string           `json:"region"`
@@ -106,13 +102,6 @@ type OpenstackImagesByLocationDto struct {
 type VolumeTypes struct {
 	Region      string   `json:"region"`
 	VolumeTypes []string `json:"volumeTypes"`
-}
-
-// ShareProtocol is one share-protocol entry (none exist on this fork).
-type ShareProtocol struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"displayName"`
-	Enabled     bool   `json:"enabled"`
 }
 
 // Location is one region location entry.
@@ -152,8 +141,8 @@ func pveTemplateImages(es *externalservice.ExternalService) []map[string]any {
 	return out
 }
 
-// osImagesByService: the provider's OS templates per region. ADMIN_SERVICE_READ.
-func (h *Handler) osImagesByService(w http.ResponseWriter, r *http.Request) {
+// imagesByService: the provider's OS templates per region. ADMIN_SERVICE_READ.
+func (h *Handler) imagesByService(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:service:read") {
 		return
 	}
@@ -161,11 +150,11 @@ func (h *Handler) osImagesByService(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	out := []OpenstackImagesByLocationDto{}
+	out := []ImagesByLocationDto{}
 	if es.IsProxmox() {
 		for _, region := range h.serviceRegions(es) {
 			display, _ := regionMeta(es, region)
-			out = append(out, OpenstackImagesByLocationDto{
+			out = append(out, ImagesByLocationDto{
 				ServiceID: es.ID, ServiceName: es.Name, Region: region,
 				RegionDisplayName: display, Images: pveTemplateImages(es),
 			})
@@ -174,12 +163,12 @@ func (h *Handler) osImagesByService(w http.ResponseWriter, r *http.Request) {
 	httpx.List(w, out)
 }
 
-// osImagesAll: templates across every provider. ADMIN_SERVICE_READ.
-func (h *Handler) osImagesAll(w http.ResponseWriter, r *http.Request) {
+// imagesAll: templates across every provider. ADMIN_SERVICE_READ.
+func (h *Handler) imagesAll(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, "admin:service:read") {
 		return
 	}
-	out := []OpenstackImagesByLocationDto{}
+	out := []ImagesByLocationDto{}
 	if h.esSvc != nil {
 		services, _ := h.esSvc.ListByType(r.Context(), externalservice.TypeCloud)
 		for i := range services {
@@ -189,7 +178,7 @@ func (h *Handler) osImagesAll(w http.ResponseWriter, r *http.Request) {
 			}
 			for _, region := range h.serviceRegions(es) {
 				display, _ := regionMeta(es, region)
-				out = append(out, OpenstackImagesByLocationDto{
+				out = append(out, ImagesByLocationDto{
 					ServiceID: es.ID, ServiceName: es.Name, Region: region,
 					RegionDisplayName: display, Images: pveTemplateImages(es),
 				})
@@ -292,29 +281,6 @@ func (h *Handler) volumeTypes(w http.ResponseWriter, r *http.Request) {
 		out = append(out, VolumeTypes{Region: es.PVERegion(), VolumeTypes: names})
 	}
 	httpx.List(w, out)
-}
-
-// shareProtocols: none on this fork. ADMIN_SERVICE_READ.
-func (h *Handler) shareProtocols(w http.ResponseWriter, r *http.Request) {
-	if !h.require(w, r, "admin:service:read") {
-		return
-	}
-	if _, ok := h.loadServiceOr(w, r, chi.URLParam(r, "id")); !ok {
-		return
-	}
-	httpx.List(w, []ShareProtocol{})
-}
-
-// availabilityZones: nodes are deliberately hidden from the platform's zone
-// concept (the scheduler owns placement). ADMIN_SERVICE_READ.
-func (h *Handler) availabilityZones(w http.ResponseWriter, r *http.Request) {
-	if !h.require(w, r, "admin:service:read") {
-		return
-	}
-	if _, ok := h.loadServiceOr(w, r, chi.URLParam(r, "id")); !ok {
-		return
-	}
-	httpx.List(w, []map[string]any{})
 }
 
 // serviceRegionsList: every provider's configured regions. ADMIN_SERVICE_READ.

@@ -15,7 +15,7 @@ import (
 // constants. Inlined here on purpose: the billing domain must stay free of any internal/cloud
 // import so it can be extracted into the standalone billing service. These are the stable wire
 // values the FE resource-name/created helpers read (data.<key>) — keep them in sync with
-// internal/cloud/resource.go if OpenStack resource types ever change.
+// internal/cloud/resource.go if the cloud resource types ever change.
 const (
 	cloudTypeServer       = "SERVER"
 	cloudTypeVolume       = "VOLUME"

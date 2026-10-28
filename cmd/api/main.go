@@ -27,12 +27,10 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/billingresource"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metricsjob"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/syncjob"
 	"github.com/mutex-solutions/proxcloud/internal/config"
@@ -219,9 +217,6 @@ func run() error {
 	// project — set via a setter).
 	orgH.SetProjectMemberAdder(projectSvc)
 	cloudRepo := cloud.NewRepo(pg)
-	// cloudCli holds the live CloudClient (set in the background once OpenStack auth completes;
-	// declared here so the project handler's write endpoints can resolve it lazily).
-	var cloudCli atomic.Pointer[client.Client]
 	// esSvc is created here (ahead of the admin handler) so the project handler's client cloud read
 	// endpoints (init menu / project services) can resolve external services too. It shares `enc`
 	// (declared above, near the mail gateway) so write-encrypt and read-decrypt use the same key.
@@ -237,8 +232,7 @@ func run() error {
 		esSvc,
 		pricingRepo,
 		project.NewInstanceMetadataReader(pg),
-		func() *client.Client { return cloudCli.Load() },
-		cfg.OpenStack.Region,
+		cfg.DefaultRegion,
 	)
 	// Cloud-object download tokens (object-store DOWNLOAD action → GET /download/{token}).
 	projectH.SetDownloads(cloud.NewDownloadRepo(pg), cfg.Self.APIBaseURL)
@@ -364,18 +358,14 @@ func run() error {
 	}
 	authn.SetClientKeyLookup(clientKeyLookup)
 
-	// The OpenStack dev-bootstrap cloud client died with that backend; /debug/cloud
-	// now reports only that no global cloud client exists (pve clients are per-provider).
-	var cloudDebug http.HandlerFunc
-
-	// Scheduled jobs: the charge cron + the gnocchi metrics
+	// Scheduled jobs: the charge cron + the usage metrics
 	// ingestion, each guarded by a distributed lock so it runs once across the fleet. The charge
-	// step reads the PostgreSQL cache (cloudResource/gnocchiMetrics/pricePlan); the metrics job
+	// step reads the PostgreSQL cache (cloudResource/usageMetrics/pricePlan); the metrics job
 	// hits the live cloud per ExternalService. Wired always, STARTED only when
 	// PROXCLOUD_JOBS_SCHEDULER_ENABLED=true — so a plain deploy never charges bills until the
 	// gated live rating run turns it on.
 	// Admin handler (needs esSvc + region + the cloud-client factory for cloud-admin live reads).
-	adminH := admin.NewHandler(admin.NewRepo(pg), catalog.NewRepo(pg), users, addFundsSvc, pricingRepo, billingRepo, cloudRepo, platformconfig.NewRepo(pg), auditSvc, esSvc, cfg.OpenStack.Region, cfg.Auth.Admin.IssuerURI, cfg.Auth.Admin.ClientID)
+	adminH := admin.NewHandler(admin.NewRepo(pg), catalog.NewRepo(pg), users, addFundsSvc, pricingRepo, billingRepo, cloudRepo, platformconfig.NewRepo(pg), auditSvc, esSvc, cfg.DefaultRegion, cfg.Auth.Admin.IssuerURI, cfg.Auth.Admin.ClientID)
 	adminH.SetKamaji(func(es *externalservice.ExternalService) (*kamaji.Service, error) {
 		return kamaji.New(es.KamajiConfig(), es.ID)
 	})
@@ -488,7 +478,7 @@ func run() error {
 	// On admin user-create, loop the given project IDs and send a project invite for each (best-effort).
 	adminH.SetInviteToProject(inviteH.InviteToProject)
 	// Live per-project cloud legs for the admin project + cloud-resource mutations:
-	// nova pause/unpause, scoped sync, keystone bootstrap.
+	// PVE suspend/resume, scoped sync, project bootstrap.
 	adminH.SetProjectCloudOps(&admin.ProjectCloudOps{
 		PauseServers: func(ctx context.Context, projectID string, pause bool) error {
 			p, err := projectRepo.FindByID(ctx, projectID)
@@ -502,7 +492,7 @@ func run() error {
 			return nil
 		},
 		Sync: syncJob.SyncOne,
-		Bootstrap: func(ctx context.Context, projectID, esID, adoptExternalProjectID string) error {
+		Bootstrap: func(ctx context.Context, projectID, esID string) error {
 			err := func() error {
 				p, err := projectSvc.GetProjectByID(ctx, projectID)
 				if err != nil {
@@ -515,7 +505,7 @@ func run() error {
 				if es == nil {
 					return fmt.Errorf("external service %s not found", esID)
 				}
-				return projectH.BootstrapOnto(ctx, p, es, adoptExternalProjectID)
+				return projectH.BootstrapOnto(ctx, p, es)
 			}()
 			if err != nil {
 				// The admin handler wraps this into a generic 500 — log the real cause here.
@@ -587,25 +577,12 @@ func run() error {
 	billSendSvc.SetNotifier(mailSvc)
 	// Project-deletion job: cascade-delete a scheduled project's cloud resources (live
 	// WriteService.Delete per resource) then remove the doc. ⚠ performs LIVE cloud DELETEs.
-	deletionJob := project.NewDeletionJob(projectRepo, projectCloudDeleter{
-		cloudRepo: cloudRepo,
-		client:    func() *client.Client { return cloudCli.Load() },
-		// kamaji rows have no keystone tenant — route them to the management cluster
-		// (Application delete) instead of the OpenStack WriteService (whose KUBERNETES_CLUSTER
-		// branch is the dormant Magnum path and would fail every sweep).
-		esGet: esSvc.Get,
-		kamajiFor: func(es *externalservice.ExternalService) (*kamaji.Service, error) {
-			return kamaji.New(es.KamajiConfig(), es.ID)
-		},
-		dbaasFor: func(es *externalservice.ExternalService) (*dbaas.Service, error) {
-			return dbaas.New(es.DbaasConfig(), es.ID)
-		},
-	}, log)
+	deletionJob := project.NewDeletionJob(projectRepo, projectTeardownDeleter(projectH.TeardownProject), log)
 	sched := scheduler.New(lock.New(pg))
 	// Which engine charges bills. NATIVE (the default) rates in-process with the billing engine in
 	// this repository and needs nothing but PostgreSQL — that is what a plain checkout of proxcloud
 	// runs. EXTERNAL delegates rating to a separate billing service; this pod still resolves each
-	// profile's cloud resources, because it owns the OpenStack cache and nothing else can.
+	// profile's cloud resources, because it owns the cloud resource cache and nothing else can.
 	//
 	// Only this step differs between the two. See internal/platform/billingprovider.
 	var billingProv billingprovider.Provider
@@ -643,7 +620,7 @@ func run() error {
 		log.Info("scheduled jobs are wired but NOT started (set PROXCLOUD_JOBS_SCHEDULER_ENABLED=true to enable)")
 	}
 	// On-demand triggers (mgmt port) for the golden run — deterministic instead of cron-timed:
-	// run-sync (populate the cache) → run-metrics (ingest gnocchi) → run-charge. Exposed when the
+	// run-sync (populate the cache) → run-metrics (ingest usage metrics) → run-charge. Exposed when the
 	// scheduler is on OR debug-triggers is on, so a deploy can be driven manually while the timed
 	// crons stay dormant (no automatic bill charging).
 	var jobsDebug map[string]http.HandlerFunc
@@ -858,7 +835,7 @@ func run() error {
 	}
 	mgmtSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Management.Port),
-		Handler:           server.MgmtRouter(h, cloudDebug, jobsDebug, billingCB),
+		Handler:           server.MgmtRouter(h, jobsDebug, billingCB),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -900,7 +877,7 @@ func startChargeConsumer(rabbit *atomic.Pointer[amqp.Client], charger chargefano
 	log.Error("charge fan-out consumer: broker not up after 120s")
 }
 
-// registerJobs wires the charge cron (minutely/hourly/monthly) + the gnocchi metrics job
+// registerJobs wires the charge cron (minutely/hourly/monthly) + the usage metrics job
 // with the verified cron specs + lock names/durations. The charge crons
 // share AtMostFor 5m / AtLeastFor 30s; the metrics job uses AtMostFor 10m / AtLeastFor 30s.
 // registerJobs wires the scheduled jobs.
@@ -938,9 +915,9 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 		{Name: "minutelyCharge", Spec: scheduler.MinutelyChargeSpec, AtMostFor: 5 * time.Minute, AtLeastFor: 30 * time.Second, Fn: chargeFn(pricing.TimeUnitMinute)},
 		{Name: "hourlyCharge", Spec: scheduler.HourlyChargeSpec, AtMostFor: 5 * time.Minute, AtLeastFor: 30 * time.Second, Fn: chargeFn(pricing.TimeUnitHour)},
 		{Name: "monthlyCharge", Spec: scheduler.MonthlyChargeSpec, AtMostFor: 5 * time.Minute, AtLeastFor: 30 * time.Second, Fn: chargeFn(pricing.TimeUnitMonth)},
-		{Name: "gnocchiMetricsFetch", Spec: scheduler.GnocchiMetricsSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
+		{Name: "usageMetricsFetch", Spec: scheduler.UsageMetricsSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
 			if err := metrics.Run(ctx); err != nil {
-				log.Error("gnocchi metrics job", "err", err)
+				log.Error("usage metrics job", "err", err)
 			}
 		}},
 		{Name: "savingsContractExpiration", Spec: scheduler.SavingsExpirationSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
@@ -1024,16 +1001,19 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 	}
 }
 
-// projectCloudDeleter implements project.ResourceDeleter: cascade-delete a project's cloud
-// resources via the live CloudClient. ⚠ performs
-// LIVE cloud DELETEs — aborts on the first failure so the caller rolls the project back to ENABLED.
+// projectTeardownDeleter adapts the project teardown (PVE VMs, networks, security groups and
+// public IPs, managed clusters, databases, buckets) to the scheduled deletion job, so a
+// scheduled delete cleans up exactly what delete-project-now does.
+type projectTeardownDeleter func(ctx context.Context, projectID string) error
 
-// billingCloudSuspender is the live OpenStack suspend/resume for a billing profile:
-// resolve the profile's projects (via its orgs — greenfield projects inherit the org's bp), and
-// per CLOUD service nova-PAUSE/UNPAUSE each cached SERVER with a tenant-scoped client + flip the
-// project ENABLED↔DISABLED. Per-project/server errors are logged and skipped (best-effort).
-// (keystone member/API-user disable legs are no-ops here — the bootstrap creates no
-// per-customer keystone users yet.)
+func (f projectTeardownDeleter) DeleteProjectResources(ctx context.Context, projectID string) error {
+	return f(ctx, projectID)
+}
+
+// billingCloudSuspender is the live suspend/resume for a billing profile: resolve the
+// profile's projects (via its orgs — greenfield projects inherit the org's bp), and per Proxmox
+// CLOUD service suspend/resume each cached SERVER (PVE VM) + flip the project ENABLED↔DISABLED.
+// Per-project/server errors are logged and skipped (best-effort).
 type billingCloudSuspender struct {
 	orgs     *org.Repo
 	projects *project.Repo
@@ -1078,8 +1058,8 @@ func (s billingCloudSuspender) forEachProjectServer(ctx context.Context, bpID st
 	return nil
 }
 
-// pauseProjectServers is the CLOUD-only per-project leg: nova PAUSE/UNPAUSE every cached SERVER
-// through a tenant-scoped client. Best-effort — per-server/-service failures are logged and
+// pauseProjectServers is the CLOUD-only per-project leg: PVE suspend/resume every cached SERVER
+// through the provider's client. Best-effort — per-server/-service failures are logged and
 // skipped. Status flips stay with the callers (bp walk above; admin status-update handler).
 func (s billingCloudSuspender) pauseProjectServers(ctx context.Context, p *project.Project, pause bool) {
 	for _, serviceID := range p.ServiceIDs() {
@@ -1117,117 +1097,6 @@ func (s billingCloudSuspender) pauseProjectServers(ctx context.Context, p *proje
 			}
 		}
 	}
-}
-
-type projectCloudDeleter struct {
-	cloudRepo *cloud.Repo
-	client    func() *client.Client
-	esGet     func(ctx context.Context, id string) (*externalservice.ExternalService, error)
-	kamajiFor func(es *externalservice.ExternalService) (*kamaji.Service, error)
-	dbaasFor  func(es *externalservice.ExternalService) (*dbaas.Service, error)
-}
-
-func (d projectCloudDeleter) DeleteProjectResources(ctx context.Context, projectID string) error {
-	cc := d.client()
-	if cc == nil {
-		return errors.New("cloud client not ready")
-	}
-	ws := providers.NewWriteService(cc, d.cloudRepo)
-	resources, err := d.cloudRepo.FindAllByProjectID(ctx, projectID)
-	if err != nil {
-		return err
-	}
-	project.SortCloudResourcesForDeletion(resources)
-
-	// kamaji rows: delete via the management cluster (ArgoCD Application cascade), never the
-	// OpenStack WriteService. A successful delete request archives the row immediately — the
-	// cascade is asynchronous and the service-level sweep (syncjob.sweepKamajiOrphans) later
-	// revokes the appcred and reaps secret/namespace, which keeps working after this project's
-	// doc is gone (the sweep scans the management cluster, not proxcloud projects). Failures are
-	// collected (not abort-on-first, so one bad row cannot strand the others) and returned at
-	// the end — the deletion job then cancels this run and the project owner sees it, same as
-	// an OpenStack sweep failure.
-	var kamajiErr error
-	if d.esGet != nil && d.kamajiFor != nil {
-		kept := resources[:0]
-		now := time.Now().UTC()
-		for i := range resources {
-			res := &resources[i]
-			es, gerr := d.esGet(ctx, res.ServiceID)
-			if gerr != nil || es == nil || (!es.IsKamaji() && !es.IsDbaas()) {
-				kept = append(kept, *res)
-				continue
-			}
-			// dbaas rows: same Application-delete route on the DB cluster; the service-level
-			// sweep (syncjob.sweepDbaasOrphans) later revokes the neutron network share and
-			// reaps the marker/auth secrets, which keeps working after this project's doc is
-			// gone.
-			if es.IsDbaas() {
-				if d.dbaasFor == nil {
-					kept = append(kept, *res)
-					continue
-				}
-				ds, derr := d.dbaasFor(es)
-				if derr != nil {
-					kamajiErr = fmt.Errorf("dbaas service %s: %w", res.ServiceID, derr)
-					continue
-				}
-				if derr := ds.DeleteDatabase(ctx, projectID, res.ExternalID); derr != nil {
-					kamajiErr = fmt.Errorf("dbaas database %s: %w", res.ExternalID, derr)
-					continue
-				}
-				if aerr := d.cloudRepo.DeleteAndArchive(ctx, res, now); aerr != nil {
-					kamajiErr = fmt.Errorf("archive dbaas database %s: %w", res.ExternalID, aerr)
-				}
-				continue
-			}
-			ks, kerr := d.kamajiFor(es)
-			if kerr != nil {
-				kamajiErr = fmt.Errorf("kamaji service %s: %w", res.ServiceID, kerr)
-				continue
-			}
-			if derr := ks.DeleteCluster(ctx, projectID, res.ExternalID); derr != nil {
-				kamajiErr = fmt.Errorf("kamaji cluster %s: %w", res.ExternalID, derr)
-				continue
-			}
-			if aerr := d.cloudRepo.DeleteAndArchive(ctx, res, now); aerr != nil {
-				kamajiErr = fmt.Errorf("archive kamaji cluster %s: %w", res.ExternalID, aerr)
-			}
-		}
-		resources = kept
-	}
-
-	remaining := resources
-	var lastErr error
-	for sweep := 0; sweep < 3 && len(remaining) > 0; sweep++ {
-		if sweep > 0 {
-			// Nova server deletion is asynchronous: the boot volume of a
-			// volume-backed server stays in-use until delete_on_termination
-			// finishes (routinely 10-30s). Back-to-back sweeps would burn all
-			// retries inside that window and fail the deletion — which the
-			// deletion job then treats as canceled (project flips back ENABLED).
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(20 * time.Second):
-			}
-		}
-		stillLeft := make([]cloud.CloudResource, 0, len(remaining))
-		for i := range remaining {
-			if err := ws.Delete(ctx, remaining[i].ServiceID, remaining[i].ExternalID); err != nil {
-				lastErr = err
-				stillLeft = append(stillLeft, remaining[i])
-			}
-		}
-		remaining = stillLeft
-	}
-	if len(remaining) > 0 {
-		return fmt.Errorf("scheduled project deletion left %d resource(s): %w", len(remaining), lastErr)
-	}
-	if kamajiErr != nil {
-		return fmt.Errorf("scheduled project deletion: %w", kamajiErr)
-	}
-	return nil
 }
 
 // jobResult writes a debug-trigger response: the result map on success, or a 500 with the error.

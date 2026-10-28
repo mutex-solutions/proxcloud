@@ -20,7 +20,3 @@ func TestResourceOwnedBy_crossProjectDenied(t *testing.T) {
 		t.Fatal("§5/§7: a raw/uncached id (nil cache row) must be rejected, not acted on")
 	}
 }
-
-// §27: the glance owner filter must apply in EVERY listImages branch, including the
-// dataAssociatedTo (server-snapshots) branch — otherwise a caller reads another tenant's snapshots
-// by naming their instance_uuid.

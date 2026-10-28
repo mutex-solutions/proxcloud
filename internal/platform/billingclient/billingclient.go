@@ -2,7 +2,7 @@
 //
 // Billing is being extracted from this monolith: the RATING half (price plans, bills, credits,
 // suspension) now lives in the billing service, while RESOLUTION — reading the cloud-resource cache
-// and turning it into billable units — stays here, because it is OpenStack-specific. This package
+// and turning it into billable units — stays here, because it is cloud-specific. This package
 // is the seam between the two.
 //
 // The wire contract is pkg/billingapi. Note that proxcloud and the billing service each keep their

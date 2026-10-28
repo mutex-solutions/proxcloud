@@ -6,15 +6,14 @@ releases share the namespace and would collide on the policy name); this
 policy is the additive allow for one database's pods.
 
 WHY allowedCidrs ARE NOT MIRRORED HERE: client filtering is enforced at the
-Octavia LB (spec.loadBalancerSourceRanges on the <id>-lb Service = the Octavia
-ACL). By the time traffic reaches a pod it has been proxied by the amphora —
-the source address is an amphora port on the member subnet (or a node address
-after kube-proxy), never the client CIDR. Mirroring allowedCidrs here would
+LB (spec.loadBalancerSourceRanges on the <id>-lb Service). By the time traffic
+reaches a pod it may have been SNATed by kube-proxy — the source address can
+be a node address, never reliably the client CIDR. Mirroring allowedCidrs here would
 therefore block ALL legitimate traffic. Do not "fix" that.
 
 ponytail: the DB-port rule below is source-open (in-cluster pods from other
 namespaces could reach the port too, gated only by DB auth) because the
-amphora/member-subnet and node CIDRs are not knowable to the chart. Ceiling:
+LB and node CIDRs are not knowable to the chart. Ceiling:
 add a network.clusterCidrs value and pin ipBlocks here if in-cluster reach
 ever matters.
 */}}
@@ -52,8 +51,8 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # 1. Client traffic on the engine port(s), arriving via the Octavia LB
-    #    (amphora member-subnet source) or node SNAT. Source-open by design —
+    # 1. Client traffic on the engine port(s), arriving via the LB (node SNAT
+    #    source). Source-open by design —
     #    see header.
     #    opensearch: 9200 client HTTPS, 9300 transport, 5601 Dashboards (via
     #    the <id>-dash-lb). kafka: 9092 internal listener, 9093 (reserved,

@@ -2,7 +2,7 @@
 //
 // Most of the billing split is one-directional: proxcloud resolves cloud resources and POSTs them to
 // the billing service to be rated. But three of the billing engine's side effects reach back into
-// things only proxcloud owns — pausing OpenStack servers, enabling projects, sending mail — and those
+// things only proxcloud owns — suspending PVE VMs, enabling projects, sending mail — and those
 // move with the engine. They become callbacks in this direction.
 //
 // These endpoints are DANGEROUS: suspend-clouds pauses every server belonging to a billing profile.

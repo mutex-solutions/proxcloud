@@ -37,8 +37,8 @@ Type: DUE_DATE
 
 ## What a suspension does
 
-Suspending a billing profile suspends its projects: running servers are paused and the OpenStack project is disabled, so the customer can neither use nor create resources. The data itself is kept — suspension is reversible, not destructive. Suspended profiles show their status under **Client area → Billing profiles**.
+Suspending a billing profile suspends its projects. Each project's running VMs are suspended in Proxmox (`qm suspend`) and the project is set to `DISABLED`, so the customer can neither use nor create resources. The data itself is kept — suspension is reversible, not destructive. Suspended profiles show their status under **Client area → Billing profiles**.
 
 ## Bringing an account back
 
-Once the customer settles up — tops up the balance or pays the overdue invoice — resume the profile from its page under **Client area → Billing profiles**. Its projects are re-enabled and any paused servers are unpaused. Chronic non-payers can be terminated by hand from that same page once your own grace policy has run its course.
+Once the customer settles up — tops up the balance or pays the overdue invoice — resume the profile from its page under **Client area → Billing profiles**. Its projects are set back to `ENABLED` and their suspended VMs are resumed. Chronic non-payers can be terminated by hand from that same page once your own grace policy has run its course.

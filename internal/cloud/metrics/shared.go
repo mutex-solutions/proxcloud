@@ -1,5 +1,5 @@
-// shared.go — the measure-fetcher shared types/helpers that outlived the Gnocchi
-// client (removed with the OpenStack backend; Prometheus is the only live source).
+// shared.go — the measure-fetcher shared types/helpers (Prometheus is the only live
+// source).
 package metrics
 
 import (
@@ -9,12 +9,7 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// DefaultGranularity is kept for the config plumbing (gnocchi-era knob; the
-// prometheus path ignores it).
-const (
-	DefaultGranularity = 300
-	bytesPerMB         = 1048576
-)
+const bytesPerMB = 1048576
 
 // decimal64 = 16 significant digits, HALF_EVEN — significant-digit division
 // before feeding the rating engine (shopspring rounds by decimal places).
@@ -34,7 +29,7 @@ func trimSlash(s string) string {
 }
 func divDecimal64(a, b decimal.Decimal) (decimal.Decimal, error) {
 	if b.IsZero() {
-		return decimal.Zero, fmt.Errorf("gnocchi: divide by zero")
+		return decimal.Zero, fmt.Errorf("metrics: divide by zero")
 	}
 	ad, _, err := apd.NewFromString(a.String())
 	if err != nil {

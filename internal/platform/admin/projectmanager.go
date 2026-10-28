@@ -33,7 +33,7 @@ import (
 //	return the project
 //
 // The membership append is persisted, then the updated project is returned. The platform runs every
-// cloud call through an ADMIN-scoped tenant client, so members carry no per-user keystone identity —
+// cloud call through an ADMIN-scoped tenant client, so members carry no per-user cloud identity —
 // there is no per-user cloud grant to perform (this mirrors the client-side AddMember, datastore-only).
 //
 // ── remove member ──
@@ -136,7 +136,7 @@ func (h *Handler) projectManagerAddUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// Append Membership{sub, role} and return the updated project. The platform runs every cloud
-	// call through an ADMIN-scoped tenant client — members have no per-user keystone identity — so
+	// call through an ADMIN-scoped tenant client — members have no per-user cloud identity — so
 	// there is no per-user cloud grant to make here (this mirrors the client-side AddMember, which is
 	// datastore-only). Returning the project after the persist also avoids the prior state-leak where the
 	// membership was written but the caller received a 501.

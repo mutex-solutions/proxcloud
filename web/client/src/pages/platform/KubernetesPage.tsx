@@ -1,10 +1,12 @@
 // Managed Kubernetes (kamaji provider) — list/create/manage clusters. The cloud scope for
 // cluster CRUD is a KAMAJI location (the create wizard offers a picker when the project has
-// more than one); the flavor picker for node groups reads the project's OPENSTACK service
-// (worker VMs run in the customer's own tenant) and mirrors CreateServerPage's flavor gating:
+// more than one); the flavor picker for node groups reads the project's Proxmox (compute)
+// service and mirrors CreateServerPage's flavor gating:
 // quota + region GPU capacity + no ephemeral/swap flavors + the admin's kubernetesFlavorIds
 // allowlist. Actions map to Go cloud_kamaji.go: create/delete + GET_KUBECONFIG / UPGRADE /
 // SET_NODE_GROUPS / SET_OIDC.
+// TODO(P7): cluster create is not available on Proxmox yet — CAPMOX worker provisioning,
+// proxmox-csi storage and MetalLB load balancers replace the old cloud-specific pieces.
 import { useCallback, useMemo, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -45,8 +47,6 @@ type NodeGroupRow = {
   name: string
   flavorId: string
   variant: string // curated image-variant name ("" = the version's default image)
-  az: string // Nova availability zone pin ("" = cloud default placement)
-  publicIp: boolean // floating IP per node from the cluster's external range
   count: string
   autoscale: boolean
   min: string
@@ -55,8 +55,8 @@ type NodeGroupRow = {
   labels: string // "k=v,k2=v2"
   taints: string // "key=val:NoSchedule,…"
 }
-// LIST_FLAVORS rows come back in the same shape CreateServerPage consumes: the OpenStack
-// flavor document nested under `data`, with the nova id mirrored as `externalId`.
+// LIST_FLAVORS rows come back in the same shape CreateServerPage consumes: the Proxmox flavor
+// catalog entry nested under `data`, with its id mirrored as `externalId`.
 type Flavor = {
   externalId?: string
   data?: {
@@ -79,8 +79,7 @@ type FlavorOption = {
   blocked?: boolean // exceeds project quota or region GPU capacity — must not be picked
 }
 // A pickable cluster network: one of the project's own VPCs plus its subnets. The default —
-// no pick — is a dedicated network CAPO creates for the cluster (EKS-style, the external
-// gateway is derived server-side and never shown).
+// no pick — is a dedicated network created for the cluster.
 type NetworkOption = {
   id: string
   name: string
@@ -108,13 +107,13 @@ function oidcToBody(o: OidcDraft): Record<string, string> {
   )
 }
 
-// Node images are bigger than most flavors' local disk, so a node group boots from a Cinder volume
-// and the size is explicit. The backend applies the provider's own default when this is left empty;
+// Node images are bigger than most flavors' local disk, so a node group's root disk size is
+// explicit. The backend applies the provider's own default when this is left empty;
 // this is only the number the form starts on.
 const DEFAULT_ROOT_DISK_GIB = "120"
 
 const emptyGroup: NodeGroupRow = {
-  name: "workers", flavorId: "", variant: "", az: "", publicIp: false, count: "3", autoscale: false, min: "1", max: "5",
+  name: "workers", flavorId: "", variant: "", count: "3", autoscale: false, min: "1", max: "5",
   rootDisk: DEFAULT_ROOT_DISK_GIB, labels: "", taints: "",
 }
 
@@ -210,8 +209,6 @@ function groupsToData(groups: NodeGroupRow[]) {
     name: g.name.trim(),
     flavorId: g.flavorId,
     ...(g.variant ? { imageVariant: g.variant } : {}),
-    ...(g.az ? { availabilityZone: g.az } : {}),
-    ...(g.publicIp ? { publicIp: true } : {}),
     ...(g.autoscale
       ? { autoscale: true, min: Number(g.min), max: Number(g.max) }
       : { count: Number(g.count) }),
@@ -229,8 +226,6 @@ function rowsToSyncGroups(rows: NodeGroupRow[]): Cluster[] {
     name: g.name.trim(),
     flavor_id: g.flavorId,
     ...(g.variant ? { image_variant: g.variant } : {}),
-    ...(g.az ? { availability_zone: g.az } : {}),
-    ...(g.publicIp ? { public_ip: true } : {}),
     // dataGroupsToRows falls back to 120 when this is absent — the patch must carry it, or
     // re-opening the editor before the next sync silently resizes every pool's root disk.
     ...(Number(g.rootDisk) > 0 ? { root_volume_gib: Number(g.rootDisk) } : {}),
@@ -274,8 +269,6 @@ function dataGroupsToRows(c: Cluster): NodeGroupRow[] {
     name: String(g.name ?? ""),
     flavorId: String(g.flavor_id ?? ""),
     variant: String(g.image_variant ?? ""),
-    az: String(g.availability_zone ?? ""),
-    publicIp: g.public_ip === true,
     count: String(g.count ?? 1),
     autoscale: g.autoscale === true,
     min: String(g.min ?? 1),
@@ -297,15 +290,15 @@ function useKubernetesData(pid: string) {
   const services = useProjectServices(pid)
   const project = useProject(pid).project
 
-  // Cluster CRUD scope = a kamaji location; flavors come from the OpenStack service.
+  // Cluster CRUD scope = a kamaji location; flavors come from the Proxmox service.
   const kLocs = useMemo(
     () => (locations.data ?? []).filter((l) => l.provider === "kamaji" && l.serviceId && l.region),
     [locations.data],
   )
   const kLoc = kLocs[0]
-  const osLoc = locations.data?.find((l) => l.provider !== "kamaji" && l.provider !== "ceph-s3")
+  const computeLoc = locations.data?.find((l) => l.provider === "proxmox")
   const kScope: CloudScope | undefined = kLoc?.serviceId && kLoc?.region ? { serviceId: kLoc.serviceId, region: kLoc.region } : undefined
-  const osScope: CloudScope | undefined = osLoc?.serviceId && osLoc?.region ? { serviceId: osLoc.serviceId, region: osLoc.region } : undefined
+  const computeScope: CloudScope | undefined = computeLoc?.serviceId && computeLoc?.region ? { serviceId: computeLoc.serviceId, region: computeLoc.region } : undefined
 
   // Curated versions live on the kamaji service DTO — per service, so per selected location.
   const versionsFor = useCallback(
@@ -325,12 +318,6 @@ function useKubernetesData(pid: string) {
   // "Apply platform update" offer on its detail page.
   const platformVersionFor = useCallback(
     (serviceId?: string) => String(services.data?.find((s) => s.id === serviceId)?.kubernetesPlatformVersion ?? ""),
-    [services.data],
-  )
-
-  // The default StorageClass clusters ship with — informational, surfaced in the create wizard.
-  const storageFor = useCallback(
-    (serviceId?: string) => services.data?.find((s) => s.id === serviceId)?.kubernetesStorage,
     [services.data],
   )
 
@@ -363,31 +350,25 @@ function useKubernetesData(pid: string) {
     refetchInterval: (query) => ((query.state.data ?? []).some((r) => clusterBusy(cluster(r))) ? 15000 : false),
   })
   const flavors = useQuery({
-    queryKey: ["bulk-action", pid, "LIST_FLAVORS", osScope?.serviceId],
+    queryKey: ["bulk-action", pid, "LIST_FLAVORS", computeScope?.serviceId],
     queryFn: () =>
       apiFetch<{ result?: Flavor[] }>(`/project/${pid}/cloud/action`, {
         method: "POST",
         body: { action: "LIST_FLAVORS" },
-        cloud: osScope,
+        cloud: computeScope,
       }),
-    enabled: !!pid && !!osScope,
-    // Nodes boot from a Cinder volume, and a flavor with local ephemeral/swap disk cannot be
-    // volume-backed — same filter the server create wizard applies.
+    enabled: !!pid && !!computeScope,
+    // A flavor with local ephemeral/swap disk is not offered — same filter the server create
+    // wizard applies.
     select: (d) => (d?.result ?? []).filter((f) => !(f.data?.ephemeral ?? 0) && !(f.data?.swap ?? 0)),
   })
   // Same gating inputs CreateServerPage uses: live compute/GPU quota + region GPU capacity
   // (capacity only fetched when the operator made it visible to the project).
-  const projectQuota = useProjectQuota(pid, osScope)
-  const gpuCapacity = useProjectGpuCapacity(pid, osScope, project?.gpuCapacityVisible === true)
-
-  // NOTE: no per-node-group AZ picker on purpose. In this platform's topology an availability
-  // zone IS a separate cloud (own network, own Kamaji management cluster; only Keystone is
-  // shared), so a cluster lives entirely in one zone — the zone choice is the LOCATION choice,
-  // and CAPI/Kamaji cannot span zones. The NodeGroup.availabilityZone API field still passes
-  // through to the chart's failureDomain for a future genuinely multi-AZ region.
+  const projectQuota = useProjectQuota(pid, computeScope)
+  const gpuCapacity = useProjectGpuCapacity(pid, computeScope, project?.gpuCapacityVisible === true)
 
   // Node-group flavor options, filtered and gated exactly like the create-server wizard:
-  //  - no local ephemeral/swap disk (worker nodes boot from volume; backend rejects those),
+  //  - no local ephemeral/swap disk,
   //  - only ids on the kamaji service's kubernetesFlavorIds allowlist when one is configured,
   //  - flavors that exceed the project quota or the region's GPU capacity cannot be picked.
   const flavorOptionsFor = useCallback(
@@ -436,8 +417,8 @@ function useKubernetesData(pid: string) {
   )
 
   return {
-    kLocs, kScope, osScope, clusters,
-    versionsFor, variantsFor, platformVersionFor, storageFor, rowServiceId, rowScope, flavorOptionsFor,
+    kLocs, kScope, computeScope, clusters,
+    versionsFor, variantsFor, platformVersionFor, rowServiceId, rowScope, flavorOptionsFor,
     invalidate, patchCluster,
   }
 }
@@ -446,7 +427,7 @@ export default function KubernetesPage() {
   const pid = useProjectId()
   const navigate = useNavigate()
   const {
-    kLocs, kScope, clusters, versionsFor, variantsFor, storageFor, rowServiceId, rowScope, flavorOptionsFor, invalidate,
+    kLocs, kScope, clusters, versionsFor, variantsFor, rowServiceId, rowScope, flavorOptionsFor, invalidate,
   } = useKubernetesData(pid)
   const { data, isLoading, isError, error, refetch, isFetching } = clusters
 
@@ -462,7 +443,7 @@ export default function KubernetesPage() {
   )
 
   // The project's own networks + subnets (cached NETWORK/SUBNET resources, default cloud scope =
-  // the OpenStack service) feed the optional bring-your-own-network picker. Only private VPCs:
+  // the compute service) feed the optional bring-your-own-network picker. Only private VPCs:
   // shared/external infra networks are not a place for worker nodes.
   const networksQ = useCloudList(pid, "NETWORK")
   const subnetsQ = useCloudList(pid, "SUBNET")
@@ -635,7 +616,6 @@ export default function KubernetesPage() {
           submitLabel="Create cluster"
           versions={createVersions}
           variantsForVersion={(v) => variantsFor(createLoc?.serviceId, v)}
-          storage={storageFor(createLoc?.serviceId)}
           flavors={createFlavorOptions}
          
           networks={networkOptions}
@@ -782,13 +762,12 @@ export function KubernetesClusterDetailPage() {
 
 // ── create/edit form ─────────────────────────────────────────────────────────
 function ClusterFormDialog({
-  title, submitLabel, versions, variantsForVersion, storage, flavors, networks, locations, locKey, onLocKey, onClose, onSubmit,
+  title, submitLabel, versions, variantsForVersion, flavors, networks, locations, locKey, onLocKey, onClose, onSubmit,
 }: {
   title: string
   submitLabel: string
   versions: string[]
   variantsForVersion: (version: string) => string[]
-  storage?: { className?: string; volumeType?: string }
   flavors: FlavorOption[]
   networks: NetworkOption[]
   locations: Location[]
@@ -932,15 +911,6 @@ function ClusterFormDialog({
           </div>
 
           <NodeGroupsEditor groups={groups} setGroups={setGroups} flavors={flavors} variants={variants} />
-
-          {storage?.className && (
-            <p className="text-xs text-muted-foreground">
-              Persistent storage: default StorageClass{" "}
-              <span className="font-mono">{storage.className}</span>
-              {storage.volumeType ? <> (volume type <span className="font-mono">{storage.volumeType}</span>)</> : null}{" "}
-              — PVCs work out of the box.
-            </p>
-          )}
 
           <div className="grid gap-3 rounded-lg border p-3">
             <div>
@@ -1165,14 +1135,10 @@ function NodeGroupsEditor({
           )}
           {/* First column sizes to the switch+label so "Autoscale" never collides with the
               number inputs; the count/disk fields share the rest. */}
-          <div className="grid grid-cols-2 items-end gap-3 sm:grid-cols-[auto_auto_1fr_1fr_1fr_auto]">
+          <div className="grid grid-cols-2 items-end gap-3 sm:grid-cols-[auto_1fr_1fr_1fr_auto]">
             <div className="flex items-center gap-2 pb-2">
               <Switch id={`ng-as-${i}`} className="shrink-0" checked={g.autoscale} onCheckedChange={(on) => set(i, { autoscale: on })} />
               <Label htmlFor={`ng-as-${i}`} className="text-sm whitespace-nowrap">Autoscale</Label>
-            </div>
-            <div className="flex items-center gap-2 pb-2">
-              <Switch id={`ng-pip-${i}`} className="shrink-0" checked={g.publicIp} onCheckedChange={(on) => set(i, { publicIp: on })} />
-              <Label htmlFor={`ng-pip-${i}`} className="text-sm whitespace-nowrap">Public IP / node</Label>
             </div>
             {g.autoscale ? (
               <>

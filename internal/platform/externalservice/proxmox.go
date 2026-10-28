@@ -355,15 +355,16 @@ func (e *ExternalService) PVEGPUAliases() map[string][]string {
 // plus the "gpu" {model|"*": n} map). Absent key = unlimited.
 var PVEQuotaKeys = []string{"servers", "vcpus", "ramMb", "diskGb", "networks", "floatingIps"}
 
-// pveQuotaAliases maps the OpenStack-named keys the generic provider quota editor (and the
-// set_provider_default_quota MCP tool) write onto the Proxmox keys. ram is MB in both.
+// pveQuotaAliases maps the legacy alias keys (instances/cores/ram/gigabytes/floatingips) the
+// generic provider quota editor (and the set_provider_default_quota MCP tool) still write onto
+// the Proxmox keys. ram is MB in both.
 var pveQuotaAliases = map[string]string{
 	"instances": "servers", "cores": "vcpus", "ram": "ramMb", "gigabytes": "diskGb", "floatingips": "floatingIps",
 }
 
 // PVEDefaultQuota is the provider's default project quota (config.provisioning.quota) in
-// Project.Quota keys, or nil when none is set. A Proxmox key wins over its OpenStack alias;
-// negative values (OpenStack's -1) mean unlimited and are dropped, as are non-numbers and keys
+// Project.Quota keys, or nil when none is set. A Proxmox key wins over its legacy alias;
+// negative values (e.g. -1) mean unlimited and are dropped, as are non-numbers and keys
 // Proxmox does not enforce (volumes, ports, …). "gpu" is copied as-is.
 func (e *ExternalService) PVEDefaultQuota() map[string]any {
 	prov, _ := e.Config["provisioning"].(map[string]any)

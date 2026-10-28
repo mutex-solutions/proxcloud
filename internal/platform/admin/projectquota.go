@@ -2,7 +2,7 @@ package admin
 
 // projectquota.go — the per-project quota admin surface. PUT /admin/project/{id}/quota stores
 // the quota config on the project doc (same stored-JSON posture as the provider default quota
-// in externalservicemut.go — no OpenStack push). Shape: {"gpu": {"<model>": n, "*": n}} where
+// in externalservicemut.go — no provider push). Shape: {"gpu": {"<model>": n, "*": n}} where
 // model names use the shared GPU alias vocabulary (see internal/cloud/gpu.go), plus the Proxmox
 // resource keys (externalservice.PVEQuotaKeys: servers, vcpus, ramMb, diskGb, networks,
 // floatingIps). Enforcement is the project cloud gate (project/gpuquota.go,

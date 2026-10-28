@@ -24,7 +24,7 @@ What actually happened (include error messages / logs / screenshots if helpful).
 - Component: [ API / customer console / operator console / MCP / Helm chart ]
 - Version or image tag / commit:
 - Deployment: [ docker-compose / Helm on Kubernetes / other ]
-- OpenStack / OIDC provider (if relevant):
+- Proxmox VE version / OIDC provider (if relevant):
 
 **Additional context**
 Anything else that might help — related config, recent changes, workarounds.

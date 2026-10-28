@@ -11,7 +11,7 @@ import (
 
 // applyMetrics drives the named apply closure the way serviceFieldSet would (body → doc
 // mutation), without the repo. nil esSvc → setSecretLeaf stores plaintext (same fallback the
-// vhi-ostor handler uses), which is exactly what these at-rest assertions want to see.
+// connection-save path uses), which is exactly what these at-rest assertions want to see.
 func applyMetrics(t *testing.T, doc pgdoc.M, body string) *httpx.HTTPError {
 	t.Helper()
 	req := httptest.NewRequest("PUT", "/service/svc-1/metrics-config", strings.NewReader(body))
@@ -72,14 +72,14 @@ func TestMetricsConfigValidationMatrix(t *testing.T) {
 	// The happy path with a full block.
 	doc := pgdoc.M{}
 	if err := applyMetrics(t, doc,
-		`{"source":"prometheus","prometheus":{"url":"https://m.example/prometheus","schema":"libvirt-exporter","headers":{"X-Scope-OrgID":"openstack"}}}`); err != nil {
+		`{"source":"prometheus","prometheus":{"url":"https://m.example/prometheus","schema":"libvirt-exporter","headers":{"X-Scope-OrgID":"tenant-a"}}}`); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 	p := promCfgOf(t, doc)
 	if p["url"] != "https://m.example/prometheus" {
 		t.Fatalf("url not stored: %#v", p)
 	}
-	if hs, _ := p["headers"].(pgdoc.M); hs["X-Scope-OrgID"] != "openstack" {
+	if hs, _ := p["headers"].(pgdoc.M); hs["X-Scope-OrgID"] != "tenant-a" {
 		t.Fatalf("tenant header not stored: %#v", p["headers"])
 	}
 }
@@ -89,9 +89,9 @@ func TestMetricsConfigValidationMatrix(t *testing.T) {
 // EncryptSecret call every other secret-writing PUT uses).
 func TestMetricsConfigSecretLeaves(t *testing.T) {
 	doc := pgdoc.M{"config": pgdoc.M{"metrics": map[string]any{
-		"source": "gnocchi", "prometheus": map[string]any{"url": "https://m.example"},
+		"source": "none", "prometheus": map[string]any{"url": "https://m.example"},
 	}}}
-	if err := applyMetrics(t, doc, `{"source":"gnocchi","prometheusAuth":{"bearerToken":"tok1"}}`); err != nil {
+	if err := applyMetrics(t, doc, `{"source":"none","prometheusAuth":{"bearerToken":"tok1"}}`); err != nil {
 		t.Fatalf("set token: %v", err)
 	}
 	secret := doc["secret"].(pgdoc.M)
@@ -101,13 +101,13 @@ func TestMetricsConfigSecretLeaves(t *testing.T) {
 	if _, ok := secret["prometheusBasicPassword"]; ok {
 		t.Fatalf("blank password must not be written")
 	}
-	if err := applyMetrics(t, doc, `{"source":"gnocchi","prometheusAuth":{"bearerToken":""}}`); err != nil {
+	if err := applyMetrics(t, doc, `{"source":"none","prometheusAuth":{"bearerToken":""}}`); err != nil {
 		t.Fatalf("blank keep: %v", err)
 	}
 	if secret["prometheusBearerToken"] != "tok1" {
 		t.Fatalf("blank must keep the stored token: %#v", secret)
 	}
-	if err := applyMetrics(t, doc, `{"source":"gnocchi","prometheusAuth":{"bearerToken":"-"}}`); err != nil {
+	if err := applyMetrics(t, doc, `{"source":"none","prometheusAuth":{"bearerToken":"-"}}`); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	if _, ok := secret["prometheusBearerToken"]; ok {

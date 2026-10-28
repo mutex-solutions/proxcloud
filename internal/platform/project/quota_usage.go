@@ -1,7 +1,6 @@
 package project
 
-// quota_usage.go — GET /project/{id}/quota-usage. The live OpenStack compute/
-// storage quota legs died with that backend; on this fork every quota is
+// quota_usage.go — GET /project/{id}/quota-usage. Every quota is
 // platform-managed (Project.Quota), so the endpoint reports the ProxCloud limits +
 // cached-row usage. The response keeps the old shape (compute/storage stay
 // absent — the FE already treats them as optional legs).

@@ -102,12 +102,6 @@ api:
     # clouds, activate projects or send mail. Empty -> those callbacks are not mounted at all.
     callbackToken: ""
 
-  # Networking defaults for client-created networks.
-  network:
-    # MTU stamped on every client-created network. 0 (or unset) leaves it to neutron's provider
-    # default (e.g. the geneve/vxlan jumbo value); set e.g. 1500 to force a fixed MTU.
-    defaultMtu: 0
-
   # Optional literal application.yml mounted at /opt/proxcloud/api/application.yml.
   # Env injected by this chart always wins over the file. Example:
   #   applicationYml: |

@@ -5,7 +5,7 @@ package project
 // Bucket configuration rides on the existing cloud-action endpoint
 // (POST /project/{id}/cloud/{resourceId}/action) because every one of these acts on a BUCKET resource and
 // must therefore run against the service that bucket actually lives on (cloudAction rebinds svcID to
-// cr.ServiceID). Swift buckets get a 400: none of this exists there.
+// cr.ServiceID). A non-ceph client gets a 400.
 //
 // S3 keys are project-scoped (not bucket-scoped) — RGW attaches keys to USERS, and a bucket grants access
 // to a principal — so they get their own REST endpoints.
@@ -34,7 +34,7 @@ func decodeInto(data map[string]any, out any) error {
 	return json.Unmarshal(raw, out)
 }
 
-// failBucketFeature maps the S3-only sentinel to a 400 (asking a Swift bucket for it is a client mistake),
+// failBucketFeature maps the S3-only sentinel to a 400 (asking a non-S3 bucket for it is a client mistake),
 // and a bad object-lock mode / quota argument to a 400 too.
 func (h *Handler) failBucketFeature(w http.ResponseWriter, err error) {
 	if errors.Is(err, client.ErrBucketFeatureUnsupported) {
@@ -298,9 +298,9 @@ type s3KeyDTO struct {
 
 // cephServiceOfProject resolves the project's ceph-s3 service for the S3-key endpoints.
 //
-// It must NOT go through resolveServiceID: that helper deliberately prefers an OpenStack service for the
+// It must NOT go through resolveServiceID: that helper deliberately prefers a Proxmox service for the
 // unheadered case (ceph serves object-store only), so on the normal side-by-side setup it would hand back
-// the OpenStack service and these endpoints would 400 "not an S3 service". Instead: honour an explicit
+// the Proxmox service and these endpoints would 400 "not an S3 service". Instead: honour an explicit
 // x-service-id ONLY when it names a ceph service the project is attached to, otherwise pick the project's
 // ceph-s3 service.
 func (h *Handler) cephServiceOfProject(ctx context.Context, w http.ResponseWriter, p *Project, r *http.Request) (*client.Client, string, bool) {

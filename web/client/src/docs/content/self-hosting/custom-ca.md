@@ -1,10 +1,10 @@
 # Trusting a Custom CA
 
-When your OpenStack endpoints (Keystone, Nova, Neutron, …) or your identity provider present certificates signed by a private CA, the ProxCloud API has to be told to trust that CA. Otherwise every HTTPS call it makes — Keystone authentication, resource sync, fetching the JWKS from your OIDC issuer to validate tokens — fails TLS verification.
+When your Proxmox VE API, your Ceph RGW endpoint or your identity provider present certificates signed by a private CA, the ProxCloud API has to be told to trust that CA. Otherwise the HTTPS calls it makes — provisioning and resource sync against Proxmox, bucket and key management against RGW, fetching the JWKS from your OIDC issuer to validate tokens — fail TLS verification.
 
 There are really two separate trust problems, each solved in its own place:
 
-1. **Outbound** — `proxcloud-api` calling Keystone / OpenStack / IdP endpoints. Fixed by mounting the CA into the API pod.
+1. **Outbound** — `proxcloud-api` calling the Proxmox VE API, Ceph RGW and the OIDC issuer. Fixed by mounting the CA into the API pod (for Proxmox there is also a per-provider alternative, below).
 2. **Inbound** — browsers reaching the ProxCloud ingress. Fixed with a TLS certificate on the ingress (from your private CA or a public one).
 
 ## Trusting a private CA in the API
@@ -39,11 +39,15 @@ The mount surfaces each key in the secret (here `ca.crt`) as a file under `/etc/
 
 Apply with `helm upgrade … -f values.yaml`. The pod restarts with the CA mounted.
 
-To verify, check the API log after the restart — Keystone connectivity errors of the `x509: certificate signed by unknown authority` variety vanish once the CA is trusted. You can confirm the file is in place from inside the pod:
+To verify, check the API log after the restart — connection errors of the `x509: certificate signed by unknown authority` variety vanish once the CA is trusted. You can confirm the file is in place from inside the pod:
 
 ```sh
 kubectl -n proxcloud exec deploy/proxcloud-api -- ls -l /etc/ssl/extra-certs
 ```
+
+## Proxmox VE: pin the certificate instead
+
+Proxmox VE nodes ship with a self-signed certificate by default. Rather than mounting a CA, you can set the provider's **fingerprint** (the SHA-256 fingerprint of the Proxmox API certificate, as printed by `pvenode cert info`) in the admin console under System → Cloud providers. ProxCloud then trusts exactly that certificate for that provider. An **insecure TLS** switch, which skips verification altogether, also exists; keep it for labs only. With neither set, the system trust store (including any CA mounted as above) is used.
 
 ## TLS on the ingress with a private CA
 
@@ -52,10 +56,10 @@ If your users' browsers should also see certificates from the private CA — com
 - With **cert-manager**, create a `ClusterIssuer` of type `ca` backed by your CA key pair, reference it in each component's ingress annotations (`api.ingress.annotations` / `ui.ingress.annotations` / `admin.ingress.annotations`, e.g. `cert-manager.io/cluster-issuer: <issuer>`), and set the per-component `*.ingress.tls` list.
 - Without cert-manager, create the TLS secret yourself and reference it by `secretName` in each component's `*.ingress.tls`.
 
-Remember that clients — browsers, but also any machine running the OpenStack CLI against a federated Keystone — need the CA in their own trust stores.
+Remember that clients — browsers, and any S3 client pointed at a privately-signed RGW endpoint — need the CA in their own trust stores.
 
 ## Where a custom CA usually comes up
 
-- Keystone / OpenStack API endpoints on a private network with internally-issued certs.
+- Proxmox VE or Ceph RGW endpoints on a private network with internally-issued certs.
 - An external Keycloak or OIDC provider on an internal domain — without trust, JWT validation fails because the JWKS endpoint can't be fetched.
 - Internal SMTP or webhook targets reached over HTTPS.

@@ -6,8 +6,8 @@ Accepted
 
 ## Context
 
-ProxCloud is a self-service platform for selling and operating OpenStack cloud
-capacity: it fronts an OpenStack region with a customer console, a billing and
+ProxCloud is a self-service platform for selling and operating private-cloud
+capacity on Proxmox VE: it fronts one or more Proxmox VE clusters with a customer console, a billing and
 rating engine, and an operator admin surface. Decisions of this size — the
 storage engine, the auth model, how background work is coordinated across pods —
 are load-bearing and hard to reverse. New contributors need to understand not

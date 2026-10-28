@@ -42,7 +42,7 @@ engineVersion: ""
 # this is the CNPG BACKEND instance count; the stateless frontend scales via
 # ferretdb.replicas. opensearch: node-pool replicas (combined
 # cluster_manager+data+ingest roles). kafka: KafkaNodePool replicas
-# (dual-role controller+broker) — ALSO the per-broker Octavia LB count, see
+# (dual-role controller+broker) — ALSO the per-broker LB count, see
 # templates/kafka/kafka.yaml.
 instances: 1
 
@@ -63,24 +63,15 @@ storage:
   # -- StorageClass for the data volumes. Empty = cluster default.
   storageClassName: ""
 
-# -- Octavia LB wiring into the tenant VPC. All three ids REQUIRED — they come
-# from the proxcloud create call (tenant network/subnet, ownership-proven) and
-# the provider config (config.database.memberSubnetId, the DBaaS-cluster-side
-# subnet the amphora reaches members on).
+# -- LoadBalancer Service wiring.
 network:
-  # -- Tenant network the LB VIP lands on (loadbalancer.openstack.org/network-id).
-  networkId: ""
-  # -- Tenant subnet for the VIP (loadbalancer.openstack.org/subnet-id).
-  subnetId: ""
-  # -- DBaaS-cluster member subnet (loadbalancer.openstack.org/member-subnet-id).
-  memberSubnetId: ""
-  # -- Client source CIDRs allowed through the LB (Octavia ACL via
+  # -- Client source CIDRs allowed through the LB (via
   # spec.loadBalancerSourceRanges). Empty = no restriction. These are
   # deliberately NOT mirrored into the NetworkPolicy — see
   # templates/networkpolicy.yaml.
   allowedCidrs: []
   # -- Extra annotations merged onto the LB Service (escape hatch for
-  # provider-specific Octavia knobs).
+  # provider-specific load-balancer knobs).
   extraAnnotations: {}
 
 # -- ProxCloud identity of this database. projectId + resourceId REQUIRED.

@@ -157,23 +157,23 @@ func (j *Job) syncProject(ctx context.Context, p *project.Project, esCache map[s
 }
 
 func (j *Job) syncService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
-	// ceph-s3: no Keystone tenant — sync only the object-store (buckets) via an admin-keyed client.
+	// ceph-s3: sync only the object-store (buckets) via an admin-keyed client.
 	if es.IsCephS3() {
 		return j.syncCephService(ctx, p, es)
 	}
-	// kamaji: no Keystone tenant — sync only the managed k8s clusters off the management cluster.
+	// kamaji: sync only the managed k8s clusters off the management cluster.
 	if es.IsKamaji() {
 		return j.syncKamajiService(ctx, p, es)
 	}
-	// dbaas: no Keystone tenant — sync only the managed databases off the DB cluster.
+	// dbaas: sync only the managed databases off the DB cluster.
 	if es.IsDbaas() {
 		return j.syncDbaasService(ctx, p, es)
 	}
-	// proxmox: no Keystone tenant — sync the project pool's VMs, their disks and templates.
+	// proxmox: sync the project pool's VMs, disks, templates, networks and security groups.
 	if es.IsProxmox() {
 		return j.syncProxmoxService(ctx, p, es)
 	}
-	// No other provider kinds exist on this fork (OpenStack was removed with it).
+	// No other provider kinds exist.
 	return 0
 }
 
@@ -184,7 +184,7 @@ func (j *Job) syncService(ctx context.Context, p *project.Project, es *externals
 // though the RGW bucket namespace is global.
 func (j *Job) syncCephService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
 	region := es.CephRegion()
-	// Honour the provider's Services-tab toggle, same as the OpenStack object-store leg.
+	// Honour the provider's Services-tab toggle.
 	if !es.ServiceEnabledInRegion("object-store", region) {
 		return 0
 	}
@@ -200,8 +200,8 @@ func (j *Job) syncCephService(ctx context.Context, p *project.Project, es *exter
 	return st.Created + st.Updated
 }
 
-// syncProxmoxService reconciles the project's SERVER, VOLUME and IMAGE resources off the PVE
-// cluster. The project-pool filter is the leak-guard: only this project's pool members are
+// syncProxmoxService reconciles the project's SERVER, VOLUME, IMAGE, NETWORK and SECURITY_GROUP
+// resources off the PVE cluster. The project-pool filter is the leak-guard: only this project's pool members are
 // listed, and Reconcile's delete-of-vanished scan is ProjectScoped.
 func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
 	region := es.PVERegion()
@@ -254,8 +254,8 @@ func (j *Job) syncKamajiService(ctx context.Context, p *project.Project, es *ext
 }
 
 // sweepKamajiOrphans runs each kamaji provider's service-level orphan sweep once per sync cycle:
-// deleted clusters whose ArgoCD cascade has finished get their appcred revoked, clouds.yaml
-// secret reaped and (when the project namespace empties out) the namespace GC'd. Service-level
+// deleted clusters whose ArgoCD cascade has finished get their cloud credentials secret reaped
+// and (when the project namespace empties out) the namespace GC'd. Service-level
 // on purpose — it must also reap leftovers of projects whose proxcloud doc is already gone
 // (scheduled deletion, teardown), which no per-project walk can visit.
 func (j *Job) sweepKamajiOrphans(ctx context.Context) {
@@ -274,7 +274,7 @@ func (j *Job) sweepKamajiOrphans(ctx context.Context) {
 			j.log.Error("syncjob: build kamaji service for sweep", "serviceId", es.ID, "err", err)
 			continue
 		}
-		pending, err := ks.FinalizeAllOrphans(ctx, j.kamajiRevokeResolver(ctx))
+		pending, err := ks.FinalizeAllOrphans(ctx)
 		if err != nil {
 			j.log.Warn("syncjob: kamaji orphan sweep", "serviceId", es.ID, "pending", pending, "err", err)
 		}
@@ -282,7 +282,7 @@ func (j *Job) sweepKamajiOrphans(ctx context.Context) {
 }
 
 // syncDbaasService reconciles the project's DATABASE_CLUSTER resources off the DB cluster
-// (Applications labelled with the project id, enriched with the LB Service's Octavia VIP). The
+// (Applications labelled with the project id, enriched with the LB Service's ingress IP). The
 // project-label filter is the leak-guard, same as kamaji.
 func (j *Job) syncDbaasService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
 	region := es.DbaasRegion()
@@ -319,9 +319,8 @@ func (j *Job) syncDbaasService(ctx context.Context, p *project.Project, es *exte
 }
 
 // sweepDbaasOrphans runs each dbaas provider's service-level orphan sweep once per sync cycle:
-// deleted databases whose ArgoCD cascade has finished (LB Service gone → Octavia port off the
-// tenant subnet) get their neutron network share revoked, marker + auth secrets reaped and
-// (when the project namespace empties out) the namespace GC'd.
+// deleted databases whose ArgoCD cascade has finished (LB Service gone) get their marker + auth
+// secrets reaped and (when the project namespace empties out) the namespace GC'd.
 func (j *Job) sweepDbaasOrphans(ctx context.Context) {
 	services, err := j.services.ListByType(ctx, externalservice.TypeCloud)
 	if err != nil {
@@ -338,31 +337,9 @@ func (j *Job) sweepDbaasOrphans(ctx context.Context) {
 			j.log.Error("syncjob: build dbaas service for sweep", "serviceId", es.ID, "err", err)
 			continue
 		}
-		pending, err := ds.FinalizeAllOrphans(ctx, j.dbaasRevokeResolver())
+		pending, err := ds.FinalizeAllOrphans(ctx)
 		if err != nil {
 			j.log.Warn("syncjob: dbaas orphan sweep", "serviceId", es.ID, "pending", pending, "err", err)
 		}
-	}
-}
-
-// dbaasRevokeResolver feeds the dbaas orphan sweep. The neutron RBAC share leg is
-// gone with the OpenStack backend; no share can exist on this fork, so any marker
-// naming one is a pre-fork import — resolve as revoked so GC converges (a real
-// OpenStack deployment keeps running the original OpenStack-based portal, not this fork).
-func (j *Job) dbaasRevokeResolver() dbaas.RevokeNetShareResolver {
-	return func(ctx context.Context, osServiceID, osProjectID, osRegion, networkID string) error {
-		return nil
-	}
-}
-
-// kamajiRevokeResolver feeds the kamaji orphan sweep. The keystone appcred leg is
-// gone; Phase K revokes per-cluster PVE tokens here. FAIL-CLOSED on markers that
-// name a credential — they are pre-fork imports needing manual review.
-func (j *Job) kamajiRevokeResolver(ctx context.Context) kamaji.RevokeCredResolver {
-	return func(ctx context.Context, osServiceID, userID, credID string) error {
-		if credID == "" {
-			return nil
-		}
-		return fmt.Errorf("appcred %s: OpenStack credential revocation is not available on this fork — revoke manually", credID)
 	}
 }

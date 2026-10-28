@@ -1,7 +1,7 @@
 // Package pveflavor is the platform-side flavor catalog for Proxmox providers.
 // Proxmox has no flavor concept, so the admin curates one here (pgdoc collection
 // `flavor`). The client wizard reads it through the existing LIST_FLAVORS bulk
-// action shaped exactly like a live nova flavor — zero FE change — and the create
+// action (the {id,name,vcpus,ram,disk,extra_specs} flavor shape) and the create
 // path resolves flavorId (the slug) back through this repo.
 package pveflavor
 
@@ -51,8 +51,8 @@ func (f *Flavor) Validate() error {
 	return nil
 }
 
-// ExtraSpecs renders the flavor's GPU demand in the OpenStack extra_specs shape
-// the existing GPU parsing/billing (cloud.GPUFromFlavor) already understands.
+// ExtraSpecs renders the flavor's GPU demand in the extra_specs shape
+// the GPU parsing/billing (cloud.GPUFromFlavor) already understands.
 func (f *Flavor) ExtraSpecs() map[string]any {
 	if f.GPUModel == "" || f.GPUCount <= 0 {
 		return map[string]any{}
@@ -60,7 +60,7 @@ func (f *Flavor) ExtraSpecs() map[string]any {
 	return map[string]any{"pci_passthrough:alias": fmt.Sprintf("%s:%d", f.GPUModel, f.GPUCount)}
 }
 
-// LiveShape renders the flavor exactly like the LIST_FLAVORS live-nova rows the
+// LiveShape renders the flavor as the LIST_FLAVORS rows the
 // FE wizard consumes ({externalId, data:{id,name,vcpus,ram,disk,extra_specs}}).
 func (f *Flavor) LiveShape(serviceID, region string) map[string]any {
 	name := f.Name

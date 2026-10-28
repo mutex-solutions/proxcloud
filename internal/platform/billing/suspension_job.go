@@ -18,9 +18,8 @@ import (
 // and flipped back to ACTIVE.
 //
 // Before-suspension dunning emails + their SentAt/balance bookkeeping ARE now wired
-// (executeBillingProfile). STILL DEFERRED (gated subsystems): the live OpenStack service
-// suspend/resume (via the cloud write providers) and the audit
-// events. The persisted profile-status flip + the process record ARE the billing effect.
+// (executeBillingProfile). The live cloud suspend/resume runs through the
+// CloudSuspender seam (nil → DB-only). The persisted profile-status flip + the process record ARE the billing effect.
 type SuspensionJob struct {
 	repo     *Repo
 	balance  *BalanceService
@@ -45,12 +44,12 @@ func (j *SuspensionJob) SetNotifier(n Notifier) { j.notifier = n }
 // SUSPENSION resource, ORGANIZATION context). Nil → no audit events.
 func (j *SuspensionJob) SetAudit(a *audit.Service) { j.audit = a }
 
-// CloudSuspender is the live OpenStack suspend/resume integration point
-// (nova PAUSE/UNPAUSE each project server +
+// CloudSuspender is the live cloud suspend/resume integration point
+// (PVE suspend/resume each project server +
 // project status DISABLED/ENABLED). Best-effort: cloud errors never block the billing state flip
 // (cloud errors are swallowed). Nil → DB-only flips (the old behavior).
 //
-// EXTRACTION SEAM: the implementation is OpenStack-specific and stays in proxcloud when billing moves
+// EXTRACTION SEAM: the implementation is cloud-specific and stays in proxcloud when billing moves
 // out; this becomes a billing→proxcloud HTTP callback
 // (POST /internal/v1/billing-profiles/{id}/{suspend,resume}-clouds). The signature is already
 // wire-ready — context-first, and a profile id is the only argument. Keep it that way.
@@ -273,9 +272,9 @@ func (j *SuspensionJob) createProcess(cfg *pricing.BillingAutomaticSuspensionCon
 
 // suspend flips the process → SUSPENDED and the profile → SUSPENDED status
 // (the billing-level part of suspendBillingProfile).
-// DEFERRED: the live OpenStack service suspend (onProjectSuspend) + the suspension email.
+// The live cloud suspend runs through CloudSuspender (nil-safe).
 func (j *SuspensionJob) suspend(ctx context.Context, proc *SuspensionProcess, profile *BillingProfile, balance decimal.Decimal, currency string) error {
-	// suspendBillingProfile: the LIVE cloud suspend (nova PAUSE each project
+	// suspendBillingProfile: the LIVE cloud suspend (PVE suspend each project
 	// server + project DISABLED) runs FIRST, best-effort — an error never blocks the billing flip.
 	if j.clouds != nil {
 		if err := j.clouds.SuspendBillingProfileClouds(ctx, profile.ID); err != nil {
@@ -300,7 +299,7 @@ func (j *SuspensionJob) suspend(ctx context.Context, proc *SuspensionProcess, pr
 }
 
 // resume flips the profile → ACTIVE (the billing-level part of unsuspendBillingProfile).
-// DEFERRED: the live OpenStack service resume + the email.
+// The live cloud resume runs through CloudSuspender (nil-safe).
 func (j *SuspensionJob) resume(ctx context.Context, profile *BillingProfile) error {
 	profile.Status = StatusActive
 	if _, err := j.repo.Update(ctx, profile); err != nil {

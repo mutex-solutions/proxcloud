@@ -20,11 +20,11 @@ func TestVolumeBackedServerDoesNotBillFlavorRootDisk(t *testing.T) {
 
 	got := (&ServerProvider{}).instanceBR(cr, false)
 	if got == nil || got.Values["root_disk_gb"] != 0 {
-		t.Fatalf("root_disk_gb = %#v, want 0 for a Cinder-backed root", got)
+		t.Fatalf("root_disk_gb = %#v, want 0 for a volume-backed root", got)
 	}
 }
 
-func TestNovaVolumeBackedShapeDoesNotBillFlavorRootDiskWithoutMarker(t *testing.T) {
+func TestEmptyImageVolumeBackedShapeDoesNotBillFlavorRootDiskWithoutMarker(t *testing.T) {
 	cr := &cloud.CloudResource{Data: map[string]any{
 		"server": map[string]any{
 			"image":  "",
@@ -33,6 +33,6 @@ func TestNovaVolumeBackedShapeDoesNotBillFlavorRootDiskWithoutMarker(t *testing.
 	}}
 	got := (&ServerProvider{}).instanceBR(cr, false)
 	if got == nil || got.Values["root_disk_gb"] != 0 {
-		t.Fatalf("root_disk_gb = %#v, want 0 from Nova's empty image reference", got)
+		t.Fatalf("root_disk_gb = %#v, want 0 from an empty image reference", got)
 	}
 }

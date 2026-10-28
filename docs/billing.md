@@ -1,7 +1,7 @@
 # Billing subsystem
 
 A deep guide to ProxCloud billing — the metering, rating, invoicing, payment, and
-dunning engine that turns OpenStack cloud usage into money owed and money
+dunning engine that turns Proxmox VE and object-storage usage into money owed and money
 collected. Audience: contributors working anywhere in the billing code.
 
 Everything here is grounded in the Go source. Money is **never** a float; all
@@ -20,7 +20,7 @@ arithmetic is exact decimal.
 | `payment` | `internal/platform/payment` | Money-in flows: add funds, deposit/collect by card, register card, the Stripe gateway, and the stuck-transaction scanner. |
 | `promotion` | `internal/platform/promotion` | Client promo-code redemption → promotional credit. |
 | `catalog` | `internal/platform/catalog` | Cloud-catalog config reads (flavor categories / image groups). |
-| `billingresource` | `internal/cloud/billingresource` | The cloud → billing bridge: turns a cloud resource (server, volume, floating IP, …) into the priced `BillingResource`(s) the rating loop consumes. |
+| `billingresource` | `internal/cloud/billingresource` | The cloud → billing bridge: turns a cloud resource (server, volume, bucket, …) into the priced `BillingResource`(s) the rating loop consumes. |
 | `admin/*` | `internal/platform/admin` | Admin CRUD for pricing config, savings, tax, and manual transactions/credits. |
 | `pkg/money` | `pkg/money` | The `Money` decimal type (JSON string ↔ shopspring/decimal). |
 
@@ -113,11 +113,11 @@ attribute schema (`BillingResourceType`):
 
 | Resource type | Provider | Metered attributes (selected) | Not billed when |
 |---|---|---|---|
-| `instance` | `ServerProvider` (`server.go`) | `instance_type`, `ram_mb`, `ram_gb`, `vcpus`, `root_disk_gb`, `is_bareMetal`, `availability_zone`, `image`, `status` | nova status `DELETED`/`ERROR`/`UNKNOWN`/`BUILD` |
-| `instance_traffic` | `ServerProvider` | `incoming/outgoing × private/public × _traffic_mb`, `total_*_traffic_mb` (usage attrs, read from the provider's configured metrics source for the month — Gnocchi by default, or a Prometheus-compatible endpoint via `config.metrics`; see `docs/jobs-scheduling.md`) | server ineligible |
-| `volume` | `VolumeProvider` (`volume.go`) | `size`, `bootable`, `type`, `status`, `availability_zone` | cinder status `error`/`deleting`/`creating`/`error_deleting` |
-| `floating_ip` | `FloatingIPProvider` (`floatingip.go`) | `status`, `floating_network_id` (typically a flat per-IP charge) | — |
-| `load_balancer` | `LoadBalancerProvider` (`loadbalancer.go`) | `flavor_id`, `operating_status` | operating status `ERROR` |
+| `instance` | `ServerProvider` (`server.go`) | `instance_type`, `ram_mb`, `ram_gb`, `vcpus`, `root_disk_gb`, `gpu_count`, `gpu_model`, `is_bareMetal`, `availability_zone`, `image`, `status` | server status `DELETED`/`ERROR`/`UNKNOWN`/`BUILD` (the Proxmox status is mapped by `pve.MapVMStatus`; a clone/create lock maps to `BUILD`) |
+| `instance_traffic` | `ServerProvider` | `incoming/outgoing × private/public × _traffic_mb`, `total_*_traffic_mb` (usage attrs, read for the month from the provider's Prometheus-compatible metrics source, `config.metrics.source=prometheus`; Proxmox defaults to `none`, so no traffic is metered unless the operator configures it; see `docs/jobs-scheduling.md`) | server ineligible |
+| `volume` | `VolumeProvider` (`volume.go`) | `size`, `bootable`, `type`, `status`, `availability_zone` | status `error`/`deleting`/`creating`/`error_deleting` (a legacy set: Proxmox volumes report only `in-use`/`available`) |
+| `floating_ip` | `FloatingIPProvider` (`floatingip.go`) | `status`, `floating_network_id` (typically a flat per-IP charge) | — (no Proxmox resource produces this type yet; public-IP billing is planned) |
+| `load_balancer` | `LoadBalancerProvider` (`loadbalancer.go`) | `flavor_id`, `operating_status` | operating status `ERROR` (no Proxmox resource produces this type yet) |
 
 Every resource additionally gets `region` and `service_id` stamped in (so plan
 filters on those resolve) and `createdAt` (drives mid-month proration) — see
@@ -185,7 +185,7 @@ per cadence (minutely / hourly / monthly). Flow:
    - Rate + accrue onto the locked current bill (`pricing.ChargeBillingResources`).
 
 Per-profile errors are logged-and-skipped so one bad profile can't stall the run.
-The charge job reads the PostgreSQL **cache** (`cloudResource` + `gnocchiMetrics` +
+The charge job reads the PostgreSQL **cache** (`cloudResource` + `usageMetrics`, the traffic usage table, +
 `pricePlan`), never live cloud — populating that cache is the separate sync +
 metrics jobs.
 
@@ -196,8 +196,8 @@ in this repository, which is the default and needs no external service.
 
 `PROXCLOUD_BILLING_PROVIDER=external` changes exactly one step — the rating and
 accrual — by POSTing the resolved resources to a separate billing service instead
-of pricing them here. Resolution stays local because it reads the OpenStack
-resource cache. Under `external` the billing-only crons in section 14 are not
+of pricing them here. Resolution stays local because it reads the resource
+cache. Under `external` the billing-only crons in section 14 are not
 scheduled here; the billing service owns them. See `docs/configuration.md`.
 
 ### In-process loop vs RabbitMQ fan-out
@@ -308,7 +308,7 @@ attempts) replaces spinning forever.
 5. Flip **`OPEN → PAID`** if nothing is left unpaid, else **`OPEN → SENT`** with
    `dueAt = sentAt + 3 days` and a "bill generated" email.
 
-This is the keystone: without send, `OPEN` bills never become `SENT`, so nothing
+This is the linchpin: without send, `OPEN` bills never become `SENT`, so nothing
 downstream (collect, dunning) has anything to act on.
 
 ### Built-in PDF invoicing
@@ -595,7 +595,7 @@ that has crossed its start limit:
 2. Mark + send each not-yet-sent notification whose limit is crossed
    (`MarkNotificationsToSend`) — a "before suspension" dunning email + audit.
 3. If the **`suspendedAt`** limit is also crossed, **suspend**: best-effort live
-   cloud suspend (pause each project's servers + disable the project) first, then
+   cloud suspend (PVE `suspend` on each project VM + disable the project) first, then
    process → `SUSPENDED`, profile → `SUSPENDED`, a suspend email + audit.
 
 **Resume** — `ReviewBillingProfile` (called on every balance-clearing event: a
@@ -626,7 +626,7 @@ stateDiagram-v2
 ```mermaid
 flowchart TD
     subgraph Metering
-        CR[Cloud resource cache<br/>cloudResource + gnocchiMetrics] --> BR[BillingResource<br/>Values + type]
+        CR["Cloud resource cache<br/>cloudResource + usageMetrics"] --> BR[BillingResource<br/>Values + type]
     end
     subgraph Rating[Charge cron — minutely / hourly / monthly]
         BR --> RULES[Applicable price-plan rules<br/>for profile + service]
@@ -647,7 +647,7 @@ flowchart TD
     end
     COLLECT -->|settled| PAID
     PAYCRED -->|settled| PAID
-    SENT -->|unpaid past dueAt /<br/>balance ≤ limit| SUSP[Dunning → SUSPENDED<br/>+ cloud pause]
+    SENT -->|unpaid past dueAt /<br/>balance ≤ limit| SUSP[Dunning → SUSPENDED<br/>+ VM suspend]
     SUSP -->|payment clears balance| RESUME[Review → ACTIVE<br/>+ cloud resume]
     RESUME --> BILL
 ```

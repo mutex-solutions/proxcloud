@@ -87,7 +87,7 @@ require Docker to be running; each run gets a fresh, disposable PostgreSQL.
 
 ## Project layout
 
-See the [repository layout table](README.md#repository-layout) in the README.
+See the [repository layout table](README.md#-repository-layout) in the README.
 In short: HTTP entrypoint and job wiring in `cmd/api`, business domains in
 `internal/platform/<domain>`, Proxmox VE integration in `internal/cloud`,
 reusable libraries in `pkg`, deployment assets in `deploy`, and the two consoles
@@ -99,8 +99,8 @@ in `web/`.
   with its repository (Postgres access), a service (business logic), and HTTP
   handlers. Follow the shape of an existing domain such as `project` or
   `billing`.
-- Cloud/Proxmox VE behavior belongs in `internal/cloud` (providers, sync,
-  metrics, notifications).
+- Cloud/Proxmox VE behavior belongs in `internal/cloud` (`pve`, providers,
+  sync, metrics).
 - Wire new routes into the appropriate surface in `cmd/api/main.go`:
   - `/api/v1` — the customer API,
   - `/admin-api/v1` — the operator API (SigV4-signed),

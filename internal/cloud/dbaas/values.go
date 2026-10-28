@@ -24,13 +24,10 @@ func BuildValues(cfg Config, spec DatabaseSpec) map[string]any {
 		"instances":     spec.Replicas,
 		"resources":     map[string]any{"cpu": spec.CPU, "memoryGi": spec.MemoryGiB},
 		"storage":       storage,
+		// TODO(P7): MetalLB services subnet — the LB address pool replaces the tenant-network
+		// placement; isolation stays loadBalancerSourceRanges.
 		"network": map[string]any{
-			// The Octavia annotation feed: the LB VIP lands on the CUSTOMER's subnet, its
-			// members pool on the DB cluster's node subnet (provider config).
-			"networkId":      spec.NetworkID,
-			"subnetId":       spec.SubnetID,
-			"memberSubnetId": cfg.MemberSubnetID,
-			"allowedCidrs":   cidrs,
+			"allowedCidrs": cidrs,
 		},
 		"proxcloud": map[string]any{
 			"projectId":   spec.ProjectID,

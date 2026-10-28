@@ -364,7 +364,7 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 			break
 		}
 	}
-	// Per-project restriction rides the same PublicNetworkIds field as OpenStack.
+	// Per-project restriction rides the project's PublicNetworkIds allow-list.
 	if pn == nil || !publicNetworkAllowed(proj, netID) {
 		h.fail(w, httpx.BadRequest("Public network is not available"))
 		return true

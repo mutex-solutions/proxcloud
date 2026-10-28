@@ -104,17 +104,14 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 		c["cp_replicas"] = replicas
 	}
 	// Network placement, read back off the values so the UI can show whether the cluster runs on
-	// a dedicated CAPO-created network or on one of the project's own (BYO). Absent keys mean
-	// dedicated. All immutable after create (CAPO webhook), so no edit path feeds off these.
+	// a dedicated network or on one of the project's own (BYO). Absent keys mean dedicated.
+	// Immutable after create, so no edit path feeds off these.
 	if netID := digStr(values, "clusterNetworking", "internalNetwork", "networkFilter", "id"); netID != "" {
 		c["network_id"] = netID
 		c["subnet_id"] = digStr(values, "clusterNetworking", "internalNetwork", "subnetFilter", "id")
 	}
-	if ext := digStr(values, "clusterNetworking", "externalNetworkId"); ext != "" {
-		c["external_network_id"] = ext
-	}
 	// Customer add-on toggles, read back for the UI (absent block = chart defaults). Filtered to
-	// the curated menu: the proxcloud-owned `openstack` storage leg (and any operator hand-edit)
+	// the curated menu: a legacy credential-push addon (and any operator hand-edit)
 	// must not surface as a customer toggle — it would round-trip into SET_ADDONS and be
 	// rejected as an unknown add-on.
 	if adds, ok := dig(values, "addons").(map[string]any); ok {

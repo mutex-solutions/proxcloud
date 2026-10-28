@@ -9,7 +9,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/billingapi"
 )
 
-// volumeNotEligibleStatuses: a volume in one of these cinder
+// volumeNotEligibleStatuses: a volume in one of these
 // statuses is excluded from billing (error/deleting/creating/error_deleting).
 var volumeNotEligibleStatuses = map[string]bool{"error": true, "deleting": true, "creating": true, "error_deleting": true}
 

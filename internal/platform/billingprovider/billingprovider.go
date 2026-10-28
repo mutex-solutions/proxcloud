@@ -6,7 +6,7 @@
 // billing with no external dependency.
 //
 // Some deployments run a separate billing service instead, with capabilities that do not live here.
-// That is the EXTERNAL provider: proxcloud still resolves what to bill (it owns the OpenStack
+// That is the EXTERNAL provider: proxcloud still resolves what to bill (it owns the cloud
 // resource cache, and nothing else can) but hands the rating and accrual to that service over HTTP.
 //
 // The split is deliberately narrow. Only the CHARGE step differs between the two:

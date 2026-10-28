@@ -49,7 +49,7 @@ var adminPlatformTools = []toolDef{
 	},
 	{
 		name:   "update_cloud_provider",
-		desc:   "Update a cloud provider. config/secret are MERGED wholesale into the stored doc (read the provider first). Per-region service toggles live at config.services = {\"<slug>\": {\"<region>\": bool}} (slugs: compute, network, image, volumev3, load-balancer, key-manager, object-store, dns, orchestration, sharev2, ...) — the sync job and client menus gate on them. Secret fields left blank are kept.",
+		desc:   "Update a cloud provider. config/secret are MERGED wholesale into the stored doc (read the provider first). Per-region service toggles live at config.services = {\"<slug>\": {\"<region>\": bool}} (slugs: compute, network, image, volumev3, object-store, kubernetes, database) — the sync job and client menus gate on them. Secret fields left blank are kept.",
 		method: "PUT",
 		path:   "/api/v1/admin/service/{id}/update",
 		params: []param{
@@ -57,20 +57,13 @@ var adminPlatformTools = []toolDef{
 			{name: "name", typ: "string", desc: "Display name.", in: "body"},
 			{name: "status", typ: "string", desc: "public | private | disabled.", in: "body"},
 			{name: "defaultPricePlan", typ: "string", desc: "Default price plan id.", in: "body"},
-			{name: "config", typ: "object", desc: "Config keys to merge (e.g. {services: {dns: {RegionOne: false}}}).", in: "body"},
+			{name: "config", typ: "object", desc: "Config keys to merge (e.g. {services: {volumev3: {pve: false}}}).", in: "body"},
 			{name: "secret", typ: "object", desc: "Secret keys to merge (blank values keep the stored ones). Never returned.", in: "body"},
 		},
 	},
 	{
-		name:   "discover_cloud_provider",
-		desc:   "Re-read the provider's Keystone catalog and merge discovered regions + services onto its config (the Sync services & regions button).",
-		method: "POST",
-		path:   "/api/v1/admin/service/{id}/discover",
-		params: []param{{name: "id", typ: "string", desc: "Cloud provider id.", required: true, in: "path"}},
-	},
-	{
 		name:   "set_provider_default_quota",
-		desc:   "Replace the provider's default project quota (config.provisioning.quota) — stored config only, not pushed to the cloud. Proxmox: {servers, vcpus, ramMb, diskGb, networks, floatingIps, gpu: {\"<model>\"|\"*\": n}} — seeded onto each new project and enforced for projects without their own quota (OpenStack names instances/cores/ram/gigabytes/floatingips are accepted as aliases). Body example: {servers: 10, vcpus: 20, ramMb: 51200, diskGb: 500, networks: 5, floatingIps: 2}.",
+		desc:   "Replace the provider's default project quota (config.provisioning.quota) — stored config only, not pushed to the cloud. Proxmox: {servers, vcpus, ramMb, diskGb, networks, floatingIps, gpu: {\"<model>\"|\"*\": n}} — seeded onto each new project and enforced for projects without their own quota (legacy alias keys instances/cores/ram/gigabytes/floatingips are also accepted). Body example: {servers: 10, vcpus: 20, ramMb: 51200, diskGb: 500, networks: 5, floatingIps: 2}.",
 		method: "PUT",
 		path:   "/api/v1/admin/service/{id}/quota",
 		params: []param{
@@ -89,23 +82,13 @@ var adminPlatformTools = []toolDef{
 		},
 	},
 	{
-		name:   "set_gnocchi_granularity",
-		desc:   "Set the provider's Gnocchi metric granularity in seconds (positive integer).",
-		method: "PUT",
-		path:   "/api/v1/admin/service/{id}/gnocchi-granularity",
-		params: []param{
-			{name: "id", typ: "string", desc: "Cloud provider id.", required: true, in: "path"},
-			{name: "granularity", typ: "integer", desc: "Granularity in seconds.", required: true, in: "body"},
-		},
-	},
-	{
 		name:   "set_metrics_config",
-		desc:   "Set the provider's usage-metrics source for traffic billing: gnocchi (default), prometheus, or none (skip metrics entirely). config.metrics is MERGED — a source-only toggle keeps the stored prometheus connection config. prometheus = {url: base up to /api/v1 (e.g. https://mimir.example/prometheus), schema: libvirt-exporter|ceilometer-pushgateway|ceilometer-exporter, headers: extra request headers (e.g. {\"X-Scope-OrgID\": \"tenant\"} for Mimir), basicUser, insecureTls, caCert, timeoutSeconds}. Credentials go in prometheusAuth = {basicPassword, bearerToken} — encrypted at rest, never returned; blank keeps the stored value, \"-\" clears it. Authorization headers and URL userinfo are rejected (use prometheusAuth).",
+		desc:   "Set the provider's usage-metrics source for traffic billing: prometheus, or none (default — skip metrics entirely). config.metrics is MERGED — a source-only toggle keeps the stored prometheus connection config. prometheus = {url: base up to /api/v1 (e.g. https://mimir.example/prometheus), schema: libvirt-exporter (legacy layout; no Proxmox schema yet), headers: extra request headers (e.g. {\"X-Scope-OrgID\": \"tenant\"} for Mimir), basicUser, insecureTls, caCert, timeoutSeconds}. Credentials go in prometheusAuth = {basicPassword, bearerToken} — encrypted at rest, never returned; blank keeps the stored value, \"-\" clears it. Authorization headers and URL userinfo are rejected (use prometheusAuth).",
 		method: "PUT",
 		path:   "/api/v1/admin/service/{id}/metrics-config",
 		params: []param{
 			{name: "id", typ: "string", desc: "Cloud provider id.", required: true, in: "path"},
-			{name: "source", typ: "string", desc: "gnocchi | prometheus | none.", required: true, in: "body"},
+			{name: "source", typ: "string", desc: "prometheus | none.", required: true, in: "body"},
 			{name: "prometheus", typ: "object", desc: "Prometheus connection config (see tool description).", in: "body"},
 			{name: "prometheusAuth", typ: "object", desc: "{basicPassword, bearerToken} — stored encrypted, never returned.", in: "body"},
 		},
@@ -119,14 +102,14 @@ var adminPlatformTools = []toolDef{
 	},
 	{
 		name:   "get_gpu_capacity",
-		desc:   "Cluster-wide GPU capacity per model from Placement, per region: [{region, gpus: [{name, total, inUse}]}]. Model names are the shared alias vocabulary (nvidia-a6000, nvidia-pro-6000, ...).",
+		desc:   "Cluster-wide GPU capacity per model from the provider's PVE resource mappings, per region: [{region, gpus: [{name, total, inUse}]}]. Model names are the shared alias vocabulary (nvidia-a6000, nvidia-pro-6000, ...).",
 		method: "GET",
 		path:   "/api/v1/admin/service/{id}/gpu-info",
 		params: []param{{name: "id", typ: "string", desc: "Cloud provider id.", required: true, in: "path"}},
 	},
 	{
 		name:   "list_live_flavors",
-		desc:   "Live Nova flavors across the provider's regions (id, name, vcpus, ram, disk, extra_specs — GPU flavors carry pci_passthrough:alias).",
+		desc:   "The Proxmox flavor catalog (id, name, vcpus, ram, disk, extraSpecs — GPU flavors carry pci_passthrough:alias).",
 		method: "GET",
 		path:   "/api/v1/admin/flavor-categories/flavors",
 	},
@@ -147,7 +130,7 @@ var adminPlatformTools = []toolDef{
 	},
 	{
 		name:   "create_flavor_category",
-		desc:   "Create a flavor category. flavors = [{flavorName, ...}] entries matched to live nova flavors by name; flavorAttributes = display attribute rows.",
+		desc:   "Create a flavor category. flavors = [{flavorName, ...}] entries matched to the Proxmox flavor catalog by name; flavorAttributes = display attribute rows.",
 		method: "POST",
 		path:   "/api/v1/admin/flavor-categories",
 		params: []param{

@@ -1,7 +1,7 @@
 // Package billingresource is the cloud→billing bridge:
 // list a service's cloud resources and turn each into the priced BillingResource(s) the
 // rating loop consumes. This package holds the dispatch/registry orchestration; the per-type Values
-// mapping (e.g. the SERVER/VPS provider reading GnocchiMetrics traffic into attribute
+// mapping (e.g. the SERVER/VPS provider reading UsageMetrics traffic into attribute
 // values) lands as concrete Providers in following slices.
 package billingresource
 
@@ -14,7 +14,7 @@ import (
 
 // Provider builds the BillingResource(s) for one CloudResourceType:
 // reads the resource's data (+ its
-// GnocchiMetrics usage, for traffic-billed types) into the priced attribute Values.
+// UsageMetrics usage, for traffic-billed types) into the priced attribute Values.
 type Provider interface {
 	Type() string
 	GetBillingInformation(ctx context.Context, bc billingapi.BillingContext, cr *cloud.CloudResource) ([]*billingapi.BillingResource, error)

@@ -76,8 +76,8 @@ func databaseDataWithHost(app map[string]any, host string) map[string]any {
 	status := "PENDING"
 	if h := digStr(app, "status", "health", "status"); h != "" {
 		// Argo health: Healthy / Progressing / Degraded / Suspended / Missing / Unknown. The LB
-		// Service's built-in health keeps the Application Progressing until the Octavia VIP is
-		// programmed, so READY implies the endpoint exists.
+		// Service's built-in health keeps the Application Progressing until the LB ingress IP is
+		// assigned, so READY implies the endpoint exists.
 		status = map[string]string{
 			"Healthy":     "READY",
 			"Progressing": "PROGRESSING",
@@ -101,9 +101,7 @@ func databaseDataWithHost(app map[string]any, host string) map[string]any {
 		"status":        status,
 		"sync_status":   digStr(app, "status", "sync", "status"),
 		"created_at":    digStr(app, "metadata", "creationTimestamp"),
-		"network_id":    digStr(values, "network", "networkId"),
-		"subnet_id":     digStr(values, "network", "subnetId"),
-		"endpoint":      host, // "" until Octavia programs the VIP — billing keys on this
+		"endpoint":      host, // "" until the LB ingress IP is assigned — billing keys on this
 		"port":          Port(engine),
 	}
 	for key, path := range map[string][]string{

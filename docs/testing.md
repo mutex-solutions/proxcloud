@@ -66,7 +66,7 @@ reach. Representative areas (one file each, `test/integration/`):
 - **Pricing** — rating and charge runs, bill build/aggregation
   (`pricing_test.go`, `pricing_bill_test.go`, `pricing_charge_test.go`).
 - **Cloud** — resource sync, reconcile, billing-resource metering, the metrics
-  and sync pipelines, notifications (`cloud_*_test.go`).
+  and sync pipelines (`cloud_*_test.go`).
 - **Jobs & lifecycle** — the distributed lock, the scheduler,
   activation/validation, suspension, savings expiry, reminders, and mail jobs
   (`lock_test.go`, `scheduler_test.go`, `activation*_test.go`,

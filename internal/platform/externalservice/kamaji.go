@@ -13,24 +13,21 @@ package externalservice
 //	      "namespace":    "argocd",
 //	      "project":      "proxcloud-k8s",  // AppProject guardrail
 //	      "chartRepo":    "ghcr.io/mutex-solutions/charts",
-//	      "chartName":    "openstack-kamaji-cluster",
+//	      "chartName":    "kamaji-cluster", // required — no default
 //	      "chartVersion": "0.2.3"         // pinned — never latest (plan §9)
 //	    },
 //	    "cluster": {                      // chart-value defaults every cluster inherits
 //	      "dataStoreName":     "default",
-//	      "floatingNetworkId": "…",       // Octavia floating net for the API LB
-//	      "externalNetworkId": "…",       // CAPO external network
 //	      "dnsZone":           "k8s.example.com",
-//	      "versions":          {"1.35.4": "<glance-image-id>"},  // curated version→DEFAULT-image matrix
-//	      "imageVariants":     {"nvidia": {"1.35.4": "<glance-image-id>"}}  // optional per-version variants
+//	      "versions":          {"1.35.4": "<node-image-id>"},  // curated version→DEFAULT-image matrix
+//	      "imageVariants":     {"nvidia": {"1.35.4": "<node-image-id>"}}  // optional per-version variants
 //	    }
 //	  },
 //	  "secret": {"kubeconfig": "<management-cluster kubeconfig>"}  // encrypted at rest
 //	}
 //
-// A kamaji provider is OpenStack-adjacent, not OpenStack-direct: cluster CONTROL PLANES live on
-// the management cluster; worker VMs land in the customer's own keystone tenant of the project's
-// OPENSTACK service (plan D4) — so a project must be attached to both.
+// Cluster CONTROL PLANES live on the management cluster; worker VMs land in the project's own
+// compute service (plan D4) — so a project must be attached to both.
 
 import "github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 
@@ -100,25 +97,17 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 		ChartName:     str(argo["chartName"]),
 		ChartVersion:  str(argo["chartVersion"]),
 		Defaults: kamaji.ClusterDefaults{
-			DataStoreName:           str(cl["dataStoreName"]),
-			FloatingNetworkID:       str(cl["floatingNetworkId"]),
-			ExternalNetworkID:       str(cl["externalNetworkId"]),
-			DNSZone:                 str(cl["dnsZone"]),
-			Versions:                versions,
-			ImageVariants:           variants,
-			Flavors:                 flavors,
-			RootVolumeGiB:           intOf(cl["rootVolumeGiB"]),
-			SupportKeypairName:      str(cl["supportKeypairName"]),
-			SupportKeypairPublicKey: str(cl["supportKeypairPublicKey"]),
-			AllowedCIDRs:            strList(cl["allowedCidrs"]),
-			StorageVolumeType:       str(cl["storageVolumeType"]),
+			DataStoreName: str(cl["dataStoreName"]),
+			DNSZone:       str(cl["dnsZone"]),
+			Versions:      versions,
+			ImageVariants: variants,
+			Flavors:       flavors,
+			RootVolumeGiB: intOf(cl["rootVolumeGiB"]),
+			AllowedCIDRs:  strList(cl["allowedCidrs"]),
 		},
 	}
 	if cfg.ArgoNamespace == "" {
 		cfg.ArgoNamespace = "argocd"
-	}
-	if cfg.ChartName == "" {
-		cfg.ChartName = "openstack-kamaji-cluster"
 	}
 	return cfg
 }

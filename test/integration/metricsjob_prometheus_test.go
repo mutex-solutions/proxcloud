@@ -32,7 +32,7 @@ func promJSON(labels map[string]string, value string) map[string]any {
 // TestMetricsJobPrometheusSource is the source=prometheus END-TO-END: the job's LIVE fetcher
 // factory (not a test seam) builds the Prometheus fetcher from the seeded externalService
 // config — auth header included — against a faked libvirt-exporter endpoint, and the month
-// doc lands with the same bucket semantics as the gnocchi path.
+// doc lands with the public/private bucket semantics.
 func TestMetricsJobPrometheusSource(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
@@ -44,7 +44,7 @@ func TestMetricsJobPrometheusSource(t *testing.T) {
 	var sawTenantHeader atomic.Bool // written from the httptest handler goroutine
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
-		if r.Header.Get("X-Scope-OrgID") == "openstack" {
+		if r.Header.Get("X-Scope-OrgID") == "tenant-a" {
 			sawTenantHeader.Store(true)
 		}
 		q := r.PostFormValue("query")
@@ -78,13 +78,13 @@ func TestMetricsJobPrometheusSource(t *testing.T) {
 			"source": "prometheus",
 			"prometheus": pgdoc.M{
 				"url": fake.URL, "schema": "libvirt-exporter",
-				"headers": pgdoc.M{"X-Scope-OrgID": "openstack"},
+				"headers": pgdoc.M{"X-Scope-OrgID": "tenant-a"},
 			},
 		}},
 	})
 
 	srv, err := cloudRepo.Insert(ctx, &cloud.CloudResource{
-		ExternalID: "nova-1", ServiceID: "svc-prom", ProjectID: projectID, Type: cloud.TypeServer,
+		ExternalID: "vm-1", ServiceID: "svc-prom", ProjectID: projectID, Type: cloud.TypeServer,
 		Data: map[string]any{"server": map[string]any{"name": "vm"}}, CreatedAt: &now, UpdatedAt: &now,
 	})
 	if err != nil {
@@ -110,7 +110,7 @@ func TestMetricsJobPrometheusSource(t *testing.T) {
 	cycleStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	saved, err := metricsRepo.FindForCurrentMonth(ctx, srv.ID, cycleStart)
 	if err != nil || saved == nil {
-		t.Fatalf("expected a gnocchiMetrics doc for the server: %v", err)
+		t.Fatalf("expected a usageMetrics doc for the server: %v", err)
 	}
 	d := saved.Details
 	if !d.IncomingPublicTrafficMb.Equal(decimal.RequireFromString("10")) ||
@@ -143,7 +143,7 @@ func TestMetricsJobSourceNone(t *testing.T) {
 		"config": pgdoc.M{"metrics": pgdoc.M{"source": "none"}},
 	})
 	srv, err := cloudRepo.Insert(ctx, &cloud.CloudResource{
-		ExternalID: "nova-2", ServiceID: "svc-none", ProjectID: projectID, Type: cloud.TypeServer,
+		ExternalID: "vm-2", ServiceID: "svc-none", ProjectID: projectID, Type: cloud.TypeServer,
 		Data: map[string]any{"server": map[string]any{"name": "vm"}}, CreatedAt: &now, UpdatedAt: &now,
 	})
 	if err != nil {
@@ -158,7 +158,7 @@ func TestMetricsJobSourceNone(t *testing.T) {
 	if err := job.Run(ctx); err != nil {
 		t.Fatalf("metrics job run: %v", err)
 	}
-	n, err := db.C("gnocchiMetrics").Count(ctx, map[string]any{"resourceId": srv.ID})
+	n, err := db.C("usageMetrics").Count(ctx, map[string]any{"resourceId": srv.ID})
 	if err != nil || n != 0 {
 		t.Fatalf("expected no metrics doc for source=none, got %d (%v)", n, err)
 	}

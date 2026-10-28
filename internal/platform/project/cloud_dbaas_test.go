@@ -10,7 +10,6 @@ func TestDbaasSpecFromData(t *testing.T) {
 		return map[string]any{
 			"name": "orders", "engine": "postgresql", "version": "17",
 			"replicas": float64(3), "cpu": float64(2), "memoryGiB": float64(8), "storageGiB": float64(100),
-			"networkId": "net-1", "subnetId": "sub-1",
 			"allowedCidrs": []any{"10.1.0.0/24"},
 		}
 	}
@@ -23,7 +22,7 @@ func TestDbaasSpecFromData(t *testing.T) {
 	}
 	if spec.DisplayName != "orders" || spec.Engine != "postgresql" || spec.Version != "17" ||
 		spec.Replicas != 3 || spec.CPU != 2 || spec.MemoryGiB != 8 || spec.StorageGiB != 100 ||
-		spec.NetworkID != "net-1" || spec.SubnetID != "sub-1" || len(spec.AllowedCIDRs) != 1 || spec.BetaAck {
+		len(spec.AllowedCIDRs) != 1 || spec.BetaAck {
 		t.Fatalf("spec = %+v", spec)
 	}
 

@@ -8,20 +8,20 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 )
 
-// Repo backs the `gnocchiMetrics` collection (the monthly usage records the rating cron
+// Repo backs the `usageMetrics` collection (the monthly usage records the rating cron
 // charges from).
 type Repo struct {
 	col *pgdoc.Store
 }
 
 func NewRepo(db *pgdoc.DB) *Repo {
-	return &Repo{col: db.C("gnocchiMetrics")}
+	return &Repo{col: db.C("usageMetrics")}
 }
 
 // FindForCurrentMonth mirrors findResourceMetricsForCurrentMonth: the doc for resourceId
 // whose billingCycle.startDate ≥ cycleStart. (nil,nil) when absent.
-func (r *Repo) FindForCurrentMonth(ctx context.Context, resourceID string, cycleStart time.Time) (*GnocchiMetrics, error) {
-	var m GnocchiMetrics
+func (r *Repo) FindForCurrentMonth(ctx context.Context, resourceID string, cycleStart time.Time) (*UsageMetrics, error) {
+	var m UsageMetrics
 	found, err := r.col.FindOne(ctx, pgdoc.M{
 		"resourceId":             resourceID,
 		"billingCycle.startDate": pgdoc.M{"$gte": cycleStart},
@@ -33,7 +33,7 @@ func (r *Repo) FindForCurrentMonth(ctx context.Context, resourceID string, cycle
 }
 
 // Save inserts a new doc (assigning _id) or replaces the existing one by _id.
-func (r *Repo) Save(ctx context.Context, m *GnocchiMetrics) (*GnocchiMetrics, error) {
+func (r *Repo) Save(ctx context.Context, m *UsageMetrics) (*UsageMetrics, error) {
 	if m.ID == "" {
 		id, err := r.col.InsertOne(ctx, m)
 		if err != nil {
@@ -49,8 +49,8 @@ func (r *Repo) Save(ctx context.Context, m *GnocchiMetrics) (*GnocchiMetrics, er
 }
 
 // GetMetric is the find-or-create for the current cycle: returns the
-// existing month doc or creates a zero-initialised one (details + ostorMetrics zeroed).
-func (r *Repo) GetMetric(ctx context.Context, cr *cloud.CloudResource, startAt, endAt time.Time) (*GnocchiMetrics, error) {
+// existing month doc or creates a zero-initialised one (details zeroed).
+func (r *Repo) GetMetric(ctx context.Context, cr *cloud.CloudResource, startAt, endAt time.Time) (*UsageMetrics, error) {
 	m, err := r.FindForCurrentMonth(ctx, cr.ID, startAt)
 	if err != nil {
 		return nil, err
@@ -59,11 +59,10 @@ func (r *Repo) GetMetric(ctx context.Context, cr *cloud.CloudResource, startAt, 
 		return m, nil
 	}
 	s, e := startAt, endAt
-	return r.Save(ctx, &GnocchiMetrics{
+	return r.Save(ctx, &UsageMetrics{
 		ResourceType: cr.Type,
 		ResourceID:   cr.ID,
 		BillingCycle: &BillBillingCycle{StartDate: &s, EndDate: &e},
 		Details:      zeroDetails(),
-		OstorMetrics: &OstorMetrics{},
 	})
 }

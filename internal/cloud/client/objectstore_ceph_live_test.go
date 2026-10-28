@@ -200,11 +200,11 @@ func TestLiveCephAProvisionAndCRUD(t *testing.T) {
 	t.Log("ACL public/private round-trip ok")
 
 	// --- bucket API URLs ---
-	sw, s3urls, err := proj.BucketAPIs(ctx, bucket)
+	s3urls, err := proj.BucketAPIs(ctx, bucket)
 	if err != nil {
 		t.Fatalf("BucketAPIs: %v", err)
 	}
-	t.Logf("BucketAPIs swift=%v s3=%v", sw, s3urls)
+	t.Logf("BucketAPIs s3=%v", s3urls)
 }
 
 // TestLiveCephBWebsite drills static website hosting end-to-end, including an ANONYMOUS https fetch of the

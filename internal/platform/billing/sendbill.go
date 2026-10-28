@@ -12,7 +12,7 @@ import (
 // sendbill.go handles sendBill + the monthlyBill cron (sendBills): finalize
 // each profile's PREVIOUS-month OPEN bill — delete-if-zero, skip SKIP profiles, else scale up, settle
 // against the credit balance, and flip OPEN→PAID (fully covered) or OPEN→SENT (+dueAt 3 days). This is
-// the keystone the charge cron's OPEN bills depend on: without it they never become SENT, so
+// the linchpin the charge cron's OPEN bills depend on: without it they never become SENT, so
 // monthlyCollect (collects SENT) and dunning (DueBills = SENT) have nothing to act on.
 //
 // NOTE: the savings-contract bill adjustment applied in sendBill (savingsContractAdjustmentsService

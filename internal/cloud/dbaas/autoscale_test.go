@@ -32,7 +32,7 @@ func TestAutoscaleTick(t *testing.T) {
 		spec := testSpec(EnginePostgreSQL, "17")
 		spec.ID = id
 		spec.StorageGiB = 20
-		if _, err := s.CreateDatabase(ctx, spec, testShare(), nil); err != nil {
+		if _, err := s.CreateDatabase(ctx, spec); err != nil {
 			t.Fatal(err)
 		}
 		if autoscale != nil {

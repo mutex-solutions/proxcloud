@@ -1,36 +1,41 @@
 # Managed Databases (DBaaS) — operator guide
 
-ProxCloud provisions customer databases as **ArgoCD Applications on a dedicated, ops-built DB
+ProxCloud runs customer databases as **ArgoCD Applications on a dedicated, ops-built DB
 Kubernetes cluster** — the managed-Kubernetes (kamaji) delivery pattern pointed at a different
 cluster. One database = one Application rendering the `database-cluster` chart
-(`deploy/charts/database-cluster`), which emits the engine operator CR, a tenant-facing Octavia
-LoadBalancer Service and a NetworkPolicy. ProxCloud stays stateless about desired spec: the
-Application's `helm.valuesObject` is the state store, status is read back off Application
-health + the LB Service.
+(`deploy/charts/database-cluster`), which emits the engine operator CR, a LoadBalancer Service
+and a NetworkPolicy. ProxCloud stays stateless about desired spec: the Application's
+`helm.valuesObject` is the state store, status is read back off Application health + the LB
+Service.
+
+> ## Status on Proxmox
+>
+> **Read, sync, connection info, actions on existing databases and delete work. Creating a
+> database on a Proxmox provider is planned.** Today a create returns "Managed Databases on
+> Proxmox are not available yet": the network legs in
+> `internal/platform/project/cloud_dbaas_create.go` are stubs. The planned design exposes
+> databases on a routed services subnet through MetalLB, with isolation by
+> `loadBalancerSourceRanges`; see
+> [C3e](architecture/c4/c3-components.md#c3e-managed-services-and-object-storage). The chart's
+> LB Service template carries no provider-specific annotations; extra ones come from
+> `network.extraAnnotations`.
 
 ```mermaid
 flowchart LR
     proxcloud["ProxCloud"]
-    subgraph cloud["OpenStack cloud"]
-        subgraph dbc["DB cluster (ops-built, OpenStack VMs)<br/>ArgoCD + AppProject proxcloud-dbaas<br/>CNPG · Percona PS · mariadb-op · valkey-op<br/>OCCM + cinder-csi"]
-            app["Application std-&lt;id&gt;<br/>(chart database-cluster)"]
-            pods["DB pods + PVCs<br/>ns st-&lt;projectId&gt;"]
-            lb["Service std-&lt;id&gt;-lb<br/>(LoadBalancer)"]
-        end
-        octavia["Octavia amphora<br/>(dbaas keystone project)"]
-        vip["VIP on the CUSTOMER's<br/>VPC subnet"]
+    subgraph dbc["DB cluster (ops-built)<br/>ArgoCD + AppProject proxcloud-dbaas<br/>CNPG, Percona PS, mariadb-op, valkey-op, ..."]
+        app["Application std-&lt;id&gt;<br/>(chart database-cluster)"]
+        pods["DB pods + PVCs<br/>ns pc-&lt;projectId&gt;"]
+        lb["Service std-&lt;id&gt;-lb<br/>(LoadBalancer)"]
     end
-    client["Customer app<br/>(tenant VM)"]
+    client["Customer app"]
     proxcloud -- "Application CRs<br/>(kubeconfig, SSA)" --> app
-    proxcloud -- "neutron RBAC<br/>access_as_shared" --> vip
     app --> pods
     app --> lb
-    lb -- "OCCM" --> octavia
-    octavia --> vip
-    client -- "5432/3306/6379/27017" --> vip
+    client -- "engine port" --> lb
 ```
 
-Engines (all five ship in the chart; valkey is beta-gated):
+Engines (valkey is beta-gated):
 
 | Engine | Operator | HA semantics | Client port |
 |---|---|---|---|
@@ -42,23 +47,23 @@ Engines (all five ship in the chart; valkey is beta-gated):
 | `opensearch` | opensearch-k8s-operator 3.0.2 | N same-size nodes (all roles), 1 or 3 | 9200 (HTTPS) |
 | `kafka` | Strimzi 1.1.0 (KRaft, Kafka 4.2.0–4.3.0) | dual-role KRaft pool, 3 brokers | 9094 (SASL/SCRAM) |
 
-Unlike managed-k8s, the compute/storage under a database is **ops-owned** — nothing lands in
-the customer tenant except the LB VIP. Billing therefore carries the full price on the
+The compute and storage under a database are **ops-owned**: nothing lands in the customer's
+project except the endpoint. Billing therefore carries the full price on the
 `database_cluster` resource type (pre-multiplied totals `vcpus_total`/`ram_gb_total`/
 `storage_gb_total`). While the endpoint is absent the charge is **deferred, not waived**:
-once the Octavia VIP appears the engine back-bills the current cycle's elapsed hours from
+once the endpoint appears the engine back-bills the current cycle's elapsed hours from
 creation.
 
 ## Cluster prerequisites (ops, out-of-band)
 
-Everything in `deploy/dbaas-cluster/` — apply order, RBAC + kubeconfig recipe, AppProject
-`proxcloud-dbaas`, `argocd-cm` Lua health checks for the engine CRDs, the pinned operator install
-list, and the Octavia/amphora quota math live there. Assumed pre-existing on the cluster:
-openstack-cloud-controller-manager (Octavia LBs), cinder-csi + a default StorageClass, ArgoCD
-(self-syncing) in `argocd`.
+Everything in `deploy/dbaas-cluster/`: apply order, RBAC + kubeconfig recipe, AppProject
+`proxcloud-dbaas`, `argocd-cm` Lua health checks for the engine CRDs, and the pinned operator
+install list. Assumed pre-existing on the cluster: a load-balancer implementation for
+`LoadBalancer` Services, a CSI driver with a default StorageClass, and ArgoCD (self-syncing) in
+`argocd`.
 
 The Lua health checks are load-bearing: the LB Service's built-in health keeps an Application
-`Progressing` until the Octavia VIP is programmed, so ProxCloud never reports READY without an
+`Progressing` until the endpoint is programmed, so ProxCloud never reports READY without an
 endpoint — and a missing engine-CRD check would leave Applications Healthy while the database
 is degraded.
 
@@ -71,26 +76,11 @@ Admin UI → System → Cloud providers → Add provider → **Database (DBaaS)*
 - `secret.kubeconfig` — the DB cluster kubeconfig from `deploy/dbaas-cluster/rbac.yaml`'s
   recipe (token or client-cert only; encrypted at rest, stripped from admin reads).
 - `config.argocd.*` — namespace/project/chartRepo/`chartVersion` (pinned, never latest).
-- `config.database.osServiceId` / `osProjectId` — the OpenStack service the DB cluster's nodes
-  live on and the **dbaas keystone project id** there: the neutron-RBAC `target_tenant` every
-  customer network is shared with.
-- `config.database.memberSubnetId` — the DB-cluster node subnet
-  (`loadbalancer.openstack.org/member-subnet-id` on every LB).
 - `config.database.engines` — the curated catalog (versions / default / replicas / `beta`).
-- `config.services.database.<region> = true` — un-hides the client Databases surface.
+- `config.services.database.<region> = true` — un-hides the client Databases surface and
+  enables the sync.
 
 Seed example: `deploy/seed/external-service-dev.json` (`svc-dbaas-dev`).
-
-## Networking (why neutron RBAC)
-
-The OCCM on the DB cluster authenticates as the ops-owned dbaas keystone project; for it to
-plant an Octavia VIP on a customer subnet, the customer network must be visible to that
-project. At database create ProxCloud verifies the customer owns the network/subnet, then creates
-a neutron RBAC policy (`access_as_shared`, target = `osProjectId`) with the project's OpenStack
-admin creds re-scoped to the tenant. The share is recorded as annotations on a per-database
-marker secret (`<id>-net-share`) on the DB cluster — the only durable revocation record.
-`loadBalancerSourceRanges` (Octavia ACLs) enforce the customer's allowed CIDRs; the chart's
-NetworkPolicy deliberately does NOT mirror them (post-LB source IPs are amphora/node IPs).
 
 ## Lifecycle
 
@@ -98,51 +88,35 @@ NetworkPolicy deliberately does NOT mirror them (post-LB source IPs are amphora/
 sequenceDiagram
     participant C as Customer
     participant S as ProxCloud
-    participant N as Neutron (customer tenant)
     participant A as ArgoCD (DB cluster)
     participant OP as Engine operator
-    participant O as Octavia (via OCCM)
-    C->>S: Create database (engine, size, VPC network/subnet)
-    S->>S: Prove network/subnet belong to the tenant
-    S->>A: pc-project namespace + default-deny NP + net-share marker Secret
-    S->>N: RBAC access_as_shared → dbaas keystone project
-    S->>A: (mariadb/valkey) auth Secret + Application CR (pinned chart, full values)
-    A->>OP: Render + sync chart (engine CR, LB Service, NetworkPolicy)
-    OP-->>A: Pods ready (Lua health)
-    O-->>A: VIP programmed on the tenant subnet (Service health)
-    S-->>C: Status READY + endpoint (sync reads Application + LB Service)
+    C->>S: Read database / list databases
+    S->>A: Read Application + LB Service
+    S-->>C: Status + endpoint
     C->>S: GET_CONNECTION_INFO
     S->>A: Read operator secret + LB ingress on demand (never stored)
+    C->>S: Action (resize, scale, upgrade, ...)
+    S->>A: Patch the Application values
+    A->>OP: Render + sync chart
     C->>S: Delete database
-    S->>A: Delete Application (resources-finalizer cascades, LB torn down)
-    S->>N: Sweep revokes the RBAC share once the LB port is gone
+    S->>A: Delete Application (resources-finalizer cascades)
 ```
 
 - **Create** — client `POST /project/{id}/cloud` `{type: DATABASE_CLUSTER, data: {name,
-  engine, version, replicas, cpu, memoryGiB, storageGiB, networkId, subnetId, allowedCidrs,
-  beta?}}`. Order: namespace (+ its `proxcloud-default-deny` NetworkPolicy) → net-share marker →
-  neutron RBAC share → (mariadb/valkey) proxcloud-owned `<id>-auth` secret → Application —
-  marker BEFORE share, so a crash mid-create always leaves a record the sweep converges on.
-  Status PENDING → PROGRESSING → READY as ArgoCD converges and the VIP is programmed
-  (minutes; the charge is deferred until the endpoint exists, then back-billed).
+  engine, version, replicas, cpu, memoryGiB, storageGiB, allowedCidrs, beta?}}`. On a Proxmox provider it currently fails before anything is written (see the status
+  box).
+- **Sync** — `syncjob.syncDbaasService` (every 15 minutes, gated on the `database` toggle)
+  reconciles the project's `DATABASE_CLUSTER` rows from Applications labeled with the project
+  id, plus the LB Service address.
 - **Actions** — `GET_CONNECTION_INFO` (secret + LB read on demand, never stored),
   `RESIZE {cpu,memoryGiB}`, `RESIZE_STORAGE {storageGiB}` (grow-only), `SCALE_REPLICAS`,
-  `UPGRADE {version}` (catalog-gated, upward-only vs live values; the operator rolls the pods
-  onto the new engine image, the endpoint never changes — off for valkey [operator unpinned]
-  and ferretdb [frontend/DocumentDB images are a pinned matched pair]), `RESTART`, `RESET_PASSWORD`
-  (returned once), `SET_ALLOWED_CIDRS`, `SET_SSO` (opensearch only: Dashboards OIDC against a
-  **public** IdP client — no client secret is ever stored; API-side securityconfig wiring is a
-  live-drill item). Engine-gated via `dbaas.Capabilities` — verify each mechanism live before
-  widening the map.
-- **Delete** — Application delete only; the ArgoCD resources-finalizer cascades the chart, the
-  LB Service delete tears the Octavia LB (and its tenant-subnet port) down. The periodic sweep
-  (`syncjob.sweepDbaasOrphans`) then revokes the network share (skipped while a live sibling
-  database rides the same network), reaps the marker/auth secrets and GCs the emptied
-  namespace. A neutron 409 while the amphora winds down is the normal first-pass outcome —
-  fail-closed retry, never force-delete ports.
-- **Project teardown** — dbaas rows are swept before the tenant sweep, and keystone tenant
-  deletion is DEFERRED while any database remnant is still finalizing (the LB port / network
-  share would wedge it). Re-run teardown after the sweep reports clean.
+  `UPGRADE {version}` (catalog-gated, upward-only vs live values; off for valkey and ferretdb),
+  `RESTART`, `RESET_PASSWORD` (returned once), `SET_ALLOWED_CIDRS`, `SET_SSO` (opensearch only:
+  Dashboards OIDC against a **public** IdP client — no client secret is ever stored),
+  `SET_AUTOSCALE` (below). Engine-gated via `dbaas.Capabilities`.
+- **Delete** — Application delete only; the ArgoCD resources-finalizer cascades the chart. The
+  periodic sweep (`syncjob.sweepDbaasOrphans`) then reaps the marker/auth secrets and GCs the
+  emptied namespace.
 
 ## Pricing (DigitalOcean parity)
 
@@ -163,28 +137,28 @@ Re-derive when DO reprices.
 
 ## HA and write-node failover (why the endpoint never moves)
 
-The customer-facing address is the Octavia VIP — a fixed IP on the tenant subnet. Failover
-never changes it; the "flip to the new write node" happens INSIDE the cluster, behind the LB:
+The customer-facing address is the LB Service address. Failover never changes it; the "flip to
+the new write node" happens INSIDE the cluster, behind the LB:
 
-| Engine | Write-path routing behind the VIP |
+| Engine | Write-path routing behind the LB |
 |---|---|
-| postgresql | LB Service selects `cnpg.io/instanceRole: primary`; CNPG re-labels pods on failover/switchover, so the Service endpoints flip to the new primary (verify on 1.29; fallback = CNPG `managed.services.additional` selectorType `rw`) |
+| postgresql | LB Service selects `cnpg.io/instanceRole: primary`; CNPG re-labels pods on failover/switchover, so the Service endpoints flip to the new primary |
 | mysql | LB targets the Percona operator's HAProxy pods; HAProxy follows the group-replication primary election |
 | mariadb | LB targets the chart-owned HAProxy, whose backend is the operator's `<id>-primary` Service — the operator re-points its endpoints on switchover/failover |
 | ferretdb | LB targets the stateless frontends, which talk to the CNPG `-pg-rw` Service (operator-managed) |
 | valkey | beta — routing unverified until the operator CRD is pinned |
 | opensearch | LB targets all nodes (every node coordinates); cluster re-elects internally |
-| kafka | Strimzi-created LBs: ONE bootstrap VIP + one VIP per broker (advertised addresses) — N+1 Octavia LBs per cluster, mind the amphora quota; partition leadership moves internally |
+| kafka | Strimzi-created LBs: ONE bootstrap address + one per broker (advertised addresses), so N+1 LoadBalancer Services per cluster; partition leadership moves internally |
 
 Clients see a few seconds of connection resets during a failover, reconnect to the SAME
-host:port, and land on the new primary. No floating-IP dance, no DNS TTL.
+host:port, and land on the new primary. No DNS TTL.
 
 ## Vertical autoscale (opt-in, surcharge-priced)
 
 `SET_AUTOSCALE {enabled, maxCpu, maxMemoryGiB, maxStorageGiB}` — available on every engine.
-Design: **the VPA is the brain, proxcloud is the hand**. The chart renders a
+Design: **the VPA is the brain, ProxCloud is the hand**. The chart renders a
 VerticalPodAutoscaler in `updateMode: Off` (recommendation only — a VPA that evicts database
-pods on its own schedule is a data-safety hazard); each sync cycle proxcloud reads the
+pods on its own schedule is a data-safety hazard); each sync cycle ProxCloud reads the
 recommendation, clamps it into the customer's ceilings and applies it through the SAME values
 patch RESIZE uses, so the operator performs its own safe rolling change. Disk rides the same
 tick: when any of the database's PVCs passes 80% full (kubelet volume-stats via the provider's
@@ -211,31 +185,23 @@ current version.
 | postgresql | `<id>-app` (CNPG-minted) | `username`/`password`/`dbname` keys |
 | ferretdb | `<id>-pg-app` (CNPG backend `<id>-pg`) | same keys, Mongo wire |
 | mysql | `<id>-secrets` (operator-minted) | `root` under key `root` (PS has no declarative app users) |
-| mariadb | `<id>-auth` (**proxcloud-provisioned**) | user `app`, database `app` |
-| valkey | `<id>-auth` (**proxcloud-provisioned**) | AUTH only |
+| mariadb | `<id>-auth` (**ProxCloud-provisioned**) | user `app`, database `app` |
+| valkey | `<id>-auth` (**ProxCloud-provisioned**) | AUTH only |
 | opensearch | `<id>-admin-password` (operator-minted, default securityconfig) | `username`/`password` keys |
-| kafka | `<id>-auth` (**proxcloud-provisioned**, KafkaUser BYO-password) | SASL user `<id>-app`, SCRAM-SHA-512 |
+| kafka | `<id>-auth` (**ProxCloud-provisioned**, KafkaUser BYO-password) | SASL user `<id>-app`, SCRAM-SHA-512 |
 
-The proxcloud-provisioned secrets live OUTSIDE the Application on purpose: a chart-generated
+The ProxCloud-provisioned secrets live OUTSIDE the Application on purpose: a chart-generated
 password would re-roll on every ArgoCD render, and values must never carry secrets (the
 Application CR is readable by anyone with argocd read).
 
-## Verify at the live drill (flags embedded in the chart/manifests)
-
-CNPG `instanceRole: primary` LB selector + restart annotation; Percona served CRD version,
-secret keys, haproxy labels; mariadb `podMetadata` passthrough + `-primary` Service naming;
-the whole valkey CRD (beta gate stays closed until pinned); FerretDB healthz + CNPG
-DocumentDB bootstrap; engineVersion→image maps; Lua status value sets; PodMonitor ports.
-
 ## Troubleshooting
 
+- **Create fails with "not available yet"** — expected on a Proxmox provider (see the status
+  box).
 - **Endpoint stuck pending** — `kubectl -n pc-<project> get svc <id>-lb`; empty
-  `EXTERNAL-IP` → OCCM events (amphora quota in the dbaas project, member-subnet ports,
-  neutron RBAC missing).
+  `EXTERNAL-IP` → the cluster's load-balancer implementation (events on the Service).
 - **Application Degraded on first create (ferretdb)** — frontend crash-loops until the CNPG
   backend accepts connections; the startup probe absorbs the normal window.
-- **Sweep logs "revoke network share: 409"** — expected while the amphora winds down; the next
-  cycle retries. Persistent 409 = a foreign port of the dbaas project on the tenant network.
 - **`not managed by proxcloud — refusing`** — the object lacks the
   `app.kubernetes.io/managed-by: proxcloud` label; pre-existing/hand-made objects are invisible
   and untouchable by design.

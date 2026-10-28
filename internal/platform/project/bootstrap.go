@@ -1,11 +1,9 @@
 package project
 
-// bootstrap.go holds the cloud-bootstrap slice: when
-// a project is enabled it is provisioned onto the platform CLOUD external service — a Keystone
-// project (tenant) is created (tagged provisioner:proxcloud / proxcloud_project_id:<id>) and recorded as a
-// ProjectExternalService on the project. Keystone user/role + quota provisioning (for the customer's
-// DIRECT OpenStack access) are deferred — app-mediated resource creates use the admin client
-// re-scoped to the tenant (ClientConfigForProject), which needs only the tenant project.
+// bootstrap.go holds the cloud-bootstrap slice: when a project is enabled it is provisioned onto
+// every non-disabled CLOUD external service — a PVE pool (proxmox), an RGW user (ceph-s3), a
+// management/DB-cluster namespace (kamaji/dbaas) — and each binding is recorded as a
+// ProjectExternalService on the project.
 
 import (
 	"context"
@@ -22,18 +20,16 @@ func (h *Handler) EnableAndBootstrap(ctx context.Context, p *Project) error {
 	return h.enableAndBootstrap(ctx, p)
 }
 
-// enableAndBootstrap provisions the project onto the first non-disabled OpenStack CLOUD service and
-// flips it to ENABLED. Idempotent: a project that already has an attached service is left as-is, and
-// an existing tenant (matched by the proxcloud_project_id tag) is reused rather than recreated.
+// enableAndBootstrap provisions the project onto the non-disabled CLOUD services and flips it to
+// ENABLED. Idempotent: a project that already has an attached service is left as-is.
 func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if h.esSvc == nil {
 		return nil
 	}
-	// Already provisioned (the project carries its attached service + external tenant) → this is a
-	// re-entry; the keystone tenant + admin-role grant were done at first bootstrap. Skip ALL the live
-	// keystone calls (FindProjectByTag/role-grant) — they are idempotent setup, not per-entry work, and
-	// re-running them on every project-open is both wasteful and a failure surface (an admin-scope
-	// config change must not 500 an already-working project).
+	// Already provisioned (the project carries its attached services) → this is a re-entry; the
+	// provider-side setup was done at first bootstrap. Skip ALL the live calls — they are idempotent
+	// setup, not per-entry work, and re-running them on every project-open is both wasteful and a
+	// failure surface (a provider config change must not 500 an already-working project).
 	if len(p.ServiceIDs()) > 0 {
 		return nil
 	}
@@ -61,25 +57,25 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 		return nil // no cloud provider configured → nothing to provision
 	}
 	p.Status = StatusEnabled
-	// Ceph-s3 object-store bootstrap (no Keystone) — provision the project's RGW tenant-user per service.
+	// Ceph-s3 object-store bootstrap — provision the project's RGW user per service.
 	for _, es := range cephES {
 		if err := h.BootstrapCephOnto(ctx, p, es); err != nil {
 			return err
 		}
 	}
-	// Kamaji managed-k8s bootstrap (no Keystone) — ensure the project's management-cluster namespace.
+	// Kamaji managed-k8s bootstrap — ensure the project's management-cluster namespace.
 	for _, es := range kamajiES {
 		if err := h.BootstrapKamajiOnto(ctx, p, es); err != nil {
 			return err
 		}
 	}
-	// Dbaas managed-database bootstrap (no Keystone) — ensure the project's DB-cluster namespace.
+	// Dbaas managed-database bootstrap — ensure the project's DB-cluster namespace.
 	for _, es := range dbaasES {
 		if err := h.BootstrapDbaasOnto(ctx, p, es); err != nil {
 			return err
 		}
 	}
-	// Proxmox bootstrap (no Keystone) — ensure the project's PVE pool.
+	// Proxmox bootstrap — ensure the project's PVE pool.
 	for _, es := range pveES {
 		if err := h.BootstrapProxmoxOnto(ctx, p, es); err != nil {
 			return err
@@ -119,7 +115,7 @@ func (h *Handler) BootstrapProxmoxOnto(ctx context.Context, p *Project, es *exte
 	}
 	region := es.PVERegion()
 	if region == "" {
-		region = h.cloudRegion
+		region = h.defaultRegion
 	}
 	p.Services = append(p.Services, map[string]any{
 		"serviceId": es.ID,
@@ -151,7 +147,7 @@ func (h *Handler) BootstrapDbaasOnto(ctx context.Context, p *Project, es *extern
 	}
 	region := es.DbaasRegion()
 	if region == "" {
-		region = h.cloudRegion
+		region = h.defaultRegion
 	}
 	p.Services = append(p.Services, map[string]any{
 		"serviceId": es.ID,
@@ -182,7 +178,7 @@ func (h *Handler) BootstrapKamajiOnto(ctx context.Context, p *Project, es *exter
 	}
 	region := es.KamajiRegion()
 	if region == "" {
-		region = h.cloudRegion
+		region = h.defaultRegion
 	}
 	p.Services = append(p.Services, map[string]any{
 		"serviceId": es.ID,
@@ -192,8 +188,8 @@ func (h *Handler) BootstrapKamajiOnto(ctx context.Context, p *Project, es *exter
 	return h.svc.Save(ctx, p)
 }
 
-// BootstrapCephOnto provisions the project onto a ceph-s3 object-store service (decision #2: no Keystone
-// tenant — rgwTenant is the sole anchor). It ensures the project's RGW tenant-user + quota via Admin Ops,
+// BootstrapCephOnto provisions the project onto a ceph-s3 object-store service (the RGW user is
+// the sole anchor). It ensures the project's RGW tenant-user + quota via Admin Ops,
 // stores the generated S3 keys (encrypted) in the ceph credential store, and appends the ProjectExternal
 // service binding {serviceId, provider:"ceph-s3", region, rgwTenant, rgwUid}. Idempotent: a project
 // already attached to this service is saved as-is; ensureUser reuses an existing RGW user's keys.
@@ -206,7 +202,7 @@ func (h *Handler) BootstrapCephOnto(ctx context.Context, p *Project, es *externa
 	}
 	region := es.CephRegion()
 	if region == "" {
-		region = h.cloudRegion
+		region = h.defaultRegion
 	}
 	uid := es.RGWUIDFor(p.ID) // uidPrefix + projectId — the one derivation
 	// Admin-keyed client (no project keys yet) drives the Admin Ops user create + quota.
@@ -234,30 +230,26 @@ func (h *Handler) BootstrapCephOnto(ctx context.Context, p *Project, es *externa
 }
 
 // BootstrapOnto provisions the project onto the GIVEN cloud service — the explicit-service leg of
-// the project bootstrap: create-or-reuse the keystone tenant (or ADOPT adoptExternalProjectID when
-// supplied), grant the admin service account onto it, append the ProjectExternalService entry and
-// save. Does NOT flip status (the bootstrap never does; enableAndBootstrap sets ENABLED itself
+// the project bootstrap, dispatched per provider kind. Does NOT flip status (the bootstrap never does; enableAndBootstrap sets ENABLED itself
 // before calling). Idempotent: a project already attached to this service is saved as-is.
-func (h *Handler) BootstrapOnto(ctx context.Context, p *Project, es *externalservice.ExternalService, adoptExternalProjectID string) error {
-	// A ceph-s3 service has no Keystone at all — route to the RGW-user bootstrap. This is what lets the
+func (h *Handler) BootstrapOnto(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
+	// A ceph-s3 service routes to the RGW-user bootstrap. This is what lets the
 	// admin "attach external service" leg onboard EXISTING projects onto a newly added ceph provider
 	// (enableAndBootstrap only provisions projects that have no service attached yet).
 	if es.IsCephS3() {
 		return h.BootstrapCephOnto(ctx, p, es)
 	}
-	// Same for kamaji: no Keystone — the management-cluster namespace leg.
+	// kamaji: the management-cluster namespace leg.
 	if es.IsKamaji() {
 		return h.BootstrapKamajiOnto(ctx, p, es)
 	}
-	// And for dbaas: no Keystone — the DB-cluster namespace leg.
+	// dbaas: the DB-cluster namespace leg.
 	if es.IsDbaas() {
 		return h.BootstrapDbaasOnto(ctx, p, es)
 	}
-	// And for proxmox: no Keystone — the PVE pool leg.
+	// proxmox: the PVE pool leg.
 	if es.IsProxmox() {
 		return h.BootstrapProxmoxOnto(ctx, p, es)
 	}
-	// No other provider kinds exist on this fork (the OpenStack keystone leg was
-	// removed with it).
 	return fmt.Errorf("bootstrap: unsupported provider kind %q", es.Provider())
 }

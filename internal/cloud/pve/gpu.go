@@ -55,7 +55,7 @@ func gpuFromTags(tags string) (alias string, count int) {
 	return v[:i], n
 }
 
-// GPUSpecsFromTags renders the OpenStack extra_specs shape for a VM's tags —
+// GPUSpecsFromTags renders the flavor extra_specs shape for a VM's tags —
 // what cloud.GPUFromFlavor already parses (billing + quota reuse).
 func GPUSpecsFromTags(tags string) map[string]any {
 	alias, count := gpuFromTags(tags)

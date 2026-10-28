@@ -224,7 +224,7 @@ on("GET /admin/project/:id/external-service/:esId", ({ params }) => {
     services.push(
       svc.config?.provider === "ceph-s3"
         ? { serviceId: svc.id, provider: "ceph-s3", region: svc.config.region, rgwUid: `${svc.config.uidPrefix ?? ""}${project.id}` }
-        : { serviceId: svc.id, externalProjectId: db.nextId("os-project") },
+        : { serviceId: svc.id, provider: svc.config?.provider, region: Object.keys(svc.config?.regions ?? {})[0], pool: `${svc.config?.poolPrefix ?? "pc-"}${project.id}` },
     )
   }
   return { data: project }

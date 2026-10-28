@@ -1,26 +1,24 @@
 # Working with Servers
 
-Servers are the virtual machines at the center of most projects. This guide covers the compute resources that surround them — server groups, key pairs, and images — and the day-to-day operations you'll run on a machine once it exists. If you've never launched one, start with [Launch Your First Server](/docs/getting-started/first-server).
+Servers are the virtual machines at the center of most projects. This guide covers the compute resources that surround them — key pairs and images — and the day-to-day operations you'll run on a machine once it exists. If you've never launched one, start with [Launch Your First Server](/docs/getting-started/first-server).
 
 Everything here lives under the **Compute** group in the sidebar.
 
 ## Launching and sizing
 
-Create a server from **Compute → Servers**. Each machine is built from an **image** (the operating system to boot), a **flavor** (its vCPU, RAM, and suggested root-storage size), a **root volume**, a **network** to attach to, a **key pair** for SSH login, and one or more **security groups** for firewalling. Pick a flavor that matches the workload, then choose the root-volume size and one of the storage classes published by the operator. The image boots from this block volume; the root volume is deleted with the server. You can also add data volumes during launch. Data volumes are preserved when the server is deleted so they can be attached elsewhere. The launch form also carries an **Assign floating IP** option, on by default — leave it on and a public IP is attached automatically shortly after the server becomes active.
+Create a server from **Compute → Servers**. Each machine is a Proxmox VE virtual machine cloned from an **image** (the operating system to boot), sized by a **flavor** (vCPUs, RAM, optional GPU, and a default root-disk size), attached to one of your project's **networks**, given a **key pair** for SSH login (injected by cloud-init), and protected by one or more **security groups**. Pick a flavor that matches the workload, then set the root-disk size; it can't go below what the image needs. The flavor decides which storage the root disk lives on, and the root disk is deleted with the server. Add data disks after launch from **Storage → Volumes** (see [Block Volumes](/docs/guides/volumes)).
+
+There are no floating IPs on Proxmox. To make a server reachable from the internet, give it a public NIC as described in [Networking](/docs/guides/networks).
 
 ## Power actions
 
 A server's page exposes the lifecycle controls:
 
-- **Soft reboot** — asks the guest OS to restart cleanly.
-- **Hard reboot** — power-cycles the machine when the guest is unresponsive.
-- **Stop / Start** — power the instance off and on. A stopped server keeps its disks and network attachments.
+- **Reboot** — asks the guest OS to restart cleanly.
+- **Stop / Start** — power the server off and on. A stopped server keeps its disks and network attachments.
+- From **More actions**: **Rename**, **Resize** (move to another flavor), **Console (VNC)** for a browser console, and **Delete**.
 
-When you're done with a machine, **delete** it so it stops consuming compute and accruing charges.
-
-## Server groups
-
-**Compute → Server groups** lets you bundle instances under a scheduling policy — for example keeping members of a group apart on separate hosts for resilience, or together for locality. Create the group first, then launch servers into it.
+When you're done with a machine, **delete** it so it stops consuming compute and accruing charges. Deleting destroys the VM together with all of its disks, so copy off anything you want to keep first.
 
 ## Key pairs
 
@@ -28,8 +26,10 @@ SSH access is by key pair, managed under **Compute → Key pairs**. Either uploa
 
 ## Images
 
-**Compute → Images** lists the machine images you can boot from — both those the operator publishes and any you own. Choose one when launching a server; the image determines the OS and the default login user.
+**Compute → Images** lists the machine images you can boot from — both the templates the operator publishes and any you own. Choose one when launching a server; the image determines the OS and the default login user.
+
+To save a server as your own image, open the server's **Snapshots** tab and create a snapshot. ProxCloud clones the server into a template that belongs to your project; it appears under **Compute → Images** and can be used to launch new servers. Deleting the image removes the template.
 
 ## Keeping the console in sync
 
-The status you see on a server reflects the real state on the underlying cloud, kept current by a background sync and by live event notifications. A machine you reboot or delete directly on OpenStack shows the change here too, usually within seconds. For the mechanics, see [How Provisioning Works](/docs/concepts/provisioning).
+The status you see on a server reflects the real state on the Proxmox VE cluster. It is kept current by a background sync every 15 minutes, by every action you take in ProxCloud, and by a live refresh when you open a server. A change made directly in Proxmox appears after the next sync. For the mechanics, see [How Provisioning Works](/docs/concepts/provisioning).

@@ -1,19 +1,21 @@
 # Block Volumes and Snapshots
 
-Block storage gives your servers persistent disks that outlive any single boot. The **Storage** group in the sidebar covers block volumes and their snapshots, alongside file shares (mountable shared file systems) and object storage buckets — the latter has [its own guide](/docs/guides/object-storage).
+Block storage gives your servers extra disks beyond the root disk they boot from. The **Storage** group in the sidebar covers volumes alongside object storage buckets — the latter has [its own guide](/docs/guides/object-storage).
 
 ## Volumes
 
-A **volume** (under **Storage → Volumes**) is a block device you attach to a server. Every newly created server also boots from a root block volume. That root volume is deleted with its server, while additional data volumes are independent of the server lifecycle and can be reattached elsewhere.
+A **volume** (under **Storage → Volumes**) is a disk of one of your servers. On Proxmox VE a disk always belongs to a VM, so a volume is created on a server rather than as a free-standing disk: a create request carries a size in GB, a storage type, and the server it belongs to (`serverId`). The **Create volume** dialog does not ask for a server yet, so on a Proxmox provider create volumes through the API (`POST /api/v1/project/{id}/cloud` with type `VOLUME`). The storage types are the storage profiles your operator publishes for the region; their specs (shared, thin, snapshots, replication) are shown next to each name. If there is only one type, it is selected automatically. The volume starts out empty — format and mount it from inside the guest OS as you would any disk.
 
-Create a standalone data volume with **Create volume** — give it a name, a size in GB, and a storage class. Only classes enabled by the operator for the selected region are available. If there is only one class, it is selected automatically. The volume starts out empty.
+Once it exists, a volume's actions menu lets you:
 
-Once it exists, a volume's actions menu lets you **attach it to a server**, **extend** it (grow the disk), **change its type**, or delete it. After attaching, format and mount it from inside the guest OS as you would any disk.
+- **Extend** it. Disks can only grow; Proxmox can't shrink a disk.
+- **Detach** it. The disk stays with the server as an unused disk, keeps its data, and is still billed.
+- **Attach** it again, to the same server or to another server in your project. Moving a disk to another server works when both servers are on the same node or the storage is shared.
+
+Volumes are deleted together with their server. Delete the server only after you've copied off any data you still need.
 
 ## Snapshots
 
-A **snapshot** (under **Storage → Snapshots**) is a point-in-time copy of a volume. Take one before a risky change so you can roll back, or use it as the basis for a new volume. Snapshots capture the volume as it stands at the moment you create them, so quiesce or unmount the volume first if you need a fully consistent image.
+To capture a server, open its **Snapshots** tab and create a snapshot: ProxCloud clones the whole server into a project image that you can launch new servers from (see [Working with Servers](/docs/guides/servers)).
 
-## File shares
-
-For storage that several servers mount at once, **Storage → File shares** provides shared file systems rather than single-attach block disks — useful when multiple machines need to read and write the same files concurrently.
+Per-volume snapshots are not available on Proxmox providers, so **Storage → Snapshots** stays empty there.

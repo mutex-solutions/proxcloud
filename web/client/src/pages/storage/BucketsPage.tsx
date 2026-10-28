@@ -8,7 +8,6 @@ import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
 import { LoadMore } from "@/components/load-more"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -25,7 +24,7 @@ import {
 import { apiFetch } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
 import { useCloudCursorList, useProjectId } from "@/lib/hooks"
-import { BACKEND_LABEL, bucketBackend, isS3Location, useBucketLocations } from "@/lib/objectstore"
+import { isS3Location, useBucketLocations } from "@/lib/objectstore"
 import type { CloudResource, Location } from "@/lib/types"
 import { BucketSettingsDialog } from "./BucketSettingsDialog"
 
@@ -51,11 +50,8 @@ export default function BucketsPage() {
   const {
     rows: data, isLoading, refetch, isFetching, error, hasNextPage, fetchNextPage, isFetchingNextPage,
   } = useCloudCursorList(pid, "BUCKET")
-  // Swift and S3 are separate stores with separate bucket sets — the user picks which one to create in.
-  const { locations: rawLocations } = useBucketLocations(pid)
-  // Show S3 (Ceph) first and default to it when a project has it: devs reach for S3 far more often than
-  // Swift, and the API array order is not stable. Swift stays available, just second.
-  const locations = [...rawLocations].sort((a, b) => Number(isS3Location(b)) - Number(isS3Location(a)))
+  // Each attached S3 service/region holds its own bucket set — the user picks which one to create in.
+  const { locations } = useBucketLocations(pid)
 
   const [createOpen, setCreateOpen] = useState(false)
   const [name, setName] = useState("")
@@ -115,7 +111,7 @@ export default function BucketsPage() {
       setDeleteTarget(null)
       invalidate()
     },
-    // Both stores refuse to delete a non-empty bucket — surface the API error.
+    // The store refuses to delete a non-empty bucket — surface the API error.
     onError: (e: Error) => toast.error(e.message),
   })
 
@@ -126,14 +122,6 @@ export default function BucketsPage() {
         accessorFn: (r) => bucketName(r),
         header: sortableHeader("Name"),
         cell: ({ getValue }) => <span className="font-medium">{getValue()}</span>,
-      },
-      {
-        id: "storage",
-        accessorFn: (r) => BACKEND_LABEL[bucketBackend(r)],
-        header: sortableHeader("Storage"),
-        cell: ({ row, getValue }) => (
-          <Badge variant={bucketBackend(row.original) === "CEPH_S3" ? "secondary" : "outline"}>{getValue()}</Badge>
-        ),
       },
       {
         id: "objects",
@@ -173,11 +161,9 @@ export default function BucketsPage() {
                   <DropdownMenuItem onClick={() => navigate(`/p/${pid}/object-storage/${r.id}`)}>
                     <FolderOpen className="size-4" /> Browse
                   </DropdownMenuItem>
-                  {bucketBackend(r) === "CEPH_S3" ? (
-                    <DropdownMenuItem onClick={() => setSettingsTarget(r)}>
-                      <Settings className="size-4" /> Settings
-                    </DropdownMenuItem>
-                  ) : null}
+                  <DropdownMenuItem onClick={() => setSettingsTarget(r)}>
+                    <Settings className="size-4" /> Settings
+                  </DropdownMenuItem>
                   <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget(r)}>
                     Delete
                   </DropdownMenuItem>
@@ -198,7 +184,7 @@ export default function BucketsPage() {
         eyebrow="Storage"
         description={
           multipleStores
-            ? "Buckets for storing objects and files. Swift and S3 are separate stores — a bucket lives in one of them."
+            ? "Buckets for storing objects and files. Each S3 location holds its own buckets — a bucket lives in one of them."
             : "Buckets for storing objects and files."
         }
         actions={
@@ -266,14 +252,13 @@ export default function BucketsPage() {
                   <SelectContent>
                     {locations.map((l) => (
                       <SelectItem key={locKeyOf(l)} value={locKeyOf(l)}>
-                        {l.provider === "ceph-s3" ? BACKEND_LABEL.CEPH_S3 : BACKEND_LABEL.SWIFT}
-                        {l.serviceName ? ` — ${l.serviceName}` : ""} ({l.region})
+                        S3 (Ceph){l.serviceName ? ` — ${l.serviceName}` : ""} ({l.region})
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
-                  Swift and S3 hold separate sets of buckets. A bucket cannot be moved between them.
+                  Each location holds a separate set of buckets. A bucket cannot be moved between them.
                 </p>
               </div>
             ) : null}

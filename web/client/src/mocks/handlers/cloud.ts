@@ -2,9 +2,8 @@
 import { on } from "../router"
 import { db } from "../db"
 import {
-  availabilityZones, bucketSettings, dnsRecordsets, flavorCategories,
-  flavors, imageGrouping, lbListeners, lbMonitors, lbPools, publicImages,
-  quotaUsage, s3Credentials, stackEvents, stackResources, volumeTypes,
+  bucketSettings, flavorCategories, flavors, imageGrouping, publicImages,
+  quotaUsage, s3Credentials, volumeTypes,
 } from "../fixtures/cloud"
 import { locations, publicNetworks } from "../fixtures/platform"
 
@@ -68,8 +67,7 @@ on("POST /project/:pid/cloud", ({ params, opts }) => {
   const kindKey: Record<string, string> = {
     SERVER: "server", SERVER_GROUP: "serverGroup", KEYPAIR: "keypair", IMAGE: "image",
     VOLUME: "volume", VOLUME_SNAPSHOT: "volumeSnapshot", NETWORK: "network", SUBNET: "subnet",
-    PORT: "port", ROUTER: "router", SECURITY_GROUP: "securityGroup", LOAD_BALANCER: "loadBalancer",
-    DNS_ZONE: "zone", STACK: "stack", BARBICAN_SECRET: "secret", SHARE: "share",
+    PORT: "port", ROUTER: "router", SECURITY_GROUP: "securityGroup",
   }
   const key = kindKey[body.type]
   const resource = {
@@ -82,7 +80,7 @@ on("POST /project/:pid/cloud", ({ params, opts }) => {
     createdAt: new Date().toISOString(),
     data: {
       ...(body.data ?? {}),
-      ...(key ? { [key]: { id: `os-${id}`, status: "BUILD", ...(body.data ?? {}) } } : {}),
+      ...(key ? { [key]: { id: `vm-${id}`, status: "BUILD", ...(body.data ?? {}) } } : {}),
     },
   }
   // Database clusters cache the snake_case sync shape under data.database (the request body is
@@ -93,7 +91,7 @@ on("POST /project/:pid/cloud", ({ params, opts }) => {
       database: {
         id: `std-${id}`, name, engine: d.engine, version: d.version, replicas: d.replicas ?? 1,
         cpu: d.cpu, memory_gib: d.memoryGiB, storage_gib: d.storageGiB,
-        network_id: d.networkId, subnet_id: d.subnetId, allowed_cidrs: d.allowedCidrs ?? [],
+        allowed_cidrs: d.allowedCidrs ?? [],
         status: "PROGRESSING", sync_status: "Progressing", chart_version: "0.1.0",
         created_at: new Date().toISOString(), endpoint: "", port: dbPorts[d.engine] ?? 5432,
       },
@@ -115,7 +113,6 @@ on("POST /project/:pid/cloud/action", ({ opts }) => {
   switch (action) {
     case "LIST_FLAVORS": return ok(flavors)
     case "PUBLIC_IMAGES": return ok(publicImages)
-    case "LIST_AVAILABILITY_ZONES": return ok(availabilityZones)
     case "LIST_VOLUME_TYPES": return ok(volumeTypes)
     case "LIST_TYPES": return ok(volumeTypes)
     default:
@@ -126,7 +123,7 @@ on("POST /project/:pid/cloud/action", ({ opts }) => {
 
 // --- Per-resource actions ----------------------------------------------------
 
-// Server detail fixtures: instance action log (LIST_EVENTS) + nova console output.
+// Server detail fixtures: instance action log (LIST_EVENTS) + serial console output.
 const serverEvents = [
   { date: "2026-07-10T08:12:00Z", action: "reboot", message: "", requestId: "req-6f2a1c", userId: "usr-dev-001" },
   { date: "2026-06-28T14:03:00Z", action: "stop", message: "", requestId: "req-b81d90", userId: "usr-dev-001" },
@@ -139,7 +136,7 @@ const consoleOutput = [
   "[    1.284712] systemd[1]: Detected virtualization kvm.",
   "[    2.031870] cloud-init[812]: Cloud-init v. 24.1 running 'init' at Thu, 12 Jun 2026 16:30:41 +0000.",
   "[    2.845003] cloud-init[812]: ci-info: | eth0  | True | 10.0.0.11 | 255.255.255.0 | global |",
-  "[    4.190338] cloud-init[1043]: Cloud-init v. 24.1 finished. Datasource DataSourceOpenStack. Up 4.18 seconds",
+  "[    4.190338] cloud-init[1043]: Cloud-init v. 24.1 finished. Datasource DataSourceNoCloud. Up 4.18 seconds",
   "",
   "Ubuntu 24.04 LTS web-01 ttyS0",
   "",
@@ -210,13 +207,6 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     // Volumes
     case "RETYPE": case "EXTEND": return ok()
 
-    // Shares
-    case "EXTEND_SHARE": case "SHRINK_SHARE": return ok()
-    case "LIST_ACCESS":
-      // Manila access rules come back verbatim (snake_case) — one sample rule so the manage sheet has data.
-      return ok([{ id: "rule-1", access_type: "ip", access_to: "10.0.0.0/24", access_level: "rw", state: "active" }])
-    case "GRANT_ACCESS": case "REVOKE_ACCESS": return ok()
-
     // Buckets
     case "LIST_OBJECTS": {
       const folder = data?.folderName
@@ -240,26 +230,8 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
     case "UPDATE": return ok()
     case "ADD_INTERFACE": case "DELETE_INTERFACE":
     case "ADD_EXTERNAL_GATEWAY": case "DELETE_EXTERNAL_GATEWAY": return ok()
-    case "ASSIGN": case "UNASSIGN": return ok()
     case "LIST_RULES": return ok(r?.data?.securityGroup?.security_group_rules ?? [])
     case "ADD_RULE": case "DELETE_RULE": return ok()
-
-    // Load balancers
-    case "GET_LISTENERS": return ok(lbListeners)
-    case "GET_POOLS": return ok(lbPools)
-    case "GET_MONITORS": return ok(lbMonitors)
-    case "CREATE_LISTENER": case "DELETE_LISTENER": case "CREATE_POOL": case "DELETE_POOL":
-    case "ADD_MEMBER": case "DELETE_MEMBER": case "ADD_MONITOR": case "DELETE_MONITOR": return ok()
-
-    // DNS
-    case "GET_RECORDSETS": return ok(dnsRecordsets)
-    case "CREATE_RECORDSET": case "DELETE_RECORDSET": return ok()
-
-    // Stacks
-    case "SUSPEND_STACK": case "RESUME_STACK": return ok()
-    case "GET_TEMPLATE": return ok({ template: "heat_template_version: 2021-04-16\nresources: {}\n" })
-    case "LIST_STACK_EVENTS": return ok(stackEvents)
-    case "LIST_RESOURCES": return ok(stackResources)
 
     default:
       console.warn(`[mock] unknown resource action ${action}`)
@@ -269,8 +241,6 @@ on("POST /project/:pid/cloud/:resourceId/action", ({ params, opts }) => {
 
 // --- Misc cloud endpoints -----------------------------------------------------
 
-on("PUT /project/:pid/cloud/:resourceId/metadata", () => ({ data: {} }))
-on("POST /project/:pid/image/:imageId/upload", () => ({ data: {} }))
 on("POST /project/:pid/cloud/:resourceId/upload-bucket-file", ({ query }) => {
   const name = query.get("objectName") ?? "upload.bin"
   db.bucketObjects.push({ name, displayName: name.split("/").pop() ?? name, sizeInBytes: 1024, mimeType: "application/octet-stream", directory: false, lastModified: new Date().toISOString() })

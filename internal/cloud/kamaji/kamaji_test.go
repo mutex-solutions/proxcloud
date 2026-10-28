@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
 )
 
 func testCfg() Config {
@@ -15,16 +14,13 @@ func testCfg() Config {
 		ArgoNamespace: "argocd",
 		ArgoProject:   "proxcloud-k8s",
 		ChartRepo:     "ghcr.io/mutex-solutions/charts",
-		ChartName:     "openstack-kamaji-cluster",
+		ChartName:     "kamaji-cluster",
 		ChartVersion:  "0.2.3",
 		Defaults: ClusterDefaults{
-			DataStoreName:      "default",
-			FloatingNetworkID:  "fnet-1",
-			ExternalNetworkID:  "ext-1",
-			DNSZone:            "k8s.example.com",
-			Versions:           map[string]string{"1.35.4": "img-1354", "1.34.2": "img-1342"},
-			RootVolumeGiB:      120,
-			SupportKeypairName: "proxcloud-support",
+			DataStoreName: "default",
+			DNSZone:       "k8s.example.com",
+			Versions:      map[string]string{"1.35.4": "img-1354", "1.34.2": "img-1342"},
+			RootVolumeGiB: 120,
 		},
 	}
 }
@@ -35,7 +31,7 @@ func testSpec() ClusterSpec {
 		OIDC:         map[string]string{"issuerUrl": "https://idp.example.com", "clientId": "kube"},
 		AllowedCIDRs: []string{"10.0.0.0/8", "1.2.3.4/32"},
 		NodeGroups: []NodeGroup{
-			{Name: "workers", FlavorID: "m5.large", Count: 3, ServerGroupID: "sg-1",
+			{Name: "workers", FlavorID: "m5.large", Count: 3,
 				Labels: map[string]string{"tier": "app"}, Taints: []string{"gpu=true:NoSchedule"}},
 			{Name: "burst", FlavorID: "m5.xlarge", Autoscale: true, Min: 1, Max: 5, RootVolumeGiB: 200},
 		},
@@ -89,7 +85,8 @@ func TestSpecValidate(t *testing.T) {
 	if err := bad.Validate(d); err == nil {
 		t.Error("taint without an effect: want error")
 	}
-	// Nodes boot from a volume; with no size anywhere the chart would build a machine nova refuses.
+	// Every node gets a sized root disk; with no size anywhere the chart would build a machine the
+	// hypervisor refuses.
 	noDisk := d
 	noDisk.RootVolumeGiB = 0
 	if err := testSpec().Validate(noDisk); err == nil {
@@ -123,9 +120,6 @@ func TestNames(t *testing.T) {
 	if got := AdminKubeconfigSecretName("stc-abcd1234"); got != "stc-abcd1234-kamaji-cp-admin-kubeconfig" {
 		t.Errorf("AdminKubeconfigSecretName = %s", got)
 	}
-	if got := ServerGroupName("stc-abcd1234", "workers"); got != "stc-abcd1234-workers" {
-		t.Errorf("ServerGroupName = %s", got)
-	}
 }
 
 func TestBuildValues(t *testing.T) {
@@ -140,10 +134,10 @@ func TestBuildValues(t *testing.T) {
 		t.Errorf("HA replicas = %v", cp["replicas"])
 	}
 	net := cp["network"].(map[string]any)
-	ann := net["serviceAnnotations"].(map[string]any)
-	if ann["loadbalancer.openstack.org/allowed-cidrs"] != "10.0.0.0/8,1.2.3.4/32" {
-		t.Errorf("allowed-cidrs = %v", ann["loadbalancer.openstack.org/allowed-cidrs"])
+	if src := net["loadBalancerSourceRanges"].([]any); len(src) != 2 || src[0] != "10.0.0.0/8" || src[1] != "1.2.3.4/32" {
+		t.Errorf("loadBalancerSourceRanges = %v", src)
 	}
+	ann := net["serviceAnnotations"].(map[string]any)
 	if ann["external-dns.alpha.kubernetes.io/hostname"] != "stc-abcd1234.k8s.example.com" {
 		t.Errorf("hostname = %v", ann["external-dns.alpha.kubernetes.io/hostname"])
 	}
@@ -151,16 +145,9 @@ func TestBuildValues(t *testing.T) {
 	if oidc["issuerUrl"] != "https://idp.example.com" || oidc["clientId"] != "kube" {
 		t.Errorf("oidc = %v", oidc)
 	}
-	if v["machineSSHKeyName"] != "proxcloud-support" {
-		t.Errorf("machineSSHKeyName = %v", v["machineSSHKeyName"])
-	}
-	// Dedicated network (no BYO ids): only the provider-default external network, no internalNetwork.
-	cn := v["clusterNetworking"].(map[string]any)
-	if cn["externalNetworkId"] != "ext-1" {
-		t.Errorf("default externalNetworkId = %v", cn["externalNetworkId"])
-	}
-	if _, has := cn["internalNetwork"]; has {
-		t.Error("dedicated cluster must not carry an internalNetwork")
+	// Dedicated network (no BYO ids): no clusterNetworking block at all.
+	if _, has := v["clusterNetworking"]; has {
+		t.Error("dedicated cluster must not carry a clusterNetworking block")
 	}
 	groups := v["nodeGroups"].([]any)
 	if len(groups) != 2 {
@@ -168,15 +155,13 @@ func TestBuildValues(t *testing.T) {
 	}
 
 	// The chart `fail`s the render on a missing/misspelled node-group key rather than defaulting, so
-	// these names ARE the contract with deploy/charts/openstack-kamaji-cluster. Verified by rendering
-	// this output with `helm template`; if the chart moves a key, it moves here and nowhere else.
+	// these names ARE the contract with the cluster chart; if the chart moves a key, it moves here
+	// and nowhere else.
 	g0 := groups[0].(map[string]any)
 	for key, want := range map[string]any{
-		"name":            "workers",
-		"machineFlavor":   "m5.large",
-		"machineFlavorId": "m5.large", // the id lands in the chart's flavorID (a name lookup fails on a uuid)
-		"machineImageId":  "img-1354", // resolved from the version matrix
-		"serverGroupId":   "sg-1",
+		"name":           "workers",
+		"machineFlavor":  "m5.large",
+		"machineImageId": "img-1354", // resolved from the version matrix
 		// Fixed group: count == min == max, autoscale false.
 		"autoscale":       false,
 		"machineCount":    3,
@@ -215,9 +200,8 @@ func TestBuildValues(t *testing.T) {
 	if tag := dig(v, "autoscaler", "image", "tag"); tag != "v1.35.0" {
 		t.Errorf("autoscaler tag = %v", tag)
 	}
-	// The addons block is the CHART's business now (deploy/charts) — proxcloud must not send one, and
-	// in particular must not re-enable the in-cluster OpenStack addons, which would push the
-	// cluster's clouds.yaml into the workload cluster.
+	// The addons block is the CHART's business — proxcloud must not send one without customer
+	// picks, and in particular must never push the cloud credential into the workload cluster.
 	if _, has := v["addons"]; has {
 		t.Error("BuildValues must not generate an addons block")
 	}
@@ -328,10 +312,10 @@ func TestClusterAddons(t *testing.T) {
 		addons["metricsServer"].(map[string]any)["enabled"] != false {
 		t.Errorf("addons = %v", addons)
 	}
-	// The openstack credential-push toggle must never be client-reachable.
+	// An add-on outside the allowlist is rejected.
 	if err := (func() error {
 		s := testSpec()
-		s.Addons = map[string]bool{"openstack": true}
+		s.Addons = map[string]bool{"credentialPush": true}
 		return s.Validate(testCfg().Defaults)
 	})(); err == nil || !strings.Contains(err.Error(), "add-on") {
 		t.Errorf("unknown addon: err = %v", err)
@@ -344,30 +328,8 @@ func TestClusterAddons(t *testing.T) {
 		t.Error("no picks must render no addons block")
 	}
 
-	// The credential-push storage leg is GONE: storage ships chart-side (split CSI), so proxcloud
-	// must never render addons.openstack — with or without an appcred (plan D7).
-	withCred := testSpec()
-	withCred.AppCredID = "cred-1"
-	if _, has := BuildValues(testCfg(), withCred)["addons"]; has {
-		t.Error("an appcred must not render an addons block either")
-	}
-	if av := AddonValues(nil, ""); len(av) != 0 {
+	if av := AddonValues(nil); len(av) != 0 {
 		t.Errorf("no picks: %v", av)
-	}
-
-	// The provider's storage volume type rides under the proxcloud-owned csiCinderNode key —
-	// off the curated menu, so the client can neither set nor clear it.
-	cfg := testCfg()
-	cfg.Defaults.StorageVolumeType = "multiattach"
-	sc := BuildValues(cfg, testSpec())["addons"].(map[string]any)["csiCinderNode"].(map[string]any)["defaultStorageClass"].(map[string]any)
-	if sc["volumeType"] != "multiattach" || sc["name"] != "multiattach" {
-		t.Errorf("storage class override = %v (the class is NAMED after the volume type)", sc)
-	}
-	if StorageClassName("") != "csi-cinder" || StorageClassName("multiattach") != "multiattach" {
-		t.Error("StorageClassName mapping")
-	}
-	if _, ok := ClusterAddons["csiCinderNode"]; ok {
-		t.Error("csiCinderNode must stay off the curated menu")
 	}
 
 	// The menu's defaults are a CONTRACT: they must mirror the chart's effective defaults (and
@@ -392,13 +354,9 @@ func TestBuildValuesBYONetwork(t *testing.T) {
 	cfg := testCfg()
 	spec := testSpec()
 	spec.NetworkID, spec.SubnetID = "net-9", "sub-9"
-	spec.ExternalNetworkID = "ext-per-cluster" // derived at create; overrides the provider default
 	v := BuildValues(cfg, spec)
 
 	cn := v["clusterNetworking"].(map[string]any)
-	if cn["externalNetworkId"] != "ext-per-cluster" {
-		t.Errorf("per-cluster externalNetworkId must win: %v", cn["externalNetworkId"])
-	}
 	in := cn["internalNetwork"].(map[string]any)
 	// Ids only, under networkFilter/subnetFilter — the exact shape the chart's BYO branch reads
 	// (and the shape that, mis-rendered as {id: nil}, caused the 0.4.0 unprovisionable bug).
@@ -457,6 +415,7 @@ func TestBuildApplication(t *testing.T) {
 		t.Errorf("destination ns = %v", dst["namespace"])
 	}
 }
+
 type fakeAPI struct {
 	namespaces map[string]map[string]string
 	secrets    map[string]map[string]string // ns/name → stringData
@@ -622,7 +581,7 @@ func TestServiceCreateDelete(t *testing.T) {
 	svc := NewWithAPI(api, testCfg(), "svc-1")
 	ctx := context.Background()
 
-	data, err := svc.CreateCluster(ctx, testSpec(), "clouds: {}")
+	data, err := svc.CreateCluster(ctx, testSpec(), map[string]string{"token": "t"})
 	if err != nil {
 		t.Fatalf("CreateCluster: %v", err)
 	}
@@ -630,7 +589,7 @@ func TestServiceCreateDelete(t *testing.T) {
 		t.Error("namespace not ensured")
 	}
 	sd := api.secrets["pc-p1/stc-abcd1234-cloud-config"]
-	if sd == nil || sd["clouds.yaml"] != "clouds: {}" {
+	if sd == nil || sd["token"] != "t" {
 		t.Errorf("cloud-config secret = %v", sd)
 	}
 	if api.apps["argocd/stc-abcd1234"] == nil {
@@ -647,10 +606,10 @@ func TestServiceCreateDelete(t *testing.T) {
 	if len(api.apps) != 0 {
 		t.Error("delete left the application behind")
 	}
-	// The clouds.yaml secret must SURVIVE the cluster delete — CAPO/OCCM need it while the
-	// ArgoCD cascade deletes the worker VMs / LB. FinalizeOrphans reaps it afterwards.
+	// The credentials secret must SURVIVE the cluster delete — the infrastructure provider needs
+	// it while the ArgoCD cascade deletes the worker VMs. FinalizeOrphans reaps it afterwards.
 	if len(api.secrets) != 1 {
-		t.Error("clouds.yaml secret must outlive the application delete")
+		t.Error("credentials secret must outlive the application delete")
 	}
 	// Idempotent: deleting again is fine.
 	if err := svc.DeleteCluster(ctx, "p1", "stc-abcd1234"); err != nil {
@@ -663,21 +622,15 @@ func TestFinalizeOrphans(t *testing.T) {
 	svc := NewWithAPI(api, testCfg(), "svc-1")
 	ctx := context.Background()
 	spec := testSpec()
-	spec.AppCredID, spec.AppCredUserID, spec.AppCredServiceID = "cred-1", "user-1", "svc-os"
-	if _, err := svc.CreateCluster(ctx, spec, "clouds: {}"); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec, nil); err != nil {
 		t.Fatal(err)
-	}
-	var revoked []string
-	revoke := func(_ context.Context, osSvcID, userID, credID string) error {
-		revoked = append(revoked, osSvcID+"/"+userID+"/"+credID)
-		return nil
 	}
 
 	// Cluster still alive → nothing happens.
-	if _, err := svc.FinalizeOrphans(ctx, "p1", revoke); err != nil {
+	if _, err := svc.FinalizeOrphans(ctx, "p1"); err != nil {
 		t.Fatalf("FinalizeOrphans (live): %v", err)
 	}
-	if len(revoked) != 0 || len(api.secrets) != 1 {
+	if len(api.secrets) != 1 {
 		t.Fatal("live cluster must not be finalized")
 	}
 
@@ -687,11 +640,11 @@ func TestFinalizeOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	api.tcps["pc-p1/"+ControlPlaneName(spec.ID)] = map[string]any{"metadata": map[string]any{"name": ControlPlaneName(spec.ID)}}
-	pending, err := svc.FinalizeOrphans(ctx, "p1", revoke)
+	pending, err := svc.FinalizeOrphans(ctx, "p1")
 	if err != nil {
 		t.Fatalf("FinalizeOrphans (cascade): %v", err)
 	}
-	if pending != 1 || len(revoked) != 0 || len(api.secrets) != 1 {
+	if pending != 1 || len(api.secrets) != 1 {
 		t.Fatalf("in-flight cascade must stay pending (pending=%d)", pending)
 	}
 
@@ -700,22 +653,19 @@ func TestFinalizeOrphans(t *testing.T) {
 	delete(api.tcps, "pc-p1/"+ControlPlaneName(spec.ID))
 	meta := api.secretObjs["pc-p1/"+CloudSecretName(spec.ID)]["metadata"].(map[string]any)
 	meta["creationTimestamp"] = time.Now().UTC().Format(time.RFC3339)
-	pending, err = svc.FinalizeOrphans(ctx, "p1", revoke)
+	pending, err = svc.FinalizeOrphans(ctx, "p1")
 	if err != nil {
 		t.Fatalf("FinalizeOrphans (grace): %v", err)
 	}
-	if pending != 1 || len(revoked) != 0 || len(api.secrets) != 1 {
+	if pending != 1 || len(api.secrets) != 1 {
 		t.Fatalf("fresh secret must ride out the grace window (pending=%d)", pending)
 	}
 
-	// Cascade done (TCP gone, secret old) → appcred revoked (annotations incl. minting service),
-	// secret deleted, and the now-empty managed namespace GC'd.
+	// Cascade done (TCP gone, secret old) → secret deleted, and the now-empty managed namespace
+	// GC'd.
 	meta["creationTimestamp"] = time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
-	if _, err := svc.FinalizeOrphans(ctx, "p1", revoke); err != nil {
+	if _, err := svc.FinalizeOrphans(ctx, "p1"); err != nil {
 		t.Fatalf("FinalizeOrphans (done): %v", err)
-	}
-	if len(revoked) != 1 || revoked[0] != "svc-os/user-1/cred-1" {
-		t.Errorf("revoked = %v", revoked)
 	}
 	if len(api.secrets) != 0 {
 		t.Error("orphan secret not reaped")
@@ -728,40 +678,17 @@ func TestFinalizeOrphans(t *testing.T) {
 	// cluster's leftovers finalize through FinalizeAllOrphans without any project doc.
 	spec2 := testSpec()
 	spec2.ID = "stc-second01"
-	spec2.AppCredID, spec2.AppCredUserID, spec2.AppCredServiceID = "cred-2", "user-1", "svc-os"
-	if _, err := svc.CreateCluster(ctx, spec2, "clouds: {}"); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec2, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.DeleteCluster(ctx, "p1", spec2.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.FinalizeAllOrphans(ctx, revoke); err != nil {
+	if _, err := svc.FinalizeAllOrphans(ctx); err != nil {
 		t.Fatalf("FinalizeAllOrphans: %v", err)
-	}
-	if len(revoked) != 2 || revoked[1] != "svc-os/user-1/cred-2" {
-		t.Errorf("sweep revoked = %v", revoked)
 	}
 	if len(api.secrets) != 0 {
 		t.Error("sweep left the orphan secret")
-	}
-
-	// Fail-closed: a failing revoker keeps the secret (the only revocation record).
-	spec3 := testSpec()
-	spec3.ID = "stc-third002"
-	spec3.AppCredID, spec3.AppCredUserID, spec3.AppCredServiceID = "cred-3", "user-1", "svc-os"
-	if _, err := svc.CreateCluster(ctx, spec3, "clouds: {}"); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.DeleteCluster(ctx, "p1", spec3.ID); err != nil {
-		t.Fatal(err)
-	}
-	failing := func(_ context.Context, _, _, _ string) error { return context.DeadlineExceeded }
-	pending, err = svc.FinalizeOrphans(ctx, "p1", failing)
-	if err == nil || pending != 1 {
-		t.Errorf("failing revoker: want pending=1 + error, got pending=%d err=%v", pending, err)
-	}
-	if len(api.secrets) != 1 {
-		t.Error("failing revoker must keep the revocation record")
 	}
 }
 
@@ -925,7 +852,7 @@ func TestPatchClusterValuesUpgrade(t *testing.T) {
 	svc := NewWithAPI(api, cfg, "svc-1")
 	ctx := context.Background()
 	spec := testSpec()
-	if _, err := svc.CreateCluster(ctx, spec, "clouds: {}"); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -973,7 +900,7 @@ func TestSetChartVersionAndPins(t *testing.T) {
 	svc := NewWithAPI(api, testCfg(), "svc-1")
 	ctx := context.Background()
 	spec := testSpec()
-	if _, err := svc.CreateCluster(ctx, spec, "clouds: {}"); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec, nil); err != nil {
 		t.Fatal(err)
 	}
 	pins, err := svc.ListClusterPins(ctx)
@@ -996,24 +923,6 @@ func TestSetChartVersionAndPins(t *testing.T) {
 	if err := svc.SetChartVersion(ctx, spec.ID, ""); err == nil {
 		t.Error("blank version must error")
 	}
-
-	// A legacy credential-push storage leg (addons.openstack) is scrubbed by the platform
-	// update — the same bump that brings the split CSI stops pushing the credential.
-	values := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
-	values["addons"] = map[string]any{
-		"openstack":     map[string]any{"enabled": true},
-		"metricsServer": map[string]any{"enabled": true},
-	}
-	if err := svc.SetChartVersion(ctx, spec.ID, "1.0.1"); err != nil {
-		t.Fatal(err)
-	}
-	addons := dig(api.apps["argocd/"+spec.ID], "spec", "source", "helm", "valuesObject", "addons").(map[string]any)
-	if _, has := addons["openstack"]; has {
-		t.Error("platform update must scrub the legacy credential-push leg")
-	}
-	if _, has := addons["metricsServer"]; !has {
-		t.Error("customer picks must survive the scrub")
-	}
 }
 
 func TestSyncProviderList(t *testing.T) {
@@ -1022,7 +931,7 @@ func TestSyncProviderList(t *testing.T) {
 	svc := NewWithAPI(api, cfg, "svc-1")
 	ctx := context.Background()
 	spec := testSpec()
-	if _, err := svc.CreateCluster(ctx, spec, "clouds: {}"); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Enrich the fake with live status: argo health + TCP endpoint + one MD.

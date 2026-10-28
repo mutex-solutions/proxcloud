@@ -44,7 +44,7 @@ capabilities to AI agents.
 ## Contents
 
 - [Features](#-features)
-- [Architecture at a glance](#-architecture-at-a-glance)
+- [Architecture overview](#-architecture-overview)
 - [Quickstart](#-quickstart)
 - [Repository layout](#-repository-layout)
 - [Tech stack](#-tech-stack)
@@ -55,7 +55,7 @@ capabilities to AI agents.
 
 ## ✨ Features
 
-- **Self-service cloud** — provision and manage instances, volumes, networks, floating IPs, load balancers, object storage and shares against one or more Proxmox VE clusters, plus S3 object storage on Ceph RGW (buckets, per-key access, static websites).
+- **Self-service cloud** — provision and manage servers, volumes, private networks (SDN), security groups, public IPs, project templates and keypairs on one or more Proxmox VE clusters, plus S3 object storage on Ceph RGW (buckets, per-key access, static websites).
 - **Usage-based billing** — metered consumption rated against configurable price plans, resource types, currencies and tax rules.
 - **Invoicing & payments** — automated invoices, account credits, card and bank-transfer payments (Stripe), and automated suspension for overdue accounts.
 - **Savings plans & promotions** — commitment discounts, promotional credits, and sign-up bonuses.
@@ -64,27 +64,30 @@ capabilities to AI agents.
 - **MCP server** — a Model Context Protocol endpoint so AI agents can drive the platform with the same auth and permissions as a user or operator.
 - **Identity via OIDC** — Keycloak or any OpenID Connect provider, browser sign-in over authorization-code + PKCE.
 
-## 🧭 Architecture at a glance
+## 🧭 Architecture overview
 
 ```mermaid
 flowchart LR
-  subgraph clients[Browsers & agents]
+  subgraph clients["Browsers and agents"]
     C["web/client<br/>Customer console"]
     A["web/admin<br/>Operator console"]
-    G["AI agents"]
+    G["AI agents<br/>MCP"]
+    M["Automation<br/>SigV4"]
   end
-
-  C -->|/api/v1| API
-  A -->|/admin-api/v1 · SigV4| API
-  G -->|/mcp| API
-
-  API["ProxCloud API<br/>Go · chi router"]
-
+  C -->|"/api/v1"| API
+  A -->|"/api/v1/admin"| API
+  G -->|"/mcp"| API
+  M -->|"/admin-api/v1"| API
+  API["ProxCloud API<br/>Go, chi router"]
   API --> DB[("PostgreSQL")]
   API --> MQ[("RabbitMQ")]
   API --> KC["Keycloak / OIDC"]
-  API --> OS["OpenStack region(s)<br/>Keystone · Nova · Neutron · Cinder · …"]
+  API -->|"REST :8006, API token"| PVE["Proxmox VE cluster(s)<br/>API, SDN, firewall, storage"]
+  API -->|"RGW Admin Ops and S3"| RGW["Ceph S3 (RGW)<br/>object storage"]
 ```
+
+Full context and container views: [C1 context](docs/architecture/c4/c1-context.md)
+and [C2 containers](docs/architecture/c4/c2-containers.md).
 
 One Go process serves all three HTTP surfaces on port `8080` and runs scheduled
 jobs (billing, sync, metrics) internally; a separate management port (`8081`)
@@ -94,7 +97,7 @@ exposes health and operational triggers.
 
 ### Local (Docker Compose)
 
-Brings up the API + both SPAs + PostgreSQL + RabbitMQ:
+Brings up the API + both SPAs + PostgreSQL + RabbitMQ + a dev Keycloak:
 
 ```sh
 docker compose up --build
@@ -106,10 +109,9 @@ docker compose up --build
 | Customer console | `http://localhost:8082` |
 | Operator console | `http://localhost:8083` |
 
-Auth-gated and cloud routes need an external OIDC issuer and an OpenStack region.
-Put `PROXCLOUD_OAUTH2_*` and `OS_*` values in a `.env` file (see
-`docker-compose.yml` for the keys) — without them the app runs but those routes
-stay dark.
+Auth-gated routes need an OIDC issuer (Compose bundles Keycloak on `:8090`); cloud
+routes need a Proxmox provider registered in the operator console (System → Cloud
+providers). Without them the app runs but those routes stay dark.
 
 ### Kubernetes (Helm)
 
@@ -132,7 +134,7 @@ external PostgreSQL/OIDC wiring, and ingress / Gateway API exposure.
 |------|----------|
 | `cmd/api` | Service entrypoint — HTTP servers + background jobs |
 | `internal/platform` | Business domains: `account`, `org`, `project`, `billing`, `payment`, `pricing`, `catalog`, `order`, `promotion`, `rbac`, `admin`, `adminapi`, `mcp`, `scheduler`, … |
-| `internal/cloud` | OpenStack providers, resource sync, usage metrics, notifications |
+| `internal/cloud` | Proxmox VE client and services (`pve`), resource cache and sync, Ceph RGW object store, usage metrics, managed K8s/DBaaS, cloud→billing bridge |
 | `internal/{config,server,amqp,oidc,pgdoc,health}` | Wiring: config, HTTP server, messaging, auth, Postgres store, health |
 | `pkg` | Reusable libraries: `auth`, `httpx`, `money`, `textcrypt`, `audit` |
 | `deploy` | `Dockerfile`, Helm chart (`chart`), seed data |
@@ -144,7 +146,7 @@ external PostgreSQL/OIDC wiring, and ingress / Gateway API exposure.
 
 ## 🧰 Tech stack
 
-- **Backend** — Go 1.25, [chi](https://github.com/go-chi/chi) router, PostgreSQL (jsonb document store via [pgx](https://github.com/jackc/pgx)), RabbitMQ, [gophercloud](https://github.com/gophercloud/gophercloud) for OpenStack, Stripe, the [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk), and [koanf](https://github.com/knadh/koanf) config (env + `application.yml`).
+- **Backend** — Go 1.25, [chi](https://github.com/go-chi/chi) router, PostgreSQL (jsonb document store via [pgx](https://github.com/jackc/pgx)), RabbitMQ, a Proxmox VE REST client (`internal/cloud/pve`), aws-sdk-go-v2 for S3, Stripe, the [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk), and [koanf](https://github.com/knadh/koanf) config (env + `application.yml`).
 - **Frontends** — React 19 + Vite + TypeScript, Tailwind CSS v4, shadcn/ui + Radix, TanStack Query, and `react-oidc-context` (authorization-code + PKCE).
 - **Identity** — Keycloak or any OIDC provider.
 
@@ -157,7 +159,7 @@ external PostgreSQL/OIDC wiring, and ingress / Gateway API exposure.
 - [Authentication](docs/auth.md) — OIDC resource server, realms, SigV4 admin keys, MCP auth.
 - [API overview](docs/api.md) — the `/api/v1`, `/admin-api/v1`, and `/mcp` surfaces + conventions.
 - [Billing](docs/billing.md) — pricing, accrual, bills, transactions, savings, suspension.
-- [Cloud integration](docs/cloud-integration.md) — OpenStack providers, resource sync, metrics.
+- [Cloud integration](docs/cloud-integration.md) — Proxmox VE providers, resource cache and sync, metrics, Ceph S3.
 - [Jobs & scheduling](docs/jobs-scheduling.md) — the scheduler, distributed locking, charge fan-out.
 - [Configuration](docs/configuration.md) — env / `application.yml` / Helm values reference.
 - [Development](docs/development.md) · [Testing](docs/testing.md) · [Glossary](docs/glossary.md) · [Decision records](docs/adr/).

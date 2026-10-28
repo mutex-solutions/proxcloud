@@ -12,7 +12,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/feature"
@@ -33,7 +32,7 @@ func emptyCostInfo(zero json.Number) map[string]any {
 }
 
 // initUI returns {id, menu, kycRequests}. The menu = base
-// provider items (greenfield: none) + the OpenStack service items derived from every non-disabled
+// provider items (admin Custom Menu) + the cloud service items derived from every non-disabled
 // CLOUD externalService's config.services (keyed by serviceName, {newMenuItem:false, enabled}).
 // KYC requests are empty (no KYC integration). Project-membership-gated.
 func (h *Handler) initUI(w http.ResponseWriter, r *http.Request) {
@@ -54,13 +53,11 @@ func (h *Handler) initUI(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// uiMenuItems builds the OpenStack menu items: for each non-disabled OpenStack CLOUD
-// service, add a menu item per service-name that has at least one enabled region. Shared services
-// disable container-infra/object-store/orchestration.
+// uiMenuItems builds the service menu items: for each non-disabled CLOUD service, add a menu
+// item per service-name that has at least one enabled region.
 func (h *Handler) uiMenuItems(r *http.Request) map[string]any {
 	// Base provider items first (admin Custom Menu docs, the "More" section);
-	// OpenStack service items are merged AFTER and overwrite colliding slugs
-	// (base providers first, then the openstack items).
+	// service items are merged AFTER and overwrite colliding slugs.
 	items := map[string]any{}
 	if h.customMenu != nil {
 		items = h.customMenu.Items(r.Context())
@@ -74,11 +71,11 @@ func (h *Handler) uiMenuItems(r *http.Request) map[string]any {
 	}
 	for i := range services {
 		es := &services[i]
-		// OpenStack (compute/network/… + Swift object-store), ceph-s3 (object-store only),
-		// kamaji (kubernetes only) AND dbaas (database only) all contribute menu items — a
-		// ceph-only project must still get its Object Storage entry, and the kamaji/dbaas slugs
-		// are what un-hide the client Kubernetes/Databases nav (AppShell gates on menu.items).
-		if es.IsDisabled() || (es.Provider() != "openstack" && !es.IsCephS3() && !es.IsKamaji() && !es.IsDbaas() && !es.IsProxmox()) {
+		// Proxmox (compute/network/…), ceph-s3 (object-store only), kamaji (kubernetes only)
+		// AND dbaas (database only) all contribute menu items — a ceph-only project must still
+		// get its Object Storage entry, and the kamaji/dbaas slugs are what un-hide the client
+		// Kubernetes/Databases nav (AppShell gates on menu.items).
+		if es.IsDisabled() || (!es.IsCephS3() && !es.IsKamaji() && !es.IsDbaas() && !es.IsProxmox()) {
 			continue
 		}
 		svcMap, _ := es.Config["services"].(map[string]any)
@@ -96,17 +93,10 @@ func (h *Handler) uiMenuItems(r *http.Request) map[string]any {
 			}
 			if v, exists := items[name]; exists {
 				if m, ok := v.(map[string]any); !ok || m["newMenuItem"] != true {
-					continue // first openstack service wins; custom slugs get overwritten
+					continue // first service wins; custom slugs get overwritten
 				}
 			}
-			enabled := true
-			if es.Shared() {
-				switch name {
-				case "container-infra", "object-store", "orchestration":
-					enabled = false
-				}
-			}
-			items[name] = map[string]any{"newMenuItem": false, "enabled": enabled}
+			items[name] = map[string]any{"newMenuItem": false, "enabled": true}
 		}
 	}
 	return items
@@ -136,7 +126,7 @@ func (h *Handler) projectServices(w http.ResponseWriter, r *http.Request) {
 }
 
 // serviceOfProject loads an external service that must be ATTACHED to the project: an unknown or
-// unattached service → 404 "Service not found: {id}". Shared by the by-id read + the auth endpoint.
+// unattached service → 404 "Service not found: {id}".
 func (h *Handler) serviceOfProject(w http.ResponseWriter, r *http.Request, p *Project, svcID string) (*externalservice.ExternalService, bool) {
 	if !p.HasService(svcID) {
 		h.fail(w, httpx.NotFound("Service not found: "+svcID))
@@ -155,7 +145,7 @@ func (h *Handler) serviceOfProject(w http.ResponseWriter, r *http.Request, p *Pr
 }
 
 // projectServiceByID handles GET /{projectId}/service/{serviceId}. Only the entity's top-level
-// id/name/type/status bind (config never flattens), so vhi/shared are always false and the
+// id/name/type/status bind (config never flattens), so shared is always false and the
 // config-derived DTO fields stay null → dropped as null. Note: this by-id read is THIN, unlike
 // the list's config-derived DTO (externalServiceDto).
 func (h *Handler) projectServiceByID(w http.ResponseWriter, r *http.Request) {
@@ -174,39 +164,8 @@ func (h *Handler) projectServiceByID(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.OK(w, map[string]any{
 		"id": es.ID, "name": es.Name, "type": es.Type, "status": es.Status,
-		"vhi": false, "shared": false,
+		"shared": false,
 	})
-}
-
-// projectServiceAuth handles POST /{projectId}/service/{serviceId}/auth:
-// a shared config can't be user-authenticated (400), else the USER's keystone credentials are
-// authenticated scoped to the project's externalProjectId — bad creds → 400 with the translated
-// message. All cloud calls run through admin-scoped tenant clients, so a successful check
-// returns 200 with nothing persisted.
-// ponytail: no user-token store — add one only if user-scoped cloud calls are ever needed.
-func (h *Handler) projectServiceAuth(w http.ResponseWriter, r *http.Request) {
-	u, ok := h.principal(w, r)
-	if !ok {
-		return
-	}
-	p, err := h.svc.GetProject(r.Context(), u.Sub, chi.URLParam(r, "projectId"))
-	if err != nil {
-		h.fail(w, err)
-		return
-	}
-	svcID := chi.URLParam(r, "serviceType")
-	es, ok := h.serviceOfProject(w, r, p, svcID)
-	if !ok {
-		return
-	}
-	if es.Shared() {
-		h.fail(w, httpx.BadRequest("Shared openstack service can not be authenticated "))
-		return
-	}
-	// The keystone credential check died with the OpenStack backend; no per-user
-	// cloud credential exists on this fork.
-	_ = svcID
-	h.fail(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "Service authentication is not available on this provider"))
 }
 
 // projectCostInfo handles GET /{id}/cost-info: the project's billing-usage overview. Live
@@ -307,7 +266,7 @@ func (h *Handler) projectLocations(w http.ResponseWriter, r *http.Request) {
 		}
 		regions, _ := es.Config["regions"].(map[string]any)
 		// A ceph-s3 provider is configured with a single config.region (its RGW zonegroup) rather than the
-		// OpenStack regions map. Without this the Location picker is empty and the create-bucket form can
+		// regions map. Without this the Location picker is empty and the create-bucket form can
 		// never send the x-service-id / x-region-id the write path needs.
 		if len(regions) == 0 && es.IsCephS3() {
 			if r := es.CephRegion(); r != "" {
@@ -349,19 +308,8 @@ func (h *Handler) instanceMetadataOptions(w http.ResponseWriter, r *http.Request
 // pricingSingle / pricingTypes live in clientpricing.go — they rate the FE's
 // BillingResource(s) against the project's price plans.
 
-// projectServiceDetails returns the OpenStack domain/project ids for the project on a given service
-// (headers x-service-id/x-region-id). Live Keystone read; deferred until bootstrap wires the
-// project's externalProjectId. Returns an empty shape pre-bootstrap.
-func (h *Handler) projectServiceDetails(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.principal(w, r); !ok {
-		return
-	}
-	httpx.OK(w, map[string]any{})
-}
-
-// projectInit handles POST /{id}/init: for each attached non-shared service, an unscoped Keystone
-// token is fetched and 307+authRedirect returned when SSO is required. With no attached services
-// there is nothing to authorize → OK (empty). Bootstrap-time SSO is deferred.
+// projectInit handles POST /{id}/init: entry into a project bootstraps it onto its attached
+// services (idempotent) → OK (empty).
 func (h *Handler) projectInit(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
@@ -372,9 +320,8 @@ func (h *Handler) projectInit(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	// Entry into a project provisions its OpenStack tenant + ENABLEs (the cloud-bootstrap slice of
-	// project bootstrap) and ensures the admin role grant on the tenant.
-	// Idempotent — safe to call on an already-bootstrapped project.
+	// Entry into a project provisions it on its services (PVE pool, RGW user, …) + ENABLEs (the
+	// cloud-bootstrap slice of project bootstrap). Idempotent — safe on a bootstrapped project.
 	if err := h.enableAndBootstrap(r.Context(), p); err != nil {
 		h.fail(w, err)
 		return
@@ -524,7 +471,7 @@ func searchValuesForResource(cr *cloud.CloudResource) map[string]any {
 	return vals
 }
 
-// serverIPv4s extracts the v4 addresses from a nova server's addresses map (version==4)
+// serverIPv4s extracts the v4 addresses from a cached server's addresses map (version==4)
 // for the SERVER search values.
 func serverIPv4s(server map[string]any) []string {
 	out := []string{}
@@ -553,7 +500,7 @@ func serverIPv4s(server map[string]any) []string {
 }
 
 // externalServiceDto maps an ExternalService to the client ExternalServiceDto shape (secret-free):
-// the cloud config the provisioning UI needs (regions/services/availabilityZones), id/name/type/status.
+// the cloud config the provisioning UI needs (regions/services), id/name/type/status.
 func externalServiceDto(es *externalservice.ExternalService) map[string]any {
 	cfg := es.Config
 	get := func(k string) any { return cfg[k] }
@@ -561,17 +508,15 @@ func externalServiceDto(es *externalservice.ExternalService) map[string]any {
 		"id":   es.ID,
 		"name": es.Name,
 		"type": es.Type,
-		// provider ("openstack" | "ceph-s3" | "kamaji") lets the client UI label which backend a
-		// service rides on — they run side by side and never mix.
-		"provider":          es.Provider(),
-		"status":            es.Status,
-		"vhi":               boolOf(cfg["vhi"]),
-		"shared":            es.Shared(),
-		"components":        orEmptyList(get("features")),
-		"groups":            orEmptyList(get("groups")),
-		"regions":           orEmptyMap(get("regions")),
-		"services":          orEmptyMap(get("services")),
-		"availabilityZones": orEmptyMap(get("availabilityZones")),
+		// provider ("proxmox" | "ceph-s3" | "kamaji" | "dbaas") lets the client UI label which
+		// backend a service rides on — they run side by side and never mix.
+		"provider":   es.Provider(),
+		"status":     es.Status,
+		"shared":     es.Shared(),
+		"components": orEmptyList(get("features")),
+		"groups":     orEmptyList(get("groups")),
+		"regions":    orEmptyMap(get("regions")),
+		"services":   orEmptyMap(get("services")),
 	}
 	// kamaji: the curated k8s VERSION list (keys only — image ids are operator detail) feeds the
 	// client create/upgrade pickers. Config is not a secret; still expose the minimum needed.
@@ -587,13 +532,6 @@ func externalServiceDto(es *externalservice.ExternalService) map[string]any {
 		if pin := es.KamajiConfig().ChartVersion; pin != "" {
 			dto["kubernetesPlatformVersion"] = pin
 		}
-		// The default StorageClass every cluster ships with — informational, shown at create.
-		// Named after the pinned volume type when there is one.
-		storage := map[string]any{"className": kamaji.StorageClassName(defaults.StorageVolumeType)}
-		if vt := defaults.StorageVolumeType; vt != "" {
-			storage["volumeType"] = vt
-		}
-		dto["kubernetesStorage"] = storage
 		// Per-version image-variant names (e.g. "nvidia") — the node-group image picker. Names
 		// only; the ids stay operator detail like the version matrix above.
 		variantsByVersion := map[string]any{}
@@ -640,8 +578,6 @@ func externalServiceDto(es *externalservice.ExternalService) map[string]any {
 	}
 	return dto
 }
-
-func boolOf(v any) bool { b, _ := v.(bool); return b }
 
 func orEmptyMap(v any) any {
 	if m, ok := v.(map[string]any); ok {

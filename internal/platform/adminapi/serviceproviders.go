@@ -1,24 +1,24 @@
 package adminapi
 
-// serviceproviders.go serves /admin-api/v1/service_providers. Read-only; the DTO exposes ONLY
-// identity_url + the customer domain id — never the externalService secret.
+// serviceproviders.go serves /admin-api/v1/service_providers. Read-only; the DTO exposes the
+// provider kind (+ the proxmox pool prefix) — never the externalService secret.
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
-type apiOpenstackConfig struct {
-	IdentityURL string `json:"identity_url,omitempty"`
-	DomainID    string `json:"domain_id,omitempty"`
+type apiProxmoxConfig struct {
+	PoolPrefix string `json:"pool_prefix,omitempty"`
 }
 
 type apiCloudConfig struct {
-	Provider  string             `json:"provider,omitempty"`
-	Openstack apiOpenstackConfig `json:"openstack"`
+	Provider string            `json:"provider,omitempty"` // PROXMOX | CEPH_S3 | KAMAJI | DBAAS
+	Proxmox  *apiProxmoxConfig `json:"proxmox,omitempty"`
 }
 
 type apiServiceProviderConfig struct {
@@ -32,28 +32,25 @@ type apiServiceProvider struct {
 	Configuration apiServiceProviderConfig `json:"configuration"`
 }
 
+// providerWire maps a config.provider kind to its wire enum: proxmox → PROXMOX,
+// ceph-s3 → CEPH_S3, kamaji → KAMAJI, dbaas → DBAAS ("" stays "").
+func providerWire(kind string) string {
+	return strings.ToUpper(strings.ReplaceAll(kind, "-", "_"))
+}
+
 func mapServiceProvider(es *externalservice.ExternalService) apiServiceProvider {
 	typ := ""
 	if es.Type == externalservice.TypeCloud {
 		typ = "CLOUD" // non-CLOUD types map to null
 	}
-	domainID := ""
-	if cust, ok := es.Config["customer"].(map[string]any); ok {
-		domainID, _ = cust["domainId"].(string)
+	cloudCfg := apiCloudConfig{Provider: providerWire(es.Provider())}
+	if es.IsProxmox() {
+		cloudCfg.Proxmox = &apiProxmoxConfig{PoolPrefix: es.PVEPoolPrefix()}
 	}
 	return apiServiceProvider{
 		ID: es.ID, Name: es.Name, Type: typ,
-		Configuration: apiServiceProviderConfig{Cloud: apiCloudConfig{
-			Provider:  "OPENSTACK",
-			Openstack: apiOpenstackConfig{IdentityURL: identityURLRaw(es), DomainID: domainID},
-		}},
+		Configuration: apiServiceProviderConfig{Cloud: cloudCfg},
 	}
-}
-
-// identityURLRaw returns config.identityUrl VERBATIM (this DTO does not normalize to /v3).
-func identityURLRaw(es *externalservice.ExternalService) string {
-	s, _ := es.Config["identityUrl"].(string)
-	return s
 }
 
 func (h *Handler) routeServiceProviders(r chi.Router) {

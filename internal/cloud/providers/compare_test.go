@@ -107,7 +107,7 @@ func TestDataEqualKeyed(t *testing.T) {
 	}
 }
 
-// LIVE-CAUGHT (kolla run-sync churn): the cached side's nested docs may decode as NAMED
+// LIVE-CAUGHT (live run-sync churn): the cached side's nested docs may decode as NAMED
 // map/slice types — the compare must treat them as maps/lists, not fall to DeepEqual
 // (always differ).
 func TestCompareMapsRoundTrip(t *testing.T) {

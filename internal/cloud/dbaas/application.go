@@ -3,8 +3,7 @@ package dbaas
 // BuildApplication renders the ArgoCD Application CR for one database: pinned chart revision,
 // FULL values inline (helm.valuesObject), destination = the project namespace on the DB cluster
 // itself. The resources-finalizer makes an Application delete cascade to everything the chart
-// rendered (engine CR, LB Service, NetworkPolicy) — our delete path relies on it; the LB
-// Service delete in turn makes the OCCM tear down the Octavia LB on the tenant subnet.
+// rendered (engine CR, LB Service, NetworkPolicy) — our delete path relies on it.
 func BuildApplication(cfg Config, spec DatabaseSpec, serviceID, chartVersion string, values map[string]any) map[string]any {
 	if chartVersion == "" {
 		chartVersion = cfg.ChartVersion

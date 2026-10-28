@@ -13,11 +13,8 @@ resources:
   memoryGi: 2
 storage:
   sizeGi: 10
-  storageClassName: csi-cinder-sc-delete
+  storageClassName: proxmox-csi
 network:
-  networkId: 11111111-2222-3333-4444-555555555555
-  subnetId: 66666666-7777-8888-9999-aaaaaaaaaaaa
-  memberSubnetId: bbbbbbbb-cccc-dddd-eeee-ffffffffffff
   allowedCidrs:
     - 10.30.0.0/16
 proxcloud:

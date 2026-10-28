@@ -43,16 +43,32 @@ the organization's billing profile.
 ## Cloud
 
 - **External service / cloud provider** (`externalService`) — a configured
-  connection to a backing provider. Its `type` is `CLOUD` (an OpenStack region),
-  `CPANEL`, or `PAYMENT`; its encrypted `secret` holds credentials (never
-  serialized). A `CLOUD` service's `config.provider` (e.g. `openstack`) and
-  regions define where resources are created.
+  connection to a backing provider. Its `type` is `CLOUD` (a Proxmox VE cluster,
+  a Ceph RGW, or a Kamaji/DBaaS management cluster), `CPANEL`, or `PAYMENT`; its
+  encrypted `secret` holds credentials (never serialized). A `CLOUD` service's
+  `config.provider` (`proxmox`, `ceph-s3`, `kamaji` or `dbaas`) and regions define
+  where resources are created.
 - **Region** — a named location within a cloud external service (from its config).
-  Resources, sync, and pricing scope are addressed per region.
+  One Proxmox cluster is one region. Resources, sync, and pricing scope are
+  addressed per region.
 - **Cloud resource** (`cloudResource`) — a locally cached record of one real
-  cloud object (server, volume, floating IP, load balancer, bucket, share, …),
-  keyed by service + external id, kept live by sync and by notifications. This
-  cache is what the console renders and what rating reads.
+  cloud object (server, volume, network, security group, bucket, …), keyed by
+  service + external id, kept current by sync and by ProxCloud's own write paths.
+  This cache is what the console renders and what rating reads.
+- **Pool** — the Proxmox resource pool a project owns (`<poolPrefix><projectId>`,
+  default prefix `pc-`). Every project VM and template lives in it; it is the
+  tenancy boundary on the cluster.
+- **Vnet / SDN zone** — a project network is a Proxmox SDN vnet with one subnet
+  carved from the provider's `cidrPool`, inside an SDN zone (one shared zone, or
+  one EVPN zone per project).
+- **Public network** — an operator-designated bridge with an IPv4 pool. A server
+  reaches the internet inbound through a public NIC with one address from it;
+  there are no floating IPs.
+- **Storage profile** — a slug on the Proxmox provider mapping to a storage id per
+  node, with admin-declared capability flags; flavors and volumes reference it.
+- **Template** — a VM that servers are fully cloned from: an admin OS template
+  from the provider config, or a project template made from a tenant VM (shown
+  as an image).
 
 ## Pricing and billing
 
@@ -64,8 +80,8 @@ the organization's billing profile.
 - **Price adjustment rule** (`priceAdjustmentRule`) — a plan-level surcharge or
   discount applied on top of rule output, via targeted tiers (e.g. volume
   discounts).
-- **Resource type** — the kind of billable thing a rule applies to (e.g. server,
-  volume, floating IP, load balancer). Maps a cloud resource to the rules that
+- **Resource type** — the kind of billable thing a rule applies to (e.g.
+  instance, volume, bucket). Maps a cloud resource to the rules that
   price it.
 - **Billable attribute** — a named, measurable quantity of a resource that a rule
   puts a price on (e.g. vCPUs, RAM, disk GB, hours). The rule's `prices` are
@@ -90,10 +106,11 @@ the organization's billing profile.
 ## Lifecycle
 
 - **Activation** — bringing a billing profile (and its projects) into service:
-  enabling projects, provisioning memberships, bootstrapping the cloud tenant,
+  enabling projects, provisioning memberships, bootstrapping projects onto the
+  cloud providers,
   applying sign-up/provisioning credits (`billing.ActivationService`).
 - **Suspension** (`suspension`) — taking a billing profile out of service for
-  non-payment or policy: pausing its projects' cloud servers and disabling the
+  non-payment or policy: suspending its projects' VMs and disabling the
   projects; reversed on resume. Driven by dunning and by admin action.
 - **Validation (KYC)** (`identityValidation`) — the identity/know-your-customer
   check on a billing profile; an approved validation is a precondition for
@@ -101,6 +118,9 @@ the organization's billing profile.
 
 ## Catalog and platform
 
+- **Flavor** (`flavor`) — an admin-curated server size for Proxmox (vCPUs, RAM,
+  disk, optional GPU model/count and storage profile); Proxmox has no flavors of
+  its own.
 - **Flavor category** (`flavorCategory`) — an operator-defined grouping of
   compute flavors for presentation in the console (alongside image groups /
   categories for OS images).

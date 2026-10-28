@@ -1,5 +1,5 @@
 // Package kamaji drives Managed Kubernetes clusters on a Kamaji management cluster: one
-// ArgoCD Application per customer cluster (chart `openstack-kamaji-cluster` from our OCI
+// ArgoCD Application per customer cluster (the provider's configured cluster chart from our OCI
 // registry, pinned targetRevision + full generated values), applied through the management
 // cluster's own API (the Application CRD — no ArgoCD API/auth involved). ArgoCD renders,
 // syncs and health-checks; proxcloud reads status back off the Application + the Kamaji
@@ -20,8 +20,8 @@ import (
 // NamespaceFor is the management-cluster namespace holding a project's clusters.
 func NamespaceFor(projectID string) string { return "pc-" + projectID }
 
-// CloudSecretName is the per-cluster clouds.yaml secret (management-cluster side ONLY — the
-// customer cluster never sees it; see plan §4/D7).
+// CloudSecretName is the per-cluster cloud credentials secret (management-cluster side ONLY —
+// the customer cluster never sees it; see plan §4/D7).
 func CloudSecretName(clusterID string) string { return clusterID + cloudSecretSuffix }
 
 // cloudSecretSuffix lets FinalizeOrphans map a secret name back to its cluster id.
@@ -39,14 +39,6 @@ func AdminKubeconfigSecretName(clusterID string) string {
 	return ControlPlaneName(clusterID) + "-admin-kubeconfig"
 }
 
-// ServerGroupName is the nova server group backing one node group. Derived, never stored: the
-// delete path finds a cluster's groups by listing and matching this prefix, so cleanup survives a
-// lost Application or a half-written cache row (CloudSecretName precedent).
-func ServerGroupName(clusterID, nodeGroup string) string { return clusterID + "-" + nodeGroup }
-
-// ServerGroupPrefix matches every server group belonging to a cluster.
-func ServerGroupPrefix(clusterID string) string { return clusterID + "-" }
-
 // Application labels/annotations stamped by proxcloud and read back by the sync.
 //
 // LabelManagedBy/ManagedByValue is the OWNERSHIP marker (decision 2026-07-12): clusters that
@@ -59,15 +51,6 @@ const (
 	LabelManagedBy        = "app.kubernetes.io/managed-by"
 	ManagedByValue        = "proxcloud"
 	AnnotationDisplayName = "proxcloud.io/display-name"
-	// Appcred annotations on the per-cluster clouds.yaml secret: the ONLY durable record of the
-	// keystone application credential minted for the cluster (plan D4). FinalizeOrphans reads them
-	// to revoke the credential once the ArgoCD delete cascade has finished with it.
-	AnnotationAppCredID   = "proxcloud.io/appcred-id"
-	AnnotationAppCredUser = "proxcloud.io/appcred-user"
-	// AnnotationAppCredService records WHICH OpenStack externalService minted the credential, so
-	// the service-level sweep can revoke it even after the project doc (and its service
-	// bindings) is gone.
-	AnnotationAppCredService = "proxcloud.io/appcred-service"
 )
 
 // managedBy reports whether obj carries the proxcloud ownership marker.
@@ -85,41 +68,30 @@ type Config struct {
 	ArgoNamespace string // namespace holding Application CRs (default "argocd")
 	ArgoProject   string // AppProject constraining sources/destinations (default "default")
 	ChartRepo     string // OCI helm repo, e.g. "ghcr.io/mutex-solutions/charts" (no oci:// prefix in Argo repoURL)
-	ChartName     string // default "openstack-kamaji-cluster"
+	ChartName     string // required — no default until the Proxmox cluster chart lands
 	ChartVersion  string // pinned default for NEW clusters; existing clusters keep their own pin
 	Defaults      ClusterDefaults
 }
 
 // ClusterDefaults are the per-provider chart value defaults every cluster inherits.
 type ClusterDefaults struct {
-	DataStoreName     string            // Kamaji DataStore (default "default")
-	FloatingNetworkID string            // Octavia floating network for the API LB
-	ExternalNetworkID string            // CAPO external network (clusterNetworking)
-	DNSZone           string            // optional: API FQDN = <clusterID>.<DNSZone> (certSAN + external-dns)
-	Versions          map[string]string // curated k8s version → DEFAULT Glance image id (the ONLY versions offered)
+	DataStoreName string // Kamaji DataStore (default "default")
+	DNSZone       string // optional: API FQDN = <clusterID>.<DNSZone> (certSAN + external-dns)
+	// Versions maps each curated k8s version → its DEFAULT node image id (the ONLY versions
+	// offered). TODO(P7): CAPMOX VM template ids.
+	Versions map[string]string
 	// ImageVariants are curated alternative node images per version, keyed variant → version →
 	// image id (e.g. "nvidia" → {"1.35.4": "<id>"} for the GPU build of the same release). A node
 	// group picks a variant BY NAME; upgrades re-resolve the group onto the target version's image
 	// of the SAME variant, so a GPU pool never silently rolls back onto the plain image.
 	ImageVariants map[string]map[string]string
 	Flavors       []string // optional node-flavor allowlist (empty = every tenant flavor)
-	// RootVolumeGiB is the default worker root-disk size. Node images are larger than most flavors'
-	// ephemeral disk, so booting from an explicitly sized Cinder volume is the norm, not an option —
-	// without it nova rejects the machine with FlavorDiskSmallerThanImage.
+	// RootVolumeGiB is the default worker root-disk size. Node images are larger than most
+	// flavors' disk, so every node gets an explicitly sized root disk.
 	RootVolumeGiB int
-	// SupportKeypairName is a nova keypair injected into EVERY node so support can SSH in when a
-	// customer asks for hands-on troubleshooting. Empty = no key injected. Nova keypairs belong to
-	// the authenticating user, so one keypair covers the whole provider.
-	SupportKeypairName string
-	// SupportKeypairPublicKey, when set, lets proxcloud create that keypair if it is missing.
-	// Without it the operator owns creating the key and proxcloud only injects the name.
-	SupportKeypairPublicKey string
 	// AllowedCIDRs is the provider-wide default API-server ingress allowlist; a cluster's own
 	// AllowedCIDRs overrides it. Empty on both = open.
 	AllowedCIDRs []string
-	// StorageVolumeType is the Cinder volume type behind every cluster's default StorageClass
-	// (csi-cinder). Empty = the cloud's default volume type.
-	StorageVolumeType string
 }
 
 // ClusterAddons is the curated add-on menu a customer can toggle per cluster (name →
@@ -176,6 +148,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("kamaji provider: secret.kubeconfig is required")
 	case c.ChartRepo == "":
 		return fmt.Errorf("kamaji provider: config.argocd.chartRepo is required")
+	case c.ChartName == "":
+		return fmt.Errorf("kamaji provider: config.argocd.chartName is required")
 	case c.ChartVersion == "":
 		return fmt.Errorf("kamaji provider: config.argocd.chartVersion is required (never latest — plan §9)")
 	}
@@ -194,35 +168,20 @@ type ClusterSpec struct {
 	// OIDC is the customer-supplied issuer config (chart oidc.* block): issuerUrl, clientId,
 	// usernameClaim, usernamePrefix, groupsClaim, groupsPrefix, signingAlgs. Empty issuerUrl = disabled.
 	OIDC map[string]string
-	// AllowedCIDRs restricts API-server LB ingress (Octavia ACL — plan Phase 2a). Empty = open.
+	// AllowedCIDRs restricts API-server LB ingress (LB source ranges — plan Phase 2a). Empty = open.
 	AllowedCIDRs []string
 	// Addons are the customer's picks off the curated ClusterAddons menu (unknown names are
 	// rejected). nil/empty = the chart's own defaults, which match the menu's defaults.
 	Addons     map[string]bool
 	NodeGroups []NodeGroup
 	// NetworkID/SubnetID attach the cluster to a network the customer already owns (EKS-style
-	// "pick your VPC subnet") instead of the per-cluster network CAPO otherwise creates. Both or
-	// neither: CAPO accepts a lone filter, but a network with the wrong subnet picked — or a
-	// subnet resolved off a different network — is exactly the class of half-configured cluster
-	// we refuse to build. Customer-supplied, but the create path MUST verify both belong to the
-	// project's tenant before building values (kamajiValidateClusterNetwork): CAPO runs with a
-	// project-scoped credential, yet shared/external networks are visible cross-tenant, and a
-	// crafted id would otherwise let a customer hang their nodes onto infrastructure networks.
+	// "pick your VPC subnet") instead of a dedicated per-cluster network. Both or neither: a
+	// network with the wrong subnet picked is exactly the class of half-configured cluster we
+	// refuse to build. Customer-supplied, so the create path MUST verify both belong to the
+	// project before building values — a crafted id would otherwise let a customer hang their
+	// nodes onto infrastructure networks.
 	NetworkID string
 	SubnetID  string
-	// ExternalNetworkID overrides ClusterDefaults.ExternalNetworkID for THIS cluster. ProxCloud-owned,
-	// derived at create time (the external network the chosen subnet's router egresses through, via
-	// the admin allowlist) — never accepted from the client. CAPO treats spec.externalNetwork as
-	// immutable after create (pkg/webhooks/openstackcluster_webhook.go ValidateUpdate), so this is
-	// pinned into the Application values once and never rewritten.
-	ExternalNetworkID string
-	// AppCredID/AppCredUserID/AppCredServiceID record the per-cluster keystone application
-	// credential minted at create (plan D4) — stamped as annotations on the clouds.yaml secret
-	// so the orphan sweep can revoke it after the delete cascade, even when the project doc is
-	// already gone. Empty when minting was skipped (fallback admin auth).
-	AppCredID        string
-	AppCredUserID    string
-	AppCredServiceID string
 }
 
 // NodeGroup is one CAPI MachineDeployment-backed worker pool.
@@ -233,14 +192,7 @@ type NodeGroup struct {
 	// ImageVariant picks a curated image variant (Defaults.ImageVariants) for this pool — e.g.
 	// "nvidia" for GPU nodes. Sticky across upgrades: the UPGRADE action re-resolves the group
 	// onto the target version's image of the same variant. Empty = the default image.
-	ImageVariant string `json:"imageVariant,omitempty"`
-	// AvailabilityZone pins the pool's machines to one Nova AZ (the chart's failureDomain).
-	// Empty = the cloud scheduler places them (single-AZ clouds today).
-	AvailabilityZone string `json:"availabilityZone,omitempty"`
-	// PublicIP gives every machine in the pool a floating IP from the cluster's external
-	// network (an OpenStackFloatingIPPool per group; released with the machine). The FIPs land
-	// in the customer's tenant, so they sync and bill like any other floating IP.
-	PublicIP      bool              `json:"publicIp,omitempty"`
+	ImageVariant  string            `json:"imageVariant,omitempty"`
 	Count         int               `json:"count"`
 	Autoscale     bool              `json:"autoscale"`
 	Min           int               `json:"min,omitempty"`
@@ -248,10 +200,6 @@ type NodeGroup struct {
 	RootVolumeGiB int               `json:"rootVolumeGiB,omitempty"` // 0 = ClusterDefaults.RootVolumeGiB
 	Labels        map[string]string `json:"labels,omitempty"`
 	Taints        []string          `json:"taints,omitempty"` // "key=value:Effect" / "key:Effect"
-	// ServerGroupID is the nova server group the pool's machines join (soft anti-affinity, one per
-	// node group). ProxCloud-owned: minted at create/update, never accepted from the client — hence
-	// json:"-", so a crafted request cannot pin machines into somebody else's server group.
-	ServerGroupID string `json:"-"`
 }
 
 // Validate rejects an unbuildable spec.
@@ -307,8 +255,8 @@ func (s ClusterSpec) Validate(d ClusterDefaults) error {
 		if !ng.Autoscale && ng.Count < 1 {
 			return fmt.Errorf("cluster: node group %q: count must be >= 1", ng.Name)
 		}
-		// Nodes always boot from a Cinder volume (the images are bigger than most flavors'
-		// ephemeral disk), so a size has to come from somewhere.
+		// Every node gets an explicitly sized root disk (the images are bigger than most
+		// flavors' disk), so a size has to come from somewhere.
 		if ng.RootVolumeGiB == 0 && d.RootVolumeGiB == 0 {
 			return fmt.Errorf("cluster: node group %q: rootVolumeGiB is required (no provider default configured)", ng.Name)
 		}

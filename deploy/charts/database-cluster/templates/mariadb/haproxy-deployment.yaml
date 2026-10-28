@@ -3,7 +3,7 @@
 Chart-owned HAProxy for MariaDB — the pods the <id>-lb Service selects. Why it
 exists: unlike Percona (which ships its own haproxy component), mariadb-operator
 exposes the primary through a Service whose endpoint is pinned to a pod NAME,
-so there is no stable pod label the Octavia LB Service could select. This tiny
+so there is no stable pod label the LB Service could select. This tiny
 TCP proxy is that stable target; it follows the operator's primary Service via
 runtime DNS (see haproxy-configmap.yaml).
 */}}

@@ -1,10 +1,10 @@
 ## Summary
 
-<!-- What does this change do, and why? -->
+<!-- What does this change do? -->
 
-## Related issues
+## Why
 
-<!-- e.g. Closes #123 -->
+<!-- The problem, decision or request behind it. Link issues, e.g. Closes #123. -->
 
 ## Type of change
 
@@ -14,7 +14,24 @@
 - [ ] Documentation
 - [ ] Build / CI / deployment
 
-## Checklist
+## Architecture impact
+
+<!--
+Tick exactly one. A change to a container, component, external system, trust
+boundary or key flow needs the C4 update in THIS PR.
+See docs/architecture/c4/README.md#maintenance-rule.
+-->
+
+- [ ] C4 diagrams updated **and** an entry appended to `docs/architecture/c4/CHANGELOG.md` (date, PR number, what changed, why)
+- [ ] No architecture impact. Reason:
+
+## Breaking changes
+
+<!-- Config, API, chart or data changes operators or clients must act on. "None" if none. -->
+
+## Test plan
+
+<!-- How this was verified: commands run, manual steps, environments. -->
 
 - [ ] `gofmt` clean and `go vet ./...` passes
 - [ ] `go test ./...` passes (and `make test-integration` if behavior needs it)

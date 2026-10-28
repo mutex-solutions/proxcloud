@@ -33,10 +33,10 @@ type K8sAPI interface {
 	GetVPA(ctx context.Context, ns, name string) (map[string]any, error)
 }
 
-// defaultFinalizeGrace: a net-share marker secret younger than this is never treated as an
-// orphan. Closes the create-race: CreateDatabase applies the marker BEFORE the Application, so
-// a concurrent finalize pass could otherwise see a fresh secret with no Application — the exact
-// signature of a finished delete cascade — and revoke the network share mid-create.
+// defaultFinalizeGrace: a marker secret younger than this is never treated as an orphan. Closes
+// the create-race: CreateDatabase applies the marker BEFORE the Application, so a concurrent
+// finalize pass could otherwise see a fresh secret with no Application — the exact signature of
+// a finished delete cascade — and reap the database's secrets mid-create.
 const defaultFinalizeGrace = 30 * time.Minute
 
 // Service drives one dbaas provider (one DB cluster). Built per external service via New
@@ -102,15 +102,12 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) 
 	})
 }
 
-// CreateDatabase provisions one database: net-share marker secret FIRST (the durable
-// neutron-RBAC record), then ensureShare (the caller's neutron RBAC create), then the
+// CreateDatabase provisions one database: marker secret FIRST (the durable record), then the
 // proxcloud-owned auth secret for engines that need one, then the Application CR. Marker-first
-// ordering is load-bearing: a crash after the RBAC create but before the marker would leave a
-// share no sweep can ever find — with the marker already applied, any half-finished create
-// converges via FinalizeOrphans (the 30-minute grace guards the mid-create window, and a revoke
-// of a never-created share is "already gone"). Returns the initial cached data payload (status
-// PENDING until the first sync reads real health).
-func (s *Service) CreateDatabase(ctx context.Context, spec DatabaseSpec, share NetShare, ensureShare func(context.Context) error) (map[string]any, error) {
+// ordering is load-bearing: with the marker already applied, any half-finished create converges
+// via FinalizeOrphans (the 30-minute grace guards the mid-create window). Returns the initial
+// cached data payload (status PENDING until the first sync reads real health).
+func (s *Service) CreateDatabase(ctx context.Context, spec DatabaseSpec) (map[string]any, error) {
 	if err := spec.Validate(s.cfg); err != nil {
 		return nil, err
 	}
@@ -118,27 +115,12 @@ func (s *Service) CreateDatabase(ctx context.Context, spec DatabaseSpec, share N
 	if err := s.EnsureProjectNamespace(ctx, spec.ProjectID); err != nil {
 		return nil, fmt.Errorf("dbaas: ensure namespace: %w", err)
 	}
-	// The annotations are the durable revocation record — the marker secret is the only k8s-side
-	// object that outlives the Application, so the record rides on it (kamaji appcred precedent).
-	if err := s.api.ApplySecret(ctx, ns, NetShareSecretName(spec.ID),
-		map[string]string{"network-id": share.NetworkID},
+	// The marker secret is the only k8s-side object that outlives the Application, so the sweep
+	// keys on it (kamaji cloud-credentials precedent).
+	if err := s.api.ApplySecret(ctx, ns, MarkerSecretName(spec.ID), nil,
 		map[string]string{LabelProject: spec.ProjectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue},
-		map[string]string{
-			AnnotationNetworkID: share.NetworkID,
-			AnnotationSubnetID:  share.SubnetID,
-			AnnotationOSService: share.OSServiceID,
-			AnnotationOSProject: share.OSProjectID,
-			AnnotationOSRegion:  share.OSRegion,
-		}); err != nil {
-		return nil, fmt.Errorf("dbaas: apply net-share marker: %w", err)
-	}
-	if ensureShare != nil {
-		if err := ensureShare(ctx); err != nil {
-			// The share was never (or not verifiably) created — reap our marker best-effort; a
-			// leftover one converges via the sweep ("already gone" revoke, then reap).
-			_ = s.api.DeleteSecret(ctx, ns, NetShareSecretName(spec.ID))
-			return nil, err
-		}
+		nil); err != nil {
+		return nil, fmt.Errorf("dbaas: apply marker: %w", err)
 	}
 	// App-credential secret for engines whose operator does not mint one (mariadb, valkey).
 	// ProxCloud-owned and OUTSIDE the Application: a chart-generated password would re-roll on
@@ -164,11 +146,9 @@ func (s *Service) CreateDatabase(ctx context.Context, spec DatabaseSpec, share N
 }
 
 // DeleteDatabase removes the database: Application delete only (the resources-finalizer
-// cascades the rendered chart; deleting the LB Service makes the OCCM tear down the Octavia LB
-// and its port on the tenant subnet). The net-share marker secret deliberately STAYS — the
-// neutron RBAC policy cannot be revoked while that port exists, so FinalizeOrphans
-// (sync-driven) revokes it and reaps the secret once the cascade has finished. Idempotent;
-// ownership-guarded like kamaji.
+// cascades the rendered chart, LB Service included). The marker secret deliberately STAYS —
+// FinalizeOrphans (sync-driven) reaps it and the auth secret once the cascade has finished.
+// Idempotent; ownership-guarded like kamaji.
 func (s *Service) DeleteDatabase(ctx context.Context, projectID, dbID string) error {
 	app, err := s.api.GetApplication(ctx, s.cfg.ArgoNamespace, dbID)
 	if err != nil {
@@ -185,31 +165,24 @@ func (s *Service) DeleteDatabase(ctx context.Context, projectID, dbID string) er
 	return nil
 }
 
-// RevokeNetShareResolver revokes one neutron RBAC network share recorded on a marker secret.
-// osRegion names the region whose neutron holds the share (recorded at create; "" on legacy
-// records → the resolver picks a fallback). Contract is FAIL-CLOSED: any error keeps the secret
-// — the only revocation record — for a later pass. This package deliberately never builds
-// OpenStack clients; the caller resolves the recorded service id to an admin client.
-type RevokeNetShareResolver func(ctx context.Context, osServiceID, osProjectID, osRegion, networkID string) error
-
 // FinalizeOrphans completes asynchronous database deletions for ONE project (teardown + tests);
 // the periodic reaper is FinalizeAllOrphans. Returns how many markers still await the cascade.
-func (s *Service) FinalizeOrphans(ctx context.Context, projectID string, revoke RevokeNetShareResolver) (int, error) {
+func (s *Service) FinalizeOrphans(ctx context.Context, projectID string) (int, error) {
 	ns := NamespaceFor(projectID)
 	sel := LabelProject + "=" + projectID + "," + LabelManagedBy + "=" + ManagedByValue
 	secrets, err := s.api.ListSecrets(ctx, ns, sel)
 	if err != nil {
 		return 0, err
 	}
-	return s.finalizeNamespace(ctx, ns, projectID, secrets, revoke)
+	return s.finalizeNamespace(ctx, ns, projectID, secrets)
 }
 
 // FinalizeAllOrphans is the service-level orphan sweep, run once per sync cycle: it scans EVERY
-// managed net-share marker of this provider across all namespaces — so leftovers of projects
-// whose proxcloud doc is already gone are still reaped — revokes recorded network shares, deletes
-// finished-cascade markers and GCs emptied project namespaces. Returns the number of markers
-// still awaiting their cascade.
-func (s *Service) FinalizeAllOrphans(ctx context.Context, revoke RevokeNetShareResolver) (int, error) {
+// managed marker of this provider across all namespaces — so leftovers of projects whose
+// proxcloud doc is already gone are still reaped — deletes finished-cascade markers (and auth
+// secrets) and GCs emptied project namespaces. Returns the number of markers still awaiting
+// their cascade.
+func (s *Service) FinalizeAllOrphans(ctx context.Context) (int, error) {
 	sel := LabelService + "=" + s.serviceID + "," + LabelManagedBy + "=" + ManagedByValue
 	secrets, err := s.api.ListSecretsAllNamespaces(ctx, sel)
 	if err != nil {
@@ -225,7 +198,7 @@ func (s *Service) FinalizeAllOrphans(ctx context.Context, revoke RevokeNetShareR
 	var errs []error
 	for ns, secs := range byNS {
 		projectID := digStr(secs[0], "metadata", "labels", LabelProject)
-		p, err := s.finalizeNamespace(ctx, ns, projectID, secs, revoke)
+		p, err := s.finalizeNamespace(ctx, ns, projectID, secs)
 		pending += p
 		if err != nil {
 			errs = append(errs, err)
@@ -236,17 +209,14 @@ func (s *Service) FinalizeAllOrphans(ctx context.Context, revoke RevokeNetShareR
 
 // finalizeNamespace reaps finished-cascade database markers in one namespace. A marker is an
 // orphan only when ALL of: it is older than the finalize grace window (create-race guard), a
-// point-in-time GetApplication finds no Application, and the LB Service is gone — that Service
-// is the last thing holding an Octavia port on the tenant subnet, and revoking the network
-// share while the port exists 409s (the normal first-pass outcome while the amphora winds
-// down). The share is revoked only when no LIVE sibling database of the project still uses the
-// same network; either way the marker is then reaped, and the auth secret with it.
-func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, secrets []map[string]any, revoke RevokeNetShareResolver) (int, error) {
+// point-in-time GetApplication finds no Application, and the LB Service is gone (the cascade's
+// last tenant-facing object). The marker is then reaped, and the auth secret with it.
+func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, secrets []map[string]any) (int, error) {
 	var errs []error
 	pending, reaped := 0, 0
 	for _, sec := range secrets {
 		name := digStr(sec, "metadata", "name")
-		dbID, isMarker := strings.CutSuffix(name, netShareSuffix)
+		dbID, isMarker := strings.CutSuffix(name, markerSuffix)
 		if !isMarker {
 			continue
 		}
@@ -267,8 +237,8 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 			continue // database alive (or deleting) — its marker is in use
 		}
 		// The marker records no engine, so probe BOTH tenant-facing LB names: the chart-owned
-		// `<id>-lb` and Strimzi's `<id>-kafka-external-bootstrap`. Either alive = an Octavia
-		// port may still sit on the tenant subnet.
+		// `<id>-lb` and Strimzi's `<id>-kafka-external-bootstrap`. Either alive = the cascade is
+		// still winding down.
 		lbGone := true
 		for _, svcName := range []string{LBServiceName(dbID), LBServiceNameFor(EngineKafka, dbID)} {
 			if svc, err := s.api.GetService(ctx, ns, svcName); err != nil {
@@ -279,31 +249,8 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 			}
 		}
 		if !lbGone {
-			pending++ // Octavia LB (and its tenant-subnet port) still winding down
+			pending++ // LB Service still winding down
 			continue
-		}
-		networkID := digStr(sec, "metadata", "annotations", AnnotationNetworkID)
-		if networkID != "" {
-			inUse, err := s.networkInUse(ctx, ns, projectID, networkID, dbID)
-			if err != nil {
-				return pending, err
-			}
-			if !inUse {
-				osSvc := digStr(sec, "metadata", "annotations", AnnotationOSService)
-				osProj := digStr(sec, "metadata", "annotations", AnnotationOSProject)
-				osRegion := digStr(sec, "metadata", "annotations", AnnotationOSRegion)
-				if revoke == nil {
-					errs = append(errs, fmt.Errorf("database %s: network share %s not revoked (no revoker)", dbID, networkID))
-					pending++
-					continue
-				}
-				if err := revoke(ctx, osSvc, osProj, osRegion, networkID); err != nil {
-					// Fail closed: the marker's annotations are the only revocation record — keep it.
-					errs = append(errs, fmt.Errorf("database %s: revoke network share: %w", dbID, err))
-					pending++
-					continue
-				}
-			}
 		}
 		// Auth secret FIRST, marker LAST: the marker is the only name the sweep keys on, so it
 		// must survive any partial failure to stay the retry driver for both deletions —
@@ -315,7 +262,7 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 			continue
 		}
 		if err := s.api.DeleteSecret(ctx, ns, name); err != nil {
-			errs = append(errs, fmt.Errorf("database %s: delete net-share marker: %w", dbID, err))
+			errs = append(errs, fmt.Errorf("database %s: delete marker: %w", dbID, err))
 			pending++
 			continue
 		}
@@ -335,72 +282,6 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		}
 	}
 	return pending, errors.Join(errs...)
-}
-
-// networkInUse reports whether the network is still needed by another database of the project —
-// in which case the neutron share must stay. Two signals, both fresh-listed: (1) a LIVE sibling
-// Application whose values ride the network; (2) another net-share MARKER for the same network
-// that is either inside its grace window or backed by an existing Application. Signal (2)
-// closes the mid-create race: a sibling create applies its marker before its Application, so
-// during that multi-round-trip window only the marker proves the network is spoken for —
-// without it, a sweep pass finalizing an older orphan on the same network would revoke the
-// share under the sibling. excludeDBID is the marker being finalized (its own records must not
-// keep the share alive).
-func (s *Service) networkInUse(ctx context.Context, ns, projectID, networkID, excludeDBID string) (bool, error) {
-	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace,
-		LabelProject+"="+projectID+","+LabelManagedBy+"="+ManagedByValue)
-	if err != nil {
-		return false, err
-	}
-	for _, app := range apps {
-		if dig(app, "metadata", "deletionTimestamp") != nil {
-			continue
-		}
-		if digStr(app, "metadata", "name") == excludeDBID {
-			continue
-		}
-		if digStr(app, "spec", "source", "helm", "valuesObject", "network", "networkId") == networkID {
-			return true, nil
-		}
-	}
-	secrets, err := s.api.ListSecrets(ctx, ns, LabelProject+"="+projectID+","+LabelManagedBy+"="+ManagedByValue)
-	if err != nil {
-		return false, err
-	}
-	for _, sec := range secrets {
-		otherID, isMarker := strings.CutSuffix(digStr(sec, "metadata", "name"), netShareSuffix)
-		if !isMarker || otherID == excludeDBID {
-			continue
-		}
-		if digStr(sec, "metadata", "annotations", AnnotationNetworkID) != networkID {
-			continue
-		}
-		if created, err := time.Parse(time.RFC3339, digStr(sec, "metadata", "creationTimestamp")); err == nil {
-			if time.Since(created) < s.finalizeGrace {
-				return true, nil // sibling mid-create — its Application may not be applied yet
-			}
-		}
-		app, err := s.api.GetApplication(ctx, s.cfg.ArgoNamespace, otherID)
-		if err != nil {
-			return false, err
-		}
-		if app != nil {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// NetworkSafeToRevoke is the failed-create rollback's guard: true only when NO other database
-// of the project (live Application or fresh/backed marker) still rides the network — the same
-// decision the sweep makes. When false the caller must skip the revoke; the sweep converges the
-// leftover marker later.
-func (s *Service) NetworkSafeToRevoke(ctx context.Context, projectID, networkID, excludeDBID string) bool {
-	inUse, err := s.networkInUse(ctx, NamespaceFor(projectID), projectID, networkID, excludeDBID)
-	if err != nil {
-		return false // fail closed: cannot prove it safe → leave the share for the sweep
-	}
-	return !inUse
 }
 
 // gcNamespace deletes the project namespace once it demonstrably holds no database remnants —
@@ -430,7 +311,7 @@ type ConnInfo struct {
 }
 
 // ConnectionInfo assembles the database's connection bundle: engine off the live values,
-// credentials off the engine's secret, host off the LB Service's Octavia VIP.
+// credentials off the engine's secret, host off the LB Service's ingress IP.
 func (s *Service) ConnectionInfo(ctx context.Context, projectID, dbID string) (ConnInfo, error) {
 	app, err := s.api.GetApplication(ctx, s.cfg.ArgoNamespace, dbID)
 	if err != nil {
@@ -506,7 +387,7 @@ func (s *Service) ResetPassword(ctx context.Context, projectID, dbID, engine str
 	return password, nil
 }
 
-// lbHost reads the Octavia VIP off the named LB Service ("" while still provisioning).
+// lbHost reads the ingress IP off the named LB Service ("" while still provisioning).
 func (s *Service) lbHost(ctx context.Context, ns, svcName string) (string, error) {
 	svc, err := s.api.GetService(ctx, ns, svcName)
 	if err != nil || svc == nil {

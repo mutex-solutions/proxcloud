@@ -17,9 +17,9 @@ The first call comes back with an authentication challenge. Your MCP client disc
 
 ## What the tools can do
 
-**Read:** your profile; projects, organizations, and members; servers, volumes, networks, floating IPs, security groups, images, load balancers; live flavors; project costs and balance; billing profiles and bills.
+**Read:** your profile; projects, organizations, and members; servers, volumes, networks, security groups, images; live flavors; project costs and balance; billing profiles and bills.
 
-**Act:** server power actions (soft/hard reboot, start, stop); create and delete volumes; invite a teammate to a project.
+**Act:** server power actions (soft/hard reboot, start, stop); create and delete volumes; invite a teammate to a project. On a Proxmox provider a volume belongs to a server, so a create needs `serverId` in the volume data, and a volume can't be deleted on its own — it goes with its server.
 
 A couple of prompts to try once you're connected:
 

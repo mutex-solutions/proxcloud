@@ -149,17 +149,13 @@ func AppRouter(log *slog.Logger, corsOrigins []string, authn *auth.Authenticator
 }
 
 // MgmtRouter serves Actuator-compatible health on :8081 + a build/debug probe.
-func MgmtRouter(h *health.Handler, cloudDebug http.HandlerFunc, jobsDebug map[string]http.HandlerFunc, billingCB *billingcallback.Handler) http.Handler {
+func MgmtRouter(h *health.Handler, jobsDebug map[string]http.HandlerFunc, billingCB *billingcallback.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /actuator/health", h.Liveness)
 	// Callbacks the billing service invokes to make proxcloud suspend/resume clouds, activate
 	// projects or send mail. Mounted here rather than on the API port because they are
 	// service-to-service and can pause a customer's fleet; nil (no token configured) mounts nothing.
 	billingCB.Routes(mux)
-	// Read-only cloud connectivity probe (mgmt port; nil when cloud disabled).
-	if cloudDebug != nil {
-		mux.HandleFunc("GET /debug/cloud", cloudDebug)
-	}
 	// Job triggers (mgmt port, NOT the /api/v1 surface) — present only when the scheduler is
 	// enabled, so a dormant deploy exposes nothing. Used to run sync/metrics/charge on demand
 	// for the golden run instead of waiting on cron.

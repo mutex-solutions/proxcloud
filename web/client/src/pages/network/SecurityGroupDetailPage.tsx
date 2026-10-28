@@ -23,7 +23,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { apiFetch } from "@/lib/api"
 import { useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
 
-// Raw neutron rule shape (LIST_RULES returns the group's security_group_rules verbatim).
+// Raw rule shape (LIST_RULES returns the group's security_group_rules verbatim).
 type SgRule = {
   id?: string
   direction?: string

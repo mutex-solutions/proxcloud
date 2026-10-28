@@ -1,13 +1,13 @@
 package mcp
 
 // adminCatalogTools drive the remaining catalog surfaces through the internal
-// /api/v1/admin routes: live Glance images, image categories, image groups, and
+// /api/v1/admin routes: Proxmox templates, image categories, image groups, and
 // instance metadata options. (Flavor categories live in tools_admin_platform.go.)
 var adminCatalogTools = []toolDef{
-	// ── live Glance images (the names image groups bind) ─────────────────────
+	// ── Proxmox templates (the names image groups bind) ──────────────────────
 	{
 		name:   "list_live_images",
-		desc:   "Live public Glance images across every cloud provider + region: [{serviceId, serviceName, region, images:[{id, name, status}]}]. Use the names when building image groups.",
+		desc:   "Proxmox templates (project templates) across every cloud provider + region: [{serviceId, serviceName, region, images:[{id, name, status}]}]. Use the names when building image groups.",
 		method: "GET",
 		path:   "/api/v1/admin/service/os-images",
 	},
@@ -74,7 +74,7 @@ var adminCatalogTools = []toolDef{
 	},
 	{
 		name:   "create_image_group",
-		desc:   "Create an image group under a category. images = [{name, version, orderNumber}] where name is a live Glance image name (see list_live_images); labels = [{label, description, color}] optional badges.",
+		desc:   "Create an image group under a category. images = [{name, version, orderNumber}] where name is a Proxmox template name (see list_live_images); labels = [{label, description, color}] optional badges.",
 		method: "POST",
 		path:   "/api/v1/admin/images/groups",
 		params: []param{
@@ -84,7 +84,7 @@ var adminCatalogTools = []toolDef{
 			{name: "enabled", typ: "boolean", desc: "Show the group to clients.", in: "body"},
 			{name: "orderNumber", typ: "integer", desc: "Sort order.", in: "body"},
 			{name: "groupLogoUrl", typ: "string", desc: "Logo URL.", in: "body"},
-			{name: "images", typ: "array", desc: "Bound images: [{name (Glance image name), version, orderNumber}].", in: "body"},
+			{name: "images", typ: "array", desc: "Bound images: [{name (template name), version, orderNumber}].", in: "body"},
 			{name: "labels", typ: "array", desc: "Optional badges: [{label, description, color}].", in: "body"},
 		},
 	},

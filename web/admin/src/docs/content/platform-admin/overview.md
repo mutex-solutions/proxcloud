@@ -7,7 +7,7 @@ The operator's job ends where yours begins. Once ProxCloud is installed, wired t
 Most deployments configure things in roughly this sequence. You can jump around, but pricing tends to come first because everything downstream depends on it.
 
 1. **Pricing** — define your price plans and the resource types they charge for.
-2. **Clouds** — register and tune your OpenStack regions.
+2. **Clouds** — register and tune your Proxmox VE clusters and S3 stores.
 3. **Activation** — decide how a fresh sign-up becomes a usable account.
 4. **Money automation** — invoicing, suspension of non-payers, and sign-up credits.
 5. **Branding** — make the platform look like yours.
@@ -33,15 +33,16 @@ Anything financial sits under the **System** group in the sidebar, spread across
 
 How a new registration turns into an active, provisioned account is covered in [Account Activation](/docs/platform-admin/account-activation). Ongoing customer management happens under the **Client area** group: **Users**, **Organizations**, **Billing profiles**, **Validations**, and **Projects**.
 
-Each project's detail page also carries a **public networks** allow-list. By default a project can use every external network its cloud provider exposes; restrict it to a chosen subset there when a customer should only allocate from specific pools. The restriction is enforced when clients create floating IPs or attach a router's external gateway — a network outside the list is rejected.
+Each project's detail page also carries a **public networks** allow-list. By default a project's servers can attach a public NIC to every public network (admin-designated bridge) its cloud provider declares. Restrict the list to a chosen subset when a customer should only get addresses from specific pools. The restriction is enforced when a public NIC is attached, and a network outside the list is rejected.
 
 ### Clouds
 
-Your OpenStack regions are managed from **System → Cloud providers** — registering a region, switching individual services (compute, volumes, load balancers, object storage, shares) on or off, and pulling instance metrics. The Cloud Providers guides cover all of this.
+Your Proxmox VE clusters and other providers are managed from **System → Cloud providers**. That's where you register a cluster, shape its networks, storage profiles, templates and GPU mappings, and switch services (compute, networks, volumes, object storage, managed Kubernetes and databases) on or off. The Cloud Providers guides cover all of this.
 
 ### Look and settings
 
 - **System → Platform** — general platform configuration.
+- **System → Flavors (Proxmox)** — the flavor catalog (vCPU, RAM, disk, optional GPU and storage profile).
 - **System → Instances** — the flavor tiers customers pick from.
 - **System → Custom menu** — extra entries in the customer navigation.
 - **System → Message templates** — the emails ProxCloud sends.

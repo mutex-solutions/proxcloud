@@ -1,9 +1,8 @@
 // Package cloud is the cloud-resource cache domain (the `cloudResource` table
-// that mirrors OpenStack state) + its history archive. This file defines the CloudResource
+// that mirrors provider state) + its history archive. This file defines the CloudResource
 // document and the persistence/sync layer (the two-op optimistic findAndModify + the
 // cloudResourceHistory soft-delete + the wasUserDeletedAfter recreation guard); the read
-// side (counts) backs the project endpoints. Providers + the live OpenStack sync (via
-// internal/cloud/client) land in later phases.
+// side (counts) backs the project endpoints. Providers + the sync job reconcile it.
 package cloud
 
 import (
@@ -11,7 +10,7 @@ import (
 	"time"
 )
 
-// CloudResourceType values — the full set (40 values, in
+// CloudResourceType values — the full set (in
 // declaration order). `type` is the SOLE discriminator for the free-form `data` payload.
 const (
 	TypeServer               = "SERVER"
@@ -43,7 +42,6 @@ const (
 	TypeShareGroup           = "SHARE_GROUP"
 	TypeShareSnapshotGroup   = "SHARE_SNAPSHOT_GROUP"
 	TypeShareSecurityService = "SHARE_SECURITY_SERVICE"
-	TypeVHICredentials       = "VHI_CREDENTIALS"
 	TypeVPNService           = "VPN_SERVICE"
 	TypeVPNEndpointGroup     = "VPN_ENDPOINT_GROUP"
 	TypeIKEPolicy            = "IKE_POLICY"
@@ -53,8 +51,6 @@ const (
 	TypeTrilioWorkload       = "TRILIO_WORKLOAD"
 	TypeTrilioSnapshot       = "TRILIO_SNAPSHOT"
 	TypeTrilioRestore        = "TRILIO_RESTORE"
-	TypeBarbicanSecret       = "BARBICAN_SECRET"
-	TypeBarbicanContainer    = "BARBICAN_CONTAINER"
 )
 
 // Info is the nested CloudResource.info.
@@ -89,7 +85,7 @@ type CloudResource struct {
 	Info          *Info          `json:"info,omitempty"`
 }
 
-// ServerIsVolumeBacked recognizes both the platform marker and Nova's live
+// ServerIsVolumeBacked recognizes both the platform marker and the legacy
 // representation of a boot-from-volume server (an empty image reference).
 // Deriving it from live data keeps billing and lifecycle guards correct when a
 // notification or action replaces the free-form cache payload.

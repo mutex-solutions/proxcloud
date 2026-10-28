@@ -1,8 +1,8 @@
 # ProxCloud — Architecture
 
 ProxCloud is a self-service private-cloud portal for Proxmox VE: it lets customers organize into organizations and projects, provision and
-manage cloud resources (servers, volumes, networks, floating IPs, load
-balancers, object storage, …), and it meters that usage, prices it, bills it,
+manage cloud resources (servers, volumes, networks, security groups, public
+IPs, buckets, …), and it meters that usage, prices it, bills it,
 and collects payment. It is a single Go service (`proxcloud-api`) fronting a
 PostgreSQL primary datastore, a RabbitMQ broker, an OIDC identity provider
 (Keycloak), and one or more Proxmox VE clusters.
@@ -14,8 +14,10 @@ deep dives live in sibling docs:
 - **[data-model.md](data-model.md)** — the PostgreSQL document tables and their relationships (ERD).
 - **[auth.md](auth.md)** — token validation, the RBAC permission kernel, the SigV4 admin-API scheme.
 - **[billing.md](billing.md)** — billing profiles, rating/pricing, bills, payments, suspension.
-- **[cloud-integration.md](cloud-integration.md)** — OpenStack clients, the resource cache, sync, metrics, notifications.
+- **[cloud-integration.md](cloud-integration.md)** — the Proxmox VE client and services, the resource cache, sync, metrics.
 - **[jobs-scheduling.md](jobs-scheduling.md)** — the cron catalog, cross-fleet locking, and the RabbitMQ charge fan-out.
+
+**Architecture diagrams (C4):** [architecture/c4/](architecture/c4/README.md) — context, containers, components and code views with Implemented/Planned status, plus a change log of why the architecture changed.
 
 ---
 
@@ -39,7 +41,8 @@ flowchart TB
     KC["Keycloak<br/>(OIDC issuer / IdP)"]
     PG[("PostgreSQL<br/>primary datastore")]
     RABBIT["RabbitMQ<br/>(charge fan-out)"]
-    OS["OpenStack region(s)<br/>Keystone/Nova/Neutron/<br/>Cinder/Glance/Octavia/<br/>Gnocchi/Swift"]
+    PVE["Proxmox VE cluster(s)<br/>REST :8006: VMs, SDN, firewall, storage"]
+    RGW["Ceph RGW<br/>S3 + Admin Ops"]
     SMTP["SMTP relay<br/>(transactional mail)"]
 
     UI -->|bearer JWT| APP
@@ -50,22 +53,23 @@ flowchart TB
     APP -->|validate tokens / JWKS| KC
     APP <-->|read / write| PG
     APP -->|publish / consume| RABBIT
-    APP -->|provision / read / meter| OS
+    APP -->|"provision / read"| PVE
+    APP -->|"buckets, keys"| RGW
     JOBS <--> PG
     JOBS -->|per-profile charge msgs| RABBIT
-    JOBS -->|sync / meter| OS
+    JOBS -->|"sync"| PVE
     APP -->|send templated mail| SMTP
-    OS -->|os-notification callbacks| APP
 ```
 
 The process listens on **two ports**. `:8080` is the public API surface behind
 the ingress; `:8081` is the management/operations port (health probes, on-demand
-job triggers, a cloud connectivity probe) and is never exposed to the internet.
+job triggers, billing callbacks) and is never exposed to the internet.
 
 PostgreSQL is connected **eagerly at startup** — dialed and pinged before the
-service listens, so a failed connection aborts the boot — while RabbitMQ, OIDC
-discovery, and OpenStack authentication happen on background goroutines, so those
-unreachable dependencies degrade a capability rather than blocking the boot.
+service listens, so a failed connection aborts the boot — while RabbitMQ and OIDC
+discovery happen on background goroutines, so those unreachable dependencies
+degrade a capability rather than blocking the boot. Proxmox and other cloud
+clients are not dialed at boot at all: they are built per provider on demand.
 
 ---
 
@@ -90,7 +94,6 @@ sequenceDiagram
     M->>PG: pgdoc.Connect (dial + ping, fatal on failure)
     M->>BG: maintainRabbit (connect + auto-reconnect loop)
     M->>BG: oidc.Discover → authn.SetRealms (per-realm verifiers)
-    M->>BG: openstack client.New → cloudCli.Store
     M->>Wire: build repos, services, handlers per domain
     Note over Wire: message.SeedSystemTemplates (idempotent)
     M->>Sched: registerJobs (crons + ShedLock)
@@ -113,11 +116,11 @@ Key properties of the boot, all visible in `run()`:
 - **The authenticator starts empty and fills in.** `auth.New` is wired into the
   router immediately; realms arrive later from `oidc.Discover`. Until then,
   bearer tokens fail closed (401) — the service is always safe, never open.
-- **The cloud client is a lazily-populated pointer.** `cloudCli
-  atomic.Pointer[client.Client]` is declared before the project handler and
-  resolved by a background goroutine once OpenStack auth succeeds; handlers read
-  it through a `func() *client.Client` accessor, so cloud-write endpoints simply
-  return "not ready" until the cloud is reachable.
+- **Cloud clients are built per provider.** The project handler receives
+  factories: `projectH.SetProxmox` (`pve.NewService` from the provider's
+  `PVEConfig`), `SetKamaji`, `SetDbaas`, and ceph-s3 through `client.NewCephS3`.
+  A Proxmox write returns `503 "proxmox client not ready"` when the provider
+  cannot be reached.
 - **Jobs are wired but gated.** Every cron is registered, but the scheduler only
   `Start()`s when `PROXCLOUD_JOBS_SCHEDULER_ENABLED=true`. A plain deploy therefore
   never charges a bill on a timer; operators drive the flow deterministically via
@@ -168,8 +171,7 @@ flowchart LR
 **Public-path whitelist** (`pkg/auth`, `IsPublic`): exact paths (`/error`,
 `/api/v1/platform-configuration/default`, the billing config country/currency
 lists, the RFC 9728 resource-metadata doc) and prefixes (`/openapi.json`, `/mcp`,
-`/api/v1/auth/`, `/api/v1/download/`, `/api/v1/notifications/`,
-`/api/v1/callbacks/`, `/api/v1/payments/`, `/api/v1/admin/job/`,
+`/api/v1/auth/`, `/api/v1/download/`, `/api/v1/callbacks/`, `/api/v1/payments/`, `/api/v1/admin/job/`,
 `/api/v1/admin/onboarding/`, `/api/v1/webhooks/`,
 `/api/v1/events/`). These are the webhook, download-token, SSE, and operator
 callback paths that authenticate by their own scheme (token in the URL, SigV4,
@@ -179,8 +181,8 @@ signed webhook) rather than a bearer header.
 
 A plain `net/http.ServeMux`: `GET /actuator/health` (liveness),
 `GET /actuator/health/readiness` (PostgreSQL ping + RabbitMQ health),
-`GET /actuator/info`, a build probe, an optional `GET /debug/cloud` connectivity
-probe, and — when jobs are enabled or debug-triggers are on — a family of
+`GET /actuator/info`, a build probe, the billing-service callbacks (when a shared
+token is configured), and — when jobs are enabled or debug-triggers are on — a family of
 `POST /debug/run-*` triggers to drive crons on demand (sync, metrics, charge,
 collect, dunning, savings expiry, project deletion, HMAC key minting, mail send,
 RabbitMQ self-test).
@@ -233,7 +235,7 @@ Notable conventions this example shows:
   `services:[]`, `customInfo:{}`) are always present.
 - **Embedded vs. referenced.** Memberships and attached services live **inside**
   the project document (queried via the `memberships.sub` and
-  `services.externalProjectId` paths), whereas organization and billing profile
+  `services` paths), whereas organization and billing profile
   are referenced by id. See [data-model.md](data-model.md) for the full picture.
 
 ### A full authenticated request
@@ -248,7 +250,7 @@ sequenceDiagram
     participant H as project.Handler
     participant S as project.Service
     participant DB as PostgreSQL
-    participant OS as OpenStack
+    participant PVE as Proxmox VE API
 
     SPA->>KC: login (Authorization Code + PKCE)
     KC-->>SPA: access token (JWT)
@@ -260,8 +262,8 @@ sequenceDiagram
     S->>DB: FindForMember(_id, memberships.sub=sub)
     DB-->>S: Project or none
     alt cloud read/write endpoint
-        H->>OS: live call via cloudCli (e.g. list servers, create VM)
-        OS-->>H: cloud state
+        H->>PVE: live call via pve.Service (e.g. create VM, read status)
+        PVE-->>H: cloud state
     end
     S-->>H: domain object
     H-->>SPA: JSON DTO (NON_NULL envelope)
@@ -278,7 +280,7 @@ initialized" if absent.
 ## 5. Module map
 
 The code is organized as one Go module (`github.com/mutex-solutions/proxcloud`) with
-`internal/platform/*` domain packages, an `internal/cloud/*` OpenStack subsystem,
+`internal/platform/*` domain packages, an `internal/cloud/*` Proxmox / object-store subsystem,
 and a handful of infrastructure packages (`internal/{config,server,oidc,pgdoc,
 amqp,health}`, `pkg/{auth,httpx,textcrypt,money,audit}`).
 
@@ -303,7 +305,7 @@ flowchart TB
     end
     subgraph CLOUD["Cloud"]
         externalservice["externalservice"]
-        cloudpkg["internal/cloud/*<br/>(client, providers, syncjob,<br/>metrics, metricsjob,<br/>notification, billingresource)"]
+        cloudpkg["internal/cloud/*<br/>(pve, providers, syncjob,<br/>metrics, metricsjob,<br/>billingresource, client, kamaji, dbaas)"]
     end
     subgraph PLAT["Platform & operations"]
         platformconfig["platformconfig"]
@@ -351,8 +353,8 @@ flowchart TB
 
 | Module | Responsibility |
 |---|---|
-| `externalservice` | The `externalService` table backing each region's cloud connection, with its encrypted-at-rest `secret` decrypted on read — the pod's source of OpenStack credentials. |
-| `internal/cloud/*` | The OpenStack subsystem (see §6): the client facade, resource providers, the resource cache + history, sync/metrics jobs, os-notification ingestion, and the cloud→billing bridge. |
+| `externalservice` | The `externalService` table: one record per provider (Proxmox API token, Ceph RGW keys, Kamaji/DBaaS kubeconfigs) with an encrypted-at-rest `secret` decrypted on read. |
+| `internal/cloud/*` | The cloud subsystem (see §6): `pve` (client, services, networks, firewall, scheduler, sync providers), `providers` (Reconcile), the resource cache + history, `syncjob`, `metrics`/`metricsjob` (Prometheus), `billingresource`, `client` (ceph-s3), `cephcred`, `kamaji`, `dbaas`. Package map: [C3 components](architecture/c4/c3-components.md). |
 
 ### Platform & operations
 
@@ -378,61 +380,59 @@ flowchart TB
 
 ## 6. The cloud subsystem (`internal/cloud/*`)
 
-The cloud layer is what makes ProxCloud a *cloud* platform: it turns OpenStack
-state into a queryable cache, meters it, and prices it. It is summarized here;
-the full treatment is in **[cloud-integration.md](cloud-integration.md)**.
+The cloud layer is what makes ProxCloud a *cloud* platform: it turns Proxmox VE
+and Ceph RGW state into a queryable cache, meters it, and prices it. It is
+summarized here; the full treatment is in
+**[cloud-integration.md](cloud-integration.md)** and the component view in
+**[C3 components](architecture/c4/c3-components.md)** (C3b, C3c, C3e).
 
 ```mermaid
 flowchart LR
-    ES["externalservice<br/>(encrypted OpenStack creds<br/>per region)"] --> CL["cloud/client<br/>CloudClient facade<br/>(gophercloud + direct-REST)"]
-    CL --> PROV["cloud/providers<br/>per-type list/map/sync<br/>+ WriteService (create/delete)"]
-    PROV --> CACHE[("cloudResource<br/>+ cloudResourceHistory")]
-    SYNC["cloud/syncjob<br/>(per ENABLED project)"] --> PROV
-    NOTI["cloud/notification<br/>os-notification ingestion"] --> CACHE
-    MET["cloud/metrics + metricsjob<br/>(Gnocchi usage → gnocchiMetrics)"] --> CACHE
-    BR["cloud/billingresource<br/>cache → priced BillingResource"] --> RATING["pricing engine<br/>(billingjob)"]
-    CACHE --> BR
-    MET --> BR
+    ES["externalservice<br/>(proxmox config + API token)"] --> PS["pve.Service<br/>(pve.Client REST)"]
+    PS --> SP["pve sync providers"]
+    SP --> REC["providers.Reconcile"]
+    REC --> CACHE[("cloudResource<br/>+ cloudResourceHistory")]
+    SYNC["cloud/syncjob<br/>(per ENABLED project)"] --> SP
+    OBJ["cloud/client<br/>(ceph-s3)"] --> CACHE
+    MET["metricsjob (Prometheus)<br/>→ usageMetrics"] --> BR
+    CACHE --> BR["cloud/billingresource<br/>cache → BillingResource"]
+    BR --> RATING["pricing engine<br/>(billingjob)"]
 ```
 
-- **`client`** — the `CloudClient` facade hiding whether a call goes through
-  gophercloud (compute/network/volume/image/load-balancer) or a direct-REST
-  transport (Gnocchi metrics, object storage). Built per external service, and
-  for suspend/sync it is scoped to a specific tenant/region.
-- **`providers`** — one provider per cloud resource type; each lists its objects,
-  maps them to a `CloudResource`, and upserts into the cache with an optimistic
-  two-op write plus a `cloudResourceHistory` soft-delete + recreation guard. A
-  `WriteService` performs live create/delete. The resource-type taxonomy is broad
-  (`SERVER`, `VOLUME`, `NETWORK`, `PORT`, `FLOATING_IP`, `LOAD_BALANCER`,
-  `IMAGE`, `KEYPAIR`, `BUCKET`, `SHARE*`, `ROUTER`, `SUBNET`, `SECURITY_GROUP`,
-  DNS/VPN/Trilio/Barbican types, …).
-- **`syncjob`** — walks every `ENABLED` project and, per attached CLOUD service,
-  lists and upserts resources into the cache (with tenant-scoping so no
-  cross-tenant leak).
-- **`notification`** — the OpenStack "Notifier URI": Ceilometer HTTP-POSTs oslo
-  lifecycle events to `/api/v1/notifications/{externalServiceId}/{region}`,
-  which are routed by `event_type`, re-read live, and applied to the cache
-  (keeping it fresh between syncs), then pushed to SSE subscribers.
-- **`metrics` / `metricsjob`** — the scheduled Gnocchi usage ingestion: per
-  `SERVER`/`PORT`, fetch the month's billable traffic and persist `gnocchiMetrics`.
-- **`billingresource`** — the cloud→billing bridge: turn cached resources (plus
-  Gnocchi usage for traffic-billed types) into the priced `BillingResource`s the
-  rating loop consumes. Includes the flat control-plane fee for
-  `KUBERNETES_CLUSTER` (workers bill as ordinary servers) and per-GB `BUCKET`
-  pricing for object storage.
-- **`kamaji` / `kamajik8s`** — the Managed Kubernetes subsystem. A `kamaji`
-  provider is a *management cluster* reached over a stored kubeconfig, not a
-  Keystone cloud: each customer cluster is one ArgoCD `Application` of the
-  pinned `openstack-kamaji-cluster` chart (full generated values, applied via
-  the management cluster's own API — never the ArgoCD API). Control planes run
-  as pods on the management cluster (Kamaji `TenantControlPlane`); worker VMs
-  are CAPI/CAPO machines in the customer's own Keystone tenant, so they surface
-  and bill like any other servers. Management-side, next to each control plane,
-  run the OpenStack CCM and the Cinder CSI *controller* — the only components
-  holding the cloud credential; the workload cluster gets a credential-free CSI
-  node plugin and never sees a secret. Post-create changes (upgrade, node
-  groups, add-ons, chart re-pin) all flow through one full-object server-side
-  re-apply of the Application. Operator guide: **[managed-k8s.md](managed-k8s.md)**.
+- **`pve`** — the Proxmox VE side: a typed REST client (`pve.Client`: cluster
+  resources, QEMU, storage, SDN, firewall, pools, tasks, PCI mappings) and the
+  project-scoped `pve.Service` (create/delete/resize/power servers, project
+  templates, volumes, GPU slots, console). Networks (`network.go`) are SDN vnets
+  with per-vnet isolation; security groups are cluster firewall groups
+  (`firewallsvc.go`); `PickNode` places VMs by capacity, storage profile and free
+  GPU slots.
+- **Sync providers + `providers.Reconcile`** — the PVE sync providers
+  (`pve/syncprovider.go`, `NetworkSyncProvider`, `SecurityGroupSyncProvider`) map
+  pool VMs, disks, templates, owned vnets and groups to cache rows; `Reconcile`
+  creates, updates and archives rows against the live list, with a
+  `cloudResourceHistory` soft-delete. The types produced are `SERVER`, `VOLUME`,
+  `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`, plus `BUCKET` (Ceph RGW) and
+  `KUBERNETES_CLUSTER` / `DATABASE_CLUSTER` (ArgoCD).
+- **`syncjob`** — every 15 minutes walks every `ENABLED` project and, per attached
+  provider and enabled service, reconciles the cache. Write paths update the cache
+  directly, and a server GET does a best-effort live refresh.
+- **`client`** — the Ceph RGW (S3 and Admin Ops) client, built with
+  `client.NewCephS3`; with `cephcred` it holds the per-project RGW user and keys.
+- **`metrics` / `metricsjob`** — opt-in traffic ingestion from a
+  Prometheus-compatible source per provider (`config.metrics.source`; Proxmox
+  defaults to `none`). Results land in the `usageMetrics` table.
+- **`billingresource`** — the cloud→billing bridge: turns cached resources (plus
+  traffic usage) into the priced `BillingResource`s the rating loop consumes:
+  instance (+ instance traffic), volume, bucket, kubernetes cluster, database
+  cluster. The floating-IP and load-balancer providers remain but no Proxmox
+  resource produces those types yet.
+- **`kamaji` / `kamajik8s` / `dbaas`** — managed Kubernetes and databases. A
+  provider is a management cluster reached over a stored kubeconfig; each
+  customer cluster is one ArgoCD `Application` written to that cluster's API.
+  Read, sync and delete work today; creating a cluster or database on a Proxmox
+  provider is planned (stubs `cloud_kamaji_create.go` and
+  `cloud_dbaas_create.go` return an explicit error). Guides:
+  **[managed-k8s.md](managed-k8s.md)**, **[managed-dbaas.md](managed-dbaas.md)**.
 
 ---
 
@@ -456,8 +456,8 @@ in **[auth.md](auth.md)**.
 always wins), and `Validate()` fails closed. Config groups: server/management
 ports, the PostgreSQL DSN (`PROXCLOUD_DB_URL`), RabbitMQ, the data-at-rest `Encryption.DefaultKey` (used by
 `pkg/textcrypt` to decrypt external-service secrets), self URLs (API/UI/admin base
-URLs, which also seed CORS), the three auth realms, the OpenStack dev-bootstrap
-connection, and the `Jobs` gates (`SchedulerEnabled`, `DebugTriggers`,
+URLs, which also seed CORS), the three auth realms, the default-region fallback
+(`PROXCLOUD_DEFAULT_REGION` / `proxcloud.default-region`, default `default`), and the `Jobs` gates (`SchedulerEnabled`, `DebugTriggers`,
 `RabbitFanout`).
 
 ### Async & scheduling (`internal/amqp`, `scheduler`, `lock`)
@@ -465,7 +465,7 @@ connection, and the `Jobs` gates (`SchedulerEnabled`, `DebugTriggers`,
 Scheduled work is driven by a seconds-enabled cron; every job is wrapped in a
 `shedLock`-backed distributed lock (`atMostFor` / `atLeastFor`) so it runs **once
 across the fleet**, not once per pod. The catalog is registered in
-`main.registerJobs` — the minutely/hourly/monthly charge crons, Gnocchi metrics,
+`main.registerJobs` — the minutely/hourly/monthly charge crons, Prometheus traffic metrics (`usageMetricsFetch`),
 services sync, savings expiry + reminders, transaction scan, auto-suspension
 (dunning), monthly bill finalization, monthly collect, and project deletion.
 
@@ -498,5 +498,5 @@ consistent NON_NULL JSON shape.
 - The document tables and their relationships → **[data-model.md](data-model.md)**
 - How a token becomes a permission decision → **[auth.md](auth.md)**
 - How usage becomes a bill and a payment → **[billing.md](billing.md)**
-- How OpenStack state becomes a cached, metered resource → **[cloud-integration.md](cloud-integration.md)**
+- How Proxmox state becomes a cached, metered resource → **[cloud-integration.md](cloud-integration.md)**
 - The full cron catalog and locking model → **[jobs-scheduling.md](jobs-scheduling.md)**

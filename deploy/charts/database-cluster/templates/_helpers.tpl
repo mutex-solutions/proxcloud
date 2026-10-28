@@ -38,15 +38,6 @@ internal/cloud/dbaas — this side is the last line of defence, not the UX.
 {{- if and (ne .Values.engine "ferretdb") (not .Values.storage.sizeGi) -}}
 {{- fail "storage.sizeGi is required" -}}
 {{- end -}}
-{{- if not .Values.network.networkId -}}
-{{- fail "network.networkId is required" -}}
-{{- end -}}
-{{- if not .Values.network.subnetId -}}
-{{- fail "network.subnetId is required" -}}
-{{- end -}}
-{{- if not .Values.network.memberSubnetId -}}
-{{- fail "network.memberSubnetId is required" -}}
-{{- end -}}
 {{- if not .Values.proxcloud.projectId -}}
 {{- fail "proxcloud.projectId is required" -}}
 {{- end -}}

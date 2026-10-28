@@ -14,7 +14,7 @@ package admin
 //   PUT  /automatic-suspension/{id}         set suspensionConfiguration + overwriteSuspension
 //   PUT  /tax-configuration/{id}            set taxConfiguration
 //   PUT  /project-provisioning-quota/{id}   set projectProvisioningQuota
-//   PUT  /reseller/{id}                     set reseller (+ the disable-while-in-use guard)
+//   PUT  /reseller/{id}                     set reseller
 //   PUT  /message-templates/{id}            set messageTemplateConfig
 //   DELETE /{id}                            in-use guards (bill/project/card) → delete by id
 //   POST /validations/{validationId}/status/{status}   flip the validation doc's status
@@ -527,11 +527,7 @@ type resellerReq struct {
 	Enabled bool `json:"enabled"`
 }
 
-// billingProfileReseller loads the profile or 404s → if currently reseller-enabled AND the
-// request disables it AND external services still reference it as a reseller → 400
-// "Cannot disable reseller option because it is used by external services"; else sets reseller → saves →
-// returns it. (The in-use check matches any externalService where
-// config.openstackReseller.enabled==true && config.openstackReseller.billingProfileId==id.)
+// billingProfileReseller loads the profile or 404s → sets reseller.enabled → saves → returns it.
 func (h *Handler) billingProfileReseller(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billingProfileUpdatePerm) {
 		return
@@ -545,21 +541,6 @@ func (h *Handler) billingProfileReseller(w http.ResponseWriter, r *http.Request)
 	existing, ok := h.findBillingProfileOr404(w, r, id)
 	if !ok {
 		return
-	}
-	// The profile's current reseller.enabled flag.
-	currentlyEnabled := false
-	if rs, ok := existing["reseller"].(pgdoc.M); ok {
-		currentlyEnabled, _ = rs["enabled"].(bool)
-	}
-	if currentlyEnabled && !req.Enabled {
-		inUse, err := h.repo.ExistsExternalServiceByReseller(r.Context(), id)
-		if httpx.WriteError(w, err) {
-			return
-		}
-		if inUse {
-			httpx.WriteError(w, httpx.BadRequest("Cannot disable reseller option because it is used by external services"))
-			return
-		}
 	}
 	reseller := pgdoc.M{"enabled": req.Enabled}
 	existing["reseller"] = reseller

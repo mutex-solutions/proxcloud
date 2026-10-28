@@ -62,7 +62,7 @@ func (r *Repo) insertUserDoc(ctx context.Context, doc pgdoc.M) (pgdoc.M, error) 
 	return doc, nil
 }
 
-// deleteUserByID removes the user doc (after the per-user keystone cleanup succeeds).
+// deleteUserByID removes the user doc.
 func (r *Repo) deleteUserByID(ctx context.Context, id string) error {
 	_, err := r.c("users").DeleteByID(ctx, id)
 	return err

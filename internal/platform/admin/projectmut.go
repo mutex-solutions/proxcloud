@@ -22,20 +22,19 @@ import (
 // /project/{billingProfileId}/billing-profile and /project/external-services/{externalServiceId}
 // are ALREADY registered there and are intentionally NOT re-registered here.
 //
-// CLOUD LEGS: the endpoints that hit OpenStack run LIVE through h.projectCloud (ProjectCloudOps,
+// CLOUD LEGS: the endpoints that hit the cloud run LIVE through h.projectCloud (ProjectCloudOps,
 // wired in cmd/api — nil → they degrade to their original 501 responses, which is what the unit tests
 // exercise):
 //
 //   - POST   /project                                  (create; optional bootstrap provision)
 //   - POST   /project/{id}/sync                         (syncjob.SyncOne — whole-project / scoped)
-//   - POST   /project/{id}/{status}  (ENABLED|DISABLED) (nova pause/unpause + status flip; resume async + sync)
+//   - POST   /project/{id}/{status}  (ENABLED|DISABLED) (PVE suspend/resume + status flip; resume async + sync)
 //   - GET    /project/{id}/external-service/{esid}      (bootstrap onto the explicit service)
-//   - GET    /project/unassociated-os-projects         (live keystone ListAllProjects, read-only)
 //   - GET    /project/{id}/resources/counts            (cache aggregation — already live)
 //
 //   - DELETE /project/{id}      (schedule deletion → CanDelete pre-check → flip SCHEDULED_FOR_DELETION)
 //   - DELETE /project/{id}/now  (delete now → flip DELETE_IN_PROGRESS → async Teardown cascade
-//                                = project.Handler.TeardownProject: cloud resources + keystone tenant → DELETED)
+//                                = project.Handler.TeardownProject: cloud resources + provider tenant → DELETED)
 //
 // IN SCOPE (no cloud, pure datastore): GET /project/{id}/members, PUT /project/{id} (field-set),
 // DELETE /project/{id}/cancel (status flip to ENABLED), and the no-cloud branches of
@@ -59,7 +58,6 @@ const (
 // external-service) take precedence over the {status} param route at the same position.
 func (h *Handler) routeProjectMut(r chi.Router) {
 	r.Post("/project", h.projectCreate)
-	r.Get("/project/unassociated-os-projects", h.projectUnassociatedOsProjects)
 	r.Get("/project/{id}/members", h.projectMembers)
 	r.Get("/project/{id}/resources/counts", h.projectResourceCounts)
 	r.Get("/project/{id}/gpu-usage", h.projectGPUUsage)
@@ -102,7 +100,7 @@ func (h *Handler) findProjectOr404(w http.ResponseWriter, r *http.Request, id st
 // organization (404) + its billingProfileId (400) + userIds exist (404) → then:
 // resolve the effective billing profile (validated but NOT stored on the project — the builder
 // omits it), build the Project (ENABLED, org-OWNER membership), save, optionally bootstrap the
-// external service (create-or-ADOPT the keystone tenant via projectCloud.Bootstrap), add the
+// external service (create-or-reuse the provider tenant via projectCloud.Bootstrap), add the
 // userIds as MEMBERs, save, audit CREATE. Any failure below →
 // 500 "Error creating project".
 func (h *Handler) projectCreate(w http.ResponseWriter, r *http.Request) {
@@ -224,9 +222,8 @@ func (h *Handler) projectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	pid, _ := created["_id"].(string)
 	if req.ExternalServiceId != "" {
-		// Bootstrap with an explicit service (+ optional ADOPT of an existing keystone
-		// project via externalProjectId).
-		if err := h.projectCloud.Bootstrap(ctx, pid, req.ExternalServiceId, req.ExternalProjectId); err != nil {
+		// Bootstrap with an explicit service.
+		if err := h.projectCloud.Bootstrap(ctx, pid, req.ExternalServiceId); err != nil {
 			createFailed()
 			return
 		}
@@ -247,7 +244,6 @@ type createProjectRequest struct {
 	BillingProfileId  string   `json:"billingProfileId"`
 	OrganizationId    string   `json:"organizationId"`
 	ExternalServiceId string   `json:"externalServiceId"`
-	ExternalProjectId string   `json:"externalProjectId"`
 	UserIds           []string `json:"userIds"`
 }
 
@@ -333,29 +329,6 @@ func (h *Handler) projectResourceCounts(w http.ResponseWriter, r *http.Request) 
 	httpx.OK(w, counts)
 }
 
-// projectUnassociatedOsProjects lists keystone projects not yet mapped to a proxcloud project
-// (?externalServiceId): resolve the external service, list ALL keystone projects (admin identity
-// scope), subtract the ones already mapped to a proxcloud project via services[].externalProjectId,
-// return the rest (read-only).
-func (h *Handler) projectUnassociatedOsProjects(w http.ResponseWriter, r *http.Request) {
-	if !h.require(w, r, projectReadPerm) {
-		return
-	}
-	esID := r.URL.Query().Get("externalServiceId")
-	if esID == "" {
-		// required query param absent → 400.
-		httpx.WriteError(w, httpx.BadRequest("Required parameter 'externalServiceId' is not present."))
-		return
-	}
-	es, ok := h.externalServiceOr404(w, r, esID)
-	if !ok {
-		return
-	}
-	// No external tenant directory exists on this fork — nothing unassociated.
-	_ = es
-	httpx.List(w, []any{})
-}
-
 // externalServiceOr404 resolves + decrypts an external service, or writes the exact
 // external-service lookup error — the odd HTTP-400/code-404 "Cloud provider is not found.
 // Please contact support." envelope (same as the serviceByID read).
@@ -379,7 +352,7 @@ func (h *Handler) externalServiceOr404(w http.ResponseWriter, r *http.Request, e
 
 // projectAddExternalService attaches an external service to a project (GET /{id}/external-service/{esid}):
 // resolve the project (mutation 404) + external service (the 400/404 envelope), then bootstrap with
-// the explicit service — create-or-reuse the keystone tenant and attach the ProjectExternalService
+// the explicit service — create-or-reuse the provider tenant and attach the ProjectExternalService
 // entry. Bootstrap failure = the wrapped 500 "Cannot sync the project with the infrastructure. ".
 func (h *Handler) projectAddExternalService(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectUpdatePerm) {
@@ -399,7 +372,7 @@ func (h *Handler) projectAddExternalService(w http.ResponseWriter, r *http.Reque
 			"attaching a cloud provider to a project not implemented"))
 		return
 	}
-	if err := h.projectCloud.Bootstrap(r.Context(), id, esID, ""); err != nil {
+	if err := h.projectCloud.Bootstrap(r.Context(), id, esID); err != nil {
 		// Bootstrap failure → 500 "Cannot sync the project with the infrastructure. ".
 		httpx.WriteError(w, httpx.NewError(http.StatusInternalServerError, http.StatusInternalServerError,
 			"Cannot sync the project with the infrastructure. "))
@@ -556,8 +529,8 @@ func (h *Handler) projectSetPublicNetworks(w http.ResponseWriter, r *http.Reques
 // projectUpdateStatus changes a project's status (POST /{id}/{status}): load-or-404, validate the
 // status value (invalid → 500), 400 if already in the
 // desired status, then:
-//   - ENABLED / DISABLED → resume / suspend against OpenStack (cloud, not wired): the
-//     status is set only AFTER the cloud call succeeds, so we 501 without persisting.
+//   - ENABLED / DISABLED → resume / suspend the project's PVE VMs (projectCloud.PauseServers;
+//     unwired → 501 without persisting, since the status is set only after the cloud call).
 //   - SCHEDULED_FOR_DELETION / DELETE_IN_PROGRESS → no cloud branch; it falls through and
 //     saves the project with its status unchanged → pure datastore no-op save, return the project.
 func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
@@ -593,9 +566,8 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		before := maps.Clone(existing)
 		if status == "DISABLED" {
-			// Suspend is SYNCHRONOUS: keystone member/API-user disable (no-op here —
-			// the bootstrap creates no per-customer keystone users) + nova PAUSE of every cached
-			// server (per-server errors swallowed inside), THEN the status flip persists.
+			// Suspend is SYNCHRONOUS: PVE suspend of every cached server (per-server errors
+			// swallowed inside), THEN the status flip persists.
 			if err := h.projectCloud.PauseServers(r.Context(), id, true); httpx.WriteError(w, err) {
 				return
 			}
@@ -603,7 +575,7 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			// Resume runs asynchronously: the datastore flip persists immediately; nova UNPAUSE + the
+			// Resume runs asynchronously: the datastore flip persists immediately; PVE resume + the
 			// follow-up project sync happen on a worker thread. Flip first so the async whole-project
 			// sync sees ENABLED.
 			if _, err := h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"status": status}); httpx.WriteError(w, err) {
@@ -702,9 +674,7 @@ func (h *Handler) projectScheduleDeletion(w http.ResponseWriter, r *http.Request
 }
 
 // projectDeleteNow deletes a project immediately (DELETE /{id}/now): load-or-404, status→DELETE_IN_PROGRESS
-// (persisted), then dispatches the async OpenStack teardown. The
-// status flip IS the faithful datastore effect and is applied; the async cloud delete is
-// not wired (return 501 after the flip).
+// (persisted), then dispatches the async cloud teardown (unwired → 501 before the flip).
 func (h *Handler) projectDeleteNow(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectDeletePerm) {
 		return
@@ -714,7 +684,7 @@ func (h *Handler) projectDeleteNow(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// The async OpenStack teardown is unwired (tests) → the original 501 BEFORE
+	// The async cloud teardown is unwired (tests) → the original 501 BEFORE
 	// the status flip (so a degraded boot never orphans a project in DELETE_IN_PROGRESS with no job).
 	if h.projectCloud == nil || h.projectCloud.Teardown == nil {
 		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,

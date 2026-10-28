@@ -60,7 +60,7 @@ const actionCopy: Record<PendingAction["kind"], { title: string; verb: string; h
   sync: {
     title: "Sync project",
     verb: "Sync",
-    hint: "Reconciles the cached cloud resources against OpenStack.",
+    hint: "Reconciles the cached cloud resources against the live cloud.",
   },
 }
 

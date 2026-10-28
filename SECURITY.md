@@ -35,7 +35,7 @@ release / image.
 ## Handling secrets and configuration
 
 - **Never commit secret values.** Credentials, encryption keys, OIDC client
-  secrets, Stripe keys, and OpenStack passwords are supplied at runtime via
+  secrets, Stripe keys, and Proxmox API tokens are supplied at runtime via
   environment variables or Kubernetes Secrets — not source.
 - Deployment value overlays that may carry secrets are already excluded by
   `.gitignore` (the local value-overlay files under `deploy/` listed there). The

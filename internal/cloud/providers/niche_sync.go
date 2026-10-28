@@ -1,6 +1,5 @@
-// niche_sync.go — the ceph-s3 BUCKET sync provider (the only survivor of the
-// OpenStack niche set: buckets are backend-agnostic and a homelab with an RGW
-// uses the ceph-s3 provider unchanged).
+// niche_sync.go — the ceph-s3 BUCKET sync provider (buckets are backend-agnostic:
+// a homelab with an RGW uses the ceph-s3 provider unchanged).
 package providers
 
 import (

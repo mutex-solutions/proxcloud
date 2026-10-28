@@ -46,7 +46,7 @@ ON CONFLICT (id) DO NOTHING;
 -- Managed Database FULL price (database_cluster: pre-multiplied totals — vcpus_total /
 -- ram_gb_total / storage_gb_total = per-instance x replicas; the DB pods/volumes run on
 -- ops-owned nodes so nothing else bills them; the endpoint gate DEFERS accrual until the
--- Octavia VIP exists, then back-bills the current cycle). One rule per engine, rates =
+-- LB ingress IP exists, then back-bills the current cycle). One rule per engine, rates =
 -- DIGITALOCEAN PARITY (see the derivation note in price-plan-seed.json; keep both in sync).
 INSERT INTO "pricePlanRule" (id, doc) VALUES
 ('6a4e63e8aa5e5eed10000015', '{"name":"Managed Database: PostgreSQL (DigitalOcean-parity)","timeUnit":"hour","resourceType":"database_cluster","pricePlanId":"6a4e63e8aa5e5eed10000001","applyMethod":"ADD_TO_TOTAL","prices":[{"attributeName":"vcpus_total","tiers":[{"value":"0.002740"}]},{"attributeName":"ram_gb_total","tiers":[{"value":"0.015068"}]},{"attributeName":"storage_gb_total","tiers":[{"value":"0.000295"}]}],"filters":[{"attributeName":"engine","operator":"eq","value":"postgresql"}],"modifiers":[]}'),

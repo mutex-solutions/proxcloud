@@ -1,12 +1,12 @@
-// Package metricsjob is the scheduled gnocchi
+// Package metricsjob is the scheduled
 // usage-ingestion driver. It walks ENABLED projects, reads each project's SERVER + PORT
 // cloud resources from the cache, resolves the server's (decrypted) ExternalService, and
-// per server fetches+saves the month's GnocchiMetrics via metrics.Service.
+// per server fetches+saves the month's UsageMetrics via metrics.Service.
 //
 // The cache walk + per-server dispatch are testcontainer-verifiable (inject fake
-// FetcherFactory / PublicNetworksFunc seams). The live defaults (a CloudClient+gnocchi per
-// service, and external-network detection) hit the shared cloud read-only and are
-// golden-verified in the gated live run.
+// FetcherFactory / PublicNetworksFunc seams). The live defaults (a Prometheus fetcher per
+// service, and the provider's config-declared public networks) are golden-verified in the
+// gated live run.
 package metricsjob
 
 import (
@@ -21,13 +21,13 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 )
 
-// FetcherFactory builds the gnocchi MeasureFetcher for a service/region (live default:
-// CloudClient + metrics.New). Injected so the walk is testable without a cloud.
+// FetcherFactory builds the MeasureFetcher for a service/region (live default:
+// metrics.NewPrometheus). Injected so the walk is testable without a cloud.
 type FetcherFactory func(ctx context.Context, es *externalservice.ExternalService, region string) (metrics.MeasureFetcher, error)
 
 // PublicNetworksFunc resolves the public NETWORK cloud resources for a service/region
-// (their ExternalID is matched by metrics.isPublicTraffic). Live default = the cloud's
-// router:external networks.
+// (their ExternalID is matched by metrics.isPublicTraffic). Live default = the provider's
+// config-declared public networks.
 type PublicNetworksFunc func(ctx context.Context, es *externalservice.ExternalService, region string) ([]cloud.CloudResource, error)
 
 // Job is the metrics-ingestion driver.
@@ -116,8 +116,8 @@ func (j *Job) processServer(ctx context.Context, server *cloud.CloudResource, po
 		j.log.Error("metricsjob: public networks", "server", server.ID, "err", err)
 		return
 	}
-	if err := j.svc.FetchAndSaveGnocchiMetrics(ctx, fetcher, server, ports, publicNets, es.GnocchiGranularity(), start, end); err != nil {
-		j.log.Error("metricsjob: fetch+save gnocchi metrics", "server", server.ID, "err", err)
+	if err := j.svc.FetchAndSaveUsageMetrics(ctx, fetcher, server, ports, publicNets, start, end); err != nil {
+		j.log.Error("metricsjob: fetch+save usage metrics", "server", server.ID, "err", err)
 	}
 }
 
@@ -134,8 +134,7 @@ func (j *Job) externalService(ctx context.Context, cache map[string]*externalser
 }
 
 // liveFetcherFactory builds the usage-source MeasureFetcher. Prometheus is the
-// only live source on this fork (gnocchi died with the OpenStack backend) — any
-// other configured source errors and the job skips the provider.
+// only live source — any other configured source errors and the job skips the provider.
 func liveFetcherFactory(ctx context.Context, es *externalservice.ExternalService, region string) (metrics.MeasureFetcher, error) {
 	if es.MetricsSource() == externalservice.MetricsSourcePrometheus {
 		return metrics.NewPrometheus(es.PrometheusMetricsConfig())

@@ -10,7 +10,7 @@ import (
 // build or a pgdoc decode) OR a NAMED map/slice type with the same underlying shape (the
 // JSON codec's pgdoc.M/pgdoc.A round-trip shapes) — a bare type assertion misses
 // named types, which made every keyed compare "differ" → update churn on every sync pass.
-// LIVE-CAUGHT on the kolla cloud: run-sync #2 updated 3 unchanged resources. The reflect
+// LIVE-CAUGHT on a live cloud: run-sync #2 updated 3 unchanged resources. The reflect
 // conversion covers both shapes without depending on the driver types.
 var (
 	tAnyMap  = reflect.TypeOf(map[string]any(nil))
@@ -46,7 +46,7 @@ func goString(v any) string { return fmt.Sprintf("%v", v) }
 // "router"), recursively, with:
 //   - NUMBER-WIDTH tolerance (compared as float64) — a stored int32/int64/float64
 //     round-trip doesn't count as a change;
-//   - ORDER-INSENSITIVE list compare (sorted toString) — a neutron list that comes
+//   - ORDER-INSENSITIVE list compare (sorted toString) — a list that comes
 //     back reordered (security_group_rules, allocation_pools, dns_nameservers, host_routes) isn't
 //     a change.
 // Go's default Reconcile.dataEqual does a whole-data JSON string compare, which churns on both of

@@ -49,7 +49,7 @@ function parseGPUCount(value: string): number {
   return /^\+?\d+$/.test(trimmed) ? Number(trimmed) : 0
 }
 
-// Keep this in lock-step with internal/cloud/gpu.go. Nova's first PCI alias names the
+// Keep this in lock-step with internal/cloud/gpu.go. The flavor's first PCI alias names the
 // quota bucket; every valid device count in the alias list contributes to that bucket.
 export function gpuFromFlavor(specs?: Record<string, unknown>): { model: string; count: number } | undefined {
   if (!specs) return undefined
@@ -130,7 +130,7 @@ export function serverQuotaViolations(
 
 // Region GPU capacity gate. A GPU flavor whose model has no project limit still can't be created
 // when the region's cluster has no free devices — the project-quota check above never sees this, so
-// OpenStack rejects at create ("No valid host"). When capacity is visible we block it up front.
+// the cluster rejects it at create. When capacity is visible we block it up front.
 // Capacity models are already normalized backend-side (cloud.NormalizeGPUAlias); gpuFromFlavor
 // returns a normalized model too, so they compare directly (re-normalizing is just defensive).
 export function gpuCapacityViolations(

@@ -1,9 +1,9 @@
-// Package providers is the OpenStack CloudResource provider layer:
+// Package providers is the CloudResource provider layer:
 // each provider lists its cloud resource type and maps the cloud
 // object to a CloudResource, and Sync upserts them into the cache. This read-sync
-// populates the `cloudResource` collection the metrics job + rating loop read from. Write
-// providers (create/delete) + the full createOrUpdate dispatch (shouldBeDeleted /
-// isNeededToUpdate / delete-missing) land later.
+// populates the `cloudResource` collection the metrics job + rating loop read from;
+// Reconcile adds the createOrUpdate gates (shouldBeDeleted / isNeededToUpdate /
+// delete-missing).
 package providers
 
 import (
@@ -33,7 +33,7 @@ type ProjectScoped interface {
 
 // Deletable is an optional Provider capability (shouldBeDeleted,
 // checked FIRST in createOrUpdate): a cached resource in a terminal/inconsistent state is
-// delete-archived even though the cloud still lists it (e.g. a nova server in status DELETED).
+// delete-archived even though the cloud still lists it (e.g. a server in status DELETED).
 type Deletable interface {
 	ShouldBeDeleted(cr *cloud.CloudResource) bool
 }

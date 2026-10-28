@@ -75,7 +75,7 @@ func (f *fakeProm) path() string {
 }
 
 // TestPrometheusLibvirtSchema drives the full MeasureFetcher contract against a faked
-// libvirt-exporter layout: nova-uuid → domain join, target_device discovery, per-direction
+// libvirt-exporter layout: instance-uuid → domain join, target_device discovery, per-direction
 // selectors, and the summed max−min → MB math.
 func TestPrometheusLibvirtSchema(t *testing.T) {
 	f := &fakeProm{t: t, respond: func(q string) string {
@@ -141,57 +141,16 @@ func TestPrometheusLibvirtSchema(t *testing.T) {
 	}
 
 	monthStart := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	in, err := p.MeasuresMBForCurrentMonth(context.Background(), inRef, 0, monthStart)
+	in, err := p.MeasuresMBForCurrentMonth(context.Background(), inRef, monthStart)
 	if err != nil {
 		t.Fatalf("measures in: %v", err)
 	}
-	out, err := p.MeasuresMBForCurrentMonth(context.Background(), outRef, 0, monthStart)
+	out, err := p.MeasuresMBForCurrentMonth(context.Background(), outRef, monthStart)
 	if err != nil {
 		t.Fatalf("measures out: %v", err)
 	}
 	if in.String() != "10" || out.String() != "5" {
 		t.Fatalf("MB math wrong: in=%s out=%s", in, out)
-	}
-}
-
-// TestPrometheusCeilometerSchemas checks discovery + tap extraction for the two ceilometer
-// layouts (bare pushgateway names with resource_id, prefixed exporter names with resource).
-func TestPrometheusCeilometerSchemas(t *testing.T) {
-	cases := []struct {
-		schema, metric, label string
-	}{
-		{PromSchemaCeilometerPushgw, "network_incoming_bytes", "resource_id"},
-		{PromSchemaCeilometerExporter, "ceilometer_network_incoming_bytes", "resource"},
-	}
-	for _, c := range cases {
-		t.Run(c.schema, func(t *testing.T) {
-			rid := "instance-00000002-uuid-9-tapab12cd34-56"
-			f := &fakeProm{t: t, respond: func(q string) string {
-				if !strings.Contains(q, c.metric) || !strings.Contains(q, c.label+"=~") || !strings.Contains(q, "uuid-9") {
-					t.Fatalf("unexpected discovery query: %s", q)
-				}
-				return promVector(map[string]any{c.label: rid, "__value__": "1"})
-			}}
-			srv := httptest.NewServer(f.handler())
-			defer srv.Close()
-			p, err := NewPrometheus(PrometheusConfig{URL: srv.URL, Schema: c.schema})
-			if err != nil {
-				t.Fatalf("new: %v", err)
-			}
-			ifaces, err := p.SearchInstanceInterfaces(context.Background(), "uuid-9")
-			if err != nil {
-				t.Fatalf("search: %v", err)
-			}
-			if len(ifaces) != 1 {
-				t.Fatalf("expected 1 interface, got %+v", ifaces)
-			}
-			if ifaces[0].Name != "tapab12cd34-56" {
-				t.Fatalf("tap extraction wrong: %q", ifaces[0].Name)
-			}
-			if !strings.Contains(ifaces[0].Metrics["network.incoming.bytes"], fmt.Sprintf("%s{%s=%q}", c.metric, c.label, rid)) {
-				t.Fatalf("selector wrong: %s", ifaces[0].Metrics["network.incoming.bytes"])
-			}
-		})
 	}
 }
 
@@ -208,7 +167,7 @@ func TestPrometheusAuthHeaders(t *testing.T) {
 		p, err := NewPrometheus(PrometheusConfig{
 			URL:       srv.URL + "/prometheus",
 			BasicUser: "u", BasicPassword: "pw",
-			Headers: map[string]string{"X-Scope-OrgID": "openstack"},
+			Headers: map[string]string{"X-Scope-OrgID": "tenant-a"},
 		})
 		if err != nil {
 			t.Fatalf("new: %v", err)
@@ -219,7 +178,7 @@ func TestPrometheusAuthHeaders(t *testing.T) {
 		if got := f.path(); got != "/prometheus/api/v1/query" {
 			t.Fatalf("path prefix lost: %s", got)
 		}
-		if f.head().Get("X-Scope-OrgID") != "openstack" {
+		if f.head().Get("X-Scope-OrgID") != "tenant-a" {
 			t.Fatalf("tenant header missing")
 		}
 		user, pass, ok := (&http.Request{Header: f.head()}).BasicAuth()
@@ -278,7 +237,7 @@ func TestPrometheusErrors(t *testing.T) {
 	})
 }
 
-// TestPrometheusMeasuresEdgeCases: empty vector → 0 (gnocchi parity for no-measures) and the
+// TestPrometheusMeasuresEdgeCases: empty vector → 0 (no measures) and the
 // negative-sum guard → 0 rather than a negative charge.
 func TestPrometheusMeasuresEdgeCases(t *testing.T) {
 	val := `{"status":"success","data":{"resultType":"vector","result":[]}}`
@@ -289,18 +248,18 @@ func TestPrometheusMeasuresEdgeCases(t *testing.T) {
 	p, _ := NewPrometheus(PrometheusConfig{URL: srv.URL})
 	start := time.Now().UTC().Add(-time.Hour)
 
-	got, err := p.MeasuresMBForCurrentMonth(context.Background(), `m{a="b"}`, 0, start)
+	got, err := p.MeasuresMBForCurrentMonth(context.Background(), `m{a="b"}`, start)
 	if err != nil || !got.IsZero() {
 		t.Fatalf("empty vector: got %s, err %v", got, err)
 	}
 
 	val = promVector(map[string]any{"__value__": "-5"})
-	got, err = p.MeasuresMBForCurrentMonth(context.Background(), `m{a="b"}`, 0, start)
+	got, err = p.MeasuresMBForCurrentMonth(context.Background(), `m{a="b"}`, start)
 	if err != nil || !got.IsZero() {
 		t.Fatalf("negative guard: got %s, err %v", got, err)
 	}
 
-	got, err = p.MeasuresMBForCurrentMonth(context.Background(), "", 0, start)
+	got, err = p.MeasuresMBForCurrentMonth(context.Background(), "", start)
 	if err != nil || !got.IsZero() {
 		t.Fatalf("empty ref: got %s, err %v", got, err)
 	}

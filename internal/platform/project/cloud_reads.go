@@ -27,7 +27,7 @@ func (h *Handler) resolveForMember(w http.ResponseWriter, r *http.Request) (*use
 }
 
 // resourceCounts returns per-type cloud-resource counts + TOTAL.
-// Empty project → {"TOTAL":0}. Reads the cloudResource cache (not live OpenStack).
+// Empty project → {"TOTAL":0}. Reads the cloudResource cache (not the live cloud).
 func (h *Handler) resourceCounts(w http.ResponseWriter, r *http.Request) {
 	_, p, ok := h.resolveForMember(w, r)
 	if !ok {
@@ -143,22 +143,16 @@ func (h *Handler) resourceStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// serviceResourceTypes maps an OpenStack service name (externalService.config.services key) to the
+// serviceResourceTypes maps a service name (externalService.config.services key) to the
 // CloudResourceTypes its provider serves — the basis for a location's resourceTypes list.
 var serviceResourceTypes = map[string][]string{
-	"compute":         {cloud.TypeServer, cloud.TypeBaremetalServer, cloud.TypeKeypair, cloud.TypeServerGroup},
-	"network":         {cloud.TypeNetwork, cloud.TypeSubnet, cloud.TypeRouter, cloud.TypePort, cloud.TypeFloatingIP, cloud.TypeSecurityGroup},
-	"volume":          {cloud.TypeVolume, cloud.TypeVolumeSnapshot, cloud.TypeVolumeBackup},
-	"image":           {cloud.TypeImage},
-	"orchestration":   {cloud.TypeStack},             // Heat → stacks (was mis-mapped to cluster)
-	"container-infra": {cloud.TypeKubernetesCluster}, // Magnum (dormant — no Magnum backend)
-	"kubernetes":      {cloud.TypeKubernetesCluster}, // Kamaji managed k8s (the kamaji provider's only slug)
-	"database":        {cloud.TypeDatabaseCluster},   // Managed databases (the dbaas provider's only slug)
-	"load-balancer":   {cloud.TypeLoadBalancer},
-	"object-store":    {cloud.TypeBucket},
-	"key-manager":     {cloud.TypeBarbicanSecret, cloud.TypeBarbicanContainer},
-	"sharev2":         {cloud.TypeShare, cloud.TypeShareSnapshot, cloud.TypeShareNetwork}, // Manila key = sharev2
-	"dns":             {cloud.TypeDNSZone},
+	"compute":      {cloud.TypeServer, cloud.TypeBaremetalServer, cloud.TypeKeypair, cloud.TypeServerGroup},
+	"network":      {cloud.TypeNetwork, cloud.TypeSubnet, cloud.TypeRouter, cloud.TypePort, cloud.TypeFloatingIP, cloud.TypeSecurityGroup},
+	"volumev3":     {cloud.TypeVolume, cloud.TypeVolumeSnapshot, cloud.TypeVolumeBackup},
+	"image":        {cloud.TypeImage},
+	"kubernetes":   {cloud.TypeKubernetesCluster}, // Kamaji managed k8s (the kamaji provider's only slug)
+	"database":     {cloud.TypeDatabaseCluster},   // Managed databases (the dbaas provider's only slug)
+	"object-store": {cloud.TypeBucket},
 }
 
 // resourceTypes lists the resource types available per location for the project:
@@ -183,7 +177,7 @@ func (h *Handler) resourceTypes(w http.ResponseWriter, r *http.Request) {
 		}
 		services, _ := es.Config["services"].(map[string]any)
 		regions, _ := es.Config["regions"].(map[string]any)
-		// A ceph-s3 provider carries a single config.region (its RGW zonegroup) instead of the OpenStack
+		// A ceph-s3 provider carries a single config.region (its RGW zonegroup) instead of a
 		// regions map. Without this synthetic entry it contributes NO location, and the client's cloud
 		// scope (x-service-id / x-region-id) is never resolved — the whole Object storage page stays empty.
 		if len(regions) == 0 && es.IsCephS3() {
@@ -219,8 +213,8 @@ func (h *Handler) resourceTypes(w http.ResponseWriter, r *http.Request) {
 			out = append(out, map[string]any{
 				"name": name, "country": country, "displayName": displayName,
 				"serviceName": es.Name, "serviceId": es.ID, "region": regionName,
-				// provider ("openstack" | "ceph-s3") lets the create form pick WHICH object store a bucket
-				// lands on — Swift and S3 run side by side over two disjoint bucket sets.
+				// provider ("proxmox" | "ceph-s3" | …) lets the create form label which backend a
+				// location belongs to.
 				"provider":      es.Provider(),
 				"resourceTypes": types,
 			})

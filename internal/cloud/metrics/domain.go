@@ -12,10 +12,10 @@ type BillBillingCycle struct {
 	EndDate   *time.Time `json:"endDate,omitempty"`
 }
 
-// GnocchiMetricsDetails holds network traffic in MB,
+// UsageMetricsDetails holds network traffic in MB,
 // public/private incoming/outgoing + totals (decimal.Decimal,
 // stored as decimal strings in jsonb).
-type GnocchiMetricsDetails struct {
+type UsageMetricsDetails struct {
 	IncomingPublicTrafficMb  decimal.Decimal `json:"incomingPublicTrafficMb"`
 	IncomingPrivateTrafficMb decimal.Decimal `json:"incomingPrivateTrafficMb"`
 	OutgoingPublicTrafficMb  decimal.Decimal `json:"outgoingPublicTrafficMb"`
@@ -25,32 +25,21 @@ type GnocchiMetricsDetails struct {
 	TotalTrafficMb           decimal.Decimal `json:"totalTrafficMb"`
 }
 
-// OstorMetrics holds S3/Ostor object-store counters.
-type OstorMetrics struct {
-	DownloadedBytes int64 `json:"downloadedBytes"`
-	UploadedBytes   int64 `json:"uploadedBytes"`
-	Puts            int64 `json:"puts"`
-	Gets            int64 `json:"gets"`
-	Lists           int64 `json:"lists"`
-	Others          int64 `json:"others"`
-}
-
-// GnocchiMetrics is the gnocchiMetrics collection document — one per (resource, billing
+// UsageMetrics is the usageMetrics collection document — one per (resource, billing
 // cycle), holding the month's accumulated usage that the rating cron charges from.
-type GnocchiMetrics struct {
-	ID           string                 `json:"id,omitempty"`
-	ResourceID   string                 `json:"resourceId,omitempty"`
-	ResourceType string                 `json:"resourceType,omitempty"`
-	BillingCycle *BillBillingCycle      `json:"billingCycle,omitempty"`
-	Details      *GnocchiMetricsDetails `json:"details,omitempty"`
-	OstorMetrics *OstorMetrics          `json:"ostorMetrics,omitempty"`
-	CreatedAt    *time.Time             `json:"createdAt,omitempty"`
-	UpdatedAt    *time.Time             `json:"updatedAt,omitempty"`
+type UsageMetrics struct {
+	ID           string               `json:"id,omitempty"`
+	ResourceID   string               `json:"resourceId,omitempty"`
+	ResourceType string               `json:"resourceType,omitempty"`
+	BillingCycle *BillBillingCycle    `json:"billingCycle,omitempty"`
+	Details      *UsageMetricsDetails `json:"details,omitempty"`
+	CreatedAt    *time.Time           `json:"createdAt,omitempty"`
+	UpdatedAt    *time.Time           `json:"updatedAt,omitempty"`
 }
 
 // zeroDetails is the zero-initialised details for a freshly-created month doc.
-func zeroDetails() *GnocchiMetricsDetails {
-	return &GnocchiMetricsDetails{
+func zeroDetails() *UsageMetricsDetails {
+	return &UsageMetricsDetails{
 		IncomingPublicTrafficMb:  decimal.Zero,
 		IncomingPrivateTrafficMb: decimal.Zero,
 		OutgoingPublicTrafficMb:  decimal.Zero,

@@ -20,9 +20,6 @@ func TestDbaasConfig(t *testing.T) {
 				"chartVersion": "0.1.0",
 			},
 			"database": map[string]any{
-				"osServiceId":    "svc-os",
-				"osProjectId":    "dbaas-tenant",
-				"memberSubnetId": "member-sub",
 				"storageClasses": []any{"nvme"},
 				"limits":         map[string]any{"maxCpu": float64(32), "maxMemoryGiB": float64(128), "maxStorageGiB": float64(2048)},
 				"engines": map[string]any{
@@ -41,7 +38,7 @@ func TestDbaasConfig(t *testing.T) {
 		t.Fatal("DbaasRegion")
 	}
 	cfg := es.DbaasConfig()
-	if cfg.Kubeconfig != "kc-yaml" || cfg.OSServiceID != "svc-os" || cfg.OSProjectID != "dbaas-tenant" || cfg.MemberSubnetID != "member-sub" {
+	if cfg.Kubeconfig != "kc-yaml" || len(cfg.StorageClasses) != 1 || cfg.StorageClasses[0] != "nvme" {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 	// Defaults fill in.

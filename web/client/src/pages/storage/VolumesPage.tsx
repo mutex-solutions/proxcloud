@@ -31,7 +31,7 @@ function vol(r: CloudResource): Record<string, any> {
   return (r.data?.volume as Record<string, any>) ?? {}
 }
 // Attachments live either at data.attachments (Go cache shape: {serverId, device, attachmentId})
-// or data.volume.attachments (live cinder shape: {server_id, device}).
+// or data.volume.attachments (live shape: {server_id, device}).
 function attachments(r: CloudResource): Array<{ serverId: string; device?: string }> {
   const cache = (r.data?.attachments as Array<Record<string, any>>) ?? []
   const live = (vol(r).attachments as Array<Record<string, any>>) ?? []
@@ -72,7 +72,7 @@ export default function VolumesPage() {
   const [migrationPolicy, setMigrationPolicy] = useState<"never" | "on-demand">("never")
 
   const requestedSize = Number(form.size)
-  // Aggregate and per-type Cinder quota checks use the selected admin-published type.
+  // Aggregate and per-type volume quota checks use the selected admin-published type.
   const quotaCheckPending = createOpen && projectQuota.isLoading
   const storageQuotaUnavailable =
     createOpen && !projectQuota.isLoading && (!!projectQuota.error || !projectQuota.data?.storage)
@@ -114,8 +114,8 @@ export default function VolumesPage() {
   )
 
   const attach = useMutation({
-    // Go VOLUME ATTACH reads data.serverId as the nova server UUID (NOT the cache id — it is
-    // passed straight to nova, no resolveExtID).
+    // Go VOLUME ATTACH reads data.serverId as the server's externalId (NOT the cache id — no
+    // resolveExtID).
     mutationFn: (r: CloudResource) =>
       apiFetch(`/project/${pid}/cloud/${r.id}/action`, {
         method: "POST",

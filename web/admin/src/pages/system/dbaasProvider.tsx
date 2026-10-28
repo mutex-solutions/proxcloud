@@ -4,15 +4,13 @@
 // config.provider === "dbaas": customer databases are ArgoCD Applications of the pinned
 // `database-cluster` chart, applied to an ops-pre-built Kubernetes cluster that runs the DB
 // operator suite; the secret is a kubeconfig for a proxcloud-scoped service account there. The
-// database endpoint is an Octavia internal LB in the customer's tenant network, so the provider
-// also records the OpenStack service it is coupled to (network sharing + LB member subnet).
+// database endpoint is a LoadBalancer Service on that cluster, restricted by source ranges.
+// TODO(P7): MetalLB address pool for the LB ingress IP — database create is pending on Proxmox.
 
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
-import { useAdminList } from "@/lib/hooks"
 
 export type DbaasFormState = {
   name: string
@@ -22,12 +20,6 @@ export type DbaasFormState = {
   chartVersion: string
   argoNamespace: string
   argoProject: string
-  // The OpenStack provider whose clouds host the tenant networks (neutron RBAC + Octavia).
-  osServiceId: string
-  // The dbaas keystone project (the DB cluster's own OpenStack tenant).
-  osProjectId: string
-  // The dbaas-side subnet LB members live on (Octavia member-subnet-id annotation).
-  memberSubnetId: string
   storageClasses: string // comma-separated
   engines: string // one "postgresql=16,17,18" line per engine
   valkeyEnabled: boolean // valkey is pre-GA — its line is rejected unless explicitly enabled
@@ -46,9 +38,6 @@ export const emptyDbaasForm: DbaasFormState = {
   chartVersion: "",
   argoNamespace: "argocd",
   argoProject: "proxcloud-dbaas",
-  osServiceId: "",
-  osProjectId: "",
-  memberSubnetId: "",
   storageClasses: "",
   engines: "",
   valkeyEnabled: false,
@@ -83,14 +72,14 @@ export function parseEngines(raw: string, valkeyEnabled: boolean): Record<string
 
 export const dbaasFormValid = (f: DbaasFormState, requireKubeconfig = true) => {
   const engines = parseEngines(f.engines, f.valkeyEnabled)
-  const required = [f.name, f.region, f.chartRepo, f.chartVersion, f.osServiceId, f.osProjectId, f.memberSubnetId]
+  const required = [f.name, f.region, f.chartRepo, f.chartVersion]
   if (requireKubeconfig) required.push(f.kubeconfig)
   return required.every((v) => v.trim() !== "") && engines !== null && Object.keys(engines).length > 0
 }
 
 // The database.* keys the form edits directly — everything else stored under config.database
 // (limits, future keys) passes through dbaasConfigBlocks untouched.
-const FORM_OWNED_DATABASE_KEYS = ["osServiceId", "osProjectId", "memberSubnetId", "storageClasses", "engines"]
+const FORM_OWNED_DATABASE_KEYS = ["storageClasses", "engines"]
 
 // dbaasConfigBlocks are the two config sub-objects proxcloud reads. The admin update route
 // replaces top-level config keys wholesale, so each block must always be sent complete —
@@ -125,9 +114,6 @@ export function dbaasConfigBlocks(f: DbaasFormState) {
     },
     database: {
       ...passthrough,
-      osServiceId: f.osServiceId.trim(),
-      osProjectId: f.osProjectId.trim(),
-      memberSubnetId: f.memberSubnetId.trim(),
       storageClasses: splitCsv(f.storageClasses),
       engines,
     },
@@ -174,17 +160,12 @@ export function dbaasFormFromService(svc: {
     chartVersion: String(argo.chartVersion ?? ""),
     argoNamespace: String(argo.namespace ?? "argocd"),
     argoProject: String(argo.project ?? "proxcloud-dbaas"),
-    osServiceId: String(database.osServiceId ?? ""),
-    osProjectId: String(database.osProjectId ?? ""),
-    memberSubnetId: String(database.memberSubnetId ?? ""),
     storageClasses: ((database.storageClasses as string[]) ?? []).join(","),
     engines: engineLines.join("\n"),
     valkeyEnabled: !!engines.valkey,
     storedDatabase: database,
   }
 }
-
-type PickerProvider = { id: string; name?: string; type?: string; config?: Record<string, any> }
 
 export function DbaasProviderForm({
   form, setForm, mode = "create",
@@ -195,10 +176,6 @@ export function DbaasProviderForm({
   mode?: "create" | "edit"
 }) {
   const edit = mode === "edit"
-  const providers = useAdminList<PickerProvider>("/admin/service")
-  const osProviders = (providers.data?.data ?? []).filter(
-    (p) => !["ceph-s3", "kamaji", "dbaas"].includes(String(p.config?.provider ?? "")),
-  )
   return (
     <div className="grid gap-4">
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -248,51 +225,8 @@ export function DbaasProviderForm({
         </div>
       </div>
       <div className="grid gap-2">
-        <Label>OpenStack provider</Label>
-        <Select
-          value={form.osServiceId || undefined}
-          onValueChange={(v) => setForm({ ...form, osServiceId: v })}
-        >
-          <SelectTrigger>
-            <SelectValue placeholder={providers.isLoading ? "Loading providers…" : "Pick the coupled OpenStack provider"} />
-          </SelectTrigger>
-          <SelectContent>
-            {/* A stored id whose provider vanished stays selectable — edits must not silently drop it. */}
-            {form.osServiceId && !osProviders.some((p) => p.id === form.osServiceId) ? (
-              <SelectItem value={form.osServiceId}>
-                <span className="font-mono text-xs">{form.osServiceId}</span>
-              </SelectItem>
-            ) : null}
-            {osProviders.map((p) => (
-              <SelectItem key={p.id} value={p.id}>{p.name || p.id}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          The cloud the customers' tenant networks live in. At create time proxcloud shares the
-          tenant network with the dbaas keystone project (neutron RBAC) so the internal LB can
-          land its VIP there.
-        </p>
-      </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div className="grid gap-2">
-          <Label htmlFor="db-osproj">DBaaS keystone project ID</Label>
-          <Input id="db-osproj" className="font-mono" value={form.osProjectId} onChange={(e) => setForm({ ...form, osProjectId: e.target.value })} autoComplete="off" />
-          <p className="text-xs text-muted-foreground">
-            The OpenStack project the DB-cluster nodes (and their Octavia LBs) run in.
-          </p>
-        </div>
-        <div className="grid gap-2">
-          <Label htmlFor="db-membersubnet">LB member subnet ID</Label>
-          <Input id="db-membersubnet" className="font-mono" value={form.memberSubnetId} onChange={(e) => setForm({ ...form, memberSubnetId: e.target.value })} autoComplete="off" />
-          <p className="text-xs text-muted-foreground">
-            The dbaas-side subnet the cluster nodes sit on — the LB's member-subnet-id.
-          </p>
-        </div>
-      </div>
-      <div className="grid gap-2">
         <Label htmlFor="db-storageclasses">StorageClasses (comma-separated, optional)</Label>
-        <Input id="db-storageclasses" className="font-mono" value={form.storageClasses} onChange={(e) => setForm({ ...form, storageClasses: e.target.value })} placeholder="csi-cinder, csi-cinder-highiops" />
+        <Input id="db-storageclasses" className="font-mono" value={form.storageClasses} onChange={(e) => setForm({ ...form, storageClasses: e.target.value })} placeholder="proxmox-csi" />
         <p className="text-xs text-muted-foreground">
           StorageClasses offered for database volumes; empty = the cluster default only.
         </p>

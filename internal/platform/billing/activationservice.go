@@ -21,7 +21,7 @@ type ActivationService struct {
 	repo     *Repo
 	log      *slog.Logger
 	audit    *audit.Service
-	clouds   CloudSuspender // nil-safe: live nova pause/unpause + project status flips
+	clouds   CloudSuspender // nil-safe: live PVE suspend/resume + project status flips
 	notifier Notifier       // nil-safe: suspension/resume customer emails
 	// activateProjects enables + bootstraps every non-ENABLED project of the profile with the
 	// owning org's memberships. Best-effort (per-project errors are swallowed).

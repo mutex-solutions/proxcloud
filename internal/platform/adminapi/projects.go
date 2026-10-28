@@ -1,6 +1,6 @@
 package adminapi
 
-// projects.go serves /admin-api/v1/projects. Provisioning (live keystone tenant + user grants)
+// projects.go serves /admin-api/v1/projects. Provisioning (the per-provider project bootstrap)
 // returns 501 when not wired; a create WITHOUT provision persists as DISABLED with no members.
 
 import (
@@ -17,13 +17,11 @@ type apiProjectMember struct {
 	Sub string `json:"sub,omitempty"`
 }
 
-type apiProvisionedOpenstack struct {
-	OpenstackProjectID string `json:"openstack_project_id,omitempty"`
-}
-
 type apiProvisionedService struct {
-	ServiceID string                  `json:"service_id,omitempty"`
-	Openstack apiProvisionedOpenstack `json:"openstack"`
+	ServiceID string `json:"service_id,omitempty"`
+	Provider  string `json:"provider,omitempty"` // PROXMOX | CEPH_S3 | KAMAJI | DBAAS
+	Region    string `json:"region,omitempty"`
+	Pool      string `json:"pool,omitempty"` // proxmox bindings only
 }
 
 type apiProject struct {
@@ -48,13 +46,6 @@ func (h *Handler) mapProject(r *http.Request, p *project.Project) apiProject {
 	for _, m := range p.Memberships {
 		members = append(members, apiProjectMember{Sub: m.Sub})
 	}
-	services := make([]apiProvisionedService, 0, len(p.Services))
-	for _, sid := range p.ServiceIDs() {
-		services = append(services, apiProvisionedService{
-			ServiceID: sid,
-			Openstack: apiProvisionedOpenstack{OpenstackProjectID: p.ExternalProjectID(sid)},
-		})
-	}
 	// billing_profile_id = the EFFECTIVE profile (the project's own, else the owning org's).
 	bpID := p.BillingProfileID
 	if bpID == "" {
@@ -64,8 +55,20 @@ func (h *Handler) mapProject(r *http.Request, p *project.Project) apiProject {
 	}
 	return apiProject{
 		ID: p.ID, Name: p.Name, Status: p.Status, OrganizationID: p.OrganizationID,
-		BillingProfileID: bpID, ProvisionedServices: services, Members: members,
+		BillingProfileID: bpID, ProvisionedServices: provisionedServices(p), Members: members,
 	}
+}
+
+// provisionedServices maps the project's service bindings to the wire shape.
+func provisionedServices(p *project.Project) []apiProvisionedService {
+	services := make([]apiProvisionedService, 0, len(p.Services))
+	for _, sid := range p.ServiceIDs() {
+		services = append(services, apiProvisionedService{
+			ServiceID: sid, Provider: providerWire(p.ServiceProvider(sid)),
+			Region: p.ServiceRegion(sid), Pool: p.ServicePool(sid),
+		})
+	}
+	return services
 }
 
 func (h *Handler) projectsList(w http.ResponseWriter, r *http.Request) {
@@ -85,14 +88,6 @@ func (h *Handler) projectsList(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := r.URL.Query().Get("status"); v != "" {
 		f["status"] = v
-	}
-	if v := r.URL.Query().Get("openstack_project_id"); v != "" {
-		// The tenant may live under services[].config.openstackProjectId or
-		// services[].externalProjectId — match either shape.
-		f["$or"] = []pgdoc.M{
-			{"services": pgdoc.M{"$contains": pgdoc.M{"config": pgdoc.M{"openstackProjectId": v}}}},
-			{"services": pgdoc.M{"$contains": pgdoc.M{"externalProjectId": v}}},
-		}
 	}
 	projects, err := findPage[project.Project](r.Context(), h.db.C("project"), f, req)
 	if err != nil {
@@ -165,9 +160,7 @@ func (h *Handler) projectCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // projectProvision looks up the project (404 if absent), then bootstraps it onto the platform
-// cloud (keystone tenant + ENABLED). The single configured cloud service is used (no per-spec
-// provider selection) and per-user keystone grants are deferred — resources are created
-// admin-scoped-to-tenant.
+// providers + ENABLED (no per-spec provider selection; no per-user cloud grants).
 func (h *Handler) projectProvision(w http.ResponseWriter, r *http.Request) {
 	var p project.Project
 	if found, err := h.db.C("project").Get(r.Context(), chi.URLParam(r, "id"), &p); err != nil || !found {

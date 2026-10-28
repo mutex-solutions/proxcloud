@@ -14,21 +14,21 @@ import (
 
 // ServerProvider yields up
 // to two BillingResources for a SERVER — "instance" (compute attributes from the cloud data) and
-// "instance_traffic" (the month's network traffic from GnocchiMetrics). notEligibleForBilling
+// "instance_traffic" (the month's network traffic from UsageMetrics). notEligibleForBilling
 // gating + the admin-configured per-attribute types are deferred.
 type ServerProvider struct {
-	gnocchi *metrics.Repo
-	now     func() time.Time
+	usage *metrics.Repo
+	now   func() time.Time
 }
 
-func NewServerProvider(gnocchi *metrics.Repo) *ServerProvider {
-	return &ServerProvider{gnocchi: gnocchi, now: func() time.Time { return time.Now().UTC() }}
+func NewServerProvider(usage *metrics.Repo) *ServerProvider {
+	return &ServerProvider{usage: usage, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (p *ServerProvider) Type() string { return cloud.TypeServer }
 
 // serverNotEligibleStatuses: a server in one of these
-// nova statuses is excluded from billing (DELETED/ERROR/UNKNOWN/BUILD).
+// statuses (the API's status vocabulary, see pve.MapVMStatus) is excluded from billing (DELETED/ERROR/UNKNOWN/BUILD).
 var serverNotEligibleStatuses = map[string]bool{"DELETED": true, "ERROR": true, "UNKNOWN": true, "BUILD": true}
 
 func (p *ServerProvider) GetBillingInformation(ctx context.Context, _ billingapi.BillingContext, cr *cloud.CloudResource) ([]*billingapi.BillingResource, error) {
@@ -64,7 +64,7 @@ func (p *ServerProvider) instanceBR(cr *cloud.CloudResource, notEligible bool) *
 	rootDisk := flavor["disk"]
 	if cloud.ServerIsVolumeBacked(cr.Data) {
 		// A volume-backed server does not consume the flavor's local root disk.
-		// Its Cinder root volume is synced and rated as a VOLUME resource instead.
+		// Its root disk is synced and rated as a VOLUME resource instead.
 		rootDisk = 0
 	}
 	values := map[string]any{
@@ -99,11 +99,11 @@ func (p *ServerProvider) instanceBR(cr *cloud.CloudResource, notEligible bool) *
 	}
 }
 
-// trafficBR builds the "instance_traffic" resource from the month's GnocchiMetrics.
+// trafficBR builds the "instance_traffic" resource from the month's UsageMetrics.
 // nil when no metrics exist for the current cycle.
 func (p *ServerProvider) trafficBR(ctx context.Context, cr *cloud.CloudResource) (*billingapi.BillingResource, error) {
 	cycleStart := firstDayOfCurrentMonth(p.now())
-	m, err := p.gnocchi.FindForCurrentMonth(ctx, cr.ID, cycleStart)
+	m, err := p.usage.FindForCurrentMonth(ctx, cr.ID, cycleStart)
 	if err != nil {
 		return nil, err
 	}

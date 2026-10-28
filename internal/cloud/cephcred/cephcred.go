@@ -1,5 +1,5 @@
-// Package cephcred stores the per-project Ceph RGW (S3) service-account credentials. A ceph-s3 project has
-// no Keystone tenant; its bucket + object I/O runs as its OWN RGW user (rgwUid, in RGW's default tenant)
+// Package cephcred stores the per-project Ceph RGW (S3) service-account credentials. A ceph-s3 project's
+// bucket + object I/O runs as its OWN RGW user (rgwUid, in RGW's default tenant)
 // whose S3 keys are provisioned at bootstrap and kept HERE (secret key encrypted at rest), keyed by
 // (projectId, serviceId). Kept OUT of the project doc on purpose — the project document is serialized to
 // the client, so the secret key would leak; this collection is never serialized.
