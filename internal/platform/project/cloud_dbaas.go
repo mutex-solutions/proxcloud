@@ -58,6 +58,10 @@ func (h *Handler) dbaasCreate(w http.ResponseWriter, r *http.Request, u *user.Us
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
 	}
+	if msg := h.dbaasStorageRefusal(r.Context(), spec.StorageClass); msg != "" {
+		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, msg))
+		return
+	}
 	if err := h.dbaasProvisionDatabase(r.Context(), proj, cfg, spec); err != nil {
 		h.fail(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, err.Error()))
 		return
@@ -83,6 +87,42 @@ func (h *Handler) dbaasCreate(w http.ResponseWriter, r *http.Request, u *user.Us
 	}
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", cr)
 	httpx.OK(w, *cr)
+}
+
+// dbaasStorageRefusal refuses a database on a storage class that is a Proxmox storage profile
+// closed to databases (plan S18/S7: never on "capacity" HDD). Kubernetes storage classes on
+// Proxmox are named after the storage profile they provision on (proxmox-csi, one class per
+// profile), so the class name is looked up as a profile slug on every Proxmox provider. "" (the
+// DB cluster's default class) and classes that are no profile pass.
+func (h *Handler) dbaasStorageRefusal(ctx context.Context, storageClass string) string {
+	if storageClass == "" || h.esSvc == nil {
+		return ""
+	}
+	services, err := h.esSvc.ListByType(ctx, externalservice.TypeCloud)
+	if err != nil {
+		return ""
+	}
+	for i := range services {
+		if !services[i].IsProxmox() {
+			continue
+		}
+		if msg := dbaasProfileRefusal(services[i].PVEStorageProfiles(), storageClass); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// dbaasProfileRefusal is the pure check behind dbaasStorageRefusal.
+func dbaasProfileRefusal(profiles map[string]externalservice.PVEStorageProfile, storageClass string) string {
+	p, ok := profiles[storageClass]
+	if !ok || p.DBaaS() {
+		return ""
+	}
+	if p.Capacity() {
+		return fmt.Sprintf("Storage class %q (%s) is HDD capacity storage — not for databases. Choose another storage class", storageClass, p.DisplayName())
+	}
+	return fmt.Sprintf("Storage class %q (%s) does not allow databases. Choose another storage class", storageClass, p.DisplayName())
 }
 
 // dbaasDelete handles the DATABASE_CLUSTER leg of cloudDelete: Application delete (ArgoCD's

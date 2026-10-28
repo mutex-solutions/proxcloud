@@ -3,12 +3,13 @@ import { Link, useNavigate } from "react-router-dom"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
-import { MoreHorizontal, Play, Plus, RefreshCw, RotateCw, Server, Square, Trash2 } from "lucide-react"
+import { CircleAlert, MoreHorizontal, Play, Plus, RefreshCw, RotateCw, Server, Square, Trash2 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
 import { LoadMore } from "@/components/load-more"
 import { StatusBadge } from "@/components/status-badge"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -20,6 +21,22 @@ import { apiFetch } from "@/lib/api"
 import { useCloudCursorList, useCloudScope, useProjectId } from "@/lib/hooks"
 import { timeAgo } from "@/lib/format"
 import type { CloudResource } from "@/lib/types"
+
+// Shown in every server delete dialog. A Proxmox disk belongs to the VM it was created on, and the
+// VM delete destroys every disk it owns — detached (unused) ones too. Drop once volumes can
+// outlive their server (holder VM).
+export function ServerDeleteWarning() {
+  return (
+    <Alert variant="destructive">
+      <CircleAlert />
+      <AlertTitle>The server's volumes are deleted too</AlertTitle>
+      <AlertDescription>
+        Every volume created on this server is deleted with it, including volumes you detached from it. Copy any
+        data you want to keep first.
+      </AlertDescription>
+    </Alert>
+  )
+}
 
 export function serverName(r: CloudResource): string {
   return (r.data?.server?.name as string) ?? r.name ?? r.id
@@ -266,6 +283,7 @@ export function ServersPage() {
             <DialogTitle>{pending ? ACTION_VERB[pending.action] : ""} server</DialogTitle>
             <DialogDescription>Are you sure you want to {pending?.label}?</DialogDescription>
           </DialogHeader>
+          {pending?.action === "DELETE" && <ServerDeleteWarning />}
           <DialogFooter>
             <Button variant="outline" onClick={() => setPending(null)}>
               Cancel

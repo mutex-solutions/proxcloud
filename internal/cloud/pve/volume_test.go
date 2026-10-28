@@ -1,0 +1,249 @@
+package pve
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"testing"
+)
+
+func TestAddVolumeStorageRoom(t *testing.T) {
+	const upid = "UPID:pve1:0:0:0:qmconfig:101:u:"
+	tests := []struct {
+		name     string
+		storage  string // row for "local-zfs" on pve1; "" = no row
+		headroom float64
+		wantFull bool
+	}{
+		{"room for disk + headroom", `{"type":"storage","storage":"local-zfs","node":"pve1","status":"available","maxdisk":107374182400,"disk":53687091200}`, 10, false},
+		{"disk eats into headroom", `{"type":"storage","storage":"local-zfs","node":"pve1","status":"available","maxdisk":107374182400,"disk":80530636800}`, 10, true},
+		{"storage inactive on the VM's node", `{"type":"storage","storage":"local-zfs","node":"pve1","status":"unknown","maxdisk":107374182400,"disk":0}`, 0, true},
+		{"storage not on the VM's node", `{"type":"storage","storage":"local-zfs","node":"pve2","status":"available","maxdisk":107374182400,"disk":0}`, 0, true},
+		{"no storage row", "", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var setCalls int
+			_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+				"GET /api2/json/cluster/resources": func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Query().Get("type") == "storage" {
+						fmt.Fprintf(w, `{"data":[%s]}`, tt.storage)
+						return
+					}
+					fmt.Fprint(w, `{"data":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve1","pool":"st-p1"}]}`)
+				},
+				"GET /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, r *http.Request) {
+					fmt.Fprint(w, `{"data":{"scsi0":"local-zfs:vm-101-disk-0,size=32G"}}`)
+				},
+				"POST /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, r *http.Request) {
+					setCalls++
+					_ = r.ParseForm()
+					if got := r.PostForm.Get("scsi1"); got != "local-zfs:20" {
+						t.Errorf("scsi1 = %q", got)
+					}
+					fmt.Fprintf(w, `{"data":%q}`, upid)
+				},
+				"GET /api2/json/nodes/pve1/tasks/" + upid + "/status": func(w http.ResponseWriter, r *http.Request) {
+					fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
+				},
+			})
+			s := &Service{C: c, PoolPrefix: "st-"}
+			slot, err := s.AddVolume(context.Background(), "p1", "101", 20, "local-zfs", tt.headroom)
+			if tt.wantFull {
+				if !errors.Is(err, ErrStorageFull) || setCalls != 0 {
+					t.Fatalf("err = %v, config writes = %d; want ErrStorageFull and no write", err, setCalls)
+				}
+				return
+			}
+			if err != nil || slot != "scsi1" || setCalls != 1 {
+				t.Fatalf("slot %q err %v writes %d", slot, err, setCalls)
+			}
+		})
+	}
+}
+
+// volCluster fakes a pool of VMs 101+102 on pve1 and 103 on pve2. VM 101's config is cfg101;
+// 102/103 have a root disk only. Storages: local-zfs (local, both nodes), nas (shared NFS),
+// isos (dir, iso only), tiny (local, 1 GiB free). Writes are recorded per path.
+func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values) *Service {
+	const upid = "UPID:pve1:0:0:0:qmmove:101:u:"
+	rec := func(key string) func(http.ResponseWriter, *http.Request) {
+		return func(w http.ResponseWriter, r *http.Request) {
+			_ = r.ParseForm()
+			writes[key] = append(writes[key], r.PostForm)
+			fmt.Fprintf(w, `{"data":%q}`, upid)
+		}
+	}
+	const g = 1 << 30
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("type") == "storage" {
+				fmt.Fprintf(w, `{"data":[
+					{"type":"storage","storage":"local-zfs","node":"pve1","status":"available","maxdisk":%d,"disk":0},
+					{"type":"storage","storage":"local-zfs","node":"pve2","status":"available","maxdisk":%d,"disk":0},
+					{"type":"storage","storage":"nas","node":"pve1","status":"available","maxdisk":%d,"disk":0},
+					{"type":"storage","storage":"nas","node":"pve2","status":"available","maxdisk":%d,"disk":0},
+					{"type":"storage","storage":"isos","node":"pve1","status":"available","maxdisk":%d,"disk":0},
+					{"type":"storage","storage":"tiny","node":"pve1","status":"available","maxdisk":%d,"disk":%d}]}`,
+					100*g, 100*g, 100*g, 100*g, 100*g, 10*g, 9*g)
+				return
+			}
+			fmt.Fprint(w, `{"data":[
+				{"id":"qemu/101","type":"qemu","vmid":101,"name":"a","node":"pve1","pool":"st-p1"},
+				{"id":"qemu/102","type":"qemu","vmid":102,"name":"b","node":"pve1","pool":"st-p1"},
+				{"id":"qemu/103","type":"qemu","vmid":103,"name":"c","node":"pve2","pool":"st-p1"},
+				{"id":"qemu/104","type":"qemu","vmid":104,"name":"other","node":"pve1","pool":"st-p2"}]}`)
+		},
+		"GET /api2/json/storage": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[
+				{"storage":"local-zfs","type":"zfspool","content":"images,rootdir"},
+				{"storage":"nas","type":"nfs","content":"images"},
+				{"storage":"isos","type":"dir","content":"iso"},
+				{"storage":"tiny","type":"lvmthin","content":"images"}]}`)
+		},
+		"GET /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"data":%s}`, cfg101)
+		},
+		"GET /api2/json/nodes/pve1/qemu/102/config": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":{"scsi0":"local-zfs:vm-102-disk-0,size=10G"}}`)
+		},
+		"GET /api2/json/nodes/pve2/qemu/103/config": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":{"scsi0":"local-zfs:vm-103-disk-0,size=10G"}}`)
+		},
+		"POST /api2/json/nodes/pve1/qemu/101/move_disk": rec("move"),
+		"POST /api2/json/nodes/pve1/qemu/101/config":    rec("config"),
+		"GET /api2/json/nodes/pve1/tasks/" + upid + "/status": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
+		},
+	})
+	return &Service{C: c, PoolPrefix: "st-"}
+}
+
+const (
+	cfgLocalUnused  = `{"scsi0":"local-zfs:vm-101-disk-0,size=10G","unused0":"local-zfs:vm-101-disk-1"}`
+	cfgSharedUnused = `{"scsi0":"local-zfs:vm-101-disk-0,size=10G","unused0":"nas:101/vm-101-disk-1.raw"}`
+	cfgAttached     = `{"scsi0":"local-zfs:vm-101-disk-0,size=10G","scsi1":"local-zfs:vm-101-disk-1,size=20G"}`
+)
+
+func TestAttachVolumeCrossNode(t *testing.T) {
+	tests := []struct {
+		name, cfg, vol, target string
+		wantConflict           bool
+	}{
+		{"local disk to a VM on another node", cfgLocalUnused, "local-zfs:vm-101-disk-1", "103", true},
+		{"local disk to a VM on the same node", cfgLocalUnused, "local-zfs:vm-101-disk-1", "102", false},
+		// PVE's reassign refuses VMs on different nodes even on shared storage.
+		{"shared disk to a VM on another node", cfgSharedUnused, "nas:101/vm-101-disk-1.raw", "103", true},
+		{"shared disk to a VM on the same node", cfgSharedUnused, "nas:101/vm-101-disk-1.raw", "102", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writes := map[string][]url.Values{}
+			s := volCluster(t, tt.cfg, writes)
+			err := s.AttachVolume(context.Background(), "p1", 101, tt.vol, tt.target)
+			var ce *ConflictError
+			if tt.wantConflict {
+				if !errors.As(err, &ce) || len(writes["move"]) != 0 {
+					t.Fatalf("err = %v, moves = %d; want ConflictError and no move", err, len(writes["move"]))
+				}
+				return
+			}
+			if err != nil || len(writes["move"]) != 1 {
+				t.Fatalf("err = %v, moves = %d", err, len(writes["move"]))
+			}
+			if f := writes["move"][0]; f.Get("disk") != "unused0" || f.Get("target-vmid") != tt.target || f.Get("target-disk") != "scsi1" {
+				t.Fatalf("move_disk form = %v", f)
+			}
+		})
+	}
+}
+
+func TestAttachTargets(t *testing.T) {
+	tests := []struct {
+		name, cfg, vol string
+		want           []int
+	}{
+		{"local detached disk: VMs on its node only", cfgLocalUnused, "local-zfs:vm-101-disk-1", []int{101, 102}},
+		{"shared detached disk: still its node only", cfgSharedUnused, "nas:101/vm-101-disk-1.raw", []int{101, 102}},
+		{"attached disk: none until detached", cfgAttached, "local-zfs:vm-101-disk-1", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := volCluster(t, tt.cfg, map[string][]url.Values{})
+			got, err := s.AttachTargets(context.Background(), "p1", 101, tt.vol)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ids []int
+			for _, vm := range got {
+				ids = append(ids, vm.VMID)
+			}
+			if fmt.Sprint(ids) != fmt.Sprint(tt.want) {
+				t.Fatalf("targets = %v, want %v", ids, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeleteVolume(t *testing.T) {
+	tests := []struct {
+		name, cfg    string
+		wantConflict bool
+	}{
+		{"detached disk is destroyed", cfgLocalUnused, false},
+		{"attached disk must be detached first", cfgAttached, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writes := map[string][]url.Values{}
+			s := volCluster(t, tt.cfg, writes)
+			err := s.DeleteVolume(context.Background(), "p1", 101, "local-zfs:vm-101-disk-1")
+			var ce *ConflictError
+			if tt.wantConflict {
+				if !errors.As(err, &ce) || len(writes["config"]) != 0 {
+					t.Fatalf("err = %v, writes = %d; want ConflictError and no write", err, len(writes["config"]))
+				}
+				return
+			}
+			if err != nil || len(writes["config"]) != 1 || writes["config"][0].Get("delete") != "unused0" {
+				t.Fatalf("err = %v, writes = %v", err, writes["config"])
+			}
+		})
+	}
+}
+
+func TestRetypeVolume(t *testing.T) {
+	tests := []struct {
+		name, storage string
+		wantConflict  string // "" = moved
+	}{
+		{"to shared storage on the node", "nas", ""},
+		{"same storage", "local-zfs", "already on storage"},
+		{"storage that holds no disks", "isos", "cannot hold disks"},
+		{"storage unknown on the node", "gone", "cannot hold disks"},
+		{"storage without room for the disk plus headroom", "tiny", "Not enough free space"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writes := map[string][]url.Values{}
+			s := volCluster(t, cfgAttached, writes)
+			err := s.RetypeVolume(context.Background(), "p1", 101, "local-zfs:vm-101-disk-1", tt.storage, 10)
+			if tt.wantConflict != "" {
+				var ce *ConflictError
+				if !errors.As(err, &ce) || !strings.Contains(ce.Msg, tt.wantConflict) || len(writes["move"]) != 0 {
+					t.Fatalf("err = %v, moves = %d; want ConflictError %q and no move", err, len(writes["move"]), tt.wantConflict)
+				}
+				return
+			}
+			if err != nil || len(writes["move"]) != 1 {
+				t.Fatalf("err = %v, moves = %d", err, len(writes["move"]))
+			}
+			if f := writes["move"][0]; f.Get("disk") != "scsi1" || f.Get("storage") != "nas" || f.Get("delete") != "1" || f.Get("target-vmid") != "" {
+				t.Fatalf("move_disk form = %v", f)
+			}
+		})
+	}
+}

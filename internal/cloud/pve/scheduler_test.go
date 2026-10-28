@@ -38,3 +38,47 @@ func TestPickNode(t *testing.T) {
 		t.Fatalf("gpu: got %q err %v", got, err)
 	}
 }
+
+func TestPickNodeStorage(t *testing.T) {
+	const g = int64(1) << 30
+	nodes := []Node{
+		{Node: "pve1", Status: "online", MaxCPU: 16, MaxMem: 64 << 30}, // most free RAM
+		{Node: "pve2", Status: "online", MaxCPU: 16, MaxMem: 32 << 30},
+		{Node: "pve3", Status: "online", MaxCPU: 16, MaxMem: 16 << 30},
+	}
+	roomy := StorageNodeState{Active: true, Total: 1000 * g, Avail: 800 * g}
+	full := StorageNodeState{Active: true, Total: 1000 * g, Avail: 105 * g} // 50G leaves < 10% free
+	tests := []struct {
+		name     string
+		storage  map[string]StorageNodeState
+		allowed  map[string]bool
+		headroom float64
+		want     string // "" = no capacity
+	}{
+		{"no profile: no storage filter", nil, nil, 10, "pve1"},
+		{"full pool on the RAM-best node is skipped", map[string]StorageNodeState{"pve1": full, "pve2": roomy, "pve3": roomy}, nil, 10, "pve2"},
+		{"full pool fits without headroom", map[string]StorageNodeState{"pve1": full, "pve2": roomy}, nil, 0, "pve1"},
+		{"node without the profile storage is skipped", map[string]StorageNodeState{"pve3": roomy}, nil, 10, "pve3"},
+		{"inactive storage is skipped", map[string]StorageNodeState{"pve1": {Total: 1000 * g, Avail: 1000 * g}, "pve2": roomy}, nil, 10, "pve2"},
+		{"local template pins to its node: shared pool roomy everywhere", map[string]StorageNodeState{"pve1": roomy, "pve2": roomy, "pve3": roomy}, map[string]bool{"pve3": true}, 10, "pve3"},
+		{"local template node full: no capacity", map[string]StorageNodeState{"pve1": roomy, "pve3": full}, map[string]bool{"pve3": true}, 10, ""},
+		{"every pool full", map[string]StorageNodeState{"pve1": full, "pve2": full, "pve3": full}, nil, 10, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := PickNode(nodes, nil, SchedReq{
+				VCPUs: 2, RAMMb: 2048, AllowedNodes: tt.allowed,
+				Storage: tt.storage, DiskBytes: 50 * g, HeadroomPct: tt.headroom,
+			})
+			if tt.want == "" {
+				if err == nil {
+					t.Fatalf("got %q, want no-capacity error", got)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("got %q err %v, want %q", got, err, tt.want)
+			}
+		})
+	}
+}

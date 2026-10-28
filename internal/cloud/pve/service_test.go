@@ -195,7 +195,7 @@ func TestServerSyncProviderPoolFilter(t *testing.T) {
 
 func TestVolumeSyncProvider(t *testing.T) {
 	s := fakeService(t)
-	rs, err := s.VolumeSyncProvider("pve", "p1").List(context.Background())
+	rs, err := s.VolumeSyncProvider("pve", "p1", nil).List(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,6 +209,32 @@ func TestVolumeSyncProvider(t *testing.T) {
 	root := byExt["local-zfs:vm-101-disk-0"].Data["volume"].(map[string]any)
 	if root["size"] != 32 || root["bootable"] != true || root["volume_type"] != "std" || root["status"] != "in-use" {
 		t.Fatalf("root volume = %v", root)
+	}
+}
+
+func TestVolumeSyncProviderProfileOf(t *testing.T) {
+	s := fakeService(t)
+	// scsi1 was retyped onto a capacity profile: its profile, not the VM's, drives volume_type.
+	profileOf := func(node, storage, vmProfile string) (string, string) {
+		if node != "pve1" || storage != "local-zfs" || vmProfile != "std" {
+			t.Errorf("profileOf(%q, %q, %q)", node, storage, vmProfile)
+		}
+		return "capacity", ClassCapacity
+	}
+	rs, err := s.VolumeSyncProvider("pve", "p1", profileOf).List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rs {
+		v := r.Data["volume"].(map[string]any)
+		if v["profile"] != "capacity" || v["storage_class"] != ClassCapacity || v["volume_type"] != "capacity" {
+			t.Fatalf("%s: volume = %v", r.ExternalID, v)
+		}
+	}
+	// An unresolved disk keeps the VM-tag fallback and stamps empty profile/class.
+	rs, _ = s.VolumeSyncProvider("pve", "p1", func(string, string, string) (string, string) { return "", "" }).List(context.Background())
+	if v := rs[0].Data["volume"].(map[string]any); v["volume_type"] != "std" || v["profile"] != "" {
+		t.Fatalf("fallback volume = %v", v)
 	}
 }
 

@@ -1,10 +1,10 @@
 package pve
 
 // scheduler.go — node placement, a pure function over one /cluster/resources +
-// /nodes snapshot. v0 filters: node online, CPU capacity under the overcommit
-// ceiling, RAM headroom for the flavor. Rank: most free RAM wins. One node =
-// degenerate correct. Storage-profile and GPU filters land in Phases 5/6 via
-// SchedReq fields already carried here.
+// /nodes snapshot (+ the storage-profile state per node). Filters: node online, allowed
+// (template/profile locality), free GPU slots, CPU capacity under the overcommit ceiling,
+// RAM for the flavor, free space on the profile's storage. Rank: most free RAM wins. One
+// node = degenerate correct.
 
 import (
 	"fmt"
@@ -23,6 +23,12 @@ type SchedReq struct {
 	// nil = no GPU demand.
 	GPUFree map[string]int
 	GPUs    int
+	// Storage maps node → live state of the storage the disk would land on there (the
+	// profile's storage). A node missing from it is skipped. nil = no free-space filter.
+	Storage map[string]StorageNodeState
+	// DiskBytes must fit on Storage while HeadroomPct % of its capacity stays free.
+	DiskBytes   int64
+	HeadroomPct float64
 }
 
 // PickNode chooses the target node. vms is the cluster-wide qemu rows (ALL pools —
@@ -58,6 +64,9 @@ func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error)
 		if req.GPUs > 0 && req.GPUFree[n.Node] < req.GPUs {
 			continue
 		}
+		if req.Storage != nil && !StorageHasRoom(req.Storage[n.Node], req.DiskBytes, req.HeadroomPct) {
+			continue
+		}
 		if usedCPU[n.Node]+float64(req.VCPUs) > float64(n.MaxCPU)*oc {
 			continue
 		}
@@ -68,7 +77,7 @@ func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error)
 		cands = append(cands, cand{n.Node, freeMem})
 	}
 	if len(cands) == 0 {
-		return "", fmt.Errorf("no node has capacity for %d vCPU / %d MB", req.VCPUs, req.RAMMb)
+		return "", fmt.Errorf("no node has capacity for %d vCPU / %d MB / %d GiB disk", req.VCPUs, req.RAMMb, req.DiskBytes>>30)
 	}
 	sort.Slice(cands, func(i, j int) bool { return cands[i].freeMem > cands[j].freeMem })
 	return cands[0].name, nil

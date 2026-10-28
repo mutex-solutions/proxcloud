@@ -112,6 +112,7 @@ on("POST /project-invites/invite", () => ({ data: {} }))
 on("GET /init/:pid", () => ({
   data: {
     ...uiMenu,
+    features: { "svc-proxmox-1": ["serverSnapshots", "volumeRetype"] },
     menu: {
       ...uiMenu.menu,
       items: {

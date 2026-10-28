@@ -22,7 +22,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import {
   useFlavorCategories, useImageGroups, useLocations, useProject, useProjectGpuCapacity, useProjectId,
-  useProjectQuota,
+  useProjectQuota, useUIMenu,
 } from "@/lib/hooks"
 import type { FlavorCategory, ImageGrouping } from "@/lib/hooks"
 import { gpuCapacityViolations, gpuFromFlavor, serverQuotaViolations, volumeBatchQuotaViolations } from "@/lib/quota"
@@ -168,6 +168,12 @@ export default function CreateServerPage() {
     selectedLoc?.serviceId && selectedLoc?.region
       ? { serviceId: selectedLoc.serviceId, region: selectedLoc.region }
       : undefined
+  // The selected provider's optional create inputs (/init features). Without user-data the
+  // password applies to the image's default account; without boot-time data volumes they are
+  // added after create (Volumes page).
+  const init = useUIMenu(pid)
+  const features = new Set(scope ? (init.data?.features?.[scope.serviceId] ?? []) : [])
+  const userDataSupported = features.has("userData")
 
   const images = useBulkAction<TemplateImage>(pid, scope, "PUBLIC_IMAGES")
   const flavors = useBulkAction<Flavor>(pid, scope, "LIST_FLAVORS")
@@ -240,7 +246,8 @@ export default function CreateServerPage() {
   const resolveVolumeType = (type: string) =>
     soleVolumeType?.name || (availableVolumeTypeNames.has(type) ? type : "")
   const selectedRootVolumeType = resolveVolumeType(rootVolumeType)
-  const resolvedDataVolumes = dataVolumes.map((volume) => ({
+  // A provider without boot-time data volumes never receives (or quota-checks) stale drafts.
+  const resolvedDataVolumes = (features.has("createDataVolumes") ? dataVolumes : []).map((volume) => ({
     ...volume,
     type: resolveVolumeType(volume.type),
   }))
@@ -304,8 +311,10 @@ export default function CreateServerPage() {
       // image); the generated user-data wins over a manually-typed one. Without a username, fall back
       // to adminPass on the image's default account.
       const genUserData =
-        loginMethod === "password" && username.trim() && password ? cloudInitUser(username.trim(), password) : ""
-      const finalUserData = genUserData || userData
+        userDataSupported && loginMethod === "password" && username.trim() && password
+          ? cloudInitUser(username.trim(), password)
+          : ""
+      const finalUserData = userDataSupported ? genUserData || userData : ""
       return apiFetch<CloudResource>(`/project/${pid}/cloud`, {
         method: "POST",
         cloud: scope,
@@ -324,7 +333,7 @@ export default function CreateServerPage() {
               fixedIps[uuid]?.trim() ? { uuid, fixedIp: fixedIps[uuid].trim() } : { uuid },
             ),
             ...(loginMethod === "key" && keyName ? { keyName } : {}),
-            ...(loginMethod === "password" && !username.trim() && password ? { adminPass: password } : {}),
+            ...(loginMethod === "password" && !genUserData && password ? { adminPass: password } : {}),
             ...(finalUserData.trim() ? { userData: finalUserData } : {}),
             ...(sgNames.length ? { securityGroupNames: sgNames } : {}),
           },
@@ -635,96 +644,98 @@ export default function CreateServerPage() {
                   </div>
                 </div>
 
-                <div className="grid gap-3">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-medium">Additional data volumes</div>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Optional blank volumes are attached at boot and preserved when the server is deleted.
-                      </p>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={dataVolumes.length >= 32}
-                      onClick={() =>
-                        setDataVolumes((volumes) => [
-                          ...volumes,
-                          {
-                            id: Date.now() + volumes.length,
-                            sizeGiB: 10,
-                            type: soleVolumeType?.name || "",
-                          },
-                        ])
-                      }
-                    >
-                      <Plus className="size-4" /> Add data volume
-                    </Button>
-                  </div>
-                  {dataVolumes.map((volume, index) => (
-                    <div
-                      key={volume.id}
-                      className="grid gap-3 rounded-lg border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end"
-                    >
-                      <div className="grid gap-2">
-                        <Label htmlFor={`data-volume-size-${volume.id}`}>Data volume {index + 1} size (GiB)</Label>
-                        <Input
-                          id={`data-volume-size-${volume.id}`}
-                          type="number"
-                          min={1}
-                          step={1}
-                          value={volume.sizeGiB}
-                          onChange={(event) =>
-                            setDataVolumes((volumes) =>
-                              volumes.map((item) =>
-                                item.id === volume.id ? { ...item, sizeGiB: Number(event.target.value) } : item,
-                              ),
-                            )
-                          }
-                        />
-                      </div>
-                      <div className="grid gap-2">
-                        <Label>Storage type</Label>
-                        {soleVolumeType ? (
-                          <div className="flex h-9 items-center gap-2 rounded-md border bg-muted/30 px-3 text-sm">
-                            <HardDrive className="size-4 text-muted-foreground" />
-                            <span>{soleVolumeType.displayName || soleVolumeType.name}</span>
-                          </div>
-                        ) : (
-                          <Select
-                            value={resolveVolumeType(volume.type)}
-                            onValueChange={(value) =>
-                              setDataVolumes((volumes) =>
-                                volumes.map((item) => (item.id === volume.id ? { ...item, type: value } : item)),
-                              )
-                            }
-                          >
-                            <SelectTrigger className="w-full" aria-label={`Data volume ${index + 1} storage type`}>
-                              <SelectValue placeholder="Select a storage type" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {availableVolumeTypes.map((type) => (
-                                <SelectItem key={type.name} value={type.name}>
-                                  {type.displayName || type.name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        )}
+                {features.has("createDataVolumes") && (
+                  <div className="grid gap-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium">Additional data volumes</div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Optional blank volumes are attached at boot and preserved when the server is deleted.
+                        </p>
                       </div>
                       <Button
                         type="button"
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Remove data volume ${index + 1}`}
-                        onClick={() => setDataVolumes((volumes) => volumes.filter((item) => item.id !== volume.id))}
+                        variant="outline"
+                        size="sm"
+                        disabled={dataVolumes.length >= 32}
+                        onClick={() =>
+                          setDataVolumes((volumes) => [
+                            ...volumes,
+                            {
+                              id: Date.now() + volumes.length,
+                              sizeGiB: 10,
+                              type: soleVolumeType?.name || "",
+                            },
+                          ])
+                        }
                       >
-                        <Trash2 className="size-4" />
+                        <Plus className="size-4" /> Add data volume
                       </Button>
                     </div>
-                  ))}
-                </div>
+                    {dataVolumes.map((volume, index) => (
+                      <div
+                        key={volume.id}
+                        className="grid gap-3 rounded-lg border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end"
+                      >
+                        <div className="grid gap-2">
+                          <Label htmlFor={`data-volume-size-${volume.id}`}>Data volume {index + 1} size (GiB)</Label>
+                          <Input
+                            id={`data-volume-size-${volume.id}`}
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={volume.sizeGiB}
+                            onChange={(event) =>
+                              setDataVolumes((volumes) =>
+                                volumes.map((item) =>
+                                  item.id === volume.id ? { ...item, sizeGiB: Number(event.target.value) } : item,
+                                ),
+                              )
+                            }
+                          />
+                        </div>
+                        <div className="grid gap-2">
+                          <Label>Storage type</Label>
+                          {soleVolumeType ? (
+                            <div className="flex h-9 items-center gap-2 rounded-md border bg-muted/30 px-3 text-sm">
+                              <HardDrive className="size-4 text-muted-foreground" />
+                              <span>{soleVolumeType.displayName || soleVolumeType.name}</span>
+                            </div>
+                          ) : (
+                            <Select
+                              value={resolveVolumeType(volume.type)}
+                              onValueChange={(value) =>
+                                setDataVolumes((volumes) =>
+                                  volumes.map((item) => (item.id === volume.id ? { ...item, type: value } : item)),
+                                )
+                              }
+                            >
+                              <SelectTrigger className="w-full" aria-label={`Data volume ${index + 1} storage type`}>
+                                <SelectValue placeholder="Select a storage type" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {availableVolumeTypes.map((type) => (
+                                  <SelectItem key={type.name} value={type.name}>
+                                    {type.displayName || type.name}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          )}
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Remove data volume ${index + 1}`}
+                          onClick={() => setDataVolumes((volumes) => volumes.filter((item) => item.id !== volume.id))}
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {storageQuotaCheckPending ? (
                   <p className="text-sm text-muted-foreground">Checking the current storage quota…</p>
@@ -852,12 +863,14 @@ export default function CreateServerPage() {
                   )
                 ) : (
                   <div className="grid gap-2">
-                    <Input
-                      value={username}
-                      onChange={(e) => setUsername(e.target.value)}
-                      placeholder="Username (optional, e.g. devuser)"
-                      autoComplete="off"
-                    />
+                    {userDataSupported && (
+                      <Input
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                        placeholder="Username (optional, e.g. devuser)"
+                        autoComplete="off"
+                      />
+                    )}
                     <Input
                       type="password"
                       value={password}
@@ -866,28 +879,32 @@ export default function CreateServerPage() {
                       autoComplete="new-password"
                     />
                     <p className="text-xs text-muted-foreground">
-                      With a username, a sudo login user is created via cloud-init (works on any cloud-init
-                      image). Without one, the password is set on the image's default account (e.g.{" "}
+                      {userDataSupported
+                        ? "With a username, a sudo login user is created via cloud-init (works on any cloud-init image). Without one, the password"
+                        : "The password"}{" "}
+                      is set on the image's default account (e.g.{" "}
                       <span className="font-mono">ubuntu</span>/<span className="font-mono">root</span>) and needs an image that supports password login.
                     </p>
                   </div>
                 )}
               </div>
 
-              <div className="grid gap-2">
-                <Label htmlFor="user-data">User data (cloud-init, optional)</Label>
-                <Textarea
-                  id="user-data"
-                  value={userData}
-                  onChange={(e) => setUserData(e.target.value)}
-                  placeholder={"#cloud-config\n# runs on first boot"}
-                  rows={5}
-                  className="font-mono text-xs"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Passed to cloud-init on first boot — e.g. create users, install packages, run scripts.
-                </p>
-              </div>
+              {userDataSupported && (
+                <div className="grid gap-2">
+                  <Label htmlFor="user-data">User data (cloud-init, optional)</Label>
+                  <Textarea
+                    id="user-data"
+                    value={userData}
+                    onChange={(e) => setUserData(e.target.value)}
+                    placeholder={"#cloud-config\n# runs on first boot"}
+                    rows={5}
+                    className="font-mono text-xs"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Passed to cloud-init on first boot — e.g. create users, install packages, run scripts.
+                  </p>
+                </div>
+              )}
 
               <div className="grid gap-2">
                 <Label>Security groups</Label>

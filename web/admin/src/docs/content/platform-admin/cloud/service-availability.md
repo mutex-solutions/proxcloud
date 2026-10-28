@@ -25,7 +25,7 @@ A new Proxmox provider starts with `compute`, `network`, `volumev3` and `image` 
 ## How far a toggle reaches
 
 - **Per region.** Enabling a service in one region makes it available only to clients in that region.
-- **Hiding a service everywhere.** A service stays visible in the portal as long as it's enabled in *any* region of *any* provider. To take it away from all clients, disable it in every region across every cloud provider.
+- **Hiding a service everywhere.** A service stays visible in the portal as long as it's enabled in *any* region of *any* provider. To take a managed service (Kubernetes, Databases, Object storage) away from all clients without touching the providers, turn it off under **System > Platform > Managed services shown to tenants**. That only hides it in the portal: the providers keep syncing, and existing resources keep running and billing.
 
 ## What happens when you disable
 

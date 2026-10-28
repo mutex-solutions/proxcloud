@@ -13,6 +13,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -183,7 +184,7 @@ function ProxmoxConfigCard({ id, provider }: TabProps) {
   const cfg = asObj(provider.config)
   const blocks: { key: string; label: string; hint: string }[] = [
     { key: "network", label: "Network", hint: '{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn","peers":["10.0.0.1"],"exitNodes":["pve1"]}},"cidrPool":"10.100.0.0/16","isolation":"shared","publicNetworks":[{"id":"vmbr1","name":"Internet","cidr":"203.0.113.0/24","gateway":"203.0.113.1","ranges":["203.0.113.10-203.0.113.200"]}]}' },
-    { key: "storageProfiles", label: "Storage profiles", hint: '{"std":{"storages":{"*":"local-zfs"},"shared":false,"snapshots":true,"thin":true,"liveMigrate":false,"replication":false}}' },
+    { key: "storageProfiles", label: "Storage profiles", hint: '{"std":{"label":"Local NVMe (ZFS)","storages":{"*":"local-zfs"},"snapshots":true,"thin":true,"replication":true},"capacity":{"label":"Capacity HDD (NFS)","storages":{"*":"nas-capacity"},"shared":true,"liveMigrate":true}}' },
     { key: "templates", label: "OS templates", hint: '{"ubuntu-24":{"vmid":9000,"node":"pve1","name":"Ubuntu 24.04","osDistro":"ubuntu","minDiskGb":10}}' },
     { key: "gpus", label: "GPU mappings", hint: '{"<pci-mapping-id>":{"alias":"nvidia-4090"}}' },
   ]
@@ -217,6 +218,7 @@ function ProxmoxConfigCard({ id, provider }: TabProps) {
               value={drafts[b.key]}
               onChange={(e) => setDrafts({ ...drafts, [b.key]: e.target.value })}
             />
+            {b.key === "storageProfiles" ? <CapacityProfileNotes cfg={cfg} /> : null}
             <div className="flex items-center justify-between">
               <p className="truncate pr-4 font-mono text-[10px] text-muted-foreground" title={b.hint}>{b.hint}</p>
               <Button size="sm" variant="outline" onClick={() => submit(b.key)} disabled={save.isPending}>Save {b.label.toLowerCase()}</Button>
@@ -225,6 +227,26 @@ function ProxmoxConfigCard({ id, provider }: TabProps) {
         ))}
       </CardContent>
     </Card>
+  )
+}
+
+// CapacityProfileNotes flags the saved storage profiles whose storages are capacity class (the
+// lowest class of a profile's storages wins, the Storage tab override over the detected class):
+// the API refuses boot disks, databases and snapshots on them (plan S18).
+function CapacityProfileNotes({ cfg }: { cfg: Record<string, any> }) {
+  const detected = asObj(asObj(cfg.capabilities).storages) as Record<string, { class?: string }>
+  const overrides = asObj(cfg.storageClasses) as Record<string, { class?: string }>
+  const classOf = (s: string) => overrides[s]?.class || detected[s]?.class
+  const capacity = Object.entries(asObj(cfg.storageProfiles) as Record<string, { label?: string; storages?: Record<string, string> }>)
+    .filter(([, p]) => Object.values(p.storages ?? {}).some((s) => classOf(s) === "capacity"))
+    .map(([slug, p]) => (p.label ? `${p.label} (${slug})` : slug))
+  if (capacity.length === 0) return null
+  return (
+    <p className="text-xs text-amber-600 dark:text-amber-400">
+      HDD — not for databases: {capacity.join(", ")}. Capacity-class profiles never take boot disks, managed databases
+      or snapshots; tenants see this warning when they pick them. Set an optional "label", and "bootDisk": false or
+      "dbaas": false to close other profiles too.
+    </p>
   )
 }
 
@@ -660,6 +682,125 @@ function QuotaTab({ id, provider }: TabProps) {
 
 // ── 6b. GPU (PVE resource-mapping capacity + unpriced-flavor guard) ─────────────────────
 type GpuRegionCapacity = { region: string; gpus: Array<{ name: string; total: number; inUse: number }> }
+// ── Storage (detected capabilities + per-storage class override) ─────────────
+// config.capabilities is written by detection (services sync / Re-detect / profile save);
+// config.storageClasses.<id> holds the admin override (class, wins) and the installer's fio
+// suggestion (suggestedClass, shown only — never applied on its own).
+type StorageCap = {
+  type?: string
+  tier?: string
+  class?: string
+  content?: string[]
+  nodes?: Record<string, { active?: boolean }>
+} & Partial<Record<(typeof CAP_FLAGS)[number][0], boolean>>
+const CAP_FLAGS = [
+  ["shared", "shared"],
+  ["snapshots", "snapshots"],
+  ["thin", "thin"],
+  ["liveMigrate", "live migrate"],
+  ["replication", "replication"],
+] as const
+const STORAGE_CLASSES = ["performance", "standard", "capacity"]
+
+function StorageTab({ id, provider }: TabProps) {
+  const qc = useQueryClient()
+  const cfg = asObj(provider.config)
+  const caps = asObj(cfg.capabilities)
+  const storages = asObj(caps.storages) as Record<string, StorageCap>
+  const classes = asObj(cfg.storageClasses) as Record<string, { class?: string; suggestedClass?: string }>
+  const save = useEsSave(id)
+  const detect = useMutation({
+    mutationFn: () => apiFetch(`/admin/service/${id}/storage/detect`, { method: "POST" }),
+    onSuccess: () => {
+      toast.success("Storage capabilities re-detected")
+      void qc.invalidateQueries({ queryKey: ["admin-get", `/admin/service/${id}`] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  const setClass = (storage: string, v: string) =>
+    save.mutate({ path: `/admin/service/${id}/storage-classes`, body: { [storage]: v === "auto" ? "" : v } })
+  const ids = Object.keys(storages).sort()
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0">
+        <CardTitle className="text-eyebrow">Storage capabilities</CardTitle>
+        <Button size="sm" variant="outline" onClick={() => detect.mutate()} disabled={detect.isPending}>
+          {detect.isPending ? "Detecting…" : "Re-detect capabilities"}
+        </Button>
+      </CardHeader>
+      <CardContent className="grid gap-3">
+        <p className="text-sm text-muted-foreground">
+          Detected from the cluster{str(caps.detectedAt) ? ` at ${new Date(str(caps.detectedAt)).toLocaleString()}` : ""}; re-run
+          every sync cycle. Storage profiles may only claim flags their storage has. The class override wins over the
+          detected class; the installer benchmark only suggests one.
+        </p>
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead>Storage</TableHead>
+                <TableHead>Tier</TableHead>
+                <TableHead>Capabilities</TableHead>
+                <TableHead>Active nodes</TableHead>
+                <TableHead>Detected</TableHead>
+                <TableHead>Suggested</TableHead>
+                <TableHead>Class</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {ids.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="text-center text-sm text-muted-foreground">
+                    Not detected yet. Use Re-detect capabilities.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                ids.map((s) => {
+                  const c = storages[s]
+                  const active = Object.entries(c.nodes ?? {}).filter(([, n]) => n.active).map(([n]) => n).sort()
+                  return (
+                    <TableRow key={s}>
+                      <TableCell>
+                        <span className="font-medium">{s}</span>{" "}
+                        <span className="font-mono text-xs text-muted-foreground">{c.type}</span>
+                        <div className="font-mono text-[10px] text-muted-foreground">{(c.content ?? []).join(", ")}</div>
+                      </TableCell>
+                      <TableCell className="text-sm">{c.tier || "—"}</TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-1">
+                          {CAP_FLAGS.filter(([k]) => c[k]).map(([k, label]) => (
+                            <Badge key={k} variant="secondary">{label}</Badge>
+                          ))}
+                        </div>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{active.length ? active.join(", ") : "none"}</TableCell>
+                      <TableCell className="text-sm">{c.class || "—"}</TableCell>
+                      <TableCell className="text-sm">{classes[s]?.suggestedClass || "—"}</TableCell>
+                      <TableCell>
+                        <Select value={classes[s]?.class || "auto"} onValueChange={(v) => setClass(s, v)} disabled={save.isPending}>
+                          <SelectTrigger className="h-8 w-40" aria-label={`Class for ${s}`}>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="auto">Detected ({c.class || "—"})</SelectItem>
+                            {STORAGE_CLASSES.map((k) => (
+                              <SelectItem key={k} value={k}>{k}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 type UnpricedFlavor = { region: string; id: string; name: string; gpuModel?: string; gpuCount?: number; reason?: string }
 
 function GpuTab({ id }: { id: string }) {
@@ -1034,6 +1175,7 @@ function MetricsTab({ id, provider }: TabProps) {
 // ── page ─────────────────────────────────────────────────────────────────────
 const TAB_DEFS = [
   { v: "connection", label: "Connection" },
+  { v: "storage", label: "Storage" },
   { v: "services", label: "Services" },
   { v: "configuration", label: "Configuration" },
   { v: "features", label: "Features" },
@@ -1043,7 +1185,8 @@ const TAB_DEFS = [
   { v: "advanced", label: "Advanced" },
 ]
 
-// A Proxmox VE provider gets every tab (network/storage/template/GPU config blocks live on Connection).
+// A Proxmox VE provider gets every tab (network/storage-profile/template/GPU config blocks live on
+// Connection; Storage shows the detected capabilities).
 const PROXMOX_TAB_KEYS = new Set(TAB_DEFS.map((t) => t.v))
 
 // ceph-s3, kamaji and dbaas serve one service each (object store / managed Kubernetes / managed
@@ -1113,6 +1256,9 @@ export default function CloudProviderDetailPage() {
 
         <TabsContent value="connection" className="mt-4">
           <ConnectionTab id={id} provider={p} />
+        </TabsContent>
+        <TabsContent value="storage" className="mt-4">
+          <StorageTab id={id} provider={p} />
         </TabsContent>
         <TabsContent value="services" className="mt-4">
           <ServicesTab id={id} provider={p} />

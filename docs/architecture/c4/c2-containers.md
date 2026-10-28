@@ -142,14 +142,33 @@ flowchart TB
 | Full | Ceph RBD / CephFS as Proxmox storage | VM disks on Ceph sites (referenced through storage profiles) | Implemented |
 | Full | Ceph RGW | Tenant buckets: per-project RGW user, keys, quotas, bucket settings | Implemented |
 | Standard | Local ZFS (`zfspool`) | VM disks, pinned to the node holding the storage | Implemented |
-| Standard | TrueNAS NFS / SMB / iSCSI | Capacity disks, templates, backups, tenant file shares, RWX volumes | Planned |
+| Standard | TrueNAS NFS as a capacity-class profile ("Capacity HDD (NFS)") | Bulk data volumes only: no boot disks, databases or snapshots (API-enforced) | Implemented |
+| Standard | TrueNAS SMB / iSCSI, NAS-created stores | Templates, backups, tenant file shares, RWX volumes | Planned |
 | Standard | RustFS | Tenant buckets and internal backups on sites without Ceph | Planned |
-| Both | Admin-declared profile flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`) | Shown to tenants as volume-type specs | Implemented |
-| Both | Profile `tier` / `class` and capability detection from the cluster | Gating snapshots, HA and DBaaS by storage type | Planned |
+| Both | Admin-declared profile flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`), validated on save against detection | Shown to tenants as volume-type specs | Implemented |
+| Both | Per-storage capability detection (type table: tier, default class, flags; per-node active/avail) + admin class override | Provider Storage tab; profile validation; scheduler node restriction and free-space filter; template placement | Implemented |
+| Both | Profile `tier` / `class` (derived from its storages) and `bootDisk` / `dbaas` caps, API-gated | Capacity class refuses boot disks (create, retype), server snapshots with an attached capacity disk, and database storage classes named after it; volume billing attributes `profile` and `storage_class` | Implemented |
+| Both | HA / replication gating per profile | Protected add-on | Planned |
 
-A storage profile today is a slug mapped to a storage id per node (or `*`) plus
-admin-declared capability flags; the scheduler restricts placement to the nodes
-the profile lists. Nothing is gated on the flags yet.
+A storage profile is a slug mapped to a storage id per node (or `*`) plus
+capability flags that may only be a subset of what the detected storage supports.
+The scheduler restricts placement to the nodes where the profile's storage is
+currently active (`*` = every such node) and skips a node whose profile storage
+would drop below `config.storageHeadroomPct` (default 10 %) free after the disk;
+a data-volume create checks the same on the server's node. PVE clones to another
+node only from shared to shared storage: a template whose volumes all sit on
+shared storage (NFS, RBD, CephFS) is full-cloned to a picked node whose profile
+storage is shared too; a local template or a local profile is created on the
+template's own node only, and a profile not active on that node answers 409. A
+detached volume attaches only to a server on its VM's node (PVE's disk reassign
+needs one node, even on shared storage; `LIST_ATTACH_TARGETS` lists the eligible
+servers; anything else is 409); retype moves the disk to another
+profile's storage on the same node (`move_disk`, source deleted), and a detached
+volume can be deleted on its own. A profile's class is the lowest effective class
+of its storages (admin override, else detected); a capacity-class profile never
+takes boot disks, managed databases or snapshots, whatever it claims, and a save
+that claims them is refused. Each volume row carries its own profile and storage
+class, so price rules can filter on them.
 
 ## C2c. Build and delivery
 

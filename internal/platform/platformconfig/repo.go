@@ -41,6 +41,7 @@ type AdminDto struct {
 	LoginConfiguration            map[string]any            `json:"loginConfiguration"`
 	ProjectProvisioningQuota      *ProjectProvisioningQuota `json:"projectProvisioningQuota,omitempty"`
 	OrganizationProvisioningQuota *ProvisioningQuota        `json:"organizationProvisioningQuota,omitempty"`
+	HiddenServices                []string                  `json:"hiddenServices,omitempty"`
 }
 
 // adminConfigDoc reads the raw doc.
@@ -58,6 +59,7 @@ type adminConfigDoc struct {
 	LoginConfiguration            map[string]any            `json:"loginConfiguration"`
 	ProjectProvisioningQuota      *ProjectProvisioningQuota `json:"projectProvisioningQuota"`
 	OrganizationProvisioningQuota *ProvisioningQuota        `json:"organizationProvisioningQuota"`
+	HiddenServices                []string                  `json:"hiddenServices"`
 }
 
 func (d adminConfigDoc) toAdminDto() AdminDto {
@@ -77,6 +79,7 @@ func (d adminConfigDoc) toAdminDto() AdminDto {
 		DateConfiguration: d.DateConfiguration, LoginConfiguration: login,
 		ProjectProvisioningQuota:      d.ProjectProvisioningQuota,
 		OrganizationProvisioningQuota: d.OrganizationProvisioningQuota,
+		HiddenServices:                d.HiddenServices,
 	}
 }
 

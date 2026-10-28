@@ -36,9 +36,19 @@ package externalservice
 //	    "storageProfiles": {                   // Phase 5 — honest capability flags
 //	      "std": {"storages": {"*": "local-zfs"}, "shared": false, "snapshots": true,
 //	              "thin": true, "liveMigrate": false, "replication": false}
+//	    },                                     // validated on save: flags ≤ detected capabilities
+//	    "capabilities": {                      // written by capability detection (services sync,
+//	      "detectedAt": "2026-10-28T10:00:00Z",// admin re-detect, profile save) — never hand-edited
+//	      "storages": {"local-zfs": {"type": "zfspool", "class": "performance", ...}}
+//	    },
+//	    "storageClasses": {                    // per storage: admin override + installer fio suggestion
+//	      "nas-capacity": {"class": "capacity", "suggestedClass": "standard"}
 //	    },
 //	    "defaultStorageProfile": "std",
-//	    "templates": {},                       // Phase 3/6 — template catalog {slug: {vmid|perNode}}
+//	    "templates": {},                       // template catalog {slug: {vmid, node}}; a template on
+//	                                           // shared storage clones to any node, a local one
+//	                                           // only to its own node
+//	    "storageHeadroomPct": 10,              // % of a storage kept free when placing disks
 //	    "gpus": {},                            // Phase 6 — {mappingId: {"alias": "nvidia-4090"}}
 //	    "overcommit": {"cpu": 4},              // scheduler capacity multiplier
 //	    "metrics": {"source": "none"},         // until prometheus-pve-exporter is wired
@@ -55,7 +65,11 @@ package externalservice
 // pool scoping in Proxmox, so the platform DB is the only tenancy boundary.
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"sort"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
@@ -109,6 +123,15 @@ func (e *ExternalService) PVEOvercommitCPU() float64 {
 		return f
 	}
 	return 4
+}
+
+// PVEStorageHeadroomPct is config.storageHeadroomPct: the % of a storage's capacity the
+// scheduler and volume creates keep free (default 10; 0 disables the headroom, not the check).
+func (e *ExternalService) PVEStorageHeadroomPct() float64 {
+	if f, ok := e.Config["storageHeadroomPct"].(float64); ok && f >= 0 && f < 100 {
+		return f
+	}
+	return 10
 }
 
 // PVETemplate is one admin-curated OS template (config.templates entry).
@@ -239,12 +262,38 @@ func (e *ExternalService) PVENetworkConfig() PVENetwork {
 // off them; nothing silently falls back.
 type PVEStorageProfile struct {
 	Slug        string
+	Label       string            // display name, e.g. "Capacity HDD (NFS)" ("" = the slug)
 	Storages    map[string]string // node → storage id; "*" → same id on every node
 	Shared      bool
 	Snapshots   bool
 	Thin        bool
 	LiveMigrate bool
 	Replication bool
+	// Tier and Class are derived from the mapped storages (never configured on the profile):
+	// Tier is full only when every storage is Ceph; Class is the lowest effective class of
+	// its storages ("" while none was detected).
+	Tier  string
+	Class string
+	// NoBootDisk / NoDBaaS are the profile's own bootDisk:false / dbaas:false downgrades.
+	NoBootDisk bool
+	NoDBaaS    bool
+}
+
+// Capacity reports whether the profile is HDD-class bulk storage (plan S18).
+func (p PVEStorageProfile) Capacity() bool { return p.Class == pve.ClassCapacity }
+
+// BootDisk reports whether a server's root disk may live on the profile: never on capacity class.
+func (p PVEStorageProfile) BootDisk() bool { return !p.NoBootDisk && !p.Capacity() }
+
+// DBaaS reports whether databases may use the profile: never on capacity class.
+func (p PVEStorageProfile) DBaaS() bool { return !p.NoDBaaS && !p.Capacity() }
+
+// DisplayName is the label, or the slug when none is set.
+func (p PVEStorageProfile) DisplayName() string {
+	if p.Label != "" {
+		return p.Label
+	}
+	return p.Slug
 }
 
 // StorageFor resolves the profile's storage id on one node ("" = not available there).
@@ -255,28 +304,47 @@ func (p PVEStorageProfile) StorageFor(node string) string {
 	return p.Storages["*"]
 }
 
-// Nodes returns the profile's node restriction (nil = all nodes, via "*").
-func (p PVEStorageProfile) Nodes() map[string]bool {
-	if _, ok := p.Storages["*"]; ok {
-		return nil
-	}
-	out := map[string]bool{}
-	for node := range p.Storages {
-		out[node] = true
+// Placement returns the nodes the profile can place on right now — every node whose resolved
+// storage (StorageFor) is currently active there, so "*" means the nodes where its storage is
+// active, not every node — each with that storage's live state (the scheduler's free-space
+// input). caps is pve.Client.DetectStorage's output.
+func (p PVEStorageProfile) Placement(caps map[string]pve.StorageCapability) map[string]pve.StorageNodeState {
+	out := map[string]pve.StorageNodeState{}
+	for id, c := range caps {
+		for node, st := range c.Nodes {
+			if st.Active && p.StorageFor(node) == id {
+				out[node] = st
+			}
+		}
 	}
 	return out
 }
 
-// PVEStorageProfiles reads config.storageProfiles.
+// classRank orders the storage classes; a profile's class is the lowest of its storages.
+var classRank = map[string]int{pve.ClassCapacity: 1, pve.ClassStandard: 2, pve.ClassPerformance: 3}
+
+// PVEStorageProfiles reads config.storageProfiles, deriving each profile's tier and class from
+// config.capabilities and config.storageClasses.
 func (e *ExternalService) PVEStorageProfiles() map[string]PVEStorageProfile {
 	m, _ := e.Config["storageProfiles"].(map[string]any)
 	out := map[string]PVEStorageProfile{}
+	if len(m) == 0 {
+		return out
+	}
+	detected := e.PVECapabilities().Storages
+	overrides := e.PVEStorageClasses()
+	classOf := func(id string) string {
+		if c := overrides[id].Class; pve.ValidClass(c) {
+			return c
+		}
+		return detected[id].Class
+	}
 	for slug, raw := range m {
 		p, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
-		prof := PVEStorageProfile{Slug: slug, Storages: map[string]string{}}
+		prof := PVEStorageProfile{Slug: slug, Label: str(p["label"]), Storages: map[string]string{}}
 		if ss, ok := p["storages"].(map[string]any); ok {
 			for node, id := range ss {
 				if s := str(id); s != "" {
@@ -289,11 +357,202 @@ func (e *ExternalService) PVEStorageProfiles() map[string]PVEStorageProfile {
 		prof.Thin, _ = p["thin"].(bool)
 		prof.LiveMigrate, _ = p["liveMigrate"].(bool)
 		prof.Replication, _ = p["replication"].(bool)
+		full := len(prof.Storages) > 0
+		for _, id := range prof.Storages {
+			if c := classOf(id); c != "" && (prof.Class == "" || classRank[c] < classRank[prof.Class]) {
+				prof.Class = c
+			}
+			if t := detected[id].Tier; t != pve.TierFull {
+				full = false
+			}
+			// Downgrade-only, on every read: a claim the detected storage lacks is dropped, so a
+			// profile written past ValidatePVEStorageProfiles (provider create, a storage that
+			// lost a capability since) is never sold above what it can do.
+			if len(detected) > 0 {
+				c := detected[id]
+				prof.Shared, prof.Snapshots, prof.Thin = prof.Shared && c.Shared, prof.Snapshots && c.Snapshots, prof.Thin && c.Thin
+				prof.LiveMigrate, prof.Replication = prof.LiveMigrate && c.LiveMigrate, prof.Replication && c.Replication
+			}
+		}
+		switch {
+		case full:
+			prof.Tier = pve.TierFull
+		case len(detected) > 0:
+			prof.Tier = pve.TierStandard
+		}
+		prof.NoBootDisk = p["bootDisk"] == false
+		prof.NoDBaaS = p["dbaas"] == false
+		// Snapshots on capacity class are not sold (NFS qcow2 internal snapshots block the VM).
+		prof.Snapshots = prof.Snapshots && !prof.Capacity()
 		if len(prof.Storages) > 0 {
 			out[slug] = prof
 		}
 	}
 	return out
+}
+
+// ValidatePVEStorageProfiles checks a config.storageProfiles value against the detected
+// storage capabilities: every mapped storage exists, takes VM disks (content "images") and is
+// active on its node ("*" = on at least one node), and a profile claims no capability flag its
+// storages lack — admins may only downgrade. A capacity-class profile (its class comes from the
+// storages' detected class or the storageClasses override) cannot claim snapshots, bootDisk or
+// dbaas.
+func ValidatePVEStorageProfiles(raw any, caps map[string]pve.StorageCapability, storageClasses any) error {
+	if raw == nil {
+		return nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("storageProfiles must be an object")
+	}
+	profiles := (&ExternalService{Config: map[string]any{
+		"storageProfiles": m, "capabilities": PVECapabilities{Storages: caps}, "storageClasses": storageClasses,
+	}}).PVEStorageProfiles()
+	for _, slug := range sortedKeys(m) {
+		p, ok := profiles[slug]
+		if !ok {
+			return fmt.Errorf("storage profile %q maps no storage", slug)
+		}
+		// pm holds the raw claims: PVEStorageProfiles already clamps parsed flags to detection.
+		pm, _ := m[slug].(map[string]any)
+		if p.Capacity() {
+			for _, f := range []string{"snapshots", "bootDisk", "dbaas"} {
+				if pm[f] == true {
+					return fmt.Errorf("storage profile %q is capacity class (HDD) and cannot claim %s", slug, f)
+				}
+			}
+		}
+		for _, node := range sortedKeys(p.Storages) {
+			id := p.Storages[node]
+			c, ok := caps[id]
+			switch {
+			case !ok:
+				return fmt.Errorf("storage profile %q: storage %q does not exist", slug, id)
+			case !c.HasContent("images"):
+				return fmt.Errorf("storage profile %q: storage %q does not allow VM disks (content images)", slug, id)
+			case node == "*" && !anyActive(c):
+				return fmt.Errorf("storage profile %q: storage %q is not active on any node", slug, id)
+			case node != "*" && !c.Nodes[node].Active:
+				return fmt.Errorf("storage profile %q: storage %q is not active on node %s", slug, id, node)
+			}
+			for _, f := range []struct {
+				name string
+				has  bool
+			}{
+				{"shared", c.Shared}, {"snapshots", c.Snapshots}, {"thin", c.Thin},
+				{"liveMigrate", c.LiveMigrate}, {"replication", c.Replication},
+			} {
+				if pm[f.name] == true && !f.has {
+					return fmt.Errorf("storage profile %q claims %s but storage %q (%s) does not support it", slug, f.name, id, c.Type)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func anyActive(c pve.StorageCapability) bool {
+	for _, n := range c.Nodes {
+		if n.Active {
+			return true
+		}
+	}
+	return false
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// PVECapabilities is config.capabilities: the last storage capability detection.
+type PVECapabilities struct {
+	DetectedAt time.Time                        `json:"detectedAt"`
+	Storages   map[string]pve.StorageCapability `json:"storages"`
+}
+
+// PVECapabilities reads config.capabilities (zero value when never detected).
+func (e *ExternalService) PVECapabilities() PVECapabilities {
+	var out PVECapabilities
+	if raw, ok := e.Config["capabilities"]; ok {
+		if b, err := json.Marshal(raw); err == nil {
+			_ = json.Unmarshal(b, &out)
+		}
+	}
+	return out
+}
+
+// PVEStorageClass is config.storageClasses.<storage>: the admin override (Class, wins) and
+// the installer's fio suggestion (SuggestedClass, display-only — never applied on its own).
+type PVEStorageClass struct {
+	Class          string `json:"class,omitempty"`
+	SuggestedClass string `json:"suggestedClass,omitempty"`
+}
+
+// PVEStorageClasses reads config.storageClasses.
+func (e *ExternalService) PVEStorageClasses() map[string]PVEStorageClass {
+	m, _ := e.Config["storageClasses"].(map[string]any)
+	out := map[string]PVEStorageClass{}
+	for id, raw := range m {
+		if c, ok := raw.(map[string]any); ok {
+			out[id] = PVEStorageClass{Class: str(c["class"]), SuggestedClass: str(c["suggestedClass"])}
+		}
+	}
+	return out
+}
+
+// PVEVolumeProfileFunc resolves a disk's storage profile and storage class for the volume sync
+// (billing attributes "profile" and "storage_class"): the VM's own profile when it maps that
+// storage on the node, else the first profile (by slug) that does; the class is the storage's
+// effective class.
+func (e *ExternalService) PVEVolumeProfileFunc() pve.VolumeProfileFunc {
+	profiles := e.PVEStorageProfiles()
+	slugs := sortedKeys(profiles)
+	detected := e.PVECapabilities().Storages
+	overrides := e.PVEStorageClasses()
+	return func(node, storage, vmProfile string) (string, string) {
+		class := detected[storage].Class
+		if c := overrides[storage].Class; pve.ValidClass(c) {
+			class = c
+		}
+		if profiles[vmProfile].StorageFor(node) == storage && storage != "" {
+			return vmProfile, class
+		}
+		for _, slug := range slugs {
+			if profiles[slug].StorageFor(node) == storage && storage != "" {
+				return slug, class
+			}
+		}
+		return "", class
+	}
+}
+
+// PVEEffectiveStorageClass is the class a storage is treated as: a valid admin override,
+// else the detected class ("" when the storage was never detected).
+func (e *ExternalService) PVEEffectiveStorageClass(storage string) string {
+	if c := e.PVEStorageClasses()[storage].Class; pve.ValidClass(c) {
+		return c
+	}
+	return e.PVECapabilities().Storages[storage].Class
+}
+
+// DetectPVECapabilities runs storage detection against the cluster and persists the result
+// under config.capabilities (a partial update, so a concurrent admin edit of other config
+// keys is not clobbered).
+func (s *Service) DetectPVECapabilities(ctx context.Context, es *ExternalService, c *pve.Client) (PVECapabilities, error) {
+	caps, err := c.DetectStorage(ctx)
+	if err != nil {
+		return PVECapabilities{}, err
+	}
+	out := PVECapabilities{DetectedAt: time.Now().UTC(), Storages: caps}
+	if _, err := s.repo.col.SetByID(ctx, es.ID, map[string]any{"config.capabilities": out}, nil); err != nil {
+		return PVECapabilities{}, err
+	}
+	return out, nil
 }
 
 // PVEDefaultStorageProfile is config.defaultStorageProfile (falls back to the

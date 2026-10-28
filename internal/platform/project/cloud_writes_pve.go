@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -165,17 +166,27 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		}
 		gpuInv, gpuFree = inv, inv.FreeCountByNode()
 	}
-	// Storage profile: the flavor's (else the provider default). Its node map is
-	// the scheduler's placement restriction; local profiles pin the VM honestly.
+	// Placement inputs: live storage capabilities give the profile's storage per node (node
+	// restriction + free space) and tell whether the template can be cloned off its node.
+	caps, derr := ps.C.DetectStorage(ctx)
+	if derr != nil {
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox cluster unavailable")
+		return
+	}
+	tplCfg, terr := ps.C.GetVMConfig(ctx, tpl.Node, tpl.VMID)
+	if terr != nil {
+		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf("Image %q is not available right now", tpl.Name)))
+		return
+	}
 	profiles := es.PVEStorageProfiles()
 	profileSlug := fl.StorageProfile
 	if profileSlug == "" {
 		profileSlug = es.PVEDefaultStorageProfile()
 	}
-	var allowedNodes map[string]bool
-	profile, hasProfile := profiles[profileSlug]
-	if hasProfile {
-		allowedNodes = profile.Nodes()
+	pl, herr := pvePlacement(tpl, pve.TemplateShared(tplCfg, caps), profileSlug, profiles, caps)
+	if herr != nil {
+		h.fail(w, herr)
+		return
 	}
 	// Scheduler: capacity-ranked node pick over the live cluster snapshot.
 	nodes, nerr := ps.C.Nodes(ctx)
@@ -186,16 +197,19 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 	}
 	target, serr := pve.PickNode(nodes, vms, pve.SchedReq{
 		VCPUs: fl.VCPUs, RAMMb: int64(fl.RAMMb), OvercommitCPU: es.PVEOvercommitCPU(),
-		AllowedNodes: allowedNodes, GPUs: fl.GPUCount, GPUFree: gpuFree,
+		AllowedNodes: pl.allowed, GPUs: fl.GPUCount, GPUFree: gpuFree,
+		Storage: pl.storage, DiskBytes: int64(diskGb) << 30, HeadroomPct: es.PVEStorageHeadroomPct(),
 	})
 	if serr != nil {
-		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "No capacity available for this flavor"))
+		msg := "No capacity available for this flavor (CPU, RAM, GPU or free disk space)"
+		if len(pl.allowed) == 1 && pl.allowed[tpl.Node] {
+			msg += fmt.Sprintf(" on node %s, the only node image %q can be created on", tpl.Node, tpl.Name)
+		}
+		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, msg))
 		return
 	}
-	cloneStorage := ""
-	if hasProfile {
-		cloneStorage = profile.StorageFor(target)
-	}
+	// "" (no profile) = full clone onto the template's storage on the target.
+	cloneStorage := profiles[profileSlug].StorageFor(target)
 	// Reserve the concrete mappings on the chosen node (distinct ids — two hostpci
 	// entries on one mapping resolve to the same card and the VM refuses to start).
 	var gpuMappings []string
@@ -297,6 +311,76 @@ func (h *Handler) pveResolveTemplate(ctx context.Context, es *externalservice.Ex
 		}
 	}
 	return nil, httpx.BadRequest("Unknown image")
+}
+
+// pvePlan is a create's placement input for pve.PickNode.
+type pvePlan struct {
+	allowed map[string]bool                 // nil = any node
+	storage map[string]pve.StorageNodeState // nil = no profile, no free-space filter
+}
+
+// pvePlacement derives where a server may be created. The profile (when configured) restricts
+// placement to the nodes where its storage is active and feeds the free-space filter. PVE clones
+// to another node (target=<node>) only when every template volume is on shared storage AND the
+// clone's target storage is shared too ("can't clone to non-shared storage"; with no profile the
+// clone lands on the template's own, shared, storages). Any other node gets nothing, so a local
+// template or a local profile pins the clone to the template's node, and a profile not active
+// there fails with 409 instead of a clone-time 502.
+func pvePlacement(tpl *externalservice.PVETemplate, tplShared bool, profileSlug string, profiles map[string]externalservice.PVEStorageProfile, caps map[string]pve.StorageCapability) (pvePlan, *httpx.HTTPError) {
+	var pl pvePlan
+	profile, hasProfile := profiles[profileSlug]
+	if hasProfile {
+		if !profile.BootDisk() {
+			return pl, httpx.NewError(http.StatusConflict, http.StatusConflict, pveNoBootDiskMsg(profile)+"; choose a flavor on another storage profile")
+		}
+		pl.storage = profile.Placement(caps)
+		if len(pl.storage) == 0 {
+			return pl, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf("Storage profile %q has no active storage on any node", profileSlug))
+		}
+	}
+	if !hasProfile {
+		if !tplShared {
+			pl.allowed = map[string]bool{tpl.Node: true}
+		}
+		return pl, nil
+	}
+	pl.allowed = map[string]bool{}
+	for node := range pl.storage {
+		if node == tpl.Node || (tplShared && caps[profile.StorageFor(node)].Shared) {
+			pl.allowed[node] = true
+		}
+	}
+	if len(pl.allowed) == 0 {
+		return pl, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf(
+			"Image %q can only be cloned on node %s (Proxmox clones to another node only from shared to shared storage), where storage profile %q is not available; the operator must enable the profile on %s or use shared storage",
+			tpl.Name, tpl.Node, profileSlug, tpl.Node))
+	}
+	return pl, nil
+}
+
+// pveNoBootDiskMsg explains why a profile refuses boot disks (plan S18).
+func pveNoBootDiskMsg(p externalservice.PVEStorageProfile) string {
+	if p.Capacity() {
+		return fmt.Sprintf("Storage profile %q (%s) is HDD capacity storage and cannot hold a boot disk", p.Slug, p.DisplayName())
+	}
+	return fmt.Sprintf("Storage profile %q (%s) does not allow boot disks", p.Slug, p.DisplayName())
+}
+
+// pveCapacityDisk returns the first attached disk (not unusedN, not a CD-ROM) of a VM config whose
+// storage is capacity class, or nil. Such a VM cannot be snapshotted into an image (plan S18:
+// no snapshots on capacity; protection there is vzdump/PBS).
+func pveCapacityDisk(cfg pve.VMConfig, classOf func(storage string) string) *pve.VMDisk {
+	disks := pve.ParseDisks(cfg)
+	sort.Slice(disks, func(i, j int) bool { return disks[i].Slot < disks[j].Slot })
+	for i, d := range disks {
+		if d.CDROM || strings.HasPrefix(d.Slot, "unused") || d.Storage == "" {
+			continue
+		}
+		if classOf(d.Storage) == pve.ClassCapacity {
+			return &disks[i]
+		}
+	}
+	return nil
 }
 
 // pveResolveBridge maps the wizard's first network interface to a PVE bridge/vnet.
@@ -447,7 +531,16 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		}
 		return ps.DeleteSecurityGroup(ctx, proj.ID, cr.ExternalID)
 	case cloud.TypeVolume:
-		return fmt.Errorf("detach or delete the volume from its server (Proxmox disks belong to a VM)")
+		// Only a detached disk (unusedN) is deleted on its own; an attached one is 409.
+		ps, err := h.pveFor(es)
+		if err != nil {
+			return err
+		}
+		vol, _ := cr.Data["volume"].(map[string]any)
+		if err := ps.DeleteVolume(ctx, proj.ID, intAny(vol["vmid"]), cr.ExternalID); err != nil {
+			return pveVolumeErr(err)
+		}
+		return nil
 	default:
 		return fmt.Errorf("resource type %q is not supported on a Proxmox provider", cr.Type)
 	}
@@ -676,10 +769,12 @@ func (h *Handler) pveBulkAction(w http.ResponseWriter, r *http.Request, proj *Pr
 		out := []map[string]any{}
 		for slug, prof := range es.PVEStorageProfiles() {
 			out = append(out, map[string]any{
-				"name": slug,
+				"name":        slug,
+				"displayName": prof.DisplayName(),
 				"extra_specs": map[string]any{
 					"shared": prof.Shared, "snapshots": prof.Snapshots, "thin": prof.Thin,
 					"liveMigrate": prof.LiveMigrate, "replication": prof.Replication,
+					"tier": prof.Tier, "class": prof.Class, "bootDisk": prof.BootDisk(), "dbaas": prof.DBaaS(),
 				},
 			})
 		}
@@ -782,7 +877,11 @@ func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *use
 		h.fail(w, httpx.BadRequest(fmt.Sprintf("Volume type %q is not available on the server's node", slug)))
 		return
 	}
-	if _, err := ps.AddVolume(ctx, proj.ID, serverExt, sizeGiB, storage); err != nil {
+	if _, err := ps.AddVolume(ctx, proj.ID, serverExt, sizeGiB, storage, es.PVEStorageHeadroomPct()); err != nil {
+		if errors.Is(err, pve.ErrStorageFull) {
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf("Not enough free space for a %d GB volume on the server's storage", sizeGiB)))
+			return
+		}
 		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
 		return
 	}
@@ -799,7 +898,7 @@ func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.Extern
 	if err != nil {
 		return
 	}
-	prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID)
+	prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc())
 	if rows, err := prov.List(ctx); err == nil {
 		now := time.Now().UTC()
 		for i := range rows {
@@ -815,7 +914,18 @@ func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.Extern
 	}
 }
 
-// pveVolumeAction handles EXTEND / ATTACH / DETACH on a VOLUME row. Returns handled.
+// pveVolumeErr maps a pve volume error: a refusal the caller can fix (pve.ConflictError) is
+// 409 with its message, anything else is PVE failing (502).
+func pveVolumeErr(err error) *httpx.HTTPError {
+	var ce *pve.ConflictError
+	if errors.As(err, &ce) {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, ce.Msg)
+	}
+	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+}
+
+// pveVolumeAction handles EXTEND / ATTACH / DETACH / RETYPE / LIST_ATTACH_TARGETS on a
+// VOLUME row. Returns handled.
 func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if cr.Type != cloud.TypeVolume {
 		return false
@@ -858,11 +968,56 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 			}
 		}
 		aerr = ps.AttachVolume(ctx, proj.ID, vmid, cr.ExternalID, target)
+	case "LIST_ATTACH_TARGETS":
+		vms, err := ps.AttachTargets(ctx, proj.ID, vmid, cr.ExternalID)
+		if err != nil {
+			h.fail(w, pveVolumeErr(err))
+			return true
+		}
+		out := []map[string]any{}
+		for _, vm := range vms {
+			ext := strconv.Itoa(vm.VMID)
+			id := ""
+			if scr, _ := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, ext); scr != nil {
+				id = scr.ID
+			}
+			out = append(out, map[string]any{"id": id, "externalId": ext, "name": vm.Name, "node": vm.Node})
+		}
+		httpx.OK(w, map[string]any{"result": out})
+		return true
+	case "RETYPE":
+		slug := strAny(data["newType"])
+		if slug == "" {
+			slug = strAny(data["type"])
+		}
+		profile, ok := es.PVEStorageProfiles()[slug]
+		if !ok {
+			h.fail(w, httpx.BadRequest("Unknown volume type"))
+			return true
+		}
+		if vol["bootable"] == true && !profile.BootDisk() {
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, pveNoBootDiskMsg(profile)))
+			return true
+		}
+		vm, verr := ps.ResolveVM(ctx, proj.ID, strconv.Itoa(vmid))
+		if verr != nil || vm == nil {
+			h.fail(w, httpx.NotFound("Server not found"))
+			return true
+		}
+		storage := profile.StorageFor(vm.Node)
+		if storage == "" {
+			h.fail(w, httpx.BadRequest(fmt.Sprintf("Volume type %q is not available on the volume's node", slug)))
+			return true
+		}
+		if aerr = ps.RetypeVolume(ctx, proj.ID, vmid, cr.ExternalID, storage, es.PVEStorageHeadroomPct()); aerr == nil {
+			// The move gives the disk a new volid: the old row is gone, the sync below adds the new one.
+			_ = h.cloud.DeleteAndArchive(ctx, cr, time.Now().UTC())
+		}
 	default:
 		return false
 	}
 	if aerr != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, aerr.Error()))
+		h.fail(w, pveVolumeErr(aerr))
 		return true
 	}
 	h.pveSyncVolumes(ctx, es, proj)
@@ -926,6 +1081,22 @@ func (h *Handler) pveCreateImage(w http.ResponseWriter, r *http.Request, u *user
 	}
 	ps, ok := h.pveService(w, es)
 	if !ok {
+		return
+	}
+	vm, verr := ps.ResolveVM(ctx, proj.ID, serverExt)
+	if verr != nil || vm == nil {
+		h.fail(w, httpx.NotFound("Server not found"))
+		return
+	}
+	cfg, gerr := ps.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+	if gerr != nil {
+		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, gerr.Error()))
+		return
+	}
+	if d := pveCapacityDisk(cfg, es.PVEEffectiveStorageClass); d != nil {
+		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf(
+			"Snapshots are not available on HDD capacity storage: volume %s is on storage %s. Detach it first, or protect it with backups",
+			d.Slot, d.Storage)))
 		return
 	}
 	vmid, cerr := ps.CreateImage(ctx, proj.ID, serverExt, name)

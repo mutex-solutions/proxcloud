@@ -214,11 +214,15 @@ sequenceDiagram
   SPA->>H: POST /project/{id}/cloud type SERVER
   H->>H: flavor, template, project network required
   H->>H: GPU quota, then enforcePVEQuota (503 if usage unreadable)
-  H->>PVE: nodes and cluster resources
-  H->>H: PickNode (capacity, profile nodes, free GPUs)
+  H->>PVE: storage detection (storage + cluster resources), template config
+  H->>H: profile refuses boot disks (capacity class or bootDisk false): 409
+  H->>H: profile nodes = nodes where its storage is active (409 when none)
+  H->>H: local template or local profile storage: pin to the template node (409 when the profile is not active there)
+  H->>PVE: nodes, cluster resources (vm)
+  H->>H: PickNode (capacity, allowed nodes, free GPUs, profile storage free >= disk + headroom)
   H->>PS: ServerSecurityGroups (ensure default group)
   H->>PS: CreateServer
-  PS->>PVE: NextID, full clone into project pool, wait
+  PS->>PVE: NextID, full clone (target node, profile storage) into project pool, wait
   PS->>PVE: read config
   PS->>PVE: set config: cores, memory, tags, net0 on vnet with firewall=1, drop extra NICs
   PS->>PVE: resize boot disk

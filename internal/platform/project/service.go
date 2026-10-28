@@ -127,6 +127,19 @@ func (s *Service) isProjectsQuotaExceeded(ctx context.Context, billingProfileID,
 	return len(existing) >= limit, nil
 }
 
+// HiddenServices returns the service slugs the operator hides from tenants
+// (platformConfiguration.hiddenServices). A read error hides nothing.
+func (s *Service) HiddenServices(ctx context.Context) []string {
+	if s.platformcfg == nil {
+		return nil
+	}
+	cfg, err := s.platformcfg.FindDefault(ctx)
+	if err != nil || cfg == nil {
+		return nil
+	}
+	return cfg.HiddenServices
+}
+
 // Save persists a project (status/services updates from cloud bootstrap).
 func (s *Service) Save(ctx context.Context, p *Project) error { return s.repo.Save(ctx, p) }
 

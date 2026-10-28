@@ -145,6 +145,11 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 		for k, v := range c {
 			cfg[k] = v
 		}
+		if raw, ok := c["storageProfiles"]; ok && cfg["provider"] == "proxmox" {
+			if herr := h.validatePVEStorageProfiles(req, cfg, raw); herr != nil {
+				return herr
+			}
+		}
 	}
 	if s, ok := body["secret"].(map[string]any); ok {
 		secret := ensureMap(doc, "secret")

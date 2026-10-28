@@ -46,11 +46,38 @@ func (h *Handler) initUI(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
+	features := map[string][]string{}
+	for _, id := range p.ServiceIDs() {
+		if es, err := h.esSvc.Get(r.Context(), id); err == nil && es != nil && !es.IsDisabled() {
+			features[es.ID] = cloudFeatures(es)
+		}
+	}
 	httpx.OK(w, map[string]any{
 		"id":          p.ID,
 		"menu":        map[string]any{"items": h.uiMenuItems(r)},
+		"features":    features,
 		"kycRequests": []any{},
 	})
+}
+
+// cloudFeatures lists the optional client actions a provider's backend serves, keyed into
+// /init features by service id. The client hides an action whose flag is absent, so a flag
+// is added here only once the backend accepts the action. Vocabulary (web/client
+// lib/hooks.ts CloudFeature): serverSnapshots and volumeRetype are served by Proxmox;
+// serverRebuild, serverRescue, serverPassword, userData, createDataVolumes, ports, subnets
+// and volumeSnapshots have no backend yet.
+func cloudFeatures(es *externalservice.ExternalService) []string {
+	out := []string{}
+	if !es.IsProxmox() {
+		return out
+	}
+	// IMAGE create from a server (pveCreateImage).
+	out = append(out, "serverSnapshots")
+	// RETYPE moves a disk to another storage profile, so it needs a second one.
+	if len(es.PVEStorageProfiles()) > 1 {
+		out = append(out, "volumeRetype")
+	}
+	return out
 }
 
 // uiMenuItems builds the service menu items: for each non-disabled CLOUD service, add a menu
@@ -98,6 +125,10 @@ func (h *Handler) uiMenuItems(r *http.Request) map[string]any {
 			}
 			items[name] = map[string]any{"newMenuItem": false, "enabled": true}
 		}
+	}
+	// Operator switch: a hidden service never reaches the client menu.
+	for _, name := range h.svc.HiddenServices(r.Context()) {
+		delete(items, name)
 	}
 	return items
 }

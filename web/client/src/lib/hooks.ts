@@ -186,13 +186,37 @@ export function useProjectServices(pid: string) {
 // provider's Services tab; a disabled/absent service hides its client section.
 export type UIMenu = { items?: Record<string, { enabled?: boolean; newMenuItem?: boolean }> }
 
+// Optional actions a provider's backend serves (/init features, keyed by service id; see
+// cloudFeatures in internal/platform/project/clientcloud.go). An action whose flag is
+// absent is hidden — the backend would reject it.
+export type CloudFeature =
+  | "serverSnapshots"
+  | "volumeRetype"
+  | "serverRebuild"
+  | "serverRescue"
+  | "serverPassword"
+  | "userData"
+  | "createDataVolumes"
+  | "ports"
+  | "subnets"
+  | "volumeSnapshots"
+
 export function useUIMenu(pid: string) {
   return useQuery({
     queryKey: ["ui-menu", pid],
-    queryFn: () => apiFetch<{ id: string; menu?: UIMenu }>(`/init/${pid}`),
+    queryFn: () =>
+      apiFetch<{ id: string; menu?: UIMenu; features?: Record<string, CloudFeature[]> }>(`/init/${pid}`),
     enabled: !!pid,
     staleTime: 60_000,
   })
+}
+
+// The compute scope's feature flags. Empty while loading, so an unsupported action never
+// flashes into view.
+export function useCloudFeatures(pid: string): Set<CloudFeature> {
+  const scope = useCloudScope(pid)
+  const { data } = useUIMenu(pid)
+  return new Set(scope ? (data?.features?.[scope.serviceId] ?? []) : [])
 }
 
 // Platform feature flags — GET /features (billing, search, ...).

@@ -444,7 +444,11 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			} else if err := h.pveDeleteResource(r.Context(), es, proj, cr); err != nil {
-				h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+				var he *httpx.HTTPError
+				if !errors.As(err, &he) {
+					he = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+				}
+				h.fail(w, he)
 				return
 			}
 			now := time.Now().UTC()

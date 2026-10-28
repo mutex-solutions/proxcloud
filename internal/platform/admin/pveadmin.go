@@ -9,6 +9,10 @@ package admin
 // a node runs the iptables (not nftables) firewall, or a stored provider's public
 // network sits on a node's management bridge.
 // Missing ProxCloudPlatform privileges come back as warnings, not failures.
+//
+// Storage capabilities: POST /service/{id}/storage/detect re-detects and persists
+// config.capabilities; PUT /service/{id}/storage-classes sets the per-storage class overrides;
+// a storageProfiles save is validated against a fresh detection (validatePVEStorageProfiles).
 
 import (
 	"context"
@@ -16,8 +20,12 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -185,4 +193,84 @@ func (h *Handler) pveConfig(ctx context.Context, req pveAuthReq, externalService
 		Fingerprint: req.Fingerprint,
 		InsecureTLS: req.InsecureTLS,
 	}, true
+}
+
+// proxmoxDetectStorage is the admin "Re-detect capabilities" action: detect every cluster
+// storage now and persist config.capabilities.
+func (h *Handler) proxmoxDetectStorage(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, externalServiceManagePerm) {
+		return
+	}
+	es, ok := h.loadServiceOr(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	if !es.IsProxmox() || h.pveFor == nil {
+		httpx.WriteError(w, httpx.BadRequest("Storage detection needs a Proxmox VE provider"))
+		return
+	}
+	ps, err := h.pveFor(es)
+	if err != nil {
+		httpx.WriteError(w, httpx.BadRequest("Proxmox connection failed: "+err.Error()))
+		return
+	}
+	caps, err := h.esSvc.DetectPVECapabilities(r.Context(), es, ps.C)
+	if err != nil {
+		httpx.WriteError(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Storage detection failed: "+err.Error()))
+		return
+	}
+	httpx.OK(w, caps)
+}
+
+// proxmoxStorageClasses handles PUT /service/{id}/storage-classes: body {"<storage>": class}
+// sets config.storageClasses.<storage>.class (the admin override, wins over the detected
+// class); "" clears it. The installer's suggestedClass is kept as-is.
+func (h *Handler) proxmoxStorageClasses(w http.ResponseWriter, r *http.Request) {
+	h.serviceFieldSet(w, r, applyStorageClasses)
+}
+
+func applyStorageClasses(req *http.Request, doc pgdoc.M) *httpx.HTTPError {
+	var body map[string]string
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		return httpx.BadRequest("Invalid request body")
+	}
+	classes := ensureMap(ensureConfig(doc), "storageClasses")
+	for id, class := range body {
+		if class != "" && !pve.ValidClass(class) {
+			return httpx.BadRequest(fmt.Sprintf("class for %q must be one of: performance, standard, capacity", id))
+		}
+		entry := ensureMap(classes, id)
+		if class == "" {
+			delete(entry, "class")
+		} else {
+			entry["class"] = class
+		}
+	}
+	return nil
+}
+
+// validatePVEStorageProfiles checks a storageProfiles save against a fresh storage detection
+// of the stored provider and, when it passes, refreshes config.capabilities with it. No pve
+// factory wired (unit tests) = no live cluster to check against → skipped.
+func (h *Handler) validatePVEStorageProfiles(req *http.Request, cfg pgdoc.M, raw any) *httpx.HTTPError {
+	if h.pveFor == nil || h.esSvc == nil {
+		return nil
+	}
+	es, err := h.esSvc.Get(req.Context(), chi.URLParam(req, "id"))
+	if err != nil {
+		return httpx.BadRequest("Cannot validate storage profiles: " + err.Error())
+	}
+	ps, err := h.pveFor(es)
+	if err != nil {
+		return httpx.BadRequest("Cannot validate storage profiles: " + err.Error())
+	}
+	caps, err := ps.C.DetectStorage(req.Context())
+	if err != nil {
+		return httpx.BadRequest("Cannot validate storage profiles: storage detection failed: " + err.Error())
+	}
+	if err := externalservice.ValidatePVEStorageProfiles(raw, caps, cfg["storageClasses"]); err != nil {
+		return httpx.BadRequest(err.Error())
+	}
+	cfg["capabilities"] = externalservice.PVECapabilities{DetectedAt: time.Now().UTC(), Storages: caps}
+	return nil
 }

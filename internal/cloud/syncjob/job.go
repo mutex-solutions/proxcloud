@@ -132,7 +132,33 @@ func (j *Job) Run(ctx context.Context) (int, error) {
 	}
 	j.sweepKamajiOrphans(ctx)
 	j.sweepDbaasOrphans(ctx)
+	j.detectProxmoxCapabilities(ctx)
 	return total, nil
+}
+
+// detectProxmoxCapabilities re-detects every proxmox provider's storage capabilities once per
+// sync cycle (config.capabilities), so a storage added, removed or disabled — or a node joining
+// or leaving — shows up without an admin action.
+func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
+	services, err := j.services.ListByType(ctx, externalservice.TypeCloud)
+	if err != nil {
+		j.log.Error("syncjob: list services for pve capability detection", "err", err)
+		return
+	}
+	for i := range services {
+		es := &services[i]
+		if es.IsDisabled() || !es.IsProxmox() {
+			continue
+		}
+		ps, err := j.pveFor(es)
+		if err != nil {
+			j.log.Error("syncjob: build pve client for capability detection", "serviceId", es.ID, "err", err)
+			continue
+		}
+		if _, err := j.services.DetectPVECapabilities(ctx, es, ps.C); err != nil {
+			j.log.Warn("syncjob: pve capability detection", "serviceId", es.ID, "err", err)
+		}
+	}
 }
 
 func (j *Job) syncProject(ctx context.Context, p *project.Project, esCache map[string]*externalservice.ExternalService) int {
@@ -217,7 +243,7 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 	now := j.now()
 	provs := []providers.Provider{
 		ps.ServerSyncProvider(region, p.ID),
-		ps.VolumeSyncProvider(region, p.ID),
+		ps.VolumeSyncProvider(region, p.ID, es.PVEVolumeProfileFunc()),
 		ps.ImageSyncProvider(region, p.ID),
 		ps.NetworkSyncProvider(region, p.ID),
 		ps.SecurityGroupSyncProvider(region, p.ID),

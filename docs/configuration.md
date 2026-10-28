@@ -113,6 +113,17 @@ unexpectedly.
 | Debug triggers | `PROXCLOUD_JOBS_DEBUG_TRIGGERS` | `proxcloud.jobs.debug-triggers` | `false` | Expose on-demand `POST :8081/debug/run-*` triggers **without** starting the crons — for deterministic, manual runs. |
 | Rabbit fanout | `PROXCLOUD_JOBS_RABBIT_FANOUT` | `proxcloud.jobs.rabbit-fanout` | `false` | Fan the **native** charge cron out across pods via RabbitMQ (one message per active profile) instead of charging every profile in one pod. Ignored by the external provider. |
 
+Storage placement is configured per Proxmox provider too, not through env. The
+keys live in the provider's `config` (full shape and behaviour:
+[cloud-integration.md](cloud-integration.md#storage-capabilities-and-placement)):
+
+| Key | Set by | Default | Meaning |
+|-----|--------|---------|---------|
+| `storageProfiles.<slug>` | Connection tab, Storage profiles block | — | `storages` (node or `*` → storage id), optional `label`, flags `shared` / `snapshots` / `thin` / `liveMigrate` / `replication`, caps `bootDisk` / `dbaas` (`false` closes the profile). Validated against a live detection on save. |
+| `capabilities` | capability detection (sync cycle, Storage tab Re-detect, profile save) | absent until first detection | `{detectedAt, storages}`. Never hand-edited. |
+| `storageClasses.<storage>` | Storage tab class select / `PUT /api/v1/admin/service/{id}/storage-classes`; installer | — | `class` = admin override (`performance` / `standard` / `capacity`, wins over the detected class); `suggestedClass` = installer fio result, shown only. |
+| `storageHeadroomPct` | `PUT /api/v1/admin/service/{id}` (`{"config":{"storageHeadroomPct":15}}`); no UI field yet | `10` | Percent of a storage's total size that must stay free after placing a disk (server create, add volume, retype). `0` is allowed; a value that is not a number or outside 0–99 falls back to 10. |
+
 Network MTU is set per EVPN zone on the Proxmox provider
 (`config.network.zones.<zone>.mtu`, default 1450; vlan and simple zones take no MTU).
 There is no deployment-wide MTU setting.

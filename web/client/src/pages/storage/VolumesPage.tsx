@@ -23,7 +23,9 @@ import {
 } from "@/components/ui/select"
 import { apiFetch } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
-import { useCloudCursorList, useCloudList, useCloudScope, useProjectId, useProjectQuota } from "@/lib/hooks"
+import {
+  useCloudCursorList, useCloudFeatures, useCloudList, useCloudScope, useProjectId, useProjectQuota,
+} from "@/lib/hooks"
 import { volumeCreateQuotaViolations } from "@/lib/quota"
 import type { CloudResource } from "@/lib/types"
 
@@ -31,10 +33,13 @@ function vol(r: CloudResource): Record<string, any> {
   return (r.data?.volume as Record<string, any>) ?? {}
 }
 // Attachments live either at data.attachments (Go cache shape: {serverId, device, attachmentId})
-// or data.volume.attachments (live shape: {server_id, device}).
+// or data.volume.attachments (live shape: {server_id, device}). A Proxmox disk instead carries its
+// VM in volume.vmid (= the server externalId) and is attached while its status is in-use.
 function attachments(r: CloudResource): Array<{ serverId: string; device?: string }> {
+  const v = vol(r)
+  if (v.vmid != null && v.status === "in-use") return [{ serverId: String(v.vmid), device: v.slot as string }]
   const cache = (r.data?.attachments as Array<Record<string, any>>) ?? []
-  const live = (vol(r).attachments as Array<Record<string, any>>) ?? []
+  const live = (v.attachments as Array<Record<string, any>>) ?? []
   const list = Array.isArray(cache) && cache.length ? cache : Array.isArray(live) ? live : []
   return list
     .map((a) => ({ serverId: (a.serverId as string) ?? (a.server_id as string) ?? "", device: a.device as string }))
@@ -56,11 +61,13 @@ export default function VolumesPage() {
     rows: data, isLoading, refetch, isFetching, error, hasNextPage, fetchNextPage, isFetchingNextPage,
   } = useCloudCursorList(pid, "VOLUME")
   const projectQuota = useProjectQuota(pid, scope)
+  const canRetype = useCloudFeatures(pid).has("volumeRetype")
 
   const { data: servers } = useCloudList(pid, "SERVER")
 
   const [createOpen, setCreateOpen] = useState(false)
-  const [form, setForm] = useState({ name: "", size: "10", type: "", availabilityZone: "" })
+  // serverId = the server externalId: a Proxmox disk is created on (and belongs to) a server.
+  const [form, setForm] = useState({ name: "", size: "10", type: "", serverId: "" })
   const [extendTarget, setExtendTarget] = useState<CloudResource | null>(null)
   const [extendSize, setExtendSize] = useState("")
   const [deleteTarget, setDeleteTarget] = useState<CloudResource | null>(null)
@@ -69,7 +76,6 @@ export default function VolumesPage() {
   const [detachTarget, setDetachTarget] = useState<CloudResource | null>(null)
   const [retypeTarget, setRetypeTarget] = useState<CloudResource | null>(null)
   const [newType, setNewType] = useState("")
-  const [migrationPolicy, setMigrationPolicy] = useState<"never" | "on-demand">("never")
 
   const requestedSize = Number(form.size)
   // Aggregate and per-type volume quota checks use the selected admin-published type.
@@ -96,7 +102,25 @@ export default function VolumesPage() {
     },
     enabled: !!scope && (createOpen || !!retypeTarget),
   })
+  // The servers this detached volume can attach to: its own and every server on its node
+  // (Proxmox moves a disk between servers on the same node only).
+  const attachTargets = useQuery({
+    queryKey: ["volume-attach-targets", pid, attachTarget?.id],
+    queryFn: async () => {
+      const res = await apiFetch<{ result?: Array<{ externalId: string; name?: string; node?: string }> }>(
+        `/project/${pid}/cloud/${attachTarget?.id}/action`,
+        { method: "POST", cloud: scope, body: { action: "LIST_ATTACH_TARGETS" } },
+      )
+      return res.result ?? []
+    },
+    enabled: !!scope && !!attachTarget,
+  })
   const soleVolumeType = volumeTypes.data?.length === 1 ? volumeTypes.data[0] : undefined
+  // A capacity-class profile is HDD bulk storage: no boot disks, databases or snapshots (API-enforced).
+  const isCapacityType = (name: string) =>
+    (volumeTypes.data ?? []).some((t) => String(t.name) === name && t.extra_specs?.class === "capacity")
+  const typeLabel = (t: Record<string, any>) =>
+    String(t.displayName ?? t.name ?? t.id) + (t.extra_specs?.class === "capacity" ? " — HDD, not for databases" : "")
   const availableVolumeTypeNames = useMemo(
     () => new Set((volumeTypes.data ?? []).map((type) => String(type.name))),
     [volumeTypes.data],
@@ -151,7 +175,7 @@ export default function VolumesPage() {
       apiFetch(`/project/${pid}/cloud/${r.id}/action`, {
         method: "POST",
         cloud: scope,
-        body: { action: "RETYPE", data: { newType: selectedRetypeVolumeType, migrationPolicy } },
+        body: { action: "RETYPE", data: { newType: selectedRetypeVolumeType } },
       }),
     onSuccess: () => {
       toast.success("Retype requested")
@@ -182,7 +206,7 @@ export default function VolumesPage() {
             name: form.name,
             size: Number(form.size),
             type: selectedVolumeType,
-            ...(form.availabilityZone ? { availabilityZone: form.availabilityZone } : {}),
+            serverId: form.serverId,
           },
         },
       })
@@ -190,7 +214,7 @@ export default function VolumesPage() {
     onSuccess: () => {
       toast.success("Volume created")
       setCreateOpen(false)
-      setForm({ name: "", size: "10", type: "", availabilityZone: "" })
+      setForm({ name: "", size: "10", type: "", serverId: "" })
       invalidate()
       void qc.invalidateQueries({ queryKey: ["project-quota", pid] })
     },
@@ -310,16 +334,18 @@ export default function VolumesPage() {
                   >
                     Extend
                   </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onClick={() => {
-                      setNewType("")
-                      setMigrationPolicy("never")
-                      setRetypeTarget(r)
-                    }}
-                  >
-                    Change type
-                  </DropdownMenuItem>
-                  {!(attachedCount(r) > 0 && isBootVolume(r)) && (
+                  {canRetype && (
+                    <DropdownMenuItem
+                      onClick={() => {
+                        setNewType("")
+                        setRetypeTarget(r)
+                      }}
+                    >
+                      Change type
+                    </DropdownMenuItem>
+                  )}
+                  {/* The API refuses to delete an attached volume: detach it first. */}
+                  {attachedCount(r) === 0 && (
                     <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget(r)}>
                       Delete
                     </DropdownMenuItem>
@@ -334,7 +360,7 @@ export default function VolumesPage() {
     // useState setters are stable; helpers are module-scope. serverName reads
     // the servers list, so the "Attached to" column re-derives when it loads.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [servers],
+    [servers, canRetype],
   )
 
   return (
@@ -389,7 +415,10 @@ export default function VolumesPage() {
         <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Create volume</DialogTitle>
-            <DialogDescription>A new block-storage volume in this project's region.</DialogDescription>
+            <DialogDescription>
+              A new disk on one of your servers. It belongs to that server: deleting the server deletes the volume,
+              even after you detach it.
+            </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
             <div className="grid gap-2">
@@ -431,7 +460,7 @@ export default function VolumesPage() {
               ) : soleVolumeType ? (
                 <div className="flex h-9 items-center gap-2 rounded-md border bg-muted/30 px-3 text-sm">
                   <HardDrive className="size-4 text-muted-foreground" />
-                  <span>{String(soleVolumeType.displayName ?? soleVolumeType.name)}</span>
+                  <span>{typeLabel(soleVolumeType)}</span>
                 </div>
               ) : (
                 <Select value={selectedCreateVolumeType} onValueChange={(type) => setForm({ ...form, type })}>
@@ -441,20 +470,34 @@ export default function VolumesPage() {
                   <SelectContent>
                     {volumeTypes.data.map((type) => (
                       <SelectItem key={String(type.name)} value={String(type.name)}>
-                        {String(type.displayName ?? type.name)}
+                        {typeLabel(type)}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               )}
+              {isCapacityType(selectedCreateVolumeType) ? <CapacityWarning /> : null}
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="vol-az">Availability zone (optional)</Label>
-              <Input
-                id="vol-az"
-                value={form.availabilityZone}
-                onChange={(e) => setForm({ ...form, availabilityZone: e.target.value })}
-              />
+              <Label>Server</Label>
+              {!(servers ?? []).some((s) => !!s.externalId) ? (
+                <p className="text-sm text-muted-foreground">Create a server first — a volume is created on a server.</p>
+              ) : (
+                <Select value={form.serverId} onValueChange={(serverId) => setForm({ ...form, serverId })}>
+                  <SelectTrigger className="w-full" aria-label="Server">
+                    <SelectValue placeholder="Select a server" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(servers ?? [])
+                      .filter((s) => !!s.externalId)
+                      .map((s) => (
+                        <SelectItem key={s.id} value={s.externalId as string}>
+                          {(s.data?.server?.name as string) || s.name || s.externalId}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              )}
             </div>
             {quotaCheckPending ? (
               <p className="text-sm text-muted-foreground">Checking the current storage quota…</p>
@@ -490,6 +533,7 @@ export default function VolumesPage() {
               onClick={() => create.mutate()}
               disabled={
                 !form.name ||
+                !form.serverId ||
                 !scope ||
                 volumeTypes.isLoading ||
                 volumeTypes.isError ||
@@ -551,20 +595,28 @@ export default function VolumesPage() {
           </DialogHeader>
           <div className="grid gap-2">
             <Label>Server</Label>
-            <Select value={attachServer} onValueChange={setAttachServer}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select a server" />
-              </SelectTrigger>
-              <SelectContent>
-                {(servers ?? [])
-                  .filter((s) => !!s.externalId)
-                  .map((s) => (
-                    <SelectItem key={s.id} value={s.externalId as string}>
-                      {(s.data?.server?.name as string) || s.name || s.externalId}
+            {attachTargets.isLoading ? (
+              <p className="text-sm text-muted-foreground">Loading servers…</p>
+            ) : attachTargets.isError ? (
+              <p className="text-sm text-destructive">{(attachTargets.error as Error).message}</p>
+            ) : !attachTargets.data?.length ? (
+              <p className="text-sm text-muted-foreground">
+                No server can use this volume: a volume only moves between servers on the same node.
+              </p>
+            ) : (
+              <Select value={attachServer} onValueChange={setAttachServer}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a server" />
+                </SelectTrigger>
+                <SelectContent>
+                  {attachTargets.data.map((t) => (
+                    <SelectItem key={t.externalId} value={t.externalId}>
+                      {t.name || t.externalId}
                     </SelectItem>
                   ))}
-              </SelectContent>
-            </Select>
+                </SelectContent>
+              </Select>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAttachTarget(null)}>
@@ -615,7 +667,8 @@ export default function VolumesPage() {
             <DialogTitle>Change volume type</DialogTitle>
             <DialogDescription>
               Retype {retypeTarget ? vol(retypeTarget).name || retypeTarget.id : ""} — current type:{" "}
-              {retypeTarget ? vol(retypeTarget).volume_type || "—" : ""}.
+              {retypeTarget ? vol(retypeTarget).volume_type || "—" : ""}. The volume's data is moved to the new
+              storage.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
@@ -643,7 +696,7 @@ export default function VolumesPage() {
               ) : soleVolumeType ? (
                 <div className="flex h-9 items-center gap-2 rounded-md border bg-muted/30 px-3 text-sm">
                   <HardDrive className="size-4 text-muted-foreground" />
-                  <span>{String(soleVolumeType.displayName ?? soleVolumeType.name)}</span>
+                  <span>{typeLabel(soleVolumeType)}</span>
                 </div>
               ) : (
                 <Select value={selectedRetypeVolumeType} onValueChange={setNewType}>
@@ -651,29 +704,20 @@ export default function VolumesPage() {
                     <SelectValue placeholder={volumeTypes.isLoading ? "Loading types…" : "Select a type"} />
                   </SelectTrigger>
                   <SelectContent>
-                    {volumeTypes.data.map((t) => (
-                      <SelectItem key={String(t.id ?? t.name)} value={String(t.name ?? t.id)}>
-                        {String(t.displayName ?? t.name ?? t.id)}
-                      </SelectItem>
-                    ))}
+                    {volumeTypes.data
+                      .filter((t) => !(retypeTarget && vol(retypeTarget).bootable === true && t.extra_specs?.bootDisk === false))
+                      .map((t) => (
+                        <SelectItem key={String(t.id ?? t.name)} value={String(t.name ?? t.id)}>
+                          {typeLabel(t)}
+                        </SelectItem>
+                      ))}
                   </SelectContent>
                 </Select>
               )}
               {retypeUnchanged ? (
                 <p className="text-xs text-muted-foreground">Choose a different enabled type to retype this volume.</p>
               ) : null}
-            </div>
-            <div className="grid gap-2">
-              <Label>Migration policy</Label>
-              <Select value={migrationPolicy} onValueChange={(v) => setMigrationPolicy(v as "never" | "on-demand")}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="never">never — fail if migration is required</SelectItem>
-                  <SelectItem value="on-demand">on-demand — migrate the data if required</SelectItem>
-                </SelectContent>
-              </Select>
+              {isCapacityType(selectedRetypeVolumeType) ? <CapacityWarning /> : null}
             </div>
           </div>
           <DialogFooter>
@@ -720,5 +764,19 @@ export default function VolumesPage() {
         </DialogContent>
       </Dialog>
     </>
+  )
+}
+
+// CapacityWarning is the honest label for a capacity-class (HDD NAS) storage type.
+function CapacityWarning() {
+  return (
+    <Alert>
+      <CircleAlert />
+      <AlertTitle>HDD — not for databases</AlertTitle>
+      <AlertDescription>
+        Bulk data only: no boot disks, no databases, no snapshots (protect it with backups). The volume migrates with
+        its server and survives a host failure, but the NAS is a single point of failure.
+      </AlertDescription>
+    </Alert>
   )
 }

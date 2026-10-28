@@ -60,7 +60,7 @@ The provider's **Connection** tab has a **Proxmox resources** card with one JSON
 | Block | What it holds |
 |---|---|
 | `network` | `defaultZone` and `zones` (SDN zones by kind: `evpn`, `vlan` or `simple`, with per-zone settings such as peers, exit nodes and, for `evpn` zones, `mtu` (default 1450)). Also `cidrPool` (required), `isolation`, `evpnController` and `publicNetworks`. |
-| `storageProfiles` | Named storage profiles mapping nodes to a Proxmox storage (`"*"` for every node), with capability flags: `shared`, `snapshots`, `thin`, `liveMigrate`, `replication`. Flavors and volumes refer to a profile by its slug. |
+| `storageProfiles` | Named storage profiles mapping nodes to a Proxmox storage (`"*"` for every node where the storage is active), with an optional `label` shown to clients, capability flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`) and the caps `bootDisk` and `dbaas` (both on unless set to `false`). Flavors and volumes refer to a profile by its slug. The save is checked against the cluster; see *Storage* below. |
 | `templates` | The OS template catalog clients create servers from: `{slug: {vmid, node, name, osDistro, minDiskGb}}`. |
 | `gpus` | GPU PCI mappings by mapping id, each with the model `alias` used everywhere GPU-related, e.g. `{"<mapping-id>": {"alias": "nvidia-4090"}}`. |
 
@@ -83,6 +83,34 @@ Projects have no floating IPs. A server becomes reachable from outside when it g
 
 `ranges` and `exclude` are optional; without `ranges` the whole CIDR is the pool. Never use the management bridge. **Test connection** rejects a public network on a node's management bridge. The traffic-metrics job also uses these bridge ids to tell public traffic from private traffic. Which public networks a given project may use is set on the project's detail page (see [Running the Platform](/docs/platform-admin/overview)).
 
+## Storage
+
+ProxCloud reads what each Proxmox storage can do from the cluster instead of trusting the profile flags. The provider's **Storage** tab lists every storage with its type, content, tier (*full* for Ceph RBD/CephFS, otherwise *standard*), capability badges (shared, snapshots, thin, live migrate, replication), the nodes where it is active, and its class. Detection runs on every sync cycle, on every save of the storage profiles, and when you press **Re-detect capabilities**.
+
+### Storage classes
+
+Each storage has a class: **performance** (local ZFS, LVM-thin, Ceph RBD), **standard** (CephFS, iSCSI, shared LVM) or **capacity** (NFS, SMB, directory storage). The detected class comes from the storage type. The **Class** select overrides it, for example to mark an SSD NFS share as *standard*; choose *Detected* to clear the override. The **Suggested** column shows the installer's disk benchmark result. It is only a suggestion and is never applied on its own.
+
+A profile's class is the lowest class among its storages. A **capacity** profile, such as an HDD NAS share labelled "Capacity HDD (NFS)", is for bulk data volumes only. Clients can't put a server's boot disk on it, can't run a managed database on it, and can't snapshot a server into an image while one of its disks is attached. This holds whatever the profile claims, and the editor lists your capacity profiles above the JSON.
+
+### What a profile save checks
+
+Saving the storage profiles runs a fresh detection. The save is refused when:
+
+- a profile maps a storage that does not exist, is not active on the node it is mapped to (or, for `"*"`, on any node), or does not hold VM disks (`images` content);
+- a profile claims a flag the storage does not support, such as `shared` on local ZFS or `snapshots` on NFS (you can always turn a flag off);
+- a capacity profile sets `snapshots`, `bootDisk` or `dbaas` to `true`.
+
+If the cluster can't be reached, the save is refused too.
+
+### Placement and free space
+
+When a client creates a server, ProxCloud picks a node where the flavor's storage profile is active and where the storage keeps at least 10% of its size free after the new disk. Adding a volume and changing a volume's type check the same on the server's node. To change the 10%, set `storageHeadroomPct` (0–99) in the provider config through `PUT /api/v1/admin/service/{id}` with `{"config": {"storageHeadroomPct": 15}}`; there is no form field for it yet.
+
+Where an OS template's disks live matters too. Proxmox clones to another node only from shared storage to shared storage. A template on shared storage (NFS, Ceph) can be cloned to any node when the flavor's profile is shared too (Ceph RBD, a shared LUN). A template on local storage, or any template with a local profile such as local ZFS, can only be cloned on the template's own node, so servers from it always land there, and the create is refused with a clear message when the flavor's profile is not active on that node. To spread local-ZFS servers across nodes, keep one template per node.
+
+A detached volume can only be attached to a server on the same node as its current server: Proxmox refuses to move a disk between VMs on different nodes, even on shared storage. Clients see the servers they can pick.
+
 ## Default quota
 
 The provider's **Quota** tab sets the default quota seeded into each new project at bootstrap: `servers`, `vcpus`, `ramMb`, `diskGb`, `networks`, `floatingIps` (public addresses) and `gpu` (the any-model GPU limit). A project's own quota can then be changed on its **Quota** tab.
@@ -99,9 +127,9 @@ Always run **Test** after you change the source. A misconfigured source doesn't 
 ## After the provider is saved
 
 - **Bootstrap.** When a billing profile is activated (or an admin provisions a project), ProxCloud bootstraps each project onto the provider. It creates the project's pool and default security group and seeds the default quota. See [Account Activation](/docs/platform-admin/account-activation).
-- **Sync.** A periodic sync, every 15 minutes, keeps ProxCloud's cache of each project's servers, volumes, networks, security groups and templates in step with the cluster, so billing accrual reflects what exists. VMs outside the project pools are invisible to ProxCloud.
+- **Sync.** A periodic sync, every 15 minutes, keeps ProxCloud's cache of each project's servers, volumes, networks, security groups and templates in step with the cluster, so billing accrual reflects what exists. VMs outside the project pools are invisible to ProxCloud. The same cycle re-detects the storage capabilities. Each volume carries its storage profile and storage class, so a price rule can filter on `profile` or `storage_class` to price capacity storage separately.
 - **Services.** Every service is available by default. Adjust that on the provider's **Services** tab; see [Service Availability](/docs/platform-admin/cloud/service-availability).
-- **Tabs.** A Proxmox provider has the Connection, Services, Configuration, Features, Quota, GPU, Metrics and Advanced tabs. The **Advanced** tab's Danger zone is where a provider is deleted.
+- **Tabs.** A Proxmox provider has the Connection, Storage, Services, Configuration, Features, Quota, GPU, Metrics and Advanced tabs. The **Advanced** tab's Danger zone is where a provider is deleted.
 
 ## GPU capacity and quotas
 

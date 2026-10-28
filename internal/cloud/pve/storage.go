@@ -13,6 +13,7 @@ type StorageDef struct {
 	Nodes   string `json:"nodes"`   // comma-separated node restriction; "" = all nodes
 	Shared  int    `json:"shared"`
 	Disable int    `json:"disable"`
+	Sparse  int    `json:"sparse"` // zfspool / zfs: thin-provisioned zvols
 }
 
 // ListStorage lists cluster storage definitions (validates admin storage-profile config).

@@ -85,14 +85,22 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 
 // --- VOLUME ---
 
+// VolumeProfileFunc resolves the storage profile and storage class of one disk: the storage it
+// sits on, the node, and the VM's own profile tag (preferred when several profiles map the same
+// storage). Either result may be "" (unknown).
+type VolumeProfileFunc func(node, storage, vmProfile string) (profile, class string)
+
 type VolumeSyncProvider struct {
 	svc       *Service
 	region    string
 	projectID string
+	profileOf VolumeProfileFunc
 }
 
-func (s *Service) VolumeSyncProvider(region, projectID string) *VolumeSyncProvider {
-	return &VolumeSyncProvider{svc: s, region: region, projectID: projectID}
+// VolumeSyncProvider lists the project's disks; profileOf (nil = unknown) stamps each disk's
+// profile and storage class, which the volume billing resource exposes to price rules.
+func (s *Service) VolumeSyncProvider(region, projectID string, profileOf VolumeProfileFunc) *VolumeSyncProvider {
+	return &VolumeSyncProvider{svc: s, region: region, projectID: projectID, profileOf: profileOf}
 }
 
 func (p *VolumeSyncProvider) Type() string          { return cloud.TypeVolume }
@@ -123,6 +131,14 @@ func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 				status = "available"
 			}
 			name := r.Name + "-" + d.Slot
+			diskProfile, class := "", ""
+			if p.profileOf != nil {
+				diskProfile, class = p.profileOf(r.Node, d.Storage, profile)
+			}
+			volType := volumeTypeOf(profile, d.Storage)
+			if diskProfile != "" {
+				volType = diskProfile
+			}
 			out = append(out, cloud.CloudResource{
 				ExternalID: d.VolID,
 				ProjectID:  p.projectID,
@@ -133,7 +149,9 @@ func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 						"name":              name,
 						"size":              d.SizeGiB,
 						"bootable":          d.Boot,
-						"volume_type":       volumeTypeOf(profile, d.Storage),
+						"volume_type":       volType,
+						"profile":           diskProfile,
+						"storage_class":     class,
 						"status":            status,
 						"availability_zone": r.Node,
 						"storage":           d.Storage,
