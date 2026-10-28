@@ -61,6 +61,10 @@ type PlatformConfiguration struct {
 	// operators create orgs and assign members). Read by org.CreateOrganization.
 	OrganizationProvisioningQuota *ProvisioningQuota `json:"organizationProvisioningQuota,omitempty"`
 	LoginConfiguration            map[string]any     `json:"loginConfiguration,omitempty"`
-	CreatedAt                     *time.Time         `json:"createdAt,omitempty"`
-	UpdatedAt                     *time.Time         `json:"updatedAt,omitempty"`
+	// HiddenServices are service slugs (kubernetes, database, object-store, …) the operator
+	// hides from every tenant: /init drops them from the menu, so the client nav and create
+	// pages disappear. The providers keep syncing; this is a display switch only.
+	HiddenServices []string   `json:"hiddenServices,omitempty"`
+	CreatedAt      *time.Time `json:"createdAt,omitempty"`
+	UpdatedAt      *time.Time `json:"updatedAt,omitempty"`
 }

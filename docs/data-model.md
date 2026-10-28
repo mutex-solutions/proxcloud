@@ -653,7 +653,7 @@ encrypted at rest.
 | `type` | string | `CLOUD` / `CPANEL` / `PAYMENT` |
 | `status` | string | `PUBLIC` / `PRIVATE` / `DISABLED` |
 | `defaultPricePlan` | string | default plan for the service |
-| `config` | object | provider document; `config.provider` ∈ `proxmox` / `ceph-s3` / `kamaji` / `dbaas`. Proxmox: `region`, `regions`, `services{compute,network,volumev3,image}`, `apiUrl`, `tokenId`, `fingerprint`, `insecureTls`, `poolPrefix`, `network{defaultZone, zones, publicNetworks, cidrPool, isolation, evpnController}`, `storageProfiles`, `defaultStorageProfile`, `templates`, `gpus`, `overcommit`, `metrics{source}`, `provisioning.quota{…}` (full shape: [cloud-integration.md](cloud-integration.md#the-proxmox-provider-document)) |
+| `config` | object | provider document; `config.provider` ∈ `proxmox` / `ceph-s3` / `kamaji` / `dbaas`. Proxmox: `region`, `regions`, `services{compute,network,volumev3,image}`, `apiUrl`, `tokenId`, `fingerprint`, `insecureTls`, `poolPrefix`, `network{defaultZone, zones, publicNetworks, cidrPool, isolation, evpnController}`, `storageProfiles`, `defaultStorageProfile`, `capabilities{detectedAt, storages}`, `storageClasses{<storage>: {class, suggestedClass}}`, `storageHeadroomPct`, `templates`, `gpus`, `overcommit`, `metrics{source}`, `provisioning.quota{…}` (full shape: [cloud-integration.md](cloud-integration.md#the-proxmox-provider-document)) |
 | `secret` | object (encrypted) | Proxmox: `tokenSecret`; ceph-s3: `adminAccessKey`, `adminSecretKey`; Prometheus credentials when configured |
 
 Referenced by `cloudResource.serviceId`, `cloudDownload.serviceId`,
@@ -756,6 +756,7 @@ The single per-deployment config the UI bootstraps from. The active doc has
 | `projectProvisioningQuota` | object | `{enabled, limit}` platform-default project cap |
 | `loginConfiguration` | object | login/IdP UI config |
 | `mailGatewayId`, `contactIntegrationId`, `segmentIntegrationId` | string FK → `thirdPartyIntegration` | wired integrations |
+| `hiddenServices` | string[] | service slugs (e.g. `kubernetes`, `database`, `object-store`) dropped from every tenant's `/init` menu; providers keep syncing |
 
 ### `auditEvent`
 The audit log; written asynchronously after a successful mutation.

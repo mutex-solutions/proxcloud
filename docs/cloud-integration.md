@@ -139,10 +139,16 @@ The shape is documented in the header of `proxmox.go`:
       "isolation": "shared",                             // or "evpn-per-project"
       "evpnController": "proxcloud"
     },
-    "storageProfiles": {"std": {"storages": {"*": "local-zfs"}, "shared": false,
-                                "snapshots": true, "thin": true,
-                                "liveMigrate": false, "replication": false}},
+    "storageProfiles": {"std": {"label": "Local NVMe (ZFS)", "storages": {"*": "local-zfs"},
+                                "shared": false, "snapshots": true, "thin": true,
+                                "liveMigrate": false, "replication": false},
+                        "capacity": {"label": "Capacity HDD (NFS)", "storages": {"*": "nas-capacity"},
+                                     "shared": true, "liveMigrate": true}},
     "defaultStorageProfile": "std",
+    "capabilities": {"detectedAt": "…", "storages": {"local-zfs": {…}}}, // written by detection only
+    "storageClasses": {"nas-capacity": {"class": "capacity",            // admin override (wins)
+                                        "suggestedClass": "standard"}}, // installer fio result, display only
+    "storageHeadroomPct": 10,                            // % of a storage kept free when placing disks
     "templates": {},                                     // admin OS templates
     "gpus": {},                                          // {mappingId: {"alias": "nvidia-4090"}}
     "overcommit": {"cpu": 4},
@@ -163,7 +169,11 @@ Typed accessors used by the rest of the code:
 | `PVEConfig()` | `apiUrl`, `tokenId`, `fingerprint`, `insecureTls`, `secret.tokenSecret` | the `pve.Config` for `pve.NewService` |
 | `PVEPoolPrefix()` / `PoolFor(projectID)` | `poolPrefix` (default `pc-`) | the project's pool id |
 | `PVENetworkConfig()` | `network.*` | zones, public networks, `cidrPool`, isolation mode |
-| `PVEStorageProfiles()` / `PVEDefaultStorageProfile()` | `storageProfiles`, `defaultStorageProfile` | storage per node plus admin-declared capability flags |
+| `PVEStorageProfiles()` / `PVEDefaultStorageProfile()` | `storageProfiles`, `defaultStorageProfile` | storage per node, label, capability flags (validated against detection), derived `tier` / `class`, `bootDisk` / `dbaas` caps |
+| `PVECapabilities()` | `capabilities` | the last storage capability detection (below) |
+| `PVEStorageClasses()` / `PVEEffectiveStorageClass(id)` | `storageClasses` | per-storage class override and installer suggestion; effective class = valid override, else detected |
+| `PVEStorageHeadroomPct()` | `storageHeadroomPct` (default 10, valid 0–99) | free space kept on a storage when placing a disk |
+| `PVEVolumeProfileFunc()` | `storageProfiles`, `capabilities`, `storageClasses` | resolves each synced disk's own profile and storage class |
 | `PVETemplates()` | `templates` | admin OS templates servers are cloned from |
 | `PVEGPUAliases()` / `PVEGPUMappingsFor(alias)` | `gpus` | PCI mapping ids per GPU alias |
 | `PVEOvercommitCPU()` | `overcommit.cpu` (default 4) | scheduler CPU overcommit |
@@ -228,8 +238,8 @@ by sync and the charge loop.
   (`WaitTask`) and PCI mappings.
 - **`pve.Service`** (`service.go`, `write.go`, `volume.go`, `gpu.go`,
   `console.go`) — project-scoped IaaS: ensure the project pool, create, delete,
-  resize, power and rename servers, project templates, volumes, GPU slot picking,
-  VNC/serial console.
+  resize, power and rename servers, project templates, volumes (add, extend,
+  detach, attach, retype, delete detached), GPU slot picking, VNC/serial console.
 - **Networks** (`network.go`, `sdn.go`) — tenant vnets and subnets carved from
   `cidrPool`, the ownership alias, per-vnet isolation rules, per-project EVPN
   zones, staged SDN changes plus apply (serialized platform-wide by the SDN apply
@@ -238,12 +248,71 @@ by sync and the charge loop.
   the project default group, VM firewall options and per-NIC ipfilter sets
   (`SecureVM`).
 - **Scheduler** (`scheduler.go`, `PickNode`) — capacity-ranked node choice with
-  CPU overcommit, storage-profile node restriction and free GPU slots.
+  CPU overcommit, storage-profile node restriction, free space on the profile's
+  storage (minus headroom) and free GPU slots.
+- **Storage capabilities** (`capability.go`, `volume.go`) — `DetectStorage`,
+  `StorageHasRoom`, `TemplateShared`; see
+  [Storage capabilities and placement](#storage-capabilities-and-placement).
 
 The handler side (`internal/platform/project`) holds a factory,
 `projectH.SetProxmox(func(es) → pve.NewService(es.PVEConfig(), …))`, wired in
 `cmd/api/main.go`. A client is built per provider when needed; a write returns
 `503 "proxmox client not ready"` if it cannot be built.
+
+### Storage capabilities and placement
+
+Storage profiles are no longer trusted as typed. `pve.DetectStorage` reads
+`GET /storage` and `GET /cluster/resources?type=storage` and returns, per storage
+id: type, shared, content, snapshots, thin, live migrate, replication (`zfspool`
+only), tier (`full` for `rbd` / `cephfs`, else `standard`), a default class
+(`performance` / `standard` / `capacity`) from a static type table, and per-node
+active / total / avail. A node outside the storage's `nodes` list is ignored and a
+`disable=1` storage is active nowhere.
+
+- **When it runs.** Every services-sync cycle (`syncjob.detectProxmoxCapabilities`,
+  so nodes joining or leaving are picked up), on `POST
+  /api/v1/admin/service/{id}/storage/detect` (the Storage tab's Re-detect), and on
+  every `storageProfiles` save. The result is written as a partial update of
+  `config.capabilities`.
+- **Class.** `PUT /api/v1/admin/service/{id}/storage-classes` takes
+  `{"<storage>": "performance|standard|capacity|"}`; `""` clears the override. The
+  installer's fio result (`suggestedClass`) is only a suggestion and is never
+  applied. A profile's class is the lowest effective class of its storages; its
+  tier is `full` only when every storage is Ceph.
+- **Profile saves** (`ValidatePVEStorageProfiles`) are checked against a live
+  detection and answer 400 when a storage is missing, lacks `images` content, is
+  inactive on its node (or on every node for `*`), when the profile claims a flag
+  (shared, snapshots, thin, liveMigrate, replication) the storage lacks, or when a
+  capacity-class profile claims `snapshots`, `bootDisk` or `dbaas`. Downgrading a
+  flag is always allowed. An unreachable cluster rejects the save.
+- **Server create** (`pveCreateServer`, `pvePlacement`) runs a live detection and
+  reads the template's config first. A profile that refuses boot disks is 409. The
+  profile's storage state per node (`PVEStorageProfile.Placement`) restricts the
+  scheduler to nodes where it is active and feeds `pve.StorageHasRoom`: free space
+  after the disk must stay at least `storageHeadroomPct` % of the storage's total
+  (thin storage is checked at full size). PVE clones to another node only from
+  shared to shared storage, so a template whose volumes all sit on shared storage
+  (`pve.TemplateShared`) is full-cloned to a picked node whose profile storage is
+  shared too (or with no profile, onto the template's own storages); a local
+  template or a local profile pins the clone to the template's node, and a profile
+  not active on that node is 409.
+- **Volumes.** Add-volume checks free space on the server's node (409, nothing
+  written). A detached disk attaches only to a server on its VM's node: PVE's disk
+  reassign requires both VMs on one node, even on shared storage (else 409);
+  `LIST_ATTACH_TARGETS` returns the eligible servers. `RETYPE` moves the disk with `move_disk ... delete=1`
+  to another profile's storage on the same node (409 if same storage, inactive, no
+  `images`, no room, or a boot disk onto a profile that refuses boot disks).
+  `DELETE` destroys a detached disk and is 409 for an attached one. A server
+  snapshot (image) is 409 while an attached disk sits on capacity storage. Typed
+  refusals are `pve.ConflictError`, mapped to 409 by `pveVolumeErr`.
+- **DBaaS.** A database create whose storage class is named after a profile closed
+  to databases on any Proxmox provider is 409.
+- **Billing.** The volume sync stamps each disk's own `profile` and `storage_class`
+  (and `volume_type` follows the disk's profile, not the server's). The volume
+  billing resource exposes both as string attributes for price-rule filters.
+
+PVE behaviour that was not verified on a lab cluster is marked `TODO(verify-lab)`
+in `capability.go` and `volume.go`.
 
 ### Tenancy: the pool is the boundary, the platform DB decides the rest
 
@@ -393,6 +462,8 @@ deletedAt`. History backs the recreate guard above.
   security groups; gated on the `compute` toggle), `syncCephService` (buckets;
   `object-store`), `syncKamajiService` (`kubernetes`), `syncDbaasService`
   (`database`). Per-project and per-service failures are logged and skipped.
+  Each cycle also re-detects the storage capabilities of every non-disabled
+  Proxmox provider (`detectProxmoxCapabilities`).
   The scheduler runs it every 15 minutes (`scheduler.ServicesSyncSpec`).
 - `SyncOne(ctx, projectID, serviceID)` — the admin single-project leg. A blank
   `serviceID` syncs every attached service (gated on the project being
@@ -472,10 +543,12 @@ sequenceDiagram
     SPA->>H: POST /project/{id}/cloud<br/>{type: SERVER, data}
     H->>H: authz, flavor, template, project network
     H->>H: GPU quota, checkPVEQuota
+    H->>PVE: storage detection, template config
+    H->>H: pvePlacement (boot-disk cap, active nodes,<br/>template locality; 409 on refusal)
     H->>PVE: nodes and cluster resources
-    H->>H: pve.PickNode
+    H->>H: pve.PickNode (capacity, GPUs,<br/>storage free >= disk + headroom)
     H->>PS: CreateServer
-    PS->>PVE: full clone into the project pool
+    PS->>PVE: full clone (target node, profile storage)<br/>into the project pool
     PS->>PVE: cores, memory, net0 on the vnet, disk resize
     PS->>PVE: SecureVM (firewall before first boot)
     PS->>PVE: start VM
@@ -676,6 +749,7 @@ AppProject guardrail, ArgoCD health checks): `deploy/mgmt-cluster/`.
 - `internal/cloud/pve/{client,cluster,qemu,storage,sdn,firewall,pool,access,task,mapping,form}.go` — REST client
 - `internal/cloud/pve/{service,write,volume,gpu,console}.go` — project-scoped service
 - `internal/cloud/pve/{network,firewallsvc,scheduler}.go` — networks and isolation, security groups, node placement
+- `internal/cloud/pve/capability.go` — storage capability detection, free-space and template-locality checks
 - `internal/cloud/pve/syncprovider.go` — server, volume and template sync providers
 - `internal/platform/externalservice/proxmox.go` — provider document and accessors
 

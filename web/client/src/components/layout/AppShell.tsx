@@ -6,7 +6,7 @@ import {
 } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useAuth } from "@/lib/auth"
-import { useFeatures, useProjects, useProjectInit, useUIMenu } from "@/lib/hooks"
+import { useCloudFeatures, useFeatures, useProjects, useProjectInit, useUIMenu, type CloudFeature } from "@/lib/hooks"
 import { useTheme, type ThemePref } from "@/lib/theme"
 import { Button } from "@/components/ui/button"
 import {
@@ -30,6 +30,8 @@ type Item = {
   // the /features flag is present. No gate = always visible.
   service?: string
   feature?: string
+  // hidden unless the compute provider serves it (/init features).
+  cloudFeature?: CloudFeature
 }
 type Group = { label: string; items: Item[] }
 
@@ -52,7 +54,7 @@ function navGroups(pid: string): Group[] {
       label: "Storage",
       items: [
         { to: `${p}/volumes`, label: "Volumes", icon: HardDrive, service: "volumev3" },
-        { to: `${p}/snapshots`, label: "Snapshots", icon: Camera, service: "volumev3" },
+        { to: `${p}/snapshots`, label: "Snapshots", icon: Camera, service: "volumev3", cloudFeature: "volumeSnapshots" },
         { to: `${p}/object-storage`, label: "Object storage", icon: Database, service: "object-store" },
         { to: `${p}/s3-keys`, label: "S3 access keys", icon: KeyRound, service: "object-store" },
       ],
@@ -103,6 +105,7 @@ function navGroups(pid: string): Group[] {
 function useGatedNavGroups(pid: string): Group[] {
   const { data: init } = useUIMenu(pid)
   const { data: features } = useFeatures()
+  const cloudFeatures = useCloudFeatures(pid)
   const items = init?.menu?.items
   const featureSet = features ? new Set(features) : undefined
   // Admin Custom Menu items (newMenuItem:true) render as a trailing "More" group.
@@ -128,6 +131,7 @@ function useGatedNavGroups(pid: string): Group[] {
       items: g.items.filter((it) => {
         if (it.service && items && !(items[it.service]?.enabled === true)) return false
         if (it.feature && featureSet && !featureSet.has(it.feature)) return false
+        if (it.cloudFeature && !cloudFeatures.has(it.cloudFeature)) return false
         return true
       }),
     }))

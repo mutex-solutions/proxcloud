@@ -185,7 +185,7 @@ func main() {
 
 	// --- 6. volume add ---
 	step(6, "Volume: add a 3 GiB data disk")
-	slot, err := svc.AddVolume(ctx, pid, vmExtID, 3, "nvme")
+	slot, err := svc.AddVolume(ctx, pid, vmExtID, 3, "nvme", 10)
 	if err != nil {
 		fatal(err, "add volume")
 	}

@@ -24,6 +24,7 @@ type PlatformConfig = {
   projectProvisioningQuota?: { enabled: boolean; limit: number }
   organizationProvisioningQuota?: { enabled: boolean; limit: number }
   regions?: Array<{ serviceId: string; region: string; order: number }>
+  hiddenServices?: string[]
   [k: string]: unknown
 }
 
@@ -38,6 +39,15 @@ type ServiceItem = { id: string; name?: string; config?: { regions?: Record<stri
 type Currency = { currency_code: string; currency_name: string }
 
 const PLATFORM_PATH = "/admin/platform-configuration/current"
+
+// Managed services the operator can hide from every tenant (platformConfiguration.hiddenServices):
+// a hidden slug never reaches the client menu, so its pages and create flows disappear. The
+// provider keeps syncing.
+const MANAGED_SERVICES = [
+  { slug: "kubernetes", label: "Kubernetes" },
+  { slug: "database", label: "Databases" },
+  { slug: "object-store", label: "Object storage" },
+]
 const BILLING_PATH = "/admin/billing/configuration/current"
 
 type PlatformForm = {
@@ -51,6 +61,7 @@ type PlatformForm = {
   quotaLimit: string
   orgQuotaEnabled: boolean
   orgQuotaLimit: string
+  hiddenServices: string[]
 }
 
 function platformConfigToForm(cfg: PlatformConfig): PlatformForm {
@@ -65,6 +76,7 @@ function platformConfigToForm(cfg: PlatformConfig): PlatformForm {
     quotaLimit: String(cfg.projectProvisioningQuota?.limit ?? 0),
     orgQuotaEnabled: cfg.organizationProvisioningQuota?.enabled === true,
     orgQuotaLimit: String(cfg.organizationProvisioningQuota?.limit ?? 0),
+    hiddenServices: cfg.hiddenServices ?? [],
   }
 }
 
@@ -192,6 +204,7 @@ export default function ConfigurationPage() {
         dateConfiguration: { ...(cfg.dateConfiguration ?? {}), dateFormat: form.dateFormat },
         projectProvisioningQuota: { enabled: form.quotaEnabled, limit: Number(form.quotaLimit) || 0 },
         organizationProvisioningQuota: { enabled: form.orgQuotaEnabled, limit: Number(form.orgQuotaLimit) || 0 },
+        hiddenServices: form.hiddenServices,
       }
       return apiFetch<PlatformConfig>(`/admin/platform-configuration/${id}`, { method: "PUT", body })
     },
@@ -362,6 +375,33 @@ export default function ConfigurationPage() {
                       />
                     </div>
                     <p className="text-xs text-muted-foreground">Max organizations a user can own. 0 = only operators create organizations and assign members.</p>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="text-eyebrow mb-2">Managed services shown to tenants</div>
+                  <div className="flex flex-wrap items-center gap-x-6 gap-y-3 rounded-lg border p-4">
+                    {MANAGED_SERVICES.map((svc) => (
+                      <div key={svc.slug} className="flex items-center gap-2">
+                        <Switch
+                          id={`pc-svc-${svc.slug}`}
+                          checked={!form.hiddenServices.includes(svc.slug)}
+                          onCheckedChange={(shown) =>
+                            setForm({
+                              ...form,
+                              hiddenServices: shown
+                                ? form.hiddenServices.filter((s) => s !== svc.slug)
+                                : [...form.hiddenServices, svc.slug],
+                            })
+                          }
+                        />
+                        <Label htmlFor={`pc-svc-${svc.slug}`} className="text-sm font-normal">{svc.label}</Label>
+                      </div>
+                    ))}
+                    <p className="text-xs text-muted-foreground">
+                      Turn a service off to hide it from every project until it is ready, even where a provider serves it.
+                      The provider keeps syncing.
+                    </p>
                   </div>
                 </div>
 

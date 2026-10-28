@@ -12,7 +12,7 @@ The organizing idea is the **project**. Nearly everything you create — servers
 
 ## The resource map
 
-Everything the portal manages falls into a handful of groups. The table below is the map; the task guides go into each area in depth. An entry only shows up when your operator has enabled that service in your region.
+Everything the portal manages falls into a handful of groups. The table below is the map; the task guides go into each area in depth. An entry only shows up when your operator has enabled that service in your region and has not hidden it platform-wide.
 
 | Group | Where in the sidebar | What it's for |
 |-------|----------------------|---------------|

@@ -65,7 +65,15 @@ the organization's billing profile.
   reaches the internet inbound through a public NIC with one address from it;
   there are no floating IPs.
 - **Storage profile** — a slug on the Proxmox provider mapping to a storage id per
-  node, with admin-declared capability flags; flavors and volumes reference it.
+  node, with capability flags validated against detection, a derived tier and
+  class, and `bootDisk` / `dbaas` caps; flavors and volumes reference it.
+- **Storage class** — `performance`, `standard` or `capacity` per Proxmox storage:
+  detected from the storage type, overridable by the admin. A capacity-class
+  profile (for example an HDD NFS share) never takes boot disks, databases or
+  snapshots.
+- **Capability detection** — reading each Proxmox storage's type, sharing,
+  content, snapshot/thin support and per-node free space from the cluster
+  (`config.capabilities`); the basis for profile validation and placement.
 - **Template** — a VM that servers are fully cloned from: an admin OS template
   from the provider config, or a project template made from a tenant VM (shown
   as an image).

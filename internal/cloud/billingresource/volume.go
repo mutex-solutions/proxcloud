@@ -32,6 +32,10 @@ func (p *VolumeProvider) GetBillingInformation(_ context.Context, _ billingapi.B
 		"type":              vol["volume_type"],
 		"status":            vol["status"],
 		"availability_zone": vol["availability_zone"],
+		// Proxmox: the disk's storage profile and storage class, so operators can price e.g.
+		// "capacity" (HDD NFS) separately from "std" (local ZFS). Absent elsewhere.
+		"profile":       vol["profile"],
+		"storage_class": vol["storage_class"],
 	}
 	dn := str(vol["name"])
 	if dn == "" {
@@ -57,6 +61,6 @@ func volumeType() *billingapi.BillingResourceType {
 	}
 	return &billingapi.BillingResourceType{ResourceType: "volume", Attributes: []billingapi.ResourceAttribute{
 		num("size"), {Name: "bootable", Type: "boolean"}, s("type"), s("status"),
-		s("availability_zone"), s("display_name"),
+		s("availability_zone"), s("display_name"), s("profile"), s("storage_class"),
 	}}
 }

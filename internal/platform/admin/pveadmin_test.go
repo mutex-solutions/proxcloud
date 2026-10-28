@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
@@ -151,6 +153,49 @@ func TestCheckNodeFirewalls(t *testing.T) {
 				t.Fatalf("unexpected error %v", herr)
 			case tt.wantErr != "" && (herr == nil || herr.Status != http.StatusBadRequest || !strings.Contains(herr.Msg, tt.wantErr)):
 				t.Fatalf("got %+v, want 400 containing %q", herr, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestApplyStorageClasses(t *testing.T) {
+	stored := func() pgdoc.M {
+		return pgdoc.M{"config": map[string]any{"storageClasses": map[string]any{
+			"nas": map[string]any{"class": "capacity", "suggestedClass": "standard"},
+		}}}
+	}
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+		want    map[string]any // storageClasses after apply
+	}{
+		{"set override keeps suggestion", `{"nas":"performance"}`, "",
+			map[string]any{"nas": pgdoc.M{"class": "performance", "suggestedClass": "standard"}}},
+		{"clear override keeps suggestion", `{"nas":""}`, "",
+			map[string]any{"nas": pgdoc.M{"suggestedClass": "standard"}}},
+		{"new storage", `{"local-zfs":"performance"}`, "",
+			map[string]any{"nas": pgdoc.M{"class": "capacity", "suggestedClass": "standard"}, "local-zfs": pgdoc.M{"class": "performance"}}},
+		{"invalid class", `{"nas":"fast"}`, "must be one of", nil},
+		{"bad body", `[1]`, "Invalid request body", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := stored()
+			req := httptest.NewRequest(http.MethodPut, "/service/s1/storage-classes", strings.NewReader(tt.body))
+			herr := applyStorageClasses(req, doc)
+			if tt.wantErr != "" {
+				if herr == nil || herr.Status != http.StatusBadRequest || !strings.Contains(herr.Msg, tt.wantErr) {
+					t.Fatalf("got %+v, want 400 containing %q", herr, tt.wantErr)
+				}
+				return
+			}
+			if herr != nil {
+				t.Fatalf("unexpected error %+v", herr)
+			}
+			got := map[string]any(doc["config"].(pgdoc.M)["storageClasses"].(pgdoc.M))
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %#v, want %#v", got, tt.want)
 			}
 		})
 	}

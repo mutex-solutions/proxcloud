@@ -37,9 +37,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import { fmtDateTime, timeAgo } from "@/lib/format"
-import { useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
+import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
-import { serverFlavor, serverIPs, serverName, serverStatus } from "./ServersPage"
+import { ServerDeleteWarning, serverFlavor, serverIPs, serverName, serverStatus } from "./ServersPage"
 
 type PendingAction = { action: string; title: string; label: string; destructive?: boolean } | null
 type FormDialog = "rename" | "resize" | "rebuild" | "password" | "delete" | null
@@ -70,6 +70,8 @@ export function ServerDetailPage() {
   const { resourceId = "" } = useParams()
   const navigate = useNavigate()
   const scope = useCloudScope(pid)
+  // Rebuild / rescue / set password / ports / snapshots show only when the provider serves them.
+  const features = useCloudFeatures(pid)
   const qc = useQueryClient()
   const { data: server, isLoading } = useCloudResource(pid, resourceId)
   const [pending, setPending] = useState<PendingAction>(null)
@@ -243,15 +245,17 @@ export function ServerDetailPage() {
                 >
                   Resize
                 </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => {
-                    setRebuildImage("")
-                    setDialog("rebuild")
-                  }}
-                >
-                  Rebuild
-                </DropdownMenuItem>
-                {status === "RESCUE" ? (
+                {features.has("serverRebuild") && (
+                  <DropdownMenuItem
+                    onClick={() => {
+                      setRebuildImage("")
+                      setDialog("rebuild")
+                    }}
+                  >
+                    Rebuild
+                  </DropdownMenuItem>
+                )}
+                {!features.has("serverRescue") ? null : status === "RESCUE" ? (
                   <DropdownMenuItem
                     onClick={() => setPending({ action: "UNRESCUE", title: "Unrescue server", label: "take this server out of rescue mode" })}
                   >
@@ -264,14 +268,16 @@ export function ServerDetailPage() {
                     Rescue
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem
-                  onClick={() => {
-                    setPasswordVal("")
-                    setDialog("password")
-                  }}
-                >
-                  Set password
-                </DropdownMenuItem>
+                {features.has("serverPassword") && (
+                  <DropdownMenuItem
+                    onClick={() => {
+                      setPasswordVal("")
+                      setDialog("password")
+                    }}
+                  >
+                    Set password
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem onClick={openConsole}>Console (VNC)</DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem variant="destructive" onClick={() => setDialog("delete")}>
@@ -325,7 +331,7 @@ export function ServerDetailPage() {
             <TabsTrigger value="security">Security</TabsTrigger>
             <TabsTrigger value="volumes">Volumes</TabsTrigger>
             <TabsTrigger value="events">Events</TabsTrigger>
-            <TabsTrigger value="snapshots">Snapshots</TabsTrigger>
+            {features.has("serverSnapshots") && <TabsTrigger value="snapshots">Snapshots</TabsTrigger>}
             <TabsTrigger value="logs">Console log</TabsTrigger>
           </TabsList>
         </div>
@@ -347,7 +353,11 @@ export function ServerDetailPage() {
         </TabsContent>
 
         <TabsContent value="network" className="mt-4">
-          <NetworkTab pid={pid} resourceId={resourceId} ext={ext} scope={scope} />
+          {features.has("ports") ? (
+            <NetworkTab pid={pid} resourceId={resourceId} ext={ext} scope={scope} />
+          ) : (
+            <AddressesTab server={server} />
+          )}
         </TabsContent>
 
         <TabsContent value="security" className="mt-4">
@@ -362,9 +372,11 @@ export function ServerDetailPage() {
           <EventsTab pid={pid} resourceId={resourceId} scope={scope} />
         </TabsContent>
 
-        <TabsContent value="snapshots" className="mt-4">
-          <SnapshotsTab pid={pid} resourceId={resourceId} ext={ext} scope={scope} />
-        </TabsContent>
+        {features.has("serverSnapshots") && (
+          <TabsContent value="snapshots" className="mt-4">
+            <SnapshotsTab pid={pid} resourceId={resourceId} ext={ext} scope={scope} />
+          </TabsContent>
+        )}
 
         <TabsContent value="logs" className="mt-4">
           <ConsoleLog pid={pid} resourceId={resourceId} />
@@ -555,6 +567,7 @@ export function ServerDetailPage() {
               Are you sure you want to delete "{name}"? This cannot be undone.
             </DialogDescription>
           </DialogHeader>
+          <ServerDeleteWarning />
           <DialogFooter>
             <Button variant="outline" onClick={closeForm}>
               Cancel
@@ -582,6 +595,44 @@ function Row({ k, v }: { k: string; v: React.ReactNode }) {
       <dt className="text-muted-foreground">{k}</dt>
       <dd className="text-right">{v}</dd>
     </div>
+  )
+}
+
+// ── Addresses (NIC/IP) panel: the guest-reported addresses from the server row, grouped by
+// network. Shown instead of the ports tab on providers without ports (Proxmox). ──
+function AddressesTab({ server }: { server: CloudResource }) {
+  const addrs = (server.data?.server?.addresses ?? {}) as Record<string, Array<{ addr?: string; version?: number }>>
+  const rows = Object.entries(addrs).flatMap(([net, list]) =>
+    (Array.isArray(list) ? list : []).filter((a) => a?.addr).map((a) => ({ net, addr: a.addr as string, version: a.version })),
+  )
+  if (!rows.length) {
+    return (
+      <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+        No addresses reported yet. They appear once the server is running with its guest agent.
+      </p>
+    )
+  }
+  return (
+    <Card className="overflow-hidden py-0">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Network</TableHead>
+            <TableHead>Address</TableHead>
+            <TableHead>Version</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((r) => (
+            <TableRow key={`${r.net}-${r.addr}`}>
+              <TableCell>{r.net}</TableCell>
+              <TableCell className="font-mono text-sm">{r.addr}</TableCell>
+              <TableCell className="text-sm text-muted-foreground">{r.version ? `IPv${r.version}` : "—"}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </Card>
   )
 }
 

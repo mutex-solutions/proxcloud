@@ -404,8 +404,9 @@ flowchart LR
   project-scoped `pve.Service` (create/delete/resize/power servers, project
   templates, volumes, GPU slots, console). Networks (`network.go`) are SDN vnets
   with per-vnet isolation; security groups are cluster firewall groups
-  (`firewallsvc.go`); `PickNode` places VMs by capacity, storage profile and free
-  GPU slots.
+  (`firewallsvc.go`); `PickNode` places VMs by capacity, the nodes where the
+  storage profile is active, free space on that storage and free GPU slots;
+  `capability.go` detects what each storage supports.
 - **Sync providers + `providers.Reconcile`** — the PVE sync providers
   (`pve/syncprovider.go`, `NetworkSyncProvider`, `SecurityGroupSyncProvider`) map
   pool VMs, disks, templates, owned vnets and groups to cache rows; `Reconcile`

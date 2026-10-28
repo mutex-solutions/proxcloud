@@ -20,7 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiFetch } from "@/lib/api"
-import { useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
+import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
 import { networkName, networkStatus } from "./NetworksPage"
 
@@ -48,6 +48,8 @@ function NetworkBreadcrumb({ pid, name }: { pid: string; name?: string }) {
 
 export default function NetworkDetailPage() {
   const pid = useProjectId()
+  // Subnets are a separate resource only on providers that serve them (/init features).
+  const features = useCloudFeatures(pid)
   const { resourceId = "" } = useParams()
   const { data: network, isLoading, error } = useCloudResource(pid, resourceId)
 
@@ -94,7 +96,7 @@ export default function NetworkDetailPage() {
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="servers">Servers</TabsTrigger>
-          <TabsTrigger value="subnets">Subnets</TabsTrigger>
+          {features.has("subnets") && <TabsTrigger value="subnets">Subnets</TabsTrigger>}
         </TabsList>
 
         <TabsContent value="overview" className="mt-4">
@@ -120,9 +122,11 @@ export default function NetworkDetailPage() {
           <NetworkServers pid={pid} resourceId={resourceId} />
         </TabsContent>
 
-        <TabsContent value="subnets" className="mt-4">
-          <SubnetsTab pid={pid} networkExtId={network.externalId ?? ""} />
-        </TabsContent>
+        {features.has("subnets") && (
+          <TabsContent value="subnets" className="mt-4">
+            <SubnetsTab pid={pid} networkExtId={network.externalId ?? ""} />
+          </TabsContent>
+        )}
       </Tabs>
     </>
   )
