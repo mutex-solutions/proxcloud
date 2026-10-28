@@ -1,9 +1,14 @@
 package project
 
 // cloud_quota_pve.go — platform-side resource quota for Proxmox projects (PVE has
-// no quota machinery at all). Project.Quota JSONB keys: vcpus, ramMb, servers,
-// networks, diskGb (+ the shared "gpu" map). Absent key = unlimited — the
-// fail-open posture of the GPU gate; the gate only ever 409s on a hard exceed.
+// no quota machinery at all). Keys: externalservice.PVEQuotaKeys (servers, vcpus,
+// ramMb, diskGb, networks, floatingIps) + the shared "gpu" map.
+//
+// Which limits apply (pveQuotaLimits): the project's own quota when it has one, else
+// the provider default (config.provisioning.quota, also seeded onto the project at
+// bootstrap). Unlimited only when neither is set; inside a non-empty quota an absent
+// key is unlimited. A usage read that fails blocks the create (503) — never a silent
+// pass.
 
 import (
 	"context"
@@ -11,90 +16,116 @@ import (
 	"net/http"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
-// pveQuotaDemand is what one create/resize adds.
+// pveQuotaDemand is what one create/resize adds (or, as usage, what is in use).
 type pveQuotaDemand struct {
 	VCPUs    int
 	RAMMb    int
 	Servers  int
 	Networks int
 	DiskGb   int
+	// FloatingIPs counts public-NIC addresses (pvePublicIp rows, not cache rows).
+	FloatingIPs int
 }
 
-// enforcePVEQuota gates a demand against Project.Quota using the cached rows as
-// usage (DELETED rows are already excluded from the cache).
-func (h *Handler) enforcePVEQuota(ctx context.Context, proj *Project, svcID string, d pveQuotaDemand) *httpx.HTTPError {
-	limits := proj.Quota
-	if len(limits) == 0 {
-		return nil
+func errQuotaUsageUnavailable() *httpx.HTTPError {
+	return httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable,
+		"Quota usage is temporarily unavailable, please try again")
+}
+
+// pveQuotaLimits is the quota that applies to proj on es (see the file comment).
+func pveQuotaLimits(proj *Project, es *externalservice.ExternalService) map[string]any {
+	if len(proj.Quota) > 0 {
+		return proj.Quota
 	}
-	limit := func(key string) (int, bool) {
-		v, ok := limits[key]
-		if !ok {
-			return 0, false
+	return es.PVEDefaultQuota()
+}
+
+// enforcePVEQuota gates a demand against the project's limits using the cached rows
+// as usage (DELETED rows are already excluded from the cache).
+func (h *Handler) enforcePVEQuota(ctx context.Context, proj *Project, es *externalservice.ExternalService, d pveQuotaDemand) *httpx.HTTPError {
+	return checkPVEQuota(pveQuotaLimits(proj, es), d,
+		func() (pveQuotaDemand, error) { return h.pveQuotaUsage(ctx, proj.ID, es.ID) },
+		func() (int, error) {
+			if h.publicIPs == nil {
+				return 0, nil
+			}
+			n, err := h.publicIPs.CountForProject(ctx, es.ID, proj.ID)
+			return int(n), err
+		})
+}
+
+// byKey maps the demand onto the quota keys.
+func (d pveQuotaDemand) byKey() map[string]int {
+	return map[string]int{"servers": d.Servers, "vcpus": d.VCPUs, "ramMb": d.RAMMb,
+		"diskGb": d.DiskGb, "networks": d.Networks, "floatingIps": d.FloatingIPs}
+}
+
+// checkPVEQuota is the gate itself. usage (cached rows) and floatingUsed (pvePublicIp
+// rows) are only read when a limited key is actually requested; a read error fails
+// closed.
+func checkPVEQuota(limits map[string]any, d pveQuotaDemand, usage func() (pveQuotaDemand, error), floatingUsed func() (int, error)) *httpx.HTTPError {
+	want := d.byKey()
+	var used map[string]int
+	for _, key := range externalservice.PVEQuotaKeys {
+		raw, limited := limits[key]
+		if !limited || want[key] <= 0 {
+			continue
 		}
-		return intAny(v), true
-	}
-	needsUsage := false
-	for _, k := range []string{"vcpus", "ramMb", "servers", "networks", "diskGb"} {
-		if _, ok := limit(k); ok {
-			needsUsage = true
-			break
+		var n int
+		if key == "floatingIps" {
+			var err error
+			if n, err = floatingUsed(); err != nil {
+				return errQuotaUsageUnavailable()
+			}
+		} else {
+			if used == nil {
+				u, err := usage()
+				if err != nil {
+					return errQuotaUsageUnavailable()
+				}
+				used = u.byKey()
+			}
+			n = used[key]
+		}
+		if lim := intAny(raw); n+want[key] > lim {
+			return httpx.NewError(http.StatusConflict, http.StatusConflict,
+				fmt.Sprintf("Quota exceeded for %s: %d in use, %d requested, limit %d", key, n, want[key], lim))
 		}
 	}
-	if !needsUsage {
-		return nil
-	}
-	rows, err := h.cloud.FindAllByProjectID(ctx, proj.ID)
+	return nil
+}
+
+// pveQuotaUsage sums the project's cached rows on one provider.
+func (h *Handler) pveQuotaUsage(ctx context.Context, projectID, svcID string) (pveQuotaDemand, error) {
+	rows, err := h.cloud.FindAllByProjectID(ctx, projectID)
 	if err != nil {
-		return nil // fail-open: a DB hiccup never blocks (GPU-gate posture)
+		return pveQuotaDemand{}, err
 	}
-	var usedVCPUs, usedRAM, usedServers, usedNetworks, usedDisk int
+	var u pveQuotaDemand
 	for i := range rows {
 		if rows[i].ServiceID != svcID {
 			continue
 		}
 		switch rows[i].Type {
 		case cloud.TypeServer:
-			usedServers++
+			u.Servers++
 			if srv, ok := rows[i].Data["server"].(map[string]any); ok {
 				if fl, ok := srv["flavor"].(map[string]any); ok {
-					usedVCPUs += intAny(fl["vcpus"])
-					usedRAM += intAny(fl["ram"])
+					u.VCPUs += intAny(fl["vcpus"])
+					u.RAMMb += intAny(fl["ram"])
 				}
 			}
 		case cloud.TypeNetwork:
-			usedNetworks++
+			u.Networks++
 		case cloud.TypeVolume:
 			if vol, ok := rows[i].Data["volume"].(map[string]any); ok {
-				usedDisk += intAny(vol["size"])
+				u.DiskGb += intAny(vol["size"])
 			}
 		}
 	}
-	check := func(key string, used, want int) *httpx.HTTPError {
-		lim, ok := limit(key)
-		if !ok || want == 0 {
-			return nil
-		}
-		if used+want > lim {
-			return httpx.NewError(http.StatusConflict, http.StatusConflict,
-				fmt.Sprintf("Quota exceeded for %s: %d in use, %d requested, limit %d", key, used, want, lim))
-		}
-		return nil
-	}
-	if e := check("vcpus", usedVCPUs, d.VCPUs); e != nil {
-		return e
-	}
-	if e := check("ramMb", usedRAM, d.RAMMb); e != nil {
-		return e
-	}
-	if e := check("servers", usedServers, d.Servers); e != nil {
-		return e
-	}
-	if e := check("networks", usedNetworks, d.Networks); e != nil {
-		return e
-	}
-	return check("diskGb", usedDisk, d.DiskGb)
+	return u, nil
 }

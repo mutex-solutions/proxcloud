@@ -9,6 +9,7 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { apiFetch } from "@/lib/api"
 
@@ -21,10 +22,17 @@ export type ProxmoxFormState = {
   fingerprint: string
   insecureTls: boolean
   poolPrefix: string
+  // config.network.isolation / .evpnController — the tenant network isolation model.
+  isolation: PVEIsolation
+  evpnController: string
   // Stored config carried through so Save never wipes keys this form does not own
   // (network, storageProfiles, templates, gpus, overcommit, metrics — later phases' tabs).
   storedConfig: Record<string, any>
 }
+
+// "shared": one SDN zone, per-vnet firewall DROPs cross-tenant traffic (default, simplest).
+// "evpn-per-project": every project gets its own EVPN zone (VRF) on top of the same DROP rules.
+export type PVEIsolation = "shared" | "evpn-per-project"
 
 export const emptyProxmoxForm: ProxmoxFormState = {
   name: "",
@@ -35,7 +43,18 @@ export const emptyProxmoxForm: ProxmoxFormState = {
   fingerprint: "",
   insecureTls: false,
   poolPrefix: "pc-",
+  isolation: "shared",
+  evpnController: "",
   storedConfig: {},
+}
+
+// proxmoxNetworkConfig merges the form-owned isolation keys into the stored config.network
+// (the update route replaces top-level config keys wholesale, so the rest must ride along).
+export function proxmoxNetworkConfig(f: ProxmoxFormState) {
+  const network: Record<string, any> = { ...((f.storedConfig?.network as Record<string, any>) ?? {}), isolation: f.isolation }
+  if (f.isolation === "evpn-per-project" && f.evpnController.trim()) network.evpnController = f.evpnController.trim()
+  else delete network.evpnController
+  return network
 }
 
 export const proxmoxFormValid = (f: ProxmoxFormState, requireSecret = true) => {
@@ -68,6 +87,7 @@ export function proxmoxFormToBody(f: ProxmoxFormState) {
       fingerprint: f.fingerprint.trim(),
       insecureTls: f.insecureTls,
       poolPrefix: f.poolPrefix.trim() || "pc-",
+      network: proxmoxNetworkConfig(f),
       // Traffic billing stays off until a prometheus-pve-exporter is wired (Phase 5).
       metrics: (f.storedConfig?.metrics as Record<string, any>) ?? { source: "none" },
     },
@@ -89,6 +109,8 @@ export function proxmoxFormFromService(svc: { name?: string; config?: Record<str
     fingerprint: String(cfg.fingerprint ?? ""),
     insecureTls: !!cfg.insecureTls,
     poolPrefix: String(cfg.poolPrefix ?? "pc-"),
+    isolation: cfg.network?.isolation === "evpn-per-project" ? "evpn-per-project" : "shared",
+    evpnController: String(cfg.network?.evpnController ?? ""),
     storedConfig: cfg,
   }
 }
@@ -99,6 +121,7 @@ type PVEAuthResponse = {
   storages?: { storage: string; type: string }[]
   sdnZones?: { zone: string; type: string }[]
   pciMappings?: { id: string }[]
+  warnings?: string[]
 }
 
 export function ProxmoxProviderForm({
@@ -114,11 +137,13 @@ export function ProxmoxProviderForm({
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<string | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
+  const [testWarnings, setTestWarnings] = useState<string[]>([])
 
   const test = async () => {
     setTesting(true)
     setTestResult(null)
     setTestError(null)
+    setTestWarnings([])
     try {
       const q = serviceId && !form.tokenSecret.trim() ? `?externalServiceId=${encodeURIComponent(serviceId)}` : ""
       const res = await apiFetch<PVEAuthResponse>(`/admin/service/proxmox/auth${q}`, {
@@ -131,6 +156,7 @@ export function ProxmoxProviderForm({
           insecureTls: form.insecureTls,
         },
       })
+      setTestWarnings(res.warnings ?? [])
       const nodes = res.nodes?.length ?? 0
       const storages = res.storages?.length ?? 0
       const gpus = res.pciMappings?.length ?? 0
@@ -192,6 +218,33 @@ export function ProxmoxProviderForm({
           Every project gets one PVE pool (<code>{form.poolPrefix || "pc-"}&lt;projectId&gt;</code>) — the tenancy boundary.
         </p>
       </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="grid gap-2">
+          <Label htmlFor="pve-isolation">Tenant network isolation</Label>
+          <Select value={form.isolation} onValueChange={(v) => setForm({ ...form, isolation: v as PVEIsolation })}>
+            <SelectTrigger id="pve-isolation">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="shared">Shared zone + vnet firewall (default)</SelectItem>
+              <SelectItem value="evpn-per-project">EVPN zone per project</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Both drop cross-tenant traffic with vnet firewall rules inside the network <code>cidrPool</code> (required).
+            Needs the nftables <code>proxmox-firewall</code> on every node.
+          </p>
+        </div>
+        {form.isolation === "evpn-per-project" ? (
+          <div className="grid gap-2">
+            <Label htmlFor="pve-evpnctl">EVPN controller</Label>
+            <Input id="pve-evpnctl" className="font-mono" value={form.evpnController} onChange={(e) => setForm({ ...form, evpnController: e.target.value })} placeholder="proxcloud" autoComplete="off" />
+            <p className="text-xs text-muted-foreground">
+              Shared by every project zone. Blank = the default zone&apos;s controller; zone settings (ASN, peers, exit nodes) come from the default zone.
+            </p>
+          </div>
+        ) : null}
+      </div>
       <div className="flex items-center gap-3">
         <Button type="button" variant="outline" onClick={() => void test()} disabled={testing || !form.apiUrl.trim() || !form.tokenId.trim() || (!form.tokenSecret.trim() && !serviceId)}>
           {testing ? "Testing…" : "Test connection"}
@@ -199,8 +252,14 @@ export function ProxmoxProviderForm({
         {testResult ? <span className="text-xs text-emerald-600">{testResult}</span> : null}
         {testError ? <span className="text-xs text-destructive">{testError}</span> : null}
       </div>
+      {testWarnings.length ? (
+        <ul className="list-disc space-y-1 pl-5 text-xs text-amber-600">
+          {testWarnings.map((w) => <li key={w}>{w}</li>)}
+        </ul>
+      ) : null}
       <p className="text-xs text-muted-foreground">
-        The token needs cluster-wide admin rights (VM, pool, SDN, storage, mapping). Networking zones,
+        Use a privilege-separated token with the ProxCloudPlatform role (docs/proxmox-permissions.md);
+        Test connection lists any privilege it lacks. Networking zones,
         storage profiles, templates and GPU mappings are configured on the provider detail page after creation.
       </p>
     </div>

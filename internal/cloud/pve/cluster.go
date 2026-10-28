@@ -77,3 +77,50 @@ func (c *Client) NextID(ctx context.Context) (int, error) {
 	}
 	return strconv.Atoi(s)
 }
+
+// ManagementBridges maps each bridge that carries a node's own IP — the node
+// address from /cluster/status, or the default gateway — to that node. A public
+// network on such a bridge would put tenant VMs on the hypervisor's L2. nodes
+// narrows the check (none = every node in the cluster).
+func (c *Client) ManagementBridges(ctx context.Context, nodes ...string) (map[string]string, error) {
+	var status []struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+		IP   string `json:"ip"`
+	}
+	if err := c.get(ctx, "/cluster/status", nil, &status); err != nil {
+		return nil, err
+	}
+	nodeIP := map[string]string{}
+	for _, s := range status {
+		if s.Type == "node" {
+			nodeIP[s.Name] = s.IP
+		}
+	}
+	if len(nodes) == 0 {
+		for n := range nodeIP {
+			nodes = append(nodes, n)
+		}
+	}
+	out := map[string]string{}
+	for _, node := range nodes {
+		var ifaces []struct {
+			Iface    string `json:"iface"`
+			Address  string `json:"address"`
+			Address6 string `json:"address6"`
+			Gateway  string `json:"gateway"`
+			Gateway6 string `json:"gateway6"`
+		}
+		form := formVals{"type": "any_bridge"}.values()
+		if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", form, &ifaces); err != nil {
+			return nil, err
+		}
+		ip := nodeIP[node]
+		for _, i := range ifaces {
+			if i.Gateway != "" || i.Gateway6 != "" || (ip != "" && (i.Address == ip || i.Address6 == ip)) {
+				out[i.Iface] = node
+			}
+		}
+	}
+	return out, nil
+}

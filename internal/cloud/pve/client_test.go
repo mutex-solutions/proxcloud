@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -240,4 +241,71 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func TestManagementBridges(t *testing.T) {
+	network := func(body string) func(http.ResponseWriter, *http.Request) {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("type") != "any_bridge" {
+				t.Errorf("network list without type=any_bridge: %s", r.URL.RawQuery)
+			}
+			fmt.Fprint(w, body)
+		}
+	}
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/status": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"type":"cluster","name":"lab"},{"type":"node","name":"pve1","ip":"10.0.0.11"},{"type":"node","name":"pve2","ip":"10.0.0.12"}]}`)
+		},
+		// pve1: vmbr0 carries the default gateway, vmbr1 is a clean public bridge.
+		"GET /api2/json/nodes/pve1/network": network(`{"data":[{"iface":"vmbr0","address":"10.0.0.11","gateway":"10.0.0.1"},{"iface":"vmbr1"}]}`),
+		// pve2: the node IP sits on vmbr2 with the gateway elsewhere.
+		"GET /api2/json/nodes/pve2/network": network(`{"data":[{"iface":"vmbr2","address":"10.0.0.12"},{"iface":"vmbr1"}]}`),
+	})
+	got, err := c.ManagementBridges(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"vmbr0": "pve1", "vmbr2": "pve2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("all nodes: got %v, want %v", got, want)
+	}
+	got, err = c.ManagementBridges(context.Background(), "pve2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"vmbr2": "pve2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("pve2 only: got %v, want %v", got, want)
+	}
+}
+
+func TestMissingPrivileges(t *testing.T) {
+	// The token holds everything on "/" and /storage, part of /sdn, nothing on /pool.
+	perms := map[string]string{
+		"/":        `{"Sys.Audit":0,"Sys.Modify":0}`,
+		"/sdn":     `{"SDN.Audit":1,"SDN.Use":1}`,
+		"/storage": `{"Datastore.AllocateSpace":1,"Datastore.Audit":1}`,
+	}
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/access/permissions": func(w http.ResponseWriter, r *http.Request) {
+			p := r.URL.Query().Get("path")
+			if body, ok := perms[p]; ok {
+				fmt.Fprintf(w, `{"data":{%q:%s}}`, p, body)
+				return
+			}
+			fmt.Fprint(w, `{"data":{}}`) // PVE returns an empty map when nothing applies
+		},
+	})
+	checks := []PrivCheck{
+		{Path: "/", Privs: []string{"Sys.Audit", "Sys.Modify"}},
+		{Path: "/pool", Privs: []string{"Pool.Allocate", "VM.Allocate"}},
+		{Path: "/sdn", Privs: []string{"SDN.Allocate", "SDN.Audit", "SDN.Use"}},
+		{Path: "/storage", Privs: []string{"Datastore.AllocateSpace", "Datastore.Audit"}},
+	}
+	got, err := c.MissingPrivileges(context.Background(), checks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Pool.Allocate, VM.Allocate on /pool", "SDN.Allocate on /sdn"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("missing = %q, want %q", got, want)
+	}
 }

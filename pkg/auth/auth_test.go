@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -103,6 +104,35 @@ func TestAzpAllowed(t *testing.T) {
 	for _, c := range cases {
 		if got := azpAllowed(c.realmClientID, c.azp); got != c.want {
 			t.Errorf("azpAllowed(%q,%q) = %v, want %v", c.realmClientID, c.azp, got, c.want)
+		}
+	}
+}
+
+// TestClaimTrue pins email_verified parsing: a JSON bool or the string "true"
+// counts; absent, null, "false" or any other shape fails closed.
+func TestClaimTrue(t *testing.T) {
+	cases := []struct {
+		claims string
+		want   bool
+	}{
+		{`{"email_verified":true}`, true},
+		{`{"email_verified":"true"}`, true},
+		{`{"email_verified":"TRUE"}`, true},
+		{`{"email_verified":false}`, false},
+		{`{"email_verified":"false"}`, false},
+		{`{"email_verified":null}`, false},
+		{`{"email_verified":1}`, false},
+		{`{}`, false},
+	}
+	for _, c := range cases {
+		var claims struct {
+			EmailVerified any `json:"email_verified"`
+		}
+		if err := json.Unmarshal([]byte(c.claims), &claims); err != nil {
+			t.Fatal(err)
+		}
+		if got := claimTrue(claims.EmailVerified); got != c.want {
+			t.Errorf("claimTrue(%s) = %v, want %v", c.claims, got, c.want)
 		}
 	}
 }

@@ -27,7 +27,10 @@ services:
 
   # Dev identity provider. Realm `proxcloud` (deploy/dev/keycloak-realm.json) ships two
   # public clients — proxcloud-ui (customer console) and proxcloud-admin (operator console)
-  # — and two users: demo/demo and admin/admin.
+  # — and two users: demo/demo and admin/admin (emails pre-verified).
+  # verifyEmail is on: org add-member and project invites only match verified emails.
+  # No SMTP is configured, so a self-registered dev user cannot get past Keycloak's
+  # verify-email step: tick "Email verified" for them in the Keycloak admin console.
   # The browser reaches it at localhost:8090 (that URL becomes the token's `iss`), the
   # api reaches the SAME realm at keycloak:8080 inside the compose network — hence the
   # *_DISCOVERY_URI vars below.

@@ -90,7 +90,7 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 
 // BootstrapProxmoxOnto provisions the project onto a Proxmox VE service: ensure the project's
 // pool (the tenancy boundary — every project VM lives in it, every list/mutation filters by it)
-// and append the binding {serviceId, provider:"proxmox", region, pool}. The pool id is persisted
+// and its default security group, seed the provider default quota, and append the binding {serviceId, provider:"proxmox", region, pool}. The pool id is persisted
 // on the binding (RGWUIDFor precedent) so teardown never re-derives it.
 // Idempotent: a project already attached to this service is saved as-is.
 func (h *Handler) BootstrapProxmoxOnto(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
@@ -107,6 +107,15 @@ func (h *Handler) BootstrapProxmoxOnto(ctx context.Context, p *Project, es *exte
 	pool, err := ps.EnsureProjectPool(ctx, p.ID)
 	if err != nil {
 		return fmt.Errorf("bootstrap proxmox: ensure pool: %w", err)
+	}
+	// The default security group every server gets unless the user picks others.
+	if _, err := ps.EnsureDefaultSecurityGroup(ctx, p.ID, es.PVENetworkConfig().CIDRPool); err != nil {
+		return fmt.Errorf("bootstrap proxmox: default security group: %w", err)
+	}
+	// Seed the provider default quota onto a project that has none, so it is
+	// visible/editable per project and survives later default changes.
+	if len(p.Quota) == 0 {
+		p.Quota = es.PVEDefaultQuota()
 	}
 	region := es.PVERegion()
 	if region == "" {

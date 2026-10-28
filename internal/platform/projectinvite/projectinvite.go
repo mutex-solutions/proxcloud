@@ -32,8 +32,12 @@ func (r *Repo) purgeExpired(ctx context.Context) {
 	_, _ = r.invites.DeleteMany(ctx, pgdoc.M{"expiresAt": pgdoc.M{"$lt": time.Now().UTC()}})
 }
 
-// ByEmailAndToken finds an invite by email + token. nil when none.
+// ByEmailAndToken finds an invite by email + token. nil when none, and for a blank
+// email (what callerEmail yields for an unverified address).
 func (r *Repo) ByEmailAndToken(ctx context.Context, email, token string) (pgdoc.M, error) {
+	if email == "" {
+		return nil, nil
+	}
 	r.purgeExpired(ctx)
 	var doc pgdoc.M
 	found, err := r.invites.FindOne(ctx, pgdoc.M{"email": email, "token": token}, &doc)
@@ -45,6 +49,9 @@ func (r *Repo) ByEmailAndToken(ctx context.Context, email, token string) (pgdoc.
 
 // ByEmail lists the pending (non-expired) invites for an email.
 func (r *Repo) ByEmail(ctx context.Context, email string) ([]pgdoc.M, error) {
+	if email == "" {
+		return nil, nil
+	}
 	r.purgeExpired(ctx)
 	var docs []pgdoc.M
 	if err := r.invites.Find(ctx, pgdoc.M{"email": email}, &docs); err != nil {
@@ -204,7 +211,7 @@ func (h *Handler) InviteToProject(ctx context.Context, u *user.User, email, proj
 		return err
 	}
 	// An existing user who is already a project member → 400.
-	if invited, _ := h.users.FindByEmail(ctx, email); invited != nil && proj.IsMember(invited.Sub) {
+	if invited, _ := h.users.FindVerifiedByEmail(ctx, email); invited != nil && proj.IsMember(invited.Sub) {
 		return httpx.BadRequest("User is already added to project")
 	}
 	token := uuid.NewString()
@@ -240,7 +247,11 @@ func (h *Handler) accept(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	inv, err := h.repo.ByEmailAndToken(r.Context(), u.Email, chi.URLParam(r, "token"))
+	if !u.EmailVerified() {
+		httpx.WriteError(w, httpx.Forbidden("Verify your email address before accepting a project invite"))
+		return
+	}
+	inv, err := h.repo.ByEmailAndToken(r.Context(), callerEmail(u), chi.URLParam(r, "token"))
 	if err != nil {
 		httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
 		return
@@ -274,6 +285,16 @@ func (h *Handler) accept(w http.ResponseWriter, r *http.Request) {
 	httpx.Accepted(w)
 }
 
+// callerEmail is the email the caller's invites are matched on: blank (matches
+// nothing) until the IdP has verified it, so an account signed up with someone
+// else's address can neither see nor claim their invites.
+func callerEmail(u *user.User) string {
+	if !u.EmailVerified() {
+		return ""
+	}
+	return u.Email
+}
+
 // decline deletes the invite if present (no 404). 202.
 func (h *Handler) decline(w http.ResponseWriter, r *http.Request) {
 	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
@@ -283,7 +304,7 @@ func (h *Handler) decline(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	inv, err := h.repo.ByEmailAndToken(r.Context(), u.Email, chi.URLParam(r, "token"))
+	inv, err := h.repo.ByEmailAndToken(r.Context(), callerEmail(u), chi.URLParam(r, "token"))
 	if err != nil {
 		httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
 		return
@@ -309,7 +330,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	inv, err := h.repo.ByEmailAndToken(r.Context(), u.Email, chi.URLParam(r, "token"))
+	inv, err := h.repo.ByEmailAndToken(r.Context(), callerEmail(u), chi.URLParam(r, "token"))
 	if err != nil {
 		httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
 		return
@@ -333,7 +354,7 @@ func (h *Handler) mine(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	invs, err := h.repo.ByEmail(r.Context(), u.Email)
+	invs, err := h.repo.ByEmail(r.Context(), callerEmail(u))
 	if err != nil {
 		httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
 		return

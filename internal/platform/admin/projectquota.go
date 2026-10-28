@@ -3,9 +3,11 @@ package admin
 // projectquota.go — the per-project quota admin surface. PUT /admin/project/{id}/quota stores
 // the quota config on the project doc (same stored-JSON posture as the provider default quota
 // in externalservicemut.go — no OpenStack push). Shape: {"gpu": {"<model>": n, "*": n}} where
-// model names use the shared GPU alias vocabulary (see internal/cloud/gpu.go). Enforcement is
-// the project cloud gate (internal/platform/project/gpuquota.go), applied on server
-// create/resize.
+// model names use the shared GPU alias vocabulary (see internal/cloud/gpu.go), plus the Proxmox
+// resource keys (externalservice.PVEQuotaKeys: servers, vcpus, ramMb, diskGb, networks,
+// floatingIps). Enforcement is the project cloud gate (project/gpuquota.go,
+// project/cloud_quota_pve.go). An empty body clears the quota; a Proxmox project then falls
+// back to its provider's default quota.
 
 import (
 	"encoding/json"
@@ -20,6 +22,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -136,6 +139,15 @@ func validateProjectQuota(body pgdoc.M) *httpx.HTTPError {
 // aliases at the write boundary so admin/API/MCP callers all match flavor aliases.
 func normalizeProjectQuota(body pgdoc.M) (pgdoc.M, *httpx.HTTPError) {
 	normalizedBody := maps.Clone(body)
+	for _, key := range externalservice.PVEQuotaKeys {
+		v, ok := body[key]
+		if !ok {
+			continue
+		}
+		if f, ok := v.(float64); !ok || f < 0 || f != float64(int64(f)) {
+			return nil, httpx.BadRequest(fmt.Sprintf("quota.%s must be a non-negative integer", key))
+		}
+	}
 	gpuRaw, ok := body["gpu"]
 	if !ok {
 		return normalizedBody, nil

@@ -3,7 +3,7 @@
   "enabled": true,
   "registrationAllowed": true,
   "loginWithEmailAllowed": true,
-  "verifyEmail": false,
+  "verifyEmail": true,
   "sslRequired": "none",
   "accessTokenLifespan": 1800,
   "clients": [

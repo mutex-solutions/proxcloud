@@ -14,7 +14,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -109,16 +111,37 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		h.fail(w, herr)
 		return
 	}
+	// A server must sit on one of the project's vnets: the template's own NIC is an
+	// admin bridge with no anti-spoof set, so ipfilter would leave it dead (and
+	// without ipfilter it would be an open L2 foothold).
+	bridge := h.pveResolveBridge(ctx, proj, data)
+	if bridge == "" {
+		h.fail(w, httpx.BadRequest("Select one of this project's networks for the server"))
+		return
+	}
+	rootGiB := 0
+	if rv, ok := data["rootVolume"].(map[string]any); ok {
+		rootGiB = intAny(rv["sizeGiB"])
+	}
+	if rootGiB > 0 && rootGiB < tpl.MinDiskGb {
+		h.fail(w, httpx.BadRequest(fmt.Sprintf("Root disk must be at least %d GB for this image", tpl.MinDiskGb)))
+		return
+	}
 	// GPU quota gate (platform-side; PVE has no quota concept at all).
 	if fl.GPUCount > 0 {
-		if err := h.enforcePVEGPUQuota(ctx, proj, es.ID, fl, nil); err != nil {
+		if err := h.enforcePVEGPUQuota(ctx, proj, es, fl, nil); err != nil {
 			h.fail(w, err)
 			return
 		}
 	}
-	// Resource quota gate (vcpus/ram/servers/disk — platform-side).
-	if err := h.enforcePVEQuota(ctx, proj, es.ID, pveQuotaDemand{
-		VCPUs: fl.VCPUs, RAMMb: fl.RAMMb, Servers: 1, DiskGb: fl.DiskGb,
+	// Resource quota gate (vcpus/ram/servers/disk — platform-side). The disk is
+	// the root size the VM really gets (a user-picked rootVolume overrides the flavor).
+	diskGb := fl.DiskGb
+	if rootGiB > 0 {
+		diskGb = rootGiB
+	}
+	if err := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{
+		VCPUs: fl.VCPUs, RAMMb: fl.RAMMb, Servers: 1, DiskGb: diskGb,
 	}); err != nil {
 		h.fail(w, err)
 		return
@@ -194,12 +217,15 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 			return
 		}
 	}
-	rootGiB := 0
-	if rv, ok := data["rootVolume"].(map[string]any); ok {
-		rootGiB = intAny(rv["sizeGiB"])
+	// Security groups: the user's pick (names or ids), else the project default.
+	groups, gerr := ps.ServerSecurityGroups(ctx, proj.ID, strSlice(data["securityGroupNames"]), es.PVENetworkConfig().CIDRPool)
+	var notFound *pve.SecurityGroupNotFoundError
+	if errors.As(gerr, &notFound) {
+		h.fail(w, httpx.BadRequest("Security group not found: "+notFound.Ref))
+		return
 	}
-	if rootGiB > 0 && rootGiB < tpl.MinDiskGb {
-		h.fail(w, httpx.BadRequest(fmt.Sprintf("Root disk must be at least %d GB for this image", tpl.MinDiskGb)))
+	if gerr != nil {
+		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Security group lookup failed: "+gerr.Error()))
 		return
 	}
 	cr, cerr := ps.CreateServer(ctx, pve.CreateServerReq{
@@ -210,16 +236,17 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 			Slug: fl.Slug, VCPUs: fl.VCPUs, RAMMb: fl.RAMMb, DiskGb: fl.DiskGb,
 			StorageProfile: profileSlug, GPUModel: fl.GPUModel, GPUCount: fl.GPUCount,
 		},
-		TemplateVMID:  tpl.VMID,
-		TemplateNode:  tpl.Node,
-		ImageSlug:     tpl.Slug,
-		TargetNode:    target,
-		Storage:       cloneStorage,
-		Bridge:        h.pveResolveBridge(ctx, proj, data),
-		GPUMappingIDs: gpuMappings,
-		SSHKeys:       sshKeys,
-		Password:      strAny(data["adminPass"]),
-		RootDiskGiB:   rootGiB,
+		TemplateVMID:   tpl.VMID,
+		TemplateNode:   tpl.Node,
+		ImageSlug:      tpl.Slug,
+		TargetNode:     target,
+		Storage:        cloneStorage,
+		Bridge:         bridge,
+		GPUMappingIDs:  gpuMappings,
+		SSHKeys:        sshKeys,
+		Password:       strAny(data["adminPass"]),
+		RootDiskGiB:    rootGiB,
+		SecurityGroups: groups,
 	})
 	if cerr != nil {
 		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Server create failed: "+cerr.Error()))
@@ -387,7 +414,18 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		if err != nil {
 			return err
 		}
-		return ps.DeleteServer(ctx, proj.ID, cr.ExternalID)
+		if err := ps.DeleteServer(ctx, proj.ID, cr.ExternalID); err != nil {
+			return err
+		}
+		// The VM and its public NIC are gone: its addresses go back to the pool. A
+		// failure only leaks the address (teardown frees it), so it never fails the
+		// delete of a VM that is already destroyed.
+		if h.publicIPs != nil {
+			if err := h.publicIPs.ReleaseServer(ctx, es.ID, cr.ExternalID); err != nil {
+				slog.Error("pve delete: release public IPs", "project", proj.ID, "server", cr.ExternalID, "err", err)
+			}
+		}
+		return nil
 	case cloud.TypeImage:
 		// A project template is a qemu template VM in the pool — same destroy path.
 		if h.pveFor == nil {
@@ -456,10 +494,14 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 			return true
 		}
 		if fl.GPUCount > 0 {
-			if err := h.enforcePVEGPUQuota(ctx, proj, es.ID, fl, cr); err != nil {
+			if err := h.enforcePVEGPUQuota(ctx, proj, es, fl, cr); err != nil {
 				h.fail(w, err)
 				return true
 			}
+		}
+		if err := h.enforcePVEQuota(ctx, proj, es, pveResizeDemand(cr, fl)); err != nil {
+			h.fail(w, err)
+			return true
 		}
 		if err := ps.ResizeServer(ctx, proj.ID, cr.ExternalID, pve.ServerSpec{
 			Slug: fl.Slug, VCPUs: fl.VCPUs, RAMMb: fl.RAMMb, DiskGb: fl.DiskGb,
@@ -543,18 +585,32 @@ func (h *Handler) pveFlavorOf(ctx context.Context, flavorID string) (*pveflavor.
 	return fl, nil
 }
 
-// enforcePVEGPUQuota gates GPU flavors against Project.Quota.gpu (the OpenStack
-// gate's twin; catalog flavors carry the GPU demand directly). replaced (resize)
-// frees its own devices first. Fail-open on missing quota — the OpenStack posture.
-func (h *Handler) enforcePVEGPUQuota(ctx context.Context, proj *Project, svcID string, fl *pveflavor.Flavor, replaced *cloud.CloudResource) *httpx.HTTPError {
+// pveResizeDemand is what a resize to fl adds: the vcpus/ram flavor delta, plus
+// the boot-disk growth (ResizeServer grows the boot disk to fl.DiskGb; the cached
+// flavor.disk is the live boot-disk size). Shrinks count as 0 — the gate skips them.
+func pveResizeDemand(cr *cloud.CloudResource, fl *pveflavor.Flavor) pveQuotaDemand {
+	var oldVCPUs, oldRAM, oldDisk int
+	if srv, ok := cr.Data["server"].(map[string]any); ok {
+		if flv, ok := srv["flavor"].(map[string]any); ok {
+			oldVCPUs, oldRAM, oldDisk = intAny(flv["vcpus"]), intAny(flv["ram"]), intAny(flv["disk"])
+		}
+	}
+	return pveQuotaDemand{VCPUs: fl.VCPUs - oldVCPUs, RAMMb: fl.RAMMb - oldRAM, DiskGb: fl.DiskGb - oldDisk}
+}
+
+// enforcePVEGPUQuota gates GPU flavors against the project's quota.gpu (pveQuotaLimits:
+// project quota, else the provider default; catalog flavors carry the GPU demand
+// directly). replaced (resize) frees its own devices first. No limit for the model =
+// unlimited; a usage read error fails closed.
+func (h *Handler) enforcePVEGPUQuota(ctx context.Context, proj *Project, es *externalservice.ExternalService, fl *pveflavor.Flavor, replaced *cloud.CloudResource) *httpx.HTTPError {
 	model := cloud.NormalizeGPUAlias(fl.GPUModel)
-	limit, limited := gpuLimitFor(proj.Quota, model)
+	limit, limited := gpuLimitFor(pveQuotaLimits(proj, es), model)
 	if !limited {
 		return nil
 	}
 	usage, err := h.cloud.GPUUsageByProject(ctx, proj.ID)
 	if err != nil {
-		return nil // fail-open (cloud hiccup never blocks)
+		return errQuotaUsageUnavailable()
 	}
 	used := usage[model]
 	if replaced != nil {
@@ -705,7 +761,7 @@ func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *use
 	if cr, err := h.cloud.FindByID(ctx, serverRef); err == nil && cr != nil && cr.Type == cloud.TypeServer && cr.ProjectID == proj.ID {
 		serverExt = cr.ExternalID
 	}
-	if err := h.enforcePVEQuota(ctx, proj, es.ID, pveQuotaDemand{DiskGb: sizeGiB}); err != nil {
+	if err := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{DiskGb: sizeGiB}); err != nil {
 		h.fail(w, err)
 		return
 	}
@@ -794,7 +850,7 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 			h.fail(w, httpx.BadRequest("New size must be larger (Proxmox cannot shrink a disk)"))
 			return true
 		}
-		if e := h.enforcePVEQuota(ctx, proj, es.ID, pveQuotaDemand{DiskGb: size - intAny(vol["size"])}); e != nil {
+		if e := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{DiskGb: size - intAny(vol["size"])}); e != nil {
 			h.fail(w, e)
 			return true
 		}

@@ -9,6 +9,7 @@ package pve
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -83,6 +84,23 @@ func (s *Service) DeleteSecurityGroup(ctx context.Context, projectID, groupID st
 	return s.C.DeleteFirewallGroup(ctx, groupID)
 }
 
+// DeleteProjectSecurityGroups removes every group the project owns (teardown,
+// once its VMs are gone).
+func (s *Service) DeleteProjectSecurityGroups(ctx context.Context, projectID string) error {
+	groups, err := s.C.ListFirewallGroups(ctx)
+	if err != nil {
+		return err
+	}
+	for _, g := range groups {
+		if pid, _, ok := aliasProject(g.Comment); ok && pid == projectID {
+			if err := s.DeleteSecurityGroup(ctx, projectID, g.Group); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // SGAddRule appends a rule to an owned group.
 func (s *Service) SGAddRule(ctx context.Context, projectID, groupID string, r FirewallRule) error {
 	g, err := s.ownedGroup(ctx, projectID, groupID)
@@ -124,12 +142,10 @@ func (s *Service) AttachSecurityGroup(ctx context.Context, projectID, serverExtI
 	if vm == nil {
 		return fmt.Errorf("pve: server %s not found", serverExtID)
 	}
-	base := qemuPath(vm.Node, vm.VMID) + "/firewall"
-	form := formVals{"type": "group", "action": groupID, "enable": "1"}.values()
-	if err := s.C.post(ctx, base+"/rules", form, nil); err != nil {
+	if err := s.C.AddVMGroupRule(ctx, vm.Node, vm.VMID, groupID); err != nil {
 		return err
 	}
-	if err := s.C.put(ctx, base+"/options", formVals{"enable": "1"}.values(), nil); err != nil {
+	if err := s.C.SetVMFirewallOptions(ctx, vm.Node, vm.VMID, map[string]string{"enable": "1"}); err != nil {
 		return err
 	}
 	// NICs must carry firewall=1 or the group filters nothing (honesty over silence).
@@ -137,19 +153,7 @@ func (s *Service) AttachSecurityGroup(ctx context.Context, projectID, serverExtI
 	if err != nil {
 		return err
 	}
-	params := map[string]string{}
-	for key := range cfg {
-		if strings.HasPrefix(key, "net") {
-			if _, err := strconv.Atoi(key[3:]); err != nil {
-				continue
-			}
-			val := cfg.Str(key)
-			if val != "" && !strings.Contains(val, "firewall=1") {
-				params[key] = val + ",firewall=1"
-			}
-		}
-	}
-	if len(params) > 0 {
+	if params := nicFirewallParams(cfg); len(params) > 0 {
 		up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, params)
 		if err != nil {
 			return err
@@ -157,6 +161,258 @@ func (s *Service) AttachSecurityGroup(ctx context.Context, projectID, serverExtI
 		return s.C.WaitTask(ctx, up)
 	}
 	return nil
+}
+
+// nicKeys returns the VM's netN config keys.
+func nicKeys(cfg VMConfig) []string {
+	var out []string
+	for key := range cfg {
+		if strings.HasPrefix(key, "net") {
+			if _, err := strconv.Atoi(key[3:]); err == nil {
+				out = append(out, key)
+			}
+		}
+	}
+	return out
+}
+
+// nicWithFirewall sets firewall=1 on a netN value, replacing any firewall=0 (an
+// appended duplicate key is rejected by PVE).
+func nicWithFirewall(val string) string {
+	var out []string
+	for _, p := range strings.Split(val, ",") {
+		if !strings.HasPrefix(p, "firewall=") {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(append(out, "firewall=1"), ",")
+}
+
+// nicFirewallParams is the config update that puts firewall=1 on every NIC
+// lacking it (empty = nothing to change).
+func nicFirewallParams(cfg VMConfig) map[string]string {
+	params := map[string]string{}
+	for _, key := range nicKeys(cfg) {
+		val := cfg.Str(key)
+		if val != "" && !strings.Contains(","+val+",", ",firewall=1,") {
+			params[key] = nicWithFirewall(val)
+		}
+	}
+	return params
+}
+
+// extraNICKeys lists a fresh clone's NICs beyond net0, with their ipconfigN, for
+// deletion: create only plugs net0 (a public NIC comes later, through the IPAM).
+// A clone inherits the source's NICs AND its firewall ipsets, so a project
+// template made from a VM with a public NIC would hand every new server that
+// VM's bridge plus an ipfilter allowing its public address — still usable after
+// the address is released and reallocated to another tenant.
+// TODO(verify-lab): qm clone copies the source VM's firewall config (ipsets).
+func extraNICKeys(cfg VMConfig) []string {
+	var out []string
+	for _, key := range nicKeys(cfg) {
+		if key == "net0" {
+			continue
+		}
+		out = append(out, key)
+		if ip := "ipconfig" + key[3:]; cfg.Str(ip) != "" {
+			out = append(out, ip)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// nicBridge extracts bridge=<id> from a netN value.
+func nicBridge(val string) string {
+	for _, p := range strings.Split(val, ",") {
+		if b, ok := strings.CutPrefix(p, "bridge="); ok {
+			return b
+		}
+	}
+	return ""
+}
+
+// vmFirewallOptions is what every platform VM runs with: anti-spoof (ipfilter +
+// macfilter); ingress closed except what a security group opens (neutron
+// default-deny); egress open, as neutron's default group allows all egress — so
+// group "out" rules stay informational; DHCP allowed so the SDN dnsmasq lease
+// survives the DROP policy and ipfilter (DISCOVER leaves from 0.0.0.0).
+// TODO(verify-lab): confirm dhcp=1 lets DISCOVER/OFFER through ipfilter on the
+// nftables proxmox-firewall.
+var vmFirewallOptions = map[string]string{
+	"enable": "1", "ipfilter": "1", "macfilter": "1", "dhcp": "1",
+	"policy_in": "DROP", "policy_out": "ACCEPT",
+}
+
+// SecureVM switches the VM firewall on with anti-spoofing. Every NIC on an SDN
+// vnet gets ipfilter-netN = that vnet's subnets. A NIC anywhere else (a template
+// or public bridge) gets no set, and PVE treats ipfilter=1 as an EMPTY set per
+// NIC, so its IPv4 egress is dropped: fail-closed until the public-IP IPAM
+// (P2-4) feeds SetIPFilter the allocated address.
+// ponytail: the set is the vnet subnet, not the exact DHCP lease (PVE's IPAM
+// assigns it, not us), so a VM can still spoof a sibling inside its own project
+// subnet; pin per-VM leases via POST /cluster/sdn/vnets/{vnet}/ips if that matters.
+// TODO(verify-lab): ipfilter=1 with no ipfilter-netN set really drops that NIC.
+func (s *Service) SecureVM(ctx context.Context, node string, vmid int) error {
+	cfg, err := s.C.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		return err
+	}
+	vnets, err := s.C.ListSDNVnets(ctx)
+	if err != nil {
+		return err
+	}
+	isVnet := map[string]bool{}
+	for _, v := range vnets {
+		isVnet[v.Vnet] = true
+	}
+	for _, key := range nicKeys(cfg) {
+		br := nicBridge(cfg.Str(key))
+		if !isVnet[br] {
+			continue
+		}
+		subs, err := s.C.ListSDNSubnets(ctx, br)
+		if err != nil {
+			return err
+		}
+		var cidrs []string
+		for _, sub := range subs {
+			if sub.CIDR != "" {
+				cidrs = append(cidrs, sub.CIDR)
+			}
+		}
+		if err := s.SetIPFilter(ctx, node, vmid, key, cidrs); err != nil {
+			return err
+		}
+	}
+	return s.C.SetVMFirewallOptions(ctx, node, vmid, vmFirewallOptions)
+}
+
+// SetIPFilter makes the VM's ipfilter-<nic> set hold exactly cidrs (no-op when
+// it already does). A changed set is dropped and rebuilt: for that instant the
+// NIC is fail-closed, never open.
+func (s *Service) SetIPFilter(ctx context.Context, node string, vmid int, nic string, cidrs []string) error {
+	name := "ipfilter-" + nic
+	sets, err := s.C.ListVMIPSets(ctx, node, vmid)
+	if err != nil {
+		return err
+	}
+	for _, set := range sets {
+		if set.Name != name {
+			continue
+		}
+		entries, err := s.C.ListVMIPSetEntries(ctx, node, vmid, name)
+		if err != nil {
+			return err
+		}
+		have := make([]string, 0, len(entries))
+		for _, e := range entries {
+			have = append(have, e.CIDR)
+		}
+		want := slices.Clone(cidrs)
+		slices.Sort(have)
+		slices.Sort(want)
+		if slices.Equal(have, want) {
+			return nil
+		}
+		if err := s.C.DeleteVMIPSet(ctx, node, vmid, name); err != nil {
+			return err
+		}
+		break
+	}
+	if err := s.C.CreateVMIPSet(ctx, node, vmid, name, "proxcloud anti-spoof"); err != nil {
+		return err
+	}
+	for _, c := range cidrs {
+		if err := s.C.AddVMIPSetEntry(ctx, node, vmid, name, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DefaultSecurityGroupName is the per-project group attached when a server is
+// created without an explicit choice (neutron's "default").
+const DefaultSecurityGroupName = "default"
+
+// SecurityGroupNotFoundError marks a create-time group ref the project doesn't own.
+type SecurityGroupNotFoundError struct{ Ref string }
+
+func (e *SecurityGroupNotFoundError) Error() string { return "security group not found: " + e.Ref }
+
+// defaultGroupRules approximates neutron's default group (ingress only from the
+// same group, all egress): ingress from the provider CIDR pool. The vnet
+// isolation rules already drop every other tenant's pool traffic, so what is
+// left is the project's own networks. No SSH/ICMP from outside — as neutron.
+// ponytail: a pool-sourced packet spoofed onto a PUBLIC bridge also matches;
+// its replies route via the vnet so TCP cannot complete. Upgrade: a per-project
+// cluster IPSet of the project's subnets as the source.
+func defaultGroupRules(cidrPool string) []FirewallRule {
+	if cidrPool == "" {
+		return nil // no pool → ingress stays fully closed
+	}
+	return []FirewallRule{{Type: "in", Action: "ACCEPT", Source: cidrPool, Comment: "intra-project (other tenants dropped by vnet isolation)"}}
+}
+
+// EnsureDefaultSecurityGroup returns the project's default group, creating it
+// with defaultGroupRules when missing. An existing group is left untouched (the
+// user may have edited it).
+func (s *Service) EnsureDefaultSecurityGroup(ctx context.Context, projectID, cidrPool string) (string, error) {
+	groups, err := s.C.ListFirewallGroups(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, g := range groups {
+		if pid, name, ok := aliasProject(g.Comment); ok && pid == projectID && name == DefaultSecurityGroupName {
+			return g.Group, nil
+		}
+	}
+	id, err := s.CreateSecurityGroup(ctx, projectID, DefaultSecurityGroupName)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range defaultGroupRules(cidrPool) {
+		if err := s.C.AddFirewallRule(ctx, id, r); err != nil {
+			_ = s.DeleteSecurityGroup(ctx, projectID, id) // never leave a half-built default behind
+			return "", err
+		}
+	}
+	return id, nil
+}
+
+// ServerSecurityGroups resolves a server create's group refs (ids or display
+// names) to owned group ids; no refs → the project's default group.
+func (s *Service) ServerSecurityGroups(ctx context.Context, projectID string, refs []string, cidrPool string) ([]string, error) {
+	if len(refs) == 0 {
+		id, err := s.EnsureDefaultSecurityGroup(ctx, projectID, cidrPool)
+		if err != nil {
+			return nil, err
+		}
+		return []string{id}, nil
+	}
+	groups, err := s.C.ListFirewallGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, ref := range refs {
+		found := ""
+		for _, g := range groups {
+			pid, name, ok := aliasProject(g.Comment)
+			if ok && pid == projectID && (g.Group == ref || name == ref) {
+				found = g.Group
+				break
+			}
+		}
+		if found == "" {
+			return nil, &SecurityGroupNotFoundError{Ref: ref}
+		}
+		if !slices.Contains(out, found) {
+			out = append(out, found)
+		}
+	}
+	return out, nil
 }
 
 // DetachSecurityGroup removes the VM firewall rule referencing the group.

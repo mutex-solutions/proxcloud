@@ -23,7 +23,7 @@ type projectQuotaUsage struct {
 	ServiceID string         `json:"serviceId"`
 	Region    string         `json:"region"`
 	GPU       gpuQuotaUsage  `json:"gpu"`
-	Limits    map[string]any `json:"limits,omitempty"` // platform quota keys (vcpus/ramMb/servers/networks/diskGb)
+	Limits    map[string]any `json:"limits,omitempty"` // platform quota keys (vcpus/ramMb/servers/networks/diskGb/floatingIps)
 	Warnings  []string       `json:"warnings"`
 }
 
@@ -35,17 +35,25 @@ func (h *Handler) quotaUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	svcID := h.resolveServiceID(r, proj)
+	// The limits the gate enforces: a Proxmox project without its own quota falls
+	// back to the provider default (pveQuotaLimits).
+	limits := proj.Quota
+	if len(limits) == 0 && svcID != "" && h.esSvc != nil {
+		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es.IsProxmox() {
+			limits = pveQuotaLimits(proj, es)
+		}
+	}
 	out := projectQuotaUsage{
 		ServiceID: svcID,
 		Region:    proj.ServiceRegion(svcID),
 		GPU: gpuQuotaUsage{
-			Limits: gpuQuotaLimits(proj.Quota),
+			Limits: gpuQuotaLimits(limits),
 			Usage:  map[string]int{},
 		},
 		Warnings: []string{},
 	}
-	if len(proj.Quota) > 0 {
-		out.Limits = proj.Quota
+	if len(limits) > 0 {
+		out.Limits = limits
 	}
 	if usage, err := h.cloud.GPUUsageByProject(r.Context(), proj.ID); err == nil {
 		out.GPU.Usage = usage

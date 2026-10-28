@@ -338,7 +338,8 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 			continue
 		}
 		if es.IsProxmox() {
-			// proxmox: destroy every VM still in the project pool, then the pool. The cache rows
+			// proxmox: destroy every VM still in the project pool, then the pool, then the
+			// project's vnets / EVPN zone / security groups. The cache rows
 			// of this service are archived here (their VMs are verifiably gone); a failure keeps
 			// them so a re-run retries.
 			if h.pveFor == nil {
@@ -359,6 +360,18 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 				slog.Error("teardown: pve pool", "project", p.ID, "pool", pool, "err", terr)
 				pveTeardownFailed = true
 				continue
+			}
+			if nerr := h.pveTeardownNetworks(ctx, ps, p.ID); nerr != nil {
+				slog.Error("teardown: pve networks", "project", p.ID, "serviceId", svcID, "err", nerr)
+				pveTeardownFailed = true
+				continue
+			}
+			if h.publicIPs != nil {
+				if rerr := h.publicIPs.ReleaseProject(ctx, svcID, p.ID); rerr != nil {
+					slog.Error("teardown: release public IPs", "project", p.ID, "serviceId", svcID, "err", rerr)
+					pveTeardownFailed = true
+					continue
+				}
 			}
 			now := time.Now().UTC()
 			var stillLeft []cloud.CloudResource

@@ -238,13 +238,15 @@ func (h *Handler) addMember(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	member, err := h.users.FindByEmail(r.Context(), req.Email)
+	// Only an IdP-verified email may resolve to a person: anyone can sign up with
+	// an address they do not own.
+	member, err := h.users.FindVerifiedByEmail(r.Context(), req.Email)
 	if err != nil {
 		h.fail(w, err)
 		return
 	}
 	if member == nil {
-		h.fail(w, httpx.BadRequest("User with email "+req.Email+" not found"))
+		h.fail(w, httpx.BadRequest("User with email "+req.Email+" not found or the email is not verified"))
 		return
 	}
 	if _, err := h.repo.AddMember(r.Context(), id, member.Sub, req.Role); err != nil {
