@@ -123,7 +123,7 @@ cron specs from `scheduler.go`. All specs are 6-field seconds-first, UTC.
 | `minutelyCharge` | `30 * * * * *` | every minute at :30 | 5m / 30s | Charge each ACTIVE billing profile for the `minute` time unit |
 | `hourlyCharge` | `0 0 * * * *` | top of every hour | 5m / 30s | Charge each ACTIVE profile for the `hour` time unit |
 | `monthlyCharge` | `0 0 * * * *` | top of every hour | 5m / 30s | Charge each ACTIVE profile for the `month` time unit (shares the hourly spec; the charge filters rules by exact time unit) |
-| `gnocchiMetricsFetch` (legacy name) | `0 0 * * * *` | top of every hour | 10m / 30s | Ingest per-VM network-traffic usage into `gnocchiMetrics` (legacy table name) from `config.metrics.source`: `prometheus` for a Prometheus-compatible endpoint, or `none` (the Proxmox default), which skips the provider |
+| `usageMetricsFetch` | `0 0 * * * *` | top of every hour | 10m / 30s | Ingest per-VM network-traffic usage into `usageMetrics` from `config.metrics.source`: `prometheus` for a Prometheus-compatible endpoint, or `none` (the Proxmox default), which skips the provider |
 | `savingsContractExpiration` | `0 0 0 * * *` | daily 00:00 | 10m / 30s | Expire savings contracts past their end date |
 | `savingsContractExpiryReminders` | `0 0 0 * * *` | daily 00:00 | 10m / 30s | Schedule reminder docs for ACTIVE contracts nearing expiry |
 | `reminderNotifications` | `0 0 * * * *` | top of every hour | 10m / 30s | Dispatch the due scheduled reminders (re-evaluates days-until-expiry each run) |
@@ -158,7 +158,7 @@ timeUnit, now)`:
 
 Errors per profile are logged and skipped so one bad profile can't stall the
 rest. Crucially, the charge reads **only** the PostgreSQL cache
-(`cloudResource` + `gnocchiMetrics` (legacy table name) + price plans), never live cloud — the sync
+(`cloudResource` + `usageMetrics` + price plans), never live cloud — the sync
 and metrics jobs are what keep that cache truthful (see
 `cloud-integration.md`).
 
@@ -318,7 +318,7 @@ only live SSE delivery is pod-local.
 - `internal/platform/chargefanout/chargefanout.go` — RabbitMQ charge fan-out (Publish / StartConsumer)
 - `internal/platform/billingjob/billingjob.go` — the charge/rating driver (`Charge`, `ChargeProfileByID`, `ActiveProfileIDs`)
 - `internal/cloud/syncjob/job.go` — the `servicesSync` job
-- `internal/cloud/metricsjob/job.go` — the `gnocchiMetricsFetch` job
+- `internal/cloud/metricsjob/job.go` — the `usageMetricsFetch` job
 - `internal/platform/job/*` — the `/api/v1/admin/job/*` operator API
 - `internal/config/config.go` — the `PROXCLOUD_JOBS_*` env gates
 - `cmd/api/main.go` — `registerJobs`, `chargeDispatch`, `startChargeConsumer`, the mgmt debug triggers, and the enable/start gating

@@ -1,11 +1,10 @@
 package project
 
 // cloud_dbaas.go — the client write surface for Managed Databases. A dbaas provider has no
-// Keystone tenant, so DATABASE_CLUSTER writes bypass the OpenStack WriteService entirely
+// compute tenant of its own, so DATABASE_CLUSTER writes bypass the generic WriteService entirely
 // (kamaji precedent) and go through dbaas.Service: Application CR on the DB cluster in, status
-// via the sync. The databases run on OPS-owned nodes; the only customer-tenant artifact is the
-// Octavia LB VIP, which needs the tenant network shared with the dbaas keystone project
-// (cloud_dbaas_openstack.go) before the chart's LoadBalancer Service can materialize.
+// via the sync. The databases run on OPS-owned nodes; the only tenant-facing artifact is the LB
+// ingress IP (cloud_dbaas_create.go).
 
 import (
 	"context"
@@ -59,48 +58,12 @@ func (h *Handler) dbaasCreate(w http.ResponseWriter, r *http.Request, u *user.Us
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
 	}
-	// Network placement: the ids are customer input — PROVE they belong to the project's own
-	// tenant before sharing the network with the ops-owned dbaas project. The binding is pinned
-	// to the provider's cfg.OSServiceID: the RBAC share is only meaningful on the SAME cloud as
-	// the dbaas keystone project (neutron never validates target_tenant, so sharing on the
-	// wrong cloud "succeeds" and the LB silently never materializes).
-	osSvcID, err := h.dbaasResolveTenantNetwork(r.Context(), proj, cfg, spec)
-	if err != nil {
-		h.fail(w, httpx.BadRequest(err.Error()))
+	if err := h.dbaasProvisionDatabase(r.Context(), proj, cfg, spec); err != nil {
+		h.fail(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, err.Error()))
 		return
 	}
-	share := dbaas.NetShare{
-		NetworkID:   spec.NetworkID,
-		SubnetID:    spec.SubnetID,
-		OSServiceID: osSvcID,
-		OSProjectID: cfg.OSProjectID,
-		OSRegion:    proj.ServiceRegion(osSvcID),
-	}
-	// The neutron RBAC share is created INSIDE CreateDatabase, after the marker secret exists —
-	// marker-first ordering means a crash mid-create always leaves a record the sweep can
-	// converge on. Idempotent; a pre-existing share belongs to a sibling database.
-	createdShare := false
-	data, err := ds.CreateDatabase(r.Context(), spec, share, func(ctx context.Context) error {
-		var serr error
-		createdShare, serr = h.dbaasEnsureNetShare(ctx, proj, cfg, spec.NetworkID)
-		if serr != nil {
-			return httpx.BadRequest(serr.Error())
-		}
-		return nil
-	})
+	data, err := ds.CreateDatabase(r.Context(), spec)
 	if err != nil {
-		// Unwind the share this create made — but only when no sibling database (live
-		// Application or mid-create marker) still rides the network: revoking under a
-		// concurrent sibling would strand ITS Octavia VIP forever, and the sweep handles our
-		// leftover marker either way. Must survive the client hanging up, hence WithoutCancel.
-		if createdShare {
-			rctx := context.WithoutCancel(r.Context())
-			if ds.NetworkSafeToRevoke(rctx, proj.ID, spec.NetworkID, spec.ID) {
-				if rerr := h.dbaasRevokeNetShare(rctx, proj, osSvcID, cfg.OSProjectID, share.OSRegion, spec.NetworkID); rerr != nil {
-					slog.Error("dbaas: revoke network share after failed create", "database", spec.ID, "network", spec.NetworkID, "err", rerr)
-				}
-			}
-		}
 		h.fail(w, err)
 		return
 	}
@@ -123,10 +86,8 @@ func (h *Handler) dbaasCreate(w http.ResponseWriter, r *http.Request, u *user.Us
 }
 
 // dbaasDelete handles the DATABASE_CLUSTER leg of cloudDelete: Application delete (ArgoCD's
-// resources-finalizer cascades the chart; the LB Service delete makes the OCCM tear down the
-// Octavia LB on the tenant subnet) + cache archive. The neutron share is NOT revoked here — the
-// LB port still exists; the orphan sweep revokes it off the marker secret once the cascade is
-// done.
+// resources-finalizer cascades the chart, LB Service included) + cache archive. The orphan
+// sweep reaps the marker and auth secrets once the cascade is done.
 func (h *Handler) dbaasDelete(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) error {
 	if h.dbaasFor == nil {
 		return fmt.Errorf("managed databases are not configured")
@@ -150,10 +111,10 @@ func (h *Handler) dbaasDelete(ctx context.Context, es *externalservice.ExternalS
 //   - RESIZE_STORAGE {storageGiB} → grow-only PVC expansion (validated vs LIVE values)
 //   - SCALE_REPLICAS {replicas}   → engine-semantic instance count, catalog-gated
 //   - UPGRADE {version}        → engine version bump (catalog-gated, upward-only vs LIVE
-//     values); the operator rolls the pods, the LB VIP never changes
+//     values); the operator rolls the pods, the LB ingress IP never changes
 //   - RESTART {}               → stamps values.restartedAt; the chart maps it per engine
 //   - RESET_PASSWORD {}        → server-generated, applied to the engine secret, returned once
-//   - SET_ALLOWED_CIDRS {allowedCidrs} → LB source ranges (Octavia ACLs)
+//   - SET_ALLOWED_CIDRS {allowedCidrs} → LB source ranges (loadBalancerSourceRanges)
 func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if !es.IsDbaas() || cr.Type != cloud.TypeDatabaseCluster {
 		return false
@@ -293,7 +254,7 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 			// Upward-only, validated against the LIVE values, not the cache — a stale sync must
 			// not let a downgrade through (the kamaji UPGRADE rule). The chart resolves the new
 			// engine image from its version map and the operator performs its own rolling
-			// upgrade; the LB endpoint (Octavia VIP) never changes.
+			// upgrade; the LB endpoint never changes.
 			current, _ := values["engineVersion"].(string)
 			if err := dbaas.ValidateUpgradePath(current, version); err != nil {
 				return httpx.BadRequest(err.Error())
@@ -485,7 +446,7 @@ var errDbaasReadOnly = fmt.Errorf("dbaas: read-only")
 // dbaasSpecFromData maps the client create body → DatabaseSpec. Body shape:
 //
 //	{name, engine, version, replicas, cpu, memoryGiB, storageGiB, storageClass?,
-//	 networkId, subnetId, allowedCidrs:[...], beta?}
+//	 allowedCidrs:[...], beta?}
 //
 // Strict on what it reads (numbers must be numbers — intAny's zero would otherwise turn a typo
 // into "replicas 0" and a confusing catalog error); unknown keys are ignored like every other
@@ -498,8 +459,6 @@ func dbaasSpecFromData(projectID string, d map[string]any) (dbaas.DatabaseSpec, 
 		Engine:       strAny(d["engine"]),
 		Version:      strAny(d["version"]),
 		StorageClass: strAny(d["storageClass"]),
-		NetworkID:    strAny(d["networkId"]),
-		SubnetID:     strAny(d["subnetId"]),
 	}
 	if spec.DisplayName == "" {
 		return spec, fmt.Errorf("name is required")

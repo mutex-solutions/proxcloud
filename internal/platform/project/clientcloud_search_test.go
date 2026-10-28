@@ -21,8 +21,8 @@ func TestSearchValuesForResource(t *testing.T) {
 		{
 			name: "PORT emits device_id/device_owner/mac_address",
 			cr: &cloud.CloudResource{Type: cloud.TypePort, Data: map[string]any{"port": map[string]any{
-				"name": "p1", "device_id": "dev-9", "device_owner": "compute:nova", "mac_address": "fa:16:3e:aa:bb:cc"}}},
-			want: map[string]any{"name": "p1", "device_id": "dev-9", "device_owner": "compute:nova", "mac_address": "fa:16:3e:aa:bb:cc"},
+				"name": "p1", "device_id": "dev-9", "device_owner": "compute:pve", "mac_address": "fa:16:3e:aa:bb:cc"}}},
+			want: map[string]any{"name": "p1", "device_id": "dev-9", "device_owner": "compute:pve", "mac_address": "fa:16:3e:aa:bb:cc"},
 		},
 		{
 			name: "SECURITY_GROUP emits description",

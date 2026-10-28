@@ -1,22 +1,9 @@
-// Object storage: Swift and Ceph S3 run SIDE BY SIDE as two independent products over two disjoint
-// bucket sets. Nothing is ever migrated between them, so the UI must always say which store a bucket
-// lives on, and the create form must make the user pick one.
+// Object storage: Ceph S3 (RGW) buckets. A project may be attached to more than one S3 service/region,
+// so the create form lets the user pick which one a bucket lives on.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { apiFetch } from "./api"
 import { useLocations } from "./hooks"
-import type { CloudResource, Location } from "./types"
-
-export type StorageBackend = "SWIFT" | "CEPH_S3"
-
-export const BACKEND_LABEL: Record<StorageBackend, string> = {
-  SWIFT: "Swift",
-  CEPH_S3: "S3 (Ceph)",
-}
-
-/** Which object store a bucket lives on. Cached rows written before this field existed read as Swift. */
-export function bucketBackend(r: CloudResource): StorageBackend {
-  return (r.data?.storageBackend as StorageBackend) ?? "SWIFT"
-}
+import type { Location } from "./types"
 
 export function isS3Location(loc: Location | undefined): boolean {
   return loc?.provider === "ceph-s3"

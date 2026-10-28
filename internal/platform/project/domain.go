@@ -45,20 +45,20 @@ type Project struct {
 	CustomInfo       map[string]any `json:"customInfo,omitempty"`
 	Services         []any          `json:"services"`
 	// PublicNetworkIds is the admin-managed external-network allow-list: nil/absent = ALL
-	// router:external networks allowed (the default); non-nil = only these Neutron network ids
+	// public networks allowed (the default); non-nil = only these public network ids
 	// (empty = none).
 	PublicNetworkIds []string `json:"publicNetworkIds,omitempty"`
 	// PublicNetworksVisible controls whether the client may CHOOSE the external network for a
-	// floating IP / router gateway. false (the default, incl. absent) = the client sees no picker
+	// public NIC. false (the default, incl. absent) = the client sees no picker
 	// and the server auto-selects an allowed external network on the user's behalf; true = the
 	// client picks explicitly.
 	PublicNetworksVisible bool `json:"publicNetworksVisible"`
 	// GpuCapacityVisible controls whether the client dashboard shows the region's cluster GPU
-	// capacity (available/total per model, from Placement). false (the default, incl. absent) =
+	// capacity (available/total per model, from the provider gpu-info read). false (the default, incl. absent) =
 	// hidden; the client still sees its own GPU quota/usage regardless.
 	GpuCapacityVisible bool `json:"gpuCapacityVisible"`
 	// Quota is the admin-managed per-project quota config (stored JSON; enforced at the
-	// ProxCloud cloud gate, never pushed to OpenStack). Shape: {"gpu": {"<model>": n, "*": n}}.
+	// ProxCloud cloud gate, never pushed to the provider). Shape: {"gpu": {"<model>": n, "*": n}}.
 	Quota                  map[string]any `json:"quota,omitempty"`
 	ScheduledForDeletionAt *time.Time     `json:"scheduledForDeletionAt,omitempty"`
 	CreatedAt              *time.Time     `json:"createdAt,omitempty"`
@@ -162,23 +162,12 @@ func svcField(svc any, key string) string {
 	return ""
 }
 
-// ExternalProjectID returns the provisioned OpenStack tenant id (externalProjectId) for the given
-// external service, or "" when the project is not (yet) bootstrapped on it. Bulk-imported
-// projects carry the tenant under config.openstackProjectId instead (the import shape) —
-// read that as the fallback so sync/tenant-scoping work for both shapes.
-func (p *Project) ExternalProjectID(serviceID string) string {
+// ServiceProvider returns the provider kind stamped on the binding for the given service
+// ("proxmox", "ceph-s3", "kamaji", "dbaas"), or "" when the project is not bound to it.
+func (p *Project) ServiceProvider(serviceID string) string {
 	for _, svc := range p.Services {
 		if svcField(svc, "serviceId") == serviceID {
-			if id := svcField(svc, "externalProjectId"); id != "" {
-				return id
-			}
-			if t, ok := svc.(map[string]any); ok {
-				if cfg, ok := t["config"].(map[string]any); ok {
-					s, _ := cfg["openstackProjectId"].(string)
-					return s
-				}
-			}
-			return ""
+			return svcField(svc, "provider")
 		}
 	}
 	return ""

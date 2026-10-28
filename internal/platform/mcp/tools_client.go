@@ -173,13 +173,13 @@ var clientTools = []toolDef{
 	},
 	{
 		name:   "create_volume",
-		desc:   "Create a block-storage volume in the project. type must be the string VOLUME; data carries the volume spec.",
+		desc:   "Add a data disk (volume) to a server in the project — Proxmox disks belong to a VM. type must be the string VOLUME; data carries the volume spec.",
 		method: "POST",
 		path:   "/api/v1/project/{id}/cloud",
 		params: []param{
 			{name: "id", typ: "string", desc: "Project id.", required: true, in: "path"},
 			{name: "type", typ: "string", desc: "Always pass \"VOLUME\".", required: true, in: "body"},
-			{name: "data", typ: "object", desc: "Volume spec: {\"name\": string, \"size\": integer (GB), optional \"type\" (volume type), \"availabilityZone\", \"imageId\"}.", required: true, in: "body"},
+			{name: "data", typ: "object", desc: "Volume spec: {\"serverId\": string (required — server resource id or vmid), \"sizeGiB\": integer, optional \"type\" (storage-profile slug)}.", required: true, in: "body"},
 		},
 	},
 	{

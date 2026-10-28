@@ -1,4 +1,4 @@
-# Custom ArgoCD health checks for the CRDs the openstack-kamaji-cluster chart renders
+# Custom ArgoCD health checks for the CRDs the kamaji cluster chart renders
 # (design plan D3/§3.0: ArgoCD has NO built-in health for TenantControlPlane /
 # Cluster / MachineDeployment — without these, every customer-cluster Application reports
 # Healthy the moment manifests apply, long before the control plane or workers exist, and the

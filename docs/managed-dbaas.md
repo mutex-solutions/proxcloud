@@ -13,11 +13,12 @@ Service.
 > **Read, sync, connection info, actions on existing databases and delete work. Creating a
 > database on a Proxmox provider is planned.** Today a create returns "Managed Databases on
 > Proxmox are not available yet": the network legs in
-> `internal/platform/project/cloud_dbaas_openstack.go` are stubs. The planned design exposes
+> `internal/platform/project/cloud_dbaas_create.go` are stubs. The planned design exposes
 > databases on a routed services subnet through MetalLB, with isolation by
 > `loadBalancerSourceRanges`; see
 > [C3e](architecture/c4/c3-components.md#c3e-managed-services-and-object-storage). The chart's
-> LB Service template still carries the previous backend's load-balancer annotations.
+> LB Service template carries no provider-specific annotations; extra ones come from
+> `network.extraAnnotations`.
 
 ```mermaid
 flowchart LR
@@ -79,9 +80,6 @@ Admin UI → System → Cloud providers → Add provider → **Database (DBaaS)*
 - `config.services.database.<region> = true` — un-hides the client Databases surface and
   enables the sync.
 
-`config.database.osServiceId`, `osProjectId` and `memberSubnetId` belong to the previous
-backend's network-sharing model and are not used on Proxmox.
-
 Seed example: `deploy/seed/external-service-dev.json` (`svc-dbaas-dev`).
 
 ## Lifecycle
@@ -105,8 +103,7 @@ sequenceDiagram
 ```
 
 - **Create** — client `POST /project/{id}/cloud` `{type: DATABASE_CLUSTER, data: {name,
-  engine, version, replicas, cpu, memoryGiB, storageGiB, networkId, subnetId, allowedCidrs,
-  beta?}}`. On a Proxmox provider it currently fails before anything is written (see the status
+  engine, version, replicas, cpu, memoryGiB, storageGiB, allowedCidrs, beta?}}`. On a Proxmox provider it currently fails before anything is written (see the status
   box).
 - **Sync** — `syncjob.syncDbaasService` (every 15 minutes, gated on the `database` toggle)
   reconciles the project's `DATABASE_CLUSTER` rows from Applications labeled with the project

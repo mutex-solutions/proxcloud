@@ -1,4 +1,4 @@
-// Server detail — Overview / Console log / Metadata (editable) plus Network / Security / Volumes /
+// Server detail — Overview / Console log plus Network / Security / Volumes /
 // Events / Snapshots tabs. Action names + data keys verified against
 // internal/platform/project/cloud_writes.go (cloudAction + clusterAction) and
 // internal/cloud/providers/write.go (WriteService.Action TypeServer/TypeVolume):
@@ -6,8 +6,7 @@
 //   SET_PASSWORD{password} · RESCUE (result = generated password) / UNRESCUE ·
 //   REMOTECONTROL (result = remote_console map with .url) ·
 //   ADD/REMOVE_SECURITY_GROUP{name} · ATTACH_PORT/DETACH_PORT{portId} ·
-//   volume ATTACH/DETACH act on the VOLUME resource with data{serverId: <server externalId>} ·
-//   metadata = PUT /project/{pid}/cloud/{id}/metadata with the FULL map[string]string.
+//   volume ATTACH/DETACH act on the VOLUME resource with data{serverId: <server externalId>}.
 import { useEffect, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -49,7 +48,7 @@ type Flavor = {
   externalId?: string
   data?: { id?: string; name?: string; vcpus?: number; ram?: number; disk?: number }
 }
-type GlanceImage = Record<string, any>
+type TemplateImage = Record<string, any>
 
 // POST /project/{pid}/cloud/{rid}/action → envelope data = {result}.
 function actionFetch<T = unknown>(
@@ -80,7 +79,7 @@ export function ServerDetailPage() {
   const [rebuildImage, setRebuildImage] = useState("")
   const [passwordVal, setPasswordVal] = useState("")
   // Hide the confirm/revert-resize panel as soon as one is clicked, so a second click can't
-  // fire a confirm at an already-confirmed server (which nova 409s). The cached status can lag
+  // fire a confirm at an already-confirmed server (which the API rejects with 409). The cached status can lag
   // the real state for a while (notification/sync delay), so relying on it alone leaves the
   // buttons live too long. Reset when the status finally moves off VERIFY_RESIZE, or on error.
   const [resizeActed, setResizeActed] = useState(false)
@@ -113,7 +112,7 @@ export function ServerDetailPage() {
   })
 
   // Console opens OUR page (it renders noVNC against ProxCloud's proxied WebSocket and mints its own
-  // token on mount) — nova's novncproxy URL is never handed to the browser, so that service stays
+  // token on mount) — the PVE console endpoint is never handed to the browser, so it stays
   // off the public internet. New tab: a console wants its own window.
   const openConsole = () =>
     window.open(`/p/${pid}/servers/${resourceId}/console`, "_blank", "noopener")
@@ -143,7 +142,7 @@ export function ServerDetailPage() {
   const images = useQuery({
     queryKey: ["bulk-action", pid, "PUBLIC_IMAGES", scope?.serviceId, scope?.region],
     queryFn: () =>
-      apiFetch<{ result?: GlanceImage[] }>(`/project/${pid}/cloud/action`, {
+      apiFetch<{ result?: TemplateImage[] }>(`/project/${pid}/cloud/action`, {
         method: "POST",
         body: { action: "PUBLIC_IMAGES" },
         cloud: scope,
@@ -317,7 +316,7 @@ export function ServerDetailPage() {
       ) : null}
 
       <Tabs defaultValue="overview">
-        {/* 8 triggers overflow narrow viewports — the wrapper scrolls horizontally
+        {/* 7 triggers overflow narrow viewports — the wrapper scrolls horizontally
             instead of wrapping/clipping (thin scrollbar as the affordance). */}
         <div className="-mx-1 overflow-x-auto px-1 pb-1">
           <TabsList className="w-max">
@@ -328,7 +327,6 @@ export function ServerDetailPage() {
             <TabsTrigger value="events">Events</TabsTrigger>
             <TabsTrigger value="snapshots">Snapshots</TabsTrigger>
             <TabsTrigger value="logs">Console log</TabsTrigger>
-            <TabsTrigger value="metadata">Metadata</TabsTrigger>
           </TabsList>
         </div>
 
@@ -342,9 +340,7 @@ export function ServerDetailPage() {
                 <Row k="Status" v={<StatusBadge status={status} />} />
                 <Row k="Flavor" v={serverFlavor(server)} />
                 <Row k="IP addresses" v={<span className="font-mono">{serverIPs(server).join(", ") || "—"}</span>} />
-                <Row k="Availability zone" v={(s["OS-EXT-AZ:availability_zone"] as string) ?? "—"} />
                 <Row k="Created" v={fmtDateTime((s.created as string) ?? server.info?.createdAt)} />
-                <Row k="Host ID" v={<span className="font-mono text-xs">{(s.hostId as string) ?? "—"}</span>} />
               </dl>
             </CardContent>
           </Card>
@@ -372,15 +368,6 @@ export function ServerDetailPage() {
 
         <TabsContent value="logs" className="mt-4">
           <ConsoleLog pid={pid} resourceId={resourceId} />
-        </TabsContent>
-
-        <TabsContent value="metadata" className="mt-4">
-          <MetadataEditor
-            pid={pid}
-            resourceId={resourceId}
-            scope={scope}
-            initial={(server.data?.instanceMetadata as Record<string, string>) ?? {}}
-          />
         </TabsContent>
       </Tabs>
 
@@ -598,7 +585,7 @@ function Row({ k, v }: { k: string; v: React.ReactNode }) {
   )
 }
 
-// ── Network tab: the server's ports (live neutron list scoped by deviceId) + attach/detach. ──
+// ── Network tab: the server's ports (live list scoped by deviceId) + attach/detach. ──
 function NetworkTab({
   pid, resourceId, ext, scope,
 }: { pid: string; resourceId: string; ext: string; scope?: CloudScope }) {
@@ -821,13 +808,13 @@ function SecurityTab({
 function volumeAttachedTo(v: CloudResource, ext: string): boolean {
   const cacheAtts = (v.data?.attachments as Array<Record<string, any>>) ?? []
   if (cacheAtts.some((a) => a?.serverId === ext || a?.server_id === ext)) return true
-  const cinderAtts = (v.data?.volume?.attachments as Array<Record<string, any>>) ?? []
-  return cinderAtts.some((a) => a?.server_id === ext || a?.serverId === ext)
+  const volAtts = (v.data?.volume?.attachments as Array<Record<string, any>>) ?? []
+  return volAtts.some((a) => a?.server_id === ext || a?.serverId === ext)
 }
 function volumeIsFree(v: CloudResource): boolean {
   const cacheAtts = (v.data?.attachments as Array<Record<string, any>>) ?? []
-  const cinderAtts = (v.data?.volume?.attachments as Array<Record<string, any>>) ?? []
-  return cacheAtts.length === 0 && cinderAtts.length === 0
+  const volAtts = (v.data?.volume?.attachments as Array<Record<string, any>>) ?? []
+  return cacheAtts.length === 0 && volAtts.length === 0
 }
 
 function VolumesTab({ pid, ext, scope }: { pid: string; ext: string; scope?: CloudScope }) {
@@ -1057,7 +1044,7 @@ function SnapshotsTab({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Create snapshot</DialogTitle>
-            <DialogDescription>Create a glance image from this server's current disk.</DialogDescription>
+            <DialogDescription>Create a template image from this server's current disk.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
             <Label htmlFor="snap-name">Snapshot name</Label>
@@ -1074,83 +1061,6 @@ function SnapshotsTab({
         </DialogContent>
       </Dialog>
     </div>
-  )
-}
-
-// ── Metadata tab: editable key/value rows; Save = PUT /cloud/{id}/metadata with the FULL map
-// (cloudMetadata decodes the raw body as map[string]string). ──
-function MetadataEditor({
-  pid, resourceId, scope, initial,
-}: { pid: string; resourceId: string; scope?: CloudScope; initial: Record<string, string> }) {
-  const qc = useQueryClient()
-  const [rows, setRows] = useState<Array<{ k: string; v: string }>>(() =>
-    Object.entries(initial).map(([k, v]) => ({ k, v: String(v) })),
-  )
-
-  const save = useMutation({
-    mutationFn: () => {
-      const map: Record<string, string> = {}
-      for (const r of rows) {
-        if (r.k.trim()) map[r.k.trim()] = r.v
-      }
-      return apiFetch(`/project/${pid}/cloud/${resourceId}/metadata`, {
-        method: "PUT",
-        body: map,
-        cloud: scope,
-      })
-    },
-    onSuccess: () => {
-      toast.success("Metadata saved")
-      void qc.invalidateQueries({ queryKey: ["cloud-resource", pid, resourceId] })
-    },
-    onError: (e: Error) => toast.error(e.message),
-  })
-
-  const setRow = (i: number, patch: Partial<{ k: string; v: string }>) =>
-    setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
-
-  return (
-    <Card>
-      <CardContent className="grid gap-3 pt-6">
-        {rows.length === 0 ? (
-          <p className="py-2 text-center text-sm text-muted-foreground">No metadata entries.</p>
-        ) : (
-          rows.map((r, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <Input
-                value={r.k}
-                onChange={(e) => setRow(i, { k: e.target.value })}
-                placeholder="key"
-                className="max-w-56 font-mono text-sm"
-              />
-              <Input
-                value={r.v}
-                onChange={(e) => setRow(i, { v: e.target.value })}
-                placeholder="value"
-                className="max-w-72 font-mono text-sm"
-              />
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-8"
-                aria-label="Remove entry"
-                onClick={() => setRows((rs) => rs.filter((_, idx) => idx !== i))}
-              >
-                <X className="size-4" />
-              </Button>
-            </div>
-          ))
-        )}
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setRows((rs) => [...rs, { k: "", v: "" }])}>
-            <Plus className="size-4" /> Add entry
-          </Button>
-          <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
-            {save.isPending ? "Saving…" : "Save metadata"}
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
   )
 }
 

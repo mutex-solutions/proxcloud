@@ -2,11 +2,10 @@
 // cluster: one ArgoCD Application per database (chart `database-cluster` from our OCI registry,
 // pinned targetRevision + full generated values), applied through the DB cluster's own API —
 // the kamaji delivery pattern on a different cluster. ArgoCD renders the engine operator CR
-// (CNPG / Percona PS / MariaDB / Valkey / FerretDB-on-CNPG), the tenant-facing Octavia
-// LoadBalancer Service and a NetworkPolicy; proxcloud reads status back off the Application and
-// the LB Service. Unlike kamaji, the compute/storage under a database is OPS-owned — the only
-// customer-tenant artifact is the LB VIP, which requires the tenant network to be shared with
-// the dbaas keystone project (neutron RBAC, cloud_dbaas_openstack.go).
+// (CNPG / Percona PS / MariaDB / Valkey / FerretDB-on-CNPG), the tenant-facing LoadBalancer
+// Service and a NetworkPolicy; proxcloud reads status back off the Application and the LB
+// Service. Unlike kamaji, the compute/storage under a database is OPS-owned — the only
+// tenant-facing artifact is the LB ingress IP, restricted by loadBalancerSourceRanges.
 package dbaas
 
 import (
@@ -25,18 +24,18 @@ func NamespaceFor(projectID string) string { return "pc-" + projectID }
 
 // LBServiceName is the chart-rendered tenant-facing LoadBalancer Service for a database — the
 // chart contract twin of values.proxcloud.resourceId (templates/service-lb.yaml). The sync reads
-// the Octavia VIP off its status; getting this wrong is invisible until the first endpoint read,
+// the LB ingress IP off its status; getting this wrong is invisible until the first endpoint read,
 // so it lives here next to the other name derivations.
 func LBServiceName(dbID string) string { return dbID + "-lb" }
 
-// NetShareSecretName is the per-database neutron-RBAC marker secret (DB-cluster side only): the
-// ONLY durable record that the customer network was shared with the dbaas keystone project.
-// FinalizeOrphans reads its annotations to revoke the share once the delete cascade — and with
-// it the Octavia LB port on the tenant subnet — is gone (the kamaji cloud-config precedent).
-func NetShareSecretName(dbID string) string { return dbID + netShareSuffix }
+// MarkerSecretName is the per-database marker secret (DB-cluster side only): the durable record
+// that a database exists, which outlives the Application. FinalizeOrphans keys on it to reap the
+// auth secret and GC the namespace once the delete cascade is gone (the kamaji cloud-credentials
+// precedent).
+func MarkerSecretName(dbID string) string { return dbID + markerSuffix }
 
-// netShareSuffix lets FinalizeOrphans map a secret name back to its database id.
-const netShareSuffix = "-net-share"
+// markerSuffix lets FinalizeOrphans map a secret name back to its database id.
+const markerSuffix = "-marker"
 
 // Application labels/annotations stamped by proxcloud and read back by the sync. Same ownership
 // discipline as kamaji: the sync lists ONLY objects carrying the managed-by marker, and
@@ -47,18 +46,6 @@ const (
 	LabelManagedBy        = "app.kubernetes.io/managed-by"
 	ManagedByValue        = "proxcloud"
 	AnnotationDisplayName = "proxcloud.io/display-name"
-	// Net-share annotations on the per-database marker secret: which network was shared, with
-	// which OpenStack service/keystone project — everything the sweep needs to revoke the neutron
-	// RBAC policy even after the project doc (and its service bindings) is gone.
-	AnnotationNetworkID = "proxcloud.io/network-id"
-	AnnotationSubnetID  = "proxcloud.io/subnet-id"
-	AnnotationOSService = "proxcloud.io/os-service"
-	AnnotationOSProject = "proxcloud.io/os-project"
-	// AnnotationOSRegion records WHICH region's neutron holds the share. Load-bearing on a
-	// multi-region OpenStack service: neutron is per-region, and a revoker pointed at the wrong
-	// region sees an empty policy list — "already gone" — and would reap the marker while the
-	// share leaks.
-	AnnotationOSRegion = "proxcloud.io/os-region"
 )
 
 // managedBy reports whether obj carries the proxcloud ownership marker.
@@ -79,15 +66,6 @@ type Config struct {
 	ChartName     string // default "database-cluster"
 	ChartVersion  string // pinned default for NEW databases; existing ones keep their own pin
 
-	// OSServiceID/OSProjectID name the OpenStack externalService the DB cluster's nodes live on
-	// and the dbaas keystone project there — the neutron-RBAC target_tenant. Kamaji never needed
-	// this: its cloud objects lived in the CUSTOMER tenant; a database's LB is created by the
-	// OCCM running as the OPS tenant, which must therefore see the customer network.
-	OSServiceID string
-	OSProjectID string
-	// MemberSubnetID is the DB-cluster node subnet — every LB's
-	// loadbalancer.openstack.org/member-subnet-id annotation.
-	MemberSubnetID string
 	// StorageClasses is the storage-class allowlist offered to customers (empty = cluster
 	// default only).
 	StorageClasses []string
@@ -112,10 +90,6 @@ func (c Config) Validate() error {
 		return fmt.Errorf("dbaas provider: config.argocd.chartRepo is required")
 	case c.ChartVersion == "":
 		return fmt.Errorf("dbaas provider: config.argocd.chartVersion is required (never latest)")
-	case c.MemberSubnetID == "":
-		return fmt.Errorf("dbaas provider: config.database.memberSubnetId is required (the DB-cluster node subnet Octavia pools members on)")
-	case c.OSProjectID == "":
-		return fmt.Errorf("dbaas provider: config.database.osProjectId is required (the dbaas keystone project — neutron RBAC target)")
 	}
 	return nil
 }
@@ -135,14 +109,7 @@ type DatabaseSpec struct {
 	StorageGiB  int
 	// StorageClass picks off Config.StorageClasses; "" = the DB cluster's default class.
 	StorageClass string
-	// NetworkID/SubnetID are the CUSTOMER's VPC network/subnet the LB VIP lands on. Both
-	// REQUIRED — a managed database without a tenant-side endpoint is unreachable by design
-	// (no public exposure in MVP). Customer-supplied, so the create path MUST verify both belong
-	// to the project's tenant before sharing the network (dbaasResolveTenantNetwork).
-	NetworkID string
-	SubnetID  string
-	// AllowedCIDRs restricts LB ingress (Octavia ACLs via loadBalancerSourceRanges). Empty = the
-	// whole tenant network.
+	// AllowedCIDRs restricts LB ingress (loadBalancerSourceRanges). Empty = open.
 	AllowedCIDRs []string
 	// BetaAck acknowledges a beta engine (valkey): required true when the engine's offer is
 	// flagged Beta, so nobody lands on a pre-GA operator by accident.
@@ -158,8 +125,6 @@ func (s DatabaseSpec) Validate(c Config) error {
 		return fmt.Errorf("database: projectId is required")
 	case s.Engine == "":
 		return fmt.Errorf("database: engine is required")
-	case s.NetworkID == "" || s.SubnetID == "":
-		return fmt.Errorf("database: networkId and subnetId are required (the endpoint lands in your VPC)")
 	}
 	offer, ok := c.Engines[s.Engine]
 	if !ok {
@@ -192,16 +157,6 @@ func (s DatabaseSpec) Validate(c Config) error {
 		}
 	}
 	return nil
-}
-
-// NetShare is the neutron-RBAC record stamped onto the marker secret at create — everything the
-// orphan sweep needs to revoke the share after the project doc is gone.
-type NetShare struct {
-	NetworkID   string
-	SubnetID    string
-	OSServiceID string
-	OSProjectID string
-	OSRegion    string
 }
 
 // dig walks nested map[string]any keys; nil when any hop is absent.

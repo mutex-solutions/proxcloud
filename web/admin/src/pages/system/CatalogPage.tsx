@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
-import { Boxes, ChevronDown, ChevronRight, Cpu, ImageIcon, MoreHorizontal, Plus, Tags, Trash2, TriangleAlert } from "lucide-react"
+import { Boxes, ChevronDown, ChevronRight, Cpu, ImageIcon, MoreHorizontal, Plus, Tags, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
@@ -66,7 +66,7 @@ type OsImagesLocation = {
   serviceName: string
   region: string
   regionDisplayName: string
-  images: Array<{ id: string; name: string; status: string; visibility?: string }>
+  images: Array<{ id: string; name: string; status: string }>
 }
 
 type MetaValueOption = { value?: string; displayName?: string; enabled?: boolean }
@@ -138,7 +138,7 @@ function FlavorCategoriesTab() {
     setOpen(true)
   }, [])
 
-  // union of live nova names + already-selected names (so an offline region's flavor still shows).
+  // union of live catalog flavor names + already-selected names (so an offline region's flavor still shows).
   const flavorChoices = dedupe([...liveNames, ...selected])
 
   const save = useMutation({
@@ -263,7 +263,7 @@ function FlavorCategoriesTab() {
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editing ? "Edit flavor category" : "Create flavor category"}</DialogTitle>
-            <DialogDescription>Pick the live Nova flavors this category exposes to clients.</DialogDescription>
+            <DialogDescription>Pick the Proxmox flavor catalog entries this category exposes to clients.</DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
@@ -559,22 +559,10 @@ function ImageGroupsTab() {
   const cats = catsQ.data?.data ?? []
   const catIds = cats.map((c) => c.id)
   const osImagesQ = useAdminList<OsImagesLocation>(OS_IMAGES_PATH)
-  const glanceNames = useMemo(
+  const templateNames = useMemo(
     () => dedupe((osImagesQ.data?.data ?? []).flatMap((l) => (l.images ?? []).map((i) => i.name))),
     [osImagesQ.data],
   )
-  // The client's create-server list is tenant-scoped: only PUBLIC Glance images reach it.
-  // Bindings to any other visibility silently vanish client-side — warn here instead.
-  const publicNames = useMemo(
-    () =>
-      new Set(
-        (osImagesQ.data?.data ?? []).flatMap((l) =>
-          (l.images ?? []).filter((i) => (i.visibility ?? "public") === "public").map((i) => i.name),
-        ),
-      ),
-    [osImagesQ.data],
-  )
-  const hiddenFromClients = (name?: string) => !!name && glanceNames.includes(name) && !publicNames.has(name)
 
   const groupsQ = useQuery({
     queryKey: ["image-groups", "by-category", catIds.join(",")],
@@ -673,8 +661,8 @@ function ImageGroupsTab() {
   if (catsQ.error) return <ErrorPanel error={catsQ.error} />
   if (groupsQ.error) return <ErrorPanel error={groupsQ.error} />
 
-  // Select options: live glance names ∪ names already on the editing group (offline regions still show).
-  const imageChoices = dedupe([...glanceNames, ...rows.map((r) => r.name ?? "")])
+  // Select options: project template names ∪ names already on the editing group (offline regions still show).
+  const imageChoices = dedupe([...templateNames, ...rows.map((r) => r.name ?? "")])
 
   return (
     <div className="space-y-4">
@@ -749,7 +737,7 @@ function ImageGroupsTab() {
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editing ? "Edit image group" : "Create image group"}</DialogTitle>
-            <DialogDescription>Bind live Glance images clients can launch from this group.</DialogDescription>
+            <DialogDescription>Bind the provider's project templates clients can launch from this group.</DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
@@ -783,13 +771,13 @@ function ImageGroupsTab() {
                 <div key={i} className="space-y-1">
                   <div className="flex gap-2">
                     <Select value={row.name ?? ""} onValueChange={(v) => setRows(rows.map((x, j) => (j === i ? { ...x, name: v } : x)))}>
-                      <SelectTrigger className="flex-1" aria-label="Glance image">
-                        <SelectValue placeholder="Glance image" />
+                      <SelectTrigger className="flex-1" aria-label="Template">
+                        <SelectValue placeholder="Template" />
                       </SelectTrigger>
                       <SelectContent>
                         {imageChoices.map((n) => (
                           <SelectItem key={n} value={n}>
-                            {hiddenFromClients(n) ? `${n} (not public)` : n}
+                            {n}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -813,13 +801,6 @@ function ImageGroupsTab() {
                       <Trash2 className="size-4" />
                     </Button>
                   </div>
-                  {hiddenFromClients(row.name) ? (
-                    <p className="text-xs text-amber-600 dark:text-amber-500">
-                      <TriangleAlert className="mr-1.5 inline size-3.5 align-[-2px]" />
-                      Not public in Glance — clients cannot see or launch this image. Run{" "}
-                      <code className="rounded bg-muted px-1">openstack image set --public</code> to publish it.
-                    </p>
-                  ) : null}
                 </div>
               ))}
               <Button
@@ -828,9 +809,9 @@ function ImageGroupsTab() {
                 onClick={() => setRows([...rows, { name: "", version: "", orderNumber: rows.length }])}
                 disabled={imageChoices.length === 0}
               >
-                <Plus className="size-4" /> Add image
+                <Plus className="size-4" /> Add template
               </Button>
-              {osImagesQ.isLoading ? <p className="text-xs text-muted-foreground">Loading live Glance images…</p> : null}
+              {osImagesQ.isLoading ? <p className="text-xs text-muted-foreground">Loading templates…</p> : null}
             </div>
           </div>
           <DialogFooter>

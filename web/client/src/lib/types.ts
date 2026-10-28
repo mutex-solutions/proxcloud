@@ -10,7 +10,7 @@ export type Project = {
   memberships?: Array<{ sub?: string; roles?: string[] }>
   services?: Array<{ serviceId?: string; config?: Record<string, unknown> }>
   // false/absent = the client gets no external-network picker (the server auto-picks the pool for
-  // floating IPs / router gateways); true = the client chooses.
+  // public NICs); true = the client chooses.
   publicNetworksVisible?: boolean
   // false/absent = the dashboard does not show the region GPU capacity; true = it does.
   gpuCapacityVisible?: boolean
@@ -77,8 +77,6 @@ export type ProjectService = {
   kubernetesImageVariants?: Record<string, string[]>
   // The provider's pinned platform (chart) version — feeds the opt-in "platform update" offer.
   kubernetesPlatformVersion?: string
-  // The default StorageClass clusters ship with (name + optional Cinder volume type).
-  kubernetesStorage?: { className?: string; volumeType?: string }
   // Managed-database (dbaas) services only: the curated per-engine catalog the create
   // wizard offers, the provider's pinned platform (chart) version, the size limits the
   // create form validates against (0/absent = unbounded), and the optional StorageClass
@@ -104,12 +102,12 @@ export type DatabaseEngineOffer = {
   beta?: boolean
 }
 
-// Live OpenStack quota values. `reserved` is capacity promised to in-flight
+// Live quota values. `reserved` is capacity promised to in-flight
 // operations, so consumers must include it when calculating current usage.
 export type QuotaMetric = {
   used: number
   reserved: number
-  // OpenStack uses a negative limit for an unlimited resource.
+  // A negative limit means unlimited.
   limit: number
 }
 
@@ -148,7 +146,7 @@ export type Location = {
   region?: string
   displayName?: string
   resourceTypes?: string[]
-  /** "openstack" (Swift object store) | "ceph-s3" — the two object stores run side by side. */
+  /** Backing provider: "proxmox" | "ceph-s3" | "kamaji" | "dbaas". */
   provider?: string
   serviceName?: string
   [k: string]: unknown

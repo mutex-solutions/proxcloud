@@ -3,8 +3,8 @@
 # API  -> http://localhost:8080 (mgmt http://localhost:8081)
 # Web  -> http://localhost:8082   Admin -> http://localhost:8083
 #
-# ponytail: no bundled Keycloak/OpenStack — auth-gated + cloud routes need an
-# external issuer/region. Put OS_* and *_OAUTH2_* in a .env file (see below).
+# Keycloak is bundled (http://localhost:8090, realm `proxcloud`); cloud providers
+# (Proxmox, Ceph S3) are registered from the admin console. Overrides go in .env.
 services:
   postgres:
     image: postgres:17-alpine
@@ -85,14 +85,7 @@ services:
       AUTH_ADMIN_API_OAUTH2_ISSUER_URI: ${PROXCLOUD_ADMIN_API_OAUTH2_ISSUER:-${PROXCLOUD_ADMIN_OAUTH2_ISSUER:-http://${PROXCLOUD_HOST:-localhost}:8090/realms/proxcloud}}
       AUTH_ADMIN_API_OAUTH2_DISCOVERY_URI: ${PROXCLOUD_ADMIN_API_OAUTH2_DISCOVERY:-http://keycloak:8080/realms/proxcloud}
       AUTH_ADMIN_API_OAUTH2_CLIENT_ID: ${PROXCLOUD_ADMIN_API_OAUTH2_CLIENT_ID:-proxcloud-admin-api}
-      # OpenStack (optional; the cloud client stays down without these).
-      OS_AUTH_URL: ${OS_AUTH_URL:-}
-      OS_REGION_NAME: ${OS_REGION_NAME:-}
-      OS_USERNAME: ${OS_USERNAME:-}
-      OS_PASSWORD: ${OS_PASSWORD:-}
-      OS_USER_DOMAIN_NAME: ${OS_USER_DOMAIN_NAME:-}
-      OS_PROJECT_NAME: ${OS_PROJECT_NAME:-}
-      OS_PROJECT_DOMAIN_NAME: ${OS_PROJECT_DOMAIN_NAME:-}
+      PROXCLOUD_DEFAULT_REGION: ${PROXCLOUD_DEFAULT_REGION:-}
     ports:
       - "8080:8080"
       - "8081:8081"

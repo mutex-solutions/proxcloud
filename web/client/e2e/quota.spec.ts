@@ -83,7 +83,7 @@ test("volume dialog blocks capacity over storage quota", async ({ page }) => {
   await expect(dialog.getByRole("button", { name: "Create volume" })).toBeDisabled()
 })
 
-test("volume dialog checks the selected Cinder volume-type quota", async ({ page }) => {
+test("volume dialog checks the selected volume-type quota", async ({ page }) => {
   await page.goto(`${project}/volumes`)
   await page.getByRole("button", { name: "Create volume" }).first().click()
   const dialog = page.getByRole("dialog")

@@ -171,8 +171,7 @@ flowchart LR
 **Public-path whitelist** (`pkg/auth`, `IsPublic`): exact paths (`/error`,
 `/api/v1/platform-configuration/default`, the billing config country/currency
 lists, the RFC 9728 resource-metadata doc) and prefixes (`/openapi.json`, `/mcp`,
-`/api/v1/auth/`, `/api/v1/download/`, `/api/v1/notifications/` (a stale entry with
-no route behind it), `/api/v1/callbacks/`, `/api/v1/payments/`, `/api/v1/admin/job/`,
+`/api/v1/auth/`, `/api/v1/download/`, `/api/v1/callbacks/`, `/api/v1/payments/`, `/api/v1/admin/job/`,
 `/api/v1/admin/onboarding/`, `/api/v1/webhooks/`,
 `/api/v1/events/`). These are the webhook, download-token, SSE, and operator
 callback paths that authenticate by their own scheme (token in the URL, SigV4,
@@ -395,7 +394,7 @@ flowchart LR
     REC --> CACHE[("cloudResource<br/>+ cloudResourceHistory")]
     SYNC["cloud/syncjob<br/>(per ENABLED project)"] --> SP
     OBJ["cloud/client<br/>(ceph-s3)"] --> CACHE
-    MET["metricsjob (Prometheus)<br/>→ gnocchiMetrics (legacy name)"] --> BR
+    MET["metricsjob (Prometheus)<br/>→ usageMetrics"] --> BR
     CACHE --> BR["cloud/billingresource<br/>cache → BillingResource"]
     BR --> RATING["pricing engine<br/>(billingjob)"]
 ```
@@ -421,7 +420,7 @@ flowchart LR
   `client.NewCephS3`; with `cephcred` it holds the per-project RGW user and keys.
 - **`metrics` / `metricsjob`** — opt-in traffic ingestion from a
   Prometheus-compatible source per provider (`config.metrics.source`; Proxmox
-  defaults to `none`). Results land in the `gnocchiMetrics` table (legacy name).
+  defaults to `none`). Results land in the `usageMetrics` table.
 - **`billingresource`** — the cloud→billing bridge: turns cached resources (plus
   traffic usage) into the priced `BillingResource`s the rating loop consumes:
   instance (+ instance traffic), volume, bucket, kubernetes cluster, database
@@ -431,8 +430,8 @@ flowchart LR
   provider is a management cluster reached over a stored kubeconfig; each
   customer cluster is one ArgoCD `Application` written to that cluster's API.
   Read, sync and delete work today; creating a cluster or database on a Proxmox
-  provider is planned (stubs `cloud_kamaji_openstack.go` and
-  `cloud_dbaas_openstack.go` return an explicit error). Guides:
+  provider is planned (stubs `cloud_kamaji_create.go` and
+  `cloud_dbaas_create.go` return an explicit error). Guides:
   **[managed-k8s.md](managed-k8s.md)**, **[managed-dbaas.md](managed-dbaas.md)**.
 
 ---
@@ -458,7 +457,7 @@ always wins), and `Validate()` fails closed. Config groups: server/management
 ports, the PostgreSQL DSN (`PROXCLOUD_DB_URL`), RabbitMQ, the data-at-rest `Encryption.DefaultKey` (used by
 `pkg/textcrypt` to decrypt external-service secrets), self URLs (API/UI/admin base
 URLs, which also seed CORS), the three auth realms, the default-region fallback
-(`openstack.region` / `OS_REGION_NAME`, the only legacy key still read), and the `Jobs` gates (`SchedulerEnabled`, `DebugTriggers`,
+(`PROXCLOUD_DEFAULT_REGION` / `proxcloud.default-region`, default `default`), and the `Jobs` gates (`SchedulerEnabled`, `DebugTriggers`,
 `RabbitFanout`).
 
 ### Async & scheduling (`internal/amqp`, `scheduler`, `lock`)
@@ -466,7 +465,7 @@ URLs, which also seed CORS), the three auth realms, the default-region fallback
 Scheduled work is driven by a seconds-enabled cron; every job is wrapped in a
 `shedLock`-backed distributed lock (`atMostFor` / `atLeastFor`) so it runs **once
 across the fleet**, not once per pod. The catalog is registered in
-`main.registerJobs` — the minutely/hourly/monthly charge crons, Prometheus traffic metrics (`gnocchiMetricsFetch`, legacy name),
+`main.registerJobs` — the minutely/hourly/monthly charge crons, Prometheus traffic metrics (`usageMetricsFetch`),
 services sync, savings expiry + reminders, transaction scan, auto-suspension
 (dunning), monthly bill finalization, monthly collect, and project deletion.
 

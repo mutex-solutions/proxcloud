@@ -17,9 +17,6 @@ package externalservice
 //	      "chartVersion": "0.1.0"          // pinned — never latest
 //	    },
 //	    "database": {
-//	      "osServiceId":    "svc-openstack", // the OpenStack service the DB cluster's nodes live on
-//	      "osProjectId":    "…",             // dbaas keystone project — neutron RBAC target_tenant
-//	      "memberSubnetId": "…",             // DB-cluster node subnet (Octavia member-subnet-id)
 //	      "storageClasses": ["nvme"],        // optional customer-facing allowlist
 //	      "limits":         {"maxCpu": 32, "maxMemoryGiB": 128, "maxStorageGiB": 2048},
 //	      "engines": {                       // curated engine catalog (the ONLY engines offered).
@@ -34,10 +31,8 @@ package externalservice
 //	  "secret": {"kubeconfig": "<db-cluster kubeconfig>"}  // encrypted at rest
 //	}
 //
-// A dbaas provider is OpenStack-adjacent the OPPOSITE way from kamaji: the databases run on
-// OPS-owned nodes; the only customer-tenant artifact is the Octavia LB VIP, which requires the
-// tenant network to be shared with the dbaas keystone project (neutron RBAC) — so a project
-// must still be attached to the OpenStack service its VPC lives on.
+// The databases run on OPS-owned nodes; the only tenant-facing artifact is the LB ingress IP,
+// restricted by loadBalancerSourceRanges.
 
 import "github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 
@@ -96,9 +91,6 @@ func (e *ExternalService) DbaasConfig() dbaas.Config {
 		ChartRepo:      str(argo["chartRepo"]),
 		ChartName:      str(argo["chartName"]),
 		ChartVersion:   str(argo["chartVersion"]),
-		OSServiceID:    str(db["osServiceId"]),
-		OSProjectID:    str(db["osProjectId"]),
-		MemberSubnetID: str(db["memberSubnetId"]),
 		StorageClasses: strList(db["storageClasses"]),
 		Limits: dbaas.Limits{
 			MaxCPU:        intOf(limits["maxCpu"]),

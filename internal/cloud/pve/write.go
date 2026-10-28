@@ -318,8 +318,7 @@ func (s *Service) PowerAction(ctx context.Context, projectID, externalID, verb s
 	return s.C.WaitTask(ctx, up)
 }
 
-// ResizeServer applies a new flavor: graceful stop when running (an OpenStack
-// resize reboots too), set cores/memory + flavor tag, grow the root disk when the
+// ResizeServer applies a new flavor: graceful stop when running, set cores/memory + flavor tag, grow the root disk when the
 // new flavor's is larger, start again if it was running.
 func (s *Service) ResizeServer(ctx context.Context, projectID, externalID string, spec ServerSpec) error {
 	ctx, cancel := context.WithTimeout(ctx, createTimeout)

@@ -8,7 +8,7 @@ import (
 )
 
 // KubernetesClusterProvider maps a KUBERNETES_CLUSTER → a "kubernetes_cluster" BillingResource:
-// the CONTROL-PLANE fee only. Worker VMs live in the customer's own keystone tenant and are
+// the CONTROL-PLANE fee only. Worker VMs live in the customer's own project and are
 // billed by the existing instance/volume/LB providers (plan D4) — pricing them here would
 // double-charge.
 type KubernetesClusterProvider struct{}

@@ -10,7 +10,7 @@ func TestMetricsSourceDefaults(t *testing.T) {
 	}{
 		{"proxmox absent → none", map[string]any{"provider": "proxmox"}, MetricsSourceNone},
 		{"proxmox explicit prometheus", map[string]any{"provider": "proxmox", "metrics": map[string]any{"source": "prometheus"}}, MetricsSourcePrometheus},
-		{"other absent → gnocchi", map[string]any{"provider": "kamaji"}, MetricsSourceGnocchi},
+		{"other absent → none", map[string]any{"provider": "kamaji"}, MetricsSourceNone},
 	}
 	for _, c := range cases {
 		if got := (&ExternalService{Config: c.cfg}).MetricsSource(); got != c.want {

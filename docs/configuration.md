@@ -95,15 +95,12 @@ identity model. Empty issuer = realm disabled (tokens for it are rejected).
 Proxmox VE clusters, Ceph RGW stores and the managed K8s/DBaaS management
 clusters are **not** configured through env. They are external-service records
 created in the admin console (System → Cloud providers) or as `externalService`
-documents; see [cloud-integration.md](cloud-integration.md). One legacy key is
-still read:
+documents; see [cloud-integration.md](cloud-integration.md). One related key is
+read from env:
 
-| Concern | env | file | Meaning |
-|---------|-----|------|---------|
-| Default region | `OS_REGION_NAME` | `openstack.region` | Region stamped on a provider binding when the provider sets none (`project/bootstrap.go`), and the admin handlers' region fallback. |
-
-The other `OS_*` / `openstack.*` keys are still parsed by `internal/config/config.go`
-but nothing uses them; they are left over from the previous backend.
+| Concern | env | file | Default | Meaning |
+|---------|-----|------|---------|---------|
+| Default region | `PROXCLOUD_DEFAULT_REGION` | `proxcloud.default-region` | `default` | Region stamped on a provider binding when the provider sets none (`project/bootstrap.go`), and the admin handlers' region fallback. |
 
 ### Scheduled jobs (billing / metrics crons)
 
@@ -117,9 +114,8 @@ unexpectedly.
 | Rabbit fanout | `PROXCLOUD_JOBS_RABBIT_FANOUT` | `proxcloud.jobs.rabbit-fanout` | `false` | Fan the **native** charge cron out across pods via RabbitMQ (one message per active profile) instead of charging every profile in one pod. Ignored by the external provider. |
 
 Network MTU is set per EVPN zone on the Proxmox provider
-(`config.network.zones.<zone>.mtu`, default 1450; vlan and simple zones take no MTU). The chart still renders
-`PROXCLOUD_DEFAULT_NETWORK_MTU` from `api.network.defaultMtu`, but the API does not
-read it.
+(`config.network.zones.<zone>.mtu`, default 1450; vlan and simple zones take no MTU).
+There is no deployment-wide MTU setting.
 
 When the scheduler or debug triggers are enabled, the management port also exposes
 operator triggers such as `POST :8081/debug/gen-hmac-key` (mint an Admin API key —

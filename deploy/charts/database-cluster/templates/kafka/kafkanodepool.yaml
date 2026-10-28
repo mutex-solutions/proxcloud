@@ -34,7 +34,7 @@ spec:
         # to size/resize.
         kraftMetadata: shared
         # The PVC dies with the database: DELETE removes the Application and
-        # ArgoCD prunes; a retained orphan PVC would leak tenant-paid Cinder
+        # ArgoCD prunes; a retained orphan PVC would leak tenant-paid
         # volumes with no owner to bill.
         deleteClaim: true
         {{- with .Values.storage.storageClassName }}

@@ -234,8 +234,8 @@ func nicBridge(val string) string {
 }
 
 // vmFirewallOptions is what every platform VM runs with: anti-spoof (ipfilter +
-// macfilter); ingress closed except what a security group opens (neutron
-// default-deny); egress open, as neutron's default group allows all egress — so
+// macfilter); ingress closed except what a security group opens (default-deny
+// ingress); egress open (open egress) — so
 // group "out" rules stay informational; DHCP allowed so the SDN dnsmasq lease
 // survives the DROP policy and ipfilter (DISCOVER leaves from 0.0.0.0).
 // TODO(verify-lab): confirm dhcp=1 lets DISCOVER/OFFER through ipfilter on the
@@ -333,7 +333,7 @@ func (s *Service) SetIPFilter(ctx context.Context, node string, vmid int, nic st
 }
 
 // DefaultSecurityGroupName is the per-project group attached when a server is
-// created without an explicit choice (neutron's "default").
+// created without an explicit choice.
 const DefaultSecurityGroupName = "default"
 
 // SecurityGroupNotFoundError marks a create-time group ref the project doesn't own.
@@ -341,10 +341,10 @@ type SecurityGroupNotFoundError struct{ Ref string }
 
 func (e *SecurityGroupNotFoundError) Error() string { return "security group not found: " + e.Ref }
 
-// defaultGroupRules approximates neutron's default group (ingress only from the
-// same group, all egress): ingress from the provider CIDR pool. The vnet
-// isolation rules already drop every other tenant's pool traffic, so what is
-// left is the project's own networks. No SSH/ICMP from outside — as neutron.
+// defaultGroupRules is the default group (default-deny ingress, open egress):
+// ingress from the provider CIDR pool. The vnet isolation rules already drop
+// every other tenant's pool traffic, so what is left is the project's own
+// networks. No SSH/ICMP from outside.
 // ponytail: a pool-sourced packet spoofed onto a PUBLIC bridge also matches;
 // its replies route via the vnet so TCP cannot complete. Upgrade: a per-project
 // cluster IPSet of the project's subnets as the source.

@@ -2,7 +2,7 @@
 
 Read-only access to the cloud service providers registered on the platform. Base path: `/admin-api/v1/service_providers`.
 
-Credentials are never exposed. Only the provider's id, name and type come back, inside a configuration object whose shape is kept from an earlier backend for compatibility.
+Credentials are never exposed. Only the provider's id, name, type and provider kind come back, plus the pool prefix for Proxmox VE providers.
 
 ## The service provider object
 
@@ -12,8 +12,8 @@ Credentials are never exposed. Only the provider's id, name and type come back, 
 | `name` | string | Display name. |
 | `type` | string | `CLOUD` for cloud providers; omitted for other provider types. |
 | `configuration` | object | Always present. |
-| `configuration.cloud.provider` | string | Always `OPENSTACK`. This is a fixed legacy value and is returned for Proxmox VE, Ceph S3, Kamaji and DBaaS providers alike. |
-| `configuration.cloud.openstack` | object | Always present. Its legacy fields `identity_url` and `domain_id` are omitted for providers that don't set them, which includes every Proxmox VE provider, so it comes back as `{}`. |
+| `configuration.cloud.provider` | string | The provider kind: `PROXMOX`, `CEPH_S3`, `KAMAJI` or `DBAAS`. |
+| `configuration.cloud.proxmox` | object | Proxmox VE providers only. `pool_prefix` is the prefix of the per-project PVE pool names (`<pool_prefix><project id>`); it defaults to `pc-`. |
 
 ## GET /admin-api/v1/service_providers
 
@@ -41,8 +41,8 @@ Response `200`:
       "type": "CLOUD",
       "configuration": {
         "cloud": {
-          "provider": "OPENSTACK",
-          "openstack": {}
+          "provider": "PROXMOX",
+          "proxmox": { "pool_prefix": "pc-" }
         }
       }
     }

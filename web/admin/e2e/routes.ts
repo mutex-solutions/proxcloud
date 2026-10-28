@@ -44,7 +44,7 @@ export const routes: RouteEntry[] = [
 
   // Platform
   { path: "/system/cloud-providers", name: "cloud-providers", hasTable: true, hasDialogs: true },
-  { path: "/system/cloud-providers/svc-openstack-01", name: "cloud-provider-detail", hasTable: true, hasDialogs: true },
+  { path: "/system/cloud-providers/svc-proxmox-01", name: "cloud-provider-detail", hasTable: true, hasDialogs: true },
   { path: "/system/catalog", name: "catalog", hasTable: true, hasDialogs: true },
   { path: "/system/templates", name: "templates", hasDialogs: true },
   { path: "/system/integrations", name: "integrations", hasDialogs: true },

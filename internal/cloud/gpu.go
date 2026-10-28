@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-// GPUFromFlavor derives the GPU model alias + device count from a nova flavor's
-// extra specs. Accepts either map shape — map[string]string straight off the cloud
+// GPUFromFlavor derives the GPU model alias + device count from a flavor's
+// extra specs (the pveflavor catalog emits the same shape). Accepts either map shape — map[string]string straight off the cloud
 // client, or map[string]any after the cloudResource cache round-trip — so no call
 // site can silently miss GPUs on a type assertion.
 //
@@ -14,9 +14,8 @@ import (
 // model = first alias, count = total across entries.
 // Fallback: `resources:VGPU` = "<count>" → model "vgpu".
 //
-// The Nova alias is normalized (lowercase, "_"→"-") so pricing, usage and project quota
-// use one stable key. Placement trait suffixes are normalized the same way for suggestions,
-// but operators must still configure the actual Nova alias when the two names differ.
+// The alias is normalized (lowercase, "_"→"-") so pricing, usage and project quota
+// use one stable key.
 func GPUFromFlavor(specs any) (model string, count int) {
 	var extraSpecs map[string]any
 	switch m := specs.(type) {

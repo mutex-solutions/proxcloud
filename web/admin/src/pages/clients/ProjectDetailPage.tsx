@@ -50,9 +50,9 @@ type ProjectDoc = {
   organizationId?: string
   billingProfileId?: string
   memberships?: Array<{ sub?: string; role?: string }>
-  // ceph-s3 bindings carry provider/region/rgwUid instead of an (OpenStack) externalProjectId.
-  services?: Array<{ serviceId?: string; externalProjectId?: string; provider?: string; region?: string; rgwUid?: string }>
-  // absent/null = all external networks allowed; array = allow-list of Neutron network ids.
+  // proxmox bindings carry provider/region/pool; ceph-s3 bindings carry provider/region/rgwUid.
+  services?: Array<{ serviceId?: string; provider?: string; region?: string; pool?: string; rgwUid?: string }>
+  // absent/null = all public networks allowed; array = allow-list of public network ids.
   publicNetworkIds?: string[] | null
   // false/absent = the client can't choose an external network (server auto-picks); true = client picks.
   publicNetworksVisible?: boolean
@@ -216,8 +216,8 @@ export default function ProjectDetailPage() {
 
   const enabled = (project?.status ?? "").toUpperCase() === "ENABLED"
 
-  // GPU quota tab state: rows derive from project.quota.gpu; Placement capacity is offered
-  // as a convenience only, while the free-text input accepts the actual Nova flavor alias.
+  // GPU quota tab state: rows derive from project.quota.gpu; region capacity is offered
+  // as a convenience only, while the free-text input accepts the actual GPU model alias.
   const gpuInfo = useAdminList<GpuRegionCapacity>(
     `/admin/service/${externalServiceId}/gpu-info`,
     !!externalServiceId && tab === "quota",
@@ -290,7 +290,7 @@ export default function ProjectDetailPage() {
       }
     }
 
-    // Region GPU capacity (placement gpu-info), aggregated per canonical model across the
+    // Region GPU capacity (gpu-info), aggregated per canonical model across the
     // service's regions — so the rows can list the full region catalog and a model with no
     // project limit shows the region's free/total instead of a bare "Unlimited".
     const capacityByModel = new Map<string, { total: number; inUse: number }>()
@@ -369,8 +369,8 @@ export default function ProjectDetailPage() {
   })
 
   // GET /admin/project/{id}/external-service/{esid} (projectmut.go projectAddExternalService):
-  // bootstraps the project onto that provider — a Keystone tenant for openstack, an RGW user +
-  // stored S3 credential for ceph-s3. Idempotent, so a re-attach is safe.
+  // bootstraps the project onto that provider — a PVE pool for proxmox, an RGW user + stored S3
+  // credential for ceph-s3, a namespace for kamaji/dbaas. Idempotent, so a re-attach is safe.
   const attachService = useMutation({
     mutationFn: (esID: string) => apiFetch(`${projectPath}/external-service/${esID}`),
     onSuccess: () => {
@@ -712,12 +712,12 @@ export default function ProjectDetailPage() {
                             <span className="text-xs text-muted-foreground">RGW user: </span>
                             <span className="font-mono text-xs">{s.rgwUid}</span>
                           </span>
-                        ) : (
+                        ) : s.pool ? (
                           <span>
-                            <span className="text-xs text-muted-foreground">External project: </span>
-                            <span className="font-mono text-xs">{s.externalProjectId ?? "—"}</span>
+                            <span className="text-xs text-muted-foreground">PVE pool: </span>
+                            <span className="font-mono text-xs">{s.pool}</span>
                           </span>
-                        )}
+                        ) : null}
                       </div>
                     ))}
                   </div>
@@ -1017,7 +1017,6 @@ export default function ProjectDetailPage() {
                 <p className="text-sm text-muted-foreground">
                   Per-model GPU device limits, enforced when servers are created or resized through
                   ProxCloud. No entry = unlimited; "*" applies to any model without its own row.
-                  Horizon-direct usage on imported projects bypasses this gate.
                 </p>
 
                 <div className="grid gap-3 sm:grid-cols-3">
@@ -1119,8 +1118,8 @@ export default function ProjectDetailPage() {
                 <div className="border-t pt-4">
                   <h3 className="text-sm font-medium">Configure limits</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Use the alias from the Nova flavor&apos;s <code>pci_passthrough:alias</code> extra spec. Aliases are saved
-                    in lowercase with dashes; capacity suggestions from Placement may use different names.
+                    Use the GPU model alias from the provider&apos;s GPU mappings (e.g. <code>nvidia-4090</code>). Aliases are
+                    saved in lowercase with dashes.
                   </p>
                 </div>
                 {quotaRows.length === 0 ? (
@@ -1325,8 +1324,8 @@ export default function ProjectDetailPage() {
           <DialogHeader>
             <DialogTitle>Attach cloud provider</DialogTitle>
             <DialogDescription>
-              Provisions this project on the provider: a Keystone tenant for OpenStack, a dedicated RGW user for
-              Ceph S3. Projects created after a provider was added pick it up on their own — this is for the ones
+              Provisions this project on the provider: a PVE pool for Proxmox, a dedicated RGW user for Ceph S3,
+              a namespace for Managed Kubernetes / Databases. Projects created after a provider was added pick it up on their own — this is for the ones
               that already existed.
             </DialogDescription>
           </DialogHeader>
@@ -1340,7 +1339,7 @@ export default function ProjectDetailPage() {
                   .filter((p) => p.id && !(project?.services ?? []).some((s) => s.serviceId === p.id))
                   .map((p) => (
                     <SelectItem key={p.id} value={p.id}>
-                      {`${p.name ?? p.id} · ${p.config?.provider ?? "openstack"}`}
+                      {p.config?.provider ? `${p.name ?? p.id} · ${p.config.provider}` : p.name ?? p.id}
                     </SelectItem>
                   ))}
               </SelectContent>

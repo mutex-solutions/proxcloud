@@ -8,7 +8,7 @@ Everything here lives under the **Compute** group in the sidebar.
 
 Create a server from **Compute → Servers**. Each machine is a Proxmox VE virtual machine cloned from an **image** (the operating system to boot), sized by a **flavor** (vCPUs, RAM, optional GPU, and a default root-disk size), attached to one of your project's **networks**, given a **key pair** for SSH login (injected by cloud-init), and protected by one or more **security groups**. Pick a flavor that matches the workload, then set the root-disk size; it can't go below what the image needs. The flavor decides which storage the root disk lives on, and the root disk is deleted with the server. Add data disks after launch from **Storage → Volumes** (see [Block Volumes](/docs/guides/volumes)).
 
-The launch form still carries an **Assign floating IP** switch, but it has no effect on Proxmox. To make a server reachable from the internet, give it a public NIC as described in [Networking](/docs/guides/networks).
+There are no floating IPs on Proxmox. To make a server reachable from the internet, give it a public NIC as described in [Networking](/docs/guides/networks).
 
 ## Power actions
 

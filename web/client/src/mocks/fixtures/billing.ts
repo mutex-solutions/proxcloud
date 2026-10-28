@@ -19,8 +19,8 @@ export const costInfo: CostInfo = {
   currentMonthCosts: 342.18,
   forecastedMonthEndCosts: 941.0,
   lastMonthCosts: 887.55,
-  currentMonthCostsByType: { SERVER: 228.4, VOLUME: 48.9, LOAD_BALANCER: 32.5, FLOATING_IP: 12.38, BUCKET: 20.0 },
-  lastMonthCostsByType: { SERVER: 610.2, VOLUME: 130.1, LOAD_BALANCER: 90.25, FLOATING_IP: 32.0, BUCKET: 25.0 },
+  currentMonthCostsByType: { SERVER: 228.4, VOLUME: 48.9, DATABASE_CLUSTER: 32.5, IMAGE: 12.38, BUCKET: 20.0 },
+  lastMonthCostsByType: { SERVER: 610.2, VOLUME: 130.1, DATABASE_CLUSTER: 90.25, IMAGE: 32.0, BUCKET: 25.0 },
   dueAmount: 0,
   balance: 128.4,
   accountCredit: 50,
@@ -28,7 +28,7 @@ export const costInfo: CostInfo = {
   topResourcePrices: [
     { currentCost: 96.2, price: 96.2, resource: { id: "res-server-004", type: "SERVER", name: "gpu-trainer", createdAt: "2026-06-12T09:30:00Z" } },
     { currentCost: 66.1, price: 66.1, resource: { id: "res-server-001", type: "SERVER", name: "web-01", createdAt: "2026-06-12T09:30:00Z" } },
-    { currentCost: 32.5, price: 32.5, resource: { id: "res-load-balancer-001", type: "LOAD_BALANCER", name: "web-lb", createdAt: "2026-06-12T09:30:00Z" } },
+    { currentCost: 32.5, price: 32.5, resource: { id: "res-database-cluster-001", type: "DATABASE_CLUSTER", name: "orders-db", createdAt: "2026-06-12T09:30:00Z" } },
   ],
 }
 
@@ -55,7 +55,7 @@ export const bills: Bill[] = [
       { name: "web-01", resourceId: "res-server-001", projectId: PID, resourceType: "SERVER", netAmount: 180.5, currency: "USD" },
       { name: "gpu-trainer", resourceId: "res-server-004", projectId: PID, resourceType: "SERVER", netAmount: 429.7, currency: "USD" },
       { name: "data-vol-01", resourceId: "res-volume-001", projectId: PID, resourceType: "VOLUME", netAmount: 118.2, currency: "USD" },
-      { name: "web-lb", resourceId: "res-load-balancer-001", projectId: PID, resourceType: "LOAD_BALANCER", netAmount: 78.46, currency: "USD" },
+      { name: "orders-db", resourceId: "res-database-cluster-001", projectId: PID, resourceType: "DATABASE_CLUSTER", netAmount: 78.46, currency: "USD" },
     ],
     adjustments: [],
     appliedPromotionalCredits: [{ code: "WELCOME25", amount: 25 }],

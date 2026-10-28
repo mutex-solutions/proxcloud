@@ -8,11 +8,11 @@
 #   ---------------------------      -----------------------------------------------
 #   EnsureNamespace (SSA PATCH)      namespaces: create+patch (+get), delete/list for
 #                                    the sync-driven namespace GC (orphan finalization)
-#   ApplySecret (SSA PATCH)          secrets: create+patch (net-share marker Secrets,
+#   ApplySecret (SSA PATCH)          secrets: create+patch (marker + auth Secrets,
 #                                    RESET_PASSWORD writes onto the engine secret)
 #   GetSecretData / DeleteSecret     secrets: get / delete; list for the orphan sweep
 #                                    (connection-info reads use get)
-#   GetService                       services: get/list (LB VIP read-back — the
+#   GetService                       services: get/list (LB IP read-back — the
 #                                    endpoint proxcloud serves to customers)
 #   Apply/Get/List/DeleteApplication applications.argoproj.io (argocd ns only)
 #   engine CR status reads           the operator CRDs below: get/list
@@ -55,13 +55,13 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "create", "patch", "delete"]
-  # Net-share marker secrets (the durable neutron-RBAC revoke record, written by proxcloud),
+  # Marker + auth secrets (written by proxcloud, reaped by the orphan sweep),
   # operator-generated connection secrets (read on GET_CONNECTION_INFO), and RESET_PASSWORD
   # writes onto the engine secret. Cluster-wide — see header.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "create", "patch", "delete"]
-  # LB Service VIP read-back (<id>-lb status.loadBalancer.ingress) — read-only; the chart
+  # LB Service IP read-back (<id>-lb status.loadBalancer.ingress) — read-only; the chart
   # (via ArgoCD) owns the Service itself.
   - apiGroups: [""]
     resources: ["services"]

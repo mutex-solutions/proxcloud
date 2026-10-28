@@ -52,8 +52,7 @@ These hold across the schema; individual tables note only their departures.
   system's id (Proxmox VMID for servers and templates, the volume `volid`, the
   vnet name, the firewall group name; the RGW bucket name), *not* a ProxCloud id.
   Everything else (`projectId`, `userId`, `serviceId`, …) is an internal id.
-  `externalProjectId` is not set on Proxmox bindings, which carry `pool`
-  instead.
+  A project's Proxmox binding carries its PVE `pool`.
 - **Foreign keys are application-level.** The tables carry no `references`
   constraints — every table is just `(id text primary key, doc jsonb)`, so
   Postgres enforces no referential integrity. The "FK" relationships below are
@@ -125,7 +124,7 @@ The distributed job lock is likewise raw SQL (see `shedLock`, below).
 | Kind | Tables |
 |---|---|
 | **Seeded / operator-configured** (define how the platform behaves) | `platformConfiguration`, `billingConfiguration`, `pricePlan`, `pricePlanRule`, `priceAdjustmentRule`, `taxRate`, `savingsPlan`, `flavor`, `flavorCategory`, `imageGroup`, `imageCategory`, `instanceMetadataOption`, `messageTemplate` (system templates seeded at startup), `thirdPartyIntegration`, `customMenuItem`, `promotionCode`, `adminRole`, `roleDefinition`, `adminPermission`, `externalService` |
-| **Runtime** (produced by customer + system activity) | `users`, `organization`, `organization_members`, `project`, `billingProfile`, `bill`, `accountCredit`, `accountCreditTransaction`, `collectTransaction`, `creditCard`, `creditCardTransaction`, `bankTransfer`, `promotionalCredit`, `promotionCodeRedemption`, `savingsContract`, `suspension`, `identityValidation`, `projectInvite`, `order`, `affiliateEntry`, `reminderNotification`, `builtInInvoice`, `cloudResource`, `cloudResourceHistory`, `cloudDownload`, `gnocchiMetrics`, `pvePublicIp`, `auditEvent`, `externalResourceProvider`, `hmac_keys`, `shedLock` |
+| **Runtime** (produced by customer + system activity) | `users`, `organization`, `organization_members`, `project`, `billingProfile`, `bill`, `accountCredit`, `accountCreditTransaction`, `collectTransaction`, `creditCard`, `creditCardTransaction`, `bankTransfer`, `promotionalCredit`, `promotionCodeRedemption`, `savingsContract`, `suspension`, `identityValidation`, `projectInvite`, `order`, `affiliateEntry`, `reminderNotification`, `builtInInvoice`, `cloudResource`, `cloudResourceHistory`, `cloudDownload`, `usageMetrics`, `pvePublicIp`, `auditEvent`, `externalResourceProvider`, `hmac_keys`, `shedLock` |
 
 ---
 
@@ -171,7 +170,7 @@ erDiagram
 
     project ||--o{ cloudResource : "projectId"
     externalService ||--o{ cloudResource : "serviceId"
-    cloudResource ||--o{ gnocchiMetrics : "resourceId"
+    cloudResource ||--o{ usageMetrics : "resourceId"
 
     users {
         string _id PK "id column"
@@ -315,7 +314,7 @@ erDiagram
         string type "SERVER|VOLUME|NETWORK|..."
         object data "type-specific"
     }
-    gnocchiMetrics {
+    usageMetrics {
         string _id PK
         string resourceId FK "cloudResource._id"
         object billingCycle
@@ -384,7 +383,7 @@ Memberships and attached services are **embedded** JSON arrays.
 | `billingProfileId` | string FK → `billingProfile` | optional direct link (usually inherited via the org) |
 | `owner` | string FK → `users.sub` | deprecated but still stored |
 | `memberships` | array | embedded `{sub, role}` (role `OWNER`/`MEMBER`) |
-| `services` | array | embedded attached-service docs, one per provider. Proxmox: `{serviceId → externalService, provider: "proxmox", region, pool}` (`project/bootstrap.go`); ceph-s3: `{serviceId, provider: "ceph-s3", region, rgwUid}`. An `externalProjectId` key appears only on legacy data. |
+| `services` | array | embedded attached-service docs, one per provider. Proxmox: `{serviceId → externalService, provider: "proxmox", region, pool}` (`project/bootstrap.go`); ceph-s3: `{serviceId, provider: "ceph-s3", region, rgwUid}`. |
 | `scheduledForDeletionAt` | time | deletion grace timer |
 
 ### `projectInvite`
@@ -693,10 +692,10 @@ written (idempotent per `cloudResourceID`) so recreation can be detected.
 | `externalId`, `type`, `region`, `data` | mixed | archived snapshot |
 | `createdAt`, `deletedAt` | time | original create / archive time |
 
-### `gnocchiMetrics`
+### `usageMetrics`
 Per-resource, per-cycle usage (network traffic) ingested from the provider's
 Prometheus-compatible metrics source; the input the traffic-billed rating rules
-read. The table name is kept from the previous backend.
+read.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -705,7 +704,6 @@ read. The table name is kept from the previous backend.
 | `resourceType` | string | |
 | `billingCycle` | object | `{startDate, endDate}` (lookup key with `resourceId`) |
 | `details` | object | traffic in MB (incoming/outgoing, public/private, totals) as decimal-string money |
-| `ostorMetrics` | object | object-store counters (bytes, puts, gets, lists); legacy, not written by the Prometheus path |
 
 ### `pvePublicIp`
 One allocated public address on a Proxmox public network
@@ -733,7 +731,7 @@ cannot reconstruct a usable token. Expiry is checked in code on lookup.
 | Field | Type | Meaning |
 |---|---|---|
 | `_id` | string | hash of the download token (the `id` column) |
-| `type` | string | literal legacy enum values from the previous backend (`internal/cloud/download.go`): `OPENSTACK_SWIFT_BUCKET` (the object download the bucket DOWNLOAD action issues, also for ceph-s3 buckets), `OPENSTACK_S3_OBJECT`, `OPENSTACK_CONSOLE` |
+| `type` | string | `internal/cloud/download.go`: `OBJECT` (the object download the bucket DOWNLOAD action issues) or `CONSOLE` (a server console session) |
 | `serviceId` | string FK → `externalService` | |
 | `projectId` | string FK → `project` | |
 | `externalId` | string | the object key / resource id |
@@ -835,7 +833,7 @@ inferred from read/write usage.
   `savingsPlan`, `savingsContract`, `identityValidation`, `creditCard`,
   `creditCardTransaction`, `collectTransaction`, `bankTransfer`, `pricePlan`,
   `pricePlanRule`, `priceAdjustmentRule`, `taxRate`, `externalService`,
-  `cloudResource`, `cloudResourceHistory`, `gnocchiMetrics`, `pvePublicIp`, `cloudDownload`,
+  `cloudResource`, `cloudResourceHistory`, `usageMetrics`, `pvePublicIp`, `cloudDownload`,
   `platformConfiguration`, `auditEvent`, `order`, `adminPermission`,
   `promotionCode` / `promotionCodeRedemption` (below).
 - **In the reference table (17):** `roleDefinition`, `adminRole`,

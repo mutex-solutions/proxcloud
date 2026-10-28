@@ -27,7 +27,6 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/billingresource"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
@@ -218,9 +217,6 @@ func run() error {
 	// project — set via a setter).
 	orgH.SetProjectMemberAdder(projectSvc)
 	cloudRepo := cloud.NewRepo(pg)
-	// cloudCli holds the live CloudClient (set in the background once OpenStack auth completes;
-	// declared here so the project handler's write endpoints can resolve it lazily).
-	var cloudCli atomic.Pointer[client.Client]
 	// esSvc is created here (ahead of the admin handler) so the project handler's client cloud read
 	// endpoints (init menu / project services) can resolve external services too. It shares `enc`
 	// (declared above, near the mail gateway) so write-encrypt and read-decrypt use the same key.
@@ -236,8 +232,7 @@ func run() error {
 		esSvc,
 		pricingRepo,
 		project.NewInstanceMetadataReader(pg),
-		func() *client.Client { return cloudCli.Load() },
-		cfg.OpenStack.Region,
+		cfg.DefaultRegion,
 	)
 	// Cloud-object download tokens (object-store DOWNLOAD action → GET /download/{token}).
 	projectH.SetDownloads(cloud.NewDownloadRepo(pg), cfg.Self.APIBaseURL)
@@ -363,18 +358,14 @@ func run() error {
 	}
 	authn.SetClientKeyLookup(clientKeyLookup)
 
-	// The OpenStack dev-bootstrap cloud client died with that backend; /debug/cloud
-	// now reports only that no global cloud client exists (pve clients are per-provider).
-	var cloudDebug http.HandlerFunc
-
-	// Scheduled jobs: the charge cron + the gnocchi metrics
+	// Scheduled jobs: the charge cron + the usage metrics
 	// ingestion, each guarded by a distributed lock so it runs once across the fleet. The charge
-	// step reads the PostgreSQL cache (cloudResource/gnocchiMetrics/pricePlan); the metrics job
+	// step reads the PostgreSQL cache (cloudResource/usageMetrics/pricePlan); the metrics job
 	// hits the live cloud per ExternalService. Wired always, STARTED only when
 	// PROXCLOUD_JOBS_SCHEDULER_ENABLED=true — so a plain deploy never charges bills until the
 	// gated live rating run turns it on.
 	// Admin handler (needs esSvc + region + the cloud-client factory for cloud-admin live reads).
-	adminH := admin.NewHandler(admin.NewRepo(pg), catalog.NewRepo(pg), users, addFundsSvc, pricingRepo, billingRepo, cloudRepo, platformconfig.NewRepo(pg), auditSvc, esSvc, cfg.OpenStack.Region, cfg.Auth.Admin.IssuerURI, cfg.Auth.Admin.ClientID)
+	adminH := admin.NewHandler(admin.NewRepo(pg), catalog.NewRepo(pg), users, addFundsSvc, pricingRepo, billingRepo, cloudRepo, platformconfig.NewRepo(pg), auditSvc, esSvc, cfg.DefaultRegion, cfg.Auth.Admin.IssuerURI, cfg.Auth.Admin.ClientID)
 	adminH.SetKamaji(func(es *externalservice.ExternalService) (*kamaji.Service, error) {
 		return kamaji.New(es.KamajiConfig(), es.ID)
 	})
@@ -487,7 +478,7 @@ func run() error {
 	// On admin user-create, loop the given project IDs and send a project invite for each (best-effort).
 	adminH.SetInviteToProject(inviteH.InviteToProject)
 	// Live per-project cloud legs for the admin project + cloud-resource mutations:
-	// nova pause/unpause, scoped sync, keystone bootstrap.
+	// PVE suspend/resume, scoped sync, project bootstrap.
 	adminH.SetProjectCloudOps(&admin.ProjectCloudOps{
 		PauseServers: func(ctx context.Context, projectID string, pause bool) error {
 			p, err := projectRepo.FindByID(ctx, projectID)
@@ -501,7 +492,7 @@ func run() error {
 			return nil
 		},
 		Sync: syncJob.SyncOne,
-		Bootstrap: func(ctx context.Context, projectID, esID, adoptExternalProjectID string) error {
+		Bootstrap: func(ctx context.Context, projectID, esID string) error {
 			err := func() error {
 				p, err := projectSvc.GetProjectByID(ctx, projectID)
 				if err != nil {
@@ -514,7 +505,7 @@ func run() error {
 				if es == nil {
 					return fmt.Errorf("external service %s not found", esID)
 				}
-				return projectH.BootstrapOnto(ctx, p, es, adoptExternalProjectID)
+				return projectH.BootstrapOnto(ctx, p, es)
 			}()
 			if err != nil {
 				// The admin handler wraps this into a generic 500 — log the real cause here.
@@ -591,7 +582,7 @@ func run() error {
 	// Which engine charges bills. NATIVE (the default) rates in-process with the billing engine in
 	// this repository and needs nothing but PostgreSQL — that is what a plain checkout of proxcloud
 	// runs. EXTERNAL delegates rating to a separate billing service; this pod still resolves each
-	// profile's cloud resources, because it owns the OpenStack cache and nothing else can.
+	// profile's cloud resources, because it owns the cloud resource cache and nothing else can.
 	//
 	// Only this step differs between the two. See internal/platform/billingprovider.
 	var billingProv billingprovider.Provider
@@ -629,7 +620,7 @@ func run() error {
 		log.Info("scheduled jobs are wired but NOT started (set PROXCLOUD_JOBS_SCHEDULER_ENABLED=true to enable)")
 	}
 	// On-demand triggers (mgmt port) for the golden run — deterministic instead of cron-timed:
-	// run-sync (populate the cache) → run-metrics (ingest gnocchi) → run-charge. Exposed when the
+	// run-sync (populate the cache) → run-metrics (ingest usage metrics) → run-charge. Exposed when the
 	// scheduler is on OR debug-triggers is on, so a deploy can be driven manually while the timed
 	// crons stay dormant (no automatic bill charging).
 	var jobsDebug map[string]http.HandlerFunc
@@ -844,7 +835,7 @@ func run() error {
 	}
 	mgmtSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Management.Port),
-		Handler:           server.MgmtRouter(h, cloudDebug, jobsDebug, billingCB),
+		Handler:           server.MgmtRouter(h, jobsDebug, billingCB),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -886,7 +877,7 @@ func startChargeConsumer(rabbit *atomic.Pointer[amqp.Client], charger chargefano
 	log.Error("charge fan-out consumer: broker not up after 120s")
 }
 
-// registerJobs wires the charge cron (minutely/hourly/monthly) + the gnocchi metrics job
+// registerJobs wires the charge cron (minutely/hourly/monthly) + the usage metrics job
 // with the verified cron specs + lock names/durations. The charge crons
 // share AtMostFor 5m / AtLeastFor 30s; the metrics job uses AtMostFor 10m / AtLeastFor 30s.
 // registerJobs wires the scheduled jobs.
@@ -924,9 +915,9 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 		{Name: "minutelyCharge", Spec: scheduler.MinutelyChargeSpec, AtMostFor: 5 * time.Minute, AtLeastFor: 30 * time.Second, Fn: chargeFn(pricing.TimeUnitMinute)},
 		{Name: "hourlyCharge", Spec: scheduler.HourlyChargeSpec, AtMostFor: 5 * time.Minute, AtLeastFor: 30 * time.Second, Fn: chargeFn(pricing.TimeUnitHour)},
 		{Name: "monthlyCharge", Spec: scheduler.MonthlyChargeSpec, AtMostFor: 5 * time.Minute, AtLeastFor: 30 * time.Second, Fn: chargeFn(pricing.TimeUnitMonth)},
-		{Name: "gnocchiMetricsFetch", Spec: scheduler.GnocchiMetricsSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
+		{Name: "usageMetricsFetch", Spec: scheduler.UsageMetricsSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
 			if err := metrics.Run(ctx); err != nil {
-				log.Error("gnocchi metrics job", "err", err)
+				log.Error("usage metrics job", "err", err)
 			}
 		}},
 		{Name: "savingsContractExpiration", Spec: scheduler.SavingsExpirationSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
@@ -1019,12 +1010,10 @@ func (f projectTeardownDeleter) DeleteProjectResources(ctx context.Context, proj
 	return f(ctx, projectID)
 }
 
-// billingCloudSuspender is the live OpenStack suspend/resume for a billing profile:
-// resolve the profile's projects (via its orgs — greenfield projects inherit the org's bp), and
-// per CLOUD service nova-PAUSE/UNPAUSE each cached SERVER with a tenant-scoped client + flip the
-// project ENABLED↔DISABLED. Per-project/server errors are logged and skipped (best-effort).
-// (keystone member/API-user disable legs are no-ops here — the bootstrap creates no
-// per-customer keystone users yet.)
+// billingCloudSuspender is the live suspend/resume for a billing profile: resolve the
+// profile's projects (via its orgs — greenfield projects inherit the org's bp), and per Proxmox
+// CLOUD service suspend/resume each cached SERVER (PVE VM) + flip the project ENABLED↔DISABLED.
+// Per-project/server errors are logged and skipped (best-effort).
 type billingCloudSuspender struct {
 	orgs     *org.Repo
 	projects *project.Repo
@@ -1069,8 +1058,8 @@ func (s billingCloudSuspender) forEachProjectServer(ctx context.Context, bpID st
 	return nil
 }
 
-// pauseProjectServers is the CLOUD-only per-project leg: nova PAUSE/UNPAUSE every cached SERVER
-// through a tenant-scoped client. Best-effort — per-server/-service failures are logged and
+// pauseProjectServers is the CLOUD-only per-project leg: PVE suspend/resume every cached SERVER
+// through the provider's client. Best-effort — per-server/-service failures are logged and
 // skipped. Status flips stay with the callers (bp walk above; admin status-update handler).
 func (s billingCloudSuspender) pauseProjectServers(ctx context.Context, p *project.Project, pause bool) {
 	for _, serviceID := range p.ServiceIDs() {

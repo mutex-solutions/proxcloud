@@ -11,7 +11,7 @@ Manage cloud projects. Base path: `/admin-api/v1/projects`.
 | `status` | string | Project status. Newly created projects are `DISABLED`; provisioning sets `ENABLED`. |
 | `organization_id` | string | Owning organization. |
 | `billing_profile_id` | string | The **effective** billing profile: the project's own, or the owning organization's when the project has none. |
-| `provisioned_services` | array | Always present. Each entry has a `service_id` and an `openstack` object. `openstack.openstack_project_id` is a legacy field. It is omitted for Proxmox bindings, which have no external project id, so `openstack` comes back as `{}`. |
+| `provisioned_services` | array | Always present. One entry per provider binding: `service_id`, `provider` (`PROXMOX`, `CEPH_S3`, `KAMAJI` or `DBAAS`), `region`, and `pool` (the project's PVE pool; Proxmox bindings only). Empty fields are omitted. |
 | `members` | array | Always present. Each entry has `sub`. |
 
 ## GET /admin-api/v1/projects
@@ -24,7 +24,6 @@ Lists projects, paginated.
 | `billing_profile_id` | string | no | Filter by the project's own billing profile id. |
 | `member_sub` | string | no | Only projects the given `sub` belongs to. |
 | `status` | string | no | Exact status match (e.g. `ENABLED`, `DISABLED`). |
-| `openstack_project_id` | string | no | Legacy filter on a binding's external project id. Proxmox bindings carry none, so it only matches imported legacy data. |
 | `limit` | integer | no | Page size (default 50, max 500). |
 | `marker` | string | no | Keyset cursor. |
 
@@ -48,7 +47,9 @@ Response `200`:
       "provisioned_services": [
         {
           "service_id": "665f0000b8d34a0012340099",
-          "openstack": {}
+          "provider": "PROXMOX",
+          "region": "default",
+          "pool": "pc-665f3b0cb8d34a0012340010"
         }
       ],
       "members": [

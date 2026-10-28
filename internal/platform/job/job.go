@@ -34,7 +34,7 @@ func NewHandler(r Runners) *Handler { return &Handler{r: r} }
 func (h *Handler) Routes(router chi.Router) {
 	// Ported, real runners.
 	router.Post("/admin/job/billing/rate", h.charge)
-	router.Post("/admin/job/gnocchi/metrics", h.run(h.r.Metrics))
+	router.Post("/admin/job/usage/metrics", h.run(h.r.Metrics))
 	router.Post("/admin/job/external-service/sync", h.run(h.r.ServicesSync))
 	router.Post("/admin/job/collect", h.run(h.r.Collect))
 	router.Post("/admin/job/savings-contracts/expiry-check", h.run(h.r.SavingsExpire))
@@ -46,7 +46,7 @@ func (h *Handler) Routes(router chi.Router) {
 	router.Get("/admin/job/cloud-resource", h.cloudResource)
 	// Gated / per-id rabbit fan-out / not-wired subsystems → 202 Accepted (no-op). These are
 	// published to RabbitMQ consumers (send-bill, per-id collect, contacts/segments=CRM,
-	// kubernetes=magnum sync, reminders=notification, bills-recover) which the single-pod build
+	// kubernetes sync, reminders=notification, bills-recover) which the single-pod build
 	// does not run; the trigger still acknowledges.
 	for _, p := range []string{
 		"/admin/job/billing/bills-recover",

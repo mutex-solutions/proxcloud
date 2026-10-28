@@ -1,8 +1,7 @@
 package providers
 
-// write.go — the ceph-s3 BUCKET write service. The 100+ method OpenStack Writer
-// died with the OpenStack backend; buckets are the only resource family that
-// still writes through this seam (Proxmox has its own pve.Service path, kamaji
+// write.go — the ceph-s3 BUCKET write service. Buckets are the only resource
+// family that writes through this seam (Proxmox has its own pve.Service path, kamaji
 // and dbaas their own services). The interface stays injectable so bucket writes
 // are testable against a fake.
 
@@ -105,12 +104,6 @@ func (s *WriteService) Delete(ctx context.Context, serviceID, externalID string)
 	return s.repo.DeleteAndArchive(ctx, cr, time.Now().UTC())
 }
 
-// DeleteResource deletes the cloud object for an already-resolved resource that
-// has no cache row. Nothing to archive.
-func (s *WriteService) DeleteResource(ctx context.Context, cr *cloud.CloudResource) error {
-	return s.deleteCloudObject(ctx, cr)
-}
-
 func (s *WriteService) deleteCloudObject(ctx context.Context, cr *cloud.CloudResource) error {
 	switch cr.Type {
 	case cloud.TypeBucket:
@@ -118,10 +111,4 @@ func (s *WriteService) deleteCloudObject(ctx context.Context, cr *cloud.CloudRes
 	default:
 		return fmt.Errorf("unsupported delete type %q", cr.Type)
 	}
-}
-
-// Action — no bucket mutations run through the action dispatch (bucket settings
-// and object I/O go through the ceph client directly in the platform layer).
-func (s *WriteService) Action(ctx context.Context, serviceID, projectID, externalID, action string, data map[string]any) (*cloud.CloudResource, error) {
-	return nil, fmt.Errorf("unsupported action %q", action)
 }

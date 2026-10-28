@@ -41,9 +41,8 @@ type Handler struct {
 	apiIssuer   string // cfg.Auth.AdminAPI — the OIDC alternative to SigV4
 	apiClientID string
 	activation  *billing.ActivationService // bp activate/suspend/resume (nil → 501 when not wired)
-	// bootstrapProject provisions a project onto the platform cloud (keystone tenant +
-	// ENABLED — single-cloud provisioning; per-spec service selection and per-user keystone
-	// grants are deferred). nil → 501 when not wired.
+	// bootstrapProject provisions a project onto the platform providers + ENABLED (no
+	// per-spec service selection, no per-user cloud grants). nil → 501 when not wired.
 	bootstrapProject func(ctx context.Context, projectID string) error
 }
 

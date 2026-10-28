@@ -17,7 +17,7 @@ import (
 //
 // The work splits where the in-process driver already splits it: RESOLUTION (read the cloud cache,
 // resolve the profile's projects, build billable units) always happens here because it is
-// OpenStack-specific and nothing else can do it, and RATING goes to the billing service. The only
+// cloud-specific and nothing else can do it, and RATING goes to the billing service. The only
 // difference from Service.Charge is that the units are POSTed instead of handed to pricing
 // in-process.
 //

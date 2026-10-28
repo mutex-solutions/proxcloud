@@ -20,7 +20,7 @@ const (
 	MinutelyChargeSpec = "30 * * * * *" // every minute at :30
 	HourlyChargeSpec   = "0 0 * * * *"  // top of every hour
 	MonthlyChargeSpec  = "0 0 * * * *"  // == hourly (intentional)
-	GnocchiMetricsSpec = "0 0 * * * *"  // top of every hour (gnocchi metrics fetch)
+	UsageMetricsSpec   = "0 0 * * * *"  // top of every hour (usage metrics fetch)
 
 	// SavingsExpirationSpec — daily at 00:00 (savings-contract expiration).
 	SavingsExpirationSpec = "0 0 0 * * *"

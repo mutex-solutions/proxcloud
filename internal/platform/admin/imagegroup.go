@@ -15,7 +15,7 @@ import (
 // (/api/v1/admin/images). The bare category list (GET /images/categories) is ALREADY registered
 // in handler.go (listRaw "imageCategory") and is intentionally NOT re-registered here.
 //
-// This surface is pure datastore CRUD over two tables — NO cloud / OpenStack calls — so
+// This surface is pure datastore CRUD over two tables — NO cloud calls — so
 // there is nothing left unwired. ImageCategory + ImageGroup are plain document domains saved/read via the
 // id-aware crud.go helpers; the handler returns the RAW domain, so shapeDoc (_id→id, drop _class)
 // gives the faithful JSON.

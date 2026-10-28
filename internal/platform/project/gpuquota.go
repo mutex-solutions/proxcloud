@@ -3,9 +3,7 @@ package project
 // gpuquota.go — the tier-1 GPU quota gate. Per-project limits live on the project doc as
 // quota.gpu = {"<model>": n, "*": n} (admin-managed via PUT /admin/project/{id}/quota;
 // model names use the shared alias vocabulary, e.g. "a100-80gb"). Enforcement happens HERE,
-// at the ProxCloud create/resize gate — nothing is pushed to OpenStack (nova legacy quotas
-// have no GPU class). Horizon-direct usage on imported projects bypasses this gate (tier 2,
-// operator-managed).
+// at the ProxCloud create/resize gate — nothing is pushed to the provider.
 
 import (
 	"context"
@@ -49,12 +47,12 @@ func (h *Handler) gpuUsage(ctx context.Context, projectID string) map[string]int
 
 // enforceGPUQuotaForNodeGroups is the same tier-1 gate for kamaji node groups: without it, a
 // user blocked from creating a GPU server could still request GPU worker VMs through a node
-// group and have CAPO create them in the tenant, bypassing the quota entirely. Demand per GPU
+// group and have the cluster create them, bypassing the quota entirely. Demand per GPU
 // model = Σ nodes × flavor devices, where nodes = count, or MAX for an autoscale group (the
 // autoscaler can reach max with no further gate). prevGroups (the cluster's current groups, on
 // a node-group edit) subtract out — their workers are already counted in gpuUsage once the
-// server sync picks them up. osSvcID is the project's OPENSTACK binding (where the worker VMs
-// and flavors live), not the kamaji service. Fail-open like enforceGPUQuota.
+// server sync picks them up. svcID is the project's compute binding (where the worker VMs and
+// flavors live), not the kamaji service. Fail-open like enforceGPUQuota.
 func (h *Handler) enforceGPUQuotaForNodeGroups(ctx context.Context, proj *Project, svcID string, groups, prevGroups []kamaji.NodeGroup) error {
 	if len(proj.Quota) == 0 || len(groups) == 0 || h.pveFlavors == nil {
 		return nil

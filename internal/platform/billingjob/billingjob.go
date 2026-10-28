@@ -5,7 +5,7 @@
 // in-process under a ShedLock (scheduler.RunLocked) instead of fanning a RabbitMQ message
 // per profile — the per-profile unit of work is identical.
 //
-// The charge step reads the PostgreSQL CACHE (cloudResource + gnocchiMetrics + pricePlan), NOT
+// The charge step reads the PostgreSQL CACHE (cloudResource + usageMetrics + pricePlan), NOT
 // live cloud — so the whole driver is testcontainer-verifiable. Populating that cache is
 // the SYNC providers + metrics job (live cloud, separate).
 package billingjob
@@ -284,7 +284,7 @@ func pricePlanConfig(p *billing.BillingProfile) (ids []string, includePublic boo
 }
 
 // monthBounds returns [first-of-month 00:00, first-of-next-month 00:00) in UTC — the billing
-// cycle window (cycleStart matches ServerProvider.firstDayOfCurrentMonth so the gnocchi
+// cycle window (cycleStart matches ServerProvider.firstDayOfCurrentMonth so the usage-metrics
 // lookup lines up).
 func monthBounds(now time.Time) (time.Time, time.Time) {
 	y, m, _ := now.UTC().Date()

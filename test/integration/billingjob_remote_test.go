@@ -62,19 +62,19 @@ func chargeFixture(t *testing.T, db *pgdoc.DB, now time.Time) (profileID, traffi
 
 	seededAt := now.Truncate(time.Minute).Add(-time.Minute)
 	srv, err := cloudRepo.Insert(ctx, &cloud.CloudResource{
-		ExternalID: "nova-1", ServiceID: "svc-x", ProjectID: projectID, Type: cloud.TypeServer,
+		ExternalID: "vm-1", ServiceID: "svc-x", ProjectID: projectID, Type: cloud.TypeServer,
 		Data:      map[string]any{"flavorName": "m5.large", "server": map[string]any{"name": "vm", "status": "ACTIVE", "flavor": map[string]any{"ram": int64(2048), "vcpus": int64(2), "disk": int64(20)}}},
 		CreatedAt: &seededAt, UpdatedAt: &seededAt,
 	})
 	if err != nil {
 		t.Fatalf("seed server: %v", err)
 	}
-	if _, err := metricsRepo.Save(ctx, &metrics.GnocchiMetrics{
+	if _, err := metricsRepo.Save(ctx, &metrics.UsageMetrics{
 		ResourceID: srv.ID, ResourceType: cloud.TypeServer,
 		BillingCycle: &metrics.BillBillingCycle{StartDate: &cycleStart, EndDate: &cycleEnd},
-		Details:      &metrics.GnocchiMetricsDetails{TotalTrafficMb: decimal.RequireFromString("100")},
+		Details:      &metrics.UsageMetricsDetails{TotalTrafficMb: decimal.RequireFromString("100")},
 	}); err != nil {
-		t.Fatalf("seed gnocchi: %v", err)
+		t.Fatalf("seed usage metrics: %v", err)
 	}
 
 	mustInsert(t, db, "pricePlan", pricing.PricePlan{ID: "pp-public", Enabled: true, AccessMode: pricing.AccessPublic})
@@ -201,7 +201,7 @@ func TestRemoteChargeMatchesInProcess(t *testing.T) {
 
 // TestResolveByProfileIDCarriesTheCatalog: the resource-type catalog must travel with the request,
 // because the billing service needs it to resolve the attributes that savings-contract targets and
-// price-adjustment rules filter on, and it cannot derive it (it describes OpenStack resources).
+// price-adjustment rules filter on, and it cannot derive it (it describes cloud resources).
 func TestResolveByProfileIDCarriesTheCatalog(t *testing.T) {
 	now := time.Now().UTC()
 	db := freshPG(t)

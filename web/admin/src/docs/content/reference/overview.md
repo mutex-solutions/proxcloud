@@ -6,7 +6,7 @@ The ProxCloud Admin API is a machine-to-machine REST interface for managing user
 - **Format:** JSON with `snake_case` field names
 - **Auth:** AWS Signature Version 4 over an HMAC key pair — see [Authentication](/docs/reference/authentication)
 
-## Authentication at a glance
+## Authentication overview
 
 Every request has to be signed with AWS SigV4 using an HMAC key pair — an access key id (`pk…`) and a secret key (`sk…`) — that you generate on the admin UI's **System → API keys** page. As an alternative, a bearer token from the dedicated admin-api OIDC realm is accepted. Requests that are unsigned or signed incorrectly get `401`; a bearer token from any other realm gets `403`.
 

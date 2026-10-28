@@ -69,8 +69,6 @@ var publicPrefix = []string{
 	"/api/v1/auth/",
 	"/api/v1/download/",
 	"/api/v1/console/", // VNC console WebSocket proxy — the console token is the auth
-
-	"/api/v1/notifications/",
 	"/api/v1/callbacks/",
 	"/api/v1/admin/onboarding/",
 }

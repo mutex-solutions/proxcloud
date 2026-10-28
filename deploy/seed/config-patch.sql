@@ -32,7 +32,7 @@ WHERE doc->>'defaultConfiguration' = 'true';
 
 -- 3. Image categories (top-level buckets; image groups hang under them) -------
 -- Simple docs (name/description/bareMetal). Add image GROUPS under these in the
--- admin Catalog UI (they bind live Glance image names, which are cloud-specific).
+-- admin Catalog UI (they bind the provider's template/image names, which are cloud-specific).
 CREATE TABLE IF NOT EXISTS "imageCategory" (id text PRIMARY KEY, doc jsonb NOT NULL);
 INSERT INTO "imageCategory" (id, doc) VALUES
 ('6a4e63e8aa5e5eed10000020', '{"bareMetal": false, "name": "Ubuntu", "description": "Ubuntu LTS server images"}'),

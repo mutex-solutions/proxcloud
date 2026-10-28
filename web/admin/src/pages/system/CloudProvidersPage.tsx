@@ -52,7 +52,7 @@ export type CloudProvider = {
   type?: string
   status?: string
   config?: {
-    identityUrl?: string
+    apiUrl?: string
     provider?: string
     regions?: Record<string, unknown>
     services?: Record<string, Record<string, boolean>>
@@ -108,7 +108,7 @@ const cephFormValid = (f: CephFormState) =>
   cephQuotaValid(f.defaultQuotaGiB)
 
 // cephFormToBody builds the ceph-s3 ExternalService document (see docs/cloud-integration.md
-// "Provider config"): no Keystone at all — the S3 + Admin Ops endpoints drive everything, and the
+// "Provider config"): the S3 + Admin Ops endpoints drive everything, and the
 // secret carries the RGW admin keys (caps users=*;buckets=*;usage=*). object-store is the ONLY
 // service a ceph-s3 provider serves, so it is enabled here directly — no discover round-trip exists.
 function cephFormToBody(f: CephFormState) {
@@ -227,8 +227,7 @@ export default function CloudProvidersPage() {
       void qc.invalidateQueries({ queryKey: ["admin-list", LIST_PATH] })
       if (created?.id) navigate(`/system/cloud-providers/${created.id}`)
     },
-    // Go's create runs a live Keystone auto-fill + provisioning; on this deployment it is a seam (501).
-    // Surface the API message so the operator sees why it did not persist.
+    // Surface the API message (validation / in-use errors) so the operator sees why it did not persist.
     onError: (e: Error) => toast.error(e.message),
   })
 
@@ -254,8 +253,8 @@ export default function CloudProvidersPage() {
       },
       {
         id: "endpoint",
-        accessorFn: (p) => p.config?.identityUrl ?? p.config?.s3Endpoint ?? "",
-        header: "Identity URL",
+        accessorFn: (p) => p.config?.apiUrl ?? p.config?.s3Endpoint ?? "",
+        header: "Endpoint",
         cell: ({ getValue }) => <span className="font-mono text-xs">{getValue() || "—"}</span>,
       },
       {
@@ -335,7 +334,7 @@ export default function CloudProvidersPage() {
             <DialogTitle>Add cloud provider</DialogTitle>
             <DialogDescription>
               {kind === "ceph-s3"
-                ? "Connect a Ceph RGW object store over its S3 and Admin Ops endpoints. No Keystone involved — projects get a dedicated RGW user."
+                ? "Connect a Ceph RGW object store over its S3 and Admin Ops endpoints. Projects get a dedicated RGW user."
                 : kind === "kamaji"
                   ? "Connect a Kamaji management cluster for Managed Kubernetes. Clusters are delivered as ArgoCD Applications of the pinned chart; worker nodes run in each customer's project."
                   : kind === "dbaas"

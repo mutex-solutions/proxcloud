@@ -7,7 +7,7 @@ The organizing idea is the **project**. Nearly everything you create — servers
 ## Moving between projects and pages
 
 - A **project switcher** sits at the top of the sidebar. Use it to jump between the projects you're a member of. Because resources, members, and billing are all per-project, switching changes the entire context around you.
-- The **Dashboard** gives you a one-glance summary of the project you're in: how many resources you have and what happened recently.
+- The **Dashboard** gives you a quick summary of the project you're in: how many resources you have and what happened recently.
 - A **More** menu may surface extra links your cloud operator has published — support desks, status pages, and the like.
 
 ## The resource map

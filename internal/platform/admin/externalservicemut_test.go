@@ -80,8 +80,8 @@ func TestEnsureMap(t *testing.T) {
 func TestEnsureConfig(t *testing.T) {
 	doc := pgdoc.M{}
 	cfg := ensureConfig(doc)
-	cfg["identityUrl"] = "http://k"
-	if got, _ := doc["config"].(pgdoc.M); got == nil || got["identityUrl"] != "http://k" {
+	cfg["apiUrl"] = "http://k"
+	if got, _ := doc["config"].(pgdoc.M); got == nil || got["apiUrl"] != "http://k" {
 		t.Fatalf("ensureConfig did not create/store config, doc=%#v", doc)
 	}
 }
@@ -99,38 +99,6 @@ func TestQuotaNestsUnderProvisioning(t *testing.T) {
 	}
 	if got["cpu"] != 4 {
 		t.Errorf("quota.cpu=%#v want 4", got["cpu"])
-	}
-}
-
-// TestVhiPlacementQuotaNesting verifies the vhi placement-quotas PUT nests at
-// config.provisioning.quota.placementQuotas (sets quota.setPlacementQuotas(body), creating the
-// quota object when null).
-func TestVhiPlacementQuotaNesting(t *testing.T) {
-	doc := pgdoc.M{}
-	cfg := ensureConfig(doc)
-	prov := ensureMap(cfg, "provisioning")
-	quota := ensureMap(prov, "quota")
-	quota["placementQuotas"] = []any{"a"}
-	if doc["config"].(pgdoc.M)["provisioning"].(pgdoc.M)["quota"].(pgdoc.M)["placementQuotas"] == nil {
-		t.Fatalf("placementQuotas not stored under config.provisioning.quota, doc=%#v", doc)
-	}
-}
-
-// TestVhiOstorAuthMergedIntoSecret verifies the vhi-ostor PUT merges non-blank keys into
-// secret.vhiOstorAuth (created when absent) — the one field-set PUT that writes the credential
-// secret. The response strips `secret` via shapeExternalService, so the credential never leaks; this
-// asserts the at-rest write is correct.
-func TestVhiOstorAuthMergedIntoSecret(t *testing.T) {
-	doc := pgdoc.M{}
-	secret := ensureMap(doc, "secret")
-	auth := ensureMap(secret, "vhiOstorAuth")
-	auth["accessKey"] = "AK"
-	// blank secretKey is NOT written (only non-blank keys are set).
-	if got := doc["secret"].(pgdoc.M)["vhiOstorAuth"].(pgdoc.M); got["accessKey"] != "AK" {
-		t.Errorf("accessKey=%#v want AK", got["accessKey"])
-	}
-	if _, ok := doc["secret"].(pgdoc.M)["vhiOstorAuth"].(pgdoc.M)["secretKey"]; ok {
-		t.Errorf("blank secretKey must not be written")
 	}
 }
 

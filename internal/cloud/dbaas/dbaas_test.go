@@ -216,9 +216,6 @@ func testConfig() Config {
 		ChartRepo:      "ghcr.io/mutex-solutions/charts",
 		ChartName:      "database-cluster",
 		ChartVersion:   "0.1.0",
-		OSServiceID:    "svc-os",
-		OSProjectID:    "dbaas-tenant",
-		MemberSubnetID: "member-subnet",
 		StorageClasses: []string{"nvme"},
 		Limits:         Limits{MaxCPU: 32, MaxMemoryGiB: 128, MaxStorageGiB: 2048},
 		Engines: map[string]EngineOffer{
@@ -238,13 +235,8 @@ func testSpec(engine, version string) DatabaseSpec {
 		ID: "std-abc12345", DisplayName: "my db", ProjectID: "p1",
 		Engine: engine, Version: version, Replicas: 1,
 		CPU: 2, MemoryGiB: 4, StorageGiB: 20,
-		NetworkID: "net-1", SubnetID: "sub-1",
 		AllowedCIDRs: []string{"10.1.0.0/24"},
 	}
-}
-
-func testShare() NetShare {
-	return NetShare{NetworkID: "net-1", SubnetID: "sub-1", OSServiceID: "svc-os", OSProjectID: "dbaas-tenant", OSRegion: "RegionOne"}
 }
 
 func TestSpecValidate(t *testing.T) {
@@ -267,9 +259,6 @@ func TestSpecValidate(t *testing.T) {
 	s = testSpec(EnginePostgreSQL, "17")
 	s.StorageGiB = 0
 	cases["zero storage"] = s
-	s = testSpec(EnginePostgreSQL, "17")
-	s.SubnetID = ""
-	cases["missing subnet"] = s
 	s = testSpec(EnginePostgreSQL, "17")
 	s.StorageClass = "hdd"
 	cases["storage class off allowlist"] = s
@@ -301,8 +290,8 @@ func TestNames(t *testing.T) {
 	if AuthSecretName("std-x") != "std-x-auth" {
 		t.Fatal("AuthSecretName")
 	}
-	if NetShareSecretName("std-x") != "std-x-net-share" {
-		t.Fatal("NetShareSecretName")
+	if MarkerSecretName("std-x") != "std-x-marker" {
+		t.Fatal("MarkerSecretName")
 	}
 }
 
@@ -333,8 +322,8 @@ func TestBuildValues(t *testing.T) {
 			t.Errorf("%s: storage = %v", engine, st)
 		}
 		net := v["network"].(map[string]any)
-		if net["networkId"] != "net-1" || net["subnetId"] != "sub-1" || net["memberSubnetId"] != "member-subnet" {
-			t.Errorf("%s: network = %v", engine, net)
+		if len(net) != 1 {
+			t.Errorf("%s: network carries only allowedCidrs, got %v", engine, net)
 		}
 		if cidrs := net["allowedCidrs"].([]any); len(cidrs) != 1 || cidrs[0] != "10.1.0.0/24" {
 			t.Errorf("%s: allowedCidrs = %v", engine, net["allowedCidrs"])
@@ -402,50 +391,18 @@ func TestServiceCreateDelete(t *testing.T) {
 	ctx := context.Background()
 
 	// mariadb needs the proxcloud-owned auth secret; ordering = ns+default-deny → marker →
-	// ensureShare → auth → Application (marker BEFORE the neutron share: a crash between them
-	// converges via the sweep instead of leaking an unfindable share).
+	// auth → Application (marker FIRST: a crash mid-create converges via the sweep).
 	spec := testSpec(EngineMariaDB, "11.8")
-	shared := false
-	data, err := s.CreateDatabase(ctx, spec, testShare(), func(context.Context) error {
-		if got := strings.Join(api.ops, ","); !strings.Contains(got, "secret:"+NetShareSecretName(spec.ID)) {
-			t.Fatalf("ensureShare ran before the marker was applied: %s", got)
-		}
-		shared = true
-		return nil
-	})
+	data, err := s.CreateDatabase(ctx, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !shared {
-		t.Fatal("ensureShare not invoked")
-	}
-	wantOps := []string{"ns:pc-p1", "np:proxcloud-default-deny", "secret:" + NetShareSecretName(spec.ID), "secret:" + AuthSecretName(spec.ID), "app:" + spec.ID}
+	wantOps := []string{"ns:pc-p1", "np:proxcloud-default-deny", "secret:" + MarkerSecretName(spec.ID), "secret:" + AuthSecretName(spec.ID), "app:" + spec.ID}
 	if got := strings.Join(api.ops, ","); got != strings.Join(wantOps, ",") {
 		t.Fatalf("create op order = %s, want %s", got, strings.Join(wantOps, ","))
 	}
 	if _, has := api.netpols[key("pc-p1", "proxcloud-default-deny")]; !has {
 		t.Fatal("namespace default-deny must be stamped at ensure time")
-	}
-	marker := api.secrets[key("pc-p1", NetShareSecretName(spec.ID))]
-	if digStr(marker, "metadata", "annotations", AnnotationNetworkID) != "net-1" ||
-		digStr(marker, "metadata", "annotations", AnnotationOSProject) != "dbaas-tenant" ||
-		digStr(marker, "metadata", "annotations", AnnotationOSRegion) != "RegionOne" {
-		t.Fatal("net-share annotations are the revocation record — must be stamped (incl. region)")
-	}
-	// A failed ensureShare reaps the fresh marker and applies no Application.
-	api3 := newFakeAPI()
-	s3 := NewWithAPI(api3, testConfig(), "svc-dbaas")
-	spec3 := testSpec(EngineMariaDB, "11.8")
-	if _, err := s3.CreateDatabase(ctx, spec3, testShare(), func(context.Context) error {
-		return errors.New("neutron down")
-	}); err == nil {
-		t.Fatal("ensureShare failure must fail the create")
-	}
-	if _, has := api3.secrets[key("pc-p1", NetShareSecretName(spec3.ID))]; has {
-		t.Fatal("marker must be reaped when ensureShare fails")
-	}
-	if _, has := api3.apps[key("argocd", spec3.ID)]; has {
-		t.Fatal("no Application may be applied when ensureShare fails")
 	}
 	db, _ := data["database"].(map[string]any)
 	if db["status"] != "PENDING" || db["engine"] != EngineMariaDB {
@@ -455,7 +412,7 @@ func TestServiceCreateDelete(t *testing.T) {
 	// postgres does NOT get an auth secret (CNPG mints its own).
 	api2 := newFakeAPI()
 	s2 := NewWithAPI(api2, testConfig(), "svc-dbaas")
-	if _, err := s2.CreateDatabase(ctx, testSpec(EnginePostgreSQL, "17"), testShare(), nil); err != nil {
+	if _, err := s2.CreateDatabase(ctx, testSpec(EnginePostgreSQL, "17")); err != nil {
 		t.Fatal(err)
 	}
 	if _, has := api2.secrets[key("pc-p1", AuthSecretName("std-abc12345"))]; has {
@@ -469,8 +426,8 @@ func TestServiceCreateDelete(t *testing.T) {
 	if _, alive := api.apps[key("argocd", spec.ID)]; alive {
 		t.Fatal("application not deleted")
 	}
-	if _, has := api.secrets[key("pc-p1", NetShareSecretName(spec.ID))]; !has {
-		t.Fatal("net-share marker must survive the delete (revocation record)")
+	if _, has := api.secrets[key("pc-p1", MarkerSecretName(spec.ID))]; !has {
+		t.Fatal("marker must survive the delete (the sweep owns it)")
 	}
 }
 
@@ -494,25 +451,19 @@ func TestOwnershipGuards(t *testing.T) {
 func TestFinalizeOrphans(t *testing.T) {
 	ctx := context.Background()
 	mkMarker := func(api *fakeAPI, dbID string, age time.Duration) {
-		k := key("pc-p1", NetShareSecretName(dbID))
+		k := key("pc-p1", MarkerSecretName(dbID))
 		api.secrets[k] = map[string]any{"metadata": map[string]any{
-			"name": NetShareSecretName(dbID), "namespace": "pc-p1",
+			"name": MarkerSecretName(dbID), "namespace": "pc-p1",
 			"creationTimestamp": time.Now().UTC().Add(-age).Format(time.RFC3339),
 			"labels":            map[string]any{LabelProject: "p1", LabelService: "svc-dbaas", LabelManagedBy: ManagedByValue},
-			"annotations": map[string]any{
-				AnnotationNetworkID: "net-1", AnnotationSubnetID: "sub-1",
-				AnnotationOSService: "svc-os", AnnotationOSProject: "dbaas-tenant",
-				AnnotationOSRegion: "RegionOne",
-			},
 		}}
-		api.secretData[k] = map[string][]byte{"network-id": []byte("net-1")}
 	}
 
 	// Fresh marker (inside grace) → pending, untouched.
 	api := newFakeAPI()
 	s := NewWithAPI(api, testConfig(), "svc-dbaas")
 	mkMarker(api, "std-new", time.Minute)
-	pending, err := s.FinalizeOrphans(ctx, "p1", nil)
+	pending, err := s.FinalizeOrphans(ctx, "p1")
 	if err != nil || pending != 1 {
 		t.Fatalf("grace window: pending=%d err=%v", pending, err)
 	}
@@ -525,10 +476,10 @@ func TestFinalizeOrphans(t *testing.T) {
 		"name": "std-live", "namespace": "argocd",
 		"labels": map[string]any{LabelProject: "p1", LabelManagedBy: ManagedByValue},
 	}}
-	if pending, err = s.FinalizeOrphans(ctx, "p1", nil); err != nil || pending != 0 {
+	if pending, err = s.FinalizeOrphans(ctx, "p1"); err != nil || pending != 0 {
 		t.Fatalf("live app: pending=%d err=%v", pending, err)
 	}
-	if _, has := api.secrets[key("pc-p1", NetShareSecretName("std-live"))]; !has {
+	if _, has := api.secrets[key("pc-p1", MarkerSecretName("std-live"))]; !has {
 		t.Fatal("live database's marker must stay")
 	}
 
@@ -537,70 +488,8 @@ func TestFinalizeOrphans(t *testing.T) {
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
 	mkMarker(api, "std-lb", 2*time.Hour)
 	api.services[key("pc-p1", LBServiceName("std-lb"))] = map[string]any{"metadata": map[string]any{"name": LBServiceName("std-lb")}}
-	if pending, err = s.FinalizeOrphans(ctx, "p1", nil); err != nil || pending != 1 {
+	if pending, err = s.FinalizeOrphans(ctx, "p1"); err != nil || pending != 1 {
 		t.Fatalf("lb present: pending=%d err=%v", pending, err)
-	}
-
-	// Revoke fails → FAIL-CLOSED: marker stays, pending.
-	api = newFakeAPI()
-	s = NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkMarker(api, "std-x", 2*time.Hour)
-	pending, err = s.FinalizeOrphans(ctx, "p1", func(_ context.Context, _, _, _, _ string) error {
-		return errors.New("neutron 409")
-	})
-	if pending != 1 || err == nil {
-		t.Fatalf("revoke failure must keep the marker: pending=%d err=%v", pending, err)
-	}
-	if _, has := api.secrets[key("pc-p1", NetShareSecretName("std-x"))]; !has {
-		t.Fatal("marker deleted despite failed revoke")
-	}
-
-	// Sibling live database on the SAME network → revoke skipped, marker reaped, ns kept.
-	api = newFakeAPI()
-	s = NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkMarker(api, "std-x", 2*time.Hour)
-	api.apps[key("argocd", "std-sibling")] = map[string]any{
-		"metadata": map[string]any{"name": "std-sibling", "namespace": "argocd",
-			"labels": map[string]any{LabelProject: "p1", LabelManagedBy: ManagedByValue}},
-		"spec": map[string]any{"source": map[string]any{"helm": map[string]any{"valuesObject": map[string]any{
-			"network": map[string]any{"networkId": "net-1"},
-		}}}},
-	}
-	revoked := false
-	pending, err = s.FinalizeOrphans(ctx, "p1", func(_ context.Context, _, _, _, _ string) error {
-		revoked = true
-		return nil
-	})
-	if err != nil || pending != 0 {
-		t.Fatalf("sibling: pending=%d err=%v", pending, err)
-	}
-	if revoked {
-		t.Fatal("revoke must be skipped while a sibling database rides the network")
-	}
-	if _, has := api.secrets[key("pc-p1", NetShareSecretName("std-x"))]; has {
-		t.Fatal("finished-cascade marker must be reaped")
-	}
-
-	// Sibling MID-CREATE (fresh marker, Application not applied yet) on the same network →
-	// revoke skipped, orphan marker still reaped (the sibling's own marker records the share).
-	api = newFakeAPI()
-	s = NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkMarker(api, "std-x", 2*time.Hour)
-	mkMarker(api, "std-fresh", time.Minute)
-	revoked = false
-	pending, err = s.FinalizeOrphans(ctx, "p1", func(_ context.Context, _, _, _, _ string) error {
-		revoked = true
-		return nil
-	})
-	// std-fresh itself counts pending (grace window); the orphan std-x must reap WITHOUT revoke.
-	if err != nil || pending != 1 {
-		t.Fatalf("mid-create sibling: pending=%d err=%v", pending, err)
-	}
-	if revoked {
-		t.Fatal("revoke must be skipped while a mid-create sibling's marker holds the network")
-	}
-	if _, has := api.secrets[key("pc-p1", NetShareSecretName("std-x"))]; has {
-		t.Fatal("orphan marker must be reaped even when the revoke is skipped")
 	}
 
 	// Auth-secret delete failure → marker STAYS (it is the only retry driver), pending.
@@ -610,15 +499,15 @@ func TestFinalizeOrphans(t *testing.T) {
 	api.secrets[key("pc-p1", AuthSecretName("std-x"))] = map[string]any{"metadata": map[string]any{
 		"name": AuthSecretName("std-x"), "namespace": "pc-p1"}}
 	api.failDelete[AuthSecretName("std-x")] = true
-	pending, err = s.FinalizeOrphans(ctx, "p1", func(_ context.Context, _, _, _, _ string) error { return nil })
+	pending, err = s.FinalizeOrphans(ctx, "p1")
 	if pending != 1 || err == nil {
 		t.Fatalf("auth delete failure: pending=%d err=%v", pending, err)
 	}
-	if _, has := api.secrets[key("pc-p1", NetShareSecretName("std-x"))]; !has {
+	if _, has := api.secrets[key("pc-p1", MarkerSecretName("std-x"))]; !has {
 		t.Fatal("marker must survive an auth-secret delete failure (retry driver)")
 	}
 
-	// Clean orphan → revoke called with the recorded ids, marker + auth reaped, ns GC'd.
+	// Clean orphan → marker + auth reaped, ns GC'd.
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
 	api.namespaces["pc-p1"] = map[string]any{"metadata": map[string]any{
@@ -626,16 +515,12 @@ func TestFinalizeOrphans(t *testing.T) {
 	mkMarker(api, "std-x", 2*time.Hour)
 	api.secrets[key("pc-p1", AuthSecretName("std-x"))] = map[string]any{"metadata": map[string]any{
 		"name": AuthSecretName("std-x"), "namespace": "pc-p1"}}
-	var gotSvc, gotProj, gotRegion, gotNet string
-	pending, err = s.FinalizeAllOrphans(ctx, func(_ context.Context, osSvc, osProj, osRegion, net string) error {
-		gotSvc, gotProj, gotRegion, gotNet = osSvc, osProj, osRegion, net
-		return nil
-	})
+	pending, err = s.FinalizeAllOrphans(ctx)
 	if err != nil || pending != 0 {
 		t.Fatalf("clean orphan: pending=%d err=%v", pending, err)
 	}
-	if gotSvc != "svc-os" || gotProj != "dbaas-tenant" || gotRegion != "RegionOne" || gotNet != "net-1" {
-		t.Fatalf("revoke got (%s,%s,%s,%s)", gotSvc, gotProj, gotRegion, gotNet)
+	if _, has := api.secrets[key("pc-p1", MarkerSecretName("std-x"))]; has {
+		t.Fatal("finished-cascade marker must be reaped")
 	}
 	if _, has := api.secrets[key("pc-p1", AuthSecretName("std-x"))]; has {
 		t.Fatal("auth secret must be reaped with the marker")
@@ -651,7 +536,7 @@ func TestSyncProviderList(t *testing.T) {
 	s := NewWithAPI(api, cfg, "svc-dbaas")
 	ctx := context.Background()
 	spec := testSpec(EnginePostgreSQL, "17")
-	if _, err := s.CreateDatabase(ctx, spec, testShare(), nil); err != nil {
+	if _, err := s.CreateDatabase(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	app := api.apps[key("argocd", spec.ID)]
@@ -742,7 +627,7 @@ func TestConnectionInfo(t *testing.T) {
 	s := NewWithAPI(api, testConfig(), "svc-dbaas")
 	ctx := context.Background()
 	spec := testSpec(EnginePostgreSQL, "17")
-	if _, err := s.CreateDatabase(ctx, spec, testShare(), nil); err != nil {
+	if _, err := s.CreateDatabase(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	// Not ready: no secret yet.
@@ -774,7 +659,7 @@ func TestResetPassword(t *testing.T) {
 	s := NewWithAPI(api, testConfig(), "svc-dbaas")
 	ctx := context.Background()
 	spec := testSpec(EngineMariaDB, "11.8")
-	if _, err := s.CreateDatabase(ctx, spec, testShare(), nil); err != nil {
+	if _, err := s.CreateDatabase(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	before := string(api.secretData[key("pc-p1", AuthSecretName(spec.ID))]["password"])
@@ -806,7 +691,7 @@ func TestResetPasswordOperatorOwned(t *testing.T) {
 	s := NewWithAPI(api, testConfig(), "svc-dbaas")
 	ctx := context.Background()
 	spec := testSpec(EnginePostgreSQL, "17")
-	if _, err := s.CreateDatabase(ctx, spec, testShare(), nil); err != nil {
+	if _, err := s.CreateDatabase(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	// Not minted yet → not-ready, and NO secret may appear as a side effect.
@@ -859,7 +744,7 @@ func TestSetChartVersionAndPins(t *testing.T) {
 	s := NewWithAPI(api, testConfig(), "svc-dbaas")
 	ctx := context.Background()
 	spec := testSpec(EnginePostgreSQL, "17")
-	if _, err := s.CreateDatabase(ctx, spec, testShare(), nil); err != nil {
+	if _, err := s.CreateDatabase(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetChartVersion(ctx, spec.ID, "0.2.0"); err != nil {

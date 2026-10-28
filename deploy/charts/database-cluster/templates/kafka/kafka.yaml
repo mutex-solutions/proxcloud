@@ -12,10 +12,9 @@ Service (<id>-kafka-external-bootstrap, the endpoint proxcloud reads — see
 LBServiceNameFor in internal/cloud/dbaas/engines.go) plus ONE Service PER
 BROKER, because each broker must be individually addressable (the bootstrap
 LB only hands clients the metadata; producers/consumers then connect to the
-advertised per-broker addresses). Every one of those Services carries the
-Octavia annotation set, so ONE KAFKA DATABASE = instances+1 OCTAVIA LBs
-(= amphora VMs) on the tenant subnet — mind the amphora quota math in
-deploy/dbaas-cluster/README.md, which is 1 LB/database for every other engine.
+advertised per-broker addresses). So ONE KAFKA DATABASE = instances+1 LB
+addresses — mind the address-pool sizing in deploy/dbaas-cluster/README.md,
+which is 1 LB/database for every other engine.
 
 Auth: SASL/SCRAM-SHA-512 on both listeners; the credential is the KafkaUser
 <id>-app (kafkauser.yaml) whose password is the PROXCLOUD-owned <id>-auth
@@ -23,19 +22,13 @@ Secret — provisioned BEFORE this Application ever syncs, patched by
 RESET_PASSWORD. authorization.type simple activates ACLs cluster-side.
 
 TODO-verify(drill): bootstrap Service name + per-broker LB provisioning on
-Strimzi 1.1.0 with Octavia; VIP read-back should adopt Kafka
+Strimzi 1.1.0; LB IP read-back should adopt Kafka
 status.listeners[].bootstrapServers if the Service name ever drifts.
 */}}
 {{- $name := include "database-cluster.name" . }}
-{{/* The Octavia annotation set every Strimzi-created LB Service gets — same
-     trio + internal flag as the chart-owned LBs, plus the extraAnnotations
-     escape hatch so that values knob keeps working for kafka too. */}}
-{{- $lbAnnotations := dict
-      "loadbalancer.openstack.org/network-id" .Values.network.networkId
-      "loadbalancer.openstack.org/subnet-id" .Values.network.subnetId
-      "loadbalancer.openstack.org/member-subnet-id" .Values.network.memberSubnetId
-      "service.beta.kubernetes.io/openstack-internal-load-balancer" "true" }}
-{{- $lbAnnotations = mergeOverwrite $lbAnnotations (.Values.network.extraAnnotations | default dict) }}
+{{/* The annotation set every Strimzi-created LB Service gets — the
+     extraAnnotations escape hatch, same as the chart-owned LBs. */}}
+{{- $lbAnnotations := .Values.network.extraAnnotations | default dict }}
 {{/* Replication safety derived from instances: RF = min(instances,3),
      min.isr = max(1, RF-1) — a 1-node dev cluster degrades to RF 1/ISR 1
      instead of failing topic creation. values.kafka.parameters overrides. */}}
@@ -75,7 +68,7 @@ spec:
         authentication:
           type: scram-sha-512
       # The tenant-facing listener. ponytail: tls false = SASL over plaintext
-      # through an internal-only Octavia LB on the tenant subnet — same
+      # through the LoadBalancer Service — same
       # posture as every other engine's LB except opensearch; ceiling is
       # tls:true + operator CA distribution when in-transit encryption is
       # asked for.
@@ -88,7 +81,7 @@ spec:
         configuration:
           createBootstrapService: true
           {{- with .Values.network.allowedCidrs }}
-          # The Octavia ACL, applied by Strimzi to bootstrap AND per-broker
+          # The LB source filter, applied by Strimzi to bootstrap AND per-broker
           # Services (spec.loadBalancerSourceRanges — same enforcement point
           # as the chart-owned LBs; the NetworkPolicy deliberately does not
           # mirror it, see templates/networkpolicy.yaml).
@@ -98,8 +91,8 @@ spec:
           bootstrap:
             annotations:
               {{- toYaml $lbAnnotations | nindent 14 }}
-          # Every broker gets its OWN Octavia LB (advertised address) — the
-          # N in the N+1 amphora math (see header).
+          # Every broker gets its OWN LB (advertised address) — the N in the
+          # N+1 address math (see header).
           brokers:
             {{- range $i := until (int .Values.instances) }}
             - broker: {{ $i }}

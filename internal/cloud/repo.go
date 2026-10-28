@@ -11,7 +11,7 @@ import (
 
 // Repo is the `cloudResource` persistence + sync layer (+ the `cloudResourceHistory`
 // archive). The count reads back the project endpoints; the transactional locked
-// upsert/OCC-update + archive + recreation guard back the live OpenStack sync.
+// upsert/OCC-update + archive + recreation guard back the sync job.
 type Repo struct {
 	db          *pgdoc.DB
 	resources   *pgdoc.Store

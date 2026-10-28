@@ -68,7 +68,7 @@ func TestObjectWalk(t *testing.T) {
 	secret := map[string]any{
 		"adminPassword":               "super-secret",
 		"applicationCredentialSecret": "another-secret",
-		"vhiOstorAuth": map[string]any{ // nested object → recurse
+		"nestedAuth": map[string]any{ // nested object → recurse
 			"accessKey": "ak",
 			"secretKey": "sk",
 		},
@@ -82,7 +82,7 @@ func TestObjectWalk(t *testing.T) {
 	if enc["adminPassword"] == "super-secret" {
 		t.Fatal("adminPassword not encrypted")
 	}
-	if nested := enc["vhiOstorAuth"].(map[string]any); nested["accessKey"] == "ak" {
+	if nested := enc["nestedAuth"].(map[string]any); nested["accessKey"] == "ak" {
 		t.Fatal("nested accessKey not encrypted")
 	}
 	// non-textual leaves untouched
@@ -97,7 +97,7 @@ func TestObjectWalk(t *testing.T) {
 	if dec["adminPassword"] != "super-secret" || dec["applicationCredentialSecret"] != "another-secret" {
 		t.Fatalf("object round-trip failed: %#v", dec)
 	}
-	if nested := dec["vhiOstorAuth"].(map[string]any); nested["accessKey"] != "ak" || nested["secretKey"] != "sk" {
+	if nested := dec["nestedAuth"].(map[string]any); nested["accessKey"] != "ak" || nested["secretKey"] != "sk" {
 		t.Fatalf("nested object round-trip failed: %#v", nested)
 	}
 }

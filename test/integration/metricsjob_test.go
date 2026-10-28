@@ -33,7 +33,7 @@ func (f jobFetcher) SearchInstanceInterfaces(_ context.Context, _ string) ([]met
 	}}, nil
 }
 
-func (f jobFetcher) MeasuresMBForCurrentMonth(_ context.Context, metricID string, _ int, _ time.Time) (decimal.Decimal, error) {
+func (f jobFetcher) MeasuresMBForCurrentMonth(_ context.Context, metricID string, _ time.Time) (decimal.Decimal, error) {
 	if metricID == "in-m" {
 		return decimal.RequireFromString(f.incomingMB), nil
 	}
@@ -42,7 +42,7 @@ func (f jobFetcher) MeasuresMBForCurrentMonth(_ context.Context, metricID string
 
 // TestMetricsJobDriver exercises the Track-1.4 metrics-job walk against real Postgres with the
 // live cloud seams faked: ENABLED project → its SERVER + PORT cache → resolve the server's
-// ExternalService → fetch+save GnocchiMetrics. The interface's tap-prefix matches the seeded
+// ExternalService → fetch+save UsageMetrics. The interface's tap-prefix matches the seeded
 // PORT whose networkId is in the (faked) public-network set, so the traffic lands in the
 // PUBLIC buckets.
 func TestMetricsJobDriver(t *testing.T) {
@@ -56,10 +56,11 @@ func TestMetricsJobDriver(t *testing.T) {
 	projectID := mustInsertID(t, db, "project", pgdoc.M{
 		"name": "p1", "status": project.StatusEnabled, "memberships": []any{}, "services": []any{},
 	})
-	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-x", "type": externalservice.TypeCloud, "name": "dev", "config": pgdoc.M{}})
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-x", "type": externalservice.TypeCloud, "name": "dev",
+		"config": pgdoc.M{"metrics": pgdoc.M{"source": externalservice.MetricsSourcePrometheus}}})
 
 	srv, err := cloudRepo.Insert(ctx, &cloud.CloudResource{
-		ExternalID: "nova-1", ServiceID: "svc-x", ProjectID: projectID, Type: cloud.TypeServer,
+		ExternalID: "vm-1", ServiceID: "svc-x", ProjectID: projectID, Type: cloud.TypeServer,
 		Data: map[string]any{"server": map[string]any{"name": "vm"}}, CreatedAt: &now, UpdatedAt: &now,
 	})
 	if err != nil {
@@ -89,7 +90,7 @@ func TestMetricsJobDriver(t *testing.T) {
 	cycleStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	saved, err := metricsRepo.FindForCurrentMonth(ctx, srv.ID, cycleStart)
 	if err != nil || saved == nil {
-		t.Fatalf("expected a gnocchiMetrics doc for the server: %v", err)
+		t.Fatalf("expected a usageMetrics doc for the server: %v", err)
 	}
 	d := saved.Details
 	if !d.IncomingPublicTrafficMb.Equal(decimal.RequireFromString("10")) ||

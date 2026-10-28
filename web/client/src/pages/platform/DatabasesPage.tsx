@@ -1,10 +1,11 @@
 // Managed Databases (dbaas provider) — list/create/manage database clusters. The cloud scope
 // for cluster CRUD is a DBAAS location (the create wizard offers a picker when the project has
 // more than one); the engine/version catalog comes from the dbaas service DTO. The database
-// runs on platform-owned infrastructure — only the tenant network for the private endpoint is
-// the customer's. Actions map to Go cloud_dbaas.go: create/delete + GET_CONNECTION_INFO /
+// runs on platform-owned infrastructure. Actions map to Go cloud_dbaas.go: create/delete + GET_CONNECTION_INFO /
 // RESIZE / RESIZE_STORAGE / SCALE_REPLICAS / RESTART / RESET_PASSWORD / SET_ALLOWED_CIDRS /
 // UPGRADE / SET_AUTOSCALE.
+// TODO(P7): create is not available on Proxmox yet — the endpoint will be a MetalLB
+// LoadBalancer Service.
 import { useCallback, useMemo, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -33,19 +34,10 @@ import {
 import { Switch } from "@/components/ui/switch"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
-import { useCloudList, useLocations, useProjectId, useProjectServices } from "@/lib/hooks"
+import { useLocations, useProjectId, useProjectServices } from "@/lib/hooks"
 import type { CloudResource, DatabaseEngineOffer, DatabaseLimits, Location } from "@/lib/types"
-import { isPrivateNetwork, networkName } from "../network/NetworksPage"
 
 type Db = Record<string, any>
-// A pickable cluster network: one of the project's own VPCs plus its subnets. Unlike the
-// Kubernetes wizard there is NO dedicated-network fallback — the database endpoint is an
-// internal LB in a tenant subnet, so a network+subnet pick is required.
-type NetworkOption = {
-  id: string
-  name: string
-  subnets: { id: string; label: string }[]
-}
 
 // The engine display catalog — keys mirror the backend's dbaas engine slugs (the offered set
 // per provider comes from the service DTO's databaseEngines; unknown keys render as-is).
@@ -82,7 +74,7 @@ function database(r: CloudResource): Db {
   return (r.data?.database as Db) ?? {}
 }
 
-// The endpoint stays "" until the Octavia VIP is programmed — READY implies it exists, so the
+// The endpoint stays "" until the LB ingress IP is assigned — READY implies it exists, so the
 // list polls while anything is not READY yet (unlike kubernetes there is no separate busy
 // notion: a DEGRADED cluster keeps its endpoint and stops the polling via its next READY flip).
 // UNKNOWN is settled too — the operator cannot report the state, which is not in-flight work,
@@ -221,30 +213,6 @@ export default function DatabasesPage() {
   const createEngines = useMemo(() => enginesFor(createLoc?.serviceId), [enginesFor, createLoc?.serviceId])
   const createSvc = serviceFor(createLoc?.serviceId)
 
-  // The project's own networks + subnets (cached NETWORK/SUBNET resources, default cloud scope =
-  // the OpenStack service) feed the REQUIRED network picker — the database's private endpoint
-  // lands on the chosen subnet. Only private VPCs.
-  const networksQ = useCloudList(pid, "NETWORK")
-  const subnetsQ = useCloudList(pid, "SUBNET")
-  const networkOptions = useMemo<NetworkOption[]>(() => {
-    const subsByNet = new Map<string, { id: string; label: string }[]>()
-    for (const r of subnetsQ.data ?? []) {
-      const s = (r.data?.subnet ?? {}) as Record<string, unknown>
-      const netId = (s.network_id as string) ?? ""
-      const id = (s.id as string) || r.externalId
-      if (!netId || !id) continue
-      const label = [s.name as string, s.cidr as string].filter(Boolean).join(" · ") || id
-      subsByNet.set(netId, [...(subsByNet.get(netId) ?? []), { id, label }])
-    }
-    return (networksQ.data ?? [])
-      .filter(isPrivateNetwork)
-      .map((r): NetworkOption => {
-        const id = ((r.data?.network as Record<string, unknown> | undefined)?.id as string) || r.externalId || ""
-        return { id, name: networkName(r), subnets: subsByNet.get(id) ?? [] }
-      })
-      .filter((n) => !!n.id && n.subnets.length > 0) // a network with no subnet cannot host the endpoint
-  }, [networksQ.data, subnetsQ.data])
-
   const [createOpen, setCreateOpen] = useState(false)
   const [toDelete, setToDelete] = useState<CloudResource | null>(null)
 
@@ -358,7 +326,7 @@ export default function DatabasesPage() {
       <PageHeader
         title="Databases"
         eyebrow="Platform"
-        description="Managed databases — provisioned and operated for you, reachable over a private endpoint in your network."
+        description="Managed databases — provisioned and operated for you, reachable over a private endpoint."
         actions={
           <>
             <Button variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching} aria-label="Refresh">
@@ -375,7 +343,7 @@ export default function DatabasesPage() {
         <EmptyState
           icon={DatabaseZap}
           title="No databases yet"
-          hint="Create a managed database — pick an engine, a size and one of your networks; the platform runs it for you."
+          hint="Create a managed database — pick an engine and a size; the platform runs it for you."
           action={
             <Button onClick={() => setCreateOpen(true)} disabled={!dScope}>
               <Plus className="size-4" /> Create database
@@ -398,7 +366,6 @@ export default function DatabasesPage() {
           engines={createEngines}
           limits={createSvc?.databaseLimits}
           storageClasses={createSvc?.databaseStorageClasses}
-          networks={networkOptions}
           locations={dLocs}
           locKey={createLoc ? locKeyOf(createLoc) : ""}
           onLocKey={setCreateLocKey}
@@ -537,12 +504,11 @@ export function DatabaseClusterDetailPage() {
 const CLUSTER_DEFAULT_STORAGE = "__cluster-default__"
 
 function DatabaseFormDialog({
-  engines, limits, storageClasses, networks, locations, locKey, onLocKey, onClose, onSubmit,
+  engines, limits, storageClasses, locations, locKey, onLocKey, onClose, onSubmit,
 }: {
   engines: Record<string, DatabaseEngineOffer>
   limits?: DatabaseLimits
   storageClasses?: string[]
-  networks: NetworkOption[]
   locations: Location[]
   locKey: string
   onLocKey: (key: string) => void
@@ -569,9 +535,6 @@ function DatabaseFormDialog({
   const [storage, setStorage] = useState("20")
   const [storageClass, setStorageClass] = useState("") // "" = cluster default (no key sent)
   const [allowedCidrs, setAllowedCidrs] = useState("")
-  const [networkId, setNetworkId] = useState("")
-  const [subnetId, setSubnetId] = useState("")
-  const selectedNetwork = networks.find((n) => n.id === networkId)
   const [pending, setPending] = useState(false)
 
   const pickPreset = (key: string) => {
@@ -583,9 +546,6 @@ function DatabaseFormDialog({
     }
   }
 
-  // The network pick is REQUIRED (no dedicated-network fallback) — the endpoint is an internal
-  // LB on the chosen subnet.
-  const networkValid = !!networkId && !!subnetId && !!selectedNetwork?.subnets.some((s) => s.id === subnetId)
   // Provider size limits (service DTO databaseLimits) — 0/absent means unbounded.
   const maxCpu = limits?.maxCpu || 0
   const maxMemory = limits?.maxMemoryGiB || 0
@@ -593,7 +553,7 @@ function DatabaseFormDialog({
   const cpuOk = Number(cpu) >= 1 && (!maxCpu || Number(cpu) <= maxCpu)
   const memoryOk = Number(memory) >= 1 && (!maxMemory || Number(memory) <= maxMemory)
   const storageOk = Number(storage) >= 1 && (!maxStorage || Number(storage) <= maxStorage)
-  const valid = !!name.trim() && !!engine && !!version && networkValid && cpuOk && memoryOk && storageOk
+  const valid = !!name.trim() && !!engine && !!version && cpuOk && memoryOk && storageOk
 
   const submit = async () => {
     setPending(true)
@@ -606,8 +566,6 @@ function DatabaseFormDialog({
         cpu: Number(cpu),
         memoryGiB: Number(memory),
         storageGiB: Number(storage),
-        networkId,
-        subnetId,
         ...(storageClass ? { storageClass } : {}),
         ...(allowedCidrs.trim()
           ? { allowedCidrs: allowedCidrs.split(",").map((c) => c.trim()).filter(Boolean) }
@@ -628,8 +586,8 @@ function DatabaseFormDialog({
         <DialogHeader>
           <DialogTitle>Create database</DialogTitle>
           <DialogDescription>
-            The database is provisioned and operated by the platform and reachable only over a
-            private endpoint in the network you pick below.
+            The database is provisioned and operated by the platform and reachable over a
+            private endpoint.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-2">
@@ -809,47 +767,6 @@ function DatabaseFormDialog({
             </div>
           )}
 
-          <div className="grid gap-3 rounded-lg border p-3">
-            <div className="grid gap-2">
-              <Label htmlFor="db-network">Network</Label>
-              <Select
-                value={networkId || undefined}
-                onValueChange={(v) => {
-                  setNetworkId(v)
-                  setSubnetId("") // a subnet from the previous network is meaningless here
-                }}
-              >
-                <SelectTrigger id="db-network">
-                  <SelectValue placeholder={networks.length ? "Pick a network" : "No networks with a subnet found"} />
-                </SelectTrigger>
-                <SelectContent>
-                  {networks.map((n) => (
-                    <SelectItem key={n.id} value={n.id}>{n.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                The database's private endpoint is created on this network — only workloads that
-                can reach the subnet can connect.
-              </p>
-            </div>
-            {selectedNetwork && (
-              <div className="grid gap-2">
-                <Label htmlFor="db-subnet">Subnet</Label>
-                <Select value={subnetId} onValueChange={setSubnetId}>
-                  <SelectTrigger id="db-subnet">
-                    <SelectValue placeholder="Pick a subnet" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {selectedNetwork.subnets.map((s) => (
-                      <SelectItem key={s.id} value={s.id}>{s.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-          </div>
-
           <div className="grid gap-2">
             <Label htmlFor="db-cidrs">Allowed CIDRs (optional, comma-separated)</Label>
             <Input
@@ -860,7 +777,7 @@ function DatabaseFormDialog({
               placeholder="10.0.0.0/24, 10.0.1.7/32"
             />
             <p className="text-xs text-muted-foreground">
-              Restricts which source addresses may reach the endpoint. Empty = the whole network.
+              Restricts which source addresses may reach the endpoint. Empty = no restriction.
             </p>
           </div>
         </div>
@@ -1005,12 +922,6 @@ function DatabaseDetail({
         <p className="text-xs text-muted-foreground">
           {resource.region ? (
             <>Location: <span className="font-medium">{resource.region}</span></>
-          ) : null}
-          {(d.network_id as string) ? (
-            <>
-              {resource.region ? " · " : ""}Network: <span className="font-mono">{d.network_id as string}</span>
-              {(d.subnet_id as string) ? <> · subnet <span className="font-mono">{d.subnet_id as string}</span></> : null}
-            </>
           ) : null}
           {(d.storage_class as string) ? <> · storage class <span className="font-mono">{d.storage_class as string}</span></> : null}
           {(d.chart_version as string) ? (
@@ -1509,7 +1420,7 @@ function CidrsDialog({
         <DialogHeader>
           <DialogTitle>Allowed CIDRs</DialogTitle>
           <DialogDescription>
-            Source ranges allowed to reach the endpoint, comma-separated. Empty = the whole network.
+            Source ranges allowed to reach the endpoint, comma-separated. Empty = no restriction.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-2 py-2">

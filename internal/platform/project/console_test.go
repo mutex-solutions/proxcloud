@@ -2,40 +2,27 @@ package project
 
 import "testing"
 
-// consoleBackend turns nova's noVNC page URL into the websockify target we reverse-proxy to.
+// consoleBackend validates the PVE vncwebsocket URL (pve.Service.Console) we reverse-proxy to.
 func TestConsoleBackend(t *testing.T) {
 	cases := []struct {
 		name, raw, want string
 	}{
 		{
-			// The common nova shape: the socket path rides in the `path` query, url-encoded.
-			name: "path query with leading ?",
-			raw:  "https://cloud-console.example.com:6080/vnc_lite.html?path=%3Ftoken%3De0cd42b5-800a-4144-9146-bb457eb356f2",
-			want: "https://cloud-console.example.com:6080/?token=e0cd42b5-800a-4144-9146-bb457eb356f2",
+			// The VNC and serial (termproxy) consoles both hand back this socket URL.
+			name: "pve vncwebsocket url passes through",
+			raw:  "https://pve1:8006/api2/json/nodes/pve1/qemu/101/vncwebsocket?port=5900&vncticket=PVEVNC%3Aabc",
+			want: "https://pve1:8006/api2/json/nodes/pve1/qemu/101/vncwebsocket?port=5900&vncticket=PVEVNC%3Aabc",
 		},
 		{
-			// Some deployments put an explicit websockify path in front of the token.
-			name: "path query with explicit websockify segment",
-			raw:  "https://host:6080/vnc_auto.html?path=websockify%3Ftoken%3Dabc",
-			want: "https://host:6080/websockify?token=abc",
+			// ReverseProxy dials http(s) and performs the Upgrade itself, so ws(s) normalises.
+			name: "wss normalises to https",
+			raw:  "wss://pve1:8006/api2/json/nodes/pve1/qemu/101/vncwebsocket?port=5901&vncticket=t",
+			want: "https://pve1:8006/api2/json/nodes/pve1/qemu/101/vncwebsocket?port=5901&vncticket=t",
 		},
 		{
-			// No `path` blob — fall back to the bare token query.
-			name: "bare token query",
-			raw:  "http://host:6080/vnc.html?token=xyz",
-			want: "http://host:6080/?token=xyz",
-		},
-		{
-			// Nova's SERIAL console hands back a socket URL, not a page. ReverseProxy dials
-			// http(s) and performs the Upgrade itself, so ws:// normalises to http://.
-			name: "serial ws url normalises to http",
-			raw:  "ws://host:6083/?token=ser1",
-			want: "http://host:6083/?token=ser1",
-		},
-		{
-			name: "serial wss url normalises to https",
-			raw:  "wss://host:6083/?token=ser2",
-			want: "https://host:6083/?token=ser2",
+			name: "ws normalises to http",
+			raw:  "ws://pve1:8006/x/vncwebsocket?port=5902&vncticket=t",
+			want: "http://pve1:8006/x/vncwebsocket?port=5902&vncticket=t",
 		},
 	}
 	for _, c := range cases {
@@ -54,9 +41,9 @@ func TestConsoleBackend(t *testing.T) {
 		{"unparseable", "::not a url::"},
 		{"empty", ""},
 		// Only http(s)/ws(s) origins are proxyable.
-		{"non-http scheme", "file://host/vnc.html?token=abc"},
-		// Neither a path blob nor a token → nothing would authenticate the socket.
-		{"no path and no token", "https://host:6080/vnc_lite.html"},
+		{"non-http scheme", "file://host/vncwebsocket?vncticket=abc"},
+		// No vncticket → nothing would authenticate the socket.
+		{"no vncticket", "https://pve1:8006/api2/json/nodes/pve1/qemu/101/vncwebsocket?port=5900"},
 	}
 	for _, c := range bad {
 		t.Run("reject/"+c.name, func(t *testing.T) {

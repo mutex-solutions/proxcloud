@@ -1,8 +1,7 @@
 package admin
 
-// cloudresourcemut.go — STUB. The admin per-resource live sync/delete ran through
-// the OpenStack tenant client; on this fork resources reconcile through the
-// project sync (POST /admin/project/{id}/sync → syncjob) and delete through the
+// cloudresourcemut.go — STUB. There is no admin per-resource live sync/delete;
+// resources reconcile through the project sync (POST /admin/project/{id}/sync → syncjob) and delete through the
 // client surface. 501 keeps the admin FE honest.
 
 import (

@@ -61,7 +61,7 @@ func TestPVEDefaultQuota(t *testing.T) {
 		{"proxmox keys", map[string]any{"servers": float64(5), "vcpus": float64(10), "ramMb": float64(8192),
 			"diskGb": float64(100), "networks": float64(2), "floatingIps": float64(1), "gpu": gpu},
 			map[string]any{"servers": 5, "vcpus": 10, "ramMb": 8192, "diskGb": 100, "networks": 2, "floatingIps": 1, "gpu": gpu}},
-		{"openstack aliases", map[string]any{"instances": float64(3), "cores": float64(6), "ram": float64(4096),
+		{"legacy aliases", map[string]any{"instances": float64(3), "cores": float64(6), "ram": float64(4096),
 			"gigabytes": float64(50), "floatingips": float64(1), "volumes": float64(9), "ports": float64(20)},
 			map[string]any{"servers": 3, "vcpus": 6, "ramMb": 4096, "diskGb": 50, "floatingIps": 1}},
 		{"proxmox key wins over alias", map[string]any{"cores": float64(6), "vcpus": float64(12)}, map[string]any{"vcpus": 12}},

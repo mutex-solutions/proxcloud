@@ -92,9 +92,7 @@ The provider's **Quota** tab sets the default quota seeded into each new project
 The **Metrics** tab chooses where the hourly traffic-billing job reads per-VM network usage:
 
 - `none` is the default for a Proxmox provider. The job skips the provider, so no traffic is metered.
-- `prometheus` reads a Prometheus-compatible endpoint (Prometheus, Mimir, VictoriaMetrics or Thanos). Set the endpoint URL and the metric schema your exporter emits, plus headers, credentials or a custom CA if needed.
-
-The selector still lists a legacy Gnocchi option. It isn't available on Proxmox: with it selected, the metrics job can't read usage and meters no traffic for the provider.
+- `prometheus` reads a Prometheus-compatible endpoint (Prometheus, Mimir, VictoriaMetrics or Thanos). Set the endpoint URL and the metric schema, plus headers, credentials or a custom CA if needed. The only schema today is `libvirt-exporter`, a legacy layout that doesn't match Proxmox VMs yet, so a Proxmox provider meters no traffic until a Proxmox schema is added.
 
 Always run **Test** after you change the source. A misconfigured source doesn't fail loudly; ingestion stops and traffic goes unbilled. The same settings are available through `PUT /api/v1/admin/service/{id}/metrics-config`, `POST /api/v1/admin/service/{id}/metrics-test`, and the admin MCP tools `set_metrics_config` and `test_metrics_config`.
 
@@ -103,7 +101,7 @@ Always run **Test** after you change the source. A misconfigured source doesn't 
 - **Bootstrap.** When a billing profile is activated (or an admin provisions a project), ProxCloud bootstraps each project onto the provider. It creates the project's pool and default security group and seeds the default quota. See [Account Activation](/docs/platform-admin/account-activation).
 - **Sync.** A periodic sync, every 15 minutes, keeps ProxCloud's cache of each project's servers, volumes, networks, security groups and templates in step with the cluster, so billing accrual reflects what exists. VMs outside the project pools are invisible to ProxCloud.
 - **Services.** Every service is available by default. Adjust that on the provider's **Services** tab; see [Service Availability](/docs/platform-admin/cloud/service-availability).
-- **Unused tabs.** The provider page also shows tabs that carry no settings for a Proxmox provider, such as Provisioning, VHI-ostor, Placement, Reseller, Availability zones, Project imports and Share protocols. Leave them untouched. The **Advanced** tab's Danger zone is where a provider is deleted.
+- **Tabs.** A Proxmox provider has the Connection, Services, Configuration, Features, Quota, GPU, Metrics and Advanced tabs. The **Advanced** tab's Danger zone is where a provider is deleted.
 
 ## GPU capacity and quotas
 

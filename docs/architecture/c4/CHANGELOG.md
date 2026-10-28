@@ -4,6 +4,48 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-10-28: Remove OpenStack remnants
+
+**What changed**
+
+- Dead OpenStack code paths are deleted: the gophercloud dependency, the Swift half
+  of the object-store client, the `OS_*` / `openstack.*` config keys (the default
+  region is now `PROXCLOUD_DEFAULT_REGION` / `proxcloud.default-region`, default
+  `default`), the stale `/api/v1/notifications/` public-path entry, and the
+  OpenStack-only client, admin and mgmt routes (`/debug/cloud`, metadata, service
+  auth and details, discovery, project imports, unassociated projects, placement,
+  reseller, availability zones, share protocols, VHI-ostor, Gnocchi granularity,
+  volume-type writes) with their MCP tools and admin UI tabs.
+- Persisted names now match the backend: table `gnocchiMetrics` is `usageMetrics`,
+  job `gnocchiMetricsFetch` is `usageMetricsFetch`, download types
+  `OPENSTACK_SWIFT_BUCKET` / `OPENSTACK_CONSOLE` are `OBJECT` / `CONSOLE`
+  (`OPENSTACK_S3_OBJECT` is gone), the Gnocchi metrics source and the two Ceilometer
+  Prometheus schemas are removed (only `libvirt-exporter` remains, pending a Proxmox
+  schema).
+- Public Admin API: `configuration.cloud.provider` reports the real provider kind
+  (`PROXMOX`, `CEPH_S3`, `KAMAJI`, `DBAAS`) with a `proxmox.pool_prefix` block;
+  `provisioned_services[]` carries `provider`, `region` and `pool` instead of the
+  `openstack` block, and the `openstack_project_id` filter is gone.
+- Managed K8s and DBaaS (C3e): the create-path stubs are renamed
+  `cloud_kamaji_create.go` / `cloud_dbaas_create.go`; Cinder CSI, Octavia
+  annotations, keystone application credentials, Glance image ids and neutron RBAC
+  plumbing are removed, with one `TODO(P7)` at each seam naming the Proxmox piece
+  (CAPMOX, proxmox-csi, MetalLB). Read, sync and delete are unchanged.
+- CI: the rebrand gate also fails on OpenStack-era terms (this file and
+  `countries.json` excluded).
+
+**Why**
+
+- **Misleading operators and API clients.** Dead paths and OpenStack wire fields
+  (a fixed `OPENSTACK` provider value, empty `openstack` blocks, admin tabs and MCP
+  tools that changed nothing on Proxmox) suggested features that do not exist and
+  hid the real provider, pool and region. Names now match the Proxmox backend.
+- **No installed base.** There are no deployed installs, so tables, jobs and enum
+  values are renamed outright, with no compatibility shims.
+
+**Diagrams updated:** c3-components.md (C3e stub file names). No diagram shape
+changed.
+
 ## 2026-10-28: PR #16 tenant isolation, VM firewall, quota hardening
 
 **What changed**

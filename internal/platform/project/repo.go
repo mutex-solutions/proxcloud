@@ -66,23 +66,6 @@ func (r *Repo) FindByID(ctx context.Context, id string) (*Project, error) {
 	return &p, nil
 }
 
-// FindByExternalProjectID loads the project whose attached service carries the given OpenStack
-// tenant id — the os-notification path maps an incoming oslo `tenant_id` back to the internal
-// project. nil when none matches.
-func (r *Repo) FindByExternalProjectID(ctx context.Context, externalProjectID string) (*Project, error) {
-	if externalProjectID == "" {
-		return nil, nil
-	}
-	var p Project
-	found, err := r.col.FindOne(ctx, pgdoc.M{
-		"services": pgdoc.M{"$contains": pgdoc.M{"externalProjectId": externalProjectID}},
-	}, &p)
-	if err != nil || !found {
-		return nil, err
-	}
-	return &p, nil
-}
-
 // FindForMember loads a project only if sub is one of its members
 // (_id == id AND some memberships element has that sub).
 func (r *Repo) FindForMember(ctx context.Context, id, sub string) (*Project, error) {

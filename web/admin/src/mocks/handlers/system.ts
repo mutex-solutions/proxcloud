@@ -31,7 +31,7 @@ on("POST /admin/service", ({ opts }) => {
   const svc = {
     id: db.nextId("svc"),
     name: body.name ?? "New provider",
-    type: body.config?.provider === "ceph-s3" || body.type === "ceph-s3" ? "ceph-s3" : "openstack",
+    type: body.type ?? "CLOUD",
     status: "ACTIVE",
     config: body.config ?? body,
   }
@@ -41,11 +41,11 @@ on("POST /admin/service", ({ opts }) => {
   return { data: svc }
 })
 
-// Live glance images across providers (register before /admin/service/:id).
+// Project templates across Proxmox providers (register before /admin/service/:id).
 on("GET /admin/service/os-images", () => ({ data: db.osImages }))
 
-// Connection test with the stored credentials.
-on("POST /admin/service/openstack/auth", () => ({ data: db.openstackAuthResult }))
+// Proxmox connection test (stored token, or the form's unsaved one).
+on("POST /admin/service/proxmox/auth", () => ({ data: db.proxmoxAuthResult }))
 
 on("GET /admin/service/:id", ({ params }) => ({
   data: db.services.find((s) => s.id === params.id) ?? notFound("Cloud provider"),
@@ -64,13 +64,9 @@ on("DELETE /admin/service/:id", ({ params }) => {
   return { data: { ok: true } }
 })
 
-on("POST /admin/service/:id/discover", ({ params }) => ({
-  data: db.services.find((s) => s.id === params.id) ?? notFound("Cloud provider"),
-}))
-
 on("GET /admin/service/:id/gpu-info", ({ params }) => ({ data: db.gpuInfoByService[params.id] ?? [] }))
 
-// Per-service live catalog (the kamaji-provider form's flavor/image pickers).
+// Per-service catalog reads: Proxmox templates rendered image-like + the flavor catalog.
 on("GET /admin/service/:id/os-images", () => ({ data: db.osImages }))
 on("GET /admin/service/:id/os-flavors", () => ({ data: db.liveFlavors }))
 
@@ -90,60 +86,6 @@ on("PUT /admin/service/:id/metrics-config", ({ params, opts }) => {
 on("POST /admin/service/:id/metrics-test", () => ({
   data: { ok: true, trafficSeries: 42, monthStartSeries: 39, warnings: [] },
 }))
-
-on("GET /admin/service/:id/volume/types", ({ params }) => ({
-  data: db.volumeTypesByService[params.id] ?? [],
-}))
-
-on("PUT /admin/service/:id/volume/types", ({ params, opts }) => {
-  const svc = db.services.find((s) => s.id === params.id) ?? notFound("Cloud provider")
-  const features = ((svc.config ??= {}).features ??= {}) as Doc
-  features.volumeTypes = opts.body ?? {}
-  return { data: svc }
-})
-
-on("GET /admin/service/:id/availability-zones", ({ params }) => ({
-  data: db.availabilityZonesByService[params.id] ?? {},
-}))
-
-on("PUT /admin/service/:id/availability-zones", ({ params, opts }) => {
-  const svc = db.services.find((s) => s.id === params.id) ?? notFound("Cloud provider")
-  ;(svc.config ??= {}).availabilityZones = opts.body ?? []
-  return { data: svc }
-})
-
-on("GET /admin/service/:id/share/protocols", ({ params }) => ({
-  data: db.shareProtocolsByService[params.id] ?? [],
-}))
-
-on("PUT /admin/service/:id/share/protocols", ({ params, opts }) => {
-  db.shareProtocolsByService[params.id] = (opts.body ?? []) as Doc[]
-  return { data: { ok: true } }
-})
-
-// Project imports (Keystone projects vs ProxCloud projects).
-on("GET /admin/project-import/:serviceId", ({ params }) => ({
-  data: db.importProjectsByService[params.serviceId] ?? [],
-}))
-
-on("POST /admin/project-import/bulk-import/:serviceId", ({ params, opts }) => {
-  const rows = db.importProjectsByService[params.serviceId] ?? []
-  for (const entry of (opts.body ?? []) as Doc[]) {
-    const row = rows.find((r) => r.project?.id === entry.project?.id)
-    if (!row || row.proxcloudProjectId) continue
-    const project = {
-      id: db.nextId("prj"),
-      name: entry.project.name,
-      status: "ENABLED",
-      services: [{ serviceId: params.serviceId, externalProjectId: entry.project.id }],
-      memberships: [],
-      createdAt: new Date().toISOString(),
-    }
-    db.projects.push(project)
-    row.proxcloudProjectId = project.id
-  }
-  return { data: { ok: true } }
-})
 
 // ─── Catalog: flavor categories ───────────────────────────────────────────────
 

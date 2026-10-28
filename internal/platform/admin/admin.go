@@ -283,14 +283,6 @@ var ThirdPartyCatalog = []ThirdPartyStats{
 	{"SMTP", []string{"Mail"}, false},
 }
 
-// OpenstackServiceTypes is the static set of supported OpenStack service types
-// (order irrelevant — the comparison harness sorts arrays).
-var OpenstackServiceTypes = []string{
-	"compute", "network", "identity", "dns", "orchestration", "image", "load-balancer",
-	"container-infra", "object-store", "volumev3", "vstorage", "metric", "sharev2",
-	"baremetal", "workloads", "key-manager",
-}
-
 // DefaultPlatformBranding reads the default platformConfiguration's branding (name/logo/faviconUrl)
 // for the admin /init response. Missing fields stay "" (omitted when empty).
 func (r *Repo) DefaultPlatformBranding(ctx context.Context) (id, name, logo, faviconURL string, err error) {

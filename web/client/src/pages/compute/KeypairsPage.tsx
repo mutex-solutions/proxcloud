@@ -1,5 +1,5 @@
 // Keypairs: list KEYPAIR cloud resources, create (data{name, publicKey?} per
-// internal/cloud/providers/write.go TypeKeypair; a nova-generated private key comes back
+// internal/cloud/providers/write.go TypeKeypair; a server-generated private key comes back
 // once as ephemeralData.privateKey) and delete with confirm.
 import { useMemo, useState } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"

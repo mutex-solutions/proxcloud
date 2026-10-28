@@ -1,7 +1,7 @@
 # Management-cluster manifests for the ProxCloud `kamaji` provider
 
 Operator-applied, one-time setup on the **Kamaji management cluster** (the cluster running
-the Kamaji operator + cluster-api-operator/CAPO — infra-ops `kamaji-cluster-az1`, or a dev
+the Kamaji operator + cluster-api-operator — infra-ops `kamaji-cluster-az1`, or a dev
 equivalent). ProxCloud does not apply these itself: they create the identity and guardrails
 proxcloud then operates *within*.
 
@@ -10,11 +10,11 @@ Full operator runbook: [`docs/managed-k8s.md`](../../docs/managed-k8s.md).
 ## Prerequisites
 
 1. **Kamaji stack live** — Kamaji operator, cluster-api-operator with the KamajiControlPlane
-   provider, CAPO, CAAPH. (Already true on `kamaji-cluster-az1`; a dev mgmt cluster needs the
+   provider, the infrastructure provider (TODO(P7): CAPMOX), CAAPH. (Already true on `kamaji-cluster-az1`; a dev mgmt cluster needs the
    same four charts — plan §3.0.)
 2. **ArgoCD installed** on this cluster (plan D3). Any standard install; the manifests here
    assume the `argocd` namespace.
-3. **Chart CI publishing `openstack-kamaji-cluster`** (and its mirrored images) to
+3. **Chart CI publishing the kamaji cluster chart** (`config.argocd.chartName`, and its mirrored images) to
    `ghcr.io/mutex-solutions/charts` at **pinned versions** — never `latest`/`0.0.0+latest`.
    The chart source lives in this repo at `deploy/charts/` and is published by
    `.github/workflows/helm.yml` on a release tag; see `deploy/charts/README.md`. The

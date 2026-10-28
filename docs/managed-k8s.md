@@ -11,7 +11,7 @@ cluster's API, and Kamaji runs the cluster's control plane as pods there
 > **Read, sync, status, kubeconfig download and delete of existing clusters work.
 > Creating a cluster on a Proxmox provider is planned.** Today a create returns
 > "Managed Kubernetes on Proxmox is not available yet": the create legs in
-> `internal/platform/project/cloud_kamaji_openstack.go` are stubs. The planned
+> `internal/platform/project/cloud_kamaji_create.go` are stubs. The planned
 > design runs worker VMs on Proxmox through Cluster API with the CAPMOX provider,
 > load-balancer IPs from MetalLB and volumes through proxmox-csi; see
 > [C2](architecture/c4/c2-containers.md) and
@@ -43,9 +43,8 @@ One-time, per management cluster (apply order:
    cluster pin an exact version, and the registry must keep every pinned version.
    The values contract lives in `internal/cloud/kamaji/values.go` and is pinned by
    `TestBuildValues`. The chart itself is not shipped in this repository
-   (`deploy/charts` holds only `proxcloud` and `database-cluster`); the default
-   chart name in `config.argocd.chartName` is still the one from the previous
-   backend.
+   (`deploy/charts` holds only `proxcloud` and `database-cluster`), and
+   `config.argocd.chartName` has no default: the provider config must name it.
 
 ## 2. Provider setup (admin → Cloud providers → Add provider → Kubernetes)
 
@@ -58,16 +57,12 @@ Seed-file twin of the form: `deploy/seed/external-service-dev.json`
 | Regions | `config.regions` | The region(s) stamped on cached clusters. |
 | Services | `config.services` | `{"kubernetes": {"<region>": true}}` — drives the client-portal nav gating and the sync. |
 | ArgoCD namespace / project | `config.argocd.namespace` / `.project` | Must match `deploy/mgmt-cluster` (`argocd` / `proxcloud-k8s`). |
-| Chart repo / name / version | `config.argocd.chartRepo` / `.chartName` / `.chartVersion` | OCI repo **without** the `oci://` prefix. The version is the pin for NEW clusters; existing clusters keep their own pin until moved (§3). |
+| Chart repo / name / version | `config.argocd.chartRepo` / `.chartName` / `.chartVersion` | All three required. OCI repo **without** the `oci://` prefix. The version is the pin for NEW clusters; existing clusters keep their own pin until moved (§3). |
 | DataStore | `config.cluster.dataStoreName` | Kamaji DataStore name (default `default`). |
 | DNS zone | `config.cluster.dnsZone` | Optional. API FQDN = `<clusterId>.<zone>`. Cluster ids (`stc-<8hex>`) never change. |
 | Version → image matrix | `config.cluster.versions` | Curated map `k8s version → node image id`: the only versions offered to customers. Textarea grammar: `1.35.4=<image-id>` per line. |
 | Image variants | `config.cluster.imageVariants` | Alternative node-image builds of the same version, e.g. a GPU build. Grammar: `1.35.4@nvidia=<image-id>`. |
 | Flavors allowlist | `config.cluster.flavors` | Flavor ids offered for node groups. Empty = no restriction. |
-
-The remaining `config.cluster.*` keys the form still shows (`floatingNetworkId`,
-`externalNetworkId`, `storageVolumeType`, the browse-provider link) belong to the
-previous infrastructure backend and have no Proxmox meaning.
 
 ## 3. How a cluster is represented
 
@@ -114,9 +109,6 @@ secrets and, when the project's last cluster is gone, the `pc-*` namespace is
 service-level sweep, after the cascade completes. It scans the management cluster
 itself, so it also reaps leftovers of projects whose ProxCloud record is already
 gone. A secret younger than the 30-minute grace window is never touched.
-
-A leftover secret that names a credential from the previous backend is not
-revoked automatically: the sweep reports it and leaves it for manual review.
 
 ```sh
 # namespaces ProxCloud owns, with what's left inside them

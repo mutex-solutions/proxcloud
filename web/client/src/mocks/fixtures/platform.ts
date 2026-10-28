@@ -14,7 +14,7 @@ export const projects: Project[] = [
     organizationId: ORG_ID,
     billingProfileId: BP_ID,
     memberships: [{ sub: mockProfile.sub, roles: ["OWNER"] }],
-    services: [{ serviceId: "svc-openstack-1" }, { serviceId: "svc-ceph-1" }, { serviceId: "svc-dbaas-1" }],
+    services: [{ serviceId: "svc-proxmox-1" }, { serviceId: "svc-ceph-1" }, { serviceId: "svc-dbaas-1" }],
     publicNetworksVisible: true,
     gpuCapacityVisible: true,
   },
@@ -25,7 +25,7 @@ export const projects: Project[] = [
     organizationId: ORG_ID,
     billingProfileId: BP_ID,
     memberships: [{ sub: mockProfile.sub, roles: ["OWNER"] }],
-    services: [{ serviceId: "svc-openstack-1" }],
+    services: [{ serviceId: "svc-proxmox-1" }],
   },
   // Seeded mid-deletion so the projects list renders the scheduled-for-deletion
   // treatment (and its "Cancel deletion" action) without needing a mutation.
@@ -36,7 +36,7 @@ export const projects: Project[] = [
     organizationId: ORG_ID,
     billingProfileId: BP_ID,
     memberships: [{ sub: mockProfile.sub, roles: ["OWNER"] }],
-    services: [{ serviceId: "svc-openstack-1" }],
+    services: [{ serviceId: "svc-proxmox-1" }],
   },
 ]
 
@@ -49,27 +49,26 @@ export const organizations: Organization[] = [
   },
 ]
 
-const ALL_TYPES = [
+const COMPUTE_TYPES = [
   "SERVER", "SERVER_GROUP", "KEYPAIR", "IMAGE", "VOLUME", "VOLUME_SNAPSHOT",
-  "SHARE", "NETWORK", "SUBNET", "PORT", "ROUTER", "FLOATING_IP",
-  "SECURITY_GROUP", "LOAD_BALANCER", "DNS_ZONE", "STACK", "BARBICAN_SECRET",
+  "NETWORK", "SUBNET", "PORT", "ROUTER", "SECURITY_GROUP",
 ]
 
 export const locations: Location[] = [
   {
-    serviceId: "svc-openstack-1",
+    serviceId: "svc-proxmox-1",
     region: "RegionOne",
     displayName: "Hanoi (RegionOne)",
-    resourceTypes: [...ALL_TYPES, "BUCKET"],
-    provider: "openstack",
+    resourceTypes: COMPUTE_TYPES,
+    provider: "proxmox",
     serviceName: "ProxCloud Compute",
   },
   {
-    serviceId: "svc-openstack-1",
+    serviceId: "svc-proxmox-1",
     region: "RegionTwo",
     displayName: "Da Nang (RegionTwo)",
-    resourceTypes: ALL_TYPES,
-    provider: "openstack",
+    resourceTypes: COMPUTE_TYPES,
+    provider: "proxmox",
     serviceName: "ProxCloud Compute",
   },
   {
@@ -90,7 +89,7 @@ export const locations: Location[] = [
   },
 ]
 
-// Sidebar service gating — keys are OpenStack service names (AppShell.tsx).
+// Sidebar service gating — keys are service slugs (AppShell.tsx).
 export const uiMenu = {
   id: PID,
   menu: {
@@ -99,12 +98,7 @@ export const uiMenu = {
       image: { enabled: true },
       volumev3: { enabled: true },
       "object-store": { enabled: true },
-      sharev2: { enabled: true },
       network: { enabled: true },
-      "load-balancer": { enabled: true },
-      dns: { enabled: true },
-      orchestration: { enabled: true },
-      "key-manager": { enabled: true },
       database: { enabled: true },
     },
   },

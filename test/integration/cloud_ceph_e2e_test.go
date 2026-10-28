@@ -124,7 +124,7 @@ func newCephRig(t *testing.T) *cephRig {
 	creds := cephcred.New(db, enc)
 
 	h := project.NewHandler(projSvc, project.NewPolicy(nil), nil, nil, nil, nil, cloudRepo, esSvc,
-		nil, nil, func() *client.Client { return nil }, env.region)
+		nil, nil, env.region)
 	h.SetCephCreds(creds, cephcred.NewKeyRepo(db, enc))
 
 	return &cephRig{db: db, h: h, esSvc: esSvc, cloudRepo: cloudRepo, projRepo: projRepo, creds: creds, env: env}
@@ -171,9 +171,8 @@ func TestCephE2EBootstrapWriteSync(t *testing.T) {
 	if !saved.HasService(cephSvcID) {
 		t.Fatalf("project not attached to ceph service: %+v", saved.Services)
 	}
-	// A ceph-s3 project has NO Keystone tenant (decision #2).
-	if ext := saved.ExternalProjectID(cephSvcID); ext != "" {
-		t.Errorf("ceph project should have no externalProjectId, got %q", ext)
+	if got := saved.ServiceProvider(cephSvcID); got != "ceph-s3" {
+		t.Errorf("ServiceProvider = %q; want ceph-s3", got)
 	}
 	binding, _ := saved.Services[0].(map[string]any)
 	if binding["provider"] != "ceph-s3" || binding["rgwUid"] != wantUID {
@@ -280,8 +279,8 @@ func TestCephE2EZZTeardown(t *testing.T) {
 		t.Fatalf("CreateBucket: %v", err)
 	}
 
-	// TeardownProject: the per-resource sweep may fail to delete a NON-EMPTY bucket (S3 refuses, as Swift
-	// does) — the ceph branch then purges the tenant-user WITH its data, which is the real cleanup. So a
+	// TeardownProject: the per-resource sweep may fail to delete a NON-EMPTY bucket (S3 refuses) — the
+	// ceph branch then purges the tenant-user WITH its data, which is the real cleanup. So a
 	// non-nil error here is expected and not fatal; what matters is that the user + credential are gone.
 	if err := rig.h.TeardownProject(ctx, cephProjID); err != nil {
 		t.Logf("TeardownProject reported (expected for a non-empty bucket): %v", err)

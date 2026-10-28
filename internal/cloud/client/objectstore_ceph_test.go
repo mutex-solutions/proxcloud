@@ -343,22 +343,6 @@ func TestCephCreateBucket(t *testing.T) {
 	}
 }
 
-// Static website hosting is an RGW s3website feature with no Swift equivalent: a Swift-backed client must
-// refuse it explicitly rather than silently do nothing.
-func TestBucketWebsiteUnsupportedOnSwift(t *testing.T) {
-	swift := &Client{} // no ceph backend
-	ctx := context.Background()
-	if _, err := swift.GetBucketWebsite(ctx, "b1"); !errors.Is(err, ErrWebsiteUnsupported) {
-		t.Errorf("GetBucketWebsite: want ErrWebsiteUnsupported, got %v", err)
-	}
-	if _, err := swift.EnableBucketWebsite(ctx, "b1", "", ""); !errors.Is(err, ErrWebsiteUnsupported) {
-		t.Errorf("EnableBucketWebsite: want ErrWebsiteUnsupported, got %v", err)
-	}
-	if err := swift.DisableBucketWebsite(ctx, "b1"); !errors.Is(err, ErrWebsiteUnsupported) {
-		t.Errorf("DisableBucketWebsite: want ErrWebsiteUnsupported, got %v", err)
-	}
-}
-
 // The website URL is virtual-hosted (<bucket>.<websiteHost>), which is why the wildcard cert/DNS exists —
 // it is NOT the path-style S3 data endpoint. And the public-read policy must name the TENANTED bucket ARN.
 func TestCephWebsiteURLAndPolicy(t *testing.T) {

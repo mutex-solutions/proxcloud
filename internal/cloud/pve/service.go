@@ -104,8 +104,8 @@ func FlavorTag(slug string) string  { return tagFlavorPref + slug }
 func ImageTag(slug string) string   { return tagImagePref + slug }
 func ProfileTag(slug string) string { return tagProfilePref + slug }
 
-// MapVMStatus maps PVE state → the OpenStack-shaped status vocabulary the FE and
-// billing eligibility already understand (ACTIVE/SHUTOFF/BUILD/ERROR).
+// MapVMStatus maps PVE state → the API's status vocabulary the FE and
+// billing eligibility understand (ACTIVE/SHUTOFF/BUILD/ERROR).
 func MapVMStatus(status, lock string) string {
 	switch lock {
 	case "clone", "create":
@@ -123,8 +123,8 @@ func MapVMStatus(status, lock string) string {
 	}
 }
 
-// ServerData builds the canonical data.server payload (the billing + FE contract;
-// see internal/cloud/providers/server.go for the OpenStack twin). All values are
+// ServerData builds the canonical data.server payload (the billing + FE contract,
+// read by internal/cloud/billingresource/server.go). All values are
 // round-trip-stable JSON scalars.
 //
 // volumeBacked is always true for PVE servers: every disk bills as a VOLUME row
@@ -169,7 +169,7 @@ func ServerData(r ClusterResource, addresses map[string]any, gpuSpecs map[string
 	}
 }
 
-// AgentAddresses converts guest-agent NICs into the OpenStack addresses shape:
+// AgentAddresses converts guest-agent NICs into the API's addresses shape:
 // {"private": [{"addr": ..., "version": 4}]}. Loopback and link-local are dropped.
 //
 // ⚠ The return type is map[string]any over []any — NOT map[string][]map[string]any.

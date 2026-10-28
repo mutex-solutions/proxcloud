@@ -185,7 +185,7 @@ per cadence (minutely / hourly / monthly). Flow:
    - Rate + accrue onto the locked current bill (`pricing.ChargeBillingResources`).
 
 Per-profile errors are logged-and-skipped so one bad profile can't stall the run.
-The charge job reads the PostgreSQL **cache** (`cloudResource` + `gnocchiMetrics`, the legacy table name for traffic usage, +
+The charge job reads the PostgreSQL **cache** (`cloudResource` + `usageMetrics`, the traffic usage table, +
 `pricePlan`), never live cloud — populating that cache is the separate sync +
 metrics jobs.
 
@@ -626,7 +626,7 @@ stateDiagram-v2
 ```mermaid
 flowchart TD
     subgraph Metering
-        CR["Cloud resource cache<br/>cloudResource + gnocchiMetrics (legacy name)"] --> BR[BillingResource<br/>Values + type]
+        CR["Cloud resource cache<br/>cloudResource + usageMetrics"] --> BR[BillingResource<br/>Values + type]
     end
     subgraph Rating[Charge cron — minutely / hourly / monthly]
         BR --> RULES[Applicable price-plan rules<br/>for profile + service]

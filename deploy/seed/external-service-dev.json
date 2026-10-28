@@ -1,45 +1,39 @@
 [
   {
-    "_id": "svc-openstack-dev",
+    "_id": "svc-proxmox-dev",
     "name": "dev region",
     "type": "CLOUD",
     "status": "PUBLIC",
     "config": {
-      "identityUrl": "https://keystone.example.com:5000/v3",
-      "provider": "openstack",
-      "shared": false,
-      "domainOnlyAdmin": false,
-      "vhi": false,
-      "gnocchiGranularity": 300,
-      "auth": {
-        "adminAuthType": "password",
-        "adminUsername": "dev",
-        "adminDomainName": "Default",
-        "adminProjectId": "01b258599b2f47f881a1cc3512fe09a4"
-      },
-      "customer": { "domainId": "default" },
+      "provider": "proxmox",
+      "region": "RegionOne",
       "regions": {
         "RegionOne": { "name": "RegionOne", "country": "", "displayName": "" }
       },
       "services": {
-        "compute": { "RegionOne": true },
-        "network": { "RegionOne": true },
-        "image":   { "RegionOne": true },
-        "metric":  { "RegionOne": true },
-        "dns":     { "RegionOne": true },
-        "key-manager": { "RegionOne": true },
-        "object-store": { "RegionOne": true },
-        "load-balancer": { "RegionOne": true },
-        "orchestration": { "RegionOne": true },
-        "sharev2": { "RegionOne": true }
+        "compute":  { "RegionOne": true },
+        "network":  { "RegionOne": true },
+        "volumev3": { "RegionOne": true },
+        "image":    { "RegionOne": true }
       },
-      "features": {},
-      "sharedSettings": {},
-      "objectStorage": {},
-      "provisioning": { "projectRoles": [] }
+      "apiUrl": "https://pve1.example.com:8006",
+      "tokenId": "proxcloud@pve!platform",
+      "fingerprint": "",
+      "insecureTls": false,
+      "poolPrefix": "pc-",
+      "network": {
+        "defaultZone": "simple",
+        "zones": { "simple": { "kind": "simple" } },
+        "cidrPool": "10.100.0.0/16"
+      },
+      "storageProfiles": {
+        "std": { "storages": { "*": "local-zfs" }, "shared": false, "snapshots": true, "thin": true, "liveMigrate": false, "replication": false }
+      },
+      "defaultStorageProfile": "std",
+      "metrics": { "source": "none" }
     },
     "secret": {
-      "adminPassword": "__ADMIN_PASSWORD__"
+      "tokenSecret": "__PVE_TOKEN_SECRET__"
     }
   },
   {
@@ -59,16 +53,14 @@
         "namespace": "argocd",
         "project": "proxcloud-k8s",
         "chartRepo": "ghcr.io/mutex-solutions/charts",
-        "chartName": "openstack-kamaji-cluster",
+        "chartName": "__KAMAJI_CLUSTER_CHART__",
         "chartVersion": "0.7.0"
       },
       "cluster": {
         "dataStoreName": "default",
-        "floatingNetworkId": "__FLOATING_NETWORK_ID__",
-        "externalNetworkId": "__EXTERNAL_NETWORK_ID__",
         "dnsZone": "k8s.example.com",
         "versions": {
-          "1.35.4": "__GLANCE_IMAGE_ID_1_35_4__"
+          "1.35.4": "__NODE_IMAGE_ID_1_35_4__"
         },
         "flavors": []
       }
@@ -99,9 +91,6 @@
         "chartVersion": "0.1.0"
       },
       "database": {
-        "osServiceId": "svc-openstack-dev",
-        "osProjectId": "__DBAAS_KEYSTONE_PROJECT_ID__",
-        "memberSubnetId": "__DBAAS_NODE_SUBNET_ID__",
         "storageClasses": [],
         "limits": { "maxCpu": 32, "maxMemoryGiB": 128, "maxStorageGiB": 2048 },
         "engines": {

@@ -12,7 +12,6 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
@@ -44,11 +43,9 @@ type Handler struct {
 	// metadata reads the admin-configured instanceMetadataOption collection for the create-form
 	// metadata panel.
 	metadata *InstanceMetadataReader
-	// cloudClient resolves the live CloudClient (nil until OpenStack auth completes, or when
-	// no cloud is configured) — the cloud write endpoints 503 until it is ready. cloudRegion is
-	// the single configured region stamped on created CloudResources.
-	cloudClient func() *client.Client
-	cloudRegion string
+	// defaultRegion is the region assumed when a project binding names none
+	// (cfg.DefaultRegion).
+	defaultRegion string
 	// downloads mints/resolves short-lived cloud-object download tokens (object-store DOWNLOAD →
 	// GET /download/{token}); apiBaseURL builds the token URL. Set via SetDownloads (nil-safe).
 	downloads  *cloud.DownloadRepo
@@ -117,8 +114,8 @@ func (h *Handler) SetDownloads(d *cloud.DownloadRepo, apiBaseURL string) {
 	h.downloads, h.apiBaseURL = d, apiBaseURL
 }
 
-func NewHandler(svc *Service, policy *Policy, orgSvc *org.Service, users *user.Repo, a *audit.Service, billingRepo *billing.Repo, cloudRepo *cloud.Repo, esSvc *externalservice.Service, pricingRepo *pricing.Repo, metadata *InstanceMetadataReader, cloudClient func() *client.Client, cloudRegion string) *Handler {
-	return &Handler{svc: svc, policy: policy, orgSvc: orgSvc, users: users, audit: a, billing: billingRepo, cloud: cloudRepo, esSvc: esSvc, pricing: pricingRepo, engine: pricing.NewEngine(nil), metadata: metadata, cloudClient: cloudClient, cloudRegion: cloudRegion}
+func NewHandler(svc *Service, policy *Policy, orgSvc *org.Service, users *user.Repo, a *audit.Service, billingRepo *billing.Repo, cloudRepo *cloud.Repo, esSvc *externalservice.Service, pricingRepo *pricing.Repo, metadata *InstanceMetadataReader, defaultRegion string) *Handler {
+	return &Handler{svc: svc, policy: policy, orgSvc: orgSvc, users: users, audit: a, billing: billingRepo, cloud: cloudRepo, esSvc: esSvc, pricing: pricingRepo, engine: pricing.NewEngine(nil), metadata: metadata, defaultRegion: defaultRegion}
 }
 
 // projectAudit emits a PROJECT event from a client (clientUser) action.
@@ -180,7 +177,7 @@ func cloudAuditKind(t string) string {
 	return t
 }
 
-// cloudAuditID prefers the OpenStack/RGW external id (what an operator sees in the cloud) and
+// cloudAuditID prefers the provider-side external id (PVE vmid / RGW name — what an operator sees in the cloud) and
 // falls back to the proxcloud cache id.
 func cloudAuditID(cr *cloud.CloudResource) string {
 	if cr.ExternalID != "" {
@@ -239,12 +236,10 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Get("/init/{projectId}", h.initUI)
 	r.Get("/search/{projectId}", h.search)
 	r.Get("/project/{projectId}/service", h.projectServices)
-	// Service get / auth (by service id). chi: the position-3
-	// param reuses the sibling {serviceType} node name; both handlers read it as the service id.
+	// Service get (by service id). chi: the position-3 param reuses the sibling
+	// {serviceType} node name; the handler reads it as the service id.
 	r.Get("/project/{projectId}/service/{serviceType}", h.projectServiceByID)
-	r.Post("/project/{projectId}/service/{serviceType}/auth", h.projectServiceAuth)
 	r.Get("/project/{projectId}/service/{serviceType}/location", h.projectLocations)
-	r.Get("/project/{id}/service/details", h.projectServiceDetails)
 	r.Get("/project/{id}/cost-info", h.projectCostInfo)
 	r.Post("/project/{id}/init", h.projectInit)
 	// POST /{id}/resource?type= → cached resources filtered by type.
@@ -255,22 +250,17 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/project/{id}/cloud", h.cloudCreate)
 	r.Delete("/project/{id}/cloud/{resourceId}", h.cloudDelete)
 	r.Post("/project/{id}/cloud/{resourceId}/action", h.cloudAction)
-	// PUT /{id}/cloud/{serverId}/metadata → replace nova metadata.
-	r.Put("/project/{id}/cloud/{resourceId}/metadata", h.cloudMetadata)
 	// POST /{id}/cloud/{resourceId}/upload-bucket-file
-	// ?objectName= with the raw file body → stream into the Swift bucket (204).
+	// ?objectName= with the raw file body → stream into the bucket (204).
 	r.Post("/project/{id}/cloud/{resourceId}/upload-bucket-file", h.cloudUploadBucketFile)
-	// Image upload: POST /{id}/image/{imageId}/upload (raw body → glance).
-	// The canonical route lives at /api/v1/openstack/{projectId}/... — both paths serve the same
-	// handler (the /project alias is legacy; old-UI clients call the /openstack path).
 	// Download: GET /download/{token} streams a cloud object (whitelisted; token=auth).
 	r.Get("/download/{token}", h.cloudObjectDownload)
-	// Console: GET /console/{token}/websockify reverse-proxies the VNC WebSocket to the
-	// project's novncproxy (whitelisted; token=auth — a bearer can't ride a WS handshake).
-	// Keeps the OpenStack console service off the public internet.
+	// Console: GET /console/{token}/websockify reverse-proxies the console WebSocket to the
+	// PVE node (whitelisted; token=auth — a bearer can't ride a WS handshake).
+	// Keeps the PVE API off the public internet.
 	r.Get("/console/{token}/websockify", h.cloudConsoleProxy)
 	// Collection-level action: catalog actions for the create wizard
-	// (PUBLIC_IMAGES, LIST_AVAILABILITY_ZONES) — must precede no static segment so it doesn't
+	// (PUBLIC_IMAGES, flavor catalog) — must precede no static segment so it doesn't
 	// collide with /{resourceId}/action (chi: static "action" wins over the {resourceId} param).
 	r.Post("/project/{id}/cloud/action", h.cloudBulkAction)
 	// ceph-s3 per-project S3 access keys ("IAM keys"): the project's own credentials, plus extra keys
@@ -327,7 +317,7 @@ func (h *Handler) billingSummary(w http.ResponseWriter, r *http.Request) {
 // project's own billingProfileId by-id 404 (no org fallback); the target resolves through the
 // getBillingProfile(sub,id) read gate (bp 404 → org 404 → BILLING_PROFILE_READ 403). Then the
 // project status is synced (NEW/SUSPENDED → DISABLED, ACTIVE → ENABLED) + the billingProfileId swap.
-// A live nova pause/unpause would follow when the status actually flips; the flip persists DB-only
+// A live PVE suspend/resume would follow when the status actually flips; the flip persists DB-only
 // here.
 // ponytail: live per-project suspend on flip not driven — extract billingCloudSuspender's
 // per-project leg (cmd/api) if this path ever needs it.

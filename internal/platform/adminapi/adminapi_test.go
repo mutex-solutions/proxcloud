@@ -9,6 +9,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -101,5 +103,36 @@ func TestEnvelopesAndPaging(t *testing.T) {
 	apiNotFound(rec3)
 	if rec3.Code != 404 || rec3.Body.String() != `{"error":{"code":"NOT_FOUND","message":"Not Found"}}`+"\n" {
 		t.Fatalf("error envelope: %d %s", rec3.Code, rec3.Body.String())
+	}
+}
+
+// service_providers reports the real provider kind; only proxmox carries a proxmox block.
+func TestMapServiceProvider(t *testing.T) {
+	for kind, want := range map[string]string{"proxmox": "PROXMOX", "ceph-s3": "CEPH_S3", "kamaji": "KAMAJI", "dbaas": "DBAAS"} {
+		es := &externalservice.ExternalService{ID: "s", Type: externalservice.TypeCloud, Config: map[string]any{"provider": kind}}
+		got := mapServiceProvider(es).Configuration.Cloud
+		if got.Provider != want {
+			t.Errorf("%s: provider = %q, want %q", kind, got.Provider, want)
+		}
+		if (got.Proxmox != nil) != (kind == "proxmox") {
+			t.Errorf("%s: proxmox block = %+v", kind, got.Proxmox)
+		}
+	}
+	b, _ := json.Marshal(mapServiceProvider(&externalservice.ExternalService{Config: map[string]any{"provider": "proxmox", "poolPrefix": "t-"}}))
+	if want := `{"configuration":{"cloud":{"provider":"PROXMOX","proxmox":{"pool_prefix":"t-"}}}}`; string(b) != want {
+		t.Errorf("service provider JSON = %s, want %s", b, want)
+	}
+}
+
+// provisioned_services carry provider/region/pool off the binding.
+func TestMapProjectProvisionedServices(t *testing.T) {
+	p := &project.Project{Services: []any{map[string]any{"serviceId": "svc-1", "provider": "proxmox", "region": "r1", "pool": "pc-p1"}}}
+	got := provisionedServices(p)
+	want := apiProvisionedService{ServiceID: "svc-1", Provider: "PROXMOX", Region: "r1", Pool: "pc-p1"}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("provisioned_services = %+v, want [%+v]", got, want)
+	}
+	if b, _ := json.Marshal(got); string(b) != `[{"service_id":"svc-1","provider":"PROXMOX","region":"r1","pool":"pc-p1"}]` {
+		t.Errorf("provisioned_services JSON = %s", b)
 	}
 }

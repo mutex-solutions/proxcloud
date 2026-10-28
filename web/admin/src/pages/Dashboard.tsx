@@ -34,8 +34,8 @@ function sumTotals(total?: Record<string, number>): number {
   return Object.values(total ?? {}).reduce((a, b) => a + Number(b || 0), 0)
 }
 
-// GPU capacity (placement gpu-info) — one row block per cloud provider; hides
-// itself when the provider reports no GPU resource providers.
+// GPU capacity (gpu-info) — one row block per cloud provider; hides itself when
+// the provider reports no GPU devices.
 type GpuRegionCapacity = { region: string; gpus: Array<{ name: string; total: number; inUse: number }> }
 
 function ServiceGpuRows({ svc }: { svc: { id: string; name?: string } }) {
@@ -203,7 +203,7 @@ export function DashboardPage() {
       <PageHeader
         title="Dashboard"
         eyebrow="Overview"
-        description="Platform-wide activity at a glance."
+        description="Platform-wide activity summary."
       />
 
       {isLoading ? (

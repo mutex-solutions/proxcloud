@@ -55,8 +55,7 @@ export function statusKind(status?: string): "ok" | "warn" | "error" | "muted" {
   if (["ACTIVE", "ENABLED", "SUCCESS", "PAID", "RUNNING", "ONLINE", "AVAILABLE", "IN-USE", "UP"].includes(s)) return "ok"
   if (["ERROR", "FAILED", "SUSPENDED", "DISABLED", "DOWN", "DELETED", "REJECTED"].includes(s)) return "error"
   if (["BUILD", "PENDING", "CREATING", "PAUSED", "SHUTOFF", "PENDING_CREATE", "OPEN", "SENT", "NEW"].includes(s)) return "warn"
-  // Compound OpenStack states — Heat (CREATE_COMPLETE, UPDATE_FAILED, …) and
-  // Octavia (PENDING_UPDATE, DEGRADED) report VERB_PHASE strings.
+  // Compound VERB_PHASE states (CREATE_COMPLETE, UPDATE_FAILED, PENDING_UPDATE, DEGRADED, …).
   if (s.endsWith("_FAILED")) return "error"
   if (s === "SUSPEND_COMPLETE") return "warn" // settled, but paused — not healthy-green
   if (s.endsWith("_COMPLETE")) return "ok"

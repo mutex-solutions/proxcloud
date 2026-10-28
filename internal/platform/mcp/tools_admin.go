@@ -114,7 +114,6 @@ var adminTools = []toolDef{
 			{name: "billing_profile_id", typ: "string", desc: "Filter by the project's own billing profile id.", in: "query"},
 			{name: "member_sub", typ: "string", desc: "Filter to projects the given subject is a member of.", in: "query"},
 			{name: "status", typ: "string", desc: "Filter by project status (e.g. ENABLED, DISABLED).", in: "query"},
-			{name: "openstack_project_id", typ: "string", desc: "Filter by the provisioned OpenStack tenant id.", in: "query"},
 		},
 	},
 	{
@@ -136,12 +135,12 @@ var adminTools = []toolDef{
 			{name: "organization_id", typ: "string", desc: "Owning organization id.", required: true, in: "body"},
 			{name: "billing_profile_id", typ: "string", desc: "Optional billing profile id (404 when unknown).", in: "body"},
 			// ponytail: handler only checks len(provision)>0 — entry contents are ignored.
-			{name: "provision", typ: "array", desc: "Optional array of provision spec objects; any non-empty array triggers provisioning (keystone tenant + ENABLED). Pass e.g. [{}].", in: "body"},
+			{name: "provision", typ: "array", desc: "Optional array of provision spec objects; any non-empty array triggers provisioning (PVE pool / provider tenants + ENABLED). Pass e.g. [{}].", in: "body"},
 		},
 	},
 	{
 		name:   "provision_project",
-		desc:   "Provision an existing project onto the platform cloud (keystone tenant, status ENABLED); returns the refreshed project.",
+		desc:   "Provision an existing project onto the platform providers (PVE pool, status ENABLED); returns the refreshed project.",
 		method: "POST",
 		path:   "/admin-api/v1/projects/{id}/provision",
 		params: []param{

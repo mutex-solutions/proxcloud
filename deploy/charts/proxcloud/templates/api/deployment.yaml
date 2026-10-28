@@ -138,10 +138,6 @@ spec:
               value: {{ .Values.api.billing.callbackToken | quote }}
             {{- end }}
             {{- end }}
-            {{- if .Values.api.network.defaultMtu }}
-            - name: PROXCLOUD_DEFAULT_NETWORK_MTU
-              value: {{ .Values.api.network.defaultMtu | quote }}
-            {{- end }}
             {{- if .Values.api.mail.smtp.host }}
             - name: PROXCLOUD_MAIL_SMTP_HOST
               value: {{ .Values.api.mail.smtp.host | quote }}

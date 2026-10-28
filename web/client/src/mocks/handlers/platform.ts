@@ -21,7 +21,7 @@ on("POST /project", ({ opts }) => {
     organizationId: body.organizationId ?? ORG_ID,
     billingProfileId: "bp-acme-1",
     memberships: [],
-    services: [{ serviceId: "svc-openstack-1" }],
+    services: [{ serviceId: "svc-proxmox-1" }],
   }
   db.projects.push(project)
   return { data: project }
@@ -50,7 +50,7 @@ on("PUT /project/:pid/organization", () => ({ data: {} }))
 on("POST /project/:pid/billing/:bpId", () => ({ data: {} }))
 on("GET /project/:pid/service", () => ({
   data: [
-    { id: "svc-openstack-1", name: "ProxCloud Compute", type: "CLOUD", status: "ACTIVE" },
+    { id: "svc-proxmox-1", name: "ProxCloud Compute", type: "CLOUD", status: "ACTIVE" },
     { id: "svc-ceph-1", name: "ProxCloud S3", type: "CLOUD", status: "ACTIVE" },
     {
       id: "svc-dbaas-1",
@@ -59,7 +59,7 @@ on("GET /project/:pid/service", () => ({
       status: "ACTIVE",
       databasePlatformVersion: "0.1.0",
       databaseLimits: { maxCpu: 32, maxMemoryGiB: 128, maxStorageGiB: 2048 },
-      databaseStorageClasses: ["csi-cinder", "csi-cinder-highiops"],
+      databaseStorageClasses: ["proxmox-csi", "proxmox-csi-nvme"],
       databaseEngines: {
         postgresql: { versions: ["16", "17", "18"], default: "17", replicas: [1, 3] },
         mysql: { versions: ["8.4"], replicas: [1, 3] },

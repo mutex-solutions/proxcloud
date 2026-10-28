@@ -133,7 +133,7 @@ func TestSuspendAndResumeClouds(t *testing.T) {
 // engine still swallows it (suspension is best-effort there), but the caller and the logs should
 // see that the cloud leg did not happen.
 func TestSuspendFailureIsReported(t *testing.T) {
-	sus := &recordingSuspender{err: fmt.Errorf("nova unreachable")}
+	sus := &recordingSuspender{err: fmt.Errorf("cloud unreachable")}
 	srv := mount(t, New(sus, nil, nil, testToken, nil))
 
 	resp := post(t, srv, "/internal/v1/billing-profiles/bp-1/suspend-clouds", testToken, "")

@@ -202,7 +202,7 @@ func (c *Client) ApplySecret(ctx context.Context, ns, name string, stringData ma
 }
 
 // ListSecrets lists secrets in ns filtered by labelSelector, as full objects (metadata incl.
-// labels/annotations — the orphan-finalize scan reads the appcred annotations off them).
+// labels/annotations — the orphan-finalize scan reads names and timestamps off them).
 func (c *Client) ListSecrets(ctx context.Context, ns, labelSelector string) ([]map[string]any, error) {
 	return c.list(ctx, fmt.Sprintf(pathSecrets, ns), labelSelector)
 }
@@ -302,7 +302,7 @@ func (c *Client) DeleteApplication(ctx context.Context, ns, name string) error {
 }
 
 // GetService returns a core/v1 Service, or nil when absent. Read-only: the dbaas provider reads
-// the Octavia VIP back off .status.loadBalancer.ingress of chart-rendered LoadBalancer Services.
+// the LB ingress IP back off .status.loadBalancer.ingress of chart-rendered LoadBalancer Services.
 func (c *Client) GetService(ctx context.Context, ns, name string) (map[string]any, error) {
 	return c.get(ctx, fmt.Sprintf(pathServices, ns), name)
 }

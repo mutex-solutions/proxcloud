@@ -20,7 +20,7 @@ import (
 //
 // ⚠ The identity stack is an EMBEDDED authorization server over this same datastore
 // users/userCredential store — there is NO Keycloak in it. create/delete are
-// therefore plain datastore (+ the per-user keystone cleanup on delete); only impersonate (a local
+// therefore plain datastore; only impersonate (a local
 // OAuth2 token MINT) stays unimplemented, because this service is a pure OIDC resource server
 // (Keycloak owns token issuance).
 //
@@ -31,14 +31,13 @@ import (
 //	GET    /user                  (list)                ADMIN_USER_READ         (ALREADY in handler.go — h.listRaw "users"; NOT re-registered)
 //	GET    /user/sub/{sub}        userBySub             ADMIN_USER_READ         (datastore load-by-sub; null → {})
 //	GET    /user/project/{pid}    userByProject         ADMIN_USER_READ         (project load-by-id-or-404 → owner sub → user; null → {})
-//	GET    /user/{id}/services    userExternalServices  ADMIN_USER_READ         (load-by-id-or-404 → list the user's external services → DTO; empty greenfield → [])
 //	PUT    /user/{id}             userUpdate            ADMIN_USER_UPDATE       (datastore: sub/firstName/lastName/email overwrite)
-//	DELETE /user/{id}             userDelete            ADMIN_USER_DELETE       (per-user keystone cleanup → delete by id)
+//	DELETE /user/{id}             userDelete            ADMIN_USER_DELETE       (not-in-use guard → delete by id)
 //	POST   /user/{id}/impersonate userImpersonate       ADMIN_USER_IMPERSONATE  [not implemented: local OAuth2 token mint — divergent by design]
 //
 // Error strings are exact: "User with id %s not found ",
 // "The project with id %s was not found. ",
-// "User is in use for projects", "Cannot delete user " — all verbatim incl.
+// "User is in use for projects" — all verbatim incl.
 // trailing spaces. Datastore writes via the crud.go helpers + user_repo.go. Identity/Keycloak/token
 // ops return 501. The surface also writes audit events (deferred, // TODO(audit)).
 
@@ -59,7 +58,6 @@ func (h *Handler) routeUser(r chi.Router) {
 	r.Post("/user", h.userCreate)
 	r.Get("/user/sub/{sub}", h.userBySub)
 	r.Get("/user/project/{projectId}", h.userByProject)
-	r.Get("/user/{id}/services", h.userExternalServices)
 	r.Get("/user/{id}", h.userGet)
 	r.Put("/user/{id}", h.userUpdate)
 	r.Delete("/user/{id}", h.userDelete)
@@ -143,27 +141,6 @@ func (h *Handler) userByProject(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, u)
 }
 
-// userExternalServices loads the user by id (or 404), then lists that user's external services
-// as DTOs. The user resolve (404 path) is the real behavior; the live OpenStack external-service
-// listing is a cloud integration point (cloud-admin), so under greenfield the list is empty →
-// {data:[], paging}. (Same stub posture as the existing /admin/service/{id}/user/services endpoint.)
-func (h *Handler) userExternalServices(w http.ResponseWriter, r *http.Request) {
-	if !h.require(w, r, userReadPerm) {
-		return
-	}
-	id := chi.URLParam(r, "id")
-	u, err := h.repo.userByID(r.Context(), id)
-	if httpx.WriteError(w, err) {
-		return
-	}
-	if u == nil {
-		httpx.WriteError(w, userNotFound(id))
-		return
-	}
-	// External integration point: list the user's live OpenStack external services (cloud-admin).
-	httpx.List(w, []any{})
-}
-
 // userUpdate loads the user by id (or 404) → overwrites
 // sub/firstName/lastName/email off the request body → saves → returns the saved user. Only those four
 // fields are copied; all other persisted fields are preserved.
@@ -206,11 +183,7 @@ func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // userDelete loads the user by id (or 404); if the user still owns projects → 400 "User is in use
-// for projects"; else cleans up the user (delete the user's per-service keystone users — one per
-// NON-SHARED openstack service in user.services[], via config.openstackUserId) → delete the user +
-// audit; a failed keystone delete → 400 "Cannot delete user ". Greenfield users carry no services[]
-// (the bootstrap creates no per-customer keystone users) → the cleanup set is empty → plain
-// datastore delete.
+// for projects"; else deletes the user (plain datastore delete) + audit.
 func (h *Handler) userDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userDeletePerm) {
 		return
@@ -232,32 +205,11 @@ func (h *Handler) userDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("User is in use for projects"))
 		return
 	}
-	if !h.cleanUpUser(w, r, id) {
-		return
-	}
 	if err := h.repo.deleteUserByID(r.Context(), id); httpx.WriteError(w, err) {
 		return
 	}
 	// DELETE USER audit (PLATFORM scope — the middleware emits the admin event).
 	httpx.OK(w, "Successful operation")
-}
-
-// cleanUpUser deletes the user's per-service keystone identities: for each of the user's attached
-// NON-SHARED openstack services, keystone-delete config.openstackUserId; all must succeed to allow the
-// datastore delete. Writes the response (400 "Cannot delete user " / 501 when a cleanup is needed but
-// the cloud factory is unwired) and returns false when the caller must stop.
-func (h *Handler) cleanUpUser(w http.ResponseWriter, r *http.Request, userID string) bool {
-	raw, err := h.repo.FindDoc(r.Context(), "users", userID)
-	if httpx.WriteError(w, err) {
-		return false
-	}
-	svcs, _ := raw["services"].(pgdoc.A)
-	if len(svcs) == 0 {
-		return true // no per-user cloud identities → nothing to clean (the greenfield case)
-	}
-	// Per-user keystone identities died with the OpenStack backend; any stored
-	// binding is a pre-fork import with nothing live behind it.
-	return true
 }
 
 // userCreate rejects a duplicate email → 400 "User with this email already exists"; else does a

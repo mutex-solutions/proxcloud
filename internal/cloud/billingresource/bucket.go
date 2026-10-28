@@ -8,7 +8,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/billingapi"
 )
 
-// BucketProvider maps a BUCKET (ceph-s3 / swift object storage) → a "bucket" BillingResource.
+// BucketProvider maps a BUCKET (ceph-s3 object storage) → a "bucket" BillingResource.
 // The sync caches each bucket FLAT (bucketName/sizeInBytes/objectCount — providers.BucketProvider),
 // so the billable quantity is the stored size: `size_gb` is ceil'd to a whole GB so a rule priced
 // per-GB (like the volume rule) charges at least one unit for any non-empty bucket, and

@@ -7,8 +7,8 @@ description: >-
   PerconaServerMySQL, mariadb-operator MariaDB + a chart-owned HAProxy,
   valkey-operator Valkey, FerretDB = CNPG backend + frontend Deployment,
   opensearch-k8s-operator OpenSearchCluster, or Strimzi Kafka + KafkaNodePool
-  + KafkaUser). Every engine additionally gets an Octavia internal
-  LoadBalancer Service into the tenant network (EXCEPT kafka, where Strimzi
+  + KafkaUser). Every engine additionally gets a LoadBalancer Service
+  (EXCEPT kafka, where Strimzi
   creates the bootstrap + per-broker LBs itself) and a NetworkPolicy.
 name: database-cluster
 type: application

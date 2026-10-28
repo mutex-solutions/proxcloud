@@ -203,7 +203,7 @@ func (b *cephBackend) websiteStmt(bucket string) policyStmt {
 
 // setPublicRead flips the explicit "public bucket" state: a public-read ACL (so the bucket can be listed)
 // PLUS a policy statement granting anonymous s3:GetObject (so the objects can actually be read). The ACL
-// alone is what the Swift-era toggle did, and on S3 it leaves every object 403 — the toggle would lie.
+// alone leaves every object 403 on S3 — the toggle would lie.
 func (b *cephBackend) setPublicRead(ctx context.Context, bucket string, public bool) error {
 	doc, err := b.getPolicyDoc(ctx, bucket)
 	if err != nil {

@@ -44,7 +44,7 @@ capabilities to AI agents.
 ## Contents
 
 - [Features](#-features)
-- [Architecture at a glance](#-architecture-at-a-glance)
+- [Architecture overview](#-architecture-overview)
 - [Quickstart](#-quickstart)
 - [Repository layout](#-repository-layout)
 - [Tech stack](#-tech-stack)
@@ -64,7 +64,7 @@ capabilities to AI agents.
 - **MCP server** — a Model Context Protocol endpoint so AI agents can drive the platform with the same auth and permissions as a user or operator.
 - **Identity via OIDC** — Keycloak or any OpenID Connect provider, browser sign-in over authorization-code + PKCE.
 
-## 🧭 Architecture at a glance
+## 🧭 Architecture overview
 
 ```mermaid
 flowchart LR

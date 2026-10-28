@@ -4,7 +4,7 @@
 # before the database exists, and the proxcloud status mapping (Argo health → DB status,
 # internal/cloud/dbaas/syncprovider.go) would be meaningless. The LB Service and the FerretDB
 # frontend Deployment ride ArgoCD's BUILT-IN Service/Deployment health — no Lua needed there;
-# the Service health is what keeps an Application Progressing until the Octavia VIP exists).
+# the Service health is what keeps an Application Progressing until the LB ingress IP exists).
 #
 # This file is a MERGE PATCH for the existing argocd-cm, not a standalone ConfigMap — ArgoCD
 # owns argocd-cm and a plain `kubectl apply` of this partial object would wipe its other keys

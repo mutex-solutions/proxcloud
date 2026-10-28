@@ -9,9 +9,8 @@ import (
 
 // TestPrometheusLiveSmoke is a READ-ONLY live check against a real Prometheus-compatible
 // endpoint — skipped unless PROXCLOUD_PROM_LIVE_URL is set. Optional env:
-// PROXCLOUD_PROM_LIVE_TENANT (sent as X-Scope-OrgID), PROXCLOUD_PROM_LIVE_INSTANCE (a nova uuid
-// to discover + measure). Mirrors TestGnocchiSmoke: proves endpoint/auth/schema on the real
-// deployment, creates nothing.
+// PROXCLOUD_PROM_LIVE_TENANT (sent as X-Scope-OrgID), PROXCLOUD_PROM_LIVE_INSTANCE (an instance uuid
+// to discover + measure). Proves endpoint/auth/schema on the real deployment, creates nothing.
 func TestPrometheusLiveSmoke(t *testing.T) {
 	url := os.Getenv("PROXCLOUD_PROM_LIVE_URL")
 	if url == "" {
@@ -49,11 +48,11 @@ func TestPrometheusLiveSmoke(t *testing.T) {
 	now := time.Now().UTC()
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	for _, iface := range ifaces {
-		in, err := p.MeasuresMBForCurrentMonth(ctx, iface.Metrics["network.incoming.bytes"], 0, monthStart)
+		in, err := p.MeasuresMBForCurrentMonth(ctx, iface.Metrics["network.incoming.bytes"], monthStart)
 		if err != nil {
 			t.Fatalf("measures incoming %s: %v", iface.Name, err)
 		}
-		out, err := p.MeasuresMBForCurrentMonth(ctx, iface.Metrics["network.outgoing.bytes"], 0, monthStart)
+		out, err := p.MeasuresMBForCurrentMonth(ctx, iface.Metrics["network.outgoing.bytes"], monthStart)
 		if err != nil {
 			t.Fatalf("measures outgoing %s: %v", iface.Name, err)
 		}

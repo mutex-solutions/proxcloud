@@ -214,7 +214,7 @@ export default function S3KeysPage() {
           <EmptyState
             icon={KeyRound}
             title="S3 access keys are not available"
-            hint="This project has no S3 (Ceph) object storage service. Swift buckets are managed through ProxCloud only."
+            hint="This project has no S3 (Ceph) object storage service."
           />
         ) : (
           <p className="rounded-md bg-muted p-4 text-sm text-muted-foreground">{(creds.error as Error).message}</p>

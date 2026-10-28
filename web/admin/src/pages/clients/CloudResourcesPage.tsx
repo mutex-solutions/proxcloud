@@ -51,7 +51,7 @@ const PAGE_SIZE = 25
 // enum (they can't be derived from a single server page). Mirror internal/cloud resource types.
 const RESOURCE_TYPES = [
   "SERVER", "VOLUME", "VOLUME_SNAPSHOT", "IMAGE", "NETWORK", "PORT", "ROUTER", "FLOATING_IP",
-  "SECURITY_GROUP", "KEYPAIR", "SERVER_GROUP", "LOAD_BALANCER", "DNS_ZONE", "BARBICAN_SECRET",
+  "SECURITY_GROUP", "KEYPAIR", "SERVER_GROUP", "LOAD_BALANCER", "DNS_ZONE",
   "STACK", "BUCKET", "SHARE",
 ]
 

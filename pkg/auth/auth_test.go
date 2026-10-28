@@ -22,9 +22,13 @@ func TestJobPrefixNotPublic(t *testing.T) {
 	if IsPublic("/api/v1/events/proj1") {
 		t.Error("/api/v1/events/ must NOT be public")
 	}
+	// The legacy notification webhook prefix is no longer public.
+	if IsPublic("/api/v1/notifications/svc/RegionOne") {
+		t.Error("/api/v1/notifications/ must NOT be public")
+	}
 	// Legitimate public paths still pass.
-	if !IsPublic("/api/v1/notifications/svc/RegionOne") {
-		t.Error("/api/v1/notifications/ should remain public")
+	if !IsPublic("/api/v1/callbacks/x") {
+		t.Error("/api/v1/callbacks/ should remain public")
 	}
 }
 

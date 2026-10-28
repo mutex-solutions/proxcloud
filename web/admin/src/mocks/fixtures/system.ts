@@ -8,13 +8,17 @@ type Doc = Record<string, any>
 
 export const services: Doc[] = [
   {
-    id: "svc-openstack-01",
-    name: "Helium OpenStack",
-    type: "openstack",
+    id: "svc-proxmox-01",
+    name: "Helium Proxmox",
+    type: "CLOUD",
     status: "ACTIVE",
     config: {
-      provider: "openstack",
-      identityUrl: "https://keystone.helium.example.com:5000/v3",
+      provider: "proxmox",
+      apiUrl: "https://pve.helium.example.com:8006",
+      tokenId: "proxcloud@pve!api",
+      fingerprint: "",
+      insecureTls: false,
+      poolPrefix: "pc-",
       regions: {
         "eu-central-1": { displayName: "EU Central (Frankfurt)" },
         "eu-west-1": { displayName: "EU West (Amsterdam)" },
@@ -22,37 +26,35 @@ export const services: Doc[] = [
       services: {
         compute: { "eu-central-1": true, "eu-west-1": true },
         network: { "eu-central-1": true, "eu-west-1": true },
-        volume: { "eu-central-1": true, "eu-west-1": true },
+        volumev3: { "eu-central-1": true, "eu-west-1": true },
         image: { "eu-central-1": true, "eu-west-1": true },
-        "load-balancer": { "eu-central-1": true, "eu-west-1": false },
-        share: { "eu-central-1": true, "eu-west-1": false },
       },
-      auth: { username: "proxcloud-admin", projectName: "admin", domainName: "Default" },
+      network: {
+        defaultZone: "overlay",
+        zones: { overlay: { kind: "evpn", peers: ["10.0.0.1"], exitNodes: ["pve1"] } },
+        cidrPool: "10.100.0.0/16",
+        isolation: "shared",
+        publicNetworks: [{ id: "net-ext-01", name: "Internet", cidr: "203.0.113.0/24", gateway: "203.0.113.1", ranges: ["203.0.113.10-203.0.113.200"] }],
+      },
+      storageProfiles: {
+        std: { storages: { "*": "local-zfs" }, shared: false, snapshots: true, thin: true, liveMigrate: false, replication: false },
+      },
+      templates: {
+        "ubuntu-24": { vmid: 9000, node: "pve1", name: "Ubuntu 24.04", osDistro: "ubuntu", minDiskGb: 10 },
+      },
+      gpus: { "a100-80gb": { alias: "nvidia-a100-80gb" }, "l40s": { alias: "nvidia-l40s" } },
       features: {
-        components: {
-          "volume-backup": true,
-          "volume-snapshot": true,
-          "image-download": false,
-          "instance-metrics": true,
-        },
-        volumeTypes: {
-          "eu-central-1": [
-            { name: "ssd", displayName: "NVMe SSD", enabled: true },
-            { name: "hdd", displayName: "Capacity HDD", enabled: false },
-          ],
-          "eu-west-1": [{ name: "ssd", displayName: "NVMe SSD", enabled: true }],
-        },
-        consoleType: "NOVNC",
+        components: [
+          { name: "volume-backup", enabled: true },
+          { name: "volume-snapshot", enabled: true },
+          { name: "image-download", enabled: false },
+        ],
+        enabledConsoleTypes: ["NOVNC"],
       },
       provisioning: {
-        quota: { instances: 20, cores: 64, ram: 262144, volumes: 40, gigabytes: 4000, floatingips: 10 },
+        quota: { servers: 20, vcpus: 64, ramMb: 262144, diskGb: 4000, floatingIps: 10, gpu: { "*": 4 } },
       },
-      metrics: { source: "gnocchi" },
-      availabilityZones: [
-        { name: "az-1", displayName: "Zone 1", enabled: true },
-        { name: "az-2", displayName: "Zone 2", enabled: true },
-        { name: "az-maintenance", displayName: "", enabled: false },
-      ],
+      metrics: { source: "none" },
     },
   },
   {
@@ -90,10 +92,7 @@ export const services: Doc[] = [
         chartVersion: "0.1.0",
       },
       database: {
-        osServiceId: "svc-openstack-01",
-        osProjectId: "db44a5000000000000000000000000aa",
-        memberSubnetId: "5f0e1d2c-3b4a-5968-8776-655443322110",
-        storageClasses: ["csi-cinder"],
+        storageClasses: ["proxmox-csi"],
         limits: { maxCpu: 32, maxMemoryGiB: 128, maxStorageGiB: 2048 },
         engines: {
           postgresql: { versions: ["16", "17", "18"], default: "17", replicas: [1, 3] },
@@ -107,9 +106,9 @@ export const services: Doc[] = [
   },
 ]
 
-// GPU placement capacity per service (GET /admin/service/{id}/gpu-info).
+// GPU capacity per service (GET /admin/service/{id}/gpu-info).
 export const gpuInfoByService: Record<string, Doc[]> = {
-  "svc-openstack-01": [
+  "svc-proxmox-01": [
     {
       region: "eu-central-1",
       gpus: [
@@ -126,60 +125,23 @@ export const gpuInfoByService: Record<string, Doc[]> = {
 }
 
 export const unpricedFlavorsByService: Record<string, Doc[]> = {
-  "svc-openstack-01": [
+  "svc-proxmox-01": [
     { region: "eu-west-1", id: "flv-9001", name: "g1.h200.8", gpuModel: "NVIDIA-H200", gpuCount: 8, reason: "no gpu rule" },
   ],
   "svc-ceph-01": [],
 }
 
-export const volumeTypesByService: Record<string, Doc[]> = {
-  "svc-openstack-01": [
-    { region: "eu-central-1", volumeTypes: ["ssd", "hdd"] },
-    { region: "eu-west-1", volumeTypes: ["ssd"] },
+// POST /admin/service/proxmox/auth — connection test with the stored token.
+export const proxmoxAuthResult: Doc = {
+  version: "9.0.3",
+  nodes: [
+    { node: "pve1", status: "online" },
+    { node: "pve2", status: "online" },
   ],
-}
-
-// serviceType -> region -> zones (GET /admin/service/{id}/availability-zones).
-export const availabilityZonesByService: Record<string, Doc> = {
-  "svc-openstack-01": {
-    compute: { "eu-central-1": ["az-1", "az-2"], "eu-west-1": ["az-1"] },
-    volume: { "eu-central-1": ["az-1"], "eu-west-1": ["az-1"] },
-  },
-}
-
-export const shareProtocolsByService: Record<string, Doc[]> = {
-  "svc-openstack-01": [
-    { name: "NFS", displayName: "NFS", enabled: true },
-    { name: "CEPHFS", displayName: "CephFS", enabled: false },
-  ],
-}
-
-// POST /admin/service/openstack/auth — connection test with the stored creds.
-export const openstackAuthResult: Doc = {
-  services: [
-    { type: "compute", name: "nova" },
-    { type: "network", name: "neutron" },
-    { type: "volumev3", name: "cinder" },
-    { type: "image", name: "glance" },
-    { type: "placement", name: "placement" },
-  ],
-  projects: [
-    { id: "8c1f6a2d94e34b7c9f1d3e5a7b2c4d6e", name: "acme-production" },
-    { id: "51b2e9c07aa14f0d8be6c3d2a1f09e88", name: "acme-staging" },
-    { id: "adm1n000000000000000000000000000", name: "admin" },
-  ],
-  domains: [{ id: "default", name: "Default" }],
-  roles: ["admin", "reader"],
-  selectedProjectName: "admin",
-}
-
-// GET /admin/project-import/{serviceId} — importable Keystone projects.
-export const importProjectsByService: Record<string, Doc[]> = {
-  "svc-openstack-01": [
-    { project: { id: "8c1f6a2d94e34b7c9f1d3e5a7b2c4d6e", name: "acme-production" }, proxcloudProjectId: "prj-0001", users: [] },
-    { project: { id: "51b2e9c07aa14f0d8be6c3d2a1f09e88", name: "acme-staging" }, proxcloudProjectId: "prj-0002", users: [] },
-    { project: { id: "3fa4b1c8d2e94f60a7b5c3d1e9f08a77", name: "legacy-analytics" }, users: [] },
-  ],
+  storages: [{ storage: "local-zfs", type: "zfspool" }],
+  sdnZones: [{ zone: "overlay", type: "evpn" }],
+  pciMappings: [{ id: "a100-80gb" }, { id: "l40s" }],
+  warnings: [],
 }
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
@@ -261,27 +223,26 @@ export const imageGroups: Doc[] = [
 
 export const osImages: Doc[] = [
   {
-    serviceId: "svc-openstack-01",
-    serviceName: "Helium OpenStack",
+    serviceId: "svc-proxmox-01",
+    serviceName: "Helium Proxmox",
     region: "eu-central-1",
     regionDisplayName: "EU Central (Frankfurt)",
     images: [
-      { id: "img-0001", name: "ubuntu-24.04-lts", status: "ACTIVE", visibility: "public" },
-      { id: "img-0002", name: "ubuntu-22.04-lts", status: "ACTIVE", visibility: "public" },
-      { id: "img-0003", name: "debian-13", status: "ACTIVE", visibility: "public" },
-      { id: "img-0004", name: "rocky-10", status: "ACTIVE", visibility: "public" },
-      // private on purpose — exercises the "not public" binding warning.
-      { id: "img-0005", name: "docker-host-24.04", status: "ACTIVE", visibility: "private" },
+      { id: "img-0001", name: "ubuntu-24.04-lts", status: "ACTIVE" },
+      { id: "img-0002", name: "ubuntu-22.04-lts", status: "ACTIVE" },
+      { id: "img-0003", name: "debian-13", status: "ACTIVE" },
+      { id: "img-0004", name: "rocky-10", status: "ACTIVE" },
+      { id: "img-0005", name: "docker-host-24.04", status: "ACTIVE" },
     ],
   },
   {
-    serviceId: "svc-openstack-01",
-    serviceName: "Helium OpenStack",
+    serviceId: "svc-proxmox-01",
+    serviceName: "Helium Proxmox",
     region: "eu-west-1",
     regionDisplayName: "EU West (Amsterdam)",
     images: [
-      { id: "img-0011", name: "ubuntu-24.04-lts", status: "ACTIVE", visibility: "public" },
-      { id: "img-0012", name: "debian-13", status: "ACTIVE", visibility: "public" },
+      { id: "img-0011", name: "ubuntu-24.04-lts", status: "ACTIVE" },
+      { id: "img-0012", name: "debian-13", status: "ACTIVE" },
     ],
   },
 ]
@@ -297,7 +258,7 @@ export const metadataOptions: Doc[] = [
       { value: "nvidia-550", displayName: "NVIDIA 550 (production)", enabled: true },
       { value: "nvidia-560", displayName: "NVIDIA 560 (new feature)", enabled: true },
     ],
-    serviceIds: ["svc-openstack-01"],
+    serviceIds: ["svc-proxmox-01"],
     regions: ["eu-central-1", "eu-west-1"],
     userEditable: true,
     showInline: true,
@@ -310,7 +271,7 @@ export const metadataOptions: Doc[] = [
     description: "How long automated volume backups are kept.",
     type: "NUMERIC_RANGE",
     numericRange: { min: 1, max: 90, unit: "days" },
-    serviceIds: ["svc-openstack-01"],
+    serviceIds: ["svc-proxmox-01"],
     regions: [],
     userEditable: false,
     showInline: false,
@@ -441,8 +402,8 @@ export const platformConfiguration: Doc = {
   projectProvisioningQuota: { enabled: true, limit: 5 },
   organizationProvisioningQuota: { enabled: false, limit: 0 },
   regions: [
-    { serviceId: "svc-openstack-01", region: "eu-central-1", order: 1 },
-    { serviceId: "svc-openstack-01", region: "eu-west-1", order: 2 },
+    { serviceId: "svc-proxmox-01", region: "eu-central-1", order: 1 },
+    { serviceId: "svc-proxmox-01", region: "eu-west-1", order: 2 },
     { serviceId: "svc-ceph-01", region: "us-east-1", order: 3 },
   ],
 }
@@ -502,7 +463,7 @@ export const pricePlans: Doc[] = [
     name: "Public standard",
     enabled: true,
     accessMode: "PUBLIC",
-    serviceProviders: [{ serviceId: "svc-openstack-01" }, { serviceId: "svc-ceph-01" }],
+    serviceProviders: [{ serviceId: "svc-proxmox-01" }, { serviceId: "svc-ceph-01" }],
     createdAt: "2025-11-01T13:00:00Z",
   },
   {
@@ -510,7 +471,7 @@ export const pricePlans: Doc[] = [
     name: "Enterprise reserved",
     enabled: true,
     accessMode: "PRIVATE",
-    serviceProviders: [{ serviceId: "svc-openstack-01" }],
+    serviceProviders: [{ serviceId: "svc-proxmox-01" }],
     createdAt: "2026-01-10T10:00:00Z",
   },
 ]

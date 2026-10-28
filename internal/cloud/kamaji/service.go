@@ -35,7 +35,7 @@ type K8sAPI interface {
 	ListMachineDeployments(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
 }
 
-// defaultFinalizeGrace: a cloud-config secret younger than this is never treated as an orphan.
+// defaultFinalizeGrace: a cloud credentials secret younger than this is never treated as an orphan.
 // This closes the create-race: CreateCluster applies the secret BEFORE the Application, so a
 // concurrent finalize pass could otherwise see a fresh secret with no Application — the exact
 // signature of a finished delete cascade — and destroy a cluster mid-create.
@@ -80,11 +80,11 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) 
 	})
 }
 
-// CreateCluster provisions one cluster: clouds.yaml secret (mgmt-side only) + Application CR.
-// osCfg is the tenant-scoped OpenStack config (ClientConfigForProject) the worker VMs / OCCM /
-// cinder-csi run under — the CUSTOMER's own project (plan D4). Returns the initial cached data
-// payload (status PENDING until the first sync reads real health).
-func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, credYAML string) (map[string]any, error) {
+// CreateCluster provisions one cluster: cloud credentials secret (mgmt-side only) + Application
+// CR. creds is the secret's data — the credential the cluster's infrastructure provider runs
+// under. Returns the initial cached data payload (status PENDING until the first sync reads real
+// health).
+func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, creds map[string]string) (map[string]any, error) {
 	if err := spec.Validate(s.cfg.Defaults); err != nil {
 		return nil, err
 	}
@@ -92,21 +92,9 @@ func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, credYAML 
 	if err := s.EnsureProjectNamespace(ctx, spec.ProjectID); err != nil {
 		return nil, fmt.Errorf("kamaji: ensure namespace: %w", err)
 	}
-	cloudsYAML := credYAML
-	// The appcred annotations are the durable revocation record (plan D4) — the secret is the
-	// only k8s-side object that outlives the Application, so the record rides on it.
-	var ann map[string]string
-	if spec.AppCredID != "" {
-		ann = map[string]string{
-			AnnotationAppCredID:      spec.AppCredID,
-			AnnotationAppCredUser:    spec.AppCredUserID,
-			AnnotationAppCredService: spec.AppCredServiceID,
-		}
-	}
-	if err := s.api.ApplySecret(ctx, ns, CloudSecretName(spec.ID),
-		map[string]string{"clouds.yaml": cloudsYAML},
+	if err := s.api.ApplySecret(ctx, ns, CloudSecretName(spec.ID), creds,
 		map[string]string{LabelProject: spec.ProjectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue},
-		ann); err != nil {
+		nil); err != nil {
 		return nil, fmt.Errorf("kamaji: apply cloud credentials secret: %w", err)
 	}
 	values := BuildValues(s.cfg, spec)
@@ -118,10 +106,10 @@ func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, credYAML 
 }
 
 // DeleteCluster removes the cluster: Application delete only (the resources-finalizer cascades
-// the rendered chart). The clouds.yaml secret deliberately STAYS — CAPO/OCCM authenticate with
-// it to delete the worker VMs and the API load balancer during the cascade, so removing it here
+// the rendered chart). The cloud credentials secret deliberately STAYS — the infrastructure
+// provider authenticates with it to delete the worker VMs during the cascade, so removing it here
 // would strand those cloud resources with stuck finalizers. FinalizeOrphans (sync-driven) reaps
-// the secret, revokes the appcred and GCs the namespace once the cascade has finished.
+// the secret and GCs the namespace once the cascade has finished.
 // Idempotent (absent objects are success). Ownership-guarded: an Application without the
 // managed-by marker is NOT ours (a pre-proxcloud cluster or foreign app that happens to share the
 // name) — refuse rather than cascade-delete it.
@@ -141,31 +129,24 @@ func (s *Service) DeleteCluster(ctx context.Context, projectID, clusterID string
 	return nil
 }
 
-// RevokeCredResolver revokes one keystone application credential recorded on a cluster secret.
-// osServiceID is the OpenStack externalService the credential was minted on (stamped at create;
-// "" on legacy records). Contract is FAIL-CLOSED: any error keeps the secret — the only
-// revocation record — for a later pass. This package deliberately never builds OpenStack
-// clients; the caller resolves the service id to an admin client.
-type RevokeCredResolver func(ctx context.Context, osServiceID, userID, credID string) error
-
 // FinalizeOrphans completes asynchronous cluster deletions for ONE project (teardown + tests);
 // the periodic reaper is FinalizeAllOrphans. Returns how many secrets still await the cascade.
-func (s *Service) FinalizeOrphans(ctx context.Context, projectID string, revoke RevokeCredResolver) (int, error) {
+func (s *Service) FinalizeOrphans(ctx context.Context, projectID string) (int, error) {
 	ns := NamespaceFor(projectID)
 	sel := LabelProject + "=" + projectID + "," + LabelManagedBy + "=" + ManagedByValue
 	secrets, err := s.api.ListSecrets(ctx, ns, sel)
 	if err != nil {
 		return 0, err
 	}
-	return s.finalizeNamespace(ctx, ns, projectID, secrets, revoke)
+	return s.finalizeNamespace(ctx, ns, projectID, secrets)
 }
 
 // FinalizeAllOrphans is the service-level orphan sweep, run once per sync cycle: it scans EVERY
-// managed cloud-config secret of this provider across all namespaces — so leftovers of projects
-// whose proxcloud doc is already gone (scheduled deletion, teardown) are still reaped — revokes
-// recorded appcreds, deletes finished-cascade secrets and GCs emptied project namespaces.
-// Returns the number of secrets still awaiting their cascade.
-func (s *Service) FinalizeAllOrphans(ctx context.Context, revoke RevokeCredResolver) (int, error) {
+// managed cloud credentials secret of this provider across all namespaces — so leftovers of
+// projects whose proxcloud doc is already gone (scheduled deletion, teardown) are still reaped —
+// deletes finished-cascade secrets and GCs emptied project namespaces. Returns the number of
+// secrets still awaiting their cascade.
+func (s *Service) FinalizeAllOrphans(ctx context.Context) (int, error) {
 	sel := LabelService + "=" + s.serviceID + "," + LabelManagedBy + "=" + ManagedByValue
 	secrets, err := s.api.ListSecretsAllNamespaces(ctx, sel)
 	if err != nil {
@@ -181,7 +162,7 @@ func (s *Service) FinalizeAllOrphans(ctx context.Context, revoke RevokeCredResol
 	var errs []error
 	for ns, secs := range byNS {
 		projectID := digStr(secs[0], "metadata", "labels", LabelProject)
-		p, err := s.finalizeNamespace(ctx, ns, projectID, secs, revoke)
+		p, err := s.finalizeNamespace(ctx, ns, projectID, secs)
 		pending += p
 		if err != nil {
 			errs = append(errs, err)
@@ -197,7 +178,7 @@ func (s *Service) FinalizeAllOrphans(ctx context.Context, revoke RevokeCredResol
 // authenticates with this secret; reaping early would strand cloud resources). The namespace is
 // GC'd only on a pass that actually reaped something and verified nothing lives there anymore —
 // an idle project's bootstrap namespace is never touched.
-func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, secrets []map[string]any, revoke RevokeCredResolver) (int, error) {
+func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, secrets []map[string]any) (int, error) {
 	var errs []error
 	pending, reaped := 0, 0
 	for _, sec := range secrets {
@@ -235,21 +216,6 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		if tcp != nil || len(mds) > 0 {
 			pending++
 			continue
-		}
-		if credID := digStr(sec, "metadata", "annotations", AnnotationAppCredID); credID != "" {
-			userID := digStr(sec, "metadata", "annotations", AnnotationAppCredUser)
-			svcID := digStr(sec, "metadata", "annotations", AnnotationAppCredService)
-			if revoke == nil {
-				errs = append(errs, fmt.Errorf("cluster %s: appcred %s not revoked (no revoker)", cid, credID))
-				pending++
-				continue
-			}
-			if err := revoke(ctx, svcID, userID, credID); err != nil {
-				// Fail closed: the secret's annotations are the only revocation record — keep it.
-				errs = append(errs, fmt.Errorf("cluster %s: revoke appcred: %w", cid, err))
-				pending++
-				continue
-			}
 		}
 		if err := s.api.DeleteSecret(ctx, ns, name); err != nil {
 			errs = append(errs, fmt.Errorf("cluster %s: delete cloud secret: %w", cid, err))
@@ -459,9 +425,7 @@ func (s *Service) PatchClusterValues(ctx context.Context, clusterID string, muta
 // SetChartVersion re-pins the cluster's Application onto a chart version (the "platform
 // update"). ArgoCD re-renders the SAME desired state with the new chart — which may roll the
 // CCM or, when the machine-template output changes between chart versions, the nodes
-// (surge-first per the chart's rollout strategy). One values cleanup rides along: a legacy
-// `addons.openstack` entry (the short-lived credential-push storage leg) is removed, so the
-// update that brings the split CSI also stops pushing the cloud credential into the cluster.
+// (surge-first per the chart's rollout strategy).
 func (s *Service) SetChartVersion(ctx context.Context, clusterID, version string) error {
 	if version == "" {
 		return fmt.Errorf("kamaji: chart version is required")
@@ -472,14 +436,6 @@ func (s *Service) SetChartVersion(ctx context.Context, clusterID, version string
 			return fmt.Errorf("kamaji: cluster %s: application carries no source", clusterID)
 		}
 		src["targetRevision"] = version
-		if addons, ok := dig(app, "spec", "source", "helm", "valuesObject", "addons").(map[string]any); ok {
-			delete(addons, "openstack")
-			if len(addons) == 0 {
-				if values, ok := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any); ok {
-					delete(values, "addons")
-				}
-			}
-		}
 		return nil
 	})
 }

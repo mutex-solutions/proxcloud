@@ -1,8 +1,6 @@
-// Create-server wizard: Location → Availability zone → Image → Flavor → Storage → Network → Public IP → Access → Name.
-// API contract verified against internal/cloud/providers/write.go (TypeServer branch):
-// data reads name / imageId / flavorId / networkInterfaces:[{uuid, fixedIp?}] / availabilityZoneName /
-// keyName / adminPass / userData / securityGroupNames / assignFloatingIp / floatingNetworkId /
-// rootVolume:{sizeGiB,type} / dataVolumes:[{sizeGiB,type}].
+// Create-server wizard: Location → Image → Flavor → Storage → Network → Access → Name.
+// Body: name / imageId (project template) / flavorId / networkInterfaces:[{uuid, fixedIp?}] /
+// keyName / adminPass / userData / securityGroupNames / rootVolume:{sizeGiB,type} / dataVolumes:[{sizeGiB,type}].
 import { useMemo, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -20,12 +18,11 @@ import {
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { StatusBadge } from "@/components/status-badge"
-import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import {
   useFlavorCategories, useImageGroups, useLocations, useProject, useProjectGpuCapacity, useProjectId,
-  useProjectQuota, usePublicNetworks,
+  useProjectQuota,
 } from "@/lib/hooks"
 import type { FlavorCategory, ImageGrouping } from "@/lib/hooks"
 import { gpuCapacityViolations, gpuFromFlavor, serverQuotaViolations, volumeBatchQuotaViolations } from "@/lib/quota"
@@ -50,9 +47,9 @@ function buildFlavorSections(live: Flavor[], cats: FlavorCategory[]): Section<Fl
   return curated > 0 ? sections : [{ label: "", items: live }]
 }
 
-// buildImageSections groups live glance images by the enabled image groups (matched by name),
+// buildImageSections groups the location's templates by the enabled image groups (matched by name),
 // labeled "Category · Group". Same never-empty fallback as flavors.
-function buildImageSections(live: GlanceImage[], grouping?: ImageGrouping): Section<GlanceImage>[] {
+function buildImageSections(live: TemplateImage[], grouping?: ImageGrouping): Section<TemplateImage>[] {
   const catName = new Map((grouping?.imageCategories ?? []).map((c) => [c.id, c.name]))
   const byName = new Map(live.map((im) => [String(im.name), im]))
   const seen = new Set<string>()
@@ -60,7 +57,7 @@ function buildImageSections(live: GlanceImage[], grouping?: ImageGrouping): Sect
     .filter((g) => g.enabled)
     .sort((a, b) => (a.orderNumber ?? 0) - (b.orderNumber ?? 0))
     .map((g) => {
-      const items: GlanceImage[] = []
+      const items: TemplateImage[] = []
       for (const gi of g.images ?? []) {
         const im = byName.get(String(gi.name))
         if (im && !seen.has(String(im.id))) {
@@ -86,8 +83,7 @@ function optionCardClass(selected: boolean): string {
   )
 }
 
-type Az = { name?: string; displayName?: string; available?: boolean }
-type GlanceImage = Record<string, any>
+type TemplateImage = Record<string, any>
 type Flavor = {
   externalId?: string
   data?: {
@@ -107,7 +103,7 @@ type DataVolumeDraft = { id: number; sizeGiB: number; type: string }
 
 const gb = (bytes?: number) => (bytes ? (bytes / 1073741824).toFixed(2) : "0.00")
 
-function imageMinimumDisk(image?: GlanceImage): number {
+function imageMinimumDisk(image?: TemplateImage): number {
   if (!image) return 1
   const declared = Number(image.min_disk ?? image.minDisk ?? 0)
   const imageBytes = Math.max(Number(image.size ?? 0), Number(image.virtual_size ?? image.virtualSize ?? 0))
@@ -115,7 +111,7 @@ function imageMinimumDisk(image?: GlanceImage): number {
   return Math.max(1, Number.isFinite(declared) ? declared : 0, imageGiB)
 }
 
-function rootDefaultDisk(flavor?: Flavor, image?: GlanceImage): number {
+function rootDefaultDisk(flavor?: Flavor, image?: TemplateImage): number {
   const flavorDisk = Number(flavor?.data?.disk ?? 0)
   return Math.max(imageMinimumDisk(image), Number.isFinite(flavorDisk) ? flavorDisk : 0)
 }
@@ -173,8 +169,7 @@ export default function CreateServerPage() {
       ? { serviceId: selectedLoc.serviceId, region: selectedLoc.region }
       : undefined
 
-  const azs = useBulkAction<Az>(pid, scope, "LIST_AVAILABILITY_ZONES")
-  const images = useBulkAction<GlanceImage>(pid, scope, "PUBLIC_IMAGES")
+  const images = useBulkAction<TemplateImage>(pid, scope, "PUBLIC_IMAGES")
   const flavors = useBulkAction<Flavor>(pid, scope, "LIST_FLAVORS")
   const volumeTypes = useBulkAction<VolumeType>(pid, scope, "LIST_VOLUME_TYPES")
   const projectQuota = useProjectQuota(pid, scope)
@@ -213,13 +208,10 @@ export default function CreateServerPage() {
       apiFetch<CloudResource[]>(`/project/${pid}/resource?type=SECURITY_GROUP`, { method: "POST", cloud: scope }),
     enabled: !!pid && !!scope,
   })
-  const pubNets = usePublicNetworks(pid, scope)
-  // publicNetworksVisible=false → hide the pool picker; the server auto-assigns the floating IP.
+  // publicNetworksVisible=false → offer only own private networks (no shared/external infra).
   const netsVisible = project?.publicNetworksVisible === true
-  // and offer only own private networks to attach to (no shared/external infra) when hidden.
   const networkRows = netsVisible ? (networks.data ?? []) : (networks.data ?? []).filter(isPrivateNetwork)
 
-  const [azName, setAzName] = useState<string>()
   const [imageId, setImageId] = useState<string>()
   const [flavorId, setFlavorId] = useState<string>() // = flavor externalId
   const [rootSizeGiB, setRootSizeGiB] = useState(1)
@@ -228,8 +220,6 @@ export default function CreateServerPage() {
   const [dataVolumes, setDataVolumes] = useState<DataVolumeDraft[]>([])
   const [netIds, setNetIds] = useState<string[]>([])
   const [fixedIps, setFixedIps] = useState<Record<string, string>>({}) // networkExtId → requested fixed IP
-  const [assignFip, setAssignFip] = useState(true)
-  const [fipNetId, setFipNetId] = useState<string>()
   const [keyName, setKeyName] = useState("") // "" = no key pair
   const [loginMethod, setLoginMethod] = useState<"key" | "password">("key")
   const [username, setUsername] = useState("")
@@ -296,12 +286,6 @@ export default function CreateServerPage() {
   const keypairName = (r: CloudResource) => (r.data?.keypair?.name as string) ?? r.name ?? ""
   const sgName = (r: CloudResource) => (r.data?.securityGroup?.name as string) ?? r.name ?? ""
 
-  const az = azName ?? (azs.data?.[0]?.name as string | undefined)
-  const fipNet = fipNetId ?? pubNets.data?.[0]?.id
-  // When the picker is hidden the server auto-picks, so a FIP can be assigned even with no listed
-  // pool; when visible we still need at least one network to pick from.
-  const wantFip = assignFip && (netsVisible ? !!pubNets.data?.length : true)
-
   const create = useMutation({
     mutationFn: async () => {
       // Refresh immediately before submit as well as checking on flavor change.
@@ -318,7 +302,7 @@ export default function CreateServerPage() {
       }
       // Password login with a username creates that user via cloud-init (reliable on any cloud-init
       // image); the generated user-data wins over a manually-typed one. Without a username, fall back
-      // to nova adminPass on the image's default account.
+      // to adminPass on the image's default account.
       const genUserData =
         loginMethod === "password" && username.trim() && password ? cloudInitUser(username.trim(), password) : ""
       const finalUserData = genUserData || userData
@@ -336,12 +320,9 @@ export default function CreateServerPage() {
               sizeGiB: volume.sizeGiB,
               type: volume.type,
             })),
-            ...(az ? { availabilityZoneName: az } : {}),
             networkInterfaces: netIds.map((uuid) =>
               fixedIps[uuid]?.trim() ? { uuid, fixedIp: fixedIps[uuid].trim() } : { uuid },
             ),
-            assignFloatingIp: wantFip,
-            ...(wantFip && netsVisible && fipNet ? { floatingNetworkId: fipNet } : {}),
             ...(loginMethod === "key" && keyName ? { keyName } : {}),
             ...(loginMethod === "password" && !username.trim() && password ? { adminPass: password } : {}),
             ...(finalUserData.trim() ? { userData: finalUserData } : {}),
@@ -363,8 +344,7 @@ export default function CreateServerPage() {
   const ready =
     !!scope && !!imageId && !!selectedFlavor && availableVolumeTypes.length > 0 &&
     !!selectedRootVolumeType && rootSizeValid && dataVolumesValid &&
-    netIds.length > 0 && !!name.trim() &&
-    (!wantFip || !netsVisible || !!fipNet)
+    netIds.length > 0 && !!name.trim()
 
   // What still blocks Create — shown next to the disabled button so nobody
   // has to scroll back up hunting for the unfinished step.
@@ -376,7 +356,6 @@ export default function CreateServerPage() {
     !rootSizeValid && `a root volume of at least ${minimumRootSizeGiB} GiB`,
     !dataVolumesValid && "valid data volume settings",
     netIds.length === 0 && "a network",
-    wantFip && netsVisible && !fipNet && "a public network",
     !name.trim() && "a name",
   ].filter((x): x is string => !!x)
 
@@ -427,7 +406,6 @@ export default function CreateServerPage() {
                     )}
                     onClick={() => {
                       setLocKey(locOf(l))
-                      setAzName(undefined)
                       setImageId(undefined)
                       setFlavorId(undefined)
                       setRootSizeGiB(1)
@@ -436,7 +414,6 @@ export default function CreateServerPage() {
                       setDataVolumes([])
                       setNetIds([])
                       setFixedIps({})
-                      setFipNetId(undefined)
                       setKeyName("")
                       setSgNames([])
                     }}
@@ -449,35 +426,7 @@ export default function CreateServerPage() {
             </div>
           </Step>
 
-          <Step n={2} title="Availability zone">
-            {azs.isLoading ? (
-              <Skeleton className="h-9 w-48" />
-            ) : !azs.data?.length ? (
-              <p className="text-sm text-muted-foreground">No availability zones reported — the default zone will be used.</p>
-            ) : (
-              <div className="flex flex-wrap gap-2">
-                {azs.data.map((z) => (
-                  <Button
-                    key={z.name}
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    aria-pressed={az === z.name}
-                    className={cn(
-                      az === z.name && "border-primary bg-transparent ring-1 ring-primary hover:bg-transparent",
-                    )}
-                    disabled={z.available === false}
-                    onClick={() => setAzName(z.name)}
-                  >
-                    {az === z.name ? <Check className="size-4 text-primary" /> : null}
-                    {z.displayName || z.name}
-                  </Button>
-                ))}
-              </div>
-            )}
-          </Step>
-
-          <Step n={3} title="Image">
+          <Step n={2} title="Image">
             {images.isLoading || imageGroups.isLoading ? (
               <Skeleton className="h-40" />
             ) : !images.data?.length ? (
@@ -528,7 +477,7 @@ export default function CreateServerPage() {
             )}
           </Step>
 
-          <Step n={4} title="Flavor">
+          <Step n={3} title="Flavor">
             {flavors.isLoading || flavorCats.isLoading ? (
               <Skeleton className="h-40" />
             ) : !flavors.data?.length ? (
@@ -609,7 +558,7 @@ export default function CreateServerPage() {
             )}
           </Step>
 
-          <Step n={5} title="Storage">
+          <Step n={4} title="Storage">
             {volumeTypes.isLoading ? (
               <Skeleton className="h-32" />
             ) : volumeTypes.isError ? (
@@ -804,7 +753,7 @@ export default function CreateServerPage() {
             )}
           </Step>
 
-          <Step n={6} title="Network">
+          <Step n={5} title="Network">
             {networks.isLoading ? (
               <Skeleton className="h-16" />
             ) : !networkRows.length ? (
@@ -850,54 +799,7 @@ export default function CreateServerPage() {
             )}
           </Step>
 
-          <Step n={7} title="Public IP">
-            {pubNets.isLoading ? (
-              <Skeleton className="h-9 w-48" />
-            ) : (
-              <div className="grid max-w-md gap-2">
-                <div className="flex items-center gap-3">
-                  <Switch
-                    id="assign-fip"
-                    checked={wantFip}
-                    disabled={netsVisible && !pubNets.data?.length}
-                    onCheckedChange={setAssignFip}
-                  />
-                  <Label htmlFor="assign-fip">Assign floating IP</Label>
-                </div>
-                {!netsVisible ? (
-                  wantFip ? (
-                    <p className="text-sm text-muted-foreground">
-                      A public IP will be assigned automatically shortly after the server becomes active.
-                    </p>
-                  ) : null
-                ) : !pubNets.data?.length ? (
-                  <p className="text-sm text-muted-foreground">
-                    No public networks are enabled for this project.
-                  </p>
-                ) : wantFip ? (
-                  <>
-                    <Select value={fipNet} onValueChange={setFipNetId}>
-                      <SelectTrigger className="w-full" aria-label="Public network">
-                        <SelectValue placeholder="Select a public network" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {pubNets.data.map((n) => (
-                          <SelectItem key={n.id} value={n.id}>
-                            {n.name || n.id}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-sm text-muted-foreground">
-                      The floating IP is attached automatically shortly after the server becomes active.
-                    </p>
-                  </>
-                ) : null}
-              </div>
-            )}
-          </Step>
-
-          <Step n={8} title="Access (optional)">
+          <Step n={6} title="Access (optional)">
             <div className="grid gap-4">
               <div className="grid max-w-md gap-2">
                 <Label>Login method</Label>
@@ -966,8 +868,7 @@ export default function CreateServerPage() {
                     <p className="text-xs text-muted-foreground">
                       With a username, a sudo login user is created via cloud-init (works on any cloud-init
                       image). Without one, the password is set on the image's default account (e.g.{" "}
-                      <span className="font-mono">ubuntu</span>/<span className="font-mono">root</span>) via nova
-                      and needs an image that supports password login.
+                      <span className="font-mono">ubuntu</span>/<span className="font-mono">root</span>) and needs an image that supports password login.
                     </p>
                   </div>
                 )}
@@ -1030,7 +931,7 @@ export default function CreateServerPage() {
             </div>
           </Step>
 
-          <Step n={9} title="Name">
+          <Step n={7} title="Name">
             <div className="grid max-w-md gap-2">
               <Label htmlFor="server-name">Server name</Label>
               <Input

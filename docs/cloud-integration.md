@@ -58,7 +58,7 @@ flowchart LR
   HIST[("cloudResourceHistory<br/>archive")]
   PROM["Prometheus-compatible<br/>source (opt-in)"]
   METJOB["metrics job"]
-  GM[("gnocchiMetrics<br/>(legacy table name)")]
+  GM[("usageMetrics")]
   BILL["charge loop<br/>(billingresource + pricing)"]
 
   PAPI --> SDN
@@ -170,9 +170,6 @@ Typed accessors used by the rest of the code:
 | `PVEDefaultQuota()` | `provisioning.quota` | quota seeded onto a new project |
 | `MetricsSource()` | `metrics.source` | `prometheus` or `none` (the Proxmox default) |
 | `ServiceEnabledInRegion(slug, region)` | `services[slug][region]` | per-service toggle (below) |
-
-`GnocchiGranularity()` (`config.gnocchiGranularity`) is still read and passed to
-the metrics service, but the Prometheus path ignores it (`metrics/shared.go`).
 
 ### Credentials
 
@@ -420,9 +417,8 @@ drives the ingestion. The scope is **network traffic** per server, for the
   job skips the provider's servers silently. Month usage is `max − min` of the
   raw cumulative-counter samples inside the month window (not PromQL
   `increase()`), using the same decimal arithmetic as the rating engine.
-- The query schemas implemented today (`libvirt-exporter`,
-  `ceilometer-pushgateway`, `ceilometer-exporter`) come from the previous
-  backend. There is no Proxmox-exporter schema yet, so traffic metering on
+- The only query schema implemented today, `libvirt-exporter`, is a layout
+  from the previous backend. There is no Proxmox-exporter schema yet, so traffic metering on
   Proxmox stays off in practice. Native Proxmox samplers (VM state, task log,
   NIC counters) are planned (C3c).
 - `metrics/service.go` aggregates per server into **public vs private** traffic.
@@ -430,8 +426,8 @@ drives the ingestion. The scope is **network traffic** per server, for the
   for the classification.
 - `metricsjob/job.go` (`Run`) walks every **ENABLED** project, reads its cached
   servers, resolves each server's external service, and calls
-  `FetchAndSaveGnocchiMetrics` (legacy name). The result is one document per
-  `(server, billing cycle)` in the `gnocchiMetrics` table (legacy name).
+  `FetchAndSaveUsageMetrics`. The result is one document per
+  `(server, billing cycle)` in the `usageMetrics` table.
 
 Operators edit the source with `PUT /api/v1/admin/service/{id}/metrics-config`
 and probe it with `POST /api/v1/admin/service/{id}/metrics-test` (the provider's
@@ -456,7 +452,7 @@ resource's values (so a price-plan rule filtered by region/service can match)
 and stamps `createdAt` (which drives mid-month proration).
 
 The charge loop itself (`internal/platform/billingjob`) reads **only** the
-PostgreSQL cache (`cloudResource` + `gnocchiMetrics` + price plans), never the
+PostgreSQL cache (`cloudResource` + `usageMetrics` + price plans), never the
 live cluster. That is why the whole rating driver is testcontainer-verifiable,
 and why sync and metrics exist: to keep the cache truthful. See
 [billing.md](billing.md) and [jobs-scheduling.md](jobs-scheduling.md).
@@ -502,8 +498,7 @@ branch, is in
 
 Buckets are served by a separate provider kind, **Ceph RGW over the S3 API**
 (`config.provider == "ceph-s3"`). It is the only bucket backend. Every bucket
-carries `data.storageBackend = "CEPH_S3"`; the `SWIFT` value and the Swift halves
-of `objectstore.go` are dead code left from the previous backend. Code:
+carries `data.storageBackend = "CEPH_S3"`. Code:
 `internal/cloud/client/objectstore_ceph*.go`, `internal/cloud/cephcred/`,
 `internal/platform/project/cloud_bucket_settings.go`.
 
@@ -657,7 +652,7 @@ from the Application and the objects it owns. Billing:
 
 Read, sync and delete work today. **Creating** a cluster or a database on a
 Proxmox provider is planned: the create legs
-(`project/cloud_kamaji_openstack.go`, `cloud_dbaas_openstack.go`) return an
+(`project/cloud_kamaji_create.go`, `cloud_dbaas_create.go`) return an
 explicit "not available yet" error. See
 [C3e](architecture/c4/c3-components.md#c3e-managed-services-and-object-storage).
 

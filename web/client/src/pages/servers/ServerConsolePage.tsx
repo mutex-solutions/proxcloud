@@ -1,6 +1,6 @@
 // Server console. The browser NEVER talks to the hypervisor console service: each action mints a
 // short-lived token and returns ProxCloud's own wss:// endpoint, which reverse-proxies the socket
-// server-side (see cloudConsoleProxy). That keeps nova's novncproxy/serialproxy off the public
+// server-side (see cloudConsoleProxy). That keeps the PVE console (vncproxy/termproxy) off the public
 // internet — only ProxCloud needs to be reachable.
 //
 // Two consoles, because they solve different problems:
@@ -144,7 +144,7 @@ function VncConsole({ pid, resourceId, cloud }: { pid: string; resourceId: strin
           setMessage((e as CustomEvent<{ reason?: string }>).detail?.reason ?? "Security handshake failed.")
         })
         // A password-protected VNC server would otherwise sit silently at "Connecting…" waiting
-        // for credentials we never supply (nova's proxy authenticates via the token instead).
+        // for credentials we never supply (the proxy authenticates via the token instead).
         rfb.addEventListener("credentialsrequired", () => {
           if (cancelled) return
           setState("error")
@@ -366,7 +366,7 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
         })
         observer.observe(hostRef.current)
 
-        // nova-serialproxy speaks websockify's binary sub-protocol.
+        // The serial console proxy speaks websockify's binary sub-protocol.
         ws = new WebSocket(url, ["binary"])
         ws.binaryType = "arraybuffer"
         ws.onopen = () => {

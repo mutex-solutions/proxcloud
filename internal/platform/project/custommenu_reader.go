@@ -1,7 +1,7 @@
 package project
 
 // CustomMenuReader feeds the admin-configured customMenuItem docs into the client
-// /init menu (one of the base menu-item providers, merged before the OpenStack
+// /init menu (one of the base menu-item providers, merged before the cloud
 // service items).
 // Each doc renders as a "More"-section item on the client:
 // { displayName, url, icon, enabled:true, externalRoute:true, newMenuItem:true,
@@ -25,7 +25,7 @@ func NewCustomMenuReader(db *pgdoc.DB) *CustomMenuReader {
 
 // Items returns the menu-item map entries, keyed by slug (displayName spaces→dashes,
 // lowercased), sorted by order. Errors collapse to empty
-// (the menu is best-effort, matching the OpenStack half).
+// (the menu is best-effort, matching the service-items half).
 func (r *CustomMenuReader) Items(ctx context.Context) map[string]any {
 	out := map[string]any{}
 	var docs []pgdoc.M

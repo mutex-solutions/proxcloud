@@ -46,3 +46,19 @@ jobs:
           if git ls-files | grep -iE "$REBRAND_PATTERN"; then
             echo "::error::old-brand file names found"; exit 1
           fi
+      # Names from the previous cloud backend (the backend is Proxmox VE). Terms match at a
+      # word start, so camelCase leftovers are caught too; a few short terms also need a word
+      # end to skip ordinary English words. The env-key alternative is case-sensitive.
+      # Exclusions: the C4 changelog (history may name the old backend) and countries.json
+      # (place names that collide with the terms).
+      - name: Check for previous-backend terms
+        env:
+          LEGACY_BACKEND_PATTERN: '\b(o[p]enstack|k[e]ystone|n[o]va\b|n[e]utron|g[l]ance|c[i]nder|s[w]ift|o[c]tavia|h[e]at\b|g[n]occhi|c[e]ilometer|b[a]rbican|m[a]nila|m[a]gnum|d[e]signate\b|k[o]lla|v[h]i\b|g[o]phercloud)|(?-i:\bO[S]_(AUTH_URL|REGION_NAME|USERNAME|PASSWORD|USER_DOMAIN_NAME|PROJECT_NAME|PROJECT_DOMAIN_NAME|APPLICATION_CREDENTIAL))'
+        run: |
+          if rg -i -n --hidden --no-heading -e "$LEGACY_BACKEND_PATTERN" -g '!.git/' \
+               -g '!docs/architecture/c4/CHANGELOG.md' -g '!internal/platform/billing/countries.json' .; then
+            echo "::error::previous-backend terms found"; exit 1
+          fi
+          if git ls-files | rg -i -e "$LEGACY_BACKEND_PATTERN"; then
+            echo "::error::previous-backend file names found"; exit 1
+          fi

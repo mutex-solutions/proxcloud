@@ -18,7 +18,7 @@ metadata:
     argocd.argoproj.io/sync-options: Prune=false
 spec:
   description: >-
-    ProxCloud managed-Kubernetes customer clusters (openstack-kamaji-cluster chart).
+    ProxCloud managed-Kubernetes customer clusters (kamaji cluster chart).
     Applications here are written exclusively by the proxcloud API — do not hand-edit.
 
   # ONLY our OCI chart registry. ArgoCD spells OCI repoURLs WITHOUT the oci:// prefix

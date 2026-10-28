@@ -66,19 +66,9 @@ type Config struct {
 		Admin    OAuth2Realm
 		AdminAPI OAuth2Realm
 	}
-	// OpenStack is the cloud connection (dev bootstrap from env; the per-region
-	// ExternalService doc supersedes this later). Empty AuthURL = cloud disabled.
-	OpenStack struct {
-		AuthURL       string
-		Region        string
-		Username      string
-		Password      string
-		UserDomain    string
-		ProjectName   string
-		ProjectDomain string
-		AppCredID     string
-		AppCredSecret string
-	}
+	// DefaultRegion is the region assumed when a provider doc names none
+	// (PROXCLOUD_DEFAULT_REGION / proxcloud.default-region, default "default").
+	DefaultRegion string
 	// Jobs gates the in-process scheduled jobs (charge cron + cloud metrics ingestion).
 	// OFF by default: a plain deploy stays dormant until the gated live rating run flips
 	// PROXCLOUD_JOBS_SCHEDULER_ENABLED=true (so deploys never charge bills unexpectedly).
@@ -101,7 +91,7 @@ type Config struct {
 		//          PostgreSQL, and it is what a plain checkout of proxcloud runs: a complete billing
 		//          system out of the box.
 		// external delegates rating to a separate billing service. ProxCloud still resolves what to
-		//          bill — it owns the OpenStack resource cache — and POSTs the resolved resources
+		//          bill — it owns the cloud resource cache — and POSTs the resolved resources
 		//          to URL. Requires URL and Token.
 		//
 		// Only the charge step changes. Every other billing surface behaves identically.
@@ -170,16 +160,7 @@ func Load() (*Config, error) {
 	c.Auth.Admin = realmEnv(k, "auth.admin.oauth2", "AUTH_ADMIN_OAUTH2")
 	c.Auth.AdminAPI = realmEnv(k, "auth.admin-api.oauth2", "AUTH_ADMIN_API_OAUTH2")
 
-	// OpenStack (cloud) — standard OS_* env (dev bootstrap).
-	c.OpenStack.AuthURL = envOr("OS_AUTH_URL", k.String("openstack.auth-url"))
-	c.OpenStack.Region = envOr("OS_REGION_NAME", k.String("openstack.region"))
-	c.OpenStack.Username = envOr("OS_USERNAME", "")
-	c.OpenStack.Password = envOr("OS_PASSWORD", "")
-	c.OpenStack.UserDomain = envOr("OS_USER_DOMAIN_NAME", "")
-	c.OpenStack.ProjectName = envOr("OS_PROJECT_NAME", "")
-	c.OpenStack.ProjectDomain = envOr("OS_PROJECT_DOMAIN_NAME", "")
-	c.OpenStack.AppCredID = envOr("OS_APPLICATION_CREDENTIAL_ID", "")
-	c.OpenStack.AppCredSecret = envOr("OS_APPLICATION_CREDENTIAL_SECRET", "")
+	c.DefaultRegion = firstNonEmpty(envOr("PROXCLOUD_DEFAULT_REGION", k.String("proxcloud.default-region")), "default")
 
 	// Scheduled jobs (charge cron + cloud metrics) — OFF unless explicitly enabled.
 	c.Jobs.SchedulerEnabled = boolEnv("PROXCLOUD_JOBS_SCHEDULER_ENABLED") || k.Bool("proxcloud.jobs.scheduler-enabled")

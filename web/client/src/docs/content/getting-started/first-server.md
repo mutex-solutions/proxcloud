@@ -23,7 +23,7 @@ A server is assembled from a few smaller pieces. You can create them as you go t
 
 Go to **Compute → Servers** and click **Create server**. The launch form is a single page with numbered sections — work down it top to bottom:
 
-1. Pick a **location** (region). The availability-zone step offers a single `default` zone; ProxCloud chooses the Proxmox node for you.
+1. Pick a **location** (region). ProxCloud chooses the Proxmox node for you.
 2. Choose the **image** to boot and a **flavor** for its compute size.
 3. Under **Storage**, set the root-disk size. Extra data disks are added after launch from **Storage → Volumes** (see [Block Volumes](/docs/guides/volumes)).
 4. Attach it to one of your **networks**, and under **Access** select a **key pair** for SSH login.
@@ -36,7 +36,7 @@ The new server appears in the list right away, first in a **build** state:
 
 A new server can already reach the internet: its private network gives it outbound access through SNAT. To reach it *from* the internet, it needs a **public NIC** — a second network interface on one of the public networks your operator has enabled for your project, carrying one public address. The address is pinned to the server by its firewall, so it can't be used by anything else.
 
-The launch form still shows an **Assign floating IP** switch, but it has no effect on Proxmox: there are no floating IPs, and the portal does not attach a public NIC for you yet. Attach one through the API with the server action `ATTACH_PUBLIC_NETWORK` (`POST /api/v1/project/{id}/cloud/{serverId}/action`, data `networkId` = one of the public networks listed by `GET /api/v1/project/{id}/public-networks`). `DETACH_PUBLIC_NETWORK` removes it again and returns the address to the pool.
+There are no floating IPs on Proxmox, and the portal does not attach a public NIC for you yet. Attach one through the API with the server action `ATTACH_PUBLIC_NETWORK` (`POST /api/v1/project/{id}/cloud/{serverId}/action`, data `networkId` = one of the public networks listed by `GET /api/v1/project/{id}/public-networks`). `DETACH_PUBLIC_NETWORK` removes it again and returns the address to the pool.
 
 Once the server has a public address:
 

@@ -15,12 +15,12 @@ var adminProjectOpsTools = []toolDef{
 	},
 	{
 		name:   "set_project_public_networks",
-		desc:   "Set a project's external-network allow-list. null = all router:external networks allowed (default); [] = none; [ids] = only those Neutron network ids.",
+		desc:   "Set a project's external-network allow-list. null = all router:external networks allowed (default); [] = none; [ids] = only those public network ids.",
 		method: "PUT",
 		path:   "/api/v1/admin/project/{id}/public-networks",
 		params: []param{
 			{name: "id", typ: "string", desc: "Project id.", required: true, in: "path"},
-			{name: "publicNetworkIds", typ: "array", desc: "Neutron network ids to allow; omit for default-all.", in: "body"},
+			{name: "publicNetworkIds", typ: "array", desc: "Public network ids to allow; omit for default-all.", in: "body"},
 		},
 	},
 	{

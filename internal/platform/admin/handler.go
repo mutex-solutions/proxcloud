@@ -55,7 +55,7 @@ type Handler struct {
 	platformcfg   *platformconfig.Repo
 	audit         *audit.Service
 	esSvc         *externalservice.Service                                        // cloud-admin: load+decrypt externalService for live cloud reads
-	region        string                                                          // default OpenStack region (cfg.OpenStack.Region)
+	defaultRegion string                                                          // fallback region (cfg.DefaultRegion)
 	pveFor        func(es *externalservice.ExternalService) (*pve.Service, error) // SetProxmox; nil in tests → pve reads degrade to empty
 	adminIssuer   string
 	adminClientID string
@@ -96,15 +96,13 @@ func (h *Handler) SetActivation(a *billing.ActivationService) { h.activation = a
 // CloudResourceAdmin mutations (the per-project cloud legs). Nil ops (or a nil struct) leave the
 // corresponding endpoints as 501 (tests construct the Handler without them).
 type ProjectCloudOps struct {
-	// PauseServers nova-PAUSE/UNPAUSEs a project's cached servers via a tenant-scoped client
-	// (best-effort per server).
+	// PauseServers suspends/resumes a project's cached PVE VMs (best-effort per server).
 	PauseServers func(ctx context.Context, projectID string, pause bool) error
 	// Sync runs the live resource sync for one project, optionally scoped to one service.
 	Sync func(ctx context.Context, projectID, serviceID string) error
-	// Bootstrap provisions a project onto an external service — create-or-reuse (or ADOPT
-	// adoptExternalProjectID) the keystone tenant + attach the ProjectExternalService entry
-	// (with an explicit provision request).
-	Bootstrap func(ctx context.Context, projectID, esID, adoptExternalProjectID string) error
+	// Bootstrap provisions a project onto an external service — create-or-reuse the provider-side
+	// tenant (PVE pool, ceph user, …) + attach the ProjectExternalService entry.
+	Bootstrap func(ctx context.Context, projectID, esID string) error
 	// CanDelete is the live pre-check gating a project-deletion schedule (project resolves / tenant
 	// reachable). nil → the endpoint stays 501.
 	CanDelete func(ctx context.Context, projectID string) error
@@ -122,8 +120,8 @@ func (h *Handler) SetInviteToProject(f func(ctx context.Context, u *user.User, e
 	h.inviteToProject = f
 }
 
-func NewHandler(repo *Repo, catalogRepo *catalog.Repo, users *user.Repo, refund txnRefunder, pricingRepo *pricing.Repo, billingRepo *billing.Repo, cloudRepo *cloud.Repo, platformcfgRepo *platformconfig.Repo, auditSvc *audit.Service, esSvc *externalservice.Service, region string, adminIssuer, adminClientID string) *Handler {
-	return &Handler{repo: repo, catalog: catalogRepo, users: users, refund: refund, pricing: pricingRepo, billing: billingRepo, cloud: cloudRepo, platformcfg: platformcfgRepo, audit: auditSvc, esSvc: esSvc, region: region, adminIssuer: adminIssuer, adminClientID: adminClientID}
+func NewHandler(repo *Repo, catalogRepo *catalog.Repo, users *user.Repo, refund txnRefunder, pricingRepo *pricing.Repo, billingRepo *billing.Repo, cloudRepo *cloud.Repo, platformcfgRepo *platformconfig.Repo, auditSvc *audit.Service, esSvc *externalservice.Service, defaultRegion string, adminIssuer, adminClientID string) *Handler {
+	return &Handler{repo: repo, catalog: catalogRepo, users: users, refund: refund, pricing: pricingRepo, billing: billingRepo, cloud: cloudRepo, platformcfg: platformcfgRepo, audit: auditSvc, esSvc: esSvc, defaultRegion: defaultRegion, adminIssuer: adminIssuer, adminClientID: adminClientID}
 }
 
 func (h *Handler) Routes(r chi.Router) {
@@ -235,21 +233,16 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/billing/configuration", h.billingConfigList)
 		r.Get("/billing/configuration/current", h.billingConfigCurrent)
 		r.Get("/billing/configuration/{id}", h.billingConfigByID)
-		// External-service reads (base path /admin/service). Empty greenfield → []/404;
-		// the cloud/openstack/services list is a static deterministic set.
+		// External-service reads (base path /admin/service). Empty greenfield → []/404.
 		r.Get("/service", h.serviceList)
-		r.Get("/service/cloud/openstack/services", h.openstackServices)
 		r.Get("/service/{id}", h.serviceByID)
 		r.Get("/service/{id}/project/services", h.projectServices)
 		r.Get("/service/{id}/user/services", h.userServices)
-		// ExternalService LIVE-cloud reads (cloud-admin) — see cloudadmin.go (routeCloudAdmin):
-		// /service/openstack/auth, /service[/{id}]/os-images, /service/{id}/{volume/types,
-		// share/protocols,availability-zones}, /service/regions, /cloud-resource/public-networks/{id}.
+		// ExternalService live provider reads (cloud-admin) — see cloudadmin.go (routeCloudAdmin):
+		// /service/proxmox/auth, /service[/{id}]/os-images, /service/{id}/{os-flavors,volume/types,
+		// gpu-info}, /service/regions, /cloud-resource/public-networks/{id}.
 		h.routeCloudAdmin(r)
 		h.routePVEFlavors(r)
-		// VHI placement-quotas stays an empty stub (VHI = Virtuozzo-specific external API; the dev
-		// region is plain OpenStack, no VHI traits → renders empty).
-		r.Get("/service/{id}/vhi/placement-quotas", h.emptyCloudList("admin:service:read"))
 		// Admin init — gated (any admin, no specific permission); branding from the
 		// seeded platformConfiguration + REMOTE_OIDC strategies.
 		r.Get("/init", h.adminInit)
@@ -322,14 +315,13 @@ func (h *Handler) Routes(r chi.Router) {
 		h.routeHmacKey(r)
 		h.routeInstanceMetadata(r)
 
-		// ── Admin mutations — cloud/service/project (all OpenStack calls not wired) ──
+		// ── Admin mutations — cloud/service/project ──
 		h.routeExtResourceProvider(r)
 		h.routeImageGroup(r)
 		h.routeFlavorCategory(r)
 		h.routeCloudResourceMut(r)
 		h.routeProjectMut(r)
 		h.routeProjectManager(r)
-		h.routeProjectImport(r)
 		h.routeExternalServiceMut(r)
 	})
 }
@@ -930,7 +922,7 @@ func (h *Handler) serviceList(w http.ResponseWriter, r *http.Request) {
 
 // shapeExternalService maps the raw externalService doc to the admin DTO shape the FE expects:
 // rename `_id` → `id` (the FE keys navigation off `id`) and DROP `secret` — the secret holds the
-// OpenStack adminPassword and must NEVER reach the browser.
+// provider credentials and must NEVER reach the browser.
 func shapeExternalService(d pgdoc.M) {
 	if d == nil {
 		return
@@ -959,42 +951,6 @@ func (h *Handler) serviceByID(w http.ResponseWriter, r *http.Request) {
 	}
 	shapeExternalService(doc)
 	httpx.OK(w, doc)
-}
-
-// OpenstackAuthResponse is the keystone-auth result. Populated live
-// by cloudadmin.go's keystoneAuth (projects/domains/roles/services from the token); fields stay
-// non-null empty (nulls omitted) when the probe yields nothing.
-type OpenstackAuthResponse struct {
-	Services            []any    `json:"services"`
-	Projects            []any    `json:"projects"`
-	Domains             []any    `json:"domains"`
-	IdentityProviders   []any    `json:"identityProviders"`
-	SelectedProjectID   string   `json:"selectedProjectId,omitempty"`
-	SelectedProjectName string   `json:"selectedProjectName,omitempty"`
-	SelectedDomainID    string   `json:"selectedDomainId,omitempty"`
-	SelectedDomainName  string   `json:"selectedDomainName,omitempty"`
-	Roles               []string `json:"roles"`
-}
-
-// emptyCloudList builds a gated handler returning an empty {data:[]} — STUBS the
-// ExternalService/cloud live-read endpoints (os-images, volume/types, share/protocols,
-// availability-zones, vhi/placement-quotas, public-networks) so the cloud-provider config page
-// renders. Live OpenStack listing = cloud-admin (the CloudClient is wired for /debug/cloud).
-func (h *Handler) emptyCloudList(perm string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !h.require(w, r, perm) {
-			return
-		}
-		httpx.OK(w, []any{})
-	}
-}
-
-// openstackServices returns the static set of OpenStack services.
-func (h *Handler) openstackServices(w http.ResponseWriter, r *http.Request) {
-	if !h.require(w, r, "admin:service:read") {
-		return
-	}
-	httpx.List(w, OpenstackServiceTypes)
 }
 
 // projectServices lists a project's external services: resolves the

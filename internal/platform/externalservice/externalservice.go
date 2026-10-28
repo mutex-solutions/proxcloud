@@ -1,16 +1,11 @@
-// Package externalservice backs the `externalService` table: each region's cloud
-// connection plus the encrypted `secret` (decrypted on read). It is the deployed pod's source
-// of OpenStack credentials — the production replacement for the dev OS_* env bootstrap in
-// cmd/api.
+// Package externalservice backs the `externalService` table: each provider's connection
+// (proxmox, ceph-s3, kamaji, dbaas) plus the encrypted `secret` (decrypted on read).
 //
 // config/secret are polymorphic free-form sub-documents, modeled as map[string]any with typed
-// accessors (OpenstackConfig/OpenstackSecret) over the known keys — exactly the read-only
-// fields the CloudClient + rating loop need.
+// per-provider accessors over the known keys.
 package externalservice
 
 import (
-	"strings"
-
 	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 )
@@ -28,9 +23,6 @@ const (
 	StatusPrivate  = "PRIVATE"
 	StatusDisabled = "DISABLED"
 )
-
-// defaultGnocchiGranularity is the default gnocchi granularity (300s).
-const defaultGnocchiGranularity = 300
 
 // ExternalService is a document in the "externalService" collection. `config` and `secret`
 // are free-form sub-documents; `secret` is stored encrypted and is decrypted in-place by the
@@ -58,28 +50,12 @@ func (e *ExternalService) secretMap() map[string]any {
 	return m
 }
 
-// NotificationSecret is the per-provider shared secret ceilometer must present on the
-// os-notification webhook (secret.notificationSecret; encrypted at rest, decrypted on read, and
-// stripped from admin read responses like every other secret field). Empty means this provider has
-// not opted notification ingestion in — the webhook stays CLOSED for it. Set it via the admin
-// Cloud-providers connection save (`{"secret":{"notificationSecret":"…"}}`).
-func (e *ExternalService) NotificationSecret() string {
-	return str(e.secretMap()["notificationSecret"])
-}
-
-// IdentityURL is config.identityUrl, normalized to end with /v3 (the auth URL ALWAYS ends in
-// the v3 path).
-func (e *ExternalService) IdentityURL() string {
-	return ensureV3(str(e.Config["identityUrl"]))
-}
-
 // Provider is config.provider; Shared is config.shared.
 func (e *ExternalService) Provider() string { return str(e.Config["provider"]) }
 func (e *ExternalService) Shared() bool     { return boolean(e.Config["shared"]) }
 
 // IsCephS3 reports whether this is a Ceph RGW (S3) object-store provider (config.provider == "ceph-s3").
-// Such a provider is fully OpenStack-independent: no Keystone tenant, no identityUrl — object-store is the
-// only service it serves, driven by the S3 + Admin Ops endpoints below.
+// Object-store is the only service it serves, driven by the S3 + Admin Ops endpoints below.
 func (e *ExternalService) IsCephS3() bool { return e.Provider() == "ceph-s3" }
 
 // S3Endpoint / AdminAPIURL are the ceph-s3 data + Admin Ops endpoints (config.s3Endpoint / config.adminApiUrl).
@@ -163,20 +139,10 @@ func (e *ExternalService) CephConfig(region, projectAccess, projectSecret, rgwUI
 	}
 }
 
-// GnocchiGranularity returns config.gnocchiGranularity, else 300.
-func (e *ExternalService) GnocchiGranularity() int {
-	if g, ok := intFrom(e.Config["gnocchiGranularity"]); ok && g > 0 {
-		return g
-	}
-	return defaultGnocchiGranularity
-}
-
-// Metrics-source values (config.metrics.source). Absent/blank = gnocchi — the pre-existing
-// behavior for every provider that predates the knob. "none" is an explicit opt-out: the
-// metrics job skips the provider's servers silently instead of failing per-server per-hour
-// against a telemetry-less cloud.
+// Metrics-source values (config.metrics.source). Absent/blank = none: the metrics job skips
+// the provider's servers silently instead of failing per-server per-hour against a
+// telemetry-less cloud.
 const (
-	MetricsSourceGnocchi    = "gnocchi"
 	MetricsSourcePrometheus = "prometheus"
 	MetricsSourceNone       = "none"
 )
@@ -187,17 +153,12 @@ func (e *ExternalService) metricsConfig() map[string]any {
 	return m
 }
 
-// MetricsSource returns config.metrics.source, defaulting to gnocchi — except on a
-// proxmox provider, which has no gnocchi: absent defaults to none so the hourly
-// metrics job skips it instead of erroring per server.
+// MetricsSource returns config.metrics.source, defaulting to none for every provider.
 func (e *ExternalService) MetricsSource() string {
 	if s := str(e.metricsConfig()["source"]); s != "" {
 		return s
 	}
-	if e.IsProxmox() {
-		return MetricsSourceNone
-	}
-	return MetricsSourceGnocchi
+	return MetricsSourceNone
 }
 
 // PrometheusMetricsConfig assembles the Prometheus usage-source config from
@@ -255,30 +216,6 @@ func (e *ExternalService) ServiceEnabledInRegion(slug, region string) bool {
 	regions, _ := svcs[slug].(map[string]any)
 	b, _ := regions[region].(bool)
 	return b
-}
-
-func (e *ExternalService) auth() map[string]any {
-	m, _ := e.Config["auth"].(map[string]any)
-	return m
-}
-
-// IsAppCred reports whether this provider authenticates with an application credential
-// (config.auth.adminAuthType == "application_credential") — the same test ClientConfig uses to
-// set AppCredID. App-cred tokens are keystone-locked to one project and CANNOT be re-scoped, so
-// the tenant-write choke points refuse to build a mis-scoped client for such a provider.
-func (e *ExternalService) IsAppCred() bool {
-	return strings.EqualFold(str(e.auth()["adminAuthType"]), "application_credential")
-}
-
-func ensureV3(url string) string {
-	if url == "" {
-		return url
-	}
-	trimmed := strings.TrimRight(url, "/")
-	if strings.HasSuffix(trimmed, "/v3") {
-		return trimmed
-	}
-	return trimmed + "/v3"
 }
 
 func str(v any) string {

@@ -1,7 +1,7 @@
 package admin
 
 // pveadmin.go — Proxmox provider admin surface: the connection test.
-// POST /api/v1/admin/service/proxmox/auth (keystoneAuth twin): authenticate with
+// POST /api/v1/admin/service/proxmox/auth: authenticate with
 // creds from the body — or the stored service via ?externalServiceId, so the FE
 // re-tests without resending the token secret — and return what the token can see
 // (nodes, storages, SDN zones, PCI mappings) to populate the provider form and
@@ -66,7 +66,7 @@ func (h *Handler) proxmoxAuth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ver, err := cc.Version(ctx)
 	if err != nil {
-		// connection test → 400, not 500 (keystoneAuth precedent)
+		// connection test → 400, not 500 (a bad credential is a client error)
 		httpx.WriteError(w, httpx.BadRequest("Proxmox authentication failed: "+err.Error()))
 		return
 	}

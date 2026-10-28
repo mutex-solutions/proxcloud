@@ -36,7 +36,7 @@ export function useLocations(pid: string) {
 
 export function useCloudScope(pid: string): CloudScope | undefined {
   const { data } = useLocations(pid)
-  // Generic compute/network/storage pages need an OpenStack scope. A project can
+  // Generic compute/network/storage pages need a compute (Proxmox) scope. A project can
   // also attach Ceph S3 (buckets only), Kamaji (managed Kubernetes control planes) or
   // DBaaS (managed databases), and any may appear first — skip them all, mirroring the
   // backend's resolveServiceID.
@@ -46,7 +46,7 @@ export function useCloudScope(pid: string): CloudScope | undefined {
   return { serviceId: loc.serviceId, region: loc.region }
 }
 
-// Live quota usage for the selected OpenStack service/region. The response can
+// Live quota usage for the selected compute service/region. The response can
 // be partial (with warnings), so callers should render each metric defensively.
 export function useProjectQuota(pid: string, scope: CloudScope | undefined) {
   return useQuery({
@@ -94,17 +94,6 @@ export function useCloudCursorList(pid: string, type: string, extraQuery = "") {
     `/project/${pid}/resource?type=${type}${extraQuery}`,
     { method: "POST", cloud: scope, enabled: !!pid && !!scope },
   )
-}
-
-// External (router:external) networks the project may allocate public IPs from —
-// already filtered by the project's allow-list server-side.
-export type PublicNetwork = { id: string; name: string }
-export function usePublicNetworks(pid: string, scope: CloudScope | undefined) {
-  return useQuery({
-    queryKey: ["public-networks", pid, scope?.serviceId, scope?.region],
-    queryFn: () => apiFetch<PublicNetwork[]>(`/project/${pid}/public-networks`, { cloud: scope }),
-    enabled: !!pid && !!scope,
-  })
 }
 
 export function useCloudResource(pid: string, resourceId?: string) {
@@ -164,7 +153,7 @@ export function useFlavorCategories() {
 }
 
 // Curated image groups + categories. Each enabled group offers named images under a category;
-// the create-server image picker shows only offered images (matched to live glance images by name).
+// the create-server image picker shows only offered images (matched to the location's templates by name).
 export type ImageGroup = {
   id: string
   name: string
@@ -192,8 +181,8 @@ export function useProjectServices(pid: string) {
   })
 }
 
-// UI menu gating — GET /init/{pid} returns menu.items keyed by OpenStack
-// service name ({enabled}). The ADMIN toggles these per region on the cloud
+// UI menu gating — GET /init/{pid} returns menu.items keyed by service
+// slug ({enabled}). The ADMIN toggles these per region on the cloud
 // provider's Services tab; a disabled/absent service hides its client section.
 export type UIMenu = { items?: Record<string, { enabled?: boolean; newMenuItem?: boolean }> }
 
@@ -241,7 +230,7 @@ export function useCursorList<T = unknown>(
   return { ...q, rows }
 }
 
-// Ensures the project is bootstrapped (keystone tenant) — fire-and-forget on entry.
+// Ensures the project is bootstrapped (project pool) — fire-and-forget on entry.
 export function useProjectInit(pid: string) {
   return useQuery({
     queryKey: ["project-init", pid],

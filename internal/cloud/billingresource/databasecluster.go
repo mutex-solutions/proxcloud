@@ -36,7 +36,7 @@ func (p *DatabaseClusterProvider) GetBillingInformation(_ context.Context, _ bil
 		// Autoscale surcharge flag (1/0): a flat per-database fee while enabled. The scaled-up
 		// capacity itself bills through the totals above — the tick raises the declared size.
 		values["autoscale_enabled"] = num(d["autoscale_enabled"])
-		// Gate on the tenant-side endpoint (the Octavia VIP): while it is absent the charge is
+		// Gate on the tenant-side endpoint (the LB ingress IP): while it is absent the charge is
 		// DEFERRED, not waived — the pricing engine freezes the bill-item watermark at
 		// createdAt and, once the endpoint appears, back-bills the elapsed hours of the current
 		// cycle at the then-current attribute values (SaveChargingToBill/updateBillItems). A

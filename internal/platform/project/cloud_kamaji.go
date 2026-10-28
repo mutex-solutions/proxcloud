@@ -1,11 +1,11 @@
 package project
 
 // cloud_kamaji.go — the client write surface for kamaji Managed-Kubernetes clusters. A kamaji
-// provider has no Keystone tenant, so KUBERNETES_CLUSTER writes bypass the OpenStack
+// provider has no compute tenant of its own, so KUBERNETES_CLUSTER writes bypass the generic
 // WriteService entirely (ceph precedent) and go through kamaji.Service: Application CR on the
-// management cluster in, status via the sync. Worker VMs land in the customer's own keystone
-// tenant of the project's OPENSTACK service (plan D4) — the create leg resolves that binding to
-// render the mgmt-side clouds.yaml secret.
+// management cluster in, status via the sync. Worker VMs land in the project's own compute
+// service (plan D4) — the create leg (cloud_kamaji_create.go) prepares the mgmt-side cloud
+// credentials secret.
 
 import (
 	"context"
@@ -65,13 +65,11 @@ func (h *Handler) kamajiCreate(w http.ResponseWriter, r *http.Request, u *user.U
 		h.fail(w, err)
 		return
 	}
-	// Phase K: CAPMOX credentialsRef token mint + IPAM range carving replace the
-	// OpenStack appcred/neutron legs deleted with the fork.
-	if err := h.kamajiResolveClusterNetwork(r.Context(), proj, es.ID, ks.Config().Defaults, &spec); err != nil {
+	if err := h.kamajiProvisionCluster(r.Context(), proj, ks.Config().Defaults, &spec); err != nil {
 		h.fail(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, err.Error()))
 		return
 	}
-	data, err := ks.CreateCluster(r.Context(), spec, "")
+	data, err := ks.CreateCluster(r.Context(), spec, nil)
 	if err != nil {
 		h.fail(w, err)
 		return
@@ -106,13 +104,6 @@ func (h *Handler) kamajiDelete(ctx context.Context, es *externalservice.External
 	}
 	if err := ks.DeleteCluster(ctx, proj.ID, cr.ExternalID); err != nil {
 		return err
-	}
-	// Drop the cluster's server groups. Best effort, and usually a no-op on this pass: nova refuses
-	// to delete a group that still has members, and the ArgoCD/CAPI cascade is still tearing the
-	// machines down. The orphan sweep re-runs it once the cascade is finished. (The application
-	// credential is revoked there too, off the annotations on the clouds.yaml secret.)
-	if err := h.kamajiReleaseServerGroups(ctx, proj, cr.ExternalID); err != nil {
-		slog.Error("kamaji: release server groups after delete", "cluster", cr.ExternalID, "err", err)
 	}
 	return h.cloud.DeleteAndArchive(ctx, cr, time.Now().UTC())
 }
@@ -209,12 +200,6 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			h.fail(w, err)
 			return true
 		}
-		// Server groups follow the node groups: new pools get one, removed pools lose theirs. Runs
-		// before the values patch so every group in the new values already carries its id.
-		if err := h.kamajiSyncServerGroups(r.Context(), proj, cr.ExternalID, groups); err != nil {
-			h.fail(w, httpx.BadRequest(err.Error()))
-			return true
-		}
 		err = ks.PatchClusterValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
 			version, _ := values["kubernetesVersion"].(string)
 			prevFlavor, prevImage, prevVariant := prevGroupIndex(values)
@@ -300,12 +285,10 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 				return true
 			}
 		}
-		// Rebuilt wholesale from the picks + the provider's CURRENT storage volume-type override
-		// (proxcloud-owned, re-derived — not carried over). A legacy `openstack` entry (the
-		// short-lived credential-push storage leg) is deliberately DROPPED here: the split CSI
-		// ships storage chart-side, and the pushed credential must not survive an addon edit.
+		// Rebuilt wholesale from the picks. A legacy credential-push addon entry is deliberately
+		// DROPPED here: the pushed credential must not survive an addon edit.
 		err = ks.PatchClusterValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
-			block := kamaji.AddonValues(addons, ks.Config().Defaults.StorageVolumeType)
+			block := kamaji.AddonValues(addons)
 			if len(block) == 0 {
 				delete(values, "addons") // back to the chart's defaults
 				return nil
@@ -573,18 +556,4 @@ func kamajiNodeGroups(v any) ([]kamaji.NodeGroup, error) {
 		return nil, fmt.Errorf("nodeGroups: %w", err)
 	}
 	return groups, nil
-}
-
-// kamajiCredRevoker builds the orphan-finalize revocation resolver. The OpenStack
-// appcred leg is gone with the fork; Phase K revokes the per-cluster PVE token
-// here instead (DELETE /access/users/.../token — pve/access.go is ready). Until
-// then no cluster can have minted a credential on this fork, so any marker that
-// names one is a pre-fork import — keep it (fail-closed) for manual review.
-func (h *Handler) kamajiCredRevoker(ctx context.Context, p *Project) kamaji.RevokeCredResolver {
-	return func(ctx context.Context, osServiceID, userID, credID string) error {
-		if credID == "" {
-			return nil
-		}
-		return fmt.Errorf("appcred %s: OpenStack credential revocation is not available on this fork — revoke manually", credID)
-	}
 }
