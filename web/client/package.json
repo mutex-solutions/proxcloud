@@ -36,7 +36,7 @@
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",
     "react-oidc-context": "^3.3.1",
-    "react-router-dom": "^7.18.1",
+    "react-router-dom": "^7.18.5",
     "recharts": "^3.10.1",
     "remark-gfm": "^4.0.1",
     "shadcn": "^4.22.1",
