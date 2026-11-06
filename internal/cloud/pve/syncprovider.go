@@ -31,11 +31,27 @@ func splitVMs(rows []ClusterResource, pool string) (vms, templates []ClusterReso
 		}
 		if r.Template == 1 {
 			templates = append(templates, r)
-		} else if !strings.HasPrefix(r.Name, imageBuildPrefix) {
+		} else if !strings.HasPrefix(r.Name, imageBuildPrefix) && !isHolder(r.Tags) {
 			vms = append(vms, r)
 		}
 	}
 	return vms, templates
+}
+
+// diskVMs lists the pool VMs whose disks are VOLUME rows: the live VMs and the holders.
+func (s *Service) diskVMs(ctx context.Context, projectID string) ([]ClusterResource, error) {
+	rows, err := s.C.ClusterResources(ctx, "vm")
+	if err != nil {
+		return nil, err
+	}
+	pool := s.PoolFor(projectID)
+	vms, _ := splitVMs(rows, pool)
+	for _, r := range rows {
+		if r.Type == "qemu" && r.Pool == pool && isHolder(r.Tags) {
+			vms = append(vms, r)
+		}
+	}
+	return vms, nil
 }
 
 // poolVMs lists the project pool's qemu rows off /cluster/resources, split into
@@ -219,7 +235,7 @@ func (p *VolumeSyncProvider) Superseded(cached, fresh *cloud.CloudResource) bool
 // standalone volume in the PVE model — a disk belongs to a VM; a detached disk is
 // its VM's unusedN entry (still billed). ExternalID = volid (cluster-unique).
 func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, error) {
-	vms, _, err := p.svc.poolVMs(ctx, p.projectID)
+	vms, err := p.svc.diskVMs(ctx, p.projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +261,9 @@ func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 				attachments = []any{}
 			}
 			name := r.Name + "-" + d.Slot
+			if isHolder(r.Tags) { // no server to name it after
+				name = d.VolID[strings.IndexByte(d.VolID, ':')+1:]
+			}
 			diskProfile, class := "", ""
 			if p.profileOf != nil {
 				diskProfile, class = p.profileOf(r.Node, d.Storage, profile)
