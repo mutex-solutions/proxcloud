@@ -238,6 +238,11 @@ func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 			identity = metaIdentity(cfg)
 		}
 		for _, d := range p.svc.withUnusedSizes(ctx, r.Node, r.VMID, ParseDisks(cfg)) {
+			// A PVC's disk belongs to the tenant cluster, not to this VM: it moves with the pod and
+			// outlives the worker. It is no volume of the project's (plan: hidden everywhere).
+			if isCSIDisk(d.VolID) {
+				continue
+			}
 			status := "in-use"
 			attachments := []any{map[string]any{"server_id": itoa0(r.VMID), "device": d.Slot}}
 			if len(d.Slot) >= 6 && d.Slot[:6] == "unused" {
@@ -281,6 +286,10 @@ func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 	}
 	return out, nil
 }
+
+// isCSIDisk recognises proxmox-csi's volume names, <store>:vm-9999-pvc-<uuid> (with a file store's
+// subdirectory and extension in between).
+func isCSIDisk(volID string) bool { return strings.Contains(volID, "-pvc-") }
 
 // volumeTypeOf is the billing `type` attribute: the storage-profile slug when the
 // VM carries one, else the raw storage id (honest fallback — price rules can still

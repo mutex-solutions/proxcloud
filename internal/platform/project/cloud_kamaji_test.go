@@ -17,7 +17,7 @@ func TestKamajiSpecFromData(t *testing.T) {
 		"nodeGroups": []any{
 			map[string]any{"name": "w", "flavorId": "m5.large", "count": 3,
 				"labels": map[string]any{"tier": "app"}, "taints": []any{"a=b:NoSchedule"}},
-			map[string]any{"name": "b", "flavorId": "m5.xl", "autoscale": true, "min": 1, "max": 4},
+			map[string]any{"name": "b", "flavorId": "m5.xl", "count": 1},
 		},
 	})
 	if err != nil {
@@ -39,7 +39,7 @@ func TestKamajiSpecFromData(t *testing.T) {
 	if len(spec.AllowedCIDRs) != 1 {
 		t.Errorf("cidrs = %v", spec.AllowedCIDRs)
 	}
-	if len(spec.NodeGroups) != 2 || spec.NodeGroups[0].Labels["tier"] != "app" || spec.NodeGroups[1].Max != 4 {
+	if len(spec.NodeGroups) != 2 || spec.NodeGroups[0].Labels["tier"] != "app" || spec.NodeGroups[1].Count != 1 {
 		t.Errorf("nodeGroups = %+v", spec.NodeGroups)
 	}
 

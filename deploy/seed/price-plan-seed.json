@@ -232,7 +232,7 @@
       "timeUnit": "hour",
       "resourceType": "instance_traffic",
       "pricePlanId": "<PLAN_ID>",
-      "applyMethod": "ADD_TO_TOTAL",
+      "applyMethod": "OVERWRITE_TOTAL",
       "prices": [
         {
           "attributeName": "outgoing_public_traffic_mb",

@@ -13,7 +13,7 @@
       ProxCloudPlatform: "Sys.Audit Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.Audit Mapping.Audit Mapping.Use"
       ProxCloudCAPI: "Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
       ProxCloudCSI: "VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit"
-      ProxCloudImages: "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
+      ProxCloudImages: "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
     users:
       proxcloud@pve: {comment: ProxCloud portal, token: platform}
       capmox@pve: {comment: ProxCloud CAPI, token: capi}
@@ -36,6 +36,25 @@
       - {path: /nodes, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
       - {path: /storage, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
       - {path: /sdn/zones/localnetwork, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
+    # mode=split: what the services cluster and the per-cluster tokens of tenant clusters hang off.
+    # Unexercised on a lab so far: see "Managed Kubernetes" in docs/proxmox-permissions.md.
+    split_roles:
+      ProxCloudKubeMint: "User.Modify Permissions.Modify"
+    split_acls:
+      - {path: /, role: ProxCloudCAPI, propagate: 0, user: capmox@pve, token: capmox@pve!capi}
+      - {path: /nodes, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
+      - {path: /pool, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
+      - {path: /pool/pc-templates, role: PVETemplateUser, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
+      - {path: /sdn/zones, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
+      - {path: /storage, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
+      - {path: "/storage/{{ pc.services.iso_storage }}", role: PVEDatastoreAdmin, propagate: 0, user: capmox@pve, token: capmox@pve!capi}
+      - {path: /pool, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!csi}
+      - {path: /storage, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!csi}
+      - {path: /access/groups, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: /pool, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: /storage, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: /sdn/zones, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: /nodes, role: ProxCloudKubeMint, propagate: 0, user: proxcloud@pve, token: proxcloud@pve!platform}
   tasks:
     - name: Log in
       ansible.builtin.include_tasks: tasks/pve-login.yml
@@ -59,7 +78,7 @@
         body_format: form-urlencoded
         body: {roleid: "{{ item.key }}", privs: "{{ item.value | split | join(',') }}"}
       changed_when: true
-      loop: "{{ roles | dict2items }}"
+      loop: "{{ (roles | combine(split_roles if pc.mode == 'split' else {})) | dict2items }}"
       loop_control: {label: "{{ item.key }}"}
 
     - name: Align a role's privileges
@@ -72,7 +91,7 @@
         body_format: form-urlencoded
         body: {privs: "{{ item.value | split | join(',') }}"}
       changed_when: true
-      loop: "{{ roles | dict2items }}"
+      loop: "{{ (roles | combine(split_roles if pc.mode == 'split' else {})) | dict2items }}"
       loop_control: {label: "{{ item.key }}"}
 
     - name: Create a pool
@@ -141,5 +160,5 @@
         body_format: form-urlencoded
         body: "{{ item }}"
       changed_when: true
-      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls) }}"
+      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + (split_acls if pc.mode == 'split' else [])) }}"
       loop_control: {label: "{{ item.path }} {{ item.roles }}"}

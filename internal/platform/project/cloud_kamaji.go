@@ -65,12 +65,18 @@ func (h *Handler) kamajiCreate(w http.ResponseWriter, r *http.Request, u *user.U
 		h.fail(w, err)
 		return
 	}
-	if err := h.kamajiProvisionCluster(r.Context(), proj, ks.Config().Defaults, &spec); err != nil {
-		h.fail(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, err.Error()))
+	// Detached like the other PVE write paths: a browser leaving mid-create must not strand tokens.
+	ctx := context.WithoutCancel(r.Context())
+	sec, err := h.kamajiProvisionCluster(ctx, proj, ks, &spec)
+	if err != nil {
+		h.fail(w, err)
 		return
 	}
-	data, err := ks.CreateCluster(r.Context(), spec, nil)
+	data, err := ks.CreateCluster(ctx, spec, sec)
 	if err != nil {
+		if rerr := kamajiReleaseCluster(h.esSvc, h.pveFor, h.publicIPs)(ctx, sec.ComputeServiceID, proj.ID, spec.ID); rerr != nil {
+			slog.Warn("kamaji: release after a failed create", "cluster", spec.ID, "err", rerr)
+		}
 		h.fail(w, err)
 		return
 	}
@@ -168,12 +174,6 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			if err := rotateNodeGroupImages(values, d, version); err != nil {
 				return err
 			}
-			// Keep the autoscaler on the new minor (chart constraint: tag minor == cluster minor).
-			if maj, min, _, verr := kamaji.ParseVersion(version); verr == nil {
-				values["autoscaler"] = map[string]any{
-					"image": map[string]any{"tag": fmt.Sprintf("v%d.%d.0", maj, min)},
-				}
-			}
 			return nil
 		})
 		if err != nil {
@@ -192,6 +192,15 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 		d := ks.Config().Defaults
 		if err := validateNodeGroupShapes(groups); err != nil {
 			h.fail(w, httpx.BadRequest(err.Error()))
+			return true
+		}
+		compute, err := h.kamajiCompute(r.Context(), proj, d)
+		if err != nil {
+			h.fail(w, err)
+			return true
+		}
+		if err := h.kamajiHydrateGroups(r.Context(), compute, d, cr.ExternalID, groups); err != nil {
+			h.fail(w, err)
 			return true
 		}
 		// GPU gate on the DELTA vs the cluster's current groups (their workers are already in
@@ -487,10 +496,8 @@ func kamajiSpecFromData(projectID string, d map[string]any) (kamaji.ClusterSpec,
 	if ha, ok := d["ha"].(bool); ok {
 		spec.HA = ha
 	}
-	// BYO network (EKS-style): both ids or neither — Validate enforces the pairing, and the create
-	// path verifies ownership against the live tenant before anything is built.
+	// The create path verifies the network belongs to this project before anything is built.
 	spec.NetworkID = strAny(d["networkId"])
-	spec.SubnetID = strAny(d["subnetId"])
 	if oidc, ok := d["oidc"].(map[string]any); ok {
 		spec.OIDC = map[string]string{}
 		for k, v := range oidc {

@@ -10,7 +10,7 @@ Full operator runbook: [`docs/managed-k8s.md`](../../docs/managed-k8s.md).
 ## Prerequisites
 
 1. **Kamaji stack live** — Kamaji operator, cluster-api-operator with the KamajiControlPlane
-   provider, the infrastructure provider (TODO(P7): CAPMOX), CAAPH. (Already true on `kamaji-cluster-az1`; a dev mgmt cluster needs the
+   provider, CAPMOX and the in-cluster IPAM provider, CAAPH. (Already true on `kamaji-cluster-az1`; a dev mgmt cluster needs the
    same four charts — plan §3.0.)
 2. **ArgoCD installed** on this cluster (plan D3). Any standard install; the manifests here
    assume the `argocd` namespace.

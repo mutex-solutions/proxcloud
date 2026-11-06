@@ -2,12 +2,12 @@ package pve
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"strings"
 )
 
-// Access management — used by Phase K to mint narrow per-cluster tokens
-// (proxcloud-capi@pve!<clusterID>) and by teardown to revoke them.
+// Access management: the narrow per-cluster tokens of managed Kubernetes, and their revocation.
 
 // CreateUser creates a PVE-realm user (idempotent: "already exists" is not an error).
 func (c *Client) CreateUser(ctx context.Context, userid, comment string) error {
@@ -57,6 +57,71 @@ func (c *Client) SetACL(ctx context.Context, path, roles string, tokens []string
 		"delete": pbool(del),
 	}.values()
 	return c.put(ctx, "/access/acl", form, nil)
+}
+
+// Users and roles the per-cluster tokens hang off (docs/proxmox-permissions.md).
+const (
+	capiUser       = "capmox@pve"
+	csiUser        = "csi@pve"
+	roleCAPI       = "ProxCloudCAPI"
+	roleCSI        = "ProxCloudCSI"
+	roleTemplate   = "PVETemplateUser"
+	roleISOStorage = "PVEDatastoreAdmin"
+)
+
+// ClusterTokenScope is what one tenant cluster's tokens may touch.
+type ClusterTokenScope struct {
+	Pool, TemplatePool string
+	Storages           []string // the boot store first; every store a StorageClass offers
+	ISOStorage         string   // where CAPMOX uploads the bootstrap ISO
+	Zone, Vnet         string
+}
+
+// ClusterTokens are the two tokens of one cluster: CAPMOX stays on the management side, the CSI token
+// reaches the tenant cluster, so it gets only disks of the project's pool on the offered stores.
+type ClusterTokens struct{ CAPIID, CAPISecret, CSIID, CSISecret string }
+
+// MintClusterTokens creates both tokens and their ACLs. Revoking is RevokeClusterTokens; a failure
+// half way revokes what was made, so a refused create leaves nothing behind.
+func (c *Client) MintClusterTokens(ctx context.Context, clusterID string, sc ClusterTokenScope) (t ClusterTokens, err error) {
+	defer func() {
+		if err != nil {
+			_ = c.RevokeClusterTokens(context.WithoutCancel(ctx), clusterID)
+		}
+	}()
+	if t.CAPIID, t.CAPISecret, err = c.CreateAPIToken(ctx, capiUser, clusterID); err != nil {
+		return t, err
+	}
+	if t.CSIID, t.CSISecret, err = c.CreateAPIToken(ctx, csiUser, clusterID); err != nil {
+		return t, err
+	}
+	grants := []struct{ path, role, token string }{
+		{"/pool/" + sc.Pool, roleCAPI, t.CAPIID},
+		{"/pool/" + sc.TemplatePool, roleTemplate, t.CAPIID},
+		{"/nodes", roleCAPI, t.CAPIID},
+		{"/storage/" + sc.ISOStorage, roleISOStorage, t.CAPIID},
+		{"/pool/" + sc.Pool, roleCSI, t.CSIID},
+	}
+	if sc.Zone != "" {
+		grants = append(grants, struct{ path, role, token string }{"/sdn/zones/" + sc.Zone + "/" + sc.Vnet, roleCAPI, t.CAPIID})
+	}
+	for _, st := range sc.Storages {
+		grants = append(grants, struct{ path, role, token string }{"/storage/" + st, roleCSI, t.CSIID})
+	}
+	if len(sc.Storages) > 0 {
+		grants = append(grants, struct{ path, role, token string }{"/storage/" + sc.Storages[0], roleCAPI, t.CAPIID})
+	}
+	for _, g := range grants {
+		if err = c.SetACL(ctx, g.path, g.role, []string{g.token}, false); err != nil {
+			return t, err
+		}
+	}
+	return t, nil
+}
+
+// RevokeClusterTokens deletes both tokens. PVE drops a deleted token's ACL entries with it.
+func (c *Client) RevokeClusterTokens(ctx context.Context, clusterID string) error {
+	return errors.Join(c.DeleteAPIToken(ctx, capiUser, clusterID), c.DeleteAPIToken(ctx, csiUser, clusterID))
 }
 
 // PrivCheck is one ACL path and the privileges the token must hold there.

@@ -9,6 +9,19 @@ pc_versions:
   # Chart + image tag of ProxCloud itself, with images.build=false. It must be a published release.
   proxcloud: v0.3.28
   rustfs: 1.0.4
+  # mode=split: Cluster API on the mgmt cluster, and the services cluster's platform.
+  capi: v1.14.4
+  capmox: v0.9.2
+  capi_ipam: v1.1.1
+  capi_kamaji: v0.22.0
+  caaph: v0.6.4
+  kube_vip: v0.8.9
+  cilium_chart: 1.18.16
+  metallb_chart: 0.16.2        # https://metallb.github.io/metallb
+  proxmox_csi_chart: 0.5.15    # oci://ghcr.io/sergelogvinov/charts/proxmox-csi-plugin
+  kamaji_etcd_chart: 0.18.1    # https://clastix.github.io/charts
+  kamaji_image: edge-26.11.2   # clastix/kamaji; the chart is 0.0.0+latest, so the image is the pin
+  barman_plugin: v0.0.0        # github.com/cloudnative-pg/plugin-barman-cloud
   packer: 1.16.2
   packer_plugin_proxmox: 1.2.4
   helm: v3.20.2                # mgmt host, only with images.build

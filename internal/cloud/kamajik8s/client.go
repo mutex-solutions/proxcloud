@@ -16,11 +16,11 @@ import (
 // API paths for the kinds this client touches. Group/version pins:
 //   - argoproj.io/v1alpha1 Application (ArgoCD — stable since 2018, no v1 planned)
 //   - kamaji.clastix.io/v1alpha1 TenantControlPlane
-//   - cluster.x-k8s.io/v1beta1 Cluster API (MachineDeployment)
+//   - cluster.x-k8s.io/v1beta2 Cluster API (MachineDeployment)
 const (
 	pathApplications        = "/apis/argoproj.io/v1alpha1/namespaces/%s/applications"
 	pathTenantControlPlanes = "/apis/kamaji.clastix.io/v1alpha1/namespaces/%s/tenantcontrolplanes"
-	pathMachineDeployments  = "/apis/cluster.x-k8s.io/v1beta1/namespaces/%s/machinedeployments"
+	pathMachineDeployments  = "/apis/cluster.x-k8s.io/v1beta2/namespaces/%s/machinedeployments"
 	pathSecrets             = "/api/v1/namespaces/%s/secrets"
 	pathServices            = "/api/v1/namespaces/%s/services"
 	pathNetworkPolicies     = "/apis/networking.k8s.io/v1/namespaces/%s/networkpolicies"
@@ -196,6 +196,19 @@ func (c *Client) ApplySecret(ctx context.Context, ns, name string, stringData ma
 		"kind":       "Secret",
 		"metadata":   meta,
 		"type":       "Opaque",
+		"stringData": toAny(stringData),
+	})
+	return err
+}
+
+// ApplyResourceSetSecret writes a Secret a ClusterResourceSet may deliver into a workload cluster: the
+// type is what CAPI insists on, and a Secret's type is immutable, so it cannot be a later patch.
+func (c *Client) ApplyResourceSetSecret(ctx context.Context, ns, name string, stringData, labels map[string]string) error {
+	_, err := c.apply(ctx, fmt.Sprintf(pathSecrets, ns), name, map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata":   map[string]any{"name": name, "namespace": ns, "labels": toAny(labels)},
+		"type":       "addons.cluster.x-k8s.io/resource-set",
 		"stringData": toAny(stringData),
 	})
 	return err
