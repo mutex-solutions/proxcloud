@@ -21,6 +21,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pveflavor"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
+	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -63,17 +64,25 @@ type Handler struct {
 	projectCloud  *ProjectCloudOps           // live per-project cloud legs (nil → those endpoints stay 501)
 	// inviteToProject invites a user to a project (admin user-create projectIds loop).
 	inviteToProject func(ctx context.Context, u *user.User, email, projectID string) error
+	// keycloak makes and removes logins for operator-created users (SetKeycloak; nil = Create
+	// user refuses, the users of an external IdP appear at their first login).
+	keycloak *sso.KCAdmin
 	// kamajiFor builds the Managed-Kubernetes service for a kamaji provider (nil in tests →
 	// the cluster chart-pin endpoints answer 501).
 	kamajiFor func(es *externalservice.ExternalService) (*kamaji.Service, error)
 	// pveFlavors is the Proxmox flavor catalog (nil in tests → the surface 503s).
 	pveFlavors *pveflavor.Repo
+	pay        *billing.PayService // bill record-payment (nil → 501)
 	// dbaasFor builds the Managed-Database service for a dbaas provider (nil in tests → the
 	// database chart-pin endpoints answer 501).
 	dbaasFor func(es *externalservice.ExternalService) (*dbaas.Service, error)
 }
 
 // SetKamaji wires the kamaji Managed-Kubernetes service factory (the admin chart-pin surface).
+// SetPayService wires the bill PayService (record-payment; carries the bill_is_paid mail +
+// suspension auto-resume hooks set in cmd/api). nil → the endpoint answers 501.
+func (h *Handler) SetPayService(p *billing.PayService) { h.pay = p }
+
 // SetProxmox wires the pve service factory for the cloud-admin live reads.
 func (h *Handler) SetProxmox(f func(es *externalservice.ExternalService) (*pve.Service, error)) {
 	h.pveFor = f
@@ -113,6 +122,9 @@ type ProjectCloudOps struct {
 
 // SetProjectCloudOps wires the live project-cloud legs (cmd/api only).
 func (h *Handler) SetProjectCloudOps(ops *ProjectCloudOps) { h.projectCloud = ops }
+
+// SetKeycloak wires the login management behind admin user create and delete.
+func (h *Handler) SetKeycloak(k *sso.KCAdmin) { h.keycloak = k }
 
 // SetInviteToProject wires inviteToProject for the admin user-create
 // projectIds loop (invites are best-effort there — each is caught and logged). nil → skipped.
@@ -522,6 +534,11 @@ func (h *Handler) require(w http.ResponseWriter, r *http.Request, key string) bo
 		return false
 	}
 	return true
+}
+
+// Require is the permission gate for handlers mounted outside this package.
+func (h *Handler) Require(w http.ResponseWriter, r *http.Request, key string) bool {
+	return h.require(w, r, key)
 }
 
 // AdminProfileDto is the admin-profile response (null email/names omitted).

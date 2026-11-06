@@ -85,6 +85,8 @@ const (
 	tagFlavorPref  = "fl-"
 	tagImagePref   = "img-"
 	tagProfilePref = "sp-" // storage profile slug (Phase 5 billing attr)
+	// tagSpreadPref carries a spread group: PVE's own affinity rules are HA-only and strict.
+	tagSpreadPref  = "grp-"
 	tagCreatedPref = "pc-c-"
 )
 
@@ -99,6 +101,23 @@ func TagValue(tags, pref string) string {
 		}
 	}
 	return ""
+}
+
+// SpreadTag is the VM tag of a spread group.
+func SpreadTag(group string) string { return tagSpreadPref + group }
+
+// SpreadGroupSlug normalizes a spread group name into a tag-safe slug ("" = not usable).
+func SpreadGroupSlug(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	if s == "" || len(s) > 40 {
+		return ""
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return ""
+		}
+	}
+	return s
 }
 
 func FlavorTag(slug string) string  { return tagFlavorPref + slug }
@@ -178,6 +197,7 @@ func ServerData(r ClusterResource, addresses map[string]any, gpuSpecs map[string
 		extraSpecs = map[string]any{}
 	}
 	server := map[string]any{
+		"spreadGroup":      TagValue(r.Tags, tagSpreadPref),
 		"name":             r.Name,
 		"host":             r.Node,
 		"status":           MapVMStatus(r.Status, r.Lock),

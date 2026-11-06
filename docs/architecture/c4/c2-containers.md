@@ -69,7 +69,7 @@ router in `internal/server/server.go`).
 | `/actuator/health*`, `/__build` | 8081 | none; not routed by the chart's gateway or ingress | Liveness, readiness, build info | Implemented |
 | `POST /debug/<job>` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (when the scheduler is enabled) | Implemented |
 | Billing service callbacks | 8081 | shared token | Suspend/resume and mail callbacks from an external billing service | Implemented |
-| SSO discovery and per-org SSO routes | 8080 | public / OIDC | Email-first login and SSO self-service | Planned |
+| SSO discovery and per-org SSO routes (`/api/v1/auth/sso/discover`, `/api/v1/organizations/{id}/sso`, `/api/v1/admin/sso`) | 8080 | public / OIDC | Email-first login, SSO self-service, operator stop | Implemented |
 
 ## C2b. Proxmox cluster and storage tiers
 
@@ -86,7 +86,7 @@ flowchart TB
     fw["proxmox-firewall (nftables)<br/>datacenter, vnet and VM rules"]:::impl
     sto["Storage profiles<br/>per-node storage ids"]:::impl
     pci["PCI mappings (GPU)"]:::impl
-    ha["HA rules and replication"]:::planned
+    ha["HA rules and replication"]:::impl
   end
 
   subgraph tenantzone["Tenant pools, one per project"]
@@ -103,7 +103,7 @@ flowchart TB
   subgraph tiers["Storage backends"]
     ceph["Full tier: Ceph<br/>RBD, CephFS, RGW"]:::impl
     zfs["Standard tier: local ZFS"]:::impl
-    nas["Standard tier: TrueNAS<br/>NFS, SMB, iSCSI"]:::planned
+    nas["Standard tier: TrueNAS<br/>NFS, SMB, iSCSI"]:::impl
   end
 
   pbs["Proxmox Backup Server"]:::planned
@@ -117,21 +117,21 @@ flowchart TB
   pci --> vm
   sto --> ceph
   sto --> zfs
-  sto -.-> nas
-  ha -.-> vm
-  svc -.-> nas
+  sto --> nas
+  ha --> vm
+  svc --> nas
   papi -.-> pbs
 ```
 
 | Element | What ProxCloud does with it | Status |
 |---|---|---|
 | Project pool (`<poolPrefix><projectId>`, default prefix `pc-`) | Created at project bootstrap; every tenant VM and template lives in it; sync and teardown are scoped to it. | Implemented |
-| Tenant VMs | Full clones of an admin template or a project template; flavor, cloud-init, tags; firewall on before first boot. | Implemented |
-| SDN zones and vnets | One vnet per tenant network, ownership alias `st:<projectId>:<name>`. Isolation mode `shared` (one zone, per-vnet DROP rules) or `evpn-per-project` (one EVPN zone per project). | Implemented |
-| proxmox-firewall | Vnet isolation rules, per-VM anti-spoof (ipfilter, macfilter), security groups as cluster firewall groups. Test connection refuses a cluster with the datacenter firewall off or a node on the legacy iptables firewall. | Implemented |
+| Tenant VMs | Full clones of an admin template or a project template; flavor, cloud-init, tags; firewall on before first boot. User-data, vendor-data and instance metadata arrive by a platform NoCloud seed: a per-VM token URL on the API on a vnet with DHCP, a `cidata` CD otherwise. | Implemented |
+| SDN zones and vnets | One vnet per tenant network, ownership alias `st:<projectId>:<name>`. Isolation mode `shared` (one zone) or `evpn-per-project` (one EVPN zone per project); the cluster firewall rule set separates tenants in both. | Implemented |
+| proxmox-firewall | Cluster isolation rules (reconciled every sync), per-VM anti-spoof (ipfilter, macfilter), security groups as cluster firewall groups. Test connection refuses a cluster with the datacenter firewall off or a node on the legacy iptables firewall. | Implemented |
 | Public networks | Admin-designated bridges with an IPv4 pool; a public NIC (`net1`) gets one address, pinned by ipfilter. The management bridge is refused. | Implemented |
 | PCI mappings | GPU flavors reserve concrete mappings on the scheduled node. | Implemented |
-| HA rules and replication | Protected VMs with replication and node-affinity rules. | Planned |
+| HA rules and replication | Protected VMs with replication and node-affinity rules. | Implemented |
 | Platform-owned VMs | Management cluster VMs and the RustFS VM in a dedicated system pool, the platform token has `NoAccess` there. | Implemented |
 | Services cluster VMs | The services cluster, in the same system pool. | Planned |
 | Proxmox Backup Server | Operator nightly backups, then tenant backup schedules and restore. | Planned |
@@ -144,13 +144,14 @@ flowchart TB
 | Full | Ceph RGW | Tenant buckets: per-project RGW user, keys, quotas, bucket settings | Implemented |
 | Standard | Local ZFS (`zfspool`) | VM disks, pinned to the node holding the storage | Implemented |
 | Standard | TrueNAS NFS as a capacity-class profile ("Capacity HDD (NFS)") | Bulk data volumes only: no boot disks, databases or snapshots (API-enforced) | Implemented |
-| Standard | TrueNAS SMB / iSCSI, NAS-created stores | Templates, backups, tenant file shares, RWX volumes | Planned |
+| Standard | TrueNAS NFS and SMB tenant file shares, NAS-created stores for templates and backups | `SHARE` product through the WebSocket API; datasets `nas-templates`, `nas-backup` | Implemented |
+| Standard | TrueNAS iSCSI, RWX volumes | Shared block and Kubernetes RWX | Planned |
 | Standard | RustFS | Internal bucket store on sites without Ceph, deployed by the installer | Implemented |
-| Standard | RustFS tenant buckets | Bucket product on sites without Ceph | Planned |
+| Standard | RustFS tenant buckets | Bucket product on sites without Ceph | Implemented |
 | Both | Admin-declared profile flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`), validated on save against detection | Shown to tenants as volume-type specs | Implemented |
 | Both | Per-storage capability detection (type table: tier, default class, flags; per-node active/avail) + admin class override | Provider Storage tab; profile validation; scheduler node restriction and free-space filter; template placement | Implemented |
 | Both | Profile `tier` / `class` (derived from its storages) and `bootDisk` / `dbaas` caps, API-gated | Capacity class refuses boot disks (create, retype), server snapshots with an attached capacity disk, and database storage classes named after it; volume billing attributes `profile` and `storage_class` | Implemented |
-| Both | HA / replication gating per profile | Protected add-on | Planned |
+| Both | HA / replication gating per profile | Protected add-on | Implemented |
 
 A storage profile is a slug mapped to a storage id per node (or `*`) plus
 capability flags that may only be a subset of what the detected storage supports.
@@ -214,17 +215,17 @@ flowchart LR
 | Scheduler and jobs | robfig/cron with a PostgreSQL distributed lock (`internal/platform/scheduler`, `lock`); disabled unless `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | Inside the API pod | Implemented |
 | PostgreSQL | JSONB document store via `internal/pgdoc`; CloudNativePG cluster (default), bundled subchart, or external | Management cluster | Implemented |
 | RabbitMQ | AMQP (`internal/amqp`), optional per-profile charge fan-out; RabbitMQ Cluster Operator (default), bundled subchart, or external | Management cluster | Implemented |
-| Keycloak | codecentric keycloakx subchart + keycloak-config-cli realm import, or an external issuer | Management cluster | Implemented |
+| Keycloak | codecentric keycloakx subchart + keycloak-config-cli realm import, or an external issuer. The API manages per-org identity providers through the Admin API with the `proxcloud-idp-admin` service account | Management cluster | Implemented |
 | Gateway / Ingress | Gateway API `HTTPRoute` or `Ingress` per host (`deploy/charts/proxcloud/templates/gateway`, `api`, `web`) | Management cluster | Implemented |
 | ArgoCD | Reconciles the platform (installer `Application` objects with inline values); receives `Application` objects for managed K8s and DBaaS | Management cluster (deployed by the installer, not the chart) | Implemented |
 | Cluster API + CAPMOX, MetalLB | Services cluster and tenant K8s workers on Proxmox, load-balancer IPs | Management and services clusters | Planned |
 | Services cluster | Kamaji, DB operators, proxmox-csi, csi-driver-nfs | VMs in a system pool | Planned |
 | Proxmox VE hosts | pveproxy, SDN, proxmox-firewall (nftables), storage, PCI mappings | Proxmox cluster | Implemented |
 | Tenant VMs | QEMU full clones in the project pool | Proxmox cluster | Implemented |
-| HA rules and replication | `ha-manager` rules, `pvesr` | Proxmox cluster | Planned |
+| HA rules and replication | `ha-manager` rules, `pvesr` | Proxmox cluster | Implemented |
 | Ceph (Full tier) | RBD/CephFS for disks, RGW for buckets | Ceph cluster | Implemented |
-| TrueNAS (Standard tier) | NFS, SMB, iSCSI, WebSocket API | Appliance outside the Proxmox cluster | Planned |
-| RustFS (Standard tier) | S3 + admin API, deployed by the installer with internal buckets; tenant buckets on it are Planned | VM in the system pool, or TrueNAS app | Implemented |
+| TrueNAS (Standard tier) | NFS, SMB, iSCSI, WebSocket API | Appliance outside the Proxmox cluster | Implemented |
+| RustFS (Standard tier) | S3 + admin API, deployed by the installer with internal buckets; also serves tenant buckets (provider `rustfs`, registered by the installer) | VM in the system pool, or TrueNAS app | Implemented |
 | Proxmox Backup Server | vzdump target | Separate machine | Planned |
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
@@ -241,8 +242,8 @@ flowchart LR
 | Automation to admin API | AWS SigV4 with `hmac_keys`, or the admin-api realm | Implemented |
 | Management port `:8081` | On the cluster Service only, never on the gateway or ingress. Billing callbacks are mounted only when a shared token is configured | Implemented |
 | API to Proxmox | Privilege-separated API token with the `ProxCloudPlatform` role; test connection warns on missing privileges and on `root@pam` | Implemented |
-| Tenant to tenant on the SDN | Vnet isolation rules (forward DROP into the CIDR pool), non-overlapping CIDRs, optional per-project EVPN zone | Implemented |
+| Tenant to tenant on the SDN | Cluster firewall rules (forward and input DROP inside the CIDR pool, per-project ACCEPT), reconciled every sync; non-overlapping CIDRs; optional per-project EVPN zone | Implemented |
 | Tenant VM to the network | VM firewall `policy_in DROP`, ipfilter/macfilter anti-spoof, security groups | Implemented |
-| Public NIC to management network | Public networks on the management bridge are refused at test connection and at attach | Implemented |
+| Public NIC to management network | Public networks on the management bridge are refused at test connection and at attach. What the uplink itself routes is filtered at the operator's edge | Implemented |
 | Identity matching by email | Only IdP-verified emails resolve to a user for add-member and invites | Implemented |
-| Tenant IdP to customer realm | Keycloak brokering, domain verification, enforced SSO | Planned |
+| Tenant IdP to customer realm | Keycloak brokering; a guard on every API request holds the IdP to its verified domains and its own accounts; enforced SSO | Implemented |

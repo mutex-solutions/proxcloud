@@ -29,8 +29,15 @@ type SuspensionLimit = { balance?: number; days?: number }
 type BillingConfig = {
   id?: string
   name?: string
-  address?: { country?: string; city?: string; address?: string } & Record<string, unknown>
-  company?: { vatId?: string; businessName?: string } & Record<string, unknown>
+  address?: { country?: string; city?: string; address?: string; zipCode?: string } & Record<string, unknown>
+  company?: {
+    vatId?: string
+    businessName?: string
+    uen?: string
+    gstRegistrationNumber?: string
+    gstRegistered?: boolean
+    financeEmail?: string // operator mailbox notified when a customer submits a bank transfer
+  } & Record<string, unknown>
   baseCurrency?: string
   mailGatewayId?: string
   invoiceGatewayId?: string
@@ -80,9 +87,14 @@ type Form = {
   name: string
   businessName: string
   vatId: string
+  uen: string
+  gstRegistrationNumber: string
+  gstRegistered: boolean // true → bills render as TAX INVOICE with GST lines
+  financeEmail: string
   country: string // alpha-2 code, "" = unset
   city: string
   street: string
+  zipCode: string
   baseCurrency: string
   mailGatewayId: string
   invoiceGatewayId: string
@@ -120,9 +132,14 @@ function formFromDoc(cfg: BillingConfig): Form {
     name: cfg.name ?? "",
     businessName: cfg.company?.businessName ?? "",
     vatId: cfg.company?.vatId ?? "",
+    uen: cfg.company?.uen ?? "",
+    gstRegistrationNumber: cfg.company?.gstRegistrationNumber ?? "",
+    gstRegistered: cfg.company?.gstRegistered === true,
+    financeEmail: cfg.company?.financeEmail ?? "",
     country: cfg.address?.country ?? "",
     city: cfg.address?.city ?? "",
     street: cfg.address?.address ?? "",
+    zipCode: cfg.address?.zipCode ?? "",
     baseCurrency: cfg.baseCurrency ?? "",
     mailGatewayId: cfg.mailGatewayId ?? "",
     invoiceGatewayId: cfg.invoiceGatewayId ?? "",
@@ -192,16 +209,26 @@ function buildBody(cfg: BillingConfig, form: Form, initial: Form): Record<string
   delete address.country
   delete address.city
   delete address.address
+  delete address.zipCode
   if (form.country) address.country = form.country
   if (form.city.trim()) address.city = form.city.trim()
   if (form.street.trim()) address.address = form.street.trim()
+  if (form.zipCode.trim()) address.zipCode = form.zipCode.trim()
   body.address = Object.keys(address).length ? address : undefined
 
   const company: Record<string, unknown> = { ...(cfg.company ?? {}) }
   delete company.businessName
   delete company.vatId
+  delete company.uen
+  delete company.gstRegistrationNumber
+  delete company.gstRegistered
+  delete company.financeEmail
   if (form.businessName.trim()) company.businessName = form.businessName.trim()
   if (form.vatId.trim()) company.vatId = form.vatId.trim()
+  if (form.uen.trim()) company.uen = form.uen.trim()
+  if (form.gstRegistrationNumber.trim()) company.gstRegistrationNumber = form.gstRegistrationNumber.trim()
+  if (form.gstRegistered) company.gstRegistered = true
+  if (form.financeEmail.trim()) company.financeEmail = form.financeEmail.trim()
   body.company = Object.keys(company).length ? company : undefined
 
   // settings.timeUnitLimits — merge into whatever else lives under settings.
@@ -457,6 +484,25 @@ export default function BillingConfigurationPage() {
                   <Field label="VAT id" id="bc-vat">
                     <Input id="bc-vat" value={form.vatId} onChange={(e) => set({ vatId: e.target.value })} />
                   </Field>
+                  <Field label="UEN" id="bc-uen">
+                    <Input id="bc-uen" value={form.uen} onChange={(e) => set({ uen: e.target.value })} />
+                  </Field>
+                  <Field label="GST registration no." id="bc-gst-no">
+                    <Input
+                      id="bc-gst-no"
+                      value={form.gstRegistrationNumber}
+                      onChange={(e) => set({ gstRegistrationNumber: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Finance notification e-mail" id="bc-finance-email">
+                    <Input
+                      id="bc-finance-email"
+                      type="email"
+                      placeholder="finance@example.com"
+                      value={form.financeEmail}
+                      onChange={(e) => set({ financeEmail: e.target.value })}
+                    />
+                  </Field>
                   <Field label="Country" id="bc-country">
                     <Select value={form.country || NONE} onValueChange={(v) => set({ country: v === NONE ? "" : v })}>
                       <SelectTrigger id="bc-country">
@@ -478,6 +524,16 @@ export default function BillingConfigurationPage() {
                   <Field label="Address" id="bc-street">
                     <Input id="bc-street" value={form.street} onChange={(e) => set({ street: e.target.value })} />
                   </Field>
+                  <Field label="Postal code" id="bc-zip">
+                    <Input id="bc-zip" value={form.zipCode} onChange={(e) => set({ zipCode: e.target.value })} />
+                  </Field>
+                </div>
+
+                <div className="flex items-center gap-2 rounded-lg border p-4">
+                  <Switch id="bc-gst" checked={form.gstRegistered} onCheckedChange={(v) => set({ gstRegistered: v })} />
+                  <Label htmlFor="bc-gst" className="text-sm font-normal">
+                    GST registered (issued bills render as a tax invoice with GST lines)
+                  </Label>
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-2">

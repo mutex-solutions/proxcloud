@@ -252,7 +252,7 @@ export default function BucketsPage() {
                   <SelectContent>
                     {locations.map((l) => (
                       <SelectItem key={locKeyOf(l)} value={locKeyOf(l)}>
-                        S3 (Ceph){l.serviceName ? ` — ${l.serviceName}` : ""} ({l.region})
+                        S3{l.serviceName ? ` — ${l.serviceName}` : ""} ({l.region})
                       </SelectItem>
                     ))}
                   </SelectContent>

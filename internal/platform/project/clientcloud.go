@@ -64,9 +64,8 @@ func (h *Handler) initUI(w http.ResponseWriter, r *http.Request) {
 // cloudFeatures lists the optional client actions a provider's backend serves, keyed into
 // /init features by service id. The client hides an action whose flag is absent, so a flag
 // is added here only once the backend accepts the action. Vocabulary (web/client
-// lib/hooks.ts CloudFeature): serverSnapshots and volumeRetype are served by Proxmox;
-// serverRebuild, serverRescue, serverPassword, userData, createDataVolumes, ports, subnets
-// and volumeSnapshots have no backend yet.
+// lib/hooks.ts CloudFeature): Proxmox serves those appended below; serverRescue,
+// createDataVolumes, ports and volumeSnapshots have no backend yet.
 func cloudFeatures(es *externalservice.ExternalService) []string {
 	out := []string{}
 	if !es.IsProxmox() {
@@ -74,6 +73,13 @@ func cloudFeatures(es *externalservice.ExternalService) []string {
 	}
 	// IMAGE create from a server (pveCreateImage).
 	out = append(out, "serverSnapshots")
+	// NoCloud seed (nocloud_pve.go), guest-agent password, boot-disk swap.
+	out = append(out, "userData", "serverPassword", "serverRebuild")
+	// PVE snapshots, several subnets on a vnet, placement groups.
+	out = append(out, "serverDiskSnapshots", "subnets", "spreadGroups")
+	if len(es.PVENetworkConfig().PublicNetworks) > 0 {
+		out = append(out, "publicIp")
+	}
 	// RETYPE moves a disk to another storage profile, so it needs a second one.
 	if len(es.PVEStorageProfiles()) > 1 {
 		out = append(out, "volumeRetype")
@@ -103,7 +109,7 @@ func (h *Handler) uiMenuItems(r *http.Request) map[string]any {
 		// AND dbaas (database only) all contribute menu items — a ceph-only project must still
 		// get its Object Storage entry, and the kamaji/dbaas slugs are what un-hide the client
 		// Kubernetes/Databases nav (AppShell gates on menu.items).
-		if es.IsDisabled() || (!es.IsCephS3() && !es.IsKamaji() && !es.IsDbaas() && !es.IsProxmox()) {
+		if es.IsDisabled() || (!es.IsObjectStore() && !es.IsKamaji() && !es.IsDbaas() && !es.IsProxmox() && !es.IsTrueNAS()) {
 			continue
 		}
 		svcMap, _ := es.Config["services"].(map[string]any)
@@ -248,7 +254,8 @@ func (h *Handler) projectCostInfo(w http.ResponseWriter, r *http.Request) {
 	if bpID != "" {
 		if bills, err := h.billing.BillsByBillingProfile(r.Context(), bpID); err == nil {
 			// resource-id → createdAt (this project's cache) so each topResourcePrices entry carries
-			// the resource's real creation time; without it the FE renders "a few seconds ago".
+			// the resource's real creation time. Absent = the resource is gone: the console shows
+			// it as deleted and does not link to it.
 			created := map[string]*time.Time{}
 			if rs, e := h.cloud.FindAllByProjectID(r.Context(), p.ID); e == nil {
 				for i := range rs {
@@ -300,7 +307,7 @@ func (h *Handler) projectLocations(w http.ResponseWriter, r *http.Request) {
 		// A ceph-s3 provider is configured with a single config.region (its RGW zonegroup) rather than the
 		// regions map. Without this the Location picker is empty and the create-bucket form can
 		// never send the x-service-id / x-region-id the write path needs.
-		if len(regions) == 0 && es.IsCephS3() {
+		if len(regions) == 0 && (es.IsObjectStore() || es.IsTrueNAS()) {
 			if r := es.CephRegion(); r != "" {
 				regions = map[string]any{r: map[string]any{}}
 			}

@@ -183,6 +183,7 @@ function ProxmoxConfigCard({ id, provider }: TabProps) {
     { key: "storageProfiles", label: "Storage profiles", hint: '{"std":{"label":"Local NVMe (ZFS)","storages":{"*":"local-zfs"},"snapshots":true,"thin":true,"replication":true},"capacity":{"label":"Capacity HDD (NFS)","storages":{"*":"nas-capacity"},"shared":true,"liveMigrate":true}}' },
     { key: "templates", label: "OS templates (optional: tagged templates are discovered; vmid + node pins one, the rest overlays)", hint: '{"ubuntu-24.04":{"name":"Ubuntu 24.04","minDiskGb":10}}' },
     { key: "gpus", label: "GPU mappings", hint: '{"<pci-mapping-id>":{"alias":"nvidia-4090"}}' },
+    { key: "metadata", label: "Server seeds (user-data delivery)", hint: '{"url":"https://api.example.com","isoStorage":"nas-templates","forceIso":false,"vendorData":"#cloud-config\\n..."}' },
   ]
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
     const out: Record<string, string> = {}
@@ -411,23 +412,45 @@ function ConnectionTab({ id, provider }: TabProps) {
   }
   // ceph-s3: show the S3/Admin Ops config. There is no backend test endpoint for RGW (the
   // connection is exercised by bootstrap/sync), so no Test button.
-  if (provider.config?.provider === "ceph-s3") {
+  if (provider.config?.provider === "ceph-s3" || provider.config?.provider === "rustfs") {
     const c = asObj(provider.config)
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-eyebrow">Ceph RGW (S3) connection</CardTitle>
+          <CardTitle className="text-eyebrow">{provider.config?.provider === "rustfs" ? "RustFS (S3) connection" : "Ceph RGW (S3) connection"}</CardTitle>
         </CardHeader>
         <CardContent>
           <Row label="S3 endpoint" value={str(c.s3Endpoint)} />
-          <Row label="Admin Ops URL" value={str(c.adminApiUrl)} />
+          <Row label="Admin URL" value={str(c.adminApiUrl)} />
           <Row label="Website endpoint" value={str(c.s3WebsiteEndpoint)} />
           <Row label="Region (zonegroup)" value={str(c.region)} />
           <Row label="RGW uid prefix" value={str(c.uidPrefix)} />
           <Row label="Default quota (GiB)" value={c.defaultQuotaGiB != null ? String(c.defaultQuotaGiB) : ""} />
           <p className="mt-4 text-sm text-muted-foreground">
-            Projects are provisioned as dedicated RGW users on entry (or via the project's "attach external
+            Projects are provisioned as dedicated object-store users on entry (or via the project's "attach external
             service" action). The admin keys are stored encrypted and never returned by the API.
+          </p>
+        </CardContent>
+      </Card>
+    )
+  }
+  if (provider.config?.provider === "truenas") {
+    const c = asObj(provider.config)
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-eyebrow">TrueNAS connection</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Row label="URL" value={str(c.apiUrl)} />
+          <Row label="API key owner" value={str(c.username)} />
+          <Row label="Parent dataset" value={str(c.parentDataset)} />
+          <Row label="Mount address" value={str(c.mountHost)} />
+          <Row label="Region" value={str(c.region)} />
+          <Row label="Quota per project (GiB)" value={c.defaultQuotaGiB != null ? String(c.defaultQuotaGiB) : ""} />
+          <p className="mt-4 text-sm text-muted-foreground">
+            The connection is exercised by the first share and by sync. The API key is stored encrypted and never
+            returned by the API.
           </p>
         </CardContent>
       </Card>

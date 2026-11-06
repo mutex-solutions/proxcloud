@@ -16,5 +16,7 @@ func Catalog() []*billingapi.BillingResourceType {
 		kubernetesClusterType(),
 		databaseClusterType(),
 		bucketType(),
+		shareType(),
+		serverProtectionType(),
 	}
 }

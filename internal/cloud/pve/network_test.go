@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"reflect"
@@ -140,14 +141,16 @@ func TestZoneIDFor(t *testing.T) {
 
 func TestIsolationRules(t *testing.T) {
 	const pool, comment = "10.100.0.0/16", isolationComment
-	if got, want := isolationRules(pool, nil), []FirewallRule{
+	if got, want := isolationRules(pool, nil, comment), []FirewallRule{
 		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("no blocked: got %+v", got)
 	}
-	got := isolationRules(pool, []string{"192.0.2.0/24", "198.51.100.0/24"})
+	got := isolationRules(pool, []string{"192.0.2.0/24", "198.51.100.0/24"}, comment)
 	want := []FirewallRule{
 		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
 		{Type: "forward", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Comment: comment},
 		{Type: "in", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Comment: comment},
 	}
@@ -160,6 +163,11 @@ func TestIsolationRules(t *testing.T) {
 // behaving like PVE's (a new rule lands on top, positions renumber); the management
 // network comes from the node's bridge.
 func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRule, *int) {
+	return isolationFakeNodes(t, rules, nil)
+}
+
+// isolationFakeNodes adds cluster members and overrides routes.
+func isolationFakeNodes(t *testing.T, rules []FirewallRule, extra map[string]func(http.ResponseWriter, *http.Request), members ...string) (*Service, *[]FirewallRule, *int) {
 	writes := 0
 	renumber := func() {
 		for i := range rules {
@@ -169,7 +177,7 @@ func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRul
 	renumber()
 	routes := map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/cluster/status": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":[{"type":"node","name":"pve1","ip":"192.0.2.11"}]}`)
+			fmt.Fprint(w, `{"data":[`+strings.Join(append([]string{`{"type":"node","name":"pve1","ip":"192.0.2.11"}`}, members...), ",")+`]}`)
 		},
 		"GET /api2/json/nodes/pve1/network": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[{"iface":"vmbr0","address":"192.0.2.11","gateway":"192.0.2.1","cidr":"192.0.2.11/24"},
@@ -210,13 +218,14 @@ func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRul
 			fmt.Fprint(w, `{"data":null}`)
 		}
 	}
+	maps.Copy(routes, extra)
 	_, c := fakePVE(t, routes)
 	return &Service{C: c, ServiceID: "svc", PoolPrefix: "pc-"}, &rules, &writes
 }
 
 func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
 	ops := FirewallRule{Type: "in", Action: "ACCEPT", Dest: "10.9.9.9", Comment: "ops"}
-	other := projectIsolationRule("p2", []string{"10.100.5.0/24"})
+	other := projectIsolationRules("p2", []string{"10.100.5.0/24"})[0]
 	srv, rules, _ := isolationFake(t, []FirewallRule{ops, other})
 	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", []string{"198.51.100.0/24"}); err != nil {
 		t.Fatal(err)
@@ -228,9 +237,11 @@ func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
 	}
 	own := "10.100.0.0/24,10.100.1.0/24"
 	want := []string{
+		"in ACCEPT " + own + " " + own + " proxcloud:isolation:p1",
 		"forward ACCEPT " + own + " " + own + " proxcloud:isolation:p1",
 		"forward ACCEPT 10.100.5.0/24 10.100.5.0/24 proxcloud:isolation:p2",
 		"forward DROP 10.100.0.0/16 10.100.0.0/16 proxcloud:isolation",
+		"in DROP 10.100.0.0/16 10.100.0.0/16 proxcloud:isolation",
 		"forward DROP 10.100.0.0/16 " + blocked + " proxcloud:isolation",
 		"in DROP 10.100.0.0/16 " + blocked + " proxcloud:isolation",
 		"in ACCEPT  10.9.9.9 ops",
@@ -242,14 +253,106 @@ func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
 
 func TestReconcileIsolationIdempotent(t *testing.T) {
 	own := "10.100.0.0/24,10.100.1.0/24"
-	current := append([]FirewallRule{projectIsolationRule("p1", strings.Split(own, ","))},
-		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"})...)
+	current := append(projectIsolationRules("p1", strings.Split(own, ",")),
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"}, isolationComment)...)
 	srv, _, writes := isolationFake(t, current)
 	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
 		t.Fatal(err)
 	}
 	if *writes != 0 {
 		t.Fatalf("%d writes on an up-to-date rule set", *writes)
+	}
+}
+
+// One portal: a changed pool replaces its own DROPs and leaves no stale ones behind.
+func TestReconcileIsolationReplacesOwnRules(t *testing.T) {
+	own := "10.100.0.0/24,10.100.1.0/24"
+	current := append(projectIsolationRules("p1", strings.Split(own, ",")),
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24", "198.51.100.0/24"}, isolationComment)...)
+	srv, rules, _ := isolationFake(t, current)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+		t.Fatal(err)
+	}
+	var drops []string
+	for _, r := range *rules {
+		if r.Action == "DROP" {
+			drops = append(drops, r.Type+" "+r.Dest)
+		}
+	}
+	want := []string{"forward 10.100.0.0/16", "in 10.100.0.0/16", "forward 192.0.2.0/24", "in 192.0.2.0/24"}
+	if !reflect.DeepEqual(drops, want) {
+		t.Fatalf("drops = %v, want %v", drops, want)
+	}
+	if (*rules)[0].Action != "ACCEPT" || (*rules)[1].Action != "ACCEPT" {
+		t.Fatalf("ACCEPTs fell below the DROPs: %+v", *rules)
+	}
+}
+
+// Two portals: neither may remove the other's DROPs, whatever their pools.
+func TestReconcileIsolationLeavesOtherPortals(t *testing.T) {
+	theirs := isolationRules("10.200.0.0/16", []string{"192.0.2.0/24"}, isolationComment+"/other-")
+	theirAccept := projectIsolationRules("p9", []string{"10.200.7.0/24"})[0]
+	srv, rules, _ := isolationFake(t, append([]FirewallRule{theirAccept}, theirs...))
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range append(theirs, theirAccept) {
+		if !slices.ContainsFunc(*rules, func(g FirewallRule) bool { return sameRule(g, r) }) {
+			t.Fatalf("rule of another portal is gone: %+v", r)
+		}
+	}
+	if (*rules)[len(*rules)-1].Comment != isolationComment+"/other-" {
+		t.Fatalf("rules of the other portal were moved: %+v", *rules)
+	}
+	srv.PoolPrefix = "pcx-"
+	if got := srv.isolationOwner(); got != isolationComment+"/pcx-" {
+		t.Fatalf("owner = %q", got)
+	}
+}
+
+// A dead node must not block a network change, and what only it knew must not lose its DROP.
+func TestReconcileIsolationWithNodeDown(t *testing.T) {
+	nodeDown := func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "595 No route to host", 595)
+	}
+	stale := isolationRules("10.100.0.0/16", []string{"192.0.2.0/24", "198.51.100.0/24"}, isolationComment)
+	srv, rules, _ := isolationFakeNodes(t, stale, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/nodes/pve2/network": nodeDown,
+	}, `{"type":"node","name":"pve2","ip":"192.0.2.12"}`)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range stale {
+		if !slices.ContainsFunc(*rules, func(g FirewallRule) bool { return sameRule(g, r) }) {
+			t.Fatalf("DROP went while a node was down: %+v", r)
+		}
+	}
+	if (*rules)[0].Comment != isolationComment+":p1" {
+		t.Fatalf("the project's ACCEPTs must still be set: %+v", *rules)
+	}
+
+	// No DROPs at all: a partial list beats none.
+	srv, rules, _ = isolationFakeNodes(t, nil, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/nodes/pve2/network": nodeDown,
+	}, `{"type":"node","name":"pve2","ip":"192.0.2.12"}`)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(*rules, func(g FirewallRule) bool { return g.Action == "DROP" && g.Dest == "192.0.2.0/24" }) {
+		t.Fatalf("no DROP for the networks the live nodes know: %+v", *rules)
+	}
+}
+
+// A rule list that shifts between the read and the delete must not cost another rule.
+func TestDeleteClusterRuleByIdentity(t *testing.T) {
+	ops := FirewallRule{Type: "in", Action: "ACCEPT", Dest: "10.9.9.9", Comment: "ops"}
+	stale := projectIsolationRules("p1", []string{"10.100.1.0/24"})
+	srv, rules, _ := isolationFake(t, append([]FirewallRule{ops}, stale...))
+	if err := srv.setProjectIsolation(context.Background(), "p1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*rules) != 1 || (*rules)[0].Comment != "ops" {
+		t.Fatalf("rules = %+v", *rules)
 	}
 }
 

@@ -25,8 +25,8 @@ flowchart LR
   rbac["rbac matcher"]:::impl
   adminapi["adminapi<br/>SigV4 public admin API"]:::impl
   mcp["mcp toolsets"]:::impl
-  sso["Per-org SSO<br/>discover, JIT, enforce"]:::planned
-  kcadm["Keycloak Admin API client"]:::planned
+  sso["Per-org SSO<br/>discover, JIT, enforce, guard"]:::impl
+  kcadm["Keycloak Admin API client"]:::impl
 
   req --> enforce
   oidc --> enforce
@@ -40,9 +40,9 @@ flowchart LR
   org -->|"verified email only"| users
   inv -->|"verified email only"| users
   org --> rbac
-  acct -.-> sso
-  sso -.-> kcadm
-  sso -.-> org
+  acct --> sso
+  sso --> kcadm
+  sso --> org
 ```
 
 | Component | Path | Responsibility | Status |
@@ -59,7 +59,10 @@ flowchart LR
 | Public admin API | `internal/platform/adminapi/` | `/admin-api/v1`: users, organizations, billing profiles, projects, bills, credits, service providers. | Implemented |
 | MCP server | `internal/platform/mcp/` (`mcp.go`, `tools_client.go`, `tools_admin*.go`) | Client and admin toolsets, dispatched in-process through the app router. | Implemented |
 | Audit | `internal/platform/audit/`, `pkg/audit/` | Audit events, field-level diffs, cursor paging. | Implemented |
-| Per-org SSO | not yet in the tree | Org IdP and domain models, Keycloak Admin API client, email-first discovery, JIT membership, enforcement middleware. | Planned |
+| Per-org SSO | `internal/platform/sso/` (`service.go`, `guard.go`, `kcadmin.go`, `fetch.go`, `repo.go`, `handler.go`) | Org IdP and domain documents, Keycloak Admin API client, DNS TXT verification, email-first discovery, JIT membership. `Guard` runs from `pkg/auth.Enforce` on every request: domain gate, account binding, enforcement, break-glass. | Implemented |
+
+The Keycloak Admin API client also backs the operator console's Create user and Delete user
+(`internal/platform/admin/user.go`): same service account, which already holds `manage-users`.
 
 ## C3b. Cloud / IaaS on Proxmox
 
@@ -78,16 +81,19 @@ flowchart TB
   fwsvc["pve firewallsvc + firewall<br/>security groups, anti-spoof"]:::impl
   sch["pve.PickNode scheduler"]:::impl
   cli["pve.Client REST"]:::impl
+  seed["server seeds<br/>pve seed, seediso, project nocloud_pve"]:::impl
   sync["syncjob + pve sync providers"]:::impl
   recon["providers.Reconcile"]:::impl
   repo["cloud.Repo<br/>resource cache"]:::impl
   lock["SDN apply lock"]:::impl
   cap["capability detection<br/>pve capability.go"]:::impl
-  ha["replication + HA"]:::planned
-  truenas["TrueNAS client"]:::planned
+  ha["replication + HA"]:::impl
+  truenas["TrueNAS client"]:::impl
 
   ph --> quota
   ph --> pip
+  ph --> seed
+  seed --> cli
   ph --> es
   ph --> svc
   ph --> net
@@ -106,13 +112,13 @@ flowchart TB
   cap --> cli
   sync --> cap
   es --> cap
-  ha -.-> cli
-  ph -.-> truenas
+  ha --> cli
+  ph --> truenas
 ```
 
 | Component | Path | Responsibility | Status |
 |---|---|---|---|
-| PVE client | `internal/cloud/pve/client.go`, `cluster.go`, `qemu.go`, `storage.go`, `sdn.go`, `firewall.go`, `pool.go`, `access.go`, `task.go`, `mapping.go`, `form.go` | Typed REST client: cluster resources, VMs, storage, SDN, cluster/VM firewall, pools, privilege checks, tasks, PCI mappings. Includes the preflight reads `DatacenterFirewallEnabled`, `NodesWithoutNFTables`, `ManagementBridges`. | Implemented |
+| PVE client (fails over across `apiUrls`, pins the cluster CA) | `internal/cloud/pve/client.go`, `cluster.go`, `qemu.go`, `storage.go`, `sdn.go`, `firewall.go`, `pool.go`, `access.go`, `task.go`, `mapping.go`, `form.go` | Typed REST client: cluster resources, VMs, storage, SDN, cluster/VM firewall, pools, privilege checks, tasks, PCI mappings. Includes the preflight reads `DatacenterFirewallEnabled`, `NodesWithoutNFTables`, `ManagementBridges`. | Implemented |
 | PVE service | `internal/cloud/pve/service.go`, `write.go`, `volume.go`, `gpu.go`, `console.go` | Project-scoped IaaS: pools, create/delete/resize/power/rename servers, project templates, volumes (add, extend, detach, attach with cross-node gating and attach targets, retype, delete detached), GPU inventory and slot picking, VNC/serial console. | Implemented |
 | Networks and isolation | `internal/cloud/pve/network.go` (`CreateNetwork`, `ReconcileIsolation`, `EnsureProjectZone`, `ZoneIDFor`, `TeardownProjectNetworks`), `sdn.go` | Tenant vnets and subnets, ownership alias, cluster firewall isolation rules, per-project EVPN zones, staged SDN changes and apply. | Implemented |
 | Firewall service | `internal/cloud/pve/firewallsvc.go` (`SecureVM`, `SetIPFilter`, `EnsureDefaultSecurityGroup`, `ServerSecurityGroups`, `DeleteProjectSecurityGroups`) | Security groups as cluster firewall groups, the project default group, VM firewall options, per-NIC ipfilter sets. | Implemented |
@@ -133,10 +139,12 @@ flowchart TB
 | GPU | `internal/cloud/gpu.go`, `gpu_usage.go`, `internal/platform/project/gpucapacity.go` | GPU alias normalization, usage by project, capacity view. | Implemented |
 | Template discovery | `internal/cloud/pve/templates.go` (`DiscoverTemplates`), `externalservice/proxmox.go` (`PVEImageCatalog`), `project/cloud_writes_pve.go` (`pveImageCatalog`, per-node copy in `pveCreateServer`) | Catalog read from the cluster: templates in pool `pc-templates` tagged `pc-public`, grouped by `pc-img-<slug>`, newest `pc-v-*` per node. `config.templates` pins or overlays. | Implemented |
 | Capability detection | `internal/cloud/pve/capability.go` (`DetectStorage`, `classify`, `StorageHasRoom`, `TemplateShared`), `externalservice/proxmox.go` (`ValidatePVEStorageProfiles`, `DetectPVECapabilities`, `PVEEffectiveStorageClass`), `syncjob/job.go` (`detectProxmoxCapabilities`), `admin/pveadmin.go` (`proxmoxDetectStorage`, `proxmoxStorageClasses`, `validatePVEStorageProfiles`) | Per storage from `GET /storage` + `/cluster/resources type=storage`: type, shared, content, snapshots, thin, live migrate, replication, tier and a default class from a static type table, plus per-node active/avail. Persisted under `config.capabilities` every sync cycle and on admin Re-detect. Storage-profile saves are rejected when a storage is missing, inactive, lacks `images`, or the profile claims a flag the storage lacks. Admin class override (`config.storageClasses.<id>.class`) wins; the installer's `suggestedClass` is display-only. Feeds placement (active nodes, free space, template and clone-target locality), same-node attach gating and the capacity-class gates (boot disk, snapshots, DBaaS). HA readiness is still Planned. | Implemented |
-| Replication and HA | not yet in the tree | `pvesr` jobs and HA node-affinity rules for protected VMs. | Planned |
+| Replication and HA | `internal/cloud/pve/protect.go`, `internal/platform/project/cloud_protect_pve.go` | `pvesr` jobs and strict HA node-affinity rules for protected VMs, gating, RPO state, memory reservation. | Implemented |
 | Metering reads | `internal/cloud/pve/syncprovider.go` (`SampledServerProvider`, `SampledImageProvider`, `Superseded`), `task.go` (`NodeTasks`), `qemu.go` (`VMStatus.NICs`), `gpu.go` (`GPUSpecsFromConfig`), `service.go` (`CreatedTag`) | The Proxmox side of metering: rows built from one `/cluster/resources` page, the VM identity stamp `pc-c-<unix>`, node task logs, per-tap counters, GPU count from `hostpciN mapping=`. See C3c. | Implemented |
-| TrueNAS client | not yet in the tree | Shares, datasets and quotas through the TrueNAS WebSocket API. | Planned |
-| VM metadata datasource | not yet in the tree | Per-VM cloud-init datasource served by the API. | Planned |
+| Server seeds | `internal/cloud/pve/seed.go` (`RenderSeed`, `RenderNetworkConfig`, `AttachSeedISO`, `SetSeedURL`), `seediso.go` (`BuildSeedISO`), `internal/platform/project/nocloud_pve.go` (`pveSeedStep`, `pveWriteSeed`, `nocloudFile`, `SeedRepo`) | NoCloud seed of a server with user-data, vendor-data or metadata: a token URL served by `GET /api/v1/nocloud/{token}/{file}`, or a `cidata` CD where the vnet has no DHCP. | Implemented |
+| Server snapshots | `internal/cloud/pve/snapshot.go`, `internal/platform/project/snapshot_pve.go` | VM snapshots, refused on storage without them, newest-only rollback on ZFS. | Implemented |
+| Holder VMs | `internal/cloud/pve/holder.go` | Volumes without a server: one never-started VM per (project, node), hidden from the server sync, billing, quota and the scheduler. | Implemented |
+| TrueNAS client | `internal/cloud/truenas/`, `internal/platform/project/cloud_shares.go` | JSON-RPC over WebSocket; NFS and SMB shares as dataset + refquota + export, limited to the project's addresses. | Implemented |
 
 ## C3c. Metering and billing
 
@@ -157,12 +165,13 @@ flowchart LR
   br["billingresource providers"]:::impl
   price["pricing engine"]:::impl
   bill["billing<br/>bills, suspension, reminders"]:::impl
-  pay["payment<br/>Stripe"]:::impl
+  pay["payment<br/>Stripe, Airwallex, bank transfer"]:::impl
   susp["suspend and resume<br/>Proxmox VMs"]:::impl
   state["pveStateSync 60s<br/>+ staleness alert"]:::impl
   tasks["pveTaskPoll 20s"]:::impl
   pvem["metrics.PVEFetcher<br/>public NIC counters"]:::impl
-  airwallex["Airwallex gateway"]:::planned
+  factory["gateway factory<br/>per integration"]:::impl
+  inv["invoice, credit note,<br/>contacts"]:::impl
 
   cron --> sync
   cron --> mj
@@ -187,7 +196,8 @@ flowchart LR
   price --> bill
   bill --> pay
   bill --> susp
-  pay -.-> airwallex
+  pay --> factory
+  bill --> inv
 ```
 
 | Component | Path | Responsibility | Status |
@@ -204,11 +214,12 @@ flowchart LR
 | Charge fan-out | `internal/platform/chargefanout/chargefanout.go` | One RabbitMQ message per profile, off by default. | Implemented |
 | Billing client and callbacks | `internal/platform/billingclient/`, `internal/platform/billingcallback/`, `pkg/billingapi/` | Wire contract and callbacks for an external billing service. | Implemented |
 | Pricing | `internal/platform/pricing/` (`engine.go`, `charge.go`, `planselect.go`, `bill_build.go`, `adjustments.go`, `tax.go`, `fx.go`, `settle.go`) | Rating engine, bill items, savings and price adjustments, tax, currency, settlement. | Implemented |
-| Billing | `internal/platform/billing/` (`balance.go`, `sendbill.go`, `suspension_job.go`, `activationservice.go`, `reminder.go`, `savings.go`, `billpdf.go`) | Billing profiles, balance, bill finalization, PDF, dunning and suspension, reminders, savings contracts. | Implemented |
+| Billing | `internal/platform/billing/` (`balance.go`, `sendbill.go`, `suspension_job.go`, `activationservice.go`, `reminder.go`, `savings.go`, `billpdf.go`, `paybill.go`) | Billing profiles, balance, bill finalization, PDF, dunning and suspension, reminders, savings contracts. PREPAID or POSTPAID payment mode per profile; an operator can record an offline payment on a SENT bill (`PayService.RecordManualPayment`, `POST /admin/bill/{id}/record-payment`, MCP `record_bill_payment`). | Implemented |
+| Invoice, credit note, contacts | `internal/platform/billing/` (`invoice.go`, `creditnote.go`, `contacts.go`) | Sequential invoice number `INV-<year>-<seq>` stamped once when a bill leaves OPEN (counter row per year), tax invoice and credit note PDFs with the operator as issuer, validated invoice recipients (max 10) that every billing mail also goes to. Bill and refund mails carry the PDF. | Implemented |
 | Proxmox suspend/resume | `cmd/api/main.go` (`billingCloudSuspender`) | Suspends and resumes a suspended profile's Proxmox VMs. | Implemented |
-| Payment | `internal/platform/payment/` (`stripe.go`, `addfunds.go`, `collect.go`, `registercard.go`, `scanner.go`) | Stripe deposits, cards, collect, transaction scanner; bank transfer settlement. | Implemented |
-| Protected VM billing | not yet in the tree | Billing unit for replicated, HA-protected VMs. | Planned |
-| Airwallex gateway | not yet in the tree | Second payment gateway. | Planned |
+| Payment | `internal/platform/payment/` (`stripe.go`, `airwallex.go`, `factory.go`, `addfunds.go`, `collect.go`, `registercard.go`, `scanner.go`, `banktransfer.go`) | Card deposits, cards, collect, refunds and the transaction scanner over one `Gateway` interface. Gateway secrets are read from the integration doc (decrypted on load). Confirm callbacks re-read the intent from the gateway and settle through an atomic PENDING to PROCESSING claim, so a repeated or concurrent callback credits once. Bank transfer: the customer submits date, bank reference and proof (2 MiB cap), finance is mailed, an operator approves or rejects. | Implemented |
+| Gateway factory | `internal/platform/payment/factory.go` (`NewGateway`) | Picks the gateway for an integration: Stripe by `secret.privateKey`; Airwallex by `config.clientId`, `secret.apiKey` and `config.sandbox` (demo host), one cached instance per credential so the login token is shared. BankTransfer is not a card gateway. | Implemented |
+| Protected VM billing | `internal/cloud/billingresource/server.go` (`protectionBR`) | `server_protection` per replicated GB, from the first sync until disabled. | Implemented |
 
 ## C3d. Platform services
 
@@ -273,13 +284,13 @@ flowchart LR
   kam["kamaji<br/>values, sync"]:::impl
   dba["dbaas<br/>values, sync, autoscale"]:::impl
   k8s["kamajik8s<br/>K8s API client"]:::impl
-  obj["client objectstore<br/>Ceph RGW backend"]:::impl
+  obj["client objectstore<br/>objectBackend"]:::impl
   ccred["cephcred"]:::impl
   argo["ArgoCD on the management cluster"]:::impl
   rgw["Ceph RGW"]:::impl
   pvek8s["Managed K8s create on Proxmox"]:::planned
   pvedb["DBaaS create on Proxmox"]:::planned
-  rustfs["RustFS backend"]:::planned
+  rustfs["RustFS"]:::impl
 
   ph --> kam
   ph --> dba
@@ -291,7 +302,7 @@ flowchart LR
   obj --> rgw
   kam -.-> pvek8s
   dba -.-> pvedb
-  obj -.-> rustfs
+  obj --> rustfs
 ```
 
 | Component | Path | Responsibility | Status |
@@ -300,7 +311,7 @@ flowchart LR
 | Managed K8s create on Proxmox | `internal/platform/project/cloud_kamaji_create.go` (stub) | Credential mint, IP range carving and worker placement on Proxmox. Create currently fails with an explicit error. | Planned |
 | DBaaS | `internal/cloud/dbaas/`, `internal/platform/project/cloud_dbaas.go`, `deploy/charts/database-cluster` | Database cluster values, sync, autoscale, read and delete. Create refuses a storage class named after a Proxmox storage profile closed to databases (capacity class). | Implemented |
 | DBaaS create on Proxmox | `internal/platform/project/cloud_dbaas_create.go` (stub) | Database endpoints on a routed services subnet through MetalLB. Create currently fails with an explicit error. | Planned |
-| Object store client | `internal/cloud/client/client.go`, `objectstore.go`, `objectstore_ceph.go`, `objectstore_ceph_policy.go`, `objectstore_ceph_settings.go` | Bucket and object operations, policies, settings on Ceph RGW. | Implemented |
+| Object store client | `internal/cloud/client/client.go`, `objectstore.go`, `objectstore_ceph.go`, `objectstore_ceph_policy.go`, `objectstore_ceph_settings.go` | `objectBackend` + `Caps()`: bucket and object operations, policies, settings. `cephBackend` talks to RGW. | Implemented |
 | Ceph credentials | `internal/cloud/cephcred/` | Per-project RGW user and S3 keys, secret encrypted at rest. | Implemented |
 | Bucket settings | `internal/platform/project/cloud_bucket_settings.go` | Bucket actions (versioning, object lock, quota, lifecycle, CORS, tags, policy, per-key grants) and project S3 keys. | Implemented |
-| RustFS backend | not yet in the tree | Second object-store backend behind the same bucket surface. | Planned |
+| RustFS backend | `internal/cloud/client/objectstore_rustfs.go` | Second `objectBackend`: reuses the S3 data plane; ownership in the project policy, project quota in the API, keep-last-value usage, website gated off. | Implemented |

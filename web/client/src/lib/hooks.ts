@@ -5,6 +5,7 @@ import type {
   BillingSummary, CloudResource, CostInfo, GpuCapacityUsage, Location, Project, ProjectQuotaUsage,
   ProjectService,
 } from "./types"
+import { isObjectProvider } from "./types"
 
 export function useProjects() {
   return useQuery({
@@ -37,11 +38,11 @@ export function useLocations(pid: string) {
 export function useCloudScope(pid: string): CloudScope | undefined {
   const { data } = useLocations(pid)
   // Generic compute/network/storage pages need a compute (Proxmox) scope. A project can
-  // also attach Ceph S3 (buckets only), Kamaji (managed Kubernetes control planes) or
+  // also attach an object store (buckets only), Kamaji (managed Kubernetes control planes) or
   // DBaaS (managed databases), and any may appear first — skip them all, mirroring the
   // backend's resolveServiceID.
   const loc =
-    data?.find((candidate) => candidate.provider !== "ceph-s3" && candidate.provider !== "kamaji" && candidate.provider !== "dbaas") ?? data?.[0]
+    data?.find((candidate) => !isObjectProvider(candidate.provider) && candidate.provider !== "kamaji" && candidate.provider !== "dbaas") ?? data?.[0]
   if (!loc?.serviceId || !loc?.region) return undefined
   return { serviceId: loc.serviceId, region: loc.region }
 }
@@ -202,6 +203,9 @@ export type CloudFeature =
   | "serverEvents"
   | "consoleLog"
   | "volumeSnapshots"
+  | "serverDiskSnapshots"
+  | "spreadGroups"
+  | "publicIp"
 
 export function useUIMenu(pid: string) {
   return useQuery({

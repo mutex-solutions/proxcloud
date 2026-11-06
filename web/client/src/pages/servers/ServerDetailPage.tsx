@@ -12,7 +12,7 @@ import { Link, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import {
-  Camera, HardDrive, MoreVertical, Play, Plus, RotateCw, Square, Trash2, X,
+  Camera, Globe, HardDrive, History, MoreVertical, Play, Plus, RotateCw, Square, Trash2, X,
 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { StatusBadge } from "@/components/status-badge"
@@ -39,10 +39,11 @@ import { apiFetch, type CloudScope } from "@/lib/api"
 import { fmtDateTime, timeAgo } from "@/lib/format"
 import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
-import { ServerDeleteWarning, serverFlavor, serverIPs, serverName, serverStatus } from "./ServersPage"
+import { ServerProtection } from "./ServerProtection"
+import { ServerDeleteVolumes, serverFlavor, serverIPs, serverName, serverStatus } from "./ServersPage"
 
 const ACTION_LABELS: Record<string, string> = {
-  START: "Start", STOP: "Stop", SOFTREBOOT: "Reboot", RESIZE: "Resize", RENAME: "Rename",
+  START: "Start", STOP: "Stop", SOFTREBOOT: "Reboot", RESIZE: "Resize", RENAME: "Rename", REBUILD: "Rebuild",
 }
 
 type PendingAction = { action: string; title: string; label: string; destructive?: boolean } | null
@@ -84,6 +85,7 @@ export function ServerDetailPage() {
   const [resizeFlavor, setResizeFlavor] = useState("")
   const [rebuildImage, setRebuildImage] = useState("")
   const [passwordVal, setPasswordVal] = useState("")
+  const [passwordUser, setPasswordUser] = useState("")
   // Hide the confirm/revert-resize panel as soon as one is clicked, so a second click can't
   // fire a confirm at an already-confirmed server (which the API rejects with 409). The cached status can lag
   // the real state for a while (notification/sync delay), so relying on it alone leaves the
@@ -109,6 +111,8 @@ export function ServerDetailPage() {
       if (p.action === "RESCUE" && typeof d?.result === "string" && d.result) {
         // RESCUE returns the generated admin password (cloud_writes.go RESCUE case).
         toast.success(`Rescue started — admin password: ${d.result}`, { duration: 30000 })
+      } else if (p.action === "SET_PASSWORD") {
+        toast.success(`Password set for user ${(d?.result as { username?: string } | undefined)?.username ?? "(default)"}`)
       } else {
         toast.success(`${ACTION_LABELS[p.action] ?? "Action"} requested`)
       }
@@ -123,8 +127,10 @@ export function ServerDetailPage() {
   const openConsole = () =>
     window.open(`/p/${pid}/servers/${resourceId}/console`, "_blank", "noopener")
 
+  const [deleteVolumes, setDeleteVolumes] = useState(false)
   const del = useMutation({
-    mutationFn: () => apiFetch(`/project/${pid}/cloud/${resourceId}`, { method: "DELETE", cloud: scope }),
+    mutationFn: () =>
+      apiFetch(`/project/${pid}/cloud/${resourceId}${deleteVolumes ? "?deleteVolumes=true" : ""}`, { method: "DELETE", cloud: scope }),
     onSuccess: () => {
       toast.success("Server deletion requested")
       void qc.invalidateQueries({ queryKey: ["cloud", pid, "SERVER"] })
@@ -334,8 +340,10 @@ export function ServerDetailPage() {
             <TabsTrigger value="network">Network</TabsTrigger>
             <TabsTrigger value="security">Security</TabsTrigger>
             <TabsTrigger value="volumes">Volumes</TabsTrigger>
+            <TabsTrigger value="protection">Protection</TabsTrigger>
             {features.has("serverEvents") && <TabsTrigger value="events">Events</TabsTrigger>}
-            {features.has("serverSnapshots") && <TabsTrigger value="snapshots">Snapshots</TabsTrigger>}
+            {features.has("serverDiskSnapshots") && <TabsTrigger value="disk-snapshots">Snapshots</TabsTrigger>}
+            {features.has("serverSnapshots") && <TabsTrigger value="snapshots">Images</TabsTrigger>}
             {features.has("consoleLog") && <TabsTrigger value="logs">Console log</TabsTrigger>}
           </TabsList>
         </div>
@@ -351,6 +359,7 @@ export function ServerDetailPage() {
                 <Row k="Flavor" v={serverFlavor(server)} />
                 <Row k="IP addresses" v={<span className="font-mono">{serverIPs(server).join(", ") || "—"}</span>} />
                 <Row k="Created" v={fmtDateTime((s.created as string) ?? server.info?.createdAt ?? server.createdAt)} />
+                {features.has("spreadGroups") && s.spreadGroup ? <Row k="Spread group" v={String(s.spreadGroup)} /> : null}
               </dl>
             </CardContent>
           </Card>
@@ -360,12 +369,21 @@ export function ServerDetailPage() {
           {features.has("ports") ? (
             <NetworkTab pid={pid} resourceId={resourceId} ext={ext} scope={scope} />
           ) : (
-            <AddressesTab server={server} />
+            <div className="grid gap-4">
+              <AddressesTab server={server} />
+              {features.has("publicIp") && (
+                <PublicIpCard pid={pid} resourceId={resourceId} server={server} scope={scope} />
+              )}
+            </div>
           )}
         </TabsContent>
 
         <TabsContent value="security" className="mt-4">
           <SecurityTab pid={pid} resourceId={resourceId} scope={scope} />
+        </TabsContent>
+
+        <TabsContent value="protection" className="mt-4">
+          <ServerProtection pid={pid} resourceId={resourceId} />
         </TabsContent>
 
         <TabsContent value="volumes" className="mt-4">
@@ -375,6 +393,12 @@ export function ServerDetailPage() {
         <TabsContent value="events" className="mt-4">
           <EventsTab pid={pid} resourceId={resourceId} scope={scope} />
         </TabsContent>
+
+        {features.has("serverDiskSnapshots") && (
+          <TabsContent value="disk-snapshots" className="mt-4">
+            <DiskSnapshotsTab pid={pid} resourceId={resourceId} scope={scope} />
+          </TabsContent>
+        )}
 
         {features.has("serverSnapshots") && (
           <TabsContent value="snapshots" className="mt-4">
@@ -532,10 +556,19 @@ export function ServerDetailPage() {
       <Dialog open={dialog === "password"} onOpenChange={(o) => !o && closeForm()}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Set admin password</DialogTitle>
-            <DialogDescription>Set a new administrator password for this server.</DialogDescription>
+            <DialogTitle>Set password</DialogTitle>
+            <DialogDescription>
+              The guest agent sets it in the running server. Without a username it is the image's default user.
+            </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
+            <Label htmlFor="password-user">Username (optional)</Label>
+            <Input
+              id="password-user"
+              value={passwordUser}
+              onChange={(e) => setPasswordUser(e.target.value)}
+              autoComplete="off"
+            />
             <Label htmlFor="password-input">New password</Label>
             <Input
               id="password-input"
@@ -551,8 +584,12 @@ export function ServerDetailPage() {
             <Button
               disabled={!passwordVal}
               onClick={() => {
-                act.mutate({ action: "SET_PASSWORD", data: { password: passwordVal } })
+                act.mutate({
+                  action: "SET_PASSWORD",
+                  data: { password: passwordVal, ...(passwordUser.trim() ? { username: passwordUser.trim() } : {}) },
+                })
                 setPasswordVal("")
+                setPasswordUser("")
                 closeForm()
               }}
             >
@@ -571,7 +608,7 @@ export function ServerDetailPage() {
               Are you sure you want to delete "{name}"? This cannot be undone.
             </DialogDescription>
           </DialogHeader>
-          <ServerDeleteWarning />
+          <ServerDeleteVolumes checked={deleteVolumes} onChange={setDeleteVolumes} />
           <DialogFooter>
             <Button variant="outline" onClick={closeForm}>
               Cancel
@@ -1008,8 +1045,226 @@ function EventsTab({ pid, resourceId, scope }: { pid: string; resourceId: string
   )
 }
 
-// ── Snapshots tab: IMAGE list scoped by dataAssociatedTo=<server externalId> (listImages) + create
-// snapshot = POST /cloud {type:IMAGE, data:{name, serverId:<cache id>, imageType:snapshot}}. ──
+// ── Public IP: a second NIC on an operator-designated public network with one address from its pool.
+// It reaches the guest at the next boot (rebootRequired). ──
+function PublicIpCard({
+  pid, resourceId, server, scope,
+}: { pid: string; resourceId: string; server: CloudResource; scope?: CloudScope }) {
+  const qc = useQueryClient()
+  const networks = useQuery({
+    queryKey: ["public-networks", pid, scope?.serviceId],
+    queryFn: () => apiFetch<Array<{ id: string; name?: string }>>(`/project/${pid}/public-networks`, { cloud: scope }),
+    enabled: !!pid && !!scope,
+  })
+  const [networkId, setNetworkId] = useState("")
+  const [reboot, setReboot] = useState(false)
+  const addrs = (server.data?.server?.addresses ?? {}) as Record<string, Array<{ addr?: string }>>
+  const publicIps = (addrs.public ?? []).map((a) => a.addr).filter(Boolean) as string[]
+  const change = useMutation({
+    mutationFn: (p: { action: string; networkId?: string }) =>
+      actionFetch(pid, resourceId, scope, p.action, p.networkId ? { networkId: p.networkId } : {}),
+    onSuccess: (_d, p) => {
+      toast.success(p.action === "ATTACH_PUBLIC_NETWORK" ? "Public IP attached" : "Public IP detached")
+      setReboot(true)
+      void qc.invalidateQueries({ queryKey: ["cloud-resource", pid, resourceId] })
+      void qc.invalidateQueries({ queryKey: ["cloud", pid, "FLOATING_IP"] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  const rows = networks.data ?? []
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Globe className="size-4" /> Public IP
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-3 text-sm">
+        {publicIps.length ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="font-mono">{publicIps.join(", ")}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={change.isPending}
+              onClick={() => change.mutate({ action: "DETACH_PUBLIC_NETWORK" })}
+            >
+              <X className="size-4" /> Detach
+            </Button>
+          </div>
+        ) : networks.isLoading ? (
+          <Skeleton className="h-9 w-72" />
+        ) : !rows.length ? (
+          <p className="text-muted-foreground">No public network is available to this project.</p>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <Select value={networkId} onValueChange={setNetworkId}>
+              <SelectTrigger className="w-72" aria-label="Public network">
+                <SelectValue placeholder="Select a public network" />
+              </SelectTrigger>
+              <SelectContent>
+                {rows.map((n) => (
+                  <SelectItem key={n.id} value={n.id}>
+                    {n.name ?? n.id}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              size="sm"
+              disabled={!networkId || change.isPending}
+              onClick={() => change.mutate({ action: "ATTACH_PUBLIC_NETWORK", networkId })}
+            >
+              <Plus className="size-4" /> Attach public IP
+            </Button>
+          </div>
+        )}
+        {reboot && (
+          <p className="text-muted-foreground">
+            Reboot the server for the guest to pick up the change. The public NIC takes the default route.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ── Snapshots tab: the VM's disk snapshots. ZFS rolls back to the newest one only; a disk on storage
+// without snapshots refuses (409 with the reason). ──
+type DiskSnapshot = { name: string; description?: string; createdAt?: number; latest?: boolean }
+
+function DiskSnapshotsTab({ pid, resourceId, scope }: { pid: string; resourceId: string; scope?: CloudScope }) {
+  const qc = useQueryClient()
+  const key = ["server-action", pid, resourceId, "LIST_SNAPSHOTS"]
+  const snaps = useQuery({
+    queryKey: key,
+    queryFn: () => actionFetch<DiskSnapshot[]>(pid, resourceId, scope, "LIST_SNAPSHOTS"),
+    enabled: !!pid && !!resourceId && !!scope,
+    select: (d) => d?.result ?? [],
+  })
+  const [open, setOpen] = useState(false)
+  const [snapName, setSnapName] = useState("")
+  const [pending, setPending] = useState<{ action: string; name: string } | null>(null)
+  const run = useMutation({
+    mutationFn: (p: { action: string; name: string }) => actionFetch(pid, resourceId, scope, p.action, { name: p.name }),
+    onSuccess: (_d, p) => {
+      toast.success(
+        p.action === "CREATE_SNAPSHOT" ? `Snapshot ${p.name} created`
+          : p.action === "ROLLBACK_SNAPSHOT" ? `Rolled back to ${p.name}` : `Snapshot ${p.name} deleted`,
+      )
+      setOpen(false)
+      setSnapName("")
+      setPending(null)
+      void qc.invalidateQueries({ queryKey: key })
+      void qc.invalidateQueries({ queryKey: ["cloud-resource", pid, resourceId] })
+    },
+    onError: (e: Error) => {
+      setPending(null)
+      toast.error(e.message)
+    },
+  })
+  const rows = snaps.data ?? []
+  return (
+    <div className="grid gap-4">
+      <div>
+        <Button size="sm" onClick={() => setOpen(true)}>
+          <Camera className="size-4" /> Create snapshot
+        </Button>
+      </div>
+      {snaps.isLoading ? (
+        <Skeleton className="h-40" />
+      ) : !rows.length ? (
+        <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+          No snapshots of this server yet.
+        </p>
+      ) : (
+        <Card className="overflow-hidden py-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Created</TableHead>
+                <TableHead className="w-48" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((sn) => (
+                <TableRow key={sn.name}>
+                  <TableCell className="font-medium">
+                    {sn.name}
+                    {sn.latest ? <span className="ml-2 text-xs text-muted-foreground">newest</span> : null}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {sn.createdAt ? timeAgo(new Date(sn.createdAt * 1000).toISOString()) : "—"}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button variant="ghost" size="sm" onClick={() => setPending({ action: "ROLLBACK_SNAPSHOT", name: sn.name })}>
+                      <History className="size-4" /> Roll back
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`Delete snapshot ${sn.name}`}
+                      onClick={() => setPending({ action: "DELETE_SNAPSHOT", name: sn.name })}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create snapshot</DialogTitle>
+            <DialogDescription>Saves the state of this server's disks. It protects against mistakes, not disk or node failure.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="disk-snap-name">Name</Label>
+            <Input id="disk-snap-name" value={snapName} onChange={(e) => setSnapName(e.target.value)} placeholder="before-upgrade" />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!snapName.trim() || run.isPending}
+              onClick={() => run.mutate({ action: "CREATE_SNAPSHOT", name: snapName.trim() })}
+            >
+              {run.isPending ? "Creating…" : "Create snapshot"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={!!pending} onOpenChange={(o) => !o && setPending(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{pending?.action === "ROLLBACK_SNAPSHOT" ? "Roll back server" : "Delete snapshot"}</DialogTitle>
+            <DialogDescription>
+              {pending?.action === "ROLLBACK_SNAPSHOT"
+                ? `The server returns to ${pending?.name}; everything written to its disks since is lost. A running server restarts.`
+                : `Delete snapshot ${pending?.name}?`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPending(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" disabled={run.isPending} onClick={() => pending && run.mutate(pending)}>
+              {run.isPending ? "Working…" : pending?.action === "ROLLBACK_SNAPSHOT" ? "Roll back" : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+// ── Images tab: IMAGE list scoped by dataAssociatedTo=<server externalId> (listImages) + create
+// image = POST /cloud {type:IMAGE, data:{name, serverId:<cache id>, imageType:snapshot}}. ──
 function SnapshotsTab({
   pid, resourceId, ext, scope,
 }: { pid: string; resourceId: string; ext: string; scope?: CloudScope }) {
@@ -1029,7 +1284,7 @@ function SnapshotsTab({
         },
       }),
     onSuccess: () => {
-      toast.success(`Snapshot "${snapName.trim()}" is being created`)
+      toast.success(`Image "${snapName.trim()}" is being created`)
       setOpen(false)
       setSnapName("")
       setTimeout(() => void qc.invalidateQueries({ queryKey: ["cloud", pid, "IMAGE"] }), 1500)
@@ -1046,7 +1301,7 @@ function SnapshotsTab({
     <div className="grid gap-4">
       <div>
         <Button size="sm" onClick={() => setOpen(true)}>
-          <Camera className="size-4" /> Create snapshot
+          <Camera className="size-4" /> Create image
         </Button>
       </div>
 
@@ -1054,7 +1309,7 @@ function SnapshotsTab({
         <Skeleton className="h-40" />
       ) : !rows.length ? (
         <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-          No snapshots of this server yet.
+          No images made from this server yet.
         </p>
       ) : (
         <Card className="overflow-hidden py-0">
@@ -1094,19 +1349,19 @@ function SnapshotsTab({
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Create snapshot</DialogTitle>
+            <DialogTitle>Create image</DialogTitle>
             <DialogDescription>Create a template image from this server's current disk.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
-            <Label htmlFor="snap-name">Snapshot name</Label>
-            <Input id="snap-name" value={snapName} onChange={(e) => setSnapName(e.target.value)} placeholder="my-snapshot" />
+            <Label htmlFor="snap-name">Image name</Label>
+            <Input id="snap-name" value={snapName} onChange={(e) => setSnapName(e.target.value)} placeholder="my-image" />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>
               Cancel
             </Button>
             <Button disabled={!snapName.trim() || create.isPending} onClick={() => create.mutate()}>
-              <Camera className="size-4" /> Create snapshot
+              <Camera className="size-4" /> Create image
             </Button>
           </DialogFooter>
         </DialogContent>

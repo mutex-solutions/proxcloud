@@ -138,6 +138,19 @@ func TestValidatePricePlanRuleTierBubbles(t *testing.T) {
 	}
 }
 
+func TestValidatePricePlanRuleTextAttribute(t *testing.T) {
+	rule := func(attr string) *pricePlanRuleReq {
+		raw := json.RawMessage(`[{"attributeName":"` + attr + `","tiers":[]}]`)
+		return &pricePlanRuleReq{Name: "n", TimeUnit: "hour", ResourceType: "floating_ip", Prices: &raw}
+	}
+	if e := validatePricePlanRule(rule("status")); e == nil {
+		t.Error("a price on a text attribute must fail validation: it would abort the charge")
+	}
+	if e := validatePricePlanRule(rule("existence")); e != nil {
+		t.Errorf("existence is the flat price and must pass: %v", e)
+	}
+}
+
 func TestClonePricePlanItemIncludeRulesDefault(t *testing.T) {
 	// absent includeRules → true (defaultValue=true)
 	var absent clonePricePlanItem

@@ -27,6 +27,7 @@ import {
 import type { FlavorCategory, ImageGrouping } from "@/lib/hooks"
 import { gpuCapacityViolations, gpuFromFlavor, serverQuotaViolations, volumeBatchQuotaViolations } from "@/lib/quota"
 import type { CloudResource, Location } from "@/lib/types"
+import { isObjectProvider } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { isPrivateNetwork } from "../network/NetworksPage"
 
@@ -159,7 +160,7 @@ export default function CreateServerPage() {
     (location) =>
       location.serviceId &&
       location.region &&
-      location.provider !== "ceph-s3" &&
+      !isObjectProvider(location.provider) &&
       (!location.resourceTypes || location.resourceTypes.includes("SERVER")),
   )
   const locOf = (l: Location) => `${l.serviceId}/${l.region}`
@@ -197,16 +198,19 @@ export default function CreateServerPage() {
   const flavorSections = useMemo(() => buildFlavorSections(bootableFlavors, flavorCats.data ?? []), [bootableFlavors, flavorCats.data])
   // The project's own images (made from a server) are cloned by their template id.
   const { data: ownImages } = useCloudList(pid, "IMAGE")
-  const allImages = useMemo<TemplateImage[]>(
-    () => [
-      ...(images.data ?? []),
-      ...(ownImages ?? [])
+  const projectImages = useMemo<TemplateImage[]>(
+    () =>
+      (ownImages ?? [])
         .filter((r) => r.externalId)
         .map((r) => ({ ...(r.data?.image as Record<string, unknown>), id: r.externalId }) as TemplateImage),
-    ],
-    [images.data, ownImages],
+    [ownImages],
   )
-  const imageSections = useMemo(() => buildImageSections(allImages, imageGroups.data), [allImages, imageGroups.data])
+  const allImages = useMemo<TemplateImage[]>(() => [...(images.data ?? []), ...projectImages], [images.data, projectImages])
+  // Curated groups only hold the catalog, so the project's images get a section of their own.
+  const imageSections = useMemo(() => {
+    const catalog = images.data?.length ? buildImageSections(images.data, imageGroups.data) : []
+    return projectImages.length ? [...catalog, { label: "Your images", items: projectImages }] : catalog
+  }, [images.data, imageGroups.data, projectImages])
   const networks = useQuery({
     queryKey: ["cloud", pid, "NETWORK", scope?.serviceId, scope?.region],
     queryFn: () =>
@@ -236,6 +240,10 @@ export default function CreateServerPage() {
   const [rootVolumeType, setRootVolumeType] = useState("")
   const [dataVolumes, setDataVolumes] = useState<DataVolumeDraft[]>([])
   const [netIds, setNetIds] = useState<string[]>([])
+  const [subnet, setSubnet] = useState("")
+  const [spreadGroup, setSpreadGroup] = useState("")
+  const [spreadStrict, setSpreadStrict] = useState(false)
+  const [metadata, setMetadata] = useState<Record<string, string>>({})
   const [keyName, setKeyName] = useState("") // "" = no key pair
   const [loginMethod, setLoginMethod] = useState<"key" | "password">("key")
   const [username, setUsername] = useState("")
@@ -244,6 +252,17 @@ export default function CreateServerPage() {
   const [sgNames, setSgNames] = useState<string[]>([])
   const [name, setName] = useState("")
 
+  // Admin-defined instance metadata options a tenant can fill in (reach the guest through the seed).
+  const metadataOptions = useQuery({
+    queryKey: ["instance-metadata-options", pid, scope?.serviceId, scope?.region],
+    queryFn: () =>
+      apiFetch<Array<{ key: string; displayName?: string; description?: string; userEditable?: boolean; options?: Array<{ value?: string; displayName?: string }> }>>(
+        `/project/${pid}/instance-metadata-options`,
+        { cloud: scope },
+      ),
+    enabled: !!pid && !!scope && features.has("userData"),
+  })
+  const editableMetadata = (metadataOptions.data ?? []).filter((o) => o.userEditable)
   const selectedImage = allImages.find((image) => String(image.id) === imageId)
   const selectedFlavor = bootableFlavors.find((flavor) => flavor.externalId === flavorId)
   const minimumRootSizeGiB = imageMinimumDisk(selectedImage)
@@ -343,7 +362,13 @@ export default function CreateServerPage() {
               sizeGiB: volume.sizeGiB,
               type: volume.type,
             })),
-            networkInterfaces: netIds.map((uuid) => ({ uuid })),
+            networkInterfaces: netIds.map((uuid) => ({ uuid, ...(subnet ? { subnet } : {}) })),
+            ...(features.has("spreadGroups") && spreadGroup.trim()
+              ? { spreadGroup: spreadGroup.trim(), spreadStrict }
+              : {}),
+            ...(Object.values(metadata).some(Boolean)
+              ? { metadata: Object.fromEntries(Object.entries(metadata).filter(([, v]) => v)) }
+              : {}),
             ...(loginMethod === "key" && keyName ? { keyName } : {}),
             ...(loginMethod === "password" && !genUserData && password ? { adminPass: password } : {}),
             ...(finalUserData.trim() ? { userData: finalUserData } : {}),
@@ -449,8 +474,8 @@ export default function CreateServerPage() {
           <Step n={2} title="Image">
             {images.isLoading || imageGroups.isLoading ? (
               <Skeleton className="h-40" />
-            ) : !images.data?.length ? (
-              <p className="text-sm text-muted-foreground">No public images available.</p>
+            ) : !allImages.length ? (
+              <p className="text-sm text-muted-foreground">No images available.</p>
             ) : (
               <div className="grid max-h-96 gap-4 overflow-y-auto pr-1">
                 {imageSections.map((sec) => (
@@ -799,11 +824,28 @@ export default function CreateServerPage() {
                         <Checkbox
                           checked={checked}
                           disabled={!ext}
-                          onCheckedChange={(v) => setNetIds(v === true ? [ext] : [])}
+                          onCheckedChange={(v) => {
+                            setNetIds(v === true ? [ext] : [])
+                            setSubnet("")
+                          }}
                         />
                         <span className="font-medium">{(n.data?.network?.name as string) ?? n.name ?? n.id}</span>
                         <span className="truncate font-mono text-xs text-muted-foreground">{ext}</span>
                       </label>
+                      {checked && ((n.data?.network?.subnets as string[] | undefined)?.length ?? 0) > 1 && (
+                        <Select value={subnet} onValueChange={setSubnet}>
+                          <SelectTrigger className="w-56" aria-label="Subnet">
+                            <SelectValue placeholder="First subnet" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {((n.data?.network?.subnets ?? []) as string[]).map((c) => (
+                              <SelectItem key={c} value={c}>
+                                {c}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      )}
                     </div>
                   )
                 })}
@@ -904,6 +946,66 @@ export default function CreateServerPage() {
                   <p className="text-xs text-muted-foreground">
                     Passed to cloud-init on first boot — e.g. create users, install packages, run scripts.
                   </p>
+                </div>
+              )}
+
+              {features.has("spreadGroups") && (
+                <div className="grid max-w-md gap-2">
+                  <Label htmlFor="spread-group">Spread group (optional)</Label>
+                  <Input
+                    id="spread-group"
+                    value={spreadGroup}
+                    onChange={(e) => setSpreadGroup(e.target.value)}
+                    placeholder="web"
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Servers of one group are placed on different nodes where possible, at create time only.
+                  </p>
+                  <label className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      checked={spreadStrict}
+                      disabled={!spreadGroup.trim()}
+                      onCheckedChange={(v) => setSpreadStrict(v === true)}
+                    />
+                    Refuse to create rather than share a node
+                  </label>
+                </div>
+              )}
+
+              {editableMetadata.length > 0 && (
+                <div className="grid max-w-md gap-2">
+                  <Label>Instance metadata (optional)</Label>
+                  {editableMetadata.map((o) => (
+                    <div key={o.key} className="grid gap-1">
+                      <Label htmlFor={`md-${o.key}`} className="text-xs text-muted-foreground">
+                        {o.displayName ?? o.key}
+                      </Label>
+                      {o.options?.length ? (
+                        <Select
+                          value={metadata[o.key] ?? ""}
+                          onValueChange={(v) => setMetadata((m) => ({ ...m, [o.key]: v }))}
+                        >
+                          <SelectTrigger id={`md-${o.key}`}>
+                            <SelectValue placeholder="Not set" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {o.options.map((v) => (
+                              <SelectItem key={v.value} value={v.value ?? ""}>
+                                {v.displayName ?? v.value}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <Input
+                          id={`md-${o.key}`}
+                          value={metadata[o.key] ?? ""}
+                          onChange={(e) => setMetadata((m) => ({ ...m, [o.key]: e.target.value }))}
+                        />
+                      )}
+                    </div>
+                  ))}
                 </div>
               )}
 

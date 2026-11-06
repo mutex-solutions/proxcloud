@@ -153,6 +153,7 @@ var serviceResourceTypes = map[string][]string{
 	"kubernetes":   {cloud.TypeKubernetesCluster}, // Kamaji managed k8s (the kamaji provider's only slug)
 	"database":     {cloud.TypeDatabaseCluster},   // Managed databases (the dbaas provider's only slug)
 	"object-store": {cloud.TypeBucket},
+	"shares":       {cloud.TypeShare}, // TrueNAS NFS/SMB
 }
 
 // resourceTypes lists the resource types available per location for the project:
@@ -180,7 +181,7 @@ func (h *Handler) resourceTypes(w http.ResponseWriter, r *http.Request) {
 		// A ceph-s3 provider carries a single config.region (its RGW zonegroup) instead of a
 		// regions map. Without this synthetic entry it contributes NO location, and the client's cloud
 		// scope (x-service-id / x-region-id) is never resolved — the whole Object storage page stays empty.
-		if len(regions) == 0 && es.IsCephS3() {
+		if len(regions) == 0 && (es.IsObjectStore() || es.IsTrueNAS()) {
 			if r := es.CephRegion(); r != "" {
 				regions = map[string]any{r: map[string]any{}}
 			}

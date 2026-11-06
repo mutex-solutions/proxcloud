@@ -75,6 +75,67 @@ function providerRegions(p: CloudProvider): string[] {
 }
 
 
+// ── truenas create form ──────────────────────────────────────────────────────
+type TrueNASFormState = {
+  name: string; apiUrl: string; username: string; apiKey: string; fingerprint: string
+  parentDataset: string; mountHost: string; region: string; defaultQuotaGiB: string
+}
+
+const emptyTrueNASForm: TrueNASFormState = {
+  name: "", apiUrl: "", username: "proxcloud", apiKey: "", fingerprint: "",
+  parentDataset: "", mountHost: "", region: "pve", defaultQuotaGiB: "",
+}
+
+const trueNASFormValid = (f: TrueNASFormState) =>
+  [f.name, f.apiUrl, f.username, f.apiKey, f.parentDataset, f.region].every((v) => v.trim() !== "") &&
+  f.apiUrl.trim().startsWith("https://") &&
+  cephQuotaValid(f.defaultQuotaGiB)
+
+// File shares only, so the shares service is enabled directly. The API key goes to the secret and never comes back.
+function trueNASFormToBody(f: TrueNASFormState) {
+  const region = f.region.trim()
+  return {
+    name: f.name.trim(),
+    type: "CLOUD",
+    status: "PUBLIC",
+    config: {
+      provider: "truenas",
+      apiUrl: f.apiUrl.trim().replace(/\/+$/, ""),
+      username: f.username.trim(),
+      parentDataset: f.parentDataset.trim(),
+      region,
+      regions: { [region]: { displayName: region } },
+      ...(f.fingerprint.trim() ? { fingerprint: f.fingerprint.trim() } : {}),
+      ...(f.mountHost.trim() ? { mountHost: f.mountHost.trim() } : {}),
+      ...(f.defaultQuotaGiB.trim() ? { defaultQuotaGiB: Number(f.defaultQuotaGiB) } : {}),
+      services: { shares: { [region]: true } },
+    },
+    secret: { apiKey: f.apiKey.trim() },
+  }
+}
+
+function TrueNASProviderForm({ form, setForm }: { form: TrueNASFormState; setForm: (f: TrueNASFormState) => void }) {
+  const field = (key: keyof TrueNASFormState, label: string, placeholder = "", type = "text") => (
+    <div className="grid gap-2">
+      <Label htmlFor={`tn-${key}`}>{label}</Label>
+      <Input id={`tn-${key}`} type={type} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} placeholder={placeholder} />
+    </div>
+  )
+  return (
+    <div className="grid gap-4">
+      {field("name", "Display name", "TrueNAS")}
+      {field("apiUrl", "URL (HTTPS only)", "https://nas.example.com")}
+      {field("username", "API key owner", "proxcloud")}
+      {field("apiKey", "API key", "", "password")}
+      {field("fingerprint", "Certificate fingerprint (self-signed)", "AA:BB:…")}
+      {field("parentDataset", "Parent dataset", "tank/shares")}
+      {field("mountHost", "Address clients mount from (optional)", "defaults to the URL's host")}
+      {field("region", "Region", "pve")}
+      {field("defaultQuotaGiB", "Quota per project, GiB (optional)")}
+    </div>
+  )
+}
+
 // ── ceph-s3 create form ──────────────────────────────────────────────────────
 type CephFormState = {
   name: string
@@ -111,7 +172,7 @@ const cephFormValid = (f: CephFormState) =>
 // "Provider config"): the S3 + Admin Ops endpoints drive everything, and the
 // secret carries the RGW admin keys (caps users=*;buckets=*;usage=*). object-store is the ONLY
 // service a ceph-s3 provider serves, so it is enabled here directly — no discover round-trip exists.
-function cephFormToBody(f: CephFormState) {
+function cephFormToBody(f: CephFormState, provider: "ceph-s3" | "rustfs" = "ceph-s3") {
   const region = f.region.trim()
   const trimURL = (s: string) => s.trim().replace(/\/+$/, "")
   return {
@@ -119,7 +180,7 @@ function cephFormToBody(f: CephFormState) {
     type: "CLOUD",
     status: "PUBLIC",
     config: {
-      provider: "ceph-s3",
+      provider,
       s3Endpoint: trimURL(f.s3Endpoint),
       adminApiUrl: trimURL(f.adminApiUrl),
       ...(f.s3WebsiteEndpoint.trim() ? { s3WebsiteEndpoint: trimURL(f.s3WebsiteEndpoint) } : {}),
@@ -196,7 +257,8 @@ export default function CloudProvidersPage() {
   const items = data?.data ?? []
 
   const [createOpen, setCreateOpen] = useState(false)
-  const [kind, setKind] = useState<"ceph-s3" | "kamaji" | "dbaas" | "proxmox">("proxmox")
+  const [kind, setKind] = useState<"ceph-s3" | "rustfs" | "truenas" | "kamaji" | "dbaas" | "proxmox">("proxmox")
+  const [trueNASForm, setTrueNASForm] = useState<TrueNASFormState>(emptyTrueNASForm)
   const [cephForm, setCephForm] = useState<CephFormState>(emptyCephForm)
   const [kamajiForm, setKamajiForm] = useState<KamajiFormState>(emptyKamajiForm)
   const [dbaasForm, setDbaasForm] = useState<DbaasFormState>(emptyDbaasForm)
@@ -209,8 +271,10 @@ export default function CloudProvidersPage() {
       apiFetch<CloudProvider>(LIST_PATH, {
         method: "POST",
         body:
-          kind === "ceph-s3"
-            ? cephFormToBody(cephForm)
+          kind === "ceph-s3" || kind === "rustfs"
+            ? cephFormToBody(cephForm, kind)
+            : kind === "truenas"
+              ? trueNASFormToBody(trueNASForm)
             : kind === "kamaji"
               ? kamajiFormToBody(kamajiForm)
               : kind === "dbaas"
@@ -335,6 +399,10 @@ export default function CloudProvidersPage() {
             <DialogDescription>
               {kind === "ceph-s3"
                 ? "Connect a Ceph RGW object store over its S3 and Admin Ops endpoints. Projects get a dedicated RGW user."
+                : kind === "truenas"
+                  ? "Connect a TrueNAS for NFS and SMB file shares, over its WebSocket API. The key's account needs the Sharing Administrator group; Deleting shares also needs DATASET_DELETE, SMB shares ACCOUNT_WRITE."
+                : kind === "rustfs"
+                  ? "Connect a RustFS object store. The admin URL is its private endpoint: the public one must block /rustfs/admin. Projects get a dedicated IAM user; the keys are the RustFS root keys."
                 : kind === "kamaji"
                   ? "Connect a Kamaji management cluster for Managed Kubernetes. Clusters are delivered as ArgoCD Applications of the pinned chart; worker nodes run in each customer's project."
                   : kind === "dbaas"
@@ -342,12 +410,18 @@ export default function CloudProvidersPage() {
                     : "Connect a Proxmox VE cluster with one admin API token. Projects get a dedicated pool; networking, storage profiles and GPU mappings are configured on the provider page after creation."}
             </DialogDescription>
           </DialogHeader>
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             <Button variant={kind === "proxmox" ? "default" : "outline"} onClick={() => setKind("proxmox")}>
               Proxmox VE
             </Button>
             <Button variant={kind === "ceph-s3" ? "default" : "outline"} onClick={() => setKind("ceph-s3")}>
               Ceph S3
+            </Button>
+            <Button variant={kind === "rustfs" ? "default" : "outline"} onClick={() => setKind("rustfs")}>
+              RustFS
+            </Button>
+            <Button variant={kind === "truenas" ? "default" : "outline"} onClick={() => setKind("truenas")}>
+              TrueNAS
             </Button>
             <Button variant={kind === "kamaji" ? "default" : "outline"} onClick={() => setKind("kamaji")}>
               Kubernetes
@@ -356,7 +430,9 @@ export default function CloudProvidersPage() {
               Database (DBaaS)
             </Button>
           </div>
-          {kind === "ceph-s3" ? (
+          {kind === "truenas" ? (
+            <TrueNASProviderForm form={trueNASForm} setForm={setTrueNASForm} />
+          ) : kind === "ceph-s3" || kind === "rustfs" ? (
             <CephProviderForm form={cephForm} setForm={setCephForm} />
           ) : kind === "kamaji" ? (
             <KamajiProviderForm form={kamajiForm} setForm={setKamajiForm} />
@@ -372,7 +448,9 @@ export default function CloudProvidersPage() {
             <Button
               onClick={() => create.mutate()}
               disabled={
-                (kind === "ceph-s3"
+                (kind === "truenas"
+                  ? !trueNASFormValid(trueNASForm)
+                  : kind === "ceph-s3" || kind === "rustfs"
                   ? !cephFormValid(cephForm)
                   : kind === "kamaji"
                     ? !kamajiFormValid(kamajiForm)

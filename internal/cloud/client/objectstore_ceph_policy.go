@@ -273,6 +273,9 @@ func (b *cephBackend) grantStmts(bucket, uid string, p BucketPermission) ([]poli
 		return nil, err
 	}
 	principal := principalUsers(uid)
+	if b.bareUserGrants {
+		principal = principalUserNames(uid)
+	}
 	bucketARN := "arn:aws:s3:::" + bucket
 	return []policyStmt{
 		{
@@ -288,36 +291,30 @@ func (b *cephBackend) grantStmts(bucket, uid string, p BucketPermission) ([]poli
 
 // GrantBucketAccess gives one RGW user (a project S3 key) access to a single bucket, merging into whatever
 // policy already exists. Idempotent: re-granting replaces the previous level for that user.
-func (c *Client) GrantBucketAccess(ctx context.Context, bucket, uid string, p BucketPermission) error {
-	if c.ceph == nil {
-		return ErrBucketFeatureUnsupported
-	}
-	stmts, err := c.ceph.grantStmts(bucket, uid, p)
+func (b *cephBackend) GrantBucketAccess(ctx context.Context, bucket, uid string, p BucketPermission) error {
+	stmts, err := b.grantStmts(bucket, uid, p)
 	if err != nil {
 		return err
 	}
-	doc, err := c.ceph.getPolicyDoc(ctx, bucket)
+	doc, err := b.getPolicyDoc(ctx, bucket)
 	if err != nil {
 		return err
 	}
 	for _, s := range stmts {
 		doc.upsertStmt(s)
 	}
-	return c.ceph.putPolicyDoc(ctx, bucket, doc)
+	return b.putPolicyDoc(ctx, bucket, doc)
 }
 
 // RevokeBucketAccess removes a key's grant from the bucket, leaving every other statement intact.
-func (c *Client) RevokeBucketAccess(ctx context.Context, bucket, uid string) error {
-	if c.ceph == nil {
-		return ErrBucketFeatureUnsupported
-	}
-	doc, err := c.ceph.getPolicyDoc(ctx, bucket)
+func (b *cephBackend) RevokeBucketAccess(ctx context.Context, bucket, uid string) error {
+	doc, err := b.getPolicyDoc(ctx, bucket)
 	if err != nil {
 		return err
 	}
 	doc.removeStmt(grantSid(uid))
 	doc.removeStmt(grantSid(uid) + "-Objects")
-	return c.ceph.putPolicyDoc(ctx, bucket, doc)
+	return b.putPolicyDoc(ctx, bucket, doc)
 }
 
 // BucketGrant is one key's access level on a bucket, as read back from the policy document.
@@ -327,11 +324,8 @@ type BucketGrant struct {
 }
 
 // ListBucketGrants reports the ProxCloud-managed per-key grants on a bucket (foreign statements ignored).
-func (c *Client) ListBucketGrants(ctx context.Context, bucket string) ([]BucketGrant, error) {
-	if c.ceph == nil {
-		return nil, ErrBucketFeatureUnsupported
-	}
-	doc, err := c.ceph.getPolicyDoc(ctx, bucket)
+func (b *cephBackend) ListBucketGrants(ctx context.Context, bucket string) ([]BucketGrant, error) {
+	doc, err := b.getPolicyDoc(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -364,11 +358,8 @@ func permissionFromActions(raw json.RawMessage) BucketPermission {
 }
 
 // GetBucketPolicyJSON returns the bucket's raw policy document ("" when none).
-func (c *Client) GetBucketPolicyJSON(ctx context.Context, bucket string) (string, error) {
-	if c.ceph == nil {
-		return "", ErrBucketFeatureUnsupported
-	}
-	doc, err := c.ceph.getPolicyDoc(ctx, bucket)
+func (b *cephBackend) GetBucketPolicyJSON(ctx context.Context, bucket string) (string, error) {
+	doc, err := b.getPolicyDoc(ctx, bucket)
 	if err != nil {
 		return "", err
 	}
@@ -414,10 +405,7 @@ func parseCustomerPolicyDoc(policyJSON string) (*policyDoc, error) {
 // ProxCloud-managed statements (website public-read, per-key grants) are stripped from the input and then
 // re-applied from the CURRENT live policy, so a hand-edited policy can never silently drop a grant or
 // leave a website publicly readable after it was disabled. Empty input clears the customer statements.
-func (c *Client) SetBucketPolicyJSON(ctx context.Context, bucket, policyJSON string) error {
-	if c.ceph == nil {
-		return ErrBucketFeatureUnsupported
-	}
+func (b *cephBackend) SetBucketPolicyJSON(ctx context.Context, bucket, policyJSON string) error {
 	next := &policyDoc{Version: "2012-10-17"}
 	if strings.TrimSpace(policyJSON) != "" {
 		parsed, err := parseCustomerPolicyDoc(policyJSON)
@@ -435,10 +423,10 @@ func (c *Client) SetBucketPolicyJSON(ctx context.Context, bucket, policyJSON str
 		}
 		next.Statement = kept
 	}
-	live, err := c.ceph.getPolicyDoc(ctx, bucket)
+	live, err := b.getPolicyDoc(ctx, bucket)
 	if err != nil {
 		return err
 	}
 	next.Statement = append(next.Statement, live.ownStmts()...)
-	return c.ceph.putPolicyDoc(ctx, bucket, next)
+	return b.putPolicyDoc(ctx, bucket, next)
 }

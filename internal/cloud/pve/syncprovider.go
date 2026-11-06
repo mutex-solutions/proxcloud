@@ -23,7 +23,8 @@ import (
 const vanishGrace = 2 * time.Minute
 
 // splitVMs splits /cluster/resources qemu rows of one pool into live VMs and templates. A clone on
-// its way to becoming an image is neither: as a server it would bill a phantom hour, disk included.
+// its way to becoming an image, or the donor of a rebuild's disk, is neither: as a server it would
+// bill a phantom hour, disk included.
 func splitVMs(rows []ClusterResource, pool string) (vms, templates []ClusterResource) {
 	for _, r := range rows {
 		if r.Type != "qemu" || r.Pool != pool {
@@ -31,11 +32,27 @@ func splitVMs(rows []ClusterResource, pool string) (vms, templates []ClusterReso
 		}
 		if r.Template == 1 {
 			templates = append(templates, r)
-		} else if !strings.HasPrefix(r.Name, imageBuildPrefix) {
+		} else if !strings.HasPrefix(r.Name, imageBuildPrefix) && !isHolder(r.Tags) {
 			vms = append(vms, r)
 		}
 	}
 	return vms, templates
+}
+
+// diskVMs lists the pool VMs whose disks are VOLUME rows: the live VMs and the holders.
+func (s *Service) diskVMs(ctx context.Context, projectID string) ([]ClusterResource, error) {
+	rows, err := s.C.ClusterResources(ctx, "vm")
+	if err != nil {
+		return nil, err
+	}
+	pool := s.PoolFor(projectID)
+	vms, _ := splitVMs(rows, pool)
+	for _, r := range rows {
+		if r.Type == "qemu" && r.Pool == pool && isHolder(r.Tags) {
+			vms = append(vms, r)
+		}
+	}
+	return vms, nil
 }
 
 // poolVMs lists the project pool's qemu rows off /cluster/resources, split into
@@ -143,6 +160,7 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 				r.Status = "paused"
 			}
 			data = ServerData(r, p.svc.ServerAddresses(ctx, r), GPUSpecsFromConfig(cfg, p.gpuAlias))
+			p.svc.StampProtection(ctx, r, data)
 		}
 		if _, tagged := data[dataIdentity]; !tagged && cfg != nil {
 			if id := metaIdentity(cfg); id != "" {
@@ -177,9 +195,23 @@ func (p *ServerSyncProvider) sampledData(r ClusterResource) map[string]any {
 					specs = m
 				}
 			}
+			if pr, ok := srv["protection"]; ok {
+				data := ServerData(r, addrs, specs)
+				data["server"].(map[string]any)["protection"] = pr
+				return data
+			}
 		}
 	}
 	return ServerData(r, addrs, specs)
+}
+
+// diskGbOf sums a VM's disks: what a replica takes on the target, and what protection bills.
+func diskGbOf(cfg VMConfig) int {
+	n := 0
+	for _, d := range ParseDisks(cfg) {
+		n += d.SizeGiB
+	}
+	return n
 }
 
 // --- VOLUME ---
@@ -219,7 +251,7 @@ func (p *VolumeSyncProvider) Superseded(cached, fresh *cloud.CloudResource) bool
 // standalone volume in the PVE model — a disk belongs to a VM; a detached disk is
 // its VM's unusedN entry (still billed). ExternalID = volid (cluster-unique).
 func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, error) {
-	vms, _, err := p.svc.poolVMs(ctx, p.projectID)
+	vms, err := p.svc.diskVMs(ctx, p.projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +282,9 @@ func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 				attachments = []any{}
 			}
 			name := r.Name + "-" + d.Slot
+			if isHolder(r.Tags) { // no server to name it after
+				name = d.VolID[strings.IndexByte(d.VolID, ':')+1:]
+			}
 			diskProfile, class := "", ""
 			if p.profileOf != nil {
 				diskProfile, class = p.profileOf(r.Node, d.Storage, profile)

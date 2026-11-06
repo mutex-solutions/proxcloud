@@ -28,6 +28,30 @@ jobs:
       - name: Integration tests (testcontainers PostgreSQL)
         run: go test -tags=integration ./test/integration/...
 
+  # tsc and vite build stay green on a bundle that renders a white page, so open the real build.
+  spa-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [client, admin]
+    defaults:
+      run:
+        working-directory: web/${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/${{ matrix.app }}/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      # No --with-deps: the runner image already has the libraries, and apt fetched the fonts at 20 kB/s.
+      - run: npx playwright install --only-shell chromium
+      - run: npm run test:smoke
+
   # Fails on any old-brand string in file contents or file names. The pattern uses
   # character classes so this file never matches itself.
   installer:

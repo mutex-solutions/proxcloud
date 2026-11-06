@@ -62,6 +62,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/pveflavor"
 	"github.com/mutex-solutions/proxcloud/internal/platform/scheduler"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sse"
+	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/internal/server"
 	"github.com/mutex-solutions/proxcloud/pkg/auth"
@@ -180,17 +181,25 @@ func run() error {
 		},
 		mailBusiness, log,
 	)
+	// {{businessName}} in every mail = the operator's legal name from the billing configuration
+	// (admin UI -> Billing configuration -> Business name); the env var stays the fallback.
+	mailSvc.SetBusinessName(func(ctx context.Context) string {
+		iss, _ := billingRepo.IssuerInfo(ctx)
+		return iss.BusinessName
+	})
 	payService := billing.NewPayService(billingRepo, pricingRepo)
-	// add-funds: build a Stripe gateway per integration secret (swappable for tests).
-	stripeGatewayFor := func(secret string) payment.Gateway { return payment.NewStripeGateway(secret) }
-	addFundsSvc := payment.NewAddFundsService(billingRepo, pricingRepo, stripeGatewayFor)
+	// Card gateways (Stripe / Airwallex) are built per integration from its decrypted secret
+	// (payment.NewGateway; a fake in tests).
+	addFundsSvc := payment.NewAddFundsService(billingRepo, pricingRepo, payment.NewGateway)
 	addFundsSvc.SetNotifier(mailSvc)
-	registerCardSvc := payment.NewRegisterCardService(billingRepo, stripeGatewayFor)
-	collectSvc := payment.NewCollectService(billingRepo, pricingRepo, stripeGatewayFor)
-	collectSvc.SetNotifier(mailSvc)
+	addFundsSvc.SetAdminURL(cfg.Self.AdminBaseURL) // {{adminUrl}} in bank_transfer_submitted
+	registerCardSvc := payment.NewRegisterCardService(billingRepo, payment.NewGateway)
+	collectSvc := payment.NewCollectService(billingRepo, pricingRepo, payment.NewGateway)
+	// attachingNotifier: bill_is_paid carries the invoice PDF on every settle path.
+	collectSvc.SetNotifier(attachingNotifier{mailSvc})
 	// Transaction scanner (transaction-sync cron): reconciles stuck PENDING deposits/collects.
 	txnScanner := payment.NewTransactionScanner(billingRepo, addFundsSvc, collectSvc, log)
-	payService.SetNotifier(mailSvc)
+	payService.SetNotifier(attachingNotifier{mailSvc})
 	orderRepo := order.NewRepo(pg)
 	billingH := org.NewBillingHandler(orgSvc, orgPolicy, billingRepo, pricingRepo, payService, addFundsSvc, registerCardSvc, collectSvc, cfg.Self.UIBaseURL, users, orderRepo)
 	// Public billing-configuration read.
@@ -267,6 +276,7 @@ func run() error {
 		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
 	}, publicIPRepo)
 	projectH.SetKamaji(kamajiFactory)
+	projectH.SetSeeds(project.NewSeedRepo(pg, enc))
 
 	// Promotion (deposit config) + Affiliate (cfy check + project config/log) — client reads.
 	// The promo-redeem authz gate resolves the bp's org WITH a membership check on the caller
@@ -350,16 +360,22 @@ func run() error {
 	// Client PAT verification: resolve `Bearer pk.sk` tokens from the client_api_keys collection
 	// (SEPARATE from admin hmac_keys — a client PAT can never resolve on the Admin-API SigV4 path).
 	// Returns the secret half + the owning user's sub, which becomes the request principal.
-	clientKeyLookup := func(r *http.Request, keyID string) (string, string, bool) {
+	clientKeyLookup := func(r *http.Request, keyID string) (auth.ClientKey, bool) {
 		var doc struct {
-			SecretKey string `json:"secretKey"`
-			Sub       string `json:"sub"`
+			SecretKey string     `json:"secretKey"`
+			Sub       string     `json:"sub"`
+			Scope     string     `json:"scope"`
+			ExpiresAt *time.Time `json:"expiresAt"`
 		}
 		found, err := pg.C("client_api_keys").FindOne(r.Context(), pgdoc.M{"_id": keyID}, &doc)
 		if err != nil || !found {
-			return "", "", false
+			return auth.ClientKey{}, false
 		}
-		return doc.SecretKey, doc.Sub, true
+		k := auth.ClientKey{Secret: doc.SecretKey, Sub: doc.Sub, Scope: doc.Scope}
+		if doc.ExpiresAt != nil {
+			k.ExpiresAt = *doc.ExpiresAt
+		}
+		return k, true
 	}
 	authn.SetClientKeyLookup(clientKeyLookup)
 
@@ -383,6 +399,35 @@ func run() error {
 		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
 	})
 	// Public Admin API (/admin-api/v1 — SigV4 hmac_keys or the admin-api OIDC realm).
+	// Per-organization SSO: on when a Keycloak service account for the customer realm is configured.
+	var ssoH *sso.Handler
+	var ssoSvc *sso.Service
+	if cfg.SSO.ClientSecret != "" && cfg.Auth.Main.IssuerURI != "" {
+		kc, err := sso.NewKCAdmin(cfg.Auth.Main.IssuerURI, cfg.Auth.Main.DiscoveryURI, cfg.SSO.ClientID, cfg.SSO.ClientSecret)
+		if err != nil {
+			return err
+		}
+		adminH.SetKeycloak(kc)
+		if cfg.Auth.Main.IssuerURI == cfg.Auth.Admin.IssuerURI {
+			log.Warn("per-organization SSO with operators in the customer realm: development only")
+		}
+		ssoRepo := sso.NewRepo(pg)
+		if err := ssoRepo.EnsureIndexes(ctx); err != nil {
+			return fmt.Errorf("sso indexes: %w", err)
+		}
+		ssoSvc = sso.NewService(ssoRepo, kc, textcrypt.New(cfg.Encryption.DefaultKey), orgRepo, orgPolicy, users, auditSvc,
+			pg.C("client_api_keys"), projectSvc, log, sso.Options{
+				MainIssuer:      cfg.Auth.Main.IssuerURI,
+				OperatorClients: []string{cfg.Auth.Admin.ClientID, cfg.Auth.AdminAPI.ClientID},
+				ReservedDomains: append(sso.ReservedFromURLs(cfg.Self.UIBaseURL, cfg.Self.AdminBaseURL, cfg.Self.APIBaseURL), cfg.SSO.ReservedDomains...),
+				AllowInternal:   cfg.SSO.AllowInternal,
+			})
+		ssoH = sso.NewHandler(ssoSvc, orgPolicy, users, cfg.Auth.Main.IssuerURI, adminH.Require)
+		authn.SetGuard(ssoSvc.Guard)
+		acct.SetProvisioner(ssoSvc)
+		orgH.SetMemberRemovedHook(ssoSvc.OnMemberRemoved)
+		go ssoSvc.Run(ctx)
+	}
 	adminAPIH := adminapi.NewHandler(pg, orgRepo, users, esSvc, auditSvc, cfg.Auth.AdminAPI.IssuerURI, cfg.Auth.AdminAPI.ClientID)
 	// MCP endpoint (/mcp): client toolset for clients-realm JWTs, admin toolset for
 	// admin-realm JWTs or `Bearer pk.sk` hmac api keys. Tools dispatch in-process
@@ -405,6 +450,7 @@ func run() error {
 			cloud.TypeKubernetesCluster: billingresource.NewKubernetesClusterProvider(),
 			cloud.TypeDatabaseCluster:   billingresource.NewDatabaseClusterProvider(),
 			cloud.TypeBucket:            billingresource.NewBucketProvider(),
+			cloud.TypeShare:             billingresource.NewShareProvider(),
 		},
 	})
 	// Client for the standalone billing service. nil when PROXCLOUD_BILLING_URL is unset, which is
@@ -415,7 +461,8 @@ func run() error {
 	syncJob := syncjob.New(projectRepo, esSvc, cloudRepo, log).
 		WithPublicIPs(publicIPRepo.ForProject, publicIPRepo.ReleaseNIC).
 		WithKamajiFactory(kamajiFactory).
-		WithAudit(auditSvc)
+		WithAudit(auditSvc).
+		WithSDNLock(lock.New(pg))
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)
@@ -551,6 +598,7 @@ func run() error {
 		return projectH.EnableAndBootstrap(ctx, p)
 	})
 	payService.SetReviewer(suspensionJob) // auto-resume a suspended profile when a bill is paid
+	adminH.SetPayService(payService)      // admin record-payment shares the same mail + review hooks
 	// bindOrderPaid flips an order PAID only when it belongs to the PAYING profile AND the settled
 	// gross covers net+tax — a foreign txn.OrderID or a short settlement is a silent no-op (never
 	// errors the payment). Shared by add-funds + collect; the write filters on {_id, billingProfileId}.
@@ -580,7 +628,35 @@ func run() error {
 	// Monthly bill finalization: finalize each profile's previous-month OPEN bill (OPEN→SENT/PAID) so
 	// the collect + dunning crons have SENT bills to act on.
 	billSendSvc := billing.NewBillSendService(billingRepo, pricingRepo)
-	billSendSvc.SetNotifier(mailSvc)
+	billSendSvc.SetNotifier(attachingNotifier{mailSvc})
+	// {{billUrl}} in the bill mails: the bill page of the profile's first ENABLED project; the
+	// console root when nothing resolves so the link still opens.
+	billLink := func(ctx context.Context, profile *billing.BillingProfile, bill *pricing.Bill) string {
+		base := strings.TrimRight(cfg.Self.UIBaseURL, "/")
+		orgIDs := []string{}
+		if orgs, err := orgRepo.FindAllByBillingProfileID(ctx, profile.ID); err == nil {
+			for i := range orgs {
+				orgIDs = append(orgIDs, orgs[i].ID)
+			}
+		}
+		if projects, err := projectRepo.AllByBillingProfile(ctx, profile.ID, orgIDs); err == nil {
+			for i := range projects {
+				if projects[i].IsEnabled() {
+					return base + "/p/" + projects[i].ID + "/billing/history/bills/" + bill.ID
+				}
+			}
+		}
+		return base + "/"
+	}
+	billSendSvc.SetBillLink(billLink)
+	payService.SetBillLink(billLink)
+	collectSvc.SetBillLink(billLink)
+	// Pay as you go: a POSTPAID profile's freshly issued bill is charged to its card right away
+	// (same path as the monthlyCollect cron; a decline is e-mailed and retried by the cron).
+	billSendSvc.SetAutoCollector(func(ctx context.Context, profile *billing.BillingProfile) error {
+		_, err := collectSvc.CollectBillingProfile(ctx, profile)
+		return err
+	})
 	// Project-deletion job: cascade-delete a scheduled project's cloud resources (live
 	// WriteService.Delete per resource) then remove the doc. ⚠ performs LIVE cloud DELETEs.
 	deletionJob := project.NewDeletionJob(projectRepo, projectTeardownDeleter(projectH.TeardownProject), log)
@@ -633,6 +709,17 @@ func run() error {
 	if cfg.Jobs.SchedulerEnabled || cfg.Jobs.DebugTriggers {
 		log.Warn("job debug triggers ENABLED on the mgmt port (/debug/run-{sync,metrics,charge})")
 		jobsDebug = map[string]http.HandlerFunc{
+			"run-sso-reconcile": func(w http.ResponseWriter, r *http.Request) {
+				if ssoSvc == nil {
+					httpx.Err(w, http.StatusNotFound, http.StatusNotFound, "SSO is off")
+					return
+				}
+				if err := ssoSvc.Reconcile(r.Context()); err != nil {
+					httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
+					return
+				}
+				httpx.Empty(w)
+			},
 			"run-sync": func(w http.ResponseWriter, r *http.Request) {
 				n, err := syncJob.Run(r.Context())
 				jobResult(w, map[string]any{"synced": n}, err)
@@ -839,7 +926,7 @@ func run() error {
 
 	appSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:           server.AppRouter(log, corsOrigins, authn, acct, orgH, roleH, orgAuditH, billingH, billingCfgH, projectH, pcfgH, featureH, promotionH, affiliateH, catalogH, orderH, inviteH, adminH, adminAPIH, sseH, jobH, mcpH),
+		Handler:           server.AppRouter(log, corsOrigins, authn, acct, orgH, roleH, orgAuditH, billingH, billingCfgH, projectH, pcfgH, featureH, promotionH, affiliateH, catalogH, orderH, inviteH, adminH, adminAPIH, sseH, jobH, mcpH, ssoH),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	mgmtSrv := &http.Server{
@@ -1198,4 +1285,16 @@ func originsOf(urls ...string) []string {
 		out = append(out, u.Scheme+"://"+u.Host)
 	}
 	return out
+}
+
+// attachingNotifier lets the bill mails carry the invoice PDF: billing.Attachment -> mail.Attachment
+// (billing does not import mail, so the mapping lives here).
+type attachingNotifier struct{ *mail.Service }
+
+func (a attachingNotifier) SendTemplateWithAttachments(ctx context.Context, key string, to []string, vars map[string]any, atts []billing.Attachment) error {
+	out := make([]mail.Attachment, 0, len(atts))
+	for _, at := range atts {
+		out = append(out, mail.Attachment{Filename: at.Filename, ContentType: at.ContentType, Data: at.Data})
+	}
+	return a.Service.SendTemplateWithAttachments(ctx, key, to, vars, out)
 }

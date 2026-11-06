@@ -205,7 +205,7 @@ export default function VolumesPage() {
           data: {
             size: Number(form.size),
             type: selectedVolumeType,
-            serverId: form.serverId,
+            ...(form.serverId ? { serverId: form.serverId } : {}),
           },
         },
       })
@@ -415,8 +415,8 @@ export default function VolumesPage() {
           <DialogHeader>
             <DialogTitle>Create volume</DialogTitle>
             <DialogDescription>
-              A new disk on one of your servers. It belongs to that server: deleting the server deletes the volume,
-              even after you detach it.
+              A new disk, on one of your servers or standalone. It stays when its server is deleted, and can then be
+              attached to another server on the same host.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
@@ -475,14 +475,13 @@ export default function VolumesPage() {
             </div>
             <div className="grid gap-2">
               <Label>Server</Label>
-              {!(servers ?? []).some((s) => !!s.externalId) ? (
-                <p className="text-sm text-muted-foreground">Create a server first — a volume is created on a server.</p>
-              ) : (
-                <Select value={form.serverId} onValueChange={(serverId) => setForm({ ...form, serverId })}>
+              {
+                <Select value={form.serverId || "none"} onValueChange={(v) => setForm({ ...form, serverId: v === "none" ? "" : v })}>
                   <SelectTrigger className="w-full" aria-label="Server">
                     <SelectValue placeholder="Select a server" />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="none">No server (standalone)</SelectItem>
                     {(servers ?? [])
                       .filter((s) => !!s.externalId)
                       .map((s) => (
@@ -492,7 +491,7 @@ export default function VolumesPage() {
                       ))}
                   </SelectContent>
                 </Select>
-              )}
+              }
             </div>
             {quotaCheckPending ? (
               <p className="text-sm text-muted-foreground">Checking the current storage quota…</p>
@@ -527,7 +526,6 @@ export default function VolumesPage() {
             <Button
               onClick={() => create.mutate()}
               disabled={
-                !form.serverId ||
                 !scope ||
                 volumeTypes.isLoading ||
                 volumeTypes.isError ||

@@ -70,7 +70,7 @@ func (h *Handler) tenantWriteService(ctx context.Context, w http.ResponseWriter,
 	if region == "" {
 		region = h.defaultRegion
 	}
-	if !es.IsCephS3() {
+	if !es.IsObjectStore() {
 		h.fail(w, httpx.BadRequest("Resource writes are not supported on this provider"))
 		return nil, "", false
 	}
@@ -86,7 +86,7 @@ func (h *Handler) tenantWriteService(ctx context.Context, w http.ResponseWriter,
 // client mistake (400 with the reason), not a server fault. Everything else goes through the normal error path.
 func (h *Handler) failWebsite(w http.ResponseWriter, err error) {
 	if errors.Is(err, client.ErrWebsiteUnsupported) {
-		h.fail(w, httpx.BadRequest("Static website hosting is only available on S3 (Ceph) object storage"))
+		h.fail(w, httpx.BadRequest("This object storage does not offer static website hosting"))
 		return
 	}
 	h.fail(w, err)
@@ -106,7 +106,7 @@ func (h *Handler) cephClientForProject(ctx context.Context, es *externalservice.
 	if cred == nil {
 		return nil, fmt.Errorf("project is not provisioned on the ceph object-store service")
 	}
-	return client.NewCephS3(ctx, es.CephConfig(region, cred.AccessKey, cred.SecretKey, cred.RGWUID))
+	return es.ObjectClient(ctx, region, cred.AccessKey, cred.SecretKey, cred.RGWUID)
 }
 
 // cloudResourceList handles POST /api/v1/project/{id}/resource?type=
@@ -268,7 +268,7 @@ func (h *Handler) cloudGet(w http.ResponseWriter, r *http.Request) {
 			if ps, perr := h.pveFor(es); perr == nil {
 				h.pveRefreshServerRow(r.Context(), ps, proj, cr)
 			}
-		case es.IsCephS3() && cr.Type == cloud.TypeBucket:
+		case es.IsObjectStore() && cr.Type == cloud.TypeBucket:
 			if cc, ok := h.tryTenantClient(r.Context(), proj, cr.ServiceID); ok {
 				h.refreshBucketCache(r.Context(), cc, cr)
 			}
@@ -292,7 +292,7 @@ func (h *Handler) tryTenantClient(ctx context.Context, p *Project, svcID string)
 		region = h.defaultRegion
 	}
 	// ceph-s3 is the only kind with a client here (proxmox goes through pve.Service).
-	if !es.IsCephS3() {
+	if !es.IsObjectStore() {
 		return nil, false
 	}
 	cc, err := h.cephClientForProject(ctx, es, p, region)
@@ -338,6 +338,16 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 		h.dbaasCreate(w, r, u, proj, es, req)
 		return
 	}
+	// truenas: file shares.
+	if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsTrueNAS() {
+		var req providers.CreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			h.fail(w, httpx.BadRequest("invalid request body"))
+			return
+		}
+		h.shareCreate(w, r, u, proj, es, req)
+		return
+	}
 	// proxmox: SERVER/KEYPAIR/… creates go through the pve service (clone-from-template on
 	// the PVE cluster), not the bucket WriteService.
 	if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsProxmox() {
@@ -367,11 +377,19 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	cr, err := ws.Create(r.Context(), svcID, region, proj.ID, uid, req)
 	if err != nil {
-		// The ceph-s3 bucket namespace is GLOBAL (no RGW tenants — see client.CephConfig), so a name may
+		// The ceph-s3 bucket namespace is GLOBAL (no RGW tenants — see client.ObjectStoreConfig), so a name may
 		// already be owned by this or another project. That is a client-correctable conflict, not a 500.
 		if errors.Is(err, client.ErrBucketNameTaken) {
 			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict,
 				"Bucket name is already taken — S3 bucket names are globally unique"))
+			return
+		}
+		if errors.Is(err, client.ErrProjectQuotaExceeded) {
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, err.Error()))
+			return
+		}
+		if errors.Is(err, client.ErrObjectStoreBusy) {
+			httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, err.Error())
 			return
 		}
 		h.fail(w, err)
@@ -437,13 +455,27 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// truenas: the share, its SMB user and the dataset, then the row.
+		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsTrueNAS() {
+			if err := h.shareDelete(r.Context(), es, proj, cr); err != nil {
+				h.fail(w, err)
+				return
+			}
+			if err := h.cloud.DeleteAndArchive(r.Context(), cr, time.Now().UTC()); err != nil {
+				h.fail(w, err)
+				return
+			}
+			h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_DELETE", "", cr)
+			httpx.Accepted(w)
+			return
+		}
 		// proxmox: destroy via the pve service, then archive the cache row here.
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsProxmox() {
 			if cr.Type == cloud.TypeNetwork {
 				if !h.pveDeleteNetwork(r.Context(), w, es, proj, cr) {
 					return
 				}
-			} else if err := h.pveDeleteResource(r.Context(), es, proj, cr); err != nil {
+			} else if err := h.pveDeleteResource(r.Context(), es, proj, cr, r.URL.Query().Get("deleteVolumes") == "true"); err != nil {
 				var he *httpx.HTTPError
 				if !errors.As(err, &he) {
 					he = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
@@ -465,6 +497,10 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := ws.Delete(r.Context(), svcID, cr.ExternalID); err != nil {
+			if errors.Is(err, client.ErrBucketNotEmpty) {
+				h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, err.Error()))
+				return
+			}
 			h.fail(w, err)
 			return
 		}
@@ -561,6 +597,16 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	// ceph-s3 bucket configuration + per-key grants (GET_SETTINGS, SET_VERSIONING, SET_QUOTA, …).
 	// Handled first: they act on THIS bucket and already run against cr.ServiceID.
 	if h.bucketSettingsAction(w, r, proj, svcID, externalID, req.Action, req.Data) {
+		return
+	}
+
+	if cr.Type == cloud.TypeShare {
+		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsTrueNAS() {
+			if h.shareAction(w, r, proj, es, cr, req.Action, req.Data) {
+				return
+			}
+		}
+		h.fail(w, httpx.BadRequest("Unknown share action"))
 		return
 	}
 
@@ -989,6 +1035,7 @@ func (h *Handler) refreshBucketCache(ctx context.Context, cc *client.Client, cr 
 	if err != nil || b == nil {
 		return
 	}
+	client.KeepLastUsage(cr.Data, b)
 	cr.Data = b
 	if saved, err := h.cloud.Insert(ctx, cr); err == nil {
 		*cr = *saved

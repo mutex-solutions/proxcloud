@@ -2,8 +2,7 @@ package pve
 
 // volume.go — disk lifecycle. The honest PVE model: a disk always belongs to a
 // VM; "detached" = the VM's unusedN entry (still billed); attach-to-another-VM =
-// MoveDisk with target-vmid (same node unless shared storage). No standalone
-// volume object exists and none is invented.
+// MoveDisk with target-vmid (same node). A volume with no server sits on a holder VM (holder.go).
 
 import (
 	"context"
@@ -35,6 +34,9 @@ func (s *Service) AddVolume(ctx context.Context, projectID, serverExtID string, 
 	}
 	if vm == nil {
 		return "", fmt.Errorf("pve: server %s not found", serverExtID)
+	}
+	if err := s.refuseUnreplicable(ctx, vm, storage); err != nil {
+		return "", err
 	}
 	rows, err := s.C.ClusterResources(ctx, "storage")
 	if err != nil {
@@ -158,6 +160,7 @@ func (s *Service) DetachVolume(ctx context.Context, projectID string, vmid int, 
 }
 
 // AttachVolume re-links an unused disk into the next free scsi slot of the SAME
+// (a holder's disk has to name a server; the holder goes once its last disk has left)
 // VM, or reassigns it to another pool VM (MoveDisk target-vmid). PVE's disk reassign needs
 // both VMs on the same node, even on shared storage (qemu-server move_vm_disk: "Both VMs need
 // to be on the same node"), so a target on another node is refused up front (ConflictError).
@@ -168,6 +171,12 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 	}
 	if !strings.HasPrefix(slot, "unused") {
 		return fmt.Errorf("pve: disk is already attached")
+	}
+	if isHolder(vm.Tags) {
+		if targetServerExtID == "" || targetServerExtID == strconv.Itoa(vmid) {
+			return conflictf("Choose a server to attach this volume to")
+		}
+		defer s.dropEmptyHolder(context.WithoutCancel(ctx), vm)
 	}
 	// Same VM: re-link by volid.
 	if targetServerExtID == "" || targetServerExtID == strconv.Itoa(vmid) {
@@ -199,6 +208,9 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 	}
 	if target == nil {
 		return fmt.Errorf("pve: target server %s not found", targetServerExtID)
+	}
+	if err := s.refuseUnreplicable(ctx, target, slotStorage(volID)); err != nil {
+		return err
 	}
 	if target.Node != vm.Node {
 		return conflictf("Server %s runs on node %s and this volume on node %s; a volume can only move to a server on the same node. "+
@@ -277,6 +289,7 @@ func (s *Service) DeleteVolume(ctx context.Context, projectID string, vmid int, 
 	if cfg.Str(slot) != "" {
 		return conflictf("The volume is still referenced by a snapshot of its server. Delete the snapshot first")
 	}
+	s.dropEmptyHolder(ctx, vm)
 	return nil
 }
 

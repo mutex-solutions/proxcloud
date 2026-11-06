@@ -21,6 +21,9 @@ export type ProxmoxFormState = {
   tokenId: string
   tokenSecret: string
   fingerprint: string
+  // Failover: other nodes or a VIP, comma or newline separated, with the cluster CA they all chain to
+  apiUrls: string
+  caCert: string
   insecureTls: boolean
   poolPrefix: string
   // config.network.isolation / .evpnController — the tenant network isolation model.
@@ -44,6 +47,8 @@ export const emptyProxmoxForm: ProxmoxFormState = {
   tokenId: "",
   tokenSecret: "",
   fingerprint: "",
+  apiUrls: "",
+  caCert: "",
   insecureTls: false,
   poolPrefix: "pc-",
   isolation: "shared",
@@ -71,7 +76,7 @@ export const proxmoxFormValid = (f: ProxmoxFormState, requireSecret = true) => {
 }
 
 // Keys this form owns; everything else under config passes through untouched.
-const FORM_OWNED_KEYS = ["provider", "region", "regions", "services", "apiUrl", "tokenId", "fingerprint", "insecureTls", "poolPrefix"]
+const FORM_OWNED_KEYS = ["provider", "region", "regions", "services", "apiUrl", "apiUrls", "caCert", "tokenId", "fingerprint", "insecureTls", "poolPrefix"]
 
 export function proxmoxFormToBody(f: ProxmoxFormState) {
   const region = f.region.trim()
@@ -92,6 +97,8 @@ export function proxmoxFormToBody(f: ProxmoxFormState) {
       apiUrl: f.apiUrl.trim().replace(/\/+$/, ""),
       tokenId: f.tokenId.trim(),
       fingerprint: f.fingerprint.trim(),
+      apiUrls: f.apiUrls.split(/[\s,]+/).map((u) => u.trim().replace(/\/+$/, "")).filter(Boolean),
+      caCert: f.caCert.trim(),
       insecureTls: f.insecureTls,
       poolPrefix: f.poolPrefix.trim() || "pc-",
       network: proxmoxNetworkConfig(f),
@@ -113,6 +120,8 @@ export function proxmoxFormFromService(svc: { name?: string; config?: Record<str
     tokenId: String(cfg.tokenId ?? ""),
     tokenSecret: "", // never returned by the API; blank = keep
     fingerprint: String(cfg.fingerprint ?? ""),
+    apiUrls: ((cfg.apiUrls as string[]) ?? []).join("\n"),
+    caCert: String(cfg.caCert ?? ""),
     insecureTls: !!cfg.insecureTls,
     poolPrefix: String(cfg.poolPrefix ?? "pc-"),
     isolation: cfg.network?.isolation === "evpn-per-project" ? "evpn-per-project" : "shared",
@@ -160,6 +169,7 @@ export function ProxmoxProviderForm({
           tokenId: form.tokenId.trim(),
           tokenSecret: form.tokenSecret.trim(),
           fingerprint: form.fingerprint.trim(),
+          caCert: form.caCert.trim(),
           insecureTls: form.insecureTls,
         },
       })
@@ -203,6 +213,14 @@ export function ProxmoxProviderForm({
           <Label htmlFor="pve-secret">Token secret{edit ? " (blank keeps the stored one)" : ""}</Label>
           <Input id="pve-secret" className="font-mono" type="password" value={form.tokenSecret} onChange={(e) => setForm({ ...form, tokenSecret: e.target.value })} autoComplete="new-password" />
         </div>
+      </div>
+      <div className="grid gap-2">
+        <Label htmlFor="pve-urls">Other API URLs for failover (other nodes or a VIP, optional)</Label>
+        <Textarea id="pve-urls" className="font-mono" rows={2} value={form.apiUrls} onChange={(e) => setForm({ ...form, apiUrls: e.target.value })} placeholder="https://pve2.example:8006" />
+      </div>
+      <div className="grid gap-2">
+        <Label htmlFor="pve-ca">Cluster CA (PEM, /etc/pve/pve-root-ca.pem; needed with several URLs)</Label>
+        <Textarea id="pve-ca" className="font-mono" rows={3} value={form.caCert} onChange={(e) => setForm({ ...form, caCert: e.target.value })} placeholder="-----BEGIN CERTIFICATE-----" />
       </div>
       <div className="grid gap-2">
         <Label htmlFor="pve-fp">TLS certificate fingerprint (SHA-256, optional)</Label>

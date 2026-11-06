@@ -241,6 +241,18 @@ auth:
     issuer: ""
     clientId: proxcloud-admin-api
     discoveryUri: ""
+  # Per-organization SSO. Needs Keycloak in auth.main, a separate realm for operators, and
+  # keycloakConfigCli (or the same realm settings applied by hand: files/keycloak-sso.json).
+  sso:
+    enabled: false
+    # Service account secret of the proxcloud-idp-admin client. Inline, or the key
+    # sso-client-secret in api.existingSecret. The operator console's Create user needs it too.
+    clientSecret: ""
+    # Domains no organization may claim: your operators' email domain, for example.
+    # The domains of api.selfUrls are always reserved.
+    reservedDomains: []
+    # Development only: lets a customer IdP live on http and on a private address.
+    allowInternalIdp: false
 
 # ----------------------------------------------------------------------------
 # PostgreSQL — the primary datastore. postgresql.auth.* also names the CloudNativePG database

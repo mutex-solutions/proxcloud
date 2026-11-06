@@ -84,7 +84,8 @@
           "value": "demo",
           "temporary": false
         }
-      ]
+      ],
+      "id": "a9c95406-454a-4027-9a44-fed5ad70cd74"
     },
     {
       "username": "admin",
@@ -99,7 +100,8 @@
           "value": "admin",
           "temporary": false
         }
-      ]
+      ],
+      "id": "3f1b7c52-8e0d-4a6b-9c21-5d7e4f0a1b63"
     }
   ]
 }

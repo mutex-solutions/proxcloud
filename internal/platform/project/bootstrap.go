@@ -10,7 +10,6 @@ import (
 	"fmt"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
@@ -37,13 +36,13 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if err != nil {
 		return err
 	}
-	var cephES, kamajiES, dbaasES, pveES []*externalservice.ExternalService
+	var cephES, kamajiES, dbaasES, pveES, truenasES []*externalservice.ExternalService
 	for i := range services {
 		if services[i].IsDisabled() {
 			continue
 		}
 		switch {
-		case services[i].IsCephS3():
+		case services[i].IsObjectStore():
 			cephES = append(cephES, &services[i])
 		case services[i].IsKamaji():
 			kamajiES = append(kamajiES, &services[i])
@@ -51,9 +50,11 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 			dbaasES = append(dbaasES, &services[i])
 		case services[i].IsProxmox():
 			pveES = append(pveES, &services[i])
+		case services[i].IsTrueNAS():
+			truenasES = append(truenasES, &services[i])
 		}
 	}
-	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 {
+	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 && len(truenasES) == 0 {
 		return nil // no cloud provider configured → nothing to provision
 	}
 	p.Status = StatusEnabled
@@ -78,6 +79,12 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	// Proxmox bootstrap — ensure the project's PVE pool.
 	for _, es := range pveES {
 		if err := h.BootstrapProxmoxOnto(ctx, p, es); err != nil {
+			return err
+		}
+	}
+	// TrueNAS: nothing to create until the first share, only the binding.
+	for _, es := range truenasES {
+		if err := h.bootstrapTrueNASOnto(ctx, p, es); err != nil {
 			return err
 		}
 	}
@@ -211,11 +218,11 @@ func (h *Handler) BootstrapCephOnto(ctx context.Context, p *Project, es *externa
 	}
 	uid := es.RGWUIDFor(p.ID) // uidPrefix + projectId — the one derivation
 	// Admin-keyed client (no project keys yet) drives the Admin Ops user create + quota.
-	adminCC, err := client.NewCephS3(ctx, es.CephConfig(region, "", "", uid))
+	adminCC, err := es.ObjectClient(ctx, region, "", "", uid)
 	if err != nil {
 		return fmt.Errorf("bootstrap ceph: build admin client: %w", err)
 	}
-	access, secret, err := adminCC.EnsureCephUser(ctx, "proxcloud-"+p.ID)
+	access, secret, err := adminCC.EnsureProjectUser(ctx, "proxcloud-"+p.ID)
 	if err != nil {
 		return fmt.Errorf("bootstrap ceph: ensure rgw user: %w", err)
 	}
@@ -227,10 +234,18 @@ func (h *Handler) BootstrapCephOnto(ctx context.Context, p *Project, es *externa
 	}
 	p.Services = append(p.Services, map[string]any{
 		"serviceId": es.ID,
-		"provider":  "ceph-s3",
+		"provider":  es.Provider(),
 		"region":    region,
 		"rgwUid":    uid,
 	})
+	return h.svc.Save(ctx, p)
+}
+
+// bootstrapTrueNASOnto appends the binding {serviceId, provider:"truenas", region}. Idempotent.
+func (h *Handler) bootstrapTrueNASOnto(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
+	if !p.HasService(es.ID) {
+		p.Services = append(p.Services, map[string]any{"serviceId": es.ID, "provider": "truenas", "region": es.CephRegion()})
+	}
 	return h.svc.Save(ctx, p)
 }
 
@@ -241,7 +256,7 @@ func (h *Handler) BootstrapOnto(ctx context.Context, p *Project, es *externalser
 	// A ceph-s3 service routes to the RGW-user bootstrap. This is what lets the
 	// admin "attach external service" leg onboard EXISTING projects onto a newly added ceph provider
 	// (enableAndBootstrap only provisions projects that have no service attached yet).
-	if es.IsCephS3() {
+	if es.IsObjectStore() {
 		return h.BootstrapCephOnto(ctx, p, es)
 	}
 	// kamaji: the management-cluster namespace leg.
@@ -255,6 +270,9 @@ func (h *Handler) BootstrapOnto(ctx context.Context, p *Project, es *externalser
 	// proxmox: the PVE pool leg.
 	if es.IsProxmox() {
 		return h.BootstrapProxmoxOnto(ctx, p, es)
+	}
+	if es.IsTrueNAS() {
+		return h.bootstrapTrueNASOnto(ctx, p, es)
 	}
 	return fmt.Errorf("bootstrap: unsupported provider kind %q", es.Provider())
 }

@@ -29,3 +29,9 @@ The portal has no button for this yet. Attach a public NIC through the API with 
 ![A security group with an SSH rule](/docs-img/security-group-rules.png)
 
 Security groups are enforced by the Proxmox VE cluster firewall, which is switched on for a server before its first boot.
+
+## Subnets and routing
+
+A network can hold several subnets (**Subnets** tab), and a server picks one at create. All networks and
+subnets of a project route to each other without a router to set up; other projects cannot reach them. Each
+subnet has its own outbound internet switch.

@@ -97,24 +97,54 @@ func (c *Client) ManagementBridges(ctx context.Context, nodes ...string) (map[st
 }
 
 // ManagementCIDRs lists the IPv4 networks of the bridges ManagementBridges finds on every node:
-// what a tenant must not reach through an exit node, storage on that network included.
-func (c *Client) ManagementCIDRs(ctx context.Context) ([]string, error) {
-	mgmt, err := c.managementIfaces(ctx)
+// what a tenant must not reach through an exit node, storage on that network included. A node that
+// cannot answer is left out and complete comes back false: a dead node must not stop the other
+// nodes' tenants from changing their networks.
+func (c *Client) ManagementCIDRs(ctx context.Context) (cidrs []string, complete bool, err error) {
+	nodeIP, err := c.clusterNodeIPs(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	var out []string
-	for _, m := range mgmt {
-		if _, n, err := net.ParseCIDR(m.cidr); err == nil && n.IP.To4() != nil && !slices.Contains(out, n.String()) {
-			out = append(out, n.String())
+	complete = true
+	for node, ip := range nodeIP {
+		mgmt, err := c.nodeManagementIfaces(ctx, node, ip)
+		if err != nil {
+			complete = false
+			continue
+		}
+		for _, m := range mgmt {
+			if _, n, err := net.ParseCIDR(m.cidr); err == nil && n.IP.To4() != nil && !slices.Contains(cidrs, n.String()) {
+				cidrs = append(cidrs, n.String())
+			}
 		}
 	}
-	return out, nil
+	return cidrs, complete, nil
 }
 
 type mgmtIface struct{ iface, node, cidr string }
 
 func (c *Client) managementIfaces(ctx context.Context, nodes ...string) ([]mgmtIface, error) {
+	nodeIP, err := c.clusterNodeIPs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(nodes) == 0 {
+		for n := range nodeIP {
+			nodes = append(nodes, n)
+		}
+	}
+	var out []mgmtIface
+	for _, node := range nodes {
+		mgmt, err := c.nodeManagementIfaces(ctx, node, nodeIP[node])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, mgmt...)
+	}
+	return out, nil
+}
+
+func (c *Client) clusterNodeIPs(ctx context.Context) (map[string]string, error) {
 	var status []struct {
 		Type string `json:"type"`
 		Name string `json:"name"`
@@ -129,30 +159,26 @@ func (c *Client) managementIfaces(ctx context.Context, nodes ...string) ([]mgmtI
 			nodeIP[s.Name] = s.IP
 		}
 	}
-	if len(nodes) == 0 {
-		for n := range nodeIP {
-			nodes = append(nodes, n)
-		}
+	return nodeIP, nil
+}
+
+func (c *Client) nodeManagementIfaces(ctx context.Context, node, ip string) ([]mgmtIface, error) {
+	var ifaces []struct {
+		Iface    string `json:"iface"`
+		Address  string `json:"address"`
+		Address6 string `json:"address6"`
+		Gateway  string `json:"gateway"`
+		Gateway6 string `json:"gateway6"`
+		CIDR     string `json:"cidr"`
+	}
+	form := formVals{"type": "any_bridge"}.values()
+	if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", form, &ifaces); err != nil {
+		return nil, err
 	}
 	var out []mgmtIface
-	for _, node := range nodes {
-		var ifaces []struct {
-			Iface    string `json:"iface"`
-			Address  string `json:"address"`
-			Address6 string `json:"address6"`
-			Gateway  string `json:"gateway"`
-			Gateway6 string `json:"gateway6"`
-			CIDR     string `json:"cidr"`
-		}
-		form := formVals{"type": "any_bridge"}.values()
-		if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", form, &ifaces); err != nil {
-			return nil, err
-		}
-		ip := nodeIP[node]
-		for _, i := range ifaces {
-			if i.Gateway != "" || i.Gateway6 != "" || (ip != "" && (i.Address == ip || i.Address6 == ip)) {
-				out = append(out, mgmtIface{i.Iface, node, i.CIDR})
-			}
+	for _, i := range ifaces {
+		if i.Gateway != "" || i.Gateway6 != "" || (ip != "" && (i.Address == ip || i.Address6 == ip)) {
+			out = append(out, mgmtIface{i.Iface, node, i.CIDR})
 		}
 	}
 	return out, nil

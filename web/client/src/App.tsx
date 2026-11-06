@@ -67,6 +67,7 @@ export default function App() {
           <Route path="object-storage" element={lazyPage(() => import("@/pages/storage/BucketsPage"))} />
           <Route path="object-storage/:resourceId" element={lazyPage(() => import("@/pages/storage/BucketExplorePage"))} />
           <Route path="s3-keys" element={lazyPage(() => import("@/pages/storage/S3KeysPage"))} />
+          <Route path="file-shares" element={lazyPage(() => import("@/pages/storage/FileSharesPage"))} />
 
           {/* Network */}
           <Route path="networks" element={lazyPage(() => import("@/pages/network/NetworksPage"))} />
@@ -97,6 +98,7 @@ export default function App() {
           <Route path="org/projects" element={lazyPage(() => import("@/pages/org/ProjectsPage"))} />
           <Route path="org/audit" element={lazyPage(() => import("@/pages/org/AuditPage"))} />
           <Route path="org/roles" element={lazyPage(() => import("@/pages/org/RolesPage"))} />
+          <Route path="org/sso" element={lazyPage(() => import("@/pages/org/SsoPage"))} />
           <Route path="org/settings" element={lazyPage(() => import("@/pages/org/OrgSettingsPage"))} />
           <Route path="account" element={lazyPage(() => import("@/pages/account/AccountPage"))} />
         </Route>

@@ -12,6 +12,8 @@ package externalservice
 //	    "services": {"compute": {"pve": true}, "network": {"pve": true},
 //	                 "volumev3": {"pve": true}, "image": {"pve": true}},
 //	    "apiUrl":      "https://pve1.lab:8006",
+//	    "apiUrls":     ["https://pve2.lab:8006"], // failover: other nodes or a VIP
+//	    "caCert":      "-----BEGIN CERTIFICATE-----…", // cluster CA pin; takes precedence over fingerprint
 //	    "tokenId":     "proxcloud@pve!platform", // full API token identity (secret half below)
 //	    "fingerprint": "AA:BB:…",              // SHA-256 cert pin; empty → system CA
 //	    "insecureTls": false,
@@ -109,6 +111,8 @@ func (e *ExternalService) PVEConfig() pve.Config {
 	insecure, _ := e.Config["insecureTls"].(bool)
 	return pve.Config{
 		APIURL:         str(e.Config["apiUrl"]),
+		APIURLs:        strList(e.Config["apiUrls"]),
+		CACert:         str(e.Config["caCert"]),
 		TokenID:        str(e.Config["tokenId"]),
 		Secret:         str(e.secretMap()["tokenSecret"]),
 		Fingerprint:    str(e.Config["fingerprint"]),
@@ -237,6 +241,25 @@ type PVENetwork struct {
 	// from DefaultZone, controller EVPNController).
 	Isolation      string
 	EVPNController string
+}
+
+// PVEMetadata is config.metadata: how servers get their NoCloud seed (pve/seed.go).
+type PVEMetadata struct {
+	// URL is the API's base URL as tenant vnets reach it ("" = the API's own base URL).
+	URL string
+	// ISOStorage holds seed CDs ("" = the first active iso storage on the VM's node, shared first).
+	ISOStorage string
+	// ForceISO seeds by CD even where a URL would work: tenants cannot reach the API at all.
+	ForceISO bool
+	// VendorData is the operator's vendor-data for every seeded server.
+	VendorData string
+}
+
+// PVEMetadataSettings reads config.metadata.
+func (e *ExternalService) PVEMetadataSettings() PVEMetadata {
+	m, _ := e.Config["metadata"].(map[string]any)
+	force, _ := m["forceIso"].(bool)
+	return PVEMetadata{URL: str(m["url"]), ISOStorage: str(m["isoStorage"]), ForceISO: force, VendorData: str(m["vendorData"])}
 }
 
 // PVEPublicNetwork is one admin-designated inbound bridge/vnet plus its IP pool:

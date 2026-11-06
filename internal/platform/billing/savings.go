@@ -174,5 +174,5 @@ func (s *SavingsService) notifyExpired(ctx context.Context, c *SavingsContract) 
 	if c.MonthlyCommittedAmount != nil {
 		vars["monthlyCommittedAmount"] = c.MonthlyCommittedAmount.StringFixed(2)
 	}
-	notify(ctx, s.notifier, "savings_contract_expired", profile.Email, vars)
+	notify(ctx, s.notifier, "savings_contract_expired", profile, vars)
 }

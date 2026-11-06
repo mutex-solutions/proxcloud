@@ -7,6 +7,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
+	"github.com/mutex-solutions/proxcloud/internal/platform/payment"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -40,6 +42,24 @@ const bankTransferManagePerm = "admin:transaction:manage"
 func (h *Handler) routeBankTransfer(r chi.Router) {
 	r.Post("/bank-transfer/{id}/approve", h.bankTransferApprove)
 	r.Post("/bank-transfer/{id}/reject", h.bankTransferReject)
+	r.Get("/bank-transfer/{id}/proof", h.bankTransferProof)
+}
+
+// bankTransferProof streams the customer's proof-of-payment file (admin:transaction:read).
+func (h *Handler) bankTransferProof(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, "admin:transaction:read") {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	bt, err := h.repo.FindDoc(r.Context(), bankTransferCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if bt == nil {
+		httpx.WriteError(w, bankTransferNotFound(id))
+		return
+	}
+	payment.WriteBankTransferProof(w, bt)
 }
 
 // bankTransferNotFound is the exact 404
@@ -88,7 +108,7 @@ func (h *Handler) bankTransferSettle(w http.ResponseWriter, r *http.Request, id,
 		return
 	}
 	// UPDATE BANK_TRANSFER audit — the middleware emits the admin event.
-	httpx.OK(w, shapeDoc(updated))
+	httpx.OK(w, billing.BankTransferPublic(updated))
 }
 
 // bankTransferReject rejects a transfer (comments=null from the

@@ -11,21 +11,28 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 )
 
-// captureNotifier records SendTemplate calls (stands in for mail.Service).
+// captureNotifier records SendTemplate calls (stands in for mail.Service) and, as a
+// billing.AttachmentNotifier, the files a bill mail carries.
 type captureNotifier struct {
 	calls []struct {
 		key  string
 		to   []string
 		vars map[string]any
+		atts []billing.Attachment
 	}
 }
 
-func (c *captureNotifier) SendTemplate(_ context.Context, key string, to []string, vars map[string]any) error {
+func (c *captureNotifier) SendTemplate(ctx context.Context, key string, to []string, vars map[string]any) error {
+	return c.SendTemplateWithAttachments(ctx, key, to, vars, nil)
+}
+
+func (c *captureNotifier) SendTemplateWithAttachments(_ context.Context, key string, to []string, vars map[string]any, atts []billing.Attachment) error {
 	c.calls = append(c.calls, struct {
 		key  string
 		to   []string
 		vars map[string]any
-	}{key, to, vars})
+		atts []billing.Attachment
+	}{key, to, vars, atts})
 	return nil
 }
 

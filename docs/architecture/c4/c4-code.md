@@ -6,8 +6,7 @@ rating path. Each section lists the key functions with `file:line` (a snapshot,
 see the [maintenance rule](README.md#maintenance-rule)), then explains the
 invariants the code holds. Four sequence diagrams follow.
 
-Status legend: [README.md](README.md). Everything on this page is **Implemented**
-except sequence (d), which is **Planned**.
+Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
 ## C4.1 Tenant network isolation
 
@@ -20,8 +19,10 @@ except sequence (d), which is **Planned**.
 | `Service.CreateNetwork` | `network.go:157` | Stages vnet `v<5 base36>` with alias `st:<projectId>:<name>`, then its subnet (gateway, DHCP range, SNAT) |
 | `ZoneIDFor` | `network.go:341` | Per-project EVPN zone id: `p` + 7 base36 chars of `sha256(projectId)` (8 chars, the PVE limit) |
 | `Service.EnsureProjectZone` | `network.go:353` | Stages the project zone from the default EVPN zone template; next free VRF VNI (from 10000); refuses an id collision with another owner |
-| `isolationRules`, `projectIsolationRule` | `network.go` | The provider-wide DROPs and one project's ACCEPT (below) |
-| `Service.ReconcileIsolation` | `network.go` | Brings the cluster firewall to the rule set: rebuilds the DROPs when they are missing or the blocked networks changed, then this project's ACCEPT over all its subnets |
+| `isolationRules`, `projectIsolationRules`, `Service.isolationOwner` | `network.go` | This portal's provider-wide DROPs, one project's ACCEPTs, and the comment that marks the DROPs as this portal's (below) |
+| `Service.ReconcileIsolation` | `network.go` | Brings the cluster firewall to the rule set: rebuilds this portal's DROPs when they are missing or the networks changed, then this project's ACCEPTs over all its subnets. Called on every network change and, per project, from the sync job |
+| `Service.deleteClusterRule` | `network.go` | Deletes a rule by identity: fresh position, sent with the list's digest, so a list edited in between can never cost another rule |
+| `Job.reconcileIsolation` | `internal/cloud/syncjob/job.go` | Per sync cycle and project, under the `sdn-apply` lock; a busy lock skips to the next cycle |
 | `Client.ManagementCIDRs` | `internal/cloud/pve/cluster.go` | The networks of the bridges carrying a node's own IP or gateway; always blocked |
 | `Service.ApplyAndWait` | `network.go:553` | `PUT /cluster/sdn` and wait for the task |
 | `pveDeleteNetwork` | `cloud_network_pve.go:175` | Refuses while a pool VM NIC uses the vnet; deletes, re-reconciles, stages an empty project zone for removal, applies once (PVE accepts both in one apply) |
@@ -37,13 +38,26 @@ except sequence (d), which is **Planned**.
 
 **Managed rule set in the cluster firewall**, top to bottom (first match wins):
 
-1. One per project, comment `proxcloud:isolation:<projectId>`: `FORWARD ACCEPT
-   source=<project subnets> dest=<project subnets>` (absent when the project has no
-   subnets, since an empty field means "any").
+1. Two per project, comment `proxcloud:isolation:<projectId>`: `FORWARD ACCEPT` and `IN
+   ACCEPT`, both `source=<project subnets> dest=<project subnets>` (absent when the project
+   has no subnets, since an empty field means "any").
 2. `FORWARD DROP source=<cidrPool> dest=<cidrPool>`.
-3. `FORWARD DROP source=<cidrPool> dest=<management networks, blockedCidrs>`.
-4. `IN DROP source=<cidrPool> dest=<management networks, blockedCidrs>`: an exit node's
+3. `IN DROP source=<cidrPool> dest=<cidrPool>`: a gateway address lives on the node, so
+   pinging another tenant's gateway is input, not forward. The project's own `IN ACCEPT`
+   keeps its own gateways reachable.
+4. `FORWARD DROP source=<cidrPool> dest=<management networks, blockedCidrs>`.
+5. `IN DROP source=<cidrPool> dest=<management networks, blockedCidrs>`: an exit node's
    own addresses are reached through input, not forward.
+
+**Who owns the DROPs.** A cluster normally has one portal, which owns its DROPs outright: a
+changed `cidrPool` or `blockedCidrs` replaces them and leaves none behind. Their comment is
+`proxcloud:isolation` for the default pool prefix `pc-` (clusters already running need no
+migration) and `proxcloud:isolation/<poolPrefix>` for any other. A portal only rewrites DROPs
+carrying its own comment, and only moves ACCEPTs inside its own pool, because those are the only
+ones its new DROPs can shadow. So a second portal on the cluster, with another pool prefix, can
+never remove the DROPs protecting the first one's tenants, whatever its pool. What this does not
+give two portals with different pools is isolation between them: add each portal's pool to the
+other's `blockedCidrs`.
 
 These are cluster rules, not vnet rules, because traffic between subnets is routed by
 the node: on PVE 9.2 with `proxmox-firewall`, vnet `FORWARD` rules only see frames
@@ -86,12 +100,24 @@ Invariants:
 - The rule set is reconciled **before** the SDN apply. If reconcile or apply fails, the
   vnet is unstaged and the apply re-run. New DROPs go in before old rules go, so every
   step fails closed.
+- Every sync cycle reconciles each project, so a project made before a rule change gets it
+  within 15 minutes and a rule deleted by hand comes back. An up-to-date cluster takes no write.
+- A node that is down does not block a network change: its networks are left out of the check,
+  DROPs already in place stay until it is back, and the project's ACCEPTs are still set.
+- Rules are deleted by identity with the list's digest. PVE has no rule ids and refuses a
+  stale digest, so an operator or a second portal editing the list cannot make a delete hit
+  the wrong rule.
 - The test connection (`internal/platform/admin/pveadmin.go:47`) refuses a cluster
   whose datacenter firewall is off or where a node still runs the legacy iptables
   firewall (it ignores FORWARD rules), so the rules above are actually enforced.
 - Verified live on PVE 9.2 in both isolation modes, on one node and across nodes: same
   project reaches its other vnets, another tenant and the management network are dropped,
-  SNAT egress works, a spoofed source address is dropped.
+  SNAT egress works, a spoofed source address is dropped. Verified again with packets for the
+  gateway rules, the sync reconcile (rules removed by hand, traffic state before and after) and
+  two portals with different pools on one cluster.
+- Outside this rule set: a public NIC is bridged straight to the uplink, so no cluster rule
+  applies and the VM reaches whatever the uplink routes. Filtering that is the operator's edge
+  (see Public networks in the operator docs).
 
 ## C4.2 VM firewall, default security group and public IPs
 
@@ -345,10 +371,11 @@ sequenceDiagram
   T->>T: mark project DELETED
 ```
 
-## Sequence (d): per-org SSO login (Planned)
+## Sequence (d): per-org SSO login
 
-Nothing in this sequence exists in the code yet. It records the intended design so
-the change that implements it can update this diagram and the status columns.
+The guard runs in `pkg/auth.Enforce` before any handler, so a refused identity never gets a
+ProxCloud user, whichever route it calls first. Keycloak runs before ProxCloud sees anything, so
+an IdP asserting a foreign address does get a Keycloak account; `SweepForeignUsers` removes those.
 
 ```mermaid
 sequenceDiagram
@@ -359,20 +386,23 @@ sequenceDiagram
   participant KC as Keycloak customer realm
   participant IDP as Tenant IdP
 
-  rect rgb(242, 242, 242)
-    Note over U,IDP: Planned, not implemented
-    U->>SPA: enter email
-    SPA->>API: POST /api/v1/auth/sso/discover
-    API-->>SPA: org IdP alias for a verified domain
-    SPA->>KC: authorize with kc_idp_hint, PKCE
-    KC->>IDP: OIDC or SAML brokering
-    IDP-->>KC: assertion with email and groups
-    KC->>KC: first-broker-login, no silent account linking
-    KC-->>SPA: tokens with idp, groups, email_verified
-    SPA->>API: POST /user
-    API->>API: domain gate, verified email, JIT membership from group mapping
+  U->>SPA: enter email
+  SPA->>API: POST /api/v1/auth/sso/discover
+  API-->>SPA: alias of the IdP for a verified domain, nothing else
+  SPA->>KC: authorize with kc_idp_hint, login_hint
+  KC->>IDP: OIDC or SAML brokering
+  IDP-->>KC: assertion with email and groups
+  KC->>KC: stock first-broker-login, no silent account linking
+  KC-->>SPA: tokens with idp, idp_groups, email_verified, scope proxcloud-sso
+  SPA->>API: POST /user
+  API->>API: guard: IdP active, verified email in its org's domains, account not bound elsewhere
+  alt refused
+    API-->>SPA: 403 sso_* and no user row
+    SPA-->>U: explains why, offers sign out
+  else accepted
+    API->>API: bind user to the IdP, JIT membership, role from group mapping, never admin
     API-->>SPA: user
     SPA->>API: later requests
-    API->>API: enforce SSO for the org
+    API->>API: guard again, plus enforce-SSO and break-glass
   end
 ```

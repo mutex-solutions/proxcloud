@@ -257,7 +257,7 @@ func TestParseCustomerPolicyAcceptsRealPolicies(t *testing.T) {
 
 // COMPLIANCE retention would make the project's RGW user un-purgeable → project undeletable. Refuse it.
 func TestObjectLockRefusesCompliance(t *testing.T) {
-	cc, err := NewCephS3(t.Context(), CephConfig{S3Endpoint: "http://x", Region: "us-east-1", RGWUID: "p", ProjectAccessKey: "a", ProjectSecretKey: "b"})
+	cc, err := NewCephS3(t.Context(), ObjectStoreConfig{S3Endpoint: "http://x", Region: "us-east-1", RGWUID: "p", ProjectAccessKey: "a", ProjectSecretKey: "b"})
 	if err != nil {
 		t.Fatal(err)
 	}

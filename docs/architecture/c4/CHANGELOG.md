@@ -4,6 +4,306 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Protected servers and several API endpoints
+
+**What changed**
+
+- New `internal/cloud/pve/protect.go`: replication jobs, HA resources and node-affinity rules, gating, RPO state on the
+  server row, `server_protection` billing, memory reservation in the scheduler, an operator migrate route.
+- `config.apiUrls` and `config.caCert`: the PVE client fails over between endpoints and pins the cluster CA.
+
+**Why**
+
+- Local ZFS is pinned to one node; a site that needs a server to survive a node failure had no answer without Ceph.
+- HA is added only after the first sync, since a failover before that has no replica to start from.
+- Node-affinity rules with equal priority, not `/cluster/ha/groups` (gone in PVE 9): a recovered node must not pull the
+  VM back on its own, a second interruption nobody asked for.
+- A single `apiUrl` made the node hosting it a point of failure for the whole portal, exactly when HA is needed. Each
+  node has its own certificate, so several endpoints need the cluster CA, not a fingerprint.
+
+**Diagrams updated**: `c2-containers.md`, `c3-components.md`.
+
+## 2026-11-07: P5 IaaS parity: server seeds, rebuild, snapshots, subnets, spread groups
+
+**What changed**
+
+- Server seeds (C3b): Planned -> Implemented. A server with user-data, vendor-data or instance metadata gets a
+  platform NoCloud seed: a per-VM token URL on the API (`GET /api/v1/nocloud/{token}/{file}`) on a vnet with DHCP,
+  a `cidata` CD written by the platform (`pve/seediso.go`) otherwise, or with `metadata.forceIso`. Any other
+  server stays on PVE's own drive.
+- New actions on a server: `SET_PASSWORD` (guest agent), `REBUILD` (boot-disk swap), `LIST_/CREATE_/ROLLBACK_/DELETE_SNAPSHOT`.
+  New on a network: `ADD_SUBNET`, `REMOVE_SUBNET`, `SET_SNAT`. New on create: `spreadGroup`, `spreadStrict`, `metadata`,
+  `networkInterfaces[0].subnet`.
+- The client gets a public-IP card, a Snapshots tab, a subnets tab and the wizard inputs. The tab that created
+  template images is now called Images, for what it does. All behind `/init` feature flags.
+- `ProxCloudPlatform` adds `VM.GuestAgent.Unrestricted` and `Datastore.AllocateTemplate`.
+
+**Why**
+
+- A URL seed alone cannot work on EVPN or VLAN: cloud-init fetches it in the network stage, the local stage gives
+  up on any CD once it sees a seed URL (lab-verified on cloud-init 25.1), and with no DHCP the guest then has no
+  network to fetch with. A CD alone would put user-data on shared storage everywhere and need the upload privilege
+  on sites that have DHCP. So the vnet decides.
+- The ISO writer is ~150 lines of Go: `user-data` is not a legal ISO 9660 name, so the image needs Joliet, and the
+  pure-Go options are whole disk-image libraries.
+- Tenant data rides `vendor-data` and `meta`: on one key user-data wins, and a tenant metadata key cannot reach
+  `dsmode` or `seedfrom`.
+- Rebuild clones first and parks the old disk: a failed clone or move leaves the server as it was.
+- A spread group is a tag and a scheduler preference because PVE 9's affinity rules are HA-only and strict.
+- There is no router resource: the zone's VRF already routes all of a project's vnets and the isolation rules keep
+  other projects out, so a router object would have nothing to decide.
+
+**Diagrams updated**: `c2-containers.md` (Tenant VMs), `c3-components.md` (C3b).
+## 2026-11-07: CI opens the built SPAs
+
+Open item of the lab drill (DRILL-1). The same PR fixes console and quota bugs with no architecture
+effect.
+
+**What changed**
+
+- New `spa-smoke` job in `test.yml`: builds each SPA, serves the production bundle and opens it in
+  Chromium. A load error or a missing login page fails it.
+
+- `ManagementCIDRs` leaves out a node that cannot answer and says so. `ReconcileIsolation` then keeps
+  the DROPs in place and still sets the project's ACCEPTs.
+
+**Why**
+
+- tsc and vite build stay green on a bundle that renders a white page, which is how a react and
+  react-dom split once reached a running console.
+- One node down made every isolation reconcile fail with `595 No route to host`, seen live during a
+  node outage. Network create and delete go through the same call, so they failed for every tenant.
+  Dropping the failed node's networks instead would have opened a hole if only it knew one.
+
+**Diagrams updated**: `c4-code.md` (C4.1 invariants).
+
+## 2026-11-07: operator Create user makes a Keycloak login
+
+Open item of the lab drill (DRILL-2).
+
+**What changed**
+
+- `POST /admin/user` creates the Keycloak account through `sso.KCAdmin`, keys the row by its id and
+  returns a temporary password once. `DELETE /admin/user/{id}` removes the account too.
+- Without the service account Create user answers 501 instead of writing a row.
+
+**Why**
+
+- The row had a random `sub` that no login could ever match, so the user could not log in and a later
+  self-registration made a second row. Reusing the SSO service account adds no client and no secret:
+  it already holds `manage-users` in the customer realm, on compose, the chart and the installer.
+
+**Diagrams updated**: `c3-components.md` (note under C3a).
+## 2026-11-07: API tokens get a scope and an expiry
+
+**What changed**
+
+- A personal access token has a scope, `full` or `read`, and an optional expiry. `pkg/auth.ClientKeyLookup`
+  returns a `ClientKey`; a read token passes safe methods and the POST list route only.
+
+**Why**
+
+- P5-12 asked for platform API tokens; the tokens already existed. What was missing is limiting one: a token
+  in a dashboard or a CI job should not be able to delete servers, or live forever. `/mcp` is refused for a read
+  token because its tools can write.
+
+**Diagrams updated**: none, `docs/auth.md` has the rules.
+
+## 2026-11-07: volumes outlive their server (holder VM)
+
+**What changed**
+
+- New `internal/cloud/pve/holder.go`. A volume without a server sits on a per (project, node) holder VM; deleting a
+  server moves its data volumes there by default, `?deleteVolumes=true` destroys them. Standalone create and delete.
+- Holders are skipped by the SERVER sync and metering (no row, no bill, no quota) and by the scheduler; their disks
+  stay VOLUME rows.
+
+**Why**
+
+- A Proxmox disk must belong to a VM, so "delete the server" used to delete data the tenant had detached on purpose.
+  The UI warning that stood in for this is gone.
+- Keeping volumes by default matches the safe reading of "delete a server": data loss needs an explicit tick.
+- A holder per node because PVE reassigns a disk only within a node.
+
+**Diagrams updated**: `c3-components.md` (PVE service).
+
+## 2026-11-07: isolation rules get an owner, cover gateways, and reconcile in the sync job
+
+Open items of the lab drill (DRILL-5, DRILL-6) and the coexistence note in the lab log.
+
+**What changed**
+
+- The sync job reconciles each project's isolation rules every cycle under the `sdn-apply` lock.
+- A portal only rewrites DROPs with its own comment: bare `proxcloud:isolation` for the default
+  pool prefix, `proxcloud:isolation/<poolPrefix>` otherwise. It only moves ACCEPTs inside its pool.
+- `IN DROP` inside the pool, plus an `IN ACCEPT` per project next to its `FORWARD ACCEPT`.
+- Rules are deleted by identity with the list's digest instead of by a remembered position.
+
+**Why**
+
+- Rules only reached a project at its next network change, so projects made before a rule change
+  kept the old set indefinitely.
+- A cluster normally has one portal, and that portal has to keep owning its rules outright so a
+  changed pool or blocked list leaves nothing stale. The old code took that to mean every rule with
+  the marker, so a second portal with another pool deleted the first one's DROPs at its next network
+  change and left those tenants unisolated with no error. Scoping by owner keeps the one-portal
+  behaviour and makes the second portal harmless. The default prefix keeps the old comment so no
+  running cluster needs a migration.
+- A gateway address is local to the node, so traffic to another tenant's gateway is input and no
+  `FORWARD` rule sees it.
+- PVE addresses rules by position, and a reconcile now runs without anyone asking for it, next to
+  operators and possibly another portal editing the same list. A stale position would delete the
+  wrong rule, possibly someone's DROP.
+
+**Diagrams updated**: `c4-code.md` (C4.1), `c2-containers.md` (tables).
+## 2026-11-07: TrueNAS client and file share product
+
+**What changed**
+
+- New `internal/cloud/truenas`: JSON-RPC 2.0 client over WebSocket and the share service. New provider kind `truenas`
+  serving `SHARE` resources, with sync, teardown, a `share` billing resource and a "File shares" page.
+- New dependency `github.com/coder/websocket` (ISC) for the client side of the socket.
+
+**Why**
+
+- TrueNAS 26 removes the REST API and revokes a key sent over HTTP, so a REST port would have had no future.
+- Tenants on the Standard tier had no shared file product; the NAS is already there as the capacity tier.
+- A share is one dataset per project, not the 1/N split across projects of the older design: per-project billing and
+  quota come out exact, and no tenant ever shares a filesystem with another.
+- Exports list tenant addresses because the NAS only knows a client by its source address. A private subnet behind
+  SNAT arrives as a node address, which the NAS cannot tell apart per tenant, so it is left out of the promise.
+
+**Diagrams updated**: `c1-context.md`, `c2-containers.md`, `c3-components.md`.
+
+## 2026-11-07: RustFS tenant buckets behind objectBackend
+
+**What changed**
+
+- `internal/cloud/client`: `Client` now wraps an `objectBackend` with `Caps()`. `cephBackend` keeps RGW;
+  the new `rustfsBackend` embeds its plain-S3 data plane. New provider kind `rustfs`
+  (`ExternalService.ObjectClient` picks the backend); methods renamed to neutral names.
+- RustFS ownership lives in the project's canned policy, the project quota in the API (sum of bucket quotas),
+  and scanner usage keeps the last value when the scanner cannot answer.
+- Extra S3 keys on RustFS are IAM users granted through bucket policies with a bare-name principal.
+- Bucket billing: new attribute `quota_gb` next to `size_gb`; the priced attribute is the billing basis.
+- The installer registers the RustFS it deployed as a `rustfs` provider at stage 60.
+
+**Why**
+
+- Standard-tier sites had a deployed RustFS but no tenant bucket product.
+- RustFS has no bucket owner and no user quota, so isolation and quota have to live on our side.
+- Lab check RUSTFS-POLICY-1 on 1.0.4 showed user principals do work in bucket policies, but only by bare
+  name, so grants could keep RGW's model instead of moving to identity policies. The ARN form saves and
+  silently matches nothing, which is why the principal form is per backend.
+- A tenant able to delete a bucket directly would leave its ARN behind and reach the next owner of the
+  name, hence the Deny on the project key and the clean-up of other policies at create.
+- Scanner usage is sometimes unavailable; writing 0 would bill nothing for that interval.
+
+**Diagrams updated**: `c1-context.md`, `c2-containers.md`, `c3-components.md` (C3 managed services).
+## 2026-11-07: per-organization SSO (PR #45)
+
+**What changed**
+
+- New package `internal/platform/sso`: per-organization identity providers (OIDC and SAML), one
+  Keycloak broker per org in the customer realm, created through the Admin API by the service
+  account `proxcloud-idp-admin`. Token issuer, SPA and MCP stay as they were.
+- Domains verified through DNS TXT, email-first discovery in the client console, JIT membership
+  with group to role mapping, enforce-SSO with up to two break-glass owners, an operator list and
+  emergency stop, org and operator console pages.
+- `pkg/auth.Enforce` gets a guard hook. The SSO guard runs on every request and answers 403
+  `sso_*`; on public paths a refused identity continues anonymous.
+- `User.ssoAlias` binds a person to the IdP that provisioned them.
+- Keycloak 26.8.2 in compose. `deploy/charts/proxcloud/files/keycloak-sso.json` is the realm
+  fragment both compose and the chart apply with keycloak-config-cli. The installer turns SSO on
+  and generates the service account secret.
+
+**Why**
+
+- Until now SSO meant one broker for every customer of the platform. One realm with a broker per
+  org (plan option B) keeps a single issuer, so ADR 0003 holds and SAML comes for free.
+- A tenant controls everything its IdP asserts, including the email claim on every login. That is
+  why the rules sit in a per-request guard and not only in the JIT step: `users.Require` creates
+  users on any route, and a rewritten claim must fail after the first login too.
+
+**Deviations from the plan, found while attacking it**
+
+- Domains: the unique index is on `verifiedDomain`, not `domain`. With a unique domain, anyone
+  could squat a name they do not own by claiming it first.
+- Account binding is new. Keycloak can end up with a foreign IdP linked to a victim's user (the
+  victim follows an email link); the IdP then rewrites the email into its own domain and passes the
+  domain gate on the victim's `sub`. The guard refuses an IdP other than the bound one, and for an
+  unbound account checks the address ProxCloud already had. Binding state is read fresh: an early
+  cached version let a brand-new account through.
+- The guard has no exemptions for `/user` and `/account`. One rule is simpler, and the console shows
+  the refusal from the 403.
+- Enforcement also covers members of the org, not only addresses in its domains. A member could
+  otherwise change their email to leave the rule. Enforcing needs a break-glass owner.
+- `proxcloud-sso` is a marker scope: while any org has SSO configured, a token without it is refused.
+  Without it a self-registered MCP client could drop the mapper and make a brokered session look
+  like a local one, skipping the domain gate.
+- `SweepForeignUsers` removes Keycloak accounts created by an IdP asserting a foreign address, which
+  otherwise block the real owner at "account already exists". This adds `manage-users` to the
+  service account. No `manage-realm`.
+- Metadata is fetched by the API behind an SSRF guard and handed to Keycloak as a file, so Keycloak
+  never dereferences a tenant URL at configuration time.
+- No custom first-broker-login flow: Keycloak's stock flow has no automatic link, and the IdP pins it
+  by alias. No `verifyEmail` in the chart realm: an install without SMTP could not register anyone,
+  and `email_verified` already fails closed.
+- Keycloak 26.8 needs the `kc-admin-api` scope on Admin API tokens. keycloak-config-cli has no 26.8
+  image; `6.5.1-26.5.5` was verified against 26.8.2.
+
+**Known ceilings**
+
+- A foreign-domain Keycloak account can exist for up to 5 minutes until the sweep.
+- Keycloak calls the token and JWKS URLs at login; they are checked when configured, not on each call.
+- A domain stays verified if the TXT record is later removed.
+- With operators in the customer realm (compose default), brokered sessions are refused on operator
+  clients, but that layout is for development only and the API logs a warning.
+
+**Diagrams updated:** c1-context.md, c2-containers.md, c3-components.md (C3a), c4-code.md (sequence d).
+
+## 2026-11-07: payments port (Airwallex, gateway factory, bank-transfer submit, invoices, record payment)
+
+**What changed**
+
+- `payment` gets an Airwallex gateway next to Stripe, selected per payment integration by a
+  gateway factory (`payment.NewGateway`). The `Gateway` interface gains refund polling,
+  releasing the 1.00 card-verification hold and a credentials ping (the admin health check).
+- Card registration is now a small authorization hold that is released once the card is saved.
+  Collect creates and confirms the charge in two steps with an idempotency key.
+- A deposit confirm claims the PENDING transaction atomically (PENDING to PROCESSING), so
+  repeated or concurrent callbacks and the scanner credit once; a settle error hands the claim back.
+- Bank transfer, customer side: submit (transfer date, bank reference, note, proof of at most
+  2 MiB), cancel, and proof download; finance is mailed on submit. The admin list never carries
+  the proof bytes; the proof streams from its own route.
+- `billing` gets invoice numbers (`INV-<year>-<seq>`, stamped once on leaving OPEN), invoice and
+  credit-note PDFs with the operator as issuer, billing contacts, and a PREPAID or POSTPAID
+  payment mode (POSTPAID charges the saved card when a bill is issued).
+- Operators record an offline payment on a SENT bill: `POST /admin/bill/{id}/record-payment`
+  and the MCP tool `record_bill_payment`.
+- Mail carries attachments (the invoice PDF); the `pgdoc` store gains an atomic counter and
+  nested transactions join the outer one; four mail templates are added.
+- Admin: Airwallex integration form, bank-transfer proof download, record-payment dialog,
+  invoice numbers. Client: Airwallex Elements for deposits and cards, bank-transfer panel,
+  payment mode, invoice recipients.
+
+**Why**
+
+- A second card gateway removes the dependency on one provider and covers customers Stripe
+  does not serve; the factory keeps the services unaware of which provider an integration is.
+- Callbacks are unauthenticated redirects. Reading the outcome from the gateway and claiming the
+  transaction before crediting is what stops a replayed or raced callback from minting a second
+  credit. There is no webhook endpoint, so there is no signature to verify; the gateway is the
+  only source of truth.
+- Wire transfers are common for business customers, and the operator needs the customer's
+  reference and proof to reconcile one; recording a payment closes the loop for payments that
+  never touch a gateway.
+- Tax invoices need a gapless number and an issuer block; credit notes and recipients are
+  required to refund and to reach accounts payable.
+
+**Diagrams updated**: C1 (Airwallex now implemented), C3c (payment, gateway factory, billing,
+invoice and credit note rows and nodes).
+
 ## 2026-11-07: P4 metering foundations (branch feat/p4-metering)
 
 **What changed**

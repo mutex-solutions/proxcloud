@@ -52,6 +52,12 @@ type VanishGrace interface {
 	VanishGrace() time.Duration
 }
 
+// CacheMerger is an optional Provider capability: before comparing, carry over what the fresh read did not
+// know from the cached row (a RustFS bucket whose usage the scanner could not answer).
+type CacheMerger interface {
+	MergeCached(cached, fresh map[string]any)
+}
+
 // Sync lists a provider's cloud resources and upserts each into the cache (blind upsert, no
 // reconciliation). Superseded by Reconcile (which adds the gates + delete-of-vanished); kept
 // for callers that want a plain upsert. `now` stamps created/updatedAt.
@@ -180,6 +186,9 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		// gets it stamped so billing accrues from true age, not first-sync time. Bypass the
 		// unchanged-data skip until Info.CreatedAt lands (self-limiting — once set, this is false).
 		infoHeal := r.Info != nil && r.Info.CreatedAt != nil && (cached.Info == nil || cached.Info.CreatedAt == nil)
+		if m, ok := p.(CacheMerger); ok {
+			m.MergeCached(cached.Data, r.Data)
+		}
 		// isNeededToUpdate: skip the write when the cloud object is unchanged (unless healing Info). A
 		// KeyedComparer provider uses the per-key compareMaps (number-width + list-order tolerant);
 		// others fall back to the whole-data JSON compare.

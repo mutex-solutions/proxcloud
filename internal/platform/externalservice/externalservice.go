@@ -6,8 +6,12 @@
 package externalservice
 
 import (
+	"context"
+	"fmt"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/truenas"
+	"net/url"
 )
 
 // ExternalServiceType values. Only CLOUD matters to the cloud slice.
@@ -57,6 +61,51 @@ func (e *ExternalService) Shared() bool     { return boolean(e.Config["shared"])
 // IsCephS3 reports whether this is a Ceph RGW (S3) object-store provider (config.provider == "ceph-s3").
 // Object-store is the only service it serves, driven by the S3 + Admin Ops endpoints below.
 func (e *ExternalService) IsCephS3() bool { return e.Provider() == "ceph-s3" }
+
+// IsRustFS reports a RustFS object store (config.provider == "rustfs"), the Standard-tier S3 product. Same
+// config keys as ceph-s3; adminApiUrl is the base URL the API reaches the admin paths on.
+func (e *ExternalService) IsRustFS() bool { return e.Provider() == "rustfs" }
+
+// IsTrueNAS reports a TrueNAS file-share provider (config.provider == "truenas"). Config: apiUrl, username,
+// fingerprint/insecureTls, parentDataset, mountHost (default: the host of apiUrl), defaultQuotaGiB, region;
+// secret: apiKey.
+func (e *ExternalService) IsTrueNAS() bool { return e.Provider() == "truenas" }
+
+// TrueNASService builds the share service. The caller closes its client.
+func (e *ExternalService) TrueNASService() (*truenas.Service, error) {
+	insecure, _ := e.Config["insecureTls"].(bool)
+	c, err := truenas.New(truenas.Config{
+		URL: str(e.Config["apiUrl"]), Username: str(e.Config["username"]), APIKey: str(e.secretMap()["apiKey"]),
+		Fingerprint: str(e.Config["fingerprint"]), InsecureTLS: insecure,
+	})
+	if err != nil {
+		return nil, err
+	}
+	parent := str(e.Config["parentDataset"])
+	if parent == "" {
+		return nil, fmt.Errorf("truenas: parentDataset is required")
+	}
+	host := str(e.Config["mountHost"])
+	if host == "" {
+		if u, err := url.Parse(str(e.Config["apiUrl"])); err == nil {
+			host = u.Hostname()
+		}
+	}
+	return &truenas.Service{C: c, Parent: parent, Host: host}, nil
+}
+
+// IsObjectStore reports a provider that serves only buckets.
+func (e *ExternalService) IsObjectStore() bool { return e.IsCephS3() || e.IsRustFS() }
+
+// ObjectClient builds the object-store client for this provider, scoped to one project user. Empty project
+// keys give an admin-only client.
+func (e *ExternalService) ObjectClient(ctx context.Context, region, projectAccess, projectSecret, uid string) (*client.Client, error) {
+	cfg := e.CephConfig(region, projectAccess, projectSecret, uid)
+	if e.IsRustFS() {
+		return client.NewRustFS(ctx, cfg)
+	}
+	return client.NewCephS3(ctx, cfg)
+}
 
 // S3Endpoint / AdminAPIURL are the ceph-s3 data + Admin Ops endpoints (config.s3Endpoint / config.adminApiUrl).
 func (e *ExternalService) S3Endpoint() string  { return str(e.Config["s3Endpoint"]) }
@@ -116,7 +165,7 @@ func (e *ExternalService) cephAdminKeys() (access, secret string) {
 // rgwUID must ALREADY be the final user id — use RGWUIDFor(projectID) to derive it, or pass the value
 // persisted on the credential/binding. The uidPrefix is NOT re-applied here, or a caller passing a stored
 // (already-prefixed) uid would double-prefix it.
-func (e *ExternalService) CephConfig(region, projectAccess, projectSecret, rgwUID string) client.CephConfig {
+func (e *ExternalService) CephConfig(region, projectAccess, projectSecret, rgwUID string) client.ObjectStoreConfig {
 	if region == "" {
 		region = e.CephRegion()
 	}
@@ -125,7 +174,7 @@ func (e *ExternalService) CephConfig(region, projectAccess, projectSecret, rgwUI
 	if g := e.DefaultQuotaGiB(); g > 0 {
 		quotaBytes = int64(g) * 1073741824
 	}
-	return client.CephConfig{
+	return client.ObjectStoreConfig{
 		S3Endpoint:        e.S3Endpoint(),
 		S3WebsiteEndpoint: e.S3WebsiteEndpoint(),
 		AdminURL:          e.AdminAPIURL(),

@@ -36,7 +36,7 @@ on("POST /admin/user", ({ opts }) => {
   db.credentialsBySub[user.sub] = [
     { id: db.nextId("cred"), sub: user.sub, type: "password", password: { configured: true }, createdAt: user.createdAt },
   ]
-  return { data: user }
+  return { data: { ...user, temporaryPassword: "mock-temporary-password" } }
 })
 
 on("GET /admin/user/:id", ({ params }) => ({

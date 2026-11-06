@@ -6,7 +6,7 @@ Object storage holds unstructured data — backups, media, artifacts, static ass
 
 A **bucket** is a flat container for objects (files), each addressed by a key. Create a bucket, then upload objects into it. Because object storage is reached over an API rather than mounted like a volume, it suits data that many clients read and write independently, that needs to scale without provisioning disks, or that you want to serve directly.
 
-Buckets are stored on S3-compatible object storage backed by Ceph (the RADOS Gateway) that your operator connects to the platform.
+Buckets are stored on S3-compatible object storage (Ceph RGW or RustFS) that your operator connects to the platform. Website hosting and object-count quotas appear only where the backend offers them.
 
 > **Bucket names are globally unique.** A name is shared across the whole platform (just like Amazon S3), so if a name is already taken you'll need to choose another.
 
