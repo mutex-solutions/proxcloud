@@ -4,6 +4,96 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: payments port (Airwallex, gateway factory, bank-transfer submit, invoices, record payment)
+
+**What changed**
+
+- `payment` gets an Airwallex gateway next to Stripe, selected per payment integration by a
+  gateway factory (`payment.NewGateway`). The `Gateway` interface gains refund polling,
+  releasing the 1.00 card-verification hold and a credentials ping (the admin health check).
+- Card registration is now a small authorization hold that is released once the card is saved.
+  Collect creates and confirms the charge in two steps with an idempotency key.
+- A deposit confirm claims the PENDING transaction atomically (PENDING to PROCESSING), so
+  repeated or concurrent callbacks and the scanner credit once; a settle error hands the claim back.
+- Bank transfer, customer side: submit (transfer date, bank reference, note, proof of at most
+  2 MiB), cancel, and proof download; finance is mailed on submit. The admin list never carries
+  the proof bytes; the proof streams from its own route.
+- `billing` gets invoice numbers (`INV-<year>-<seq>`, stamped once on leaving OPEN), invoice and
+  credit-note PDFs with the operator as issuer, billing contacts, and a PREPAID or POSTPAID
+  payment mode (POSTPAID charges the saved card when a bill is issued).
+- Operators record an offline payment on a SENT bill: `POST /admin/bill/{id}/record-payment`
+  and the MCP tool `record_bill_payment`.
+- Mail carries attachments (the invoice PDF); the `pgdoc` store gains an atomic counter and
+  nested transactions join the outer one; four mail templates are added.
+- Admin: Airwallex integration form, bank-transfer proof download, record-payment dialog,
+  invoice numbers. Client: Airwallex Elements for deposits and cards, bank-transfer panel,
+  payment mode, invoice recipients.
+
+**Why**
+
+- A second card gateway removes the dependency on one provider and covers customers Stripe
+  does not serve; the factory keeps the services unaware of which provider an integration is.
+- Callbacks are unauthenticated redirects. Reading the outcome from the gateway and claiming the
+  transaction before crediting is what stops a replayed or raced callback from minting a second
+  credit. There is no webhook endpoint, so there is no signature to verify; the gateway is the
+  only source of truth.
+- Wire transfers are common for business customers, and the operator needs the customer's
+  reference and proof to reconcile one; recording a payment closes the loop for payments that
+  never touch a gateway.
+- Tax invoices need a gapless number and an issuer block; credit notes and recipients are
+  required to refund and to reach accounts payable.
+
+**Diagrams updated**: C1 (Airwallex now implemented), C3c (payment, gateway factory, billing,
+invoice and credit note rows and nodes).
+
+## 2026-11-07: P4 metering foundations (branch feat/p4-metering)
+
+**What changed**
+
+- Proxmox state sampler (C3c): Planned -> Implemented. `pveStateSync`, every minute: one
+  `/cluster/resources` page per provider reconciles SERVER, IMAGE and FLOATING_IP rows of every
+  project, carrying agent IPs and the GPU count from the cached row.
+- Proxmox task poller (C3c): Planned -> Implemented. `pveTaskPoll`, every 20 seconds, per-node
+  cursor, UPID dedupe; re-syncs the project, audits other users' tasks, and backs `LIST_EVENTS`
+  (was an empty stub).
+- VM identity: portal-created VMs carry a `pc-c-<unix>` tag. A row whose identity changed is
+  archived and a new one inserted in the same pass, disks included, so a reused vmid gets a new
+  row and bill item. The portal also archives a row older than its own create.
+- Traffic (C3c): Planned -> Implemented. `metrics.PVEFetcher` reads public-NIC counters from
+  `status/current` every minute into `nicCounter` with reset-aware deltas. `pve` is the new default
+  source of a Proxmox provider.
+- Public IP and image billing: Planned -> Implemented. FLOATING_IP rows derive from the allocations
+  (one per allocation, deletable, which detaches the NIC); new `image` resource type on `size_gb`.
+- GPU count comes from `hostpciN mapping=` on the full sync, tags being only the fallback.
+- Rating engine: a started unit is a billed unit, `getTimeUnitsDiff` floors at 0, rows archived this
+  cycle are fed back with `DeletedAt`, `OVERWRITE_TOTAL` is stored bare on the first charge too.
+- Staleness policy (C3c): new. Last-known state for 30 minutes, then the provider's resources stop
+  billing, the gap is written off (`SkipInterval`, new on the `billingapi` wire contract), and an
+  `ERROR` log line and a `METERING_STALE` audit event fire once.
+- Admin API refuses a rule pricing a usage attribute unless it is `OVERWRITE_TOTAL` on an hour or
+  minute cadence (an unnamed apply method defaults to overwrite).
+- Removed: the inert `load_balancer` price type (provider, catalog entry, seed rule).
+
+**Why**
+
+The cache was refreshed every 15 minutes and keyed on the vmid alone, so state changes outside
+the portal lagged charges, and PVE's reuse of the lowest free vmid let a new VM inherit the old VM's
+row and bill item. Hour rules lost the first partial hour and the last interval of every
+resource. One page per provider instead of 3N calls makes a 60-second cadence affordable, and
+the 2-minute grace exists because pmxcfs lags: without it a just-created VM would be archived and a
+just-deleted one resurrected. The stamp replaced `meta: ctime` as the identity because a clone keeps
+its template's ctime (verified on PVE 9.2), so ctime only separates VMs created from scratch. A
+started hour bills in full so that a resource's bill is a simple count of clock hours; truncating
+would make any VM younger than an hour free. The write-off exists because `NotEligibleForBilling`
+alone only delays a charge: the watermark would stay and recovery would back-bill the whole outage.
+Status/current was picked over a metric-server push because it needs nothing installed on the
+nodes; its ceiling is the traffic between the last sample and a counter reset.
+
+An external billing service must mirror the rating changes (`getTimeUnitsDiff`, the first
+`OVERWRITE_TOTAL` charge, `SkipInterval`).
+
+**Diagrams updated:** C3c, C3b table.
+
 ## 2026-11-07: tenant isolation moves to cluster firewall rules, EVPN gets platform IPAM
 
 Found by the end-to-end lab drill on PVE 9.2.

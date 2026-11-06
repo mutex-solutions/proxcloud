@@ -17,7 +17,7 @@ arithmetic is exact decimal.
 | `billing` | `internal/platform/billing` | The billing-profile aggregate, the PostgreSQL repos, and the stateful services: balance/due, bill send, pay-by-credit, savings contracts + reminders, suspension **orchestration**, gateways, cards, activation. |
 | `billingjob` | `internal/platform/billingjob` | The charge cron driver — loads active profiles + resources and drives `pricing` to accrue costs onto the current bill. |
 | `chargefanout` | `internal/platform/chargefanout` | Optional RabbitMQ fan-out of the charge job (one message per profile) as a multi-pod alternative to the in-process loop. |
-| `payment` | `internal/platform/payment` | Money-in flows: add funds, deposit/collect by card, register card, the Stripe gateway, and the stuck-transaction scanner. |
+| `payment` | `internal/platform/payment` | Money-in flows: add funds, deposit/collect by card, register card, the Stripe and Airwallex gateways, and the stuck-transaction scanner. |
 | `promotion` | `internal/platform/promotion` | Client promo-code redemption → promotional credit. |
 | `catalog` | `internal/platform/catalog` | Cloud-catalog config reads (flavor categories / image groups). |
 | `billingresource` | `internal/cloud/billingresource` | The cloud → billing bridge: turns a cloud resource (server, volume, bucket, …) into the priced `BillingResource`(s) the rating loop consumes. |
@@ -114,10 +114,10 @@ attribute schema (`BillingResourceType`):
 | Resource type | Provider | Metered attributes (selected) | Not billed when |
 |---|---|---|---|
 | `instance` | `ServerProvider` (`server.go`) | `instance_type`, `ram_mb`, `ram_gb`, `vcpus`, `root_disk_gb`, `gpu_count`, `gpu_model`, `is_bareMetal`, `availability_zone`, `image`, `status` | server status `DELETED`/`ERROR`/`UNKNOWN`/`BUILD` (the Proxmox status is mapped by `pve.MapVMStatus`; a clone/create lock maps to `BUILD`) |
-| `instance_traffic` | `ServerProvider` | `incoming/outgoing × private/public × _traffic_mb`, `total_*_traffic_mb` (usage attrs, read for the month from the provider's Prometheus-compatible metrics source, `config.metrics.source=prometheus`; Proxmox defaults to `none`, so no traffic is metered unless the operator configures it; see `docs/jobs-scheduling.md`) | server ineligible |
+| `instance_traffic` | `ServerProvider` | `incoming/outgoing × private/public × _traffic_mb`, `total_*_traffic_mb` (usage attrs, month to date, from `config.metrics.source`: `pve`, the Proxmox default, reads public-NIC counters every minute; `prometheus` reads a compatible source hourly; `none` meters nothing; see `docs/jobs-scheduling.md`). A rule pricing them must be `OVERWRITE_TOTAL` on an hour or minute cadence (the admin API refuses anything else) | server ineligible |
 | `volume` | `VolumeProvider` (`volume.go`) | `size`, `bootable`, `type`, `status`, `availability_zone` | status `error`/`deleting`/`creating`/`error_deleting` (a legacy set: Proxmox volumes report only `in-use`/`available`) |
-| `floating_ip` | `FloatingIPProvider` (`floatingip.go`) | `status`, `floating_network_id` (typically a flat per-IP charge) | — (no Proxmox resource produces this type yet; public-IP billing is planned) |
-| `load_balancer` | `LoadBalancerProvider` (`loadbalancer.go`) | `flavor_id`, `operating_status` | operating status `ERROR` (no Proxmox resource produces this type yet) |
+| `floating_ip` | `FloatingIPProvider` (`floatingip.go`) | `existence` (typically a flat per-IP charge), `status`, `floating_network_id`. Rows derive from the public-IP allocations (`pvePublicIp`), one per allocation, billed from the moment of allocation | — |
+| `image` | `ImageProvider` (`image.go`) | `size_gb` (a project template's disk, rounded up to whole GiB), `status`. Catalog templates are the operator's and never bill | — |
 
 Every resource additionally gets `region` and `service_id` stamped in (so plan
 filters on those resolve) and `createdAt` (drives mid-month proration) — see
@@ -234,18 +234,35 @@ flowchart TD
 Each cadence tick **accumulates** onto a per-resource `BillItem`:
 
 - Find-or-create the item (keyed by `resourceId` + `resourceType`).
-- Skip if the resource is `NotEligibleForBilling`, or if the item is already at
+- Skip if the resource is `NotEligibleForBilling` (its watermark stays, so a `BUILD`
+  VM is back-billed when it comes up; `SkipInterval` advances it instead, see below), or if the item is already at
   its cap (net ≥ `getTotalCap` = Σ `timeUnitLimit × ruleSum`) — the cap freezes a
   runaway line.
 - Advance the cadence counter by `getTimeUnitsDiff`: `month` is always `+1`;
-  `minute`/`hour` add `min(elapsed units, remaining headroom to the cap)` since the
-  last rate time (or `+1` on the first charge). A deleted resource charges up to
-  its `deletedAt`.
+  `minute`/`hour` add the units **started** since the last rate time (or `+1` on the
+  first charge), clamped to `[0, remaining headroom to the cap]`. A started hour is a
+  billed hour: a resource pays for every clock unit it existed in, so created 10:20 and
+  deleted 12:50 is 3 hours (10, 11, 12).
+- Rows archived during the cycle are fed back in with their `deletedAt` (the charge job,
+  `GetArchivedBillingResources`), which is what bills the last partial interval. Re-rating
+  one is a no-op: its `deletedAt` is behind the watermark and the floor at 0 keeps that
+  from being a refund. `month` rules skip them, being paid up front when first rated.
 - Update per-rule/per-attribute applied amounts: `round16(perUnit) × diff` (a new
-  amount), accumulated for `ADD_TO_TOTAL` or overwritten for `OVERWRITE_TOTAL`.
+  amount), accumulated for `ADD_TO_TOTAL`. `OVERWRITE_TOTAL` stores the amount as is, on
+  the first charge too: it is a month-to-date total, not a per-unit price.
 - Re-derive `item.NetAmount = round16(min(Σ applied, cap))`.
 
 The result is a bill whose items track a running, capped, cadence-accurate cost.
+
+### Metering staleness
+
+The state sampler stamps `meterState.lastOkAt` per Proxmox provider. While the cluster does
+not answer the cache keeps its last-known state and billing goes on from it. Past 30 minutes
+(`cloud.MeterStaleAfter`) every resource of that provider is rated `NotEligibleForBilling` +
+`SkipInterval`: nothing accrues and the watermark moves, so the blind interval is written off
+instead of being back-billed on recovery. The same moment raises the alert: an `ERROR` log
+line with `alert=pve_metering_stale` and a `METERING_STALE` audit event, once per outage,
+closed by `METERING_RECOVERED`.
 
 ### Charge-time bill adjustments
 
@@ -385,10 +402,20 @@ it settles, persists the consumed credits, flips `PAID`, and re-reviews suspensi
 
 The `payment` package orchestrates money-in. The gateway is an interface
 (`payment.Gateway`) built per integration, so flows are unit-testable with a fake
-and live-testable against a sandbox. **Stripe** is the wired gateway
-(`StripeGateway`, `stripe-go` v82, keyed by an integration's secret). Other
-gateways are configurable integrations added as their factories land; a
-**bank transfer** manual gateway is also supported.
+and live-testable against a sandbox. `payment.NewGateway` picks the card gateway
+for an integration: **Stripe** (`StripeGateway`, `stripe-go` v82, keyed by
+`secret.privateKey`) or **Airwallex** (`AirwallexGateway`, REST, keyed by
+`config.clientId` + `secret.apiKey`; `config.sandbox` selects the demo host). Card
+data never reaches the platform for either: the console confirms the intent in the
+browser (Stripe Elements, Airwallex Elements) and the confirm callback re-reads the
+intent from the gateway. A callback claims the PENDING transaction atomically before
+crediting, so a replayed or concurrent callback credits once. There is no webhook
+endpoint. A **bank transfer** manual gateway is also supported: the customer reports
+the transfer (date, bank reference, optional proof up to 2 MiB), finance is mailed,
+and an operator approves or rejects it; an operator can also record an offline
+payment against a SENT bill (`POST /admin/bill/{id}/record-payment`, MCP tool
+`record_bill_payment`). Issued bills carry a sequential invoice number
+(`INV-<year>-<seq>`); refunds produce a credit note.
 
 Payment gateways are `thirdPartyIntegration` docs (`billing/gateway.go`);
 `ListGateways` maps each enabled one to a `PaymentGatewayDTO`

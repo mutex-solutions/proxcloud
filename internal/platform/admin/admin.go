@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/paging"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -218,13 +219,17 @@ func (r *Repo) ListBankTransfers(ctx context.Context, integrationId string) ([]p
 		pgdoc.Sort(pgdoc.DescK("createdAt", pgdoc.KTime))); err != nil {
 		return nil, err
 	}
+	for i := range out {
+		out[i] = billing.BankTransferPublic(out[i]) // never ship the proof bytes in a list
+	}
 	return out, nil
 }
 
 // BankTransferByID looks up a bank transfer by id; nil when
 // absent (the caller maps that to the 404 "Bank transfer %s not found ").
 func (r *Repo) BankTransferByID(ctx context.Context, id string) (pgdoc.M, error) {
-	return r.FindByIDRaw(ctx, "bankTransfer", id)
+	doc, err := r.FindByIDRaw(ctx, "bankTransfer", id)
+	return billing.BankTransferPublic(doc), err
 }
 
 // FindByIDRaw is a generic by-id lookup over any collection → raw pgdoc.M, or (nil,nil) when absent.

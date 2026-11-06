@@ -886,12 +886,12 @@ function AdvancedTab({ id }: { id: string }) {
   )
 }
 
-// ── 8b. Metrics (usage source for traffic billing: prometheus | none) ──────────
+// ── 8b. Metrics (usage source for traffic billing: pve | prometheus | none) ──────────
 type MetricsTestResp = { ok: boolean; error?: string; trafficSeries?: number; monthStartSeries?: number; warnings?: string[] }
 function MetricsTab({ id, provider }: TabProps) {
   const stored = asObj(asObj((provider.config as Obj)?.metrics))
   const prom = asObj(stored.prometheus)
-  const [source, setSource] = useState(String(stored.source ?? "none"))
+  const [source, setSource] = useState(String(stored.source ?? (asObj(provider.config as Obj).provider === "proxmox" ? "pve" : "none")))
   const [url, setUrl] = useState(String(prom.url ?? ""))
   const [schema, setSchema] = useState(String(prom.schema ?? "libvirt-exporter"))
   const [headersText, setHeadersText] = useState(JSON.stringify(asObj(prom.headers), null, 2))
@@ -978,7 +978,8 @@ function MetricsTab({ id, provider }: TabProps) {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="none">None (disable usage metrics, default)</SelectItem>
+                <SelectItem value="pve">Proxmox NIC counters (public NICs, Proxmox default)</SelectItem>
+                <SelectItem value="none">None (disable usage metrics)</SelectItem>
                 <SelectItem value="prometheus">Prometheus-compatible</SelectItem>
               </SelectContent>
             </Select>

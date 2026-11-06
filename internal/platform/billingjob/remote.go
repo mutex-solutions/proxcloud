@@ -74,7 +74,7 @@ func (s *Service) ResolveByProfileID(ctx context.Context, profileID, timeUnit st
 
 	for i := range externalServices {
 		es := &externalServices[i]
-		resources, err := s.billingResources(ctx, bc, projects, es.ID)
+		resources, err := s.billingResources(ctx, bc, projects, es, timeUnit, cycleStart)
 		if err != nil {
 			return req, err
 		}

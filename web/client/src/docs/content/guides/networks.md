@@ -8,6 +8,8 @@ Start under **Network → Networks**, where you create the private networks your
 
 Each network is a virtual network on the Proxmox VE cluster with one IPv4 subnet. Leave the range empty and ProxCloud picks a free one from the range your operator reserved for tenant networks, or ask for a specific CIDR inside that range. DHCP and outbound NAT (SNAT) are on by default, so servers get an address and can reach the internet without further setup.
 
+![The Create network dialog](/docs-img/create-network.png)
+
 Your networks can talk to each other. They are isolated from every other project's networks: traffic towards another tenant's range is dropped.
 
 A network can only be deleted once no server has an interface on it.
@@ -23,5 +25,7 @@ The portal has no button for this yet. Attach a public NIC through the API with 
 ## Firewalling with security groups
 
 **Network → Security groups** are the firewalls around your servers. Each group is a set of allow rules for inbound and outbound traffic; attach one or more to a server to control which ports and sources can reach it. Every project starts with a default group. A common first rule is allowing SSH (port 22) from your own address.
+
+![A security group with an SSH rule](/docs-img/security-group-rules.png)
 
 Security groups are enforced by the Proxmox VE cluster firewall, which is switched on for a server before its first boot.

@@ -68,12 +68,17 @@ type Handler struct {
 	kamajiFor func(es *externalservice.ExternalService) (*kamaji.Service, error)
 	// pveFlavors is the Proxmox flavor catalog (nil in tests → the surface 503s).
 	pveFlavors *pveflavor.Repo
+	pay        *billing.PayService // bill record-payment (nil → 501)
 	// dbaasFor builds the Managed-Database service for a dbaas provider (nil in tests → the
 	// database chart-pin endpoints answer 501).
 	dbaasFor func(es *externalservice.ExternalService) (*dbaas.Service, error)
 }
 
 // SetKamaji wires the kamaji Managed-Kubernetes service factory (the admin chart-pin surface).
+// SetPayService wires the bill PayService (record-payment; carries the bill_is_paid mail +
+// suspension auto-resume hooks set in cmd/api). nil → the endpoint answers 501.
+func (h *Handler) SetPayService(p *billing.PayService) { h.pay = p }
+
 // SetProxmox wires the pve service factory for the cloud-admin live reads.
 func (h *Handler) SetProxmox(f func(es *externalservice.ExternalService) (*pve.Service, error)) {
 	h.pveFor = f

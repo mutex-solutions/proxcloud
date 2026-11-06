@@ -26,7 +26,7 @@ flowchart LR
     kc["Keycloak<br/>OIDC issuer"]:::impl
     idp["Tenant IdPs<br/>per-org SSO"]:::planned
     stripe["Stripe"]:::impl
-    airwallex["Airwallex"]:::planned
+    airwallex["Airwallex"]:::impl
     smtp["SMTP relay"]:::impl
     rgw["S3 store: Ceph RGW"]:::impl
     rustfs["S3 store: RustFS"]:::planned
@@ -46,7 +46,7 @@ flowchart LR
   pc -->|"REST :8006, API token"| pve
   pve -.->|"backups"| pbs
   pc -->|"deposits, cards, collect"| stripe
-  pc -.->|"payments"| airwallex
+  pc -->|"deposits, cards, collect"| airwallex
   pc -->|"transactional mail"| smtp
   pc -->|"RGW admin ops and S3"| rgw
   pc -.->|"admin API and S3"| rustfs
@@ -78,12 +78,12 @@ flowchart LR
 | Keycloak | OIDC issuer with one realm per audience (customer, admin, admin API). ProxCloud is a resource server: it validates bearer tokens against the realm JWKS and reads `sub`, `email`, `email_verified`, `azp`. The chart can bundle Keycloak or point at an external one. | Implemented |
 | Tenant IdPs | Per-organization OIDC/SAML IdPs brokered through Keycloak. | Planned |
 | Stripe | Deposits, saved cards, off-session collect, refunds. | Implemented |
-| Airwallex | Second payment gateway. | Planned |
+| Airwallex | Second card gateway, chosen per integration. Deposits and saved cards through the browser Elements SDK, off-session collect, refunds. | Implemented |
 | SMTP relay | Bills, reminders, invites, suspension notices. | Implemented |
 | S3 store: Ceph RGW | Tenant buckets on sites with Ceph: RGW Admin Ops for per-project users, keys and quotas, S3 for bucket and object operations. | Implemented |
 | S3 store: RustFS | Tenant buckets and internal backups on sites without Ceph. | Planned |
 | TrueNAS NAS | Capacity storage for Proxmox (NFS, SMB, iSCSI) and tenant file shares created through the TrueNAS WebSocket API. | Planned |
-| Prometheus-compatible metrics | Optional per-provider source for per-VM network traffic counters, used to bill traffic. Proxmox providers default to no metrics source. | Implemented |
+| Prometheus-compatible metrics | Optional per-provider source for per-VM network traffic counters, used to bill traffic. Proxmox providers default to their own public-NIC counters instead. | Implemented |
 | DNS and ACME | Hostnames and TLS certificates for the portal, the API and Keycloak, provided by the hosting cluster (the chart renders the routes, not the certificates). | Implemented |
 | DNS TXT verification | Domain ownership checks for per-org SSO. | Planned |
 | Container registry (ghcr.io) | CI publishes the `proxcloud-api`, `proxcloud-web` and `proxcloud-admin` images and the Helm charts; deployments pull from it. | Implemented |

@@ -3,6 +3,8 @@ package pve
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -92,6 +94,29 @@ func (c *Client) TaskLog(ctx context.Context, upid UPID, limit int) ([]string, e
 	out := make([]string, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, r.T)
+	}
+	return out, nil
+}
+
+// NodeTask is one row of GET /nodes/{node}/tasks. EndTime is 0 while the task runs.
+type NodeTask struct {
+	UPID      string `json:"upid"`
+	Node      string `json:"node"`
+	Type      string `json:"type"`
+	ID        string `json:"id"` // the vmid for VM tasks
+	User      string `json:"user"`
+	Status    string `json:"status"`
+	StartTime int64  `json:"starttime"`
+	EndTime   int64  `json:"endtime"`
+}
+
+// NodeTasks lists a node's tasks started at or after since, running ones included. Seeing other
+// users' tasks takes Sys.Audit on the node; without it only the token's own come back.
+func (c *Client) NodeTasks(ctx context.Context, node string, since int64, limit int) ([]NodeTask, error) {
+	form := formVals{"since": strconv.FormatInt(since, 10), "source": "all", "limit": itoa(limit)}.values()
+	var out []NodeTask
+	if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/tasks", form, &out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

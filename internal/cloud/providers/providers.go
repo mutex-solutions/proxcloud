@@ -38,6 +38,20 @@ type Deletable interface {
 	ShouldBeDeleted(cr *cloud.CloudResource) bool
 }
 
+// Replaceable is an optional Provider capability: the live object under a cached row's externalId
+// is a different object (PVE hands out the lowest free vmid again). Reconcile archives the old row
+// and inserts a new one, so the new object gets its own id, createdAt and bill item.
+type Replaceable interface {
+	Superseded(cached, fresh *cloud.CloudResource) bool
+}
+
+// VanishGrace is an optional Provider capability for clouds whose list lags their writes (pmxcfs):
+// a row younger than the grace is not archived for being absent, and a row archived less than the
+// grace ago is not resurrected for being still listed.
+type VanishGrace interface {
+	VanishGrace() time.Duration
+}
+
 // Sync lists a provider's cloud resources and upserts each into the cache (blind upsert, no
 // reconciliation). Superseded by Reconcile (which adds the gates + delete-of-vanished); kept
 // for callers that want a plain upsert. `now` stamps created/updatedAt.
@@ -83,6 +97,23 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 	if err != nil {
 		return st, err
 	}
+	var grace time.Duration
+	if g, ok := p.(VanishGrace); ok {
+		grace = g.VanishGrace()
+	}
+	insert := func(r *cloud.CloudResource) error {
+		t := now
+		r.UpdatedAt = &t
+		if r.CreatedAt == nil {
+			c := now
+			r.CreatedAt = &c
+		}
+		if _, err := repo.Insert(ctx, r); err != nil {
+			return err
+		}
+		st.Created++
+		return nil
+	}
 	fresh := make(map[string]bool, len(list))
 	for i := range list {
 		r := list[i]
@@ -99,23 +130,27 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		if cached == nil {
 			// Recreate guard: if the user deleted this resource after the sync snapshot, don't
 			// resurrect it from a stale cloud read.
-			guard, err := repo.WasUserDeletedAfter(ctx, serviceID, r.ExternalID, &now)
+			guardAt := now.Add(-grace)
+			guard, err := repo.WasUserDeletedAfter(ctx, serviceID, r.ExternalID, &guardAt)
 			if err != nil {
 				return st, err
 			}
 			if guard {
 				continue
 			}
-			t := now
-			r.UpdatedAt = &t
-			if r.CreatedAt == nil {
-				c := now
-				r.CreatedAt = &c
-			}
-			if _, err := repo.Insert(ctx, &r); err != nil {
+			if err := insert(&r); err != nil {
 				return st, err
 			}
-			st.Created++
+			continue
+		}
+		if rp, ok := p.(Replaceable); ok && rp.Superseded(cached, &r) {
+			if err := repo.DeleteAndArchive(ctx, cached, now); err != nil {
+				return st, err
+			}
+			st.Deleted++
+			if err := insert(&r); err != nil {
+				return st, err
+			}
 			continue
 		}
 		// shouldBeDeleted gate: a cached resource the provider
@@ -185,6 +220,9 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 	for i := range cachedAll {
 		cr := cachedAll[i]
 		if fresh[cr.ExternalID] {
+			continue
+		}
+		if grace > 0 && cr.CreatedAt != nil && now.Sub(*cr.CreatedAt) < grace {
 			continue
 		}
 		if err := repo.DeleteAndArchive(ctx, &cr, now); err != nil {

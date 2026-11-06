@@ -43,7 +43,39 @@ export type BillingSummary = {
   defaultCardId?: string
   hasBillingDetails?: boolean
   fullName?: string
+  firstName?: string
+  lastName?: string
+  phone?: string
+  address?: string
+  city?: string
+  county?: string
+  country?: string
+  zipCode?: string
+  company?: boolean
+  companyName?: string
+  vatCode?: string
+  // Extra invoice/billing e-mail recipients (every billing mail goes to `email` + these).
+  contacts?: BillingContact[]
+  // Payment settings: PREPAID (default; bills settle from credit) | POSTPAID (every issued bill
+  // is charged to the saved card), and the preferred gateway preselected for deposits / new cards.
+  paymentMode?: "PREPAID" | "POSTPAID"
+  paymentGatewayId?: string
   [k: string]: unknown
+}
+
+export type BillingContact = { name?: string; email?: string }
+
+// Payment gateway as listed by GET /payment/{bp}/gateway (no secrets): Stripe carries the
+// Elements publicKey, Airwallex the SDK env ("demo" | "prod"), BankTransfer the operator-entered
+// transfer instructions.
+export type Gateway = {
+  id?: string
+  name?: string
+  thirdParty?: string
+  addCard?: boolean
+  addFunds?: boolean
+  minDeposit?: number | string
+  metadata?: { publicKey?: string; env?: string; instructions?: string; minDeposit?: number }
 }
 
 export type CloudResource = {
@@ -173,6 +205,7 @@ export type CostInfo = {
 export type Bill = {
   id: string
   status?: string
+  invoiceNumber?: string
   netAmount?: number
   grossAmount?: number
   unpaidGrossAmount?: number

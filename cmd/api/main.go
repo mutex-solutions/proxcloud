@@ -182,17 +182,25 @@ func run() error {
 		},
 		mailBusiness, log,
 	)
+	// {{businessName}} in every mail = the operator's legal name from the billing configuration
+	// (admin UI -> Billing configuration -> Business name); the env var stays the fallback.
+	mailSvc.SetBusinessName(func(ctx context.Context) string {
+		iss, _ := billingRepo.IssuerInfo(ctx)
+		return iss.BusinessName
+	})
 	payService := billing.NewPayService(billingRepo, pricingRepo)
-	// add-funds: build a Stripe gateway per integration secret (swappable for tests).
-	stripeGatewayFor := func(secret string) payment.Gateway { return payment.NewStripeGateway(secret) }
-	addFundsSvc := payment.NewAddFundsService(billingRepo, pricingRepo, stripeGatewayFor)
+	// Card gateways (Stripe / Airwallex) are built per integration from its decrypted secret
+	// (payment.NewGateway; a fake in tests).
+	addFundsSvc := payment.NewAddFundsService(billingRepo, pricingRepo, payment.NewGateway)
 	addFundsSvc.SetNotifier(mailSvc)
-	registerCardSvc := payment.NewRegisterCardService(billingRepo, stripeGatewayFor)
-	collectSvc := payment.NewCollectService(billingRepo, pricingRepo, stripeGatewayFor)
-	collectSvc.SetNotifier(mailSvc)
+	addFundsSvc.SetAdminURL(cfg.Self.AdminBaseURL) // {{adminUrl}} in bank_transfer_submitted
+	registerCardSvc := payment.NewRegisterCardService(billingRepo, payment.NewGateway)
+	collectSvc := payment.NewCollectService(billingRepo, pricingRepo, payment.NewGateway)
+	// attachingNotifier: bill_is_paid carries the invoice PDF on every settle path.
+	collectSvc.SetNotifier(attachingNotifier{mailSvc})
 	// Transaction scanner (transaction-sync cron): reconciles stuck PENDING deposits/collects.
 	txnScanner := payment.NewTransactionScanner(billingRepo, addFundsSvc, collectSvc, log)
-	payService.SetNotifier(mailSvc)
+	payService.SetNotifier(attachingNotifier{mailSvc})
 	orderRepo := order.NewRepo(pg)
 	billingH := org.NewBillingHandler(orgSvc, orgPolicy, billingRepo, pricingRepo, payService, addFundsSvc, registerCardSvc, collectSvc, cfg.Self.UIBaseURL, users, orderRepo)
 	// Public billing-configuration read.
@@ -265,7 +273,8 @@ func run() error {
 	// SDN applies are cluster-global on PVE and must be serialized platform-wide.
 	projectH.SetSDNLock(lock.New(pg))
 	// Public-NIC IP allocations (pgdoc `pvePublicIp`).
-	projectH.SetPublicIPs(project.NewPublicIPRepo(pg))
+	publicIPRepo := project.NewPublicIPRepo(pg)
+	projectH.SetPublicIPs(publicIPRepo)
 
 	// Promotion (deposit config) + Affiliate (cfy check + project config/log) — client reads.
 	// The promo-redeem authz gate resolves the bp's org WITH a membership check on the caller
@@ -430,7 +439,7 @@ func run() error {
 			cloud.TypeServer:            billingresource.NewServerProvider(metricsRepo),
 			cloud.TypeVolume:            billingresource.NewVolumeProvider(),
 			cloud.TypeFloatingIP:        billingresource.NewFloatingIPProvider(),
-			cloud.TypeLoadBalancer:      billingresource.NewLoadBalancerProvider(),
+			cloud.TypeImage:             billingresource.NewImageProvider(),
 			cloud.TypeKubernetesCluster: billingresource.NewKubernetesClusterProvider(),
 			cloud.TypeDatabaseCluster:   billingresource.NewDatabaseClusterProvider(),
 			cloud.TypeBucket:            billingresource.NewBucketProvider(),
@@ -440,8 +449,10 @@ func run() error {
 	// fine: every call on it reports ErrNotConfigured, and Validate() already refuses to boot with
 	// remote charging enabled but no URL.
 	billingCli := billingclient.New(cfg.Billing.URL, cfg.Billing.Token, cfg.Billing.Timeout)
-	metricsJob := metricsjob.New(projectRepo, cloudRepo, esSvc, metrics.NewService(metricsRepo), log)
-	syncJob := syncjob.New(projectRepo, esSvc, cloudRepo, log)
+	metricsJob := metricsjob.New(projectRepo, cloudRepo, esSvc, metrics.NewService(metricsRepo), log).WithDB(pg)
+	syncJob := syncjob.New(projectRepo, esSvc, cloudRepo, log).
+		WithPublicIPs(publicIPRepo.ForProject, publicIPRepo.ReleaseNIC).
+		WithAudit(auditSvc)
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)
@@ -577,6 +588,7 @@ func run() error {
 		return projectH.EnableAndBootstrap(ctx, p)
 	})
 	payService.SetReviewer(suspensionJob) // auto-resume a suspended profile when a bill is paid
+	adminH.SetPayService(payService)      // admin record-payment shares the same mail + review hooks
 	// bindOrderPaid flips an order PAID only when it belongs to the PAYING profile AND the settled
 	// gross covers net+tax — a foreign txn.OrderID or a short settlement is a silent no-op (never
 	// errors the payment). Shared by add-funds + collect; the write filters on {_id, billingProfileId}.
@@ -606,7 +618,35 @@ func run() error {
 	// Monthly bill finalization: finalize each profile's previous-month OPEN bill (OPEN→SENT/PAID) so
 	// the collect + dunning crons have SENT bills to act on.
 	billSendSvc := billing.NewBillSendService(billingRepo, pricingRepo)
-	billSendSvc.SetNotifier(mailSvc)
+	billSendSvc.SetNotifier(attachingNotifier{mailSvc})
+	// {{billUrl}} in the bill mails: the bill page of the profile's first ENABLED project; the
+	// console root when nothing resolves so the link still opens.
+	billLink := func(ctx context.Context, profile *billing.BillingProfile, bill *pricing.Bill) string {
+		base := strings.TrimRight(cfg.Self.UIBaseURL, "/")
+		orgIDs := []string{}
+		if orgs, err := orgRepo.FindAllByBillingProfileID(ctx, profile.ID); err == nil {
+			for i := range orgs {
+				orgIDs = append(orgIDs, orgs[i].ID)
+			}
+		}
+		if projects, err := projectRepo.AllByBillingProfile(ctx, profile.ID, orgIDs); err == nil {
+			for i := range projects {
+				if projects[i].IsEnabled() {
+					return base + "/p/" + projects[i].ID + "/billing/history/bills/" + bill.ID
+				}
+			}
+		}
+		return base + "/"
+	}
+	billSendSvc.SetBillLink(billLink)
+	payService.SetBillLink(billLink)
+	collectSvc.SetBillLink(billLink)
+	// Pay as you go: a POSTPAID profile's freshly issued bill is charged to its card right away
+	// (same path as the monthlyCollect cron; a decline is e-mailed and retried by the cron).
+	billSendSvc.SetAutoCollector(func(ctx context.Context, profile *billing.BillingProfile) error {
+		_, err := collectSvc.CollectBillingProfile(ctx, profile)
+		return err
+	})
 	// Project-deletion job: cascade-delete a scheduled project's cloud resources (live
 	// WriteService.Delete per resource) then remove the doc. ⚠ performs LIVE cloud DELETEs.
 	deletionJob := project.NewDeletionJob(projectRepo, projectTeardownDeleter(projectH.TeardownProject), log)
@@ -673,6 +713,17 @@ func run() error {
 			"run-sync": func(w http.ResponseWriter, r *http.Request) {
 				n, err := syncJob.Run(r.Context())
 				jobResult(w, map[string]any{"synced": n}, err)
+			},
+			"run-pve-state": func(w http.ResponseWriter, r *http.Request) {
+				n, err := syncJob.RunPVEState(r.Context())
+				jobResult(w, map[string]any{"changed": n}, err)
+			},
+			"run-pve-tasks": func(w http.ResponseWriter, r *http.Request) {
+				n, err := syncJob.RunPVETasks(r.Context())
+				jobResult(w, map[string]any{"recorded": n}, err)
+			},
+			"run-pve-traffic": func(w http.ResponseWriter, r *http.Request) {
+				jobResult(w, map[string]any{"ran": "pve-traffic"}, metricsJob.RunPVE(r.Context()))
 			},
 			"run-metrics": func(w http.ResponseWriter, r *http.Request) {
 				jobResult(w, map[string]any{"ran": "metrics"}, metricsJob.Run(r.Context()))
@@ -1011,6 +1062,21 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 				log.Info("cloud resources synced", "count", n)
 			}
 		}},
+		{Name: "pveStateSync", Spec: scheduler.PVEStateSyncSpec, AtMostFor: 2 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
+			if _, err := sync.RunPVEState(ctx); err != nil {
+				log.Error("pve state sync job", "err", err)
+			}
+		}},
+		{Name: "pveTaskPoll", Spec: scheduler.PVETaskPollSpec, AtMostFor: time.Minute, AtLeastFor: 10 * time.Second, Fn: func(ctx context.Context) {
+			if _, err := sync.RunPVETasks(ctx); err != nil {
+				log.Error("pve task poll job", "err", err)
+			}
+		}},
+		{Name: "pveTrafficSample", Spec: scheduler.PVETrafficSpec, AtMostFor: 2 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
+			if err := metrics.RunPVE(ctx); err != nil {
+				log.Error("pve traffic job", "err", err)
+			}
+		}},
 		{Name: "executeProjectDeletion", Spec: scheduler.ProjectDeletionSpec, AtMostFor: time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
 			if n, err := deletion.ExecuteAll(ctx); err != nil {
 				log.Error("project deletion job", "err", err)
@@ -1209,4 +1275,16 @@ func originsOf(urls ...string) []string {
 		out = append(out, u.Scheme+"://"+u.Host)
 	}
 	return out
+}
+
+// attachingNotifier lets the bill mails carry the invoice PDF: billing.Attachment -> mail.Attachment
+// (billing does not import mail, so the mapping lives here).
+type attachingNotifier struct{ *mail.Service }
+
+func (a attachingNotifier) SendTemplateWithAttachments(ctx context.Context, key string, to []string, vars map[string]any, atts []billing.Attachment) error {
+	out := make([]mail.Attachment, 0, len(atts))
+	for _, at := range atts {
+		out = append(out, mail.Attachment{Filename: at.Filename, ContentType: at.ContentType, Data: at.Data})
+	}
+	return a.Service.SendTemplateWithAttachments(ctx, key, to, vars, out)
 }

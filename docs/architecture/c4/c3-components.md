@@ -134,7 +134,7 @@ flowchart TB
 | Template discovery | `internal/cloud/pve/templates.go` (`DiscoverTemplates`), `externalservice/proxmox.go` (`PVEImageCatalog`), `project/cloud_writes_pve.go` (`pveImageCatalog`, per-node copy in `pveCreateServer`) | Catalog read from the cluster: templates in pool `pc-templates` tagged `pc-public`, grouped by `pc-img-<slug>`, newest `pc-v-*` per node. `config.templates` pins or overlays. | Implemented |
 | Capability detection | `internal/cloud/pve/capability.go` (`DetectStorage`, `classify`, `StorageHasRoom`, `TemplateShared`), `externalservice/proxmox.go` (`ValidatePVEStorageProfiles`, `DetectPVECapabilities`, `PVEEffectiveStorageClass`), `syncjob/job.go` (`detectProxmoxCapabilities`), `admin/pveadmin.go` (`proxmoxDetectStorage`, `proxmoxStorageClasses`, `validatePVEStorageProfiles`) | Per storage from `GET /storage` + `/cluster/resources type=storage`: type, shared, content, snapshots, thin, live migrate, replication, tier and a default class from a static type table, plus per-node active/avail. Persisted under `config.capabilities` every sync cycle and on admin Re-detect. Storage-profile saves are rejected when a storage is missing, inactive, lacks `images`, or the profile claims a flag the storage lacks. Admin class override (`config.storageClasses.<id>.class`) wins; the installer's `suggestedClass` is display-only. Feeds placement (active nodes, free space, template and clone-target locality), same-node attach gating and the capacity-class gates (boot disk, snapshots, DBaaS). HA readiness is still Planned. | Implemented |
 | Replication and HA | not yet in the tree | `pvesr` jobs and HA node-affinity rules for protected VMs. | Planned |
-| Metering samplers | not yet in the tree | Minute-level VM state sampling from `/cluster/resources`, task log polling, native NIC counters. | Planned |
+| Metering reads | `internal/cloud/pve/syncprovider.go` (`SampledServerProvider`, `SampledImageProvider`, `Superseded`), `task.go` (`NodeTasks`), `qemu.go` (`VMStatus.NICs`), `gpu.go` (`GPUSpecsFromConfig`), `service.go` (`CreatedTag`) | The Proxmox side of metering: rows built from one `/cluster/resources` page, the VM identity stamp `pc-c-<unix>`, node task logs, per-tap counters, GPU count from `hostpciN mapping=`. See C3c. | Implemented |
 | TrueNAS client | not yet in the tree | Shares, datasets and quotas through the TrueNAS WebSocket API. | Planned |
 | VM metadata datasource | not yet in the tree | Per-VM cloud-init datasource served by the API. | Planned |
 
@@ -157,15 +157,25 @@ flowchart LR
   br["billingresource providers"]:::impl
   price["pricing engine"]:::impl
   bill["billing<br/>bills, suspension, reminders"]:::impl
-  pay["payment<br/>Stripe"]:::impl
+  pay["payment<br/>Stripe, Airwallex, bank transfer"]:::impl
   susp["suspend and resume<br/>Proxmox VMs"]:::impl
-  samplers["Proxmox state and task samplers"]:::planned
-  airwallex["Airwallex gateway"]:::planned
+  state["pveStateSync 60s<br/>+ staleness alert"]:::impl
+  tasks["pveTaskPoll 20s"]:::impl
+  pvem["metrics.PVEFetcher<br/>public NIC counters"]:::impl
+  factory["gateway factory<br/>per integration"]:::impl
+  inv["invoice, credit note,<br/>contacts"]:::impl
 
   cron --> sync
   cron --> mj
   cron --> bp
   sync --> repo
+  cron --> state
+  cron --> tasks
+  state --> repo
+  tasks --> repo
+  tasks --> sync
+  mj --> pvem
+  pvem --> repo
   mj --> prom
   mj --> mrepo
   bp --> fan
@@ -178,28 +188,30 @@ flowchart LR
   price --> bill
   bill --> pay
   bill --> susp
-  samplers -.-> repo
-  pay -.-> airwallex
+  pay --> factory
+  bill --> inv
 ```
 
 | Component | Path | Responsibility | Status |
 |---|---|---|---|
 | Scheduler | `internal/platform/scheduler/scheduler.go`, `internal/platform/lock/shedlock.go` | Cron specs (charge every minute, hour and month; sync every 15 minutes; dunning, collect, bill send) run once across pods. | Implemented |
 | Operator job triggers | `internal/platform/job/job.go` | `/api/v1/admin/job/*` triggers for charge, metrics, sync, collect. | Implemented |
-| Metrics | `internal/cloud/metrics/` (`prometheus.go`, `service.go`, `repo.go`), `internal/cloud/metricsjob/job.go` | Month-to-date VM traffic from a Prometheus-compatible source, per provider (opt-in; Proxmox defaults to none). | Implemented |
-| Billing resources | `internal/cloud/billingresource/` (`billingresource.go` `GetBillingResources`, `server.go`, `volume.go`, `floatingip.go`, `bucket.go`, `loadbalancer.go`, `kubernetescluster.go`, `databasecluster.go`, `catalog.go`) | Turn cache rows into billable units with typed attributes; servers yield an instance unit plus a traffic unit; volumes carry `profile` and `storage_class` for per-profile price rules. | Implemented |
+| Metrics | `internal/cloud/metrics/` (`prometheus.go`, `pve.go`, `service.go`, `repo.go`), `internal/cloud/metricsjob/job.go` | Month-to-date VM traffic per provider: Proxmox public-NIC counters by default, sampled every minute with reset-aware deltas (`nicCounter`), or a Prometheus-compatible source hourly. | Implemented |
+| Proxmox state sampler | `internal/cloud/syncjob/pve_meter.go` (`RunPVEState`), `internal/cloud/providers/providers.go` (`Reconcile`: `Replaceable`, `VanishGrace`) | Every minute, one `/cluster/resources` page per provider reconciles SERVER, IMAGE and FLOATING_IP rows of every project. A reused vmid gets a new row (archive + insert); a row is not archived for being absent in its first 2 minutes, nor resurrected in the 2 minutes after archiving (pmxcfs lag). An empty page never archives. | Implemented |
+| Proxmox task poller | `internal/cloud/syncjob/pve_meter.go` (`RunPVETasks`), `internal/cloud/meter.go` (`TaskEvent`), `internal/platform/project/cloud_writes_pve.go` (`pveServerEvents`) | Every 20 seconds, finished VM tasks past each node's cursor: deduped on UPID, served by `LIST_EVENTS`, audited when another user ran them, and their project re-synced, so a change outside the portal lands in seconds. | Implemented |
+| Staleness policy | `internal/cloud/meter.go` (`MeterState`, `MeterStaleAfter`), `syncjob/pve_meter.go` (`meterFailed`), `billingjob.go` (`billingResources`), `pricing/bill_build.go` (`SkipInterval`) | Last-known state for 30 minutes without a good sample, then the provider's resources stop billing and the gap is written off; alert by `ERROR` log and audit event. | Implemented |
+| Billing resources | `internal/cloud/billingresource/` (`billingresource.go` `GetBillingResources`, `server.go`, `volume.go`, `floatingip.go`, `image.go`, `bucket.go`, `kubernetescluster.go`, `databasecluster.go`, `catalog.go`) | Turn cache rows into billable units with typed attributes; servers yield an instance unit plus a traffic unit; volumes carry `profile` and `storage_class` for per-profile price rules; public IPs (one row per allocation) and project templates bill too. `GetArchivedBillingResources` feeds rows archived this cycle back in with `DeletedAt` for their last partial interval. | Implemented |
 | Billing provider | `internal/platform/billingprovider/billingprovider.go` | Native (rate in process) or external (resolve here, rate in a separate billing service). | Implemented |
 | Billing job | `internal/platform/billingjob/billingjob.go` (`Charge`, `ChargeProfileByID`), `remote.go` | Per active billing profile and provider: resolve billing resources, pick price plans, rate onto the current bill. | Implemented |
 | Charge fan-out | `internal/platform/chargefanout/chargefanout.go` | One RabbitMQ message per profile, off by default. | Implemented |
 | Billing client and callbacks | `internal/platform/billingclient/`, `internal/platform/billingcallback/`, `pkg/billingapi/` | Wire contract and callbacks for an external billing service. | Implemented |
 | Pricing | `internal/platform/pricing/` (`engine.go`, `charge.go`, `planselect.go`, `bill_build.go`, `adjustments.go`, `tax.go`, `fx.go`, `settle.go`) | Rating engine, bill items, savings and price adjustments, tax, currency, settlement. | Implemented |
-| Billing | `internal/platform/billing/` (`balance.go`, `sendbill.go`, `suspension_job.go`, `activationservice.go`, `reminder.go`, `savings.go`, `billpdf.go`) | Billing profiles, balance, bill finalization, PDF, dunning and suspension, reminders, savings contracts. | Implemented |
+| Billing | `internal/platform/billing/` (`balance.go`, `sendbill.go`, `suspension_job.go`, `activationservice.go`, `reminder.go`, `savings.go`, `billpdf.go`, `paybill.go`) | Billing profiles, balance, bill finalization, PDF, dunning and suspension, reminders, savings contracts. PREPAID or POSTPAID payment mode per profile; an operator can record an offline payment on a SENT bill (`PayService.RecordManualPayment`, `POST /admin/bill/{id}/record-payment`, MCP `record_bill_payment`). | Implemented |
+| Invoice, credit note, contacts | `internal/platform/billing/` (`invoice.go`, `creditnote.go`, `contacts.go`) | Sequential invoice number `INV-<year>-<seq>` stamped once when a bill leaves OPEN (counter row per year), tax invoice and credit note PDFs with the operator as issuer, validated invoice recipients (max 10) that every billing mail also goes to. Bill and refund mails carry the PDF. | Implemented |
 | Proxmox suspend/resume | `cmd/api/main.go` (`billingCloudSuspender`) | Suspends and resumes a suspended profile's Proxmox VMs. | Implemented |
-| Payment | `internal/platform/payment/` (`stripe.go`, `addfunds.go`, `collect.go`, `registercard.go`, `scanner.go`) | Stripe deposits, cards, collect, transaction scanner; bank transfer settlement. | Implemented |
-| Proxmox native samplers | not yet in the tree | Minute-level state and task sampling, native NIC counters, VM identity stamp. | Planned |
-| Public IP and image billing | not yet in the tree | Billing units for allocated public IPs and project templates. | Planned |
+| Payment | `internal/platform/payment/` (`stripe.go`, `airwallex.go`, `factory.go`, `addfunds.go`, `collect.go`, `registercard.go`, `scanner.go`, `banktransfer.go`) | Card deposits, cards, collect, refunds and the transaction scanner over one `Gateway` interface. Gateway secrets are read from the integration doc (decrypted on load). Confirm callbacks re-read the intent from the gateway and settle through an atomic PENDING to PROCESSING claim, so a repeated or concurrent callback credits once. Bank transfer: the customer submits date, bank reference and proof (2 MiB cap), finance is mailed, an operator approves or rejects. | Implemented |
+| Gateway factory | `internal/platform/payment/factory.go` (`NewGateway`) | Picks the gateway for an integration: Stripe by `secret.privateKey`; Airwallex by `config.clientId`, `secret.apiKey` and `config.sandbox` (demo host), one cached instance per credential so the login token is shared. BankTransfer is not a card gateway. | Implemented |
 | Protected VM billing | not yet in the tree | Billing unit for replicated, HA-protected VMs. | Planned |
-| Airwallex gateway | not yet in the tree | Second payment gateway. | Planned |
 
 ## C3d. Platform services
 

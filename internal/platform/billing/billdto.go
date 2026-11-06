@@ -32,6 +32,7 @@ type BillDto struct {
 	Status                    string                             `json:"status,omitempty"`
 	Items                     []BillItemDto                      `json:"items"`
 	BillingCycle              *pricing.BillBillingCycle          `json:"billingCycle,omitempty"`
+	InvoiceNumber             string                             `json:"invoiceNumber,omitempty"`
 	InvoiceCurrency           string                             `json:"invoiceCurrency,omitempty"`
 	BillingProfileID          string                             `json:"billingProfileId,omitempty"`
 	GrossAmount               json.Number                        `json:"grossAmount"`
@@ -92,6 +93,7 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 		Status:                    string(bill.Status),
 		Items:                     items,
 		BillingCycle:              bill.BillingCycle,
+		InvoiceNumber:             bill.InvoiceNumber,
 		InvoiceCurrency:           bill.InvoiceCurrency,
 		BillingProfileID:          bill.BillingProfileID,
 		GrossAmount:               num(grossAmount),

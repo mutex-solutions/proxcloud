@@ -51,7 +51,7 @@ It **warns** without failing when:
 
 On success it reports the Proxmox VE version and how many nodes, storages and PCI mappings the token can see.
 
-<!-- screenshot: /docs-img/add-proxmox-provider.png — ProxCloud admin: the Add provider dialog with the Proxmox VE form and a Test connection result -->
+![The Add cloud provider dialog with the Proxmox VE form](/docs-img/add-proxmox-provider.png)
 
 ## Proxmox resources
 
@@ -85,6 +85,8 @@ Projects have no floating IPs. A server becomes reachable from outside when it g
 
 ## Storage
 
+![The provider Storage tab with detected storage capabilities](/docs-img/provider-storage.png)
+
 ProxCloud reads what each Proxmox storage can do from the cluster instead of trusting the profile flags. The provider's **Storage** tab lists every storage with its type, content, tier (*full* for Ceph RBD/CephFS, otherwise *standard*), capability badges (shared, snapshots, thin, live migrate, replication), the nodes where it is active, and its class. Detection runs on every sync cycle, on every save of the storage profiles, and when you press **Re-detect capabilities**.
 
 ### Storage classes
@@ -117,10 +119,11 @@ The provider's **Quota** tab sets the default quota seeded into each new project
 
 ## Usage metrics
 
-The **Metrics** tab chooses where the hourly traffic-billing job reads per-VM network usage:
+The **Metrics** tab chooses where the traffic-billing job reads per-VM network usage:
 
-- `none` is the default for a Proxmox provider. The job skips the provider, so no traffic is metered.
-- `prometheus` reads a Prometheus-compatible endpoint (Prometheus, Mimir, VictoriaMetrics or Thanos). Set the endpoint URL and the metric schema, plus headers, credentials or a custom CA if needed. The only schema today is `libvirt-exporter`, a legacy layout that doesn't match Proxmox VMs yet, so a Proxmox provider meters no traffic until a Proxmox schema is added.
+- `pve` is the default for a Proxmox provider. It reads the byte counters of each VM's public NIC from Proxmox every minute. SDN traffic is not metered. Traffic in the last minute before a VM stops or migrates is lost, because Proxmox restarts the counter there.
+- `none` turns traffic metering off.
+- `prometheus` reads a Prometheus-compatible endpoint (Prometheus, Mimir, VictoriaMetrics or Thanos). Set the endpoint URL and the metric schema, plus headers, credentials or a custom CA if needed. The only schema today is `libvirt-exporter`, a legacy layout that doesn't match Proxmox VMs yet.
 
 Always run **Test** after you change the source. A misconfigured source doesn't fail loudly; ingestion stops and traffic goes unbilled. The same settings are available through `PUT /api/v1/admin/service/{id}/metrics-config`, `POST /api/v1/admin/service/{id}/metrics-test`, and the admin MCP tools `set_metrics_config` and `test_metrics_config`.
 

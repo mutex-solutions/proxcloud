@@ -30,7 +30,11 @@ Go to **Compute → Servers** and click **Create server**. The launch form is a 
 5. Still under **Access**, tick a **security group** that opens the ports you'll use. Every project has a default group.
 6. Give it a **name** and click **Create server**. ProxCloud clones the image into a new VM in your project, turns on its firewall before the first boot, and starts it. It moves through **BUILD** and settles on **ACTIVE** once it's up. (For what's happening behind that, see [How Provisioning Works](/docs/concepts/provisioning).)
 
+![The Create server page with an image and a flavor selected](/docs-img/create-server.png)
+
 The new server appears in the list right away, first in a **build** state:
+
+![The Servers list with a running server and its addresses](/docs-img/servers-list.png)
 
 ## Step 4 — Reach it from the internet
 
@@ -46,6 +50,8 @@ Once the server has a public address:
 ## Step 5 — Operate and tidy up
 
 From the server's page you can run power actions — **Start**, **Stop**, **Reboot** — and, from **More actions**, delete it. Deleting destroys the VM together with its disks, so it stops accruing charges, and returns any public address to the pool.
+
+![A server detail page with its power actions and addresses](/docs-img/server-detail.png)
 
 Deleting asks you to confirm, since it can't be undone:
 

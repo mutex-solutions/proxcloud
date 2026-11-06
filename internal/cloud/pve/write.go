@@ -54,11 +54,13 @@ type CreateServerReq struct {
 	// DHCP (nil = the zone's DHCP serves it). The caller owns the allocation and releases it
 	// when CreateServer fails.
 	AssignIP func(ctx context.Context, vmid int) (ip string, prefix int, gateway string, err error)
+	// createdUnix is the identity stamp, set by CreateServer.
+	createdUnix int64
 }
 
 // vmTags renders the identity tags for a create/read-back.
 func (r CreateServerReq) vmTags() string {
-	tags := []string{TagManaged, FlavorTag(r.Spec.Slug), ImageTag(r.ImageSlug), ProfileTag(r.Spec.StorageProfile)}
+	tags := []string{TagManaged, FlavorTag(r.Spec.Slug), ImageTag(r.ImageSlug), ProfileTag(r.Spec.StorageProfile), CreatedTag(r.createdUnix)}
 	if r.Spec.GPUModel != "" && r.Spec.GPUCount > 0 {
 		tags = append(tags, GPUTag(r.Spec.GPUModel, r.Spec.GPUCount))
 	}
@@ -115,6 +117,7 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 		s.destroyBestEffort(ctx, node, vmid)
 		return nil, fmt.Errorf("pve create: read config: %w", err)
 	}
+	req.createdUnix = nowUTC().Unix()
 	params := nicFirewallParams(cloned)
 	drop := extraNICKeys(cloned)
 	for _, k := range drop {
@@ -291,6 +294,9 @@ func (s *Service) ResolveVM(ctx context.Context, projectID, externalID string) (
 			if st, err := s.C.GetVMStatus(ctx, r.Node, vmid); err == nil {
 				r.Status, r.Lock, r.Name = st.Status, st.Lock, st.Name
 				r.Tags, r.MaxCPU, r.MaxMem, r.MaxDisk = st.Tags, st.CPUs, st.MaxMem, st.MaxDisk
+				if st.QMPStatus == "paused" { // a suspended billing profile or disabled project
+					r.Status = "paused"
+				}
 			}
 			return r, nil
 		}
@@ -538,6 +544,9 @@ func (s *Service) Console(ctx context.Context, projectID, externalID string, ser
 	return u, t.User, t.Ticket, nil
 }
 
+// imageBuildPrefix names a clone CreateImage has not converted yet, so no sync takes it for a server.
+const imageBuildPrefix = "pc-img-build-"
+
 // CreateImage snapshots a pool VM into a project-owned template (full clone →
 // convert). Returns the template's vmid; the IMAGE sync row follows.
 func (s *Service) CreateImage(ctx context.Context, projectID, serverExtID, name string) (int, error) {
@@ -555,12 +564,31 @@ func (s *Service) CreateImage(ctx context.Context, projectID, serverExtID, name 
 		return 0, err
 	}
 	upid, err := s.C.CloneVM(ctx, vm.Node, vm.VMID, CloneOpts{
-		NewID: newID, Name: name, Pool: s.PoolFor(projectID), Full: true,
+		NewID: newID, Name: imageBuildPrefix + name, Pool: s.PoolFor(projectID), Full: true,
 	})
 	if err != nil {
 		return 0, err
 	}
 	if err := s.C.WaitTask(ctx, upid); err != nil {
+		return 0, err
+	}
+	// The clone inherited the source VM's identity stamp. Dropping it keeps it from spreading to
+	// every VM later cloned out of this template.
+	cfg, err := s.C.GetVMConfig(ctx, vm.Node, newID)
+	if err == nil {
+		var tags []string
+		for _, t := range strings.Split(cfg.Str("tags"), ";") {
+			if t != "" && !strings.HasPrefix(t, tagCreatedPref) {
+				tags = append(tags, t)
+			}
+		}
+		var up UPID
+		if up, err = s.C.SetVMConfig(ctx, vm.Node, newID, map[string]string{"tags": JoinTags(tags...)}); err == nil {
+			err = s.C.WaitTask(ctx, up)
+		}
+	}
+	if err != nil {
+		s.destroyBestEffort(ctx, vm.Node, newID)
 		return 0, err
 	}
 	tupid, err := s.C.ToTemplate(ctx, vm.Node, newID)
@@ -569,6 +597,14 @@ func (s *Service) CreateImage(ctx context.Context, projectID, serverExtID, name 
 		return 0, err
 	}
 	if err := s.C.WaitTask(ctx, tupid); err != nil {
+		s.destroyBestEffort(ctx, vm.Node, newID)
+		return 0, err
+	}
+	up, err := s.C.SetVMConfig(ctx, vm.Node, newID, map[string]string{"name": name})
+	if err == nil {
+		err = s.C.WaitTask(ctx, up)
+	}
+	if err != nil {
 		s.destroyBestEffort(ctx, vm.Node, newID)
 		return 0, err
 	}

@@ -82,27 +82,34 @@ func TestStripeCardSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("customer: %v", err)
 	}
-	si, err := g.CreateSetupIntent(ctx, SetupIntentInput{CustomerID: cust, Description: "Register card"})
+	si, err := g.CreateSetupIntent(ctx, SetupIntentInput{CustomerID: cust, Description: "Card verification", AmountCents: CardVerificationAmountCents, Currency: "usd"})
 	if err != nil {
-		t.Fatalf("create setup intent: %v", err)
+		t.Fatalf("create verification intent: %v", err)
 	}
-	t.Logf("setup intent %s status=%s", si.ID, si.Status)
-	// confirm with a test card (attaches a card pm to the customer).
-	if _, err := g.sc.SetupIntents.Confirm(si.ID, &stripe.SetupIntentConfirmParams{PaymentMethod: stripe.String("pm_card_visa"), ReturnURL: stripe.String("https://example.com/return")}); err != nil {
-		t.Fatalf("confirm setup intent: %v", err)
+	t.Logf("verification intent %s status=%s", si.ID, si.Status)
+	// confirm with a test card (authorizes the 1.00 hold + attaches the card pm to the customer).
+	if _, err := g.sc.PaymentIntents.Confirm(si.ID, &stripe.PaymentIntentConfirmParams{PaymentMethod: stripe.String("pm_card_visa"), ReturnURL: stripe.String("https://example.com/return")}); err != nil {
+		t.Fatalf("confirm verification intent: %v", err)
 	}
 	got, err := g.RetrieveSetupIntent(ctx, si.ID)
 	if err != nil || got.Status != "succeeded" {
-		t.Fatalf("retrieve SI: %v status=%s", err, got.Status)
+		t.Fatalf("retrieve verification: %v status=%s", err, got.Status)
 	}
-	card, err := g.LatestCardForCustomer(ctx, cust)
-	if err != nil {
-		t.Fatalf("latest card: %v", err)
-	}
-	if card.TokenID == "" || card.PanMasked == "" {
+	card := got.Card
+	if card.TokenID == "" || card.PanMasked == "" || card.ExpYear == 0 {
 		t.Fatalf("card details empty: %+v", card)
 	}
 	t.Logf("stored card token=%s pan=%s exp=%d/%d", card.TokenID, card.PanMasked, card.ExpMonth, card.ExpYear)
+	// release the hold → the intent is canceled.
+	if err := g.ReleaseSetupIntent(ctx, si.ID); err != nil {
+		t.Fatalf("release hold: %v", err)
+	}
+	if after, err := g.RetrievePaymentIntent(ctx, si.ID); err != nil || after.Status != "canceled" {
+		t.Fatalf("hold not released: %v status=%s", err, after.Status)
+	}
+	if err := g.ReleaseSetupIntent(ctx, si.ID); err != nil { // idempotent
+		t.Fatalf("second release: %v", err)
+	}
 	if _, err := g.sc.Customers.Del(cust, nil); err == nil {
 		t.Logf("cleaned customer %s", cust)
 	}
@@ -122,16 +129,20 @@ func TestStripeCollectRefundSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("customer: %v", err)
 	}
-	si, err := g.CreateSetupIntent(ctx, SetupIntentInput{CustomerID: cust, Description: "Register card"})
+	si, err := g.CreateSetupIntent(ctx, SetupIntentInput{CustomerID: cust, Description: "Card verification", AmountCents: CardVerificationAmountCents, Currency: "usd"})
 	if err != nil {
-		t.Fatalf("setup intent: %v", err)
+		t.Fatalf("verification intent: %v", err)
 	}
-	if _, err := g.sc.SetupIntents.Confirm(si.ID, &stripe.SetupIntentConfirmParams{PaymentMethod: stripe.String("pm_card_visa"), ReturnURL: stripe.String("https://example.com/return")}); err != nil {
-		t.Fatalf("confirm setup intent: %v", err)
+	if _, err := g.sc.PaymentIntents.Confirm(si.ID, &stripe.PaymentIntentConfirmParams{PaymentMethod: stripe.String("pm_card_visa"), ReturnURL: stripe.String("https://example.com/return")}); err != nil {
+		t.Fatalf("confirm verification intent: %v", err)
 	}
-	card, err := g.LatestCardForCustomer(ctx, cust)
-	if err != nil {
-		t.Fatalf("latest card: %v", err)
+	verified, err := g.RetrieveSetupIntent(ctx, si.ID)
+	if err != nil || verified.Status != "succeeded" {
+		t.Fatalf("verification: %v status=%s", err, verified.Status)
+	}
+	card := verified.Card
+	if err := g.ReleaseSetupIntent(ctx, si.ID); err != nil {
+		t.Fatalf("release hold: %v", err)
 	}
 
 	// collect: charge the saved card immediately.

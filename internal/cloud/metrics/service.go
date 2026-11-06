@@ -72,6 +72,9 @@ func (s *Service) FetchAndSaveUsageMetrics(ctx context.Context, f MeasureFetcher
 // interface name → port-id prefix → find the matching PORT resource → its port.networkId →
 // true iff that network is in the public-networks list.
 func isPublicTraffic(iface Resource, ports, publicNets []cloud.CloudResource) bool {
+	if iface.Public != nil {
+		return *iface.Public
+	}
 	portIDPrefix := strings.ReplaceAll(iface.Name, "tap", "")
 	for i := range ports {
 		if !strings.HasPrefix(ports[i].ExternalID, portIDPrefix) {
