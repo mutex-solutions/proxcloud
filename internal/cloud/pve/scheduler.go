@@ -29,6 +29,8 @@ type SchedReq struct {
 	// DiskBytes must fit on Storage while HeadroomPct % of its capacity stays free.
 	DiskBytes   int64
 	HeadroomPct float64
+	// ReserveMem is memory a node keeps free for the protected VMs that fail over to it. nil = none.
+	ReserveMem map[string]int64
 	// SpreadGroup keeps the group's members (VMs of SpreadPool carrying its tag) apart: among the
 	// nodes that fit, those with the fewest members win. SpreadStrict refuses a node that has one.
 	// A preference, not a guarantee: nothing moves a member later (PVE's own rules are HA-only).
@@ -83,7 +85,7 @@ func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error)
 		if usedCPU[n.Node]+float64(req.VCPUs) > float64(n.MaxCPU)*oc {
 			continue
 		}
-		freeMem := n.MaxMem - usedMem[n.Node]
+		freeMem := n.MaxMem - usedMem[n.Node] - req.ReserveMem[n.Node]
 		if freeMem < req.RAMMb*(1<<20) {
 			continue
 		}

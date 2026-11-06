@@ -160,6 +160,7 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 				r.Status = "paused"
 			}
 			data = ServerData(r, p.svc.ServerAddresses(ctx, r), GPUSpecsFromConfig(cfg, p.gpuAlias))
+			p.svc.StampProtection(ctx, r, data)
 		}
 		if _, tagged := data[dataIdentity]; !tagged && cfg != nil {
 			if id := metaIdentity(cfg); id != "" {
@@ -194,9 +195,23 @@ func (p *ServerSyncProvider) sampledData(r ClusterResource) map[string]any {
 					specs = m
 				}
 			}
+			if pr, ok := srv["protection"]; ok {
+				data := ServerData(r, addrs, specs)
+				data["server"].(map[string]any)["protection"] = pr
+				return data
+			}
 		}
 	}
 	return ServerData(r, addrs, specs)
+}
+
+// diskGbOf sums a VM's disks: what a replica takes on the target, and what protection bills.
+func diskGbOf(cfg VMConfig) int {
+	n := 0
+	for _, d := range ParseDisks(cfg) {
+		n += d.SizeGiB
+	}
+	return n
 }
 
 // --- VOLUME ---

@@ -394,6 +394,12 @@ func (s *Service) DeleteServer(ctx context.Context, projectID, externalID string
 	if vm == nil {
 		return nil // already gone
 	}
+	if HasTag(vm.Tags, tagProtected) {
+		// HA would restart what we stop below.
+		if err := s.DisableProtection(ctx, projectID, externalID); err != nil {
+			return err
+		}
+	}
 	if vm.Status == "running" {
 		if up, err := s.C.StopVM(ctx, vm.Node, vm.VMID); err == nil {
 			_ = s.C.WaitTask(ctx, up)
@@ -449,6 +455,9 @@ func (s *Service) PowerAction(ctx context.Context, projectID, externalID, verb s
 	err = s.C.WaitTask(ctx, up)
 	if err != nil && strings.Contains(err.Error(), "got timeout") {
 		return conflictf("Server %s did not respond in time. If it is still booting, try again when it is up", vm.Name)
+	}
+	if err == nil && HasTag(vm.Tags, tagProtected) {
+		s.waitHAPower(ctx, vm, verb)
 	}
 	return err
 }

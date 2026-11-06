@@ -12,6 +12,8 @@ package externalservice
 //	    "services": {"compute": {"pve": true}, "network": {"pve": true},
 //	                 "volumev3": {"pve": true}, "image": {"pve": true}},
 //	    "apiUrl":      "https://pve1.lab:8006",
+//	    "apiUrls":     ["https://pve2.lab:8006"], // failover: other nodes or a VIP
+//	    "caCert":      "-----BEGIN CERTIFICATE-----…", // cluster CA pin; takes precedence over fingerprint
 //	    "tokenId":     "proxcloud@pve!platform", // full API token identity (secret half below)
 //	    "fingerprint": "AA:BB:…",              // SHA-256 cert pin; empty → system CA
 //	    "insecureTls": false,
@@ -109,6 +111,8 @@ func (e *ExternalService) PVEConfig() pve.Config {
 	insecure, _ := e.Config["insecureTls"].(bool)
 	return pve.Config{
 		APIURL:         str(e.Config["apiUrl"]),
+		APIURLs:        strList(e.Config["apiUrls"]),
+		CACert:         str(e.Config["caCert"]),
 		TokenID:        str(e.Config["tokenId"]),
 		Secret:         str(e.secretMap()["tokenSecret"]),
 		Fingerprint:    str(e.Config["fingerprint"]),

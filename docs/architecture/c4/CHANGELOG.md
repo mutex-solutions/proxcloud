@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Protected servers and several API endpoints
+
+**What changed**
+
+- New `internal/cloud/pve/protect.go`: replication jobs, HA resources and node-affinity rules, gating, RPO state on the
+  server row, `server_protection` billing, memory reservation in the scheduler, an operator migrate route.
+- `config.apiUrls` and `config.caCert`: the PVE client fails over between endpoints and pins the cluster CA.
+
+**Why**
+
+- Local ZFS is pinned to one node; a site that needs a server to survive a node failure had no answer without Ceph.
+- HA is added only after the first sync, since a failover before that has no replica to start from.
+- Node-affinity rules with equal priority, not `/cluster/ha/groups` (gone in PVE 9): a recovered node must not pull the
+  VM back on its own, a second interruption nobody asked for.
+- A single `apiUrl` made the node hosting it a point of failure for the whole portal, exactly when HA is needed. Each
+  node has its own certificate, so several endpoints need the cluster CA, not a fingerprint.
+
+**Diagrams updated**: `c2-containers.md`, `c3-components.md`.
+
 ## 2026-11-07: P5 IaaS parity: server seeds, rebuild, snapshots, subnets, spread groups
 
 **What changed**

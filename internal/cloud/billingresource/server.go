@@ -37,6 +37,9 @@ func (p *ServerProvider) GetBillingInformation(ctx context.Context, _ billingapi
 	if server, ok := mapAt(cr.Data, "server"); ok {
 		notEligible = serverNotEligibleStatuses[str(server["status"])]
 	}
+	if pr := protectionBR(cr); pr != nil {
+		out = append(out, pr)
+	}
 	if inst := p.instanceBR(cr, notEligible); inst != nil {
 		out = append(out, inst)
 	}
@@ -97,6 +100,36 @@ func (p *ServerProvider) instanceBR(cr *cloud.CloudResource, notEligible bool) *
 		BillingResourceType:   instanceType(),
 		NotEligibleForBilling: notEligible,
 	}
+}
+
+// protectionBR bills the Protected add-on: the replica's space, from the first successful sync until it is disabled.
+// A VM still on its first sync has nothing to fail over to yet, so it costs nothing.
+func protectionBR(cr *cloud.CloudResource) *billingapi.BillingResource {
+	server, ok := mapAt(cr.Data, "server")
+	if !ok {
+		return nil
+	}
+	pr, ok := mapAt(server, "protection")
+	if !ok || (str(pr["state"]) != "active" && str(pr["state"]) != "degraded") {
+		return nil
+	}
+	return &billingapi.BillingResource{
+		ResourceID:   fmt.Sprintf("server_protection-%s", cr.ID),
+		ProjectID:    cr.ProjectID,
+		ResourceType: "server_protection",
+		Values: map[string]any{
+			"display_name": server["name"],
+			"size_gb":      numOf(pr["diskGb"]),
+			"state":        str(pr["state"]),
+		},
+		BillingResourceType: serverProtectionType(),
+	}
+}
+
+func serverProtectionType() *billingapi.BillingResourceType {
+	return &billingapi.BillingResourceType{ResourceType: "server_protection", Attributes: []billingapi.ResourceAttribute{
+		{Name: "display_name", Type: "string"}, {Name: "size_gb", Type: "number"}, {Name: "state", Type: "string"},
+	}}
 }
 
 // trafficBR builds the "instance_traffic" resource from the month's UsageMetrics.

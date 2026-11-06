@@ -329,6 +329,25 @@
       "modifiers": []
     },
     {
+      "name": "Server protection (per replicated GB)",
+      "timeUnit": "hour",
+      "resourceType": "server_protection",
+      "pricePlanId": "<PLAN_ID>",
+      "applyMethod": "ADD_TO_TOTAL",
+      "prices": [
+        {
+          "attributeName": "size_gb",
+          "tiers": [
+            {
+              "value": "0.00014"
+            }
+          ]
+        }
+      ],
+      "filters": [],
+      "modifiers": []
+    },
+    {
       "name": "File share (per GB)",
       "timeUnit": "hour",
       "resourceType": "share",
