@@ -65,7 +65,7 @@ func New(projects *project.Repo, services *externalservice.Service, cloudRepo *c
 	return &Job{
 		projects: projects, services: services, cloud: cloudRepo,
 		cephClientFor: func(ctx context.Context, es *externalservice.ExternalService, region, projectID string) (*client.Client, error) {
-			return client.NewCephS3(ctx, es.CephConfig(region, "", "", es.RGWUIDFor(projectID)))
+			return es.ObjectClient(ctx, region, "", "", es.RGWUIDFor(projectID))
 		},
 		kamajiFor: func(es *externalservice.ExternalService) (*kamaji.Service, error) {
 			return kamaji.New(es.KamajiConfig(), es.ID)
@@ -188,7 +188,7 @@ func (j *Job) syncProject(ctx context.Context, p *project.Project, esCache map[s
 
 func (j *Job) syncService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
 	// ceph-s3: sync only the object-store (buckets) via an admin-keyed client.
-	if es.IsCephS3() {
+	if es.IsObjectStore() {
 		return j.syncCephService(ctx, p, es)
 	}
 	// kamaji: sync only the managed k8s clusters off the management cluster.

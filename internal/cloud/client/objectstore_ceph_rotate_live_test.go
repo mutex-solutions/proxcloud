@@ -19,14 +19,14 @@ func TestLiveCephERotateKey(t *testing.T) {
 	admin, proj, bucket := liveClients(t, ctx)
 
 	uid := proj.ChildUID("rotkey")
-	oldAK, oldSK, err := proj.CreateCephChildUser(ctx, uid, "proxcloud-rotate-drill")
+	oldAK, oldSK, err := proj.CreateChildKey(ctx, uid, "proxcloud-rotate-drill")
 	if err != nil {
-		t.Fatalf("CreateCephChildUser: %v", err)
+		t.Fatalf("CreateChildKey: %v", err)
 	}
 	t.Cleanup(func() {
 		bg := context.Background()
 		_ = proj.RevokeBucketAccess(bg, bucket, uid)
-		_ = proj.DeleteCephChildUser(bg, uid)
+		_ = proj.DeleteChildKey(bg, uid)
 	})
 	if err := proj.GrantBucketAccess(ctx, bucket, uid, PermissionRead); err != nil {
 		t.Fatalf("GrantBucketAccess: %v", err)
@@ -34,8 +34,8 @@ func TestLiveCephERotateKey(t *testing.T) {
 
 	s3For := func(ak, sk string) *s3.Client {
 		return s3.New(s3.Options{
-			Region: admin.ceph.region, Credentials: credentials.NewStaticCredentialsProvider(ak, sk, ""),
-			BaseEndpoint: awsv2.String(admin.ceph.s3Endpoint), UsePathStyle: true,
+			Region: cephOf(admin).region, Credentials: credentials.NewStaticCredentialsProvider(ak, sk, ""),
+			BaseEndpoint: awsv2.String(cephOf(admin).s3Endpoint), UsePathStyle: true,
 			RequestChecksumCalculation: awsv2.RequestChecksumCalculationWhenRequired,
 			ResponseChecksumValidation: awsv2.ResponseChecksumValidationWhenRequired,
 		})
@@ -49,9 +49,9 @@ func TestLiveCephERotateKey(t *testing.T) {
 		t.Fatal("old key cannot list before rotation")
 	}
 
-	newAK, newSK, err := proj.RotateCephUserKey(ctx, uid, oldAK)
+	newAK, newSK, err := proj.RotateKey(ctx, uid, oldAK)
 	if err != nil {
-		t.Fatalf("RotateCephUserKey: %v", err)
+		t.Fatalf("RotateKey: %v", err)
 	}
 	if newAK == oldAK {
 		t.Fatal("rotation returned the same access key")

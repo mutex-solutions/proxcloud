@@ -27,6 +27,7 @@ import {
 import type { FlavorCategory, ImageGrouping } from "@/lib/hooks"
 import { gpuCapacityViolations, gpuFromFlavor, serverQuotaViolations, volumeBatchQuotaViolations } from "@/lib/quota"
 import type { CloudResource, Location } from "@/lib/types"
+import { isObjectProvider } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { isPrivateNetwork } from "../network/NetworksPage"
 
@@ -159,7 +160,7 @@ export default function CreateServerPage() {
     (location) =>
       location.serviceId &&
       location.region &&
-      location.provider !== "ceph-s3" &&
+      !isObjectProvider(location.provider) &&
       (!location.resourceTypes || location.resourceTypes.includes("SERVER")),
   )
   const locOf = (l: Location) => `${l.serviceId}/${l.region}`

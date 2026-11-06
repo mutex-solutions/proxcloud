@@ -178,7 +178,7 @@ export type Location = {
   region?: string
   displayName?: string
   resourceTypes?: string[]
-  /** Backing provider: "proxmox" | "ceph-s3" | "kamaji" | "dbaas". */
+  /** Backing provider: "proxmox" | "ceph-s3" | "rustfs" | "kamaji" | "dbaas". */
   provider?: string
   serviceName?: string
   [k: string]: unknown
@@ -233,3 +233,6 @@ export type CreditCard = {
   tokenExpirationDate?: string
   [k: string]: unknown
 }
+
+/** Providers that serve only buckets. */
+export const isObjectProvider = (provider?: string) => provider === "ceph-s3" || provider === "rustfs"

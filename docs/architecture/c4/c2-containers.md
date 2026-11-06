@@ -146,7 +146,7 @@ flowchart TB
 | Standard | TrueNAS NFS as a capacity-class profile ("Capacity HDD (NFS)") | Bulk data volumes only: no boot disks, databases or snapshots (API-enforced) | Implemented |
 | Standard | TrueNAS SMB / iSCSI, NAS-created stores | Templates, backups, tenant file shares, RWX volumes | Planned |
 | Standard | RustFS | Internal bucket store on sites without Ceph, deployed by the installer | Implemented |
-| Standard | RustFS tenant buckets | Bucket product on sites without Ceph | Planned |
+| Standard | RustFS tenant buckets | Bucket product on sites without Ceph | Implemented |
 | Both | Admin-declared profile flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`), validated on save against detection | Shown to tenants as volume-type specs | Implemented |
 | Both | Per-storage capability detection (type table: tier, default class, flags; per-node active/avail) + admin class override | Provider Storage tab; profile validation; scheduler node restriction and free-space filter; template placement | Implemented |
 | Both | Profile `tier` / `class` (derived from its storages) and `bootDisk` / `dbaas` caps, API-gated | Capacity class refuses boot disks (create, retype), server snapshots with an attached capacity disk, and database storage classes named after it; volume billing attributes `profile` and `storage_class` | Implemented |
@@ -224,7 +224,7 @@ flowchart LR
 | HA rules and replication | `ha-manager` rules, `pvesr` | Proxmox cluster | Planned |
 | Ceph (Full tier) | RBD/CephFS for disks, RGW for buckets | Ceph cluster | Implemented |
 | TrueNAS (Standard tier) | NFS, SMB, iSCSI, WebSocket API | Appliance outside the Proxmox cluster | Planned |
-| RustFS (Standard tier) | S3 + admin API, deployed by the installer with internal buckets; tenant buckets on it are Planned | VM in the system pool, or TrueNAS app | Implemented |
+| RustFS (Standard tier) | S3 + admin API, deployed by the installer with internal buckets; also serves tenant buckets (provider `rustfs`, registered by the installer) | VM in the system pool, or TrueNAS app | Implemented |
 | Proxmox Backup Server | vzdump target | Separate machine | Planned |
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |

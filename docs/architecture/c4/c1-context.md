@@ -29,7 +29,7 @@ flowchart LR
     airwallex["Airwallex"]:::impl
     smtp["SMTP relay"]:::impl
     rgw["S3 store: Ceph RGW"]:::impl
-    rustfs["S3 store: RustFS"]:::planned
+    rustfs["S3 store: RustFS"]:::impl
     nas["TrueNAS NAS"]:::planned
     prom["Prometheus-compatible metrics"]:::impl
     dns["DNS and ACME"]:::impl
@@ -49,7 +49,7 @@ flowchart LR
   pc -->|"deposits, cards, collect"| airwallex
   pc -->|"transactional mail"| smtp
   pc -->|"RGW admin ops and S3"| rgw
-  pc -.->|"admin API and S3"| rustfs
+  pc -->|"admin API and S3"| rustfs
   pc -.->|"WebSocket API: shares"| nas
   pve -.->|"NFS, SMB, iSCSI"| nas
   pc -->|"PromQL traffic counters"| prom
@@ -81,7 +81,7 @@ flowchart LR
 | Airwallex | Second card gateway, chosen per integration. Deposits and saved cards through the browser Elements SDK, off-session collect, refunds. | Implemented |
 | SMTP relay | Bills, reminders, invites, suspension notices. | Implemented |
 | S3 store: Ceph RGW | Tenant buckets on sites with Ceph: RGW Admin Ops for per-project users, keys and quotas, S3 for bucket and object operations. | Implemented |
-| S3 store: RustFS | Tenant buckets and internal backups on sites without Ceph. | Planned |
+| S3 store: RustFS | Tenant buckets and internal backups on sites without Ceph. | Implemented |
 | TrueNAS NAS | Capacity storage for Proxmox (NFS, SMB, iSCSI) and tenant file shares created through the TrueNAS WebSocket API. | Planned |
 | Prometheus-compatible metrics | Optional per-provider source for per-VM network traffic counters, used to bill traffic. Proxmox providers default to their own public-NIC counters instead. | Implemented |
 | DNS and ACME | Hostnames and TLS certificates for the portal, the API and Keycloak, provided by the hosting cluster (the chart renders the routes, not the certificates). | Implemented |

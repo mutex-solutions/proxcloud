@@ -118,7 +118,7 @@ export function BucketSettingsDialog({ pid, resourceId, bucketName, open, onOpen
           <Tabs defaultValue="general">
             <TabsList>
               <TabsTrigger value="general">General</TabsTrigger>
-              <TabsTrigger value="website">Website</TabsTrigger>
+              {s.caps?.website !== false ? <TabsTrigger value="website">Website</TabsTrigger> : null}
               <TabsTrigger value="access">Access</TabsTrigger>
               <TabsTrigger value="lifecycle">Lifecycle</TabsTrigger>
               <TabsTrigger value="cors">CORS</TabsTrigger>
@@ -201,15 +201,17 @@ export function BucketSettingsDialog({ pid, resourceId, bucketName, open, onOpen
                       onChange={(e) => setQuotaGb(e.target.value)}
                     />
                   </div>
-                  <div className="grid gap-1">
-                    <Label className="text-xs text-muted-foreground">Max objects</Label>
-                    <Input
-                      className="w-32"
-                      placeholder={s.quota.enabled && s.quota.maxObjects > 0 ? String(s.quota.maxObjects) : "unlimited"}
-                      value={quotaObjects}
-                      onChange={(e) => setQuotaObjects(e.target.value)}
-                    />
-                  </div>
+                  {s.caps?.quotaObjects !== false ? (
+                    <div className="grid gap-1">
+                      <Label className="text-xs text-muted-foreground">Max objects</Label>
+                      <Input
+                        className="w-32"
+                        placeholder={s.quota.enabled && s.quota.maxObjects > 0 ? String(s.quota.maxObjects) : "unlimited"}
+                        value={quotaObjects}
+                        onChange={(e) => setQuotaObjects(e.target.value)}
+                      />
+                    </div>
+                  ) : null}
                   <Button
                     variant="outline"
                     size="sm"

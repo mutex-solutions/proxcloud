@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 )
 
@@ -246,7 +245,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		if err != nil || es == nil {
 			continue
 		}
-		if es.IsCephS3() {
+		if es.IsObjectStore() {
 			// ceph-s3: purge the RGW user + ALL its data, then drop the stored credential.
 			// The customer-facing DeleteBucket in the sweep above refuses a NON-EMPTY bucket (S3 semantics),
 			// so those buckets are still in `remaining`. Force-delete each of THIS project's
@@ -265,7 +264,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 					rgwUID = cred.RGWUID
 				}
 			}
-			adminCC, cerr := client.NewCephS3(ctx, es.CephConfig(region, "", "", rgwUID))
+			adminCC, cerr := es.ObjectClient(ctx, region, "", "", rgwUID)
 			if cerr != nil {
 				// Could not even build the admin client → cloud credentials are NOT revoked. Keep every
 				// local credential record so a re-run / operator can still revoke, and report the failure.
@@ -281,12 +280,12 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 					stillLeft = append(stillLeft, *res)
 					continue
 				}
-				if derr := adminCC.ForceDeleteCephBucket(ctx, res.ExternalID); derr != nil {
+				if derr := adminCC.ForceDeleteBucket(ctx, res.ExternalID); derr != nil {
 					stillLeft = append(stillLeft, *res)
 					continue
 				}
 				// The bucket is gone cloud-side; archiving the cache row can still fail. Keep it in
-				// `remaining` so teardown reports it (a re-run's ForceDeleteCephBucket is a no-op and retries
+				// `remaining` so teardown reports it (a re-run's ForceDeleteBucket is a no-op and retries
 				// the archive) rather than silently claiming success with a stale row left behind.
 				if aerr := h.cloud.DeleteAndArchive(ctx, res, now); aerr != nil {
 					slog.Error("teardown: archive ceph bucket row", "project", p.ID, "externalId", res.ExternalID, "err", aerr)
@@ -301,7 +300,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 			if h.cephKeys != nil {
 				if keys, kerr := h.cephKeys.List(ctx, p.ID, svcID); kerr == nil {
 					for i := range keys {
-						if derr := adminCC.DeleteCephChildUser(ctx, keys[i].RGWUID); derr != nil {
+						if derr := adminCC.DeleteChildKey(ctx, keys[i].RGWUID); derr != nil {
 							slog.Error("teardown: purge ceph child key", "project", p.ID, "rgwUid", keys[i].RGWUID, "err", derr)
 							cephRevokeFailed = true
 							continue // keep the local record so the key can still be revoked later
@@ -318,7 +317,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 					cephRevokeFailed = true
 				}
 			}
-			if perr := adminCC.PurgeCephUser(ctx); perr != nil {
+			if perr := adminCC.PurgeProjectUser(ctx); perr != nil {
 				// The parent user (and its keys) is still alive. Keep the stored credential so it can be
 				// revoked on a retry; do not blank the only record that identifies it.
 				slog.Error("teardown: purge ceph user", "project", p.ID, "rgwUid", rgwUID, "err", perr)
