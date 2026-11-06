@@ -3,13 +3,18 @@
 opensearch-k8s-operator OpenSearchCluster (operator 3.0.2, pinned in
 deploy/dbaas-cluster/README.md).
 
-TODO-verify(drill) — API GROUP MIGRATION: operator 3.x is mid-migration from
-api group opensearch.opster.io to opensearch.org. Both are served on 3.0.2;
-opster.io is DEPRECATED but still the widely-documented one, so this template
-(and the rbac/health files in deploy/dbaas-cluster/) uses opensearch.opster.io/v1.
-At the drill: `kubectl api-resources | grep -i opensearch`, and if 3.x has
-flipped the storage/preferred version, move this apiVersion (plus the argocd
-health key and pod-label assumptions) to opensearch.org in one chart release.
+API GROUP: opensearch.org/v1. Settled at the live drill — operator 3.0.2
+serves BOTH groups, but its validating webhooks REFUSE creation on the old
+opensearch.opster.io group ("API group is deprecated. Please use
+opensearch.org/v1 instead"), for clusters, users and role bindings alike.
+
+The pod LABELS moved WITH the api group. This header used to claim the opposite
+— that pods still carried opster.io/* — and networkpolicy.yaml and
+dashboards-lb.yaml selected on that, which matched nothing: a podSelector that
+matches nothing grants nothing, the namespace default-deny then blocked the node
+pods from reaching the bootstrap pod on 9300, and the cluster never formed. A
+live 3.0.2 node pod carries opensearch.org/opensearch-cluster and
+opensearch.org/opensearch-nodepool, and no opster.io key at all.
 
 Auth: NO spec.security.config on purpose — with the operator's DEFAULT
 securityconfig init, the operator generates the admin credential Secret
@@ -22,7 +27,7 @@ operator 3.x.
 {{/* JVM heap = half the pod memory, in MB — the OpenSearch sizing rule of
      thumb (leave the other half to the OS page cache / Lucene mmaps). */}}
 {{- $halfMemMi := div (mul (int .Values.resources.memoryGi) 1024) 2 }}
-apiVersion: opensearch.opster.io/v1
+apiVersion: opensearch.org/v1
 kind: OpenSearchCluster
 metadata:
   name: {{ $name }}
@@ -38,21 +43,42 @@ spec:
     version: {{ .Values.engineVersion | quote }}
     setVMMaxMapCount: true
     drainDataNodes: true
-    {{- with .Values.opensearch.parameters }}
+    {{/*
+    opensearch.yml settings for every node, bootstrap pod included. The two
+    security defaults are NOT optional:
+      * clientauth_mode NONE — clients present no certificate against the
+        generated http chain, so demanding one is a handshake failure.
+      * allow_default_init_securityindex — lets the plugin seed the security
+        index from the image's default config on first boot, which is what
+        makes the operator's generated admin credential work.
+    They live here rather than under spec.bootstrap because THIS OPERATOR HAS
+    NO spec.bootstrap.additionalConfig — sending one is a strict-decoding
+    rejection from the API server, i.e. the cluster never gets created.
+    values.opensearch.parameters is merged last so an operator can override.
+    */}}
     additionalConfig:
-      {{- toYaml . | nindent 6 }}
-    {{- end }}
-  bootstrap:
-    additionalConfig:
-      # Known-good fix for TLS handshake errors against the generated http
-      # cert chain: clients present no cert, so demand none.
       plugins.security.ssl.http.clientauth_mode: "NONE"
-      # Let the security plugin initialize the security index from the
-      # operator's default config on first boot.
       plugins.security.allow_default_init_securityindex: "true"
+      {{- with .Values.opensearch.parameters }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
   security:
-    # Operator-generated TLS on both layers; the chart LB (service-lb.yaml)
-    # passes 9200 through as TCP — clients speak HTTPS end to end.
+    # BOTH TLS layers are operator-generated, ALWAYS.
+    #
+    # Handing the http layer a user-provided certificate makes the operator's
+    # validating webhook refuse the object outright:
+    #
+    #   admission webhook "vopensearchcluster.opensearch.org" denied the request:
+    #   admin secret name is not provided but http.tls generate is not true
+    #
+    # security.config.adminSecret is "a client certificate (tls.key, tls.crt,
+    # ca.crt) with admin rights ... Must be set if http certificates are provided
+    # by user and not generated", and that admin CLIENT cert is presented on the
+    # TRANSPORT layer, which is operator-generated and pinned by the security
+    # plugin (nodes_dn) — a public issuer can never supply it. So a customer's
+    # BYO certificate (SET_CUSTOM_DOMAIN) is served by Dashboards only, which
+    # terminates TLS itself with no security plugin in the path.
+    #
     # NO security.config here — see header (admin secret generation).
     tls:
       http:
@@ -79,9 +105,18 @@ spec:
     enable: true
     replicas: 1
     version: {{ .Values.engineVersion | quote }}
+    {{- include "database-cluster.podPlacement" . | nindent 4 }}
+    # A customer BYO certificate (SET_CUSTOM_DOMAIN) wins; otherwise the
+    # operator's self-signed pair.
     tls:
       enable: true
+      {{- if .Values.opensearch.customDomain }}
+      generate: false
+      secret:
+        name: {{ $name }}-custom-tls
+      {{- else }}
       generate: true
+      {{- end }}
     # Fixed small size: Dashboards is a stateless UI, not the product the
     # customer sizes — resources.cpu/memoryGi buy DB nodes only.
     resources:
@@ -114,6 +149,11 @@ spec:
         - cluster_manager
         - data
         - ingest
+      {{- include "database-cluster.podPlacement" . | nindent 6 }}
+      {{- if gt (int .Values.instances) 1 }}
+      affinity:
+        {{- include "database-cluster.zoneAntiAffinity" (dict "root" . "labels" (dict "opensearch.org/opensearch-cluster" $name "opensearch.org/opensearch-nodepool" "nodes")) | nindent 8 }}
+      {{- end }}
       # NOTE: diskSize is a SIBLING of persistence in this CRD — the pvc block
       # carries class/accessModes only, NOT the size.
       diskSize: {{ .Values.storage.sizeGi }}Gi
