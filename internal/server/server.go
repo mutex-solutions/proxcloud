@@ -6,6 +6,7 @@ package server
 import (
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -35,6 +36,13 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
+// tokenPaths are the routes with a bearer credential in the path: a seed, an object download, a
+// console session, an invite. Whoever reads the logs must not be able to use them.
+var tokenPaths = regexp.MustCompile(`(/(?:nocloud|download|console|project-invites(?:/accept|/decline)?)/)[^/]+`)
+
+// redactPath is the path as the access log may show it.
+func redactPath(p string) string { return tokenPaths.ReplaceAllString(p, "${1}REDACTED") }
+
 // requestLogger emits one structured access-log line per request (method, path, status, latency,
 // response bytes, request id) so the app's own traffic is visible in the logs — otherwise only
 // startup and explicit domain events are logged and successful requests leave no trace.
@@ -46,7 +54,7 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 			defer func() {
 				log.Info("request",
 					"method", r.Method,
-					"path", r.URL.Path,
+					"path", redactPath(r.URL.Path),
 					"status", ww.Status(),
 					"bytes", ww.BytesWritten(),
 					"ms", time.Since(start).Milliseconds(),

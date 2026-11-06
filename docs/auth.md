@@ -112,9 +112,13 @@ MCP clients into the OAuth flow.
 A customer mints personal access tokens on the account page (`POST /api/v1/user/api-keys`
 `{description, scope?, expiresInDays?}`). `Authorization: Bearer <pk>.<sk>` then acts as that user
 (`pkg/auth/clientkey.go`). `scope` is `full` (the default, and what a token from before scopes means) or
-`read`: a read token passes safe methods and the `POST .../resource` list route, and answers `401` on
-everything else, `/mcp` included, because MCP tools can write. A token past `expiresAt` answers `401`. The
-list route shows scope and expiry and never the secret.
+`read`: a read token passes safe methods and the exact `POST /api/v1/project/{id}/resource` list route, and answers
+`401` on everything else: `/mcp`, because MCP tools can write, and the reads that return a live credential
+(`s3-credentials`, `s3-keys`). A token past `expiresAt` answers `401`. The list route shows scope and expiry and
+never the secret.
+
+The store keeps only a SHA-256 of the secret half; tokens from before that are converted at boot. A token cannot
+mint another: `POST /user/api-keys` needs a signed-in session, so a token cannot outlive its own expiry.
 
 ## The Admin API gate
 
