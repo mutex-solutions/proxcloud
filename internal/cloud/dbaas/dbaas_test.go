@@ -22,9 +22,11 @@ type fakeAPI struct {
 	secretData  map[string]map[string][]byte
 	secretTypes map[string]string // key ns/name → Secret.type
 	netpols     map[string]map[string]any
-	apps        map[string]map[string]any // key ns/name
-	services    map[string]map[string]any // key ns/name
-	vpas        map[string]map[string]any // key ns/name
+	apps        map[string]map[string]any            // key ns/name
+	services    map[string]map[string]any            // key ns/name
+	vpas        map[string]map[string]any            // key ns/name
+	crs         map[string]map[string]map[string]any // plural → ns/name → object
+	pods        map[string]map[string]any            // key ns/name
 	ops         []string
 	failApply   bool
 	failDelete  map[string]bool // secret names whose DeleteSecret fails
@@ -40,6 +42,8 @@ func newFakeAPI() *fakeAPI {
 		apps:        map[string]map[string]any{},
 		services:    map[string]map[string]any{},
 		vpas:        map[string]map[string]any{},
+		crs:         map[string]map[string]map[string]any{},
+		pods:        map[string]map[string]any{},
 		failDelete:  map[string]bool{},
 	}
 }
@@ -189,6 +193,37 @@ func (f *fakeAPI) GetVPA(_ context.Context, ns, name string) (map[string]any, er
 	return f.vpas[key(ns, name)], nil
 }
 
+// ListCRs serves the generic CR reads (backup lists). Keyed by plural so a test can seed
+// backups without modelling every operator's CRD.
+func (f *fakeAPI) ListCRs(_ context.Context, _, _, plural, ns, sel string) ([]map[string]any, error) {
+	var out []map[string]any
+	for k, obj := range f.crs[plural] {
+		if strings.HasPrefix(k, ns+"/") && matchesSelector(obj, sel) {
+			out = append(out, obj)
+		}
+	}
+	return out, nil
+}
+
+// ListPods / PodLogs back the log reads. Pods are seeded per test; a name in failDelete
+// doubles as "this pod's log read fails", which is how the partial-failure path is covered.
+func (f *fakeAPI) ListPods(_ context.Context, ns, sel string) ([]map[string]any, error) {
+	var out []map[string]any
+	for k, obj := range f.pods {
+		if strings.HasPrefix(k, ns+"/") && matchesSelector(obj, sel) {
+			out = append(out, obj)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeAPI) PodLogs(_ context.Context, ns, pod, container string, tail int) (string, error) {
+	if f.failDelete[pod] {
+		return "", errors.New("container is not running")
+	}
+	return fmt.Sprintf("log of %s/%s container=%s tail=%d", ns, pod, container, tail), nil
+}
+
 // matchesSelector honours the label selectors the Service actually uses (k=v comma lists).
 func matchesSelector(obj map[string]any, sel string) bool {
 	if sel == "" {
@@ -267,6 +302,19 @@ func TestSpecValidate(t *testing.T) {
 	cases["bad cidr"] = s
 	s = testSpec(EngineValkey, "9")
 	cases["beta without ack"] = s
+	s = testSpec(EnginePostgreSQL, "17")
+	s.DashboardsEnabled = true
+	cases["dashboards on non-opensearch"] = s
+	s = testSpec(EnginePostgreSQL, "17")
+	s.ReadEndpoint = true // one instance: the "reader" would be the primary under another name
+	cases["read endpoint on a single instance"] = s
+	s = testSpec(EngineKafka, "4.3.0")
+	s.Replicas = 3
+	s.ReadEndpoint = true
+	cases["read endpoint on an engine without one"] = s
+	s = testSpec(EnginePostgreSQL, "17")
+	s.RestoreFrom = &RestoreSource{SourceID: "std-0abc1234"}
+	cases["restore without an object store"] = s
 	for name, spec := range cases {
 		if err := spec.Validate(cfg); err == nil {
 			t.Errorf("%s: expected rejection", name)
@@ -592,11 +640,14 @@ func TestConnectionSecretContract(t *testing.T) {
 		port                                  int
 		defUser, defDB                        string
 	}{
-		{EnginePostgreSQL, "std-1-app", "username", "password", "dbname", 5432, "", ""},
+		// The exposed postgres account is the SUPERUSER (chart sets enableSuperuserAccess); the
+		// database name is fixed, not read off that secret.
+		{EnginePostgreSQL, "std-1-superuser", "username", "password", "", 5432, "", "app"},
 		{EngineFerretDB, "std-1-pg-app", "username", "password", "dbname", 27017, "", ""},
 		{EngineMySQL, "std-1-secrets", "", "root", "", 3306, "root", ""},
 		{EngineMariaDB, "std-1-auth", "", "password", "", 3306, "app", "app"},
-		{EngineValkey, "std-1-auth", "", "password", "", 6379, "", ""},
+		// valkey's exposed account is the `default` ACL user the chart wires to <id>-auth.
+		{EngineValkey, "std-1-auth", "", "password", "", 6379, "default", ""},
 		{EngineOpenSearch, "std-1-admin-password", "username", "password", "", 9200, "", ""},
 		{EngineKafka, "std-1-auth", "", "password", "", 9094, "std-1-app", ""},
 	}
@@ -610,6 +661,15 @@ func TestConnectionSecretContract(t *testing.T) {
 		}
 		if DefaultUser(c.engine, "std-1") != c.defUser || DefaultDB(c.engine) != c.defDB {
 			t.Errorf("%s: defaults (%s,%s)", c.engine, DefaultUser(c.engine, "std-1"), DefaultDB(c.engine))
+		}
+	}
+	// Databases predating the superuser switch keep working off the scoped app role.
+	if n, uk, pk, dk := PriorConnectionSecret(EnginePostgreSQL, "std-1"); n != "std-1-app" || uk != "username" || pk != "password" || dk != "dbname" {
+		t.Errorf("postgres fallback = (%s,%s,%s,%s)", n, uk, pk, dk)
+	}
+	for _, e := range []string{EngineMySQL, EngineMariaDB, EngineValkey, EngineOpenSearch, EngineKafka, EngineFerretDB} {
+		if n, _, _, _ := PriorConnectionSecret(e, "std-1"); n != "" {
+			t.Errorf("%s must have no fallback, got %s", e, n)
 		}
 	}
 	if !NeedsAuthSecret(EngineMariaDB) || !NeedsAuthSecret(EngineValkey) || !NeedsAuthSecret(EngineKafka) ||
@@ -634,11 +694,11 @@ func TestConnectionInfo(t *testing.T) {
 	if _, err := s.ConnectionInfo(ctx, "p1", spec.ID); err == nil {
 		t.Fatal("expected not-ready before the operator mints the secret")
 	}
-	// CNPG mints the app secret; LB gets its VIP.
-	api.secretData[key("pc-p1", spec.ID+"-app")] = map[string][]byte{
-		"username": []byte("app"), "password": []byte("s3cr3t"), "dbname": []byte("app"),
+	// CNPG mints the superuser secret; LB gets its address.
+	api.secretData[key("pc-p1", spec.ID+"-superuser")] = map[string][]byte{
+		"username": []byte("postgres"), "password": []byte("s3cr3t"), "dbname": []byte("postgres"),
 	}
-	api.secrets[key("pc-p1", spec.ID+"-app")] = map[string]any{"metadata": map[string]any{"name": spec.ID + "-app"}}
+	api.secrets[key("pc-p1", spec.ID+"-superuser")] = map[string]any{"metadata": map[string]any{"name": spec.ID + "-superuser"}}
 	api.services[key("pc-p1", LBServiceName(spec.ID))] = map[string]any{
 		"status": map[string]any{"loadBalancer": map[string]any{"ingress": []any{map[string]any{"ip": "10.1.0.9"}}}},
 	}
@@ -646,10 +706,10 @@ func TestConnectionInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Host != "10.1.0.9" || info.Port != 5432 || info.Username != "app" || info.Password != "s3cr3t" || info.DBName != "app" {
+	if info.Host != "10.1.0.9" || info.Port != 5432 || info.Username != "postgres" || info.Password != "s3cr3t" || info.DBName != "app" {
 		t.Fatalf("info = %+v", info)
 	}
-	if info.URI != "postgresql://app:s3cr3t@10.1.0.9:5432/app" {
+	if info.URI != "postgresql://postgres:s3cr3t@10.1.0.9:5432/app" {
 		t.Fatalf("uri = %s", info.URI)
 	}
 }
@@ -765,5 +825,156 @@ func TestSetChartVersionAndPins(t *testing.T) {
 	fins, _ := dig(app, "metadata", "finalizers").([]any)
 	if len(fins) != 1 {
 		t.Fatal("patch dropped the resources-finalizer")
+	}
+}
+
+// TestStorageClassNeverCapacity pins the storage rule: the capacity tier (HDD NFS) is never
+// offered to a database — a spec naming it is rejected even when the provider config lists it.
+func TestStorageClassNeverCapacity(t *testing.T) {
+	for name, want := range map[string]bool{
+		"capacity": true, "capacity-nfs": true, "capacity-": true,
+		"nvme": false, "capacitor": false, "my-capacity": false, "": false,
+	} {
+		if got := CapacityClass(name); got != want {
+			t.Errorf("CapacityClass(%q) = %v, want %v", name, got, want)
+		}
+	}
+	cfg := testConfig()
+	cfg.StorageClasses = []string{"nvme", "capacity", "capacity-nfs"}
+	for _, class := range []string{"capacity", "capacity-nfs"} {
+		spec := testSpec(EnginePostgreSQL, "17")
+		spec.StorageClass = class
+		if err := spec.Validate(cfg); err == nil {
+			t.Errorf("storage class %q must be rejected even when allow-listed", class)
+		}
+	}
+	spec := testSpec(EnginePostgreSQL, "17")
+	spec.StorageClass = "nvme"
+	if err := spec.Validate(cfg); err != nil {
+		t.Errorf("nvme rejected: %v", err)
+	}
+}
+
+// TestBuildValuesNetworkAndScheduling pins the MetalLB address pool and the zone spread key:
+// addressPool rides network.*, zoneKey rides scheduling.* — both only when configured, so the
+// chart defaults (any auto-assign pool, topology.kubernetes.io/zone) stand otherwise.
+func TestBuildValuesNetworkAndScheduling(t *testing.T) {
+	cfg := testConfig()
+	spec := testSpec(EnginePostgreSQL, "17")
+	v := BuildValues(cfg, spec)
+	if _, has := v["scheduling"]; has {
+		t.Errorf("no scheduling config → no scheduling block, got %v", v["scheduling"])
+	}
+	if _, has := v["network"].(map[string]any)["addressPool"]; has {
+		t.Error("no pool configured → no addressPool key")
+	}
+
+	cfg.LBAddressPool = "dbaas-services"
+	cfg.ZoneKey = "kubernetes.io/hostname"
+	cfg.NodeSelector = map[string]string{"node-role": "database"}
+	cfg.Tolerations = []map[string]any{{"key": "dedicated", "operator": "Equal", "value": "database", "effect": "NoSchedule"}}
+	spec.ReadEndpoint = true
+	spec.Replicas = 3
+	v = BuildValues(cfg, spec)
+	net := v["network"].(map[string]any)
+	if net["addressPool"] != "dbaas-services" || net["readEndpoint"] != true {
+		t.Errorf("network = %v", net)
+	}
+	for _, banned := range []string{"networkId", "subnetId", "memberSubnetId"} {
+		if _, has := net[banned]; has {
+			t.Errorf("network.%s must not exist: nothing is placed on a tenant network", banned)
+		}
+	}
+	sch := v["scheduling"].(map[string]any)
+	if sch["zoneKey"] != "kubernetes.io/hostname" {
+		t.Errorf("scheduling.zoneKey = %v", sch["zoneKey"])
+	}
+	if sel := sch["nodeSelector"].(map[string]any); sel["node-role"] != "database" {
+		t.Errorf("nodeSelector = %v", sel)
+	}
+	if tol := sch["tolerations"].([]any); len(tol) != 1 {
+		t.Errorf("tolerations = %v", tol)
+	}
+}
+
+// TestCreateDatabaseNeedsNoTenantNetwork drives create end to end with a pool configured: no
+// network leg, the Application carries the pool, marker first.
+func TestCreateDatabaseNeedsNoTenantNetwork(t *testing.T) {
+	api := newFakeAPI()
+	cfg := testConfig()
+	cfg.LBAddressPool = "dbaas-services"
+	s := NewWithAPI(api, cfg, "svc-dbaas")
+	spec := testSpec(EnginePostgreSQL, "17")
+	if _, err := s.CreateDatabase(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	app := api.apps[key("argocd", spec.ID)]
+	if got := digStr(app, "spec", "source", "helm", "valuesObject", "network", "addressPool"); got != "dbaas-services" {
+		t.Fatalf("addressPool on the Application = %q", got)
+	}
+}
+
+// TestFinalizeReapsDatabaseSecrets: a deleted database leaves nothing behind — its backup
+// credentials, customer-user passwords and BYO certificate go with the marker, while a sibling
+// database's secrets (which share the namespace) are untouched.
+func TestFinalizeReapsDatabaseSecrets(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeAPI()
+	cfg := testConfig()
+	cfg.Backup = BackupConfig{Endpoint: "http://s3.example.com:9000", Bucket: "b", AccessKey: "a", SecretKey: "s"}
+	s := NewWithAPI(api, cfg, "svc-dbaas")
+	s.finalizeGrace = 0
+	gone, kept := testSpec(EnginePostgreSQL, "17"), testSpec(EnginePostgreSQL, "17")
+	kept.ID = "std-keep0001"
+	for _, spec := range []DatabaseSpec{gone, kept} {
+		if _, err := s.CreateDatabase(ctx, spec); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{UserSecretName(spec.ID, "alice_b"), CustomTLSSecretName(spec.ID)} {
+			if err := api.ApplySecret(ctx, "pc-p1", name, map[string]string{"k": "v"},
+				map[string]string{LabelProject: "p1", LabelService: "svc-dbaas", LabelManagedBy: ManagedByValue}, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, has := api.secrets[key("pc-p1", BackupSecretName(gone.ID))]; !has {
+		t.Fatal("create must write the backup credential Secret")
+	}
+	delete(api.apps, key("argocd", gone.ID)) // the delete cascade finished
+	if _, err := s.FinalizeOrphans(ctx, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{MarkerSecretName(gone.ID), BackupSecretName(gone.ID), UserSecretName(gone.ID, "alice_b"), CustomTLSSecretName(gone.ID)} {
+		if _, has := api.secrets[key("pc-p1", name)]; has {
+			t.Errorf("secret %s outlived its database", name)
+		}
+	}
+	for _, name := range []string{MarkerSecretName(kept.ID), BackupSecretName(kept.ID), UserSecretName(kept.ID, "alice_b"), CustomTLSSecretName(kept.ID)} {
+		if _, has := api.secrets[key("pc-p1", name)]; !has {
+			t.Errorf("sibling secret %s must stay", name)
+		}
+	}
+}
+
+func TestValidateParameters(t *testing.T) {
+	if err := ValidateParameters(EnginePostgreSQL, map[string]string{"max_connections": "200", "shared_buffers": "1GB"}); err != nil {
+		t.Fatalf("valid set rejected: %v", err)
+	}
+	for name, params := range map[string]map[string]string{
+		"not tunable (operator-owned)": {"wal_level": "logical"},
+		"out of range":                 {"max_connections": "1"},
+		"injection":                    {"work_mem": "4MB\n[mysqld]\nlog_bin=OFF"},
+		"not a size":                   {"shared_buffers": "lots"},
+	} {
+		if err := ValidateParameters(EnginePostgreSQL, params); err == nil {
+			t.Errorf("%s: expected rejection", name)
+		}
+	}
+	if err := ValidateParameters(EngineFerretDB, map[string]string{"max_connections": "200"}); err == nil {
+		t.Error("ferretdb has no tunables")
+	}
+	if !ParametersNeedRestart(EnginePostgreSQL, map[string]string{"max_connections": "200"}) ||
+		ParametersNeedRestart(EnginePostgreSQL, map[string]string{"work_mem": "8MB"}) {
+		t.Error("restart flag")
 	}
 }
