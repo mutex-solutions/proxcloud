@@ -119,10 +119,11 @@ The provider's **Quota** tab sets the default quota seeded into each new project
 
 ## Usage metrics
 
-The **Metrics** tab chooses where the hourly traffic-billing job reads per-VM network usage:
+The **Metrics** tab chooses where the traffic-billing job reads per-VM network usage:
 
-- `none` is the default for a Proxmox provider. The job skips the provider, so no traffic is metered.
-- `prometheus` reads a Prometheus-compatible endpoint (Prometheus, Mimir, VictoriaMetrics or Thanos). Set the endpoint URL and the metric schema, plus headers, credentials or a custom CA if needed. The only schema today is `libvirt-exporter`, a legacy layout that doesn't match Proxmox VMs yet, so a Proxmox provider meters no traffic until a Proxmox schema is added.
+- `pve` is the default for a Proxmox provider. It reads the byte counters of each VM's public NIC from Proxmox every minute. SDN traffic is not metered. Traffic in the last minute before a VM stops or migrates is lost, because Proxmox restarts the counter there.
+- `none` turns traffic metering off.
+- `prometheus` reads a Prometheus-compatible endpoint (Prometheus, Mimir, VictoriaMetrics or Thanos). Set the endpoint URL and the metric schema, plus headers, credentials or a custom CA if needed. The only schema today is `libvirt-exporter`, a legacy layout that doesn't match Proxmox VMs yet.
 
 Always run **Test** after you change the source. A misconfigured source doesn't fail loudly; ingestion stops and traffic goes unbilled. The same settings are available through `PUT /api/v1/admin/service/{id}/metrics-config`, `POST /api/v1/admin/service/{id}/metrics-test`, and the admin MCP tools `set_metrics_config` and `test_metrics_config`.
 

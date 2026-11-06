@@ -645,6 +645,13 @@ func (e *ExternalService) PVEGPUMappingsFor(alias string) []string {
 	return out
 }
 
+// PVEGPUAliasOf names the GPU model of a PCI mapping ("" = the mapping is not a GPU).
+func (e *ExternalService) PVEGPUAliasOf(mappingID string) string {
+	m, _ := e.Config["gpus"].(map[string]any)
+	g, _ := m[mappingID].(map[string]any)
+	return str(g["alias"])
+}
+
 // PVEGPUAliases lists the distinct GPU aliases the provider offers, each with its
 // mapping ids (the capacity reads walk this).
 func (e *ExternalService) PVEGPUAliases() map[string][]string {

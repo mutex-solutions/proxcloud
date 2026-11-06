@@ -114,10 +114,10 @@ attribute schema (`BillingResourceType`):
 | Resource type | Provider | Metered attributes (selected) | Not billed when |
 |---|---|---|---|
 | `instance` | `ServerProvider` (`server.go`) | `instance_type`, `ram_mb`, `ram_gb`, `vcpus`, `root_disk_gb`, `gpu_count`, `gpu_model`, `is_bareMetal`, `availability_zone`, `image`, `status` | server status `DELETED`/`ERROR`/`UNKNOWN`/`BUILD` (the Proxmox status is mapped by `pve.MapVMStatus`; a clone/create lock maps to `BUILD`) |
-| `instance_traffic` | `ServerProvider` | `incoming/outgoing × private/public × _traffic_mb`, `total_*_traffic_mb` (usage attrs, read for the month from the provider's Prometheus-compatible metrics source, `config.metrics.source=prometheus`; Proxmox defaults to `none`, so no traffic is metered unless the operator configures it; see `docs/jobs-scheduling.md`) | server ineligible |
+| `instance_traffic` | `ServerProvider` | `incoming/outgoing × private/public × _traffic_mb`, `total_*_traffic_mb` (usage attrs, month to date, from `config.metrics.source`: `pve`, the Proxmox default, reads public-NIC counters every minute; `prometheus` reads a compatible source hourly; `none` meters nothing; see `docs/jobs-scheduling.md`). A rule pricing them must be `OVERWRITE_TOTAL` on an hour or minute cadence (the admin API refuses anything else) | server ineligible |
 | `volume` | `VolumeProvider` (`volume.go`) | `size`, `bootable`, `type`, `status`, `availability_zone` | status `error`/`deleting`/`creating`/`error_deleting` (a legacy set: Proxmox volumes report only `in-use`/`available`) |
-| `floating_ip` | `FloatingIPProvider` (`floatingip.go`) | `status`, `floating_network_id` (typically a flat per-IP charge) | — (no Proxmox resource produces this type yet; public-IP billing is planned) |
-| `load_balancer` | `LoadBalancerProvider` (`loadbalancer.go`) | `flavor_id`, `operating_status` | operating status `ERROR` (no Proxmox resource produces this type yet) |
+| `floating_ip` | `FloatingIPProvider` (`floatingip.go`) | `existence` (typically a flat per-IP charge), `status`, `floating_network_id`. Rows derive from the public-IP allocations (`pvePublicIp`), one per allocation, billed from the moment of allocation | — |
+| `image` | `ImageProvider` (`image.go`) | `size_gb` (a project template's disk, rounded up to whole GiB), `status`. Catalog templates are the operator's and never bill | — |
 
 Every resource additionally gets `region` and `service_id` stamped in (so plan
 filters on those resolve) and `createdAt` (drives mid-month proration) — see
@@ -234,18 +234,35 @@ flowchart TD
 Each cadence tick **accumulates** onto a per-resource `BillItem`:
 
 - Find-or-create the item (keyed by `resourceId` + `resourceType`).
-- Skip if the resource is `NotEligibleForBilling`, or if the item is already at
+- Skip if the resource is `NotEligibleForBilling` (its watermark stays, so a `BUILD`
+  VM is back-billed when it comes up; `SkipInterval` advances it instead, see below), or if the item is already at
   its cap (net ≥ `getTotalCap` = Σ `timeUnitLimit × ruleSum`) — the cap freezes a
   runaway line.
 - Advance the cadence counter by `getTimeUnitsDiff`: `month` is always `+1`;
-  `minute`/`hour` add `min(elapsed units, remaining headroom to the cap)` since the
-  last rate time (or `+1` on the first charge). A deleted resource charges up to
-  its `deletedAt`.
+  `minute`/`hour` add the units **started** since the last rate time (or `+1` on the
+  first charge), clamped to `[0, remaining headroom to the cap]`. A started hour is a
+  billed hour: a resource pays for every clock unit it existed in, so created 10:20 and
+  deleted 12:50 is 3 hours (10, 11, 12).
+- Rows archived during the cycle are fed back in with their `deletedAt` (the charge job,
+  `GetArchivedBillingResources`), which is what bills the last partial interval. Re-rating
+  one is a no-op: its `deletedAt` is behind the watermark and the floor at 0 keeps that
+  from being a refund. `month` rules skip them, being paid up front when first rated.
 - Update per-rule/per-attribute applied amounts: `round16(perUnit) × diff` (a new
-  amount), accumulated for `ADD_TO_TOTAL` or overwritten for `OVERWRITE_TOTAL`.
+  amount), accumulated for `ADD_TO_TOTAL`. `OVERWRITE_TOTAL` stores the amount as is, on
+  the first charge too: it is a month-to-date total, not a per-unit price.
 - Re-derive `item.NetAmount = round16(min(Σ applied, cap))`.
 
 The result is a bill whose items track a running, capped, cadence-accurate cost.
+
+### Metering staleness
+
+The state sampler stamps `meterState.lastOkAt` per Proxmox provider. While the cluster does
+not answer the cache keeps its last-known state and billing goes on from it. Past 30 minutes
+(`cloud.MeterStaleAfter`) every resource of that provider is rated `NotEligibleForBilling` +
+`SkipInterval`: nothing accrues and the watermark moves, so the blind interval is written off
+instead of being back-billed on recovery. The same moment raises the alert: an `ERROR` log
+line with `alert=pve_metering_stale` and a `METERING_STALE` audit event, once per outage,
+closed by `METERING_RECOVERED`.
 
 ### Charge-time bill adjustments
 

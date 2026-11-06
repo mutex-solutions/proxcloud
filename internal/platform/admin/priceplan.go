@@ -36,6 +36,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/billingresource"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
+	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -348,7 +349,7 @@ type pricePlanRuleReq struct {
 // validatePricePlanRule validates a rule: name/timeUnit/resourceType
 // must be non-null, and any tier with both from+to must have to >= from. The tier check runs against
 // the decoded prices (when present). Exact messages.
-func validatePricePlanRule(req pricePlanRuleReq) *httpx.HTTPError {
+func validatePricePlanRule(req *pricePlanRuleReq) *httpx.HTTPError {
 	if req.Name == "" {
 		return httpx.BadRequest("Name must not be null")
 	}
@@ -361,6 +362,49 @@ func validatePricePlanRule(req pricePlanRuleReq) *httpx.HTTPError {
 	if req.Prices != nil {
 		if err := validateTiers(*req.Prices); err != nil {
 			return err
+		}
+		if err := validateUsageRule(req); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateUsageRule: a usage attribute carries a month-to-date total. Rated with ADD_TO_TOTAL, the
+// whole total is added again on every charge; on a month rule the engine prorates it as if it were
+// a price. Such a rule must overwrite (the default when the request names no apply method) on an
+// hour or minute cadence.
+func validateUsageRule(req *pricePlanRuleReq) *httpx.HTTPError {
+	var prices []struct {
+		AttributeName string `json:"attributeName"`
+	}
+	if err := json.Unmarshal(*req.Prices, &prices); err != nil {
+		return nil // malformed prices are left to the decode/store path
+	}
+	usage := map[string]bool{}
+	for _, t := range billingresource.Catalog() {
+		if !strings.EqualFold(t.ResourceType, req.ResourceType) {
+			continue
+		}
+		for _, a := range t.Attributes {
+			if a.IsUsage != nil && *a.IsUsage {
+				usage[a.Name] = true
+			}
+		}
+	}
+	for _, p := range prices {
+		if !usage[p.AttributeName] {
+			continue
+		}
+		if req.ApplyMethod == nil || *req.ApplyMethod == "" {
+			overwrite := pricing.ApplyOverwriteTotal
+			req.ApplyMethod = &overwrite
+		}
+		if *req.ApplyMethod != pricing.ApplyOverwriteTotal {
+			return httpx.BadRequest(fmt.Sprintf("Usage attribute %s must use apply method %s", p.AttributeName, pricing.ApplyOverwriteTotal))
+		}
+		if strings.EqualFold(req.TimeUnit, pricing.TimeUnitMonth) {
+			return httpx.BadRequest(fmt.Sprintf("Usage attribute %s must be rated by the hour or minute", p.AttributeName))
 		}
 	}
 	return nil
@@ -405,7 +449,7 @@ func (h *Handler) pricePlanRuleCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	if verr := validatePricePlanRule(req); verr != nil {
+	if verr := validatePricePlanRule(&req); verr != nil {
 		httpx.WriteError(w, verr)
 		return
 	}
@@ -446,7 +490,7 @@ func (h *Handler) pricePlanRuleUpdate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	if verr := validatePricePlanRule(req); verr != nil {
+	if verr := validatePricePlanRule(&req); verr != nil {
 		httpx.WriteError(w, verr)
 		return
 	}

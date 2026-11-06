@@ -280,6 +280,7 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 			return a.IP, a.Prefix, gateway, nil
 		}
 	}
+	started := time.Now().UTC()
 	cr, cerr := ps.CreateServer(ctx, pve.CreateServerReq{
 		AssignIP:  assignIP,
 		ProjectID: proj.ID,
@@ -314,6 +315,7 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		return
 	}
 	cr.ServiceID = es.ID
+	h.pveArchiveStaleRow(ctx, cr, started)
 	saved, ierr := h.cloud.Insert(ctx, cr)
 	if ierr != nil {
 		// The VM exists cloud-side; a 500 would invite a duplicate-create retry.
@@ -336,6 +338,20 @@ func (h *Handler) pveImageCatalog(ctx context.Context, es *externalservice.Exter
 		}
 	}
 	return es.PVEImageCatalog(found)
+}
+
+// pveArchiveStaleRow archives a row still sitting on a vmid PVE just handed out to a new object (the
+// old one went away less than a sample ago): the upsert would otherwise give the new object the old
+// row and bill item, possibly another project's. The vmid was free when the create started, so only
+// a row older than that is stale; a younger one is the sampler having seen this very VM.
+func (h *Handler) pveArchiveStaleRow(ctx context.Context, cr *cloud.CloudResource, started time.Time) {
+	old, err := h.cloud.FindByServiceIDAndExternalID(ctx, cr.ServiceID, cr.ExternalID)
+	if err != nil || old == nil || (old.CreatedAt != nil && !old.CreatedAt.Before(started)) {
+		return
+	}
+	if err := h.cloud.DeleteAndArchive(ctx, old, time.Now().UTC()); err != nil {
+		slog.Error("pve create: archive stale row", "externalId", cr.ExternalID, "err", err)
+	}
 }
 
 // pveResolveTemplate maps imageId → a clone source: an admin catalog slug, or a
@@ -588,6 +604,26 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 			return err
 		}
 		return ps.DeleteServer(ctx, proj.ID, cr.ExternalID)
+	case cloud.TypeFloatingIP:
+		// The row is derived from the allocation: deleting it detaches the NIC behind it. A VM
+		// already gone just gives the address back.
+		ps, err := h.pveFor(es)
+		if err != nil {
+			return err
+		}
+		if h.publicIPs == nil {
+			return fmt.Errorf("public IP service not configured")
+		}
+		fip, _ := cr.Data["floatingIp"].(map[string]any)
+		serverID := strAny(fip["server_id"])
+		vm, err := ps.ResolveVM(ctx, proj.ID, serverID)
+		if err != nil {
+			return err
+		}
+		if vm == nil {
+			return h.publicIPs.ReleaseServer(ctx, es.ID, serverID)
+		}
+		return h.pveDetachPublicNIC(ctx, ps, es, proj, vm, serverID)
 	case cloud.TypeKeypair:
 		return nil // platform-only row; the archive below is the whole delete
 	case cloud.TypeNetwork:
@@ -748,10 +784,31 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 		return true
 
 	case "LIST_EVENTS":
-		httpx.OK(w, map[string]any{"result": []any{}})
+		httpx.OK(w, map[string]any{"result": h.pveServerEvents(ctx, es.ID, proj.ID, cr)})
 		return true
 	}
 	return false
+}
+
+// pveServerEvents renders a server's recorded Proxmox tasks in the events-tab shape. Only tasks since
+// the row was created: vmids get reused, and the older tasks are another VM's, maybe another tenant's.
+func (h *Handler) pveServerEvents(ctx context.Context, serviceID, projectID string, cr *cloud.CloudResource) []map[string]any {
+	out := []map[string]any{}
+	var since time.Time
+	if cr.CreatedAt != nil {
+		since = *cr.CreatedAt
+	}
+	events, err := h.cloud.TaskEventsForVM(ctx, serviceID, projectID, cr.ExternalID, since, 200)
+	if err != nil {
+		slog.Error("pve list events", "server", cr.ExternalID, "err", err)
+		return out
+	}
+	for _, e := range events {
+		out = append(out, map[string]any{
+			"date": e.StartedAt, "action": e.Type, "message": e.Status, "requestId": e.ID, "userId": e.User,
+		})
+	}
+	return out
 }
 
 // pveRefreshServerRow re-reads live VM state into the cached row (best-effort).
@@ -1196,6 +1253,7 @@ func (h *Handler) pveCreateImage(w http.ResponseWriter, r *http.Request, u *user
 			d.Slot, d.Storage)))
 		return
 	}
+	started := time.Now().UTC()
 	vmid, cerr := ps.CreateImage(ctx, proj.ID, serverExt, name)
 	if cerr != nil {
 		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, cerr.Error()))
@@ -1211,6 +1269,7 @@ func (h *Handler) pveCreateImage(w http.ResponseWriter, r *http.Request, u *user
 		CreatedAt: &now, UpdatedAt: &now,
 		Info: &cloud.Info{CreatedAt: &now, UpdatedAt: &now},
 	}
+	h.pveArchiveStaleRow(ctx, cr, started)
 	saved, ierr := h.cloud.Insert(ctx, cr)
 	if ierr != nil {
 		saved = cr

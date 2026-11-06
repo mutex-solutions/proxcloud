@@ -83,7 +83,7 @@ flowchart LR
 | S3 store: Ceph RGW | Tenant buckets on sites with Ceph: RGW Admin Ops for per-project users, keys and quotas, S3 for bucket and object operations. | Implemented |
 | S3 store: RustFS | Tenant buckets and internal backups on sites without Ceph. | Planned |
 | TrueNAS NAS | Capacity storage for Proxmox (NFS, SMB, iSCSI) and tenant file shares created through the TrueNAS WebSocket API. | Planned |
-| Prometheus-compatible metrics | Optional per-provider source for per-VM network traffic counters, used to bill traffic. Proxmox providers default to no metrics source. | Implemented |
+| Prometheus-compatible metrics | Optional per-provider source for per-VM network traffic counters, used to bill traffic. Proxmox providers default to their own public-NIC counters instead. | Implemented |
 | DNS and ACME | Hostnames and TLS certificates for the portal, the API and Keycloak, provided by the hosting cluster (the chart renders the routes, not the certificates). | Implemented |
 | DNS TXT verification | Domain ownership checks for per-org SSO. | Planned |
 | Container registry (ghcr.io) | CI publishes the `proxcloud-api`, `proxcloud-web` and `proxcloud-admin` images and the Helm charts; deployments pull from it. | Implemented |

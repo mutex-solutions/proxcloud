@@ -179,7 +179,7 @@ Typed accessors used by the rest of the code:
 | `PVEGPUAliases()` / `PVEGPUMappingsFor(alias)` | `gpus` | PCI mapping ids per GPU alias |
 | `PVEOvercommitCPU()` | `overcommit.cpu` (default 4) | scheduler CPU overcommit |
 | `PVEDefaultQuota()` | `provisioning.quota` | quota seeded onto a new project |
-| `MetricsSource()` | `metrics.source` | `prometheus` or `none` (the Proxmox default) |
+| `MetricsSource()` | `metrics.source` | `pve` (the Proxmox default), `prometheus` or `none` |
 | `ServiceEnabledInRegion(slug, region)` | `services[slug][region]` | per-service toggle (below) |
 
 ### Credentials
@@ -484,11 +484,13 @@ on a server GET.
 drives the ingestion. The scope is **network traffic** per server, for the
 `instance_traffic` billing unit.
 
-- The only live source is a **Prometheus-compatible** endpoint
-  (`metrics/prometheus.go`; vanilla Prometheus, Mimir, VictoriaMetrics, Thanos).
-  `liveFetcherFactory` (`metricsjob/job.go`) builds it when
-  `config.metrics.source == "prometheus"`; with `none` (the Proxmox default) the
-  job skips the provider's servers silently. Month usage is `max − min` of the
+- A Proxmox provider defaults to `pve` (`metrics/pve.go`): public-NIC byte counters off
+  `status/current` every minute, folded into month-to-date totals with reset-aware deltas
+  (`cur >= prev ? cur - prev : cur`), SDN traffic excluded. The other live source is a
+  **Prometheus-compatible** endpoint (`metrics/prometheus.go`; vanilla Prometheus, Mimir,
+  VictoriaMetrics, Thanos). `liveFetcher` (`metricsjob/job.go`) picks by
+  `config.metrics.source`; with `none` the job skips the provider's servers silently.
+  Prometheus month usage is `max − min` of the
   raw cumulative-counter samples inside the month window (not PromQL
   `increase()`), using the same decimal arithmetic as the rating engine.
 - The only query schema implemented today, `libvirt-exporter`, is a layout
@@ -768,7 +770,7 @@ AppProject guardrail, ArgoCD health checks): `deploy/mgmt-cluster/`.
 
 **Billing bridge:**
 
-- `internal/cloud/billingresource/{billingresource,catalog,server,volume,bucket,floatingip,loadbalancer,kubernetescluster,databasecluster}.go`
+- `internal/cloud/billingresource/{billingresource,catalog,server,volume,bucket,image,floatingip,kubernetescluster,databasecluster}.go`
 
 **Object storage:**
 

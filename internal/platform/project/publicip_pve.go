@@ -58,6 +58,15 @@ func (r *PublicIPRepo) ForServer(ctx context.Context, serviceID, serverID string
 	return r.find(ctx, pgdoc.M{"serviceId": serviceID, "serverId": serverID})
 }
 
+// ForProject lists the project's allocations on one service, net0 included.
+func (r *PublicIPRepo) ForProject(ctx context.Context, serviceID, projectID string) ([]PublicIP, error) {
+	return r.find(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID})
+}
+
+// IsPublic: a public NIC's address, the billed kind. A net0 row is an address on the project's own
+// vnet (zones without DHCP) and costs nothing.
+func (p PublicIP) IsPublic() bool { return p.NIC == publicNIC }
+
 // CountForProject is the floatingIps quota usage: public NICs only, not the net0 addresses
 // allocated on the project's own vnets.
 func (r *PublicIPRepo) CountForProject(ctx context.Context, serviceID, projectID string) (int64, error) {
