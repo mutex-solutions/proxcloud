@@ -39,6 +39,7 @@ import { apiFetch, type CloudScope } from "@/lib/api"
 import { fmtDateTime, timeAgo } from "@/lib/format"
 import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
+import { ServerProtection } from "./ServerProtection"
 import { ServerDeleteVolumes, serverFlavor, serverIPs, serverName, serverStatus } from "./ServersPage"
 
 const ACTION_LABELS: Record<string, string> = {
@@ -336,6 +337,7 @@ export function ServerDetailPage() {
             <TabsTrigger value="network">Network</TabsTrigger>
             <TabsTrigger value="security">Security</TabsTrigger>
             <TabsTrigger value="volumes">Volumes</TabsTrigger>
+            <TabsTrigger value="protection">Protection</TabsTrigger>
             {features.has("serverEvents") && <TabsTrigger value="events">Events</TabsTrigger>}
             {features.has("serverSnapshots") && <TabsTrigger value="snapshots">Snapshots</TabsTrigger>}
             {features.has("consoleLog") && <TabsTrigger value="logs">Console log</TabsTrigger>}
@@ -368,6 +370,10 @@ export function ServerDetailPage() {
 
         <TabsContent value="security" className="mt-4">
           <SecurityTab pid={pid} resourceId={resourceId} scope={scope} />
+        </TabsContent>
+
+        <TabsContent value="protection" className="mt-4">
+          <ServerProtection pid={pid} resourceId={resourceId} />
         </TabsContent>
 
         <TabsContent value="volumes" className="mt-4">

@@ -17,8 +17,10 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +36,7 @@ import (
 // ?externalServiceId resolves a stored provider.
 type pveAuthReq struct {
 	APIURL      string `json:"apiUrl"`
+	CACert      string `json:"caCert"`
 	TokenID     string `json:"tokenId"`
 	TokenSecret string `json:"tokenSecret"`
 	Fingerprint string `json:"fingerprint"`
@@ -188,11 +191,51 @@ func (h *Handler) pveConfig(ctx context.Context, req pveAuthReq, externalService
 	}
 	return pve.Config{
 		APIURL:      req.APIURL,
+		CACert:      req.CACert,
 		TokenID:     req.TokenID,
 		Secret:      req.TokenSecret,
 		Fingerprint: req.Fingerprint,
 		InsecureTLS: req.InsecureTLS,
 	}, true
+}
+
+// proxmoxMigrateServer moves a VM to another node: POST /service/{id}/server/{vmid}/migrate {target}. Operator only,
+// for maintenance. Waits for the migration; a large disk without a replica takes as long as its copy.
+func (h *Handler) proxmoxMigrateServer(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, externalServiceManagePerm) {
+		return
+	}
+	es, ok := h.loadServiceOr(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	if !es.IsProxmox() || h.pveFor == nil {
+		httpx.WriteError(w, httpx.BadRequest("Migration needs a Proxmox VE provider"))
+		return
+	}
+	vmid, err := strconv.Atoi(chi.URLParam(r, "vmid"))
+	var req struct {
+		Target string `json:"target"`
+	}
+	if err != nil || json.NewDecoder(r.Body).Decode(&req) != nil || req.Target == "" {
+		httpx.WriteError(w, httpx.BadRequest("A numeric vmid and a target node are required"))
+		return
+	}
+	ps, err := h.pveFor(es)
+	if err != nil {
+		httpx.WriteError(w, httpx.BadRequest("Proxmox connection failed: "+err.Error()))
+		return
+	}
+	if err := ps.MigrateServer(context.WithoutCancel(r.Context()), vmid, req.Target); err != nil {
+		var ce *pve.ConflictError
+		if errors.As(err, &ce) {
+			httpx.WriteError(w, httpx.NewError(http.StatusConflict, http.StatusConflict, ce.Msg))
+			return
+		}
+		httpx.WriteError(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+		return
+	}
+	httpx.OK(w, map[string]any{"target": req.Target})
 }
 
 // proxmoxDetectStorage is the admin "Re-detect capabilities" action: detect every cluster

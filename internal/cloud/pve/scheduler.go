@@ -29,6 +29,8 @@ type SchedReq struct {
 	// DiskBytes must fit on Storage while HeadroomPct % of its capacity stays free.
 	DiskBytes   int64
 	HeadroomPct float64
+	// ReserveMem is memory a node keeps free for the protected VMs that fail over to it. nil = none.
+	ReserveMem map[string]int64
 }
 
 // PickNode chooses the target node. vms is the cluster-wide qemu rows (ALL pools —
@@ -70,7 +72,7 @@ func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error)
 		if usedCPU[n.Node]+float64(req.VCPUs) > float64(n.MaxCPU)*oc {
 			continue
 		}
-		freeMem := n.MaxMem - usedMem[n.Node]
+		freeMem := n.MaxMem - usedMem[n.Node] - req.ReserveMem[n.Node]
 		if freeMem < req.RAMMb*(1<<20) {
 			continue
 		}

@@ -205,10 +205,16 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox cluster unavailable")
 		return
 	}
+	reserve, rerr := ps.ReserveMem(ctx, vms)
+	if rerr != nil {
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox cluster unavailable")
+		return
+	}
 	target, serr := pve.PickNode(nodes, vms, pve.SchedReq{
 		VCPUs: fl.VCPUs, RAMMb: int64(fl.RAMMb), OvercommitCPU: es.PVEOvercommitCPU(),
 		AllowedNodes: pl.allowed, GPUs: fl.GPUCount, GPUFree: gpuFree,
 		Storage: pl.storage, DiskBytes: int64(diskGb) << 30, HeadroomPct: es.PVEStorageHeadroomPct(),
+		ReserveMem: reserve,
 	})
 	if serr != nil {
 		msg := "No capacity available for this flavor (CPU, RAM, GPU or free disk space)"
@@ -584,6 +590,10 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		// Volumes outlive the server unless the caller says otherwise. If moving one fails the server stays,
 		// and its data with it.
 		if !deleteVolumes {
+			// A replicated disk cannot leave its VM, and neither may HA restart the VM meanwhile.
+			if err := ps.DisableProtection(ctx, proj.ID, cr.ExternalID); err != nil {
+				return fmt.Errorf("disable protection: %w", err)
+			}
 			if err := ps.KeepServerVolumes(ctx, proj.ID, cr.ExternalID); err != nil {
 				return fmt.Errorf("keep the server's volumes: %w", err)
 			}
@@ -695,6 +705,9 @@ func (h *Handler) pveArchiveServerVolumes(ctx context.Context, es *externalservi
 func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	r = r.WithContext(context.WithoutCancel(r.Context())) // see pveCreate
 	ctx := r.Context()
+	if cr.Type == cloud.TypeServer && h.pveProtectionAction(w, r, u, proj, es, cr, action) {
+		return true
+	}
 	if action == "INVOKEACTION" {
 		action = strings.ToUpper(strAny(data["action"]))
 	}
@@ -826,6 +839,7 @@ func (h *Handler) pveRefreshServerRow(ctx context.Context, ps *pve.Service, proj
 		return
 	}
 	cr.Data = pve.ServerData(*vm, ps.ServerAddresses(ctx, *vm), nil)
+	ps.StampProtection(ctx, *vm, cr.Data)
 	if saved, err := h.cloud.Insert(ctx, cr); err == nil {
 		*cr = *saved
 	}

@@ -380,6 +380,12 @@ func (s *Service) DeleteServer(ctx context.Context, projectID, externalID string
 	if vm == nil {
 		return nil // already gone
 	}
+	if HasTag(vm.Tags, tagProtected) {
+		// HA would restart what we stop below.
+		if err := s.DisableProtection(ctx, projectID, externalID); err != nil {
+			return err
+		}
+	}
 	if vm.Status == "running" {
 		if up, err := s.C.StopVM(ctx, vm.Node, vm.VMID); err == nil {
 			_ = s.C.WaitTask(ctx, up)
