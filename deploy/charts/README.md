@@ -3,9 +3,10 @@
 Two charts live here:
 
 - **`proxcloud`** — the application chart: the ProxCloud API, the customer and operator
-  consoles, plus optionally bundled PostgreSQL, RabbitMQ and Keycloak. This is what
-  `make deploy` installs and what CI publishes to `oci://ghcr.io/mutex-solutions/charts`
-  at the release tag (see its own README).
+  consoles, a CloudNativePG `Cluster`, a `RabbitmqCluster` and optionally Keycloak. The
+  [installer](../../docs/install.md) deploys it through ArgoCD with the operators in place;
+  `make deploy` installs it directly, and CI publishes it to
+  `oci://ghcr.io/mutex-solutions/charts` at the release tag (see its own README).
 - **`database-cluster`** — the Managed Database (DBaaS) chart: ONE chart, several engines
   (`values.engine` discriminator — postgresql / mysql / mariadb / valkey / ferretdb /
   opensearch / kafka) rendering the engine's operator CR plus an internal LB Service into the

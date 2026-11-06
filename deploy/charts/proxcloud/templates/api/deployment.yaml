@@ -52,13 +52,23 @@ spec:
             - name: PROXCLOUD_RABBITMQ_HOST
               value: {{ include "proxcloud.rabbitHost" . | quote }}
             - name: PROXCLOUD_RABBITMQ_PORT
-              value: {{ ternary "5672" (toString .Values.externalRabbitmq.port) .Values.rabbitmq.enabled | quote }}
+              value: {{ ternary "5672" (toString .Values.externalRabbitmq.port) (or .Values.rabbitmq.enabled .Values.rabbitmqCluster.enabled) | quote }}
             - name: PROXCLOUD_RABBITMQ_USERNAME
+              {{- if .Values.rabbitmqCluster.enabled }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "proxcloud.rabbitClusterName" . }}-default-user
+                  key: username
+              {{- else }}
               value: {{ ternary .Values.rabbitmq.auth.username .Values.externalRabbitmq.username .Values.rabbitmq.enabled | quote }}
+              {{- end }}
             - name: PROXCLOUD_RABBITMQ_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  {{- if .Values.externalRabbitmq.existingSecret }}
+                  {{- if .Values.rabbitmqCluster.enabled }}
+                  name: {{ include "proxcloud.rabbitClusterName" . }}-default-user
+                  key: password
+                  {{- else if .Values.externalRabbitmq.existingSecret }}
                   name: {{ .Values.externalRabbitmq.existingSecret }}
                   key: {{ .Values.externalRabbitmq.secretKey }}
                   {{- else }}
@@ -95,18 +105,30 @@ spec:
               value: {{ .Values.auth.main.issuer | quote }}
             - name: AUTH_MAIN_OAUTH2_CLIENT_ID
               value: {{ .Values.auth.main.clientId | quote }}
+            {{- with .Values.auth.main.discoveryUri }}
+            - name: AUTH_MAIN_OAUTH2_DISCOVERY_URI
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.auth.admin.issuer }}
             - name: AUTH_ADMIN_OAUTH2_ISSUER_URI
               value: {{ .Values.auth.admin.issuer | quote }}
             - name: AUTH_ADMIN_OAUTH2_CLIENT_ID
               value: {{ .Values.auth.admin.clientId | quote }}
+            {{- with .Values.auth.admin.discoveryUri }}
+            - name: AUTH_ADMIN_OAUTH2_DISCOVERY_URI
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.auth.adminApi.issuer }}
             - name: AUTH_ADMIN_API_OAUTH2_ISSUER_URI
               value: {{ .Values.auth.adminApi.issuer | quote }}
             - name: AUTH_ADMIN_API_OAUTH2_CLIENT_ID
               value: {{ .Values.auth.adminApi.clientId | quote }}
+            {{- with .Values.auth.adminApi.discoveryUri }}
+            - name: AUTH_ADMIN_API_OAUTH2_DISCOVERY_URI
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.api.jobs.schedulerEnabled }}
             - name: PROXCLOUD_JOBS_SCHEDULER_ENABLED

@@ -20,7 +20,7 @@ bundled keycloakx is enabled.
       "directAccessGrantsEnabled" true
       "redirectUris" (list (printf "%s/*" $ui))
       "webOrigins" (list $ui)
-      "attributes" (dict "pkce.code.challenge.method" "S256" "post.logout.redirect.uris" (printf "%s/*" $ui)) }}
+      "attributes" (dict "pkce.code.challenge.method" (ternary "S256" "" .Values.keycloakConfigCli.requirePkce) "post.logout.redirect.uris" (printf "%s/*" $ui)) }}
 {{- /* The customer realm: registration on, email as the username (ProxCloud keys users by email). */}}
 {{- $_ := set $realms $name (dict
       "realm" $name
@@ -29,6 +29,7 @@ bundled keycloakx is enabled.
       "registrationEmailAsUsername" true
       "loginWithEmailAllowed" true
       "resetPasswordAllowed" true
+      "sslRequired" .Values.keycloakConfigCli.sslRequired
       "clients" (list $client)) }}
 {{- end }}
 {{- if .Values.auth.admin.issuer }}
@@ -42,8 +43,8 @@ bundled keycloakx is enabled.
       "directAccessGrantsEnabled" true
       "redirectUris" (list (printf "%s/*" $admin))
       "webOrigins" (list $admin)
-      "attributes" (dict "pkce.code.challenge.method" "S256" "post.logout.redirect.uris" (printf "%s/*" $admin)) }}
-{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "clients" (list)) }}
+      "attributes" (dict "pkce.code.challenge.method" (ternary "S256" "" .Values.keycloakConfigCli.requirePkce) "post.logout.redirect.uris" (printf "%s/*" $admin)) }}
+{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "sslRequired" .Values.keycloakConfigCli.sslRequired "clients" (list)) }}
 {{- $_ := set $def "clients" (append (index $def "clients") $client) }}
 {{- $_ := set $realms $name $def }}
 {{- end }}
@@ -55,7 +56,7 @@ bundled keycloakx is enabled.
       "publicClient" true
       "standardFlowEnabled" false
       "directAccessGrantsEnabled" true }}
-{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "clients" (list)) }}
+{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "sslRequired" .Values.keycloakConfigCli.sslRequired "clients" (list)) }}
 {{- $_ := set $def "clients" (append (index $def "clients") $client) }}
 {{- $_ := set $realms $name $def }}
 {{- end }}
