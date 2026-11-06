@@ -56,6 +56,7 @@ type Job struct {
 	releaseIP     PublicIPReleaser
 	audit         *audit.Service
 	sdnLock       *lock.ShedLock
+	shareAccess   func(ctx context.Context, projectID string) error
 	now           func() time.Time
 	log           *slog.Logger
 }
@@ -92,6 +93,12 @@ func (j *Job) WithNow(now func() time.Time) *Job              { j.now = now; ret
 // WithSDNLock enables the isolation reconcile: it edits the rules a network change also edits, so
 // it takes the same lock (nil = no reconcile).
 func (j *Job) WithSDNLock(l *lock.ShedLock) *Job { j.sdnLock = l; return j }
+
+// WithShareAccess wires the reconcile of a project's file share exports to its addresses (nil = none).
+func (j *Job) WithShareAccess(f func(ctx context.Context, projectID string) error) *Job {
+	j.shareAccess = f
+	return j
+}
 
 // SyncOne runs the sync for a single project — the admin POST /project/{id}/sync leg.
 // serviceID == "" syncs every attached CLOUD service but only
@@ -254,6 +261,11 @@ func (j *Job) syncTrueNASService(ctx context.Context, p *project.Project, es *ex
 	st, err := providers.Reconcile(ctx, ts.ShareSyncProvider(region, p.ID), j.cloud, es.ID, j.now())
 	if err != nil {
 		j.log.Error("syncjob: reconcile shares", "project", p.ID, "serviceId", es.ID, "err", err)
+	}
+	if j.shareAccess != nil {
+		if err := j.shareAccess(ctx, p.ID); err != nil {
+			j.log.Error("syncjob: reconcile share access", "project", p.ID, "serviceId", es.ID, "err", err)
+		}
 	}
 	return st.Created + st.Updated
 }

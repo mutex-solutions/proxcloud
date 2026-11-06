@@ -462,7 +462,8 @@ func run() error {
 	syncJob := syncjob.New(projectRepo, esSvc, cloudRepo, log).
 		WithPublicIPs(publicIPRepo.ForProject, publicIPRepo.ReleaseNIC).
 		WithAudit(auditSvc).
-		WithSDNLock(lock.New(pg))
+		WithSDNLock(lock.New(pg)).
+		WithShareAccess(projectH.ReconcileShareAccess)
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)

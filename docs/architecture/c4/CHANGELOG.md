@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: File share exports follow the project's addresses
+
+**What changed**
+
+- Every release of a public address now passes through one guard (`PublicIPRepo.release`), and network and subnet delete
+  through the same one: the address leaves the project's exports first, under a per-project lock, and a NAS that refuses
+  fails the release.
+- The sync reconciles exports with the project's addresses. Project teardown deletes shares before the addresses go back.
+- NFS exports squash root; a dataset is `777`. SMB account names are a hash, stamped on the dataset.
+
+**Why**
+
+- Exports were written only at create and on refresh, so a released address or CIDR reallocated to another tenant
+  reached the first tenant's dataset as root. An address is only safe to reallocate once nothing lists it, and the row
+  in `pvePublicIp` (or the SDN subnet) is what holds it, so that row goes last.
+- The lock exists because a refresh during a release would write the address straight back. The sync reconcile covers
+  exports that were already stale when this shipped, and anything edited on the NAS by hand.
+
+**Diagrams updated**: `c3-components.md`.
+
 ## 2026-11-07: Protected servers and several API endpoints
 
 **What changed**

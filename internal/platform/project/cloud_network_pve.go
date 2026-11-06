@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -190,23 +191,30 @@ func (h *Handler) pveDeleteNetwork(ctx context.Context, w http.ResponseWriter, e
 	}
 	netCfg := es.PVENetworkConfig()
 	return h.withSDNLock(ctx, w, func() error {
-		if err := ps.DeleteNetwork(ctx, proj.ID, cr.ExternalID); err != nil {
-			return err
-		}
-		// Shrink the project's allow-list (a freed CIDR may be carved for another
-		// tenant next). No pool = nothing was ever isolated.
-		if netCfg.CIDRPool != "" {
-			if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs); err != nil {
-				return fmt.Errorf("isolation: %w", err)
-			}
-		}
-		// Lab-verified (PVE 9.2): a zone and its last vnet can go in one apply.
-		if netCfg.Isolation == pve.IsolationEVPN {
-			if _, err := ps.DeleteProjectZoneIfEmpty(ctx, proj.ID); err != nil {
+		// A freed CIDR may be carved for another tenant next, so no export may still list it.
+		return h.withShareAccessRevoked(ctx, proj.ID, networkCIDRs(cr), func() error {
+			if err := ps.DeleteNetwork(ctx, proj.ID, cr.ExternalID); err != nil {
 				return err
 			}
-		}
-		return ps.ApplyAndWait(ctx)
+			// Shrink the project's allow-list (a freed CIDR may be carved for another
+			// tenant next). No pool = nothing was ever isolated.
+			if netCfg.CIDRPool != "" {
+				if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs); err != nil {
+					return fmt.Errorf("isolation: %w", err)
+				}
+			}
+			// Lab-verified (PVE 9.2): a zone and its last vnet can go in one apply.
+			if netCfg.Isolation == pve.IsolationEVPN {
+				if _, err := ps.DeleteProjectZoneIfEmpty(ctx, proj.ID); err != nil {
+					return err
+				}
+			}
+			if err := ps.ApplyAndWait(ctx); err != nil {
+				return err
+			}
+			// Under the lock: a refresh right after must not read the deleted network's CIDR off its row.
+			return h.cloud.DeleteAndArchive(ctx, cr, time.Now().UTC())
+		})
 	})
 }
 
@@ -520,9 +528,20 @@ func (h *Handler) pveSubnetAction(w http.ResponseWriter, r *http.Request, u *use
 				return pveVolumeErr(err)
 			}
 		case "REMOVE_SUBNET":
-			if err := ps.RemoveSubnet(ctx, proj.ID, cr.ExternalID, cidr); err != nil {
-				return pveVolumeErr(err)
-			}
+			// Off the exports first, and the row follows inside the lock: a freed CIDR may be carved for
+			// another tenant next.
+			return h.withShareAccessRevoked(ctx, proj.ID, []string{cidr}, func() error {
+				if err := ps.RemoveSubnet(ctx, proj.ID, cr.ExternalID, cidr); err != nil {
+					return pveVolumeErr(err)
+				}
+				if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs); err != nil {
+					return fmt.Errorf("isolation: %w", err)
+				}
+				if err := ps.ApplyAndWait(ctx); err != nil {
+					return err
+				}
+				return h.pveRefreshSubnetRow(ctx, ps, cr)
+			})
 		case "SET_SNAT":
 			if err := ps.SetSubnetSNAT(ctx, proj.ID, cr.ExternalID, cidr, snat); err != nil {
 				return pveVolumeErr(err)
@@ -535,16 +554,33 @@ func (h *Handler) pveSubnetAction(w http.ResponseWriter, r *http.Request, u *use
 	}) {
 		return true
 	}
-	net, _ := cr.Data["network"].(map[string]any)
-	if subs, err := ps.C.ListSDNSubnets(ctx, cr.ExternalID); err == nil && net != nil {
-		for k, v := range pve.SubnetDetail(subs) {
-			net[k] = v
-		}
-		if saved, err := h.cloud.Insert(ctx, cr); err == nil {
-			cr = saved
+	if action != "REMOVE_SUBNET" {
+		if err := h.pveRefreshSubnetRow(ctx, ps, cr); err != nil {
+			slog.Error("pve network: refresh subnets", "network", cr.ExternalID, "err", err)
 		}
 	}
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 	httpx.OK(w, map[string]any{"result": *cr})
 	return true
+}
+
+// pveRefreshSubnetRow rereads a NETWORK row's subnets off the SDN.
+func (h *Handler) pveRefreshSubnetRow(ctx context.Context, ps *pve.Service, cr *cloud.CloudResource) error {
+	net, _ := cr.Data["network"].(map[string]any)
+	if net == nil {
+		return nil
+	}
+	subs, err := ps.C.ListSDNSubnets(ctx, cr.ExternalID)
+	if err != nil {
+		return err
+	}
+	for k, v := range pve.SubnetDetail(subs) {
+		net[k] = v
+	}
+	saved, err := h.cloud.Insert(ctx, cr)
+	if err != nil {
+		return err
+	}
+	*cr = *saved
+	return nil
 }

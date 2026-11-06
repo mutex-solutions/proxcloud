@@ -472,10 +472,14 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 		// proxmox: destroy via the pve service, then archive the cache row here.
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsProxmox() {
 			if cr.Type == cloud.TypeNetwork {
-				if !h.pveDeleteNetwork(r.Context(), w, es, proj, cr) {
-					return
+				// pveDeleteNetwork archives the row itself, inside the share-access lock.
+				if h.pveDeleteNetwork(r.Context(), w, es, proj, cr) {
+					h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_DELETE", "", cr)
+					httpx.Accepted(w)
 				}
-			} else if err := h.pveDeleteResource(r.Context(), es, proj, cr, r.URL.Query().Get("deleteVolumes") == "true"); err != nil {
+				return
+			}
+			if err := h.pveDeleteResource(r.Context(), es, proj, cr, r.URL.Query().Get("deleteVolumes") == "true"); err != nil {
 				var he *httpx.HTTPError
 				if !errors.As(err, &he) {
 					he = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
