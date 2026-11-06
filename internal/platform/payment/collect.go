@@ -76,8 +76,8 @@ func (s *CollectService) CollectByCard(ctx context.Context, profile *billing.Bil
 	if req.CardID == "" {
 		return nil, httpx.BadRequest("Card id is required.")
 	}
-	if req.Amount == nil {
-		return nil, httpx.BadRequest("Amount is required.")
+	if req.Amount == nil || !req.Amount.IsPositive() {
+		return nil, httpx.BadRequest("Amount is required and must be positive.")
 	}
 	// Bind the card to the CALLER's billing profile: a card id owned by another
 	// profile must not be chargeable by this caller (deposit-by-card IDOR).
@@ -402,7 +402,7 @@ func (s *CollectService) processCollect(ctx context.Context, txn *pricing.Collec
 			if err != nil {
 				return nil, err
 			}
-			if err := s.billing.CreateAccountCredit(ctx, ac); err != nil {
+			if err := s.billing.CreateAccountCreditForTxn(ctx, txn.ID, ac); err != nil {
 				return nil, err
 			}
 			if s.notifier != nil {
@@ -458,7 +458,7 @@ func (s *CollectService) settleSurplus(ctx context.Context, txn *pricing.Collect
 	if err != nil {
 		return false
 	}
-	if err := s.billing.CreateAccountCredit(ctx, ac); err != nil {
+	if err := s.billing.CreateAccountCreditForTxn(ctx, txn.ID, ac); err != nil {
 		return false
 	}
 	txn.Status = pricing.CollectTransactionStatusSuccess

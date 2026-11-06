@@ -269,9 +269,9 @@ closed by `METERING_RECOVERED`.
 After rating every resource, `billingjob.billAdjuster` applies (in place):
 
 - **Savings-contract discounts** (`Engine.ApplySavingsContractDiscounts`) — for
-  each active contract whose target item usage ≥ its `monthlyCommittedAmount`, a
-  negative `SAVINGS_CONTRACT` adjustment (upfront → `-min(committed, usage)`; else
-  a discount-rate fraction, MATH_CONTEXT `÷100`).
+  each `ACTIVE` contract whose target item usage ≥ its `monthlyCommittedAmount`, a
+  negative `SAVINGS_CONTRACT` adjustment (a contract paid upfront → `-min(committed, usage)`,
+  at any usage; else a discount-rate fraction, MATH_CONTEXT `÷100`).
 - **Price-adjustment rules** (`Engine.ApplyPriceAdjustmentRules`) — the enabled
   rules of the service's plans add a tiered `PRICE_ADJUSTMENT_RULE` adjustment.
 
@@ -471,11 +471,22 @@ sequenceDiagram
   (converted to base currency), linked on the transaction so a refund can void it.
 
 It then marks the txn `SUCCESS` (idempotent — only a `PENDING` txn may be
-processed, guarding against a duplicate credit), sends a thank-you email, and best-
+processed, guarding against a duplicate credit, and the credit's id is the
+transaction's, so a settle retried after a failure cannot mint a second one. The
+scanner re-drives a deposit left `PROCESSING` for 20 minutes), sends a thank-you email, and best-
 effort re-reviews suspension + settles the targeted bill.
 
-`RefundFunds` (admin) full-refunds the `PaymentIntent` and, on success, deletes the
-spendable credit and marks the txn `REFUNDED`.
+`RefundFunds` (admin) full-refunds the `PaymentIntent`, voids the spendable credit and
+marks the txn `REFUNDED`. The gateway refunds a charge in full, so a deposit whose credit is
+partly spent is refused with the amount spent, and so is the deposit of a savings contract
+that still runs: cancel the contract first.
+
+**Credit concurrency.** Every read-check-write of a profile's credit (pay a bill from
+credit, bill issue, refund) runs in one transaction under `Repo.WithProfileLock`, a
+per-profile advisory lock.
+
+**Bank transfers** leave `PENDING` once: approve, reject and the customer's cancel race on
+a conditional update, and the loser gets a 409 naming the state.
 
 ### Deposit / collect by card
 
@@ -528,20 +539,32 @@ each with **upfront** and **no-upfront** discount **tiers** (`startAmount` →
 A **savings contract** (`billing.SavingsContract`, table **`savingsContract`**)
 is a profile's accepted commitment. `CreateSavingsContract`:
 
-1. Resolve the available plan; reject a duplicate **`ACTIVE`** contract for the
-   same plan.
+1. Resolve the available plan; reject a duplicate contract for the same plan,
+   **`ACTIVE`** or **`PENDING_PAYMENT`**. The commitment must be positive.
 2. Match the schedule by `durationMonths`.
 3. Pick the discount from the upfront-or-no-upfront tiers: the **max** discount
    among tiers whose `startAmount ≤ monthlyCommittedAmount`.
 4. `startDate` = first of current or next month (`startDate` request =
    `CURRENT_MONTH` / `NEXT_MONTH`); `endDate = startDate + durationMonths`.
-5. Persist an **`ACTIVE`** contract (`monthlyCommittedAmount`, `discountRate`,
-   `paidUpfront`, `targets`).
+5. Persist the contract (`monthlyCommittedAmount`, `discountRate`, `paidUpfront`,
+   `targets`): **`ACTIVE`** without upfront payment, **`PENDING_PAYMENT`** with it, plus
+   `upfrontAmount` = commitment x months, less the discount.
 
-Statuses: `ACTIVE` → `EXPIRED` (or `CANCELLED`). During charging, an active
-contract covering the whole cycle discounts the bill once target usage reaches the
-committed amount (see §4). A deposit tied to a contract activates it
-(`activateSavingsContract`) instead of minting spendable credit.
+Statuses: `PENDING_PAYMENT` → `ACTIVE` → `EXPIRED` (or `CANCELLED`). During charging,
+only an `ACTIVE` contract covering the whole cycle discounts the bill: once target usage
+reaches the committed amount, or from the first unit for one paid upfront, whose usage up to
+the commitment is prepaid (see §4). Cancelling keeps what a bill already holds and stops
+further discounts.
+
+An upfront contract is paid with `POST /payment/deposit/{bp}` carrying
+`savingsContractId`. `AddFunds` requires it to be the caller's own contract and
+`PENDING_PAYMENT`, and takes its `upfrontAmount` as the amount, whatever the client sent.
+When that deposit settles (card callback, or an operator approving the bank transfer)
+`activateSavingsContract` activates the contract instead of minting credit. A term whose start
+has passed restarts at the current month. If the contract no longer wants the money (cancelled
+meanwhile, another amount) the deposit becomes spendable credit. A paid upfront contract cannot be
+cancelled or extended by the customer; one awaiting payment can be cancelled. An operator
+creating a contract in the admin console sets it `ACTIVE` directly and answers for the payment.
 
 **Expiry** — `SavingsService.ExpireContracts` (daily `0 0 0 * * *`) flips every
 `ACTIVE` contract past its `endDate` to `EXPIRED`, cancels its reminders, and sends

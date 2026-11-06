@@ -139,7 +139,7 @@ export function useCardElement(gateway: Gateway | undefined, active: boolean) {
 // gateway's card element → GET the whitelisted funds-confirm callback so the API retrieves the
 // intent and mints the account credit (which settles `billId` when given).
 export function NewCardDepositDialog({
-  open, onOpenChange, bp, amount, currency, gateways, preferredGatewayId, billId, onDone,
+  open, onOpenChange, bp, amount, currency, gateways, preferredGatewayId, billId, savingsContractId, onDone,
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
@@ -149,6 +149,7 @@ export function NewCardDepositDialog({
   gateways: Gateway[]
   preferredGatewayId?: string
   billId?: string
+  savingsContractId?: string
   onDone: () => void
 }) {
   const [gwId, setGwId] = useState(() => defaultGatewayId(gateways, preferredGatewayId))
@@ -171,7 +172,7 @@ export function NewCardDepositDialog({
       try {
         const resp = await apiFetch<DepositResponse>(`/payment/deposit/${bp}`, {
           method: "POST",
-          body: { amount, paymentGatewayId: gwId, ...(billId ? { billId } : {}) },
+          body: { amount, paymentGatewayId: gwId, ...(billId ? { billId } : {}), ...(savingsContractId ? { savingsContractId } : {}) },
         })
         const clientSecret = typeof resp?.metadata === "string" ? resp.metadata : undefined
         if (!resp?.transactionId || !clientSecret) throw new Error("Gateway did not return a payment secret")
@@ -184,7 +185,7 @@ export function NewCardDepositDialog({
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, bp, gwId, amount, billId])
+  }, [open, bp, gwId, amount, billId, savingsContractId])
 
   const pay = async () => {
     if (!intent) return
@@ -193,7 +194,7 @@ export function NewCardDepositDialog({
     try {
       await el.confirm({ clientSecret: intent.clientSecret, intentId: intent.intentId })
       await apiFetch(`/callbacks/payment/${gatewaySlug(gateway)}/funds/confirm/${intent.txnId}`)
-      toast.success(billId ? "Bill paid" : `Deposit of ${fmtMoney(amount, currency)} succeeded`)
+      toast.success(billId ? "Bill paid" : savingsContractId ? "Savings contract activated" : `Deposit of ${fmtMoney(amount, currency)} succeeded`)
       onDone()
       onOpenChange(false)
     } catch (e) {

@@ -103,6 +103,13 @@ func (d *DB) WithTx(ctx context.Context, fn func(ctx context.Context) error) err
 	})
 }
 
+// LockXact takes an advisory lock on key until the surrounding WithTx ends. Unlike a row lock it
+// also works for a key with no row behind it.
+func (d *DB) LockXact(ctx context.Context, key string) error {
+	_, err := d.q(ctx).Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", key)
+	return err
+}
+
 func (d *DB) q(ctx context.Context) querier {
 	if tx, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
 		return tx

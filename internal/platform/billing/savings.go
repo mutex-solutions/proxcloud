@@ -36,9 +36,13 @@ func (r *Repo) InsertSavingsContract(ctx context.Context, c *SavingsContract) er
 }
 
 // CreateSavingsContract creates a savings contract: resolve the available plan, reject a
-// duplicate ACTIVE contract, pick the schedule by duration + the discount tier by committed amount,
-// compute start/end dates, persist an ACTIVE contract. Returns httpx errors (400/404) for the guards.
+// duplicate contract, pick the schedule by duration + the discount tier by committed amount, compute
+// start/end dates, persist. No-upfront is ACTIVE at once, upfront waits for its payment
+// (ActivatePaidSavingsContract). Returns httpx errors (400/404) for the guards.
 func (r *Repo) CreateSavingsContract(ctx context.Context, bpID string, in CreateSavingsContractInput, now time.Time) (*SavingsContract, error) {
+	if !in.MonthlyCommittedAmount.IsPositive() {
+		return nil, httpx.BadRequest("The monthly committed amount must be positive")
+	}
 	plan, err := r.AvailableSavingsPlanByID(ctx, in.SavingsPlanID)
 	if err != nil {
 		return nil, err
@@ -95,10 +99,36 @@ func (r *Repo) CreateSavingsContract(ctx context.Context, bpID string, in Create
 		DurationMonths: in.DurationMonths, DiscountRate: discount, MonthlyCommittedAmount: &monthly,
 		PaidUpfront: in.PaidUpfront,
 	}
+	if in.PaidUpfront {
+		c.Status = SavingsStatusPendingPayment
+		price := upfrontPrice(monthly, in.DurationMonths, *discount)
+		c.UpfrontAmount = &price
+	}
 	if err := r.InsertSavingsContract(ctx, c); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// upfrontPrice is the term's commitment less the contract's discount, in the base currency.
+func upfrontPrice(monthly decimal.Decimal, months int, discountRate decimal.Decimal) decimal.Decimal {
+	full := monthly.Mul(decimal.NewFromInt(int64(months)))
+	return full.Sub(full.Mul(discountRate).Div(decimal.NewFromInt(100))).Round(2)
+}
+
+// ActivatePaidSavingsContract flips a contract from PENDING_PAYMENT to ACTIVE, once: a concurrent
+// settle or cancel loses. Reports whether this caller won.
+func (r *Repo) ActivatePaidSavingsContract(ctx context.Context, c *SavingsContract, txnID string, now time.Time) (bool, error) {
+	set := map[string]any{"status": SavingsStatusActive, "paymentTransactionId": txnID, "updatedAt": now}
+	// A term whose start went by while the contract waited for its money starts now: the customer
+	// paid for all of it.
+	if c.StartDate != nil && c.StartDate.Before(firstOfMonth(now, 0)) {
+		start := firstOfMonth(now, 0)
+		end := start.AddDate(0, c.DurationMonths, 0)
+		set["startDate"], set["endDate"] = start, end
+		c.StartDate, c.EndDate = &start, &end
+	}
+	return r.savingCtrs.SetFieldsOne(ctx, map[string]any{"_id": c.ID, "status": SavingsStatusPendingPayment}, set, nil)
 }
 
 // firstOfMonth returns the first day of the month addMonths from now (UTC midnight).

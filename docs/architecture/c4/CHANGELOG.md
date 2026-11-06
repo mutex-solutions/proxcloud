@@ -4,6 +4,30 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Money paths: upfront contracts are paid for, credit has one writer per profile
+
+**What changed**
+
+- Upfront savings contracts start `PENDING_PAYMENT` with a server-computed `upfrontAmount`. Only a deposit bound to the
+  contract at `AddFunds` activates it, and only `ACTIVE` contracts discount a bill.
+- `Repo.WithProfileLock`: pay-from-credit, bill issue and refund read and write credit in one transaction under a
+  per-profile advisory lock.
+- A deposit's credit has the transaction's id, and the scanner re-drives a deposit stuck `PROCESSING`.
+- Bank transfers leave `PENDING` once, through a conditional update.
+- A refund refuses a credit partly spent or a contract still running.
+
+**Why**
+
+- A contract was `ACTIVE` at create with no payment, and upfront means usage up to the commitment is free, so a tenant
+  got that usage for nothing. Any deposit naming any contract id activated it, whatever the amount or owner.
+- Credit was read, checked and replaced with no lock, so two concurrent payers both spent the same balance.
+- An advisory lock rather than a row lock: the balance is many rows, and a lock on one profile row would tie the
+  money paths to that row existing.
+- The settle released its claim on any error after minting, so a retry minted again. A primary key is the one guard that
+  also covers a crash between the two writes.
+
+**Diagrams updated**: none: no container or component changes.
+
 ## 2026-11-07: Protected servers and several API endpoints
 
 **What changed**

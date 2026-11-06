@@ -119,8 +119,15 @@ func (s *AddFundsService) AddFunds(ctx context.Context, profile *billing.Billing
 	if req.PaymentGatewayID == "" {
 		return nil, httpx.BadRequest("Payment gateway id is required.")
 	}
-	if req.Amount == nil && req.BillID == "" {
-		return nil, httpx.BadRequest("Amount is required.")
+	contract, err := s.payableContract(ctx, profile, req)
+	if err != nil {
+		return nil, err
+	}
+	if contract != nil {
+		req.Amount = contract.UpfrontAmount // the contract's price, whatever the client sent
+	}
+	if req.BillID == "" && (req.Amount == nil || !req.Amount.IsPositive()) {
+		return nil, httpx.BadRequest("Amount is required and must be positive.")
 	}
 
 	gw, err := s.billing.GetGateway(ctx, req.PaymentGatewayID)
@@ -131,7 +138,7 @@ func (s *AddFundsService) AddFunds(ctx context.Context, profile *billing.Billing
 		return nil, httpx.NotFound("Payment gateway not found")
 	}
 	// minDeposit guard (skipped when paying a specific bill).
-	if req.BillID == "" {
+	if req.BillID == "" && contract == nil {
 		if min := gw.MinDeposit(); min > 0 && req.Amount.LessThan(decimal.NewFromFloat(min)) {
 			return nil, httpx.BadRequest("The amount is less than the minimum deposit.")
 		}
@@ -402,8 +409,16 @@ func (s *AddFundsService) settleClaimed(ctx context.Context, txn *billing.Accoun
 				}
 			}
 		case contractID != "":
-			if err := s.activateSavingsContract(ctx, profile, contractID); err != nil {
+			activated, err := s.activateSavingsContract(ctx, profile, txn, contractID)
+			if err != nil {
 				return nil, err
+			}
+			if !activated {
+				// The money came in and the contract no longer wants it (cancelled meanwhile): it
+				// stands as spendable credit, where the operator can also refund it.
+				if err := s.createAccountCredit(ctx, profile, txn); err != nil {
+					return nil, err
+				}
 			}
 		default:
 			if err := s.createAccountCredit(ctx, profile, txn); err != nil {
@@ -449,7 +464,14 @@ func (s *AddFundsService) ProcessBankTransfer(ctx context.Context, txnID, bankSt
 	case "APPROVED":
 		return s.settleSuccess(ctx, txn)
 	case "REJECTED":
-		// REFUSED → failed transaction: status FAILED + gatewayMessage.
+		// REFUSED → failed transaction: status FAILED + gatewayMessage. Only from PENDING: a settled
+		// deposit going FAILED would keep its credit and lose its record.
+		if txn.Status == "FAILED" {
+			return txn, nil
+		}
+		if txn.Status != "PENDING" {
+			return nil, httpx.BadRequest(fmt.Sprintf("Transaction %s already processed", txn.ID))
+		}
 		txn.Status = "FAILED"
 		txn.GatewayMessage = comments
 		return s.billing.SaveAccountCreditTransaction(ctx, txn)
@@ -458,20 +480,50 @@ func (s *AddFundsService) ProcessBankTransfer(ctx context.Context, txnID, bankSt
 	}
 }
 
-// activateSavingsContract activates the savings contract (a deposit tied to a savings
-// contract activates the contract instead of minting spendable credit): status → ACTIVE + the
-// savings_contract_activated email. A missing contract errors (404).
-func (s *AddFundsService) activateSavingsContract(ctx context.Context, profile *billing.BillingProfile, contractID string) error {
+// payableContract resolves a deposit's savingsContractId: the caller's own contract, upfront, still
+// waiting for its money. nil when the deposit names no contract.
+func (s *AddFundsService) payableContract(ctx context.Context, profile *billing.BillingProfile, req AddFundsRequest) (*billing.SavingsContract, error) {
+	if req.SavingsContractID == "" {
+		return nil, nil
+	}
+	if req.BillID != "" || req.OrderID != "" {
+		return nil, httpx.BadRequest("A deposit pays one thing: a savings contract, a bill or an order.")
+	}
+	c, err := s.billing.SavingsContractByID(ctx, req.SavingsContractID)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil || c.BillingProfileID != profile.ID {
+		return nil, httpx.NotFound("Savings contract not found")
+	}
+	if !c.PaidUpfront || c.Status != billing.SavingsStatusPendingPayment || c.UpfrontAmount == nil {
+		return nil, httpx.BadRequest("This savings contract is not waiting for a payment.")
+	}
+	return c, nil
+}
+
+// activateSavingsContract activates the contract a settled deposit paid for instead of minting
+// spendable credit: status → ACTIVE + the savings_contract_activated email. It reports false, with no
+// change, when this deposit cannot pay that contract any more (another profile's, cancelled, or not
+// the amount it costs), and the caller keeps the money as credit. A retry of a settle this deposit
+// already won reports true.
+func (s *AddFundsService) activateSavingsContract(ctx context.Context, profile *billing.BillingProfile, txn *billing.AccountCreditTransaction, contractID string) (bool, error) {
 	c, err := s.billing.SavingsContractByID(ctx, contractID)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if c == nil {
-		return httpx.NotFound("Savings contract not found")
+	if c == nil || c.BillingProfileID != txn.BillingProfileID {
+		return false, nil
 	}
-	c.Status = billing.SavingsStatusActive
-	if err := s.billing.SaveSavingsContract(ctx, c); err != nil {
-		return err
+	if c.Status == billing.SavingsStatusActive && c.PaymentTransactionID == txn.ID {
+		return true, nil
+	}
+	if c.Status != billing.SavingsStatusPendingPayment || !depositPaysContract(txn, c) {
+		return false, nil
+	}
+	won, err := s.billing.ActivatePaidSavingsContract(ctx, c, txn.ID, time.Now().UTC())
+	if err != nil || !won {
+		return false, err
 	}
 	vars := map[string]any{
 		"fullName": fullName(profile), "savingsPlanName": c.SavingsPlanName, "currency": profile.Currency,
@@ -489,7 +541,20 @@ func (s *AddFundsService) activateSavingsContract(ctx context.Context, profile *
 		vars["discountRate"] = c.DiscountRate.String()
 	}
 	s.notify(ctx, "savings_contract_activated", profile, vars)
-	return nil
+	return true, nil
+}
+
+// depositPaysContract compares a deposit (profile currency) with the contract's price (base currency)
+// at the rate the deposit was taken at.
+func depositPaysContract(txn *billing.AccountCreditTransaction, c *billing.SavingsContract) bool {
+	if txn.Amount == nil || c.UpfrontAmount == nil {
+		return false
+	}
+	rate := decimal.NewFromInt(1)
+	if txn.ExchangeRate != nil {
+		rate = *txn.ExchangeRate
+	}
+	return txn.Amount.Equal(rate.Mul(*c.UpfrontAmount).Round(2))
 }
 
 // createAccountCredit creates the spendable AccountCredit balance from
@@ -500,7 +565,7 @@ func (s *AddFundsService) createAccountCredit(ctx context.Context, profile *bill
 	if err != nil {
 		return err
 	}
-	if err := s.billing.CreateAccountCredit(ctx, ac); err != nil {
+	if err := s.billing.CreateAccountCreditForTxn(ctx, txn.ID, ac); err != nil {
 		return err
 	}
 	txn.AccountCredit = pgdoc.M{"id": ac.ID, "billingProfileId": ac.BillingProfileID, "amount": ac.Amount.String(), "currency": ac.Currency}
@@ -541,7 +606,8 @@ func newAccountCredit(ctx context.Context, b *billing.Repo, billingProfileID, cu
 	}, nil
 }
 
-// RefundFunds is the admin refund endpoint: full-refund a SUCCESS deposit's PaymentIntent. When the
+// RefundFunds is the admin refund endpoint: full-refund a SUCCESS deposit's PaymentIntent. A credit
+// partly spent, or a savings contract the deposit paid and that still runs, refuses it. When the
 // gateway accepts the refund (succeeded, or still processing — Airwallex settles refunds
 // asynchronously) the spendable AccountCredit is voided right away (zero balance + refundedAt,
 // never deleted — the money is on its way back and must not be spendable meanwhile) and the txn is
@@ -550,6 +616,8 @@ func newAccountCredit(ctx context.Context, b *billing.Repo, billingProfileID, cu
 // billing.CreditNoteNumber) goes out when the refund is confirmed: immediately for a succeeded
 // one, from the scanner (ReconcileRefund) for a pending one. Non-refund-capable gateways → 400.
 func (s *AddFundsService) RefundFunds(ctx context.Context, txnID string) (*billing.AccountCreditTransaction, error) {
+	// The gateway call cannot be taken back: a browser leaving must not lose the void that follows it.
+	ctx = context.WithoutCancel(ctx)
 	txn, err := s.billing.AccountCreditTransactionByID(ctx, txnID)
 	if err != nil {
 		return nil, err
@@ -557,39 +625,67 @@ func (s *AddFundsService) RefundFunds(ctx context.Context, txnID string) (*billi
 	if txn == nil {
 		return nil, httpx.NotFound(fmt.Sprintf("Transaction %s not found ", txnID))
 	}
-	if txn.Status != "SUCCESS" {
-		return nil, httpx.BadRequest(fmt.Sprintf("Transaction %s is %s — only a SUCCESS deposit can be refunded.", txn.ID, txn.Status))
-	}
 	gw, err := s.billing.GetGateway(ctx, txn.PaymentGatewayID)
 	if err != nil {
 		return nil, err
 	}
-	if gw == nil {
-		return nil, httpx.NotFound("Payment gateway not found")
-	}
-	if !gw.IsCard() { // only refund-capable (card) gateways
-		return nil, httpx.BadRequest("Cannot refund the transaction.")
-	}
-	g, err := cardGateway(s.gatewayFor, gw)
-	if err != nil {
-		return nil, err
-	}
-	rf, err := g.Refund(ctx, txn.ExternalID)
-	if err != nil {
-		return nil, err
-	}
-	if rf.Status == "failed" {
-		return nil, httpx.BadRequest("Refund refused by the payment provider: " + gatewayErrorMessage(rf.ErrorMessage, ""))
-	}
-	now := time.Now().UTC()
-	refund := pgdoc.M{"id": rf.ID, "status": "PENDING", "requestedAt": now}
-	if rf.Status == "succeeded" {
-		refund["status"] = "SUCCEEDED"
-	}
-	if id, _ := txn.AccountCredit["id"].(string); id != "" {
-		ac, err := s.billing.AccountCreditByID(ctx, id)
+	var saved *billing.AccountCreditTransaction
+	succeeded := false
+	// ponytail: holds the profile's credit lock across the gateway call so nothing can spend the credit
+	// between the check and the void. Reserve-then-call if a slow gateway ever blocks a profile for long.
+	err = s.billing.WithProfileLock(ctx, txn.BillingProfileID, func(ctx context.Context) error {
+		cur, err := s.billing.AccountCreditTransactionByID(ctx, txnID)
 		if err != nil {
-			return nil, err
+			return err
+		}
+		txn = cur
+		if txn.Status != "SUCCESS" {
+			return httpx.BadRequest(fmt.Sprintf("Transaction %s is %s — only a SUCCESS deposit can be refunded.", txn.ID, txn.Status))
+		}
+		if gw == nil {
+			return httpx.NotFound("Payment gateway not found")
+		}
+		if !gw.IsCard() { // only refund-capable (card) gateways
+			return httpx.BadRequest("Cannot refund the transaction.")
+		}
+		if contractID, _ := txn.Metadata["savingsContractId"].(string); contractID != "" {
+			c, err := s.billing.SavingsContractByID(ctx, contractID)
+			if err != nil {
+				return err
+			}
+			if c != nil && c.Status == billing.SavingsStatusActive && c.PaymentTransactionID == txn.ID {
+				return httpx.BadRequest("This deposit paid savings contract " + c.ID + ", which is still active: cancel the contract first.")
+			}
+		}
+		var ac *pricing.AccountCredit
+		if id, _ := txn.AccountCredit["id"].(string); id != "" {
+			if ac, err = s.billing.AccountCreditByID(ctx, id); err != nil {
+				return err
+			}
+		}
+		// The gateway refunds a charge in full, so a credit partly spent would hand back money that
+		// already paid for something.
+		if ac != nil && ac.Amount != nil && ac.InitialAmount != nil && ac.Amount.LessThan(*ac.InitialAmount) {
+			spent := ac.InitialAmount.Sub(*ac.Amount)
+			return httpx.BadRequest(fmt.Sprintf("Cannot refund: %s of this %s %s deposit has already been spent. Only an unspent deposit can be refunded.",
+				spent.StringFixed(2), ac.InitialAmount.StringFixed(2), ac.Currency))
+		}
+		g, err := cardGateway(s.gatewayFor, gw)
+		if err != nil {
+			return err
+		}
+		rf, err := g.Refund(ctx, txn.ExternalID)
+		if err != nil {
+			return err
+		}
+		if rf.Status == "failed" {
+			return httpx.BadRequest("Refund refused by the payment provider: " + gatewayErrorMessage(rf.ErrorMessage, ""))
+		}
+		now := time.Now().UTC()
+		refund := pgdoc.M{"id": rf.ID, "status": "PENDING", "requestedAt": now}
+		if rf.Status == "succeeded" {
+			refund["status"] = "SUCCEEDED"
+			succeeded = true
 		}
 		if ac != nil {
 			if ac.Amount != nil {
@@ -597,20 +693,21 @@ func (s *AddFundsService) RefundFunds(ctx context.Context, txnID string) (*billi
 			}
 			billing.MarkAccountCreditRefunded(ac, now)
 			if err := s.billing.SaveAccountCredit(ctx, ac); err != nil {
-				return nil, err
+				return err
 			}
 		}
-	}
-	txn.Status = "REFUNDED"
-	if txn.Metadata == nil {
-		txn.Metadata = pgdoc.M{}
-	}
-	txn.Metadata["refund"] = refund
-	saved, err := s.billing.SaveAccountCreditTransaction(ctx, txn)
+		txn.Status = "REFUNDED"
+		if txn.Metadata == nil {
+			txn.Metadata = pgdoc.M{}
+		}
+		txn.Metadata["refund"] = refund
+		saved, err = s.billing.SaveAccountCreditTransaction(ctx, txn)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	if rf.Status == "succeeded" {
+	if succeeded {
 		s.notifyRefunded(ctx, saved)
 	}
 	return saved, nil

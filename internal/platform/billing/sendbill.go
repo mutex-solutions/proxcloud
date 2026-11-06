@@ -105,58 +105,61 @@ func (s *BillSendService) sendBill(ctx context.Context, profile *BillingProfile,
 	// consumed credits, then decide PAID vs SENT on the remaining unpaid amount.
 	baseCcy, _ := s.repo.BaseCurrency(ctx)
 	x := pricing.NewExchanger(nil)
-	promoCredits, err := s.repo.PromotionalCreditCandidates(ctx, profile.ID, now)
-	if err != nil {
-		return err
-	}
-	accountCredits, err := s.repo.AccountCreditsByProfile(ctx, profile.ID)
-	if err != nil {
-		return err
-	}
 	var rates, allRates []pricing.TaxRate
 	if s.pricing != nil {
 		allRates, _ = s.pricing.AllTaxRates(ctx)
 		rates = pricing.SelectTaxRates(allRates, profile.Country, profile.Company, now)
 	}
-	appliedPromo, acctSettlements, err := pricing.SettleBillAmount(bill, grossTotal, promoCredits, accountCredits, rates, baseCcy, profile.Currency, x, now)
-	if err != nil {
-		return err
-	}
-	touched := map[string]bool{}
-	for _, ap := range appliedPromo {
-		touched[ap.PromotionalCreditID] = true
-	}
-	for _, pc := range promoCredits {
-		if touched[pc.ID] {
-			if err := s.repo.SavePromotionalCredit(ctx, pc); err != nil {
-				return err
-			}
-		}
-	}
-	for _, as := range acctSettlements {
-		if as.AccountCredit != nil {
-			if err := s.repo.SaveAccountCredit(ctx, as.AccountCredit); err != nil {
-				return err
-			}
-		}
-	}
-
-	// The bill is issued now either way (sentAt = the invoice issue date); the number is stamped
-	// before the mail so the template can print it.
-	bill.SentAt = &now
-	if err := s.stampInvoiceNumber(ctx, bill, now); err != nil {
-		return err
-	}
 	key := "bill_is_paid"
-	if pricing.GetUnpaidAmountBillProductCurrency(bill).Cmp(decimal.Zero) <= 0 {
-		bill.Status = pricing.BillStatusPaid
-	} else {
-		bill.Status = pricing.BillStatusSent
-		due := now.AddDate(0, 0, 7) // sentAt + 7 days
-		bill.DueAt = &due
-		key = "bill_is_generated"
-	}
-	if err := s.repo.SaveBillDoc(ctx, bill); err != nil {
+	err := s.repo.WithProfileLock(ctx, profile.ID, func(ctx context.Context) error {
+		promoCredits, err := s.repo.PromotionalCreditCandidates(ctx, profile.ID, now)
+		if err != nil {
+			return err
+		}
+		accountCredits, err := s.repo.AccountCreditsByProfile(ctx, profile.ID)
+		if err != nil {
+			return err
+		}
+		appliedPromo, acctSettlements, err := pricing.SettleBillAmount(bill, grossTotal, promoCredits, accountCredits, rates, baseCcy, profile.Currency, x, now)
+		if err != nil {
+			return err
+		}
+		touched := map[string]bool{}
+		for _, ap := range appliedPromo {
+			touched[ap.PromotionalCreditID] = true
+		}
+		for _, pc := range promoCredits {
+			if touched[pc.ID] {
+				if err := s.repo.SavePromotionalCredit(ctx, pc); err != nil {
+					return err
+				}
+			}
+		}
+		for _, as := range acctSettlements {
+			if as.AccountCredit != nil {
+				if err := s.repo.SaveAccountCredit(ctx, as.AccountCredit); err != nil {
+					return err
+				}
+			}
+		}
+
+		// The bill is issued now either way (sentAt = the invoice issue date); the number is stamped
+		// before the mail so the template can print it.
+		bill.SentAt = &now
+		if err := s.stampInvoiceNumber(ctx, bill, now); err != nil {
+			return err
+		}
+		if pricing.GetUnpaidAmountBillProductCurrency(bill).Cmp(decimal.Zero) <= 0 {
+			bill.Status = pricing.BillStatusPaid
+		} else {
+			bill.Status = pricing.BillStatusSent
+			due := now.AddDate(0, 0, 7) // sentAt + 7 days
+			bill.DueAt = &due
+			key = "bill_is_generated"
+		}
+		return s.repo.SaveBillDoc(ctx, bill)
+	})
+	if err != nil {
 		return err
 	}
 	// The remainder is charged to the saved card BEFORE the mail (chargesAtIssue), so the customer
