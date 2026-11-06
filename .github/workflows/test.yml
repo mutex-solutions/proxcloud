@@ -31,6 +31,7 @@ jobs:
   # tsc and vite build stay green on a bundle that renders a white page, so open the real build.
   spa-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
