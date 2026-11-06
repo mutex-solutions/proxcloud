@@ -371,6 +371,14 @@ func (s *Service) DisableProtection(ctx context.Context, projectID, externalID s
 	if vm == nil {
 		return nil
 	}
+	// An unprotected VM touches none of this, so a server delete keeps working on a token without HA rights.
+	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	if !HasTag(cfg.Str("tags"), tagProtected) {
+		return nil
+	}
 	if err := s.C.DeleteHARule(ctx, vm.VMID); err != nil && !IsNotFound(err) {
 		return err
 	}
@@ -395,13 +403,6 @@ func (s *Service) DisableProtection(ctx context.Context, projectID, externalID s
 				return err
 			}
 		}
-	}
-	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
-	if err != nil {
-		return err
-	}
-	if !HasTag(cfg.Str("tags"), tagProtected) {
-		return nil
 	}
 	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"tags": removeTag(cfg.Str("tags"), tagProtected)})
 	if err != nil {
