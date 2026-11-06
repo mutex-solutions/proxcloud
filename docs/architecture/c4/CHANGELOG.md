@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: operator Create user makes a Keycloak login
+
+Open item of the lab drill (DRILL-2).
+
+**What changed**
+
+- `POST /admin/user` creates the Keycloak account through `sso.KCAdmin`, keys the row by its id and
+  returns a temporary password once. `DELETE /admin/user/{id}` removes the account too.
+- Without the service account Create user answers 501 instead of writing a row.
+
+**Why**
+
+- The row had a random `sub` that no login could ever match, so the user could not log in and a later
+  self-registration made a second row. Reusing the SSO service account adds no client and no secret:
+  it already holds `manage-users` in the customer realm, on compose, the chart and the installer.
+
+**Diagrams updated**: `c3-components.md` (note under C3a).
+
 ## 2026-11-07: isolation rules get an owner, cover gateways, and reconcile in the sync job
 
 Open items of the lab drill (DRILL-5, DRILL-6) and the coexistence note in the lab log.
