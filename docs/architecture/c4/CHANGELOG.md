@@ -36,6 +36,23 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Diagrams updated**: `c2-containers.md` (Tenant VMs), `c3-components.md` (C3b).
 
+## 2026-11-07: operator Create user makes a Keycloak login
+
+Open item of the lab drill (DRILL-2).
+
+**What changed**
+
+- `POST /admin/user` creates the Keycloak account through `sso.KCAdmin`, keys the row by its id and
+  returns a temporary password once. `DELETE /admin/user/{id}` removes the account too.
+- Without the service account Create user answers 501 instead of writing a row.
+
+**Why**
+
+- The row had a random `sub` that no login could ever match, so the user could not log in and a later
+  self-registration made a second row. Reusing the SSO service account adds no client and no secret:
+  it already holds `manage-users` in the customer realm, on compose, the chart and the installer.
+
+**Diagrams updated**: `c3-components.md` (note under C3a).
 ## 2026-11-07: API tokens get a scope and an expiry
 
 **What changed**
