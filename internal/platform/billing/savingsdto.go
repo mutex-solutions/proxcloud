@@ -20,6 +20,9 @@ const (
 	SavingsStatusActive    = "ACTIVE"
 	SavingsStatusExpired   = "EXPIRED"
 	SavingsStatusCancelled = "CANCELLED"
+	// SavingsStatusPendingPayment is an upfront contract nobody has paid for: it discounts nothing
+	// until a deposit bound to it settles.
+	SavingsStatusPendingPayment = "PENDING_PAYMENT"
 )
 
 // --- decode structs (money = decimal.Decimal) ---
@@ -37,9 +40,13 @@ type SavingsContract struct {
 	Targets                []SavingsPlanTarget `json:"targets,omitempty"`
 	MonthlyCommittedAmount *decimal.Decimal    `json:"monthlyCommittedAmount,omitempty"`
 	PaidUpfront            bool                `json:"paidUpfront"`
-	OrderID                string              `json:"orderId,omitempty"`
-	CreatedAt              *time.Time          `json:"createdAt,omitempty"`
-	UpdatedAt              *time.Time          `json:"updatedAt,omitempty"`
+	// UpfrontAmount is what an upfront contract costs: the term's commitment less its discount.
+	UpfrontAmount *decimal.Decimal `json:"upfrontAmount,omitempty"`
+	// PaymentTransactionID is the deposit that paid it, which makes a retried settle a no-op.
+	PaymentTransactionID string     `json:"paymentTransactionId,omitempty"`
+	OrderID              string     `json:"orderId,omitempty"`
+	CreatedAt            *time.Time `json:"createdAt,omitempty"`
+	UpdatedAt            *time.Time `json:"updatedAt,omitempty"`
 }
 
 type SavingsPlan struct {
@@ -104,6 +111,7 @@ type SavingsContractDto struct {
 	Targets                []SavingsPlanTarget `json:"targets,omitempty"`
 	MonthlyCommittedAmount json.Number         `json:"monthlyCommittedAmount,omitempty"`
 	PaidUpfront            bool                `json:"paidUpfront"`
+	UpfrontAmount          json.Number         `json:"upfrontAmount,omitempty"`
 	OrderID                string              `json:"orderId,omitempty"`
 	CreatedAt              *time.Time          `json:"createdAt,omitempty"`
 	UpdatedAt              *time.Time          `json:"updatedAt,omitempty"`
@@ -143,7 +151,7 @@ func SavingsContractToDto(c *SavingsContract) SavingsContractDto {
 		DurationMonths: c.DurationMonths, StartDate: c.StartDate, EndDate: c.EndDate,
 		DiscountRate: numPtr(c.DiscountRate), Targets: c.Targets,
 		MonthlyCommittedAmount: numPtr(c.MonthlyCommittedAmount),
-		PaidUpfront:            c.PaidUpfront, OrderID: c.OrderID,
+		PaidUpfront:            c.PaidUpfront, UpfrontAmount: numPtr(c.UpfrontAmount), OrderID: c.OrderID,
 		CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
 	}
 }

@@ -60,85 +60,91 @@ var (
 // the consumed credits + bill, and flip → PAID when nothing is left unpaid. The mail + the
 // suspension review (side-effects) are out of scope for this slice (see TODO).
 func (s *PayService) PayBillWithCredits(ctx context.Context, profile *BillingProfile, billID string, now time.Time) (*pricing.Bill, error) {
-	bill, err := s.repo.BillByID(ctx, billID)
-	if err != nil {
-		return nil, err
-	}
-	if bill == nil {
-		return nil, ErrBillNotFound
-	}
-	// Owner guard (mirrors the by-id lookup's owner check): a bill of another profile
-	// must be invisible on the pay path, else a member of profile A could settle profile B's bill.
-	if !billBelongsToProfile(bill, profile.ID) {
-		return nil, ErrBillNotFound
-	}
-	switch bill.Status {
-	case pricing.BillStatusPaid:
-		return nil, ErrBillAlreadyPaid
-	case pricing.BillStatusOpen:
-		return nil, ErrCannotPayOpenBill
-	}
-
+	// Read before the lock's transaction: a failed read would abort it, and these tolerate failure.
 	baseCurrency, _ := s.repo.BaseCurrency(ctx)
-	x := pricing.NewExchanger(nil) // same-currency identity; live FX deferred
-
-	promoCredits, err := s.repo.PromotionalCreditCandidates(ctx, profile.ID, now)
-	if err != nil {
-		return nil, err
-	}
-	accountCredits, err := s.repo.AccountCreditsByProfile(ctx, profile.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	// unpaid amount converted into the product currency.
-	unpaid, err := x.ExchangeToProductCurrency(pricing.GetUnpaidAmountBillProductCurrency(bill), bill.InvoiceCurrency, baseCurrency, now)
-	if err != nil {
-		return nil, err
-	}
-	if creditBalance(promoCredits, accountCredits).Cmp(unpaid) < 0 {
-		return nil, ErrNotEnoughCredit
-	}
-
 	var rates []pricing.TaxRate
 	if s.pricing != nil {
 		all, _ := s.pricing.AllTaxRates(ctx)
 		rates = pricing.SelectTaxRates(all, profile.Country, profile.Company, now)
 	}
+	var bill *pricing.Bill
+	paid := false
+	err := s.repo.WithProfileLock(ctx, profile.ID, func(ctx context.Context) error {
+		var err error
+		bill, err = s.repo.BillByID(ctx, billID)
+		if err != nil {
+			return err
+		}
+		if bill == nil {
+			return ErrBillNotFound
+		}
+		// Owner guard (mirrors the by-id lookup's owner check): a bill of another profile
+		// must be invisible on the pay path, else a member of profile A could settle profile B's bill.
+		if !billBelongsToProfile(bill, profile.ID) {
+			return ErrBillNotFound
+		}
+		switch bill.Status {
+		case pricing.BillStatusPaid:
+			return ErrBillAlreadyPaid
+		case pricing.BillStatusOpen:
+			return ErrCannotPayOpenBill
+		}
 
-	appliedPromo, acctSettlements, err := pricing.SettleBillAmount(bill, unpaid, promoCredits, accountCredits, rates, baseCurrency, profile.Currency, x, now)
+		x := pricing.NewExchanger(nil) // same-currency identity; live FX deferred
+
+		promoCredits, err := s.repo.PromotionalCreditCandidates(ctx, profile.ID, now)
+		if err != nil {
+			return err
+		}
+		accountCredits, err := s.repo.AccountCreditsByProfile(ctx, profile.ID)
+		if err != nil {
+			return err
+		}
+
+		// unpaid amount converted into the product currency.
+		unpaid, err := x.ExchangeToProductCurrency(pricing.GetUnpaidAmountBillProductCurrency(bill), bill.InvoiceCurrency, baseCurrency, now)
+		if err != nil {
+			return err
+		}
+		if creditBalance(promoCredits, accountCredits).Cmp(unpaid) < 0 {
+			return ErrNotEnoughCredit
+		}
+
+		appliedPromo, acctSettlements, err := pricing.SettleBillAmount(bill, unpaid, promoCredits, accountCredits, rates, baseCurrency, profile.Currency, x, now)
+		if err != nil {
+			return err
+		}
+
+		// persist the consumed credits (their balances were mutated in place by the settlement)
+		touched := map[string]bool{}
+		for _, ap := range appliedPromo {
+			touched[ap.PromotionalCreditID] = true
+		}
+		for _, pc := range promoCredits {
+			if touched[pc.ID] {
+				if err := s.repo.SavePromotionalCredit(ctx, pc); err != nil {
+					return err
+				}
+			}
+		}
+		for _, as := range acctSettlements {
+			if as.AccountCredit != nil {
+				if err := s.repo.SaveAccountCredit(ctx, as.AccountCredit); err != nil {
+					return err
+				}
+			}
+		}
+
+		if pricing.GetUnpaidAmountBillProductCurrency(bill).Cmp(decimal.Zero) <= 0 {
+			bill.Status = pricing.BillStatusPaid
+			paid = true
+		}
+		return s.repo.SaveBillDoc(ctx, bill)
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	// persist the consumed credits (their balances were mutated in place by the settlement)
-	touched := map[string]bool{}
-	for _, ap := range appliedPromo {
-		touched[ap.PromotionalCreditID] = true
-	}
-	for _, pc := range promoCredits {
-		if touched[pc.ID] {
-			if err := s.repo.SavePromotionalCredit(ctx, pc); err != nil {
-				return nil, err
-			}
-		}
-	}
-	for _, as := range acctSettlements {
-		if as.AccountCredit != nil {
-			if err := s.repo.SaveAccountCredit(ctx, as.AccountCredit); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	if err := s.repo.SaveBillDoc(ctx, bill); err != nil {
-		return nil, err
-	}
-	if pricing.GetUnpaidAmountBillProductCurrency(bill).Cmp(decimal.Zero) <= 0 {
-		bill.Status = pricing.BillStatusPaid
-		if err := s.repo.SaveBillDoc(ctx, bill); err != nil {
-			return nil, err
-		}
+	if paid {
 		s.afterBillPaid(ctx, profile, bill)
 	}
 	return bill, nil

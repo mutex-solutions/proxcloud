@@ -93,11 +93,11 @@ func TestRefundFunds(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed gw: %v", err)
 	}
-	// the spendable credit that the deposit created (partly spent: 25 of 40 left).
+	// the spendable credit that the deposit created, unspent.
 	creditID := pgdoc.NewID()
 	if _, err := db.C("accountCredit").InsertOne(ctx, pgdoc.M{
 		"_id": creditID, "billingProfileId": "bp1", "currency": "USD",
-		"initialAmount": decimalOf(t, "40"), "amount": decimalOf(t, "25"),
+		"initialAmount": decimalOf(t, "40"), "amount": decimalOf(t, "40"),
 	}); err != nil {
 		t.Fatalf("seed credit: %v", err)
 	}

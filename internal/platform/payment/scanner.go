@@ -84,6 +84,20 @@ func (s *TransactionScanner) scanAccountCredits(ctx context.Context, from, to ti
 	if err != nil {
 		return 0, err
 	}
+	// A settle that died after its claim: put it back and re-drive it like any other. The settle is
+	// idempotent, so even a claim still in flight here only risks a second thank-you mail.
+	stuck, err := s.billing.StuckAccountCreditTransactions(ctx, to)
+	if err != nil {
+		return 0, err
+	}
+	for i := range stuck {
+		if err := s.billing.ReleaseAccountCreditTransaction(ctx, stuck[i].ID); err != nil {
+			s.log.Error("txn-scan: release stuck txn", "txn", stuck[i].ID, "err", err)
+			continue
+		}
+		stuck[i].Status = "PENDING"
+		txns = append(txns, stuck[i])
+	}
 	n := 0
 	for i := range txns {
 		t := &txns[i]

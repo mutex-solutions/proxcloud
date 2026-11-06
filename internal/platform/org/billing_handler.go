@@ -1170,20 +1170,22 @@ func (h *BillingHandler) requireSavingsContract(w http.ResponseWriter, r *http.R
 	return c, true
 }
 
-// cancelSavingsContract cancels a contract (also the cancel-non-upfront route — the
-// guard rejects upfront contracts either way): reject upfront / non-ACTIVE, flip to CANCELLED.
+// cancelSavingsContract cancels a contract (also the cancel-non-upfront route): a paid upfront
+// contract cannot be cancelled, one still awaiting its payment can. Non-ACTIVE otherwise refused.
 func (h *BillingHandler) cancelSavingsContract(w http.ResponseWriter, r *http.Request) {
 	c, ok := h.requireSavingsContract(w, r)
 	if !ok {
 		return
 	}
-	if c.PaidUpfront {
-		fail(w, httpx.BadRequest("Cannot cancel upfront contracts"))
-		return
-	}
-	if c.Status != billing.SavingsStatusActive {
-		fail(w, httpx.BadRequest("Only active contracts can be cancelled"))
-		return
+	if c.Status != billing.SavingsStatusPendingPayment {
+		if c.PaidUpfront {
+			fail(w, httpx.BadRequest("Cannot cancel upfront contracts"))
+			return
+		}
+		if c.Status != billing.SavingsStatusActive {
+			fail(w, httpx.BadRequest("Only active contracts can be cancelled"))
+			return
+		}
 	}
 	c.Status = billing.SavingsStatusCancelled
 	if err := h.billing.SaveSavingsContract(r.Context(), c); err != nil {
@@ -1203,6 +1205,11 @@ func (h *BillingHandler) extendSavingsContract(w http.ResponseWriter, r *http.Re
 	}
 	if c.Status != billing.SavingsStatusActive {
 		fail(w, httpx.BadRequest("Only active contracts can be extended"))
+		return
+	}
+	// Its discount is prepaid usage, and the extra months were not paid for.
+	if c.PaidUpfront {
+		fail(w, httpx.BadRequest("An upfront contract cannot be extended: buy a new one when it ends"))
 		return
 	}
 	if c.EndDate != nil {

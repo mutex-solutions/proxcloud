@@ -52,6 +52,10 @@ A contract binds a billing profile to a plan. From the same page you can create 
 
 Active contracts are listed alongside their committed amounts, so you can see who's on which plan.
 
+A contract you create here is **ACTIVE** right away, and any upfront money is yours to collect: use it for a customer who paid you outside the portal. An upfront contract a customer buys in the console stays **PENDING_PAYMENT** and discounts nothing until their deposit for it settles.
+
+A deposit that paid a contract cannot be refunded while the contract is active. Cancel the contract first, knowing any discount it already gave stays on the bills it is on.
+
 ## Expiry reminders
 
 So a contract's end doesn't take customers by surprise, enable **Savings contract expiry notifications** under **System → Billing configuration → Settings**. Enter the reminder offsets as comma-separated days before expiry, e.g. `30, 14, 7` — the customer receives an email at each checkpoint. Renewal means a new contract; expired contracts do not renew on their own.

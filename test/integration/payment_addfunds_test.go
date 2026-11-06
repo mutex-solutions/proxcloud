@@ -260,7 +260,7 @@ func TestProcessAddFundsBranches(t *testing.T) {
 	// (2) savings-contract deposit → contract ACTIVE, NO account credit.
 	contractID := pgdoc.NewID()
 	if _, err := db.C("savingsContract").InsertOne(ctx, pgdoc.M{
-		"_id": contractID, "status": "PENDING_PAYMENT", "billingProfileId": bpID, "savingsPlanName": "Saver",
+		"_id": contractID, "status": "PENDING_PAYMENT", "billingProfileId": bpID, "savingsPlanName": "Saver", "paidUpfront": true, "upfrontAmount": tenD128,
 	}); err != nil {
 		t.Fatalf("seed contract: %v", err)
 	}

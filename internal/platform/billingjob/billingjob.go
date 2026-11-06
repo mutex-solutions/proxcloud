@@ -183,18 +183,22 @@ func (s *Service) billAdjuster(ctx context.Context, profile *billing.BillingProf
 	}
 }
 
-// availableSavingsAdj adapts the profile's savings contracts that cover the whole billing cycle
+// availableSavingsAdj adapts the profile's ACTIVE savings contracts that cover the whole billing cycle
 // (listAvailableContractsByBillingProfileId: startDate ≤ cycleStart AND endDate ≥ cycleEnd) into
-// the pricing-native discount inputs.
+// the pricing-native discount inputs. A cancelled, expired or unpaid contract discounts nothing.
 func (s *Service) availableSavingsAdj(ctx context.Context, bpID string, cycleStart, cycleEnd time.Time) []pricing.SavingsContractAdj {
 	contracts, err := s.d.Billing.SavingsContractsByBillingProfile(ctx, bpID)
 	if err != nil {
 		return nil
 	}
+	return savingsAdjOf(contracts, cycleStart, cycleEnd)
+}
+
+func savingsAdjOf(contracts []billing.SavingsContract, cycleStart, cycleEnd time.Time) []pricing.SavingsContractAdj {
 	out := make([]pricing.SavingsContractAdj, 0, len(contracts))
 	for i := range contracts {
 		c := &contracts[i]
-		if c.StartDate == nil || c.EndDate == nil || c.StartDate.After(cycleStart) || c.EndDate.Before(cycleEnd) {
+		if c.Status != billing.SavingsStatusActive || c.StartDate == nil || c.EndDate == nil || c.StartDate.After(cycleStart) || c.EndDate.Before(cycleEnd) {
 			continue
 		}
 		committed, rate := decimal.Zero, decimal.Zero

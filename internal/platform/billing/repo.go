@@ -104,6 +104,12 @@ func (r *Repo) ListBankTransfers(ctx context.Context, bpID string) ([]pgdoc.M, e
 }
 
 // UpdateBankTransfer merges set into the transfer doc.
+// ResolveBankTransfer moves a PENDING transfer on, once: of an approve, a reject and a customer cancel
+// racing each other only one wins. unset names fields to drop. Reports whether this caller won.
+func (r *Repo) ResolveBankTransfer(ctx context.Context, id string, set pgdoc.M, unset ...string) (bool, error) {
+	return r.bankXfers.SetFieldsOne(ctx, pgdoc.M{"_id": id, "status": "PENDING"}, set, unset)
+}
+
 func (r *Repo) UpdateBankTransfer(ctx context.Context, id string, set pgdoc.M) error {
 	_, err := r.bankXfers.SetByID(ctx, id, set, nil)
 	return err
@@ -322,10 +328,12 @@ func (r *Repo) SavingsContractByID(ctx context.Context, id string) (*SavingsCont
 	return &c, nil
 }
 
-// ExistsActiveSavingsContract reports whether the profile already has an ACTIVE contract for the plan.
+// ExistsActiveSavingsContract reports whether the profile already holds a contract for the plan, ACTIVE
+// or awaiting its payment: paying two of them would stack their discounts.
 func (r *Repo) ExistsActiveSavingsContract(ctx context.Context, planID, bpID string) (bool, error) {
 	return r.savingCtrs.Exists(ctx, pgdoc.M{
-		"savingsPlanId": planID, "billingProfileId": bpID, "status": SavingsStatusActive,
+		"savingsPlanId": planID, "billingProfileId": bpID,
+		"status": pgdoc.M{"$in": []string{SavingsStatusActive, SavingsStatusPendingPayment}},
 	})
 }
 

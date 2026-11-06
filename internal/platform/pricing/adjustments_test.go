@@ -64,6 +64,18 @@ func TestSavingsContractDiscountPaidUpfront(t *testing.T) {
 	}
 }
 
+// Prepaid usage below the commitment is free, not billed a second time.
+func TestSavingsContractPaidUpfrontBelowCommitment(t *testing.T) {
+	e := NewEngine(nil)
+	c := SavingsContractAdj{ID: "c1", MonthlyCommittedAmount: d("100"), DiscountRate: d("10"), PaidUpfront: true,
+		Targets: []AdjustmentTarget{{ResourceType: "instance"}}}
+	bill := billWith(item("instance", "60"))
+	e.ApplySavingsContractDiscounts(bill, []SavingsContractAdj{c}, nil)
+	if got := adjAmount(t, bill); !got.Equal(d("-60")) {
+		t.Fatalf("upfront discount = %s, want -60", got)
+	}
+}
+
 func TestSavingsContractOnlyTargetResourceTypeCounts(t *testing.T) {
 	e := NewEngine(nil)
 	// target instance only; a volume item must NOT count toward usage.
