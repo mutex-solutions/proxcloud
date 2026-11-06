@@ -291,6 +291,9 @@ func (s *Service) ResolveVM(ctx context.Context, projectID, externalID string) (
 			if st, err := s.C.GetVMStatus(ctx, r.Node, vmid); err == nil {
 				r.Status, r.Lock, r.Name = st.Status, st.Lock, st.Name
 				r.Tags, r.MaxCPU, r.MaxMem, r.MaxDisk = st.Tags, st.CPUs, st.MaxMem, st.MaxDisk
+				if st.QMPStatus == "paused" { // a suspended billing profile or disabled project
+					r.Status = "paused"
+				}
 			}
 			return r, nil
 		}

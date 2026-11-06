@@ -63,6 +63,9 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 	now := nowUTC()
 	out := make([]cloud.CloudResource, 0, len(vms))
 	for _, r := range vms {
+		if st, err := p.svc.C.GetVMStatus(ctx, r.Node, r.VMID); err == nil && st.QMPStatus == "paused" {
+			r.Status = "paused"
+		}
 		addrs := p.svc.ServerAddresses(ctx, r)
 		out = append(out, cloud.CloudResource{
 			ExternalID: itoa0(r.VMID),

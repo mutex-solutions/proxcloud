@@ -51,7 +51,7 @@ It **warns** without failing when:
 
 On success it reports the Proxmox VE version and how many nodes, storages and PCI mappings the token can see.
 
-<!-- screenshot: /docs-img/add-proxmox-provider.png — ProxCloud admin: the Add provider dialog with the Proxmox VE form and a Test connection result -->
+![The Add cloud provider dialog with the Proxmox VE form](/docs-img/add-proxmox-provider.png)
 
 ## Proxmox resources
 
@@ -84,6 +84,8 @@ Projects have no floating IPs. A server becomes reachable from outside when it g
 `ranges` and `exclude` are optional; without `ranges` the whole CIDR is the pool. Never use the management bridge. **Test connection** rejects a public network on a node's management bridge. The traffic-metrics job also uses these bridge ids to tell public traffic from private traffic. Which public networks a given project may use is set on the project's detail page (see [Running the Platform](/docs/platform-admin/overview)).
 
 ## Storage
+
+![The provider Storage tab with detected storage capabilities](/docs-img/provider-storage.png)
 
 ProxCloud reads what each Proxmox storage can do from the cluster instead of trusting the profile flags. The provider's **Storage** tab lists every storage with its type, content, tier (*full* for Ceph RBD/CephFS, otherwise *standard*), capability badges (shared, snapshots, thin, live migrate, replication), the nodes where it is active, and its class. Detection runs on every sync cycle, on every save of the storage profiles, and when you press **Re-detect capabilities**.
 
