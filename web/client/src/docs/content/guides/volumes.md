@@ -14,7 +14,7 @@ Once it exists, a volume's actions menu lets you:
 
 - **Extend** it. Disks can only grow; Proxmox can't shrink a disk.
 - **Detach** it. The disk stays with the server as an unused disk, keeps its data, and is still billed.
-- **Attach** it again, to the same server or to another server in your project. Moving a disk to another server works only when both servers run on the same node; ProxCloud lists only the servers it can attach to and refuses the others with the reason.
+- **Attach** it again, to the same server or to another server in your project. A volume on shared storage (Ceph RBD, NFS) can go to any server. A volume on local storage (local ZFS) only moves between servers on the same node. ProxCloud lists only the servers it can attach to and refuses the others with the reason.
 - **Change type** (retype) it, which moves the disk to another storage type on its server's node. The disk keeps its data and the old copy is removed once the move succeeds. The action shows only when your operator publishes more than one storage type.
 
 ![The Volumes list with a boot disk and a data disk](/docs-img/volumes-list.png)

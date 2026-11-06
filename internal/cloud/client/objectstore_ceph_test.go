@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // mockRGW emulates the RGW Admin Ops JSON API (/admin/*) + a minimal S3 endpoint on one server, so the
@@ -345,6 +347,28 @@ func TestCephCreateBucket(t *testing.T) {
 
 // The website URL is virtual-hosted (<bucket>.<websiteHost>), which is why the wildcard cert/DNS exists —
 // it is NOT the path-style S3 data endpoint. And the public-read policy must name the TENANTED bucket ARN.
+func TestCephWebsiteNeedsAnEndpoint(t *testing.T) {
+	cfg := ObjectStoreConfig{S3Endpoint: "https://s3.example", ProjectAccessKey: "a", ProjectSecretKey: "b"}
+	b, err := newCephBackend(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Caps().Website {
+		t.Fatal("no s3WebsiteEndpoint: website must not be offered")
+	}
+	if _, err := b.EnableBucketWebsite(context.Background(), "b", "", ""); !errors.Is(err, ErrWebsiteUnsupported) {
+		t.Fatalf("enable err = %v", err)
+	}
+	cfg.S3WebsiteEndpoint = "https://s3-website.example"
+	if b, err = newCephBackend(cfg); err != nil || !b.Caps().Website {
+		t.Fatalf("with an endpoint: caps %+v err %v", b.Caps(), err)
+	}
+	notAllowed := &smithyhttp.ResponseError{Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusMethodNotAllowed}}}
+	if !errors.Is(websiteErr(notAllowed), ErrWebsiteUnsupported) {
+		t.Fatal("a 405 means the gateway has no website API")
+	}
+}
+
 func TestCephWebsiteURLAndPolicy(t *testing.T) {
 	cc, err := NewCephS3(context.Background(), ObjectStoreConfig{
 		S3Endpoint: "https://s3.example", S3WebsiteEndpoint: "https://s3-website.example/",

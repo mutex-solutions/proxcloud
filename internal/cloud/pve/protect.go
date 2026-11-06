@@ -518,7 +518,8 @@ func (s *Service) waitHAPower(ctx context.Context, vm *ClusterResource, verb str
 // checkStaleCloudInit refuses a migrate that PVE would abort. PVE regenerates a VM's cloud-init volume wherever the VM
 // starts and does not replicate it, so a node left in a failover keeps its copy, and a later migrate back fails on
 // "volume already exists" after copying the disks (seen on the lab, PVE 9.2). Removing it takes Datastore.Allocate on the
-// storage, more than the platform token should hold, so the operator is told what to run.
+// storage, more than the platform token should hold, so the operator is told what to run. Shared storage has one copy
+// that every node lists, the one the VM is using, so there it never counts as stale.
 func (s *Service) checkStaleCloudInit(ctx context.Context, vmid int, cfg VMConfig, target string) error {
 	for k := range cfg {
 		raw := cfg.Str(k)
@@ -526,6 +527,10 @@ func (s *Service) checkStaleCloudInit(ctx context.Context, vmid int, cfg VMConfi
 			continue
 		}
 		vol, _, _ := strings.Cut(raw, ",")
+		caps, err := s.C.DetectStorage(ctx)
+		if err != nil || caps[slotStorage(vol)].Shared {
+			continue
+		}
 		rows, err := s.C.StorageContents(ctx, target, slotStorage(vol), "images", vmid)
 		if err != nil {
 			return nil // cannot tell: let PVE decide

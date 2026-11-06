@@ -36,6 +36,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // emptyPayloadHash is the SHA-256 of an empty body — the x-amz-content-sha256 for a bodyless admin call.
@@ -96,9 +97,9 @@ func NewCephS3(_ context.Context, cfg ObjectStoreConfig) (*Client, error) {
 	return &Client{objectBackend: b}, nil
 }
 
-// Caps: RGW offers everything the settings panel shows.
+// Caps: RGW offers everything the settings panel shows; websites only where the operator set s3WebsiteEndpoint.
 func (b *cephBackend) Caps() ObjectCaps {
-	return ObjectCaps{Backend: BackendCephS3, Website: true, QuotaObjects: true}
+	return ObjectCaps{Backend: BackendCephS3, Website: b.websiteEndpoint != "", QuotaObjects: true}
 }
 
 func newCephBackend(cfg ObjectStoreConfig) (*cephBackend, error) {
@@ -655,6 +656,9 @@ func (b *cephBackend) enableWebsite(ctx context.Context, bucket, indexDoc, error
 	if err := b.needS3(); err != nil {
 		return err
 	}
+	if b.websiteEndpoint == "" {
+		return ErrWebsiteUnsupported
+	}
 	if indexDoc == "" {
 		indexDoc = "index.html"
 	}
@@ -666,7 +670,7 @@ func (b *cephBackend) enableWebsite(ctx context.Context, bucket, indexDoc, error
 		cfg.ErrorDocument = &s3types.ErrorDocument{Key: &errorDoc}
 	}
 	if _, err := b.s3.PutBucketWebsite(ctx, &s3.PutBucketWebsiteInput{Bucket: &bucket, WebsiteConfiguration: cfg}); err != nil {
-		return err
+		return websiteErr(err)
 	}
 	// Merge the public-read statement INTO the existing policy (by Sid) — a blind replace would delete the
 	// customer's own statements and every per-key grant on this bucket.
@@ -686,6 +690,15 @@ func (b *cephBackend) enableWebsite(ctx context.Context, bucket, indexDoc, error
 	return nil
 }
 
+// websiteErr names a gateway without rgw_enable_static_website: it answers 405 to every website call.
+func websiteErr(err error) error {
+	var re *smithyhttp.ResponseError
+	if errors.As(err, &re) && re.HTTPStatusCode() == http.StatusMethodNotAllowed {
+		return ErrWebsiteUnsupported
+	}
+	return err
+}
+
 // disableWebsite removes the website config AND the public-read statement enableWebsite installed, so
 // turning the website off closes anonymous access again — while LEAVING every other statement (customer
 // policy, per-key grants) untouched.
@@ -695,7 +708,7 @@ func (b *cephBackend) disableWebsite(ctx context.Context, bucket string) error {
 	}
 	if _, err := b.s3.DeleteBucketWebsite(ctx, &s3.DeleteBucketWebsiteInput{Bucket: &bucket}); err != nil &&
 		!strings.Contains(err.Error(), "NoSuchWebsiteConfiguration") {
-		return err
+		return websiteErr(err)
 	}
 	doc, err := b.getPolicyDoc(ctx, bucket)
 	if err != nil {
