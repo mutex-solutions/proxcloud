@@ -37,6 +37,14 @@ Found by the end-to-end lab drill on PVE 9.2.
 
 **Diagrams updated**: `c4-code.md` (C4.1, C4.2, sequences).
 
+## 2026-11-07: console and server detail match what Proxmox serves
+
+No component changed. The wizard honors the boot volume type, offers the project's own
+images and sends one network; the serial console speaks the `termproxy` framing; PVE write
+calls run on a context detached from the client connection, because a browser going away
+mid-clone left a half-built VM. Fields the backend ignored were removed rather than kept
+(fixed IP, DNS and gateway on networks, volume name, security group description, ether type).
+
 ## 2026-10-28: P3 storage foundation and honest UI (branch feat/p3-storage, PR TBD)
 
 Summary of the P3 slices below (P3-1 to P3-10); the per-slice entries carry the detail.

@@ -426,7 +426,11 @@ func (s *Service) PowerAction(ctx context.Context, projectID, externalID, verb s
 	if err != nil {
 		return err
 	}
-	return s.C.WaitTask(ctx, up)
+	err = s.C.WaitTask(ctx, up)
+	if err != nil && strings.Contains(err.Error(), "got timeout") {
+		return conflictf("Server %s did not respond in time. If it is still booting, try again when it is up", vm.Name)
+	}
+	return err
 }
 
 // ResizeServer applies a new flavor: graceful stop when running, set cores/memory + flavor tag, grow the root disk when the
@@ -509,14 +513,14 @@ func (s *Service) RenameServer(ctx context.Context, projectID, externalID, name 
 // Console mints a one-shot VNC (or serial when serial=true) websocket target.
 // The returned URL is the PVE backend socket; the platform console proxy dials it
 // with the API-token header. password is the VNC ticket — noVNC must present it
-// as the RFB credential.
-func (s *Service) Console(ctx context.Context, projectID, externalID string, serial bool) (backendURL, password string, err error) {
+// as the RFB credential. A serial session (termproxy) opens by sending "<user>:<ticket>\n".
+func (s *Service) Console(ctx context.Context, projectID, externalID string, serial bool) (backendURL, user, password string, err error) {
 	vm, err := s.ResolveVM(ctx, projectID, externalID)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if vm == nil {
-		return "", "", fmt.Errorf("pve: vm %s not found", externalID)
+		return "", "", "", fmt.Errorf("pve: vm %s not found", externalID)
 	}
 	var t *VNCProxyTicket
 	if serial {
@@ -525,13 +529,13 @@ func (s *Service) Console(ctx context.Context, projectID, externalID string, ser
 		t, err = s.C.VNCProxy(ctx, vm.Node, vm.VMID)
 	}
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	q := url.Values{}
 	q.Set("port", t.PortString())
 	q.Set("vncticket", t.Ticket)
 	u := s.C.BaseURL() + qemuPath(vm.Node, vm.VMID) + "/vncwebsocket?" + q.Encode()
-	return u, t.Ticket, nil
+	return u, t.User, t.Ticket, nil
 }
 
 // CreateImage snapshots a pool VM into a project-owned template (full clone →

@@ -118,10 +118,12 @@ func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 			return nil, err
 		}
 		profile := TagValue(cfg.Str("tags"), tagProfilePref)
-		for _, d := range ParseDisks(cfg) {
+		for _, d := range p.svc.withUnusedSizes(ctx, r.Node, r.VMID, ParseDisks(cfg)) {
 			status := "in-use"
+			attachments := []any{map[string]any{"server_id": itoa0(r.VMID), "device": d.Slot}}
 			if len(d.Slot) >= 6 && d.Slot[:6] == "unused" {
 				status = "available"
+				attachments = []any{}
 			}
 			name := r.Name + "-" + d.Slot
 			diskProfile, class := "", ""
@@ -146,6 +148,7 @@ func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 						"profile":           diskProfile,
 						"storage_class":     class,
 						"status":            status,
+						"attachments":       attachments,
 						"availability_zone": r.Node,
 						"storage":           d.Storage,
 						"vmid":              r.VMID,

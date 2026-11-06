@@ -83,7 +83,7 @@ export default function NetworkDetailPage() {
       <PageHeader
         title={networkName(network)}
         eyebrow="Network"
-        description={`${subnets.length} ${subnets.length === 1 ? "subnet" : "subnets"} — servers, subnets and settings for this network.`}
+        description="Details and servers of this network."
         breadcrumb={<NetworkBreadcrumb pid={pid} name={networkName(network)} />}
       />
 
@@ -108,11 +108,9 @@ export default function NetworkDetailPage() {
               <dl className="grid gap-x-8 gap-y-3 text-sm sm:grid-cols-2">
                 <Row k="ID" v={<span className="font-mono text-xs">{(net.id as string) ?? network.externalId ?? "—"}</span>} />
                 <Row k="Status" v={<StatusBadge status={networkStatus(network)} />} />
-                <Row k="MTU" v={net.mtu != null ? String(net.mtu) : "—"} />
-                <Row k="Shared" v={net.shared ? "Yes" : "No"} />
-                <Row k="External" v={net["router:external"] ? "Yes" : "No"} />
-                <Row k="Admin state up" v={net.admin_state_up === false ? "No" : "Yes"} />
-                <Row k="Subnets" v={String(subnets.length)} />
+                <Row k="Subnet" v={<span className="font-mono text-xs">{subnets.join(", ") || "—"}</span>} />
+                <Row k="Gateway" v={<span className="font-mono text-xs">{(net.gateway as string) || "—"}</span>} />
+                <Row k="Outbound internet (SNAT)" v={net.snat ? "Yes" : "No"} />
               </dl>
             </CardContent>
           </Card>
