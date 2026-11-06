@@ -178,8 +178,9 @@ export default function FileSharesPage() {
           <DialogHeader>
             <DialogTitle>Create file share</DialogTitle>
             <DialogDescription>
-              The share is open to this project's public IPs and networks. Attached a public IP later? Use the shield
-              button on the share to refresh access.
+              The share is open to this project's public IPs and networks, and follows them at the next sync. To pick up a
+              new public IP right away, use the shield button on the share. Root on a client has no special rights on an
+              NFS share.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3">

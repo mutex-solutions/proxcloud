@@ -1,15 +1,18 @@
 package project
 
 // cloud_shares.go = the file share product on a TrueNAS provider: SHARE rows, cloud create/delete/actions, quota.
-// The NAS sees clients by address, so an export lists the project's own addresses (shareNetworks).
+// The NAS sees clients by address, so an export lists the project's own addresses (shareNetworks). An address
+// leaving the project goes off the exports BEFORE it can be reallocated to another tenant (withShareAccessRevoked).
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
@@ -31,7 +34,13 @@ func (h *Handler) shareNetworks(ctx context.Context, p *Project) ([]string, erro
 	seen := map[string]bool{}
 	for _, svcID := range p.ServiceIDs() {
 		es, err := h.esSvc.Get(ctx, svcID)
-		if err != nil || es == nil || !es.IsProxmox() {
+		if errors.Is(err, externalservice.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !es.IsProxmox() {
 			continue
 		}
 		if h.publicIPs != nil {
@@ -51,8 +60,7 @@ func (h *Handler) shareNetworks(ctx context.Context, p *Project) ([]string, erro
 		return nil, err
 	}
 	for i := range rows {
-		net, _ := rows[i].Data["network"].(map[string]any)
-		if c, _ := net["cidr"].(string); c != "" {
+		for _, c := range networkCIDRs(&rows[i]) {
 			seen[c] = true
 		}
 	}
@@ -62,6 +70,153 @@ func (h *Handler) shareNetworks(ctx context.Context, p *Project) ([]string, erro
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// networkCIDRs lists every subnet of a NETWORK row.
+func networkCIDRs(cr *cloud.CloudResource) []string {
+	net, _ := cr.Data["network"].(map[string]any)
+	var out []string
+	if c, _ := net["cidr"].(string); c != "" {
+		out = append(out, c)
+	}
+	if subs, ok := net["subnets"].([]any); ok {
+		for _, v := range subs {
+			if c, _ := v.(string); c != "" {
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
+// shareAccessLockMaxFor bounds a crashed holder. The longest holder is a share create (SMB user + a permission job).
+const shareAccessLockMaxFor = 5 * time.Minute
+
+// lockShareAccess serialises what reads the project's addresses onto an export against what takes one away: without
+// it a refresh running during a release writes the address straight back. Busy for 10 s = 409.
+func (h *Handler) lockShareAccess(ctx context.Context, projectID string) (func(), error) {
+	if h.sdnLock == nil {
+		return func() {}, nil
+	}
+	name := "share-access-" + projectID
+	for range 20 {
+		now := time.Now().UTC()
+		ok, err := h.sdnLock.Lock(ctx, name, shareAccessLockMaxFor, now)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return func() { _ = h.sdnLock.Unlock(context.WithoutCancel(ctx), name, 0, now, time.Now().UTC()) }, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "Another change to this project's file share access is in progress — retry in a moment")
+}
+
+// trueNASServices lists the project's file share providers.
+func (h *Handler) trueNASServices(ctx context.Context, p *Project) ([]*externalservice.ExternalService, error) {
+	var out []*externalservice.ExternalService
+	for _, svcID := range p.ServiceIDs() {
+		es, err := h.esSvc.Get(ctx, svcID)
+		if errors.Is(err, externalservice.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if es.IsTrueNAS() {
+			out = append(out, es)
+		}
+	}
+	return out, nil
+}
+
+// reconcileShareExports brings every export of the project to its current addresses minus drop. Any failure is an
+// error and the caller must not free the address. The caller holds the lock.
+func (h *Handler) reconcileShareExports(ctx context.Context, p *Project, services []*externalservice.ExternalService, drop []string) error {
+	networks, err := h.shareNetworks(ctx, p)
+	if err != nil {
+		return err
+	}
+	networks = slices.DeleteFunc(networks, func(n string) bool { return slices.Contains(drop, n) })
+	for _, es := range services {
+		if err := func() error {
+			ts, err := es.TrueNASService()
+			if err != nil {
+				return err
+			}
+			defer ts.C.Close()
+			list, err := ts.List(ctx, p.ID)
+			if err != nil {
+				return err
+			}
+			for i := range list {
+				if truenas.SameExport(list[i].Networks, networks) {
+					continue
+				}
+				if err := ts.SetAccess(ctx, p.ID, list[i].Dataset, networks); err != nil {
+					return err
+				}
+			}
+			return nil
+		}(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// withShareAccessRevoked takes drop off every export of the project, then runs release, the step that lets those
+// addresses go to another tenant. Failing closed: if an export cannot be updated, release never runs and the address
+// stays held. The sync retries the release of a destroyed VM's address, and a detach or network delete can be re-sent.
+func (h *Handler) withShareAccessRevoked(ctx context.Context, projectID string, drop []string, release func() error) error {
+	p, err := h.svc.GetProjectByID(ctx, projectID)
+	var he *httpx.HTTPError
+	if errors.As(err, &he) && he.Status == http.StatusNotFound {
+		return release() // no project left to hold a share
+	}
+	if err != nil {
+		return err
+	}
+	services, err := h.trueNASServices(ctx, p)
+	if err != nil {
+		return err
+	}
+	if len(services) == 0 {
+		return release()
+	}
+	unlock, err := h.lockShareAccess(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := h.reconcileShareExports(ctx, p, services, drop); err != nil {
+		return fmt.Errorf("take the address off the file share exports: %w", err)
+	}
+	return release()
+}
+
+// ReconcileShareAccess is the sync's backstop: exports drifted by hand, or left stale by a version before the release
+// guard, come back to the project's addresses. A busy lock skips this project until the next cycle.
+func (h *Handler) ReconcileShareAccess(ctx context.Context, projectID string) error {
+	p, err := h.svc.GetProjectByID(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	services, err := h.trueNASServices(ctx, p)
+	if err != nil || len(services) == 0 {
+		return err
+	}
+	unlock, err := h.lockShareAccess(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return h.reconcileShareExports(ctx, p, services, nil)
 }
 
 // shareQuotaCheck enforces the provider's per-project limit on allocated space, over the cached rows.
@@ -103,6 +258,12 @@ func (h *Handler) shareCreate(w http.ResponseWriter, r *http.Request, u *user.Us
 		h.fail(w, err)
 		return
 	}
+	unlock, err := h.lockShareAccess(ctx, proj.ID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	defer unlock()
 	networks, err := h.shareNetworks(ctx, proj)
 	if err != nil {
 		h.fail(w, err)
@@ -180,6 +341,12 @@ func (h *Handler) shareAction(w http.ResponseWriter, r *http.Request, proj *Proj
 		}
 		err = ts.Resize(ctx, proj.ID, cr.ExternalID, size)
 	case "REFRESH_ACCESS":
+		var unlock func()
+		if unlock, err = h.lockShareAccess(ctx, proj.ID); err != nil {
+			h.fail(w, err)
+			return true
+		}
+		defer unlock()
 		var networks []string
 		if networks, err = h.shareNetworks(ctx, proj); err != nil {
 			h.fail(w, err)

@@ -710,8 +710,12 @@ Each share is a dataset `<parent>/<projectId>-<name>` with a `refquota`, the `pr
 ownership, plus one NFS or SMB share. SMB gets a generated user and password: the password appears once, in the
 create or reset response, and is never stored.
 
-**Access.** An export lists the project's public NIC addresses and subnets, computed at create and by the
-`REFRESH_ACCESS` action. The NAS tells tenants apart by source address, so a client needs a path to the NAS that keeps
+**Access.** An export lists the project's public NIC addresses and subnets, computed at create, by the `REFRESH_ACCESS`
+action and by every sync. An address leaving the project (detach, server delete, public IP delete, subnet or network
+delete, teardown) comes off the project's exports first, and if the NAS refuses, the release fails and the address stays
+held, so it can never reach another tenant while an export lists it. NFS squashes root: a client's root is `nobody` on the
+NAS, and a new dataset is mode `777` so that unprivileged clients can write. Exports from before this rule keep their
+`maproot` until they are recreated. The NAS tells tenants apart by source address, so a client needs a path to the NAS that keeps
 its address. A public NIC has one when the NAS is routable from the public network. A private subnet that leaves
 through SNAT arrives with a node's address, and the tenant isolation rules drop traffic from the pool to the nodes'
 management network: on a NAS placed there, private subnets cannot mount.
@@ -719,7 +723,7 @@ management network: on a NAS placed there, private subnets cannot mount.
 **Actions:** `EXTEND {sizeGb}` (either direction, not below usage), `REFRESH_ACCESS`, `RESET_PASSWORD`. Delete removes
 the export, the SMB user and the dataset with its data. Project teardown does the same.
 
-**Quota and billing.** `defaultQuotaGiB` caps the sum of a project's allocated sizes. The `share` billing resource has
+**Quota and billing.** `defaultQuotaGiB` caps the sum of a project's allocated sizes, and one share is at most 1 PiB. The `share` billing resource has
 `size_gb` (used), `quota_gb` (allocated) and `protocol`; the seed bills `size_gb`.
 
 ## RustFS S3 object storage
