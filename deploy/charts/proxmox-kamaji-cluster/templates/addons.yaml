@@ -7,8 +7,14 @@ the chart's CRDs first (ClusterResourceSet retries until they exist).
 {{- $root := . }}
 {{- $proxies := list }}
 {{- $proxies = append $proxies (dict "key" "cilium" "ns" "kube-system" "values" (dict "kubeProxyReplacement" false "ipam" (dict "mode" "kubernetes") "routingMode" "tunnel" "tunnelProtocol" "vxlan" "operator" (dict "replicas" 1) "hubble" (dict "enabled" false))) }}
-{{- $proxies = append $proxies (dict "key" "proxmoxCsi" "ns" "csi-proxmox" "values" (dict "existingConfigSecret" "proxmox-csi-plugin" "storageClass" .Values.proxmox.csi.storageClasses "node" (dict "tolerations" (list (dict "operator" "Exists"))) "controller" (dict "replicaCount" 1))) }}
-{{- $proxies = append $proxies (dict "key" "metallb" "ns" "metallb-system" "values" (dict "speaker" (dict "frr" (dict "enabled" false)))) }}
+{{- $classes := list }}
+{{- range $i, $c := .Values.proxmox.csi.storageClasses }}
+{{- $class := dict "name" $c.name "storage" $c.storage "fstype" "ext4" "reclaimPolicy" "Delete" }}
+{{- if eq $i 0 }}{{- $_ := set $class "annotations" (dict "storageclass.kubernetes.io/is-default-class" "true") }}{{- end }}
+{{- $classes = append $classes $class }}
+{{- end }}
+{{- $proxies = append $proxies (dict "key" "proxmoxCsi" "ns" "csi-proxmox" "values" (dict "existingConfigSecret" "proxmox-csi-plugin" "storageClass" $classes "node" (dict "tolerations" (list (dict "operator" "Exists"))) "controller" (dict "replicaCount" 1))) }}
+{{- $proxies = append $proxies (dict "key" "metallb" "ns" "metallb-system" "values" (dict "speaker" (dict "frr" (dict "enabled" false)) "frrk8s" (dict "enabled" false))) }}
 {{- range $key := list "metricsServer" "certManager" "ingress" }}
 {{- $picked := dict "enabled" false }}
 {{- if hasKey $root.Values.addons $key }}{{- $picked = get $root.Values.addons $key }}{{- end }}

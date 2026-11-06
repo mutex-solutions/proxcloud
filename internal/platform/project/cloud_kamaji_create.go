@@ -162,7 +162,10 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 			_ = h.publicIPs.ReleaseServer(context.WithoutCancel(ctx), compute.ID, owner)
 		}
 	}()
-	in.Addresses, in.LBAddresses = addrs[:kamajiWorkerAddrs], addrs[kamajiWorkerAddrs:]
+	in.Addresses = addrs[:kamajiWorkerAddrs]
+	for _, ip := range addrs[kamajiWorkerAddrs:] {
+		in.LBAddresses = append(in.LBAddresses, ip+"/32") // MetalLB takes no bare address
+	}
 	spec.Infra = in
 
 	apiURL := d.PVEAPIURL

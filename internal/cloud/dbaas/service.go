@@ -927,7 +927,7 @@ type DatabasePin struct {
 // ListDatabasePins lists every proxcloud-managed database on this provider with its chart pin
 // (ownership-labelled Applications only).
 func (s *Service) ListDatabasePins(ctx context.Context) ([]DatabasePin, error) {
-	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelManagedBy+"="+ManagedByValue)
+	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelService+"="+s.serviceID+","+LabelManagedBy+"="+ManagedByValue)
 	if err != nil {
 		return nil, err
 	}

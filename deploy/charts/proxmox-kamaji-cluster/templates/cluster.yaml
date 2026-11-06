@@ -37,7 +37,7 @@ spec:
     prefix: {{ $net.prefix }}
   dnsServers: {{ toJson $net.dnsServers }}
 ---
-apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+apiVersion: controlplane.cluster.x-k8s.io/v1alpha2
 kind: KamajiControlPlane
 metadata:
   name: {{ .Release.Name }}-kamaji-cp
@@ -56,6 +56,10 @@ spec:
     serviceType: {{ .Values.kamajiControlPlane.network.serviceType | default "LoadBalancer" }}
     {{- with .Values.kamajiControlPlane.network.serviceAnnotations }}
     serviceAnnotations: {{ toJson . }}
+    {{- end }}
+    {{- with .Values.kamajiControlPlane.network.loadBalancerSourceRanges }}
+    loadBalancerConfig:
+      loadBalancerSourceRanges: {{ toJson . }}
     {{- end }}
     {{- with .Values.kamajiControlPlane.network.certSANs }}
     certSANs: {{ toJson . }}

@@ -488,7 +488,7 @@ type ClusterPin struct {
 // ListClusterPins lists every proxcloud-managed cluster on this provider with its chart pin
 // (ownership-labelled Applications only — pre-proxcloud clusters stay invisible).
 func (s *Service) ListClusterPins(ctx context.Context) ([]ClusterPin, error) {
-	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelManagedBy+"="+ManagedByValue)
+	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelService+"="+s.serviceID+","+LabelManagedBy+"="+ManagedByValue)
 	if err != nil {
 		return nil, err
 	}

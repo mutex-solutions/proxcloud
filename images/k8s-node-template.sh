@@ -105,7 +105,7 @@ for node in $PVE_NODES; do
     wait_task "$first" "$upid"
     pve -X POST "$api/nodes/$node/qemu/$id/template" >/dev/null
   fi
-  pve -X PUT "$api/nodes/$node/qemu/$id/config" -d "tags=proxcloud;pc-k8s;$tag" >/dev/null
+  pve -X PUT "$api/nodes/$node/qemu/$id/config" --data-urlencode "tags=proxcloud;pc-k8s;$tag" >/dev/null
   images="$images${images:+,}$node=$id"
 done
 # What the kamaji provider takes as this version's image (config.cluster.versions).

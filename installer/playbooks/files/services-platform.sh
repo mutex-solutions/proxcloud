@@ -4,18 +4,28 @@
 set -euo pipefail
 
 : "${KUBECONFIG:?}" "${METALLB_RANGE:?}" "${PVE_API_URL:?}" "${PVE_NODE_IPS:?}" "${PVE_PROXY_IP:?}"
-: "${CAPI_TOKEN_ID:?}" "${CAPI_TOKEN_SECRET:?}" "${CSI_TOKEN_ID:?}" "${CSI_TOKEN_SECRET:?}" "${REGION:?}" "${STORAGE:?}"
+: "${CSI_TOKEN_ID:?}" "${CSI_TOKEN_SECRET:?}" "${REGION:?}" "${STORAGE:?}"
 : "${CILIUM_VERSION:?}" "${CERT_MANAGER_VERSION:?}" "${METALLB_VERSION:?}" "${CSI_VERSION:?}" "${ARGOCD_VERSION:?}" "${CNPG_VERSION:?}"
 : "${CAPI_VERSION:?}" "${CAPMOX_VERSION:?}" "${IPAM_VERSION:?}" "${KAMAJI_CP_VERSION:?}" "${CAAPH_VERSION:?}"
 : "${KAMAJI_IMAGE_TAG:?}" "${KAMAJI_ETCD_VERSION:?}" "${BARMAN_PLUGIN_VERSION:?}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
+BUNDLE="$(cd "$(dirname "$0")" && pwd)"
+: "${CHART_REPO:?}"
 
 log() { echo "== $*"; }
-up() { helm upgrade --install "$@" --wait --timeout 10m; }
+# A young API server drops connections while the CNI comes up: an install is retried, and is idempotent.
+up() {
+  for _ in 1 2 3 4; do
+    helm upgrade --install "$@" --wait --timeout 10m && return 0
+    sleep 30
+  done
+  return 1
+}
 
 log cni
 up cilium cilium --repo https://helm.cilium.io --version "$CILIUM_VERSION" -n kube-system \
   --set operator.replicas=1 --set hubble.enabled=false --set ipam.mode=kubernetes
+
+kubectl wait nodes --all --for=condition=Ready --timeout=600s
 
 log cert-manager
 up cert-manager cert-manager --repo https://charts.jetstack.io --version "$CERT_MANAGER_VERSION" \
@@ -23,7 +33,7 @@ up cert-manager cert-manager --repo https://charts.jetstack.io --version "$CERT_
 
 log metallb
 up metallb metallb --repo https://metallb.github.io/metallb --version "$METALLB_VERSION" \
-  -n metallb-system --create-namespace --set speaker.frr.enabled=false
+  -n metallb-system --create-namespace --set speaker.frr.enabled=false --set frrk8s.enabled=false
 kubectl label ns metallb-system pod-security.kubernetes.io/enforce=privileged --overwrite
 kubectl apply -f - <<EOF
 apiVersion: metallb.io/v1beta1
@@ -90,7 +100,9 @@ $(for ip in $PVE_NODE_IPS; do echo "  - addresses: [$ip]"; done)
 EOF
 
 log cluster api
-export PROXMOX_URL="$PVE_API_URL" PROXMOX_TOKEN="$CAPI_TOKEN_ID" PROXMOX_SECRET="$CAPI_TOKEN_SECRET"
+# Empty on purpose: a manager-level credential silently wins over every ProxmoxCluster.credentialsRef,
+# which is what makes CAPMOX answer "not authorized to access endpoint" with the wrong token.
+export PROXMOX_URL="" PROXMOX_TOKEN="" PROXMOX_SECRET=""
 export EXP_CLUSTER_RESOURCE_SET=true
 if ! kubectl get deploy -n capi-system capi-controller-manager >/dev/null 2>&1; then
   clusterctl init --core "cluster-api:$CAPI_VERSION" --bootstrap "kubeadm:$CAPI_VERSION" \
@@ -99,9 +111,9 @@ if ! kubectl get deploy -n capi-system capi-controller-manager >/dev/null 2>&1; 
 fi
 
 log kamaji
+up kamaji-crds kamaji-crds --repo https://clastix.github.io/charts --version 0.0.0+latest -n kamaji-system --create-namespace
 up kamaji-etcd kamaji-etcd --repo https://clastix.github.io/charts --version "$KAMAJI_ETCD_VERSION" \
-  -n kamaji-system --create-namespace --set replicas=1 --set datastore.enabled=true --set datastore.name=default
-up kamaji-crds kamaji-crds --repo https://clastix.github.io/charts --version 0.0.0+latest -n kamaji-system
+  -n kamaji-system --set replicas=1 --set datastore.enabled=true --set datastore.name=default
 up kamaji kamaji --repo https://clastix.github.io/charts --version 0.0.0+latest -n kamaji-system \
   --set image.tag="$KAMAJI_IMAGE_TAG" --set kamaji-etcd.deploy=false --set defaultDatastoreName=default
 
@@ -114,9 +126,40 @@ log database operators
 up cnpg cloudnative-pg --repo https://cloudnative-pg.github.io/charts --version "$CNPG_VERSION" -n cnpg-system --create-namespace
 kubectl apply --server-side -f "https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/$BARMAN_PLUGIN_VERSION/manifest.yaml"
 
-log registry
-kubectl apply -f "$HERE/services-registry.yml"
+log registry and charts
+kubectl apply -f "$BUNDLE/registry.yml"
 kubectl -n proxcloud-registry rollout status deploy/pc-registry --timeout=180s
+kubectl -n proxcloud-registry port-forward svc/pc-registry 15000:5000 >/dev/null 2>&1 &
+pf=$!
+trap 'kill $pf 2>/dev/null || true' EXIT
+sleep 3
+for chart in "$BUNDLE"/charts/*; do
+  helm package "$chart" -d /tmp/pc-charts >/dev/null
+done
+for pkg in /tmp/pc-charts/*.tgz; do
+  helm push "$pkg" oci://127.0.0.1:15000/charts --plain-http
+done
+rm -rf /tmp/pc-charts
 
 log guardrails
-kubectl apply -f "$HERE/manifests/"
+for f in "$BUNDLE"/manifests/*.yaml; do
+  case "$f" in
+    *health*) kubectl -n argocd patch configmap argocd-cm --type merge --patch-file "$f" ;;
+    *) sed "s#ghcr.io/mutex-solutions/charts#$CHART_REPO#" "$f" | kubectl apply -f - ;;
+  esac
+done
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxcloud-charts-creds
+  namespace: argocd
+  labels: {argocd.argoproj.io/secret-type: repository}
+stringData:
+  type: helm
+  name: proxcloud-charts
+  url: $CHART_REPO
+  enableOCI: "true"
+  insecureOCIForceHttp: "true"
+EOF
+kubectl -n argocd rollout restart statefulset -l app.kubernetes.io/name=argocd-application-controller

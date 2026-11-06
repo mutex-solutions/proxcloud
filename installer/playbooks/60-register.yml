@@ -244,6 +244,97 @@
       loop: "{{ pc.flavors }}"
       loop_control: {label: "{{ item.slug }}"}
 
+    # mode=split: the two providers that write Applications to the services cluster.
+    - name: Read the portal's identity on the services cluster
+      when: pc.mode == 'split'
+      ansible.builtin.shell: |
+        set -eu
+        export KUBECONFIG=/root/services.kubeconfig
+        kubectl -n proxcloud-system get secret proxcloud-token -o jsonpath='{.data.ca\.crt} {.data.token}'
+      changed_when: false
+      register: pc_svc_identity
+      no_log: true
+    - name: Register the managed-service providers
+      when: pc.mode == 'split' and item.name not in (pc_services.json.data | map(attribute='name') | list)
+      vars:
+        kubeconfig: |
+          apiVersion: v1
+          kind: Config
+          current-context: services
+          contexts: [{name: services, context: {cluster: services, user: proxcloud}}]
+          clusters:
+            - name: services
+              cluster:
+                server: https://{{ pc.services.network.endpoint }}:6443
+                certificate-authority-data: {{ pc_svc_identity.stdout.split()[0] }}
+          users:
+            - name: proxcloud
+              user:
+                token: {{ pc_svc_identity.stdout.split()[1] | b64decode }}
+        region: "{{ pc.provider.region }}"
+        region_doc: "{{ {region: {'displayName': pc.provider.region_name}} }}"
+        object_store: "{{ lookup('ansible.builtin.file', pc_gen ~ '/object-store.json') | from_json }}"
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service"
+        method: POST
+        body: "{{ item }}"
+      no_log: true
+      loop:
+        - name: "{{ pc.provider.name }} Kubernetes"
+          type: CLOUD
+          status: PUBLIC
+          config:
+            provider: kamaji
+            region: "{{ pc.provider.region }}"
+            regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
+            services: {kubernetes: "{{ {pc.provider.region: true} }}"}
+            argocd:
+              namespace: argocd
+              project: proxcloud-k8s
+              chartRepo: "{{ pc.services.chart_repo }}"
+              chartName: proxmox-kamaji-cluster
+              chartVersion: "{{ pc_ver.kamaji_cluster_chart }}"
+            cluster:
+              dataStoreName: default
+              versions: "{{ pc.services.kamaji.version_images }}"
+              rootVolumeGiB: "{{ pc.services.kamaji.root_volume_gib | int }}"
+              workerMtu: "{{ pc.services.kamaji.worker_mtu | int }}"
+              pveApiUrl: "{{ pc_portal_pve_url }}"
+              pveCsiUrl: "https://{{ pc.services.network.pve_proxy_ip }}:8006"
+          secret: {kubeconfig: "{{ kubeconfig }}"}
+        - name: "{{ pc.provider.name }} Databases"
+          type: CLOUD
+          status: PUBLIC
+          config:
+            provider: dbaas
+            region: "{{ pc.provider.region }}"
+            regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
+            services: {database: "{{ {pc.provider.region: true} }}"}
+            argocd:
+              namespace: argocd
+              project: proxcloud-dbaas
+              chartRepo: "{{ pc.services.chart_repo }}"
+              chartName: database-cluster
+              chartVersion: "{{ pc_ver.database_cluster_chart }}"
+            database:
+              lbAddressPool: services
+              storageClasses: [std]
+              backup:
+                endpoint: "{{ object_store.internalEndpoint | default(object_store.endpoint) }}"
+                bucket: cnpg-backups
+                prefix: backups
+                region: us-east-1
+                pathStyle: true
+              engines:
+                postgresql: {versions: ["17"], default: "17", replicas: [1, 3]}
+          secret:
+            kubeconfig: "{{ kubeconfig }}"
+            backupAccessKey: cnpg-backups-svc
+            backupSecretKey: "{{ lookup('ansible.builtin.file', pc_gen ~ '/rustfs-cnpg-secret') | trim }}"
+      loop_control: {label: "{{ item.name }}"}
+
 - name: Say how to log in
   hosts: localhost
   connection: local

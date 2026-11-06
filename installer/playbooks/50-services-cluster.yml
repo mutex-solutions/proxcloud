@@ -34,11 +34,8 @@
         clusterctl init --core cluster-api:{{ pc_ver.capi }} --bootstrap kubeadm:{{ pc_ver.capi }}
         --control-plane kubeadm:{{ pc_ver.capi }} --infrastructure proxmox:{{ pc_ver.capmox }}
         --ipam in-cluster:{{ pc_ver.capi_ipam }} --wait-providers
-      environment:
-        PROXMOX_URL: "{{ pc_portal_pve_url }}"
-        PROXMOX_TOKEN: "{{ pc_services_capi_token_id }}"
-        PROXMOX_SECRET: "{{ pc_services_capi_token_secret }}"
-      no_log: true
+      # Empty on purpose: a manager-level credential silently wins over every ProxmoxCluster.credentialsRef.
+      environment: {PROXMOX_URL: "", PROXMOX_TOKEN: "", PROXMOX_SECRET: ""}
     - name: Apply the services cluster
       ansible.builtin.include_tasks: tasks/kube-apply.yml
       vars:
@@ -67,32 +64,30 @@
       delegate_to: localhost
       become: false
       no_log: true
-    - name: Copy the platform script and manifests
-      ansible.posix.synchronize:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-      loop:
-        - {src: "{{ playbook_dir }}/files/services-platform.sh", dest: /root/services-platform.sh}
-    - name: Copy the guardrails
+    - name: Copy the platform bundle
       ansible.builtin.copy:
-        src: "{{ pc_repo_root }}/deploy/{{ item.from }}"
-        dest: "/root/services-manifests/{{ item.to }}"
-        mode: "0600"
+        src: "{{ item.src }}"
+        dest: "/root/services-bundle/{{ item.dest }}"
+        mode: preserve
       loop:
-        - {from: mgmt-cluster/rbac.yaml, to: mgmt-rbac.yaml}
-        - {from: mgmt-cluster/appproject.yaml, to: mgmt-appproject.yaml}
-        - {from: dbaas-cluster/rbac.yaml, to: dbaas-rbac.yaml}
-        - {from: dbaas-cluster/appproject.yaml, to: dbaas-appproject.yaml}
+        - {src: files/services-platform.sh, dest: services-platform.sh}
+        - {src: templates/registry.yml.j2, dest: registry.yml}
+        - {src: "{{ pc_repo_root }}/deploy/mgmt-cluster/rbac.yaml", dest: manifests/mgmt-rbac.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/mgmt-cluster/appproject.yaml", dest: manifests/mgmt-appproject.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/mgmt-cluster/argocd-health.yaml", dest: manifests/mgmt-health.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/dbaas-cluster/rbac.yaml", dest: manifests/dbaas-rbac.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/dbaas-cluster/appproject.yaml", dest: manifests/dbaas-appproject.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/dbaas-cluster/argocd-health.yaml", dest: manifests/dbaas-health.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/charts/proxmox-kamaji-cluster/", dest: charts/proxmox-kamaji-cluster/}
+        - {src: "{{ pc_repo_root }}/deploy/charts/database-cluster/", dest: charts/database-cluster/}
     - name: Run the platform script
-      ansible.builtin.command: bash /root/services-platform.sh
+      ansible.builtin.command: bash /root/services-bundle/services-platform.sh
       environment:
         KUBECONFIG: /root/services.kubeconfig
         METALLB_RANGE: "{{ svc.network.metallb }}"
         PVE_API_URL: "{{ pc_portal_pve_url }}"
         PVE_NODE_IPS: "{{ svc.pve_node_ips | join(' ') }}"
         PVE_PROXY_IP: "{{ svc.network.pve_proxy_ip }}"
-        CAPI_TOKEN_ID: "{{ pc_services_capi_token_id }}"
-        CAPI_TOKEN_SECRET: "{{ pc_services_capi_token_secret }}"
         CSI_TOKEN_ID: "{{ svc.csi_token_id }}"
         CSI_TOKEN_SECRET: "{{ lookup('ansible.builtin.file', pc_gen ~ '/' ~ svc.csi_token_file) | trim }}"
         REGION: "{{ pc.provider.region }}"

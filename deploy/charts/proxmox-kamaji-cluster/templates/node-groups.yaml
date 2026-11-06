@@ -6,6 +6,9 @@ from the same pin, which is why no cloud controller manager is needed for topolo
 
 Machine and bootstrap templates are immutable in CAPI: their names carry a hash of their spec, so a changed
 flavor or image rolls the nodes instead of silently applying to new machines only.
+
+skipCloudInitStatus: CAPMOX reads cloud-init's status with agent exec, which PVE 9 only allows with
+VM.GuestAgent.Unrestricted, root in every guest of the pool. The Node joining is the real signal anyway.
 */ -}}
 {{- $root := . }}
 {{- $net := .Values.proxmox.network }}
@@ -29,7 +32,7 @@ flavor or image rolls the nodes instead of silently applying to new machines onl
 {{- $replicas := div $count $n }}
 {{- if lt $i (mod $count $n) }}{{- $replicas = add1 $replicas }}{{- end }}
 {{- $base := printf "%s-%s-%s" $root.Release.Name $ng.name $node }}
-{{- $machine := dict "sourceNode" $node "templateID" (int $vmid) "allowedNodes" (list $node) "storage" $root.Values.proxmox.storage "format" "raw" "full" true "pool" $root.Values.proxmox.pool "tags" $ng.machineTags "numSockets" 1 "numCores" (int $ng.machineCores) "memoryMiB" (int $ng.machineMemoryMiB) "disks" (dict "bootVolume" (dict "disk" "scsi0" "sizeGb" (int $ng.machineRootVolume.diskSize))) }}
+{{- $machine := dict "sourceNode" $node "templateID" (int $vmid) "allowedNodes" (list $node) "storage" $root.Values.proxmox.storage "format" "raw" "full" true "pool" $root.Values.proxmox.pool "checks" (dict "skipCloudInitStatus" true) "tags" $ng.machineTags "numSockets" 1 "numCores" (int $ng.machineCores) "memoryMiB" (int $ng.machineMemoryMiB) "disks" (dict "bootVolume" (dict "disk" "scsi0" "sizeGb" (int $ng.machineRootVolume.diskSize))) }}
 {{- $device := dict "name" "net0" "bridge" $net.bridge "model" "virtio" }}
 {{- if $net.mtu }}{{- $_ := set $device "linkMtu" (int $net.mtu) }}{{- $_ := set $device "mtu" 1 }}{{- end }}
 {{- $_ := set $machine "network" (dict "networkDevices" (list $device)) }}

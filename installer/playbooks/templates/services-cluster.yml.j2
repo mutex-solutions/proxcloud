@@ -18,6 +18,7 @@ spec:
       format: raw
       full: true
       pool: {{ svc.pool }}
+      checks: {skipCloudInitStatus: true}  # agent exec needs VM.GuestAgent.Unrestricted on PVE 9: root in every guest
       tags: [proxcloud, pc-services]
       numSockets: 1
       numCores: {{ m.cores }}
