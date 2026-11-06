@@ -384,6 +384,36 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 			remaining = stillLeft
 			continue
 		}
+		if es.IsTrueNAS() {
+			// Shares go with the project; a failure keeps the rows so a re-run retries.
+			ts, terr := es.TrueNASService()
+			if terr != nil {
+				slog.Error("teardown: build truenas client", "project", p.ID, "serviceId", svcID, "err", terr)
+				pveTeardownFailed = true
+				continue
+			}
+			now := time.Now().UTC()
+			var stillLeft []cloud.CloudResource
+			for i := range remaining {
+				res := &remaining[i]
+				if res.ServiceID != svcID {
+					stillLeft = append(stillLeft, *res)
+					continue
+				}
+				if derr := ts.Delete(ctx, p.ID, res.ExternalID); derr != nil {
+					slog.Error("teardown: delete share", "project", p.ID, "dataset", res.ExternalID, "err", derr)
+					pveTeardownFailed = true
+					stillLeft = append(stillLeft, *res)
+					continue
+				}
+				if aerr := h.cloud.DeleteAndArchive(ctx, res, now); aerr != nil {
+					stillLeft = append(stillLeft, *res)
+				}
+			}
+			remaining = stillLeft
+			ts.C.Close()
+			continue
+		}
 		// Nothing external to delete for the remaining kinds.
 		continue
 	}
@@ -397,7 +427,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		return fmt.Errorf("teardown could not revoke some ceph-s3 credentials; their local records were kept for retry")
 	}
 	if pveTeardownFailed {
-		return fmt.Errorf("teardown could not fully tear down the project's Proxmox pool; re-run teardown to retry")
+		return fmt.Errorf("teardown could not fully tear down the project's cloud resources; re-run teardown to retry")
 	}
 	if len(remaining) > 0 {
 		return fmt.Errorf("teardown left %d resource(s) undeleted; the sync job will reconcile them", len(remaining))

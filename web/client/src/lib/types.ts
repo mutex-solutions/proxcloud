@@ -234,5 +234,5 @@ export type CreditCard = {
   [k: string]: unknown
 }
 
-/** Providers that serve only buckets. */
-export const isObjectProvider = (provider?: string) => provider === "ceph-s3" || provider === "rustfs"
+/** Providers that serve only storage products (no compute). */
+export const isObjectProvider = (provider?: string) => provider === "ceph-s3" || provider === "rustfs" || provider === "truenas"

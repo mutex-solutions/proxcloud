@@ -36,7 +36,7 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if err != nil {
 		return err
 	}
-	var cephES, kamajiES, dbaasES, pveES []*externalservice.ExternalService
+	var cephES, kamajiES, dbaasES, pveES, truenasES []*externalservice.ExternalService
 	for i := range services {
 		if services[i].IsDisabled() {
 			continue
@@ -50,9 +50,11 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 			dbaasES = append(dbaasES, &services[i])
 		case services[i].IsProxmox():
 			pveES = append(pveES, &services[i])
+		case services[i].IsTrueNAS():
+			truenasES = append(truenasES, &services[i])
 		}
 	}
-	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 {
+	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 && len(truenasES) == 0 {
 		return nil // no cloud provider configured → nothing to provision
 	}
 	p.Status = StatusEnabled
@@ -77,6 +79,12 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	// Proxmox bootstrap — ensure the project's PVE pool.
 	for _, es := range pveES {
 		if err := h.BootstrapProxmoxOnto(ctx, p, es); err != nil {
+			return err
+		}
+	}
+	// TrueNAS: nothing to create until the first share, only the binding.
+	for _, es := range truenasES {
+		if err := h.bootstrapTrueNASOnto(ctx, p, es); err != nil {
 			return err
 		}
 	}
@@ -233,6 +241,14 @@ func (h *Handler) BootstrapCephOnto(ctx context.Context, p *Project, es *externa
 	return h.svc.Save(ctx, p)
 }
 
+// bootstrapTrueNASOnto appends the binding {serviceId, provider:"truenas", region}. Idempotent.
+func (h *Handler) bootstrapTrueNASOnto(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
+	if !p.HasService(es.ID) {
+		p.Services = append(p.Services, map[string]any{"serviceId": es.ID, "provider": "truenas", "region": es.CephRegion()})
+	}
+	return h.svc.Save(ctx, p)
+}
+
 // BootstrapOnto provisions the project onto the GIVEN cloud service — the explicit-service leg of
 // the project bootstrap, dispatched per provider kind. Does NOT flip status (the bootstrap never does; enableAndBootstrap sets ENABLED itself
 // before calling). Idempotent: a project already attached to this service is saved as-is.
@@ -254,6 +270,9 @@ func (h *Handler) BootstrapOnto(ctx context.Context, p *Project, es *externalser
 	// proxmox: the PVE pool leg.
 	if es.IsProxmox() {
 		return h.BootstrapProxmoxOnto(ctx, p, es)
+	}
+	if es.IsTrueNAS() {
+		return h.bootstrapTrueNASOnto(ctx, p, es)
 	}
 	return fmt.Errorf("bootstrap: unsupported provider kind %q", es.Provider())
 }

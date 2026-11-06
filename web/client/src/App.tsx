@@ -67,6 +67,7 @@ export default function App() {
           <Route path="object-storage" element={lazyPage(() => import("@/pages/storage/BucketsPage"))} />
           <Route path="object-storage/:resourceId" element={lazyPage(() => import("@/pages/storage/BucketExplorePage"))} />
           <Route path="s3-keys" element={lazyPage(() => import("@/pages/storage/S3KeysPage"))} />
+          <Route path="file-shares" element={lazyPage(() => import("@/pages/storage/FileSharesPage"))} />
 
           {/* Network */}
           <Route path="networks" element={lazyPage(() => import("@/pages/network/NetworksPage"))} />

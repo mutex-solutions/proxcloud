@@ -433,6 +433,28 @@ function ConnectionTab({ id, provider }: TabProps) {
       </Card>
     )
   }
+  if (provider.config?.provider === "truenas") {
+    const c = asObj(provider.config)
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-eyebrow">TrueNAS connection</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Row label="URL" value={str(c.apiUrl)} />
+          <Row label="API key owner" value={str(c.username)} />
+          <Row label="Parent dataset" value={str(c.parentDataset)} />
+          <Row label="Mount address" value={str(c.mountHost)} />
+          <Row label="Region" value={str(c.region)} />
+          <Row label="Quota per project (GiB)" value={c.defaultQuotaGiB != null ? String(c.defaultQuotaGiB) : ""} />
+          <p className="mt-4 text-sm text-muted-foreground">
+            The connection is exercised by the first share and by sync. The API key is stored encrypted and never
+            returned by the API.
+          </p>
+        </CardContent>
+      </Card>
+    )
+  }
   return <Note>Unknown provider type "{str(provider.config?.provider)}" — no connection settings to show.</Note>
 }
 

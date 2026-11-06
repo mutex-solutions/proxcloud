@@ -107,6 +107,7 @@ provider kind:
 | `proxmox` | One Proxmox VE cluster (one cluster = one region) | `internal/platform/externalservice/proxmox.go` |
 | `ceph-s3` | A Ceph RGW reached over S3 and Admin Ops | `externalservice.go` (`IsCephS3`, `ObjectClient`, …) |
 | `rustfs` | A RustFS reached over S3 and its admin API | `externalservice.go` (`IsRustFS`, `ObjectClient`) |
+| `truenas` | A TrueNAS reached over its WebSocket API | `externalservice.go` (`IsTrueNAS`, `TrueNASService`) |
 | `kamaji` | A management cluster for managed Kubernetes | `kamaji.go` |
 | `dbaas` | A management cluster for managed databases | `dbaas.go` |
 
@@ -218,6 +219,7 @@ everything enabled):
 | `proxmox` | `volumev3` | Volumes, Snapshots pages |
 | `proxmox` | `network` | Networks, Security groups |
 | `ceph-s3`, `rustfs` | `object-store` | Object storage, S3 access keys |
+| `truenas` | `shares` | NFS and SMB file shares |
 | `kamaji` | `kubernetes` | Kubernetes |
 | `dbaas` | `database` | Databases |
 
@@ -572,6 +574,41 @@ branch, is in
 [C4 sequence (a)](architecture/c4/c4-code.md#sequence-a-create-server).
 
 ---
+
+## TrueNAS file shares
+
+`config.provider == "truenas"` serves NFS and SMB shares (`SHARE` resources, service slug `shares`). Code:
+`internal/cloud/truenas/`, `internal/platform/project/cloud_shares.go`,
+`internal/cloud/billingresource/share.go`.
+
+The client speaks JSON-RPC 2.0 over one WebSocket (`wss://<nas>/api/current`, `auth.login_ex` with
+`API_KEY_PLAIN`), and refuses a plain-HTTP URL because TrueNAS revokes a key sent over it. Minimum TrueNAS 25.10.
+
+```json
+{"provider": "truenas", "apiUrl": "https://nas.example", "username": "proxcloud", "fingerprint": "AA:BB:...",
+ "parentDataset": "tank/shares", "mountHost": "192.0.2.10", "region": "pve", "defaultQuotaGiB": 500,
+ "regions": {"pve": {"displayName": "Lab"}}, "services": {"shares": {"pve": true}}}
+```
+
+The API key goes in `secret.apiKey`. Its account needs the built-in `truenas_sharing_administrators` group
+(`SHARING_ADMIN` also covers `pool.dataset.create`, checked on 25.10.8). Deleting a share needs `DATASET_DELETE`, and SMB shares create a user per share, which
+takes `ACCOUNT_WRITE`: a privilege with both roles on the account's group.
+
+Each share is a dataset `<parent>/<projectId>-<name>` with a `refquota`, the `proxcloud:project` property proving
+ownership, plus one NFS or SMB share. SMB gets a generated user and password: the password appears once, in the
+create or reset response, and is never stored.
+
+**Access.** An export lists the project's public NIC addresses and subnets, computed at create and by the
+`REFRESH_ACCESS` action. The NAS tells tenants apart by source address, so a client needs a path to the NAS that keeps
+its address. A public NIC has one when the NAS is routable from the public network. A private subnet that leaves
+through SNAT arrives with a node's address, and the tenant isolation rules drop traffic from the pool to the nodes'
+management network: on a NAS placed there, private subnets cannot mount.
+
+**Actions:** `EXTEND {sizeGb}` (either direction, not below usage), `REFRESH_ACCESS`, `RESET_PASSWORD`. Delete removes
+the export, the SMB user and the dataset with its data. Project teardown does the same.
+
+**Quota and billing.** `defaultQuotaGiB` caps the sum of a project's allocated sizes. The `share` billing resource has
+`size_gb` (used), `quota_gb` (allocated) and `protocol`; the seed bills `size_gb`.
 
 ## RustFS S3 object storage
 

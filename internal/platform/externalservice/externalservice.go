@@ -7,8 +7,11 @@ package externalservice
 
 import (
 	"context"
+	"fmt"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/truenas"
+	"net/url"
 )
 
 // ExternalServiceType values. Only CLOUD matters to the cloud slice.
@@ -62,6 +65,34 @@ func (e *ExternalService) IsCephS3() bool { return e.Provider() == "ceph-s3" }
 // IsRustFS reports a RustFS object store (config.provider == "rustfs"), the Standard-tier S3 product. Same
 // config keys as ceph-s3; adminApiUrl is the base URL the API reaches the admin paths on.
 func (e *ExternalService) IsRustFS() bool { return e.Provider() == "rustfs" }
+
+// IsTrueNAS reports a TrueNAS file-share provider (config.provider == "truenas"). Config: apiUrl, username,
+// fingerprint/insecureTls, parentDataset, mountHost (default: the host of apiUrl), defaultQuotaGiB, region;
+// secret: apiKey.
+func (e *ExternalService) IsTrueNAS() bool { return e.Provider() == "truenas" }
+
+// TrueNASService builds the share service. The caller closes its client.
+func (e *ExternalService) TrueNASService() (*truenas.Service, error) {
+	insecure, _ := e.Config["insecureTls"].(bool)
+	c, err := truenas.New(truenas.Config{
+		URL: str(e.Config["apiUrl"]), Username: str(e.Config["username"]), APIKey: str(e.secretMap()["apiKey"]),
+		Fingerprint: str(e.Config["fingerprint"]), InsecureTLS: insecure,
+	})
+	if err != nil {
+		return nil, err
+	}
+	parent := str(e.Config["parentDataset"])
+	if parent == "" {
+		return nil, fmt.Errorf("truenas: parentDataset is required")
+	}
+	host := str(e.Config["mountHost"])
+	if host == "" {
+		if u, err := url.Parse(str(e.Config["apiUrl"])); err == nil {
+			host = u.Hostname()
+		}
+	}
+	return &truenas.Service{C: c, Parent: parent, Host: host}, nil
+}
 
 // IsObjectStore reports a provider that serves only buckets.
 func (e *ExternalService) IsObjectStore() bool { return e.IsCephS3() || e.IsRustFS() }

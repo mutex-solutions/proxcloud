@@ -103,7 +103,7 @@ flowchart TB
   subgraph tiers["Storage backends"]
     ceph["Full tier: Ceph<br/>RBD, CephFS, RGW"]:::impl
     zfs["Standard tier: local ZFS"]:::impl
-    nas["Standard tier: TrueNAS<br/>NFS, SMB, iSCSI"]:::planned
+    nas["Standard tier: TrueNAS<br/>NFS, SMB, iSCSI"]:::impl
   end
 
   pbs["Proxmox Backup Server"]:::planned
@@ -117,9 +117,9 @@ flowchart TB
   pci --> vm
   sto --> ceph
   sto --> zfs
-  sto -.-> nas
+  sto --> nas
   ha -.-> vm
-  svc -.-> nas
+  svc --> nas
   papi -.-> pbs
 ```
 
@@ -144,7 +144,8 @@ flowchart TB
 | Full | Ceph RGW | Tenant buckets: per-project RGW user, keys, quotas, bucket settings | Implemented |
 | Standard | Local ZFS (`zfspool`) | VM disks, pinned to the node holding the storage | Implemented |
 | Standard | TrueNAS NFS as a capacity-class profile ("Capacity HDD (NFS)") | Bulk data volumes only: no boot disks, databases or snapshots (API-enforced) | Implemented |
-| Standard | TrueNAS SMB / iSCSI, NAS-created stores | Templates, backups, tenant file shares, RWX volumes | Planned |
+| Standard | TrueNAS NFS and SMB tenant file shares, NAS-created stores for templates and backups | `SHARE` product through the WebSocket API; datasets `nas-templates`, `nas-backup` | Implemented |
+| Standard | TrueNAS iSCSI, RWX volumes | Shared block and Kubernetes RWX | Planned |
 | Standard | RustFS | Internal bucket store on sites without Ceph, deployed by the installer | Implemented |
 | Standard | RustFS tenant buckets | Bucket product on sites without Ceph | Implemented |
 | Both | Admin-declared profile flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`), validated on save against detection | Shown to tenants as volume-type specs | Implemented |
@@ -223,7 +224,7 @@ flowchart LR
 | Tenant VMs | QEMU full clones in the project pool | Proxmox cluster | Implemented |
 | HA rules and replication | `ha-manager` rules, `pvesr` | Proxmox cluster | Planned |
 | Ceph (Full tier) | RBD/CephFS for disks, RGW for buckets | Ceph cluster | Implemented |
-| TrueNAS (Standard tier) | NFS, SMB, iSCSI, WebSocket API | Appliance outside the Proxmox cluster | Planned |
+| TrueNAS (Standard tier) | NFS, SMB, iSCSI, WebSocket API | Appliance outside the Proxmox cluster | Implemented |
 | RustFS (Standard tier) | S3 + admin API, deployed by the installer with internal buckets; also serves tenant buckets (provider `rustfs`, registered by the installer) | VM in the system pool, or TrueNAS app | Implemented |
 | Proxmox Backup Server | vzdump target | Separate machine | Planned |
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |

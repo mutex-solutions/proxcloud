@@ -2,8 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate, useParams } from "react-rout
 import {
   Boxes, BarChart3, BookOpen, Camera, Check, ChevronsUpDown, CreditCard, Database, DatabaseZap, FileClock, FolderKanban, HardDrive,
   Image, KeyRound, LayoutDashboard, LogOut, Monitor, Moon, Network, Receipt,
-  ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, Sun, UserCircle, Users, Wallet,
-} from "lucide-react"
+  ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, Sun, UserCircle, Users, Wallet, FolderTree } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useAuth } from "@/lib/auth"
 import { useCloudFeatures, useFeatures, useProjects, useProjectInit, useUIMenu, type CloudFeature } from "@/lib/hooks"
@@ -57,6 +56,7 @@ function navGroups(pid: string): Group[] {
         { to: `${p}/snapshots`, label: "Snapshots", icon: Camera, service: "volumev3", cloudFeature: "volumeSnapshots" },
         { to: `${p}/object-storage`, label: "Object storage", icon: Database, service: "object-store" },
         { to: `${p}/s3-keys`, label: "S3 access keys", icon: KeyRound, service: "object-store" },
+        { to: `${p}/file-shares`, label: "File shares", icon: FolderTree, service: "shares" },
       ],
     },
     {

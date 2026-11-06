@@ -203,6 +203,9 @@ func (j *Job) syncService(ctx context.Context, p *project.Project, es *externals
 	if es.IsProxmox() {
 		return j.syncProxmoxService(ctx, p, es)
 	}
+	if es.IsTrueNAS() {
+		return j.syncTrueNASService(ctx, p, es)
+	}
 	// No other provider kinds exist.
 	return 0
 }
@@ -226,6 +229,25 @@ func (j *Job) syncCephService(ctx context.Context, p *project.Project, es *exter
 	st, err := providers.Reconcile(ctx, providers.NewBucketProvider(cc, region, p.ID), j.cloud, es.ID, j.now())
 	if err != nil {
 		j.log.Error("syncjob: reconcile ceph buckets", "project", p.ID, "serviceId", es.ID, "region", region, "err", err)
+	}
+	return st.Created + st.Updated
+}
+
+// syncTrueNASService reconciles the project's file shares and their usage off the NAS.
+func (j *Job) syncTrueNASService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
+	region := es.CephRegion()
+	if !es.ServiceEnabledInRegion("shares", region) {
+		return 0
+	}
+	ts, err := es.TrueNASService()
+	if err != nil {
+		j.log.Error("syncjob: build truenas client", "project", p.ID, "serviceId", es.ID, "err", err)
+		return 0
+	}
+	defer ts.C.Close()
+	st, err := providers.Reconcile(ctx, ts.ShareSyncProvider(region, p.ID), j.cloud, es.ID, j.now())
+	if err != nil {
+		j.log.Error("syncjob: reconcile shares", "project", p.ID, "serviceId", es.ID, "err", err)
 	}
 	return st.Created + st.Updated
 }

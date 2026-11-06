@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: TrueNAS client and file share product
+
+**What changed**
+
+- New `internal/cloud/truenas`: JSON-RPC 2.0 client over WebSocket and the share service. New provider kind `truenas`
+  serving `SHARE` resources, with sync, teardown, a `share` billing resource and a "File shares" page.
+- New dependency `github.com/coder/websocket` (ISC) for the client side of the socket.
+
+**Why**
+
+- TrueNAS 26 removes the REST API and revokes a key sent over HTTP, so a REST port would have had no future.
+- Tenants on the Standard tier had no shared file product; the NAS is already there as the capacity tier.
+- A share is one dataset per project, not the 1/N split across projects of the older design: per-project billing and
+  quota come out exact, and no tenant ever shares a filesystem with another.
+- Exports list tenant addresses because the NAS only knows a client by its source address. A private subnet behind
+  SNAT arrives as a node address, which the NAS cannot tell apart per tenant, so it is left out of the promise.
+
+**Diagrams updated**: `c1-context.md`, `c2-containers.md`, `c3-components.md`.
+
 ## 2026-11-07: RustFS tenant buckets behind objectBackend
 
 **What changed**
