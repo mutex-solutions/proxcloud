@@ -21,6 +21,21 @@ Open item of the lab drill (DRILL-2).
   it already holds `manage-users` in the customer realm, on compose, the chart and the installer.
 
 **Diagrams updated**: `c3-components.md` (note under C3a).
+## 2026-11-07: API tokens get a scope and an expiry
+
+**What changed**
+
+- A personal access token has a scope, `full` or `read`, and an optional expiry. `pkg/auth.ClientKeyLookup`
+  returns a `ClientKey`; a read token passes safe methods and the POST list route only.
+
+**Why**
+
+- P5-12 asked for platform API tokens; the tokens already existed. What was missing is limiting one: a token
+  in a dashboard or a CI job should not be able to delete servers, or live forever. `/mcp` is refused for a read
+  token because its tools can write.
+
+**Diagrams updated**: none, `docs/auth.md` has the rules.
+
 ## 2026-11-07: volumes outlive their server (holder VM)
 
 **What changed**

@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { apiFetch, apiFetchEnvelope, apiFetchRaw } from "@/lib/api"
@@ -50,6 +51,8 @@ type ApiKey = {
   description?: string
   createdAt?: string
   lastUsedAt?: string
+  scope?: "full" | "read"
+  expiresAt?: string
 }
 
 const AUDIT_LIMIT = 25
@@ -130,13 +133,19 @@ export default function AccountPage() {
   })
   const [tokenCreateOpen, setTokenCreateOpen] = useState(false)
   const [tokenDesc, setTokenDesc] = useState("")
+  const [tokenScope, setTokenScope] = useState<"full" | "read">("full")
+  const [tokenExpiry, setTokenExpiry] = useState("0")
   const [newToken, setNewToken] = useState<{ id: string; token: string } | null>(null)
   const [tokenDeleting, setTokenDeleting] = useState<ApiKey | null>(null)
   const createToken = useMutation({
     mutationFn: () =>
       apiFetch<{ id: string; token: string }>("/user/api-keys", {
         method: "POST",
-        body: { description: tokenDesc.trim() },
+        body: {
+          description: tokenDesc.trim(),
+          scope: tokenScope,
+          ...(tokenExpiry !== "0" ? { expiresInDays: Number(tokenExpiry) } : {}),
+        },
       }),
     onSuccess: (res) => {
       setTokenCreateOpen(false)
@@ -283,6 +292,8 @@ export default function AccountPage() {
                   <TableRow className="hover:bg-transparent">
                     <TableHead>Description</TableHead>
                     <TableHead>Token ID</TableHead>
+                    <TableHead>Scope</TableHead>
+                    <TableHead>Expires</TableHead>
                     <TableHead>Created</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
@@ -292,6 +303,8 @@ export default function AccountPage() {
                     <TableRow key={t.id}>
                       <TableCell className="font-medium">{t.description || "—"}</TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">{t.id}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground">{t.scope === "read" ? "Read only" : "Full"}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground">{t.expiresAt ? fmtDate(t.expiresAt) : "Never"}</TableCell>
                       <TableCell className="text-sm text-muted-foreground">{fmtDate(t.createdAt)}</TableCell>
                       <TableCell className="text-right">
                         <Button
@@ -540,6 +553,28 @@ export default function AccountPage() {
               placeholder="terraform / laptop / ci"
               maxLength={200}
             />
+            <Label htmlFor="token-scope">Scope</Label>
+            <Select value={tokenScope} onValueChange={(v) => setTokenScope(v as "full" | "read")}>
+              <SelectTrigger id="token-scope">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="full">Full access</SelectItem>
+                <SelectItem value="read">Read only</SelectItem>
+              </SelectContent>
+            </Select>
+            <Label htmlFor="token-expiry">Expires</Label>
+            <Select value={tokenExpiry} onValueChange={setTokenExpiry}>
+              <SelectTrigger id="token-expiry">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0">Never</SelectItem>
+                <SelectItem value="30">In 30 days</SelectItem>
+                <SelectItem value="90">In 90 days</SelectItem>
+                <SelectItem value="365">In a year</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setTokenCreateOpen(false)}>

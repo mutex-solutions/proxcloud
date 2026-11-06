@@ -106,6 +106,15 @@ The MCP endpoint (`internal/platform/mcp/mcp.go`) accepts either scheme:
 Unauthenticated requests get an RFC 9728 challenge (below), which drives compliant
 MCP clients into the OAuth flow.
 
+## Client API tokens
+
+A customer mints personal access tokens on the account page (`POST /api/v1/user/api-keys`
+`{description, scope?, expiresInDays?}`). `Authorization: Bearer <pk>.<sk>` then acts as that user
+(`pkg/auth/clientkey.go`). `scope` is `full` (the default, and what a token from before scopes means) or
+`read`: a read token passes safe methods and the `POST .../resource` list route, and answers `401` on
+everything else, `/mcp` included, because MCP tools can write. A token past `expiresAt` answers `401`. The
+list route shows scope and expiry and never the secret.
+
 ## The Admin API gate
 
 `/admin-api/v1` sits behind an extra authorization gate on top of `Enforce`
