@@ -30,8 +30,8 @@ Open **System → Cloud providers**, choose **Add provider**, and pick the **Pro
 | Token secret | The token's secret. It is encrypted at rest and never returned by the API. When you edit the provider later, leaving it blank keeps the stored secret. |
 | TLS certificate fingerprint | Optional SHA-256 pin for a self-signed cluster certificate (`pvenode cert info` prints it). Empty means the system CA pool is used. |
 | Skip TLS verification | Last resort. Prefer the fingerprint pin. |
-| Pool prefix | Default `pc-`. Each project gets the pool `<prefix><projectId>`, which is its tenancy boundary. Don't give your management pool a name that starts with this prefix. |
-| Tenant network isolation | `Shared zone` (default) or `EVPN zone per project`. Both drop cross-tenant traffic with cluster firewall rules inside the CIDR pool, and keep tenants off the nodes' management networks plus any **Networks tenants must not reach** you list; the EVPN mode also gives every project its own EVPN zone (VRF). |
+| Pool prefix | Default `pc-`. Each project gets the pool `<prefix><projectId>`, which is its tenancy boundary. Don't give your management pool a name that starts with this prefix. A second portal on the same cluster needs its own prefix. |
+| Tenant network isolation | `Shared zone` (default) or `EVPN zone per project`. Both drop cross-tenant traffic with cluster firewall rules inside the CIDR pool, including other tenants' gateway addresses, and keep tenants off the nodes' management networks plus any **Networks tenants must not reach** you list; the EVPN mode also gives every project its own EVPN zone (VRF). The sync job puts these rules back within 15 minutes if they change, and a changed setting reaches existing projects the same way. Switching mode applies to new networks: existing ones stay in their zone until they are deleted. Widen the CIDR pool rather than move it: subnets left outside the pool lose the rule that separates them. |
 | EVPN controller | Only for `EVPN zone per project`: the controller every project zone uses. Blank means the default zone's controller. |
 
 Saving creates the provider as `PUBLIC` and enables the four services a Proxmox cluster serves in its region: `compute`, `network`, `volumev3` and `image`. There is no discovery round-trip. Traffic metrics start as `none` (see *Usage metrics* below).
@@ -82,6 +82,8 @@ Projects have no floating IPs. A server becomes reachable from outside when it g
 ```
 
 `ranges` and `exclude` are optional; without `ranges` the whole CIDR is the pool. Never use the management bridge. **Test connection** rejects a public network on a node's management bridge. The traffic-metrics job also uses these bridge ids to tell public traffic from private traffic. Which public networks a given project may use is set on the project's detail page (see [Running the Platform](/docs/platform-admin/overview)).
+
+A public NIC is bridged straight to the uplink, so the isolation rules do not apply to it: the server reaches whatever the uplink routes. Filter management and internal networks on the uplink's router.
 
 ## Storage
 

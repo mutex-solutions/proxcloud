@@ -50,6 +50,7 @@ type FirewallRule struct {
 	SPort   string `json:"sport"`
 	Enable  int    `json:"enable"`
 	Comment string `json:"comment"`
+	Digest  string `json:"digest,omitempty"`
 }
 
 func (c *Client) ListFirewallRules(ctx context.Context, group string) ([]FirewallRule, error) {
@@ -108,8 +109,10 @@ func (c *Client) AddClusterFirewallRule(ctx context.Context, r FirewallRule) err
 	return c.post(ctx, "/cluster/firewall/rules", ruleForm(r), nil)
 }
 
-func (c *Client) DeleteClusterFirewallRule(ctx context.Context, pos int) error {
-	return c.delete(ctx, "/cluster/firewall/rules/"+itoa0(pos), nil, nil)
+// DeleteClusterFirewallRule removes the rule at pos; PVE refuses it when digest (of the list the
+// position came from) no longer matches.
+func (c *Client) DeleteClusterFirewallRule(ctx context.Context, pos int, digest string) error {
+	return c.delete(ctx, "/cluster/firewall/rules/"+itoa0(pos), formVals{"digest": digest}.values(), nil)
 }
 
 // --- datacenter + VM firewall (/cluster/firewall/options, /nodes/{node}/qemu/{vmid}/firewall) ---

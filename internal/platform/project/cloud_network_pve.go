@@ -26,13 +26,13 @@ import (
 // writes are unavailable — apply MUST be serialized).
 func (h *Handler) SetSDNLock(l *lock.ShedLock) { h.sdnLock = l }
 
-// sdnApplyLockName serializes PUT /cluster/sdn platform-wide (it is global +
+// SDNApplyLockName serializes PUT /cluster/sdn platform-wide (it is global +
 // async on the PVE side and PVE itself does not serialize it).
-const sdnApplyLockName = "sdn-apply"
+const SDNApplyLockName = "sdn-apply"
 
-// sdnApplyMaxFor bounds a crashed holder: the next apply may steal the lock
+// SDNApplyMaxFor bounds a crashed holder: the next apply may steal the lock
 // after this long.
-const sdnApplyMaxFor = 3 * time.Minute
+const SDNApplyMaxFor = 3 * time.Minute
 
 // lockSDN takes the sdn-apply lock and returns its release; busy → 409.
 func (h *Handler) lockSDN(ctx context.Context) (func(), error) {
@@ -40,14 +40,14 @@ func (h *Handler) lockSDN(ctx context.Context) (func(), error) {
 		return nil, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "network service not configured")
 	}
 	now := time.Now().UTC()
-	ok, err := h.sdnLock.Lock(ctx, sdnApplyLockName, sdnApplyMaxFor, now)
+	ok, err := h.sdnLock.Lock(ctx, SDNApplyLockName, SDNApplyMaxFor, now)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
 		return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "Another network change is being applied — retry in a moment")
 	}
-	return func() { _ = h.sdnLock.Unlock(ctx, sdnApplyLockName, 0, now, time.Now().UTC()) }, nil
+	return func() { _ = h.sdnLock.Unlock(ctx, SDNApplyLockName, 0, now, time.Now().UTC()) }, nil
 }
 
 // withSDNLock runs fn under the sdn-apply lock; busy → 409.
