@@ -4,6 +4,35 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: isolation rules get an owner, cover gateways, and reconcile in the sync job
+
+Open items of the lab drill (DRILL-5, DRILL-6) and the coexistence note in the lab log.
+
+**What changed**
+
+- The sync job reconciles each project's isolation rules every cycle under the `sdn-apply` lock.
+- A portal only rewrites DROPs with its own comment: bare `proxcloud:isolation` for the default
+  pool prefix, `proxcloud:isolation/<poolPrefix>` otherwise. It only moves ACCEPTs inside its pool.
+- `IN DROP` inside the pool, plus an `IN ACCEPT` per project next to its `FORWARD ACCEPT`.
+- Rules are deleted by identity with the list's digest instead of by a remembered position.
+
+**Why**
+
+- Rules only reached a project at its next network change, so projects made before a rule change
+  kept the old set indefinitely.
+- A cluster normally has one portal, and that portal has to keep owning its rules outright so a
+  changed pool or blocked list leaves nothing stale. The old code took that to mean every rule with
+  the marker, so a second portal with another pool deleted the first one's DROPs at its next network
+  change and left those tenants unisolated with no error. Scoping by owner keeps the one-portal
+  behaviour and makes the second portal harmless. The default prefix keeps the old comment so no
+  running cluster needs a migration.
+- A gateway address is local to the node, so traffic to another tenant's gateway is input and no
+  `FORWARD` rule sees it.
+- PVE addresses rules by position, and a reconcile now runs without anyone asking for it, next to
+  operators and possibly another portal editing the same list. A stale position would delete the
+  wrong rule, possibly someone's DROP.
+
+**Diagrams updated**: `c4-code.md` (C4.1), `c2-containers.md` (tables).
 ## 2026-11-07: TrueNAS client and file share product
 
 **What changed**
