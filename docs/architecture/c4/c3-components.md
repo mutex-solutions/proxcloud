@@ -84,7 +84,7 @@ flowchart TB
   lock["SDN apply lock"]:::impl
   cap["capability detection<br/>pve capability.go"]:::impl
   ha["replication + HA"]:::planned
-  truenas["TrueNAS client"]:::planned
+  truenas["TrueNAS client"]:::impl
 
   ph --> quota
   ph --> pip
@@ -107,7 +107,7 @@ flowchart TB
   sync --> cap
   es --> cap
   ha -.-> cli
-  ph -.-> truenas
+  ph --> truenas
 ```
 
 | Component | Path | Responsibility | Status |
@@ -135,7 +135,7 @@ flowchart TB
 | Capability detection | `internal/cloud/pve/capability.go` (`DetectStorage`, `classify`, `StorageHasRoom`, `TemplateShared`), `externalservice/proxmox.go` (`ValidatePVEStorageProfiles`, `DetectPVECapabilities`, `PVEEffectiveStorageClass`), `syncjob/job.go` (`detectProxmoxCapabilities`), `admin/pveadmin.go` (`proxmoxDetectStorage`, `proxmoxStorageClasses`, `validatePVEStorageProfiles`) | Per storage from `GET /storage` + `/cluster/resources type=storage`: type, shared, content, snapshots, thin, live migrate, replication, tier and a default class from a static type table, plus per-node active/avail. Persisted under `config.capabilities` every sync cycle and on admin Re-detect. Storage-profile saves are rejected when a storage is missing, inactive, lacks `images`, or the profile claims a flag the storage lacks. Admin class override (`config.storageClasses.<id>.class`) wins; the installer's `suggestedClass` is display-only. Feeds placement (active nodes, free space, template and clone-target locality), same-node attach gating and the capacity-class gates (boot disk, snapshots, DBaaS). HA readiness is still Planned. | Implemented |
 | Replication and HA | not yet in the tree | `pvesr` jobs and HA node-affinity rules for protected VMs. | Planned |
 | Metering reads | `internal/cloud/pve/syncprovider.go` (`SampledServerProvider`, `SampledImageProvider`, `Superseded`), `task.go` (`NodeTasks`), `qemu.go` (`VMStatus.NICs`), `gpu.go` (`GPUSpecsFromConfig`), `service.go` (`CreatedTag`) | The Proxmox side of metering: rows built from one `/cluster/resources` page, the VM identity stamp `pc-c-<unix>`, node task logs, per-tap counters, GPU count from `hostpciN mapping=`. See C3c. | Implemented |
-| TrueNAS client | not yet in the tree | Shares, datasets and quotas through the TrueNAS WebSocket API. | Planned |
+| TrueNAS client | `internal/cloud/truenas/`, `internal/platform/project/cloud_shares.go` | JSON-RPC over WebSocket; NFS and SMB shares as dataset + refquota + export, limited to the project's addresses. | Implemented |
 | VM metadata datasource | not yet in the tree | Per-VM cloud-init datasource served by the API. | Planned |
 
 ## C3c. Metering and billing

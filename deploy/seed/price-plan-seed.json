@@ -232,7 +232,7 @@
       "timeUnit": "hour",
       "resourceType": "instance_traffic",
       "pricePlanId": "<PLAN_ID>",
-      "applyMethod": "ADD_TO_TOTAL",
+      "applyMethod": "OVERWRITE_TOTAL",
       "prices": [
         {
           "attributeName": "outgoing_public_traffic_mb",
@@ -321,6 +321,25 @@
           "tiers": [
             {
               "value": "0.10"
+            }
+          ]
+        }
+      ],
+      "filters": [],
+      "modifiers": []
+    },
+    {
+      "name": "File share (per GB)",
+      "timeUnit": "hour",
+      "resourceType": "share",
+      "pricePlanId": "<PLAN_ID>",
+      "applyMethod": "ADD_TO_TOTAL",
+      "prices": [
+        {
+          "attributeName": "size_gb",
+          "tiers": [
+            {
+              "value": "0.00007"
             }
           ]
         }

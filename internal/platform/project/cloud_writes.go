@@ -338,6 +338,16 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 		h.dbaasCreate(w, r, u, proj, es, req)
 		return
 	}
+	// truenas: file shares.
+	if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsTrueNAS() {
+		var req providers.CreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			h.fail(w, httpx.BadRequest("invalid request body"))
+			return
+		}
+		h.shareCreate(w, r, u, proj, es, req)
+		return
+	}
 	// proxmox: SERVER/KEYPAIR/… creates go through the pve service (clone-from-template on
 	// the PVE cluster), not the bucket WriteService.
 	if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsProxmox() {
@@ -444,6 +454,20 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 				httpx.Accepted(w)
 				return
 			}
+		}
+		// truenas: the share, its SMB user and the dataset, then the row.
+		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsTrueNAS() {
+			if err := h.shareDelete(r.Context(), es, proj, cr); err != nil {
+				h.fail(w, err)
+				return
+			}
+			if err := h.cloud.DeleteAndArchive(r.Context(), cr, time.Now().UTC()); err != nil {
+				h.fail(w, err)
+				return
+			}
+			h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_DELETE", "", cr)
+			httpx.Accepted(w)
+			return
 		}
 		// proxmox: destroy via the pve service, then archive the cache row here.
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsProxmox() {
@@ -573,6 +597,16 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	// ceph-s3 bucket configuration + per-key grants (GET_SETTINGS, SET_VERSIONING, SET_QUOTA, …).
 	// Handled first: they act on THIS bucket and already run against cr.ServiceID.
 	if h.bucketSettingsAction(w, r, proj, svcID, externalID, req.Action, req.Data) {
+		return
+	}
+
+	if cr.Type == cloud.TypeShare {
+		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsTrueNAS() {
+			if h.shareAction(w, r, proj, es, cr, req.Action, req.Data) {
+				return
+			}
+		}
+		h.fail(w, httpx.BadRequest("Unknown share action"))
 		return
 	}
 

@@ -3,10 +3,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { apiFetch } from "./api"
 import { useLocations } from "./hooks"
-import { isObjectProvider, type Location } from "./types"
+import type { Location } from "./types"
 
 export function isS3Location(loc: Location | undefined): boolean {
-  return isObjectProvider(loc?.provider)
+  return loc?.provider === "ceph-s3" || loc?.provider === "rustfs"
 }
 
 /** Locations that can hold a bucket, i.e. the object-store services this project is attached to. */

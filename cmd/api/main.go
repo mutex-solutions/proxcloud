@@ -443,6 +443,7 @@ func run() error {
 			cloud.TypeKubernetesCluster: billingresource.NewKubernetesClusterProvider(),
 			cloud.TypeDatabaseCluster:   billingresource.NewDatabaseClusterProvider(),
 			cloud.TypeBucket:            billingresource.NewBucketProvider(),
+			cloud.TypeShare:             billingresource.NewShareProvider(),
 		},
 	})
 	// Client for the standalone billing service. nil when PROXCLOUD_BILLING_URL is unset, which is

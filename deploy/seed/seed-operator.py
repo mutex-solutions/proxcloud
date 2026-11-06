@@ -19,7 +19,7 @@ TOKEN_URL = os.environ.get(
     "PROXCLOUD_TOKEN_URL", f"http://{HOST}:8090/realms/proxcloud/protocol/openid-connect/token"
 )
 # Resource types a Proxmox provider bills today; the seed file also prices managed services.
-RULE_TYPES = {"instance", "instance_traffic", "volume", "floating_ip", "bucket"}
+RULE_TYPES = {"instance", "instance_traffic", "volume", "floating_ip", "bucket", "share"}
 DEFAULT_QUOTA = {"servers": 20, "vcpus": 80, "ramMb": 102400, "diskGb": 2000, "networks": 10, "floatingIps": 5}
 
 
