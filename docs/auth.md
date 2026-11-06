@@ -39,6 +39,21 @@ The service maps these to three realm configs — `auth.main` (customer), `auth.
 id (`internal/config/config.go`, `OAuth2Realm`). `auth.admin` and `auth.admin-api`
 both point at the `master` realm issuer, distinguished by their client id.
 
+### Accounts made by an operator
+
+The operator console's **Create user** makes the login in the customer realm through the Keycloak
+Admin API, with the `proxcloud-idp-admin` service account that per-organization SSO also uses, then
+a platform user row keyed by the new account's id. The first login lands on that row. The response
+carries a temporary password once; it is not stored, and Keycloak asks for a new one at first login.
+The email counts as verified, because the operator vouches for it. An account that already holds
+the email is linked, with no password. **Delete user** removes the Keycloak account too, so the user
+cannot log back in.
+
+With no service account (`auth.sso.enabled: false`, or another OIDC provider) Create user answers
+501: a row alone can never log in, so those users appear at their first login instead. The machine
+Admin API's `POST /admin-api/v1/users` stays a pre-create for integrators who manage the IdP
+themselves and pass the `sub`.
+
 ## The three credential schemes
 
 ```mermaid
@@ -90,6 +105,15 @@ The MCP endpoint (`internal/platform/mcp/mcp.go`) accepts either scheme:
 
 Unauthenticated requests get an RFC 9728 challenge (below), which drives compliant
 MCP clients into the OAuth flow.
+
+## Client API tokens
+
+A customer mints personal access tokens on the account page (`POST /api/v1/user/api-keys`
+`{description, scope?, expiresInDays?}`). `Authorization: Bearer <pk>.<sk>` then acts as that user
+(`pkg/auth/clientkey.go`). `scope` is `full` (the default, and what a token from before scopes means) or
+`read`: a read token passes safe methods and the `POST .../resource` list route, and answers `401` on
+everything else, `/mcp` included, because MCP tools can write. A token past `expiresAt` answers `401`. The
+list route shows scope and expiry and never the secret.
 
 ## The Admin API gate
 

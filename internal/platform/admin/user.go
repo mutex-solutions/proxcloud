@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
@@ -18,28 +18,26 @@ import (
 
 // user.go implements the admin user-management surface (/api/v1/admin/user).
 //
-// ⚠ The identity stack is an EMBEDDED authorization server over this same datastore
-// users/userCredential store — there is NO Keycloak in it. create/delete are
-// therefore plain datastore; only impersonate (a local
-// OAuth2 token MINT) stays unimplemented, because this service is a pure OIDC resource server
-// (Keycloak owns token issuance).
+// Logins live in the IdP, so create and delete also make and remove the Keycloak account (see
+// keycloak.go). Impersonate stays unimplemented, because this service is a pure OIDC resource
+// server (Keycloak owns token issuance).
 //
 // Routes:
 //
-//	POST   /user                  userCreate            ADMIN_USER_CREATE       (datastore upsert-by-email + best-effort project invites)
+//	POST   /user                  userCreate            ADMIN_USER_CREATE       (Keycloak account + datastore row + best-effort project invites)
 //	GET    /user/{id}             userGet               ADMIN_USER_READ         (datastore load-by-id-or-404)
 //	GET    /user                  (list)                ADMIN_USER_READ         (ALREADY in handler.go — h.listRaw "users"; NOT re-registered)
 //	GET    /user/sub/{sub}        userBySub             ADMIN_USER_READ         (datastore load-by-sub; null → {})
 //	GET    /user/project/{pid}    userByProject         ADMIN_USER_READ         (project load-by-id-or-404 → owner sub → user; null → {})
 //	PUT    /user/{id}             userUpdate            ADMIN_USER_UPDATE       (datastore: sub/firstName/lastName/email overwrite)
-//	DELETE /user/{id}             userDelete            ADMIN_USER_DELETE       (not-in-use guard → delete by id)
+//	DELETE /user/{id}             userDelete            ADMIN_USER_DELETE       (not-in-use guard → delete the Keycloak account + the row)
 //	POST   /user/{id}/impersonate userImpersonate       ADMIN_USER_IMPERSONATE  [not implemented: local OAuth2 token mint — divergent by design]
 //
 // Error strings are exact: "User with id %s not found ",
 // "The project with id %s was not found. ",
 // "User is in use for projects" — all verbatim incl.
-// trailing spaces. Datastore writes via the crud.go helpers + user_repo.go. Identity/Keycloak/token
-// ops return 501. The surface also writes audit events (deferred, // TODO(audit)).
+// trailing spaces. Datastore writes via the crud.go helpers + user_repo.go. Token ops return 501.
+// The surface also writes audit events (deferred, // TODO(audit)).
 
 const userCollection = "users"
 
@@ -183,7 +181,8 @@ func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // userDelete loads the user by id (or 404); if the user still owns projects → 400 "User is in use
-// for projects"; else deletes the user (plain datastore delete) + audit.
+// for projects"; else deletes the Keycloak account, so a deleted user cannot log back in, then the
+// row + audit.
 func (h *Handler) userDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userDeletePerm) {
 		return
@@ -205,6 +204,12 @@ func (h *Handler) userDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("User is in use for projects"))
 		return
 	}
+	if h.keycloak != nil {
+		if err := h.keycloak.DeleteUser(r.Context(), u.Sub); err != nil {
+			httpx.WriteError(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			return
+		}
+	}
 	if err := h.repo.deleteUserByID(r.Context(), id); httpx.WriteError(w, err) {
 		return
 	}
@@ -212,11 +217,11 @@ func (h *Handler) userDelete(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, "Successful operation")
 }
 
-// userCreate rejects a duplicate email → 400 "User with this email already exists"; else does a
-// plain datastore upsert-by-email (sub = random UUID, NO password/credential, NO identity-provider
-// call: the identity stack is the embedded auth server over this same `users` collection) — then
+// userCreate rejects a duplicate email → 400 "User with this email already exists"; else makes the
+// Keycloak account and a user row keyed by its id, so the first login lands on this row, then
 // best-effort invites the user to each projectId (each caught + logged). Returns the created user
-// (newest by sub).
+// plus, when the account is new, temporaryPassword: shown once, Keycloak asks for a new one at the
+// first login. Without a Keycloak service account → 501: a row alone can never log in.
 func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, userCreatePerm) {
 		return
@@ -231,6 +236,16 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
+	if h.keycloak == nil {
+		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
+			"Create the account in your identity provider: the user appears here at first login"))
+		return
+	}
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	if req.Email == "" {
+		httpx.WriteError(w, httpx.BadRequest("email is required"))
+		return
+	}
 	existing, err := h.repo.userByEmail(r.Context(), req.Email)
 	if httpx.WriteError(w, err) {
 		return
@@ -239,9 +254,14 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("User with this email already exists"))
 		return
 	}
+	sub, tempPassword, err := h.keycloak.CreateUser(r.Context(), req.Email, req.FirstName, req.LastName)
+	if err != nil {
+		httpx.WriteError(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+		return
+	}
 	now := time.Now().UTC()
 	doc := pgdoc.M{
-		"sub":          uuid.NewString(),
+		"sub":          sub,
 		"email":        req.Email,
 		"createdAt":    now,
 		"modelVersion": 1,
@@ -257,10 +277,14 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 	if req.LastName != "" {
 		doc["lastName"] = req.LastName
 	}
-	if _, err := h.repo.insertUserDoc(r.Context(), doc); httpx.WriteError(w, err) {
+	if _, err := h.repo.insertUserDoc(r.Context(), doc); err != nil {
+		if tempPassword != "" { // a login without a row is the reverse of the bug this path fixes
+			_ = h.keycloak.DeleteUser(r.Context(), sub)
+		}
+		httpx.WriteError(w, err)
 		return
 	}
-	created, err := h.repo.userBySub(r.Context(), doc["sub"].(string))
+	created, err := h.repo.userBySub(r.Context(), sub)
 	if httpx.WriteError(w, err) {
 		return
 	}
@@ -273,7 +297,18 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// CREATE USER audit (the middleware emits the admin event).
-	httpx.OK(w, created)
+	raw, err := json.Marshal(created)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	out := map[string]any{}
+	if httpx.WriteError(w, json.Unmarshal(raw, &out)) {
+		return
+	}
+	if tempPassword != "" {
+		out["temporaryPassword"] = tempPassword
+	}
+	httpx.OK(w, out)
 }
 
 // userImpersonate loads the user by id (or 404 "User not found"); the embedded authorization server

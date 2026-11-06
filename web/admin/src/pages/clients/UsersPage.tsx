@@ -58,6 +58,8 @@ export default function UsersPage() {
   const [form, setForm] = useState({ email: "", firstName: "", lastName: "" })
   const [projectIds, setProjectIds] = useState<string[]>([])
   const [toDelete, setToDelete] = useState<AdminUser | null>(null)
+  // Shown once after Create user: the API does not keep it, Keycloak asks for a new one at first login.
+  const [created, setCreated] = useState<{ email: string; password: string } | null>(null)
 
   // GET /admin/project (clientarea_reads.go projectAdminList) — for the create-dialog invite picker.
   const projects = useAdminList<{ id?: string; name?: string }>("/admin/project", createOpen)
@@ -72,7 +74,7 @@ export default function UsersPage() {
   // projectIds fan out as best-effort project invites server-side.
   const createUser = useMutation({
     mutationFn: () =>
-      apiFetch(LIST_PATH, {
+      apiFetch<AdminUser & { temporaryPassword?: string }>(LIST_PATH, {
         method: "POST",
         body: {
           email: form.email,
@@ -81,8 +83,11 @@ export default function UsersPage() {
           ...(projectIds.length ? { projectIds } : {}),
         },
       }),
-    onSuccess: () => {
+    onSuccess: (user) => {
       toast.success("User created")
+      if (user?.temporaryPassword) {
+        setCreated({ email: user.email ?? form.email, password: user.temporaryPassword })
+      }
       setCreateOpen(false)
       setForm({ email: "", firstName: "", lastName: "" })
       setProjectIds([])
@@ -216,12 +221,39 @@ export default function UsersPage() {
         />
       )}
 
+      {/* Temporary password of the user just created */}
+      <Dialog open={!!created} onOpenChange={(open) => !open && setCreated(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>User created</DialogTitle>
+            <DialogDescription>
+              Pass this temporary password to {created?.email}. It is shown only once.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center gap-2">
+            <Input readOnly aria-label="Temporary password" className="font-mono" value={created?.password ?? ""} />
+            <Button
+              variant="outline"
+              onClick={() => navigator.clipboard?.writeText(created?.password ?? "").then(() => toast.success("Copied"))}
+            >
+              Copy
+            </Button>
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setCreated(null)}>Done</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Create user */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Create user</DialogTitle>
-            <DialogDescription>The user is created without a password; set one from their detail page.</DialogDescription>
+            <DialogDescription>
+              Makes the login in the identity provider. You get a temporary password to pass on; the user sets their
+              own at first login.
+            </DialogDescription>
           </DialogHeader>
           <form
             className="space-y-4"

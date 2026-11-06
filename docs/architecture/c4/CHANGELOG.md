@@ -22,6 +22,37 @@ and rules: [README.md](README.md#maintenance-rule).
   node has its own certificate, so several endpoints need the cluster CA, not a fingerprint.
 
 **Diagrams updated**: `c2-containers.md`, `c3-components.md`.
+## 2026-11-07: operator Create user makes a Keycloak login
+
+Open item of the lab drill (DRILL-2).
+
+**What changed**
+
+- `POST /admin/user` creates the Keycloak account through `sso.KCAdmin`, keys the row by its id and
+  returns a temporary password once. `DELETE /admin/user/{id}` removes the account too.
+- Without the service account Create user answers 501 instead of writing a row.
+
+**Why**
+
+- The row had a random `sub` that no login could ever match, so the user could not log in and a later
+  self-registration made a second row. Reusing the SSO service account adds no client and no secret:
+  it already holds `manage-users` in the customer realm, on compose, the chart and the installer.
+
+**Diagrams updated**: `c3-components.md` (note under C3a).
+## 2026-11-07: API tokens get a scope and an expiry
+
+**What changed**
+
+- A personal access token has a scope, `full` or `read`, and an optional expiry. `pkg/auth.ClientKeyLookup`
+  returns a `ClientKey`; a read token passes safe methods and the POST list route only.
+
+**Why**
+
+- P5-12 asked for platform API tokens; the tokens already existed. What was missing is limiting one: a token
+  in a dashboard or a CI job should not be able to delete servers, or live forever. `/mcp` is refused for a read
+  token because its tools can write.
+
+**Diagrams updated**: none, `docs/auth.md` has the rules.
 
 ## 2026-11-07: volumes outlive their server (holder VM)
 

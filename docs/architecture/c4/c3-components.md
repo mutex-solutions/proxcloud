@@ -61,6 +61,9 @@ flowchart LR
 | Audit | `internal/platform/audit/`, `pkg/audit/` | Audit events, field-level diffs, cursor paging. | Implemented |
 | Per-org SSO | `internal/platform/sso/` (`service.go`, `guard.go`, `kcadmin.go`, `fetch.go`, `repo.go`, `handler.go`) | Org IdP and domain documents, Keycloak Admin API client, DNS TXT verification, email-first discovery, JIT membership. `Guard` runs from `pkg/auth.Enforce` on every request: domain gate, account binding, enforcement, break-glass. | Implemented |
 
+The Keycloak Admin API client also backs the operator console's Create user and Delete user
+(`internal/platform/admin/user.go`): same service account, which already holds `manage-users`.
+
 ## C3b. Cloud / IaaS on Proxmox
 
 ```mermaid

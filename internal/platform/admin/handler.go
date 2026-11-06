@@ -21,6 +21,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pveflavor"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
+	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -63,6 +64,9 @@ type Handler struct {
 	projectCloud  *ProjectCloudOps           // live per-project cloud legs (nil → those endpoints stay 501)
 	// inviteToProject invites a user to a project (admin user-create projectIds loop).
 	inviteToProject func(ctx context.Context, u *user.User, email, projectID string) error
+	// keycloak makes and removes logins for operator-created users (SetKeycloak; nil = Create
+	// user refuses, the users of an external IdP appear at their first login).
+	keycloak *sso.KCAdmin
 	// kamajiFor builds the Managed-Kubernetes service for a kamaji provider (nil in tests →
 	// the cluster chart-pin endpoints answer 501).
 	kamajiFor func(es *externalservice.ExternalService) (*kamaji.Service, error)
@@ -118,6 +122,9 @@ type ProjectCloudOps struct {
 
 // SetProjectCloudOps wires the live project-cloud legs (cmd/api only).
 func (h *Handler) SetProjectCloudOps(ops *ProjectCloudOps) { h.projectCloud = ops }
+
+// SetKeycloak wires the login management behind admin user create and delete.
+func (h *Handler) SetKeycloak(k *sso.KCAdmin) { h.keycloak = k }
 
 // SetInviteToProject wires inviteToProject for the admin user-create
 // projectIds loop (invites are best-effort there — each is caught and logged). nil → skipped.

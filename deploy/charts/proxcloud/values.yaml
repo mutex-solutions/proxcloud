@@ -246,7 +246,7 @@ auth:
   sso:
     enabled: false
     # Service account secret of the proxcloud-idp-admin client. Inline, or the key
-    # sso-client-secret in api.existingSecret.
+    # sso-client-secret in api.existingSecret. The operator console's Create user needs it too.
     clientSecret: ""
     # Domains no organization may claim: your operators' email domain, for example.
     # The domains of api.selfUrls are always reserved.
