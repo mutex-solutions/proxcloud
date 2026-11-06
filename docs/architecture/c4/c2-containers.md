@@ -132,7 +132,8 @@ flowchart TB
 | Public networks | Admin-designated bridges with an IPv4 pool; a public NIC (`net1`) gets one address, pinned by ipfilter. The management bridge is refused. | Implemented |
 | PCI mappings | GPU flavors reserve concrete mappings on the scheduled node. | Implemented |
 | HA rules and replication | Protected VMs with replication and node-affinity rules. | Planned |
-| Platform-owned VMs | Management cluster VMs, the services cluster and the RustFS VM in a dedicated system pool. | Planned |
+| Platform-owned VMs | Management cluster VMs and the RustFS VM in a dedicated system pool, the platform token has `NoAccess` there. | Implemented |
+| Services cluster VMs | The services cluster, in the same system pool. | Planned |
 | Proxmox Backup Server | Operator nightly backups, then tenant backup schedules and restore. | Planned |
 
 ### Storage tiers
@@ -144,7 +145,8 @@ flowchart TB
 | Standard | Local ZFS (`zfspool`) | VM disks, pinned to the node holding the storage | Implemented |
 | Standard | TrueNAS NFS as a capacity-class profile ("Capacity HDD (NFS)") | Bulk data volumes only: no boot disks, databases or snapshots (API-enforced) | Implemented |
 | Standard | TrueNAS SMB / iSCSI, NAS-created stores | Templates, backups, tenant file shares, RWX volumes | Planned |
-| Standard | RustFS | Tenant buckets and internal backups on sites without Ceph | Planned |
+| Standard | RustFS | Internal bucket store on sites without Ceph, deployed by the installer | Implemented |
+| Standard | RustFS tenant buckets | Bucket product on sites without Ceph | Planned |
 | Both | Admin-declared profile flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`), validated on save against detection | Shown to tenants as volume-type specs | Implemented |
 | Both | Per-storage capability detection (type table: tier, default class, flags; per-node active/avail) + admin class override | Provider Storage tab; profile validation; scheduler node restriction and free-space filter; template placement | Implemented |
 | Both | Profile `tier` / `class` (derived from its storages) and `bootDisk` / `dbaas` caps, API-gated | Capacity class refuses boot disks (create, retype), server snapshots with an attached capacity disk, and database storage classes named after it; volume billing attributes `profile` and `storage_class` | Implemented |
@@ -183,8 +185,8 @@ flowchart LR
   ghcr["ghcr.io<br/>images and OCI charts"]:::impl
   chart["Chart proxcloud<br/>api, SPAs, gateway, Keycloak, CNPG"]:::impl
   dbchart["Chart database-cluster<br/>DBaaS engines"]:::impl
-  inst["Installer (Ansible)"]:::planned
-  vmt["VM template pipeline"]:::planned
+  inst["Installer (Ansible)<br/>make install, day-2 targets"]:::impl
+  vmt["VM template pipeline<br/>build.py, Packer, tags"]:::impl
   k8st["K8s node template pipeline"]:::planned
   mgmt["Management cluster"]:::impl
   pve["Proxmox cluster"]:::impl
@@ -194,9 +196,11 @@ flowchart LR
   chart --> helm
   dbchart --> helm
   ghcr -->|"helm install, ArgoCD"| mgmt
-  inst -.-> mgmt
-  inst -.-> pve
-  vmt -.-> pve
+  ghcr --> inst
+  inst -->|"k3s, ArgoCD Applications, register"| mgmt
+  inst -->|"API: roles, tokens, stores, VMs"| pve
+  inst --> vmt
+  vmt -->|"templates in pc-templates"| pve
   k8st -.-> pve
 ```
 
@@ -208,11 +212,11 @@ flowchart LR
 | `web/admin` | React, Vite, TypeScript; served by nginx | Management cluster | Implemented |
 | `proxcloud-api` | Go, chi router, one binary (`cmd/api`) | Management cluster | Implemented |
 | Scheduler and jobs | robfig/cron with a PostgreSQL distributed lock (`internal/platform/scheduler`, `lock`); disabled unless `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | Inside the API pod | Implemented |
-| PostgreSQL | JSONB document store via `internal/pgdoc`; bundled subchart, CloudNativePG cluster, or external | Management cluster | Implemented |
-| RabbitMQ | AMQP (`internal/amqp`), optional per-profile charge fan-out | Management cluster | Implemented |
+| PostgreSQL | JSONB document store via `internal/pgdoc`; CloudNativePG cluster (default), bundled subchart, or external | Management cluster | Implemented |
+| RabbitMQ | AMQP (`internal/amqp`), optional per-profile charge fan-out; RabbitMQ Cluster Operator (default), bundled subchart, or external | Management cluster | Implemented |
 | Keycloak | codecentric keycloakx subchart + keycloak-config-cli realm import, or an external issuer | Management cluster | Implemented |
 | Gateway / Ingress | Gateway API `HTTPRoute` or `Ingress` per host (`deploy/charts/proxcloud/templates/gateway`, `api`, `web`) | Management cluster | Implemented |
-| ArgoCD | Receives `Application` objects for managed K8s and DBaaS | Management cluster (not deployed by the chart) | Implemented |
+| ArgoCD | Reconciles the platform (installer `Application` objects with inline values); receives `Application` objects for managed K8s and DBaaS | Management cluster (deployed by the installer, not the chart) | Implemented |
 | Cluster API + CAPMOX, MetalLB | Services cluster and tenant K8s workers on Proxmox, load-balancer IPs | Management and services clusters | Planned |
 | Services cluster | Kamaji, DB operators, proxmox-csi, csi-driver-nfs | VMs in a system pool | Planned |
 | Proxmox VE hosts | pveproxy, SDN, proxmox-firewall (nftables), storage, PCI mappings | Proxmox cluster | Implemented |
@@ -220,13 +224,14 @@ flowchart LR
 | HA rules and replication | `ha-manager` rules, `pvesr` | Proxmox cluster | Planned |
 | Ceph (Full tier) | RBD/CephFS for disks, RGW for buckets | Ceph cluster | Implemented |
 | TrueNAS (Standard tier) | NFS, SMB, iSCSI, WebSocket API | Appliance outside the Proxmox cluster | Planned |
-| RustFS (Standard tier) | S3 + admin API | VM or TrueNAS app | Planned |
+| RustFS (Standard tier) | S3 + admin API, deployed by the installer with internal buckets; tenant buckets on it are Planned | VM in the system pool, or TrueNAS app | Implemented |
 | Proxmox Backup Server | vzdump target | Separate machine | Planned |
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
 | CI | GitHub Actions `test.yml`, `docker.yml`, `helm.yml` | GitHub | Implemented |
-| Installer | Ansible playbooks and Makefile | Operator workstation | Planned |
-| VM / K8s node template pipelines | Packer, image-builder | Self-hosted runner in the Proxmox network | Planned |
+| Installer | Ansible playbooks and Makefile (`installer/`): one-shot install, `allinone` mode, day-2 targets; `split` mode is Planned | Operator workstation | Implemented |
+| VM template pipeline | `images/build.py` + Packer, `vm-templates.yml`; tag-published, one copy per node on local-disk sites | Self-hosted runner in the Proxmox network, or the installer from the first management host | Implemented |
+| K8s node template pipeline | image-builder | Self-hosted runner in the Proxmox network | Planned |
 
 ## Trust boundaries
 

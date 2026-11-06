@@ -218,6 +218,11 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, msg))
 		return
 	}
+	// A per-node copy on the target clones locally; otherwise the primary clones across (shared).
+	tplVMID, tplNode := tpl.VMID, tpl.Node
+	if id := tpl.OnNode(target); id != 0 {
+		tplVMID, tplNode = id, target
+	}
 	// "" (no profile) = full clone onto the template's storage on the target.
 	cloneStorage := profiles[profileSlug].StorageFor(target)
 	// Reserve the concrete mappings on the chosen node (distinct ids — two hostpci
@@ -284,8 +289,8 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 			Slug: fl.Slug, VCPUs: fl.VCPUs, RAMMb: fl.RAMMb, DiskGb: fl.DiskGb,
 			StorageProfile: profileSlug, GPUModel: fl.GPUModel, GPUCount: fl.GPUCount,
 		},
-		TemplateVMID:   tpl.VMID,
-		TemplateNode:   tpl.Node,
+		TemplateVMID:   tplVMID,
+		TemplateNode:   tplNode,
 		ImageSlug:      tpl.Slug,
 		TargetNode:     target,
 		Storage:        cloneStorage,
@@ -321,13 +326,25 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 	httpx.OK(w, *saved)
 }
 
+// pveImageCatalog is the provider's public images: tagged templates read live from the cluster plus
+// config.templates. A cluster that cannot be read leaves only the configured pins.
+func (h *Handler) pveImageCatalog(ctx context.Context, es *externalservice.ExternalService) []externalservice.PVETemplate {
+	var found []pve.DiscoveredTemplate
+	if ps, err := h.pveFor(es); err == nil {
+		if found, err = ps.C.Templates(ctx); err != nil {
+			slog.Warn("template discovery failed", "service", es.ID, "err", err)
+		}
+	}
+	return es.PVEImageCatalog(found)
+}
+
 // pveResolveTemplate maps imageId → a clone source: an admin catalog slug, or a
 // project-owned template (numeric vmid whose cached IMAGE row proves ownership).
 func (h *Handler) pveResolveTemplate(ctx context.Context, es *externalservice.ExternalService, proj *Project, imageID string) (*externalservice.PVETemplate, *httpx.HTTPError) {
 	if imageID == "" {
 		return nil, httpx.BadRequest("imageId is required")
 	}
-	for _, t := range es.PVETemplates() {
+	for _, t := range h.pveImageCatalog(ctx, es) {
 		if t.Slug == imageID {
 			tpl := t
 			return &tpl, nil
@@ -385,12 +402,15 @@ func pvePlacement(tpl *externalservice.PVETemplate, tplShared bool, profileSlug 
 	if !hasProfile {
 		if !tplShared {
 			pl.allowed = map[string]bool{tpl.Node: true}
+			for node := range tpl.Copies {
+				pl.allowed[node] = true
+			}
 		}
 		return pl, nil
 	}
 	pl.allowed = map[string]bool{}
 	for node := range pl.storage {
-		if node == tpl.Node || (tplShared && caps[profile.StorageFor(node)].Shared) {
+		if tpl.OnNode(node) != 0 || (tplShared && caps[profile.StorageFor(node)].Shared) {
 			pl.allowed[node] = true
 		}
 	}
@@ -827,7 +847,7 @@ func (h *Handler) pveBulkAction(w http.ResponseWriter, r *http.Request, proj *Pr
 	case "PUBLIC_IMAGES", "PUBLIC_IMAGES_AS_CLOUD_RESOURCE":
 		asResource := action == "PUBLIC_IMAGES_AS_CLOUD_RESOURCE"
 		out := []any{}
-		for _, t := range es.PVETemplates() {
+		for _, t := range h.pveImageCatalog(ctx, es) {
 			img := map[string]any{
 				"id": t.Slug, "name": t.Name, "status": "active", "visibility": "public",
 				"os_distro": t.OSDistro, "min_disk": t.MinDiskGb, "size": int64(t.MinDiskGb) << 30,

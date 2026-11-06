@@ -10,6 +10,8 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Getting started
 
+- [install.md](install.md) — the one-shot installer: `make install`, its stages, options
+  and day-2 commands.
 - [development.md](development.md) — prerequisites, build, run the full stack with
   `docker compose`, run the backend and SPAs locally, seed config, point at a dev
   cloud, and the edit/run loop.

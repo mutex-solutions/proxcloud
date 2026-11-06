@@ -1,0 +1,39 @@
+# Stage 05: the TrueNAS NFS stores, when a NAS is given. Never sets sync=disabled; the template store is
+# soft-mounted (read-mostly, must not hang a node), backups and capacity are not.
+- name: Create the NAS stores
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  vars:
+    wanted:
+      templates: {content: "iso,import,images", options: "vers=4.2,soft"}
+      capacity: {content: images, options: "vers=4.2"}
+      backup: {content: backup, options: "vers=4.2"}
+  tasks:
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Create a store
+      when:
+        - pc.nas.host | length > 0
+        - item.key in pc.nas.exports
+        - pc.nas.names[item.key] not in (pc_storage_rows | map(attribute='storage') | list)
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/storage"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          storage: "{{ pc.nas.names[item.key] }}"
+          type: nfs
+          server: "{{ pc.nas.host }}"
+          export: "{{ pc.nas.exports[item.key] }}"
+          content: "{{ item.value.content }}"
+          options: "{{ item.value.options }}"
+      changed_when: true
+      register: pc_store_created
+      loop: "{{ wanted | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+    - name: Reread the storages
+      when: pc_store_created is changed
+      ansible.builtin.include_tasks: tasks/pve-login.yml

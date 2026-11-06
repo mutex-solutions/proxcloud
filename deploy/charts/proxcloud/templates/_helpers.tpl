@@ -103,9 +103,16 @@ http://{{ .Values.keycloakx.fullnameOverride | default (printf "%s-keycloakx" .R
 {{- splitList "/" . | last -}}
 {{- end }}
 
-{{/* RabbitMQ host: bundled subchart service, else the external host. */}}
+{{/* RabbitmqCluster name; the operator names its Service after it and its Secret <name>-default-user. */}}
+{{- define "proxcloud.rabbitClusterName" -}}
+{{- .Values.rabbitmqCluster.name | default (printf "%s-rabbitmq" (include "proxcloud.fullname" .)) -}}
+{{- end }}
+
+{{/* RabbitMQ host: RabbitmqCluster, else bundled subchart service, else the external host. */}}
 {{- define "proxcloud.rabbitHost" -}}
-{{- if .Values.rabbitmq.enabled -}}
+{{- if .Values.rabbitmqCluster.enabled -}}
+{{- include "proxcloud.rabbitClusterName" . -}}
+{{- else if .Values.rabbitmq.enabled -}}
 {{- /* honor the subchart's fullnameOverride — that IS its service name */ -}}
 {{- .Values.rabbitmq.fullnameOverride | default (printf "%s-rabbitmq" .Release.Name) -}}
 {{- else -}}

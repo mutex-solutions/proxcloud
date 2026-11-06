@@ -69,6 +69,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
@@ -142,6 +143,58 @@ type PVETemplate struct {
 	VMID      int    `json:"vmid"`
 	Node      string `json:"node"`
 	MinDiskGb int    `json:"minDiskGb,omitempty"`
+	// Copies is a discovered template's per-node copy (node -> vmid). VMID/Node stay the primary.
+	Copies map[string]int `json:"-"`
+}
+
+// OnNode returns the vmid to clone on node: the node's own copy, or 0 when it has none.
+func (t PVETemplate) OnNode(node string) int {
+	if id, ok := t.Copies[node]; ok {
+		return id
+	}
+	if t.Node == node {
+		return t.VMID
+	}
+	return 0
+}
+
+// PVEImageCatalog merges the templates discovered in the cluster with config.templates: an entry
+// with vmid+node is an operator pin and wins; any other entry only overlays name, osDistro and
+// minDiskGb on the discovered template of that slug. Sorted by slug.
+func (e *ExternalService) PVEImageCatalog(found []pve.DiscoveredTemplate) []PVETemplate {
+	pinned := map[string]bool{}
+	out := e.PVETemplates()
+	for _, t := range out {
+		pinned[t.Slug] = true
+	}
+	overlay, _ := e.Config["templates"].(map[string]any)
+	for _, d := range found {
+		if pinned[d.Slug] {
+			continue
+		}
+		distro, _, _ := strings.Cut(d.Slug, "-")
+		t := PVETemplate{Slug: d.Slug, Name: d.Slug, OSDistro: distro, VMID: d.VMID, Node: d.Node, Copies: map[string]int{}}
+		for node, c := range d.Copies {
+			t.Copies[node] = c.VMID
+			if node == d.Node {
+				t.MinDiskGb = c.DiskGb
+			}
+		}
+		if o, ok := overlay[d.Slug].(map[string]any); ok {
+			if v := str(o["name"]); v != "" {
+				t.Name = v
+			}
+			if v := str(o["osDistro"]); v != "" {
+				t.OSDistro = v
+			}
+			if v := intOf(o["minDiskGb"]); v > 0 {
+				t.MinDiskGb = v
+			}
+		}
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Slug < out[j].Slug })
+	return out
 }
 
 // PVETemplates reads the admin template catalog: config.templates =

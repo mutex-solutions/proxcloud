@@ -181,7 +181,7 @@ function ProxmoxConfigCard({ id, provider }: TabProps) {
   const blocks: { key: string; label: string; hint: string }[] = [
     { key: "network", label: "Network", hint: '{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn","peers":["10.0.0.1"],"exitNodes":["pve1"]}},"cidrPool":"10.100.0.0/16","isolation":"shared","publicNetworks":[{"id":"vmbr1","name":"Internet","cidr":"203.0.113.0/24","gateway":"203.0.113.1","ranges":["203.0.113.10-203.0.113.200"]}]}' },
     { key: "storageProfiles", label: "Storage profiles", hint: '{"std":{"label":"Local NVMe (ZFS)","storages":{"*":"local-zfs"},"snapshots":true,"thin":true,"replication":true},"capacity":{"label":"Capacity HDD (NFS)","storages":{"*":"nas-capacity"},"shared":true,"liveMigrate":true}}' },
-    { key: "templates", label: "OS templates", hint: '{"ubuntu-24":{"vmid":9000,"node":"pve1","name":"Ubuntu 24.04","osDistro":"ubuntu","minDiskGb":10}}' },
+    { key: "templates", label: "OS templates (optional: tagged templates are discovered; vmid + node pins one, the rest overlays)", hint: '{"ubuntu-24.04":{"name":"Ubuntu 24.04","minDiskGb":10}}' },
     { key: "gpus", label: "GPU mappings", hint: '{"<pci-mapping-id>":{"alias":"nvidia-4090"}}' },
   ]
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {

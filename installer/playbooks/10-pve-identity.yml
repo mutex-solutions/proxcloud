@@ -1,0 +1,145 @@
+# Stage 10: roles, users, tokens, ACLs and pools from docs/proxmox-permissions.md. GET, then write only
+# the difference. A token secret is shown once, on creation: it goes to generated/ and is never rotated
+# here. When a token exists but its secret is unknown, the vault must supply it.
+- name: Set up the Proxmox identity
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  vars:
+    vm_config: "VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options"
+    roles:
+      ProxCloudPlatform: "Sys.Audit Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.Audit Mapping.Audit Mapping.Use"
+      ProxCloudCAPI: "Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
+      ProxCloudCSI: "VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit"
+      ProxCloudImages: "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
+    users:
+      proxcloud@pve: {comment: ProxCloud portal, token: platform}
+      capmox@pve: {comment: ProxCloud CAPI, token: capi}
+      csi@pve: {comment: ProxCloud CSI, token: csi}
+      images@pve: {comment: ProxCloud image pipeline, token: packer}
+    pools:
+      pc-templates: ProxCloud templates
+      "{{ pc.pve.system_pool }}": ProxCloud management (not tenant)
+    acls:
+      # platform
+      - {path: /, role: ProxCloudPlatform, propagate: 0, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: /nodes, role: PVEAuditor, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: /pool, role: ProxCloudPlatform, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: "/pool/{{ pc.pve.system_pool }}", role: NoAccess, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: /sdn, role: ProxCloudPlatform, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: /storage, role: ProxCloudPlatform, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: /mapping/pci, role: ProxCloudPlatform, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      # image pipeline: builds in the template pool only
+      - {path: /pool/pc-templates, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
+      - {path: /nodes, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
+      - {path: /storage, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
+      - {path: /sdn/zones/localnetwork, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
+  tasks:
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+
+    - name: Read what exists
+      ansible.builtin.uri: {url: "{{ pc_api }}/{{ item }}"}
+      loop: [access/roles, access/users?full=1, pools, access/acl]
+      register: pc_id
+
+    - name: Index what exists
+      ansible.builtin.set_fact:
+        have_roles: "{{ pc_id.results[0].json.data | items2dict(key_name='roleid', value_name='privs') }}"
+        have_users: "{{ pc_id.results[1].json.data | items2dict(key_name='userid', value_name='tokens') }}"
+        have_pools: "{{ pc_id.results[2].json.data | map(attribute='poolid') | list }}"
+
+    - name: Create a role
+      when: item.key not in have_roles
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/roles"
+        method: POST
+        body_format: form-urlencoded
+        body: {roleid: "{{ item.key }}", privs: "{{ item.value | split | join(',') }}"}
+      changed_when: true
+      loop: "{{ roles | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+
+    - name: Align a role's privileges
+      when:
+        - item.key in have_roles
+        - (have_roles[item.key] | split(',') | sort) != (item.value | split | sort)
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/roles/{{ item.key }}"
+        method: PUT
+        body_format: form-urlencoded
+        body: {privs: "{{ item.value | split | join(',') }}"}
+      changed_when: true
+      loop: "{{ roles | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+
+    - name: Create a pool
+      when: item.key not in have_pools
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/pools"
+        method: POST
+        body_format: form-urlencoded
+        body: {poolid: "{{ item.key }}", comment: "{{ item.value }}"}
+      changed_when: true
+      loop: "{{ pools | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+
+    - name: Create a user
+      when: item.key not in have_users
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/users"
+        method: POST
+        body_format: form-urlencoded
+        body: {userid: "{{ item.key }}", comment: "{{ item.value.comment }}"}
+      changed_when: true
+      loop: "{{ users | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+
+    - name: Create a token
+      when: item.value.token not in (have_users[item.key] | default([], true) | map(attribute='tokenid') | list)
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/users/{{ item.key }}/token/{{ item.value.token }}"
+        method: POST
+        body_format: form-urlencoded
+        body: {privsep: 1, comment: ProxCloud installer}
+      changed_when: true
+      no_log: true
+      register: pc_new_tokens
+      loop: "{{ users | dict2items }}"
+      loop_control: {label: "{{ item.key }}"}
+
+    - name: Keep the new token secrets
+      when: item.json is defined
+      ansible.builtin.copy:
+        dest: "{{ pc_gen }}/token-{{ item.item.value.token }}"
+        content: "{{ item.json.data.value }}\n"
+        mode: "0600"
+      no_log: true
+      loop: "{{ pc_new_tokens.results }}"
+
+    - name: Copy token secrets given in the vault
+      when: pc_vault[item.key] is defined
+      ansible.builtin.copy:
+        dest: "{{ pc_gen }}/token-{{ item.value }}"
+        content: "{{ pc_vault[item.key] }}\n"
+        mode: "0600"
+      no_log: true
+      loop: "{{ {'platform_token_secret': 'platform', 'images_token_secret': 'packer'} | dict2items }}"
+
+    - name: Check the tokens the installer needs are known
+      ansible.builtin.stat: {path: "{{ pc_gen }}/token-{{ item }}"}
+      register: pc_tokens
+      failed_when: not pc_tokens.stat.exists
+      loop: [platform, packer]
+
+    - name: Grant the missing ACLs
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/acl"
+        method: PUT
+        body_format: form-urlencoded
+        body: "{{ item }}"
+      changed_when: true
+      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls) }}"
+      loop_control: {label: "{{ item.path }} {{ item.roles }}"}

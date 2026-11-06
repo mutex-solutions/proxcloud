@@ -1,27 +1,30 @@
 # proxcloud
 
 Helm chart for the ProxCloud platform: the `proxcloud-api` Go service, the
-customer console (`ui`) and the operator console (`admin`), plus optional
-bundled PostgreSQL and RabbitMQ (bitnami subcharts, pinned to the frozen
-`bitnamilegacy` image mirror pending a move to operators) and Keycloak
-(codecentric/keycloakx, running the official `quay.io/keycloak/keycloak` image).
+customer console (`ui`) and the operator console (`admin`), a CloudNativePG
+`Cluster`, a `RabbitmqCluster`, and optionally Keycloak (codecentric/keycloakx,
+running the official `quay.io/keycloak/keycloak` image).
 
 ## Install
+
+[`make install`](../../../docs/install.md) deploys this chart with everything it
+needs. By hand, the CloudNativePG and RabbitMQ Cluster operators must already run in
+the cluster:
 
 ```sh
 helm dependency build deploy/charts/proxcloud
 helm install proxcloud deploy/charts/proxcloud -n proxcloud --create-namespace \
   --set api.encryptionKey=$(openssl rand -hex 32) \
-  --set postgresql.auth.password=$(openssl rand -hex 16) \
-  --set rabbitmq.auth.password=$(openssl rand -hex 16)
+  --set postgresql.auth.password=$(openssl rand -hex 16)
 ```
 
-Defaults deploy api + ui + admin with bundled PostgreSQL and RabbitMQ.
+Defaults deploy api + ui + admin with operator-managed PostgreSQL and RabbitMQ.
 Everything else (Keycloak, Ingress, Gateway-API routes, scheduled jobs) is
-off until you enable it.
+off until you enable it. For a cluster without the operators,
+`-f deploy/charts/proxcloud/values-dev.yaml` selects the bitnami subcharts instead.
 
-The chart ships **no default secrets** — `api.encryptionKey` and the bundled
-`postgresql`/`rabbitmq` passwords are required (a template `fail` blocks an
+The chart ships **no default secrets** — `api.encryptionKey` and the
+PostgreSQL owner password are required (a template `fail` blocks an
 install that leaves them empty, so a known key/password never reaches a live
 Secret; use `api.existingSecret` / `external*.existingSecret` to supply your
 own). For a throwaway local dev install, pass the insecure sample values with
@@ -54,22 +57,23 @@ before the provider is added. See `docs/managed-k8s.md`.
 
 **PostgreSQL** (primary, required). Three backends:
 
-- **Bundled bitnami subchart** (default) — `postgresql.auth.*` makes the
-  subchart create the `proxcloud` role and database on first boot.
-- **CloudNativePG** (`cnpg.enabled=true`, `postgresql.enabled=false`) — runs
-  Postgres via the [CloudNativePG](https://cloudnative-pg.io/) operator on the
-  **official** `ghcr.io/cloudnative-pg/postgresql` image (no Bitnami). Two modes:
-  `installOperator=false` when the operator is already in the cluster (the chart
-  renders just the `Cluster` CR + its credentials Secret), or `installOperator=true`
-  to also bundle the operator + CRDs. db/owner/password come from `postgresql.auth.*`;
-  the api connects to the `<cluster>-rw` service.
-- **Managed / external** — `postgresql.enabled=false` + `externalPostgresql.*`.
+- **CloudNativePG** (default) — runs Postgres via the
+  [CloudNativePG](https://cloudnative-pg.io/) operator on the **official**
+  `ghcr.io/cloudnative-pg/postgresql` image. Two modes: `installOperator=false` when the
+  operator is already in the cluster (the chart renders just the `Cluster` CR + its
+  credentials Secret), or `installOperator=true` to also bundle the operator + CRDs.
+  db/owner/password come from `postgresql.auth.*`; the api connects to the
+  `<cluster>-rw` service. `cnpg.keycloak` adds a role and database for the bundled Keycloak.
+- **Bundled bitnami subchart** (`postgresql.enabled=true`, `cnpg.enabled=false`).
+- **Managed / external** — both off + `externalPostgresql.*`.
 
 Either way the api consumes a single DSN (`PROXCLOUD_DB_URL`): the chart builds it
-into its own Secret, or reads it whole from `externalPostgresql.existingSecret`/`secretKey`.
+into its own Secret, or reads it whole from `api.existingSecret` or
+`externalPostgresql.existingSecret`/`secretKey`.
 
-**RabbitMQ** (required). Same pattern: bundled `rabbitmq.*` or
-`externalRabbitmq.*` (password inline or via `existingSecret`).
+**RabbitMQ** (required). Same pattern: `rabbitmqCluster.*` (default, needs the RabbitMQ
+Cluster Operator; the api reads the operator's `<name>-default-user` Secret), the bundled
+`rabbitmq.*`, or `externalRabbitmq.*` (password inline or via `existingSecret`).
 
 PostgreSQL is the only datastore.
 

@@ -5,9 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
-	"crypto/sha1"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
 	"github.com/mutex-solutions/proxcloud/internal/amqp"
@@ -75,6 +71,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "admin-key" {
+		if err := adminKeyCmd(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "admin-key:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
@@ -771,17 +774,9 @@ func run() error {
 		// not also expose unauthenticated key-minting. The secret is returned ONCE and stored verbatim.
 		if cfg.Jobs.DebugTriggers {
 			jobsDebug["gen-hmac-key"] = func(w http.ResponseWriter, r *http.Request) {
-				m := md5.Sum([]byte(uuid.NewString()))
-				s := sha1.Sum([]byte(uuid.NewString()))
-				id := "pk" + hex.EncodeToString(m[:])
-				secret := "sk" + hex.EncodeToString(s[:])
-				_, err := pg.C("hmac_keys").InsertOne(r.Context(), pgdoc.M{
-					"_id": id, "secretKey": secret,
-					"description": r.URL.Query().Get("description"),
-					"createdAt":   time.Now().UTC(),
-					"purpose":     "admin-api",
-				})
-				jobResult(w, map[string]any{"id": id, "secretKey": secret}, err)
+				doc := admin.NewAdminAPIKey(r.URL.Query().Get("description"))
+				_, err := pg.C("hmac_keys").InsertOne(r.Context(), doc)
+				jobResult(w, map[string]any{"id": doc["_id"], "secretKey": doc["secretKey"]}, err)
 			}
 		}
 	}

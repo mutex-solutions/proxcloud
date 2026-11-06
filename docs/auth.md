@@ -160,13 +160,16 @@ Stored in the `hmac_keys` table as `{ _id: <pk>, secretKey: <sk>, description,
 createdAt }`. The secret is returned **once at creation** and never re-served in
 full by the read endpoints.
 
-Create a key two ways:
+Create a key three ways:
 
 - **Admin console** → System → HMAC Keys, which calls `POST /api/v1/admin/hmac-keys`
   (permission `admin:hmac_key:manage`). See `internal/platform/admin/hmackey.go`.
 - **Operator management port** → `POST :8081/debug/gen-hmac-key?description=...`
-  (only registered when job debug triggers / scheduler are enabled). See
-  `cmd/api/main.go`.
+  (only registered when job debug triggers are enabled). See `cmd/api/main.go`.
+- **Shell in the API pod** → `proxcloud-api admin-key create -description <text>` prints
+  `{id, secretKey}` once. It talks to PostgreSQL through `PROXCLOUD_DB_URL`, so it is as
+  privileged as that shell and needs no first login: the installer uses it to register the
+  provider ([install.md](install.md)). See `cmd/api/adminkey.go`.
 
 Resolution at request time is a single `hmac_keys` lookup by `_id`
 (`cmd/api/main.go`, `hmacLookup`), wired into both the SigV4 verifier

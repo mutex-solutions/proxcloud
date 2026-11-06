@@ -1,0 +1,18 @@
+# Release BOM: `make upgrade` moves the platform to whatever is pinned here.
+pc_versions:
+  k3s: v1.35.10+k3s1
+  argocd_chart: 10.14.0        # oci://ghcr.io/argoproj/argo-helm/argo-cd
+  cnpg_chart: 0.29.1           # https://cloudnative-pg.github.io/charts
+  rabbitmq_operator: v2.23.2   # github.com/rabbitmq/cluster-operator release manifest
+  cert_manager_chart: v1.20.2  # the RabbitMQ operator's webhook needs it, as does ingress.tls=acme
+  keycloak: "26.8.2"
+  # Chart + image tag of ProxCloud itself, with images.build=false. It must be a published release.
+  proxcloud: v0.3.28
+  rustfs: 1.0.4
+  packer: 1.16.2
+  packer_plugin_proxmox: 1.2.4
+  helm: v3.20.2                # mgmt host, only with images.build
+  # Digests of rustfs-linux-x86_64-musl-v<version>.zip from the GitHub release.
+  rustfs_sha256:
+    "1.0.4": 4924ad4b699b9f59943051efedae2d1eb6d4cac503a1b0384c4b25f7c2c31b5c
+    "1.0.3": 29a083f156fe1a246f0336afe16ff77fffe587628e97339448d8f4fba38dba54

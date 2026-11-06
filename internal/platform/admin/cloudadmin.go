@@ -5,11 +5,13 @@ package admin
 // public networks, regions).
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -132,9 +134,15 @@ type GPURegionCapacity struct {
 // ── handlers ───────────────────────────────────────────────────────────────
 
 // pveTemplateImages renders a proxmox provider's template catalog image-like.
-func pveTemplateImages(es *externalservice.ExternalService) []map[string]any {
+func (h *Handler) pveTemplateImages(ctx context.Context, es *externalservice.ExternalService) []map[string]any {
 	out := []map[string]any{}
-	for _, t := range es.PVETemplates() {
+	var found []pve.DiscoveredTemplate
+	if h.pveFor != nil {
+		if ps, err := h.pveFor(es); err == nil {
+			found, _ = ps.C.Templates(ctx) // an unreachable cluster leaves the configured pins
+		}
+	}
+	for _, t := range es.PVEImageCatalog(found) {
 		out = append(out, map[string]any{
 			"id": t.Slug, "name": t.Name, "status": "active", "visibility": "public",
 			"os_distro": t.OSDistro, "min_disk": t.MinDiskGb,
@@ -158,7 +166,7 @@ func (h *Handler) imagesByService(w http.ResponseWriter, r *http.Request) {
 			display, _ := regionMeta(es, region)
 			out = append(out, ImagesByLocationDto{
 				ServiceID: es.ID, ServiceName: es.Name, Region: region,
-				RegionDisplayName: display, Images: pveTemplateImages(es),
+				RegionDisplayName: display, Images: h.pveTemplateImages(r.Context(), es),
 			})
 		}
 	}
@@ -182,7 +190,7 @@ func (h *Handler) imagesAll(w http.ResponseWriter, r *http.Request) {
 				display, _ := regionMeta(es, region)
 				out = append(out, ImagesByLocationDto{
 					ServiceID: es.ID, ServiceName: es.Name, Region: region,
-					RegionDisplayName: display, Images: pveTemplateImages(es),
+					RegionDisplayName: display, Images: h.pveTemplateImages(r.Context(), es),
 				})
 			}
 		}

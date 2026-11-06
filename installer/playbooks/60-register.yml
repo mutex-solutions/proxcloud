@@ -1,0 +1,259 @@
+# Stage 60: operator login, admin key, provider, first-run seed, fio suggestions. Runs on the mgmt host against
+# the Keycloak and API services, so it does not depend on DNS or the ingress. All GET, then write.
+- name: Prepare the registration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  tasks:
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Read the node addresses
+      ansible.builtin.uri: {url: "{{ pc_api }}/cluster/status"}
+      register: pc_status
+
+- name: Register with the portal
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  vars:
+    lh: "{{ hostvars.localhost }}"
+    ns: "{{ pc.namespace }}"
+    key_file: "{{ pc_gen }}/admin-api-key.json"
+    api_key: "{{ lookup('ansible.builtin.file', key_file) | from_json }}"
+    node_ips: "{{ lh.pc_status.json.data | selectattr('type', 'eq', 'node') | map(attribute='ip') | sort | list }}"
+    zone:
+      kind: "{{ pc.network.kind }}"
+      controller: "{{ pc.network.controller }}"
+      asn: "{{ pc.network.asn | int }}"
+      peers: "{{ node_ips }}"
+      exitNodes: "{{ pc.network.exit_nodes or lh.pc_nodes[:1] }}"
+      vrfVxlan: "{{ pc.network.vrf_vxlan | int }}"
+      mtu: 1450
+      bridge: "{{ pc.network.bridge }}"
+      vlanMin: "{{ pc.network.vlan_min | int }}"
+      vlanMax: "{{ pc.network.vlan_max | int }}"
+    provider:
+      name: "{{ pc.provider.name }}"
+      type: CLOUD
+      status: PUBLIC
+      config:
+        provider: proxmox
+        region: "{{ pc.provider.region }}"
+        regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
+        services:
+          compute: "{{ {pc.provider.region: true} }}"
+          network: "{{ {pc.provider.region: true} }}"
+          volumev3: "{{ {pc.provider.region: true} }}"
+          image: "{{ {pc.provider.region: true} }}"
+        apiUrl: "{{ pc_portal_pve_url }}"
+        tokenId: proxcloud@pve!platform
+        fingerprint: "{{ lookup('ansible.builtin.file', pc_gen ~ '/pve-fingerprint') | trim }}"
+        poolPrefix: "{{ pc.pve.pool_prefix }}"
+        network:
+          defaultZone: "{{ pc.network.default_zone }}"
+          zones: "{{ {pc.network.default_zone: zone} }}"
+          publicNetworks: "{{ [pc.network.public] if pc.network.public else [] }}"
+          cidrPool: "{{ pc.network.cidr_pool }}"
+          isolation: "{{ pc.network.isolation }}"
+          blockedCidrs: "{{ pc.network.blocked_cidrs }}"
+          evpnController: "{{ pc.network.controller }}"
+        storageProfiles: "{{ lh.pc_profiles }}"
+        defaultStorageProfile: "{{ lh.pc_default_profile }}"
+        templates: "{{ pc.provider.templates }}"
+        storageClasses: "{{ storage_classes }}"
+    fio_file: "{{ pc_gen }}/storage-classes.json"
+    fio: "{{ lookup('ansible.builtin.file', fio_file) | from_json if fio_file is file else {} }}"
+    storage_classes: >-
+      {% set out = {} %}{% for id, r in fio.items() %}{% set _ = out.update({id: {'suggestedClass': r.class}}) %}{% endfor
+      %}{% for id, c in pc.storage_classes.items() %}{% set _ = out.update({id: dict(out.get(id, {}), **{'class': c})}) %}{% endfor %}{{ out }}
+  tasks:
+    - name: Find the services
+      ansible.builtin.command: k3s kubectl -n {{ ns }} get svc proxcloud-api proxcloud-keycloak-http -o jsonpath={.items[*].spec.clusterIP}
+      changed_when: false
+      register: pc_ips
+    - name: Note the service URLs
+      ansible.builtin.set_fact:
+        pc_svc_api: "http://{{ pc_ips.stdout.split()[0] }}:8080/api/v1"
+        pc_svc_kc: "http://{{ pc_ips.stdout.split()[1] }}"
+
+    # Keycloak: the realms came from keycloak-config-cli; the logins are added here so the Application
+    # values carry no password. Existing users keep the password they changed it to.
+    - name: Get a Keycloak admin token
+      ansible.builtin.uri:
+        url: "{{ pc_svc_kc }}/realms/master/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body: {grant_type: password, client_id: admin-cli, username: admin, password: "{{ pc_keycloak_admin_password }}"}
+      no_log: true
+      register: pc_kc
+      retries: 30
+      delay: 10
+      until: pc_kc is succeeded
+    - name: Wait for the realms
+      ansible.builtin.uri:
+        url: "{{ pc_svc_kc }}/admin/realms/{{ item }}"
+        headers: {Authorization: "Bearer {{ pc_kc.json.access_token }}"}
+      register: pc_realm
+      retries: 30
+      delay: 10
+      until: pc_realm is succeeded
+      loop: ["{{ pc.keycloak.main_realm }}", "{{ pc.keycloak.admin_realm }}"]
+    - name: Create the logins
+      vars:
+        users: >-
+          {{ [{'realm': pc.keycloak.admin_realm, 'username': pc.keycloak.operator.username, 'email': pc.keycloak.operator.email, 'password': pc_operator_password}] +
+             pc.keycloak.tenant_users | map('combine', {'realm': pc.keycloak.main_realm}) | list }}
+      ansible.builtin.uri:
+        url: "{{ pc_svc_kc }}/admin/realms/{{ item.realm }}/users"
+        method: POST
+        headers: {Authorization: "Bearer {{ pc_kc.json.access_token }}"}
+        body_format: json
+        body:
+          username: "{{ item.username }}"
+          email: "{{ item.email }}"
+          firstName: "{{ item.username }}"
+          lastName: "ProxCloud"
+          enabled: true
+          emailVerified: true
+          credentials: [{type: password, value: "{{ item.password }}", temporary: false}]
+        status_code: [201, 409]
+      register: pc_user
+      changed_when: pc_user.status == 201
+      loop: "{{ users }}"
+      loop_control: {label: "{{ item.realm }}/{{ item.username }}"}
+      no_log: true
+
+    - name: Is there an admin key
+      ansible.builtin.stat: {path: "{{ key_file }}"}
+      delegate_to: localhost
+      become: false
+      register: pc_key
+    - name: Mint the installer's admin key
+      when: not pc_key.stat.exists
+      ansible.builtin.command: k3s kubectl -n {{ ns }} exec deploy/proxcloud-api -c api -- proxcloud-api admin-key create -description installer
+      register: pc_minted
+      no_log: true
+    - name: Keep the admin key
+      when: not pc_key.stat.exists
+      ansible.builtin.copy: {dest: "{{ key_file }}", content: "{{ pc_minted.stdout }}\n", mode: "0600"}
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Read the registered providers
+      proxcloud_api: &api
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service"
+      register: pc_services
+      retries: 20
+      delay: 10
+      until: pc_services is succeeded
+    - name: Register the Proxmox provider
+      when: pc.provider.name not in (pc_services.json.data | map(attribute='name') | list)
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service"
+        method: POST
+        body: "{{ provider | combine({'secret': {'tokenSecret': lookup('ansible.builtin.file', pc_gen ~ '/token-platform') | trim}}) }}"
+      no_log: true
+    - name: Read the providers again
+      proxcloud_api: *api
+      register: pc_services
+    - name: Note the provider
+      ansible.builtin.set_fact:
+        pc_service: "{{ pc_services.json.data | selectattr('name', 'eq', pc.provider.name) | first }}"
+    - name: Keep the configuration of an existing provider in line
+      when: pc_service.config.network != provider.config.network or pc_service.config.storageProfiles != provider.config.storageProfiles or pc_service.config.apiUrl != provider.config.apiUrl or pc_service.config.storageClasses | default({}) != provider.config.storageClasses or pc_service.config.templates | default({}) != provider.config.templates
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service/{{ pc_service.id }}"
+        method: PUT
+        body: {name: "{{ pc.provider.name }}", config: "{{ pc_service.config | combine(provider.config) }}"}
+    - name: Test the connection with the platform token
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service/proxmox/auth?externalServiceId={{ pc_service.id }}"
+        method: POST
+        body: {}
+      changed_when: false
+      register: pc_conn
+    - name: Report token warnings
+      when: pc_conn.json.data.warnings | default([]) | length > 0
+      ansible.builtin.debug: {msg: "{{ pc_conn.json.data.warnings }}"}
+    - name: Detect the storage capabilities
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service/{{ pc_service.id }}/storage/detect"
+        method: POST
+        body: {}
+      changed_when: false
+
+    - name: Has the first-run configuration been seeded
+      ansible.builtin.stat: {path: "{{ pc_gen }}/operator-seeded"}
+      delegate_to: localhost
+      become: false
+      register: pc_seeded
+    - name: Seed the first-run configuration
+      # Platform and billing configuration, flavors, public price plan, default quota. First run only: an
+      # operator's later edits in the admin console win.
+      when: not pc_seeded.stat.exists
+      block:
+        - name: Copy the seed
+          ansible.builtin.copy: {src: "{{ pc_repo_root }}/deploy/seed/", dest: /tmp/proxcloud-seed/, mode: preserve}
+        - name: Run the seed
+          ansible.builtin.command: python3 /tmp/proxcloud-seed/seed-operator.py --provider {{ pc.provider.name | quote }}
+          environment:
+            PROXCLOUD_API: "{{ pc_svc_api }}"
+            PROXCLOUD_TOKEN_URL: "{{ pc_svc_kc }}/realms/{{ pc.keycloak.admin_realm }}/protocol/openid-connect/token"
+            PROXCLOUD_ADMIN_USER: "{{ pc.keycloak.operator.username }}"
+            PROXCLOUD_ADMIN_PASSWORD: "{{ pc_operator_password }}"
+          changed_when: true
+          no_log: "{{ not ansible_verbosity }}"
+        - name: Apply the site's quota
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service/{{ pc_service.id }}/quota"
+            method: PUT
+            body: "{{ pc.provider.quota }}"
+        - name: Remember the seed
+          ansible.builtin.copy: {dest: "{{ pc_gen }}/operator-seeded", content: "", mode: "0600"}
+          delegate_to: localhost
+          become: false
+    - name: Read the flavors
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/flavors"
+      register: pc_flavors
+    - name: Create the site's extra flavors
+      when: item.slug not in (pc_flavors.json.data | default([], true) | map(attribute='slug') | list)
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/flavors"
+        method: POST
+        body: "{{ item | combine({'active': true}) }}"
+      loop: "{{ pc.flavors }}"
+      loop_control: {label: "{{ item.slug }}"}
+
+- name: Say how to log in
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Print the portal
+      ansible.builtin.debug:
+        msg:
+          - "Customer console  {{ pc_url_app }}"
+          - "Operator console  {{ pc_url_admin }}  login {{ pc.keycloak.operator.username }}, password in {{ pc_gen }}/operator-password"
+          - "API               {{ pc_url_api }}"
+          - "Keycloak          {{ pc_url_id }}  admin password in {{ pc_gen }}/keycloak-admin-password"
+          - "BACK UP {{ pc_gen }}: the encryption key cannot be recovered, and without it stored provider secrets are lost."

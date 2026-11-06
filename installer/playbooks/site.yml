@@ -1,0 +1,12 @@
+# make install: every stage is idempotent, re-running is a no-op.
+# 25 precedes 20 because the Packer build runs from the first mgmt host.
+- import_playbook: 00-preflight.yml
+- import_playbook: 05-storage.yml
+- import_playbook: 10-pve-identity.yml
+- import_playbook: 25-mgmt-vms.yml
+- import_playbook: 20-templates.yml
+- import_playbook: 30-mgmt-cluster.yml
+- import_playbook: 35-local-images.yml
+- import_playbook: 40-mgmt-platform.yml
+- import_playbook: 45-object-store.yml
+- import_playbook: 60-register.yml

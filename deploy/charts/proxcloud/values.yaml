@@ -7,8 +7,10 @@
 #   admin  the operator console SPA (static nginx image)
 #
 # Datastores: PostgreSQL (primary, required) and RabbitMQ (required).
-# Both can be bundled (bitnami subcharts, on by default) or brought
-# externally via the matching external* block. Keycloak is optional.
+# Default: operator-managed, a CloudNativePG Cluster and a RabbitmqCluster, so both
+# operators must already run in the cluster (the installer does that, see installer/).
+# Alternatives: the bitnami subcharts (values-dev.yaml) or an external* block.
+# Keycloak is optional.
 # ============================================================================
 
 nameOverride: ""
@@ -224,23 +226,28 @@ admin:
 # match) — e.g. https://id.example.com/realms/<realm>.
 # ----------------------------------------------------------------------------
 auth:
+  # discoveryUri (optional, per realm): where the API itself fetches the OIDC metadata when the
+  # public issuer URL is not reachable from the pod, e.g. the in-cluster Keycloak service. The token
+  # `iss` must still equal issuer.
   main:
     issuer: ""
     clientId: proxcloud-ui
+    discoveryUri: ""
   admin:
     issuer: ""
     clientId: proxcloud-admin
+    discoveryUri: ""
   adminApi:
     issuer: ""
     clientId: proxcloud-admin-api
+    discoveryUri: ""
 
 # ----------------------------------------------------------------------------
-# PostgreSQL — the primary datastore.
-# Bundled bitnami subchart by default; auth.* below makes the subchart
-# create the `proxcloud` role and database on first boot.
+# PostgreSQL — the primary datastore. postgresql.auth.* also names the CloudNativePG database
+# and owner. enabled=true swaps in the bitnami subchart (see values-dev.yaml).
 # ----------------------------------------------------------------------------
 postgresql:
-  enabled: true
+  enabled: false
   # ⚠ Bitnami catalog risk (unresolved for PostgreSQL): the subchart pulls PostgreSQL 18.4, but the
   # frozen `bitnamilegacy` mirror predates PG 18 (frozen ~Aug 2025) — so it has NO PG 18 image, and
   # repointing there would 404 or downgrade to a PG that can't start on PG-18 data. The subchart
@@ -270,10 +277,8 @@ externalPostgresql:
   secretKey: db-url
 
 # ----------------------------------------------------------------------------
-# CloudNativePG — run PostgreSQL via the CloudNativePG operator (official
-# ghcr.io/cloudnative-pg/postgresql images, NO Bitnami) instead of the bundled
-# bitnami subchart. Set postgresql.enabled=false when cnpg.enabled=true.
-# Two modes:
+# CloudNativePG — the default PostgreSQL: the CloudNativePG operator with the official
+# ghcr.io/cloudnative-pg/postgresql images. Two modes:
 #   • Operator ALREADY in the cluster → cnpg.enabled=true, installOperator=false.
 #     The chart renders only the Cluster CR + its owner-credentials Secret.
 #   • Operator NOT installed → also set installOperator=true to bundle the
@@ -285,7 +290,7 @@ externalPostgresql:
 # db name / owner / password are taken from postgresql.auth.* (uniform DSN wiring).
 # ----------------------------------------------------------------------------
 cnpg:
-  enabled: false
+  enabled: true
   installOperator: false
   clusterName: ""   # defaults to <fullname>-pg; the app connects to <name>-rw:5432
   instances: 1
@@ -296,12 +301,29 @@ cnpg:
   # A pre-created kubernetes.io/basic-auth Secret (username+password for the owner).
   # When empty the chart renders one from postgresql.auth.username/password.
   existingSecret: ""
+  # A `keycloak` role + database in this same Cluster for the bundled Keycloak (keycloakx).
+  # existingSecret is a kubernetes.io/basic-auth Secret holding that role's username + password.
+  keycloak:
+    enabled: false
+    existingSecret: ""
 
 # ----------------------------------------------------------------------------
-# RabbitMQ — the message broker (charge fan-out).
+# RabbitMQ — the message broker (charge fan-out). The default is a RabbitmqCluster; the operator
+# generates its credentials (<name>-default-user) and the API reads them from there.
 # ----------------------------------------------------------------------------
-rabbitmq:
+rabbitmqCluster:
   enabled: true
+  name: ""   # defaults to <fullname>-rabbitmq
+  replicas: 1
+  image: ""  # "" = the operator's default image
+  storage:
+    size: 5Gi
+    storageClass: ""
+  resources: {}
+
+# The bitnami subchart alternative (see values-dev.yaml).
+rabbitmq:
+  enabled: false
   # STOPGAP (see postgresql above): pin to the frozen bitnamilegacy mirror so pulls survive the
   # docker.io/bitnami catalog deletion. Planned exit: the official RabbitMQ Cluster Operator.
   image:
@@ -313,7 +335,7 @@ rabbitmq:
     # A bundled install with this empty FAILS by design (see values-dev.yaml for a dev value).
     password: ""
 
-# Bring-your-own RabbitMQ (used when rabbitmq.enabled=false).
+# Bring-your-own RabbitMQ (used when both rabbitmqCluster and rabbitmq are off).
 externalRabbitmq:
   host: ""
   port: 5672
@@ -405,6 +427,10 @@ keycloakConfigCli:
   adminPassword: ""
   existingSecret: ""
   passwordKey: admin-password
+  # For a portal on plain HTTP only: keep "external" and true otherwise. A browser has no WebCrypto
+  # outside a secure context, so the consoles cannot do PKCE there; requiring it breaks every login.
+  sslRequired: external
+  requirePkce: true
   # Additional raw keycloak-config-cli import files (filename -> JSON string),
   # applied alongside the derived ones.
   extraRealms: {}

@@ -55,20 +55,25 @@ func (h *Handler) hmacKeyGenerate(w http.ResponseWriter, r *http.Request) {
 		Description string `json:"description"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	m := md5.Sum([]byte(uuid.NewString()))
-	s := sha1.Sum([]byte(uuid.NewString()))
-	id := "pk" + hex.EncodeToString(m[:])
-	secret := "sk" + hex.EncodeToString(s[:])
-	now := time.Now().UTC()
-	// purpose:"admin-api" marks this as an Admin-API / MCP credential; the SigV4 verifier only
-	// resolves admin-api-purpose keys, so provider keys (which stamp purpose:"provider") can never
-	// authenticate to the Admin API.
-	doc := pgdoc.M{"_id": id, "secretKey": secret, "description": req.Description, "createdAt": now, "purpose": hmacKeyPurposeAdminAPI}
+	doc := NewAdminAPIKey(req.Description)
 	if err := h.repo.InsertDocKeepID(r.Context(), hmacKeyCollection, doc); httpx.WriteError(w, err) {
 		return
 	}
 	// The generate response carries the plaintext secret (shown once, client must save it).
-	httpx.OK(w, map[string]any{"id": id, "secretKey": secret, "description": req.Description, "createdAt": now})
+	httpx.OK(w, map[string]any{"id": doc["_id"], "secretKey": doc["secretKey"], "description": req.Description, "createdAt": doc["createdAt"]})
+}
+
+// NewAdminAPIKey builds a new Admin-API SigV4 key pair document for the hmac_keys collection.
+// purpose:"admin-api" marks it as an Admin-API / MCP credential; the SigV4 verifier only resolves
+// admin-api-purpose keys, so provider keys (which stamp purpose:"provider") can never authenticate
+// to the Admin API. Its writers: the admin endpoint, the mgmt trigger and `proxcloud-api admin-key`.
+func NewAdminAPIKey(description string) pgdoc.M {
+	m := md5.Sum([]byte(uuid.NewString()))
+	s := sha1.Sum([]byte(uuid.NewString()))
+	return pgdoc.M{
+		"_id": "pk" + hex.EncodeToString(m[:]), "secretKey": "sk" + hex.EncodeToString(s[:]),
+		"description": description, "createdAt": time.Now().UTC(), "purpose": hmacKeyPurposeAdminAPI,
+	}
 }
 
 // hmacKeyGet loads a single HMAC key by id; 404 "HMAC Key Not Found" if absent.

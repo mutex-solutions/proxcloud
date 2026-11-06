@@ -37,6 +37,54 @@ Found by the end-to-end lab drill on PVE 9.2.
 
 **Diagrams updated**: `c4-code.md` (C4.1, C4.2, sequences).
 
+## 2026-11-07: P6 installer and image pipelines
+
+**What changed**
+
+- Installer (C2c): Planned -> Implemented. `installer/` is one Ansible entrypoint,
+  `make install INVENTORY=...`, in `allinone` mode: preflight, Proxmox identity, NAS stores,
+  OS templates, k3s (`mgmt.placement: ssh | pve-vm`, always `--cluster-init`), the platform
+  through ArgoCD Applications with inline values, the object store, and registration through
+  the admin API. Day-2: `upgrade`, `templates`, `storage-rebench`, `add-node`, `remove-node`,
+  `mgmt-scale`, `rustfs-upgrade`, `rustfs-rollback`. `split` mode stays Planned with P7.
+- VM template pipeline (C2c): Planned -> Implemented. `images/build.py` (vendor image, Packer,
+  smoke test, publish by tag, prune) runs from the installer and from
+  `.github/workflows/vm-templates.yml`, which has no PR or fork trigger.
+- Template discovery (C3b): new. The catalog comes from cluster tags (`pc-public`,
+  `pc-img-*`, `pc-v-*`) in pool `pc-templates`; `config.templates` is now an optional pin or
+  overlay. Server create clones the target node's own copy, so a local-disk site is no longer
+  pinned to one node.
+- `proxcloud-api admin-key create`: new. A non-interactive Admin-API key, minted through the
+  database; the one writer path (`admin.NewAdminAPIKey`) is shared with the endpoint and the
+  debug trigger.
+- Chart: CloudNativePG and a new `RabbitmqCluster` are the defaults, the bitnami subcharts
+  are opt-in (`values-dev.yaml`). `cnpg.keycloak` and `auth.*.discoveryUri` added.
+- RustFS (C2): Planned -> Implemented as the internal object store; tenant buckets stay
+  Planned. Platform-owned VMs (C2b): Planned -> Implemented, except the services cluster.
+- New `ProxCloudImages` role and `images@pve!packer` token.
+
+**Why**
+
+- A first install took hand-run `pveum`, hand-made templates and psql seeds. The plan's
+  v3.1 decision is one command with the easiest default for every choice, each overridable.
+- Tags, not config, because a weekly rebuild changes template ids: a catalog in config goes
+  stale on every run. The pool is the ownership proof, a tag alone is not.
+- Per-node copies, because PVE clones across nodes only from shared to shared storage (the
+  P3 lesson): with local VM disks, one template meant every VM on one node.
+- `ProxCloudImages` uses `Sys.AccessNetwork` instead of `Sys.Modify` on `/`, and has no
+  ACL on `/vms`, so the pipeline token cannot touch a tenant VM.
+- k3s's bundled Traefik and ServiceLB replace MetalLB and nginx-gateway-fabric in `allinone`:
+  one host needs no VIP pool, and every extra component is one more thing to pin and upgrade.
+  They return with the services cluster.
+- cert-manager is always deployed, not only for ACME, because the RabbitMQ operator's webhook
+  needs it (operator v2.23).
+- The operator's own Secret carries the RabbitMQ credentials, so there is one less secret
+  to generate and rotate. The API reads it directly.
+- The admin realm is separate from the customer realm: any login in the admin realm is an
+  administrator, and the customer realm allows self-registration.
+
+**Diagrams updated:** c1-context.md, c2-containers.md (C2b, C2c, tables), c3-components.md (C3b)
+
 ## 2026-11-07: console and server detail match what Proxmox serves
 
 No component changed. The wizard honors the boot volume type, offers the project's own

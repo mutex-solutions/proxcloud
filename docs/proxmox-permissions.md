@@ -1,12 +1,13 @@
 # Proxmox VE permissions
 
-ProxCloud needs no `root@pam` access on the cluster. This page defines three least-privilege roles, the users and API tokens that hold them, and the ACL paths they are granted on. The commands are for **PVE 9**. PVE 9 removed `VM.Monitor`; the guest-agent reads ProxCloud uses need `VM.GuestAgent.Audit` instead.
+ProxCloud needs no `root@pam` access on the cluster. The [installer](install.md) creates everything on this page (`installer/playbooks/10-pve-identity.yml`). This page defines four least-privilege roles, the users and API tokens that hold them, and the ACL paths they are granted on. The commands are for **PVE 9**. PVE 9 removed `VM.Monitor`; the guest-agent reads ProxCloud uses need `VM.GuestAgent.Audit` instead.
 
 | Role | Held by | Used for |
 |---|---|---|
 | `ProxCloudPlatform` | `proxcloud@pve!platform` | the portal API (the token configured on the Proxmox provider) |
 | `ProxCloudCAPI` | `capmox@pve!capi` | Cluster API provider for Proxmox (CAPMOX), services cluster |
 | `ProxCloudCSI` | `csi@pve!csi` | `proxmox-csi-plugin` in the services cluster |
+| `ProxCloudImages` | `images@pve!packer` | the image pipeline ([images/README.md](../images/README.md)) |
 
 Every token is created with **privilege separation** (`--privsep 1`). A privilege-separated token's rights are the **intersection** of the user's ACLs and the token's ACLs, so each ACL below is granted to both the user and the token.
 
@@ -83,6 +84,19 @@ Privileges: `VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace 
 | `/pool/proxcloud-system` | `ProxCloudCSI` | 1 |
 | `/storage/<csi storage>` | `ProxCloudCSI` | 0 |
 
+## ProxCloudImages
+
+Privileges: `Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use`
+
+| Path | Role | Propagate | Note |
+|---|---|---|---|
+| `/pool/pc-templates` | `ProxCloudImages` | 1 | the only VMs it can touch |
+| `/nodes` | `ProxCloudImages` | 1 | `Sys.AccessNetwork` is what `download-url` asks for on a node; without it, that call wants `Sys.Modify` on `/` |
+| `/storage` | `ProxCloudImages` | 1 | or one ACL per template and import store |
+| `/sdn/zones/localnetwork` | `ProxCloudImages` | 1 | `SDN.Use` on the node bridges |
+
+There is no ACL on `/vms`, so the token holds `VM.Config.*` only on VMs already in the pool. `build.py` therefore creates a VM empty, with just `pool`, and configures it in a second call.
+
 ## pveum commands
 
 Run these on any node (cluster config is shared). Replace the `<…>` placeholders.
@@ -92,6 +106,7 @@ Run these on any node (cluster config is shared). Replace the `<…>` placeholde
 pveum role add ProxCloudPlatform --privs "Sys.Audit Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Console VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.Audit Mapping.Audit Mapping.Use"
 pveum role add ProxCloudCAPI --privs "Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
 pveum role add ProxCloudCSI --privs "VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit"
+pveum role add ProxCloudImages --privs "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
 
 # pools
 pveum pool add pc-templates --comment "ProxCloud templates"
@@ -101,9 +116,11 @@ pveum pool add proxcloud-system --comment "ProxCloud management (not tenant)"
 pveum user add proxcloud@pve --comment "ProxCloud portal"
 pveum user add capmox@pve --comment "ProxCloud CAPI"
 pveum user add csi@pve --comment "ProxCloud CSI"
+pveum user add images@pve --comment "ProxCloud image pipeline"
 pveum user token add proxcloud@pve platform --privsep 1
 pveum user token add capmox@pve capi --privsep 1
 pveum user token add csi@pve csi --privsep 1
+pveum user token add images@pve packer --privsep 1
 
 # helper: grant to user AND token (privsep = intersection)
 grant() { # path role propagate user token
@@ -132,6 +149,12 @@ grant /storage/<iso-storage>   PVEDatastoreAdmin 0 capmox@pve capi
 # CSI
 grant /pool/proxcloud-system  ProxCloudCSI 1 csi@pve csi
 grant /storage/<csi-storage>  ProxCloudCSI 0 csi@pve csi
+
+# images
+grant /pool/pc-templates        ProxCloudImages 1 images@pve packer
+grant /nodes                    ProxCloudImages 1 images@pve packer
+grant /storage                  ProxCloudImages 1 images@pve packer
+grant /sdn/zones/localnetwork   ProxCloudImages 1 images@pve packer
 
 # check what a token really has
 pveum user token permissions proxcloud@pve platform
