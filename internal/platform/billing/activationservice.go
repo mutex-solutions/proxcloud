@@ -48,7 +48,7 @@ func (s *ActivationService) SetLoginURL(u string)       { s.loginURL = u }
 // billing-profile validation flips to APPROVED (message key "billing_profile_validated";
 // businessName is injected by the mail service when absent from vars). Best-effort.
 func (s *ActivationService) NotifyValidation(ctx context.Context, bp *BillingProfile) {
-	notify(ctx, s.notifier, "billing_profile_validated", bp.Email, map[string]any{
+	notify(ctx, s.notifier, "billing_profile_validated", bp, map[string]any{
 		"fullName": profileFullName(bp), "email": bp.Email, "loginUrl": s.loginURL,
 	})
 }
@@ -119,7 +119,7 @@ func (s *ActivationService) Suspend(ctx context.Context, bp *BillingProfile, sou
 	}
 	balance := s.currentBalance(ctx, bp.ID)
 	currency, _ := s.repo.BaseCurrency(ctx)
-	notify(ctx, s.notifier, "notify_customer_is_suspended", bp.Email, map[string]any{
+	notify(ctx, s.notifier, "notify_customer_is_suspended", bp, map[string]any{
 		"fullName": profileFullName(bp), "balance": balance.StringFixed(2), "currency": currency,
 	})
 	bp.Status = StatusSuspended
@@ -148,7 +148,7 @@ func (s *ActivationService) Unsuspend(ctx context.Context, bp *BillingProfile, s
 	balance := s.currentBalance(ctx, bp.ID)
 	currency, _ := s.repo.BaseCurrency(ctx)
 	_ = balance // the resume mail renders balance too
-	notify(ctx, s.notifier, "notify_customer_is_resumed", bp.Email, map[string]any{
+	notify(ctx, s.notifier, "notify_customer_is_resumed", bp, map[string]any{
 		"fullName": profileFullName(bp), "balance": balance.StringFixed(2), "currency": currency,
 	})
 	return nil

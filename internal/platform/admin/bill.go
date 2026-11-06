@@ -2,15 +2,20 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/shopspring/decimal"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
+	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -22,6 +27,7 @@ import (
 //
 // Newly registered here:
 //   - PUT    /admin/bill/{id}                       update — status/invoiceCurrency/invoiceGatewayId/billingProfileId
+//   - POST   /admin/bill/{id}/record-payment        record an offline (bank transfer / other) payment on a SENT bill
 //   - DELETE /admin/bill/{id}                       delete
 //   - GET    /admin/bill/{id}                       bill financial overview (pricing recompute — not wired)
 //   - GET    /admin/bill/{billingProfileId}/billing-profile  bills for a billing profile → overview page (not wired)
@@ -56,6 +62,7 @@ const billManagePerm = "admin:bill:manage"
 // `billing-profile` literal.
 func (h *Handler) routeBill(r chi.Router) {
 	r.Put("/bill/{id}", h.billUpdate)
+	r.Post("/bill/{id}/record-payment", h.billRecordPayment)
 	r.Delete("/bill/{id}", h.billDelete)
 	r.Get("/bill/download/{billId}", h.billDownload)
 	r.Get("/bill/{id}", h.billGet)
@@ -112,6 +119,10 @@ func (h *Handler) billUpdate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
+	if req.Status != "" && !isValidBillStatus(req.Status) {
+		httpx.WriteError(w, httpx.BadRequest("Invalid bill status: must be one of OPEN, SENT, PAID"))
+		return
+	}
 	existing, err := h.repo.FindDoc(r.Context(), billCollection, id)
 	if httpx.WriteError(w, err) {
 		return
@@ -139,6 +150,109 @@ func (h *Handler) billUpdate(w http.ResponseWriter, r *http.Request) {
 	after, _ := h.repo.FindDoc(r.Context(), billCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
+}
+
+// isValidBillStatus reports whether s is one of the bill lifecycle statuses (OPEN → SENT → PAID).
+func isValidBillStatus(s string) bool {
+	switch pricing.BillStatus(s) {
+	case pricing.BillStatusOpen, pricing.BillStatusSent, pricing.BillStatusPaid:
+		return true
+	}
+	return false
+}
+
+// billRecordPaymentReq is the record-payment body. amount is a decimal (string or number);
+// omitted → the bill's full unpaid amount. paidAt is RFC3339; omitted → now.
+type billRecordPaymentReq struct {
+	Amount    json.Number `json:"amount"`
+	Method    string      `json:"method"` // BANK_TRANSFER | OTHER
+	Reference string      `json:"reference"`
+	PaidAt    string      `json:"paidAt"`
+}
+
+// billRecordPayment handles POST /admin/bill/{id}/record-payment: an accountant confirms an
+// offline payment (bank transfer, …) against a SENT bill. The PayService records a SUCCESS
+// collect transaction on the bill; a full amount flips it PAID (bill_is_paid mail + suspension
+// auto-resume, like paying with credits), a partial one leaves it SENT with the collected amount.
+// OPEN → 400 (not issued yet), PAID → 409. Returns the bill financial overview (GET /bill/{id}).
+// Gated ADMIN_BILL_MANAGE; the audit middleware records the CREATE BILL event with the field diff.
+func (h *Handler) billRecordPayment(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, billManagePerm) {
+		return
+	}
+	if h.pay == nil {
+		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "record payment not wired"))
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var req billRecordPaymentReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
+		return
+	}
+	p := billing.ManualPayment{
+		Method:    strings.ToUpper(strings.TrimSpace(req.Method)),
+		Reference: strings.TrimSpace(req.Reference),
+	}
+	if p.Method != "BANK_TRANSFER" && p.Method != "OTHER" {
+		httpx.WriteError(w, httpx.BadRequest("method must be BANK_TRANSFER or OTHER"))
+		return
+	}
+	if req.Amount != "" {
+		d, err := decimal.NewFromString(req.Amount.String())
+		if err != nil {
+			httpx.WriteError(w, httpx.BadRequest("Invalid amount"))
+			return
+		}
+		p.Amount = &d
+	}
+	if req.PaidAt != "" {
+		t, err := time.Parse(time.RFC3339, req.PaidAt)
+		if err != nil {
+			httpx.WriteError(w, httpx.BadRequest("Invalid paidAt: RFC3339 timestamp expected"))
+			return
+		}
+		p.PaidAt = t
+	}
+	if rc := httpx.RC(r.Context()); rc != nil {
+		p.RecordedBy = rc.Sub
+		if p.RecordedBy == "" {
+			p.RecordedBy = rc.SigV4KeyID
+		}
+	}
+	before, err := h.repo.FindDoc(r.Context(), billCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if before == nil {
+		httpx.WriteError(w, billNotFound(id))
+		return
+	}
+	_, _, err = h.pay.RecordManualPayment(r.Context(), id, p)
+	switch {
+	case errors.Is(err, billing.ErrBillNotFound):
+		err = billNotFound(id)
+	case errors.Is(err, billing.ErrBillAlreadyPaid):
+		err = httpx.NewError(http.StatusConflict, http.StatusConflict, billing.ErrBillAlreadyPaid.Error())
+	case errors.Is(err, billing.ErrBillNotIssued), errors.Is(err, billing.ErrInvalidAmount):
+		err = httpx.BadRequest(err.Error())
+	}
+	if httpx.WriteError(w, err) {
+		return
+	}
+	after, err := h.repo.FindDoc(r.Context(), billCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	audit.RecordSnapshots(r.Context(), before, after)
+	// The payment is committed at this point; an orphan bill (profile gone) still gets a 200 with
+	// the raw bill instead of the overview's 404, so the caller never retries a recorded payment.
+	fo, err := h.billFinancialOverview(r.Context(), after)
+	if err != nil {
+		httpx.OK(w, shapeDoc(after))
+		return
+	}
+	httpx.OK(w, fo)
 }
 
 // billDelete deletes a bill by id (the bill is NOT looked up first — the audit event is
@@ -226,7 +340,12 @@ func (h *Handler) billDownload(w http.ResponseWriter, r *http.Request) {
 	if bp == nil {
 		bp = &billing.BillingProfile{ID: bill.BillingProfileID}
 	}
-	data, filename, err := billing.BillStatementPDF(bill, bp)
+	issuer, _ := h.billing.IssuerInfo(r.Context())
+	var allRates []pricing.TaxRate
+	if h.pricing != nil {
+		allRates, _ = h.pricing.AllTaxRates(r.Context())
+	}
+	data, filename, err := billing.BillStatementPDF(bill, bp, issuer, billing.InvoiceTaxRates(allRates, bp, bill, time.Now().UTC()))
 	if httpx.WriteError(w, err) {
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -78,8 +79,7 @@ func (h *BillingHandler) Routes(r chi.Router) {
 	r.Get("/savings-plans", h.savingsPlans)                                           // ?billingProfileId=
 	r.Get("/account-credit-transactions", h.accountCreditTransactions)                // ?billingProfileId=
 	r.Get("/account-credit-transactions/{transactionId}", h.accountCreditTransaction) // single (404 by id)
-	// Invoice PDF download. The PDF render is an
-	// external invoice-provider call → 501 (same posture as the admin bill statement download). chi:
+	// Deposit document download: REFUNDED → credit note PDF, SUCCESS → deposit receipt PDF. chi:
 	// the position-1 param must reuse the {transactionId} node name; the real txn id is {downloadTxnId}.
 	r.Get("/account-credit-transactions/{transactionId}/download/{downloadTxnId}", h.accountCreditTxnDownload)
 	r.Get("/collect-transactions", h.collectTransactions) // ?billingProfileId=
@@ -96,14 +96,23 @@ func (h *BillingHandler) Routes(r chi.Router) {
 	r.Post("/payment/{billingProfileId}/bill/{billId}/pay", h.payBill)
 	// list the available payment gateways for a profile.
 	r.Get("/payment/{billingProfileId}/gateway", h.paymentGateways)
+	// Manual bank transfers: the profile's transfers (proof stripped), the customer's
+	// "I have transferred" submission, and the proof file download.
+	r.Get("/payment/{billingProfileId}/bank-transfers", h.bankTransfers)
+	r.Post("/payment/{billingProfileId}/bank-transfers/{transferId}/submit", h.bankTransferSubmit)
+	r.Post("/payment/{billingProfileId}/bank-transfers/{transferId}/cancel", h.bankTransferCancel)
+	r.Get("/payment/{billingProfileId}/bank-transfers/{transferId}/proof", h.bankTransferProof)
 	// add funds via a gateway (→ PaymentIntent). The path is
 	// /payment/deposit/{bpId} (static "deposit" precedes the {billingProfileId} param routes).
 	r.Post("/payment/deposit/{billingProfileId}", h.deposit)
 	// deposit by charging a saved card (→ collect,
 	// synchronous confirm=true). cardId is in the CollectRequest body, not the path.
 	r.Post("/payment/deposit/{billingProfileId}/card", h.depositByCard)
-	// Stripe redirect confirm callback (whitelisted in auth — no bearer; finalizes the txn).
-	r.Get("/callbacks/payment/stripe/funds/confirm/{transactionId}", h.stripeFundsConfirm)
+	// pay a SENT bill with a saved card (the retry after a failed automatic charge).
+	r.Post("/payment/{billingProfileId}/bill/{billId}/collect", h.collectBill)
+	// Gateway confirm callbacks (whitelisted in auth — no bearer; finalizes the txn). The {gateway}
+	// segment is informational (stripe / airwallex): the transaction knows its gateway.
+	r.Get("/callbacks/payment/{gateway}/funds/confirm/{transactionId}", h.stripeFundsConfirm)
 	// register a card (SetupIntent) + list saved cards + the card-confirm callback.
 	r.Post("/card/{billingProfileId}/add", h.addCard)
 	r.Get("/card/{billingProfileId}", h.listCards)
@@ -112,7 +121,7 @@ func (h *BillingHandler) Routes(r chi.Router) {
 	r.Delete("/card/{billingProfileId}", h.deleteCard)
 	r.Post("/card/{billingProfileId}/{cardId}/default", h.setDefaultCard)
 	r.Get("/card/{billingProfileId}/transactions/{transactionId}", h.getCardTransaction)
-	r.Get("/callbacks/payment/stripe/card/confirm/{transactionId}", h.stripeCardConfirm)
+	r.Get("/callbacks/payment/{gateway}/card/confirm/{transactionId}", h.stripeCardConfirm)
 	// KYC + websso callbacks. These integrations are NOT configured in this
 	// deployment → 501 (would verify with the vendor; the posture for an
 	// unconfigured external integration is a 501). Whitelisted (no bearer).
@@ -324,7 +333,12 @@ func (h *BillingHandler) billStatementDownload(w http.ResponseWriter, r *http.Re
 		fail(w, httpx.NotFound(fmt.Sprintf("Bill %s not found ", billID)))
 		return
 	}
-	data, _, err := billing.BillStatementPDF(bill, bp)
+	issuer, _ := h.billing.IssuerInfo(r.Context())
+	var allRates []pricing.TaxRate
+	if h.pricing != nil {
+		allRates, _ = h.pricing.AllTaxRates(r.Context())
+	}
+	data, _, err := billing.BillStatementPDF(bill, bp, issuer, billing.InvoiceTaxRates(allRates, bp, bill, time.Now().UTC()))
 	if err != nil {
 		fail(w, err)
 		return
@@ -568,6 +582,47 @@ func (h *BillingHandler) payBill(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, dtos[0])
 }
 
+// isPaymentSettingsBody reports whether a tenant profile PUT carries only the payment-settings
+// keys (at least one of paymentMode / paymentGatewayId, nothing else).
+func isPaymentSettingsBody(raw map[string]json.RawMessage) bool {
+	if len(raw) == 0 || len(raw) > 2 {
+		return false
+	}
+	for k := range raw {
+		if k != "paymentMode" && k != "paymentGatewayId" {
+			return false
+		}
+	}
+	return true
+}
+
+// collectBill charges a SENT bill on a saved card (body {cardId}; blank → the current card):
+// POST /api/v1/payment/{bp}/bill/{billId}/collect, BILLING_PROFILE_ADD_FUNDS. Returns the
+// terminal collect transaction — FAILED carries the gateway's decline message.
+func (h *BillingHandler) collectBill(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	bp, _, ok := h.requireBillingProfilePermission(w, r, u, chi.URLParam(r, "billingProfileId"), rbac.BillingProfileAddFunds)
+	if !ok {
+		return
+	}
+	var req payment.CollectBillRequest
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			fail(w, httpx.BadRequest("invalid request body"))
+			return
+		}
+	}
+	txn, err := h.collect.CollectBill(r.Context(), bp, chi.URLParam(r, "billId"), req)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	httpx.OK(w, billing.CollectTransactionToDto(txn))
+}
+
 // paymentGateways lists the available payment gateways for a profile. Membership +
 // BILLING_PROFILE_READ gated (via getBillingProfile); empty under the greenfield seed.
 func (h *BillingHandler) paymentGateways(w http.ResponseWriter, r *http.Request) {
@@ -584,6 +639,102 @@ func (h *BillingHandler) paymentGateways(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	httpx.List(w, gws)
+}
+
+// bankTransfers lists the profile's bank transfers, newest first, without the proof bytes.
+// Membership + BILLING_PROFILE_READ gated.
+func (h *BillingHandler) bankTransfers(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	bp, ok := h.requireBillingProfileRead(w, r, u, chi.URLParam(r, "billingProfileId"))
+	if !ok {
+		return
+	}
+	docs, err := h.billing.ListBankTransfers(r.Context(), bp.ID)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(docs))
+	for _, d := range docs {
+		out = append(out, billing.BankTransferPublic(d))
+	}
+	httpx.List(w, out)
+}
+
+// bankTransferSubmit records the customer's "I have transferred" step (BILLING_PROFILE_ADD_FUNDS).
+// The body is capped at 3 MiB — the 2 MiB proof in base64 plus the text fields.
+func (h *BillingHandler) bankTransferSubmit(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	bp, _, ok := h.requireBillingProfilePermission(w, r, u, chi.URLParam(r, "billingProfileId"), rbac.BillingProfileAddFunds)
+	if !ok {
+		return
+	}
+	var req payment.BankTransferSubmitRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 3<<20)).Decode(&req); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			httpx.Err(w, http.StatusRequestEntityTooLarge, http.StatusRequestEntityTooLarge, "Proof file must be at most 2 MiB")
+			return
+		}
+		fail(w, httpx.BadRequest("invalid request body"))
+		return
+	}
+	doc, err := h.addFunds.SubmitBankTransfer(r.Context(), bp, chi.URLParam(r, "transferId"), req)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	httpx.OK(w, doc)
+}
+
+// bankTransferCancel withdraws a PENDING, not-yet-reported transfer (BILLING_PROFILE_ADD_FUNDS):
+// the transfer and its deposit transaction become CANCELLED. 404 for another profile's transfer,
+// 409 once it is settled or already reported.
+func (h *BillingHandler) bankTransferCancel(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	bp, _, ok := h.requireBillingProfilePermission(w, r, u, chi.URLParam(r, "billingProfileId"), rbac.BillingProfileAddFunds)
+	if !ok {
+		return
+	}
+	doc, err := h.addFunds.CancelBankTransfer(r.Context(), bp, chi.URLParam(r, "transferId"))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	httpx.OK(w, doc)
+}
+
+// bankTransferProof streams the customer's proof file for one of the profile's transfers
+// (BILLING_PROFILE_READ); 404 when the transfer is not the profile's or carries no proof.
+func (h *BillingHandler) bankTransferProof(w http.ResponseWriter, r *http.Request) {
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	bp, ok := h.requireBillingProfileRead(w, r, u, chi.URLParam(r, "billingProfileId"))
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "transferId")
+	bt, err := h.billing.BankTransferByID(r.Context(), id)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if bt == nil || bt["billingProfileId"] != bp.ID {
+		fail(w, httpx.NotFound(fmt.Sprintf("Bank transfer %s not found ", id)))
+		return
+	}
+	payment.WriteBankTransferProof(w, bt)
 }
 
 // deposit creates a gateway PaymentIntent for a deposit and
@@ -644,6 +795,25 @@ func (h *BillingHandler) depositByCard(w http.ResponseWriter, r *http.Request) {
 // would be followed cross-origin by fetch and fail CORS ("Failed to fetch").
 func (h *BillingHandler) stripeFundsConfirm(w http.ResponseWriter, r *http.Request) {
 	txnID := chi.URLParam(r, "transactionId")
+	// The path is on the auth whitelist (a bearer is still processed when present); the console
+	// always sends one, so the caller must be a member with add-funds rights on the transaction's
+	// billing profile — a stranger cannot probe transaction ids or drive gateway reads.
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	txn, err := h.billing.AccountCreditTransactionByID(r.Context(), txnID)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if txn == nil {
+		fail(w, httpx.NotFound("Transaction not found"))
+		return
+	}
+	if _, _, ok := h.requireBillingProfilePermission(w, r, u, txn.BillingProfileID, rbac.BillingProfileAddFunds); !ok {
+		return
+	}
 	if _, err := h.addFunds.ProcessAddFunds(r.Context(), txnID); err != nil {
 		fail(w, err)
 		return
@@ -699,6 +869,22 @@ func (h *BillingHandler) listCards(w http.ResponseWriter, r *http.Request) {
 // (a redirect to the UI base would be followed by fetch cross-origin and fail CORS).
 func (h *BillingHandler) stripeCardConfirm(w http.ResponseWriter, r *http.Request) {
 	txnID := chi.URLParam(r, "transactionId")
+	u, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	txn, err := h.billing.CreditCardTransactionByID(r.Context(), txnID)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if txn == nil {
+		fail(w, httpx.NotFound("Transaction not found"))
+		return
+	}
+	if _, _, ok := h.requireBillingProfilePermission(w, r, u, txn.BillingProfileID, rbac.BillingProfileManagePaymentMethods); !ok {
+		return
+	}
 	if _, err := h.registerCard.ProcessRegisterCard(r.Context(), txnID); err != nil {
 		fail(w, err)
 		return
@@ -791,18 +977,48 @@ func (h *BillingHandler) getCardTransaction(w http.ResponseWriter, r *http.Reque
 	httpx.OK(w, *txn)
 }
 
-// accountCreditTxnDownload access-checks the
-// profile, then returns 501: the invoice PDF is rendered by an external invoice provider (not implemented here).
-// The {transactionId} path param carries the billingProfileId (chi node param-name reuse).
+// accountCreditTxnDownload streams the self-contained document for a deposit transaction of the
+// profile: REFUNDED → the credit note, SUCCESS → the deposit receipt (ProxCloud generates both; no
+// external invoice provider). Other statuses have no document (400). The {transactionId} path param
+// carries the billingProfileId (chi node param-name reuse); the real txn id is {downloadTxnId}.
 func (h *BillingHandler) accountCreditTxnDownload(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
 		return
 	}
-	if _, ok := h.requireBillingProfileRead(w, r, u, chi.URLParam(r, "transactionId")); !ok {
+	bp, _, ok := h.requireBillingProfilePermission(w, r, u, chi.URLParam(r, "transactionId"), rbac.BillingProfileReadTransactions)
+	if !ok {
 		return
 	}
-	httpx.Err(w, http.StatusNotImplemented, http.StatusNotImplemented, "invoice PDF download not implemented")
+	txnID := chi.URLParam(r, "downloadTxnId")
+	txn, err := h.billing.AccountCreditTransactionByID(r.Context(), txnID)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if txn == nil || txn.BillingProfileID != bp.ID {
+		fail(w, httpx.NotFound(fmt.Sprintf("Transaction %s not found ", txnID)))
+		return
+	}
+	issuer, _ := h.billing.IssuerInfo(r.Context())
+	var data []byte
+	var filename string
+	switch txn.Status {
+	case "REFUNDED":
+		data, filename, err = billing.CreditNotePDF(txn, bp, issuer)
+	case "SUCCESS":
+		data, filename, err = billing.DepositReceiptPDF(txn, bp, issuer)
+	default:
+		fail(w, httpx.BadRequest("No document is available for a "+txn.Status+" transaction."))
+		return
+	}
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
+	_, _ = w.Write(data)
 }
 
 // collectTxnDownload access-checks then returns a self-contained receipt PDF.
@@ -827,7 +1043,8 @@ func (h *BillingHandler) collectTxnDownload(w http.ResponseWriter, r *http.Reque
 	}
 	// An external invoice gateway would proxy a PDF; the demo has none, so ProxCloud generates a
 	// self-contained receipt instead (functional, not the external invoice).
-	data, filename, err := billing.CollectReceiptPDF(txn, bp)
+	issuer, _ := h.billing.IssuerInfo(r.Context())
+	data, filename, err := billing.CollectReceiptPDF(txn, bp, issuer)
 	if err != nil {
 		fail(w, err)
 		return
@@ -1182,9 +1399,42 @@ func (h *BillingHandler) update(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var input billing.BillingProfile
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
 		fail(w, httpx.BadRequest("Invalid request body"))
+		return
+	}
+	var raw map[string]json.RawMessage
+	var input billing.BillingProfile
+	if json.Unmarshal(body, &raw) != nil || json.Unmarshal(body, &input) != nil {
+		fail(w, httpx.BadRequest("Invalid request body"))
+		return
+	}
+	// Payment-settings body (paymentMode / paymentGatewayId only — the "Payment settings" card):
+	// partial write with its own validation, nothing else in the document rewritten.
+	if isPaymentSettingsBody(raw) {
+		var ps billing.PaymentSettings
+		if err := json.Unmarshal(body, &ps); err != nil {
+			fail(w, httpx.BadRequest("Invalid request body"))
+			return
+		}
+		saved, err := h.billing.UpdatePaymentSettings(r.Context(), bp, ps)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		httpx.OK(w, billing.ToSummary(saved).WithFinancials(r.Context(), h.billing, time.Now().UTC()))
+		return
+	}
+	// Contacts-only body (the "invoice recipients" editor): partial write, no billing-details
+	// validation, nothing else in the document rewritten.
+	if _, has := raw["contacts"]; has && len(raw) == 1 {
+		saved, err := h.billing.UpdateContacts(r.Context(), bp, input.Contacts)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		httpx.OK(w, billing.ToSummary(saved))
 		return
 	}
 	saved, err := h.billing.PopulateBillingData(r.Context(), bp, &input)

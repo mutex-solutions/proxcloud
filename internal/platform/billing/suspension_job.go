@@ -182,7 +182,7 @@ func (j *SuspensionJob) executeBillingProfile(ctx context.Context, global *prici
 		if cfg.Type == pricing.SuspensionTypeBalance {
 			template = "notify_customer_before_suspension_balance"
 		}
-		notify(ctx, j.notifier, template, profile.Email, map[string]any{
+		notify(ctx, j.notifier, template, profile, map[string]any{
 			"fullName": profileFullName(profile), "balance": balance.StringFixed(2),
 			"currency": baseCurrency, "unpaidInvoices": len(dueAts),
 		})
@@ -290,7 +290,7 @@ func (j *SuspensionJob) suspend(ctx context.Context, proc *SuspensionProcess, pr
 		return err
 	}
 	j.log.Info("suspended billing profile (auto)", "id", profile.ID)
-	notify(ctx, j.notifier, "notify_customer_is_suspended", profile.Email, map[string]any{
+	notify(ctx, j.notifier, "notify_customer_is_suspended", profile, map[string]any{
 		"fullName": profileFullName(profile), "balance": balance.StringFixed(2), "currency": currency,
 	})
 	// suspend → auditSystem(SUSPEND, ORGANIZATION, {billingProfile, balance}).
@@ -313,7 +313,7 @@ func (j *SuspensionJob) resume(ctx context.Context, profile *BillingProfile) err
 		}
 	}
 	j.log.Info("resumed billing profile (auto)", "id", profile.ID)
-	notify(ctx, j.notifier, "notify_customer_is_resumed", profile.Email, map[string]any{
+	notify(ctx, j.notifier, "notify_customer_is_resumed", profile, map[string]any{
 		"fullName": profileFullName(profile),
 	})
 	return nil

@@ -18,6 +18,7 @@ type PayService struct {
 	pricing  *pricing.Repo // tax rates for the account-credit gross legs (nil-safe → no tax)
 	notifier Notifier
 	reviewer ProfileReviewer
+	billLink BillLinkFunc // {{billUrl}} in the bill_is_paid mail (nil → "")
 }
 
 // ProfileReviewer re-evaluates a profile's suspension after its balance changes.
@@ -40,12 +41,17 @@ func (s *PayService) SetNotifier(n Notifier) { s.notifier = n }
 // SetReviewer wires the suspension auto-resume hook (called after a bill flips PAID). Nil → no-op.
 func (s *PayService) SetReviewer(r ProfileReviewer) { s.reviewer = r }
 
+// SetBillLink wires the console deep-link resolver for {{billUrl}}. Nil → empty link.
+func (s *PayService) SetBillLink(fn BillLinkFunc) { s.billLink = fn }
+
 // Sentinel errors (the canonical messages).
 var (
 	ErrBillNotFound      = errors.New("Bill not found")
 	ErrBillAlreadyPaid   = errors.New("Bill is already paid")
 	ErrCannotPayOpenBill = errors.New("Cannot pay an open bill")
 	ErrNotEnoughCredit   = errors.New("Not enough credit")
+	ErrBillNotIssued     = errors.New("bill is not issued yet")
+	ErrInvalidAmount     = errors.New("amount must be positive")
 )
 
 // PayBillWithCredits pays a bill from the credit balance:
@@ -133,23 +139,128 @@ func (s *PayService) PayBillWithCredits(ctx context.Context, profile *BillingPro
 		if err := s.repo.SaveBillDoc(ctx, bill); err != nil {
 			return nil, err
 		}
-		vars := map[string]any{"fullName": profileFullName(profile)}
-		if bill.BillingCycle != nil {
-			if bill.BillingCycle.StartDate != nil {
-				vars["startDate"] = bill.BillingCycle.StartDate.Format("2006-01-02")
-			}
-			if bill.BillingCycle.EndDate != nil {
-				vars["endDate"] = bill.BillingCycle.EndDate.Format("2006-01-02")
-			}
-		}
-		notify(ctx, s.notifier, "bill_is_paid", profile.Email, vars)
-		// re-review suspension after a bill is paid → auto-resume a
-		// SUSPENDED profile once its balance clears. Best-effort (a review failure must not fail the pay).
-		if s.reviewer != nil {
-			_ = s.reviewer.ReviewBillingProfile(ctx, profile)
-		}
+		s.afterBillPaid(ctx, profile, bill)
 	}
 	return bill, nil
+}
+
+// afterBillPaid runs the side-effects of a bill flipping PAID: the bill_is_paid mail with the
+// invoice PDF and the suspension re-review → auto-resume a SUSPENDED profile once its balance
+// clears. Both best-effort (a failure must not fail the pay).
+func (s *PayService) afterBillPaid(ctx context.Context, profile *BillingProfile, bill *pricing.Bill) {
+	NotifyBillPaid(ctx, s.notifier, s.repo, s.pricing, s.billLink, profile, bill)
+	if s.reviewer != nil {
+		_ = s.reviewer.ReviewBillingProfile(ctx, profile)
+	}
+}
+
+// ManualPayment is an offline payment an operator confirms against a SENT bill (a bank
+// transfer that showed up on the statement, cash, …). Amount is the GROSS amount received in
+// the bill's invoice (profile) currency — what the bank statement shows; nil → the bill's
+// full unpaid gross amount. PaidAt zero → now.
+type ManualPayment struct {
+	Amount     *decimal.Decimal
+	Method     string // BANK_TRANSFER | OTHER
+	Reference  string // free text (bank reference, receipt number)
+	PaidAt     time.Time
+	RecordedBy string // operator sub / key id (audit trail on the transaction metadata)
+}
+
+// RecordManualPayment records an offline payment on a SENT bill: a SUCCESS CollectTransaction
+// (paymentGatewayId = the BankTransfer integration when one is configured) is applied to the bill
+// through the golden settle helper so CollectedAmounts is recorded; when nothing is left unpaid
+// the bill flips PAID with the same mail + suspension review as PayBillWithCredits. A partial
+// amount leaves the bill SENT with the collected amount on it.
+//
+// The received gross maps back to the net product-currency amount the bill tracks
+// proportionally: net = unpaidNet × received ÷ unpaidGross — exact for the full-payment
+// default, and an overpayment still settles the bill.
+// ponytail: proportional gross→net; per-rate reverse tax if mixed-rate bills ever need cent-exact partials.
+func (s *PayService) RecordManualPayment(ctx context.Context, billID string, p ManualPayment) (*pricing.Bill, *pricing.CollectTransaction, error) {
+	bill, err := s.repo.BillByID(ctx, billID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if bill == nil {
+		return nil, nil, ErrBillNotFound
+	}
+	switch bill.Status {
+	case pricing.BillStatusPaid:
+		return nil, nil, ErrBillAlreadyPaid
+	case pricing.BillStatusOpen:
+		return nil, nil, ErrBillNotIssued
+	}
+	now := time.Now().UTC()
+	if p.PaidAt.IsZero() {
+		p.PaidAt = now
+	}
+	baseCurrency, _ := s.repo.BaseCurrency(ctx)
+	profile, err := s.repo.FindByID(ctx, bill.BillingProfileID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if profile == nil { // orphan bill: still settle it, in the base currency
+		profile = &BillingProfile{ID: bill.BillingProfileID, Currency: baseCurrency}
+	}
+	if profile.Currency == "" {
+		profile.Currency = baseCurrency
+	}
+	var rates []pricing.TaxRate
+	if s.pricing != nil {
+		all, _ := s.pricing.AllTaxRates(ctx)
+		rates = pricing.SelectTaxRates(all, profile.Country, profile.Company, now)
+	}
+	rate, err := pricing.NewExchanger(nil).GetExchangeRate(baseCurrency, profile.Currency, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	unpaidNet := pricing.GetUnpaidAmountBillProductCurrency(bill)
+	unpaidGross := rate.Mul(pricing.CalculateGrossAmount(unpaidNet, rates))
+
+	received := unpaidGross
+	if p.Amount != nil {
+		received = *p.Amount
+	}
+	if !received.IsPositive() {
+		return nil, nil, ErrInvalidAmount
+	}
+	netBase := received
+	if unpaidGross.IsPositive() {
+		netBase = unpaidNet.Mul(received).Div(unpaidGross).Round(2)
+	}
+	amount := rate.Mul(netBase) // net in the profile currency (ApplyPaidCollectOnBill converts it back)
+
+	gatewayID, err := s.repo.BankTransferGatewayID(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	paidAt := p.PaidAt.UTC()
+	txn := &pricing.CollectTransaction{
+		BillID:           bill.ID,
+		BillingProfileID: bill.BillingProfileID,
+		Currency:         profile.Currency,
+		Amount:           &amount,
+		GrossAmount:      &received,
+		ExchangeRate:     &rate,
+		PaymentGatewayID: gatewayID,
+		Status:           pricing.CollectTransactionStatusSuccess,
+		Metadata: map[string]any{
+			"manual": true, "method": p.Method, "reference": p.Reference,
+			"paidAt": paidAt.Format(time.RFC3339), "recordedBy": p.RecordedBy,
+		},
+		CreatedAt: &paidAt,
+	}
+	if txn, err = s.repo.SaveCollectTransaction(ctx, txn); err != nil {
+		return nil, nil, err
+	}
+	pricing.ApplyPaidCollectOnBill(bill, txn, baseCurrency)
+	if err := s.repo.SaveBillDoc(ctx, bill); err != nil {
+		return nil, nil, err
+	}
+	if bill.Status == pricing.BillStatusPaid {
+		s.afterBillPaid(ctx, profile, bill)
+	}
+	return bill, txn, nil
 }
 
 // billBelongsToProfile is the pay-path owner guard (mirrors the by-id lookup): a bill of another

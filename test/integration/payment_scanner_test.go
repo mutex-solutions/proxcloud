@@ -66,7 +66,7 @@ func TestTransactionScanner(t *testing.T) {
 	seedAcct("acct-ancient", ancient, "pi_fake")
 	seedAcct("acct-noext", stuck, "")
 
-	// Bills: one PAID (its collect must be CANCELLED), one SENT (its collect re-processes).
+	// Bills: one PAID (its stuck collect is reconciled against the gateway), one SENT (its collect re-processes).
 	paidBillID, sentBillID := pgdoc.NewID(), pgdoc.NewID()
 	if _, err := db.C("bill").InsertOne(ctx, pgdoc.M{"_id": paidBillID, "status": "PAID", "billingProfileId": bpID, "invoiceCurrency": "USD"}); err != nil {
 		t.Fatalf("seed paid bill: %v", err)
@@ -94,8 +94,8 @@ func TestTransactionScanner(t *testing.T) {
 	seedCollect("col-sentbill", sentBillID, stuck)
 
 	fg := &fakeGW{} // RetrievePaymentIntent → succeeded
-	addFunds := payment.NewAddFundsService(repo, pricingRepo, func(string) payment.Gateway { return fg })
-	collect := payment.NewCollectService(repo, pricingRepo, func(string) payment.Gateway { return fg })
+	addFunds := payment.NewAddFundsService(repo, pricingRepo, func(*billing.Gateway) payment.Gateway { return fg })
+	collect := payment.NewCollectService(repo, pricingRepo, func(*billing.Gateway) payment.Gateway { return fg })
 	scanner := payment.NewTransactionScanner(repo, addFunds, collect, nil)
 
 	n, err := scanner.Scan(ctx)
@@ -125,18 +125,20 @@ func TestTransactionScanner(t *testing.T) {
 	if got := status("acct-noext"); got != "PENDING" {
 		t.Errorf("acct-noext = %s, want PENDING (blank externalId skipped)", got)
 	}
-	// the deposit's AccountCredit materialized.
-	if cn, _ := db.C("accountCredit").Count(ctx, pgdoc.M{"billingProfileId": bpID}); cn != 1 {
-		t.Errorf("accountCredit count = %d, want 1", cn)
+	// the deposit's AccountCredit materialized, plus the surplus credit of the PAID bill's charge:
+	// the gateway (fakeGW) reports that stuck charge succeeded, so the money the customer paid
+	// twice is credited to the balance instead of being cancelled blind.
+	if cn, _ := db.C("accountCredit").Count(ctx, pgdoc.M{"billingProfileId": bpID}); cn != 2 {
+		t.Errorf("accountCredit count = %d, want 2 (deposit + surplus)", cn)
 	}
-	// collect on the PAID bill → CANCELLED; collect on the SENT bill → SUCCESS (re-processed).
-	var cancelled, succeeded int64
-	cancelled, _ = db.C("collectTransaction").Count(ctx, pgdoc.M{"billId": paidBillID, "status": "CANCELLED"})
-	succeeded, _ = db.C("collectTransaction").Count(ctx, pgdoc.M{"billId": sentBillID, "status": "SUCCESS"})
-	if cancelled != 1 {
-		t.Errorf("collect on PAID bill: cancelled = %d, want 1", cancelled)
+	// collect on the PAID bill → SUCCESS as a surplus credit; collect on the SENT bill → SUCCESS
+	// (re-processed, settles the bill).
+	var surplus []pricing.CollectTransaction
+	_ = db.C("collectTransaction").Find(ctx, pgdoc.M{"billId": paidBillID}, &surplus)
+	if len(surplus) != 1 || surplus[0].Status != pricing.CollectTransactionStatusSuccess || surplus[0].Metadata["surplusAccountCreditId"] == nil {
+		t.Errorf("collect on PAID bill: %+v, want SUCCESS with a surplus credit", surplus)
 	}
-	if succeeded != 1 {
+	if succeeded, _ := db.C("collectTransaction").Count(ctx, pgdoc.M{"billId": sentBillID, "status": "SUCCESS"}); succeeded != 1 {
 		t.Errorf("collect on SENT bill: succeeded = %d, want 1", succeeded)
 	}
 
