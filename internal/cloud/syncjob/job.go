@@ -23,6 +23,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/internal/platform/lock"
 	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 )
 
@@ -54,6 +55,7 @@ type Job struct {
 	publicIPs     PublicIPLister
 	releaseIP     PublicIPReleaser
 	audit         *audit.Service
+	sdnLock       *lock.ShedLock
 	now           func() time.Time
 	log           *slog.Logger
 }
@@ -86,6 +88,10 @@ func (j *Job) WithKamajiFactory(f KamajiFactory) *Job         { j.kamajiFor = f;
 func (j *Job) WithDbaasFactory(f DbaasFactory) *Job           { j.dbaasFor = f; return j }
 func (j *Job) WithProxmoxFactory(f ProxmoxFactory) *Job       { j.pveFor = f; return j }
 func (j *Job) WithNow(now func() time.Time) *Job              { j.now = now; return j }
+
+// WithSDNLock enables the isolation reconcile: it edits the rules a network change also edits, so
+// it takes the same lock (nil = no reconcile).
+func (j *Job) WithSDNLock(l *lock.ShedLock) *Job { j.sdnLock = l; return j }
 
 // SyncOne runs the sync for a single project — the admin POST /project/{id}/sync leg.
 // serviceID == "" syncs every attached CLOUD service but only
@@ -282,7 +288,29 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 		}
 		count += st.Created + st.Updated
 	}
+	j.reconcileIsolation(ctx, ps, p, es)
 	return count
+}
+
+// reconcileIsolation brings the project's firewall rules to the current rule set: a project made
+// before a rule change gets it here instead of at its next network change, and a rule deleted by
+// hand comes back. A busy lock skips this project until the next cycle.
+// ponytail: one short lock per project per cycle, so a network create can hit the usual "retry in a
+// moment" 409 during a sync. Take it only on detected drift if that ever shows up on a big cluster.
+func (j *Job) reconcileIsolation(ctx context.Context, ps *pve.Service, p *project.Project, es *externalservice.ExternalService) {
+	netCfg := es.PVENetworkConfig()
+	if j.sdnLock == nil || netCfg.CIDRPool == "" {
+		return
+	}
+	start := j.now()
+	ok, err := j.sdnLock.Lock(ctx, project.SDNApplyLockName, project.SDNApplyMaxFor, start)
+	if err != nil || !ok {
+		return
+	}
+	defer func() { _ = j.sdnLock.Unlock(ctx, project.SDNApplyLockName, 0, start, j.now()) }()
+	if err := ps.ReconcileIsolation(ctx, p.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs); err != nil {
+		j.log.Error("syncjob: reconcile isolation", "project", p.ID, "serviceId", es.ID, "err", err)
+	}
 }
 
 // syncKamajiService reconciles the project's KUBERNETES_CLUSTER resources off the kamaji
