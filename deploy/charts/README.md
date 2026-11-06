@@ -9,8 +9,8 @@ Two charts live here:
   `oci://ghcr.io/mutex-solutions/charts` at the release tag (see its own README).
 - **`database-cluster`** — the Managed Database (DBaaS) chart: ONE chart, several engines
   (`values.engine` discriminator — postgresql / mysql / mariadb / valkey / ferretdb /
-  opensearch / kafka) rendering the engine's operator CR plus an internal LB Service into the
-  tenant network and a NetworkPolicy, once per customer database, on the ops-built DBaaS
+  opensearch / kafka) rendering the engine's operator CR plus a LoadBalancer Service (MetalLB address pool) and a
+  NetworkPolicy, once per customer database, on the ops-built DBaaS
   cluster. ProxCloud writes an ArgoCD `Application` whose values come from
   `internal/cloud/dbaas/values.go` (`BuildValues` — the values contract's other half; see the
   chart's `Chart.yaml` header for the change discipline). Cluster-side setup lives in

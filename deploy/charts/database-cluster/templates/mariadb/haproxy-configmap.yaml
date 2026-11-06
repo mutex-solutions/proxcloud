@@ -50,4 +50,21 @@ data:
       # only pod. TODO-verify(drill): operator Service naming on 26.x (flagged
       # in the plan's verify list).
       server-template primary 1 {{ if gt (int .Values.instances) 1 }}{{ $name }}-primary{{ else }}{{ $name }}{{ end }}.{{ .Release.Namespace }}.svc.cluster.local:3306 check resolvers kubedns init-addr none
+    {{- if and .Values.network.readEndpoint (gt (int .Values.instances) 1) }}
+
+    # Read-only endpoint on a SECOND PORT of this same proxy, so it needs no
+    # second load balancer and costs nothing extra. 3307 is the port
+    # Percona's haproxy uses for mysql reads, so both engines answer reads on
+    # the same number.
+    #
+    # Backed by <id>-secondary, the operator Service that resolves to replicas
+    # only — a single-instance database has none, hence the gate.
+    frontend mariadb_read
+      bind *:3307
+      default_backend replicas
+
+    backend replicas
+      balance roundrobin
+      server-template replica {{ sub (int .Values.instances) 1 }} {{ $name }}-secondary.{{ .Release.Namespace }}.svc.cluster.local:3306 check resolvers kubedns init-addr none
+    {{- end }}
 {{- end }}

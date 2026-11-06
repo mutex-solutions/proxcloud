@@ -1,16 +1,21 @@
 {{- if and (eq .Values.engine "opensearch") .Values.opensearch.dashboards.enabled }}
 {{/*
 Optional SECOND chart-owned LB <id>-dash-lb: the Dashboards UI on 5601, same
-LoadBalancer wiring (and the same allowedCidrs source filter) as the main
+MetalLB address pool (and the same allowedCidrs filter) as the main
 <id>-lb in service-lb.yaml. TCP passthrough — Dashboards serves its own
 operator-generated TLS (spec.dashboards.tls in opensearchcluster.yaml).
 
-TODO-verify(drill): the SELECTOR. The operator labels the Dashboards
-Deployment pods; best-known pair below is the cluster label plus the
-dashboards deployment label (opensearch.cluster.dashboards). If the drill
-shows dashboards pods do NOT carry opster.io/opensearch-cluster, drop that
-line and select on the dashboards label alone — and re-check the
-NetworkPolicy podSelector caveat in templates/networkpolicy.yaml.
+The cluster label is opensearch.org/*, not opster.io/*: on operator 3.0.2 the
+labels moved with the api group (drill-verified off a live node pod, which
+carries no opster.io key at all — the same mistake made the NetworkPolicy
+select nothing and kept the cluster from forming).
+
+STILL TODO-verify(drill): whether the Dashboards pods carry the CLUSTER label
+at all, or only opensearch.cluster.dashboards. Dashboards were off in the
+2026-08-06 drill, so this pair is unverified — if the dash pods do not carry
+the cluster label, drop that line and select on the dashboards label alone, and
+re-check the NetworkPolicy podSelector caveat in templates/networkpolicy.yaml
+(outside that selector, the namespace default-deny blocks <id>-dash-lb).
 */}}
 {{- $name := include "database-cluster.name" . }}
 apiVersion: v1
@@ -21,6 +26,7 @@ metadata:
     {{- include "database-cluster.labels" . | nindent 4 }}
   annotations:
     {{- include "database-cluster.annotations" . | nindent 4 }}
+    {{- include "database-cluster.lbAnnotations" . | nindent 4 }}
     {{- with .Values.network.extraAnnotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
@@ -36,6 +42,6 @@ spec:
       targetPort: 5601
       protocol: TCP
   selector:
-    opster.io/opensearch-cluster: {{ $name }}
+    opensearch.org/opensearch-cluster: {{ $name }}
     opensearch.cluster.dashboards: {{ $name }}
 {{- end }}

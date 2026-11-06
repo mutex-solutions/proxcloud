@@ -1,32 +1,33 @@
 {{- if eq .Values.engine "valkey" }}
 {{/*
-=============================================================================
-TODO-VERIFY — UNVERIFIED CRD, BETA-GATED ENGINE (plan: valkey last, behind
-the provider beta flag). This template picks the hyperspike valkey-operator
-(apiVersion hyperspike.io/v1, kind Valkey) as the best-known candidate; the
-group/kind/spec below are UNPINNED best-effort and MUST be verified against
-the actually-installed operator before the beta gate opens:
+Valkey via the OFFICIAL valkey-io/valkey-operator (chart valkey-operator,
+CRD group valkey.io). An earlier revision of this file targeted the
+third-party hyperspike operator, which has no helm chart at all — only a
+raw install.yaml per release — and a different CRD shape.
 
-  kubectl api-resources | grep -i valkey
-  kubectl explain valkey.spec
+TOPOLOGY. `shards` is the number of shard groups and `replicas` the copies
+WITHIN each shard, so an HA valkey is 1 shard with N-1 replicas, NOT N shards:
+sharding splits the keyspace, it does not make it redundant. The platform
+exposes only `instances` (1 or 3) and maps it that way. The operator is
+CLUSTER-MODE ONLY — upstream states plainly that standalone and sentinel are
+not supported — so there is no mode to offer and nothing to pretend about.
 
-Things to pin at verification time (all flagged in the plan's verify list):
-  * apiVersion/kind (hyperspike.io/v1 Valkey vs a valkey-io operator CRD)
-  * replica/node field name and semantics (nodes vs shards vs replicas)
-  * pod labels (the LB selector in _helpers.tpl guesses
-    app.kubernetes.io/name=valkey + instance=<id>)
-  * auth secret name + key (engines.go pins <id>-auth — chart-provisioned?
-    operator-provisioned? adjust the ConnectionSecret tuple to match)
-  * whether valkey.parameters can be passed through (schema-only until then)
-  * restartedAt mechanism (none wired — RESTART capability stays off)
-
-Also update: rbac.yaml CRD read grant + argocd-health.yaml Lua placeholder in
-deploy/dbaas-cluster/.
-=============================================================================
+STILL BETA. What remains unverified against a live operator, and why the
+provider keeps this engine behind its beta flag:
+  * the pod labels the operator stamps (the LB selector in _helpers.tpl and
+    the NetworkPolicy podSelector both guess them)
+  * whether one LB address in front of a multi-shard cluster is usable at
+    all — a client that lands on the wrong node gets a MOVED redirect to a
+    DB-cluster pod IP that is unroutable from tenants. Safe at
+    instances 1 (one shard, one keyspace owner); shards > 1 is not offered.
+  * ~~whether the ACL user below is actually the credential engines.go
+    ConnectionSecret hands customers~~ — it is, live-verified: the account
+    authenticated but had NO permissions until the explicit `permissions`
+    grant below (see its note).
 */}}
 {{- $name := include "database-cluster.name" . }}
-apiVersion: hyperspike.io/v1
-kind: Valkey
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
 metadata:
   name: {{ $name }}
   labels:
@@ -34,19 +35,86 @@ metadata:
   annotations:
     {{- include "database-cluster.annotations" . | nindent 4 }}
 spec:
-  nodes: {{ int .Values.instances }}
+  {{/* One keyspace, instances-1 copies of it — see the topology note. */}}
+  shards: 1
+  replicas: {{ sub (int .Values.instances) 1 }}
   image: {{ include "database-cluster.image" . }}
-  tls: false
-  prometheus: {{ .Values.monitoring.enabled }}
+  {{/* The exposed account, authenticated from the PROXCLOUD-owned <id>-auth
+       secret (engines.go ConnectionSecret) rather than a chart-generated
+       password, which would re-roll on every ArgoCD render. */}}
+  users:
+    {{/* permissions is the operator's RAW ACL tail, and it is NOT optional in
+         practice: buildUserAcl (operator users.go) renders EXACTLY the rules
+         declared, and a `user … on #hash` line with no rules is a valkey user
+         with no keys and no commands — every command answered NOPERM. That is
+         how the exposed account shipped once: authenticated fine, could not
+         GET/SET a thing. `default` gets the full grant (the customer's own
+         instance — the postgresql superuser posture); customer users below
+         additionally lose @admin so an app credential cannot CONFIG SET /
+         CLUSTER / ACL against the operator's management. */}}
+    - name: default
+      enabled: true
+      permissions: "~* &* +@all"
+      passwordSecret:
+        name: {{ $name }}-auth
+        {{- /* keys, PLURAL and an ARRAY — valkey supports several passwords per
+             user for rotation. It was `key: password`, a field the CRD does not
+             have: the API server pruned it without a word, and the operator
+             fell back to its documented default, "defaults to username", i.e.
+             it looked for a key called `default` in our secret. The cluster
+             then never started —
+
+               state: Failed
+               reason: UsersACLError
+               message: user default: missing password key in secret
+
+             — with ZERO pods and, because nothing reads that condition, an
+             ArgoCD app still reporting Healthy. Live-caught on the 2026-08-06
+             engine drill. */}}
+        keys:
+          - password
+    {{- range .Values.users }}
+    {{/* Customer-declared ACL users (MANAGE_ACCESS) — the same live-verified
+         shape as `default` above: name + passwordSecret, no explicit ACL rule
+         fields (the operator owns the defaults; a wrong raw rule is the
+         UsersACLError failure mode documented above). Secret name maps
+         '_' -> '-' (config.go K8sName) to stay a legal k8s name. */}}
+    - name: {{ .name }}
+      enabled: true
+      permissions: "~* &* +@all -@admin"
+      passwordSecret:
+        name: {{ $name }}-u-{{ .name | replace "_" "-" }}
+        keys:
+          - password
+    {{- end }}
   resources:
     {{- include "database-cluster.resources" . | nindent 4 }}
-  storage:
-    spec:
-      accessModes: ["ReadWriteOnce"]
-      {{- with .Values.storage.storageClassName }}
-      storageClassName: {{ . }}
-      {{- end }}
-      resources:
-        requests:
-          storage: {{ .Values.storage.sizeGi }}Gi
+  {{- if or (gt (int .Values.instances) 1) .Values.scheduling.nodeSelector .Values.scheduling.tolerations }}
+  # valkey-operator groups placement under spec.scheduling. With more than one
+  # instance the nodes spread across scheduling.zoneKey as a HARD rule.
+  scheduling:
+    {{- with (include "database-cluster.podPlacement" .) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- if gt (int .Values.instances) 1 }}
+    affinity:
+      {{- include "database-cluster.zoneAntiAffinity" (dict "root" . "labels" (dict "valkey.io/cluster" $name)) | nindent 6 }}
+    {{- end }}
+  {{- end }}
+  persistence:
+    size: {{ .Values.storage.sizeGi }}Gi
+    {{- with .Values.storage.storageClassName }}
+    storageClassName: {{ . }}
+    {{- end }}
+    reclaimPolicy: Delete
+  {{- if .Values.monitoring.enabled }}
+  exporter:
+    enabled: true
+  {{- end }}
+  {{- with .Values.valkey.parameters }}
+  {{/* Customer-tunable valkey.conf settings (maxmemory-policy, timeout, ...).
+       Free-form string map on the CR; proxcloud allowlists what may land here. */}}
+  config:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 {{- end }}

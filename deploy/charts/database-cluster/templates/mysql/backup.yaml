@@ -1,0 +1,23 @@
+{{- if and (include "database-cluster.backupEnabled" .) (eq .Values.engine "mysql") (.Values.backup.runAt) }}
+{{/*
+On-demand Percona backup. Unlike mariadb (which has schedule.onDemand) and CNPG
+(whose Backup CR we also render), Percona expresses an ad-hoc run as its own
+object — so the stamp goes in the NAME: a new value creates a new backup, an
+unchanged one is a no-op re-apply.
+
+storageName must key into spec.backup.storages on the PerconaServerMySQL CR
+(perconaservermysql.yaml renders exactly one, "proxcloud").
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLBackup
+metadata:
+  name: {{ printf "%s-ondemand-%s" $name .Values.backup.runAt | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  clusterName: {{ $name }}
+  storageName: proxcloud
+{{- end }}

@@ -728,10 +728,11 @@ from the Application and the objects it owns. Billing:
 `billingresource/kubernetescluster.go` (control-plane fee) and
 `databasecluster.go`.
 
-Read, sync and delete work today. **Creating** a cluster or a database on a
-Proxmox provider is planned: the create legs
-(`project/cloud_kamaji_create.go`, `cloud_dbaas_create.go`) return an
-explicit "not available yet" error. See
+Read, sync and delete work today, and so does **creating a database**: its
+endpoint is a MetalLB address from `config.database.lbAddressPool`, no tenant
+network is involved. **Creating a cluster** on a Proxmox provider is planned:
+the create leg (`project/cloud_kamaji_create.go`) returns an explicit "not
+available yet" error. See
 [C3e](architecture/c4/c3-components.md#c3e-managed-services-and-object-storage).
 
 Operator guides: [managed-k8s.md](managed-k8s.md),
