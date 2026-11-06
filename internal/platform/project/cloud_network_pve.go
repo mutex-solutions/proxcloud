@@ -367,7 +367,7 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, derr.Error()))
 			return true
 		}
-		h.pveReseed(ctx, ps, es, cr.ExternalID, vm.Node)
+		h.pveReseed(ctx, ps, es, proj.ID, cr.ExternalID, vm.Node)
 		h.pveRefreshServerRow(ctx, ps, proj, cr)
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 		httpx.OK(w, map[string]any{"result": map[string]any{"rebootRequired": true}})
@@ -475,7 +475,7 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, serr.Error()))
 		return true
 	}
-	h.pveReseed(ctx, ps, es, cr.ExternalID, vm.Node)
+	h.pveReseed(ctx, ps, es, proj.ID, cr.ExternalID, vm.Node)
 	h.pveRefreshServerRow(ctx, ps, proj, cr)
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 	httpx.OK(w, map[string]any{"result": map[string]any{"ip": ip.IP, "networkId": netID, "rebootRequired": true}})

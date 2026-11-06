@@ -158,6 +158,21 @@ func (r *Repo) Update(ctx context.Context, res *CloudResource) (*CloudResource, 
 	return out, nil
 }
 
+// ChangeExternalID follows a resource whose provider id changed, keeping the row and so its id. A row
+// a sync already made for the new id goes: it is the same resource seen too early.
+func (r *Repo) ChangeExternalID(ctx context.Context, res *CloudResource, externalID string) error {
+	return r.db.WithTx(ctx, func(tc context.Context) error {
+		if _, err := r.resources.DeleteMany(tc, pgdoc.M{"externalId": externalID, "serviceId": res.ServiceID, "_id": pgdoc.M{"$ne": res.ID}}); err != nil {
+			return err
+		}
+		if _, err := r.resources.SetByID(tc, res.ID, pgdoc.M{"externalId": externalID}, nil); err != nil {
+			return err
+		}
+		res.ExternalID = externalID
+		return nil
+	})
+}
+
 // FindByServiceIDAndExternalID returns the cached resource, or (nil,nil).
 func (r *Repo) FindByServiceIDAndExternalID(ctx context.Context, serviceID, externalID string) (*CloudResource, error) {
 	var out CloudResource

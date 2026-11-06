@@ -407,12 +407,14 @@ func run() error {
 	// Per-organization SSO: on when a Keycloak service account for the customer realm is configured.
 	var ssoH *sso.Handler
 	var ssoSvc *sso.Service
+	var kcAccounts *sso.KCAdmin
 	if cfg.SSO.ClientSecret != "" && cfg.Auth.Main.IssuerURI != "" {
 		kc, err := sso.NewKCAdmin(cfg.Auth.Main.IssuerURI, cfg.Auth.Main.DiscoveryURI, cfg.SSO.ClientID, cfg.SSO.ClientSecret)
 		if err != nil {
 			return err
 		}
 		adminH.SetKeycloak(kc)
+		kcAccounts = kc
 		if cfg.Auth.Main.IssuerURI == cfg.Auth.Admin.IssuerURI {
 			log.Warn("per-organization SSO with operators in the customer realm: development only")
 		}
@@ -434,6 +436,9 @@ func run() error {
 		go ssoSvc.Run(ctx)
 	}
 	adminAPIH := adminapi.NewHandler(pg, orgRepo, users, esSvc, auditSvc, cfg.Auth.AdminAPI.IssuerURI, cfg.Auth.AdminAPI.ClientID)
+	if kcAccounts != nil {
+		adminAPIH.SetKeycloak(kcAccounts)
+	}
 	// MCP endpoint (/mcp): client toolset for clients-realm JWTs, admin toolset for
 	// admin-realm JWTs or `Bearer pk.sk` hmac api keys. Tools dispatch in-process
 	// through the app router (root wired in server.AppRouter).
@@ -468,7 +473,8 @@ func run() error {
 		WithKamajiFactory(kamajiFactory).
 		WithAudit(auditSvc).
 		WithSDNLock(lock.New(pg)).
-		WithShareAccess(projectH.ReconcileShareAccess)
+		WithShareAccess(projectH.ReconcileShareAccess).
+		WithStaleSeeds(projectH.DropStaleSeeds)
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)

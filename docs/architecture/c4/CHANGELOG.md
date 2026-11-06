@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Seeds stay with their project, a retype keeps its row
+
+**What changed**
+
+- A seed is looked up by service, project and vmid. The sync drops seeds whose VM is gone or whose vmid now belongs to
+  another project.
+- A volume retype repoints the row at the new volid (`cloud.Repo.ChangeExternalID`) instead of archiving it.
+- `POST /admin-api/v1/users` without a `sub` makes the Keycloak login, or answers 400 with no service account.
+
+**Why**
+
+- PVE reuses vmids, and a seed holds user-data, so a stale seed could reach another tenant's VM on its next reseed.
+- A bill is keyed on the row id, and the same disk showed as deleted next to a new one after a change of type.
+- A generated `sub` matched no login, so the created user could never sign in.
+- Keycloak calls tenant-chosen SSO URLs out of the API's reach, and DNS can change after the check at save time, so
+  the egress policy is now a documented install requirement rather than something the code claims to cover.
+
+**Diagrams updated**: none: no container or component changes.
+
 ## 2026-11-07: Money paths: upfront contracts are paid for, credit has one writer per profile
 
 **What changed**

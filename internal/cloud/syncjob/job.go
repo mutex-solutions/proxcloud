@@ -57,6 +57,7 @@ type Job struct {
 	audit         *audit.Service
 	sdnLock       *lock.ShedLock
 	shareAccess   func(ctx context.Context, projectID string) error
+	staleSeeds    func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
 	now           func() time.Time
 	log           *slog.Logger
 }
@@ -135,6 +136,12 @@ func (j *Job) SyncOne(ctx context.Context, projectID, serviceID string) error {
 	return nil
 }
 
+// WithStaleSeeds wires the cleanup of seeds whose VM is gone (nil = none).
+func (j *Job) WithStaleSeeds(f func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error) *Job {
+	j.staleSeeds = f
+	return j
+}
+
 // Run syncs every ENABLED project's CLOUD-service resources. Returns the total SERVER+PORT
 // resources synced. Per-project / per-service failures are logged and skipped.
 func (j *Job) Run(ctx context.Context) (int, error) {
@@ -174,6 +181,11 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 		}
 		if _, err := j.services.DetectPVECapabilities(ctx, es, ps.C); err != nil {
 			j.log.Warn("syncjob: pve capability detection", "serviceId", es.ID, "err", err)
+		}
+		if j.staleSeeds != nil {
+			if err := j.staleSeeds(ctx, ps, es); err != nil {
+				j.log.Warn("syncjob: drop stale seeds", "serviceId", es.ID, "err", err)
+			}
 		}
 	}
 }
