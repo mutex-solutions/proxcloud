@@ -2,6 +2,7 @@ package kamaji
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func testSpec() ClusterSpec {
 		NodeGroups: []NodeGroup{
 			{Name: "workers", FlavorID: "m5.large", Count: 3,
 				Labels: map[string]string{"tier": "app"}, Taints: []string{"gpu=true:NoSchedule"}},
-			{Name: "burst", FlavorID: "m5.xlarge", Autoscale: true, Min: 1, Max: 5, RootVolumeGiB: 200},
+			{Name: "burst", FlavorID: "m5.xlarge", Count: 1, RootVolumeGiB: 200},
 		},
 	}
 }
@@ -54,9 +55,9 @@ func TestSpecValidate(t *testing.T) {
 		t.Error("no node groups: want error")
 	}
 	bad = testSpec()
-	bad.NodeGroups[1].Max = 0
-	if err := bad.Validate(d); err == nil {
-		t.Error("autoscale max < min: want error")
+	bad.NodeGroups[1].Autoscale = true
+	if err := bad.Validate(d); err == nil || !strings.Contains(err.Error(), "autoscaling") {
+		t.Errorf("autoscale: want a refusal, got %v", err)
 	}
 	// Flavor allowlist: when configured, only listed flavors pass.
 	allow := d
@@ -91,22 +92,6 @@ func TestSpecValidate(t *testing.T) {
 	noDisk.RootVolumeGiB = 0
 	if err := testSpec().Validate(noDisk); err == nil {
 		t.Error("no root volume size anywhere: want error")
-	}
-	// BYO network needs BOTH ids or neither — a lone one is a half-configured cluster.
-	half := testSpec()
-	half.NetworkID = "net-1"
-	if err := half.Validate(d); err == nil {
-		t.Error("networkId without subnetId: want error")
-	}
-	half = testSpec()
-	half.SubnetID = "sub-1"
-	if err := half.Validate(d); err == nil {
-		t.Error("subnetId without networkId: want error")
-	}
-	both := testSpec()
-	both.NetworkID, both.SubnetID = "net-1", "sub-1"
-	if err := both.Validate(d); err != nil {
-		t.Errorf("networkId+subnetId together: %v", err)
 	}
 }
 
@@ -145,10 +130,6 @@ func TestBuildValues(t *testing.T) {
 	if oidc["issuerUrl"] != "https://idp.example.com" || oidc["clientId"] != "kube" {
 		t.Errorf("oidc = %v", oidc)
 	}
-	// Dedicated network (no BYO ids): no clusterNetworking block at all.
-	if _, has := v["clusterNetworking"]; has {
-		t.Error("dedicated cluster must not carry a clusterNetworking block")
-	}
 	groups := v["nodeGroups"].([]any)
 	if len(groups) != 2 {
 		t.Fatalf("nodeGroups = %d", len(groups))
@@ -162,11 +143,7 @@ func TestBuildValues(t *testing.T) {
 		"name":           "workers",
 		"machineFlavor":  "m5.large",
 		"machineImageId": "img-1354", // resolved from the version matrix
-		// Fixed group: count == min == max, autoscale false.
-		"autoscale":       false,
-		"machineCount":    3,
-		"machineCountMin": 3,
-		"machineCountMax": 3,
+		"machineCount":   3,
 	} {
 		if g0[key] != want {
 			t.Errorf("node group key %q = %v, want %v", key, g0[key], want)
@@ -186,19 +163,8 @@ func TestBuildValues(t *testing.T) {
 	}
 
 	g1 := groups[1].(map[string]any)
-	if g1["autoscale"] != true || g1["machineCountMin"] != 1 || g1["machineCountMax"] != 5 {
-		t.Errorf("autoscale group = %v", g1)
-	}
-	// An autoscaling MachineDeployment still needs a starting size — the floor, never zero.
-	if g1["machineCount"] != 1 {
-		t.Errorf("autoscale group machineCount = %v, want the min", g1["machineCount"])
-	}
 	if rv := g1["machineRootVolume"].(map[string]any); rv["diskSize"] != 200 { // per-group override
 		t.Errorf("per-group machineRootVolume = %v", rv)
-	}
-	// Autoscaler image tag follows the cluster minor (chart constraint).
-	if tag := dig(v, "autoscaler", "image", "tag"); tag != "v1.35.0" {
-		t.Errorf("autoscaler tag = %v", tag)
 	}
 	// The addons block is the CHART's business — proxcloud must not send one without customer
 	// picks, and in particular must never push the cloud credential into the workload cluster.
@@ -216,9 +182,6 @@ func TestBuildValues(t *testing.T) {
 	}
 	if labels := back[0]["labels"].(map[string]any); labels["tier"] != "app" {
 		t.Errorf("round-trip labels = %v", labels)
-	}
-	if back[1]["min"] != 1 || back[1]["max"] != 5 || back[1]["autoscale"] != true {
-		t.Errorf("round-trip autoscale = %v", back[1])
 	}
 
 	// No OIDC issuer → no oidc block at all (chart default = disabled).
@@ -337,8 +300,6 @@ func TestClusterAddons(t *testing.T) {
 	// what an API user gets by omitting the block. Update all three together, deliberately.
 	want := map[string]bool{
 		"certManager": false, "ingress": false, "metricsServer": true,
-		"monitoring": false, "nodeProblemDetector": true, "nvidiaGPUOperator": false,
-		"reloader": false,
 	}
 	if len(ClusterAddons) != len(want) {
 		t.Errorf("ClusterAddons = %v, want %v", ClusterAddons, want)
@@ -350,21 +311,51 @@ func TestClusterAddons(t *testing.T) {
 	}
 }
 
-func TestBuildValuesBYONetwork(t *testing.T) {
+// The chart reads these keys; the portal is what fills them.
+func TestBuildValuesProxmoxBlock(t *testing.T) {
 	cfg := testCfg()
+	cfg.Defaults.NodeGroupMTU = 1450
 	spec := testSpec()
-	spec.NetworkID, spec.SubnetID = "net-9", "sub-9"
-	v := BuildValues(cfg, spec)
-
-	cn := v["clusterNetworking"].(map[string]any)
-	in := cn["internalNetwork"].(map[string]any)
-	// Ids only, under networkFilter/subnetFilter — the exact shape the chart's BYO branch reads
-	// (and the shape that, mis-rendered as {id: nil}, caused the 0.4.0 unprovisionable bug).
-	if id := dig(in, "networkFilter", "id"); id != "net-9" {
-		t.Errorf("networkFilter.id = %v", id)
+	spec.Infra = ClusterInfra{
+		Region: "r1", Pool: "pc-p1", Storage: "local-zfs", Bridge: "vnet1", Gateway: "192.0.2.1", Prefix: 24,
+		Addresses: []string{"192.0.2.200"}, LBAddresses: []string{"192.0.2.190"},
+		StorageClasses: []StorageClass{{Name: "std", Storage: "local-zfs"}},
 	}
-	if id := dig(in, "subnetFilter", "id"); id != "sub-9" {
-		t.Errorf("subnetFilter.id = %v", id)
+	spec.NodeGroups[0].Cores, spec.NodeGroups[0].MemoryMiB, spec.NodeGroups[0].Tags = 2, 2048, []string{"proxcloud", "fl-small"}
+	v := BuildValues(cfg, spec)
+	for keys, want := range map[string]any{
+		"region": "r1", "pool": "pc-p1", "storage": "local-zfs",
+	} {
+		if got := dig(v, "proxmox", keys); got != want {
+			t.Errorf("proxmox.%s = %v", keys, got)
+		}
+	}
+	if got := dig(v, "proxmox", "network", "bridge"); got != "vnet1" {
+		t.Errorf("bridge = %v", got)
+	}
+	if got := dig(v, "proxmox", "network", "mtu"); got != 1450 {
+		t.Errorf("mtu = %v", got)
+	}
+	if got := dig(v, "proxmox", "network", "addresses").([]any); len(got) != 1 || got[0] != "192.0.2.200" {
+		t.Errorf("addresses = %v", got)
+	}
+	if got := dig(v, "proxmox", "csi", "configSecretName"); got != "stc-abcd1234-csi-config" {
+		t.Errorf("csi secret = %v", got)
+	}
+	if got := dig(v, "proxmox", "metallb", "addresses").([]any); got[0] != "192.0.2.190" {
+		t.Errorf("metallb = %v", got)
+	}
+	g := v["nodeGroups"].([]any)[0].(map[string]any)
+	if g["machineCores"] != 2 || g["machineMemoryMiB"] != 2048 {
+		t.Errorf("size = %v", g)
+	}
+	if tags := g["machineTags"].([]any); len(tags) != 2 || tags[1] != "fl-small" {
+		t.Errorf("tags = %v", tags)
+	}
+	// No credential may enter the values: they sit in an Application anyone with argocd read can see.
+	raw, _ := json.Marshal(v)
+	if strings.Contains(string(raw), "token") {
+		t.Errorf("values mention a token: %s", raw)
 	}
 }
 
@@ -456,6 +447,9 @@ func (f *fakeAPI) DeleteNamespace(_ context.Context, name string) error {
 	delete(f.namespaces, name)
 	f.deleted = append(f.deleted, "namespace:"+name)
 	return nil
+}
+func (f *fakeAPI) ApplyResourceSetSecret(_ context.Context, ns, name string, sd, labels map[string]string) error {
+	return f.ApplySecret(context.Background(), ns, name, sd, labels, nil)
 }
 func (f *fakeAPI) ApplySecret(_ context.Context, ns, name string, sd map[string]string, labels, annotations map[string]string) error {
 	f.secrets[ns+"/"+name] = sd
@@ -581,7 +575,7 @@ func TestServiceCreateDelete(t *testing.T) {
 	svc := NewWithAPI(api, testCfg(), "svc-1")
 	ctx := context.Background()
 
-	data, err := svc.CreateCluster(ctx, testSpec(), map[string]string{"token": "t"})
+	data, err := svc.CreateCluster(ctx, testSpec(), ClusterSecrets{Cloud: map[string]string{"token": "t"}, CSIManifest: "m"})
 	if err != nil {
 		t.Fatalf("CreateCluster: %v", err)
 	}
@@ -591,6 +585,9 @@ func TestServiceCreateDelete(t *testing.T) {
 	sd := api.secrets["pc-p1/stc-abcd1234-cloud-config"]
 	if sd == nil || sd["token"] != "t" {
 		t.Errorf("cloud-config secret = %v", sd)
+	}
+	if csi := api.secrets["pc-p1/stc-abcd1234-csi-config"]; csi["csi.yaml"] != "m" {
+		t.Errorf("csi secret = %v", csi)
 	}
 	if api.apps["argocd/stc-abcd1234"] == nil {
 		t.Error("application not applied")
@@ -608,8 +605,8 @@ func TestServiceCreateDelete(t *testing.T) {
 	}
 	// The credentials secret must SURVIVE the cluster delete — the infrastructure provider needs
 	// it while the ArgoCD cascade deletes the worker VMs. FinalizeOrphans reaps it afterwards.
-	if len(api.secrets) != 1 {
-		t.Error("credentials secret must outlive the application delete")
+	if len(api.secrets) != 2 {
+		t.Error("credentials secrets must outlive the application delete")
 	}
 	// Idempotent: deleting again is fine.
 	if err := svc.DeleteCluster(ctx, "p1", "stc-abcd1234"); err != nil {
@@ -622,7 +619,7 @@ func TestFinalizeOrphans(t *testing.T) {
 	svc := NewWithAPI(api, testCfg(), "svc-1")
 	ctx := context.Background()
 	spec := testSpec()
-	if _, err := svc.CreateCluster(ctx, spec, nil); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -630,7 +627,7 @@ func TestFinalizeOrphans(t *testing.T) {
 	if _, err := svc.FinalizeOrphans(ctx, "p1"); err != nil {
 		t.Fatalf("FinalizeOrphans (live): %v", err)
 	}
-	if len(api.secrets) != 1 {
+	if len(api.secrets) != 2 {
 		t.Fatal("live cluster must not be finalized")
 	}
 
@@ -644,7 +641,7 @@ func TestFinalizeOrphans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FinalizeOrphans (cascade): %v", err)
 	}
-	if pending != 1 || len(api.secrets) != 1 {
+	if pending != 1 || len(api.secrets) != 2 {
 		t.Fatalf("in-flight cascade must stay pending (pending=%d)", pending)
 	}
 
@@ -657,7 +654,7 @@ func TestFinalizeOrphans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FinalizeOrphans (grace): %v", err)
 	}
-	if pending != 1 || len(api.secrets) != 1 {
+	if pending != 1 || len(api.secrets) != 2 {
 		t.Fatalf("fresh secret must ride out the grace window (pending=%d)", pending)
 	}
 
@@ -678,7 +675,7 @@ func TestFinalizeOrphans(t *testing.T) {
 	// cluster's leftovers finalize through FinalizeAllOrphans without any project doc.
 	spec2 := testSpec()
 	spec2.ID = "stc-second01"
-	if _, err := svc.CreateCluster(ctx, spec2, nil); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec2, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.DeleteCluster(ctx, "p1", spec2.ID); err != nil {
@@ -852,7 +849,7 @@ func TestPatchClusterValuesUpgrade(t *testing.T) {
 	svc := NewWithAPI(api, cfg, "svc-1")
 	ctx := context.Background()
 	spec := testSpec()
-	if _, err := svc.CreateCluster(ctx, spec, nil); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -900,7 +897,7 @@ func TestSetChartVersionAndPins(t *testing.T) {
 	svc := NewWithAPI(api, testCfg(), "svc-1")
 	ctx := context.Background()
 	spec := testSpec()
-	if _, err := svc.CreateCluster(ctx, spec, nil); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
 		t.Fatal(err)
 	}
 	pins, err := svc.ListClusterPins(ctx)
@@ -931,7 +928,7 @@ func TestSyncProviderList(t *testing.T) {
 	svc := NewWithAPI(api, cfg, "svc-1")
 	ctx := context.Background()
 	spec := testSpec()
-	if _, err := svc.CreateCluster(ctx, spec, nil); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
 		t.Fatal(err)
 	}
 	// Enrich the fake with live status: argo health + TCP endpoint + one MD.
@@ -946,8 +943,11 @@ func TestSyncProviderList(t *testing.T) {
 		"status":   map[string]any{"controlPlaneEndpoint": "10.0.0.5:6443"},
 	}
 	api.mds = []map[string]any{{
-		"metadata": map[string]any{"name": spec.ID + "-workers"},
-		"status":   map[string]any{"replicas": float64(3), "readyReplicas": float64(2), "phase": "ScalingUp"},
+		"metadata": map[string]any{"name": spec.ID + "-workers-pve1", "labels": map[string]any{labelNodeGroup: "workers"}},
+		"status":   map[string]any{"replicas": float64(2), "readyReplicas": float64(1), "phase": "ScalingUp"},
+	}, {
+		"metadata": map[string]any{"name": spec.ID + "-workers-pve2", "labels": map[string]any{labelNodeGroup: "workers"}},
+		"status":   map[string]any{"replicas": float64(1), "readyReplicas": float64(1), "phase": "Running"},
 	}}
 
 	// A PRE-PROXCLOUD cluster on the same management cluster (same project label but NO managed-by

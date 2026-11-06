@@ -1,0 +1,77 @@
+# FULL values contract, mirrored by internal/cloud/kamaji/values.go (BuildValues). The portal renders
+# every key per cluster; the defaults below only make `helm template` and lint work. No secrets here:
+# this document sits in an ArgoCD Application. Credentials live in the two Secrets named below.
+
+# -- Kubernetes version of the control plane and the workers, without the leading v.
+kubernetesVersion: "1.35.10"
+
+# -- Secret with url, token and secret: the per-cluster PVE token CAPMOX runs under. Management side only.
+cloudCredentialsSecretName: example-cloud-config
+
+kamajiControlPlane:
+  replicas: 1
+  dataStoreName: default
+  network:
+    serviceType: LoadBalancer
+    # loadBalancerSourceRanges: [192.0.2.0/24]
+    # certSANs: [cluster.example.com]
+    # serviceAnnotations: {}
+
+clusterNetwork:
+  pods: 10.244.0.0/16
+  services: 10.96.0.0/12
+
+proxmox:
+  # -- Region label on the nodes; proxmox-csi matches it against its cluster config.
+  region: example
+  # -- PVE pool the worker VMs land in: the project's own, so they sync and bill as servers.
+  pool: pc-example
+  # -- Storage the boot disks clone to.
+  storage: local-zfs
+  network:
+    # -- Vnet or bridge of the workers.
+    bridge: vexample
+    gateway: 192.0.2.1
+    prefix: 24
+    # -- Worker addresses (IPAM), carved from the subnet by the portal.
+    addresses: ["192.0.2.200-192.0.2.215"]
+    dnsServers: ["192.0.2.53"]
+    # -- 0 = the guest default. EVPN vnets need the vnet MTU here.
+    mtu: 0
+  csi:
+    # -- Secret with the manifest of the tenant-side proxmox-csi config (type addons.cluster.x-k8s.io/resource-set).
+    configSecretName: example-csi-config
+    # -- One tenant StorageClass per storage. The first is the default class.
+    storageClasses:
+      - {name: std, storage: local-zfs}
+  metallb:
+    # -- LoadBalancer addresses inside the tenant cluster, carved from the same subnet.
+    addresses: ["192.0.2.216-192.0.2.231"]
+
+nodeGroups:
+  - name: workers
+    machineFlavor: example-small
+    # -- <pve node>=<template vmid>,... One MachineDeployment per entry: a clone stays on its template's node.
+    machineImageId: "pve1=9210"
+    machineCores: 2
+    machineMemoryMiB: 2048
+    machineRootVolume: {diskSize: 30}
+    machineTags: [proxcloud]
+    machineCount: 1
+    # nodeLabels: {key: value}
+    # taints: [{key: k, value: v, effect: NoSchedule}]
+
+# -- Chart repos and versions of what CAAPH installs in the tenant cluster. Operator territory.
+addonCharts:
+  cilium: {repoURL: "https://helm.cilium.io", chart: cilium, version: "1.18.16"}
+  proxmoxCsi: {repoURL: "oci://ghcr.io/sergelogvinov/charts", chart: proxmox-csi-plugin, version: "0.5.15"}
+  metallb: {repoURL: "https://metallb.github.io/metallb", chart: metallb, version: "0.16.2"}
+  metricsServer: {repoURL: "https://kubernetes-sigs.github.io/metrics-server", chart: metrics-server, version: "3.13.0"}
+  certManager: {repoURL: "https://charts.jetstack.io", chart: cert-manager, version: "v1.20.2"}
+  ingress: {repoURL: "https://kubernetes.github.io/ingress-nginx", chart: ingress-nginx, version: "4.13.3"}
+
+# -- The tenant's add-on picks, addons.<name>.enabled. metricsServer defaults on.
+addons:
+  metricsServer: {enabled: true}
+  certManager: {enabled: false}
+  ingress: {enabled: false}

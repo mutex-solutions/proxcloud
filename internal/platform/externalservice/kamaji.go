@@ -19,8 +19,11 @@ package externalservice
 //	    "cluster": {                      // chart-value defaults every cluster inherits
 //	      "dataStoreName":     "default",
 //	      "dnsZone":           "k8s.example.com",
-//	      "versions":          {"1.35.4": "<node-image-id>"},  // curated version→DEFAULT-image matrix
-//	      "imageVariants":     {"nvidia": {"1.35.4": "<node-image-id>"}}  // optional per-version variants
+//	      "versions":          {"1.35.10": "pve1=9210,pve2=9211"},  // version→template per PVE node
+//	      "imageVariants":     {"nvidia": {"1.35.4": "<node-image-id>"}},  // optional per-version variants
+//	      "pveApiUrl":         "https://192.0.2.11:8006",  // the PVE API as CAPMOX reaches it
+//	      "pveCsiUrl":         "https://192.0.2.60:8006",  // the same as tenant workers reach it
+//	      "workerMtu":         1450                        // EVPN vnets
 //	    }
 //	  },
 //	  "secret": {"kubeconfig": "<management-cluster kubeconfig>"}  // encrypted at rest
@@ -104,7 +107,22 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 			Flavors:       flavors,
 			RootVolumeGiB: intOf(cl["rootVolumeGiB"]),
 			AllowedCIDRs:  strList(cl["allowedCidrs"]),
+			PVEAPIURL:     str(cl["pveApiUrl"]),
+			PVECSIURL:     str(cl["pveCsiUrl"]),
+			DNSServers:    strList(cl["dnsServers"]),
+			NodeGroupMTU:  intOf(cl["workerMtu"]),
+
+			ProxmoxServiceID: str(cl["proxmoxServiceId"]),
 		},
+	}
+	if sw, ok := cl["sharedWorkers"].(map[string]any); ok && str(sw["bridge"]) != "" {
+		sec := e.secretMap()
+		cfg.Defaults.Shared = &kamaji.SharedWorkers{
+			Pool: str(sw["pool"]), Bridge: str(sw["bridge"]), Gateway: str(sw["gateway"]), Prefix: intOf(sw["prefix"]),
+			First: str(sw["first"]), Last: str(sw["last"]),
+			CAPITokenID: str(sw["capiTokenId"]), CAPISecret: str(sec["sharedCapiSecret"]),
+			CSITokenID: str(sw["csiTokenId"]), CSISecret: str(sec["sharedCsiSecret"]),
+		}
 	}
 	if cfg.ArgoNamespace == "" {
 		cfg.ArgoNamespace = "argocd"

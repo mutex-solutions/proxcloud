@@ -1,0 +1,114 @@
+# Stage 50, mode=split: the services cluster. The mgmt cluster gets Cluster API and CAPMOX and builds a kubeadm
+# cluster of PVE VMs; that cluster then runs Kamaji, its own Cluster API (for tenant clusters), ArgoCD, MetalLB,
+# proxmox-csi and the database operators. Every step is idempotent.
+- name: Build the services cluster
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  vars:
+    svc: "{{ pc.services }}"
+    kube: "{{ pc_gen }}/services.kubeconfig"
+    pc_services_capi_token_id: "{{ svc.capi_token_id }}"
+    pc_services_capi_token_secret: "{{ lookup('ansible.builtin.file', pc_gen ~ '/' ~ svc.capi_token_file) | trim }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    - name: Skip outside split mode
+      ansible.builtin.meta: end_play
+      when: pc.mode != 'split'
+    - name: Install clusterctl and helm
+      ansible.builtin.shell: |
+        set -eu
+        curl -fsSL -o /usr/local/bin/clusterctl https://github.com/kubernetes-sigs/cluster-api/releases/download/{{ pc_ver.capi }}/clusterctl-linux-amd64
+        chmod +x /usr/local/bin/clusterctl
+        [ -x /usr/local/bin/helm ] || curl -fsSL https://get.helm.sh/helm-{{ pc_ver.helm }}-linux-amd64.tar.gz | tar -xz -C /usr/local/bin --strip-components=1 linux-amd64/helm
+      args: {creates: /usr/local/bin/clusterctl}
+    - name: Is Cluster API on the mgmt cluster
+      ansible.builtin.command: k3s kubectl get deploy -n capi-system capi-controller-manager
+      register: pc_capi
+      changed_when: false
+      failed_when: false
+    - name: Install Cluster API on the mgmt cluster
+      when: pc_capi.rc != 0
+      ansible.builtin.command: >-
+        clusterctl init --core cluster-api:{{ pc_ver.capi }} --bootstrap kubeadm:{{ pc_ver.capi }}
+        --control-plane kubeadm:{{ pc_ver.capi }} --infrastructure proxmox:{{ pc_ver.capmox }}
+        --ipam in-cluster:{{ pc_ver.capi_ipam }} --wait-providers
+      # Empty on purpose: a manager-level credential silently wins over every ProxmoxCluster.credentialsRef.
+      environment: {PROXMOX_URL: "", PROXMOX_TOKEN: "", PROXMOX_SECRET: ""}
+    - name: Apply the services cluster
+      ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        apply_name: services cluster
+        apply_no_log: true
+        manifest: "{{ lookup('ansible.builtin.template', 'templates/services-cluster.yml.j2') }}"
+    - name: Wait for its kubeconfig
+      ansible.builtin.command: k3s kubectl -n pc-services get secret pc-services-kubeconfig -o jsonpath={.data.value}
+      register: pc_kc
+      changed_when: false
+      no_log: true
+      retries: 90
+      delay: 20
+      until: pc_kc.rc == 0 and pc_kc.stdout != ''
+    - name: Keep the kubeconfig on the mgmt host
+      ansible.builtin.copy:
+        dest: /root/services.kubeconfig
+        content: "{{ pc_kc.stdout | b64decode }}"
+        mode: "0600"
+      no_log: true
+    - name: Keep the kubeconfig in the site directory
+      ansible.builtin.copy:
+        dest: "{{ kube }}"
+        content: "{{ pc_kc.stdout | b64decode }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+    - name: Create the platform bundle's directories
+      ansible.builtin.file: {path: "/root/services-bundle/{{ item }}", state: directory, mode: "0700"}
+      loop: [manifests, charts]
+    - name: Copy the platform bundle
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "/root/services-bundle/{{ item.dest }}"
+        mode: preserve
+      loop:
+        - {src: files/services-platform.sh, dest: services-platform.sh}
+        - {src: templates/registry.yml.j2, dest: registry.yml}
+        - {src: "{{ pc_repo_root }}/deploy/mgmt-cluster/rbac.yaml", dest: manifests/mgmt-rbac.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/mgmt-cluster/appproject.yaml", dest: manifests/mgmt-appproject.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/mgmt-cluster/argocd-health.yaml", dest: manifests/mgmt-health.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/dbaas-cluster/rbac.yaml", dest: manifests/dbaas-rbac.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/dbaas-cluster/appproject.yaml", dest: manifests/dbaas-appproject.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/dbaas-cluster/argocd-health.yaml", dest: manifests/dbaas-health.yaml}
+        - {src: "{{ pc_repo_root }}/deploy/charts/proxmox-kamaji-cluster/", dest: charts/proxmox-kamaji-cluster/}
+        - {src: "{{ pc_repo_root }}/deploy/charts/database-cluster/", dest: charts/database-cluster/}
+    - name: Run the platform script
+      ansible.builtin.command: bash /root/services-bundle/services-platform.sh
+      environment:
+        KUBECONFIG: /root/services.kubeconfig
+        METALLB_RANGE: "{{ svc.network.metallb }}"
+        PVE_API_URL: "{{ pc_portal_pve_url }}"
+        PVE_NODE_IPS: "{{ svc.pve_node_ips | join(' ') }}"
+        PVE_PROXY_IP: "{{ svc.network.pve_proxy_ip }}"
+        CSI_TOKEN_ID: "{{ svc.csi_token_id }}"
+        CSI_TOKEN_SECRET: "{{ lookup('ansible.builtin.file', pc_gen ~ '/' ~ svc.csi_token_file) | trim }}"
+        REGION: "{{ pc.provider.region }}"
+        STORAGE: "{{ svc.storage }}"
+        CHART_REPO: "{{ svc.chart_repo }}"
+        CILIUM_VERSION: "{{ pc_ver.cilium_chart }}"
+        CERT_MANAGER_VERSION: "{{ pc_ver.cert_manager_chart }}"
+        METALLB_VERSION: "{{ pc_ver.metallb_chart }}"
+        CSI_VERSION: "{{ pc_ver.proxmox_csi_chart }}"
+        ARGOCD_VERSION: "{{ pc_ver.argocd_chart }}"
+        CNPG_VERSION: "{{ pc_ver.cnpg_chart }}"
+        CAPI_VERSION: "{{ pc_ver.capi }}"
+        CAPMOX_VERSION: "{{ pc_ver.capmox }}"
+        IPAM_VERSION: "{{ pc_ver.capi_ipam }}"
+        KAMAJI_CP_VERSION: "{{ pc_ver.capi_kamaji }}"
+        CAAPH_VERSION: "{{ pc_ver.caaph }}"
+        KAMAJI_IMAGE_TAG: "{{ pc_ver.kamaji_image }}"
+        KAMAJI_ETCD_VERSION: "{{ pc_ver.kamaji_etcd_chart }}"
+        BARMAN_PLUGIN_VERSION: "{{ pc_ver.barman_plugin }}"
+      changed_when: false
+      no_log: true

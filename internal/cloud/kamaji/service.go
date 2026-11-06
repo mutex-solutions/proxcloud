@@ -21,6 +21,7 @@ type K8sAPI interface {
 	GetNamespace(ctx context.Context, name string) (map[string]any, error)
 	DeleteNamespace(ctx context.Context, name string) error
 	ApplySecret(ctx context.Context, ns, name string, stringData map[string]string, labels, annotations map[string]string) error
+	ApplyResourceSetSecret(ctx context.Context, ns, name string, stringData, labels map[string]string) error
 	GetSecretData(ctx context.Context, ns, name string) (map[string][]byte, error)
 	ListSecrets(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
 	ListSecretsAllNamespaces(ctx context.Context, labelSelector string) ([]map[string]any, error)
@@ -48,7 +49,28 @@ type Service struct {
 	cfg           Config
 	serviceID     string
 	finalizeGrace time.Duration
+	onClusterGone func(ctx context.Context, computeServiceID, projectID, clusterID string) error
 }
+
+// OnClusterGone registers what must outlive the delete cascade and run after it: revoking the
+// cluster's PVE tokens and freeing its addresses. CAPMOX deletes the workers with that very token,
+// so the delete path cannot do this itself. An error keeps the secret, so the next sweep retries.
+func (s *Service) OnClusterGone(f func(ctx context.Context, computeServiceID, projectID, clusterID string) error) {
+	s.onClusterGone = f
+}
+
+// ClusterSecrets is what a cluster runs under, written next to its Application and never into it.
+type ClusterSecrets struct {
+	// Cloud is the CAPMOX credential: url, token, secret.
+	Cloud map[string]string
+	// CSIManifest is the tenant-side proxmox-csi config, delivered by a ClusterResourceSet.
+	CSIManifest string
+	// ComputeServiceID names the proxmox provider hosting the workers; the reaper needs it.
+	ComputeServiceID string
+}
+
+// annotationComputeService records ClusterSecrets.ComputeServiceID on the cloud secret.
+const annotationComputeService = "proxcloud.io/compute-service"
 
 // New builds a live Service from the provider config.
 func New(cfg Config, serviceID string) (*Service, error) {
@@ -81,10 +103,9 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) 
 }
 
 // CreateCluster provisions one cluster: cloud credentials secret (mgmt-side only) + Application
-// CR. creds is the secret's data — the credential the cluster's infrastructure provider runs
-// under. Returns the initial cached data payload (status PENDING until the first sync reads real
+// CR. Returns the initial cached data payload (status PENDING until the first sync reads real
 // health).
-func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, creds map[string]string) (map[string]any, error) {
+func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, sec ClusterSecrets) (map[string]any, error) {
 	if err := spec.Validate(s.cfg.Defaults); err != nil {
 		return nil, err
 	}
@@ -92,10 +113,14 @@ func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, creds map
 	if err := s.EnsureProjectNamespace(ctx, spec.ProjectID); err != nil {
 		return nil, fmt.Errorf("kamaji: ensure namespace: %w", err)
 	}
-	if err := s.api.ApplySecret(ctx, ns, CloudSecretName(spec.ID), creds,
-		map[string]string{LabelProject: spec.ProjectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue},
-		nil); err != nil {
+	labels := map[string]string{LabelProject: spec.ProjectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue}
+	if err := s.api.ApplySecret(ctx, ns, CloudSecretName(spec.ID), sec.Cloud, labels,
+		map[string]string{annotationComputeService: sec.ComputeServiceID}); err != nil {
 		return nil, fmt.Errorf("kamaji: apply cloud credentials secret: %w", err)
+	}
+	if err := s.api.ApplyResourceSetSecret(ctx, ns, CSISecretName(spec.ID),
+		map[string]string{"csi.yaml": sec.CSIManifest}, labels); err != nil {
+		return nil, fmt.Errorf("kamaji: apply csi secret: %w", err)
 	}
 	values := BuildValues(s.cfg, spec)
 	app := BuildApplication(s.cfg, spec, s.serviceID, s.cfg.ChartVersion, values)
@@ -214,6 +239,18 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 			return pending, err
 		}
 		if tcp != nil || len(mds) > 0 {
+			pending++
+			continue
+		}
+		if s.onClusterGone != nil {
+			if err := s.onClusterGone(ctx, digStr(sec, "metadata", "annotations", annotationComputeService), projectID, cid); err != nil {
+				errs = append(errs, fmt.Errorf("cluster %s: release infrastructure: %w", cid, err))
+				pending++
+				continue
+			}
+		}
+		if err := s.api.DeleteSecret(ctx, ns, CSISecretName(cid)); err != nil {
+			errs = append(errs, fmt.Errorf("cluster %s: delete csi secret: %w", cid, err))
 			pending++
 			continue
 		}
@@ -451,7 +488,7 @@ type ClusterPin struct {
 // ListClusterPins lists every proxcloud-managed cluster on this provider with its chart pin
 // (ownership-labelled Applications only — pre-proxcloud clusters stay invisible).
 func (s *Service) ListClusterPins(ctx context.Context) ([]ClusterPin, error) {
-	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelManagedBy+"="+ManagedByValue)
+	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelService+"="+s.serviceID+","+LabelManagedBy+"="+ManagedByValue)
 	if err != nil {
 		return nil, err
 	}

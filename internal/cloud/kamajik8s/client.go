@@ -10,17 +10,18 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
 // API paths for the kinds this client touches. Group/version pins:
 //   - argoproj.io/v1alpha1 Application (ArgoCD — stable since 2018, no v1 planned)
 //   - kamaji.clastix.io/v1alpha1 TenantControlPlane
-//   - cluster.x-k8s.io/v1beta1 Cluster API (MachineDeployment)
+//   - cluster.x-k8s.io/v1beta2 Cluster API (MachineDeployment)
 const (
 	pathApplications        = "/apis/argoproj.io/v1alpha1/namespaces/%s/applications"
 	pathTenantControlPlanes = "/apis/kamaji.clastix.io/v1alpha1/namespaces/%s/tenantcontrolplanes"
-	pathMachineDeployments  = "/apis/cluster.x-k8s.io/v1beta1/namespaces/%s/machinedeployments"
+	pathMachineDeployments  = "/apis/cluster.x-k8s.io/v1beta2/namespaces/%s/machinedeployments"
 	pathSecrets             = "/api/v1/namespaces/%s/secrets"
 	pathServices            = "/api/v1/namespaces/%s/services"
 	pathNetworkPolicies     = "/apis/networking.k8s.io/v1/namespaces/%s/networkpolicies"
@@ -201,6 +202,19 @@ func (c *Client) ApplySecret(ctx context.Context, ns, name string, stringData ma
 	return err
 }
 
+// ApplyResourceSetSecret writes a Secret a ClusterResourceSet may deliver into a workload cluster: the
+// type is what CAPI insists on, and a Secret's type is immutable, so it cannot be a later patch.
+func (c *Client) ApplyResourceSetSecret(ctx context.Context, ns, name string, stringData, labels map[string]string) error {
+	_, err := c.apply(ctx, fmt.Sprintf(pathSecrets, ns), name, map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata":   map[string]any{"name": name, "namespace": ns, "labels": toAny(labels)},
+		"type":       "addons.cluster.x-k8s.io/resource-set",
+		"stringData": toAny(stringData),
+	})
+	return err
+}
+
 // ListSecrets lists secrets in ns filtered by labelSelector, as full objects (metadata incl.
 // labels/annotations — the orphan-finalize scan reads names and timestamps off them).
 func (c *Client) ListSecrets(ctx context.Context, ns, labelSelector string) ([]map[string]any, error) {
@@ -313,6 +327,69 @@ func (c *Client) GetService(ctx context.Context, ns, name string) (map[string]an
 // mutates pods itself.
 func (c *Client) GetVPA(ctx context.Context, ns, name string) (map[string]any, error) {
 	return c.get(ctx, fmt.Sprintf(pathVPAs, ns), name)
+}
+
+// ListPods lists pods in ns filtered by labelSelector. Read-only: the dbaas GET_LOGS leg finds a
+// database's pods with it.
+func (c *Client) ListPods(ctx context.Context, ns, labelSelector string) ([]map[string]any, error) {
+	return c.list(ctx, fmt.Sprintf("/api/v1/namespaces/%s/pods", ns), labelSelector)
+}
+
+// PodLogs returns the tail of one container's stdout. Bounded by design: tailLines caps what
+// the apiserver sends (default 500, max 5000) and the response read is capped at 8 MiB, so a
+// chatty database cannot stream unbounded output through the API into a browser. Returns raw
+// text, not JSON — this subresource does not speak it.
+func (c *Client) PodLogs(ctx context.Context, ns, pod, container string, tailLines int) (string, error) {
+	if tailLines <= 0 || tailLines > 5000 {
+		tailLines = 500
+	}
+	q := url.Values{}
+	q.Set("container", container)
+	q.Set("tailLines", strconv.Itoa(tailLines))
+	q.Set("timestamps", "true")
+	body, err := c.raw(ctx, fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log?%s", ns, pod, q.Encode()))
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// raw GETs a path whose response is NOT JSON (pods/log is plain text). Same auth and transport
+// as do(), and the same 8 MiB read cap. NO Accept header: the apiserver content-negotiates even
+// on pods/log and answers `Accept: text/plain` with 406 — the body is plain text regardless.
+func (c *Client) raw(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.rc.server, "/")+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.rc.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.rc.token)
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode >= 300 {
+		return nil, &APIError{Status: res.StatusCode, Message: strings.TrimSpace(string(body))}
+	}
+	return body, nil
+}
+
+// ListCRs lists any namespaced custom resource by group/version/plural, filtered by
+// labelSelector. Read-only escape hatch for CRs that need no typed helper — the dbaas backup
+// list, where the kind differs per engine. A missing CRD 404s the same way an empty list does,
+// which is the right behaviour: an operator that is not installed simply has no backups.
+func (c *Client) ListCRs(ctx context.Context, group, version, plural, ns, labelSelector string) ([]map[string]any, error) {
+	items, err := c.list(ctx, fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s", group, version, ns, plural), labelSelector)
+	if NotFound(err) {
+		return nil, nil
+	}
+	return items, err
 }
 
 // GetTenantControlPlane returns the Kamaji TCP, or nil when absent.

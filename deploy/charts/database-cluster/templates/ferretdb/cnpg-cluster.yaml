@@ -25,20 +25,118 @@ metadata:
     {{- end }}
 spec:
   instances: {{ int .Values.instances }}
-  imageName: {{ .Values.ferretdb.postgresImage }}
-  # DocumentDB extension requirements. TODO-verify(drill): the FerretDB CNPG
-  # guide's exact bootstrap stanza for the pinned image pair — whether the
-  # extension must be created in the app database or comes preloaded, and the
-  # required shared_preload_libraries set (flagged in the plan's verify list
-  # together with the frontend healthz port).
+  imageName: {{ include "database-cluster.ferretdbPostgresImage" . }}
+  # The postgres user in the FerretDB image is uid/gid 999 (it is built on the
+  # official postgres image), NOT the 26/26 CNPG assumes for its OWN images.
+  # Without this, initdb dies at bootstrap with
+  #   "initdb: could not look up effective user ID 26: user does not exist"
+  # and the Job retries forever. IMMUTABLE after creation — a database created
+  # by an older chart cannot be repaired in place, it must be recreated.
+  postgresUID: 999
+  postgresGID: 999
+  {{- if or (gt (int .Values.instances) 1) .Values.scheduling.nodeSelector .Values.scheduling.tolerations }}
+  # CNPG keeps pod placement under spec.affinity, not on a pod template. With
+  # more than one instance the replicas must spread across scheduling.zoneKey
+  # as a HARD rule (podAntiAffinityType: required).
+  affinity:
+    {{- if gt (int .Values.instances) 1 }}
+    enablePodAntiAffinity: true
+    topologyKey: {{ .Values.scheduling.zoneKey | quote }}
+    podAntiAffinityType: required
+    {{- end }}
+    {{- with (include "database-cluster.podPlacement" .) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+  # DocumentDB requirements, taken verbatim from the image's own bootstrap
+  # scripts (/docker-entrypoint-initdb.d/10-preload.sh + 20-install.sql), which
+  # CNPG never runs — it does not use the image entrypoint, so everything those
+  # scripts would have written into postgresql.conf must live here instead.
+  #
+  # pg_cron is LOAD-BEARING, not optional: documentdb.control declares
+  #   requires = 'documentdb_core, pg_cron, tsm_system_rows, vector, postgis, rum'
+  # so the CASCADE below creates pg_cron too — and pg_cron refuses to be created
+  # in any database other than cron.database_name. That is why the setting names
+  # the CNPG APP database (the one the frontend connects to, deployment.yaml),
+  # not the image default of `postgres`. Order matters: pg_cron first.
   postgresql:
     shared_preload_libraries:
+      - pg_cron
       - pg_documentdb_core
       - pg_documentdb
+    parameters:
+      {{/*
+      Customer settings FIRST so the DocumentDB block below always wins: these
+      keys are what make the extension work at all, and a customer who set
+      cron.database_name would break their own database. Before this merge the
+      customer's parameters were dropped entirely — accepted by the API,
+      applied nowhere.
+      */}}
+      {{- with .Values.postgresql.parameters }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+      cron.database_name: app
+      documentdb.enableCompact: "true"
+      documentdb.enableLetAndCollationForQueryMatch: "true"
+      documentdb.enableNowSystemVariable: "true"
+      documentdb.enableSortbyIdPushDownToPrimaryKey: "true"
+      documentdb.enableSchemaValidation: "true"
+      documentdb.enableBypassDocumentValidation: "true"
+      documentdb.enableUserCrud: "true"
+      documentdb.maxUserLimit: "100"
+    # DocumentDB opens an internal libpq connection back to itself over
+    # loopback with NO password (drop_collection and friends run their DDL
+    # through it). CNPG's generated pg_hba ends in scram-sha-256, so without
+    # these two rules those calls die with
+    #   fe_sendauth: no password supplied / while executing command over libpq
+    # Loopback only, and the pod runs exactly one customer's database with no
+    # customer-reachable shell, so nothing outside the pod can use it.
+    pg_hba:
+      - host all all 127.0.0.1/32 trust
+      - host all all ::1/128 trust
+  {{- if .Values.restore.sourceId }}
+  {{/*
+  Recovery replaces initdb entirely: the DocumentDB extension, its roles and the
+  grant all come back inside the restored datadir, so re-running the bootstrap
+  SQL would be both redundant and wrong. serverName must be the SOURCE's id.
+  */}}
+  bootstrap:
+    recovery:
+      source: restore-origin
+      {{- with .Values.restore.targetTime }}
+      recoveryTarget:
+        targetTime: {{ . | quote }}
+      {{- end }}
+  externalClusters:
+    - name: restore-origin
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: {{ include "database-cluster.name" . }}-restore-store
+          serverName: {{ .Values.restore.sourceId }}
+  {{- else }}
   bootstrap:
     initdb:
+      # Runs in the app database as superuser — the CNPG equivalent of the
+      # image's 20-install.sql (`CREATE EXTENSION documentdb CASCADE`).
+      # The GRANT is ours, not the image's: the extension's API schemas are
+      # owned by documentdb_admin_role, while the frontend connects as CNPG's
+      # unprivileged `app` owner (deployment.yaml) — without it every call
+      # fails with "permission denied for schema documentdb_api".
       postInitApplicationSQL:
         - CREATE EXTENSION IF NOT EXISTS documentdb CASCADE;
+        - GRANT documentdb_admin_role TO app;
+  {{- end }}
+  {{- if include "database-cluster.backupEnabled" . }}
+  {{/* barman-cloud plugin: isWALArchiver is what turns on continuous WAL
+       archiving, i.e. what makes point-in-time recovery possible at all.
+       The ObjectStore it names is rendered by templates/postgresql/backup.yaml. */}}
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: {{ include "database-cluster.name" . }}-store
+  {{- end }}
   storage:
     {{/* Sized from the SAME storage.sizeGi every other engine uses — one knob,
          so RESIZE_STORAGE (values.storage.sizeGi, grow-only) works uniformly. */}}

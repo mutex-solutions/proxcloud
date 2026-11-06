@@ -53,7 +53,7 @@ func TestAutoscaleTick(t *testing.T) {
 	api := newFakeAPI()
 	s := NewWithAPI(api, testConfig(), "svc-dbaas")
 	mkDB(api, s, "std-up", map[string]any{"enabled": true, "maxCpu": 3, "maxMemoryGi": 8, "maxStorageGi": 0})
-	api.vpas[key("pc-p1", AutoscaleVPAName("std-up"))] = vpaRec("3500m", "6Gi") // cpu ceil 4 → clamp 3
+	api.vpas[key("pc-db-p1", AutoscaleVPAName("std-up"))] = vpaRec("3500m", "6Gi") // cpu ceil 4 → clamp 3
 	bumped, err := s.AutoscaleTick(ctx, "p1", nil)
 	if err != nil || bumped != 1 {
 		t.Fatalf("bumped=%d err=%v", bumped, err)
@@ -66,7 +66,7 @@ func TestAutoscaleTick(t *testing.T) {
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
 	mkDB(api, s, "std-down", map[string]any{"enabled": true, "maxCpu": 8, "maxMemoryGi": 16, "maxStorageGi": 0})
-	api.vpas[key("pc-p1", AutoscaleVPAName("std-down"))] = vpaRec("500m", "1Gi")
+	api.vpas[key("pc-db-p1", AutoscaleVPAName("std-down"))] = vpaRec("500m", "1Gi")
 	if bumped, err = s.AutoscaleTick(ctx, "p1", nil); err != nil || bumped != 0 {
 		t.Fatalf("scale-down must be a no-op: bumped=%d err=%v", bumped, err)
 	}
@@ -79,7 +79,7 @@ func TestAutoscaleTick(t *testing.T) {
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
 	mkDB(api, s, "std-disk", map[string]any{"enabled": true, "maxCpu": 2, "maxMemoryGi": 4, "maxStorageGi": 23})
 	bumped, err = s.AutoscaleTick(ctx, "p1", func(_ context.Context, ns string) (map[string]float64, error) {
-		if ns != "pc-p1" {
+		if ns != "pc-db-p1" {
 			t.Fatalf("ns = %s", ns)
 		}
 		return map[string]float64{"data-std-disk-1": 0.91, "data-std-other-1": 0.99}, nil
@@ -96,7 +96,7 @@ func TestAutoscaleTick(t *testing.T) {
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
 	mkDB(api, s, "std-off", nil)
-	api.vpas[key("pc-p1", AutoscaleVPAName("std-off"))] = vpaRec("8", "16Gi")
+	api.vpas[key("pc-db-p1", AutoscaleVPAName("std-off"))] = vpaRec("8", "16Gi")
 	if bumped, err = s.AutoscaleTick(ctx, "p1", nil); err != nil || bumped != 0 {
 		t.Fatalf("disabled: bumped=%d err=%v", bumped, err)
 	}

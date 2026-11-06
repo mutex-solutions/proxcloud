@@ -1,7 +1,7 @@
 # Every installer option with its easiest default. Override any of them under `proxcloud:` in the
 # site's group_vars; the two are deep-merged into `pc` (computed.yml).
 pc_defaults:
-  mode: allinone                 # split (services cluster for managed K8s / DBaaS) arrives with P7
+  mode: allinone                 # allinone | split (adds the services cluster for managed K8s and DBaaS)
   namespace: proxcloud
 
   pve:
@@ -111,6 +111,38 @@ pc_defaults:
     # another node only from shared to shared storage, so local VM disks need a copy on each node.
     per_node: auto
     keep: 2                      # versions kept per OS and node
+
+  # mode=split: the services cluster stage 50 builds. Node templates come from images/k8s-node-template.sh.
+  services:
+    k8s_version: 1.35.10
+    templates: {}                # {pve node: template vmid}, what the script prints
+    storage: local-zfs           # boot disks and the databases' StorageClass
+    iso_storage: nas-templates   # CAPMOX uploads the bootstrap ISO here
+    pool: proxcloud-system
+    capi_token_id: capmox@pve!capi
+    capi_token_file: token-capi   # in generated/
+    csi_token_id: csi@pve!csi
+    csi_token_file: token-csi     # in generated/
+    pve_node_ips: []             # what tenant workers' CSI reaches through network.pve_proxy_ip
+    api_extra_sans: []           # more names or addresses on the services API certificate
+    chart_repo: pc-registry.proxcloud-registry.svc.cluster.local:5000/charts
+    # A subnet tenants can reach (over their normal egress) and that reaches the PVE API.
+    network:
+      bridge: ""
+      gateway: ""
+      prefix: 24
+      dns: [1.1.1.1, 8.8.8.8]
+      endpoint: ""               # kube-vip: the services API
+      nodes: []                  # node addresses, e.g. [192.0.2.201-192.0.2.209]
+      metallb: ""                # kamaji-api + DBaaS pool, e.g. 192.0.2.210-192.0.2.229
+      pve_proxy_ip: ""           # inside metallb; tenants' CSI reaches the PVE API here
+    control_plane: {node: "", cores: 2, memory: 4096, disk: 30}
+    workers: []                  # [{node, cores, memory, disk}]: one per PVE node you want a zone on
+    # Kamaji provider defaults (stage 60).
+    kamaji:
+      version_images: {}         # {k8s version: "pve1=9210,pve2=9211"}
+      root_volume_gib: 30
+      worker_mtu: 1450
 
   nas:
     host: ""                     # TrueNAS address; empty = no NAS stage

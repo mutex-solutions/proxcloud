@@ -152,6 +152,67 @@ func (r *PublicIPRepo) Allocate(ctx context.Context, serviceID, projectID, serve
 	return allocatePublicIP(pn, used, insert)
 }
 
+// Reserve holds n free addresses of pn's pool for owner in one go, taken from the top of the range so
+// servers, which take the lowest free one, reach them last. A range address, unlike pickPublicIP's
+// result, is not tied to a NIC. Release is ReleaseServer(serviceID, owner).
+func (r *PublicIPRepo) Reserve(ctx context.Context, serviceID, projectID, owner string, pn externalservice.PVEPublicNetwork, n int) ([]string, error) {
+	rows, err := r.find(ctx, pgdoc.M{"serviceId": serviceID, "networkId": pn.ID})
+	if err != nil {
+		return nil, err
+	}
+	taken := make([]string, 0, len(rows))
+	for _, row := range rows {
+		taken = append(taken, row.IP)
+	}
+	free, prefix, herr := freeAddresses(pn, taken, n)
+	if herr != nil {
+		return nil, herr
+	}
+	now := time.Now().UTC()
+	for _, ip := range free {
+		a := &PublicIP{
+			ID: serviceID + "/" + pn.ID + "/" + ip, ServiceID: serviceID, NetworkID: pn.ID,
+			IP: ip, Prefix: prefix, ProjectID: projectID, ServerID: owner, NIC: ReservedNIC, CreatedAt: &now,
+		}
+		if _, err := r.col.InsertOne(ctx, a); err != nil {
+			_ = r.ReleaseServer(context.WithoutCancel(ctx), serviceID, owner)
+			if pgdoc.IsDup(err) {
+				return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "Another address change is in progress — retry in a moment")
+			}
+			return nil, err
+		}
+	}
+	return free, nil
+}
+
+// ReservedNIC marks an address held for a cluster: no NIC of any server, so no VM can orphan it.
+const ReservedNIC = "reserved"
+
+// freeAddresses returns the n highest free addresses of pn's pool, highest first.
+func freeAddresses(pn externalservice.PVEPublicNetwork, used []string, n int) ([]string, int, *httpx.HTTPError) {
+	// ponytail: repeated lowest-free picks then keep the top n, O(range*n) on a /24 at most.
+	var all []string
+	prefix := 0
+	taken := append([]string(nil), used...)
+	for {
+		ip, p, herr := pickPublicIP(pn, taken)
+		if herr != nil {
+			break
+		}
+		all, prefix = append(all, ip), p
+		taken = append(taken, ip)
+	}
+	if len(all) < n {
+		return nil, 0, httpx.NewError(http.StatusConflict, http.StatusConflict,
+			fmt.Sprintf("Network %s has %d free addresses, a cluster needs %d", pn.ID, len(all), n))
+	}
+	out := make([]string, 0, n)
+	for i := len(all) - 1; i >= len(all)-n; i-- {
+		out = append(out, all[i])
+	}
+	return out, prefix, nil
+}
+
 // publicIPAllocAttempts bounds the pick-insert loop under insert collisions.
 const publicIPAllocAttempts = 5
 

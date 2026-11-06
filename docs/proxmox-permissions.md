@@ -77,7 +77,27 @@ Privileges: `Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM 
 | `/storage/<disk storage>` | `ProxCloudCAPI` | 0 |
 | `/storage/<cloud-init ISO storage>` | `PVEDatastoreAdmin` (built-in) | 0 |
 
-Per-tenant managed-K8s clusters will get their own narrow tokens (`proxcloud-capi@pve!<clusterId>` on `/pool/pc-<projectId>`), which the portal will mint itself (`internal/cloud/pve/access.go`). Before that ships, the platform role also needs `Realm.AllocateUser` on `/access/realm/pve`, `User.Modify` on `/access/groups`, and the right to grant ACLs on the tenant pool. These are not part of the role today.
+### Managed Kubernetes
+
+Each tenant cluster runs under two tokens the portal mints at create and revokes after the delete cascade (`MintClusterTokens`, `RevokeClusterTokens` in `internal/cloud/pve/access.go`):
+
+| Token | Grants | Reaches |
+|---|---|---|
+| `capmox@pve!<clusterId>` | `ProxCloudCAPI` on the project pool, the boot store, the vnet and `/nodes`; `PVETemplateUser` on `pc-templates`; `PVEDatastoreAdmin` on the ISO store | CAPMOX on the services cluster |
+| `csi@pve!<clusterId>` | `ProxCloudCSI` on the project pool and the stores of the cluster's StorageClasses | the tenant cluster, where a cluster-admin can read it |
+
+A token's rights are its user's intersected with its own, so `capmox@pve` and `csi@pve` hold the same roles on `/pool`, `/storage` and `/sdn/zones`, and the portal token additionally needs the right to mint and grant. `make install` with `mode: split` sets this (stage 10, `split_acls`):
+
+```sh
+pveum role add ProxCloudKubeMint --privs "User.Modify Permissions.Modify"
+grant /access/groups ProxCloudKubeMint 1 proxcloud@pve platform
+grant /pool          ProxCloudKubeMint 1 proxcloud@pve platform
+grant /storage       ProxCloudKubeMint 1 proxcloud@pve platform
+grant /sdn/zones     ProxCloudKubeMint 1 proxcloud@pve platform
+grant /nodes         ProxCloudKubeMint 0 proxcloud@pve platform
+```
+
+`Permissions.Modify` is a big right: a stolen portal token can grant itself anything on those paths. Without these grants a cluster create fails with PVE's `Permission check failed`, or the provider runs in `sharedWorkers` mode (docs/managed-k8s.md). **The minted path has only run against a fake PVE, not a real one, so check this list on the first real install.** What is known from the lab (PVE 9.2): without these grants, `POST /access/users/{user}/token/{name}` answers 403 even for the token's own user, and `PUT /access/acl` wants `Permissions.Modify` on `/sdn/zones/...` and `/nodes`, and `Permissions.Modify` or `Datastore.Allocate` on `/storage/...`.
 
 ## ProxCloudCSI
 
@@ -92,7 +112,7 @@ Privileges: `VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace 
 
 ## ProxCloudImages
 
-Privileges: `Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use`
+Privileges: `Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Console VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use`
 
 | Path | Role | Propagate | Note |
 |---|---|---|---|
@@ -100,6 +120,8 @@ Privileges: `Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM
 | `/nodes` | `ProxCloudImages` | 1 | `Sys.AccessNetwork` is what `download-url` asks for on a node; without it, that call wants `Sys.Modify` on `/` |
 | `/storage` | `ProxCloudImages` | 1 | or one ACL per template and import store |
 | `/sdn/zones/localnetwork` | `ProxCloudImages` | 1 | `SDN.Use` on the node bridges |
+
+`VM.Console` is for image-builder: Packer types the Ubuntu installer's boot command over the VM's console.
 
 There is no ACL on `/vms`, so the token holds `VM.Config.*` only on VMs already in the pool. `build.py` therefore creates a VM empty, with just `pool`, and configures it in a second call.
 
@@ -112,7 +134,7 @@ Run these on any node (cluster config is shared). Replace the `<…>` placeholde
 pveum role add ProxCloudPlatform --privs "Sys.Audit Sys.Console Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Console VM.GuestAgent.Audit VM.GuestAgent.Unrestricted VM.Migrate VM.PowerMgmt VM.Replicate VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Mapping.Audit Mapping.Use"
 pveum role add ProxCloudCAPI --privs "Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
 pveum role add ProxCloudCSI --privs "VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit"
-pveum role add ProxCloudImages --privs "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
+pveum role add ProxCloudImages --privs "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Console VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
 
 # pools
 pveum pool add pc-templates --comment "ProxCloud templates"

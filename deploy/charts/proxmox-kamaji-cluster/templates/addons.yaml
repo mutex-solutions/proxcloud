@@ -1,0 +1,87 @@
+{{- /*
+What every tenant cluster runs, installed by CAAPH from the management side: the CNI, proxmox-csi and MetalLB
+always, the rest from the tenant's picks. The two ClusterResourceSets carry what a chart value must not: the
+CSI token (a Secret the portal writes, never in this document) and the MetalLB custom resources, which need
+the chart's CRDs first (ClusterResourceSet retries until they exist).
+*/ -}}
+{{- $root := . }}
+{{- $proxies := list }}
+{{- $proxies = append $proxies (dict "key" "cilium" "ns" "kube-system" "values" (dict "kubeProxyReplacement" false "ipam" (dict "mode" "kubernetes") "routingMode" "tunnel" "tunnelProtocol" "vxlan" "operator" (dict "replicas" 1) "hubble" (dict "enabled" false))) }}
+{{- $classes := list }}
+{{- range $i, $c := .Values.proxmox.csi.storageClasses }}
+{{- $class := dict "name" $c.name "storage" $c.storage "fstype" "ext4" "reclaimPolicy" "Delete" }}
+{{- if eq $i 0 }}{{- $_ := set $class "annotations" (dict "storageclass.kubernetes.io/is-default-class" "true") }}{{- end }}
+{{- $classes = append $classes $class }}
+{{- end }}
+{{- $proxies = append $proxies (dict "key" "proxmoxCsi" "ns" "csi-proxmox" "values" (dict "existingConfigSecret" "proxmox-csi-plugin" "storageClass" $classes "node" (dict "tolerations" (list (dict "operator" "Exists"))) "controller" (dict "replicaCount" 1))) }}
+{{- $proxies = append $proxies (dict "key" "metallb" "ns" "metallb-system" "values" (dict "speaker" (dict "frr" (dict "enabled" false)) "frrk8s" (dict "enabled" false))) }}
+{{- range $key := list "metricsServer" "certManager" "ingress" }}
+{{- $picked := dict "enabled" false }}
+{{- if hasKey $root.Values.addons $key }}{{- $picked = get $root.Values.addons $key }}{{- end }}
+{{- if $picked.enabled }}
+{{- $v := dict }}
+{{- if eq $key "metricsServer" }}{{- $v = dict "args" (list "--kubelet-insecure-tls") }}{{- end }}
+{{- if eq $key "certManager" }}{{- $v = dict "crds" (dict "enabled" true) }}{{- end }}
+{{- $ns := dict "metricsServer" "kube-system" "certManager" "cert-manager" "ingress" "ingress-nginx" }}
+{{- $proxies = append $proxies (dict "key" $key "ns" (get $ns $key) "values" $v) }}
+{{- end }}
+{{- end }}
+{{- range $p := $proxies }}
+{{- $chart := get $root.Values.addonCharts $p.key }}
+---
+apiVersion: addons.cluster.x-k8s.io/v1alpha1
+kind: HelmChartProxy
+metadata:
+  name: {{ $root.Release.Name }}-{{ $p.key | lower }}
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: {{ $root.Release.Name }}
+  repoURL: {{ $chart.repoURL }}
+  chartName: {{ $chart.chart }}
+  version: {{ $chart.version | quote }}
+  namespace: {{ $p.ns }}
+  releaseName: {{ $p.key | lower }}
+  options:
+    wait: false
+    timeout: 10m
+    install:
+      createNamespace: true
+  valuesTemplate: {{ toJson $p.values | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-metallb-config
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  metallb.yaml: |
+    apiVersion: metallb.io/v1beta1
+    kind: IPAddressPool
+    metadata:
+      name: tenant
+      namespace: metallb-system
+    spec:
+      addresses: {{ toJson .Values.proxmox.metallb.addresses }}
+    ---
+    apiVersion: metallb.io/v1beta1
+    kind: L2Advertisement
+    metadata:
+      name: tenant
+      namespace: metallb-system
+    spec:
+      ipAddressPools: [tenant]
+---
+apiVersion: addons.cluster.x-k8s.io/v1beta2
+kind: ClusterResourceSet
+metadata:
+  name: {{ .Release.Name }}-tenant-config
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: {{ .Release.Name }}
+  strategy: Reconcile
+  resources:
+    - {kind: Secret, name: {{ .Release.Name }}-metallb-config}
+    - {kind: Secret, name: {{ required "proxmox.csi.configSecretName is required" .Values.proxmox.csi.configSecretName }}}

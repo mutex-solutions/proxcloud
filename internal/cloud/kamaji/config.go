@@ -24,6 +24,10 @@ func NamespaceFor(projectID string) string { return "pc-" + projectID }
 // the customer cluster never sees it; see plan §4/D7).
 func CloudSecretName(clusterID string) string { return clusterID + cloudSecretSuffix }
 
+// CSISecretName is the resource-set Secret carrying the tenant-side proxmox-csi config (with its
+// scoped token) to the customer cluster.
+func CSISecretName(clusterID string) string { return clusterID + "-csi-config" }
+
 // cloudSecretSuffix lets FinalizeOrphans map a secret name back to its cluster id.
 const cloudSecretSuffix = "-cloud-config"
 
@@ -53,6 +57,9 @@ const (
 	AnnotationDisplayName = "proxcloud.io/display-name"
 )
 
+// labelNodeGroup is what the chart stamps on a group's MachineDeployments.
+const labelNodeGroup = "proxcloud.io/node-group"
+
 // managedBy reports whether obj carries the proxcloud ownership marker.
 func managedBy(obj map[string]any) bool {
 	labels, _ := dig(obj, "metadata", "labels").(map[string]any)
@@ -77,8 +84,9 @@ type Config struct {
 type ClusterDefaults struct {
 	DataStoreName string // Kamaji DataStore (default "default")
 	DNSZone       string // optional: API FQDN = <clusterID>.<DNSZone> (certSAN + external-dns)
-	// Versions maps each curated k8s version → its DEFAULT node image id (the ONLY versions
-	// offered). TODO(P7): CAPMOX VM template ids.
+	// Versions maps each curated k8s version → its DEFAULT node image (the ONLY versions offered).
+	// A node image is the template of that version per PVE node, "pve1=9210,pve2=9211": a clone to
+	// local storage stays on its template's node, so a node group gets one machine pool per entry.
 	Versions map[string]string
 	// ImageVariants are curated alternative node images per version, keyed variant → version →
 	// image id (e.g. "nvidia" → {"1.35.4": "<id>"} for the GPU build of the same release). A node
@@ -92,6 +100,33 @@ type ClusterDefaults struct {
 	// AllowedCIDRs is the provider-wide default API-server ingress allowlist; a cluster's own
 	// AllowedCIDRs overrides it. Empty on both = open.
 	AllowedCIDRs []string
+	// PVEAPIURL is the PVE API as CAPMOX on the services cluster reaches it. PVECSIURL is the same
+	// API as a tenant's workers reach it: they sit on a tenant vnet with no route to the management
+	// network, so this is an address on the services subnet that forwards to PVE.
+	PVEAPIURL string
+	PVECSIURL string
+	// DNSServers go to the worker nodes (default: public resolvers).
+	DNSServers []string
+	// NodeGroupMTU is the worker NIC MTU on a tenant vnet (EVPN: the vnet's own, 1450).
+	NodeGroupMTU int
+	// ProxmoxServiceID names the compute provider whose PVE cluster hosts the workers. Empty: the
+	// project's only proxmox service.
+	ProxmoxServiceID string
+	// Shared, when set, puts every cluster's workers on one provider-run placement and credential
+	// instead of the project's pool and vnet with tokens minted per cluster. For a site whose portal
+	// token may not mint tokens. Workers then neither sync nor bill, and tenants share a network.
+	Shared *SharedWorkers
+}
+
+// SharedWorkers is the operator-run placement of ClusterDefaults.Shared.
+type SharedWorkers struct {
+	Pool, Bridge, Gateway string
+	Prefix                int
+	First, Last           string // address range on the bridge
+	CAPITokenID           string
+	CAPISecret            string
+	CSITokenID            string
+	CSISecret             string
 }
 
 // ClusterAddons is the curated add-on menu a customer can toggle per cluster (name →
@@ -99,13 +134,9 @@ type ClusterDefaults struct {
 // `addons.<key>.enabled`; everything else in the addons stack — the CNI, the CSI/credential
 // push, the mirror-registry pins — stays operator territory and is never client-writable.
 var ClusterAddons = map[string]bool{
-	"certManager":         false, // cert-manager (Let's Encrypt & friends)
-	"ingress":             false, // NGINX ingress controller
-	"metricsServer":       true,  // kubectl top / HPA metrics
-	"monitoring":          false, // kube-prometheus-stack + Loki (heavy)
-	"nodeProblemDetector": true,  // node faults (kernel hangs, bad disks) as Events; chart default is on
-	"nvidiaGPUOperator":   false, // driver/toolkit for NVIDIA GPU pools
-	"reloader":            false, // roll Deployments when watched ConfigMaps/Secrets change
+	"certManager":   false, // cert-manager (Let's Encrypt & friends)
+	"ingress":       false, // NGINX ingress controller
+	"metricsServer": true,  // kubectl top / HPA metrics
 }
 
 // ClusterFQDN is the cluster's public API hostname (<clusterID>.<dnsZone>) — the name
@@ -156,6 +187,27 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// ClusterInfra is where one cluster's workers live on Proxmox, resolved by the create path from the
+// project: its pool, its vnet, addresses reserved on that vnet, the storage classes of the compute
+// provider. It rides in the Application values, so the sync and later actions never recompute it.
+type ClusterInfra struct {
+	Region         string
+	Pool           string
+	Storage        string // boot disks
+	Bridge         string // the vnet
+	Gateway        string
+	Prefix         int
+	Addresses      []string // worker addresses (IPAM)
+	LBAddresses    []string // MetalLB inside the tenant cluster
+	StorageClasses []StorageClass
+}
+
+// StorageClass is one tenant-side proxmox-csi class.
+type StorageClass struct {
+	Name    string
+	Storage string
+}
+
 // ClusterSpec is the desired state of ONE customer cluster — the values-builder input. The
 // full generated values live on the Application (spec.source.helm.valuesObject); this struct
 // is what the client API accepts and what actions mutate.
@@ -174,14 +226,13 @@ type ClusterSpec struct {
 	// rejected). nil/empty = the chart's own defaults, which match the menu's defaults.
 	Addons     map[string]bool
 	NodeGroups []NodeGroup
-	// NetworkID/SubnetID attach the cluster to a network the customer already owns (EKS-style
-	// "pick your VPC subnet") instead of a dedicated per-cluster network. Both or neither: a
-	// network with the wrong subnet picked is exactly the class of half-configured cluster we
-	// refuse to build. Customer-supplied, so the create path MUST verify both belong to the
-	// project before building values — a crafted id would otherwise let a customer hang their
-	// nodes onto infrastructure networks.
+	// NetworkID attaches the cluster to a network the customer already owns; empty gets a dedicated
+	// per-cluster network. Customer-supplied, so the create path MUST verify it belongs to the
+	// project before building values — a crafted id would otherwise let a customer hang their nodes
+	// onto infrastructure networks.
 	NetworkID string
-	SubnetID  string
+	// Infra is filled by the create path, never by the client.
+	Infra ClusterInfra
 }
 
 // NodeGroup is one CAPI MachineDeployment-backed worker pool.
@@ -200,6 +251,11 @@ type NodeGroup struct {
 	RootVolumeGiB int               `json:"rootVolumeGiB,omitempty"` // 0 = ClusterDefaults.RootVolumeGiB
 	Labels        map[string]string `json:"labels,omitempty"`
 	Taints        []string          `json:"taints,omitempty"` // "key=value:Effect" / "key:Effect"
+	// Resolved from the flavor by the portal, never taken from the client: what the worker VMs get,
+	// and the VM tags that make them sync and bill as servers of that flavor.
+	Cores     int      `json:"-"`
+	MemoryMiB int      `json:"-"`
+	Tags      []string `json:"-"`
 }
 
 // Validate rejects an unbuildable spec.
@@ -211,8 +267,6 @@ func (s ClusterSpec) Validate(d ClusterDefaults) error {
 		return fmt.Errorf("cluster: projectId is required")
 	case s.Version == "":
 		return fmt.Errorf("cluster: version is required")
-	case (s.NetworkID == "") != (s.SubnetID == ""):
-		return fmt.Errorf("cluster: networkId and subnetId must be set together (or both left empty for a dedicated cluster network)")
 	case len(s.NodeGroups) == 0:
 		return fmt.Errorf("cluster: at least one node group is required")
 	}
@@ -249,10 +303,12 @@ func (s ClusterSpec) Validate(d ClusterDefaults) error {
 		if ng.ImageVariant != "" && len(d.Versions) > 0 && d.ImageFor(s.Version, ng.ImageVariant) == "" {
 			return fmt.Errorf("cluster: node group %q: image variant %q is not offered for version %s", ng.Name, ng.ImageVariant, s.Version)
 		}
-		if ng.Autoscale && (ng.Min < 1 || ng.Max < ng.Min) {
-			return fmt.Errorf("cluster: node group %q: autoscale needs 1 <= min <= max", ng.Name)
+		// ponytail: no cluster-autoscaler on Proxmox yet. The chart has one machine pool per PVE node,
+		// so an autoscale group needs per-pool min/max. Fixed sizes until someone asks.
+		if ng.Autoscale {
+			return fmt.Errorf("cluster: node group %q: autoscaling is not available on this platform", ng.Name)
 		}
-		if !ng.Autoscale && ng.Count < 1 {
+		if ng.Count < 1 {
 			return fmt.Errorf("cluster: node group %q: count must be >= 1", ng.Name)
 		}
 		// Every node gets an explicitly sized root disk (the images are bigger than most

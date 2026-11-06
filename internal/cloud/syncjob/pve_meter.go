@@ -164,7 +164,7 @@ func (j *Job) releaseOrphanIPs(ctx context.Context, serviceID, projectID string,
 func orphanIPs(allocs []project.PublicIP, listed map[string]bool, rows map[string]*cloud.CloudResource, now time.Time) []project.PublicIP {
 	var out []project.PublicIP
 	for _, a := range allocs {
-		if a.CreatedAt == nil {
+		if a.CreatedAt == nil || a.NIC == project.ReservedNIC {
 			continue
 		}
 		row := rows[a.ServerID]

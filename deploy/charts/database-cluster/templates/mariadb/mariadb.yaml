@@ -16,6 +16,55 @@ metadata:
   annotations:
     {{- include "database-cluster.annotations" . | nindent 4 }}
 spec:
+  {{- if .Values.restore.sourceId }}
+  {{/*
+  Physical restore into a NEW instance. backupContentType MUST be set
+  explicitly for a raw S3 source — the operator only infers it from backupRef
+  or volumeSnapshotRef, and the default (Logical) would try to replay a
+  datadir copy as a SQL dump.
+
+  targetRecoveryTime picks the backup closest to that instant; it is not binlog
+  replay, so recovery lands on a backup boundary rather than an exact second.
+  */}}
+  bootstrapFrom:
+    {{- if and .Values.restore.targetTime .Values.restore.pitr }}
+    {{/*
+    TRUE point-in-time recovery: replay the source's archived binlogs up to the
+    instant asked for. Only available when the SOURCE ran replication, because
+    that is the only topology 26.6.0 archives binlogs on — otherwise the s3
+    branch below lands on the nearest physical backup instead, which is a
+    coarser answer but never a wrong one.
+    */}}
+    pointInTimeRecoveryRef:
+      name: {{ printf "%s-pitr" .Values.restore.sourceId }}
+    targetRecoveryTime: {{ .Values.restore.targetTime | quote }}
+    {{- else }}
+    backupContentType: Physical
+    {{- with .Values.restore.targetTime }}
+    targetRecoveryTime: {{ . | quote }}
+    {{- end }}
+    s3:
+      bucket: {{ .Values.restore.s3.bucket | quote }}
+      endpoint: {{ include "database-cluster.restoreHostPort" . | quote }}
+      prefix: {{ printf "%s/%s" (.Values.restore.s3.prefix | default "proxcloud") .Values.restore.sourceId | quote }}
+      {{- with .Values.restore.s3.region }}
+      region: {{ . | quote }}
+      {{- end }}
+      accessKeyIdSecretKeyRef:
+        name: {{ .Values.restore.credsSecret }}
+        key: AWS_ACCESS_KEY_ID
+      secretAccessKeySecretKeyRef:
+        name: {{ .Values.restore.credsSecret }}
+        key: AWS_SECRET_ACCESS_KEY
+      tls:
+        enabled: {{ include "database-cluster.restoreTLS" . }}
+        {{- with .Values.restore.s3.caCertSecret }}
+        caSecretKeyRef:
+          name: {{ . }}
+          key: ca.crt
+        {{- end }}
+    {{- end }}
+  {{- end }}
   replicas: {{ int .Values.instances }}
   {{- if gt (int .Values.instances) 1 }}
   replication:
@@ -38,6 +87,13 @@ spec:
     name: {{ $name }}-auth
     key: password
   image: {{ include "database-cluster.image" . }}
+  {{- include "database-cluster.podPlacement" . | nindent 2 }}
+  {{- if gt (int .Values.instances) 1 }}
+  # mariadb-operator's affinity embeds a plain Kubernetes affinity: the replicas
+  # spread across scheduling.zoneKey as a HARD rule.
+  affinity:
+    {{- include "database-cluster.zoneAntiAffinity" (dict "root" . "labels" (dict "app.kubernetes.io/name" "mariadb" "app.kubernetes.io/instance" $name)) | nindent 4 }}
+  {{- end }}
   {{- with .Values.restartedAt }}
   # RESTART mechanism: a changed pod-template annotation rolls the pods, same
   # convention as `kubectl rollout restart`. TODO-verify(drill): podMetadata

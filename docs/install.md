@@ -118,3 +118,15 @@ Not automated yet: the off-site copy, OTLP metrics, and pointing CloudNativePG a
 - **Installer's admin key:** `proxcloud-api admin-key create -description installer`, run in the API pod by stage 60, mints an Admin-API SigV4 key directly in PostgreSQL. It needs database access and no login, which is what makes it usable before the first operator exists. Delete it from the admin console (API keys) if you do not want to keep it, and remove `generated/admin-api-key.json`.
 - **Operator login:** user `keycloak.operator.username` in realm `proxcloud-admin`, password in `generated/operator-password`. That realm has no self-registration, because every login in it is an administrator.
 - **Customers:** realm `proxcloud`, with self-registration on.
+
+## Split mode: managed Kubernetes and databases
+
+`proxcloud.mode: split` adds stage 50: Cluster API and CAPMOX on the mgmt cluster build a kubeadm **services cluster** of PVE VMs, which then runs Kamaji, its own Cluster API, ArgoCD, MetalLB, proxmox-csi and the database operators. Stage 60 registers the Kubernetes and database providers.
+
+1. Build the node templates (`images/k8s-node-template.sh`, see [images/README.md](../images/README.md)).
+2. Set `proxcloud.services` in the site's group_vars ([defaults.yml](../installer/playbooks/group_vars/all/defaults.yml) documents it): the network, `templates`, `control_plane`, one `workers` entry per PVE node a zone should exist on, and `kamaji.version_images`. A database with replicas needs a worker per replica, on different nodes.
+3. `make install`.
+
+The services subnet must be reachable from tenant networks (it holds the API endpoints and database addresses) and must reach the PVE API. Stage 10 grants what per-cluster tokens need, see [proxmox-permissions.md](proxmox-permissions.md#managed-kubernetes): read that first, since it gives the portal token `Permissions.Modify`.
+
+**What ran where:** `50-services-cluster.yml`'s template and `files/services-platform.sh` ran on a lab through hand-written drivers, against a site already installed in `allinone`. The playbook itself, stage 10's split grants and stage 60's registration have not run end to end on a clean site.

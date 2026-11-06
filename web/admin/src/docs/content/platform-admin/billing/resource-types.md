@@ -25,7 +25,7 @@ Which types produce charges depends on the services enabled on your cloud provid
 | `share` | TrueNAS NFS and SMB file shares | existence, `size_gb` (used), `quota_gb` (allocated), `protocol` |
 | `bucket` | S3 buckets (Ceph RGW, RustFS) | existence, `size_gb` (used), `quota_gb` (allocated: the bucket quota, or the used size without one), `object_count`. Price `size_gb` or `quota_gb` to choose the billing basis |
 | `kubernetes_cluster` | Managed Kubernetes | existence, `cp_replicas`, `node_groups` |
-| `database_cluster` | Managed databases | existence, `replicas`, `vcpus_total`, `ram_gb_total`, `storage_gb_total`, `autoscale_enabled` |
+| `database_cluster` | Managed databases | existence, `replicas`, `vcpus_total`, `ram_gb_total`, `storage_gb_total`, `autoscale_enabled`, `read_endpoint_lb` (1 when a PostgreSQL read-only endpoint runs its own load balancer) |
 | `floating_ip` | Public IPs allocated to Proxmox VE servers | existence |
 | `image` | Project templates (images saved from a server) | `size_gb` |
 

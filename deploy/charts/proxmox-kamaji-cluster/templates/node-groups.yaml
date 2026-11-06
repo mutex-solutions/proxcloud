@@ -1,0 +1,102 @@
+{{- /*
+One MachineDeployment per node group and PVE node. PVE clones to local storage only on the template's own
+node, so a group is pinned: each entry of machineImageId (<node>=<vmid>) gets its own machine template, and
+machineCount is split evenly across the entries, the first ones taking the remainder. The zone label comes
+from the same pin, which is why no cloud controller manager is needed for topology.
+
+Machine and bootstrap templates are immutable in CAPI: their names carry a hash of their spec, so a changed
+flavor or image rolls the nodes instead of silently applying to new machines only.
+
+skipCloudInitStatus: CAPMOX reads cloud-init's status with agent exec, which PVE 9 only allows with
+VM.GuestAgent.Unrestricted, root in every guest of the pool. The Node joining is the real signal anyway.
+*/ -}}
+{{- $root := . }}
+{{- $net := .Values.proxmox.network }}
+{{- range $ng := .Values.nodeGroups }}
+{{- if not (regexMatch "^[a-z][a-z0-9-]+[a-z0-9]$" $ng.name) }}
+{{- fail (printf "node group name %q: lower-case letters, digits and dashes, 3+ characters" $ng.name) }}
+{{- end }}
+{{- if $ng.autoscale }}
+{{- fail (printf "node group %q: autoscale is not supported by this chart" $ng.name) }}
+{{- end }}
+{{- $pins := splitList "," (required (printf "node group %s: machineImageId is required" $ng.name) $ng.machineImageId) }}
+{{- $n := len $pins }}
+{{- $count := int $ng.machineCount }}
+{{- range $i, $pin := $pins }}
+{{- $kv := splitList "=" $pin }}
+{{- if ne (len $kv) 2 }}
+{{- fail (printf "node group %s: machineImageId entry %q is not <node>=<vmid>" $ng.name $pin) }}
+{{- end }}
+{{- $node := index $kv 0 }}
+{{- $vmid := index $kv 1 }}
+{{- $replicas := div $count $n }}
+{{- if lt $i (mod $count $n) }}{{- $replicas = add1 $replicas }}{{- end }}
+{{- $base := printf "%s-%s-%s" $root.Release.Name $ng.name $node }}
+{{- $machine := dict "sourceNode" $node "templateID" (int $vmid) "allowedNodes" (list $node) "storage" $root.Values.proxmox.storage "format" "raw" "full" true "pool" $root.Values.proxmox.pool "checks" (dict "skipCloudInitStatus" true) "tags" $ng.machineTags "numSockets" 1 "numCores" (int $ng.machineCores) "memoryMiB" (int $ng.machineMemoryMiB) "disks" (dict "bootVolume" (dict "disk" "scsi0" "sizeGb" (int $ng.machineRootVolume.diskSize))) }}
+{{- $device := dict "name" "net0" "bridge" $net.bridge "model" "virtio" }}
+{{- if $net.mtu }}{{- $_ := set $device "linkMtu" (int $net.mtu) }}{{- $_ := set $device "mtu" 1 }}{{- end }}
+{{- $_ := set $machine "network" (dict "networkDevices" (list $device)) }}
+{{- $mtName := printf "%s-%s" $base (toJson $machine | sha256sum | trunc 8) }}
+{{- $labels := dict "proxcloud.io/node-group" $ng.name "topology.kubernetes.io/region" $root.Values.proxmox.region "topology.kubernetes.io/zone" $node }}
+{{- range $k, $v := $ng.nodeLabels }}{{- $_ := set $labels $k $v }}{{- end }}
+{{- $labelArg := list }}
+{{- range $k := keys $labels | sortAlpha }}{{- $labelArg = append $labelArg (printf "%s=%s" $k (get $labels $k)) }}{{- end }}
+{{- $nodeReg := dict "name" "{{ local_hostname }}" "kubeletExtraArgs" (list (dict "name" "provider-id" "value" "proxmox://'{{ ds.meta_data.instance_id }}'") (dict "name" "node-labels" "value" (join "," $labelArg))) }}
+{{- with $ng.taints }}{{- $_ := set $nodeReg "taints" . }}{{- end }}
+{{- $bootstrap := dict "joinConfiguration" (dict "nodeRegistration" $nodeReg) }}
+{{- $ktName := printf "%s-%s" $base (toJson $bootstrap | sha256sum | trunc 8) }}
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxMachineTemplate
+metadata:
+  name: {{ $mtName }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {{ toJson $machine }}
+---
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KubeadmConfigTemplate
+metadata:
+  name: {{ $ktName }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  template:
+    spec: {{ toJson $bootstrap }}
+---
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  name: {{ $base }}
+  labels:
+    cluster.x-k8s.io/cluster-name: {{ $root.Release.Name }}
+    proxcloud.io/node-group: {{ $ng.name }}
+spec:
+  clusterName: {{ $root.Release.Name }}
+  replicas: {{ $replicas }}
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: {{ $root.Release.Name }}
+      proxcloud.io/machine-deployment: {{ $base }}
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: {{ $root.Release.Name }}
+        proxcloud.io/machine-deployment: {{ $base }}
+        proxcloud.io/node-group: {{ $ng.name }}
+    spec:
+      clusterName: {{ $root.Release.Name }}
+      version: {{ printf "v%s" ($root.Values.kubernetesVersion | trimPrefix "v") | quote }}
+      bootstrap:
+        configRef:
+          apiGroup: bootstrap.cluster.x-k8s.io
+          kind: KubeadmConfigTemplate
+          name: {{ $ktName }}
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: ProxmoxMachineTemplate
+        name: {{ $mtName }}
+{{- end }}
+{{- end }}

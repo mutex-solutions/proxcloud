@@ -2,7 +2,6 @@ package kamaji
 
 import (
 	"context"
-	"strings"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 )
@@ -30,7 +29,7 @@ func (p *ClusterSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 	// Ownership marker in the selector: pre-proxcloud clusters on the same management cluster
 	// (unlabelled) never enter the cache, so they never surface in the UI or billing.
 	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace,
-		LabelProject+"="+p.projectID+","+LabelManagedBy+"="+ManagedByValue)
+		LabelProject+"="+p.projectID+","+LabelService+"="+s.serviceID+","+LabelManagedBy+"="+ManagedByValue)
 	if err != nil {
 		return nil, err
 	}
@@ -103,12 +102,9 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 	} else if replicas, ok := dig(values, "kamajiControlPlane", "replicas").(int); ok {
 		c["cp_replicas"] = replicas
 	}
-	// Network placement, read back off the values so the UI can show whether the cluster runs on
-	// a dedicated network or on one of the project's own (BYO). Absent keys mean dedicated.
-	// Immutable after create, so no edit path feeds off these.
-	if netID := digStr(values, "clusterNetworking", "internalNetwork", "networkFilter", "id"); netID != "" {
-		c["network_id"] = netID
-		c["subnet_id"] = digStr(values, "clusterNetworking", "internalNetwork", "subnetFilter", "id")
+	// The vnet of the workers, read back off the values. Immutable after create.
+	if bridge := digStr(values, "proxmox", "network", "bridge"); bridge != "" {
+		c["network_id"] = bridge
 	}
 	// Customer add-on toggles, read back for the UI (absent block = chart defaults). Filtered to
 	// the curated menu: a legacy credential-push addon (and any operator hand-edit)
@@ -156,32 +152,35 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 		}
 	}
 
-	// Desired node groups from values, live replica counts from the MachineDeployments.
+	// Desired node groups from values, live replica counts from the MachineDeployments. A group has
+	// one per PVE node (the chart labels them), so the counts add up.
 	live := map[string]map[string]any{}
 	for _, md := range mds {
-		name := digStr(md, "metadata", "name")
-		entry := map[string]any{}
-		if r, ok := dig(md, "status", "replicas").(float64); ok {
-			entry["replicas"] = r
+		name := digStr(md, "metadata", "labels", labelNodeGroup)
+		if name == "" {
+			continue
 		}
-		if r, ok := dig(md, "status", "readyReplicas").(float64); ok {
-			entry["ready_replicas"] = r
+		entry := live[name]
+		if entry == nil {
+			entry = map[string]any{}
+			live[name] = entry
 		}
-		if phase := digStr(md, "status", "phase"); phase != "" {
+		for src, dst := range map[string]string{"replicas": "replicas", "readyReplicas": "ready_replicas"} {
+			if r, ok := dig(md, "status", src).(float64); ok {
+				prev, _ := entry[dst].(float64)
+				entry[dst] = prev + r
+			}
+		}
+		// The least settled pool speaks for the group.
+		if phase := digStr(md, "status", "phase"); phase != "" && entry["phase"] != "ScalingUp" && entry["phase"] != "ScalingDown" {
 			entry["phase"] = phase
 		}
-		live[name] = entry
 	}
 	groups := []any{}
 	for _, g := range NodeGroupsFromValues(values) {
 		name, _ := g["name"].(string)
-		// MachineDeployment names are chart-derived (typically <cluster>-<group>); match by suffix.
-		for mdName, entry := range live {
-			if name != "" && (mdName == name || strings.HasSuffix(mdName, "-"+name)) {
-				for k, v := range entry {
-					g[k] = v
-				}
-			}
+		for k, v := range live[name] {
+			g[k] = v
 		}
 		groups = append(groups, g)
 	}

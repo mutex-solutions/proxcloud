@@ -24,7 +24,6 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/billingresource"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metricsjob"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
@@ -252,11 +251,6 @@ func run() error {
 	// Ceph RGW (S3) per-project credentials — enables ceph-s3 provisioning + bucket writes.
 	cephCredRepo := cephcred.New(pg, enc)
 	projectH.SetCephCreds(cephCredRepo, cephcred.NewKeyRepo(pg, enc))
-	// Kamaji Managed Kubernetes — enables kamaji provisioning + the KUBERNETES_CLUSTER write
-	// surface (Application CRs on the provider's management cluster).
-	projectH.SetKamaji(func(es *externalservice.ExternalService) (*kamaji.Service, error) {
-		return kamaji.New(es.KamajiConfig(), es.ID)
-	})
 	// Dbaas Managed Databases — enables dbaas provisioning + the DATABASE_CLUSTER write surface
 	// (Application CRs on the provider's DB cluster).
 	projectH.SetDbaas(func(es *externalservice.ExternalService) (*dbaas.Service, error) {
@@ -275,6 +269,13 @@ func run() error {
 	// Public-NIC IP allocations (pgdoc `pvePublicIp`).
 	publicIPRepo := project.NewPublicIPRepo(pg)
 	projectH.SetPublicIPs(publicIPRepo)
+	// Kamaji Managed Kubernetes — enables kamaji provisioning + the KUBERNETES_CLUSTER write
+	// surface (Application CRs on the provider's management cluster). The sync job's orphan sweep
+	// uses the same factory: it releases a deleted cluster's PVE tokens and addresses.
+	kamajiFactory := project.KamajiFactory(esSvc, func(es *externalservice.ExternalService) (*pve.Service, error) {
+		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
+	}, publicIPRepo)
+	projectH.SetKamaji(kamajiFactory)
 	projectH.SetSeeds(project.NewSeedRepo(pg, enc))
 
 	// Promotion (deposit config) + Affiliate (cfy check + project config/log) — client reads.
@@ -386,9 +387,7 @@ func run() error {
 	// gated live rating run turns it on.
 	// Admin handler (needs esSvc + region + the cloud-client factory for cloud-admin live reads).
 	adminH := admin.NewHandler(admin.NewRepo(pg), catalog.NewRepo(pg), users, addFundsSvc, pricingRepo, billingRepo, cloudRepo, platformconfig.NewRepo(pg), auditSvc, esSvc, cfg.DefaultRegion, cfg.Auth.Admin.IssuerURI, cfg.Auth.Admin.ClientID)
-	adminH.SetKamaji(func(es *externalservice.ExternalService) (*kamaji.Service, error) {
-		return kamaji.New(es.KamajiConfig(), es.ID)
-	})
+	adminH.SetKamaji(kamajiFactory)
 	adminH.SetDbaas(func(es *externalservice.ExternalService) (*dbaas.Service, error) {
 		return dbaas.New(es.DbaasConfig(), es.ID)
 	})
@@ -461,6 +460,7 @@ func run() error {
 	metricsJob := metricsjob.New(projectRepo, cloudRepo, esSvc, metrics.NewService(metricsRepo), log).WithDB(pg)
 	syncJob := syncjob.New(projectRepo, esSvc, cloudRepo, log).
 		WithPublicIPs(publicIPRepo.ForProject, publicIPRepo.ReleaseNIC).
+		WithKamajiFactory(kamajiFactory).
 		WithAudit(auditSvc).
 		WithSDNLock(lock.New(pg)).
 		WithShareAccess(projectH.ReconcileShareAccess)
