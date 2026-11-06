@@ -19,6 +19,14 @@ const (
 	StatusSkip      = "SKIP"
 )
 
+// PaymentMode values. PREPAID (the default when blank): the customer tops up and bills settle
+// from the credit balance. POSTPAID (pay as you go): every issued bill is charged to the saved
+// card the moment it is issued; a failed charge is e-mailed and retried by the collect cron.
+const (
+	PaymentModePrepaid  = "PREPAID"
+	PaymentModePostpaid = "POSTPAID"
+)
+
 // ActivationSource values.
 const (
 	SourceDeposit               = "DEPOSIT"
@@ -78,27 +86,32 @@ type ResellerConfig struct {
 }
 
 type BillingProfile struct {
-	ID                       string                                    `json:"id,omitempty"`
-	OrganizationID           string                                    `json:"organizationId,omitempty"`
-	Sub                      string                                    `json:"sub,omitempty"`         // the (single) member's IdP sub
-	AffiliateID              string                                    `json:"affiliateId,omitempty"` // referral source — gates the sign-up bonus
-	Status                   string                                    `json:"status,omitempty"`
-	Email                    string                                    `json:"email,omitempty"`
-	FirstName                string                                    `json:"firstName,omitempty"`
-	LastName                 string                                    `json:"lastName,omitempty"`
-	Currency                 string                                    `json:"currency,omitempty"`
-	Company                  bool                                      `json:"company"`
-	CompanyName              string                                    `json:"companyName,omitempty"`
-	VatCode                  string                                    `json:"vatCode,omitempty"`
-	TaxPayer                 bool                                      `json:"taxPayer"`
-	Address                  string                                    `json:"address,omitempty"`
-	City                     string                                    `json:"city,omitempty"`
-	County                   string                                    `json:"county,omitempty"`
-	Country                  string                                    `json:"country,omitempty"`
-	ZipCode                  string                                    `json:"zipCode,omitempty"`
-	Phone                    string                                    `json:"phone,omitempty"`
-	IdentityValidationID     string                                    `json:"identityValidationId,omitempty"`
-	DefaultCardID            string                                    `json:"defaultCardId,omitempty"`
+	ID                   string `json:"id,omitempty"`
+	OrganizationID       string `json:"organizationId,omitempty"`
+	Sub                  string `json:"sub,omitempty"`         // the (single) member's IdP sub
+	AffiliateID          string `json:"affiliateId,omitempty"` // referral source — gates the sign-up bonus
+	Status               string `json:"status,omitempty"`
+	Email                string `json:"email,omitempty"`
+	FirstName            string `json:"firstName,omitempty"`
+	LastName             string `json:"lastName,omitempty"`
+	Currency             string `json:"currency,omitempty"`
+	Company              bool   `json:"company"`
+	CompanyName          string `json:"companyName,omitempty"`
+	VatCode              string `json:"vatCode,omitempty"`
+	TaxPayer             bool   `json:"taxPayer"`
+	Address              string `json:"address,omitempty"`
+	City                 string `json:"city,omitempty"`
+	County               string `json:"county,omitempty"`
+	Country              string `json:"country,omitempty"`
+	ZipCode              string `json:"zipCode,omitempty"`
+	Phone                string `json:"phone,omitempty"`
+	IdentityValidationID string `json:"identityValidationId,omitempty"`
+	DefaultCardID        string `json:"defaultCardId,omitempty"`
+	// PaymentMode is PREPAID (blank = PREPAID) or POSTPAID — see the PaymentMode constants.
+	PaymentMode string `json:"paymentMode,omitempty"`
+	// PaymentGatewayID is the customer's preferred payment-gateway integration (a console default
+	// for deposits / new cards); a charge always runs on the gateway the card was registered with.
+	PaymentGatewayID         string                                    `json:"paymentGatewayId,omitempty"`
 	ProjectProvisioningQuota *ProjectProvisioningQuota                 `json:"projectProvisioningQuota,omitempty"`
 	OverwriteSuspension      bool                                      `json:"overwriteSuspension"`
 	SuspensionConfiguration  *pricing.BillingAutomaticSuspensionConfig `json:"suspensionConfiguration,omitempty"`
@@ -111,6 +124,17 @@ type BillingProfile struct {
 	CreatedAt                *time.Time                                `json:"createdAt,omitempty"`
 	UpdatedAt                *time.Time                                `json:"updatedAt,omitempty"`
 	ActivatedAt              *time.Time                                `json:"activatedAt,omitempty"`
+}
+
+// IsPostpaid reports whether the profile pays as it goes (bills are charged to the card on issue).
+func (bp *BillingProfile) IsPostpaid() bool { return bp.PaymentMode == PaymentModePostpaid }
+
+// EffectivePaymentMode is the profile's payment mode with the PREPAID default applied.
+func (bp *BillingProfile) EffectivePaymentMode() string {
+	if bp.PaymentMode == "" {
+		return PaymentModePrepaid
+	}
+	return bp.PaymentMode
 }
 
 // Restricted is the billing-profile-restricted response. reason

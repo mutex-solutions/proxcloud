@@ -157,12 +157,13 @@ flowchart LR
   br["billingresource providers"]:::impl
   price["pricing engine"]:::impl
   bill["billing<br/>bills, suspension, reminders"]:::impl
-  pay["payment<br/>Stripe"]:::impl
+  pay["payment<br/>Stripe, Airwallex, bank transfer"]:::impl
   susp["suspend and resume<br/>Proxmox VMs"]:::impl
   state["pveStateSync 60s<br/>+ staleness alert"]:::impl
   tasks["pveTaskPoll 20s"]:::impl
   pvem["metrics.PVEFetcher<br/>public NIC counters"]:::impl
-  airwallex["Airwallex gateway"]:::planned
+  factory["gateway factory<br/>per integration"]:::impl
+  inv["invoice, credit note,<br/>contacts"]:::impl
 
   cron --> sync
   cron --> mj
@@ -187,7 +188,8 @@ flowchart LR
   price --> bill
   bill --> pay
   bill --> susp
-  pay -.-> airwallex
+  pay --> factory
+  bill --> inv
 ```
 
 | Component | Path | Responsibility | Status |
@@ -204,11 +206,12 @@ flowchart LR
 | Charge fan-out | `internal/platform/chargefanout/chargefanout.go` | One RabbitMQ message per profile, off by default. | Implemented |
 | Billing client and callbacks | `internal/platform/billingclient/`, `internal/platform/billingcallback/`, `pkg/billingapi/` | Wire contract and callbacks for an external billing service. | Implemented |
 | Pricing | `internal/platform/pricing/` (`engine.go`, `charge.go`, `planselect.go`, `bill_build.go`, `adjustments.go`, `tax.go`, `fx.go`, `settle.go`) | Rating engine, bill items, savings and price adjustments, tax, currency, settlement. | Implemented |
-| Billing | `internal/platform/billing/` (`balance.go`, `sendbill.go`, `suspension_job.go`, `activationservice.go`, `reminder.go`, `savings.go`, `billpdf.go`) | Billing profiles, balance, bill finalization, PDF, dunning and suspension, reminders, savings contracts. | Implemented |
+| Billing | `internal/platform/billing/` (`balance.go`, `sendbill.go`, `suspension_job.go`, `activationservice.go`, `reminder.go`, `savings.go`, `billpdf.go`, `paybill.go`) | Billing profiles, balance, bill finalization, PDF, dunning and suspension, reminders, savings contracts. PREPAID or POSTPAID payment mode per profile; an operator can record an offline payment on a SENT bill (`PayService.RecordManualPayment`, `POST /admin/bill/{id}/record-payment`, MCP `record_bill_payment`). | Implemented |
+| Invoice, credit note, contacts | `internal/platform/billing/` (`invoice.go`, `creditnote.go`, `contacts.go`) | Sequential invoice number `INV-<year>-<seq>` stamped once when a bill leaves OPEN (counter row per year), tax invoice and credit note PDFs with the operator as issuer, validated invoice recipients (max 10) that every billing mail also goes to. Bill and refund mails carry the PDF. | Implemented |
 | Proxmox suspend/resume | `cmd/api/main.go` (`billingCloudSuspender`) | Suspends and resumes a suspended profile's Proxmox VMs. | Implemented |
-| Payment | `internal/platform/payment/` (`stripe.go`, `addfunds.go`, `collect.go`, `registercard.go`, `scanner.go`) | Stripe deposits, cards, collect, transaction scanner; bank transfer settlement. | Implemented |
+| Payment | `internal/platform/payment/` (`stripe.go`, `airwallex.go`, `factory.go`, `addfunds.go`, `collect.go`, `registercard.go`, `scanner.go`, `banktransfer.go`) | Card deposits, cards, collect, refunds and the transaction scanner over one `Gateway` interface. Gateway secrets are read from the integration doc (decrypted on load). Confirm callbacks re-read the intent from the gateway and settle through an atomic PENDING to PROCESSING claim, so a repeated or concurrent callback credits once. Bank transfer: the customer submits date, bank reference and proof (2 MiB cap), finance is mailed, an operator approves or rejects. | Implemented |
+| Gateway factory | `internal/platform/payment/factory.go` (`NewGateway`) | Picks the gateway for an integration: Stripe by `secret.privateKey`; Airwallex by `config.clientId`, `secret.apiKey` and `config.sandbox` (demo host), one cached instance per credential so the login token is shared. BankTransfer is not a card gateway. | Implemented |
 | Protected VM billing | not yet in the tree | Billing unit for replicated, HA-protected VMs. | Planned |
-| Airwallex gateway | not yet in the tree | Second payment gateway. | Planned |
 
 ## C3d. Platform services
 

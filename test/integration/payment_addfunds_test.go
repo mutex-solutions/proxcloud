@@ -16,7 +16,10 @@ import (
 
 // fakeGW stands in for Stripe so the add-funds orchestration is tested against real Postgres
 // without calling Stripe (the live gateway path is covered by payment.TestStripeSmoke).
-type fakeGW struct{ lastAmountCents int64 }
+type fakeGW struct {
+	lastAmountCents int64
+	released        []string // ReleaseSetupIntent calls (the 1.00 verification hold voids)
+}
 
 func (g *fakeGW) GetOrCreateCustomer(context.Context, payment.CustomerInput) (string, error) {
 	return "cus_fake", nil
@@ -32,17 +35,23 @@ func (g *fakeGW) CreateSetupIntent(context.Context, payment.SetupIntentInput) (p
 	return payment.SetupIntentResult{ID: "seti_fake", ClientSecret: "seti_cs", Status: "requires_payment_method"}, nil
 }
 func (g *fakeGW) RetrieveSetupIntent(context.Context, string) (payment.SetupIntentResult, error) {
-	return payment.SetupIntentResult{ID: "seti_fake", Status: "succeeded"}, nil
+	return payment.SetupIntentResult{ID: "seti_fake", Status: "succeeded",
+		Card: payment.CardDetails{TokenID: "pm_fake", PanMasked: "*.4242", ExpMonth: 12, ExpYear: 2030}}, nil
 }
-func (g *fakeGW) LatestCardForCustomer(context.Context, string) (payment.CardDetails, error) {
-	return payment.CardDetails{TokenID: "pm_fake", PanMasked: "*.4242", ExpMonth: 12, ExpYear: 2030}, nil
+func (g *fakeGW) ReleaseSetupIntent(_ context.Context, id string) error {
+	g.released = append(g.released, id)
+	return nil
 }
+func (g *fakeGW) Ping(context.Context) error { return nil }
 func (g *fakeGW) CollectPaymentIntent(_ context.Context, in payment.CollectInput) (payment.PaymentIntentResult, error) {
 	g.lastAmountCents = in.AmountCents
 	return payment.PaymentIntentResult{ID: "pi_collect", Status: "succeeded"}, nil
 }
 func (g *fakeGW) Refund(context.Context, string) (payment.RefundResult, error) {
-	return payment.RefundResult{Status: "succeeded"}, nil
+	return payment.RefundResult{ID: "rf_fake", Status: "succeeded"}, nil
+}
+func (g *fakeGW) RetrieveRefund(context.Context, string) (payment.RefundResult, error) {
+	return payment.RefundResult{ID: "rf_fake", Status: "succeeded"}, nil
 }
 
 // TestRegisterCardDispatch exercises payment.RegisterCardService against real Postgres with a fake
@@ -59,7 +68,7 @@ func TestRegisterCardDispatch(t *testing.T) {
 	if _, err := db.C("thirdPartyIntegration").InsertOne(ctx, pgdoc.M{"_id": "gw1", "name": "Stripe", "thirdParty": "Stripe", "config": pgdoc.M{"publicKey": "pk_x"}, "secret": pgdoc.M{"privateKey": "sk_x"}}); err != nil {
 		t.Fatalf("seed gw: %v", err)
 	}
-	svc := payment.NewRegisterCardService(repo, func(string) payment.Gateway { return &fakeGW{} })
+	svc := payment.NewRegisterCardService(repo, func(*billing.Gateway) payment.Gateway { return &fakeGW{} })
 	profile := &billing.BillingProfile{ID: bpID, Currency: "USD", Country: "US", Email: "a@b.c", FirstName: "Ada"}
 
 	resp, err := svc.RegisterCard(ctx, profile, payment.RegisterCardRequest{PaymentGatewayID: "gw1"})
@@ -68,7 +77,7 @@ func TestRegisterCardDispatch(t *testing.T) {
 	}
 	// register-card metadata is a map {"client_secret": <secret>} (Stripe
 	// Elements requires it), NOT a bare string.
-	md, _ := resp.Metadata.(map[string]string)
+	md, _ := resp.Metadata.(map[string]any)
 	if resp.ExternalPaymentID != "seti_fake" || md["client_secret"] != "seti_cs" || resp.ThirdParty != "Stripe" || resp.TransactionID == "" {
 		t.Fatalf("response: %+v", resp)
 	}
@@ -125,7 +134,7 @@ func TestAddFundsDispatch(t *testing.T) {
 		t.Fatalf("seed profile: %v", err)
 	}
 	fg := &fakeGW{}
-	svc := payment.NewAddFundsService(repo, pricingRepo, func(string) payment.Gateway { return fg })
+	svc := payment.NewAddFundsService(repo, pricingRepo, func(*billing.Gateway) payment.Gateway { return fg })
 	profile := &billing.BillingProfile{ID: bpID, Currency: "USD", Country: "US", Email: "a@b.c", FirstName: "Ada"}
 
 	// below minDeposit (5) → 400.
@@ -222,7 +231,7 @@ func TestProcessAddFundsBranches(t *testing.T) {
 	}
 	tenD128 := decimalOf(t, "10")
 
-	svc := payment.NewAddFundsService(repo, pricingRepo, func(string) payment.Gateway { return &fakeGW{} })
+	svc := payment.NewAddFundsService(repo, pricingRepo, func(*billing.Gateway) payment.Gateway { return &fakeGW{} })
 	orderFlips := map[string]string{}
 	svc.SetOrderStatusUpdater(func(_ context.Context, orderID, _ string, _ decimal.Decimal, status string) error {
 		orderFlips[orderID] = status

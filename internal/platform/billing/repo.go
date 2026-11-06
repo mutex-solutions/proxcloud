@@ -37,6 +37,7 @@ type Repo struct {
 	promoCodes  *pgdoc.Store         // promotionCode (admin-created codes)
 	promoRedeem *pgdoc.Store         // promotionCodeRedemption (per-org redemption record)
 	reminders   *pgdoc.Store         // reminderNotification (savings-contract expiry reminders)
+	counters    *pgdoc.Store         // counters (invoice-number sequences, one doc per year)
 	enc         *textcrypt.Encryptor // OPTIONAL, nil-safe: decrypts payment-gateway secrets on read
 }
 
@@ -66,6 +67,7 @@ func NewRepo(db *pgdoc.DB) *Repo {
 		priceAdjust: db.C("priceAdjustmentRule"),
 		reminders:   db.C("reminderNotification"),
 		bankXfers:   db.C("bankTransfer"),
+		counters:    db.C("counters"),
 	}
 }
 
@@ -86,15 +88,58 @@ func (r *Repo) CreateBankTransfer(ctx context.Context, doc pgdoc.M) (string, err
 	return r.bankXfers.InsertOne(ctx, doc)
 }
 
+// BankTransferByID loads a bank transfer by id (raw doc, `_id` injected); nil,nil when absent.
+func (r *Repo) BankTransferByID(ctx context.Context, id string) (pgdoc.M, error) {
+	var doc pgdoc.M
+	found, err := r.bankXfers.Get(ctx, id, &doc)
+	if err != nil || !found {
+		return nil, err
+	}
+	return doc, nil
+}
+
+// ListBankTransfers returns a billing profile's bank transfers, newest first (never nil).
+func (r *Repo) ListBankTransfers(ctx context.Context, bpID string) ([]pgdoc.M, error) {
+	return r.listRaw(ctx, r.bankXfers, pgdoc.M{"billingProfileId": bpID}, pgdoc.Sort(pgdoc.DescK("createdAt", pgdoc.KTime)))
+}
+
+// UpdateBankTransfer merges set into the transfer doc.
+func (r *Repo) UpdateBankTransfer(ctx context.Context, id string, set pgdoc.M) error {
+	_, err := r.bankXfers.SetByID(ctx, id, set, nil)
+	return err
+}
+
+// BankTransferPublic shapes a stored bank transfer for the API: `_id` → `id`, `_class` dropped, and the customer's
+// proof file is reduced to its metadata (the bytes stream from the dedicated /proof routes).
+// Returns a shallow copy; nil-safe.
+func BankTransferPublic(doc pgdoc.M) pgdoc.M {
+	if doc == nil {
+		return nil
+	}
+	out := make(pgdoc.M, len(doc))
+	for k, v := range doc {
+		out[k] = v
+	}
+	if v, ok := out["_id"]; ok {
+		out["id"] = v
+		delete(out, "_id")
+	}
+	delete(out, "_class") // legacy discriminator, not part of the API shape
+	if p, ok := out["proof"].(map[string]any); ok {
+		out["proof"] = pgdoc.M{"fileName": p["fileName"], "contentType": p["contentType"], "size": p["size"]}
+	}
+	return out
+}
+
 // listRaw returns the matching docs as raw maps (never nil). NOTE: this handles the
 // EMPTY-STATE case — under the default seed these collections are empty, so the
 // client list endpoints return []. The per-element DTO mapping (BillDto gross/tax/FX,
 // credit/transaction/savings shapes) is deferred to later when these get populated; a
 // non-empty raw passthrough would NOT match the canonical DTOs and would fail loudly,
 // signalling that the DTO work is due.
-func (r *Repo) listRaw(ctx context.Context, col *pgdoc.Store, filter pgdoc.M) ([]pgdoc.M, error) {
+func (r *Repo) listRaw(ctx context.Context, col *pgdoc.Store, filter pgdoc.M, opts ...pgdoc.FindOpt) ([]pgdoc.M, error) {
 	out := []pgdoc.M{}
-	if err := col.Find(ctx, filter, &out); err != nil {
+	if err := col.Find(ctx, filter, &out, opts...); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -377,14 +422,13 @@ func (r *Repo) CountSentBills(ctx context.Context, bpID string) (int64, error) {
 	return r.bills.Count(ctx, pgdoc.M{"billingProfileId": bpID, "status": "SENT"})
 }
 
-// HasOverdueBills reports whether the profile has any SENT bill sent more than 3 days
-// ago (status SENT, cutoff = now − 3 days).
+// HasOverdueBills reports whether the profile has a SENT bill past its due date (dueAt < now) —
+// the same date the invoice and the bill mail print.
 func (r *Repo) HasOverdueBills(ctx context.Context, bpID string) (bool, error) {
-	cutoff := time.Now().UTC().AddDate(0, 0, -3)
 	return r.bills.Exists(ctx, pgdoc.M{
 		"billingProfileId": bpID,
 		"status":           "SENT",
-		"sentAt":           pgdoc.M{"$lt": cutoff},
+		"dueAt":            pgdoc.M{"$lt": time.Now().UTC()},
 	})
 }
 
@@ -409,6 +453,7 @@ func (r *Repo) CreateForOrganization(ctx context.Context, orgID string, owner Ow
 	currency, _ := r.BaseCurrency(ctx) // null/"" when unconfigured
 	bp := &BillingProfile{
 		OrganizationID:  orgID,
+		Sub:             owner.Sub,
 		Status:          StatusNew,
 		Email:           owner.Email,
 		FirstName:       owner.FirstName,

@@ -91,7 +91,13 @@ type txKey struct{}
 // receives executes on that transaction (commit on nil, rollback on error).
 // This is the replacement for the old single-document atomic
 // read-modify-write patterns (get-and-lock, upsert-if, OCC).
+//
+// Called inside another WithTx, fn joins that transaction (a nested BeginFunc on the pool would
+// be a second transaction, deadlocking on rows the outer one locked).
 func (d *DB) WithTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	if _, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
+		return fn(ctx)
+	}
 	return pgx.BeginFunc(ctx, d.Pool, func(tx pgx.Tx) error {
 		return fn(context.WithValue(ctx, txKey{}, tx))
 	})

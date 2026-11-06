@@ -4,6 +4,48 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: payments port (Airwallex, gateway factory, bank-transfer submit, invoices, record payment)
+
+**What changed**
+
+- `payment` gets an Airwallex gateway next to Stripe, selected per payment integration by a
+  gateway factory (`payment.NewGateway`). The `Gateway` interface gains refund polling,
+  releasing the 1.00 card-verification hold and a credentials ping (the admin health check).
+- Card registration is now a small authorization hold that is released once the card is saved.
+  Collect creates and confirms the charge in two steps with an idempotency key.
+- A deposit confirm claims the PENDING transaction atomically (PENDING to PROCESSING), so
+  repeated or concurrent callbacks and the scanner credit once; a settle error hands the claim back.
+- Bank transfer, customer side: submit (transfer date, bank reference, note, proof of at most
+  2 MiB), cancel, and proof download; finance is mailed on submit. The admin list never carries
+  the proof bytes; the proof streams from its own route.
+- `billing` gets invoice numbers (`INV-<year>-<seq>`, stamped once on leaving OPEN), invoice and
+  credit-note PDFs with the operator as issuer, billing contacts, and a PREPAID or POSTPAID
+  payment mode (POSTPAID charges the saved card when a bill is issued).
+- Operators record an offline payment on a SENT bill: `POST /admin/bill/{id}/record-payment`
+  and the MCP tool `record_bill_payment`.
+- Mail carries attachments (the invoice PDF); the `pgdoc` store gains an atomic counter and
+  nested transactions join the outer one; four mail templates are added.
+- Admin: Airwallex integration form, bank-transfer proof download, record-payment dialog,
+  invoice numbers. Client: Airwallex Elements for deposits and cards, bank-transfer panel,
+  payment mode, invoice recipients.
+
+**Why**
+
+- A second card gateway removes the dependency on one provider and covers customers Stripe
+  does not serve; the factory keeps the services unaware of which provider an integration is.
+- Callbacks are unauthenticated redirects. Reading the outcome from the gateway and claiming the
+  transaction before crediting is what stops a replayed or raced callback from minting a second
+  credit. There is no webhook endpoint, so there is no signature to verify; the gateway is the
+  only source of truth.
+- Wire transfers are common for business customers, and the operator needs the customer's
+  reference and proof to reconcile one; recording a payment closes the loop for payments that
+  never touch a gateway.
+- Tax invoices need a gapless number and an issuer block; credit notes and recipients are
+  required to refund and to reach accounts payable.
+
+**Diagrams updated**: C1 (Airwallex now implemented), C3c (payment, gateway factory, billing,
+invoice and credit note rows and nodes).
+
 ## 2026-11-07: P4 metering foundations (branch feat/p4-metering)
 
 **What changed**

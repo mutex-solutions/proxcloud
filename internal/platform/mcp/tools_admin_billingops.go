@@ -74,6 +74,19 @@ var adminBillingOpsTools = []toolDef{
 		path:   "/api/v1/admin/bank-transfer/{id}/reject",
 		params: []param{{name: "id", typ: "string", desc: "Bank transfer id.", required: true, in: "path"}},
 	},
+	{
+		name:   "record_bill_payment",
+		desc:   "Record an offline payment (bank transfer / other) against a SENT bill: creates a SUCCESS collect transaction, records the collected amount on the bill and marks it PAID once nothing is left unpaid (partial amounts leave it SENT). Returns the bill financial overview.",
+		method: "POST",
+		path:   "/api/v1/admin/bill/{id}/record-payment",
+		params: []param{
+			{name: "id", typ: "string", desc: "Bill id (must be SENT).", required: true, in: "path"},
+			{name: "method", typ: "string", desc: "BANK_TRANSFER or OTHER.", required: true, in: "body"},
+			{name: "amount", typ: "string", desc: "Decimal gross amount received in the bill's invoice currency (default: the full unpaid amount).", in: "body"},
+			{name: "reference", typ: "string", desc: "Free-text reference (bank statement reference, receipt number).", in: "body"},
+			{name: "paidAt", typ: "string", desc: "RFC3339 payment date (default: now).", in: "body"},
+		},
+	},
 
 	// ── savings plans ────────────────────────────────────────────────────────
 	{

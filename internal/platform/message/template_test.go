@@ -27,8 +27,8 @@ func TestRenderEscapesValues(t *testing.T) {
 
 func TestSystemTemplatesComplete(t *testing.T) {
 	tmpls := SystemTemplates()
-	if len(tmpls) != 18 {
-		t.Fatalf("system templates = %d, want 18", len(tmpls))
+	if len(tmpls) != 22 {
+		t.Fatalf("system templates = %d, want 22", len(tmpls))
 	}
 	for _, x := range tmpls {
 		if x.Key == "" || x.MessageTitle == "" || x.MessageBody == "" || !x.SystemTemplate {
