@@ -575,6 +575,40 @@ branch, is in
 
 ---
 
+## Several API endpoints
+
+`config.apiUrl` is the first endpoint; `config.apiUrls` lists other nodes or a VIP. The client tries them in order and
+remembers the last one that answered, so one dead node costs one 5 s dial, not one per request. It moves on when a
+connection never opened, for a read that lost its connection, and when a node answers without quorum. A mutation
+whose connection broke after sending is not retried, because it may have run.
+
+Nodes have different certificates, so several endpoints need `config.caCert`: the cluster CA (`/etc/pve/pve-root-ca.pem`).
+It accepts any certificate that CA signed, whatever the host name, because nodes are addressed by IP. It takes
+precedence over `fingerprint`, which only ever matches one node.
+
+## Protected servers (replication + HA)
+
+An opt-in per server: ZFS replication every 15 minutes to a second node, plus an HA resource with a strict
+node-affinity rule over the two. Code: `internal/cloud/pve/protect.go`, `internal/platform/project/cloud_protect_pve.go`.
+Actions on a server: `GET_PROTECTION`, `ENABLE_PROTECTION`, `DISABLE_PROTECTION`.
+
+- **Availability.** The cluster needs quorum and three nodes, or two with a QDevice. Every disk must be on `zfspool`
+  storage, the VM must have no passthrough device, and another node must have room for its disks and its memory.
+- **Lifecycle.** Enable creates the job and syncs at once. HA is added only after the first sync has landed, on read or at
+  the next sync (`ReconcileProtection`), because HA recovery before that has nothing to start from. State:
+  `syncing` → `active`, or `degraded` when the last sync failed or is older than twice the schedule.
+- **Failover.** The dead node's watchdog fences it and the VM starts on the replica with its data as of the last sync.
+  RPO = schedule + sync time. What was written after the last sync is lost.
+- **Node returns.** The VM stays where it is: equal priority in the rule, so no second interruption.
+- **Capacity.** The scheduler keeps each node's protected VMs' memory free for them (`SchedReq.ReserveMem`).
+- **Billing.** `server_protection` with `size_gb` (replicated disks), from the first successful sync until disabled.
+- **Operator migrate.** `POST /admin/service/{id}/server/{vmid}/migrate {target}`. Sends only the delta when a replica
+  exists; PVE turns it into an HA request for a managed VM.
+
+Limits: a volume on another storage cannot be attached to a protected server without breaking its job; rollback of a
+VM snapshot older than the last sync can force a full resync (unverified). There is no alert on `degraded` yet; the state
+shows in the console and on the row.
+
 ## Standalone volumes (holder VM)
 
 A Proxmox disk must belong to a VM. A volume with no server sits as `unusedN` on a **holder VM**: one per (project,

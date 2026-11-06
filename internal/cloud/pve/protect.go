@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -112,6 +113,19 @@ func (c *Client) AddNodeAffinityRule(ctx context.Context, vmid int, nodes []stri
 
 func (c *Client) DeleteHARule(ctx context.Context, vmid int) error {
 	return c.delete(ctx, "/cluster/ha/rules/"+haRuleID(vmid), nil, nil)
+}
+
+// HARule is one row of GET /cluster/ha/rules.
+type HARule struct {
+	Rule string `json:"rule"`
+}
+
+func (c *Client) ListHARules(ctx context.Context) ([]HARule, error) {
+	var out []HARule
+	if err := c.get(ctx, "/cluster/ha/rules", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // HAResource is one row of GET /cluster/ha/resources.
@@ -392,7 +406,8 @@ func (s *Service) ReconcileProtection(ctx context.Context, r ClusterResource) (m
 	// After a failover the row's node is the one the VM moved to, and the job has already turned around.
 	st, err := s.C.GetReplicationStatus(ctx, r.Node, job.ID)
 	if err != nil {
-		return nil, err
+		// The node holding the state is down, which is the moment this page is looked at: report, do not fail.
+		st = &ReplicationStatus{Error: "Replication state is unavailable: node " + r.Node + " does not answer"}
 	}
 	ha, err := s.C.ListHAResources(ctx)
 	if err != nil {
@@ -404,13 +419,22 @@ func (s *Service) ReconcileProtection(ctx context.Context, r ClusterResource) (m
 		managed = managed || h.SID == sid
 	}
 	if st.LastSync > 0 && !managed {
-		if err := s.C.AddNodeAffinityRule(ctx, r.VMID, []string{r.Node, job.Target}); err != nil && !strings.Contains(err.Error(), "already") {
-			return nil, err
-		}
-		if err := s.C.AddHAResource(ctx, r.VMID); err != nil && !strings.Contains(err.Error(), "already") {
+		if err := s.C.AddHAResource(ctx, r.VMID); err != nil {
 			return nil, err
 		}
 		managed = true
+	}
+	if managed {
+		// After the resource: PVE refuses a rule over an unmanaged resource. Retried on the next read if it fails.
+		rules, err := s.C.ListHARules(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.ContainsFunc(rules, func(rl HARule) bool { return rl.Rule == haRuleID(r.VMID) }) {
+			if err := s.C.AddNodeAffinityRule(ctx, r.VMID, []string{r.Node, job.Target}); err != nil {
+				return nil, err
+			}
+		}
 	}
 	state := ProtectionSyncing
 	if managed {
