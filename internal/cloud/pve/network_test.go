@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"reflect"
@@ -162,6 +163,11 @@ func TestIsolationRules(t *testing.T) {
 // behaving like PVE's (a new rule lands on top, positions renumber); the management
 // network comes from the node's bridge.
 func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRule, *int) {
+	return isolationFakeNodes(t, rules, nil)
+}
+
+// isolationFakeNodes adds cluster members and overrides routes.
+func isolationFakeNodes(t *testing.T, rules []FirewallRule, extra map[string]func(http.ResponseWriter, *http.Request), members ...string) (*Service, *[]FirewallRule, *int) {
 	writes := 0
 	renumber := func() {
 		for i := range rules {
@@ -171,7 +177,7 @@ func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRul
 	renumber()
 	routes := map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/cluster/status": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":[{"type":"node","name":"pve1","ip":"192.0.2.11"}]}`)
+			fmt.Fprint(w, `{"data":[`+strings.Join(append([]string{`{"type":"node","name":"pve1","ip":"192.0.2.11"}`}, members...), ",")+`]}`)
 		},
 		"GET /api2/json/nodes/pve1/network": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[{"iface":"vmbr0","address":"192.0.2.11","gateway":"192.0.2.1","cidr":"192.0.2.11/24"},
@@ -212,6 +218,7 @@ func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRul
 			fmt.Fprint(w, `{"data":null}`)
 		}
 	}
+	maps.Copy(routes, extra)
 	_, c := fakePVE(t, routes)
 	return &Service{C: c, ServiceID: "svc", PoolPrefix: "pc-"}, &rules, &writes
 }
@@ -300,6 +307,39 @@ func TestReconcileIsolationLeavesOtherPortals(t *testing.T) {
 	srv.PoolPrefix = "pcx-"
 	if got := srv.isolationOwner(); got != isolationComment+"/pcx-" {
 		t.Fatalf("owner = %q", got)
+	}
+}
+
+// A dead node must not block a network change, and what only it knew must not lose its DROP.
+func TestReconcileIsolationWithNodeDown(t *testing.T) {
+	nodeDown := func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "595 No route to host", 595)
+	}
+	stale := isolationRules("10.100.0.0/16", []string{"192.0.2.0/24", "198.51.100.0/24"}, isolationComment)
+	srv, rules, _ := isolationFakeNodes(t, stale, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/nodes/pve2/network": nodeDown,
+	}, `{"type":"node","name":"pve2","ip":"192.0.2.12"}`)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range stale {
+		if !slices.ContainsFunc(*rules, func(g FirewallRule) bool { return sameRule(g, r) }) {
+			t.Fatalf("DROP went while a node was down: %+v", r)
+		}
+	}
+	if (*rules)[0].Comment != isolationComment+":p1" {
+		t.Fatalf("the project's ACCEPTs must still be set: %+v", *rules)
+	}
+
+	// No DROPs at all: a partial list beats none.
+	srv, rules, _ = isolationFakeNodes(t, nil, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/nodes/pve2/network": nodeDown,
+	}, `{"type":"node","name":"pve2","ip":"192.0.2.12"}`)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(*rules, func(g FirewallRule) bool { return g.Action == "DROP" && g.Dest == "192.0.2.0/24" }) {
+		t.Fatalf("no DROP for the networks the live nodes know: %+v", *rules)
 	}
 }
 
