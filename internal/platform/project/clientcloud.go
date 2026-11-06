@@ -253,7 +253,8 @@ func (h *Handler) projectCostInfo(w http.ResponseWriter, r *http.Request) {
 	if bpID != "" {
 		if bills, err := h.billing.BillsByBillingProfile(r.Context(), bpID); err == nil {
 			// resource-id → createdAt (this project's cache) so each topResourcePrices entry carries
-			// the resource's real creation time; without it the FE renders "a few seconds ago".
+			// the resource's real creation time. Absent = the resource is gone: the console shows
+			// it as deleted and does not link to it.
 			created := map[string]*time.Time{}
 			if rs, e := h.cloud.FindAllByProjectID(r.Context(), p.ID); e == nil {
 				for i := range rs {

@@ -54,6 +54,28 @@ and rules: [README.md](README.md#maintenance-rule).
   other projects out, so a router object would have nothing to decide.
 
 **Diagrams updated**: `c2-containers.md` (Tenant VMs), `c3-components.md` (C3b).
+## 2026-11-07: CI opens the built SPAs
+
+Open item of the lab drill (DRILL-1). The same PR fixes console and quota bugs with no architecture
+effect.
+
+**What changed**
+
+- New `spa-smoke` job in `test.yml`: builds each SPA, serves the production bundle and opens it in
+  Chromium. A load error or a missing login page fails it.
+
+- `ManagementCIDRs` leaves out a node that cannot answer and says so. `ReconcileIsolation` then keeps
+  the DROPs in place and still sets the project's ACCEPTs.
+
+**Why**
+
+- tsc and vite build stay green on a bundle that renders a white page, which is how a react and
+  react-dom split once reached a running console.
+- One node down made every isolation reconcile fail with `595 No route to host`, seen live during a
+  node outage. Network create and delete go through the same call, so they failed for every tenant.
+  Dropping the failed node's networks instead would have opened a hole if only it knew one.
+
+**Diagrams updated**: `c4-code.md` (C4.1 invariants).
 
 ## 2026-11-07: operator Create user makes a Keycloak login
 

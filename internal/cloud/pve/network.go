@@ -485,7 +485,7 @@ func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string
 	if err != nil {
 		return fmt.Errorf("pve isolation: invalid cidrPool %q", pool)
 	}
-	mgmt, err := s.C.ManagementCIDRs(ctx)
+	mgmt, complete, err := s.C.ManagementCIDRs(ctx)
 	if err != nil {
 		return err
 	}
@@ -502,7 +502,9 @@ func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string
 			mine = append(mine, r)
 		}
 	}
-	if !slices.EqualFunc(mine, want, sameRule) {
+	// With a node down the list may miss a network only it knew, so DROPs in place stay until it is
+	// back. The project's own ACCEPTs below do not depend on it.
+	if !slices.EqualFunc(mine, want, sameRule) && (complete || len(mine) == 0) {
 		if err := s.rebuildIsolation(ctx, rules, want, owner, poolNet); err != nil {
 			return err
 		}

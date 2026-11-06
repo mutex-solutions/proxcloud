@@ -124,7 +124,15 @@ export function DashboardPage() {
         cell: ({ row }) => {
           const resource = row.original.resource
           const label = resource?.name ?? resource?.id ?? "—"
-          return resource?.type === "SERVER" && resource.id ? (
+          // Bills outlive resources: only a live one has createdAt (the API reads it off the live row).
+          if (!resource?.createdAt) {
+            return (
+              <span className="font-medium">
+                {label} <span className="font-normal text-muted-foreground">(deleted)</span>
+              </span>
+            )
+          }
+          return resource.type === "SERVER" && resource.id ? (
             <Link
               className="font-medium hover:underline"
               to={`/p/${pid}/servers/${resource.id}`}
@@ -151,7 +159,9 @@ export function DashboardPage() {
         header: "Created",
         enableSorting: false,
         cell: ({ row }) => (
-          <span className="text-muted-foreground">{timeAgo(row.original.resource?.createdAt)}</span>
+          <span className="text-muted-foreground">
+            {row.original.resource?.createdAt ? timeAgo(row.original.resource.createdAt) : "—"}
+          </span>
         ),
       },
       {
