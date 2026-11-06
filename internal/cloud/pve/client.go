@@ -302,7 +302,7 @@ func (c *Client) doOne(ctx context.Context, base, method, path string, form url.
 
 // doBody performs a call with a ready-made body (a multipart upload).
 func (c *Client) doBody(ctx context.Context, method, path string, body io.Reader, contentType string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL()+path, body)
 	if err != nil {
 		return err
 	}
