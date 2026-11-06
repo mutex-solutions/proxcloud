@@ -462,7 +462,8 @@ func run() error {
 		WithPublicIPs(publicIPRepo.ForProject, publicIPRepo.ReleaseNIC).
 		WithKamajiFactory(kamajiFactory).
 		WithAudit(auditSvc).
-		WithSDNLock(lock.New(pg))
+		WithSDNLock(lock.New(pg)).
+		WithShareAccess(projectH.ReconcileShareAccess)
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)
