@@ -24,7 +24,7 @@ Which types produce charges depends on the services enabled on your cloud provid
 | `volume` | Proxmox VE volumes | existence, `size` (GB) |
 | `bucket` | Ceph RGW (S3) buckets | existence, `size_gb`, `object_count` |
 | `kubernetes_cluster` | Managed Kubernetes | existence, `cp_replicas`, `node_groups` |
-| `database_cluster` | Managed databases | existence, `replicas`, `vcpus_total`, `ram_gb_total`, `storage_gb_total`, `autoscale_enabled` |
+| `database_cluster` | Managed databases | existence, `replicas`, `vcpus_total`, `ram_gb_total`, `storage_gb_total`, `autoscale_enabled`, `read_endpoint_lb` (1 when a PostgreSQL read-only endpoint runs its own load balancer) |
 | `floating_ip` | Public IPs allocated to Proxmox VE servers | existence |
 | `image` | Project templates (images saved from a server) | `size_gb` |
 

@@ -85,6 +85,10 @@ export type ProjectService = {
   databasePlatformVersion?: string
   databaseLimits?: DatabaseLimits
   databaseStorageClasses?: string[]
+  // Whether the location has an S3 backup store (the whole backup surface hides otherwise) and
+  // the server-side tunable catalog per engine (the configuration form renders from it).
+  databaseBackupConfigured?: boolean
+  databaseParameters?: Record<string, unknown[]>
   [k: string]: unknown
 }
 
