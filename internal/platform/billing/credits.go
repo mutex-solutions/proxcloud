@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 )
@@ -92,6 +94,26 @@ func (r *Repo) PendingCollectTransactions(ctx context.Context, from, to time.Tim
 	})
 }
 
+// PendingCollectForBill returns the bill's PENDING collect transactions created after `since` —
+// an in-flight charge (the browser/cron/scanner has not settled it yet). A new charge for the bill
+// must not start while one exists, or the customer is charged twice.
+func (r *Repo) PendingCollectForBill(ctx context.Context, billID string, since time.Time) ([]pricing.CollectTransaction, error) {
+	return findTyped[pricing.CollectTransaction](ctx, r.collects, pgdoc.M{
+		"billId": billID, "status": string(pricing.CollectTransactionStatusPending), "createdAt": pgdoc.M{"$gt": since},
+	})
+}
+
+// CreditCardByToken finds a profile's stored card by its gateway token (nil if absent) — the
+// card-confirm callback's duplicate guard.
+func (r *Repo) CreditCardByToken(ctx context.Context, bpID, tokenID string) (*CreditCard, error) {
+	var c CreditCard
+	found, err := r.cards.FindOne(ctx, pgdoc.M{"billingProfileId": bpID, "tokenId": tokenID}, &c)
+	if err != nil || !found {
+		return nil, err
+	}
+	return &c, nil
+}
+
 // SaveCollectTransaction upserts a collect transaction (insert on a blank id, else replace
 // by id — same pattern as SaveAccountCreditTransaction).
 func (r *Repo) SaveCollectTransaction(ctx context.Context, t *pricing.CollectTransaction) (*pricing.CollectTransaction, error) {
@@ -114,7 +136,7 @@ func (r *Repo) SaveCollectTransaction(ctx context.Context, t *pricing.CollectTra
 	return t, nil
 }
 
-// AccountCreditByID loads one spendable account-credit by id (the refund delete path). nil if absent.
+// AccountCreditByID loads one spendable account-credit by id (the refund void path). nil if absent.
 func (r *Repo) AccountCreditByID(ctx context.Context, id string) (*pricing.AccountCredit, error) {
 	var ac pricing.AccountCredit
 	found, err := r.acctCredits.Get(ctx, id, &ac)
@@ -124,11 +146,29 @@ func (r *Repo) AccountCreditByID(ctx context.Context, id string) (*pricing.Accou
 	return &ac, nil
 }
 
-// DeleteAccountCredit removes a spendable account-credit (the
-// refund path: a refunded deposit's credit is voided).
-func (r *Repo) DeleteAccountCredit(ctx context.Context, id string) error {
-	_, err := r.acctCredits.DeleteByID(ctx, id)
-	return err
+// MarkAccountCreditRefunded voids a refunded deposit's credit WITHOUT deleting it: the remaining
+// balance is zeroed and refundedAt stamped, initialAmount stays for the audit trail. Every balance
+// reader sums Amount (AccountCreditTotal, creditBalance) and the settle path skips zero credits
+// (pricing.SettleAccountCredits), so a voided credit is excluded exactly as a deleted one was.
+func MarkAccountCreditRefunded(ac *pricing.AccountCredit, now time.Time) {
+	zero := decimal.Zero
+	ac.Amount = &zero
+	ac.RefundedAt = &now
+	ac.UpdatedAt = &now
+}
+
+// RestoreAccountCredit undoes MarkAccountCreditRefunded when the gateway could not complete the
+// refund: the balance the customer had before the refund comes back and refundedAt is cleared.
+func RestoreAccountCredit(ac *pricing.AccountCredit, amount decimal.Decimal, now time.Time) {
+	ac.Amount = &amount
+	ac.RefundedAt = nil
+	ac.UpdatedAt = &now
+}
+
+// RefundedAccountCreditTransactions lists REFUNDED deposits updated after `since` — the scanner
+// filters those whose gateway refund is still pending.
+func (r *Repo) RefundedAccountCreditTransactions(ctx context.Context, since time.Time) ([]AccountCreditTransaction, error) {
+	return findTyped[AccountCreditTransaction](ctx, r.credits, pgdoc.M{"status": "REFUNDED", "updatedAt": pgdoc.M{"$gt": since}})
 }
 
 // CreateAccountCredit inserts a NEW spendable AccountCredit (the deposit credit)

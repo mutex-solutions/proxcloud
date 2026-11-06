@@ -17,7 +17,7 @@ arithmetic is exact decimal.
 | `billing` | `internal/platform/billing` | The billing-profile aggregate, the PostgreSQL repos, and the stateful services: balance/due, bill send, pay-by-credit, savings contracts + reminders, suspension **orchestration**, gateways, cards, activation. |
 | `billingjob` | `internal/platform/billingjob` | The charge cron driver — loads active profiles + resources and drives `pricing` to accrue costs onto the current bill. |
 | `chargefanout` | `internal/platform/chargefanout` | Optional RabbitMQ fan-out of the charge job (one message per profile) as a multi-pod alternative to the in-process loop. |
-| `payment` | `internal/platform/payment` | Money-in flows: add funds, deposit/collect by card, register card, the Stripe gateway, and the stuck-transaction scanner. |
+| `payment` | `internal/platform/payment` | Money-in flows: add funds, deposit/collect by card, register card, the Stripe and Airwallex gateways, and the stuck-transaction scanner. |
 | `promotion` | `internal/platform/promotion` | Client promo-code redemption → promotional credit. |
 | `catalog` | `internal/platform/catalog` | Cloud-catalog config reads (flavor categories / image groups). |
 | `billingresource` | `internal/cloud/billingresource` | The cloud → billing bridge: turns a cloud resource (server, volume, bucket, …) into the priced `BillingResource`(s) the rating loop consumes. |
@@ -385,10 +385,20 @@ it settles, persists the consumed credits, flips `PAID`, and re-reviews suspensi
 
 The `payment` package orchestrates money-in. The gateway is an interface
 (`payment.Gateway`) built per integration, so flows are unit-testable with a fake
-and live-testable against a sandbox. **Stripe** is the wired gateway
-(`StripeGateway`, `stripe-go` v82, keyed by an integration's secret). Other
-gateways are configurable integrations added as their factories land; a
-**bank transfer** manual gateway is also supported.
+and live-testable against a sandbox. `payment.NewGateway` picks the card gateway
+for an integration: **Stripe** (`StripeGateway`, `stripe-go` v82, keyed by
+`secret.privateKey`) or **Airwallex** (`AirwallexGateway`, REST, keyed by
+`config.clientId` + `secret.apiKey`; `config.sandbox` selects the demo host). Card
+data never reaches the platform for either: the console confirms the intent in the
+browser (Stripe Elements, Airwallex Elements) and the confirm callback re-reads the
+intent from the gateway. A callback claims the PENDING transaction atomically before
+crediting, so a replayed or concurrent callback credits once. There is no webhook
+endpoint. A **bank transfer** manual gateway is also supported: the customer reports
+the transfer (date, bank reference, optional proof up to 2 MiB), finance is mailed,
+and an operator approves or rejects it; an operator can also record an offline
+payment against a SENT bill (`POST /admin/bill/{id}/record-payment`, MCP tool
+`record_bill_payment`). Issued bills carry a sequential invoice number
+(`INV-<year>-<seq>`); refunds produce a credit note.
 
 Payment gateways are `thirdPartyIntegration` docs (`billing/gateway.go`);
 `ListGateways` maps each enabled one to a `PaymentGatewayDTO`

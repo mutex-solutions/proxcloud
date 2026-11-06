@@ -82,7 +82,8 @@ func (h *Handler) collectTransactionDownload(w http.ResponseWriter, r *http.Requ
 	if bp == nil {
 		bp = &billing.BillingProfile{ID: txn.BillingProfileID}
 	}
-	data, filename, err := billing.CollectReceiptPDF(txn, bp)
+	issuer, _ := h.billing.IssuerInfo(r.Context())
+	data, filename, err := billing.CollectReceiptPDF(txn, bp, issuer)
 	if httpx.WriteError(w, err) {
 		return
 	}

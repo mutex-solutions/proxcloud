@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"strings"
 	"time"
 
@@ -39,8 +40,17 @@ func (r *Repo) PopulateBillingData(ctx context.Context, profile, input *BillingP
 	}
 	processBusinessBilling(profile, input)
 
+	// contacts present in the body (even []) replace the profile's billing contacts; absent → kept.
+	if input.Contacts != nil {
+		contacts, err := NormalizeContacts(input.Contacts)
+		if err != nil {
+			return nil, err
+		}
+		profile.Contacts = contacts
+	}
+
 	if validInput {
-		currency, _ := r.getCurrency(ctx, input)
+		currency, _ := r.getCurrency(ctx, profile, input)
 		profile.Currency = currency
 		profile.Address = input.Address
 		profile.City = input.City
@@ -98,13 +108,37 @@ func (r *Repo) processConstraints(_ context.Context, profile, input *BillingProf
 	return nil
 }
 
-// getCurrency resolves the currency: the input currency if
-// non-blank, else the configured base currency ("" when unconfigured).
-func (r *Repo) getCurrency(ctx context.Context, input *BillingProfile) (string, error) {
+// getCurrency resolves the currency: the input currency if non-blank, else the profile's
+// current currency (an admin-set non-base currency must survive a details save), else the
+// configured base currency ("" when unconfigured).
+func (r *Repo) getCurrency(ctx context.Context, profile, input *BillingProfile) (string, error) {
 	if strings.TrimSpace(input.Currency) != "" {
 		return input.Currency, nil
 	}
+	if profile != nil && strings.TrimSpace(profile.Currency) != "" {
+		return profile.Currency, nil
+	}
 	return r.BaseCurrency(ctx)
+}
+
+// UpdateContacts replaces ONLY the profile's billing contacts (validated, de-duplicated) with a
+// partial write — the tenant "invoice recipients" editor must not re-run the full billing-details
+// validation nor rewrite the rest of the document.
+func (r *Repo) UpdateContacts(ctx context.Context, profile *BillingProfile, contacts []Contact) (*BillingProfile, error) {
+	normalized, err := NormalizeContacts(contacts)
+	if err != nil {
+		return nil, err
+	}
+	if normalized == nil {
+		normalized = []Contact{}
+	}
+	now := time.Now().UTC()
+	if _, err := r.profiles.SetByID(ctx, profile.ID, pgdoc.M{"contacts": normalized, "updatedAt": now}, nil); err != nil {
+		return nil, err
+	}
+	profile.Contacts = normalized
+	profile.UpdatedAt = &now
+	return profile, nil
 }
 
 // activateIfPossible runs the activation flow for the

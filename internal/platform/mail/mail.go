@@ -12,13 +12,22 @@ import (
 )
 
 // Message is one outbound email. HTMLBody and TextBody are both optional; when both are set a
-// multipart/alternative body is sent, else whichever is present.
+// multipart/alternative body is sent, else whichever is present. Attachments (if any) wrap the
+// body in multipart/mixed — any SMTP relay (SendGrid, Azure ACS, ...) carries them as plain MIME.
 type Message struct {
-	From     string
-	To       []string
-	Subject  string
-	TextBody string
-	HTMLBody string
+	From        string
+	To          []string
+	Subject     string
+	TextBody    string
+	HTMLBody    string
+	Attachments []Attachment
+}
+
+// Attachment is one file carried by a Message (base64 in the wire message).
+type Attachment struct {
+	Filename    string
+	ContentType string // e.g. application/pdf; defaults to application/octet-stream
+	Data        []byte
 }
 
 // Mailer sends email. The jobs depend on this interface (not the concrete SMTP impl) so they are
