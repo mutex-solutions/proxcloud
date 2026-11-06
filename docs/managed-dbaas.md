@@ -8,17 +8,26 @@ and a NetworkPolicy. ProxCloud stays stateless about desired spec: the Applicati
 `helm.valuesObject` is the state store, status is read back off Application health + the LB
 Service.
 
-> ## Status on Proxmox
->
-> **Read, sync, connection info, actions on existing databases and delete work. Creating a
-> database on a Proxmox provider is planned.** Today a create returns "Managed Databases on
-> Proxmox are not available yet": the network legs in
-> `internal/platform/project/cloud_dbaas_create.go` are stubs. The planned design exposes
-> databases on a routed services subnet through MetalLB, with isolation by
-> `loadBalancerSourceRanges`; see
-> [C3e](architecture/c4/c3-components.md#c3e-managed-services-and-object-storage). The chart's
-> LB Service template carries no provider-specific annotations; extra ones come from
-> `network.extraAnnotations`.
+## Networking on Proxmox
+
+No tenant network is involved. The chart's `<id>-lb` LoadBalancer Service gets its address from
+**MetalLB**, out of the provider's `config.database.lbAddressPool` (annotation
+`metallb.universe.tf/address-pool` on every tenant-facing LB Service: `<id>-lb`, the PostgreSQL
+`<id>-ro-lb`, the OpenSearch `<id>-dash-lb`, and the Strimzi bootstrap + per-broker Services of
+Kafka). The pool is a routable services subnet that tenants reach over their normal egress;
+isolation is the client's `allowedCidrs`, rendered as `loadBalancerSourceRanges`. Leave the
+pool empty and MetalLB picks from any auto-assign pool.
+
+A database's replicas spread across `topology.kubernetes.io/zone` as a **hard** anti-affinity
+whenever `instances > 1` (CNPG `podAntiAffinityType: required`, the equivalent required
+`podAntiAffinity` on every other engine). With fewer zones than instances the surplus pod
+stays Pending. A single-node or single-zone site overrides the key with
+`config.database.scheduling.zoneKey` (chart value `scheduling.zoneKey`), for example
+`kubernetes.io/hostname`.
+
+Storage classes named `capacity` or `capacity-*` (HDD-backed NFS) are never offered to
+databases: the provider's `storageClasses` list drops them and a create naming one is
+rejected.
 
 ```mermaid
 flowchart LR
@@ -39,7 +48,7 @@ Engines (valkey is beta-gated):
 
 | Engine | Operator | HA semantics | Client port |
 |---|---|---|---|
-| `postgresql` | CloudNativePG ≥ 1.29.1 | `instances` 1/2/3, operator failover | 5432 |
+| `postgresql` | CloudNativePG ≥ 1.29.1 (+ `plugin-barman-cloud` for backups) | `instances` 1/2/3, operator failover | 5432 |
 | `mysql` | Percona Operator for MySQL (PS) | group replication, size 1 or 3 | 3306 |
 | `mariadb` | mariadb-operator 26.x | replication + chart-owned HAProxy | 3306 |
 | `valkey` | valkey-operator (pre-GA, **beta**) | primary + replicas | 6379 |
@@ -58,8 +67,8 @@ creation.
 
 Everything in `deploy/dbaas-cluster/`: apply order, RBAC + kubeconfig recipe, AppProject
 `proxcloud-dbaas`, `argocd-cm` Lua health checks for the engine CRDs, and the pinned operator
-install list. Assumed pre-existing on the cluster: a load-balancer implementation for
-`LoadBalancer` Services, a CSI driver with a default StorageClass, and ArgoCD (self-syncing) in
+install list. Assumed pre-existing on the cluster: MetalLB with the address pool named in
+`config.database.lbAddressPool`, a CSI driver with a default StorageClass, and ArgoCD (self-syncing) in
 `argocd`.
 
 The Lua health checks are load-bearing: the LB Service's built-in health keeps an Application
@@ -77,6 +86,11 @@ Admin UI → System → Cloud providers → Add provider → **Database (DBaaS)*
   recipe (token or client-cert only; encrypted at rest, stripped from admin reads).
 - `config.argocd.*` — namespace/project/chartRepo/`chartVersion` (pinned, never latest).
 - `config.database.engines` — the curated catalog (versions / default / replicas / `beta`).
+- `config.database.lbAddressPool`, `config.database.scheduling.zoneKey`,
+  `config.database.storageClasses` — the MetalLB pool, the replica spread key and the storage
+  allowlist (see Networking on Proxmox).
+- `config.database.backup` + `secret.backupAccessKey` / `secret.backupSecretKey` — the S3 store
+  (see Backups and restore).
 - `config.services.database.<region> = true` — un-hides the client Databases surface and
   enables the sync.
 
@@ -103,20 +117,70 @@ sequenceDiagram
 ```
 
 - **Create** — client `POST /project/{id}/cloud` `{type: DATABASE_CLUSTER, data: {name,
-  engine, version, replicas, cpu, memoryGiB, storageGiB, allowedCidrs, beta?}}`. On a Proxmox provider it currently fails before anything is written (see the status
-  box).
+  engine, version, replicas, cpu, memoryGiB, storageGiB, storageClass?, allowedCidrs, beta?,
+  readEndpoint?, dashboards?, sso?, restoreFrom?}}`. Nothing is placed on a tenant network, so
+  there is no network id to send. `restoreFrom` recovers another database of the project into
+  the new one (see Backups and restore).
 - **Sync** — `syncjob.syncDbaasService` (every 15 minutes, gated on the `database` toggle)
   reconciles the project's `DATABASE_CLUSTER` rows from Applications labeled with the project
   id, plus the LB Service address.
 - **Actions** — `GET_CONNECTION_INFO` (secret + LB read on demand, never stored),
   `RESIZE {cpu,memoryGiB}`, `RESIZE_STORAGE {storageGiB}` (grow-only), `SCALE_REPLICAS`,
-  `UPGRADE {version}` (catalog-gated, upward-only vs live values; off for valkey and ferretdb),
+  `UPGRADE {version}` (catalog-gated, upward-only vs live values; off for valkey),
   `RESTART`, `RESET_PASSWORD` (returned once), `SET_ALLOWED_CIDRS`, `SET_SSO` (opensearch only:
   Dashboards OIDC against a **public** IdP client — no client secret is ever stored),
-  `SET_AUTOSCALE` (below). Engine-gated via `dbaas.Capabilities`.
+  `SET_AUTOSCALE` (below), and the day-2 set: `MANAGE_ACCESS {databases, users, roles?}`
+  (declarative logical databases and users for postgresql / mariadb / valkey (users only) /
+  opensearch; new passwords are returned once), `RESET_USER_PASSWORD {username}`,
+  `GET_LOGS {lines?}` (tail of every pod's engine log), `SET_PARAMETERS {parameters}` (the
+  whole desired runtime-settings set, allowlisted per engine in `parameters.go`),
+  `SET_READ_ENDPOINT {enabled}` (postgresql: a second LB `<id>-ro-lb` serving replicas;
+  mysql/mariadb: port 3307 of the existing proxy), `SET_BACKUP`, `CREATE_BACKUP`,
+  `LIST_BACKUPS` (below), `SET_INDEX_POLICIES {policies}` (opensearch retention) and
+  `SET_CUSTOM_DOMAIN {domain, certPem, keyPem, caPem?}` (opensearch BYO certificate on
+  Dashboards). Engine-gated via `dbaas.Capabilities`.
 - **Delete** — Application delete only; the ArgoCD resources-finalizer cascades the chart. The
-  periodic sweep (`syncjob.sweepDbaasOrphans`) then reaps the marker/auth secrets and GCs the
-  emptied namespace.
+  periodic sweep (`syncjob.sweepDbaasOrphans`) then reaps the marker, auth, backup-credential and customer-user secrets and
+  GCs the emptied namespace.
+
+## Backups and restore
+
+Backups are optional per provider: `config.database.backup` names **any S3 endpoint** (RustFS
+on the Standard tier, Ceph RGW on the Full tier; plain `http://` works) and the credentials
+ride in the provider secret (`secret.backupAccessKey` / `secret.backupSecretKey`). Without an
+endpoint and bucket the whole backup surface (capability, UI, CRs) is off. The location is the
+operator's choice; customers only pick a schedule and a retention.
+
+At create, every backup-capable engine (postgresql, mysql, mariadb, ferretdb) is wired to the
+store with a weekly schedule (`0 2 * * 0`) and 30 days of retention, because a WAL/binlog archive
+without a base backup underneath it restores nothing. ProxCloud writes a per-database Secret
+`<id>-backup-s3` on the DB cluster (the values never carry credentials). `SET_BACKUP
+{enabled?, schedule, retentionDays}` changes the schedule (a 5-field cron, `""` = on demand
+only; the store stays wired so continuous archiving and point-in-time recovery keep working),
+`CREATE_BACKUP` takes one now and `LIST_BACKUPS` reads the engine's backup objects live.
+
+| Engine | Mechanism |
+|---|---|
+| postgresql, ferretdb | CloudNativePG through the **barman-cloud plugin**: an `ObjectStore` CR per database, `isWALArchiver` on the Cluster, `ScheduledBackup` (6-field cron, converted by the chart) and `Backup` CRs. Needs CNPG plus `plugin-barman-cloud` (and cert-manager) on the DB cluster |
+| mariadb | `PhysicalBackup` (`onDemand` stamp) + `PointInTimeRecovery` binlog archive when `instances > 1` |
+| mysql | Percona `backup.storages` (xbcloud) with a weekly full and daily incrementals, plus `PerconaServerMySQLBackup` for on-demand |
+
+**Restore always produces a NEW database** (the physical backups only lay down on a fresh data
+directory, the source keeps running):
+
+```json
+POST /api/v1/project/{projectId}/cloud
+{"type": "DATABASE_CLUSTER", "data": {
+  "name": "orders-recovered", "engine": "postgresql", "version": "17",
+  "replicas": 1, "cpu": 2, "memoryGiB": 4, "storageGiB": 20,
+  "restoreFrom": {"sourceDatabaseId": "std-1a2b3c4d", "targetTime": "2026-11-01T09:30:00Z"}}}
+```
+
+`sourceDatabaseId` must be a database of the same project and engine with backups enabled;
+`targetTime` (RFC3339) is optional (omitted = replay the archive to its end). mysql needs
+`backupName` (the `PerconaServerMySQLBackup` to restore, from `LIST_BACKUPS`) instead of a
+search. Use the same major version as the source. mariadb replays binlogs to `targetTime` only
+when the source ran replication, otherwise it lands on the nearest physical backup.
 
 ## Pricing (DigitalOcean parity)
 
@@ -182,11 +246,11 @@ current version.
 
 | Engine | Secret | Exposed account |
 |---|---|---|
-| postgresql | `<id>-app` (CNPG-minted) | `username`/`password`/`dbname` keys |
+| postgresql | `<id>-superuser` (CNPG-minted; `<id>-app` for databases created without superuser access) | `postgres` role, `username`/`password` keys, database `app` |
 | ferretdb | `<id>-pg-app` (CNPG backend `<id>-pg`) | same keys, Mongo wire |
 | mysql | `<id>-secrets` (operator-minted) | `root` under key `root` (PS has no declarative app users) |
 | mariadb | `<id>-auth` (**ProxCloud-provisioned**) | user `app`, database `app` |
-| valkey | `<id>-auth` (**ProxCloud-provisioned**) | AUTH only |
+| valkey | `<id>-auth` (**ProxCloud-provisioned**) | ACL user `default` |
 | opensearch | `<id>-admin-password` (operator-minted, default securityconfig) | `username`/`password` keys |
 | kafka | `<id>-auth` (**ProxCloud-provisioned**, KafkaUser BYO-password) | SASL user `<id>-app`, SCRAM-SHA-512 |
 
@@ -196,10 +260,14 @@ Application CR is readable by anyone with argocd read).
 
 ## Troubleshooting
 
-- **Create fails with "not available yet"** — expected on a Proxmox provider (see the status
-  box).
 - **Endpoint stuck pending** — `kubectl -n pc-<project> get svc <id>-lb`; empty
-  `EXTERNAL-IP` → the cluster's load-balancer implementation (events on the Service).
+  `EXTERNAL-IP` → MetalLB (events on the Service; an exhausted or misnamed
+  `config.database.lbAddressPool` parks the Service `<pending>`).
+- **Replica pod Pending** — the zone anti-affinity is a hard rule; fewer zones than
+  `instances` leaves the surplus pod unschedulable. Add a zone, lower the replica count or set
+  `config.database.scheduling.zoneKey` to a key the nodes do vary on.
+- **Database shows PROGRESSING with sync `OutOfSync` and backups on (postgresql)** — the
+  `barmancloud.cnpg.io` `ObjectStore` CRD is missing: install `plugin-barman-cloud`.
 - **Application Degraded on first create (ferretdb)** — frontend crash-loops until the CNPG
   backend accepts connections; the startup probe absorbs the normal window.
 - **`not managed by proxcloud — refusing`** — the object lacks the
