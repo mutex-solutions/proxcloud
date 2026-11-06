@@ -35,3 +35,36 @@ To save a server as your own image, open the server's **Snapshots** tab and crea
 ## Keeping the console in sync
 
 The status you see on a server reflects the real state on the Proxmox VE cluster. It is kept current by a background sync every 15 minutes, by every action you take in ProxCloud, and by a live refresh when you open a server. A change made directly in Proxmox appears after the next sync. For the mechanics, see [How Provisioning Works](/docs/concepts/provisioning).
+
+## User data and metadata
+
+The create wizard takes cloud-init user data (a `#cloud-config` or a script) and any instance metadata the
+operator offers. Inside the server, read the metadata with `cloud-init query ds.meta_data.meta`.
+
+## Set password
+
+Sets a user's password in the running server through its guest agent. Without a username it is the image's
+default user (`debian`, `ubuntu`, ...).
+
+## Rebuild
+
+Replaces the boot disk with a fresh copy of an image, losing everything on it. The server keeps its addresses,
+firewall and data volumes. Delete its snapshots first.
+
+## Snapshots
+
+The **Snapshots** tab saves the state of the server's disks and rolls back to it, losing what was written
+since. It protects against mistakes, not against disk or node failure. Local ZFS rolls back to the newest
+snapshot only: delete newer ones first. A server with a disk on capacity storage cannot be snapshotted.
+
+**Images** on the same page are something else: a full copy of the server's disk, to create new servers from.
+
+## Public IP
+
+On the server's **Network** tab, attach a public IP from a public network the project may use, then reboot:
+the guest brings the address up at boot, and it becomes the default route. Detach gives the address back.
+
+## Spread groups
+
+Give servers the same spread group in the create wizard to place them on different nodes where possible.
+With the strict option, creating one fails rather than share a node. Placement happens once, at create.

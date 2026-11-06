@@ -183,6 +183,7 @@ function ProxmoxConfigCard({ id, provider }: TabProps) {
     { key: "storageProfiles", label: "Storage profiles", hint: '{"std":{"label":"Local NVMe (ZFS)","storages":{"*":"local-zfs"},"snapshots":true,"thin":true,"replication":true},"capacity":{"label":"Capacity HDD (NFS)","storages":{"*":"nas-capacity"},"shared":true,"liveMigrate":true}}' },
     { key: "templates", label: "OS templates (optional: tagged templates are discovered; vmid + node pins one, the rest overlays)", hint: '{"ubuntu-24.04":{"name":"Ubuntu 24.04","minDiskGb":10}}' },
     { key: "gpus", label: "GPU mappings", hint: '{"<pci-mapping-id>":{"alias":"nvidia-4090"}}' },
+    { key: "metadata", label: "Server seeds (user-data delivery)", hint: '{"url":"https://api.example.com","isoStorage":"nas-templates","forceIso":false,"vendorData":"#cloud-config\\n..."}' },
   ]
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
     const out: Record<string, string> = {}

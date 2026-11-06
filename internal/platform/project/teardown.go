@@ -361,6 +361,11 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 				pveTeardownFailed = true
 				continue
 			}
+			if serr := h.pveReleaseProjectSeeds(ctx, ps, svcID, p.ID); serr != nil {
+				slog.Error("teardown: release seeds", "project", p.ID, "serviceId", svcID, "err", serr)
+				pveTeardownFailed = true
+				continue
+			}
 			if h.publicIPs != nil {
 				if rerr := h.publicIPs.ReleaseProject(ctx, svcID, p.ID); rerr != nil {
 					slog.Error("teardown: release public IPs", "project", p.ID, "serviceId", svcID, "err", rerr)

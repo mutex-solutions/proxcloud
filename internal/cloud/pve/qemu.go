@@ -280,6 +280,12 @@ func (c *Client) AgentNetworkInterfaces(ctx context.Context, node string, vmid i
 	return out.Result, nil
 }
 
+// AgentSetUserPassword sets a guest user's password through the guest agent.
+func (c *Client) AgentSetUserPassword(ctx context.Context, node string, vmid int, username, password string) error {
+	form := formVals{"username": username, "password": password}.values()
+	return c.post(ctx, qemuPath(node, vmid)+"/agent/set-user-password", form, nil)
+}
+
 // SuspendVM pauses a running VM (billing suspension leg).
 func (c *Client) SuspendVM(ctx context.Context, node string, vmid int) (UPID, error) {
 	return c.vmPower(ctx, node, vmid, "suspend", nil)

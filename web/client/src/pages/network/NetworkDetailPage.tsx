@@ -2,7 +2,7 @@ import { useState } from "react"
 import { Link, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { Pencil, Plus, Trash2 } from "lucide-react"
+import { Plus, Trash2 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { StatusBadge } from "@/components/status-badge"
 import {
@@ -20,7 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiFetch } from "@/lib/api"
-import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
+import { useCloudFeatures, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
 import { networkName, networkStatus } from "./NetworksPage"
 
@@ -111,7 +111,11 @@ export default function NetworkDetailPage() {
                 <Row k="Subnet" v={<span className="font-mono text-xs">{subnets.join(", ") || "—"}</span>} />
                 <Row k="Gateway" v={<span className="font-mono text-xs">{(net.gateway as string) || "—"}</span>} />
                 <Row k="Outbound internet (SNAT)" v={net.snat ? "Yes" : "No"} />
+                <Row k="Router" v={<span className="text-xs">zone {(net.zone as string) || "—"}</span>} />
               </dl>
+              <p className="mt-3 text-xs text-muted-foreground">
+                The zone routes between all of this project's networks and subnets. Other projects cannot reach them.
+              </p>
             </CardContent>
           </Card>
         </TabsContent>
@@ -122,7 +126,7 @@ export default function NetworkDetailPage() {
 
         {features.has("subnets") && (
           <TabsContent value="subnets" className="mt-4">
-            <SubnetsTab pid={pid} networkExtId={network.externalId ?? ""} />
+            <SubnetsTab pid={pid} network={network} />
           </TabsContent>
         )}
       </Tabs>
@@ -173,240 +177,116 @@ function NetworkServers({ pid, resourceId }: { pid: string; resourceId: string }
   )
 }
 
-// SubnetsTab lists this network's subnets (cached SUBNET resources filtered by network_id) with
-// add / edit / delete. A network commonly carries more than one subnet.
-function SubnetsTab({ pid, networkExtId }: { pid: string; networkExtId: string }) {
+// SubnetsTab: a network's subnets live on its own row (data.network.subnetDetails). Routing between
+// them and between the project's networks is the zone's job; a tenant only decides on outbound SNAT.
+type SubnetRow = { cidr: string; gateway?: string; snat?: boolean }
+
+function SubnetsTab({ pid, network }: { pid: string; network: CloudResource }) {
   const scope = useCloudScope(pid)
   const qc = useQueryClient()
-  const { data, isLoading, error } = useCloudList(pid, "SUBNET")
-  const rows = (data ?? []).filter((r) => (r.data?.subnet?.network_id as string) === networkExtId)
-
-  const [createOpen, setCreateOpen] = useState(false)
-  const [editing, setEditing] = useState<CloudResource | null>(null)
-  const [toDelete, setToDelete] = useState<CloudResource | null>(null)
-
-  // shared form state
-  const [name, setName] = useState("")
-  const [cidr, setCidr] = useState("10.0.0.0/24")
-  const [dhcp, setDhcp] = useState(true)
-  const [gatewayIp, setGatewayIp] = useState("")
-  const [dns, setDns] = useState("8.8.8.8, 1.1.1.1")
-
-  const invalidate = () => void qc.invalidateQueries({ queryKey: ["cloud", pid, "SUBNET"] })
-  const dnsList = () => dns.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean)
-
-  const openCreate = () => {
-    setName("")
-    setCidr("10.0.0.0/24")
-    setDhcp(true)
-    setGatewayIp("")
-    setDns("8.8.8.8, 1.1.1.1")
-    setCreateOpen(true)
-  }
-  const openEdit = (r: CloudResource) => {
-    const s = (r.data?.subnet ?? {}) as Record<string, unknown>
-    setName((s.name as string) ?? "")
-    setCidr((s.cidr as string) ?? "")
-    setDhcp(s.enable_dhcp !== false)
-    setGatewayIp((s.gateway_ip as string) ?? "")
-    setDns(((s.dns_nameservers as string[]) ?? []).join(", "))
-    setEditing(r)
-  }
-
-  const create = useMutation({
-    mutationFn: () =>
-      apiFetch(`/project/${pid}/cloud`, {
-        method: "POST",
-        cloud: scope,
-        body: {
-          type: "SUBNET",
-          data: {
-            networkId: networkExtId,
-            name,
-            cidr,
-            enableDhcp: dhcp,
-            gateway: true,
-            ...(gatewayIp.trim() ? { customGatewayIp: true, gatewayIp: gatewayIp.trim() } : {}),
-            ...(dnsList().length ? { dnsNameServers: dnsList() } : {}),
-          },
-        },
-      }),
+  const rows = ((network.data?.network?.subnetDetails ?? []) as SubnetRow[])
+  const [addOpen, setAddOpen] = useState(false)
+  const [cidr, setCidr] = useState("")
+  const [toDelete, setToDelete] = useState<string | null>(null)
+  const act = useMutation({
+    mutationFn: (p: { action: string; data: Record<string, unknown> }) =>
+      apiFetch(`/project/${pid}/cloud/${network.id}/action`, { method: "POST", cloud: scope, body: p }),
     onSuccess: () => {
-      toast.success("Subnet created")
-      setCreateOpen(false)
-      setTimeout(invalidate, 1200)
-    },
-    onError: (e: Error) => toast.error(e.message),
-  })
-
-  const update = useMutation({
-    mutationFn: (r: CloudResource) =>
-      apiFetch(`/project/${pid}/cloud/${r.id}/action`, {
-        method: "POST",
-        cloud: scope,
-        body: {
-          action: "UPDATE",
-          data: { name, enableDhcp: dhcp, gatewayIp: gatewayIp.trim(), dnsNameServers: dnsList() },
-        },
-      }),
-    onSuccess: () => {
-      toast.success("Subnet updated")
-      setEditing(null)
-      invalidate()
-    },
-    onError: (e: Error) => toast.error(e.message),
-  })
-
-  const del = useMutation({
-    mutationFn: (r: CloudResource) => apiFetch(`/project/${pid}/cloud/${r.id}`, { method: "DELETE", cloud: scope }),
-    onSuccess: () => {
-      toast.success("Subnet deletion requested")
+      toast.success("Network updated")
+      setAddOpen(false)
+      setCidr("")
       setToDelete(null)
-      setTimeout(invalidate, 1200)
+      void qc.invalidateQueries({ queryKey: ["cloud-resource", pid, network.id] })
+      void qc.invalidateQueries({ queryKey: ["cloud", pid, "NETWORK"] })
     },
     onError: (e: Error) => toast.error(e.message),
   })
-
   return (
     <>
       <div className="mb-3 flex items-center justify-between gap-2">
         <span className="text-eyebrow">Subnets</span>
-        <Button size="sm" onClick={openCreate}>
+        <Button size="sm" onClick={() => setAddOpen(true)}>
           <Plus className="size-4" /> Add subnet
         </Button>
       </div>
-
-      {isLoading ? (
-        <Skeleton className="h-40" />
-      ) : error ? (
-        <div className="rounded-xl border bg-card p-6 text-sm text-muted-foreground">{(error as Error).message}</div>
-      ) : !rows.length ? (
-        <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
-          No subnets on this network yet.
-        </div>
-      ) : (
-        <div className="overflow-hidden rounded-xl border bg-card">
-          <Table>
-            <TableHeader>
-              <TableRow className="hover:bg-transparent">
-                <TableHead>Name</TableHead>
-                <TableHead>CIDR</TableHead>
-                <TableHead>Gateway</TableHead>
-                <TableHead>DHCP</TableHead>
-                <TableHead>DNS</TableHead>
-                <TableHead className="w-20" />
+      <div className="overflow-hidden rounded-xl border bg-card">
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead>CIDR</TableHead>
+              <TableHead>Gateway</TableHead>
+              <TableHead>Outbound internet (SNAT)</TableHead>
+              <TableHead className="w-20" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((r) => (
+              <TableRow key={r.cidr}>
+                <TableCell className="font-mono text-xs">{r.cidr}</TableCell>
+                <TableCell className="font-mono text-xs">{r.gateway || "—"}</TableCell>
+                <TableCell>
+                  <Checkbox
+                    aria-label={`Outbound internet for ${r.cidr}`}
+                    checked={!!r.snat}
+                    disabled={act.isPending}
+                    onCheckedChange={(v) => act.mutate({ action: "SET_SNAT", data: { cidr: r.cidr, snat: v === true } })}
+                  />
+                </TableCell>
+                <TableCell className="text-right">
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={rows.length < 2}
+                    onClick={() => setToDelete(r.cidr)}
+                    aria-label={`Delete subnet ${r.cidr}`}
+                  >
+                    <Trash2 className="size-4 text-muted-foreground" />
+                  </Button>
+                </TableCell>
               </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((r) => {
-                const s = (r.data?.subnet ?? {}) as Record<string, unknown>
-                return (
-                  <TableRow key={r.id}>
-                    <TableCell className="font-medium">{(s.name as string) || "—"}</TableCell>
-                    <TableCell className="font-mono text-xs">{(s.cidr as string) ?? "—"}</TableCell>
-                    <TableCell className="font-mono text-xs">{(s.gateway_ip as string) || "—"}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground">{s.enable_dhcp !== false ? "Yes" : "No"}</TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">
-                      {((s.dns_nameservers as string[]) ?? []).join(", ") || "—"}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button variant="ghost" size="icon-sm" onClick={() => openEdit(r)} aria-label="Edit subnet">
-                        <Pencil className="size-4 text-muted-foreground" />
-                      </Button>
-                      <Button variant="ghost" size="icon-sm" onClick={() => setToDelete(r)} aria-label="Delete subnet">
-                        <Trash2 className="size-4 text-muted-foreground" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </div>
-      )}
-
-      {/* Create / edit share one form */}
-      <Dialog open={createOpen || !!editing} onOpenChange={(o) => !o && (setCreateOpen(false), setEditing(null))}>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{editing ? "Edit subnet" : "Add subnet"}</DialogTitle>
-            <DialogDescription>
-              {editing ? "CIDR can't change after creation." : "Add a subnet to this network."}
-            </DialogDescription>
+            <DialogTitle>Add subnet</DialogTitle>
+            <DialogDescription>Leave the CIDR empty to take the next free /24 of the provider's pool.</DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 py-2">
-            <div className="grid gap-2">
-              <Label htmlFor="sn-name">Name</Label>
-              <Input id="sn-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-subnet" />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="sn-cidr">CIDR</Label>
-              <Input
-                id="sn-cidr"
-                className="font-mono"
-                value={cidr}
-                onChange={(e) => setCidr(e.target.value)}
-                disabled={!!editing}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="sn-gw">Gateway IP</Label>
-              <Input
-                id="sn-gw"
-                className="font-mono"
-                value={gatewayIp}
-                onChange={(e) => setGatewayIp(e.target.value)}
-                placeholder="Auto (first usable)"
-              />
-              <p className="text-xs text-muted-foreground">Set to a VM's IP to route via a self-hosted router.</p>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="sn-dns">DNS servers</Label>
-              <Input
-                id="sn-dns"
-                className="font-mono"
-                value={dns}
-                onChange={(e) => setDns(e.target.value)}
-                placeholder="8.8.8.8, 1.1.1.1"
-              />
-            </div>
-            <label className="flex cursor-pointer items-center gap-2 text-sm">
-              <Checkbox checked={dhcp} onCheckedChange={(v) => setDhcp(v === true)} />
-              Enable DHCP
-            </label>
+          <div className="grid gap-2">
+            <Label htmlFor="sn-cidr">CIDR (optional)</Label>
+            <Input id="sn-cidr" value={cidr} onChange={(e) => setCidr(e.target.value)} placeholder="auto" className="font-mono" />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => (editing ? setEditing(null) : setCreateOpen(false))}>
+            <Button variant="outline" onClick={() => setAddOpen(false)}>
               Cancel
             </Button>
-            {editing ? (
-              <Button onClick={() => update.mutate(editing)} disabled={update.isPending}>
-                {update.isPending ? "Saving…" : "Save changes"}
-              </Button>
-            ) : (
-              <Button onClick={() => create.mutate()} disabled={!cidr || create.isPending}>
-                {create.isPending ? "Creating…" : "Add subnet"}
-              </Button>
-            )}
+            <Button
+              disabled={act.isPending}
+              onClick={() => act.mutate({ action: "ADD_SUBNET", data: { ...(cidr.trim() ? { cidr: cidr.trim() } : {}) } })}
+            >
+              {act.isPending ? "Adding…" : "Add subnet"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
       <Dialog open={!!toDelete} onOpenChange={(o) => !o && setToDelete(null)}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete subnet</DialogTitle>
-            <DialogDescription>
-              Delete subnet "{(toDelete?.data?.subnet?.name as string) || (toDelete?.data?.subnet?.cidr as string) || ""}"?
-              Detach any router interface / ports first.
-            </DialogDescription>
+            <DialogDescription>Delete subnet {toDelete}? It must have no servers on it.</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setToDelete(null)}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={() => toDelete && del.mutate(toDelete)} disabled={del.isPending}>
-              {del.isPending ? "Deleting…" : "Delete subnet"}
+            <Button
+              variant="destructive"
+              disabled={act.isPending}
+              onClick={() => toDelete && act.mutate({ action: "REMOVE_SUBNET", data: { cidr: toDelete } })}
+            >
+              {act.isPending ? "Deleting…" : "Delete subnet"}
             </Button>
           </DialogFooter>
         </DialogContent>

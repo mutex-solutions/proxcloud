@@ -243,6 +243,25 @@ type PVENetwork struct {
 	EVPNController string
 }
 
+// PVEMetadata is config.metadata: how servers get their NoCloud seed (pve/seed.go).
+type PVEMetadata struct {
+	// URL is the API's base URL as tenant vnets reach it ("" = the API's own base URL).
+	URL string
+	// ISOStorage holds seed CDs ("" = the first active iso storage on the VM's node, shared first).
+	ISOStorage string
+	// ForceISO seeds by CD even where a URL would work: tenants cannot reach the API at all.
+	ForceISO bool
+	// VendorData is the operator's vendor-data for every seeded server.
+	VendorData string
+}
+
+// PVEMetadataSettings reads config.metadata.
+func (e *ExternalService) PVEMetadataSettings() PVEMetadata {
+	m, _ := e.Config["metadata"].(map[string]any)
+	force, _ := m["forceIso"].(bool)
+	return PVEMetadata{URL: str(m["url"]), ISOStorage: str(m["isoStorage"]), ForceISO: force, VendorData: str(m["vendorData"])}
+}
+
 // PVEPublicNetwork is one admin-designated inbound bridge/vnet plus its IP pool:
 // CIDR (+ Gateway), optionally narrowed to Ranges ("a-b" or a single address),
 // minus Exclude. No CIDR = public NICs cannot attach there.

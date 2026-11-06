@@ -63,9 +63,8 @@ func (h *Handler) initUI(w http.ResponseWriter, r *http.Request) {
 // cloudFeatures lists the optional client actions a provider's backend serves, keyed into
 // /init features by service id. The client hides an action whose flag is absent, so a flag
 // is added here only once the backend accepts the action. Vocabulary (web/client
-// lib/hooks.ts CloudFeature): serverSnapshots and volumeRetype are served by Proxmox;
-// serverRebuild, serverRescue, serverPassword, userData, createDataVolumes, ports, subnets
-// and volumeSnapshots have no backend yet.
+// lib/hooks.ts CloudFeature): Proxmox serves those appended below; serverRescue,
+// createDataVolumes, ports and volumeSnapshots have no backend yet.
 func cloudFeatures(es *externalservice.ExternalService) []string {
 	out := []string{}
 	if !es.IsProxmox() {
@@ -73,6 +72,13 @@ func cloudFeatures(es *externalservice.ExternalService) []string {
 	}
 	// IMAGE create from a server (pveCreateImage).
 	out = append(out, "serverSnapshots")
+	// NoCloud seed (nocloud_pve.go), guest-agent password, boot-disk swap.
+	out = append(out, "userData", "serverPassword", "serverRebuild")
+	// PVE snapshots, several subnets on a vnet, placement groups.
+	out = append(out, "serverDiskSnapshots", "subnets", "spreadGroups")
+	if len(es.PVENetworkConfig().PublicNetworks) > 0 {
+		out = append(out, "publicIp")
+	}
 	// RETYPE moves a disk to another storage profile, so it needs a second one.
 	if len(es.PVEStorageProfiles()) > 1 {
 		out = append(out, "volumeRetype")

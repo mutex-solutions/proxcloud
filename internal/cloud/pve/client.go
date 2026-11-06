@@ -96,6 +96,12 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("pve: %d %s", e.Status, e.Message)
 }
 
+// IsForbidden reports a privilege the API token lacks.
+func IsForbidden(err error) bool {
+	ae, ok := err.(*APIError)
+	return ok && ae.Status == http.StatusForbidden
+}
+
 // IsNotFound reports whether err is a PVE 404 (or a "does not exist" 500 — PVE is
 // inconsistent: a missing vmid is a 500 "Configuration file ... does not exist",
 // and per-parameter misses land in the errors map instead of the status line).
@@ -292,6 +298,45 @@ func (c *Client) doOne(ctx context.Context, base, method, path string, form url.
 		return fmt.Errorf("pve: decode %s data: %w", path, err)
 	}
 	return nil
+}
+
+// doBody performs a call with a ready-made body (a multipart upload).
+func (c *Client) doBody(ctx context.Context, method, path string, body io.Reader, contentType string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", c.token)
+	req.Header.Set("Content-Type", contentType)
+	res, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("pve: %s %s: %w", method, path, err)
+	}
+	defer res.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	if err != nil {
+		return fmt.Errorf("pve: read %s: %w", path, err)
+	}
+	if res.StatusCode < 200 || res.StatusCode > 299 {
+		ae := &APIError{Status: res.StatusCode, Message: strings.TrimSpace(strings.TrimPrefix(res.Status, fmt.Sprintf("%d", res.StatusCode)))}
+		var env struct {
+			Errors map[string]string `json:"errors"`
+		}
+		if json.Unmarshal(raw, &env) == nil {
+			ae.Errors = env.Errors
+		}
+		return ae
+	}
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return fmt.Errorf("pve: decode %s: %w", path, err)
+	}
+	if out == nil || len(env.Data) == 0 || string(env.Data) == "null" {
+		return nil
+	}
+	return json.Unmarshal(env.Data, out)
 }
 
 func (c *Client) get(ctx context.Context, path string, form url.Values, out any) error {

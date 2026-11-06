@@ -126,7 +126,7 @@ flowchart TB
 | Element | What ProxCloud does with it | Status |
 |---|---|---|
 | Project pool (`<poolPrefix><projectId>`, default prefix `pc-`) | Created at project bootstrap; every tenant VM and template lives in it; sync and teardown are scoped to it. | Implemented |
-| Tenant VMs | Full clones of an admin template or a project template; flavor, cloud-init, tags; firewall on before first boot. | Implemented |
+| Tenant VMs | Full clones of an admin template or a project template; flavor, cloud-init, tags; firewall on before first boot. User-data, vendor-data and instance metadata arrive by a platform NoCloud seed: a per-VM token URL on the API on a vnet with DHCP, a `cidata` CD otherwise. | Implemented |
 | SDN zones and vnets | One vnet per tenant network, ownership alias `st:<projectId>:<name>`. Isolation mode `shared` (one zone) or `evpn-per-project` (one EVPN zone per project); the cluster firewall rule set separates tenants in both. | Implemented |
 | proxmox-firewall | Cluster isolation rules (reconciled every sync), per-VM anti-spoof (ipfilter, macfilter), security groups as cluster firewall groups. Test connection refuses a cluster with the datacenter firewall off or a node on the legacy iptables firewall. | Implemented |
 | Public networks | Admin-designated bridges with an IPv4 pool; a public NIC (`net1`) gets one address, pinned by ipfilter. The management bridge is refused. | Implemented |

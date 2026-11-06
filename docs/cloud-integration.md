@@ -156,6 +156,12 @@ The shape is documented in the header of `proxmox.go`:
     "gpus": {},                                          // {mappingId: {"alias": "nvidia-4090"}}
     "overcommit": {"cpu": 4},
     "metrics": {"source": "none"},
+    "metadata": {                                        // server seeds, all optional (see "Server seeds")
+      "url": "https://api.example.com",                  // the API as tenant vnets reach it; default its own base URL
+      "isoStorage": "nas-templates",                     // default: first active iso storage on the node, shared first
+      "forceIso": false,                                 // never use a URL: tenants cannot reach the API
+      "vendorData": "#cloud-config\n…"                   // operator's vendor-data for every seeded server
+    },
     "provisioning": {"quota": {"servers": 10, "vcpus": 20, "ramMb": 51200, "diskGb": 500,
                                "networks": 5, "floatingIps": 2, "gpu": {"*": 0}}}
   },
@@ -172,6 +178,7 @@ Typed accessors used by the rest of the code:
 | `PVEConfig()` | `apiUrl`, `tokenId`, `fingerprint`, `insecureTls`, `secret.tokenSecret` | the `pve.Config` for `pve.NewService` |
 | `PVEPoolPrefix()` / `PoolFor(projectID)` | `poolPrefix` (default `pc-`) | the project's pool id |
 | `PVENetworkConfig()` | `network.*` | zones, public networks, `cidrPool`, isolation mode |
+| `PVEMetadataSettings()` | `metadata.*` | where server seeds come from and live |
 | `PVEStorageProfiles()` / `PVEDefaultStorageProfile()` | `storageProfiles`, `defaultStorageProfile` | storage per node, label, capability flags (validated against detection), derived `tier` / `class`, `bootDisk` / `dbaas` caps |
 | `PVECapabilities()` | `capabilities` | the last storage capability detection (below) |
 | `PVEStorageClasses()` / `PVEEffectiveStorageClass(id)` | `storageClasses` | per-storage class override and installer suggestion; effective class = valid override, else detected |
@@ -315,6 +322,58 @@ active / total / avail. A node outside the storage's `nodes` list is ignored and
 - **Billing.** The volume sync stamps each disk's own `profile` and `storage_class`
   (and `volume_type` follows the disk's profile, not the server's). The volume
   billing resource exposes both as string attributes for price-rule filters.
+
+### Server seeds
+
+A server with user-data, instance metadata or a provider `vendorData` gets a NoCloud seed from the
+platform (`pve/seed.go`, `project/nocloud_pve.go`). Any other server stays on PVE's own cloud-init
+drive. PVE's drive cannot carry them: its only input is cicustom snippets, and the API cannot upload a
+snippet.
+
+| Vnet | Seed | Why |
+|---|---|---|
+| With DHCP (simple zone), and an API URL | `smbios1` serial `ds=nocloud;s=<api>/api/v1/nocloud/<token>/` | cloud-init fetches it in its network stage, with DHCP on the first NIC |
+| Without DHCP (EVPN, VLAN), or `forceIso`, or no URL | a `cidata` ISO in the VM's cloud-init slot, uploaded to `isoStorage` | a URL seed means no network until it is fetched: the local stage gives up on any CD, so a static address has nowhere to come from |
+
+Both carry the same files. `meta-data` holds the instance id, hostname and tenant metadata under `meta`
+(`cloud-init query ds.meta_data.meta`), so a tenant key can never set `instance-id`, `dsmode` or
+`seedfrom`. `user-data` is the tenant's, passed through. `vendor-data` is the platform's cloud-config
+(a bcrypt hash of the create password, SSH keys) joined with the operator's: a tenant's user-data wins on
+the same key. `network-config` is rendered from `ipconfigN` and is absent for plain DHCP.
+
+- **Token.** Per VM, 256 bits, only its hash is stored (`pveServerSeed`). It is the only credential of
+  `GET /api/v1/nocloud/{token}/{meta-data,user-data,vendor-data,network-config}`. Deleting the server or
+  tearing down the project revokes it and removes the CD.
+- **Secrets.** User-data is encrypted at rest in the database. On an ISO seed it is a plain file on the
+  ISO storage and in the guest's CD drive for the server's lifetime, as any cloud-init seed is.
+- **Later changes.** Attaching or detaching a public NIC re-delivers the seed with the same instance id
+  and the seed asks cloud-init to re-read the network at each boot (`updates.network.when: [boot]`), so
+  user-data does not run again. Rebuild delivers it with a new instance id: the new disk runs it once.
+- **Reachability.** A URL seed needs a route from tenant vnets to `metadata.url` that `blockedCidrs` does
+  not cover.
+
+### Server actions beyond power
+
+- **Set password** (`SET_PASSWORD {password, username?}`): the guest agent's `set-user-password`, for
+  `username` or the image's default user. The server must be running. 409 when the agent answers with an
+  error (no agent yet, no such user) or the token lacks the privilege.
+- **Rebuild** (`REBUILD {imageId}`): swaps the boot disk for a fresh copy of the image and keeps the vmid,
+  NICs, addresses, firewall and data disks. The copy goes on the old disk's storage, because PVE only moves
+  a disk between VMs on one node and storage; the old disk is parked as `unusedN` until the new one is in,
+  and put back on any failure. The disk donor VM is named like an image build for the seconds it exists:
+  sync and billing skip it. 409 with snapshots on the server, or when the image needs a bigger disk.
+- **Snapshots** (`LIST_/CREATE_/ROLLBACK_/DELETE_SNAPSHOT {name}`): PVE VM snapshots, disk only. 409 when an
+  attached disk is on storage without snapshots (capacity class by design). ZFS rolls back to the newest
+  snapshot only, so an older one is 409 rather than a failed task. A running server restarts after a rollback.
+  Replication's `__*` snapshots are hidden and refused.
+- **Spread groups** (`spreadGroup`, `spreadStrict` on create): a `grp-<name>` tag on the VM. The scheduler
+  prefers the node with the fewest members of the group in the project; strict refuses a node that has one.
+  At create time only: nothing moves a member later. PVE 9's own affinity rules are HA-only, and strict.
+- **Subnets** (`ADD_SUBNET {cidr?, snat?}`, `REMOVE_SUBNET {cidr}`, `SET_SNAT {cidr, snat}` on a NETWORK): a vnet
+  holds several subnets, from the same `cidrPool` with the same overlap check, and the project's isolation
+  ACCEPT covers them all. A server picks one with `networkInterfaces[0].subnet`. A subnet with an allocated
+  address cannot be removed, and a network keeps one. There is no router resource: the zone's VRF routes
+  between all of a project's vnets, and the isolation rules are what keeps other projects out.
 
 ### Tenancy: the pool is the boundary, the platform DB decides the rest
 

@@ -80,6 +80,8 @@ type Handler struct {
 	// publicIPs allocates Proxmox public-NIC addresses (SetPublicIPs; nil = public
 	// NICs cannot attach).
 	publicIPs *PublicIPRepo
+	// seeds holds Proxmox server seeds (SetSeeds; nil = user-data is refused).
+	seeds *SeedRepo
 }
 
 // SetCustomMenu wires the customMenuItem reader into the /init menu build.
@@ -255,6 +257,8 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/project/{id}/cloud/{resourceId}/upload-bucket-file", h.cloudUploadBucketFile)
 	// Download: GET /download/{token} streams a cloud object (whitelisted; token=auth).
 	r.Get("/download/{token}", h.cloudObjectDownload)
+	// NoCloud seed of a server (whitelisted; the per-VM token is the auth).
+	r.Get("/nocloud/{token}/{file}", h.nocloudFile)
 	// Console: GET /console/{token}/websockify reverse-proxies the console WebSocket to the
 	// PVE node (whitelisted; token=auth — a bearer can't ride a WS handshake).
 	// Keeps the PVE API off the public internet.
