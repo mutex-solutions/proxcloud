@@ -139,11 +139,13 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		}
 	}
 	// Resource quota gate (vcpus/ram/servers/disk — platform-side). The disk is
-	// the root size the VM really gets (a user-picked rootVolume overrides the flavor).
+	// the root size the VM really gets: a user-picked rootVolume overrides the flavor,
+	// and a clone never gets smaller than its image.
 	diskGb := fl.DiskGb
 	if rootGiB > 0 {
 		diskGb = rootGiB
 	}
+	diskGb = max(diskGb, tpl.MinDiskGb)
 	if err := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{
 		VCPUs: fl.VCPUs, RAMMb: fl.RAMMb, Servers: 1, DiskGb: diskGb,
 	}); err != nil {
@@ -419,20 +421,19 @@ func (h *Handler) pveResolveTemplate(ctx context.Context, es *externalservice.Ex
 	if vmid, err := strconv.Atoi(imageID); err == nil {
 		cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, imageID)
 		if err == nil && cr != nil && cr.Type == cloud.TypeImage && cr.ProjectID == proj.ID {
-			node := ""
-			if img, ok := cr.Data["image"].(map[string]any); ok {
-				node = strAny(img["node"])
-			}
+			img, _ := cr.Data["image"].(map[string]any)
+			node, minDisk := strAny(img["node"]), intAny(img["min_disk"])
 			if node == "" {
 				// The sync stamps availabilityZone-less images; fall back to a live pool scan.
 				if ps, err := h.pveFor(es); err == nil {
 					if vm, rerr := ps.ResolveVM(ctx, proj.ID, imageID); rerr == nil && vm != nil {
 						node = vm.Node
+						minDisk = max(minDisk, int(vm.MaxDisk>>30))
 					}
 				}
 			}
 			if node != "" {
-				return &externalservice.PVETemplate{Slug: imageID, Name: strAny(cr.Data["name"]), VMID: vmid, Node: node}, nil
+				return &externalservice.PVETemplate{Slug: imageID, Name: strAny(img["name"]), VMID: vmid, Node: node, MinDiskGb: minDisk}, nil
 			}
 		}
 	}
@@ -1425,6 +1426,8 @@ func (h *Handler) pveCreateImage(w http.ResponseWriter, r *http.Request, u *user
 		Type: cloud.TypeImage, ExternalID: strconv.Itoa(vmid),
 		Data: map[string]any{"image": map[string]any{
 			"id": strconv.Itoa(vmid), "name": name, "status": "active", "visibility": "private",
+			// The source VM's disks are what a clone of the image starts from.
+			"size": vm.MaxDisk, "min_disk": vm.MaxDisk >> 30,
 		}},
 		CreatedAt: &now, UpdatedAt: &now,
 		Info: &cloud.Info{CreatedAt: &now, UpdatedAt: &now},

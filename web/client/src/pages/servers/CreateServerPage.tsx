@@ -198,16 +198,19 @@ export default function CreateServerPage() {
   const flavorSections = useMemo(() => buildFlavorSections(bootableFlavors, flavorCats.data ?? []), [bootableFlavors, flavorCats.data])
   // The project's own images (made from a server) are cloned by their template id.
   const { data: ownImages } = useCloudList(pid, "IMAGE")
-  const allImages = useMemo<TemplateImage[]>(
-    () => [
-      ...(images.data ?? []),
-      ...(ownImages ?? [])
+  const projectImages = useMemo<TemplateImage[]>(
+    () =>
+      (ownImages ?? [])
         .filter((r) => r.externalId)
         .map((r) => ({ ...(r.data?.image as Record<string, unknown>), id: r.externalId }) as TemplateImage),
-    ],
-    [images.data, ownImages],
+    [ownImages],
   )
-  const imageSections = useMemo(() => buildImageSections(allImages, imageGroups.data), [allImages, imageGroups.data])
+  const allImages = useMemo<TemplateImage[]>(() => [...(images.data ?? []), ...projectImages], [images.data, projectImages])
+  // Curated groups only hold the catalog, so the project's images get a section of their own.
+  const imageSections = useMemo(() => {
+    const catalog = images.data?.length ? buildImageSections(images.data, imageGroups.data) : []
+    return projectImages.length ? [...catalog, { label: "Your images", items: projectImages }] : catalog
+  }, [images.data, imageGroups.data, projectImages])
   const networks = useQuery({
     queryKey: ["cloud", pid, "NETWORK", scope?.serviceId, scope?.region],
     queryFn: () =>
@@ -471,8 +474,8 @@ export default function CreateServerPage() {
           <Step n={2} title="Image">
             {images.isLoading || imageGroups.isLoading ? (
               <Skeleton className="h-40" />
-            ) : !images.data?.length ? (
-              <p className="text-sm text-muted-foreground">No public images available.</p>
+            ) : !allImages.length ? (
+              <p className="text-sm text-muted-foreground">No images available.</p>
             ) : (
               <div className="grid max-h-96 gap-4 overflow-y-auto pr-1">
                 {imageSections.map((sec) => (
