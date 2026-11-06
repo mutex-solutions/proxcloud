@@ -46,6 +46,10 @@ spec:
           adminApi:
             issuer: {{ pc_url_id }}/realms/{{ pc.keycloak.admin_realm }}
             discoveryUri: http://proxcloud-keycloak-http/realms/{{ pc.keycloak.admin_realm }}
+          sso:
+            enabled: true
+            # An operator's email domain can never be claimed by a customer organization.
+            reservedDomains: {{ [pc.keycloak.operator.email.split('@')[-1]] | to_json }}
         cnpg:
           existingSecret: proxcloud-db-owner
           keycloak: {enabled: true, existingSecret: proxcloud-keycloak-db}

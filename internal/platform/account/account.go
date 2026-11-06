@@ -4,6 +4,7 @@
 package account
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -19,6 +20,26 @@ type Handler struct {
 	users *user.Repo
 	audit *audit.Service
 	pat   *pgdoc.Store // client_api_keys collection — self-service API tokens (see account_apikeys.go)
+	jit   Provisioner  // nil when per-organization SSO is off
+}
+
+// Provisioner adds a person who signed in through an organization's IdP to that organization.
+type Provisioner interface {
+	Provision(ctx context.Context, rc *httpx.RequestContext, u *user.User) error
+}
+
+// SetProvisioner wires the SSO just-in-time step.
+func (h *Handler) SetProvisioner(p Provisioner) { h.jit = p }
+
+// provision runs the JIT step and answers POST /user.
+func (h *Handler) provision(w http.ResponseWriter, r *http.Request, u *user.User) {
+	if h.jit != nil {
+		if err := h.jit.Provision(r.Context(), httpx.RC(r.Context()), u); err != nil {
+			httpx.Err(w, http.StatusInternalServerError, 500, "user.create.failed")
+			return
+		}
+	}
+	httpx.OK(w, u)
 }
 
 func NewHandler(users *user.Repo, a *audit.Service, pat *pgdoc.Store) *Handler {
@@ -94,17 +115,17 @@ func (h *Handler) getCustomer(w http.ResponseWriter, r *http.Request) {
 		// the already-validated access-token claims (same principal) to create.
 		u, err := h.users.FromClaims(r.Context(), user.Claims{
 			Sub: rc.Sub, Email: rc.Email, EmailVerified: rc.EmailVerified,
-			GivenName: rc.GivenName, FamilyName: rc.FamilyName, Issuer: rc.Issuer,
+			GivenName: rc.GivenName, FamilyName: rc.FamilyName, Issuer: rc.Issuer, IdP: rc.IdP,
 		})
 		if err != nil || u == nil {
 			httpx.Err(w, http.StatusInternalServerError, 500, "user.create.failed")
 			return
 		}
-		httpx.OK(w, u)
+		h.provision(w, r, u)
 		return
 	}
 	if u, ok := h.requireUser(w, r); ok {
-		httpx.OK(w, u)
+		h.provision(w, r, u)
 	}
 }
 

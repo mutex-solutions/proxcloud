@@ -25,8 +25,8 @@ flowchart LR
   rbac["rbac matcher"]:::impl
   adminapi["adminapi<br/>SigV4 public admin API"]:::impl
   mcp["mcp toolsets"]:::impl
-  sso["Per-org SSO<br/>discover, JIT, enforce"]:::planned
-  kcadm["Keycloak Admin API client"]:::planned
+  sso["Per-org SSO<br/>discover, JIT, enforce, guard"]:::impl
+  kcadm["Keycloak Admin API client"]:::impl
 
   req --> enforce
   oidc --> enforce
@@ -40,9 +40,9 @@ flowchart LR
   org -->|"verified email only"| users
   inv -->|"verified email only"| users
   org --> rbac
-  acct -.-> sso
-  sso -.-> kcadm
-  sso -.-> org
+  acct --> sso
+  sso --> kcadm
+  sso --> org
 ```
 
 | Component | Path | Responsibility | Status |
@@ -59,7 +59,7 @@ flowchart LR
 | Public admin API | `internal/platform/adminapi/` | `/admin-api/v1`: users, organizations, billing profiles, projects, bills, credits, service providers. | Implemented |
 | MCP server | `internal/platform/mcp/` (`mcp.go`, `tools_client.go`, `tools_admin*.go`) | Client and admin toolsets, dispatched in-process through the app router. | Implemented |
 | Audit | `internal/platform/audit/`, `pkg/audit/` | Audit events, field-level diffs, cursor paging. | Implemented |
-| Per-org SSO | not yet in the tree | Org IdP and domain models, Keycloak Admin API client, email-first discovery, JIT membership, enforcement middleware. | Planned |
+| Per-org SSO | `internal/platform/sso/` (`service.go`, `guard.go`, `kcadmin.go`, `fetch.go`, `repo.go`, `handler.go`) | Org IdP and domain documents, Keycloak Admin API client, DNS TXT verification, email-first discovery, JIT membership. `Guard` runs from `pkg/auth.Enforce` on every request: domain gate, account binding, enforcement, break-glass. | Implemented |
 
 ## C3b. Cloud / IaaS on Proxmox
 

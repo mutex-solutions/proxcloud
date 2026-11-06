@@ -69,7 +69,7 @@ router in `internal/server/server.go`).
 | `/actuator/health*`, `/__build` | 8081 | none; not routed by the chart's gateway or ingress | Liveness, readiness, build info | Implemented |
 | `POST /debug/<job>` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (when the scheduler is enabled) | Implemented |
 | Billing service callbacks | 8081 | shared token | Suspend/resume and mail callbacks from an external billing service | Implemented |
-| SSO discovery and per-org SSO routes | 8080 | public / OIDC | Email-first login and SSO self-service | Planned |
+| SSO discovery and per-org SSO routes (`/api/v1/auth/sso/discover`, `/api/v1/organizations/{id}/sso`, `/api/v1/admin/sso`) | 8080 | public / OIDC | Email-first login, SSO self-service, operator stop | Implemented |
 
 ## C2b. Proxmox cluster and storage tiers
 
@@ -214,7 +214,7 @@ flowchart LR
 | Scheduler and jobs | robfig/cron with a PostgreSQL distributed lock (`internal/platform/scheduler`, `lock`); disabled unless `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | Inside the API pod | Implemented |
 | PostgreSQL | JSONB document store via `internal/pgdoc`; CloudNativePG cluster (default), bundled subchart, or external | Management cluster | Implemented |
 | RabbitMQ | AMQP (`internal/amqp`), optional per-profile charge fan-out; RabbitMQ Cluster Operator (default), bundled subchart, or external | Management cluster | Implemented |
-| Keycloak | codecentric keycloakx subchart + keycloak-config-cli realm import, or an external issuer | Management cluster | Implemented |
+| Keycloak | codecentric keycloakx subchart + keycloak-config-cli realm import, or an external issuer. The API manages per-org identity providers through the Admin API with the `proxcloud-idp-admin` service account | Management cluster | Implemented |
 | Gateway / Ingress | Gateway API `HTTPRoute` or `Ingress` per host (`deploy/charts/proxcloud/templates/gateway`, `api`, `web`) | Management cluster | Implemented |
 | ArgoCD | Reconciles the platform (installer `Application` objects with inline values); receives `Application` objects for managed K8s and DBaaS | Management cluster (deployed by the installer, not the chart) | Implemented |
 | Cluster API + CAPMOX, MetalLB | Services cluster and tenant K8s workers on Proxmox, load-balancer IPs | Management and services clusters | Planned |
@@ -245,4 +245,4 @@ flowchart LR
 | Tenant VM to the network | VM firewall `policy_in DROP`, ipfilter/macfilter anti-spoof, security groups | Implemented |
 | Public NIC to management network | Public networks on the management bridge are refused at test connection and at attach | Implemented |
 | Identity matching by email | Only IdP-verified emails resolve to a user for add-member and invites | Implemented |
-| Tenant IdP to customer realm | Keycloak brokering, domain verification, enforced SSO | Planned |
+| Tenant IdP to customer realm | Keycloak brokering; a guard on every API request holds the IdP to its verified domains and its own accounts; enforced SSO | Implemented |

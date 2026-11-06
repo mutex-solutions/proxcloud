@@ -15,6 +15,7 @@ pc_db_password: "{{ lookup('ansible.builtin.password', pc_gen ~ '/db-password ' 
 pc_keycloak_db_password: "{{ lookup('ansible.builtin.password', pc_gen ~ '/keycloak-db-password ' ~ pc_alnum) }}"
 pc_keycloak_admin_password: "{{ lookup('ansible.builtin.password', pc_gen ~ '/keycloak-admin-password ' ~ pc_alnum) }}"
 pc_operator_password: "{{ lookup('ansible.builtin.password', pc_gen ~ '/operator-password ' ~ pc_alnum) }}"
+pc_sso_client_secret: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sso-client-secret ' ~ pc_alnum) }}"
 pc_rustfs_access_key: "{{ lookup('ansible.builtin.password', pc_gen ~ '/rustfs-access-key chars=ascii_lowercase,digits length=20') }}"
 pc_rustfs_secret_key: "{{ lookup('ansible.builtin.password', pc_gen ~ '/rustfs-secret-key ' ~ pc_alnum) }}"
 
