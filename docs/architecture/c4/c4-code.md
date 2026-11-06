@@ -6,8 +6,7 @@ rating path. Each section lists the key functions with `file:line` (a snapshot,
 see the [maintenance rule](README.md#maintenance-rule)), then explains the
 invariants the code holds. Four sequence diagrams follow.
 
-Status legend: [README.md](README.md). Everything on this page is **Implemented**
-except sequence (d), which is **Planned**.
+Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
 ## C4.1 Tenant network isolation
 
@@ -345,10 +344,11 @@ sequenceDiagram
   T->>T: mark project DELETED
 ```
 
-## Sequence (d): per-org SSO login (Planned)
+## Sequence (d): per-org SSO login
 
-Nothing in this sequence exists in the code yet. It records the intended design so
-the change that implements it can update this diagram and the status columns.
+The guard runs in `pkg/auth.Enforce` before any handler, so a refused identity never gets a
+ProxCloud user, whichever route it calls first. Keycloak runs before ProxCloud sees anything, so
+an IdP asserting a foreign address does get a Keycloak account; `SweepForeignUsers` removes those.
 
 ```mermaid
 sequenceDiagram
@@ -359,20 +359,23 @@ sequenceDiagram
   participant KC as Keycloak customer realm
   participant IDP as Tenant IdP
 
-  rect rgb(242, 242, 242)
-    Note over U,IDP: Planned, not implemented
-    U->>SPA: enter email
-    SPA->>API: POST /api/v1/auth/sso/discover
-    API-->>SPA: org IdP alias for a verified domain
-    SPA->>KC: authorize with kc_idp_hint, PKCE
-    KC->>IDP: OIDC or SAML brokering
-    IDP-->>KC: assertion with email and groups
-    KC->>KC: first-broker-login, no silent account linking
-    KC-->>SPA: tokens with idp, groups, email_verified
-    SPA->>API: POST /user
-    API->>API: domain gate, verified email, JIT membership from group mapping
+  U->>SPA: enter email
+  SPA->>API: POST /api/v1/auth/sso/discover
+  API-->>SPA: alias of the IdP for a verified domain, nothing else
+  SPA->>KC: authorize with kc_idp_hint, login_hint
+  KC->>IDP: OIDC or SAML brokering
+  IDP-->>KC: assertion with email and groups
+  KC->>KC: stock first-broker-login, no silent account linking
+  KC-->>SPA: tokens with idp, idp_groups, email_verified, scope proxcloud-sso
+  SPA->>API: POST /user
+  API->>API: guard: IdP active, verified email in its org's domains, account not bound elsewhere
+  alt refused
+    API-->>SPA: 403 sso_* and no user row
+    SPA-->>U: explains why, offers sign out
+  else accepted
+    API->>API: bind user to the IdP, JIT membership, role from group mapping, never admin
     API-->>SPA: user
     SPA->>API: later requests
-    API->>API: enforce SSO for the org
+    API->>API: guard again, plus enforce-SSO and break-glass
   end
 ```
