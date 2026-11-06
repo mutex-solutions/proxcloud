@@ -214,6 +214,28 @@ func (s *Service) ProtectableDisks(ctx context.Context, vm *ClusterResource, cfg
 	return storages, nil
 }
 
+// refuseUnreplicable stops a disk from joining a protected VM on a storage that cannot replicate: the job would fail
+// on it, and leaving it out of the job would lose it on a failover.
+func (s *Service) refuseUnreplicable(ctx context.Context, vm *ClusterResource, storage string) error {
+	if !HasTag(vm.Tags, tagProtected) {
+		return nil
+	}
+	caps, err := s.C.DetectStorage(ctx)
+	if err != nil {
+		return err
+	}
+	if c, ok := caps[storage]; !ok || c.Type != "zfspool" {
+		return conflictf("Server %s is protected, and storage %s cannot be replicated. Remove the protection first", vm.Name, storage)
+	}
+	return nil
+}
+
+// slotStorage is the storage part of a volid.
+func slotStorage(volID string) string {
+	st, _, _ := strings.Cut(volID, ":")
+	return st
+}
+
 func hasPassthrough(cfg VMConfig) bool {
 	for k := range cfg {
 		if strings.HasPrefix(k, "hostpci") {
@@ -468,6 +490,54 @@ func (s *Service) StampProtection(ctx context.Context, r ClusterResource, data m
 	}
 }
 
+// waitHAPower: for an HA-managed VM the power task only asks the HA stack and returns at once (lab: 2 s, the VM
+// changed state up to 20 s later), so a row refreshed right after would say the opposite of what the tenant just did.
+// Best effort: after a minute the row just follows at the next sample.
+func (s *Service) waitHAPower(ctx context.Context, vm *ClusterResource, verb string) {
+	want := "stopped"
+	switch verb {
+	case "START":
+		want = "running"
+	case "STOP", "SHUTOFF", "SHUTDOWN":
+	default:
+		return // a reboot stays running
+	}
+	for range 30 {
+		if st, err := s.C.GetVMStatus(ctx, vm.Node, vm.VMID); err == nil && st.Status == want {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// checkStaleCloudInit refuses a migrate that PVE would abort. PVE regenerates a VM's cloud-init volume wherever the VM
+// starts and does not replicate it, so a node left in a failover keeps its copy, and a later migrate back fails on
+// "volume already exists" after copying the disks (seen on the lab, PVE 9.2). Removing it takes Datastore.Allocate on the
+// storage, more than the platform token should hold, so the operator is told what to run.
+func (s *Service) checkStaleCloudInit(ctx context.Context, vmid int, cfg VMConfig, target string) error {
+	for k := range cfg {
+		raw := cfg.Str(k)
+		if !strings.Contains(raw, "cloudinit") || !strings.Contains(raw, "media=cdrom") {
+			continue
+		}
+		vol, _, _ := strings.Cut(raw, ",")
+		rows, err := s.C.StorageContents(ctx, target, slotStorage(vol), "images", vmid)
+		if err != nil {
+			return nil // cannot tell: let PVE decide
+		}
+		for _, r := range rows {
+			if r.VolID == vol {
+				return conflictf("Node %s still holds %s from before a failover. Run `pvesm free %s` on it, then migrate", target, vol, vol)
+			}
+		}
+	}
+	return nil
+}
+
 // MigrateServer moves a VM to another node (admin only). PVE sends only the delta when a replica exists there, and
 // turns the migration into an HA request for an HA-managed VM.
 func (s *Service) MigrateServer(ctx context.Context, vmid int, target string) error {
@@ -480,11 +550,41 @@ func (s *Service) MigrateServer(ctx context.Context, vmid int, target string) er
 			if r.Node == target {
 				return conflictf("The server is already on node %s", target)
 			}
+			cfg, err := s.C.GetVMConfig(ctx, r.Node, vmid)
+			if err != nil {
+				return err
+			}
+			if err := s.checkStaleCloudInit(ctx, vmid, cfg, target); err != nil {
+				return err
+			}
 			up, err := s.C.MigrateVM(ctx, r.Node, vmid, target, r.Status == "running")
 			if err != nil {
 				return err
 			}
-			return s.C.WaitTask(ctx, up)
+			if err := s.C.WaitTask(ctx, up); err != nil {
+				return err
+			}
+			if !HasTag(cfg.Str("tags"), tagProtected) {
+				return nil
+			}
+			// HA runs the real migration behind a task that returns at once: report what actually happened.
+			for range 60 {
+				rows, err := s.C.ClusterResources(ctx, "vm")
+				if err != nil {
+					return err
+				}
+				for _, x := range rows {
+					if x.Type == "qemu" && x.VMID == vmid && x.Node == target {
+						return nil
+					}
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(5 * time.Second):
+				}
+			}
+			return conflictf("The server did not reach node %s in five minutes. Check the migration task on the cluster", target)
 		}
 	}
 	return conflictf("Server %d not found", vmid)

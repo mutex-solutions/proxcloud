@@ -442,6 +442,9 @@ func (s *Service) PowerAction(ctx context.Context, projectID, externalID, verb s
 	if err != nil && strings.Contains(err.Error(), "got timeout") {
 		return conflictf("Server %s did not respond in time. If it is still booting, try again when it is up", vm.Name)
 	}
+	if err == nil && HasTag(vm.Tags, tagProtected) {
+		s.waitHAPower(ctx, vm, verb)
+	}
 	return err
 }
 

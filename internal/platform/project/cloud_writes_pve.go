@@ -1071,7 +1071,7 @@ func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *use
 			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf("Not enough free space for a %d GB volume on the server's storage", sizeGiB)))
 			return
 		}
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+		h.fail(w, pveVolumeErr(err))
 		return
 	}
 	// The volid is named server-side; the volume sync provider picks the new disk

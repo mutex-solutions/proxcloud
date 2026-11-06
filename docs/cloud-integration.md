@@ -603,7 +603,12 @@ Actions on a server: `GET_PROTECTION`, `ENABLE_PROTECTION`, `DISABLE_PROTECTION`
 - **Capacity.** The scheduler keeps each node's protected VMs' memory free for them (`SchedReq.ReserveMem`).
 - **Billing.** `server_protection` with `size_gb` (replicated disks), from the first successful sync until disabled.
 - **Operator migrate.** `POST /admin/service/{id}/server/{vmid}/migrate {target}`. Sends only the delta when a replica
-  exists; PVE turns it into an HA request for a managed VM.
+  exists; PVE turns it into an HA request for a managed VM, and the route waits until the VM is on the target.
+- **After a failover**, the node the VM left keeps its cloud-init volume, because PVE regenerates that volume on start
+  and does not replicate it. A later migrate back would abort on "volume already exists", so the route refuses with the
+  `pvesm free` to run. Removing it from the API takes `Datastore.Allocate` on the storage, more than the platform token
+  should hold.
+- **Power actions** on a managed VM return once the VM has reached the state, not when the HA request was accepted.
 
 Limits: a volume on another storage cannot be attached to a protected server without breaking its job; rollback of a
 VM snapshot older than the last sync can force a full resync (unverified). There is no alert on `degraded` yet; the state
