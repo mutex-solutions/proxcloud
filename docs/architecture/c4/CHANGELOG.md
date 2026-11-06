@@ -29,6 +29,68 @@ and rules: [README.md](README.md#maintenance-rule).
 - Scanner usage is sometimes unavailable; writing 0 would bill nothing for that interval.
 
 **Diagrams updated**: `c1-context.md`, `c2-containers.md`, `c3-components.md` (C3 managed services).
+## 2026-11-07: per-organization SSO (PR #45)
+
+**What changed**
+
+- New package `internal/platform/sso`: per-organization identity providers (OIDC and SAML), one
+  Keycloak broker per org in the customer realm, created through the Admin API by the service
+  account `proxcloud-idp-admin`. Token issuer, SPA and MCP stay as they were.
+- Domains verified through DNS TXT, email-first discovery in the client console, JIT membership
+  with group to role mapping, enforce-SSO with up to two break-glass owners, an operator list and
+  emergency stop, org and operator console pages.
+- `pkg/auth.Enforce` gets a guard hook. The SSO guard runs on every request and answers 403
+  `sso_*`; on public paths a refused identity continues anonymous.
+- `User.ssoAlias` binds a person to the IdP that provisioned them.
+- Keycloak 26.8.2 in compose. `deploy/charts/proxcloud/files/keycloak-sso.json` is the realm
+  fragment both compose and the chart apply with keycloak-config-cli. The installer turns SSO on
+  and generates the service account secret.
+
+**Why**
+
+- Until now SSO meant one broker for every customer of the platform. One realm with a broker per
+  org (plan option B) keeps a single issuer, so ADR 0003 holds and SAML comes for free.
+- A tenant controls everything its IdP asserts, including the email claim on every login. That is
+  why the rules sit in a per-request guard and not only in the JIT step: `users.Require` creates
+  users on any route, and a rewritten claim must fail after the first login too.
+
+**Deviations from the plan, found while attacking it**
+
+- Domains: the unique index is on `verifiedDomain`, not `domain`. With a unique domain, anyone
+  could squat a name they do not own by claiming it first.
+- Account binding is new. Keycloak can end up with a foreign IdP linked to a victim's user (the
+  victim follows an email link); the IdP then rewrites the email into its own domain and passes the
+  domain gate on the victim's `sub`. The guard refuses an IdP other than the bound one, and for an
+  unbound account checks the address ProxCloud already had. Binding state is read fresh: an early
+  cached version let a brand-new account through.
+- The guard has no exemptions for `/user` and `/account`. One rule is simpler, and the console shows
+  the refusal from the 403.
+- Enforcement also covers members of the org, not only addresses in its domains. A member could
+  otherwise change their email to leave the rule. Enforcing needs a break-glass owner.
+- `proxcloud-sso` is a marker scope: while any org has SSO configured, a token without it is refused.
+  Without it a self-registered MCP client could drop the mapper and make a brokered session look
+  like a local one, skipping the domain gate.
+- `SweepForeignUsers` removes Keycloak accounts created by an IdP asserting a foreign address, which
+  otherwise block the real owner at "account already exists". This adds `manage-users` to the
+  service account. No `manage-realm`.
+- Metadata is fetched by the API behind an SSRF guard and handed to Keycloak as a file, so Keycloak
+  never dereferences a tenant URL at configuration time.
+- No custom first-broker-login flow: Keycloak's stock flow has no automatic link, and the IdP pins it
+  by alias. No `verifyEmail` in the chart realm: an install without SMTP could not register anyone,
+  and `email_verified` already fails closed.
+- Keycloak 26.8 needs the `kc-admin-api` scope on Admin API tokens. keycloak-config-cli has no 26.8
+  image; `6.5.1-26.5.5` was verified against 26.8.2.
+
+**Known ceilings**
+
+- A foreign-domain Keycloak account can exist for up to 5 minutes until the sweep.
+- Keycloak calls the token and JWKS URLs at login; they are checked when configured, not on each call.
+- A domain stays verified if the TXT record is later removed.
+- With operators in the customer realm (compose default), brokered sessions are refused on operator
+  clients, but that layout is for development only and the API logs a warning.
+
+**Diagrams updated:** c1-context.md, c2-containers.md, c3-components.md (C3a), c4-code.md (sequence d).
+
 ## 2026-11-07: payments port (Airwallex, gateway factory, bank-transfer submit, invoices, record payment)
 
 **What changed**

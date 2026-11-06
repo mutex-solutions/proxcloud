@@ -529,6 +529,11 @@ func (h *Handler) require(w http.ResponseWriter, r *http.Request, key string) bo
 	return true
 }
 
+// Require is the permission gate for handlers mounted outside this package.
+func (h *Handler) Require(w http.ResponseWriter, r *http.Request, key string) bool {
+	return h.require(w, r, key)
+}
+
 // AdminProfileDto is the admin-profile response (null email/names omitted).
 type AdminProfileDto struct {
 	Sub         string   `json:"sub,omitempty"`

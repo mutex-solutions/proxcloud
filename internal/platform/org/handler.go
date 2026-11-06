@@ -20,6 +20,7 @@ type Handler struct {
 	users          *user.Repo
 	audit          *audit.Service
 	projectMembers ProjectMemberAdder // nil-safe; set post-construction (avoids the org→project cycle)
+	onMemberRemove func(ctx context.Context, orgID, sub string)
 }
 
 // ProjectMemberAdder propagates a new organization member onto the org's projects.
@@ -36,6 +37,11 @@ func NewHandler(svc *Service, policy *Policy, repo *Repo, users *user.Repo, a *a
 // SetProjectMemberAdder wires the project-membership propagation (called from main.go after the
 // project service is constructed).
 func (h *Handler) SetProjectMemberAdder(p ProjectMemberAdder) { h.projectMembers = p }
+
+// SetMemberRemovedHook is called after a member leaves an organization (SSO revokes API tokens there).
+func (h *Handler) SetMemberRemovedHook(f func(ctx context.Context, orgID, sub string)) {
+	h.onMemberRemove = f
+}
 
 // Routes registers the organization endpoints under the /api/v1 group.
 // The static /self-service segment precedes the /{id} param route (chi matches static first).
@@ -321,6 +327,9 @@ func (h *Handler) removeMember(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.RemoveMember(r.Context(), id, sub); err != nil {
 		h.fail(w, err)
 		return
+	}
+	if h.onMemberRemove != nil {
+		h.onMemberRemove(r.Context(), id, sub)
 	}
 	o, _ := h.svc.GetOrganization(r.Context(), id)
 	member, _ := h.users.FindBySub(r.Context(), sub)

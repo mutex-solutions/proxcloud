@@ -10,8 +10,10 @@
 package auth
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
@@ -34,6 +36,27 @@ type Authenticator struct {
 	realms          []Realm
 	hmacLookup      HmacKeyLookup   // hmac_keys resolver for SigV4 (Admin API) — see sigv4.go
 	clientKeyLookup ClientKeyLookup // client_api_keys resolver for `Bearer pk.sk` PATs — see clientkey.go
+	guard           GuardFunc
+}
+
+// GuardFunc gets the last word on an authenticated request; a non-empty result is the refusal code.
+type GuardFunc func(ctx context.Context, rc *httpx.RequestContext) string
+
+// SetGuard installs the guard (per-organization SSO rules). nil means none.
+func (a *Authenticator) SetGuard(g GuardFunc) {
+	a.mu.Lock()
+	a.guard = g
+	a.mu.Unlock()
+}
+
+func (a *Authenticator) refusal(r *http.Request, rc *httpx.RequestContext) string {
+	a.mu.RLock()
+	g := a.guard
+	a.mu.RUnlock()
+	if g == nil {
+		return ""
+	}
+	return g(r.Context(), rc)
 }
 
 func New(log *slog.Logger) *Authenticator {
@@ -100,7 +123,8 @@ func (a *Authenticator) Enforce(next http.Handler) http.Handler {
 			// (the auth context is populated on permitAll paths too) — some public DTOs vary
 			// by auth, e.g. platform-configuration returns `regions` only to authenticated callers.
 			rc := &httpx.RequestContext{}
-			if got, ok := a.authenticate(r); ok {
+			// A refused identity is anonymous here; it never reaches a handler as itself.
+			if got, ok := a.authenticate(r); ok && a.refusal(r, got) == "" {
 				rc = got
 			}
 			next.ServeHTTP(w, r.WithContext(httpx.WithRC(r.Context(), rc)))
@@ -109,6 +133,10 @@ func (a *Authenticator) Enforce(next http.Handler) http.Handler {
 		rc, ok := a.authenticate(r)
 		if !ok {
 			unauthorized(w)
+			return
+		}
+		if code := a.refusal(r, rc); code != "" {
+			httpx.Err(w, http.StatusForbidden, http.StatusForbidden, code)
 			return
 		}
 		// Operator job triggers require an ADMIN credential, not just any authenticated user.
@@ -187,6 +215,9 @@ func (a *Authenticator) verifyJWT(r *http.Request, raw string) (*httpx.RequestCo
 			GivenName     string `json:"given_name"`
 			FamilyName    string `json:"family_name"`
 			Azp           string `json:"azp"`
+			Scope         string `json:"scope"`
+			IdP           string `json:"idp"`
+			IdPGroups     any    `json:"idp_groups"`
 		}
 		if err := tok.Claims(&claims); err != nil {
 			continue
@@ -211,9 +242,32 @@ func (a *Authenticator) verifyJWT(r *http.Request, raw string) (*httpx.RequestCo
 			FamilyName:    claims.FamilyName,
 			Issuer:        realm.IssuerURI,
 			Azp:           claims.Azp,
+			IdP:           claims.IdP,
+			IdPGroups:     stringList(claims.IdPGroups),
+			SSOScope:      slices.Contains(strings.Fields(claims.Scope), ssoScope),
 		}, true
 	}
 	return nil, false
+}
+
+// ssoScope is the client scope that carries the idp and idp_groups claims.
+const ssoScope = "proxcloud-sso"
+
+// stringList reads a claim Keycloak renders as a string or a list depending on how many values it has.
+func stringList(v any) []string {
+	switch t := v.(type) {
+	case string:
+		return []string{t}
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // claimTrue reads a boolean claim. Keycloak sends a JSON bool; some IdPs send the

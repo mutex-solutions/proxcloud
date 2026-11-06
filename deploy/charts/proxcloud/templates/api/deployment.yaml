@@ -80,6 +80,21 @@ spec:
                 secretKeyRef:
                   name: {{ include "proxcloud.apiSecretName" . }}
                   key: encryption-key
+            {{- if .Values.auth.sso.enabled }}
+            - name: PROXCLOUD_SSO_KC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "proxcloud.apiSecretName" . }}
+                  key: sso-client-secret
+            {{- with .Values.auth.sso.reservedDomains }}
+            - name: PROXCLOUD_SSO_RESERVED_DOMAINS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.auth.sso.allowInternalIdp }}
+            - name: PROXCLOUD_SSO_ALLOW_INTERNAL_IDP
+              value: "true"
+            {{- end }}
+            {{- end }}
             {{- with .Values.api.selfUrls.base }}
             - name: PROXCLOUD_SELF_BASE_URL
               value: {{ . | quote }}

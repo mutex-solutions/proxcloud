@@ -66,6 +66,14 @@ type Config struct {
 		Admin    OAuth2Realm
 		AdminAPI OAuth2Realm
 	}
+	// SSO is per-organization single sign-on. An empty ClientSecret leaves the feature off: it needs
+	// a Keycloak service account in the customer realm to create identity providers.
+	SSO struct {
+		ClientID        string
+		ClientSecret    string
+		ReservedDomains []string // never claimable by an organization
+		AllowInternal   bool     // development only: IdPs on http and on private addresses
+	}
 	// DefaultRegion is the region assumed when a provider doc names none
 	// (PROXCLOUD_DEFAULT_REGION / proxcloud.default-region, default "default").
 	DefaultRegion string
@@ -146,6 +154,12 @@ func Load() (*Config, error) {
 	// dashed alias, so the key resolves from the same chart value either way.
 	c.Encryption.DefaultKey = envOr("PROXCLOUD_ENCRYPTION_DEFAULT_KEY",
 		firstNonEmpty(k.String("proxcloud.encryption.default.key"), k.String("proxcloud.encryption.default-key")))
+
+	// Per-organization SSO.
+	c.SSO.ClientID = envOr("PROXCLOUD_SSO_KC_CLIENT_ID", "proxcloud-idp-admin")
+	c.SSO.ClientSecret = os.Getenv("PROXCLOUD_SSO_KC_CLIENT_SECRET")
+	c.SSO.ReservedDomains = strings.Split(os.Getenv("PROXCLOUD_SSO_RESERVED_DOMAINS"), ",")
+	c.SSO.AllowInternal = os.Getenv("PROXCLOUD_SSO_ALLOW_INTERNAL_IDP") == "true"
 
 	// Self URLs.
 	c.Self.BaseURL = envOr("PROXCLOUD_SELF_BASE_URL", k.String("proxcloud.self.base-url"))

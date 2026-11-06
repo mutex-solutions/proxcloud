@@ -50,4 +50,4 @@ The client IDs stay configurable through `auth.main.clientId`, `auth.admin.clien
 
 ## Social, corporate and two-factor logins
 
-Social logins, LDAP or SAML directories, and two-factor policies are configured on the identity provider, not in ProxCloud — see [Single Sign-On](/docs/self-hosting/sso).
+Social logins, LDAP or SAML directories, and two-factor policies are configured on the identity provider, not in ProxCloud. Organizations can also connect their own identity provider from the console. Both are covered in [Single Sign-On](/docs/self-hosting/sso).

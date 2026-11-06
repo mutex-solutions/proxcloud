@@ -92,6 +92,7 @@ function navGroups(pid: string): Group[] {
         { to: `${p}/org/projects`, label: "Projects", icon: Boxes },
         { to: `${p}/org/audit`, label: "Audit log", icon: FileClock },
         { to: `${p}/org/roles`, label: "Roles", icon: Shield },
+        { to: `${p}/org/sso`, label: "Single sign-on", icon: KeyRound },
         { to: `${p}/org/settings`, label: "Settings", icon: Settings },
       ],
     },

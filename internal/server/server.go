@@ -30,6 +30,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/projectinvite"
 	"github.com/mutex-solutions/proxcloud/internal/platform/promotion"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sse"
+	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/pkg/auth"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -95,7 +96,7 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 }
 
 // AppRouter is the public API on :8080.
-func AppRouter(log *slog.Logger, corsOrigins []string, authn *auth.Authenticator, acct *account.Handler, orgH *org.Handler, roleH *org.RoleHandler, orgAuditH *org.AuditHandler, billingH *org.BillingHandler, billingCfgH *billing.ConfigHandler, projectH *project.Handler, pcfgH *platformconfig.Handler, featureH *feature.Handler, promotionH *promotion.Handler, affiliateH *affiliate.Handler, catalogH *catalog.Handler, orderH *order.Handler, inviteH *projectinvite.Handler, adminH *admin.Handler, adminAPIH *adminapi.Handler, sseH *sse.Handler, jobH *job.Handler, mcpH *mcp.Handler) http.Handler {
+func AppRouter(log *slog.Logger, corsOrigins []string, authn *auth.Authenticator, acct *account.Handler, orgH *org.Handler, roleH *org.RoleHandler, orgAuditH *org.AuditHandler, billingH *org.BillingHandler, billingCfgH *billing.ConfigHandler, projectH *project.Handler, pcfgH *platformconfig.Handler, featureH *feature.Handler, promotionH *promotion.Handler, affiliateH *affiliate.Handler, catalogH *catalog.Handler, orderH *order.Handler, inviteH *projectinvite.Handler, adminH *admin.Handler, adminAPIH *adminapi.Handler, sseH *sse.Handler, jobH *job.Handler, mcpH *mcp.Handler, ssoH *sso.Handler) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(requestLogger(log)) // access log: method/path/status/latency per request (JSON, one line each)
@@ -127,6 +128,9 @@ func AppRouter(log *slog.Logger, corsOrigins []string, authn *auth.Authenticator
 		adminH.Routes(r)      // /admin/** surface (admin-permission gated)
 		sseH.Routes(r)        // SSE real-time stream (/events/{projectId}); source connected later
 		jobH.Routes(r)        // operator job triggers (/admin/job/*; whitelisted)
+		if ssoH != nil {
+			ssoH.Routes(r) // per-organization SSO
+		}
 	})
 	// Public Admin API: SigV4 (hmac_keys) or the admin-api OIDC realm.
 	r.Route("/admin-api/v1", adminAPIH.Routes)
