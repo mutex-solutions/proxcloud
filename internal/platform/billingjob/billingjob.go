@@ -143,7 +143,7 @@ func (s *Service) chargeBillingResource(
 	for i := range externalServices {
 		es := &externalServices[i]
 		rc := pricing.RatingContext{TimeUnit: timeUnit, CycleTimestamp: cycleTimestamp}
-		resources, err := s.billingResources(ctx, bc, projects, es.ID)
+		resources, err := s.billingResources(ctx, bc, projects, es, timeUnit, cycleStart)
 		if err != nil {
 			return err
 		}
@@ -240,12 +240,17 @@ func (s *Service) activeProjectsWithServices(ctx context.Context, billingProfile
 	return out, nil
 }
 
-// billingResources builds the billing resources (project-scoped): for each
-// project attached to the external service, dispatch its cloud resources through the
-// type→Provider registry into priced BillingResources.
-func (s *Service) billingResources(ctx context.Context, bc pricing.BillingContext, projects []project.Project, serviceID string) ([]*billingapi.BillingResource, error) {
+// billingResources builds the billing resources (project-scoped): for each project attached to the
+// external service, dispatch its cloud resources through the type→Provider registry into priced
+// BillingResources, plus the rows archived this cycle (their final interval). A month rule is paid
+// up front when first rated, so an archived row owes it nothing.
+//
+// While the provider's state is stale nothing it reports is billed and the elapsed time is written
+// off: the resources behind that time could not be observed (plan decision 12).
+func (s *Service) billingResources(ctx context.Context, bc pricing.BillingContext, projects []project.Project, es *externalservice.ExternalService, timeUnit string, cycleStart time.Time) ([]*billingapi.BillingResource, error) {
 	out := []*billingapi.BillingResource{}
 	pbc := pricing.ToAPIBillingContext(bc)
+	serviceID := es.ID
 	for i := range projects {
 		p := &projects[i]
 		if !p.HasService(serviceID) {
@@ -256,6 +261,25 @@ func (s *Service) billingResources(ctx context.Context, bc pricing.BillingContex
 			return nil, err
 		}
 		out = append(out, brs...)
+		if timeUnit == pricing.TimeUnitMonth {
+			continue
+		}
+		archived, err := billingresource.GetArchivedBillingResources(ctx, s.d.Cloud, s.d.Registry, p.ID, serviceID, cycleStart, pbc)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, archived...)
+	}
+	if es.IsProxmox() && !es.IsDisabled() {
+		state, err := s.d.Cloud.MeterState(ctx, serviceID)
+		if err != nil {
+			return nil, err
+		}
+		if state.Stale(s.d.Now()) {
+			for _, b := range out {
+				b.NotEligibleForBilling, b.SkipInterval = true, true
+			}
+		}
 	}
 	return out, nil
 }

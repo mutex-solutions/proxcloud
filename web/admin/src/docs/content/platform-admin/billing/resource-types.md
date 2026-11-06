@@ -20,15 +20,17 @@ Which types produce charges depends on the services enabled on your cloud provid
 | Resource type | Comes from | Billable attributes |
 |---|---|---|
 | `instance` | Proxmox VE servers | existence, `vcpus`, `ram_mb`, `ram_gb`, `root_disk_gb`, `gpu_count` (filter on `gpu_model`, `instance_type`, `status`, …) |
-| `instance_traffic` | Proxmox VE servers, usage from the provider's metrics source | `incoming/outgoing_public_traffic_mb`, `incoming/outgoing_private_traffic_mb`, `total_public_traffic_mb`, `total_private_traffic_mb`, `total_traffic_mb` |
+| `instance_traffic` | Proxmox VE servers, usage from the provider's metrics source (a rule on it must be `OVERWRITE_TOTAL`, by the hour or minute) | `incoming/outgoing_public_traffic_mb`, `incoming/outgoing_private_traffic_mb`, `total_public_traffic_mb`, `total_private_traffic_mb`, `total_traffic_mb` |
 | `volume` | Proxmox VE volumes | existence, `size` (GB) |
 | `bucket` | Ceph RGW (S3) buckets | existence, `size_gb`, `object_count` |
 | `kubernetes_cluster` | Managed Kubernetes | existence, `cp_replicas`, `node_groups` |
 | `database_cluster` | Managed databases | existence, `replicas`, `vcpus_total`, `ram_gb_total`, `storage_gb_total`, `autoscale_enabled` |
-| `floating_ip` | No Proxmox resource produces this type yet | existence |
-| `load_balancer` | No Proxmox resource produces this type yet | existence |
+| `floating_ip` | Public IPs allocated to Proxmox VE servers | existence |
+| `image` | Project templates (images saved from a server) | `size_gb` |
 
-Traffic is only metered when the provider has a metrics source configured. A Proxmox provider defaults to `none`; see [Connecting a Proxmox VE Cluster](/docs/platform-admin/cloud/connect-a-cloud). Networks, subnets, security groups, key pairs and templates have no billing type: they are free plumbing. Billing for public IP addresses and images is planned.
+A Proxmox provider meters the traffic of public NICs out of the box; see [Connecting a Proxmox VE Cluster](/docs/platform-admin/cloud/connect-a-cloud). Networks, subnets, security groups, key pairs and catalog templates have no billing type: they are free plumbing.
+
+Charges follow the cluster within a minute, including changes made outside the portal. An hourly rule bills every clock hour a resource existed in: created at 10:20 and deleted at 12:50 is three hours. If a cluster stops answering, billing carries on from the last known state for 30 minutes, then stops for that provider's resources until it answers again, and that gap is never back-billed. Look for the `METERING_STALE` event in the audit log.
 
 ## Deciding what to charge for
 

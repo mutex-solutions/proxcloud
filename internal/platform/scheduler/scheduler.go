@@ -51,6 +51,15 @@ const (
 	// resources.
 	ServicesSyncSpec = "0 */15 * * * *"
 
+	// PVEStateSyncSpec — every minute at :15 (Proxmox state sampler), clear of the charge at :30.
+	PVEStateSyncSpec = "15 * * * * *"
+
+	// PVETaskPollSpec — every 20 seconds (Proxmox task log poller).
+	PVETaskPollSpec = "*/20 * * * * *"
+
+	// PVETrafficSpec — every minute at :45 (Proxmox public-NIC counters).
+	PVETrafficSpec = "45 * * * * *"
+
 	// ProjectDeletionSpec — every minute at :30 (project deletion): delete projects past their
 	// deletion grace window (cascade cloud delete → remove the doc).
 	ProjectDeletionSpec = "30 * * * * *"

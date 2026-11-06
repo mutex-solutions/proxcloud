@@ -16,6 +16,8 @@ type Repo struct {
 	db          *pgdoc.DB
 	resources   *pgdoc.Store
 	history     *pgdoc.Store
+	meter       *pgdoc.Store
+	tasks       *pgdoc.Store
 	ensureOnce  sync.Once
 	ensureError error
 }
@@ -25,6 +27,8 @@ func NewRepo(db *pgdoc.DB) *Repo {
 		db:        db,
 		resources: db.C("cloudResource"),
 		history:   db.C("cloudResourceHistory"),
+		meter:     db.C("meterState"),
+		tasks:     db.C("vmTaskEvent"),
 	}
 }
 

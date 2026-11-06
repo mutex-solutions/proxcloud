@@ -85,6 +85,7 @@ const (
 	tagFlavorPref  = "fl-"
 	tagImagePref   = "img-"
 	tagProfilePref = "sp-" // storage profile slug (Phase 5 billing attr)
+	tagCreatedPref = "pc-c-"
 )
 
 // JoinTags renders VM tags for create.
@@ -103,6 +104,39 @@ func TagValue(tags, pref string) string {
 func FlavorTag(slug string) string  { return tagFlavorPref + slug }
 func ImageTag(slug string) string   { return tagImagePref + slug }
 func ProfileTag(slug string) string { return tagProfilePref + slug }
+
+// CreatedTag is a VM's identity stamp (pc-c-<unix>), written by the portal at create. Together with
+// the vmid it tells two VMs apart: PVE hands out the lowest free vmid again, and without the stamp a
+// new VM inherits the old VM's cache row and bill item.
+func CreatedTag(unix int64) string { return tagCreatedPref + strconv.FormatInt(unix, 10) }
+
+// Identity values on SERVER and VOLUME data: "c-<unix>" from the stamp, "m-<ctime>" from the `meta`
+// config key for a VM with no stamp. ctime is the weaker of the two: a clone keeps its source's
+// (verified on PVE 9.2), so clones of one template look alike and only a VM created from scratch
+// has its own. "" = unknown.
+const (
+	identityStamp = "c-"
+	identityMeta  = "m-"
+)
+
+// taggedIdentity reads the stamp, "" when there is none (or the VM is mid-clone and still carries
+// its source's tags).
+func taggedIdentity(tags, lock string) string {
+	if v := TagValue(tags, tagCreatedPref); v != "" && lock != "clone" && lock != "create" {
+		return identityStamp + v
+	}
+	return ""
+}
+
+// metaIdentity reads the ctime PVE keeps in a VM's `meta` config key.
+func metaIdentity(cfg VMConfig) string {
+	for _, kv := range splitCommaKV(cfg.Str("meta")) {
+		if kv[0] == "ctime" {
+			return identityMeta + kv[1]
+		}
+	}
+	return ""
+}
 
 // MapVMStatus maps PVE state → the API's status vocabulary the FE and
 // billing eligibility understand (ACTIVE/SHUTOFF/BUILD/ERROR).
@@ -162,12 +196,19 @@ func ServerData(r ClusterResource, addresses map[string]any, gpuSpecs map[string
 	if imageSlug != "" {
 		server["image"] = map[string]any{"id": imageSlug}
 	}
-	return map[string]any{
+	data := map[string]any{
 		"flavorName":   flavorSlug,
 		"volumeBacked": true,
 		"server":       server,
 	}
+	if id := taggedIdentity(r.Tags, r.Lock); id != "" {
+		data[dataIdentity] = id
+	}
+	return data
 }
+
+// dataIdentity is the identity key on SERVER and VOLUME data ("" or absent = unknown).
+const dataIdentity = "identity"
 
 // AgentAddresses converts guest-agent NICs into the API's addresses shape:
 // {"private": [{"addr": ..., "version": 4}]}. Loopback and link-local are dropped.

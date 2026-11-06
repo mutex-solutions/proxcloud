@@ -127,6 +127,15 @@ type VMStatus struct {
 	Uptime    int64   `json:"uptime"`
 	Agent     int     `json:"agent"`
 	Template  int     `json:"template"`
+	// NICs maps tap device → byte counters since the tap was created, in the guest's frame of
+	// reference (netin = received by the guest). Absent on a stopped VM.
+	NICs map[string]NICCounters `json:"nics"`
+}
+
+// NICCounters is one tap's counters off status/current.
+type NICCounters struct {
+	NetIn  int64 `json:"netin"`
+	NetOut int64 `json:"netout"`
 }
 
 // GetVMStatus reads the live VM state (node-scoped — the authoritative read-back

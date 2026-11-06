@@ -21,6 +21,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 )
@@ -50,6 +51,9 @@ type Job struct {
 	kamajiFor     KamajiFactory
 	dbaasFor      DbaasFactory
 	pveFor        ProxmoxFactory
+	publicIPs     PublicIPLister
+	releaseIP     PublicIPReleaser
+	audit         *audit.Service
 	now           func() time.Time
 	log           *slog.Logger
 }
@@ -226,8 +230,8 @@ func (j *Job) syncCephService(ctx context.Context, p *project.Project, es *exter
 	return st.Created + st.Updated
 }
 
-// syncProxmoxService reconciles the project's SERVER, VOLUME, IMAGE, NETWORK and SECURITY_GROUP
-// resources off the PVE cluster. The project-pool filter is the leak-guard: only this project's pool members are
+// syncProxmoxService reconciles the project's SERVER, VOLUME, IMAGE, NETWORK, SECURITY_GROUP and
+// FLOATING_IP resources off the PVE cluster and the public-IP allocations. The project-pool filter is the leak-guard: only this project's pool members are
 // listed, and Reconcile's delete-of-vanished scan is ProjectScoped.
 func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
 	region := es.PVERegion()
@@ -242,11 +246,12 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 	count := 0
 	now := j.now()
 	provs := []providers.Provider{
-		ps.ServerSyncProvider(region, p.ID),
+		ps.ServerSyncProvider(region, p.ID, es.PVEGPUAliasOf),
 		ps.VolumeSyncProvider(region, p.ID, es.PVEVolumeProfileFunc()),
 		ps.ImageSyncProvider(region, p.ID),
 		ps.NetworkSyncProvider(region, p.ID),
 		ps.SecurityGroupSyncProvider(region, p.ID),
+		j.floatingIPProvider(region, p.ID, es.ID),
 	}
 	for _, prov := range provs {
 		st, err := providers.Reconcile(ctx, prov, j.cloud, es.ID, now)

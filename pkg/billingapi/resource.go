@@ -38,6 +38,7 @@ type BillingResource struct {
 	DisplayPrice          bool                 `json:"displayPrice"`
 	Values                map[string]any       `json:"values,omitempty"`
 	NotEligibleForBilling bool                 `json:"notEligibleForBilling"`
+	SkipInterval          bool                 `json:"skipInterval,omitempty"`
 	BillingResourceType   *BillingResourceType `json:"billingResourceType,omitempty"`
 }
 

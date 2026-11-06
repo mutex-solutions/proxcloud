@@ -8,7 +8,8 @@ func TestMetricsSourceDefaults(t *testing.T) {
 		cfg  map[string]any
 		want string
 	}{
-		{"proxmox absent → none", map[string]any{"provider": "proxmox"}, MetricsSourceNone},
+		{"proxmox absent → native counters", map[string]any{"provider": "proxmox"}, MetricsSourcePVE},
+		{"proxmox explicit none", map[string]any{"provider": "proxmox", "metrics": map[string]any{"source": "none"}}, MetricsSourceNone},
 		{"proxmox explicit prometheus", map[string]any{"provider": "proxmox", "metrics": map[string]any{"source": "prometheus"}}, MetricsSourcePrometheus},
 		{"other absent → none", map[string]any{"provider": "kamaji"}, MetricsSourceNone},
 	}

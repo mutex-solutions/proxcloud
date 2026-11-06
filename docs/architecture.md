@@ -420,8 +420,8 @@ flowchart LR
 - **`client`** — the Ceph RGW (S3 and Admin Ops) client, built with
   `client.NewCephS3`; with `cephcred` it holds the per-project RGW user and keys.
 - **`metrics` / `metricsjob`** — opt-in traffic ingestion from a
-  Prometheus-compatible source per provider (`config.metrics.source`; Proxmox
-  defaults to `none`). Results land in the `usageMetrics` table.
+  source per provider (`config.metrics.source`; Proxmox defaults to `pve`, its
+  public-NIC counters, sampled every minute). Results land in the `usageMetrics` table.
 - **`billingresource`** — the cloud→billing bridge: turns cached resources (plus
   traffic usage) into the priced `BillingResource`s the rating loop consumes:
   instance (+ instance traffic), volume, bucket, kubernetes cluster, database
