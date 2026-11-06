@@ -131,6 +131,21 @@ records.
    (pool, default security group, default quota). Drive a sync with
    `POST :8081/debug/run-sync`.
 
+### Seed an operator setup
+
+After registering a Proxmox provider (admin console, **Cloud providers**), one command
+gives it what customers need: platform configuration and region, flavor catalog, billing
+configuration, the public price plan with its compute, volume and public IP rules, and the
+provider default quota. It goes through the admin API and can be re-run.
+
+```sh
+PROXCLOUD_HOST=<host> deploy/seed/seed-operator.py --provider "<provider name>"
+```
+
+The documents come from `deploy/seed/` (`platform-configuration.json`, `flavors.json`,
+`billing-configuration.json`, `price-plan-seed.json`). Change them there or in the admin
+console afterwards. `--help` lists the environment variables.
+
 `deploy/seed/external-service-dev.json` holds example documents for the
 `kamaji` and `dbaas` provider kinds (insert each element as its own row,
 replacing the `__…__` placeholders); they need a prepared management cluster, see
