@@ -163,9 +163,11 @@ node only from shared to shared storage: a template whose volumes all sit on
 shared storage (NFS, RBD, CephFS) is full-cloned to a picked node whose profile
 storage is shared too; a local template or a local profile is created on the
 template's own node only, and a profile not active on that node answers 409. A
-detached volume attaches only to a server on its VM's node (PVE's disk reassign
-needs one node, even on shared storage; `LIST_ATTACH_TARGETS` lists the eligible
-servers; anything else is 409); retype moves the disk to another
+detached volume on local storage attaches only to a server on its VM's node (PVE's
+disk reassign needs one node, even on shared storage). On shared storage it attaches
+to any server: the disk rides a new holder VM, which migrates offline without copying
+data, and is reassigned on the target's node. `LIST_ATTACH_TARGETS` lists the eligible
+servers; anything else is 409. Retype moves the disk to another
 profile's storage on the same node (`move_disk`, source deleted), and a detached
 volume can be deleted on its own. A profile's class is the lowest effective class
 of its storages (admin override, else detected); a capacity-class profile never

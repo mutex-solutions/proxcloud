@@ -102,8 +102,8 @@ export default function VolumesPage() {
     },
     enabled: !!scope && (createOpen || !!retypeTarget),
   })
-  // The servers this detached volume can attach to: its own and every server on its node
-  // (Proxmox moves a disk between servers on the same node only).
+  // The servers this detached volume can attach to: its own and every server on its node, or
+  // every server of the project when the volume is on shared storage.
   const attachTargets = useQuery({
     queryKey: ["volume-attach-targets", pid, attachTarget?.id],
     queryFn: async () => {
@@ -416,7 +416,7 @@ export default function VolumesPage() {
             <DialogTitle>Create volume</DialogTitle>
             <DialogDescription>
               A new disk, on one of your servers or standalone. It stays when its server is deleted, and can then be
-              attached to another server on the same host.
+              attached to another server (on local storage, only one on the same host).
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
@@ -593,7 +593,7 @@ export default function VolumesPage() {
               <p className="text-sm text-destructive">{(attachTargets.error as Error).message}</p>
             ) : !attachTargets.data?.length ? (
               <p className="text-sm text-muted-foreground">
-                No server can use this volume: a volume only moves between servers on the same node.
+                No server can use this volume: a volume on local storage only moves between servers on the same node.
               </p>
             ) : (
               <Select value={attachServer} onValueChange={setAttachServer}>

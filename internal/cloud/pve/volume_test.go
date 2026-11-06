@@ -68,7 +68,8 @@ func TestAddVolumeStorageRoom(t *testing.T) {
 
 // volCluster fakes a pool of VMs 101+102 on pve1 and 103 on pve2. VM 101's config is cfg101;
 // 102/103 have a root disk only. Storages: local-zfs (local, both nodes), nas (shared NFS),
-// isos (dir, iso only), tiny (local, 1 GiB free). Writes are recorded per path.
+// isos (dir, iso only), tiny (local, 1 GiB free). Writes are recorded per path. VM 900 is the
+// holder a cross-node attach creates; it only exists for those calls.
 func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values) *Service {
 	const upid = "UPID:pve1:0:0:0:qmmove:101:u:"
 	rec := func(key string) func(http.ResponseWriter, *http.Request) {
@@ -96,7 +97,8 @@ func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values) *Se
 				{"id":"qemu/101","type":"qemu","vmid":101,"name":"a","node":"pve1","pool":"st-p1"},
 				{"id":"qemu/102","type":"qemu","vmid":102,"name":"b","node":"pve1","pool":"st-p1"},
 				{"id":"qemu/103","type":"qemu","vmid":103,"name":"c","node":"pve2","pool":"st-p1"},
-				{"id":"qemu/104","type":"qemu","vmid":104,"name":"other","node":"pve1","pool":"st-p2"}]}`)
+				{"id":"qemu/104","type":"qemu","vmid":104,"name":"other","node":"pve1","pool":"st-p2"},
+				{"id":"qemu/900","type":"qemu","vmid":900,"name":"pc-holder-pve1","node":"pve1","pool":"st-p1","tags":"pc-holder;proxcloud"}]}`)
 		},
 		"GET /api2/json/storage": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[
@@ -123,6 +125,17 @@ func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values) *Se
 		"GET /api2/json/nodes/pve2/qemu/103/config": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":{"scsi0":"local-zfs:vm-103-disk-0,size=10G"}}`)
 		},
+		"GET /api2/json/cluster/nextid": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":"900"}`)
+		},
+		"GET /api2/json/nodes/pve2/qemu/900/config": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":{"tags":"pc-holder;proxcloud"}}`)
+		},
+		"POST /api2/json/nodes/pve1/qemu":               rec("create"),
+		"POST /api2/json/nodes/pve1/qemu/900/config":    rec("holderconfig"),
+		"POST /api2/json/nodes/pve1/qemu/900/migrate":   rec("migrate"),
+		"POST /api2/json/nodes/pve2/qemu/900/move_disk": rec("carriermove"),
+		"DELETE /api2/json/nodes/pve2/qemu/900":         rec("carrierdelete"),
 		"POST /api2/json/nodes/pve1/qemu/101/move_disk": rec("move"),
 		"POST /api2/json/nodes/pve1/qemu/101/config":    rec("config"),
 		"GET /api2/json/nodes/pve1/tasks/" + upid + "/status": func(w http.ResponseWriter, r *http.Request) {
@@ -145,8 +158,6 @@ func TestAttachVolumeCrossNode(t *testing.T) {
 	}{
 		{"local disk to a VM on another node", cfgLocalUnused, "local-zfs:vm-101-disk-1", "103", true},
 		{"local disk to a VM on the same node", cfgLocalUnused, "local-zfs:vm-101-disk-1", "102", false},
-		// PVE's reassign refuses VMs on different nodes even on shared storage.
-		{"shared disk to a VM on another node", cfgSharedUnused, "nas:101/vm-101-disk-1.raw", "103", true},
 		{"shared disk to a VM on the same node", cfgSharedUnused, "nas:101/vm-101-disk-1.raw", "102", false},
 	}
 	for _, tt := range tests {
@@ -171,13 +182,34 @@ func TestAttachVolumeCrossNode(t *testing.T) {
 	}
 }
 
+// PVE's reassign refuses VMs on different nodes even on shared storage, so the disk rides a holder across.
+func TestAttachVolumeSharedAcrossNodes(t *testing.T) {
+	writes := map[string][]url.Values{}
+	s := volCluster(t, cfgSharedUnused, writes)
+	if err := s.AttachVolume(context.Background(), "p1", 101, "nas:101/vm-101-disk-1.raw", "103"); err != nil {
+		t.Fatal(err)
+	}
+	if f := writes["move"]; len(f) != 1 || f[0].Get("target-vmid") != "900" || f[0].Get("target-disk") != "unused0" {
+		t.Fatalf("move onto the holder = %v", f)
+	}
+	if f := writes["migrate"]; len(f) != 1 || f[0].Get("target") != "pve2" || f[0].Get("online") == "1" {
+		t.Fatalf("holder migrate = %v", f)
+	}
+	if f := writes["carriermove"]; len(f) != 1 || f[0].Get("disk") != "unused0" || f[0].Get("target-vmid") != "103" || f[0].Get("target-disk") != "scsi1" {
+		t.Fatalf("move onto the target = %v", f)
+	}
+	if len(writes["carrierdelete"]) != 1 {
+		t.Fatalf("the empty holder must go: %v", writes)
+	}
+}
+
 func TestAttachTargets(t *testing.T) {
 	tests := []struct {
 		name, cfg, vol string
 		want           []int
 	}{
 		{"local detached disk: VMs on its node only", cfgLocalUnused, "local-zfs:vm-101-disk-1", []int{101, 102}},
-		{"shared detached disk: still its node only", cfgSharedUnused, "nas:101/vm-101-disk-1.raw", []int{101, 102}},
+		{"shared detached disk: every VM of the pool", cfgSharedUnused, "nas:101/vm-101-disk-1.raw", []int{101, 102, 103}},
 		{"attached disk: none until detached", cfgAttached, "local-zfs:vm-101-disk-1", nil},
 	}
 	for _, tt := range tests {

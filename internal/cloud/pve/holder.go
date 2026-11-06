@@ -43,6 +43,12 @@ func (s *Service) holderOn(ctx context.Context, projectID, node string) (*Cluste
 			return &rows[i], nil
 		}
 	}
+	return s.newHolder(ctx, projectID, node)
+}
+
+// newHolder creates a holder VM on node, whether or not the project has one there.
+func (s *Service) newHolder(ctx context.Context, projectID, node string) (*ClusterResource, error) {
+	pool := s.PoolFor(projectID)
 	vmid, err := s.C.NextID(ctx)
 	if err != nil {
 		return nil, err

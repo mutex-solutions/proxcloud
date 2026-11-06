@@ -685,7 +685,10 @@ node), never started, tagged `pc-holder`, in the project pool, created on demand
   them with the server. If a move fails the server is not deleted.
 - Holders have no SERVER row, so no compute bill, no quota and no attach target. Their disks are normal `VOLUME` rows,
   billed and counted against `diskGb`. The scheduler ignores holders.
-- Attach is limited to a server on the same node: PVE reassigns a disk only within a node.
+- PVE reassigns a disk only within a node. A local disk therefore only attaches to a server on its node. A disk on
+  shared storage (`Shared` in the detected capabilities: RBD, NFS) attaches anywhere: `carryToNode` moves it onto a new
+  holder, migrates that holder offline (nothing to copy) and reassigns on the target's node. If a step fails the disk
+  stays on that holder as an ordinary detached volume.
 
 ## TrueNAS file shares
 
@@ -812,6 +815,11 @@ posts to. Shape:
   "secret": { "adminAccessKey": "…", "adminSecretKey": "…" }  // an RGW admin user, caps users=*;buckets=*;usage=*
 }
 ```
+
+Static websites are offered only when `s3WebsiteEndpoint` is set, and the gateway must run with
+`rgw_enable_static_website = true` and `rgw_dns_s3website_name` = the endpoint's host. Without the option RGW answers
+`405` to the website calls; ProxCloud reports that as "does not offer static website hosting". Sites live at
+`<bucket>.<endpoint host>`, so that name needs a wildcard DNS record.
 
 Accessors: `IsCephS3`, `S3Endpoint`, `AdminAPIURL`, `S3WebsiteEndpoint`,
 `CephRegion`, `UIDPrefix`, `RGWUIDFor(projectID)`, `DefaultQuotaGiB`, and

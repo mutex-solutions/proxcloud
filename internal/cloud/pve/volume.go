@@ -163,7 +163,8 @@ func (s *Service) DetachVolume(ctx context.Context, projectID string, vmid int, 
 // (a holder's disk has to name a server; the holder goes once its last disk has left)
 // VM, or reassigns it to another pool VM (MoveDisk target-vmid). PVE's disk reassign needs
 // both VMs on the same node, even on shared storage (qemu-server move_vm_disk: "Both VMs need
-// to be on the same node"), so a target on another node is refused up front (ConflictError).
+// to be on the same node"), so a disk on shared storage first rides a holder to the target's node
+// (carryToNode) and a target on another node is refused for any other disk (ConflictError).
 func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, volID string, targetServerExtID string) error {
 	vm, slot, err := s.volumeSlot(ctx, projectID, vmid, volID)
 	if err != nil {
@@ -213,8 +214,14 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 		return err
 	}
 	if target.Node != vm.Node {
-		return conflictf("Server %s runs on node %s and this volume on node %s; a volume can only move to a server on the same node. "+
-			"Attach it to a server on %s", target.Name, target.Node, vm.Node, vm.Node)
+		caps, err := s.C.DetectStorage(ctx)
+		if err != nil {
+			return err
+		}
+		if !caps[slotStorage(volID)].Shared {
+			return conflictf("Server %s runs on node %s and this volume on node %s; a volume on local storage can only move to a server on the same node. "+
+				"Attach it to a server on %s", target.Name, target.Node, vm.Node, vm.Node)
+		}
 	}
 	tcfg, err := s.C.GetVMConfig(ctx, target.Node, target.VMID)
 	if err != nil {
@@ -231,6 +238,12 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 	if free == "" {
 		return conflictf("Server %s has no free disk slot", target.Name)
 	}
+	if target.Node != vm.Node {
+		if vm, slot, err = s.carryToNode(ctx, projectID, vm, slot, target.Node); err != nil {
+			return err
+		}
+		defer s.dropEmptyHolder(context.WithoutCancel(ctx), vm)
+	}
 	up, err := s.C.MoveDisk(ctx, vm.Node, vm.VMID, MoveDiskOpts{
 		Disk: slot, TargetVMID: target.VMID, TargetDisk: free,
 	})
@@ -240,8 +253,37 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 	return s.C.WaitTask(ctx, up)
 }
 
+// carryToNode brings a detached disk on shared storage to another node: onto a new holder on the disk's node, then the
+// holder migrates offline, which copies nothing because its only disk is shared. A failure past the first move leaves
+// the disk on that holder, an ordinary detached volume the user can attach again.
+func (s *Service) carryToNode(ctx context.Context, projectID string, vm *ClusterResource, slot, node string) (*ClusterResource, string, error) {
+	carrier, err := s.newHolder(ctx, projectID, vm.Node)
+	if err != nil {
+		return nil, "", err
+	}
+	const carried = "unused0"
+	up, err := s.C.MoveDisk(ctx, vm.Node, vm.VMID, MoveDiskOpts{Disk: slot, TargetVMID: carrier.VMID, TargetDisk: carried})
+	if err == nil {
+		err = s.C.WaitTask(ctx, up)
+	}
+	if err != nil {
+		s.dropEmptyHolder(context.WithoutCancel(ctx), carrier)
+		return nil, "", err
+	}
+	if up, err = s.C.MigrateVM(ctx, vm.Node, carrier.VMID, node, false); err == nil {
+		err = s.C.WaitTask(ctx, up)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	moved := *carrier
+	moved.Node = node
+	return &moved, carried, nil
+}
+
 // AttachTargets lists the pool VMs a volume can be attached to now: none while it is
-// attached (detach first); otherwise every pool VM on its VM's node (its own included).
+// attached (detach first); otherwise every pool VM on its VM's node (its own included), or
+// every pool VM when the volume is on shared storage.
 func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int, volID string) ([]ClusterResource, error) {
 	vm, slot, err := s.volumeSlot(ctx, projectID, vmid, volID)
 	if err != nil {
@@ -254,9 +296,14 @@ func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int,
 	if err != nil {
 		return nil, err
 	}
+	caps, err := s.C.DetectStorage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	shared := caps[slotStorage(volID)].Shared
 	out := []ClusterResource{}
 	for _, t := range vms {
-		if t.Node == vm.Node {
+		if shared || t.Node == vm.Node {
 			out = append(out, t)
 		}
 	}

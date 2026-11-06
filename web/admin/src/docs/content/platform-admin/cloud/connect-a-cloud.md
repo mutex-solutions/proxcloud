@@ -113,7 +113,7 @@ When a client creates a server, ProxCloud picks a node where the flavor's storag
 
 Where an OS template's disks live matters too. Proxmox clones to another node only from shared storage to shared storage. A template on shared storage (NFS, Ceph) can be cloned to any node when the flavor's profile is shared too (Ceph RBD, a shared LUN). A template on local storage, or any template with a local profile such as local ZFS, can only be cloned on the template's own node, so servers from it always land there, and the create is refused with a clear message when the flavor's profile is not active on that node. To spread local-ZFS servers across nodes, keep one template per node.
 
-A detached volume can only be attached to a server on the same node as its current server: Proxmox refuses to move a disk between VMs on different nodes, even on shared storage. Clients see the servers they can pick.
+A detached volume on local storage can only be attached to a server on the same node as its current server. On shared storage (Ceph RBD, NFS) it can go to any server: Proxmox moves a disk between VMs on one node only, so ProxCloud carries it across on a short-lived holder VM, which migrates offline without copying data. Clients see the servers they can pick.
 
 ## Default quota
 

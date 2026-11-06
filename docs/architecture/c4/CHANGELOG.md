@@ -46,6 +46,28 @@ and rules: [README.md](README.md#maintenance-rule).
   also covers a crash between the two writes.
 
 **Diagrams updated**: none: no container or component changes.
+
+## 2026-11-07: Full tier run on a real Ceph cluster
+
+**What changed**
+
+- A detached volume on shared storage attaches to a server on any node (`carryToNode`): a new holder VM takes the disk,
+  migrates offline, and the disk is reassigned on the target's node. `LIST_ATTACH_TARGETS` lists every server of the
+  project for such a volume. Local disks keep the same-node rule.
+- The stale cloud-init guard on migrate skips shared storage.
+- RGW static websites are offered only when `s3WebsiteEndpoint` is set. A gateway without `rgw_enable_static_website`
+  (`405`) reports "does not offer static website hosting" instead of an internal error.
+
+**Why**
+
+- The Full tier had only been unit-tested. The plan sells Ceph RBD as attachable on any node, and PVE's reassign refuses
+  two nodes even on shared storage, so the code refused it. The refusal was right for local disks only.
+- The guard read a shared volume, which every node lists, as a leftover from a failover: no VM with a cloud-init disk
+  could live-migrate on RBD or NFS.
+- The website tab appeared for every RGW and failed with a bare 500 on a default gateway.
+
+**Diagrams updated:** `c2-containers.md` (storage text).
+
 ## 2026-11-07: File share exports follow the project's addresses
 
 **What changed**
