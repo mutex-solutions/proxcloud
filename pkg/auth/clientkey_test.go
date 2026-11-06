@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newClientKeyAuth builds an Authenticator with a "main" realm and a stub client-key lookup that
@@ -13,11 +14,11 @@ import (
 func newClientKeyAuth(pk, secret, sub string) *Authenticator {
 	a := New(slog.Default())
 	a.SetRealms([]Realm{{Name: "main", IssuerURI: "https://issuer.example/realms/main"}})
-	a.SetClientKeyLookup(func(_ *http.Request, id string) (string, string, bool) {
+	a.SetClientKeyLookup(func(_ *http.Request, id string) (ClientKey, bool) {
 		if id == pk {
-			return secret, sub, true
+			return ClientKey{Secret: secret, Sub: sub}, true
 		}
-		return "", "", false
+		return ClientKey{}, false
 	})
 	return a
 }
@@ -63,7 +64,7 @@ func TestClientKeyRegexIsolatesJWT(t *testing.T) {
 	if clientKeyRe.MatchString("eyJhbGciOi.eyJzdWIiOi.sIgnAtUrE") {
 		t.Fatal("clientKeyRe wrongly matched a JWT")
 	}
-	if !clientKeyRe.MatchString("pk"+strings.Repeat("0", 32)+".sk"+strings.Repeat("f", 40)) {
+	if !clientKeyRe.MatchString("pk" + strings.Repeat("0", 32) + ".sk" + strings.Repeat("f", 40)) {
 		t.Fatal("clientKeyRe failed to match a valid pk.sk")
 	}
 }
@@ -74,8 +75,8 @@ func TestVerifyClientKeyNoMainRealmRejected(t *testing.T) {
 	pk := "pk" + strings.Repeat("a", 32)
 	sk := "sk" + strings.Repeat("b", 40)
 	a := New(slog.Default()) // realms never set → no "main" realm
-	a.SetClientKeyLookup(func(_ *http.Request, id string) (string, string, bool) {
-		return sk, "user-sub-123", id == pk
+	a.SetClientKeyLookup(func(_ *http.Request, id string) (ClientKey, bool) {
+		return ClientKey{Secret: sk, Sub: "user-sub-123"}, id == pk
 	})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/account/details", nil)
 	req.Header.Set("Authorization", "Bearer "+pk+"."+sk)
@@ -93,5 +94,47 @@ func TestVerifyClientKeyEmptySubRejected(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+pk+"."+sk)
 	if _, ok := a.authenticate(req); ok {
 		t.Fatal("PAT with empty sub accepted")
+	}
+}
+
+func TestVerifyClientKeyScopeAndExpiry(t *testing.T) {
+	pk := "pk" + strings.Repeat("a", 32)
+	sk := "sk" + strings.Repeat("b", 40)
+	withKey := func(k ClientKey) *Authenticator {
+		a := newClientKeyAuth(pk, sk, "u")
+		k.Secret, k.Sub = sk, "u"
+		a.SetClientKeyLookup(func(*http.Request, string) (ClientKey, bool) { return k, true })
+		return a
+	}
+	try := func(a *Authenticator, method, path string) bool {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("Authorization", "Bearer "+pk+"."+sk)
+		_, ok := a.authenticate(req)
+		return ok
+	}
+	full := withKey(ClientKey{})
+	if !try(full, http.MethodPost, "/api/v1/project/p/cloud") {
+		t.Fatal("a token without a scope is a full token")
+	}
+	read := withKey(ClientKey{Scope: PATScopeRead})
+	for _, c := range []struct {
+		method, path string
+		want         bool
+	}{
+		{http.MethodGet, "/api/v1/account/details", true},
+		{http.MethodPost, "/api/v1/project/p/resource", true},
+		{http.MethodPost, "/api/v1/project/p/cloud", false},
+		{http.MethodDelete, "/api/v1/project/p/cloud/x", false},
+		{http.MethodPost, "/mcp", false},
+	} {
+		if got := try(read, c.method, c.path); got != c.want {
+			t.Fatalf("read token %s %s = %v, want %v", c.method, c.path, got, c.want)
+		}
+	}
+	if try(withKey(ClientKey{ExpiresAt: time.Now().Add(-time.Minute)}), http.MethodGet, "/api/v1/account/details") {
+		t.Fatal("an expired token must not authenticate")
+	}
+	if !try(withKey(ClientKey{ExpiresAt: time.Now().Add(time.Hour)}), http.MethodGet, "/api/v1/account/details") {
+		t.Fatal("a token before its expiry authenticates")
 	}
 }

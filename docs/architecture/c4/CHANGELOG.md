@@ -4,6 +4,21 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: API tokens get a scope and an expiry
+
+**What changed**
+
+- A personal access token has a scope, `full` or `read`, and an optional expiry. `pkg/auth.ClientKeyLookup`
+  returns a `ClientKey`; a read token passes safe methods and the POST list route only.
+
+**Why**
+
+- P5-12 asked for platform API tokens; the tokens already existed. What was missing is limiting one: a token
+  in a dashboard or a CI job should not be able to delete servers, or live forever. `/mcp` is refused for a read
+  token because its tools can write.
+
+**Diagrams updated**: none, `docs/auth.md` has the rules.
+
 ## 2026-11-07: isolation rules get an owner, cover gateways, and reconcile in the sync job
 
 Open items of the lab drill (DRILL-5, DRILL-6) and the coexistence note in the lab log.
