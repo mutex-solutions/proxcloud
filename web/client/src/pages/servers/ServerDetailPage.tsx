@@ -39,7 +39,7 @@ import { apiFetch, type CloudScope } from "@/lib/api"
 import { fmtDateTime, timeAgo } from "@/lib/format"
 import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
-import { ServerDeleteWarning, serverFlavor, serverIPs, serverName, serverStatus } from "./ServersPage"
+import { ServerDeleteVolumes, serverFlavor, serverIPs, serverName, serverStatus } from "./ServersPage"
 
 const ACTION_LABELS: Record<string, string> = {
   START: "Start", STOP: "Stop", SOFTREBOOT: "Reboot", RESIZE: "Resize", RENAME: "Rename", REBUILD: "Rebuild",
@@ -126,8 +126,10 @@ export function ServerDetailPage() {
   const openConsole = () =>
     window.open(`/p/${pid}/servers/${resourceId}/console`, "_blank", "noopener")
 
+  const [deleteVolumes, setDeleteVolumes] = useState(false)
   const del = useMutation({
-    mutationFn: () => apiFetch(`/project/${pid}/cloud/${resourceId}`, { method: "DELETE", cloud: scope }),
+    mutationFn: () =>
+      apiFetch(`/project/${pid}/cloud/${resourceId}${deleteVolumes ? "?deleteVolumes=true" : ""}`, { method: "DELETE", cloud: scope }),
     onSuccess: () => {
       toast.success("Server deletion requested")
       void qc.invalidateQueries({ queryKey: ["cloud", pid, "SERVER"] })
@@ -600,7 +602,7 @@ export function ServerDetailPage() {
               Are you sure you want to delete "{name}"? This cannot be undone.
             </DialogDescription>
           </DialogHeader>
-          <ServerDeleteWarning />
+          <ServerDeleteVolumes checked={deleteVolumes} onChange={setDeleteVolumes} />
           <DialogFooter>
             <Button variant="outline" onClick={closeForm}>
               Cancel

@@ -50,7 +50,7 @@ func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error)
 	usedMem := map[string]int64{}
 	members := map[string]int{}
 	for _, r := range vms {
-		if r.Type != "qemu" || r.Template == 1 {
+		if r.Type != "qemu" || r.Template == 1 || isHolder(r.Tags) {
 			continue
 		}
 		usedCPU[r.Node] += r.MaxCPU

@@ -629,7 +629,7 @@ func (h *Handler) pveCreateKeypair(w http.ResponseWriter, r *http.Request, u *us
 // --- delete ---
 
 // pveDeleteResource deletes one cached resource on a proxmox provider.
-func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) error {
+func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, deleteVolumes bool) error {
 	ctx = context.WithoutCancel(ctx) // see pveCreate
 	switch cr.Type {
 	case cloud.TypeServer:
@@ -639,6 +639,13 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		ps, err := h.pveFor(es)
 		if err != nil {
 			return err
+		}
+		// Volumes outlive the server unless the caller says otherwise. If moving one fails the server stays,
+		// and its data with it.
+		if !deleteVolumes {
+			if err := ps.KeepServerVolumes(ctx, proj.ID, cr.ExternalID); err != nil {
+				return fmt.Errorf("keep the server's volumes: %w", err)
+			}
 		}
 		if err := ps.DeleteServer(ctx, proj.ID, cr.ExternalID); err != nil {
 			return err
@@ -653,6 +660,7 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		}
 		h.pveReleaseSeed(ctx, ps, es.ID, cr.ExternalID)
 		h.pveArchiveServerVolumes(ctx, es, proj, cr.ExternalID)
+		h.pveSyncVolumes(ctx, es, proj) // kept volumes have new ids on the holder
 		return nil
 	case cloud.TypeImage:
 		// A project template is a qemu template VM in the pool — same destroy path.
@@ -724,8 +732,8 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 	}
 }
 
-// pveArchiveServerVolumes drops the VOLUME rows of a destroyed server: its disks, detached ones
-// included, went with it, and billing must stop now rather than at the next sync.
+// pveArchiveServerVolumes drops the VOLUME rows of a destroyed server: its disks either went with it or moved to a
+// holder under a new volid, and billing of the old rows must stop now rather than at the next sync.
 func (h *Handler) pveArchiveServerVolumes(ctx context.Context, es *externalservice.ExternalService, proj *Project, serverExtID string) {
 	rows, err := h.cloud.FindByServiceProjectAndType(ctx, es.ID, proj.ID, cloud.TypeVolume)
 	if err != nil {
@@ -1125,9 +1133,9 @@ func (h *Handler) emitPVEConsole(w http.ResponseWriter, r *http.Request, u *user
 // errPVENetworkDelete signals cloudDelete to route through pveDeleteNetwork.
 var errPVENetworkDelete = fmt.Errorf("pve network delete needs the sdn lock")
 
-// pveCreateVolume adds a data disk to an existing server (there is no standalone
-// volume in the PVE model). Body: {serverId, sizeGiB, type?} — serverId is the
-// SERVER cache id or vmid; type is a storage-profile slug.
+// pveCreateVolume adds a data disk to a server, or with no serverId a standalone volume (on a holder VM, see
+// pve/holder.go). Body: {serverId?, availabilityZone?, sizeGiB, type?} — serverId is the SERVER cache id or vmid;
+// availabilityZone the node for a standalone volume; type a storage-profile slug.
 func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
 	ctx := r.Context()
 	sizeGiB := intAny(data["sizeGiB"])
@@ -1139,10 +1147,6 @@ func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *use
 		return
 	}
 	serverRef := strAny(data["serverId"])
-	if serverRef == "" {
-		h.fail(w, httpx.BadRequest("serverId is required (Proxmox disks belong to a server)"))
-		return
-	}
 	// Accept the cache id or the vmid.
 	serverExt := serverRef
 	if cr, err := h.cloud.FindByID(ctx, serverRef); err == nil && cr != nil && cr.Type == cloud.TypeServer && cr.ProjectID == proj.ID {
@@ -1164,6 +1168,20 @@ func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *use
 	}
 	ps, ok2 := h.pveService(w, es)
 	if !ok2 {
+		return
+	}
+	if serverRef == "" {
+		node, storage, err := ps.PlaceVolume(ctx, profile.StorageFor, strAny(data["availabilityZone"]), int64(sizeGiB)<<30, es.PVEStorageHeadroomPct())
+		if err == nil {
+			err = ps.CreateDetachedVolume(ctx, proj.ID, node, storage, sizeGiB, es.PVEStorageHeadroomPct())
+		}
+		if err != nil {
+			h.fail(w, pveVolumeErr(err))
+			return
+		}
+		h.pveSyncVolumes(ctx, es, proj)
+		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", &cloud.CloudResource{Type: cloud.TypeVolume, ProjectID: proj.ID})
+		httpx.OK(w, map[string]any{"result": map[string]any{"node": node}})
 		return
 	}
 	vm, verr := ps.ResolveVM(ctx, proj.ID, serverExt)

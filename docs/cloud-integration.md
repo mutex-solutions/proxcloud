@@ -634,6 +634,20 @@ branch, is in
 
 ---
 
+## Standalone volumes (holder VM)
+
+A Proxmox disk must belong to a VM. A volume with no server sits as `unusedN` on a **holder VM**: one per (project,
+node), never started, tagged `pc-holder`, in the project pool, created on demand and removed with its last disk. Code:
+`internal/cloud/pve/holder.go`.
+
+- `POST /project/{id}/cloud` with type `VOLUME` and no `serverId` creates one, placed on the node with most free space
+  on the profile's storage (or `availabilityZone`).
+- Deleting a server moves its data volumes to the holder, attached and detached alike; `?deleteVolumes=true` destroys
+  them with the server. If a move fails the server is not deleted.
+- Holders have no SERVER row, so no compute bill, no quota and no attach target. Their disks are normal `VOLUME` rows,
+  billed and counted against `diskGb`. The scheduler ignores holders.
+- Attach is limited to a server on the same node: PVE reassigns a disk only within a node.
+
 ## TrueNAS file shares
 
 `config.provider == "truenas"` serves NFS and SMB shares (`SHARE` resources, service slug `shares`). Code:
