@@ -329,7 +329,7 @@ func TestSpecValidate(t *testing.T) {
 }
 
 func TestNames(t *testing.T) {
-	if NamespaceFor("p1") != "pc-p1" {
+	if NamespaceFor("p1") != "pc-db-p1" {
 		t.Fatal("NamespaceFor")
 	}
 	if LBServiceName("std-x") != "std-x-lb" {
@@ -417,7 +417,7 @@ func TestBuildApplication(t *testing.T) {
 	if digStr(app, "spec", "source", "targetRevision") != "0.1.0" {
 		t.Fatal("chart pin fallback")
 	}
-	if digStr(app, "spec", "destination", "namespace") != "pc-p1" {
+	if digStr(app, "spec", "destination", "namespace") != "pc-db-p1" {
 		t.Fatal("destination namespace")
 	}
 	labels, _ := dig(app, "metadata", "labels").(map[string]any)
@@ -445,11 +445,11 @@ func TestServiceCreateDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantOps := []string{"ns:pc-p1", "np:proxcloud-default-deny", "secret:" + MarkerSecretName(spec.ID), "secret:" + AuthSecretName(spec.ID), "app:" + spec.ID}
+	wantOps := []string{"ns:pc-db-p1", "np:proxcloud-default-deny", "secret:" + MarkerSecretName(spec.ID), "secret:" + AuthSecretName(spec.ID), "app:" + spec.ID}
 	if got := strings.Join(api.ops, ","); got != strings.Join(wantOps, ",") {
 		t.Fatalf("create op order = %s, want %s", got, strings.Join(wantOps, ","))
 	}
-	if _, has := api.netpols[key("pc-p1", "proxcloud-default-deny")]; !has {
+	if _, has := api.netpols[key("pc-db-p1", "proxcloud-default-deny")]; !has {
 		t.Fatal("namespace default-deny must be stamped at ensure time")
 	}
 	db, _ := data["database"].(map[string]any)
@@ -463,7 +463,7 @@ func TestServiceCreateDelete(t *testing.T) {
 	if _, err := s2.CreateDatabase(ctx, testSpec(EnginePostgreSQL, "17")); err != nil {
 		t.Fatal(err)
 	}
-	if _, has := api2.secrets[key("pc-p1", AuthSecretName("std-abc12345"))]; has {
+	if _, has := api2.secrets[key("pc-db-p1", AuthSecretName("std-abc12345"))]; has {
 		t.Fatal("postgresql must not get a proxcloud auth secret")
 	}
 
@@ -474,7 +474,7 @@ func TestServiceCreateDelete(t *testing.T) {
 	if _, alive := api.apps[key("argocd", spec.ID)]; alive {
 		t.Fatal("application not deleted")
 	}
-	if _, has := api.secrets[key("pc-p1", MarkerSecretName(spec.ID))]; !has {
+	if _, has := api.secrets[key("pc-db-p1", MarkerSecretName(spec.ID))]; !has {
 		t.Fatal("marker must survive the delete (the sweep owns it)")
 	}
 }
@@ -499,9 +499,9 @@ func TestOwnershipGuards(t *testing.T) {
 func TestFinalizeOrphans(t *testing.T) {
 	ctx := context.Background()
 	mkMarker := func(api *fakeAPI, dbID string, age time.Duration) {
-		k := key("pc-p1", MarkerSecretName(dbID))
+		k := key("pc-db-p1", MarkerSecretName(dbID))
 		api.secrets[k] = map[string]any{"metadata": map[string]any{
-			"name": MarkerSecretName(dbID), "namespace": "pc-p1",
+			"name": MarkerSecretName(dbID), "namespace": "pc-db-p1",
 			"creationTimestamp": time.Now().UTC().Add(-age).Format(time.RFC3339),
 			"labels":            map[string]any{LabelProject: "p1", LabelService: "svc-dbaas", LabelManagedBy: ManagedByValue},
 		}}
@@ -527,7 +527,7 @@ func TestFinalizeOrphans(t *testing.T) {
 	if pending, err = s.FinalizeOrphans(ctx, "p1"); err != nil || pending != 0 {
 		t.Fatalf("live app: pending=%d err=%v", pending, err)
 	}
-	if _, has := api.secrets[key("pc-p1", MarkerSecretName("std-live"))]; !has {
+	if _, has := api.secrets[key("pc-db-p1", MarkerSecretName("std-live"))]; !has {
 		t.Fatal("live database's marker must stay")
 	}
 
@@ -535,7 +535,7 @@ func TestFinalizeOrphans(t *testing.T) {
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
 	mkMarker(api, "std-lb", 2*time.Hour)
-	api.services[key("pc-p1", LBServiceName("std-lb"))] = map[string]any{"metadata": map[string]any{"name": LBServiceName("std-lb")}}
+	api.services[key("pc-db-p1", LBServiceName("std-lb"))] = map[string]any{"metadata": map[string]any{"name": LBServiceName("std-lb")}}
 	if pending, err = s.FinalizeOrphans(ctx, "p1"); err != nil || pending != 1 {
 		t.Fatalf("lb present: pending=%d err=%v", pending, err)
 	}
@@ -544,36 +544,36 @@ func TestFinalizeOrphans(t *testing.T) {
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
 	mkMarker(api, "std-x", 2*time.Hour)
-	api.secrets[key("pc-p1", AuthSecretName("std-x"))] = map[string]any{"metadata": map[string]any{
-		"name": AuthSecretName("std-x"), "namespace": "pc-p1"}}
+	api.secrets[key("pc-db-p1", AuthSecretName("std-x"))] = map[string]any{"metadata": map[string]any{
+		"name": AuthSecretName("std-x"), "namespace": "pc-db-p1"}}
 	api.failDelete[AuthSecretName("std-x")] = true
 	pending, err = s.FinalizeOrphans(ctx, "p1")
 	if pending != 1 || err == nil {
 		t.Fatalf("auth delete failure: pending=%d err=%v", pending, err)
 	}
-	if _, has := api.secrets[key("pc-p1", MarkerSecretName("std-x"))]; !has {
+	if _, has := api.secrets[key("pc-db-p1", MarkerSecretName("std-x"))]; !has {
 		t.Fatal("marker must survive an auth-secret delete failure (retry driver)")
 	}
 
 	// Clean orphan → marker + auth reaped, ns GC'd.
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
-	api.namespaces["pc-p1"] = map[string]any{"metadata": map[string]any{
-		"name": "pc-p1", "labels": map[string]any{LabelManagedBy: ManagedByValue}}}
+	api.namespaces["pc-db-p1"] = map[string]any{"metadata": map[string]any{
+		"name": "pc-db-p1", "labels": map[string]any{LabelManagedBy: ManagedByValue}}}
 	mkMarker(api, "std-x", 2*time.Hour)
-	api.secrets[key("pc-p1", AuthSecretName("std-x"))] = map[string]any{"metadata": map[string]any{
-		"name": AuthSecretName("std-x"), "namespace": "pc-p1"}}
+	api.secrets[key("pc-db-p1", AuthSecretName("std-x"))] = map[string]any{"metadata": map[string]any{
+		"name": AuthSecretName("std-x"), "namespace": "pc-db-p1"}}
 	pending, err = s.FinalizeAllOrphans(ctx)
 	if err != nil || pending != 0 {
 		t.Fatalf("clean orphan: pending=%d err=%v", pending, err)
 	}
-	if _, has := api.secrets[key("pc-p1", MarkerSecretName("std-x"))]; has {
+	if _, has := api.secrets[key("pc-db-p1", MarkerSecretName("std-x"))]; has {
 		t.Fatal("finished-cascade marker must be reaped")
 	}
-	if _, has := api.secrets[key("pc-p1", AuthSecretName("std-x"))]; has {
+	if _, has := api.secrets[key("pc-db-p1", AuthSecretName("std-x"))]; has {
 		t.Fatal("auth secret must be reaped with the marker")
 	}
-	if _, has := api.namespaces["pc-p1"]; has {
+	if _, has := api.namespaces["pc-db-p1"]; has {
 		t.Fatal("emptied managed namespace must be GC'd")
 	}
 }
@@ -592,7 +592,7 @@ func TestSyncProviderList(t *testing.T) {
 		"health": map[string]any{"status": "Healthy"},
 		"sync":   map[string]any{"status": "Synced"},
 	}
-	api.services[key("pc-p1", LBServiceName(spec.ID))] = map[string]any{
+	api.services[key("pc-db-p1", LBServiceName(spec.ID))] = map[string]any{
 		"status": map[string]any{"loadBalancer": map[string]any{"ingress": []any{map[string]any{"ip": "10.1.0.5"}}}},
 	}
 	// A terminating sibling must NOT re-enter the cache.
@@ -695,11 +695,11 @@ func TestConnectionInfo(t *testing.T) {
 		t.Fatal("expected not-ready before the operator mints the secret")
 	}
 	// CNPG mints the superuser secret; LB gets its address.
-	api.secretData[key("pc-p1", spec.ID+"-superuser")] = map[string][]byte{
+	api.secretData[key("pc-db-p1", spec.ID+"-superuser")] = map[string][]byte{
 		"username": []byte("postgres"), "password": []byte("s3cr3t"), "dbname": []byte("postgres"),
 	}
-	api.secrets[key("pc-p1", spec.ID+"-superuser")] = map[string]any{"metadata": map[string]any{"name": spec.ID + "-superuser"}}
-	api.services[key("pc-p1", LBServiceName(spec.ID))] = map[string]any{
+	api.secrets[key("pc-db-p1", spec.ID+"-superuser")] = map[string]any{"metadata": map[string]any{"name": spec.ID + "-superuser"}}
+	api.services[key("pc-db-p1", LBServiceName(spec.ID))] = map[string]any{
 		"status": map[string]any{"loadBalancer": map[string]any{"ingress": []any{map[string]any{"ip": "10.1.0.9"}}}},
 	}
 	info, err := s.ConnectionInfo(ctx, "p1", spec.ID)
@@ -722,18 +722,18 @@ func TestResetPassword(t *testing.T) {
 	if _, err := s.CreateDatabase(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
-	before := string(api.secretData[key("pc-p1", AuthSecretName(spec.ID))]["password"])
+	before := string(api.secretData[key("pc-db-p1", AuthSecretName(spec.ID))]["password"])
 	pw, err := s.ResetPassword(ctx, "p1", spec.ID, EngineMariaDB)
 	if err != nil {
 		t.Fatal(err)
 	}
-	after := string(api.secretData[key("pc-p1", AuthSecretName(spec.ID))]["password"])
+	after := string(api.secretData[key("pc-db-p1", AuthSecretName(spec.ID))]["password"])
 	if pw == "" || pw == before || after != pw {
 		t.Fatalf("reset: before=%q pw=%q after=%q", before, pw, after)
 	}
 	// The rotation must be a DATA-ONLY patch: the proxcloud ownership labels applied at create
 	// survive (an SSA re-apply under the same field manager would retract them).
-	auth := api.secrets[key("pc-p1", AuthSecretName(spec.ID))]
+	auth := api.secrets[key("pc-db-p1", AuthSecretName(spec.ID))]
 	if digStr(auth, "metadata", "labels", LabelManagedBy) != ManagedByValue {
 		t.Fatal("reset stripped the ownership labels off the proxcloud-owned auth secret")
 	}
@@ -758,13 +758,13 @@ func TestResetPasswordOperatorOwned(t *testing.T) {
 	if _, err := s.ResetPassword(ctx, "p1", spec.ID, EnginePostgreSQL); err == nil || !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("pre-mint reset must be not-ready, got %v", err)
 	}
-	if _, has := api.secrets[key("pc-p1", spec.ID+"-app")]; has {
+	if _, has := api.secrets[key("pc-db-p1", spec.ID+"-app")]; has {
 		t.Fatal("reset must never create the operator's secret")
 	}
 	// CNPG mints the basic-auth secret.
-	k := key("pc-p1", spec.ID+"-app")
+	k := key("pc-db-p1", spec.ID+"-app")
 	api.secrets[k] = map[string]any{"metadata": map[string]any{
-		"name": spec.ID + "-app", "namespace": "pc-p1",
+		"name": spec.ID + "-app", "namespace": "pc-db-p1",
 		"labels": map[string]any{"cnpg.io/cluster": spec.ID},
 	}}
 	api.secretTypes[k] = "kubernetes.io/basic-auth"
@@ -931,13 +931,13 @@ func TestFinalizeReapsDatabaseSecrets(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, name := range []string{UserSecretName(spec.ID, "alice_b"), CustomTLSSecretName(spec.ID)} {
-			if err := api.ApplySecret(ctx, "pc-p1", name, map[string]string{"k": "v"},
+			if err := api.ApplySecret(ctx, "pc-db-p1", name, map[string]string{"k": "v"},
 				map[string]string{LabelProject: "p1", LabelService: "svc-dbaas", LabelManagedBy: ManagedByValue}, nil); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
-	if _, has := api.secrets[key("pc-p1", BackupSecretName(gone.ID))]; !has {
+	if _, has := api.secrets[key("pc-db-p1", BackupSecretName(gone.ID))]; !has {
 		t.Fatal("create must write the backup credential Secret")
 	}
 	delete(api.apps, key("argocd", gone.ID)) // the delete cascade finished
@@ -945,12 +945,12 @@ func TestFinalizeReapsDatabaseSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{MarkerSecretName(gone.ID), BackupSecretName(gone.ID), UserSecretName(gone.ID, "alice_b"), CustomTLSSecretName(gone.ID)} {
-		if _, has := api.secrets[key("pc-p1", name)]; has {
+		if _, has := api.secrets[key("pc-db-p1", name)]; has {
 			t.Errorf("secret %s outlived its database", name)
 		}
 	}
 	for _, name := range []string{MarkerSecretName(kept.ID), BackupSecretName(kept.ID), UserSecretName(kept.ID, "alice_b"), CustomTLSSecretName(kept.ID)} {
-		if _, has := api.secrets[key("pc-p1", name)]; !has {
+		if _, has := api.secrets[key("pc-db-p1", name)]; !has {
 			t.Errorf("sibling secret %s must stay", name)
 		}
 	}

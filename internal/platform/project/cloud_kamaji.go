@@ -74,7 +74,7 @@ func (h *Handler) kamajiCreate(w http.ResponseWriter, r *http.Request, u *user.U
 	}
 	data, err := ks.CreateCluster(ctx, spec, sec)
 	if err != nil {
-		if rerr := kamajiReleaseCluster(h.esSvc, h.pveFor, h.publicIPs)(ctx, sec.ComputeServiceID, proj.ID, spec.ID); rerr != nil {
+		if rerr := kamajiReleaseCluster(h.esSvc, h.pveFor, h.publicIPs, ks.Config().Defaults.Shared != nil)(ctx, sec.ComputeServiceID, proj.ID, spec.ID); rerr != nil {
 			slog.Warn("kamaji: release after a failed create", "cluster", spec.ID, "err", rerr)
 		}
 		h.fail(w, err)

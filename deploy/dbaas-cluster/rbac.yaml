@@ -24,7 +24,7 @@
 # therefore needs BOTH `create` and `patch`.
 #
 # ⚠ Why secrets/services/engine-CRs are CLUSTER-wide grants: Kubernetes RBAC cannot
-# wildcard namespaces — a Role binds to exactly one concrete namespace, and the `pc-<projectId>`
+# wildcard namespaces — a Role binds to exactly one concrete namespace, and the `pc-db-<projectId>`
 # namespaces are created dynamically by proxcloud itself, so no pre-created namespaced Role can
 # cover them. The ClusterRole below is the honest trade-off: the proxcloud SA can read/write
 # Secrets in ANY namespace of this cluster. Accepted for v1 because the DBaaS cluster is
@@ -52,7 +52,7 @@ kind: ClusterRole
 metadata:
   name: proxcloud-dbaas
 rules:
-  # pc-<projectId> project namespaces: created via SSA at bootstrap, deleted by the
+  # pc-db-<projectId> project namespaces: created via SSA at bootstrap, deleted by the
   # sync-driven GC once a project's last database is finalized. `list` is label-filtered
   # (app.kubernetes.io/managed-by=proxcloud) by the GC scan.
   - apiGroups: [""]

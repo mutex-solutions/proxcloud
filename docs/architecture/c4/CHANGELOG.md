@@ -316,6 +316,8 @@ invoice and credit note rows and nodes).
 - K8s node template pipeline (C2): Planned -> Implemented, with image-builder.
 - proxmox-csi disks (`-pvc-` volumes) no longer sync as the project's volumes.
 - Applications are listed per provider label, since one cluster can host both a kamaji and a dbaas provider.
+- Databases moved to `pc-db-<projectId>` namespaces: their default-deny NetworkPolicy cut tenant control planes in
+  `pc-<projectId>` off from their workers when both shared a cluster.
 - Removed from the add-on menu until they are wired: node problem detector, monitoring, NVIDIA GPU operator, reloader.
 - Node group autoscaling is refused, and GPU flavors for node groups.
 

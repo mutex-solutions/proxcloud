@@ -195,13 +195,14 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 }
 
 // kamajiReleaseCluster runs after a cluster's delete cascade has finished (kamaji.OnClusterGone).
-func kamajiReleaseCluster(esSvc *externalservice.Service, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo) func(ctx context.Context, computeID, projectID, clusterID string) error {
+func kamajiReleaseCluster(esSvc *externalservice.Service, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, shared bool) func(ctx context.Context, computeID, projectID, clusterID string) error {
 	return func(ctx context.Context, computeID, _, clusterID string) error {
 		es, err := esSvc.Get(ctx, computeID)
 		if err != nil || es == nil {
 			return nil // provider gone, nothing to release on
 		}
-		if pveFor != nil {
+		// sharedWorkers mints nothing, and its portal token may not touch tokens at all.
+		if pveFor != nil && !shared {
 			ps, err := pveFor(es)
 			if err != nil {
 				return err
@@ -220,13 +221,13 @@ func kamajiReleaseCluster(esSvc *externalservice.Service, pveFor func(*externals
 // KamajiFactory builds the kamaji service with its infrastructure release wired in; the API and the sync
 // job's orphan sweep use the same one.
 func KamajiFactory(esSvc *externalservice.Service, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo) func(*externalservice.ExternalService) (*kamaji.Service, error) {
-	release := kamajiReleaseCluster(esSvc, pveFor, ips)
 	return func(es *externalservice.ExternalService) (*kamaji.Service, error) {
-		ks, err := kamaji.New(es.KamajiConfig(), es.ID)
+		cfg := es.KamajiConfig()
+		ks, err := kamaji.New(cfg, es.ID)
 		if err != nil {
 			return nil, err
 		}
-		ks.OnClusterGone(release)
+		ks.OnClusterGone(kamajiReleaseCluster(esSvc, pveFor, ips, cfg.Defaults.Shared != nil))
 		return ks, nil
 	}
 }

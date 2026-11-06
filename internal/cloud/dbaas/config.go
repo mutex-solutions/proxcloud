@@ -21,9 +21,10 @@ import (
 // Customer-typed names are display-only; every k8s-side identifier is the generated database id
 // (`std-<8 hex>`), so duplicate display names, unicode and RFC1123 limits are non-issues.
 
-// NamespaceFor is the DB-cluster namespace holding a project's databases. Same derivation as
-// kamaji's (different physical cluster, so no collision).
-func NamespaceFor(projectID string) string { return "pc-" + projectID }
+// NamespaceFor is the DB-cluster namespace holding a project's databases. Not kamaji's namespace: one
+// cluster may host both, and this namespace gets a default-deny NetworkPolicy, which would cut a tenant
+// control plane off from its workers.
+func NamespaceFor(projectID string) string { return "pc-db-" + projectID }
 
 // LBServiceName is the chart-rendered tenant-facing LoadBalancer Service for a database — the
 // chart contract twin of values.proxcloud.resourceId (templates/service-lb.yaml). The sync reads
