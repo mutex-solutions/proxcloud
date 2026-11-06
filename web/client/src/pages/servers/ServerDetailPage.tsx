@@ -41,6 +41,10 @@ import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, usePro
 import type { CloudResource } from "@/lib/types"
 import { ServerDeleteWarning, serverFlavor, serverIPs, serverName, serverStatus } from "./ServersPage"
 
+const ACTION_LABELS: Record<string, string> = {
+  START: "Start", STOP: "Stop", SOFTREBOOT: "Reboot", RESIZE: "Resize", RENAME: "Rename",
+}
+
 type PendingAction = { action: string; title: string; label: string; destructive?: boolean } | null
 type FormDialog = "rename" | "resize" | "rebuild" | "password" | "delete" | null
 
@@ -106,7 +110,7 @@ export function ServerDetailPage() {
         // RESCUE returns the generated admin password (cloud_writes.go RESCUE case).
         toast.success(`Rescue started — admin password: ${d.result}`, { duration: 30000 })
       } else {
-        toast.success(`${p.action} requested`)
+        toast.success(`${ACTION_LABELS[p.action] ?? "Action"} requested`)
       }
       invalidate()
     },
@@ -330,9 +334,9 @@ export function ServerDetailPage() {
             <TabsTrigger value="network">Network</TabsTrigger>
             <TabsTrigger value="security">Security</TabsTrigger>
             <TabsTrigger value="volumes">Volumes</TabsTrigger>
-            <TabsTrigger value="events">Events</TabsTrigger>
+            {features.has("serverEvents") && <TabsTrigger value="events">Events</TabsTrigger>}
             {features.has("serverSnapshots") && <TabsTrigger value="snapshots">Snapshots</TabsTrigger>}
-            <TabsTrigger value="logs">Console log</TabsTrigger>
+            {features.has("consoleLog") && <TabsTrigger value="logs">Console log</TabsTrigger>}
           </TabsList>
         </div>
 
@@ -346,7 +350,7 @@ export function ServerDetailPage() {
                 <Row k="Status" v={<StatusBadge status={status} />} />
                 <Row k="Flavor" v={serverFlavor(server)} />
                 <Row k="IP addresses" v={<span className="font-mono">{serverIPs(server).join(", ") || "—"}</span>} />
-                <Row k="Created" v={fmtDateTime((s.created as string) ?? server.info?.createdAt)} />
+                <Row k="Created" v={fmtDateTime((s.created as string) ?? server.info?.createdAt ?? server.createdAt)} />
               </dl>
             </CardContent>
           </Card>
@@ -440,7 +444,7 @@ export function ServerDetailPage() {
           <DialogHeader>
             <DialogTitle>Resize server</DialogTitle>
             <DialogDescription>
-              Pick a new flavor. After the resize you must confirm or revert it from this page.
+              Pick a new flavor. A running server restarts to apply it. A disk can grow but never shrink.
             </DialogDescription>
           </DialogHeader>
           {flavors.isLoading ? (
@@ -823,7 +827,6 @@ function SecurityTab({
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
-                <TableHead>Description</TableHead>
                 <TableHead className="w-24" />
               </TableRow>
             </TableHeader>
@@ -831,9 +834,6 @@ function SecurityTab({
               {attached.data.map((sg) => (
                 <TableRow key={sg.id}>
                   <TableCell className="font-medium">{sgName(sg)}</TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    {(sg.data?.securityGroup?.description as string) || "—"}
-                  </TableCell>
                   <TableCell className="text-right">
                     <Button
                       variant="ghost"

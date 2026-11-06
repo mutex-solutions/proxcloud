@@ -453,6 +453,28 @@ func (s *Service) DetachSecurityGroup(ctx context.Context, projectID, serverExtI
 	return nil
 }
 
+// VMSecurityGroups lists the group ids a pool VM's firewall references.
+func (s *Service) VMSecurityGroups(ctx context.Context, projectID, serverExtID string) ([]string, error) {
+	vm, err := s.ResolveVM(ctx, projectID, serverExtID)
+	if err != nil {
+		return nil, err
+	}
+	if vm == nil {
+		return nil, fmt.Errorf("pve: server %s not found", serverExtID)
+	}
+	var rules []FirewallRule
+	if err := s.C.get(ctx, vmFirewallPath(vm.Node, vm.VMID)+"/rules", nil, &rules); err != nil {
+		return nil, err
+	}
+	out := []string{}
+	for _, r := range rules {
+		if r.Type == "group" {
+			out = append(out, r.Action)
+		}
+	}
+	return out, nil
+}
+
 // SecurityGroupInUse names a pool VM whose firewall references the group ("" = none). PVE
 // deletes a referenced group without complaint and leaves a dangling rule on the VM.
 func (s *Service) SecurityGroupInUse(ctx context.Context, projectID, groupID string) (string, error) {

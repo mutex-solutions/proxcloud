@@ -32,13 +32,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 // POST the console action and return the ProxCloud-proxied socket URL (+ the VNC
 // password when the backend needs one — Proxmox presents its ticket as the RFB credential).
 async function fetchConsoleURL(pid: string, resourceId: string, cloud: Scope, action: string) {
-  const res = await apiFetch<{ result?: { url?: string; password?: string } }>(
+  const res = await apiFetch<{ result?: { url?: string; password?: string; user?: string } }>(
     `/project/${pid}/cloud/${resourceId}/action`,
     { method: "POST", body: { action }, cloud },
   )
   const url = res?.result?.url
   if (!url) throw new Error("No console URL returned.")
-  return { url, password: res?.result?.password }
+  return { url, password: res?.result?.password, user: res?.result?.user }
 }
 
 export default function ServerConsolePage() {
@@ -319,12 +319,13 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
     let ws: WebSocket | null = null
     let term: Terminal | null = null
     let observer: ResizeObserver | null = null
+    let keepAlive: ReturnType<typeof setInterval> | undefined
     setState("connecting")
     setMessage("")
 
     void (async () => {
       try {
-        const { url } = await fetchConsoleURL(pid, resourceId, { serviceId, region }, "SERIAL_CONSOLE")
+        const { url, user, password } = await fetchConsoleURL(pid, resourceId, { serviceId, region }, "SERIAL_CONSOLE")
         if (cancelled || !hostRef.current) return
 
         term = new Terminal({
@@ -350,32 +351,65 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
           }
           if (e.key === "V" || e.key === "v") {
             void navigator.clipboard?.readText().then((t) => {
-              if (t && ws?.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(t))
+              if (t && ws?.readyState === WebSocket.OPEN) {
+                const data = new TextEncoder().encode(t)
+                ws.send(new Uint8Array([...new TextEncoder().encode(`0:${data.length}:`), ...data]))
+              }
             })
             return false
           }
           return true
         })
 
+        // Proxmox termproxy framing: the session opens with "<user>:<ticket>\n" and answers "OK";
+        // after that input is "0:<bytes>:<data>", a resize "1:<cols>:<rows>:" and a keep-alive "2".
+        const encoder = new TextEncoder()
+        const sendInput = (data: string) => {
+          if (ws?.readyState !== WebSocket.OPEN) return
+          const bytes = encoder.encode(data)
+          const frame = new Uint8Array([...encoder.encode(`0:${bytes.length}:`), ...bytes])
+          ws.send(frame)
+        }
+        const sendSize = () => {
+          if (ws?.readyState === WebSocket.OPEN && term) ws.send(encoder.encode(`1:${term.cols}:${term.rows}:`))
+        }
+
         observer = new ResizeObserver(() => {
           try {
             fit.fit()
+            sendSize()
           } catch {
             /* container not laid out yet */
           }
         })
         observer.observe(hostRef.current)
 
-        // The serial console proxy speaks websockify's binary sub-protocol.
         ws = new WebSocket(url, ["binary"])
         ws.binaryType = "arraybuffer"
+        let authed = false
         ws.onopen = () => {
-          if (!cancelled) setState("connected")
+          if (cancelled) return
+          ws?.send(encoder.encode(`${user}:${password}\n`))
+          keepAlive = setInterval(() => {
+            if (ws?.readyState === WebSocket.OPEN) ws.send(encoder.encode("2"))
+          }, 30_000)
         }
         ws.onmessage = (e: MessageEvent) => {
           if (!term) return
-          if (typeof e.data === "string") term.write(e.data)
-          else term.write(new Uint8Array(e.data as ArrayBuffer))
+          let bytes = typeof e.data === "string" ? encoder.encode(e.data) : new Uint8Array(e.data as ArrayBuffer)
+          if (!authed) {
+            if (bytes[0] !== 0x4f || bytes[1] !== 0x4b) { // "OK"
+              setState("error")
+              setMessage("The serial console refused the session.")
+              ws?.close()
+              return
+            }
+            authed = true
+            bytes = bytes.slice(2)
+            setState("connected")
+            sendSize()
+          }
+          term.write(bytes)
         }
         ws.onerror = () => {
           if (cancelled) return
@@ -387,9 +421,7 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
           setState((s) => (s === "error" ? s : "disconnected"))
           setMessage((m) => m || "Serial session ended.")
         }
-        term.onData((d) => {
-          if (ws?.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(d))
-        })
+        term.onData(sendInput)
       } catch (err) {
         if (cancelled) return
         setState("error")
@@ -400,6 +432,7 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
     return () => {
       cancelled = true
       observer?.disconnect()
+      clearInterval(keepAlive)
       try {
         ws?.close()
       } catch {

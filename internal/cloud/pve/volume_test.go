@@ -225,6 +225,22 @@ func TestDeleteVolume(t *testing.T) {
 	}
 }
 
+func TestWithUnusedSizes(t *testing.T) {
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/nodes/pve1/storage/nas/content": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"data":[{"volid":"nas:101/d.raw","size":%d}]}`, int64(3)<<30)
+		},
+	})
+	s := &Service{C: c}
+	disks := s.withUnusedSizes(context.Background(), "pve1", 101, []VMDisk{
+		{Slot: "scsi0", VolID: "local-zfs:d0", Storage: "local-zfs", SizeGiB: 20},
+		{Slot: "unused0", VolID: "nas:101/d.raw", Storage: "nas"},
+	})
+	if disks[0].SizeGiB != 20 || disks[1].SizeGiB != 3 {
+		t.Fatalf("sizes = %d, %d; want 20, 3", disks[0].SizeGiB, disks[1].SizeGiB)
+	}
+}
+
 func TestDeleteVolumeStillInSnapshot(t *testing.T) {
 	writes := map[string][]url.Values{"pinned": nil}
 	s := volCluster(t, cfgLocalUnused, writes)

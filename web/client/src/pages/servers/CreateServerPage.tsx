@@ -21,7 +21,7 @@ import { StatusBadge } from "@/components/status-badge"
 import { Textarea } from "@/components/ui/textarea"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import {
-  useFlavorCategories, useImageGroups, useLocations, useProject, useProjectGpuCapacity, useProjectId,
+  useCloudList, useFlavorCategories, useImageGroups, useLocations, useProject, useProjectGpuCapacity, useProjectId,
   useProjectQuota, useUIMenu,
 } from "@/lib/hooks"
 import type { FlavorCategory, ImageGrouping } from "@/lib/hooks"
@@ -98,7 +98,7 @@ type Flavor = {
   }
 }
 
-type VolumeType = { id?: string; name: string; displayName?: string }
+type VolumeType = { id?: string; name: string; displayName?: string; extra_specs?: { bootDisk?: boolean } }
 type DataVolumeDraft = { id: number; sizeGiB: number; type: string }
 
 const gb = (bytes?: number) => (bytes ? (bytes / 1073741824).toFixed(2) : "0.00")
@@ -195,7 +195,18 @@ export default function CreateServerPage() {
     [flavors.data],
   )
   const flavorSections = useMemo(() => buildFlavorSections(bootableFlavors, flavorCats.data ?? []), [bootableFlavors, flavorCats.data])
-  const imageSections = useMemo(() => buildImageSections(images.data ?? [], imageGroups.data), [images.data, imageGroups.data])
+  // The project's own images (made from a server) are cloned by their template id.
+  const { data: ownImages } = useCloudList(pid, "IMAGE")
+  const allImages = useMemo<TemplateImage[]>(
+    () => [
+      ...(images.data ?? []),
+      ...(ownImages ?? [])
+        .filter((r) => r.externalId)
+        .map((r) => ({ ...(r.data?.image as Record<string, unknown>), id: r.externalId }) as TemplateImage),
+    ],
+    [images.data, ownImages],
+  )
+  const imageSections = useMemo(() => buildImageSections(allImages, imageGroups.data), [allImages, imageGroups.data])
   const networks = useQuery({
     queryKey: ["cloud", pid, "NETWORK", scope?.serviceId, scope?.region],
     queryFn: () =>
@@ -225,7 +236,6 @@ export default function CreateServerPage() {
   const [rootVolumeType, setRootVolumeType] = useState("")
   const [dataVolumes, setDataVolumes] = useState<DataVolumeDraft[]>([])
   const [netIds, setNetIds] = useState<string[]>([])
-  const [fixedIps, setFixedIps] = useState<Record<string, string>>({}) // networkExtId → requested fixed IP
   const [keyName, setKeyName] = useState("") // "" = no key pair
   const [loginMethod, setLoginMethod] = useState<"key" | "password">("key")
   const [username, setUsername] = useState("")
@@ -234,10 +244,14 @@ export default function CreateServerPage() {
   const [sgNames, setSgNames] = useState<string[]>([])
   const [name, setName] = useState("")
 
-  const selectedImage = images.data?.find((image) => String(image.id) === imageId)
+  const selectedImage = allImages.find((image) => String(image.id) === imageId)
   const selectedFlavor = bootableFlavors.find((flavor) => flavor.externalId === flavorId)
   const minimumRootSizeGiB = imageMinimumDisk(selectedImage)
-  const availableVolumeTypes = useMemo(() => volumeTypes.data ?? [], [volumeTypes.data])
+  // A profile that refuses boot disks (HDD capacity storage) is not offered for the boot volume.
+  const availableVolumeTypes = useMemo(
+    () => (volumeTypes.data ?? []).filter((type) => type.extra_specs?.bootDisk !== false),
+    [volumeTypes.data],
+  )
   const soleVolumeType = availableVolumeTypes.length === 1 ? availableVolumeTypes[0] : undefined
   const availableVolumeTypeNames = useMemo(
     () => new Set(availableVolumeTypes.map((type) => type.name)),
@@ -329,9 +343,7 @@ export default function CreateServerPage() {
               sizeGiB: volume.sizeGiB,
               type: volume.type,
             })),
-            networkInterfaces: netIds.map((uuid) =>
-              fixedIps[uuid]?.trim() ? { uuid, fixedIp: fixedIps[uuid].trim() } : { uuid },
-            ),
+            networkInterfaces: netIds.map((uuid) => ({ uuid })),
             ...(loginMethod === "key" && keyName ? { keyName } : {}),
             ...(loginMethod === "password" && !genUserData && password ? { adminPass: password } : {}),
             ...(finalUserData.trim() ? { userData: finalUserData } : {}),
@@ -422,7 +434,6 @@ export default function CreateServerPage() {
                       setRootVolumeType("")
                       setDataVolumes([])
                       setNetIds([])
-                      setFixedIps({})
                       setKeyName("")
                       setSgNames([])
                     }}
@@ -788,21 +799,11 @@ export default function CreateServerPage() {
                         <Checkbox
                           checked={checked}
                           disabled={!ext}
-                          onCheckedChange={(v) =>
-                            setNetIds((ids) => (v === true ? [...ids, ext] : ids.filter((x) => x !== ext)))
-                          }
+                          onCheckedChange={(v) => setNetIds(v === true ? [ext] : [])}
                         />
                         <span className="font-medium">{(n.data?.network?.name as string) ?? n.name ?? n.id}</span>
                         <span className="truncate font-mono text-xs text-muted-foreground">{ext}</span>
                       </label>
-                      {checked ? (
-                        <Input
-                          className="h-8 w-44 font-mono text-xs"
-                          value={fixedIps[ext] ?? ""}
-                          onChange={(e) => setFixedIps((m) => ({ ...m, [ext]: e.target.value }))}
-                          placeholder="Fixed IP (optional)"
-                        />
-                      ) : null}
                     </div>
                   )
                 })}

@@ -199,6 +199,8 @@ export type CloudFeature =
   | "createDataVolumes"
   | "ports"
   | "subnets"
+  | "serverEvents"
+  | "consoleLog"
   | "volumeSnapshots"
 
 export function useUIMenu(pid: string) {
