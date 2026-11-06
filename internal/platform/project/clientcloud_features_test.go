@@ -18,16 +18,16 @@ func TestCloudFeatures(t *testing.T) {
 	}{
 		{"ceph-s3 serves none", map[string]any{"provider": "ceph-s3"}, []string{}},
 		{"kamaji serves none", map[string]any{"provider": "kamaji"}, []string{}},
-		{"proxmox without profiles", map[string]any{"provider": "proxmox"}, []string{"serverSnapshots"}},
+		{"proxmox without profiles", map[string]any{"provider": "proxmox"}, []string{"serverSnapshots", "userData", "serverPassword", "serverRebuild", "serverDiskSnapshots", "subnets", "spreadGroups"}},
 		{"proxmox with one profile: nothing to retype to", map[string]any{
 			"provider": "proxmox", "storageProfiles": map[string]any{"std": profile("local-zfs")},
-		}, []string{"serverSnapshots"}},
+		}, []string{"serverSnapshots", "userData", "serverPassword", "serverRebuild", "serverDiskSnapshots", "subnets", "spreadGroups"}},
 		{"proxmox with a storage-less profile does not count it", map[string]any{
 			"provider": "proxmox", "storageProfiles": map[string]any{"std": profile("local-zfs"), "empty": map[string]any{}},
-		}, []string{"serverSnapshots"}},
+		}, []string{"serverSnapshots", "userData", "serverPassword", "serverRebuild", "serverDiskSnapshots", "subnets", "spreadGroups"}},
 		{"proxmox with two profiles", map[string]any{
 			"provider": "proxmox", "storageProfiles": map[string]any{"std": profile("local-zfs"), "nas": profile("nas")},
-		}, []string{"serverSnapshots", "volumeRetype"}},
+		}, []string{"serverSnapshots", "userData", "serverPassword", "serverRebuild", "serverDiskSnapshots", "subnets", "spreadGroups", "volumeRetype"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

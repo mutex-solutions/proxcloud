@@ -318,7 +318,7 @@ func (h *Handler) pveDetachPublicNIC(ctx context.Context, ps *pve.Service, es *e
 	}
 	for _, row := range held {
 		if row.NIC == "net0" && row.ProjectID == proj.ID {
-			_, gateway, _, _, _, gerr := ps.VnetStaticPool(ctx, row.NetworkID)
+			_, gateway, _, _, _, gerr := ps.VnetStaticPoolFor(ctx, row.NetworkID, row.IP)
 			if gerr != nil {
 				return gerr
 			}
@@ -359,6 +359,7 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, derr.Error()))
 			return true
 		}
+		h.pveReseed(ctx, ps, es, cr.ExternalID, vm.Node)
 		h.pveRefreshServerRow(ctx, ps, proj, cr)
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 		httpx.OK(w, map[string]any{"result": map[string]any{"rebootRequired": true}})
@@ -466,8 +467,84 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, serr.Error()))
 		return true
 	}
+	h.pveReseed(ctx, ps, es, cr.ExternalID, vm.Node)
 	h.pveRefreshServerRow(ctx, ps, proj, cr)
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 	httpx.OK(w, map[string]any{"result": map[string]any{"ip": ip.IP, "networkId": netID, "rebootRequired": true}})
+	return true
+}
+
+// pveSubnetAction handles ADD_SUBNET / REMOVE_SUBNET / SET_SNAT on a NETWORK: a vnet holds several
+// subnets. Routing between them, and between the project's networks, needs nothing of a tenant: the
+// zone's VRF is the router, and the project's isolation ACCEPT covers all its subnets.
+func (h *Handler) pveSubnetAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
+	if cr.Type != cloud.TypeNetwork || (action != "ADD_SUBNET" && action != "REMOVE_SUBNET" && action != "SET_SNAT") {
+		return false
+	}
+	ctx := r.Context()
+	ps, ok := h.pveService(w, es)
+	if !ok {
+		return true
+	}
+	netCfg := es.PVENetworkConfig()
+	cidr := strAny(data["cidr"])
+	if action == "REMOVE_SUBNET" {
+		held, err := h.publicIPs.InNetwork(ctx, es.ID, cr.ExternalID)
+		if err != nil {
+			h.fail(w, err)
+			return true
+		}
+		for _, row := range held {
+			if pve.SubnetHolds(cidr, row.IP) {
+				httpx.Err(w, http.StatusConflict, http.StatusConflict, "Subnet "+cidr+" is in use by server "+row.ServerID)
+				return true
+			}
+		}
+	}
+	snat := true
+	if v, ok := data["snat"].(bool); ok {
+		snat = v
+	}
+	if !h.withSDNLock(ctx, w, func() error {
+		switch action {
+		case "ADD_SUBNET":
+			used, err := ps.SubnetCIDRs(ctx)
+			if err != nil {
+				return err
+			}
+			picked, herr := pvePickCIDR(cidr, netCfg.CIDRPool, used)
+			if herr != nil {
+				return herr
+			}
+			if _, err := ps.AddSubnet(ctx, proj.ID, cr.ExternalID, picked, snat); err != nil {
+				return pveVolumeErr(err)
+			}
+		case "REMOVE_SUBNET":
+			if err := ps.RemoveSubnet(ctx, proj.ID, cr.ExternalID, cidr); err != nil {
+				return pveVolumeErr(err)
+			}
+		case "SET_SNAT":
+			if err := ps.SetSubnetSNAT(ctx, proj.ID, cr.ExternalID, cidr, snat); err != nil {
+				return pveVolumeErr(err)
+			}
+		}
+		if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs); err != nil {
+			return fmt.Errorf("isolation: %w", err)
+		}
+		return ps.ApplyAndWait(ctx)
+	}) {
+		return true
+	}
+	net, _ := cr.Data["network"].(map[string]any)
+	if subs, err := ps.C.ListSDNSubnets(ctx, cr.ExternalID); err == nil && net != nil {
+		for k, v := range pve.SubnetDetail(subs) {
+			net[k] = v
+		}
+		if saved, err := h.cloud.Insert(ctx, cr); err == nil {
+			cr = saved
+		}
+	}
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
+	httpx.OK(w, map[string]any{"result": *cr})
 	return true
 }

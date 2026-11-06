@@ -58,6 +58,11 @@ func (r *PublicIPRepo) ForServer(ctx context.Context, serviceID, serverID string
 	return r.find(ctx, pgdoc.M{"serviceId": serviceID, "serverId": serverID})
 }
 
+// InNetwork lists the allocations on one network (a vnet or a public network).
+func (r *PublicIPRepo) InNetwork(ctx context.Context, serviceID, networkID string) ([]PublicIP, error) {
+	return r.find(ctx, pgdoc.M{"serviceId": serviceID, "networkId": networkID})
+}
+
 // ForProject lists the project's allocations on one service, net0 included.
 func (r *PublicIPRepo) ForProject(ctx context.Context, serviceID, projectID string) ([]PublicIP, error) {
 	return r.find(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID})

@@ -275,6 +275,7 @@ func run() error {
 	// Public-NIC IP allocations (pgdoc `pvePublicIp`).
 	publicIPRepo := project.NewPublicIPRepo(pg)
 	projectH.SetPublicIPs(publicIPRepo)
+	projectH.SetSeeds(project.NewSeedRepo(pg, enc))
 
 	// Promotion (deposit config) + Affiliate (cfy check + project config/log) — client reads.
 	// The promo-redeem authz gate resolves the bp's org WITH a membership check on the caller

@@ -9,6 +9,7 @@ package pve
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -54,6 +55,10 @@ type CreateServerReq struct {
 	// DHCP (nil = the zone's DHCP serves it). The caller owns the allocation and releases it
 	// when CreateServer fails.
 	AssignIP func(ctx context.Context, vmid int) (ip string, prefix int, gateway string, err error)
+	// Seed writes the server's NoCloud seed before its first boot (nil = PVE's own drive).
+	Seed func(ctx context.Context, node string, vmid int) error
+	// SpreadGroup rides the VM's tags: the scheduler keeps a group's members apart.
+	SpreadGroup string
 	// createdUnix is the identity stamp, set by CreateServer.
 	createdUnix int64
 }
@@ -63,6 +68,9 @@ func (r CreateServerReq) vmTags() string {
 	tags := []string{TagManaged, FlavorTag(r.Spec.Slug), ImageTag(r.ImageSlug), ProfileTag(r.Spec.StorageProfile), CreatedTag(r.createdUnix)}
 	if r.Spec.GPUModel != "" && r.Spec.GPUCount > 0 {
 		tags = append(tags, GPUTag(r.Spec.GPUModel, r.Spec.GPUCount))
+	}
+	if r.SpreadGroup != "" {
+		tags = append(tags, SpreadTag(r.SpreadGroup))
 	}
 	return JoinTags(tags...)
 }
@@ -204,6 +212,12 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 	if err != nil {
 		s.destroyBestEffort(ctx, node, vmid)
 		return nil, fmt.Errorf("pve create: firewall: %w", err)
+	}
+	if req.Seed != nil {
+		if err := req.Seed(ctx, node, vmid); err != nil {
+			s.destroyBestEffort(ctx, node, vmid)
+			return nil, fmt.Errorf("pve create: seed: %w", err)
+		}
 	}
 
 	if up, serr := s.C.StartVM(ctx, node, vmid); serr == nil {
@@ -544,7 +558,8 @@ func (s *Service) Console(ctx context.Context, projectID, externalID string, ser
 	return u, t.User, t.Ticket, nil
 }
 
-// imageBuildPrefix names a clone CreateImage has not converted yet, so no sync takes it for a server.
+// imageBuildPrefix names a clone that is not a server: one CreateImage has not converted yet, or the
+// disk donor of a rebuild. No sync takes it for a server.
 const imageBuildPrefix = "pc-img-build-"
 
 // CreateImage snapshots a pool VM into a project-owned template (full clone →
@@ -587,6 +602,10 @@ func (s *Service) CreateImage(ctx context.Context, projectID, serverExtID, name 
 			err = s.C.WaitTask(ctx, up)
 		}
 	}
+	// A project image is seeded per server like any other: it must not keep this server's CD.
+	if err == nil {
+		err = s.dropSeedFromClone(ctx, vm.Node, newID)
+	}
 	if err != nil {
 		s.destroyBestEffort(ctx, vm.Node, newID)
 		return 0, err
@@ -609,4 +628,261 @@ func (s *Service) CreateImage(ctx context.Context, projectID, serverExtID, name 
 		return 0, err
 	}
 	return newID, nil
+}
+
+// dropSeedFromClone clears what a clone inherited of its source's seed: the smbios serial (the seed
+// URL with the source's token) and the seed CD, which a PVE cloud-init drive replaces.
+func (s *Service) dropSeedFromClone(ctx context.Context, node string, vmid int) error {
+	cfg, err := s.C.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		return err
+	}
+	slot, vol := cloudInitSlot(cfg), seedVolOf(cfg)
+	params := map[string]string{}
+	if v := cfg.Str("smbios1"); strings.Contains(v, "serial=") {
+		params["smbios1"] = smbiosWithoutSerial(v)
+	}
+	var del []string
+	if vol != "" {
+		del = append(del, slot)
+	}
+	if len(params) > 0 || len(del) > 0 {
+		up, err := s.C.SetVMConfig(ctx, node, vmid, params, del...)
+		if err == nil {
+			err = s.C.WaitTask(ctx, up)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if slot != "" && vol == "" {
+		return nil // still has PVE's drive
+	}
+	if slot == "" {
+		slot = "ide2"
+	}
+	storage, _, ok := strings.Cut(cfg.Str(s.bootDiskSlot(ctx, node, vmid)), ":")
+	if !ok {
+		return nil
+	}
+	up, err := s.C.SetVMConfig(ctx, node, vmid, map[string]string{slot: storage + ":cloudinit"})
+	if err == nil {
+		err = s.C.WaitTask(ctx, up)
+	}
+	return err
+}
+
+// SetPassword changes a user's password in a running guest through its agent. The guest's own
+// users are the guest's business: an unknown user comes back as the agent's error.
+func (s *Service) SetPassword(ctx context.Context, projectID, externalID, username, password string) error {
+	vm, err := s.ResolveVM(ctx, projectID, externalID)
+	if err != nil {
+		return err
+	}
+	if vm == nil {
+		return fmt.Errorf("pve: vm %s not found", externalID)
+	}
+	if vm.Status != "running" {
+		return conflictf("Start server %s to set a password: the guest agent does it", vm.Name)
+	}
+	err = s.C.AgentSetUserPassword(ctx, vm.Node, vm.VMID, username, password)
+	if IsForbidden(err) {
+		return conflictf("The provider's API token cannot set guest passwords (it needs VM.GuestAgent.Unrestricted)")
+	}
+	var ae *APIError
+	if errors.As(err, &ae) && ae.Status >= 500 {
+		// A 500 is the agent answering (or not): no agent yet, or no such user.
+		return conflictf("The guest agent could not set the password for user %q: %s", username, ae.Message)
+	}
+	return err
+}
+
+// DefaultUserOf is the login user of a server's image: cloud images name it after the distro.
+func DefaultUserOf(imageSlug string) string {
+	first, _, _ := strings.Cut(imageSlug, "-")
+	switch first {
+	case "debian", "ubuntu", "fedora", "centos", "rocky", "almalinux", "alpine", "arch":
+		return first
+	case "rhel":
+		return "cloud-user"
+	}
+	return "root"
+}
+
+// RebuildReq drives RebuildServer.
+type RebuildReq struct {
+	ProjectID, ServerID string
+	TemplateVMID        int
+	TemplateNode        string
+	ImageSlug           string
+	// Reseed runs once the new disk is in, before the first boot (nil = PVE's own drive).
+	Reseed func(ctx context.Context, node string, vmid int) error
+}
+
+// RebuildServer replaces a server's boot disk with a fresh copy of an image; its identity (vmid, NICs,
+// addresses, firewall, data disks) stays. The sequence never leaves the VM without a disk: the old one
+// is parked as unusedN while the new one moves in and only removed once it did, and any failure until
+// then puts it back. PVE moves a disk between VMs only on one node and storage, so the copy lands on
+// the storage the old disk is on. A boot disk with snapshots cannot be moved away from: 409.
+func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
+	ctx, cancel := context.WithTimeout(ctx, createTimeout)
+	defer cancel()
+	vm, err := s.ResolveVM(ctx, req.ProjectID, req.ServerID)
+	if err != nil {
+		return err
+	}
+	if vm == nil {
+		return fmt.Errorf("pve: vm %s not found", req.ServerID)
+	}
+	node := vm.Node
+	snaps, err := s.C.ListSnapshots(ctx, node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	for _, sn := range snaps {
+		if sn.Name != "current" {
+			return conflictf("Delete the snapshots of server %s before rebuilding it", vm.Name)
+		}
+	}
+	cfg, err := s.C.GetVMConfig(ctx, node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	slot := s.bootDiskSlot(ctx, node, vm.VMID)
+	if slot == "" {
+		return conflictf("Server %s has no boot disk", vm.Name)
+	}
+	oldVal := cfg.Str(slot)
+	oldVol, _, _ := strings.Cut(oldVal, ",")
+	storage, _, _ := strings.Cut(oldVol, ":")
+	oldGiB := 0
+	for _, d := range ParseDisks(cfg) {
+		if d.Slot == slot {
+			oldGiB = d.SizeGiB
+		}
+	}
+
+	// The fresh disk first: nothing has happened to the server if this fails.
+	tmpID, err := s.cloneRetry(ctx, req.TemplateNode, req.TemplateVMID, CloneOpts{
+		Name: imageBuildPrefix + "rebuild-" + req.ServerID, Pool: s.PoolFor(req.ProjectID), Target: nodeIfOther(node, req.TemplateNode), Storage: storage, Full: true,
+	})
+	if err != nil {
+		return fmt.Errorf("pve rebuild: clone: %w", err)
+	}
+	defer s.destroyBestEffort(context.WithoutCancel(ctx), node, tmpID)
+	tmpSlot := s.bootDiskSlot(ctx, node, tmpID)
+	if tmpSlot == "" {
+		return conflictf("Image %s has no boot disk", req.ImageSlug)
+	}
+
+	if vm.Status == "running" {
+		up, err := s.C.StopVM(ctx, node, vm.VMID)
+		if err == nil {
+			err = s.C.WaitTask(ctx, up)
+		}
+		if err != nil {
+			return fmt.Errorf("pve rebuild: stop: %w", err)
+		}
+	}
+	// Removing a disk from its slot parks it as unusedN.
+	up, err := s.C.SetVMConfig(ctx, node, vm.VMID, nil, slot)
+	if err == nil {
+		err = s.C.WaitTask(ctx, up)
+	}
+	if err != nil {
+		return fmt.Errorf("pve rebuild: detach: %w", err)
+	}
+	restore := func() {
+		rctx := context.WithoutCancel(ctx)
+		if up, err := s.C.SetVMConfig(rctx, node, vm.VMID, map[string]string{slot: oldVal}); err == nil {
+			_ = s.C.WaitTask(rctx, up)
+		}
+		if vm.Status == "running" {
+			if up, err := s.C.StartVM(rctx, node, vm.VMID); err == nil {
+				_ = s.C.WaitTask(rctx, up)
+			}
+		}
+	}
+	up, err = s.C.MoveDisk(ctx, node, tmpID, MoveDiskOpts{Disk: tmpSlot, TargetVMID: vm.VMID, TargetDisk: slot})
+	if err == nil {
+		err = s.C.WaitTask(ctx, up)
+	}
+	if err != nil {
+		restore()
+		return fmt.Errorf("pve rebuild: move disk: %w", err)
+	}
+
+	cfg, err = s.C.GetVMConfig(ctx, node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	var del []string
+	for _, d := range ParseDisks(cfg) {
+		if strings.HasPrefix(d.Slot, "unused") && d.VolID == oldVol {
+			del = append(del, d.Slot)
+		}
+	}
+	var tags []string
+	for _, t := range strings.Split(cfg.Str("tags"), ";") {
+		if t != "" && !strings.HasPrefix(t, tagImagePref) {
+			tags = append(tags, t)
+		}
+	}
+	tags = append(tags, ImageTag(req.ImageSlug))
+	up, err = s.C.SetVMConfig(ctx, node, vm.VMID, map[string]string{"tags": JoinTags(tags...), "boot": "order=" + slot}, del...)
+	if err == nil {
+		err = s.C.WaitTask(ctx, up)
+	}
+	if err != nil {
+		return fmt.Errorf("pve rebuild: finish: %w", err)
+	}
+	if oldGiB > 0 {
+		if up, rerr := s.C.ResizeDisk(ctx, node, vm.VMID, slot, fmt.Sprintf("%dG", oldGiB)); rerr == nil {
+			_ = s.C.WaitTask(ctx, up)
+		}
+	}
+	if req.Reseed != nil {
+		if err := req.Reseed(ctx, node, vm.VMID); err != nil {
+			return fmt.Errorf("pve rebuild: seed: %w", err)
+		}
+	}
+	up, err = s.C.StartVM(ctx, node, vm.VMID)
+	if err == nil {
+		err = s.C.WaitTask(ctx, up)
+	}
+	if err != nil {
+		return fmt.Errorf("pve rebuild: start: %w", err)
+	}
+	return nil
+}
+
+func nodeIfOther(node, templateNode string) string {
+	if node == templateNode {
+		return ""
+	}
+	return node
+}
+
+// cloneRetry clones under a fresh vmid, retrying the races NextID and the template's clone lock allow.
+func (s *Service) cloneRetry(ctx context.Context, node string, vmid int, o CloneOpts) (int, error) {
+	for attempt := 0; ; attempt++ {
+		id, err := s.C.NextID(ctx)
+		if err != nil {
+			return 0, err
+		}
+		o.NewID = id
+		up, err := s.C.CloneVM(ctx, node, vmid, o)
+		if err == nil {
+			if err := s.C.WaitTask(ctx, up); err != nil {
+				return 0, err
+			}
+			return id, nil
+		}
+		msg := strings.ToLower(err.Error())
+		if attempt < 3 && (strings.Contains(msg, "already exist") || strings.Contains(msg, "can't lock")) {
+			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+			continue
+		}
+		return 0, err
+	}
 }

@@ -78,6 +78,7 @@ flowchart TB
   fwsvc["pve firewallsvc + firewall<br/>security groups, anti-spoof"]:::impl
   sch["pve.PickNode scheduler"]:::impl
   cli["pve.Client REST"]:::impl
+  seed["server seeds<br/>pve seed, seediso, project nocloud_pve"]:::impl
   sync["syncjob + pve sync providers"]:::impl
   recon["providers.Reconcile"]:::impl
   repo["cloud.Repo<br/>resource cache"]:::impl
@@ -88,6 +89,8 @@ flowchart TB
 
   ph --> quota
   ph --> pip
+  ph --> seed
+  seed --> cli
   ph --> es
   ph --> svc
   ph --> net
@@ -135,8 +138,9 @@ flowchart TB
 | Capability detection | `internal/cloud/pve/capability.go` (`DetectStorage`, `classify`, `StorageHasRoom`, `TemplateShared`), `externalservice/proxmox.go` (`ValidatePVEStorageProfiles`, `DetectPVECapabilities`, `PVEEffectiveStorageClass`), `syncjob/job.go` (`detectProxmoxCapabilities`), `admin/pveadmin.go` (`proxmoxDetectStorage`, `proxmoxStorageClasses`, `validatePVEStorageProfiles`) | Per storage from `GET /storage` + `/cluster/resources type=storage`: type, shared, content, snapshots, thin, live migrate, replication, tier and a default class from a static type table, plus per-node active/avail. Persisted under `config.capabilities` every sync cycle and on admin Re-detect. Storage-profile saves are rejected when a storage is missing, inactive, lacks `images`, or the profile claims a flag the storage lacks. Admin class override (`config.storageClasses.<id>.class`) wins; the installer's `suggestedClass` is display-only. Feeds placement (active nodes, free space, template and clone-target locality), same-node attach gating and the capacity-class gates (boot disk, snapshots, DBaaS). HA readiness is still Planned. | Implemented |
 | Replication and HA | not yet in the tree | `pvesr` jobs and HA node-affinity rules for protected VMs. | Planned |
 | Metering reads | `internal/cloud/pve/syncprovider.go` (`SampledServerProvider`, `SampledImageProvider`, `Superseded`), `task.go` (`NodeTasks`), `qemu.go` (`VMStatus.NICs`), `gpu.go` (`GPUSpecsFromConfig`), `service.go` (`CreatedTag`) | The Proxmox side of metering: rows built from one `/cluster/resources` page, the VM identity stamp `pc-c-<unix>`, node task logs, per-tap counters, GPU count from `hostpciN mapping=`. See C3c. | Implemented |
+| Server seeds | `internal/cloud/pve/seed.go` (`RenderSeed`, `RenderNetworkConfig`, `AttachSeedISO`, `SetSeedURL`), `seediso.go` (`BuildSeedISO`), `internal/platform/project/nocloud_pve.go` (`pveSeedStep`, `pveWriteSeed`, `nocloudFile`, `SeedRepo`) | NoCloud seed of a server with user-data, vendor-data or metadata: a token URL served by `GET /api/v1/nocloud/{token}/{file}`, or a `cidata` CD where the vnet has no DHCP. | Implemented |
+| Server snapshots | `internal/cloud/pve/snapshot.go`, `internal/platform/project/snapshot_pve.go` | VM snapshots, refused on storage without them, newest-only rollback on ZFS. | Implemented |
 | TrueNAS client | `internal/cloud/truenas/`, `internal/platform/project/cloud_shares.go` | JSON-RPC over WebSocket; NFS and SMB shares as dataset + refquota + export, limited to the project's addresses. | Implemented |
-| VM metadata datasource | not yet in the tree | Per-VM cloud-init datasource served by the API. | Planned |
 
 ## C3c. Metering and billing
 

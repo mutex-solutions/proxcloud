@@ -4,6 +4,40 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: P5 IaaS parity: server seeds, rebuild, snapshots, subnets, spread groups
+
+**What changed**
+
+- Server seeds (C3b): Planned -> Implemented. A server with user-data, vendor-data or instance metadata gets a
+  platform NoCloud seed: a per-VM token URL on the API (`GET /api/v1/nocloud/{token}/{file}`) on a vnet with DHCP,
+  a `cidata` CD written by the platform (`pve/seediso.go`) otherwise, or with `metadata.forceIso`. Any other
+  server stays on PVE's own drive.
+- New actions on a server: `SET_PASSWORD` (guest agent), `REBUILD` (boot-disk swap), `LIST_/CREATE_/ROLLBACK_/DELETE_SNAPSHOT`.
+  New on a network: `ADD_SUBNET`, `REMOVE_SUBNET`, `SET_SNAT`. New on create: `spreadGroup`, `spreadStrict`, `metadata`,
+  `networkInterfaces[0].subnet`.
+- The client gets a public-IP card, a Snapshots tab, a subnets tab and the wizard inputs. The tab that created
+  template images is now called Images, for what it does. All behind `/init` feature flags.
+- `ProxCloudPlatform` adds `VM.GuestAgent.Unrestricted` and `Datastore.AllocateTemplate`.
+
+**Why**
+
+- A URL seed alone cannot work on EVPN or VLAN: cloud-init fetches it in the network stage, the local stage gives
+  up on any CD once it sees a seed URL (lab-verified on cloud-init 25.1), and with no DHCP the guest then has no
+  network to fetch with. A CD alone would put user-data on shared storage everywhere and need the upload privilege
+  on sites that have DHCP. So the vnet decides.
+- The ISO writer is ~150 lines of Go: `user-data` is not a legal ISO 9660 name, so the image needs Joliet, and the
+  pure-Go options are whole disk-image libraries.
+- Tenant data rides `vendor-data` and `meta`: on one key user-data wins, and a tenant metadata key cannot reach
+  `dsmode` or `seedfrom`.
+- Rebuild clones first and parks the old disk: a failed clone or move leaves the server as it was.
+- A spread group is a tag and a scheduler preference because PVE 9's affinity rules are HA-only and strict.
+- There is no router resource: the zone's VRF already routes all of a project's vnets and the isolation rules keep
+  other projects out, so a router object would have nothing to decide.
+
+**Diagrams updated**: `c2-containers.md` (Tenant VMs), `c3-components.md` (C3b).
+
+
+
 ## 2026-11-07: isolation rules get an owner, cover gateways, and reconcile in the sync job
 
 Open items of the lab drill (DRILL-5, DRILL-6) and the coexistence note in the lab log.

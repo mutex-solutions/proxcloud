@@ -29,6 +29,12 @@ type SchedReq struct {
 	// DiskBytes must fit on Storage while HeadroomPct % of its capacity stays free.
 	DiskBytes   int64
 	HeadroomPct float64
+	// SpreadGroup keeps the group's members (VMs of SpreadPool carrying its tag) apart: among the
+	// nodes that fit, those with the fewest members win. SpreadStrict refuses a node that has one.
+	// A preference, not a guarantee: nothing moves a member later (PVE's own rules are HA-only).
+	SpreadPool   string
+	SpreadGroup  string
+	SpreadStrict bool
 }
 
 // PickNode chooses the target node. vms is the cluster-wide qemu rows (ALL pools —
@@ -42,12 +48,16 @@ func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error)
 	// Stopped VMs still count — they can start any time and PVE reserves nothing.
 	usedCPU := map[string]float64{}
 	usedMem := map[string]int64{}
+	members := map[string]int{}
 	for _, r := range vms {
 		if r.Type != "qemu" || r.Template == 1 {
 			continue
 		}
 		usedCPU[r.Node] += r.MaxCPU
 		usedMem[r.Node] += r.MaxMem
+		if req.SpreadGroup != "" && r.Pool == req.SpreadPool && TagValue(r.Tags, tagSpreadPref) == req.SpreadGroup {
+			members[r.Node]++
+		}
 	}
 	type cand struct {
 		name    string
@@ -62,6 +72,9 @@ func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error)
 			continue
 		}
 		if req.GPUs > 0 && req.GPUFree[n.Node] < req.GPUs {
+			continue
+		}
+		if req.SpreadStrict && members[n.Node] > 0 {
 			continue
 		}
 		if req.Storage != nil && !StorageHasRoom(req.Storage[n.Node], req.DiskBytes, req.HeadroomPct) {
@@ -79,6 +92,11 @@ func PickNode(nodes []Node, vms []ClusterResource, req SchedReq) (string, error)
 	if len(cands) == 0 {
 		return "", fmt.Errorf("no node has capacity for %d vCPU / %d MB / %d GiB disk", req.VCPUs, req.RAMMb, req.DiskBytes>>30)
 	}
-	sort.Slice(cands, func(i, j int) bool { return cands[i].freeMem > cands[j].freeMem })
+	sort.Slice(cands, func(i, j int) bool {
+		if mi, mj := members[cands[i].name], members[cands[j].name]; mi != mj {
+			return mi < mj
+		}
+		return cands[i].freeMem > cands[j].freeMem
+	})
 	return cands[0].name, nil
 }

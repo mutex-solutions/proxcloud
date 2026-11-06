@@ -203,6 +203,9 @@ export type CloudFeature =
   | "serverEvents"
   | "consoleLog"
   | "volumeSnapshots"
+  | "serverDiskSnapshots"
+  | "spreadGroups"
+  | "publicIp"
 
 export function useUIMenu(pid: string) {
   return useQuery({
