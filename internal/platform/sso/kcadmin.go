@@ -3,6 +3,8 @@ package sso
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,7 +18,7 @@ import (
 
 // KCAdmin talks to the Keycloak Admin API of the customer realm with the proxcloud-idp-admin
 // service account. Its roles are confined to identity providers and users; it cannot edit clients,
-// flows or realm settings.
+// flows or realm settings. The operator console's Create user uses it too.
 type KCAdmin struct {
 	base, realm, clientID, secret string
 	http                          *http.Client
@@ -238,4 +240,43 @@ func (k *KCAdmin) IsDisposable(ctx context.Context, userID, alias string) (bool,
 func (k *KCAdmin) DeleteUser(ctx context.Context, userID string) error {
 	_, err := k.callJSON(ctx, http.MethodDelete, "/users/"+url.PathEscape(userID), nil, nil)
 	return err
+}
+
+// CreateUser makes an enabled account with a verified email (the operator vouches for it) and a
+// temporary password, returning its id and that password. An account already holding the email is
+// reused: its id comes back with no password.
+func (k *KCAdmin) CreateUser(ctx context.Context, email, first, last string) (id, tempPassword string, err error) {
+	if id, err = k.userIDByEmail(ctx, email); err != nil || id != "" {
+		return id, "", err
+	}
+	secret := make([]byte, 18)
+	if _, err := rand.Read(secret); err != nil {
+		return "", "", err
+	}
+	tempPassword = base64.RawURLEncoding.EncodeToString(secret)
+	if _, err := k.callJSON(ctx, http.MethodPost, "/users", map[string]any{
+		"username": email, "email": email, "firstName": first, "lastName": last,
+		"enabled": true, "emailVerified": true,
+		"credentials": []map[string]any{{"type": "password", "value": tempPassword, "temporary": true}},
+	}, nil); err != nil {
+		return "", "", err
+	}
+	if id, err = k.userIDByEmail(ctx, email); err != nil {
+		return "", "", err
+	}
+	if id == "" {
+		return "", "", fmt.Errorf("sso: keycloak does not list the user it just created: %s", email)
+	}
+	return id, tempPassword, nil
+}
+
+func (k *KCAdmin) userIDByEmail(ctx context.Context, email string) (string, error) {
+	var out []KCUser
+	if _, err := k.callJSON(ctx, http.MethodGet, "/users?exact=true&email="+url.QueryEscape(email), nil, &out); err != nil {
+		return "", err
+	}
+	if len(out) == 0 {
+		return "", nil
+	}
+	return out[0].ID, nil
 }

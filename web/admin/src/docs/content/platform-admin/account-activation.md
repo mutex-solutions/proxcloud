@@ -14,6 +14,10 @@ Three objects together form a customer account:
 
 Activation is a state change on the **billing profile**: it moves to `ACTIVE`. At that point ProxCloud provisions the account. It bootstraps each project onto the enabled Proxmox provider(s): it creates the project's resource pool and a default security group and seeds the provider's default quota. Then it issues any configured sign-up credits. Access to the project is governed by ProxCloud's own project membership and roles; no per-user account is created on the cluster. Until then the customer can sign in but has no usable cloud project.
 
+## Creating a user yourself
+
+Customers normally register on their own. **Client area → Users → Create user** makes the account for them: you get a temporary password, shown once, to pass on, and the user sets their own at first login. **Delete user** also removes the login. Create user needs the bundled Keycloak with SSO enabled, which the installer sets up; with another identity provider it refuses and users appear here at their first login.
+
 ## Letting ProxCloud activate automatically
 
 Open **System → Billing configuration** and switch to the **Activation** tab. Turn on **Auto-activation enabled** and choose the conditions a customer must satisfy for ProxCloud to activate them with no admin in the loop.

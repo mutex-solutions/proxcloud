@@ -407,6 +407,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		adminH.SetKeycloak(kc)
 		if cfg.Auth.Main.IssuerURI == cfg.Auth.Admin.IssuerURI {
 			log.Warn("per-organization SSO with operators in the customer realm: development only")
 		}
