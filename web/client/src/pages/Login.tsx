@@ -1,7 +1,10 @@
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { BookOpen } from "lucide-react"
 import { useAuth } from "@/lib/auth"
+import { apiFetch } from "@/lib/api"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 
 // Public landing: one job — sign in. Split layout after the design-system product
 // logins: a full-bleed brand visual on the left (space photography over the
@@ -9,10 +12,27 @@ import { Button } from "@/components/ui/button"
 // token-driven; works in both themes.
 export function LoginPage() {
   const auth = useAuth()
+  const [email, setEmail] = useState("")
+  const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     document.title = "ProxCloud Console"
   }, [])
+
+  // Email first: an address in a domain with company SSO goes straight to that organization's
+  // identity provider, everyone else to the normal sign-in page. A failed lookup is not fatal.
+  const continueWithEmail = async () => {
+    const address = email.trim()
+    if (!address) return void auth.signinRedirect()
+    setBusy(true)
+    const found = await apiFetch<{ found: boolean; alias?: string }>("/auth/sso/discover", {
+      method: "POST",
+      body: { email: address },
+    }).catch(() => ({ found: false, alias: undefined }))
+    await auth.signinRedirect({
+      extraQueryParams: found.found && found.alias ? { kc_idp_hint: found.alias, login_hint: address } : { login_hint: address },
+    })
+  }
 
   return (
     <main className="flex min-h-screen w-full gap-3 bg-background p-3 text-foreground md:gap-5 md:p-5">
@@ -45,13 +65,30 @@ export function LoginPage() {
           </div>
 
           <div className="flex w-full flex-col gap-3">
-            <Button
-              size="lg"
-              className="w-full"
-              disabled={auth.isLoading}
-              onClick={() => void auth.signinRedirect()}
+            <form
+              className="flex flex-col gap-3 text-left"
+              onSubmit={(e) => {
+                e.preventDefault()
+                void continueWithEmail()
+              }}
             >
-              {auth.isLoading ? "Checking session…" : "Sign in"}
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="login-email">Work email</Label>
+                <Input
+                  id="login-email"
+                  type="email"
+                  autoComplete="email"
+                  placeholder="you@example.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+              </div>
+              <Button type="submit" size="lg" className="w-full" disabled={auth.isLoading || busy}>
+                {auth.isLoading ? "Checking session…" : "Continue"}
+              </Button>
+            </form>
+            <Button variant="ghost" size="lg" className="w-full" disabled={auth.isLoading} onClick={() => void auth.signinRedirect()}>
+              Sign in with a password
             </Button>
             <Button asChild variant="outline" size="lg" className="w-full">
               <a href="/docs" target="_blank" rel="noopener noreferrer">

@@ -63,6 +63,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/pveflavor"
 	"github.com/mutex-solutions/proxcloud/internal/platform/scheduler"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sse"
+	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/internal/server"
 	"github.com/mutex-solutions/proxcloud/pkg/auth"
@@ -383,6 +384,34 @@ func run() error {
 		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
 	})
 	// Public Admin API (/admin-api/v1 — SigV4 hmac_keys or the admin-api OIDC realm).
+	// Per-organization SSO: on when a Keycloak service account for the customer realm is configured.
+	var ssoH *sso.Handler
+	var ssoSvc *sso.Service
+	if cfg.SSO.ClientSecret != "" && cfg.Auth.Main.IssuerURI != "" {
+		kc, err := sso.NewKCAdmin(cfg.Auth.Main.IssuerURI, cfg.Auth.Main.DiscoveryURI, cfg.SSO.ClientID, cfg.SSO.ClientSecret)
+		if err != nil {
+			return err
+		}
+		if cfg.Auth.Main.IssuerURI == cfg.Auth.Admin.IssuerURI {
+			log.Warn("per-organization SSO with operators in the customer realm: development only")
+		}
+		ssoRepo := sso.NewRepo(pg)
+		if err := ssoRepo.EnsureIndexes(ctx); err != nil {
+			return fmt.Errorf("sso indexes: %w", err)
+		}
+		ssoSvc = sso.NewService(ssoRepo, kc, textcrypt.New(cfg.Encryption.DefaultKey), orgRepo, orgPolicy, users, auditSvc,
+			pg.C("client_api_keys"), projectSvc, log, sso.Options{
+				MainIssuer:      cfg.Auth.Main.IssuerURI,
+				OperatorClients: []string{cfg.Auth.Admin.ClientID, cfg.Auth.AdminAPI.ClientID},
+				ReservedDomains: append(sso.ReservedFromURLs(cfg.Self.UIBaseURL, cfg.Self.AdminBaseURL, cfg.Self.APIBaseURL), cfg.SSO.ReservedDomains...),
+				AllowInternal:   cfg.SSO.AllowInternal,
+			})
+		ssoH = sso.NewHandler(ssoSvc, orgPolicy, users, cfg.Auth.Main.IssuerURI, adminH.Require)
+		authn.SetGuard(ssoSvc.Guard)
+		acct.SetProvisioner(ssoSvc)
+		orgH.SetMemberRemovedHook(ssoSvc.OnMemberRemoved)
+		go ssoSvc.Run(ctx)
+	}
 	adminAPIH := adminapi.NewHandler(pg, orgRepo, users, esSvc, auditSvc, cfg.Auth.AdminAPI.IssuerURI, cfg.Auth.AdminAPI.ClientID)
 	// MCP endpoint (/mcp): client toolset for clients-realm JWTs, admin toolset for
 	// admin-realm JWTs or `Bearer pk.sk` hmac api keys. Tools dispatch in-process
@@ -630,6 +659,17 @@ func run() error {
 	if cfg.Jobs.SchedulerEnabled || cfg.Jobs.DebugTriggers {
 		log.Warn("job debug triggers ENABLED on the mgmt port (/debug/run-{sync,metrics,charge})")
 		jobsDebug = map[string]http.HandlerFunc{
+			"run-sso-reconcile": func(w http.ResponseWriter, r *http.Request) {
+				if ssoSvc == nil {
+					httpx.Err(w, http.StatusNotFound, http.StatusNotFound, "SSO is off")
+					return
+				}
+				if err := ssoSvc.Reconcile(r.Context()); err != nil {
+					httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
+					return
+				}
+				httpx.Empty(w)
+			},
 			"run-sync": func(w http.ResponseWriter, r *http.Request) {
 				n, err := syncJob.Run(r.Context())
 				jobResult(w, map[string]any{"synced": n}, err)
@@ -825,7 +865,7 @@ func run() error {
 
 	appSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:           server.AppRouter(log, corsOrigins, authn, acct, orgH, roleH, orgAuditH, billingH, billingCfgH, projectH, pcfgH, featureH, promotionH, affiliateH, catalogH, orderH, inviteH, adminH, adminAPIH, sseH, jobH, mcpH),
+		Handler:           server.AppRouter(log, corsOrigins, authn, acct, orgH, roleH, orgAuditH, billingH, billingCfgH, projectH, pcfgH, featureH, promotionH, affiliateH, catalogH, orderH, inviteH, adminH, adminAPIH, sseH, jobH, mcpH, ssoH),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	mgmtSrv := &http.Server{

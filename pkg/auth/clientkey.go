@@ -59,5 +59,5 @@ func (a *Authenticator) verifyClientKey(r *http.Request, pk, sk string) (*httpx.
 	if !ok || sub == "" || subtle.ConstantTimeCompare([]byte(secret), []byte(sk)) != 1 {
 		return nil, false
 	}
-	return &httpx.RequestContext{Sub: sub, Issuer: issuer}, true
+	return &httpx.RequestContext{Sub: sub, Issuer: issuer, PAT: true}, true
 }

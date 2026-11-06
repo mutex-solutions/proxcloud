@@ -125,7 +125,7 @@ var AllPermissionKeys = []string{
 	"admin:bill:manage", "admin:bill:read", "admin:billing_config:read", "admin:billing_config:update",
 	"admin:billing_profile:read", "admin:billing_profile:update", "admin:cloud_resource:manage",
 	"admin:cloud_resource:read", "admin:flavor_category:manage", "admin:hmac_key:manage",
-	"admin:image_group:manage", "admin:instance_metadata:manage", "admin:integration:manage",
+	"admin:sso:manage", "admin:image_group:manage", "admin:instance_metadata:manage", "admin:integration:manage",
 	"admin:integration:read", "admin:menu:manage",
 	"admin:message_template:manage", "admin:message_template:read", "admin:organization:delete",
 	"admin:organization:manage_roles", "admin:organization:read", "admin:organization:update",
@@ -206,6 +206,7 @@ var AdminPermissionMeta = []PermissionMeta{
 	{"admin:permission:read", "View admin permissions"},
 	{"admin:permission:manage", "Manage admin permissions"},
 	{"admin:hmac_key:manage", "Manage HMAC keys"},
+	{"admin:sso:manage", "Manage organization SSO"},
 	{"admin:stats:read", "View statistics"},
 }
 

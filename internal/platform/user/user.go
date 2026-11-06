@@ -31,6 +31,7 @@ type User struct {
 	LastName         string         `json:"lastName,omitempty"`
 	Email            string         `json:"email,omitempty"`
 	EmailConfirmedAt *time.Time     `json:"emailConfirmedAt,omitempty"`
+	SSOAlias         string         `json:"ssoAlias,omitempty"` // the org IdP this person belongs to; no other IdP may reach this account
 	Tags             []string       `json:"tags,omitempty"`
 	Identities       []Identity     `json:"identities,omitempty"`
 	Metadata         map[string]any `json:"metadata,omitempty"`
@@ -82,6 +83,7 @@ type Claims struct {
 	GivenName     string
 	FamilyName    string
 	Issuer        string
+	IdP           string // alias of the org IdP the session came through
 }
 
 // Repo provides persistence operations for User documents in the `users` collection.
@@ -162,7 +164,7 @@ func (r *Repo) Require(ctx context.Context, sub string) (*User, error) {
 	if rc := httpx.RC(ctx); rc != nil && rc.Sub != "" && rc.Sub == sub {
 		return r.FromClaims(ctx, Claims{
 			Sub: rc.Sub, Email: rc.Email, EmailVerified: rc.EmailVerified,
-			GivenName: rc.GivenName, FamilyName: rc.FamilyName, Issuer: rc.Issuer,
+			GivenName: rc.GivenName, FamilyName: rc.FamilyName, Issuer: rc.Issuer, IdP: rc.IdP,
 		})
 	}
 	return nil, httpx.BadRequest("User is not initialized")
@@ -185,6 +187,7 @@ func (r *Repo) FromClaims(ctx context.Context, c Claims) (*User, error) {
 			LastName:     c.FamilyName,
 			ModelVersion: 1,
 			Identities:   []Identity{{Sub: c.Sub, Issuer: c.Issuer}},
+			SSOAlias:     c.IdP,
 			CreatedAt:    &now,
 			UpdatedAt:    &now,
 		}
@@ -225,6 +228,10 @@ func (r *Repo) FromClaims(ctx context.Context, c Claims) (*User, error) {
 			existing.EmailConfirmedAt = nil
 		}
 	}
+	if c.IdP != "" && existing.SSOAlias == "" {
+		set["ssoAlias"] = c.IdP
+		existing.SSOAlias = c.IdP
+	}
 	if c.GivenName != "" && c.GivenName != existing.FirstName {
 		set["firstName"] = c.GivenName
 		existing.FirstName = c.GivenName
@@ -241,6 +248,12 @@ func (r *Repo) FromClaims(ctx context.Context, c Claims) (*User, error) {
 		existing.UpdatedAt = &now
 	}
 	return existing, nil
+}
+
+// ClearSSOAlias releases every user from an IdP that no longer exists.
+func (r *Repo) ClearSSOAlias(ctx context.Context, alias string) error {
+	_, err := r.col.SetFields(ctx, pgdoc.M{"ssoAlias": alias}, pgdoc.M{"updatedAt": time.Now().UTC()}, []string{"ssoAlias"})
+	return err
 }
 
 // UpdateName applies firstName/lastName only when non-blank.
