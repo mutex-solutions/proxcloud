@@ -40,12 +40,21 @@ type PublicIP struct {
 // PublicIPRepo persists the allocations. _id = serviceId/networkId/ip, so the
 // primary key is the race guard: two attaches that pick the same free address
 // collide on insert and the loser picks again.
-type PublicIPRepo struct{ col *pgdoc.Store }
+type PublicIPRepo struct {
+	col *pgdoc.Store
+	// guard wraps every release of a public address: it may refuse to let the address go (file share exports).
+	guard func(ctx context.Context, projectID string, drop []string, release func() error) error
+}
 
 func NewPublicIPRepo(db *pgdoc.DB) *PublicIPRepo { return &PublicIPRepo{col: db.C("pvePublicIp")} }
 
 // SetPublicIPs wires the public-IP store (nil = public NICs cannot attach).
-func (h *Handler) SetPublicIPs(r *PublicIPRepo) { h.publicIPs = r }
+func (h *Handler) SetPublicIPs(r *PublicIPRepo) {
+	h.publicIPs = r
+	if r != nil {
+		r.guard = h.withShareAccessRevoked
+	}
+}
 
 func (r *PublicIPRepo) find(ctx context.Context, filter pgdoc.M) ([]PublicIP, error) {
 	var out []PublicIP
@@ -80,20 +89,45 @@ func (r *PublicIPRepo) CountForProject(ctx context.Context, serviceID, projectID
 
 // ReleaseNIC frees the address the server holds on one NIC.
 func (r *PublicIPRepo) ReleaseNIC(ctx context.Context, serviceID, serverID, nic string) error {
-	_, err := r.col.DeleteMany(ctx, pgdoc.M{"serviceId": serviceID, "serverId": serverID, "nic": nic})
-	return err
+	return r.release(ctx, pgdoc.M{"serviceId": serviceID, "serverId": serverID, "nic": nic})
 }
 
 // ReleaseServer frees every address the server holds on the service.
 func (r *PublicIPRepo) ReleaseServer(ctx context.Context, serviceID, serverID string) error {
-	_, err := r.col.DeleteMany(ctx, pgdoc.M{"serviceId": serviceID, "serverId": serverID})
-	return err
+	return r.release(ctx, pgdoc.M{"serviceId": serviceID, "serverId": serverID})
 }
 
 // ReleaseProject frees every address the project holds on the service (teardown).
 func (r *PublicIPRepo) ReleaseProject(ctx context.Context, serviceID, projectID string) error {
-	_, err := r.col.DeleteMany(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID})
-	return err
+	return r.release(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID})
+}
+
+// release frees the matching rows, the one way an address gets back to the pool. A public address goes through the
+// guard of each project holding one first; a failed guard keeps the row, so the address cannot be reallocated. A net0
+// row has nothing to guard: the export lists the subnet, which network delete guards.
+func (r *PublicIPRepo) release(ctx context.Context, filter pgdoc.M) error {
+	del := func() error {
+		_, err := r.col.DeleteMany(ctx, filter)
+		return err
+	}
+	if r.guard == nil {
+		return del()
+	}
+	rows, err := r.find(ctx, filter)
+	if err != nil {
+		return err
+	}
+	drop := map[string][]string{}
+	for _, row := range rows {
+		if row.IsPublic() {
+			drop[row.ProjectID] = append(drop[row.ProjectID], row.IP+"/32")
+		}
+	}
+	for projectID, ips := range drop {
+		inner := del
+		del = func() error { return r.guard(ctx, projectID, ips, inner) }
+	}
+	return del()
 }
 
 // Allocate takes a free address from pn's pool for the server's nic.
