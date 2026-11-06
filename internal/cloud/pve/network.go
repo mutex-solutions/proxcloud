@@ -15,6 +15,7 @@ package pve
 // stages + applies, it never locks.
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -638,6 +639,12 @@ func (s *Service) ApplyAndWait(ctx context.Context) error {
 // simple zones only, so EVPN and VLAN zones): servers there get a fixed address over cloud-init,
 // allocated by the platform. ok=false means the zone's own DHCP hands out addresses.
 func (s *Service) VnetStaticPool(ctx context.Context, vnet string) (cidr, gateway, first, last string, ok bool, err error) {
+	return s.VnetStaticPoolFor(ctx, vnet, "")
+}
+
+// VnetStaticPoolFor is VnetStaticPool on one subnet of the vnet: the one with this CIDR or holding
+// this address ("" = the first).
+func (s *Service) VnetStaticPoolFor(ctx context.Context, vnet, within string) (cidr, gateway, first, last string, ok bool, err error) {
 	vnets, err := s.C.ListSDNVnets(ctx)
 	if err != nil {
 		return "", "", "", "", false, err
@@ -664,12 +671,25 @@ func (s *Service) VnetStaticPool(ctx context.Context, vnet string) (cidr, gatewa
 	if len(subs) == 0 {
 		return "", "", "", "", false, fmt.Errorf("pve: vnet %s has no subnet", vnet)
 	}
-	_, ipnet, err := net.ParseCIDR(subs[0].CIDR)
-	if err != nil {
-		return "", "", "", "", false, fmt.Errorf("pve: vnet %s subnet %q: %w", vnet, subs[0].CIDR, err)
+	sub := subs[0]
+	if within != "" {
+		found := false
+		for _, c := range subs {
+			if SubnetHolds(c.CIDR, within) {
+				sub, found = c, true
+				break
+			}
+		}
+		if !found {
+			return "", "", "", "", false, conflictf("Network %s has no subnet %s", vnet, within)
+		}
 	}
-	first, last = dhcpRange(ipnet, subs[0].Gateway)
-	return subs[0].CIDR, subs[0].Gateway, first, last, true, nil
+	_, ipnet, err := net.ParseCIDR(sub.CIDR)
+	if err != nil {
+		return "", "", "", "", false, fmt.Errorf("pve: vnet %s subnet %q: %w", vnet, sub.CIDR, err)
+	}
+	first, last = dhcpRange(ipnet, sub.Gateway)
+	return sub.CIDR, sub.Gateway, first, last, true, nil
 }
 
 // VnetInUse reports whether any pool VM NIC sits on the vnet (delete guard).
@@ -734,21 +754,123 @@ func (p *NetworkSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 	return out, nil
 }
 
-// subnetDetail reads a vnet's subnets into the data.network sub-shape.
+// subnetDetail reads a vnet's subnets into the data.network sub-shape. The top-level
+// cidr/gateway/snat describe the first subnet, subnetDetails all of them.
 func (p *NetworkSyncProvider) subnetDetail(ctx context.Context, vnet string) map[string]any {
 	det := map[string]any{}
 	if subs, err := p.svc.C.ListSDNSubnets(ctx, vnet); err == nil {
-		cidrs := make([]any, 0, len(subs))
-		for _, sub := range subs {
-			cidrs = append(cidrs, sub.CIDR)
-			det["cidr"] = sub.CIDR
-			det["gateway"] = sub.Gateway
-			det["snat"] = sub.SNAT == 1
-			det["dhcp"] = len(sub.DHCPRange) > 0
-		}
-		det["subnets"] = cidrs
+		det = SubnetDetail(subs)
 	}
 	return det
+}
+
+// SubnetDetail renders a vnet's subnets for data.network.
+func SubnetDetail(subs []SDNSubnet) map[string]any {
+	det := map[string]any{}
+	slices.SortFunc(subs, func(a, b SDNSubnet) int { return cmp.Compare(a.CIDR, b.CIDR) })
+	cidrs := make([]any, 0, len(subs))
+	rows := make([]any, 0, len(subs))
+	for i, sub := range subs {
+		cidrs = append(cidrs, sub.CIDR)
+		rows = append(rows, map[string]any{"cidr": sub.CIDR, "gateway": sub.Gateway, "snat": sub.SNAT == 1})
+		if i == 0 {
+			det["cidr"], det["gateway"] = sub.CIDR, sub.Gateway
+			det["snat"], det["dhcp"] = sub.SNAT == 1, len(sub.DHCPRange) > 0
+		}
+	}
+	det["subnets"], det["subnetDetails"] = cidrs, rows
+	return det
+}
+
+// AddSubnet stages one more subnet on an owned vnet. On a vnet with DHCP it gets a range too, or
+// its addresses would never be handed out. The caller holds the lock, reconciles isolation, applies.
+func (s *Service) AddSubnet(ctx context.Context, projectID, vnet, cidr string, snat bool) (*SDNSubnet, error) {
+	if err := s.ownedVnet(ctx, projectID, vnet); err != nil {
+		return nil, err
+	}
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, fmt.Errorf("pve network: bad cidr %q", cidr)
+	}
+	gw := firstHost(ipnet)
+	o := SubnetOpts{CIDR: cidr, Gateway: gw, SNAT: snat}
+	_, _, _, _, static, err := s.VnetStaticPool(ctx, vnet)
+	if err != nil {
+		return nil, err
+	}
+	if !static {
+		o.DHCPStart, o.DHCPEnd = dhcpRange(ipnet, gw)
+	}
+	if err := s.C.CreateSDNSubnet(ctx, vnet, o); err != nil {
+		return nil, err
+	}
+	return &SDNSubnet{CIDR: cidr, Gateway: gw}, nil
+}
+
+// RemoveSubnet stages the removal of a subnet of an owned vnet; a vnet keeps at least one.
+func (s *Service) RemoveSubnet(ctx context.Context, projectID, vnet, cidr string) error {
+	sub, count, err := s.ownedSubnet(ctx, projectID, vnet, cidr)
+	if err != nil {
+		return err
+	}
+	if count < 2 {
+		return conflictf("A network keeps at least one subnet. Delete the network instead")
+	}
+	return s.C.DeleteSDNSubnet(ctx, vnet, sub.Subnet)
+}
+
+// SetSubnetSNAT stages the outbound-internet switch of a subnet.
+func (s *Service) SetSubnetSNAT(ctx context.Context, projectID, vnet, cidr string, snat bool) error {
+	sub, _, err := s.ownedSubnet(ctx, projectID, vnet, cidr)
+	if err != nil {
+		return err
+	}
+	return s.C.UpdateSDNSubnetSNAT(ctx, vnet, sub.Subnet, snat)
+}
+
+func (s *Service) ownedVnet(ctx context.Context, projectID, vnet string) error {
+	vnets, err := s.C.ListSDNVnets(ctx)
+	if err != nil {
+		return err
+	}
+	for _, v := range vnets {
+		if v.Vnet == vnet {
+			if pid, _, ok := aliasProject(v.Alias); ok && pid == projectID {
+				return nil
+			}
+			break
+		}
+	}
+	return fmt.Errorf("pve network: vnet %s is not owned by project %s", vnet, projectID)
+}
+
+func (s *Service) ownedSubnet(ctx context.Context, projectID, vnet, cidr string) (*SDNSubnet, int, error) {
+	if err := s.ownedVnet(ctx, projectID, vnet); err != nil {
+		return nil, 0, err
+	}
+	subs, err := s.C.ListSDNSubnets(ctx, vnet)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range subs {
+		if subs[i].CIDR == cidr {
+			return &subs[i], len(subs), nil
+		}
+	}
+	return nil, 0, conflictf("Network %s has no subnet %s", vnet, cidr)
+}
+
+// SubnetHolds reports whether within (a CIDR or an address) is this subnet or inside it.
+func SubnetHolds(cidr, within string) bool {
+	if cidr == within {
+		return true
+	}
+	_, n, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(within)
+	return ip != nil && n.Contains(ip)
 }
 
 // NetworkData builds the canonical data.network payload (create + sync share it).

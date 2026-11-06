@@ -23,7 +23,8 @@ import (
 const vanishGrace = 2 * time.Minute
 
 // splitVMs splits /cluster/resources qemu rows of one pool into live VMs and templates. A clone on
-// its way to becoming an image is neither: as a server it would bill a phantom hour, disk included.
+// its way to becoming an image, or the donor of a rebuild's disk, is neither: as a server it would
+// bill a phantom hour, disk included.
 func splitVMs(rows []ClusterResource, pool string) (vms, templates []ClusterResource) {
 	for _, r := range rows {
 		if r.Type != "qemu" || r.Pool != pool {

@@ -82,3 +82,32 @@ func TestPickNodeStorage(t *testing.T) {
 		})
 	}
 }
+
+func TestPickNodeSpreadGroup(t *testing.T) {
+	const g = int64(1) << 30
+	nodes := []Node{
+		{Node: "a", Status: "online", MaxCPU: 8, MaxMem: 64 * g},
+		{Node: "b", Status: "online", MaxCPU: 8, MaxMem: 32 * g},
+	}
+	member := func(node, pool, tags string) ClusterResource {
+		return ClusterResource{Type: "qemu", Node: node, Pool: pool, Tags: tags}
+	}
+	req := SchedReq{VCPUs: 1, RAMMb: 1024, SpreadPool: "p", SpreadGroup: "web"}
+
+	got, err := PickNode(nodes, []ClusterResource{member("a", "p", "grp-web")}, req)
+	if err != nil || got != "b" {
+		t.Fatalf("a member on a must send the next to b although a has more RAM: %q %v", got, err)
+	}
+	got, err = PickNode(nodes, []ClusterResource{member("a", "other", "grp-web"), member("a", "p", "grp-db")}, req)
+	if err != nil || got != "a" {
+		t.Fatalf("another project's or another group's VMs do not count: %q %v", got, err)
+	}
+	both := []ClusterResource{member("a", "p", "grp-web"), member("b", "p", "grp-web")}
+	if _, err = PickNode(nodes, both, req); err != nil {
+		t.Fatalf("soft spread still places: %v", err)
+	}
+	req.SpreadStrict = true
+	if _, err = PickNode(nodes, both, req); err == nil {
+		t.Fatal("strict spread must refuse when every node has a member")
+	}
+}
