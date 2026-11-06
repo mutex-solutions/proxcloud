@@ -2,6 +2,7 @@ package pve
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -105,7 +106,16 @@ func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values) *Se
 				{"storage":"tiny","type":"lvmthin","content":"images"}]}`)
 		},
 		"GET /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"data":%s}`, cfg101)
+			// A config write that deletes keys takes effect, unless the test pins the volume
+			// (PVE keeps unusedN while a snapshot references it).
+			var cfg map[string]any
+			_ = json.Unmarshal([]byte(cfg101), &cfg)
+			if _, pinned := writes["pinned"]; !pinned {
+				for _, w := range writes["config"] {
+					delete(cfg, w.Get("delete"))
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": cfg})
 		},
 		"GET /api2/json/nodes/pve1/qemu/102/config": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":{"scsi0":"local-zfs:vm-102-disk-0,size=10G"}}`)
@@ -212,6 +222,15 @@ func TestDeleteVolume(t *testing.T) {
 				t.Fatalf("err = %v, writes = %v", err, writes["config"])
 			}
 		})
+	}
+}
+
+func TestDeleteVolumeStillInSnapshot(t *testing.T) {
+	writes := map[string][]url.Values{"pinned": nil}
+	s := volCluster(t, cfgLocalUnused, writes)
+	var ce *ConflictError
+	if err := s.DeleteVolume(context.Background(), "p1", 101, "local-zfs:vm-101-disk-1"); !errors.As(err, &ce) {
+		t.Fatalf("err = %v, want ConflictError", err)
 	}
 }
 

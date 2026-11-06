@@ -2,11 +2,14 @@ package pve
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"reflect"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -136,36 +139,42 @@ func TestZoneIDFor(t *testing.T) {
 }
 
 func TestIsolationRules(t *testing.T) {
-	tests := []struct {
-		name  string
-		cidrs []string
-		want  []FirewallRule
-	}{
-		{"allow own then drop pool", []string{"10.100.0.0/24", "10.100.3.0/24"}, []FirewallRule{
-			{Type: "forward", Action: "ACCEPT", Source: "10.100.0.0/24,10.100.3.0/24", Dest: "10.100.0.0/24,10.100.3.0/24", Comment: isolationComment},
-			{Type: "forward", Action: "DROP", Dest: "10.100.0.0/16", Comment: isolationComment},
-		}},
-		{"no subnets never emits an any-ACCEPT", nil, []FirewallRule{
-			{Type: "forward", Action: "DROP", Dest: "10.100.0.0/16", Comment: isolationComment},
-		}},
+	const pool, comment = "10.100.0.0/16", isolationComment
+	if got, want := isolationRules(pool, nil), []FirewallRule{
+		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("no blocked: got %+v", got)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isolationRules(tt.cidrs, "10.100.0.0/16"); !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("got %+v\nwant %+v", got, tt.want)
-			}
-		})
+	got := isolationRules(pool, []string{"192.0.2.0/24", "198.51.100.0/24"})
+	want := []FirewallRule{
+		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Comment: comment},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v\nwant %+v", got, want)
 	}
 }
 
-// isolationFake serves two vnets of p1 (+ one of p2) and records firewall writes.
-func isolationFake(t *testing.T, existing string) (*Service, *[]string) {
-	var calls []string
-	form := func(r *http.Request) string {
-		r.ParseForm()
-		return r.PostFormValue("action") + " src=" + r.PostFormValue("source") + " dst=" + r.PostFormValue("dest")
+// isolationFake is a cluster with two vnets of p1, one of p2 and a firewall rule list
+// behaving like PVE's (a new rule lands on top, positions renumber); the management
+// network comes from the node's bridge.
+func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRule, *int) {
+	writes := 0
+	renumber := func() {
+		for i := range rules {
+			rules[i].Pos = i
+		}
 	}
-	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+	renumber()
+	routes := map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/status": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"type":"node","name":"pve1","ip":"192.0.2.11"}]}`)
+		},
+		"GET /api2/json/nodes/pve1/network": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"iface":"vmbr0","address":"192.0.2.11","gateway":"192.0.2.1","cidr":"192.0.2.11/24"},
+				{"iface":"vmbr1","cidr":"203.0.113.5/24"}]}`)
+		},
 		"GET /api2/json/cluster/sdn/vnets": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[
 				{"vnet":"vaaa11","zone":"overlay","alias":"st:p1:web"},
@@ -174,82 +183,73 @@ func isolationFake(t *testing.T, existing string) (*Service, *[]string) {
 			]}`)
 		},
 		"GET /api2/json/cluster/sdn/vnets/vaaa11/subnets": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":[{"cidr":"10.100.0.0/24"}]}`)
-		},
-		"GET /api2/json/cluster/sdn/vnets/vbbb22/subnets": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[{"cidr":"10.100.1.0/24"}]}`)
 		},
-		"GET /api2/json/cluster/sdn/vnets/vaaa11/firewall/rules": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, existing)
+		"GET /api2/json/cluster/sdn/vnets/vbbb22/subnets": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"cidr":"10.100.0.0/24"}]}`)
 		},
-		"GET /api2/json/cluster/sdn/vnets/vbbb22/firewall/rules": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, existing)
+		"GET /api2/json/cluster/firewall/rules": func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{"data": rules})
 		},
-		"POST /api2/json/cluster/sdn/vnets/vaaa11/firewall/rules": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "add vaaa11 "+form(r))
-			fmt.Fprint(w, `{"data":null}`)
-		},
-		"POST /api2/json/cluster/sdn/vnets/vbbb22/firewall/rules": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "add vbbb22 "+form(r))
-			fmt.Fprint(w, `{"data":null}`)
-		},
-		"DELETE /api2/json/cluster/sdn/vnets/vaaa11/firewall/rules/0": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "del vaaa11 0")
-			fmt.Fprint(w, `{"data":null}`)
-		},
-		"DELETE /api2/json/cluster/sdn/vnets/vbbb22/firewall/rules/0": func(w http.ResponseWriter, r *http.Request) {
-			calls = append(calls, "del vbbb22 0")
-			fmt.Fprint(w, `{"data":null}`)
-		},
-		"PUT /api2/json/cluster/sdn/vnets/vaaa11/firewall/options": func(w http.ResponseWriter, r *http.Request) {
+		"POST /api2/json/cluster/firewall/rules": func(w http.ResponseWriter, r *http.Request) {
 			r.ParseForm()
-			calls = append(calls, "enable vaaa11 "+r.PostFormValue("enable"))
+			writes++
+			rules = append([]FirewallRule{{
+				Type: r.PostFormValue("type"), Action: r.PostFormValue("action"), Source: r.PostFormValue("source"),
+				Dest: r.PostFormValue("dest"), Comment: r.PostFormValue("comment"),
+			}}, rules...)
+			renumber()
 			fmt.Fprint(w, `{"data":null}`)
 		},
-		"PUT /api2/json/cluster/sdn/vnets/vbbb22/firewall/options": func(w http.ResponseWriter, r *http.Request) {
-			r.ParseForm()
-			calls = append(calls, "enable vbbb22 "+r.PostFormValue("enable"))
+	}
+	for pos := 0; pos < 12; pos++ {
+		routes["DELETE /api2/json/cluster/firewall/rules/"+strconv.Itoa(pos)] = func(w http.ResponseWriter, r *http.Request) {
+			writes++
+			rules = slices.Delete(rules, pos, pos+1)
+			renumber()
 			fmt.Fprint(w, `{"data":null}`)
-		},
-	})
-	return &Service{C: c, ServiceID: "svc", PoolPrefix: "pc-"}, &calls
+		}
+	}
+	_, c := fakePVE(t, routes)
+	return &Service{C: c, ServiceID: "svc", PoolPrefix: "pc-"}, &rules, &writes
 }
 
-func TestReconcileIsolationRewritesStaleRules(t *testing.T) {
-	// A stale managed rule at pos 0 (old allow-list) + an operator rule at pos 1.
-	srv, calls := isolationFake(t, `{"data":[
-		{"pos":0,"type":"forward","action":"ACCEPT","source":"10.100.0.0/24","dest":"10.100.0.0/24","comment":"proxcloud:isolation"},
-		{"pos":1,"type":"forward","action":"ACCEPT","dest":"10.9.9.9","comment":"ops"}
-	]}`)
-	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16"); err != nil {
+func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
+	ops := FirewallRule{Type: "in", Action: "ACCEPT", Dest: "10.9.9.9", Comment: "ops"}
+	other := projectIsolationRule("p2", []string{"10.100.5.0/24"})
+	srv, rules, _ := isolationFake(t, []FirewallRule{ops, other})
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", []string{"198.51.100.0/24"}); err != nil {
 		t.Fatal(err)
 	}
-	own := "10.100.0.0/24,10.100.1.0/24"
-	var want []string
-	for _, v := range []string{"vaaa11", "vbbb22"} {
-		want = append(want,
-			"del "+v+" 0", // only the managed rule; the operator rule stays
-			// bottom-up: PVE prepends, so the ACCEPT lands on top
-			"add "+v+" DROP src= dst=10.100.0.0/16",
-			"add "+v+" ACCEPT src="+own+" dst="+own,
-			"enable "+v+" 1",
-		)
+	const blocked = "192.0.2.0/24,198.51.100.0/24"
+	var got []string
+	for _, r := range *rules {
+		got = append(got, r.Type+" "+r.Action+" "+r.Source+" "+r.Dest+" "+r.Comment)
 	}
-	if !reflect.DeepEqual(*calls, want) {
-		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(*calls, "\n"), strings.Join(want, "\n"))
+	own := "10.100.0.0/24,10.100.1.0/24"
+	want := []string{
+		"forward ACCEPT " + own + " " + own + " proxcloud:isolation:p1",
+		"forward ACCEPT 10.100.5.0/24 10.100.5.0/24 proxcloud:isolation:p2",
+		"forward DROP 10.100.0.0/16 10.100.0.0/16 proxcloud:isolation",
+		"forward DROP 10.100.0.0/16 " + blocked + " proxcloud:isolation",
+		"in DROP 10.100.0.0/16 " + blocked + " proxcloud:isolation",
+		"in ACCEPT  10.9.9.9 ops",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rules:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 
 func TestReconcileIsolationIdempotent(t *testing.T) {
-	srv, calls := isolationFake(t, `{"data":[
-		{"pos":0,"type":"forward","action":"ACCEPT","source":"10.100.0.0/24,10.100.1.0/24","dest":"10.100.0.0/24,10.100.1.0/24","comment":"proxcloud:isolation"},
-		{"pos":1,"type":"forward","action":"DROP","dest":"10.100.0.0/16","comment":"proxcloud:isolation"}
-	]}`)
-	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16"); err != nil {
+	own := "10.100.0.0/24,10.100.1.0/24"
+	current := append([]FirewallRule{projectIsolationRule("p1", strings.Split(own, ","))},
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"})...)
+	srv, _, writes := isolationFake(t, current)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"enable vaaa11 1", "enable vbbb22 1"}; !reflect.DeepEqual(*calls, want) {
-		t.Fatalf("calls = %v, want only %v", *calls, want)
+	if *writes != 0 {
+		t.Fatalf("%d writes on an up-to-date rule set", *writes)
 	}
 }
 
@@ -284,7 +284,7 @@ func TestEnsureProjectZonePayload(t *testing.T) {
 	}
 	want := map[string]string{
 		"zone": ZoneIDFor("p1"), "type": "evpn", "controller": "ctl", "vrf-vxlan": "10008",
-		"mtu": "1450", "exitnodes": "pve1", "ipam": "pve", "dhcp": "dnsmasq",
+		"mtu": "1450", "exitnodes": "pve1", "ipam": "pve",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("zone form = %v\nwant %v", got, want)
@@ -352,7 +352,7 @@ func TestDeleteProjectZoneIfEmpty(t *testing.T) {
 }
 
 // TestTeardownProjectNetworks: teardown stages the delete of every vnet the
-// project owns (isolation rules first, then subnet, then vnet) and never touches
+// project owns (subnet, then vnet), drops its isolation rule and never touches
 // another project's or an operator's vnet.
 func TestTeardownProjectNetworks(t *testing.T) {
 	var calls []string
@@ -370,10 +370,11 @@ func TestTeardownProjectNetworks(t *testing.T) {
 				{"vnet":"opsnet","zone":"overlay","alias":"ops"}
 			]}`)
 		},
-		"GET /api2/json/cluster/sdn/vnets/vaaa11/firewall/rules": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":[{"pos":0,"type":"forward","action":"DROP","dest":"10.100.0.0/16","comment":"proxcloud:isolation"}]}`)
+		"GET /api2/json/cluster/firewall/rules": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"pos":0,"type":"forward","action":"ACCEPT","comment":"proxcloud:isolation:p1"},
+				{"pos":1,"type":"forward","action":"DROP","comment":"proxcloud:isolation"}]}`)
 		},
-		"DELETE /api2/json/cluster/sdn/vnets/vaaa11/firewall/rules/0": rec("del rule vaaa11 0"),
+		"DELETE /api2/json/cluster/firewall/rules/0": rec("del rule 0"),
 		"GET /api2/json/cluster/sdn/vnets/vaaa11/subnets": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[{"subnet":"overlay-10.100.0.0-24","cidr":"10.100.0.0/24"}]}`)
 		},
@@ -385,7 +386,7 @@ func TestTeardownProjectNetworks(t *testing.T) {
 	if err != nil || !staged {
 		t.Fatalf("staged=%v err=%v", staged, err)
 	}
-	if want := []string{"del rule vaaa11 0", "del subnet vaaa11", "del vnet vaaa11"}; !reflect.DeepEqual(calls, want) {
+	if want := []string{"del subnet vaaa11", "del vnet vaaa11", "del rule 0"}; !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls = %v, want %v", calls, want)
 	}
 	if staged, err := srv.TeardownProjectNetworks(context.Background(), "p9"); err != nil || staged {

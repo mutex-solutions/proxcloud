@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 import { apiFetch } from "@/lib/api"
 
 export type ProxmoxFormState = {
@@ -25,12 +26,14 @@ export type ProxmoxFormState = {
   // config.network.isolation / .evpnController — the tenant network isolation model.
   isolation: PVEIsolation
   evpnController: string
+  // config.network.blockedCidrs: extra networks tenants must not reach, one CIDR per line.
+  blockedCidrs: string
   // Stored config carried through so Save never wipes keys this form does not own
   // (network, storageProfiles, templates, gpus, overcommit, metrics — later phases' tabs).
   storedConfig: Record<string, any>
 }
 
-// "shared": one SDN zone, per-vnet firewall DROPs cross-tenant traffic (default, simplest).
+// "shared": one SDN zone, cluster firewall rules DROP cross-tenant traffic (default, simplest).
 // "evpn-per-project": every project gets its own EVPN zone (VRF) on top of the same DROP rules.
 export type PVEIsolation = "shared" | "evpn-per-project"
 
@@ -45,6 +48,7 @@ export const emptyProxmoxForm: ProxmoxFormState = {
   poolPrefix: "pc-",
   isolation: "shared",
   evpnController: "",
+  blockedCidrs: "",
   storedConfig: {},
 }
 
@@ -54,6 +58,9 @@ export function proxmoxNetworkConfig(f: ProxmoxFormState) {
   const network: Record<string, any> = { ...((f.storedConfig?.network as Record<string, any>) ?? {}), isolation: f.isolation }
   if (f.isolation === "evpn-per-project" && f.evpnController.trim()) network.evpnController = f.evpnController.trim()
   else delete network.evpnController
+  const blocked = f.blockedCidrs.split(/[\s,]+/).filter(Boolean)
+  if (blocked.length) network.blockedCidrs = blocked
+  else delete network.blockedCidrs
   return network
 }
 
@@ -111,6 +118,7 @@ export function proxmoxFormFromService(svc: { name?: string; config?: Record<str
     poolPrefix: String(cfg.poolPrefix ?? "pc-"),
     isolation: cfg.network?.isolation === "evpn-per-project" ? "evpn-per-project" : "shared",
     evpnController: String(cfg.network?.evpnController ?? ""),
+    blockedCidrs: ((cfg.network?.blockedCidrs as string[]) ?? []).join("\n"),
     storedConfig: cfg,
   }
 }
@@ -226,13 +234,20 @@ export function ProxmoxProviderForm({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="shared">Shared zone + vnet firewall (default)</SelectItem>
+              <SelectItem value="shared">Shared zone (default)</SelectItem>
               <SelectItem value="evpn-per-project">EVPN zone per project</SelectItem>
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            Both drop cross-tenant traffic with vnet firewall rules inside the network <code>cidrPool</code> (required).
+            Both drop cross-tenant traffic with cluster firewall rules inside the network <code>cidrPool</code> (required).
             Needs the nftables <code>proxmox-firewall</code> on every node.
+          </p>
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="pve-blocked">Networks tenants must not reach</Label>
+          <Textarea id="pve-blocked" className="font-mono" rows={2} value={form.blockedCidrs} onChange={(e) => setForm({ ...form, blockedCidrs: e.target.value })} placeholder="192.0.2.0/24" autoComplete="off" />
+          <p className="text-xs text-muted-foreground">
+            One CIDR per line, on top of the nodes&apos; management networks, which are always blocked. List storage and office networks a server could otherwise reach through an exit node.
           </p>
         </div>
         {form.isolation === "evpn-per-project" ? (

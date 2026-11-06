@@ -69,8 +69,8 @@ type PrivCheck struct {
 // per ACL path (docs/proxmox-permissions.md keeps the pveum commands in sync).
 // /pool stands in for every tenant pool: pools are created at runtime and
 // inherit from it. Names verified against the PVE 9 pveum docs and API schema.
-// TODO(verify-lab): pool inheritance and the NoAccess override on
-// /pool/proxcloud-system are documented behaviour, not yet run on the lab.
+// Lab-verified (PVE 9.2): pool inheritance, and the NoAccess override on
+// /pool/proxcloud-system (VM.Audit and VM.PowerMgmt are refused on a VM in it).
 var PlatformPrivileges = []PrivCheck{
 	// cluster status, PCI scan, datacenter firewall options and the cluster
 	// security groups all check "/" itself (granted with propagate=0).
@@ -93,8 +93,8 @@ var PlatformPrivileges = []PrivCheck{
 
 // Permissions returns the calling token's effective privileges on path
 // (GET /access/permissions?path=…; a token may always read its own).
-// TODO(verify-lab): confirm on PVE 9 that a path with no ACL of its own reports
-// the inherited privileges and that a privsep token gets the user∩token set.
+// Lab-verified (PVE 9.2): a path with no ACL of its own reports the inherited privileges
+// and a privsep token gets the user∩token set.
 func (c *Client) Permissions(ctx context.Context, path string) (map[string]bool, error) {
 	var out map[string]map[string]any // priv → propagate flag
 	if err := c.get(ctx, "/access/permissions", formVals{"path": path}.values(), &out); err != nil {

@@ -73,8 +73,7 @@ func (h *Handler) withSDNLock(ctx context.Context, w http.ResponseWriter, fn fun
 // pveCreateNetwork handles POST /project/{id}/cloud {type:NETWORK} on a proxmox
 // provider. Body: {name, cidr?, enableDhcp?, snat?} — cidr blank auto-carves a
 // /24 from the provider's cidrPool; a given cidr must sit inside the pool and
-// overlap no subnet on the cluster (any project). The vnet gets its tenant
-// isolation rules before the SDN apply, so it never goes live unisolated.
+// overlap no subnet on the cluster (any project).
 func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
 	ctx := r.Context()
 	name := strAny(data["name"])
@@ -134,7 +133,8 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 		if err != nil {
 			return err
 		}
-		if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool); err != nil {
+		// A new network's subnet is allowed to its project before it goes live.
+		if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs); err != nil {
 			_ = ps.DeleteNetwork(ctx, proj.ID, res.Vnet)
 			return fmt.Errorf("isolation: %w", err)
 		}
@@ -143,7 +143,7 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 			// The apply failed with the vnet staged — unstage and re-apply so the SDN
 			// config never sits pending (risk #2 in the plan).
 			_ = ps.DeleteNetwork(ctx, proj.ID, res.Vnet)
-			_ = ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool)
+			_ = ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs)
 			_ = ps.ApplyAndWait(ctx)
 			return fmt.Errorf("apply: %w", err)
 		}
@@ -192,24 +192,18 @@ func (h *Handler) pveDeleteNetwork(ctx context.Context, w http.ResponseWriter, e
 		if err := ps.DeleteNetwork(ctx, proj.ID, cr.ExternalID); err != nil {
 			return err
 		}
-		// Shrink the allow-list of the project's remaining vnets (a freed CIDR may
-		// be carved for another tenant next). No pool = nothing was ever isolated.
+		// Shrink the project's allow-list (a freed CIDR may be carved for another
+		// tenant next). No pool = nothing was ever isolated.
 		if netCfg.CIDRPool != "" {
-			if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool); err != nil {
+			if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs); err != nil {
 				return fmt.Errorf("isolation: %w", err)
 			}
 		}
-		if err := ps.ApplyAndWait(ctx); err != nil {
-			return err
-		}
-		if netCfg.Isolation != pve.IsolationEVPN {
-			return nil
-		}
-		// Second apply: the zone can only go once its last vnet is applied away.
-		// TODO(verify-lab): PVE may accept zone+vnet removal in one apply.
-		gone, err := ps.DeleteProjectZoneIfEmpty(ctx, proj.ID)
-		if err != nil || !gone {
-			return err
+		// Lab-verified (PVE 9.2): a zone and its last vnet can go in one apply.
+		if netCfg.Isolation == pve.IsolationEVPN {
+			if _, err := ps.DeleteProjectZoneIfEmpty(ctx, proj.ID); err != nil {
+				return err
+			}
 		}
 		return ps.ApplyAndWait(ctx)
 	})
@@ -229,17 +223,11 @@ func (h *Handler) pveTeardownNetworks(ctx context.Context, ps *pve.Service, proj
 	if err != nil {
 		return err
 	}
-	if staged {
-		if err := ps.ApplyAndWait(ctx); err != nil {
-			return err
-		}
-	}
-	// The zone only goes once its last vnet is applied away (see pveDeleteNetwork).
 	gone, err := ps.DeleteProjectZoneIfEmpty(ctx, projectID)
 	if err != nil {
 		return err
 	}
-	if gone {
+	if staged || gone {
 		if err := ps.ApplyAndWait(ctx); err != nil {
 			return err
 		}
@@ -335,25 +323,41 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		// Empty net1's ipfilter first: should the unplug only go pending (no
 		// hotplug), the NIC can no longer use the address once it is reallocated.
 		// The address goes back to the pool only after the NIC is gone.
-		// TODO(verify-lab): an empty ipfilter-net1 set drops all net1 egress, and
+		// Lab-verified (PVE 9.2): an empty ipfilter-net1 set drops all net1 egress, and
 		// deleting an absent net1/ipconfig1 key only warns.
 		derr := ps.SetIPFilter(ctx, vm.Node, vm.VMID, "net1", nil)
+		// net0 takes the default route back (see the attach below).
+		restore := map[string]string{}
+		if derr == nil {
+			held, ferr := h.publicIPs.ForServer(ctx, es.ID, cr.ExternalID)
+			derr = ferr
+			for _, row := range held {
+				if row.NIC == "net0" && row.ProjectID == proj.ID {
+					_, gateway, _, _, _, gerr := ps.VnetStaticPool(ctx, row.NetworkID)
+					if gerr != nil {
+						derr = gerr
+					}
+					restore["ipconfig0"] = fmt.Sprintf("ip=%s/%d,gw=%s", row.IP, row.Prefix, gateway)
+				}
+			}
+		}
 		var up pve.UPID
 		if derr == nil {
-			up, derr = ps.C.SetVMConfig(ctx, vm.Node, vm.VMID, nil, "net1", "ipconfig1")
+			up, derr = ps.C.SetVMConfig(ctx, vm.Node, vm.VMID, restore, "net1", "ipconfig1")
 		}
 		if derr == nil {
 			derr = ps.C.WaitTask(ctx, up)
 		}
 		if derr == nil {
-			derr = h.publicIPs.ReleaseServer(ctx, es.ID, cr.ExternalID)
+			derr = h.publicIPs.ReleaseNIC(ctx, es.ID, cr.ExternalID, publicNIC)
 		}
 		if derr != nil {
 			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, derr.Error()))
 			return true
 		}
+		h.pveRefreshServerRow(ctx, ps, proj, cr)
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
-		httpx.OK(w, map[string]any{"result": map[string]any{}})
+		httpx.OK(w, map[string]any{"result": map[string]any{"rebootRequired": true}})
 		return true
 	}
 	netID := strAny(data["networkId"])
@@ -386,12 +390,18 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		h.fail(w, err)
 		return true
 	}
-	var ip *PublicIP
+	var ip, net0IP *PublicIP
 	for i := range held {
 		// PVE reuses vmids: a row a failed release left behind for another
 		// project's deleted VM is never handed to this one.
-		if held[i].NIC == "net1" && held[i].ProjectID == proj.ID {
+		if held[i].ProjectID != proj.ID {
+			continue
+		}
+		switch held[i].NIC {
+		case publicNIC:
 			ip = &held[i]
+		case "net0":
+			net0IP = &held[i]
 		}
 	}
 	if ip != nil && ip.NetworkID != netID {
@@ -404,32 +414,41 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 			h.fail(w, herr)
 			return true
 		}
-		if ip, err = h.publicIPs.Allocate(ctx, es.ID, proj.ID, cr.ExternalID, "net1", *pn); err != nil {
+		if ip, err = h.publicIPs.Allocate(ctx, es.ID, proj.ID, cr.ExternalID, publicNIC, *pn); err != nil {
 			h.fail(w, err)
 			return true
 		}
 	}
 	// Anti-spoof first (VMs made before the firewall default get it here), then
 	// pin net1 to its /32, then plug the NIC: it never comes up unfiltered.
-	// TODO(verify-lab): ipconfig1 reaches the guest only when cloud-init re-runs
-	// (next boot), and a second gw= next to net0's DHCP default route needs a
-	// guest route-metric check.
+	// Lab-verified (PVE 9.2): the NIC hot-plugs, but ipconfig1 reaches the guest only when
+	// cloud-init re-runs (next boot), hence rebootRequired. With a gateway on both NICs the guest
+	// keeps net0's default route, and replies from the public address then leave through the
+	// overlay, where its ipfilter and the exit node's SNAT do not cover them. So the public NIC
+	// takes the default route and a static net0 gives up its gateway. A DHCP net0 cannot.
 	ipcfg := "ip=" + ip.IP + "/" + strconv.Itoa(ip.Prefix)
 	if pn.Gateway != "" {
 		ipcfg += ",gw=" + pn.Gateway
 	}
+	cfgParams := map[string]string{
+		"net1":      "virtio,bridge=" + netID + ",firewall=1",
+		"ipconfig1": ipcfg,
+	}
+	if net0IP != nil && pn.Gateway != "" {
+		cfgParams["ipconfig0"] = "ip=" + net0IP.IP + "/" + strconv.Itoa(net0IP.Prefix)
+	}
 	plugged := false
 	serr := ps.SecureVM(ctx, vm.Node, vm.VMID)
+	if serr == nil && net0IP != nil { // SecureVM widened net0 to its subnet
+		serr = ps.SetIPFilter(ctx, vm.Node, vm.VMID, "net0", []string{net0IP.IP + "/32"})
+	}
 	if serr == nil {
 		serr = ps.SetIPFilter(ctx, vm.Node, vm.VMID, "net1", []string{ip.IP + "/32"})
 	}
 	var up pve.UPID
 	if serr == nil {
 		plugged = true
-		up, serr = ps.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{
-			"net1":      "virtio,bridge=" + netID + ",firewall=1",
-			"ipconfig1": ipcfg,
-		})
+		up, serr = ps.C.SetVMConfig(ctx, vm.Node, vm.VMID, cfgParams)
 	}
 	if serr == nil {
 		serr = ps.C.WaitTask(ctx, up)
@@ -438,12 +457,13 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		// Only an address no NIC was ever plugged with goes straight back; past
 		// that point it stays held until a detach.
 		if fresh && !plugged {
-			_ = h.publicIPs.ReleaseServer(ctx, es.ID, cr.ExternalID)
+			_ = h.publicIPs.ReleaseNIC(ctx, es.ID, cr.ExternalID, publicNIC)
 		}
 		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, serr.Error()))
 		return true
 	}
+	h.pveRefreshServerRow(ctx, ps, proj, cr)
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
-	httpx.OK(w, map[string]any{"result": map[string]any{"ip": ip.IP, "networkId": netID}})
+	httpx.OK(w, map[string]any{"result": map[string]any{"ip": ip.IP, "networkId": netID, "rebootRequired": true}})
 	return true
 }

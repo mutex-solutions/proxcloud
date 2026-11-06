@@ -7,9 +7,11 @@ package pve
 // (cluster/resources lags pmxcfs — the read-back-after-wait discipline).
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +50,10 @@ type CreateServerReq struct {
 	// SecurityGroups are firewall group ids the VM references (ServerSecurityGroups
 	// resolves them; the platform always passes at least the project default).
 	SecurityGroups []string
+	// AssignIP picks net0's fixed address once the vmid is known, on a vnet whose zone has no
+	// DHCP (nil = the zone's DHCP serves it). The caller owns the allocation and releases it
+	// when CreateServer fails.
+	AssignIP func(ctx context.Context, vmid int) (ip string, prefix int, gateway string, err error)
 }
 
 // vmTags renders the identity tags for a create/read-back.
@@ -114,6 +120,16 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 	for _, k := range drop {
 		delete(params, k)
 	}
+	ipconfig0, fixedIP := "ip=dhcp", ""
+	if req.AssignIP != nil {
+		ip, prefix, gw, aerr := req.AssignIP(ctx, vmid)
+		if aerr != nil {
+			s.destroyBestEffort(ctx, node, vmid)
+			return nil, aerr
+		}
+		fixedIP = ip
+		ipconfig0 = fmt.Sprintf("ip=%s/%d,gw=%s", ip, prefix, gw)
+	}
 	// Flavor + cloud-init + identity tags. sshkeys is the PVE quirk: the value must
 	// be URI-encoded ONCE MORE inside the form encoding.
 	for k, v := range map[string]string{
@@ -121,7 +137,7 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 		"memory":    strconv.Itoa(req.Spec.RAMMb),
 		"agent":     "1", // guest agent gives the sync its IP addresses
 		"tags":      req.vmTags(),
-		"ipconfig0": "ip=dhcp",
+		"ipconfig0": ipconfig0,
 	} {
 		params[k] = v
 	}
@@ -131,7 +147,8 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 		}
 	}
 	if req.SSHKeys != "" {
-		params["sshkeys"] = url.QueryEscape(strings.TrimSpace(req.SSHKeys))
+		// PVE uri-unescapes the value: "+" stays literal, so spaces must be %20.
+		params["sshkeys"] = strings.ReplaceAll(url.QueryEscape(strings.TrimSpace(req.SSHKeys)), "+", "%20")
 	}
 	if req.Password != "" {
 		params["cipassword"] = req.Password
@@ -166,14 +183,20 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 	}
 
 	// Firewall before the first boot: a VM never runs unfiltered. Failure destroys
-	// it rather than start it open.
+	// it rather than start it open. A clone inherits the source's firewall config, so a
+	// server made from a project image starts from its groups: only the chosen ones stay.
+	err = s.clearVMRules(ctx, node, vmid)
 	for _, g := range req.SecurityGroups {
-		if err = s.C.AddVMGroupRule(ctx, node, vmid, g); err != nil {
+		if err != nil {
 			break
 		}
+		err = s.C.AddVMGroupRule(ctx, node, vmid, g)
 	}
 	if err == nil {
 		err = s.SecureVM(ctx, node, vmid)
+	}
+	if err == nil && fixedIP != "" {
+		err = s.SetIPFilter(ctx, node, vmid, "net0", []string{fixedIP + "/32"})
 	}
 	if err != nil {
 		s.destroyBestEffort(ctx, node, vmid)
@@ -223,6 +246,9 @@ func (s *Service) readBackServer(ctx context.Context, node string, vmid int, req
 		MaxCPU: float64(req.Spec.VCPUs), MaxMem: int64(req.Spec.RAMMb) << 20,
 		MaxDisk: int64(req.Spec.DiskGb) << 30,
 	}
+	if st.MaxDisk > 0 { // a project image can be larger than the flavor's disk
+		r.MaxDisk = st.MaxDisk
+	}
 	if r.Name == "" {
 		r.Name = req.Name
 	}
@@ -232,7 +258,7 @@ func (s *Service) readBackServer(ctx context.Context, node string, vmid int, req
 		ProjectID:  req.ProjectID,
 		Region:     req.Region,
 		Type:       cloud.TypeServer,
-		Data:       ServerData(r, nil, nil),
+		Data:       ServerData(r, s.ServerAddresses(ctx, r), nil),
 		CreatedAt:  &now, UpdatedAt: &now,
 		Info: &cloud.Info{CreatedAt: &now, UpdatedAt: &now},
 	}, nil
@@ -259,10 +285,82 @@ func (s *Service) ResolveVM(ctx context.Context, projectID, externalID string) (
 			if rows[i].Pool != pool {
 				return nil, fmt.Errorf("pve: vm %d is not in project pool %s", vmid, pool)
 			}
-			return &rows[i], nil
+			// cluster/resources lags a just-finished task by seconds: pool and node come
+			// from it, power state and config from the node itself (when it answers).
+			r := &rows[i]
+			if st, err := s.C.GetVMStatus(ctx, r.Node, vmid); err == nil {
+				r.Status, r.Lock, r.Name = st.Status, st.Lock, st.Name
+				r.Tags, r.MaxCPU, r.MaxMem, r.MaxDisk = st.Tags, st.CPUs, st.MaxMem, st.MaxDisk
+			}
+			return r, nil
 		}
 	}
 	return nil, nil // vanished — caller archives the row
+}
+
+// ServerAddresses is the VM's addresses in the API shape: what the guest agent reports, or
+// failing that (stopped, still booting, no agent) the static ipconfigN of its config. An
+// address on ipconfig1+ is a public-NIC address, the rest are private.
+func (s *Service) ServerAddresses(ctx context.Context, r ClusterResource) map[string]any {
+	cfg, err := s.C.GetVMConfig(ctx, r.Node, r.VMID)
+	if err != nil {
+		return map[string]any{}
+	}
+	public := map[string]bool{}
+	var configured []any
+	for _, key := range nicKeys(cfg) {
+		addr := ipconfigAddr(cfg.Str("ipconfig" + key[3:]))
+		if addr == "" {
+			continue
+		}
+		configured = append(configured, addr)
+		public[addr] = key != "net0"
+	}
+	var addrs []any
+	if r.Status == "running" {
+		if ifaces, err := s.C.AgentNetworkInterfaces(ctx, r.Node, r.VMID); err == nil {
+			if private, ok := AgentAddresses(ifaces)["private"].([]any); ok {
+				addrs = private
+			}
+		}
+	}
+	if len(addrs) == 0 {
+		slices.SortFunc(configured, func(a, b any) int { return cmp.Compare(a.(string), b.(string)) })
+		for _, a := range configured {
+			addrs = append(addrs, map[string]any{"addr": a, "version": 4})
+		}
+	}
+	out := map[string]any{}
+	seen := map[string]bool{}
+	for _, a := range addrs {
+		addr := a.(map[string]any)["addr"].(string)
+		seen[addr] = true
+		group := "private"
+		if public[addr] {
+			group = "public"
+		}
+		list, _ := out[group].([]any)
+		out[group] = append(list, a)
+	}
+	// A public address the guest has not brought up yet (it needs a reboot) is still its address.
+	for _, a := range configured {
+		if addr := a.(string); public[addr] && !seen[addr] {
+			list, _ := out["public"].([]any)
+			out["public"] = append(list, map[string]any{"addr": addr, "version": 4})
+		}
+	}
+	return out
+}
+
+// ipconfigAddr extracts the static address of an ipconfigN value ("" for dhcp or none).
+func ipconfigAddr(val string) string {
+	for _, p := range strings.Split(val, ",") {
+		if v, ok := strings.CutPrefix(p, "ip="); ok && v != "dhcp" && v != "manual" {
+			addr, _, _ := strings.Cut(v, "/")
+			return addr
+		}
+	}
+	return ""
 }
 
 // DeleteServer stops (hard) and destroys a VM.
@@ -299,15 +397,28 @@ func (s *Service) PowerAction(ctx context.Context, projectID, externalID, verb s
 	if vm == nil {
 		return fmt.Errorf("pve: vm %s not found", externalID)
 	}
+	running := vm.Status == "running"
 	var up UPID
 	switch verb {
 	case "START":
+		if running {
+			return nil
+		}
 		up, err = s.C.StartVM(ctx, vm.Node, vm.VMID)
 	case "STOP", "SHUTOFF", "SHUTDOWN":
+		if !running {
+			return nil
+		}
 		up, err = s.C.ShutdownVM(ctx, vm.Node, vm.VMID, 60)
 	case "REBOOT_SOFT", "SOFTREBOOT", "REBOOT":
+		if !running {
+			return conflictf("Server %s is not running", vm.Name)
+		}
 		up, err = s.C.RebootVM(ctx, vm.Node, vm.VMID)
 	case "REBOOT_HARD", "HARDREBOOT":
+		if !running {
+			return conflictf("Server %s is not running", vm.Name)
+		}
 		up, err = s.C.ResetVM(ctx, vm.Node, vm.VMID)
 	default:
 		return fmt.Errorf("pve: unsupported power verb %q", verb)

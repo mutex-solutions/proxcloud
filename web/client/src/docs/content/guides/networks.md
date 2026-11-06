@@ -18,7 +18,7 @@ A network can only be deleted once no server has an interface on it.
 
 **Inbound** traffic needs a **public NIC**. There are no floating IPs on Proxmox. Instead, a server gets a second network interface on one of the public networks your operator has set up, with one public address from that network's pool. The address is pinned to the server by its firewall, so the server can't use any other address on that network. Your operator decides which public networks your project may use.
 
-The portal has no button for this yet. Attach a public NIC through the API with the server action `ATTACH_PUBLIC_NETWORK` (`POST /api/v1/project/{id}/cloud/{serverId}/action`, data `networkId` = one of the networks listed by `GET /api/v1/project/{id}/public-networks`). `DETACH_PUBLIC_NETWORK` removes the NIC and returns the address to the pool. Deleting the server returns it too.
+The portal has no button for this yet. Attach a public NIC through the API with the server action `ATTACH_PUBLIC_NETWORK` (`POST /api/v1/project/{id}/cloud/{serverId}/action`, data `networkId` = one of the networks listed by `GET /api/v1/project/{id}/public-networks`). `DETACH_PUBLIC_NETWORK` removes the NIC and returns the address to the pool. Deleting the server returns it too. The guest configures the change at its next boot, so **reboot the server** after attaching or detaching. While a server has a public NIC, its default route and outbound traffic go through the public address.
 
 ## Firewalling with security groups
 

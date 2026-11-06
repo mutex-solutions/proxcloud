@@ -68,14 +68,14 @@ func TestExecuteProjectDeletion(t *testing.T) {
 		t.Fatal("C (within grace) should remain")
 	}
 
-	// rollback: a deleter error leaves the project + flips it back to ENABLED.
+	// a deleter error keeps the project in progress, so the next sweep retries.
 	d := mk("d", project.StatusScheduledForDeletion, &past)
 	n2, _ := project.NewDeletionJob(repo, &fakeDeleter{err: errors.New("cloud down")}, nil).ExecuteAll(ctx)
 	if n2 != 0 {
-		t.Fatalf("rollback run deleted=%d, want 0", n2)
+		t.Fatalf("failed run deleted=%d, want 0", n2)
 	}
 	got, _ := repo.FindByID(ctx, d.ID)
-	if got == nil || got.Status != project.StatusEnabled {
-		t.Fatalf("D should roll back to ENABLED, got %+v", got)
+	if got == nil || got.Status != project.StatusDeleteInProgress {
+		t.Fatalf("D should stay DELETE_IN_PROGRESS, got %+v", got)
 	}
 }

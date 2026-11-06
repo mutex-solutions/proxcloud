@@ -258,14 +258,16 @@ func (s *Service) ScheduleDeletion(ctx context.Context, p *Project, _ bool) (*Pr
 	return p, nil
 }
 
-// DeleteNow flags the project for immediate deletion.
-// The async cloud teardown is deferred.
+// DeleteNow flags the project for immediate deletion: the deletion job's next sweep (every
+// minute) tears it down, with the grace window already over.
 func (s *Service) DeleteNow(ctx context.Context, id string) (*Project, error) {
 	p, err := s.GetProjectByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	p.Status = StatusDeleteInProgress
+	past := time.Now().UTC().Add(-deletionGrace)
+	p.ScheduledForDeletionAt = &past
 	if err := s.repo.Save(ctx, p); err != nil {
 		return nil, err
 	}

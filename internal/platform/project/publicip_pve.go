@@ -19,8 +19,12 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
+// publicNIC is the NIC a public network plugs as (net0 sits on a project vnet).
+const publicNIC = "net1"
+
 // PublicIP is one allocated address (collection pvePublicIp). ServerID is the
-// VM's cloud-resource ExternalID (the vmid).
+// VM's cloud-resource ExternalID (the vmid). Rows on nic net0 are the fixed tenant
+// addresses of vnets without DHCP (NetworkID = the vnet).
 type PublicIP struct {
 	ID        string     `json:"id"`
 	ServiceID string     `json:"serviceId"`
@@ -54,9 +58,16 @@ func (r *PublicIPRepo) ForServer(ctx context.Context, serviceID, serverID string
 	return r.find(ctx, pgdoc.M{"serviceId": serviceID, "serverId": serverID})
 }
 
-// CountForProject is the floatingIps quota usage.
+// CountForProject is the floatingIps quota usage: public NICs only, not the net0 addresses
+// allocated on the project's own vnets.
 func (r *PublicIPRepo) CountForProject(ctx context.Context, serviceID, projectID string) (int64, error) {
-	return r.col.Count(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID})
+	return r.col.Count(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID, "nic": publicNIC})
+}
+
+// ReleaseNIC frees the address the server holds on one NIC.
+func (r *PublicIPRepo) ReleaseNIC(ctx context.Context, serviceID, serverID, nic string) error {
+	_, err := r.col.DeleteMany(ctx, pgdoc.M{"serviceId": serviceID, "serverId": serverID, "nic": nic})
+	return err
 }
 
 // ReleaseServer frees every address the server holds on the service.

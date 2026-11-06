@@ -119,8 +119,10 @@ type VMStatus struct {
 	QMPStatus string  `json:"qmpstatus"` // "running" | "paused" | ...
 	Name      string  `json:"name"`
 	Lock      string  `json:"lock"`
+	Tags      string  `json:"tags"`
 	CPUs      float64 `json:"cpus"`
 	MaxMem    int64   `json:"maxmem"`
+	MaxDisk   int64   `json:"maxdisk"`
 	Mem       int64   `json:"mem"`
 	Uptime    int64   `json:"uptime"`
 	Agent     int     `json:"agent"`

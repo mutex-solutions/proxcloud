@@ -14,7 +14,7 @@ You'll need:
   - Read-only `PVEAuditor` on `/nodes`.
   - `NoAccess` on the `proxcloud-system` pool.
 - **The datacenter firewall switched on** (Datacenter → Firewall → Options). Without it, security groups and tenant network isolation are not enforced.
-- **The nftables firewall on every node** (`nftables: 1` under Node → Firewall → Options). The legacy iptables firewall ignores the SDN vnet rules that isolate tenant networks.
+- **The nftables firewall on every node** (`nftables: 1` under Node → Firewall → Options). The legacy iptables firewall ignores the FORWARD rules that isolate tenant networks.
 - **A CIDR pool for tenant networks**, e.g. `10.100.0.0/16`. Every project subnet is carved from it.
 
 ## Registering the provider
@@ -31,7 +31,7 @@ Open **System → Cloud providers**, choose **Add provider**, and pick the **Pro
 | TLS certificate fingerprint | Optional SHA-256 pin for a self-signed cluster certificate (`pvenode cert info` prints it). Empty means the system CA pool is used. |
 | Skip TLS verification | Last resort. Prefer the fingerprint pin. |
 | Pool prefix | Default `pc-`. Each project gets the pool `<prefix><projectId>`, which is its tenancy boundary. Don't give your management pool a name that starts with this prefix. |
-| Tenant network isolation | `Shared zone + vnet firewall` (default) or `EVPN zone per project`. Both drop cross-tenant traffic with vnet firewall rules inside the CIDR pool; the EVPN mode also gives every project its own EVPN zone (VRF). |
+| Tenant network isolation | `Shared zone` (default) or `EVPN zone per project`. Both drop cross-tenant traffic with cluster firewall rules inside the CIDR pool, and keep tenants off the nodes' management networks plus any **Networks tenants must not reach** you list; the EVPN mode also gives every project its own EVPN zone (VRF). |
 | EVPN controller | Only for `EVPN zone per project`: the controller every project zone uses. Blank means the default zone's controller. |
 
 Saving creates the provider as `PUBLIC` and enables the four services a Proxmox cluster serves in its region: `compute`, `network`, `volumev3` and `image`. There is no discovery round-trip. Traffic metrics start as `none` (see *Usage metrics* below).

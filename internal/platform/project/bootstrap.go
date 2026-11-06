@@ -123,7 +123,12 @@ func (h *Handler) BootstrapProxmoxOnto(ctx context.Context, p *Project, es *exte
 		"region":    region,
 		"pool":      pool,
 	})
-	return h.svc.Save(ctx, p)
+	if err := h.svc.Save(ctx, p); err != nil {
+		return err
+	}
+	// Show the default group right away, not after the next sync cycle.
+	h.pveSyncSecurityGroups(ctx, es, p)
+	return nil
 }
 
 // BootstrapDbaasOnto provisions the project onto a dbaas Managed-Database service: ensure the

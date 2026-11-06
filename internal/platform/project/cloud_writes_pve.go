@@ -242,7 +242,31 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Security group lookup failed: "+gerr.Error()))
 		return
 	}
+	// A vnet whose zone has no DHCP (EVPN, VLAN): the platform allocates net0's address.
+	var assignIP func(context.Context, int) (string, int, string, error)
+	allocatedVMID := ""
+	cidr, gateway, first, last, static, serr := ps.VnetStaticPool(ctx, bridge)
+	if serr != nil {
+		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, serr.Error()))
+		return
+	}
+	if static {
+		if h.publicIPs == nil {
+			httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "IP allocation service not configured")
+			return
+		}
+		pool := externalservice.PVEPublicNetwork{ID: bridge, CIDR: cidr, Gateway: gateway, Ranges: []string{first + "-" + last}}
+		assignIP = func(ctx context.Context, vmid int) (string, int, string, error) {
+			allocatedVMID = strconv.Itoa(vmid)
+			a, err := h.publicIPs.Allocate(ctx, es.ID, proj.ID, allocatedVMID, "net0", pool)
+			if err != nil {
+				return "", 0, "", err
+			}
+			return a.IP, a.Prefix, gateway, nil
+		}
+	}
 	cr, cerr := ps.CreateServer(ctx, pve.CreateServerReq{
+		AssignIP:  assignIP,
 		ProjectID: proj.ID,
 		Region:    h.pveRegion(proj, es),
 		Name:      name,
@@ -263,6 +287,14 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		SecurityGroups: groups,
 	})
 	if cerr != nil {
+		if allocatedVMID != "" {
+			_ = h.publicIPs.ReleaseNIC(ctx, es.ID, allocatedVMID, "net0")
+		}
+		var he *httpx.HTTPError
+		if errors.As(cerr, &he) { // the pool ran out
+			h.fail(w, he)
+			return
+		}
 		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Server create failed: "+cerr.Error()))
 		return
 	}
@@ -273,6 +305,8 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		// Accept and let the sync reconcile (the WriteService server precedent).
 		saved = cr
 	}
+	// The new root disk is a VOLUME row: show (and bill) it now, not after the next sync.
+	h.pveSyncVolumes(ctx, es, proj)
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", saved)
 	httpx.OK(w, *saved)
 }
@@ -509,6 +543,7 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 				slog.Error("pve delete: release public IPs", "project", proj.ID, "server", cr.ExternalID, "err", err)
 			}
 		}
+		h.pveArchiveServerVolumes(ctx, es, proj, cr.ExternalID)
 		return nil
 	case cloud.TypeImage:
 		// A project template is a qemu template VM in the pool — same destroy path.
@@ -529,6 +564,16 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		if err != nil {
 			return err
 		}
+		if sg, _ := cr.Data["securityGroup"].(map[string]any); strAny(sg["name"]) == pve.DefaultSecurityGroupName {
+			return httpx.NewError(http.StatusConflict, http.StatusConflict, "The default security group cannot be deleted")
+		}
+		inUse, err := ps.SecurityGroupInUse(ctx, proj.ID, cr.ExternalID)
+		if err != nil {
+			return err
+		}
+		if inUse != "" {
+			return httpx.NewError(http.StatusConflict, http.StatusConflict, "Security group is in use by server "+inUse)
+		}
 		return ps.DeleteSecurityGroup(ctx, proj.ID, cr.ExternalID)
 	case cloud.TypeVolume:
 		// Only a detached disk (unusedN) is deleted on its own; an attached one is 409.
@@ -543,6 +588,26 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		return nil
 	default:
 		return fmt.Errorf("resource type %q is not supported on a Proxmox provider", cr.Type)
+	}
+}
+
+// pveArchiveServerVolumes drops the VOLUME rows of a destroyed server: its disks, detached ones
+// included, went with it, and billing must stop now rather than at the next sync.
+func (h *Handler) pveArchiveServerVolumes(ctx context.Context, es *externalservice.ExternalService, proj *Project, serverExtID string) {
+	rows, err := h.cloud.FindByServiceProjectAndType(ctx, es.ID, proj.ID, cloud.TypeVolume)
+	if err != nil {
+		slog.Error("pve delete: list volumes", "project", proj.ID, "server", serverExtID, "err", err)
+		return
+	}
+	now := time.Now().UTC()
+	for i := range rows {
+		vol, _ := rows[i].Data["volume"].(map[string]any)
+		if strconv.Itoa(intAny(vol["vmid"])) != serverExtID {
+			continue
+		}
+		if err := h.cloud.DeleteAndArchive(ctx, &rows[i], now); err != nil {
+			slog.Error("pve delete: archive volume", "project", proj.ID, "volume", rows[i].ExternalID, "err", err)
+		}
 	}
 }
 
@@ -572,7 +637,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 	switch action {
 	case "START", "STOP", "SHUTOFF", "SHUTDOWN", "REBOOT", "SOFTREBOOT", "REBOOT_SOFT", "HARDREBOOT", "REBOOT_HARD":
 		if err := ps.PowerAction(ctx, proj.ID, cr.ExternalID, action); err != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			h.fail(w, pveVolumeErr(err))
 			return true
 		}
 		h.pveRefreshServerRow(ctx, ps, proj, cr)
@@ -661,7 +726,7 @@ func (h *Handler) pveRefreshServerRow(ctx context.Context, ps *pve.Service, proj
 	if err != nil || vm == nil {
 		return
 	}
-	cr.Data = pve.ServerData(*vm, nil, nil)
+	cr.Data = pve.ServerData(*vm, ps.ServerAddresses(ctx, *vm), nil)
 	if saved, err := h.cloud.Insert(ctx, cr); err == nil {
 		*cr = *saved
 	}
@@ -900,21 +965,11 @@ func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.Extern
 	}
 	prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc())
 	if rows, err := prov.List(ctx); err == nil {
-		now := time.Now().UTC()
-		for i := range rows {
-			rows[i].ServiceID = es.ID
-			if existing, _ := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, rows[i].ExternalID); existing == nil {
-				_, _ = h.cloud.Insert(ctx, &rows[i])
-			} else {
-				existing.Data = rows[i].Data
-				existing.UpdatedAt = &now
-				_, _ = h.cloud.Insert(ctx, existing)
-			}
-		}
+		h.pveUpsertRows(ctx, es, rows)
 	}
 }
 
-// pveVolumeErr maps a pve volume error: a refusal the caller can fix (pve.ConflictError) is
+// pveVolumeErr maps a pve volume or power error: a refusal the caller can fix (pve.ConflictError) is
 // 409 with its message, anything else is PVE failing (502).
 func pveVolumeErr(err error) *httpx.HTTPError {
 	var ce *pve.ConflictError
@@ -1233,16 +1288,23 @@ func (h *Handler) pveSyncSecurityGroups(ctx context.Context, es *externalservice
 		return
 	}
 	if rows, err := ps.SecurityGroupSyncProvider(h.pveRegion(proj, es), proj.ID).List(ctx); err == nil {
-		now := time.Now().UTC()
-		for i := range rows {
-			rows[i].ServiceID = es.ID
-			if existing, _ := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, rows[i].ExternalID); existing == nil {
-				_, _ = h.cloud.Insert(ctx, &rows[i])
-			} else {
-				existing.Data = rows[i].Data
-				existing.UpdatedAt = &now
-				_, _ = h.cloud.Insert(ctx, existing)
-			}
+		h.pveUpsertRows(ctx, es, rows)
+	}
+}
+
+// pveUpsertRows saves freshly listed rows: a new one is billed from now, an existing one only
+// gets its data refreshed.
+func (h *Handler) pveUpsertRows(ctx context.Context, es *externalservice.ExternalService, rows []cloud.CloudResource) {
+	now := time.Now().UTC()
+	for i := range rows {
+		rows[i].ServiceID = es.ID
+		if existing, _ := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, rows[i].ExternalID); existing == nil {
+			rows[i].CreatedAt, rows[i].UpdatedAt = &now, &now
+			_, _ = h.cloud.Insert(ctx, &rows[i])
+		} else {
+			existing.Data = rows[i].Data
+			existing.UpdatedAt = &now
+			_, _ = h.cloud.Insert(ctx, existing)
 		}
 	}
 }
