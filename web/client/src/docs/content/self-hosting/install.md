@@ -186,6 +186,7 @@ Scale each workload manually with `api.replicas` / `ui.replicas` / `admin.replic
 2. Open `https://cloud.example.com/proxcloud_admin` and sign in with an admin-realm account.
 
 3. Add your Proxmox VE cluster(s) and API token in the admin console. ProxCloud syncs resource state by polling the PVE API, so there is no event feed to set up.
+4. If you enable per-organization SSO, restrict Keycloak's egress first: tenants choose URLs Keycloak will call. See [Required: Keycloak egress policy](/docs/self-hosting/sso#required-keycloak-egress-policy).
 
 ## Upgrading
 

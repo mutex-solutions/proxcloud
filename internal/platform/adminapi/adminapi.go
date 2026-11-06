@@ -44,7 +44,17 @@ type Handler struct {
 	// bootstrapProject provisions a project onto the platform providers + ENABLED (no
 	// per-spec service selection, no per-user cloud grants). nil → 501 when not wired.
 	bootstrapProject func(ctx context.Context, projectID string) error
+	keycloak         identityAccounts // nil = no service account for the customer realm
 }
+
+// identityAccounts makes and removes login accounts (sso.KCAdmin).
+type identityAccounts interface {
+	CreateUser(ctx context.Context, email, first, last string) (id, tempPassword string, err error)
+	DeleteUser(ctx context.Context, userID string) error
+}
+
+// SetKeycloak wires login accounts for users created without a sub.
+func (h *Handler) SetKeycloak(k identityAccounts) { h.keycloak = k }
 
 // SetActivation wires the billing ActivationService.
 func (h *Handler) SetActivation(a *billing.ActivationService) { h.activation = a }

@@ -51,8 +51,9 @@ cannot log back in.
 
 With no service account (`auth.sso.enabled: false`, or another OIDC provider) Create user answers
 501: a row alone can never log in, so those users appear at their first login instead. The machine
-Admin API's `POST /admin-api/v1/users` stays a pre-create for integrators who manage the IdP
-themselves and pass the `sub`.
+Admin API's `POST /admin-api/v1/users` does the same without a `sub` (the temporary password is in the
+response; no service account = 400), and with a `sub` stays a pre-create for integrators who manage the
+IdP themselves. Its delete also removes the Keycloak account.
 
 ## The three credential schemes
 

@@ -23,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
@@ -97,10 +98,12 @@ func (r *SeedRepo) byToken(ctx context.Context, token string) (*ServerSeed, erro
 	return r.decrypted(&s), nil
 }
 
-// forServer returns the server's seed (nil = it runs on PVE's drive).
-func (r *SeedRepo) forServer(ctx context.Context, serviceID, serverID string) (*ServerSeed, error) {
+// ForServer returns the project's seed for a server (nil = it runs on PVE's drive). PVE reuses vmids,
+// so a seed left behind by another project's deleted VM can share the service and the vmid: its
+// user-data must never reach this VM.
+func (r *SeedRepo) ForServer(ctx context.Context, serviceID, projectID, serverID string) (*ServerSeed, error) {
 	var s ServerSeed
-	found, err := r.col.FindOne(ctx, pgdoc.M{"serviceId": serviceID, "serverId": serverID}, &s)
+	found, err := r.col.FindOne(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID, "serverId": serverID}, &s)
 	if err != nil || !found {
 		return nil, err
 	}
@@ -301,11 +304,11 @@ func seedSpec(es *externalservice.ExternalService, s *ServerSeed) pve.SeedSpec {
 
 // pveReseed re-delivers a server's seed after its NICs changed. Best-effort: it only matters at the
 // next boot, and the address itself stays pinned by ipfilter.
-func (h *Handler) pveReseed(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, serverID, node string) {
+func (h *Handler) pveReseed(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, projectID, serverID, node string) {
 	if h.seeds == nil {
 		return
 	}
-	s, err := h.seeds.forServer(ctx, es.ID, serverID)
+	s, err := h.seeds.ForServer(ctx, es.ID, projectID, serverID)
 	if err == nil && s != nil {
 		s.Node = node
 		err = h.pveWriteSeed(ctx, ps, es, s, "")
@@ -327,6 +330,40 @@ func (h *Handler) pveReleaseSeed(ctx context.Context, ps *pve.Service, serviceID
 	} else {
 		slog.Error("release seed", "server", serverID, "err", err)
 	}
+}
+
+// staleSeed: past the create grace, the seed's VM has no row, or the row is another project's because
+// the vmid was reused.
+func staleSeed(s *ServerSeed, row *cloud.CloudResource, now time.Time) bool {
+	if s.CreatedAt != nil && now.Sub(*s.CreatedAt) <= seedOrphanGrace {
+		return false
+	}
+	return row == nil || row.ProjectID != s.ProjectID
+}
+
+// DropStaleSeeds is the sync's cleanup: a VM destroyed outside the portal never runs pveReleaseSeed, and
+// its seed would hold its user-data, token and CD forever.
+func (h *Handler) DropStaleSeeds(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error {
+	if h.seeds == nil {
+		return nil
+	}
+	var rows []ServerSeed
+	if err := h.seeds.col.Find(ctx, pgdoc.M{"serviceId": es.ID}, &rows); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	var stale []ServerSeed
+	for i := range rows {
+		row, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, rows[i].ServerID)
+		if err != nil {
+			return err
+		}
+		if staleSeed(&rows[i], row, now) {
+			stale = append(stale, rows[i])
+		}
+	}
+	h.pveDropSeeds(ctx, ps, stale)
+	return nil
 }
 
 // pveReleaseProjectSeeds is the project-teardown variant.
@@ -372,7 +409,7 @@ func (h *Handler) nocloudFile(w http.ResponseWriter, r *http.Request) {
 	// A server deleted outside the portal: the sync archived its row, so its token is dead. The grace
 	// covers a first boot racing the create's own insert.
 	if s.CreatedAt != nil && time.Since(*s.CreatedAt) > seedOrphanGrace {
-		if row, err := h.cloud.FindByServiceIDAndExternalID(r.Context(), s.ServiceID, s.ServerID); err == nil && row == nil {
+		if row, err := h.cloud.FindByServiceIDAndExternalID(r.Context(), s.ServiceID, s.ServerID); err == nil && staleSeed(s, row, time.Now().UTC()) {
 			if _, err := h.seeds.col.DeleteByID(r.Context(), s.ID); err != nil {
 				slog.Error("drop orphan seed", "server", s.ServerID, "err", err)
 			}

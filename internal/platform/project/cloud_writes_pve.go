@@ -705,7 +705,7 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		if err := h.pveDetachPublicNIC(ctx, ps, es, proj, vm, serverID); err != nil {
 			return err
 		}
-		h.pveReseed(ctx, ps, es, serverID, vm.Node)
+		h.pveReseed(ctx, ps, es, proj.ID, serverID, vm.Node)
 		return nil
 	case cloud.TypeKeypair:
 		return nil // platform-only row; the archive below is the whole delete
@@ -851,7 +851,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 		}
 		// A later rebuild of a seeded server sets the password from its seed.
 		if h.seeds != nil {
-			if seed, err := h.seeds.forServer(ctx, es.ID, cr.ExternalID); err == nil && seed != nil && seed.PasswordHash != "" {
+			if seed, err := h.seeds.ForServer(ctx, es.ID, proj.ID, cr.ExternalID); err == nil && seed != nil && seed.PasswordHash != "" {
 				if b, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); err == nil {
 					seed.PasswordHash = string(b)
 					if err := h.seeds.put(ctx, seed); err != nil {
@@ -886,7 +886,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 		req := pve.RebuildReq{ProjectID: proj.ID, ServerID: cr.ExternalID, TemplateVMID: srcID, TemplateNode: srcNode, ImageSlug: tpl.Slug}
 		// Delivered again with a new instance-id: the new disk's cloud-init runs everything once.
 		if h.seeds != nil {
-			if seed, err := h.seeds.forServer(ctx, es.ID, cr.ExternalID); err == nil && seed != nil {
+			if seed, err := h.seeds.ForServer(ctx, es.ID, proj.ID, cr.ExternalID); err == nil && seed != nil {
 				req.Reseed = func(ctx context.Context, node string, _ int) error {
 					iid, err := randomHex(8)
 					if err != nil {
@@ -1236,6 +1236,25 @@ func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.Extern
 	}
 }
 
+// pveFollowRetypedVolume points the row at the disk's new volid. A failure only costs what the retype
+// cost before: the sync finds a new disk, and the bill shows two.
+func (h *Handler) pveFollowRetypedVolume(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, slot string) {
+	rows, err := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc()).List(ctx)
+	if err == nil {
+		for i := range rows {
+			vol, _ := rows[i].Data["volume"].(map[string]any)
+			if intAny(vol["vmid"]) == vmid && strAny(vol["slot"]) == slot {
+				err = h.cloud.ChangeExternalID(ctx, cr, rows[i].ExternalID)
+				if err == nil {
+					return
+				}
+				break
+			}
+		}
+	}
+	slog.Error("retype: keep the volume's row", "project", proj.ID, "volume", cr.ExternalID, "err", err)
+}
+
 // pveVolumeErr maps a pve server or volume error: a refusal the caller can fix (pve.ConflictError) is
 // 409 with its message, a VM locked by a running task too, anything else is PVE failing (502).
 func pveVolumeErr(err error) *httpx.HTTPError {
@@ -1338,9 +1357,11 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 			h.fail(w, httpx.BadRequest(fmt.Sprintf("Volume type %q is not available on the volume's node", slug)))
 			return true
 		}
+		slot := strAny(vol["slot"])
 		if aerr = ps.RetypeVolume(ctx, proj.ID, vmid, cr.ExternalID, storage, es.PVEStorageHeadroomPct()); aerr == nil {
-			// The move gives the disk a new volid: the old row is gone, the sync below adds the new one.
-			_ = h.cloud.DeleteAndArchive(ctx, cr, time.Now().UTC())
+			// The move gives the disk a new volid. It is still this disk: the row follows it and keeps its
+			// id, which is what the bill and its history are keyed on. The sync below fills in the rest.
+			h.pveFollowRetypedVolume(ctx, ps, es, proj, cr, vmid, slot)
 		}
 	default:
 		return false

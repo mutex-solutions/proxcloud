@@ -80,12 +80,20 @@ Enforced in the API on every request, not only at login:
 - **A provider speaks only for its own domains.** A token from an organization's provider with an email outside that organization's verified domains is refused and creates no ProxCloud user, so nobody can invite the fake person by email.
 - **Accounts do not change hands.** A person stays bound to the provider that first provisioned them. Keycloak's first-broker-login flow never links an existing account without a password or an email round trip, and a provider linked to an account anyway cannot use it. A local account can be claimed only by the provider that owns the domain of its existing address.
 - **SSO never creates an admin.** It cannot grant OWNER, ADMIN or a role that can manage members or roles. This is checked when the mapping is saved and again when it is used, and an existing membership is never changed.
-- **Provider metadata stays outside your network.** ProxCloud fetches discovery documents and metadata itself, refusing private addresses, and rejects a document that points at them.
+- **Provider metadata stays outside your network, at the time it is saved.** ProxCloud fetches discovery documents and metadata itself, refusing private addresses, and rejects a document that points at them. Keycloak then calls those URLs at every login, out of ProxCloud's reach, and a tenant controls their DNS: a name that resolved to a public address when saved can resolve to an internal one later. Only your network can close that, so **restrict Keycloak's egress**, see below.
 - **Secrets stay encrypted.** The client secret is write-only and stored with `textcrypt`. SSO refuses to save one if no encryption key is configured.
 
 Every configuration change, automatic provisioning, refused login and break-glass use goes to the audit log.
 
 An email a provider asserts for a foreign domain still creates a Keycloak account during the broker login, because Keycloak runs before ProxCloud sees the token. ProxCloud removes such accounts every 5 minutes when they hold nothing else. Until then the address's real owner sees "account already exists".
+
+### Required: Keycloak egress policy
+
+With per-organization SSO on, tenants choose URLs that Keycloak requests server-side (DNS rebinding makes the check at save time insufficient). Keycloak must not be able to reach anything internal:
+
+- Allow egress to DNS and to the public internet on 443.
+- Deny the pod network, the service network, the node and management networks, your Proxmox, TrueNAS and database addresses, and link-local (`169.254.0.0/16`, cloud metadata included). Keycloak's own database stays allowed.
+- On Kubernetes this is a `NetworkPolicy` with an `ipBlock` of `0.0.0.0/0` and an `except` list on the Keycloak pods, which needs a CNI that enforces it. The chart does not ship one, since the ranges are yours. With another IdP the same applies to whatever brokers the logins.
 
 ### Enforcement
 

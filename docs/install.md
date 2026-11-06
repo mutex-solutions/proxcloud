@@ -113,6 +113,14 @@ Not automated yet: the off-site copy, OTLP metrics, and pointing CloudNativePG a
 
 `add-node` needs SSH from the node to an existing member (`pvecm add --use_ssh`). On a 2-node cluster it does not set up the QDevice for you: it needs a machine outside the cluster.
 
+## Per-organization SSO: restrict Keycloak's egress
+
+If you enable per-organization SSO, Keycloak calls URLs tenants choose, and a DNS name checked when it was saved can
+point at an internal address later. No check in the API can close that. Allow Keycloak egress to DNS, its database and
+the public internet on 443 only, and deny the pod, service, node and management networks, the Proxmox, TrueNAS and
+database addresses, and `169.254.0.0/16`. A `NetworkPolicy` with `ipBlock` `0.0.0.0/0` and an `except` list does it on
+a CNI that enforces policies. The installer does not apply one, since the ranges are specific to the site.
+
 ## Credentials
 
 - **Installer's admin key:** `proxcloud-api admin-key create -description installer`, run in the API pod by stage 60, mints an Admin-API SigV4 key directly in PostgreSQL. It needs database access and no login, which is what makes it usable before the first operator exists. Delete it from the admin console (API keys) if you do not want to keep it, and remove `generated/admin-api-key.json`.

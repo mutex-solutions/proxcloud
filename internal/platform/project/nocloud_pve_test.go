@@ -3,7 +3,9 @@ package project
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
@@ -17,6 +19,28 @@ func TestSeedHostname(t *testing.T) {
 	} {
 		if got := seedHostname(in); got != want {
 			t.Fatalf("seedHostname(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestStaleSeed(t *testing.T) {
+	now := time.Now().UTC()
+	old, fresh := now.Add(-time.Hour), now.Add(-time.Minute)
+	mine := &cloud.CloudResource{ProjectID: "a"}
+	theirs := &cloud.CloudResource{ProjectID: "b"}
+	for _, c := range []struct {
+		name    string
+		created *time.Time
+		row     *cloud.CloudResource
+		want    bool
+	}{
+		{"VM alive", &old, mine, false},
+		{"VM gone", &old, nil, true},
+		{"vmid reused by another project", &old, theirs, true},
+		{"create still racing its row", &fresh, nil, false},
+	} {
+		if got := staleSeed(&ServerSeed{ProjectID: "a", CreatedAt: c.created}, c.row, now); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}
 }
