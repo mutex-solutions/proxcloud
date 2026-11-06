@@ -314,9 +314,9 @@ func (h *Handler) applyMetricsConfig(req *http.Request, doc pgdoc.M) *httpx.HTTP
 		return httpx.BadRequest("Invalid request body")
 	}
 	switch body.Source {
-	case externalservice.MetricsSourcePrometheus, externalservice.MetricsSourceNone:
+	case externalservice.MetricsSourcePrometheus, externalservice.MetricsSourceNone, externalservice.MetricsSourcePVE:
 	default:
-		return httpx.BadRequest("source must be one of: prometheus, none")
+		return httpx.BadRequest("source must be one of: pve, prometheus, none")
 	}
 	cfg := ensureConfig(doc)
 	metricsCfg := ensureMap(cfg, "metrics")

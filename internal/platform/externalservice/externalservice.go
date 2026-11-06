@@ -145,6 +145,8 @@ func (e *ExternalService) CephConfig(region, projectAccess, projectSecret, rgwUI
 const (
 	MetricsSourcePrometheus = "prometheus"
 	MetricsSourceNone       = "none"
+	// MetricsSourcePVE is the Proxmox default: public-NIC counters off status/current.
+	MetricsSourcePVE = "pve"
 )
 
 // metricsConfig returns the config.metrics sub-map (nil-safe).
@@ -153,10 +155,14 @@ func (e *ExternalService) metricsConfig() map[string]any {
 	return m
 }
 
-// MetricsSource returns config.metrics.source, defaulting to none for every provider.
+// MetricsSource returns config.metrics.source, defaulting to the native counters on a proxmox
+// provider and to none on every other.
 func (e *ExternalService) MetricsSource() string {
 	if s := str(e.metricsConfig()["source"]); s != "" {
 		return s
+	}
+	if e.IsProxmox() {
+		return MetricsSourcePVE
 	}
 	return MetricsSourceNone
 }

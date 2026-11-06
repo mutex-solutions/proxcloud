@@ -9,8 +9,8 @@
     "kubernetes_cluster is the managed-k8s CONTROL-PLANE fee only, priced per CP replica",
     "(attrs: display_name/version/status/endpoint/cp_replicas/node_groups — see",
     "internal/cloud/billingresource/kubernetescluster.go). A cluster's worker VMs, volumes",
-    "and API load balancer live in the customer's own project and already bill via",
-    "the existing instance/volume/load_balancer rules — never add k8s rules for them here",
+    "live in the customer's own project and already bill via",
+    "the existing instance/volume rules — never add k8s rules for them here",
     "(double-charge). Billing starts once the control-plane endpoint exists; the rate below",
     "is a placeholder until the plan-§6 CP-pricing decision (free CP vs paid HA vs flat fee).",
     "_pendingRules are NOT applied by the steps above. kubernetes_cluster sits there (matching the commented-out twin in price-plan-seed.sql) until the plan-§6 CP-pricing decision; move it into .rules to activate, and update the SQL twin in the same change.",
@@ -291,17 +291,17 @@
       "modifiers": []
     },
     {
-      "name": "Load balancer",
+      "name": "Project image storage",
       "timeUnit": "hour",
-      "resourceType": "load_balancer",
+      "resourceType": "image",
       "pricePlanId": "<PLAN_ID>",
       "applyMethod": "ADD_TO_TOTAL",
       "prices": [
         {
-          "attributeName": "existence",
+          "attributeName": "size_gb",
           "tiers": [
             {
-              "value": "0.0165"
+              "value": "0.000068"
             }
           ]
         }

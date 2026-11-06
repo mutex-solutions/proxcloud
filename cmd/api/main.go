@@ -264,7 +264,8 @@ func run() error {
 	// SDN applies are cluster-global on PVE and must be serialized platform-wide.
 	projectH.SetSDNLock(lock.New(pg))
 	// Public-NIC IP allocations (pgdoc `pvePublicIp`).
-	projectH.SetPublicIPs(project.NewPublicIPRepo(pg))
+	publicIPRepo := project.NewPublicIPRepo(pg)
+	projectH.SetPublicIPs(publicIPRepo)
 
 	// Promotion (deposit config) + Affiliate (cfy check + project config/log) — client reads.
 	// The promo-redeem authz gate resolves the bp's org WITH a membership check on the caller
@@ -401,7 +402,7 @@ func run() error {
 			cloud.TypeServer:            billingresource.NewServerProvider(metricsRepo),
 			cloud.TypeVolume:            billingresource.NewVolumeProvider(),
 			cloud.TypeFloatingIP:        billingresource.NewFloatingIPProvider(),
-			cloud.TypeLoadBalancer:      billingresource.NewLoadBalancerProvider(),
+			cloud.TypeImage:             billingresource.NewImageProvider(),
 			cloud.TypeKubernetesCluster: billingresource.NewKubernetesClusterProvider(),
 			cloud.TypeDatabaseCluster:   billingresource.NewDatabaseClusterProvider(),
 			cloud.TypeBucket:            billingresource.NewBucketProvider(),
@@ -411,8 +412,10 @@ func run() error {
 	// fine: every call on it reports ErrNotConfigured, and Validate() already refuses to boot with
 	// remote charging enabled but no URL.
 	billingCli := billingclient.New(cfg.Billing.URL, cfg.Billing.Token, cfg.Billing.Timeout)
-	metricsJob := metricsjob.New(projectRepo, cloudRepo, esSvc, metrics.NewService(metricsRepo), log)
-	syncJob := syncjob.New(projectRepo, esSvc, cloudRepo, log)
+	metricsJob := metricsjob.New(projectRepo, cloudRepo, esSvc, metrics.NewService(metricsRepo), log).WithDB(pg)
+	syncJob := syncjob.New(projectRepo, esSvc, cloudRepo, log).
+		WithPublicIPs(publicIPRepo.ForProject, publicIPRepo.ReleaseNIC).
+		WithAudit(auditSvc)
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)
@@ -633,6 +636,17 @@ func run() error {
 			"run-sync": func(w http.ResponseWriter, r *http.Request) {
 				n, err := syncJob.Run(r.Context())
 				jobResult(w, map[string]any{"synced": n}, err)
+			},
+			"run-pve-state": func(w http.ResponseWriter, r *http.Request) {
+				n, err := syncJob.RunPVEState(r.Context())
+				jobResult(w, map[string]any{"changed": n}, err)
+			},
+			"run-pve-tasks": func(w http.ResponseWriter, r *http.Request) {
+				n, err := syncJob.RunPVETasks(r.Context())
+				jobResult(w, map[string]any{"recorded": n}, err)
+			},
+			"run-pve-traffic": func(w http.ResponseWriter, r *http.Request) {
+				jobResult(w, map[string]any{"ran": "pve-traffic"}, metricsJob.RunPVE(r.Context()))
 			},
 			"run-metrics": func(w http.ResponseWriter, r *http.Request) {
 				jobResult(w, map[string]any{"ran": "metrics"}, metricsJob.Run(r.Context()))
@@ -969,6 +983,21 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 				log.Error("services sync job", "err", err)
 			} else if n > 0 {
 				log.Info("cloud resources synced", "count", n)
+			}
+		}},
+		{Name: "pveStateSync", Spec: scheduler.PVEStateSyncSpec, AtMostFor: 2 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
+			if _, err := sync.RunPVEState(ctx); err != nil {
+				log.Error("pve state sync job", "err", err)
+			}
+		}},
+		{Name: "pveTaskPoll", Spec: scheduler.PVETaskPollSpec, AtMostFor: time.Minute, AtLeastFor: 10 * time.Second, Fn: func(ctx context.Context) {
+			if _, err := sync.RunPVETasks(ctx); err != nil {
+				log.Error("pve task poll job", "err", err)
+			}
+		}},
+		{Name: "pveTrafficSample", Spec: scheduler.PVETrafficSpec, AtMostFor: 2 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
+			if err := metrics.RunPVE(ctx); err != nil {
+				log.Error("pve traffic job", "err", err)
 			}
 		}},
 		{Name: "executeProjectDeletion", Spec: scheduler.ProjectDeletionSpec, AtMostFor: time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {

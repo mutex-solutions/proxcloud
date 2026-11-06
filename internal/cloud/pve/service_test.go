@@ -176,7 +176,7 @@ func fakeService(t *testing.T) *Service {
 
 func TestServerSyncProviderPoolFilter(t *testing.T) {
 	s := fakeService(t)
-	p := s.ServerSyncProvider("pve", "p1")
+	p := s.ServerSyncProvider("pve", "p1", nil)
 	if p.Type() != cloud.TypeServer || p.ProjectID() != "p1" {
 		t.Fatal("provider identity")
 	}

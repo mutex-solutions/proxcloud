@@ -95,8 +95,7 @@ export function proxmoxFormToBody(f: ProxmoxFormState) {
       insecureTls: f.insecureTls,
       poolPrefix: f.poolPrefix.trim() || "pc-",
       network: proxmoxNetworkConfig(f),
-      // Traffic billing stays off until a prometheus-pve-exporter is wired (Phase 5).
-      metrics: (f.storedConfig?.metrics as Record<string, any>) ?? { source: "none" },
+      metrics: (f.storedConfig?.metrics as Record<string, any>) ?? { source: "pve" },
     },
     // Secret merge skips blank values server-side, so an empty tokenSecret keeps the stored one.
     secret: f.tokenSecret.trim() ? { tokenSecret: f.tokenSecret.trim() } : {},

@@ -301,6 +301,40 @@ func pvePickCIDR(requested, pool string, used []string) (string, *httpx.HTTPErro
 // a SERVER: inbound reachability = a second NIC (net1) on an admin-designated
 // bridge with one address from that network's pool (no floating IPs in the PVE
 // model). Returns handled.
+// pveDetachPublicNIC unplugs a VM's public NIC and frees its address. Empty net1's ipfilter first:
+// should the unplug only go pending (no hotplug), the NIC can no longer use the address once it is
+// reallocated. The address goes back to the pool only after the NIC is gone.
+// Lab-verified (PVE 9.2): an empty ipfilter-net1 set drops all net1 egress, and deleting an absent
+// net1/ipconfig1 key only warns.
+func (h *Handler) pveDetachPublicNIC(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, vm *pve.ClusterResource, serverID string) error {
+	if err := ps.SetIPFilter(ctx, vm.Node, vm.VMID, "net1", nil); err != nil {
+		return err
+	}
+	// net0 takes the default route back (see the attach below).
+	restore := map[string]string{}
+	held, err := h.publicIPs.ForServer(ctx, es.ID, serverID)
+	if err != nil {
+		return err
+	}
+	for _, row := range held {
+		if row.NIC == "net0" && row.ProjectID == proj.ID {
+			_, gateway, _, _, _, gerr := ps.VnetStaticPool(ctx, row.NetworkID)
+			if gerr != nil {
+				return gerr
+			}
+			restore["ipconfig0"] = fmt.Sprintf("ip=%s/%d,gw=%s", row.IP, row.Prefix, gateway)
+		}
+	}
+	up, err := ps.C.SetVMConfig(ctx, vm.Node, vm.VMID, restore, "net1", "ipconfig1")
+	if err != nil {
+		return err
+	}
+	if err := ps.C.WaitTask(ctx, up); err != nil {
+		return err
+	}
+	return h.publicIPs.ReleaseNIC(ctx, es.ID, serverID, publicNIC)
+}
+
 func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if action != "ATTACH_PUBLIC_NETWORK" && action != "DETACH_PUBLIC_NETWORK" {
 		return false
@@ -321,38 +355,7 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		return true
 	}
 	if action == "DETACH_PUBLIC_NETWORK" {
-		// Empty net1's ipfilter first: should the unplug only go pending (no
-		// hotplug), the NIC can no longer use the address once it is reallocated.
-		// The address goes back to the pool only after the NIC is gone.
-		// Lab-verified (PVE 9.2): an empty ipfilter-net1 set drops all net1 egress, and
-		// deleting an absent net1/ipconfig1 key only warns.
-		derr := ps.SetIPFilter(ctx, vm.Node, vm.VMID, "net1", nil)
-		// net0 takes the default route back (see the attach below).
-		restore := map[string]string{}
-		if derr == nil {
-			held, ferr := h.publicIPs.ForServer(ctx, es.ID, cr.ExternalID)
-			derr = ferr
-			for _, row := range held {
-				if row.NIC == "net0" && row.ProjectID == proj.ID {
-					_, gateway, _, _, _, gerr := ps.VnetStaticPool(ctx, row.NetworkID)
-					if gerr != nil {
-						derr = gerr
-					}
-					restore["ipconfig0"] = fmt.Sprintf("ip=%s/%d,gw=%s", row.IP, row.Prefix, gateway)
-				}
-			}
-		}
-		var up pve.UPID
-		if derr == nil {
-			up, derr = ps.C.SetVMConfig(ctx, vm.Node, vm.VMID, restore, "net1", "ipconfig1")
-		}
-		if derr == nil {
-			derr = ps.C.WaitTask(ctx, up)
-		}
-		if derr == nil {
-			derr = h.publicIPs.ReleaseNIC(ctx, es.ID, cr.ExternalID, publicNIC)
-		}
-		if derr != nil {
+		if derr := h.pveDetachPublicNIC(ctx, ps, es, proj, vm, cr.ExternalID); derr != nil {
 			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, derr.Error()))
 			return true
 		}

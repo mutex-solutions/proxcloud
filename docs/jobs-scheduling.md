@@ -123,7 +123,7 @@ cron specs from `scheduler.go`. All specs are 6-field seconds-first, UTC.
 | `minutelyCharge` | `30 * * * * *` | every minute at :30 | 5m / 30s | Charge each ACTIVE billing profile for the `minute` time unit |
 | `hourlyCharge` | `0 0 * * * *` | top of every hour | 5m / 30s | Charge each ACTIVE profile for the `hour` time unit |
 | `monthlyCharge` | `0 0 * * * *` | top of every hour | 5m / 30s | Charge each ACTIVE profile for the `month` time unit (shares the hourly spec; the charge filters rules by exact time unit) |
-| `usageMetricsFetch` | `0 0 * * * *` | top of every hour | 10m / 30s | Ingest per-VM network-traffic usage into `usageMetrics` from `config.metrics.source`: `prometheus` for a Prometheus-compatible endpoint, or `none` (the Proxmox default), which skips the provider |
+| `usageMetricsFetch` | `0 0 * * * *` | top of every hour | 10m / 30s | Ingest per-VM network-traffic usage into `usageMetrics` from `config.metrics.source` (`pve`, `prometheus` or `none`; see `pveTrafficSample` for the per-minute Proxmox pass) |
 | `savingsContractExpiration` | `0 0 0 * * *` | daily 00:00 | 10m / 30s | Expire savings contracts past their end date |
 | `savingsContractExpiryReminders` | `0 0 0 * * *` | daily 00:00 | 10m / 30s | Schedule reminder docs for ACTIVE contracts nearing expiry |
 | `reminderNotifications` | `0 0 * * * *` | top of every hour | 10m / 30s | Dispatch the due scheduled reminders (re-evaluates days-until-expiry each run) |
@@ -132,6 +132,9 @@ cron specs from `scheduler.go`. All specs are 6-field seconds-first, UTC.
 | `monthlyBill` | `0 0 0 * * *` | daily 00:00 | 1h / 30s | Finalize each profile's previous-month OPEN bill (OPEN → SENT/PAID) so it becomes collectable + dunnable |
 | `monthlyCollect` | `0 0 7 1,5,9,13,16 * *` | 07:00 on the 1st/5th/9th/13th/16th | 1h / 30s | Collect SENT bills via the stored card |
 | `servicesSync` | `0 */15 * * * *` | every 15 minutes | 10m / 30s | Sync every ENABLED project's cloud resources into the cache |
+| `pveStateSync` | `15 * * * * *` | every minute at :15 | 2m / 30s | Proxmox: SERVER, IMAGE and FLOATING_IP rows of every project off one `/cluster/resources` page per provider; heartbeat and staleness alert |
+| `pveTaskPoll` | `*/20 * * * * *` | every 20 seconds | 1m / 10s | Proxmox: finished VM tasks past each node's cursor; records them (`LIST_EVENTS`), audits the ones the platform did not run, re-syncs their project |
+| `pveTrafficSample` | `45 * * * * *` | every minute at :45 | 2m / 30s | Proxmox: public-NIC counters of the VMs holding a public IP into `usageMetrics` |
 | `executeProjectDeletion` | `30 * * * * *` | every minute at :30 | 1m / 30s | Delete projects past their deletion grace window (cascade live cloud delete → remove the doc) |
 
 Notes:
@@ -220,6 +223,9 @@ Each is `POST /debug/<name>` and returns a small JSON result:
 | Trigger | Runs |
 |---|---|
 | `run-sync` | one cloud resource sync pass |
+| `run-pve-state` | one Proxmox state sample |
+| `run-pve-tasks` | one Proxmox task poll |
+| `run-pve-traffic` | one Proxmox public-NIC sample |
 | `run-metrics` | one metrics ingestion pass (prometheus per provider config) |
 | `run-charge?timeUnit=minute\|hour\|month` | one charge pass (defaults to `minute`) |
 | `run-savings-expire` | expire savings contracts |
@@ -318,6 +324,7 @@ only live SSE delivery is pod-local.
 - `internal/platform/chargefanout/chargefanout.go` — RabbitMQ charge fan-out (Publish / StartConsumer)
 - `internal/platform/billingjob/billingjob.go` — the charge/rating driver (`Charge`, `ChargeProfileByID`, `ActiveProfileIDs`)
 - `internal/cloud/syncjob/job.go` — the `servicesSync` job
+- `internal/cloud/syncjob/pve_meter.go` — the Proxmox sampler and task poller
 - `internal/cloud/metricsjob/job.go` — the `usageMetricsFetch` job
 - `internal/platform/job/*` — the `/api/v1/admin/job/*` operator API
 - `internal/config/config.go` — the `PROXCLOUD_JOBS_*` env gates
