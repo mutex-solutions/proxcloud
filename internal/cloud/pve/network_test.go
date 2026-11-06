@@ -140,14 +140,16 @@ func TestZoneIDFor(t *testing.T) {
 
 func TestIsolationRules(t *testing.T) {
 	const pool, comment = "10.100.0.0/16", isolationComment
-	if got, want := isolationRules(pool, nil), []FirewallRule{
+	if got, want := isolationRules(pool, nil, comment), []FirewallRule{
 		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("no blocked: got %+v", got)
 	}
-	got := isolationRules(pool, []string{"192.0.2.0/24", "198.51.100.0/24"})
+	got := isolationRules(pool, []string{"192.0.2.0/24", "198.51.100.0/24"}, comment)
 	want := []FirewallRule{
 		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
 		{Type: "forward", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Comment: comment},
 		{Type: "in", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Comment: comment},
 	}
@@ -216,7 +218,7 @@ func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRul
 
 func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
 	ops := FirewallRule{Type: "in", Action: "ACCEPT", Dest: "10.9.9.9", Comment: "ops"}
-	other := projectIsolationRule("p2", []string{"10.100.5.0/24"})
+	other := projectIsolationRules("p2", []string{"10.100.5.0/24"})[0]
 	srv, rules, _ := isolationFake(t, []FirewallRule{ops, other})
 	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", []string{"198.51.100.0/24"}); err != nil {
 		t.Fatal(err)
@@ -228,9 +230,11 @@ func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
 	}
 	own := "10.100.0.0/24,10.100.1.0/24"
 	want := []string{
+		"in ACCEPT " + own + " " + own + " proxcloud:isolation:p1",
 		"forward ACCEPT " + own + " " + own + " proxcloud:isolation:p1",
 		"forward ACCEPT 10.100.5.0/24 10.100.5.0/24 proxcloud:isolation:p2",
 		"forward DROP 10.100.0.0/16 10.100.0.0/16 proxcloud:isolation",
+		"in DROP 10.100.0.0/16 10.100.0.0/16 proxcloud:isolation",
 		"forward DROP 10.100.0.0/16 " + blocked + " proxcloud:isolation",
 		"in DROP 10.100.0.0/16 " + blocked + " proxcloud:isolation",
 		"in ACCEPT  10.9.9.9 ops",
@@ -242,14 +246,73 @@ func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
 
 func TestReconcileIsolationIdempotent(t *testing.T) {
 	own := "10.100.0.0/24,10.100.1.0/24"
-	current := append([]FirewallRule{projectIsolationRule("p1", strings.Split(own, ","))},
-		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"})...)
+	current := append(projectIsolationRules("p1", strings.Split(own, ",")),
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"}, isolationComment)...)
 	srv, _, writes := isolationFake(t, current)
 	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
 		t.Fatal(err)
 	}
 	if *writes != 0 {
 		t.Fatalf("%d writes on an up-to-date rule set", *writes)
+	}
+}
+
+// One portal: a changed pool replaces its own DROPs and leaves no stale ones behind.
+func TestReconcileIsolationReplacesOwnRules(t *testing.T) {
+	own := "10.100.0.0/24,10.100.1.0/24"
+	current := append(projectIsolationRules("p1", strings.Split(own, ",")),
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24", "198.51.100.0/24"}, isolationComment)...)
+	srv, rules, _ := isolationFake(t, current)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+		t.Fatal(err)
+	}
+	var drops []string
+	for _, r := range *rules {
+		if r.Action == "DROP" {
+			drops = append(drops, r.Type+" "+r.Dest)
+		}
+	}
+	want := []string{"forward 10.100.0.0/16", "in 10.100.0.0/16", "forward 192.0.2.0/24", "in 192.0.2.0/24"}
+	if !reflect.DeepEqual(drops, want) {
+		t.Fatalf("drops = %v, want %v", drops, want)
+	}
+	if (*rules)[0].Action != "ACCEPT" || (*rules)[1].Action != "ACCEPT" {
+		t.Fatalf("ACCEPTs fell below the DROPs: %+v", *rules)
+	}
+}
+
+// Two portals: neither may remove the other's DROPs, whatever their pools.
+func TestReconcileIsolationLeavesOtherPortals(t *testing.T) {
+	theirs := isolationRules("10.200.0.0/16", []string{"192.0.2.0/24"}, isolationComment+"/other-")
+	theirAccept := projectIsolationRules("p9", []string{"10.200.7.0/24"})[0]
+	srv, rules, _ := isolationFake(t, append([]FirewallRule{theirAccept}, theirs...))
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range append(theirs, theirAccept) {
+		if !slices.ContainsFunc(*rules, func(g FirewallRule) bool { return sameRule(g, r) }) {
+			t.Fatalf("rule of another portal is gone: %+v", r)
+		}
+	}
+	if (*rules)[len(*rules)-1].Comment != isolationComment+"/other-" {
+		t.Fatalf("rules of the other portal were moved: %+v", *rules)
+	}
+	srv.PoolPrefix = "pcx-"
+	if got := srv.isolationOwner(); got != isolationComment+"/pcx-" {
+		t.Fatalf("owner = %q", got)
+	}
+}
+
+// A rule list that shifts between the read and the delete must not cost another rule.
+func TestDeleteClusterRuleByIdentity(t *testing.T) {
+	ops := FirewallRule{Type: "in", Action: "ACCEPT", Dest: "10.9.9.9", Comment: "ops"}
+	stale := projectIsolationRules("p1", []string{"10.100.1.0/24"})
+	srv, rules, _ := isolationFake(t, append([]FirewallRule{ops}, stale...))
+	if err := srv.setProjectIsolation(context.Background(), "p1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*rules) != 1 || (*rules)[0].Comment != "ops" {
+		t.Fatalf("rules = %+v", *rules)
 	}
 }
 

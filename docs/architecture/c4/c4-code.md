@@ -19,8 +19,10 @@ Status legend: [README.md](README.md). Everything on this page is **Implemented*
 | `Service.CreateNetwork` | `network.go:157` | Stages vnet `v<5 base36>` with alias `st:<projectId>:<name>`, then its subnet (gateway, DHCP range, SNAT) |
 | `ZoneIDFor` | `network.go:341` | Per-project EVPN zone id: `p` + 7 base36 chars of `sha256(projectId)` (8 chars, the PVE limit) |
 | `Service.EnsureProjectZone` | `network.go:353` | Stages the project zone from the default EVPN zone template; next free VRF VNI (from 10000); refuses an id collision with another owner |
-| `isolationRules`, `projectIsolationRule` | `network.go` | The provider-wide DROPs and one project's ACCEPT (below) |
-| `Service.ReconcileIsolation` | `network.go` | Brings the cluster firewall to the rule set: rebuilds the DROPs when they are missing or the blocked networks changed, then this project's ACCEPT over all its subnets |
+| `isolationRules`, `projectIsolationRules`, `Service.isolationOwner` | `network.go` | This portal's provider-wide DROPs, one project's ACCEPTs, and the comment that marks the DROPs as this portal's (below) |
+| `Service.ReconcileIsolation` | `network.go` | Brings the cluster firewall to the rule set: rebuilds this portal's DROPs when they are missing or the networks changed, then this project's ACCEPTs over all its subnets. Called on every network change and, per project, from the sync job |
+| `Service.deleteClusterRule` | `network.go` | Deletes a rule by identity: fresh position, sent with the list's digest, so a list edited in between can never cost another rule |
+| `Job.reconcileIsolation` | `internal/cloud/syncjob/job.go` | Per sync cycle and project, under the `sdn-apply` lock; a busy lock skips to the next cycle |
 | `Client.ManagementCIDRs` | `internal/cloud/pve/cluster.go` | The networks of the bridges carrying a node's own IP or gateway; always blocked |
 | `Service.ApplyAndWait` | `network.go:553` | `PUT /cluster/sdn` and wait for the task |
 | `pveDeleteNetwork` | `cloud_network_pve.go:175` | Refuses while a pool VM NIC uses the vnet; deletes, re-reconciles, stages an empty project zone for removal, applies once (PVE accepts both in one apply) |
@@ -36,13 +38,26 @@ Status legend: [README.md](README.md). Everything on this page is **Implemented*
 
 **Managed rule set in the cluster firewall**, top to bottom (first match wins):
 
-1. One per project, comment `proxcloud:isolation:<projectId>`: `FORWARD ACCEPT
-   source=<project subnets> dest=<project subnets>` (absent when the project has no
-   subnets, since an empty field means "any").
+1. Two per project, comment `proxcloud:isolation:<projectId>`: `FORWARD ACCEPT` and `IN
+   ACCEPT`, both `source=<project subnets> dest=<project subnets>` (absent when the project
+   has no subnets, since an empty field means "any").
 2. `FORWARD DROP source=<cidrPool> dest=<cidrPool>`.
-3. `FORWARD DROP source=<cidrPool> dest=<management networks, blockedCidrs>`.
-4. `IN DROP source=<cidrPool> dest=<management networks, blockedCidrs>`: an exit node's
+3. `IN DROP source=<cidrPool> dest=<cidrPool>`: a gateway address lives on the node, so
+   pinging another tenant's gateway is input, not forward. The project's own `IN ACCEPT`
+   keeps its own gateways reachable.
+4. `FORWARD DROP source=<cidrPool> dest=<management networks, blockedCidrs>`.
+5. `IN DROP source=<cidrPool> dest=<management networks, blockedCidrs>`: an exit node's
    own addresses are reached through input, not forward.
+
+**Who owns the DROPs.** A cluster normally has one portal, which owns its DROPs outright: a
+changed `cidrPool` or `blockedCidrs` replaces them and leaves none behind. Their comment is
+`proxcloud:isolation` for the default pool prefix `pc-` (clusters already running need no
+migration) and `proxcloud:isolation/<poolPrefix>` for any other. A portal only rewrites DROPs
+carrying its own comment, and only moves ACCEPTs inside its own pool, because those are the only
+ones its new DROPs can shadow. So a second portal on the cluster, with another pool prefix, can
+never remove the DROPs protecting the first one's tenants, whatever its pool. What this does not
+give two portals with different pools is isolation between them: add each portal's pool to the
+other's `blockedCidrs`.
 
 These are cluster rules, not vnet rules, because traffic between subnets is routed by
 the node: on PVE 9.2 with `proxmox-firewall`, vnet `FORWARD` rules only see frames
@@ -85,12 +100,22 @@ Invariants:
 - The rule set is reconciled **before** the SDN apply. If reconcile or apply fails, the
   vnet is unstaged and the apply re-run. New DROPs go in before old rules go, so every
   step fails closed.
+- Every sync cycle reconciles each project, so a project made before a rule change gets it
+  within 15 minutes and a rule deleted by hand comes back. An up-to-date cluster takes no write.
+- Rules are deleted by identity with the list's digest. PVE has no rule ids and refuses a
+  stale digest, so an operator or a second portal editing the list cannot make a delete hit
+  the wrong rule.
 - The test connection (`internal/platform/admin/pveadmin.go:47`) refuses a cluster
   whose datacenter firewall is off or where a node still runs the legacy iptables
   firewall (it ignores FORWARD rules), so the rules above are actually enforced.
 - Verified live on PVE 9.2 in both isolation modes, on one node and across nodes: same
   project reaches its other vnets, another tenant and the management network are dropped,
-  SNAT egress works, a spoofed source address is dropped.
+  SNAT egress works, a spoofed source address is dropped. Verified again with packets for the
+  gateway rules, the sync reconcile (rules removed by hand, traffic state before and after) and
+  two portals with different pools on one cluster.
+- Outside this rule set: a public NIC is bridged straight to the uplink, so no cluster rule
+  applies and the VM reaches whatever the uplink routes. Filtering that is the operator's edge
+  (see Public networks in the operator docs).
 
 ## C4.2 VM firewall, default security group and public IPs
 

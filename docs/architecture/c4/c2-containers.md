@@ -127,8 +127,8 @@ flowchart TB
 |---|---|---|
 | Project pool (`<poolPrefix><projectId>`, default prefix `pc-`) | Created at project bootstrap; every tenant VM and template lives in it; sync and teardown are scoped to it. | Implemented |
 | Tenant VMs | Full clones of an admin template or a project template; flavor, cloud-init, tags; firewall on before first boot. | Implemented |
-| SDN zones and vnets | One vnet per tenant network, ownership alias `st:<projectId>:<name>`. Isolation mode `shared` (one zone, per-vnet DROP rules) or `evpn-per-project` (one EVPN zone per project). | Implemented |
-| proxmox-firewall | Vnet isolation rules, per-VM anti-spoof (ipfilter, macfilter), security groups as cluster firewall groups. Test connection refuses a cluster with the datacenter firewall off or a node on the legacy iptables firewall. | Implemented |
+| SDN zones and vnets | One vnet per tenant network, ownership alias `st:<projectId>:<name>`. Isolation mode `shared` (one zone) or `evpn-per-project` (one EVPN zone per project); the cluster firewall rule set separates tenants in both. | Implemented |
+| proxmox-firewall | Cluster isolation rules (reconciled every sync), per-VM anti-spoof (ipfilter, macfilter), security groups as cluster firewall groups. Test connection refuses a cluster with the datacenter firewall off or a node on the legacy iptables firewall. | Implemented |
 | Public networks | Admin-designated bridges with an IPv4 pool; a public NIC (`net1`) gets one address, pinned by ipfilter. The management bridge is refused. | Implemented |
 | PCI mappings | GPU flavors reserve concrete mappings on the scheduled node. | Implemented |
 | HA rules and replication | Protected VMs with replication and node-affinity rules. | Planned |
@@ -242,8 +242,8 @@ flowchart LR
 | Automation to admin API | AWS SigV4 with `hmac_keys`, or the admin-api realm | Implemented |
 | Management port `:8081` | On the cluster Service only, never on the gateway or ingress. Billing callbacks are mounted only when a shared token is configured | Implemented |
 | API to Proxmox | Privilege-separated API token with the `ProxCloudPlatform` role; test connection warns on missing privileges and on `root@pam` | Implemented |
-| Tenant to tenant on the SDN | Vnet isolation rules (forward DROP into the CIDR pool), non-overlapping CIDRs, optional per-project EVPN zone | Implemented |
+| Tenant to tenant on the SDN | Cluster firewall rules (forward and input DROP inside the CIDR pool, per-project ACCEPT), reconciled every sync; non-overlapping CIDRs; optional per-project EVPN zone | Implemented |
 | Tenant VM to the network | VM firewall `policy_in DROP`, ipfilter/macfilter anti-spoof, security groups | Implemented |
-| Public NIC to management network | Public networks on the management bridge are refused at test connection and at attach | Implemented |
+| Public NIC to management network | Public networks on the management bridge are refused at test connection and at attach. What the uplink itself routes is filtered at the operator's edge | Implemented |
 | Identity matching by email | Only IdP-verified emails resolve to a user for add-member and invites | Implemented |
 | Tenant IdP to customer realm | Keycloak brokering; a guard on every API request holds the IdP to its verified domains and its own accounts; enforced SSO | Implemented |
