@@ -93,12 +93,33 @@ func (s *Service) volumeDisk(ctx context.Context, projectID string, vmid int, vo
 	if err != nil {
 		return nil, VMDisk{}, err
 	}
-	for _, d := range ParseDisks(cfg) {
+	for _, d := range s.withUnusedSizes(ctx, vm.Node, vm.VMID, ParseDisks(cfg)) {
 		if d.VolID == volID {
 			return vm, d, nil
 		}
 	}
 	return nil, VMDisk{}, fmt.Errorf("pve: disk %s not found on server %d", volID, vmid)
+}
+
+// withUnusedSizes fills in the size of detached disks: an unusedN entry is a bare volid without
+// size=, so the storage has to say (best-effort; a storage that cannot answer leaves size 0).
+func (s *Service) withUnusedSizes(ctx context.Context, node string, vmid int, disks []VMDisk) []VMDisk {
+	sizes := map[string]map[string]int64{}
+	for i, d := range disks {
+		if !strings.HasPrefix(d.Slot, "unused") || d.SizeGiB > 0 {
+			continue
+		}
+		if _, seen := sizes[d.Storage]; !seen {
+			sizes[d.Storage] = map[string]int64{}
+			if rows, err := s.C.StorageContents(ctx, node, d.Storage, "images", vmid); err == nil {
+				for _, r := range rows {
+					sizes[d.Storage][r.VolID] = r.Size
+				}
+			}
+		}
+		disks[i].SizeGiB = int(sizes[d.Storage][d.VolID] >> 30)
+	}
+	return disks
 }
 
 // ExtendVolume grows a disk to sizeGiB (grow-only — PVE cannot shrink).
@@ -117,8 +138,7 @@ func (s *Service) ExtendVolume(ctx context.Context, projectID string, vmid int, 
 	return s.C.WaitTask(ctx, up)
 }
 
-// DetachVolume unlinks a disk from its slot — PVE moves it to unusedN (kept +
-// still billed; delete goes through the server's destroy or a future purge op).
+// DetachVolume unlinks a disk from its slot — PVE moves it to unusedN (kept + still billed).
 func (s *Service) DetachVolume(ctx context.Context, projectID string, vmid int, volID string) error {
 	vm, slot, err := s.volumeSlot(ctx, projectID, vmid, volID)
 	if err != nil {

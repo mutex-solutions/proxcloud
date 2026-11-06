@@ -334,12 +334,9 @@ sequenceDiagram
   T->>L: lock
   T->>PS: TeardownProjectNetworks
   PS->>PVE: remove subnets, vnets (staged), project isolation rule
-  opt vnets were staged
+  T->>PS: DeleteProjectZoneIfEmpty (staged)
+  opt anything staged
     T->>PS: ApplyAndWait
-  end
-  T->>PS: DeleteProjectZoneIfEmpty
-  opt evpn-per-project zone left
-    T->>PS: ApplyAndWait again
   end
   T->>PS: DeleteProjectSecurityGroups
   T->>L: unlock

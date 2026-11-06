@@ -52,14 +52,10 @@ import {
 // ── helpers ─────────────────────────────────────────────────────────────────
 type Obj = Record<string, any>
 const asObj = (v: unknown): Obj => (v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : {})
-const asArr = (v: unknown): any[] => (Array.isArray(v) ? v : [])
 const str = (v: unknown) => (typeof v === "string" ? v : "")
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
-// The named feature components the Features tab toggles.
-const FEATURE_COMPONENTS = ["volume-backup", "volume-snapshot", "image-download"]
 // The console types the PVE console endpoint serves (VNC ticket + serial terminal).
-const CONSOLE_TYPES = ["NOVNC", "SERIAL"]
 // Proxmox providers: the keys the PVE create paths enforce (externalservice.PVEQuotaKeys), seeded onto
 // each new project; "gpu" edits quota.gpu["*"] (any model).
 const PVE_QUOTA_KEYS = ["servers", "vcpus", "ramMb", "diskGb", "networks", "floatingIps", "gpu"]
@@ -541,65 +537,6 @@ function ConfigurationTab({ id, provider }: TabProps) {
           disabled={save.isPending}
         >
           {save.isPending ? "Saving…" : "Save configuration"}
-        </Button>
-      </CardContent>
-    </Card>
-  )
-}
-
-// ── 5. Features (component toggles + console type)  ──────────────────────────
-function FeaturesTab({ id, provider }: TabProps) {
-  const features = asObj((provider.config as Obj)?.features)
-  const compMap: Record<string, boolean> = {}
-  for (const c of asArr(features.components)) if (asObj(c).name) compMap[str(asObj(c).name)] = asObj(c).enabled === true
-  const [comps, setComps] = useState<Record<string, boolean>>(() => {
-    const seed: Record<string, boolean> = {}
-    for (const n of FEATURE_COMPONENTS) seed[n] = compMap[n] === true
-    return seed
-  })
-  const storedConsole = asArr(features.enabledConsoleTypes).map(String)[0] || asArr((provider.config as Obj)?.enabledConsoleTypes).map(String)[0] || "NOVNC"
-  const [consoleType, setConsoleType] = useState(storedConsole)
-  const save = useEsSave(id)
-
-  const submit = () => {
-    // Merge over the stored features (keep any other stored keys, e.g. publicNetworks),
-    // then overwrite the known component set (preserving any unknown stored components).
-    const merged: Record<string, boolean> = { ...compMap }
-    for (const n of FEATURE_COMPONENTS) merged[n] = comps[n]
-    const components = Object.entries(merged).map(([name, enabled]) => ({ name, enabled }))
-    save.mutate({ path: `/admin/service/${id}/features`, body: { ...features, components, enabledConsoleTypes: [consoleType] } })
-  }
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-eyebrow">Feature components</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="divide-y">
-          {FEATURE_COMPONENTS.map((n) => (
-            <div key={n} className="flex items-center justify-between py-2">
-              <span className="font-mono text-xs">{n}</span>
-              <Switch checked={comps[n]} onCheckedChange={(on) => setComps((c) => ({ ...c, [n]: on }))} aria-label={n} />
-            </div>
-          ))}
-        </div>
-        <div className="grid max-w-md gap-2">
-          <Label htmlFor="es-console">Console type</Label>
-          <Select value={consoleType} onValueChange={setConsoleType}>
-            <SelectTrigger id="es-console" className="w-full sm:w-56">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {CONSOLE_TYPES.map((c) => (
-                <SelectItem key={c} value={c}>
-                  {c}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <Button onClick={submit} disabled={save.isPending}>
-          {save.isPending ? "Saving…" : "Save features"}
         </Button>
       </CardContent>
     </Card>
@@ -1178,7 +1115,6 @@ const TAB_DEFS = [
   { v: "storage", label: "Storage" },
   { v: "services", label: "Services" },
   { v: "configuration", label: "Configuration" },
-  { v: "features", label: "Features" },
   { v: "quota", label: "Quota" },
   { v: "gpu", label: "GPU" },
   { v: "metrics", label: "Metrics" },
@@ -1265,9 +1201,6 @@ export default function CloudProviderDetailPage() {
         </TabsContent>
         <TabsContent value="configuration" className="mt-4">
           <ConfigurationTab id={id} provider={p} />
-        </TabsContent>
-        <TabsContent value="features" className="mt-4">
-          <FeaturesTab id={id} provider={p} />
         </TabsContent>
         <TabsContent value="quota" className="mt-4">
           <QuotaTab id={id} provider={p} />

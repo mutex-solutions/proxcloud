@@ -67,7 +67,7 @@ export default function VolumesPage() {
 
   const [createOpen, setCreateOpen] = useState(false)
   // serverId = the server externalId: a Proxmox disk is created on (and belongs to) a server.
-  const [form, setForm] = useState({ name: "", size: "10", type: "", serverId: "" })
+  const [form, setForm] = useState({ size: "10", type: "", serverId: "" })
   const [extendTarget, setExtendTarget] = useState<CloudResource | null>(null)
   const [extendSize, setExtendSize] = useState("")
   const [deleteTarget, setDeleteTarget] = useState<CloudResource | null>(null)
@@ -203,7 +203,6 @@ export default function VolumesPage() {
         body: {
           type: "VOLUME",
           data: {
-            name: form.name,
             size: Number(form.size),
             type: selectedVolumeType,
             serverId: form.serverId,
@@ -214,7 +213,7 @@ export default function VolumesPage() {
     onSuccess: () => {
       toast.success("Volume created")
       setCreateOpen(false)
-      setForm({ name: "", size: "10", type: "", serverId: "" })
+      setForm({ size: "10", type: "", serverId: "" })
       invalidate()
       void qc.invalidateQueries({ queryKey: ["project-quota", pid] })
     },
@@ -422,10 +421,6 @@ export default function VolumesPage() {
           </DialogHeader>
           <div className="grid gap-4">
             <div className="grid gap-2">
-              <Label htmlFor="vol-name">Name</Label>
-              <Input id="vol-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </div>
-            <div className="grid gap-2">
               <Label htmlFor="vol-size">Size (GB)</Label>
               <Input
                 id="vol-size"
@@ -532,7 +527,6 @@ export default function VolumesPage() {
             <Button
               onClick={() => create.mutate()}
               disabled={
-                !form.name ||
                 !form.serverId ||
                 !scope ||
                 volumeTypes.isLoading ||

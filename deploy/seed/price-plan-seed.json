@@ -272,7 +272,7 @@
       "modifiers": []
     },
     {
-      "name": "Floating IP",
+      "name": "Public IP",
       "timeUnit": "hour",
       "resourceType": "floating_ip",
       "pricePlanId": "<PLAN_ID>",

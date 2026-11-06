@@ -173,6 +173,7 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 
 // pveDeleteNetwork removes a vnet (guarded: no pool VM NIC may sit on it).
 func (h *Handler) pveDeleteNetwork(ctx context.Context, w http.ResponseWriter, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) bool {
+	ctx = context.WithoutCancel(ctx) // see pveCreate
 	ps, err := h.pveFor(es)
 	if err != nil {
 		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox client not ready")

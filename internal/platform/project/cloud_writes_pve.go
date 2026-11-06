@@ -69,6 +69,8 @@ func (h *Handler) pveRegion(p *Project, es *externalservice.ExternalService) str
 // Types: SERVER (clone-from-template) and KEYPAIR (platform-only — no cloud call;
 // the public key is injected into VMs via cloud-init at create time).
 func (h *Handler) pveCreate(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, reqType string, data map[string]any) {
+	// A client that goes away must not cancel a change half way: it would leave a half-built VM.
+	r = r.WithContext(context.WithoutCancel(r.Context()))
 	switch reqType {
 	case cloud.TypeServer:
 		h.pveCreateServer(w, r, u, proj, es, data)
@@ -115,14 +117,14 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 	// A server must sit on one of the project's vnets: the template's own NIC is an
 	// admin bridge with no anti-spoof set, so ipfilter would leave it dead (and
 	// without ipfilter it would be an open L2 foothold).
-	bridge := h.pveResolveBridge(ctx, proj, data)
+	bridge := h.pveResolveBridge(ctx, es, proj, data)
 	if bridge == "" {
 		h.fail(w, httpx.BadRequest("Select one of this project's networks for the server"))
 		return
 	}
-	rootGiB := 0
+	rootGiB, rootType := 0, ""
 	if rv, ok := data["rootVolume"].(map[string]any); ok {
-		rootGiB = intAny(rv["sizeGiB"])
+		rootGiB, rootType = intAny(rv["sizeGiB"]), strAny(rv["type"])
 	}
 	if rootGiB > 0 && rootGiB < tpl.MinDiskGb {
 		h.fail(w, httpx.BadRequest(fmt.Sprintf("Root disk must be at least %d GB for this image", tpl.MinDiskGb)))
@@ -178,10 +180,18 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf("Image %q is not available right now", tpl.Name)))
 		return
 	}
+	// The boot volume type the user picked, else the flavor's profile, else the provider default.
 	profiles := es.PVEStorageProfiles()
-	profileSlug := fl.StorageProfile
+	profileSlug := rootType
+	if profileSlug == "" {
+		profileSlug = fl.StorageProfile
+	}
 	if profileSlug == "" {
 		profileSlug = es.PVEDefaultStorageProfile()
+	}
+	if _, known := profiles[profileSlug]; !known && rootType != "" {
+		h.fail(w, httpx.BadRequest("Unknown volume type"))
+		return
 	}
 	pl, herr := pvePlacement(tpl, pve.TemplateShared(tplCfg, caps), profileSlug, profiles, caps)
 	if herr != nil {
@@ -437,10 +447,9 @@ func pveCapacityDisk(cfg pve.VMConfig, classOf func(storage string) string) *pve
 	return nil
 }
 
-// pveResolveBridge maps the wizard's first network interface to a PVE bridge/vnet.
-// Phase 4 stamps data.network.vnet on NETWORK rows; before that, creates keep the
-// template's own NIC ("" = no override).
-func (h *Handler) pveResolveBridge(ctx context.Context, proj *Project, data map[string]any) string {
+// pveResolveBridge maps the wizard's first network interface (the row's external id, the vnet;
+// the API also takes the cache id) to the project's vnet ("" = not one of its networks).
+func (h *Handler) pveResolveBridge(ctx context.Context, es *externalservice.ExternalService, proj *Project, data map[string]any) string {
 	var netID string
 	if ifs, ok := data["networkInterfaces"].([]any); ok && len(ifs) > 0 {
 		if m, ok := ifs[0].(map[string]any); ok {
@@ -455,7 +464,10 @@ func (h *Handler) pveResolveBridge(ctx context.Context, proj *Project, data map[
 	if netID == "" {
 		return ""
 	}
-	cr, err := h.cloud.FindByID(ctx, netID)
+	cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, netID)
+	if err != nil || cr == nil {
+		cr, err = h.cloud.FindByID(ctx, netID)
+	}
 	if err != nil || cr == nil || cr.ProjectID != proj.ID || cr.Type != cloud.TypeNetwork {
 		return ""
 	}
@@ -543,6 +555,7 @@ func (h *Handler) pveCreateKeypair(w http.ResponseWriter, r *http.Request, u *us
 
 // pveDeleteResource deletes one cached resource on a proxmox provider.
 func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) error {
+	ctx = context.WithoutCancel(ctx) // see pveCreate
 	switch cr.Type {
 	case cloud.TypeServer:
 		if h.pveFor == nil {
@@ -636,6 +649,7 @@ func (h *Handler) pveArchiveServerVolumes(ctx context.Context, es *externalservi
 // pveAction handles POST /cloud/{id}/action for proxmox resources. Returns true
 // when the action was handled (the caller falls through to 400 otherwise).
 func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
+	r = r.WithContext(context.WithoutCancel(r.Context())) // see pveCreate
 	ctx := r.Context()
 	if action == "INVOKEACTION" {
 		action = strings.ToUpper(strAny(data["action"]))
@@ -685,7 +699,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 			Slug: fl.Slug, VCPUs: fl.VCPUs, RAMMb: fl.RAMMb, DiskGb: fl.DiskGb,
 			StorageProfile: fl.StorageProfile, GPUModel: fl.GPUModel, GPUCount: fl.GPUCount,
 		}); err != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			h.fail(w, pveVolumeErr(err))
 			return true
 		}
 		h.pveRefreshServerRow(ctx, ps, proj, cr)
@@ -700,7 +714,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 			return true
 		}
 		if err := ps.RenameServer(ctx, proj.ID, cr.ExternalID, name); err != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			h.fail(w, pveVolumeErr(err))
 			return true
 		}
 		if srv, ok := cr.Data["server"].(map[string]any); ok {
@@ -714,7 +728,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 		return true
 
 	case "REMOTECONTROL", "SERIAL_CONSOLE":
-		backendURL, ticket, cerr := ps.Console(ctx, proj.ID, cr.ExternalID, action == "SERIAL_CONSOLE")
+		backendURL, ticketUser, ticket, cerr := ps.Console(ctx, proj.ID, cr.ExternalID, action == "SERIAL_CONSOLE")
 		if cerr != nil {
 			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, cerr.Error()))
 			return true
@@ -725,7 +739,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 		}
 		// The PVE VNC ticket doubles as the RFB password — the FE passes it as the
 		// noVNC credential (`password` in the result).
-		h.emitPVEConsole(w, r, u, proj, cr, es.ID, cr.ExternalID, action, backendURL, kind, ticket)
+		h.emitPVEConsole(w, r, u, proj, cr, es.ID, cr.ExternalID, action, backendURL, kind, ticketUser, ticket)
 		return true
 
 	case "SHOW_CONSOLE_OUTPUT":
@@ -882,7 +896,7 @@ func sshFingerprint(pubKey string) string {
 // emitPVEConsole mints the console token for a PVE vncwebsocket/termproxy backend.
 // The proxy dials it with the provider's API-token header + pinned TLS; the response carries the VNC ticket as
 // `password` — noVNC must present it as the RFB credential.
-func (h *Handler) emitPVEConsole(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, cr *cloud.CloudResource, svcID, externalID, action, backendURL, kind, password string) {
+func (h *Handler) emitPVEConsole(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, cr *cloud.CloudResource, svcID, externalID, action, backendURL, kind, ticketUser, password string) {
 	if h.downloads == nil {
 		h.fail(w, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "console not configured"))
 		return
@@ -904,6 +918,7 @@ func (h *Handler) emitPVEConsole(w http.ResponseWriter, r *http.Request, u *user
 		"protocol": proto,
 		"type":     kind,
 		"url":      h.consoleWebsocketURL(tok.ID),
+		"user":     ticketUser,
 		"password": password,
 	}})
 }
@@ -989,12 +1004,15 @@ func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.Extern
 	}
 }
 
-// pveVolumeErr maps a pve volume or power error: a refusal the caller can fix (pve.ConflictError) is
-// 409 with its message, anything else is PVE failing (502).
+// pveVolumeErr maps a pve server or volume error: a refusal the caller can fix (pve.ConflictError) is
+// 409 with its message, a VM locked by a running task too, anything else is PVE failing (502).
 func pveVolumeErr(err error) *httpx.HTTPError {
 	var ce *pve.ConflictError
 	if errors.As(err, &ce) {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, ce.Msg)
+	}
+	if strings.Contains(err.Error(), "can't lock file") {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, "The server is busy with another operation. Try again in a moment")
 	}
 	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
 }
@@ -1043,6 +1061,10 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 			}
 		}
 		aerr = ps.AttachVolume(ctx, proj.ID, vmid, cr.ExternalID, target)
+		if aerr == nil && target != "" && target != strconv.Itoa(vmid) {
+			// Moving a disk to another server renames it: the sync below adds the new row.
+			_ = h.cloud.DeleteAndArchive(ctx, cr, time.Now().UTC())
+		}
 	case "LIST_ATTACH_TARGETS":
 		vms, err := ps.AttachTargets(ctx, proj.ID, vmid, cr.ExternalID)
 		if err != nil {
@@ -1205,6 +1227,21 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		return false
 	}
+	if cr.Type == cloud.TypeServer && action == "LIST_SECURITY_GROUPS" {
+		ids, err := ps.VMSecurityGroups(ctx, proj.ID, cr.ExternalID)
+		if err != nil {
+			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			return true
+		}
+		rows := []cloud.CloudResource{}
+		for _, id := range ids {
+			if g, err := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, id); err == nil && g != nil {
+				rows = append(rows, *g)
+			}
+		}
+		httpx.OK(w, map[string]any{"result": rows})
+		return true
+	}
 	// Server-side attach/detach: the group is named in data.
 	if cr.Type == cloud.TypeServer && (action == "ADD_SECURITY_GROUP" || action == "REMOVE_SECURITY_GROUP") {
 		groupID := strAny(data["securityGroup"])
@@ -1218,6 +1255,18 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 		if g, err := h.cloud.FindByID(ctx, groupID); err == nil && g != nil && g.Type == cloud.TypeSecurityGroup && g.ProjectID == proj.ID {
 			groupID = g.ExternalID
 		}
+		// The console names the group by its display name.
+		ids, gerr := ps.ServerSecurityGroups(ctx, proj.ID, []string{groupID}, es.PVENetworkConfig().CIDRPool)
+		var notFound *pve.SecurityGroupNotFoundError
+		if errors.As(gerr, &notFound) {
+			h.fail(w, httpx.BadRequest("Security group not found: "+notFound.Ref))
+			return true
+		}
+		if gerr != nil {
+			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, gerr.Error()))
+			return true
+		}
+		groupID = ids[0]
 		var aerr error
 		if action == "ADD_SECURITY_GROUP" {
 			aerr = ps.AttachSecurityGroup(ctx, proj.ID, cr.ExternalID, groupID)
