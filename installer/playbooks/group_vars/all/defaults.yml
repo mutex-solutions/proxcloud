@@ -1,0 +1,150 @@
+# Every installer option with its easiest default. Override any of them under `proxcloud:` in the
+# site's group_vars; the two are deep-merged into `pc` (computed.yml).
+pc_defaults:
+  mode: allinone                 # split (services cluster for managed K8s / DBaaS) arrives with P7
+  namespace: proxcloud
+
+  pve:
+    api_url: ""                  # as the installer reaches it
+    portal_api_url: ""           # as the portal (mgmt cluster) reaches it; default: api_url
+    min_version: "9.2"
+    fingerprint: ""              # default: pinned on first contact (generated/pve-fingerprint)
+    pool_prefix: pc-             # one pool per project; must not match the system pool
+    system_pool: proxcloud-system
+
+  preflight:
+    firewall: fail               # fail | warn: datacenter firewall on, nftables on every node
+    fio: auto                    # auto = when the inventory group `pve` has hosts | false
+    fio_runtime: 20              # seconds per fio job
+    # Class suggestion thresholds (calibration knobs): p99 sync-write latency in ms, randread IOPS.
+    fio_performance_ms: 1
+    fio_standard_ms: 5
+    fio_capacity_iops: 2000
+
+  mgmt:
+    placement: ssh               # ssh = hosts in the inventory group mgmt | pve-vm = VMs created here
+    k3s_extra_args: ""
+    # For the VMs the installer creates (mgmt with pve-vm, the RustFS VM):
+    ssh_public_key: ""           # default ~/.ssh/id_rsa.pub, else id_ed25519.pub
+    ssh_common_args: ""          # e.g. -o ProxyJump=root@bastion.example.com
+    vm:                          # placement: pve-vm
+      servers: 1                 # 1 or 3
+      os: debian-13
+      user: debian
+      cores: 4
+      memory: 8192
+      disk: 60
+      storage: ""                # default: the default profile's storage
+      bridge: vmbr0
+      vlan: 0
+      vmid_base: 9001
+      nodes: []                  # default: every node, in order
+      ips: []                    # one CIDR per server, e.g. [192.0.2.30/24]
+      gateway: ""
+      nameserver: ""
+
+  ingress:
+    domain: ""                   # default: <first mgmt ip>.sslip.io
+    tls: none                    # none | acme (cert-manager, needs public DNS) | a TLS Secret name
+    acme_email: ""
+
+  images:
+    # true (default, until there is a published release) = build the three images and the chart from
+    # this checkout on the installer host (needs docker and helm there) and push them to a registry on
+    # the mgmt cluster. false = pull versions.yml's `proxcloud` release from the registry below.
+    build: true
+    registry: ghcr.io/mutex-solutions
+    chart_repo: ghcr.io/mutex-solutions/charts
+    # Private registry credentials (optional): {username, password}.
+    pull_secret: {}
+
+  keycloak:
+    main_realm: proxcloud
+    admin_realm: proxcloud-admin
+    operator:                    # first operator login; the password lands in generated/
+      username: admin
+      email: admin@example.com
+    tenant_users: []             # optional seed logins: [{username, email, password}]
+
+  # Tenant networks. Default: one EVPN zone over all nodes, first node as exit node.
+  # Needs frr-pythontools on the nodes; on one node use kind: simple.
+  network:
+    default_zone: overlay        # at most 8 characters
+    kind: evpn                   # evpn | simple | vlan
+    bridge: ""                   # vlan only
+    vlan_min: 100                # vlan only
+    vlan_max: 199                # vlan only
+    controller: proxcloud
+    asn: 65000
+    vrf_vxlan: 10000
+    exit_nodes: []               # default: the first node
+    cidr_pool: 10.100.0.0/16
+    isolation: shared            # shared | evpn (a zone per project)
+    blocked_cidrs: []            # networks tenants must not reach, beyond the node management networks
+    public: {}                   # {id, name, cidr, gateway, ranges}
+
+  # Provider registration. storage_profiles empty = what preflight detected.
+  provider:
+    name: Proxmox
+    region: pve
+    region_name: Default
+    default_profile: ""          # default: std when detected, else the first detected
+    # Display names for the discovered templates (config.templates overlay).
+    templates:
+      debian-13: {name: Debian 13, osDistro: debian}
+      ubuntu-2404: {name: Ubuntu 24.04, osDistro: ubuntu}
+    quota: {servers: 20, vcpus: 80, ramMb: 102400, diskGb: 2000, networks: 10, floatingIps: 5}
+  storage_profiles: {}           # {slug: {storages: {"*": id}, snapshots: bool, ...}}
+  storage_classes: {}            # {storage: performance|standard|capacity}: confirm a suggestion
+  flavors: []                    # beyond deploy/seed/flavors.json: [{slug, name, vcpus, ramMb, diskGb}]
+
+  templates:
+    os: [debian-13, ubuntu-2404]  # catalog slugs; a slug lands in a tag, so no dots
+    storage: ""                  # default: shared `images` store on a NAS, else the local profile storage
+    import_storage: ""           # default: the first store with `import` content
+    bridge: vmbr0
+    vlan: 0
+    build_ip: ""                 # CIDR, required to build
+    build_gateway: ""
+    nameserver: ""
+    # auto = one copy per node unless the default profile is on shared storage. PVE clones to
+    # another node only from shared to shared storage, so local VM disks need a copy on each node.
+    per_node: auto
+    keep: 2                      # versions kept per OS and node
+
+  nas:
+    host: ""                     # TrueNAS address; empty = no NAS stage
+    pool: ""                     # truenas-app: the pool Docker apps run on
+    exports: {}                  # {templates: path, capacity: path, backup: path}
+    names: {templates: nas-templates, capacity: nas-capacity, backup: nas-backup}
+    api_url: ""                  # default https://<host>; object_store.mode=truenas-app needs vault truenas_api_key
+
+  object_store:
+    mode: vm                     # vm | truenas-app | external | ceph-rgw
+    vm:
+      vmid: 9100
+      name: pc-rustfs
+      os: debian-13
+      user: debian
+      node: ""                   # default: first node
+      cores: 2
+      memory: 4096
+      disk: 20
+      data_disk: 200             # GiB, XFS in the guest
+      data_storage: ""           # default: nas-capacity when present, else the default profile storage
+      storage: ""                # boot disk; default: the default profile's storage
+      bridge: vmbr0
+      vlan: 0
+      ip: ""                     # CIDR
+      gateway: ""
+      nameserver: ""
+    truenas_app:
+      name: rustfs
+      train: community
+      s3_port: 30900
+      console_port: 30901
+    # mode external / ceph-rgw: an existing S3 endpoint. ceph-rgw also registers the ceph-s3 provider.
+    endpoint: ""
+    access_key: ""
+    secret_key: ""
+    region: us-east-1

@@ -1,0 +1,170 @@
+# Stage 00: read-only checks, plus the fio class suggestion (scratch volumes only).
+- name: Preflight against the Proxmox API
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults: &pve
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  tasks:
+    - name: Check the inventory
+      ansible.builtin.assert:
+        that:
+          - pc.pve.api_url | length > 0
+          - pc.mode == 'allinone'
+          - pc.mgmt.placement in ['ssh', 'pve-vm']
+          - pc.object_store.mode in ['vm', 'truenas-app', 'external', 'ceph-rgw']
+          - pc.mgmt.placement == 'pve-vm' or groups['mgmt'] | default([]) | length > 0
+          - groups['mgmt'] | default([]) | length in [0, 1, 3] and pc.mgmt.vm.servers in [1, 3]
+          - not pc.pve.system_pool.startswith(pc.pve.pool_prefix)
+          - pc.network.default_zone | length <= 8
+        fail_msg: >-
+          Fix the inventory: proxcloud.pve.api_url is required, mode=split is not available before P7,
+          mgmt needs 1 or 3 servers, the system pool must not start with pool_prefix, a zone name has at
+          most 8 characters.
+
+    - name: Check the build tools
+      when: pc.images.build
+      ansible.builtin.shell: docker version --format '{{ "{{" }}.Server.Version{{ "}}" }}' && helm version --short
+      changed_when: false
+      register: pc_tools
+      failed_when: pc_tools.rc != 0
+      # images.build needs both on this host; images.build=false pulls a published release instead.
+
+    - name: Create the generated directory
+      ansible.builtin.file: {path: "{{ pc_gen }}", state: directory, mode: "0700"}
+
+    - name: Read the API certificate fingerprint
+      ansible.builtin.shell: |
+        set -o pipefail
+        openssl s_client -connect {{ pc.pve.api_url | urlsplit('netloc') | quote }} </dev/null 2>/dev/null \
+          | openssl x509 -noout -fingerprint -sha256 | cut -d= -f2
+      args: {executable: /bin/bash}
+      changed_when: false
+      register: pc_fp
+
+    - name: Pin the fingerprint on first contact
+      ansible.builtin.copy:
+        dest: "{{ pc_gen }}/pve-fingerprint"
+        content: "{{ pc.pve.fingerprint or pc_fp.stdout }}\n"
+        force: false
+        mode: "0600"
+
+    - name: Refuse to send credentials to an unexpected certificate
+      ansible.builtin.assert:
+        that: pc_fp.stdout | trim == lookup('ansible.builtin.file', pc_gen ~ '/pve-fingerprint') | trim
+        fail_msg: >-
+          {{ pc.pve.api_url }} presents certificate {{ pc_fp.stdout }}, not the pinned one in
+          {{ pc_gen }}/pve-fingerprint. If the certificate was renewed on purpose, delete that file.
+
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+
+    - name: Read version, datacenter firewall and node firewall options
+      ansible.builtin.uri: {url: "{{ pc_api }}/{{ item }}"}
+      loop: >-
+        {{ ['version', 'cluster/firewall/options', 'cluster/status'] +
+           pc_nodes | map('regex_replace', '^(.*)$', 'nodes/\1/firewall/options') | list }}
+      register: pc_pf
+
+    - name: Check the Proxmox version
+      ansible.builtin.assert:
+        that: pc_pf.results[0].json.data.version is version(pc.pve.min_version, '>=')
+        fail_msg: "Proxmox VE {{ pc_pf.results[0].json.data.version }} found; ProxCloud needs {{ pc.pve.min_version }} or newer."
+
+    - name: Evaluate the firewall
+      ansible.builtin.set_fact:
+        pc_firewall_issues: >-
+          {{ ([] if pc_pf.results[1].json.data.enable | default(0) | int == 1 else ['the datacenter firewall is off']) +
+             (pc_pf.results[3:] | rejectattr('json.data.nftables', 'defined') | map(attribute='item') | list +
+              pc_pf.results[3:] | selectattr('json.data.nftables', 'defined') | rejectattr('json.data.nftables', 'eq', 1) | map(attribute='item') | list)
+             | map('regex_replace', '^nodes/(.*)/firewall/options$', 'node \1 does not run the nftables firewall') | list }}
+
+    - name: Check the firewall
+      ansible.builtin.assert:
+        that: pc_firewall_issues | length == 0 or pc.preflight.firewall == 'warn'
+        fail_msg: "{{ pc_firewall_issues | join('; ') }}. Tenant security groups depend on them; preflight.firewall=warn proceeds anyway."
+
+    - name: Report firewall warnings
+      when: pc_firewall_issues | length > 0
+      ansible.builtin.debug: {msg: "WARNING: {{ pc_firewall_issues | join('; ') }}"}
+
+    - name: Check FRR on the nodes (EVPN only)
+      when: pc.network.kind == 'evpn'
+      ansible.builtin.uri: {url: "{{ pc_api }}/nodes/{{ item }}/apt/versions"}
+      loop: "{{ pc_nodes }}"
+      register: pc_apt
+      failed_when: >-
+        pc_apt.json.data | selectattr('Package', 'eq', 'frr-pythontools')
+        | selectattr('CurrentState', 'eq', 'Installed') | length == 0
+      loop_control: {label: "{{ item }}"}
+
+    - name: Check the public network
+      when: pc.network.public
+      ansible.builtin.uri: {url: "{{ pc_api }}/nodes/{{ pc_nodes[0] }}/network"}
+      register: pc_net
+      failed_when: >-
+        pc.network.public.id in (pc_net.json.data | selectattr('gateway', 'defined') | map(attribute='iface') | list)
+      # The portal refuses the management bridge as a public network; say so before installing.
+
+    - name: Check there is somewhere to put VM disks
+      ansible.builtin.assert:
+        that: pc_default_profile | length > 0
+        fail_msg: "No storage with `images` content that can back a profile was detected ({{ pc_storage_rows | map(attribute='storage') | join(', ') }})."
+
+    - name: Report what was detected
+      ansible.builtin.debug:
+        msg: >-
+          Proxmox {{ pc_pf.results[0].json.data.version }}, nodes {{ pc_nodes | join(', ') }},
+          tier {{ pc_detected.tier }}, profiles {{ pc_profiles | list | join(', ') }} (default {{ pc_default_profile }}),
+          templates on {{ pc_template_storage }}, cloud images on {{ pc_import_storage }}.
+
+- name: Check the mgmt hosts
+  hosts: mgmt
+  gather_facts: false
+  tasks:
+    - name: Refuse a Proxmox host
+      ansible.builtin.shell: test -d /etc/pve || dpkg -s pve-manager >/dev/null 2>&1
+      register: pc_is_pve
+      changed_when: false
+      failed_when: pc_is_pve.rc == 0
+    # k3s on a Proxmox node fights the node's firewall, AppArmor and pve-firewall over FORWARD, and its
+    # evictions see ZFS ARC as used memory. Use mgmt.placement: pve-vm instead.
+
+    - name: Check the host can reach the Proxmox API
+      ansible.builtin.command: curl -ksS -m 10 -o /dev/null -w '%{http_code}' {{ hostvars.localhost.pc_portal_pve_url | default(pc_portal_pve_url) }}/api2/json/version
+      changed_when: false
+      register: pc_reach
+      failed_when: pc_reach.rc != 0 or pc_reach.stdout not in ['200', '401']
+
+- name: Suggest a class per storage with fio
+  # Only ever a suggestion (plan S19-UX): stage 60 stores it as suggestedClass, the operator confirms.
+  hosts: pve[0]
+  gather_facts: false
+  vars:
+    fio_file: "{{ pc_gen }}/storage-classes.json"
+    fio_wanted: "{{ pc.preflight.fio != false and (pc_rebench | default(false) | bool or fio_file is not file) }}"
+    rows: "{{ hostvars.localhost.pc_storage_rows | selectattr('content', 'search', 'images') | list }}"
+  tasks:
+    - name: Install fio
+      when: fio_wanted
+      ansible.builtin.apt: {name: fio, state: present, update_cache: true, cache_valid_time: 86400}
+    - name: Run fio on a 4 GiB scratch volume
+      when: fio_wanted
+      ansible.builtin.script:
+        cmd: "files/fio-class.sh {{ item.storage | quote }} {{ pc.preflight.fio_runtime }}"
+      loop: "{{ rows }}"
+      loop_control: {label: "{{ item.storage }}"}
+      register: pc_fio
+      changed_when: false
+    - name: Record the suggestions
+      when: fio_wanted
+      vars:
+        classes: >-
+          {% set out = {} %}{% for r in pc_fio.results %}{% set j = r.stdout | from_json %}{%
+          set _ = out.update({r.item.storage: {'p99_ms': j.p99_ms, 'iops': j.iops, 'class': (j.p99_ms | pc_fio_class(j.iops, pc.preflight.fio_performance_ms, pc.preflight.fio_standard_ms, pc.preflight.fio_capacity_iops))}}) %}{% endfor %}{{ out }}
+      delegate_to: localhost
+      ansible.builtin.copy: {dest: "{{ fio_file }}", content: "{{ classes | to_nice_json }}\n", mode: "0600"}
+      register: pc_fio_saved
+    - name: Show the suggestions
+      when: pc_fio_saved is changed
+      ansible.builtin.debug: {msg: "{{ lookup('ansible.builtin.file', fio_file) }}"}

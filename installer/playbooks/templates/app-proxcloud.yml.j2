@@ -1,0 +1,104 @@
+{% macro ingress(host) %}
+{ enabled: true, className: traefik, host: {{ host }}{% if pc.ingress.tls == 'acme' %}, annotations: {cert-manager.io/cluster-issuer: letsencrypt}, tls: [{hosts: [{{ host }}], secretName: {{ host | replace('.', '-') }}-tls}]{% elif pc.ingress.tls != 'none' %}, tls: [{hosts: [{{ host }}], secretName: {{ pc.ingress.tls }}}]{% endif %} }
+{% endmacro %}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: proxcloud
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: {{ pc_chart_repo }}
+    chart: proxcloud
+    targetRevision: {{ pc_chart_version | to_json }}
+    helm:
+      releaseName: proxcloud
+      valuesObject:
+        fullnameOverride: proxcloud
+{% if pc.images.pull_secret %}
+        imagePullSecrets: [{name: proxcloud-pull}]
+{% endif %}
+        api:
+          image: {repository: {{ pc_image_prefix }}-api, tag: {{ pc_image_tag | to_json }}}
+          existingSecret: proxcloud-secrets
+          # The Secret holds db-url + encryption-key; RabbitMQ comes from the operator's Secret.
+          selfUrls:
+            base: {{ pc_url_app }}
+            api: {{ pc_url_api }}
+            ui: {{ pc_url_app }}
+            admin: {{ pc_url_admin }}
+          jobs: {schedulerEnabled: true}
+          ingress: {{ ingress('api.' ~ pc_domain) | trim }}
+        ui:
+          image: {repository: {{ pc_image_prefix }}-web, tag: {{ pc_image_tag | to_json }}}
+          ingress: {{ ingress('app.' ~ pc_domain) | trim }}
+        admin:
+          image: {repository: {{ pc_image_prefix }}-admin, tag: {{ pc_image_tag | to_json }}}
+          ingress: {{ ingress('admin.' ~ pc_domain) | trim }}
+        auth:
+          main:
+            issuer: {{ pc_url_id }}/realms/{{ pc.keycloak.main_realm }}
+            discoveryUri: http://proxcloud-keycloak-http/realms/{{ pc.keycloak.main_realm }}
+          admin:
+            issuer: {{ pc_url_id }}/realms/{{ pc.keycloak.admin_realm }}
+            discoveryUri: http://proxcloud-keycloak-http/realms/{{ pc.keycloak.admin_realm }}
+          adminApi:
+            issuer: {{ pc_url_id }}/realms/{{ pc.keycloak.admin_realm }}
+            discoveryUri: http://proxcloud-keycloak-http/realms/{{ pc.keycloak.admin_realm }}
+        cnpg:
+          existingSecret: proxcloud-db-owner
+          keycloak: {enabled: true, existingSecret: proxcloud-keycloak-db}
+        keycloakx:
+          enabled: true
+          fullnameOverride: proxcloud-keycloak
+          image: {tag: {{ pc_ver.keycloak | to_json }}}
+          command:
+            - /opt/keycloak/bin/kc.sh
+            - start
+            - --http-enabled=true
+            - --http-port=8080
+            - --proxy-headers=xforwarded
+            # Fixed public issuer; pods reach the same realm through the service, hence backchannel-dynamic.
+            - --hostname={{ pc_url_id }}
+            - --hostname-backchannel-dynamic=true
+          extraEnv: |
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: admin
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: proxcloud-keycloak-admin, key: admin-password}
+          database:
+            vendor: postgres
+            hostname: proxcloud-pg-rw
+            port: 5432
+            database: keycloak
+            username: keycloak
+            existingSecret: proxcloud-keycloak-db
+            existingSecretKey: password
+          ingress:
+            enabled: true
+            ingressClassName: traefik
+            rules:
+              - host: id.{{ pc_domain }}
+                paths:
+                  - {path: /, pathType: Prefix}
+{% if pc.ingress.tls == 'acme' %}
+            annotations: {cert-manager.io/cluster-issuer: letsencrypt}
+            tls: [{hosts: [id.{{ pc_domain }}], secretName: id-tls}]
+{% elif pc.ingress.tls != 'none' %}
+            tls: [{hosts: [id.{{ pc_domain }}], secretName: {{ pc.ingress.tls }}}]
+{% endif %}
+        keycloakConfigCli:
+          enabled: true
+          url: http://proxcloud-keycloak-http
+          existingSecret: proxcloud-keycloak-admin
+          sslRequired: {{ 'none' if pc.ingress.tls == 'none' else 'external' }}
+          requirePkce: {{ (pc.ingress.tls != 'none') | to_json }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ pc.namespace }}
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+    retry: {limit: 10, backoff: {duration: 30s, factor: 2, maxDuration: 5m}}

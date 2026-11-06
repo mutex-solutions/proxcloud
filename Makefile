@@ -9,7 +9,7 @@ VALUES   ?=
 IMAGE    := $(REGISTRY)/proxcloud-api:$(TAG)
 
 # One-line recipes (`target: ; cmd`) avoid Makefile tab pitfalls.
-.PHONY: build vet test test-integration binary image push deploy print-image
+.PHONY: build vet test test-integration binary image push deploy print-image install
 
 build:   ; go build ./...
 vet:     ; go vet ./...
@@ -21,3 +21,5 @@ image:   ; docker build -f deploy/Dockerfile -t $(IMAGE) .
 push:    ; docker push $(IMAGE)
 deploy:  ; helm upgrade --install proxcloud $(CHART) -n $(NS) --create-namespace $(if $(KUBECTX),--kube-context $(KUBECTX)) $(if $(VALUES),-f $(VALUES)) --set api.image.tag=$(TAG)
 print-image: ; @echo $(IMAGE)
+# The one-shot installer: make install INVENTORY=inventory/mysite (relative to installer/).
+install: ; $(MAKE) -C installer install
