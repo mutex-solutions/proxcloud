@@ -22,6 +22,7 @@ const cloudServiceCollection = "externalService"
 func (h *Handler) routeCloudAdmin(r chi.Router) {
 	r.Post("/service/proxmox/auth", h.proxmoxAuth)
 	r.Post("/service/{id}/storage/detect", h.proxmoxDetectStorage)
+	r.Post("/service/{id}/server/{vmid}/migrate", h.proxmoxMigrateServer)
 	r.Put("/service/{id}/storage-classes", h.proxmoxStorageClasses)
 	r.Get("/service/os-images", h.imagesAll)
 	r.Get("/service/regions", h.serviceRegionsList)

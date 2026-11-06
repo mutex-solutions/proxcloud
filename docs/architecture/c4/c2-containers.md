@@ -86,7 +86,7 @@ flowchart TB
     fw["proxmox-firewall (nftables)<br/>datacenter, vnet and VM rules"]:::impl
     sto["Storage profiles<br/>per-node storage ids"]:::impl
     pci["PCI mappings (GPU)"]:::impl
-    ha["HA rules and replication"]:::planned
+    ha["HA rules and replication"]:::impl
   end
 
   subgraph tenantzone["Tenant pools, one per project"]
@@ -118,7 +118,7 @@ flowchart TB
   sto --> ceph
   sto --> zfs
   sto --> nas
-  ha -.-> vm
+  ha --> vm
   svc --> nas
   papi -.-> pbs
 ```
@@ -131,7 +131,7 @@ flowchart TB
 | proxmox-firewall | Cluster isolation rules (reconciled every sync), per-VM anti-spoof (ipfilter, macfilter), security groups as cluster firewall groups. Test connection refuses a cluster with the datacenter firewall off or a node on the legacy iptables firewall. | Implemented |
 | Public networks | Admin-designated bridges with an IPv4 pool; a public NIC (`net1`) gets one address, pinned by ipfilter. The management bridge is refused. | Implemented |
 | PCI mappings | GPU flavors reserve concrete mappings on the scheduled node. | Implemented |
-| HA rules and replication | Protected VMs with replication and node-affinity rules. | Planned |
+| HA rules and replication | Protected VMs with replication and node-affinity rules. | Implemented |
 | Platform-owned VMs | Management cluster VMs and the RustFS VM in a dedicated system pool, the platform token has `NoAccess` there. | Implemented |
 | Services cluster VMs | The services cluster, in the same system pool. | Planned |
 | Proxmox Backup Server | Operator nightly backups, then tenant backup schedules and restore. | Planned |
@@ -151,7 +151,7 @@ flowchart TB
 | Both | Admin-declared profile flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`), validated on save against detection | Shown to tenants as volume-type specs | Implemented |
 | Both | Per-storage capability detection (type table: tier, default class, flags; per-node active/avail) + admin class override | Provider Storage tab; profile validation; scheduler node restriction and free-space filter; template placement | Implemented |
 | Both | Profile `tier` / `class` (derived from its storages) and `bootDisk` / `dbaas` caps, API-gated | Capacity class refuses boot disks (create, retype), server snapshots with an attached capacity disk, and database storage classes named after it; volume billing attributes `profile` and `storage_class` | Implemented |
-| Both | HA / replication gating per profile | Protected add-on | Planned |
+| Both | HA / replication gating per profile | Protected add-on | Implemented |
 
 A storage profile is a slug mapped to a storage id per node (or `*`) plus
 capability flags that may only be a subset of what the detected storage supports.
@@ -222,7 +222,7 @@ flowchart LR
 | Services cluster | Kamaji, DB operators, proxmox-csi, csi-driver-nfs | VMs in a system pool | Planned |
 | Proxmox VE hosts | pveproxy, SDN, proxmox-firewall (nftables), storage, PCI mappings | Proxmox cluster | Implemented |
 | Tenant VMs | QEMU full clones in the project pool | Proxmox cluster | Implemented |
-| HA rules and replication | `ha-manager` rules, `pvesr` | Proxmox cluster | Planned |
+| HA rules and replication | `ha-manager` rules, `pvesr` | Proxmox cluster | Implemented |
 | Ceph (Full tier) | RBD/CephFS for disks, RGW for buckets | Ceph cluster | Implemented |
 | TrueNAS (Standard tier) | NFS, SMB, iSCSI, WebSocket API | Appliance outside the Proxmox cluster | Implemented |
 | RustFS (Standard tier) | S3 + admin API, deployed by the installer with internal buckets; also serves tenant buckets (provider `rustfs`, registered by the installer) | VM in the system pool, or TrueNAS app | Implemented |

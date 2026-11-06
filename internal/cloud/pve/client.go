@@ -19,11 +19,15 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,6 +37,12 @@ type Config struct {
 	// APIURL is the base URL up to and including the host:port, e.g. "https://pve1.lab:8006".
 	// "/api2/json" is appended here — operators paste the UI origin.
 	APIURL string
+	// APIURLs are other nodes (or a VIP) to fail over to when the current one is unreachable. Nodes have different
+	// certificates: use CACert, a single Fingerprint only ever matches one of them.
+	APIURLs []string
+	// CACert (PEM) pins the cluster CA: any certificate it signed is accepted, whatever the host name. It takes
+	// precedence over Fingerprint. PVE's is /etc/pve/pve-root-ca.pem.
+	CACert string
 	// TokenID is the full token identity "user@realm!tokenid" (config side, not secret).
 	TokenID string
 	// Secret is the token's secret UUID (secret side, encrypted at rest).
@@ -49,9 +59,22 @@ type Config struct {
 
 // Client is a thin transport over one PVE cluster's API.
 type Client struct {
-	base  string // ".../api2/json"
-	token string // "PVEAPIToken=user@realm!tokenid=secret"
+	bases []string // ".../api2/json", the configured order
+	token string   // "PVEAPIToken=user@realm!tokenid=secret"
 	http  *http.Client
+}
+
+// lastGood remembers per endpoint list which one answered last. A Client lives for one request, and without this each
+// of them would wait out a dial to the dead node first.
+var lastGood sync.Map
+
+func (c *Client) goodIndex() int {
+	if v, ok := lastGood.Load(strings.Join(c.bases, "|")); ok {
+		if i := v.(int); i < len(c.bases) {
+			return i
+		}
+	}
+	return 0
 }
 
 // APIError is a non-2xx response from PVE. Proxmox reports parameter errors in an
@@ -95,12 +118,21 @@ func IsNotFound(err error) bool {
 
 // New builds a Client. It performs no network I/O — Version() is the connectivity probe.
 func New(cfg Config) (*Client, error) {
-	base := strings.TrimRight(strings.TrimSpace(cfg.APIURL), "/")
-	if base == "" {
-		return nil, fmt.Errorf("pve: apiUrl is required")
+	var bases []string
+	for _, u := range append([]string{cfg.APIURL}, cfg.APIURLs...) {
+		base := strings.TrimRight(strings.TrimSpace(u), "/")
+		if base == "" {
+			continue
+		}
+		if !strings.HasSuffix(base, "/api2/json") {
+			base += "/api2/json"
+		}
+		if !slices.Contains(bases, base) {
+			bases = append(bases, base)
+		}
 	}
-	if !strings.HasSuffix(base, "/api2/json") {
-		base += "/api2/json"
+	if len(bases) == 0 {
+		return nil, fmt.Errorf("pve: apiUrl is required")
 	}
 	if cfg.TokenID == "" || cfg.Secret == "" {
 		return nil, fmt.Errorf("pve: tokenId and secret are required")
@@ -110,11 +142,15 @@ func New(cfg Config) (*Client, error) {
 		timeout = 30 * time.Second
 	}
 	return &Client{
-		base:  base,
+		bases: bases,
 		token: AuthHeaderFor(cfg),
 		http: &http.Client{
-			Timeout:   timeout,
-			Transport: &http.Transport{TLSClientConfig: TLSConfigFor(cfg)},
+			Timeout: timeout,
+			Transport: &http.Transport{
+				TLSClientConfig: TLSConfigFor(cfg),
+				// A dead node never refuses: without a short dial timeout failover would take the whole call timeout.
+				DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+			},
 		},
 	}, nil
 }
@@ -132,6 +168,29 @@ func TLSConfigFor(cfg Config) *tls.Config {
 	switch {
 	case cfg.InsecureTLS:
 		tlsCfg.InsecureSkipVerify = true
+	case cfg.CACert != "":
+		// The cluster CA signs every node's certificate, for names we do not address it by (IPs, a VIP). So: chain
+		// checked here, host name not.
+		roots := x509.NewCertPool()
+		roots.AppendCertsFromPEM([]byte(cfg.CACert))
+		tlsCfg.InsecureSkipVerify = true
+		tlsCfg.VerifyPeerCertificate = func(raw [][]byte, _ [][]*x509.Certificate) error {
+			if len(raw) == 0 {
+				return fmt.Errorf("pve: no peer certificate")
+			}
+			leaf, err := x509.ParseCertificate(raw[0])
+			if err != nil {
+				return err
+			}
+			inter := x509.NewCertPool()
+			for _, r := range raw[1:] {
+				if c, err := x509.ParseCertificate(r); err == nil {
+					inter.AddCert(c)
+				}
+			}
+			_, err = leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
+			return err
+		}
 	case cfg.Fingerprint != "":
 		want := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(cfg.Fingerprint), ":", ""))
 		// Fingerprint pinning: chain verification is disabled and replaced by an exact
@@ -154,7 +213,40 @@ func TLSConfigFor(cfg Config) *tls.Config {
 // do performs one API call. form is sent urlencoded for POST/PUT and as the query
 // string for GET/DELETE. out (if non-nil) receives the unmarshalled "data" field.
 func (c *Client) do(ctx context.Context, method, path string, form url.Values, out any) error {
-	u := c.base + path
+	start := c.goodIndex()
+	var err error
+	for i := range c.bases {
+		idx := (start + i) % len(c.bases)
+		if err = c.doOne(ctx, c.bases[idx], method, path, form, out); !shouldFailOver(err, method) {
+			if err == nil && idx != start {
+				lastGood.Store(strings.Join(c.bases, "|"), idx)
+			}
+			return err
+		}
+	}
+	return err
+}
+
+// shouldFailOver: another node can serve this. A connection that never opened means the request was not sent, so any
+// method may retry. After that only a read: a mutation that lost its connection may have run. A node that lost quorum
+// answers, but refuses writes, and any other node may still have it.
+func shouldFailOver(err error, method string) bool {
+	if err == nil {
+		return false
+	}
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae.Status >= 500 && strings.Contains(ae.Error(), "no quorum")
+	}
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return true
+	}
+	return method == http.MethodGet
+}
+
+func (c *Client) doOne(ctx context.Context, base, method, path string, form url.Values, out any) error {
+	u := base + path
 	var body io.Reader
 	if form != nil {
 		if method == http.MethodGet || method == http.MethodDelete {
@@ -210,7 +302,7 @@ func (c *Client) do(ctx context.Context, method, path string, form url.Values, o
 
 // doBody performs a call with a ready-made body (a multipart upload).
 func (c *Client) doBody(ctx context.Context, method, path string, body io.Reader, contentType string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL()+path, body)
 	if err != nil {
 		return err
 	}
