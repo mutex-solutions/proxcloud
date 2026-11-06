@@ -66,7 +66,7 @@ flowchart LR
 | Tenant org admin | Manages organization members, custom roles, project members and invites, billing profiles. Members are matched by an IdP-verified email only. | Implemented |
 | Tenant org admin, SSO self-service | Configures the organization's OIDC/SAML IdP, verified domains and group-to-role mapping. | Planned |
 | Platform operator | Uses the admin console (`web/admin`) and the admin routes under `/api/v1/admin/**`; automates through the public admin API `/admin-api/v1` (AWS SigV4 keys or the admin-api realm). Configures Proxmox providers, flavors, price plans, quotas, integrations. | Implemented |
-| Platform operator, installer | One-command install, add-node and upgrade of the whole stack. | Planned |
+| Platform operator, installer | One-command install, add-node and upgrade of the whole stack. | Implemented |
 | AI agent | Calls `/mcp` with the client toolset (customer realm token or personal access key) or the admin toolset (admin realm token or SigV4 key). Tools dispatch in-process through the same router as the HTTP API. | Implemented |
 
 ## External systems

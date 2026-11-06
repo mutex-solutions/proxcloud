@@ -113,17 +113,25 @@ Auth-gated routes need an OIDC issuer (Compose bundles Keycloak on `:8090`); clo
 routes need a Proxmox provider registered in the operator console (System → Cloud
 providers). Without them the app runs but those routes stay dark.
 
-### Kubernetes (Helm)
+### On a Proxmox VE cluster (installer)
 
-The chart bundles PostgreSQL, RabbitMQ, and Keycloak by default (each toggle-able):
+One command, from any Linux host that can reach the Proxmox API and a management host:
 
 ```sh
-helm install proxcloud oci://ghcr.io/mutex-solutions/charts/proxcloud \
-  -n proxcloud --create-namespace
+cd installer
+cp -r inventory/example inventory/mysite   # then edit it: only Proxmox API access is mandatory
+make install INVENTORY=inventory/mysite
 ```
 
-See [`deploy/charts/proxcloud/README.md`](deploy/charts/proxcloud/README.md) for values,
-external PostgreSQL/OIDC wiring, and ingress / Gateway API exposure.
+It sets up Proxmox roles and tokens, OS templates, a k3s management cluster, the platform
+through ArgoCD, an object store and the provider registration. See
+[`docs/install.md`](docs/install.md).
+
+### Kubernetes (Helm)
+
+To deploy just the chart on an existing cluster, with the CloudNativePG and RabbitMQ
+operators in place, see [`deploy/charts/proxcloud/README.md`](deploy/charts/proxcloud/README.md)
+for values, external PostgreSQL/OIDC wiring, and ingress / Gateway API exposure.
 
 ## 📂 Repository layout
 
@@ -138,6 +146,8 @@ external PostgreSQL/OIDC wiring, and ingress / Gateway API exposure.
 | `internal/{config,server,amqp,oidc,pgdoc,health}` | Wiring: config, HTTP server, messaging, auth, Postgres store, health |
 | `pkg` | Reusable libraries: `auth`, `httpx`, `money`, `textcrypt`, `audit` |
 | `deploy` | `Dockerfile`, Helm chart (`chart`), seed data |
+| `installer` | One-shot installer (Ansible): `make install` and the day-2 targets |
+| `images` | OS template pipeline (Packer) |
 | `web/client` | Customer console (React SPA) |
 | `web/admin` | Operator console (React SPA) |
 | `test/integration` | Integration tests (build tag `integration`) |

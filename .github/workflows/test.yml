@@ -30,6 +30,21 @@ jobs:
 
   # Fails on any old-brand string in file contents or file names. The pattern uses
   # character classes so this file never matches itself.
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the installer
+        working-directory: installer
+        run: |
+          make test
+          ANSIBLE_CONFIG=ansible.cfg .venv/bin/ansible-playbook -i inventory/example/hosts.yml -e pc_site_dir=/tmp/site -e pc_node=x --syntax-check \
+            playbooks/site.yml playbooks/46-rustfs-upgrade.yml playbooks/70-add-node.yml playbooks/71-remove-node.yml
+      - name: Check the image pipeline never runs on PR or fork events
+        run: |
+          python3 -m py_compile images/build.py
+          ! grep -nE '^\s*(pull_request|pull_request_target|issue_comment|workflow_run):' .github/workflows/vm-templates.yml
+
   rebrand-gate:
     runs-on: ubuntu-latest
     env:
