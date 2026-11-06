@@ -67,7 +67,7 @@ jobs:
       - name: Check the image pipeline never runs on PR or fork events
         run: |
           python3 -m py_compile images/build.py
-          ! grep -nE '^\s*(pull_request|pull_request_target|issue_comment|workflow_run):' .github/workflows/vm-templates.yml
+          ! grep -nE '^\s*(pull_request|pull_request_target|issue_comment|workflow_run):' .github/workflows/vm-templates.yml .github/workflows/k8s-node-templates.yml
 
   rebrand-gate:
     runs-on: ubuntu-latest

@@ -8,15 +8,13 @@ cluster's API, and Kamaji runs the cluster's control plane as pods there
 
 > ## Status on Proxmox
 >
-> **Read, sync, status, kubeconfig download and delete of existing clusters work.
-> Creating a cluster on a Proxmox provider is planned.** Today a create returns
-> "Managed Kubernetes on Proxmox is not available yet": the create legs in
-> `internal/platform/project/cloud_kamaji_create.go` are stubs. The planned
-> design runs worker VMs on Proxmox through Cluster API with the CAPMOX provider,
-> load-balancer IPs from MetalLB and volumes through proxmox-csi; see
-> [C2](architecture/c4/c2-containers.md) and
-> [C3e](architecture/c4/c3-components.md#c3e-managed-services-and-object-storage).
-> Nothing below describes that design as built.
+> Creating a cluster works: a tenant control plane on Kamaji, worker VMs through CAPMOX, Cilium, proxmox-csi
+> and MetalLB. Verified on PVE 9.2 with CAPI v1.14.4, CAPMOX v0.9.2 and Kamaji CP provider v0.22.0, with
+> create, worker scale-out and a bound PVC, in `sharedWorkers` mode (section 9). **Workers in the project's
+> pool with per-cluster tokens have only run against a fake PVE**: the required grants
+> ([proxmox-permissions.md](proxmox-permissions.md)) are the operator's call and were not applied on the lab, so
+> syncing and billing workers, suspend coverage and the minted tokens are unverified. Not available: autoscaling
+> node groups, GPU node groups.
 
 Code: `internal/cloud/kamaji` (config, values builder, Application builder,
 service, sync provider), `internal/cloud/kamajik8s` (minimal management-cluster
@@ -146,3 +144,40 @@ kubectl get application <stc-id> -n argocd -o jsonpath='{.status.health}{"\n"}{.
 | Delete hangs | The Application keeps its finalizer while the cascade runs; inspect what is left in the tree (`argocd app get`). Remove the finalizer by hand only if you accept orphaning the rendered objects, then clean up per §3. |
 | Orphaned namespaces/secrets | §3 orphan-finalization check. |
 | Cluster missing from the portal | The `kubernetes` service toggle for the region is off, or the Application lacks the ProxCloud labels. |
+
+## 9. How a cluster lands on Proxmox
+
+What the create path resolves (`internal/platform/project/cloud_kamaji_create.go`):
+
+| What | From | Note |
+|---|---|---|
+| Workers' pool | the project's pool | they sync and bill as servers of their flavor (`fl-`, `sp-` tags) |
+| Network | the customer's pick, one of the project's networks | the zone must have no DHCP (EVPN, VLAN) |
+| Addresses | 16 for workers, 8 for tenant LoadBalancers, reserved from the top of the subnet | hence at most 15 workers: a rolling replacement needs a spare |
+| Credentials | `capmox@pve!<id>` (management side), `csi@pve!<id>` (reaches the tenant cluster) | minted at create, revoked after the delete cascade |
+
+**Node images.** `config.cluster.versions` maps a version to its template per PVE node, as printed by
+`images/k8s-node-template.sh`: `{"1.35.10": "pve1=9210,pve2=9211"}`. PVE clones to local storage only on the
+template's node, so a node group has one MachineDeployment per entry, its replicas split evenly, the first entries
+taking the remainder. The zone label comes from that pin, so no cloud controller manager is needed.
+
+**Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
+endpoint and proxmox-csi's PVE API are addresses on the services subnet, which tenants reach over their normal
+egress: MetalLB, and a `pve-api` Service forwarding to the PVE nodes (`config.cluster.pveCsiUrl`).
+
+**`sharedWorkers`.** For a site that will not give the portal token the right to mint tokens,
+`config.cluster.sharedWorkers` (`pool`, `bridge`, `gateway`, `prefix`, `first`, `last`, `capiTokenId`, `csiTokenId`;
+`secret.sharedCapiSecret`, `secret.sharedCsiSecret`) puts every cluster on one operator-run pool, network and
+credential. **Tenants then share a network and a CSI token any of them can read, and workers neither sync nor bill.**
+Lab and evaluation only.
+
+**CAPMOX pitfalls found on PVE 9.2.**
+
+- `not authorized to access endpoint` (upstream issue #513): a manager-level credential
+  (`capmox-manager-credentials`, `PROXMOX_URL`) **silently wins over every `ProxmoxCluster.credentialsRef`**
+  (`pkg/scope/cluster.go`), so clones run under a token that was never meant for them. Keep the manager
+  credential empty: `clusterctl init` with `PROXMOX_URL=""`.
+- `no pid returned from agent exec command`: reading cloud-init's status needs `VM.GuestAgent.Unrestricted` on PVE 9,
+  which is root in every guest of the pool. The chart sets `checks.skipCloudInitStatus`; the Node joining is the signal.
+- A machine whose clone was in flight across a CAPMOX restart can end up "ready" while stopped and unconfigured. Delete
+  the Machine and CAPI replaces it.

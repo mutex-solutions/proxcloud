@@ -21,10 +21,9 @@ import (
 // kamajiWorkerAddrs + kamajiLBAddrs are the addresses a cluster reserves on its vnet. The workers' range
 // caps a cluster: a rolling replacement needs one spare, hence kamajiMaxWorkers.
 const (
-	kamajiWorkerAddrs  = 16
-	kamajiLBAddrs      = 8
-	kamajiMaxWorkers   = kamajiWorkerAddrs - 1
-	kamajiTemplatePool = "pc-templates"
+	kamajiWorkerAddrs = 16
+	kamajiLBAddrs     = 8
+	kamajiMaxWorkers  = kamajiWorkerAddrs - 1
 )
 
 // kamajiReservation names a cluster's addresses in the allocation store.
@@ -181,7 +180,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 		capiID, capiSecret, csiID, csiSecret = sw.CAPITokenID, sw.CAPISecret, sw.CSITokenID, sw.CSISecret
 	} else {
 		toks, terr := ps.C.MintClusterTokens(ctx, spec.ID, pve.ClusterTokenScope{
-			Pool: in.Pool, TemplatePool: kamajiTemplatePool, Storages: classStorages(classes),
+			Pool: in.Pool, TemplatePool: pve.TemplatePool, Storages: classStorages(classes),
 			ISOStorage: pveISOStorage(compute), Zone: zone, Vnet: in.Bridge,
 		})
 		if terr != nil {

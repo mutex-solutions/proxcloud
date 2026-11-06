@@ -64,6 +64,9 @@
       delegate_to: localhost
       become: false
       no_log: true
+    - name: Create the platform bundle's directories
+      ansible.builtin.file: {path: "/root/services-bundle/{{ item }}", state: directory, mode: "0700"}
+      loop: [manifests, charts]
     - name: Copy the platform bundle
       ansible.builtin.copy:
         src: "{{ item.src }}"

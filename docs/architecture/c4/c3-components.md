@@ -288,8 +288,7 @@ flowchart LR
   ccred["cephcred"]:::impl
   argo["ArgoCD on the management cluster"]:::impl
   rgw["Ceph RGW"]:::impl
-  pvek8s["Managed K8s create on Proxmox"]:::planned
-  pvedb["DBaaS create on Proxmox"]:::planned
+  pvek8s["Managed K8s create on Proxmox"]:::impl
   rustfs["RustFS"]:::impl
 
   ph --> kam
@@ -300,17 +299,15 @@ flowchart LR
   k8s --> argo
   obj --> ccred
   obj --> rgw
-  kam -.-> pvek8s
-  dba -.-> pvedb
+  kam --> pvek8s
   obj --> rustfs
 ```
 
 | Component | Path | Responsibility | Status |
 |---|---|---|---|
 | Managed Kubernetes | `internal/cloud/kamaji/`, `internal/cloud/kamajik8s/`, `internal/platform/project/cloud_kamaji.go` | Cluster values builder, Kubernetes API client, sync, read and delete of Kamaji clusters through ArgoCD `Application` objects. | Implemented |
-| Managed K8s create on Proxmox | `internal/platform/project/cloud_kamaji_create.go` (stub) | Credential mint, IP range carving and worker placement on Proxmox. Create currently fails with an explicit error. | Planned |
+| Managed K8s create on Proxmox | `internal/platform/project/cloud_kamaji_create.go`, `internal/cloud/pve/access.go`, `deploy/charts/proxmox-kamaji-cluster` | Flavors to VM sizes and tags, network pick, address reservation, per-cluster PVE tokens, one machine pool per PVE node; proxmox-csi and MetalLB through CAAPH. Create, scale and PVC verified on a lab in `sharedWorkers` mode; project pool and minted tokens against a fake PVE only. | Implemented |
 | DBaaS | `internal/cloud/dbaas/`, `internal/platform/project/cloud_dbaas.go`, `deploy/charts/database-cluster` | Database cluster values, sync, autoscale, read and delete. Create refuses a storage class named after a Proxmox storage profile closed to databases (capacity class). | Implemented |
-| DBaaS create on Proxmox | `internal/platform/project/cloud_dbaas_create.go` (stub) | Database endpoints on a routed services subnet through MetalLB. Create currently fails with an explicit error. | Planned |
 | Object store client | `internal/cloud/client/client.go`, `objectstore.go`, `objectstore_ceph.go`, `objectstore_ceph_policy.go`, `objectstore_ceph_settings.go` | `objectBackend` + `Caps()`: bucket and object operations, policies, settings. `cephBackend` talks to RGW. | Implemented |
 | Ceph credentials | `internal/cloud/cephcred/` | Per-project RGW user and S3 keys, secret encrypted at rest. | Implemented |
 | Bucket settings | `internal/platform/project/cloud_bucket_settings.go` | Bucket actions (versioning, object lock, quota, lifecycle, CORS, tags, policy, per-key grants) and project S3 keys. | Implemented |

@@ -26,8 +26,8 @@ flowchart TB
     mq["RabbitMQ<br/>charge fan-out"]:::impl
     kc["Keycloak<br/>realms + config-cli import"]:::impl
     argo["ArgoCD<br/>managed K8s and DBaaS apps"]:::impl
-    capi["Cluster API + CAPMOX"]:::planned
-    mlb["MetalLB"]:::planned
+    capi["Cluster API + CAPMOX"]:::impl
+    mlb["MetalLB"]:::impl
   end
 
   pve["Proxmox VE API :8006"]:::impl
@@ -51,8 +51,8 @@ flowchart TB
 ArgoCD is not deployed by the ProxCloud chart. The managed Kubernetes and DBaaS
 providers expect an ArgoCD instance on a management cluster and write
 `Application` objects to it (see [managed-k8s.md](../../managed-k8s.md) and
-[managed-dbaas.md](../../managed-dbaas.md)). Creating a managed cluster or
-database on a Proxmox provider is Planned; see the C3 managed-services table.
+[managed-dbaas.md](../../managed-dbaas.md)). In split mode the installer builds that
+management cluster, the services cluster, as VMs through Cluster API.
 
 ### API surfaces
 
@@ -96,7 +96,7 @@ flowchart TB
 
   subgraph sys["Platform-owned VMs"]
     mgmtvm["Management cluster VMs"]:::planned
-    svc["Services cluster<br/>Kamaji, DB operators, CSI"]:::planned
+    svc["Services cluster<br/>Kamaji, DB operators, CSI"]:::impl
     rfsvm["RustFS VM"]:::planned
   end
 
@@ -133,7 +133,7 @@ flowchart TB
 | PCI mappings | GPU flavors reserve concrete mappings on the scheduled node. | Implemented |
 | HA rules and replication | Protected VMs with replication and node-affinity rules. | Implemented |
 | Platform-owned VMs | Management cluster VMs and the RustFS VM in a dedicated system pool, the platform token has `NoAccess` there. | Implemented |
-| Services cluster VMs | The services cluster, in the same system pool. | Planned |
+| Services cluster VMs | The services cluster, in the same system pool. | Implemented |
 | Proxmox Backup Server | Operator nightly backups, then tenant backup schedules and restore. | Planned |
 
 ### Storage tiers
@@ -218,8 +218,8 @@ flowchart LR
 | Keycloak | codecentric keycloakx subchart + keycloak-config-cli realm import, or an external issuer. The API manages per-org identity providers through the Admin API with the `proxcloud-idp-admin` service account | Management cluster | Implemented |
 | Gateway / Ingress | Gateway API `HTTPRoute` or `Ingress` per host (`deploy/charts/proxcloud/templates/gateway`, `api`, `web`) | Management cluster | Implemented |
 | ArgoCD | Reconciles the platform (installer `Application` objects with inline values); receives `Application` objects for managed K8s and DBaaS | Management cluster (deployed by the installer, not the chart) | Implemented |
-| Cluster API + CAPMOX, MetalLB | Services cluster and tenant K8s workers on Proxmox, load-balancer IPs | Management and services clusters | Planned |
-| Services cluster | Kamaji, DB operators, proxmox-csi, csi-driver-nfs | VMs in a system pool | Planned |
+| Cluster API + CAPMOX, MetalLB | Services cluster and tenant K8s workers on Proxmox, load-balancer IPs | Management and services clusters | Implemented |
+| Services cluster | Kamaji, DB operators, proxmox-csi, csi-driver-nfs | VMs in a system pool | Implemented, without csi-driver-nfs |
 | Proxmox VE hosts | pveproxy, SDN, proxmox-firewall (nftables), storage, PCI mappings | Proxmox cluster | Implemented |
 | Tenant VMs | QEMU full clones in the project pool | Proxmox cluster | Implemented |
 | HA rules and replication | `ha-manager` rules, `pvesr` | Proxmox cluster | Implemented |
@@ -232,7 +232,7 @@ flowchart LR
 | CI | GitHub Actions `test.yml`, `docker.yml`, `helm.yml` | GitHub | Implemented |
 | Installer | Ansible playbooks and Makefile (`installer/`): one-shot install, `allinone` mode, day-2 targets; `split` mode is Planned | Operator workstation | Implemented |
 | VM template pipeline | `images/build.py` + Packer, `vm-templates.yml`; tag-published, one copy per node on local-disk sites | Self-hosted runner in the Proxmox network, or the installer from the first management host | Implemented |
-| K8s node template pipeline | image-builder | Self-hosted runner in the Proxmox network | Planned |
+| K8s node template pipeline | image-builder | Self-hosted runner in the Proxmox network | Implemented, script run by hand |
 
 ## Trust boundaries
 

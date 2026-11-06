@@ -304,6 +304,33 @@ Open items of the lab drill (DRILL-5, DRILL-6) and the coexistence note in the l
 **Diagrams updated**: C1 (Airwallex now implemented), C3c (payment, gateway factory, billing,
 invoice and credit note rows and nodes).
 
+## 2026-11-07: P7 managed Kubernetes, DBaaS and split mode (branch feat/p7-k8s)
+
+**What changed**
+
+- Managed K8s create on Proxmox (C3e): Planned -> Implemented. New chart `proxmox-kamaji-cluster`; the create path
+  resolves flavor, network, addresses and credentials, with one MachineDeployment per PVE node.
+- DBaaS create on Proxmox (C3e): Planned -> Implemented. The ten missing actions and create-with-restore are ported;
+  endpoints come from a MetalLB pool, replicas spread hard across zones, backups go to any S3 endpoint.
+- Services cluster, Cluster API + CAPMOX, MetalLB (C2): Planned -> Implemented. Installer stage 50, `mode: split`.
+- K8s node template pipeline (C2): Planned -> Implemented, with image-builder.
+- proxmox-csi disks (`-pvc-` volumes) no longer sync as the project's volumes.
+- Applications are listed per provider label, since one cluster can host both a kamaji and a dbaas provider.
+- Removed from the add-on menu until they are wired: node problem detector, monitoring, NVIDIA GPU operator, reloader.
+- Node group autoscaling is refused, and GPU flavors for node groups.
+
+**Why**
+
+- Pinned pools rather than a cloud controller manager: PVE clones to local storage only on the template's node, so
+  workers are pinned to a node anyway, and the pin gives the zone label without another token in the tenant cluster.
+- The worker's route to the PVE API goes through a Service on the services subnet, since tenant vnets are blocked from
+  the management network, and its CSI token is scoped per cluster because a tenant can read it.
+- The manager-level CAPMOX credential stays empty because it silently overrides `credentialsRef`: that is what
+  upstream issue #513's error turned out to be here. The cloud-init check is off because on PVE 9 it needs
+  `VM.GuestAgent.Unrestricted`, which is root in every guest.
+
+**Diagrams:** C2 (containers, deployment), C3e.
+
 ## 2026-11-07: P4 metering foundations (branch feat/p4-metering)
 
 **What changed**

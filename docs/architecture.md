@@ -430,10 +430,9 @@ flowchart LR
 - **`kamaji` / `kamajik8s` / `dbaas`** — managed Kubernetes and databases. A
   provider is a management cluster reached over a stored kubeconfig; each
   customer cluster is one ArgoCD `Application` written to that cluster's API.
-  Read, sync and delete work today, and creating a database works (its endpoint
-  is a MetalLB address, no tenant network); creating a cluster on a Proxmox
-  provider is planned (stub `cloud_kamaji_create.go` returns an explicit
-  error). Guides:
+  A database's endpoint is a MetalLB address, with no tenant network involved; a
+  cluster's workers land in the project's pool and vnet through CAPMOX
+  (`cloud_kamaji_create.go`). Guides:
   **[managed-k8s.md](managed-k8s.md)**, **[managed-dbaas.md](managed-dbaas.md)**.
 
 ---
