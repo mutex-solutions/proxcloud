@@ -11,6 +11,26 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
+func TestPVEPlacementPerNodeCopies(t *testing.T) {
+	caps := map[string]pve.StorageCapability{"local-zfs": {Storage: "local-zfs", Nodes: map[string]pve.StorageNodeState{
+		"pve1": {Active: true, Total: 100 << 30, Avail: 90 << 30},
+		"pve2": {Active: true, Total: 100 << 30, Avail: 90 << 30},
+		"pve3": {Active: true, Total: 100 << 30, Avail: 90 << 30},
+	}}}
+	profiles := map[string]externalservice.PVEStorageProfile{"std": {Slug: "std", Storages: map[string]string{"*": "local-zfs"}}}
+	tpl := &externalservice.PVETemplate{Slug: "debian-13", VMID: 9001, Node: "pve1", Copies: map[string]int{"pve1": 9001, "pve2": 9002}}
+	pl, herr := pvePlacement(tpl, false, "std", profiles, caps)
+	if herr != nil {
+		t.Fatal(herr)
+	}
+	if !pl.allowed["pve1"] || !pl.allowed["pve2"] || pl.allowed["pve3"] {
+		t.Fatalf("allowed = %v, want the two nodes with a copy", pl.allowed)
+	}
+	if tpl.OnNode("pve2") != 9002 || tpl.OnNode("pve3") != 0 {
+		t.Fatalf("OnNode: pve2=%d pve3=%d", tpl.OnNode("pve2"), tpl.OnNode("pve3"))
+	}
+}
+
 func TestPVEPlacement(t *testing.T) {
 	const g = int64(1) << 30
 	roomy := pve.StorageNodeState{Active: true, Total: 1000 * g, Avail: 900 * g}

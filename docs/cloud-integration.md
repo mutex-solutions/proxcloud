@@ -150,7 +150,7 @@ The shape is documented in the header of `proxmox.go`:
     "storageClasses": {"nas-capacity": {"class": "capacity",            // admin override (wins)
                                         "suggestedClass": "standard"}}, // installer fio result, display only
     "storageHeadroomPct": 10,                            // % of a storage kept free when placing disks
-    "templates": {},                                     // admin OS templates
+    "templates": {},                                     // optional pins or overlays on the discovered OS templates
     "gpus": {},                                          // {mappingId: {"alias": "nvidia-4090"}}
     "overcommit": {"cpu": 4},
     "metrics": {"source": "none"},
@@ -175,7 +175,7 @@ Typed accessors used by the rest of the code:
 | `PVEStorageClasses()` / `PVEEffectiveStorageClass(id)` | `storageClasses` | per-storage class override and installer suggestion; effective class = valid override, else detected |
 | `PVEStorageHeadroomPct()` | `storageHeadroomPct` (default 10, valid 0–99) | free space kept on a storage when placing a disk |
 | `PVEVolumeProfileFunc()` | `storageProfiles`, `capabilities`, `storageClasses` | resolves each synced disk's own profile and storage class |
-| `PVETemplates()` | `templates` | admin OS templates servers are cloned from |
+| `PVETemplates()`, `PVEImageCatalog()` | `templates` | OS templates servers are cloned from: discovered from cluster tags ([images/README.md](../images/README.md)); an entry with `vmid` + `node` pins one, any other entry overlays `name`, `osDistro`, `minDiskGb` |
 | `PVEGPUAliases()` / `PVEGPUMappingsFor(alias)` | `gpus` | PCI mapping ids per GPU alias |
 | `PVEOvercommitCPU()` | `overcommit.cpu` (default 4) | scheduler CPU overcommit |
 | `PVEDefaultQuota()` | `provisioning.quota` | quota seeded onto a new project |
@@ -295,7 +295,8 @@ active / total / avail. A node outside the storage's `nodes` list is ignored and
   shared to shared storage, so a template whose volumes all sit on shared storage
   (`pve.TemplateShared`) is full-cloned to a picked node whose profile storage is
   shared too (or with no profile, onto the template's own storages); a local
-  template or a local profile pins the clone to the template's node, and a profile
+  template or a local profile pins the clone to the nodes holding a copy of the template
+  (a discovered template clones the target node's own copy), and a profile
   not active on that node is 409.
 - **Volumes.** Add-volume checks free space on the server's node (409, nothing
   written). A detached disk attaches only to a server on its VM's node: PVE's disk

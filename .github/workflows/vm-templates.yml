@@ -1,0 +1,66 @@
+name: vm-templates
+
+# Builds the OS templates on a self-hosted runner inside the Proxmox network: images/build.py = vendor
+# image -> Packer -> smoke test -> tags -> prune. Publishing is the tag; the portal discovers it.
+#
+# NEVER add pull_request, pull_request_target or any fork-reachable trigger here: a PR would run its code
+# on a machine inside the Proxmox network, holding the image token.
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "One OS, blank = all"
+        required: false
+        default: ""
+  schedule:
+    - cron: "17 3 * * 1" # weekly, for vendor security updates
+  push:
+    branches: [main]
+    paths:
+      - "images/packer/**"
+      - "images/build.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vm-templates
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: [self-hosted, proxcloud-pve]
+    # A fork's push cannot reach this event set, but the repository check keeps the runner off forks of forks.
+    if: github.repository == 'mutex-solutions/proxcloud'
+    timeout-minutes: 240
+    env:
+      PVE_URL: ${{ vars.PVE_URL }}
+      PVE_TOKEN_ID: ${{ vars.PVE_TOKEN_ID }}
+      PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build
+        # vars: PVE_NODES = space-separated nodes (one on shared VM disks, all of them on local disks),
+        # PVE_TEMPLATE_STORAGE, PVE_IMPORT_STORAGE, PVE_BRIDGE, BUILD_IP (CIDR), BUILD_GATEWAY, BUILD_NAMESERVER.
+        env:
+          OS_LIST: ${{ inputs.os || 'debian-13 ubuntu-2404' }}
+          NODES: ${{ vars.PVE_NODES }}
+          TEMPLATE_STORAGE: ${{ vars.PVE_TEMPLATE_STORAGE }}
+          IMPORT_STORAGE: ${{ vars.PVE_IMPORT_STORAGE }}
+          BRIDGE: ${{ vars.PVE_BRIDGE }}
+          BUILD_IP: ${{ vars.BUILD_IP }}
+          BUILD_GATEWAY: ${{ vars.BUILD_GATEWAY }}
+          BUILD_NAMESERVER: ${{ vars.BUILD_NAMESERVER }}
+        run: |
+          set -eu
+          for os in $OS_LIST; do
+            for node in $NODES; do
+              python3 images/build.py build --os "$os" --node "$node" --storage "$TEMPLATE_STORAGE" \
+                --import-storage "$IMPORT_STORAGE" --bridge "$BRIDGE" --build-ip "$BUILD_IP" \
+                --build-gateway "$BUILD_GATEWAY" --nameserver "$BUILD_NAMESERVER" | tee -a manifest.jsonl
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: templates-${{ github.run_id }}
+          path: manifest.jsonl
