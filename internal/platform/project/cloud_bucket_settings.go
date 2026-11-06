@@ -1,11 +1,11 @@
 package project
 
-// cloud_bucket_settings.go — the ceph-s3 bucket configuration + S3-key surface.
+// cloud_bucket_settings.go — the bucket configuration + S3-key surface of the object-store providers.
 //
 // Bucket configuration rides on the existing cloud-action endpoint
 // (POST /project/{id}/cloud/{resourceId}/action) because every one of these acts on a BUCKET resource and
 // must therefore run against the service that bucket actually lives on (cloudAction rebinds svcID to
-// cr.ServiceID). A non-ceph client gets a 400.
+// cr.ServiceID). A backend without the feature gets a 400 (client.ObjectCaps).
 //
 // S3 keys are project-scoped (not bucket-scoped) — RGW attaches keys to USERS, and a bucket grants access
 // to a principal — so they get their own REST endpoints.
@@ -38,7 +38,15 @@ func decodeInto(data map[string]any, out any) error {
 // and a bad object-lock mode / quota argument to a 400 too.
 func (h *Handler) failBucketFeature(w http.ResponseWriter, err error) {
 	if errors.Is(err, client.ErrBucketFeatureUnsupported) {
-		h.fail(w, httpx.BadRequest("This setting is only available on S3 (Ceph) object storage"))
+		h.fail(w, httpx.BadRequest("This object storage does not offer this setting"))
+		return
+	}
+	if errors.Is(err, client.ErrProjectQuotaExceeded) {
+		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, err.Error()))
+		return
+	}
+	if errors.Is(err, client.ErrObjectStoreBusy) {
+		httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	// A malformed hand-edited policy is the CALLER's mistake — surface the parse detail as a 400 so the
@@ -306,7 +314,7 @@ type s3KeyDTO struct {
 func (h *Handler) cephServiceOfProject(ctx context.Context, w http.ResponseWriter, p *Project, r *http.Request) (*client.Client, string, bool) {
 	isCeph := func(id string) bool {
 		es, err := h.esSvc.Get(ctx, id)
-		return err == nil && es != nil && es.IsCephS3()
+		return err == nil && es != nil && es.IsObjectStore()
 	}
 	svcID := ""
 	if hd := r.Header.Get("x-service-id"); hd != "" && p.HasService(hd) && isCeph(hd) {
@@ -321,7 +329,7 @@ func (h *Handler) cephServiceOfProject(ctx context.Context, w http.ResponseWrite
 		}
 	}
 	if svcID == "" {
-		h.fail(w, httpx.BadRequest("Project has no S3 (Ceph) object storage service"))
+		h.fail(w, httpx.BadRequest("Project has no object storage service"))
 		return nil, "", false
 	}
 	cc, ok := h.tryTenantClient(ctx, p, svcID)
@@ -357,7 +365,7 @@ func (h *Handler) s3Credentials(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, httpx.NotFound("Project is not provisioned on the object storage service"))
 		return
 	}
-	s3Endpoint, websiteEndpoint, region := cc.CephEndpoints()
+	s3Endpoint, websiteEndpoint, region := cc.Endpoints()
 	h.projectAudit(u, proj, "CLOUD_RESOURCE_ACTION")
 	httpx.OK(w, map[string]any{
 		"accessKey": cred.AccessKey, "secretKey": cred.SecretKey, "rgwUid": cred.RGWUID,
@@ -430,7 +438,7 @@ func (h *Handler) s3KeyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid := cc.ChildUID(req.Name)
-	access, secret, err := cc.CreateCephChildUser(r.Context(), uid, "proxcloud-"+proj.ID+"-"+req.Name)
+	access, secret, err := cc.CreateChildKey(r.Context(), uid, "proxcloud-"+proj.ID+"-"+req.Name)
 	if err != nil {
 		h.failBucketFeature(w, err)
 		return
@@ -473,7 +481,7 @@ func (h *Handler) s3CredentialsRotate(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, httpx.NotFound("Project is not provisioned on the object storage service"))
 		return
 	}
-	access, secret, rotErr := cc.RotateCephUserKey(r.Context(), cred.RGWUID, cred.AccessKey)
+	access, secret, rotErr := cc.RotateKey(r.Context(), cred.RGWUID, cred.AccessKey)
 	if access == "" {
 		h.failBucketFeature(w, rotErr)
 		return
@@ -485,7 +493,7 @@ func (h *Handler) s3CredentialsRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.projectAudit(u, proj, "CLOUD_RESOURCE_ACTION")
-	s3Endpoint, websiteEndpoint, region := cc.CephEndpoints()
+	s3Endpoint, websiteEndpoint, region := cc.Endpoints()
 	out := map[string]any{
 		"accessKey": access, "secretKey": secret, "rgwUid": cred.RGWUID,
 		"s3Endpoint": s3Endpoint, "websiteEndpoint": websiteEndpoint, "region": region,
@@ -524,7 +532,7 @@ func (h *Handler) s3KeyRotate(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, httpx.NotFound("S3 key not found"))
 		return
 	}
-	access, secret, rotErr := cc.RotateCephUserKey(r.Context(), key.RGWUID, key.AccessKey)
+	access, secret, rotErr := cc.RotateKey(r.Context(), key.RGWUID, key.AccessKey)
 	if access == "" {
 		h.failBucketFeature(w, rotErr)
 		return
@@ -582,7 +590,7 @@ func (h *Handler) s3KeyDelete(w http.ResponseWriter, r *http.Request) {
 			_ = cc.RevokeBucketAccess(r.Context(), buckets[i].ExternalID, key.RGWUID)
 		}
 	}
-	if err := cc.DeleteCephChildUser(r.Context(), key.RGWUID); err != nil {
+	if err := cc.DeleteChildKey(r.Context(), key.RGWUID); err != nil {
 		h.failBucketFeature(w, err)
 		return
 	}

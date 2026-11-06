@@ -102,7 +102,7 @@ func (h *Handler) uiMenuItems(r *http.Request) map[string]any {
 		// AND dbaas (database only) all contribute menu items — a ceph-only project must still
 		// get its Object Storage entry, and the kamaji/dbaas slugs are what un-hide the client
 		// Kubernetes/Databases nav (AppShell gates on menu.items).
-		if es.IsDisabled() || (!es.IsCephS3() && !es.IsKamaji() && !es.IsDbaas() && !es.IsProxmox()) {
+		if es.IsDisabled() || (!es.IsObjectStore() && !es.IsKamaji() && !es.IsDbaas() && !es.IsProxmox()) {
 			continue
 		}
 		svcMap, _ := es.Config["services"].(map[string]any)
@@ -299,7 +299,7 @@ func (h *Handler) projectLocations(w http.ResponseWriter, r *http.Request) {
 		// A ceph-s3 provider is configured with a single config.region (its RGW zonegroup) rather than the
 		// regions map. Without this the Location picker is empty and the create-bucket form can
 		// never send the x-service-id / x-region-id the write path needs.
-		if len(regions) == 0 && es.IsCephS3() {
+		if len(regions) == 0 && es.IsObjectStore() {
 			if r := es.CephRegion(); r != "" {
 				regions = map[string]any{r: map[string]any{}}
 			}

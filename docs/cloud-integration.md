@@ -105,7 +105,8 @@ provider kind:
 | `config.provider` | What it is | Accessors |
 |---|---|---|
 | `proxmox` | One Proxmox VE cluster (one cluster = one region) | `internal/platform/externalservice/proxmox.go` |
-| `ceph-s3` | A Ceph RGW reached over S3 and Admin Ops | `externalservice.go` (`IsCephS3`, `CephConfig`, …) |
+| `ceph-s3` | A Ceph RGW reached over S3 and Admin Ops | `externalservice.go` (`IsCephS3`, `ObjectClient`, …) |
+| `rustfs` | A RustFS reached over S3 and its admin API | `externalservice.go` (`IsRustFS`, `ObjectClient`) |
 | `kamaji` | A management cluster for managed Kubernetes | `kamaji.go` |
 | `dbaas` | A management cluster for managed databases | `dbaas.go` |
 
@@ -216,7 +217,7 @@ everything enabled):
 | `proxmox` | `image` | Images (admin templates and project templates) |
 | `proxmox` | `volumev3` | Volumes, Snapshots pages |
 | `proxmox` | `network` | Networks, Security groups |
-| `ceph-s3` | `object-store` | Object storage, S3 access keys |
+| `ceph-s3`, `rustfs` | `object-store` | Object storage, S3 access keys |
 | `kamaji` | `kubernetes` | Kubernetes |
 | `dbaas` | `database` | Databases |
 
@@ -572,10 +573,50 @@ branch, is in
 
 ---
 
+## RustFS S3 object storage
+
+Standard-tier sites serve buckets from **RustFS** (`config.provider == "rustfs"`, same config keys
+as `ceph-s3`). `adminApiUrl` is the private base URL the API reaches `/rustfs/admin/v3` on (the public
+endpoint blocks it); the secret holds the RustFS root keys. Buckets carry
+`data.storageBackend = "RUSTFS"`. Code: `internal/cloud/client/objectstore_rustfs.go`.
+
+`rustfsBackend` embeds the Ceph backend's plain-S3 data plane and replaces what RGW does through Admin
+Ops or bucket ownership. `client.ObjectCaps` (returned by `GET_SETTINGS` as `caps`) tells the UI what is
+off; the API enforces it too.
+
+| Concern | Ceph RGW | RustFS |
+|---|---|---|
+| Project identity | RGW user with generated keys | IAM user `uidPrefix + projectId`; ProxCloud generates the secret; access key = the user name |
+| Bucket ownership | RGW owner | ARN in the project's canned policy, named like the user. Created and deleted with the root key; the project policy denies `s3:CreateBucket` and `s3:DeleteBucket` |
+| Project quota | RGW user quota | Sum of bucket quotas, enforced by the API. With `defaultQuotaGiB` set, a new bucket gets what is left as its HARD quota, and quotas must keep fitting (`409` otherwise) |
+| Bucket quota | bytes and objects | bytes only (`caps.quotaObjects = false`); HARD but fail-open, so never a billing guarantee |
+| Usage | Admin Ops counters | Scanner (`datausageinfo`): delayed. Unknown usage keeps the last value, never 0 (`client.KeepLastUsage`) |
+| Extra keys | child RGW user | IAM user with no identity policy, reaching only what a bucket policy grants |
+| Key rotation | new access + secret | new secret, access key unchanged |
+| Website | yes | gated off (`caps.website = false`) until per-bucket DNS serving is verified |
+
+**Lab check RUSTFS-POLICY-1 (RustFS 1.0.4):** a bucket-policy principal matches the **bare user name**,
+`{"AWS":["<user>"]}`. The ARN forms RGW uses (`arn:aws:iam:::user/<user>`) are accepted and silently match
+nothing. So grants are bucket-policy statements, as on RGW, with the principal in RustFS's form
+(`cephBackend.bareUserGrants`).
+
+Known limit: a bucket with a quota refuses writes with `503` for a few seconds after creation, until the
+scanner has seen it (measured 5 s on an idle 1.0.4). The root key owns every bucket, so `CreateBucket` on an
+existing name answers 200: the API checks with `HeadBucket` first.
+
+Quirks handled: `GET /quota/<bucket>` answers `503 "authoritative bucket usage is not available yet"` until
+the scanner has seen a new bucket (waited out for decisions, flagged unknown in sync, `503` to the user if it
+lasts); `list-canned-policies` needs `bucket=` next to `format=json`. Any bucket's ARN is removed from other
+project policies when that name is created, so an owner who deleted a bucket directly through a key granted
+by a custom policy cannot reach the next owner's bucket.
+
+Bucket billing rules choose their basis through the priced attribute: `size_gb` (used, the default in the
+seed) or `quota_gb` (allocated; the used size for a bucket without a quota). Both backends fill it.
+
 ## Ceph RGW S3 object storage
 
-Buckets are served by a separate provider kind, **Ceph RGW over the S3 API**
-(`config.provider == "ceph-s3"`). It is the only bucket backend. Every bucket
+Full-tier sites serve buckets from **Ceph RGW over the S3 API**
+(`config.provider == "ceph-s3"`). Every bucket
 carries `data.storageBackend = "CEPH_S3"`. Code:
 `internal/cloud/client/objectstore_ceph*.go`, `internal/cloud/cephcred/`,
 `internal/platform/project/cloud_bucket_settings.go`.

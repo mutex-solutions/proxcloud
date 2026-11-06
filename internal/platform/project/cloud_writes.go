@@ -70,7 +70,7 @@ func (h *Handler) tenantWriteService(ctx context.Context, w http.ResponseWriter,
 	if region == "" {
 		region = h.defaultRegion
 	}
-	if !es.IsCephS3() {
+	if !es.IsObjectStore() {
 		h.fail(w, httpx.BadRequest("Resource writes are not supported on this provider"))
 		return nil, "", false
 	}
@@ -86,7 +86,7 @@ func (h *Handler) tenantWriteService(ctx context.Context, w http.ResponseWriter,
 // client mistake (400 with the reason), not a server fault. Everything else goes through the normal error path.
 func (h *Handler) failWebsite(w http.ResponseWriter, err error) {
 	if errors.Is(err, client.ErrWebsiteUnsupported) {
-		h.fail(w, httpx.BadRequest("Static website hosting is only available on S3 (Ceph) object storage"))
+		h.fail(w, httpx.BadRequest("This object storage does not offer static website hosting"))
 		return
 	}
 	h.fail(w, err)
@@ -106,7 +106,7 @@ func (h *Handler) cephClientForProject(ctx context.Context, es *externalservice.
 	if cred == nil {
 		return nil, fmt.Errorf("project is not provisioned on the ceph object-store service")
 	}
-	return client.NewCephS3(ctx, es.CephConfig(region, cred.AccessKey, cred.SecretKey, cred.RGWUID))
+	return es.ObjectClient(ctx, region, cred.AccessKey, cred.SecretKey, cred.RGWUID)
 }
 
 // cloudResourceList handles POST /api/v1/project/{id}/resource?type=
@@ -268,7 +268,7 @@ func (h *Handler) cloudGet(w http.ResponseWriter, r *http.Request) {
 			if ps, perr := h.pveFor(es); perr == nil {
 				h.pveRefreshServerRow(r.Context(), ps, proj, cr)
 			}
-		case es.IsCephS3() && cr.Type == cloud.TypeBucket:
+		case es.IsObjectStore() && cr.Type == cloud.TypeBucket:
 			if cc, ok := h.tryTenantClient(r.Context(), proj, cr.ServiceID); ok {
 				h.refreshBucketCache(r.Context(), cc, cr)
 			}
@@ -292,7 +292,7 @@ func (h *Handler) tryTenantClient(ctx context.Context, p *Project, svcID string)
 		region = h.defaultRegion
 	}
 	// ceph-s3 is the only kind with a client here (proxmox goes through pve.Service).
-	if !es.IsCephS3() {
+	if !es.IsObjectStore() {
 		return nil, false
 	}
 	cc, err := h.cephClientForProject(ctx, es, p, region)
@@ -367,11 +367,19 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	cr, err := ws.Create(r.Context(), svcID, region, proj.ID, uid, req)
 	if err != nil {
-		// The ceph-s3 bucket namespace is GLOBAL (no RGW tenants — see client.CephConfig), so a name may
+		// The ceph-s3 bucket namespace is GLOBAL (no RGW tenants — see client.ObjectStoreConfig), so a name may
 		// already be owned by this or another project. That is a client-correctable conflict, not a 500.
 		if errors.Is(err, client.ErrBucketNameTaken) {
 			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict,
 				"Bucket name is already taken — S3 bucket names are globally unique"))
+			return
+		}
+		if errors.Is(err, client.ErrProjectQuotaExceeded) {
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, err.Error()))
+			return
+		}
+		if errors.Is(err, client.ErrObjectStoreBusy) {
+			httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, err.Error())
 			return
 		}
 		h.fail(w, err)
@@ -465,6 +473,10 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := ws.Delete(r.Context(), svcID, cr.ExternalID); err != nil {
+			if errors.Is(err, client.ErrBucketNotEmpty) {
+				h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, err.Error()))
+				return
+			}
 			h.fail(w, err)
 			return
 		}
@@ -989,6 +1001,7 @@ func (h *Handler) refreshBucketCache(ctx context.Context, cc *client.Client, cr 
 	if err != nil || b == nil {
 		return
 	}
+	client.KeepLastUsage(cr.Data, b)
 	cr.Data = b
 	if saved, err := h.cloud.Insert(ctx, cr); err == nil {
 		*cr = *saved

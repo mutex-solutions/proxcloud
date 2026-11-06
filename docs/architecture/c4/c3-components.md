@@ -273,13 +273,13 @@ flowchart LR
   kam["kamaji<br/>values, sync"]:::impl
   dba["dbaas<br/>values, sync, autoscale"]:::impl
   k8s["kamajik8s<br/>K8s API client"]:::impl
-  obj["client objectstore<br/>Ceph RGW backend"]:::impl
+  obj["client objectstore<br/>objectBackend"]:::impl
   ccred["cephcred"]:::impl
   argo["ArgoCD on the management cluster"]:::impl
   rgw["Ceph RGW"]:::impl
   pvek8s["Managed K8s create on Proxmox"]:::planned
   pvedb["DBaaS create on Proxmox"]:::planned
-  rustfs["RustFS backend"]:::planned
+  rustfs["RustFS"]:::impl
 
   ph --> kam
   ph --> dba
@@ -291,7 +291,7 @@ flowchart LR
   obj --> rgw
   kam -.-> pvek8s
   dba -.-> pvedb
-  obj -.-> rustfs
+  obj --> rustfs
 ```
 
 | Component | Path | Responsibility | Status |
@@ -300,7 +300,7 @@ flowchart LR
 | Managed K8s create on Proxmox | `internal/platform/project/cloud_kamaji_create.go` (stub) | Credential mint, IP range carving and worker placement on Proxmox. Create currently fails with an explicit error. | Planned |
 | DBaaS | `internal/cloud/dbaas/`, `internal/platform/project/cloud_dbaas.go`, `deploy/charts/database-cluster` | Database cluster values, sync, autoscale, read and delete. Create refuses a storage class named after a Proxmox storage profile closed to databases (capacity class). | Implemented |
 | DBaaS create on Proxmox | `internal/platform/project/cloud_dbaas_create.go` (stub) | Database endpoints on a routed services subnet through MetalLB. Create currently fails with an explicit error. | Planned |
-| Object store client | `internal/cloud/client/client.go`, `objectstore.go`, `objectstore_ceph.go`, `objectstore_ceph_policy.go`, `objectstore_ceph_settings.go` | Bucket and object operations, policies, settings on Ceph RGW. | Implemented |
+| Object store client | `internal/cloud/client/client.go`, `objectstore.go`, `objectstore_ceph.go`, `objectstore_ceph_policy.go`, `objectstore_ceph_settings.go` | `objectBackend` + `Caps()`: bucket and object operations, policies, settings. `cephBackend` talks to RGW. | Implemented |
 | Ceph credentials | `internal/cloud/cephcred/` | Per-project RGW user and S3 keys, secret encrypted at rest. | Implemented |
 | Bucket settings | `internal/platform/project/cloud_bucket_settings.go` | Bucket actions (versioning, object lock, quota, lifecycle, CORS, tags, policy, per-key grants) and project S3 keys. | Implemented |
-| RustFS backend | not yet in the tree | Second object-store backend behind the same bucket surface. | Planned |
+| RustFS backend | `internal/cloud/client/objectstore_rustfs.go` | Second `objectBackend`: reuses the S3 data plane; ownership in the project policy, project quota in the API, keep-last-value usage, website gated off. | Implemented |

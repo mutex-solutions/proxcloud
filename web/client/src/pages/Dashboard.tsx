@@ -20,6 +20,7 @@ import {
 } from "@/lib/hooks"
 import { fmtMoney, timeAgo } from "@/lib/format"
 import type { CostInfo } from "@/lib/types"
+import { isObjectProvider } from "@/lib/types"
 
 // Stable slot assignment: sort categories so a service keeps its color across
 // months/filters; >7 categories fold into "Other".
@@ -88,7 +89,7 @@ export function DashboardPage() {
       (locations ?? [])
         .filter(
           (location) =>
-            location.provider !== "ceph-s3" &&
+            !isObjectProvider(location.provider) &&
             !!location.serviceId &&
             !!location.region &&
             (!location.resourceTypes ||

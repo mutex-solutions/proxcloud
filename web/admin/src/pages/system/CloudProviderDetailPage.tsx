@@ -411,22 +411,22 @@ function ConnectionTab({ id, provider }: TabProps) {
   }
   // ceph-s3: show the S3/Admin Ops config. There is no backend test endpoint for RGW (the
   // connection is exercised by bootstrap/sync), so no Test button.
-  if (provider.config?.provider === "ceph-s3") {
+  if (provider.config?.provider === "ceph-s3" || provider.config?.provider === "rustfs") {
     const c = asObj(provider.config)
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-eyebrow">Ceph RGW (S3) connection</CardTitle>
+          <CardTitle className="text-eyebrow">{provider.config?.provider === "rustfs" ? "RustFS (S3) connection" : "Ceph RGW (S3) connection"}</CardTitle>
         </CardHeader>
         <CardContent>
           <Row label="S3 endpoint" value={str(c.s3Endpoint)} />
-          <Row label="Admin Ops URL" value={str(c.adminApiUrl)} />
+          <Row label="Admin URL" value={str(c.adminApiUrl)} />
           <Row label="Website endpoint" value={str(c.s3WebsiteEndpoint)} />
           <Row label="Region (zonegroup)" value={str(c.region)} />
           <Row label="RGW uid prefix" value={str(c.uidPrefix)} />
           <Row label="Default quota (GiB)" value={c.defaultQuotaGiB != null ? String(c.defaultQuotaGiB) : ""} />
           <p className="mt-4 text-sm text-muted-foreground">
-            Projects are provisioned as dedicated RGW users on entry (or via the project's "attach external
+            Projects are provisioned as dedicated object-store users on entry (or via the project's "attach external
             service" action). The admin keys are stored encrypted and never returned by the API.
           </p>
         </CardContent>

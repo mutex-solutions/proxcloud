@@ -22,7 +22,7 @@ Which types produce charges depends on the services enabled on your cloud provid
 | `instance` | Proxmox VE servers | existence, `vcpus`, `ram_mb`, `ram_gb`, `root_disk_gb`, `gpu_count` (filter on `gpu_model`, `instance_type`, `status`, …) |
 | `instance_traffic` | Proxmox VE servers, usage from the provider's metrics source (a rule on it must be `OVERWRITE_TOTAL`, by the hour or minute) | `incoming/outgoing_public_traffic_mb`, `incoming/outgoing_private_traffic_mb`, `total_public_traffic_mb`, `total_private_traffic_mb`, `total_traffic_mb` |
 | `volume` | Proxmox VE volumes | existence, `size` (GB) |
-| `bucket` | Ceph RGW (S3) buckets | existence, `size_gb`, `object_count` |
+| `bucket` | S3 buckets (Ceph RGW, RustFS) | existence, `size_gb` (used), `quota_gb` (allocated: the bucket quota, or the used size without one), `object_count`. Price `size_gb` or `quota_gb` to choose the billing basis |
 | `kubernetes_cluster` | Managed Kubernetes | existence, `cp_replicas`, `node_groups` |
 | `database_cluster` | Managed databases | existence, `replicas`, `vcpus_total`, `ram_gb_total`, `storage_gb_total`, `autoscale_enabled` |
 | `floating_ip` | Public IPs allocated to Proxmox VE servers | existence |

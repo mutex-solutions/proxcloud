@@ -4,6 +4,32 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: RustFS tenant buckets behind objectBackend
+
+**What changed**
+
+- `internal/cloud/client`: `Client` now wraps an `objectBackend` with `Caps()`. `cephBackend` keeps RGW;
+  the new `rustfsBackend` embeds its plain-S3 data plane. New provider kind `rustfs`
+  (`ExternalService.ObjectClient` picks the backend); methods renamed to neutral names.
+- RustFS ownership lives in the project's canned policy, the project quota in the API (sum of bucket quotas),
+  and scanner usage keeps the last value when the scanner cannot answer.
+- Extra S3 keys on RustFS are IAM users granted through bucket policies with a bare-name principal.
+- Bucket billing: new attribute `quota_gb` next to `size_gb`; the priced attribute is the billing basis.
+- The installer registers the RustFS it deployed as a `rustfs` provider at stage 60.
+
+**Why**
+
+- Standard-tier sites had a deployed RustFS but no tenant bucket product.
+- RustFS has no bucket owner and no user quota, so isolation and quota have to live on our side.
+- Lab check RUSTFS-POLICY-1 on 1.0.4 showed user principals do work in bucket policies, but only by bare
+  name, so grants could keep RGW's model instead of moving to identity policies. The ARN form saves and
+  silently matches nothing, which is why the principal form is per backend.
+- A tenant able to delete a bucket directly would leave its ARN behind and reach the next owner of the
+  name, hence the Deny on the project key and the clean-up of other policies at create.
+- Scanner usage is sometimes unavailable; writing 0 would bill nothing for that interval.
+
+**Diagrams updated**: `c1-context.md`, `c2-containers.md`, `c3-components.md` (C3 managed services).
+
 ## 2026-11-07: P4 metering foundations (branch feat/p4-metering)
 
 **What changed**

@@ -20,4 +20,3 @@ func TestBucketsToResources(t *testing.T) {
 		t.Errorf("flat bucket data mismatch: %#v", got[0].Data)
 	}
 }
-

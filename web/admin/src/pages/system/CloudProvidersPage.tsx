@@ -111,7 +111,7 @@ const cephFormValid = (f: CephFormState) =>
 // "Provider config"): the S3 + Admin Ops endpoints drive everything, and the
 // secret carries the RGW admin keys (caps users=*;buckets=*;usage=*). object-store is the ONLY
 // service a ceph-s3 provider serves, so it is enabled here directly — no discover round-trip exists.
-function cephFormToBody(f: CephFormState) {
+function cephFormToBody(f: CephFormState, provider: "ceph-s3" | "rustfs" = "ceph-s3") {
   const region = f.region.trim()
   const trimURL = (s: string) => s.trim().replace(/\/+$/, "")
   return {
@@ -119,7 +119,7 @@ function cephFormToBody(f: CephFormState) {
     type: "CLOUD",
     status: "PUBLIC",
     config: {
-      provider: "ceph-s3",
+      provider,
       s3Endpoint: trimURL(f.s3Endpoint),
       adminApiUrl: trimURL(f.adminApiUrl),
       ...(f.s3WebsiteEndpoint.trim() ? { s3WebsiteEndpoint: trimURL(f.s3WebsiteEndpoint) } : {}),
@@ -196,7 +196,7 @@ export default function CloudProvidersPage() {
   const items = data?.data ?? []
 
   const [createOpen, setCreateOpen] = useState(false)
-  const [kind, setKind] = useState<"ceph-s3" | "kamaji" | "dbaas" | "proxmox">("proxmox")
+  const [kind, setKind] = useState<"ceph-s3" | "rustfs" | "kamaji" | "dbaas" | "proxmox">("proxmox")
   const [cephForm, setCephForm] = useState<CephFormState>(emptyCephForm)
   const [kamajiForm, setKamajiForm] = useState<KamajiFormState>(emptyKamajiForm)
   const [dbaasForm, setDbaasForm] = useState<DbaasFormState>(emptyDbaasForm)
@@ -209,8 +209,8 @@ export default function CloudProvidersPage() {
       apiFetch<CloudProvider>(LIST_PATH, {
         method: "POST",
         body:
-          kind === "ceph-s3"
-            ? cephFormToBody(cephForm)
+          kind === "ceph-s3" || kind === "rustfs"
+            ? cephFormToBody(cephForm, kind)
             : kind === "kamaji"
               ? kamajiFormToBody(kamajiForm)
               : kind === "dbaas"
@@ -335,6 +335,8 @@ export default function CloudProvidersPage() {
             <DialogDescription>
               {kind === "ceph-s3"
                 ? "Connect a Ceph RGW object store over its S3 and Admin Ops endpoints. Projects get a dedicated RGW user."
+                : kind === "rustfs"
+                  ? "Connect a RustFS object store. The admin URL is its private endpoint: the public one must block /rustfs/admin. Projects get a dedicated IAM user; the keys are the RustFS root keys."
                 : kind === "kamaji"
                   ? "Connect a Kamaji management cluster for Managed Kubernetes. Clusters are delivered as ArgoCD Applications of the pinned chart; worker nodes run in each customer's project."
                   : kind === "dbaas"
@@ -342,12 +344,15 @@ export default function CloudProvidersPage() {
                     : "Connect a Proxmox VE cluster with one admin API token. Projects get a dedicated pool; networking, storage profiles and GPU mappings are configured on the provider page after creation."}
             </DialogDescription>
           </DialogHeader>
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-5 gap-2">
             <Button variant={kind === "proxmox" ? "default" : "outline"} onClick={() => setKind("proxmox")}>
               Proxmox VE
             </Button>
             <Button variant={kind === "ceph-s3" ? "default" : "outline"} onClick={() => setKind("ceph-s3")}>
               Ceph S3
+            </Button>
+            <Button variant={kind === "rustfs" ? "default" : "outline"} onClick={() => setKind("rustfs")}>
+              RustFS
             </Button>
             <Button variant={kind === "kamaji" ? "default" : "outline"} onClick={() => setKind("kamaji")}>
               Kubernetes
@@ -356,7 +361,7 @@ export default function CloudProvidersPage() {
               Database (DBaaS)
             </Button>
           </div>
-          {kind === "ceph-s3" ? (
+          {kind === "ceph-s3" || kind === "rustfs" ? (
             <CephProviderForm form={cephForm} setForm={setCephForm} />
           ) : kind === "kamaji" ? (
             <KamajiProviderForm form={kamajiForm} setForm={setKamajiForm} />
@@ -372,7 +377,7 @@ export default function CloudProvidersPage() {
             <Button
               onClick={() => create.mutate()}
               disabled={
-                (kind === "ceph-s3"
+                (kind === "ceph-s3" || kind === "rustfs"
                   ? !cephFormValid(cephForm)
                   : kind === "kamaji"
                     ? !kamajiFormValid(kamajiForm)

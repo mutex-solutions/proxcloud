@@ -10,7 +10,6 @@ import (
 	"fmt"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
@@ -43,7 +42,7 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 			continue
 		}
 		switch {
-		case services[i].IsCephS3():
+		case services[i].IsObjectStore():
 			cephES = append(cephES, &services[i])
 		case services[i].IsKamaji():
 			kamajiES = append(kamajiES, &services[i])
@@ -211,11 +210,11 @@ func (h *Handler) BootstrapCephOnto(ctx context.Context, p *Project, es *externa
 	}
 	uid := es.RGWUIDFor(p.ID) // uidPrefix + projectId — the one derivation
 	// Admin-keyed client (no project keys yet) drives the Admin Ops user create + quota.
-	adminCC, err := client.NewCephS3(ctx, es.CephConfig(region, "", "", uid))
+	adminCC, err := es.ObjectClient(ctx, region, "", "", uid)
 	if err != nil {
 		return fmt.Errorf("bootstrap ceph: build admin client: %w", err)
 	}
-	access, secret, err := adminCC.EnsureCephUser(ctx, "proxcloud-"+p.ID)
+	access, secret, err := adminCC.EnsureProjectUser(ctx, "proxcloud-"+p.ID)
 	if err != nil {
 		return fmt.Errorf("bootstrap ceph: ensure rgw user: %w", err)
 	}
@@ -227,7 +226,7 @@ func (h *Handler) BootstrapCephOnto(ctx context.Context, p *Project, es *externa
 	}
 	p.Services = append(p.Services, map[string]any{
 		"serviceId": es.ID,
-		"provider":  "ceph-s3",
+		"provider":  es.Provider(),
 		"region":    region,
 		"rgwUid":    uid,
 	})
@@ -241,7 +240,7 @@ func (h *Handler) BootstrapOnto(ctx context.Context, p *Project, es *externalser
 	// A ceph-s3 service routes to the RGW-user bootstrap. This is what lets the
 	// admin "attach external service" leg onboard EXISTING projects onto a newly added ceph provider
 	// (enableAndBootstrap only provisions projects that have no service attached yet).
-	if es.IsCephS3() {
+	if es.IsObjectStore() {
 		return h.BootstrapCephOnto(ctx, p, es)
 	}
 	// kamaji: the management-cluster namespace leg.
