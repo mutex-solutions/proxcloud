@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-import { Building2, FolderKanban, KeyRound, Server, Trash2, UserCog } from "lucide-react"
+import { Building2, FolderKanban, KeyRound, Server, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { EmptyState } from "@/components/empty-state"
@@ -25,11 +25,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { ApiError, apiFetch } from "@/lib/api"
+import { apiFetch } from "@/lib/api"
 import { fmtDate, fmtDateTime } from "@/lib/format"
 import { useAdminGet, useAdminList } from "@/lib/hooks"
 
@@ -127,26 +125,9 @@ export default function UserDetailPage() {
   const credsPath = `/admin/user-management/credentials?sub=${encodeURIComponent(sub)}`
   const creds = useAdminList<Credential>(credsPath, !!sub)
 
-  const [resetOpen, setResetOpen] = useState(false)
-  const [newPassword, setNewPassword] = useState("")
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [credToDelete, setCredToDelete] = useState<Credential | null>(null)
 
-  // PUT /admin/user-management/password?sub= body {newPassword} (usermanagement.go).
-  const resetPassword = useMutation({
-    mutationFn: () =>
-      apiFetch(`/admin/user-management/password?sub=${encodeURIComponent(sub)}`, {
-        method: "PUT",
-        body: { newPassword },
-      }),
-    onSuccess: () => {
-      toast.success("Password reset")
-      setResetOpen(false)
-      setNewPassword("")
-      qc.invalidateQueries({ queryKey: ["admin-list", credsPath] })
-    },
-    onError: (e: Error) => toast.error(e.message),
-  })
 
   // DELETE /admin/user-management/credentials/{credentialId}?sub= (usermanagement.go).
   const deleteCredential = useMutation({
@@ -162,26 +143,6 @@ export default function UserDetailPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
-  // POST /admin/user/{id}/impersonate (user.go userImpersonate) — 501 seam on this deployment:
-  // this service is a pure OIDC resource server and does not mint local OAuth2 tokens.
-  const impersonate = useMutation({
-    mutationFn: () => apiFetch<{ url?: string }>(`/admin/user/${id}/impersonate`, { method: "POST" }),
-    onSuccess: (d) => {
-      if (d?.url) {
-        navigator.clipboard?.writeText(d.url)
-        toast.success("Impersonation URL copied")
-      } else {
-        toast.success("Impersonation started")
-      }
-    },
-    onError: (e: Error) => {
-      if (e instanceof ApiError && e.status === 501) {
-        toast.info("Not available: impersonation is not supported on this deployment.")
-      } else {
-        toast.error(e.message)
-      }
-    },
-  })
 
   // DELETE /admin/user/{id} (user.go userDelete).
   const deleteUser = useMutation({
@@ -216,17 +177,6 @@ export default function UserDetailPage() {
         }
         actions={
           <>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => impersonate.mutate()}
-              disabled={!user || impersonate.isPending}
-            >
-              <UserCog className="size-4" /> Impersonate
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => setResetOpen(true)} disabled={!sub}>
-              <KeyRound className="size-4" /> Reset password
-            </Button>
             <Button variant="destructive" size="sm" onClick={() => setDeleteOpen(true)} disabled={!user}>
               <Trash2 className="size-4" /> Delete user
             </Button>
@@ -490,42 +440,6 @@ export default function UserDetailPage() {
         </div>
       )}
 
-      {/* Reset password */}
-      <Dialog open={resetOpen} onOpenChange={setResetOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Reset password</DialogTitle>
-            <DialogDescription>Replaces every stored password credential for {user?.email}.</DialogDescription>
-          </DialogHeader>
-          <form
-            className="space-y-4"
-            onSubmit={(e) => {
-              e.preventDefault()
-              resetPassword.mutate()
-            }}
-          >
-            <div className="grid gap-2">
-              <Label htmlFor="new-password">New password</Label>
-              <Input
-                id="new-password"
-                type="password"
-                autoComplete="new-password"
-                required
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-              />
-            </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setResetOpen(false)}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={resetPassword.isPending || !newPassword}>
-                {resetPassword.isPending ? "Resetting…" : "Reset password"}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
 
       {/* Delete credential confirm */}
       <Dialog open={!!credToDelete} onOpenChange={(o) => !o && setCredToDelete(null)}>
