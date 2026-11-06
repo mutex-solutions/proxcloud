@@ -143,7 +143,7 @@ func tokenWarnings(ctx context.Context, cc *pve.Client, tokenID string) []string
 }
 
 // checkNodeFirewalls rejects a cluster where an online node still runs the stock
-// iptables firewall: it ignores the SDN vnet rules, so tenant network isolation
+// iptables firewall: it ignores FORWARD rules, so tenant network isolation
 // would be silently off on that node.
 func checkNodeFirewalls(ctx context.Context, cc *pve.Client) *httpx.HTTPError {
 	legacy, err := cc.NodesWithoutNFTables(ctx)
@@ -151,7 +151,7 @@ func checkNodeFirewalls(ctx context.Context, cc *pve.Client) *httpx.HTTPError {
 		return httpx.BadRequest("Proxmox preflight failed: cannot read the node firewall options: " + err.Error())
 	}
 	if len(legacy) > 0 {
-		return httpx.BadRequest("Proxmox preflight failed: node " + strings.Join(legacy, ", ") + " runs the legacy iptables firewall, which ignores the SDN vnet rules that isolate tenant networks. Set nftables: 1 under Node > Firewall > Options on every node, then restart its guests.")
+		return httpx.BadRequest("Proxmox preflight failed: node " + strings.Join(legacy, ", ") + " runs the legacy iptables firewall, which ignores the FORWARD rules that isolate tenant networks. Set nftables: 1 under Node > Firewall > Options on every node, then restart its guests.")
 	}
 	return nil
 }

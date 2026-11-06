@@ -403,7 +403,7 @@ flowchart LR
   resources, QEMU, storage, SDN, firewall, pools, tasks, PCI mappings) and the
   project-scoped `pve.Service` (create/delete/resize/power servers, project
   templates, volumes, GPU slots, console). Networks (`network.go`) are SDN vnets
-  with per-vnet isolation; security groups are cluster firewall groups
+  with cluster firewall isolation; security groups are cluster firewall groups
   (`firewallsvc.go`); `PickNode` places VMs by capacity, the nodes where the
   storage profile is active, free space on that storage and free GPU slots;
   `capability.go` detects what each storage supports.

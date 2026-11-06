@@ -4,6 +4,39 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: tenant isolation moves to cluster firewall rules, EVPN gets platform IPAM
+
+Found by the end-to-end lab drill on PVE 9.2.
+
+**What changed**
+
+- Tenant isolation is now a managed rule set in the cluster firewall (`proxcloud:isolation`
+  rules, one ACCEPT per project) instead of per-vnet firewall rules. It also drops traffic
+  from the pool to the nodes' management networks and a new `network.blockedCidrs`.
+- On a zone without DHCP (EVPN, VLAN) the platform allocates each server's `net0` address,
+  sets it through cloud-init and pins `ipfilter-net0` to the `/32`. The allocation rows live
+  in `pvePublicIp` on NIC `net0`; only `net1` rows count against the `floatingIps` quota.
+- A public NIC takes the default route; attach and detach answer `rebootRequired`.
+- `ResolveVM` reads power state and config from the node, not from `cluster/resources`.
+- A failed project deletion stays `DELETE_IN_PROGRESS` and is retried, and `DELETE
+  /project/{id}/now` now actually deletes.
+
+**Why**
+
+- Vnet `FORWARD` rules only see frames switched inside one vnet bridge. Traffic between
+  subnets is routed by the node, so with the old rules one tenant reached another, and
+  through an exit node's leaked VRF route also the node management network and storage.
+- PVE refuses `dhcp` on an EVPN zone: network create failed outright, and DHCP is simple-zone
+  only. A static address also lets ipfilter pin the exact address, which closes the
+  spoof-a-sibling ceiling.
+- With a default route on both NICs, replies from a public address left through the overlay.
+- `cluster/resources` lags a finished task by seconds, so a resize right after a stop
+  restarted the VM.
+- A rollback to `ENABLED` after a half-done teardown showed a broken project as healthy and
+  was never retried.
+
+**Diagrams updated**: `c4-code.md` (C4.1, C4.2, sequences).
+
 ## 2026-10-28: P3 storage foundation and honest UI (branch feat/p3-storage, PR TBD)
 
 Summary of the P3 slices below (P3-1 to P3-10); the per-slice entries carry the detail.

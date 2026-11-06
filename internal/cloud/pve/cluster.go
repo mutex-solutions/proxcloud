@@ -2,7 +2,9 @@ package pve
 
 import (
 	"context"
+	"net"
 	"net/url"
+	"slices"
 	"strconv"
 )
 
@@ -83,6 +85,36 @@ func (c *Client) NextID(ctx context.Context) (int, error) {
 // network on such a bridge would put tenant VMs on the hypervisor's L2. nodes
 // narrows the check (none = every node in the cluster).
 func (c *Client) ManagementBridges(ctx context.Context, nodes ...string) (map[string]string, error) {
+	mgmt, err := c.managementIfaces(ctx, nodes...)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, m := range mgmt {
+		out[m.iface] = m.node
+	}
+	return out, nil
+}
+
+// ManagementCIDRs lists the IPv4 networks of the bridges ManagementBridges finds on every node:
+// what a tenant must not reach through an exit node, storage on that network included.
+func (c *Client) ManagementCIDRs(ctx context.Context) ([]string, error) {
+	mgmt, err := c.managementIfaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, m := range mgmt {
+		if _, n, err := net.ParseCIDR(m.cidr); err == nil && n.IP.To4() != nil && !slices.Contains(out, n.String()) {
+			out = append(out, n.String())
+		}
+	}
+	return out, nil
+}
+
+type mgmtIface struct{ iface, node, cidr string }
+
+func (c *Client) managementIfaces(ctx context.Context, nodes ...string) ([]mgmtIface, error) {
 	var status []struct {
 		Type string `json:"type"`
 		Name string `json:"name"`
@@ -102,7 +134,7 @@ func (c *Client) ManagementBridges(ctx context.Context, nodes ...string) (map[st
 			nodes = append(nodes, n)
 		}
 	}
-	out := map[string]string{}
+	var out []mgmtIface
 	for _, node := range nodes {
 		var ifaces []struct {
 			Iface    string `json:"iface"`
@@ -110,6 +142,7 @@ func (c *Client) ManagementBridges(ctx context.Context, nodes ...string) (map[st
 			Address6 string `json:"address6"`
 			Gateway  string `json:"gateway"`
 			Gateway6 string `json:"gateway6"`
+			CIDR     string `json:"cidr"`
 		}
 		form := formVals{"type": "any_bridge"}.values()
 		if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", form, &ifaces); err != nil {
@@ -118,7 +151,7 @@ func (c *Client) ManagementBridges(ctx context.Context, nodes ...string) (map[st
 		ip := nodeIP[node]
 		for _, i := range ifaces {
 			if i.Gateway != "" || i.Gateway6 != "" || (ip != "" && (i.Address == ip || i.Address6 == ip)) {
-				out[i.Iface] = node
+				out = append(out, mgmtIface{i.Iface, node, i.CIDR})
 			}
 		}
 	}

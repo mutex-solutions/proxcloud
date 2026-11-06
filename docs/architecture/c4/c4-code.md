@@ -20,32 +20,42 @@ except sequence (d), which is **Planned**.
 | `Service.CreateNetwork` | `network.go:157` | Stages vnet `v<5 base36>` with alias `st:<projectId>:<name>`, then its subnet (gateway, DHCP range, SNAT) |
 | `ZoneIDFor` | `network.go:341` | Per-project EVPN zone id: `p` + 7 base36 chars of `sha256(projectId)` (8 chars, the PVE limit) |
 | `Service.EnsureProjectZone` | `network.go:353` | Stages the project zone from the default EVPN zone template; next free VRF VNI (from 10000); refuses an id collision with another owner |
-| `isolationRules` | `network.go:443` | The managed rule set for one vnet (below) |
-| `Service.ReconcileIsolation` | `network.go:455` | Rewrites every vnet of the project to the rule set over all its subnets and enables the vnet firewall |
-| `Service.ensureVnetRules` | `network.go:488` | Touches only rules tagged `proxcloud:isolation`; adds bottom-up so a wrong insert order fails closed |
+| `isolationRules`, `projectIsolationRule` | `network.go` | The provider-wide DROPs and one project's ACCEPT (below) |
+| `Service.ReconcileIsolation` | `network.go` | Brings the cluster firewall to the rule set: rebuilds the DROPs when they are missing or the blocked networks changed, then this project's ACCEPT over all its subnets |
+| `Client.ManagementCIDRs` | `internal/cloud/pve/cluster.go` | The networks of the bridges carrying a node's own IP or gateway; always blocked |
 | `Service.ApplyAndWait` | `network.go:553` | `PUT /cluster/sdn` and wait for the task |
-| `pveDeleteNetwork` | `cloud_network_pve.go:175` | Refuses while a pool VM NIC uses the vnet; deletes, re-reconciles, applies, then removes an empty project zone in a second apply |
-| `Client.AddVnetFirewallRule`, `EnableVnetFirewall` | `internal/cloud/pve/firewall.go:118`, `:128` | Vnet firewall REST calls |
+| `pveDeleteNetwork` | `cloud_network_pve.go:175` | Refuses while a pool VM NIC uses the vnet; deletes, re-reconciles, stages an empty project zone for removal, applies once (PVE accepts both in one apply) |
+| `Client.AddClusterFirewallRule`, `DeleteClusterFirewallRule` | `internal/cloud/pve/firewall.go` | Cluster firewall REST calls |
 
 **Isolation modes** (`config.network.isolation` on the provider):
 
-- `shared` (default): every tenant vnet sits in the provider's default zone. Each
-  vnet carries the managed rule set, so traffic between tenants is dropped even
-  though they share one routing domain.
+- `shared` (default): every tenant vnet sits in the provider's default zone, one
+  routing domain. The rule set below drops traffic between tenants.
 - `evpn-per-project`: each project gets its own EVPN zone (its own VRF) with id
-  `ZoneIDFor(projectId)`. The same vnet rules still apply, because exit nodes leak
+  `ZoneIDFor(projectId)`. The same rule set still applies, because exit nodes leak
   every VRF into the default table and the VRF alone is not a wall.
 
-**Managed rule set per vnet**, top to bottom, all `forward` rules:
+**Managed rule set in the cluster firewall**, top to bottom (first match wins):
 
-1. `ACCEPT source=<all project subnets> dest=<all project subnets>` (omitted when
-   the project has no subnets, since an empty field means "any").
-2. `DROP dest=<cidrPool>`.
+1. One per project, comment `proxcloud:isolation:<projectId>`: `FORWARD ACCEPT
+   source=<project subnets> dest=<project subnets>` (absent when the project has no
+   subnets, since an empty field means "any").
+2. `FORWARD DROP source=<cidrPool> dest=<cidrPool>`.
+3. `FORWARD DROP source=<cidrPool> dest=<management networks, blockedCidrs>`.
+4. `IN DROP source=<cidrPool> dest=<management networks, blockedCidrs>`: an exit node's
+   own addresses are reached through input, not forward.
 
-Forward rules see both directions, so a packet from tenant A to tenant B is dropped
-on both vnets. There is deliberately no `DROP source=<cidrPool>`: every tenant
-source is in the pool, and that rule would also drop egress to the internet through
-SNAT.
+These are cluster rules, not vnet rules, because traffic between subnets is routed by
+the node: on PVE 9.2 with `proxmox-firewall`, vnet `FORWARD` rules only see frames
+switched inside one vnet bridge, and a routed packet never hits them. Traffic inside
+one vnet is switched and needs no rule. There is deliberately no blanket
+`DROP source=<cidrPool>`: it would also drop egress to the internet through SNAT.
+
+Addresses: PVE offers DHCP on simple zones only (`dhcp` on an EVPN zone is refused). On a
+zone without DHCP the platform allocates the server's `net0` address when it clones the VM
+(`VnetStaticPool`, `PublicIPRepo.Allocate`, a row on NIC `net0`), writes it to `ipconfig0`,
+and pins `ipfilter-net0` to that `/32`. On a DHCP zone the set is the subnet plus `0.0.0.0`,
+because `proxmox-firewall` checks ipfilter before `dhcp=1` and would drop DISCOVER.
 
 ```mermaid
 flowchart LR
@@ -60,8 +70,11 @@ flowchart LR
   end
   inet["Internet via SNAT"]:::impl
 
+  mgmt["Node management networks,<br/>blockedCidrs"]:::impl
+
   va1 <-->|"ACCEPT: own subnets"| va2
   va1 -.-x|"DROP: dest in cidrPool"| vb1
+  va1 -.-x|"DROP"| mgmt
   va1 -->|"egress allowed"| inet
   vb1 -->|"egress allowed"| inet
 ```
@@ -70,11 +83,15 @@ Invariants:
 
 - The CIDR pick and the vnet staging happen under the same lock, so two concurrent
   creates cannot land on one range, and `SubnetCIDRs` also sees staged networks.
-- A vnet gets its isolation rules **before** the SDN apply, so it never goes live
-  unisolated. If reconcile or apply fails, the vnet is unstaged and the apply re-run.
+- The rule set is reconciled **before** the SDN apply. If reconcile or apply fails, the
+  vnet is unstaged and the apply re-run. New DROPs go in before old rules go, so every
+  step fails closed.
 - The test connection (`internal/platform/admin/pveadmin.go:47`) refuses a cluster
   whose datacenter firewall is off or where a node still runs the legacy iptables
-  firewall (it ignores vnet rules), so the rules above are actually enforced.
+  firewall (it ignores FORWARD rules), so the rules above are actually enforced.
+- Verified live on PVE 9.2 in both isolation modes, on one node and across nodes: same
+  project reaches its other vnets, another tenant and the management network are dropped,
+  SNAT egress works, a spoofed source address is dropped.
 
 ## C4.2 VM firewall, default security group and public IPs
 
@@ -85,7 +102,7 @@ Invariants:
 | `vmFirewallOptions` | `firewallsvc.go:243` | `enable=1 ipfilter=1 macfilter=1 dhcp=1 policy_in=DROP policy_out=ACCEPT` |
 | `Service.SecureVM` | `firewallsvc.go:257` | `ipfilter-netN` = the vnet's subnets for each NIC on a tenant vnet, then the VM firewall options |
 | `Service.SetIPFilter` | `firewallsvc.go:295` | Makes an ipfilter set hold exactly the given CIDRs; a changed set is dropped and rebuilt (fail closed) |
-| `defaultGroupRules`, `EnsureDefaultSecurityGroup` | `firewallsvc.go:351`, `:361` | Project `default` group: ingress from `cidrPool` only (other tenants are already dropped by the vnet rules) |
+| `defaultGroupRules`, `EnsureDefaultSecurityGroup` | `firewallsvc.go:351`, `:361` | Project `default` group: ingress from `cidrPool` only (other tenants are already dropped by the isolation rules) |
 | `Service.ServerSecurityGroups` | `firewallsvc.go:386` | Resolve the user's group names or ids to owned groups; none given means the default group |
 | `pvePublicNetworkAction` | `internal/platform/project/cloud_network_pve.go:315` | `ATTACH_PUBLIC_NETWORK` / `DETACH_PUBLIC_NETWORK` on a server |
 | `PublicIPRepo.Allocate`, `allocatePublicIP`, `pickPublicIP` | `internal/platform/project/publicip_pve.go:75`, `:101`, `:125` | Lowest free address of the network's pool; insert with primary key `serviceId/networkId/ip`, retry on a duplicate |
@@ -96,7 +113,8 @@ Invariants:
 - A server must sit on one of the project's own networks. The template's NIC is
   replaced by `net0` on the tenant vnet; any other cloned NIC is removed, so a
   template made from a VM with a public NIC cannot hand out that VM's bridge or
-  ipfilter.
+  ipfilter. A clone also inherits the source's firewall rules, so they are cleared before
+  the chosen groups are added.
 - The firewall is configured **before the first boot**. If adding a group or
   `SecureVM` fails, the VM is destroyed rather than started open.
 - A NIC on a bridge that is not a tenant vnet gets an empty ipfilter set, which
@@ -105,6 +123,10 @@ Invariants:
   `ipfilter-net1` = the address `/32`, then plug `net1` with `firewall=1`. Detach
   empties the ipfilter set first, unplugs, and only then returns the address.
   Server delete and project teardown release the server's or project's addresses.
+- A public NIC takes the default route: a static `net0` loses its gateway while one is
+  attached, because replies from the public address must not leave through the overlay.
+  The guest picks up `ipconfig1` and the route change at its next boot, so attach and
+  detach answer `rebootRequired: true`.
 
 ## C4.3 Quota enforcement
 
@@ -266,8 +288,8 @@ sequenceDiagram
     H->>PS: EnsureZone default zone
   end
   H->>PS: CreateNetwork: stage vnet and subnet
-  H->>PS: ReconcileIsolation over all project vnets
-  PS->>PVE: rewrite managed vnet rules, enable vnet firewall
+  H->>PS: ReconcileIsolation (cluster firewall rules)
+  PS->>PVE: reconcile cluster firewall rules
   opt reconcile failed
     H->>PS: unstage vnet
     H->>L: unlock
@@ -311,7 +333,7 @@ sequenceDiagram
   PS->>PVE: stop and destroy every VM in the pool, delete pool
   T->>L: lock
   T->>PS: TeardownProjectNetworks
-  PS->>PVE: remove isolation rules, subnets, vnets (staged)
+  PS->>PVE: remove subnets, vnets (staged), project isolation rule
   opt vnets were staged
     T->>PS: ApplyAndWait
   end

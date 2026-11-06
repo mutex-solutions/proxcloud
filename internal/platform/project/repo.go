@@ -118,11 +118,14 @@ func (r *Repo) AllEnabled(ctx context.Context) ([]Project, error) {
 	return out, nil
 }
 
+// deletionGrace is how long a scheduled project deletion can still be cancelled.
+const deletionGrace = 5 * time.Minute
+
 // ScheduledForDeletion returns projects in
 // SCHEDULED_FOR_DELETION / DELETE_IN_PROGRESS whose scheduledForDeletionAt is past the 5-minute
 // grace window (so a just-scheduled / quickly-canceled deletion isn't acted on immediately).
 func (r *Repo) ScheduledForDeletion(ctx context.Context, now time.Time) ([]Project, error) {
-	cutoff := now.Add(-5 * time.Minute)
+	cutoff := now.Add(-deletionGrace)
 	out := []Project{}
 	if err := r.col.Find(ctx, pgdoc.M{
 		"status":                 pgdoc.M{"$in": []string{StatusScheduledForDeletion, StatusDeleteInProgress}},

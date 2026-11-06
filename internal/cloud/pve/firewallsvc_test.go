@@ -92,6 +92,9 @@ func vmFirewallFake(t *testing.T, existing string) (*Service, *[]string) {
 		"GET /api2/json/cluster/sdn/vnets": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[{"vnet":"vaaa11","zone":"overlay","alias":"st:p1:web"}]}`)
 		},
+		"GET /api2/json/cluster/sdn/zones": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":[{"zone":"overlay","type":"evpn"}]}`)
+		},
 		"GET /api2/json/cluster/sdn/vnets/vaaa11/subnets": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[{"cidr":"10.100.0.0/24"},{"cidr":"10.100.9.0/24"}]}`)
 		},

@@ -7,8 +7,8 @@ import (
 )
 
 // deletion.go runs the executeProjectDeletion cron: projects past their deletion grace window get
-// their cloud resources cascade-deleted, then the project doc is removed. A failure rolls the
-// project back to ENABLED (so it's retried/visible).
+// their cloud resources cascade-deleted, then the project doc is removed. A failure leaves the
+// project DELETE_IN_PROGRESS, so the next sweep retries: part of it may already be gone.
 
 // ResourceDeleter cascades a project's cloud-resource deletion (per-provider delete). The
 // production impl deletes each CloudResource via the cloud WriteService; tests use a fake.
@@ -50,7 +50,7 @@ func (j *DeletionJob) ExecuteAll(ctx context.Context) (int, error) {
 
 // deleteProject: ENABLED → skip (deletion was canceled);
 // SCHEDULED_FOR_DELETION → DELETE_IN_PROGRESS; cascade-delete the cloud resources; on success
-// remove the doc; on error roll back to ENABLED. Returns whether the project was deleted.
+// remove the doc; on error stay in progress for the next sweep. Returns whether the project was deleted.
 func (j *DeletionJob) deleteProject(ctx context.Context, p *Project) bool {
 	if p.Status == StatusEnabled {
 		j.log.Debug("project no longer scheduled for deletion (canceled)", "id", p.ID)
@@ -64,9 +64,7 @@ func (j *DeletionJob) deleteProject(ctx context.Context, p *Project) bool {
 		}
 	}
 	if err := j.deleter.DeleteProjectResources(ctx, p.ID); err != nil {
-		j.log.Error("project deletion: cascade cloud delete failed, rolling back to ENABLED", "id", p.ID, "err", err)
-		p.Status = StatusEnabled
-		_ = j.repo.Save(ctx, p)
+		j.log.Error("project deletion: cascade cloud delete failed, retrying on the next sweep", "id", p.ID, "err", err)
 		return false
 	}
 	if err := j.repo.Delete(ctx, p.ID); err != nil {

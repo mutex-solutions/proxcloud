@@ -136,6 +136,7 @@ The shape is documented in the header of `proxmox.go`:
       "publicNetworks": [{"id": "vmbr1", "name": "Internet", "cidr": "203.0.113.0/24",
                           "gateway": "203.0.113.1", "ranges": ["…"], "exclude": ["…"]}],
       "cidrPool": "10.100.0.0/16",                       // required; tenant CIDRs never overlap
+      "blockedCidrs": ["192.0.2.0/24"],                  // tenants cannot reach these; node management networks are always added
       "isolation": "shared",                             // or "evpn-per-project"
       "evpnController": "proxcloud"
     },
@@ -241,8 +242,8 @@ by sync and the charge loop.
   resize, power and rename servers, project templates, volumes (add, extend,
   detach, attach, retype, delete detached), GPU slot picking, VNC/serial console.
 - **Networks** (`network.go`, `sdn.go`) — tenant vnets and subnets carved from
-  `cidrPool`, the ownership alias, per-vnet isolation rules, per-project EVPN
-  zones, staged SDN changes plus apply (serialized platform-wide by the SDN apply
+  `cidrPool`, the ownership alias, cluster firewall isolation rules, per-project
+  EVPN zones, staged SDN changes plus apply (serialized platform-wide by the SDN apply
   lock).
 - **Firewall** (`firewallsvc.go`) — security groups as cluster firewall groups,
   the project default group, VM firewall options and per-NIC ipfilter sets
@@ -311,9 +312,6 @@ active / total / avail. A node outside the storage's `nodes` list is ignored and
   (and `volume_type` follows the disk's profile, not the server's). The volume
   billing resource exposes both as string attributes for price-rule filters.
 
-PVE behaviour that was not verified on a lab cluster is marked `TODO(verify-lab)`
-in `capability.go` and `volume.go`.
-
 ### Tenancy: the pool is the boundary, the platform DB decides the rest
 
 There is one admin token per provider, and ProxCloud is the policy decision
@@ -326,9 +324,13 @@ point (`proxmox.go` header):
 - Vnets, firewall groups and PCI mappings have **no pool scoping** in Proxmox.
   For them the platform database is the only tenancy boundary: vnets carry an
   ownership alias, and ownership is checked before any change.
-- Tenant-to-tenant isolation on the SDN is enforced by vnet DROP rules
-  (`shared` mode) or one EVPN zone per project (`evpn-per-project`). Details:
+- Tenant-to-tenant isolation on the SDN is enforced by cluster firewall rules,
+  in `shared` mode and with one EVPN zone per project (`evpn-per-project`) alike.
+  They also keep tenants off the nodes' management networks and `blockedCidrs`. Details:
   [C4.1 tenant network isolation](architecture/c4/c4-code.md#c41-tenant-network-isolation).
+- PVE offers DHCP on simple zones only, and a simple zone stays on one node. On EVPN and
+  VLAN zones the platform allocates each server's `net0` address and sets it through
+  cloud-init, so an image without cloud-init gets no address there.
 
 Getting tenancy wrong over-bills a customer for resources that are not theirs,
 or worse, exposes them.

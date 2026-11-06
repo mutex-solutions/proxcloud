@@ -127,8 +127,8 @@ func (s *Service) DetachVolume(ctx context.Context, projectID string, vmid int, 
 	if strings.HasPrefix(slot, "unused") {
 		return nil // already detached
 	}
-	if strings.HasSuffix(slot, "0") && (strings.HasPrefix(slot, "scsi") || strings.HasPrefix(slot, "virtio")) {
-		return fmt.Errorf("pve: cannot detach the boot disk")
+	if slot == "scsi0" || slot == "virtio0" {
+		return conflictf("The boot disk cannot be detached")
 	}
 	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, nil, slot)
 	if err != nil {
@@ -233,9 +233,8 @@ func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int,
 
 // DeleteVolume destroys a detached disk: dropping its unusedN entry from the VM config
 // frees the volume on its storage. An attached disk must be detached first (ConflictError).
-// TODO(verify-lab): PVE docs say unlinking unused[n] always removes the volume physically;
-// confirm POST /config delete=unusedN does the same (and what happens when a VM snapshot
-// still references the volume).
+// Lab-verified (PVE 9.2): delete=unusedN removes the volume physically. While a VM snapshot
+// references it, the task still succeeds with a warning and the entry stays, hence the re-read.
 func (s *Service) DeleteVolume(ctx context.Context, projectID string, vmid int, volID string) error {
 	vm, slot, err := s.volumeSlot(ctx, projectID, vmid, volID)
 	if err != nil {
@@ -248,7 +247,17 @@ func (s *Service) DeleteVolume(ctx context.Context, projectID string, vmid int, 
 	if err != nil {
 		return err
 	}
-	return s.C.WaitTask(ctx, up)
+	if err := s.C.WaitTask(ctx, up); err != nil {
+		return err
+	}
+	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	if cfg.Str(slot) != "" {
+		return conflictf("The volume is still referenced by a snapshot of its server. Delete the snapshot first")
+	}
+	return nil
 }
 
 // RetypeVolume moves a disk to another storage of its VM's node (move_disk storage=,

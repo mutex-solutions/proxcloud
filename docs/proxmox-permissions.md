@@ -25,7 +25,7 @@ The admin **Test connection** button on the Proxmox provider reads the token's e
 | Privilege | Why |
 |---|---|
 | `Sys.Audit` | cluster status, node PCI scan, datacenter firewall options (the preflight) |
-| `Sys.Modify` | cluster firewall security groups (`/cluster/firewall/groups` checks `Sys.Modify` on `/`) |
+| `Sys.Modify` | cluster firewall security groups and tenant isolation rules (`/cluster/firewall/groups` and `/rules` check `Sys.Modify` on `/`) |
 | `Pool.Allocate`, `Pool.Audit` | create, read, fill and delete project pools |
 | `VM.Allocate`, `VM.Clone` | clone templates into a project pool, delete VMs, convert snapshots to images |
 | `VM.Audit` | read VM config, status, snapshots and firewall |
@@ -35,7 +35,7 @@ The admin **Test connection** button on the Proxmox provider reads the token's e
 | `VM.Migrate` | migrate and rebalance |
 | `VM.PowerMgmt` | start, stop, reboot, suspend and resume |
 | `VM.Snapshot`, `VM.Snapshot.Rollback` | server snapshots |
-| `SDN.Allocate`, `SDN.Audit` | vnets, subnets, vnet firewall, per-project EVPN zones, SDN apply |
+| `SDN.Allocate`, `SDN.Audit` | vnets, subnets, per-project EVPN zones, SDN apply |
 | `SDN.Use` | attach NICs to vnets and public bridges |
 | `Datastore.AllocateSpace`, `Datastore.Audit` | VM disks and volumes, storage listing |
 | `Mapping.Audit`, `Mapping.Use` | GPU PCI mappings |
@@ -149,17 +149,19 @@ Templates must be members of `pc-templates`, or neither the platform nor CAPMOX 
 
 ## Known ceilings
 
-- `Sys.Modify` on `/` is needed for cluster security groups. The same privilege also allows editing datacenter options and the datacenter firewall. Proxmox has no narrower privilege for firewall groups.
+- `Sys.Modify` on `/` is needed for cluster security groups and isolation rules. The same privilege also allows editing datacenter options and the datacenter firewall. Proxmox has no narrower privilege for firewall groups.
 - `SDN.Use` on `/sdn` also covers the node bridges, the management bridge included. The portal refuses the management bridge as a public network (test connection and attach). For a tighter setup, grant `SDN.Use` only on `/sdn/zones/<zone>` and `/sdn/zones/localnetwork/<public bridge>`.
 
-## To verify in the lab (PVE 9.2)
-
-These are documented behaviour that has not yet been run against the lab:
+## Verified on a PVE 9.2 lab
 
 - A `pc-*` pool created after the `/pool` ACL inherits it, and VMs inherit their pool's rights.
-- `NoAccess` on `/pool/proxcloud-system` overrides the propagated `/pool` grant for those VMs.
-- `GET /access/permissions?path=/pool` called with a privsep token returns the inherited user∩token set (the test-connection check relies on this).
+- `NoAccess` on `/pool/proxcloud-system` overrides the propagated `/pool` grant: the token gets `Permission check failed` on a VM in that pool and does not see it.
+- `GET /access/permissions?path=/pool` called with a privsep token returns the inherited user∩token set. A correctly set up token gets no warnings from **Test connection**.
 - `GET /nodes/{node}/firewall/options` reports `nftables` as 0/1 and is readable with `PVEAuditor` on `/nodes`.
-- VNC/serial console through `vncproxy`/`termproxy` works with a token (the pveum docs say some console endpoints refuse API tokens).
-- Hot-adding a mapped GPU (`hostpciN: mapping=…`) works with `Mapping.Use` and `VM.Config.HWType`, without root.
-- CAPMOX and `proxmox-csi-plugin` work with the scoped paths above instead of `/`.
+- VNC console through `vncproxy` + `vncwebsocket` works with a token (`RFB` banner through the portal's proxy). `termproxy` mints a ticket with a token too.
+- The whole lifecycle ran on this token alone: SDN zones, vnets and apply, cluster firewall rules and groups, VM clone, config, power, resize and delete, disks across storages, pools.
+
+Not run yet, because the lab has no GPU and no services cluster:
+
+- Hot-adding a mapped GPU (`hostpciN: mapping=…`) with `Mapping.Use` and `VM.Config.HWType`, without root.
+- CAPMOX and `proxmox-csi-plugin` with the scoped paths above instead of `/`.

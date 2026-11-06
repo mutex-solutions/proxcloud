@@ -63,14 +63,7 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 	now := nowUTC()
 	out := make([]cloud.CloudResource, 0, len(vms))
 	for _, r := range vms {
-		// Guest-agent IPs, best-effort: only a running VM can answer, and a guest
-		// without the agent just yields no addresses (cloud-init installs it).
-		var addrs map[string]any
-		if r.Status == "running" {
-			if ifaces, err := p.svc.C.AgentNetworkInterfaces(ctx, r.Node, r.VMID); err == nil {
-				addrs = AgentAddresses(ifaces)
-			}
-		}
+		addrs := p.svc.ServerAddresses(ctx, r)
 		out = append(out, cloud.CloudResource{
 			ExternalID: itoa0(r.VMID),
 			ProjectID:  p.projectID,
