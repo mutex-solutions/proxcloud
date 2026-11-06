@@ -359,19 +359,24 @@ func run() error {
 
 	// Client PAT verification: resolve `Bearer pk.sk` tokens from the client_api_keys collection
 	// (SEPARATE from admin hmac_keys — a client PAT can never resolve on the Admin-API SigV4 path).
-	// Returns the secret half + the owning user's sub, which becomes the request principal.
+	// Returns the hash of the secret half + the owning user's sub, which becomes the request principal.
+	if n, err := account.HashStoredPATs(ctx, pg.C("client_api_keys")); err != nil {
+		log.Error("hash stored API tokens", "converted", n, "err", err)
+	} else if n > 0 {
+		log.Info("hashed stored API tokens", "count", n)
+	}
 	clientKeyLookup := func(r *http.Request, keyID string) (auth.ClientKey, bool) {
 		var doc struct {
-			SecretKey string     `json:"secretKey"`
-			Sub       string     `json:"sub"`
-			Scope     string     `json:"scope"`
-			ExpiresAt *time.Time `json:"expiresAt"`
+			SecretHash string     `json:"secretHash"`
+			Sub        string     `json:"sub"`
+			Scope      string     `json:"scope"`
+			ExpiresAt  *time.Time `json:"expiresAt"`
 		}
 		found, err := pg.C("client_api_keys").FindOne(r.Context(), pgdoc.M{"_id": keyID}, &doc)
 		if err != nil || !found {
 			return auth.ClientKey{}, false
 		}
-		k := auth.ClientKey{Secret: doc.SecretKey, Sub: doc.Sub, Scope: doc.Scope}
+		k := auth.ClientKey{SecretHash: doc.SecretHash, Sub: doc.Sub, Scope: doc.Scope}
 		if doc.ExpiresAt != nil {
 			k.ExpiresAt = *doc.ExpiresAt
 		}

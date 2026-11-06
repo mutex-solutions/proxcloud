@@ -13,10 +13,11 @@ package auth
 // an admin key can never resolve here.
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"net/http"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -30,9 +31,9 @@ const (
 
 // ClientKey is a resolved client PAT.
 type ClientKey struct {
-	Secret string
-	Sub    string // scopes the resulting principal
-	Scope  string // "" = PATScopeFull
+	SecretHash string // HashClientKeySecret of the secret half: the secret itself is never stored
+	Sub        string // scopes the resulting principal
+	Scope      string // "" = PATScopeFull
 	// ExpiresAt zero = never.
 	ExpiresAt time.Time
 }
@@ -46,6 +47,13 @@ func (a *Authenticator) SetClientKeyLookup(l ClientKeyLookup) {
 	a.mu.Lock()
 	a.clientKeyLookup = l
 	a.mu.Unlock()
+}
+
+// HashClientKeySecret is what the store keeps of a PAT's secret half. A bearer token is only ever
+// compared, never used to sign, so nothing needs it back; SHA-256 is enough for 160 random bits.
+func HashClientKeySecret(sk string) string {
+	sum := sha256.Sum256([]byte(sk))
+	return hex.EncodeToString(sum[:])
 }
 
 // clientKeyRe matches a client PAT bearer: "pk<32hex>.sk<40hex>" (same shape as the admin hmac
@@ -73,7 +81,7 @@ func (a *Authenticator) verifyClientKey(r *http.Request, pk, sk string) (*httpx.
 	}
 	key, ok := lookup(r, pk)
 	// Constant-time compare of the secret half; sub must resolve to a user (empty = reject).
-	if !ok || key.Sub == "" || subtle.ConstantTimeCompare([]byte(key.Secret), []byte(sk)) != 1 {
+	if !ok || key.Sub == "" || subtle.ConstantTimeCompare([]byte(key.SecretHash), []byte(HashClientKeySecret(sk))) != 1 {
 		return nil, false
 	}
 	if !key.ExpiresAt.IsZero() && !time.Now().Before(key.ExpiresAt) {
@@ -85,14 +93,22 @@ func (a *Authenticator) verifyClientKey(r *http.Request, pk, sk string) (*httpx.
 	return &httpx.RequestContext{Sub: key.Sub, Issuer: issuer, PAT: true}, true
 }
 
-// patReadAllowed reports whether a read-only PAT may make this request: safe methods, plus the POST
-// list routes reads go through. Everything else, /mcp included (its tools can write), is refused.
+// patReadPosts are the POST routes that only read: the resource list takes its filters in the body.
+var patReadPosts = regexp.MustCompile(`^/api/v1/project/[^/]+/resource$`)
+
+// patSecretReads are the GET routes that hand out a live credential. Read access to a project's
+// resources must not become write access to its buckets.
+var patSecretReads = regexp.MustCompile(`/(s3-credentials|s3-keys)(/|$)`)
+
+// patReadAllowed reports whether a read-only PAT may make this request: safe methods except the
+// credential reads, plus the POST list route. Everything else, /mcp included (its tools can write), is
+// refused. Matched on the exact route: a suffix would also let in a write that ends the same way.
 func patReadAllowed(r *http.Request) bool {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		return true
+		return !patSecretReads.MatchString(r.URL.Path)
 	case http.MethodPost:
-		return strings.HasSuffix(r.URL.Path, "/resource")
+		return patReadPosts.MatchString(r.URL.Path)
 	}
 	return false
 }
