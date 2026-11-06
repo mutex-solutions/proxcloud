@@ -16,13 +16,30 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"regexp"
+	"strings"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
-// ClientKeyLookup resolves a client PAT access-key id (pk…) to its secret half and the owning user's
-// subject. ok=false when the key is unknown or revoked. sub scopes the resulting principal.
-type ClientKeyLookup func(r *http.Request, accessKeyID string) (secret, sub string, ok bool)
+// PAT scopes: full acts as the user; read can only read.
+const (
+	PATScopeFull = "full"
+	PATScopeRead = "read"
+)
+
+// ClientKey is a resolved client PAT.
+type ClientKey struct {
+	Secret string
+	Sub    string // scopes the resulting principal
+	Scope  string // "" = PATScopeFull
+	// ExpiresAt zero = never.
+	ExpiresAt time.Time
+}
+
+// ClientKeyLookup resolves a client PAT access-key id (pk…). ok=false when the key is unknown or
+// revoked.
+type ClientKeyLookup func(r *http.Request, accessKeyID string) (key ClientKey, ok bool)
 
 // SetClientKeyLookup wires the client_api_keys resolver (nil → PAT bearers are rejected).
 func (a *Authenticator) SetClientKeyLookup(l ClientKeyLookup) {
@@ -54,10 +71,28 @@ func (a *Authenticator) verifyClientKey(r *http.Request, pk, sk string) (*httpx.
 	if lookup == nil || issuer == "" {
 		return nil, false
 	}
-	secret, sub, ok := lookup(r, pk)
+	key, ok := lookup(r, pk)
 	// Constant-time compare of the secret half; sub must resolve to a user (empty = reject).
-	if !ok || sub == "" || subtle.ConstantTimeCompare([]byte(secret), []byte(sk)) != 1 {
+	if !ok || key.Sub == "" || subtle.ConstantTimeCompare([]byte(key.Secret), []byte(sk)) != 1 {
 		return nil, false
 	}
-	return &httpx.RequestContext{Sub: sub, Issuer: issuer, PAT: true}, true
+	if !key.ExpiresAt.IsZero() && !time.Now().Before(key.ExpiresAt) {
+		return nil, false
+	}
+	if key.Scope == PATScopeRead && !patReadAllowed(r) {
+		return nil, false
+	}
+	return &httpx.RequestContext{Sub: key.Sub, Issuer: issuer, PAT: true}, true
+}
+
+// patReadAllowed reports whether a read-only PAT may make this request: safe methods, plus the POST
+// list routes reads go through. Everything else, /mcp included (its tools can write), is refused.
+func patReadAllowed(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	case http.MethodPost:
+		return strings.HasSuffix(r.URL.Path, "/resource")
+	}
+	return false
 }

@@ -28,12 +28,16 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
+	"github.com/mutex-solutions/proxcloud/pkg/auth"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
 // maxPATDescription caps the free-text label. The collection (client_api_keys) is bound at wiring
 // time via pg.C(...) — see cmd/api/main.go and account.NewHandler.
-const maxPATDescription = 200
+const (
+	maxPATDescription = 200
+	maxPATDays        = 3650
+)
 
 // apiKeyView is the safe projection returned by list/create — the secret half is NEVER included
 // (it exists only in the create response's one-time `token`).
@@ -42,6 +46,9 @@ type apiKeyView struct {
 	Description string     `json:"description"`
 	CreatedAt   *time.Time `json:"createdAt"`
 	LastUsedAt  *time.Time `json:"lastUsedAt,omitempty"`
+	// Scope is "full" (default, also what tokens from before scopes mean) or "read".
+	Scope     string     `json:"scope,omitempty"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
 // listAPIKeys returns the caller's tokens, newest first, secret stripped.
@@ -71,11 +78,24 @@ func (h *Handler) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Description string `json:"description"`
+		Description   string `json:"description"`
+		Scope         string `json:"scope"`
+		ExpiresInDays int    `json:"expiresInDays"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if len(req.Description) > maxPATDescription {
 		httpx.Err(w, http.StatusBadRequest, 400, "validation.size")
+		return
+	}
+	if req.Scope == "" {
+		req.Scope = auth.PATScopeFull
+	}
+	if req.Scope != auth.PATScopeFull && req.Scope != auth.PATScopeRead {
+		httpx.Err(w, http.StatusBadRequest, 400, "scope must be full or read")
+		return
+	}
+	if req.ExpiresInDays < 0 || req.ExpiresInDays > maxPATDays {
+		httpx.Err(w, http.StatusBadRequest, 400, "expiresInDays is out of range")
 		return
 	}
 	m := md5.Sum([]byte(uuid.NewString()))
@@ -89,6 +109,13 @@ func (h *Handler) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		"sub":         u.Sub,
 		"description": req.Description,
 		"createdAt":   now,
+		"scope":       req.Scope,
+	}
+	var expiresAt *time.Time
+	if req.ExpiresInDays > 0 {
+		e := now.AddDate(0, 0, req.ExpiresInDays)
+		expiresAt = &e
+		doc["expiresAt"] = e
 	}
 	if _, err := h.pat.InsertOne(r.Context(), doc); err != nil {
 		httpx.Err(w, http.StatusInternalServerError, 500, "internal.error")
@@ -101,6 +128,8 @@ func (h *Handler) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		"token":       pk + "." + sk,
 		"description": req.Description,
 		"createdAt":   now,
+		"scope":       req.Scope,
+		"expiresAt":   expiresAt,
 	})
 }
 
