@@ -3,7 +3,6 @@ package project
 import (
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -116,28 +115,6 @@ func TestPVEVolumeErr(t *testing.T) {
 	}
 	if he := pveVolumeErr(errors.New("pve: task failed")); he.Status != http.StatusBadGateway {
 		t.Fatalf("PVE failure mapped to %d", he.Status)
-	}
-}
-
-// A Proxmox volume is always a disk of a server: create without serverId is a clean 400
-// before any PVE or quota work.
-func TestPVECreateVolumeNeedsServer(t *testing.T) {
-	tests := []struct {
-		name string
-		data map[string]any
-		want string
-	}{
-		{"no size", map[string]any{"serverId": "101"}, "sizeGiB is required"},
-		{"no server", map[string]any{"sizeGiB": 20}, "serverId is required"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			(&Handler{}).pveCreateVolume(w, httptest.NewRequest(http.MethodPost, "/", nil), nil, nil, nil, tt.data)
-			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tt.want) {
-				t.Fatalf("got %d %s, want 400 %q", w.Code, w.Body.String(), tt.want)
-			}
-		})
 	}
 }
 

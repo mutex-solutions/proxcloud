@@ -21,18 +21,20 @@ import { apiFetch } from "@/lib/api"
 import { useCloudCursorList, useCloudScope, useProjectId } from "@/lib/hooks"
 import { timeAgo } from "@/lib/format"
 import type { CloudResource } from "@/lib/types"
+import { Checkbox } from "@/components/ui/checkbox"
 
-// Shown in every server delete dialog. A Proxmox disk belongs to the VM it was created on, and the
-// VM delete destroys every disk it owns — detached (unused) ones too. Drop once volumes can
-// outlive their server (holder VM).
-export function ServerDeleteWarning() {
+// Shown in every server delete dialog. Data volumes outlive the server and stay billed, unless ticked here.
+export function ServerDeleteVolumes({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <Alert variant="destructive">
+    <Alert>
       <CircleAlert />
-      <AlertTitle>The server's volumes are deleted too</AlertTitle>
-      <AlertDescription>
-        Every volume created on this server is deleted with it, including volumes you detached from it. Copy any
-        data you want to keep first.
+      <AlertTitle>Data volumes are kept</AlertTitle>
+      <AlertDescription className="grid gap-2">
+        <span>The boot disk goes with the server. Other volumes stay in this project, detached and still billed.</span>
+        <label className="flex items-center gap-2">
+          <Checkbox checked={checked} onCheckedChange={(v) => onChange(v === true)} />
+          Also delete this server's volumes
+        </label>
       </AlertDescription>
     </Alert>
   )
@@ -105,8 +107,10 @@ export function ServersPage() {
     onError: (e: Error) => toast.error(e.message),
   })
 
+  const [deleteVolumes, setDeleteVolumes] = useState(false)
   const del = useMutation({
-    mutationFn: (id: string) => apiFetch(`/project/${pid}/cloud/${id}`, { method: "DELETE", cloud: scope }),
+    mutationFn: (id: string) =>
+      apiFetch(`/project/${pid}/cloud/${id}${deleteVolumes ? "?deleteVolumes=true" : ""}`, { method: "DELETE", cloud: scope }),
     onSuccess: () => {
       toast.success("Server deletion requested")
       invalidate()
@@ -283,7 +287,7 @@ export function ServersPage() {
             <DialogTitle>{pending ? ACTION_VERB[pending.action] : ""} server</DialogTitle>
             <DialogDescription>Are you sure you want to {pending?.label}?</DialogDescription>
           </DialogHeader>
-          {pending?.action === "DELETE" && <ServerDeleteWarning />}
+          {pending?.action === "DELETE" && <ServerDeleteVolumes checked={deleteVolumes} onChange={setDeleteVolumes} />}
           <DialogFooter>
             <Button variant="outline" onClick={() => setPending(null)}>
               Cancel

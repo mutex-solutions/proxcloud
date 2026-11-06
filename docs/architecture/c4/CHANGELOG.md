@@ -19,6 +19,24 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Diagrams updated**: none, `docs/auth.md` has the rules.
 
+## 2026-11-07: volumes outlive their server (holder VM)
+
+**What changed**
+
+- New `internal/cloud/pve/holder.go`. A volume without a server sits on a per (project, node) holder VM; deleting a
+  server moves its data volumes there by default, `?deleteVolumes=true` destroys them. Standalone create and delete.
+- Holders are skipped by the SERVER sync and metering (no row, no bill, no quota) and by the scheduler; their disks
+  stay VOLUME rows.
+
+**Why**
+
+- A Proxmox disk must belong to a VM, so "delete the server" used to delete data the tenant had detached on purpose.
+  The UI warning that stood in for this is gone.
+- Keeping volumes by default matches the safe reading of "delete a server": data loss needs an explicit tick.
+- A holder per node because PVE reassigns a disk only within a node.
+
+**Diagrams updated**: `c3-components.md` (PVE service).
+
 ## 2026-11-07: isolation rules get an owner, cover gateways, and reconcile in the sync job
 
 Open items of the lab drill (DRILL-5, DRILL-6) and the coexistence note in the lab log.
