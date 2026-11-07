@@ -71,7 +71,8 @@ server action `ATTACH_PUBLIC_NETWORK` / `DETACH_PUBLIC_NETWORK` on
 adds (or removes) a second NIC (`net1`) on the admin-designated bridge with one
 address from that network's pool, pinned by the VM firewall's ipfilter
 (`internal/platform/project/cloud_network_pve.go`). The network must be in the
-project's allow-list.
+project's allow-list. Attaching again while the NIC is plugged answers 409 and
+leaves it alone; an address held by a NIC that never got plugged is plugged.
 
 ## Admin API — `/admin-api/v1`
 

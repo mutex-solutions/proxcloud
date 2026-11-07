@@ -2,9 +2,12 @@ package project
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -1088,7 +1091,43 @@ func (h *Handler) cloudConsoleProxy(w http.ResponseWriter, r *http.Request) {
 			httpx.Err(w, http.StatusBadGateway, http.StatusBadGateway, "console backend unavailable")
 		},
 	}
+	if user := tok.Metadata[consoleTermUser]; user != "" {
+		// A serial session opens with "<user>:<ticket>\n". The proxy sends it before relaying anything of the
+		// browser's, so the platform's PVE user never reaches the tenant.
+		open := wsClientFrame([]byte(user + ":" + backend.Query().Get("vncticket") + "\n"))
+		proxy.ModifyResponse = func(res *http.Response) error {
+			if res.StatusCode != http.StatusSwitchingProtocols {
+				return nil
+			}
+			conn, ok := res.Body.(io.Writer)
+			if !ok {
+				return errors.New("console: backend connection is not writable")
+			}
+			_, err := conn.Write(open)
+			return err
+		}
+	}
 	proxy.ServeHTTP(w, r)
+}
+
+// wsClientFrame is payload as one masked binary WebSocket frame, the way a browser sends it (RFC 6455 §5.2).
+func wsClientFrame(payload []byte) []byte {
+	b := []byte{0x82}
+	switch n := len(payload); {
+	case n < 126:
+		b = append(b, 0x80|byte(n))
+	case n < 1<<16:
+		b = append(b, 0x80|126, byte(n>>8), byte(n))
+	default:
+		b = binary.BigEndian.AppendUint64(append(b, 0x80|127), uint64(n))
+	}
+	var key [4]byte
+	_, _ = rand.Read(key[:])
+	b = append(b, key[:]...)
+	for i, c := range payload {
+		b = append(b, c^key[i%4])
+	}
+	return b
 }
 
 // cloudUploadBucketFile streams the raw request body into a bucket object (?objectName=).

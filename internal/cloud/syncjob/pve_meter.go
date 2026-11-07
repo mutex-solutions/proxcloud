@@ -471,7 +471,9 @@ func (j *Job) taskAudit(t *pve.NodeTask, projectID string, now time.Time) {
 	ev.Action = taskEventsAudit
 	ev.ResourceType = cloud.TypeServer
 	ev.ResourceID = t.ID
-	ev.ResourceMetadata = map[string]any{"type": t.Type, "user": t.User, "node": t.Node, "upid": t.UPID, "status": t.Status}
+	// The project's members read this event: no PVE account or UPID (it names one), only what ran where. Only tasks
+	// someone other than the platform ran are audited, so the actor is an operator.
+	ev.ResourceMetadata = map[string]any{"type": t.Type, "by": "operator", "node": t.Node, "status": t.Status}
 	ev.Outcome = audit.OutcomeSuccess
 	if t.Status != "OK" {
 		ev.Outcome = audit.OutcomeFailure

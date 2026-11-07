@@ -49,6 +49,47 @@ and rules: [README.md](README.md#maintenance-rule).
   location and showed "No region" until a reload. They read again once that call is done.
 
 **Diagrams updated:** none (no new container, component or relation).
+## 2026-11-07: Retype keeps one row; tenant views lose platform identities; named volumes
+
+**What changed**
+
+- A retype marks the volume row moving (`CloudResource.MovingSince`, at most 3 hours). A sync's delete-of-vanished keeps a
+  moving row, and the follow then moves it onto the new volid (`ChangeExternalID`). `ChangeExternalID` fails when the row is
+  gone instead of deleting the sync's row, and an upsert and a follow of one external id are serialised (advisory lock).
+- An upsert that finds a row it did not read first carries the provider's merge (`Repo.Upsert`, `CacheMerger`).
+- A move whose status read failed is waited out before the follow reads the disk's slot, and a disk the follow finds at its
+  new place answers success.
+- The retype's wait, follow and mark clear run on a context the request cannot cancel (bounded by the 3 hours of the mark).
+- A retype of a row still marked moving answers 409.
+- `providers.Reconcile` leaves a row alone whose `ExternalIDSince` is after its listing, and holds the pass's inserts for
+  the next sync when such a row is in scope.
+- The serial console proxy sends termproxy's opening line (`<user>:<ticket>`) itself. The action answers no user, and no ticket
+  for a serial session. The events tab shows a digest for the task id and `platform` or `operator` for its user; the audit of
+  a task run outside the portal keeps the type, node and status only.
+- A repeated `ATTACH_PUBLIC_NETWORK` on a server whose public NIC is plugged answers 409.
+- Volume create takes a name, kept on the row as `data.volume.label`; an unnamed standalone volume reads as its disk's file
+  name instead of its path on the store.
+
+**Why**
+
+- The task poller syncs a project as soon as a move ends, before the retype's follow ran: the sync archived the row, the
+  follow deleted the sync's new row and renamed a row that was gone, and the next sync added a third. The bill and history of
+  the disk split in two (acceptance pass on the lab). Keeping the row while the portal moves it is what lets the existing
+  follow do its work; a failing follow now leaves one row instead of none.
+- The ingress cuts a request after 60 s while a disk copy goes on for minutes. On the cut request the wait returned at once,
+  and the follow and mark clear failed with it: every sync then kept the old row and added one for the new volid, both
+  billed until the mark ran out. A sync lists first and reads the rows last, so a follow landing in between had the row
+  archived and the old volid inserted again. And one lost status read made a retype that had worked answer an error.
+- The serial session's first line named the platform's PVE token to the tenant, and the events and audit carried the UPID
+  and PVE user, which name it too, or an operator's account.
+- Rewriting a plugged NIC gives it a new MAC, and the guest loses its public address until a reboot. The API answers other
+  repeats ("already attached", "already on storage") with 409.
+- PVE names disks itself and has no field for a name, so a tenant's name can only live on the row.
+- A tenant whose request was cut may retype again while the copy runs. PVE refuses that retry ("can't lock file"), but its
+  follow found the old volid in the slot and cleared the first move's mark, so the sync at the move's end archived the row
+  and inserted a new one.
+
+**Diagrams updated:** `c2-containers.md`.
 
 ## 2026-11-07: An untyped handler error answers 500
 
