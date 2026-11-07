@@ -51,13 +51,15 @@ type Handler struct {
 	cache map[string]cachedList
 }
 
-// NewServer is the gateway's own listener. It serves TLS only: the credential travels in a header.
+// NewServer is the gateway's own listener. It serves TLS only: the credential travels in a header. A call makes a few
+// PVE requests of at most 30 s each, which bounds WriteTimeout; writes go on without the client (WithoutCancel).
 func NewServer(addr string, h http.Handler) *http.Server {
-	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+		WriteTimeout: 3 * time.Minute, IdleTimeout: 2 * time.Minute}
 }
 
 const (
-	cacheTTL = 10 * time.Second
+	cacheTTL = 10 * time.Second // the store list only; workers are read on every call
 	taskTTL  = time.Hour
 	maxBody  = 64 << 10
 	gib      = int64(1) << 30
@@ -169,7 +171,10 @@ func (h *Handler) refused(cred *Credential, method, path string, rf *refusal) {
 	h.Audit(ev)
 }
 
-var clusterIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+var (
+	clusterIDRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	noSecretHash = hashSecret("")
+)
 
 // authenticate reads `PVEAPIToken=csi@proxcloud!<clusterId>=<secret>`, or with a space after the scheme as the plugin's
 // HTTP client sends it (PVE takes both). The cluster comes from the credential alone.
@@ -194,8 +199,13 @@ func (h *Handler) authenticate(ctx context.Context, header string) (*Credential,
 	if err != nil {
 		return nil, err
 	}
-	if cred == nil || cred.RevokedAt != nil ||
-		subtle.ConstantTimeCompare([]byte(hashSecret(secret)), []byte(cred.SecretSHA256)) != 1 {
+	// The hash is compared for an unknown cluster too, so the answer takes as long whether the id exists or not.
+	want := noSecretHash
+	if cred != nil {
+		want = cred.SecretSHA256
+	}
+	match := subtle.ConstantTimeCompare([]byte(hashSecret(secret)), []byte(want)) == 1
+	if cred == nil || cred.RevokedAt != nil || !match {
 		return nil, unauth
 	}
 	return cred, nil
@@ -356,40 +366,50 @@ type cachedList struct {
 	list []resource
 }
 
-// listed reads /cluster/resources?type=… through client, cached per provider for cacheTTL. A VM CAPMOX has just cloned
-// can answer 403 for those seconds; the sidecar retries.
-func (h *Handler) listed(ctx context.Context, serviceID, typ string, client func(context.Context, string) (*pve.Client, error)) ([]resource, error) {
-	key := serviceID + "|" + typ
-	h.mu.Lock()
-	if e, ok := h.cache[key]; ok && time.Since(e.at) < cacheTTL {
-		h.mu.Unlock()
-		return e.list, nil
-	}
-	h.mu.Unlock()
-	cl, err := client(ctx, serviceID)
-	if err != nil {
-		return nil, err
-	}
+func listResources(ctx context.Context, cl *pve.Client, typ string) ([]resource, error) {
 	raw, err := cl.Raw(ctx, http.MethodGet, "/cluster/resources", url.Values{"type": {typ}})
 	if err != nil {
 		return nil, err
 	}
 	var list []resource
-	if err := json.Unmarshal(raw, &list); err != nil {
+	return list, json.Unmarshal(raw, &list)
+}
+
+// storages reads /cluster/resources?type=storage with the gateway token, cached per provider for cacheTTL. Stores are
+// the operator's and never change hands, so a stale list cannot cross tenants.
+func (h *Handler) storages(ctx context.Context, serviceID string) ([]resource, error) {
+	h.mu.Lock()
+	if e, ok := h.cache[serviceID]; ok && time.Since(e.at) < cacheTTL {
+		h.mu.Unlock()
+		return e.list, nil
+	}
+	h.mu.Unlock()
+	cl, err := h.PVE(ctx, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	list, err := listResources(ctx, cl, "storage")
+	if err != nil {
 		return nil, err
 	}
 	h.mu.Lock()
 	if h.cache == nil {
 		h.cache = map[string]cachedList{}
 	}
-	h.cache[key] = cachedList{time.Now(), list}
+	h.cache[serviceID] = cachedList{time.Now(), list}
 	h.mu.Unlock()
 	return list, nil
 }
 
-// workers are the cluster's VMs: QEMU guests in its pool with its pc-k8s-<id> tag, by vmid → node.
+// workers are the cluster's VMs: QEMU guests in its pool with its pc-k8s-<id> tag, by vmid → node. Read on every call,
+// never cached: PVE hands a freed vmid to the next VM at once, so a list even seconds old would let a cluster reach the
+// VM another project now has under its old worker's id.
 func (h *Handler) workers(ctx context.Context, cred *Credential) (map[int]string, error) {
-	list, err := h.listed(ctx, cred.ComputeServiceID, "vm", h.Portal)
+	cl, err := h.Portal(ctx, cred.ComputeServiceID)
+	if err != nil {
+		return nil, err
+	}
+	list, err := listResources(ctx, cl, "vm")
 	if err != nil {
 		return nil, err
 	}
@@ -429,7 +449,7 @@ func (h *Handler) store(ctx context.Context, c *call, node, s string) (shared bo
 	if !slices.Contains(c.cred.Storages, s) {
 		return false, deny("storage %s is not offered to this cluster", s)
 	}
-	list, err := h.listed(ctx, c.cred.ComputeServiceID, "storage", h.PVE)
+	list, err := h.storages(ctx, c.cred.ComputeServiceID)
 	if err != nil {
 		return false, err
 	}
@@ -627,6 +647,33 @@ func (h *Handler) quota(ctx context.Context, c *call, addGiB int) error {
 	return err
 }
 
+// reserve runs fn, a quota check and the registry write it allows, under the project's lock, so concurrent creates,
+// copies and resizes cannot each pass on the same usage.
+func (h *Handler) reserve(ctx context.Context, c *call, fn func(ctx context.Context) error) error {
+	return h.Reg.Locked(ctx, "csigw-quota:"+c.cred.ComputeServiceID+"/"+c.cred.ProjectID, fn)
+}
+
+// onPVE reports whether store s on node already holds a disk called name, under any vmid directory.
+func (h *Handler) onPVE(ctx context.Context, c *call, node, s, name string) (string, bool, error) {
+	raw, err := c.gw.Raw(ctx, http.MethodGet, "/nodes/"+node+"/storage/"+s+"/content", nil)
+	if err != nil {
+		return "", false, err
+	}
+	var list []struct {
+		VolID string `json:"volid"`
+	}
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return "", false, err
+	}
+	for _, e := range list {
+		_, disk, _ := strings.Cut(e.VolID, ":")
+		if disk[strings.LastIndex(disk, "/")+1:] == name {
+			return e.VolID, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // #5 POST /nodes/{n}/storage/{s}/content: a new disk. Its row goes in first, so a name taken by anyone is refused and two
 // creates of one name cannot both reach PVE.
 func (h *Handler) contentCreate(ctx context.Context, c *call) (json.RawMessage, error) {
@@ -658,22 +705,25 @@ func (h *Handler) contentCreate(ctx context.Context, c *call) (json.RawMessage, 
 	} else if v != nil {
 		return h.existing(v, c)
 	}
-	if err := h.quota(ctx, c, gibUp(size)); err != nil {
+	if err := h.unused(ctx, c, n, s, name); err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 	v := &Volume{ID: id, ClusterID: c.cred.ID, ProjectID: c.cred.ProjectID, ComputeServiceID: c.cred.ComputeServiceID,
 		Storage: s, Node: n, VolID: s + ":" + name, SizeBytes: size, State: StateCreating, CreatedAt: &now}
-	if err := h.Reg.InsertVolume(ctx, v); errors.Is(err, ErrExists) {
+	if err := h.reserve(ctx, c, func(ctx context.Context) error {
+		if err := h.quota(ctx, c, gibUp(size)); err != nil {
+			return err
+		}
+		return h.Reg.InsertVolume(ctx, v)
+	}); errors.Is(err, ErrExists) {
 		return nil, conflict("volume %s is being created", name)
 	} else if err != nil {
 		return nil, err
 	}
 	raw, err := c.gw.Raw(ctx, http.MethodPost, c.path(), c.params)
 	if err != nil {
-		if derr := h.Reg.DeleteVolume(ctx, id); derr != nil {
-			h.log().Error("csi gateway: row of a refused create left", "volume", id, "err", derr)
-		}
+		h.createFailed(ctx, c, v, name)
 		return nil, err
 	}
 	var volid string
@@ -682,6 +732,36 @@ func (h *Handler) contentCreate(ctx context.Context, c *call) (json.RawMessage, 
 		volid = s + ":" + name
 	}
 	return raw, h.Reg.UpdateVolume(ctx, id, pgdoc.M{"state": StateReady, "volid": volid})
+}
+
+// unused refuses a name the store on node already has a disk under. Such a disk has no row (the row was looked up
+// first): an older disk, another cluster's from before the gateway, which a create or copy must not take over.
+func (h *Handler) unused(ctx context.Context, c *call, node, s, name string) error {
+	if _, found, err := h.onPVE(ctx, c, node, s, name); err != nil {
+		return err
+	} else if found {
+		return conflict("volume name is taken")
+	}
+	return nil
+}
+
+// createFailed settles the row of a create PVE did not confirm. The name was unused before, so a disk under it now is
+// this create's: the row turns ready and the plugin's retry gets it. No disk, the row goes. No answer from PVE either,
+// the row stays creating for the registry reconciler, so a disk is never left without a row.
+func (h *Handler) createFailed(ctx context.Context, c *call, v *Volume, name string) {
+	volid, found, err := h.onPVE(ctx, c, v.Node, v.Storage, name)
+	switch {
+	case err != nil:
+		h.log().Error("csi gateway: create not confirmed, row kept creating", "volume", v.ID, "err", err)
+		return
+	case found:
+		err = h.Reg.UpdateVolume(ctx, v.ID, pgdoc.M{"state": StateReady, "volid": volid})
+	default:
+		err = h.Reg.DeleteVolume(ctx, v.ID)
+	}
+	if err != nil {
+		h.log().Error("csi gateway: row of a failed create", "volume", v.ID, "err", err)
+	}
 }
 
 // existing answers a create of a name with a row: the same cluster's ready disk again is the plugin retrying after a lost
@@ -728,23 +808,38 @@ func (h *Handler) contentCopy(ctx context.Context, c *call) (json.RawMessage, er
 		node = tn
 	}
 	id := VolumeID(c.cred.ComputeServiceID, s, name)
-	if err := h.quota(ctx, c, gibUp(src.SizeBytes)); err != nil {
+	if v, err := h.Reg.Volume(ctx, id); err != nil {
+		return nil, err
+	} else if v != nil {
+		return nil, conflict("volume name is taken")
+	}
+	if err := h.unused(ctx, c, node, s, name); err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 	v := &Volume{ID: id, ClusterID: c.cred.ID, ProjectID: c.cred.ProjectID, ComputeServiceID: c.cred.ComputeServiceID,
 		Storage: s, Node: node, VolID: s + ":" + target, SizeBytes: src.SizeBytes, SourceID: src.ID,
 		State: StateCreating, CreatedAt: &now}
-	if err := h.Reg.InsertVolume(ctx, v); errors.Is(err, ErrExists) {
+	if err := h.reserve(ctx, c, func(ctx context.Context) error {
+		if err := h.quota(ctx, c, gibUp(src.SizeBytes)); err != nil {
+			return err
+		}
+		return h.Reg.InsertVolume(ctx, v)
+	}); errors.Is(err, ErrExists) {
 		return nil, conflict("volume name is taken")
 	} else if err != nil {
 		return nil, err
 	}
 	raw, err := c.gw.Raw(ctx, http.MethodPost, c.path(), c.params)
-	if err != nil {
+	var ae *pve.APIError
+	if errors.As(err, &ae) {
+		// PVE refused it, so no task runs: the name is free again.
 		if derr := h.Reg.DeleteVolume(ctx, id); derr != nil {
 			h.log().Error("csi gateway: row of a refused copy left", "volume", id, "err", derr)
 		}
+		return nil, err
+	} else if err != nil {
+		// A lost answer: the task may be writing the disk. The row stays creating for the reconciler.
 		return nil, err
 	}
 	// ponytail: a copy task that fails leaves the row creating; the registry reconciler drops it once PVE has no disk.
@@ -822,7 +917,28 @@ func (h *Handler) vmConfig(ctx context.Context, c *call) (json.RawMessage, error
 	if err := h.worker(ctx, c, c.seg[1], c.seg[3]); err != nil {
 		return nil, err
 	}
-	return c.gw.Raw(ctx, http.MethodGet, c.path(), c.params)
+	raw, err := c.gw.Raw(ctx, http.MethodGet, c.path(), c.params)
+	if err != nil {
+		return nil, err
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, err
+	}
+	if err := tagged(c, cfg); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// tagged checks the cluster's tag again on the config just read, so a VM that took a worker's vmid between the worker
+// list and this read is still refused.
+func tagged(c *call, cfg map[string]any) error {
+	tags, _ := cfg["tags"].(string)
+	if !hasTag(tags, "pc-k8s-"+c.cred.ID) {
+		return deny("vm %s is not a worker of this cluster", c.seg[3])
+	}
+	return nil
 }
 
 var slotRe = regexp.MustCompile(`^scsi([1-9]|1[0-9]|2[0-9])$`)
@@ -894,6 +1010,9 @@ func (h *Handler) vmConfigs(ctx context.Context, c *call) (current, pending map[
 			return nil, nil, err
 		}
 		if err := json.Unmarshal(raw, q.dst); err != nil {
+			return nil, nil, err
+		}
+		if err := tagged(c, *q.dst); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1007,10 +1126,35 @@ func (h *Handler) vmResize(ctx context.Context, c *call) (json.RawMessage, error
 	if err != nil {
 		return nil, err
 	}
-	if err := h.quota(ctx, c, gibUp(size)-gibUp(v.SizeBytes)); err != nil {
+	// The row takes the new size as the call is accepted, not when a task poll comes (which the cluster may skip), so
+	// quota and billing count it at once. Resize only grows; a smaller size is PVE's to refuse.
+	var before int64
+	if err := h.reserve(ctx, c, func(ctx context.Context) error {
+		cur, err := h.Reg.Volume(ctx, v.ID)
+		if err != nil {
+			return err
+		}
+		if cur == nil {
+			return deny("volume %s is not owned by this cluster", v.VolID)
+		}
+		if before = cur.SizeBytes; size <= before {
+			return nil
+		}
+		if err := h.quota(ctx, c, gibUp(size)-gibUp(before)); err != nil {
+			return err
+		}
+		return h.Reg.UpdateVolume(ctx, v.ID, pgdoc.M{"sizeBytes": size})
+	}); err != nil {
 		return nil, err
 	}
 	raw, err := c.gw.Raw(ctx, http.MethodPut, c.path(), c.params)
+	var ae *pve.APIError
+	if errors.As(err, &ae) && size > before {
+		// Refused: the disk kept its size. Any other failure leaves the larger size for the reconciler to correct.
+		if uerr := h.Reg.UpdateVolume(ctx, v.ID, pgdoc.M{"sizeBytes": before}); uerr != nil {
+			h.log().Error("csi gateway: size of a refused resize", "volume", v.ID, "err", uerr)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

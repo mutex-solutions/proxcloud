@@ -20,6 +20,7 @@ import (
 
 // memReg is the registry in memory.
 type memReg struct {
+	lock  sync.Mutex // Locked
 	mu    sync.Mutex
 	creds map[string]*Credential
 	vols  map[string]*Volume
@@ -111,6 +112,12 @@ func (m *memReg) ProjectBytes(_ context.Context, project, svc string) (int64, er
 	return n, nil
 }
 
+func (m *memReg) Locked(ctx context.Context, _ string, fn func(context.Context) error) error {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	return fn(ctx)
+}
+
 func (m *memReg) PutTask(_ context.Context, t *Task) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -147,6 +154,7 @@ type fakePVE struct {
 	config  map[string]map[string]any
 	content map[string][]map[string]any // storage → entries
 	failNew bool
+	dropNew bool // create the disk, then lose the answer
 }
 
 const (
@@ -159,8 +167,8 @@ const (
 func newFake() *fakePVE {
 	return &fakePVE{
 		config: map[string]map[string]any{
-			"101": {"scsi0": "local-zfs:vm-101-disk-0,size=10G", "scsi1": "local-zfs:vm-9999-pvc-" + u1 + ",backup=0,size=1G,wwn=0x5000000000000001"},
-			"102": {"scsi0": "local-zfs:vm-102-disk-0,size=10G", "scsi1": "local-zfs:vm-9999-pvc-" + u2 + ",size=1G"},
+			"101": {"scsi0": "local-zfs:vm-101-disk-0,size=10G", "scsi1": "local-zfs:vm-9999-pvc-" + u1 + ",backup=0,size=1G,wwn=0x5000000000000001", "tags": "pc-k8s;pc-k8s-c1;proxcloud"},
+			"102": {"scsi0": "local-zfs:vm-102-disk-0,size=10G", "scsi1": "local-zfs:vm-9999-pvc-" + u2 + ",size=1G", "tags": "pc-k8s-c2;proxcloud"},
 			"103": {"scsi0": "local-zfs:vm-103-disk-0,size=10G"},
 			"104": {"scsi0": "local-zfs:vm-104-disk-0,size=10G"},
 		},
@@ -224,6 +232,11 @@ func (f *fakePVE) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		volid := seg[3] + ":" + r.Form.Get("filename")
 		f.content[seg[3]] = append(f.content[seg[3]], map[string]any{"volid": volid, "size": 1})
+		if f.dropNew {
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			_ = conn.Close()
+			return
+		}
 		data(volid)
 	case len(seg) >= 6 && seg[4] == "content":
 		data(upid)
@@ -630,6 +643,151 @@ func TestSizeAndNames(t *testing.T) {
 	for disk, want := range map[string]bool{"vm-9999-pvc-x": true, "9999/vm-9999-pvc-x.raw": true, "9998/vm-9999-pvc-x.raw": false, "9999/a/b": false, "9999/": false} {
 		if _, ok := baseName(9999, disk); ok != want {
 			t.Errorf("%s: %v", disk, ok)
+		}
+	}
+}
+
+// A worker destroyed and its vmid handed to another project's VM stops being the cluster's on the next call: the worker
+// list is not cached.
+func TestReusedVMIDRefused(t *testing.T) {
+	r := newRig(t)
+	var mu sync.Mutex
+	pool, tags := "pc-p1", "pc-k8s-c1"
+	portal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{
+			{"type": "qemu", "vmid": 101, "node": "pve1", "pool": pool, "tags": tags, "template": 0}}})
+	}))
+	t.Cleanup(portal.Close)
+	r.h.Portal = func(context.Context, string) (*pve.Client, error) {
+		return pve.New(pve.Config{APIURL: portal.URL, TokenID: "p@pve!p", Secret: "x"})
+	}
+	if rec := r.do(c1, "GET", j+"/nodes/pve1/qemu/101/config", ""); rec.Code != 200 {
+		t.Fatalf("own worker: %d %s", rec.Code, rec.Body)
+	}
+	mu.Lock()
+	pool, tags = "pc-p2", "pc-k8s-c2"
+	mu.Unlock()
+	if rec := r.do(c1, "GET", j+"/nodes/pve1/qemu/101/config", ""); rec.Code != 403 {
+		t.Errorf("read another project's VM config under a reused vmid: %d", rec.Code)
+	}
+	if rec := r.do(c1, "POST", j+"/nodes/pve1/qemu/101/config?"+q("scsi2", disk1b+",backup=0"), ""); rec.Code != 403 {
+		t.Errorf("attached to another project's VM under a reused vmid: %d", rec.Code)
+	}
+	noWrites(t, r)
+}
+
+// The vmid changes hands between the worker list and the config read: the tag on the config itself refuses it.
+func TestConfigTagRechecked(t *testing.T) {
+	r := newRig(t)
+	r.pve.config["101"]["tags"] = "pc-k8s-c2;proxcloud"
+	for _, c := range []struct{ m, target string }{
+		{"GET", j + "/nodes/pve1/qemu/101/config?current=1"},
+		{"POST", j + "/nodes/pve1/qemu/101/config?" + q("scsi2", disk1b)},
+		{"PUT", j + "/nodes/pve1/qemu/101/unlink?idlist=scsi1"},
+		{"PUT", j + "/nodes/pve1/qemu/101/resize?" + q("disk", "scsi1", "size", "2G")},
+	} {
+		if rec := r.do(c1, c.m, c.target, ""); rec.Code != 403 {
+			t.Errorf("%s %s: %d", c.m, c.target, rec.Code)
+		}
+	}
+	noWrites(t, r)
+}
+
+// The row takes a resize's size when PVE accepts the call, so skipping the task poll does not leave quota counting the
+// old size.
+func TestResizeCountsAtOnce(t *testing.T) {
+	r := newRig(t)
+	const limit = 10
+	r.h.Quota = func(_ context.Context, _, _ string, add int, used func() (int, error)) error {
+		n, _ := used()
+		if n+add > limit {
+			return conflict("Quota exceeded for diskGb")
+		}
+		return nil
+	}
+	r.pve.config["101"]["scsi2"] = disk1b + ",size=1G"
+	if rec := r.do(c1, "PUT", j+"/nodes/pve1/qemu/101/resize", q("disk", "scsi1", "size", "6G")); rec.Code != 200 {
+		t.Fatalf("first resize: %d %s", rec.Code, rec.Body)
+	}
+	if v, _ := r.reg.Volume(context.Background(), VolumeID("svc", "local-zfs", "vm-9999-pvc-"+u1)); v.SizeBytes != 6<<30 {
+		t.Fatalf("row size before any poll: %d", v.SizeBytes)
+	}
+	if rec := r.do(c1, "PUT", j+"/nodes/pve1/qemu/101/resize", q("disk", "scsi2", "size", "9G")); rec.Code != 409 {
+		t.Errorf("second resize to 15 GiB total under a 10 GiB quota: %d", rec.Code)
+	}
+}
+
+// A disk PVE has under a name with no row (one from before the gateway) is never taken over by a create or a copy.
+func TestRowlessDiskNameRefused(t *testing.T) {
+	legacy := "vm-9999-pvc-" + u3
+	for name, target := range map[string]string{
+		"create": j + "/nodes/pve1/storage/local-zfs/content?" + q("filename", legacy, "vmid", "9999", "size", "1G"),
+		"copy":   j + "/nodes/pve1/storage/local-zfs/content/vm-9999-pvc-" + u1 + "?" + q("target", legacy),
+	} {
+		r := newRig(t)
+		r.pve.content["local-zfs"] = append(r.pve.content["local-zfs"], map[string]any{"volid": "local-zfs:" + legacy})
+		if rec := r.do(c1, "POST", target, ""); rec.Code != 409 {
+			t.Errorf("%s: %d %s", name, rec.Code, rec.Body)
+		}
+		noWrites(t, r)
+		if v, _ := r.reg.Volume(context.Background(), VolumeID("svc", "local-zfs", legacy)); v != nil {
+			t.Errorf("%s: row %+v", name, v)
+		}
+	}
+}
+
+// A create whose answer is lost but whose disk PVE made keeps its row, ready, and the plugin's retry gets the disk.
+func TestCreateLostAnswerKeepsRow(t *testing.T) {
+	r := newRig(t)
+	r.pve.dropNew = true
+	target := j + "/nodes/pve1/storage/local-zfs/content?" + q("filename", "vm-9999-pvc-"+u3, "vmid", "9999", "size", "1G")
+	if rec := r.do(c1, "POST", target, ""); rec.Code != 502 {
+		t.Fatalf("lost answer: %d %s", rec.Code, rec.Body)
+	}
+	v, _ := r.reg.Volume(context.Background(), VolumeID("svc", "local-zfs", "vm-9999-pvc-"+u3))
+	if v == nil || v.State != StateReady || v.ClusterID != "c1" {
+		t.Fatalf("row %+v", v)
+	}
+	r.pve.dropNew = false
+	if rec := r.do(c1, "POST", target, ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), "vm-9999-pvc-"+u3) {
+		t.Fatalf("retry: %d %s", rec.Code, rec.Body)
+	}
+	if n := r.pve.writeCount(); n != 1 {
+		t.Fatalf("PVE asked to create %d times", n)
+	}
+}
+
+// Requests dressed up to reach a disk, VM or parameter the cluster does not own; none may write to PVE.
+func TestTricksRefused(t *testing.T) {
+	n2 := "vm-9999-pvc-" + u2
+	for _, c := range []struct{ m, path, body string }{
+		{"DELETE", j + "/nodes/pve1/storage/local-zfs/content/9999/" + n2, ""},
+		{"DELETE", j + "/nodes/pve1/storage/local-zfs/content/" + n2 + ".raw", ""},
+		{"DELETE", j + "/nodes/pve1/storage/local-zfs/content/local-zfs:" + n2, ""},
+		{"DELETE", j + "/nodes/pve1/storage/nas/content/" + n2, ""},
+		{"DELETE", j + "/nodes/pve1/storage/local-zfs/content/" + n2 + "?delay=5&delay=5", ""},
+		{"DELETE", j + "/nodes/pve1/storage/local-zfs/content/%76m-9999-pvc-" + u2, ""},
+		{"POST", j + "/nodes/pve1/storage/local-zfs/content/vm-9999-pvc-" + u1, q("target", "9999/../"+n2)},
+		{"POST", j + "/nodes/pve1/storage/local-zfs/content/vm-9999-pvc-" + u1, q("target", n2)},
+		{"POST", j + "/nodes/pve1/storage/local-zfs/content/vm-9999-pvc-" + u1, q("target", "local-zfs:vm-9999-pvc-"+u3)},
+		{"POST", j + "/nodes/pve1/qemu/101/config", q("scsi2", "file="+disk2)},
+		{"POST", j + "/nodes/pve1/qemu/101/config", q("scsi2", disk1b+",volume="+disk2)},
+		{"POST", j + "/nodes/pve1/qemu/101/config", q("scsi2", "cache=none,"+disk2)},
+		{"POST", j + "/nodes/pve1/qemu/101/config?scsi2=" + disk1b, q("scsi3", disk1b)},
+		{"PUT", j + "/nodes/pve1/qemu/101/unlink", q("idlist", "scsi0")},
+		{"PUT", j + "/nodes/pve1/qemu/101/unlink", q("idlist", "scsi1", "force", "1")},
+		{"PUT", j + "/nodes/pve1/qemu/101/config", q("revert", "scsi1", "delete", "scsi0")},
+		{"GET", j + "/nodes/pve1/qemu/102/config", ""},
+		{"GET", j + "/nodes/pve2/qemu/104/config", ""},
+		{"HEAD", j + "/cluster/resources?type=vm", ""},
+		{"GET", j + "/nodes/pve1/storage/local-zfs/content?vmid=102", ""},
+	} {
+		r := newRig(t)
+		rec := r.do(c1, c.m, c.path, c.body)
+		if rec.Code < 400 || rec.Code >= 500 || r.pve.writeCount() != 0 {
+			t.Errorf("%s %s %s: %d writes=%d %s", c.m, c.path, c.body, rec.Code, r.pve.writeCount(), rec.Body)
 		}
 	}
 }

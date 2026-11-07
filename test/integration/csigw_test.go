@@ -20,6 +20,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/csigw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
 // TestCSIGatewayRegistry: the registry on Postgres — credential hash only, revoke, a name taken once, listings, the task
@@ -134,6 +135,8 @@ func TestCSIGatewayConcurrentCreate(t *testing.T) {
 		switch {
 		case r.URL.Path == "/api2/json/cluster/resources":
 			fmt.Fprint(w, `{"data":[{"type":"storage","storage":"local-zfs","node":"pve1","status":"available","shared":0}]}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/content"):
+			fmt.Fprint(w, `{"data":[]}`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/content"):
 			creates.Add(1)
 			time.Sleep(50 * time.Millisecond)
@@ -190,5 +193,76 @@ func TestCSIGatewayConcurrentCreate(t *testing.T) {
 		if c[0] == v.ClusterID && c[1] != "200" && c[1] != "409" {
 			t.Fatalf("winner got %s", c[1])
 		}
+	}
+}
+
+// TestCSIGatewayQuotaConcurrent: creates of one project racing for the last of its quota cannot all pass on the same
+// usage; the quota check and the row insert run under one advisory lock.
+func TestCSIGatewayQuotaConcurrent(t *testing.T) {
+	ctx := context.Background()
+	st := csigw.NewStore(freshPG(t))
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		switch {
+		case r.URL.Path == "/api2/json/cluster/resources":
+			fmt.Fprint(w, `{"data":[{"type":"storage","storage":"local-zfs","node":"pve1","status":"available","shared":0}]}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/content"):
+			fmt.Fprint(w, `{"data":[]}`)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/content"):
+			fmt.Fprintf(w, `{"data":"local-zfs:%s"}`, r.Form.Get("filename"))
+		default:
+			w.WriteHeader(501)
+		}
+	}))
+	defer fake.Close()
+	client := func(context.Context, string) (*pve.Client, error) {
+		return pve.New(pve.Config{APIURL: fake.URL, TokenID: "csi@pve!gateway", Secret: "x"})
+	}
+	_, secret, err := st.MintCredential(ctx, csigw.Credential{ID: "c1", ProjectID: "p1", ComputeServiceID: "svc",
+		Pool: "pc-p1", Storages: []string{"local-zfs"}, ControllerVMID: 9999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const limit = 3
+	h := &csigw.Handler{Reg: st, PVE: client, Portal: client, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Quota: func(_ context.Context, _, _ string, add int, used func() (int, error)) error {
+			n, err := used()
+			if err != nil {
+				return err
+			}
+			time.Sleep(20 * time.Millisecond) // widen the window between reading usage and the insert
+			if n+add > limit {
+				return httpx.NewError(http.StatusConflict, http.StatusConflict, "Quota exceeded for diskGb")
+			}
+			return nil
+		}}
+	var ok, refused atomic.Int32
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := fmt.Sprintf("vm-9999-pvc-0c0c0c0c-1111-4111-8111-%012d", i)
+			r := httptest.NewRequest("POST", "/api2/json/nodes/pve1/storage/local-zfs/content?"+
+				url.Values{"filename": {name}, "vmid": {"9999"}, "size": {"1G"}}.Encode(), nil)
+			r.Header.Set("Authorization", "PVEAPIToken=csi@proxcloud!c1="+secret)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			switch w.Code {
+			case 200:
+				ok.Add(1)
+			case 409:
+				refused.Add(1)
+			default:
+				t.Errorf("create %d: %d %s", i, w.Code, w.Body)
+			}
+		}()
+	}
+	wg.Wait()
+	if ok.Load() != limit || refused.Load() != 8-limit {
+		t.Fatalf("%d created, %d refused under a %d GiB quota", ok.Load(), refused.Load(), limit)
+	}
+	if n, err := st.ProjectBytes(ctx, "p1", "svc"); err != nil || n != limit<<30 {
+		t.Fatalf("project bytes %d %v", n, err)
 	}
 }

@@ -203,7 +203,8 @@ cluster. The portal API serves a CSI gateway (`internal/cloud/csigw`, its own TL
 off by default) that the proxmox-csi controller calls as if it were PVE, with a credential per cluster
 (`csi@proxcloud!<clusterId>`). The gateway allows only the calls proxmox-csi-plugin v0.22.0 makes and checks each one: a
 disk is the cluster's when the gateway's `csiVolume` registry says it created it for that cluster (written before the disk,
-so a name is taken once), a VM when it is in the cluster's pool with its `pc-k8s-<clusterId>` tag, a task when the gateway
+so a name is taken once), a VM when it is in the cluster's pool with its `pc-k8s-<clusterId>` tag right now (read on
+every call, since PVE reuses a freed vmid at once), a task when the gateway
 answered with its UPID. A crafted `volumeHandle`, NodeID or StorageClass is only an input it checks; another cluster's disk
 does not even show in a listing, so a delete of it is a no-op and an attach finds nothing. It refuses replication,
 `/cluster/nextid`, VM create, migrate and `/access/ticket`, and records every refusal in the audit log. It calls PVE with

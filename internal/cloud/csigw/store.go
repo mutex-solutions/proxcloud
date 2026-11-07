@@ -87,6 +87,9 @@ type Registry interface {
 	ClusterVolumes(ctx context.Context, clusterID, serviceID, storage string) ([]Volume, error)
 	// ProjectBytes sums the project's rows on a provider, all states but deleted: what quota counts.
 	ProjectBytes(ctx context.Context, projectID, serviceID string) (int64, error)
+	// Locked runs fn holding a lock on key that every API replica honours, so a quota check and the write it allows
+	// happen as one: two creates of a project cannot both pass on the same usage.
+	Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error
 	PutTask(ctx context.Context, t *Task) error
 	Task(ctx context.Context, upid string) (*Task, error)
 	// FinishTask marks the task done; only the first caller gets true, so a result is applied once.
@@ -184,6 +187,17 @@ func (s *Store) ProjectBytes(ctx context.Context, projectID, serviceID string) (
 		n += v.SizeBytes
 	}
 	return n, nil
+}
+
+// Locked runs fn in a transaction holding a Postgres advisory lock on key; the registry calls fn makes join it.
+func (s *Store) Locked(ctx context.Context, key string, fn func(ctx context.Context) error) error {
+	db := s.vols.DB()
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		if err := db.LockXact(ctx, key); err != nil {
+			return err
+		}
+		return fn(ctx)
+	})
 }
 
 // PutTask records a UPID and drops the cluster's expired ones.
