@@ -207,6 +207,9 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 				j.log.Warn("syncjob: load balancers", "serviceId", es.ID, "err", err)
 			}
 		}
+		if err := j.reconcileSandboxWorkers(ctx, ps, es); err != nil {
+			j.log.Error("syncjob: sandbox workers", "serviceId", es.ID, "err", err)
+		}
 	}
 }
 

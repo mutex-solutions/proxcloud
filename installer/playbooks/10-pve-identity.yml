@@ -13,6 +13,7 @@
       ProxCloudPlatform: "Sys.Audit Sys.Console Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Backup VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.GuestAgent.Unrestricted VM.Migrate VM.PowerMgmt VM.Replicate VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Mapping.Audit Mapping.Use"
       ProxCloudCAPI: "Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
       ProxCloudCSI: "VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit"
+      ProxCloudSandboxGuard: "Pool.Audit VM.Audit VM.Config.Network"
       ProxCloudImages: "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
     users:
       proxcloud@pve: {comment: ProxCloud portal, token: platform}
@@ -71,8 +72,9 @@
       - {path: /sdn/zones, role: ProxCloudPlatform, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /nodes, role: ProxCloudKubeMint, propagate: 0, user: proxcloud@pve, token: proxcloud@pve!platform}
     # sandbox.enabled: the sandbox cluster's CAPMOX token, with the grants the portal gives a tenant cluster's token
-    # (MintClusterTokens, internal/cloud/pve/access.go). Token rows only: capmox@pve already holds these paths through
-    # split_acls, and a user row on a child path would replace what the user inherits there.
+    # (MintClusterTokens, internal/cloud/pve/access.go). Token rows only for it: capmox@pve already holds these paths
+    # through split_acls, and a user row on a child path would replace what the user inherits there. The last two rows
+    # narrow the portal and the CSI tokens on the sandbox pool, which is why they carry user rows.
     sandbox_acls:
       - {path: "/pool/{{ pc.sandbox.pool }}", role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
       - {path: "/storage/{{ pc_sandbox_storage }}", role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
@@ -81,6 +83,12 @@
       - {path: /sdn/zones/localnetwork, role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
       - {path: "/storage/{{ pc_sandbox_iso_storage }}", role: PVEDatastoreAdmin, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
       - {path: "/sdn/zones/{{ pc_sandbox_zone }}/{{ pc.sandbox.network.vnet }}", role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
+      # The portal's sync only reads the workers and sets their firewall there (docs/managed-sandbox.md §2). This row
+      # replaces, on the sandbox pool alone, what the portal inherits from /pool (ProxCloudPlatform, ProxCloudKubeMint):
+      # no guest agent, console, disk, power or ACL rights on a VM that runs tenant code.
+      - {path: "/pool/{{ pc.sandbox.pool }}", role: ProxCloudSandboxGuard, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      # The CSI tokens hold ProxCloudCSI on /pool for tenant clusters; nothing of theirs is in the sandbox pool.
+      - {path: "/pool/{{ pc.sandbox.pool }}", role: NoAccess, propagate: 1, user: csi@pve, token: ""}
     # On its own ISO store the user holds only ProxCloudCAPI (from /storage), which lacks Datastore.AllocateTemplate,
     # so the token could not upload the bootstrap ISO. The capi token has no row there, so it still sees one ISO store.
     sandbox_iso_user_acls: "{{ [{'path': '/storage/' ~ pc_sandbox_iso_storage, 'role': 'PVEDatastoreAdmin', 'propagate': 0, 'user': 'capmox@pve', 'token': ''}] if pc_sandbox_iso_storage != pc.services.iso_storage else [] }}"
@@ -290,3 +298,20 @@
         that: seen == [pc_sandbox_iso_storage] or ansible_check_mode
         fail_msg: "{{ pc_sandbox_token_id }} sees the ISO stores {{ seen }}; it must see {{ pc_sandbox_iso_storage }} alone (docs/proxmox-permissions.md)."
         success_msg: "{{ pc_sandbox_token_id }} sees the ISO stores {{ seen }}"
+
+    # What the portal may do to a sandbox worker, as PVE computes it: an extra row on /pool/<pool> (a group, a role
+    # added by hand) would hand back guest agent, console or disk rights on VMs that run tenant code.
+    - name: Read what the portal token may do on the sandbox pool
+      when: pc_sandbox_on
+      check_mode: false
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/permissions?{{ {'userid': 'proxcloud@pve!platform', 'path': '/pool/' ~ pc.sandbox.pool} | urlencode }}"
+      register: pc_sandbox_guard
+    - name: Check the portal token holds the guard role alone there
+      when: pc_sandbox_on
+      vars:
+        privs: "{{ (pc_sandbox_guard.json.data.values() | first | default({})).keys() | sort }}"
+      ansible.builtin.assert:
+        that: privs == (roles.ProxCloudSandboxGuard | split | sort) or ansible_check_mode
+        fail_msg: "proxcloud@pve!platform holds {{ privs }} on /pool/{{ pc.sandbox.pool }}; it must hold ProxCloudSandboxGuard alone (docs/proxmox-permissions.md)."
+        success_msg: "proxcloud@pve!platform on /pool/{{ pc.sandbox.pool }}: {{ privs }}"

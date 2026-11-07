@@ -143,6 +143,11 @@ The shape is documented in the header of `proxmox.go`:
       "isolation": "shared",                             // or "evpn-per-project"
       "evpnController": "proxcloud"
     },
+    "sandbox": {                                         // the sandbox workers' VM firewall, applied by the sync; secret.sandboxKubeconfig
+      "pool": "proxcloud-sandbox", "nodes": ["198.51.100.10-198.51.100.29"],
+      "loadBalancers": ["198.51.100.200-198.51.100.209"], "dns": ["1.1.1.1"],
+      "kubeletSources": ["192.0.2.201-192.0.2.209"], "unsecuredMinAgeMinutes": 15
+    },
     "storageProfiles": {"std": {"label": "Local NVMe (ZFS)", "storages": {"*": "local-zfs"},
                                 "shared": false, "snapshots": true, "thin": true,
                                 "liveMigrate": false, "replication": false},
@@ -464,6 +469,10 @@ point (`proxmox.go` header):
   They also keep tenants off the nodes' management networks and `blockedCidrs`, and fence the
   sandbox cluster's workers (`sandboxCidrs`) off tenants and those networks in both directions. Details:
   [C4.1 tenant network isolation](architecture/c4/c4-code.md#c41-tenant-network-isolation).
+- With `config.sandbox`, the sync puts every VM of that pool behind its own VM firewall (both policies DROP, address
+  pinned, only its control plane, DNS, the other workers and the internet allowed) and takes the
+  `proxcloud.io/unsecured` taint off a worker once that is in place:
+  [managed-sandbox.md §2](managed-sandbox.md#2-layer-1-the-vm-firewall-on-the-workers-sb2b).
 - PVE offers DHCP on simple zones only, and a simple zone stays on one node. On EVPN and
   VLAN zones the platform allocates each server's `net0` address and sets it through
   cloud-init, so an image without cloud-init gets no address there.

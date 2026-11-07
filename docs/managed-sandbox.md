@@ -9,9 +9,10 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 >
 > **Not reachable by tenants.** The sandbox service is ported (SB1) with no route, and the admin API refuses the
 > `sandbox` provider kind. SB2a adds the cluster itself: manifests in `deploy/sandbox-cluster/`, installer stages 10
-> and 55, and isolation drops for the sandbox network (section 1, after the spike). The per-NIC VM firewall (SB2b) is still missing,
-> and it is a release gate. Section 0 records the hand-built lab spike. Phase order and decisions: the sandbox plan
-> (owner document, not in this repository).
+> and 55, and isolation drops for the sandbox network (section 1). SB2b adds layer 1: the VM firewall on every NIC
+> of the workers, kept by the portal's sync job, the `unsecured` taint until it is in place, and the sandbox's own
+> egress address (section 2). The billing, quota and suspension gates (SB3) are still missing. Section 0 records the
+> hand-built lab spike. Phase order and decisions: the sandbox plan (owner document, not in this repository).
 
 ## 0. SB0 lab spike (2026-11-07)
 
@@ -343,3 +344,135 @@ in `node-setup.yaml` was already there unchanged. Results:
   `kubernetes` ClusterIP dropped, internet and cluster DNS open, TCP 25 dropped, 587 open.
 - IPv6 check: passes on the worker; with a ULA address added on a dummy interface of the worker, node-setup refused the
   node (CrashLoopBackOff, the address in its log) and the check failed; with it removed, both passed again.
+
+## 2. Layer 1: the VM firewall on the workers (SB2b)
+
+Layer 0 (§1.2) sees routed traffic only. Layer 1 sees every frame a worker sends or receives, frames switched inside
+the sandbox vnet included, and pins the worker's source address. The portal applies it, not the installer: the sync
+job's pass over each Proxmox provider (`syncjob.reconcileSandboxWorkers`, `pve.StartSandboxPass`) fences every VM of
+the provider's sandbox pool on every cycle, so a new worker, a replaced one and a hand edit all come back to it.
+
+### 2.1 What a worker may do
+
+Options on each worker: `enable`, `ipfilter`, `macfilter` on; `policy_in` and `policy_out` `DROP`; `dhcp`, `ndp`,
+`radv` off. Every NIC gets `firewall=1`. The rules live in one cluster security group per generation, `sbx<pool
+hash><content hash>`, which is the VM's only rule. Every rule in it ACCEPTs:
+
+| Direction | What | Where |
+|---|---|---|
+| out | TCP to the API port and 8132 (konnectivity) | the sandbox control plane's address (the provider kubeconfig's server) |
+| out | UDP and TCP 53 | `sandbox.dns` only |
+| out, in | UDP 8472 (Cilium VXLAN), TCP 4240 and ICMP (Cilium health), TCP and UDP 7946 (MetalLB), TCP 10250 | the other sandbox workers (IP set `<group>-n`) |
+| in | TCP 10250 | `sandbox.kubeletSources` (the services cluster's nodes) |
+| out | anything | IP set `<group>-o`: `0.0.0.0/1` and `128.0.0.0/1` minus the private, CGNAT, link-local, multicast and reserved ranges, the management networks, `blockedCidrs`, the tenant pool, the sandbox subnet itself (its gateway is a PVE node) and the control plane address |
+
+Nothing else comes in: there is no rule for a tenant, for the services cluster beyond the kubelet, or for anyone on the
+internet. The sandbox entry (HAProxy appliance to `sandbox-proxy`) gets its rule with SB4.
+
+- **Why the kubelet between workers.** Kamaji starts the konnectivity server with the default proxy strategy, so
+  exec and logs for a pod on one worker can leave through the agent on another. The kubelet still wants an API server
+  credential.
+- **Why all ACCEPT.** The policies drop, so no rule order matters and no partial state opens anything: a missing rule
+  drops more. A changed rule set is a new generation. Its sets and group are built while nothing references them, each
+  worker then gets the new reference before the old one is removed (for that moment it allows the union of two
+  complete sets), and the old generation is deleted once no worker holds it. A generation that a worker uses and that
+  differs from what the portal would build is not rewritten in place: the pass fails with `ErrSandboxDrift` and clears
+  no worker for tenants.
+- **Address pinning.** `ipfilter-net0` admits the worker's address and the MetalLB range (any worker may answer for a
+  VIP). Before the worker's Node exists, the filter admits the whole worker range. The Node's `InternalIP` is the
+  kubelet's to write, so it is trusted once, before the worker takes tenant pods, and then pinned: an address the set
+  already holds is never replaced by a later claim. A NIC off the sandbox vnet gets an empty filter, which drops every
+  IPv4 frame it sends. `macfilter` keeps the NIC's own MAC.
+- **IPv6.** No IPv6 rule: the policies drop it.
+
+### 2.2 The unsecured taint
+
+The node group gives every worker `proxcloud.io/unsecured=true:NoSchedule` at join (`templates/sandbox-cluster.yml.j2`),
+and NodeRestriction keeps the kubelet from removing it. The pass removes it only when all of these hold: the firewall
+was read back in place in this pass, the filter is pinned to exactly the address the Node reports, and the Node is at
+least `unsecuredMinAgeMinutes` old (default 15, CABPK's bootstrap token TTL: by then the join token on the worker's own
+disk is dead, §0.6). A Node the pass cannot match to a VM of the pool keeps the taint. DaemonSets that tolerate every
+taint (Cilium, `node-setup`) run before; CoreDNS, the agent-sandbox controller, konnectivity's agent and MetalLB's
+speaker schedule after, which is why stage 55 no longer waits for the controller.
+
+### 2.3 Its own egress address (D14)
+
+`sandbox.network.snat` is required with the sandbox on. Stage 55 puts it on the zone's exit node (one exit node, or
+`exitnodes-primary`; root ssh to it through the inventory group `pve`) as an ifupdown2 dummy interface in
+`/etc/network/interfaces.d/proxcloud-sandbox-snat`, whose `post-up` inserts `SNAT -s <subnet> -o <uplink>
+--to-source <address>` above PVE's own rules. It then turns the subnet's PVE `snat` off and deletes the rules PVE left
+behind. With the interface down the subnet's traffic leaves with its private source, which an uplink drops: it never
+falls back to the node's address. `snat: node` keeps PVE's SNAT to the exit node's own address, for a site with one
+public address that accepts sharing it with the nodes and the portal.
+
+Measured on PVE 9.2: every SDN apply runs `ifreload`, which runs `post-up` again without `post-down`, so the rule is
+added with `-C ... || -I`. PVE did not remove its own SNAT rules when `snat` went off, and every earlier apply had added
+another copy (24 copies of the node-address rule for the sandbox subnet on the lab).
+
+### 2.4 Permissions
+
+The portal token keeps its inherited roles everywhere except the sandbox pool, where stage 10 gives `proxcloud@pve`
+and `proxcloud@pve!platform` the role `ProxCloudSandboxGuard` (`Pool.Audit VM.Audit VM.Config.Network`). An ACL on a
+path replaces what the parent passes down, so on the pool and its VMs the token loses `ProxCloudPlatform` and
+`ProxCloudKubeMint` from `/pool`: no guest agent (`VM.GuestAgent.Unrestricted`), console, disk, power, snapshot, backup
+or ACL rights on a VM that runs tenant code. `csi@pve` gets `NoAccess` there. Stage 10 reads the token's effective
+rights on the pool from PVE and stops unless they are exactly the guard role. The groups and IP sets are cluster
+firewall objects, written with the `Sys.Modify` the token holds on `/`.
+
+The pass reads the sandbox cluster with the `proxcloud-system/proxcloud-firewall` service account
+(`deploy/sandbox-cluster/rbac.yaml`: nodes get, list, patch). Stage 55 turns its token into
+`generated/sandbox-firewall.kubeconfig`, and stage 60 stores it as the provider's `secret.sandboxKubeconfig`, next to
+`config.sandbox` (`pool`, `nodes`, `loadBalancers`, `dns`, `kubeletSources`, `unsecuredMinAgeMinutes`).
+
+### 2.5 Measured on the lab (2026-11-07)
+
+The SB0 cluster, with the pass run from the management host every 20 s with the portal's own PVE token (`go test
+-tags sandboxlive ./internal/cloud/syncjob/ -run TestSandboxFenceLive`) and the firewall service account. No portal
+stack: the provider config was a file. Probes as in §1.2 (TCP connect, 4 s timeout, "dropped" is a timeout), with no
+layer 0 rule for the sandbox subnet in place, so the right column is layer 1 alone.
+
+Permissions, `pveum user token permissions proxcloud@pve platform`: on `/pool/proxcloud-sandbox` and `/vms/<worker>`,
+35 privileges before and `Pool.Audit VM.Audit VM.Config.Network` after; unchanged (35, or 33 on `/`) on a project pool
+and its VMs, the sandbox vnet, the boot store and `/`. `csi@pve!gateway` and `!csi`: nothing on the worker after,
+unchanged on a project pool.
+
+| From → to | Before | After |
+|---|---|---|
+| Worker node namespace → NAS NFS, TrueNAS API | open | dropped |
+| → PVE API on its own node, ssh on another node; PVE API on the exit node | open; refused | dropped |
+| → the vnet gateway's PVE API and ssh (a PVE node's own address) | refused | dropped |
+| → management host ssh, k3s API, PowerDNS API | open | dropped |
+| → CSI gateways on the management host (two portals) | refused | dropped |
+| → RustFS, RGW, the outer host | open | dropped |
+| → DBaaS load balancers :5432 (two), another tenant cluster's control plane | open | dropped |
+| → services cluster API, a services node's kubelet; the PVE API forwarder | timeout; refused | dropped |
+| → a tenant VM's public and project addresses, 169.254.169.254 | timeout | dropped |
+| → its own control plane :6443 and :8132 | open | open |
+| → internet :443, DNS, HTTPS GET | open, ok, 200 | open, ok, 200 |
+| Tenant VM → worker kubelet, ssh; a NodePort | open; refused | dropped |
+| Tenant VM → worker UDP 8472, counted on the worker's tap | 5 of 5 | 0 of 5 |
+
+No tenant load balancer appliance existed on the lab during the run: the tenant VM's public and project addresses
+stood in for one (an appliance is a tenant VM with a public NIC).
+
+Spoofing, raw UDP to 8472 from worker 1's namespace to worker 2, counted on worker 2's tap: with its own source
+address 5 of 5; with another worker's address 0 of 5 (5 of 5 with `ipfilter` turned off by hand, which the pass turned
+back on 8 s later); with the vnet gateway, a tenant address or a MetalLB address 0 of 5 (the last two are also refused
+by worker 2's inbound rules).
+
+Second worker: a node group with the taint added to the running cluster, the pass looping. From the PVE task log:
+CAPMOX's clone and config at 16:00:50, the portal's `firewall=1` on its NIC at 16:01:04, CAPMOX's start at 16:01:06, so
+the VM never ran without its firewall. Its Node registered at 16:01:54 through it, the filter was pinned to its address
+at 16:02:08, and Cilium health reported 2/2 nodes and endpoints reachable over VXLAN. The pass took the taint off at
+16:17:15 (Node 15 min 21 s old); konnectivity's agent and MetalLB's speaker started there, and a gVisor pod pinned to
+it resolved names through CoreDNS on the first worker (VXLAN), fetched HTTPS (200), was refused the NAS, its control
+plane and the first worker's kubelet by the guardrail, and answered 6 of 6 execs with two konnectivity agents up.
+
+Generation switch: adding the kubelet rule made a new group; both workers moved to it in one pass, the old group and
+its sets were deleted, and the cluster stayed Ready with exec working.
+
+Egress (D14), SYNs from the worker to 1.1.1.1:443 seen on the uplink: before, source = the exit node's address; after
+the interface file on the exit node and `snat` off on the subnet, source = the dedicated address, HTTPS 200.
+
+Not run here: stages 55 and 60 (they would add an Application to the lab's shared services cluster). The exit node file
+and the subnet change were made by hand with the content stage 55 writes, and the provider config came from a file.

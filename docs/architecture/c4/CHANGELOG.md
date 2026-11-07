@@ -4,6 +4,56 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: The sandbox workers' VM firewall, the unsecured taint and their own egress address (SB2b)
+
+**What changed**
+
+- `pve.StartSandboxPass` / `Secure` / `Sweep` (`internal/cloud/pve/sandboxfw.go`): every VM of the provider's
+  sandbox pool gets `firewall=1` on each NIC, VM options with both policies `DROP`, `ipfilter` and `macfilter` on and
+  DHCP, NDP and RA off, and as its only rule a reference to one cluster security group per generation
+  (`sbx<pool hash><content hash>`, with IP sets `-n` for the workers and `-o` for the internet minus every private and
+  denied range). Every rule ACCEPTs: the control plane's API and konnectivity ports, DNS to the configured resolvers,
+  VXLAN, Cilium health, MetalLB memberlist and the kubelet between workers, the kubelet from `kubeletSources`, the
+  internet. `ipfilter-net0` holds the worker range until the Node joins, then the Node's address, pinned once, plus
+  the MetalLB range; a NIC off the sandbox vnet gets an empty filter. A generation a worker uses that differs from the
+  computed one fails the pass (`ErrSandboxDrift`) instead of being rewritten. New client calls for VM rules and options
+  and for cluster IP sets.
+- `syncjob.reconcileSandboxWorkers`, run with the capability detection each cycle: reads `config.sandbox` (`pool`,
+  `nodes`, `loadBalancers`, `dns`, `kubeletSources`, `unsecuredMinAgeMinutes`) and `secret.sandboxKubeconfig`, takes the
+  control plane address from that kubeconfig, fences each worker, then removes the `proxcloud.io/unsecured` taint
+  from a worker read back in place, pinned to its Node's address and at least 15 minutes old. `kamajik8s` gains
+  `SetNodeTaints` (merge patch guarded by resourceVersion) and `Server`.
+- `deploy/sandbox-cluster/rbac.yaml`: ServiceAccount `proxcloud-system/proxcloud-firewall`, nodes get, list, patch.
+- Installer: stage 10 adds role `ProxCloudSandboxGuard` (`Pool.Audit VM.Audit VM.Config.Network`) on
+  `/pool/<sandbox pool>` for `proxcloud@pve` and its token, `NoAccess` there for `csi@pve`, and checks the token's
+  effective rights on the pool. Stage 55 taints the node group, requires `sandbox.network.snat` (or `node`), writes the
+  sandbox's SNAT address as an ifupdown2 dummy interface on the exit node (root ssh, group `pve`), turns the subnet's
+  PVE SNAT off and deletes the rules PVE leaves, mints `generated/sandbox-firewall.kubeconfig`, and no longer waits for
+  the agent-sandbox controller. Stage 60 writes `config.sandbox` and `secret.sandboxKubeconfig`.
+
+**Why**
+
+- Layer 0 sees routed packets only and leaves the services network open (tenants need it): a foothold on a worker
+  still reaches the DBaaS load balancers and other tenants' control planes, the vnet gateway is a PVE node's own
+  address, and nothing stopped address spoofing inside the vnet. Only the VM firewall sees every frame of a worker.
+  The CAPMOX workers have no `SecureVM` and the chart no NIC firewall field, so the portal applies it after the
+  clone, in the pass that already walks each provider.
+- All-ACCEPT rules under DROP policies make the reconcile safe without ordering: PVE adds rules on top and has no
+  atomic replace. Content-hashed generations make a change a switch rather than an edit.
+- The Node address is the kubelet's to write; it is trusted once, while the taint keeps tenant code off, and pinned.
+  The taint also covers the join token left on the worker's disk (CABPK TTL 15 minutes, SB0).
+- The portal token inherited every privilege of `/pool` on the workers, guest agent and disk included, which a gVisor
+  escape plus a portal bug could turn into a path back. An ACL on the pool replaces what `/pool` passes down there and
+  nowhere else, so the role is narrowed exactly on the VMs that run tenant code.
+- D14: abuse from tenant code must get the sandbox's address blocklisted, not the nodes' or the portal's. PVE SNATs
+  to the exit node's own address and offers no other, so the rule lives on the exit node; with it missing the traffic
+  leaves unrewritten and is dropped upstream rather than falling back to the node address.
+- Kamaji's konnectivity server uses the default proxy strategy, so exec to a pod can go through another worker's agent:
+  the kubelet port is open between workers, found on the lab when a second worker joined.
+
+**Diagrams updated:** `c2-containers.md` (Sandbox cluster row), `c3-components.md` (Sync job, Networks and isolation
+rows), `c4-code.md` (C4.1 layer 1 and diagram).
+
 ## 2026-11-07: Sandbox cluster setup and isolation drops for its network (SB2a)
 
 **What changed**

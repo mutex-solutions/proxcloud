@@ -86,3 +86,43 @@ metadata:
   annotations:
     kubernetes.io/service-account.name: proxcloud
 type: kubernetes.io/service-account-token
+---
+# The proxmox provider's sync job (secret.sandboxKubeconfig): it reads the Nodes to pin each worker's address in its
+# VM firewall, and takes the proxcloud.io/unsecured taint off once the firewall is in place (docs/managed-sandbox.md
+# §2). Nodes only: no pods, no exec, no Secret.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxcloud-firewall
+  namespace: proxcloud-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxcloud-firewall
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-firewall
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxcloud-firewall
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud-firewall
+    namespace: proxcloud-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxcloud-firewall-token
+  namespace: proxcloud-system
+  annotations:
+    kubernetes.io/service-account.name: proxcloud-firewall
+type: kubernetes.io/service-account-token

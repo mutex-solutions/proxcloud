@@ -113,8 +113,16 @@ except ValueError:
     pass
 
 # The sandbox subnet: outside the tenant pool, every cluster address inside it.
-sbx = {"subnet": "10.110.0.0/24", "gateway": "10.110.0.1", "nodes": "10.110.0.10-10.110.0.19", "metallb": "10.110.0.200-10.110.0.209"}
+sbx = {"subnet": "10.110.0.0/24", "gateway": "10.110.0.1", "nodes": "10.110.0.10-10.110.0.19", "metallb": "10.110.0.200-10.110.0.209",
+       "snat": "198.51.100.7"}
 assert f.sandbox_net_problem(sbx, "10.100.0.0/16") == ""
+# Its own egress address (D14): required, outside the subnet and the tenant pool; "node" shares the exit node's.
+assert "sandbox.network.snat must be" in f.sandbox_net_problem(dict(sbx, snat=""), "10.100.0.0/16")
+assert "sandbox.network.snat must be" in f.sandbox_net_problem(dict(sbx, snat="198.51.100.0/24"), "10.100.0.0/16")
+assert "outside" in f.sandbox_net_problem(dict(sbx, snat="10.110.0.250"), "10.100.0.0/16")
+assert "outside" in f.sandbox_net_problem(dict(sbx, snat="10.100.7.1"), "10.100.0.0/16")
+assert "outside" in f.sandbox_net_problem(dict(sbx, snat="2001:db8::1"), "10.100.0.0/16")
+assert f.sandbox_net_problem(dict(sbx, snat="node"), "10.100.0.0/16") == ""
 assert "overlaps" in f.sandbox_net_problem(dict(sbx, subnet="10.100.9.0/24", gateway="10.100.9.1",
                                                 nodes="10.100.9.10-10.100.9.19", metallb="10.100.9.200-10.100.9.209"), "10.100.0.0/16")
 assert "IPv4 network" in f.sandbox_net_problem(dict(sbx, subnet=""), "10.100.0.0/16")
