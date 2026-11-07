@@ -63,7 +63,11 @@ type RegistryUsers struct {
 	hashes   map[string][2]string // user -> {password, bcrypt}
 	projects []string             // as last written
 	written  bool
+	kept     bool // config.json was on disk at start and is kept until the first list succeeds
 }
+
+// Ready reports that Zot has a config to serve: written by this process, or kept from before a restart.
+func (r *RegistryUsers) Ready() bool { return r.written || r.kept }
 
 var registryProjectRe = regexp.MustCompile(`^[a-z0-9]{1,40}$`)
 
@@ -119,8 +123,8 @@ func ZotAccess(projects []string) map[string]any {
 }
 
 // Pass lists the projects, rewrites Zot's files when the set changed, and makes sure every project namespace and the
-// system namespace hold their pull Secret. A failed list keeps the users Zot has (none on the first pass: then only
-// the static users are written, so the registry can start).
+// system namespace hold their pull Secret. A failed list keeps the users Zot has (on the first pass of a new pod none:
+// then only the static users are written, so the registry can start; after a sidecar restart the file on disk).
 func (r *RegistryUsers) Pass(ctx context.Context) (changed bool, err error) {
 	sel := sandbox.LabelTenant + "=true," + sandbox.LabelManagedBy + "=" + sandbox.ManagedByValue
 	if r.ServiceID != "" {
@@ -128,6 +132,14 @@ func (r *RegistryUsers) Pass(ctx context.Context) (changed bool, err error) {
 	}
 	nss, lerr := r.API.ListNamespaces(ctx, sel)
 	projects := RegistryProjects(nss)
+	if lerr != nil && !r.written {
+		// A restarted sidecar (the pod and its config volume stay): Zot still serves the last full config. Writing the
+		// static users now would drop every project's account until a list succeeds.
+		if _, err := os.Stat(filepath.Join(r.Dir, "config.json")); err == nil {
+			r.kept = true
+			return false, fmt.Errorf("list tenant namespaces (keeping the config on disk): %w", lerr)
+		}
+	}
 	if lerr != nil && r.written {
 		return false, fmt.Errorf("list tenant namespaces: %w", lerr)
 	}

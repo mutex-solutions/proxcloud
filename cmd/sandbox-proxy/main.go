@@ -2,7 +2,7 @@
 // TLS ends here: the wildcard certificate is a mounted Secret, read again when it is renewed. The public entry in
 // front only passes TCP through.
 //
-//	sandbox-proxy             serve (in the sandbox cluster)
+//	sandbox-proxy [serve]     serve (in the sandbox cluster)
 //	sandbox-proxy cert-sync   copy the wildcard certificate from the services cluster to the sandbox cluster
 //	sandbox-proxy registry-users  keep the sandbox registry's accounts in step with the sandbox cluster's projects
 package main
@@ -35,10 +35,16 @@ func main() {
 	run := serve
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "serve":
 		case "cert-sync":
 			run = certSync
 		case "registry-users":
 			run = registryUsers
+		default:
+			// An image older than the subcommand would otherwise serve, and its pod would wait for a readiness that
+			// never comes with no cause in the log.
+			log.Error("sandbox-proxy: unknown subcommand", "arg", os.Args[1])
+			os.Exit(2)
 		}
 	}
 	if err := run(ctx, log); err != nil {
@@ -231,9 +237,9 @@ func registryUsers(ctx context.Context, log *slog.Logger) error {
 	for {
 		changed, err := u.Pass(ctx)
 		if changed {
-			ready.Store(true)
 			log.Info("registry-users: registry config written")
 		}
+		ready.Store(u.Ready())
 		if err != nil {
 			log.Error("registry-users", "err", err)
 		}

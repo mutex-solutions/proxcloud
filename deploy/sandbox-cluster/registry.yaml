@@ -7,7 +7,10 @@
 #
 # sandbox-registry-users: the identity of the registry's account sync on the services cluster. It lists the tenant
 # namespaces and writes one Secret per project (sandbox-template-pull: that project's own account) plus the nodes'
-# Secret (sandbox-registry-nodes, read-only on library/**). It cannot read any other Secret.
+# Secret (sandbox-registry-nodes, read-only on library/**). RBAC cannot limit create by name, so a create alone could
+# make a service-account-token Secret named sandbox-template-pull in kube-system that the token controller fills and the
+# sync could then read (a controller's token: cluster-admin). The admission policy at the end allows this identity
+# only pull Secrets (type kubernetes.io/dockerconfigjson) under its two names, each in its own namespaces.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -28,7 +31,7 @@ spec:
       tolerations: [{operator: Exists}]
       containers:
       - name: trust
-        image: busybox:1.37
+        image: docker.io/library/busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
         command: [sh, -c]
         args:
         - |
@@ -98,3 +101,34 @@ metadata:
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: sandbox-registry-users}
 subjects:
 - {kind: ServiceAccount, name: sandbox-registry-users, namespace: sandbox-system}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: sandbox-registry-users-pull-secrets-only
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["secrets"]
+  matchConditions:
+  - name: account-sync
+    expression: request.userInfo.username == "system:serviceaccount:sandbox-system:sandbox-registry-users"
+  validations:
+  - expression: has(object.type) && object.type == "kubernetes.io/dockerconfigjson"
+    message: the registry account sync writes pull Secrets (kubernetes.io/dockerconfigjson) only
+  - expression: >-
+      (object.metadata.name == "sandbox-template-pull" && request.namespace.startsWith("sb-")) ||
+      (object.metadata.name == "sandbox-registry-nodes" && request.namespace == "sandbox-system")
+    message: the registry account sync writes sandbox-template-pull in sb-* and sandbox-registry-nodes in sandbox-system only
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: sandbox-registry-users-pull-secrets-only
+spec:
+  policyName: sandbox-registry-users-pull-secrets-only
+  validationActions: ["Deny"]

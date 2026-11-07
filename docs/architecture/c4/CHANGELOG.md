@@ -41,8 +41,23 @@ only after every node has it. Zot over distribution: garbage collection while se
 restart (measured), one binary. The account sync derives the accounts from the cluster instead of the portal writing
 registry config, so the portal gains no credential for the services cluster.
 
+**Review fixes (same PR)**
+
+- `registry.yaml` gained the ValidatingAdmissionPolicy `sandbox-registry-users-pull-secrets-only`: the sync's identity
+  may create and update only `kubernetes.io/dockerconfigjson` Secrets named `sandbox-template-pull` in `sb-*` and
+  `sandbox-registry-nodes` in `sandbox-system`. Why: RBAC cannot limit `create` by name, so the role alone could create
+  a service-account-token Secret named `sandbox-template-pull` in `kube-system` for a controller's account and read the
+  token the controller filled in, a cluster-admin token held on the services cluster.
+- After a sidecar restart with a failing namespace list the sync keeps Zot's config on disk instead of writing the
+  static users only. Why: every project's pulls failed until the next successful list.
+- `sandbox-proxy` refuses an unknown subcommand. Why: an image older than `registry-users` served instead, and Zot
+  waited for a readiness that never came with no cause in the log.
+- `registry-trust` runs busybox pinned by digest (D11); the workflow builds pull requests in a job with a read-only
+  token and pushes only from the other events.
+
 **Diagrams:** C1 (ghcr row), C2 (the registry container, its edges to the workers and the object stores, table row),
-C3 (registry component and edges), C4 (layer-1 rule list). Measured on the lab: docs/managed-sandbox.md §5.6.
+C3 (registry component and edges), C4 (layer-1 rule list). Measured on the lab: docs/managed-sandbox.md §5.6. The
+review fixes change no diagram.
 
 ## 2026-11-08: Sandbox ports in public: sandbox-proxy with TLS, entry appliance, wildcard certificate, wake (SB4)
 

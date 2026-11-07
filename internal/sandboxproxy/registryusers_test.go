@@ -201,3 +201,34 @@ func htpasswdOK(ht, user, pw string) bool {
 	}
 	return false
 }
+
+// A sidecar restart (not a pod restart) keeps Zot's config volume; if the first list then fails, the sync must not
+// overwrite the full config with the static users only, or every project's pulls fail until a list succeeds.
+func TestReviewRestartWithListErrorKeepsProjectUsers(t *testing.T) {
+	dir := t.TempDir()
+	api := &fakeRegistryAPI{nss: []map[string]any{tenantNS("sb-a1", "a1")}, secrets: map[string][]byte{}}
+	mk := func(dir string) *RegistryUsers {
+		return &RegistryUsers{Base: map[string]any{}, Host: "192.0.2.10", Key: []byte("0123456789abcdef"),
+			Static: map[string]string{"admin": "a", "push": "p", "pull-nodes": "n"}, Dir: dir, SystemNS: "sandbox-system", API: api}
+	}
+	if _, err := mk(dir).Pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	api.nss, api.listErr = nil, errors.New("apiserver unreachable")
+	restarted := mk(dir)
+	if _, err := restarted.Pass(context.Background()); err == nil {
+		t.Error("a failed list must be reported")
+	}
+	if !restarted.Ready() {
+		t.Error("Zot has a config on disk: the restarted sidecar must report ready")
+	}
+	ht, _ := os.ReadFile(filepath.Join(dir, "htpasswd"))
+	if !strings.Contains(string(ht), "pull-a1:") {
+		t.Fatalf("restart with a failed list dropped pull-a1 from htpasswd:\n%s", ht)
+	}
+	// A new pod (empty volume) with a failed list still writes the static users, so the registry can start.
+	fresh := mk(t.TempDir())
+	if _, err := fresh.Pass(context.Background()); err == nil || !fresh.Ready() {
+		t.Errorf("new pod, failed list: err=%v ready=%v, want an error and ready", err, fresh.Ready())
+	}
+}

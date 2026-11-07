@@ -941,12 +941,19 @@ sandbox node containerd ──TLS (registry CA), project account──┘   prep
   `htpasswd` into a shared `emptyDir` (Zot reloads both when the file changes; Zot starts only once the sync is
   ready), and writes one Secret per project plus the nodes' Secret on the sandbox cluster. A project's password is an
   HMAC of the account name with a key the stage generated, so nothing is stored per project and a restart writes the
-  same file. A failed namespace list keeps the users Zot has.
+  same file. A failed namespace list keeps the users Zot has, also right after the sidecar restarted (its config
+  volume stays with the pod): it writes nothing until a list succeeds, and only a new pod starts from the static users.
+  An unknown subcommand is an error, so an image older than `registry-users` fails with that cause instead of serving.
 - **On the sandbox cluster** (`deploy/sandbox-cluster/registry.yaml` and the stage's prepull template):
   `registry-trust` writes `/etc/containerd/certs.d/<address>/` on every node, so containerd trusts the registry CA
   for that host alone; the sync's identity `sandbox-system/sandbox-registry-users` (namespaces `list`, Secrets
-  `create`, and `get`/`patch` only on the two Secret names it writes; it reads no other Secret); `template-prepull`,
-  one init container per pinned image, on every node, the unsecured and system ones too.
+  `create`, and `get`/`patch` only on the two Secret names it writes); `template-prepull`,
+  one init container per pinned image, on every node, the unsecured and system ones too. RBAC cannot limit `create`
+  by name, so on its own that role could create a `kubernetes.io/service-account-token` Secret named
+  `sandbox-template-pull` in `kube-system` for a controller's account, let the token controller fill it and read it
+  back: a cluster-admin token, held on the services cluster. The ValidatingAdmissionPolicy
+  `sandbox-registry-users-pull-secrets-only` in the same file allows this identity only `kubernetes.io/dockerconfigjson`
+  Secrets named `sandbox-template-pull` in `sb-*` and `sandbox-registry-nodes` in `sandbox-system`.
 
 ### 5.2 Accounts
 
@@ -1048,3 +1055,7 @@ site, and the release image is not published); stage 60's provider writes (`regi
 `imageAdoption`, `pin:` resolution) other than through unit tests; the `sandbox-templates` workflow (GitHub Actions is
 stopped by the account's billing); the adoption job writing through a portal (its database write has an integration
 test, the decision a live read). Everything the drill made was removed afterwards.
+
+The admission policy on the sync's identity came after the drill: `kubectl apply --dry-run=server` of
+`registry.yaml` passed on the SB0 cluster (v1.35.10), so the schema and the CEL compile, but applying it there was
+refused by the session's permission check and its denials are not measured (the manifest test checks its shape).

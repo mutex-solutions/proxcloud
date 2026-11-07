@@ -222,6 +222,9 @@ that reads its own images and the built-in ones only ([managed-sandbox.md §5](m
 5. New template images: merge the `sandbox-templates` workflow's pull request, then `make upgrade`. The portal moves
    the templates to the new digests once every node pre-pulled them (`imageAdoption: on`).
 
+The sync runs from the release's sandbox-proxy image: it needs a release newer than v0.3.28 (the first with
+`sandbox-proxy registry-users`), or `sandbox.proxy.image` set to one. An older image stops with "unknown subcommand".
+
 An existing sandbox provider keeps its templates: set `Template registry` (`<address>/t`), `Built-in image updates`
 and the templates' images (the `library/` copies) in the console.
 
