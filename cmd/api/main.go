@@ -493,7 +493,8 @@ func run() error {
 		WithAudit(auditSvc).
 		WithSDNLock(lock.New(pg)).
 		WithShareAccess(projectH.ReconcileShareAccess).
-		WithStaleSeeds(projectH.DropStaleSeeds)
+		WithStaleSeeds(projectH.DropStaleSeeds).
+		WithLoadBalancers(projectH.ReconcileLoadBalancers)
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)

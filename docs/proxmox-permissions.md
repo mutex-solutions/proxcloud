@@ -36,7 +36,7 @@ The admin **Test connection** button on the Proxmox provider reads the token's e
 | `VM.Backup` | server backups: vzdump, restore and deleting an archive all check it on the VM, through its pool. The same check hides an archive of a VM that is gone from this token, which is why backups go with their server. On the backup store, `Datastore.AllocateSpace` (below) is the other half |
 | `VM.Console` | VNC and serial console |
 | `VM.GuestAgent.Audit` | `network-get-interfaces`, which the sync uses to read VM IPs |
-| `VM.GuestAgent.Unrestricted` | `set-user-password`: the server's Set password action. PVE checks nothing narrower for it. |
+| `VM.GuestAgent.Unrestricted` | `set-user-password`: the server's Set password action. PVE checks nothing narrower for it. Also `exec` and `file-write` on a load balancer's own VM, which is how its config gets there. |
 | `VM.Migrate` | migrate and rebalance |
 | `VM.PowerMgmt` | start, stop, reboot, suspend and resume |
 | `VM.Replicate` | replication jobs of protected servers |

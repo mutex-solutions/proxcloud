@@ -4,6 +4,30 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Load balancers (HAProxy appliance)
+
+**What changed**
+
+- `LOAD_BALANCER` on a Proxmox provider: customer page, API, sync pass, delete. Each is a VM in the project's pool running
+  HAProxy, on a project network and a public network, configured through the guest agent. Members are servers of the
+  project; the platform resolves their addresses.
+- The VM, disk and address are ordinary SERVER, VOLUME and FLOATING_IP rows; a tenant's direct action on them answers 409.
+- `pveCreateServer` split into `pveBuildServer` and its handler, so an appliance goes through the same quota, placement
+  and firewall path.
+- `PublicIP.BeforeRow`, because the orphan check took an address allocated during a build for a reused vmid.
+
+**Why**
+
+- PVE has no load balancer service, and a tenant needs one address in front of several servers. A VM rather than something
+  shared keeps one tenant's traffic and config out of another's way, and lets the existing metering bill it with no new
+  price type, which is what removing the inert `load_balancer` type left room for.
+- The seed CD route was tried and dropped: PVE wants `Datastore.Allocate` to delete an ISO, so each balancer left a file on
+  the store. PVE's own cloud-init drive plus the guest agent leaves nothing and needs no extra privilege.
+- Names stay out of the config, and members are named by server, because both are tenant input that ends up in a file root
+  reads on a VM with a public address.
+
+**Diagrams updated:** `c2-containers.md`, `c4-code.md`.
+
 ## 2026-11-07: A server's name is checked against PVE's rule
 
 **What changed**

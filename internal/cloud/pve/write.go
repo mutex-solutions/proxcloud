@@ -59,6 +59,8 @@ type CreateServerReq struct {
 	Seed func(ctx context.Context, node string, vmid int) error
 	// SpreadGroup rides the VM's tags: the scheduler keeps a group's members apart.
 	SpreadGroup string
+	// LoadBalancerID marks the VM as a load balancer's appliance ("" for a tenant's server).
+	LoadBalancerID string
 	// createdUnix is the identity stamp, set by CreateServer.
 	createdUnix int64
 }
@@ -71,6 +73,9 @@ func (r CreateServerReq) vmTags() string {
 	}
 	if r.SpreadGroup != "" {
 		tags = append(tags, SpreadTag(r.SpreadGroup))
+	}
+	if r.LoadBalancerID != "" {
+		tags = append(tags, LBTag(r.LoadBalancerID))
 	}
 	return JoinTags(tags...)
 }

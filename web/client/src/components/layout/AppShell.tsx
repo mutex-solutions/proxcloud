@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useLocation, useNavigate, useParams } from "react-router-dom"
 import {
   Boxes, BarChart3, BookOpen, Camera, Check, ChevronsUpDown, CreditCard, Database, DatabaseZap, FileClock, FolderKanban, HardDrive,
-  Image, KeyRound, LayoutDashboard, LogOut, Monitor, Moon, Network, Receipt,
+  Image, KeyRound, LayoutDashboard, LogOut, Monitor, Moon, Network, Receipt, Scale,
   ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, Sun, UserCircle, Users, Wallet, FolderTree, Globe } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useAuth } from "@/lib/auth"
@@ -64,6 +64,7 @@ function navGroups(pid: string): Group[] {
       label: "Network",
       items: [
         { to: `${p}/networks`, label: "Networks", icon: Network, service: "network" },
+        { to: `${p}/load-balancers`, label: "Load balancers", icon: Scale, service: "network" },
         { to: `${p}/security-groups`, label: "Security groups", icon: Shield, service: "network" },
       ],
     },

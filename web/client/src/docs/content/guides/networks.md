@@ -22,6 +22,8 @@ A network can only be deleted once no server has an interface on it.
 
 The portal has no button for this yet. Attach a public NIC through the API with the server action `ATTACH_PUBLIC_NETWORK` (`POST /api/v1/project/{id}/cloud/{serverId}/action`, data `networkId` = one of the networks listed by `GET /api/v1/project/{id}/public-networks`). `DETACH_PUBLIC_NETWORK` removes the NIC and returns the address to the pool. Deleting the server returns it too. The guest configures the change at its next boot, so **reboot the server** after attaching or detaching. While a server has a public NIC, its default route and outbound traffic go through the public address.
 
+To spread inbound traffic across several servers behind one address, use a [load balancer](/docs/guides/load-balancers).
+
 ## Firewalling with security groups
 
 **Network → Security groups** are the firewalls around your servers. Each group is a set of allow rules for inbound and outbound traffic; attach one or more to a server to control which ports and sources can reach it. Every project starts with a default group. A common first rule is allowing SSH (port 22) from your own address.

@@ -609,9 +609,9 @@ client console.
 and flat-maps each through its type's **Provider** (`GetBillingInformation`) into
 priced `BillingResource`s. Types with no registered provider are skipped. The
 providers are instance (plus `instance_traffic`), volume, bucket,
-kubernetes_cluster, database_cluster, and the floating_ip / load_balancer
-providers that no Proxmox resource feeds yet. Networks and security groups are
-not billed. Public-IP and template billing are planned (C3c).
+kubernetes_cluster, database_cluster and floating_ip. A load balancer has no
+provider of its own: its VM, disk and address bill as those types. Networks and
+security groups are not billed. Public-IP and template billing are planned (C3c).
 
 `stampResourceValues` injects `region` and `service_id` into each billing
 resource's values (so a price-plan rule filtered by region/service can match)
@@ -1064,6 +1064,22 @@ KMS/Vault backend — `PutBucketEncryption` returns 200 but then bricks writes
 without one), cross-zone replication (single-zone cluster), MFA delete.
 
 ---
+
+## Load balancers (HAProxy appliance)
+
+A `LOAD_BALANCER` row (`internal/platform/project/cloud_lb_pve.go`) is what a tenant configured: listeners, pools, members. Everything that runs and bills is an ordinary object in the project's pool: a VM tagged `pc-lb-<id>` with a SERVER row, its disk with a VOLUME row, its public address with a FLOATING_IP row. So the charge job, quota, sync, project suspension and teardown need nothing new. A tenant's direct action on those rows answers 409 (`pveApplianceGuard`), and **Servers** hides the VM.
+
+- **Create.** `POST /project/{id}/cloud`, `type: LOAD_BALANCER`, data `name`, `networkId`, `publicNetworkId`, `flavorId`. The row goes in first, so a crash during the build leaves something to find the VM by. The build is a server create with no security group and no seed: before first boot `net1` is plugged on the public network, pinned by ipfilter, with the default route on it, and `net0` gives up its gateway, so no reboot is needed. A network with DHCP is refused, because a DHCP `net0` keeps its gateway and replies would leave through the overlay.
+- **Image.** `config.lbImage` (`PUT /admin/service/{id}/update`), default `debian-13`: a Debian-family image with the guest agent and cloud-init. A stock image gets `haproxy` and `socat` through apt over the public NIC; a site with no egress bakes both into the image.
+- **Config.** `pveLBApply` renders the row with `pve.RenderHAProxy` and compares the hash with the last one applied. On a difference it opens the listener ports on the VM's firewall, writes the file through the guest agent, and runs `haproxy -c` before moving it in, so a refused config leaves the old one running. It runs after each change, every 10 seconds until a new balancer is active, and on every sync, which also starts a stopped appliance. All of it holds the lock `lb-<externalId>`.
+- **Tenant input.** Names never reach the config: it uses generated ids, numbers, parsed addresses and values from fixed lists, and the renderer enforces that again on stored rows.
+- **Members.** `UPDATE_CONFIG` takes servers, never addresses. `lbMemberAddress` wants a VM in this project's pool, not a template, with a platform allocation on the balancer's network and inside its subnet, and answers the same 400 for a vmid of another project and one that does not exist. The identity stamp is kept, so a reused vmid stays out: the member is marked `missing` and leaves the config at the next sync.
+- **Health.** `GET_HEALTH` reads `show stat` through the guest agent, on demand.
+- **Delete.** Destroys only a VM carrying this balancer's tag, then its rows and address. Project teardown takes it with the pool.
+
+Privileges: `VM.GuestAgent.Unrestricted` (exec and file-write), which is root in that guest. The token already holds it for Set password, and the platform runs nothing on a VM without this tag.
+
+Not there: TLS termination, HTTP health checks, a second appliance for failover, traffic billing on the balancer itself. If its node dies the address is down until the node returns, as for any server on local storage.
 
 ## Managed Kubernetes and databases (Kamaji and DBaaS providers)
 
