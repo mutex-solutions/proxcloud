@@ -35,6 +35,19 @@ assert f.fio_class(9, 50000) == "capacity"
 assert f.fio_class(0.5, 100) == "capacity"  # IOPS can only downgrade
 assert f.fio_class(1.5, 900, 2, 5, 500) == "performance"  # thresholds are knobs
 
+# A re-run keeps what the operator set on the provider, adds what is new, and a site value wins.
+assert f.kept_profiles({"a": 1, "new": 2}, {}, {"a": 9}) == {"a": 9, "new": 2}
+assert f.kept_profiles({"a": 1}, {"site": 3}, {"a": 9}) == {"site": 3}
+assert f.kept_default_profile({"std": 1, "ceph": 2}, "ceph", "", "std") == "std"  # Ceph added later moves nothing
+assert f.kept_default_profile({"std": 1, "ceph": 2}, "ceph", "", "") == "ceph"  # first run
+assert f.kept_default_profile({"ceph": 2}, "ceph", "", "std") == "ceph"  # its profile is gone
+assert f.kept_default_profile({"std": 1, "ceph": 2}, "ceph", "std", "ceph") == "std"
+stored = {"a": {"class": "standard", "suggestedClass": "capacity"}}
+assert f.storage_classes({"a": {"class": "performance"}, "b": {"class": "capacity"}}, {}, stored) == {
+    "a": {"class": "standard", "suggestedClass": "performance"}, "b": {"suggestedClass": "capacity"}}
+assert f.storage_classes({}, {"a": "capacity"}, stored)["a"]["class"] == "capacity"
+assert stored["a"]["class"] == "standard"  # input untouched: the first run's `provider` is rendered again later
+
 assert f.template_nodes(["b", "a"], False) == ["a", "b"]
 assert f.template_nodes(["b", "a"], True) == ["a"]
 assert f.template_nodes(["b", "a"], True, True) == ["a", "b"]
