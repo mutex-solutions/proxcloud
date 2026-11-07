@@ -80,7 +80,7 @@ func newImportCluster(t *testing.T) *importCluster {
 			fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"secret internal detail"}}`)
 		},
 	})
-	b.s = &Service{C: c, ServiceID: "svc", PoolPrefix: "st-"}
+	b.s = &Service{C: c, ServiceID: "svc", PoolPrefix: "tp-"}
 	return b
 }
 
@@ -99,7 +99,7 @@ func TestImportImage(t *testing.T) {
 	if !strings.HasPrefix(file, "pc-import-p1-") || !strings.HasSuffix(file, ".qcow2") {
 		t.Fatalf("the name comes from the portal, never the tenant: %q", file)
 	}
-	if b.created.Get("pool") != "st-p1" || b.created.Get("name") != imageBuildPrefix+"golden" {
+	if b.created.Get("pool") != "tp-p1" || b.created.Get("name") != imageBuildPrefix+"golden" {
 		t.Fatalf("in the pool, and named so that no sample takes it for a server: %v", b.created)
 	}
 	if got := b.cfg.Get("scsi0"); got != "local-zfs:0,discard=on,import-from=imp:import/"+file {

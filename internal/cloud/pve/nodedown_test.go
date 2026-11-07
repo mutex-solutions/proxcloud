@@ -23,11 +23,11 @@ func nodeDownCluster(t *testing.T) *Service {
 				return
 			}
 			fmt.Fprint(w, `{"data":[
-				{"type":"qemu","vmid":101,"node":"pve1","name":"up","status":"running","pool":"st-p1","tags":"proxcloud","maxcpu":2,"maxmem":2147483648},
-				{"type":"qemu","vmid":102,"node":"pve2","name":"last-seen","status":"running","pool":"st-p1","tags":"proxcloud","maxcpu":2,"maxmem":2147483648},
-				{"type":"qemu","vmid":103,"node":"pve2","status":"unknown","pool":"st-p1","tags":"proxcloud"},
-				{"type":"qemu","vmid":104,"node":"pve2","status":"unknown","pool":"st-p1"},
-				{"type":"qemu","vmid":105,"node":"pve2","status":"unknown","pool":"st-OTHER"}
+				{"type":"qemu","vmid":101,"node":"pve1","name":"up","status":"running","pool":"tp-p1","tags":"proxcloud","maxcpu":2,"maxmem":2147483648},
+				{"type":"qemu","vmid":102,"node":"pve2","name":"last-seen","status":"running","pool":"tp-p1","tags":"proxcloud","maxcpu":2,"maxmem":2147483648},
+				{"type":"qemu","vmid":103,"node":"pve2","status":"unknown","pool":"tp-p1","tags":"proxcloud"},
+				{"type":"qemu","vmid":104,"node":"pve2","status":"unknown","pool":"tp-p1"},
+				{"type":"qemu","vmid":105,"node":"pve2","status":"unknown","pool":"tp-OTHER"}
 			]}`)
 		},
 		"GET /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, _ *http.Request) {
@@ -45,7 +45,7 @@ func nodeDownCluster(t *testing.T) *Service {
 		}
 		base.ServeHTTP(w, r)
 	})
-	return &Service{C: c, ServiceID: "svc", PoolPrefix: "st-"}
+	return &Service{C: c, ServiceID: "svc", PoolPrefix: "tp-"}
 }
 
 func serverRow(id, status string) *cloud.CloudResource {
@@ -133,13 +133,13 @@ func TestUnreadableVMKeepsItsRow(t *testing.T) {
 				fmt.Fprint(w, `{"data":[{"type":"node","node":"pve1","status":"online"}]}`)
 				return
 			}
-			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":101,"node":"pve1","name":"a","status":"running","pool":"st-p1"}]}`)
+			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":101,"node":"pve1","name":"a","status":"running","pool":"tp-p1"}]}`)
 		},
 		"GET /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(595)
 		},
 	})
-	s := &Service{C: c, PoolPrefix: "st-"}
+	s := &Service{C: c, PoolPrefix: "tp-"}
 	p := s.ServerSyncProvider("r", "p1", nil)
 	if list, err := p.List(context.Background()); err != nil || len(list) != 0 {
 		t.Fatalf("list = %+v, %v", list, err)

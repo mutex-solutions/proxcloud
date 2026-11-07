@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// backupCluster fakes VM 101 on pve1 (pool st-p1) with one archive of p1 and one of another project on nas-backup.
+// backupCluster fakes VM 101 on pve1 (pool tp-p1) with one archive of p1 and one of another project on nas-backup.
 type backupCluster struct {
 	s        *Service
 	vzdump   url.Values
@@ -41,7 +41,7 @@ func newBackupCluster(t *testing.T) *backupCluster {
 	}
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, _ *http.Request) {
-			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"st-p1","name":"web","status":"running"}]}`)
+			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"tp-p1","name":"web","status":"running"}]}`)
 		},
 		"GET /api2/json/nodes/pve1/qemu/101/status/current": func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprint(w, `{"data":{"status":"running","name":"web"}}`)
@@ -92,7 +92,7 @@ func newBackupCluster(t *testing.T) *backupCluster {
 			fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
 		},
 	})
-	b.s = &Service{C: c, ServiceID: "svc", PoolPrefix: "st-"}
+	b.s = &Service{C: c, ServiceID: "svc", PoolPrefix: "tp-"}
 	return b
 }
 

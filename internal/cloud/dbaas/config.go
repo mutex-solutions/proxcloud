@@ -19,7 +19,7 @@ import (
 
 // Namespace / naming derivations — the ONE place these are derived (kamaji precedent).
 // Customer-typed names are display-only; every k8s-side identifier is the generated database id
-// (`std-<8 hex>`), so duplicate display names, unicode and RFC1123 limits are non-issues.
+// (`pc-d-<8 hex>`), so duplicate display names, unicode and RFC1123 limits are non-issues.
 
 // NamespaceFor is the DB-cluster namespace holding a project's databases. Not kamaji's namespace: one
 // cluster may host both, and this namespace gets a default-deny NetworkPolicy, which would cut a tenant
@@ -170,7 +170,7 @@ func (c Config) Validate() error {
 // full generated values live on the Application (spec.source.helm.valuesObject); this struct is
 // what the client API accepts and what actions mutate.
 type DatabaseSpec struct {
-	ID          string // generated std-<8hex>; Application/release/CR name
+	ID          string // generated pc-d-<8hex>; Application/release/CR name
 	DisplayName string // customer-typed, display-only
 	ProjectID   string
 	Engine      string // key of Config.Engines
@@ -353,7 +353,8 @@ type RestoreSource struct {
 // Validate checks a restore request in isolation; the caller additionally proves the source
 // exists, shares this engine and actually has backups.
 func (r RestoreSource) Validate() error {
-	if !strings.HasPrefix(r.SourceID, "std-") {
+	// A malformed id goes no further. Databases made before pc-d- keep the prefix they were born with.
+	if !strings.HasPrefix(r.SourceID, "pc-d-") && !strings.HasPrefix(r.SourceID, "std-") {
 		return fmt.Errorf("restore: sourceDatabaseId is required")
 	}
 	if r.TargetTime != "" {

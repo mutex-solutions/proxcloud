@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// rebuildCluster fakes VM 101 on pve1 (pool st-p1) with the given snapshots, a donor clone that gets
+// rebuildCluster fakes VM 101 on pve1 (pool tp-p1) with the given snapshots, a donor clone that gets
 // vmid 200, and records every config write. moveFails makes the disk move fail.
 func rebuildCluster(t *testing.T, snapshots string, moveFails bool, writes *[]url.Values, stopped *[]string) *Service {
 	const upid = "UPID:pve1:0:0:0:x:101:u:"
@@ -18,7 +18,7 @@ func rebuildCluster(t *testing.T, snapshots string, moveFails bool, writes *[]ur
 	cfg101 := `{"scsi0":"local-zfs:vm-101-disk-0,discard=on,size=8G","tags":"fl-a;img-old;proxcloud"}`
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"st-p1","name":"web","status":"running"}]}`)
+			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"tp-p1","name":"web","status":"running"}]}`)
 		},
 		"GET /api2/json/nodes/pve1/qemu/101/status/current": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":{"status":"running","name":"web"}}`)
@@ -77,7 +77,7 @@ func rebuildCluster(t *testing.T, snapshots string, moveFails bool, writes *[]ur
 			fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
 		},
 	})
-	return &Service{C: c, PoolPrefix: "st-"}
+	return &Service{C: c, PoolPrefix: "tp-"}
 }
 
 func TestRebuildServer(t *testing.T) {
