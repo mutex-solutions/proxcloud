@@ -535,8 +535,13 @@ rejected credentials, a removed integration) leaves it `PENDING` with the reason
 `gatewayMessage` or `errorMessage`, and the next pass asks again. The 24 hour window is the bound.
 Past it the scanner stops asking and logs an error on the way out, and the row stays `PENDING`,
 because the money may have moved. A late gateway callback or the operator's
-`GET /admin/account-credit-transactions/{id}/sync` can still settle a deposit. A charge past the
-window has no such route yet and needs an operator to look at it at the gateway.
+`GET /admin/account-credit-transactions/{id}/sync` can still settle a deposit, and
+`GET /admin/collect-transactions/{id}/sync` (Re-check in the operator console) asks the gateway about a charge the same
+way a scan does. A bill charge stays in the in-flight guard for as long as it is `PENDING`, however old, so a long gateway
+outage cannot lead to a second charge for the bill; past the window a customer retry is told to contact support. A
+`PENDING` charge with no gateway reference (the process stopped between creating the row and the gateway's answer) cannot
+be asked about: look for its id as the reference at the gateway, then `POST /admin/collect-transactions/{id}/close`
+ends it as `CANCELLED` if nothing was charged.
 
 ### Bill writers and the credit lock
 

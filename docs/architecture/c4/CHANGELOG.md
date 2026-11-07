@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: A charge with an unknown outcome blocks new charges until resolved
+
+**What changed**
+
+- The in-flight guard covers every `PENDING` charge of a bill, not only those younger than 24 hours.
+- `GET /admin/collect-transactions/{id}/sync` re-checks a charge at the gateway, and
+  `POST /admin/collect-transactions/{id}/close` ends one that has no gateway reference. Both are in the operator console.
+
+**Why**
+
+- Past the scanner's 24 hours the guard let a new charge through while the old one's outcome was still unknown, so a long
+  gateway outage could charge a customer twice. Lifting the age limit needed a way to resolve the charge, or the bill
+  would stay blocked for good.
+
+**Diagrams updated:** none; no container or relationship changed.
+
 ## 2026-11-07: A server's name is checked against PVE's rule
 
 **What changed**

@@ -166,6 +166,114 @@ func TestScannerStopsAtItsWindow(t *testing.T) {
 	}
 }
 
+// A charge past the scanner's window keeps blocking new charges for its bill until an answer lifts the guard: this is the
+// double charge after a long gateway outage.
+func TestStuckChargeBlocksUntilResolved(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	repo := billing.NewRepo(db)
+	pricingRepo := pricing.NewRepo(db)
+	profile, cardID := seedPostpaid(t, db, billing.PaymentModePostpaid)
+	billID := mustInsertID(t, db, "bill", pgdoc.M{"billingProfileId": profile.ID, "status": "SENT", "invoiceCurrency": "USD",
+		"items": []any{pgdoc.M{"netAmount": decimalOf(t, "30")}}})
+	var gw payment.Gateway = &statusGW{status: "requires_payment_method"}
+	factory := func(*billing.Gateway) payment.Gateway { return gw }
+	collect := payment.NewCollectService(repo, pricingRepo, factory)
+	scanner := payment.NewTransactionScanner(repo, payment.NewAddFundsService(repo, pricingRepo, factory), collect, nil)
+	stuck := mustInsertID(t, db, "collectTransaction", pgdoc.M{"billId": billID, "billingProfileId": profile.ID, "status": "PENDING",
+		"externalId": "pi_stuck", "paymentGatewayId": "gw-awx", "currency": "USD", "amount": decimalOf(t, "30"), "grossAmount": decimalOf(t, "30"),
+		"exchangeRate": decimalOf(t, "1"), "creditCardId": cardID, "createdAt": time.Now().UTC().Add(-72 * time.Hour)})
+	charges := func() int64 {
+		n, _ := db.C("collectTransaction").Count(ctx, pgdoc.M{"billId": billID})
+		return n
+	}
+
+	// The cron and the customer both stop at the guard, and the customer is told waiting will not help.
+	if paid, _ := collect.CollectBillingProfile(ctx, profile); paid != 0 || charges() != 1 {
+		t.Fatalf("the cron charged again: paid=%d charges=%d", paid, charges())
+	}
+	if _, err := collect.CollectBill(ctx, profile, billID, payment.CollectBillRequest{CardID: cardID}); !errors.Is(err, payment.ErrCollectStuck) || charges() != 1 {
+		t.Fatalf("customer retry: %v, charges=%d", err, charges())
+	}
+	// The scanner stopped asking long ago.
+	if _, err := scanner.Scan(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if row, _ := repo.CollectTransactionByID(ctx, stuck); row.Status != pricing.CollectTransactionStatusPending {
+		t.Fatalf("the scan touched it: %+v", row)
+	}
+	// A re-check while the gateway cannot answer says so and closes nothing.
+	gw = &flakyGW{err: errors.New("connection reset by peer")}
+	row, err := scanner.RecheckCollect(ctx, stuck)
+	if err != nil || row.Status != pricing.CollectTransactionStatusPending || !strings.Contains(row.ErrorMessage, "an operator can re-check") {
+		t.Fatalf("%+v %v", row, err)
+	}
+	// Then it answers: the money moved, so the bill is paid by that charge and no other.
+	gw = &fakeGW{}
+	row, err = scanner.RecheckCollect(ctx, stuck)
+	if err != nil || row.Status != pricing.CollectTransactionStatusSuccess {
+		t.Fatalf("%+v %v", row, err)
+	}
+	if bill, _ := repo.BillByID(ctx, billID); bill.Status != pricing.BillStatusPaid || charges() != 1 {
+		t.Fatalf("bill %s, charges %d", bill.Status, charges())
+	}
+	// Re-checking a settled charge changes nothing, and an unknown id is nil.
+	if row, err = scanner.RecheckCollect(ctx, stuck); err != nil || row.Status != pricing.CollectTransactionStatusSuccess {
+		t.Fatalf("%+v %v", row, err)
+	}
+	if row, err = scanner.RecheckCollect(ctx, "no-such"); err != nil || row != nil {
+		t.Fatalf("%+v %v", row, err)
+	}
+}
+
+// A charge with no gateway reference cannot be re-checked, and only such a charge can be closed by hand.
+func TestCloseUnreferencedCharge(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	repo := billing.NewRepo(db)
+	pricingRepo := pricing.NewRepo(db)
+	profile, cardID := seedPostpaid(t, db, billing.PaymentModePostpaid)
+	billID := mustInsertID(t, db, "bill", pgdoc.M{"billingProfileId": profile.ID, "status": "SENT", "invoiceCurrency": "USD",
+		"items": []any{pgdoc.M{"netAmount": decimalOf(t, "30")}}})
+	fg := &fakeGW{}
+	factory := func(*billing.Gateway) payment.Gateway { return fg }
+	collect := payment.NewCollectService(repo, pricingRepo, factory)
+	scanner := payment.NewTransactionScanner(repo, payment.NewAddFundsService(repo, pricingRepo, factory), collect, nil)
+	mk := func(ext string, age time.Duration) string {
+		return mustInsertID(t, db, "collectTransaction", pgdoc.M{"billId": billID, "billingProfileId": profile.ID, "status": "PENDING",
+			"externalId": ext, "paymentGatewayId": "gw-awx", "currency": "USD", "amount": decimalOf(t, "30"), "grossAmount": decimalOf(t, "30"),
+			"exchangeRate": decimalOf(t, "1"), "creditCardId": cardID, "createdAt": time.Now().UTC().Add(-age)})
+	}
+	orphan := mk("", 72*time.Hour)
+	if _, err := scanner.RecheckCollect(ctx, orphan); err == nil || !strings.Contains(err.Error(), "no gateway reference") {
+		t.Fatalf("re-check of an orphan: %v", err)
+	}
+	if paid, _ := collect.CollectBillingProfile(ctx, profile); paid != 0 || fg.lastAmountCents != 0 {
+		t.Fatalf("an orphan must block too: paid=%d cents=%d", paid, fg.lastAmountCents)
+	}
+	fresh := mk("", time.Minute)
+	if _, err := scanner.CancelUnreferencedCollect(ctx, fresh); err == nil || !strings.Contains(err.Error(), "too recent") {
+		t.Fatalf("a charge that may still be running: %v", err)
+	}
+	referenced := mk("pi_x", 72*time.Hour)
+	if _, err := scanner.CancelUnreferencedCollect(ctx, referenced); err == nil {
+		t.Fatal("a charge with a reference must be re-checked, not closed")
+	}
+	row, err := scanner.CancelUnreferencedCollect(ctx, orphan)
+	if err != nil || row.Status != pricing.CollectTransactionStatusCancelled {
+		t.Fatalf("%+v %v", row, err)
+	}
+	for _, other := range []string{fresh, referenced} { // not under test from here on
+		if _, err := db.C("collectTransaction").SetFieldsOne(ctx, pgdoc.M{"_id": other}, pgdoc.M{"status": "CANCELLED"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Resolved: the bill can be charged again.
+	if paid, err := collect.CollectBillingProfile(ctx, profile); err != nil || paid != 1 {
+		t.Fatalf("paid=%d %v", paid, err)
+	}
+}
+
 // TestScannerDoesNotOverwriteAWinningSettle: the row read at the start of the pass must not undo a settle that
 // finished while the gateway call failed.
 func TestScannerDoesNotOverwriteAWinningSettle(t *testing.T) {

@@ -418,6 +418,18 @@ on("GET /admin/collect-transactions/:bpId/billing-profile", ({ params }) => ({
   data: db.collectTransactions.filter((t) => t.billingProfileId === params.bpId),
 }))
 
+on("GET /admin/collect-transactions/:id/sync", ({ params }) => {
+  const t = db.collectTransactions.find((x) => x.id === params.id) ?? notFound("Transaction")
+  if (t.status === "PENDING" && t.externalId) t.status = "SUCCESS"
+  return { data: t }
+})
+
+on("POST /admin/collect-transactions/:id/close", ({ params }) => {
+  const t = db.collectTransactions.find((x) => x.id === params.id) ?? notFound("Transaction")
+  if (t.status === "PENDING" && !t.externalId) t.status = "CANCELLED"
+  return { data: t }
+})
+
 on("GET /admin/collect-transactions/download/:id", ({ params }) => ({
   data: pdfResponse(`receipt-${params.id}.pdf`),
 }))

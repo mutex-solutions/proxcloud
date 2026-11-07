@@ -11,6 +11,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
 // scanner.go is the PENDING-transaction reconciler (a distributed-locked scheduled job running
@@ -23,8 +24,9 @@ import (
 // A failed re-check says nothing about the payment, so it does not close the transaction: the money may
 // have moved, and a FAILED deposit that did succeed takes a manual repair. Only the gateway saying it has
 // no such intent is terminal. Everything else stays PENDING with the reason on the row, re-checked until
-// it ages out of the window. That window is the bound: past it the scanner stops asking, the row stays
-// PENDING, and a late gateway callback or an operator sync can still settle a deposit.
+// it ages out of the window. That window is the bound: past it the scanner stops asking and the row stays
+// PENDING, where a late gateway callback or an operator re-check can still settle it. A bill charge in that state keeps
+// blocking new charges for the bill (chargeBusy): the money may have moved, so only an answer may lift the guard.
 
 // TransactionScanner re-drives stuck PENDING transactions through the same Process paths the
 // callbacks use (ProcessAddFunds / processCollect — both idempotent; a still-pending gateway
@@ -74,6 +76,10 @@ func (s *TransactionScanner) retryNote(id string, createdAt *time.Time, err erro
 		return "Could not confirm with the payment gateway: " + err.Error()
 	}
 	stop := createdAt.Add(scanMaxAge)
+	if s.now().After(stop) {
+		s.log.Warn("txn-scan: operator re-check failed", "txn", id, "err", err)
+		return fmt.Sprintf("Could not confirm with the payment gateway: %v. Automatic re-checks have ended; an operator can re-check it.", err)
+	}
 	if s.now().Add(2 * scanInterval).After(stop) {
 		s.log.Error("txn-scan: re-checks are ending with the outcome unknown", "txn", id, "stop", stop, "err", err)
 	} else {
@@ -181,6 +187,41 @@ func (s *TransactionScanner) scanCollects(ctx context.Context, from, to time.Tim
 		s.scanOneCollect(ctx, t)
 	}
 	return n, nil
+}
+
+// RecheckCollect is the operator's re-check of one charge, past the scan window too: it asks the gateway the way a scan
+// pass does and returns the row as it then stands. A charge with no gateway reference cannot be asked about (see
+// CancelUnreferencedCollect). Nil when there is no such charge.
+func (s *TransactionScanner) RecheckCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error) {
+	t, err := s.billing.CollectTransactionByID(ctx, id)
+	if err != nil || t == nil || t.Status != pricing.CollectTransactionStatusPending {
+		return t, err
+	}
+	if t.ExternalID == "" {
+		return nil, httpx.NewError(409, 409, fmt.Sprintf("This charge has no gateway reference, so the gateway cannot be asked about it. Look for reference %s at the gateway. If nothing was charged, close it.", id))
+	}
+	s.scanOneCollect(ctx, t)
+	return s.billing.CollectTransactionByID(ctx, id)
+}
+
+// CancelUnreferencedCollect closes a PENDING charge that never got a gateway reference: the process stopped between the
+// row and the gateway's answer. Nothing can ask the gateway about one and it blocks new charges for its bill, so an
+// operator who found no charge at the gateway ends it. Refused while the live flow could still be running.
+func (s *TransactionScanner) CancelUnreferencedCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error) {
+	t, err := s.billing.CollectTransactionByID(ctx, id)
+	if err != nil || t == nil {
+		return nil, err
+	}
+	if t.Status != pricing.CollectTransactionStatusPending || t.ExternalID != "" {
+		return nil, httpx.NewError(409, 409, "Only a PENDING charge with no gateway reference can be closed. Re-check any other.")
+	}
+	if t.CreatedAt != nil && s.now().Sub(*t.CreatedAt) < scanMinAge {
+		return nil, httpx.NewError(409, 409, "This charge is too recent: it may still be running. Try again later.")
+	}
+	if err := s.billing.UpdatePendingCollectTransaction(ctx, id, pricing.CollectTransactionStatusCancelled, "Closed by an operator: no charge found at the gateway"); err != nil {
+		return nil, err
+	}
+	return s.billing.CollectTransactionByID(ctx, id)
 }
 
 func (s *TransactionScanner) scanOneCollect(ctx context.Context, t *pricing.CollectTransaction) {

@@ -153,7 +153,7 @@ func (s *CollectService) CollectBill(ctx context.Context, profile *billing.Billi
 	ctx = context.WithValue(ctx, ctxKeyManual{}, true)
 	// An earlier charge still in flight: ask the gateway about it right now instead of charging
 	// again — a settled one answers the customer, a still-pending one is a 409.
-	if pending, err := s.billing.PendingCollectForBill(ctx, billID, now.Add(-24*time.Hour)); err != nil {
+	if pending, err := s.billing.PendingCollectForBill(ctx, billID); err != nil {
 		return nil, err
 	} else if len(pending) > 0 {
 		if pending[0].ExternalID != "" {
@@ -161,7 +161,7 @@ func (s *CollectService) CollectBill(ctx context.Context, profile *billing.Billi
 				return done, nil
 			}
 		}
-		return nil, ErrCollectInFlight
+		return nil, chargeBusy(pending, now)
 	}
 	return s.collectBill(ctx, profile, bill, card, now)
 }
@@ -221,23 +221,30 @@ func (s *CollectService) CollectBillingProfile(ctx context.Context, profile *bil
 }
 
 // ErrCollectInFlight is returned when a charge for the bill is still being processed (a PENDING
-// collect transaction younger than the scanner window) — starting another would charge twice.
+// collect transaction) — starting another would charge twice.
 var ErrCollectInFlight = httpx.NewError(409, 409, "A payment for this bill is still being processed — please wait a few minutes.")
 
-// inFlight reports whether the bill already has a PENDING charge younger than 24h (the
-// stuck-transaction scanner's window; older ones have aged out of reconciliation).
-func (s *CollectService) inFlight(ctx context.Context, billID string, now time.Time) (bool, error) {
-	pending, err := s.billing.PendingCollectForBill(ctx, billID, now.Add(-24*time.Hour))
-	return len(pending) > 0, err
+// ErrCollectStuck is the same refusal past the scanner's window: nothing re-checks the charge by itself any more, so
+// waiting will not help, and until an operator resolves it a new charge could be a second one.
+var ErrCollectStuck = httpx.NewError(409, 409, "An earlier payment for this bill could not be confirmed with the payment gateway, so the bill cannot be charged again yet. Please contact support.")
+
+// chargeBusy is the refusal for a bill with these PENDING charges.
+func chargeBusy(pending []pricing.CollectTransaction, now time.Time) error {
+	for i := range pending {
+		if c := pending[i].CreatedAt; c != nil && now.Sub(*c) > scanMaxAge {
+			return ErrCollectStuck
+		}
+	}
+	return ErrCollectInFlight
 }
 
 // collectBill collects one SENT bill: CollectTransaction(billId, unpaidAmount) → charge → process.
-// Refused (ErrCollectInFlight) while an earlier charge for the bill is still PENDING.
+// Refused (chargeBusy) while an earlier charge for the bill is still PENDING, however old it is.
 func (s *CollectService) collectBill(ctx context.Context, profile *billing.BillingProfile, bill *pricing.Bill, card *billing.CreditCard, now time.Time) (*pricing.CollectTransaction, error) {
-	if busy, err := s.inFlight(ctx, bill.ID, now); err != nil {
+	if pending, err := s.billing.PendingCollectForBill(ctx, bill.ID); err != nil {
 		return nil, err
-	} else if busy {
-		return nil, ErrCollectInFlight
+	} else if len(pending) > 0 {
+		return nil, chargeBusy(pending, now)
 	}
 	baseCcy, _ := s.billing.BaseCurrency(ctx)
 	x := pricing.NewExchanger(nil)
@@ -273,7 +280,7 @@ func (s *CollectService) collectBill(ctx context.Context, profile *billing.Billi
 	// Insert-then-check duplicate guard (no lock needed): if another PENDING charge for the bill
 	// was created before ours, ours yields — two concurrent requests can at worst both yield,
 	// never both charge. Ids are time-ordered, so "older" is a total order.
-	if pending, err := s.billing.PendingCollectForBill(ctx, bill.ID, now.Add(-24*time.Hour)); err != nil {
+	if pending, err := s.billing.PendingCollectForBill(ctx, bill.ID); err != nil {
 		return nil, err
 	} else {
 		for i := range pending {
