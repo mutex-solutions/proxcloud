@@ -1149,10 +1149,13 @@ func (h *Handler) pveBulkAction(w http.ResponseWriter, r *http.Request, proj *Pr
 
 	case "LIST_VOLUME_TYPES":
 		out := []map[string]any{}
+		def := es.PVEDefaultStorageProfile()
 		for slug, prof := range es.PVEStorageProfiles() {
 			out = append(out, map[string]any{
 				"name":        slug,
 				"displayName": prof.DisplayName(),
+				// The provider's default profile: the server wizard preselects it.
+				"default": slug == def,
 				"extra_specs": map[string]any{
 					"shared": prof.Shared, "snapshots": prof.Snapshots, "thin": prof.Thin,
 					"liveMigrate": prof.LiveMigrate, "replication": prof.Replication,

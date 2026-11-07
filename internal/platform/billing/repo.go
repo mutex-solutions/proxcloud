@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -201,7 +202,9 @@ func (r *Repo) AllBills(ctx context.Context) ([]pricing.Bill, error) {
 // AllBillingProfiles — every profile. The collect cron fans out over
 // every profile (NOT only ACTIVE — the collect job skips SUSPENDED).
 func (r *Repo) AllBillingProfiles(ctx context.Context) ([]BillingProfile, error) {
-	return findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{})
+	bps, err := findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{})
+	r.fillCurrency(ctx, bps)
+	return bps, err
 }
 
 // PromotionalCreditsByBillingProfile — all of a profile's promotional credits (the
@@ -536,13 +539,45 @@ func (r *Repo) FindByID(ctx context.Context, id string) (*BillingProfile, error)
 	if err != nil || !found {
 		return nil, err
 	}
-	return &bp, nil
+	one := []BillingProfile{bp}
+	r.fillCurrency(ctx, one)
+	return &one[0], nil
 }
 
 // FindByStatus returns every billing profile in the given status —
 // the charge cron loads the ACTIVE profiles.
 func (r *Repo) FindByStatus(ctx context.Context, status string) ([]BillingProfile, error) {
-	return findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{"status": status})
+	bps, err := findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{"status": status})
+	r.fillCurrency(ctx, bps)
+	return bps, err
+}
+
+// fillCurrency backfills an ACTIVE profile with no currency: an operator could activate a profile
+// before it had billing details (activation now sets it), and every bill read of such a profile
+// failed on the blank currency. It bills in the base currency, as saving its details would have
+// set, filled in memory and written once where the stored currency is still blank. A failed write
+// only leaves the fill to the next read.
+func (r *Repo) fillCurrency(ctx context.Context, bps []BillingProfile) {
+	base := ""
+	for i := range bps {
+		bp := &bps[i]
+		if bp.Status != StatusActive || bp.Currency != "" {
+			continue
+		}
+		if base == "" {
+			b, err := r.BaseCurrency(ctx)
+			if err != nil || b == "" {
+				return
+			}
+			base = b
+		}
+		bp.Currency = base
+		if _, err := r.profiles.SetFieldsOne(ctx, pgdoc.M{"_id": bp.ID, "status": StatusActive,
+			"$or": []pgdoc.M{{"currency": pgdoc.M{"$exists": false}}, {"currency": ""}}},
+			pgdoc.M{"currency": base}, nil); err != nil {
+			slog.Warn("billing profile currency backfill", "billingProfile", bp.ID, "err", err)
+		}
+	}
 }
 
 // Exists reports whether a billing profile with the given _id exists

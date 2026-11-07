@@ -432,8 +432,14 @@ type fakeAPI struct {
 	apps       map[string]map[string]any    // ns/name → object
 	tcps       map[string]map[string]any
 	mds        []map[string]any
+	crs        map[string][]map[string]any // plural → objects (ListCRs)
+	crsErr     error
 	deleted    []string
 	annotated  map[string]map[string]string // ns/name → annotations
+}
+
+func (f *fakeAPI) ListCRs(_ context.Context, _, _, plural, _, _ string) ([]map[string]any, error) {
+	return f.crs[plural], f.crsErr
 }
 
 func newFakeAPI() *fakeAPI {

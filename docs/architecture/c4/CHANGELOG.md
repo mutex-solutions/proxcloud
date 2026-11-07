@@ -4,6 +4,51 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Acceptance pass: statuses and messages the consoles got wrong
+
+**What changed**
+
+- A Kubernetes cluster reads `READY` when Argo CD still says `Progressing` but the control plane is Ready with an endpoint,
+  every node group runs its count of Ready nodes, the Application is Synced, and the one part of it not done is its
+  ClusterResourceSet: every HelmChartProxy Ready, read off the management cluster. That
+  holds for 30 minutes from the Application's creation; past it a ClusterResourceSet that never applies leaves the cluster
+  `PROGRESSING`. `deploy/mgmt-cluster/rbac.yaml` gives the ProxCloud ServiceAccount read on HelmChartProxies and
+  ClusterResourceSets; on an existing install re-run the services-cluster step to apply it. Without it the reads are refused
+  and Argo's answer stands. The sync also reports the cluster's
+  StorageClasses and whether it has ReadWriteMany, and the cluster page says when a claim will stay Pending.
+- `LIST_VOLUME_TYPES` marks the provider's default storage profile; the server wizard preselects it.
+- Activating a billing profile that has no currency gives it the base currency, an ACTIVE profile already stored without
+  one gets it when read (and stored once), and a bill of such a profile reads in the base currency.
+- Operator Delete now asks once more before it runs, answers a failure underneath as a 500 instead of 200, and its audit
+  event records the flip to `DELETE_IN_PROGRESS`, which tells it from a scheduled deletion.
+- The bill page's lines add up to the total: the subtotal is the items before adjustments, tax keeps its sign (credit-note
+  bills), and a sub-cent remainder dropped by the cent-rounded total shows as Rounding. The bill DTO (`ToBillDto`) converts
+  items and adjustments to the profile's currency at the rate its net and gross use, so every amount on a bill is in one
+  currency.
+- The refusal on a suspended project says who lifts it: paying the balance, or the operator for an operator's disable.
+- The admin Kubernetes and database cluster lists answer a management-cluster error as a 502.
+- Consoles: Delete now for operators, Test connection on Kubernetes and database providers, a first-project form for an
+  organization member with no project, operator-activated profiles get deposits, and several labels (open bills, sub-cent
+  amounts, deleted projects, inherited billing profiles, servers being deleted, SMB passwords, backups on delete).
+
+**Why**
+
+- Argo's health covers the whole Application, and its ClusterResourceSet fails until MetalLB's webhook answers, then waits
+  out CAPI's retry backoff: on the lab the Application read `Progressing` 8 minutes past CAPI's `Available`, and the page
+  said "Working on it" with every step done. Five lab creates turned Healthy 9.5 to 16 minutes after the Application was
+  created, the last change each time the ClusterResourceSet. Argo stays the source for everything else: a broken chart or a
+  ClusterResourceSet that never applies is not hidden behind READY for good. Argo 3 no longer keeps per-resource health in
+  `app.status.resources`, so the parts are read from the management cluster.
+- An operator can activate a profile before its owner saves billing details, which is where the currency came from. Its
+  bill list then answered 500.
+- An unreachable management cluster answered 200 with no clusters, and a Test connection built on that list would have
+  said connected. Since #109 any untyped error answers 500; a cluster error answers 502, the cluster's fault.
+- The bill net was converted to the profile's currency but the adjustments were not, so the subtotal (net minus
+  adjustments) mixed currencies: EUR at 0.9, items $100 and an adjustment of -$10 printed a subtotal of 91.00, not 90.
+- A new project's services are attached by the entry call that runs alongside the pages' first reads, so they read no
+  location and showed "No region" until a reload. They read again once that call is done.
+
+**Diagrams updated:** none (no new container, component or relation).
 ## 2026-11-07: Retype keeps one row; tenant views lose platform identities; named volumes
 
 **What changed**
