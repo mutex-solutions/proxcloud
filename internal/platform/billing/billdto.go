@@ -80,6 +80,8 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 		}
 	}
 
+	// Items and adjustments are stored in the base currency; the net and gross above are in the profile's. Every amount
+	// goes out in the profile's currency, so the bill's lines add up to its total.
 	items := make([]BillItemDto, 0, len(bill.Items))
 	for i := range bill.Items {
 		it := &bill.Items[i]
@@ -88,9 +90,17 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 			ResourceID:   it.ResourceID,
 			ResourceType: it.ResourceType,
 			ProjectID:    it.ProjectID,
-			Currency:     it.Currency,
-			NetAmount:    num(it.NetAmount),
+			Currency:     currency,
+			NetAmount:    num(rate.Mul(it.NetAmount)),
 		})
+	}
+	var adjustments []pricing.BillAdjustment
+	for _, a := range bill.Adjustments {
+		if a.Amount != nil {
+			v := rate.Mul(*a.Amount)
+			a.Amount = &v
+		}
+		adjustments = append(adjustments, a)
 	}
 
 	return &BillDto{
@@ -107,7 +117,7 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 		AppliedAccountCredits:     bill.AppliedAccountCredits,
 		CollectedAmounts:          bill.CollectedAmounts,
 		AppliedPromotionalCredits: bill.AppliedPromotionalCredits,
-		Adjustments:               bill.Adjustments,
+		Adjustments:               adjustments,
 		CreatedAt:                 bill.CreatedAt,
 		UpdatedAt:                 bill.UpdatedAt,
 	}, nil

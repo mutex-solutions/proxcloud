@@ -195,7 +195,8 @@ export default function BillDetailPage() {
   const adjTotal = adjustments.reduce((s, a) => s + Number(a.amount ?? 0), 0)
   const rounding = cents(net) - net
   const tax = cents(gross - cents(net))
-  // The two lines that carry the sub-cent part show it, so the block adds up as printed.
+  // The lines that carry a sub-cent part (subtotal, adjustments, rounding) show it, so the block adds up as printed.
+  // Every amount of the DTO is in the profile's currency (ToBillDto converts items and adjustments with the net).
   const fine = (v: number) =>
     new Intl.NumberFormat("en-US", { style: "currency", currency: ccy || "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(
       Math.abs(v) < 1e-6 ? 0 : v,
@@ -448,7 +449,7 @@ export default function BillDetailPage() {
               <TotalRow
                 key={`adj-${i}`}
                 label={(a.description as string) ?? (a.type as string) ?? "Adjustment"}
-                value={fmtMoney(a.amount as number, ccy)}
+                value={fine(Number(a.amount ?? 0))}
                 muted
               />
             ))}
