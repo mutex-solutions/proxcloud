@@ -66,6 +66,9 @@ type SandboxFirewall struct {
 	// containerd pulls templates and runtime images from (a MetalLB address on the services cluster). Unset: none.
 	RegistryAddress string
 	RegistryPort    int
+	// The template build bucket (docs/managed-sandbox.md §7): build pods fetch their contexts from it. Unset: none.
+	BuildStorageAddress string
+	BuildStoragePort    int
 }
 
 // sandboxGen is one generation of the shared rules: the group and its two IP sets.
@@ -293,16 +296,22 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 		}
 		rules = append(rules, r)
 	}
-	if f.RegistryAddress != "" {
-		reg, err := netip.ParseAddr(strings.TrimSpace(f.RegistryAddress))
-		port := f.RegistryPort
+	for _, ep := range []struct {
+		what, addr string
+		port, def  int
+	}{{"registry", f.RegistryAddress, f.RegistryPort, 443}, {"build storage", f.BuildStorageAddress, f.BuildStoragePort, 443}} {
+		if ep.addr == "" {
+			continue
+		}
+		a, err := netip.ParseAddr(strings.TrimSpace(ep.addr))
+		port := ep.port
 		if port == 0 {
-			port = 443
+			port = ep.def
 		}
-		if err != nil || !reg.Is4() || subnet.Contains(reg) || reg == cp || port < 1 || port > 65535 {
-			return g, fmt.Errorf("pve sandbox: invalid registry %s:%d (IPv4 outside the sandbox subnet, not the control plane)", f.RegistryAddress, port)
+		if err != nil || !a.Is4() || subnet.Contains(a) || a == cp || port < 1 || port > 65535 {
+			return g, fmt.Errorf("pve sandbox: invalid %s %s:%d (IPv4 outside the sandbox subnet, not the control plane)", ep.what, ep.addr, port)
 		}
-		rules = append(rules, rule("out", "tcp", "", reg.String(), strconv.Itoa(port)))
+		rules = append(rules, rule("out", "tcp", "", a.String(), strconv.Itoa(port)))
 	}
 	rules = append(rules, rule("out", "", "", outRef, "")) // the internet, through the sandbox SNAT address
 

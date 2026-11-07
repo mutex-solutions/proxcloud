@@ -100,6 +100,8 @@ type Handler struct {
 	gateCache    map[string]gateVerdict
 	// sbKeys holds the sandbox API keys, SHA-256 only (SetSandboxKeys; nil = the E2B API refuses every key).
 	sbKeys *pgdoc.Store
+	// sbTemplates holds the projects' custom templates and their builds (SetSandboxTemplates; nil = off).
+	sbTemplates *pgdoc.Store
 }
 
 // SetSandbox wires the sandbox service factory (enables sandbox provisioning and the SANDBOX
@@ -275,6 +277,9 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Get("/project/{id}/sandbox-api-keys", h.sandboxKeyList)
 	r.Post("/project/{id}/sandbox-api-keys", h.sandboxKeyCreate)
 	r.Delete("/project/{id}/sandbox-api-keys/{keyId}", h.sandboxKeyDelete)
+	r.Get("/project/{id}/sandbox-templates", h.consoleTemplateList)
+	r.Get("/project/{id}/sandbox-templates/{templateId}/builds/{buildId}/logs", h.consoleTemplateLogs)
+	r.Delete("/project/{id}/sandbox-templates/{templateId}", h.consoleTemplateDelete)
 	// GET /{id}/public-networks → the provider's router:external networks filtered by the
 	// project's publicNetworkIds allow-list — see publicnetworks.go.
 	r.Get("/project/{id}/public-networks", h.publicNetworks)

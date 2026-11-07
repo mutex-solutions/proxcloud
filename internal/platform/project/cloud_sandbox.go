@@ -21,6 +21,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
@@ -190,6 +191,19 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 	if err != nil {
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
+	}
+	// A project's own template (E2B-built) by name, name:tag or id; anything else is a built-in.
+	custom, customName, err := h.resolveCustomTemplate(r.Context(), proj.ID, spec.Template)
+	if errors.Is(err, sandbox.ErrBadTemplate) {
+		h.fail(w, httpx.BadRequest(err.Error()))
+		return
+	}
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if custom != nil {
+		spec.Custom, spec.Template = custom, customName
 	}
 	q := es.SandboxProjectQuota(proj.Quota)
 	spec.Quota = &q
@@ -527,7 +541,11 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 		ss, err := h.sandboxFor(es)
 		if err == nil && res.Data["status"] != sandbox.StatusDeleted {
 			refreshSandboxRow(ctx, ss, p.ID, res, now)
-			err = ss.DeleteSandbox(ctx, p.ID, res.ExternalID)
+			if res.Data["kind"] == "build" { // a template build's pod, in sbx-build
+				err = ss.DeleteBuild(ctx, strings.TrimPrefix(res.ExternalID, "build-"))
+			} else {
+				err = ss.DeleteSandbox(ctx, p.ID, res.ExternalID)
+			}
 		}
 		if err != nil {
 			slog.Error("teardown: delete sandbox", "project", p.ID, "sandbox", res.ExternalID, "err", err)
@@ -555,12 +573,34 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 		if err == nil {
 			err = ss.DeleteProjectNamespace(ctx, p.ID)
 		}
+		if err == nil {
+			err = h.teardownTemplates(ctx, ss, p.ID)
+		}
 		if err != nil {
-			slog.Error("teardown: delete sandbox namespace", "project", p.ID, "serviceId", svcID, "err", err)
+			slog.Error("teardown: delete sandbox namespace and templates", "project", p.ID, "serviceId", svcID, "err", err)
 			failed = true
 		}
 	}
 	return left, failed
+}
+
+// teardownTemplates removes the project's custom templates: their build pods, contexts and records, then the
+// project's images in the template registry (the prune never touches them: it treats a repo of an unknown project as
+// another portal's).
+func (h *Handler) teardownTemplates(ctx context.Context, ss *sandbox.Service, projectID string) error {
+	if h.sbTemplates == nil {
+		return nil
+	}
+	var ts []sandboxTemplateDoc
+	if err := h.sbTemplates.Find(ctx, pgdoc.M{"projectId": projectID}, &ts); err != nil {
+		return err
+	}
+	var errs []error
+	for i := range ts {
+		errs = append(errs, h.deleteTemplate(ctx, ss, &ts[i]))
+	}
+	errs = append(errs, deleteProjectImages(ctx, ss.Config(), projectID))
+	return errors.Join(errs...)
 }
 
 // sandboxServiceOf returns the id of the project's first sandbox service ("" if none), a live one before a DISABLED

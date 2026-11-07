@@ -40,6 +40,17 @@ export type SandboxFormState = {
   // the prepull DaemonSet to a new digest.
   templateRegistry: string
   imageAdoption: string
+  // Custom template builds and the pruning of their images (docs/managed-sandbox.md §7). Keys are write-only.
+  registryCa: string
+  registryPrune: string
+  registryGcUser: string
+  registryGcPassword: string
+  buildEndpoint: string
+  buildPodEndpoint: string
+  buildBucket: string
+  buildRegion: string
+  buildAccessKey: string
+  buildSecretKey: string
   storedSandbox: Record<string, any>
 }
 
@@ -63,6 +74,16 @@ export const emptySandboxForm: SandboxFormState = {
   quotaGpus: "",
   templateRegistry: "",
   imageAdoption: "off",
+  registryCa: "",
+  registryPrune: "off",
+  registryGcUser: "",
+  registryGcPassword: "",
+  buildEndpoint: "",
+  buildPodEndpoint: "",
+  buildBucket: "",
+  buildRegion: "",
+  buildAccessKey: "",
+  buildSecretKey: "",
   storedSandbox: {},
 }
 
@@ -121,6 +142,11 @@ export function sandboxConfigBlocks(f: SandboxFormState) {
       domain,
       templateRegistry: f.templateRegistry.trim(),
       imageAdoption: f.imageAdoption === "off" ? "" : f.imageAdoption,
+      registryCa: f.registryCa.trim(),
+      registryPrune: f.registryPrune === "off" ? "" : f.registryPrune,
+      buildStorage: f.buildBucket.trim()
+        ? { endpoint: f.buildEndpoint.trim(), podEndpoint: f.buildPodEndpoint.trim(), bucket: f.buildBucket.trim(), region: f.buildRegion.trim() }
+        : {},
       limits: compact({
         maxCpu: num(f.maxCpu),
         maxMemoryGiB: num(f.maxMemoryGiB),
@@ -138,13 +164,26 @@ export function sandboxConfigBlocks(f: SandboxFormState) {
   }
 }
 
+// sandboxSecret is what the form has for the secret: only filled fields, since the API merges non-blank values into the
+// stored secret and a blank field means "unchanged".
+export function sandboxSecret(f: SandboxFormState): Record<string, string> {
+  const all: Record<string, string> = {
+    kubeconfig: f.kubeconfig.trim(),
+    registryGcUser: f.registryGcUser.trim(),
+    registryGcPassword: f.registryGcPassword,
+    buildStorageAccessKey: f.buildAccessKey.trim(),
+    buildStorageSecretKey: f.buildSecretKey,
+  }
+  return Object.fromEntries(Object.entries(all).filter(([, v]) => v !== ""))
+}
+
 export function sandboxFormToBody(f: SandboxFormState) {
   return {
     name: f.name.trim(),
     type: "CLOUD",
     status: f.status,
     config: sandboxConfigBlocks(f),
-    secret: { kubeconfig: f.kubeconfig.trim() },
+    secret: sandboxSecret(f),
   }
 }
 
@@ -177,6 +216,12 @@ export function sandboxFormFromService(svc: { name?: string; status?: string; co
     quotaGpus: s(q.sandboxGpus),
     templateRegistry: s(sb.templateRegistry),
     imageAdoption: s(sb.imageAdoption) || "off",
+    registryCa: s(sb.registryCa),
+    registryPrune: s(sb.registryPrune) || "off",
+    buildEndpoint: s(sb.buildStorage?.endpoint),
+    buildPodEndpoint: s(sb.buildStorage?.podEndpoint),
+    buildBucket: s(sb.buildStorage?.bucket),
+    buildRegion: s(sb.buildStorage?.region),
     storedSandbox: sb,
   }
 }
@@ -278,6 +323,51 @@ export function SandboxProviderForm({ form, setForm, mode = "create" }: {
             has pulled it. To pin an image by hand, set this to Off first.
           </p>
         </div>
+      </div>
+      <div className="grid gap-2">
+        <div className="text-sm font-medium">Custom template builds</div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field id="sb-bep" label="Build bucket endpoint" value={form.buildEndpoint} onChange={set("buildEndpoint")} placeholder="http://192.0.2.41:9000" />
+          <Field id="sb-bpep" label="Endpoint the nodes reach (if different)" value={form.buildPodEndpoint} onChange={set("buildPodEndpoint")} placeholder="empty: the same" />
+          <Field id="sb-bbk" label="Bucket" value={form.buildBucket} onChange={set("buildBucket")} placeholder="pc-sandbox-builds" />
+          <Field id="sb-brg" label="Region" value={form.buildRegion} onChange={set("buildRegion")} placeholder="us-east-1" />
+          <Field id="sb-bak" label="Access key" value={form.buildAccessKey} onChange={set("buildAccessKey")} placeholder={edit ? "unchanged" : ""} />
+          <div className="grid gap-2">
+            <Label htmlFor="sb-bsk">Secret key</Label>
+            <Input id="sb-bsk" type="password" value={form.buildSecretKey} onChange={(e) => setForm({ ...form, buildSecretKey: e.target.value })} placeholder={edit ? "unchanged" : ""} autoComplete="off" />
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Where the E2B SDK's build contexts go; build pods fetch them with presigned URLs, so the nodes must reach the
+          endpoint (the Proxmox provider's sandbox fence opens it). Empty bucket: template builds are off. Needs the
+          template registry.
+        </p>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-2">
+          <Label htmlFor="sb-prune">Prune unused template images</Label>
+          <Select value={form.registryPrune} onValueChange={set("registryPrune")}>
+            <SelectTrigger id="sb-prune"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="off">Off</SelectItem>
+              <SelectItem value="dry-run">Dry run (log only)</SelectItem>
+              <SelectItem value="on">On</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">Hourly: template images nothing references, older than a day, with the registry's gc account.</p>
+        </div>
+        <div className="grid gap-4">
+          <Field id="sb-gcu" label="Registry gc user" value={form.registryGcUser} onChange={set("registryGcUser")} placeholder={edit ? "unchanged" : "gc"} />
+          <div className="grid gap-2">
+            <Label htmlFor="sb-gcp">Registry gc password</Label>
+            <Input id="sb-gcp" type="password" value={form.registryGcPassword} onChange={(e) => setForm({ ...form, registryGcPassword: e.target.value })} placeholder={edit ? "unchanged" : ""} autoComplete="off" />
+          </div>
+        </div>
+      </div>
+      <div className="grid gap-2">
+        <Label htmlFor="sb-ca">Registry CA (PEM)</Label>
+        <Textarea id="sb-ca" className="min-h-16 font-mono text-xs" value={form.registryCa} onChange={(e) => setForm({ ...form, registryCa: e.target.value })}
+          placeholder="-----BEGIN CERTIFICATE----- (empty: the registry has a publicly trusted certificate)" />
       </div>
       <Field
         id="sb-domain"

@@ -33,9 +33,17 @@ OPS = {
     ("get", "/sandboxes/{sandboxID}/logs"): "ProxCloud: the newest 1000 lines; no `start` or `limit`.",
     ("get", "/v2/sandboxes/{sandboxID}/logs"): "ProxCloud: the newest 1000 lines; no cursor.",
     ("get", "/sandboxes/{sandboxID}/metrics"): "ProxCloud: always empty.",
-    ("get", "/templates"): "ProxCloud: the location's built-in templates.",
+    ("get", "/templates"): "ProxCloud: the project's templates, then the location's built-in ones.",
     ("get", "/templates/aliases/{alias}"): None,
     ("get", "/templates/{templateID}"): None,
+    ("delete", "/templates/{templateID}"): None,
+    ("get", "/templates/{templateID}/tags"): None,
+    ("post", "/templates/tags"): None,
+    ("delete", "/templates/tags"): None,
+    ("post", "/v3/templates"): "ProxCloud: 503 where the location has no template registry or build bucket.",
+    ("get", "/templates/{templateID}/files/{hash}"): "ProxCloud: the upload URL points at this API (PUT …/upload, authenticated by the token in it), up to 2 GiB.",
+    ("post", "/v2/templates/{templateID}/builds/{buildID}"): "ProxCloud: steps RUN, COPY, ENV, WORKDIR, USER; `fromImageRegistry` types registry and gcp (aws → 400: use type registry with an ECR token); no layer cache between builds; 30 min per build, 2 at once per project; passes the usage checks of the sandbox create.",
+    ("get", "/templates/{templateID}/builds/{buildID}/status"): None,
 }
 
 GPU = {"type": "object", "description": "ProxCloud extension: whole GPUs of a model the location offers.",

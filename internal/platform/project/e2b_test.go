@@ -111,7 +111,8 @@ func TestE2BAuthAndErrors(t *testing.T) {
 		{"POST", "/e2b/v2/sandboxes", "e2b_short", 401},
 		{"GET", "/e2b/v2/sandboxes", "pk0123.sk0123", 401},
 		{"GET", "/e2b/volumes", "", 404},
-		{"POST", "/e2b/v3/templates", "", 404},
+		{"POST", "/e2b/v3/templates", "", 401},
+		{"PUT", "/e2b/templates/t1/files/0123456789/upload?token=x", "", 403},
 		{"POST", "/e2b/sandboxes/sbx-0123456789abcdef/pause", "", 404},
 	} {
 		req := httptest.NewRequest(c.method, c.path, nil)

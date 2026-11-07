@@ -75,8 +75,12 @@ served, answers 404 with E2B's error body (or 400 for a refused field).
 
 | Endpoint | Status | Notes |
 |---|---|---|
-| `GET /templates`, `GET /templates/{id}`, `GET /templates/aliases/{alias}` | partial | The location's built-in templates only (`public: true`) |
-| `POST /v3/templates`, `GET /templates/{id}/files/{hash}`, `POST /v2/templates/{id}/builds/{buildID}`, `GET …/builds/{buildID}/status`, `DELETE /templates/{id}`, template tags | no | SB6 (template builds) |
+| `GET /templates`, `GET /templates/{id}`, `GET /templates/aliases/{alias}` | yes | The project's own templates (`public: false`), then the location's built-in ones (`public: true`) |
+| `POST /v3/templates` | yes | `name` (or `alias`, `name:tag`), `tags`, `cpuCount`, `memoryMB` (whole GiB); at most 20 templates per project; a built-in name → 409. 503 where the location has no template registry or build bucket |
+| `GET /templates/{id}/files/{hash}` | yes | The upload URL points at this API (`PUT …/upload?token=…`), not at a bucket; up to 2 GiB per context, 10 GiB per project (507 above) |
+| `POST /v2/templates/{id}/builds/{buildID}` | partial | Steps `RUN`, `COPY`, `ENV`, `WORKDIR`, `USER`; `fromImage`, `fromTemplate`, `fromImageRegistry` types `registry` and `gcp` (`aws` → 400, see below); `startCmd`, `readyCmd`. No layer cache between builds, 30 minutes per build, 2 at once per project; billed like a sandbox of the template's size while it runs; passes the sandbox create's checks (409, 403, 503) |
+| `GET /templates/{id}/builds/{buildID}/status` | yes | `logsOffset`; build logs are kaniko's, crane's and the context fetch's lines |
+| `DELETE /templates/{id}`, `GET /templates/{id}/tags`, `POST /templates/tags`, `DELETE /templates/tags` | yes | A deleted template's images are pruned later (docs/managed-sandbox.md §7.4) |
 | `/v2/templates`, `PATCH /templates/{id}`, v1 builds, `/unstable/builds*` | no | Older build APIs; the SDKs from 2.x use v3 |
 
 ### Not served
@@ -113,10 +117,13 @@ dashboard APIs. They answer 404 with E2B's error body.
    pause at its timeout would be deleted and its files lost. After SB7: filesystem only.
 3. **Pause with memory** (`memory: true`, `mode: "full"`, `autoPauseMemory`): never. gVisor in a pod has no microVM
    snapshot; a later resume is a cold boot (files kept, processes, memory and open connections not).
-4. **Custom templates** (`Template()` builder, `e2b template build`, v3 build API, template tags and delete): not before
-   SB6. Until then only the provider's built-in templates exist.
+4. **Custom templates**: the v3 build API works (`Template()` builder, `from_dockerfile`, `e2b template build`, tags,
+   delete). `fromImageRegistry` with `type: "aws"` (AWS keys exchanged for an ECR token) answers 400: use
+   `type: "registry"` with username `AWS` and the output of `aws ecr get-login-password` as the password. No layer cache
+   between builds, so a large base image is pulled again on every build. A template belongs to its project; no public
+   templates.
 5. **Templates beyond `base` and `code-interpreter-v1`** (`desktop`, agent CLIs, `mcp-gateway`): no images before the
-   template workflow (SB6a) and the MCP gateway (SB8). Build your own from `base` after SB6.
+   template workflow (SB6a) and the MCP gateway (SB8). Build your own from `base`.
 6. **`Sandbox.create(mcp=…)`**: 400 before SB8 (the gateway runs from the `mcp-gateway` template).
 7. **Volumes** (`volumeMounts`, `/volumes`): 400 / 404. A sandbox has ephemeral storage only, by design: the sandbox cluster has no CSI
    token and no NAS dataset, so an escape from gVisor finds no storage credential.

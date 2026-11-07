@@ -29,6 +29,7 @@ import { timeAgo } from "@/lib/format"
 import { useLocations, useProjectId, useProjectServices } from "@/lib/hooks"
 import type { CloudResource, SandboxExecResult, SandboxLimits, SandboxTemplate } from "@/lib/types"
 import { ApiKeysTab } from "./SandboxApiKeys"
+import { TemplatesTab } from "./SandboxTemplates"
 
 const TYPE = "SANDBOX"
 const NO_GPU = "none"
@@ -238,6 +239,7 @@ export default function SandboxesPage() {
       <Tabs defaultValue="sandboxes">
         <TabsList>
           <TabsTrigger value="sandboxes">Sandboxes</TabsTrigger>
+          {e2b && <TabsTrigger value="templates">Templates</TabsTrigger>}
           <TabsTrigger value="api-keys">API keys</TabsTrigger>
         </TabsList>
         <TabsContent value="sandboxes" className="grid gap-4">
@@ -252,6 +254,11 @@ export default function SandboxesPage() {
             <DataTable columns={columns} data={list.data ?? []} isLoading={list.isLoading} error={list.error as Error | null} />
           )}
         </TabsContent>
+        {e2b && (
+          <TabsContent value="templates">
+            <TemplatesTab pid={pid} />
+          </TabsContent>
+        )}
         <TabsContent value="api-keys">
           <ApiKeysTab pid={pid} e2b={e2b} />
         </TabsContent>

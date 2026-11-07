@@ -169,7 +169,8 @@ func TestReviewSyncCannotMintServiceAccountTokens(t *testing.T) {
 		all += v.Expression + "\n"
 	}
 	for _, want := range []string{`object.type == "kubernetes.io/dockerconfigjson"`, `"sandbox-template-pull"`,
-		`request.namespace.startsWith("sb-")`, `"sandbox-registry-nodes"`, `request.namespace == "sandbox-system"`} {
+		`request.namespace.startsWith("sb-")`, `"sandbox-registry-nodes"`, `request.namespace == "sandbox-system"`,
+		`matches("^registry-build-[a-z0-9]{1,40}$")`, `request.namespace == "sbx-build"`} {
 		if !strings.Contains(all, want) {
 			t.Errorf("validations lack %s:\n%s", want, all)
 		}

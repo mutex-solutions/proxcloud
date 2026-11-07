@@ -3,7 +3,6 @@ package sandbox
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -88,6 +87,16 @@ func (s *Service) ownerSelector(projectID string) string {
 	return LabelProject + "=" + projectID + "," + LabelManagedBy + "=" + ManagedByValue + "," + LabelService + "=" + s.serviceID
 }
 
+// ensureTenantNamespace creates/labels sb-<projectId> and leaves its quota alone.
+func (s *Service) ensureTenantNamespace(ctx context.Context, projectID string) error {
+	return s.api.EnsureNamespace(ctx, NamespaceFor(projectID), map[string]string{
+		LabelProject:   projectID,
+		LabelService:   s.serviceID,
+		LabelManagedBy: ManagedByValue,
+		LabelTenant:    "true",
+	})
+}
+
 // EnsureProjectNamespace creates/labels sb-<projectId> and its ResourceQuota (the bootstrap
 // leg). LabelTenant is load-bearing: it is what puts the namespace under the cluster-wide egress
 // guardrail. The quota is the hard backstop behind the create-time checks in CreateSandbox
@@ -95,13 +104,7 @@ func (s *Service) ownerSelector(projectID string) string {
 // quota when q is set.
 func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string, q *ProjectQuota) error {
 	ns := NamespaceFor(projectID)
-	labels := map[string]string{
-		LabelProject:   projectID,
-		LabelService:   s.serviceID,
-		LabelManagedBy: ManagedByValue,
-		LabelTenant:    "true",
-	}
-	if err := s.api.EnsureNamespace(ctx, ns, labels); err != nil {
+	if err := s.ensureTenantNamespace(ctx, projectID); err != nil {
 		return err
 	}
 	l := s.cfg.Limits
@@ -129,29 +132,10 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string, 
 	})
 }
 
-// The project's pull Secret (TemplatePullSecret in sb-<project>) is not written here: the registry's account sync
-// writes one per project with that project's own account (docs/managed-sandbox.md §6). Copying one shared account
-// into every namespace, as before, let a node escape read every tenant's templates.
-
-var errPullSourceUnreadable = errors.New("cannot read the template registry pull secret")
-
-// copyPullSecret writes the template registry pull credentials into ns/name. false = no source
-// (custom templates are not set up on this cluster); an unreadable source is an error
-// (errPullSourceUnreadable), not "no source".
-func (s *Service) copyPullSecret(ctx context.Context, ns, name string, labels map[string]any) (bool, error) {
-	src, err := s.api.GetSecretData(ctx, pullSecretSourceNS, TemplatePullSecret)
-	if err != nil {
-		return false, fmt.Errorf("%w %s/%s: %w", errPullSourceUnreadable, pullSecretSourceNS, TemplatePullSecret, err)
-	}
-	if len(src[".dockerconfigjson"]) == 0 {
-		return false, nil
-	}
-	return true, s.api.ApplyCore(ctx, "secrets", map[string]any{
-		"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/dockerconfigjson",
-		"metadata": map[string]any{"name": name, "namespace": ns, "labels": labels},
-		"data":     map[string]any{".dockerconfigjson": base64.StdEncoding.EncodeToString(src[".dockerconfigjson"])},
-	})
-}
+// The project's pull Secret (TemplatePullSecret in sb-<project>) and build Secret (BuildSecretFor in sbx-build) are
+// not written here: the registry's account sync writes them with that project's own accounts
+// (docs/managed-sandbox.md §6). Copying one shared account into every namespace, as before, let a node escape read
+// every tenant's templates.
 
 // DeleteProjectNamespace removes sb-<projectId> and everything left in it (project teardown).
 // Refuses a namespace proxcloud does not own for this service.

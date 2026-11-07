@@ -4,6 +4,62 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: Custom sandbox templates: build pods, a build account per project, pruning through the OCI API (SB6b)
+
+**What changed**
+
+- The E2B v3 template API (`POST /e2b/v3/templates`, files, builds, build status, tags, delete) and the template list,
+  alias and get with the project's own templates, ported from the earlier implementation
+  (`internal/platform/project/e2b_templates.go`, `e2b_template_base.go`); records in the new table `sandbox_templates`.
+  A ready build is a template for the project's sandboxes on the E2B and the native create.
+- New container: the template build bucket (`sandbox.registry.builds_bucket`, RustFS or RGW, its own service user),
+  set on the sandbox provider as `config.sandbox.buildStorage` with its keys in the secret. The portal streams contexts
+  into it (one PUT up to 16 MiB, else a multipart upload, `UNSIGNED-PAYLOAD` for both) and deletes a template's contexts
+  with it.
+- Build pods in namespace `sbx-build` on the sandbox cluster (`installer/playbooks/templates/sandbox-builds.yml.j2`,
+  stage 55 (registry)): fetch with presigned GETs for the endpoint the nodes reach, base pulls, kaniko offline with no
+  credential, crane push. Its own egress policy (internet minus private ranges, port 25 closed, the registry and the
+  bucket alone), the registry CA for crane, the portal's Role (pods, ConfigMaps, `create`/`patch` on Secrets) and a
+  `patch`-only Role for the account sync. The workers' VM firewall gets one rule more for the bucket
+  (`SandboxFirewall.BuildStorageAddress`, Proxmox `config.sandbox.buildStorage`, stage 60).
+- Registry accounts: the shared `push` account is gone; the account sync writes `build-<project>` (reads `library/**`
+  and `t/<project>/**`, writes `t/<project>/**` only) into `sbx-build` as `registry-build-<project>`, and a static `gc`
+  account reads and deletes `t/**`. The sync's admission policy allows that one Secret name pattern in `sbx-build`.
+- `fromImageRegistry` types `registry` and `gcp`; `aws` is refused, so the AWS SDK's ECR client is not a dependency.
+- Jobs `sandboxBuildSync` (every minute) and `sandboxRegistryPrune` (hourly, `config.sandbox.registryPrune`, the `gc`
+  account, `config.sandbox.registryCa`); debug triggers `run-sandbox-builds` and `run-registry-prune?grace=`.
+- Console: a Templates tab on the Sandboxes page (`/project/{id}/sandbox-templates`: list, build logs, delete); the admin
+  sandbox provider form edits the build bucket, the prune mode, the gc account and the registry CA.
+- Project teardown deletes the project's templates, their build pods and contexts, and its images under
+  `t/<project>/` with the `gc` account (following `registryPrune`).
+- The build limit (2 per project) is counted and the pod started under a Postgres advisory lock per project; a
+  template keeps its last 10 builds plus any a tag names or that is building; a project's contexts are capped at
+  10 GiB (oldest past the presigned URL's lifetime evicted first, else 507), and the upload URL and the upload pass the
+  usage gate. The build namespace's Cilium policy has an explicit empty ingress rule (default deny).
+
+**Why**
+
+- Tenants of the E2B SDKs build their own templates (`Template.build`); without it only the operator's built-in
+  templates existed.
+- EE pushed every tenant's builds with one robot that could overwrite any tenant's template; a build pod is customer
+  code on a shared node, so its push credential is now its own project's, and no account but `admin` writes
+  `library/**`.
+- EE's build pods downloaded their contexts from the portal. The workers reach the object store (layer 1 can open one
+  address) but not the portal, which the plan keeps off the CPU workers (only the system node reaches it, for wake);
+  presigned GETs need no portal route and no bucket key on the cluster.
+- EE pruned through Harbor's API; Zot speaks the OCI distribution API, with which the same live-set rules apply.
+- ProxCloud runs on Proxmox only, so an AWS SDK client for one `fromImageRegistry` flavour was not worth carrying; an ECR
+  token used as a registry password covers the same images.
+- Review of the first cut: 10 failed build requests trimmed away the build `default` named (the template stopped
+  resolving and the prune lost its image); parallel build requests all passed the count and started 3 pods for a
+  limit of 2, so one project could fill the quota every project's builds share; contexts had no cap and no usage gate
+  on the object store that also holds the registry's blobs; and the prune treats a repo of an unknown project as
+  foreign, so a deleted project's images would have stayed forever. `ingress: []` is no ingress section to Cilium,
+  and `sbx-build` carries no tenant label for the cluster-wide rule.
+
+**Diagrams updated:** C2 (template build bucket, build pod flows), C3 (custom templates component, the account sync's
+accounts), C4 (the fence rule for the bucket).
+
 ## 2026-11-08: The sandbox registry: Zot on the services cluster, a pull account per project, pinned built-in images (SB6a)
 
 **What changed**

@@ -20,7 +20,10 @@ package externalservice
 //	      "gpuModels": ["nvidia-3090"],                // node label node-restriction.kubernetes.io/proxcloud-gpu values
 //	      "envd":      true,                           // run E2B's envd (E2B-compatible API)
 //	      "domain":    "sbx.example.org",              // E2B_DOMAIN served by sandbox-proxy
-//	      "templateRegistry": "registry.example.org/sandbox-templates", // custom templates + snapshots
+//	      "templateRegistry": "registry.example.org/t",  // custom templates + snapshots (t/<project>/<template>)
+//	      "registryPrune":    "on",                      // "dry-run" logs, "" off (secret.registryGcUser/Password)
+//	      "buildStorage": {"endpoint": "http://s3.internal:9000", "bucket": "pc-sandbox-builds", "region": "us-east-1",
+//	                       "podEndpoint": ""},           // contexts of template builds (secret.buildStorageAccessKey/SecretKey)
 //	      "limits": {"maxCpu": 8, "maxMemoryGiB": 32, "maxGpus": 1, "maxTimeoutSeconds": 86400,
 //	                 "defaultTimeoutSeconds": 3600, "maxConcurrent": 10, "maxConcurrentGpus": 1}
 //	    }
@@ -115,7 +118,12 @@ func (e *ExternalService) SandboxConfig() sandbox.Config {
 		}
 	}
 	limits, _ := sb["limits"].(map[string]any)
+	bs, _ := sb["buildStorage"].(map[string]any)
 	return sandbox.Config{
+		BuildStorage: sandbox.BuildStorage{
+			Endpoint: str(bs["endpoint"]), PodEndpoint: str(bs["podEndpoint"]), Bucket: str(bs["bucket"]), Region: str(bs["region"]),
+			AccessKey: str(e.secretMap()["buildStorageAccessKey"]), SecretKey: str(e.secretMap()["buildStorageSecretKey"]),
+		},
 		Kubeconfig:       str(e.secretMap()["kubeconfig"]),
 		Region:           e.SandboxRegion(),
 		RuntimeClass:     str(sb["runtimeClass"]),
@@ -126,6 +134,7 @@ func (e *ExternalService) SandboxConfig() sandbox.Config {
 		RegistryPrune:    str(sb["registryPrune"]),
 		ImageAdoption:    str(sb["imageAdoption"]),
 		TemplateRegistry: str(sb["templateRegistry"]),
+		RegistryCA:       str(sb["registryCa"]),
 		ProxyWakeToken:   str(e.secretMap()["proxyWakeToken"]),
 		RegistryGC: sandbox.RegistryCredential{
 			User: str(e.secretMap()["registryGcUser"]), Password: str(e.secretMap()["registryGcPassword"]),

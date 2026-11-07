@@ -208,15 +208,22 @@ that reads its own images and the built-in ones only ([managed-sandbox.md §6](m
      admin ops API, and that user creates and owns the bucket. `object_store.region` is the zonegroup's `api_name`.
    - `external`: the store's own key creates and keeps the bucket.
    The bucket has no Object Lock (Zot's garbage collection deletes unreferenced blobs); its secret is
-   `generated/sandbox-registry-s3-secret`.
+   `generated/sandbox-registry-s3-secret`. A second bucket, `sandbox.registry.builds_bucket` (default
+   `pc-sandbox-builds`), gets the same treatment for custom template builds (secret
+   `generated/sandbox-builds-s3-secret`). Build pods fetch from it, so the store's endpoint must be an IPv4 address with
+   its port; the stage refuses a name.
 3. `make install`, or stages 55 (both), 56 and 60 on an installed site. Stage 55 (registry) runs Zot in
-   `sandbox.registry.namespace` with a CA of its own, writes `generated/sandbox-registry-{admin,push,pull-nodes,key}`
+   `sandbox.registry.namespace` with a CA of its own, writes `generated/sandbox-registry-{admin,gc,pull-nodes,key}`
    (the accounts and the key project passwords derive from), copies each pinned image and the release's
    `proxcloud-sandbox-proxy` in (skopeo on the first mgmt host; `images.pull_secret` if ghcr needs a login) and
-   applies `deploy/sandbox-cluster/registry.yaml` and the prepull on the sandbox cluster. Stage 56 runs
-   sandbox-proxy from the copy. Stage 60 gives the Proxmox provider `config.sandbox.registry` (the workers' firewall
-   then admits that address and port) and, when it first registers the sandbox provider, the templates with
-   `pin:<name>` resolved to the copies, `templateRegistry` and `imageAdoption` (`sandbox.registry.adoption`).
+   applies `deploy/sandbox-cluster/registry.yaml`, the prepull and the build namespace `sbx-build`
+   (`templates/sandbox-builds.yml.j2`: its egress policy, the registry CA, the portal's and the sync's rights there)
+   on the sandbox cluster. Stage 56 runs sandbox-proxy from the copy. Stage 60 gives the Proxmox provider
+   `config.sandbox.registry` and `config.sandbox.buildStorage` (the workers' firewall then admits those two addresses
+   and ports) and, when it first registers the sandbox provider, the templates with `pin:<name>` resolved to the copies,
+   `templateRegistry`, `imageAdoption` (`sandbox.registry.adoption`), the build bucket, the registry CA,
+   `registryPrune` (`sandbox.registry.prune`, default `on`) and the `gc` account
+   ([managed-sandbox.md §7](managed-sandbox.md#7-custom-templates-sb6b)).
 4. Check: after the next sync, `kubectl -n sandbox-system get pods -l app=template-prepull` on the sandbox cluster
    shows one Running pod per node; a re-run of stage 55 reports the count.
 5. New template images: merge the `sandbox-templates` workflow's pull request, then `make upgrade`. The portal moves
@@ -226,11 +233,16 @@ The sync runs from the release's sandbox-proxy image: it needs a release newer t
 `sandbox-proxy registry-users`), or `sandbox.proxy.image` set to one. An older image stops with "unknown subcommand".
 
 An existing sandbox provider keeps its templates: set `Template registry` (`<address>/t`), `Built-in image updates`
-and the templates' images (the `library/` copies) in the console.
+and the templates' images (the `library/` copies) in the console, and for custom templates "Custom template builds"
+(endpoint, bucket and keys from `generated/`), "Prune unused template images", the gc account
+(`generated/sandbox-registry-gc`) and the registry CA. Upgrading from SB6a replaces the `push` account with per-project
+build accounts; nothing used `push` before SB6b.
 
 **What ran where:** stage 55 (registry) ran on the lab against the SB0 cluster from a scratch site, with RustFS and
 then RGW as the backend; stage 60's new keys and the release proxy copy did not run there
-([managed-sandbox.md §6.6](managed-sandbox.md#66-measured-on-the-lab-2026-11-07)).
+([managed-sandbox.md §6.6](managed-sandbox.md#66-measured-on-the-lab-2026-11-07)). SB6b's additions to stages 55 and
+60 have not run on the lab: running stage 55 there was refused by the session's permission check
+([§7.6](managed-sandbox.md#76-measured-on-the-lab-2026-11-08)).
 
 ## Sandbox ports (stage 56)
 
