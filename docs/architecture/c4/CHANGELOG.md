@@ -4,6 +4,43 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: E2B-compatible API, sandbox API keys, envd in sandboxes, MCP sandbox tools (SB5)
+
+**What changed**
+
+- Portal: `/e2b/*` (`internal/platform/project/e2b.go`), mounted next to `/api/v1` and public in `pkg/auth`; its own gate
+  reads `X-API-Key` (or a bearer) and resolves it to the key's creator in the key's project. Sandbox create (v1 and v2),
+  list, get, kill, timeout, refreshes, connect, network, logs, metrics and the built-in templates, in E2B's shapes and
+  `{code, message}` errors; anything else answers 404 "not supported". `GET /e2b/openapi.json` is E2B's own document
+  cut to those routes (`e2b_openapi_gen.py`), guarded by `TestE2BOpenAPIParity`.
+- Sandbox API keys (D8, `e2b_keys.go`, table `sandbox_api_keys`): `e2b_` + 40 hex, one project each, acting as the member
+  who made it, stored as SHA-256 only; `GET/POST/DELETE /api/v1/project/{id}/sandbox-api-keys` and the client console's
+  Sandboxes > API keys tab (key shown once, then a hint). The project service view says whether the location offers the
+  E2B API (`sandboxE2B`); the admin sandbox provider form has an "E2B domain" field (`config.sandbox.envd` + `domain`)
+  and keeps a template's start and ready commands when the template list is edited.
+- In the sandbox: `cmd/sandbox-init` (PID 1: user, envd, `/init`, start and ready commands, localhost relay) and
+  `deploy/sandbox-runtime.Dockerfile` (envd built unmodified from e2b-dev/infra e85b9f5 plus sandbox-init), installed on
+  every node by a new init container of `node-setup`; stage 55 pins its image, CI builds `proxcloud-sandbox-runtime`.
+  Built-in templates `base` and `code-interpreter-v1`: `deploy/templates/` and `build.sh` (pushed by hand until SB6a's
+  workflow); stage 60 registers a provider with a domain with envd on.
+- MCP client toolset: `list_sandboxes`, `create_sandbox`, `exec_in_sandbox`, `get_sandbox_logs`, `set_sandbox_timeout`,
+  `delete_sandbox` over the native routes.
+- `tests/e2b-compat/compat.py`: the stock SDKs end to end (commands, streaming, files, preview URL, metadata, egress,
+  cross-project key, code interpreter). `docs/e2b-compat.md`: what works, what differs and what does not, and why.
+- C2: the sandbox cluster row had two sentences starting "Built by installer stage 55"; merged into one.
+
+**Why**
+
+- The plan's SB5 (§11, D8): the E2B SDKs are how agents use sandboxes, and a key must not reach every project of its
+  user the way a PAT does, so keys are project-scoped and stored as hashes.
+- `/e2b` is a second door to the same sandboxes. If it had its own create, a suspended project or a provider whose
+  release gates fail would run sandboxes through it, so it calls the native gate, quota and create (proved by
+  `test/integration/sandbox_e2b_test.go`, which fails with the gate calls removed).
+- autoPause, autoResume, templates builds, snapshots and MCP are refused with 400 or 404 instead of being accepted and
+  ignored: without pause (SB7) an autoPause sandbox would be deleted at its timeout and its files lost.
+
+**Diagrams updated:** `c1-context.md` (registry images), `c2-containers.md` (API box, sandbox cluster row), `c3-components.md` (sandbox diagram: E2B API and envd; E2B component row).
+
 ## 2026-11-08: Sandbox ports in public: sandbox-proxy with TLS, entry appliance, wildcard certificate, wake (SB4)
 
 **What changed**

@@ -14,8 +14,10 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 > sandboxes on a suspension and on project deletion, and lets an operator create a sandbox provider, which goes live
 > only while its three release gates hold. SB4 (section 4) publishes sandbox ports at
 > `https://<port>-<id>.<domain>`: a platform HAProxy appliance passes TCP 443 to `sandbox-proxy`, where TLS ends with
-> a wildcard certificate issued on the services cluster. Not yet: the E2B-compatible API and keys (SB5), templates,
-> snapshots and pause (SB6-SB7, so the wake endpoint has nothing to resume yet), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
+> a wildcard certificate issued on the services cluster. SB5 (section 5) adds the E2B-compatible API at `/e2b` with
+> project-scoped sandbox API keys, envd in every sandbox and the built-in templates `base` and `code-interpreter-v1`;
+> what of E2B does not work is in [e2b-compat.md](e2b-compat.md). Not yet: template builds, snapshots and pause
+> (SB6-SB7, so the wake endpoint has nothing to resume yet), MCP gateway (SB8), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
 > and decisions: the sandbox plan (owner document, not in this repository).
 
 ## 0. SB0 lab spike (2026-11-07)
@@ -908,3 +910,92 @@ prefers the other two workers; a gVisor pod pinned to the system node stayed Pen
 manifest passed `kubectl apply --dry-run=server`. MetalLB's speaker ran on the two old workers only (SB0's MetalLB
 values predate `speakerTolerations`), which is why stage 55 now sets it. The node group and the probes were removed
 afterwards. Not repeated end to end: the full entry path with the proxy on a system node, and wake (now off).
+
+## 5. The E2B-compatible API (SB5)
+
+The stock E2B SDKs (`e2b`, `e2b-code-interpreter`) work against a sandbox provider that runs envd under a sandbox
+domain. Feature by feature, what works, what differs and what does not: [e2b-compat.md](e2b-compat.md).
+
+```
+SDK ──REST, X-API-Key──► proxcloud-api /e2b/*  (E2B_API_URL=https://<api host>/e2b)
+ │                          └── same gate, quota and create as the native API ──► Sandbox CR on the sandbox cluster
+ └──HTTPS──► https://<port>-<id>.<domain> ──► entry appliance ──► sandbox-proxy (section 4) ──► pod:49983 (envd)
+```
+
+### 5.1 Keys
+
+A sandbox API key is `e2b_` and 40 hex digits. It belongs to one project and acts as the member who created it; every
+call checks again that this member may manage cloud resources in the project, so removing the member stops the key.
+Only its SHA-256 is stored (table `sandbox_api_keys`, the hash is the id): a database read never yields a usable key.
+The client console's Sandboxes > API keys tab, or `GET`/`POST`/`DELETE /api/v1/project/{id}/sandbox-api-keys[/{keyId}]`,
+lists (name, hint, created, last used), mints (the key is shown once) and revokes keys; a revoked key answers 401 at
+once. A PAT (`pk.sk`) is not accepted here: it reaches every project of its user (D8).
+
+### 5.2 One door more, the same checks
+
+`/e2b/*` is public in `pkg/auth`; its own gate resolves the key. Create, `POST .../timeout`, and `refreshes` or
+`connect` that move the end later call the native `sandboxUsageGate` (a deleting or DISABLED project 409, a suspended
+billing profile 403, a DISABLED provider or a release gate that does not hold 503) and the create carries the project
+quota (429), then creates the sandbox and its row the native API does, so billing, suspension, teardown and the
+cross-project checks are the same. List, get, logs and kill stay open, as on the native API. A create returns once the
+sandbox is ready (envd up, the template's ready command passed), at most 50 s, and records the start on the row then,
+so a sandbox only the E2B API ever touched is billed from that moment. `test/integration/sandbox_e2b_test.go` covers
+each gate on each of these routes, and fails with the gate calls taken out.
+
+### 5.3 envd in the sandbox
+
+With `config.sandbox.envd: true` and a `domain` (the admin form's "E2B domain"; installer stage 60 sets both when
+`sandbox.domain` is set), every sandbox mounts `/opt/proxcloud-sandbox/bin` from its node read-only at `/.proxcloud`
+and runs `/.proxcloud/sandbox-init` as PID 1: it creates the template's user if the image has none, starts envd
+(`-isnotfc`, port 49983), posts envd's `/init` over localhost with the sandbox's env, user, workdir and access token,
+runs the template's start command (as root with `startAsRoot`), marks the pod ready once the ready command exits 0,
+restarts envd if it dies, and relays ports bound to localhost to the pod address. The two binaries come from
+`proxcloud-sandbox-runtime` (`deploy/sandbox-runtime.Dockerfile`: envd built unmodified from e2b-dev/infra `e85b9f5`,
+Apache-2.0, notice in the image), which `node-setup`'s init container copies to every node (stage 55 pins its tag).
+
+### 5.4 Built-in templates
+
+Until template builds (SB6) the provider offers only the templates of its `config.sandbox.templates`. The E2B SDKs ask
+for `base` (`Sandbox.create()`) and `code-interpreter-v1` (`e2b_code_interpreter.Sandbox.create()`).
+`deploy/templates/build.sh` builds both (`PUSH=1 REGISTRY=ghcr.io/mutex-solutions TAG=<tag>`, prints each reference
+with its digest; SB6a moves this into a CI workflow):
+
+| Template | Image | Config |
+|---|---|---|
+| `base` | `sandbox-base`: E2B's base image plus user `user` with passwordless sudo | `"user": "user", "workdir": "/home/user"`, 1-2 vCPU / 1 GiB |
+| `code-interpreter-v1` | `sandbox-code-interpreter`: Jupyter and E2B's code-interpreter server on :49999 (Python, JavaScript, Bash kernels) | `"startCmd": "/root/.jupyter/start-up.sh", "startAsRoot": true, "readyCmd": "curl -fsS localhost:49999/health", "user": "user", "workdir": "/home/user"`, 2 vCPU / 2 GiB |
+
+The code interpreter's start counts towards the create's 50 s: at 1 vCPU on the nested lab it took 37-40 s on an idle
+node and missed the limit when its node was busy, so offer it at 2 vCPU.
+
+### 5.5 Measured on the lab (2026-11-08)
+
+A compose stack on this branch (`pc-sb5`, scheduler off, jobs by trigger) with its own Proxmox provider (pool prefix
+`pc5-`, the SB0 workers' pool, `config.sandbox.proxy` naming its entry), a sandbox provider with envd under a lab
+domain, two tenants with a key each, the SDKs on the workstation. The SB0 cluster (two workers, 2 vCPU / 3 GiB each)
+got the runtime installed by the runtime image run as node-setup's init container would, the template and proxy images
+loaded into each node's containerd (the workers reach no lab registry), a `sandbox-proxy` with a lab CA's wildcard
+certificate and an entry appliance VM shaped as stage 56 builds it in a scratch pool; the stack's sync fenced the
+workers with the entry rule and pushed the appliance's HAProxy config. Lab deviations: no `sandbox-system` node group
+on SB0, so the proxy ran on a worker; the client reached the appliance through a lab host forward.
+
+- Release check: all three gates held; provider set `PUBLIC`.
+- `tests/e2b-compat/compat.py` with the stock `e2b` 2.63.0 and `e2b-code-interpreter` 2.11.9: all checks pass. Create of
+  `base` in about 9 s; commands as `user` in `/home/user` with `envVars`, streamed output, exit code, background process
+  listed and killed; `python3` run; files written, read, listed, binary round trip; a port served at
+  `https://8000-<id>.<domain>` through the appliance and the proxy; `set_timeout`, `get_info` with metadata, list by
+  metadata, `connect` from a second client; `allow_internet_access=False` blocks egress, the default reaches the
+  internet, 169.254.169.254 stays unreachable; kill, and the port answers 502 afterwards. Code interpreter: create in 37 s,
+  `run_code` result `42`, stdout and stderr, `ZeroDivisionError`.
+- Other project's key: `connect` 404, list empty, kill refused (the sandbox kept running). Revoked key: 401 on list and
+  create at once, the other project's key unaffected; no key or a PAT: 401.
+- Provider `DISABLED`: E2B create 503, list 200; back to `PUBLIC`.
+- Client console (headless browser): API keys tab, key shown once, listed by hint only, works (200), revoked (401).
+  Admin console: the provider's "E2B domain" field.
+- MCP client toolset as the tenant: `create_sandbox`, `list_sandboxes` (RUNNING), `exec_in_sandbox` (`42`,
+  `4.19.0-gvisor`), `get_sandbox_logs`, `set_sandbox_timeout`, `delete_sandbox`. On the compose stack the admin and client
+  realms are one, so the check ran with the admin issuer moved off it for the run.
+- The keys table holds hashes, names and hints only. Ended E2B sandboxes are archived with their start.
+- Found: another drill fencing the same pool with a different provider config rolled the workers to its generation
+  while this ran; the fence gate then failed (503 on create) until this stack's sync ran again. Two portals must not
+  fence one sandbox pool.

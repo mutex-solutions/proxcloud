@@ -148,6 +148,7 @@ pc_defaults:
     enabled: false
     pool: proxcloud-sandbox
     token: sandbox               # capmox@pve!<token>, the cluster's CAPMOX credential; secret in generated/token-<token>
+    runtime_image: ""            # envd + sandbox-init for node-setup; default <images.registry>/proxcloud-sandbox-runtime:<release>
     storage: ""                  # boot disks; default: services.storage
     iso_storage: ""              # bootstrap ISOs, node-local only; default: services.iso_storage
     network:
@@ -201,7 +202,8 @@ pc_defaults:
       public: {bridge: "", vlan: 0, address: "", gateway: ""}  # address as CIDR; the record and the internet side
     # The sandbox provider stage 60 registers (first run only; the console owns it afterwards). Templates are the only
     # images offered; a site's templates replace this list instead of merging into it. limits empty = the portal's
-    # defaults (internal/cloud/sandbox/config.go).
+    # defaults (internal/cloud/sandbox/config.go). With a domain the provider runs envd and offers the E2B API; the
+    # E2B SDKs start `base` and `code-interpreter-v1` (images from deploy/templates/build.sh, docs/managed-sandbox.md §5.4).
     templates:
       python: {image: "python:3.12-slim", cpu: 1, memoryGiB: 2, description: Python 3.12}
     limits: {}

@@ -21,6 +21,8 @@ export type SandboxFormState = {
   proxmoxServiceId: string
   // One template per line: `name=image cpu memoryGiB [description…]`
   templates: string
+  // The E2B API's sandbox domain (<port>-<id>.<domain> through sandbox-proxy); empty = no E2B API (envd off).
+  e2bDomain: string
   maxCpu: string
   maxMemoryGiB: string
   maxTimeoutSeconds: string
@@ -41,6 +43,7 @@ export const emptySandboxForm: SandboxFormState = {
   kubeconfig: "",
   proxmoxServiceId: "",
   templates: "",
+  e2bDomain: "",
   maxCpu: "",
   maxMemoryGiB: "",
   maxTimeoutSeconds: "",
@@ -81,8 +84,20 @@ function compact(o: Record<string, number | undefined>) {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined))
 }
 
+// mergeTemplates keeps what the one-line form cannot show (startCmd, readyCmd, user, workdir, startAsRoot, gpu) on a
+// template still listed under the same name, so editing the list never strips code-interpreter's start command.
+function mergeTemplates(stored: Record<string, any> | undefined, parsed: Record<string, TemplateOffer>) {
+  const out: Record<string, any> = {}
+  for (const [name, t] of Object.entries(parsed)) {
+    const { description: _drop, ...keep } = (stored?.[name] ?? {}) as Record<string, any>
+    out[name] = { ...keep, ...t }
+  }
+  return out
+}
+
 export function sandboxConfigBlocks(f: SandboxFormState) {
   const region = f.region.trim()
+  const domain = f.e2bDomain.trim()
   return {
     provider: "sandbox",
     region,
@@ -91,7 +106,9 @@ export function sandboxConfigBlocks(f: SandboxFormState) {
     sandbox: {
       ...f.storedSandbox,
       proxmoxServiceId: f.proxmoxServiceId.trim(),
-      templates: parseTemplates(f.templates) ?? {},
+      templates: mergeTemplates(f.storedSandbox.templates, parseTemplates(f.templates) ?? {}),
+      envd: domain !== "",
+      domain,
       limits: compact({
         maxCpu: num(f.maxCpu),
         maxMemoryGiB: num(f.maxMemoryGiB),
@@ -135,6 +152,7 @@ export function sandboxFormFromService(svc: { name?: string; status?: string; co
     region: s(c.region),
     proxmoxServiceId: s(sb.proxmoxServiceId),
     templates,
+    e2bDomain: sb.envd ? s(sb.domain) : "",
     maxCpu: s(l.maxCpu),
     maxMemoryGiB: s(l.maxMemoryGiB),
     maxTimeoutSeconds: s(l.maxTimeoutSeconds),
@@ -227,6 +245,14 @@ export function SandboxProviderForm({ form, setForm, mode = "create" }: {
         />
         <p className="text-xs text-muted-foreground">Only these images are offered. Customers may raise CPU and memory up to the limits below.</p>
       </div>
+      <Field
+        id="sb-e2b"
+        label="E2B domain"
+        value={form.e2bDomain}
+        onChange={set("e2bDomain")}
+        placeholder="example-sandbox.net"
+        hint="The sandbox domain sandbox-proxy serves (installer sandbox.domain). Set: sandboxes run E2B's envd and the E2B-compatible API at /e2b answers for this provider. Empty: off."
+      />
       <div className="grid gap-4 sm:grid-cols-3">
         <Field id="sb-maxcpu" label="Max vCPU per sandbox" value={form.maxCpu} onChange={set("maxCpu")} placeholder="8" />
         <Field id="sb-maxmem" label="Max GiB per sandbox" value={form.maxMemoryGiB} onChange={set("maxMemoryGiB")} placeholder="32" />

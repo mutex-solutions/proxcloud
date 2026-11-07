@@ -74,9 +74,11 @@ kubectl -n sandbox-system annotate svc sandbox-proxy metallb.io/loadBalancerIPs=
 Kept by `internal/cloud/sandbox` (`RuntimeHostDir`, `RuntimeMountPath`, `LabelTenant`):
 
 - Tenant namespaces carry `proxcloud.io/tenant=true`; the guardrail selects on it.
-- With envd on (SB5), sandbox pods mount `/opt/proxcloud-sandbox/bin` read-only at `/.proxcloud` and run
-  `/.proxcloud/sandbox-init` as PID 1. The init container that installs envd and `sandbox-init` there comes with the
-  runtime image in SB5; until then the provider runs sandboxes as plain gVisor pods.
+- With envd on (`config.sandbox.envd` and a `domain`, SB5), sandbox pods mount `/opt/proxcloud-sandbox/bin` read-only at
+  `/.proxcloud` and run `/.proxcloud/sandbox-init` as PID 1. `node-setup.yaml`'s init container installs envd and
+  `sandbox-init` there from the `proxcloud-sandbox-runtime` image (stage 55 pins its tag; by hand, `kubectl -n
+  sandbox-system set image ds/node-setup sandbox-runtime=ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:<release>`).
+  Without envd the provider runs sandboxes as plain gVisor pods.
 - GPU placement uses `node-restriction.kubernetes.io/proxcloud-gpu` (SB9), the one label prefix a kubelet cannot set on
   its own Node once NodeRestriction is on.
 

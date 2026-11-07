@@ -12,6 +12,7 @@ ProxCloud exposes three HTTP surfaces, all mounted on the same router
 | Customer API | `/api/v1` | OIDC JWT (`clients` realm) | camelCase | `CustomHttpResponse` (`{data,errors,paging,...}`) |
 | Admin API | `/admin-api/v1` | SigV4 **or** admin-api-realm JWT | snake_case | `{data}` / `{data,next_marker}` / `{error}` |
 | MCP | `/mcp` | OIDC JWT **or** `pk.sk` API key | MCP tools | JSON tool results |
+| E2B-compatible sandboxes | `/e2b` | a project's sandbox API key (`X-API-Key`) | E2B's camelCase | E2B's `{code, message}` errors; [e2b-compat.md](e2b-compat.md), document at `/e2b/openapi.json` |
 
 All three are described in `docs/auth.md`. The management port (`:8081`, separate
 from the API port `:8080`) additionally serves health probes and operator debug

@@ -13,8 +13,10 @@
 # a global IPv6 address or an IPv6 default route before it installs anything: such a node never gets
 # runsc, its node-setup pod never turns Ready, and check-ipv4-only.sh fails.
 #
-# Not here yet: the init container that copies envd + sandbox-init into /opt/proxcloud-sandbox/bin
-# (the runtime image is built in SB5), and the NVIDIA toolkit + nvproxy branch for GPU nodes (SB9).
+# The init container installs envd (E2B's in-sandbox agent) and sandbox-init into /opt/proxcloud-sandbox/bin, which
+# every sandbox pod of a provider with `envd` mounts read-only at /.proxcloud (SB5, docs/managed-sandbox.md §5). Its
+# image is CI's proxcloud-sandbox-runtime (deploy/sandbox-runtime.Dockerfile); pin a release tag or digest here.
+# Not here yet: the NVIDIA toolkit + nvproxy branch for GPU nodes (SB9).
 # ponytail: setup runs once per pod start; bumping RUNSC_VERSION = edit + rollout restart.
 apiVersion: v1
 kind: Namespace
@@ -82,6 +84,15 @@ spec:
       hostPID: true
       priorityClassName: system-node-critical
       tolerations: [{operator: Exists}]
+      initContainers:
+      # The copy is atomic (tmp + mv), so a rollout never hands a starting sandbox a half-written binary; running ones
+      # keep theirs.
+      - name: sandbox-runtime
+        image: ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:latest
+        env: [{name: DEST, value: /host/opt/proxcloud-sandbox/bin}]
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+        volumeMounts: [{name: sandbox-runtime, mountPath: /host/opt/proxcloud-sandbox}]
       containers:
       - name: setup
         image: busybox:1.37
@@ -106,3 +117,5 @@ spec:
       volumes:
       - name: setup
         configMap: {name: node-setup}
+      - name: sandbox-runtime
+        hostPath: {path: /opt/proxcloud-sandbox, type: DirectoryOrCreate}

@@ -22,11 +22,13 @@ import { Label } from "@/components/ui/label"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
 import { useLocations, useProjectId, useProjectServices } from "@/lib/hooks"
 import type { CloudResource, SandboxExecResult, SandboxLimits, SandboxTemplate } from "@/lib/types"
+import { ApiKeysTab } from "./SandboxApiKeys"
 
 const TYPE = "SANDBOX"
 const NO_GPU = "none"
@@ -56,13 +58,14 @@ function useSandboxData(pid: string) {
     templates: svc?.sandboxTemplates ?? [],
     gpuModels: svc?.sandboxGpuModels ?? [],
     limits: svc?.sandboxLimits ?? {},
+    e2b: !!svc?.sandboxE2B,
   }
 }
 
 export default function SandboxesPage() {
   const pid = useProjectId()
   const qc = useQueryClient()
-  const { scope, loading, templates, gpuModels, limits } = useSandboxData(pid)
+  const { scope, loading, templates, gpuModels, limits, e2b } = useSandboxData(pid)
   const list = useQuery({
     queryKey: ["cloud", pid, TYPE],
     queryFn: () => apiFetch<CloudResource[]>(`/project/${pid}/resource?type=${TYPE}`, { method: "POST", cloud: scope }),
@@ -232,16 +235,27 @@ export default function SandboxesPage() {
           </>
         }
       />
-      {list.data && list.data.length === 0 ? (
-        <EmptyState
-          icon={Cpu}
-          title="No sandboxes"
-          hint="Start one to run code in an isolated environment."
-          action={<Button onClick={() => setCreateOpen(true)}><Plus aria-hidden="true" /> New sandbox</Button>}
-        />
-      ) : (
-        <DataTable columns={columns} data={list.data ?? []} isLoading={list.isLoading} error={list.error as Error | null} />
-      )}
+      <Tabs defaultValue="sandboxes">
+        <TabsList>
+          <TabsTrigger value="sandboxes">Sandboxes</TabsTrigger>
+          <TabsTrigger value="api-keys">API keys</TabsTrigger>
+        </TabsList>
+        <TabsContent value="sandboxes" className="grid gap-4">
+          {list.data && list.data.length === 0 ? (
+            <EmptyState
+              icon={Cpu}
+              title="No sandboxes"
+              hint="Start one to run code in an isolated environment."
+              action={<Button onClick={() => setCreateOpen(true)}><Plus aria-hidden="true" /> New sandbox</Button>}
+            />
+          ) : (
+            <DataTable columns={columns} data={list.data ?? []} isLoading={list.isLoading} error={list.error as Error | null} />
+          )}
+        </TabsContent>
+        <TabsContent value="api-keys">
+          <ApiKeysTab pid={pid} e2b={e2b} />
+        </TabsContent>
+      </Tabs>
 
       <CreateSandboxDialog
         open={createOpen}
