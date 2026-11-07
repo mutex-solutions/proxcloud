@@ -159,7 +159,7 @@ func importStoreWarnings(ctx context.Context, cc *pve.Client, store string) []st
 	}
 	out := []string{}
 	for _, m := range missing {
-		out = append(out, "Token lacks "+m+": image import needs it, or downloaded files stay on the store (see docs/proxmox-permissions.md)")
+		out = append(out, "Token lacks "+m+": image import needs it, or uploaded files stay on the store (see docs/proxmox-permissions.md)")
 	}
 	return out
 }

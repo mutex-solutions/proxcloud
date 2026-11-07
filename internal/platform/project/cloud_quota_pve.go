@@ -105,6 +105,10 @@ func (h *Handler) pveQuotaUsage(ctx context.Context, projectID, svcID string) (p
 	if err != nil {
 		return pveQuotaDemand{}, err
 	}
+	return pveUsageOf(rows, svcID), nil
+}
+
+func pveUsageOf(rows []cloud.CloudResource, svcID string) pveQuotaDemand {
 	var u pveQuotaDemand
 	for i := range rows {
 		if rows[i].ServiceID != svcID {
@@ -125,7 +129,12 @@ func (h *Handler) pveQuotaUsage(ctx context.Context, projectID, svcID string) (p
 			if vol, ok := rows[i].Data["volume"].(map[string]any); ok {
 				u.DiskGb += intAny(vol["size"])
 			}
+		case cloud.TypeImage:
+			// A project template is a disk on the provider's storage. Its size is in bytes.
+			if img, ok := rows[i].Data["image"].(map[string]any); ok {
+				u.DiskGb += gibUp(int64(intAny(img["size"])))
+			}
 		}
 	}
-	return u, nil
+	return u
 }

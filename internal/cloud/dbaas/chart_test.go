@@ -223,7 +223,7 @@ func TestChartBackupAndRestore(t *testing.T) {
 	cfg := testConfig()
 	cfg.Backup = BackupConfig{Endpoint: "http://s3.example.com:9000", Bucket: "dbaas-backups", Prefix: "backups", Region: "us-east-1", PathStyle: true, AccessKey: "a", SecretKey: "s"}
 	spec := chartSpec(EnginePostgreSQL, 3)
-	spec.RestoreFrom = &RestoreSource{SourceID: "std-0abc1234", TargetTime: "2026-11-01T09:30:00Z"}
+	spec.RestoreFrom = &RestoreSource{SourceID: "pc-d-0abc1234", TargetTime: "2026-11-01T09:30:00Z"}
 	docs := renderChart(t, BuildValues(cfg, spec))
 
 	byKindName := map[string]map[string]any{}
@@ -247,7 +247,7 @@ func TestChartBackupAndRestore(t *testing.T) {
 	if restoreStore == nil {
 		t.Fatalf("no recovery ObjectStore rendered")
 	}
-	if got := digStr(restoreStore, "spec", "configuration", "destinationPath"); got != "s3://dbaas-backups/backups/std-0abc1234" {
+	if got := digStr(restoreStore, "spec", "configuration", "destinationPath"); got != "s3://dbaas-backups/backups/pc-d-0abc1234" {
 		t.Errorf("recovery path = %q (must read the SOURCE's folder)", got)
 	}
 	cluster := byKindName[`"Cluster"/`+spec.ID]
@@ -259,7 +259,7 @@ func TestChartBackupAndRestore(t *testing.T) {
 		`"isWALArchiver":true`,
 		`"barmanObjectName":"` + spec.ID + `-store"`,
 		`"barmanObjectName":"` + spec.ID + `-restore-store"`,
-		`"serverName":"std-0abc1234"`,
+		`"serverName":"pc-d-0abc1234"`,
 		`"targetTime":"2026-11-01T09:30:00Z"`,
 	} {
 		if !strings.Contains(j, want) {

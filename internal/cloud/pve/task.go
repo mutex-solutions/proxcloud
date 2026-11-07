@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -136,4 +137,14 @@ func (c *Client) NodeTasks(ctx context.Context, node string, since int64, limit 
 		return nil, err
 	}
 	return out, nil
+}
+
+// RestoreRunning reports a restore task running on a VM. A restore is the token's own task, so it needs no Sys.Audit to see.
+func (c *Client) RestoreRunning(ctx context.Context, node string, vmid int) (bool, error) {
+	form := formVals{"source": "active", "vmid": itoa(vmid), "typefilter": "qmrestore"}.values()
+	var out []NodeTask
+	if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/tasks", form, &out); err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(out, func(t NodeTask) bool { return t.EndTime == 0 }), nil
 }

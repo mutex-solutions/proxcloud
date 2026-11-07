@@ -186,7 +186,8 @@ Typed accessors used by the rest of the code:
 | `PVEStorageClasses()` / `PVEEffectiveStorageClass(id)` | `storageClasses` | per-storage class override and installer suggestion; effective class = valid override, else detected |
 | `PVEStorageHeadroomPct()` | `storageHeadroomPct` (default 10, valid 0–99) | free space kept on a storage when placing a disk |
 | `PVEBackupStorage()` | `backupStorage` | shared store of server backups (NFS, CephFS, PBS); absent = no backups offered |
-| `PVEImportStorage()` | `importStorage` | store with `import` content customer images are downloaded to; absent = no image import offered |
+| `PVEImportStorage()` | `importStorage` | store with `import` content customer images are streamed to; absent = no image import offered |
+| `PVEImportUnknownSizeMaxGiB()` | `importUnknownSizeMaxGiB` | how large an image whose server states no size may get, spooled on the portal; absent = such a URL is refused |
 | `PVEVolumeProfileFunc()` | `storageProfiles`, `capabilities`, `storageClasses` | resolves each synced disk's own profile and storage class |
 | `PVETemplates()`, `PVEImageCatalog()` | `templates` | OS templates servers are cloned from: discovered from cluster tags ([images/README.md](../images/README.md)); an entry with `vmid` + `node` pins one, any other entry overlays `name`, `osDistro`, `minDiskGb` |
 | `PVEGPUAliases()` / `PVEGPUMappingsFor(alias)` | `gpus` | PCI mapping ids per GPU alias |
@@ -389,23 +390,46 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   per server; 409 when the store lacks room for the server's provisioned disks plus `storageHeadroomPct`. Restore runs
   in place: PVE destroys the VM's disks and rebuilds them and the config from the archive, and a running server comes
   back running. 409 up front, with nothing stopped, on a protected server, when the token lacks the privilege, when a
-  disk (a detached one too) is not in the archive, or when the NICs changed since the backup. A failed restore task
-  after that point leaves the VM without disks until another restore. Backups go with their server, on delete and on
-  project teardown, and a failure stops either: PVE lets the token delete an archive only through `VM.Backup` on its
-  VM. Keeping a server's state past its life is what an image is for. An archive of a VM destroyed outside the portal
+  volume (a detached one too) is not in the archive, when what the restore would produce breaks the project's quota
+  (vCPUs, RAM, disk, GPUs), or when the NICs changed since the backup. A volume counts as in the archive when the archive
+  names its volid and its VOLUME row is older than the backup: PVE reuses disk names, so a disk added after another left
+  can carry that one's name. The boot disk always counts, so a restore can roll back a rebuild. A disk with no row before
+  a restore dates from that backup (`dataSince` on the row), so the same archive can restore it again. A retype keeps the
+  row but dates its name from the move (`externalIdSince`), since the move can land on the name of a disk that left: a backup
+  older than that does not hold it. A disk that left and came back, or was retyped and back, is refused too, though the
+  archive has an older copy: move it away or take a new backup. The checks run again once the server has stopped. VOLUME rows
+  wait out a restore (PVE cuts the config to `{memory: 128}` while its task runs), so the bill and the row's age carry on. A
+  failed restore task after that point leaves the VM with that cut-down config and its disks destroyed: their rows are
+  archived and the bill for them stops, the task's answer says so (409), and another restore brings the server back (it
+  stays stopped). What a killed task had already written is freed right after, and by that retry or the server's delete if
+  that fails. Such a retry skips the volume and NIC checks, and its quota check counts the server by its rows. Backups go with their
+  server, on delete and on project teardown, and a failure stops either: PVE lets the token delete an archive only through
+  `VM.Backup` on its VM, so on a server delete they go after protection is off, the volumes have moved and a hard stop has
+  worked, just before the destroy. A running restore refuses the delete, and so does a store that cannot list them, before anything changes. Keeping a server's state past its life is what an image is for. An archive of a VM destroyed outside the portal
   disappears from the token's listing (PVE filters by the same check), so it stays on the store until an operator
   removes it; its notes name the project. Backups are not billed yet.
 - **Image import** (`POST /project/{id}/cloud` `IMAGE {name, url, format?, checksum?, checksumAlgorithm?, profile?}`, offered
-  when `config.importStorage` names a store with `import` content): the portal probes the URL, a node downloads it with
-  `download-url`, a VM takes it with `import-from` on the profile's boot storage, and it becomes the project's template.
-  The probe (`pkg/safeurl`) allows http and https without credentials, and refuses any host on the redirect chain that
-  resolves to a non-public address or one in `network.blockedCidrs`, so list public management ranges there; the portal
-  needs internet access for it. The node gets the final URL. `format` is `qcow2` or `vmdk`, not raw: PVE checks those two
-  as untrusted and refuses a backing file, while any bytes are a valid raw image, so a name that resolved differently on
-  the node could otherwise land an internal response on a tenant's disk. A disk over 200 GiB is 409. The client waits;
-  if it gives up the import finishes and the sampler adds the image. Nothing is left on a failure except, with no
-  `Datastore.Allocate` on the store, the downloaded file (Test connection warns, see `docs/proxmox-permissions.md`). A
-  template on local storage clones on its own node only, like any project image. Billed as `image`.
+  when `config.importStorage` names a store with `import` content): the portal fetches the URL and streams it to PVE's
+  upload API, a VM takes it with `import-from` on the profile's boot storage, and it becomes the project's template. **A
+  node never sees the URL.** PVE's `download-url` follows redirects with no way to turn that off, so a server answering the
+  portal with an image and the node with a 302 would reach the node's network, and no check in the portal could see it.
+  The fetch (`pkg/safeurl`) allows http and https without credentials, and refuses, at connect time, any address that is
+  not globally routable or is in `network.blockedCidrs`, so list public management ranges there; the portal needs
+  internet access for it, and carries the bytes. `format` is `qcow2` or `vmdk`, not raw: PVE checks those two as untrusted
+  and refuses a backing file on upload, and no check can tell a raw disk from any other bytes. Limits: one import at a
+  time per project; a disk over 200 GiB is 409; the disk counts against `diskGb` (project images count there now, from a
+  snapshot too), checked on the file's size before the upload and on the disk's virtual size after it; room on the
+  import store and, for the disk, on the profile's storage, both with `storageHeadroomPct`. pveproxy spools an upload to
+  `/var/tmp` on the API node, on any node's behalf, so an image also needs room on that node's root disk or it is 409, and
+  only one upload runs at a time per provider (409 for the others), since each passing the room check on its own could fill
+  that disk together. Because that holds up other projects, a source that sends nothing for a minute, or averages under
+  2 MiB/s past a two-minute grace, ends the import with a 409 and lets go at once. A
+  URL whose server states no size is refused unless `config.importUnknownSizeMaxGiB` allows it: then it is spooled to the
+  portal's temporary directory up to that limit, first. The client waits; if it gives up the import finishes and the
+  sampler adds the image, and whatever ends an import, the portal waits for the upload's task on the node before it lets go of
+  the project's lock and removes the file. Nothing is left on a failure except, with no `Datastore.Allocate` on the store, the uploaded
+  file (Test connection warns, see `docs/proxmox-permissions.md`). A template on local storage clones on its own node
+  only, like any project image. Billed as `image`.
 - **Spread groups** (`spreadGroup`, `spreadStrict` on create): a `grp-<name>` tag on the VM. The scheduler
   prefers the node with the fewest members of the group in the project; strict refuses a node that has one.
   At create time only: nothing moves a member later. PVE 9's own affinity rules are HA-only, and strict.

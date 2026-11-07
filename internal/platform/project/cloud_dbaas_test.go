@@ -25,7 +25,7 @@ func TestDbaasSpecFromData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(spec.ID, "std-") || len(spec.ID) != 12 {
+	if !strings.HasPrefix(spec.ID, "pc-d-") || len(spec.ID) != 13 {
 		t.Fatalf("id = %q", spec.ID)
 	}
 	if spec.DisplayName != "orders" || spec.Engine != "postgresql" || spec.Version != "17" ||
@@ -140,7 +140,7 @@ func TestDbaasSpecFromDataDay2Fields(t *testing.T) {
 		"replicas": float64(3), "cpu": float64(2), "memoryGiB": float64(8), "storageGiB": float64(100),
 		"dashboards": true, "readEndpoint": true,
 		"sso":         map[string]any{"connectUrl": "https://idp.example.com/.well-known/openid-configuration", "clientId": "dash"},
-		"restoreFrom": map[string]any{"sourceDatabaseId": " std-0abc1234 ", "targetTime": "2026-11-01T09:30:00Z", "backupName": "b1"},
+		"restoreFrom": map[string]any{"sourceDatabaseId": " pc-d-0abc1234 ", "targetTime": "2026-11-01T09:30:00Z", "backupName": "b1"},
 	}
 	spec, err := dbaasSpecFromData("p1", d)
 	if err != nil {
@@ -149,10 +149,10 @@ func TestDbaasSpecFromDataDay2Fields(t *testing.T) {
 	if !spec.DashboardsEnabled || !spec.ReadEndpoint || spec.SSO["clientId"] != "dash" {
 		t.Fatalf("spec = %+v", spec)
 	}
-	if r := spec.RestoreFrom; r == nil || r.SourceID != "std-0abc1234" || r.TargetTime != "2026-11-01T09:30:00Z" || r.BackupName != "b1" || r.PITR {
+	if r := spec.RestoreFrom; r == nil || r.SourceID != "pc-d-0abc1234" || r.TargetTime != "2026-11-01T09:30:00Z" || r.BackupName != "b1" || r.PITR {
 		t.Fatalf("restoreFrom = %+v (PITR is decided server-side, never by the customer)", r)
 	}
-	for k, v := range map[string]any{"dashboards": "yes", "readEndpoint": "yes", "restoreFrom": "std-1", "sso": []any{}} {
+	for k, v := range map[string]any{"dashboards": "yes", "readEndpoint": "yes", "restoreFrom": "pc-d-1", "sso": []any{}} {
 		bad := map[string]any{"name": "x", "engine": "postgresql", "version": "17", "replicas": float64(1), "cpu": float64(1), "memoryGiB": float64(1), "storageGiB": float64(1)}
 		bad[k] = v
 		if _, err := dbaasSpecFromData("p1", bad); err == nil {

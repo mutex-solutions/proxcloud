@@ -348,6 +348,20 @@ func (p *VolumeSyncProvider) list(ctx context.Context, skip func(ClusterResource
 			}
 			continue
 		}
+		if cfg.Str("lock") == "create" {
+			p.unread[r.VMID] = false
+			continue
+		}
+		// A restore cuts the config down for as long as it takes, while /cluster/resources still lists the VM (lab, PVE 9.2).
+		// While its task runs the disks are coming back: a row archived now would stop the bill and lose how old the disk is.
+		// Once no task runs the restore has failed and the disks are gone: their rows go, with their bill, and a later restore
+		// makes new ones. If the node cannot say which, the rows wait for the next pass.
+		if restoreCutDown(cfg) {
+			if running, err := p.svc.C.RestoreRunning(ctx, r.Node, r.VMID); err != nil || running {
+				p.unread[r.VMID] = false
+			}
+			continue
+		}
 		profile := TagValue(cfg.Str("tags"), tagProfilePref)
 		identity := taggedIdentity(cfg.Str("tags"), cfg.Str("lock"))
 		if identity == "" {

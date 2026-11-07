@@ -1,6 +1,6 @@
 {{/*
 Base name for every object this chart renders: the proxcloud resource id
-(std-xxxxxxxx), NOT the release name. internal/cloud/dbaas derives secret and
+(pc-d-xxxxxxxx), NOT the release name. internal/cloud/dbaas derives secret and
 service names from the resource id (ConnectionSecret tuples, <id>-lb), so the
 release name must stay an ArgoCD implementation detail.
 */}}
@@ -343,7 +343,7 @@ app.kubernetes.io/instance: {{ $name }}
 {{- else if eq .Values.engine "valkey" -}}
 {{- /* valkey.io/cluster, the operator's own cluster label — NOT
      app.kubernetes.io/instance, which valkey-operator stamps PER NODE as
-     `<cluster>-<shard>-<node>` (e.g. std-abc12345-0-0). Selecting on the bare
+     `<cluster>-<shard>-<node>` (e.g. pc-d-abc12345-0-0). Selecting on the bare
      cluster id matched no pod, so this Service had zero endpoints and the
      LB fronted nothing. */}}
 valkey.io/cluster: {{ $name }}

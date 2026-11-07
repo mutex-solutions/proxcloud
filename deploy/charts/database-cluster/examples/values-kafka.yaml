@@ -22,7 +22,7 @@ network:
     - 192.0.2.0/24
 proxcloud:
   projectId: 665f1a2b3c4d5e6f77889900
-  resourceId: std-708192a3
+  resourceId: pc-d-708192a3
   displayName: events-bus
 monitoring:
   enabled: false

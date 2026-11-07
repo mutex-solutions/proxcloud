@@ -125,6 +125,17 @@ func TestChangeExternalIDKeepsTheRow(t *testing.T) {
 	if err != nil || got == nil || got.ID != old.ID {
 		t.Fatalf("row = %+v (%v), want id %s", got, err, old.ID)
 	}
+	if got.ExternalIDSince == nil || old.ExternalIDSince == nil {
+		t.Fatalf("the row must record when it took this name: %+v", got)
+	}
+	// A sync's update of the row keeps it, or a retyped disk would look like it always had this name.
+	got.Data = map[string]any{"volume": map[string]any{"size": 5}}
+	if _, err := repo.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := repo.FindByServiceIDAndExternalID(ctx, "svc", "slow:vm-1-disk-1"); after == nil || after.ExternalIDSince == nil {
+		t.Fatalf("a sync's update lost it: %+v", after)
+	}
 	if rows, _ := repo.FindByServiceAndType(ctx, "svc", cloud.TypeVolume); len(rows) != 1 {
 		t.Fatalf("%d rows", len(rows))
 	}
