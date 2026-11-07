@@ -48,7 +48,7 @@ func (c *Client) DeleteAPIToken(ctx context.Context, userid, tokenName string) e
 }
 
 // SetACL grants (or with del revokes) a role on a path for users/tokens.
-// path e.g. "/pool/st-abc123", roles e.g. "PVEVMAdmin".
+// path e.g. "/pool/tp-abc123", roles e.g. "PVEVMAdmin".
 func (c *Client) SetACL(ctx context.Context, path, roles string, tokens []string, del bool) error {
 	form := formVals{
 		"path":   path,
@@ -139,7 +139,7 @@ type PrivCheck struct {
 var PlatformPrivileges = []PrivCheck{
 	// cluster status, PCI scan, datacenter firewall options and the cluster
 	// security groups all check "/" itself (granted with propagate=0).
-	{Path: "/", Privs: []string{"Sys.AccessNetwork", "Sys.Audit", "Sys.Modify"}},
+	{Path: "/", Privs: []string{"Sys.Audit", "Sys.Modify"}},
 	// node firewall options (nftables preflight) and node network list
 	// (management-bridge guard) check /nodes/{node}: PVEAuditor on /nodes.
 	{Path: "/nodes", Privs: []string{"Sys.Audit"}},

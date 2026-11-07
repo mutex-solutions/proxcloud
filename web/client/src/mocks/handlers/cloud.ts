@@ -89,7 +89,7 @@ on("POST /project/:pid/cloud", ({ params, opts }) => {
     const d = body.data ?? {}
     resource.data = {
       database: {
-        id: `std-${id}`, name, engine: d.engine, version: d.version, replicas: d.replicas ?? 1,
+        id: `pc-d-${id}`, name, engine: d.engine, version: d.version, replicas: d.replicas ?? 1,
         cpu: d.cpu, memory_gib: d.memoryGiB, storage_gib: d.storageGiB,
         allowed_cidrs: d.allowedCidrs ?? [],
         status: "PROGRESSING", sync_status: "Progressing", chart_version: "0.1.0",

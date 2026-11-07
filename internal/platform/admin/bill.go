@@ -1,11 +1,13 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -123,24 +125,35 @@ func (h *Handler) billUpdate(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid bill status: must be one of OPEN, SENT, PAID"))
 		return
 	}
-	existing, err := h.repo.FindDoc(r.Context(), billCollection, id)
+	found, err := h.repo.FindDoc(r.Context(), billCollection, id)
 	if httpx.WriteError(w, err) {
 		return
 	}
-	if existing == nil {
+	if found == nil {
 		httpx.WriteError(w, billNotFound(id))
 		return
 	}
-	before := maps.Clone(existing) // snapshot the pre-mutation state for the audit field-diff
-	// Overwrite exactly the four editable fields (drop-first so an omitted/null body
-	// field is cleared rather than left at its old value).
-	for _, k := range []string{"status", "invoiceCurrency", "invoiceGatewayId", "billingProfileId"} {
-		delete(existing, k)
-	}
-	for k, v := range req.setMap() {
-		existing[k] = v
-	}
-	if err := h.repo.ReplaceDoc(r.Context(), billCollection, id, existing); httpx.WriteError(w, err) {
+	var existing, before pgdoc.M
+	err = h.withBillLocks(r.Context(), []string{billProfileID(found), req.BillingProfileID}, func(ctx context.Context) error {
+		var err error
+		if existing, err = h.repo.FindDoc(ctx, billCollection, id); err != nil {
+			return err
+		}
+		if existing == nil {
+			return billNotFound(id)
+		}
+		before = maps.Clone(existing) // snapshot the pre-mutation state for the audit field-diff
+		// Overwrite exactly the four editable fields (drop-first so an omitted/null body
+		// field is cleared rather than left at its old value).
+		for _, k := range []string{"status", "invoiceCurrency", "invoiceGatewayId", "billingProfileId"} {
+			delete(existing, k)
+		}
+		for k, v := range req.setMap() {
+			existing[k] = v
+		}
+		return h.repo.ReplaceDoc(ctx, billCollection, id, existing)
+	})
+	if httpx.WriteError(w, err) {
 		return
 	}
 	// UPDATE audit: field-level before/after diff onto the audit event (the middleware
@@ -150,6 +163,23 @@ func (h *Handler) billUpdate(w http.ResponseWriter, r *http.Request) {
 	after, _ := h.repo.FindDoc(r.Context(), billCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
+}
+
+func billProfileID(doc pgdoc.M) string {
+	id, _ := doc["billingProfileId"].(string)
+	return id
+}
+
+// withBillLocks runs fn holding the profile lock of each profile a bill write touches (two when a bill
+// moves between profiles), so it cannot undo a charge or a payment. A bill is replaced whole, and an
+// open one is rewritten by the charge cron all the time. Sorted, so two moves cannot deadlock.
+func (h *Handler) withBillLocks(ctx context.Context, profileIDs []string, fn func(ctx context.Context) error) error {
+	slices.Sort(profileIDs)
+	for _, id := range slices.Backward(slices.Compact(profileIDs)) {
+		next := fn
+		fn = func(ctx context.Context) error { return h.billing.WithProfileLock(ctx, id, next) }
+	}
+	return fn(ctx)
 }
 
 // isValidBillStatus reports whether s is one of the bill lifecycle statuses (OPEN → SENT → PAID).
@@ -265,8 +295,18 @@ func (h *Handler) billDelete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	// The delete is idempotent (no 404 on a missing id) — the handler returns
 	// success regardless. DeleteDoc returns 0 deleted for a missing id; we ignore the count.
-	if _, err := h.repo.DeleteDoc(r.Context(), billCollection, id); httpx.WriteError(w, err) {
+	found, err := h.repo.FindDoc(r.Context(), billCollection, id)
+	if httpx.WriteError(w, err) {
 		return
+	}
+	if found != nil {
+		err = h.withBillLocks(r.Context(), []string{billProfileID(found)}, func(ctx context.Context) error {
+			_, err := h.repo.DeleteDoc(ctx, billCollection, id)
+			return err
+		})
+		if httpx.WriteError(w, err) {
+			return
+		}
 	}
 	// TODO(audit): write an admin audit event for the bill deletion (DELETE BILL, resourceId=id).
 	httpx.OK(w, "Successful operation")

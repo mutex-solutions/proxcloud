@@ -19,7 +19,7 @@ func TestStopAndDeleteReachAPausedVM(t *testing.T) {
 			}
 		}
 		return fakeRoutes{
-			"GET /api2/json/cluster/resources":                                say(`{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"st-p1","status":"paused","name":"a"}]}`),
+			"GET /api2/json/cluster/resources":                                say(`{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"tp-p1","status":"paused","name":"a"}]}`),
 			"GET /api2/json/nodes/pve1/qemu/101/status/current":               say(`{"data":{"status":"running","qmpstatus":"paused","name":"a"}}`),
 			"POST /api2/json/nodes/pve1/qemu/101/status/shutdown":             note("shutdown"),
 			"POST /api2/json/nodes/pve1/qemu/101/status/stop":                 note("stop"),
@@ -30,7 +30,7 @@ func TestStopAndDeleteReachAPausedVM(t *testing.T) {
 	t.Run("stop", func(t *testing.T) {
 		var calls []string
 		_, c := fakePVE(t, routes(&calls))
-		s := &Service{C: c, PoolPrefix: "st-"}
+		s := &Service{C: c, PoolPrefix: "tp-"}
 		if err := s.PowerAction(context.Background(), "p1", "101", "STOP"); err != nil {
 			t.Fatal(err)
 		}
@@ -43,7 +43,7 @@ func TestStopAndDeleteReachAPausedVM(t *testing.T) {
 		r := routes(&calls)
 		r["GET /api2/json/nodes/pve1/qemu/101/config"] = say(`{"data":{"name":"a","scsi0":"zfs:vm-101-disk-0,size=10G","scsi1":"zfs:vm-101-disk-1,size=1G"}}`)
 		_, c := fakePVE(t, r)
-		s := &Service{C: c, PoolPrefix: "st-"}
+		s := &Service{C: c, PoolPrefix: "tp-"}
 		err := s.DetachVolume(context.Background(), "p1", 101, "zfs:vm-101-disk-1")
 		if !strings.Contains(fmt.Sprint(err), "Stop it first") {
 			t.Fatalf("err %v", err)
@@ -52,7 +52,7 @@ func TestStopAndDeleteReachAPausedVM(t *testing.T) {
 	t.Run("delete", func(t *testing.T) {
 		var calls []string
 		_, c := fakePVE(t, routes(&calls))
-		s := &Service{C: c, PoolPrefix: "st-"}
+		s := &Service{C: c, PoolPrefix: "tp-"}
 		if err := s.DeleteServer(context.Background(), "p1", "101"); err != nil {
 			t.Fatal(err)
 		}
@@ -74,7 +74,7 @@ func TestPausedVMNeedsStoppingBeforeItsConfigChanges(t *testing.T) {
 			}
 		}
 		return fakeRoutes{
-			"GET /api2/json/cluster/resources":                                say(`{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"st-p1","status":"running","name":"a"},{"type":"qemu","vmid":900,"node":"pve1","pool":"st-p1","status":"stopped","name":"pc-holder-pve1","tags":"pc-holder;proxcloud"}]}`),
+			"GET /api2/json/cluster/resources":                                say(`{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"tp-p1","status":"running","name":"a"},{"type":"qemu","vmid":900,"node":"pve1","pool":"tp-p1","status":"stopped","name":"pc-holder-pve1","tags":"pc-holder;proxcloud"}]}`),
 			"GET /api2/json/nodes/pve1/qemu/101/status/current":               say(`{"data":{"status":"running","qmpstatus":"paused","name":"a"}}`),
 			"GET /api2/json/nodes/pve1/qemu/101/config":                       say(`{"data":{"name":"a","scsi0":"zfs:vm-101-disk-0,size=10G","scsi1":"zfs:vm-101-disk-1,size=1G"}}`),
 			"GET /api2/json/nodes/pve1/qemu/900/config":                       say(`{"data":{"name":"pc-holder-pve1","tags":"pc-holder;proxcloud"}}`),
@@ -91,7 +91,7 @@ func TestPausedVMNeedsStoppingBeforeItsConfigChanges(t *testing.T) {
 		t.Helper()
 		var calls []string
 		_, c := fakePVE(t, routes(&calls))
-		if err := op(&Service{C: c, PoolPrefix: "st-"}); err != nil {
+		if err := op(&Service{C: c, PoolPrefix: "tp-"}); err != nil {
 			t.Fatalf("%v, calls %v", err, calls)
 		}
 		return fmt.Sprint(calls)

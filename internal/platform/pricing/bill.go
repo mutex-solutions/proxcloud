@@ -50,7 +50,6 @@ type Bill struct {
 	CollectedAmounts          []AppliedCollectedCredit   `json:"collectedAmounts,omitempty"`
 	DueAt                     *time.Time                 `json:"dueAt,omitempty"`
 	SentAt                    *time.Time                 `json:"sentAt,omitempty"`
-	LockedAt                  *time.Time                 `json:"lockedAt,omitempty"`
 	CreatedAt                 *time.Time                 `json:"createdAt,omitempty"`
 	UpdatedAt                 *time.Time                 `json:"updatedAt,omitempty"`
 }

@@ -86,6 +86,12 @@ type CloudResource struct {
 	// PausedBySuspension: a suspension walk paused this VM, or is about to, and no resume has seen it back since. It is what tells
 	// that pause from any other. Only MarkPausedBySuspension writes it: toDbRecord leaves it out, so a sync keeps it.
 	PausedBySuspension bool `json:"pausedBySuspension,omitempty"`
+	// DataSince is how old a resource's data is when that is older than its row: a disk a restore brought back dates
+	// from the backup. Only SetDataSince writes it, so a sync's update leaves it alone.
+	DataSince *time.Time `json:"dataSince,omitempty"`
+	// ExternalIDSince is when the resource took its current external id, on a row that followed a rename (a retyped disk).
+	// Only ChangeExternalID writes it, so a sync's update leaves it alone.
+	ExternalIDSince *time.Time `json:"externalIdSince,omitempty"`
 }
 
 // ServerIsVolumeBacked recognizes both the platform marker and the legacy

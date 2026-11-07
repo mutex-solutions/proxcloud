@@ -88,7 +88,7 @@ func (r *Repo) WithProfileLock(ctx context.Context, profileID string, fn func(ct
 	}
 	db := r.acctCredits.DB()
 	return db.WithTx(ctx, func(ctx context.Context) error {
-		if err := db.LockXact(ctx, "billing-profile-credit:"+profileID); err != nil {
+		if err := db.LockXact(ctx, pricing.ProfileLockKey(profileID)); err != nil {
 			return err
 		}
 		return fn(ctx)
@@ -122,12 +122,11 @@ func (r *Repo) PendingCollectTransactions(ctx context.Context, from, to time.Tim
 	})
 }
 
-// PendingCollectForBill returns the bill's PENDING collect transactions created after `since` —
-// an in-flight charge (the browser/cron/scanner has not settled it yet). A new charge for the bill
-// must not start while one exists, or the customer is charged twice.
-func (r *Repo) PendingCollectForBill(ctx context.Context, billID string, since time.Time) ([]pricing.CollectTransaction, error) {
+// PendingCollectForBill returns the bill's PENDING collect transactions, however old: a charge whose outcome is
+// unknown. A new charge for the bill must not start while one exists, or the customer may be charged twice.
+func (r *Repo) PendingCollectForBill(ctx context.Context, billID string) ([]pricing.CollectTransaction, error) {
 	return findTyped[pricing.CollectTransaction](ctx, r.collects, pgdoc.M{
-		"billId": billID, "status": string(pricing.CollectTransactionStatusPending), "createdAt": pgdoc.M{"$gt": since},
+		"billId": billID, "status": string(pricing.CollectTransactionStatusPending),
 	})
 }
 

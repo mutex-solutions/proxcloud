@@ -44,7 +44,7 @@ func TestGPUInventoryPerCardMappings(t *testing.T) {
 			fmt.Fprint(w, `{"data":{"hostpci0":"mapping=gpu2,pcie=1","cores":8}}`)
 		},
 	})
-	s := &Service{C: c, ServiceID: "svc", PoolPrefix: "st-"}
+	s := &Service{C: c, ServiceID: "svc", PoolPrefix: "tp-"}
 	inv, err := s.GPUInventoryFor(context.Background(), "nvidia-p40", []string{"gpu1", "gpu2", "gpu3"})
 	if err != nil {
 		t.Fatal(err)

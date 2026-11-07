@@ -27,6 +27,12 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
+// collectChecker is the operator's way out of a charge whose outcome is unknown (payment.TransactionScanner).
+type collectChecker interface {
+	RecheckCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error)
+	CloseCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error)
+}
+
 // txnRefunder is the narrow interface the admin refund + bank-transfer endpoints need
 // (refund + bank-transfer add-funds) — kept as an interface so admin
 // does not depend on the whole payment package.
@@ -51,6 +57,7 @@ type Handler struct {
 	catalog       *catalog.Repo
 	users         *user.Repo
 	refund        txnRefunder
+	collects      collectChecker
 	pricing       *pricing.Repo
 	billing       *billing.Repo
 	cloud         *cloud.Repo
@@ -156,6 +163,8 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/account-credit-transactions/{id}/payment-gateway", h.txnByGateway("accountCreditTransaction"))
 		r.Get("/account-credit-transactions/{id}/sync", h.accountCreditTxnSync)
 		r.Get("/collect-transactions/{id}/payment-gateway", h.txnByGateway("collectTransaction"))
+		r.Get("/collect-transactions/{id}/sync", h.collectTxnSync)
+		r.Post("/collect-transactions/{id}/close", h.collectTxnClose)
 		r.Get("/credit-card-transaction/{id}/payment-gateway", h.txnByGateway("creditCardTransaction"))
 		// The global cursor-paginated audit log (all
 		// request interfaces; the org/account readers are scoped). Gated ADMIN_AUDIT_READ.
@@ -407,6 +416,38 @@ func (h *Handler) accountCreditTxnByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, billing.AccountCreditTransactionToDto(txn))
+}
+
+// SetCollectChecker wires the charge re-check and close routes.
+func (h *Handler) SetCollectChecker(c collectChecker) { h.collects = c }
+
+// collectTxnAction runs one operator action on a charge and answers with the row (ADMIN_TRANSACTION_MANAGE).
+func (h *Handler) collectTxnAction(w http.ResponseWriter, r *http.Request, act func(context.Context, string) (*pricing.CollectTransaction, error)) {
+	if !h.require(w, r, "admin:transaction:manage") {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	txn, err := act(r.Context(), id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if txn == nil {
+		httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("Bill transaction with id %s not found ", id)))
+		return
+	}
+	httpx.OK(w, billing.CollectTransactionToDto(txn))
+}
+
+// collectTxnSync asks the gateway about a charge, past the scanner's window too, like a deposit's /sync. It is a GET for
+// the same reason as that one: the re-check only records what the gateway says.
+func (h *Handler) collectTxnSync(w http.ResponseWriter, r *http.Request) {
+	h.collectTxnAction(w, r, h.collects.RecheckCollect)
+}
+
+// collectTxnClose ends a PENDING charge the gateway says did not succeed, or one with no gateway reference once the
+// operator found no charge at the gateway.
+func (h *Handler) collectTxnClose(w http.ResponseWriter, r *http.Request) {
+	h.collectTxnAction(w, r, h.collects.CloseCollect)
 }
 
 // collectTxnByID handles the collect transaction by-id read (ADMIN_TRANSACTION_READ).

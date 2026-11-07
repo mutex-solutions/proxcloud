@@ -105,7 +105,7 @@ func vmFirewallFake(t *testing.T, existing string) (*Service, *[]string) {
 		"DELETE " + vm + "/ipset/ipfilter-net0": rec("drop"),
 		"PUT " + vm + "/options":                rec("options"),
 	})
-	return &Service{C: c, PoolPrefix: "st-"}, &calls
+	return &Service{C: c, PoolPrefix: "tp-"}, &calls
 }
 
 func TestSecureVM(t *testing.T) {
@@ -155,7 +155,7 @@ func groupFake(t *testing.T, groups string) (*Service, *[]string) {
 			fmt.Fprint(w, `{"data":null}`)
 		},
 	})
-	return &Service{C: c, PoolPrefix: "st-"}, &calls
+	return &Service{C: c, PoolPrefix: "tp-"}, &calls
 }
 
 func TestEnsureDefaultSecurityGroupExisting(t *testing.T) {
@@ -191,7 +191,7 @@ func TestEnsureDefaultSecurityGroupCreates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Service{C: c, PoolPrefix: "st-"}
+	s := &Service{C: c, PoolPrefix: "tp-"}
 	id, err := s.EnsureDefaultSecurityGroup(context.Background(), "p1", "10.100.0.0/16")
 	if err != nil || len(id) != 8 || id[0] != 'g' {
 		t.Fatalf("id = %q, %v", id, err)
