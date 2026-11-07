@@ -55,6 +55,8 @@ type StorageContent struct {
 	Size    int64  `json:"size"`
 	Used    int64  `json:"used"`
 	VMID    int    `json:"vmid"`
+	CTime   int64  `json:"ctime"` // backups: when it was taken
+	Notes   string `json:"notes"` // backups: vzdump's notes-template, rendered
 }
 
 // StorageContents lists a storage's content, optionally filtered by content type

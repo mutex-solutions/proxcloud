@@ -51,6 +51,7 @@ package externalservice
 //	                                           // shared storage clones to any node, a local one
 //	                                           // only to its own node
 //	    "storageHeadroomPct": 10,              // % of a storage kept free when placing disks
+//	    "backupStorage": "nas-backup",         // shared store of server backups (NFS, CephFS, PBS); absent = none
 //	    "gpus": {},                            // Phase 6 — {mappingId: {"alias": "nvidia-4090"}}
 //	    "overcommit": {"cpu": 4},              // scheduler capacity multiplier
 //	    "metrics": {"source": "none"},         // until prometheus-pve-exporter is wired
@@ -120,6 +121,9 @@ func (e *ExternalService) PVEConfig() pve.Config {
 		TimeoutSeconds: intOf(e.Config["timeoutSeconds"]),
 	}
 }
+
+// PVEBackupStorage is config.backupStorage: the shared store server backups go to ("" = no backups offered).
+func (e *ExternalService) PVEBackupStorage() string { return str(e.Config["backupStorage"]) }
 
 // PVEOvercommitCPU is the scheduler's CPU overcommit factor (default 4).
 func (e *ExternalService) PVEOvercommitCPU() float64 {
