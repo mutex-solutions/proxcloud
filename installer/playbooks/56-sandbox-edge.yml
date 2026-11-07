@@ -10,9 +10,13 @@
   connection: local
   gather_facts: false
   tasks:
-    - name: Skip unless the sandbox is on
+    # A sandbox site from before SB4 has no domain: its sandboxes keep the native API, and `make upgrade` goes on.
+    - name: Say why sandbox ports are not published
+      when: pc_sandbox_on and not pc_sandbox_edge_on
+      ansible.builtin.debug: {msg: "SKIPPED: set sandbox.domain (and sandbox.proxy, sandbox.tls, sandbox.entry) to publish sandbox ports"}
+    - name: Skip unless the sandbox is on with a domain
       ansible.builtin.meta: end_play
-      when: not pc_sandbox_on
+      when: not pc_sandbox_edge_on
     - name: Check the settings
       vars:
         problem: "{{ pc.sandbox | pc_sandbox_edge_problem }}"
@@ -35,7 +39,7 @@
   tasks:
     - name: Skip unless the sandbox is on and its zone is on PowerDNS
       ansible.builtin.meta: end_play
-      when: not pc_sandbox_on or not pc.sandbox.powerdns.api_url
+      when: not pc_sandbox_edge_on or not pc.sandbox.powerdns.api_url
     - name: Read the zone
       ansible.builtin.uri: {url: "{{ pdns }}/zones/{{ zone }}", status_code: [200, 404, 422]}
       register: pc_sbx_zone
@@ -113,7 +117,7 @@
   tasks:
     - name: Skip unless the sandbox is on with an appliance
       ansible.builtin.meta: end_play
-      when: not pc_sandbox_on or not pc.sandbox.entry.public.bridge
+      when: not pc_sandbox_edge_on or not pc.sandbox.entry.public.bridge
     - name: Log in
       ansible.builtin.include_tasks: tasks/pve-login.yml
     - name: Find the newest template on the node
@@ -200,7 +204,7 @@
   tasks:
     - name: Skip unless the sandbox is on
       ansible.builtin.meta: end_play
-      when: not pc_sandbox_on
+      when: not pc_sandbox_edge_on
     - name: Look for the sandbox cluster's kubeconfig
       ansible.builtin.stat: {path: "{{ pc_sbx_kubeconfig }}"}
       register: pc_sbx_kc
