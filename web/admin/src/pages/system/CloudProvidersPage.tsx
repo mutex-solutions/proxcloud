@@ -78,18 +78,27 @@ function providerRegions(p: CloudProvider): string[] {
 // ── truenas create form ──────────────────────────────────────────────────────
 type TrueNASFormState = {
   name: string; apiUrl: string; username: string; apiKey: string; fingerprint: string
-  parentDataset: string; mountHost: string; region: string; defaultQuotaGiB: string
+  parentDataset: string; mountHost: string; snatSources: string; region: string; defaultQuotaGiB: string
 }
 
 const emptyTrueNASForm: TrueNASFormState = {
   name: "", apiUrl: "", username: "proxcloud", apiKey: "", fingerprint: "",
-  parentDataset: "", mountHost: "", region: "pve", defaultQuotaGiB: "",
+  parentDataset: "", mountHost: "", snatSources: "", region: "pve", defaultQuotaGiB: "",
 }
 
 const trueNASFormValid = (f: TrueNASFormState) =>
   [f.name, f.apiUrl, f.username, f.apiKey, f.parentDataset, f.region].every((v) => v.trim() !== "") &&
   f.apiUrl.trim().startsWith("https://") &&
   cephQuotaValid(f.defaultQuotaGiB)
+
+export const parseSNATSources = (v: string) => v.split(",").map((a) => a.trim()).filter(Boolean)
+
+export const SNAT_SOURCES_HELP =
+  "Leave empty unless a NAT sits between tenants and this NAS, so that the NAS sees the NAT's address instead of the " +
+  "tenant's. Each address listed here goes on every export of this provider, Kubernetes RWX datasets included, and " +
+  "stays there through sync. The cost: the NAS can no longer tell tenants apart. Every tenant behind that NAT can " +
+  "mount every NFS share of every project on this provider, and only the SMB password still protects an SMB share. " +
+  "Single addresses only, no ranges."
 
 // File shares only, so the shares service is enabled directly. The API key goes to the secret and never comes back.
 function trueNASFormToBody(f: TrueNASFormState) {
@@ -107,6 +116,7 @@ function trueNASFormToBody(f: TrueNASFormState) {
       regions: { [region]: { displayName: region } },
       ...(f.fingerprint.trim() ? { fingerprint: f.fingerprint.trim() } : {}),
       ...(f.mountHost.trim() ? { mountHost: f.mountHost.trim() } : {}),
+      ...(parseSNATSources(f.snatSources).length ? { snatSources: parseSNATSources(f.snatSources) } : {}),
       ...(f.defaultQuotaGiB.trim() ? { defaultQuotaGiB: Number(f.defaultQuotaGiB) } : {}),
       services: { shares: { [region]: true } },
     },
@@ -173,6 +183,10 @@ function TrueNASProviderForm({ form, setForm }: { form: TrueNASFormState; setFor
       {field("fingerprint", "Certificate fingerprint (self-signed)", "AA:BB:…")}
       {field("parentDataset", "Parent dataset", "tank/shares")}
       {field("mountHost", "Address clients mount from (optional)", "defaults to the URL's host")}
+      <div className="grid gap-2">
+        {field("snatSources", "NAT source addresses, comma separated (optional, weakens isolation)", "none")}
+        <p className="text-sm text-muted-foreground">{SNAT_SOURCES_HELP}</p>
+      </div>
       {field("region", "Region", "pve")}
       {field("defaultQuotaGiB", "Quota per project, GiB (optional)")}
     </div>

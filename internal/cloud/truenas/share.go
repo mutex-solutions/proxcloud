@@ -53,6 +53,9 @@ type Service struct {
 	C      *Client
 	Parent string // parent dataset, e.g. tank/shares
 	Host   string // the address clients mount from
+	// SNATSources are the addresses a NAT on the way to the NAS rewrites tenants to, kept on every export. Every
+	// tenant behind such an address passes the NAS's address check on every share. Empty on a site without one.
+	SNATSources []string
 }
 
 // Share is one tenant share. Password is set only by create and password reset.
@@ -93,18 +96,26 @@ func legacySMBUser(projectID, name string) string {
 func smbUserFullName(name string) string { return "ProxCloud share " + name }
 
 // SameExport reports whether an export already lists exactly these networks (as exportList would write them).
-func SameExport(current, networks []string) bool {
-	a, b := slices.Clone(current), slices.Clone(exportList(networks))
+func (s *Service) SameExport(current, networks []string) bool {
+	a, b := slices.Clone(current), s.exportList(networks)
 	slices.Sort(a)
 	slices.Sort(b)
 	return slices.Equal(a, b)
 }
 
-func exportList(networks []string) []string {
-	if len(networks) == 0 {
+// exportList is what an export carries: the given networks, then the site's NAT addresses. A caller taking an address
+// off the list cannot take a NAT address off with it.
+func (s *Service) exportList(networks []string) []string {
+	out := slices.Clone(networks)
+	for _, a := range s.SNATSources {
+		if !slices.Contains(out, a) {
+			out = append(out, a)
+		}
+	}
+	if len(out) == 0 {
 		return []string{"127.0.0.1/32"}
 	}
-	return networks
+	return out
 }
 
 type dsValue struct {
@@ -183,7 +194,7 @@ func (s *Service) Create(ctx context.Context, projectID, name, protocol string, 
 		}
 		return nil, err
 	}
-	sh := &Share{Name: name, Protocol: protocol, Dataset: id, SizeBytes: size, Networks: exportList(networks)}
+	sh := &Share{Name: name, Protocol: protocol, Dataset: id, SizeBytes: size, Networks: s.exportList(networks)}
 	if err := s.export(ctx, projectID, sh); err != nil {
 		// A dataset nobody can reach is only a bill: remove what was made.
 		_ = s.Delete(ctx, projectID, id)
@@ -364,9 +375,9 @@ func (s *Service) SetAccess(ctx context.Context, projectID, id string, networks 
 		return sharef("the share has no export")
 	}
 	if sh.Protocol == ProtocolNFS {
-		return s.C.Call(ctx, "sharing.nfs.update", []any{sh.ShareID, map[string]any{"networks": exportList(networks)}}, nil)
+		return s.C.Call(ctx, "sharing.nfs.update", []any{sh.ShareID, map[string]any{"networks": s.exportList(networks)}}, nil)
 	}
-	return s.C.Call(ctx, "sharing.smb.update", []any{sh.ShareID, map[string]any{"purpose": "DEFAULT_SHARE", "options": map[string]any{"hostsallow": exportList(networks)}}}, nil)
+	return s.C.Call(ctx, "sharing.smb.update", []any{sh.ShareID, map[string]any{"purpose": "DEFAULT_SHARE", "options": map[string]any{"hostsallow": s.exportList(networks)}}}, nil)
 }
 
 // ResetPassword issues a new password for an SMB share's user.
@@ -463,7 +474,7 @@ func (s *Service) ShareData(projectID string, sh *Share) map[string]any {
 	return map[string]any{"share": map[string]any{
 		"name": sh.Name, "protocol": sh.Protocol, "dataset": sh.Dataset, "status": "available",
 		"sizeBytes": sh.SizeBytes, "usedBytes": sh.UsedBytes, "networks": sh.Networks,
-		"username": sh.Username, "server": s.Host, "mount": mount,
+		"username": sh.Username, "server": s.Host, "mount": mount, "sharedNat": s.SNATSources,
 	}}
 }
 
