@@ -39,7 +39,8 @@ package externalservice
 //	      "pool": "proxcloud-sandbox", "nodes": ["192.0.2.10-192.0.2.29"], "loadBalancers": ["192.0.2.200-192.0.2.209"],
 //	      "dns": ["1.1.1.1"], "kubeletSources": ["198.51.100.0/24"], "snat": "203.0.113.50", "unsecuredMinAgeMinutes": 20,
 //	      "proxy": {"address": "192.0.2.200", "port": 443,  // sandbox-proxy's MetalLB address, and the entry appliance
-//	                "entry": {"vmid": 9110, "address": "192.0.2.5"}}  // (its address on the sandbox vnet)
+//	                "entry": {"vmid": 9110, "pool": "proxcloud-sandbox-entry", "address": "192.0.2.5"}}  // (its pool,
+//	                                                                         // its address on the sandbox vnet)
 //	    },                                     // + secret.sandboxKubeconfig (nodes get/list/patch)
 //	    "storageProfiles": {                   // Phase 5 — honest capability flags
 //	      "std": {"storages": {"*": "local-zfs"}, "shared": false, "snapshots": true,
@@ -414,6 +415,7 @@ type PVESandboxProxy struct {
 	Address      string
 	Port         int
 	EntryVMID    int
+	EntryPool    string // the appliance's own pool: the sync touches the VM only there
 	EntryAddress string // the appliance's address on the sandbox vnet
 }
 
@@ -430,7 +432,7 @@ func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
 	}
 	if p, _ := s["proxy"].(map[string]any); p != nil {
 		e, _ := p["entry"].(map[string]any)
-		cfg.Proxy = PVESandboxProxy{Address: str(p["address"]), Port: intOf(p["port"]), EntryVMID: intOf(e["vmid"]), EntryAddress: str(e["address"])}
+		cfg.Proxy = PVESandboxProxy{Address: str(p["address"]), Port: intOf(p["port"]), EntryVMID: intOf(e["vmid"]), EntryPool: str(e["pool"]), EntryAddress: str(e["address"])}
 		if cfg.Proxy.Port == 0 {
 			cfg.Proxy.Port = 443
 		}

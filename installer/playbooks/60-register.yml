@@ -209,7 +209,7 @@
           # Stage 56's entry: the workers admit the appliance alone to sandbox-proxy, and the sync keeps the appliance.
           proxy: >-
             {{ ({'address': pc.sandbox.proxy.address, 'port': 443}
-                | combine({'entry': {'vmid': pc.sandbox.entry.vmid | int, 'address': pc.sandbox.entry.address}}
+                | combine({'entry': {'vmid': pc.sandbox.entry.vmid | int, 'pool': pc.sandbox.entry.pool, 'address': pc.sandbox.entry.address}}
                           if pc.sandbox.entry.public.bridge else {})) if pc_sandbox_edge_on else {} }}
       when:
         - pc_sandbox_on

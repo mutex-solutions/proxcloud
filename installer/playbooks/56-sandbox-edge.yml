@@ -217,12 +217,14 @@
         dest: /root/sandbox-bundle/
         mode: preserve
     # The wake token is the sandbox provider's secret.proxyWakeToken (generated/sandbox-wake-token in the site directory).
+    # PROXCLOUD_WAKE_URL stays unset until pause and resume exist (SB7): until then the portal can resume nothing, and
+    # with it set every request for an unknown host would make an unauthenticated call to the portal.
     - name: Apply sandbox-proxy
       ansible.builtin.shell: |
         set -euo pipefail
         ns="-n sandbox-system"
         kubectl $ns create configmap sandbox-proxy-config --from-literal=SANDBOX_DOMAIN="$DOMAIN" \
-          --from-literal=PROXCLOUD_WAKE_URL="$WAKE_URL" --dry-run=client -o yaml | kubectl apply -f -
+          --dry-run=client -o yaml | kubectl apply -f -
         kubectl $ns create secret generic sandbox-proxy-wake --from-literal=PROXCLOUD_WAKE_TOKEN="$WAKE" \
           --dry-run=client -o yaml | kubectl apply -f -
         kubectl $ns get secret sandbox-proxy-tls >/dev/null 2>&1 || kubectl $ns create secret generic sandbox-proxy-tls
@@ -233,7 +235,6 @@
       environment:
         KUBECONFIG: "{{ pc_sbx_kubeconfig }}"
         DOMAIN: "{{ pc.sandbox.domain }}"
-        WAKE_URL: "{{ pc_url_api }}/api/v1/internal/sandboxes"
         WAKE: "{{ pc_sbx_wake }}"
         IMAGE: "{{ pc_sbx_proxy_image }}"
         ADDRESS: "{{ pc.sandbox.proxy.address }}"
@@ -289,12 +290,31 @@
           ansible.builtin.copy: {dest: "{{ pc_gen }}/sandbox-ca.crt", content: "{{ pc_sbx_ca.stdout | b64decode }}", mode: "0644"}
           delegate_to: localhost
           become: false
+    # The proxy runs on the system nodes only, and they take pods once the portal's sync has fenced them (after stage
+    # 60): on a first install the proxy is still Pending here, and the next run of this stage checks it.
+    - name: Count the system nodes open to pods
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl get nodes -l node-restriction.kubernetes.io/proxcloud-system -o json | python3 -c '
+        import json, sys
+        print(sum(1 for n in json.load(sys.stdin)["items"]
+                  if not any(t["key"] == "proxcloud.io/unsecured" for t in n["spec"].get("taints", []))))'
+      args: {executable: /bin/bash}
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      register: pc_sbx_sys
+      changed_when: false
+    - name: Say why sandbox-proxy is not checked yet
+      when: pc_sbx_sys.stdout | int == 0
+      ansible.builtin.debug:
+        msg: No system node is fenced yet; sandbox-proxy starts after the portal's sync (stage 60). Run stage 56 again then.
     # Ready once cert-sync has copied the certificate and the proxy has read it.
     - name: Wait for sandbox-proxy
+      when: pc_sbx_sys.stdout | int > 0
       ansible.builtin.command: kubectl -n sandbox-system rollout status deploy/sandbox-proxy --timeout=10m
       environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
       changed_when: false
     - name: Check it holds its address
+      when: pc_sbx_sys.stdout | int > 0
       ansible.builtin.command: kubectl -n sandbox-system get svc sandbox-proxy -o jsonpath={.status.loadBalancer.ingress[0].ip}
       environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
       register: pc_sbx_lb

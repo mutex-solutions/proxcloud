@@ -27,6 +27,13 @@ and rules: [README.md](README.md#maintenance-rule).
   `GET_ACCESS` returns a sandbox's host pattern and traffic token from the live CR.
 - Fixed in stage 55 on the way: `-o jsonpath={.data.admin\\.conf}` lost its backslash to the command module's word
   splitting, so the wait for the sandbox cluster's kubeconfig could never succeed.
+- After review, same PR: `sandbox-proxy` runs on a node group of its own. Stage 55 adds `sandbox-system` when a domain
+  is set: its Machines carry `node-restriction.kubernetes.io/proxcloud-system` (new chart value `machineLabels`, which
+  CAPI copies onto the Node) and the taint `proxcloud.io/sandbox-system`, which MetalLB's speaker tolerates (new chart
+  value `proxmox.metallb.speakerTolerations`, empty for tenants, so their clusters render as before). The proxy
+  requires that label, no preferred fallback. Chart 0.1.8. cert-sync copies only a certificate valid now and for
+  `*.<domain>`. The entry appliance gets one-hour idle timeouts, and the sync touches it only in its own pool
+  (`config.sandbox.proxy.entry.pool`), not merely when tagged. Stage 56 leaves the proxy's wake URL unset until SB7.
 
 **Why**
 
@@ -37,6 +44,12 @@ and rules: [README.md](README.md#maintenance-rule).
 - D4: no Octavia; the P8-1 appliance already does TCP passthrough with a checked reload through the guest agent, so
   the entry reuses it rather than adding an ingress. Its pool gets its own narrow role because it faces the internet.
 - A tenant using the native API could set `allowPublicTraffic: false` but had no way to learn the token it then needs.
+- The system node group: a kubelet may read the Secrets of the pods bound to its node, so a gVisor escape on a node
+  with a proxy pod would get the wildcard key (every tenant's host) and the wake token. Only a label the kubelet cannot
+  set itself (NodeRestriction) can be trusted to mean "no tenant code here", hence CAPI's label propagation rather than
+  `--node-labels`. A tag on a VM is set by whoever owns the VM, and the portal's `/pool` role reaches tenant VMs, so
+  the appliance check needs the pool as well. The wake URL stays off because nothing can be resumed before SB7 and
+  every unknown host would otherwise cost an unauthenticated call to the portal.
 
 **Diagrams updated:** `c1-context.md` (sandbox ports, PowerDNS and ACME roles, images), `c2-containers.md` (entry
 appliance, certificate copy), `c3-components.md` (sandbox proxy, entry appliance, `GET_ACCESS`, diagram), `c4-code.md`

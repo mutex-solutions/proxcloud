@@ -112,11 +112,16 @@ func serve(ctx context.Context, log *slog.Logger) error {
 }
 
 // certSync runs on the services cluster: CERT_SOURCE (namespace/name, read with the pod's service account),
-// CERT_TARGET (namespace/name on the sandbox cluster) and TARGET_KUBECONFIG (a credential that may get and patch that
-// one Secret). It copies every SYNC_INTERVAL (default 1m).
+// CERT_TARGET (namespace/name on the sandbox cluster), TARGET_KUBECONFIG (a credential that may get and patch that
+// one Secret) and SANDBOX_DOMAIN (a certificate that does not cover *.<domain> is not copied). It copies every
+// SYNC_INTERVAL (default 1m).
 func certSync(ctx context.Context, log *slog.Logger) error {
 	from, err1 := ref(os.Getenv("CERT_SOURCE"))
 	to, err2 := ref(os.Getenv("CERT_TARGET"))
+	domain := os.Getenv("SANDBOX_DOMAIN")
+	if domain == "" {
+		err2 = errors.Join(err2, errors.New("SANDBOX_DOMAIN is required"))
+	}
 	if err := errors.Join(err1, err2); err != nil {
 		return err
 	}
@@ -140,7 +145,7 @@ func certSync(ctx context.Context, log *slog.Logger) error {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
-		switch changed, err := sandboxproxy.SyncCert(ctx, src, from, dst, to); {
+		switch changed, err := sandboxproxy.SyncCert(ctx, src, from, dst, to, domain); {
 		case err != nil:
 			log.Error("cert-sync", "err", err)
 		case changed:

@@ -191,20 +191,24 @@ have only been syntax-checked.
 
 Sandbox ports answer at `https://<port>-<sandboxId>.<sandbox.domain>` ([managed-sandbox.md §4](managed-sandbox.md#4-public-entry-tls-and-wake-sb4)).
 
-1. Give the sandbox a domain of its own (`sandbox.domain`, e.g. `sbx.example.org`): a zone on PowerDNS, delegated from
-   its parent, with `dnsupdate=yes` in `pdns.conf`, `sandbox.powerdns.api_url` and `.nameserver` set and
+1. Give the sandbox a domain of its own (`sandbox.domain`, e.g. `example-sandbox.net`): a registrable domain apart
+   from the portal's, on the Public Suffix List if you can, since every tenant's sandbox shares its cookie site
+   (managed-sandbox.md §4.3). A zone on PowerDNS, delegated from its parent, with `dnsupdate=yes` and
+   `allow-dnsupdate-from=` (empty) in `pdns.conf`, `sandbox.powerdns.api_url` and `.nameserver` set and
    `pdns_api_key` in the vault. Without PowerDNS set `sandbox.tls.issuer: secret` (your `kubernetes.io/tls` Secret
    for `*.<domain>` in `pc-sandbox` on the services cluster, `sandbox.tls.secret`) and write `*.<domain>` yourself.
 2. `sandbox.proxy.address`: one address of `sandbox.network.metallb`. `sandbox.entry`: the appliance's address on the
    sandbox vnet (outside the gateway, the workers and the MetalLB range) and its public bridge, address (CIDR) and
    gateway. No `entry.public.bridge`: no appliance; forward TCP 443 to `sandbox.proxy.address` yourself.
 3. Stages 10, 55, 56 and 60 (or `make install`). Stage 10 creates pool `proxcloud-sandbox-entry` with the
-   `ProxCloudSandboxEntry` role for the portal. Stage 56 writes the record and, for `acme`, the TSIG key
-   (`generated/sandbox-tsig.json`), builds the appliance (VM `sandbox.entry.vmid`), applies the issuer, the certificate
-   and cert-sync on the services cluster and `sandbox-proxy` on the sandbox cluster, and waits until the proxy serves.
-   It generates `generated/sandbox-wake-token`: put it into the sandbox provider's `secret.proxyWakeToken`. Stage 60
-   gives the Proxmox provider `config.sandbox.proxy`; the next sync opens the workers to the appliance and installs
-   HAProxy's config on it.
+   `ProxCloudSandboxEntry` role for the portal. Stage 55 adds the node group `sandbox-system`
+   (`sandbox.system_nodes`, its addresses from `sandbox.network.nodes`): sandbox-proxy runs there alone. Stage 56
+   writes the record and, for `acme`, the TSIG key (`generated/sandbox-tsig.json`), builds the appliance (VM
+   `sandbox.entry.vmid`), applies the issuer, the certificate and cert-sync on the services cluster and `sandbox-proxy`
+   on the sandbox cluster. It generates `generated/sandbox-wake-token`: put it into the sandbox provider's
+   `secret.proxyWakeToken` (the proxy calls the wake endpoint from SB7 on). Stage 60 gives the Proxmox provider
+   `config.sandbox.proxy`; the next sync fences the system nodes, opens the workers to the appliance and installs
+   HAProxy's config on it. Run stage 56 again after that sync: it then waits until the proxy serves.
 4. Check: `curl https://8000-<id>.<domain>/` with a sandbox serving on 8000 (`GET_ACCESS` gives its host and token).
 
 **What ran where:** stage 56 ran on the lab against the SB0 cluster (a split-mode copy of the lab site, the SB0

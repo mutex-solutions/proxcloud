@@ -23,22 +23,33 @@ var sandboxEntryFirewallOptions = map[string]string{
 	"policy_in": "DROP", "policy_out": "ACCEPT",
 }
 
-// SandboxEntryConfig is the appliance's HAProxy config: port, passed through to proxy:port.
+// sandboxEntryIdle is how long a quiet connection stays open: a tenant's WebSocket or SSE stream may say nothing for
+// minutes. sandbox-proxy closes a connection that never sends its request headers after 10 s, so idle sockets do not
+// pile up here.
+const sandboxEntryIdle = "1h"
+
+// SandboxEntryConfig is the appliance's HAProxy config: port, passed through to proxy:port, with the P8-1 defaults
+// except the idle timeouts (60 s there).
 func SandboxEntryConfig(proxy string, port int) string {
-	return RenderHAProxy(LBSpec{
+	return strings.Replace(RenderHAProxy(LBSpec{
 		Listeners: []LBListener{{Port: port, Pool: "sandbox-proxy"}},
 		Pools: []LBPool{{Name: "sandbox-proxy", Protocol: "tcp", Algorithm: "roundrobin",
 			Members: []LBMember{{ServerID: "0", Port: port, Weight: 1, Address: proxy}}}},
-	})
+	}), "  timeout client 60s\n  timeout server 60s\n",
+		"  timeout client "+sandboxEntryIdle+"\n  timeout server "+sandboxEntryIdle+"\n", 1)
 }
 
 // SandboxEntry keeps the entry appliance vmid in line: its inbound firewall opens port alone, and HAProxy runs
 // SandboxEntryConfig. The config is pushed only when the file on the appliance differs or HAProxy is not running. A
-// VM that is not the appliance (no SandboxEntryTag, or in the sandbox pool: a recycled vmid) is never touched.
-func (s *Service) SandboxEntry(ctx context.Context, vmid int, sandboxPool, proxy string, port int) error {
+// VM that is not the appliance is never touched: it must carry SandboxEntryTag and sit in entryPool, the appliance's
+// own pool (stage 10). A tag alone is not enough, since the portal's rights reach tenant VMs, whose owners set tags.
+func (s *Service) SandboxEntry(ctx context.Context, vmid int, entryPool, sandboxPool, proxy string, port int) error {
 	addr, err := netip.ParseAddr(proxy)
 	if err != nil || !addr.Is4() || port < 1 || port > 65535 {
 		return fmt.Errorf("pve sandbox entry: invalid proxy address %q or port %d", proxy, port)
+	}
+	if entryPool == "" || entryPool == sandboxPool {
+		return fmt.Errorf("pve sandbox entry: the appliance's pool %q must be set and not the sandbox pool", entryPool)
 	}
 	vms, err := s.C.ClusterResources(ctx, "vm")
 	if err != nil {
@@ -53,8 +64,8 @@ func (s *Service) SandboxEntry(ctx context.Context, vmid int, sandboxPool, proxy
 	switch {
 	case vm == nil:
 		return fmt.Errorf("pve sandbox entry: VM %d does not exist", vmid)
-	case !HasTag(vm.Tags, SandboxEntryTag) || vm.Pool == sandboxPool || vm.Template == 1:
-		return fmt.Errorf("pve sandbox entry: VM %d is not the entry appliance (tag %s)", vmid, SandboxEntryTag)
+	case !HasTag(vm.Tags, SandboxEntryTag) || vm.Pool != entryPool || vm.Template == 1:
+		return fmt.Errorf("pve sandbox entry: VM %d is not the entry appliance (tag %s, pool %s)", vmid, SandboxEntryTag, entryPool)
 	case vm.Status != "running":
 		return fmt.Errorf("pve sandbox entry: VM %d is %s", vmid, vm.Status)
 	}

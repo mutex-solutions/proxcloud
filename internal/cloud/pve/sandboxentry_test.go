@@ -59,15 +59,22 @@ func TestSandboxEntryConfig(t *testing.T) {
 	if strings.Contains(c, "forwardfor") {
 		t.Fatal("TLS ends in sandbox-proxy: the entry must pass TCP through")
 	}
+	// A tenant's WebSocket or SSE stream may stay quiet for minutes: the P8-1 default of 60 s would cut it.
+	if !strings.Contains(c, "timeout client 1h\n  timeout server 1h\n") || strings.Contains(c, "60s") {
+		t.Fatalf("the entry keeps idle streams open for an hour:\n%s", c)
+	}
 }
 
-// A VM without the entry tag (a recycled vmid, a tenant's VM) is never written to.
+// A VM that is not the appliance (a recycled vmid, a tenant's VM that its owner tagged) is never written to.
 func TestSandboxEntryRefusesOtherVMs(t *testing.T) {
 	writes := 0
 	for name, row := range map[string]string{
-		"untagged":        `{"id":"qemu/9110","type":"qemu","vmid":9110,"node":"pve1","status":"running","pool":"tp-p1","tags":"proxcloud"}`,
-		"in sandbox pool": `{"id":"qemu/9110","type":"qemu","vmid":9110,"node":"pve1","status":"running","pool":"proxcloud-sandbox","tags":"proxcloud-sandbox-entry"}`,
-		"gone":            ``,
+		"untagged":         `{"id":"qemu/9110","type":"qemu","vmid":9110,"node":"pve1","status":"running","pool":"proxcloud-sandbox-entry","tags":"proxcloud"}`,
+		"tagged by tenant": `{"id":"qemu/9110","type":"qemu","vmid":9110,"node":"pve1","status":"running","pool":"tp-p1","tags":"proxcloud-sandbox-entry"}`,
+		"tagged, no pool":  `{"id":"qemu/9110","type":"qemu","vmid":9110,"node":"pve1","status":"running","tags":"proxcloud-sandbox-entry"}`,
+		"in sandbox pool":  `{"id":"qemu/9110","type":"qemu","vmid":9110,"node":"pve1","status":"running","pool":"proxcloud-sandbox","tags":"proxcloud-sandbox-entry"}`,
+		"a template":       `{"id":"qemu/9110","type":"qemu","vmid":9110,"node":"pve1","status":"stopped","template":1,"pool":"proxcloud-sandbox-entry","tags":"proxcloud-sandbox-entry"}`,
+		"gone":             ``,
 	} {
 		_, c := fakePVE(t, fakeRoutes{
 			"GET /api2/json/cluster/resources": say(`{"data":[` + row + `]}`),
@@ -76,8 +83,15 @@ func TestSandboxEntryRefusesOtherVMs(t *testing.T) {
 				say(`{"data":null}`)(w, nil)
 			},
 		})
-		if err := (&Service{C: c}).SandboxEntry(context.Background(), 9110, "proxcloud-sandbox", "10.110.0.200", 443); err == nil {
+		if err := (&Service{C: c}).SandboxEntry(context.Background(), 9110, "proxcloud-sandbox-entry", "proxcloud-sandbox", "10.110.0.200", 443); err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+	// No pool configured, or the sandbox pool named as the appliance's: refused before anything is read.
+	for _, pool := range []string{"", "proxcloud-sandbox"} {
+		_, c := fakePVE(t, fakeRoutes{})
+		if err := (&Service{C: c}).SandboxEntry(context.Background(), 9110, pool, "proxcloud-sandbox", "10.110.0.200", 443); err == nil {
+			t.Errorf("entry pool %q: accepted", pool)
 		}
 	}
 	if writes != 0 {

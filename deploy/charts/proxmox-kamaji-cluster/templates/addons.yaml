@@ -19,7 +19,9 @@ replicas (the chart's top-level replicaCount; it has no controller.replicaCount)
 {{- $tenantController := ternary 0 1 (not (empty (.Values.proxmox.csi.gateway | default dict).secretName)) }}
 {{- $proxies = append $proxies (dict "key" "proxmoxCsi" "ns" "csi-proxmox" "values" (dict "existingConfigSecret" "proxmox-csi-plugin" "storageClass" $classes "node" (dict "tolerations" (list (dict "operator" "Exists"))) "replicaCount" $tenantController)) }}
 {{- end }}
-{{- $proxies = append $proxies (dict "key" "metallb" "ns" "metallb-system" "values" (dict "speaker" (dict "frr" (dict "enabled" false)) "frrk8s" (dict "enabled" false))) }}
+{{- $speaker := dict "frr" (dict "enabled" false) }}
+{{- with .Values.proxmox.metallb.speakerTolerations }}{{- $_ := set $speaker "tolerations" . }}{{- end }}
+{{- $proxies = append $proxies (dict "key" "metallb" "ns" "metallb-system" "values" (dict "speaker" $speaker "frrk8s" (dict "enabled" false))) }}
 {{- with .Values.proxmox.rwx }}{{- if .server }}
 {{- $nfsClass := dict "create" true "name" .storageClassName "reclaimPolicy" "Delete" "volumeBindingMode" "Immediate" "parameters" (dict "server" .server "share" .share "mountPermissions" "0777") "mountOptions" (list "nfsvers=4.1") }}
 {{- if not $classes }}{{- $_ := set $nfsClass "annotations" (dict "storageclass.kubernetes.io/is-default-class" "true") }}{{- end }}

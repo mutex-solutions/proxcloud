@@ -54,7 +54,9 @@ spec:
             mtu: {{ net.mtu | int }}
           csi: {configSecretName: "", storageClasses: []}
           rwx: {server: "", share: "", storageClassName: shared-file}
-          metallb: {addresses: {{ [net.metallb] | to_json }}}
+          metallb:
+            addresses: {{ [net.metallb] | to_json }}
+            speakerTolerations: [{key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}]
         nodeGroups:
           - name: sandbox
             machineFlavor: sandbox
@@ -68,6 +70,24 @@ spec:
             # Off only through the portal's sync, once the worker's VM firewall is in place and the join token its disk
             # holds has expired (docs/managed-sandbox.md §2). NodeRestriction keeps the kubelet from dropping it.
             taints: [{key: proxcloud.io/unsecured, value: "true", effect: NoSchedule}]
+{% if pc_sandbox_edge_on | bool %}
+          # sandbox-proxy holds the wildcard key and the wake token, and a kubelet can read the Secrets of the pods on its
+          # node: so the proxy runs here alone, never next to tenant code. The label is CAPI's to set (a kubelet cannot
+          # claim it), the taint keeps sandboxes off. In the sandbox pool, so the sync fences these workers too.
+          - name: sandbox-system
+            machineFlavor: sandbox-system
+            machineImageId: "{{ images }}"
+            machineCores: {{ sbx.system_nodes.cores | int }}
+            machineMemoryMiB: {{ sbx.system_nodes.memory | int }}
+            machineRootVolume: {diskSize: {{ sbx.system_nodes.disk | int }}}
+            machineTags: [proxcloud, pc-sandbox]
+            machineCount: {{ sbx.system_nodes.count | int }}
+            nodeLabels: {proxcloud.io/sandbox: system}
+            machineLabels: {node-restriction.kubernetes.io/proxcloud-system: "true"}
+            taints:
+              - {key: proxcloud.io/unsecured, value: "true", effect: NoSchedule}
+              - {key: proxcloud.io/sandbox-system, value: "true", effect: NoSchedule}
+{% endif %}
         addons:
           metricsServer: {enabled: false}
           certManager: {enabled: false}

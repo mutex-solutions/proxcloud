@@ -166,13 +166,16 @@ pc_defaults:
       # exit node's own address instead (PVE's SNAT), for a site with one public address that accepts the risk.
       snat: ""
     nodes: {count: 2, cores: 4, memory: 8192, disk: 40}
+    # With a domain (stage 56): the node group sandbox-proxy runs on, apart from tenant code. Its workers take addresses
+    # from network.nodes too. 2 keeps the proxy up while one node rolls.
+    system_nodes: {count: 2, cores: 2, memory: 2048, disk: 30}
     unsecured_min_age_minutes: 20  # a new worker takes tenant pods no earlier: CABPK's bootstrap token TTL (15) + margin
     # Stage 56, the public entry: https://<port>-<id>.<domain> -> entry appliance (TCP 443) -> sandbox-proxy, where TLS
     # ends (docs/managed-sandbox.md §4).
     domain: ""                   # required, e.g. sbx.example.org: its own DNS zone; the wildcard certificate covers it
     proxy:
       address: ""                # required: sandbox-proxy's MetalLB address, inside network.metallb
-      image: ""                  # default <images.registry>/proxcloud/proxcloud-sandbox-proxy:<release>
+      image: ""                  # default <images.registry>/proxcloud-sandbox-proxy:<release>
     tls:
       issuer: acme               # acme (DNS-01 through PowerDNS with RFC2136) | secret (yours) | selfsigned (test sites)
       secret: ""                 # issuer secret: a kubernetes.io/tls Secret for *.<domain> in pc-sandbox, services cluster

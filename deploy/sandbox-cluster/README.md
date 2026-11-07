@@ -17,7 +17,7 @@ Design, lab measurements and the threat model: [`docs/managed-sandbox.md`](../..
 | `network-policy.yaml` | Cilium cluster-wide guardrail for every tenant namespace: private ranges and TCP 25 denied, ingress from `sandbox-proxy` only |
 | `rbac.yaml` | `proxcloud-system/proxcloud` ServiceAccount, its ClusterRole and a token Secret; `proxcloud-system/proxcloud-firewall` (nodes get, list, patch; impersonating only the node `proxcloud-noderestriction-probe` for the NodeRestriction release gate) for the Proxmox provider's sync, which fences the workers and takes their `unsecured` taint off |
 | `check-ipv4-only.sh` | The IPv6 precondition: Cilium IPv6 off, no IPv6 on any node |
-| `sandbox-proxy.yaml` | `sandbox-proxy` (two replicas, TLS ends there), its LoadBalancer Service on one MetalLB address, and `sandbox-cert-sync`: the identity that may get and patch `sandbox-proxy-tls` alone, for the copy from the services cluster (docs/managed-sandbox.md §4) |
+| `sandbox-proxy.yaml` | `sandbox-proxy` (two replicas on the `sandbox-system` nodes only, TLS ends there), its LoadBalancer Service on one MetalLB address, and `sandbox-cert-sync`: the identity that may get and patch `sandbox-proxy-tls` alone, for the copy from the services cluster (docs/managed-sandbox.md §4) |
 
 ## Preconditions
 
@@ -56,10 +56,12 @@ kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller
 # 4. Guardrail and the portal's identity.
 kubectl apply -f network-policy.yaml -f rbac.yaml
 
-# 5. sandbox-proxy (installer stage 56 does this, plus the certificate and the entry appliance). Its config, wake
-#    token and an empty certificate Secret first; cert-sync on the services cluster fills the certificate.
-kubectl -n sandbox-system create configmap sandbox-proxy-config --from-literal=SANDBOX_DOMAIN=sbx.example.org \
-  --from-literal=PROXCLOUD_WAKE_URL=https://api.example.org/api/v1/internal/sandboxes
+# 5. sandbox-proxy (installer stage 56 does this, plus the certificate and the entry appliance). It runs only on nodes
+#    labelled node-restriction.kubernetes.io/proxcloud-system by CAPI (stage 55's sandbox-system node group, chart
+#    value machineLabels), never on a sandbox worker. Its config, wake token and an empty certificate Secret first;
+#    cert-sync on the services cluster fills the certificate. PROXCLOUD_WAKE_URL
+#    (https://api.example.org/api/v1/internal/sandboxes) only from SB7 on, when there is something to resume.
+kubectl -n sandbox-system create configmap sandbox-proxy-config --from-literal=SANDBOX_DOMAIN=example-sandbox.net
 kubectl -n sandbox-system create secret generic sandbox-proxy-wake --from-literal=PROXCLOUD_WAKE_TOKEN=<proxyWakeToken>
 kubectl -n sandbox-system create secret generic sandbox-proxy-tls
 kubectl apply -f sandbox-proxy.yaml

@@ -4,7 +4,7 @@
 # control-plane routes and enforces the per-sandbox traffic access token (docs/managed-sandbox.md §4).
 #
 # Created outside this file (installer stage 56, or by hand, README):
-#   - ConfigMap sandbox-proxy-config: SANDBOX_DOMAIN, PROXCLOUD_WAKE_URL (<portal API>/api/v1/internal/sandboxes)
+#   - ConfigMap sandbox-proxy-config: SANDBOX_DOMAIN; from SB7 PROXCLOUD_WAKE_URL (<portal API>/api/v1/internal/sandboxes)
 #   - Secret sandbox-proxy-wake: PROXCLOUD_WAKE_TOKEN (the sandbox provider's secret.proxyWakeToken); optional
 #   - Secret sandbox-proxy-tls: tls.crt and tls.key, written by cert-sync on the services cluster
 #   - the Service's address: annotation metallb.io/loadBalancerIPs
@@ -82,20 +82,17 @@ spec:
       labels: {app: sandbox-proxy}
     spec:
       serviceAccountName: sandbox-proxy
-      # The pod holds the wildcard key and the wake token, and a kubelet reads the Secrets of the pods on its node. A
-      # node group of its own (tainted, so no sandbox lands there) keeps them off the nodes that run tenant code; until a
-      # site has one, the proxy shares the workers (docs/managed-sandbox.md §4.5).
+      # The pod holds the wildcard key and the wake token, and a kubelet reads the Secrets of the pods on its node: a
+      # gVisor escape on a node that runs tenant code would get both. So the proxy runs on the system node group alone
+      # (installer stage 55): its label is one CAPI sets and a kubelet cannot claim (NodeRestriction), and its taint,
+      # tolerated here, keeps sandboxes off it. With no system node the proxy stays Pending rather than land elsewhere.
       tolerations:
         - {key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
-              - matchExpressions: [{key: node-restriction.kubernetes.io/proxcloud-gpu, operator: DoesNotExist}]
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              preference:
-                matchExpressions: [{key: node-restriction.kubernetes.io/proxcloud-system, operator: Exists}]
+              - matchExpressions: [{key: node-restriction.kubernetes.io/proxcloud-system, operator: Exists}]
       topologySpreadConstraints:
         - {maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: ScheduleAnyway, labelSelector: {matchLabels: {app: sandbox-proxy}}}
       securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
