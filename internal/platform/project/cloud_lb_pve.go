@@ -63,6 +63,8 @@ type loadBalancer struct {
 	pve.LBSpec
 }
 
+// lbOfRow refuses a row with no id: an untagged VM's tag reads "" too, so such a row would match every one of them,
+// as the owner of a tenant's server and as what a delete destroys.
 func lbOfRow(cr *cloud.CloudResource) (*loadBalancer, error) {
 	raw, err := json.Marshal(cr.Data[lbDataKey])
 	if err != nil {
@@ -72,7 +74,21 @@ func lbOfRow(cr *cloud.CloudResource) (*loadBalancer, error) {
 	if err := json.Unmarshal(raw, &lb); err != nil {
 		return nil, err
 	}
+	if lb.ID == "" {
+		return nil, fmt.Errorf("load balancer row %s has no id", cr.ExternalID)
+	}
 	return &lb, nil
+}
+
+// lbsOfRows skips a row that cannot be read: it owns nothing.
+func lbsOfRows(rows []cloud.CloudResource) []loadBalancer {
+	var out []loadBalancer
+	for i := range rows {
+		if lb, err := lbOfRow(&rows[i]); err == nil {
+			out = append(out, *lb)
+		}
+	}
+	return out
 }
 
 // setLBRow stores lb on the row in the JSON-stable shape the cache needs.
@@ -721,13 +737,7 @@ func (h *Handler) pveApplianceGuard(ctx context.Context, es *externalservice.Ext
 	if err != nil {
 		return unreadable
 	}
-	var balancers []loadBalancer
-	for i := range rows {
-		if lb, err := lbOfRow(&rows[i]); err == nil {
-			balancers = append(balancers, *lb)
-		}
-	}
-	if lb := lbOwnerOf(server, serverID, balancers); lb != nil {
+	if lb := lbOwnerOf(server, serverID, lbsOfRows(rows)); lb != nil {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict,
 			"This belongs to load balancer "+lb.Name+". Change or delete the load balancer instead")
 	}

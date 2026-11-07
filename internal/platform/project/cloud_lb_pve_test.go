@@ -1,10 +1,13 @@
 package project
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
 func TestLBMemberVM(t *testing.T) {
@@ -89,6 +92,37 @@ func TestLBOwnerOf(t *testing.T) {
 		if got != c.owner {
 			t.Errorf("%s: got %q", c.name, got)
 		}
+	}
+}
+
+// A row with no id must not match what an untagged VM's tag reads, so it owns nothing and a delete refuses it.
+func TestLBRowWithNoID(t *testing.T) {
+	for name, data := range map[string]map[string]any{
+		"no data":  nil,
+		"empty":    {lbDataKey: map[string]any{}},
+		"blank id": {lbDataKey: map[string]any{"id": "", "name": "x", "serverId": "7"}},
+	} {
+		cr := &cloud.CloudResource{ExternalID: "lb-x", Type: cloud.TypeLoadBalancer, Data: data}
+		if lb, err := lbOfRow(cr); err == nil {
+			t.Errorf("%s: read as %+v", name, lb)
+		}
+
+		untagged := &cloud.CloudResource{Type: cloud.TypeServer, Data: map[string]any{"server": map[string]any{}}}
+		if lb := lbOwnerOf(untagged, "9", lbsOfRows([]cloud.CloudResource{*cr})); lb != nil {
+			t.Errorf("%s: owns an untagged server", name)
+		}
+
+		reached := false
+		h := &Handler{pveFor: func(*externalservice.ExternalService) (*pve.Service, error) {
+			reached = true
+			return nil, errors.New("not to be reached")
+		}}
+		if err := h.pveDeleteLoadBalancer(context.Background(), nil, &Project{}, cr); err == nil || reached {
+			t.Errorf("%s: delete went on to the cluster: %v", name, err)
+		}
+	}
+	if lb, err := lbOfRow(&cloud.CloudResource{Data: map[string]any{lbDataKey: map[string]any{"id": "a"}}}); err != nil || lb.ID != "a" {
+		t.Fatalf("good row: %+v, %v", lb, err)
 	}
 }
 

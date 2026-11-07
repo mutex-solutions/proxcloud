@@ -141,6 +141,8 @@ func lbCreateCluster(t *testing.T, del, resources func(http.ResponseWriter, *htt
 		"PUT " + lbCreatePath + "/resize":                                  task,
 		"GET " + lbCreatePath + "/firewall/rules":                          say(`{"data":[]}`),
 		"PUT " + lbCreatePath + "/firewall/options":                        say(`{"data":null}`),
+		"GET /api2/json/cluster/sdn/vnets":                                 say(`{"data":[]}`),
+		"GET /api2/json/cluster/sdn/zones":                                 say(`{"data":[]}`),
 		"GET " + lbCreatePath + "/firewall/ipset":                          say(`{"data":[]}`),
 		"POST " + lbCreatePath + "/status/start":                           task,
 		"POST " + lbCreatePath + "/status/stop":                            task,
@@ -171,8 +173,8 @@ func TestCreateServerFailedReadBack(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := lbCreateCluster(t, c.del, c.resources).CreateServer(context.Background(), req)
 			var left *VMLeftError
-			if err == nil || errors.As(err, &left) != c.left {
-				t.Fatalf("err = %v, want left = %v", err, c.left)
+			if err == nil || !strings.Contains(err.Error(), "read back") || errors.As(err, &left) != c.left {
+				t.Fatalf("err = %v, want a failed read-back with left = %v", err, c.left)
 			}
 		})
 	}
