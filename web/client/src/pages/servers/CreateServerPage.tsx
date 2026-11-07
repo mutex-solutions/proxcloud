@@ -2,6 +2,7 @@
 // Body: name / imageId (project template) / flavorId / networkInterfaces:[{uuid, fixedIp?}] /
 // keyName / adminPass / userData / securityGroupNames / rootVolume:{sizeGiB,type} / dataVolumes:[{sizeGiB,type}].
 import { useMemo, useState } from "react"
+import { isValidServerName, SERVER_NAME_RULE } from "@/lib/server-name"
 import { Link, useNavigate } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
@@ -390,7 +391,7 @@ export default function CreateServerPage() {
   const ready =
     !!scope && !!imageId && !!selectedFlavor && availableVolumeTypes.length > 0 &&
     !!selectedRootVolumeType && rootSizeValid && dataVolumesValid &&
-    netIds.length > 0 && !!name.trim()
+    netIds.length > 0 && isValidServerName(name.trim())
 
   // What still blocks Create — shown next to the disabled button so nobody
   // has to scroll back up hunting for the unfinished step.
@@ -403,6 +404,7 @@ export default function CreateServerPage() {
     !dataVolumesValid && "valid data volume settings",
     netIds.length === 0 && "a network",
     !name.trim() && "a name",
+    !!name.trim() && !isValidServerName(name.trim()) && "a valid name",
   ].filter((x): x is string => !!x)
 
   if (locations.isLoading) {
@@ -1059,7 +1061,9 @@ export default function CreateServerPage() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="my-server"
+                aria-invalid={!!name.trim() && !isValidServerName(name.trim())}
               />
+              {name.trim() && !isValidServerName(name.trim()) ? <p className="text-xs text-destructive">{SERVER_NAME_RULE}</p> : null}
             </div>
           </Step>
 

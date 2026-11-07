@@ -4,6 +4,19 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: A server's name is checked against PVE's rule
+
+**What changed**
+
+- Create, rename and image-from-server check the name with `pve.ValidVMName`, PVE's `dns-name` format plus a DNS name's
+  length limits, and answer 400 with what to fix. The create and rename forms apply the same rule as you type.
+
+**Why**
+
+- PVE refuses anything else with a field error, which the API now hides on a 502, so a name with a space read "compute
+  backend is unavailable". Only the API and the client can say what is wrong with it.
+
+**Diagrams updated:** none.
 ## 2026-11-07: Installer re-runs keep operator settings, split mode passes preflight
 
 **What changed**
