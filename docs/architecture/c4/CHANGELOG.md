@@ -16,11 +16,14 @@ and rules: [README.md](README.md#maintenance-rule).
 - Sandbox API keys (D8, `e2b_keys.go`, table `sandbox_api_keys`): `e2b_` + 40 hex, one project each, acting as the member
   who made it, stored as SHA-256 only; `GET/POST/DELETE /api/v1/project/{id}/sandbox-api-keys` and the client console's
   Sandboxes > API keys tab (key shown once, then a hint). The project service view says whether the location offers the
-  E2B API (`sandboxE2B`); the admin sandbox provider form has an "E2B domain" field (`config.sandbox.envd` + `domain`)
-  and keeps a template's start and ready commands when the template list is edited.
+  E2B API (`sandboxE2B`); the admin sandbox provider form edits the sandbox domain and an envd switch separately
+  (`config.sandbox.domain`, `envd`) and keeps a template's start and ready commands when the template list is edited.
+  Teardown deletes a DELETED project's keys.
 - In the sandbox: `cmd/sandbox-init` (PID 1: user, envd, `/init`, start and ready commands, localhost relay) and
   `deploy/sandbox-runtime.Dockerfile` (envd built unmodified from e2b-dev/infra e85b9f5 plus sandbox-init), installed on
-  every node by a new init container of `node-setup`; stage 55 pins its image, CI builds `proxcloud-sandbox-runtime`.
+  every node by a new init container of `node-setup`; stage 55 pins its image and leaves the init container out where
+  there is no sandbox domain, CI builds `proxcloud-sandbox-runtime`. Sandbox pods get a readiness probe on the ready
+  marker, which sandbox-init drops while a crashed envd restarts.
   Built-in templates `base` and `code-interpreter-v1`: `deploy/templates/` and `build.sh` (pushed by hand until SB6a's
   workflow); stage 60 registers a provider with a domain with envd on.
 - MCP client toolset: `list_sandboxes`, `create_sandbox`, `exec_in_sandbox`, `get_sandbox_logs`, `set_sandbox_timeout`,
@@ -38,6 +41,12 @@ and rules: [README.md](README.md#maintenance-rule).
   `test/integration/sandbox_e2b_test.go`, which fails with the gate calls removed).
 - autoPause, autoResume, templates builds, snapshots and MCP are refused with 400 or 404 instead of being accepted and
   ignored: without pause (SB7) an autoPause sandbox would be deleted at its timeout and its files lost.
+- `PUT /e2b/sandboxes/{id}/network` is a mutation the native allow-list of a DISABLED project does not hold, so it is
+  refused there too (409).
+- envd with no access token serves every request, and a restarted envd has none until its `/init`; sandbox IDs are in
+  every shared preview URL, so that window must not be reachable. Readiness, not just startup, now follows the marker.
+- One domain field that also switched envd made every edit of an SB4 provider (domain, no envd) save an empty domain,
+  which breaks its published ports; a site without envd would also pull a runtime image no release had yet.
 
 **Diagrams updated:** `c1-context.md` (registry images), `c2-containers.md` (API box, sandbox cluster row), `c3-components.md` (sandbox diagram: E2B API and envd; E2B component row).
 

@@ -160,6 +160,10 @@ func TestE2BUsageGatesFailClosed(t *testing.T) {
 				t.Errorf("%s on a DISABLED project: %d %s", c.name, code, body)
 			}
 		}
+		// A new mutation, not on the native allow-list of a DISABLED project, so refused like native.
+		if code, body := f.e2b(keyA, http.MethodPut, "/sandboxes/"+id+"/network", `{"allowOut":["1.1.1.1/32"]}`); code != http.StatusConflict {
+			t.Errorf("PUT network on a DISABLED project: %d %s", code, body)
+		}
 		if f.cluster.count() != 1 {
 			t.Fatalf("a create got through: %d sandboxes", f.cluster.count())
 		}
@@ -262,5 +266,19 @@ func TestE2BKeys(t *testing.T) {
 	}
 	if code, body := f.e2b(keyB, http.MethodGet, "/sandboxes", ""); code != http.StatusOK {
 		t.Errorf("B's key after A's revoke: %d %s", code, body)
+	}
+}
+
+// A deleted project leaves no key rows behind; other projects keep theirs.
+func TestE2BKeysGoWithTheProject(t *testing.T) {
+	f, _, keyB := newE2BFixture(t, gatesHold)
+	if err := f.h.TeardownProject(context.Background(), "pa"); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	if n, err := f.db.C("sandbox_api_keys").Count(context.Background(), pgdoc.M{"projectId": "pa"}); err != nil || n != 0 {
+		t.Errorf("pa's keys after teardown: %d %v", n, err)
+	}
+	if code, body := f.e2b(keyB, http.MethodGet, "/sandboxes", ""); code != http.StatusOK {
+		t.Errorf("B's key after A's teardown: %d %s", code, body)
 	}
 }

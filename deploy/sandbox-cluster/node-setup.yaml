@@ -16,6 +16,7 @@
 # The init container installs envd (E2B's in-sandbox agent) and sandbox-init into /opt/proxcloud-sandbox/bin, which
 # every sandbox pod of a provider with `envd` mounts read-only at /.proxcloud (SB5, docs/managed-sandbox.md §5). Its
 # image is CI's proxcloud-sandbox-runtime (deploy/sandbox-runtime.Dockerfile); pin a release tag or digest here.
+# Installer stage 55 pins it, and drops the init container on a site without a sandbox domain (no envd there).
 # Not here yet: the NVIDIA toolkit + nvproxy branch for GPU nodes (SB9).
 # ponytail: setup runs once per pod start; bumping RUNSC_VERSION = edit + rollout restart.
 apiVersion: v1

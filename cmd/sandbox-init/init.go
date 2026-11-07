@@ -12,9 +12,11 @@ import (
 
 const (
 	envPrefix  = "PROXCLOUD_"
-	readyPath  = "/run/proxcloud/ready"
 	defaultUsr = "user"
 )
+
+// readyPath is the marker the startup and readiness probes check (a var for tests).
+var readyPath = "/run/proxcloud/ready"
 
 // perUserEnv are set by envd for each process from the user running it (or describe this init
 // process only), so they must not be pinned as sandbox-wide defaults: HOME=/root from the

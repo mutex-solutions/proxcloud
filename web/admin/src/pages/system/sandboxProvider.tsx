@@ -9,6 +9,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { apiFetch, apiFetchEnvelope } from "@/lib/api"
@@ -21,8 +22,10 @@ export type SandboxFormState = {
   proxmoxServiceId: string
   // One template per line: `name=image cpu memoryGiB [description…]`
   templates: string
-  // The E2B API's sandbox domain (<port>-<id>.<domain> through sandbox-proxy); empty = no E2B API (envd off).
-  e2bDomain: string
+  // The sandbox domain sandbox-proxy serves (<port>-<id>.<domain>): published ports (SB4) and, with envd, the E2B API.
+  domain: string
+  // envd in every sandbox, which the E2B-compatible API at /e2b needs (with a domain).
+  envd: boolean
   maxCpu: string
   maxMemoryGiB: string
   maxTimeoutSeconds: string
@@ -43,7 +46,8 @@ export const emptySandboxForm: SandboxFormState = {
   kubeconfig: "",
   proxmoxServiceId: "",
   templates: "",
-  e2bDomain: "",
+  domain: "",
+  envd: false,
   maxCpu: "",
   maxMemoryGiB: "",
   maxTimeoutSeconds: "",
@@ -97,7 +101,7 @@ function mergeTemplates(stored: Record<string, any> | undefined, parsed: Record<
 
 export function sandboxConfigBlocks(f: SandboxFormState) {
   const region = f.region.trim()
-  const domain = f.e2bDomain.trim()
+  const domain = f.domain.trim()
   return {
     provider: "sandbox",
     region,
@@ -107,7 +111,7 @@ export function sandboxConfigBlocks(f: SandboxFormState) {
       ...f.storedSandbox,
       proxmoxServiceId: f.proxmoxServiceId.trim(),
       templates: mergeTemplates(f.storedSandbox.templates, parseTemplates(f.templates) ?? {}),
-      envd: domain !== "",
+      envd: f.envd,
       domain,
       limits: compact({
         maxCpu: num(f.maxCpu),
@@ -152,7 +156,8 @@ export function sandboxFormFromService(svc: { name?: string; status?: string; co
     region: s(c.region),
     proxmoxServiceId: s(sb.proxmoxServiceId),
     templates,
-    e2bDomain: sb.envd ? s(sb.domain) : "",
+    domain: s(sb.domain),
+    envd: sb.envd === true,
     maxCpu: s(l.maxCpu),
     maxMemoryGiB: s(l.maxMemoryGiB),
     maxTimeoutSeconds: s(l.maxTimeoutSeconds),
@@ -246,13 +251,22 @@ export function SandboxProviderForm({ form, setForm, mode = "create" }: {
         <p className="text-xs text-muted-foreground">Only these images are offered. Customers may raise CPU and memory up to the limits below.</p>
       </div>
       <Field
-        id="sb-e2b"
-        label="E2B domain"
-        value={form.e2bDomain}
-        onChange={set("e2bDomain")}
+        id="sb-domain"
+        label="Sandbox domain"
+        value={form.domain}
+        onChange={set("domain")}
         placeholder="example-sandbox.net"
-        hint="The sandbox domain sandbox-proxy serves (installer sandbox.domain). Set: sandboxes run E2B's envd and the E2B-compatible API at /e2b answers for this provider. Empty: off."
+        hint="The domain sandbox-proxy serves (installer sandbox.domain): published ports are reached at <port>-<id>.<domain>. Empty: no published ports."
       />
+      <div className="grid gap-2">
+        <div className="flex items-center gap-3">
+          <Switch id="sb-envd" checked={form.envd} onCheckedChange={(on) => setForm({ ...form, envd: on })} />
+          <Label htmlFor="sb-envd">Run envd (E2B-compatible API)</Label>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Sandboxes run E2B's envd and the API at /e2b answers for this provider. Needs the sandbox domain and the node runtime installer stage 55 installs.
+        </p>
+      </div>
       <div className="grid gap-4 sm:grid-cols-3">
         <Field id="sb-maxcpu" label="Max vCPU per sandbox" value={form.maxCpu} onChange={set("maxCpu")} placeholder="8" />
         <Field id="sb-maxmem" label="Max GiB per sandbox" value={form.maxMemoryGiB} onChange={set("maxMemoryGiB")} placeholder="32" />

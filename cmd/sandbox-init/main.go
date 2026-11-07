@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -144,13 +145,7 @@ func main() {
 						os.Exit(code)
 					}
 					log.Printf("envd exited (%d); restarting", code)
-					time.Sleep(time.Second)
-					envd = startEnvd()
-					go func() {
-						if err := initEnvd(userEnv, token, user, workdir, now()); err != nil {
-							log.Printf("re-init after restart failed: %v", err)
-						}
-					}()
+					envd = restartEnvd(startEnvd, func() error { return initEnvd(userEnv, token, user, workdir, now()) }, restartHold)
 				}
 			}
 		}
@@ -216,10 +211,35 @@ func mergeEnv(env map[string]string, k, v string) map[string]string {
 	return out
 }
 
-// markReady writes the marker the pod's startup probe (sandbox-init -ready) checks.
+// restartHold is how long a restarted envd waits after the ready marker is gone: the readiness probe (every second,
+// one failure) turns the pod NotReady and sandbox-proxy's 2s lookup cache expires, so no request reaches the new
+// envd before /init has set its access token (envd with no token lets everything through).
+// ponytail: timing, not a handshake; if the kubelet's status update ever lags more than ~2s, have sandbox-proxy check
+// X-Access-Token on port 49983 itself.
+const restartHold = 5 * time.Second
+
+// restartEnvd brings envd back after it exited on its own: unready first, then hold, start, /init, and ready again
+// only when /init succeeded (a failed re-init leaves the sandbox NotReady, so closed).
+func restartEnvd(start func() *exec.Cmd, reinit func() error, hold time.Duration) *exec.Cmd {
+	if err := os.Remove(readyPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("remove ready marker: %v", err)
+	}
+	time.Sleep(hold)
+	c := start()
+	go func() {
+		if err := reinit(); err != nil {
+			log.Printf("re-init after restart failed, sandbox stays not ready: %v", err)
+			return
+		}
+		markReady()
+	}()
+	return c
+}
+
+// markReady writes the marker the pod's startup and readiness probes (sandbox-init -ready) check.
 func markReady() {
-	if err := os.MkdirAll("/run/proxcloud", 0o755); err != nil {
-		log.Printf("mkdir /run/proxcloud: %v", err)
+	if err := os.MkdirAll(filepath.Dir(readyPath), 0o755); err != nil {
+		log.Printf("mkdir %s: %v", filepath.Dir(readyPath), err)
 		return
 	}
 	if err := os.WriteFile(readyPath, nil, 0o644); err != nil {

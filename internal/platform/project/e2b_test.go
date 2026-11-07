@@ -6,11 +6,26 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 )
+
+// A key used within the minute is not written again (nor is a goroutine started for it).
+func TestSandboxKeyTouchDue(t *testing.T) {
+	now := time.Now()
+	recent, old := now.Add(-10*time.Second), now.Add(-2*time.Minute)
+	for _, c := range []struct {
+		last *time.Time
+		want bool
+	}{{nil, true}, {&recent, false}, {&old, true}} {
+		if got := sandboxKeyTouchDue(&sandboxKey{LastUsedAt: c.last}, now); got != c.want {
+			t.Errorf("lastUsedAt %v: due=%v, want %v", c.last, got, c.want)
+		}
+	}
+}
 
 // ListedSandbox's required fields (E2B openapi.yml) must always be present.
 func TestE2BListedShape(t *testing.T) {

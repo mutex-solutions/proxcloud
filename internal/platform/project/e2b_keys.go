@@ -63,8 +63,13 @@ func (h *Handler) lookupSandboxKey(ctx context.Context, key string) (*sandboxKey
 	return &k, nil
 }
 
-// touchSandboxKey records the last use, at most once a minute per key (best-effort, async).
-func (h *Handler) touchSandboxKey(id string) {
+// touchSandboxKey records the last use, at most once a minute per key (best-effort, async). The key was just read, so
+// a use within the minute costs neither a goroutine nor a write.
+func (h *Handler) touchSandboxKey(k *sandboxKey) {
+	if !sandboxKeyTouchDue(k, time.Now()) {
+		return
+	}
+	id := k.ID
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -73,6 +78,10 @@ func (h *Handler) touchSandboxKey(id string) {
 			pgdoc.M{"_id": id, "$or": []pgdoc.M{{"lastUsedAt": pgdoc.M{"$exists": false}}, {"lastUsedAt": pgdoc.M{"$lt": now.Add(-time.Minute)}}}},
 			pgdoc.M{"lastUsedAt": now}, nil)
 	}()
+}
+
+func sandboxKeyTouchDue(k *sandboxKey, now time.Time) bool {
+	return k.LastUsedAt == nil || k.LastUsedAt.Before(now.Add(-time.Minute))
 }
 
 func (h *Handler) sandboxKeyProject(w http.ResponseWriter, r *http.Request) (*Project, *user.User, bool) {

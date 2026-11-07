@@ -42,7 +42,12 @@ Create keys in the console (Sandboxes > API keys) or with the client API:
 `POST /api/v1/project/{id}/sandbox-api-keys {name?}` returns the key once; `GET` lists them (hint only); `DELETE
 …/{keyId}` revokes it at once. A key stops working when its creator loses the right to manage cloud resources in the
 project. Only the key's SHA-256 is stored. The key goes in `X-API-Key`, as the SDKs send it; `Authorization: Bearer
-e2b_…` works too. A personal API token (`pk.sk`) is refused: it is not tied to one project.
+e2b_…` works too. A personal API token (`pk.sk`) is refused: it is not tied to one project. Deleting the project deletes
+its keys.
+
+Revoking a key (or removing its creator) does not touch sandboxes already started: each keeps its envd access token,
+so a client that holds a sandbox's envd token keeps reaching it (commands, files) until the sandbox ends at its
+timeout, as on E2B. Kill those sandboxes to cut that access at once.
 
 ## REST API (`/e2b`)
 

@@ -157,7 +157,7 @@ func (h *Handler) e2bAuth(next http.Handler) http.Handler {
 			e2bErr(w, status, msg)
 			return
 		}
-		h.touchSandboxKey(k.ID)
+		h.touchSandboxKey(k)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, e2bCtxKey{}, c)))
 	})
 }
@@ -629,9 +629,14 @@ func (h *Handler) e2bConnect(w http.ResponseWriter, r *http.Request) {
 	e2bJSON(w, http.StatusOK, c.e2bSandbox(id, tpl, a))
 }
 
-// e2bNetwork: PUT /sandboxes/{id}/network: replaces the egress rules (omitted = cleared).
+// e2bNetwork: PUT /sandboxes/{id}/network: replaces the egress rules (omitted = cleared). Not a read and lowers no
+// usage, so a DISABLED or deleting project refuses it, as the native allow-list (allowedWhileDisabled) would.
 func (h *Handler) e2bNetwork(w http.ResponseWriter, r *http.Request) {
 	c := e2bFrom(r)
+	if err := refuseNewUsage(c.proj); err != nil {
+		e2bFail(w, err)
+		return
+	}
 	var b e2bNetworkBody
 	if !decodeE2B(w, r, &b) {
 		return

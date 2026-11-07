@@ -944,14 +944,18 @@ each gate on each of these routes, and fails with the gate calls taken out.
 
 ### 5.3 envd in the sandbox
 
-With `config.sandbox.envd: true` and a `domain` (the admin form's "E2B domain"; installer stage 60 sets both when
-`sandbox.domain` is set), every sandbox mounts `/opt/proxcloud-sandbox/bin` from its node read-only at `/.proxcloud`
+With `config.sandbox.envd: true` and a `domain` (the admin form's "Sandbox domain" and "Run envd";
+installer stage 60 sets both when `sandbox.domain` is set), every sandbox mounts `/opt/proxcloud-sandbox/bin` from its node read-only at `/.proxcloud`
 and runs `/.proxcloud/sandbox-init` as PID 1: it creates the template's user if the image has none, starts envd
 (`-isnotfc`, port 49983), posts envd's `/init` over localhost with the sandbox's env, user, workdir and access token,
 runs the template's start command (as root with `startAsRoot`), marks the pod ready once the ready command exits 0,
-restarts envd if it dies, and relays ports bound to localhost to the pod address. The two binaries come from
-`proxcloud-sandbox-runtime` (`deploy/sandbox-runtime.Dockerfile`: envd built unmodified from e2b-dev/infra `e85b9f5`,
-Apache-2.0, notice in the image), which `node-setup`'s init container copies to every node (stage 55 pins its tag).
+restarts envd if it dies, and relays ports bound to localhost to the pod address. A restarted envd has no access token
+until its `/init`, and envd without a token lets every request through, so sandbox-init first drops the ready marker
+(the readiness probe turns the pod NotReady and sandbox-proxy routes only to Ready pods), waits 5 s (probe period plus
+the proxy's 2 s lookup cache), starts envd, and puts the marker back only once `/init` succeeded. The two binaries come
+from `proxcloud-sandbox-runtime` (`deploy/sandbox-runtime.Dockerfile`: envd built unmodified from e2b-dev/infra
+`e85b9f5`, Apache-2.0, notice in the image), which `node-setup`'s init container copies to every node (stage 55 pins its
+tag, and leaves the init container out on a site without a sandbox domain).
 
 ### 5.4 Built-in templates
 
@@ -991,7 +995,7 @@ on SB0, so the proxy ran on a worker; the client reached the appliance through a
   create at once, the other project's key unaffected; no key or a PAT: 401.
 - Provider `DISABLED`: E2B create 503, list 200; back to `PUBLIC`.
 - Client console (headless browser): API keys tab, key shown once, listed by hint only, works (200), revoked (401).
-  Admin console: the provider's "E2B domain" field.
+  Admin console: the provider's "Sandbox domain" field and "Run envd" switch.
 - MCP client toolset as the tenant: `create_sandbox`, `list_sandboxes` (RUNNING), `exec_in_sandbox` (`42`,
   `4.19.0-gvisor`), `get_sandbox_logs`, `set_sandbox_timeout`, `delete_sandbox`. On the compose stack the admin and client
   realms are one, so the check ran with the admin issuer moved off it for the run.
