@@ -98,8 +98,8 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		return
 	}
 	name := strAny(data["name"])
-	if name == "" {
-		h.fail(w, httpx.BadRequest("name is required"))
+	if herr := vmNameErr(name); herr != nil {
+		h.fail(w, herr)
 		return
 	}
 	fl, err := h.pveFlavors.Get(ctx, strAny(data["flavorId"]))
@@ -897,8 +897,8 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 
 	case "RENAME":
 		name := strAny(data["name"])
-		if name == "" {
-			h.fail(w, httpx.BadRequest("name is required"))
+		if herr := vmNameErr(name); herr != nil {
+			h.fail(w, herr)
 			return true
 		}
 		if err := ps.RenameServer(ctx, proj.ID, cr.ExternalID, name); err != nil {
@@ -1250,6 +1250,17 @@ const computeBackend = "compute backend"
 // pveVolumeErr maps a pve server or volume error: a refusal the caller can fix (pve.ConflictError) is
 // 409 with its message, a VM locked by a running task too, anything else is PVE failing (502, cause in the log: the raw
 // text names the API's address, and a proxied call names the node's).
+// vmNameErr refuses a name PVE would refuse, with what to fix: PVE's own 400 would reach the tenant as a backend failure.
+func vmNameErr(name string) *httpx.HTTPError {
+	if name == "" {
+		return httpx.BadRequest("name is required")
+	}
+	if !pve.ValidVMName(name) {
+		return httpx.BadRequest("The name must be a DNS name: letters, digits and hyphens, with dots between parts. Each part starts and ends with a letter or digit")
+	}
+	return nil
+}
+
 func pveVolumeErr(err error) *httpx.HTTPError {
 	var ce *pve.ConflictError
 	if errors.As(err, &ce) {
@@ -1456,6 +1467,11 @@ func (h *Handler) pveCreateImage(w http.ResponseWriter, r *http.Request, u *user
 	serverRef := strAny(data["serverId"])
 	if name == "" || serverRef == "" {
 		h.fail(w, httpx.BadRequest("name and serverId are required"))
+		return
+	}
+	// An image is a VM too: its name meets the same rule at PVE.
+	if herr := vmNameErr(name); herr != nil {
+		h.fail(w, herr)
 		return
 	}
 	serverExt := serverRef
