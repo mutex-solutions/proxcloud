@@ -935,7 +935,10 @@ the Website tab with **Disable website** on such a bucket, and making the bucket
 
 `POST /api/v1/admin/service/object-store/test` with `{s3Endpoint, adminApiUrl, region, adminAccessKey, adminSecretKey}`
 tests a connection without storing it: an S3 call, then the key's own Admin Ops user and caps. The answer is `200`, or
-`400` with the reason. The installer calls it before registering the provider.
+`400` with the reason. The installer calls it before registering the provider, and the Add dialog's **Test connection**
+button calls it for a `ceph-s3` provider. The same check runs on `POST /admin/service` for a `ceph-s3` row with status
+`PUBLIC`, and on an update that changes such a row's status, endpoints, region or keys, because a row that cannot reach
+RGW fails the bootstrap of every new project. A write that changes none of those still works while RGW is down.
 
 Accessors: `IsCephS3`, `S3Endpoint`, `AdminAPIURL`, `S3WebsiteEndpoint`,
 `CephRegion`, `UIDPrefix`, `RGWUIDFor(projectID)`, `DefaultQuotaGiB`, and

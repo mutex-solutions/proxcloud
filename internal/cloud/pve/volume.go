@@ -274,15 +274,13 @@ func (s *Service) carryToNode(ctx context.Context, projectID string, vm *Cluster
 	const carried = "unused0"
 	up, err := s.C.MoveDisk(ctx, vm.Node, vm.VMID, MoveDiskOpts{Disk: slot, TargetVMID: carrier.VMID, TargetDisk: carried})
 	if err != nil {
-		// PVE checks a VM's lock before it starts the task. Any other failure could be a lost answer to a started move.
-		var ae *APIError
-		if errors.As(err, &ae) && (ae.Status < 500 || strings.Contains(ae.Error(), "is locked")) {
+		if taskRefused(err) {
 			s.dropEmptyHolder(context.WithoutCancel(ctx), carrier)
 		}
 		return nil, "", err
 	}
 	if err := s.C.WaitTask(ctx, up); err != nil {
-		if s.C.TaskStopped(ctx, up, carrierTaskWait) {
+		if s.C.TaskStopped(ctx, up, lostTaskWait) {
 			s.dropEmptyHolder(context.WithoutCancel(ctx), carrier)
 		}
 		return nil, "", err
