@@ -23,8 +23,8 @@ func TestKamajiSpecFromData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kamajiSpecFromData: %v", err)
 	}
-	// Display name is free-form; the k8s identifier is always the generated stc- id (plan §9).
-	if spec.DisplayName != "my cluster ✨" || !strings.HasPrefix(spec.ID, "stc-") || len(spec.ID) != 12 {
+	// Display name is free-form; the k8s identifier is always the generated pc-c- id (plan §9).
+	if spec.DisplayName != "my cluster ✨" || !strings.HasPrefix(spec.ID, "pc-c-") || len(spec.ID) != 13 {
 		t.Errorf("id/display = %q/%q", spec.ID, spec.DisplayName)
 	}
 	if !spec.HA || spec.Version != "1.35.4" || spec.ProjectID != "p1" {
