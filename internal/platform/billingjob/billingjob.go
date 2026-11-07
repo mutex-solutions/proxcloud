@@ -198,7 +198,7 @@ func savingsAdjOf(contracts []billing.SavingsContract, cycleStart, cycleEnd time
 	out := make([]pricing.SavingsContractAdj, 0, len(contracts))
 	for i := range contracts {
 		c := &contracts[i]
-		if c.Status != billing.SavingsStatusActive || c.StartDate == nil || c.EndDate == nil || c.StartDate.After(cycleStart) || c.EndDate.Before(cycleEnd) {
+		if c.Status != billing.SavingsStatusActive || c.UpfrontUnpaid() || c.StartDate == nil || c.EndDate == nil || c.StartDate.After(cycleStart) || c.EndDate.Before(cycleEnd) {
 			continue
 		}
 		committed, rate := decimal.Zero, decimal.Zero
