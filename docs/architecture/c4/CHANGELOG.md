@@ -4,6 +4,35 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: One bill per profile and cycle, the month's last hour billed once
+
+**What changed**
+
+- `ChargeBillingResources` runs get-or-create, rating and save in one transaction under the profile lock, the same
+  advisory lock payments already hold. The `lockedAt` lease and its retry are gone.
+- The admin bill update and delete, and the whole of the bill send, now hold that lock too. The send reads the bill
+  again inside it.
+- A minute or hour pass on the 1st at 00:00 bills the month that just ended, using that month's metrics. It never opens
+  a bill. `monthlyBill` moved from 00:00 to 00:30 so those passes run first.
+- The send worked out "last month" from the 1st. On the 31st after a shorter month it landed in the current month.
+- `docs/billing.md` has queries to find duplicate bills on an installed site and to delete the empty ones.
+
+**Why**
+
+- `hourlyCharge` and `monthlyCharge` share a cron spec and have different ShedLock names, so they ran at once and both
+  inserted a bill. An item first seen on the second bill starts at the cycle start and charges the month again, and both
+  bills get invoiced: two OPEN bills in 113 of 200 passes in the review's repro, over-billed in 27 of 40 rounds.
+- The lease did not hold, because a retry added a minute to its own clock instead of waiting. A second claimant got the
+  same bill and its save replaced the first one's charge. Under a real lock a lease would only refuse the second pass.
+- One lock rather than a charge-only one: the send and the admin update replace the same document. A test with a
+  separate key lost a closing charge to a racing send within 7 rounds.
+- The 00:00 charge opened the new bill with nothing elapsed, so the month's last hour was never billed: a VM running
+  21:00 to 01:00 paid for 3 hours of 4. On the old wall clock the same pass would have read the new month's metrics and
+  overwritten the month's traffic total.
+- Issuing the running bill on the 31st let the next charge open another one that re-billed the month.
+
+**Diagrams updated:** `c4-code.md` (charge rows). No container or relationship changed.
+
 ## 2026-11-07: Cluster ids take a neutral prefix
 
 **What changed**

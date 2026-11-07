@@ -334,8 +334,8 @@ func instanceNet(t *testing.T, db *pgdoc.DB, profileID string) decimal.Decimal {
 
 // TestRemoteChargeCreatesBillForProfileWithNoResources guards a difference that is easy to
 // introduce as an "optimisation": the in-process driver calls ChargeBillingResources once per
-// external service whether or not that service has resources, and that call opens the current bill
-// via GetCurrentBill, which CREATES it when absent.
+// external service whether or not that service has resources, and that call CREATES the current
+// bill when absent.
 //
 // So an ACTIVE profile with nothing billable still gets a bill each tick. If the remote path drops
 // empty service groups to save bytes, those profiles silently stop getting bills — visible to the
