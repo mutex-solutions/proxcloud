@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -319,6 +320,28 @@ type SandboxPass struct {
 
 // StartSandboxPass lists the pool's workers and makes the current generation exist.
 func (s *Service) StartSandboxPass(ctx context.Context, f SandboxFirewall) (*SandboxPass, error) {
+	p, err := s.newSandboxPass(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	g := p.g
+	inUse := false
+	for _, w := range p.Workers {
+		groups, err := p.groupsOf(ctx, w)
+		if err != nil {
+			return nil, err
+		}
+		inUse = inUse || slices.Contains(groups, g.Group)
+	}
+	if err := s.ensureSandboxGeneration(ctx, g, inUse); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// newSandboxPass reads what a pass works on (the generation, the datacenter firewall switch, the vnet and the pool's
+// workers) and writes nothing.
+func (s *Service) newSandboxPass(ctx context.Context, f SandboxFirewall) (*SandboxPass, error) {
 	g, err := f.generation()
 	if err != nil {
 		return nil, err
@@ -341,18 +364,81 @@ func (s *Service) StartSandboxPass(ctx context.Context, f SandboxFirewall) (*San
 			p.Workers = append(p.Workers, SandboxWorker{Node: vm.Node, VMID: vm.VMID, Name: vm.Name})
 		}
 	}
-	inUse := false
-	for _, w := range p.Workers {
-		groups, err := p.groupsOf(ctx, w)
-		if err != nil {
-			return nil, err
-		}
-		inUse = inUse || slices.Contains(groups, g.Group)
-	}
-	if err := s.ensureSandboxGeneration(ctx, g, inUse); err != nil {
-		return nil, err
-	}
 	return p, nil
+}
+
+// CheckSandboxFence is the worker-fence release gate (docs/managed-sandbox.md §3): read-only, with the portal's token, it
+// checks that PVE enforces VM firewalls, that the current generation's IP sets and group hold exactly what the pass
+// would write, and that every worker open to tenant pods (open: Node name → the InternalIP its Node reports, for Nodes
+// without the unsecured taint) is a VM of the pool whose firewall reads back as the pass leaves it, with its filter
+// pinned to that address. A tainted worker takes no tenant pod (NodeRestriction keeps the kubelet from dropping the
+// taint), so it is not asked for. At least one worker must be open.
+func (s *Service) CheckSandboxFence(ctx context.Context, f SandboxFirewall, open map[string]string) error {
+	p, err := s.newSandboxPass(ctx, f)
+	if err != nil {
+		return err
+	}
+	if !p.on {
+		return ErrSandboxUnenforced
+	}
+	if err := s.checkSandboxGeneration(ctx, p.g); err != nil {
+		return err
+	}
+	if len(open) == 0 {
+		return errors.New("pve sandbox: no worker is open to sandboxes yet (every Node still has the unsecured taint)")
+	}
+	byName := map[string]SandboxWorker{}
+	for _, w := range p.Workers {
+		byName[w.Name] = w
+	}
+	for _, name := range slices.Sorted(maps.Keys(open)) {
+		w, ok := byName[name]
+		if !ok {
+			return fmt.Errorf("pve sandbox: Node %s takes tenant pods but is no VM of pool %s", name, f.Pool)
+		}
+		st, changed, err := p.secure(ctx, w, "", false)
+		if err != nil {
+			return fmt.Errorf("pve sandbox: worker %s (VM %d): %w", name, w.VMID, err)
+		}
+		if changed {
+			return fmt.Errorf("pve sandbox: worker %s (VM %d) does not carry the current firewall (group %s)", name, w.VMID, p.g.Group)
+		}
+		if st.Pinned == "" || st.Pinned != open[name] {
+			return fmt.Errorf("pve sandbox: worker %s (VM %d) filter admits %q, its Node reports %q", name, w.VMID, st.Pinned, open[name])
+		}
+	}
+	return nil
+}
+
+// checkSandboxGeneration is the read-only half of ensureSandboxGeneration: anything missing or different is an error.
+func (s *Service) checkSandboxGeneration(ctx context.Context, g sandboxGen) error {
+	sets, err := s.C.ListClusterIPSets(ctx)
+	if err != nil {
+		return err
+	}
+	for _, set := range []struct {
+		name    string
+		entries []IPSet
+	}{{g.NodeSet, g.Nodes}, {g.OutSet, g.Out}} {
+		if !slices.ContainsFunc(sets, func(x IPSet) bool { return x.Name == set.name }) {
+			return fmt.Errorf("pve sandbox: ip set %s does not exist", set.name)
+		}
+		have, err := s.C.ListClusterIPSetEntries(ctx, set.name)
+		if err != nil {
+			return err
+		}
+		if !sameEntries(have, set.entries) {
+			return fmt.Errorf("%w: ip set %s", ErrSandboxDrift, set.name)
+		}
+	}
+	have, err := s.C.ListFirewallRules(ctx, g.Group)
+	if err != nil {
+		return err
+	}
+	if !sameGroupRules(have, g.Rules) {
+		return fmt.Errorf("%w: group %s", ErrSandboxDrift, g.Group)
+	}
+	return nil
 }
 
 // Group is the current generation's security group.

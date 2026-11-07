@@ -41,22 +41,11 @@ func (j *Job) reconcileSandboxWorkers(ctx context.Context, ps *pve.Service, es *
 }
 
 func (j *Job) fenceSandbox(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, cfg externalservice.PVESandbox, kc SandboxNodes) error {
-	netCfg := es.PVENetworkConfig()
-	if len(netCfg.SandboxCIDRs) != 1 {
-		return fmt.Errorf("sandbox: network.sandboxCidrs must hold the sandbox subnet, has %d entries", len(netCfg.SandboxCIDRs))
-	}
-	host, port, err := apiEndpoint(kc.Server())
+	f, err := sandboxFirewall(ctx, ps, es.PVENetworkConfig(), cfg, kc.Server())
 	if err != nil {
 		return err
 	}
-	deny, err := sandboxDeny(ctx, ps, netCfg, cfg)
-	if err != nil {
-		return err
-	}
-	pass, err := ps.StartSandboxPass(ctx, pve.SandboxFirewall{
-		Pool: cfg.Pool, Subnet: netCfg.SandboxCIDRs[0], Nodes: cfg.Nodes, LoadBalancers: cfg.LoadBalancers,
-		ControlPlane: host, APIPort: port, DNS: cfg.DNS, KubeletFrom: cfg.KubeletSources, Deny: deny,
-	})
+	pass, err := ps.StartSandboxPass(ctx, f)
 	if err != nil {
 		return err
 	}
@@ -97,6 +86,25 @@ func (j *Job) fenceSandbox(ctx context.Context, ps *pve.Service, es *externalser
 		j.log.Info("syncjob: sandbox worker fenced, open to tenant pods", "serviceId", es.ID, "node", w.Name, "address", addr, "group", pass.Group())
 	}
 	return pass.Sweep(ctx)
+}
+
+// sandboxFirewall is the firewall the pass writes for a provider's sandbox pool (and the fence gate reads back).
+func sandboxFirewall(ctx context.Context, ps *pve.Service, netCfg externalservice.PVENetwork, cfg externalservice.PVESandbox, server string) (pve.SandboxFirewall, error) {
+	if len(netCfg.SandboxCIDRs) != 1 {
+		return pve.SandboxFirewall{}, fmt.Errorf("sandbox: network.sandboxCidrs must hold the sandbox subnet, has %d entries", len(netCfg.SandboxCIDRs))
+	}
+	host, port, err := apiEndpoint(server)
+	if err != nil {
+		return pve.SandboxFirewall{}, err
+	}
+	deny, err := sandboxDeny(ctx, ps, netCfg, cfg)
+	if err != nil {
+		return pve.SandboxFirewall{}, err
+	}
+	return pve.SandboxFirewall{
+		Pool: cfg.Pool, Subnet: netCfg.SandboxCIDRs[0], Nodes: cfg.Nodes, LoadBalancers: cfg.LoadBalancers,
+		ControlPlane: host, APIPort: port, DNS: cfg.DNS, KubeletFrom: cfg.KubeletSources, Deny: deny,
+	}, nil
 }
 
 // sandboxDeny is what a worker's internet set leaves out on top of the private ranges: the nodes' management

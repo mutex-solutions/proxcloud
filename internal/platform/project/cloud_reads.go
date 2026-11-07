@@ -155,6 +155,7 @@ var serviceResourceTypes = map[string][]string{
 	"object-store": {cloud.TypeBucket},
 	"shares":       {cloud.TypeShare},   // TrueNAS NFS/SMB
 	"dns":          {cloud.TypeDNSZone}, // PowerDNS
+	"sandbox":      {cloud.TypeSandbox}, // gVisor sandboxes (the sandbox provider's only slug)
 }
 
 // resourceTypes lists the resource types available per location for the project:

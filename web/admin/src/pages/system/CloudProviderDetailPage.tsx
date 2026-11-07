@@ -48,6 +48,14 @@ import {
   dbaasFormValid,
   type DbaasFormState,
 } from "./dbaasProvider"
+import {
+  SandboxProviderForm,
+  SandboxReleaseGates,
+  sandboxConfigBlocks,
+  sandboxFormFromService,
+  sandboxFormValid,
+  type SandboxFormState,
+} from "./sandboxProvider"
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 type Obj = Record<string, any>
@@ -194,6 +202,49 @@ function DbaasConnectionTab({ id, provider }: TabProps) {
         </div>
       </CardContent>
     </Card>
+  )
+}
+
+// SandboxConnectionTab edits a sandbox provider in place and runs its release check. A save that leaves it live is
+// refused while a gate does not hold (the API answers 409 with the gates' reasons).
+function SandboxConnectionTab({ id, provider }: TabProps) {
+  const [form, setForm] = useState<SandboxFormState>(() => sandboxFormFromService(provider))
+  const save = useEsSave(id)
+  const submit = () => {
+    save.mutate({
+      path: `/admin/service/${id}`,
+      body: {
+        name: form.name.trim(),
+        status: form.status,
+        config: sandboxConfigBlocks(form),
+        ...(form.kubeconfig.trim() ? { secret: { kubeconfig: form.kubeconfig.trim() } } : {}),
+      },
+    })
+  }
+  return (
+    <div className="grid gap-6">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-eyebrow">Release gates</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <SandboxReleaseGates id={id} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-eyebrow">Sandbox cluster connection</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          <SandboxProviderForm form={form} setForm={setForm} mode="edit" />
+          <div className="flex justify-end">
+            <Button onClick={submit} disabled={!sandboxFormValid(form, false) || save.isPending}>
+              {save.isPending ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   )
 }
 
@@ -424,6 +475,9 @@ function ConnectionTab({ id, provider }: TabProps) {
   // dbaas: same delivery-config-heavy shape as kamaji — the tab IS the editable form.
   if (provider.config?.provider === "dbaas") {
     return <DbaasConnectionTab id={id} provider={provider} />
+  }
+  if (provider.config?.provider === "sandbox") {
+    return <SandboxConnectionTab id={id} provider={provider} />
   }
   // proxmox: the editable connection form with its own Test button, plus the
   // resource-config blocks (zones/storage/templates/GPUs).

@@ -19,5 +19,7 @@ func Catalog() []*billingapi.BillingResourceType {
 		shareType(),
 		serverProtectionType(),
 		serverSnapshotType(),
+		sandboxType(),
+		sandboxSnapshotType(),
 	}
 }

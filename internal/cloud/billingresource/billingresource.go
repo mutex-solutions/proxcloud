@@ -76,12 +76,21 @@ func GetArchivedBillingResources(ctx context.Context, repo *cloud.Repo, registry
 		stampResourceValues(brs, cr)
 		for _, b := range brs {
 			if b != nil {
-				b.DeletedAt = h.DeletedAt
+				b.DeletedAt = archivedEnd(b.DeletedAt, h.DeletedAt)
 			}
 		}
 		out = append(out, brs...)
 	}
 	return out, nil
+}
+
+// archivedEnd is where an archived resource's charge stops: its archive time, unless its provider knows an earlier end
+// (an ended sandbox lingers a few minutes before it is archived, and those minutes are not the customer's).
+func archivedEnd(provider, archived *time.Time) *time.Time {
+	if provider != nil && (archived == nil || provider.Before(*archived)) {
+		return provider
+	}
+	return archived
 }
 
 // stampResourceValues runs after each provider builds its BillingResources:

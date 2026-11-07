@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -89,9 +90,24 @@ type Handler struct {
 	// on sharedWorkers).
 	csiGW *CSIGateway
 	// sandboxFor builds the sandbox service for a sandbox provider (sandbox-cluster client from
-	// the provider's kubeconfig). Always nil until phase SB3 adds its setter and mounts the
-	// SANDBOX legs of cloud_sandbox.go; until then no route reaches them.
+	// the provider's kubeconfig). SetSandbox; nil = sandbox provisioning and writes are off.
 	sandboxFor func(es *externalservice.ExternalService) (*sandbox.Service, error)
+	// sandboxGates checks a sandbox provider's release gates (SetSandboxGates; nil = every sandbox
+	// usage is refused). gateCache holds the last verdict per provider (sandboxReleaseGate).
+	sandboxGates func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
+	gateMu       sync.Mutex
+	gateCache    map[string]gateVerdict
+}
+
+// SetSandbox wires the sandbox service factory (enables sandbox provisioning and the SANDBOX
+// write surface for sandbox providers).
+func (h *Handler) SetSandbox(f func(es *externalservice.ExternalService) (*sandbox.Service, error)) {
+	h.sandboxFor = f
+}
+
+// SetSandboxGates wires the release-gate check every sandbox create, exec and timeout extension passes.
+func (h *Handler) SetSandboxGates(f func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate) {
+	h.sandboxGates = f
 }
 
 // SetCustomMenu wires the customMenuItem reader into the /init menu build.
@@ -160,7 +176,7 @@ func (h *Handler) cloudResourceAudit(u *user.User, p *Project, action, verb stri
 
 // unauditedActions change nothing and hand out no credential. GET_KUBECONFIG and GET_CONNECTION_INFO are reads too, but
 // who took a credential is what an audit trail is for.
-var unauditedActions = map[string]bool{"GET_SETTINGS": true, "GET_POLICY": true, "GET_LOGS": true, "LIST_BACKUPS": true}
+var unauditedActions = map[string]bool{"GET_SETTINGS": true, "GET_POLICY": true, "GET_LOGS": true, "LIST_BACKUPS": true, "REFRESH": true}
 
 // runAudited runs a provider's action handler and logs once it handled the action and succeeded, so a handler with many
 // actions needs no audit call on each success path. The event never carries the action's data: much of it is secret.

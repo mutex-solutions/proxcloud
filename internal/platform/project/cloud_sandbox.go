@@ -2,10 +2,11 @@ package project
 
 // cloud_sandbox.go — the SANDBOX legs of cloudCreate / cloudDelete / cloudAction /
 // cloudResourceList for a sandbox provider (gVisor pods on the sandbox cluster; nothing on PVE,
-// dbaas precedent). See internal/cloud/sandbox and docs/managed-sandbox.md.
+// dbaas precedent). See internal/cloud/sandbox and docs/managed-sandbox.md §3.
 //
-// Not reachable yet: nothing calls these legs and Handler.sandboxFor stays nil until phase SB3
-// (routes, billing, quota and the suspend gate land together, after the SB2b node firewall).
+// What adds usage (create, exec, a longer timeout) passes three checks first: the suspension gate
+// (refuseNewUsage, then the billing profile), the provider's release gates (sandboxReleaseGate) and,
+// on create, the project's sandbox quota (D10, checked against the live cluster).
 
 import (
 	"context"
@@ -41,11 +42,15 @@ func (h *Handler) sandboxService(w http.ResponseWriter, es *externalservice.Exte
 	return ss, true
 }
 
-// sandboxBillingGate refuses new sandboxes for a project that cannot be billed: the project
-// must be ENABLED and its billing profile (own, or the org's) must not be SUSPENDED. Sandboxes
-// start in seconds and an agent can start many, so this check sits on the create path itself
-// instead of relying on the after-the-fact suspension job (which only pauses PVE servers).
+// sandboxBillingGate refuses new sandbox usage (create, exec, a longer timeout) for a project that
+// cannot be billed: refuseNewUsage first (deleting or DISABLED, an operator's disable and a billing
+// suspension alike), then the billing profile (own, or the org's) must not be SUSPENDED, which
+// covers the moment between a profile's suspension and the walk that disables its projects.
+// Sandboxes start in seconds and an agent can start many, so this sits on the request itself.
 func (h *Handler) sandboxBillingGate(ctx context.Context, proj *Project) error {
+	if err := refuseNewUsage(proj); err != nil {
+		return err
+	}
 	if proj.Status != StatusEnabled {
 		return errSandboxForbidden("the project is not active")
 	}
@@ -62,6 +67,53 @@ func (h *Handler) sandboxBillingGate(ctx context.Context, proj *Project) error {
 	}
 	if profile != nil && profile.Status == billing.StatusSuspended {
 		return errSandboxForbidden("the billing profile is suspended")
+	}
+	return nil
+}
+
+// sandboxGateTTL is how long a release-gate verdict is reused before the next create asks again.
+const sandboxGateTTL = time.Minute
+
+type gateVerdict struct {
+	at  time.Time
+	err error
+}
+
+// sandboxReleaseGate is nil when the provider's three release gates hold (docs/managed-sandbox.md §3). Fail closed: no
+// gate checker wired, or any gate not holding, refuses. The verdict is cached per provider for sandboxGateTTL, a
+// failure included, so a broken gate costs one check a minute and not one per request.
+func (h *Handler) sandboxReleaseGate(ctx context.Context, es *externalservice.ExternalService) error {
+	if h.sandboxGates == nil {
+		return errors.New("no release-gate checker is wired")
+	}
+	h.gateMu.Lock()
+	v, ok := h.gateCache[es.ID]
+	h.gateMu.Unlock()
+	if ok && time.Since(v.at) < sandboxGateTTL {
+		return v.err
+	}
+	err := sandbox.GatesErr(h.sandboxGates(ctx, es))
+	h.gateMu.Lock()
+	if h.gateCache == nil {
+		h.gateCache = map[string]gateVerdict{}
+	}
+	h.gateCache[es.ID] = gateVerdict{at: time.Now(), err: err}
+	h.gateMu.Unlock()
+	return err
+}
+
+// errSandboxesUnavailable is what a tenant sees while a release gate does not hold: the reason is the operator's.
+var errSandboxesUnavailable = httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable,
+	"Sandboxes are not available on this location right now. Try again later or contact your platform operator.")
+
+// sandboxUsageGate is the suspension gate plus the release gates, for anything that adds usage.
+func (h *Handler) sandboxUsageGate(ctx context.Context, proj *Project, es *externalservice.ExternalService) error {
+	if err := h.sandboxBillingGate(ctx, proj); err != nil {
+		return err
+	}
+	if err := h.sandboxReleaseGate(ctx, es); err != nil {
+		slog.Error("sandbox: release gates do not hold, usage refused", "service", es.ID, "project", proj.ID, "err", err)
+		return errSandboxesUnavailable
 	}
 	return nil
 }
@@ -123,7 +175,7 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 		h.fail(w, httpx.BadRequest("A sandbox service only provisions SANDBOX resources"))
 		return
 	}
-	if err := h.sandboxBillingGate(r.Context(), proj); err != nil {
+	if err := h.sandboxUsageGate(r.Context(), proj, es); err != nil {
 		h.sandboxFail(w, err)
 		return
 	}
@@ -136,6 +188,8 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
 	}
+	q := es.SandboxProjectQuota(proj.Quota)
+	spec.Quota = &q
 	if err := spec.Validate(ss.Config()); err != nil {
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
@@ -216,16 +270,29 @@ func (h *Handler) sandboxDelete(ctx context.Context, es *externalservice.Externa
 //	REFRESH {}:                   the live state of this sandbox
 //	EXEC {command:[...] | cmd:"…", stdin?, timeoutSeconds?}: run one command, wait for it,
 //	                              → {result: {stdout, stderr, exitCode, truncated}}
+//	GET_LOGS {tailLines?}:        the newest lines of its output → {result: {logs}}
 //
-// Like every other cloud action, the payload is wrapped in {result: …}.
+// Like every other cloud action, the payload is wrapped in {result: …}. EXEC and SET_TIMEOUT add usage, so they pass
+// the suspension and release gates; cloudAction's allow-list has already refused them for a DISABLED project, while
+// GET_LOGS (a read) and the delete stay open.
 func (h *Handler) sandboxAction(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if !es.IsSandbox() {
 		return false
 	}
 	switch action {
+	case "SET_TIMEOUT", "EXEC":
+		if err := h.sandboxUsageGate(r.Context(), proj, es); err != nil {
+			h.sandboxFail(w, err)
+			return true
+		}
+	}
+	switch action {
 	case "SET_TIMEOUT", "REFRESH":
 	case "EXEC":
 		h.sandboxExec(w, r, proj, es, cr, data)
+		return true
+	case "GET_LOGS":
+		h.sandboxLogs(w, r, proj, es, cr, data)
 		return true
 	default:
 		h.fail(w, httpx.BadRequest("unknown sandbox action "+action))
@@ -305,6 +372,138 @@ func (h *Handler) sandboxExec(w http.ResponseWriter, r *http.Request, proj *Proj
 	default:
 		httpx.OK(w, map[string]any{"result": *res})
 	}
+}
+
+// maxLogLines caps GET_LOGS.
+const maxLogLines = 2000
+
+// sandboxLogs answers GET_LOGS: the newest tailLines (default 200) of the sandbox's output.
+func (h *Handler) sandboxLogs(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, data map[string]any) {
+	ss, ok := h.sandboxService(w, es)
+	if !ok {
+		return
+	}
+	n := intAny(data["tailLines"])
+	if n <= 0 {
+		n = 200
+	}
+	logs, err := ss.Logs(r.Context(), proj.ID, cr.ExternalID, min(n, maxLogLines))
+	if err != nil {
+		h.sandboxFail(w, err)
+		return
+	}
+	httpx.OK(w, map[string]any{"result": map[string]any{"logs": logs}})
+}
+
+// DeleteProjectSandboxes deletes every live sandbox of the project on each of its sandbox providers (D9: a billing
+// suspension ends sandboxes; nothing else is kept, since a sandbox is disposable). Each one's row is ended at the
+// delete so billing stops there. A sandbox the cluster lists with no row yet is deleted too. Returns how many went;
+// the first error is returned after trying the rest, so the walk's next pass retries what failed.
+func (h *Handler) DeleteProjectSandboxes(ctx context.Context, p *Project) (int, error) {
+	if h.sandboxFor == nil {
+		return 0, nil
+	}
+	n := 0
+	var first error
+	keep := func(err error) {
+		if err != nil && first == nil {
+			first = err
+		}
+	}
+	for _, svcID := range p.ServiceIDs() {
+		es, err := h.esSvc.Get(ctx, svcID)
+		if err != nil || es == nil || !es.IsSandbox() {
+			continue
+		}
+		ss, err := h.sandboxFor(es)
+		if err != nil {
+			keep(err)
+			continue
+		}
+		live, err := ss.ListSandboxes(ctx, p.ID)
+		if err != nil {
+			keep(err)
+			continue
+		}
+		rows, err := h.cloud.FindByServiceProjectAndType(ctx, svcID, p.ID, cloud.TypeSandbox)
+		if err != nil {
+			keep(err)
+			continue
+		}
+		byID := map[string]*cloud.CloudResource{}
+		for i := range rows {
+			byID[rows[i].ExternalID] = &rows[i]
+		}
+		for id := range live {
+			if cr := byID[id]; cr != nil {
+				err = h.sandboxDelete(ctx, es, p, cr)
+			} else {
+				err = ss.DeleteSandbox(ctx, p.ID, id)
+			}
+			if err != nil {
+				keep(fmt.Errorf("sandbox %s: %w", id, err))
+				continue
+			}
+			n++
+		}
+	}
+	return n, first
+}
+
+// teardownSandboxes is the project-deletion leg for sandboxes: every SANDBOX row's sandbox is deleted and its row ended
+// and archived, then each sandbox provider's project namespace goes (it cascades anything the rows missed). It returns
+// the rows of other kinds, and whether anything is left to retry.
+func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []cloud.CloudResource) ([]cloud.CloudResource, bool) {
+	var left []cloud.CloudResource
+	failed := false
+	now := time.Now().UTC()
+	for i := range rows {
+		res := &rows[i]
+		if res.Type != cloud.TypeSandbox {
+			left = append(left, *res)
+			continue
+		}
+		es, err := h.esSvc.Get(ctx, res.ServiceID)
+		if err != nil || es == nil || !es.IsSandbox() || h.sandboxFor == nil {
+			left = append(left, *res)
+			continue
+		}
+		ss, err := h.sandboxFor(es)
+		if err == nil {
+			err = ss.DeleteSandbox(ctx, p.ID, res.ExternalID)
+		}
+		if err != nil {
+			slog.Error("teardown: delete sandbox", "project", p.ID, "sandbox", res.ExternalID, "err", err)
+			left, failed = append(left, *res), true
+			continue
+		}
+		if res.Data["status"] != sandbox.StatusDeleted {
+			res.Data = sandbox.MarkDeleted(res.Data, now)
+		}
+		if err := h.cloud.DeleteAndArchive(ctx, res, now); err != nil {
+			slog.Error("teardown: archive sandbox row", "project", p.ID, "sandbox", res.ExternalID, "err", err)
+			left, failed = append(left, *res), true
+		}
+	}
+	for _, svcID := range p.ServiceIDs() {
+		es, err := h.esSvc.Get(ctx, svcID)
+		if err != nil || es == nil || !es.IsSandbox() {
+			continue
+		}
+		if h.sandboxFor == nil {
+			failed = true
+			continue
+		}
+		ss, err := h.sandboxFor(es)
+		if err == nil {
+			err = ss.DeleteProjectNamespace(ctx, p.ID)
+		}
+		if err != nil {
+			slog.Error("teardown: delete sandbox namespace", "project", p.ID, "serviceId", svcID, "err", err)
+			failed = true
+		}
+	}
+	return left, failed
 }
 
 // sandboxServiceOf returns the id of the project's first sandbox service ("" if none). A SANDBOX

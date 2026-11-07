@@ -4,6 +4,47 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: Sandboxes reach tenants: native API, billing, quota, suspension, release gates (SB3)
+
+**What changed**
+
+- Project cloud routes serve `SANDBOX`: create (a create with no service goes to the project's sandbox provider),
+  list with a live read-through, delete, and the actions `EXEC`, `GET_LOGS`, `SET_TIMEOUT`, `REFRESH`
+  (`internal/platform/project/cloud_sandbox.go`, `cloud_writes.go`). Bootstrap attaches projects to a sandbox
+  provider (`BootstrapSandboxOnto`: namespace, ResourceQuota); the sync job keeps the rows (`syncSandboxService`).
+- Billing types `sandbox` (per minute, `vcpus`, `ram_gb`, `gpu_count`, `gpu_model`) and `sandbox_snapshot` (GB-hour)
+  in the billing registry and the catalog; seed rules marked PLACEHOLDER, in `seed-operator.py`'s `RULE_TYPES`. An
+  archived row keeps its provider's earlier end (`archivedEnd`).
+- Quota keys `sandboxes`, `sandboxVcpus`, `sandboxRamMb`, `sandboxGpus` (D10 defaults 5 / 16 / 32768 / 0,
+  provider default `config.sandbox.projectQuota`), checked against the live sandboxes and carried by the namespace
+  ResourceQuota; admin quota validation and the Quota tab take them.
+- Suspension gate: create, `EXEC` and `SET_TIMEOUT` pass `refuseNewUsage` (and the allow-list from #84) and the
+  billing profile check; `billingCloudSuspender` deletes a suspended project's running sandboxes (D9).
+- Project teardown deletes sandboxes and the `sb-<project>` namespace first, and retries while either is left.
+- Release gates: a sandbox provider names its workers' Proxmox provider (`config.sandbox.proxmoxServiceId`); the
+  portal checks NodeRestriction (dry-run Node creates impersonating a node, `rbac.yaml` grants exactly that
+  impersonation to the firewall service account), the isolation DROPs (`pve.CheckSandboxIsolation`) and the worker
+  fence (`pve.CheckSandboxFence`, read-only). Admin create or update leaving a sandbox provider live answers 409 when
+  one fails; every sandbox create, exec and timeout extension checks them again (cached a minute, fail closed).
+- Consoles: client Sandboxes page (create, run command, logs, extend, delete); admin Sandboxes provider form, detail
+  tab with a release check, project Quota tab keys.
+
+**Why**
+
+- The plan's release rule: no tenant may run code before layer 1 (SB2b), the suspension gate, quota and billing are
+  all in place, so the routes, the gates and the money land in one phase.
+- Each gate is checked by what it protects against, not by the configuration that should produce it: the
+  NodeRestriction probe asks the API server with a node's identity (Kamaji's default list lacks the plugin, SB0),
+  the isolation and fence gates read PVE with the portal's own token. A gate that stops holding later stops new
+  sandboxes at the next minute.
+- Sandboxes are disposable and bill by the minute: on a suspension, pausing them would keep capacity held for an
+  unpaid account, so they are deleted (D9). A project's sandbox namespace outlives no project.
+- An archived sandbox row was billed to its archive time, minutes after it ended (rows linger for the minutely
+  charge).
+
+**Diagrams updated:** `c2-containers.md` (sandbox cluster), `c3-components.md` (external services, sandboxes, billing
+resources, sync job, diagram), `c4-code.md` (C4.3 keys, new C4.5, teardown sequence).
+
 ## 2026-11-07: SB2b review fixes: pin, datacenter switch, node addresses, re-taint
 
 **What changed**

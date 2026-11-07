@@ -11,6 +11,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
@@ -87,6 +88,8 @@ type Handler struct {
 	// database chart-pin endpoints answer 501).
 	dbaasFor func(es *externalservice.ExternalService) (*dbaas.Service, error)
 	hmacEnc  *textcrypt.Encryptor // seals the secrets of generated hmac keys
+	// sandboxGates checks a sandbox provider's release gates (SetSandboxGates; nil = none can go live).
+	sandboxGates func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
 }
 
 // SetHmacEncryptor wires the data-at-rest key for hmac key secrets.

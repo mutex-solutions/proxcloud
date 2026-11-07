@@ -16,7 +16,8 @@
     "_pendingRules are NOT applied by the steps above. kubernetes_cluster sits there (matching the commented-out twin in price-plan-seed.sql) until the plan-§6 CP-pricing decision; move it into .rules to activate, and update the SQL twin in the same change.",
     "kubernetes_cluster: EKS-style flat control-plane fee via the generic `existence` attribute (0.10/h ~= $73/mo); worker VMs/volumes/LBs bill through the existing rules. bucket: object storage priced per stored GB-hour (size_gb, ceil'd), or swap attributeName to `existence` for a flat per-bucket fee.",
     "database_cluster is the managed-database FULL price (unlike kubernetes_cluster): the DB pods and volumes run on ops-owned nodes, so nothing else bills them. Attributes are pre-multiplied totals (vcpus_total/ram_gb_total/storage_gb_total = per-instance x replicas — see internal/cloud/billingresource/databasecluster.go). The endpoint gate DEFERS the charge while the LB ingress IP is absent and back-bills the current cycle's elapsed hours once it appears (the engine freezes the watermark at createdAt; it does not waive them). Keep in sync with the database_cluster entries in price-plan-seed.sql.",
-    "database_cluster rates are DIGITALOCEAN-PARITY (managed-databases price list, read 2026-08-03; monthly/730h): PG+MySQL fit exactly at the small tiers with $2/vCPU-mo + $11/GB-RAM-mo + $0.215/GB-disk-mo -> 0.002740/0.015068/0.000295 per hour (mariadb=MySQL rates, ferretdb=Mongo rates which are within 1% of PG so PG rates reused); Valkey $2.15/$10.70/$0.215 -> 0.002945/0.014658/0.000295; OpenSearch $2/$4.50/$0.215 -> 0.002740/0.006164/0.000295 (exact on all three DO tiers); Kafka is RAM-rated only ($21/GB-RAM-mo + storage; DO prices the 3-broker cluster, vCPU does not move price across DO's two plans) -> 0.028767 ram + 0.000295 storage. One rule per engine (filter engine eq ...) because rule filters have no OR. Re-derive when DO reprices."
+    "database_cluster rates are DIGITALOCEAN-PARITY (managed-databases price list, read 2026-08-03; monthly/730h): PG+MySQL fit exactly at the small tiers with $2/vCPU-mo + $11/GB-RAM-mo + $0.215/GB-disk-mo -> 0.002740/0.015068/0.000295 per hour (mariadb=MySQL rates, ferretdb=Mongo rates which are within 1% of PG so PG rates reused); Valkey $2.15/$10.70/$0.215 -> 0.002945/0.014658/0.000295; OpenSearch $2/$4.50/$0.215 -> 0.002740/0.006164/0.000295 (exact on all three DO tiers); Kafka is RAM-rated only ($21/GB-RAM-mo + storage; DO prices the 3-broker cluster, vCPU does not move price across DO's two plans) -> 0.028767 ram + 0.000295 storage. One rule per engine (filter engine eq ...) because rule filters have no OR. Re-derive when DO reprices.",
+    "sandbox and sandbox_snapshot rules are PLACEHOLDERS (names start with PLACEHOLDER) until the owner signs a sandbox rate: sandbox is priced PER MINUTE (timeUnit minute, the only rules here that are not per hour) on vcpus/ram_gb at the instance CPU/RAM hourly rates / 60 and gpu_count at 0.50/h / 60; billing runs from the moment the sandbox is Ready, rounded up to whole minutes, at least one (internal/cloud/billingresource/sandbox.go). sandbox_snapshot is per stored GB-hour like file shares; nothing writes one before phase SB7. The sandbox worker VMs sit in the platform's pool and bill nobody: the per-minute rate carries them. No SQL twin: price-plan-seed.sql does not carry the newer product rules either."
   ],
   "plan": {
     "name": "Public rate card",
@@ -511,6 +512,71 @@
         { "attributeName": "storage_gb_total", "tiers": [{ "value": "0.000295" }] }
       ],
       "filters": [{ "attributeName": "engine", "operator": "eq", "value": "opensearch" }],
+      "modifiers": []
+    },
+    {
+      "name": "PLACEHOLDER sandbox: CPU + RAM per minute",
+      "timeUnit": "minute",
+      "resourceType": "sandbox",
+      "pricePlanId": "<PLAN_ID>",
+      "applyMethod": "ADD_TO_TOTAL",
+      "prices": [
+        {
+          "attributeName": "vcpus",
+          "tiers": [
+            {
+              "value": "0.000134"
+            }
+          ]
+        },
+        {
+          "attributeName": "ram_gb",
+          "tiers": [
+            {
+              "value": "0.000067"
+            }
+          ]
+        }
+      ],
+      "filters": [],
+      "modifiers": []
+    },
+    {
+      "name": "PLACEHOLDER sandbox: GPU per minute",
+      "timeUnit": "minute",
+      "resourceType": "sandbox",
+      "pricePlanId": "<PLAN_ID>",
+      "applyMethod": "ADD_TO_TOTAL",
+      "prices": [
+        {
+          "attributeName": "gpu_count",
+          "tiers": [
+            {
+              "value": "0.0083"
+            }
+          ]
+        }
+      ],
+      "filters": [],
+      "modifiers": []
+    },
+    {
+      "name": "PLACEHOLDER sandbox snapshot (per GB-hour)",
+      "timeUnit": "hour",
+      "resourceType": "sandbox_snapshot",
+      "pricePlanId": "<PLAN_ID>",
+      "applyMethod": "ADD_TO_TOTAL",
+      "prices": [
+        {
+          "attributeName": "size_gb",
+          "tiers": [
+            {
+              "value": "0.00007"
+            }
+          ]
+        }
+      ],
+      "filters": [],
       "modifiers": []
     }
   ],

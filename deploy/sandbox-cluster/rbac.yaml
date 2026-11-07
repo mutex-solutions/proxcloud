@@ -90,6 +90,11 @@ type: kubernetes.io/service-account-token
 # The proxmox provider's sync job (secret.sandboxKubeconfig): it reads the Nodes to pin each worker's address in its
 # VM firewall, and takes the proxcloud.io/unsecured taint off once the firewall is in place (docs/managed-sandbox.md
 # §2). Nodes only: no pods, no exec, no Secret.
+#
+# The NodeRestriction release gate (docs/managed-sandbox.md §3) runs two dry-run Node creates as the node
+# `proxcloud-noderestriction-probe`: impersonating that one user and the system:nodes group is all it may impersonate.
+# That identity can do what any node can (the Node authorizer): read nodes, services and endpoints, and register a Node
+# of that name. A Node registered that way has no VM in the sandbox pool, which the fence gate refuses.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -104,6 +109,14 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["users"]
+    verbs: ["impersonate"]
+    resourceNames: ["system:node:proxcloud-noderestriction-probe"]
+  - apiGroups: [""]
+    resources: ["groups"]
+    verbs: ["impersonate"]
+    resourceNames: ["system:nodes"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

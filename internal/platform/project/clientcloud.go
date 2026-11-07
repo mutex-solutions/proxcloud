@@ -115,7 +115,7 @@ func (h *Handler) uiMenuItems(r *http.Request) map[string]any {
 		// AND dbaas (database only) all contribute menu items — a ceph-only project must still
 		// get its Object Storage entry, and the kamaji/dbaas slugs are what un-hide the client
 		// Kubernetes/Databases nav (AppShell gates on menu.items).
-		if es.IsDisabled() || (!es.IsObjectStore() && !es.IsKamaji() && !es.IsDbaas() && !es.IsProxmox() && !es.IsTrueNAS() && !es.IsPowerDNS()) {
+		if es.IsDisabled() || (!es.IsObjectStore() && !es.IsKamaji() && !es.IsDbaas() && !es.IsProxmox() && !es.IsTrueNAS() && !es.IsPowerDNS() && !es.IsSandbox()) {
 			continue
 		}
 		svcMap, _ := es.Config["services"].(map[string]any)
@@ -604,6 +604,26 @@ func externalServiceDto(es *externalservice.ExternalService) map[string]any {
 		// Optional node-flavor allowlist: when set, the client node-group picker offers only these.
 		if len(defaults.Flavors) > 0 {
 			dto["kubernetesFlavorIds"] = defaults.Flavors
+		}
+	}
+	// sandbox: the template catalog, GPU models and limits feed the client create form.
+	if es.IsSandbox() {
+		scfg := es.SandboxConfig().WithDefaults()
+		templates := []any{}
+		for _, name := range scfg.TemplateNames() {
+			t := scfg.Templates[name]
+			templates = append(templates, map[string]any{
+				"name": name, "image": t.Image, "description": t.Description, "cpu": t.CPU, "memoryGiB": t.MemoryGiB,
+				"gpu": t.GPU,
+			})
+		}
+		dto["sandboxTemplates"] = templates
+		dto["sandboxGpuModels"] = scfg.GPUModels
+		l := scfg.Limits
+		dto["sandboxLimits"] = map[string]any{
+			"maxCpu": l.MaxCPU, "maxMemoryGiB": l.MaxMemoryGiB, "maxGpus": l.MaxGPUs,
+			"maxTimeoutSeconds": l.MaxTimeoutSeconds, "defaultTimeoutSeconds": l.DefaultTimeoutSeconds,
+			"maxConcurrent": l.MaxConcurrent, "maxConcurrentGpus": l.MaxConcurrentGPUs,
 		}
 	}
 	// dbaas: the curated engine catalog feeds the client create pickers (versions/replica choices

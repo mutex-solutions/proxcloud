@@ -7,12 +7,14 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 
 > ## Status
 >
-> **Not reachable by tenants.** The sandbox service is ported (SB1) with no route, and the admin API refuses the
-> `sandbox` provider kind. SB2a adds the cluster itself: manifests in `deploy/sandbox-cluster/`, installer stages 10
-> and 55, and isolation drops for the sandbox network (section 1). SB2b adds layer 1: the VM firewall on every NIC
-> of the workers, kept by the portal's sync job, the `unsecured` taint until it is in place, and the sandbox's own
-> egress address (section 2). The billing, quota and suspension gates (SB3) are still missing. Section 0 records the
-> hand-built lab spike. Phase order and decisions: the sandbox plan (owner document, not in this repository).
+> **Reachable by tenants through the native API, behind release gates (SB3).** SB1 ported the sandbox service; SB2a
+> added the cluster (`deploy/sandbox-cluster/`, installer stages 10 and 55, isolation drops, section 1); SB2b layer 1
+> (the VM firewall on every worker NIC, the `unsecured` taint, the sandbox's own egress address, section 2). SB3
+> (section 3) mounts the routes, bills sandboxes per minute, adds the project quota and the suspension gate, deletes
+> sandboxes on a suspension and on project deletion, and lets an operator create a sandbox provider, which goes live
+> only while its three release gates hold. Not yet: `sandbox-proxy` and TLS (SB4), the E2B-compatible API and keys
+> (SB5), templates, snapshots and pause (SB6-SB7), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
+> and decisions: the sandbox plan (owner document, not in this repository).
 
 ## 0. SB0 lab spike (2026-11-07)
 
@@ -505,3 +507,97 @@ back on, the next pass cleared both, nodes Ready, HTTPS 200.
 
 Not run here: stages 55 and 60 (they would add an Application to the lab's shared services cluster). The exit node file
 and the subnet change were made by hand with the content stage 55 writes, and the provider config came from a file.
+
+## 3. Tenant API, billing, quota, suspension and release gates (SB3)
+
+### 3.1 The native API
+
+On the project cloud routes (`/api/v1/project/{id}/...`), for a project attached to a sandbox provider:
+
+| Call | What |
+|---|---|
+| `POST /cloud` `{type: SANDBOX, data: {template, name?, cpu?, memoryGiB?, timeoutSeconds?, gpu?, env?, metadata?, network?}}` | Create. A create that names no service goes to the project's first enabled sandbox provider. 200 with the row; the sandbox is `PENDING` until its pod is Ready |
+| `POST /resource?type=SANDBOX` | List, read through the cluster (a sandbox goes `RUNNING` in seconds and ends at its time limit) |
+| `DELETE /cloud/{id}` | Delete the Sandbox CR (its pod goes with it); the row ends now and lingers `DELETED` for the minutely charge |
+| `POST /cloud/{id}/action` `EXEC {cmd \| command[], stdin?, timeoutSeconds?}` | Run one command and wait: `{stdout, stderr, exitCode, truncated}` |
+| `GET_LOGS {tailLines?}` | The newest lines of its output (default 200, at most 2000) |
+| `SET_TIMEOUT {timeoutSeconds}` | The end moves to now plus that (keepalive or shorten), within the provider's maximum |
+| `REFRESH` | The live state |
+
+Errors: 409 for a DISABLED or deleting project, 403 for a SUSPENDED billing profile, 503 while a release gate does not
+hold or the cluster is unreachable, 429 over the project quota or the cluster ResourceQuota, 400 for a bad request,
+404 for a sandbox of another project (every action and delete needs a row the project owns, and the service checks
+the sandbox's project labels again).
+
+### 3.2 Billing
+
+`sandbox` is billed per minute from the moment the sandbox was Ready (`runningSince`, never the create: an image pull
+is not the customer's) to its end, rounded up to whole minutes, at least one. Attributes: `vcpus`, `ram_gb`,
+`gpu_count`, `gpu_model`, `template`, `status`, `display_name`. A sandbox that never ran bills nothing. An ended row
+lingers `DELETED` for three minutes so the minutely charge sees it; an archived row keeps the earlier end its provider
+knows. `sandbox_snapshot` is per stored GB-hour (`size_gb`); nothing writes one before SB7. The seed's rules for both
+are named `PLACEHOLDER ...` until a rate is signed. The worker VMs sit in the platform's pool and bill nobody.
+
+### 3.3 Quota (D10)
+
+Project quota keys `sandboxes`, `sandboxVcpus`, `sandboxRamMb`, `sandboxGpus`, on the project's quota document (admin
+Projects → Quota). Each absent key falls back to the provider's `config.sandbox.projectQuota`, then to 5 sandboxes,
+16 vCPU, 32768 MB, 0 GPU: never to unlimited. A create is checked against the sandboxes the cluster runs for the
+project (not the cache), and the namespace ResourceQuota carries the same numbers as the backstop for two creates at
+once. The provider's per-sandbox limits (`config.sandbox.limits`: 8 vCPU, 32 GiB, 1 GPU by default) apply first.
+
+### 3.4 Suspension (D9)
+
+Create, `EXEC` and `SET_TIMEOUT` pass `refuseNewUsage` (`cloudAction`'s allow-list from #84 refuses `EXEC`,
+`SET_TIMEOUT` and `REFRESH` for a DISABLED project) and then the billing profile check, which covers the moment between a
+profile's suspension and the walk that disables its projects. List, `GET_LOGS` and delete stay open. On a suspension
+(and an operator's disable through the same walk) `billingCloudSuspender` deletes every running sandbox of the
+project and ends its row; snapshots are kept (none exist before SB7); a resume brings none back.
+
+### 3.5 Project deletion
+
+Teardown handles sandboxes first: every row's sandbox is deleted, the row ended and archived, then the project's
+`sb-<project>` namespace is deleted. A failure on either keeps the project `DELETE_IN_PROGRESS`, so the deletion job
+retries.
+
+### 3.6 Release gates: how the portal checks each
+
+A sandbox provider names the Proxmox provider of its workers (`config.sandbox.proxmoxServiceId`): that provider's
+sync fences them (section 2), and the gates read through its PVE token and its sandbox kubeconfig (the
+`proxcloud-firewall` service account). Both kubeconfigs must name the same API server. The provider can be stored
+`DISABLED` at any time; create or update leaving it live answers 409 with each failing gate, and
+`POST /admin/service/{id}/sandbox/release-check` (the provider page's "Check release gates") shows all three. Every
+create, `EXEC` and `SET_TIMEOUT` checks them again (one verdict per provider kept for a minute; no checker or any
+failure refuses).
+
+| Gate | How the portal checks it |
+|---|---|
+| NodeRestriction on the sandbox cluster's API server | Impersonating the node `system:node:proxcloud-noderestriction-probe` (group `system:nodes`), it asks the API server for two dry-run creates of that node's own Node: plain, which the Node authorizer allows (so the identity works), then with a `node-restriction.kubernetes.io/` label, which only NodeRestriction refuses (`is not allowed to set the following labels`). Holds only when the first passes and the second is refused that way. Admission runs on dry runs; nothing is stored. The firewall service account may impersonate that one user and that group, nothing else (`rbac.yaml`) |
+| Isolation DROP for the sandbox CIDR | With the portal's token: the datacenter firewall is on, and this portal's rules in the cluster firewall are exactly, and enabled, the set `ReconcileIsolation` writes with `network.sandboxCidrs` (tenant pool to the sandbox network, sandbox network to the pool and the blocked networks, `forward` and `in`) |
+| The SB2b fence on every worker | Read-only with the portal's token: PVE enforces VM firewalls, the current generation's IP sets and group hold exactly what the pass writes, and every Node without the `unsecured` taint (a tainted one takes no tenant pod, and NodeRestriction keeps the kubelet from dropping the taint) is a VM of the sandbox pool whose firewall reads back as the pass leaves it, with its filter pinned to the address the Node reports. At least one worker must be open |
+
+### 3.7 Measured on the lab (2026-11-08)
+
+A compose stack on this branch (scheduler off, jobs by trigger), its Proxmox provider with the SB0 cluster's pool,
+`sandboxCidrs` and the firewall service account's kubeconfig, and a sandbox provider stored `DISABLED`; two tenant
+projects. The portal reached the sandbox API server through a lab host forward.
+
+- The stack's own fence pass changed nothing on the workers (same generation as the SB2b hand pass).
+- Release check: isolation held, fence held ("2 worker(s) open ... pinned"), NodeRestriction did not: the firewall
+  service account had no impersonation right, because applying this branch's `rbac.yaml` to the SB0 cluster was
+  refused by the session's permission check. The same probe with the cluster admin's credential: the plain dry run
+  passed, the labelled one was refused by NodeRestriction (`node "proxcloud-noderestriction-probe" is not allowed to set
+  the following labels`). One of the stack's sandbox DROP rules disabled by hand: the isolation gate failed (`rule 12
+  ... is disabled`); re-enabled. The provider page in a browser showed the three answers.
+- Going live (`PUT status PUBLIC`): 409 with the NodeRestriction reason; the row stayed `DISABLED`.
+- Attach to both projects: `sb-<project>` with the tenant label and the ResourceQuota (5 pods, 16 CPU, the lower of the
+  provider cap and the quota for memory). A sandbox create: 503 "not available" (fail closed on the gate), nothing
+  on the cluster. Profile suspended: project `DISABLED`, create 409, list 200; resumed: `ENABLED`, create 503 again.
+  The other tenant: 404 on the project. Project deleted now: its namespace gone.
+- Not run: anything with a running sandbox (console create, exec, logs, timeout, delete, quota refusal, suspension
+  deleting a running sandbox, the minutely charge, a cross-tenant action on a sandbox id). They wait for `rbac.yaml`
+  on the SB0 cluster; the service-level create, exec, logs, timeout and delete ran there in SB1.
+
+Found while measuring, not changed here: `ReconcileIsolation` compares rules without their `enable` flag, so a rule
+disabled by hand is not repaired by the sync; the isolation gate refuses it.
+
