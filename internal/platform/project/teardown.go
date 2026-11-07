@@ -440,7 +440,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 
 	// ponytail: rows left with no failed leg behind them (a provider since removed) do not ask for a re-run, or a project
 	// could wedge the job's sweep forever. Report them and move on.
-	teardownOutcome(p, cephRevokeFailed || pveTeardownFailed || zonesLeft || kamajiPending > 0 || dbaasPending > 0, time.Now().UTC())
+	teardownOutcome(p, cephRevokeFailed || pveTeardownFailed || zonesLeft || kamajiPending > 0 || dbaasPending > 0)
 	if err := h.svc.Save(ctx, p); err != nil {
 		return err
 	}
@@ -466,18 +466,13 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 }
 
 // teardownOutcome sets the status one teardown pass leaves. DELETED is terminal: nothing looks at it again, so a pass that
-// needs a re-run stays DELETE_IN_PROGRESS with a past schedule, which is what the deletion job selects (the admin's
-// delete-now path sets no schedule of its own).
-func teardownOutcome(p *Project, retry bool, now time.Time) {
-	if !retry {
-		p.Status = StatusDeleted
+// needs a re-run stays DELETE_IN_PROGRESS, keeping the past schedule the deletion job selected it by.
+func teardownOutcome(p *Project, retry bool) {
+	if retry {
+		p.Status = StatusDeleteInProgress
 		return
 	}
-	p.Status = StatusDeleteInProgress
-	if p.ScheduledForDeletionAt == nil {
-		past := now.Add(-deletionGrace)
-		p.ScheduledForDeletionAt = &past
-	}
+	p.Status = StatusDeleted
 }
 
 // teardownShares deletes everything the NAS holds for the project, cached or not, and archives the provider's rows.

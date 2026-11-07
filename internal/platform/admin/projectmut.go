@@ -33,8 +33,8 @@ import (
 //   - GET    /project/{id}/resources/counts            (cache aggregation — already live)
 //
 //   - DELETE /project/{id}      (schedule deletion → CanDelete pre-check → flip SCHEDULED_FOR_DELETION)
-//   - DELETE /project/{id}/now  (delete now → flip DELETE_IN_PROGRESS → async Teardown cascade
-//                                = project.Handler.TeardownProject: cloud resources + provider tenant → DELETED)
+//   - DELETE /project/{id}/now  (delete now → flag DELETE_IN_PROGRESS with a past schedule → the deletion job's
+//                                next sweep runs project.Handler.TeardownProject and retries it until it is clean)
 //
 // IN SCOPE (no cloud, pure datastore): GET /project/{id}/members, PUT /project/{id} (field-set),
 // DELETE /project/{id}/cancel (status flip to ENABLED), and the no-cloud branches of
@@ -673,39 +673,35 @@ func (h *Handler) projectScheduleDeletion(w http.ResponseWriter, r *http.Request
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// projectDeleteNow deletes a project immediately (DELETE /{id}/now): load-or-404, status→DELETE_IN_PROGRESS
-// (persisted), then dispatches the async cloud teardown (unwired → 501 before the flip).
+// projectDeleteNow flags a project for immediate deletion (DELETE /{id}/now): load-or-404, then the same flag a client's
+// delete-now sets, so the deletion job does the teardown on its next sweep. A restart or a failed pass cannot strand the
+// project: what the job selects is the persisted flag, not a worker in this process. Unwired → 501 before any write.
 func (h *Handler) projectDeleteNow(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectDeletePerm) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	existing, ok := h.findProjectOr404(w, r, id)
-	if !ok {
+	if _, ok := h.findProjectOr404(w, r, id); !ok {
 		return
 	}
-	// The async cloud teardown is unwired (tests) → the original 501 BEFORE
-	// the status flip (so a degraded boot never orphans a project in DELETE_IN_PROGRESS with no job).
-	if h.projectCloud == nil || h.projectCloud.Teardown == nil {
+	if h.projectCloud == nil || h.projectCloud.DeleteNow == nil {
 		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 			"project deletion (cloud teardown) not implemented"))
 		return
 	}
-	// status=DELETE_IN_PROGRESS, persisted (the faithful effect before dispatching the teardown).
-	if _, err := h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"status": "DELETE_IN_PROGRESS"}); httpx.WriteError(w, err) {
+	if err := h.projectCloud.DeleteNow(r.Context(), id); httpx.WriteError(w, err) {
 		return
 	}
-	existing["status"] = "DELETE_IN_PROGRESS"
-	// Dispatch the async cloud cascade (fire-and-forget; deletes resources + tenant → marks DELETED).
-	if err := h.projectCloud.Teardown(r.Context(), id); httpx.WriteError(w, err) {
+	updated, err := h.repo.FindDoc(r.Context(), projectCollection, id)
+	if httpx.WriteError(w, err) {
 		return
 	}
 	// TODO(audit): write a DELETE PROJECT scheduled=false admin audit event.
-	httpx.OK(w, shapeDoc(existing))
+	httpx.OK(w, shapeDoc(updated))
 }
 
 // projectCancelDeletion cancels a scheduled deletion (DELETE /{id}/cancel): load-or-404,
-// 400 if DELETE_IN_PROGRESS ("Project is deleting. Cannot cancel deletion"), else status→ENABLED +
+// 400 if DELETE_IN_PROGRESS or DELETED (its cloud resources are going or gone), else status→ENABLED +
 // clear scheduledForDeletionAt, save, return the project. Pure datastore (no cloud). The 404 here uses
 // the "The project with id %s was not found. " message.
 func (h *Handler) projectCancelDeletion(w http.ResponseWriter, r *http.Request) {
@@ -724,6 +720,10 @@ func (h *Handler) projectCancelDeletion(w http.ResponseWriter, r *http.Request) 
 	current, _ := existing["status"].(string)
 	if current == "DELETE_IN_PROGRESS" {
 		httpx.WriteError(w, httpx.BadRequest("Project is deleting. Cannot cancel deletion"))
+		return
+	}
+	if current == "DELETED" {
+		httpx.WriteError(w, httpx.BadRequest("Project is deleted. Cannot cancel deletion"))
 		return
 	}
 	// status=ENABLED, scheduledForDeletionAt cleared. SetFields sets status; clear the watermark by

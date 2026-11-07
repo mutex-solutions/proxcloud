@@ -44,20 +44,14 @@ func TestSortCloudResourcesForDeletionPutsServerBeforeBootVolume(t *testing.T) {
 
 // A pass that needs a re-run must stay where the deletion job looks: DELETED is never looked at again.
 func TestTeardownOutcome(t *testing.T) {
-	now := time.Now().UTC()
+	past := time.Now().UTC().Add(-time.Hour)
 	p := &Project{Status: StatusDeleteInProgress}
-	teardownOutcome(p, false, now)
+	teardownOutcome(p, false)
 	if p.Status != StatusDeleted {
 		t.Fatalf("a clean pass: %s", p.Status)
 	}
-	p = &Project{Status: StatusDeleteInProgress} // the admin's delete-now sets no schedule
-	teardownOutcome(p, true, now)
-	if p.Status != StatusDeleteInProgress || p.ScheduledForDeletionAt == nil || !p.ScheduledForDeletionAt.Before(now) {
-		t.Fatalf("a retry: %+v", p)
-	}
-	past := now.Add(-time.Hour)
 	p = &Project{Status: StatusDeleted, ScheduledForDeletionAt: &past}
-	teardownOutcome(p, true, now)
+	teardownOutcome(p, true)
 	if p.Status != StatusDeleteInProgress || !p.ScheduledForDeletionAt.Equal(past) {
 		t.Fatalf("a retry keeps its schedule: %+v", p)
 	}
