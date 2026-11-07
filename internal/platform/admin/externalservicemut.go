@@ -8,9 +8,9 @@ package admin
 // Flow:
 //
 //	POST /object-store/test   = check a ceph-s3 endpoint and admin key, storing nothing
-//	create(es)                = persist the operator-supplied doc (secret encrypted) — no live
-//	                            validation; the Connection tab's Test button probes the provider
-//	update(id,es)             = look up → merge connection fields → save
+//	create(es)                = persist the operator-supplied doc (secret encrypted). Live validation only for a
+//	                            PUBLIC ceph-s3 row; for others the Connection tab's Test button probes the provider
+//	update(id,es)             = look up → merge connection fields → save (same check when the connection changed)
 //	delete(id)                = in-use guards (project/user/cloudResource → exact 400s)
 //	                            THEN look up (404 if absent) → delete
 //	PUT /{id}/update          = look up (404 if absent) → same merge → save
@@ -76,9 +76,8 @@ func serviceNotFoundErr(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("Service not found: %s", id))
 }
 
-// externalServiceCreate persists the operator-supplied doc (secret encrypted) with no live
-// validation — the connection is exercised by the detail page's Test connection and the live
-// provider reads using the stored creds.
+// externalServiceCreate persists the operator-supplied doc (secret encrypted). Only a PUBLIC ceph-s3 row is checked
+// live (checkPublicCeph); others are exercised by the detail page's Test connection and the live provider reads.
 func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, externalServiceManagePerm) {
 		return
@@ -121,6 +120,10 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	if sec, ok := doc["secret"]; ok && h.esSvc != nil {
 		doc["secret"] = h.esSvc.EncryptSecret(sec)
 	}
+	if herr := h.checkPublicCeph(r.Context(), doc); herr != nil {
+		httpx.WriteError(w, herr)
+		return
+	}
 	if err := h.repo.InsertDocKeepID(r.Context(), externalServiceCollection, doc); httpx.WriteError(w, err) {
 		return
 	}
@@ -147,16 +150,45 @@ func (h *Handler) objectStoreTest(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	if err := client.CheckCephS3(ctx, client.ObjectStoreConfig{
+	if herr := checkObjectStore(r.Context(), client.ObjectStoreConfig{
 		S3Endpoint: body.S3Endpoint, AdminURL: body.AdminAPIURL, Region: body.Region,
 		AdminAccessKey: body.AdminAccessKey, AdminSecretKey: body.AdminSecretKey,
-	}); err != nil {
-		httpx.WriteError(w, httpx.BadRequest("Object store check failed: "+err.Error()))
+	}); herr != nil {
+		httpx.WriteError(w, herr)
 		return
 	}
 	httpx.OK(w, map[string]any{"ok": true})
+}
+
+func checkObjectStore(ctx context.Context, cfg client.ObjectStoreConfig) *httpx.HTTPError {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := client.CheckCephS3(ctx, cfg); err != nil {
+		return httpx.BadRequest("Object store check failed: " + err.Error())
+	}
+	return nil
+}
+
+// checkPublicCeph proves a row new projects would be provisioned on: a stored one that cannot reach RGW fails the
+// bootstrap of every new project.
+func (h *Handler) checkPublicCeph(ctx context.Context, doc pgdoc.M) *httpx.HTTPError {
+	cfg, _ := doc["config"].(map[string]any)
+	es := &externalservice.ExternalService{Config: cfg, Secret: doc["secret"]}
+	if !es.IsCephS3() || doc["status"] != externalservice.StatusPublic {
+		return nil
+	}
+	if h.esSvc != nil {
+		h.esSvc.Decrypt(es)
+	}
+	return checkObjectStore(ctx, es.CephConfig("", "", "", ""))
+}
+
+// cephConnection is what checkPublicCeph's answer depends on, so a write that leaves it alone (quota, features, turning
+// a service off) still works while RGW is down.
+func cephConnection(doc pgdoc.M) string {
+	cfg, _ := doc["config"].(map[string]any)
+	b, _ := json.Marshal([]any{doc["status"], cfg["provider"], cfg["s3Endpoint"], cfg["adminApiUrl"], cfg["region"], doc["secret"]})
+	return string(b)
 }
 
 // externalServiceUpdate is the update path (PUT /service/{id} — the Connection-tab Save): persist
@@ -457,9 +489,16 @@ func (h *Handler) serviceFieldSet(w http.ResponseWriter, r *http.Request, apply 
 		httpx.WriteError(w, serviceNotFoundErr(id))
 		return
 	}
+	connection := cephConnection(doc)
 	if aerr := apply(r, doc); aerr != nil {
 		httpx.WriteError(w, aerr)
 		return
+	}
+	if cephConnection(doc) != connection {
+		if herr := h.checkPublicCeph(r.Context(), doc); herr != nil {
+			httpx.WriteError(w, herr)
+			return
+		}
 	}
 	if err := h.repo.ReplaceDoc(r.Context(), externalServiceCollection, id, doc); httpx.WriteError(w, err) {
 		return
