@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Delete-now frees a project stranded in deletion
+
+**What changed**
+
+- Delete-now (client `DELETE /project/{id}/now` and operator `DELETE /admin/project/{id}/now`, both
+  `project.Service.DeleteNow`) accepts a `DELETE_IN_PROGRESS` project that has no `scheduledForDeletionAt`, and stamps the
+  past schedule the deletion job selects by. The next sweep tears it down and removes the row. A `DELETE_IN_PROGRESS`
+  project that has a schedule is the sweep's to retry and still answers 400 "Project is deleting".
+
+**Why**
+
+- Before PR #76 the operator's delete-now wrote `DELETE_IN_PROGRESS` alone and ran the teardown in a goroutine. A restart
+  or a failed teardown left the row in that status with no schedule, which the sweep never selects. #76 stopped new rows
+  getting there and named delete-now as the way out for old ones, but the status machine of PR #84 refuses delete-now from
+  `DELETE_IN_PROGRESS`, so an old row had no way out at all. No current path writes that status without a schedule, so the
+  exception covers only those rows. Delete-now rather than widening the sweep: the operator decides when a project
+  stranded that long is torn down.
+
+**Diagrams updated:** none (no new component or flow).
+
 ## 2026-11-07: Bootstrap ISOs off shared storage (SB-pre, PR #101)
 
 **What changed**

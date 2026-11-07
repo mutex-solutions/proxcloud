@@ -99,6 +99,23 @@ func TestAdminProjectDeletionLegs(t *testing.T) {
 		t.Fatalf("a clean pass removes the project, got %s", status())
 	}
 
+	// A row flagged by the old admin delete-now has no schedule, so the sweep never selects it: delete-now must still take
+	// it, and the sweep then finishes it. One the sweep is retrying (it has a schedule) stays refused.
+	_, _ = db.C("project").DeleteMany(ctx, pgdoc.M{})
+	_, _ = db.C("project").InsertOne(ctx, pgdoc.M{"_id": "proj-1", "status": "DELETE_IN_PROGRESS"})
+	if n, err := job.ExecuteAll(ctx); err != nil || n != 0 {
+		t.Fatalf("a stranded row is not the sweep's: n=%d err=%v", n, err)
+	}
+	if w := do(wired, "/admin/project/proj-1/now"); w.Code != 200 {
+		t.Fatalf("deleteNow of a stranded row: status=%d body=%s", w.Code, w.Body)
+	}
+	if w := do(wired, "/admin/project/proj-1/now"); w.Code != http.StatusBadRequest {
+		t.Fatalf("deleteNow of a row the sweep retries: status=%d body=%s", w.Code, w.Body)
+	}
+	if n, err := job.ExecuteAll(ctx); err != nil || n != 1 || status() != "" {
+		t.Fatalf("sweep after re-flag: n=%d err=%v status=%s", n, err, status())
+	}
+
 	// Past the point of no return, neither cancel may bring it back.
 	for _, st := range []string{"DELETE_IN_PROGRESS", "DELETED"} {
 		_, _ = db.C("project").DeleteMany(ctx, pgdoc.M{})

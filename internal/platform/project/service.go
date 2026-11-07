@@ -296,8 +296,13 @@ func (s *Service) DeleteNow(ctx context.Context, id string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := CheckTransition(ActionDeleteNow, p.Status); err != nil {
-		return nil, err
+	// DELETE_IN_PROGRESS with no schedule is a row the admin delete-now flagged before it stamped one (#76): the sweep selects
+	// by the schedule, so nothing else would ever finish it. Delete-now gives it the schedule it lacks. One with a schedule
+	// is the sweep's to retry and stays refused.
+	if !(p.Status == StatusDeleteInProgress && p.ScheduledForDeletionAt == nil) {
+		if err := CheckTransition(ActionDeleteNow, p.Status); err != nil {
+			return nil, err
+		}
 	}
 	expect := p.Status
 	p.Status = StatusDeleteInProgress
