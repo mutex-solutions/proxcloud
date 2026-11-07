@@ -100,7 +100,7 @@ func updateBillItems(rc RatingContext, bc BillingContext, res *BillingResource, 
 		// A blind interval (stale cloud state) is written off instead of back-billed on recovery;
 		// every other ineligible state (BUILD, …) keeps its watermark and is back-billed.
 		if res.SkipInterval {
-			advanceWatermark(rc, item)
+			advanceWatermark(rc, item, res)
 		}
 		return
 	}
@@ -117,7 +117,7 @@ func updateBillItems(rc RatingContext, bc BillingContext, res *BillingResource, 
 	case TimeUnitMonth:
 		*item.TimeUnits.Month = diff + *item.TimeUnits.Month
 	}
-	advanceWatermark(rc, item)
+	advanceWatermark(rc, item, res)
 	for i := range results {
 		ppid := results[i].PricePlanRule.ID
 		if applied := findAppliedRule(item, ppid); applied != nil {
@@ -136,9 +136,14 @@ func updateBillItems(rc RatingContext, bc BillingContext, res *BillingResource, 
 	item.Metadata = res.Values
 }
 
-// advanceWatermark moves the rated-up-to mark of the charge's cadence to the cycle timestamp.
-func advanceWatermark(rc RatingContext, item *BillItem) {
+// advanceWatermark moves the rated-up-to mark of the charge's cadence to the cycle timestamp, or to the resource's
+// deletion when that is later: such a row was just rated up to its deletion (getTimeUnitsDiff), so a mark at the cycle
+// would rate the unit between the two again on the next charge.
+func advanceWatermark(rc RatingContext, item *BillItem, res *BillingResource) {
 	ct := rc.CycleTimestamp
+	if res.DeletedAt != nil && res.DeletedAt.After(ct) {
+		ct = *res.DeletedAt
+	}
 	switch rc.TimeUnit {
 	case TimeUnitMinute:
 		item.TimeUnits.MinuteLastRateTime = &ct

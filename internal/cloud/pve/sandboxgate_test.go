@@ -19,10 +19,14 @@ func TestCheckSandboxFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Secure(ctx, p.Workers[0], "10.110.0.11"); err != nil {
+	byName := map[string]SandboxWorker{} // the pass lists the pool in the fake's map order
+	for _, w := range p.Workers {
+		byName[w.Name] = w
+	}
+	if _, err := p.Secure(ctx, byName["w1"], "10.110.0.11"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Secure(ctx, p.Workers[1], ""); err != nil { // fenced, not pinned yet (its Node is still tainted)
+	if _, err := p.Secure(ctx, byName["w2"], ""); err != nil { // fenced, not pinned yet (its Node is still tainted)
 		t.Fatal(err)
 	}
 	before := len(f.writes)

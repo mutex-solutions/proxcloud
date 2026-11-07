@@ -220,6 +220,45 @@
           config: {sandbox: "{{ sandbox }}"}
           secret: {sandboxKubeconfig: "{{ lookup('ansible.builtin.file', pc_gen ~ '/sandbox-firewall.kubeconfig') }}"}
       no_log: true
+    # The provider tenants create sandboxes on, with the portal's kubeconfig (stage 55). Stored DISABLED: it may go live
+    # only while its release gates hold, and the fence gate needs a sync to have fenced the workers first. The operator
+    # checks the gates and sets the status in the console; a re-run never touches an existing sandbox row (renamed or
+    # not), so an operator's DISABLED stays and an edited template list is kept.
+    - name: Register the sandbox provider
+      when:
+        - pc_sandbox_on
+        - (pc_gen ~ '/sandbox-portal.kubeconfig') is file
+        # by kind, not by name: an operator may rename the row in the console
+        - "'sandbox' not in (pc_services.json.data | map(attribute='config.provider', default='') | list)"
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service"
+        method: POST
+        body:
+          name: "{{ pc.provider.name }} Sandboxes"
+          type: CLOUD
+          status: DISABLED
+          config:
+            provider: sandbox
+            region: "{{ pc.provider.region }}"
+            regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
+            services: {sandbox: "{{ {pc.provider.region: true} }}"}
+            sandbox:
+              proxmoxServiceId: "{{ pc_service.id }}"
+              # the site's list replaces the default one (pc merges dicts, which would always keep python)
+              templates: "{{ ((proxcloud | default({})).sandbox | default({})).templates | default(pc.sandbox.templates) }}"
+              limits: "{{ pc.sandbox.limits }}"
+          secret: {kubeconfig: "{{ lookup('ansible.builtin.file', pc_gen ~ '/sandbox-portal.kubeconfig') }}"}
+      register: pc_sbx_provider
+      no_log: true
+    - name: Say how the sandbox provider goes live
+      when: pc_sbx_provider is changed
+      ansible.builtin.debug:
+        msg: >-
+          {{ pc.provider.name }} Sandboxes is registered DISABLED. Once a sync has fenced the workers (the
+          proxcloud.io/unsecured taint is gone), open it under Cloud providers, run "Check release gates" and set the
+          status to PUBLIC; tenants get sandboxes once a project has it attached.
     - name: Test the connection with the platform token
       proxcloud_api:
         access_key: "{{ api_key.id }}"

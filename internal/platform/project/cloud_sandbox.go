@@ -531,16 +531,25 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 	return left, failed
 }
 
-// sandboxServiceOf returns the id of the project's first sandbox service ("" if none). A SANDBOX
-// create that names no service goes there instead of the project's default (Proxmox) one, so
-// API and MCP callers do not have to look the id up.
+// sandboxServiceOf returns the id of the project's first sandbox service ("" if none), a live one before a DISABLED
+// one. A SANDBOX create that names no service goes there instead of the project's default (Proxmox) one, so API and
+// MCP callers do not have to look the id up. A DISABLED one still counts, so its create is refused as unavailable
+// (503) rather than handed to Proxmox, which answers that it cannot run sandboxes at all.
 func (h *Handler) sandboxServiceOf(ctx context.Context, p *Project) string {
+	disabled := ""
 	for _, id := range p.ServiceIDs() {
-		if es, err := h.esSvc.Get(ctx, id); err == nil && es != nil && es.IsSandbox() && !es.IsDisabled() {
+		es, err := h.esSvc.Get(ctx, id)
+		if err != nil || es == nil || !es.IsSandbox() {
+			continue
+		}
+		if !es.IsDisabled() {
 			return id
 		}
+		if disabled == "" {
+			disabled = id
+		}
 	}
-	return ""
+	return disabled
 }
 
 // refreshSandboxes live-reconciles the project's SANDBOX cache off the sandbox cluster: the

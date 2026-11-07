@@ -145,9 +145,9 @@ Stage 50 cannot change the machines of a running cluster: a `ProxmoxMachineTempl
 
 ## Sandbox cluster (split mode)
 
-`proxcloud.sandbox.enabled: true` with `mode: split` builds the platform's sandbox cluster, where tenant code will run
-under gVisor ([managed-sandbox.md](managed-sandbox.md)). Nothing reaches it yet: the `sandbox` provider kind is refused
-until a later phase.
+`proxcloud.sandbox.enabled: true` with `mode: split` builds the platform's sandbox cluster, where tenant code runs
+under gVisor ([managed-sandbox.md](managed-sandbox.md)). Tenants reach it through the sandbox provider stage 60
+registers, once the operator sets it live (step 2).
 
 1. Set `proxcloud.sandbox.network` ([defaults.yml](../installer/playbooks/group_vars/all/defaults.yml)): a subnet outside
    `network.cidr_pool`, its gateway, the worker range (`nodes`), the cluster's LoadBalancer range (`metallb`) and DNS
@@ -171,7 +171,12 @@ until a later phase.
    also gives the portal token the `ProxCloudSandboxGuard` role on the sandbox pool and checks it. Stage 60 writes the
    subnet to the Proxmox provider's `network.sandboxCidrs` and the workers to `config.sandbox` with that kubeconfig;
    the next sync adds the isolation drops and the workers' VM firewall, and takes the `proxcloud.io/unsecured` taint
-   off each worker once it is fenced and 20 minutes old (`sandbox.unsecured_min_age_minutes`).
+   off each worker once it is fenced and 20 minutes old (`sandbox.unsecured_min_age_minutes`). Stage 55 also keeps
+   the portal service account's `generated/sandbox-portal.kubeconfig`, and stage 60 registers the sandbox provider
+   `<provider name> Sandboxes` with it, stored `DISABLED` (templates and limits from `sandbox.templates` and
+   `sandbox.limits`; a site's `templates` replace the default `python` one). Once the taint is off, open it under Cloud
+   providers, run "Check release gates" and set the status to `PUBLIC`. A re-run leaves an existing sandbox provider
+   alone, also one renamed in the console.
 3. The portal creates the default EVPN zone with the first tenant network. On a first install stage 55 therefore says
    SKIPPED; create a network, then run stage 55 again (and stage 60 if the provider was registered before
    `sandbox.enabled`). Until stage 60 and one sync have run, the workers have no isolation drops and no VM firewall,

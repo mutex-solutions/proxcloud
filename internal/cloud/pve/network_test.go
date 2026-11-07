@@ -142,17 +142,17 @@ func TestZoneIDFor(t *testing.T) {
 func TestIsolationRules(t *testing.T) {
 	const pool, comment = "10.100.0.0/16", isolationComment
 	if got, want := isolationRules(pool, nil, nil, comment), []FirewallRule{
-		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
-		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("no blocked: got %+v", got)
 	}
 	got := isolationRules(pool, []string{"192.0.2.0/24", "198.51.100.0/24"}, nil, comment)
 	want := []FirewallRule{
-		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
-		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
-		{Type: "forward", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Comment: comment},
-		{Type: "in", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Comment: comment},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Enable: 1, Comment: comment},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
@@ -166,12 +166,12 @@ func TestIsolationRulesSandbox(t *testing.T) {
 	const pool, comment = "10.100.0.0/16", isolationComment
 	got := isolationRules(pool, []string{"192.0.2.0/24"}, []string{"10.110.0.0/24", "10.111.0.0/24"}, comment)
 	want := []FirewallRule{
-		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
-		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
-		{Type: "forward", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,10.110.0.0/24,10.111.0.0/24", Comment: comment},
-		{Type: "in", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,10.110.0.0/24,10.111.0.0/24", Comment: comment},
-		{Type: "forward", Action: "DROP", Source: "10.110.0.0/24,10.111.0.0/24", Dest: pool + ",192.0.2.0/24", Comment: comment},
-		{Type: "in", Action: "DROP", Source: "10.110.0.0/24,10.111.0.0/24", Dest: pool + ",192.0.2.0/24", Comment: comment},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,10.110.0.0/24,10.111.0.0/24", Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,10.110.0.0/24,10.111.0.0/24", Enable: 1, Comment: comment},
+		{Type: "forward", Action: "DROP", Source: "10.110.0.0/24,10.111.0.0/24", Dest: pool + ",192.0.2.0/24", Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: "10.110.0.0/24,10.111.0.0/24", Dest: pool + ",192.0.2.0/24", Enable: 1, Comment: comment},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
@@ -260,7 +260,7 @@ func isolationFakeNodes(t *testing.T, rules []FirewallRule, extra map[string]fun
 			writes++
 			rules = append([]FirewallRule{{
 				Type: r.PostFormValue("type"), Action: r.PostFormValue("action"), Source: r.PostFormValue("source"),
-				Dest: r.PostFormValue("dest"), Comment: r.PostFormValue("comment"),
+				Dest: r.PostFormValue("dest"), Comment: r.PostFormValue("comment"), Enable: map[string]int{"1": 1}[r.PostFormValue("enable")],
 			}}, rules...)
 			renumber()
 			fmt.Fprint(w, `{"data":null}`)
@@ -317,6 +317,43 @@ func TestReconcileIsolationIdempotent(t *testing.T) {
 	}
 	if *writes != 0 {
 		t.Fatalf("%d writes on an up-to-date rule set", *writes)
+	}
+}
+
+// A rule disabled by hand (enable 0) counts as missing: the next reconcile puts every rule back enabled, in order.
+func TestReconcileIsolationRepairsDisabledRules(t *testing.T) {
+	own := "10.100.0.0/24,10.100.1.0/24"
+	want := append(projectIsolationRules("p1", strings.Split(own, ",")),
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"}, nil, isolationComment)...)
+	for _, off := range []int{0, 3} { // a project ACCEPT, a provider DROP
+		current := slices.Clone(want)
+		current[off].Enable = 0
+		srv, rules, writes := isolationFake(t, current)
+		if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if *writes == 0 {
+			t.Fatalf("rule %d disabled: no write", off)
+		}
+		if !slices.EqualFunc(*rules, want, sameLiveRule) {
+			t.Fatalf("rule %d disabled: rules after the reconcile:\n%+v\nwant:\n%+v", off, *rules, want)
+		}
+	}
+}
+
+// A disabled copy of a project ACCEPT above its enabled twin: the reconcile deletes the disabled copy, not the twin.
+func TestReconcileIsolationDisabledAcceptAboveEnabledTwin(t *testing.T) {
+	own := "10.100.0.0/24,10.100.1.0/24"
+	want := append(projectIsolationRules("p1", strings.Split(own, ",")),
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"}, nil, isolationComment)...)
+	off := want[0]
+	off.Enable = 0
+	srv, rules, _ := isolationFake(t, append([]FirewallRule{off}, want...))
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.EqualFunc(*rules, want, sameLiveRule) {
+		t.Fatalf("rules after the reconcile:\n%+v\nwant:\n%+v", *rules, want)
 	}
 }
 
