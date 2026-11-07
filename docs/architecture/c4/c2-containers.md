@@ -137,7 +137,7 @@ flowchart TB
 | HA rules and replication | Protected VMs with replication and node-affinity rules. | Implemented |
 | Platform-owned VMs | Management cluster VMs and the RustFS VM in a dedicated system pool, the platform token has `NoAccess` there. | Implemented |
 | Services cluster VMs | The services cluster, in the same system pool. | Implemented |
-| Sandbox cluster | A platform-owned Kamaji cluster from the cluster chart: control plane on the services cluster, workers in pool `proxcloud-sandbox` on their own vnet, gVisor (`runsc`, systrap) for tenant code, a Cilium egress guardrail, no CSI token and no NAS dataset. Its CAPMOX token sees only a node-local ISO store. Spike results: [managed-sandbox.md](../../managed-sandbox.md). | Planned |
+| Sandbox cluster | A platform-owned Kamaji cluster from the cluster chart: control plane on the services cluster, workers in pool `proxcloud-sandbox` on their own vnet, gVisor (`runsc`, systrap) for tenant code, a Cilium egress guardrail, no CSI token and no NAS dataset. Its CAPMOX token sees only a node-local ISO store. Release gates: per-NIC VM firewall and isolation drops for the sandbox CIDR in both directions, NodeRestriction on its control plane, single-stack IPv4. Spike results: [managed-sandbox.md](../../managed-sandbox.md). | Planned |
 | Proxmox Backup Server | Operator nightly backups, then tenant backup schedules and restore. | Planned |
 
 ### Storage tiers

@@ -22,7 +22,14 @@ and rules: [README.md](README.md#maintenance-rule).
 - It also showed what is not there yet and why the element stays Planned: from the worker's own network namespace the PVE
   API, the NAS and the management host are reachable (the per-NIC VM firewall of SB2b is a release gate), Kamaji tenant
   control planes run without the `NodeRestriction` admission plugin (true of every managed cluster today), and Cilium's
-  Gateway API does not work with the chart's kube-proxy setup, so TLS for sandbox hostnames needs another terminator.
+  Gateway API does not work with the chart's kube-proxy setup, so TLS for sandbox hostnames ends in `sandbox-proxy`
+  itself (D15: Go TLS listener, wildcard Secret issued by cert-manager on the services cluster).
+- A review of the spike added three release gates the diagram's Planned element now carries. Without NodeRestriction a
+  node credential can create a pod bound to itself that mounts any Secret and then read it, so one worker reads every
+  tenant's secrets. Tenant VMs reach the sandbox workers on every port (one VRF holds both, the isolation rules do not
+  name the sandbox CIDR, the worker NIC has no VM firewall), and forged Cilium VXLAN packets can skip sandbox ingress
+  policy, so the sandbox CIDR must be dropped in both directions. Sandbox traffic reaches the NAS as a node address after
+  the exit node's SNAT, which the exports accept. And the guardrail is IPv4 only, so the cluster must be single-stack.
 - The bootstrap ISO's store is chosen by the cluster token's ACL (CAPMOX takes the first ISO store the token can see), so
   the sandbox token is granted a node-local store only. That is the trust boundary the C2b row names.
 

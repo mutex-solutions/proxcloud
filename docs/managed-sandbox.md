@@ -116,7 +116,32 @@ What this shows:
   tenants' control planes and database load balancers. The portal's cluster isolation rules match only the tenant CIDR
   pool, so a vnet outside it (as the plan wants for `pcsbx`) gets no drop rule at all. A gVisor escape on this cluster
   today is a foothold on the management network. This is SB2b (per-NIC VM firewall), and it blocks any tenant use.
+- **The NAS accepts that foothold as a node.** Traffic from the sandbox vnet leaves through the EVPN exit node, which
+  SNATs it to its own node address. The NAS exports (templates, capacity, backup) admit the node subnet, so code that
+  escapes gVisor can mount every VM disk on the NAS stores, every backup archive and the ISO store. No export rule can
+  tell the two apart once the source is rewritten; the drop has to happen before the exit node (SB2b, and the sandbox
+  CIDR in the isolation DROP set).
 - Rejects from the exit node's own addresses show that "refused" is not "blocked": the packet got there.
+
+**The other direction: tenant VMs to the sandbox workers.** The table above covers only traffic leaving a sandbox.
+Traffic arriving at a sandbox worker from a tenant is not covered either, read from the lab configuration (not probed):
+
+- The EVPN zone has one VRF per node, and on every node that VRF holds the routes of every tenant vnet and of the
+  sandbox vnet together, so a tenant VM routes to the sandbox worker through its own gateway.
+- The portal's isolation rules drop only tenant pool to tenant pool and tenant pool to the management ranges. The
+  sandbox CIDR is in neither set, so nothing drops tenant to sandbox.
+- The worker's NIC has no `firewall=1`, so no per-VM rule applies either.
+
+So any tenant VM reaches a sandbox worker on every port: kubelet :10250, every NodePort, and Cilium's VXLAN UDP 8472.
+A packet forged onto 8472 is decapsulated by Cilium as if it came from another node, with a source identity the sender
+chooses, and can skip the sandbox ingress policy. The guardrail cannot defend against this; only a drop in front of the
+worker can. The sandbox CIDR must be in the isolation DROP set in both directions, and the worker NIC needs
+`firewall=1` with an inbound default of drop (SB2b).
+
+**The guardrail is IPv4 only.** Every rule in it names IPv4 ranges (`0.0.0.0/0` minus the private ranges), so an IPv6
+path out of a sandbox would match none of them. The sandbox cluster must run single-stack IPv4 (Cilium IPv6 off, no
+IPv6 on the vnet). This is a precondition, not a default: SB2a has to check it, and adding IPv6 means writing the
+IPv6 half of the guardrail first.
 
 ### 0.4 Exec goes through konnectivity
 
@@ -136,7 +161,7 @@ into one, and were refused secrets. `kubectl auth can-i create pods/exec` answer
 
 | EE | Here | Why |
 |---|---|---|
-| `cilium-node-config.yaml` (`bpf-lb-sock-hostns-only`) is a prerequisite | **not applied** | The chart runs Cilium without kube-proxy replacement, so `bpf-lb-sock` is already `false` and kube-proxy's iptables rules translate ClusterIPs on the host side, which gVisor traffic crosses. Cluster DNS and ClusterIPs worked from a gVisor pod without it. It becomes required if the sandbox cluster ever turns on kube-proxy replacement (see §0.6, Gateway). |
+| `cilium-node-config.yaml` (`bpf-lb-sock-hostns-only`) is a prerequisite | **not applied** | The chart runs Cilium without kube-proxy replacement, so socket LB (`bpf-lb-sock`) is off and nothing tries to translate inside gVisor's own network stack, which a socket hook cannot see into. Cilium still translates ClusterIPs per packet in BPF at the pod's veth, which every gVisor packet crosses, so cluster DNS and ClusterIPs worked from a gVisor pod without the file. It becomes required if the sandbox cluster ever turns on kube-proxy replacement, which brings socket LB back (see §0.6, Gateway). |
 | `node-setup` init container copies envd and `sandbox-init` from a private registry image; pull secret created by hand | removed for the spike | The runtime image comes with SB5 (built in this repository's CI). Without it a sandbox is a plain pod, which is enough to test the runtime and the network. |
 | runsc platform left at the default | `platform = "systrap"` written to `runsc.toml` | Make the choice explicit; systrap needs no `/dev/kvm` in the worker, which a nested or a cloud VM may not have. |
 | NVIDIA toolkit and nvproxy branch | left out | The lab has no GPU (SB9). |
@@ -155,8 +180,9 @@ chosen by the cluster token's ACL**: give the token `PVEDatastoreAdmin` on a nod
 nothing on the shared one. On the lab the ISO was uploaded to the node's `local` dir store and never touched the NAS.
 Because a token's rights are its user's intersected with its own, `capmox@pve` needed the same role on that store; it was
 added next to the user's inherited `ProxCloudCAPI` there so nothing else it had on that path was shadowed, and checked
-with `pveum user token permissions` and `pveum user permissions`. If the token sees two `iso` stores, the order of that
-listing decides.
+with `pveum user token permissions` and `pveum user permissions`. If the token sees two `iso` stores, the pick is not
+stable: PVE builds that listing in Perl hash order, which changes between calls, so the store alternates (PR #101). One
+`iso` store per cluster token is the only reliable setting.
 CAPMOX does detach and delete it: once the Machine is Available with a NodeRef it sets `ide0: none,media=cdrom` and
 deletes `user-data-<vmid>.iso` (that delete needs `Datastore.Allocate`, which `PVEDatastoreAdmin` has). Measured: the
 ISO existed for 111 s. This is the grant SB-pre (PR #101) gives every cluster token, exercised here by CAPMOX itself
@@ -183,9 +209,22 @@ control planes it is off**: Kamaji's default `admissionControllers` list (copied
 | remove a taint an admin set | **allowed** | refused |
 
 It was turned on for the spike cluster by setting `KamajiControlPlane.spec.admissionControllers` to Kamaji's list plus
-`NodeRestriction`; the API server rolled in about a minute and the table's right column was then measured. This affects
-every managed Kubernetes cluster, not only the sandbox one: a compromised worker can drop taints that keep workloads
-off it and claim `node-restriction.kubernetes.io/` labels. The chart change is small and needs its own PR.
+`NodeRestriction`; the API server rolled in about a minute and the table's right column was then measured.
+
+Labels and taints are the small part. The Node authorizer lets any node credential write Node objects and create pods;
+NodeRestriction is what limits that to the node's own object and to mirror pods without secrets. Without it, a node's
+own kubelet credential can:
+
+- change or delete **other** nodes (their labels, taints, status), and
+- create a pod bound to itself that mounts any Secret or uses any service account in any namespace. The Node authorizer
+  grants a node read access to the secrets of pods bound to it, so the kubelet can then read that Secret.
+
+So one compromised worker reads every Secret in the cluster, one pod at a time. In a shared sandbox cluster those
+secrets belong to other tenants and to the platform (`proxcloud-system`), so the step crosses tenants. **NodeRestriction
+is a release gate for the sandbox cluster**, and it affects every managed Kubernetes cluster as well: the chart change
+is small and needs its own PR. Any placement decision (dedicated nodes, `sandbox-system` nodes) must use labels under
+`node-restriction.kubernetes.io/`, the only prefix a kubelet cannot set on itself once NodeRestriction is on; a plain
+label like `proxcloud.io/tenant` can be claimed by the node it is meant to keep tenants off.
 
 **Does Cilium's Gateway API work with the chart's Cilium config?** No. With `gatewayAPI.enabled: true` alone the
 operator logs `Gateway API support requires either kube-proxy-replacement or enable-node-port enabled` and the
@@ -193,10 +232,14 @@ operator logs `Gateway API support requires either kube-proxy-replacement or ena
 MetalLB address (the L2 announcement reached the EVPN fabric), but kube-proxy installs a `REJECT` for the Gateway's
 endpoint-less Service, so every connection is refused, from the node and from the exit node. A Cilium Gateway on this
 cluster needs kube-proxy replacement, which means dropping Kamaji's kube-proxy addon, and then socket LB, which brings
-back EE's `bpf-lb-sock-hostns-only` for gVisor. gVisor cluster DNS still worked with `nodePort` on. For D15 the cheaper
-route is an ordinary TLS terminator (Envoy or HAProxy Deployment behind MetalLB on the `sandbox-system` nodes) in front of
-`sandbox-proxy`, keeping the chart's Cilium. Gateway API CRDs v1.3.0 were installed for the test; the Cilium values went
-back to the chart's afterwards.
+back EE's `bpf-lb-sock-hostns-only` for gVisor. gVisor cluster DNS still worked with `nodePort` on. Gateway API CRDs
+v1.3.0 were installed for the test; the Cilium values went back to the chart's afterwards.
+
+**D15, as recorded in the sandbox plan after this spike:** TLS ends inside `sandbox-proxy` itself, a Go TLS listener
+serving the wildcard certificate from a Secret and reloading it when the Secret changes. cert-manager on the services
+cluster issues the certificate and syncs the Secret into the sandbox cluster. No Gateway, no ingress controller and no
+separate terminator Deployment, and the chart's Cilium stays as it is. The plan's author chose this; the owner has not
+reviewed it yet.
 
 Not tested here: Zot reloading `accessControl`, nvproxy on Pascal.
 
@@ -215,12 +258,21 @@ Not tested here: Zot reloading `accessControl`, nvproxy on Pascal.
 
 ### 0.8 Consequences for the next phases
 
-1. **SB2b stays a release gate.** Without a VM-level firewall on the workers, a node-level foothold reaches the PVE API,
-   the NAS and the management host (§0.3).
-2. **SB-pre** (PR #101) mints cluster tokens on the node-local ISO store; §0.6 is a live CAPMOX run of that grant. The
-   sandbox cluster's token gets the same.
-3. **NodeRestriction**: add it to the chart's `KamajiControlPlane` for every cluster, as its own fix.
-4. **D15**: plan a TLS terminator Deployment rather than Cilium Gateway, unless the sandbox cluster moves to kube-proxy
-   replacement.
-5. **D10 and pricing**: smallest sandbox 1 vCPU under systrap.
-6. SB2a does not need EE's `cilium-node-config.yaml` on this chart.
+Release gates (no tenant code on the sandbox cluster until all hold):
+
+1. **SB2b, in both directions.** Without a VM-level firewall on the workers, a node-level foothold reaches the PVE API,
+   the NAS (as a node address, through the exit node's SNAT) and the management host, and every tenant VM reaches the
+   workers on any port, VXLAN included (§0.3). The sandbox CIDR goes into the isolation DROP set both ways, and the
+   worker NIC gets `firewall=1` with inbound drop by default.
+2. **NodeRestriction on the sandbox control plane**, with placement on `node-restriction.kubernetes.io/` labels only
+   (§0.6). Add it to the chart's `KamajiControlPlane` for every cluster, as its own fix.
+3. **Single-stack IPv4** on the sandbox cluster and vnet while the guardrail names only IPv4 ranges (§0.3).
+
+Other consequences:
+
+4. **SB-pre** (PR #101) mints cluster tokens on the node-local ISO store; §0.6 is a live CAPMOX run of that grant. The
+   sandbox cluster's token gets the same, with exactly one `iso` store visible.
+5. **D15**: TLS ends in `sandbox-proxy` (Go listener, wildcard Secret from cert-manager on the services cluster), not in
+   a Cilium Gateway or a separate terminator (§0.6).
+6. **D10 and pricing**: smallest sandbox 1 vCPU under systrap.
+7. SB2a does not need EE's `cilium-node-config.yaml` on this chart, as long as kube-proxy replacement stays off (§0.5).
