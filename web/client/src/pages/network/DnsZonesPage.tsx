@@ -39,6 +39,7 @@ export default function DnsZonesPage() {
   const [open, setOpen] = useState<CloudResource | null>(null)
   const [record, setRecord] = useState(emptyRecord)
   const [deleting, setDeleting] = useState<CloudResource | null>(null)
+  const [deletingRecord, setDeletingRecord] = useState<RRSet | null>(null)
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["cloud", pid, "DNS_ZONE"] }).then(() => refetch())
   const action = <T,>(r: CloudResource, act: string, body?: Record<string, unknown>) =>
@@ -84,7 +85,10 @@ export default function DnsZonesPage() {
   })
   const removeRecord = useMutation({
     mutationFn: (r: RRSet) => action(open!, "DELETE_RECORD", { name: r.name, type: r.type }),
-    onSuccess: () => void records.refetch(),
+    onSuccess: () => {
+      setDeletingRecord(null)
+      void records.refetch()
+    },
     onError: (e: Error) => toast.error(e.message),
   })
   const remove = useMutation({
@@ -149,7 +153,7 @@ export default function DnsZonesPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Create zone</DialogTitle>
-            <DialogDescription>A zone name can be held by one project only.</DialogDescription>
+            <DialogDescription>A zone name can be held by one project only, and it cannot sit above or below another project's zone.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-1">
             <Label htmlFor="dns-zone">Domain</Label>
@@ -164,7 +168,15 @@ export default function DnsZonesPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!open} onOpenChange={(o) => !o && setOpen(null)}>
+      <Dialog
+        open={!!open}
+        onOpenChange={(o) => {
+          if (!o) {
+            setOpen(null)
+            setRecord(emptyRecord) // a draft for this zone must not be saved into the next one
+          }
+        }}
+      >
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>{open ? zone(open).name : ""}</DialogTitle>
@@ -188,7 +200,7 @@ export default function DnsZonesPage() {
                     <td className="break-all">{r.records.map((x) => x.content).join(", ")}</td>
                     <td className="text-right">
                       {apexNS(r) ? null : (
-                        <Button variant="ghost" size="sm" aria-label={`Delete ${r.name} ${r.type}`} onClick={() => removeRecord.mutate(r)}>
+                        <Button variant="ghost" size="sm" aria-label={`Delete ${r.name} ${r.type}`} onClick={() => setDeletingRecord(r)}>
                           <Trash2 className="size-4" />
                         </Button>
                       )}
@@ -228,6 +240,21 @@ export default function DnsZonesPage() {
           </div>
           <DialogFooter>
             <Button disabled={save.isPending || !record.content.trim()} onClick={() => save.mutate()}>Save record</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deletingRecord} onOpenChange={(o) => !o && setDeletingRecord(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {deletingRecord?.type} records of {deletingRecord?.name}?</DialogTitle>
+            <DialogDescription>
+              All of them go, and this cannot be undone: {deletingRecord?.records.map((x) => x.content).join(", ")}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeletingRecord(null)}>Cancel</Button>
+            <Button variant="destructive" disabled={removeRecord.isPending} onClick={() => removeRecord.mutate(deletingRecord!)}>Delete records</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

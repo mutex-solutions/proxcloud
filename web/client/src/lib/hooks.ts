@@ -204,6 +204,8 @@ export type CloudFeature =
   | "consoleLog"
   | "volumeSnapshots"
   | "serverDiskSnapshots"
+  | "serverBackups"
+  | "imageImport"
   | "spreadGroups"
   | "publicIp"
 

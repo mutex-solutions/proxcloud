@@ -10,7 +10,7 @@
   vars:
     vm_config: "VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options"
     roles:
-      ProxCloudPlatform: "Sys.Audit Sys.Console Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.GuestAgent.Unrestricted VM.Migrate VM.PowerMgmt VM.Replicate VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Mapping.Audit Mapping.Use"
+      ProxCloudPlatform: "Sys.AccessNetwork Sys.Audit Sys.Console Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Backup VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.GuestAgent.Unrestricted VM.Migrate VM.PowerMgmt VM.Replicate VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Mapping.Audit Mapping.Use"
       ProxCloudCAPI: "Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
       ProxCloudCSI: "VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit"
       ProxCloudImages: "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
@@ -36,6 +36,8 @@
       - {path: /nodes, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
       - {path: /storage, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
       - {path: /sdn/zones/localnetwork, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
+    # Image import deletes what it downloaded, and deleting a file takes Datastore.Allocate. Only on this store.
+    nas_acls: "{{ [{'path': '/storage/' ~ pc.nas.names.templates, 'role': 'PVEDatastoreAdmin', 'propagate': 0, 'user': 'proxcloud@pve', 'token': 'proxcloud@pve!platform'}] if pc.nas.host | length > 0 and 'templates' in pc.nas.exports else [] }}"
     # mode=split: what the services cluster and the per-cluster tokens of tenant clusters hang off.
     # Unexercised on a lab so far: see "Managed Kubernetes" in docs/proxmox-permissions.md.
     split_roles:
@@ -162,5 +164,5 @@
         body_format: form-urlencoded
         body: "{{ item }}"
       changed_when: true
-      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + (split_acls if pc.mode == 'split' else [])) }}"
+      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls if pc.mode == 'split' else [])) }}"
       loop_control: {label: "{{ item.path }} {{ item.roles }}"}

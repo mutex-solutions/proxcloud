@@ -137,9 +137,10 @@ func (r *Repo) Update(ctx context.Context, res *CloudResource) (*CloudResource, 
 		if err != nil || !found {
 			return err
 		}
-		// OCC guard: proceed only when stored updatedAt ≤ incoming. A missing timestamp on
-		// either side rejects the write.
-		if cur.UpdatedAt == nil || res.UpdatedAt == nil || cur.UpdatedAt.After(*res.UpdatedAt) {
+		// OCC guard: proceed only when stored updatedAt ≤ incoming. An incoming write without a
+		// timestamp is rejected. A stored row without one is older than any read: rejecting it
+		// would leave the row out of every sync, for good.
+		if res.UpdatedAt == nil || (cur.UpdatedAt != nil && cur.UpdatedAt.After(*res.UpdatedAt)) {
 			return nil // OCC reject (DB newer) — caller re-reads latest
 		}
 		if _, err := r.resources.SetByID(tc, id, toDbRecord(res), nil); err != nil {

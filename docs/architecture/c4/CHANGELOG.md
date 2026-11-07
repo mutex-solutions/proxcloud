@@ -24,6 +24,228 @@ and rules: [README.md](README.md#maintenance-rule).
 - Preflight still refused split mode with a message from before it existed, so the documented command could not start.
 
 **Diagrams updated:** none; no container or relationship changed.
+## 2026-11-07: Protected servers on shared storage
+
+**What changed**
+
+- `ProtectableDisks` takes disks that are all on shared storage as well as all on ZFS. Such a server gets the HA resource alone:
+  no replication job, no node-affinity rule, `mode: shared` on its state, and no `server_protection` bill line. A disk that
+  would not follow it (`refuseUnreplicable`) is refused either way.
+
+**Why**
+
+- On a Full-tier site every server sits on Ceph, so Protected could not be sold there at all, and HA needs nothing from the
+  replication machinery when every node already reaches the disks. There is no replica to bill. Whether to charge for HA
+  on shared storage is an operator decision still to be made.
+
+**Diagrams updated:** `c3-components.md` (Replication and HA row).
+
+## 2026-11-07: A node that is down loses no rows
+
+**What changed**
+
+- `Client.ClusterResources` marks VM rows of a node that is not online. `providers.UnreadKeeper` is a new optional provider
+  capability: Reconcile keeps a cached row whose object is listed but cannot be read. The server, volume and image sync
+  providers implement it. A server on a down node reads `UNKNOWN`, with all else unchanged.
+- Power actions on a down node's VM and `pve.IsNodeUnreachable` errors answer 409. `VnetInUse` and `SecurityGroupInUse` refuse
+  while a VM of the project cannot be read. A template copy on a down node is not offered.
+
+**Why**
+
+- A node loss drill on Ceph: PVE drops the name of a dead node's VMs after about five minutes, and the sync took a VM with no
+  name for one that is not there yet. Servers, volumes and images were archived as deleted while the data sat safely on RBD,
+  then came back as new resources when the node returned. Until then the portal said `ACTIVE` and billed a dead VM, a full
+  sync wiped its addresses, one unreadable VM stopped the volume sync of its whole project, and a stop answered 200.
+- The node is the only thing that knows, so one check where the list is read covers every caller.
+
+**Diagrams updated:** `c3-components.md` (Reconcile row).
+## 2026-11-07: Provider actions are audited; a 502 hides its cause from tenants
+
+**What changed**
+
+- Share, managed Kubernetes, managed database and bucket settings actions write an audit event on success, in one place in
+  `cloudAction` through `cloudResourceAudit`. Plain reads do not. Taking a kubeconfig or a database's connection info does.
+- About 30 sites in `internal/platform/project` stopped returning a raw upstream error on a 502. What the tenant can act on
+  stays: a `ConflictError` is a 409 with its text, a full storage is a 409, and PVE's 400 on a firewall rule names the field.
+
+**Why**
+
+- Who changed a bucket policy or took a kubeconfig could not be traced, unlike a DNS record. A wrapper at the dispatch covers
+  every action, including those added later.
+- Raw errors carried the API's address, and on a proxied call a node's. Some user-facing refusals in `internal/cloud/pve`
+  were plain errors relying on that passthrough, so they became `ConflictError`. A test scans the package for new raw sites.
+
+**Diagrams updated:** none.
+## 2026-11-07: The console proves a ceph-s3 row before storing it
+
+**What changed**
+
+- `POST /admin/service` and the field-set PUTs run `CheckCephS3` on a `PUBLIC` `ceph-s3` row, for an update only when its
+  status, endpoints, region or keys changed. A failed check is a 400 and nothing is stored.
+- The Add dialog has a **Test connection** button for `ceph-s3`, calling `POST /admin/service/object-store/test`.
+
+**Why**
+
+- The installer checked before registering, and the console did not. A form typo stored a `PUBLIC` row, which blocks the
+  provisioning of every new project. The check sits in the API so that every console path gets it. A write that leaves the
+  connection alone skips it, or an RGW outage would stop an operator from turning the service off.
+
+**Diagrams updated:** none.
+## 2026-11-07: A broken NAS no longer blocks an address no export lists
+
+**What changed**
+
+- The address release guard takes only what `shareNetworks` can put on an export: public addresses and cluster addresses
+  on a shared worker pool. Both now read the same `onExport` rule.
+
+**Why**
+
+- Every cluster address went through the guard, including one on a project network, which the subnet covers. A broken or
+  disabled TrueNAS on the project then blocked the release of a cluster with no dataset, against what `docs/managed-k8s.md`
+  promises. Addresses an export can list still fail closed, because releasing one would let another tenant inherit access.
+
+**Diagrams updated:** none.
+## 2026-11-07: Holders survive a lost answer from PVE
+
+**What changed**
+
+- `KeepServerVolumes` keeps the holder lock until it expires when a move may still be running, the same doubt the carrier
+  path already acted on. `taskRefused` is the one rule for telling a refusal from a lost answer.
+- `newHolder` on a create POST with no answer removes the VM only if it is in the project's pool and as blank as the create
+  leaves it.
+- A VOLUME pass looks for a holder on the other nodes before calling it gone. A node that cannot answer fails the pass.
+
+**Why**
+
+- The lock was released with the move possibly running, so a later `dropEmptyHolder` could see the holder empty and destroy
+  it as the disk landed. A disk lost that way is customer data, and blocking volume changes in one project for 10 minutes is
+  a small price. Only a lost answer gets there.
+- The cleanup defer sat after the POST's error check, so a lost answer left an untagged VM in the project pool, billed as a
+  server. NextID is racy, so the vmid alone does not make the VM ours: a name, a tag or a disk means it is someone else's.
+- `/cluster/resources` names the old node for a moment during a holder's migrate. Skipping that holder archived its volume
+  rows until the next sync, up to 15 minutes hidden and unbilled. Keeping rows of every skipped holder instead would have
+  kept the phantom carrier rows that the same reconcile exists to remove, so the pass tells moved from gone.
+
+**Diagrams updated:** none (no new component or flow).
+## 2026-11-07: Admin delete-now goes through the deletion job
+
+**What changed**
+
+- `DELETE /admin/project/{id}/now` sets the same flag as the client's delete-now, `DELETE_IN_PROGRESS` with a past schedule,
+  and returns. The goroutine in `cmd/api` is gone; the deletion job is the one thing that runs `TeardownProject`. The job's
+  lock now holds for 30 minutes instead of 1.
+- Both cancels refuse a `DELETED` project.
+
+**Why**
+
+- The sweep selects on `scheduledForDeletionAt`, and the admin path set none. A pod restart, an early return from the
+  teardown or a failed final save left the project `DELETE_IN_PROGRESS` forever. Stamping the schedule alone would have left
+  the goroutine and the sweep tearing down the same project at once, so there is now one runner, and a lock shorter than a
+  teardown no longer starts a second one. A project already stuck that way is freed by calling delete-now again.
+- A cancel of a `DELETED` project flipped it to `ENABLED` with its cloud resources gone.
+
+**Diagrams updated:** `c4-code.md` (teardown sequence).
+
+## 2026-11-07: Customer image import (P5-11)
+
+**What changed**
+
+- `POST /project/{id}/cloud` `IMAGE {url, ...}`: the portal probes the URL (`pkg/safeurl`, the guard that was private to
+  SSO), a node downloads it to `importStorage`, `import-from` builds a template in the project pool. Import dialog on the
+  Images page. `ProxCloudPlatform` adds `Sys.AccessNetwork`; the token gets `PVEDatastoreAdmin` on the import store alone.
+
+**Why**
+
+- Tenants could only make images from their own servers. A node fetches the URL from the management network, so the URL
+  is the attack surface: the probe refuses non-public addresses on the whole redirect chain and the portal hands the node
+  the final URL. A node resolves the name again, so raw images are not accepted and the download goes through PVE's
+  untrusted-image check. `Datastore.Allocate` to delete the download is confined to one store, so the token cannot delete
+  other volumes.
+
+**Diagrams updated:** `c3-components.md` (new row).
+## 2026-11-07: DNS zones cannot overlap across owners; a failed teardown retries
+
+**What changed**
+
+- `powerdns.Service.Create` refuses a name equal to, above or below anything the project does not own, the name server
+  hosts included, and a public suffix. It looks again after the create and removes its zone on an overlap.
+- `TeardownProject` keeps a project `DELETE_IN_PROGRESS` while a leg asks for a re-run (DNS zones, shares, Proxmox, ceph-s3
+  credentials, managed-service remnants), so the deletion job retries. It was marked `DELETED` regardless, and nothing
+  looks at that status again.
+- Cloud creates and actions refuse a project on its way out, for every provider.
+- Tenant errors from a failed DNS or file server no longer carry the raw client error. Record writes are audited with the
+  record's name, type and content.
+
+**Why**
+
+- PowerDNS answers from the longest matching zone with no delegation step, so a child zone took over names of a zone it
+  did not own, including an operator's. Verified against the lab server through two projects.
+- A zone left on the server after a failed teardown kept answering for the former tenant's domain and held its name.
+- The raw error named the DNS server's internal address, which tenants must not learn.
+
+**Diagrams updated:** none; the containers and relations are the same.
+## 2026-11-07: Holder use is serialised, a carrier is left alone
+
+**What changed**
+
+- A cross-node attach carries the disk on a holder tagged `pc-carrier`, which the regular holder lookup skips. Its
+  cleanup runs only once the move is known to have stopped or PVE refused it. Otherwise the empty carrier stays until
+  project teardown.
+- Creating a detached volume, keeping a server's volumes, attaching and deleting a volume take a per-project lock
+  (`ShedLock.Wait`, PostgreSQL). `holderMu` is gone, and `lockShareAccess` uses the same `Wait`.
+- A node where the volume's storage is not active is no attach target, and an attach to one is 409.
+- `VolumeSyncProvider.ListReadable` skips a VM it cannot read, for callers that only add rows. `List` skips only a holder
+  that is gone. A move to another server now ends with a reconcile.
+- `newHolder` removes its VM if it fails before the tags are on.
+
+**Why**
+
+- The destroy behind `dropEmptyHolder` takes every disk on the VM when it runs, and the source no longer names a disk
+  that has moved. A cleanup racing a running move, or another operation adding a disk, could lose a customer's volume
+  for good. A vmid is a cheap price against that.
+- A process mutex cannot serialise replicas, and it covered only the lookup.
+- An untagged VM in a pool counts as a server, so a failed create left a billed row.
+- Retrying a target that could never work moved the disk off its server and answered 502.
+- A deleted VM still listed, or a node that is down, failed the one read after an attach and left the volume without a
+  row until the next good sync. A sync during the carry could leave a row naming the carrier's disk.
+
+**Diagrams updated:** `c2-containers.md` (attach rule), `c3-components.md` (holder row).
+## 2026-11-07: Share exports can keep a site's NAT addresses
+
+**What changed**
+
+- TrueNAS providers take `config.snatSources`, single host addresses, off by default. `truenas.Service` adds them to
+  every export it writes or compares, so tenant shares and Kubernetes RWX datasets both keep them through create, sync
+  and address release. An empty list takes them off at the next sync. The operator console edits the setting with the
+  isolation cost in its help text, and the customer console tells a share's owner when it applies.
+- Share rows now carry `updatedAt`, and a stored row without one takes sync updates instead of being refused.
+
+**Why**
+
+- An export lists a project's own addresses. Behind a NAT the NAS sees the NAT's address instead, so the mount failed, and an
+  address added by hand was removed by sync, which left mounted pods with `Stale file handle`. A site can now say so
+  explicitly. The address is shared by every tenant behind the NAT, so the setting gives up isolation between them on that NAS.
+  That is why it is off by default, takes hosts only, and is stated plainly wherever it is set.
+- Share rows were written without `updatedAt`, and the sync's optimistic guard refused every update to them. Their
+  addresses and `usedBytes` stayed as created, so a share priced on `size_gb` billed its usage at creation.
+
+**Diagrams updated:** `c3-components.md` (TrueNAS client row).
+
+## 2026-11-07: Server backups (P5-3)
+
+**What changed**
+
+- `pve/backup.go` + `project/backup_pve.go`: LIST/CREATE/RESTORE/DELETE_BACKUP on a server, on vzdump to the provider's
+  `backupStorage` (NFS, CephFS or PBS). Backups tab in the customer console. `ProxCloudPlatform` adds `VM.Backup`.
+
+**Why**
+
+- Snapshots do not survive a disk or node failure. The ownership proof is a project stamp in the archive's notes, read
+  back from PVE on every action, because the store is shared and tenants never reach PVE, so the portal needs no table
+  of its own that could drift from the store. Backups go with their server because the token can see and delete an
+  archive only through `VM.Backup` on its VM, and an ACL on `/vms` would break the rule that the token only sees pool VMs.
+
+**Diagrams updated:** `c3-components.md` (PVE service).
 
 ## 2026-11-07: Server snapshots billed (MET-G9)
 
@@ -95,6 +317,27 @@ and rules: [README.md](README.md#maintenance-rule).
   Upfront contracts bought before payments were enforced discounted every bill for money nobody paid.
 
 **Diagrams updated:** none, no container or component changed.
+## 2026-11-07: A cluster's addresses and dataset follow the share access rule
+
+**What changed**
+
+- Share exports list a cluster's addresses only on a shared worker pool. A cluster on a project network is covered by
+  the subnet. Releasing a cluster's addresses goes through the export guard like a public address.
+- Network delete refuses while a live cluster holds addresses on the network, and drops what a deleted cluster left.
+- The marker secret is written before a create takes anything, and a failed create releases everything at once. If that
+  fails, the sweep retries.
+- The release reads the dataset's NAS from the share row instead of scanning every provider, and a failed provider read
+  is an error, not "provider gone".
+- Chart 0.1.4: `shared-file` PVC directories are named after the PV and are mode `0777`.
+
+**Why**
+
+- Lab drill: deleting a network put the cluster's /32s on the export, where they stayed after the CIDR was free for
+  another tenant to take, and the NAS, which refuses a /32 inside a listed subnet, failed every share create and
+  refresh on such a project before that. Tokens and datasets of a failed create had no record that could release them.
+  A PVC directory named after the PVC handed an old PVC's data, and its pending delete, to a new PVC of the same name.
+
+**Diagrams updated**: none: no container or component changes.
 
 ## 2026-11-07: Admin hmac key secrets encrypted at rest, old NFS exports squash root
 

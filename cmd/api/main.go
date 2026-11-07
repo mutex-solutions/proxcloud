@@ -257,8 +257,14 @@ func run() error {
 		return dbaas.New(es.DbaasConfig(), es.ID)
 	})
 	// Proxmox VE — enables proxmox provisioning (project pool) + the VM write surface.
+	holderLocks := lock.New(pg)
 	projectH.SetProxmox(func(es *externalservice.ExternalService) (*pve.Service, error) {
-		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
+		s, err := pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
+		if err != nil {
+			return nil, err
+		}
+		s.HolderLock = holderLocks.Wait
+		return s, nil
 	})
 	// Proxmox flavor catalog (pgdoc `flavor`) — the admin-curated flavors PVE servers
 	// are created from (Proxmox itself has no flavor concept).
@@ -272,7 +278,7 @@ func run() error {
 	// Kamaji Managed Kubernetes — enables kamaji provisioning + the KUBERNETES_CLUSTER write
 	// surface (Application CRs on the provider's management cluster). The sync job's orphan sweep
 	// uses the same factory: it releases a deleted cluster's PVE tokens and addresses.
-	kamajiFactory := project.KamajiFactory(esSvc, func(es *externalservice.ExternalService) (*pve.Service, error) {
+	kamajiFactory := project.KamajiFactory(esSvc, cloudRepo, func(es *externalservice.ExternalService) (*pve.Service, error) {
 		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
 	}, publicIPRepo)
 	projectH.SetKamaji(kamajiFactory)
@@ -603,15 +609,10 @@ func run() error {
 			}
 			return nil
 		},
-		// Delete the project now: an async cloud cascade (fire-and-forget) — delete the project's
-		// cloud resources + tenant, then mark it DELETED. Detached context so it outlives the request.
-		Teardown: func(_ context.Context, projectID string) error {
-			go func() {
-				if err := projectH.TeardownProject(context.Background(), projectID); err != nil {
-					log.Error("admin project teardown", "project", projectID, "err", err)
-				}
-			}()
-			return nil
+		// Delete the project now: the deletion job's next sweep tears it down, and retries until it is clean.
+		DeleteNow: func(ctx context.Context, projectID string) error {
+			_, err := projectSvc.DeleteNow(ctx, projectID)
+			return err
 		},
 	})
 	adminAPIH.SetActivation(activationSvc)
@@ -1112,7 +1113,9 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 				log.Error("pve traffic job", "err", err)
 			}
 		}},
-		{Name: "executeProjectDeletion", Spec: scheduler.ProjectDeletionSpec, AtMostFor: time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
+		// A teardown runs for minutes, and a lock that expires under it starts a second teardown of the same project. The
+		// price: a sweep killed mid-way holds the next one back for at most this long.
+		{Name: "executeProjectDeletion", Spec: scheduler.ProjectDeletionSpec, AtMostFor: 30 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
 			if n, err := deletion.ExecuteAll(ctx); err != nil {
 				log.Error("project deletion job", "err", err)
 			} else if n > 0 {

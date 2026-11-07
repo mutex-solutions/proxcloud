@@ -31,6 +31,9 @@ type ClusterResource struct {
 	Storage  string  `json:"storage"` // storage rows: the storage id
 	Shared   int     `json:"shared"`  // storage rows
 	Content  string  `json:"content"` // storage rows: comma-separated content types
+
+	// NodeDown: a qemu row whose node is not online (see markNodeDown). The VM exists, nothing else in the row counts.
+	NodeDown bool `json:"-"`
 }
 
 // ClusterResources lists cluster-wide resources. kind filters server-side:
@@ -44,7 +47,32 @@ func (c *Client) ClusterResources(ctx context.Context, kind string) ([]ClusterRe
 	if err := c.get(ctx, "/cluster/resources", form, &out); err != nil {
 		return nil, err
 	}
+	if kind == "vm" {
+		c.markNodeDown(ctx, out)
+	}
 	return out, nil
+}
+
+// markNodeDown makes VM rows honest about a dead node. Lab, PVE 9.2: for about five minutes after a node dies its VMs
+// still read as last seen, "running" included; after that as status "unknown" with no name, template flag or sizes. So
+// a row of such a node says the VM exists and nothing more. Best effort: without the node list a row just stays as PVE
+// gave it for one more read.
+func (c *Client) markNodeDown(ctx context.Context, rows []ClusterResource) {
+	var nodes []ClusterResource
+	if err := c.get(ctx, "/cluster/resources", formVals{"type": "node"}.values(), &nodes); err != nil {
+		return
+	}
+	down := map[string]bool{}
+	for _, n := range nodes {
+		if n.Type == "node" && n.Status != "online" {
+			down[n.Node] = true
+		}
+	}
+	for i := range rows {
+		if rows[i].Type == "qemu" && down[rows[i].Node] {
+			rows[i].NodeDown, rows[i].Status = true, "unknown"
+		}
+	}
 }
 
 // Node is one row of GET /nodes.

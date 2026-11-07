@@ -6,10 +6,13 @@ package project
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
@@ -99,8 +102,8 @@ func (h *Handler) kamajiNetwork(ctx context.Context, proj *Project, compute *ext
 	return strAny(n["vnet"]), strAny(n["zone"]), nil
 }
 
-// kamajiProvisionCluster resolves the cluster's infrastructure and the secrets it runs under. Addresses
-// and tokens it took are released again when it fails, and by kamajiReleaseCluster after a delete.
+// kamajiProvisionCluster resolves the cluster's infrastructure and the secrets it runs under. What it took
+// (addresses, tokens, dataset) is released again when it fails, and by KamajiReleaseCluster after a delete.
 func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks *kamaji.Service, spec *kamaji.ClusterSpec) (sec kamaji.ClusterSecrets, err error) {
 	d := ks.Config().Defaults
 	compute, err := h.kamajiCompute(ctx, proj, d)
@@ -138,30 +141,35 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 		}
 		cidr, gateway, first, last, static, serr := ps.VnetStaticPool(ctx, vnet)
 		if serr != nil {
-			return sec, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, serr.Error())
+			return sec, upstreamErr(computeBackend, serr)
 		}
 		if !static {
 			return sec, httpx.BadRequest("Worker nodes need a network without DHCP (an EVPN or VLAN zone)")
 		}
 		_, ipnet, perr := net.ParseCIDR(cidr)
 		if perr != nil {
-			return sec, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, perr.Error())
+			return sec, upstreamErr(computeBackend, perr)
 		}
 		ones, _ := ipnet.Mask.Size()
 		in.Bridge, in.Gateway, in.Prefix = vnet, gateway, ones
 		pool = externalservice.PVEPublicNetwork{ID: vnet, CIDR: cidr, Gateway: gateway, Ranges: []string{first + "-" + last}}
 	}
 
-	owner := kamajiReservation(spec.ID)
-	addrs, err := h.publicIPs.Reserve(ctx, compute.ID, proj.ID, owner, pool, kamajiWorkerAddrs+kamajiLBAddrs)
-	if err != nil {
-		return sec, err
+	// The marker goes first: nothing else records this cluster until CreateCluster, and a rollback can fail too.
+	if err = ks.RecordCluster(ctx, proj.ID, spec.ID, compute.ID); err != nil {
+		return sec, upstreamErr("Kubernetes backend", err)
 	}
 	defer func() {
 		if err != nil {
-			_ = h.publicIPs.ReleaseServer(context.WithoutCancel(ctx), compute.ID, owner)
+			if rerr := ks.AbandonCluster(context.WithoutCancel(ctx), proj.ID, spec.ID, compute.ID); rerr != nil {
+				slog.Warn("kamaji: release after a failed create, the sweep retries", "cluster", spec.ID, "err", rerr)
+			}
 		}
 	}()
+	addrs, err := h.publicIPs.Reserve(ctx, compute.ID, proj.ID, kamajiReservation(spec.ID), pool, kamajiWorkerAddrs+kamajiLBAddrs)
+	if err != nil {
+		return sec, err
+	}
 	in.Addresses = addrs[:kamajiWorkerAddrs]
 	for _, ip := range addrs[kamajiWorkerAddrs:] {
 		in.LBAddresses = append(in.LBAddresses, ip+"/32") // MetalLB takes no bare address
@@ -185,7 +193,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 			ISOStorage: pveISOStorage(compute), Zone: zone, Vnet: in.Bridge,
 		})
 		if terr != nil {
-			err = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Could not mint the cluster's Proxmox tokens: "+terr.Error())
+			err = upstreamErr(computeBackend, terr)
 			return sec, err
 		}
 		capiID, capiSecret, csiID, csiSecret = toks.CAPIID, toks.CAPISecret, toks.CSIID, toks.CSISecret
@@ -233,11 +241,17 @@ func (h *Handler) kamajiRWX(ctx context.Context, proj *Project, clusterID string
 	if err != nil {
 		return shareErr(err)
 	}
+	now := time.Now().UTC()
 	if _, err := h.cloud.Insert(ctx, &cloud.CloudResource{
 		ServiceID: es.ID, ProjectID: proj.ID, Region: es.CephRegion(), Type: cloud.TypeShare,
-		ExternalID: sh.Dataset, Data: ts.ShareData(proj.ID, sh),
+		ExternalID: sh.Dataset, Data: ts.ShareData(proj.ID, sh), CreatedAt: &now, UpdatedAt: &now,
 	}); err != nil {
-		return err // the sync adds the row; the cluster's release removes the dataset
+		// The release finds a dataset by its row, and this one has none. Should the delete fail as well, the sync adds
+		// the row and the tenant can delete it as a share.
+		if derr := ts.Delete(context.WithoutCancel(ctx), proj.ID, sh.Dataset); derr != nil {
+			slog.Warn("kamaji: dataset left after a failed create", "dataset", sh.Dataset, "err", derr)
+		}
+		return err
 	}
 	in.RWXServer, in.RWXShare = ts.Host, truenas.MountPath(sh.Dataset)
 	return nil
@@ -245,15 +259,17 @@ func (h *Handler) kamajiRWX(ctx context.Context, proj *Project, clusterID string
 
 func kamajiRWXShare(clusterID string) string { return "k8s-" + clusterID }
 
-// kamajiReleaseCluster runs after a cluster's delete cascade has finished (kamaji.OnClusterGone).
-func kamajiReleaseCluster(esSvc *externalservice.Service, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, shared bool) func(ctx context.Context, computeID, projectID, clusterID string) error {
+// KamajiReleaseCluster runs after a cluster's delete cascade has finished, and after a failed create
+// (kamaji.OnClusterGone). An error keeps the marker, so the sweep retries: only a provider that is really gone
+// counts as nothing to release on.
+func KamajiReleaseCluster(services serviceGetter, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, shared bool) func(ctx context.Context, computeID, projectID, clusterID string) error {
 	return func(ctx context.Context, computeID, projectID, clusterID string) error {
-		es, err := esSvc.Get(ctx, computeID)
-		if err != nil || es == nil {
-			return nil // provider gone, nothing to release on
+		es, err := services.Get(ctx, computeID)
+		if err != nil && !errors.Is(err, externalservice.ErrNotFound) {
+			return err
 		}
 		// sharedWorkers mints nothing, and its portal token may not touch tokens at all.
-		if pveFor != nil && !shared {
+		if err == nil && pveFor != nil && !shared {
 			ps, err := pveFor(es)
 			if err != nil {
 				return err
@@ -262,24 +278,8 @@ func kamajiReleaseCluster(esSvc *externalservice.Service, pveFor func(*externals
 				return err
 			}
 		}
-		// A cluster's dataset goes with it, like its proxmox-csi disks. Missing is fine: the sync drops the row.
-		nas, err := esSvc.ListByType(ctx, "CLOUD")
-		if err != nil {
+		if err := kamajiDeleteDataset(ctx, services, shares, projectID, clusterID); err != nil {
 			return err
-		}
-		for i := range nas {
-			if !nas[i].IsTrueNAS() {
-				continue
-			}
-			ts, err := nas[i].TrueNASService()
-			if err != nil {
-				return err
-			}
-			err = ts.DeleteByName(ctx, projectID, kamajiRWXShare(clusterID))
-			ts.C.Close()
-			if err != nil {
-				return err
-			}
 		}
 		if ips != nil {
 			return ips.ReleaseServer(ctx, computeID, kamajiReservation(clusterID))
@@ -288,16 +288,55 @@ func kamajiReleaseCluster(esSvc *externalservice.Service, pveFor func(*externals
 	}
 }
 
+type serviceGetter interface {
+	Get(ctx context.Context, id string) (*externalservice.ExternalService, error)
+}
+
+type shareRowFinder interface {
+	FindByProjectAndType(ctx context.Context, projectID, resourceType string) ([]cloud.CloudResource, error)
+}
+
+// kamajiDeleteDataset removes a cluster's dataset, like its proxmox-csi disks, from the NAS its share row names: a
+// broken NAS holding nothing of this cluster must not block its release. No row: no dataset, or the sync drops it.
+func kamajiDeleteDataset(ctx context.Context, services serviceGetter, shares shareRowFinder, projectID, clusterID string) error {
+	rows, err := shares.FindByProjectAndType(ctx, projectID, cloud.TypeShare)
+	if err != nil {
+		return err
+	}
+	for i := range rows {
+		if !strings.HasSuffix(rows[i].ExternalID, "/"+projectID+"-"+kamajiRWXShare(clusterID)) {
+			continue
+		}
+		nas, err := services.Get(ctx, rows[i].ServiceID)
+		if errors.Is(err, externalservice.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		ts, err := nas.TrueNASService()
+		if err != nil {
+			return err
+		}
+		err = ts.Delete(ctx, projectID, rows[i].ExternalID)
+		ts.C.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // KamajiFactory builds the kamaji service with its infrastructure release wired in; the API and the sync
 // job's orphan sweep use the same one.
-func KamajiFactory(esSvc *externalservice.Service, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo) func(*externalservice.ExternalService) (*kamaji.Service, error) {
+func KamajiFactory(esSvc *externalservice.Service, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo) func(*externalservice.ExternalService) (*kamaji.Service, error) {
 	return func(es *externalservice.ExternalService) (*kamaji.Service, error) {
 		cfg := es.KamajiConfig()
 		ks, err := kamaji.New(cfg, es.ID)
 		if err != nil {
 			return nil, err
 		}
-		ks.OnClusterGone(kamajiReleaseCluster(esSvc, pveFor, ips, cfg.Defaults.Shared != nil))
+		ks.OnClusterGone(KamajiReleaseCluster(esSvc, shares, pveFor, ips, cfg.Defaults.Shared != nil))
 		return ks, nil
 	}
 }

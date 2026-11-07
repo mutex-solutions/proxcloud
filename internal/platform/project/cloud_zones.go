@@ -5,6 +5,7 @@ package project
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/powerdns"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
+	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -22,7 +24,14 @@ func zoneErr(err error) error {
 	if errors.Is(err, powerdns.ErrZone) {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, strings.TrimPrefix(err.Error(), powerdns.ErrZone.Error()+": "))
 	}
-	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+	return upstreamErr("DNS server", err)
+}
+
+// upstreamErr logs why a backend failed and tells the tenant only that it did: the raw error names the backend's internal
+// address, which tenants must not learn.
+func upstreamErr(what string, err error) *httpx.HTTPError {
+	slog.Error("backend request failed", "backend", what, "err", err)
+	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "The "+what+" is unavailable. Try again later.")
 }
 
 func (h *Handler) zoneCreate(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, req providers.CreateRequest) {
@@ -67,7 +76,7 @@ func (h *Handler) zoneDelete(ctx context.Context, es *externalservice.ExternalSe
 }
 
 // zoneAction: LIST_RECORDS, SET_RECORD {name, type, ttl?, records[]} replaces one name and type, DELETE_RECORD {name, type}.
-func (h *Handler) zoneAction(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
+func (h *Handler) zoneAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	ds, err := es.PowerDNSService()
 	if err != nil {
 		h.fail(w, err)
@@ -95,17 +104,32 @@ func (h *Handler) zoneAction(w http.ResponseWriter, r *http.Request, proj *Proje
 			h.fail(w, zoneErr(err))
 			return true
 		}
+		h.audit.LogAsync(newZoneRecordEvent(u, proj, action, cr, data, contents))
 		httpx.OK(w, map[string]any{"result": map[string]any{}})
 	case "DELETE_RECORD":
 		if err := ds.DeleteRecord(ctx, proj.ID, cr.ExternalID, strAny(data["name"]), strAny(data["type"])); err != nil {
 			h.fail(w, zoneErr(err))
 			return true
 		}
+		h.audit.LogAsync(newZoneRecordEvent(u, proj, action, cr, data, nil))
 		httpx.OK(w, map[string]any{"result": map[string]any{}})
 	default:
 		return false
 	}
 	return true
+}
+
+// newZoneRecordEvent is the audit event of a record write. It carries the record, since "zone changed" cannot trace a
+// repointed MX.
+func newZoneRecordEvent(u *user.User, p *Project, action string, cr *cloud.CloudResource, data map[string]any, contents []string) audit.AuditEvent {
+	ev := newCloudResourceEvent(u, p, "CLOUD_RESOURCE_ACTION", action, cr)
+	record := map[string]any{"name": strAny(data["name"]), "type": strAny(data["type"])}
+	if contents != nil {
+		record["ttl"] = intAny(data["ttl"])
+		record["records"] = contents
+	}
+	ev.ResourceMetadata["record"] = record
+	return ev
 }
 
 // powerDNSServices lists the project's DNS providers.

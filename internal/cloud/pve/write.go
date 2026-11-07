@@ -305,6 +305,9 @@ func (s *Service) ResolveVM(ctx context.Context, projectID, externalID string) (
 			// cluster/resources lags a just-finished task by seconds: pool and node come
 			// from it, power state and config from the node itself (when it answers).
 			r := &rows[i]
+			if r.NodeDown {
+				return r, nil
+			}
 			if st, err := s.C.GetVMStatus(ctx, r.Node, vmid); err == nil {
 				r.Status, r.Lock, r.Name = st.Status, st.Lock, st.Name
 				r.Tags, r.MaxCPU, r.MaxMem, r.MaxDisk = st.Tags, st.CPUs, st.MaxMem, st.MaxDisk
@@ -422,6 +425,9 @@ func (s *Service) PowerAction(ctx context.Context, projectID, externalID, verb s
 	}
 	if vm == nil {
 		return fmt.Errorf("pve: vm %s not found", externalID)
+	}
+	if vm.NodeDown { // what follows reads a stop of a VM that is not running as already done
+		return conflictf("The host of this server is down. Try again when it is back")
 	}
 	running := vm.Status == "running"
 	var up UPID

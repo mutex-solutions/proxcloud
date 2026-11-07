@@ -146,6 +146,35 @@ def run():
         check("the disk is back", guest(a, "cat /var/tmp/e2e") == "before")
     action(a["id"], "DELETE_SNAPSHOT", name="s1")
 
+    # Backups, when the provider has a store: E2E_BACKUP=1 (needs VM.Backup on the token).
+    if os.environ.get("E2E_BACKUP") == "1":
+        if SSH:
+            guest(a, "echo before-backup > /var/tmp/e2e; sync")
+        st, _ = action(a["id"], "CREATE_BACKUP")
+        check("create a backup", st == 200, st)
+        st, res = action(a["id"], "LIST_BACKUPS")
+        ids = [b["id"] for b in res["result"]]
+        check("lists it", len(ids) == 1, ids)
+        st, _ = action(a["id"], "DELETE_BACKUP", id="nas-backup:backup/not-yours")
+        check("an archive not listed is refused", st == 409, st)
+        if SSH:
+            guest(a, "echo after-backup > /var/tmp/e2e; sync")
+        st, _ = action(a["id"], "RESTORE_BACKUP", id=ids[0])
+        check("restore", st == 200, st)
+        if SSH:
+            check("the disk is back", guest(a, "cat /var/tmp/e2e") == "before-backup")
+        st, _ = action(a["id"], "DELETE_BACKUP", id=ids[0])
+        check("delete it", st == 200, st)
+
+    # Image import, when the provider has a store: E2E_IMPORT_URL = a small public qcow2.
+    url = os.environ.get("E2E_IMPORT_URL", "")
+    if url:
+        st, _ = call("POST", f"/project/{PID}/cloud", {"type": "IMAGE", "data": {"name": f"{PREFIX}-x", "url": "http://169.254.169.254/"}})
+        check("an internal URL is refused", st == 400, st)
+        img = create("IMAGE", name=f"{PREFIX}-imp", url=url)
+        imported = create("SERVER", name=f"{PREFIX}-imp", flavorId=FLAVOR, imageId=img["externalId"], networkIds=[netid])
+        check("a server starts from it", imported["data"]["server"]["status"] != "ERROR", imported["data"]["server"]["status"])
+
     # Rebuild keeps the identity.
     _, before = call("GET", f"/project/{PID}/cloud/{a['id']}")
     st, res = action(a["id"], "REBUILD", imageId=IMAGE2)

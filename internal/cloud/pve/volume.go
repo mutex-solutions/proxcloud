@@ -64,7 +64,7 @@ func (s *Service) AddVolume(ctx context.Context, projectID, serverExtID string, 
 		}
 	}
 	if slot == "" {
-		return "", fmt.Errorf("pve: no free disk slot on server %s", serverExtID)
+		return "", conflictf("Server %s has no free disk slot", serverExtID)
 	}
 	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{
 		slot: fmt.Sprintf("%s:%d", storage, sizeGiB),
@@ -131,7 +131,7 @@ func (s *Service) ExtendVolume(ctx context.Context, projectID string, vmid int, 
 		return err
 	}
 	if strings.HasPrefix(slot, "unused") {
-		return fmt.Errorf("pve: attach the disk before extending it")
+		return conflictf("Attach the disk before extending it")
 	}
 	up, err := s.C.ResizeDisk(ctx, vm.Node, vm.VMID, slot, fmt.Sprintf("%dG", sizeGiB))
 	if err != nil {
@@ -166,12 +166,17 @@ func (s *Service) DetachVolume(ctx context.Context, projectID string, vmid int, 
 // to be on the same node"), so a disk on shared storage first rides a holder to the target's node
 // (carryToNode) and a target on another node is refused for any other disk (ConflictError).
 func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, volID string, targetServerExtID string) error {
+	release, err := s.lockHolders(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	defer release() // deferred first, so the holder drops below run under the lock
 	vm, slot, err := s.volumeSlot(ctx, projectID, vmid, volID)
 	if err != nil {
 		return err
 	}
 	if !strings.HasPrefix(slot, "unused") {
-		return fmt.Errorf("pve: disk is already attached")
+		return conflictf("The disk is already attached")
 	}
 	if isHolder(vm.Tags) {
 		if targetServerExtID == "" || targetServerExtID == strconv.Itoa(vmid) {
@@ -194,7 +199,7 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 			}
 		}
 		if free == "" {
-			return fmt.Errorf("pve: no free disk slot")
+			return conflictf("This server has no free disk slot")
 		}
 		up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{free: volID})
 		if err != nil {
@@ -208,7 +213,7 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 		return err
 	}
 	if target == nil {
-		return fmt.Errorf("pve: target server %s not found", targetServerExtID)
+		return conflictf("Server %s not found", targetServerExtID)
 	}
 	if err := s.refuseUnreplicable(ctx, target, slotStorage(volID)); err != nil {
 		return err
@@ -221,6 +226,9 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 		if !caps[slotStorage(volID)].Shared {
 			return conflictf("Server %s runs on node %s and this volume on node %s; a volume on local storage can only move to a server on the same node. "+
 				"Attach it to a server on %s", target.Name, target.Node, vm.Node, vm.Node)
+		}
+		if !caps[slotStorage(volID)].Nodes[target.Node].Active {
+			return conflictf("Server %s runs on node %s, where storage %s is not available", target.Name, target.Node, slotStorage(volID))
 		}
 	}
 	tcfg, err := s.C.GetVMConfig(ctx, target.Node, target.VMID)
@@ -255,19 +263,26 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 
 // carryToNode brings a detached disk on shared storage to another node: onto a new holder on the disk's node, then the
 // holder migrates offline, which copies nothing because its only disk is shared. A failure past the first move leaves
-// the disk on that holder, an ordinary detached volume the user can attach again.
+// the disk on that holder, an ordinary detached volume the user can attach again. A move that may still be running keeps
+// the carrier too, even if it looks empty: the task could add the disk just after the check, and the destroy would take
+// it, with the source VM no longer naming it. An empty carrier costs only a vmid, until the project teardown.
 func (s *Service) carryToNode(ctx context.Context, projectID string, vm *ClusterResource, slot, node string) (*ClusterResource, string, error) {
-	carrier, err := s.newHolder(ctx, projectID, vm.Node)
+	carrier, err := s.newHolder(ctx, projectID, vm.Node, JoinTags(tagHolder, tagCarrier, TagManaged))
 	if err != nil {
 		return nil, "", err
 	}
 	const carried = "unused0"
 	up, err := s.C.MoveDisk(ctx, vm.Node, vm.VMID, MoveDiskOpts{Disk: slot, TargetVMID: carrier.VMID, TargetDisk: carried})
-	if err == nil {
-		err = s.C.WaitTask(ctx, up)
-	}
 	if err != nil {
-		s.dropEmptyHolder(context.WithoutCancel(ctx), carrier)
+		if taskRefused(err) {
+			s.dropEmptyHolder(context.WithoutCancel(ctx), carrier)
+		}
+		return nil, "", err
+	}
+	if err := s.C.WaitTask(ctx, up); err != nil {
+		if s.C.TaskStopped(ctx, up, lostTaskWait) {
+			s.dropEmptyHolder(context.WithoutCancel(ctx), carrier)
+		}
 		return nil, "", err
 	}
 	if up, err = s.C.MigrateVM(ctx, vm.Node, carrier.VMID, node, false); err == nil {
@@ -282,8 +297,8 @@ func (s *Service) carryToNode(ctx context.Context, projectID string, vm *Cluster
 }
 
 // AttachTargets lists the pool VMs a volume can be attached to now: none while it is
-// attached (detach first); otherwise every pool VM on its VM's node (its own included), or
-// every pool VM when the volume is on shared storage.
+// attached (detach first); otherwise every pool VM on its VM's node (its own included), and
+// when the volume is on shared storage every pool VM on a node where that storage is active.
 func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int, volID string) ([]ClusterResource, error) {
 	vm, slot, err := s.volumeSlot(ctx, projectID, vmid, volID)
 	if err != nil {
@@ -292,7 +307,7 @@ func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int,
 	if !strings.HasPrefix(slot, "unused") {
 		return []ClusterResource{}, nil
 	}
-	vms, _, err := s.poolVMs(ctx, projectID)
+	vms, _, _, err := s.poolVMs(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -300,10 +315,10 @@ func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int,
 	if err != nil {
 		return nil, err
 	}
-	shared := caps[slotStorage(volID)].Shared
+	st := caps[slotStorage(volID)]
 	out := []ClusterResource{}
 	for _, t := range vms {
-		if shared || t.Node == vm.Node {
+		if t.Node == vm.Node || (st.Shared && st.Nodes[t.Node].Active) {
 			out = append(out, t)
 		}
 	}
@@ -315,6 +330,11 @@ func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int,
 // Lab-verified (PVE 9.2): delete=unusedN removes the volume physically. While a VM snapshot
 // references it, the task still succeeds with a warning and the entry stays, hence the re-read.
 func (s *Service) DeleteVolume(ctx context.Context, projectID string, vmid int, volID string) error {
+	release, err := s.lockHolders(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	vm, slot, err := s.volumeSlot(ctx, projectID, vmid, volID)
 	if err != nil {
 		return err
@@ -355,6 +375,9 @@ func (s *Service) RetypeVolume(ctx context.Context, projectID string, vmid int, 
 	}
 	if d.Storage == storage {
 		return conflictf("The volume is already on storage %s", storage)
+	}
+	if err := s.refuseUnreplicable(ctx, vm, storage); err != nil {
+		return err
 	}
 	caps, err := s.C.DetectStorage(ctx)
 	if err != nil {

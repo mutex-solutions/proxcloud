@@ -3,6 +3,8 @@ package project
 import (
 	"net/http"
 	"testing"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 )
 
 func TestPVEPickCIDR(t *testing.T) {
@@ -44,5 +46,21 @@ func TestPVEPickCIDR(t *testing.T) {
 				t.Fatalf("got %q, %v; want %q", got, herr, tt.want)
 			}
 		})
+	}
+}
+
+// A live cluster's addresses refuse the network delete. A deleted cluster's are purged instead, or a row no sweep will
+// ever reach would keep the network forever.
+func TestLiveClusterOn(t *testing.T) {
+	rows := []PublicIP{
+		{ServerID: "100", NIC: "net0"},
+		{ServerID: "k8s:stc-gone", NIC: ReservedNIC},
+		{ServerID: "k8s:stc-live", NIC: ReservedNIC},
+	}
+	if got := liveClusterOn(rows, []cloud.CloudResource{{ExternalID: "stc-live"}, {ExternalID: "stc-other"}}); got != "stc-live" {
+		t.Errorf("got %q", got)
+	}
+	if got := liveClusterOn(rows, []cloud.CloudResource{{ExternalID: "stc-other"}}); got != "" {
+		t.Errorf("no live cluster holds these: got %q", got)
 	}
 }

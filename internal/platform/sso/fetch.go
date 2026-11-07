@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"syscall"
 	"time"
+
+	"github.com/mutex-solutions/proxcloud/pkg/safeurl"
 )
 
 // fetcher reads tenant-supplied URLs from inside the management network, so it refuses to reach
@@ -21,13 +23,7 @@ type fetcher struct {
 	client        *http.Client
 }
 
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
-
-func blockedIP(ip netip.Addr) bool {
-	ip = ip.Unmap()
-	return !ip.IsValid() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() || cgnat.Contains(ip)
-}
+func blockedIP(ip netip.Addr) bool { return safeurl.Blocked(ip) }
 
 func newFetcher(allowInternal bool) *fetcher {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}

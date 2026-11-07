@@ -63,7 +63,7 @@ func (h *Handler) withSDNLock(ctx context.Context, w http.ResponseWriter, fn fun
 		// Validation done under the lock (CIDR checks) keeps its own status.
 		var he *httpx.HTTPError
 		if !errors.As(err, &he) {
-			he = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+			he = pveVolumeErr(err)
 		}
 		h.fail(w, he)
 		return false
@@ -172,7 +172,22 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 	httpx.OK(w, *saved)
 }
 
-// pveDeleteNetwork removes a vnet (guarded: no pool VM NIC may sit on it).
+// liveClusterOn names a cluster that still exists and holds addresses among rows.
+func liveClusterOn(rows []PublicIP, clusters []cloud.CloudResource) string {
+	for _, row := range rows {
+		if row.NIC != ReservedNIC {
+			continue
+		}
+		for i := range clusters {
+			if kamajiReservation(clusters[i].ExternalID) == row.ServerID {
+				return clusters[i].ExternalID
+			}
+		}
+	}
+	return ""
+}
+
+// pveDeleteNetwork removes a vnet (guarded: no pool VM NIC and no live cluster may sit on it).
 func (h *Handler) pveDeleteNetwork(ctx context.Context, w http.ResponseWriter, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) bool {
 	ctx = context.WithoutCancel(ctx) // see pveCreate
 	ps, err := h.pveFor(es)
@@ -182,12 +197,28 @@ func (h *Handler) pveDeleteNetwork(ctx context.Context, w http.ResponseWriter, e
 	}
 	inUse, uerr := ps.VnetInUse(ctx, proj.ID, cr.ExternalID)
 	if uerr != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, uerr.Error()))
+		h.fail(w, pveVolumeErr(uerr))
 		return false
 	}
 	if inUse {
 		httpx.Err(w, http.StatusConflict, http.StatusConflict, "Network is in use by a server")
 		return false
+	}
+	if h.publicIPs != nil {
+		rows, err := h.publicIPs.InNetwork(ctx, es.ID, cr.ExternalID)
+		if err != nil {
+			h.fail(w, err)
+			return false
+		}
+		clusters, err := h.cloud.FindByProjectAndType(ctx, proj.ID, cloud.TypeKubernetesCluster)
+		if err != nil {
+			h.fail(w, err)
+			return false
+		}
+		if id := liveClusterOn(rows, clusters); id != "" {
+			httpx.Err(w, http.StatusConflict, http.StatusConflict, "Network is in use by cluster "+id)
+			return false
+		}
 	}
 	netCfg := es.PVENetworkConfig()
 	return h.withSDNLock(ctx, w, func() error {
@@ -211,6 +242,12 @@ func (h *Handler) pveDeleteNetwork(ctx context.Context, w http.ResponseWriter, e
 			}
 			if err := ps.ApplyAndWait(ctx); err != nil {
 				return err
+			}
+			// Addresses of a cluster already deleted: its VMs are gone (VnetInUse) and the vnet goes with them.
+			if h.publicIPs != nil {
+				if err := h.publicIPs.purgeClusterRows(ctx, es.ID, cr.ExternalID); err != nil {
+					return err
+				}
 			}
 			// Under the lock: a refresh right after must not read the deleted network's CIDR off its row.
 			return h.cloud.DeleteAndArchive(ctx, cr, time.Now().UTC())
@@ -364,7 +401,7 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 	}
 	if action == "DETACH_PUBLIC_NETWORK" {
 		if derr := h.pveDetachPublicNIC(ctx, ps, es, proj, vm, cr.ExternalID); derr != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, derr.Error()))
+			h.fail(w, pveVolumeErr(derr))
 			return true
 		}
 		h.pveReseed(ctx, ps, es, proj.ID, cr.ExternalID, vm.Node)
@@ -390,7 +427,7 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 	// may have changed since).
 	mgmt, merr := ps.C.ManagementBridges(ctx, vm.Node)
 	if merr != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, merr.Error()))
+		h.fail(w, upstreamErr(computeBackend, merr))
 		return true
 	}
 	if _, bad := mgmt[netID]; bad {
@@ -472,7 +509,7 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		if fresh && !plugged {
 			_ = h.publicIPs.ReleaseNIC(ctx, es.ID, cr.ExternalID, publicNIC)
 		}
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, serr.Error()))
+		h.fail(w, pveVolumeErr(serr))
 		return true
 	}
 	h.pveReseed(ctx, ps, es, proj.ID, cr.ExternalID, vm.Node)

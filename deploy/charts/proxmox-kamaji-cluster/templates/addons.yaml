@@ -16,7 +16,7 @@ the chart's CRDs first (ClusterResourceSet retries until they exist).
 {{- $proxies = append $proxies (dict "key" "proxmoxCsi" "ns" "csi-proxmox" "values" (dict "existingConfigSecret" "proxmox-csi-plugin" "storageClass" $classes "node" (dict "tolerations" (list (dict "operator" "Exists"))) "controller" (dict "replicaCount" 1))) }}
 {{- $proxies = append $proxies (dict "key" "metallb" "ns" "metallb-system" "values" (dict "speaker" (dict "frr" (dict "enabled" false)) "frrk8s" (dict "enabled" false))) }}
 {{- with .Values.proxmox.rwx }}{{- if .server }}
-{{- $proxies = append $proxies (dict "key" "nfsCsi" "ns" "kube-system" "values" (dict "storageClass" (dict "create" true "name" .storageClassName "reclaimPolicy" "Delete" "volumeBindingMode" "Immediate" "parameters" (dict "server" .server "share" .share "subDir" "${pvc.metadata.namespace}/${pvc.metadata.name}") "mountOptions" (list "nfsvers=4.1")))) }}
+{{- $proxies = append $proxies (dict "key" "nfsCsi" "ns" "kube-system" "values" (dict "storageClass" (dict "create" true "name" .storageClassName "reclaimPolicy" "Delete" "volumeBindingMode" "Immediate" "parameters" (dict "server" .server "share" .share "mountPermissions" "0777") "mountOptions" (list "nfsvers=4.1")))) }}
 {{- end }}{{- end }}
 {{- range $key := list "metricsServer" "certManager" "ingress" }}
 {{- $picked := dict "enabled" false }}

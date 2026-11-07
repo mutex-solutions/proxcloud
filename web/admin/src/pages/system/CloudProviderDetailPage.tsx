@@ -26,7 +26,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiFetch } from "@/lib/api"
 import { useAdminGet } from "@/lib/hooks"
-import type { CloudProvider } from "./CloudProvidersPage"
+import { parseSNATSources, SNAT_SOURCES_HELP, type CloudProvider } from "./CloudProvidersPage"
 import {
   KamajiProviderForm,
   kamajiConfigBlocks,
@@ -90,6 +90,29 @@ function Row({ label, value }: { label: string; value?: string }) {
 }
 
 type TabProps = { id: string; provider: CloudProvider }
+
+// TrueNASSNATSources edits config.snatSources: an empty list turns the setting off, and the next sync takes the
+// addresses off the exports.
+function TrueNASSNATSources({ id, provider }: TabProps) {
+  const stored = asObj(provider.config).snatSources
+  const [value, setValue] = useState(Array.isArray(stored) ? stored.join(", ") : "")
+  const save = useEsSave(id)
+  return (
+    <div className="mt-4 grid gap-2 border-t pt-4">
+      <Label htmlFor="tn-snat-sources">NAT source addresses, comma separated (weakens isolation)</Label>
+      <Input id="tn-snat-sources" value={value} onChange={(e) => setValue(e.target.value)} placeholder="none" />
+      <p className="text-sm text-muted-foreground">{SNAT_SOURCES_HELP}</p>
+      <div className="flex justify-end">
+        <Button
+          disabled={save.isPending}
+          onClick={() => save.mutate({ path: `/admin/service/${id}`, body: { config: { snatSources: parseSNATSources(value) } } })}
+        >
+          {save.isPending ? "Saving…" : "Save"}
+        </Button>
+      </div>
+    </div>
+  )
+}
 
 // ── 1. Connection (per-provider connection form) ─────────────────────────────
 // KamajiConnectionTab edits a Managed Kubernetes provider in place. PUT /admin/service/{id}
@@ -410,8 +433,8 @@ function ConnectionTab({ id, provider }: TabProps) {
       </div>
     )
   }
-  // ceph-s3: show the S3/Admin Ops config. There is no backend test endpoint for RGW (the
-  // connection is exercised by bootstrap/sync), so no Test button.
+  // ceph-s3: show the S3/Admin Ops config. The API proves a public row when it is stored or its
+  // connection changes, and the Add dialog has the Test button.
   if (provider.config?.provider === "ceph-s3" || provider.config?.provider === "rustfs") {
     const c = asObj(provider.config)
     return (
@@ -452,6 +475,7 @@ function ConnectionTab({ id, provider }: TabProps) {
             The connection is exercised by the first share and by sync. The API key is stored encrypted and never
             returned by the API.
           </p>
+          <TrueNASSNATSources id={id} provider={provider} />
         </CardContent>
       </Card>
     )

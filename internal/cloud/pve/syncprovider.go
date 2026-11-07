@@ -12,7 +12,9 @@ package pve
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,10 +27,10 @@ const vanishGrace = 2 * time.Minute
 
 // splitVMs splits /cluster/resources qemu rows of one pool into live VMs and templates. A clone on
 // its way to becoming an image, or the donor of a rebuild's disk, is neither: as a server it would
-// bill a phantom hour, disk included.
+// bill a phantom hour, disk included. Nor is a row PVE knows nothing about (rowUnread).
 func splitVMs(rows []ClusterResource, pool string) (vms, templates []ClusterResource) {
 	for _, r := range rows {
-		if r.Type != "qemu" || r.Pool != pool {
+		if r.Type != "qemu" || r.Pool != pool || rowUnread(r) {
 			continue
 		}
 		if r.Template == 1 {
@@ -40,31 +42,55 @@ func splitVMs(rows []ClusterResource, pool string) (vms, templates []ClusterReso
 	return vms, templates
 }
 
-// diskVMs lists the pool VMs whose disks are VOLUME rows: the live VMs and the holders.
-func (s *Service) diskVMs(ctx context.Context, projectID string) ([]ClusterResource, error) {
-	rows, err := s.C.ClusterResources(ctx, "vm")
-	if err != nil {
-		return nil, err
-	}
-	pool := s.PoolFor(projectID)
-	vms, _ := splitVMs(rows, pool)
-	for _, r := range rows {
-		if r.Type == "qemu" && r.Pool == pool && isHolder(r.Tags) {
-			vms = append(vms, r)
-		}
-	}
-	return vms, nil
+// rowUnread: PVE lists the vmid but says nothing usable about it. Its node is down, or the row has no name yet:
+// /cluster/resources lags a create by seconds (lab, PVE 9.2), and every VM the portal makes has one.
+func rowUnread(r ClusterResource) bool {
+	return r.NodeDown || (r.Name == "" && r.Template != 1)
 }
 
-// poolVMs lists the project pool's qemu rows off /cluster/resources, split into
-// live VMs and templates.
-func (s *Service) poolVMs(ctx context.Context, projectID string) (vms, templates []ClusterResource, err error) {
+// unreadVMs is rowUnread over one pool's rows: vmid -> its node is down. A listed vmid exists, so Reconcile must not
+// take the row of an unread one for a VM that is gone (KeepUnread).
+func unreadVMs(rows []ClusterResource, pool string) map[int]bool {
+	out := map[int]bool{}
+	for _, r := range rows {
+		if r.Type == "qemu" && r.Pool == pool && rowUnread(r) {
+			out[r.VMID] = r.NodeDown
+		}
+	}
+	return out
+}
+
+// diskVMs lists the pool VMs whose disks are VOLUME rows: the live VMs and the holders, plus the unread ones.
+func (s *Service) diskVMs(ctx context.Context, projectID string) ([]ClusterResource, map[int]bool, error) {
 	rows, err := s.C.ClusterResources(ctx, "vm")
 	if err != nil {
 		return nil, nil, err
 	}
-	vms, templates = splitVMs(rows, s.PoolFor(projectID))
-	return vms, templates, nil
+	pool := s.PoolFor(projectID)
+	vms, _ := splitVMs(rows, pool)
+	for _, r := range rows {
+		if r.Type == "qemu" && r.Pool == pool && isHolder(r.Tags) && !rowUnread(r) {
+			vms = append(vms, r)
+		}
+	}
+	return vms, unreadVMs(rows, pool), nil
+}
+
+// poolVMs lists the project pool's qemu rows off /cluster/resources, split into
+// live VMs and templates, plus the unread ones.
+func (s *Service) poolVMs(ctx context.Context, projectID string) (vms, templates []ClusterResource, unread map[int]bool, err error) {
+	rows, err := s.C.ClusterResources(ctx, "vm")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	pool := s.PoolFor(projectID)
+	vms, templates = splitVMs(rows, pool)
+	return vms, templates, unreadVMs(rows, pool), nil
+}
+
+// errUnreadVMs refuses a delete guard that cannot see every VM of the project: the object may be in use by one of them.
+func errUnreadVMs() error {
+	return conflictf("A host of this project's servers is down, so its servers cannot be checked. Try again when it is back")
 }
 
 // supersededByIdentity: the row now names another object when its type changed (a template's vmid
@@ -107,6 +133,7 @@ type ServerSyncProvider struct {
 	sampled   []ClusterResource
 	isSampled bool
 	cached    map[string]*cloud.CloudResource
+	unread    map[int]bool
 }
 
 func (s *Service) ServerSyncProvider(region, projectID string, gpuAlias GPUAliasFunc) *ServerSyncProvider {
@@ -116,8 +143,9 @@ func (s *Service) ServerSyncProvider(region, projectID string, gpuAlias GPUAlias
 // SampledServerProvider is the per-minute variant over one /cluster/resources page. cached is the
 // project's SERVER rows by externalId.
 func (s *Service) SampledServerProvider(region, projectID string, page []ClusterResource, cached map[string]*cloud.CloudResource) *ServerSyncProvider {
-	vms, _ := splitVMs(page, s.PoolFor(projectID))
-	return &ServerSyncProvider{svc: s, region: region, projectID: projectID, sampled: vms, isSampled: true, cached: cached}
+	pool := s.PoolFor(projectID)
+	vms, _ := splitVMs(page, pool)
+	return &ServerSyncProvider{svc: s, region: region, projectID: projectID, sampled: vms, isSampled: true, cached: cached, unread: unreadVMs(page, pool)}
 }
 
 func (p *ServerSyncProvider) Type() string      { return cloud.TypeServer }
@@ -136,7 +164,7 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 	vms := p.sampled
 	if !p.isSampled {
 		var err error
-		if vms, _, err = p.svc.poolVMs(ctx, p.projectID); err != nil {
+		if vms, _, p.unread, err = p.svc.poolVMs(ctx, p.projectID); err != nil {
 			return nil, err
 		}
 	}
@@ -150,8 +178,13 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 			// sample, because only its ctime can tell it from a reuse of its vmid. Stamp it on first
 			// sight if pools ever hold many of them; that would also tell apart clones of one
 			// template, which share a ctime.
-			if c, err := p.svc.C.GetVMConfig(ctx, r.Node, r.VMID); err == nil {
+			c, err := p.svc.C.GetVMConfig(ctx, r.Node, r.VMID)
+			if err == nil {
 				cfg = c
+			} else if !p.isSampled {
+				// Its node just died, before PVE calls it offline: no addresses from here must not wipe the row's.
+				p.unread[r.VMID] = false
+				continue
 			}
 		}
 		if p.isSampled {
@@ -179,6 +212,25 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 		})
 	}
 	return out, nil
+}
+
+// KeepUnread: a VM on a dead node is still the tenant's. Its row stays, with what it knew; only the status changes,
+// which also stops the server's bill for as long as nobody can use it.
+func (p *ServerSyncProvider) KeepUnread(cached *cloud.CloudResource) (keep, changed bool) {
+	id, err := strconv.Atoi(cached.ExternalID)
+	if err != nil {
+		return false, false
+	}
+	down, unread := p.unread[id]
+	if !unread {
+		return false, false
+	}
+	srv, _ := cached.Data["server"].(map[string]any)
+	if !down || srv == nil || srv["status"] == "UNKNOWN" {
+		return true, false
+	}
+	srv["status"] = "UNKNOWN"
+	return true, true
 }
 
 // sampledData builds a sampled VM's payload, carrying the agent IPs, GPU specs and paused state of
@@ -231,6 +283,7 @@ type VolumeSyncProvider struct {
 	region    string
 	projectID string
 	profileOf VolumeProfileFunc
+	unread    map[int]bool
 }
 
 // VolumeSyncProvider lists the project's disks; profileOf (nil = unknown) stamps each disk's
@@ -255,19 +308,36 @@ func (p *VolumeSyncProvider) Superseded(cached, fresh *cloud.CloudResource) bool
 // List derives VOLUME rows from every pool VM's disk entries. There is no
 // standalone volume in the PVE model — a disk belongs to a VM; a detached disk is
 // its VM's unusedN entry (still billed). ExternalID = volid (cluster-unique).
+// Reconcile archives what this leaves out, so the rows of a VM that cannot be read stay (KeepUnread). Only a holder gone
+// from every node is not kept: /cluster/resources still lists one just dropped, and every cross-node attach drops one.
 func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, error) {
-	vms, err := p.svc.diskVMs(ctx, p.projectID)
+	return p.list(ctx, func(vm ClusterResource, err error) bool { return isHolder(vm.Tags) && IsNotFound(err) })
+}
+
+// ListReadable lists the rows of every VM that can be read. It is for callers that only add and update rows, where a
+// VM just deleted or a node that is down must not hold up the rest of the project.
+func (p *VolumeSyncProvider) ListReadable(ctx context.Context) ([]cloud.CloudResource, error) {
+	return p.list(ctx, func(ClusterResource, error) bool { return true })
+}
+
+func (p *VolumeSyncProvider) list(ctx context.Context, skip func(ClusterResource, error) bool) ([]cloud.CloudResource, error) {
+	vms, unread, err := p.svc.diskVMs(ctx, p.projectID)
 	if err != nil {
 		return nil, err
 	}
+	p.unread = unread
 	now := nowUTC()
 	var out []cloud.CloudResource
 	for _, r := range vms {
 		cfg, err := p.svc.C.GetVMConfig(ctx, r.Node, r.VMID)
+		if isHolder(r.Tags) && IsNotFound(err) {
+			r.Node, cfg, err = p.svc.holderElsewhere(ctx, r, err)
+		}
 		if err != nil {
-			// A vanished/locked VM must not wipe the whole project's volume cache —
-			// fail the sync pass; Reconcile skips this round.
-			return nil, err
+			if !skip(r, err) {
+				p.unread[r.VMID] = false
+			}
+			continue
 		}
 		profile := TagValue(cfg.Str("tags"), tagProfilePref)
 		identity := taggedIdentity(cfg.Str("tags"), cfg.Str("lock"))
@@ -327,6 +397,50 @@ func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 	return out, nil
 }
 
+// KeepUnread: the disks of a VM nobody can read right now are still there.
+func (p *VolumeSyncProvider) KeepUnread(cached *cloud.CloudResource) (keep, changed bool) {
+	vol, _ := cached.Data["volume"].(map[string]any)
+	_, unread := p.unread[intOf(vol["vmid"])]
+	return unread, false
+}
+
+// intOf reads a number off a row, fresh (int) or from the database (json.Number).
+func intOf(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
+}
+
+// holderElsewhere finds a holder its listed node does not have: mid-migrate, /cluster/resources still names the old node
+// while the disk is billed and in use on the new one. notFound comes back when no node has it. A node that cannot say is
+// an error of its own, so the holder counts as unread instead of its volume being archived while only out of sight.
+func (s *Service) holderElsewhere(ctx context.Context, vm ClusterResource, notFound error) (string, VMConfig, error) {
+	nodes, err := s.C.Nodes(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, n := range nodes {
+		if n.Node == vm.Node {
+			continue
+		}
+		cfg, err := s.C.GetVMConfig(ctx, n.Node, vm.VMID)
+		if err == nil {
+			return n.Node, cfg, nil
+		}
+		if !IsNotFound(err) {
+			return "", nil, err
+		}
+	}
+	return "", nil, notFound
+}
+
 // isCSIDisk recognises proxmox-csi's volume names, <store>:vm-9999-pvc-<uuid> (with a file store's
 // subdirectory and extension in between).
 func isCSIDisk(volID string) bool { return strings.Contains(volID, "-pvc-") }
@@ -350,6 +464,7 @@ type ImageSyncProvider struct {
 	region    string
 	projectID string
 	page      []ClusterResource
+	unread    map[int]bool
 }
 
 func (s *Service) ImageSyncProvider(region, projectID string) *ImageSyncProvider {
@@ -370,13 +485,25 @@ func (p *ImageSyncProvider) Superseded(cached, fresh *cloud.CloudResource) bool 
 	return supersededByIdentity(cached, fresh, nil)
 }
 
+// KeepUnread: PVE does not even say a dead node's row is a template; the image is still there.
+func (p *ImageSyncProvider) KeepUnread(cached *cloud.CloudResource) (keep, changed bool) {
+	id, err := strconv.Atoi(cached.ExternalID)
+	if err != nil {
+		return false, false
+	}
+	_, unread := p.unread[id]
+	return unread, false
+}
+
 func (p *ImageSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, error) {
 	var templates []ClusterResource
 	if p.page != nil {
-		_, templates = splitVMs(p.page, p.svc.PoolFor(p.projectID))
+		pool := p.svc.PoolFor(p.projectID)
+		_, templates = splitVMs(p.page, pool)
+		p.unread = unreadVMs(p.page, pool)
 	} else {
 		var err error
-		if _, templates, err = p.svc.poolVMs(ctx, p.projectID); err != nil {
+		if _, templates, p.unread, err = p.svc.poolVMs(ctx, p.projectID); err != nil {
 			return nil, err
 		}
 	}
