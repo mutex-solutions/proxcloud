@@ -1,6 +1,9 @@
 package externalservice
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestKamajiConfig(t *testing.T) {
 	es := &ExternalService{
@@ -88,20 +91,25 @@ func TestIntOfTakesTheInstallersStrings(t *testing.T) {
 	}
 }
 
-// Only a JSON true hands tenants the CSI token. It fails closed: the installer sends a real boolean (checked on the
-// ansible-core it pins), and anything that merely looks like yes is not an operator giving up tenant isolation.
-func TestCSISharedStoresParsing(t *testing.T) {
+// The tenant-side controller's keys are named whatever their value, false or empty included: a config that still
+// carries one is refused rather than silently doing nothing.
+func TestKamajiRemovedKeys(t *testing.T) {
 	for _, c := range []struct {
-		in   any
-		want bool
-	}{{true, true}, {false, false}, {nil, false}, {"true", false}, {"True", false}, {"false", false}, {1, false}} {
-		cluster := map[string]any{}
-		if c.in != nil {
-			cluster["csiSharedStores"] = c.in
+		cluster map[string]any
+		want    string
+	}{
+		{nil, ""},
+		{map[string]any{"pveApiUrl": "https://192.0.2.11:8006"}, ""},
+		{map[string]any{"csiSharedStores": false}, "csiSharedStores"},
+		{map[string]any{"pveCsiUrl": ""}, "pveCsiUrl"},
+		{map[string]any{"csiSharedStores": true, "pveCsiUrl": "https://192.0.2.60:8006"}, "csiSharedStores,pveCsiUrl"},
+	} {
+		cfg := map[string]any{}
+		if c.cluster != nil {
+			cfg["cluster"] = c.cluster
 		}
-		es := &ExternalService{Config: map[string]any{"cluster": cluster}}
-		if got := es.KamajiConfig().Defaults.CSISharedStores; got != c.want {
-			t.Errorf("csiSharedStores %#v: %v, want %v", c.in, got, c.want)
+		if got := strings.Join(KamajiRemovedKeys(cfg), ","); got != c.want {
+			t.Errorf("%v: %q, want %q", c.cluster, got, c.want)
 		}
 	}
 }

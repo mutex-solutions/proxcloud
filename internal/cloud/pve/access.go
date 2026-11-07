@@ -85,16 +85,15 @@ const (
 // ClusterTokenScope is what one tenant cluster's tokens may touch.
 type ClusterTokenScope struct {
 	Pool, TemplatePool string
-	BootStorage        string   // where CAPMOX clones the workers' boot disks
-	CSIStorages        []string // the stores a StorageClass offers; none = no CSI token
-	ISOStorage         string   // where CAPMOX uploads the bootstrap ISO
+	BootStorage        string // where CAPMOX clones the workers' boot disks
+	ISOStorage         string // where CAPMOX uploads the bootstrap ISO
 	Zone, Vnet         string
 }
 
-// ClusterTokens are the tokens of one cluster. CAPMOX stays on the management side. A CSI token reaches the
-// tenant cluster, and PVE checks only Datastore.Allocate on the store to attach or delete a disk, so it opens
-// every disk on those stores, of any project: it is minted only for a provider that accepts that.
-type ClusterTokens struct{ CAPIID, CAPISecret, CSIID, CSISecret string }
+// ClusterTokens are the tokens of one cluster. CAPMOX stays on the management side. No CSI token is minted: tenant
+// block volumes go through the CSI gateway's own token. Clusters from before it may still hold csi@pve!<id>, which
+// RevokeClusterTokens deletes too.
+type ClusterTokens struct{ CAPIID, CAPISecret string }
 
 // MintClusterTokens creates the tokens and their ACLs. Revoking is RevokeClusterTokens; a failure
 // half way revokes what was made, so a refused create leaves nothing behind.
@@ -118,15 +117,6 @@ func (c *Client) MintClusterTokens(ctx context.Context, clusterID string, sc Clu
 	}
 	if sc.Zone != "" {
 		grants = append(grants, struct{ path, role, token string }{"/sdn/zones/" + sc.Zone + "/" + sc.Vnet, roleCAPI, t.CAPIID})
-	}
-	if len(sc.CSIStorages) > 0 {
-		if t.CSIID, t.CSISecret, err = c.CreateAPIToken(ctx, csiUser, clusterID); err != nil {
-			return t, err
-		}
-		grants = append(grants, struct{ path, role, token string }{"/pool/" + sc.Pool, roleCSI, t.CSIID})
-		for _, st := range sc.CSIStorages {
-			grants = append(grants, struct{ path, role, token string }{"/storage/" + st, roleCSI, t.CSIID})
-		}
 	}
 	for _, g := range grants {
 		if err = c.SetACL(ctx, g.path, g.role, []string{g.token}, false); err != nil {

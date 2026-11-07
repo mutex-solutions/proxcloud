@@ -123,7 +123,6 @@ pc_defaults:
     capi_token_file: token-capi   # in generated/
     csi_token_id: csi@pve!csi
     csi_token_file: token-csi     # in generated/
-    pve_node_ips: []             # what tenant workers' CSI reaches through network.pve_proxy_ip
     api_extra_sans: []           # more names or addresses on the services API certificate
     chart_repo: pc-registry.proxcloud-registry.svc.cluster.local:5000/charts
     # A subnet tenants can reach (over their normal egress) and that reaches the PVE API.
@@ -135,7 +134,6 @@ pc_defaults:
       endpoint: ""               # kube-vip: the services API
       nodes: []                  # node addresses, e.g. [192.0.2.201-192.0.2.209]
       metallb: ""                # kamaji-api + DBaaS pool, e.g. 192.0.2.210-192.0.2.229
-      pve_proxy_ip: ""           # inside metallb; tenants' CSI reaches the PVE API here
     control_plane: {node: "", cores: 2, memory: 4096, disk: 30}
     workers: []                  # [{node, cores, memory, disk}]: one per PVE node you want a zone on
     # Kamaji provider defaults: read once, when stage 60 first registers the provider. Later: docs/managed-k8s.md.
@@ -144,7 +142,6 @@ pc_defaults:
       root_volume_gib: 30
       worker_mtu: 1450
       rwx_gib: 0                 # NAS dataset per cluster and its RWX class; 0 = none
-      csi_shared_stores: false   # proxmox-csi for tenants: gives up isolation between them, docs/managed-k8s.md
 
   # mode=split: the platform's sandbox cluster (gVisor), stage 55. Not reachable by tenants yet: docs/managed-sandbox.md.
   sandbox:

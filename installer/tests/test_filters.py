@@ -149,4 +149,34 @@ import re  # noqa: E402
 
 policy = open(os.path.join(os.path.dirname(__file__), "..", "..", "deploy", "sandbox-cluster", "network-policy.yaml")).read()
 assert set(re.findall(r"- cidr: (\S+)", policy)) - {"0.0.0.0/0"} == set(f.SANDBOX_GUARDRAIL_DENY), "guardrail drift"
+
+# Stage 60 keeps svc/pve-api while any cluster still runs its tenant-side proxmox-csi controller on its own token.
+import base64  # noqa: E402
+import importlib.util  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location(
+    "pve_forward", os.path.join(os.path.dirname(__file__), "..", "playbooks", "files", "pve-forward.py"))
+fwd = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(fwd)
+
+
+def _sec(name, csi_yaml):
+    return {"metadata": {"namespace": "p1", "name": name}, "data": {"csi.yaml": base64.b64encode(csi_yaml.encode()).decode()}}
+
+
+def _app(name, csi, managed=True):
+    labels = {"app.kubernetes.io/managed-by": "proxcloud"} if managed else {}
+    return {"metadata": {"namespace": "argocd", "name": name, "labels": labels},
+            "spec": {"source": {"helm": {"valuesObject": {"proxmox": {"csi": csi}}}}}}
+
+
+SC = [{"name": "std", "storage": "local-zfs"}]
+GW = {"secretName": "c1-csi-gateway", "kubeconfigSecretName": "c1-admin-kubeconfig"}
+assert fwd.users([_sec("c1-csi-config", "token_secret: x"), _sec("c2-csi-config", "namespace: csi-proxmox"),
+                  _sec("c1-csi-gateway", "token_secret: x"), {"metadata": {"namespace": "p1", "name": "c3-csi-config"}}],
+                 []) == ["p1/c1-csi-config"]
+# A half-finished migration: the config Secret was rewritten but the Application patch failed.
+assert fwd.users([_sec("c1-csi-config", "namespace: csi-proxmox")], [_app("c1", {"storageClasses": SC})]) == ["argocd/c1"]
+assert fwd.users([], [_app("c1", {"storageClasses": SC, "gateway": GW}), _app("c2", {"storageClasses": []}),
+                      _app("c3", {}), _app("x", {"storageClasses": SC}, managed=False)]) == []
 print("ok")

@@ -26,7 +26,7 @@ export type KamajiFormState = {
   versions: string // one "1.35.4=<node-image-id>" (or "1.35.4@variant=<id>") per line
   flavors: string // optional allowlist, one flavor id per line (empty = all flavors)
   pveApiUrl: string // the PVE API as CAPMOX on the services cluster reaches it
-  pveCsiUrl: string // the same as tenant workers reach it
+  removedKeys: string[] // stored config.cluster keys that no longer exist; a save drops them
   workerMtu: string // worker NIC MTU on a tenant vnet
   clusterExtra: Record<string, unknown> // stored config.cluster keys this form does not edit
 }
@@ -47,13 +47,17 @@ export const emptyKamajiForm: KamajiFormState = {
   versions: "",
   flavors: "",
   pveApiUrl: "",
-  pveCsiUrl: "",
+  removedKeys: [],
   workerMtu: "1450",
   clusterExtra: {},
 }
 
+// Keys of the tenant-side proxmox-csi controller, gone since block volumes go through the CSI gateway. The API refuses
+// a cluster block that still has one, so the form never sends them back.
+const REMOVED_CLUSTER_KEYS = ["csiSharedStores", "pveCsiUrl"]
+
 // The config.cluster keys the form owns; anything else survives a save untouched.
-const CLUSTER_FORM_KEYS = ["dataStoreName", "dnsZone", "rootVolumeGiB", "allowedCidrs", "flavors", "versions", "imageVariants", "pveApiUrl", "pveCsiUrl", "workerMtu"]
+const CLUSTER_FORM_KEYS = ["dataStoreName", "dnsZone", "rootVolumeGiB", "allowedCidrs", "flavors", "versions", "imageVariants", "pveApiUrl", "workerMtu", ...REMOVED_CLUSTER_KEYS]
 
 // splitLines is the shared reader for the one-per-line textarea fields.
 const splitLines = (s: string) => s.split("\n").map((v) => v.trim()).filter(Boolean)
@@ -130,7 +134,6 @@ export function kamajiConfigBlocks(f: KamajiFormState) {
     cluster: {
       ...f.clusterExtra,
       ...(f.pveApiUrl.trim() ? { pveApiUrl: f.pveApiUrl.trim() } : {}),
-      ...(f.pveCsiUrl.trim() ? { pveCsiUrl: f.pveCsiUrl.trim() } : {}),
       ...(Number(f.workerMtu) > 0 ? { workerMtu: Number(f.workerMtu) } : {}),
       ...(f.dataStoreName.trim() ? { dataStoreName: f.dataStoreName.trim() } : {}),
       ...(f.dnsZone.trim() ? { dnsZone: f.dnsZone.trim() } : {}),
@@ -198,7 +201,7 @@ export function kamajiFormFromService(svc: {
     versions: versionLines.join("\n"),
     flavors: ((cluster.flavors as string[]) ?? []).join("\n"),
     pveApiUrl: String(cluster.pveApiUrl ?? ""),
-    pveCsiUrl: String(cluster.pveCsiUrl ?? ""),
+    removedKeys: REMOVED_CLUSTER_KEYS.filter((k) => k in cluster),
     workerMtu: cluster.workerMtu ? String(cluster.workerMtu) : "",
     clusterExtra: Object.fromEntries(Object.entries(cluster).filter(([k]) => !CLUSTER_FORM_KEYS.includes(k))),
   }
@@ -248,14 +251,16 @@ export function KamajiProviderForm({
           <Input id="km-chartname" className="font-mono" value={form.chartName} onChange={(e) => setForm({ ...form, chartName: e.target.value })} placeholder="kamaji-cluster" />
         </div>
       </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      {form.removedKeys.length > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          This provider still stores {form.removedKeys.map((k) => <code key={k} className="mr-1">{k}</code>)}which no
+          longer do anything: tenant block volumes go through the CSI gateway. Saving removes them.
+        </p>
+      ) : null}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="grid gap-2">
           <Label htmlFor="km-pveapi">PVE API for CAPMOX</Label>
           <Input id="km-pveapi" className="font-mono" value={form.pveApiUrl} onChange={(e) => setForm({ ...form, pveApiUrl: e.target.value })} placeholder="https://192.0.2.11:8006" />
-        </div>
-        <div className="grid gap-2">
-          <Label htmlFor="km-pvecsi">PVE API for workers</Label>
-          <Input id="km-pvecsi" className="font-mono" value={form.pveCsiUrl} onChange={(e) => setForm({ ...form, pveCsiUrl: e.target.value })} placeholder="https://192.0.2.60:8006" />
         </div>
         <div className="grid gap-2">
           <Label htmlFor="km-mtu">Worker MTU</Label>

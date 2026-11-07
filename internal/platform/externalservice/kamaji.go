@@ -22,9 +22,7 @@ package externalservice
 //	      "versions":          {"1.35.10": "pve1=9210,pve2=9211"},  // version→template per PVE node
 //	      "imageVariants":     {"nvidia": {"1.35.4": "<node-image-id>"}},  // optional per-version variants
 //	      "pveApiUrl":         "https://192.0.2.11:8006",  // the PVE API as CAPMOX reaches it
-//	      "pveCsiUrl":         "https://192.0.2.60:8006",  // the same as tenant workers reach it
-//	      "workerMtu":         1450,                       // EVPN vnets
-//	      "csiSharedStores":   false                       // proxmox-csi for tenants: gives up isolation between them
+//	      "workerMtu":         1450                        // EVPN vnets
 //	    }
 //	  },
 //	  "secret": {"kubeconfig": "<management-cluster kubeconfig>"}  // encrypted at rest
@@ -115,11 +113,8 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 			RWXGiB:        intOf(cl["rwxGiB"]),
 			AllowedCIDRs:  strList(cl["allowedCidrs"]),
 			PVEAPIURL:     str(cl["pveApiUrl"]),
-			PVECSIURL:     str(cl["pveCsiUrl"]),
 			DNSServers:    strList(cl["dnsServers"]),
 			NodeGroupMTU:  intOf(cl["workerMtu"]),
-
-			CSISharedStores: cl["csiSharedStores"] == true,
 
 			ProxmoxServiceID: str(cl["proxmoxServiceId"]),
 		},
@@ -165,6 +160,22 @@ func strList(v any) []string {
 	for _, it := range items {
 		if s := str(it); s != "" {
 			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// RemovedKamajiClusterKeys are config.cluster keys of the tenant-side proxmox-csi controller, gone since block volumes
+// go through the CSI gateway: a provider that still sends one is refused (KamajiRemovedKeys), not silently ignored.
+var RemovedKamajiClusterKeys = []string{"csiSharedStores", "pveCsiUrl"}
+
+// KamajiRemovedKeys names the removed keys a kamaji provider config sets in its cluster block.
+func KamajiRemovedKeys(cfg map[string]any) []string {
+	cl, _ := cfg["cluster"].(map[string]any)
+	var out []string
+	for _, k := range RemovedKamajiClusterKeys {
+		if _, ok := cl[k]; ok {
+			out = append(out, k)
 		}
 	}
 	return out

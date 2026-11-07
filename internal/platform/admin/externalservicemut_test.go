@@ -174,3 +174,35 @@ func TestSandboxProviderRefused(t *testing.T) {
 		t.Fatalf("an ordinary update refused: %#v", herr)
 	}
 }
+
+// A kamaji config still carrying the tenant-side proxmox-csi keys is refused on create and on an update whose cluster
+// block has them; an update that leaves the cluster block alone passes, so a stored leftover does not lock the row.
+func TestKamajiRemovedKeysRefused(t *testing.T) {
+	h := &Handler{}
+	ctx := httpx.WithRC(t.Context(), &httpx.RequestContext{SigV4KeyID: "pk-test"})
+	rec := httptest.NewRecorder()
+	h.externalServiceCreate(rec, httptest.NewRequest(http.MethodPost, "/service",
+		strings.NewReader(`{"name":"k","config":{"provider":"kamaji","cluster":{"csiSharedStores":false}}}`)).WithContext(ctx))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "config.cluster.csiSharedStores no longer exist") {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	stored := func() pgdoc.M {
+		return pgdoc.M{"config": pgdoc.M{"provider": "kamaji", "cluster": map[string]any{"pveCsiUrl": "https://192.0.2.60:8006"}}}
+	}
+	put := func(doc pgdoc.M, body string) *httpx.HTTPError {
+		return h.applyServiceConnectionBody(httptest.NewRequest(http.MethodPut, "/service/k", strings.NewReader(body)), doc)
+	}
+	if herr := put(stored(), `{"config":{"cluster":{"pveApiUrl":"https://192.0.2.11:8006","pveCsiUrl":"https://192.0.2.60:8006"}}}`); herr == nil ||
+		!strings.Contains(herr.Msg, "config.cluster.pveCsiUrl") {
+		t.Fatalf("update with the key: %#v", herr)
+	}
+	if herr := put(stored(), `{"config":{"cluster":{"pveApiUrl":"https://192.0.2.11:8006"}}}`); herr != nil {
+		t.Fatalf("update dropping the key: %#v", herr)
+	}
+	if herr := put(stored(), `{"config":{"argocd":{"chartVersion":"0.1.7"}}}`); herr != nil {
+		t.Fatalf("update without a cluster block: %#v", herr)
+	}
+	if herr := put(pgdoc.M{"config": pgdoc.M{"provider": "proxmox"}}, `{"config":{"cluster":{"pveCsiUrl":"x"}}}`); herr != nil {
+		t.Fatalf("another provider kind: %#v", herr)
+	}
+}

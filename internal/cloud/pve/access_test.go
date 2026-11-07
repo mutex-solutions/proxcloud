@@ -11,10 +11,10 @@ import (
 	"testing"
 )
 
-// The CSI token reaches the tenant cluster, so it may touch only the pool and the stores. A refused
-// ACL must not leave tokens behind.
+// A cluster gets its CAPMOX token alone. A refused ACL must not leave tokens behind, and the revoke still takes a CSI
+// token a cluster from before the CSI gateway holds.
 func TestMintClusterTokens(t *testing.T) {
-	var acls, deleted []string
+	var acls, deleted, minted []string
 	aclErr := false
 	token := func(user string) func(http.ResponseWriter, *http.Request) {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -28,8 +28,11 @@ func TestMintClusterTokens(t *testing.T) {
 		}
 	}
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
-		"POST /api2/json/access/users/capmox@pve/token/pc-c-1":   token("capmox@pve"),
-		"POST /api2/json/access/users/csi@pve/token/pc-c-1":      token("csi@pve"),
+		"POST /api2/json/access/users/capmox@pve/token/pc-c-1": token("capmox@pve"),
+		"POST /api2/json/access/users/csi@pve/token/pc-c-1": func(w http.ResponseWriter, r *http.Request) {
+			minted = append(minted, "csi@pve")
+			token("csi@pve")(w, r)
+		},
 		"DELETE /api2/json/access/users/capmox@pve/token/pc-c-1": del("capmox"),
 		"DELETE /api2/json/access/users/csi@pve/token/pc-c-1":    del("csi"),
 		"PUT /api2/json/access/acl": func(w http.ResponseWriter, r *http.Request) {
@@ -45,53 +48,29 @@ func TestMintClusterTokens(t *testing.T) {
 		},
 	})
 	sc := ClusterTokenScope{
-		Pool: "pc-p1", TemplatePool: "pc-templates", BootStorage: "local-zfs", CSIStorages: []string{"local-zfs", "ssd"},
+		Pool: "pc-p1", TemplatePool: "pc-templates", BootStorage: "local-zfs",
 		ISOStorage: "nas", Zone: "z1", Vnet: "v1",
 	}
 	got, err := c.MintClusterTokens(context.Background(), "pc-c-1", sc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.CAPIID != "capmox@pve!pc-c-1" || got.CSIID != "csi@pve!pc-c-1" || got.CSISecret != "secret-csi@pve" {
+	if got.CAPIID != "capmox@pve!pc-c-1" || got.CAPISecret != "secret-capmox@pve" {
 		t.Errorf("tokens = %+v", got)
 	}
-	var csi []string
-	for _, a := range acls {
-		if strings.HasSuffix(a, "csi@pve!pc-c-1") {
-			csi = append(csi, a)
-		}
-	}
-	slices.Sort(csi)
-	want := []string{
-		"/pool/pc-p1 ProxCloudCSI csi@pve!pc-c-1",
-		"/storage/local-zfs ProxCloudCSI csi@pve!pc-c-1",
-		"/storage/ssd ProxCloudCSI csi@pve!pc-c-1",
-	}
-	if !slices.Equal(csi, want) {
-		t.Errorf("csi grants = %v, want %v", csi, want)
-	}
-	for _, want := range []string{"/sdn/zones/z1/v1 ProxCloudCAPI capmox@pve!pc-c-1", "/sdn/zones/localnetwork ProxCloudCAPI capmox@pve!pc-c-1"} {
+	for _, want := range []string{"/sdn/zones/z1/v1 ProxCloudCAPI capmox@pve!pc-c-1", "/sdn/zones/localnetwork ProxCloudCAPI capmox@pve!pc-c-1",
+		"/storage/local-zfs ProxCloudCAPI capmox@pve!pc-c-1"} {
 		if !slices.Contains(acls, want) {
 			t.Errorf("capi grants = %v, want %s", acls, want)
 		}
 	}
-	// No store offered to the tenant: no CSI token at all, and CAPMOX still gets the boot store.
-	acls = nil
-	noCSI := sc
-	noCSI.CSIStorages = nil
-	got, err = c.MintClusterTokens(context.Background(), "pc-c-1", noCSI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.CSIID != "" || got.CSISecret != "" {
-		t.Errorf("no store offered, yet a CSI token: %+v", got)
-	}
-	if !slices.Contains(acls, "/storage/local-zfs ProxCloudCAPI capmox@pve!pc-c-1") {
-		t.Errorf("capi grants = %v", acls)
+	// Tenant block volumes go through the CSI gateway: no cluster ever gets a CSI token.
+	if minted != nil {
+		t.Errorf("tokens minted for %v, want capmox@pve only", minted)
 	}
 	for _, a := range acls {
 		if strings.Contains(a, "csi@pve") || strings.Contains(a, roleCSI) {
-			t.Errorf("no store offered, yet a CSI grant: %s", a)
+			t.Errorf("a CSI grant: %s", a)
 		}
 	}
 	aclErr = true

@@ -462,9 +462,7 @@
               rootVolumeGiB: "{{ pc.services.kamaji.root_volume_gib | int }}"
               workerMtu: "{{ pc.services.kamaji.worker_mtu | int }}"
               rwxGiB: "{{ pc.services.kamaji.rwx_gib | int }}"
-              csiSharedStores: "{{ pc.services.kamaji.csi_shared_stores | bool }}"
               pveApiUrl: "{{ pc_portal_pve_url }}"
-              pveCsiUrl: "https://{{ pc.services.network.pve_proxy_ip }}:8006"
           secret: {kubeconfig: "{{ kubeconfig }}"}
         - name: "{{ pc.provider.name }} Databases"
           type: CLOUD
@@ -496,6 +494,30 @@
             backupAccessKey: cnpg-backups-svc
             backupSecretKey: "{{ lookup('ansible.builtin.file', pc_gen ~ '/rustfs-cnpg-secret') | trim }}"
       loop_control: {label: "{{ item.name }}"}
+
+- name: Retire the PVE API forward
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  tasks:
+    # Tenant proxmox-csi controllers on the tenant side reached PVE through svc/pve-api; through the CSI gateway nothing
+    # does. A cluster whose resource-set config still holds a token, or whose Application has StorageClasses and no
+    # gateway, has not been moved yet (docs/managed-k8s.md, "Moving a cluster onto the CSI gateway"), so the forward
+    # stays until none is left.
+    - name: Remove the forward once no cluster uses it
+      when: pc.mode == 'split'
+      ansible.builtin.script: files/pve-forward.py
+      environment: {KUBECONFIG: /root/services.kubeconfig}
+      args: {executable: python3}
+      register: pc_forward
+      changed_when: (pc_forward.stdout | trim) == 'removed'
+    - name: Report clusters that still use the forward
+      when: pc.mode == 'split' and pc_forward.stdout is search('kept')
+      ansible.builtin.debug:
+        msg: >-
+          svc/pve-api is kept: {{ pc_forward.stdout_lines[1:] | join(', ') }} show a cluster whose proxmox-csi controller
+          still runs on its own token. Move each cluster onto the CSI gateway (POST /api/v1/admin/service/<k8s provider>/k8s-clusters/<id>/csi-gateway), then
+          run make upgrade again.
 
 - name: Say how to log in
   hosts: localhost

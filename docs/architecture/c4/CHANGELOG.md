@@ -82,6 +82,42 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Diagrams updated:** `c2-containers.md` (Sandbox cluster row), `c3-components.md` (Sync job, Networks and isolation
 rows), `c4-code.md` (C4.1 layer 1 and diagram).
+## 2026-11-07: tenant-side proxmox-csi settings and the PVE API forward removed (K8s-CSI, PR 4 of 4)
+
+**What changed**
+
+- `config.cluster.csiSharedStores` and `config.cluster.pveCsiUrl` are gone from the kamaji provider
+  (`kamaji.ClusterDefaults.CSISharedStores`, `.PVECSIURL`). A new cluster gets proxmox-csi classes through the CSI gateway,
+  or none; `sharedWorkers` keeps its tenant-side controller on the operator's token, now pointed at `pveApiUrl`.
+- `pve.MintClusterTokens` mints the CAPMOX token alone (`ClusterTokenScope.CSIStorages`, `ClusterTokens.CSIID/CSISecret`
+  removed). `RevokeClusterTokens` still deletes a `csi@pve!<id>` an older cluster holds.
+- Admin create and update of a kamaji provider answer 400 to a `cluster` block that still sets either key
+  (`externalservice.KamajiRemovedKeys`); an update that does not send the block passes. The admin form drops the keys on
+  save, says so when the stored config has them, and no longer has the "PVE API for workers" field.
+- Installer: the `pve-api` Service and EndpointSlice are no longer created (stage 50), and `services.pve_node_ips`,
+  `services.network.pve_proxy_ip` and `services.kamaji.csi_shared_stores` are removed (preflight names them when a site
+  still sets them). Stage 60 (`files/pve-forward.py`) deletes the forward on the services cluster when no
+  `<id>-csi-config` there still holds a token and no managed cluster Application has StorageClasses without
+  `proxmox.csi.gateway`, and otherwise names the clusters to move first; stage 60 stops sending the two keys.
+- The "Changing a setting later" recipe in `docs/managed-k8s.md` drops the two keys from the `cluster` block it re-sends.
+- The PR 3 migration action is unchanged, for sites with clusters made before the gateway.
+
+**Why**
+
+- PR 3's lab drill left no cluster on the tenant-side controller, so the setting only kept a way to hand tenants a token
+  that opens every disk on a store. Removing it leaves the gateway as the one path, which is the owner's rule: no PVE
+  credential in a tenant cluster.
+- A stored key that silently stops doing anything would leave an operator wondering why new clusters have no classes;
+  a 400 on write says so where the config is changed, and refusing only what the request sends keeps old rows editable.
+- The forward existed only for tenant workers' proxmox-csi. Deleting it in stage 60, the stage `make upgrade` runs, is
+  what reaches existing sites; checking the clusters' resource-set configs first keeps an upgrade from cutting off a
+  cluster that has not been moved yet. The migration rewrites that config before it patches the Application, so the
+  Application is checked too: a failed patch leaves the tenant-side controller on its old token, and removing the
+  forward then would break its attach and delete until the migration is re-run.
+- Every installer site's stored `cluster` block still holds the two keys, so the documented re-send recipe would now get
+  the 400.
+
+**Diagrams updated:** `c3-components.md` (Managed K8s create row). C1/C2 had no element or edge for the forward.
 
 ## 2026-11-07: Sandbox cluster setup and isolation drops for its network (SB2a)
 

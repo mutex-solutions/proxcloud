@@ -89,8 +89,6 @@
         KUBECONFIG: /root/services.kubeconfig
         METALLB_RANGE: "{{ svc.network.metallb }}"
         PVE_API_URL: "{{ pc_portal_pve_url }}"
-        PVE_NODE_IPS: "{{ svc.pve_node_ips | join(' ') }}"
-        PVE_PROXY_IP: "{{ svc.network.pve_proxy_ip }}"
         CSI_TOKEN_ID: "{{ svc.csi_token_id }}"
         CSI_TOKEN_SECRET: "{{ lookup('ansible.builtin.file', pc_gen ~ '/' ~ svc.csi_token_file) | trim }}"
         REGION: "{{ pc.provider.region }}"
