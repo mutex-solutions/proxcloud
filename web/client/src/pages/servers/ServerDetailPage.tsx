@@ -12,7 +12,7 @@ import { Link, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import {
-  Camera, Globe, HardDrive, History, MoreVertical, Play, Plus, RotateCw, Square, Trash2, X,
+  Archive, Camera, Globe, HardDrive, History, MoreVertical, Play, Plus, RotateCw, Square, Trash2, X,
 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { StatusBadge } from "@/components/status-badge"
@@ -343,6 +343,7 @@ export function ServerDetailPage() {
             <TabsTrigger value="protection">Protection</TabsTrigger>
             {features.has("serverEvents") && <TabsTrigger value="events">Events</TabsTrigger>}
             {features.has("serverDiskSnapshots") && <TabsTrigger value="disk-snapshots">Snapshots</TabsTrigger>}
+            {features.has("serverBackups") && <TabsTrigger value="backups">Backups</TabsTrigger>}
             {features.has("serverSnapshots") && <TabsTrigger value="snapshots">Images</TabsTrigger>}
             {features.has("consoleLog") && <TabsTrigger value="logs">Console log</TabsTrigger>}
           </TabsList>
@@ -397,6 +398,12 @@ export function ServerDetailPage() {
         {features.has("serverDiskSnapshots") && (
           <TabsContent value="disk-snapshots" className="mt-4">
             <DiskSnapshotsTab pid={pid} resourceId={resourceId} scope={scope} />
+          </TabsContent>
+        )}
+
+        {features.has("serverBackups") && (
+          <TabsContent value="backups" className="mt-4">
+            <BackupsTab pid={pid} resourceId={resourceId} scope={scope} />
           </TabsContent>
         )}
 
@@ -606,6 +613,7 @@ export function ServerDetailPage() {
             <DialogTitle>Delete server</DialogTitle>
             <DialogDescription>
               Are you sure you want to delete "{name}"? This cannot be undone.
+              {features.has("serverBackups") ? " Its backups are deleted with it." : ""}
             </DialogDescription>
           </DialogHeader>
           <ServerDeleteVolumes checked={deleteVolumes} onChange={setDeleteVolumes} />
@@ -1126,6 +1134,113 @@ function PublicIpCard({
         )}
       </CardContent>
     </Card>
+  )
+}
+
+// ── Backups tab: archives on the provider's backup store. They survive a disk or node failure, and go when the
+// server goes. A restore replaces the disks; the API refuses (409 with the reason) what it would lose beyond that. ──
+type ServerBackup = { id: string; createdAt?: number; sizeBytes?: number }
+
+function BackupsTab({ pid, resourceId, scope }: { pid: string; resourceId: string; scope?: CloudScope }) {
+  const qc = useQueryClient()
+  const key = ["server-action", pid, resourceId, "LIST_BACKUPS"]
+  const backups = useQuery({
+    queryKey: key,
+    queryFn: () => actionFetch<ServerBackup[]>(pid, resourceId, scope, "LIST_BACKUPS"),
+    enabled: !!pid && !!resourceId && !!scope,
+    select: (d) => d?.result ?? [],
+  })
+  const [pending, setPending] = useState<{ action: string; id: string } | null>(null)
+  const run = useMutation({
+    mutationFn: (p: { action: string; id?: string }) => actionFetch(pid, resourceId, scope, p.action, p.id ? { id: p.id } : undefined),
+    onSuccess: (_d, p) => {
+      toast.success(
+        p.action === "CREATE_BACKUP" ? "Backup created" : p.action === "RESTORE_BACKUP" ? "Server restored" : "Backup deleted",
+      )
+      setPending(null)
+      void qc.invalidateQueries({ queryKey: key })
+      void qc.invalidateQueries({ queryKey: ["cloud-resource", pid, resourceId] })
+    },
+    onError: (e: Error) => {
+      setPending(null)
+      toast.error(e.message)
+    },
+  })
+  const rows = backups.data ?? []
+  return (
+    <div className="grid gap-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <Button size="sm" disabled={run.isPending} onClick={() => run.mutate({ action: "CREATE_BACKUP" })}>
+          <Archive className="size-4" /> {run.isPending && !pending ? "Backing up…" : "Create backup"}
+        </Button>
+        <p className="text-sm text-muted-foreground">A backup can take minutes. It is deleted with the server; to keep a server's state longer, create an image.</p>
+      </div>
+      {backups.isLoading ? (
+        <Skeleton className="h-40" />
+      ) : !rows.length ? (
+        <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+          No backups of this server yet.
+        </p>
+      ) : (
+        <Card className="overflow-hidden py-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Created</TableHead>
+                <TableHead>Size</TableHead>
+                <TableHead className="w-48" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((b) => (
+                <TableRow key={b.id}>
+                  <TableCell className="font-medium">
+                    {b.createdAt ? new Date(b.createdAt * 1000).toLocaleString() : "—"}
+                  </TableCell>
+                  <TableCell className="text-sm tabular-nums text-muted-foreground">
+                    {((b.sizeBytes ?? 0) / 1073741824).toFixed(2)} GB
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button variant="ghost" size="sm" disabled={run.isPending} onClick={() => setPending({ action: "RESTORE_BACKUP", id: b.id })}>
+                      <History className="size-4" /> Restore
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      disabled={run.isPending}
+                      aria-label={`Delete backup of ${b.createdAt ? new Date(b.createdAt * 1000).toLocaleString() : b.id}`}
+                      onClick={() => setPending({ action: "DELETE_BACKUP", id: b.id })}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+      <Dialog open={!!pending} onOpenChange={(o) => !o && !run.isPending && setPending(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{pending?.action === "RESTORE_BACKUP" ? "Restore server" : "Delete backup"}</DialogTitle>
+            <DialogDescription>
+              {pending?.action === "RESTORE_BACKUP"
+                ? "The server stops, and its disks and settings are replaced with this backup. Everything written since is lost, and so are its snapshots. A running server restarts."
+                : "Delete this backup? This cannot be undone."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" disabled={run.isPending} onClick={() => setPending(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" disabled={run.isPending} onClick={() => pending && run.mutate(pending)}>
+              {run.isPending ? "Working…" : pending?.action === "RESTORE_BACKUP" ? "Restore" : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
   )
 }
 

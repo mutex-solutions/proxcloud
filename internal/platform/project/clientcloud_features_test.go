@@ -25,6 +25,8 @@ func TestCloudFeatures(t *testing.T) {
 		{"proxmox with a storage-less profile does not count it", map[string]any{
 			"provider": "proxmox", "storageProfiles": map[string]any{"std": profile("local-zfs"), "empty": map[string]any{}},
 		}, []string{"serverSnapshots", "userData", "serverPassword", "serverRebuild", "serverDiskSnapshots", "subnets", "spreadGroups"}},
+		{"proxmox with a backup store", map[string]any{"provider": "proxmox", "backupStorage": "nas-backup"},
+			[]string{"serverSnapshots", "userData", "serverPassword", "serverRebuild", "serverDiskSnapshots", "subnets", "spreadGroups", "serverBackups"}},
 		{"proxmox with two profiles", map[string]any{
 			"provider": "proxmox", "storageProfiles": map[string]any{"std": profile("local-zfs"), "nas": profile("nas")},
 		}, []string{"serverSnapshots", "userData", "serverPassword", "serverRebuild", "serverDiskSnapshots", "subnets", "spreadGroups", "volumeRetype"}},

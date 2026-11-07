@@ -25,6 +25,22 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Diagrams updated:** `c3-components.md` (TrueNAS client row).
 
+## 2026-11-07: Server backups (P5-3)
+
+**What changed**
+
+- `pve/backup.go` + `project/backup_pve.go`: LIST/CREATE/RESTORE/DELETE_BACKUP on a server, on vzdump to the provider's
+  `backupStorage` (NFS, CephFS or PBS). Backups tab in the customer console. `ProxCloudPlatform` adds `VM.Backup`.
+
+**Why**
+
+- Snapshots do not survive a disk or node failure. The ownership proof is a project stamp in the archive's notes, read
+  back from PVE on every action, because the store is shared and tenants never reach PVE, so the portal needs no table
+  of its own that could drift from the store. Backups go with their server because the token can see and delete an
+  archive only through `VM.Backup` on its VM, and an ACL on `/vms` would break the rule that the token only sees pool VMs.
+
+**Diagrams updated:** `c3-components.md` (PVE service).
+
 ## 2026-11-07: Server snapshots billed (MET-G9)
 
 **What changed**
