@@ -59,6 +59,10 @@
       - {path: "/storage/{{ pc.services.iso_storage }}", role: PVEDatastoreAdmin, propagate: 0, user: capmox@pve, token: capmox@pve!capi}
       - {path: /pool, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!csi}
       - {path: /storage, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!csi}
+      # The CSI gateway (portal API) calls PVE for every tenant cluster's proxmox-csi with this one token and checks
+      # ownership itself; the same role and paths as the services cluster's own CSI token.
+      - {path: /pool, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!gateway}
+      - {path: /storage, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!gateway}
       - {path: /access/groups, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /pool, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /storage, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
@@ -150,6 +154,27 @@
       no_log: true
       loop: "{{ pc_new_tokens.results }}"
 
+    - name: Create the CSI gateway token
+      when:
+        - pc.mode == 'split'
+        - "'gateway' not in (have_users['csi@pve'] | default([], true) | map(attribute='tokenid') | list)"
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/users/csi@pve/token/gateway"
+        method: POST
+        body_format: form-urlencoded
+        body: {privsep: 1, comment: ProxCloud CSI gateway}
+      changed_when: true
+      no_log: true
+      register: pc_gateway_token
+
+    - name: Keep the CSI gateway token secret
+      when: pc_gateway_token.json is defined
+      ansible.builtin.copy:
+        dest: "{{ pc_gen }}/token-gateway"
+        content: "{{ pc_gateway_token.json.data.value }}\n"
+        mode: "0600"
+      no_log: true
+
     - name: Copy token secrets given in the vault
       when: pc_vault[item.key] is defined
       ansible.builtin.copy:
@@ -157,13 +182,13 @@
         content: "{{ pc_vault[item.key] }}\n"
         mode: "0600"
       no_log: true
-      loop: "{{ {'platform_token_secret': 'platform', 'images_token_secret': 'packer', 'capi_token_secret': 'capi', 'csi_token_secret': 'csi'} | dict2items }}"
+      loop: "{{ {'platform_token_secret': 'platform', 'images_token_secret': 'packer', 'capi_token_secret': 'capi', 'csi_token_secret': 'csi', 'csi_gateway_token_secret': 'gateway'} | dict2items }}"
 
     - name: Check the tokens the installer needs are known
       ansible.builtin.stat: {path: "{{ pc_gen }}/token-{{ item }}"}
       register: pc_tokens
       failed_when: not pc_tokens.stat.exists
-      loop: "{{ ['platform', 'packer'] + (['capi', 'csi'] if pc.mode == 'split' else []) }}"
+      loop: "{{ ['platform', 'packer'] + (['capi', 'csi', 'gateway'] if pc.mode == 'split' else []) }}"
 
     - name: Grant the missing ACLs
       ansible.builtin.uri:

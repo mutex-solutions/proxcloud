@@ -124,6 +124,14 @@ func (e *ExternalService) PVEConfig() pve.Config {
 	}
 }
 
+// PVECSIGatewayConfig is PVEConfig with the CSI gateway's token (config.csiGatewayTokenId, secret.csiGatewaySecret)
+// in place of the portal's. ok is false when the provider has none: the gateway then refuses its clusters.
+func (e *ExternalService) PVECSIGatewayConfig() (cfg pve.Config, ok bool) {
+	cfg = e.PVEConfig()
+	cfg.TokenID, cfg.Secret = str(e.Config["csiGatewayTokenId"]), str(e.secretMap()["csiGatewaySecret"])
+	return cfg, cfg.TokenID != "" && cfg.Secret != ""
+}
+
 // PVEBackupStorage is config.backupStorage: the shared store server backups go to ("" = no backups offered).
 func (e *ExternalService) PVEBackupStorage() string { return str(e.Config["backupStorage"]) }
 

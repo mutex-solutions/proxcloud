@@ -138,3 +138,29 @@ func pveUsageOf(rows []cloud.CloudResource, svcID string) pveQuotaDemand {
 	}
 	return u
 }
+
+// CSIDiskQuota gates disk the CSI gateway is about to create or grow for a tenant cluster's volume, against the
+// project's diskGb. The gateway's registry is not in the cache, so csiUsed adds its volumes to the cached usage.
+func (h *Handler) CSIDiskQuota(ctx context.Context, projectID, serviceID string, addGiB int, csiUsed func() (int, error)) error {
+	proj, err := h.svc.GetProjectByID(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	es, err := h.esSvc.Get(ctx, serviceID)
+	if err != nil {
+		return err
+	}
+	usage := func() (pveQuotaDemand, error) {
+		u, err := h.pveQuotaUsage(ctx, proj.ID, es.ID)
+		if err != nil {
+			return u, err
+		}
+		n, err := csiUsed()
+		u.DiskGb += n
+		return u, err
+	}
+	if herr := checkPVEQuota(pveQuotaLimits(proj, es), pveQuotaDemand{DiskGb: addGiB}, usage, func() (int, error) { return 0, nil }); herr != nil {
+		return herr
+	}
+	return nil
+}

@@ -50,6 +50,53 @@ and rules: [README.md](README.md#maintenance-rule).
   it: the isolation rules do, and the warning says when a store is outside them.
 
 **Diagrams updated:** `c3-components.md`, `c4-code.md`.
+## 2026-11-07: CSI gateway and volume registry (K8s-CSI, PR 1 of 4)
+
+**What changed**
+
+- `internal/cloud/csigw`: a listener in `cmd/api` (`PROXCLOUD_CSI_GATEWAY_ADDR`, TLS only, off by default) that answers
+  proxmox-csi-plugin v0.22.0's controller as if it were PVE. Thirteen calls are allowed, each with its own check; every
+  other path, nextid, VM create, replication, migrate and `/access/ticket` included, answers 403 and writes an audit
+  event (`CSI_GATEWAY` / `DENY`).
+- Per-cluster credential `csi@proxcloud!<clusterId>` (`csiGatewayCredential`, SHA-256 only), minted and revoked by
+  `Store.MintCredential` / `RevokeCredential` for PR 2 to call at cluster create and release.
+- `csiVolume`: the gateway's record of the disks it created, keyed provider/store/name and written before PVE is asked,
+  so a name is taken once across clusters. `csiTask`: the UPIDs it answered, the only ones a cluster may poll; a finished
+  delete, copy or resize lands on its row once.
+- `pve.Client.Raw`; `ExternalService.PVECSIGatewayConfig` (`config.csiGatewayTokenId`, `secret.csiGatewaySecret`);
+  `project.Handler.CSIDiskQuota` counts registry volumes against `diskGb`.
+- Installer: stage 10 creates `csi@pve!gateway` (role `ProxCloudCSI` on `/pool` and `/storage`) in split mode, stage 60
+  puts it on the compute provider.
+
+**Why**
+
+- The tenant-side CSI token opens every disk on a store, since PVE checks only `Datastore.Allocate` there, and moving the
+  controller out of the tenant is not enough: a tenant still writes the PV that names the disk. A gateway that checks
+  ownership is the boundary, and only it holds a PVE token.
+- Ownership is a registry row, not a tag or a name prefix, because the plugin's disks carry neither, and nothing a tenant
+  controls (volumeHandle, NodeID, providerID, StorageClass) is taken as proof.
+- The worker check reads `/cluster/resources` with the portal token: a token without `Pool.Audit` gets no `pool` field
+  there (PVE 9.2, lab), and `ProxCloudCSI` stays as it is. The portal token also cannot see `proxcloud-system`.
+- Its own port, not `:8080` (public) or `:8081` (`/debug/*` has no auth).
+
+**Review fixes in the same PR**
+
+- The worker list is read on every VM call, not cached for 10 s as the design had it, and the `pc-k8s-<id>` tag is
+  checked again on the VM config the gateway reads. Why: PVE gives a freed vmid to the next VM at once, so a cached list
+  let a cluster read the config of, attach to and revert another project's VM under its old worker's id for up to 10 s.
+  The store list stays cached: stores never change hands.
+- Quota check and registry write run under a Postgres advisory lock per project (`Registry.Locked`). Why: concurrent
+  creates, copies or resizes each passed on the same usage.
+- A resize writes the new size to its row when PVE accepts the call (set back if PVE refuses). Why: the row only moved
+  when the cluster polled the task, so a cluster that skipped the poll could grow each disk to the whole quota, and
+  billing from the registry would undercount.
+- A create or copy whose name PVE already holds without a row is refused (409). A create whose answer is lost asks PVE
+  whether the disk exists: yes, the row turns ready; no, it goes; no answer, it stays `creating`. A copy whose answer is
+  lost keeps its `creating` row. Why: an older disk with no row (another cluster's, before the gateway) must not be taken
+  over or blocked for the migration's adopt step, and a disk must never be left without a row.
+- The listener has read, write and idle timeouts, and an unknown cluster id costs the same hash compare as a known one.
+
+**Diagrams updated:** `c2-containers.md`, `c3-components.md`.
 
 ## 2026-11-07: Load balancers (HAProxy appliance)
 

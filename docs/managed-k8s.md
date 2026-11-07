@@ -231,6 +231,20 @@ another project's PVC or boot disk to its own worker (a pod then read the files)
 task ran and failed only because that disk was in use). Moving the plugin to the management side would not close this, as a
 tenant can create a `PersistentVolume` naming any disk. Turn the setting on only for tenants who trust each other, or on a
 store they alone use.
+
+**Block volumes through the CSI gateway (in progress).** The replacement keeps every PVE credential out of the tenant
+cluster. The portal API serves a CSI gateway (`internal/cloud/csigw`, its own TLS listener, `PROXCLOUD_CSI_GATEWAY_ADDR`,
+off by default) that the proxmox-csi controller calls as if it were PVE, with a credential per cluster
+(`csi@proxcloud!<clusterId>`). The gateway allows only the calls proxmox-csi-plugin v0.22.0 makes and checks each one: a
+disk is the cluster's when the gateway's `csiVolume` registry says it created it for that cluster (written before the disk,
+so a name is taken once), a VM when it is in the cluster's pool with its `pc-k8s-<clusterId>` tag right now (read on
+every call, since PVE reuses a freed vmid at once), a task when the gateway
+answered with its UPID. A crafted `volumeHandle`, NodeID or StorageClass is only an input it checks; another cluster's disk
+does not even show in a listing, so a delete of it is a no-op and an attach finds nothing. It refuses replication,
+`/cluster/nextid`, VM create, migrate and `/access/ticket`, and records every refusal in the audit log. It calls PVE with
+one token, `csi@pve!gateway` ([proxmox-permissions.md](proxmox-permissions.md#the-csi-gateway-token)). Not wired yet: the
+controller still runs in the tenant until the services-cluster deployment, credential minting at create and the
+migration of existing clusters land.
 A disk is named after its PV alone, so the portal cannot tell whose it is: a PVC still there when the cluster is deleted
 leaves its disk on the store, unbilled. Delete PVCs first. A cluster created with the setting off has no proxmox-csi, no CSI token and no
 `csi-proxmox` namespace, and `shared-file` is the default StorageClass if it has a dataset. Without a TrueNAS provider on
