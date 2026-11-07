@@ -114,6 +114,49 @@ function trueNASFormToBody(f: TrueNASFormState) {
   }
 }
 
+// ── powerdns create form ─────────────────────────────────────────────────────
+type PowerDNSFormState = { name: string; apiUrl: string; apiKey: string; nameservers: string; region: string }
+const emptyPowerDNSForm: PowerDNSFormState = { name: "", apiUrl: "", apiKey: "", nameservers: "", region: "pve" }
+const powerDNSFormValid = (f: PowerDNSFormState) =>
+  [f.name, f.apiUrl, f.apiKey, f.nameservers, f.region].every((v) => v.trim() !== "")
+
+// DNS zones only, so the dns service is enabled directly. The API key goes to the secret and never comes back.
+function powerDNSFormToBody(f: PowerDNSFormState) {
+  const region = f.region.trim()
+  return {
+    name: f.name.trim(),
+    type: "CLOUD",
+    status: "PUBLIC",
+    config: {
+      provider: "powerdns",
+      apiUrl: f.apiUrl.trim().replace(/\/+$/, ""),
+      nameservers: f.nameservers.split(",").map((n) => n.trim()).filter(Boolean),
+      region,
+      regions: { [region]: { displayName: region } },
+      services: { dns: { [region]: true } },
+    },
+    secret: { apiKey: f.apiKey.trim() },
+  }
+}
+
+function PowerDNSProviderForm({ form, setForm }: { form: PowerDNSFormState; setForm: (f: PowerDNSFormState) => void }) {
+  const field = (key: keyof PowerDNSFormState, label: string, placeholder = "", type = "text") => (
+    <div className="grid gap-2">
+      <Label htmlFor={`pd-${key}`}>{label}</Label>
+      <Input id={`pd-${key}`} type={type} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} placeholder={placeholder} />
+    </div>
+  )
+  return (
+    <div className="grid gap-4">
+      {field("name", "Display name", "DNS")}
+      {field("apiUrl", "API URL", "https://dns.example.com:8081")}
+      {field("apiKey", "API key", "", "password")}
+      {field("nameservers", "Name servers of new zones, comma separated", "ns1.example.com, ns2.example.com")}
+      {field("region", "Region", "pve")}
+    </div>
+  )
+}
+
 function TrueNASProviderForm({ form, setForm }: { form: TrueNASFormState; setForm: (f: TrueNASFormState) => void }) {
   const field = (key: keyof TrueNASFormState, label: string, placeholder = "", type = "text") => (
     <div className="grid gap-2">
@@ -257,7 +300,8 @@ export default function CloudProvidersPage() {
   const items = data?.data ?? []
 
   const [createOpen, setCreateOpen] = useState(false)
-  const [kind, setKind] = useState<"ceph-s3" | "rustfs" | "truenas" | "kamaji" | "dbaas" | "proxmox">("proxmox")
+  const [kind, setKind] = useState<"ceph-s3" | "rustfs" | "truenas" | "powerdns" | "kamaji" | "dbaas" | "proxmox">("proxmox")
+  const [powerDNSForm, setPowerDNSForm] = useState<PowerDNSFormState>(emptyPowerDNSForm)
   const [trueNASForm, setTrueNASForm] = useState<TrueNASFormState>(emptyTrueNASForm)
   const [cephForm, setCephForm] = useState<CephFormState>(emptyCephForm)
   const [kamajiForm, setKamajiForm] = useState<KamajiFormState>(emptyKamajiForm)
@@ -275,6 +319,8 @@ export default function CloudProvidersPage() {
             ? cephFormToBody(cephForm, kind)
             : kind === "truenas"
               ? trueNASFormToBody(trueNASForm)
+            : kind === "powerdns"
+              ? powerDNSFormToBody(powerDNSForm)
             : kind === "kamaji"
               ? kamajiFormToBody(kamajiForm)
               : kind === "dbaas"
@@ -389,6 +435,7 @@ export default function CloudProvidersPage() {
             setKamajiForm(emptyKamajiForm)
             setDbaasForm(emptyDbaasForm)
             setProxmoxForm(emptyProxmoxForm)
+            setPowerDNSForm(emptyPowerDNSForm)
             setKind("proxmox")
           }
         }}
@@ -399,6 +446,8 @@ export default function CloudProvidersPage() {
             <DialogDescription>
               {kind === "ceph-s3"
                 ? "Connect a Ceph RGW object store over its S3 and Admin Ops endpoints. Projects get a dedicated RGW user."
+                : kind === "powerdns"
+                  ? "Connect a PowerDNS Authoritative server for tenant DNS zones, over its HTTP API."
                 : kind === "truenas"
                   ? "Connect a TrueNAS for NFS and SMB file shares, over its WebSocket API. The key's account needs the Sharing Administrator group; Deleting shares also needs DATASET_DELETE, SMB shares ACCOUNT_WRITE."
                 : kind === "rustfs"
@@ -423,6 +472,9 @@ export default function CloudProvidersPage() {
             <Button variant={kind === "truenas" ? "default" : "outline"} onClick={() => setKind("truenas")}>
               TrueNAS
             </Button>
+            <Button variant={kind === "powerdns" ? "default" : "outline"} onClick={() => setKind("powerdns")}>
+              PowerDNS
+            </Button>
             <Button variant={kind === "kamaji" ? "default" : "outline"} onClick={() => setKind("kamaji")}>
               Kubernetes
             </Button>
@@ -430,7 +482,9 @@ export default function CloudProvidersPage() {
               Database (DBaaS)
             </Button>
           </div>
-          {kind === "truenas" ? (
+          {kind === "powerdns" ? (
+            <PowerDNSProviderForm form={powerDNSForm} setForm={setPowerDNSForm} />
+          ) : kind === "truenas" ? (
             <TrueNASProviderForm form={trueNASForm} setForm={setTrueNASForm} />
           ) : kind === "ceph-s3" || kind === "rustfs" ? (
             <CephProviderForm form={cephForm} setForm={setCephForm} />
@@ -448,7 +502,9 @@ export default function CloudProvidersPage() {
             <Button
               onClick={() => create.mutate()}
               disabled={
-                (kind === "truenas"
+                (kind === "powerdns"
+                  ? !powerDNSFormValid(powerDNSForm)
+                  : kind === "truenas"
                   ? !trueNASFormValid(trueNASForm)
                   : kind === "ceph-s3" || kind === "rustfs"
                   ? !cephFormValid(cephForm)

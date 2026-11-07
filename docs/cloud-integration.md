@@ -690,6 +690,29 @@ node), never started, tagged `pc-holder`, in the project pool, created on demand
   holder, migrates that holder offline (nothing to copy) and reassigns on the target's node. If a step fails the disk
   stays on that holder as an ordinary detached volume.
 
+## PowerDNS zones
+
+`config.provider == "powerdns"` serves tenant zones (`DNS_ZONE` resources, service slug `dns`). Code:
+`internal/cloud/powerdns/`, `internal/platform/project/cloud_zones.go`.
+
+```json
+{"provider": "powerdns", "apiUrl": "https://dns.example:8081", "serverId": "localhost",
+ "nameservers": ["ns1.example.net", "ns2.example.net"], "region": "pve",
+ "regions": {"pve": {"displayName": "Lab"}}, "services": {"dns": {"pve": true}}}
+```
+
+The API key goes in `secret.apiKey`. The server needs `api=yes`, a backend that stores zones, and its API reachable
+from ProxCloud only. Zones are `Native`, so the operator replicates them (database replication or a second backend).
+
+A zone belongs to the project in its `account` field (`proxcloud:<projectId>`). Every read and write checks it first,
+and another project's zone looks absent. Names are global on the server: a taken name answers `409`. ProxCloud does not
+prove a tenant owns a domain, so a tenant can hold a name it does not own until the owner complains; a zone only takes
+effect once the domain is delegated to these name servers. Tenants may not write the SOA or the apex NS. Zones are not
+billed and have no quota yet.
+
+The PVE SDN DNS plugin, which would register VM names from SDN IPAM, is not wired and stays Planned: it needs DNS
+options on the shared EVPN zone, and ProxCloud does not create IPAM records for it to use.
+
 ## TrueNAS file shares
 
 `config.provider == "truenas"` serves NFS and SMB shares (`SHARE` resources, service slug `shares`). Code:

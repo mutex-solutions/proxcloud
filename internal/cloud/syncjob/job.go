@@ -231,6 +231,9 @@ func (j *Job) syncService(ctx context.Context, p *project.Project, es *externals
 	if es.IsTrueNAS() {
 		return j.syncTrueNASService(ctx, p, es)
 	}
+	if es.IsPowerDNS() {
+		return j.syncPowerDNSService(ctx, p, es)
+	}
 	// No other provider kinds exist.
 	return 0
 }
@@ -278,6 +281,24 @@ func (j *Job) syncTrueNASService(ctx context.Context, p *project.Project, es *ex
 		if err := j.shareAccess(ctx, p.ID); err != nil {
 			j.log.Error("syncjob: reconcile share access", "project", p.ID, "serviceId", es.ID, "err", err)
 		}
+	}
+	return st.Created + st.Updated
+}
+
+// syncPowerDNSService reconciles the project's DNS zones, by the account field on the server.
+func (j *Job) syncPowerDNSService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
+	region := es.CephRegion()
+	if !es.ServiceEnabledInRegion("dns", region) {
+		return 0
+	}
+	ds, err := es.PowerDNSService()
+	if err != nil {
+		j.log.Error("syncjob: build powerdns client", "project", p.ID, "serviceId", es.ID, "err", err)
+		return 0
+	}
+	st, err := providers.Reconcile(ctx, ds.ZoneSyncProvider(region, p.ID), j.cloud, es.ID, j.now())
+	if err != nil {
+		j.log.Error("syncjob: reconcile zones", "project", p.ID, "serviceId", es.ID, "err", err)
 	}
 	return st.Created + st.Updated
 }

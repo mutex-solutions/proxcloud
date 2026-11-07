@@ -29,6 +29,7 @@ flowchart LR
     airwallex["Airwallex"]:::impl
     smtp["SMTP relay"]:::impl
     rgw["S3 store: Ceph RGW"]:::impl
+    pdns["PowerDNS"]:::impl
     rustfs["S3 store: RustFS"]:::impl
     nas["TrueNAS NAS"]:::impl
     prom["Prometheus-compatible metrics"]:::impl
@@ -49,6 +50,7 @@ flowchart LR
   pc -->|"deposits, cards, collect"| airwallex
   pc -->|"transactional mail"| smtp
   pc -->|"RGW admin ops and S3"| rgw
+  pc -->|"zones and records"| pdns
   pc -->|"admin API and S3"| rustfs
   pc -->|"WebSocket API: shares"| nas
   pve -->|"NFS, SMB, iSCSI"| nas
@@ -85,6 +87,7 @@ flowchart LR
 | TrueNAS NAS | Capacity storage for Proxmox (NFS, SMB, iSCSI) and tenant file shares created through the TrueNAS WebSocket API. | Implemented (iSCSI not used) |
 | Prometheus-compatible metrics | Optional per-provider source for per-VM network traffic counters, used to bill traffic. Proxmox providers default to their own public-NIC counters instead. | Implemented |
 | DNS and ACME | Hostnames and TLS certificates for the portal, the API and Keycloak, provided by the hosting cluster (the chart renders the routes, not the certificates). | Implemented |
+| PowerDNS Authoritative | Tenant DNS zones and records over its HTTP API, owned through the zone's account field. | Implemented |
 | DNS TXT verification | Domain ownership checks for per-org SSO (`_proxcloud-challenge.<domain>`). | Implemented |
 | Container registry (ghcr.io) | CI publishes the `proxcloud-api`, `proxcloud-web` and `proxcloud-admin` images and the Helm charts; deployments pull from it. | Implemented |
 | VM template pipelines | Image builds that publish OS and Kubernetes node templates into Proxmox. | Planned |

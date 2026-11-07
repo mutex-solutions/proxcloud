@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/powerdns"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/truenas"
 	"net/url"
 )
@@ -70,6 +71,14 @@ func (e *ExternalService) IsRustFS() bool { return e.Provider() == "rustfs" }
 // fingerprint/insecureTls, parentDataset, mountHost (default: the host of apiUrl), defaultQuotaGiB, region;
 // secret: apiKey.
 func (e *ExternalService) IsTrueNAS() bool { return e.Provider() == "truenas" }
+
+// IsPowerDNS reports a DNS zone provider (config.provider == "powerdns").
+func (e *ExternalService) IsPowerDNS() bool { return e.Provider() == "powerdns" }
+
+// PowerDNSService builds the zone service: config apiUrl, serverId, nameservers; secret apiKey.
+func (e *ExternalService) PowerDNSService() (*powerdns.Service, error) {
+	return powerdns.New(str(e.Config["apiUrl"]), str(e.Config["serverId"]), str(e.secretMap()["apiKey"]), strList(e.Config["nameservers"]))
+}
 
 // TrueNASService builds the share service. The caller closes its client.
 func (e *ExternalService) TrueNASService() (*truenas.Service, error) {
