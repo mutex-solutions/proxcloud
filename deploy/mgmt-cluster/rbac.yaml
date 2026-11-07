@@ -13,6 +13,7 @@
 #   ListMachineDeployments           machinedeployments.cluster.x-k8s.io: get/list
 #   ListCRs (cluster add-on status)  helmchartproxies, clusterresourcesets
 #                                    (addons.cluster.x-k8s.io): get/list
+#   ListPersistentVolumes            persistentvolumes: list (CSI gateway migration)
 #
 # Server-side apply is a PATCH that CREATES the object when absent — every SSA'd resource
 # therefore needs BOTH `create` and `patch`.
@@ -68,6 +69,11 @@ rules:
   - apiGroups: ["addons.cluster.x-k8s.io"]
     resources: ["helmchartproxies", "clusterresourcesets"]
     verbs: ["get", "list"]
+  # Read-only: moving a cluster onto the CSI gateway must not adopt a disk this cluster's own PVs
+  # name (Kamaji etcd, registry, DBaaS share the vm-9999-pvc- names and stores with the tenants).
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

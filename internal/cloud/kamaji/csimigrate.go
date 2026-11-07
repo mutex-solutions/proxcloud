@@ -29,6 +29,10 @@ func (s *Service) ClusterCSI(ctx context.Context, clusterID string) (*ClusterCSI
 	if app == nil || !managedBy(app) || digStr(app, "metadata", "labels", LabelService) != s.serviceID {
 		return nil, fmt.Errorf("kamaji: cluster %s not found", clusterID)
 	}
+	// A cluster being deleted: its release may have run already, so a credential or disk rows made now would outlive it.
+	if dig(app, "metadata", "deletionTimestamp") != nil {
+		return nil, fmt.Errorf("kamaji: cluster %s is being deleted", clusterID)
+	}
 	values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
 	out := &ClusterCSI{
 		ProjectID:    digStr(app, "metadata", "labels", LabelProject),
@@ -69,6 +73,12 @@ func (s *Service) TenantKubeconfig(ctx context.Context, projectID, clusterID str
 		return b, nil
 	}
 	return nil, fmt.Errorf("kamaji: cluster %s: admin kubeconfig not ready", clusterID)
+}
+
+// ServicesPersistentVolumes lists the management (services) cluster's own PersistentVolumes: its proxmox-csi disks
+// (Kamaji etcd, registry, DBaaS) share names and stores with the tenants'.
+func (s *Service) ServicesPersistentVolumes(ctx context.Context) ([]map[string]any, error) {
+	return s.api.ListPersistentVolumes(ctx)
 }
 
 // SwitchCSIGateway moves the cluster's proxmox-csi controller onto the services cluster in one Application apply: the

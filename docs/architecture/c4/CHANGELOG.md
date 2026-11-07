@@ -12,11 +12,14 @@ and rules: [README.md](README.md#maintenance-rule).
   `?force=true`; ADMIN_SERVICE_MANAGE), `project.MigrateClusterCSI`. It moves one cluster made with the tenant-side
   proxmox-csi controller (`csiSharedStores`) onto the gateway: adopt, switch, clean up, and answers a report.
 - Adopt: the portal reads the cluster's PersistentVolumes through its Kamaji admin kubeconfig (`kamaji.TenantKubeconfig`,
-  `kamajik8s.ListPersistentVolumes`), and those of every other cluster of the provider. `planCSIAdoption` takes a disk
-  into the `csiVolume` registry as the cluster's only when its PV is the one PV naming it, PVE lists it on one of the
-  cluster's stores, only the cluster's workers have it attached, and no row holds it. Refusals carry their reason and stop
-  the migration (409 with the report) unless forced; unnamed, unheld, unattached `-pvc-` disks are listed as orphans and
-  left alone. Disks are listed with the gateway token, VMs and their configs with the portal's.
+  `kamajik8s.ListPersistentVolumes`), those of every other cluster of the provider, and the services cluster's own
+  (`kamaji.ServicesPersistentVolumes`; `deploy/mgmt-cluster/rbac.yaml` gains `list persistentvolumes`).
+  `planCSIAdoption` takes a disk into the `csiVolume` registry as the cluster's only when its PV is the one PV naming it,
+  PVE lists it on one of the cluster's stores, it is attached to the cluster's workers and to no other VM, and no row
+  holds it; a disk no worker holds needs the operator to name its PV (`?adoptDetached=`). Refusals carry their reason
+  and stop the migration (409 with the report) unless forced; unnamed, unheld, unattached `-pvc-` disks are listed as
+  orphans and left alone. Disks are listed with the gateway token, VMs and their configs with the portal's. A cluster
+  being deleted is refused; PVs made between the read and the revoke are reported as `late`.
 - Switch: `kamaji.SwitchCSIGateway` writes `<id>-csi-gateway`, cuts `<id>-csi-config` to the `csi-proxmox` namespace and
   pins the provider's chart (0.1.7 or later) with the gateway values in one Application apply.
 - Clean up: the tenant's `csi-proxmox/proxmox-csi-plugin` Secret is deleted and `csi@pve!<id>` revoked
@@ -30,6 +33,12 @@ and rules: [README.md](README.md#maintenance-rule).
   named by two clusters, attached to someone else's VM, or any disk while some cluster cannot be read is the operator's
   call, not the migration's. Being attached to the cluster's own worker proves nothing on its own: the old token let a
   cluster attach another's disk to its worker.
+- Nobody else naming a disk proves nothing either (review of PR 3): the portal sees only its own provider's clusters, so
+  a services-cluster disk (Kamaji etcd, registry, DBaaS, same `vm-9999-pvc-` names on `local-zfs` on the lab), a disk a
+  deleted cluster left behind, or another portal's disk is named by nobody, and is detached during a pod restart, a
+  drain or a hibernate. A crafted PV migrated in that window would have kept gateway access to it after the token went.
+  The services cluster's PVs now count as claims, and a detached disk is adopted only by name from the operator.
+  Attachments are kept per VM, so a disk on a worker and on a foreign VM is refused.
 - PVE shows a `vm-9999-…` disk only to a token with `Datastore.Allocate` on its store, since VM 9999 does not exist to
   hold `VM.Audit` on. The portal token's listing came back without the cluster's disks on the lab (every PV read "not on
   PVE"), hence the gateway token for the listing.

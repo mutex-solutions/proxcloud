@@ -431,8 +431,8 @@ func run() error {
 	adminH.SetHmacEncryptor(enc)
 	adminH.SetCollectChecker(txnScanner)
 	adminH.SetKamaji(kamajiFactory)
-	adminH.SetCSIMigrator(func(ctx context.Context, es *externalservice.ExternalService, ks *kamaji.Service, clusterID string, dryRun, force bool) (any, error) {
-		rep, err := projectH.MigrateClusterCSI(ctx, es, ks, clusterID, dryRun, force)
+	adminH.SetCSIMigrator(func(ctx context.Context, es *externalservice.ExternalService, ks *kamaji.Service, clusterID string, dryRun, force bool, adoptDetached []string) (any, error) {
+		rep, err := projectH.MigrateClusterCSI(ctx, es, ks, clusterID, dryRun, force, adoptDetached)
 		if rep == nil {
 			return nil, err
 		}

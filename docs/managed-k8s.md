@@ -316,22 +316,33 @@ project's own workers) and a Kubernetes provider pinned to chart 0.1.7 or later,
 portal reads the tenant API through the cluster's Kamaji admin kubeconfig, at the control plane's LoadBalancer
 address: a cluster whose API allowlist leaves the portal out cannot be moved until it is added.
 
-1. **Adopt.** The portal reads the cluster's PersistentVolumes of driver `csi.proxmox.sinextra.dev`, and those of every
-   other cluster of the provider. A PV's disk enters the gateway's registry as the cluster's when that PV is the only one
-   naming it, PVE lists it on one of the cluster's stores, nothing but the cluster's workers has it attached, and no
-   registry row holds it. Any other PV is refused with its reason: another cluster's PV names the disk too (a crafted
-   PV, or a disk passed between clusters), the registry holds it for another cluster, another VM has it attached, it is
-   not on PVE, its name is not one proxmox-csi gives a volume, it is on another region or store, or another cluster's PVs
-   could not be read (the disk could be theirs). A refusal stops the migration with 409 and the report; `?force=true` goes
-   on, and a pod of a refused PV cannot attach afterwards. `-pvc-` disks on the cluster's stores that no PV names, no row
-   holds and no VM has attached are listed as `orphans`, never deleted. Adopted disks bill from now on (the PVE sync
-   never counted them before).
+1. **Adopt.** The portal reads the cluster's PersistentVolumes of driver `csi.proxmox.sinextra.dev`, those of every
+   other cluster of the provider, and the services cluster's own (Kamaji etcd, the registry and DBaaS use the same
+   `vm-9999-pvc-` names on the same stores; this needs `list persistentvolumes` in `deploy/mgmt-cluster/rbac.yaml`, so
+   apply it again on an existing site before migrating: `make upgrade` does not). A PV's disk enters the gateway's
+   registry as the cluster's when that PV is the only one naming it, PVE lists it on one of the cluster's stores, it is
+   attached to the cluster's workers and to nothing else, and no registry row holds it. Any other PV is refused with its
+   reason: another PV names the disk too (a crafted PV, or a disk passed between clusters), the registry holds it for
+   another cluster, another VM has it attached, no worker of the cluster has it attached, it is not on PVE, its name is
+   not one proxmox-csi gives a volume, it is on another region or store, or some cluster's PVs could not be read (the
+   disk could be theirs). A disk nobody else names is not proof it is the cluster's: a disk left by a deleted cluster or
+   by another portal on the same PVE, or a services-cluster disk while its pod restarts, is named by nobody. So a PV whose
+   pod is not running (scaled to 0, or no pod at all) is refused until the operator has checked the disk and names the
+   PV in `?adoptDetached=<pv>,<pv>`; migrate while the cluster's pods run. A refusal stops the migration with 409 and the
+   report; `?force=true` goes on without adopting them, and a pod of a refused PV cannot attach afterwards. `-pvc-` disks
+   on the cluster's stores that no PV names, no row holds and no VM has attached are listed as `orphans`, never deleted.
+   Adopted disks bill from now on (the PVE sync never counted them before) and are not checked against the project's
+   quota.
 2. **Switch.** The portal mints the cluster's gateway credential, writes `<id>-csi-gateway`, cuts `<id>-csi-config` down
    to the `csi-proxmox` namespace, and in one Application apply pins the provider's chart with the gateway values.
    CAAPH takes the tenant's controller to 0 replicas and the services-side controller takes over the same leases. Pods
    keep their volumes: their I/O does not pass through the controller. On the lab the switch took about 10 seconds.
 3. **Clean up.** It deletes the tenant's `csi-proxmox/proxmox-csi-plugin` Secret (the resource set does not delete what
-   it no longer carries), then revokes `csi@pve!<id>`.
+   it no longer carries), then revokes `csi@pve!<id>`. It then reads the PVs again: one the old controller made after
+   the first read is listed in `late`, unadopted, and its pod cannot attach; run the migration again for it. The token
+   is revoked right after the Application apply, without waiting for ArgoCD to roll out the services-side controller:
+   afterwards, check on the services cluster that the cluster's csi controller Deployment is Ready. A cluster being
+   deleted is refused.
 
 Running it again is safe: adopted rows stay, a switched cluster is not switched again, and a Secret or token already gone
 counts as done. Its CAPI token stays.

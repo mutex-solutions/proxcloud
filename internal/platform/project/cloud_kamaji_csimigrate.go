@@ -54,6 +54,9 @@ type CSIMigration struct {
 	// Orphans are -pvc- disks on the cluster's stores that no PersistentVolume of the provider's clusters names, no
 	// registry row holds and no VM has attached. Listed for the operator, never deleted.
 	Orphans []string `json:"orphans"`
+	// Late are PersistentVolumes the old controller made after the disks were read: not adopted, so their pods
+	// cannot attach until the migration is run again.
+	Late []string `json:"late,omitempty"`
 	// UnreadClusters are other clusters whose PersistentVolumes could not be read: any disk could be theirs.
 	UnreadClusters []string `json:"unreadClusters,omitempty"`
 	Switched       bool     `json:"switched"`
@@ -80,10 +83,17 @@ type csiAdoptInput struct {
 	Others    map[string][]csiPV // other clusters' PersistentVolumes, by cluster id
 	Unread    []string           // other clusters whose PersistentVolumes could not be read
 	Disks     map[string]csiDisk // key: csiKey(storage, name)
-	Attached  map[string]int     // key → vmid of a VM that has the disk attached
+	Attached  map[string][]int   // key → vmids of the VMs that have the disk attached
 	Workers   map[int]bool       // the cluster's workers
 	Rows      map[string]string  // key → cluster id of a registry row (any state but deleted)
+	// AllowDetached names the PersistentVolumes the operator lets adopt although no worker of the cluster holds
+	// their disk.
+	AllowDetached map[string]bool
 }
+
+// servicesClaimant is how the services cluster's own PersistentVolumes (Kamaji etcd, registry, DBaaS) show in
+// Others and Unread.
+const servicesClaimant = "the services cluster"
 
 func csiKey(storage, name string) string { return storage + "/" + name }
 
@@ -106,8 +116,11 @@ func parseCSIHandle(h string) (region, zone, storage, name string, ok bool) {
 }
 
 // planCSIAdoption decides, PV by PV, whether the cluster's disk may enter the registry. A disk is adopted when the
-// cluster's own PV is the only one naming it, PVE has it, nothing but the cluster's workers has it attached, and no
-// registry row holds it for anyone else. Nothing is adopted while another cluster's PVs are unknown: the disk could be
+// cluster's own PV is the only one naming it (among the provider's clusters and the services cluster), PVE has it, it
+// is attached to the cluster's workers and to nothing else, and no registry row holds it for anyone else. "Nobody else
+// names it" is no proof of ownership: a disk left by a deleted cluster, one of another portal on the same PVE, or one
+// of the services cluster's own while its pod restarts is named by nobody. So a disk no worker of the cluster holds is
+// adopted only when the operator names its PV in AllowDetached. Nothing is adopted while another cluster's PVs are unknown: the disk could be
 // theirs, named here by a crafted PV, and attached here through the old token. Everything else is refused with its
 // reason, for the operator to decide.
 func planCSIAdoption(in csiAdoptInput) (adopt, refuse []CSIMigrationPV, orphans []string) {
@@ -138,7 +151,13 @@ func planCSIAdoption(in csiAdoptInput) (adopt, refuse []CSIMigrationPV, orphans 
 				others = append(others, c)
 			}
 		}
-		vmid, attached := in.Attached[k]
+		foreign := -1
+		for _, vmid := range in.Attached[k] {
+			if !in.Workers[vmid] {
+				foreign = vmid
+				break
+			}
+		}
 		switch {
 		case !ok:
 			r.Reason = "volume handle " + p.Handle + " is not region/zone/storage/disk"
@@ -159,8 +178,11 @@ func planCSIAdoption(in csiAdoptInput) (adopt, refuse []CSIMigrationPV, orphans 
 		case len(others) > 0:
 			sort.Strings(others)
 			r.Reason = "the disk is also named by a PersistentVolume of " + strings.Join(others, ", ")
-		case attached && !in.Workers[vmid]:
-			r.Reason = fmt.Sprintf("the disk is attached to VM %d, which is not a worker of this cluster", vmid)
+		case foreign >= 0:
+			r.Reason = fmt.Sprintf("the disk is attached to VM %d, which is not a worker of this cluster", foreign)
+		case len(in.Attached[k]) == 0 && !in.AllowDetached[p.Name]:
+			r.Reason = "no worker of this cluster has the disk attached, so nothing shows it is this cluster's; " +
+				"check it and name the PV in adoptDetached to adopt it"
 		case len(in.Unread) > 0:
 			r.Reason = "the PersistentVolumes of " + strings.Join(in.Unread, ", ") + " could not be read"
 		default:
@@ -176,8 +198,7 @@ func planCSIAdoption(in csiAdoptInput) (adopt, refuse []CSIMigrationPV, orphans 
 	}
 	for k, d := range in.Disks {
 		_, held := in.Rows[k]
-		_, attached := in.Attached[k]
-		if len(claims[k]) == 0 && !held && !attached {
+		if len(claims[k]) == 0 && !held && len(in.Attached[k]) == 0 {
 			orphans = append(orphans, d.VolID)
 		}
 	}
@@ -188,7 +209,8 @@ func planCSIAdoption(in csiAdoptInput) (adopt, refuse []CSIMigrationPV, orphans 
 // MigrateClusterCSI moves one cluster of the kamaji provider es onto the CSI gateway, or with dryRun only reports what
 // it would do. Refused PersistentVolumes stop the migration unless force is set: their pods could not attach afterwards.
 // A cluster already on the gateway gets its leftovers taken away again (tenant Secret, token), nothing else.
-func (h *Handler) MigrateClusterCSI(ctx context.Context, es *externalservice.ExternalService, ks *kamaji.Service, clusterID string, dryRun, force bool) (*CSIMigration, error) {
+// adoptDetached names the PersistentVolumes whose disk may be adopted although no worker holds it (planCSIAdoption).
+func (h *Handler) MigrateClusterCSI(ctx context.Context, es *externalservice.ExternalService, ks *kamaji.Service, clusterID string, dryRun, force bool, adoptDetached []string) (*CSIMigration, error) {
 	ctx = context.WithoutCancel(ctx)
 	cfg := ks.Config()
 	rep := &CSIMigration{ClusterID: clusterID, DryRun: dryRun, ChartVersion: cfg.ChartVersion, Adopted: []CSIMigrationPV{},
@@ -247,6 +269,10 @@ func (h *Handler) MigrateClusterCSI(ctx context.Context, es *externalservice.Ext
 	if err != nil {
 		return nil, err
 	}
+	in.AllowDetached = map[string]bool{}
+	for _, pv := range adoptDetached {
+		in.AllowDetached[pv] = true
+	}
 	adopt, refuse, orphans := planCSIAdoption(*in)
 	rep.UnreadClusters = in.Unread
 	rep.Refused = append(rep.Refused, refuse...)
@@ -301,6 +327,21 @@ func (h *Handler) MigrateClusterCSI(ctx context.Context, es *externalservice.Ext
 		return rep, upstreamErr(computeBackend, err)
 	}
 	rep.TokenRevoked = true
+	// The old controller could still make a PV between the read above and the revoke: its disk is not adopted.
+	list, err := tenant.ListPersistentVolumes(ctx)
+	if err != nil {
+		rep.Late = []string{"(could not read the PersistentVolumes again: run the migration again to check)"}
+		return rep, nil
+	}
+	known := map[string]bool{}
+	for _, p := range in.PVs {
+		known[p.Name] = true
+	}
+	for _, p := range pvsOf(list) {
+		if !known[p.Name] {
+			rep.Late = append(rep.Late, p.Name)
+		}
+	}
 	return rep, nil
 }
 
@@ -337,13 +378,19 @@ func pvsOf(list []map[string]any) []csiPV {
 // with hundreds of clusters wants a cached claim index instead.
 func (h *Handler) csiAdoptInput(ctx context.Context, ks *kamaji.Service, cl, gw *pve.Client, tenant *kamajik8s.Client, info *kamaji.ClusterCSI, clusterID, computeID string) (*csiAdoptInput, error) {
 	in := &csiAdoptInput{ClusterID: clusterID, Region: info.Region, Storages: classStoragesOf(info.Classes),
-		Others: map[string][]csiPV{}, Disks: map[string]csiDisk{}, Attached: map[string]int{}, Workers: map[int]bool{},
+		Others: map[string][]csiPV{}, Disks: map[string]csiDisk{}, Attached: map[string][]int{}, Workers: map[int]bool{},
 		Rows: map[string]string{}}
 	list, err := tenant.ListPersistentVolumes(ctx)
 	if err != nil {
 		return nil, upstreamErr("tenant cluster", err)
 	}
 	in.PVs = pvsOf(list)
+	// The services cluster's own disks (Kamaji etcd, registry, DBaaS) carry the same vm-9999-pvc- names on the same stores.
+	if l, err := ks.ServicesPersistentVolumes(ctx); err != nil {
+		in.Unread = append(in.Unread, servicesClaimant)
+	} else {
+		in.Others[servicesClaimant] = pvsOf(l)
+	}
 	pins, err := ks.ListClusterPins(ctx)
 	if err != nil {
 		return nil, upstreamErr("Kubernetes backend", err)
@@ -429,7 +476,7 @@ func (h *Handler) csiAdoptInput(ctx context.Context, ks *kamaji.Service, cl, gw 
 				continue
 			}
 			if k := csiKey(st, disk[strings.LastIndex(disk, "/")+1:]); slices.Contains(in.Storages, st) {
-				in.Attached[k] = v.VMID
+				in.Attached[k] = append(in.Attached[k], v.VMID)
 			}
 		}
 	}

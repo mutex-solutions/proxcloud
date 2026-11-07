@@ -105,4 +105,9 @@ func TestSwitchCSIGateway(t *testing.T) {
 	if _, err := svc.ClusterCSI(ctx, "pc-c-nothere"); err == nil {
 		t.Fatal("an unknown cluster is an error")
 	}
+	// A cluster being deleted is not migrated: its release may have run, so new credentials or disk rows would stay.
+	api.apps[appKey]["metadata"].(map[string]any)["deletionTimestamp"] = "2026-11-07T00:00:00Z"
+	if _, err := svc.ClusterCSI(ctx, spec.ID); err == nil || !strings.Contains(err.Error(), "being deleted") {
+		t.Fatalf("a cluster being deleted: err = %v", err)
+	}
 }
