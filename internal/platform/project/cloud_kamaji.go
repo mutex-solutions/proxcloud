@@ -90,12 +90,13 @@ func (h *Handler) kamajiCreate(w http.ResponseWriter, r *http.Request, u *user.U
 		Type: cloud.TypeKubernetesCluster, ExternalID: spec.ID,
 		Data: data, CreatedAt: &now, UpdatedAt: &now,
 	}
-	if _, err := h.cloud.Insert(r.Context(), cr); err != nil {
+	saved, err := h.cloud.Insert(r.Context(), cr)
+	if err != nil {
 		h.fail(w, err)
 		return
 	}
-	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", cr)
-	httpx.OK(w, *cr)
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", saved)
+	httpx.OK(w, *saved)
 }
 
 // kamajiDelete handles the KUBERNETES_CLUSTER leg of cloudDelete: Application delete (ArgoCD's

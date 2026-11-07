@@ -122,6 +122,10 @@ func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, sec Clust
 		map[string]string{"csi.yaml": sec.CSIManifest}, labels); err != nil {
 		return nil, fmt.Errorf("kamaji: apply csi secret: %w", err)
 	}
+	if err := s.api.ApplySecret(ctx, ns, MarkerSecretName(spec.ID), nil, labels,
+		map[string]string{annotationComputeService: sec.ComputeServiceID}); err != nil {
+		return nil, fmt.Errorf("kamaji: apply marker secret: %w", err)
+	}
 	values := BuildValues(s.cfg, spec)
 	app := BuildApplication(s.cfg, spec, s.serviceID, s.cfg.ChartVersion, values)
 	if err := s.api.ApplyApplication(ctx, app); err != nil {
@@ -206,11 +210,21 @@ func (s *Service) FinalizeAllOrphans(ctx context.Context) (int, error) {
 func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, secrets []map[string]any) (int, error) {
 	var errs []error
 	pending, reaped := 0, 0
+	marked := map[string]bool{}
+	for _, sec := range secrets {
+		if cid, ok := strings.CutSuffix(digStr(sec, "metadata", "name"), markerSuffix); ok {
+			marked[cid] = true
+		}
+	}
 	for _, sec := range secrets {
 		name := digStr(sec, "metadata", "name")
-		cid, isCloud := strings.CutSuffix(name, cloudSecretSuffix)
-		if !isCloud {
-			continue
+		cid, isMarker := strings.CutSuffix(name, markerSuffix)
+		if !isMarker {
+			// A cluster from before the marker still has its cloud secret until the cascade collects it.
+			var isCloud bool
+			if cid, isCloud = strings.CutSuffix(name, cloudSecretSuffix); !isCloud || marked[cid] {
+				continue
+			}
 		}
 		if created, err := time.Parse(time.RFC3339, digStr(sec, "metadata", "creationTimestamp")); err == nil {
 			if time.Since(created) < s.finalizeGrace {
@@ -254,8 +268,13 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 			pending++
 			continue
 		}
-		if err := s.api.DeleteSecret(ctx, ns, name); err != nil {
+		if err := s.api.DeleteSecret(ctx, ns, CloudSecretName(cid)); err != nil {
 			errs = append(errs, fmt.Errorf("cluster %s: delete cloud secret: %w", cid, err))
+			pending++
+			continue
+		}
+		if err := s.api.DeleteSecret(ctx, ns, MarkerSecretName(cid)); err != nil {
+			errs = append(errs, fmt.Errorf("cluster %s: delete marker secret: %w", cid, err))
 			pending++
 			continue
 		}

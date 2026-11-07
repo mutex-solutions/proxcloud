@@ -49,7 +49,7 @@ func (h *Handler) shareNetworks(ctx context.Context, p *Project) ([]string, erro
 				return nil, err
 			}
 			for _, ip := range ips {
-				if ip.IsPublic() {
+				if ip.IsPublic() || strings.HasPrefix(ip.ServerID, "k8s:") { // sharedWorkers: not on any project network
 					seen[ip.IP+"/32"] = true
 				}
 			}

@@ -106,6 +106,7 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 			ImageVariants: variants,
 			Flavors:       flavors,
 			RootVolumeGiB: intOf(cl["rootVolumeGiB"]),
+			RWXGiB:        intOf(cl["rwxGiB"]),
 			AllowedCIDRs:  strList(cl["allowedCidrs"]),
 			PVEAPIURL:     str(cl["pveApiUrl"]),
 			PVECSIURL:     str(cl["pveCsiUrl"]),

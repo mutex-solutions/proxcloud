@@ -60,6 +60,7 @@ Seed-file twin of the form: `deploy/seed/external-service-dev.json`
 | DNS zone | `config.cluster.dnsZone` | Optional. API FQDN = `<clusterId>.<zone>`. Cluster ids (`stc-<8hex>`) never change. |
 | Version → image matrix | `config.cluster.versions` | Curated map `k8s version → node image id`: the only versions offered to customers. Textarea grammar: `1.35.4=<image-id>` per line. |
 | Image variants | `config.cluster.imageVariants` | Alternative node-image builds of the same version, e.g. a GPU build. Grammar: `1.35.4@nvidia=<image-id>`. |
+| RWX dataset size | `config.cluster.rwxGiB` | Optional, API only. See [section 9](#9-how-a-cluster-lands-on-proxmox). |
 | Flavors allowlist | `config.cluster.flavors` | Flavor ids offered for node groups. Empty = no restriction. |
 
 ## 3. How a cluster is represented
@@ -164,6 +165,14 @@ taking the remainder. The zone label comes from that pin, so no cloud controller
 **Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
 endpoint and proxmox-csi's PVE API are addresses on the services subnet, which tenants reach over their normal
 egress: MetalLB, and a `pve-api` Service forwarding to the PVE nodes (`config.cluster.pveCsiUrl`).
+
+**RWX volumes.** `config.cluster.rwxGiB` gives each new cluster on a project with a TrueNAS provider one NAS dataset
+of that size and the `shared-file` StorageClass (csi-driver-nfs, `ReadWriteMany`), next to the proxmox-csi classes,
+which stay the default. The dataset is an ordinary share of the project named `k8s-<clusterId>`: it bills as a share,
+counts against the share quota, can be resized on the Shares page, and its export follows the project's addresses.
+PVCs are subdirectories of it, so `refquota` caps them together, not one by one. It is destroyed with the cluster, by the sweep after the delete cascade (30 minutes after the cluster was created at the earliest).
+Workers reach it over their egress, so the NAS must see them under the project's addresses: no NAT on the way.
+Full-tier sites (ceph-csi CephFS) are not built yet.
 
 **`sharedWorkers`.** For a site that will not give the portal token the right to mint tokens,
 `config.cluster.sharedWorkers` (`pool`, `bridge`, `gateway`, `prefix`, `first`, `last`, `capiTokenId`, `csiTokenId`;
