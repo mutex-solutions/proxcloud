@@ -134,6 +134,37 @@ func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, sec Clust
 	return clusterData(app, nil, nil), nil
 }
 
+// RecordCluster writes the marker before a create takes anything, so whatever it takes can be released by the sweep
+// even if the create dies halfway. CreateCluster writes the same marker again.
+func (s *Service) RecordCluster(ctx context.Context, projectID, clusterID, computeServiceID string) error {
+	if err := s.EnsureProjectNamespace(ctx, projectID); err != nil {
+		return fmt.Errorf("kamaji: ensure namespace: %w", err)
+	}
+	labels := map[string]string{LabelProject: projectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue}
+	if err := s.api.ApplySecret(ctx, NamespaceFor(projectID), MarkerSecretName(clusterID), nil, labels,
+		map[string]string{annotationComputeService: computeServiceID}); err != nil {
+		return fmt.Errorf("kamaji: apply marker secret: %w", err)
+	}
+	return nil
+}
+
+// AbandonCluster undoes a create that failed: it releases what the cluster took now, then its secrets. Any error leaves
+// the marker, and the sweep retries after the grace window.
+func (s *Service) AbandonCluster(ctx context.Context, projectID, clusterID, computeServiceID string) error {
+	if s.onClusterGone != nil {
+		if err := s.onClusterGone(ctx, computeServiceID, projectID, clusterID); err != nil {
+			return err
+		}
+	}
+	ns := NamespaceFor(projectID)
+	for _, name := range []string{CSISecretName(clusterID), CloudSecretName(clusterID), MarkerSecretName(clusterID)} {
+		if err := s.api.DeleteSecret(ctx, ns, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // DeleteCluster removes the cluster: Application delete only (the resources-finalizer cascades
 // the rendered chart). The cloud credentials secret deliberately STAYS — the infrastructure
 // provider authenticates with it to delete the worker VMs during the cascade, so removing it here

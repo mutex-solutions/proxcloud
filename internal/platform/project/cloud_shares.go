@@ -30,9 +30,13 @@ func shareErr(err error) error {
 	return upstreamErr("file server", err)
 }
 
-// shareNetworks lists what a project's clients look like to the NAS: its public addresses and its subnets.
+// shareNetworks lists what a project's clients look like to the NAS: its public addresses, its clusters' addresses on
+// a shared worker pool, and its subnets. A cluster on a project network is covered by the subnet: listing its addresses
+// too would keep them on the export after the subnet is freed for another tenant.
 func (h *Handler) shareNetworks(ctx context.Context, p *Project) ([]string, error) {
 	seen := map[string]bool{}
+	sharedPools := map[string]bool{}
+	var computes []string
 	for _, svcID := range p.ServiceIDs() {
 		es, err := h.esSvc.Get(ctx, svcID)
 		if errors.Is(err, externalservice.ErrNotFound) {
@@ -41,16 +45,23 @@ func (h *Handler) shareNetworks(ctx context.Context, p *Project) ([]string, erro
 		if err != nil {
 			return nil, err
 		}
-		if !es.IsProxmox() {
-			continue
+		if es.IsProxmox() {
+			computes = append(computes, svcID)
 		}
-		if h.publicIPs != nil {
+		if es.IsKamaji() {
+			if sw := es.KamajiConfig().Defaults.Shared; sw != nil {
+				sharedPools[sw.Bridge] = true
+			}
+		}
+	}
+	if h.publicIPs != nil {
+		for _, svcID := range computes {
 			ips, err := h.publicIPs.ForProject(ctx, svcID, p.ID)
 			if err != nil {
 				return nil, err
 			}
 			for _, ip := range ips {
-				if ip.IsPublic() || strings.HasPrefix(ip.ServerID, "k8s:") { // sharedWorkers: not on any project network
+				if ip.IsPublic() || (ip.NIC == ReservedNIC && sharedPools[ip.NetworkID]) {
 					seen[ip.IP+"/32"] = true
 				}
 			}

@@ -158,6 +158,27 @@ and rules: [README.md](README.md#maintenance-rule).
   Upfront contracts bought before payments were enforced discounted every bill for money nobody paid.
 
 **Diagrams updated:** none, no container or component changed.
+## 2026-11-07: A cluster's addresses and dataset follow the share access rule
+
+**What changed**
+
+- Share exports list a cluster's addresses only on a shared worker pool. A cluster on a project network is covered by
+  the subnet. Releasing a cluster's addresses goes through the export guard like a public address.
+- Network delete refuses while a live cluster holds addresses on the network, and drops what a deleted cluster left.
+- The marker secret is written before a create takes anything, and a failed create releases everything at once. If that
+  fails, the sweep retries.
+- The release reads the dataset's NAS from the share row instead of scanning every provider, and a failed provider read
+  is an error, not "provider gone".
+- Chart 0.1.4: `shared-file` PVC directories are named after the PV and are mode `0777`.
+
+**Why**
+
+- Lab drill: deleting a network put the cluster's /32s on the export, where they stayed after the CIDR was free for
+  another tenant to take, and the NAS, which refuses a /32 inside a listed subnet, failed every share create and
+  refresh on such a project before that. Tokens and datasets of a failed create had no record that could release them.
+  A PVC directory named after the PVC handed an old PVC's data, and its pending delete, to a new PVC of the same name.
+
+**Diagrams updated**: none: no container or component changes.
 
 ## 2026-11-07: Admin hmac key secrets encrypted at rest, old NFS exports squash root
 

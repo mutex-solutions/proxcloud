@@ -785,10 +785,13 @@ Each share is a dataset `<parent>/<projectId>-<name>` with a `refquota`, the `pr
 ownership, plus one NFS or SMB share. SMB gets a generated user and password: the password appears once, in the
 create or reset response, and is never stored.
 
-**Access.** An export lists the project's public NIC addresses and subnets, computed at create, by the `REFRESH_ACCESS`
-action and by every sync. An address leaving the project (detach, server delete, public IP delete, subnet or network
-delete, teardown) comes off the project's exports first, and if the NAS refuses, the release fails and the address stays
-held, so it can never reach another tenant while an export lists it. NFS squashes root: a client's root is `nobody` on the
+**Access.** An export lists the project's public NIC addresses, the addresses of its clusters on a shared worker pool,
+and its subnets, computed at create, by the `REFRESH_ACCESS` action and by every sync. A cluster on a project network is
+covered by the subnet and is not listed on its own (TrueNAS also refuses a /32 inside a listed subnet). An address leaving
+the project (detach, server delete, public IP delete, subnet or network delete, cluster release, teardown) comes off the
+project's exports first, and if the NAS refuses, the release fails and the address stays held, so it can never reach
+another tenant while an export lists it. Network delete is refused while a live cluster holds addresses on the network,
+and drops the addresses a deleted cluster left there. NFS squashes root: a client's root is `nobody` on the
 NAS, and a new dataset is mode `777` so that unprivileged clients can write. An export from before this rule is brought
 in line by the next sync or `REFRESH_ACCESS`: `maproot` goes and its top directory opens to `777`, not recursively. Files
 a client's root wrote before that stay owned by root with their modes, so clients can read them as those modes allow but

@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,6 +31,8 @@ type exportNAS struct {
 	failing  bool
 	updates  int
 	onUpdate func() // runs at the moment the export changes
+	name     string // the share's name; empty = "data"
+	deleted  []string
 }
 
 func (n *exportNAS) current() []string {
@@ -40,7 +43,10 @@ func (n *exportNAS) current() []string {
 
 func (n *exportNAS) serve(t *testing.T, projectID string) string {
 	t.Helper()
-	dataset := "tank/shares/" + projectID + "-data"
+	if n.name == "" {
+		n.name = "data"
+	}
+	dataset := "tank/shares/" + projectID + "-" + n.name
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -79,6 +85,10 @@ func (n *exportNAS) serve(t *testing.T, projectID string) string {
 				result = []any{map[string]any{"state": "SUCCESS"}}
 			case "sharing.smb.query":
 				result = []any{}
+			case "pool.dataset.delete":
+				var id string
+				_ = json.Unmarshal(req.Params[0], &id)
+				n.deleted = append(n.deleted, id)
 			case "sharing.nfs.update":
 				if n.failing {
 					resp["error"] = map[string]any{"code": 1, "message": "NAS says no"}
@@ -126,7 +136,7 @@ func newShareAccessFixture(t *testing.T) *shareAccessFixture {
 	db := freshPG(t)
 	repo := project.NewRepo(db)
 	p, err := repo.Insert(ctx, &project.Project{Name: "a", Status: "ENABLED", OrganizationID: "o", Services: []any{
-		map[string]any{"serviceId": "svc-pve"}, map[string]any{"serviceId": "svc-nas"},
+		map[string]any{"serviceId": "svc-pve"}, map[string]any{"serviceId": "svc-nas"}, map[string]any{"serviceId": "svc-k8s"},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +147,8 @@ func newShareAccessFixture(t *testing.T) *shareAccessFixture {
 	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-nas", "type": externalservice.TypeCloud,
 		"config": pgdoc.M{"provider": "truenas", "apiUrl": nas.serve(t, p.ID), "username": "u", "insecureTls": true, "parentDataset": "tank/shares"},
 		"secret": pgdoc.M{"apiKey": "k"}})
+	mustInsert(t, db, "externalService", pgdoc.M{"_id": "svc-k8s", "type": externalservice.TypeCloud,
+		"config": pgdoc.M{"provider": "kamaji", "cluster": pgdoc.M{"sharedWorkers": pgdoc.M{"bridge": "vmbrw"}}}})
 	mustInsert(t, db, "pvePublicIp", pgdoc.M{"_id": "svc-pve/vmbr1/10.89.0.10", "serviceId": "svc-pve", "networkId": "vmbr1",
 		"ip": "10.89.0.10", "prefix": 24, "projectId": p.ID, "serverId": "100", "nic": "net1"})
 	cloudRepo := cloud.NewRepo(db)
@@ -240,6 +252,137 @@ func TestReconcileShareAccessRewritesStaleExports(t *testing.T) {
 	}
 	if f.nas.updates != 1 {
 		t.Fatalf("%d writes, want 1: an unchanged export must not be rewritten", f.nas.updates)
+	}
+}
+
+func (f *shareAccessFixture) reserve(t *testing.T, network, ip, cluster string) {
+	t.Helper()
+	mustInsert(t, f.db, "pvePublicIp", pgdoc.M{"_id": "svc-pve/" + network + "/" + ip, "serviceId": "svc-pve", "networkId": network,
+		"ip": ip, "prefix": 24, "projectId": f.projectID, "serverId": "k8s:" + cluster, "nic": project.ReservedNIC})
+}
+
+func (f *shareAccessFixture) clusterRows(t *testing.T, network string) int {
+	t.Helper()
+	rows, err := f.ips.InNetwork(context.Background(), "svc-pve", network)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(rows)
+}
+
+// A cluster on a project network is covered by the subnet, so its addresses never reach an export on their own: a row
+// left on a deleted vnet would keep a freed CIDR's addresses open to the tenant it goes to next.
+func TestProjectNetworkClusterAddressesStayOffExports(t *testing.T) {
+	ctx := context.Background()
+	f := newShareAccessFixture(t)
+	f.reserve(t, "v1", "10.100.0.250", "stc-live")
+	f.reserve(t, "v-deleted", "10.100.9.250", "stc-stale")
+	f.nas.networks = []string{"10.100.0.0/24", "10.100.9.250/32"} // written before this rule
+	if err := f.handler.ReconcileShareAccess(ctx, f.projectID); err != nil {
+		t.Fatal(err)
+	}
+	want := "10.100.0.0/24,10.100.1.0/24,10.89.0.10/32"
+	if got := strings.Join(f.nas.current(), ","); got != want {
+		t.Fatalf("export = %s, want %s", got, want)
+	}
+}
+
+// A shared worker pool sits on no project network, so its addresses are listed, and go through the same guard as a
+// public address: off the exports first, and held if the NAS refuses.
+func TestSharedPoolClusterAddressLeavesExportsFirst(t *testing.T) {
+	ctx := context.Background()
+	f := newShareAccessFixture(t)
+	f.reserve(t, "vmbrw", "10.89.0.99", "stc-a")
+	if err := f.handler.ReconcileShareAccess(ctx, f.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.nas.current(), ","); !strings.Contains(got, "10.89.0.99/32") {
+		t.Fatalf("a shared worker is off the export: %s", got)
+	}
+
+	f.nas.failing = true
+	if err := f.ips.ReleaseServer(ctx, "svc-pve", "k8s:stc-a"); err == nil {
+		t.Fatal("release succeeded with a stale export")
+	}
+	if n := f.clusterRows(t, "vmbrw"); n != 1 {
+		t.Fatalf("address was freed while exported: %d rows", n)
+	}
+
+	f.nas.failing = false
+	heldAtUpdate := -1
+	f.nas.onUpdate = func() { heldAtUpdate = f.clusterRows(t, "vmbrw") }
+	if err := f.ips.ReleaseServer(ctx, "svc-pve", "k8s:stc-a"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.nas.current(), ","); strings.Contains(got, "10.89.0.99") {
+		t.Fatalf("export still lists the released address: %s", got)
+	}
+	if heldAtUpdate != 1 || f.clusterRows(t, "vmbrw") != 0 {
+		t.Fatalf("held at update = %d, rows left = %d", heldAtUpdate, f.clusterRows(t, "vmbrw"))
+	}
+}
+
+type failingServices struct{ err error }
+
+func (s failingServices) Get(context.Context, string) (*externalservice.ExternalService, error) {
+	return nil, s.err
+}
+
+// A failed read of the compute provider says nothing about it: the sweep must keep the marker and retry. A provider
+// that is really gone has no tokens left to revoke, and everything else is still released.
+func TestClusterReleaseKeepsItsRecordUntilDone(t *testing.T) {
+	ctx := context.Background()
+	f := newShareAccessFixture(t)
+	f.reserve(t, "vmbrw", "10.89.0.99", "stc-a")
+	cloudRepo := cloud.NewRepo(f.db)
+	if err := project.KamajiReleaseCluster(failingServices{errors.New("db down")}, cloudRepo, nil, f.ips, false)(ctx, "svc-pve", f.projectID, "stc-a"); err == nil {
+		t.Fatal("release reported success after a failed provider read")
+	}
+	if n := f.clusterRows(t, "vmbrw"); n != 1 {
+		t.Fatalf("%d rows after a failed read", n)
+	}
+
+	es := externalservice.NewService(externalservice.NewRepo(f.db), textcrypt.New("k"))
+	if err := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, false)(ctx, "no-such-provider", f.projectID, "stc-a"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The dataset goes from the NAS its share row names. A broken provider holding nothing of this cluster is not asked.
+func TestClusterReleaseOnlyTouchesTheNASHoldingItsDataset(t *testing.T) {
+	ctx := context.Background()
+	f := newShareAccessFixture(t)
+	mustInsert(t, f.db, "externalService", pgdoc.M{"_id": "svc-dead", "type": externalservice.TypeCloud,
+		"config": pgdoc.M{"provider": "truenas", "apiUrl": "https://127.0.0.1:1", "username": "u", "insecureTls": true, "parentDataset": "tank/shares"},
+		"secret": pgdoc.M{"apiKey": "k"}})
+	es := externalservice.NewService(externalservice.NewRepo(f.db), textcrypt.New("k"))
+	cloudRepo := cloud.NewRepo(f.db)
+	release := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, true)
+
+	// No share row: nothing on any NAS to reach.
+	f.reserve(t, "vmbrw", "10.89.0.99", "stc-a")
+	if err := release(ctx, "svc-pve", f.projectID, "stc-a"); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.clusterRows(t, "vmbrw"); n != 0 {
+		t.Fatalf("%d rows left", n)
+	}
+
+	// A row on the fake NAS: its dataset goes, even though the dead provider is still registered.
+	nas := &exportNAS{name: "k8s-stc-b"}
+	url := nas.serve(t, f.projectID)
+	mustInsert(t, f.db, "externalService", pgdoc.M{"_id": "svc-nas2", "type": externalservice.TypeCloud,
+		"config": pgdoc.M{"provider": "truenas", "apiUrl": url, "username": "u", "insecureTls": true, "parentDataset": "tank/shares"},
+		"secret": pgdoc.M{"apiKey": "k"}})
+	dataset := "tank/shares/" + f.projectID + "-k8s-stc-b"
+	if _, err := cloudRepo.Insert(ctx, &cloud.CloudResource{ServiceID: "svc-nas2", ProjectID: f.projectID, Type: cloud.TypeShare, ExternalID: dataset}); err != nil {
+		t.Fatal(err)
+	}
+	if err := release(ctx, "svc-pve", f.projectID, "stc-b"); err != nil {
+		t.Fatal(err)
+	}
+	if len(nas.deleted) != 1 || nas.deleted[0] != dataset {
+		t.Fatalf("deleted = %v, want %s", nas.deleted, dataset)
 	}
 }
 
