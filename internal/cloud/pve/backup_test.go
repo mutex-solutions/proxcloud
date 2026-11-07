@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,8 @@ type backupCluster struct {
 	order     []string
 	qmp       string // qmpstatus the VM reports, running when empty
 	storeDown bool   // the backup store answers its listing with an error
+	replica   int    // how many more listings still show job 101-0 being removed
+	afterCfg  string // the config a restore leaves, when it differs
 	// destroyedAfter is how many archives were gone when the VM was destroyed, -1 while it stands.
 	destroyedAfter int
 }
@@ -109,8 +112,19 @@ func newBackupCluster(t *testing.T) *backupCluster {
 			_ = r.ParseForm()
 			b.restored = r.PostForm
 			b.order = append(b.order, "restore")
+			if b.afterCfg != "" {
+				b.cfg = b.afterCfg
+			}
 			task(w, r)
 		}),
+		"GET /api2/json/cluster/replication": func(w http.ResponseWriter, _ *http.Request) {
+			if b.replica == 0 {
+				fmt.Fprint(w, `{"data":[]}`)
+				return
+			}
+			b.replica--
+			fmt.Fprint(w, `{"data":[{"id":"101-0","guest":101,"target":"pve2","remove_job":"full"}]}`)
+		},
 		"DELETE /api2/json/nodes/pve1/qemu/101": func(w http.ResponseWriter, r *http.Request) {
 			b.destroyedAfter = len(b.deleted)
 			task(w, r)
@@ -214,6 +228,34 @@ func TestCreateServerBackup(t *testing.T) {
 	}
 	b.deny = "vzdump"
 	wantConflict(t, b.s.CreateServerBackup(ctx, "p1", "101", "nas-backup", goodStore, 10), "VM.Backup")
+}
+
+// A restore brings back the archive's tags, and those of a protection since removed would bring back its bill line.
+func TestRestoreKeepsProtectionTags(t *testing.T) {
+	b := newBackupCluster(t)
+	b.cfg = `{"scsi0":"z:vm-101-disk-0,size=8G","net0":"virtio=AA:BB,bridge=v1,firewall=1","tags":"proxcloud"}`
+	b.afterCfg = `{"scsi0":"z:vm-101-disk-0,size=8G","net0":"virtio=AA:BB,bridge=v1,firewall=1","tags":"pc-protected;pc-p-9;proxcloud"}`
+	if _, err := b.s.RestoreServerBackup(context.Background(), "p1", "101", "nas-backup", "nas-backup:backup/old", heldVolumes); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(b.order, "config tags=proxcloud") {
+		t.Fatalf("order %v", b.order)
+	}
+}
+
+// pvesr removes a replica from the VM's config as it is then, so the volumes move only once it has.
+func TestRetireServerWaitsForTheReplica(t *testing.T) {
+	defer func(d time.Duration) { replicaRemovePoll = d }(replicaRemovePoll)
+	replicaRemovePoll = time.Millisecond
+	b := newBackupCluster(t)
+	b.cfg = `{"scsi0":"z:vm-101-disk-0,size=8G","scsi1":"z:vm-101-disk-1,size=4G"}` // moving the disk finds no route
+	b.replica = 3
+	if err := b.s.RetireServer(context.Background(), "p1", "101", "nas-backup", true); err == nil || !strings.Contains(err.Error(), "keep the server's volumes") {
+		t.Fatalf("got %v", err)
+	}
+	if b.replica != 0 {
+		t.Fatalf("volumes moved with the replica still there, %d listings early", b.replica)
+	}
 }
 
 func wantRestoreRefused(t *testing.T, b *backupCluster, part string) {

@@ -94,6 +94,12 @@ func TestSpecValidate(t *testing.T) {
 	if err := testSpec().Validate(noDisk); err == nil {
 		t.Error("no root volume size anywhere: want error")
 	}
+	// A negative size would cancel another group's in the disk quota check.
+	bad = testSpec()
+	bad.NodeGroups[0].RootVolumeGiB = -100000
+	if err := bad.Validate(d); err == nil || !strings.Contains(err.Error(), "negative") {
+		t.Errorf("negative root volume: want error, got %v", err)
+	}
 }
 
 func TestNames(t *testing.T) {
@@ -660,6 +666,19 @@ func TestFinalizeAfterCloudSecretCollected(t *testing.T) {
 	}
 }
 
+// No StorageClass offered: no CSI secret, so no token on its way to the tenant.
+func TestCreateClusterWithoutCSI(t *testing.T) {
+	api := newFakeAPI()
+	svc := NewWithAPI(api, testCfg(), "svc-1")
+	spec := testSpec()
+	if _, err := svc.CreateCluster(context.Background(), spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.secrets["pc-p1/"+CSISecretName(spec.ID)]; ok {
+		t.Fatal("a CSI secret without a manifest")
+	}
+}
+
 // Clusters made before the pc-c- prefix keep their ids. Every name and selector comes from the id whatever its shape, so
 // the whole life of a cluster works the same for both.
 func TestClusterLifeWithEitherIDShape(t *testing.T) {
@@ -744,7 +763,7 @@ func TestFinalizeOrphans(t *testing.T) {
 	svc := NewWithAPI(api, testCfg(), "svc-1")
 	ctx := context.Background()
 	spec := testSpec()
-	if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}, CSIManifest: "m"}); err != nil {
 		t.Fatal(err)
 	}
 

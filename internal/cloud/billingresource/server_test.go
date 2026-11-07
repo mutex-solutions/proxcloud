@@ -2,6 +2,7 @@ package billingresource
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -91,15 +92,32 @@ func TestEmptyImageVolumeBackedShapeDoesNotBillFlavorRootDiskWithoutMarker(t *te
 	}
 }
 
+func TestProtectionBilledFromItsStamp(t *testing.T) {
+	cr := &cloud.CloudResource{ID: "r1", ProjectID: "p", Data: map[string]any{"server": map[string]any{
+		"name": "a", "protection": map[string]any{"state": "active", "diskGb": 10.0, "since": "2026-11-07T01:00:00Z"},
+	}}}
+	br := protectionBR(cr)
+	if br == nil || br.CreatedAt == nil || br.CreatedAt.Format(time.RFC3339) != "2026-11-07T01:00:00Z" {
+		t.Fatalf("got %+v", br)
+	}
+	if br.ResourceID != fmt.Sprintf("server_protection-r1-%d", br.CreatedAt.Unix()) {
+		t.Fatalf("each enable is its own line: %s", br.ResourceID)
+	}
+	delete(cr.Data["server"].(map[string]any)["protection"].(map[string]any), "since")
+	if br := protectionBR(cr); br != nil {
+		t.Fatalf("no stamp, no line, or it charges from the server's creation: %+v", br)
+	}
+}
+
 // There is no replica on shared storage, so no space to rate.
 func TestProtectionBRSkipsSharedStorage(t *testing.T) {
 	row := func(pr map[string]any) *cloud.CloudResource {
 		return &cloud.CloudResource{ID: "r", Data: map[string]any{"server": map[string]any{"name": "a", "protection": pr}}}
 	}
-	if br := protectionBR(row(map[string]any{"state": "active", "diskGb": 10})); br == nil {
+	if br := protectionBR(row(map[string]any{"state": "active", "diskGb": 10, "since": "2026-11-07T01:00:00Z"})); br == nil {
 		t.Fatal("replicated: want a bill line")
 	}
-	if br := protectionBR(row(map[string]any{"state": "active", "mode": "shared", "diskGb": 10})); br != nil {
+	if br := protectionBR(row(map[string]any{"state": "active", "mode": "shared", "diskGb": 10, "since": "2026-11-07T01:00:00Z"})); br != nil {
 		t.Fatalf("shared: %+v", br)
 	}
 }

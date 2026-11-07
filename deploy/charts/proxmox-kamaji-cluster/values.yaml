@@ -41,7 +41,8 @@ proxmox:
   csi:
     # -- Secret with the manifest of the tenant-side proxmox-csi config (type addons.cluster.x-k8s.io/resource-set).
     configSecretName: example-csi-config
-    # -- One tenant StorageClass per storage. The first is the default class.
+    # -- One tenant StorageClass per storage. The first is the default class. Empty = no proxmox-csi and no token in the
+    # tenant cluster, which is what the portal renders unless the provider sets csiSharedStores; see docs/managed-k8s.md.
     storageClasses:
       - {name: std, storage: local-zfs}
   # -- The cluster's NAS dataset. Server set: csi-driver-nfs and an RWX StorageClass on it; PVCs are subdirectories.

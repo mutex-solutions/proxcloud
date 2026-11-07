@@ -3,6 +3,7 @@ package pve
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/url"
 	"strings"
 )
@@ -41,10 +42,22 @@ func (c *Client) CreateAPIToken(ctx context.Context, userid, tokenName string) (
 func (c *Client) DeleteAPIToken(ctx context.Context, userid, tokenName string) error {
 	path := "/access/users/" + url.PathEscape(userid) + "/token/" + url.PathEscape(tokenName)
 	err := c.delete(ctx, path, nil, nil)
-	if err != nil && IsNotFound(err) {
+	if err != nil && (IsNotFound(err) || isTokenAbsent(err)) {
 		return nil
 	}
 	return err
+}
+
+// isTokenAbsent: PVE answers a missing token or user with a 500 naming it, not a 404. Only that answer: "no such host" from
+// the dialer or a 401 for our own token means the token may still be live, and a release that takes it for revoked
+// never comes back to it.
+func isTokenAbsent(err error) bool {
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Status != http.StatusInternalServerError {
+		return false
+	}
+	msg := ae.Error()
+	return strings.Contains(msg, "no such token") || strings.Contains(msg, "no such user")
 }
 
 // SetACL grants (or with del revokes) a role on a path for users/tokens.
@@ -72,16 +85,18 @@ const (
 // ClusterTokenScope is what one tenant cluster's tokens may touch.
 type ClusterTokenScope struct {
 	Pool, TemplatePool string
-	Storages           []string // the boot store first; every store a StorageClass offers
+	BootStorage        string   // where CAPMOX clones the workers' boot disks
+	CSIStorages        []string // the stores a StorageClass offers; none = no CSI token
 	ISOStorage         string   // where CAPMOX uploads the bootstrap ISO
 	Zone, Vnet         string
 }
 
-// ClusterTokens are the two tokens of one cluster: CAPMOX stays on the management side, the CSI token
-// reaches the tenant cluster, so it gets only disks of the project's pool on the offered stores.
+// ClusterTokens are the tokens of one cluster. CAPMOX stays on the management side. A CSI token reaches the
+// tenant cluster, and PVE checks only Datastore.Allocate on the store to attach or delete a disk, so it opens
+// every disk on those stores, of any project: it is minted only for a provider that accepts that.
 type ClusterTokens struct{ CAPIID, CAPISecret, CSIID, CSISecret string }
 
-// MintClusterTokens creates both tokens and their ACLs. Revoking is RevokeClusterTokens; a failure
+// MintClusterTokens creates the tokens and their ACLs. Revoking is RevokeClusterTokens; a failure
 // half way revokes what was made, so a refused create leaves nothing behind.
 func (c *Client) MintClusterTokens(ctx context.Context, clusterID string, sc ClusterTokenScope) (t ClusterTokens, err error) {
 	defer func() {
@@ -92,24 +107,26 @@ func (c *Client) MintClusterTokens(ctx context.Context, clusterID string, sc Clu
 	if t.CAPIID, t.CAPISecret, err = c.CreateAPIToken(ctx, capiUser, clusterID); err != nil {
 		return t, err
 	}
-	if t.CSIID, t.CSISecret, err = c.CreateAPIToken(ctx, csiUser, clusterID); err != nil {
-		return t, err
-	}
 	grants := []struct{ path, role, token string }{
 		{"/pool/" + sc.Pool, roleCAPI, t.CAPIID},
+		{"/storage/" + sc.BootStorage, roleCAPI, t.CAPIID},
 		{"/pool/" + sc.TemplatePool, roleTemplate, t.CAPIID},
 		{"/nodes", roleCAPI, t.CAPIID},
+		// A clone is checked against the NICs of the template, and a node template sits on a node bridge.
+		{"/sdn/zones/localnetwork", roleCAPI, t.CAPIID},
 		{"/storage/" + sc.ISOStorage, roleISOStorage, t.CAPIID},
-		{"/pool/" + sc.Pool, roleCSI, t.CSIID},
 	}
 	if sc.Zone != "" {
 		grants = append(grants, struct{ path, role, token string }{"/sdn/zones/" + sc.Zone + "/" + sc.Vnet, roleCAPI, t.CAPIID})
 	}
-	for _, st := range sc.Storages {
-		grants = append(grants, struct{ path, role, token string }{"/storage/" + st, roleCSI, t.CSIID})
-	}
-	if len(sc.Storages) > 0 {
-		grants = append(grants, struct{ path, role, token string }{"/storage/" + sc.Storages[0], roleCAPI, t.CAPIID})
+	if len(sc.CSIStorages) > 0 {
+		if t.CSIID, t.CSISecret, err = c.CreateAPIToken(ctx, csiUser, clusterID); err != nil {
+			return t, err
+		}
+		grants = append(grants, struct{ path, role, token string }{"/pool/" + sc.Pool, roleCSI, t.CSIID})
+		for _, st := range sc.CSIStorages {
+			grants = append(grants, struct{ path, role, token string }{"/storage/" + st, roleCSI, t.CSIID})
+		}
 	}
 	for _, g := range grants {
 		if err = c.SetACL(ctx, g.path, g.role, []string{g.token}, false); err != nil {
@@ -119,7 +136,8 @@ func (c *Client) MintClusterTokens(ctx context.Context, clusterID string, sc Clu
 	return t, nil
 }
 
-// RevokeClusterTokens deletes both tokens. PVE drops a deleted token's ACL entries with it.
+// RevokeClusterTokens deletes the tokens. PVE stops honouring a deleted token's ACL entries at once and drops
+// them from user.cfg at the next write of that file; until then `pveum` warns "ignore invalid acl token".
 func (c *Client) RevokeClusterTokens(ctx context.Context, clusterID string) error {
 	return errors.Join(c.DeleteAPIToken(ctx, capiUser, clusterID), c.DeleteAPIToken(ctx, csiUser, clusterID))
 }
@@ -139,7 +157,7 @@ type PrivCheck struct {
 var PlatformPrivileges = []PrivCheck{
 	// cluster status, PCI scan, datacenter firewall options and the cluster
 	// security groups all check "/" itself (granted with propagate=0).
-	{Path: "/", Privs: []string{"Sys.Audit", "Sys.Modify"}},
+	{Path: "/", Privs: []string{"Sys.Audit", "Sys.Console", "Sys.Modify"}},
 	// node firewall options (nftables preflight) and node network list
 	// (management-bridge guard) check /nodes/{node}: PVEAuditor on /nodes.
 	{Path: "/nodes", Privs: []string{"Sys.Audit"}},
@@ -149,7 +167,7 @@ var PlatformPrivileges = []PrivCheck{
 		"VM.Config.CDROM", "VM.Config.CPU", "VM.Config.Cloudinit", "VM.Config.Disk",
 		"VM.Config.HWType", "VM.Config.Memory", "VM.Config.Network", "VM.Config.Options",
 		"VM.Backup", "VM.Console", "VM.GuestAgent.Audit", "VM.GuestAgent.Unrestricted", "VM.Migrate", "VM.PowerMgmt",
-		"VM.Snapshot", "VM.Snapshot.Rollback",
+		"VM.Replicate", "VM.Snapshot", "VM.Snapshot.Rollback",
 	}},
 	{Path: "/sdn", Privs: []string{"SDN.Allocate", "SDN.Audit", "SDN.Use"}},
 	// Read apart from /sdn: an ACL on /sdn/zones replaces what /sdn passes down, and zones and NICs check here.

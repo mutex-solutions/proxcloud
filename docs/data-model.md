@@ -679,6 +679,7 @@ over this table (not the filter DSL).
 | `type` | string | `SERVER`, `VOLUME`, `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`, `BUCKET`, `KUBERNETES_CLUSTER`, `DATABASE_CLUSTER` |
 | `region`, `availabilityZone` | string | placement |
 | `data` | object | type-specific resource detail |
+| `pausedBySuspension` | bool | a suspension walk paused this VM and no resume has read it back yet; a resume touches only these. A sync keeps it |
 | `createdAt` | time | immutable (set on insert) |
 | `updatedAt` | time | optimistic-lock compare key |
 

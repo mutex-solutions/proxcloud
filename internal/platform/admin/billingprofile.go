@@ -638,12 +638,12 @@ func (h *Handler) billingProfileDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Billing profile is in use for some bills"))
 		return
 	}
-	// Guard: is the billing profile referenced by any project?
-	inUse, err = h.repo.ExistsByBillingProfileID(r.Context(), "project", id)
+	// Guard: does the billing profile pay for any project, its own or through its organization?
+	paidFor, err := h.repo.ProjectPaidBy(r.Context(), id)
 	if httpx.WriteError(w, err) {
 		return
 	}
-	if inUse {
+	if paidFor != "" {
 		httpx.WriteError(w, httpx.BadRequest("Billing profile is in use for some projects"))
 		return
 	}

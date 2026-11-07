@@ -72,6 +72,14 @@ func TestRenderSeed(t *testing.T) {
 		t.Fatalf("vendor-data: %v", cc)
 	}
 
+	s, err = RenderSeed(SeedSpec{InstanceID: "i", Hostname: "h", PasswordHash: "$2a$10$x", LoginUser: "dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(s.VendorData, `"hashed_passwd":"$2a$10$x"`) || !strings.Contains(s.VendorData, `"name":"dev"`) || strings.Contains(s.VendorData, `"password"`) {
+		t.Fatalf("a login user gets the hash, the default user nothing: %q", s.VendorData)
+	}
+
 	s, err = RenderSeed(SeedSpec{InstanceID: "i", Hostname: "h", OperatorVendorData: "#!/bin/sh\ntrue\n"})
 	if err != nil {
 		t.Fatal(err)

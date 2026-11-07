@@ -52,10 +52,13 @@ func (j *SuspensionJob) SetAudit(a *audit.Service) { j.audit = a }
 // EXTRACTION SEAM: the implementation is cloud-specific and stays in proxcloud when billing moves
 // out; this becomes a billing→proxcloud HTTP callback
 // (POST /internal/v1/billing-profiles/{id}/{suspend,resume}-clouds). The signature is already
-// wire-ready — context-first, and a profile id is the only argument. Keep it that way.
+// wire-ready — context-first, and at most a profile id as argument. Keep it that way.
+//
+// FinishResumes is the retry of the resume leg, across profiles: only the cloud side knows which VMs a suspension paused.
 type CloudSuspender interface {
 	SuspendBillingProfileClouds(ctx context.Context, billingProfileID string) error
 	ResumeBillingProfileClouds(ctx context.Context, billingProfileID string) error
+	FinishResumes(ctx context.Context) error
 }
 
 func (j *SuspensionJob) SetCloudSuspender(cs CloudSuspender) { j.clouds = cs }
@@ -95,9 +98,15 @@ func suspensionConfigFor(global *pricing.BillingAutomaticSuspensionConfig, profi
 // ExecuteDunning is the autoSuspensionJob fan-out: gated on the global config being
 // enabled (isSuspensionEnabled), it evaluates every ACTIVE profile for suspension. Per-profile
 // errors are logged-and-skipped (per-profile failures are isolated). Returns the
-// number of profiles newly suspended. Before that gate it finishes what earlier suspensions left, an operator's included.
+// number of profiles newly suspended. Before that gate it finishes what earlier suspensions and resumes left, an operator's
+// included.
 func (j *SuspensionJob) ExecuteDunning(ctx context.Context) (int, error) {
 	j.finishSuspensions(ctx)
+	if j.clouds != nil {
+		if err := j.clouds.FinishResumes(ctx); err != nil {
+			j.log.Error("finishing resumes", "err", err)
+		}
+	}
 	now := j.now()
 	global, err := j.repo.SuspensionConfiguration(ctx)
 	if err != nil {
@@ -148,7 +157,15 @@ func (j *SuspensionJob) finishSuspensions(ctx context.Context) {
 		return
 	}
 	for i := range profiles {
-		suspendClouds(ctx, j.repo, j.clouds, profiles[i].ID, j.log)
+		// A walk can take minutes, and a profile resumed since the list must not go down again, even for a moment.
+		fresh, err := j.repo.FindByID(ctx, profiles[i].ID)
+		if err != nil {
+			j.log.Error("finishing suspensions: read profile", "billingProfile", profiles[i].ID, "err", err)
+			continue
+		}
+		if fresh != nil && fresh.Status == StatusSuspended {
+			suspendClouds(ctx, j.repo, j.clouds, fresh.ID, j.log)
+		}
 	}
 }
 
@@ -168,6 +185,18 @@ func suspendClouds(ctx context.Context, repo *Repo, clouds CloudSuspender, id st
 	}
 	if err := clouds.ResumeBillingProfileClouds(ctx, id); err != nil {
 		log.Error("cloud resume after a suspend walk", "billingProfile", id, "err", err)
+	}
+}
+
+// resumeClouds is the cloud leg of a resume, run once the profile is saved ACTIVE. Like the suspend, the walk outlives the request:
+// stopping halfway would leave VMs paused on a profile that has paid. A failure is logged, and the next pass picks up what it left
+// (CloudSuspender.FinishResumes).
+func resumeClouds(ctx context.Context, clouds CloudSuspender, id string, log *slog.Logger) {
+	if clouds == nil {
+		return
+	}
+	if err := clouds.ResumeBillingProfileClouds(context.WithoutCancel(ctx), id); err != nil {
+		log.Error("cloud resume incomplete, the next suspension pass picks it up", "billingProfile", id, "err", err)
 	}
 }
 
@@ -336,11 +365,7 @@ func (j *SuspensionJob) resume(ctx context.Context, profile *BillingProfile) err
 	}
 	// unsuspendBillingProfile: status flip first, then the live cloud resume (UNPAUSE +
 	// project ENABLED), best-effort.
-	if j.clouds != nil {
-		if err := j.clouds.ResumeBillingProfileClouds(ctx, profile.ID); err != nil {
-			j.log.Error("cloud resume failed (billing flip already done)", "billingProfile", profile.ID, "err", err)
-		}
-	}
+	resumeClouds(ctx, j.clouds, profile.ID, j.log)
 	j.log.Info("resumed billing profile (auto)", "id", profile.ID)
 	notify(ctx, j.notifier, "notify_customer_is_resumed", profile, map[string]any{
 		"fullName": profileFullName(profile),

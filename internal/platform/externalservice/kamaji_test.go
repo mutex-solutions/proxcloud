@@ -69,3 +69,39 @@ func TestKamajiConfig(t *testing.T) {
 		t.Error("missing chart name must fail validation")
 	}
 }
+
+// Stage 60 sends "{{ x | int }}", which reaches the API as a string: read as 0, a site's rwx_gib silently meant no
+// StorageClass, its worker_mtu the guest default on a 1450 vnet, and vlan_min/vlan_max no tags at all.
+func TestIntOfTakesTheInstallersStrings(t *testing.T) {
+	for _, c := range []struct {
+		in   any
+		want int
+	}{{float64(100), 100}, {100, 100}, {int64(100), 100}, {"100", 100}, {" 1450 ", 1450}, {"", 0}, {"lots", 0}, {nil, 0}, {true, 0}} {
+		if got := intOf(c.in); got != c.want {
+			t.Errorf("intOf(%#v) = %d, want %d", c.in, got, c.want)
+		}
+	}
+	es := &ExternalService{Config: map[string]any{"cluster": map[string]any{"rootVolumeGiB": "30", "workerMtu": "1450", "rwxGiB": "100"}}}
+	d := es.KamajiConfig().Defaults
+	if d.RootVolumeGiB != 30 || d.NodeGroupMTU != 1450 || d.RWXGiB != 100 {
+		t.Errorf("defaults from strings: %+v", d)
+	}
+}
+
+// Only a JSON true hands tenants the CSI token. It fails closed: the installer sends a real boolean (checked on the
+// ansible-core it pins), and anything that merely looks like yes is not an operator giving up tenant isolation.
+func TestCSISharedStoresParsing(t *testing.T) {
+	for _, c := range []struct {
+		in   any
+		want bool
+	}{{true, true}, {false, false}, {nil, false}, {"true", false}, {"True", false}, {"false", false}, {1, false}} {
+		cluster := map[string]any{}
+		if c.in != nil {
+			cluster["csiSharedStores"] = c.in
+		}
+		es := &ExternalService{Config: map[string]any{"cluster": cluster}}
+		if got := es.KamajiConfig().Defaults.CSISharedStores; got != c.want {
+			t.Errorf("csiSharedStores %#v: %v, want %v", c.in, got, c.want)
+		}
+	}
+}
