@@ -170,9 +170,16 @@ function PendingInvites({ invites }: { invites: Invite[] }) {
 }
 
 // The user belongs to an organization but has no project assigned. The client is
-// project-scoped, so there is nothing to land on yet — tell them to contact their admin.
+// project-scoped, so there is nothing to land on yet. Whoever the organization lets create
+// projects (an owner, an admin, a member by default) makes the first one here; anyone else is
+// told to ask an admin.
+const canCreateProject = (o: Organization) =>
+  (o.currentUserPermissions ?? []).some((p) => p === "*" || p === "project:*" || p === "project:create")
+
 function NoProjectYet({ orgs }: { orgs: Organization[] }) {
+  const creatable = orgs.filter(canCreateProject)
   const names = orgs.map((o) => o.name).filter(Boolean).join(", ")
+  if (creatable.length > 0) return <FirstProject orgs={creatable} />
   return (
     <BrandShell>
       <Card>
@@ -190,6 +197,65 @@ function NoProjectYet({ orgs }: { orgs: Organization[] }) {
           <Button variant="outline" className="w-full" onClick={() => window.location.reload()}>
             <RefreshCw className="size-4" /> Check again
           </Button>
+        </CardContent>
+      </Card>
+    </BrandShell>
+  )
+}
+
+function FirstProject({ orgs }: { orgs: Organization[] }) {
+  const [orgId, setOrgId] = useState(orgs[0].id)
+  const [name, setName] = useState("")
+  const navigate = useNavigate()
+  const qc = useQueryClient()
+  const create = useMutation({
+    mutationFn: () => apiFetch<Project>("/project", { method: "POST", body: { name, organizationId: orgId } }),
+    onSuccess: (p) => {
+      void qc.invalidateQueries({ queryKey: ["projects"] })
+      navigate(`/p/${p.id}/dashboard`)
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  const orgName = orgs.find((o) => o.id === orgId)?.name || "Your organization"
+  return (
+    <BrandShell>
+      <Card>
+        <BrandCardHeader
+          eyebrow="Organization"
+          title="Create your first project"
+          description={<>You are not in any project of {orgName} yet. Create one to get started.</>}
+        />
+        <CardContent>
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (name && !create.isPending) create.mutate()
+            }}
+          >
+            {orgs.length > 1 ? (
+              <div className="space-y-2">
+                <Label htmlFor="first-org">Organization</Label>
+                <select
+                  id="first-org"
+                  className="h-9 w-full rounded-md border bg-transparent px-3 text-sm"
+                  value={orgId}
+                  onChange={(e) => setOrgId(e.target.value)}
+                >
+                  {orgs.map((o) => (
+                    <option key={o.id} value={o.id}>{o.name || o.id}</option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+            <div className="space-y-2">
+              <Label htmlFor="first-proj">Project name</Label>
+              <Input id="first-proj" value={name} onChange={(e) => setName(e.target.value)} placeholder="production" />
+            </div>
+            <Button type="submit" className="w-full" disabled={!name || create.isPending}>
+              {create.isPending ? "Creating…" : "Create project"}
+            </Button>
+          </form>
         </CardContent>
       </Card>
     </BrandShell>

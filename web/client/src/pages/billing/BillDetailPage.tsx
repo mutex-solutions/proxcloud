@@ -43,7 +43,9 @@ export default function BillDetailPage() {
   // so an org admin can read per-project spend on the same bill.
   const { data: projects } = useProjects()
   const [projFilter, setProjFilter] = useState("__all__")
-  const projName = (id?: string) => projects?.find((p) => p.id === id)?.name || id || "—"
+  // An id not in the caller's project list is a deleted project, or a live one this member cannot
+  // see (the org bill is wider than their projects): the bill carries no name, so neither is claimed.
+  const projName = (id?: string) => (!id ? "—" : projects?.find((p) => p.id === id)?.name || `Project …${id.slice(-6)}`)
 
   const { data: bill, isLoading, error } = useQuery({
     queryKey: ["bill", bp, billId],
@@ -183,11 +185,25 @@ export default function BillDetailPage() {
   const filtered = projFilter !== "__all__"
   const itemsSubtotal = items.reduce((s, it) => s + Number(it.netAmount ?? 0), 0)
 
-  // Invoice math: net (subtotal) + tax = gross; credits reduce what was collected.
+  // Invoice lines that add up to the total: the bill's net already holds the adjustments, and the
+  // gross is net plus tax rounded half-up to cents. Tax keeps its sign (a credit-note bill is
+  // negative); the sub-cent part that rounding dropped gets its own line instead of reading as tax.
+  // Credits reduce what was collected.
+  const cents = (n: number) => (Math.sign(n) * Math.round(Math.abs(n) * 100)) / 100
   const net = Number(bill.netAmount ?? 0)
   const gross = Number(bill.grossAmount ?? 0)
-  const tax = gross - net
+  const adjTotal = adjustments.reduce((s, a) => s + Number(a.amount ?? 0), 0)
+  const rounding = cents(net) - net
+  const tax = cents(gross - cents(net))
+  // The lines that carry a sub-cent part (subtotal, adjustments, rounding) show it, so the block adds up as printed.
+  // Every amount of the DTO is in the profile's currency (ToBillDto converts items and adjustments with the net).
+  const fine = (v: number) =>
+    new Intl.NumberFormat("en-US", { style: "currency", currency: ccy || "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(
+      Math.abs(v) < 1e-6 ? 0 : v,
+    )
   const unpaid = Number(bill.unpaidGrossAmount ?? 0)
+  // An OPEN bill is still accruing: nothing is due on it yet, though the balance already counts it.
+  const open = bill.status === "OPEN"
 
   return (
     <>
@@ -428,16 +444,17 @@ export default function BillDetailPage() {
                 <div className="my-2 border-t border-dashed" />
               </>
             ) : null}
-            <TotalRow label="Subtotal" value={fmtMoney(net, ccy)} />
-            <TotalRow label="Tax" value={fmtMoney(tax, ccy)} muted />
+            <TotalRow label="Subtotal" value={fine(net - adjTotal)} />
             {adjustments.map((a, i) => (
               <TotalRow
                 key={`adj-${i}`}
                 label={(a.description as string) ?? (a.type as string) ?? "Adjustment"}
-                value={fmtMoney(a.amount as number, ccy)}
+                value={fine(Number(a.amount ?? 0))}
                 muted
               />
             ))}
+            {Math.abs(rounding) >= 1e-6 ? <TotalRow label="Rounding" value={fine(rounding)} muted /> : null}
+            <TotalRow label="Tax" value={fmtMoney(tax, ccy)} muted />
             <div className="my-2 border-t" />
             <TotalRow label="Total" value={fmtMoney(gross, ccy)} strong />
             {appliedCredits.length > 0 ? (
@@ -454,10 +471,23 @@ export default function BillDetailPage() {
               </div>
             ) : null}
             <div className="my-2 border-t" />
-            <div className="flex items-baseline justify-between gap-4">
-              <span className="text-sm font-medium">Amount due</span>
-              <span className="font-mono text-lg font-semibold tabular-nums">{fmtMoney(unpaid, ccy)}</span>
-            </div>
+            {open ? (
+              <div className="space-y-1">
+                <div className="flex items-baseline justify-between gap-4">
+                  <span className="text-sm font-medium">Accrued so far</span>
+                  <span className="font-mono text-lg font-semibold tabular-nums">{fmtMoney(gross, ccy)}</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  This bill is still open: charges add up until it is issued at the end of the billing cycle, and
+                  nothing is due on it before then. Your balance already counts them.
+                </p>
+              </div>
+            ) : (
+              <div className="flex items-baseline justify-between gap-4">
+                <span className="text-sm font-medium">Amount due</span>
+                <span className="font-mono text-lg font-semibold tabular-nums">{fmtMoney(unpaid, ccy)}</span>
+              </div>
+            )}
           </div>
         </div>
       </Card>

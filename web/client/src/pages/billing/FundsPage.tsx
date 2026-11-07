@@ -33,8 +33,10 @@ export default function FundsPage() {
   const { data: summary, isLoading } = useBillingSummary(pid)
   const bp = summary?.id
   const currency = summary?.currency ?? "USD"
-  // A NEW profile has no billing details yet — filling them activates it.
-  const needsDetails = summary?.status === "NEW" || summary?.hasBillingDetails === false
+  // A NEW profile has no billing details yet — filling them activates it. An operator can also
+  // activate a profile with none: deposits then work, and the address is only asked for.
+  const needsDetails = summary?.status === "NEW"
+  const missingDetails = !needsDetails && summary?.hasBillingDetails === false
 
   return (
     <>
@@ -85,6 +87,13 @@ export default function FundsPage() {
               />
             )}
             <PromoCard pid={pid} bp={bp} />
+            {missingDetails ? (
+              <BillingDetailsCard
+                bp={bp}
+                activated
+                onSaved={() => void qc.invalidateQueries({ queryKey: ["billing-summary", pid] })}
+              />
+            ) : null}
           </div>
         </>
       )}
@@ -364,7 +373,7 @@ function PromoCard({ pid, bp }: { pid: string; bp: string }) {
 }
 
 // First-time billing details (PUT /billing-profile/{bp}) — saving valid details activates a NEW profile.
-function BillingDetailsCard({ bp, onSaved }: { bp: string; onSaved: () => void }) {
+function BillingDetailsCard({ bp, activated = false, onSaved }: { bp: string; activated?: boolean; onSaved: () => void }) {
   const [form, setForm] = useState({
     firstName: "", lastName: "", phone: "", address: "", city: "", zipCode: "", country: "",
   })
@@ -376,7 +385,7 @@ function BillingDetailsCard({ bp, onSaved }: { bp: string; onSaved: () => void }
     mutationFn: () =>
       apiFetch(`/billing-profile/${bp}`, { method: "PUT", body: { ...form, company: false } }),
     onSuccess: () => {
-      toast.success("Billing details saved — profile activated")
+      toast.success(activated ? "Billing details saved" : "Billing details saved — profile activated")
       onSaved()
     },
     onError: (e: Error) => toast.error(e.message),
@@ -390,7 +399,9 @@ function BillingDetailsCard({ bp, onSaved }: { bp: string; onSaved: () => void }
       <CardHeader className="border-b [.border-b]:pb-4">
         <CardTitle className="text-base">Billing details</CardTitle>
         <CardDescription>
-          Fill in your billing address to activate this billing profile and unlock deposits.
+          {activated
+            ? "Your billing profile is active. Add a billing address for your invoices."
+            : "Fill in your billing address to activate this billing profile and unlock deposits."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

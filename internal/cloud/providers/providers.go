@@ -9,6 +9,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -106,13 +107,31 @@ type ReconcileStats struct{ Created, Updated, Deleted int }
 // `now` is the sync snapshot time (stamped on writes + the delete-guard cutoff).
 func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID string, now time.Time) (ReconcileStats, error) {
 	var st ReconcileStats
+	// The rows are read after the list. A row that followed its resource onto another id since (a retype's follow,
+	// ChangeExternalID stamps ExternalIDSince with the wall clock) is newer than the list: the list may still show the
+	// old id, which no row has any more, and not the new one, which the row has.
+	listedAt := time.Now().UTC()
 	list, err := p.List(ctx)
 	if err != nil {
 		return st, err
 	}
+	scopeRows := func() ([]cloud.CloudResource, error) {
+		if ps, ok := p.(ProjectScoped); ok && ps.ProjectID() != "" {
+			return repo.FindByServiceProjectAndType(ctx, serviceID, ps.ProjectID(), p.Type())
+		}
+		return repo.FindByServiceAndType(ctx, serviceID, p.Type())
+	}
+	renamedSinceList := func(cr *cloud.CloudResource) bool {
+		return cr.ExternalIDSince != nil && cr.ExternalIDSince.After(listedAt)
+	}
+	var pending []cloud.CloudResource // new in the list: inserted once the loop is done
 	var grace time.Duration
 	if g, ok := p.(VanishGrace); ok {
 		grace = g.VanishGrace()
+	}
+	var merge func(cached, fresh map[string]any)
+	if m, ok := p.(CacheMerger); ok {
+		merge = m.MergeCached
 	}
 	insert := func(r *cloud.CloudResource) error {
 		t := now
@@ -121,7 +140,7 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 			c := now
 			r.CreatedAt = &c
 		}
-		if _, err := repo.Insert(ctx, r); err != nil {
+		if _, err := repo.Upsert(ctx, r, merge); err != nil {
 			return err
 		}
 		st.Created++
@@ -151,9 +170,7 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 			if guard {
 				continue
 			}
-			if err := insert(&r); err != nil {
-				return st, err
-			}
+			pending = append(pending, r)
 			continue
 		}
 		if rp, ok := p.(Replaceable); ok && rp.Superseded(cached, &r) {
@@ -219,26 +236,42 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		st.Updated++
 	}
 
+	// A new id in the list may be the old id of a row renamed since: inserting it would bill the resource twice until
+	// the next sync. Which one it is cannot be told here, so the new ones wait for the next sync.
+	// ponytail: defers every insert of the scope for one sync; match on the old id if that delay ever matters.
+	if len(pending) > 0 {
+		rows, err := scopeRows()
+		if err != nil {
+			return st, err
+		}
+		if !slices.ContainsFunc(rows, func(cr cloud.CloudResource) bool { return renamedSinceList(&cr) }) {
+			for i := range pending {
+				if err := insert(&pending[i]); err != nil {
+					return st, err
+				}
+			}
+		}
+	}
+
 	// delete-of-vanished: cached resources of this type no longer present in the cloud. Scope the
 	// scan to this project when the provider exposes its projectId (the deletion scan is
 	// projectId+serviceId+type-scoped) — otherwise a shared serviceId would let this project's sync
 	// delete-archive another project's cached resources. Falls back to the serviceId+type scan for
 	// providers that don't declare a project.
-	var cachedAll []cloud.CloudResource
-	if ps, ok := p.(ProjectScoped); ok && ps.ProjectID() != "" {
-		cachedAll, err = repo.FindByServiceProjectAndType(ctx, serviceID, ps.ProjectID(), p.Type())
-	} else {
-		cachedAll, err = repo.FindByServiceAndType(ctx, serviceID, p.Type())
-	}
+	cachedAll, err := scopeRows()
 	if err != nil {
 		return st, err
 	}
 	for i := range cachedAll {
 		cr := cachedAll[i]
-		if fresh[cr.ExternalID] {
+		if fresh[cr.ExternalID] || renamedSinceList(&cr) {
 			continue
 		}
 		if grace > 0 && cr.CreatedAt != nil && now.Sub(*cr.CreatedAt) < grace {
+			continue
+		}
+		// Gone under its old id because the portal is moving it: the move carries the row over to the new one.
+		if cr.Moving(now) {
 			continue
 		}
 		if k, ok := p.(UnreadKeeper); ok {

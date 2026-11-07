@@ -184,26 +184,36 @@ func (s *Service) PlaceVolume(ctx context.Context, storageFor func(node string) 
 }
 
 // CreateDetachedVolume allocates a volume with no server: a new disk on the node's holder, detached at once so it
-// is the same unusedN shape as any other detached volume.
-func (s *Service) CreateDetachedVolume(ctx context.Context, projectID, node, storage string, sizeGiB int, headroomPct float64) error {
+// is the same unusedN shape as any other detached volume. Returns its volid.
+func (s *Service) CreateDetachedVolume(ctx context.Context, projectID, node, storage string, sizeGiB int, headroomPct float64) (string, error) {
 	release, err := s.lockHolders(ctx, projectID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer release()
 	holder, err := s.holderOn(ctx, projectID, node)
 	if err != nil {
-		return err
+		return "", err
 	}
 	slot, err := s.AddVolume(ctx, projectID, strconv.Itoa(holder.VMID), sizeGiB, storage, headroomPct)
 	if err != nil {
-		return err
+		return "", err
+	}
+	cfg, err := s.C.GetVMConfig(ctx, node, holder.VMID)
+	if err != nil {
+		return "", err
+	}
+	volID := ""
+	for _, d := range ParseDisks(cfg) {
+		if d.Slot == slot {
+			volID = d.VolID
+		}
 	}
 	up, err := s.C.SetVMConfig(ctx, node, holder.VMID, nil, slot)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return s.C.WaitTask(ctx, up)
+	return volID, s.C.WaitTask(ctx, up)
 }
 
 // KeepServerVolumes moves every data volume of a server to its node's holder, attached and detached alike, so the
