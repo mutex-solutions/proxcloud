@@ -398,7 +398,8 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   import store and, for the disk, on the profile's storage, both with `storageHeadroomPct`. pveproxy spools an upload to
   `/var/tmp` on the API node, on any node's behalf, so an image also needs room on that node's root disk or it is 409, and
   only one upload runs at a time per provider (409 for the others), since each passing the room check on its own could fill
-  that disk together. A
+  that disk together. Because that holds up other projects, a source that sends nothing for a minute, or averages under
+  2 MiB/s past a two-minute grace, ends the import with a 409 and lets go at once. A
   URL whose server states no size is refused unless `config.importUnknownSizeMaxGiB` allows it: then it is spooled to the
   portal's temporary directory up to that limit, first. The client waits; if it gives up the import finishes and the
   sampler adds the image, and whatever ends an import, the portal waits for the upload's task on the node before it lets go of

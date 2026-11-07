@@ -15,6 +15,7 @@ and rules: [README.md](README.md#maintenance-rule).
   checked on the import store, on the profile's boot storage for the disk, and on the API node's root disk, where pveproxy
   spools an upload. A URL with no stated size is refused unless the operator sets `importUnknownSizeMaxGiB`.
 - An import waits for its upload task, whatever happens to its call, before releasing the lock and removing the file.
+- A source that sends nothing for a minute, or averages under 2 MiB/s past a two-minute grace, ends the import (409).
 
 **Why**
 
@@ -27,6 +28,9 @@ and rules: [README.md](README.md#maintenance-rule).
   root disk. A failed poll of the upload task returned with the file still landing, the lock released and nothing to remove it.
 - The block list let through ranges that reach no one on the internet but can reach something inside: benchmarking,
   IETF protocol, reserved, NAT64 and 6to4 among them. The SSO fetcher uses the same function, so it gains this too.
+- A slow URL held the provider-wide upload lock for as long as the import timeout, an hour, so one tenant could keep other
+  projects' imports at 409 at almost no cost. A stall limit alone would not stop a drip, so the source also has to keep up a
+  floor: holding the lock now takes really sending the bytes.
 
 **Diagrams updated:** `c3-components.md` (the image import row).
 ## 2026-11-07: Leftover holders stop billing; a late lock release frees nothing

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -326,6 +327,16 @@ func TestImportUploadLock(t *testing.T) {
 	}
 	if heldAtCreate || held[lock] {
 		t.Fatalf("released once the body is off the node: at create %v, after %v", heldAtCreate, held[lock])
+	}
+	// A source that stops mid-body lets go of the lock at once, with no task to wait for and nothing to remove.
+	b.deletedVol = ""
+	failing := goodImport()
+	failing.Source = io.MultiReader(strings.NewReader("QFI"), iotest.ErrReader(errors.New("source too slow")))
+	if err := firstErr(b.s.ImportImage(context.Background(), "p1", failing)); err == nil || !strings.Contains(err.Error(), "source too slow") {
+		t.Fatalf("the source's error comes back: %v", err)
+	}
+	if held[lock] || b.deletedVol != "" {
+		t.Fatalf("lock held %v, dropped %q", held[lock], b.deletedVol)
 	}
 	// Another project's import while one uploads: refused with nothing sent.
 	b = newImportCluster(t)

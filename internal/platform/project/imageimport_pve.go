@@ -105,6 +105,43 @@ func spoolImage(body io.Reader, maxBytes int64) (*os.File, int64, error) {
 	return f, n, nil
 }
 
+// An import holds the provider's upload lock while it reads its source (pve.lockImportUpload), so a tenant's slow URL must
+// not get to hold it for the whole of pve.ImportTimeout: a source that goes silent, or falls behind a floor, ends the fetch.
+// ponytail: a source just above the floor still holds the lock until ImportTimeout, at the price of really sending that
+// much; the byte budget on lockImportUpload is what would end that.
+var (
+	importStall         = time.Minute     // nothing read for this long
+	importGrace         = 2 * time.Minute // what a source gets on top of importMinRate
+	errImportSourceSlow = errors.New("image source too slow")
+)
+
+const importMinRate = 2 << 20 // bytes a second the source has to average
+
+// importBody ends a fetch, through cancel, when a read outlasts what the source has earned. Only time in a read counts, so a
+// slow PVE on the other side does not count against the source.
+type importBody struct {
+	r     io.Reader
+	timer *time.Timer
+	n     int64
+	spent time.Duration
+}
+
+func newImportBody(r io.Reader, cancel context.CancelCauseFunc) *importBody {
+	t := time.AfterFunc(importStall, func() { cancel(errImportSourceSlow) })
+	t.Stop()
+	return &importBody{r: r, timer: t}
+}
+
+func (b *importBody) Read(p []byte) (int, error) {
+	start := time.Now()
+	b.timer.Reset(min(importStall, importGrace+time.Duration(b.n/importMinRate)*time.Second-b.spent))
+	n, err := b.r.Read(p)
+	b.timer.Stop()
+	b.n += int64(n)
+	b.spent += time.Since(start)
+	return n, err
+}
+
 func gibUp(b int64) int { return int((b + 1<<30 - 1) >> 30) }
 
 // pveImportImage makes a project template from a URL. Body: {name, url, format?, checksum?, checksumAlgorithm?, profile?}.
@@ -162,7 +199,16 @@ func (h *Handler) pveImportImage(w http.ResponseWriter, r *http.Request, u *user
 	}
 	defer release()
 
-	src, err := safeurl.Open(ctx, strAny(data["url"]), importAlso(es.PVENetworkConfig().BlockedCIDRs))
+	fetchCtx, endFetch := context.WithCancelCause(ctx)
+	defer endFetch(nil)
+	sourceSlow := func() bool {
+		if !errors.Is(context.Cause(fetchCtx), errImportSourceSlow) {
+			return false
+		}
+		conflict(fmt.Sprintf("The server at this URL stopped sending, or sent too slowly: an import needs %d MiB/s from it", importMinRate>>20))
+		return true
+	}
+	src, err := safeurl.Open(fetchCtx, strAny(data["url"]), importAlso(es.PVENetworkConfig().BlockedCIDRs))
 	if err != nil {
 		var refusal *safeurl.Refusal
 		if errors.As(err, &refusal) {
@@ -173,15 +219,18 @@ func (h *Handler) pveImportImage(w http.ResponseWriter, r *http.Request, u *user
 		return
 	}
 	defer src.Body.Close()
-	body, size := io.Reader(src.Body), src.Size
+	body, size := io.Reader(newImportBody(src.Body, endFetch)), src.Size
 	if size < 0 {
 		maxGiB := es.PVEImportUnknownSizeMaxGiB()
 		if maxGiB == 0 {
 			conflict("The server did not say how large this image is, and this provider only takes images of a known size")
 			return
 		}
-		f, n, err := spoolImage(src.Body, int64(maxGiB)<<30)
+		f, n, err := spoolImage(body, int64(maxGiB)<<30)
 		if err != nil {
+			if sourceSlow() {
+				return
+			}
 			h.fail(w, upstreamErr("image URL", err))
 			return
 		}
@@ -230,6 +279,9 @@ func (h *Handler) pveImportImage(w http.ResponseWriter, r *http.Request, u *user
 	})
 	if err != nil {
 		slog.Warn("pve image import", "project", proj.ID, "err", err)
+		if sourceSlow() {
+			return
+		}
 		var herr *httpx.HTTPError
 		if errors.As(err, &herr) {
 			h.fail(w, herr)
