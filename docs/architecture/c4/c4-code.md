@@ -52,7 +52,8 @@ Status legend: [README.md](README.md). Everything on this page is **Implemented*
    DROP`, `source=<sandboxCidrs> dest=<cidrPool, management networks, blockedCidrs>`. Sandbox
    workers leave through an exit node that SNATs them to a node address, which the NAS exports and
    the management hosts admit, so their drop must happen here, before the rewrite. An entry that
-   overlaps `cidrPool` is refused (the reconcile fails and writes nothing).
+   overlaps `cidrPool` or a blocked network (the management networks included) is refused (the
+   reconcile fails and writes nothing).
 
 **Who owns the DROPs.** A cluster normally has one portal, which owns its DROPs outright: a
 changed `cidrPool` or `blockedCidrs` replaces them and leaves none behind. Their comment is

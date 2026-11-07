@@ -123,4 +123,22 @@ assert "outside" in f.sandbox_net_problem(dict(sbx, gateway="10.111.0.1"), "10.1
 assert "nodes" in f.sandbox_net_problem(dict(sbx, nodes="10.110.0.1-10.110.0.9"), "10.100.0.0/16")  # holds the gateway
 assert "metallb" in f.sandbox_net_problem(dict(sbx, metallb="10.111.0.200-10.111.0.209"), "10.100.0.0/16")
 assert "metallb" in f.sandbox_net_problem(dict(sbx, metallb=""), "10.100.0.0/16")
+# Nor any other network the isolation rules or the guardrail rely on: a services network equal to the sandbox subnet
+# would cut tenants off their control planes, a blocked or public one would cut it off the nodes.
+avoid = {"services.network": "10.110.0.1/24", "network.blocked_cidrs": [], "network.public.cidr": ""}
+assert "services.network 10.110.0.1/24" in f.sandbox_net_problem(sbx, "10.100.0.0/16", avoid)
+assert "network.blocked_cidrs" in f.sandbox_net_problem(sbx, "10.100.0.0/16", {"network.blocked_cidrs": ["10.0.0.0/8"]})
+assert "network.public.cidr" in f.sandbox_net_problem(sbx, "10.100.0.0/16", {"network.public.cidr": "10.110.0.128/25"})
+assert f.sandbox_net_problem(sbx, "10.100.0.0/16", {"services.network": "10.89.0.1/24", "network.blocked_cidrs": [],
+                                                    "network.public.cidr": "203.0.113.0/24"}) == ""
+
+# The guardrail must deny the services network, and its list must be the one network-policy.yaml denies.
+assert f.sandbox_guardrail_problem({"services.network": "10.89.0.1/24"}) == ""
+assert "services.network 192.0.2.0/24" in f.sandbox_guardrail_problem({"services.network": "192.0.2.1/24"})
+assert "outside" in f.sandbox_guardrail_problem({"x": ["10.0.0.0/8", "11.0.0.0/8"]})  # partly outside
+assert "outside" in f.sandbox_guardrail_problem({"x": "10.0.0.0/7"})
+import re  # noqa: E402
+
+policy = open(os.path.join(os.path.dirname(__file__), "..", "..", "deploy", "sandbox-cluster", "network-policy.yaml")).read()
+assert set(re.findall(r"- cidr: (\S+)", policy)) - {"0.0.0.0/0"} == set(f.SANDBOX_GUARDRAIL_DENY), "guardrail drift"
 print("ok")

@@ -496,14 +496,14 @@ func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string
 	if err != nil {
 		return fmt.Errorf("pve isolation: invalid cidrPool %q", pool)
 	}
-	if sandbox, err = sandboxNets(poolNet, sandbox); err != nil {
-		return err
-	}
 	mgmt, complete, err := s.C.ManagementCIDRs(ctx)
 	if err != nil {
 		return err
 	}
 	blocked = slices.Compact(slices.Sorted(slices.Values(append(mgmt, blocked...))))
+	if sandbox, err = sandboxNets(poolNet, blocked, sandbox); err != nil {
+		return err
+	}
 	owner := s.isolationOwner()
 	want := isolationRules(poolNet.String(), blocked, sandbox, owner)
 	rules, err := s.C.ListClusterFirewallRules(ctx)
@@ -547,16 +547,24 @@ func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string
 
 // sandboxNets normalises the sandbox networks. One that overlaps the tenant pool is refused: a
 // tenant subnet inside it would be cut off from its own project, and the pool's DROPs would no
-// longer say which side a packet came from.
-func sandboxNets(pool *net.IPNet, cidrs []string) ([]string, error) {
+// longer say which side a packet came from. One that overlaps a blocked network (the management
+// networks among them) is refused too: its DROPs would cut that network off the nodes' own
+// addresses (PVE API, ssh, corosync).
+func sandboxNets(pool *net.IPNet, blocked, cidrs []string) ([]string, error) {
+	overlaps := func(a, b *net.IPNet) bool { return a.Contains(b.IP) || b.Contains(a.IP) }
 	out := make([]string, 0, len(cidrs))
 	for _, c := range cidrs {
 		_, n, err := net.ParseCIDR(strings.TrimSpace(c))
 		if err != nil || n.IP.To4() == nil {
 			return nil, fmt.Errorf("pve isolation: invalid sandboxCidrs entry %q (IPv4 CIDR)", c)
 		}
-		if pool.Contains(n.IP) || n.Contains(pool.IP) {
+		if overlaps(pool, n) {
 			return nil, fmt.Errorf("pve isolation: sandboxCidrs entry %s overlaps cidrPool %s", n, pool)
+		}
+		for _, b := range blocked {
+			if _, bn, err := net.ParseCIDR(b); err == nil && overlaps(bn, n) {
+				return nil, fmt.Errorf("pve isolation: sandboxCidrs entry %s overlaps blocked network %s", n, b)
+			}
 		}
 		out = append(out, n.String())
 	}

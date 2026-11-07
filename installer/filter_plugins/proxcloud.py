@@ -153,9 +153,19 @@ def visible_stores(results):
     return out
 
 
-def sandbox_net_problem(net, cidr_pool):
-    """Why sandbox.network cannot be used, or "". The isolation rules fence the sandbox subnet off the tenant pool in
-    both directions, so the two must not overlap; every address the cluster takes must sit inside the subnet."""
+# The ranges deploy/sandbox-cluster/network-policy.yaml denies to every sandbox pod (egressDeny). The installer tests
+# check the two lists match.
+SANDBOX_GUARDRAIL_DENY = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16")
+
+
+def _cidrs(value):
+    return [str(v) for v in (value if isinstance(value, (list, tuple)) else [value]) if v]
+
+
+def sandbox_net_problem(net, cidr_pool, avoid=None):
+    """Why sandbox.network cannot be used, or "". The isolation rules fence the sandbox subnet off the tenant pool and
+    the blocked networks in both directions, so it must overlap none of them, nor any other network in avoid
+    ({setting name: CIDR or list of CIDRs}); every address the cluster takes must sit inside the subnet."""
     import ipaddress
 
     try:
@@ -164,8 +174,10 @@ def sandbox_net_problem(net, cidr_pool):
         return "sandbox.network.subnet must be an IPv4 network such as 192.0.2.0/24, got %r" % net.get("subnet")
     if sub.version != 4:
         return "sandbox.network.subnet must be IPv4: the sandbox guardrail names IPv4 ranges only"
-    if cidr_pool and sub.overlaps(ipaddress.ip_network(cidr_pool, strict=False)):
-        return "sandbox.network.subnet %s overlaps network.cidr_pool %s" % (sub, cidr_pool)
+    for name, value in [("network.cidr_pool", cidr_pool)] + sorted((avoid or {}).items()):
+        for c in _cidrs(value):
+            if sub.overlaps(ipaddress.ip_network(c, strict=False)):
+                return "sandbox.network.subnet %s overlaps %s %s" % (sub, name, c)
     try:
         gw = ipaddress.ip_address(str(net.get("gateway") or ""))
     except ValueError:
@@ -180,6 +192,23 @@ def sandbox_net_problem(net, cidr_pool):
             return "sandbox.network.%s must be a first-last range inside %s" % (key, sub)
         if lo not in sub or hi not in sub or lo > hi or lo <= gw <= hi:
             return "sandbox.network.%s %s must be inside %s and leave out the gateway" % (key, net.get(key), sub)
+    return ""
+
+
+def sandbox_guardrail_problem(nets):
+    """Which of nets ({setting name: CIDR or list}) the sandbox guardrail does not deny, or "". A sandbox pod reaches
+    whatever lies outside SANDBOX_GUARDRAIL_DENY without leaving gVisor, and the PVE isolation rules do not stop it
+    from reaching the services network (tenants need that one)."""
+    import ipaddress
+
+    deny = [ipaddress.ip_network(d) for d in SANDBOX_GUARDRAIL_DENY]
+    for name, value in sorted(nets.items()):
+        for c in _cidrs(value):
+            n = ipaddress.ip_network(c, strict=False)
+            if not any(n.version == d.version and n.subnet_of(d) for d in deny):
+                return ("%s %s is outside the ranges the sandbox guardrail denies (%s), so a sandbox pod could reach "
+                        "it: use private addresses there, or add the range to deploy/sandbox-cluster/network-policy.yaml"
+                        % (name, n, ", ".join(SANDBOX_GUARDRAIL_DENY)))
     return ""
 
 
@@ -200,4 +229,5 @@ class FilterModule:
             "pc_ip_cidrs": ip_cidrs,
             "pc_node_with_address": node_with_address,
             "pc_sandbox_net_problem": sandbox_net_problem,
+            "pc_sandbox_guardrail_problem": sandbox_guardrail_problem,
         }

@@ -10,14 +10,30 @@
     ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
   vars:
     net: "{{ pc.sandbox.network }}"
+    svc_net: "{{ (pc.services.network.gateway ~ '/' ~ pc.services.network.prefix) if pc.services.network.gateway else '' }}"
   tasks:
     - name: Skip unless the sandbox is on
       ansible.builtin.meta: end_play
       when: not pc_sandbox_on
+    # The management networks come from PVE at run time; the portal refuses a sandbox subnet overlapping them.
     - name: Check the sandbox network settings
       vars:
-        problem: "{{ net | pc_sandbox_net_problem(pc.network.cidr_pool) }}"
+        avoid: {services.network: "{{ svc_net }}", network.blocked_cidrs: "{{ pc.network.blocked_cidrs }}", network.public.cidr: "{{ pc.network.public.cidr | default('') }}"}
+        problem: "{{ net | pc_sandbox_net_problem(pc.network.cidr_pool, avoid) }}"
       ansible.builtin.assert: {that: problem == '', fail_msg: "{{ problem }}", quiet: true}
+    # Tenants reach the services network, so the PVE isolation rules leave it open to the workers too; only the
+    # guardrail keeps a sandbox pod off the control-plane APIs, the database load balancers and pve_proxy_ip.
+    - name: Check the guardrail covers the services network
+      vars:
+        problem: "{{ {'services.network': svc_net} | pc_sandbox_guardrail_problem }}"
+      ansible.builtin.assert: {that: problem == '', fail_msg: "{{ problem }}", quiet: true}
+    - name: Check a zone is named on a site with a zone per project
+      ansible.builtin.assert:
+        that: pc.network.isolation != 'evpn' or pc.sandbox.network.zone
+        fail_msg: >-
+          network.isolation is evpn, so there is no shared zone: set sandbox.network.zone to an EVPN zone made for the
+          sandbox alone. A tenant's zone would put the workers in that tenant's VRF.
+        quiet: true
     - name: Log in
       ansible.builtin.include_tasks: tasks/pve-login.yml
     - name: Check the bootstrap ISO store
@@ -41,7 +57,8 @@
           ansible.builtin.debug:
             msg: >-
               SKIPPED: EVPN zone {{ pc_sandbox_zone }} does not exist yet. Create a tenant network once (the portal
-              creates the zone), or set sandbox.network.zone to an existing EVPN zone, then run stage 55 again.
+              creates the zone), or set sandbox.network.zone to an existing EVPN zone no tenant uses, then run stage
+              55 again.
         - name: Remember the skip
           ansible.builtin.set_fact: {pc_sbx_skip: true}
         - name: Stop here
@@ -57,6 +74,13 @@
       ansible.builtin.assert:
         that: have | length == 0 or have[0].zone == pc_sandbox_zone
         fail_msg: "vnet {{ net.vnet }} exists in zone {{ have[0].zone | default('') }}, not {{ pc_sandbox_zone }}"
+        quiet: true
+    - name: Check no other vnet holds the VNI
+      vars:
+        taken: "{{ pc_sdn.results[1].json.data | rejectattr('vnet', 'eq', net.vnet) | selectattr('tag', 'defined') | map(attribute='tag') | map('string') | select('eq', net.tag | string) | list }}"
+      ansible.builtin.assert:
+        that: taken | length == 0
+        fail_msg: "VNI {{ net.tag }} is taken by another vnet: set sandbox.network.tag to a free one"
         quiet: true
     - name: Create the vnet
       when: pc_sdn.results[1].json.data | selectattr('vnet', 'eq', net.vnet) | list | length == 0

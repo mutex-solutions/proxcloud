@@ -202,9 +202,11 @@ func TestReconcileIsolationSandbox(t *testing.T) {
 	if !reflect.DeepEqual(drops, want) {
 		t.Fatalf("drops:\n%s\nwant:\n%s", strings.Join(drops, "\n"), strings.Join(want, "\n"))
 	}
-	for _, bad := range [][]string{{"10.100.7.0/24"}, {"10.0.0.0/8"}, {"not-a-cidr"}, {"fd00::/64"}} {
+	// The fake's management network is 192.0.2.0/24; 198.51.100.0/24 is an operator-blocked one.
+	for _, bad := range [][]string{{"10.100.7.0/24"}, {"10.0.0.0/8"}, {"not-a-cidr"}, {"fd00::/64"},
+		{"192.0.0.0/16"}, {"192.0.2.128/25"}, {"198.51.100.0/24"}} {
 		srv, rules, writes := isolationFake(t, nil)
-		if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, bad); err == nil {
+		if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", []string{"198.51.100.0/24"}, bad); err == nil {
 			t.Fatalf("sandboxCidrs %v accepted", bad)
 		}
 		if *writes != 0 || len(*rules) != 0 {

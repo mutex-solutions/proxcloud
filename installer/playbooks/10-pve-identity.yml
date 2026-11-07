@@ -81,6 +81,9 @@
       - {path: /sdn/zones/localnetwork, role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
       - {path: "/storage/{{ pc_sandbox_iso_storage }}", role: PVEDatastoreAdmin, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
       - {path: "/sdn/zones/{{ pc_sandbox_zone }}/{{ pc.sandbox.network.vnet }}", role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
+    # On its own ISO store the user holds only ProxCloudCAPI (from /storage), which lacks Datastore.AllocateTemplate,
+    # so the token could not upload the bootstrap ISO. The capi token has no row there, so it still sees one ISO store.
+    sandbox_iso_user_acls: "{{ [{'path': '/storage/' ~ pc_sandbox_iso_storage, 'role': 'PVEDatastoreAdmin', 'propagate': 0, 'user': 'capmox@pve', 'token': ''}] if pc_sandbox_iso_storage != pc.services.iso_storage else [] }}"
   tasks:
     - name: Log in
       ansible.builtin.include_tasks: tasks/pve-login.yml
@@ -229,7 +232,7 @@
         body_format: form-urlencoded
         body: "{{ item }}"
       changed_when: true
-      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else []) + (sandbox_acls if pc_sandbox_on else [])) }}"
+      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else []) + (sandbox_acls + sandbox_iso_user_acls if pc_sandbox_on else [])) }}"
       loop_control: {label: "{{ item.path }} {{ item.roles }}"}
 
     # Older installs gave the services token /storage (propagate) and the ISO role on the NAS template store, so it

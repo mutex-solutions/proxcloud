@@ -304,7 +304,10 @@ directions ([C4.1](architecture/c4/c4-code.md#c41-tenant-network-isolation)): te
 to the tenant pool, the node management networks and `blockedCidrs`. These rules see routed traffic, which is what
 both paths of §0.3 are: a tenant VM reaching a worker through the shared VRF, and a worker reaching the NAS or a node
 through the exit node's SNAT. They do not see traffic switched inside the sandbox vnet (HAProxy or node address
-spoofing there is SB2b's `ipfilter`). An entry that overlaps the tenant pool is refused.
+spoofing there is SB2b's `ipfilter`). An entry that overlaps the tenant pool or a blocked network (the management
+networks included) is refused. The services network stays open to the workers here, because tenants need it; until
+SB2b only the guardrail keeps a sandbox pod off it, so stage 55 refuses a services network outside the ranges the
+guardrail denies.
 
 Measured on the lab (2026-11-07) with the SB0 cluster's worker and a tenant VM of a portal stack on this branch,
 packets in both directions, the provider without `sandboxCidrs`, with it, without it again, then with it:

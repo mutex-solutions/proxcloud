@@ -17,11 +17,15 @@ and rules: [README.md](README.md#maintenance-rule).
   cluster token's grants (token rows only) and checks it sees one ISO store; new stage 55 creates the vnet, applies
   an ArgoCD Application of the kamaji chart in `pc-sandbox` with no project label, checks NodeRestriction on its
   control plane, waits for the workers and applies the manifests, stopping on IPv6; stage 60 writes
-  `network.sandboxCidrs` on the Proxmox provider. Filter `pc_sandbox_net_problem` checks the addresses.
+  `network.sandboxCidrs` on the Proxmox provider. Filter `pc_sandbox_net_problem` checks the addresses and refuses
+  an overlap with the tenant pool, the services, blocked and public networks; `pc_sandbox_guardrail_problem` refuses a
+  services network the guardrail does not deny (a test keeps its list equal to `network-policy.yaml`). Stage 55 also
+  refuses a VNI another vnet holds, and an `evpn`-isolation site without `sandbox.network.zone`. Stage 10 gives
+  `capmox@pve` `PVEDatastoreAdmin` on a separate `sandbox.iso_storage`, which the ISO upload needs.
 - `pve.ReconcileIsolation` takes the sandbox networks (`PVENetwork.SandboxCIDRs`, provider `network.sandboxCidrs`):
   the tenant pool's DROPs to the blocked networks also name them, and two new DROPs (`FORWARD`, `IN`) stop them
-  reaching the pool, the management networks and `blockedCidrs`. An entry overlapping `cidrPool` fails the reconcile
-  before any write. A provider without the key gets exactly the old rule set.
+  reaching the pool, the management networks and `blockedCidrs`. An entry overlapping `cidrPool` or a blocked
+  network (the management networks included) fails the reconcile before any write. A provider without the key gets exactly the old rule set.
 - The rebrand gate's previous-backend check skips `deploy/sandbox-cluster/agent-sandbox/`.
 
 **Why**
@@ -34,6 +38,10 @@ and rules: [README.md](README.md#maintenance-rule).
 - The cluster is the platform's, not a project's: no project label keeps it out of every portal sync and bill, and a
   token minted per installation keeps its CAPMOX credential off the services token. NodeRestriction and IPv4 are
   release gates (SB0), so stage 55 checks both instead of trusting the chart default and the vnet.
+- The overlap checks exist because the DROPs are symmetric: a sandbox subnet over the management network would drop
+  new connections from it to the nodes (PVE API, ssh), and one over the services network would cut tenants off their
+  control planes. The services network stays open to the workers at layer 0 (tenants need it), so until SB2b only the
+  guardrail keeps a sandbox pod off it, and that holds only if the network is in a range the guardrail denies.
 - The vendored CRD contains the Kubernetes pod schema, which names another platform's in-tree volume plugin; the file
   must stay byte-identical to the release for its checksum, so the gate skips that directory instead.
 

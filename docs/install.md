@@ -151,7 +151,12 @@ until a later phase.
 
 1. Set `proxcloud.sandbox.network` ([defaults.yml](../installer/playbooks/group_vars/all/defaults.yml)): a subnet outside
    `network.cidr_pool`, its gateway, the worker range (`nodes`), the cluster's LoadBalancer range (`metallb`) and DNS
-   servers that are not on the management network. Stage 55 refuses an overlap or an address outside the subnet.
+   servers that are not on the management network. Stage 55 refuses a subnet overlapping the tenant pool, the
+   services network, `network.blocked_cidrs` or `network.public`, an address outside the subnet, a VNI
+   (`sandbox.network.tag`) another vnet holds, and a services network outside the private, CGNAT and link-local ranges
+   the sandbox guardrail denies (a sandbox pod would reach the tenants' control planes there). The portal refuses a
+   subnet overlapping a node's management network. With `network.isolation: evpn` set `sandbox.network.zone` to an
+   EVPN zone made for the sandbox: there is no shared zone, and a tenant's zone would put the workers in its VRF.
 2. `make install`, or stages 10, 55 and 60 on an installed site. Stage 10 creates pool `proxcloud-sandbox` and token
    `capmox@pve!sandbox` ([proxmox-permissions.md](proxmox-permissions.md#managed-kubernetes)). Stage 55 creates the vnet
    (`sandbox.network.vnet`, in the EVPN zone `sandbox.network.zone`, default the provider's default zone), applies an
