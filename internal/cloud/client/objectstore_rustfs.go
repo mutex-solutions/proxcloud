@@ -79,6 +79,33 @@ func principalUserNames(uids ...string) json.RawMessage {
 	return b
 }
 
+// CheckRustFS proves a rustfs connection before it is stored: an S3 call on the tenants' endpoint, then an admin read on
+// the private one. The admin URL may be blank, since it defaults to the S3 endpoint.
+func CheckRustFS(ctx context.Context, cfg ObjectStoreConfig) error {
+	urls := []string{cfg.S3Endpoint}
+	if cfg.AdminURL != "" {
+		urls = append(urls, cfg.AdminURL)
+	}
+	if err := checkObjectStoreFields(cfg, urls...); err != nil {
+		return err
+	}
+	cfg.ProjectAccessKey, cfg.ProjectSecretKey = cfg.AdminAccessKey, cfg.AdminSecretKey // the S3 leg signs with the same key
+	cc, err := NewRustFS(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	r := cc.objectBackend.(*rustfsBackend)
+	if _, err := r.s3.ListBuckets(ctx, &s3.ListBucketsInput{}); err != nil {
+		return fmt.Errorf("S3 endpoint %s: %w", cfg.S3Endpoint, err)
+	}
+	var policies map[string]any
+	// bucket= is required next to adminDo's format=json (see stripFromOtherPolicies).
+	if err := r.adminDo(ctx, "GET", "/list-canned-policies", urlValues("bucket", ""), nil, &policies); err != nil {
+		return fmt.Errorf("Admin API %s: %w", r.adminURL, err)
+	}
+	return nil
+}
+
 // Caps: website serving needs per-bucket DNS and is gated off; quota is bytes only.
 func (r *rustfsBackend) Caps() ObjectCaps {
 	return ObjectCaps{Backend: BackendRustFS, Website: false, QuotaObjects: false}

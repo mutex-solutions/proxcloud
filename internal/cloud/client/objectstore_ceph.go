@@ -811,13 +811,8 @@ type adminCap struct {
 // bootstrap of every new project. It reads the admin key's own user, so an endpoint that is not RGW or a key
 // that does not exist fails instead of reading as "user absent".
 func CheckCephS3(ctx context.Context, cfg ObjectStoreConfig) error {
-	for _, u := range []string{cfg.S3Endpoint, cfg.AdminURL} {
-		if p, err := url.Parse(u); err != nil || p.Host == "" || (p.Scheme != "http" && p.Scheme != "https") {
-			return fmt.Errorf("%q is not an http(s) URL", u)
-		}
-	}
-	if cfg.AdminAccessKey == "" || cfg.AdminSecretKey == "" {
-		return errors.New("the admin access key and secret key are required")
+	if err := checkObjectStoreFields(cfg, cfg.S3Endpoint, cfg.AdminURL); err != nil {
+		return err
 	}
 	cfg.ProjectAccessKey, cfg.ProjectSecretKey = cfg.AdminAccessKey, cfg.AdminSecretKey // the S3 leg signs with the same key
 	b, err := newCephBackend(cfg)
@@ -837,6 +832,26 @@ func CheckCephS3(ctx context.Context, cfg ObjectStoreConfig) error {
 		if !slices.Contains(self.Caps, adminCap{Type: want, Perm: "*"}) {
 			return fmt.Errorf("the admin key lacks the RGW cap %s=* (it needs users=*;buckets=*;usage=*)", want)
 		}
+	}
+	return nil
+}
+
+// CheckObjectStore proves an object-store connection for this provider ("ceph-s3" or "rustfs").
+func CheckObjectStore(ctx context.Context, provider string, cfg ObjectStoreConfig) error {
+	if provider == "rustfs" {
+		return CheckRustFS(ctx, cfg)
+	}
+	return CheckCephS3(ctx, cfg)
+}
+
+func checkObjectStoreFields(cfg ObjectStoreConfig, urls ...string) error {
+	for _, u := range urls {
+		if p, err := url.Parse(u); err != nil || p.Host == "" || (p.Scheme != "http" && p.Scheme != "https") {
+			return fmt.Errorf("%q is not an http(s) URL", u)
+		}
+	}
+	if cfg.AdminAccessKey == "" || cfg.AdminSecretKey == "" {
+		return errors.New("the admin access key and secret key are required")
 	}
 	return nil
 }

@@ -7,7 +7,8 @@ package admin
 //
 // Flow:
 //
-//	POST /object-store/test   = check a ceph-s3 endpoint and admin key, storing nothing
+//	POST /object-store/test   = check an object-store endpoint and admin key, storing nothing
+//	POST /{id}/object-store/test = the same check on a stored row, with its stored key
 //	create(es)                = persist the operator-supplied doc (secret encrypted). Live validation only for a
 //	                            PUBLIC ceph-s3 row; for others the Connection tab's Test button probes the provider
 //	update(id,es)             = look up → merge connection fields → save (same check when the connection changed)
@@ -55,6 +56,7 @@ const externalServiceCollection = "externalService"
 func (h *Handler) routeExternalServiceMut(r chi.Router) {
 	r.Post("/service", h.externalServiceCreate)
 	r.Post("/service/object-store/test", h.objectStoreTest)
+	r.Post("/service/{id}/object-store/test", h.objectStoreTestStored)
 	r.Put("/service/{id}", h.externalServiceUpdate)
 	r.Delete("/service/{id}", h.externalServiceDelete)
 	// the no-provision re-save (PUT /{id}/update) — get-or-404 then merge + resave.
@@ -120,7 +122,7 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	if sec, ok := doc["secret"]; ok && h.esSvc != nil {
 		doc["secret"] = h.esSvc.EncryptSecret(sec)
 	}
-	if herr := h.checkPublicCeph(r.Context(), doc); herr != nil {
+	if herr := h.checkObjectStoreRow(r.Context(), doc); herr != nil {
 		httpx.WriteError(w, herr)
 		return
 	}
@@ -132,14 +134,15 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	httpx.OK(w, doc)
 }
 
-// objectStoreTest proves a ceph-s3 connection before it is stored (POST /service/object-store/test): the
-// installer calls it ahead of registering a row, since a stored row that cannot reach RGW fails every new
-// project. A failed check is a 400 with the reason, like the Proxmox connection test.
+// objectStoreTest proves an object-store connection before it is stored (POST /service/object-store/test): the
+// installer calls it ahead of registering a row. A failed check is a 400 with the reason, like the Proxmox connection
+// test. A blank provider means ceph-s3, which is what the installer's callers send.
 func (h *Handler) objectStoreTest(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, externalServiceManagePerm) {
 		return
 	}
 	var body struct {
+		Provider       string `json:"provider"`
 		S3Endpoint     string `json:"s3Endpoint"`
 		AdminAPIURL    string `json:"adminApiUrl"`
 		Region         string `json:"region"`
@@ -150,7 +153,7 @@ func (h *Handler) objectStoreTest(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	if herr := checkObjectStore(r.Context(), client.ObjectStoreConfig{
+	if herr := checkObjectStore(r.Context(), body.Provider, client.ObjectStoreConfig{
 		S3Endpoint: body.S3Endpoint, AdminURL: body.AdminAPIURL, Region: body.Region,
 		AdminAccessKey: body.AdminAccessKey, AdminSecretKey: body.AdminSecretKey,
 	}); herr != nil {
@@ -160,34 +163,70 @@ func (h *Handler) objectStoreTest(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, map[string]any{"ok": true})
 }
 
-func checkObjectStore(ctx context.Context, cfg client.ObjectStoreConfig) *httpx.HTTPError {
+// objectStoreTestStored runs the same check on a stored row (POST /service/{id}/object-store/test), with its stored key,
+// which the API never returns to the console.
+func (h *Handler) objectStoreTestStored(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, externalServiceManagePerm) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	doc, err := h.repo.FindDoc(r.Context(), externalServiceCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if doc == nil {
+		httpx.WriteError(w, serviceNotFoundErr(id))
+		return
+	}
+	es := h.objectStoreOf(doc)
+	if es == nil {
+		httpx.WriteError(w, httpx.BadRequest("This provider is not an object store"))
+		return
+	}
+	if herr := checkObjectStore(r.Context(), es.Provider(), es.CephConfig("", "", "", "")); herr != nil {
+		httpx.WriteError(w, herr)
+		return
+	}
+	httpx.OK(w, map[string]any{"ok": true})
+}
+
+func checkObjectStore(ctx context.Context, provider string, cfg client.ObjectStoreConfig) *httpx.HTTPError {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := client.CheckCephS3(ctx, cfg); err != nil {
+	if err := client.CheckObjectStore(ctx, provider, cfg); err != nil {
 		return httpx.BadRequest("Object store check failed: " + err.Error())
 	}
 	return nil
 }
 
-// checkPublicCeph proves a row new projects would be provisioned on: a stored one that cannot reach RGW fails the
-// bootstrap of every new project.
-func (h *Handler) checkPublicCeph(ctx context.Context, doc pgdoc.M) *httpx.HTTPError {
+// objectStoreOf reads a doc as an object-store provider with its secret decrypted; nil for any other provider.
+func (h *Handler) objectStoreOf(doc pgdoc.M) *externalservice.ExternalService {
 	cfg, _ := doc["config"].(map[string]any)
 	es := &externalservice.ExternalService{Config: cfg, Secret: doc["secret"]}
-	if !es.IsCephS3() || doc["status"] != externalservice.StatusPublic {
+	if !es.IsObjectStore() {
 		return nil
 	}
 	if h.esSvc != nil {
 		h.esSvc.Decrypt(es)
 	}
-	return checkObjectStore(ctx, es.CephConfig("", "", "", ""))
+	return es
 }
 
-// cephConnection is what checkPublicCeph's answer depends on, so a write that leaves it alone (quota, features, turning
-// a service off) still works while RGW is down.
-func cephConnection(doc pgdoc.M) string {
+// checkObjectStoreRow proves an object-store row of any status: bootstrap provisions every one that is not disabled, and
+// a DISABLED row can be turned on later.
+func (h *Handler) checkObjectStoreRow(ctx context.Context, doc pgdoc.M) *httpx.HTTPError {
+	es := h.objectStoreOf(doc)
+	if es == nil {
+		return nil
+	}
+	return checkObjectStore(ctx, es.Provider(), es.CephConfig("", "", "", ""))
+}
+
+// objectStoreConnection is what checkObjectStoreRow's answer depends on, so a write that leaves it alone (quota, features)
+// still works while the store is down.
+func objectStoreConnection(doc pgdoc.M) string {
 	cfg, _ := doc["config"].(map[string]any)
-	b, _ := json.Marshal([]any{doc["status"], cfg["provider"], cfg["s3Endpoint"], cfg["adminApiUrl"], cfg["region"], doc["secret"]})
+	b, _ := json.Marshal([]any{cfg["provider"], cfg["s3Endpoint"], cfg["adminApiUrl"], cfg["region"], doc["secret"]})
 	return string(b)
 }
 
@@ -489,16 +528,21 @@ func (h *Handler) serviceFieldSet(w http.ResponseWriter, r *http.Request, apply 
 		httpx.WriteError(w, serviceNotFoundErr(id))
 		return
 	}
-	connection := cephConnection(doc)
+	connection, status := objectStoreConnection(doc), doc["status"]
 	if aerr := apply(r, doc); aerr != nil {
 		httpx.WriteError(w, aerr)
 		return
 	}
-	if cephConnection(doc) != connection {
-		if herr := h.checkPublicCeph(r.Context(), doc); herr != nil {
+	// Turning a service off must work with the store down; turning one on proves it, as its connection may predate the check.
+	newConnection := objectStoreConnection(doc) != connection
+	if newConnection || (doc["status"] != status && doc["status"] != externalservice.StatusDisabled) {
+		if herr := h.checkObjectStoreRow(r.Context(), doc); herr != nil {
 			httpx.WriteError(w, herr)
 			return
 		}
+	}
+	if newConnection {
+		delete(doc, "provisionError") // it was about the old connection
 	}
 	if err := h.repo.ReplaceDoc(r.Context(), externalServiceCollection, id, doc); httpx.WriteError(w, err) {
 		return
