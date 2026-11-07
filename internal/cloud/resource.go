@@ -83,6 +83,9 @@ type CloudResource struct {
 	CreatedAt     *time.Time     `json:"createdAt,omitempty"`
 	UpdatedAt     *time.Time     `json:"updatedAt,omitempty"`
 	Info          *Info          `json:"info,omitempty"`
+	// PausedBySuspension: a suspension walk paused this VM, or is about to, and no resume has seen it back since. It is what tells
+	// that pause from any other. Only MarkPausedBySuspension writes it: toDbRecord leaves it out, so a sync keeps it.
+	PausedBySuspension bool `json:"pausedBySuspension,omitempty"`
 }
 
 // ServerIsVolumeBacked recognizes both the platform marker and the legacy

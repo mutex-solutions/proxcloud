@@ -501,7 +501,7 @@ func run() error {
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)
 	suspensionJob.SetNotifier(mailSvc)
 	suspensionJob.SetAudit(auditSvc) // writes a system audit trail for CREATE/NOTIFY/SUSPEND/UNSUSPEND
-	cloudSuspender := billingCloudSuspender{orgs: orgRepo, projects: projectRepo, cloud: cloudRepo, services: esSvc, log: log}
+	cloudSuspender := billingCloudSuspender{orgs: orgRepo, projects: projectRepo, cloud: cloudRepo, services: esSvc, log: log, allowsEnabled: projectSvc.BillingAllowsEnabled}
 	suspensionJob.SetCloudSuspender(cloudSuspender)
 	// ActivationService (billing/activation): the DIRECT activate/suspend/resume driven by
 	// the admin status transitions + the public Admin API. Activating a profile provisions
@@ -577,6 +577,7 @@ func run() error {
 	// Live per-project cloud legs for the admin project + cloud-resource mutations:
 	// PVE suspend/resume, scoped sync, project bootstrap.
 	adminH.SetProjectCloudOps(&admin.ProjectCloudOps{
+		HoldForMove: projectH.HoldForOperatorMove,
 		PauseServers: func(ctx context.Context, projectID string, pause bool) error {
 			p, err := projectRepo.FindByID(ctx, projectID)
 			if err != nil {
@@ -1165,13 +1166,15 @@ func (f projectTeardownDeleter) DeleteProjectResources(ctx context.Context, proj
 // billingCloudSuspender is the live suspend/resume for a billing profile: resolve the
 // profile's projects (via its orgs — greenfield projects inherit the org's bp), and per Proxmox
 // CLOUD service suspend/resume each cached SERVER (PVE VM) + flip the project ENABLED↔DISABLED.
-// Per-project/server errors are logged and skipped (best-effort).
+// Per-project/server errors are logged and skipped (best-effort): the row marks and FinishResumes carry what failed.
 type billingCloudSuspender struct {
 	orgs     *org.Repo
 	projects *project.Repo
 	cloud    *cloud.Repo
 	services *externalservice.Service
 	log      *slog.Logger
+	// allowsEnabled says nothing on the billing side holds a DISABLED project. Nil: FinishResumes lifts none.
+	allowsEnabled func(ctx context.Context, p *project.Project) (bool, error)
 }
 
 func (s billingCloudSuspender) SuspendBillingProfileClouds(ctx context.Context, bpID string) error {
@@ -1214,9 +1217,63 @@ func (s billingCloudSuspender) forEachProjectServer(ctx context.Context, bpID st
 	return nil
 }
 
-// pauseProjectServers is the CLOUD-only per-project leg: PVE suspend/resume every cached SERVER
-// through the provider's client. Best-effort — per-server/-service failures are logged and
-// skipped. Status flips stay with the callers (bp walk above; admin status-update handler).
+// FinishResumes picks up what a resume left: every VM still marked as paused by a suspension, in a project nothing holds any
+// more. One failed VM, a crash mid-walk and a walk that never reached a project all end here. A project still DISABLED comes up
+// first if billing allows it and no operator disabled it: only a resume that stopped halfway leaves one with a marked VM.
+func (s billingCloudSuspender) FinishResumes(ctx context.Context) error {
+	rows, err := s.cloud.FindPausedBySuspension(ctx)
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for i := range rows {
+		id := rows[i].ProjectID
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		p, err := s.projects.FindByID(ctx, id)
+		if err != nil {
+			s.log.Error("suspender: read project", "project", id, "err", err)
+			continue
+		}
+		if p == nil || !s.liftForResume(ctx, p) {
+			continue
+		}
+		s.pauseProjectServers(ctx, p, false)
+	}
+	return nil
+}
+
+// liftForResume reports whether the project's marked VMs may come back, enabling it if that is all that is left of a resume.
+func (s billingCloudSuspender) liftForResume(ctx context.Context, p *project.Project) bool {
+	if p.IsEnabled() {
+		return true
+	}
+	if !p.IsDisabled() || p.DisabledByOperator || s.allowsEnabled == nil {
+		return false
+	}
+	allowed, err := s.allowsEnabled(ctx, p)
+	if err != nil {
+		s.log.Error("suspender: billing hold", "project", p.ID, "err", err)
+		return false
+	}
+	if !allowed {
+		return false
+	}
+	lifted, err := s.projects.EnableIfDisabled(ctx, p, false)
+	if err != nil {
+		s.log.Error("suspender: enable project", "project", p.ID, "err", err)
+		return false
+	}
+	return lifted
+}
+
+// pauseProjectServers is the CLOUD-only per-project leg: PVE suspend/resume the project's cached SERVERs through the provider's
+// client. A suspend marks each VM on its row before pausing it, and a resume touches marked VMs only: PVE has no record of why a
+// VM is paused, and one that the walk did not pause, or a tenant stopped, is not the walk's to bring back. Best-effort: per-server
+// and per-service failures are logged and skipped, and the mark stays for the next pass. Status flips stay with the callers (bp
+// walk above; admin status-update handler).
 func (s billingCloudSuspender) pauseProjectServers(ctx context.Context, p *project.Project, pause bool) {
 	for _, serviceID := range p.ServiceIDs() {
 		es, err := s.services.Get(ctx, serviceID)
@@ -1228,36 +1285,71 @@ func (s billingCloudSuspender) pauseProjectServers(ctx context.Context, p *proje
 			s.log.Error("suspender: pve client", "project", p.ID, "err", err)
 			continue
 		}
-		servers, err := s.cloud.FindByProjectAndType(ctx, p.ID, cloud.TypeServer)
+		servers, err := s.cloud.FindByServiceProjectAndType(ctx, serviceID, p.ID, cloud.TypeServer)
 		if err != nil {
 			s.log.Error("suspender: list cached servers", "project", p.ID, "err", err)
 			continue
 		}
 		for si := range servers {
+			if !pause && !servers[si].PausedBySuspension {
+				continue
+			}
 			vm, rerr := ps.ResolveVM(ctx, p.ID, servers[si].ExternalID)
 			if rerr != nil {
 				s.log.Error("suspender: read server", "server", servers[si].ExternalID, "pause", pause, "err", rerr)
 				continue
 			}
-			// A walk repeats until the profile is settled, so it skips what is already where it should be.
-			if vm == nil || (pause && vm.Status != "running") || (!pause && vm.Status != "paused") {
+			if vm == nil {
 				continue
 			}
-			var upid pve.UPID
-			var aerr error
+			var err error
 			if pause {
-				upid, aerr = ps.C.SuspendVM(ctx, vm.Node, vm.VMID)
+				err = s.pauseVM(ctx, ps, &servers[si], vm)
 			} else {
-				upid, aerr = ps.C.ResumeVM(ctx, vm.Node, vm.VMID)
+				err = s.resumeVM(ctx, ps, &servers[si], vm)
 			}
-			if aerr == nil {
-				aerr = ps.C.WaitTask(ctx, upid)
-			}
-			if aerr != nil {
-				s.log.Error("suspender: server action", "server", servers[si].ExternalID, "pause", pause, "err", aerr)
+			if err != nil {
+				s.log.Error("suspender: server action", "server", servers[si].ExternalID, "pause", pause, "err", err)
 			}
 		}
 	}
+}
+
+// pauseVM pauses a running VM, marking it first: a crash between the two leaves a mark on a running VM, which the next resume
+// clears, where the other order would leave a paused VM nothing brings back. A walk repeats until the profile is settled, so
+// anything not running is skipped.
+func (s billingCloudSuspender) pauseVM(ctx context.Context, ps *pve.Service, row *cloud.CloudResource, vm *pve.ClusterResource) error {
+	if vm.Status != "running" {
+		return nil
+	}
+	if err := s.cloud.MarkPausedBySuspension(ctx, row, true); err != nil {
+		return err
+	}
+	upid, err := ps.C.SuspendVM(ctx, vm.Node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	return ps.C.WaitTask(ctx, upid)
+}
+
+// resumeVM brings back a marked VM still paused, then clears the mark. A VM read as running or stopped needs no resume: stopped
+// means a member stopped it while it was held, and it stays stopped. Any other status (a dead node reads unknown) says nothing,
+// so the mark stays.
+func (s billingCloudSuspender) resumeVM(ctx context.Context, ps *pve.Service, row *cloud.CloudResource, vm *pve.ClusterResource) error {
+	switch vm.Status {
+	case "paused":
+		upid, err := ps.C.ResumeVM(ctx, vm.Node, vm.VMID)
+		if err != nil {
+			return err
+		}
+		if err := ps.C.WaitTask(ctx, upid); err != nil {
+			return err
+		}
+	case "running", "stopped":
+	default:
+		return nil
+	}
+	return s.cloud.MarkPausedBySuspension(ctx, row, false)
 }
 
 // jobResult writes a debug-trigger response: the result map on success, or a 500 with the error.

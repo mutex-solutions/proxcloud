@@ -3,6 +3,7 @@ package project
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -471,7 +472,8 @@ var billableRows = []struct{ rowType, what string }{
 }
 
 // billableResource names one thing the project holds that billing would rate, "" when there is none. Live for VMs as well as
-// from rows: a row can lag a start, and not knowing refuses the change.
+// from rows: a row can lag a start, and not knowing refuses the change. A provider that has been removed has nothing left to ask:
+// the rows above still count what it left. A provider that is there and does not answer is not knowing.
 func (h *Handler) billableResource(ctx context.Context, proj *Project) (string, error) {
 	for _, b := range billableRows {
 		rows, err := h.cloud.FindByProjectAndType(ctx, proj.ID, b.rowType)
@@ -490,16 +492,19 @@ func (h *Handler) billableResource(ctx context.Context, proj *Project) (string, 
 			continue
 		}
 		es, err := h.esSvc.Get(ctx, id)
-		if err != nil || es == nil {
-			return "", fmt.Errorf("provider %s of the project: %w", id, err)
+		if errors.Is(err, externalservice.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return "", err
 		}
 		ps, err := h.pveFor(es)
 		if err != nil {
-			return "", err
+			return "", billableUnknown(proj, id, err)
 		}
 		rows, err := ps.C.ClusterResources(ctx, "vm")
 		if err != nil {
-			return "", err
+			return "", billableUnknown(proj, id, err)
 		}
 		pool := ps.PoolFor(proj.ID)
 		for _, r := range rows {
@@ -509,6 +514,42 @@ func (h *Handler) billableResource(ctx context.Context, proj *Project) (string, 
 		}
 	}
 	return "", nil
+}
+
+// billableUnknown is the refusal when a provider cannot say what the project runs on it. The cause goes to the log, not the tenant.
+func billableUnknown(proj *Project, serviceID string, cause error) error {
+	slog.Error("project move: read provider", "project", proj.ID, "service", serviceID, "err", cause)
+	return httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable,
+		"A provider of this project cannot be reached, so what the project holds there is not known. Try again later")
+}
+
+// HoldForOperatorMove is the hold on an operator's move of an ENABLED project (own profile and organization as they will be
+// afterwards): what the client paths apply through holdForProfile, without their refusals about leaving a profile, which are the
+// operator's to overrule. True means the move has to disable the project. A move that leaves the paying profile as it is holds
+// nothing.
+func (h *Handler) HoldForOperatorMove(ctx context.Context, projectID, ownProfileID, organizationID string) (bool, error) {
+	proj, err := h.svc.GetProjectByID(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	if !proj.IsEnabled() {
+		return false, nil
+	}
+	cur, err := h.paidByProfile(ctx, proj)
+	if err != nil {
+		return false, err
+	}
+	next, err := h.paidByProfile(ctx, &Project{BillingProfileID: ownProfileID, OrganizationID: organizationID})
+	if err != nil {
+		return false, err
+	}
+	if cur == nil && next == nil || cur != nil && next != nil && cur.ID == next.ID {
+		return false, nil
+	}
+	if err := h.holdForProfile(ctx, proj, next); err != nil {
+		return false, err
+	}
+	return proj.IsDisabled(), nil
 }
 
 // sameOrgBillingProfile reports whether a target billing profile belongs to the project's own

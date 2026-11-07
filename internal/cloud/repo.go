@@ -254,6 +254,21 @@ func (r *Repo) FindByServiceProjectAndType(ctx context.Context, serviceID, proje
 	return r.findAll(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID, "type": resourceType})
 }
 
+// MarkPausedBySuspension records or clears that a suspension walk paused this VM.
+func (r *Repo) MarkPausedBySuspension(ctx context.Context, res *CloudResource, paused bool) error {
+	if paused {
+		_, err := r.resources.SetFieldsOne(ctx, matchByServiceExternal(res), pgdoc.M{"pausedBySuspension": true}, nil)
+		return err
+	}
+	_, err := r.resources.SetFieldsOne(ctx, matchByServiceExternal(res), nil, []string{"pausedBySuspension"})
+	return err
+}
+
+// FindPausedBySuspension lists the VMs a suspension walk paused and no resume has seen back yet.
+func (r *Repo) FindPausedBySuspension(ctx context.Context) ([]CloudResource, error) {
+	return r.findAll(ctx, pgdoc.M{"pausedBySuspension": true})
+}
+
 func (r *Repo) findAll(ctx context.Context, filter pgdoc.M) ([]CloudResource, error) {
 	out := []CloudResource{}
 	if err := r.resources.Find(ctx, filter, &out); err != nil {
