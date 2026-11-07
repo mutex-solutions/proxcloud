@@ -87,8 +87,8 @@ func (s *Service) newHolder(ctx context.Context, projectID, node, tags string) (
 		}
 		return nil, err
 	}
-	// From here the VM may exist, and without its tags it counts as a server: billed, and shown to the customer. It
-	// holds no disk yet, so a failure removes it.
+	// From here the VM may exist. It holds no disk yet, so a failure removes it, and if that fails too the sync keeps it
+	// out of the servers and retries (RemoveBlankVMs).
 	ready := false
 	defer func() {
 		if !ready {
@@ -123,10 +123,9 @@ func (s *Service) newHolder(ctx context.Context, projectID, node, tags string) (
 	return nil, fmt.Errorf("pve: holder VM %d not listed yet", vmid)
 }
 
-// dropLostCreate removes the VM a create POST with no answer may have made. It sits untagged in the pool, where the sync
-// bills it as a server. NextID is racy, so the vmid alone proves nothing: only a VM in this pool and as blank as a create
-// leaves it goes, and clones have a name and a disk.
-// ponytail: PVE unreachable for the whole wait leaves the VM; a sync rule for blank VMs if that ever shows up.
+// dropLostCreate removes the VM a create POST with no answer may have made. NextID is racy, so the vmid alone proves nothing:
+// only a VM in this pool and as blank as a create leaves it goes, by the same test the sync uses. PVE unreachable for the whole
+// wait leaves the VM to the sync's RemoveBlankVMs.
 func (s *Service) dropLostCreate(ctx context.Context, projectID string, vmid int) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lostTaskWait)
 	defer cancel()
@@ -134,7 +133,7 @@ func (s *Service) dropLostCreate(ctx context.Context, projectID string, vmid int
 		// cluster/resources lags, and the task may still be running.
 		if vm, err := s.ResolveVM(ctx, projectID, strconv.Itoa(vmid)); err == nil && vm != nil {
 			if cfg, err := s.C.GetVMConfig(ctx, vm.Node, vmid); err == nil {
-				if cfg.Str("tags") == "" && cfg.Str("name") == "" && len(ParseDisks(cfg)) == 0 {
+				if blankConfig(cfg) {
 					s.destroyBestEffort(ctx, vm.Node, vmid)
 				}
 				return

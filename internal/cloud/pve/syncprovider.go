@@ -187,6 +187,15 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 				continue
 			}
 		}
+		if blankRow(r) {
+			if cfg != nil && blankConfig(cfg) {
+				continue // a create that never finished: no server, and RemoveBlankVMs retries removing it
+			}
+			if cfg == nil { // it could not be asked: keep what is known
+				p.unread[r.VMID] = false
+				continue
+			}
+		}
 		if p.isSampled {
 			data = p.sampledData(r)
 		} else {
