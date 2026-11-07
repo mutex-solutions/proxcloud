@@ -56,6 +56,9 @@ and rules: [README.md](README.md#maintenance-rule).
   payments of 5 kept 50 of the 80 on the bill. A scanner marking a deposit `FAILED` on a network error needed a manual
   repair if the money had moved, since `FAILED` is terminal, and it could also overwrite a settle that won meanwhile.
   Upfront contracts bought before payments were enforced discounted every bill for money nobody paid.
+
+**Diagrams updated:** none, no container or component changed.
+
 ## 2026-11-07: Admin hmac key secrets encrypted at rest, old NFS exports squash root
 
 **What changed**
