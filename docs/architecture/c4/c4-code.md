@@ -119,6 +119,23 @@ Invariants:
   applies and the VM reaches whatever the uplink routes. Filtering that is the operator's edge
   (see Public networks in the operator docs).
 
+## C4.2a Load balancers
+
+| Symbol | Location | Role |
+|---|---|---|
+| `Handler.pveCreateLoadBalancer`, `lbPlugPublic` | `internal/platform/project/cloud_lb_pve.go` | Row first, then a server build with no group and no seed; public NIC before first boot |
+| `Handler.pveBuildServer` | `internal/platform/project/cloud_writes_pve.go` | The server create shared with `pveCreateServer`; `pveAppliance` is what only the platform can set |
+| `Handler.pveLBApply`, `lbApplyLocked` | `cloud_lb_pve.go` | One balancer in line with its row: members re-resolved, config hash compared, pushed when it differs |
+| `Handler.ReconcileLoadBalancers` | `cloud_lb_pve.go`, via `syncjob.WithLoadBalancers` | The pass on every sync; a stopped appliance is started here |
+| `Handler.lbMemberAddress` | `cloud_lb_pve.go` | The ownership check of a member: pool, stamp, allocation on the balancer's network and subnet |
+| `Handler.pveApplianceGuard`, `lbOwnerOf` | `cloud_lb_pve.go` | 409 on a tenant's direct action on the VM, its disk or its address; the VM's own tag decides, the balancer's record when it has no row yet |
+| `refuseAppliance` | `lb.go`, in `AddVolume`, `AttachVolume`, `AttachTargets`, `CreateImage` | A request cannot name the appliance as a target |
+| `Service.undoCreate`, `VMLeftError` | `internal/cloud/pve/write.go` | A failed create destroys its VM; its addresses go back only when PVE confirms it is gone. Every server create |
+| `LBSpec.Validate`, `RenderHAProxy` | `internal/cloud/pve/lb.go` | Request checks; the config, safe on any stored row |
+| `Service.PushHAProxy`, `SetVMInboundPorts`, `LBHealth` | `lb.go` | Install if missing, `haproxy -c`, swap, reload, swap back if the reload fails; listener ports on the VM firewall; `show stat` |
+| `Client.GuestStart`, `GuestRun`, `GuestWriteFile` | `internal/cloud/pve/agent.go` | Guest agent `exec` and `file-write`; only ever used on a VM with the `pc-lb-` tag |
+| `PublicIPRepo.AllocateBeforeRow` | `internal/platform/project/publicip_pve.go` | A public address taken during the build, which `orphanIPs` must not read as a reused vmid |
+
 ## C4.2 VM firewall, default security group and public IPs
 
 | Symbol | Location | Role |
@@ -212,7 +229,7 @@ flowchart TB
 | `Service.chargeBillingResource` | `billingjob.go:128` | Per provider: resolve resources, select plans and rules, rate |
 | `Service.billingResources` | `billingjob.go:252` | Every active project of the profile bound to the provider |
 | `GetBillingResources`, `stampResourceValues` | `internal/cloud/billingresource/billingresource.go:26`, `:55` | Cache rows to billing resources via the type registry; stamps region, service id, createdAt |
-| Registry | `cmd/api/main.go:407` | Server, volume, floating IP, load balancer, K8s cluster, DB cluster, bucket |
+| Registry | `cmd/api/main.go:407` | Server, volume, floating IP, K8s cluster, DB cluster, bucket. A load balancer bills as the VM, disk and address it is made of |
 | `ServerProvider.GetBillingInformation` | `internal/cloud/billingresource/server.go:34` | `instance` unit (flavor, GPU) plus `instance_traffic` unit; not billed in DELETED, ERROR, UNKNOWN, BUILD |
 | `SelectPricePlansForService`, `ApplicableRules` | `internal/platform/pricing/planselect.go:46`, `:60` | Profile plans plus public plans for the provider, filtered by time unit |
 | `ChargeBillingResources` | `internal/platform/pricing/charge.go:26` | Under the profile lock: current bill, created on demand, rate each resource, adjustments, save |

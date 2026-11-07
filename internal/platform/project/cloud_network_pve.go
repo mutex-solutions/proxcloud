@@ -380,6 +380,17 @@ func (h *Handler) pveDetachPublicNIC(ctx context.Context, ps *pve.Service, es *e
 	return h.publicIPs.ReleaseNIC(ctx, es.ID, serverID, publicNIC)
 }
 
+// pveAllowedPublicNetwork finds a provider's public network, nil when it does not exist or the
+// project's PublicNetworkIds allow-list leaves it out.
+func pveAllowedPublicNetwork(es *externalservice.ExternalService, proj *Project, netID string) *externalservice.PVEPublicNetwork {
+	for _, n := range es.PVENetworkConfig().PublicNetworks {
+		if n.ID == netID && publicNetworkAllowed(proj, netID) {
+			return &n
+		}
+	}
+	return nil
+}
+
 func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if action != "ATTACH_PUBLIC_NETWORK" && action != "DETACH_PUBLIC_NETWORK" {
 		return false
@@ -415,15 +426,8 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		return true
 	}
 	netID := strAny(data["networkId"])
-	var pn *externalservice.PVEPublicNetwork
-	for _, n := range es.PVENetworkConfig().PublicNetworks {
-		if n.ID == netID {
-			pn = &n
-			break
-		}
-	}
-	// Per-project restriction rides the project's PublicNetworkIds allow-list.
-	if pn == nil || !publicNetworkAllowed(proj, netID) {
+	pn := pveAllowedPublicNetwork(es, proj, netID)
+	if pn == nil {
 		h.fail(w, httpx.BadRequest("Public network is not available"))
 		return true
 	}

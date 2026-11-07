@@ -550,6 +550,10 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
+			if herr := h.pveApplianceGuard(r.Context(), es, proj, cr); herr != nil {
+				h.fail(w, herr)
+				return
+			}
 			if err := h.pveDeleteResource(r.Context(), es, proj, cr, r.URL.Query().Get("deleteVolumes") == "true"); err != nil {
 				var he *httpx.HTTPError
 				if !errors.As(err, &he) {

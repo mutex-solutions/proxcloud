@@ -159,8 +159,9 @@ func (j *Job) releaseOrphanIPs(ctx context.Context, serviceID, projectID string,
 
 // orphanIPs picks the allocations that outlived their VM: the vmid is not listed anymore (past the
 // pmxcfs grace), or, for a public NIC, its row is younger than the allocation, which means the vmid
-// was reused, since a public NIC is only ever attached to a VM that already has a row. A net0
-// address does not get that second check: it is allocated before its VM's row exists.
+// was reused, since a public NIC is normally attached to a VM that already has a row. A net0 address,
+// and a public NIC plugged during the VM's build (BeforeRow), do not get that second check: they are
+// allocated before the row exists.
 func orphanIPs(allocs []project.PublicIP, listed map[string]bool, rows map[string]*cloud.CloudResource, now time.Time) []project.PublicIP {
 	var out []project.PublicIP
 	for _, a := range allocs {
@@ -169,7 +170,7 @@ func orphanIPs(allocs []project.PublicIP, listed map[string]bool, rows map[strin
 		}
 		row := rows[a.ServerID]
 		gone := !listed[a.ServerID] && now.Sub(*a.CreatedAt) > orphanIPGrace
-		reused := a.IsPublic() && row != nil && row.CreatedAt != nil && row.CreatedAt.After(*a.CreatedAt)
+		reused := a.IsPublic() && !a.BeforeRow && row != nil && row.CreatedAt != nil && row.CreatedAt.After(*a.CreatedAt)
 		if gone || reused {
 			out = append(out, a)
 		}

@@ -26,14 +26,17 @@ const publicNIC = "net1"
 // VM's cloud-resource ExternalID (the vmid). Rows on nic net0 are the fixed tenant
 // addresses of vnets without DHCP (NetworkID = the vnet).
 type PublicIP struct {
-	ID        string     `json:"id"`
-	ServiceID string     `json:"serviceId"`
-	NetworkID string     `json:"networkId"`
-	IP        string     `json:"ip"`
-	Prefix    int        `json:"prefix"`
-	ProjectID string     `json:"projectId"`
-	ServerID  string     `json:"serverId"`
-	NIC       string     `json:"nic"`
+	ID        string `json:"id"`
+	ServiceID string `json:"serviceId"`
+	NetworkID string `json:"networkId"`
+	IP        string `json:"ip"`
+	Prefix    int    `json:"prefix"`
+	ProjectID string `json:"projectId"`
+	ServerID  string `json:"serverId"`
+	NIC       string `json:"nic"`
+	// BeforeRow: taken while its VM was still being built (a load balancer's), so a row younger than this
+	// allocation says nothing about the vmid being reused.
+	BeforeRow bool       `json:"beforeRow,omitempty"`
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 }
 
@@ -140,6 +143,15 @@ func (r *PublicIPRepo) release(ctx context.Context, filter pgdoc.M) error {
 
 // Allocate takes a free address from pn's pool for the server's nic.
 func (r *PublicIPRepo) Allocate(ctx context.Context, serviceID, projectID, serverID, nic string, pn externalservice.PVEPublicNetwork) (*PublicIP, error) {
+	return r.allocate(ctx, serviceID, projectID, serverID, nic, pn, false)
+}
+
+// AllocateBeforeRow is Allocate for a public NIC plugged during its VM's build.
+func (r *PublicIPRepo) AllocateBeforeRow(ctx context.Context, serviceID, projectID, serverID, nic string, pn externalservice.PVEPublicNetwork) (*PublicIP, error) {
+	return r.allocate(ctx, serviceID, projectID, serverID, nic, pn, true)
+}
+
+func (r *PublicIPRepo) allocate(ctx context.Context, serviceID, projectID, serverID, nic string, pn externalservice.PVEPublicNetwork, beforeRow bool) (*PublicIP, error) {
 	used := func() ([]string, error) {
 		rows, err := r.find(ctx, pgdoc.M{"serviceId": serviceID, "networkId": pn.ID})
 		ips := make([]string, 0, len(rows))
@@ -152,7 +164,7 @@ func (r *PublicIPRepo) Allocate(ctx context.Context, serviceID, projectID, serve
 	insert := func(ip string, prefix int) (*PublicIP, error) {
 		a := &PublicIP{
 			ID: serviceID + "/" + pn.ID + "/" + ip, ServiceID: serviceID, NetworkID: pn.ID,
-			IP: ip, Prefix: prefix, ProjectID: projectID, ServerID: serverID, NIC: nic, CreatedAt: &now,
+			IP: ip, Prefix: prefix, ProjectID: projectID, ServerID: serverID, NIC: nic, BeforeRow: beforeRow, CreatedAt: &now,
 		}
 		_, err := r.col.InsertOne(ctx, a)
 		return a, err

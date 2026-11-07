@@ -86,8 +86,10 @@ export function ServersPage() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const {
-    rows: data, isLoading, refetch, isFetching, error, hasNextPage, fetchNextPage, isFetchingNextPage,
+    rows: all, isLoading, refetch, isFetching, error, hasNextPage, fetchNextPage, isFetchingNextPage,
   } = useCloudCursorList(pid, "SERVER")
+  // A load balancer's VM is managed on its own page; it still bills and counts as a server.
+  const data = useMemo(() => all.filter((r) => !r.data?.server?.loadBalancerId), [all])
   const [pending, setPending] = useState<PendingRow | null>(null)
 
   const invalidate = () =>

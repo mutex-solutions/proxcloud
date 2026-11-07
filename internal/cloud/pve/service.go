@@ -223,6 +223,9 @@ func ServerData(r ClusterResource, addresses map[string]any, gpuSpecs map[string
 	if imageSlug != "" {
 		server["image"] = map[string]any{"id": imageSlug}
 	}
+	if lb := LBOfTags(r.Tags); lb != "" {
+		server["loadBalancerId"] = lb
+	}
 	data := map[string]any{
 		"flavorName":   flavorSlug,
 		"volumeBacked": true,

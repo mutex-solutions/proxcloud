@@ -281,6 +281,15 @@ func (e *ExternalService) PVEMetadataSettings() PVEMetadata {
 	return PVEMetadata{URL: str(m["url"]), ISOStorage: str(m["isoStorage"]), ForceISO: force, VendorData: str(m["vendorData"])}
 }
 
+// PVELoadBalancerImage is the image a load balancer's VM is cloned from (config.lbImage): a Debian
+// family image with the guest agent and cloud-init.
+func (e *ExternalService) PVELoadBalancerImage() string {
+	if s := str(e.Config["lbImage"]); s != "" {
+		return s
+	}
+	return "debian-13"
+}
+
 // PVEPublicNetwork is one admin-designated inbound bridge/vnet plus its IP pool:
 // CIDR (+ Gateway), optionally narrowed to Ranges ("a-b" or a single address),
 // minus Exclude. No CIDR = public NICs cannot attach there.

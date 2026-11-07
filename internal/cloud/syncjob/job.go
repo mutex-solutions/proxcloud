@@ -58,6 +58,7 @@ type Job struct {
 	sdnLock       *lock.ShedLock
 	shareAccess   func(ctx context.Context, projectID string) error
 	staleSeeds    func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
+	loadBalancers func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
 	now           func() time.Time
 	log           *slog.Logger
 }
@@ -142,6 +143,12 @@ func (j *Job) WithStaleSeeds(f func(ctx context.Context, ps *pve.Service, es *ex
 	return j
 }
 
+// WithLoadBalancers wires the pass over a provider's load balancers (nil = none).
+func (j *Job) WithLoadBalancers(f func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error) *Job {
+	j.loadBalancers = f
+	return j
+}
+
 // Run syncs every ENABLED project's CLOUD-service resources. Returns the total SERVER+PORT
 // resources synced. Per-project / per-service failures are logged and skipped.
 func (j *Job) Run(ctx context.Context) (int, error) {
@@ -185,6 +192,11 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 		if j.staleSeeds != nil {
 			if err := j.staleSeeds(ctx, ps, es); err != nil {
 				j.log.Warn("syncjob: drop stale seeds", "serviceId", es.ID, "err", err)
+			}
+		}
+		if j.loadBalancers != nil {
+			if err := j.loadBalancers(ctx, ps, es); err != nil {
+				j.log.Warn("syncjob: load balancers", "serviceId", es.ID, "err", err)
 			}
 		}
 	}

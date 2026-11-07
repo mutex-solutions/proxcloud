@@ -19,6 +19,7 @@ export const sections: DocSection[] = [
     pages: [
       { slug: "guides/servers", title: "Working with servers" },
       { slug: "guides/networks", title: "Networking" },
+      { slug: "guides/load-balancers", title: "Load balancers" },
       { slug: "guides/volumes", title: "Volumes & snapshots" },
       { slug: "guides/object-storage", title: "Object storage buckets" },
       { slug: "guides/dns", title: "DNS zones" },
