@@ -63,7 +63,7 @@ func (h *Handler) withSDNLock(ctx context.Context, w http.ResponseWriter, fn fun
 		// Validation done under the lock (CIDR checks) keeps its own status.
 		var he *httpx.HTTPError
 		if !errors.As(err, &he) {
-			he = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+			he = pveVolumeErr(err)
 		}
 		h.fail(w, he)
 		return false
@@ -197,7 +197,7 @@ func (h *Handler) pveDeleteNetwork(ctx context.Context, w http.ResponseWriter, e
 	}
 	inUse, uerr := ps.VnetInUse(ctx, proj.ID, cr.ExternalID)
 	if uerr != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, uerr.Error()))
+		h.fail(w, upstreamErr(computeBackend, uerr))
 		return false
 	}
 	if inUse {
@@ -401,7 +401,7 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 	}
 	if action == "DETACH_PUBLIC_NETWORK" {
 		if derr := h.pveDetachPublicNIC(ctx, ps, es, proj, vm, cr.ExternalID); derr != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, derr.Error()))
+			h.fail(w, pveVolumeErr(derr))
 			return true
 		}
 		h.pveReseed(ctx, ps, es, proj.ID, cr.ExternalID, vm.Node)
@@ -427,7 +427,7 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 	// may have changed since).
 	mgmt, merr := ps.C.ManagementBridges(ctx, vm.Node)
 	if merr != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, merr.Error()))
+		h.fail(w, upstreamErr(computeBackend, merr))
 		return true
 	}
 	if _, bad := mgmt[netID]; bad {
@@ -509,7 +509,7 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		if fresh && !plugged {
 			_ = h.publicIPs.ReleaseNIC(ctx, es.ID, cr.ExternalID, publicNIC)
 		}
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, serr.Error()))
+		h.fail(w, pveVolumeErr(serr))
 		return true
 	}
 	h.pveReseed(ctx, ps, es, proj.ID, cr.ExternalID, vm.Node)

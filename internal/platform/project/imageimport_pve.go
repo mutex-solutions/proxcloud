@@ -117,7 +117,7 @@ func (h *Handler) pveImportImage(w http.ResponseWriter, r *http.Request, u *user
 			h.fail(w, httpx.BadRequest(refusal.Msg))
 			return
 		}
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+		h.fail(w, upstreamErr("image URL", err))
 		return
 	}
 	ps, ok := h.pveService(w, es)
@@ -126,7 +126,7 @@ func (h *Handler) pveImportImage(w http.ResponseWriter, r *http.Request, u *user
 	}
 	caps, err := ps.C.DetectStorage(ctx)
 	if err != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+		h.fail(w, upstreamErr(computeBackend, err))
 		return
 	}
 	importCap := caps[store]

@@ -46,7 +46,7 @@ func (h *Handler) pveBackupAction(w http.ResponseWriter, r *http.Request, u *use
 	case "CREATE_BACKUP":
 		caps, cerr := ps.C.DetectStorage(ctx)
 		if cerr != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, cerr.Error()))
+			h.fail(w, upstreamErr(computeBackend, cerr))
 			return true
 		}
 		err = ps.CreateServerBackup(ctx, proj.ID, cr.ExternalID, store, caps[store], es.PVEStorageHeadroomPct())

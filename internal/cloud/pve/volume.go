@@ -64,7 +64,7 @@ func (s *Service) AddVolume(ctx context.Context, projectID, serverExtID string, 
 		}
 	}
 	if slot == "" {
-		return "", fmt.Errorf("pve: no free disk slot on server %s", serverExtID)
+		return "", conflictf("Server %s has no free disk slot", serverExtID)
 	}
 	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{
 		slot: fmt.Sprintf("%s:%d", storage, sizeGiB),
@@ -131,7 +131,7 @@ func (s *Service) ExtendVolume(ctx context.Context, projectID string, vmid int, 
 		return err
 	}
 	if strings.HasPrefix(slot, "unused") {
-		return fmt.Errorf("pve: attach the disk before extending it")
+		return conflictf("Attach the disk before extending it")
 	}
 	up, err := s.C.ResizeDisk(ctx, vm.Node, vm.VMID, slot, fmt.Sprintf("%dG", sizeGiB))
 	if err != nil {
@@ -176,7 +176,7 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 		return err
 	}
 	if !strings.HasPrefix(slot, "unused") {
-		return fmt.Errorf("pve: disk is already attached")
+		return conflictf("The disk is already attached")
 	}
 	if isHolder(vm.Tags) {
 		if targetServerExtID == "" || targetServerExtID == strconv.Itoa(vmid) {
@@ -199,7 +199,7 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 			}
 		}
 		if free == "" {
-			return fmt.Errorf("pve: no free disk slot")
+			return conflictf("This server has no free disk slot")
 		}
 		up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{free: volID})
 		if err != nil {
@@ -213,7 +213,7 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 		return err
 	}
 	if target == nil {
-		return fmt.Errorf("pve: target server %s not found", targetServerExtID)
+		return conflictf("Server %s not found", targetServerExtID)
 	}
 	if err := s.refuseUnreplicable(ctx, target, slotStorage(volID)); err != nil {
 		return err

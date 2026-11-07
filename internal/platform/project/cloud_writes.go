@@ -514,7 +514,7 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 			if err := h.pveDeleteResource(r.Context(), es, proj, cr, r.URL.Query().Get("deleteVolumes") == "true"); err != nil {
 				var he *httpx.HTTPError
 				if !errors.As(err, &he) {
-					he = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+					he = pveVolumeErr(err)
 				}
 				h.fail(w, he)
 				return
@@ -636,13 +636,20 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 
 	// ceph-s3 bucket configuration + per-key grants (GET_SETTINGS, SET_VERSIONING, SET_QUOTA, …).
 	// Handled first: they act on THIS bucket and already run against cr.ServiceID.
-	if h.bucketSettingsAction(w, r, proj, svcID, externalID, req.Action, req.Data) {
+	audited := func(handle func(http.ResponseWriter) bool) bool {
+		return runAudited(w, r.ProtoMajor, req.Action, handle, func() {
+			h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", req.Action, cr)
+		})
+	}
+	if audited(func(w http.ResponseWriter) bool {
+		return h.bucketSettingsAction(w, r, proj, svcID, externalID, req.Action, req.Data)
+	}) {
 		return
 	}
 
 	if cr.Type == cloud.TypeShare {
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsTrueNAS() {
-			if h.shareAction(w, r, proj, es, cr, req.Action, req.Data) {
+			if audited(func(w http.ResponseWriter) bool { return h.shareAction(w, r, proj, es, cr, req.Action, req.Data) }) {
 				return
 			}
 		}
@@ -663,7 +670,7 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	// act-on-THIS-resource rule, against the resource's own (kamaji) service.
 	if cr.Type == cloud.TypeKubernetesCluster {
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil {
-			if h.kamajiAction(w, r, proj, es, cr, req.Action, req.Data) {
+			if audited(func(w http.ResponseWriter) bool { return h.kamajiAction(w, r, proj, es, cr, req.Action, req.Data) }) {
 				return
 			}
 		}
@@ -672,7 +679,7 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	// dbaas managed database actions (GET_CONNECTION_INFO, RESIZE, SCALE_REPLICAS, …).
 	if cr.Type == cloud.TypeDatabaseCluster {
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil {
-			if h.dbaasAction(w, r, proj, es, cr, req.Action, req.Data) {
+			if audited(func(w http.ResponseWriter) bool { return h.dbaasAction(w, r, proj, es, cr, req.Action, req.Data) }) {
 				return
 			}
 		}

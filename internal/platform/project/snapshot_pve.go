@@ -47,7 +47,7 @@ func (h *Handler) pveSnapshotAction(w http.ResponseWriter, r *http.Request, u *u
 		}
 		caps, cerr := ps.C.DetectStorage(ctx)
 		if cerr != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, cerr.Error()))
+			h.fail(w, upstreamErr(computeBackend, cerr))
 			return true
 		}
 		err = ps.CreateServerSnapshot(ctx, proj.ID, cr.ExternalID, name, strAny(data["description"]), func(storage string) bool {
@@ -56,7 +56,7 @@ func (h *Handler) pveSnapshotAction(w http.ResponseWriter, r *http.Request, u *u
 	case "ROLLBACK_SNAPSHOT":
 		caps, cerr := ps.C.DetectStorage(ctx)
 		if cerr != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, cerr.Error()))
+			h.fail(w, upstreamErr(computeBackend, cerr))
 			return true
 		}
 		err = ps.RollbackServerSnapshot(ctx, proj.ID, cr.ExternalID, name, func(storage string) bool {
