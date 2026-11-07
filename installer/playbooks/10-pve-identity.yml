@@ -38,8 +38,8 @@
       - {path: /sdn/zones/localnetwork, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
     # Image import deletes what it downloaded, and deleting a file takes Datastore.Allocate. Only on this store.
     nas_acls: "{{ [{'path': '/storage/' ~ pc.nas.names.templates, 'role': 'PVEDatastoreAdmin', 'propagate': 0, 'user': 'proxcloud@pve', 'token': 'proxcloud@pve!platform'}] if pc.nas.host | length > 0 and 'templates' in pc.nas.exports else [] }}"
-    # That ACL shadows /storage for the token, so mode=split repeats the mint role there: a cluster's token gets its ACL on
-    # the ISO store, which is usually this one, and writing it takes Permissions.Modify on the path.
+    # That ACL shadows /storage for the token, so mode=split repeats the mint role there: clusters made before bootstrap
+    # ISOs moved to node-local storage hold an ACL on this store, and taking it back takes Permissions.Modify on the path.
     nas_mint_acls: "{{ [{'path': '/storage/' ~ pc.nas.names.templates, 'role': 'ProxCloudKubeMint', 'propagate': 0, 'user': 'proxcloud@pve', 'token': 'proxcloud@pve!platform'}] if nas_acls | length > 0 else [] }}"
     # mode=split: what the services cluster and the per-cluster tokens of tenant clusters hang off.
     # Unexercised on a lab so far: see "Managed Kubernetes" in docs/proxmox-permissions.md.
@@ -51,10 +51,18 @@
       - {path: /pool, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
       - {path: /pool/pc-templates, role: PVETemplateUser, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
       - {path: /sdn/zones, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
-      - {path: /storage, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
+      # CAPMOX puts a bootstrap ISO (kubeadm join token) on the first iso store its token sees, in no fixed order: the
+      # services token sees its boot store and the node-local ISO store only. The user keeps /storage for the boot
+      # stores of tenant clusters' tokens, which the portal grants one by one.
+      - {path: /storage, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: ""}
+      - {path: "/storage/{{ pc.services.storage }}", role: ProxCloudCAPI, propagate: 0, user: "", token: capmox@pve!capi}
       - {path: "/storage/{{ pc.services.iso_storage }}", role: PVEDatastoreAdmin, propagate: 0, user: capmox@pve, token: capmox@pve!capi}
       - {path: /pool, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!csi}
       - {path: /storage, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!csi}
+      # The CSI gateway (portal API) calls PVE for every tenant cluster's proxmox-csi with this one token and checks
+      # ownership itself; the same role and paths as the services cluster's own CSI token.
+      - {path: /pool, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!gateway}
+      - {path: /storage, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!gateway}
       - {path: /access/groups, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /pool, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /storage, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
@@ -67,6 +75,7 @@
       ansible.builtin.include_tasks: tasks/pve-login.yml
 
     - name: Read what exists
+      check_mode: false
       ansible.builtin.uri: {url: "{{ pc_api }}/{{ item }}"}
       loop: [access/roles, access/users?full=1, pools, access/acl]
       register: pc_id
@@ -145,6 +154,27 @@
       no_log: true
       loop: "{{ pc_new_tokens.results }}"
 
+    - name: Create the CSI gateway token
+      when:
+        - pc.mode == 'split'
+        - "'gateway' not in (have_users['csi@pve'] | default([], true) | map(attribute='tokenid') | list)"
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/users/csi@pve/token/gateway"
+        method: POST
+        body_format: form-urlencoded
+        body: {privsep: 1, comment: ProxCloud CSI gateway}
+      changed_when: true
+      no_log: true
+      register: pc_gateway_token
+
+    - name: Keep the CSI gateway token secret
+      when: pc_gateway_token.json is defined
+      ansible.builtin.copy:
+        dest: "{{ pc_gen }}/token-gateway"
+        content: "{{ pc_gateway_token.json.data.value }}\n"
+        mode: "0600"
+      no_log: true
+
     - name: Copy token secrets given in the vault
       when: pc_vault[item.key] is defined
       ansible.builtin.copy:
@@ -152,13 +182,13 @@
         content: "{{ pc_vault[item.key] }}\n"
         mode: "0600"
       no_log: true
-      loop: "{{ {'platform_token_secret': 'platform', 'images_token_secret': 'packer', 'capi_token_secret': 'capi', 'csi_token_secret': 'csi'} | dict2items }}"
+      loop: "{{ {'platform_token_secret': 'platform', 'images_token_secret': 'packer', 'capi_token_secret': 'capi', 'csi_token_secret': 'csi', 'csi_gateway_token_secret': 'gateway'} | dict2items }}"
 
     - name: Check the tokens the installer needs are known
       ansible.builtin.stat: {path: "{{ pc_gen }}/token-{{ item }}"}
       register: pc_tokens
       failed_when: not pc_tokens.stat.exists
-      loop: "{{ ['platform', 'packer'] + (['capi', 'csi'] if pc.mode == 'split' else []) }}"
+      loop: "{{ ['platform', 'packer'] + (['capi', 'csi', 'gateway'] if pc.mode == 'split' else []) }}"
 
     - name: Grant the missing ACLs
       ansible.builtin.uri:
@@ -169,3 +199,41 @@
       changed_when: true
       loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else [])) }}"
       loop_control: {label: "{{ item.path }} {{ item.roles }}"}
+
+    # Older installs gave the services token /storage (propagate) and the ISO role on the NAS template store, so it
+    # saw every iso store. Taken off after the grants above, so the token never lacks its boot or ISO store.
+    - name: Narrow the services cluster token to its own stores
+      when:
+        - pc.mode == 'split'
+        - (item.path == '/storage' and item.roleid == 'ProxCloudCAPI') or
+          (item.path == '/storage/' ~ pc.nas.names.templates and item.roleid == 'PVEDatastoreAdmin' and pc.nas.names.templates != pc.services.iso_storage)
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/acl"
+        method: PUT
+        body_format: form-urlencoded
+        body: {path: "{{ item.path }}", roles: "{{ item.roleid }}", tokens: capmox@pve!capi, delete: 1}
+      changed_when: true
+      loop: "{{ pc_id.results[3].json.data | selectattr('type', 'eq', 'token') | selectattr('ugid', 'eq', 'capmox@pve!capi') | list }}"
+      loop_control: {label: "{{ item.path }} {{ item.roleid }}"}
+
+    # CAPMOX puts each join token on the first iso store the services token sees, in no fixed order, so it must see
+    # the bootstrap store alone. Asked of PVE (user ∩ token, inheritance, groups), not worked out from the rows above.
+    - name: Read what the services cluster token may do on each ISO store
+      when: pc.mode == 'split'
+      check_mode: false
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/permissions?{{ {'userid': pc.services.capi_token_id, 'path': '/storage/' ~ item} | urlencode }}"
+      loop: "{{ pc_storage_rows | pc_iso_stores }}"
+      register: pc_capi_iso
+
+    - name: Check the services cluster token sees one ISO store, the bootstrap one
+      when: pc.mode == 'split'
+      vars:
+        seen: "{{ pc_capi_iso.results | pc_visible_stores }}"
+      ansible.builtin.assert:
+        that: seen == [pc.services.iso_storage] or ansible_check_mode
+        fail_msg: >-
+          {{ pc.services.capi_token_id }} sees the ISO stores {{ seen }}; CAPMOX would put the services cluster's join tokens
+          on any of them. It must see {{ pc.services.iso_storage }} alone: look for other ACLs on those stores for the
+          token or capmox@pve (docs/proxmox-permissions.md).
+        success_msg: "{{ pc.services.capi_token_id }} sees the ISO stores {{ seen }}{{ ' (before the changes above: --check writes nothing)' if ansible_check_mode else '' }}"

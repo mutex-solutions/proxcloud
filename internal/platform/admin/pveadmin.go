@@ -19,7 +19,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -108,8 +111,12 @@ func (h *Handler) proxmoxAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	out := PVEAuthResponse{Nodes: []pve.Node{}, Storages: []pve.StorageDef{}, SDNZones: []pve.SDNZone{}, PCIMappings: []pve.PCIMapping{}, Warnings: tokenWarnings(ctx, cc, cfg.TokenID)}
 	if id := r.URL.Query().Get("externalServiceId"); id != "" && h.esSvc != nil {
-		if es, err := h.esSvc.Get(ctx, id); err == nil && es != nil && es.PVEImportStorage() != "" {
-			out.Warnings = append(out.Warnings, importStoreWarnings(ctx, cc, es.PVEImportStorage())...)
+		if es, err := h.esSvc.Get(ctx, id); err == nil && es != nil && es.IsProxmox() {
+			if es.PVEImportStorage() != "" {
+				out.Warnings = append(out.Warnings, importStoreWarnings(ctx, cc, es.PVEImportStorage())...)
+			}
+			out.Warnings = append(out.Warnings, storeReachWarnings(ctx, cc, es.PVENetworkConfig().BlockedCIDRs)...)
+			out.Warnings = append(out.Warnings, bootISOWarnings(ctx, cc, es.PVEBootISOStorage())...)
 		}
 	}
 	if v, ok := ver["version"].(string); ok {
@@ -160,6 +167,100 @@ func importStoreWarnings(ctx context.Context, cc *pve.Client, store string) []st
 	out := []string{}
 	for _, m := range missing {
 		out = append(out, "Token lacks "+m+": image import needs it, or uploaded files stay on the store (see docs/proxmox-permissions.md)")
+	}
+	return out
+}
+
+// bootISOWarnings says when the provider's Kubernetes bootstrap ISO store is unfit. A create refuses it, but clusters made
+// earlier stay on it without a word: their move only ever goes to this store (docs/managed-k8s.md, "Bootstrap ISOs").
+func bootISOWarnings(ctx context.Context, cc *pve.Client, store string) []string {
+	caps, err := cc.DetectStorage(ctx)
+	if err != nil {
+		return []string{"Could not read the storages to check the Kubernetes bootstrap ISO store: " + err.Error()}
+	}
+	if p := pve.BootISOProblem(caps, store, store); p != "" {
+		return []string{"Kubernetes bootstrap ISO store (setting isoStorage): " + p + ". Cluster creates on this provider answer 409, and existing clusters keep their join tokens there."}
+	}
+	return nil
+}
+
+// storeReachWarnings names each network store outside the networks tenants are dropped from. A tenant network
+// leaves through its exit node's NAT under the node's address, which an export to the nodes admits, and these stores
+// hold seed CDs with user-data, templates and disks.
+func storeReachWarnings(ctx context.Context, cc *pve.Client, blocked []string) []string {
+	defs, err := cc.ListStorage(ctx)
+	if err != nil {
+		return []string{"Could not read the storages to check that tenants cannot reach them: " + err.Error()}
+	}
+	mgmt, _, err := cc.ManagementCIDRs(ctx)
+	if err != nil {
+		return []string{"Could not read the node networks to check that tenants cannot reach the storages: " + err.Error()}
+	}
+	return unblockedStores(defs, append(mgmt, blocked...), func(host string) ([]net.IP, error) {
+		return net.DefaultResolver.LookupIP(ctx, "ip4", host)
+	})
+}
+
+func unblockedStores(defs []pve.StorageDef, blocked []string, lookup func(string) ([]net.IP, error)) []string {
+	var nets []netip.Prefix
+	for _, b := range blocked {
+		if p, err := netip.ParsePrefix(b); err == nil {
+			nets = append(nets, p.Masked())
+		} else if a, err := netip.ParseAddr(b); err == nil {
+			nets = append(nets, netip.PrefixFrom(a, a.BitLen()))
+		}
+	}
+	out := []string{}
+	for _, d := range defs {
+		if d.Disable == 1 {
+			continue
+		}
+	hosts:
+		for _, host := range storeHosts(d) {
+			ips := []net.IP{net.ParseIP(host)}
+			if ips[0] == nil {
+				var err error
+				if ips, err = lookup(host); err != nil || len(ips) == 0 {
+					out = append(out, fmt.Sprintf("Could not resolve %s, a server of storage %s, to check that tenants cannot reach it", host, d.Storage))
+					continue
+				}
+			}
+			for _, ip := range ips {
+				a, _ := netip.AddrFromSlice(ip)
+				if !slices.ContainsFunc(nets, func(p netip.Prefix) bool { return p.Contains(a.Unmap()) }) {
+					out = append(out, fmt.Sprintf("Storage %s (%s at %s) is outside blockedCidrs and the nodes' management networks: a tenant network reaches it through the nodes' NAT, under a node's address, and only the store's own access control then keeps seed CDs and disks there from it. Add %s to blockedCidrs and export the store to the node addresses only (docs/cloud-integration.md).", d.Storage, d.Type, host, a.Unmap()))
+					break hosts
+				}
+			}
+		}
+	}
+	return out
+}
+
+// storeHosts lists the addresses a network store is reached at: the file server, an external Ceph's monitors
+// (`10.0.0.1 10.0.0.2`, `a:6789;b`, `[v2:a:3300/0,v1:a:6789/0]`), the iSCSI portal.
+// ponytail: rbd and cephfs without monhost use the nodes' own Ceph, whose monitors this does not look up.
+func storeHosts(d pve.StorageDef) []string {
+	var raw string
+	switch d.Type {
+	case "nfs", "cifs", "glusterfs":
+		raw = d.Server
+	case "rbd", "cephfs":
+		raw = d.Monhost
+	case "iscsi", "iscsidirect":
+		raw = d.Portal
+	}
+	var out []string
+	for _, f := range strings.FieldsFunc(raw, func(r rune) bool { return r == ' ' || r == ',' || r == ';' }) {
+		f = strings.Trim(f, "[]")
+		f = strings.TrimPrefix(strings.TrimPrefix(f, "v1:"), "v2:")
+		f, _, _ = strings.Cut(f, "/")
+		if h, _, err := net.SplitHostPort(f); err == nil {
+			f = h
+		}
+		if f != "" && !slices.Contains(out, f) {
+			out = append(out, f)
+		}
 	}
 	return out
 }

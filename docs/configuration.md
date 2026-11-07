@@ -103,6 +103,12 @@ read from env:
 | Concern | env | file | Default | Meaning |
 |---------|-----|------|---------|---------|
 | Default region | `PROXCLOUD_DEFAULT_REGION` | `proxcloud.default-region` | `default` | Region stamped on a provider binding when the provider sets none (`project/bootstrap.go`), and the admin handlers' region fallback. |
+| CSI gateway address | `PROXCLOUD_CSI_GATEWAY_ADDR` | `proxcloud.csi-gateway.addr` | — (off) | Listener for tenant clusters' proxmox-csi controllers (e.g. `:8443`), see [managed-k8s.md](managed-k8s.md). Separate from `:8080` and `:8081` on purpose. |
+| CSI gateway certificate | `PROXCLOUD_CSI_GATEWAY_TLS_CERT`, `PROXCLOUD_CSI_GATEWAY_TLS_KEY` | `proxcloud.csi-gateway.tls-cert`, `.tls-key` | — | PEM files. The listener serves TLS only; an address without both fails startup. |
+
+The gateway's PVE token is per compute provider: `config.csiGatewayTokenId` and `secret.csiGatewaySecret` on the Proxmox
+provider ([proxmox-permissions.md](proxmox-permissions.md#the-csi-gateway-token)). Without them the gateway answers its
+clusters with an error.
 
 ### Scheduled jobs (billing / metrics crons)
 
