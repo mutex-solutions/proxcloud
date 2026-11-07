@@ -118,6 +118,7 @@ attribute schema (`BillingResourceType`):
 | `volume` | `VolumeProvider` (`volume.go`) | `size`, `bootable`, `type`, `status`, `availability_zone` | status `error`/`deleting`/`creating`/`error_deleting` (a legacy set: Proxmox volumes report only `in-use`/`available`) |
 | `floating_ip` | `FloatingIPProvider` (`floatingip.go`) | `existence` (typically a flat per-IP charge), `status`, `floating_network_id`. Rows derive from the public-IP allocations (`pvePublicIp`), one per allocation, billed from the moment of allocation | — |
 | `image` | `ImageProvider` (`image.go`) | `size_gb` (a project template's disk, rounded up to whole GiB), `status`. Catalog templates are the operator's and never bill | — |
+| `server_snapshot` | `ServerProvider` | `size_gb` (the server's provisioned disks, not the blocks the snapshot pins: Proxmox reports no per-snapshot usage). One line per snapshot, billed from the moment it was taken, read at each full sync and after a portal action on the server; replication and backup snapshots do not count | — |
 
 Every resource additionally gets `region` and `service_id` stamped in (so plan
 filters on those resolve) and `createdAt` (drives mid-month proration) — see

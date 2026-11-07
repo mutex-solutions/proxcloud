@@ -103,9 +103,12 @@ func stampResourceValues(brs []*billingapi.BillingResource, cr *cloud.CloudResou
 		if b.Values == nil {
 			b.Values = map[string]any{}
 		}
-		if created != nil {
-			b.Values["createdAt"] = *created
+		// A resource younger than its row (a server's snapshot) already says when it began.
+		if b.CreatedAt == nil {
 			b.CreatedAt = created
+		}
+		if b.CreatedAt != nil {
+			b.Values["createdAt"] = *b.CreatedAt
 		}
 		// region/service_id are FILTER attributes: applyFilter looks up AttributeTypeByName on the
 		// resource's type, so the value MUST be matched by a declared attribute or the filter errors
