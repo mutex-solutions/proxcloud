@@ -41,6 +41,8 @@ type Spec struct {
 
 	// Custom is a project's own template, resolved by the caller (Template is then its name).
 	Custom *Template `json:"-"`
+	// Quota is the project's sandbox quota, set by the caller (nil = the provider limits only).
+	Quota *ProjectQuota `json:"-"`
 
 	// Minted by CreateSandbox, rendered into the CR by BuildCR; never decoded from callers.
 	envdToken    string

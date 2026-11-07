@@ -15,7 +15,7 @@ Design, lab measurements and the threat model: [`docs/managed-sandbox.md`](../..
 | `runtimeclass.yaml` | RuntimeClass `gvisor` |
 | `agent-sandbox/` | kubernetes-sigs/agent-sandbox v1.0.9, vendored (Sandbox CRD and controller); see its README |
 | `network-policy.yaml` | Cilium cluster-wide guardrail for every tenant namespace: private ranges and TCP 25 denied, ingress from `sandbox-proxy` only |
-| `rbac.yaml` | `proxcloud-system/proxcloud` ServiceAccount, its ClusterRole and a token Secret; `proxcloud-system/proxcloud-firewall` (nodes get, list, patch) for the Proxmox provider's sync, which fences the workers and takes their `unsecured` taint off |
+| `rbac.yaml` | `proxcloud-system/proxcloud` ServiceAccount, its ClusterRole and a token Secret; `proxcloud-system/proxcloud-firewall` (nodes get, list, patch; impersonating only the node `proxcloud-noderestriction-probe` for the NodeRestriction release gate) for the Proxmox provider's sync, which fences the workers and takes their `unsecured` taint off |
 | `check-ipv4-only.sh` | The IPv6 precondition: Cilium IPv6 off, no IPv6 on any node |
 
 ## Preconditions
@@ -70,4 +70,6 @@ Kept by `internal/cloud/sandbox` (`RuntimeHostDir`, `RuntimeMountPath`, `LabelTe
 ## Attach to the portal
 
 Build a kubeconfig from the `proxcloud-system/proxcloud-token` Secret (the recipe in the header of `deploy/mgmt-cluster/rbac.yaml`)
-and register it as a `sandbox` provider. The admin API refuses the provider kind until SB3.
+and register it as a `sandbox` provider with `config.sandbox.proxmoxServiceId` naming the Proxmox provider of the workers.
+Store it `DISABLED` first: it goes live only while its release gates hold (NodeRestriction, the isolation drops, the
+worker fence; [managed-sandbox.md §3](../../docs/managed-sandbox.md#36-release-gates-how-the-portal-checks-each)).

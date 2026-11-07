@@ -135,14 +135,19 @@ function normalizeGPUModel(value: string): string {
   return trimmed === "*" ? "*" : trimmed.toLowerCase().replaceAll("_", "-")
 }
 
-// The resource keys the Proxmox create paths enforce (externalservice.PVEQuotaKeys).
-const RESOURCE_QUOTA_KEYS: Array<{ key: string; label: string }> = [
+// The resource keys the Proxmox create paths enforce (externalservice.PVEQuotaKeys), then the sandbox keys
+// (externalservice.SandboxQuotaKeys): a blank sandbox key falls back to the sandbox provider's default, never unlimited.
+const RESOURCE_QUOTA_KEYS: Array<{ key: string; label: string; blank?: string }> = [
   { key: "servers", label: "Servers" },
   { key: "vcpus", label: "vCPUs" },
   { key: "ramMb", label: "RAM (MiB)" },
   { key: "diskGb", label: "Disk (GiB)" },
   { key: "networks", label: "Networks" },
   { key: "floatingIps", label: "Public IPs" },
+  { key: "sandboxes", label: "Sandboxes at once", blank: "Provider default (5)" },
+  { key: "sandboxVcpus", label: "Sandbox vCPUs", blank: "Provider default (16)" },
+  { key: "sandboxRamMb", label: "Sandbox RAM (MiB)", blank: "Provider default (32768)" },
+  { key: "sandboxGpus", label: "Sandbox GPUs", blank: "Provider default (0)" },
 ]
 
 function parseGPUQuotaLimit(value: string): number | undefined {
@@ -955,12 +960,14 @@ export default function ProjectDetailPage() {
                 <h2 className="text-base font-semibold">Resource quota</h2>
                 <p className="mt-1 text-sm text-muted-foreground">
                   Enforced when servers, volumes, networks and public IPs are created or resized on Proxmox. Blank =
-                  unlimited. A project with no quota at all uses its provider&apos;s default quota.
+                  unlimited. A project with no quota at all uses its provider&apos;s default quota. The sandbox keys are
+                  checked on every sandbox create against what is running; blank there means the sandbox
+                  provider&apos;s default.
                 </p>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-                  {RESOURCE_QUOTA_KEYS.map(({ key, label }) => {
+                  {RESOURCE_QUOTA_KEYS.map(({ key, label, blank }) => {
                     const raw = resourceQuota[key] ?? ""
                     const invalid = !!raw.trim() && parseGPUQuotaLimit(raw) === undefined
                     return (
@@ -973,7 +980,7 @@ export default function ProjectDetailPage() {
                           type="number"
                           min={0}
                           step={1}
-                          placeholder="Unlimited"
+                          placeholder={blank ?? "Unlimited"}
                           aria-invalid={invalid}
                           aria-describedby={invalid ? `rq-${key}-error` : undefined}
                           value={raw}

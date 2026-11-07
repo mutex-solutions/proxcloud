@@ -29,12 +29,48 @@ package externalservice
 //	}
 //
 // Like dbaas, nothing lands on PVE for a project: the sandbox cluster belongs to the platform.
-// Until phase SB3 an operator cannot create one (admin.externalServiceCreate refuses the kind).
+// It goes live only while its release gates hold (docs/managed-sandbox.md §3, admin/sandboxprovider.go).
 
 import "github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 
 // IsSandbox reports whether this is a sandbox provider (config.provider == "sandbox").
 func (e *ExternalService) IsSandbox() bool { return e.Provider() == "sandbox" }
+
+// SandboxProxmoxServiceID is config.sandbox.proxmoxServiceId: the Proxmox provider whose config.sandbox pool holds this
+// provider's workers. Its sync fences them (SB2b) and the release gates read them through it.
+func (e *ExternalService) SandboxProxmoxServiceID() string {
+	sb, _ := e.Config["sandbox"].(map[string]any)
+	return str(sb["proxmoxServiceId"])
+}
+
+// SandboxQuotaKeys are the per-project sandbox quota keys (decision D10), stored on the project's quota document next
+// to the Proxmox keys.
+var SandboxQuotaKeys = []string{"sandboxes", "sandboxVcpus", "sandboxRamMb", "sandboxGpus"}
+
+// SandboxProjectQuota resolves a project's sandbox quota key by key: the project's own value, else the provider's
+// default (config.sandbox.projectQuota), else sandbox.DefaultProjectQuota. Never unlimited: an absent key falls back,
+// it does not lift the limit.
+func (e *ExternalService) SandboxProjectQuota(project map[string]any) sandbox.ProjectQuota {
+	sb, _ := e.Config["sandbox"].(map[string]any)
+	provider, _ := sb["projectQuota"].(map[string]any)
+	d := sandbox.DefaultProjectQuota
+	pick := func(key string, def int) int {
+		for _, m := range []map[string]any{project, provider} {
+			if v, ok := m[key]; ok {
+				if n := intOf(v); n >= 0 {
+					return n
+				}
+			}
+		}
+		return def
+	}
+	return sandbox.ProjectQuota{
+		Sandboxes: pick("sandboxes", d.Sandboxes),
+		VCPUs:     pick("sandboxVcpus", d.VCPUs),
+		RAMMb:     pick("sandboxRamMb", d.RAMMb),
+		GPUs:      pick("sandboxGpus", d.GPUs),
+	}
+}
 
 // SandboxRegion is config.region, falling back to the first configured region.
 func (e *ExternalService) SandboxRegion() string {

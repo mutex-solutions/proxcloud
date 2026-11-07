@@ -99,6 +99,10 @@ export type CloudResource = {
 
 export type ProjectService = {
   id: string
+  // Sandbox services only: the template catalog, offered GPU models and size/lifetime limits.
+  sandboxTemplates?: SandboxTemplate[]
+  sandboxGpuModels?: string[]
+  sandboxLimits?: SandboxLimits
   name?: string
   type?: string
   status?: string
@@ -242,3 +246,17 @@ export type CreditCard = {
 
 /** Providers that serve only storage products (no compute). */
 export const isObjectProvider = (provider?: string) => provider === "ceph-s3" || provider === "rustfs" || provider === "truenas"
+
+export type SandboxTemplate = { name: string; image: string; description?: string; cpu?: number; memoryGiB?: number; gpu?: { model: string; count: number } }
+
+export type SandboxLimits = {
+  maxCpu?: number
+  maxMemoryGiB?: number
+  maxGpus?: number
+  maxTimeoutSeconds?: number
+  defaultTimeoutSeconds?: number
+  maxConcurrent?: number
+  maxConcurrentGpus?: number
+}
+
+export type SandboxExecResult = { stdout: string; stderr: string; exitCode: number; truncated?: boolean }

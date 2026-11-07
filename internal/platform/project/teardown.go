@@ -84,6 +84,10 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 	}
 	SortCloudResourcesForDeletion(resources)
 
+	// Sandboxes first: they run customer code and bill by the minute, and nothing else depends on them. Their rows end
+	// at the delete, and the project's sandbox namespace goes after them.
+	resources, sandboxesLeft := h.teardownSandboxes(ctx, p, resources)
+
 	// kamaji + dbaas rows first, split out of the bucket sweep entirely: tryTenantClient below can
 	// never build a client for them, and their delete is an
 	// ArgoCD Application delete on the management/DB cluster whose cascade runs asynchronously.
@@ -451,9 +455,12 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 	// ponytail: rows left with no failed leg behind them (a provider since removed) do not ask for a re-run, or a project
 	// could wedge the job's sweep forever. Report them and move on.
 	expect := p.Status
-	teardownOutcome(p, cephRevokeFailed || pveTeardownFailed || zonesLeft || kamajiPending > 0 || dbaasPending > 0)
+	teardownOutcome(p, cephRevokeFailed || pveTeardownFailed || zonesLeft || sandboxesLeft || kamajiPending > 0 || dbaasPending > 0)
 	if _, err := h.svc.SaveIfStatus(ctx, p, expect); err != nil {
 		return err
+	}
+	if sandboxesLeft {
+		return fmt.Errorf("teardown could not remove the project's sandboxes or their namespace; the deletion job retries")
 	}
 	if zonesLeft {
 		return fmt.Errorf("teardown could not remove the project's DNS zones; the deletion job retries")

@@ -92,8 +92,9 @@ func (s *Service) ownerSelector(projectID string) string {
 // EnsureProjectNamespace creates/labels sb-<projectId> and its ResourceQuota (the bootstrap
 // leg). LabelTenant is load-bearing: it is what puts the namespace under the cluster-wide egress
 // guardrail. The quota is the hard backstop behind the create-time checks in CreateSandbox
-// (which can race between two concurrent creates).
-func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) error {
+// (which can race between two concurrent creates): the provider limits, lowered to the project's
+// quota when q is set.
+func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string, q *ProjectQuota) error {
 	ns := NamespaceFor(projectID)
 	labels := map[string]string{
 		LabelProject:   projectID,
@@ -108,6 +109,10 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) 
 		return err
 	}
 	l := s.cfg.Limits
+	pods, cpu, memMb, gpus := l.MaxConcurrent, l.MaxConcurrent*l.MaxCPU, l.MaxConcurrent*l.MaxMemoryGiB*1024, l.MaxConcurrentGPUs
+	if q != nil {
+		pods, cpu, memMb, gpus = min(pods, q.Sandboxes), min(cpu, q.VCPUs), min(memMb, q.RAMMb), min(gpus, q.GPUs)
+	}
 	return s.api.ApplyResourceQuota(ctx, map[string]any{
 		"apiVersion": "v1",
 		"kind":       "ResourceQuota",
@@ -118,11 +123,11 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) 
 		},
 		"spec": map[string]any{
 			"hard": map[string]any{
-				"pods":                       strconv.Itoa(l.MaxConcurrent),
-				"requests.cpu":               strconv.Itoa(l.MaxConcurrent * l.MaxCPU),
-				"requests.memory":            fmt.Sprintf("%dGi", l.MaxConcurrent*l.MaxMemoryGiB),
-				"requests." + ResourceGPU:    strconv.Itoa(l.MaxConcurrentGPUs),
-				"count/sandboxes." + CRGroup: strconv.Itoa(l.MaxConcurrent),
+				"pods":                       strconv.Itoa(pods),
+				"requests.cpu":               strconv.Itoa(cpu),
+				"requests.memory":            fmt.Sprintf("%dMi", memMb),
+				"requests." + ResourceGPU:    strconv.Itoa(gpus),
+				"count/sandboxes." + CRGroup: strconv.Itoa(pods),
 			},
 		},
 	})
@@ -199,7 +204,7 @@ func (s *Service) CreateSandbox(ctx context.Context, spec *Spec) (map[string]any
 	if err := spec.Validate(s.cfg); err != nil {
 		return nil, err
 	}
-	if err := s.EnsureProjectNamespace(ctx, spec.ProjectID); err != nil {
+	if err := s.EnsureProjectNamespace(ctx, spec.ProjectID, spec.Quota); err != nil {
 		return nil, fmt.Errorf("sandbox: ensure namespace: %w", err)
 	}
 	live, err := s.live(ctx, spec.ProjectID)
@@ -209,6 +214,11 @@ func (s *Service) CreateSandbox(ctx context.Context, spec *Spec) (map[string]any
 	l := s.cfg.Limits
 	if len(live)+1 > l.MaxConcurrent {
 		return nil, fmt.Errorf("%w: at most %d sandboxes may run at once", ErrQuotaExceeded, l.MaxConcurrent)
+	}
+	if spec.Quota != nil {
+		if err := spec.Quota.check(live, spec); err != nil {
+			return nil, err
+		}
 	}
 	if spec.GPUs() > 0 {
 		held := 0
@@ -359,7 +369,16 @@ func (s *Service) GetSandbox(ctx context.Context, projectID, id string) (map[str
 		return nil, err
 	}
 	s.pinRunningSince(ctx, obj)
-	return sandboxData(obj), nil
+	return s.observed(sandboxData(obj)), nil
+}
+
+// observed stamps a PENDING payload with when it was read (seenPendingAt): the latest moment the sandbox is known not to
+// have been running, which bills a sandbox that ends before any read sees it running (MarkVanished).
+func (s *Service) observed(d map[string]any) map[string]any {
+	if d["status"] == StatusPending {
+		d["seenPendingAt"] = s.now().UTC().Format(time.RFC3339)
+	}
+	return d
 }
 
 // pinRunningSince records, once, when the sandbox first became Ready (AnnotationRunningSince).
@@ -475,7 +494,7 @@ func (s *Service) ListSandboxes(ctx context.Context, projectID string) (map[stri
 	for _, it := range items {
 		if id := digStr(it, "metadata", "name"); id != "" {
 			s.pinRunningSince(ctx, it)
-			out[id] = sandboxData(it)
+			out[id] = s.observed(sandboxData(it))
 		}
 	}
 	return out, nil
@@ -487,8 +506,8 @@ func (s *Service) owns(obj map[string]any, projectID string) bool {
 		digStr(obj, "metadata", "labels", LabelProject) == projectID
 }
 
-// Status values in the cached payload. DELETED rows linger briefly after the sandbox is gone so
-// the billing job charges up to its end (see MarkDeleted and SyncProvider.Linger).
+// Status values in the cached payload. A DELETED row carries its end (endedAt), which the charge bills up to (see
+// MarkDeleted and MarkVanished).
 const (
 	StatusPending = "PENDING"
 	StatusRunning = "RUNNING"

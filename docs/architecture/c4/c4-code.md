@@ -218,7 +218,8 @@ Invariants:
 | `BootstrapProxmoxOnto` | `internal/platform/project/bootstrap.go:96` | Seeds the provider default quota onto a project that has none |
 
 Keys: `servers`, `vcpus`, `ramMb`, `diskGb`, `networks`, `floatingIps`, plus the
-`gpu` map. A key absent from a non-empty quota is unlimited; with no project quota
+`gpu` map. Sandbox keys (`sandboxes`, `sandboxVcpus`, `sandboxRamMb`, `sandboxGpus`) live on the same
+document but follow C4.5: an absent one falls back to the sandbox provider's default, never to unlimited. A key absent from a non-empty quota is unlimited; with no project quota
 and no provider default, everything is unlimited. `floatingIps` usage is counted
 from the `pvePublicIp` table, not the cache.
 
@@ -296,6 +297,52 @@ Public IPs from the Proxmox pool and project templates are not billing units yet
 (Planned); they are bounded by quota (`floatingIps`, `diskGb`) in the meantime.
 
 ---
+
+## C4.5 Sandboxes: the usage path and the release gates
+
+| Symbol | Location | Role |
+|---|---|---|
+| `Handler.sandboxBillingGate` | `internal/platform/project/cloud_sandbox.go` | `refuseNewUsage` (deleting or DISABLED, so an operator's disable and a billing suspension alike), then the billing profile not SUSPENDED |
+| `Handler.sandboxReleaseGate` | `cloud_sandbox.go` | The three release gates, cached per provider for a minute, fail closed |
+| `ExternalService.SandboxProjectQuota` | `internal/platform/externalservice/sandbox.go` | Per key: the project's value, else `config.sandbox.projectQuota`, else 5 sandboxes / 16 vCPU / 32768 MB / 0 GPU |
+| `ProjectQuota.check` | `internal/cloud/sandbox/quota.go` | Live sandboxes plus the new one against the project quota (429); the provider's per-sandbox limits apply first |
+| `Job.SandboxReleaseGates` | `internal/cloud/syncjob/sandboxgate.go` | NodeRestriction, isolation and fence, read through the Proxmox provider of the workers (`config.sandbox.proxmoxServiceId`) |
+| `probeNodeRestriction` | `sandboxgate.go` | Two dry-run Node creates impersonating a node: plain must pass, with a `node-restriction.kubernetes.io/` label must be refused by NodeRestriction |
+| `Service.CheckSandboxIsolation` | `internal/cloud/pve/network.go` | Datacenter firewall on and this portal's isolation DROPs exactly those `ReconcileIsolation` writes for `sandboxCidrs` |
+| `Service.CheckSandboxFence` | `internal/cloud/pve/sandboxfw.go` | Read-only: the current generation's sets and group exist unchanged, every untainted Node is a pool VM whose firewall reads back in place and whose filter is pinned to its address |
+| `Handler.DeleteProjectSandboxes` | `cloud_sandbox.go` | D9: called by `billingCloudSuspender` on suspend; deletes every live sandbox and ends its row |
+| `Handler.teardownSandboxes` | `cloud_sandbox.go` | Project deletion: delete, end and archive every sandbox row, then `DeleteProjectNamespace` |
+
+Allowed while the project is DISABLED: list, `GET_LOGS`, delete. Refused: create, `EXEC`, `SET_TIMEOUT`
+(the allow-list of `cloudAction` and the gate above), `REFRESH`.
+
+```mermaid
+flowchart TB
+  classDef impl fill:#e6f4ea,stroke:#1e7e34,color:#0b3d1a
+
+  req["create / EXEC / SET_TIMEOUT"]:::impl
+  susp{"refuseNewUsage, profile SUSPENDED?"}
+  r409["409 / 403"]:::impl
+  gates{"release gates hold?<br/>(cached 1 min)"}
+  r503["503 not available"]:::impl
+  quota{"create: live usage + new > project quota?"}
+  r429["429 quota exceeded"]:::impl
+  ok["Sandbox CR / exec / patch"]:::impl
+  nr["NodeRestriction<br/>dry-run Node as a node"]:::impl
+  iso["isolation<br/>cluster firewall DROPs"]:::impl
+  fen["fence<br/>VM firewall, pinned filter"]:::impl
+
+  req --> susp
+  susp -->|"yes"| r409
+  susp -->|"no"| gates
+  gates -->|"no"| r503
+  gates -->|"yes"| quota
+  quota -->|"yes"| r429
+  quota -->|"no"| ok
+  gates --- nr
+  gates --- iso
+  gates --- fen
+```
 
 ## Sequence (a): create server
 
@@ -405,7 +452,7 @@ sequenceDiagram
   participant R as cloud.Repo
 
   OP->>T: deletion job sweep (flagged by delete now, or past its grace window)
-  T->>T: managed K8s and DBaaS rows first
+  T->>T: sandboxes first (delete, end and archive the rows, drop sb-<project>), then managed K8s and DBaaS rows
   T->>PS: TeardownProjectPool
   PS->>PVE: stop and destroy every VM in the pool, delete pool
   T->>L: lock

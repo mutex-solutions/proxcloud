@@ -100,7 +100,7 @@ flowchart TB
     mgmtvm["Management cluster VMs"]:::planned
     svc["Services cluster<br/>Kamaji, DB operators, CSI"]:::impl
     rfsvm["RustFS VM"]:::planned
-    sbx["Sandbox cluster workers<br/>pool proxcloud-sandbox, vnet pcsbx<br/>gVisor, no CSI, no NAS"]:::planned
+    sbx["Sandbox cluster workers<br/>pool proxcloud-sandbox, vnet pcsbx<br/>gVisor, no CSI, no NAS"]:::impl
   end
 
   subgraph tiers["Storage backends"]
@@ -141,7 +141,7 @@ flowchart TB
 | HA rules and replication | Protected VMs with replication and node-affinity rules. | Implemented |
 | Platform-owned VMs | Management cluster VMs and the RustFS VM in a dedicated system pool, the platform token has `NoAccess` there. | Implemented |
 | Services cluster VMs | The services cluster, in the same system pool. | Implemented |
-| Sandbox cluster | A platform-owned Kamaji cluster from the cluster chart: control plane on the services cluster, workers in pool `proxcloud-sandbox` on their own vnet, gVisor (`runsc`, systrap) for tenant code, a Cilium egress guardrail, no CSI token and no NAS dataset. Its CAPMOX token `capmox@pve!sandbox` sees only a node-local ISO store. Built by installer stage 55 from `deploy/sandbox-cluster/`; nothing routes tenants to it yet. Release gates: isolation drops for the sandbox CIDR in both directions (in place, `sandboxCidrs`), NodeRestriction on its control plane (checked by stage 55), single-stack IPv4 (checked by stage 55), per-NIC VM firewall with address pinning and the `unsecured` taint until it is in place (in place, kept by the portal's sync with a narrow `ProxCloudSandboxGuard` role on the pool). Egress leaves through its own SNAT address on the exit node (`sandbox.network.snat`). Spike and SB2a results: [managed-sandbox.md](../../managed-sandbox.md). | Planned |
+| Sandbox cluster | A platform-owned Kamaji cluster from the cluster chart: control plane on the services cluster, workers in pool `proxcloud-sandbox` on their own vnet, gVisor (`runsc`, systrap) for tenant code, a Cilium egress guardrail, no CSI token and no NAS dataset. Its CAPMOX token `capmox@pve!sandbox` sees only a node-local ISO store. Built by installer stage 55 from `deploy/sandbox-cluster/`. Tenants reach it only through the portal's native API (SB3): the portal creates, execs into, reads the logs of and deletes Sandbox CRs with its service account, bills them per minute and refuses all new usage while a release gate does not hold. Release gates: isolation drops for the sandbox CIDR in both directions (in place, `sandboxCidrs`), NodeRestriction on its control plane (checked by stage 55), single-stack IPv4 (checked by stage 55), per-NIC VM firewall with address pinning and the `unsecured` taint until it is in place (in place, kept by the portal's sync with a narrow `ProxCloudSandboxGuard` role on the pool). Egress leaves through its own SNAT address on the exit node (`sandbox.network.snat`). The portal checks NodeRestriction, the isolation drops and the fence itself before a sandbox provider goes live and again before each create ([managed-sandbox.md §3](../../managed-sandbox.md#3-tenant-api-billing-quota-suspension-and-release-gates-sb3)). | Implemented |
 | Proxmox Backup Server | Operator nightly backups, then tenant backup schedules and restore. | Planned |
 
 ### Storage tiers

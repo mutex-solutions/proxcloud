@@ -1,6 +1,7 @@
 package project
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -135,6 +136,9 @@ func (h *Handler) cloudResourceList(w http.ResponseWriter, r *http.Request) {
 	case cloud.TypeDatabaseCluster:
 		// Same read-through for provisioning databases (endpoint appears minutes after create).
 		h.refreshDbaasClusters(r.Context(), proj)
+	case cloud.TypeSandbox:
+		// Sandboxes start in seconds and end at their timeout: the cache must follow live.
+		h.refreshSandboxes(r.Context(), proj)
 	case cloud.TypeKeypair:
 		// KEYPAIR is a USER-scoped identity resource (blank projectId — see providers/write.go),
 		// so FindAllByProjectID below never returns it. List by user (same uid the create path
@@ -374,6 +378,32 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, httpx.BadRequest("Project has no cloud service"))
 		return
 	}
+	// A SANDBOX create that names no service goes to the project's sandbox service (the default
+	// resolution prefers Proxmox, which cannot create sandboxes). Peeks the type only; the body is
+	// restored for the legs below.
+	if r.Header.Get("x-service-id") == "" && r.URL.Query().Get("serviceId") == "" {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err == nil {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var peek struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(body, &peek) == nil && peek.Type == cloud.TypeSandbox {
+				if id := h.sandboxServiceOf(r.Context(), proj); id != "" {
+					svcID = id
+				}
+			}
+		}
+	}
+	// sandbox: SANDBOX creates go through the sandbox service (a Sandbox CR on the sandbox cluster).
+	if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsSandbox() {
+		var req providers.CreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			h.fail(w, httpx.BadRequest("invalid request body"))
+			return
+		}
+		h.sandboxCreate(w, r, u, proj, es, req)
+		return
+	}
 	// kamaji managed-k8s: KUBERNETES_CLUSTER creates go through the kamaji service
 	// (Application CR on the management cluster), not the bucket WriteService.
 	if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsKamaji() {
@@ -522,6 +552,18 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 			if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsDbaas() {
 				if err := h.dbaasDelete(r.Context(), es, proj, cr); err != nil {
 					h.fail(w, err)
+					return
+				}
+				h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_DELETE", "", cr)
+				httpx.Accepted(w)
+				return
+			}
+		}
+		// sandbox: delete the CR (its pod goes with it), end the row; billing stops at the delete.
+		if cr.Type == cloud.TypeSandbox {
+			if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsSandbox() {
+				if err := h.sandboxDelete(r.Context(), es, proj, cr); err != nil {
+					h.sandboxFail(w, err)
 					return
 				}
 				h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_DELETE", "", cr)
@@ -747,6 +789,17 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+
+	// sandbox actions (EXEC, GET_LOGS, SET_TIMEOUT, REFRESH), against the sandbox's own service.
+	if cr.Type == cloud.TypeSandbox {
+		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil {
+			if audited(func(w http.ResponseWriter) bool { return h.sandboxAction(w, r, proj, es, cr, req.Action, req.Data) }) {
+				return
+			}
+		}
+		h.fail(w, httpx.BadRequest("Unknown sandbox action"))
+		return
 	}
 
 	// proxmox: power/resize/rename/console — dispatched off the resource's own service.

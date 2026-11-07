@@ -37,6 +37,13 @@ import {
   type DbaasFormState,
 } from "./dbaasProvider"
 import {
+  SandboxProviderForm,
+  emptySandboxForm,
+  sandboxFormToBody,
+  sandboxFormValid,
+  type SandboxFormState,
+} from "./sandboxProvider"
+import {
   ProxmoxProviderForm,
   emptyProxmoxForm,
   proxmoxFormToBody,
@@ -342,12 +349,13 @@ export default function CloudProvidersPage() {
   const items = data?.data ?? []
 
   const [createOpen, setCreateOpen] = useState(false)
-  const [kind, setKind] = useState<"ceph-s3" | "rustfs" | "truenas" | "powerdns" | "kamaji" | "dbaas" | "proxmox">("proxmox")
+  const [kind, setKind] = useState<"ceph-s3" | "rustfs" | "truenas" | "powerdns" | "kamaji" | "dbaas" | "sandbox" | "proxmox">("proxmox")
   const [powerDNSForm, setPowerDNSForm] = useState<PowerDNSFormState>(emptyPowerDNSForm)
   const [trueNASForm, setTrueNASForm] = useState<TrueNASFormState>(emptyTrueNASForm)
   const [cephForm, setCephForm] = useState<CephFormState>(emptyCephForm)
   const [kamajiForm, setKamajiForm] = useState<KamajiFormState>(emptyKamajiForm)
   const [dbaasForm, setDbaasForm] = useState<DbaasFormState>(emptyDbaasForm)
+  const [sandboxForm, setSandboxForm] = useState<SandboxFormState>(emptySandboxForm)
   const [proxmoxForm, setProxmoxForm] = useState<ProxmoxFormState>(emptyProxmoxForm)
 
   const create = useMutation({
@@ -367,7 +375,9 @@ export default function CloudProvidersPage() {
               ? kamajiFormToBody(kamajiForm)
               : kind === "dbaas"
                 ? dbaasFormToBody(dbaasForm)
-                : proxmoxFormToBody(proxmoxForm),
+                : kind === "sandbox"
+                  ? sandboxFormToBody(sandboxForm)
+                  : proxmoxFormToBody(proxmoxForm),
       }),
     onSuccess: (created) => {
       toast.success("Cloud provider created")
@@ -375,6 +385,7 @@ export default function CloudProvidersPage() {
       setCephForm(emptyCephForm)
       setKamajiForm(emptyKamajiForm)
       setDbaasForm(emptyDbaasForm)
+      setSandboxForm(emptySandboxForm)
       setProxmoxForm(emptyProxmoxForm)
       void qc.invalidateQueries({ queryKey: ["admin-list", LIST_PATH] })
       if (created?.id) navigate(`/system/cloud-providers/${created.id}`)
@@ -476,6 +487,7 @@ export default function CloudProvidersPage() {
                   setCephForm(emptyCephForm)
             setKamajiForm(emptyKamajiForm)
             setDbaasForm(emptyDbaasForm)
+            setSandboxForm(emptySandboxForm)
             setProxmoxForm(emptyProxmoxForm)
             setPowerDNSForm(emptyPowerDNSForm)
             setKind("proxmox")
@@ -498,6 +510,8 @@ export default function CloudProvidersPage() {
                   ? "Connect a Kamaji management cluster for Managed Kubernetes. Clusters are delivered as ArgoCD Applications of the pinned chart; worker nodes run in each customer's project."
                   : kind === "dbaas"
                     ? "Connect a pre-built database Kubernetes cluster for Managed Databases. Databases are delivered as ArgoCD Applications of the pinned chart, reachable over an internal LB in each customer's tenant network."
+                    : kind === "sandbox"
+                      ? "Connect the platform's sandbox cluster: customer sandboxes run there as gVisor pods. Store it DISABLED first; it goes live only once its release gates hold."
                     : "Connect a Proxmox VE cluster with one admin API token. Projects get a dedicated pool; networking, storage profiles and GPU mappings are configured on the provider page after creation."}
             </DialogDescription>
           </DialogHeader>
@@ -523,6 +537,9 @@ export default function CloudProvidersPage() {
             <Button variant={kind === "dbaas" ? "default" : "outline"} onClick={() => setKind("dbaas")}>
               Database (DBaaS)
             </Button>
+            <Button variant={kind === "sandbox" ? "default" : "outline"} onClick={() => setKind("sandbox")}>
+              Sandboxes
+            </Button>
           </div>
           {kind === "powerdns" ? (
             <PowerDNSProviderForm form={powerDNSForm} setForm={setPowerDNSForm} />
@@ -534,6 +551,8 @@ export default function CloudProvidersPage() {
             <KamajiProviderForm form={kamajiForm} setForm={setKamajiForm} />
           ) : kind === "dbaas" ? (
             <DbaasProviderForm form={dbaasForm} setForm={setDbaasForm} />
+          ) : kind === "sandbox" ? (
+            <SandboxProviderForm form={sandboxForm} setForm={setSandboxForm} />
           ) : (
             <ProxmoxProviderForm form={proxmoxForm} setForm={setProxmoxForm} />
           )}
@@ -554,7 +573,9 @@ export default function CloudProvidersPage() {
                     ? !kamajiFormValid(kamajiForm)
                     : kind === "dbaas"
                       ? !dbaasFormValid(dbaasForm)
-                      : !proxmoxFormValid(proxmoxForm)) ||
+                      : kind === "sandbox"
+                        ? !sandboxFormValid(sandboxForm)
+                        : !proxmoxFormValid(proxmoxForm)) ||
                 create.isPending
               }
             >

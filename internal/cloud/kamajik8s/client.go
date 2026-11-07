@@ -105,6 +105,20 @@ func (e *APIError) Error() string { return fmt.Sprintf("kubernetes api: %d: %s",
 // so the payload stays JSON). 2xx with a body decodes into map[string]any; 404 on GET/DELETE
 // returns (nil, *APIError{404}).
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body any, contentType string) (map[string]any, error) {
+	return c.doH(ctx, method, path, query, body, contentType, nil)
+}
+
+// CreateNodeDryRunAs asks the API server to create node as user in groups (impersonation) with
+// dryRun=All: authorization and admission run, nothing is stored. It probes what a node's own
+// credential may do, e.g. whether NodeRestriction is on (the sandbox release gate).
+func (c *Client) CreateNodeDryRunAs(ctx context.Context, user string, groups []string, node map[string]any) error {
+	hdr := http.Header{"Impersonate-User": {user}, "Impersonate-Group": groups}
+	_, err := c.doH(ctx, http.MethodPost, "/api/v1/nodes", url.Values{"dryRun": {"All"}}, node, "", hdr)
+	return err
+}
+
+// doH is do with extra request headers.
+func (c *Client) doH(ctx context.Context, method, path string, query url.Values, body any, contentType string, hdr http.Header) (map[string]any, error) {
 	u := strings.TrimRight(c.rc.server, "/") + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
@@ -130,6 +144,11 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	req.Header.Set("Accept", "application/json")
 	if t := c.rc.bearer(); t != "" {
 		req.Header.Set("Authorization", "Bearer "+t)
+	}
+	for k, vs := range hdr {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 	res, err := c.http.Do(req)
 	if err != nil {

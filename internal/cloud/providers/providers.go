@@ -55,7 +55,7 @@ type VanishGrace interface {
 
 // UnreadKeeper is an optional Provider capability for a cloud that can list an object without being able to read it
 // (its node is down): such a cached row is not gone, however absent from List. The provider may change the row's data
-// in place; changed says to store it.
+// in place; changed says to store it. A row it does not keep is archived as the provider left it.
 type UnreadKeeper interface {
 	KeepUnread(cached *cloud.CloudResource) (keep, changed bool)
 }

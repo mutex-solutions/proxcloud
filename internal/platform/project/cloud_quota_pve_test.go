@@ -131,6 +131,10 @@ func TestPVEQuotaLimits(t *testing.T) {
 	if got := pveQuotaLimits(&Project{}, noDefault); len(got) != 0 {
 		t.Fatalf("neither set = unlimited, got %v", got)
 	}
+	// A project attached to sandboxes first holds only sandbox keys: that must not lift the Proxmox default.
+	if got := pveQuotaLimits(&Project{Quota: map[string]any{"sandboxes": float64(2)}}, withDefault); got["vcpus"] != 16 {
+		t.Fatalf("sandbox-only quota must keep the provider default, got %v", got)
+	}
 }
 
 // TestPVEResizeDemand: a resize charges the flavor delta INCLUDING the boot-disk

@@ -776,7 +776,7 @@ func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map
 	if !ValidID(id) {
 		return ErrNotFound
 	}
-	if err := s.EnsureProjectNamespace(ctx, projectID); err != nil {
+	if err := s.EnsureProjectNamespace(ctx, projectID, nil); err != nil {
 		return err
 	}
 	if n := gpuCount(cr); n > 0 {

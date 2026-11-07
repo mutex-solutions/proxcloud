@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"time"
 
@@ -77,7 +78,7 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if err != nil {
 		return err
 	}
-	var cephES, kamajiES, dbaasES, pveES, truenasES, dnsES []*externalservice.ExternalService
+	var cephES, kamajiES, dbaasES, pveES, truenasES, dnsES, sandboxES []*externalservice.ExternalService
 	for i := range services {
 		if services[i].IsDisabled() {
 			continue
@@ -95,16 +96,18 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 			truenasES = append(truenasES, &services[i])
 		case services[i].IsPowerDNS():
 			dnsES = append(dnsES, &services[i])
+		case services[i].IsSandbox():
+			sandboxES = append(sandboxES, &services[i])
 		}
 	}
-	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 && len(truenasES) == 0 && len(dnsES) == 0 {
+	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 && len(truenasES) == 0 && len(dnsES) == 0 && len(sandboxES) == 0 {
 		return nil // no cloud provider configured → nothing to provision
 	}
 	changed := false
 	// A failure on a provider that has since gone or been disabled is nothing to retry.
 	live := map[string]bool{}
 	var lastErr error
-	for _, es := range slices.Concat(cephES, kamajiES, dbaasES, pveES, truenasES, dnsES) {
+	for _, es := range slices.Concat(cephES, kamajiES, dbaasES, pveES, truenasES, dnsES, sandboxES) {
 		live[es.ID] = true
 		failed, known := p.ProvisionFailures[es.ID]
 		switch {
@@ -196,8 +199,13 @@ func (h *Handler) BootstrapProxmoxOnto(ctx context.Context, p *Project, es *exte
 	}
 	// Seed the provider default quota onto a project that has none, so it is
 	// visible/editable per project and survives later default changes.
-	if len(p.Quota) == 0 {
-		p.Quota = es.PVEDefaultQuota()
+	if !hasPVEQuota(p.Quota) { // sandbox keys set first stay next to it
+		q := maps.Clone(es.PVEDefaultQuota())
+		if q == nil && len(p.Quota) > 0 {
+			q = map[string]any{}
+		}
+		maps.Copy(q, p.Quota)
+		p.Quota = q
 	}
 	region := es.PVERegion()
 	if region == "" {
@@ -245,6 +253,32 @@ func (h *Handler) BootstrapDbaasOnto(ctx context.Context, p *Project, es *extern
 		"provider":  "dbaas",
 		"region":    region,
 	})
+	return h.svc.Save(ctx, p)
+}
+
+// BootstrapSandboxOnto attaches the project to a sandbox service: ensure sb-<projectId> on the sandbox cluster (the
+// tenant label puts it under the egress guardrail; the ResourceQuota carries the project's sandbox quota) and append
+// the binding {serviceId, provider:"sandbox", region}. Idempotent.
+func (h *Handler) BootstrapSandboxOnto(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
+	if p.HasService(es.ID) {
+		return h.svc.Save(ctx, p)
+	}
+	if h.sandboxFor == nil {
+		return fmt.Errorf("bootstrap sandbox: sandbox service not configured")
+	}
+	ss, err := h.sandboxFor(es)
+	if err != nil {
+		return fmt.Errorf("bootstrap sandbox: %w", err)
+	}
+	q := es.SandboxProjectQuota(p.Quota)
+	if err := ss.EnsureProjectNamespace(ctx, p.ID, &q); err != nil {
+		return fmt.Errorf("bootstrap sandbox: ensure namespace: %w", err)
+	}
+	region := es.SandboxRegion()
+	if region == "" {
+		region = h.defaultRegion
+	}
+	p.Services = append(p.Services, map[string]any{"serviceId": es.ID, "provider": "sandbox", "region": region})
 	return h.svc.Save(ctx, p)
 }
 
@@ -360,6 +394,9 @@ func (h *Handler) BootstrapOnto(ctx context.Context, p *Project, es *externalser
 	}
 	if es.IsPowerDNS() {
 		return h.bootstrapBindingOnto(ctx, p, es, "powerdns")
+	}
+	if es.IsSandbox() {
+		return h.BootstrapSandboxOnto(ctx, p, es)
 	}
 	return fmt.Errorf("bootstrap: unsupported provider kind %q", es.Provider())
 }

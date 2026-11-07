@@ -50,25 +50,39 @@ func (p *SyncProvider) List(ctx context.Context) ([]cloud.CloudResource, error) 
 	return out, nil
 }
 
-// lingerFor keeps an ended sandbox's row past at least two minutely charge ticks.
-const lingerFor = 3 * time.Minute
+// KeepUnread is where a sandbox gone from the cluster (its timeout, or a delete) gets its last row: Reconcile archives the
+// row as this leaves it, and the charge rates archived rows to their end. It never keeps the row.
+func (p *SyncProvider) KeepUnread(cr *cloud.CloudResource) (keep, changed bool) {
+	MarkVanished(cr, p.svc.now())
+	return false, false
+}
 
-// Linger keeps a vanished sandbox's row for lingerFor after it ended, so the minutely charge rates
-// it up to its end (the billing job only sees cached rows). A sandbox the controller removed at its
-// shutdownTime is marked ended then; one deleted through proxcloud is already marked. Sandboxes that
-// never ran have nothing to bill and are archived at once.
-func (p *SyncProvider) Linger(cr *cloud.CloudResource, now time.Time) bool {
+// MarkVanished ends the row of a sandbox that is no longer on the cluster: DELETED at its shutdownTime if that has
+// passed, else now. A row never seen running may still have run between two reads (a sandbox can live for seconds),
+// so it is billed from the last time it was seen not running (seenPendingAt, else its create): at most one read
+// interval more than it ran, never less. A row already DELETED keeps its end.
+func MarkVanished(cr *cloud.CloudResource, now time.Time) {
 	d := cr.Data
-	if str(d["runningSince"]) == "" {
-		return false
+	if str(d["status"]) == StatusDeleted {
+		return
 	}
-	ended, err := time.Parse(time.RFC3339, str(d["endedAt"]))
-	if err != nil || str(d["status"]) != StatusDeleted {
-		ended = now
-		if sd, err := time.Parse(time.RFC3339, str(d["shutdownTime"])); err == nil && sd.Before(now) {
-			ended = sd
+	end := now
+	if sd, err := time.Parse(time.RFC3339, str(d["shutdownTime"])); err == nil && sd.Before(now) {
+		end = sd
+	}
+	out := MarkDeleted(d, end)
+	// A build pod records its own start and end; one that failed before it started ran nothing.
+	if str(out["runningSince"]) == "" && str(d["kind"]) != "build" {
+		since := str(d["seenPendingAt"])
+		if since == "" {
+			since = str(d["startedAt"])
 		}
-		cr.Data = MarkDeleted(d, ended)
+		if since == "" && cr.CreatedAt != nil {
+			since = cr.CreatedAt.UTC().Format(time.RFC3339)
+		}
+		if since != "" {
+			out["runningSince"], out["runningSinceAssumed"] = since, true
+		}
 	}
-	return now.Sub(ended) < lingerFor
+	cr.Data = out
 }

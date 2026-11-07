@@ -21,6 +21,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/lock"
@@ -44,7 +45,11 @@ type DbaasFactory func(es *externalservice.ExternalService) (*dbaas.Service, err
 // Injectable so the pve sync walk is testable against an httptest fake.
 type ProxmoxFactory func(es *externalservice.ExternalService) (*pve.Service, error)
 
+// SandboxFactory builds the sandbox service for a sandbox provider. Injectable for tests.
+type SandboxFactory func(es *externalservice.ExternalService) (*sandbox.Service, error)
+
 type Job struct {
+	sandboxFor    SandboxFactory
 	projects      *project.Repo
 	services      *externalservice.Service
 	cloud         *cloud.Repo
@@ -82,6 +87,9 @@ func New(projects *project.Repo, services *externalservice.Service, cloudRepo *c
 		pveFor: func(es *externalservice.ExternalService) (*pve.Service, error) {
 			return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
 		},
+		sandboxFor: func(es *externalservice.ExternalService) (*sandbox.Service, error) {
+			return sandbox.New(es.SandboxConfig(), es.ID)
+		},
 		now: func() time.Time { return time.Now().UTC() },
 		log: log,
 	}
@@ -91,6 +99,7 @@ func (j *Job) WithCephClientFactory(f CephClientFactory) *Job { j.cephClientFor 
 func (j *Job) WithKamajiFactory(f KamajiFactory) *Job         { j.kamajiFor = f; return j }
 func (j *Job) WithDbaasFactory(f DbaasFactory) *Job           { j.dbaasFor = f; return j }
 func (j *Job) WithProxmoxFactory(f ProxmoxFactory) *Job       { j.pveFor = f; return j }
+func (j *Job) WithSandboxFactory(f SandboxFactory) *Job       { j.sandboxFor = f; return j }
 func (j *Job) WithNow(now func() time.Time) *Job              { j.now = now; return j }
 
 // WithSDNLock enables the isolation reconcile: it edits the rules a network change also edits, so
@@ -256,6 +265,9 @@ func (j *Job) syncService(ctx context.Context, p *project.Project, es *externals
 	}
 	if es.IsPowerDNS() {
 		return j.syncPowerDNSService(ctx, p, es)
+	}
+	if es.IsSandbox() {
+		return j.syncSandboxService(ctx, p, es)
 	}
 	// No other provider kinds exist.
 	return 0

@@ -5,8 +5,10 @@ package admin
 // in externalservicemut.go — no provider push). Shape: {"gpu": {"<model>": n, "*": n}} where
 // model names use the shared GPU alias vocabulary (see internal/cloud/gpu.go), plus the Proxmox
 // resource keys (externalservice.PVEQuotaKeys: servers, vcpus, ramMb, diskGb, networks,
-// floatingIps). Enforcement is the project cloud gate (project/gpuquota.go,
-// project/cloud_quota_pve.go). An empty body clears the quota; a Proxmox project then falls
+// floatingIps), and the sandbox keys (externalservice.SandboxQuotaKeys: sandboxes, sandboxVcpus,
+// sandboxRamMb, sandboxGpus; an absent one falls back to the provider's, then the built-in default).
+// Enforcement is the project cloud gate (project/gpuquota.go, project/cloud_quota_pve.go,
+// project/cloud_sandbox.go). An empty body clears the quota; a Proxmox project then falls
 // back to its provider's default quota.
 
 import (
@@ -15,6 +17,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -145,7 +148,7 @@ func validateProjectQuota(body pgdoc.M) *httpx.HTTPError {
 // aliases at the write boundary so admin/API/MCP callers all match flavor aliases.
 func normalizeProjectQuota(body pgdoc.M) (pgdoc.M, *httpx.HTTPError) {
 	normalizedBody := maps.Clone(body)
-	for _, key := range externalservice.PVEQuotaKeys {
+	for _, key := range append(slices.Clone(externalservice.PVEQuotaKeys), externalservice.SandboxQuotaKeys...) {
 		v, ok := body[key]
 		if !ok {
 			continue

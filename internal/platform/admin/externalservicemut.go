@@ -69,6 +69,7 @@ func (h *Handler) routeExternalServiceMut(r chi.Router) {
 	// POST probes the configured prometheus endpoint live (metricstest.go).
 	r.Put("/service/{id}/metrics-config", h.externalServiceUpdateMetricsConfig)
 	r.Post("/service/{id}/metrics-test", h.externalServiceMetricsTest)
+	h.routeSandboxProvider(r)
 }
 
 // serviceNotFoundErr is the 404 returned when a service id is not found
@@ -77,11 +78,6 @@ func (h *Handler) routeExternalServiceMut(r chi.Router) {
 func serviceNotFoundErr(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("Service not found: %s", id))
 }
-
-// errSandboxNotYet refuses the sandbox provider kind on create and on an update that turns a row
-// into one. The kind exists in code (internal/cloud/sandbox) but tenant code must not run before
-// the node firewall, quota, billing and suspend gate are in place (phases SB2b and SB3).
-var errSandboxNotYet = httpx.BadRequest("Sandbox providers cannot be created yet")
 
 // kamajiRemovedKeysErr refuses a kamaji config that still sets a key of the tenant-side proxmox-csi controller, so an
 // operator learns it no longer does anything instead of finding out from a cluster without volumes.
@@ -133,10 +129,6 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	if cfg, _ := doc["config"].(map[string]any); cfg["provider"] == "sandbox" {
-		httpx.WriteError(w, errSandboxNotYet)
-		return
-	}
 	if cfg, _ := doc["config"].(map[string]any); kamajiRemovedKeysErr(cfg) != nil {
 		httpx.WriteError(w, kamajiRemovedKeysErr(cfg))
 		return
@@ -151,6 +143,10 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 		doc["secret"] = h.esSvc.EncryptSecret(sec)
 	}
 	if herr := h.checkObjectStoreRow(r.Context(), doc); herr != nil {
+		httpx.WriteError(w, herr)
+		return
+	}
+	if herr := h.checkSandboxGoLive(r.Context(), doc); herr != nil {
 		httpx.WriteError(w, herr)
 		return
 	}
@@ -283,9 +279,6 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 		cfg := ensureConfig(doc)
 		for k, v := range c {
 			cfg[k] = v
-		}
-		if cfg["provider"] == "sandbox" {
-			return errSandboxNotYet
 		}
 		if _, ok := c["cluster"]; ok { // the body's cluster block replaced the stored one
 			if herr := kamajiRemovedKeysErr(cfg); herr != nil {
@@ -579,6 +572,11 @@ func (h *Handler) serviceFieldSet(w http.ResponseWriter, r *http.Request, apply 
 	}
 	if newConnection {
 		delete(doc, "provisionError") // it was about the old connection
+	}
+	// A sandbox provider stays or goes live only while its release gates hold.
+	if herr := h.checkSandboxGoLive(r.Context(), doc); herr != nil {
+		httpx.WriteError(w, herr)
+		return
 	}
 	if err := h.repo.ReplaceDoc(r.Context(), externalServiceCollection, id, doc); httpx.WriteError(w, err) {
 		return

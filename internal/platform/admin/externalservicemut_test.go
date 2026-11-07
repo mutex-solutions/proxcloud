@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -153,25 +155,42 @@ func TestApplyServiceConnectionBodyRefusesSNATRange(t *testing.T) {
 	}
 }
 
-// The sandbox kind is refused on create and on an update that turns a row into one (until SB3).
-// A nil repo means the refusal has to come before any write; other updates still go through.
-func TestSandboxProviderRefused(t *testing.T) {
-	h := &Handler{}
+// A sandbox provider goes live only while its release gates hold; DISABLED it may be stored at any time. A nil repo
+// means the refusal comes before any write.
+func TestSandboxProviderGoLive(t *testing.T) {
+	gates := []sandbox.Gate{{Name: "noderestriction", OK: true}, {Name: "isolation", OK: false, Detail: "no DROP"}, {Name: "fence", OK: true}}
+	h := &Handler{sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate { return gates }}
 	ctx := httpx.WithRC(t.Context(), &httpx.RequestContext{SigV4KeyID: "pk-test"})
+	body := `{"name":"sbx","config":{"provider":"sandbox","sandbox":{"templates":{"python":{"image":"python:3.12-slim"}}}},"secret":{"kubeconfig":"x"}}`
 	rec := httptest.NewRecorder()
-	h.externalServiceCreate(rec, httptest.NewRequest(http.MethodPost, "/service",
-		strings.NewReader(`{"name":"sbx","config":{"provider":"sandbox"},"secret":{"kubeconfig":"x"}}`)).WithContext(ctx))
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Sandbox providers cannot be created yet") {
-		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	h.externalServiceCreate(rec, httptest.NewRequest(http.MethodPost, "/service", strings.NewReader(body)).WithContext(ctx))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "isolation: no DROP") {
+		t.Fatalf("create with a gate failing: %d %s", rec.Code, rec.Body.String())
 	}
-	put := func(doc pgdoc.M, body string) *httpx.HTTPError {
-		return h.applyServiceConnectionBody(httptest.NewRequest(http.MethodPut, "/service/s", strings.NewReader(body)), doc)
+	doc := func(status string) pgdoc.M {
+		return pgdoc.M{"_id": "s1", "status": status, "secret": map[string]any{"kubeconfig": "x"},
+			"config": map[string]any{"provider": "sandbox", "sandbox": map[string]any{"templates": map[string]any{"python": map[string]any{"image": "python:3.12-slim"}}}}}
 	}
-	if put(pgdoc.M{"config": pgdoc.M{"provider": "dbaas"}}, `{"config":{"provider":"sandbox"}}`) == nil {
-		t.Fatal("update to the sandbox kind accepted")
+	if herr := h.checkSandboxGoLive(ctx, doc("DISABLED")); herr != nil {
+		t.Fatalf("DISABLED refused: %#v", herr)
 	}
-	if herr := put(pgdoc.M{"config": pgdoc.M{"provider": "dbaas"}}, `{"config":{"region":"r1"}}`); herr != nil {
-		t.Fatalf("an ordinary update refused: %#v", herr)
+	if herr := h.checkSandboxGoLive(ctx, doc("PUBLIC")); herr == nil || herr.Status != http.StatusConflict {
+		t.Fatalf("live with a gate failing: %#v", herr)
+	}
+	if herr := h.checkSandboxGoLive(ctx, pgdoc.M{"status": "PUBLIC", "config": map[string]any{"provider": "dbaas"}}); herr != nil {
+		t.Fatalf("another provider: %#v", herr)
+	}
+	gates[1].OK = true
+	if herr := h.checkSandboxGoLive(ctx, doc("PUBLIC")); herr != nil {
+		t.Fatalf("all gates hold: %#v", herr)
+	}
+	broken := doc("PUBLIC")
+	broken["config"].(map[string]any)["sandbox"] = map[string]any{}
+	if herr := h.checkSandboxGoLive(ctx, broken); herr == nil {
+		t.Fatal("a provider without templates went live")
+	}
+	if herr := (&Handler{}).checkSandboxGoLive(ctx, doc("PUBLIC")); herr == nil {
+		t.Fatal("no gate checker wired: went live")
 	}
 }
 

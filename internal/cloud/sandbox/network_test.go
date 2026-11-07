@@ -107,17 +107,32 @@ func TestValidIDAndLifecycle(t *testing.T) {
 		t.Errorf("pinned start lost: %v", d)
 	}
 
-	p := &SyncProvider{}
 	now := time.Date(2026, 11, 6, 2, 0, 0, 0, time.UTC)
-	never := &cloud.CloudResource{Data: map[string]any{"status": StatusPending}}
-	if p.Linger(never, now) {
-		t.Error("a sandbox that never ran has nothing to bill: archive at once")
-	}
+	p := &SyncProvider{svc: &Service{now: func() time.Time { return now }}}
 	expired := &cloud.CloudResource{Data: map[string]any{"status": StatusRunning, "runningSince": "2026-11-06T01:00:00Z", "shutdownTime": "2026-11-06T01:59:00Z"}}
-	if !p.Linger(expired, now) || expired.Data["status"] != StatusDeleted || expired.Data["endedAt"] != "2026-11-06T01:59:00Z" {
-		t.Errorf("a sandbox the controller removed ends at its shutdownTime: %v", expired.Data)
+	if keep, _ := p.KeepUnread(expired); keep || expired.Data["status"] != StatusDeleted || expired.Data["endedAt"] != "2026-11-06T01:59:00Z" {
+		t.Errorf("a sandbox the controller removed ends at its shutdownTime and is archived: %v", expired.Data)
 	}
-	if p.Linger(expired, now.Add(5*time.Minute)) {
-		t.Error("an ended sandbox is archived after the linger window")
+	// Never seen running: it may have run between two reads, so it bills from the last read that saw it pending.
+	unseen := &cloud.CloudResource{Data: map[string]any{"status": StatusPending, "seenPendingAt": "2026-11-06T01:58:30Z", "startedAt": "2026-11-06T01:58:00Z"}}
+	p.KeepUnread(unseen)
+	if unseen.Data["status"] != StatusDeleted || unseen.Data["runningSince"] != "2026-11-06T01:58:30Z" || unseen.Data["endedAt"] != "2026-11-06T02:00:00Z" {
+		t.Errorf("an unseen sandbox must bill from its last pending read: %v", unseen.Data)
+	}
+	created := now.Add(-40 * time.Second)
+	bare := &cloud.CloudResource{CreatedAt: &created, Data: map[string]any{"status": StatusPending}}
+	p.KeepUnread(bare)
+	if bare.Data["runningSince"] != "2026-11-06T01:59:20Z" {
+		t.Errorf("a row never read bills from its create: %v", bare.Data)
+	}
+	failedBuild := &cloud.CloudResource{CreatedAt: &created, Data: map[string]any{"kind": "build", "status": StatusPending}}
+	p.KeepUnread(failedBuild)
+	if failedBuild.Data["runningSince"] != nil {
+		t.Errorf("a build that never started bills nothing: %v", failedBuild.Data)
+	}
+	ended := &cloud.CloudResource{Data: map[string]any{"status": StatusDeleted, "endedAt": "2026-11-06T01:10:00Z"}}
+	p.KeepUnread(ended)
+	if ended.Data["endedAt"] != "2026-11-06T01:10:00Z" {
+		t.Errorf("a DELETED row keeps its end: %v", ended.Data)
 	}
 }

@@ -23,7 +23,8 @@ const (
 	TypeDNSZone              = "DNS_ZONE"
 	TypeKubernetesCluster    = "KUBERNETES_CLUSTER"
 	TypeDatabaseCluster      = "DATABASE_CLUSTER"
-	TypeSandbox              = "SANDBOX" // gVisor sandbox (sandbox provider); nothing syncs or bills it before SB3
+	TypeSandbox              = "SANDBOX"          // gVisor sandbox (sandbox provider), billed per minute while running
+	TypeSandboxSnapshot      = "SANDBOX_SNAPSHOT" // a sandbox's stored filesystem (pause, snapshot); billed per GB-hour, nothing writes one before SB7
 	TypeLoadBalancer         = "LOAD_BALANCER"
 	TypeFloatingIP           = "FLOATING_IP"
 	TypeNetwork              = "NETWORK"

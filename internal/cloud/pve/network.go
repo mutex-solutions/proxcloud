@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -492,20 +493,10 @@ func sameRule(a, b FirewallRule) bool {
 // made before it. PVE adds a rule on top, and every step fails closed: DROPs go in before anything
 // is removed, and an ACCEPT is only ever replaced by adding it after the old one is gone.
 func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string, blocked, sandbox []string) error {
-	_, poolNet, err := net.ParseCIDR(pool)
-	if err != nil {
-		return fmt.Errorf("pve isolation: invalid cidrPool %q", pool)
-	}
-	mgmt, complete, err := s.C.ManagementCIDRs(ctx)
+	want, owner, poolNet, complete, err := s.isolationWant(ctx, pool, blocked, sandbox)
 	if err != nil {
 		return err
 	}
-	blocked = slices.Compact(slices.Sorted(slices.Values(append(mgmt, blocked...))))
-	if sandbox, err = sandboxNets(poolNet, blocked, sandbox); err != nil {
-		return err
-	}
-	owner := s.isolationOwner()
-	want := isolationRules(poolNet.String(), blocked, sandbox, owner)
 	rules, err := s.C.ListClusterFirewallRules(ctx)
 	if err != nil {
 		return err
@@ -543,6 +534,66 @@ func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string
 	}
 	slices.Sort(cidrs)
 	return s.setProjectIsolation(ctx, projectID, cidrs)
+}
+
+// isolationWant is this portal's provider-wide isolation rule set (isolationRules over the management networks plus
+// blocked). complete is false when a node did not report its networks.
+func (s *Service) isolationWant(ctx context.Context, pool string, blocked, sandbox []string) (want []FirewallRule, owner string, poolNet *net.IPNet, complete bool, err error) {
+	if _, poolNet, err = net.ParseCIDR(pool); err != nil {
+		return nil, "", nil, false, fmt.Errorf("pve isolation: invalid cidrPool %q", pool)
+	}
+	mgmt, complete, err := s.C.ManagementCIDRs(ctx)
+	if err != nil {
+		return nil, "", nil, false, err
+	}
+	blocked = slices.Compact(slices.Sorted(slices.Values(append(mgmt, blocked...))))
+	if sandbox, err = sandboxNets(poolNet, blocked, sandbox); err != nil {
+		return nil, "", nil, false, err
+	}
+	owner = s.isolationOwner()
+	return isolationRules(poolNet.String(), blocked, sandbox, owner), owner, poolNet, complete, nil
+}
+
+// CheckSandboxIsolation is the isolation release gate of a sandbox provider (docs/managed-sandbox.md §3): read-only,
+// with the portal's token, it checks that the datacenter firewall is on and that this portal's isolation DROPs are in
+// the cluster firewall, enabled, exactly as ReconcileIsolation writes them for these sandbox networks: the tenant pool
+// may not reach them, and they reach neither the pool nor a blocked network.
+func (s *Service) CheckSandboxIsolation(ctx context.Context, pool string, blocked, sandbox []string) error {
+	if len(sandbox) == 0 {
+		return errors.New("pve isolation: network.sandboxCidrs is empty, so no rule fences the sandbox network")
+	}
+	want, owner, _, complete, err := s.isolationWant(ctx, pool, blocked, sandbox)
+	if err != nil {
+		return err
+	}
+	if !complete {
+		return errors.New("pve isolation: a PVE node did not report its networks, so the rule set cannot be checked")
+	}
+	on, err := s.C.DatacenterFirewallEnabled(ctx)
+	if err != nil {
+		return err
+	}
+	if !on {
+		return errors.New("pve isolation: the datacenter firewall is off, so no isolation rule is enforced")
+	}
+	rules, err := s.C.ListClusterFirewallRules(ctx)
+	if err != nil {
+		return err
+	}
+	var mine []FirewallRule
+	for _, r := range rules {
+		if r.Comment == owner {
+			if r.Enable != 1 {
+				return fmt.Errorf("pve isolation: rule %d (%s) is disabled", r.Pos, owner)
+			}
+			mine = append(mine, r)
+		}
+	}
+	if !slices.EqualFunc(mine, want, sameRule) {
+		return fmt.Errorf("pve isolation: the %s rules in the cluster firewall are not the ones for sandbox networks %s (%d in place, %d wanted); the next sync rewrites them",
+			owner, strings.Join(sandbox, ","), len(mine), len(want))
+	}
+	return nil
 }
 
 // sandboxNets normalises the sandbox networks. One that overlaps the tenant pool is refused: a

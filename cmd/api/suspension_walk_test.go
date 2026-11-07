@@ -440,3 +440,23 @@ func TestSyncKeepsTheMark(t *testing.T) {
 		t.Fatal("the sync took the mark")
 	}
 }
+
+// D9: a suspension deletes the project's running sandboxes once the project is DISABLED, so nothing can start a new one
+// while it runs; a resume brings none back.
+func TestSuspendDeletesSandboxesOfADisabledProject(t *testing.T) {
+	e := newWalkEnv(t)
+	e.project("p1", project.StatusEnabled, 101)
+	var seen []string
+	e.sus.deleteSandboxes = func(ctx context.Context, p *project.Project) (int, error) {
+		seen = append(seen, p.ID+":"+e.projectStatus(p.ID))
+		return 1, nil
+	}
+	e.suspend()
+	if !slices.Equal(seen, []string{"p1:" + project.StatusDisabled}) {
+		t.Fatalf("sandbox delete on suspend: %v", seen)
+	}
+	e.unsuspend(context.Background())
+	if len(seen) != 1 {
+		t.Fatalf("a resume must not touch sandboxes: %v", seen)
+	}
+}

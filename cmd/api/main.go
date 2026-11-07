@@ -31,6 +31,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metricsjob"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/syncjob"
 	"github.com/mutex-solutions/proxcloud/internal/config"
 	"github.com/mutex-solutions/proxcloud/internal/health"
@@ -260,6 +261,9 @@ func run() error {
 	projectH.SetDbaas(func(es *externalservice.ExternalService) (*dbaas.Service, error) {
 		return dbaas.New(es.DbaasConfig(), es.ID)
 	})
+	// Sandboxes — enables sandbox provisioning and the SANDBOX surface (Sandbox CRs on the provider's sandbox cluster).
+	// The release gates are wired once the sync job exists, below.
+	projectH.SetSandbox(sandboxServiceFor)
 	// Proxmox VE — enables proxmox provisioning (project pool) + the VM write surface.
 	holderLocks := lock.New(pg)
 	pveWithHolderLock := func(es *externalservice.ExternalService) (*pve.Service, error) {
@@ -506,6 +510,8 @@ func run() error {
 			cloud.TypeDatabaseCluster:   billingresource.NewDatabaseClusterProvider(),
 			cloud.TypeBucket:            billingresource.NewBucketProvider(),
 			cloud.TypeShare:             billingresource.NewShareProvider(),
+			cloud.TypeSandbox:           billingresource.NewSandboxProvider(),
+			cloud.TypeSandboxSnapshot:   billingresource.NewSandboxSnapshotProvider(),
 		},
 	})
 	// Client for the standalone billing service. nil when PROXCLOUD_BILLING_URL is unset, which is
@@ -525,13 +531,18 @@ func run() error {
 		WithCSIVolumes(func(region, projectID string, es *externalservice.ExternalService) providers.Provider {
 			return &csigw.VolumeRows{Reg: csiStore, ServiceID: es.ID, Project: projectID, Region: region, GW: gwPVE,
 				ProfileOf: es.PVEVolumeProfileFunc()}
-		})
+		}).
+		WithSandboxFactory(sandboxServiceFor)
+	// Sandbox release gates (docs/managed-sandbox.md §3): read through the Proxmox provider that fences the workers.
+	projectH.SetSandboxGates(syncJob.SandboxReleaseGates)
+	adminH.SetSandboxGates(syncJob.SandboxReleaseGates)
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)
 	suspensionJob.SetNotifier(mailSvc)
 	suspensionJob.SetAudit(auditSvc) // writes a system audit trail for CREATE/NOTIFY/SUSPEND/UNSUSPEND
-	cloudSuspender := billingCloudSuspender{orgs: orgRepo, projects: projectRepo, cloud: cloudRepo, services: esSvc, log: log, allowsEnabled: projectSvc.BillingAllowsEnabled}
+	cloudSuspender := billingCloudSuspender{orgs: orgRepo, projects: projectRepo, cloud: cloudRepo, services: esSvc, log: log, allowsEnabled: projectSvc.BillingAllowsEnabled,
+		deleteSandboxes: projectH.DeleteProjectSandboxes}
 	suspensionJob.SetCloudSuspender(cloudSuspender)
 	// ActivationService (billing/activation): the DIRECT activate/suspend/resume driven by
 	// the admin status transitions + the public Admin API. Activating a profile provisions
@@ -796,6 +807,10 @@ func run() error {
 			},
 			"run-pve-state": func(w http.ResponseWriter, r *http.Request) {
 				n, err := syncJob.RunPVEState(r.Context())
+				jobResult(w, map[string]any{"changed": n}, err)
+			},
+			"run-sandbox-state": func(w http.ResponseWriter, r *http.Request) {
+				n, err := syncJob.RunSandboxState(r.Context())
 				jobResult(w, map[string]any{"changed": n}, err)
 			},
 			"run-pve-tasks": func(w http.ResponseWriter, r *http.Request) {
@@ -1168,6 +1183,11 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 				log.Error("pve state sync job", "err", err)
 			}
 		}},
+		{Name: "sandboxStateSync", Spec: scheduler.SandboxStateSyncSpec, AtMostFor: 2 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
+			if _, err := sync.RunSandboxState(ctx); err != nil {
+				log.Error("sandbox state sync job", "err", err)
+			}
+		}},
 		{Name: "pveTaskPoll", Spec: scheduler.PVETaskPollSpec, AtMostFor: time.Minute, AtLeastFor: 10 * time.Second, Fn: func(ctx context.Context) {
 			if _, err := sync.RunPVETasks(ctx); err != nil {
 				log.Error("pve task poll job", "err", err)
@@ -1205,6 +1225,12 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 	}
 }
 
+// sandboxServiceFor builds the sandbox service for a sandbox provider (one place, shared by the project handler and
+// the sync job).
+func sandboxServiceFor(es *externalservice.ExternalService) (*sandbox.Service, error) {
+	return sandbox.New(es.SandboxConfig(), es.ID)
+}
+
 // projectTeardownDeleter adapts the project teardown (PVE VMs, networks, security groups and
 // public IPs, managed clusters, databases, buckets) to the scheduled deletion job, so a
 // scheduled delete cleans up exactly what delete-project-now does.
@@ -1226,6 +1252,9 @@ type billingCloudSuspender struct {
 	log      *slog.Logger
 	// allowsEnabled says nothing on the billing side holds a DISABLED project. Nil: FinishResumes lifts none.
 	allowsEnabled func(ctx context.Context, p *project.Project) (bool, error)
+	// deleteSandboxes ends a project's running sandboxes (D9: a suspension deletes them, keeps snapshots, and a resume
+	// brings none back). Nil: sandboxes are left alone.
+	deleteSandboxes func(ctx context.Context, p *project.Project) (int, error)
 }
 
 func (s billingCloudSuspender) SuspendBillingProfileClouds(ctx context.Context, bpID string) error {
@@ -1326,6 +1355,15 @@ func (s billingCloudSuspender) liftForResume(ctx context.Context, p *project.Pro
 // and per-service failures are logged and skipped, and the mark stays for the next pass. Status flips stay with the callers (bp
 // walk above; admin status-update handler).
 func (s billingCloudSuspender) pauseProjectServers(ctx context.Context, p *project.Project, pause bool) {
+	if pause && s.deleteSandboxes != nil {
+		// Sandboxes are not paused: they are deleted (D9), and billing ends at the delete. The project is DISABLED
+		// first, so nothing can start a new one while this runs; a failure is retried by the walk's next pass.
+		if n, err := s.deleteSandboxes(ctx, p); err != nil {
+			s.log.Error("suspender: delete sandboxes", "project", p.ID, "deleted", n, "err", err)
+		} else if n > 0 {
+			s.log.Info("suspender: sandboxes deleted", "project", p.ID, "deleted", n)
+		}
+	}
 	for _, serviceID := range p.ServiceIDs() {
 		es, err := s.services.Get(ctx, serviceID)
 		if err != nil || es == nil || es.Type != externalservice.TypeCloud || !es.IsProxmox() {

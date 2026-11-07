@@ -42,7 +42,7 @@ export function useCloudScope(pid: string): CloudScope | undefined {
   // DBaaS (managed databases), and any may appear first — skip them all, mirroring the
   // backend's resolveServiceID.
   const loc =
-    data?.find((candidate) => !isObjectProvider(candidate.provider) && candidate.provider !== "kamaji" && candidate.provider !== "dbaas") ?? data?.[0]
+    data?.find((candidate) => !isObjectProvider(candidate.provider) && candidate.provider !== "kamaji" && candidate.provider !== "dbaas" && candidate.provider !== "sandbox") ?? data?.[0]
   if (!loc?.serviceId || !loc?.region) return undefined
   return { serviceId: loc.serviceId, region: loc.region }
 }

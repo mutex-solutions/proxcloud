@@ -321,7 +321,7 @@ func TestPullSecretReadErrorIsNotNoSource(t *testing.T) {
 	if errors.Is(err, ErrBadBuild) || !errors.As(err, &ae) || ae.Status != 403 {
 		t.Fatalf("unreadable source: want the 403, got %v", err)
 	}
-	if err := s.EnsureProjectNamespace(context.Background(), "p1"); err != nil {
+	if err := s.EnsureProjectNamespace(context.Background(), "p1", nil); err != nil {
 		t.Fatalf("namespace ensure must not fail on an unreadable pull secret: %v", err)
 	}
 	if sec, _ := f.GetCore(context.Background(), "secrets", NamespaceFor("p1"), TemplatePullSecret); sec != nil {

@@ -39,11 +39,23 @@ func errQuotaUsageUnavailable() *httpx.HTTPError {
 }
 
 // pveQuotaLimits is the quota that applies to proj on es (see the file comment).
+// The sandbox keys (externalservice.SandboxQuotaKeys) share the document but are not a Proxmox quota: a project that
+// holds only those still gets the provider default.
 func pveQuotaLimits(proj *Project, es *externalservice.ExternalService) map[string]any {
-	if len(proj.Quota) > 0 {
+	if hasPVEQuota(proj.Quota) {
 		return proj.Quota
 	}
 	return es.PVEDefaultQuota()
+}
+
+// hasPVEQuota reports whether q holds any key other than the sandbox ones.
+func hasPVEQuota(q map[string]any) bool {
+	for k := range q {
+		if !slices.Contains(externalservice.SandboxQuotaKeys, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // enforcePVEQuota gates a demand against the project's limits using the cached rows

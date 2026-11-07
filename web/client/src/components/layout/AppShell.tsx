@@ -2,7 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate, useParams } from "react-rout
 import {
   Boxes, BarChart3, BookOpen, Camera, Check, ChevronsUpDown, CreditCard, Database, DatabaseZap, FileClock, FolderKanban, HardDrive,
   Image, KeyRound, LayoutDashboard, LogOut, Monitor, Moon, Network, Receipt, Scale,
-  ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, Sun, UserCircle, Users, Wallet, FolderTree, Globe } from "lucide-react"
+  ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, SquareTerminal, Sun, UserCircle, Users, Wallet, FolderTree, Globe } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useAuth } from "@/lib/auth"
 import { useCloudFeatures, useFeatures, useProjects, useProjectInit, useUIMenu, type CloudFeature } from "@/lib/hooks"
@@ -74,6 +74,7 @@ function navGroups(pid: string): Group[] {
         { to: `${p}/kubernetes`, label: "Kubernetes", icon: Boxes, service: "kubernetes" },
         // DatabaseZap: plain Database is taken by object storage above.
         { to: `${p}/databases`, label: "Databases", icon: DatabaseZap, service: "database" },
+        { to: `${p}/sandboxes`, label: "Sandboxes", icon: SquareTerminal, service: "sandbox" },
       ],
     },
     {
