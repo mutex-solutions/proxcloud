@@ -22,6 +22,11 @@
     ns: "{{ pc.namespace }}"
     key_file: "{{ pc_gen }}/admin-api-key.json"
     api_key: "{{ lookup('ansible.builtin.file', key_file) | from_json }}"
+    # What stage 55 (registry) recorded: its CA and the template build bucket (docs/managed-sandbox.md §7).
+    pc_sbx_reg: >-
+      {{ (lookup('ansible.builtin.file', pc_gen ~ '/sandbox-registry.json') | from_json)
+         if pc_sandbox_registry_on and (pc_gen ~ '/sandbox-registry.json') is file else {} }}
+    pc_sbx_builds: "{{ pc_sbx_reg.buildStorage | default({}) }}"
     node_ips: "{{ lh.pc_status.json.data | selectattr('type', 'eq', 'node') | map(attribute='ip') | sort | list }}"
     zone:
       kind: "{{ pc.network.kind }}"
@@ -213,6 +218,8 @@
                           if pc.sandbox.entry.public.bridge else {})) if pc_sandbox_edge_on else {} }}
           # Stage 55's registry: the one address and port outside the vnet the workers pull images from.
           registry: "{{ {'address': pc.sandbox.registry.address, 'port': 443} if pc_sandbox_registry_on else {} }}"
+          # The build bucket, where build pods fetch their contexts.
+          buildStorage: "{{ {'address': pc_sbx_builds.address, 'port': pc_sbx_builds.port} if pc_sbx_builds else {} }}"
       when:
         - pc_sandbox_on
         - (pc_gen ~ '/sandbox-firewall.kubeconfig') is file
@@ -264,7 +271,20 @@
               limits: "{{ pc.sandbox.limits }}"
               templateRegistry: "{{ (pc_sandbox_registry_host ~ '/t') if pc_sandbox_registry_on else '' }}"
               imageAdoption: "{{ pc.sandbox.registry.adoption if pc_sandbox_registry_on else '' }}"
-          secret: {kubeconfig: "{{ lookup('ansible.builtin.file', pc_gen ~ '/sandbox-portal.kubeconfig') }}"}
+              # Custom template builds and the pruning of their images (docs/managed-sandbox.md §7).
+              registryCa: "{{ pc_sbx_reg.ca | default('') }}"
+              registryPrune: "{{ pc.sandbox.registry.prune if pc_sandbox_registry_on else '' }}"
+              buildStorage: >-
+                {{ {'endpoint': pc_sbx_builds.endpoint, 'region': pc_sbx_builds.region, 'bucket': pc_sbx_builds.bucket}
+                   if pc_sbx_builds else {} }}
+          secret: >-
+            {{ {'kubeconfig': lookup('ansible.builtin.file', pc_gen ~ '/sandbox-portal.kubeconfig')}
+               | combine({'registryGcUser': 'gc',
+                          'registryGcPassword': lookup('ansible.builtin.file', pc_gen ~ '/sandbox-registry-gc') | trim,
+                          'buildStorageAccessKey': (pc_sbx_builds.bucket ~ '-svc') if pc.object_store.mode != 'external' else pc.object_store.access_key,
+                          'buildStorageSecretKey': (lookup('ansible.builtin.file', pc_gen ~ '/sandbox-builds-s3-secret') | trim)
+                                                   if pc.object_store.mode != 'external' else pc.object_store.secret_key}
+                         if pc_sbx_builds else {}) }}
       register: pc_sbx_provider
       no_log: true
     - name: Say how the sandbox provider goes live

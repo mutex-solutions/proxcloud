@@ -41,6 +41,8 @@ func (h *Handler) E2BRoutes(r chi.Router) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(e2bOpenAPI)
 	})
+	// The SDK uploads a template's COPY context here with the URL GET .../files/{hash} answered (the token is the auth).
+	r.Put("/templates/{templateID}/files/{hash}/upload", h.e2bTemplateUpload)
 	r.Group(func(r chi.Router) {
 		r.Use(h.e2bAuth)
 		r.Post("/sandboxes", h.e2bCreate)
@@ -61,6 +63,14 @@ func (h *Handler) E2BRoutes(r chi.Router) {
 		r.Get("/templates", h.e2bTemplates)
 		r.Get("/templates/aliases/{alias}", h.e2bTemplateAlias)
 		r.Get("/templates/{templateID}", h.e2bTemplateGet)
+		r.Delete("/templates/{templateID}", h.e2bTemplateDelete)
+		r.Get("/templates/{templateID}/tags", h.e2bTemplateTags)
+		r.Post("/templates/tags", h.e2bTemplateTagsAssign)
+		r.Delete("/templates/tags", h.e2bTemplateTagsRemove)
+		r.Post("/v3/templates", h.e2bTemplateRequest)
+		r.Get("/templates/{templateID}/files/{hash}", h.e2bTemplateFile)
+		r.Post("/v2/templates/{templateID}/builds/{buildID}", h.e2bTemplateBuild)
+		r.Get("/templates/{templateID}/builds/{buildID}/status", h.e2bTemplateBuildStatus)
 	})
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see docs/e2b-compat.md)")
@@ -339,13 +349,26 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
+	custom, customName, err := h.resolveCustomTemplate(r.Context(), c.proj.ID, b.TemplateID)
+	if errors.Is(err, sandbox.ErrBadTemplate) {
+		e2bErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err != nil {
+		e2bFail(w, err)
+		return
+	}
 	spec := sandbox.Spec{
 		ProjectID: c.proj.ID,
 		Template:  b.TemplateID,
+		Custom:    custom,
 		Env:       b.EnvVars,
 		Metadata:  b.Metadata,
 		GPU:       b.GPU,
 		Network:   b.Network.policy(b.AllowInternetAccess),
+	}
+	if custom != nil {
+		spec.Template = customName
 	}
 	spec.TimeoutSeconds = 300 // E2B's default; the SDKs always send one
 	if b.Timeout != nil {
@@ -693,7 +716,7 @@ func (h *Handler) e2bMetricsMany(w http.ResponseWriter, _ *http.Request) {
 	e2bJSON(w, http.StatusOK, map[string]any{"sandboxes": map[string]any{}})
 }
 
-// ---- templates (built-in only before SB6) --------------------------------------------------------
+// ---- templates: the project's own (e2b_templates.go) and the built-in ones ------------------------
 
 func e2bTemplate(name string, t sandbox.Template) map[string]any {
 	return map[string]any{
@@ -716,16 +739,34 @@ func e2bTemplate(name string, t sandbox.Template) map[string]any {
 }
 
 func (h *Handler) e2bTemplates(w http.ResponseWriter, r *http.Request) {
-	cfg := e2bFrom(r).ss.Config()
+	c := e2bFrom(r)
+	cfg := c.ss.Config()
 	out := []any{}
+	for _, t := range h.projectTemplates(r.Context(), c.proj.ID) {
+		out = append(out, t.e2bView())
+	}
 	for _, name := range cfg.TemplateNames() {
 		out = append(out, e2bTemplate(name, cfg.Templates[name]))
 	}
 	e2bJSON(w, http.StatusOK, out)
 }
 
+// projectTemplate is the caller's project template by id or name (nil when there is none).
+func (h *Handler) projectTemplate(r *http.Request, idOrName string) *sandboxTemplateDoc {
+	if h.sbTemplates == nil {
+		return nil
+	}
+	name, _ := splitNameTag(idOrName)
+	t, _ := h.loadTemplate(r.Context(), e2bFrom(r).proj.ID, name)
+	return t
+}
+
 func (h *Handler) e2bTemplateAlias(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "alias")
+	if t := h.projectTemplate(r, name); t != nil {
+		e2bJSON(w, http.StatusOK, map[string]any{"templateID": t.ID, "public": false})
+		return
+	}
 	if _, ok := e2bFrom(r).ss.Config().Templates[name]; !ok {
 		e2bErr(w, http.StatusNotFound, fmt.Sprintf("template %q not found", name))
 		return
@@ -735,6 +776,17 @@ func (h *Handler) e2bTemplateAlias(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) e2bTemplateGet(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "templateID")
+	if pt := h.projectTemplate(r, name); pt != nil {
+		v := pt.e2bView()
+		builds := []any{}
+		for _, b := range pt.Builds {
+			builds = append(builds, map[string]any{"buildID": b.BuildID, "status": b.Status, "cpuCount": pt.CPU, "memoryMB": pt.MemoryGiB * 1024,
+				"createdAt": b.CreatedAt, "finishedAt": b.FinishedAt})
+		}
+		v["builds"] = builds
+		e2bJSON(w, http.StatusOK, v)
+		return
+	}
 	t, ok := e2bFrom(r).ss.Config().Templates[name]
 	if !ok {
 		e2bErr(w, http.StatusNotFound, fmt.Sprintf("template %q not found", name))

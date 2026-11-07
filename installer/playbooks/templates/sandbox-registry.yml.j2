@@ -2,7 +2,7 @@
     of the object store, TLS from a CA of its own (the sandbox nodes trust that CA alone for this address), and the
     account sync next to it (sandbox-proxy registry-users), which writes Zot's users and access rules from the sandbox
     cluster's projects. Vars: pc_sbx_reg_ns, pc_sbx_reg_s3 {endpoint, region, bucket, access, secret},
-    pc_sbx_reg_users {admin, push, pull-nodes, key}, pc_sbx_reg_kubeconfig, pc_sbx_reg_sync_image. -#}
+    pc_sbx_reg_users {admin, gc, pull-nodes, key}, pc_sbx_reg_kubeconfig, pc_sbx_reg_sync_image. -#}
 {%- set ns = pc_sbx_reg_ns -%}
 {%- set addr = pc.sandbox.registry.address -%}
 {%- set s3 = pc_sbx_reg_s3 -%}

@@ -408,6 +408,9 @@ type PVESandbox struct {
 	Kubeconfig      string // secret.sandboxKubeconfig: the sandbox cluster, nodes get/list/patch
 	Proxy           PVESandboxProxy
 	Registry        PVESandboxRegistry
+	// BuildStorage is config.sandbox.buildStorage: the template build bucket's endpoint as the workers reach it
+	// (docs/managed-sandbox.md §7), the one more place outside the subnet build pods fetch from. Empty: no rule.
+	BuildStorage PVESandboxRegistry
 }
 
 // PVESandboxRegistry is config.sandbox.registry: the sandbox registry's address and port (docs/managed-sandbox.md §6),
@@ -448,6 +451,9 @@ func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
 	}
 	if r, _ := s["registry"].(map[string]any); r != nil {
 		cfg.Registry = PVESandboxRegistry{Address: str(r["address"]), Port: intOf(r["port"])}
+	}
+	if b, _ := s["buildStorage"].(map[string]any); b != nil {
+		cfg.BuildStorage = PVESandboxRegistry{Address: str(b["address"]), Port: intOf(b["port"])}
 	}
 	return cfg, cfg.Pool != ""
 }

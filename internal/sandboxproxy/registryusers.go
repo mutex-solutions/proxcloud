@@ -3,10 +3,12 @@ package sandboxproxy
 // registryusers.go — the sandbox registry's accounts (docs/managed-sandbox.md §6). The registry (Zot) runs on the
 // services cluster; this keeps its users and access rules in step with the projects on the sandbox cluster:
 //
-//	pull-<project>  reads library/** and t/<project>/**     Secret sandbox-template-pull in sb-<project>
-//	pull-nodes      reads library/**                        Secret sandbox-registry-nodes in the system namespace
-//	push            writes t/** (template builds), never library/**
-//	admin           everything (the installer's mirror of the built-in images)
+//	pull-<project>   reads library/** and t/<project>/**                    Secret sandbox-template-pull in sb-<project>
+//	build-<project>  reads library/** and t/<project>/**, writes t/<project>/** (template builds of that project, never
+//	                 library/** or another project)                         Secret registry-build-<project> in sbx-build
+//	pull-nodes       reads library/**                                       Secret sandbox-registry-nodes in the system namespace
+//	gc               reads and deletes t/** (the portal's pruning of unreferenced template images)
+//	admin            everything (the installer's mirror of the built-in images)
 //
 // A project's password is derived from a key (HMAC), so nothing is stored per project: a restart writes the same
 // file. Zot reloads its config and htpasswd when they change on disk.
@@ -35,7 +37,7 @@ import (
 // Registry account names and the Secrets that carry pull credentials.
 const (
 	RegistryAdminUser  = "admin"
-	RegistryPushUser   = "push"
+	RegistryGCUser     = "gc"
 	RegistryNodesUser  = "pull-nodes"
 	RegistryNodeSecret = "sandbox-registry-nodes"
 )
@@ -52,7 +54,7 @@ type RegistryUsers struct {
 	Base     map[string]any    // Zot's config without http.auth and http.accessControl (storage, TLS, log)
 	Host     string            // the registry as the nodes pull from it: host[:port]
 	Key      []byte            // derives pull-<project> passwords
-	Static   map[string]string // admin, push, pull-nodes -> password
+	Static   map[string]string // admin, gc, pull-nodes -> password
 	Dir      string            // config.json and htpasswd, read by Zot
 	SystemNS string            // where the nodes' Secret goes (sandbox-system)
 	// ServiceID, when set, counts only the namespaces of that sandbox provider (proxcloud.io/service): a cluster
@@ -64,6 +66,9 @@ type RegistryUsers struct {
 	projects []string             // as last written
 	written  bool
 	kept     bool // config.json was on disk at start and is kept until the first list succeeds
+	// applied: build Secrets written by this process (ns/name -> content). Those are applied blind (this identity
+	// cannot read Secrets in sbx-build, where user builds keep their registry credentials), once per process.
+	applied map[string]string
 }
 
 // Ready reports that Zot has a config to serve: written by this process, or kept from before a restart.
@@ -99,20 +104,22 @@ func RegistryProjects(namespaces []map[string]any) []string {
 }
 
 // ZotAccess is http.accessControl for these projects. Zot applies the most specific matching pattern, so a project's
-// pattern repeats the push user's rights.
+// pattern repeats the gc user's rights.
 func ZotAccess(projects []string) map[string]any {
 	rw := []any{"read", "create", "update"}
+	gc := map[string]any{"users": []any{RegistryGCUser}, "actions": []any{"read", "delete"}}
 	pull := []any{RegistryNodesUser}
 	repos := map[string]any{
 		"library/**": map[string]any{"policies": []any{map[string]any{"groups": []any{"pull"}, "actions": []any{"read"}}}, "defaultPolicy": []any{}},
-		"t/**":       map[string]any{"policies": []any{map[string]any{"users": []any{RegistryPushUser}, "actions": rw}}, "defaultPolicy": []any{}},
+		"t/**":       map[string]any{"policies": []any{gc}, "defaultPolicy": []any{}},
 	}
 	for _, p := range projects {
-		u := "pull-" + p
-		pull = append(pull, u)
+		// The build account reads the built-in images too: a build from a built-in template starts from one.
+		pull = append(pull, "pull-"+p, "build-"+p)
 		repos["t/"+p+"/**"] = map[string]any{"policies": []any{
-			map[string]any{"users": []any{u}, "actions": []any{"read"}},
-			map[string]any{"users": []any{RegistryPushUser}, "actions": rw},
+			map[string]any{"users": []any{"pull-" + p}, "actions": []any{"read"}},
+			map[string]any{"users": []any{"build-" + p}, "actions": rw},
+			gc,
 		}, "defaultPolicy": []any{}}
 	}
 	return map[string]any{
@@ -161,8 +168,34 @@ func (r *RegistryUsers) Pass(ctx context.Context) (changed bool, err error) {
 		if err := r.ensureSecret(ctx, sandbox.NamespaceFor(p), sandbox.TemplatePullSecret, "pull-"+p, labels); err != nil {
 			errs = append(errs, err)
 		}
+		if err := r.applySecret(ctx, sandbox.BuildNamespace, sandbox.BuildSecretFor(p), "build-"+p, labels); err != nil {
+			errs = append(errs, err)
+		}
 	}
+	// ponytail: a removed project's build Secret stays in sbx-build; its account is gone from Zot with the namespace.
 	return changed, errors.Join(errs...)
+}
+
+// applySecret writes a Secret without reading it first (sbx-build: the build pods' users' credentials live there),
+// once per process unless its content changes.
+func (r *RegistryUsers) applySecret(ctx context.Context, ns, name, user string, labels map[string]any) error {
+	want := DockerConfig(r.Host, user, r.password(user))
+	key := ns + "/" + name
+	if r.applied[key] == string(want) {
+		return nil
+	}
+	if err := r.API.ApplyCore(ctx, "secrets", map[string]any{
+		"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/dockerconfigjson",
+		"metadata": map[string]any{"name": name, "namespace": ns, "labels": labels},
+		"data":     map[string]any{".dockerconfigjson": base64.StdEncoding.EncodeToString(want)},
+	}); err != nil {
+		return fmt.Errorf("write %s: %w", key, err)
+	}
+	if r.applied == nil {
+		r.applied = map[string]string{}
+	}
+	r.applied[key] = string(want)
+	return nil
 }
 
 // ManagedByRegistry marks the pull Secrets this sync writes (the portal leaves them alone).
@@ -201,9 +234,9 @@ func (r *RegistryUsers) htpasswd(users []string) ([]byte, error) {
 }
 
 func (r *RegistryUsers) write(projects []string) error {
-	users := []string{RegistryAdminUser, RegistryPushUser, RegistryNodesUser}
+	users := []string{RegistryAdminUser, RegistryGCUser, RegistryNodesUser}
 	for _, p := range projects {
-		users = append(users, "pull-"+p)
+		users = append(users, "pull-"+p, "build-"+p)
 	}
 	ht, err := r.htpasswd(users)
 	if err != nil {
@@ -268,7 +301,7 @@ func (r *RegistryUsers) ensureSecret(ctx context.Context, ns, name, user string,
 // ReadRegistryUsersDir reads the static passwords and the key from files named after them (a mounted Secret).
 func ReadRegistryUsersDir(dir string) (static map[string]string, key []byte, err error) {
 	static = map[string]string{}
-	for _, u := range []string{RegistryAdminUser, RegistryPushUser, RegistryNodesUser} {
+	for _, u := range []string{RegistryAdminUser, RegistryGCUser, RegistryNodesUser} {
 		b, err := os.ReadFile(filepath.Join(dir, u))
 		if err != nil {
 			return nil, nil, err

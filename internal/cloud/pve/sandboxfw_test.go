@@ -81,12 +81,22 @@ func TestSandboxGenerationRegistry(t *testing.T) {
 		"a name":            func(f *SandboxFirewall) { f.RegistryAddress = "registry.example.org" },
 		"a network":         func(f *SandboxFirewall) { f.RegistryAddress = "10.20.0.0/24" },
 		"port out of range": func(f *SandboxFirewall) { f.RegistryAddress, f.RegistryPort = "10.20.0.226", 70000 },
+		"bucket in subnet":  func(f *SandboxFirewall) { f.BuildStorageAddress = "10.110.0.250" },
+		"bucket by name":    func(f *SandboxFirewall) { f.BuildStorageAddress = "s3.example.org" },
 	} {
 		f := testSandbox()
 		mod(&f)
 		if _, err := f.generation(); err == nil {
 			t.Errorf("%s: want an error", name)
 		}
+	}
+	// The build bucket is one more address and port, the same way.
+	f = testSandbox()
+	f.BuildStorageAddress, f.BuildStoragePort = "10.20.0.41", 9000
+	g, err = f.generation()
+	if err != nil || len(g.Rules) != len(base.Rules)+1 ||
+		!slices.ContainsFunc(g.Rules, func(r FirewallRule) bool { return r.Dest == "10.20.0.41" && r.DPort == "9000" && r.Type == "out" }) {
+		t.Fatalf("build storage rule: %v %+v", err, g.Rules)
 	}
 }
 

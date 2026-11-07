@@ -42,9 +42,14 @@
       secret: "{{ bucket_secret if pc.object_store.mode != 'external' else pc.object_store.secret_key }}"
     pc_sbx_reg_users:
       admin: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-admin ' ~ pc_alnum) }}"
-      push: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-push ' ~ pc_alnum) }}"
+      # the portal's pruning of unreferenced template images (read and delete on t/** only); stage 60 hands it over
+      gc: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-gc ' ~ pc_alnum) }}"
       pull-nodes: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-pull-nodes ' ~ pc_alnum) }}"
       key: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-key ' ~ pc_alnum) }}"
+    # The template build bucket: its own service user, which stage 60 gives the sandbox provider.
+    builds_secret: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-builds-s3-secret ' ~ pc_alnum) }}"
+    pc_sbx_build_s3_host: "{{ pc_sbx_reg_s3.endpoint | urlsplit('hostname') }}"
+    pc_sbx_build_s3_port: "{{ pc_sbx_reg_s3.endpoint | urlsplit('port') or (443 if pc_sbx_reg_s3.endpoint.startswith('https://') else 80) }}"
     pc_sbx_proxy_source: "{{ pc.sandbox.proxy.image or (pc.images.registry ~ '/proxcloud-sandbox-proxy:' ~ pc_ver.proxcloud) }}"
     pc_sbx_reg_sync_image: "{{ pc_sbx_proxy_source }}"
     images: "{{ hostvars.localhost.pc_sbx_images | default([]) }}"
@@ -59,8 +64,16 @@
     - name: Skip until stage 55 built the cluster
       ansible.builtin.meta: end_play
       when: not pc_sbx_kc.stat.exists
-    # A plain bucket (no Object Lock): Zot's garbage collection deletes blobs nothing references any more.
-    - name: Create the bucket and its user
+    - name: Check the build bucket's endpoint
+      ansible.builtin.assert:
+        that: pc_sbx_build_s3_host is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+        fail_msg: >-
+          the object store endpoint {{ pc_sbx_reg_s3.endpoint }} must be an IPv4 address: build pods fetch their
+          contexts from it, and the workers' fence and the build namespace's policy open exactly that address
+        quiet: true
+    # Plain buckets (no Object Lock): Zot's garbage collection deletes blobs nothing references any more, and a deleted
+    # template's contexts are deleted with it.
+    - name: Create the buckets and their users
       ansible.builtin.script: files/rustfs-bootstrap.py
       environment:
         S3_URL: "{{ pc_sbx_reg_s3.endpoint }}"
@@ -68,7 +81,9 @@
         FLAVOR: "{{ {'vm': 'rustfs', 'truenas-app': 'rustfs', 'ceph-rgw': 'rgw', 'external': 'external'}[pc.object_store.mode] }}"
         ROOT_ACCESS: "{{ pc_rustfs_access_key if own_store else pc.object_store.access_key }}"
         ROOT_SECRET: "{{ pc_rustfs_secret_key if own_store else pc.object_store.secret_key }}"
-        BUCKETS: "{{ {pc.sandbox.registry.bucket: {'secret': bucket_secret, 'lock': false}} | to_json }}"
+        BUCKETS: >-
+          {{ {pc.sandbox.registry.bucket: {'secret': bucket_secret, 'lock': false},
+              pc.sandbox.registry.builds_bucket: {'secret': builds_secret, 'lock': false}} | to_json }}
       args: {executable: python3}
       register: pc_sbx_bucket
       changed_when: (pc_sbx_bucket.stdout | from_json).changed
@@ -179,6 +194,17 @@
       when: pc_sandbox_edge_on
       register: pc_sbx_proxy_copy
       changed_when: false
+    # Template builds (docs/managed-sandbox.md §7): the namespace, its fence, the portal's and the sync's rights there,
+    # and the registry's CA for crane.
+    - name: Apply the build namespace on the sandbox cluster
+      vars:
+        pc_sbx_reg_ca: "{{ pc_sbx_reg_ca_b64.stdout | b64decode }}"
+      ansible.builtin.command:
+        cmd: kubectl apply -f -
+        stdin: "{{ lookup('ansible.builtin.template', 'templates/sandbox-builds.yml.j2') }}"
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      register: pc_sbx_builds_ns
+      changed_when: pc_sbx_builds_ns.stdout_lines | reject('search', ' unchanged$') | list | length > 0
     - name: Apply the prepull and the registry's address on the sandbox cluster
       vars:
         pc_sbx_images: "{{ images }}"
@@ -196,7 +222,10 @@
         dest: "{{ pc_gen }}/sandbox-registry.json"
         mode: "0600"
         content: >-
-          {{ {'host': host, 'templateRegistry': host ~ '/t',
+          {{ {'host': host, 'templateRegistry': host ~ '/t', 'ca': pc_sbx_reg_ca_b64.stdout | b64decode,
+              'buildStorage': {'endpoint': pc_sbx_reg_s3.endpoint, 'region': pc_sbx_reg_s3.region,
+                               'bucket': pc.sandbox.registry.builds_bucket,
+                               'address': pc_sbx_build_s3_host, 'port': pc_sbx_build_s3_port | int},
               'proxyImage': (pc_sbx_proxy_copy.stdout | default('')) if pc_sandbox_edge_on else ''} | to_nice_json }}
     # The workers reach the registry once stage 60 gave the Proxmox provider its address (config.sandbox.registry)
     # and the sync fenced them with it: on a first install the prepull waits for that, and a re-run checks it.

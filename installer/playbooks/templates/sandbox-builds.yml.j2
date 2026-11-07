@@ -1,0 +1,87 @@
+{#- Stage 55 (registry), on the sandbox cluster: the namespace custom template builds run in (docs/managed-sandbox.md
+    §7). Each build is one gVisor pod: fetch (the COPY contexts, presigned GETs on the build bucket) -> base (pulls the
+    base image) -> kaniko (the customer's RUN steps, no credentials) -> push (crane, the project's build account).
+    Vars: pc_sbx_build_s3_host, pc_sbx_build_s3_port (the bucket's endpoint as the nodes reach it), pc_sbx_reg_ca. -#}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sbx-build
+  # No proxcloud.io/tenant label: the tenant guardrail's egressDeny on private ranges would also deny the registry and
+  # the bucket, and a deny cannot be lifted. The policy below is this namespace's own fence instead.
+  labels: {app.kubernetes.io/managed-by: proxcloud}
+---
+# The registry's CA for crane in the build pods' base and push containers (SSL_CERT_DIR=/registry-ca).
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: registry-ca, namespace: sbx-build}
+data:
+  ca.crt: {{ pc_sbx_reg_ca | to_json }}
+---
+# Build pods run customer code: no ingress; egress to DNS, the internet minus private and link-local ranges (base
+# images, package installs), and exactly two internal endpoints: the sandbox registry (push, base images) and the build
+# bucket (contexts). No SMTP. The node-level fence (layer 1) opens the same two to the workers.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: build-egress, namespace: sbx-build}
+spec:
+  endpointSelector: {}
+  ingress: []
+  egress:
+  - toEndpoints:
+    - matchLabels: {k8s:io.kubernetes.pod.namespace: kube-system, k8s:k8s-app: kube-dns}
+    toPorts: [{ports: [{port: "53", protocol: ANY}]}]
+  - toCIDRSet:
+    - cidr: 0.0.0.0/0
+      except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+  - toCIDR: ["{{ pc.sandbox.registry.address }}/32"]
+    toPorts: [{ports: [{port: "443", protocol: TCP}]}]
+  - toCIDR: ["{{ pc_sbx_build_s3_host }}/32"]
+    toPorts: [{ports: [{port: "{{ pc_sbx_build_s3_port }}", protocol: TCP}]}]
+  egressDeny:
+  - toCIDRSet: [{cidr: 0.0.0.0/0}]
+    toPorts: [{ports: [{port: "25", protocol: TCP}]}]
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata: {name: builds, namespace: sbx-build}
+spec:
+  hard: {pods: "40", requests.cpu: "64", requests.memory: 256Gi}
+---
+# The portal runs build pods here: the pod, its ConfigMap (Dockerfile, presigned fetch list), the Secret with a user's
+# own registry credentials for fromImageRegistry (owned by the pod, so it goes with it), and the build's logs. It
+# cannot read any Secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: proxcloud-builds, namespace: sbx-build}
+rules:
+- apiGroups: [""]
+  resources: ["pods", "configmaps"]
+  verbs: ["get", "list", "watch", "create", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: proxcloud-builds, namespace: sbx-build}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: proxcloud-builds}
+subjects: [{kind: ServiceAccount, name: proxcloud, namespace: proxcloud-system}]
+---
+# The registry's account sync writes each project's build account here (registry-build-<project>) without reading
+# Secrets: patch (server-side apply) only. The admission policy in registry.yaml limits it to those names.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: sandbox-registry-users, namespace: sbx-build}
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: sandbox-registry-users, namespace: sbx-build}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: sandbox-registry-users}
+subjects: [{kind: ServiceAccount, name: sandbox-registry-users, namespace: sandbox-system}]

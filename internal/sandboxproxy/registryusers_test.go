@@ -18,6 +18,7 @@ type fakeRegistryAPI struct {
 	selector string
 	listErr  error
 	secrets  map[string][]byte // ns/name -> .dockerconfigjson
+	gets     map[string]bool
 	writes   int
 }
 
@@ -27,6 +28,10 @@ func (f *fakeRegistryAPI) ListNamespaces(_ context.Context, sel string) ([]map[s
 }
 
 func (f *fakeRegistryAPI) GetSecretData(_ context.Context, ns, name string) (map[string][]byte, error) {
+	if f.gets == nil {
+		f.gets = map[string]bool{}
+	}
+	f.gets[ns+"/"+name] = true
 	if b, ok := f.secrets[ns+"/"+name]; ok {
 		return map[string][]byte{".dockerconfigjson": b}, nil
 	}
@@ -73,15 +78,35 @@ func TestZotAccess(t *testing.T) {
 		t.Fatalf("repositories %v", repos)
 	}
 	lib, _ := json.Marshal(repos["library/**"])
-	if strings.Contains(string(lib), RegistryPushUser) || strings.Contains(string(lib), "create") {
-		t.Fatalf("library/** must be read-only and not name the push user: %s", lib)
+	if strings.Contains(string(lib), "create") || strings.Contains(string(lib), "update") || strings.Contains(string(lib), "delete") {
+		t.Fatalf("library/** must be read-only: %s", lib)
+	}
+	// Only a project's own build account writes its repositories; the catch-all t/** gives no one a write.
+	for repo, want := range map[string]string{"t/a1/**": "build-a1", "t/**": ""} {
+		var p struct {
+			Policies []struct {
+				Users   []string `json:"users"`
+				Actions []string `json:"actions"`
+			} `json:"policies"`
+		}
+		b, _ := json.Marshal(repos[repo])
+		_ = json.Unmarshal(b, &p)
+		for _, pol := range p.Policies {
+			writes := strings.Contains(strings.Join(pol.Actions, ","), "create")
+			if writes && (len(pol.Users) != 1 || pol.Users[0] != want) {
+				t.Errorf("%s: %v may write", repo, pol.Users)
+			}
+			if strings.Contains(strings.Join(pol.Actions, ","), "delete") && (len(pol.Users) != 1 || pol.Users[0] != RegistryGCUser) {
+				t.Errorf("%s: %v may delete", repo, pol.Users)
+			}
+		}
 	}
 	own, _ := json.Marshal(repos["t/a1/**"])
-	if !strings.Contains(string(own), `"pull-a1"`) || !strings.Contains(string(own), `"push"`) {
+	if !strings.Contains(string(own), `"pull-a1"`) || !strings.Contains(string(own), `"gc"`) {
 		t.Fatalf("t/a1/** = %s", own)
 	}
 	pull, _ := json.Marshal(ac["groups"])
-	if !strings.Contains(string(pull), `"pull-a1"`) || !strings.Contains(string(pull), `"pull-nodes"`) {
+	if !strings.Contains(string(pull), `"pull-a1"`) || !strings.Contains(string(pull), `"build-a1"`) || !strings.Contains(string(pull), `"pull-nodes"`) {
 		t.Fatalf("groups = %s", pull)
 	}
 }
@@ -91,7 +116,7 @@ func newUsers(t *testing.T, api *fakeRegistryAPI) *RegistryUsers {
 	return &RegistryUsers{
 		Base: map[string]any{"storage": map[string]any{"rootDirectory": "/var/lib/registry"}, "http": map[string]any{"port": "5000"}},
 		Host: "192.0.2.10", Key: []byte("0123456789abcdef0123"), Dir: t.TempDir(), SystemNS: "sandbox-system", API: api,
-		Static: map[string]string{"admin": "adm", "push": "psh", "pull-nodes": "pn"},
+		Static: map[string]string{"admin": "adm", "gc": "gcp", "pull-nodes": "pn"},
 	}
 }
 
@@ -125,8 +150,17 @@ func TestRegistryUsersPass(t *testing.T) {
 		t.Fatalf("htpasswd path %v", auth)
 	}
 	pw := RegistryPassword(r.Key, "pull-a1")
-	if !htpasswdOK(ht, "pull-a1", pw) || !htpasswdOK(ht, "push", "psh") || htpasswdOK(ht, "pull-a1", "wrong") {
-		t.Fatalf("htpasswd does not hold the derived password:\n%s", ht)
+	if !htpasswdOK(ht, "pull-a1", pw) || !htpasswdOK(ht, "gc", "gcp") || htpasswdOK(ht, "pull-a1", "wrong") ||
+		!htpasswdOK(ht, "build-a1", RegistryPassword(r.Key, "build-a1")) || strings.Contains(ht, "push:") {
+		t.Fatalf("htpasswd does not hold the derived passwords:\n%s", ht)
+	}
+	var bc map[string]map[string]map[string]string
+	_ = json.Unmarshal(api.secrets["sbx-build/registry-build-a1"], &bc)
+	if bc["auths"]["192.0.2.10"]["username"] != "build-a1" || bc["auths"]["192.0.2.10"]["password"] != RegistryPassword(r.Key, "build-a1") {
+		t.Fatalf("build secret %s", api.secrets["sbx-build/registry-build-a1"])
+	}
+	if api.gets["sbx-build/registry-build-a1"] {
+		t.Fatal("the build secret was read: this identity may not read Secrets in sbx-build")
 	}
 	var dc map[string]map[string]map[string]string
 	_ = json.Unmarshal(api.secrets["sb-a1/sandbox-template-pull"], &dc)
@@ -209,7 +243,7 @@ func TestReviewRestartWithListErrorKeepsProjectUsers(t *testing.T) {
 	api := &fakeRegistryAPI{nss: []map[string]any{tenantNS("sb-a1", "a1")}, secrets: map[string][]byte{}}
 	mk := func(dir string) *RegistryUsers {
 		return &RegistryUsers{Base: map[string]any{}, Host: "192.0.2.10", Key: []byte("0123456789abcdef"),
-			Static: map[string]string{"admin": "a", "push": "p", "pull-nodes": "n"}, Dir: dir, SystemNS: "sandbox-system", API: api}
+			Static: map[string]string{"admin": "a", "gc": "g", "pull-nodes": "n"}, Dir: dir, SystemNS: "sandbox-system", API: api}
 	}
 	if _, err := mk(dir).Pass(context.Background()); err != nil {
 		t.Fatal(err)

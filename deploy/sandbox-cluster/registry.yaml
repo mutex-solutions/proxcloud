@@ -6,11 +6,12 @@
 # (the node images set config_path = /etc/containerd/certs.d; containerd reads it on every pull, no restart).
 #
 # sandbox-registry-users: the identity of the registry's account sync on the services cluster. It lists the tenant
-# namespaces and writes one Secret per project (sandbox-template-pull: that project's own account) plus the nodes'
-# Secret (sandbox-registry-nodes, read-only on library/**). RBAC cannot limit create by name, so a create alone could
-# make a service-account-token Secret named sandbox-template-pull in kube-system that the token controller fills and the
-# sync could then read (a controller's token: cluster-admin). The admission policy at the end allows this identity
-# only pull Secrets (type kubernetes.io/dockerconfigjson) under its two names, each in its own namespaces.
+# namespaces and writes Secrets per project (sandbox-template-pull: that project's pull account; registry-build-<project>
+# in sbx-build: its build account, through the Role of installer/playbooks/templates/sandbox-builds.yml.j2) plus the
+# nodes' Secret (sandbox-registry-nodes, read-only on library/**). RBAC cannot limit create by name, so a create alone
+# could make a service-account-token Secret named sandbox-template-pull in kube-system that the token controller fills
+# and the sync could then read (a controller's token: cluster-admin). The admission policy at the end allows this
+# identity only pull Secrets (type kubernetes.io/dockerconfigjson) under its names, each in its own namespaces.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -122,8 +123,11 @@ spec:
     message: the registry account sync writes pull Secrets (kubernetes.io/dockerconfigjson) only
   - expression: >-
       (object.metadata.name == "sandbox-template-pull" && request.namespace.startsWith("sb-")) ||
-      (object.metadata.name == "sandbox-registry-nodes" && request.namespace == "sandbox-system")
-    message: the registry account sync writes sandbox-template-pull in sb-* and sandbox-registry-nodes in sandbox-system only
+      (object.metadata.name == "sandbox-registry-nodes" && request.namespace == "sandbox-system") ||
+      (object.metadata.name.matches("^registry-build-[a-z0-9]{1,40}$") && request.namespace == "sbx-build")
+    message: >-
+      the registry account sync writes sandbox-template-pull in sb-*, sandbox-registry-nodes in sandbox-system and
+      registry-build-<project> in sbx-build only
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

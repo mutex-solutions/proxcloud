@@ -11,9 +11,11 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// Routes that are not part of the E2B API: the document itself.
+// Routes that are not part of the E2B API: the document itself, and the context upload whose URL the files answer
+// hands out (E2B's is a presigned bucket URL; ours authenticates by the token in it).
 var e2bOpenAPIExcluded = map[string]bool{
 	"GET /openapi.json": true,
+	"PUT /templates/{templateID}/files/{hash}/upload": true,
 }
 
 // TestE2BOpenAPIParity: every routed E2B operation is documented and every documented one is

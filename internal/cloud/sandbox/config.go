@@ -133,6 +133,9 @@ type Config struct {
 	// (secret.registryGcUser / registryGcPassword: artifact list/read/delete only).
 	RegistryPrune string
 	RegistryGC    RegistryCredential
+	// RegistryCA is the PEM CA the template registry's certificate chains to (config.sandbox.registryCa; empty: the
+	// system roots). The portal's pruning reaches the registry with it.
+	RegistryCA string
 	// TemplateRegistry is the repository prefix custom templates and snapshots are pushed under,
 	// e.g. registry.example.org/sandbox-templates (config.sandbox.templateRegistry). An image
 	// under it gets the template pull secret. Empty: no template registry, so no image counts as
@@ -144,6 +147,18 @@ type Config struct {
 	// ProxyWakeToken is the bearer sandbox-proxy sends to wake a paused sandbox (secret
 	// proxyWakeToken). Empty = autoResume is refused.
 	ProxyWakeToken string
+	// BuildStorage is the bucket custom template builds keep their COPY contexts in (config.sandbox.buildStorage,
+	// keys secret.buildStorageAccessKey / buildStorageSecretKey). Empty Bucket: custom template builds are off.
+	BuildStorage BuildStorage
+}
+
+// BuildStorage is an S3 bucket the portal writes build contexts to and build pods read them from (presigned GETs).
+type BuildStorage struct {
+	Endpoint string // as the portal reaches it
+	// PodEndpoint is the endpoint as the sandbox nodes reach it, which presigned URLs name (default Endpoint).
+	PodEndpoint          string
+	Bucket, Region       string
+	AccessKey, SecretKey string
 }
 
 // RegistryCredential is a template registry robot (never logged, never mounted into pods).

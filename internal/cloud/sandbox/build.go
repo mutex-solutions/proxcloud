@@ -3,12 +3,15 @@ package sandbox
 // build.go — custom templates (E2B template builds). A build turns E2B's step list into a
 // Dockerfile and runs it as one gVisor pod in BuildNamespace on the sandbox cluster:
 //
-//	init fetch  (trusted)    downloads the COPY contexts from proxcloud into /workspace/files/<hash>
+//	init fetch  (trusted)    downloads the COPY contexts from the build bucket (presigned URLs) into /workspace/files/<hash>
+//	init base   (trusted)    pulls the base image into kaniko's cache (the only container that may hold a pull credential)
 //	init kaniko (user code)  builds the Dockerfile, --no-push, image tarball to /out; holds NO credentials
 //	push        (trusted)    crane pushes the tarball to the template registry; only it mounts the push secret
 //
 // The customer's RUN steps execute inside the kaniko container, which has finished before the
-// push container starts and never sees the registry secret.
+// push container starts and never sees the registry secret. That secret is the project's own build account
+// (BuildSecretFor: reads library/** and t/<project>/**, writes t/<project>/** only), written into sbx-build by the
+// registry's account sync, so a build cannot write another project's templates or the built-in library/ images.
 
 import (
 	"context"
@@ -28,17 +31,9 @@ const (
 	BuildNamespace  = "sbx-build"
 	LabelBuild      = "proxcloud.io/sandbox-build"
 	LabelTemplateID = "proxcloud.io/sandbox-template"
-	buildPushSecret = "registry-push"
-	// BuildTemplatePullSecret is a copy of the template registry's pull robot in sbx-build (made
-	// by StartBuild), mounted only into the `base` init container and only for refs the server
-	// chose (a project's own template). It can read every tenant's templates, so user code must
-	// never see it.
-	BuildTemplatePullSecret = "template-pull"
 	// TemplatePullSecret is the project's own registry account in sb-<project> (pull-<project>: library/** and
-	// t/<project>/**), written by the registry's account sync (sandbox-proxy registry-users, docs/managed-sandbox.md
-	// §6). A build still copies an operator-made sandbox-system/<name> into sbx-build (SB6b replaces that).
+	// t/<project>/**), written by the registry's account sync (sandbox-proxy registry-users, docs/managed-sandbox.md §6).
 	TemplatePullSecret = "sandbox-template-pull"
-	pullSecretSourceNS = "sandbox-system"
 	BuildTimeout       = 30 * time.Minute
 	buildDiskLimit     = "30Gi"
 
@@ -247,8 +242,23 @@ type BaseAuth int
 
 const (
 	BaseAuthNone     BaseAuth = iota // public image
-	BaseAuthTemplate                 // a project's own template in the template registry (server-chosen ref)
+	BaseAuthRegistry                 // an image on the sandbox registry (built-in or the project's own): its build account
 	BaseAuthUser                     // fromImageRegistry: the user's registry credentials
+)
+
+// BuildSecretFor is the project's build account in sbx-build (user build-<project>), written by the registry's
+// account sync: the push container mounts it, and the base container for an image on the sandbox registry.
+func BuildSecretFor(projectID string) string { return "registry-build-" + projectID }
+
+// BuildRegistryCA is the ConfigMap in sbx-build holding the sandbox registry's CA (ca.crt), written by installer stage
+// 55: crane in the base and push containers trusts it on top of the system roots (SSL_CERT_DIR). Optional, so a
+// registry with a public certificate needs none.
+const BuildRegistryCA = "registry-ca"
+
+// registryTrust is the CA volume and the env that makes crane read it.
+var (
+	registryTrustVolume = map[string]any{"name": "registry-ca", "configMap": map[string]any{"name": BuildRegistryCA, "optional": true}}
+	registryTrustEnv    = map[string]any{"name": "SSL_CERT_DIR", "value": "/registry-ca"}
 )
 
 // baseSecretName is the per-build Secret holding the user's registry credentials.
@@ -299,19 +309,20 @@ echo "pulling base image $R@$D"
 crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 { echo "FROM $R@$D"; tail -n +2 /config/Dockerfile; } > /pinned/Dockerfile
 `
-	baseMounts := []any{mount("config", "/config"), mount("base-cache", "/cache"), mount("pinned", "/pinned")}
+	baseMounts := []any{mount("config", "/config"), mount("base-cache", "/cache"), mount("pinned", "/pinned"), mount("registry-ca", "/registry-ca")}
 	volumes := []any{
+		registryTrustVolume,
 		map[string]any{"name": "config", "configMap": map[string]any{"name": name}},
 		map[string]any{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
 		map[string]any{"name": "out", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
 		map[string]any{"name": "base-cache", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
 		map[string]any{"name": "pinned", "emptyDir": map[string]any{"sizeLimit": "1Mi"}},
 		map[string]any{"name": "push-secret", "secret": map[string]any{
-			"secretName": buildPushSecret,
+			"secretName": BuildSecretFor(req.ProjectID),
 			"items":      []any{map[string]any{"key": ".dockerconfigjson", "path": "config.json"}},
 		}},
 	}
-	if secret := map[BaseAuth]string{BaseAuthTemplate: BuildTemplatePullSecret, BaseAuthUser: baseSecretName(req.BuildID)}[req.BaseAuth]; secret != "" {
+	if secret := map[BaseAuth]string{BaseAuthRegistry: BuildSecretFor(req.ProjectID), BaseAuthUser: baseSecretName(req.BuildID)}[req.BaseAuth]; secret != "" {
 		baseMounts = append(baseMounts, mount("base-secret", "/docker"))
 		volumes = append(volumes, map[string]any{"name": "base-secret", "secret": map[string]any{
 			"secretName": secret,
@@ -340,6 +351,7 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 					"env": []any{
 						map[string]any{"name": "SRC", "value": req.Base},
 						map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"},
+						registryTrustEnv,
 					},
 					"resources":    map[string]any{"requests": small, "limits": map[string]any{"cpu": "1", "memory": "512Mi"}},
 					"volumeMounts": baseMounts,
@@ -362,9 +374,9 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 			"containers": []any{map[string]any{
 				"name": "push", "image": craneImage,
 				"args":         []any{"push", "/out/image.tar", req.Image, "--image-refs", "/dev/termination-log"},
-				"env":          []any{map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}},
+				"env":          []any{map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}, registryTrustEnv},
 				"resources":    map[string]any{"requests": small, "limits": map[string]any{"cpu": "1", "memory": "512Mi"}},
-				"volumeMounts": []any{mount("out", "/out"), mount("push-secret", "/docker")},
+				"volumeMounts": []any{mount("out", "/out"), mount("push-secret", "/docker"), mount("registry-ca", "/registry-ca")},
 			}},
 			"volumes": volumes,
 		},
@@ -374,17 +386,12 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 
 func mount(name, at string) map[string]any { return map[string]any{"name": name, "mountPath": at} }
 
-// StartBuild creates the build's ConfigMap and Pod.
+// StartBuild creates the build's ConfigMap and Pod. The project's namespace comes first (its quota untouched): the
+// registry's account sync derives the project's accounts from it and writes the build Secret the pod mounts, so a
+// project's first build waits up to one sync pass (30 s) for that volume.
 func (s *Service) StartBuild(ctx context.Context, req BuildRequest) error {
-	if req.BaseAuth == BaseAuthTemplate {
-		// The pull robot copy that only `base` mounts (refreshed on every such build).
-		ok, err := s.copyPullSecret(ctx, BuildNamespace, BuildTemplatePullSecret, map[string]any{LabelManagedBy: ManagedByValue})
-		if err != nil {
-			return fmt.Errorf("sandbox: build pull credentials: %w", err)
-		}
-		if !ok {
-			return fmt.Errorf("%w: building from a project template needs the template registry pull secret (%s/%s)", ErrBadBuild, pullSecretSourceNS, TemplatePullSecret)
-		}
+	if err := s.ensureTenantNamespace(ctx, req.ProjectID); err != nil {
+		return fmt.Errorf("sandbox: build namespace: %w", err)
 	}
 	cm, pod := BuildObjects(s.cfg, req)
 	if err := s.api.ApplyCore(ctx, "configmaps", cm); err != nil {
@@ -653,16 +660,6 @@ func hasDotDot(p string) bool {
 	return false
 }
 
-// BuildStorageSecret is the context bucket's settings (endpoint, bucket, region, accessKey,
-// secretKey), kept as sandbox-system/sandbox-build-s3 on the sandbox cluster.
-func (s *Service) BuildStorageSecret(ctx context.Context) (map[string][]byte, error) {
-	sec, err := s.api.GetSecretData(ctx, pullSecretSourceNS, "sandbox-build-s3")
-	if err == nil && sec == nil {
-		err = errors.New("sandbox-system/sandbox-build-s3 is missing")
-	}
-	return sec, err
-}
-
 // SnapshotRequest appends a sandbox's filesystem changes (one gzip tar) as a layer on Base.
 type SnapshotRequest struct {
 	ProjectID, TemplateID, BuildID string
@@ -705,15 +702,16 @@ func SnapshotObjects(cfg Config, req SnapshotRequest) map[string]any {
 				"command": []any{"sh", "-c", `set -eu; crane append --platform linux/amd64 -b "$BASE" -f /work/layer.tar.gz -t "$DEST" > /dev/termination-log; cat /dev/termination-log`},
 				"env": []any{
 					map[string]any{"name": "BASE", "value": req.Base}, map[string]any{"name": "DEST", "value": req.Image},
-					map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"},
+					map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}, registryTrustEnv,
 				},
 				"resources":    map[string]any{"requests": small, "limits": work},
-				"volumeMounts": []any{mount("work", "/work"), mount("push-secret", "/docker")},
+				"volumeMounts": []any{mount("work", "/work"), mount("push-secret", "/docker"), mount("registry-ca", "/registry-ca")},
 			}},
 			"volumes": []any{
+				registryTrustVolume,
 				map[string]any{"name": "work", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
 				map[string]any{"name": "push-secret", "secret": map[string]any{
-					"secretName": buildPushSecret,
+					"secretName": BuildSecretFor(req.ProjectID),
 					"items":      []any{map[string]any{"key": ".dockerconfigjson", "path": "config.json"}},
 				}},
 			},
