@@ -47,11 +47,14 @@ type ProjectDoc = {
   id?: string
   name?: string
   status?: string
+  disabledByOperator?: boolean
   organizationId?: string
   billingProfileId?: string
   memberships?: Array<{ sub?: string; role?: string }>
   // proxmox bindings carry provider/region/pool; ceph-s3 bindings carry provider/region/rgwUid.
   services?: Array<{ serviceId?: string; provider?: string; region?: string; pool?: string; rgwUid?: string }>
+  // Per provider id: a provisioning attempt that failed and is retried when the project is next opened.
+  provisionFailures?: Record<string, { message?: string; at?: string }>
   // absent/null = all public networks allowed; array = allow-list of public network ids.
   publicNetworkIds?: string[] | null
   // false/absent = the client can't choose an external network (server auto-picks); true = client picks.
@@ -602,12 +605,18 @@ export default function ProjectDetailPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={!project}
+              disabled={!project || !["ENABLED", "DISABLED"].includes((project.status ?? "").toUpperCase())}
               onClick={() => setStatusConfirm(enabled ? "DISABLED" : "ENABLED")}
             >
               {enabled ? <Pause className="size-4" /> : <Play className="size-4" />}
               {enabled ? "Disable" : "Enable"}
             </Button>
+            {/* Held only by billing: a resume would lift it, unless an operator pins it. */}
+            {(project?.status ?? "").toUpperCase() === "DISABLED" && !project?.disabledByOperator && (
+              <Button variant="outline" size="sm" onClick={() => setStatusConfirm("DISABLED")}>
+                <Pause className="size-4" /> Keep disabled
+              </Button>
+            )}
             <Button variant="destructive" size="sm" disabled={!project} onClick={() => setDeleteOpen(true)}>
               <Trash2 className="size-4" /> Delete project
             </Button>
@@ -697,6 +706,11 @@ export default function ProjectDetailPage() {
                 </Button>
               </CardHeader>
               <CardContent>
+                {Object.entries(project?.provisionFailures ?? {}).map(([id, f]) => (
+                  <p key={id} role="alert" className="mb-2 text-sm text-destructive">
+                    Not provisioned on <span className="font-mono text-xs">{id}</span>: {f.message}
+                  </p>
+                ))}
                 {(project?.services ?? []).length === 0 ? (
                   <p className="text-sm text-muted-foreground">No external service attached.</p>
                 ) : (
@@ -1236,7 +1250,9 @@ export default function ProjectDetailPage() {
             <DialogTitle>{statusConfirm === "DISABLED" ? "Disable project" : "Enable project"}</DialogTitle>
             <DialogDescription>
               {statusConfirm === "DISABLED"
-                ? "Pauses every server in the project before disabling it."
+                ? enabled
+                  ? "Pauses every server in the project before disabling it."
+                  : "Keeps the project disabled when its billing profile resumes or activates. Only an operator can then enable it."
                 : "Unpauses the project's servers and re-enables it."}{" "}
               Project: <span className="font-medium">{project?.name}</span>
             </DialogDescription>

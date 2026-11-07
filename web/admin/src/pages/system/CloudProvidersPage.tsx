@@ -51,6 +51,8 @@ export type CloudProvider = {
   name?: string
   type?: string
   status?: string
+  // The last project that could not be provisioned on this provider; a success clears it.
+  provisionError?: { projectId?: string; message?: string; at?: string }
   config?: {
     apiUrl?: string
     provider?: string
@@ -251,18 +253,18 @@ function cephFormToBody(f: CephFormState, provider: "ceph-s3" | "rustfs" = "ceph
   }
 }
 
-function CephProviderForm({ form, setForm, canTest }: { form: CephFormState; setForm: (f: CephFormState) => void; canTest: boolean }) {
+function CephProviderForm({ form, setForm, provider }: { form: CephFormState; setForm: (f: CephFormState) => void; provider: "ceph-s3" | "rustfs" }) {
   // The answer belongs to the values it tested, so it goes when they change.
   const [tested, setTested] = useState<{ form: CephFormState; error?: string } | null>(null)
   const [testing, setTesting] = useState(false)
   const result = tested?.form === form ? tested : null
   const test = async () => {
     setTesting(true)
-    const { config, secret } = cephFormToBody(form)
+    const { config, secret } = cephFormToBody(form, provider)
     try {
       await apiFetch("/admin/service/object-store/test", {
         method: "POST",
-        body: { s3Endpoint: config.s3Endpoint, adminApiUrl: config.adminApiUrl, region: config.region, ...secret },
+        body: { provider, s3Endpoint: config.s3Endpoint, adminApiUrl: config.adminApiUrl, region: config.region, ...secret },
       })
       setTested({ form })
     } catch (e) {
@@ -322,15 +324,13 @@ function CephProviderForm({ form, setForm, canTest }: { form: CephFormState; set
       <p className="text-xs text-muted-foreground">
         The admin keys belong to an RGW admin user with caps <code>users=*;buckets=*;usage=*</code>.
       </p>
-      {canTest ? (
-        <div className="flex items-center gap-3">
-          <Button type="button" variant="outline" onClick={() => void test()} disabled={testing || !cephFormValid({ ...form, name: form.name || "-" })}>
-            {testing ? "Testing…" : "Test connection"}
-          </Button>
-          {result && !result.error ? <span className="text-xs text-emerald-600">Connection OK</span> : null}
-          {result?.error ? <span className="text-xs text-destructive">{result.error}</span> : null}
-        </div>
-      ) : null}
+      <div className="flex items-center gap-3">
+        <Button type="button" variant="outline" onClick={() => void test()} disabled={testing || !cephFormValid({ ...form, name: form.name || "-" })}>
+          {testing ? "Testing…" : "Test connection"}
+        </Button>
+        {result && !result.error ? <span className="text-xs text-emerald-600">Connection OK</span> : null}
+        {result?.error ? <span className="text-xs text-destructive">{result.error}</span> : null}
+      </div>
     </div>
   )
 }
@@ -529,7 +529,7 @@ export default function CloudProvidersPage() {
           ) : kind === "truenas" ? (
             <TrueNASProviderForm form={trueNASForm} setForm={setTrueNASForm} />
           ) : kind === "ceph-s3" || kind === "rustfs" ? (
-            <CephProviderForm form={cephForm} setForm={setCephForm} canTest={kind === "ceph-s3"} />
+            <CephProviderForm form={cephForm} setForm={setCephForm} provider={kind} />
           ) : kind === "kamaji" ? (
             <KamajiProviderForm form={kamajiForm} setForm={setKamajiForm} />
           ) : kind === "dbaas" ? (

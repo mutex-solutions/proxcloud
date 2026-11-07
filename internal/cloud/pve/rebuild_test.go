@@ -13,6 +13,10 @@ import (
 // rebuildCluster fakes VM 101 on pve1 (pool tp-p1) with the given snapshots, a donor clone that gets
 // vmid 200, and records every config write. moveFails makes the disk move fail.
 func rebuildCluster(t *testing.T, snapshots string, moveFails bool, writes *[]url.Values, stopped *[]string) *Service {
+	return rebuildClusterQMP(t, "running", snapshots, moveFails, writes, stopped)
+}
+
+func rebuildClusterQMP(t *testing.T, qmp, snapshots string, moveFails bool, writes *[]url.Values, stopped *[]string) *Service {
 	const upid = "UPID:pve1:0:0:0:x:101:u:"
 	task := func(w http.ResponseWriter, r *http.Request) { fmt.Fprintf(w, `{"data":%q}`, upid) }
 	cfg101 := `{"scsi0":"local-zfs:vm-101-disk-0,discard=on,size=8G","tags":"fl-a;img-old;proxcloud"}`
@@ -21,7 +25,7 @@ func rebuildCluster(t *testing.T, snapshots string, moveFails bool, writes *[]ur
 			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"tp-p1","name":"web","status":"running"}]}`)
 		},
 		"GET /api2/json/nodes/pve1/qemu/101/status/current": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":{"status":"running","name":"web"}}`)
+			fmt.Fprintf(w, `{"data":{"status":"running","qmpstatus":%q,"name":"web"}}`, qmp)
 		},
 		"GET /api2/json/nodes/pve1/qemu/101/snapshot": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, `{"data":[%s]}`, snapshots)
@@ -97,6 +101,18 @@ func TestRebuildServer(t *testing.T) {
 		}
 		if last.Get("delete") != "unused0" {
 			t.Fatalf("the old disk must go once the new one is in: %v", last)
+		}
+	})
+
+	t.Run("a paused server stops before its disk is detached", func(t *testing.T) {
+		var writes []url.Values
+		var stopped []string
+		s := rebuildClusterQMP(t, "paused", current, false, &writes, &stopped)
+		if err := s.RebuildServer(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		if len(stopped) == 0 || stopped[0] != "101" {
+			t.Fatalf("stops %v", stopped)
 		}
 	})
 
