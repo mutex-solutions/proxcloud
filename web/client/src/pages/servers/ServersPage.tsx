@@ -18,14 +18,27 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { apiFetch } from "@/lib/api"
-import { useCloudCursorList, useCloudScope, useProjectId } from "@/lib/hooks"
+import { useCloudCursorList, useCloudFeatures, useCloudScope, useProjectId } from "@/lib/hooks"
 import { timeAgo } from "@/lib/format"
 import type { CloudResource } from "@/lib/types"
 import { Checkbox } from "@/components/ui/checkbox"
 
 // Shown in every server delete dialog. Data volumes outlive the server and stay billed, unless ticked here.
+// Backups do not outlive it, which is easy to miss in a sentence, so they get their own warning.
 export function ServerDeleteVolumes({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  const backups = useCloudFeatures(useProjectId()).has("serverBackups")
   return (
+    <>
+    {backups && (
+      <Alert variant="destructive">
+        <Trash2 />
+        <AlertTitle>Its backups are deleted too</AlertTitle>
+        <AlertDescription>
+          Every backup of this server goes with it and none can be restored afterwards. If you may need an older
+          state, restore it and copy what you need off the server first.
+        </AlertDescription>
+      </Alert>
+    )}
     <Alert>
       <CircleAlert />
       <AlertTitle>Data volumes are kept</AlertTitle>
@@ -37,6 +50,7 @@ export function ServerDeleteVolumes({ checked, onChange }: { checked: boolean; o
         </label>
       </AlertDescription>
     </Alert>
+    </>
   )
 }
 
@@ -110,14 +124,28 @@ export function ServersPage() {
   })
 
   const [deleteVolumes, setDeleteVolumes] = useState(false)
+  // The delete answers once the VM is destroyed, seconds later: until the list drops the row it
+  // reads "Deleting", not the "Active" of the row's last read.
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set())
+  const markDeleting = (id: string, on: boolean) =>
+    setDeletingIds((s) => {
+      const next = new Set(s)
+      if (on) next.add(id)
+      else next.delete(id)
+      return next
+    })
   const del = useMutation({
     mutationFn: (id: string) =>
       apiFetch(`/project/${pid}/cloud/${id}${deleteVolumes ? "?deleteVolumes=true" : ""}`, { method: "DELETE", cloud: scope }),
+    onMutate: (id) => markDeleting(id, true),
     onSuccess: () => {
       toast.success("Server deletion requested")
-      invalidate()
+      void qc.invalidateQueries({ queryKey: ["cloud", pid, "SERVER"] })
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error, id) => {
+      markDeleting(id, false)
+      toast.error(e.message)
+    },
   })
 
   const runPending = () => {
@@ -147,7 +175,7 @@ export function ServersPage() {
         id: "status",
         accessorFn: (r) => serverStatus(r) ?? "",
         header: sortableHeader("Status"),
-        cell: ({ getValue }) => <StatusBadge status={getValue()} />,
+        cell: ({ row, getValue }) => <StatusBadge status={deletingIds.has(row.original.id) ? "DELETING" : getValue()} />,
       },
       {
         id: "flavor",
@@ -227,7 +255,7 @@ export function ServersPage() {
       },
     ],
     // pid from route params is stable per mount; setters are stable.
-    [pid],
+    [pid, deletingIds],
   )
 
   return (

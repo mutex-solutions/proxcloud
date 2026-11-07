@@ -4,6 +4,38 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Acceptance pass: statuses and messages the consoles got wrong
+
+**What changed**
+
+- A Kubernetes cluster reads `READY` when Argo CD still says `Progressing` but the control plane is Ready with an endpoint,
+  every node group runs its count of Ready nodes and the Application is Synced. The sync also reports the cluster's
+  StorageClasses and whether it has ReadWriteMany, and the cluster page says when a claim will stay Pending.
+- `LIST_VOLUME_TYPES` marks the provider's default storage profile; the server wizard preselects it.
+- Activating a billing profile that has no currency gives it the base currency, and a bill of such a profile reads in the
+  base currency.
+- The refusal on a suspended project says who lifts it: paying the balance, or the operator for an operator's disable.
+- The admin Kubernetes and database cluster lists answer a management-cluster error as a 502.
+- Consoles: Delete now for operators, Test connection on Kubernetes and database providers, a first-project form for an
+  organization member with no project, operator-activated profiles get deposits, and several labels (open bills, sub-cent
+  amounts, deleted projects, inherited billing profiles, servers being deleted, SMB passwords, backups on delete).
+
+**Why**
+
+- Argo's health covers the whole Application, and its ClusterResourceSet fails until MetalLB's webhook answers, then waits
+  out CAPI's retry backoff: on the lab the Application read `Progressing` 8 minutes past CAPI's `Available`, and the page
+  said "Working on it" with every step done. Argo stays the source for everything else; only a `Progressing` that the parts
+  the customer uses contradict is overridden.
+- An operator can activate a profile before its owner saves billing details, which is where the currency came from. Its
+  bill list then answered 500.
+- `httpx.WriteError` writes only a typed error and returns false for any other, so an unreachable management cluster
+  answered 200 with no clusters, and a Test connection built on that list would have said connected. Many other handlers
+  share the pattern; that is left for its own change.
+- A new project's services are attached by the entry call that runs alongside the pages' first reads, so they read no
+  location and showed "No region" until a reload. They read again once that call is done.
+
+**Diagrams updated:** none (no new container, component or relation).
+
 ## 2026-11-07: Load balancers (HAProxy appliance)
 
 **What changed**

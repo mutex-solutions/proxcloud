@@ -307,9 +307,17 @@ func (h *Handler) tryTenantClient(ctx context.Context, p *Project, svcID string)
 var errProjectDeleting = httpx.NewError(http.StatusConflict, http.StatusConflict, "This project is being deleted")
 
 // errProjectDisabled refuses what would add usage to a DISABLED project: metering, the sync and rating cover only ENABLED ones,
-// so anything started here would run free.
-var errProjectDisabled = httpx.NewError(http.StatusConflict, http.StatusConflict,
-	"This project is suspended: nothing can be created or started until it is enabled again. You can still read, stop and delete its resources")
+// so anything started here would run free. It says who can lift it: billing resumes the project once the balance is paid, an
+// operator's disable only the operator lifts.
+func errProjectDisabled(p *Project) error {
+	const keep = " You can still read, stop and delete its resources."
+	if p.DisabledByOperator {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict,
+			"This project was suspended by your platform operator: nothing can be created or started until they enable it again. Contact your operator."+keep)
+	}
+	return httpx.NewError(http.StatusConflict, http.StatusConflict,
+		"This project is suspended for an unpaid balance: nothing can be created or started until it is paid. Add funds or pay the open bills under Billing and the project resumes, or contact your platform operator."+keep)
+}
 
 // refuseNewUsage is the gate of whatever adds to a project: a create, an upload, a new key.
 func refuseNewUsage(p *Project) error {
@@ -317,7 +325,7 @@ func refuseNewUsage(p *Project) error {
 	case p.Deleting():
 		return errProjectDeleting
 	case p.IsDisabled():
-		return errProjectDisabled
+		return errProjectDisabled(p)
 	}
 	return nil
 }
@@ -683,7 +691,7 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if proj.IsDisabled() && !allowedWhileDisabled(req.Action, req.Data) {
-		h.fail(w, errProjectDisabled)
+		h.fail(w, errProjectDisabled(proj))
 		return
 	}
 

@@ -146,7 +146,8 @@ function KamajiConnectionTab({ id, provider }: TabProps) {
           cluster keeps the version it was pinned to until it is explicitly moved. Removing a
           Kubernetes version stops it being offered; clusters already on it keep running.
         </Note>
-        <div className="flex justify-end">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <ManagementClusterTest id={id} path="k8s-clusters" noun="cluster" />
           <Button onClick={submit} disabled={!kamajiFormValid(form, false) || save.isPending}>
             {save.isPending ? "Saving…" : "Save"}
           </Button>
@@ -185,7 +186,8 @@ function DbaasConnectionTab({ id, provider }: TabProps) {
           database keeps the version it was pinned to. Removing an engine or version stops it being
           offered; databases already on it keep running.
         </Note>
-        <div className="flex justify-end">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <ManagementClusterTest id={id} path="db-clusters" noun="database" />
           <Button onClick={submit} disabled={!dbaasFormValid(form, false) || save.isPending}>
             {save.isPending ? "Saving…" : "Save"}
           </Button>
@@ -497,6 +499,29 @@ function ConnectionTab({ id, provider }: TabProps) {
     )
   }
   return <Note>Unknown provider type "{str(provider.config?.provider)}" — no connection settings to show.</Note>
+}
+
+// Test connection for a stored Kubernetes or database provider: the cluster list reads the provider's
+// Applications on the management cluster with the stored kubeconfig, a real round trip. It tests what is
+// saved, not unsaved edits.
+function ManagementClusterTest({ id, path, noun }: { id: string; path: "k8s-clusters" | "db-clusters"; noun: string }) {
+  const test = useMutation({
+    mutationFn: () => apiFetch<{ clusters?: unknown[]; databases?: unknown[] }>(`/admin/service/${id}/${path}`),
+  })
+  const n = (test.data?.clusters ?? test.data?.databases)?.length ?? 0
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <Button variant="outline" onClick={() => test.mutate()} disabled={test.isPending}>
+        {test.isPending ? "Testing…" : "Test connection"}
+      </Button>
+      {test.isSuccess ? (
+        <span className="text-xs text-emerald-600">
+          Connected: the management cluster answered, {n} {noun}{n === 1 ? "" : "s"}
+        </span>
+      ) : null}
+      {test.isError ? <span className="text-xs text-destructive">{test.error.message}</span> : null}
+    </div>
+  )
 }
 
 // Test connection for a stored object-store row.

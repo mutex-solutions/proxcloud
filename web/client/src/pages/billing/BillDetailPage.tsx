@@ -43,7 +43,9 @@ export default function BillDetailPage() {
   // so an org admin can read per-project spend on the same bill.
   const { data: projects } = useProjects()
   const [projFilter, setProjFilter] = useState("__all__")
-  const projName = (id?: string) => projects?.find((p) => p.id === id)?.name || id || "—"
+  // A bill outlives its projects: an id no longer in the list is a deleted project.
+  const projName = (id?: string) =>
+    !id ? "—" : projects?.find((p) => p.id === id)?.name || (projects ? `Deleted project …${id.slice(-6)}` : id)
 
   const { data: bill, isLoading, error } = useQuery({
     queryKey: ["bill", bp, billId],
@@ -186,8 +188,11 @@ export default function BillDetailPage() {
   // Invoice math: net (subtotal) + tax = gross; credits reduce what was collected.
   const net = Number(bill.netAmount ?? 0)
   const gross = Number(bill.grossAmount ?? 0)
-  const tax = gross - net
+  // The gross is rounded to cents and the net is not, so a sub-cent bill would read "Tax -$0.00".
+  const tax = Math.max(0, gross - Math.round(net * 100) / 100)
   const unpaid = Number(bill.unpaidGrossAmount ?? 0)
+  // An OPEN bill is still accruing: nothing is due on it yet, though the balance already counts it.
+  const open = bill.status === "OPEN"
 
   return (
     <>
@@ -454,10 +459,23 @@ export default function BillDetailPage() {
               </div>
             ) : null}
             <div className="my-2 border-t" />
-            <div className="flex items-baseline justify-between gap-4">
-              <span className="text-sm font-medium">Amount due</span>
-              <span className="font-mono text-lg font-semibold tabular-nums">{fmtMoney(unpaid, ccy)}</span>
-            </div>
+            {open ? (
+              <div className="space-y-1">
+                <div className="flex items-baseline justify-between gap-4">
+                  <span className="text-sm font-medium">Accrued so far</span>
+                  <span className="font-mono text-lg font-semibold tabular-nums">{fmtMoney(gross, ccy)}</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  This bill is still open: charges add up until it is issued at the end of the billing cycle, and
+                  nothing is due on it before then. Your balance already counts them.
+                </p>
+              </div>
+            ) : (
+              <div className="flex items-baseline justify-between gap-4">
+                <span className="text-sm font-medium">Amount due</span>
+                <span className="font-mono text-lg font-semibold tabular-nums">{fmtMoney(unpaid, ccy)}</span>
+              </div>
+            )}
           </div>
         </div>
       </Card>

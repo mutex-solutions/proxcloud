@@ -55,12 +55,17 @@ type BillDto struct {
 // (same-currency ⇒ identity, no fetch); `now` is the FX-rate instant. The net base is the
 // with-adjustments product-currency net (matches getNetAmountBillProductCurrencyWithAdjustments).
 func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxRate, baseCurrency string, x *pricing.Exchanger, now time.Time) (*BillDto, error) {
+	// A profile an operator activated before it had billing details carries no currency: it bills in the base currency.
+	currency := profile.Currency
+	if currency == "" {
+		currency = baseCurrency
+	}
 	netBase := pricing.GetNetAmountBillProductCurrencyWithAdjustments(bill)
-	netAmount, err := x.ExchangeToBillingProfileCurrency(netBase, profile.Currency, baseCurrency, now)
+	netAmount, err := x.ExchangeToBillingProfileCurrency(netBase, currency, baseCurrency, now)
 	if err != nil {
 		return nil, err
 	}
-	rate, err := x.GetExchangeRate(baseCurrency, profile.Currency, now)
+	rate, err := x.GetExchangeRate(baseCurrency, currency, now)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +74,7 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 	unpaid := decimal.Zero
 	if bill.Status == pricing.BillStatusSent {
 		unpaidGrossBase := pricing.CalculateGrossAmount(pricing.GetUnpaidAmountBillProductCurrency(bill), rates)
-		unpaid, err = x.ExchangeToBillingProfileCurrency(unpaidGrossBase, profile.Currency, baseCurrency, now)
+		unpaid, err = x.ExchangeToBillingProfileCurrency(unpaidGrossBase, currency, baseCurrency, now)
 		if err != nil {
 			return nil, err
 		}

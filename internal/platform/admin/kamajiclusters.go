@@ -15,6 +15,19 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
+// writeClusterErr answers any error of a management-cluster call. httpx.WriteError writes only a typed
+// error and returns false for anything else, so an unreachable cluster or a bad kubeconfig used to answer
+// 200 with no clusters, which the console's Test connection read as connected. Such an error is a 502.
+func writeClusterErr(w http.ResponseWriter, err error) bool {
+	if err == nil {
+		return false
+	}
+	if !httpx.WriteError(w, err) {
+		httpx.Err(w, http.StatusBadGateway, http.StatusBadGateway, "management cluster: "+err.Error())
+	}
+	return true
+}
+
 // kamajiService resolves the kamaji provider + its Service, writing the error response on
 // failure. 501 when the factory is unwired (tests), 400 when the service is not kamaji.
 func (h *Handler) kamajiService(w http.ResponseWriter, r *http.Request) (*externalservice.ExternalService, *kamaji.Service, bool) {
@@ -33,7 +46,7 @@ func (h *Handler) kamajiService(w http.ResponseWriter, r *http.Request) (*extern
 	}
 	ks, err := h.kamajiFor(es)
 	if err != nil {
-		httpx.WriteError(w, err)
+		writeClusterErr(w, err)
 		return nil, nil, false
 	}
 	return es, ks, true
@@ -50,7 +63,7 @@ func (h *Handler) kamajiClusterPins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pins, err := ks.ListClusterPins(r.Context())
-	if httpx.WriteError(w, err) {
+	if writeClusterErr(w, err) {
 		return
 	}
 	httpx.OK(w, map[string]any{
@@ -74,7 +87,7 @@ func (h *Handler) kamajiClusterBump(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("the provider has no pinned chart version"))
 		return
 	}
-	if err := ks.SetChartVersion(r.Context(), chi.URLParam(r, "clusterId"), pin); httpx.WriteError(w, err) {
+	if err := ks.SetChartVersion(r.Context(), chi.URLParam(r, "clusterId"), pin); writeClusterErr(w, err) {
 		return
 	}
 	httpx.OK(w, map[string]any{"chartVersion": pin})
@@ -97,7 +110,7 @@ func (h *Handler) kamajiClusterBumpAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pins, err := ks.ListClusterPins(r.Context())
-	if httpx.WriteError(w, err) {
+	if writeClusterErr(w, err) {
 		return
 	}
 	bumped := 0

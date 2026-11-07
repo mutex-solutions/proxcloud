@@ -30,6 +30,8 @@ export type Organization = {
   name?: string
   billingProfileId?: string
   members?: Array<{ sub?: string; roles?: string[]; email?: string }>
+  // The caller's role patterns in this organization (rbac static roles), e.g. "project:*".
+  currentUserPermissions?: string[]
 }
 
 export type BillingSummary = {

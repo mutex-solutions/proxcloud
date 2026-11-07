@@ -73,7 +73,8 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 	values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
 
 	status := "PENDING"
-	if h := digStr(app, "status", "health", "status"); h != "" {
+	h := digStr(app, "status", "health", "status")
+	if h != "" {
 		// Argo health: Healthy / Progressing / Degraded / Suspended / Missing / Unknown.
 		status = map[string]string{
 			"Healthy":     "READY",
@@ -106,6 +107,18 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 	if bridge := digStr(values, "proxmox", "network", "bridge"); bridge != "" {
 		c["network_id"] = bridge
 	}
+	// What storage the cluster was given, so the page can say why a claim stays Pending: the
+	// block classes proxmox-csi installs, and whether a NAS dataset backs ReadWriteMany.
+	classes := []any{}
+	if list, ok := dig(values, "proxmox", "csi", "storageClasses").([]any); ok {
+		for _, raw := range list {
+			if m, ok := raw.(map[string]any); ok && m["name"] != nil {
+				classes = append(classes, m["name"])
+			}
+		}
+	}
+	c["storage_classes"] = classes
+	c["rwx"] = digStr(values, "proxmox", "rwx", "server") != ""
 	// Customer add-on toggles, read back for the UI (absent block = chart defaults). Filtered to
 	// the curated menu: a legacy credential-push addon (and any operator hand-edit)
 	// must not surface as a customer toggle — it would round-trip into SET_ADDONS and be
@@ -185,5 +198,38 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 		groups = append(groups, g)
 	}
 	c["node_groups"] = groups
+
+	// Argo's health is the whole Application's. Its ClusterResourceSet (the MetalLB pool) fails
+	// until MetalLB's webhook answers, and CAPI's retry backoff then leaves it unapplied for up
+	// to ~15 min after the cluster works: on the lab the app read Progressing 8 min past CAPI's
+	// Available. When everything the customer uses reports done, the cluster is ready.
+	if h == "Progressing" && c["sync_status"] == "Synced" && c["cp_status"] == "Ready" && c["endpoint"] != nil && groupsReady(groups) {
+		c["status"] = "READY"
+	}
 	return map[string]any{"cluster": c}
+}
+
+// groupsReady: every node group runs its desired count of Ready nodes.
+func groupsReady(groups []any) bool {
+	for _, raw := range groups {
+		g, _ := raw.(map[string]any)
+		ready, _ := g["ready_replicas"].(float64)
+		if g["phase"] != "Running" || ready < count(g["count"]) {
+			return false
+		}
+	}
+	return true
+}
+
+// count reads a node count: float64 off JSON, int off Go-built values, 1 when unset.
+func count(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return 1
 }
