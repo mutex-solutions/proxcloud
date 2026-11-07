@@ -45,6 +45,29 @@ and rules: [README.md](README.md#maintenance-rule).
   location and showed "No region" until a reload. They read again once that call is done.
 
 **Diagrams updated:** none (no new container, component or relation).
+## 2026-11-07: An untyped handler error answers 500
+
+**What changed**
+
+- `httpx.WriteError` writes a response for every non-nil error: a typed `*HTTPError` as before, anything else as a 500
+  `internal.error`, with the error logged against the request id and kept out of the body. A nil error still writes
+  nothing and returns false.
+- The API sets `X-Request-Id` on every response (`exposeRequestID`), which is where `WriteError` reads the id.
+- The package helpers that wrote their own 500 after a false return (org, project, sso, affiliate, order, project
+  invites) now only call `WriteError`; accepting an invite still answers 404 when the project lookup fails untyped.
+
+**Why**
+
+- About 380 callers wrote an untyped error with `httpx.WriteError(w, err); return`, and about 320 used
+  `if httpx.WriteError(w, err) { return }`. For a database or upstream error the first answered 200 with an empty body
+  and the second went on to the success write: creating a tax rate with the database down answered
+  `200 {"data":null}`, the flavor categories an empty list, and the UI showed success. The admin audit middleware read
+  those 200s as successes and recorded the failed mutations.
+- The order and project-invite routes sent the raw error text instead, which named the database user and address.
+- Fixing it in `WriteError` covers every caller at once and keeps the change to the callers mechanical.
+
+**Diagrams updated:** none; no container or component changed.
+
 ## 2026-11-07: Bootstrap ISOs off shared storage (SB-pre, PR #101)
 
 **What changed**
