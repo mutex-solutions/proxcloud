@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -35,6 +36,17 @@ func TestStopAndDeleteReachAPausedVM(t *testing.T) {
 		}
 		if fmt.Sprint(calls) != "[shutdown]" {
 			t.Fatalf("calls %v", calls)
+		}
+	})
+	t.Run("detach says to stop it first", func(t *testing.T) {
+		var calls []string
+		r := routes(&calls)
+		r["GET /api2/json/nodes/pve1/qemu/101/config"] = say(`{"data":{"name":"a","scsi0":"zfs:vm-101-disk-0,size=10G","scsi1":"zfs:vm-101-disk-1,size=1G"}}`)
+		_, c := fakePVE(t, r)
+		s := &Service{C: c, PoolPrefix: "st-"}
+		err := s.DetachVolume(context.Background(), "p1", 101, "zfs:vm-101-disk-1")
+		if !strings.Contains(fmt.Sprint(err), "Stop it first") {
+			t.Fatalf("err %v", err)
 		}
 	})
 	t.Run("delete", func(t *testing.T) {
