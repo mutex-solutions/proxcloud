@@ -29,6 +29,123 @@ and rules: [README.md](README.md#maintenance-rule).
   IETF protocol, reserved, NAT64 and 6to4 among them. The SSO fetcher uses the same function, so it gains this too.
 
 **Diagrams updated:** `c3-components.md` (the image import row).
+## 2026-11-07: Leftover holders stop billing; a late lock release frees nothing
+
+**What changed**
+
+- A VM with no name, no tags, no disk and a config holding only what PVE writes for an empty create is no server: the sync
+  neither lists nor bills it. `Service.RemoveBlankVMs` removes it on each full sync, under the holder lock, once it is past 15
+  minutes old. A VM that matches on its row but not its config is listed as ever; one whose config cannot be read keeps its row.
+- `ShedLock.Unlock` writes only if the row still carries the caller's `lockedBy` and `lockedAt`.
+- `RemoveBlankVMs` bounds its pass, as the sync goes through projects one at a time and a hung destroy would hold them all.
+  `dropLostCreate` uses the same `blankConfig` test, so a nameless VM holding a NIC or a description stays.
+
+**Why**
+
+- A holder VM is created empty and configured once it is in the pool. The cleanup ran only in the request, so PVE staying away,
+  a restart or a failed destroy left a VM billed and shown as a server. The check reads the config, not only the row, because a
+  row with no name can be a customer's VM with a data disk. The grace outlives the holder lock's 10 minute ceiling.
+- A holder past its lock's ceiling released whatever row was there, freeing the next owner's lock. A later owner's lock now
+  survives this. Two holders can still overlap once the first runs past the ceiling: this fixes the release, not the ceiling.
+
+**Diagrams updated:** none.
+## 2026-11-07: One bad provider no longer blocks a project; every object-store row is checked
+
+**What changed**
+
+- `POST /admin/service` and the updates check every `ceph-s3` and `rustfs` row whatever its status (`CheckRustFS` is new).
+  Turning a row off stays unchecked.
+- `POST /admin/service/{id}/object-store/test` tests a stored row with its stored key, as **Test connection** on the
+  provider's Connection tab. The Add dialog's button now works for `rustfs` too.
+- Bootstrap gives each provider its own bounded attempt. A failure goes in `project.provisionFailures`, retried on the next
+  open at most every 5 minutes, and in `externalService.provisionError`, shown on the provider's page. Opening a project
+  fails only when it ends up on no provider.
+
+**Why**
+
+- Only a `PUBLIC` `ceph-s3` row was proved, yet bootstrap provisions every non-disabled object store and stopped at the first
+  error, so a `PRIVATE` or `rustfs` typo blocked every new project. A row can also go bad after it is stored, so the check
+  alone would not be enough. Without the record on the project, a project that had any provider would never get the failed
+  one, since a re-entry skips provisioning.
+
+**Then, on the same PR, what a recheck found**
+
+- A failed attempt is recorded on the provider under its own short context. The attempt's had often just expired, so a hung
+  store, the likeliest failure, never reached the provider's page.
+- A project on no provider gets an error on every open, not only the first. Inside the retry window it looked fine and was not.
+- The admin API's project answer carries `provision_failures`, because a partial provision answers 200.
+- Stage 60 checks a `rustfs` store from the API and shows the reason, as it does for Ceph. The task that registers it is
+  `no_log`, so a refused row used to abort the install with the reason hidden.
+
+**Diagrams updated:** none; no container or relationship changed.
+
+## 2026-11-07: One table holds a project's status changes; a member cannot lift a suspension
+
+**What changed**
+
+- `internal/platform/project/status.go` holds every allowed status change. The client service, the client handler, the admin
+  routes and the billing suspender all ask it, and writes are conditional on the status they read. `DELETED` and
+  `DELETE_IN_PROGRESS` refuse every action.
+- Cancelling a deletion needs `SCHEDULED_FOR_DELETION` and restores the status kept on the doc in `statusBeforeDeletion`.
+- `POST /project/{id}/billing/{bp}` and `POST /project/{id}/init` no longer enable a project. A billing resume leaves a project
+  an operator disabled (`disabledByOperator`).
+
+**Why**
+
+- Enabling was reachable from each path on its own terms: a cancel with nothing scheduled, a profile change, opening a project
+  with no service yet. Each could lift a billing or operator suspension, and each could overwrite `DELETE_IN_PROGRESS`, which
+  drops the project out of the sweep mid-teardown. A rule per handler is what let them differ.
+- The write is conditional because the deletion sweep moves a project between a handler's read and its write.
+
+**Then, on the same PR, what a recheck found**
+
+- `Repo.Save` no longer writes `status`, `scheduledForDeletionAt`, `statusBeforeDeletion` or `disabledByOperator`. Only the
+  conditional writes do: `SaveIfStatus`, `EnableIfDisabled` and `ApplyBillingSuspension`. Admin project update and quota write
+  their own fields, where they replaced the whole doc.
+- `pgdoc.SetFieldsOne` and `DeleteOne` lock the row they select. Without it a write queued behind another rechecked only the id,
+  so two conditional writes could both win. The test that races a suspension against a member's schedule found this.
+- A `DISABLED` project refuses what adds usage (`errProjectDisabled`, 409): every create, an upload, new or rotated S3 keys, and
+  every action outside `allowedWhileDisabled`. Reads, stop and delete stay open.
+- Moving a project to a `NEW` profile, by profile or by organization, is refused while something would keep running.
+- A billing profile's suspend, resume and activation apply only to the projects it pays for (`AllByBillingProfile`, `PaidBy`).
+- Opening a project lifts a `DISABLED` that nothing holds any more: not an operator's, and billing allows it. Activation lifts a
+  provisioned project as well.
+
+**Why**
+
+- `Save` ran from a read that could be minutes old: a bootstrap waiting on a provider put back the status from before a member's
+  delete-now, and the project dropped out of the sweep. Conditional writes on the few status paths do not help while a generic
+  write can overwrite them, so the generic write must not hold the field at all.
+- Metering, the sync and rating cover only `ENABLED` projects, so anything created or started in a `DISABLED` one ran free.
+- Refusing the profile move, rather than pausing through the suspender, because the move is the tenant's own action and
+  activation has no leg that resumes VMs. A refusal has no partial failure and tells them what to do.
+
+**Then, on the same PR, what a second recheck found**
+
+- `ActivationService.Suspend` and `SuspensionJob.suspend` save `SUSPENDED` before the cloud walk. `SuspensionJob.ExecuteDunning`
+  starts by walking every `SUSPENDED` profile again (`finishSuspensions`), before the check that dunning is on. The walk skips what
+  is already down. When a walk ends and the profile reads `ACTIVE`, the resume leg runs once more.
+- A process already `SUSPENDED` on an `ACTIVE` profile no longer stops dunning: it is a suspend whose profile save failed, and the
+  next pass carries on from it.
+- The client's `DELETE /billing-profile/{id}` refuses a `SUSPENDED` profile, a negative balance, or one still paying for a project.
+- `holdForProfile` takes "no profile" as well as a `NEW` one, covers every row type billing rates (`billableRows`) and a `DISABLED`
+  project too, and does nothing when billing is unconfigured.
+- `KeepServerVolumes`, `RebuildServer`, `ResizeServer` and `RestoreServerBackup` test `PoweredOn` before changing a VM: a paused VM
+  reads `paused`, so they skipped the stop. `START` on a paused VM resumes it.
+
+**Why**
+
+- With the walk first, a member opening a project during it saw `DISABLED` on an `ACTIVE` profile and lifted it, and the suspension
+  was lost for good. Saving first closes that, and leaves the failure cases to choose between. `ACTIVE` with projects down and
+  nothing retrying is the one to rule out, so a failed save touches nothing and a failed walk stands as `SUSPENDED`.
+- The pass is level-triggered rather than a retry marker. A marker only knows what a walk reported, and it would miss a crash, a
+  VM whose row appeared after the walk, and a lift racing the save. The price: an operator's enable under a suspended profile lasts
+  until the next pass, because nothing tells it from a missed project.
+- A suspended project could get out by deleting the profile, since `updateOrganization` skips its check when there is none. An org
+  with no profile was skipped too, and left a running project `ENABLED` and unrated.
+- Billing unconfigured leaves every profile `NEW`, so the hold refused or disabled every move on a portal that bills nothing.
+- Buckets and volumes were not in the check, so a tenant could park storage on a `NEW` profile, `DISABLED` and unrated, with its S3
+  keys still working against the store.
 ## 2026-11-07: Cluster ids take a neutral prefix
 
 **What changed**
