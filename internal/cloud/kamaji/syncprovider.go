@@ -74,14 +74,13 @@ func (p *ClusterSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 	return out, nil
 }
 
-// addonParts reads the namespace's HelmChartProxies, ClusterResourceSets and Deployments, keyed
-// Kind/name, for readyPastResourceSet.
+// addonParts reads the namespace's HelmChartProxies and ClusterResourceSets, keyed Kind/name, for
+// readyPastResourceSet.
 func (s *Service) addonParts(ctx context.Context, ns string) (map[string]map[string]any, error) {
 	parts := map[string]map[string]any{}
 	for _, k := range []struct{ group, version, plural, kind string }{
 		{"addons.cluster.x-k8s.io", "v1alpha1", "helmchartproxies", "HelmChartProxy"},
 		{"addons.cluster.x-k8s.io", "v1beta2", "clusterresourcesets", "ClusterResourceSet"},
-		{"apps", "v1", "deployments", "Deployment"},
 	} {
 		items, err := s.api.ListCRs(ctx, k.group, k.version, k.plural, ns, "")
 		if err != nil {
@@ -249,7 +248,7 @@ const resourceSetGrace = 30 * time.Minute
 // webhook answers, and CAPI's retry backoff then leaves it unapplied for minutes after the
 // cluster works: on the lab it applied 15 min after the Application was created, 8 min past
 // CAPI's Available. Argo 3 no longer keeps per-resource health in app.status.resources, so the
-// HelmChartProxies, Deployments and the CRS that list names are read off the management cluster
+// HelmChartProxies and the CRS that list names are read off the management cluster
 // (parts, keyed Kind/name). Anything else not done, or a CRS past the grace, keeps Argo's answer.
 func readyPastResourceSet(app map[string]any, parts map[string]map[string]any, now time.Time) bool {
 	created, err := time.Parse(time.RFC3339, digStr(app, "metadata", "creationTimestamp"))
@@ -266,10 +265,6 @@ func readyPastResourceSet(app map[string]any, parts map[string]map[string]any, n
 		switch kind {
 		case "HelmChartProxy":
 			if !conditionTrue(obj, "Ready") {
-				return false
-			}
-		case "Deployment":
-			if !deploymentAvailable(obj) {
 				return false
 			}
 		case "ClusterResourceSet":
@@ -289,19 +284,6 @@ func conditionTrue(obj map[string]any, typ string) bool {
 		}
 	}
 	return false
-}
-
-// deploymentAvailable: every desired replica of the current spec is up (nil = not found).
-func deploymentAvailable(d map[string]any) bool {
-	if d == nil {
-		return false
-	}
-	want := count(dig(d, "spec", "replicas"))
-	avail, _ := dig(d, "status", "availableReplicas").(float64)
-	updated, _ := dig(d, "status", "updatedReplicas").(float64)
-	gen, _ := dig(d, "metadata", "generation").(float64)
-	seen, _ := dig(d, "status", "observedGeneration").(float64)
-	return seen >= gen && avail >= want && updated >= want
 }
 
 // groupsReady: every node group runs its desired count of Ready nodes.

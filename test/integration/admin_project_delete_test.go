@@ -64,6 +64,13 @@ func TestAdminProjectDeletionLegs(t *testing.T) {
 		t.Fatalf("unwired schedule must not flip status, got %s", status())
 	}
 
+	// A pre-check that fails with a plain error (the cloud unreachable) answers 500 and schedules nothing.
+	reseed()
+	cantCheck := newH(&admin.ProjectCloudOps{CanDelete: func(context.Context, string) error { return errors.New("cloud down") }})
+	if w := do(cantCheck, "/admin/project/proj-1"); w.Code != http.StatusInternalServerError || status() != "ENABLED" {
+		t.Fatalf("schedule on a failing pre-check: status=%d project=%s", w.Code, status())
+	}
+
 	// wired
 	repo := project.NewRepo(db)
 	svc := project.NewService(repo, nil, nil, nil, nil)

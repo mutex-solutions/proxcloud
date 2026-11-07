@@ -86,7 +86,7 @@ func projectIDNotFound(id string) *httpx.HTTPError {
 // findProjectOr404 loads a project by id or writes the exact 404; returns (doc, ok).
 func (h *Handler) findProjectOr404(w http.ResponseWriter, r *http.Request, id string) (pgdoc.M, bool) {
 	doc, err := h.repo.FindDoc(r.Context(), projectCollection, id)
-	if writeErr(w, err) {
+	if httpx.WriteError(w, err) {
 		return nil, false
 	}
 	if doc == nil {
@@ -94,20 +94,6 @@ func (h *Handler) findProjectOr404(w http.ResponseWriter, r *http.Request, id st
 		return nil, false
 	}
 	return doc, true
-}
-
-// writeErr answers any non-nil error: a typed one as itself, anything else (a database error) as a
-// 500. httpx.WriteError alone returns false for an untyped error, and a handler that then carries on
-// answers 200 for something that failed.
-func writeErr(w http.ResponseWriter, err error) bool {
-	if err == nil {
-		return false
-	}
-	if !httpx.WriteError(w, err) {
-		slog.Error("admin handler internal error", "err", err)
-		httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, "internal.error")
-	}
-	return true
 }
 
 // ── create ──────────────────────────────────────────────────────────────────────────────────────
@@ -734,11 +720,11 @@ func (h *Handler) projectDeleteNow(w http.ResponseWriter, r *http.Request) {
 			"project deletion (cloud teardown) not implemented"))
 		return
 	}
-	if err := h.projectCloud.DeleteNow(r.Context(), id); writeErr(w, err) {
+	if err := h.projectCloud.DeleteNow(r.Context(), id); httpx.WriteError(w, err) {
 		return
 	}
 	updated, err := h.repo.FindDoc(r.Context(), projectCollection, id)
-	if writeErr(w, err) {
+	if httpx.WriteError(w, err) {
 		return
 	}
 	// The middleware's DELETE PROJECT event carries the status flip to DELETE_IN_PROGRESS, which is

@@ -18,20 +18,15 @@ func TestClusterReadyPastResourceSet(t *testing.T) {
 		obj["metadata"] = map[string]any{"name": name, "generation": float64(1)}
 		return obj
 	}
-	deploy := func(avail float64) map[string]any {
-		return map[string]any{"spec": map[string]any{"replicas": float64(1)},
-			"status": map[string]any{"availableReplicas": avail, "updatedReplicas": float64(1), "observedGeneration": float64(1)}}
-	}
 	type world struct {
 		age     time.Duration
 		sync    string
 		ready   float64 // ready workers of 2
 		hcp     string  // Ready condition of the MetalLB HelmChartProxy
 		crs     string  // ResourcesApplied condition of the CRS
-		deploy  float64 // available csi-controller replicas
 		readErr error
 	}
-	base := world{age: 10 * time.Minute, sync: "Synced", ready: 2, hcp: "True", crs: "False", deploy: 1}
+	base := world{age: 10 * time.Minute, sync: "Synced", ready: 2, hcp: "True", crs: "False"}
 	for _, tc := range []struct {
 		name string
 		edit func(*world)
@@ -40,7 +35,6 @@ func TestClusterReadyPastResourceSet(t *testing.T) {
 		{"only the CRS left, inside the grace", func(*world) {}, "READY"},
 		{"CRS still not applied past the grace", func(w *world) { w.age = 2 * time.Hour }, "PROGRESSING"},
 		{"a chart not Ready", func(w *world) { w.hcp = "False" }, "PROGRESSING"},
-		{"a Deployment not available", func(w *world) { w.deploy = 0 }, "PROGRESSING"},
 		{"CRS applied, something else progressing", func(w *world) { w.crs = "True" }, "PROGRESSING"},
 		{"one node short", func(w *world) { w.ready = 1 }, "PROGRESSING"},
 		{"not synced", func(w *world) { w.sync = "OutOfSync" }, "PROGRESSING"},
@@ -65,7 +59,6 @@ func TestClusterReadyPastResourceSet(t *testing.T) {
 					map[string]any{"kind": "Secret", "name": id + "-metallb-config"},
 					map[string]any{"group": "addons.cluster.x-k8s.io", "kind": "ClusterResourceSet", "name": id + "-tenant-config"},
 					map[string]any{"group": "addons.cluster.x-k8s.io", "kind": "HelmChartProxy", "name": id + "-metallb"},
-					map[string]any{"group": "apps", "kind": "Deployment", "name": id + "-csi-controller"},
 				},
 			},
 		}
@@ -80,7 +73,6 @@ func TestClusterReadyPastResourceSet(t *testing.T) {
 		api.crs = map[string][]map[string]any{
 			"helmchartproxies":    {named(id+"-metallb", cond("Ready", w.hcp))},
 			"clusterresourcesets": {named(id+"-tenant-config", cond("ResourcesApplied", w.crs))},
-			"deployments":         {named(id+"-csi-controller", deploy(w.deploy))},
 		}
 		api.crsErr = w.readErr
 		rows, err := svc.SyncProvider("az1", "p1").List(context.Background())

@@ -10,10 +10,11 @@ and rules: [README.md](README.md#maintenance-rule).
 
 - A Kubernetes cluster reads `READY` when Argo CD still says `Progressing` but the control plane is Ready with an endpoint,
   every node group runs its count of Ready nodes, the Application is Synced, and the one part of it not done is its
-  ClusterResourceSet: every HelmChartProxy Ready and every Deployment available, read off the management cluster. That
+  ClusterResourceSet: every HelmChartProxy Ready, read off the management cluster. That
   holds for 30 minutes from the Application's creation; past it a ClusterResourceSet that never applies leaves the cluster
-  `PROGRESSING`. `deploy/mgmt-cluster/rbac.yaml` gives the ProxCloud ServiceAccount read on those three kinds (the
-  services-cluster step applies it again on a re-run); without it the reads are refused and Argo's answer stands. The sync also reports the cluster's
+  `PROGRESSING`. `deploy/mgmt-cluster/rbac.yaml` gives the ProxCloud ServiceAccount read on HelmChartProxies and
+  ClusterResourceSets; on an existing install re-run the services-cluster step to apply it. Without it the reads are refused
+  and Argo's answer stands. The sync also reports the cluster's
   StorageClasses and whether it has ReadWriteMany, and the cluster page says when a claim will stay Pending.
 - `LIST_VOLUME_TYPES` marks the provider's default storage profile; the server wizard preselects it.
 - Activating a billing profile that has no currency gives it the base currency, an ACTIVE profile already stored without
@@ -21,7 +22,9 @@ and rules: [README.md](README.md#maintenance-rule).
 - Operator Delete now asks once more before it runs, answers a failure underneath as a 500 instead of 200, and its audit
   event records the flip to `DELETE_IN_PROGRESS`, which tells it from a scheduled deletion.
 - The bill page's lines add up to the total: the subtotal is the items before adjustments, tax keeps its sign (credit-note
-  bills), and a sub-cent remainder dropped by the cent-rounded total shows as Rounding.
+  bills), and a sub-cent remainder dropped by the cent-rounded total shows as Rounding. The bill DTO (`ToBillDto`) converts
+  items and adjustments to the profile's currency at the rate its net and gross use, so every amount on a bill is in one
+  currency.
 - The refusal on a suspended project says who lifts it: paying the balance, or the operator for an operator's disable.
 - The admin Kubernetes and database cluster lists answer a management-cluster error as a 502.
 - Consoles: Delete now for operators, Test connection on Kubernetes and database providers, a first-project form for an
@@ -38,13 +41,15 @@ and rules: [README.md](README.md#maintenance-rule).
   `app.status.resources`, so the parts are read from the management cluster.
 - An operator can activate a profile before its owner saves billing details, which is where the currency came from. Its
   bill list then answered 500.
-- `httpx.WriteError` writes only a typed error and returns false for any other, so an unreachable management cluster
-  answered 200 with no clusters, and a Test connection built on that list would have said connected. Many other handlers
-  share the pattern; that is left for its own change.
+- An unreachable management cluster answered 200 with no clusters, and a Test connection built on that list would have
+  said connected. Since #109 any untyped error answers 500; a cluster error answers 502, the cluster's fault.
+- The bill net was converted to the profile's currency but the adjustments were not, so the subtotal (net minus
+  adjustments) mixed currencies: EUR at 0.9, items $100 and an adjustment of -$10 printed a subtotal of 91.00, not 90.
 - A new project's services are attached by the entry call that runs alongside the pages' first reads, so they read no
   location and showed "No region" until a reload. They read again once that call is done.
 
 **Diagrams updated:** none (no new container, component or relation).
+
 ## 2026-11-07: An untyped handler error answers 500
 
 **What changed**

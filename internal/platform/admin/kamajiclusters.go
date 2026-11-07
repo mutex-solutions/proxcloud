@@ -6,6 +6,7 @@ package admin
 // roll customer clusters implicitly) — these endpoints are the operator's explicit override.
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -15,16 +16,14 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
-// writeClusterErr answers any error of a management-cluster call. httpx.WriteError writes only a typed
-// error and returns false for anything else, so an unreachable cluster or a bad kubeconfig used to answer
-// 200 with no clusters, which the console's Test connection read as connected. Such an error is a 502.
+// writeClusterErr answers any error of a management-cluster call: a typed one as itself, anything else
+// (an unreachable cluster, a bad kubeconfig) as a 502, the cluster's fault rather than the portal's.
 func writeClusterErr(w http.ResponseWriter, err error) bool {
-	if err == nil {
-		return false
+	var he *httpx.HTTPError
+	if err == nil || errors.As(err, &he) {
+		return httpx.WriteError(w, err)
 	}
-	if !httpx.WriteError(w, err) {
-		httpx.Err(w, http.StatusBadGateway, http.StatusBadGateway, "management cluster: "+err.Error())
-	}
+	httpx.Err(w, http.StatusBadGateway, http.StatusBadGateway, "management cluster: "+err.Error())
 	return true
 }
 
