@@ -26,6 +26,24 @@ and rules: [README.md](README.md#maintenance-rule).
   kept the phantom carrier rows that the same reconcile exists to remove, so the pass tells moved from gone.
 
 **Diagrams updated:** none (no new component or flow).
+## 2026-11-07: Admin delete-now goes through the deletion job
+
+**What changed**
+
+- `DELETE /admin/project/{id}/now` sets the same flag as the client's delete-now, `DELETE_IN_PROGRESS` with a past schedule,
+  and returns. The goroutine in `cmd/api` is gone; the deletion job is the one thing that runs `TeardownProject`. The job's
+  lock now holds for 30 minutes instead of 1.
+- Both cancels refuse a `DELETED` project.
+
+**Why**
+
+- The sweep selects on `scheduledForDeletionAt`, and the admin path set none. A pod restart, an early return from the
+  teardown or a failed final save left the project `DELETE_IN_PROGRESS` forever. Stamping the schedule alone would have left
+  the goroutine and the sweep tearing down the same project at once, so there is now one runner, and a lock shorter than a
+  teardown no longer starts a second one. A project already stuck that way is freed by calling delete-now again.
+- A cancel of a `DELETED` project flipped it to `ENABLED` with its cloud resources gone.
+
+**Diagrams updated:** `c4-code.md` (teardown sequence).
 
 ## 2026-11-07: Customer image import (P5-11)
 
