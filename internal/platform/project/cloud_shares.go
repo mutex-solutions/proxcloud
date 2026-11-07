@@ -27,7 +27,7 @@ func shareErr(err error) error {
 	if errors.Is(err, truenas.ErrShare) {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, strings.TrimPrefix(err.Error(), truenas.ErrShare.Error()+": "))
 	}
-	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+	return upstreamErr("file server", err)
 }
 
 // shareNetworks lists what a project's clients look like to the NAS: its public addresses and its subnets.

@@ -302,6 +302,10 @@ func (h *Handler) tryTenantClient(ctx context.Context, p *Project, svcID string)
 	return cc, true
 }
 
+// errProjectDeleting refuses creates and actions on a project on its way out: teardown lists what exists once, so anything
+// made after that would stay behind with nothing to remove it. Deletes stay open.
+var errProjectDeleting = httpx.NewError(http.StatusConflict, http.StatusConflict, "This project is being deleted")
+
 func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
@@ -309,6 +313,10 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	proj, ok := h.project(w, r, u, rbac.ProjectCloudResourceManage)
 	if !ok {
+		return
+	}
+	if proj.Deleting() {
+		h.fail(w, errProjectDeleting)
 		return
 	}
 	svcID := h.resolveServiceID(r, proj)
@@ -591,6 +599,10 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if proj.Deleting() {
+		h.fail(w, errProjectDeleting)
+		return
+	}
 	svcID := h.resolveServiceID(r, proj)
 	if svcID == "" {
 		h.fail(w, httpx.BadRequest("Project has no cloud service"))
@@ -639,7 +651,7 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if cr.Type == cloud.TypeDNSZone {
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsPowerDNS() {
-			if h.zoneAction(w, r, proj, es, cr, req.Action, req.Data) {
+			if h.zoneAction(w, r, u, proj, es, cr, req.Action, req.Data) {
 				return
 			}
 		}
