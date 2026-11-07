@@ -113,6 +113,17 @@ func TestPVEPlacement(t *testing.T) {
 	}
 }
 
+func TestVMNameErr(t *testing.T) {
+	if herr := vmNameErr("web-1.example.org"); herr != nil {
+		t.Fatal(herr)
+	}
+	for _, name := range []string{"", "my server", "my_server", "-web"} {
+		if herr := vmNameErr(name); herr == nil || herr.Status != http.StatusBadRequest {
+			t.Errorf("%q: %v", name, herr)
+		}
+	}
+}
+
 func TestPVEVolumeErr(t *testing.T) {
 	if he := pveVolumeErr(&pve.ConflictError{Msg: "Detach the volume before deleting it"}); he.Status != http.StatusConflict || he.Msg != "Detach the volume before deleting it" {
 		t.Fatalf("conflict mapped to %d %q", he.Status, he.Msg)
