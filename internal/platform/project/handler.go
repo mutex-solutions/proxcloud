@@ -84,6 +84,9 @@ type Handler struct {
 	publicIPs *PublicIPRepo
 	// seeds holds Proxmox server seeds (SetSeeds; nil = user-data is refused).
 	seeds *SeedRepo
+	// csiGW gives new Kubernetes clusters block volumes through the CSI gateway (SetCSIGateway; nil = the tenant-side
+	// controller, offered only with csiSharedStores).
+	csiGW *CSIGateway
 }
 
 // SetCustomMenu wires the customMenuItem reader into the /init menu build.

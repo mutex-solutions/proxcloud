@@ -744,6 +744,9 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		}
 		return ps.DeleteSecurityGroup(ctx, proj.ID, cr.ExternalID)
 	case cloud.TypeVolume:
+		if herr := csiVolumeGuard(cr); herr != nil {
+			return herr
+		}
 		// Only a detached disk (unusedN) is deleted on its own; an attached one is 409.
 		ps, err := h.pveFor(es)
 		if err != nil {
@@ -1358,6 +1361,10 @@ func sgRuleErr(err error) *httpx.HTTPError {
 func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if cr.Type != cloud.TypeVolume {
 		return false
+	}
+	if herr := csiVolumeGuard(cr); herr != nil {
+		h.fail(w, herr)
+		return true
 	}
 	ctx := r.Context()
 	ps, err := h.pveFor(es)

@@ -4,6 +4,49 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: proxmox-csi controller on the services cluster (K8s-CSI, PR 2 of 4)
+
+**What changed**
+
+- New clusters run proxmox-csi's controller on the services cluster, in `pc-<projectId>`, from a new chart template
+  (`proxmox-kamaji-cluster` 0.1.6, `templates/csi-controller.yaml`): plugin, attacher, provisioner and resizer, each with
+  the Kamaji admin kubeconfig (`admin.svc`) and the gateway config from `<id>-csi-gateway`. The tenant keeps the node
+  plugin with the upstream controller at 0 replicas (the chart's top-level `replicaCount`; the `controller.replicaCount`
+  the chart set before is no key of the upstream chart) and no config Secret; the resource set carries only the
+  `csi-proxmox` namespace. No `csi@pve!<id>` token is minted.
+- The create path mints the cluster's gateway credential (`Store.ControllerSecret`) when the portal has
+  `PROXCLOUD_CSI_GATEWAY_URL` + `PROXCLOUD_CSI_GATEWAY_CA_FILE`, the compute provider holds the gateway token and the
+  workers are the project's. Every storage profile is then a StorageClass; `csiSharedStores` no longer gates them.
+- `KamajiReleaseCluster` first revokes the credential and deletes every disk the registry still holds for the cluster
+  (`Store.ReleaseCluster`, gateway token), and keeps the marker while PVE refuses one.
+- Registry-driven billing: `csigw.VolumeRows` (a VOLUME sync provider in the PVE sync) makes each `ready`/`deleting` row a
+  VOLUME row of the project (`data.volume.k8sCluster`, the profile of its store, created at the disk's creation), drops
+  `creating` rows 15 minutes old with no disk, closes rows whose disk is gone and takes the size from PVE. The PVE volume
+  sync keeps rows with `k8sCluster`; `VolumeRows` keeps all others. The portal answers 409 to a delete or action on one.
+  `CSIDiskQuota` counts the registry, not those rows, so a disk is counted once; other quota checks now see the disks.
+- Deployment: proxcloud chart `api.csiGateway` (port, Service with `externalTrafficPolicy: Local`, cert-manager CA and
+  leaf certificate, NetworkPolicy admitting the port from `allowedCIDRs` only, the API's other ports unchanged); the
+  listener reloads its certificate files. Installer stage 40 turns it on in split mode with the services nodes as the
+  sources (`pc_ip_cidrs`).
+
+**Why**
+
+- The upstream chart cannot give its sidecars a kubeconfig, so the controller is our template; the in-cluster
+  kubeconfig avoids the tenant API allowlist. Leases and capacity objects stay in the tenant: the scheduler needs the
+  capacity objects (the CSIDriver says `storageCapacity`), and the lease names depend on the driver name only (seen on the
+  lab), so PR 3 can switch a cluster with one sync.
+- The release revokes the credential before it deletes, so nothing can create a disk behind it, and deletes from the
+  registry, so no disk of a deleted cluster stays on the store unbilled and with no owner, as the tenant-side controller
+  left any PVC still there at delete.
+- Two VOLUME providers reconcile one (provider, project, type) set, so each keeps the other's rows instead of archiving
+  them; a second row type or service id would have broken pricing rules and the project teardown.
+- The gateway port must not be reachable from tenant networks: a Local Service keeps the caller's address, which the
+  NetworkPolicy checks (lab: the services nodes reach it, the lab host is refused). The CA keeps its key
+  (`rotationPolicy: Never`) because every cluster's Secret holds it.
+- New clusters only; existing ones keep their tenant controller until the migration (PR 3).
+
+**Diagrams updated:** `c2-containers.md`, `c3-components.md`.
+
 ## 2026-11-07: An untyped handler error answers 500
 
 **What changed**
@@ -73,6 +116,7 @@ and rules: [README.md](README.md#maintenance-rule).
   it: the isolation rules do, and the warning says when a store is outside them.
 
 **Diagrams updated:** `c3-components.md`, `c4-code.md`.
+
 ## 2026-11-07: CSI gateway and volume registry (K8s-CSI, PR 1 of 4)
 
 **What changed**

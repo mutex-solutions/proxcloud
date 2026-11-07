@@ -73,6 +73,9 @@ type ClusterSecrets struct {
 	Cloud map[string]string
 	// CSIManifest is the tenant-side proxmox-csi config, delivered by a ClusterResourceSet.
 	CSIManifest string
+	// CSIGateway is the data of the controller's Secret on the services cluster (CSIGatewaySecretName): its config
+	// and the gateway's CA. Empty: no controller there.
+	CSIGateway map[string]string
 	// ComputeServiceID names the proxmox provider hosting the workers; the reaper needs it.
 	ComputeServiceID string
 }
@@ -132,6 +135,11 @@ func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, sec Clust
 			return nil, fmt.Errorf("kamaji: apply csi secret: %w", err)
 		}
 	}
+	if len(sec.CSIGateway) > 0 {
+		if err := s.api.ApplySecret(ctx, ns, CSIGatewaySecretName(spec.ID), sec.CSIGateway, labels, nil); err != nil {
+			return nil, fmt.Errorf("kamaji: apply csi gateway secret: %w", err)
+		}
+	}
 	if err := s.api.ApplySecret(ctx, ns, MarkerSecretName(spec.ID), nil, labels,
 		map[string]string{annotationComputeService: sec.ComputeServiceID}); err != nil {
 		return nil, fmt.Errorf("kamaji: apply marker secret: %w", err)
@@ -167,7 +175,7 @@ func (s *Service) AbandonCluster(ctx context.Context, projectID, clusterID, comp
 		}
 	}
 	ns := NamespaceFor(projectID)
-	for _, name := range []string{CSISecretName(clusterID), CloudSecretName(clusterID), MarkerSecretName(clusterID)} {
+	for _, name := range []string{CSISecretName(clusterID), CSIGatewaySecretName(clusterID), CloudSecretName(clusterID), MarkerSecretName(clusterID)} {
 		if err := s.api.DeleteSecret(ctx, ns, name); err != nil {
 			return err
 		}
@@ -310,6 +318,11 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		}
 		if err := s.api.DeleteSecret(ctx, ns, CSISecretName(cid)); err != nil {
 			errs = append(errs, fmt.Errorf("cluster %s: delete csi secret: %w", cid, err))
+			pending++
+			continue
+		}
+		if err := s.api.DeleteSecret(ctx, ns, CSIGatewaySecretName(cid)); err != nil {
+			errs = append(errs, fmt.Errorf("cluster %s: delete csi gateway secret: %w", cid, err))
 			pending++
 			continue
 		}

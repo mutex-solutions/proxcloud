@@ -84,6 +84,21 @@ def template_nodes(nodes, profile_storage_shared, per_node="auto"):
     return names if per_node else names[:1]
 
 
+def ip_cidrs(entries):
+    """Addresses, CIDRs and first-last ranges (services.network.nodes) as the CIDRs that cover exactly them."""
+    import ipaddress
+
+    out = []
+    for e in entries:
+        first, _, last = str(e).partition("-")
+        if not last:
+            out.append(str(ipaddress.ip_network(first.strip(), strict=False)))
+            continue
+        nets = ipaddress.summarize_address_range(ipaddress.ip_address(first.strip()), ipaddress.ip_address(last.strip()))
+        out.extend(str(n) for n in nets)
+    return out
+
+
 def pve_acl_missing(rows, wanted):
     """Which wanted ACL entries GET /access/acl does not hold yet. A wanted entry is {path, role,
     propagate, user, token}; both the user and its privsep token need it, unless one of them is empty."""
@@ -143,4 +158,5 @@ class FilterModule:
             "pc_boot_iso_problem": boot_iso_problem,
             "pc_iso_stores": iso_stores,
             "pc_visible_stores": visible_stores,
+            "pc_ip_cidrs": ip_cidrs,
         }

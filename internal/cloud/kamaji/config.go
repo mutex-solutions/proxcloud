@@ -28,6 +28,10 @@ func CloudSecretName(clusterID string) string { return clusterID + cloudSecretSu
 // scoped token) to the customer cluster.
 func CSISecretName(clusterID string) string { return clusterID + "-csi-config" }
 
+// CSIGatewaySecretName is the Secret of the cluster's proxmox-csi controller on the services cluster: its config with
+// the cluster's gateway credential, and the CA of the gateway. Management side only, never in the resource set.
+func CSIGatewaySecretName(clusterID string) string { return clusterID + "-csi-gateway" }
+
 // cloudSecretSuffix lets FinalizeOrphans map a secret name back to its cluster id.
 const cloudSecretSuffix = "-cloud-config"
 
@@ -215,6 +219,9 @@ type ClusterInfra struct {
 	StorageClasses []StorageClass
 	RWXServer      string // NFS server of the cluster's dataset ("" = no RWX class)
 	RWXShare       string // its export path
+	// CSIGateway runs the cluster's proxmox-csi controller on the services cluster against the CSI gateway, with no PVE
+	// credential in the tenant cluster (CSIGatewaySecretName). False: the tenant-side controller of older clusters.
+	CSIGateway bool
 }
 
 // StorageClass is one tenant-side proxmox-csi class.

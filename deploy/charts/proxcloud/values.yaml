@@ -151,6 +151,26 @@ api:
     type: ClusterIP
     port: 8080
 
+  # CSI gateway: the listener tenant clusters' proxmox-csi controllers on the services cluster call instead of PVE
+  # (docs/managed-k8s.md). Off by default; needs cert-manager. When on, new Kubernetes clusters get block volumes with
+  # no PVE credential in the tenant, provided the compute provider holds the gateway token (csiGatewayTokenId).
+  csiGateway:
+    enabled: false
+    port: 8443
+    # The address the services cluster reaches the gateway at, https://<host>:<port>. Its host goes in the
+    # certificate, which a CA made here signs; the controllers get that CA, not the system roots.
+    url: ""
+    service:
+      # Its own Service, never the Ingress: the port is not for the Internet. Local keeps the caller's address,
+      # which the NetworkPolicy below checks.
+      type: LoadBalancer
+      externalTrafficPolicy: Local
+      loadBalancerIP: ""
+      annotations: {}
+    # Sources allowed on the gateway port: the services cluster's node addresses (its pods leave with them). Empty
+    # refuses everyone. Never a tenant network.
+    allowedCIDRs: []
+
   ingress:
     enabled: false
     className: ""

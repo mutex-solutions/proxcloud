@@ -45,6 +45,13 @@ proxmox:
     # tenant cluster, which is what the portal renders unless the provider sets csiSharedStores; see docs/managed-k8s.md.
     storageClasses:
       - {name: std, storage: local-zfs}
+    # -- Set by the portal when the CSI gateway is on: the controller runs on this (services) cluster against the
+    # gateway (templates/csi-controller.yaml), the tenant's controller stays at 0 replicas, and the tenant holds no PVE
+    # credential. secretName: the controller's config Secret the portal writes. kubeconfigSecretName: the Kamaji admin
+    # kubeconfig of this cluster.
+    gateway:
+      secretName: ""
+      kubeconfigSecretName: ""
   # -- The cluster's NAS dataset. Server set: csi-driver-nfs and an RWX StorageClass on it; PVCs are subdirectories.
   rwx:
     server: ""
@@ -76,6 +83,14 @@ addonCharts:
   certManager: {repoURL: "https://charts.jetstack.io", chart: cert-manager, version: "v1.20.2"}
   ingress: {repoURL: "https://kubernetes.github.io/ingress-nginx", chart: ingress-nginx, version: "4.13.3"}
   nfsCsi: {repoURL: "https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts", chart: csi-driver-nfs, version: "4.13.6"}
+
+# -- Images of the services-side proxmox-csi controller (proxmox.csi.gateway), the versions of chart proxmoxCsi above.
+csiController:
+  images:
+    controller: ghcr.io/sergelogvinov/proxmox-csi-controller:v0.22.0
+    attacher: registry.k8s.io/sig-storage/csi-attacher:v4.13.0
+    provisioner: registry.k8s.io/sig-storage/csi-provisioner:v6.4.0
+    resizer: registry.k8s.io/sig-storage/csi-resizer:v2.3.0
 
 # -- The tenant's add-on picks, addons.<name>.enabled. metricsServer defaults on.
 addons:

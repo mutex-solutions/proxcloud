@@ -14,8 +14,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -151,16 +153,28 @@ func (h *Handler) CSIDiskQuota(ctx context.Context, projectID, serviceID string,
 		return err
 	}
 	usage := func() (pveQuotaDemand, error) {
-		u, err := h.pveQuotaUsage(ctx, proj.ID, es.ID)
+		rows, err := h.cloud.FindAllByProjectID(ctx, proj.ID)
 		if err != nil {
-			return u, err
+			return pveQuotaDemand{}, err
 		}
+		// The registry counts the cluster disks itself, creating and just-grown ones too: not their cached rows again.
+		rows = slices.DeleteFunc(rows, func(r cloud.CloudResource) bool { return pve.CSIClusterOf(r.Data) != "" })
+		u := pveUsageOf(rows, es.ID)
 		n, err := csiUsed()
 		u.DiskGb += n
 		return u, err
 	}
 	if herr := checkPVEQuota(pveQuotaLimits(proj, es), pveQuotaDemand{DiskGb: addGiB}, usage, func() (int, error) { return 0, nil }); herr != nil {
 		return herr
+	}
+	return nil
+}
+
+// csiVolumeGuard refuses a portal write on a tenant cluster's disk: the cluster owns it, through its PersistentVolume.
+func csiVolumeGuard(cr *cloud.CloudResource) *httpx.HTTPError {
+	if id := pve.CSIClusterOf(cr.Data); id != "" {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict,
+			"This volume belongs to Kubernetes cluster "+id+". Manage it through its PersistentVolumeClaim")
 	}
 	return nil
 }

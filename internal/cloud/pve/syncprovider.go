@@ -420,8 +420,12 @@ func (p *VolumeSyncProvider) list(ctx context.Context, skip func(ClusterResource
 	return out, nil
 }
 
-// KeepUnread: the disks of a VM nobody can read right now are still there.
+// KeepUnread: the disks of a VM nobody can read right now are still there. A tenant cluster's disk is no VM's: its row
+// comes from the CSI gateway's registry (csigw.VolumeRows), and this sync leaves it alone.
 func (p *VolumeSyncProvider) KeepUnread(cached *cloud.CloudResource) (keep, changed bool) {
+	if CSIClusterOf(cached.Data) != "" {
+		return true, false
+	}
 	vol, _ := cached.Data["volume"].(map[string]any)
 	_, unread := p.unread[intOf(vol["vmid"])]
 	return unread, false
@@ -462,6 +466,16 @@ func (s *Service) holderElsewhere(ctx context.Context, vm ClusterResource, notFo
 		}
 	}
 	return "", nil, notFound
+}
+
+// DataK8sCluster marks a VOLUME row as a tenant cluster's disk (data.volume.k8sCluster = cluster id).
+const DataK8sCluster = "k8sCluster"
+
+// CSIClusterOf is the tenant cluster a VOLUME row's disk belongs to, "" for any other row.
+func CSIClusterOf(data map[string]any) string {
+	vol, _ := data["volume"].(map[string]any)
+	id, _ := vol[DataK8sCluster].(string)
+	return id
 }
 
 // isCSIDisk recognises proxmox-csi's volume names, <store>:vm-9999-pvc-<uuid> (with a file store's

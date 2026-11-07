@@ -84,6 +84,16 @@ func infraValues(d ClusterDefaults, spec ClusterSpec) map[string]any {
 	if len(dns) == 0 {
 		dns = []string{"1.1.1.1", "8.8.8.8"}
 	}
+	csi := map[string]any{
+		"configSecretName": CSISecretName(spec.ID),
+		"storageClasses":   classes,
+	}
+	if in.CSIGateway {
+		csi["gateway"] = map[string]any{
+			"secretName":           CSIGatewaySecretName(spec.ID),
+			"kubeconfigSecretName": AdminKubeconfigSecretName(spec.ID),
+		}
+	}
 	out := map[string]any{
 		"region":  in.Region,
 		"pool":    in.Pool,
@@ -96,10 +106,7 @@ func infraValues(d ClusterDefaults, spec ClusterSpec) map[string]any {
 			"dnsServers": anySlice(dns),
 			"mtu":        d.NodeGroupMTU,
 		},
-		"csi": map[string]any{
-			"configSecretName": CSISecretName(spec.ID),
-			"storageClasses":   classes,
-		},
+		"csi":     csi,
 		"metallb": map[string]any{"addresses": anySlice(in.LBAddresses)},
 	}
 	if in.RWXServer != "" {

@@ -104,7 +104,8 @@ read from env:
 |---------|-----|------|---------|---------|
 | Default region | `PROXCLOUD_DEFAULT_REGION` | `proxcloud.default-region` | `default` | Region stamped on a provider binding when the provider sets none (`project/bootstrap.go`), and the admin handlers' region fallback. |
 | CSI gateway address | `PROXCLOUD_CSI_GATEWAY_ADDR` | `proxcloud.csi-gateway.addr` | — (off) | Listener for tenant clusters' proxmox-csi controllers (e.g. `:8443`), see [managed-k8s.md](managed-k8s.md). Separate from `:8080` and `:8081` on purpose. |
-| CSI gateway certificate | `PROXCLOUD_CSI_GATEWAY_TLS_CERT`, `PROXCLOUD_CSI_GATEWAY_TLS_KEY` | `proxcloud.csi-gateway.tls-cert`, `.tls-key` | — | PEM files. The listener serves TLS only; an address without both fails startup. |
+| CSI gateway certificate | `PROXCLOUD_CSI_GATEWAY_TLS_CERT`, `PROXCLOUD_CSI_GATEWAY_TLS_KEY` | `proxcloud.csi-gateway.tls-cert`, `.tls-key` | — | PEM files. The listener serves TLS only; an address without both fails startup. Read again a minute after the last handshake, so a renewal in place needs no restart. |
+| CSI gateway URL and CA | `PROXCLOUD_CSI_GATEWAY_URL`, `PROXCLOUD_CSI_GATEWAY_CA_FILE` | `proxcloud.csi-gateway.url`, `.ca-file` | — (off) | `https://<host>:<port>` as the services cluster reaches the gateway, and the PEM CA that signs its certificate. Set, new Kubernetes clusters run their proxmox-csi controller on the services cluster against the gateway; empty, they keep the tenant-side controller of `csiSharedStores`. Required together. Independent of the address: the replica that creates a cluster need not serve the gateway. |
 
 The gateway's PVE token is per compute provider: `config.csiGatewayTokenId` and `secret.csiGatewaySecret` on the Proxmox
 provider ([proxmox-permissions.md](proxmox-permissions.md#the-csi-gateway-token)). Without them the gateway answers its

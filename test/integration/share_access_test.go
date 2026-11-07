@@ -335,7 +335,7 @@ func TestClusterReleaseKeepsItsRecordUntilDone(t *testing.T) {
 	f := newShareAccessFixture(t)
 	f.reserve(t, "vmbrw", "10.89.0.99", "pc-c-a")
 	cloudRepo := cloud.NewRepo(f.db)
-	if err := project.KamajiReleaseCluster(failingServices{errors.New("db down")}, cloudRepo, nil, f.ips, false)(ctx, "svc-pve", f.projectID, "pc-c-a"); err == nil {
+	if err := project.KamajiReleaseCluster(failingServices{errors.New("db down")}, cloudRepo, nil, f.ips, false, nil)(ctx, "svc-pve", f.projectID, "pc-c-a"); err == nil {
 		t.Fatal("release reported success after a failed provider read")
 	}
 	if n := f.clusterRows(t, "vmbrw"); n != 1 {
@@ -343,7 +343,7 @@ func TestClusterReleaseKeepsItsRecordUntilDone(t *testing.T) {
 	}
 
 	es := externalservice.NewService(externalservice.NewRepo(f.db), textcrypt.New("k"))
-	if err := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, false)(ctx, "no-such-provider", f.projectID, "pc-c-a"); err != nil {
+	if err := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, false, nil)(ctx, "no-such-provider", f.projectID, "pc-c-a"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -357,7 +357,7 @@ func TestClusterReleaseOnlyTouchesTheNASHoldingItsDataset(t *testing.T) {
 		"secret": pgdoc.M{"apiKey": "k"}})
 	es := externalservice.NewService(externalservice.NewRepo(f.db), textcrypt.New("k"))
 	cloudRepo := cloud.NewRepo(f.db)
-	release := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, true)
+	release := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, true, nil)
 
 	// No share row: nothing on any NAS to reach.
 	f.reserve(t, "vmbrw", "10.89.0.99", "pc-c-a")
