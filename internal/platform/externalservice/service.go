@@ -91,6 +91,9 @@ func (s *Service) EncryptSecret(v any) any {
 }
 
 // decrypt normalizes config + secret and decrypts the secret's textual leaves in place.
+// Decrypt turns a row built from a stored doc into one with a readable secret.
+func (s *Service) Decrypt(es *ExternalService) *ExternalService { return s.decrypt(es) }
+
 func (s *Service) decrypt(es *ExternalService) *ExternalService {
 	if m, ok := normalize(es.Config).(map[string]any); ok {
 		es.Config = m

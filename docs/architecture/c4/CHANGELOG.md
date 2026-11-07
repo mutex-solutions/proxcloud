@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: The console proves a ceph-s3 row before storing it
+
+**What changed**
+
+- `POST /admin/service` and the field-set PUTs run `CheckCephS3` on a `PUBLIC` `ceph-s3` row, for an update only when its
+  status, endpoints, region or keys changed. A failed check is a 400 and nothing is stored.
+- The Add dialog has a **Test connection** button for `ceph-s3`, calling `POST /admin/service/object-store/test`.
+
+**Why**
+
+- The installer checked before registering, and the console did not. A form typo stored a `PUBLIC` row, which blocks the
+  provisioning of every new project. The check sits in the API so that every console path gets it. A write that leaves the
+  connection alone skips it, or an RGW outage would stop an operator from turning the service off.
+
+**Diagrams updated:** none.
+
 ## 2026-11-07: Customer image import (P5-11)
 
 **What changed**
