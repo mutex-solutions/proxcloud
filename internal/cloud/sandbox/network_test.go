@@ -78,6 +78,8 @@ func TestBuildCREnvd(t *testing.T) {
 		`"readOnly":true`,
 		`"proxcloud.io/sandbox-id":"sbx-00000001"`,
 		`"proxcloud.io/metadata":"{\"k\":\"v\"}"`,
+		// readiness follows the ready marker after startup: a restarted envd without its token is not routed to
+		`"readinessProbe":{"exec":{"command":["/.proxcloud/sandbox-init","-ready"]},"failureThreshold":1,"periodSeconds":1}`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("CR lacks %s:\n%s", want, got)

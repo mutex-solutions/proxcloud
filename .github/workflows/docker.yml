@@ -1,6 +1,6 @@
 name: docker
 
-# Publishes the ProxCloud images (api, web, admin, sandbox-proxy) to GitHub Container Registry (ghcr.io):
+# Publishes the ProxCloud images (api, web, admin, sandbox-proxy, sandbox-runtime) to GitHub Container Registry (ghcr.io):
 #   push to main   -> tag `dev-<short-sha>` (only when image sources changed; a
 #                     docs/README/CHANGELOG/chart-only push is skipped)
 #   push a git tag -> that tag name (e.g. v1.2.3) — always builds
@@ -59,7 +59,7 @@ jobs:
             echo "build=true" >> "$GITHUB_OUTPUT"   # new branch / force-push / unknown base → build to be safe
             exit 0
           fi
-          if git diff --name-only "$base" "$GITHUB_SHA" | grep -qE '^(cmd/|internal/|pkg/|web/|deploy/Dockerfile$|deploy/sandbox-proxy\.Dockerfile$|go\.mod$|go\.sum$|\.github/workflows/docker\.yml$)'; then
+          if git diff --name-only "$base" "$GITHUB_SHA" | grep -qE '^(cmd/|internal/|pkg/|web/|deploy/Dockerfile$|deploy/sandbox-proxy\.Dockerfile$|deploy/sandbox-runtime\.Dockerfile$|go\.mod$|go\.sum$|\.github/workflows/docker\.yml$)'; then
             echo "build=true" >> "$GITHUB_OUTPUT"
           else
             echo "build=false" >> "$GITHUB_OUTPUT"
@@ -93,6 +93,11 @@ jobs:
           # Runs in the sandbox cluster, whose nodes reach the internet and not the mgmt registry: always from here.
           - image: proxcloud-sandbox-proxy
             dockerfile: deploy/sandbox-proxy.Dockerfile
+            context: .
+            build-args: ""
+          # envd + sandbox-init, installed on every sandbox node by node-setup's init container (SB5).
+          - image: proxcloud-sandbox-runtime
+            dockerfile: deploy/sandbox-runtime.Dockerfile
             context: .
             build-args: ""
     steps:

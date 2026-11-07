@@ -19,6 +19,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
@@ -97,6 +98,8 @@ type Handler struct {
 	sandboxGates func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
 	gateMu       sync.Mutex
 	gateCache    map[string]gateVerdict
+	// sbKeys holds the sandbox API keys, SHA-256 only (SetSandboxKeys; nil = the E2B API refuses every key).
+	sbKeys *pgdoc.Store
 }
 
 // SetSandbox wires the sandbox service factory (enables sandbox provisioning and the SANDBOX
@@ -268,6 +271,10 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Get("/project/{id}/quota-usage", h.quotaUsage)
 	r.Get("/project/{id}/gpu-capacity", h.projectGPUCapacity)
 	r.Get("/project/{id}/resource-types", h.resourceTypes)
+	// Sandbox API keys: the E2B_API_KEY of the E2B-compatible API (e2b_keys.go).
+	r.Get("/project/{id}/sandbox-api-keys", h.sandboxKeyList)
+	r.Post("/project/{id}/sandbox-api-keys", h.sandboxKeyCreate)
+	r.Delete("/project/{id}/sandbox-api-keys/{keyId}", h.sandboxKeyDelete)
 	// GET /{id}/public-networks → the provider's router:external networks filtered by the
 	// project's publicNetworkIds allow-list — see publicnetworks.go.
 	r.Get("/project/{id}/public-networks", h.publicNetworks)

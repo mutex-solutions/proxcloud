@@ -9,6 +9,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { apiFetch, apiFetchEnvelope } from "@/lib/api"
@@ -21,6 +22,10 @@ export type SandboxFormState = {
   proxmoxServiceId: string
   // One template per line: `name=image cpu memoryGiB [description…]`
   templates: string
+  // The sandbox domain sandbox-proxy serves (<port>-<id>.<domain>): published ports (SB4) and, with envd, the E2B API.
+  domain: string
+  // envd in every sandbox, which the E2B-compatible API at /e2b needs (with a domain).
+  envd: boolean
   maxCpu: string
   maxMemoryGiB: string
   maxTimeoutSeconds: string
@@ -41,6 +46,8 @@ export const emptySandboxForm: SandboxFormState = {
   kubeconfig: "",
   proxmoxServiceId: "",
   templates: "",
+  domain: "",
+  envd: false,
   maxCpu: "",
   maxMemoryGiB: "",
   maxTimeoutSeconds: "",
@@ -81,8 +88,20 @@ function compact(o: Record<string, number | undefined>) {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined))
 }
 
+// mergeTemplates keeps what the one-line form cannot show (startCmd, readyCmd, user, workdir, startAsRoot, gpu) on a
+// template still listed under the same name, so editing the list never strips code-interpreter's start command.
+function mergeTemplates(stored: Record<string, any> | undefined, parsed: Record<string, TemplateOffer>) {
+  const out: Record<string, any> = {}
+  for (const [name, t] of Object.entries(parsed)) {
+    const { description: _drop, ...keep } = (stored?.[name] ?? {}) as Record<string, any>
+    out[name] = { ...keep, ...t }
+  }
+  return out
+}
+
 export function sandboxConfigBlocks(f: SandboxFormState) {
   const region = f.region.trim()
+  const domain = f.domain.trim()
   return {
     provider: "sandbox",
     region,
@@ -91,7 +110,9 @@ export function sandboxConfigBlocks(f: SandboxFormState) {
     sandbox: {
       ...f.storedSandbox,
       proxmoxServiceId: f.proxmoxServiceId.trim(),
-      templates: parseTemplates(f.templates) ?? {},
+      templates: mergeTemplates(f.storedSandbox.templates, parseTemplates(f.templates) ?? {}),
+      envd: f.envd,
+      domain,
       limits: compact({
         maxCpu: num(f.maxCpu),
         maxMemoryGiB: num(f.maxMemoryGiB),
@@ -135,6 +156,8 @@ export function sandboxFormFromService(svc: { name?: string; status?: string; co
     region: s(c.region),
     proxmoxServiceId: s(sb.proxmoxServiceId),
     templates,
+    domain: s(sb.domain),
+    envd: sb.envd === true,
     maxCpu: s(l.maxCpu),
     maxMemoryGiB: s(l.maxMemoryGiB),
     maxTimeoutSeconds: s(l.maxTimeoutSeconds),
@@ -226,6 +249,23 @@ export function SandboxProviderForm({ form, setForm, mode = "create" }: {
           placeholder={"python=python:3.12-slim 1 2 Python 3.12\nnode=node:22-slim 1 2 Node.js 22"}
         />
         <p className="text-xs text-muted-foreground">Only these images are offered. Customers may raise CPU and memory up to the limits below.</p>
+      </div>
+      <Field
+        id="sb-domain"
+        label="Sandbox domain"
+        value={form.domain}
+        onChange={set("domain")}
+        placeholder="example-sandbox.net"
+        hint="The domain sandbox-proxy serves (installer sandbox.domain): published ports are reached at <port>-<id>.<domain>. Empty: no published ports."
+      />
+      <div className="grid gap-2">
+        <div className="flex items-center gap-3">
+          <Switch id="sb-envd" checked={form.envd} onCheckedChange={(on) => setForm({ ...form, envd: on })} />
+          <Label htmlFor="sb-envd">Run envd (E2B-compatible API)</Label>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Sandboxes run E2B's envd and the API at /e2b answers for this provider. Needs the sandbox domain and the node runtime installer stage 55 installs.
+        </p>
       </div>
       <div className="grid gap-4 sm:grid-cols-3">
         <Field id="sb-maxcpu" label="Max vCPU per sandbox" value={form.maxCpu} onChange={set("maxCpu")} placeholder="8" />

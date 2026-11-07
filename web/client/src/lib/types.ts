@@ -103,6 +103,8 @@ export type ProjectService = {
   sandboxTemplates?: SandboxTemplate[]
   sandboxGpuModels?: string[]
   sandboxLimits?: SandboxLimits
+  // true when the location offers the E2B-compatible API (envd and a sandbox domain).
+  sandboxE2B?: boolean
   name?: string
   type?: string
   status?: string
@@ -258,5 +260,8 @@ export type SandboxLimits = {
   maxConcurrent?: number
   maxConcurrentGpus?: number
 }
+
+// A sandbox API key as listed: the key itself is shown once, at create.
+export type SandboxApiKey = { id: string; name: string; hint: string; createdAt: string; lastUsedAt?: string }
 
 export type SandboxExecResult = { stdout: string; stderr: string; exitCode: number; truncated?: boolean }

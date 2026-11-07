@@ -1,0 +1,2690 @@
+{
+ "components": {
+  "headers": {
+   "ShouldRetry": {
+    "description": "Whether the condition behind this error may clear, so that retrying the request could\nsucceed. true marks a transient failure such as missing capacity, a rate limit, or a\ncreation still in progress: retry after Retry-After when present, otherwise with\nexponential backoff. false marks a failure a retry cannot fix, such as a malformed request\nor a configuration fault, or an outcome that is unknown, where a retry could create a\nsecond sandbox. Successful responses and errors without an explicit classification omit\nthe header. With idempotency enabled, retry sandbox creation with the same Idempotency-Key\nand request parameters. A retryable creation failure permits a fresh attempt; an\nidempotency_in_progress response only reports an existing attempt and never releases it.\n",
+    "required": false,
+    "schema": {
+     "type": "boolean"
+    }
+   },
+   "XNextToken": {
+    "description": "Cursor to fetch the next page of results, if more exist",
+    "schema": {
+     "type": "string"
+    }
+   },
+   "XTotalRunning": {
+    "description": "Number of running sandboxes matching the filters, before pagination is applied. Only present when running sandboxes were requested.\n",
+    "schema": {
+     "format": "int32",
+     "type": "integer"
+    }
+   }
+  },
+  "parameters": {
+   "paginationLimit": {
+    "description": "Maximum number of items to return per page",
+    "in": "query",
+    "name": "limit",
+    "required": false,
+    "schema": {
+     "default": 100,
+     "format": "int32",
+     "maximum": 100,
+     "minimum": 1,
+     "type": "integer"
+    }
+   },
+   "paginationNextToken": {
+    "description": "Cursor to start the list from",
+    "in": "query",
+    "name": "nextToken",
+    "required": false,
+    "schema": {
+     "type": "string"
+    }
+   },
+   "sandboxID": {
+    "in": "path",
+    "name": "sandboxID",
+    "required": true,
+    "schema": {
+     "type": "string"
+    }
+   },
+   "templateID": {
+    "in": "path",
+    "name": "templateID",
+    "required": true,
+    "schema": {
+     "type": "string"
+    }
+   }
+  },
+  "responses": {
+   "400": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    },
+    "description": "Bad request"
+   },
+   "401": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    },
+    "description": "Authentication error"
+   },
+   "403": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    },
+    "description": "Forbidden"
+   },
+   "404": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    },
+    "description": "Not found"
+   },
+   "409": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    },
+    "description": "Conflict"
+   },
+   "429": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    },
+    "description": "Too many requests",
+    "headers": {
+     "Retry-After": {
+      "description": "When present, the number of seconds to wait before retrying the request.",
+      "example": 30,
+      "required": false,
+      "schema": {
+       "minimum": 0,
+       "type": "integer"
+      }
+     }
+    }
+   },
+   "500": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    },
+    "description": "Server error"
+   },
+   "503": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    },
+    "description": "Service unavailable"
+   },
+   "504": {
+    "content": {
+     "application/json": {
+      "schema": {
+       "$ref": "#/components/schemas/Error"
+      }
+     }
+    },
+    "description": "Backend timeout"
+   }
+  },
+  "schemas": {
+   "CPUCount": {
+    "description": "CPU cores for the sandbox",
+    "format": "int32",
+    "minimum": 1,
+    "type": "integer"
+   },
+   "ConnectSandbox": {
+    "properties": {
+     "memory": {
+      "description": "Defaults to true. When false and the sandbox is paused, resume from disk state only: the sandbox cold-boots fresh and any memory in the snapshot is ignored, never modified or deleted. Disk state has crash-recovery semantics \u2014 writes not flushed before the pause may be lost. A no-op for snapshots that contain no memory. Rejected with an error in environments where this capability is not enabled, never silently downgraded to a memory restore. A snapshot taken while the sandbox guest agent was not responding (envdUnresponsiveAtPause) can only be resumed this way, and needs no enablement.",
+      "type": "boolean"
+     },
+     "timeout": {
+      "description": "Timeout in seconds from the current time after which the sandbox should expire",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "timeout"
+    ],
+    "type": "object"
+   },
+   "ConnectSandboxV2": {
+    "properties": {
+     "memory": {
+      "description": "Defaults to true. When false and the sandbox is paused, resume from disk state only: the sandbox cold-boots fresh and any memory in the snapshot is ignored, never modified or deleted. Disk state has crash-recovery semantics \u2014 writes not flushed before the pause may be lost. A no-op for snapshots that contain no memory. Rejected with an error in environments where this capability is not enabled, never silently downgraded to a memory restore. A snapshot taken while the sandbox guest agent was not responding (envdUnresponsiveAtPause) can only be resumed this way, and needs no enablement.",
+      "type": "boolean"
+     },
+     "timeout": {
+      "default": 300,
+      "description": "Timeout in seconds from the current time after which the sandbox should expire",
+      "format": "int32",
+      "minimum": 1,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "DiskSizeMB": {
+    "description": "Disk size for the sandbox in MiB",
+    "format": "int32",
+    "minimum": 0,
+    "type": "integer"
+   },
+   "EnvVars": {
+    "additionalProperties": {
+     "description": "Environment variables for the sandbox",
+     "type": "string"
+    }
+   },
+   "EnvdUnresponsiveAtPause": {
+    "description": "True when the snapshot a paused sandbox would resume from was taken while the sandbox guest agent was not responding. A plain resume of it is refused with 409 and error_code sandbox_snapshot_guest_agent_unresponsive, because restoring that memory would bring the unresponsive agent back; resume it without memory (`memory: false`), which cold-boots the sandbox from its disk. Omitted for a running sandbox and for a snapshot whose agent answered.",
+    "type": "boolean"
+   },
+   "EnvdVersion": {
+    "description": "Version of the envd running in the sandbox",
+    "type": "string"
+   },
+   "Error": {
+    "properties": {
+     "code": {
+      "description": "Error code",
+      "format": "int32",
+      "type": "integer"
+     },
+     "error_code": {
+      "description": "Machine-readable semantic error code. Not a closed set; initial values: sandbox_capacity_unavailable, sandbox_placement_timeout, sandbox_no_compatible_node, sandbox_create_failed (a node could not create the sandbox this time; retry), sandbox_create_refused (a node refused the sandbox for a reason no retry changes, such as a vcpu count out of bounds in the stored build; a server error, since no request field reaches that check), internal_server_error, secret_limit_reached, idempotency_request_mismatch, idempotency_in_progress, idempotency_outcome_unknown, cluster_registration_invalid, cluster_registration_conflict, cluster_assignment_invalid, cluster_assignment_project_not_found, cluster_assignment_cluster_not_found, cluster_assignment_already_assigned, cluster_assignment_cluster_deleting, sandbox_snapshot_guest_agent_unresponsive (a plain resume of a snapshot taken while the sandbox guest agent was not responding; resume it with memory: false).",
+      "type": "string"
+     },
+     "message": {
+      "description": "Error",
+      "type": "string"
+     }
+    },
+    "required": [
+     "code",
+     "message"
+    ]
+   },
+   "ListedSandbox": {
+    "properties": {
+     "alias": {
+      "description": "Alias of the template",
+      "type": "string"
+     },
+     "clientID": {
+      "deprecated": true,
+      "description": "Identifier of the client",
+      "type": "string"
+     },
+     "cpuCount": {
+      "$ref": "#/components/schemas/CPUCount"
+     },
+     "diskSizeMB": {
+      "$ref": "#/components/schemas/DiskSizeMB"
+     },
+     "endAt": {
+      "description": "Time when the sandbox will expire",
+      "format": "date-time",
+      "type": "string"
+     },
+     "envdUnresponsiveAtPause": {
+      "$ref": "#/components/schemas/EnvdUnresponsiveAtPause"
+     },
+     "envdVersion": {
+      "$ref": "#/components/schemas/EnvdVersion"
+     },
+     "memoryMB": {
+      "$ref": "#/components/schemas/MemoryMB"
+     },
+     "metadata": {
+      "$ref": "#/components/schemas/SandboxMetadata"
+     },
+     "sandboxID": {
+      "description": "Identifier of the sandbox",
+      "type": "string"
+     },
+     "startedAt": {
+      "description": "Time when the sandbox was started",
+      "format": "date-time",
+      "type": "string"
+     },
+     "state": {
+      "$ref": "#/components/schemas/SandboxState"
+     },
+     "templateID": {
+      "description": "Identifier of the template from which is the sandbox created",
+      "type": "string"
+     },
+     "volumeMounts": {
+      "items": {
+       "$ref": "#/components/schemas/SandboxVolumeMount"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "templateID",
+     "sandboxID",
+     "clientID",
+     "startedAt",
+     "cpuCount",
+     "memoryMB",
+     "diskSizeMB",
+     "endAt",
+     "state",
+     "envdVersion"
+    ]
+   },
+   "LogLevel": {
+    "description": "State of the sandbox",
+    "enum": [
+     "debug",
+     "info",
+     "warn",
+     "error"
+    ],
+    "type": "string"
+   },
+   "LogsDirection": {
+    "description": "Direction of the logs that should be returned",
+    "enum": [
+     "forward",
+     "backward"
+    ],
+    "type": "string",
+    "x-enum-varnames": [
+     "LogsDirectionForward",
+     "LogsDirectionBackward"
+    ]
+   },
+   "Mcp": {
+    "additionalProperties": {},
+    "description": "MCP configuration for the sandbox",
+    "type": [
+     "object",
+     "null"
+    ]
+   },
+   "MemoryMB": {
+    "description": "Memory for the sandbox in MiB",
+    "format": "int32",
+    "minimum": 128,
+    "type": "integer"
+   },
+   "NewSandbox": {
+    "properties": {
+     "allow_internet_access": {
+      "description": "Allow sandbox to access the internet. When set to false, it behaves the same as specifying denyOut to 0.0.0.0/0 in the network config.",
+      "type": "boolean"
+     },
+     "autoPause": {
+      "default": false,
+      "description": "Automatically pauses the sandbox after the timeout",
+      "type": "boolean"
+     },
+     "autoPauseMemory": {
+      "default": true,
+      "description": "Controls the snapshot kind taken when the sandbox auto-pauses on timeout (only relevant when autoPause is true). When false, the auto-pause drops the in-memory state and persists only the filesystem (a filesystem-only snapshot); resuming it cold-boots (reboots) the sandbox from disk. Such a snapshot cannot be auto-resumed by traffic and must be resumed explicitly, so it cannot be combined with autoResume. Defaults to true (full memory snapshot).",
+      "type": "boolean"
+     },
+     "autoResume": {
+      "$ref": "#/components/schemas/SandboxAutoResumeConfig"
+     },
+     "cpuCount": {
+      "description": "ProxCloud extension: vCPUs within the location's limit.",
+      "minimum": 1,
+      "type": "integer"
+     },
+     "envVars": {
+      "$ref": "#/components/schemas/EnvVars"
+     },
+     "gpu": {
+      "description": "ProxCloud extension: whole GPUs of a model the location offers.",
+      "properties": {
+       "count": {
+        "default": 1,
+        "minimum": 1,
+        "type": "integer"
+       },
+       "model": {
+        "examples": [
+         "nvidia-3090"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "model"
+      ],
+      "type": "object"
+     },
+     "iam": {
+      "$ref": "#/components/schemas/SandboxIam"
+     },
+     "mcp": {
+      "$ref": "#/components/schemas/Mcp"
+     },
+     "memoryMB": {
+      "description": "ProxCloud extension: memory, rounded up to whole GiB.",
+      "minimum": 1,
+      "type": "integer"
+     },
+     "metadata": {
+      "$ref": "#/components/schemas/SandboxMetadata"
+     },
+     "network": {
+      "$ref": "#/components/schemas/SandboxNetworkConfig"
+     },
+     "secure": {
+      "deprecated": true,
+      "description": "Ignored. All system communication with the sandbox is always secured; the template's envd version must support secured access.",
+      "type": "boolean"
+     },
+     "templateID": {
+      "description": "Identifier of the required template",
+      "type": "string"
+     },
+     "timeout": {
+      "default": 15,
+      "description": "Time to live for the sandbox in seconds.",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "volumeMounts": {
+      "items": {
+       "$ref": "#/components/schemas/SandboxVolumeMount"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "templateID"
+    ]
+   },
+   "NewSandboxV2": {
+    "description": "Sandbox creation request. All system communication with the sandbox is always secured; the template's envd version must support secured access.",
+    "properties": {
+     "allow_internet_access": {
+      "description": "Allow sandbox to access the internet. When set to false, it behaves the same as specifying denyOut to 0.0.0.0/0 in the network config.",
+      "type": "boolean"
+     },
+     "autoPause": {
+      "default": false,
+      "description": "Automatically pauses the sandbox after the timeout",
+      "type": "boolean"
+     },
+     "autoPauseMemory": {
+      "default": true,
+      "description": "Controls the snapshot kind taken when the sandbox auto-pauses on timeout (only relevant when autoPause is true). When false, the auto-pause drops the in-memory state and persists only the filesystem (a filesystem-only snapshot); resuming it cold-boots (reboots) the sandbox from disk. Such a snapshot cannot be auto-resumed by traffic and must be resumed explicitly, so it cannot be combined with autoResume. Defaults to true (full memory snapshot).",
+      "type": "boolean"
+     },
+     "autoResume": {
+      "$ref": "#/components/schemas/SandboxAutoResumeConfig"
+     },
+     "envVars": {
+      "$ref": "#/components/schemas/EnvVars"
+     },
+     "iam": {
+      "$ref": "#/components/schemas/SandboxIam"
+     },
+     "mcp": {
+      "$ref": "#/components/schemas/Mcp"
+     },
+     "metadata": {
+      "$ref": "#/components/schemas/SandboxMetadata"
+     },
+     "network": {
+      "$ref": "#/components/schemas/SandboxNetworkConfig"
+     },
+     "templateID": {
+      "description": "Identifier of the required template",
+      "type": "string"
+     },
+     "timeout": {
+      "default": 300,
+      "description": "Time to live for the sandbox in seconds.",
+      "format": "int32",
+      "minimum": 1,
+      "type": "integer"
+     },
+     "volumeMounts": {
+      "items": {
+       "$ref": "#/components/schemas/SandboxVolumeMount"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "templateID"
+    ]
+   },
+   "OrderDirection": {
+    "default": "desc",
+    "description": "Sort direction",
+    "enum": [
+     "asc",
+     "desc"
+    ],
+    "type": "string"
+   },
+   "Sandbox": {
+    "properties": {
+     "alias": {
+      "description": "Alias of the template",
+      "type": "string"
+     },
+     "clientID": {
+      "deprecated": true,
+      "description": "Identifier of the client",
+      "type": "string"
+     },
+     "domain": {
+      "description": "Base domain where the sandbox traffic is accessible",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "envdAccessToken": {
+      "description": "Access token used for envd communication",
+      "type": "string"
+     },
+     "envdVersion": {
+      "$ref": "#/components/schemas/EnvdVersion"
+     },
+     "sandboxID": {
+      "description": "Identifier of the sandbox",
+      "type": "string"
+     },
+     "templateID": {
+      "description": "Identifier of the template from which is the sandbox created",
+      "type": "string"
+     },
+     "trafficAccessToken": {
+      "description": "Token required for accessing sandbox via proxy.",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "templateID",
+     "sandboxID",
+     "clientID",
+     "envdVersion"
+    ]
+   },
+   "SandboxAutoResumeConfig": {
+    "description": "Auto-resume configuration for paused sandboxes.",
+    "properties": {
+     "enabled": {
+      "$ref": "#/components/schemas/SandboxAutoResumeEnabled"
+     }
+    },
+    "required": [
+     "enabled"
+    ],
+    "type": "object"
+   },
+   "SandboxAutoResumeEnabled": {
+    "default": false,
+    "description": "Auto-resume enabled flag for paused sandboxes. Default false.",
+    "type": "boolean"
+   },
+   "SandboxDetail": {
+    "properties": {
+     "alias": {
+      "description": "Alias of the template",
+      "type": "string"
+     },
+     "allowInternetAccess": {
+      "description": "Whether internet access was explicitly enabled or disabled for the sandbox. Null means it was not explicitly set.",
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "clientID": {
+      "deprecated": true,
+      "description": "Identifier of the client",
+      "type": "string"
+     },
+     "cpuCount": {
+      "$ref": "#/components/schemas/CPUCount"
+     },
+     "diskSizeMB": {
+      "$ref": "#/components/schemas/DiskSizeMB"
+     },
+     "domain": {
+      "description": "Base domain where the sandbox traffic is accessible",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "endAt": {
+      "description": "Time when the sandbox will expire",
+      "format": "date-time",
+      "type": "string"
+     },
+     "envdAccessToken": {
+      "description": "Access token used for envd communication",
+      "type": "string"
+     },
+     "envdUnresponsiveAtPause": {
+      "$ref": "#/components/schemas/EnvdUnresponsiveAtPause"
+     },
+     "envdVersion": {
+      "$ref": "#/components/schemas/EnvdVersion"
+     },
+     "lifecycle": {
+      "$ref": "#/components/schemas/SandboxLifecycle"
+     },
+     "memoryMB": {
+      "$ref": "#/components/schemas/MemoryMB"
+     },
+     "metadata": {
+      "$ref": "#/components/schemas/SandboxMetadata"
+     },
+     "network": {
+      "$ref": "#/components/schemas/SandboxNetworkConfig"
+     },
+     "pauseMode": {
+      "$ref": "#/components/schemas/SandboxPauseMode"
+     },
+     "sandboxID": {
+      "description": "Identifier of the sandbox",
+      "type": "string"
+     },
+     "startedAt": {
+      "description": "Time when the sandbox was started",
+      "format": "date-time",
+      "type": "string"
+     },
+     "state": {
+      "$ref": "#/components/schemas/SandboxState"
+     },
+     "templateID": {
+      "description": "Identifier of the template from which is the sandbox created",
+      "type": "string"
+     },
+     "volumeMounts": {
+      "items": {
+       "$ref": "#/components/schemas/SandboxVolumeMount"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "templateID",
+     "sandboxID",
+     "clientID",
+     "startedAt",
+     "cpuCount",
+     "memoryMB",
+     "diskSizeMB",
+     "endAt",
+     "state",
+     "envdVersion"
+    ]
+   },
+   "SandboxEgressProxyConfig": {
+    "description": "SOCKS5 proxy for sandbox egress. Outbound TCP is tunneled through the proxy after allow/deny filtering; the sandbox is unaware. Domain-matched flows use remote DNS (ATYP=domain).",
+    "properties": {
+     "address": {
+      "description": "SOCKS5 proxy address in host:port format (e.g. \"proxy.example.com:1080\").",
+      "type": "string"
+     },
+     "password": {
+      "description": "Optional SOCKS5 password (RFC 1929), max 255 bytes.",
+      "maxLength": 255,
+      "type": "string"
+     },
+     "tls": {
+      "$ref": "#/components/schemas/SandboxEgressProxyTLSConfig"
+     },
+     "username": {
+      "description": "Optional SOCKS5 username (RFC 1929), max 255 bytes.",
+      "maxLength": 255,
+      "type": "string"
+     }
+    },
+    "required": [
+     "address"
+    ],
+    "type": [
+     "object",
+     "null"
+    ]
+   },
+   "SandboxEgressProxyTLSConfig": {
+    "description": "TLS for the connection to the SOCKS5 proxy. The SOCKS5 negotiation and the tunneled traffic both run inside the TLS session, so the proxy credentials are not sent in the clear. This secures only the hop to the proxy; what the proxy does onward is its own concern. A half-close from the sandbox reaches the proxy as a TLS close_notify, not a TCP FIN, and a proxy that treats close_notify as a full close cuts the reply short.",
+    "properties": {
+     "caCert": {
+      "description": "One or more PEM-encoded certificates to verify the proxy against, for a proxy fronted by a private CA. These replace the system trust store, which is what is used when this is omitted. The system trust store depends on the host the orchestrator runs on, so set this to get the same verification everywhere.",
+      "maxLength": 8192,
+      "type": "string"
+     },
+     "enabled": {
+      "description": "Connect to the proxy over TLS. When false, no other field in this object may be set.",
+      "type": "boolean"
+     },
+     "serverName": {
+      "description": "Name to verify the proxy certificate against, and to send as SNI. Defaults to the host part of address. Set this only when the certificate does not match the address the proxy is reached at.",
+      "maxLength": 253,
+      "type": "string"
+     }
+    },
+    "required": [
+     "enabled"
+    ],
+    "type": [
+     "object",
+     "null"
+    ]
+   },
+   "SandboxIam": {
+    "description": "Sandbox workload identity configuration. A non-empty, valid tokens map enables workload identity for the sandbox.",
+    "properties": {
+     "tokens": {
+      "$ref": "#/components/schemas/SandboxIamTokens"
+     }
+    },
+    "type": "object"
+   },
+   "SandboxIamToken": {
+    "properties": {
+     "audience": {
+      "description": "Audience of the workload token, stored exactly as provided.",
+      "type": "string"
+     },
+     "tokenType": {
+      "description": "Workload token type.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "audience",
+     "tokenType"
+    ],
+    "type": "object"
+   },
+   "SandboxIamTokens": {
+    "additionalProperties": {
+     "$ref": "#/components/schemas/SandboxIamToken"
+    },
+    "description": "Named workload-token definitions, keyed by a caller-chosen token name.",
+    "type": "object"
+   },
+   "SandboxLifecycle": {
+    "description": "Sandbox lifecycle policy returned by sandbox info.",
+    "properties": {
+     "autoResume": {
+      "description": "Whether the sandbox can auto-resume.",
+      "type": "boolean"
+     },
+     "onTimeout": {
+      "$ref": "#/components/schemas/SandboxOnTimeout"
+     }
+    },
+    "required": [
+     "autoResume",
+     "onTimeout"
+    ],
+    "type": "object"
+   },
+   "SandboxLog": {
+    "description": "Log entry with timestamp and line",
+    "properties": {
+     "line": {
+      "description": "Log line content",
+      "type": "string"
+     },
+     "timestamp": {
+      "description": "Timestamp of the log entry",
+      "format": "date-time",
+      "type": "string"
+     }
+    },
+    "required": [
+     "timestamp",
+     "line"
+    ]
+   },
+   "SandboxLogEntry": {
+    "properties": {
+     "fields": {
+      "additionalProperties": {
+       "type": "string"
+      },
+      "type": "object"
+     },
+     "level": {
+      "$ref": "#/components/schemas/LogLevel"
+     },
+     "message": {
+      "description": "Log message content",
+      "type": "string"
+     },
+     "timestamp": {
+      "description": "Timestamp of the log entry",
+      "format": "date-time",
+      "type": "string"
+     }
+    },
+    "required": [
+     "timestamp",
+     "level",
+     "message",
+     "fields"
+    ]
+   },
+   "SandboxLogs": {
+    "properties": {
+     "logEntries": {
+      "description": "Structured logs of the sandbox",
+      "items": {
+       "$ref": "#/components/schemas/SandboxLogEntry"
+      },
+      "type": "array"
+     },
+     "logs": {
+      "description": "Logs of the sandbox",
+      "items": {
+       "$ref": "#/components/schemas/SandboxLog"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "logs",
+     "logEntries"
+    ]
+   },
+   "SandboxLogsV2Response": {
+    "properties": {
+     "logs": {
+      "default": [],
+      "description": "Sandbox logs structured",
+      "items": {
+       "$ref": "#/components/schemas/SandboxLogEntry"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "logs"
+    ]
+   },
+   "SandboxMetadata": {
+    "additionalProperties": {
+     "description": "Metadata of the sandbox",
+     "type": "string"
+    }
+   },
+   "SandboxMetric": {
+    "description": "Metric entry with timestamp and line",
+    "properties": {
+     "cpuCount": {
+      "description": "Number of CPU cores",
+      "format": "int32",
+      "type": "integer"
+     },
+     "cpuUsedPct": {
+      "description": "CPU usage percentage",
+      "format": "float",
+      "type": "number"
+     },
+     "diskTotal": {
+      "description": "Total disk space in bytes",
+      "format": "int64",
+      "type": "integer"
+     },
+     "diskUsed": {
+      "description": "Disk used in bytes",
+      "format": "int64",
+      "type": "integer"
+     },
+     "memCache": {
+      "description": "Cached memory (page cache) in bytes",
+      "format": "int64",
+      "type": "integer"
+     },
+     "memTotal": {
+      "description": "Total memory in bytes",
+      "format": "int64",
+      "type": "integer"
+     },
+     "memUsed": {
+      "description": "Memory used in bytes",
+      "format": "int64",
+      "type": "integer"
+     },
+     "timestamp": {
+      "deprecated": true,
+      "description": "Timestamp of the metric entry",
+      "format": "date-time",
+      "type": "string"
+     },
+     "timestampUnix": {
+      "description": "Timestamp of the metric entry in Unix time (seconds since epoch)",
+      "format": "int64",
+      "type": "integer"
+     }
+    },
+    "required": [
+     "timestamp",
+     "timestampUnix",
+     "cpuCount",
+     "cpuUsedPct",
+     "memUsed",
+     "memTotal",
+     "memCache",
+     "diskUsed",
+     "diskTotal"
+    ]
+   },
+   "SandboxNetworkConfig": {
+    "properties": {
+     "allowOut": {
+      "description": "List of allowed destinations for egress traffic. Each entry can be a CIDR block (e.g. \"8.8.8.8/32\"), a bare IP address (e.g. \"8.8.8.8\"), or a domain name (e.g. \"example.com\", \"*.example.com\"). Allowed entries always take precedence over denied entries. When allowOut contains a domain, the servers in dnsServers (8.8.8.8 by default) are also allowed.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "allowPublicTraffic": {
+      "description": "Whether sandbox URLs accept traffic without the sandbox's traffic access token. When omitted or null on create, the project's default applies, which is true unless the project changed it.",
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "denyOut": {
+      "description": "List of denied CIDR blocks or IP addresses for egress traffic. Domain names are not supported for deny rules.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "dnsServers": {
+      "description": "DNS servers the sandbox can reach when allowOut contains a domain. Each entry must be an IPv4 address, and all traffic to it is allowed. Omit it to allow the default nameserver 8.8.8.8, or pass an empty list to allow none. This does not change the sandbox's /etc/resolv.conf.",
+      "items": {
+       "type": "string"
+      },
+      "maxItems": 10,
+      "type": "array"
+     },
+     "egressProxy": {
+      "$ref": "#/components/schemas/SandboxEgressProxyConfig"
+     },
+     "httpsPorts": {
+      "description": "Sandbox ports that serve HTTPS rather than plaintext HTTP. Affects how the proxy reaches the service inside the sandbox; the public URL is HTTPS either way. Certificates are not verified, so self-signed ones work. The envd port (49983) cannot be listed.",
+      "items": {
+       "format": "uint32",
+       "maximum": 65535,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "maxItems": 128,
+      "type": "array",
+      "uniqueItems": true
+     },
+     "maskRequestHost": {
+      "description": "Specify host mask which will be used for all sandbox requests",
+      "type": "string"
+     },
+     "rules": {
+      "additionalProperties": {
+       "items": {
+        "$ref": "#/components/schemas/SandboxNetworkRule"
+       },
+       "type": "array"
+      },
+      "description": "Per-domain transform rules applied to matching outbound HTTPS requests. Keys may be exact DNS names (for example, \"api.example.com\") or a leading wildcard (for example, \"*.example.com\"), and are normalized to lowercase on write. Wildcards match subdomains at any depth but not the apex domain; a bare \"*\" is invalid. Exact rules take precedence, followed by the longest matching wildcard suffix, and matching rule sets are not merged. Broad wildcards such as \"*.com\" are allowed and may expose transformed credentials to every matching destination the sandbox contacts. Rules do not grant network access; configure allowOut separately to permit the destination.\n",
+      "type": "object"
+     }
+    },
+    "type": "object"
+   },
+   "SandboxNetworkRule": {
+    "description": "Transform rule applied to egress requests matching a domain pattern.",
+    "properties": {
+     "transform": {
+      "$ref": "#/components/schemas/SandboxNetworkTransform"
+     }
+    },
+    "type": "object"
+   },
+   "SandboxNetworkTransform": {
+    "description": "Transformations applied to matching egress requests before forwarding.",
+    "properties": {
+     "headers": {
+      "additionalProperties": {
+       "type": "string"
+      },
+      "description": "HTTP headers to inject or override in matching requests. An existing header with the same name is replaced. Values are plain strings; secret resolution happens client-side before sending to the API.\n",
+      "type": "object"
+     }
+    },
+    "type": "object"
+   },
+   "SandboxNetworkUpdateConfig": {
+    "description": "Network configuration update for a running sandbox. Replaces the current egress rules with the provided configuration. Omitting a field clears it.",
+    "properties": {
+     "allowOut": {
+      "description": "List of allowed destinations for egress traffic. Each entry can be a CIDR block (e.g. \"8.8.8.8/32\"), a bare IP address (e.g. \"8.8.8.8\"), or a domain name (e.g. \"example.com\", \"*.example.com\"). Allowed entries always take precedence over denied entries. When allowOut contains a domain, the servers in dnsServers (8.8.8.8 by default) are also allowed.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "allow_internet_access": {
+      "description": "Allow sandbox to access the internet. When set to false, it behaves the same as specifying denyOut to 0.0.0.0/0 in the network config.",
+      "type": "boolean"
+     },
+     "denyOut": {
+      "description": "List of denied CIDR blocks or IP addresses for egress traffic. Domain names are not supported for deny rules.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "dnsServers": {
+      "description": "DNS servers the sandbox can reach when allowOut contains a domain. Each entry must be an IPv4 address, and all traffic to it is allowed. Omit it to reset to the default nameserver 8.8.8.8, or pass an empty list to allow none. This does not change the sandbox's /etc/resolv.conf.",
+      "items": {
+       "type": "string"
+      },
+      "maxItems": 10,
+      "type": "array"
+     },
+     "egressProxy": {
+      "$ref": "#/components/schemas/SandboxEgressProxyConfig"
+     },
+     "rules": {
+      "additionalProperties": {
+       "items": {
+        "$ref": "#/components/schemas/SandboxNetworkRule"
+       },
+       "type": "array"
+      },
+      "description": "Per-domain transform rules applied to matching outbound HTTPS requests. Replaces all existing rules when provided. Keys may be exact DNS names or a single leading wildcard (for example, \"*.example.com\"), and are normalized to lowercase on write. Wildcards match subdomains at any depth but not the apex domain; a bare \"*\" is invalid. Exact rules take precedence, followed by the longest matching wildcard suffix, and matching rule sets are not merged. Broad wildcards such as \"*.com\" are allowed and may expose transformed credentials to every matching destination the sandbox contacts. Rules do not grant network access; configure allowOut separately to permit the destination.\n",
+      "type": "object"
+     }
+    },
+    "type": "object"
+   },
+   "SandboxOnTimeout": {
+    "description": "Action taken when the sandbox times out.",
+    "enum": [
+     "kill",
+     "pause"
+    ],
+    "type": "string"
+   },
+   "SandboxPauseMode": {
+    "description": "What the sandbox's latest pause saved. `full` saved the filesystem and the memory, and resuming restores the sandbox where it left off. `filesystem` saved only the filesystem, and resuming reboots the sandbox from disk. Returned for a paused sandbox once its pause has finished, and omitted while it is still pausing.",
+    "enum": [
+     "full",
+     "filesystem"
+    ],
+    "type": "string"
+   },
+   "SandboxRefreshRequest": {
+    "properties": {
+     "duration": {
+      "description": "Duration for which the sandbox should be kept alive in seconds",
+      "maximum": 3600,
+      "minimum": 0,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "SandboxState": {
+    "description": "State of the sandbox",
+    "enum": [
+     "running",
+     "paused"
+    ],
+    "type": "string"
+   },
+   "SandboxTimeoutRequest": {
+    "properties": {
+     "timeout": {
+      "description": "Timeout in seconds from the current time after which the sandbox should expire",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "timeout"
+    ],
+    "type": "object"
+   },
+   "SandboxVolumeMount": {
+    "properties": {
+     "name": {
+      "description": "Name of the volume",
+      "type": "string"
+     },
+     "path": {
+      "description": "Path of the volume",
+      "type": "string"
+     }
+    },
+    "required": [
+     "name",
+     "path"
+    ],
+    "type": "object"
+   },
+   "SandboxesWithMetrics": {
+    "properties": {
+     "sandboxes": {
+      "additionalProperties": {
+       "$ref": "#/components/schemas/SandboxMetric"
+      }
+     }
+    },
+    "required": [
+     "sandboxes"
+    ]
+   },
+   "TeamUser": {
+    "properties": {
+     "email": {
+      "default": null,
+      "deprecated": true,
+      "description": "Email of the user",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "id": {
+      "description": "Identifier of the user",
+      "format": "uuid",
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "email"
+    ]
+   },
+   "Template": {
+    "properties": {
+     "aliases": {
+      "deprecated": true,
+      "description": "Aliases of the template",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "buildCount": {
+      "description": "Number of times the template was built",
+      "format": "int32",
+      "type": "integer"
+     },
+     "buildID": {
+      "description": "Identifier of the last successful build for given template",
+      "type": "string"
+     },
+     "buildStatus": {
+      "$ref": "#/components/schemas/TemplateBuildStatus"
+     },
+     "cpuCount": {
+      "$ref": "#/components/schemas/CPUCount"
+     },
+     "createdAt": {
+      "description": "Time when the template was created",
+      "format": "date-time",
+      "type": "string"
+     },
+     "createdBy": {
+      "anyOf": [
+       {
+        "allOf": [
+         {
+          "$ref": "#/components/schemas/TeamUser"
+         }
+        ]
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "description": {
+      "description": "Description of the template",
+      "type": "string"
+     },
+     "diskSizeMB": {
+      "$ref": "#/components/schemas/DiskSizeMB"
+     },
+     "envdVersion": {
+      "$ref": "#/components/schemas/EnvdVersion"
+     },
+     "isDefault": {
+      "description": "Whether the template is one of the platform's default templates. A default template owned by another team carries zero or null usage fields (`spawnCount`, `buildCount`, `lastSpawnedAt`, `createdBy`).\n",
+      "type": "boolean"
+     },
+     "lastSpawnedAt": {
+      "description": "Time when the template was last used",
+      "format": "date-time",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "memoryMB": {
+      "$ref": "#/components/schemas/MemoryMB"
+     },
+     "names": {
+      "description": "Names of the template (namespace/alias format when namespaced)",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "public": {
+      "description": "Whether the template is public or only accessible by the team",
+      "type": "boolean"
+     },
+     "spawnCount": {
+      "description": "Number of times the template was used",
+      "format": "int64",
+      "type": "integer"
+     },
+     "templateID": {
+      "description": "Identifier of the template",
+      "type": "string"
+     },
+     "updatedAt": {
+      "description": "Time when the template was last updated",
+      "format": "date-time",
+      "type": "string"
+     }
+    },
+    "required": [
+     "templateID",
+     "buildID",
+     "cpuCount",
+     "memoryMB",
+     "diskSizeMB",
+     "public",
+     "createdAt",
+     "updatedAt",
+     "createdBy",
+     "lastSpawnedAt",
+     "spawnCount",
+     "buildCount",
+     "envdVersion",
+     "aliases",
+     "names",
+     "buildStatus"
+    ]
+   },
+   "TemplateAliasResponse": {
+    "properties": {
+     "public": {
+      "description": "Whether the template is public or only accessible by the team",
+      "type": "boolean"
+     },
+     "templateID": {
+      "description": "Identifier of the template",
+      "type": "string"
+     }
+    },
+    "required": [
+     "templateID",
+     "public"
+    ]
+   },
+   "TemplateBuild": {
+    "properties": {
+     "buildID": {
+      "description": "Identifier of the build",
+      "format": "uuid",
+      "type": "string"
+     },
+     "cpuCount": {
+      "$ref": "#/components/schemas/CPUCount"
+     },
+     "createdAt": {
+      "description": "Time when the build was created",
+      "format": "date-time",
+      "type": "string"
+     },
+     "diskSizeMB": {
+      "$ref": "#/components/schemas/DiskSizeMB"
+     },
+     "envdVersion": {
+      "$ref": "#/components/schemas/EnvdVersion"
+     },
+     "finishedAt": {
+      "description": "Time when the build was finished",
+      "format": "date-time",
+      "type": "string"
+     },
+     "memoryMB": {
+      "$ref": "#/components/schemas/MemoryMB"
+     },
+     "status": {
+      "$ref": "#/components/schemas/TemplateBuildStatus"
+     },
+     "updatedAt": {
+      "description": "Time when the build was last updated",
+      "format": "date-time",
+      "type": "string"
+     }
+    },
+    "required": [
+     "buildID",
+     "status",
+     "createdAt",
+     "updatedAt",
+     "cpuCount",
+     "memoryMB"
+    ]
+   },
+   "TemplateBuildStatus": {
+    "description": "Status of the template build",
+    "enum": [
+     "building",
+     "waiting",
+     "ready",
+     "error"
+    ],
+    "type": "string"
+   },
+   "TemplateWithBuilds": {
+    "allOf": [
+     {
+      "$ref": "#/components/schemas/Template"
+     },
+     {
+      "properties": {
+       "builds": {
+        "description": "List of builds for the template",
+        "items": {
+         "$ref": "#/components/schemas/TemplateBuild"
+        },
+        "type": "array"
+       }
+      },
+      "required": [
+       "builds"
+      ],
+      "type": "object"
+     }
+    ]
+   }
+  },
+  "securitySchemes": {
+   "ApiKeyAuth": {
+    "in": "header",
+    "name": "X-API-Key",
+    "type": "apiKey"
+   },
+   "ApiKeyBearer": {
+    "description": "The same sandbox API key as a bearer token.",
+    "scheme": "bearer",
+    "type": "http"
+   }
+  }
+ },
+ "info": {
+  "description": "The E2B API as ProxCloud serves it, for the stock E2B SDKs and CLI. Generated from e2b-dev/runtime@e85b9f5 spec/openapi.yml (Copyright E2B, Apache License 2.0), cut down to the operations ProxCloud serves; ProxCloud's differences are noted per operation and in the docs (E2B API page).",
+  "license": {
+   "identifier": "Apache-2.0",
+   "name": "Apache-2.0"
+  },
+  "title": "ProxCloud E2B-compatible API",
+  "version": "1"
+ },
+ "openapi": "3.1.0",
+ "paths": {
+  "/health": {
+   "get": {
+    "description": "Health check",
+    "responses": {
+     "200": {
+      "description": "The service is healthy"
+     }
+    },
+    "security": [],
+    "summary": "Health check"
+   }
+  },
+  "/sandboxes": {
+   "get": {
+    "deprecated": true,
+    "description": "List all running sandboxes. Returns 400 when more than 5000 running sandboxes match; use GET /v2/sandboxes to page through them.\n\nProxCloud: everything in one page.",
+    "parameters": [
+     {
+      "description": "Metadata query used to filter the sandboxes (e.g. \"user=abc&app=prod\"). Each key and values must be URL encoded.",
+      "in": "query",
+      "name": "metadata",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "$ref": "#/components/schemas/ListedSandbox"
+         },
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successfully returned all running sandboxes"
+     },
+     "400": {
+      "$ref": "#/components/responses/400"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "List running sandboxes",
+    "tags": [
+     "sandboxes"
+    ],
+    "x-api-group": "list"
+   },
+   "post": {
+    "deprecated": true,
+    "description": "Create a sandbox from the template. All system communication with the sandbox is secured. Use POST /v2/sandboxes instead.\n\nProxCloud: `secure` is ignored (envd always needs its token); `volumeMounts`, `mcp`, `autoPause` and `autoResume` \u2192 400. Waits until the sandbox is ready, at most about 50 s, else 503. Passes the same checks as the native create: suspended project 409, suspended billing profile 403, provider DISABLED or a release gate not holding 503, project quota 429. Extensions: `gpu`, `cpuCount`, `memoryMB`.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewSandbox"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Sandbox"
+        }
+       }
+      },
+      "description": "The sandbox was created successfully"
+     },
+     "400": {
+      "$ref": "#/components/responses/400"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     },
+     "503": {
+      "$ref": "#/components/responses/503"
+     },
+     "504": {
+      "$ref": "#/components/responses/504"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Create sandbox",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/sandboxes/metrics": {
+   "get": {
+    "description": "List metrics for given sandboxes\n\nProxCloud: always empty.",
+    "parameters": [
+     {
+      "description": "Comma-separated list of sandbox IDs to get metrics for",
+      "explode": false,
+      "in": "query",
+      "name": "sandbox_ids",
+      "required": true,
+      "schema": {
+       "items": {
+        "type": "string"
+       },
+       "maxItems": 100,
+       "type": "array",
+       "uniqueItems": true
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SandboxesWithMetrics"
+        }
+       }
+      },
+      "description": "Successfully returned all running sandboxes with metrics"
+     },
+     "400": {
+      "$ref": "#/components/responses/400"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "List sandbox metrics",
+    "tags": [
+     "sandboxes"
+    ],
+    "x-api-group": "list"
+   }
+  },
+  "/sandboxes/{sandboxID}": {
+   "delete": {
+    "description": "Kill a sandbox",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "The sandbox was killed successfully"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "409": {
+      "$ref": "#/components/responses/409"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Kill sandbox",
+    "tags": [
+     "sandboxes"
+    ],
+    "x-api-group": "delete"
+   },
+   "get": {
+    "description": "Get a sandbox by id\n\nProxCloud: `diskSizeMB` is always 0.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SandboxDetail"
+        }
+       }
+      },
+      "description": "Successfully returned the sandbox"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Sandbox",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/sandboxes/{sandboxID}/connect": {
+   "post": {
+    "deprecated": true,
+    "description": "Returns sandbox details. If the sandbox is paused, it will be resumed. TTL is only extended. Use POST /v2/sandboxes/{sandboxID}/connect instead. Answers 409 with error_code sandbox_snapshot_guest_agent_unresponsive when the paused sandbox's snapshot was taken while its guest agent was not responding and the request did not ask for `memory: false`.\n\nProxCloud: running sandboxes only; an extension passes the usage checks of the create.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ConnectSandbox"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Sandbox"
+        }
+       }
+      },
+      "description": "The sandbox was already running"
+     },
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Sandbox"
+        }
+       }
+      },
+      "description": "The sandbox was resumed successfully"
+     },
+     "400": {
+      "$ref": "#/components/responses/400"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "409": {
+      "$ref": "#/components/responses/409"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     },
+     "503": {
+      "$ref": "#/components/responses/503"
+     },
+     "504": {
+      "$ref": "#/components/responses/504"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Connect sandbox",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/sandboxes/{sandboxID}/logs": {
+   "get": {
+    "deprecated": true,
+    "description": "Get sandbox logs. Use /v2/sandboxes/{sandboxID}/logs instead.\n\nProxCloud: the newest 1000 lines; no `start` or `limit`.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     },
+     {
+      "description": "Starting timestamp of the logs that should be returned in milliseconds",
+      "in": "query",
+      "name": "start",
+      "schema": {
+       "format": "int64",
+       "minimum": 0,
+       "type": "integer"
+      }
+     },
+     {
+      "description": "Maximum number of logs that should be returned",
+      "in": "query",
+      "name": "limit",
+      "schema": {
+       "default": 1000,
+       "format": "int32",
+       "minimum": 0,
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SandboxLogs"
+        }
+       }
+      },
+      "description": "Successfully returned the sandbox logs"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Sandbox logs",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/sandboxes/{sandboxID}/metrics": {
+   "get": {
+    "description": "Get sandbox metrics\n\nProxCloud: always empty.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     },
+     {
+      "description": "Unix timestamp for the start of the interval, in seconds, for which the metrics",
+      "in": "query",
+      "name": "start",
+      "schema": {
+       "format": "int64",
+       "minimum": 0,
+       "type": "integer"
+      }
+     },
+     {
+      "in": "query",
+      "name": "end",
+      "schema": {
+       "description": "Unix timestamp for the end of the interval, in seconds, for which the metrics",
+       "format": "int64",
+       "minimum": 0,
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "$ref": "#/components/schemas/SandboxMetric"
+         },
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successfully returned the sandbox metrics"
+     },
+     "400": {
+      "$ref": "#/components/responses/400"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Sandbox metrics",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/sandboxes/{sandboxID}/network": {
+   "put": {
+    "description": "Update the network configuration for a running sandbox. Replaces the current egress rules with the provided configuration. Omitting field clears it.\n\nProxCloud: `allowOut`, `denyOut`, `dnsServers`; `allowPublicTraffic` only at create.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SandboxNetworkUpdateConfig"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "204": {
+      "description": "Successfully updated the sandbox network configuration"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "409": {
+      "$ref": "#/components/responses/409"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Update sandbox network",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/sandboxes/{sandboxID}/refreshes": {
+   "post": {
+    "description": "Refresh the sandbox extending its time to live\n\nProxCloud: an extension passes the usage checks of the create.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SandboxRefreshRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "204": {
+      "description": "Successfully refreshed the sandbox"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Refresh sandbox",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/sandboxes/{sandboxID}/timeout": {
+   "post": {
+    "description": "Set the timeout for the sandbox. The sandbox will expire x seconds from the time of the request. Calling this method multiple times overwrites the TTL, each time using the current timestamp as the starting point to measure the timeout duration.\n\nProxCloud: passes the usage checks of the create (409, 403, 503).",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SandboxTimeoutRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "204": {
+      "description": "Successfully set the sandbox timeout"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Set sandbox timeout",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/templates": {
+   "get": {
+    "deprecated": true,
+    "description": "List all templates. Returns 400 when the team has more than 5000 templates; use /v2/templates to page through them.\n\nProxCloud: the location's built-in templates.",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "teamID",
+      "required": false,
+      "schema": {
+       "description": "Identifier of the team, as its UUID or its public project ID (prj_)",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "$ref": "#/components/schemas/Template"
+         },
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successfully returned all templates"
+     },
+     "400": {
+      "$ref": "#/components/responses/400"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "List templates",
+    "tags": [
+     "templates"
+    ],
+    "x-api-group": "list"
+   }
+  },
+  "/templates/aliases/{alias}": {
+   "get": {
+    "description": "Check if template with given alias exists",
+    "parameters": [
+     {
+      "in": "path",
+      "name": "alias",
+      "required": true,
+      "schema": {
+       "description": "Template alias",
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/TemplateAliasResponse"
+        }
+       }
+      },
+      "description": "Successfully queried template by alias"
+     },
+     "400": {
+      "$ref": "#/components/responses/400"
+     },
+     "403": {
+      "$ref": "#/components/responses/403"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Check template alias",
+    "tags": [
+     "templates"
+    ]
+   }
+  },
+  "/templates/{templateID}": {
+   "get": {
+    "description": "List all builds for a template",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/templateID"
+     },
+     {
+      "$ref": "#/components/parameters/paginationNextToken"
+     },
+     {
+      "$ref": "#/components/parameters/paginationLimit"
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/TemplateWithBuilds"
+        }
+       }
+      },
+      "description": "Successfully returned the template with its builds",
+      "headers": {
+       "X-Next-Token": {
+        "$ref": "#/components/headers/XNextToken"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "List template builds",
+    "tags": [
+     "templates"
+    ],
+    "x-api-group": "list"
+   }
+  },
+  "/v2/sandboxes": {
+   "get": {
+    "description": "List all sandboxes\n\nProxCloud: running sandboxes only (nothing is paused); everything in one page.",
+    "parameters": [
+     {
+      "description": "Metadata query used to filter the sandboxes (e.g. \"user=abc&app=prod\"). Each key and values must be URL encoded.",
+      "in": "query",
+      "name": "metadata",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "description": "Filter sandboxes by one or more states",
+      "explode": false,
+      "in": "query",
+      "name": "state",
+      "required": false,
+      "schema": {
+       "items": {
+        "$ref": "#/components/schemas/SandboxState"
+       },
+       "type": "array"
+      },
+      "style": "form"
+     },
+     {
+      "description": "Sort direction by sandbox start time. Defaults to desc (newest first).",
+      "in": "query",
+      "name": "order",
+      "required": false,
+      "schema": {
+       "$ref": "#/components/schemas/OrderDirection"
+      }
+     },
+     {
+      "description": "Return sandboxes started at or after this timestamp.",
+      "in": "query",
+      "name": "startedAfter",
+      "required": false,
+      "schema": {
+       "format": "date-time",
+       "type": "string"
+      }
+     },
+     {
+      "description": "Filter sandboxes by a template ID or alias.",
+      "in": "query",
+      "name": "template",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "$ref": "#/components/parameters/paginationNextToken"
+     },
+     {
+      "$ref": "#/components/parameters/paginationLimit"
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "$ref": "#/components/schemas/ListedSandbox"
+         },
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successfully returned all running sandboxes",
+      "headers": {
+       "X-Next-Token": {
+        "$ref": "#/components/headers/XNextToken"
+       },
+       "X-Total-Running": {
+        "$ref": "#/components/headers/XTotalRunning"
+       }
+      }
+     },
+     "400": {
+      "$ref": "#/components/responses/400"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "List sandboxes (v2)",
+    "tags": [
+     "sandboxes"
+    ],
+    "x-api-group": "list"
+   },
+   "post": {
+    "description": "Create a sandbox from the template. All system communication with the sandbox is secured.\n\nSame as POST /sandboxes.",
+    "parameters": [
+     {
+      "description": "Optional team-scoped key for retrying sandbox creation. Use 1 to 255 lowercase ASCII\nletters, digits, or hyphens (a-z, 0-9, -), such as a lowercase UUID. When idempotency is enabled,\nmatching retries replay a completed status and body for the retention period. A creation\nfailure explicitly classified as safe to retry (Should-Retry: true) permits a fresh\nattempt with the same key and parameters. Only one attempt can run at a time.\nDifferent request parameters return 409 with error_code idempotency_request_mismatch.\nAn in-progress request returns 409 with error_code idempotency_in_progress; an unknown\noutcome returns 422 with error_code idempotency_outcome_unknown. These retries do not execute the request again.\nRetries do not extend retention. If a fresh attempt's request deadline plus response\npersistence budget would exceed the remaining retention, the previous error is replayed.\nAfter the key expires, it can start a new creation.\n",
+      "in": "header",
+      "name": "Idempotency-Key",
+      "required": false,
+      "schema": {
+       "maxLength": 255,
+       "minLength": 1,
+       "pattern": "^[a-z0-9-]+$",
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewSandboxV2"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Sandbox"
+        }
+       }
+      },
+      "description": "The sandbox was created successfully"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      },
+      "description": "Bad request",
+      "headers": {
+       "Should-Retry": {
+        "$ref": "#/components/headers/ShouldRetry"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "403": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      },
+      "description": "Forbidden",
+      "headers": {
+       "Should-Retry": {
+        "$ref": "#/components/headers/ShouldRetry"
+       }
+      }
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      },
+      "description": "Not found",
+      "headers": {
+       "Should-Retry": {
+        "$ref": "#/components/headers/ShouldRetry"
+       }
+      }
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      },
+      "description": "The Idempotency-Key conflicts with a different request (error_code idempotency_request_mismatch), or the matching original request has no recorded response yet and is within its expected response window (error_code idempotency_in_progress); this request was not executed again",
+      "headers": {
+       "Should-Retry": {
+        "$ref": "#/components/headers/ShouldRetry"
+       }
+      }
+     },
+     "422": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      },
+      "description": "The matching original request has no recorded response and its expected response deadline has passed or is unknown (error_code idempotency_outcome_unknown); this request was not executed again",
+      "headers": {
+       "Should-Retry": {
+        "$ref": "#/components/headers/ShouldRetry"
+       }
+      }
+     },
+     "429": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      },
+      "description": "Too many requests",
+      "headers": {
+       "Retry-After": {
+        "description": "When present, the number of seconds to wait before retrying the request.",
+        "example": 30,
+        "required": false,
+        "schema": {
+         "minimum": 0,
+         "type": "integer"
+        }
+       },
+       "Should-Retry": {
+        "$ref": "#/components/headers/ShouldRetry"
+       }
+      }
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      },
+      "description": "Server error",
+      "headers": {
+       "Should-Retry": {
+        "$ref": "#/components/headers/ShouldRetry"
+       }
+      }
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      },
+      "description": "Service unavailable",
+      "headers": {
+       "Should-Retry": {
+        "$ref": "#/components/headers/ShouldRetry"
+       }
+      }
+     },
+     "504": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      },
+      "description": "Backend timeout",
+      "headers": {
+       "Should-Retry": {
+        "$ref": "#/components/headers/ShouldRetry"
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Create sandbox (v2)",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/v2/sandboxes/{sandboxID}/connect": {
+   "post": {
+    "description": "Returns sandbox details. If the sandbox is paused, it will be resumed. TTL is only extended. The request body is optional; an omitted timeout defaults to 300 seconds. Answers 409 with error_code sandbox_snapshot_guest_agent_unresponsive when the paused sandbox's snapshot was taken while its guest agent was not responding and the request did not ask for `memory: false`.\n\nSame as POST /sandboxes/{sandboxID}/connect.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ConnectSandboxV2"
+       }
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Sandbox"
+        }
+       }
+      },
+      "description": "The sandbox was already running"
+     },
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Sandbox"
+        }
+       }
+      },
+      "description": "The sandbox was resumed successfully"
+     },
+     "400": {
+      "$ref": "#/components/responses/400"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "409": {
+      "$ref": "#/components/responses/409"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     },
+     "503": {
+      "$ref": "#/components/responses/503"
+     },
+     "504": {
+      "$ref": "#/components/responses/504"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Connect sandbox (v2)",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/v2/sandboxes/{sandboxID}/logs": {
+   "get": {
+    "description": "Get sandbox logs\n\nProxCloud: the newest 1000 lines; no cursor.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     },
+     {
+      "description": "Starting timestamp of the logs that should be returned in milliseconds",
+      "in": "query",
+      "name": "cursor",
+      "schema": {
+       "format": "int64",
+       "minimum": 0,
+       "type": "integer"
+      }
+     },
+     {
+      "description": "Maximum number of logs that should be returned",
+      "in": "query",
+      "name": "limit",
+      "schema": {
+       "default": 1000,
+       "format": "int32",
+       "maximum": 1000,
+       "minimum": 0,
+       "type": "integer"
+      }
+     },
+     {
+      "description": "Direction of the logs that should be returned",
+      "in": "query",
+      "name": "direction",
+      "schema": {
+       "$ref": "#/components/schemas/LogsDirection"
+      }
+     },
+     {
+      "description": "Minimum log level to return. Logs below this level are excluded",
+      "in": "query",
+      "name": "level",
+      "schema": {
+       "$ref": "#/components/schemas/LogLevel"
+      }
+     },
+     {
+      "description": "Case-sensitive substring match on log message content",
+      "in": "query",
+      "name": "search",
+      "schema": {
+       "maxLength": 256,
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SandboxLogsV2Response"
+        }
+       }
+      },
+      "description": "Successfully returned the sandbox logs"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Sandbox logs (v2)",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  }
+ },
+ "servers": [
+  {
+   "url": "https://api.{domain}/e2b",
+   "variables": {
+    "domain": {
+     "default": "example.org",
+     "description": "the portal's API host"
+    }
+   }
+  }
+ ]
+}
