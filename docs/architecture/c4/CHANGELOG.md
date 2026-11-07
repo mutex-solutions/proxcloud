@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-07: Bootstrap ISOs off shared storage (SB-pre)
+## 2026-11-07: Bootstrap ISOs off shared storage (SB-pre, PR #101)
 
 **What changed**
 
