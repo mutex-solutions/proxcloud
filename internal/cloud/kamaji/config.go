@@ -122,6 +122,9 @@ type ClusterDefaults struct {
 	// ProxmoxServiceID names the compute provider whose PVE cluster hosts the workers. Empty: the
 	// project's only proxmox service.
 	ProxmoxServiceID string
+	// CSISharedStores offers the provider's storage profiles to tenant clusters through proxmox-csi. Off by default:
+	// the plugin's token reaches the tenant cluster, and on a store other projects use it opens their disks too.
+	CSISharedStores bool
 	// Shared, when set, puts every cluster's workers on one provider-run placement and credential
 	// instead of the project's pool and vnet with tokens minted per cluster. For a site whose portal
 	// token may not mint tokens. Workers then neither sync nor bill, and tenants share a network.
@@ -325,6 +328,9 @@ func (s ClusterSpec) Validate(d ClusterDefaults) error {
 		}
 		// Every node gets an explicitly sized root disk (the images are bigger than most
 		// flavors' disk), so a size has to come from somewhere.
+		if ng.RootVolumeGiB < 0 {
+			return fmt.Errorf("cluster: node group %q: rootVolumeGiB must not be negative", ng.Name)
+		}
 		if ng.RootVolumeGiB == 0 && d.RootVolumeGiB == 0 {
 			return fmt.Errorf("cluster: node group %q: rootVolumeGiB is required (no provider default configured)", ng.Name)
 		}

@@ -81,14 +81,16 @@ Privileges: `Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM 
 
 ### Managed Kubernetes
 
-Each tenant cluster runs under two tokens the portal mints at create and revokes after the delete cascade (`MintClusterTokens`, `RevokeClusterTokens` in `internal/cloud/pve/access.go`):
+Each tenant cluster runs under tokens the portal mints at create and revokes after the delete cascade (`MintClusterTokens`, `RevokeClusterTokens` in `internal/cloud/pve/access.go`):
 
 | Token | Grants | Reaches |
 |---|---|---|
-| `capmox@pve!<clusterId>` | `ProxCloudCAPI` on the project pool, the boot store, the vnet and `/nodes`; `PVETemplateUser` on `pc-templates`; `PVEDatastoreAdmin` on the ISO store | CAPMOX on the services cluster |
-| `csi@pve!<clusterId>` | `ProxCloudCSI` on the project pool and the stores of the cluster's StorageClasses | the tenant cluster, where a cluster-admin can read it |
+| `capmox@pve!<clusterId>` | `ProxCloudCAPI` on the project pool, the boot store, the vnet, `/sdn/zones/localnetwork` and `/nodes`; `PVETemplateUser` on `pc-templates`; `PVEDatastoreAdmin` on the ISO store | CAPMOX on the services cluster |
+| `csi@pve!<clusterId>` | `ProxCloudCSI` on the project pool and the stores of the cluster's StorageClasses. Minted only with the provider's `csiSharedStores`: **`Datastore.Allocate` on a store opens every disk on it, of any project** ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)) | the tenant cluster, where a cluster-admin can read it |
 
-A token's rights are its user's intersected with its own, so `capmox@pve` and `csi@pve` hold the same roles on `/pool`, `/storage` and `/sdn/zones`, and the portal token additionally needs the right to mint and grant. `make install` with `mode: split` sets this (stage 10, `split_acls`):
+`/sdn/zones/localnetwork` is there because PVE checks a clone against the NICs of the template, which sit on a node bridge (`Permission check failed (/sdn/zones/localnetwork/vmbr0, SDN.Use)`). The token also has it for every other node bridge, so it stays on the management side. It needs no `/`: go-proxmox's `GET /cluster/status` answers 403 and is ignored.
+
+A token's rights are its user's intersected with its own, so `capmox@pve` holds the same role on `/pool`, `/storage` and `/sdn/zones`, `csi@pve` on `/pool` and `/storage`, and the portal token additionally needs the right to mint and grant. `make install` with `mode: split` sets this (stage 10, `split_acls`):
 
 ```sh
 pveum role add ProxCloudKubeMint --privs "User.Modify Permissions.Modify"
@@ -102,7 +104,9 @@ grant /nodes         ProxCloudKubeMint 0 proxcloud@pve platform
 
 An ACL on a path replaces what the parent passes down for that user or token. The `/sdn/zones` mint grant on its own leaves the portal token without `SDN.*` under `/sdn/zones`, so every network create fails with `Permission check failed (/sdn/zones, SDN.Allocate)` and no NIC can attach, hence the second `/sdn/zones` line. `/pool` and `/storage` already hold `ProxCloudPlatform` directly. `/nodes/<node>` does not inherit the mint grant (propagate 0), by design. After any ACL change, read the result with `pveum user token permissions proxcloud@pve platform --path <path>`, not the ACL list; Test connection warns when the portal token lacks a privilege on `/sdn/zones`.
 
-`Permissions.Modify` is a big right: a stolen portal token can grant itself anything on those paths. Without these grants a cluster create fails with PVE's `Permission check failed`, or the provider runs in `sharedWorkers` mode (docs/managed-k8s.md). **The minted path has only run against a fake PVE, not a real one, so check this list on the first real install.** What is known from the lab (PVE 9.2): without these grants, `POST /access/users/{user}/token/{name}` answers 403 even for the token's own user, and `PUT /access/acl` wants `Permissions.Modify` on `/sdn/zones/...` and `/nodes`, and `Permissions.Modify` or `Datastore.Allocate` on `/storage/...`.
+`Permissions.Modify` is a big right: a stolen portal token can grant itself anything on those paths. Without these grants a cluster create fails with PVE's `Permission check failed`, or the provider runs in `sharedWorkers` mode (docs/managed-k8s.md). This list ran on a real cluster (PVE 9.2) with no other grant: create, scale-out, delete, a refused create. Without it, `POST /access/users/{user}/token/{name}` answers 403 even for the token's own user, and `PUT /access/acl` wants `Permissions.Modify` on `/sdn/zones/...` and `/nodes`, and `Permissions.Modify` or `Datastore.Allocate` on `/storage/...`.
+
+PVE stops honouring a deleted token's ACL entries at once, but leaves them in `user.cfg` until the next write of that file. Until then `pveum` prints `ignore invalid acl token`, which is harmless; token names are never reused.
 
 ## ProxCloudCSI
 

@@ -1,6 +1,6 @@
 {{- /*
-What every tenant cluster runs, installed by CAAPH from the management side: the CNI, proxmox-csi and MetalLB
-always, csi-driver-nfs when the cluster has a NAS dataset, the rest from the tenant's picks. The two ClusterResourceSets carry what a chart value must not: the
+What every tenant cluster runs, installed by CAAPH from the management side: the CNI and MetalLB always, proxmox-csi when
+a StorageClass is offered, csi-driver-nfs when the cluster has a NAS dataset, the rest from the tenant's picks. The ClusterResourceSet carries what a chart value must not: the
 CSI token (a Secret the portal writes, never in this document) and the MetalLB custom resources, which need
 the chart's CRDs first (ClusterResourceSet retries until they exist).
 */ -}}
@@ -13,10 +13,14 @@ the chart's CRDs first (ClusterResourceSet retries until they exist).
 {{- if eq $i 0 }}{{- $_ := set $class "annotations" (dict "storageclass.kubernetes.io/is-default-class" "true") }}{{- end }}
 {{- $classes = append $classes $class }}
 {{- end }}
+{{- if $classes }}
 {{- $proxies = append $proxies (dict "key" "proxmoxCsi" "ns" "csi-proxmox" "values" (dict "existingConfigSecret" "proxmox-csi-plugin" "storageClass" $classes "node" (dict "tolerations" (list (dict "operator" "Exists"))) "controller" (dict "replicaCount" 1))) }}
+{{- end }}
 {{- $proxies = append $proxies (dict "key" "metallb" "ns" "metallb-system" "values" (dict "speaker" (dict "frr" (dict "enabled" false)) "frrk8s" (dict "enabled" false))) }}
 {{- with .Values.proxmox.rwx }}{{- if .server }}
-{{- $proxies = append $proxies (dict "key" "nfsCsi" "ns" "kube-system" "values" (dict "storageClass" (dict "create" true "name" .storageClassName "reclaimPolicy" "Delete" "volumeBindingMode" "Immediate" "parameters" (dict "server" .server "share" .share "mountPermissions" "0777") "mountOptions" (list "nfsvers=4.1")))) }}
+{{- $nfsClass := dict "create" true "name" .storageClassName "reclaimPolicy" "Delete" "volumeBindingMode" "Immediate" "parameters" (dict "server" .server "share" .share "mountPermissions" "0777") "mountOptions" (list "nfsvers=4.1") }}
+{{- if not $classes }}{{- $_ := set $nfsClass "annotations" (dict "storageclass.kubernetes.io/is-default-class" "true") }}{{- end }}
+{{- $proxies = append $proxies (dict "key" "nfsCsi" "ns" "kube-system" "values" (dict "storageClass" $nfsClass)) }}
 {{- end }}{{- end }}
 {{- range $key := list "metricsServer" "certManager" "ingress" }}
 {{- $picked := dict "enabled" false }}
@@ -87,4 +91,6 @@ spec:
   strategy: Reconcile
   resources:
     - {kind: Secret, name: {{ .Release.Name }}-metallb-config}
+    {{- if $classes }}
     - {kind: Secret, name: {{ required "proxmox.csi.configSecretName is required" .Values.proxmox.csi.configSecretName }}}
+    {{- end }}
