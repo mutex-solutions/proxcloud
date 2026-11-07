@@ -114,6 +114,10 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 	if g, ok := p.(VanishGrace); ok {
 		grace = g.VanishGrace()
 	}
+	var merge func(cached, fresh map[string]any)
+	if m, ok := p.(CacheMerger); ok {
+		merge = m.MergeCached
+	}
 	insert := func(r *cloud.CloudResource) error {
 		t := now
 		r.UpdatedAt = &t
@@ -121,7 +125,7 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 			c := now
 			r.CreatedAt = &c
 		}
-		if _, err := repo.Insert(ctx, r); err != nil {
+		if _, err := repo.Upsert(ctx, r, merge); err != nil {
 			return err
 		}
 		st.Created++
@@ -239,6 +243,10 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 			continue
 		}
 		if grace > 0 && cr.CreatedAt != nil && now.Sub(*cr.CreatedAt) < grace {
+			continue
+		}
+		// Gone under its old id because the portal is moving it: the move carries the row over to the new one.
+		if cr.Moving(now) {
 			continue
 		}
 		if k, ok := p.(UnreadKeeper); ok {

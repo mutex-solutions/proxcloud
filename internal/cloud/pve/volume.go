@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ErrStorageFull: the target storage lacks free space for the disk plus the headroom.
@@ -408,5 +409,14 @@ func (s *Service) RetypeVolume(ctx context.Context, projectID string, vmid int, 
 	if err != nil {
 		return err
 	}
-	return s.C.WaitTask(ctx, up)
+	if err := s.C.WaitTask(ctx, up); err != nil {
+		// A status read that failed is not a move that ended (lab: the API refused one poll and the copy went on).
+		// The caller reads where the disk is right after this, so let the move end first.
+		s.C.TaskStopped(ctx, up, moveSettle)
+		return err
+	}
+	return nil
 }
+
+// moveSettle bounds the wait for a move whose status could not be read.
+const moveSettle = 5 * time.Minute

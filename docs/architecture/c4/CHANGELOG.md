@@ -4,6 +4,36 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Retype keeps one row; tenant views lose platform identities; named volumes
+
+**What changed**
+
+- A retype marks the volume row moving (`CloudResource.MovingSince`, at most 3 hours). A sync's delete-of-vanished keeps a
+  moving row, and the follow then moves it onto the new volid (`ChangeExternalID`). `ChangeExternalID` fails when the row is
+  gone instead of deleting the sync's row, and an upsert and a follow of one external id are serialised (advisory lock).
+- An upsert that finds a row it did not read first carries the provider's merge (`Repo.Upsert`, `CacheMerger`).
+- A move whose status read failed is waited out before the follow reads the disk's slot.
+- The serial console proxy sends termproxy's opening line (`<user>:<ticket>`) itself. The action answers no user, and no ticket
+  for a serial session. The events tab shows a digest for the task id and `platform` or `operator` for its user; the audit of
+  a task run outside the portal keeps the type, node and status only.
+- A repeated `ATTACH_PUBLIC_NETWORK` on a server whose public NIC is plugged answers 409.
+- Volume create takes a name, kept on the row as `data.volume.label`; an unnamed standalone volume reads as its disk's file
+  name instead of its path on the store.
+
+**Why**
+
+- The task poller syncs a project as soon as a move ends, before the retype's follow ran: the sync archived the row, the
+  follow deleted the sync's new row and renamed a row that was gone, and the next sync added a third. The bill and history of
+  the disk split in two (acceptance pass on the lab). Keeping the row while the portal moves it is what lets the existing
+  follow do its work; a failing follow now leaves one row instead of none.
+- The serial session's first line named the platform's PVE token to the tenant, and the events and audit carried the UPID
+  and PVE user, which name it too, or an operator's account.
+- Rewriting a plugged NIC gives it a new MAC, and the guest loses its public address until a reboot. The API answers other
+  repeats ("already attached", "already on storage") with 409.
+- PVE names disks itself and has no field for a name, so a tenant's name can only live on the row.
+
+**Diagrams updated:** `c2-containers.md`.
+
 ## 2026-11-07: Bootstrap ISOs off shared storage (SB-pre, PR #101)
 
 **What changed**
