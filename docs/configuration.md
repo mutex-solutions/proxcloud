@@ -65,7 +65,9 @@ or external codec) and stored verbatim in each table's `doc` jsonb column.
 | Default key | `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` | `proxcloud.encryption.default.key` (alias `default-key`) | `api.encryptionKey` (or `api.existingSecret`) | — | Key used to encrypt sensitive fields at rest. |
 
 The chart renders `api.encryptionKey` into a Secret and injects it as
-`PROXCLOUD_ENCRYPTION_DEFAULT_KEY`. Alternatively, point `api.existingSecret` at a
+`PROXCLOUD_ENCRYPTION_DEFAULT_KEY`. It protects provider and integration secrets and the secrets of admin hmac keys, and
+changing it locks all of those out: hmac key rows that no longer decrypt fail authentication until they are minted again.
+Alternatively, point `api.existingSecret` at a
 pre-made Secret carrying `db-url` / `rabbitmq-password` / `encryption-key`.
 
 ### Self URLs
@@ -122,6 +124,7 @@ keys live in the provider's `config` (full shape and behaviour:
 | `storageProfiles.<slug>` | Connection tab, Storage profiles block | — | `storages` (node or `*` → storage id), optional `label`, flags `shared` / `snapshots` / `thin` / `liveMigrate` / `replication`, caps `bootDisk` / `dbaas` (`false` closes the profile). Validated against a live detection on save. |
 | `capabilities` | capability detection (sync cycle, Storage tab Re-detect, profile save) | absent until first detection | `{detectedAt, storages}`. Never hand-edited. |
 | `storageClasses.<storage>` | Storage tab class select / `PUT /api/v1/admin/service/{id}/storage-classes`; installer | — | `class` = admin override (`performance` / `standard` / `capacity`, wins over the detected class); `suggestedClass` = installer fio result, shown only. |
+| `backupStorage` | `PUT /api/v1/admin/service/{id}` (`{"config":{"backupStorage":"nas-backup"}}`); no UI field yet | none | The shared store server backups go to (NFS, CephFS or PBS, with `backup` content). Absent: the customer console offers no backups. The store is checked when a backup is created (409), not on save. |
 | `storageHeadroomPct` | `PUT /api/v1/admin/service/{id}` (`{"config":{"storageHeadroomPct":15}}`); no UI field yet | `10` | Percent of a storage's total size that must stay free after placing a disk (server create, add volume, retype). `0` is allowed; a value that is not a number or outside 0–99 falls back to 10. |
 
 Network MTU is set per EVPN zone on the Proxmox provider

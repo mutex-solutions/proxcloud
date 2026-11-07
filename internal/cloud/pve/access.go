@@ -148,7 +148,7 @@ var PlatformPrivileges = []PrivCheck{
 		"VM.Allocate", "VM.Audit", "VM.Clone",
 		"VM.Config.CDROM", "VM.Config.CPU", "VM.Config.Cloudinit", "VM.Config.Disk",
 		"VM.Config.HWType", "VM.Config.Memory", "VM.Config.Network", "VM.Config.Options",
-		"VM.Console", "VM.GuestAgent.Audit", "VM.GuestAgent.Unrestricted", "VM.Migrate", "VM.PowerMgmt",
+		"VM.Backup", "VM.Console", "VM.GuestAgent.Audit", "VM.GuestAgent.Unrestricted", "VM.Migrate", "VM.PowerMgmt",
 		"VM.Snapshot", "VM.Snapshot.Rollback",
 	}},
 	{Path: "/sdn", Privs: []string{"SDN.Allocate", "SDN.Audit", "SDN.Use"}},

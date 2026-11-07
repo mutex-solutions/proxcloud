@@ -385,6 +385,14 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 			if pool == "" {
 				pool = es.PoolFor(p.ID) // pre-pool-stamp bindings: re-derive
 			}
+			// Archives first: PVE only lets the token delete one while its VM exists.
+			if store := es.PVEBackupStorage(); store != "" {
+				if berr := ps.DeleteProjectBackups(ctx, p.ID, store); berr != nil {
+					slog.Error("teardown: backups", "project", p.ID, "serviceId", svcID, "err", berr)
+					pveTeardownFailed = true
+					continue
+				}
+			}
 			if terr := ps.TeardownProjectPool(ctx, pool); terr != nil {
 				slog.Error("teardown: pve pool", "project", p.ID, "pool", pool, "err", terr)
 				pveTeardownFailed = true

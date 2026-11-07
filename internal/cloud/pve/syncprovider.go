@@ -12,6 +12,7 @@ package pve
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"time"
 
@@ -161,6 +162,7 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 			}
 			data = ServerData(r, p.svc.ServerAddresses(ctx, r), GPUSpecsFromConfig(cfg, p.gpuAlias))
 			p.svc.StampProtection(ctx, r, data)
+			p.svc.StampSnapshots(ctx, r, data)
 		}
 		if _, tagged := data[dataIdentity]; !tagged && cfg != nil {
 			if id := metaIdentity(cfg); id != "" {
@@ -184,6 +186,7 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 // a paused VM running; a resume is a task, and the task poller re-syncs on it.
 func (p *ServerSyncProvider) sampledData(r ClusterResource) map[string]any {
 	var addrs, specs map[string]any
+	carried := map[string]any{} // what only a full pass reads, and billing rates
 	if c := p.cached[itoa0(r.VMID)]; c != nil {
 		if srv, ok := c.Data["server"].(map[string]any); ok {
 			addrs, _ = srv["addresses"].(map[string]any)
@@ -195,14 +198,16 @@ func (p *ServerSyncProvider) sampledData(r ClusterResource) map[string]any {
 					specs = m
 				}
 			}
-			if pr, ok := srv["protection"]; ok {
-				data := ServerData(r, addrs, specs)
-				data["server"].(map[string]any)["protection"] = pr
-				return data
+			for _, k := range []string{"protection", "snapshots"} {
+				if v, ok := srv[k]; ok {
+					carried[k] = v
+				}
 			}
 		}
 	}
-	return ServerData(r, addrs, specs)
+	data := ServerData(r, addrs, specs)
+	maps.Copy(data["server"].(map[string]any), carried)
+	return data
 }
 
 // diskGbOf sums a VM's disks: what a replica takes on the target, and what protection bills.

@@ -3,6 +3,7 @@ package project
 // cloud_shares.go = the file share product on a TrueNAS provider: SHARE rows, cloud create/delete/actions, quota.
 // The NAS sees clients by address, so an export lists the project's own addresses (shareNetworks). An address
 // leaving the project goes off the exports BEFORE it can be reallocated to another tenant (withShareAccessRevoked).
+// A provider's snatSources are added by truenas.Service on every export and are no tenant's to release.
 
 import (
 	"context"
@@ -146,7 +147,7 @@ func (h *Handler) reconcileShareExports(ctx context.Context, p *Project, service
 				return err
 			}
 			for i := range list {
-				if truenas.SameExport(list[i].Networks, networks) {
+				if !list[i].MapsRoot && ts.SameExport(list[i].Networks, networks) {
 					continue
 				}
 				if err := ts.SetAccess(ctx, p.ID, list[i].Dataset, networks); err != nil {
@@ -275,9 +276,10 @@ func (h *Handler) shareCreate(w http.ResponseWriter, r *http.Request, u *user.Us
 		h.fail(w, shareErr(err))
 		return
 	}
+	now := time.Now().UTC()
 	saved, err := h.cloud.Insert(ctx, &cloud.CloudResource{
 		ServiceID: es.ID, ProjectID: proj.ID, Region: es.CephRegion(), Type: cloud.TypeShare,
-		ExternalID: sh.Dataset, Data: ts.ShareData(proj.ID, sh),
+		ExternalID: sh.Dataset, Data: ts.ShareData(proj.ID, sh), CreatedAt: &now, UpdatedAt: &now,
 	})
 	if err != nil {
 		h.fail(w, err)

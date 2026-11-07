@@ -80,6 +80,9 @@ func cloudFeatures(es *externalservice.ExternalService) []string {
 	if len(es.PVENetworkConfig().PublicNetworks) > 0 {
 		out = append(out, "publicIp")
 	}
+	if es.PVEBackupStorage() != "" {
+		out = append(out, "serverBackups")
+	}
 	// RETYPE moves a disk to another storage profile, so it needs a second one.
 	if len(es.PVEStorageProfiles()) > 1 {
 		out = append(out, "volumeRetype")

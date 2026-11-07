@@ -144,6 +144,50 @@ func TestSampledServerProvider(t *testing.T) {
 	}
 }
 
+func TestStampSnapshots(t *testing.T) {
+	snaps := `[{"name":"current"},{"name":"s2","snaptime":20},{"name":"__replicate_101_0__","snaptime":30},{"name":"s1","snaptime":10}]`
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/nodes/n1/qemu/101/snapshot": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"data":` + snaps + `}`))
+		},
+		"GET /api2/json/nodes/n1/qemu/101/config": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"data":{"scsi0":"z:vm-101-disk-0,size=8G","scsi1":"z:vm-101-disk-1,size=4G","ide2":"z:vm-101-cloudinit,media=cdrom"}}`))
+		},
+	})
+	s := &Service{C: c, ServiceID: "svc", PoolPrefix: "pc-"}
+	vm := ClusterResource{VMID: 101, Node: "n1"}
+	stamped := func() any {
+		data := map[string]any{"server": map[string]any{}}
+		s.StampSnapshots(context.Background(), vm, data)
+		return data["server"].(map[string]any)["snapshots"]
+	}
+	got, _ := stamped().(map[string]any)
+	items, _ := got["items"].([]any)
+	if len(items) != 2 || got["diskGb"] != 12 {
+		t.Fatalf("platform snapshots and the CD must not count: %+v", got)
+	}
+	if first := items[0].(map[string]any); first["name"] != "s1" || first["createdAt"] != "1970-01-01T00:00:10Z" {
+		t.Fatalf("a stable order keeps the row from churning, and billing needs the time: %+v", items)
+	}
+	snaps = `[{"name":"current"},{"name":"__replicate_101_0__"}]`
+	if v := stamped(); v != nil {
+		t.Fatalf("no tenant snapshot, nothing to bill: %+v", v)
+	}
+	// The sampler keeps what the last full pass read.
+	cached := map[string]*cloud.CloudResource{"101": {Data: map[string]any{"server": map[string]any{
+		"snapshots": map[string]any{"items": []any{}, "diskGb": 8}, "protection": map[string]any{"state": "active"},
+	}}}}
+	page := []ClusterResource{{Type: "qemu", VMID: 101, Name: "a", Node: "n1", Pool: "pc-p1", Tags: CreatedTag(7)}}
+	list, err := s.SampledServerProvider("r", "p1", page, cached).List(context.Background())
+	if err != nil || len(list) != 1 {
+		t.Fatalf("%v %+v", err, list)
+	}
+	srv := list[0].Data["server"].(map[string]any)
+	if srv["snapshots"] == nil || srv["protection"] == nil {
+		t.Fatalf("carried state lost: %+v", srv)
+	}
+}
+
 func TestSplitVMsSkipsImageBuild(t *testing.T) {
 	vms, templates := splitVMs([]ClusterResource{
 		{Type: "qemu", VMID: 1, Pool: "p", Name: "web"},
