@@ -15,16 +15,39 @@ import (
 )
 
 func TestRestoreVolumesOfOneServer(t *testing.T) {
-	at, older := time.Unix(100, 0), time.Unix(50, 0)
+	at, older, later := time.Unix(100, 0), time.Unix(50, 0), time.Unix(150, 0)
 	rows := []cloud.CloudResource{
 		{ExternalID: "z:a", CreatedAt: &at, Data: map[string]any{"volume": map[string]any{"vmid": 101, "name": "web-data"}}},
 		{ExternalID: "z:b", CreatedAt: &at, Data: map[string]any{"volume": map[string]any{"vmid": float64(202), "name": "other"}}},
 		{ExternalID: "z:c", Data: map[string]any{"volume": map[string]any{"vmid": 101}}},
 		{ExternalID: "z:d", CreatedAt: &at, DataSince: &older, Data: map[string]any{"volume": map[string]any{"vmid": 101, "name": "restored"}}},
+		// An old row that took this name only later: a retype, which can land on the name of a disk that left.
+		{ExternalID: "z:e", CreatedAt: &older, ExternalIDSince: &later, Data: map[string]any{"volume": map[string]any{"vmid": 101, "name": "retyped"}}},
+		{ExternalID: "z:f", CreatedAt: &at, DataSince: &older, ExternalIDSince: &later, Data: map[string]any{"volume": map[string]any{"vmid": 101, "name": "both"}}},
 	}
 	got := pveRestoreVolumes(rows, "101")
-	if len(got) != 2 || got["z:a"].Name != "web-data" || !got["z:a"].Since.Equal(at) || !got["z:d"].Since.Equal(older) {
+	if len(got) != 4 || got["z:a"].Name != "web-data" || !got["z:a"].Since.Equal(at) || !got["z:d"].Since.Equal(older) ||
+		!got["z:e"].Since.Equal(later) || !got["z:f"].Since.Equal(later) {
 		t.Fatalf("%+v", got)
+	}
+}
+
+// A retry after a failed restore: rows that still count the server, or that a sync already removed, add up the same.
+func TestRowsDemandAfterAFailedRestore(t *testing.T) {
+	archive := pve.VMConfig{"cores": "2", "memory": "2048", "scsi0": "z:a,size=8G", "scsi1": "z:b,size=4G"}
+	srv := func(cpu, ram int) *cloud.CloudResource {
+		return &cloud.CloudResource{ExternalID: "101", Data: map[string]any{"server": map[string]any{"flavor": map[string]any{"vcpus": cpu, "ram": ram}}}}
+	}
+	vols := []cloud.CloudResource{
+		{Data: map[string]any{"volume": map[string]any{"vmid": 101, "size": 8}}},
+		{Data: map[string]any{"volume": map[string]any{"vmid": 101, "size": 4}}},
+		{Data: map[string]any{"volume": map[string]any{"vmid": 202, "size": 100}}},
+	}
+	if v, r, d := pveRowsDemand(srv(2, 2048), vols, archive); v != 0 || r != 0 || d != 0 {
+		t.Fatalf("rows still there: %d %d %d", v, r, d)
+	}
+	if v, r, d := pveRowsDemand(srv(1, 128), vols[2:], archive); v != 1 || r != 1920 || d != 12 {
+		t.Fatalf("rows gone: %d %d %d", v, r, d)
 	}
 }
 

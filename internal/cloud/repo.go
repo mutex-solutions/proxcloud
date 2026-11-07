@@ -166,10 +166,11 @@ func (r *Repo) ChangeExternalID(ctx context.Context, res *CloudResource, externa
 		if _, err := r.resources.DeleteMany(tc, pgdoc.M{"externalId": externalID, "serviceId": res.ServiceID, "_id": pgdoc.M{"$ne": res.ID}}); err != nil {
 			return err
 		}
-		if _, err := r.resources.SetByID(tc, res.ID, pgdoc.M{"externalId": externalID}, nil); err != nil {
+		now := time.Now().UTC()
+		if _, err := r.resources.SetByID(tc, res.ID, pgdoc.M{"externalId": externalID, "externalIdSince": now}, nil); err != nil {
 			return err
 		}
-		res.ExternalID = externalID
+		res.ExternalID, res.ExternalIDSince = externalID, &now
 		return nil
 	})
 }

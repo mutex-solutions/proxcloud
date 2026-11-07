@@ -381,13 +381,18 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   (vCPUs, RAM, disk, GPUs), or when the NICs changed since the backup. A volume counts as in the archive when the archive
   names its volid and its VOLUME row is older than the backup: PVE reuses disk names, so a disk added after another left
   can carry that one's name. The boot disk always counts, so a restore can roll back a rebuild. A disk with no row before
-  a restore dates from that backup (`dataSince` on the row), so the same archive can restore it again. A disk that left and
-  came back, or was retyped, is refused too, though the archive has an older copy: move it away or take a new backup. The
-  checks run again once the server has stopped. VOLUME rows wait out a restore (PVE cuts the config to `{memory: 128}`
-  meanwhile), so the bill and the row's age carry on. A failed restore task after that point leaves the VM without disks until
-  another restore. Backups go with their server, on delete and on project teardown, and a failure stops either: PVE lets
-  the token delete an archive only through `VM.Backup` on its VM, so on a server delete they go after protection is off
-  and the volumes have moved, just before the destroy. Keeping a server's state past its life is what an image is for. An archive of a VM destroyed outside the portal
+  a restore dates from that backup (`dataSince` on the row), so the same archive can restore it again. A retype keeps the
+  row but dates its name from the move (`externalIdSince`), since the move can land on the name of a disk that left: a backup
+  older than that does not hold it. A disk that left and came back, or was retyped and back, is refused too, though the
+  archive has an older copy: move it away or take a new backup. The checks run again once the server has stopped. VOLUME rows
+  wait out a restore (PVE cuts the config to `{memory: 128}` while its task runs), so the bill and the row's age carry on. A
+  failed restore task after that point leaves the VM with that cut-down config and its disks destroyed: their rows are
+  archived and the bill for them stops, the task's answer says so (409), and another restore brings the server back (it
+  stays stopped). What a killed task had already written is freed right after, and by that retry or the server's delete if
+  that fails. Such a retry skips the volume and NIC checks, and its quota check counts the server by its rows. Backups go with their
+  server, on delete and on project teardown, and a failure stops either: PVE lets the token delete an archive only through
+  `VM.Backup` on its VM, so on a server delete they go after protection is off, the volumes have moved and a hard stop has
+  worked, just before the destroy. Keeping a server's state past its life is what an image is for. An archive of a VM destroyed outside the portal
   disappears from the token's listing (PVE filters by the same check), so it stays on the store until an operator
   removes it; its notes name the project. Backups are not billed yet.
 - **Image import** (`POST /project/{id}/cloud` `IMAGE {name, url, format?, checksum?, checksumAlgorithm?, profile?}`, offered

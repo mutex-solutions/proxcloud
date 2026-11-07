@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
@@ -64,7 +65,12 @@ func (h *Handler) pveBackupAction(w http.ResponseWriter, r *http.Request, u *use
 	}
 	if err != nil {
 		if action == "RESTORE_BACKUP" {
-			h.pveSyncVolumes(ctx, es, proj)
+			// A reconcile, not only a refresh: a failed restore destroyed the disks, and their rows must stop billing.
+			prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc())
+			if _, rerr := providers.Reconcile(ctx, prov, h.cloud, es.ID, time.Now().UTC()); rerr != nil {
+				slog.Warn("restore: refresh rows", "project", proj.ID, "err", rerr)
+			}
+			h.pveRefreshServerRow(ctx, ps, proj, cr)
 		}
 		var quota *httpx.HTTPError
 		if errors.As(err, &quota) {
@@ -93,16 +99,38 @@ func (h *Handler) pveRestoreGuard(proj *Project, es *externalservice.ExternalSer
 		if err := h.enforcePVEGPURestore(ctx, proj, es, cur, archive); err != nil {
 			return nil, err
 		}
-		vcpus, ramMb, diskGb := pve.RestoreDemand(cur, archive)
-		if err := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{VCPUs: vcpus, RAMMb: ramMb, DiskGb: diskGb}); err != nil {
-			return nil, err
-		}
 		rows, err := h.cloud.FindByServiceProjectAndType(ctx, es.ID, proj.ID, cloud.TypeVolume)
 		if err != nil {
 			return nil, err
 		}
+		vcpus, ramMb, diskGb := pve.RestoreDemand(cur, archive)
+		if pve.RestoreCutDown(cur) {
+			// A failed restore left a config that says nothing. Usage reads the rows, so that is what this server counts as.
+			srv, err := h.cloud.FindByID(ctx, cr.ID)
+			if err != nil || srv == nil {
+				return nil, errQuotaUsageUnavailable()
+			}
+			vcpus, ramMb, diskGb = pveRowsDemand(srv, rows, archive)
+		}
+		if err := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{VCPUs: vcpus, RAMMb: ramMb, DiskGb: diskGb}); err != nil {
+			return nil, err
+		}
 		return pveRestoreVolumes(rows, cr.ExternalID), nil
 	}
+}
+
+// pveRowsDemand is what a restore adds to a server as its rows count it: usage + demand must come to the others + the archive.
+func pveRowsDemand(srv *cloud.CloudResource, volumes []cloud.CloudResource, archive pve.VMConfig) (vcpus, ramMb, diskGb int) {
+	disk := 0
+	for i := range volumes {
+		vol, _ := volumes[i].Data["volume"].(map[string]any)
+		if fmt.Sprint(intAny(vol["vmid"])) == srv.ExternalID {
+			disk += intAny(vol["size"])
+		}
+	}
+	s, _ := srv.Data["server"].(map[string]any)
+	fl, _ := s["flavor"].(map[string]any)
+	return pve.RestoreDemandOver(intAny(fl["vcpus"]), intAny(fl["ram"]), disk, archive)
 }
 
 // pveRestoreVolumes maps one server's VOLUME rows by volid.
@@ -116,6 +144,10 @@ func pveRestoreVolumes(rows []cloud.CloudResource, serverExtID string) map[strin
 		since := *rows[i].CreatedAt
 		if d := rows[i].DataSince; d != nil && d.Before(since) {
 			since = *d
+		}
+		// A retype keeps the row and its age, but the name is new: an archive older than that means another disk by it.
+		if e := rows[i].ExternalIDSince; e != nil && e.After(since) {
+			since = *e
 		}
 		out[rows[i].ExternalID] = pve.RestoreVolume{Name: strAny(vol["name"]), Since: since}
 	}

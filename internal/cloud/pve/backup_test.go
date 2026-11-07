@@ -23,15 +23,19 @@ func heldVolumes(context.Context, VMConfig, VMConfig) (map[string]RestoreVolume,
 
 // backupCluster fakes VM 101 on pve1 (pool st-p1) with one archive of p1 and one of another project on nas-backup.
 type backupCluster struct {
-	s        *Service
-	vzdump   url.Values
-	restored url.Values
-	deleted  []string
-	stopped  int
-	started  int
-	cfg      string
-	archive  string
-	deny     string // the route answering 403
+	s         *Service
+	vzdump    url.Values
+	restored  url.Values
+	deleted   []string
+	stopped   int
+	started   int
+	cfg       string
+	archive   string
+	deny      string // the route answering 403
+	taskErr   string // what a task ends with, "" = OK
+	active    string // the active qmrestore tasks, as JSON
+	leftovers string // the VM's volumes on storage z, as JSON
+	order     []string
 	// destroyedAfter is how many archives were gone when the VM was destroyed, -1 while it stands.
 	destroyedAfter int
 }
@@ -40,6 +44,8 @@ func newBackupCluster(t *testing.T) *backupCluster {
 	const upid = "UPID:pve1:0:0:0:x:101:u:"
 	b := &backupCluster{
 		destroyedAfter: -1,
+		active:         "[]",
+		leftovers:      "[]",
 		cfg:            `{"scsi0":"z:vm-101-disk-0,size=8G","net0":"virtio=AA:BB,bridge=v1,firewall=1","ide2":"z:vm-101-cloudinit,media=cdrom"}`,
 		archive:        "scsi0: z:vm-101-disk-0,size=8G\nnet0: virtio=AA:BB,bridge=v1,firewall=1\n#qmdump#map:scsi0:drive-scsi0:z:raw:\n\n[snap]\nscsi5: z:old\n",
 	}
@@ -54,8 +60,23 @@ func newBackupCluster(t *testing.T) *backupCluster {
 		}
 	}
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
-		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, _ *http.Request) {
+		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("type") == "storage" {
+				fmt.Fprint(w, `{"data":[{"type":"storage","storage":"z","node":"pve1","status":"available","maxdisk":100,"disk":1}]}`)
+				return
+			}
 			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"st-p1","name":"web","status":"running"}]}`)
+		},
+		"GET /api2/json/storage": func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"data":[{"storage":"z","type":"zfspool","content":"images"}]}`)
+		},
+		"GET /api2/json/nodes/pve1/storage/z/content": func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprintf(w, `{"data":%s}`, b.leftovers)
+		},
+		"POST /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, r *http.Request) {
+			_ = r.ParseForm()
+			b.order = append(b.order, "config "+r.PostForm.Encode())
+			task(w, r)
 		},
 		"GET /api2/json/nodes/pve1/qemu/101/status/current": func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprint(w, `{"data":{"status":"running","name":"web"}}`)
@@ -81,15 +102,23 @@ func newBackupCluster(t *testing.T) *backupCluster {
 		"POST /api2/json/nodes/pve1/qemu": guard("restore", func(w http.ResponseWriter, r *http.Request) {
 			_ = r.ParseForm()
 			b.restored = r.PostForm
+			b.order = append(b.order, "restore")
 			task(w, r)
 		}),
 		"DELETE /api2/json/nodes/pve1/qemu/101": func(w http.ResponseWriter, r *http.Request) {
 			b.destroyedAfter = len(b.deleted)
 			task(w, r)
 		},
-		"POST /api2/json/nodes/pve1/qemu/101/status/stop": func(w http.ResponseWriter, r *http.Request) {
+		"POST /api2/json/nodes/pve1/qemu/101/status/stop": guard("stop", func(w http.ResponseWriter, r *http.Request) {
 			b.stopped++
+			b.order = append(b.order, "stop")
 			task(w, r)
+		}),
+		"GET /api2/json/nodes/pve1/tasks": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("source") != "active" || r.URL.Query().Get("vmid") != "101" || r.URL.Query().Get("typefilter") != "qmrestore" {
+				t.Errorf("task query %v", r.URL.Query())
+			}
+			fmt.Fprintf(w, `{"data":%s}`, b.active)
 		},
 		"POST /api2/json/nodes/pve1/qemu/101/status/start": func(w http.ResponseWriter, r *http.Request) {
 			b.started++
@@ -97,6 +126,7 @@ func newBackupCluster(t *testing.T) *backupCluster {
 		},
 		"DELETE /api2/json/nodes/pve1/storage/nas-backup/content/nas-backup:backup/old": guard("delete", func(w http.ResponseWriter, r *http.Request) {
 			b.deleted = append(b.deleted, "old")
+			b.order = append(b.order, "archive")
 			task(w, r)
 		}),
 		"DELETE /api2/json/nodes/pve1/storage/nas-backup/content/nas-backup:backup/new": func(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +137,10 @@ func newBackupCluster(t *testing.T) *backupCluster {
 			fmt.Fprint(w, `{"data":[{"node":"pve2","status":"offline"},{"node":"pve1","status":"online"}]}`)
 		},
 		"GET /api2/json/nodes/pve1/tasks/" + upid + "/status": func(w http.ResponseWriter, _ *http.Request) {
+			if b.taskErr != "" {
+				fmt.Fprintf(w, `{"data":{"status":"stopped","exitstatus":%q}}`, b.taskErr)
+				return
+			}
 			fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
 		},
 	})
@@ -267,6 +301,12 @@ func TestRestoreConflictVolumeIdentity(t *testing.T) {
 			map[string]RestoreVolume{"z:vm-101-disk-1": {Name: "web-data", Since: before}}, "web-data"},
 		{"the boot disk rolls back, even rebuilt", VMConfig{"scsi0": "z:vm-101-disk-9,size=8G"}, nil, ""},
 		{"a boot disk the archive lacks", with("virtio0", "z:vm-101-disk-8,size=8G"), nil, "virtio0"},
+		// V1 left after the backup, and a disk retyped onto this storage took its name: the row follows the disk and is old,
+		// so only the time it took the name tells them apart (pveRestoreVolumes dates it from the retype).
+		{"a disk retyped into a name the archive holds", with("scsi1", "z:vm-101-disk-1,size=4G"),
+			map[string]RestoreVolume{"z:vm-101-disk-1": {Name: "moved-in", Since: after}}, "moved-in"},
+		{"what a failed restore left: no NICs to compare, nothing to lose", VMConfig{"memory": "128"}, nil, ""},
+		{"and with its leftovers listed", VMConfig{"memory": "128", "unused0": "z:vm-101-disk-0"}, nil, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got := restoreConflict(tt.cur, archive, archivedAt, tt.vols)
@@ -313,6 +353,71 @@ func TestRestoreDemand(t *testing.T) {
 	}
 }
 
+// A retry first frees what a killed restore left on the storage, or the restore fails on those volumes. The token can only
+// do that by listing the volume as a detached disk and dropping the entry.
+func TestRestoreRetryPurgesLeftovers(t *testing.T) {
+	retry := func(b *backupCluster) error {
+		_, err := b.s.RestoreServerBackup(context.Background(), "p1", "101", "nas-backup", "nas-backup:backup/old", func(context.Context, VMConfig, VMConfig) (map[string]RestoreVolume, error) {
+			return nil, nil
+		})
+		return err
+	}
+	b := newBackupCluster(t)
+	b.cfg = `{"memory":"128","unused0":"z:vm-101-disk-0"}`
+	b.leftovers = `[{"volid":"z:vm-101-cloudinit"}]`
+	if err := retry(b); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"stop", "config delete=unused0", "config unused0=z%3Avm-101-cloudinit", "config delete=unused0", "restore"}
+	if strings.Join(b.order, "|") != strings.Join(want, "|") {
+		t.Fatalf("%v", b.order)
+	}
+	// Never under a restore still running: those volumes are its own.
+	b = newBackupCluster(t)
+	b.cfg = `{"memory":"128"}`
+	b.leftovers = `[{"volid":"z:vm-101-disk-0"}]`
+	b.active = `[{"upid":"u","type":"qmrestore","id":"101","status":"running"}]`
+	wantConflict(t, retry(b), "being restored")
+	if b.restored != nil || strings.Contains(strings.Join(b.order, "|"), "config") {
+		t.Fatalf("%v", b.order)
+	}
+	// A VM that is not cut down has no leftovers to look for.
+	b = newBackupCluster(t)
+	b.leftovers = `[{"volid":"z:vm-101-other"}]`
+	if _, err := b.s.RestoreServerBackup(context.Background(), "p1", "101", "nas-backup", "nas-backup:backup/old", heldVolumes); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(b.order, "|") != "stop|restore" {
+		t.Fatalf("%v", b.order)
+	}
+}
+
+func TestRestoreDemandOver(t *testing.T) {
+	archive := parseVMConf("cores: 2\nmemory: 2048\nscsi0: z:a,size=8G\nscsi1: z:b,size=4G\n")
+	if v, r, d := RestoreDemandOver(2, 2048, 12, archive); v != 0 || r != 0 || d != 0 {
+		t.Fatalf("rows still counting the server: %d %d %d", v, r, d)
+	}
+	if v, r, d := RestoreDemandOver(1, 128, 0, archive); v != 1 || r != 1920 || d != 12 {
+		t.Fatalf("rows gone: %d %d %d", v, r, d)
+	}
+}
+
+// A task that fails after PVE destroyed the disks tells the tenant what is left and what to do.
+func TestRestoreTaskFails(t *testing.T) {
+	b := newBackupCluster(t)
+	calls := 0
+	_, err := b.s.RestoreServerBackup(context.Background(), "p1", "101", "nas-backup", "nas-backup:backup/old", func(ctx context.Context, cur, a VMConfig) (map[string]RestoreVolume, error) {
+		if calls++; calls == 2 { // past the stop, right before the POST
+			b.taskErr = "command failed"
+		}
+		return heldVolumes(ctx, cur, a)
+	})
+	wantConflict(t, err, "Restore a backup again")
+	if b.started != 0 {
+		t.Fatalf("no disks to start on: %d", b.started)
+	}
+}
+
 // Whatever refuses leaves the archives in place, and the destroy comes after the last of them.
 func TestRetireServer(t *testing.T) {
 	ctx := context.Background()
@@ -328,6 +433,19 @@ func TestRetireServer(t *testing.T) {
 		protected = `{"scsi0":"z:vm-101-disk-0,size=8G","tags":"pc-protected"}`             // removing HA finds no route
 		locked    = `{"scsi0":"z:vm-101-disk-0,size=8G","lock":"backup"}`
 	)
+	// The stop comes before the first archive goes, and a failed one keeps them.
+	b = newBackupCluster(t)
+	if err := b.s.RetireServer(ctx, "p1", "101", "nas-backup", false); err != nil || b.order[0] != "stop" {
+		t.Fatalf("%v order %v", err, b.order)
+	}
+	b = newBackupCluster(t)
+	b.deny = "stop"
+	if err := b.s.RetireServer(ctx, "p1", "101", "nas-backup", false); err == nil || !strings.Contains(err.Error(), "stop the server") {
+		t.Fatalf("a failed stop must refuse: %v", err)
+	}
+	if len(b.deleted) != 0 || b.destroyedAfter != -1 {
+		t.Fatalf("archives %v destroyed %d", b.deleted, b.destroyedAfter)
+	}
 	for name, cfg := range map[string]string{"volume move": noMoveOff, "protection": protected, "lock": locked} {
 		t.Run(name, func(t *testing.T) {
 			b := newBackupCluster(t)
@@ -343,19 +461,35 @@ func TestRetireServer(t *testing.T) {
 }
 
 // While a restore runs the VM has no disks in its config. Their rows must wait, or the bill stops and the row's age is lost.
-func TestVolumeRowsSurviveARestore(t *testing.T) {
-	for _, cfg := range []string{`{"lock":"create","name":"web"}`, `{"memory":"128"}`} {
+// Once it has failed the disks are gone: the rows must go, with their bill.
+func TestVolumeRowsAcrossARestore(t *testing.T) {
+	row := &cloud.CloudResource{Data: map[string]any{"volume": map[string]any{"vmid": 101}}}
+	keeps := func(t *testing.T, cfg, active string) bool {
 		b := newBackupCluster(t)
-		b.cfg = cfg
+		b.cfg, b.active = cfg, active
 		p := b.s.VolumeSyncProvider("r", "p1", nil)
 		rows, err := p.List(context.Background())
 		if err != nil || len(rows) != 0 {
 			t.Fatalf("%v %v", rows, err)
 		}
-		row := &cloud.CloudResource{Data: map[string]any{"volume": map[string]any{"vmid": 101}}}
-		if keep, _ := p.KeepUnread(row); !keep {
-			t.Fatalf("the row of a VM being restored must stay: %s", cfg)
-		}
+		keep, _ := p.KeepUnread(row)
+		return keep
+	}
+	const running = `[{"upid":"u","type":"qmrestore","id":"101","status":"running"}]`
+	if !keeps(t, `{"lock":"create","name":"web"}`, "[]") {
+		t.Fatal("the lock of a restore keeps the rows")
+	}
+	if !keeps(t, `{"memory":"128"}`, running) {
+		t.Fatal("a running restore keeps the rows")
+	}
+	if keeps(t, `{"memory":"128"}`, "[]") {
+		t.Fatal("a failed restore must let the rows go")
+	}
+	if keeps(t, `{"memory":"128"}`, `[{"upid":"u","type":"qmrestore","id":"101","endtime":5,"status":"job errors"}]`) {
+		t.Fatal("a task that has ended is not running")
+	}
+	if !keeps(t, `{"memory":"128"}`, `not json`) {
+		t.Fatal("not knowing keeps the rows")
 	}
 }
 
