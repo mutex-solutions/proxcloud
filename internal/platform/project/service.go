@@ -283,6 +283,9 @@ func (s *Service) CancelDeletion(ctx context.Context, id string) (*Project, erro
 	if p.Status == StatusDeleteInProgress {
 		return nil, httpx.BadRequest("Project is deleting. Cannot cancel deletion")
 	}
+	if p.Status == StatusDeleted {
+		return nil, httpx.BadRequest("Project is deleted. Cannot cancel deletion")
+	}
 	p.Status = StatusEnabled
 	p.ScheduledForDeletionAt = nil
 	if err := s.repo.Save(ctx, p); err != nil {

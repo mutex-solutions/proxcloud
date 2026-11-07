@@ -177,7 +177,7 @@ NAT cannot be avoided, the TrueNAS provider's `snatSources` keeps its address on
 isolation between every tenant behind that NAT (see "TrueNAS file shares" in `cloud-integration.md`).
 Full-tier sites (ceph-csi CephFS) are not built yet.
 
-**A create that fails.** The marker secret is written before the create takes anything. A failure releases the addresses, tokens and dataset at once, and if that release fails too (NAS or PVE down), the marker stays and the sweep retries it after the grace window. A release only reaches the NAS named by the cluster's share row, so a broken NAS holding nothing of the cluster blocks nothing.
+**A create that fails.** The marker secret is written before the create takes anything. A failure releases the addresses, tokens and dataset at once, and if that release fails too (NAS or PVE down), the marker stays and the sweep retries it after the grace window. A release only reaches the NAS named by the cluster's share row, so a broken NAS holding nothing of the cluster blocks nothing. The exception is a cluster on a shared worker pool: its addresses are on every export of the project, so they stay reserved until the NAS takes them off.
 
 **`sharedWorkers`.** For a site that will not give the portal token the right to mint tokens,
 `config.cluster.sharedWorkers` (`pool`, `bridge`, `gateway`, `prefix`, `first`, `last`, `capiTokenId`, `csiTokenId`;

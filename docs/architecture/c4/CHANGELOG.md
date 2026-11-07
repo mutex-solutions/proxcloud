@@ -23,6 +23,60 @@ and rules: [README.md](README.md#maintenance-rule).
 - The node is the only thing that knows, so one check where the list is read covers every caller.
 
 **Diagrams updated:** `c3-components.md` (Reconcile row).
+## 2026-11-07: A broken NAS no longer blocks an address no export lists
+
+**What changed**
+
+- The address release guard takes only what `shareNetworks` can put on an export: public addresses and cluster addresses
+  on a shared worker pool. Both now read the same `onExport` rule.
+
+**Why**
+
+- Every cluster address went through the guard, including one on a project network, which the subnet covers. A broken or
+  disabled TrueNAS on the project then blocked the release of a cluster with no dataset, against what `docs/managed-k8s.md`
+  promises. Addresses an export can list still fail closed, because releasing one would let another tenant inherit access.
+
+**Diagrams updated:** none.
+## 2026-11-07: Holders survive a lost answer from PVE
+
+**What changed**
+
+- `KeepServerVolumes` keeps the holder lock until it expires when a move may still be running, the same doubt the carrier
+  path already acted on. `taskRefused` is the one rule for telling a refusal from a lost answer.
+- `newHolder` on a create POST with no answer removes the VM only if it is in the project's pool and as blank as the create
+  leaves it.
+- A VOLUME pass looks for a holder on the other nodes before calling it gone. A node that cannot answer fails the pass.
+
+**Why**
+
+- The lock was released with the move possibly running, so a later `dropEmptyHolder` could see the holder empty and destroy
+  it as the disk landed. A disk lost that way is customer data, and blocking volume changes in one project for 10 minutes is
+  a small price. Only a lost answer gets there.
+- The cleanup defer sat after the POST's error check, so a lost answer left an untagged VM in the project pool, billed as a
+  server. NextID is racy, so the vmid alone does not make the VM ours: a name, a tag or a disk means it is someone else's.
+- `/cluster/resources` names the old node for a moment during a holder's migrate. Skipping that holder archived its volume
+  rows until the next sync, up to 15 minutes hidden and unbilled. Keeping rows of every skipped holder instead would have
+  kept the phantom carrier rows that the same reconcile exists to remove, so the pass tells moved from gone.
+
+**Diagrams updated:** none (no new component or flow).
+## 2026-11-07: Admin delete-now goes through the deletion job
+
+**What changed**
+
+- `DELETE /admin/project/{id}/now` sets the same flag as the client's delete-now, `DELETE_IN_PROGRESS` with a past schedule,
+  and returns. The goroutine in `cmd/api` is gone; the deletion job is the one thing that runs `TeardownProject`. The job's
+  lock now holds for 30 minutes instead of 1.
+- Both cancels refuse a `DELETED` project.
+
+**Why**
+
+- The sweep selects on `scheduledForDeletionAt`, and the admin path set none. A pod restart, an early return from the
+  teardown or a failed final save left the project `DELETE_IN_PROGRESS` forever. Stamping the schedule alone would have left
+  the goroutine and the sweep tearing down the same project at once, so there is now one runner, and a lock shorter than a
+  teardown no longer starts a second one. A project already stuck that way is freed by calling delete-now again.
+- A cancel of a `DELETED` project flipped it to `ENABLED` with its cloud resources gone.
+
+**Diagrams updated:** `c4-code.md` (teardown sequence).
 
 ## 2026-11-07: Customer image import (P5-11)
 

@@ -120,9 +120,8 @@ type ProjectCloudOps struct {
 	// CanDelete is the live pre-check gating a project-deletion schedule (project resolves / tenant
 	// reachable). nil → the endpoint stays 501.
 	CanDelete func(ctx context.Context, projectID string) error
-	// Teardown dispatches the async cloud cascade for an immediate project delete (delete the
-	// project's cloud resources + tenant, then mark it DELETED). Returns fast (fire-and-forget). nil → 501.
-	Teardown func(ctx context.Context, projectID string) error
+	// DeleteNow flags a project for immediate deletion; the deletion job's next sweep tears it down. nil → 501.
+	DeleteNow func(ctx context.Context, projectID string) error
 }
 
 // SetProjectCloudOps wires the live project-cloud legs (cmd/api only).

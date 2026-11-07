@@ -35,24 +35,9 @@ func shareErr(err error) error {
 // too would keep them on the export after the subnet is freed for another tenant.
 func (h *Handler) shareNetworks(ctx context.Context, p *Project) ([]string, error) {
 	seen := map[string]bool{}
-	sharedPools := map[string]bool{}
-	var computes []string
-	for _, svcID := range p.ServiceIDs() {
-		es, err := h.esSvc.Get(ctx, svcID)
-		if errors.Is(err, externalservice.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if es.IsProxmox() {
-			computes = append(computes, svcID)
-		}
-		if es.IsKamaji() {
-			if sw := es.KamajiConfig().Defaults.Shared; sw != nil {
-				sharedPools[sw.Bridge] = true
-			}
-		}
+	computes, sharedPools, err := h.shareAddressSources(ctx, p)
+	if err != nil {
+		return nil, err
 	}
 	if h.publicIPs != nil {
 		for _, svcID := range computes {
@@ -61,7 +46,7 @@ func (h *Handler) shareNetworks(ctx context.Context, p *Project) ([]string, erro
 				return nil, err
 			}
 			for _, ip := range ips {
-				if ip.IsPublic() || (ip.NIC == ReservedNIC && sharedPools[ip.NetworkID]) {
+				if ip.onExport(sharedPools) {
 					seen[ip.IP+"/32"] = true
 				}
 			}
@@ -82,6 +67,35 @@ func (h *Handler) shareNetworks(ctx context.Context, p *Project) ([]string, erro
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// shareAddressSources lists the project's compute providers and its shared worker pools, which together say which of its
+// addresses an export can list.
+func (h *Handler) shareAddressSources(ctx context.Context, p *Project) (computes []string, sharedPools map[string]bool, err error) {
+	sharedPools = map[string]bool{}
+	for _, svcID := range p.ServiceIDs() {
+		es, err := h.esSvc.Get(ctx, svcID)
+		if errors.Is(err, externalservice.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if es.IsProxmox() {
+			computes = append(computes, svcID)
+		}
+		if es.IsKamaji() {
+			if sw := es.KamajiConfig().Defaults.Shared; sw != nil {
+				sharedPools[sw.Bridge] = true
+			}
+		}
+	}
+	return computes, sharedPools, nil
+}
+
+// onExport says whether an export can list this address itself (shareNetworks).
+func (p PublicIP) onExport(sharedPools map[string]bool) bool {
+	return p.IsPublic() || (p.NIC == ReservedNIC && sharedPools[p.NetworkID])
 }
 
 // networkCIDRs lists every subnet of a NETWORK row.
@@ -201,6 +215,34 @@ func (h *Handler) withShareAccessRevoked(ctx context.Context, projectID string, 
 		return fmt.Errorf("take the address off the file share exports: %w", err)
 	}
 	return release()
+}
+
+// guardAddressRelease takes the addresses among rows that an export can list off the exports, then runs release. An address
+// no export can list has nothing to take off, so a broken NAS cannot hold it back. Failing to tell which is which refuses
+// the release.
+func (h *Handler) guardAddressRelease(ctx context.Context, projectID string, rows []PublicIP, release func() error) error {
+	p, err := h.svc.GetProjectByID(ctx, projectID)
+	var he *httpx.HTTPError
+	if errors.As(err, &he) && he.Status == http.StatusNotFound {
+		return release() // no project left to hold a share
+	}
+	if err != nil {
+		return err
+	}
+	_, sharedPools, err := h.shareAddressSources(ctx, p)
+	if err != nil {
+		return err
+	}
+	var drop []string
+	for _, row := range rows {
+		if row.onExport(sharedPools) {
+			drop = append(drop, row.IP+"/32")
+		}
+	}
+	if len(drop) == 0 {
+		return release()
+	}
+	return h.withShareAccessRevoked(ctx, projectID, drop, release)
 }
 
 // ReconcileShareAccess is the sync's backstop: exports drifted by hand, or left stale by a version before the release
