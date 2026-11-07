@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -204,5 +205,49 @@ func TestApplyStorageClasses(t *testing.T) {
 				t.Fatalf("got %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+// A tenant network leaves through a node's NAT, so a file store is out of its reach only inside the networks the
+// isolation rules drop: the nodes' management networks and blockedCidrs.
+func TestStoreReachWarnings(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/cluster/status":
+			fmt.Fprint(w, `{"data":[{"type":"node","name":"pve1","ip":"10.0.0.11"}]}`)
+		case "/api2/json/nodes/pve1/network":
+			fmt.Fprint(w, `{"data":[{"iface":"vmbr0","address":"10.0.0.11","gateway":"10.0.0.1","cidr":"10.0.0.11/24"}]}`)
+		case "/api2/json/storage":
+			fmt.Fprint(w, `{"data":[
+				{"storage":"local","type":"dir","content":"iso"},
+				{"storage":"nas-templates","type":"nfs","server":"10.0.0.20","content":"iso,images"},
+				{"storage":"nas-capacity","type":"nfs","server":"10.50.0.20","content":"images"},
+				{"storage":"smb","type":"cifs","server":"10.60.0.5","content":"iso"},
+				{"storage":"old","type":"nfs","server":"10.70.0.5","content":"iso","disable":1}]}`)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+	cc, err := pve.New(pve.Config{APIURL: srv.URL, TokenID: "proxcloud@pve!t1", Secret: "sec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := storeReachWarnings(context.Background(), cc, []string{"10.60.0.5"})
+	if len(got) != 1 || !strings.Contains(got[0], "Storage nas-capacity (nfs at 10.50.0.20)") {
+		t.Fatalf("warnings = %q", got)
+	}
+	if got := storeReachWarnings(context.Background(), cc, []string{"10.50.0.0/16", "10.60.0.5/32"}); len(got) != 0 {
+		t.Fatalf("all blocked, warnings = %q", got)
+	}
+	// A server given by name is checked at the addresses it resolves to.
+	defs := []pve.StorageDef{{Storage: "nas", Type: "nfs", Server: "nas.example"}}
+	inside := func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("10.0.0.20")}, nil }
+	if got := unblockedStores(defs, []string{"10.0.0.0/24"}, inside); len(got) != 0 {
+		t.Fatalf("resolved inside: %q", got)
+	}
+	gone := func(string) ([]net.IP, error) { return nil, fmt.Errorf("no such host") }
+	if got := unblockedStores(defs, nil, gone); len(got) != 1 || !strings.Contains(got[0], "Could not resolve nas.example") {
+		t.Fatalf("unresolvable: %q", got)
 	}
 }

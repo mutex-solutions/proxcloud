@@ -19,7 +19,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -108,8 +111,11 @@ func (h *Handler) proxmoxAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	out := PVEAuthResponse{Nodes: []pve.Node{}, Storages: []pve.StorageDef{}, SDNZones: []pve.SDNZone{}, PCIMappings: []pve.PCIMapping{}, Warnings: tokenWarnings(ctx, cc, cfg.TokenID)}
 	if id := r.URL.Query().Get("externalServiceId"); id != "" && h.esSvc != nil {
-		if es, err := h.esSvc.Get(ctx, id); err == nil && es != nil && es.PVEImportStorage() != "" {
-			out.Warnings = append(out.Warnings, importStoreWarnings(ctx, cc, es.PVEImportStorage())...)
+		if es, err := h.esSvc.Get(ctx, id); err == nil && es != nil && es.IsProxmox() {
+			if es.PVEImportStorage() != "" {
+				out.Warnings = append(out.Warnings, importStoreWarnings(ctx, cc, es.PVEImportStorage())...)
+			}
+			out.Warnings = append(out.Warnings, storeReachWarnings(ctx, cc, es.PVENetworkConfig().BlockedCIDRs)...)
 		}
 	}
 	if v, ok := ver["version"].(string); ok {
@@ -160,6 +166,56 @@ func importStoreWarnings(ctx context.Context, cc *pve.Client, store string) []st
 	out := []string{}
 	for _, m := range missing {
 		out = append(out, "Token lacks "+m+": image import needs it, or uploaded files stay on the store (see docs/proxmox-permissions.md)")
+	}
+	return out
+}
+
+// storeReachWarnings names each NFS or CIFS store outside the networks tenants are dropped from. A tenant network
+// leaves through its exit node's NAT under the node's address, which an export to the nodes admits, and these stores
+// hold seed CDs with user-data, templates and disks.
+func storeReachWarnings(ctx context.Context, cc *pve.Client, blocked []string) []string {
+	defs, err := cc.ListStorage(ctx)
+	if err != nil {
+		return []string{"Could not read the storages to check that tenants cannot reach them: " + err.Error()}
+	}
+	mgmt, _, err := cc.ManagementCIDRs(ctx)
+	if err != nil {
+		return []string{"Could not read the node networks to check that tenants cannot reach the storages: " + err.Error()}
+	}
+	return unblockedStores(defs, append(mgmt, blocked...), func(host string) ([]net.IP, error) {
+		return net.DefaultResolver.LookupIP(ctx, "ip4", host)
+	})
+}
+
+func unblockedStores(defs []pve.StorageDef, blocked []string, lookup func(string) ([]net.IP, error)) []string {
+	var nets []netip.Prefix
+	for _, b := range blocked {
+		if p, err := netip.ParsePrefix(b); err == nil {
+			nets = append(nets, p.Masked())
+		} else if a, err := netip.ParseAddr(b); err == nil {
+			nets = append(nets, netip.PrefixFrom(a, a.BitLen()))
+		}
+	}
+	out := []string{}
+	for _, d := range defs {
+		if (d.Type != "nfs" && d.Type != "cifs") || d.Disable == 1 || d.Server == "" {
+			continue
+		}
+		ips := []net.IP{net.ParseIP(d.Server)}
+		if ips[0] == nil {
+			var err error
+			if ips, err = lookup(d.Server); err != nil || len(ips) == 0 {
+				out = append(out, fmt.Sprintf("Could not resolve %s, the server of storage %s, to check that tenants cannot reach it", d.Server, d.Storage))
+				continue
+			}
+		}
+		for _, ip := range ips {
+			a, _ := netip.AddrFromSlice(ip)
+			if !slices.ContainsFunc(nets, func(p netip.Prefix) bool { return p.Contains(a.Unmap()) }) {
+				out = append(out, fmt.Sprintf("Storage %s (%s at %s) is outside blockedCidrs and the nodes' management networks: a tenant network reaches it through the nodes' NAT, under a node's address, and can read seed CDs and disks there. Add %s to blockedCidrs and export the store to the node addresses only (docs/cloud-integration.md).", d.Storage, d.Type, d.Server, a.Unmap()))
+				break
+			}
+		}
 	}
 	return out
 }

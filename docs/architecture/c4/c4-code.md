@@ -109,7 +109,9 @@ Invariants:
   the wrong rule.
 - The test connection (`internal/platform/admin/pveadmin.go:47`) refuses a cluster
   whose datacenter firewall is off or where a node still runs the legacy iptables
-  firewall (it ignores FORWARD rules), so the rules above are actually enforced.
+  firewall (it ignores FORWARD rules), so the rules above are actually enforced. It warns about
+  each NFS or CIFS store whose server is outside the dropped networks: a vnet's NAT gives its
+  traffic a node's address, which a NAS export to the nodes admits.
 - Verified live on PVE 9.2 in both isolation modes, on one node and across nodes: same
   project reaches its other vnets, another tenant and the management network are dropped,
   SNAT egress works, a spoofed source address is dropped. Verified again with packets for the

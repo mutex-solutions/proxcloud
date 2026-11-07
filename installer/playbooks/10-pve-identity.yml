@@ -38,8 +38,8 @@
       - {path: /sdn/zones/localnetwork, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
     # Image import deletes what it downloaded, and deleting a file takes Datastore.Allocate. Only on this store.
     nas_acls: "{{ [{'path': '/storage/' ~ pc.nas.names.templates, 'role': 'PVEDatastoreAdmin', 'propagate': 0, 'user': 'proxcloud@pve', 'token': 'proxcloud@pve!platform'}] if pc.nas.host | length > 0 and 'templates' in pc.nas.exports else [] }}"
-    # That ACL shadows /storage for the token, so mode=split repeats the mint role there: a cluster's token gets its ACL on
-    # the ISO store, which is usually this one, and writing it takes Permissions.Modify on the path.
+    # That ACL shadows /storage for the token, so mode=split repeats the mint role there: clusters made before bootstrap
+    # ISOs moved to node-local storage hold an ACL on this store, and taking it back takes Permissions.Modify on the path.
     nas_mint_acls: "{{ [{'path': '/storage/' ~ pc.nas.names.templates, 'role': 'ProxCloudKubeMint', 'propagate': 0, 'user': 'proxcloud@pve', 'token': 'proxcloud@pve!platform'}] if nas_acls | length > 0 else [] }}"
     # mode=split: what the services cluster and the per-cluster tokens of tenant clusters hang off.
     # Unexercised on a lab so far: see "Managed Kubernetes" in docs/proxmox-permissions.md.
@@ -51,7 +51,11 @@
       - {path: /pool, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
       - {path: /pool/pc-templates, role: PVETemplateUser, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
       - {path: /sdn/zones, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
-      - {path: /storage, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: capmox@pve!capi}
+      # CAPMOX puts a bootstrap ISO (kubeadm join token) on the first iso store its token sees, in no fixed order: the
+      # services token sees its boot store and the node-local ISO store only. The user keeps /storage for the boot
+      # stores of tenant clusters' tokens, which the portal grants one by one.
+      - {path: /storage, role: ProxCloudCAPI, propagate: 1, user: capmox@pve, token: ""}
+      - {path: "/storage/{{ pc.services.storage }}", role: ProxCloudCAPI, propagate: 0, user: "", token: capmox@pve!capi}
       - {path: "/storage/{{ pc.services.iso_storage }}", role: PVEDatastoreAdmin, propagate: 0, user: capmox@pve, token: capmox@pve!capi}
       - {path: /pool, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!csi}
       - {path: /storage, role: ProxCloudCSI, propagate: 1, user: csi@pve, token: csi@pve!csi}
@@ -169,3 +173,19 @@
       changed_when: true
       loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else [])) }}"
       loop_control: {label: "{{ item.path }} {{ item.roles }}"}
+
+    # Older installs gave the services token /storage (propagate) and the ISO role on the NAS template store, so it
+    # saw every iso store. Taken off after the grants above, so the token never lacks its boot or ISO store.
+    - name: Narrow the services cluster token to its own stores
+      when:
+        - pc.mode == 'split'
+        - (item.path == '/storage' and item.roleid == 'ProxCloudCAPI') or
+          (item.path == '/storage/' ~ pc.nas.names.templates and item.roleid == 'PVEDatastoreAdmin' and pc.nas.names.templates != pc.services.iso_storage)
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/acl"
+        method: PUT
+        body_format: form-urlencoded
+        body: {path: "{{ item.path }}", roles: "{{ item.roleid }}", tokens: capmox@pve!capi, delete: 1}
+      changed_when: true
+      loop: "{{ pc_id.results[3].json.data | selectattr('type', 'eq', 'token') | selectattr('ugid', 'eq', 'capmox@pve!capi') | list }}"
+      loop_control: {label: "{{ item.path }} {{ item.roleid }}"}

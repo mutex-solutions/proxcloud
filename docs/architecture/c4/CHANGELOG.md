@@ -4,6 +4,38 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Bootstrap ISOs off shared storage (SB-pre)
+
+**What changed**
+
+- A Kubernetes cluster's CAPMOX token gets its ISO grant on the Proxmox provider's `isoStorage`, now `local` by default
+  (was `nas-templates`). A create answers 409 when that store is shared, takes no ISO images, when the boot store also
+  takes ISO images, or when `capmox@pve` lacks `PVEDatastoreAdmin` there (`pve.BootISOProblem`, `CheckBootISOGrant`).
+- The kamaji sweep calls a new live-cluster hook, `OnClusterLive`; `KamajiPinBootISO` moves an older cluster's grant to
+  the new store (`pve.PinClusterISO`) once no bootstrap ISO is left on the old one.
+- Installer: `services.iso_storage` defaults to `local` and preflight refuses a shared one; stage 10 gives the services
+  token `capmox@pve!capi` only its boot store and the ISO store, keeps `/storage` on the user, and takes the old
+  `/storage` and NAS grants off the token.
+- Test connection warns about each NFS or CIFS store outside `blockedCidrs` and the nodes' management networks.
+  `StorageDef` carries the store's `server`.
+
+**Why**
+
+- A bootstrap ISO holds the node's kubeadm join token, renewed until the node joins. On the NAS any VM whose traffic
+  reaches the export can read it and join a node of its own to the cluster, the services cluster included. Drilled on the
+  lab with CAPMOX's own go-proxmox calls: a VM with a public NIC mounted `nas-templates` and read the token; with the new
+  grant the same ISO went to `local` and nothing reached the NAS.
+- CAPMOX v0.9.2 names no store, so go-proxmox takes the first `iso` store in the token's view, and PVE lists stores in
+  Perl hash order: the old services token saw three and the pick changed between calls. Pinning one store by ACL is the
+  only lever, hence one iso store per token and the check on the boot store.
+- Moving an old grant while a node is still booting from the NAS would leave that ISO there for good: CAPMOX deletes it
+  only on stores its token still sees. The sweep waits instead.
+- Server seed CDs stay on shared storage, since PVE does not migrate a VM with a node-local CD. They are as safe as the
+  store's reach, and a vnet reaches a NAS under a node's address through its NAT, so a node-only export does not stop
+  it: the isolation rules do, and the warning says when a store is outside them.
+
+**Diagrams updated:** `c3-components.md`, `c4-code.md`.
+
 ## 2026-11-07: Load balancers (HAProxy appliance)
 
 **What changed**

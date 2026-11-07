@@ -79,13 +79,20 @@ Privileges: `Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM 
 | `/storage/<disk storage>` | `ProxCloudCAPI` | 0 |
 | `/storage/<cloud-init ISO storage>` | `PVEDatastoreAdmin` (built-in) | 0 |
 
+The ISO storage holds each new node's kubeadm join token until it has joined, and CAPMOX uploads to the first
+`iso` store the token sees, in no fixed order: make it node-local (`local`, the installer's default), and give the
+token no other store with `iso` content ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox),
+"Bootstrap ISOs"). Installs before this rule gave `capmox@pve!capi` `ProxCloudCAPI` on all of `/storage` and the ISO
+role on the NAS template store; stage 10 now takes both off the token after granting the two rows above, and keeps
+`/storage` on the user, which the tenant clusters' tokens need.
+
 ### Managed Kubernetes
 
 Each tenant cluster runs under tokens the portal mints at create and revokes after the delete cascade (`MintClusterTokens`, `RevokeClusterTokens` in `internal/cloud/pve/access.go`):
 
 | Token | Grants | Reaches |
 |---|---|---|
-| `capmox@pve!<clusterId>` | `ProxCloudCAPI` on the project pool, the boot store, the vnet, `/sdn/zones/localnetwork` and `/nodes`; `PVETemplateUser` on `pc-templates`; `PVEDatastoreAdmin` on the ISO store | CAPMOX on the services cluster |
+| `capmox@pve!<clusterId>` | `ProxCloudCAPI` on the project pool, the boot store, the vnet, `/sdn/zones/localnetwork` and `/nodes`; `PVETemplateUser` on `pc-templates`; `PVEDatastoreAdmin` on the node-local ISO store (provider `isoStorage`, default `local`), which needs the same role for `capmox@pve` itself | CAPMOX on the services cluster |
 | `csi@pve!<clusterId>` | `ProxCloudCSI` on the project pool and the stores of the cluster's StorageClasses. Minted only with the provider's `csiSharedStores`: **`Datastore.Allocate` on a store opens every disk on it, of any project** ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)) | the tenant cluster, where a cluster-admin can read it |
 
 `/sdn/zones/localnetwork` is there because PVE checks a clone against the NICs of the template, which sit on a node bridge (`Permission check failed (/sdn/zones/localnetwork/vmbr0, SDN.Use)`). The token also has it for every other node bridge, so it stays on the management side. It needs no `/`: go-proxmox's `GET /cluster/status` answers 403 and is ignored.
@@ -100,6 +107,9 @@ grant /storage       ProxCloudKubeMint 1 proxcloud@pve platform
 grant /sdn/zones     ProxCloudKubeMint 1 proxcloud@pve platform
 grant /sdn/zones     ProxCloudPlatform 1 proxcloud@pve platform
 grant /nodes         ProxCloudKubeMint 0 proxcloud@pve platform
+# capmox@pve itself, for the cluster tokens: their boot stores, and the ISO store (a create checks this one)
+pveum acl modify /storage       --users capmox@pve --roles ProxCloudCAPI     --propagate 1
+pveum acl modify /storage/local --users capmox@pve --roles PVEDatastoreAdmin --propagate 0
 ```
 
 An ACL on a path replaces what the parent passes down for that user or token. The `/sdn/zones` mint grant on its own leaves the portal token without `SDN.*` under `/sdn/zones`, so every network create fails with `Permission check failed (/sdn/zones, SDN.Allocate)` and no NIC can attach, hence the second `/sdn/zones` line. `/pool` and `/storage` already hold `ProxCloudPlatform` directly. `/nodes/<node>` does not inherit the mint grant (propagate 0), by design. After any ACL change, read the result with `pveum user token permissions proxcloud@pve platform --path <path>`, not the ACL list; Test connection warns when the portal token lacks a privilege on `/sdn/zones`.
@@ -181,7 +191,7 @@ grant /pool/proxcloud-system   ProxCloudCAPI     1 capmox@pve capi
 grant /pool/pc-templates       PVETemplateUser   1 capmox@pve capi
 grant /sdn/zones/<zone>/<vnet> ProxCloudCAPI     0 capmox@pve capi
 grant /storage/<disk-storage>  ProxCloudCAPI     0 capmox@pve capi
-grant /storage/<iso-storage>   PVEDatastoreAdmin 0 capmox@pve capi
+grant /storage/local           PVEDatastoreAdmin 0 capmox@pve capi   # node-local ISO store: join tokens
 
 # CSI
 grant /pool/proxcloud-system  ProxCloudCSI 1 csi@pve csi

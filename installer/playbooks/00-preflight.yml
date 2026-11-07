@@ -137,6 +137,14 @@
         pc.network.public.id in (pc_net.json.data | selectattr('gateway', 'defined') | map(attribute='iface') | list)
       # The portal refuses the management bridge as a public network; say so before installing.
 
+    - name: Check the bootstrap ISO store
+      when: pc.mode == 'split'
+      vars:
+        problem: "{{ pc_storage_rows | pc_boot_iso_problem(pc.services.iso_storage, pc.services.storage) }}"
+      ansible.builtin.assert:
+        that: problem | length == 0
+        fail_msg: "proxcloud.services.iso_storage: {{ problem }}. Bootstrap ISOs carry the kubeadm join token of a node until it joins (docs/managed-k8s.md)."
+
     - name: Check there is somewhere to put VM disks
       ansible.builtin.assert:
         that: pc_default_profile | length > 0

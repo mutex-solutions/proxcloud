@@ -86,14 +86,31 @@ def template_nodes(nodes, profile_storage_shared, per_node="auto"):
 
 def pve_acl_missing(rows, wanted):
     """Which wanted ACL entries GET /access/acl does not hold yet. A wanted entry is {path, role,
-    propagate, user, token}; both the user and its privsep token need it."""
+    propagate, user, token}; both the user and its privsep token need it, unless one of them is empty."""
     have = {(r["path"], r["roleid"], r["type"], r["ugid"], int(r.get("propagate", 1))) for r in rows}
     missing = []
     for w in wanted:
         for typ, ugid, key in (("user", w["user"], "users"), ("token", w["token"], "tokens")):
-            if (w["path"], w["role"], typ, ugid, int(w["propagate"])) not in have:
+            if ugid and (w["path"], w["role"], typ, ugid, int(w["propagate"])) not in have:
                 missing.append({"path": w["path"], "roles": w["role"], "propagate": int(w["propagate"]), key: ugid})
     return missing
+
+
+def boot_iso_problem(storages, iso, boot):
+    """Why `iso` cannot hold bootstrap ISOs (kubeadm join tokens) for workers booting from `boot`, or "". CAPMOX takes
+    the first iso store its token sees, in no fixed order, so the token must see one, and a node-local one. Mirrors
+    BootISOProblem in internal/cloud/pve/bootiso.go."""
+    rows = {s["storage"]: s for s in storages}
+    s = rows.get(iso)
+    if s is None:
+        return f"storage {iso} does not exist"
+    if "iso" not in _content(s):
+        return f"storage {iso} does not take ISO images"
+    if int(s.get("shared", 0)) or s.get("type") in ("rbd", "cephfs", "nfs", "cifs", "iscsi", "iscsidirect", "zfs", "pbs", "glusterfs", "drbd"):
+        return f"storage {iso} is shared, and whoever reaches it reads the join tokens of booting nodes: use a node-local store such as local"
+    if boot != iso and "iso" in _content(rows.get(boot, {})):
+        return f"boot storage {boot} also takes ISO images, so CAPMOX may put the bootstrap ISO on either"
+    return ""
 
 
 class FilterModule:
@@ -107,4 +124,5 @@ class FilterModule:
             "pc_fio_class": fio_class,
             "pc_template_nodes": template_nodes,
             "pc_acl_missing": pve_acl_missing,
+            "pc_boot_iso_problem": boot_iso_problem,
         }

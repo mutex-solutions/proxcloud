@@ -154,6 +154,7 @@ The shape is documented in the header of `proxmox.go`:
     "storageHeadroomPct": 10,                            // % of a storage kept free when placing disks
     "backupStorage": "nas-backup",                       // shared store of server backups; absent = none
     "importStorage": "nas-templates",                    // store with import content for customer images; absent = none
+    "isoStorage": "local",                               // Kubernetes workers' bootstrap ISOs: node-local only (managed-k8s.md)
     "templates": {},                                     // optional pins or overlays on the discovered OS templates
     "gpus": {},                                          // {mappingId: {"alias": "nvidia-4090"}}
     "overcommit": {"cpu": 4},
@@ -356,7 +357,12 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   addresses, not to a subnet.** With a subnet, any VM whose traffic reaches the NAS from inside it can mount
   the store and read every seed on it, along with every disk. Private vnets cannot get there
   (`blockedCidrs` plus the node networks); a public NIC is bridged to the uplink and only the site's routing
-  stops it. CephFS asks for a key, so reaching a monitor is not enough.
+  stops it. CephFS asks for a key, so reaching a monitor is not enough. A vnet leaves through its exit node's
+  NAT under the node's address, which a node-only export admits, so the isolation rules are what keeps it
+  out: **Test connection warns about every NFS or CIFS store whose server is outside `blockedCidrs` and the
+  nodes' management networks.** Seeds stay on a shared store by default because PVE refuses to migrate a VM
+  with a CD on a node-local one (`local cdrom image`, `QemuMigrate.pm`). Bootstrap ISOs of Kubernetes
+  workers are different, live only until the node joins, and must be node-local (docs/managed-k8s.md).
 - **Removal.** Deleting the server removes the CD, or without `Datastore.Allocate` overwrites it with an
   empty one (docs/proxmox-permissions.md). A shared store is tried from the other nodes when the CD's node is
   down. If nothing works, a row holding only the file name stays and each sync tries again. A CD replaced on a
