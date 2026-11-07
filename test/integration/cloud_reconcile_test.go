@@ -268,6 +268,57 @@ func TestReconcileIdentityAndGrace(t *testing.T) {
 	}
 }
 
+// unreadProv keeps the rows of what it cannot read, like a Proxmox provider with a node down.
+type unreadProv struct {
+	reconcileProv
+	unread map[string]string // externalId -> new status ("" = no change)
+}
+
+func (p *unreadProv) KeepUnread(cr *cloud.CloudResource) (keep, changed bool) {
+	st, ok := p.unread[cr.ExternalID]
+	if !ok {
+		return false, false
+	}
+	if st != "" {
+		cr.Data["status"] = st
+	}
+	return true, st != ""
+}
+
+// A row the provider cannot read survives being absent, and only what it changed changes. Once the object is really
+// gone it goes.
+func TestReconcileKeepsUnreadRows(t *testing.T) {
+	ctx := context.Background()
+	repo := cloud.NewRepo(freshPG(t))
+	p := &unreadProv{reconcileProv: reconcileProv{typ: cloud.TypeServer}}
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	p.list = []cloud.CloudResource{rcRes("A", map[string]any{"name": "a", "status": "ACTIVE"})}
+	if _, err := providers.Reconcile(ctx, p, repo, "svc1", base); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := repo.FindByServiceIDAndExternalID(ctx, "svc1", "A")
+
+	p.list, p.unread = nil, map[string]string{"A": "UNKNOWN"}
+	st, err := providers.Reconcile(ctx, p, repo, "svc1", base.Add(time.Minute))
+	if err != nil || st.Deleted != 0 || st.Updated != 1 {
+		t.Fatalf("stats %+v, %v", st, err)
+	}
+	row, _ := repo.FindByServiceIDAndExternalID(ctx, "svc1", "A")
+	if row == nil || row.ID != before.ID || row.Data["name"] != "a" || row.Data["status"] != "UNKNOWN" {
+		t.Fatalf("row = %+v", row)
+	}
+
+	p.unread = map[string]string{"A": ""}
+	if st, err = providers.Reconcile(ctx, p, repo, "svc1", base.Add(2*time.Minute)); err != nil || st != (providers.ReconcileStats{}) {
+		t.Fatalf("no change expected: %+v, %v", st, err)
+	}
+
+	p.unread = nil
+	if st, err = providers.Reconcile(ctx, p, repo, "svc1", base.Add(3*time.Minute)); err != nil || st.Deleted != 1 {
+		t.Fatalf("gone for real: %+v, %v", st, err)
+	}
+}
+
 // TestMeterState covers the heartbeat doc and the task event store on real Postgres.
 func TestMeterState(t *testing.T) {
 	ctx := context.Background()

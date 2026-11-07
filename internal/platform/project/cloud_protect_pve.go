@@ -46,7 +46,7 @@ func (h *Handler) pveProtectionAction(w http.ResponseWriter, r *http.Request, u 
 	}
 	state, err := ps.ReconcileProtection(ctx, *vm)
 	if err != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+		h.fail(w, pveVolumeErr(err))
 		return true
 	}
 	out["protection"] = state

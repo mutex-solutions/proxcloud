@@ -988,7 +988,7 @@ func (h *Handler) pveServerEvents(ctx context.Context, serviceID, projectID stri
 // pveRefreshServerRow re-reads live VM state into the cached row (best-effort).
 func (h *Handler) pveRefreshServerRow(ctx context.Context, ps *pve.Service, proj *Project, cr *cloud.CloudResource) {
 	vm, err := ps.ResolveVM(ctx, proj.ID, cr.ExternalID)
-	if err != nil || vm == nil {
+	if err != nil || vm == nil || vm.NodeDown { // a down node's row has nothing to refresh from
 		return
 	}
 	cr.Data = pve.ServerData(*vm, ps.ServerAddresses(ctx, *vm), nil)
@@ -1272,6 +1272,9 @@ func pveVolumeErr(err error) *httpx.HTTPError {
 	var ce *pve.ConflictError
 	if errors.As(err, &ce) {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, ce.Msg)
+	}
+	if pve.IsNodeUnreachable(err) {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, "The host of this server does not answer. Try again when it is back")
 	}
 	if msg := err.Error(); strings.Contains(msg, "can't lock file") || strings.Contains(msg, "VM is locked") {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, "The server is busy with another operation. Try again in a moment")

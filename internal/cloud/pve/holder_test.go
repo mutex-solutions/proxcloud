@@ -208,8 +208,9 @@ func TestVolumeListWithVMsGone(t *testing.T) {
 		"GET " + carrierPath + "/config":            gone,
 		"GET /api2/json/nodes/pve1/qemu/102/config": gone,
 	})
-	if _, err := vols(s, strict); err == nil {
-		t.Fatal("server gone: List must fail the pass")
+	// Its rows stay this pass: Reconcile takes them for unread rather than gone (next pass, unlisted, they go).
+	if got, err := vols(s, strict); err != nil || len(got) != 3 {
+		t.Fatalf("server unread: List = %v, %v", got, err)
 	}
 	if got, err := vols(s, readable); err != nil || len(got) != 3 {
 		t.Fatalf("server gone: ListReadable = %v, %v", got, err)

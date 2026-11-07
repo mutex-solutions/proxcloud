@@ -309,7 +309,7 @@ func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int,
 	if !strings.HasPrefix(slot, "unused") {
 		return []ClusterResource{}, nil
 	}
-	vms, _, err := s.poolVMs(ctx, projectID)
+	vms, _, _, err := s.poolVMs(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

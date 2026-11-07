@@ -105,6 +105,12 @@ func IsForbidden(err error) bool {
 // IsNotFound reports whether err is a PVE 404 (or a "does not exist" 500 — PVE is
 // inconsistent: a missing vmid is a 500 "Configuration file ... does not exist",
 // and per-parameter misses land in the errors map instead of the status line).
+// IsNodeUnreachable: the API node answered, but could not reach the node that holds the object (HTTP 595/596).
+func IsNodeUnreachable(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && (ae.Status == 595 || ae.Status == 596)
+}
+
 func IsNotFound(err error) bool {
 	ae, ok := err.(*APIError)
 	if !ok {

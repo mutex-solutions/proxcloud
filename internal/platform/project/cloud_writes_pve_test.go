@@ -2,6 +2,7 @@ package project
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -162,5 +163,12 @@ func TestDbaasProfileRefusal(t *testing.T) {
 		if (tt.want == "") != (got == "") || !strings.Contains(got, tt.want) {
 			t.Errorf("%s: got %q, want %q", tt.class, got, tt.want)
 		}
+	}
+}
+
+func TestPveVolumeErrDeadNode(t *testing.T) {
+	he := pveVolumeErr(fmt.Errorf("disable protection: %w", &pve.APIError{Status: 595, Message: "No route to host"}))
+	if he.Status != http.StatusConflict || strings.Contains(he.Msg, "595") {
+		t.Fatalf("got %d %q", he.Status, he.Msg)
 	}
 }
