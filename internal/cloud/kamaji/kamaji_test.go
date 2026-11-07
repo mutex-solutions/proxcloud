@@ -29,7 +29,7 @@ func testCfg() Config {
 
 func testSpec() ClusterSpec {
 	return ClusterSpec{
-		ID: "stc-abcd1234", DisplayName: "prod cluster", ProjectID: "p1", Version: "1.35.4", HA: true,
+		ID: "pc-c-abcd1234", DisplayName: "prod cluster", ProjectID: "p1", Version: "1.35.4", HA: true,
 		OIDC:         map[string]string{"issuerUrl": "https://idp.example.com", "clientId": "kube"},
 		AllowedCIDRs: []string{"10.0.0.0/8", "1.2.3.4/32"},
 		NodeGroups: []NodeGroup{
@@ -100,10 +100,10 @@ func TestNames(t *testing.T) {
 	// The chart names the KamajiControlPlane <release>-kamaji-cp and the Kamaji CAPI provider gives
 	// the TenantControlPlane the same name; Kamaji derives the kubeconfig secret from that. Getting
 	// this wrong is invisible until a kubeconfig fetch, so pin it.
-	if got := ControlPlaneName("stc-abcd1234"); got != "stc-abcd1234-kamaji-cp" {
+	if got := ControlPlaneName("pc-c-abcd1234"); got != "pc-c-abcd1234-kamaji-cp" {
 		t.Errorf("ControlPlaneName = %s", got)
 	}
-	if got := AdminKubeconfigSecretName("stc-abcd1234"); got != "stc-abcd1234-kamaji-cp-admin-kubeconfig" {
+	if got := AdminKubeconfigSecretName("pc-c-abcd1234"); got != "pc-c-abcd1234-kamaji-cp-admin-kubeconfig" {
 		t.Errorf("AdminKubeconfigSecretName = %s", got)
 	}
 }
@@ -124,7 +124,7 @@ func TestBuildValues(t *testing.T) {
 		t.Errorf("loadBalancerSourceRanges = %v", src)
 	}
 	ann := net["serviceAnnotations"].(map[string]any)
-	if ann["external-dns.alpha.kubernetes.io/hostname"] != "stc-abcd1234.k8s.example.com" {
+	if ann["external-dns.alpha.kubernetes.io/hostname"] != "pc-c-abcd1234.k8s.example.com" {
 		t.Errorf("hostname = %v", ann["external-dns.alpha.kubernetes.io/hostname"])
 	}
 	oidc := v["oidc"].(map[string]any)
@@ -340,7 +340,7 @@ func TestBuildValuesProxmoxBlock(t *testing.T) {
 	if got := dig(v, "proxmox", "network", "addresses").([]any); len(got) != 1 || got[0] != "192.0.2.200" {
 		t.Errorf("addresses = %v", got)
 	}
-	if got := dig(v, "proxmox", "csi", "configSecretName"); got != "stc-abcd1234-csi-config" {
+	if got := dig(v, "proxmox", "csi", "configSecretName"); got != "pc-c-abcd1234-csi-config" {
 		t.Errorf("csi secret = %v", got)
 	}
 	if got := dig(v, "proxmox", "metallb", "addresses").([]any); got[0] != "192.0.2.190" {
@@ -364,9 +364,9 @@ func TestInfraValuesRWX(t *testing.T) {
 	if _, ok := infraValues(ClusterDefaults{}, ClusterSpec{})["rwx"]; ok {
 		t.Fatal("no dataset: the chart must not get an rwx block")
 	}
-	v := infraValues(ClusterDefaults{}, ClusterSpec{Infra: ClusterInfra{RWXServer: "192.0.2.10", RWXShare: "/mnt/tank/shares/p-k8s-stc-1"}})
+	v := infraValues(ClusterDefaults{}, ClusterSpec{Infra: ClusterInfra{RWXServer: "192.0.2.10", RWXShare: "/mnt/tank/shares/p-k8s-pc-c-1"}})
 	rwx, _ := v["rwx"].(map[string]any)
-	if rwx["server"] != "192.0.2.10" || rwx["share"] != "/mnt/tank/shares/p-k8s-stc-1" {
+	if rwx["server"] != "192.0.2.10" || rwx["share"] != "/mnt/tank/shares/p-k8s-pc-c-1" {
 		t.Fatalf("rwx = %v", v["rwx"])
 	}
 }
@@ -398,7 +398,7 @@ func TestBuildApplication(t *testing.T) {
 	app := BuildApplication(cfg, spec, "svc-1", "", BuildValues(cfg, spec))
 
 	meta := app["metadata"].(map[string]any)
-	if meta["name"] != "stc-abcd1234" || meta["namespace"] != "argocd" {
+	if meta["name"] != "pc-c-abcd1234" || meta["namespace"] != "argocd" {
 		t.Errorf("metadata = %v", meta)
 	}
 	labels := meta["labels"].(map[string]any)
@@ -594,22 +594,22 @@ func TestServiceCreateDelete(t *testing.T) {
 	if _, ok := api.namespaces["pc-p1"]; !ok {
 		t.Error("namespace not ensured")
 	}
-	sd := api.secrets["pc-p1/stc-abcd1234-cloud-config"]
+	sd := api.secrets["pc-p1/pc-c-abcd1234-cloud-config"]
 	if sd == nil || sd["token"] != "t" {
 		t.Errorf("cloud-config secret = %v", sd)
 	}
-	if csi := api.secrets["pc-p1/stc-abcd1234-csi-config"]; csi["csi.yaml"] != "m" {
+	if csi := api.secrets["pc-p1/pc-c-abcd1234-csi-config"]; csi["csi.yaml"] != "m" {
 		t.Errorf("csi secret = %v", csi)
 	}
-	if api.apps["argocd/stc-abcd1234"] == nil {
+	if api.apps["argocd/pc-c-abcd1234"] == nil {
 		t.Error("application not applied")
 	}
 	c := data["cluster"].(map[string]any)
-	if c["status"] != "PENDING" || c["id"] != "stc-abcd1234" || c["name"] != "prod cluster" {
+	if c["status"] != "PENDING" || c["id"] != "pc-c-abcd1234" || c["name"] != "prod cluster" {
 		t.Errorf("initial data = %v", c)
 	}
 
-	if err := svc.DeleteCluster(ctx, "p1", "stc-abcd1234"); err != nil {
+	if err := svc.DeleteCluster(ctx, "p1", "pc-c-abcd1234"); err != nil {
 		t.Fatalf("DeleteCluster: %v", err)
 	}
 	if len(api.apps) != 0 {
@@ -621,7 +621,7 @@ func TestServiceCreateDelete(t *testing.T) {
 		t.Error("credentials and marker secrets must outlive the application delete")
 	}
 	// Idempotent: deleting again is fine.
-	if err := svc.DeleteCluster(ctx, "p1", "stc-abcd1234"); err != nil {
+	if err := svc.DeleteCluster(ctx, "p1", "pc-c-abcd1234"); err != nil {
 		t.Fatalf("DeleteCluster twice: %v", err)
 	}
 }
@@ -657,6 +657,42 @@ func TestFinalizeAfterCloudSecretCollected(t *testing.T) {
 	}
 	if len(api.secrets) != 0 {
 		t.Fatalf("secrets left: %v", api.secrets)
+	}
+}
+
+// Clusters made before the pc-c- prefix keep their ids. Every name and selector comes from the id whatever its shape, so
+// the whole life of a cluster works the same for both.
+func TestClusterLifeWithEitherIDShape(t *testing.T) {
+	const legacy = "stc-abcd1234" // the one place the old shape stays: it is what such a cluster is called
+	for _, id := range []string{"pc-c-abcd1234", legacy} {
+		t.Run(id, func(t *testing.T) {
+			ctx := context.Background()
+			api := newFakeAPI()
+			svc := NewWithAPI(api, testCfg(), "svc-1")
+			spec := testSpec()
+			spec.ID = id
+			if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}, CSIManifest: "m"}); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{CloudSecretName(id), CSISecretName(id), MarkerSecretName(id)} {
+				if _, has := api.secretObjs["pc-p1/"+name]; !has || !strings.HasPrefix(name, id+"-") {
+					t.Fatalf("secret %s: %v", name, api.secretObjs)
+				}
+			}
+			if api.apps["argocd/"+id] == nil || ControlPlaneName(id) != id+"-kamaji-cp" || AdminKubeconfigSecretName(id) != id+"-kamaji-cp-admin-kubeconfig" {
+				t.Fatalf("application or names: %v", api.apps)
+			}
+			rows, err := svc.SyncProvider("r", "p1").List(ctx)
+			if err != nil || len(rows) != 1 || rows[0].ExternalID != id {
+				t.Fatalf("the sync sees it: %+v %v", rows, err)
+			}
+			if err := svc.DeleteCluster(ctx, "p1", id); err != nil {
+				t.Fatal(err)
+			}
+			if api.apps["argocd/"+id] != nil {
+				t.Fatal("delete")
+			}
+		})
 	}
 }
 
@@ -720,7 +756,7 @@ func TestFinalizeOrphans(t *testing.T) {
 	// The service-level sweep sees the same world (labels carry service+project) — a second
 	// cluster's leftovers finalize through FinalizeAllOrphans without any project doc.
 	spec2 := testSpec()
-	spec2.ID = "stc-second01"
+	spec2.ID = "pc-c-second01"
 	if _, err := svc.CreateCluster(ctx, spec2, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -783,12 +819,12 @@ func TestAdminKubeconfig(t *testing.T) {
 	ctx := context.Background()
 
 	// The TCP is named after the KamajiControlPlane the chart renders, NOT after the cluster id.
-	api.tcps["pc-p1/"+ControlPlaneName("stc-x")] = map[string]any{
-		"metadata": map[string]any{"name": ControlPlaneName("stc-x")},
+	api.tcps["pc-p1/"+ControlPlaneName("pc-c-x")] = map[string]any{
+		"metadata": map[string]any{"name": ControlPlaneName("pc-c-x")},
 	}
-	api.secrets["pc-p1/"+AdminKubeconfigSecretName("stc-x")] = map[string]string{"admin.conf": "KUBECONFIG"}
+	api.secrets["pc-p1/"+AdminKubeconfigSecretName("pc-c-x")] = map[string]string{"admin.conf": "KUBECONFIG"}
 
-	kc, err := svc.AdminKubeconfig(ctx, "p1", "stc-x")
+	kc, err := svc.AdminKubeconfig(ctx, "p1", "pc-c-x")
 	if err != nil {
 		t.Fatalf("AdminKubeconfig: %v", err)
 	}
@@ -797,7 +833,7 @@ func TestAdminKubeconfig(t *testing.T) {
 	}
 	// Never persisted anywhere by the service — nothing to assert beyond the fetch itself (plan D5).
 
-	if _, err := svc.AdminKubeconfig(ctx, "p1", "stc-none"); err == nil {
+	if _, err := svc.AdminKubeconfig(ctx, "p1", "pc-c-none"); err == nil {
 		t.Error("absent cluster: want error")
 	}
 
@@ -806,11 +842,11 @@ func TestAdminKubeconfig(t *testing.T) {
 	api.tcps["pc-p1/legacy-tcp"] = map[string]any{
 		"metadata": map[string]any{
 			"name":   "legacy-tcp",
-			"labels": map[string]any{"cluster.x-k8s.io/cluster-name": "stc-y"},
+			"labels": map[string]any{"cluster.x-k8s.io/cluster-name": "pc-c-y"},
 		},
 	}
 	api.secrets["pc-p1/legacy-tcp-admin-kubeconfig"] = map[string]string{"admin.conf": "LEGACY"}
-	kc, err = svc.AdminKubeconfig(ctx, "p1", "stc-y")
+	kc, err = svc.AdminKubeconfig(ctx, "p1", "pc-c-y")
 	if err != nil || string(kc) != "LEGACY" {
 		t.Errorf("label fallback: %q %v", kc, err)
 	}
@@ -822,21 +858,21 @@ func TestPublicKubeconfig(t *testing.T) {
 	kc := []byte(`apiVersion: v1
 kind: Config
 clusters:
-- name: stc-x
+- name: pc-c-x
   cluster:
     server: https://10.0.0.75:6443
     certificate-authority-data: Q0FEQVRB
 contexts:
 - name: admin
-  context: {cluster: stc-x, user: admin}
+  context: {cluster: pc-c-x, user: admin}
 users:
 - name: admin
   user: {token: tok}
 current-context: admin
 `)
-	out := publicKubeconfig(kc, "stc-x.k8s.example.com")
+	out := publicKubeconfig(kc, "pc-c-x.k8s.example.com")
 	s := string(out)
-	if !strings.Contains(s, "server: https://stc-x.k8s.example.com:6443") {
+	if !strings.Contains(s, "server: https://pc-c-x.k8s.example.com:6443") {
 		t.Errorf("server not rewritten:\n%s", s)
 	}
 	if strings.Contains(s, "10.0.0.75") {
@@ -857,12 +893,12 @@ current-context: admin
 	// End-to-end through AdminKubeconfig with the provider's DNS zone (testCfg: k8s.example.com).
 	api := newFakeAPI()
 	svc := NewWithAPI(api, testCfg(), "svc-1")
-	api.tcps["pc-p9/"+ControlPlaneName("stc-z")] = map[string]any{
-		"metadata": map[string]any{"name": ControlPlaneName("stc-z")},
+	api.tcps["pc-p9/"+ControlPlaneName("pc-c-z")] = map[string]any{
+		"metadata": map[string]any{"name": ControlPlaneName("pc-c-z")},
 	}
-	api.secrets["pc-p9/"+AdminKubeconfigSecretName("stc-z")] = map[string]string{"admin.conf": string(kc)}
-	got, err := svc.AdminKubeconfig(context.Background(), "p9", "stc-z")
-	if err != nil || !strings.Contains(string(got), "server: https://stc-z.k8s.example.com:6443") {
+	api.secrets["pc-p9/"+AdminKubeconfigSecretName("pc-c-z")] = map[string]string{"admin.conf": string(kc)}
+	got, err := svc.AdminKubeconfig(context.Background(), "p9", "pc-c-z")
+	if err != nil || !strings.Contains(string(got), "server: https://pc-c-z.k8s.example.com:6443") {
 		t.Errorf("AdminKubeconfig rewrite: err=%v\n%s", err, got)
 	}
 }
@@ -872,18 +908,18 @@ func TestRotateKubeconfig(t *testing.T) {
 	svc := NewWithAPI(api, testCfg(), "svc-1")
 	ctx := context.Background()
 
-	if err := svc.RotateKubeconfig(ctx, "p1", "stc-x"); err == nil {
+	if err := svc.RotateKubeconfig(ctx, "p1", "pc-c-x"); err == nil {
 		t.Error("no control plane yet: want error")
 	}
-	api.tcps["pc-p1/"+ControlPlaneName("stc-x")] = map[string]any{
-		"metadata": map[string]any{"name": ControlPlaneName("stc-x")},
+	api.tcps["pc-p1/"+ControlPlaneName("pc-c-x")] = map[string]any{
+		"metadata": map[string]any{"name": ControlPlaneName("pc-c-x")},
 	}
-	if err := svc.RotateKubeconfig(ctx, "p1", "stc-x"); err != nil {
+	if err := svc.RotateKubeconfig(ctx, "p1", "pc-c-x"); err != nil {
 		t.Fatalf("RotateKubeconfig: %v", err)
 	}
 	// Kamaji watches for this annotation and regenerates the secret; anything else is a no-op that
 	// would look like it worked.
-	ann := api.annotated["pc-p1/"+AdminKubeconfigSecretName("stc-x")]
+	ann := api.annotated["pc-p1/"+AdminKubeconfigSecretName("pc-c-x")]
 	if _, ok := ann["certs.kamaji.clastix.io/rotate"]; !ok {
 		t.Errorf("rotate annotation = %v", ann)
 	}
@@ -931,7 +967,7 @@ func TestPatchClusterValuesUpgrade(t *testing.T) {
 		t.Error("patch dropped the resources-finalizer")
 	}
 
-	if err := svc.PatchClusterValues(ctx, "stc-none", func(map[string]any) error { return nil }); err == nil {
+	if err := svc.PatchClusterValues(ctx, "pc-c-none", func(map[string]any) error { return nil }); err == nil {
 		t.Error("absent cluster: want error")
 	}
 }
@@ -1043,7 +1079,7 @@ func TestAbandonCluster(t *testing.T) {
 	svc.finalizeGrace = 0
 	releases, failing := 0, true
 	svc.OnClusterGone(func(_ context.Context, compute, project, cluster string) error {
-		if compute != "svc-pve" || project != "p1" || cluster != "stc-x" {
+		if compute != "svc-pve" || project != "p1" || cluster != "pc-c-x" {
 			t.Errorf("release of %s/%s/%s", compute, project, cluster)
 		}
 		releases++
@@ -1052,15 +1088,15 @@ func TestAbandonCluster(t *testing.T) {
 		}
 		return nil
 	})
-	if err := svc.RecordCluster(ctx, "p1", "stc-x", "svc-pve"); err != nil {
+	if err := svc.RecordCluster(ctx, "p1", "pc-c-x", "svc-pve"); err != nil {
 		t.Fatal(err)
 	}
-	marker := NamespaceFor("p1") + "/" + MarkerSecretName("stc-x")
+	marker := NamespaceFor("p1") + "/" + MarkerSecretName("pc-c-x")
 	if _, ok := api.secrets[marker]; !ok {
 		t.Fatal("no marker written")
 	}
 
-	if err := svc.AbandonCluster(ctx, "p1", "stc-x", "svc-pve"); err == nil {
+	if err := svc.AbandonCluster(ctx, "p1", "pc-c-x", "svc-pve"); err == nil {
 		t.Fatal("want the release error")
 	}
 	if _, ok := api.secrets[marker]; !ok {
@@ -1075,10 +1111,10 @@ func TestAbandonCluster(t *testing.T) {
 		t.Fatalf("after the sweep: marker kept = %v, releases = %d", ok, releases)
 	}
 
-	if err := svc.RecordCluster(ctx, "p1", "stc-x", "svc-pve"); err != nil {
+	if err := svc.RecordCluster(ctx, "p1", "pc-c-x", "svc-pve"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AbandonCluster(ctx, "p1", "stc-x", "svc-pve"); err != nil {
+	if err := svc.AbandonCluster(ctx, "p1", "pc-c-x", "svc-pve"); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := api.secrets[marker]; ok {

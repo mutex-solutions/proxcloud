@@ -54,13 +54,13 @@ func TestPVEPickCIDR(t *testing.T) {
 func TestLiveClusterOn(t *testing.T) {
 	rows := []PublicIP{
 		{ServerID: "100", NIC: "net0"},
-		{ServerID: "k8s:stc-gone", NIC: ReservedNIC},
-		{ServerID: "k8s:stc-live", NIC: ReservedNIC},
+		{ServerID: "k8s:pc-c-gone", NIC: ReservedNIC},
+		{ServerID: "k8s:pc-c-live", NIC: ReservedNIC},
 	}
-	if got := liveClusterOn(rows, []cloud.CloudResource{{ExternalID: "stc-live"}, {ExternalID: "stc-other"}}); got != "stc-live" {
+	if got := liveClusterOn(rows, []cloud.CloudResource{{ExternalID: "pc-c-live"}, {ExternalID: "pc-c-other"}}); got != "pc-c-live" {
 		t.Errorf("got %q", got)
 	}
-	if got := liveClusterOn(rows, []cloud.CloudResource{{ExternalID: "stc-other"}}); got != "" {
+	if got := liveClusterOn(rows, []cloud.CloudResource{{ExternalID: "pc-c-other"}}); got != "" {
 		t.Errorf("no live cluster holds these: got %q", got)
 	}
 }

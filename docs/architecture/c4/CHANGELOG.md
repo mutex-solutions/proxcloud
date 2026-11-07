@@ -4,6 +4,20 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Cluster ids take a neutral prefix
+
+**What changed**
+
+- New Managed Kubernetes clusters get ids of the form `pc-c-<8hex>`. Existing clusters keep the id they have.
+
+**Why**
+
+- The earlier prefix came from the old brand. An id names every object of a cluster (Application, release, CAPI Cluster,
+  TenantControlPlane, secrets, PVE tokens, share dataset, DNS), so it cannot change on a live cluster, and nothing read the
+  prefix, so both forms can live side by side.
+
+**Diagrams updated:** none; no container or relationship changed.
+
 ## 2026-11-07: A server's name is checked against PVE's rule
 
 **What changed**
