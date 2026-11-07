@@ -441,6 +441,16 @@ func (h *Handler) projectUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(existing)
+	if h.projectCloud != nil && h.projectCloud.HoldForMove != nil {
+		disable, err := h.projectCloud.HoldForMove(r.Context(), id, req.BillingProfileId, req.OrganizationId)
+		if httpx.WriteError(w, err) {
+			return
+		}
+		// Not pinned: the project comes up on the next open once it is on a profile that pays.
+		if disable && !h.setProjectStatus(w, r, id, "ENABLED", pgdoc.M{"status": "DISABLED"}) {
+			return
+		}
+	}
 	// Only these three fields: a replace of the whole doc from this read would put back a status changed since. An omitted
 	// (null) or blank field is cleared.
 	set, unset := pgdoc.M{}, pgdoc.M{}
