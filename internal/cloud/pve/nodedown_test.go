@@ -180,3 +180,15 @@ func TestIsNodeUnreachable(t *testing.T) {
 		t.Fatal("595 and 596 only")
 	}
 }
+
+func TestResolveVMRefusesForeignServer(t *testing.T) {
+	s := nodeDownCluster(t)
+	for _, id := range []string{"105", "abc"} {
+		if _, err := s.ResolveVM(context.Background(), "p1", id); !errors.Is(err, ErrNotInProject) {
+			t.Errorf("%s: %v, want ErrNotInProject", id, err)
+		}
+	}
+	if vm, err := s.ResolveVM(context.Background(), "p1", "101"); err != nil || vm == nil {
+		t.Fatalf("own server: %v %v", vm, err)
+	}
+}
