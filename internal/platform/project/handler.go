@@ -246,6 +246,7 @@ func cloudResourceName(cr *cloud.CloudResource) string {
 // Routes registers the project endpoints under the /api/v1 group (the platform
 // subset; cloud/billing-usage endpoints are deferred).
 func (h *Handler) Routes(r chi.Router) {
+	r.Post("/internal/sandboxes/{sandboxID}/wake", h.sandboxWake) // sandbox-proxy, its own bearer (public in pkg/auth)
 	r.Get("/project", h.list)
 	r.Post("/project", h.create)
 	r.Get("/project/{id}", h.get)

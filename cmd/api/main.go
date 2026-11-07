@@ -71,6 +71,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/internal/server"
 	"github.com/mutex-solutions/proxcloud/pkg/auth"
+	"github.com/mutex-solutions/proxcloud/pkg/certfile"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
@@ -1029,7 +1030,7 @@ func run() error {
 	if cfg.CSIGateway.Addr != "" {
 		csiSrv = csigw.NewServer(cfg.CSIGateway.Addr, &csigw.Handler{Reg: csiStore, PVE: gwPVE, Portal: gwPortal,
 			Quota: projectH.CSIDiskQuota, Audit: auditSvc.LogAsync, Log: log})
-		getCert, err := csigw.CertFiles(cfg.CSIGateway.TLSCert, cfg.CSIGateway.TLSKey)
+		getCert, err := certfile.Files(cfg.CSIGateway.TLSCert, cfg.CSIGateway.TLSKey)
 		if err != nil {
 			return fmt.Errorf("csi gateway certificate: %w", err)
 		}

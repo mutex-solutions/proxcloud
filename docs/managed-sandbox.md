@@ -12,8 +12,10 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 > (the VM firewall on every worker NIC, the `unsecured` taint, the sandbox's own egress address, section 2). SB3
 > (section 3) mounts the routes, bills sandboxes per minute, adds the project quota and the suspension gate, deletes
 > sandboxes on a suspension and on project deletion, and lets an operator create a sandbox provider, which goes live
-> only while its three release gates hold. Not yet: `sandbox-proxy` and TLS (SB4), the E2B-compatible API and keys
-> (SB5), templates, snapshots and pause (SB6-SB7), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
+> only while its three release gates hold. SB4 (section 4) publishes sandbox ports at
+> `https://<port>-<id>.<domain>`: a platform HAProxy appliance passes TCP 443 to `sandbox-proxy`, where TLS ends with
+> a wildcard certificate issued on the services cluster. Not yet: the E2B-compatible API and keys (SB5), templates,
+> snapshots and pause (SB6-SB7, so the wake endpoint has nothing to resume yet), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
 > and decisions: the sandbox plan (owner document, not in this repository).
 
 ## 0. SB0 lab spike (2026-11-07)
@@ -291,14 +293,14 @@ Other consequences:
 |---|---|---|
 | Token and pool | installer stage 10, `sandbox.enabled` | pool `proxcloud-sandbox`; token `capmox@pve!sandbox` with the grants of a tenant cluster's token (token rows only, so `capmox@pve` keeps what it inherits), then a PVE check that it sees one `iso` store, the node-local one |
 | Vnet | stage 55 | `sandbox.network.vnet` in an existing EVPN zone, subnet with SNAT and no DHCP, alias `proxcloud-sandbox` (no `st:` alias, so no project owns it) |
-| Cluster | stage 55, `templates/sandbox-cluster.yml.j2` | an ArgoCD Application `pc-sandbox` of `proxmox-kamaji-cluster` at this checkout's chart version (0.1.7), namespace `pc-sandbox`, no project label: no portal sync lists it. No CSI, no StorageClass, no NAS dataset. One node group `sandbox`, no taint (the SB1 code sets no toleration on CPU sandboxes) |
+| Cluster | stage 55, `templates/sandbox-cluster.yml.j2` | an ArgoCD Application `pc-sandbox` of `proxmox-kamaji-cluster` at this checkout's chart version (0.1.8), namespace `pc-sandbox`, no project label: no portal sync lists it. No CSI, no StorageClass, no NAS dataset. Node group `sandbox` for sandboxes; with a sandbox domain also `sandbox-system` for sandbox-proxy (§4.5) |
 | Release gate: NodeRestriction | stage 55 | the chart's `admissionControllers` include it; stage 55 reads the `KamajiControlPlane` and stops if it is missing |
 | Runtime, guardrail, identity | `deploy/sandbox-cluster/` (README has the order) | `cilium-node-config.yaml`, `node-setup.yaml` (runsc 20261102.0, systrap), `runtimeclass.yaml`, agent-sandbox v1.0.9 vendored, `network-policy.yaml` (private ranges and TCP 25 denied), `rbac.yaml` (`proxcloud-system/proxcloud`, no Secret access) |
 | Release gate: IPv4 only | `node-setup.yaml`, `check-ipv4-only.sh`, stage 55 | node-setup refuses a host with a global IPv6 address or an IPv6 default route; the check wants Cilium `enable-ipv6=false`, no IPv6 node address or pod CIDR, and node-setup Ready everywhere. Stage 55 stops before agent-sandbox and the guardrail when it fails |
 | Layer 0: isolation drops | `internal/cloud/pve/network.go`, provider `network.sandboxCidrs` (stage 60 writes it) | section 1.2 |
 
 Not in SB2a: the per-NIC VM firewall with `ipfilter` and the `unsecured` taint (SB2b), a dedicated SNAT address
-(SB2b), the `sandbox-system` node group, `sandbox-proxy` and TLS (SB4), the envd runtime image (SB5).
+(SB2b), the `sandbox-system` node group, `sandbox-proxy` and TLS (SB4, §4.5), the envd runtime image (SB5).
 
 ### 1.2 Layer 0: the sandbox network in the isolation rules
 
@@ -366,10 +368,11 @@ hash><content hash>`, which is the VM's only rule. Every rule in it ACCEPTs:
 | out | UDP and TCP 53 | `sandbox.dns` only |
 | out, in | UDP 8472 (Cilium VXLAN), TCP 4240 and ICMP (Cilium health), TCP and UDP 7946 (MetalLB), TCP 10250 | the other sandbox workers (IP set `<group>-n`) |
 | in | TCP 10250 | `sandbox.kubeletSources` (the services cluster's nodes) |
+| in | TCP 443 (`config.sandbox.proxy.port`) | the entry appliance's vnet address only, to `sandbox-proxy`'s MetalLB address (`config.sandbox.proxy`, SB4) |
 | out | anything | IP set `<group>-o`: `0.0.0.0/1` and `128.0.0.0/1` minus the private, CGNAT, link-local, multicast and reserved ranges, the management networks, every address a PVE node holds on any interface (uplinks, bonds and VLANs too), the sandbox's own SNAT address, `blockedCidrs`, the tenant pool, the sandbox subnet itself (its gateway is a PVE node) and the control plane address |
 
 Nothing else comes in: there is no rule for a tenant, for the services cluster beyond the kubelet, or for anyone on the
-internet. The sandbox entry (HAProxy appliance to `sandbox-proxy`) gets its rule with SB4.
+internet, except the entry appliance, which may reach `sandbox-proxy`'s address on 443 (SB4, §4.3).
 
 - **Why the kubelet between workers.** Kamaji starts the konnectivity server with the default proxy strategy, so
   exec and logs for a pod on one worker can leave through the agent on another. The kubelet still wants an API server
@@ -602,6 +605,7 @@ On the project cloud routes (`/api/v1/project/{id}/...`), for a project attached
 | `DELETE /cloud/{id}` | Delete the Sandbox CR (its pod goes with it); the row ends now (`DELETED` with its end) and the next read archives it |
 | `POST /cloud/{id}/action` `EXEC {cmd \| command[], stdin?, timeoutSeconds?}` | Run one command and wait: `{stdout, stderr, exitCode, truncated}` |
 | `GET_LOGS {tailLines?}` | The newest lines of its output (default 200, at most 2000) |
+| `GET_ACCESS` | How to reach its ports (SB4): `{domain, host: "{port}-<id>.<domain>", trafficAccessToken?}`, read from the live sandbox; 409 when the provider publishes no ports (`config.sandbox.domain` unset) |
 | `SET_TIMEOUT {timeoutSeconds}` | The end moves to now plus that (keepalive or shorten), within the provider's maximum |
 | `REFRESH` | The live state |
 
@@ -727,3 +731,180 @@ Bugs found and fixed:
   a disabled DROP (or project ACCEPT) counts as missing: one of the stack's DROPs disabled by hand failed the
   isolation gate (`rule 12 ... is disabled`), and the next sync put it back enabled and the gate held.
 
+
+## 4. Public entry, TLS and wake (SB4)
+
+A port inside a running sandbox is reached at `https://<port>-<sandboxId>.<domain>`, one DNS label under the sandbox
+domain, so a single wildcard name and certificate cover every sandbox:
+
+```
+client ──TCP 443──► entry appliance (HAProxy VM: public NIC + NIC on the sandbox vnet, TCP passthrough)
+                    └──► sandbox-proxy's MetalLB address (sandbox cluster, sandbox-system)
+                         TLS ends here (*.<domain>), route <port>-<id> → the ready pod's IP:<port>
+```
+
+### 4.1 sandbox-proxy
+
+`cmd/sandbox-proxy` and `internal/sandboxproxy`, ported from EE with its routing unchanged: it looks the pod up by
+`proxcloud.io/sandbox-id` (Running, Ready, not being deleted; hits and misses cached two seconds), forwards plain HTTP
+to `<podIP>:<port>` with streaming and WebSocket upgrades, refuses envd's control-plane paths (`/init`, `/freeze`, ...)
+on port 49983, and on every other port wants the sandbox's traffic token in `e2b-traffic-access-token` when the
+sandbox was created with `allowPublicTraffic: false`. EE's trust of `X-Forwarded-Host` is gone: nothing sits between
+the client and the proxy that could set it.
+
+New here (D15): the proxy terminates TLS itself. `SANDBOX_TLS_DIR` holds `tls.crt` and `tls.key` from the mounted
+Secret `sandbox-proxy-tls`; the files are read again at most once a minute on a handshake (`pkg/certfile`, shared with
+the CSI gateway), so a renewal is picked up without a restart, and a broken write keeps the last good certificate.
+Until the Secret holds a certificate the proxy waits (alive on `/healthz`, not ready on `/readyz`), so MetalLB answers
+for the address only from a node with a ready proxy (`externalTrafficPolicy: Local`). Manifest:
+`deploy/sandbox-cluster/sandbox-proxy.yaml` (two replicas on the system nodes only, §4.5; a `pods: list` ClusterRole
+and nothing else). Image:
+`deploy/sandbox-proxy.Dockerfile`, published by CI as `proxcloud-sandbox-proxy` next to the other images; the sandbox
+nodes pull it from the registry over the internet, never from the mgmt registry they cannot reach.
+
+### 4.2 The entry appliance
+
+The load balancer appliance of P8-1 with one TCP listener (`pve.SandboxEntryConfig` renders it with `RenderHAProxy`):
+443 passed through to `sandbox-proxy`'s address, so the appliance never holds the certificate. Installer stage 56
+builds the VM (`sandbox.entry`): a clone of the stock image in its own pool `proxcloud-sandbox-entry`, `net0` on the
+public bridge with the default route, `net1` on the sandbox vnet, each NIC's address pinned (`ipfilter-net0/1`), inbound
+DROP. The Proxmox provider's sync (`syncjob.reconcileSandboxWorkers` → `pve.Service.SandboxEntry`) then keeps it in
+line every cycle: firewall options, the listener as the only inbound rule (`SetVMInboundPorts`), and HAProxy's config
+through the guest agent (`PushHAProxy`, which installs HAProxy over the public NIC first and disables sshd), pushed
+only when the file's hash differs or HAProxy is not running. It touches a VM only when it carries the tag
+`proxcloud-sandbox-entry` and sits in the entry pool (`config.sandbox.proxy.entry.pool`, stage 60 writes it), so a
+recycled vmid or a tenant's VM that its owner tagged (the portal's `/pool` role reaches those) is never written to.
+
+The workers admit the appliance alone: with `config.sandbox.proxy` (`address`, `port`, `entry.address`) the layer-1
+group gets `in TCP <port> from <entry address> to <proxy address>` (§2.1), and the rule set refuses a proxy address
+outside the MetalLB range or an entry address that is a worker's, a load balancer's or outside the subnet. A provider
+without it keeps the generation it had. The workers' `-o` set excludes the whole sandbox subnet, so no worker can open
+a connection to the appliance; anti-spoofing on both sides keeps a worker from taking its address.
+
+Grants (stage 10, `docs/proxmox-permissions.md`): on the entry pool the portal holds `ProxCloudSandboxEntry`
+(`Pool.Audit VM.Audit VM.Config.Network VM.GuestAgent.Audit VM.GuestAgent.Unrestricted`), replacing the platform role
+it inherits from `/pool` (no power, disk, console or clone on a VM that faces the internet); `csi@pve` and
+`capmox@pve!capi` get `NoAccess` there.
+
+Limits, as for every P8-1 appliance: one VM, no standby (a single point of failure for every sandbox's ports), security
+updates by hand, and no client address at the proxy (TCP passthrough without the PROXY protocol). Idle connections
+stay open for an hour (P8-1's 60 s would cut a quiet WebSocket or SSE stream); sandbox-proxy closes a connection that
+sends no request headers within 10 s. Without
+`sandbox.entry.public.bridge` there is no appliance: forward TCP 443 to `sandbox.proxy.address` yourself (a site that
+publishes sandboxes over a VPN only does that, D4).
+
+### 4.3 Certificate and DNS
+
+cert-manager on the **services cluster** issues `*.<domain>` (stage 56, `templates/sandbox-edge.yml.j2`, namespace
+`pc-sandbox`), and `sandbox-proxy cert-sync` (a Deployment there) copies `tls.crt` and `tls.key` every minute to
+`sandbox-system/sandbox-proxy-tls` with a sandbox-cluster credential that may get and patch that one Secret. Only a
+complete, matching pair that is valid now and covers `*.<domain>` is copied, so an expired or wrong certificate (for
+example a stale `issuer: secret` Secret) never replaces the one the proxy serves; cert-sync logs why. The issuer, the ACME account key and the DNS update key never reach the cluster
+that runs tenant code: code that escapes a sandbox can read at most the certificate's private key on its node (§4.5).
+
+`sandbox.tls.issuer`:
+
+| Issuer | What stage 56 does |
+|---|---|
+| `acme` (default) | DNS-01 through PowerDNS with RFC2136. Stage 56 creates a TSIG key (`hmac-sha256`) on PowerDNS and lets it update the sandbox zone alone, and only from the services network (`TSIG-ALLOW-DNSUPDATE`, `ALLOW-DNSUPDATE-FROM` zone metadata), keeps it in `generated/sandbox-tsig.json` and gives it to an ACME `Issuer`. Needs `dnsupdate=yes` in `pdns.conf` (checked through the API) and the zone delegated publicly. `acme.ca_bundle` takes a private ACME server's CA |
+| `secret` | Your `kubernetes.io/tls` Secret named `sandbox.tls.secret` in `pc-sandbox` on the services cluster; cert-sync copies it whenever it changes |
+| `selfsigned` | Test sites without a public domain: a CA of its own (kept in `generated/sandbox-ca.crt`) issues the wildcard |
+
+DNS: with `sandbox.powerdns.api_url` stage 56 points `*.<domain>` at the appliance's public address (the zone must
+exist on PowerDNS). Without it, write that record yourself.
+
+`dnsupdate=yes` is server-wide, and PowerDNS's `allow-dnsupdate-from` defaults to `127.0.0.0/8,::1`: any local process
+on the PowerDNS host could then update any zone, tenant zones included, without a key. Set `allow-dnsupdate-from=`
+(empty) in `pdns.conf` alongside it; the sandbox zone's own `ALLOW-DNSUPDATE-FROM` and TSIG metadata then decide alone.
+
+The domain: every sandbox host is a sibling under `*.<domain>`, so one tenant's page can set cookies for
+`.<domain>` that reach every other tenant's sandbox. Use a registrable domain of its own (`example-sandbox.net`, not
+`sbx.example.org` under the portal's domain, whose cookies it could then also toss), and add it to the Public Suffix
+List so browsers treat each host as its own site.
+
+### 4.4 Wake and the tokens a tenant needs
+
+`POST /api/v1/internal/sandboxes/{id}/wake` is how `sandbox-proxy` asks the portal to resume a paused sandbox (E2B
+autoResume) when traffic finds no pod. It is public in `pkg/auth`; the bearer must be some sandbox provider's
+`secret.proxyWakeToken`, compared before anything about the sandbox is read. Stage 56 generates the token
+(`generated/sandbox-wake-token`, put it into the sandbox provider's `secret.proxyWakeToken`) and gives it to the proxy,
+but not the portal's address yet: nothing is paused before SB7, so stage 56 leaves `PROXCLOUD_WAKE_URL` unset and the
+proxy answers 502 "not found" for an unknown host at once, without calling the portal. SB7 sets it. With it set, the
+endpoint answers 404 for a sandbox it cannot resume, and a proxy that cannot reach the portal answers 503 with
+`Retry-After` after five seconds.
+
+`GET_ACCESS` (native action, a read) returns the sandbox's host pattern `{port}-<id>.<domain>` and its traffic token
+(and envd's token once envd runs, SB5), read from the live CR: the tokens are never on the cache row or in the
+create answer.
+
+### 4.5 What a compromised worker can reach here
+
+The proxy pods hold the wildcard key and the wake token, and a kubelet may read the Secrets of the pods bound to its
+node. Code that escapes gVisor on a node with a proxy pod could read both: impersonate every sandbox host to clients
+that reach it, and ask the portal to wake sandboxes. So the proxy never shares a node with tenant code:
+
+- Stage 55 adds the node group `sandbox-system` when a sandbox domain is set (`sandbox.system_nodes`, default 2 small
+  workers, addresses from `sandbox.network.nodes`). Its Machines carry `node-restriction.kubernetes.io/proxcloud-system`
+  (chart value `machineLabels`), which CAPI copies onto the Node from the management side; NodeRestriction keeps any
+  kubelet from setting it, so a compromised worker cannot pass itself off as a system node. Its taint
+  `proxcloud.io/sandbox-system:NoSchedule` keeps sandboxes off (they tolerate nothing but the GPU taint), and MetalLB's
+  speaker tolerates it (chart value `proxmox.metallb.speakerTolerations`) so the proxy's address is announced there.
+- The proxy requires that label (required node affinity, no preferred fallback) and tolerates that taint alone. With no
+  system node it stays Pending; it never lands on a sandbox worker.
+- The system workers sit in the sandbox pool: the sync fences them like the others (§2), and they join with the
+  unsecured taint, so the proxy starts once the portal's sync has run (after stage 60; stage 56 then says so and checks
+  the proxy on its next run).
+
+Rotating means a new certificate (`kubectl -n pc-sandbox delete secret sandbox-wildcard-tls` on the services cluster)
+and a new wake token in both places.
+
+### 4.6 Measured on the lab (2026-11-08)
+
+On the SB0 cluster, with no portal stack: stage 56 of this branch ran from the installer host against a split-mode copy
+of the lab site (the SB0 cluster's admin kubeconfig standing in for stage 55's, the services objects in a scratch
+namespace), the fence pass and the entry reconcile as a live test binary with the portal's own PVE token, two
+sandboxes through `sandbox.Service`, and every request from the workstation through a lab host forward to the
+appliance's public address. The lab has no public domain: a lab zone on PowerDNS, first `selfsigned`, then `acme`
+against Pebble (Let's Encrypt's ACME test server) checking DNS-01 against the lab PowerDNS.
+
+- Stage 56, first run: zone check, wildcard record (`*.<domain>` answered with the appliance's address), the VM (two
+  NICs, both pinned, inbound DROP), the proxy on its MetalLB address waiting for its certificate, the issuer,
+  certificate and cert-sync. A second run changed nothing but the copied manifests.
+- The fence pass moved both workers to a new generation with `in tcp 443 from <appliance> to <proxy address>` as the
+  only addition. The entry reconcile's first pass found no HAProxy and started its install (`not ready`), the second
+  pushed the config: HAProxy active, the listener as the VM's only inbound rule, sshd off.
+- Requests, TLS verified against the issuer's root only (system trust refuses the chain):
+
+  | Request | Answer |
+  |---|---|
+  | tenant A's host, A's token | 200, the page A's sandbox serves on 8000 |
+  | A's host, no token | 403 token missing |
+  | A's host, tenant B's token | 403 token invalid |
+  | B's host, A's token | 403 token invalid |
+  | B's host, B's token | 200, B's page |
+  | A's envd port (no envd before SB5) | 502 port not open |
+  | a sandbox that does not exist | 503 after 5 s: the wake call cannot reach the lab portal from the workers (wake is now off until SB7: 502 at once) |
+
+- Reload: the wildcard Secret deleted on the services cluster at 19:16:16; cert-manager reissued, cert-sync copied it at
+  19:16:46, and the proxy served the new serial by 19:17:04, with no restart. Switching the issuer from `selfsigned` to
+  `acme` reissued through Pebble (order valid, so Pebble found the TXT record that only the RFC2136 solver could have
+  written with the TSIG key; PowerDNS refused an unsigned update to the zone); both replicas served the new chain (leaf, Pebble intermediate, verified against Pebble's root)
+  within three minutes of the copy.
+- Fenced: from a worker's node namespace the appliance (443) is dropped. Back on the workers' old generation (the pass
+  with a provider config without `proxy`) the same request from the workstation times out.
+
+Not run here: stage 10's entry pool rows (the grant was refused by the session's permission check; the appliance ran
+in a scratch pool that inherits the portal's `/pool` role instead) and stage 60's; the wake endpoint against a portal
+(its tests run on Postgres: `test/integration/sandbox_test.go`); `GET_ACCESS` through a portal (same test). The proxy
+image was built on the workstation and loaded into each node's containerd; the workers cannot reach a lab registry,
+and none is configured for them.
+
+Review follow-up, same day, on the SB0 cluster: a third MachineDeployment shaped as stage 55 now renders
+`sandbox-system` (template label `node-restriction.kubernetes.io/proxcloud-system`, taints `unsecured` and
+`sandbox-system`). CAPI v1.14 put the label on the Machine and on the Node within a minute of the join; the kubelet's
+own `--node-labels` did not carry it. Three replicas with the proxy's scheduling rules (plus a toleration for
+`unsecured`, since no fence pass ran for that node) all landed on the system node, though the spread constraint
+prefers the other two workers; a gVisor pod pinned to the system node stayed Pending ("untolerated taint"). The
+manifest passed `kubectl apply --dry-run=server`. MetalLB's speaker ran on the two old workers only (SB0's MetalLB
+values predate `speakerTolerations`), which is why stage 55 now sets it. The node group and the probes were removed
+afterwards. Not repeated end to end: the full entry path with the proxy on a system node, and wake (now off).

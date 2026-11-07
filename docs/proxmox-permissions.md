@@ -9,6 +9,7 @@ ProxCloud needs no `root@pam` access on the cluster. The [installer](install.md)
 | `ProxCloudCSI` | `csi@pve!csi`, `csi@pve!gateway` | `proxmox-csi-plugin` in the services cluster; the CSI gateway of the portal API (split mode) |
 | `ProxCloudImages` | `images@pve!packer` | the image pipeline ([images/README.md](../images/README.md)) |
 | `ProxCloudSandboxGuard` | `proxcloud@pve!platform`, on pool `proxcloud-sandbox` only | the sync job's VM firewall on the sandbox workers (`sandbox.enabled`) |
+| `ProxCloudSandboxEntry` | `proxcloud@pve!platform`, on pool `proxcloud-sandbox-entry` only | the sync job keeping the sandbox entry appliance: firewall and HAProxy config through the guest agent (stage 56) |
 
 Every token is created with **privilege separation** (`--privsep 1`). A privilege-separated token's rights are the **intersection** of the user's ACLs and the token's ACLs, so each ACL below is granted to both the user and the token.
 
@@ -63,13 +64,15 @@ ACLs:
 | `/mapping/pci` | `ProxCloudPlatform` | 1 | GPU clusters only |
 | `/storage/<importStorage>` | `PVEDatastoreAdmin` | 0 | image import only: PVE wants `Datastore.Allocate` to delete any file that is not a backup, and the import store is the one place the portal needs that. Without it an imported image works, the uploaded file stays on the store, and Test connection warns. The installer adds it with a NAS. It shadows the `/storage` grant on that store, so with minted cluster tokens add `ProxCloudKubeMint` on the same path too |
 
-There is no ACL on `/vms`. VMs get their rights only through their pool, so a VM outside `pc-*`/`pc-templates` is invisible to the portal. The sandbox pool (`sandbox.enabled`) is the other exception to `/pool`: the workers run tenant code, so the portal holds only what its sync needs there.
+There is no ACL on `/vms`. VMs get their rights only through their pool, so a VM outside `pc-*`/`pc-templates` is invisible to the portal. The sandbox pool (`sandbox.enabled`) and the sandbox entry pool are the other exceptions to `/pool`: the workers run tenant code and the entry appliance faces the internet, so the portal holds only what its sync needs there.
 
 | Path | Role | Propagate | Note |
 |---|---|---|---|
 | `/pool/proxcloud-sandbox` | `ProxCloudSandboxGuard` (`Pool.Audit VM.Audit VM.Config.Network`) | 1 | user and token rows. It replaces, on that pool and its VMs, the `ProxCloudPlatform` and `ProxCloudKubeMint` the token inherits from `/pool`: the sync reads the workers and sets their NIC flag, firewall options, rules and IP filters, and can do nothing else to them (no guest agent, console, disk, power, snapshot or ACL rights). The cluster security group and IP sets it references are written with `Sys.Modify` on `/`. Stage 10 reads the token's effective rights there and stops unless they are exactly these three ([managed-sandbox.md](managed-sandbox.md#24-permissions)) |
 | `/pool/proxcloud-sandbox` | `NoAccess` | 1 | user `csi@pve`: its tokens hold `ProxCloudCSI` on `/pool` for tenant clusters, and nothing of theirs is in this pool. A user row: the CSI tokens are privilege-separated, so capping the user caps them |
 | `/pool/proxcloud-sandbox` | `NoAccess` | 1 | token `capmox@pve!capi`: the services cluster's CAPMOX holds `ProxCloudCAPI` on `/pool` and would inherit it on the workers, but the sandbox cluster runs through `capmox@pve!sandbox`, so it never manages this pool. A token row, not a user row: `capmox@pve` owns the sandbox token, which the user `NoAccess` would cap too |
+| `/pool/proxcloud-sandbox-entry` | `ProxCloudSandboxEntry` (`Pool.Audit VM.Audit VM.Config.Network VM.GuestAgent.Audit VM.GuestAgent.Unrestricted`) | 1 | user and token rows, with an entry appliance (`sandbox.entry.public.bridge`). It replaces the platform role from `/pool` on the VM that faces the internet: the sync sets its firewall and pushes HAProxy's config through the agent, and cannot power, resize, console into or clone it |
+| `/pool/proxcloud-sandbox-entry` | `NoAccess` | 1 | user `csi@pve` and token `capmox@pve!capi`, as on the sandbox pool |
 
 Lab, PVE 9.2: before, the platform token held all 35 privileges on a worker (`/vms/<id>`) and `capmox@pve!capi` the 19 of `ProxCloudCAPI`; after, the three above for the platform token and nothing for the CAPI and CSI tokens, on the pool and on each worker VM (stage 10 checks both), with project pools and their VMs, the sandbox vnet, the stores and `/` unchanged.
 

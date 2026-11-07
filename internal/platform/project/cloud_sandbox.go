@@ -282,10 +282,12 @@ func refreshSandboxRow(ctx context.Context, ss *sandbox.Service, projectID strin
 //	EXEC {command:[...] | cmd:"…", stdin?, timeoutSeconds?}: run one command, wait for it,
 //	                              → {result: {stdout, stderr, exitCode, truncated}}
 //	GET_LOGS {tailLines?}:        the newest lines of its output → {result: {logs}}
+//	GET_ACCESS {}:                how to reach its ports through sandbox-proxy → {result: {domain, host,
+//	                              trafficAccessToken?, envdAccessToken?}}, read from the live CR, never cached
 //
 // Like every other cloud action, the payload is wrapped in {result: …}. EXEC and SET_TIMEOUT add usage, so they pass
 // the suspension and release gates; cloudAction's allow-list has already refused them for a DISABLED project, while
-// GET_LOGS (a read) and the delete stay open.
+// GET_LOGS and GET_ACCESS (reads) and the delete stay open.
 func (h *Handler) sandboxAction(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if !es.IsSandbox() {
 		return false
@@ -304,6 +306,9 @@ func (h *Handler) sandboxAction(w http.ResponseWriter, r *http.Request, proj *Pr
 		return true
 	case "GET_LOGS":
 		h.sandboxLogs(w, r, proj, es, cr, data)
+		return true
+	case "GET_ACCESS":
+		h.sandboxAccess(w, r, proj, es, cr)
 		return true
 	default:
 		h.fail(w, httpx.BadRequest("unknown sandbox action "+action))
@@ -412,6 +417,33 @@ func (h *Handler) sandboxLogs(w http.ResponseWriter, r *http.Request, proj *Proj
 		return
 	}
 	httpx.OK(w, map[string]any{"result": map[string]any{"logs": logs}})
+}
+
+// sandboxAccess answers GET_ACCESS. A port's host is <port>-<id>.<domain>; a sandbox created with allowPublicTraffic
+// false wants trafficAccessToken in the e2b-traffic-access-token header on every port but envd's.
+func (h *Handler) sandboxAccess(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource) {
+	ss, ok := h.sandboxService(w, es)
+	if !ok {
+		return
+	}
+	domain := ss.Config().Domain
+	if domain == "" {
+		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "This location does not publish sandbox ports"))
+		return
+	}
+	a, err := ss.AccessFor(r.Context(), proj.ID, cr.ExternalID)
+	if err != nil {
+		h.sandboxFail(w, err)
+		return
+	}
+	res := map[string]any{"domain": domain, "host": "{port}-" + cr.ExternalID + "." + domain}
+	if a.TrafficAccessToken != "" {
+		res["trafficAccessToken"] = a.TrafficAccessToken
+	}
+	if a.EnvdAccessToken != "" {
+		res["envdAccessToken"] = a.EnvdAccessToken
+	}
+	httpx.OK(w, map[string]any{"result": res})
 }
 
 // DeleteProjectSandboxes deletes every live sandbox of the project on each of its sandbox providers (D9: a billing

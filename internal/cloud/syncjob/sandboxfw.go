@@ -37,7 +37,14 @@ func (j *Job) reconcileSandboxWorkers(ctx context.Context, ps *pve.Service, es *
 	if err != nil {
 		return fmt.Errorf("sandbox: kubeconfig: %w", err)
 	}
-	return j.fenceSandbox(ctx, ps, es, cfg, kc)
+	err = j.fenceSandbox(ctx, ps, es, cfg, kc)
+	// The entry appliance passes traffic only where the workers' rule admits it, so it follows the fence either way.
+	if cfg.Proxy.EntryVMID > 0 {
+		if eerr := ps.SandboxEntry(ctx, cfg.Proxy.EntryVMID, cfg.Proxy.EntryPool, cfg.Pool, cfg.Proxy.Address, cfg.Proxy.Port); eerr != nil {
+			err = errors.Join(err, fmt.Errorf("sandbox entry: %w", eerr))
+		}
+	}
+	return err
 }
 
 func (j *Job) fenceSandbox(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, cfg externalservice.PVESandbox, kc SandboxNodes) error {
@@ -104,6 +111,7 @@ func sandboxFirewall(ctx context.Context, ps *pve.Service, netCfg externalservic
 	return pve.SandboxFirewall{
 		Pool: cfg.Pool, Subnet: netCfg.SandboxCIDRs[0], Nodes: cfg.Nodes, LoadBalancers: cfg.LoadBalancers,
 		ControlPlane: host, APIPort: port, DNS: cfg.DNS, KubeletFrom: cfg.KubeletSources, Deny: deny,
+		ProxyAddress: cfg.Proxy.Address, ProxyPort: cfg.Proxy.Port, EntryFrom: cfg.Proxy.EntryAddress,
 	}, nil
 }
 

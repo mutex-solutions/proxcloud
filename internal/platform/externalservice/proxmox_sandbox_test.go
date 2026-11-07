@@ -25,4 +25,10 @@ func TestPVESandboxConfig(t *testing.T) {
 	if cfg, _ := es.PVESandboxConfig(); cfg.UnsecuredMinAge != 20*time.Minute {
 		t.Fatalf("default min age: %v (CABPK's bootstrap token TTL plus a margin)", cfg.UnsecuredMinAge)
 	}
+	es.Config["sandbox"].(map[string]any)["proxy"] = map[string]any{"address": "192.0.2.200",
+		"entry": map[string]any{"vmid": float64(9110), "pool": "proxcloud-sandbox-entry", "address": "192.0.2.5"}}
+	if p := func() PVESandboxProxy { c, _ := es.PVESandboxConfig(); return c.Proxy }(); p != (PVESandboxProxy{Address: "192.0.2.200",
+		Port: 443, EntryVMID: 9110, EntryPool: "proxcloud-sandbox-entry", EntryAddress: "192.0.2.5"}) {
+		t.Fatalf("proxy: %+v", p)
+	}
 }

@@ -20,7 +20,7 @@ storage-rebench: deps ; $(PLAYBOOK) playbooks/00-preflight.yml -e pc_rebench=tru
 templates: deps       ; $(PLAYBOOK) playbooks/00-preflight.yml playbooks/20-templates.yml -e pc_templates_force=true $(ARGS)
 # Bump installer/playbooks/group_vars/all/versions.yml first (or -e), then:
 # (stage 10 too: a release's grants change with it, e.g. the services token's ISO stores.)
-upgrade: deps         ; $(PLAYBOOK) playbooks/00-preflight.yml playbooks/10-pve-identity.yml playbooks/30-mgmt-cluster.yml playbooks/35-local-images.yml playbooks/40-mgmt-platform.yml playbooks/60-register.yml $(ARGS)
+upgrade: deps         ; $(PLAYBOOK) playbooks/00-preflight.yml playbooks/10-pve-identity.yml playbooks/30-mgmt-cluster.yml playbooks/35-local-images.yml playbooks/40-mgmt-platform.yml playbooks/56-sandbox-edge.yml playbooks/60-register.yml $(ARGS)
 # What stage 10 would grant, align and take away, writing nothing: the items skipped with "does not support check
 # mode" are the changes, and the last task prints which ISO stores the services token sees today.
 identity-check: deps  ; $(PLAYBOOK) playbooks/10-pve-identity.yml --check -v $(ARGS)

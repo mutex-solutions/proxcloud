@@ -7,6 +7,10 @@ from the same pin, which is why no cloud controller manager is needed for topolo
 Machine and bootstrap templates are immutable in CAPI: their names carry a hash of their spec, so a changed
 flavor or image rolls the nodes instead of silently applying to new machines only.
 
+machineLabels go on the Machines, and CAPI copies those under node-restriction.kubernetes.io/ (also node-role.kubernetes.io/,
+node.cluster.x-k8s.io/) onto the Node from the management side. A kubelet cannot set or change those under NodeRestriction,
+unlike nodeLabels (its own --node-labels), so a workload may trust them to pick a node group.
+
 skipCloudInitStatus: CAPMOX reads cloud-init's status with agent exec, which PVE 9 only allows with
 VM.GuestAgent.Unrestricted, root in every guest of the pool. The Node joining is the real signal anyway.
 */ -}}
@@ -86,6 +90,9 @@ spec:
         cluster.x-k8s.io/cluster-name: {{ $root.Release.Name }}
         proxcloud.io/machine-deployment: {{ $base }}
         proxcloud.io/node-group: {{ $ng.name }}
+        {{- range $k, $v := $ng.machineLabels }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
     spec:
       clusterName: {{ $root.Release.Name }}
       version: {{ printf "v%s" ($root.Values.kubernetesVersion | trimPrefix "v") | quote }}

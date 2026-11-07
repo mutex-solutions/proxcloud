@@ -421,6 +421,8 @@ func TestSandboxCrossTenant(t *testing.T) {
 	for _, c := range []struct{ name, method, path, body string }{
 		{"exec through own project", http.MethodPost, "/project/pb/cloud/" + sb.ID + "/action", `{"action":"EXEC","data":{"cmd":"id"}}`},
 		{"logs through own project", http.MethodPost, "/project/pb/cloud/" + sb.ID + "/action", `{"action":"GET_LOGS"}`},
+		{"access through own project", http.MethodPost, "/project/pb/cloud/" + sb.ID + "/action", `{"action":"GET_ACCESS"}`},
+		{"access on the other project", http.MethodPost, "/project/pa/cloud/" + sb.ID + "/action", `{"action":"GET_ACCESS"}`},
 		{"delete through own project", http.MethodDelete, "/project/pb/cloud/" + sb.ID, ""},
 		{"exec on the other project", http.MethodPost, "/project/pa/cloud/" + sb.ID + "/action", `{"action":"EXEC","data":{"cmd":"id"}}`},
 		{"delete on the other project", http.MethodDelete, "/project/pa/cloud/" + sb.ID, ""},
@@ -435,6 +437,76 @@ func TestSandboxCrossTenant(t *testing.T) {
 	}
 	if f.cluster.count() != 1 || f.row(sb.ID) == nil || f.row(sb.ID).Data["status"] == sandbox.StatusDeleted {
 		t.Fatal("the sandbox was touched")
+	}
+}
+
+// GET_ACCESS hands the tenant its sandbox's host and traffic token (read from the CR, kept off the row), and the wake
+// endpoint answers only a sandbox provider's proxyWakeToken.
+func TestSandboxAccessAndWake(t *testing.T) {
+	f := newSbxFixture(t, gatesHold)
+	if code, body := f.do(sbxA, http.MethodPost, "/project/pa/cloud/"+f.create().ID+"/action", `{"action":"GET_ACCESS"}`); code != http.StatusConflict {
+		t.Fatalf("a provider without a domain publishes no ports: %d %s", code, body)
+	}
+	if _, err := f.db.C("externalService").SetByID(context.Background(), "sbx", pgdoc.M{
+		"config": pgdoc.M{"provider": "sandbox", "region": "az1", "services": pgdoc.M{"sandbox": pgdoc.M{"az1": true}},
+			"sandbox": pgdoc.M{"domain": "sbx.example.org",
+				"templates": pgdoc.M{"python": pgdoc.M{"image": "python:3.12-slim", "cpu": 1, "memoryGiB": 2}}}},
+		"secret": pgdoc.M{"proxyWakeToken": "wake-secret"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	code, body := f.do(sbxA, http.MethodPost, "/project/pa/cloud", `{"type":"SANDBOX","data":{"template":"python","allowPublicTraffic":false}}`)
+	if code != http.StatusOK {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var created struct {
+		Data cloud.CloudResource `json:"data"`
+	}
+	_ = json.Unmarshal([]byte(body), &created)
+	sb := f.row(created.Data.ID)
+	a, err := sandbox.NewWithAPI(f.cluster, sandbox.Config{}, "sbx").AccessFor(context.Background(), "pa", sb.ExternalID)
+	if err != nil || a.TrafficAccessToken == "" {
+		t.Fatalf("no traffic token on the CR: %v", err)
+	}
+	if strings.Contains(body, a.TrafficAccessToken) {
+		t.Fatalf("the create answer carries the token: %s", body)
+	}
+	if raw, _ := json.Marshal(sb.Data); strings.Contains(string(raw), a.TrafficAccessToken) {
+		t.Fatal("the token is cached on the row")
+	}
+	code, body = f.do(sbxA, http.MethodPost, "/project/pa/cloud/"+sb.ID+"/action", `{"action":"GET_ACCESS"}`)
+	var acc struct {
+		Data struct {
+			Result map[string]string `json:"result"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal([]byte(body), &acc)
+	if code != http.StatusOK || acc.Data.Result["host"] != "{port}-"+sb.ExternalID+".sbx.example.org" ||
+		acc.Data.Result["trafficAccessToken"] != a.TrafficAccessToken {
+		t.Fatalf("access: %d %s", code, body)
+	}
+
+	wake := func(auth, id string) int {
+		req := httptest.NewRequest(http.MethodPost, "/internal/sandboxes/"+id+"/wake", strings.NewReader(`{"port":8000}`))
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		w := httptest.NewRecorder()
+		f.router.ServeHTTP(w, req)
+		return w.Code
+	}
+	for _, c := range []struct {
+		auth, id string
+		want     int
+	}{
+		{"", sb.ExternalID, http.StatusUnauthorized},
+		{"Bearer wrong", sb.ExternalID, http.StatusUnauthorized},
+		{"wake-secret", sb.ExternalID, http.StatusUnauthorized}, // not a bearer
+		{"Bearer wake-secret", "not-an-id", http.StatusNotFound},
+		{"Bearer wake-secret", sb.ExternalID, http.StatusNotFound}, // nothing is paused before SB7
+	} {
+		if got := wake(c.auth, c.id); got != c.want {
+			t.Errorf("wake %q %s: %d, want %d", c.auth, c.id, got, c.want)
+		}
 	}
 }
 

@@ -334,7 +334,7 @@
       delay: 10
       until: pc_sbx_adm.rc == 0 and 'NodeRestriction' in pc_sbx_adm.stdout
     - name: Wait for its admin kubeconfig
-      ansible.builtin.command: "{{ kc }} -n pc-sandbox get secret pc-sandbox-kamaji-cp-admin-kubeconfig -o jsonpath={.data.admin\\.conf}"
+      ansible.builtin.command: "{{ kc }} -n pc-sandbox get secret pc-sandbox-kamaji-cp-admin-kubeconfig -o 'jsonpath={.data.admin\\.conf}'"
       register: pc_sbx_kc
       changed_when: false
       no_log: true

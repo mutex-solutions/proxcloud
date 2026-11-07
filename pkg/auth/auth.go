@@ -95,6 +95,7 @@ var publicPrefix = []string{
 	"/api/v1/console/", // VNC console WebSocket proxy — the console token is the auth
 	"/api/v1/callbacks/",
 	"/api/v1/admin/onboarding/",
+	"/api/v1/internal/sandboxes/", // sandbox-proxy's wake call — a sandbox provider's proxyWakeToken is the auth
 }
 
 // adminJobPrefix drives operator billing/collect/sync jobs — it is NOT public (anon must not be

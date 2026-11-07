@@ -1,0 +1,324 @@
+# Stage 56 (sandbox.enabled, after 55): the public entry of the sandbox cluster (docs/managed-sandbox.md §4).
+#   https://<port>-<id>.<domain> -> *.<domain> on PowerDNS -> entry appliance (HAProxy VM, TCP 443 passed through)
+#   -> sandbox-proxy's MetalLB address -> TLS ends in sandbox-proxy -> the sandbox pod.
+# The wildcard certificate comes from cert-manager on the services cluster (DNS-01 through PowerDNS, a TSIG key that
+# may update the sandbox zone alone) or from a Secret you provide, and cert-sync copies it to the sandbox cluster: the
+# issuer and the key that changes DNS never reach the cluster that runs tenant code. The Proxmox provider's sync keeps
+# the appliance's listener and HAProxy config and the workers' rule that admits it (stage 60 gives it config.sandbox.proxy).
+- name: Check the sandbox entry settings
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    # A sandbox site from before SB4 has no domain: its sandboxes keep the native API, and `make upgrade` goes on.
+    - name: Say why sandbox ports are not published
+      when: pc_sandbox_on and not pc_sandbox_edge_on
+      ansible.builtin.debug: {msg: "SKIPPED: set sandbox.domain (and sandbox.proxy, sandbox.tls, sandbox.entry) to publish sandbox ports"}
+    - name: Skip unless the sandbox is on with a domain
+      ansible.builtin.meta: end_play
+      when: not pc_sandbox_edge_on
+    - name: Check the settings
+      vars:
+        problem: "{{ pc.sandbox | pc_sandbox_edge_problem }}"
+      ansible.builtin.assert: {that: problem == '', fail_msg: "{{ problem }}", quiet: true}
+
+- name: Publish the wildcard name and the update key on PowerDNS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri:
+      headers: {X-API-Key: "{{ pc_vault.pdns_api_key | default('') }}"}
+      return_content: true
+      timeout: 30
+  vars:
+    pdns: "{{ pc.sandbox.powerdns.api_url | regex_replace('/+$', '') }}/api/v1/servers/{{ pc.sandbox.powerdns.server }}"
+    zone: "{{ pc.sandbox.domain | regex_replace('\\.$', '') }}."
+    tsig_name: "proxcloud-sandbox-{{ pc.sandbox.domain | regex_replace('[^A-Za-z0-9]+', '-') }}"
+    public_ip: "{{ pc.sandbox.entry.public.address | split('/') | first }}"
+  tasks:
+    - name: Skip unless the sandbox is on and its zone is on PowerDNS
+      ansible.builtin.meta: end_play
+      when: not pc_sandbox_edge_on or not pc.sandbox.powerdns.api_url
+    - name: Read the zone
+      ansible.builtin.uri: {url: "{{ pdns }}/zones/{{ zone }}", status_code: [200, 404, 422]}
+      register: pc_sbx_zone
+    - name: Check the zone exists
+      ansible.builtin.assert:
+        that: pc_sbx_zone.status == 200
+        fail_msg: "Zone {{ zone }} is not on PowerDNS: create it there (and delegate it from its parent), then run again."
+        quiet: true
+    - name: Point the wildcard at the entry
+      when: pc.sandbox.entry.public.bridge
+      ansible.builtin.uri:
+        url: "{{ pdns }}/zones/{{ zone }}"
+        method: PATCH
+        body_format: json
+        body:
+          rrsets: [{name: "*.{{ zone }}", type: A, ttl: 300, changetype: REPLACE, records: [{content: "{{ public_ip }}", disabled: false}]}]
+        status_code: 204
+      changed_when: false
+    - name: Make the key cert-manager answers DNS-01 with
+      when: pc.sandbox.tls.issuer == 'acme'
+      block:
+        - name: Read the server settings
+          ansible.builtin.uri: {url: "{{ pdns }}/config"}
+          register: pc_pdns_cfg
+        - name: Check DNS updates are on
+          vars:
+            dnsupdate: "{{ pc_pdns_cfg.json | selectattr('name', 'eq', 'dnsupdate') | map(attribute='value') | first | default('no') }}"
+          ansible.builtin.assert:
+            that: dnsupdate == 'yes'
+            fail_msg: "PowerDNS refuses RFC2136 updates: set dnsupdate=yes in pdns.conf and restart it."
+            quiet: true
+        - name: Read the update key
+          ansible.builtin.uri: {url: "{{ pdns }}/tsigkeys/{{ tsig_name }}.", status_code: [200, 404, 422]}
+          register: pc_sbx_tsig_read
+          no_log: true
+        - name: Create the update key
+          when: pc_sbx_tsig_read.status != 200
+          ansible.builtin.uri:
+            url: "{{ pdns }}/tsigkeys"
+            method: POST
+            body_format: json
+            body: {name: "{{ tsig_name }}", algorithm: hmac-sha256}
+            status_code: 201
+          register: pc_sbx_tsig_new
+          no_log: true
+        - name: Keep the key in the site directory
+          ansible.builtin.copy:
+            dest: "{{ pc_gen }}/sandbox-tsig.json"
+            content: "{{ {'name': tsig_name, 'key': (pc_sbx_tsig_new.json if pc_sbx_tsig_new is not skipped else pc_sbx_tsig_read.json).key} | to_json }}"
+            mode: "0600"
+          no_log: true
+        # The key updates this zone alone, and only from the services cluster's nodes (cert-manager runs there).
+        - name: Let the key update this zone
+          ansible.builtin.uri:
+            url: "{{ pdns }}/zones/{{ zone }}/metadata/{{ item.kind }}"
+            method: PUT
+            body_format: json
+            body: {kind: "{{ item.kind }}", metadata: "{{ item.meta }}"}
+          loop:
+            - {kind: TSIG-ALLOW-DNSUPDATE, meta: ["{{ tsig_name }}"]}
+            - {kind: ALLOW-DNSUPDATE-FROM, meta: ["{{ pc.services.network.gateway }}/{{ pc.services.network.prefix }}"]}
+          changed_when: false
+
+- name: Build the entry appliance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  vars:
+    e: "{{ pc.sandbox.entry }}"
+    node: "{{ e.node or pc_nodes[0] }}"
+    vm_path: "{{ pc_api }}/nodes/{{ node }}/qemu/{{ e.vmid }}"
+    prefix: "{{ pc.sandbox.network.subnet | split('/') | last }}"
+  tasks:
+    - name: Skip unless the sandbox is on with an appliance
+      ansible.builtin.meta: end_play
+      when: not pc_sandbox_edge_on or not pc.sandbox.entry.public.bridge
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Find the newest template on the node
+      ansible.builtin.uri: {url: "{{ pc_api }}/cluster/resources?type=vm"}
+      register: pc_vms
+    - name: Pick the template
+      vars:
+        copies: >-
+          {{ pc_vms.json.data | selectattr('template', 'defined') | selectattr('template', 'eq', 1)
+             | selectattr('node', 'eq', node) | selectattr('tags', 'defined')
+             | selectattr('tags', 'search', 'pc-img-' ~ e.os ~ '(;|$)') | selectattr('tags', 'search', 'pc-v-')
+             | sort(attribute='tags') | list }}
+      ansible.builtin.set_fact: {pc_entry_source: "{{ (copies | last).vmid }}"}
+    # net0 is the public side and carries the default route; net1 sits on the sandbox vnet. Both are filtered by the VM
+    # firewall: the Proxmox provider's sync opens the listener and nothing else.
+    - name: Create the VM
+      ansible.builtin.include_tasks: tasks/clone-vm.yml
+      vars:
+        vm:
+          vmid: "{{ e.vmid }}"
+          name: proxcloud-sandbox-entry
+          node: "{{ node }}"
+          source_vmid: "{{ pc_entry_source }}"
+          storage: "{{ pc_default_storage }}"
+          cores: "{{ e.cores }}"
+          memory: "{{ e.memory }}"
+          disk: "{{ e.disk }}"
+          bridge: "{{ e.public.bridge }}"
+          vlan: "{{ e.public.vlan }}"
+          user: debian
+          ip: "{{ e.public.address }}"
+          gateway: "{{ e.public.gateway }}"
+          nameserver: "{{ pc.sandbox.network.dns | first }}"
+          ssh_key: "{{ pc_ssh_public_key }}"
+          tags: proxcloud;proxcloud-sandbox-entry
+          pool: "{{ e.pool }}"
+          extra:
+            net0: "virtio,bridge={{ e.public.bridge }}{{ (',tag=' ~ e.public.vlan) if e.public.vlan | int else '' }},firewall=1"
+            net1: "virtio,bridge={{ pc.sandbox.network.vnet }},firewall=1,mtu={{ pc.sandbox.network.mtu }}"
+            ipconfig1: "ip={{ e.address }}/{{ prefix }}"
+    - name: Read its anti-spoof sets
+      ansible.builtin.uri: {url: "{{ vm_path }}/firewall/ipset"}
+      register: pc_entry_sets
+    - name: Create its anti-spoof sets
+      when: item not in (pc_entry_sets.json.data | map(attribute='name') | list)
+      ansible.builtin.uri:
+        url: "{{ vm_path }}/firewall/ipset"
+        method: POST
+        body_format: form-urlencoded
+        body: {name: "{{ item }}", comment: proxcloud:sandbox-entry}
+      loop: [ipfilter-net0, ipfilter-net1]
+      changed_when: true
+    - name: Pin each NIC to its address
+      ansible.builtin.uri:
+        url: "{{ vm_path }}/firewall/ipset/{{ item.set }}"
+        method: POST
+        body_format: form-urlencoded
+        body: {cidr: "{{ item.cidr }}"}
+        status_code: [200, 400, 500]  # 400/500: the entry is there already
+      loop:
+        - {set: ipfilter-net0, cidr: "{{ e.public.address | split('/') | first }}"}
+        - {set: ipfilter-net1, cidr: "{{ e.address }}"}
+      changed_when: false
+    - name: Switch its firewall on
+      ansible.builtin.uri:
+        url: "{{ vm_path }}/firewall/options"
+        method: PUT
+        body_format: form-urlencoded
+        body: {enable: 1, ipfilter: 1, macfilter: 1, dhcp: 0, ndp: 0, radv: 0, policy_in: DROP, policy_out: ACCEPT}
+      changed_when: false
+
+- name: Run sandbox-proxy and its certificate
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  vars:
+    kc: k3s kubectl --kubeconfig /root/services.kubeconfig
+    pc_sbx_kubeconfig: /root/sandbox.kubeconfig  # stage 55 writes it
+    pc_sbx_edge_ns: pc-sandbox
+    pc_sbx_tls_secret: "{{ pc.sandbox.tls.secret if pc.sandbox.tls.issuer == 'secret' else 'sandbox-wildcard-tls' }}"
+    pc_sbx_proxy_image: "{{ pc.sandbox.proxy.image or (pc.images.registry ~ '/proxcloud-sandbox-proxy:' ~ pc_ver.proxcloud) }}"
+    pc_sbx_tsig: "{{ (lookup('ansible.builtin.file', pc_gen ~ '/sandbox-tsig.json') | from_json) if pc.sandbox.tls.issuer == 'acme' else {} }}"
+    pc_sbx_wake: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-wake-token ' ~ pc_alnum) }}"
+  tasks:
+    - name: Skip unless the sandbox is on
+      ansible.builtin.meta: end_play
+      when: not pc_sandbox_edge_on
+    - name: Look for the sandbox cluster's kubeconfig
+      ansible.builtin.stat: {path: "{{ pc_sbx_kubeconfig }}"}
+      register: pc_sbx_kc
+    - name: Skip until stage 55 built the cluster
+      ansible.builtin.meta: end_play
+      when: not pc_sbx_kc.stat.exists
+    - name: Copy the cluster manifests
+      ansible.builtin.copy:
+        src: "{{ pc_repo_root }}/deploy/sandbox-cluster/"
+        dest: /root/sandbox-bundle/
+        mode: preserve
+    # The wake token is the sandbox provider's secret.proxyWakeToken (generated/sandbox-wake-token in the site directory).
+    # PROXCLOUD_WAKE_URL stays unset until pause and resume exist (SB7): until then the portal can resume nothing, and
+    # with it set every request for an unknown host would make an unauthenticated call to the portal.
+    - name: Apply sandbox-proxy
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ns="-n sandbox-system"
+        kubectl $ns create configmap sandbox-proxy-config --from-literal=SANDBOX_DOMAIN="$DOMAIN" \
+          --dry-run=client -o yaml | kubectl apply -f -
+        kubectl $ns create secret generic sandbox-proxy-wake --from-literal=PROXCLOUD_WAKE_TOKEN="$WAKE" \
+          --dry-run=client -o yaml | kubectl apply -f -
+        kubectl $ns get secret sandbox-proxy-tls >/dev/null 2>&1 || kubectl $ns create secret generic sandbox-proxy-tls
+        kubectl apply -f sandbox-proxy.yaml
+        kubectl $ns set image deploy/sandbox-proxy proxy="$IMAGE"
+        kubectl $ns annotate svc sandbox-proxy metallb.io/loadBalancerIPs="$ADDRESS" --overwrite
+      args: {executable: /bin/bash, chdir: /root/sandbox-bundle}
+      environment:
+        KUBECONFIG: "{{ pc_sbx_kubeconfig }}"
+        DOMAIN: "{{ pc.sandbox.domain }}"
+        WAKE: "{{ pc_sbx_wake }}"
+        IMAGE: "{{ pc_sbx_proxy_image }}"
+        ADDRESS: "{{ pc.sandbox.proxy.address }}"
+      changed_when: false
+      no_log: true
+    - name: Build cert-sync's kubeconfig
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for i in $(seq 30); do
+          t=$(kubectl -n sandbox-system get secret sandbox-cert-sync-token -o jsonpath='{.data.token}' | base64 -d)
+          [ -n "$t" ] && break; sleep 2
+        done
+        [ -n "$t" ]
+        kubectl config view --raw --minify -o json | T="$t" python3 -c '
+        import json, os, sys
+        c = json.load(sys.stdin)["clusters"][0]
+        print(json.dumps({"apiVersion": "v1", "kind": "Config", "current-context": "sync",
+          "clusters": [{"name": "sandbox", "cluster": c["cluster"]}],
+          "users": [{"name": "sync", "user": {"token": os.environ["T"]}}],
+          "contexts": [{"name": "sync", "context": {"cluster": "sandbox", "user": "sync"}}]}))'
+      args: {executable: /bin/bash}
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      register: pc_sbx_sync_kc
+      changed_when: false
+      no_log: true
+    - name: Give cert-sync its kubeconfig
+      ansible.builtin.command:
+        cmd: "{{ kc }} apply -f -"
+        stdin: "{{ {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+                    'metadata': {'name': 'sandbox-cert-sync-kubeconfig', 'namespace': pc_sbx_edge_ns},
+                    'stringData': {'kubeconfig': pc_sbx_sync_kc.stdout}} | to_json }}"
+      changed_when: false
+      no_log: true
+    - name: Apply the issuer, the certificate and cert-sync
+      ansible.builtin.command:
+        cmd: "{{ kc }} apply -f -"
+        stdin: "{{ lookup('ansible.builtin.template', 'templates/sandbox-edge.yml.j2') }}"
+      changed_when: false
+      no_log: "{{ pc.sandbox.tls.issuer == 'acme' }}"  # the TSIG key
+    - name: Wait for the certificate
+      when: pc.sandbox.tls.issuer != 'secret'
+      ansible.builtin.command: "{{ kc }} -n {{ pc_sbx_edge_ns }} wait certificate/sandbox-wildcard --for=condition=Ready --timeout=15m"
+      changed_when: false
+    - name: Keep the test CA in the site directory
+      when: pc.sandbox.tls.issuer == 'selfsigned'
+      block:
+        - name: Read it
+          ansible.builtin.command: "{{ kc }} -n {{ pc_sbx_edge_ns }} get secret sandbox-ca -o 'jsonpath={.data.ca\\.crt}'"
+          register: pc_sbx_ca
+          failed_when: pc_sbx_ca.rc != 0 or pc_sbx_ca.stdout == ''
+          changed_when: false
+        - name: Write it
+          ansible.builtin.copy: {dest: "{{ pc_gen }}/sandbox-ca.crt", content: "{{ pc_sbx_ca.stdout | b64decode }}", mode: "0644"}
+          delegate_to: localhost
+          become: false
+    # The proxy runs on the system nodes only, and they take pods once the portal's sync has fenced them (after stage
+    # 60): on a first install the proxy is still Pending here, and the next run of this stage checks it.
+    - name: Count the system nodes open to pods
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl get nodes -l node-restriction.kubernetes.io/proxcloud-system -o json | python3 -c '
+        import json, sys
+        print(sum(1 for n in json.load(sys.stdin)["items"]
+                  if not any(t["key"] == "proxcloud.io/unsecured" for t in n["spec"].get("taints", []))))'
+      args: {executable: /bin/bash}
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      register: pc_sbx_sys
+      changed_when: false
+    - name: Say why sandbox-proxy is not checked yet
+      when: pc_sbx_sys.stdout | int == 0
+      ansible.builtin.debug:
+        msg: No system node is fenced yet; sandbox-proxy starts after the portal's sync (stage 60). Run stage 56 again then.
+    # Ready once cert-sync has copied the certificate and the proxy has read it.
+    - name: Wait for sandbox-proxy
+      when: pc_sbx_sys.stdout | int > 0
+      ansible.builtin.command: kubectl -n sandbox-system rollout status deploy/sandbox-proxy --timeout=10m
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      changed_when: false
+    - name: Check it holds its address
+      when: pc_sbx_sys.stdout | int > 0
+      ansible.builtin.command: kubectl -n sandbox-system get svc sandbox-proxy -o jsonpath={.status.loadBalancer.ingress[0].ip}
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      register: pc_sbx_lb
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: pc_sbx_lb.stdout == pc.sandbox.proxy.address

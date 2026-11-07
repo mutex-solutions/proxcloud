@@ -81,6 +81,9 @@ proxmox:
   metallb:
     # -- LoadBalancer addresses inside the tenant cluster, carved from the same subnet.
     addresses: ["192.0.2.216-192.0.2.231"]
+    # -- Taints MetalLB's speaker tolerates on top of its defaults: a node group whose taint keeps other pods off but
+    # that runs a LoadBalancer's endpoints (externalTrafficPolicy Local) needs its speaker there. Empty for tenants.
+    speakerTolerations: []
 
 nodeGroups:
   - name: workers
@@ -92,7 +95,8 @@ nodeGroups:
     machineRootVolume: {diskSize: 30}
     machineTags: [proxcloud]
     machineCount: 1
-    # nodeLabels: {key: value}
+    # nodeLabels: {key: value}            # the kubelet sets these itself: a node can claim any of them
+    # machineLabels: {node-restriction.kubernetes.io/key: value}  # CAPI sets these on the Node; the kubelet cannot
     # taints: [{key: k, value: v, effect: NoSchedule}]
 
 # -- Chart repos and versions of what CAAPH installs in the tenant cluster. Operator territory.
