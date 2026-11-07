@@ -264,4 +264,30 @@ export type SandboxLimits = {
 // A sandbox API key as listed: the key itself is shown once, at create.
 export type SandboxApiKey = { id: string; name: string; hint: string; createdAt: string; lastUsedAt?: string }
 
+// One build of a project's custom sandbox template (built with the E2B SDK or CLI).
+export type SandboxTemplateBuild = {
+  buildID: string
+  status: string
+  reason?: string
+  tags: string[]
+  from?: string
+  startCmd?: string
+  readyCmd?: string
+  createdAt?: string
+  finishedAt?: string
+}
+
+// A project's custom sandbox template (the E2B API's records), as the console lists them.
+export type ProjectSandboxTemplate = {
+  id: string
+  name: string
+  cpu: number
+  memoryGiB: number
+  status: string
+  ready: boolean
+  builds: SandboxTemplateBuild[]
+  createdAt?: string
+  updatedAt?: string
+}
+
 export type SandboxExecResult = { stdout: string; stderr: string; exitCode: number; truncated?: boolean }

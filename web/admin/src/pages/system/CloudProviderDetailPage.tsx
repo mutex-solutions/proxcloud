@@ -52,6 +52,7 @@ import {
   SandboxProviderForm,
   SandboxReleaseGates,
   sandboxConfigBlocks,
+  sandboxSecret,
   sandboxFormFromService,
   sandboxFormValid,
   type SandboxFormState,
@@ -217,7 +218,7 @@ function SandboxConnectionTab({ id, provider }: TabProps) {
         name: form.name.trim(),
         status: form.status,
         config: sandboxConfigBlocks(form),
-        ...(form.kubeconfig.trim() ? { secret: { kubeconfig: form.kubeconfig.trim() } } : {}),
+        ...(Object.keys(sandboxSecret(form)).length ? { secret: sandboxSecret(form) } : {}),
       },
     })
   }

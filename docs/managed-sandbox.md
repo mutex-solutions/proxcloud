@@ -18,8 +18,9 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 > project-scoped sandbox API keys, envd in every sandbox and the built-in templates `base` and `code-interpreter-v1`;
 > what of E2B does not work is in [e2b-compat.md](e2b-compat.md). SB6a (section 6) adds the sandbox registry: Zot on
 > the services cluster with its blobs in the object store, one pull account per project, the built-in images copied in
-> by digest and pre-pulled on every node. Not yet: custom template builds (SB6b), snapshots and pause (SB7, so the wake
-> endpoint has nothing to resume yet), MCP gateway (SB8), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
+> by digest and pre-pulled on every node. SB6b (section 7) adds custom templates built with the E2B SDKs (a build pod
+> per build, a build account per project, presigned contexts) and the pruning of unreferenced images. Not yet: snapshots
+> and pause (SB7, so the wake endpoint has nothing to resume yet), MCP gateway (SB8), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
 > and decisions: the sandbox plan (owner document, not in this repository).
 
 ## 0. SB0 lab spike (2026-11-07)
@@ -962,7 +963,7 @@ tag, and leaves the init container out on a site without a sandbox domain).
 
 ### 5.4 Built-in templates
 
-Until custom template builds (SB6b) the provider offers only the templates of its `config.sandbox.templates`. The E2B
+Besides a project's own templates (section 7), the provider offers the templates of its `config.sandbox.templates`. The E2B
 SDKs ask for `base` (`Sandbox.create()`) and `code-interpreter-v1` (`e2b_code_interpreter.Sandbox.create()`).
 `deploy/templates/build.sh` builds both with the other built-in templates (`PUSH=1 REGISTRY=ghcr.io/mutex-solutions
 TAG=<tag>`, prints each reference with its digest); the `sandbox-templates` workflow runs it and pins the digests in
@@ -1060,12 +1061,11 @@ sandbox node containerd ──TLS (registry CA), project account──┘   prep
 |---|---|---|---|
 | `pull-<project>` | `library/**`, `t/<project>/**` | nothing | Secret `sandbox-template-pull` in `sb-<project>` |
 | `pull-nodes` | `library/**` | nothing | Secret `sandbox-registry-nodes` in `sandbox-system` (prepull, sandbox-proxy) |
-| `push` | `t/**` | `t/**` (template builds, SB6b) | services cluster only |
+| `push` (SB6a; replaced by `build-<project>` and `gc` in SB6b, section 7.2) | `t/**` | `t/**` | services cluster only |
 | `admin` | everything | everything (the installer's copies into `library/`) | services cluster and `generated/` |
 
-No anonymous access. Zot applies the most specific matching pattern, so each `t/<project>/**` repeats the push
-user's rights. One push account for every project is what SB6b's build pod starts from; an account per build is
-SB6b's.
+No anonymous access. Zot applies the most specific matching pattern, so each `t/<project>/**` repeats the rights of
+the accounts that span projects. SB6b replaced the one push account with a build account per project (section 7.2).
 
 A sandbox pod names its project's Secret for every image on the registry's host (`Config.pullsFromRegistry`), the
 built-in `library/` images too: the kubelet (1.35, `KubeletEnsureSecretPulledImages`) checks a pod's credentials even
@@ -1158,3 +1158,120 @@ test, the decision a live read). Everything the drill made was removed afterward
 The admission policy on the sync's identity came after the drill: `kubectl apply --dry-run=server` of
 `registry.yaml` passed on the SB0 cluster (v1.35.10), so the schema and the CEL compile, but applying it there was
 refused by the session's permission check and its denials are not measured (the manifest test checks its shape).
+
+## 7. Custom templates (SB6b)
+
+Tenants build their own templates with the stock E2B SDKs and CLI (`Template()` with `from_image`, `from_dockerfile`,
+`from_template`, `copy`, `run_cmd`, … then `Template.build`). A template belongs to one project: listing, starting from
+it and deleting it are scoped to the key's project, and its images live under that project's repository in the sandbox
+registry. What of E2B's build API works: [e2b-compat.md](e2b-compat.md#templates).
+
+```
+SDK ──POST /e2b/v3/templates──► portal (template + build ids, table sandbox_templates)
+ ├─GET  …/files/{hash} → upload URL ─PUT …/upload?token= (streamed) ──► build bucket  <project>/<template>/<hash>.tar
+ └─POST /e2b/v2/templates/{id}/builds/{build}  (steps, fromImage | fromTemplate | fromImageRegistry)
+        portal: steps → Dockerfile, presigned GET per context, build pod in sbx-build on the sandbox cluster
+          fetch  (curl, presigned GETs from the bucket)            no credential
+          base   (crane: base image → kaniko's cache, pinned)      the project's build account, or the caller's
+          kaniko (the caller's RUN steps, --no-push, offline)      no credential
+          push   (crane push → <registry>/t/<project>/<template>:<build>)  the project's build account
+ GET …/builds/{build}/status (polled by the SDK; job sandboxBuildSync records builds nobody polls) → ready, digest
+Sandbox.create("<name>[:tag]") → <registry>/t/<project>/<template>@<digest>, pulled with the project's pull account
+```
+
+### 7.1 Where things run
+
+- **The build bucket** (`config.sandbox.buildStorage {endpoint, podEndpoint, bucket, region}`, keys in
+  `secret.buildStorageAccessKey/SecretKey`; installer `sandbox.registry.builds_bucket`, default `pc-sandbox-builds`, on
+  the same object store as the registry's blobs, its own service user). The portal streams a context into it: up to
+  16 MiB as one PUT, a larger one as a multipart upload in 16 MiB parts, both with `UNSIGNED-PAYLOAD` (the portal reads
+  the body once as it arrives and does not hash it first); at most 2 GiB per context. A failed multipart upload is
+  aborted. A deleted template's contexts are deleted with it.
+- **Build pods** run in `sbx-build` on the sandbox workers (`installer/playbooks/templates/sandbox-builds.yml.j2`,
+  applied by stage 55 (registry)), under gVisor like a sandbox, on the same nodes as tenant sandboxes: the system node
+  keeps the wake token and the wildcard key away from customer code (section 4). They fetch the contexts with presigned
+  GETs signed for `podEndpoint` (the address the nodes reach; default `endpoint`), valid for the build deadline plus 10
+  minutes, because the workers reach the bucket but not the portal. At most 2 builds per project at once, 30 minutes
+  each; a build is billed like a sandbox of the template's size while it runs (row `build-<id>`, template
+  `build:<template>`).
+- **The template record** (`sandbox_templates`): name, size, tags, the last 10 builds with their logs once the pod is
+  gone (kept 10 minutes after it finished), the image digest of each ready build.
+
+### 7.2 Accounts
+
+Section 6.2's table, as SB6b leaves it:
+
+| Account | Reads | Writes | Where it lives |
+|---|---|---|---|
+| `pull-<project>` | `library/**`, `t/<project>/**` | nothing | `sandbox-template-pull` in `sb-<project>` |
+| `build-<project>` | `library/**`, `t/<project>/**` | `t/<project>/**` | `registry-build-<project>` in `sbx-build` |
+| `pull-nodes` | `library/**` | nothing | `sandbox-registry-nodes` in `sandbox-system` |
+| `gc` | `t/**` | deletes in `t/**` | the sandbox provider's `secret.registryGcUser/Password` (portal only) |
+| `admin` | everything | everything | services cluster and `generated/` |
+
+The shared `push` account of SB6a is gone: a build pushes with its own project's account, which cannot write
+`library/**` or another project's repositories, so a build pod taken over through its base image or a gVisor escape on
+its node cannot overwrite another tenant's template. The account sync writes `registry-build-<project>` into
+`sbx-build` without reading Secrets there (users' own registry credentials for `fromImageRegistry` live there, in
+Secrets owned by their build pod): a `patch`-only Role in that namespace, and the admission policy of
+`deploy/sandbox-cluster/registry.yaml` allows that identity only `registry-build-<id>` there. A project's first build
+waits up to one sync pass (30 s) for its account: the build makes the project's namespace, from which the sync derives
+the accounts. A removed project's build Secret stays in `sbx-build` with a password Zot no longer accepts.
+
+Crane in the base and push containers trusts the registry's CA (`ConfigMap registry-ca` in `sbx-build`,
+`SSL_CERT_DIR`), which stage 55 writes next to the namespace.
+
+### 7.3 What a build starts from
+
+- `fromTemplate`: a built-in template (its image on the registry, pulled with the build account) or one of the
+  project's own ready builds (by name or `name:tag`); the child keeps the parent's user, workdir and start/ready commands
+  unless its own steps or commands set them, as in E2B.
+- `fromImage`: a public image. E2B's own base image (what `Template()` sends without `from_image`) maps to the
+  location's `base` template. An image on the sandbox registry by name is refused: use `fromTemplate`.
+- `fromImageRegistry`: a private image with the caller's credentials, `type` `registry` (username, password) or `gcp`
+  (service account JSON). The credentials go into a Secret owned by the build pod and are mounted only into `base`.
+  **`type: aws` is not offered** (400): E2B exchanges the caller's AWS keys for an ECR token server side, which needs
+  the AWS SDK's ECR client; ProxCloud runs on Proxmox only and does not carry that dependency. An ECR image builds with
+  `type: registry`, username `AWS` and the output of `aws ecr get-login-password` (valid 12 h) as the password.
+- The build pod reaches the internet (base images, package installs) minus private and link-local ranges, port 25
+  closed, plus exactly the registry's address on 443 and the bucket's endpoint. Layer 1 opens the same two to the
+  workers: the Proxmox provider's `config.sandbox.buildStorage {address, port}` (stage 60) adds one rule
+  `out tcp <address> <port>`, the way `config.sandbox.registry` does. The endpoint must be an IPv4 address. On Full the
+  bucket is RGW, which runs on the PVE nodes: that rule opens one port of one node address to the workers.
+
+### 7.4 Pruning
+
+Job `sandboxRegistryPrune` (hourly at :17), when a sandbox provider sets `config.sandbox.registryPrune` (`on`, or
+`dry-run` to log; installer `sandbox.registry.prune`, default `on`) and holds the `gc` account. It reads, through the
+OCI distribution API of the registry (`/v2/_catalog`, `tags/list`, manifests, the image config's `created`), every
+tagged image under `t/`, and deletes (`DELETE /v2/<repo>/manifests/<digest>`) those that are older than a day,
+in a project this portal knows, and referenced by nothing: no Sandbox CR or build pod on any sandbox provider's cluster,
+no template record (ready image, base, a build in progress), no built-in template. It reads the clusters, the records
+and the clusters again, waits two minutes, reads everything again, and deletes at most 200 per run; any read error
+stops it. Zot's own garbage collection frees the blobs an hour later. An image whose age cannot be read (an index, a
+missing `created`) is never deleted. Providers naming two different registries stop it (each would see the other's
+images as unreferenced). `POST :8081/debug/run-registry-prune?grace=10m` runs it with a lower age floor.
+
+### 7.5 Installer
+
+Stage 55 (registry) creates the build bucket and its user next to the registry's, applies the build namespace with its
+policy, the registry CA and both Roles, and records the bucket (endpoint, address, port) and the CA for stage 60. Stage
+60 gives the Proxmox provider `buildStorage` and, when it first registers the sandbox provider, `buildStorage`,
+`registryCa`, `registryPrune` and the `gc` and bucket keys. An existing sandbox provider keeps its settings: set
+"Custom template builds", "Prune unused template images", the gc account and the registry CA in the console.
+
+### 7.6 Measured on the lab (2026-11-08)
+
+- **Build bucket, both stores** (`go test -tags s3live -run TestBuildStoreLive`, the portal's own code, buckets with
+  their own service users made by the stage's bootstrap script): RustFS and RGW both took a 1 MiB context as one
+  `UNSIGNED-PAYLOAD` PUT and a 33.6 MB one as a three-part multipart upload with `UNSIGNED-PAYLOAD` parts (ETag `…-3`),
+  each stored at full length; presigned GETs returned both from RustFS. From RGW the 1 MiB one came back through the lab
+  host's forward, the 33.6 MB one broke off there after about 18 MB twice; the same presigned URL, signed for RGW's own
+  address as a build pod gets it, fetched from the lab LAN (where the workers are) returned all 33,566,777 bytes with the
+  right digest in 0.09 s. Template deletion's prefix delete left no object behind.
+- **Not run:** the build pod, the registry with the build accounts, the E2B SDK building a template (from a Dockerfile
+  and with `fromImageRegistry`) and starting a sandbox from it, the cross-project checks and the prune against Zot.
+  Running stage 55 (registry) against the lab was refused by the session's permission check, and so was applying the
+  same objects by hand; nothing of the registry or the build namespace was left on either cluster. These paths have unit
+  tests only (build pod shape and accounts, the account sync's rules and Secrets, the OCI client against a fake
+  registry, the S3 store against a fake S3, the fence rule, the OpenAPI parity).
