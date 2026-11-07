@@ -428,6 +428,12 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Data == nil {
 		req.Data = map[string]any{}
 	}
+	if req.Type == cloud.TypeBucket {
+		if herr := bucketNameErr(strAny(req.Data["bucketName"])); herr != nil {
+			h.fail(w, herr)
+			return
+		}
+	}
 	uid := u.ID
 	if uid == "" {
 		uid = u.Sub

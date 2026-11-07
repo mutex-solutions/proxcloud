@@ -333,13 +333,17 @@ const opTimeout = 5 * time.Minute
 // reads "paused", not "running": a project's VMs are paused while it is DISABLED, and its members can still stop and delete them.
 func (r *ClusterResource) PoweredOn() bool { return r.Status == "running" || r.Status == "paused" }
 
+// ErrNotInProject is ResolveVM refusing a vmid that names no VM of the project's pool. Tenant input reaches it (an attach
+// target, a load balancer member), so callers answer it as a missing server, not as a failing backend.
+var ErrNotInProject = errors.New("pve: server not in this project")
+
 // ResolveVM finds a pool VM by vmid string, verifying pool membership — the
 // per-op ownership re-check (platform-is-the-PDP): a cached row names the vmid,
 // but the pool is re-verified against the live cluster before any mutation.
 func (s *Service) ResolveVM(ctx context.Context, projectID, externalID string) (*ClusterResource, error) {
 	vmid, err := strconv.Atoi(externalID)
 	if err != nil {
-		return nil, fmt.Errorf("pve: bad vmid %q", externalID)
+		return nil, fmt.Errorf("%w: bad vmid %q", ErrNotInProject, externalID)
 	}
 	rows, err := s.C.ClusterResources(ctx, "vm")
 	if err != nil {
@@ -349,7 +353,7 @@ func (s *Service) ResolveVM(ctx context.Context, projectID, externalID string) (
 	for i := range rows {
 		if rows[i].Type == "qemu" && rows[i].VMID == vmid {
 			if rows[i].Pool != pool {
-				return nil, fmt.Errorf("pve: vm %d is not in project pool %s", vmid, pool)
+				return nil, fmt.Errorf("%w: vm %d is not in project pool %s", ErrNotInProject, vmid, pool)
 			}
 			// cluster/resources lags a just-finished task by seconds: pool and node come
 			// from it, power state and config from the node itself (when it answers).
