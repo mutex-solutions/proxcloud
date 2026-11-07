@@ -121,6 +121,28 @@ func TestBadProviderDoesNotBlockTheOthers(t *testing.T) {
 		if _, ok := q.ProvisionFailures["bad"]; !ok {
 			t.Fatalf("failure not stored: %+v", q)
 		}
+		// Inside the retry window nothing is tried, and the project still does not work.
+		if err := h.EnableAndBootstrap(ctx, q); err == nil {
+			t.Fatal("want an error inside the window too")
+		}
+	})
+
+	t.Run("a hung provider shows on its row", func(t *testing.T) {
+		stop := make(chan struct{})
+		hung := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-stop }))
+		defer hung.Close()
+		defer close(stop)
+		_, _ = db.C("externalService").DeleteMany(ctx, pgdoc.M{})
+		mustInsert(t, db, "externalService", objectRow("hung", externalservice.StatusPublic, hung.URL))
+		mustInsert(t, db, "project", pgdoc.M{"_id": "p3", "name": "p", "status": project.StatusEnabled, "services": []any{}})
+		q, _ := repo.FindByID(ctx, "p3")
+		if err := h.EnableAndBootstrap(ctx, q); err == nil {
+			t.Fatal("want an error")
+		}
+		row, err := esSvc.Get(ctx, "hung")
+		if err != nil || row.ProvisionError == nil {
+			t.Fatalf("the attempt that ran out must still be recorded on the provider: %+v %v", row, err)
+		}
 	})
 
 	t.Run("a failure on a provider that has gone is dropped", func(t *testing.T) {

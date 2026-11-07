@@ -22,6 +22,18 @@ and rules: [README.md](README.md#maintenance-rule).
   error, so a `PRIVATE` or `rustfs` typo blocked every new project. A row can also go bad after it is stored, so the check
   alone would not be enough. Without the record on the project, a project that had any provider would never get the failed
   one, since a re-entry skips provisioning.
+
+**Then, on the same PR, what a recheck found**
+
+- A failed attempt is recorded on the provider under its own short context. The attempt's had often just expired, so a hung
+  store, the likeliest failure, never reached the provider's page.
+- A project on no provider gets an error on every open, not only the first. Inside the retry window it looked fine and was not.
+- The admin API's project answer carries `provision_failures`, because a partial provision answers 200.
+- Stage 60 checks a `rustfs` store from the API and shows the reason, as it does for Ceph. The task that registers it is
+  `no_log`, so a refused row used to abort the install with the reason hidden.
+
+**Diagrams updated:** none; no container or relationship changed.
+
 ## 2026-11-07: One table holds a project's status changes; a member cannot lift a suspension
 
 **What changed**

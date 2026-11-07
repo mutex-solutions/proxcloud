@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -134,5 +135,19 @@ func TestMapProjectProvisionedServices(t *testing.T) {
 	}
 	if b, _ := json.Marshal(got); string(b) != `[{"service_id":"svc-1","provider":"PROXMOX","region":"r1","pool":"pc-p1"}]` {
 		t.Errorf("provisioned_services JSON = %s", b)
+	}
+}
+
+// A partial provision answers 200, so what failed has to be in the answer.
+func TestProvisionFailuresOnTheWire(t *testing.T) {
+	at := time.Date(2026, 11, 7, 1, 2, 3, 0, time.UTC)
+	got := provisionFailures(&project.Project{ProvisionFailures: map[string]project.ProvisionFailure{
+		"b": {Message: "down", At: at}, "a": {Message: "refused", At: at},
+	}})
+	if len(got) != 2 || got[0].ServiceID != "a" || got[0].Message != "refused" || got[1].ServiceID != "b" || !got[1].At.Equal(at) {
+		t.Fatalf("%+v", got)
+	}
+	if provisionFailures(&project.Project{}) != nil {
+		t.Fatal("none must stay out of the answer")
 	}
 }

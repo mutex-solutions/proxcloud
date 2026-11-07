@@ -977,8 +977,8 @@ store is down, turning a service off included.
 A row can still go bad after it is stored, so bootstrap does not depend on the check. Each provider gets its own attempt,
 bounded to 45 seconds. A failed one leaves the others provisioned, and it is recorded twice: in `provisionFailures` on the
 project, retried when the project is next opened and no more than once in 5 minutes, and in `provisionError` on the
-provider's row, which the provider's page shows. A project with no provider at all still gets an error on opening. An
-operator can also attach the provider by hand.
+provider's row, which the provider's page shows. A project on no provider at all gets an error on every open until one attaches, also inside
+the 5 minutes when nothing is tried. An operator can also attach the provider by hand.
 
 Accessors: `IsCephS3`, `S3Endpoint`, `AdminAPIURL`, `S3WebsiteEndpoint`,
 `CephRegion`, `UIDPrefix`, `RGWUIDFor(projectID)`, `DefaultQuotaGiB`, and

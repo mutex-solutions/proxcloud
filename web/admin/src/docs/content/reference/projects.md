@@ -91,6 +91,8 @@ Errors:
 
 Provisions an existing project onto the platform cloud. It bootstraps the project onto the Proxmox provider (project pool, default security group, default quota) and sets the project `ENABLED`, ending an operator's disable. Returns the refreshed project, including its new `provisioned_services` entry. A `DISABLED` project that is already provisioned stays `DISABLED`: enable it from the console, which also resumes its VMs.
 
+One provider failing does not fail the call: the answer is 200 when the project got onto another provider, with what failed under `provision_failures` (`service_id`, `message`, `at`), retried when the project is next opened. It is 400 when the project is on no provider.
+
 No request body.
 
 Response `200`: `{ "data": { ...project } }`.
