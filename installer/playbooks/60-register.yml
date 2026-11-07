@@ -475,32 +475,22 @@
   gather_facts: false
   tasks:
     # Tenant proxmox-csi controllers on the tenant side reached PVE through svc/pve-api; through the CSI gateway nothing
-    # does. A cluster whose resource-set config still holds a token has not been moved yet (docs/managed-k8s.md,
-    # "Moving a cluster onto the CSI gateway"), so the forward stays until none does.
+    # does. A cluster whose resource-set config still holds a token, or whose Application has StorageClasses and no
+    # gateway, has not been moved yet (docs/managed-k8s.md, "Moving a cluster onto the CSI gateway"), so the forward
+    # stays until none is left.
     - name: Remove the forward once no cluster uses it
       when: pc.mode == 'split'
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG=/root/services.kubeconfig
-        if ! kubectl -n proxcloud-system get svc pve-api >/dev/null 2>&1; then echo absent; exit 0; fi
-        left=$(kubectl get secret -A -o json | python3 -c '
-        import base64, json, sys
-        for s in json.load(sys.stdin)["items"]:
-            m = s["metadata"]
-            if m["name"].endswith("-csi-config") and b"token_secret" in base64.b64decode((s.get("data") or {}).get("csi.yaml", "")):
-                print(m["namespace"] + "/" + m["name"])')
-        if [ -n "$left" ]; then echo "kept, still used by:"; echo "$left"; exit 0; fi
-        kubectl -n proxcloud-system delete svc/pve-api endpointslice/pve-api --ignore-not-found
-        echo removed
-      args: {executable: /bin/bash}
+      ansible.builtin.script: files/pve-forward.py
+      environment: {KUBECONFIG: /root/services.kubeconfig}
+      args: {executable: python3}
       register: pc_forward
-      changed_when: pc_forward.stdout_lines | last == 'removed'
+      changed_when: (pc_forward.stdout | trim) == 'removed'
     - name: Report clusters that still use the forward
       when: pc.mode == 'split' and pc_forward.stdout is search('kept')
       ansible.builtin.debug:
         msg: >-
-          svc/pve-api is kept: {{ pc_forward.stdout_lines[1:] | join(', ') }} still hold a proxmox-csi token. Move each
-          cluster onto the CSI gateway (POST /api/v1/admin/service/<k8s provider>/k8s-clusters/<id>/csi-gateway), then
+          svc/pve-api is kept: {{ pc_forward.stdout_lines[1:] | join(', ') }} show a cluster whose proxmox-csi controller
+          still runs on its own token. Move each cluster onto the CSI gateway (POST /api/v1/admin/service/<k8s provider>/k8s-clusters/<id>/csi-gateway), then
           run make upgrade again.
 
 - name: Say how to log in

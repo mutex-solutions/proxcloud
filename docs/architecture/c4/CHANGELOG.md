@@ -18,8 +18,10 @@ and rules: [README.md](README.md#maintenance-rule).
   save, says so when the stored config has them, and no longer has the "PVE API for workers" field.
 - Installer: the `pve-api` Service and EndpointSlice are no longer created (stage 50), and `services.pve_node_ips`,
   `services.network.pve_proxy_ip` and `services.kamaji.csi_shared_stores` are removed (preflight names them when a site
-  still sets them). Stage 60 deletes the forward on the services cluster when no `<id>-csi-config` there still holds a
-  token, and otherwise names the clusters to move first; stage 60 stops sending the two keys.
+  still sets them). Stage 60 (`files/pve-forward.py`) deletes the forward on the services cluster when no
+  `<id>-csi-config` there still holds a token and no managed cluster Application has StorageClasses without
+  `proxmox.csi.gateway`, and otherwise names the clusters to move first; stage 60 stops sending the two keys.
+- The "Changing a setting later" recipe in `docs/managed-k8s.md` drops the two keys from the `cluster` block it re-sends.
 - The PR 3 migration action is unchanged, for sites with clusters made before the gateway.
 
 **Why**
@@ -31,7 +33,11 @@ and rules: [README.md](README.md#maintenance-rule).
   a 400 on write says so where the config is changed, and refusing only what the request sends keeps old rows editable.
 - The forward existed only for tenant workers' proxmox-csi. Deleting it in stage 60, the stage `make upgrade` runs, is
   what reaches existing sites; checking the clusters' resource-set configs first keeps an upgrade from cutting off a
-  cluster that has not been moved yet.
+  cluster that has not been moved yet. The migration rewrites that config before it patches the Application, so the
+  Application is checked too: a failed patch leaves the tenant-side controller on its old token, and removing the
+  forward then would break its attach and delete until the migration is re-run.
+- Every installer site's stored `cluster` block still holds the two keys, so the documented re-send recipe would now get
+  the 400.
 
 **Diagrams updated:** `c3-components.md` (Managed K8s create row). C1/C2 had no element or edge for the forward.
 

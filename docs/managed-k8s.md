@@ -70,7 +70,7 @@ form above, or for the keys it has no field for (`rwxGiB`) the API. An update re
 
 ```sh
 # AUTH='Authorization: Bearer <operator token>', API=<api url>/api/v1, ID=<provider id>
-curl -s -H "$AUTH" "$API/admin/service/$ID" | jq '{config: {cluster: (.data.config.cluster + {rwxGiB: 100})}}' \
+curl -s -H "$AUTH" "$API/admin/service/$ID" | jq '{config: {cluster: (.data.config.cluster | del(.csiSharedStores, .pveCsiUrl)) + {rwxGiB: 100}}}' \
   | curl -s -X PUT -H "$AUTH" -H 'Content-Type: application/json' -d @- "$API/admin/service/$ID"
 ```
 
@@ -191,7 +191,8 @@ tenant reaches the PVE API: proxmox-csi's controller runs on the services cluste
 
 Earlier releases gave tenant workers a `pve-api` Service on the services subnet that forwarded to the PVE nodes
 (`config.cluster.pveCsiUrl`), for a proxmox-csi controller inside the tenant. Stage 60 (`make upgrade` runs it)
-deletes it once no cluster's `<id>-csi-config` on the services cluster still holds a token, and otherwise names the
+deletes it once no cluster's `<id>-csi-config` on the services cluster still holds a token and no cluster Application
+has StorageClasses without `proxmox.csi.gateway` (a migration whose Application patch failed), and otherwise names the
 clusters to move first ("Moving a cluster onto the CSI gateway" below). By hand:
 `kubectl -n proxcloud-system delete svc/pve-api endpointslice/pve-api` on the services cluster. The services cluster's own
 proxmox-csi calls the PVE API directly and never used it.
