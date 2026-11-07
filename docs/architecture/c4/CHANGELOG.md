@@ -22,6 +22,26 @@ and rules: [README.md](README.md#maintenance-rule).
 - A blocked bill still counts for dunning and auto-suspension. Leaving it out of `DueBills` would cover the due-date type
   only (the balance type reads the balance), and a customer whose card needs an action nobody completes would never be
   suspended. A re-check that settles the charge resumes the profile, as any collect does.
+## 2026-11-07: Leftover holders stop billing; a late lock release frees nothing
+
+**What changed**
+
+- A VM with no name, no tags, no disk and a config holding only what PVE writes for an empty create is no server: the sync
+  neither lists nor bills it. `Service.RemoveBlankVMs` removes it on each full sync, under the holder lock, once it is past 15
+  minutes old. A VM that matches on its row but not its config is listed as ever; one whose config cannot be read keeps its row.
+- `ShedLock.Unlock` writes only if the row still carries the caller's `lockedBy` and `lockedAt`.
+- `RemoveBlankVMs` bounds its pass, as the sync goes through projects one at a time and a hung destroy would hold them all.
+  `dropLostCreate` uses the same `blankConfig` test, so a nameless VM holding a NIC or a description stays.
+
+**Why**
+
+- A holder VM is created empty and configured once it is in the pool. The cleanup ran only in the request, so PVE staying away,
+  a restart or a failed destroy left a VM billed and shown as a server. The check reads the config, not only the row, because a
+  row with no name can be a customer's VM with a data disk. The grace outlives the holder lock's 10 minute ceiling.
+- A holder past its lock's ceiling released whatever row was there, freeing the next owner's lock. A later owner's lock now
+  survives this. Two holders can still overlap once the first runs past the ceiling: this fixes the release, not the ceiling.
+
+**Diagrams updated:** none.
 ## 2026-11-07: One bad provider no longer blocks a project; every object-store row is checked
 
 **What changed**

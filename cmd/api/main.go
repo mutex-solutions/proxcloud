@@ -258,14 +258,15 @@ func run() error {
 	})
 	// Proxmox VE — enables proxmox provisioning (project pool) + the VM write surface.
 	holderLocks := lock.New(pg)
-	projectH.SetProxmox(func(es *externalservice.ExternalService) (*pve.Service, error) {
+	pveWithHolderLock := func(es *externalservice.ExternalService) (*pve.Service, error) {
 		s, err := pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
 		if err != nil {
 			return nil, err
 		}
 		s.HolderLock = holderLocks.Wait
 		return s, nil
-	})
+	}
+	projectH.SetProxmox(pveWithHolderLock)
 	// Proxmox flavor catalog (pgdoc `flavor`) — the admin-curated flavors PVE servers
 	// are created from (Proxmox itself has no flavor concept).
 	pveFlavorRepo := pveflavor.New(pg)
@@ -492,6 +493,7 @@ func run() error {
 		WithPublicIPs(publicIPRepo.ForProject, publicIPRepo.ReleaseNIC).
 		WithKamajiFactory(kamajiFactory).
 		WithAudit(auditSvc).
+		WithProxmoxFactory(pveWithHolderLock).
 		WithSDNLock(lock.New(pg)).
 		WithShareAccess(projectH.ReconcileShareAccess).
 		WithStaleSeeds(projectH.DropStaleSeeds)
