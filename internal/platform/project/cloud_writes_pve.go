@@ -648,6 +648,12 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		if err != nil {
 			return err
 		}
+		// A backup goes with its server (pve/backup.go). If one cannot, the server stays and can be retried.
+		if store := es.PVEBackupStorage(); store != "" {
+			if err := ps.DeleteServerBackups(ctx, proj.ID, cr.ExternalID, store); err != nil {
+				return fmt.Errorf("delete the server's backups: %w", err)
+			}
+		}
 		// Volumes outlive the server unless the caller says otherwise. If moving one fails the server stays,
 		// and its data with it.
 		if !deleteVolumes {
@@ -795,6 +801,9 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 		return true
 	}
 	if h.pveSnapshotAction(w, r, u, proj, es, cr, action, data) {
+		return true
+	}
+	if h.pveBackupAction(w, r, u, proj, es, cr, action, data) {
 		return true
 	}
 	switch action {
@@ -984,6 +993,7 @@ func (h *Handler) pveRefreshServerRow(ctx context.Context, ps *pve.Service, proj
 	}
 	cr.Data = pve.ServerData(*vm, ps.ServerAddresses(ctx, *vm), nil)
 	ps.StampProtection(ctx, *vm, cr.Data)
+	ps.StampSnapshots(ctx, *vm, cr.Data)
 	if saved, err := h.cloud.Insert(ctx, cr); err == nil {
 		*cr = *saved
 	}

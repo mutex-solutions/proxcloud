@@ -118,6 +118,7 @@ attribute schema (`BillingResourceType`):
 | `volume` | `VolumeProvider` (`volume.go`) | `size`, `bootable`, `type`, `status`, `availability_zone` | status `error`/`deleting`/`creating`/`error_deleting` (a legacy set: Proxmox volumes report only `in-use`/`available`) |
 | `floating_ip` | `FloatingIPProvider` (`floatingip.go`) | `existence` (typically a flat per-IP charge), `status`, `floating_network_id`. Rows derive from the public-IP allocations (`pvePublicIp`), one per allocation, billed from the moment of allocation | — |
 | `image` | `ImageProvider` (`image.go`) | `size_gb` (a project template's disk, rounded up to whole GiB), `status`. Catalog templates are the operator's and never bill | — |
+| `server_snapshot` | `ServerProvider` | `size_gb` (the server's provisioned disks, not the blocks the snapshot pins: Proxmox reports no per-snapshot usage). One line per snapshot, billed from the moment it was taken, read at each full sync and after a portal action on the server; replication and backup snapshots do not count | — |
 
 Every resource additionally gets `region` and `service_id` stamped in (so plan
 filters on those resolve) and `createdAt` (drives mid-month proration) — see
@@ -525,7 +526,25 @@ comments, else no-op. The admin approve/reject endpoints
 every 20 min) re-drives `PENDING` transactions in the window `(now−24h, now−20min)`
 through the same idempotent `Process` paths the callbacks use — so a deposit whose
 callback never landed, or a collect a pod died mid-processing, eventually resolves.
-An already-`PAID` bill cancels a late duplicate collect (never double-settle).
+A stuck charge on an already-`PAID` bill never settles it again: if the gateway says it
+succeeded it becomes spendable credit, otherwise it is `CANCELLED`.
+
+A failed re-check says nothing about the payment. Only the gateway answering 404 (no such
+intent) closes the transaction as `FAILED`. Any other error (network, 5xx, rate limit,
+rejected credentials, a removed integration) leaves it `PENDING` with the reason in
+`gatewayMessage` or `errorMessage`, and the next pass asks again. The 24 hour window is the bound.
+Past it the scanner stops asking and logs an error on the way out, and the row stays `PENDING`,
+because the money may have moved. A late gateway callback or the operator's
+`GET /admin/account-credit-transactions/{id}/sync` can still settle a deposit. A charge past the
+window has no such route yet and needs an operator to look at it at the gateway.
+
+### Bill writers and the credit lock
+
+Everything that reads a bill's unpaid amount and writes the bill holds
+`billing.Repo.WithProfileLock`: pay with credits, issuing a bill, a recorded manual payment, a
+card charge settling. Gateway calls stay outside it. A charge succeeding on a bill that was
+paid some other way meanwhile becomes spendable credit, and one the bill already holds changes
+nothing.
 
 ---
 
@@ -564,7 +583,17 @@ When that deposit settles (card callback, or an operator approving the bank tran
 has passed restarts at the current month. If the contract no longer wants the money (cancelled
 meanwhile, another amount) the deposit becomes spendable credit. A paid upfront contract cannot be
 cancelled or extended by the customer; one awaiting payment can be cancelled. An operator
-creating a contract in the admin console sets it `ACTIVE` directly and answers for the payment.
+creating a contract in the admin console sets it `ACTIVE` directly and answers for the payment
+(`paymentRecordedBy`, optional `paymentReference`), and
+`POST /admin/savings-contracts/{id}/record-payment {reference}` does the same for a
+`PENDING_PAYMENT` contract paid outside the portal.
+
+An upfront contract with neither a paying deposit nor an operator on record never discounts,
+whatever its status (`SavingsContract.UpfrontUnpaid`). Contracts from before payments were
+enforced are in that state as `ACTIVE`: `HoldUnpaidUpfrontContracts` moves them to
+`PENDING_PAYMENT`, priced, at every API start and logs their ids. It is idempotent, and leaves
+alone what they already discounted and contracts past their `endDate`. An admin edit cannot set
+one back to `ACTIVE`.
 
 **Expiry** — `SavingsService.ExpireContracts` (daily `0 0 0 * * *`) flips every
 `ACTIVE` contract past its `endDate` to `EXPIRED`, cancels its reminders, and sends

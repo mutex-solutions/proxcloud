@@ -25,6 +25,132 @@ and rules: [README.md](README.md#maintenance-rule).
 - The raw error named the DNS server's internal address, which tenants must not learn.
 
 **Diagrams updated:** none; the containers and relations are the same.
+## 2026-11-07: Share exports can keep a site's NAT addresses
+
+**What changed**
+
+- TrueNAS providers take `config.snatSources`, single host addresses, off by default. `truenas.Service` adds them to
+  every export it writes or compares, so tenant shares and Kubernetes RWX datasets both keep them through create, sync
+  and address release. An empty list takes them off at the next sync. The operator console edits the setting with the
+  isolation cost in its help text, and the customer console tells a share's owner when it applies.
+- Share rows now carry `updatedAt`, and a stored row without one takes sync updates instead of being refused.
+
+**Why**
+
+- An export lists a project's own addresses. Behind a NAT the NAS sees the NAT's address instead, so the mount failed, and an
+  address added by hand was removed by sync, which left mounted pods with `Stale file handle`. A site can now say so
+  explicitly. The address is shared by every tenant behind the NAT, so the setting gives up isolation between them on that NAS.
+  That is why it is off by default, takes hosts only, and is stated plainly wherever it is set.
+- Share rows were written without `updatedAt`, and the sync's optimistic guard refused every update to them. Their
+  addresses and `usedBytes` stayed as created, so a share priced on `size_gb` billed its usage at creation.
+
+**Diagrams updated:** `c3-components.md` (TrueNAS client row).
+
+## 2026-11-07: Server backups (P5-3)
+
+**What changed**
+
+- `pve/backup.go` + `project/backup_pve.go`: LIST/CREATE/RESTORE/DELETE_BACKUP on a server, on vzdump to the provider's
+  `backupStorage` (NFS, CephFS or PBS). Backups tab in the customer console. `ProxCloudPlatform` adds `VM.Backup`.
+
+**Why**
+
+- Snapshots do not survive a disk or node failure. The ownership proof is a project stamp in the archive's notes, read
+  back from PVE on every action, because the store is shared and tenants never reach PVE, so the portal needs no table
+  of its own that could drift from the store. Backups go with their server because the token can see and delete an
+  archive only through `VM.Backup` on its VM, and an ACL on `/vms` would break the rule that the token only sees pool VMs.
+
+**Diagrams updated:** `c3-components.md` (PVE service).
+
+## 2026-11-07: Server snapshots billed (MET-G9)
+
+**What changed**
+
+- The full sync and portal actions stamp `server.snapshots {items, diskGb}` on the SERVER row; the minute sampler
+  carries it. `ServerProvider` turns each snapshot into a `server_snapshot` billing resource with the snapshot's own
+  start time, priced by a new seed rule. `stampResourceValues` keeps a start time a provider set.
+
+**Why**
+
+- Snapshots hold space on the operator's storage and were free. Proxmox reports no per-snapshot usage on any backend
+  (a volume's `used` excludes its snapshots), so the metered size is the provisioned disks: an upper-bound proxy with a
+  placeholder rate, until a node-side read justifies real usage. One line per snapshot because a bill item's first
+  watermark is the resource's start: a single line per server would back-charge a new snapshot to the server's creation.
+
+**Diagrams updated:** none (the metering flow is unchanged, one more billing resource on the SERVER row).
+## 2026-11-07: Split mode keeps the portal's SDN rights
+
+**What changed**
+
+- `mode: split` also grants `ProxCloudPlatform` on `/sdn/zones` to the portal token. Test connection reads `/sdn/zones`
+  as well as `/sdn`.
+
+**Why**
+
+- An ACL on a path replaces what its parent passes down. The mint grant alone took `SDN.*` away from the portal, so on
+  a split site no tenant network could be created. The lab showed it as soon as the grants were applied. No diagram
+  shows ACLs.
+
+**Diagrams updated:** none.
+
+## 2026-11-07: Object store connection checked at registration, public buckets always closable
+
+**What changed**
+
+- New `POST /admin/service/object-store/test`: the API checks a ceph-s3 endpoint and admin key without storing them.
+  Installer preflight requires the `ceph-rgw` values, stage 60 calls the test before it writes, updates the row's
+  endpoint and key on a re-run, and registers `object_store.region` as the provider's region.
+- A bucket's website state now also reads its public-read statement. Disable website removes that statement before it
+  touches the website config, and making a bucket private removes it too.
+
+**Why**
+
+- A wrong endpoint or key stored as a PUBLIC provider made every new project fail its bootstrap, after a green install,
+  and a re-run skipped the row. Checking from the API tests the network path the running platform will use. The region
+  shown to tenants was the Proxmox region name, which RGW rejects as a location constraint.
+- The statement publishes objects on the S3 endpoint whether or not the gateway has its website API. A gateway answering
+  405, or a provider with no website endpoint, left tenants with a public bucket and no control that closed it.
+
+**Diagrams updated:** none; no container or relationship changed.
+## 2026-11-07: Money paths: bill writers under the credit lock, unknown outcomes stay PENDING, unpaid upfront contracts held
+
+**What changed**
+
+- A recorded manual payment and a card charge settling on a bill now hold the profile's credit lock, like paying with
+  credits and issuing a bill. A charge the bill already holds changes nothing, and one succeeding on a bill paid some
+  other way becomes credit.
+- The transaction scanner closes a transaction only when the gateway answers it has no such intent. Any other error
+  leaves it `PENDING` with the reason, re-checked until it leaves the 24 hour window.
+- An upfront savings contract with no deposit and no operator on record never discounts. Such contracts that are `ACTIVE`
+  move to `PENDING_PAYMENT` at API start, and a new operator action records a payment taken outside the portal.
+
+**Why**
+
+- Each bill writer replaces the whole bill it read, so concurrent payments overwrote each other: a race test of 16
+  payments of 5 kept 50 of the 80 on the bill. A scanner marking a deposit `FAILED` on a network error needed a manual
+  repair if the money had moved, since `FAILED` is terminal, and it could also overwrite a settle that won meanwhile.
+  Upfront contracts bought before payments were enforced discounted every bill for money nobody paid.
+
+**Diagrams updated:** none, no container or component changed.
+
+## 2026-11-07: Admin hmac key secrets encrypted at rest, old NFS exports squash root
+
+**What changed**
+
+- `hmac_keys.secretKey` is stored encrypted with the data-at-rest key. Every writer seals it, the SigV4 and MCP lookup
+  opens it, and rows in plain text are converted at API start. Creating a key still returns its secret once.
+- The share reconcile treats an NFS export with `maproot` as drifted: it opens the top directory and clears `maproot`.
+
+**Why**
+
+- A database read handed over every Admin API credential in the clear. SigV4 has to get the secret back, so a hash like
+  the one client tokens use cannot work. A key changed without re-sealing fails closed: the stored text does not start
+  working as the secret.
+- Root squash only covered new shares, so the oldest ones, with the most data, kept giving a client's root full access
+  on the NAS. The top directory opens because otherwise a squashed client could not write to a root-owned dataset at all.
+  It is not recursive, so files root wrote before stay owned by root, which `docs/cloud-integration.md` tells operators.
+
+**Diagrams updated:** none, no container or component changed.
 
 ## 2026-11-07: Shared block on a TrueNAS LUN checked (P8-4, part)
 

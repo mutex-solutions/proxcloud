@@ -183,30 +183,26 @@ type ManualPayment struct {
 // default, and an overpayment still settles the bill.
 // ponytail: proportional gross→net; per-rate reverse tax if mixed-rate bills ever need cent-exact partials.
 func (s *PayService) RecordManualPayment(ctx context.Context, billID string, p ManualPayment) (*pricing.Bill, *pricing.CollectTransaction, error) {
-	bill, err := s.repo.BillByID(ctx, billID)
+	// This read only finds the lock to take. The decision is made on the bill read under it.
+	found, err := s.repo.BillByID(ctx, billID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if bill == nil {
+	if found == nil {
 		return nil, nil, ErrBillNotFound
-	}
-	switch bill.Status {
-	case pricing.BillStatusPaid:
-		return nil, nil, ErrBillAlreadyPaid
-	case pricing.BillStatusOpen:
-		return nil, nil, ErrBillNotIssued
 	}
 	now := time.Now().UTC()
 	if p.PaidAt.IsZero() {
 		p.PaidAt = now
 	}
+	// Read before the lock's transaction: a failed read would abort it, and these tolerate failure.
 	baseCurrency, _ := s.repo.BaseCurrency(ctx)
-	profile, err := s.repo.FindByID(ctx, bill.BillingProfileID)
+	profile, err := s.repo.FindByID(ctx, found.BillingProfileID)
 	if err != nil {
 		return nil, nil, err
 	}
 	if profile == nil { // orphan bill: still settle it, in the base currency
-		profile = &BillingProfile{ID: bill.BillingProfileID, Currency: baseCurrency}
+		profile = &BillingProfile{ID: found.BillingProfileID, Currency: baseCurrency}
 	}
 	if profile.Currency == "" {
 		profile.Currency = baseCurrency
@@ -220,47 +216,66 @@ func (s *PayService) RecordManualPayment(ctx context.Context, billID string, p M
 	if err != nil {
 		return nil, nil, err
 	}
-	unpaidNet := pricing.GetUnpaidAmountBillProductCurrency(bill)
-	unpaidGross := rate.Mul(pricing.CalculateGrossAmount(unpaidNet, rates))
-
-	received := unpaidGross
-	if p.Amount != nil {
-		received = *p.Amount
-	}
-	if !received.IsPositive() {
-		return nil, nil, ErrInvalidAmount
-	}
-	netBase := received
-	if unpaidGross.IsPositive() {
-		netBase = unpaidNet.Mul(received).Div(unpaidGross).Round(2)
-	}
-	amount := rate.Mul(netBase) // net in the profile currency (ApplyPaidCollectOnBill converts it back)
-
 	gatewayID, err := s.repo.BankTransferGatewayID(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	paidAt := p.PaidAt.UTC()
-	txn := &pricing.CollectTransaction{
-		BillID:           bill.ID,
-		BillingProfileID: bill.BillingProfileID,
-		Currency:         profile.Currency,
-		Amount:           &amount,
-		GrossAmount:      &received,
-		ExchangeRate:     &rate,
-		PaymentGatewayID: gatewayID,
-		Status:           pricing.CollectTransactionStatusSuccess,
-		Metadata: map[string]any{
-			"manual": true, "method": p.Method, "reference": p.Reference,
-			"paidAt": paidAt.Format(time.RFC3339), "recordedBy": p.RecordedBy,
-		},
-		CreatedAt: &paidAt,
-	}
-	if txn, err = s.repo.SaveCollectTransaction(ctx, txn); err != nil {
-		return nil, nil, err
-	}
-	pricing.ApplyPaidCollectOnBill(bill, txn, baseCurrency)
-	if err := s.repo.SaveBillDoc(ctx, bill); err != nil {
+
+	var bill *pricing.Bill
+	var txn *pricing.CollectTransaction
+	err = s.repo.WithProfileLock(ctx, found.BillingProfileID, func(ctx context.Context) error {
+		var err error
+		if bill, err = s.repo.BillByID(ctx, billID); err != nil {
+			return err
+		}
+		if bill == nil {
+			return ErrBillNotFound
+		}
+		switch bill.Status {
+		case pricing.BillStatusPaid:
+			return ErrBillAlreadyPaid
+		case pricing.BillStatusOpen:
+			return ErrBillNotIssued
+		}
+		unpaidNet := pricing.GetUnpaidAmountBillProductCurrency(bill)
+		unpaidGross := rate.Mul(pricing.CalculateGrossAmount(unpaidNet, rates))
+
+		received := unpaidGross
+		if p.Amount != nil {
+			received = *p.Amount
+		}
+		if !received.IsPositive() {
+			return ErrInvalidAmount
+		}
+		netBase := received
+		if unpaidGross.IsPositive() {
+			netBase = unpaidNet.Mul(received).Div(unpaidGross).Round(2)
+		}
+		amount := rate.Mul(netBase) // net in the profile currency (ApplyPaidCollectOnBill converts it back)
+
+		paidAt := p.PaidAt.UTC()
+		txn = &pricing.CollectTransaction{
+			BillID:           bill.ID,
+			BillingProfileID: bill.BillingProfileID,
+			Currency:         profile.Currency,
+			Amount:           &amount,
+			GrossAmount:      &received,
+			ExchangeRate:     &rate,
+			PaymentGatewayID: gatewayID,
+			Status:           pricing.CollectTransactionStatusSuccess,
+			Metadata: map[string]any{
+				"manual": true, "method": p.Method, "reference": p.Reference,
+				"paidAt": paidAt.Format(time.RFC3339), "recordedBy": p.RecordedBy,
+			},
+			CreatedAt: &paidAt,
+		}
+		if txn, err = s.repo.SaveCollectTransaction(ctx, txn); err != nil {
+			return err
+		}
+		pricing.ApplyPaidCollectOnBill(bill, txn, baseCurrency)
+		return s.repo.SaveBillDoc(ctx, bill)
+	})
+	if err != nil {
 		return nil, nil, err
 	}
 	if bill.Status == pricing.BillStatusPaid {

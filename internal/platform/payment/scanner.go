@@ -2,8 +2,12 @@ package payment
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
+
+	stripe "github.com/stripe/stripe-go/v82"
 
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
@@ -15,6 +19,12 @@ import (
 // or a collect the pod died mid-processing — stays PENDING forever and the credit never
 // materializes. The scan window: status PENDING, createdAt in
 // (now-24h, now-20min) — old enough to not race the live flow, young enough to still matter.
+//
+// A failed re-check says nothing about the payment, so it does not close the transaction: the money may
+// have moved, and a FAILED deposit that did succeed takes a manual repair. Only the gateway saying it has
+// no such intent is terminal. Everything else stays PENDING with the reason on the row, re-checked until
+// it ages out of the window. That window is the bound: past it the scanner stops asking, the row stays
+// PENDING, and a late gateway callback or an operator sync can still settle a deposit.
 
 // TransactionScanner re-drives stuck PENDING transactions through the same Process paths the
 // callbacks use (ProcessAddFunds / processCollect — both idempotent; a still-pending gateway
@@ -39,11 +49,44 @@ func NewTransactionScanner(b *billing.Repo, af *AddFundsService, c *CollectServi
 
 func (s *TransactionScanner) WithNow(now func() time.Time) *TransactionScanner { s.now = now; return s }
 
+const (
+	scanMaxAge   = 24 * time.Hour
+	scanMinAge   = 20 * time.Minute
+	scanInterval = 20 * time.Minute
+)
+
+// intentGone reports the gateway answering that it has no such payment intent. Any other error (network,
+// 5xx, rate limit, rejected credentials, a removed integration) leaves the outcome unknown.
+func intentGone(err error) bool {
+	var se *stripe.Error
+	if errors.As(err, &se) {
+		return se.HTTPStatusCode == 404
+	}
+	var ae *AirwallexError
+	return errors.As(err, &ae) && ae.HTTPStatus == 404
+}
+
+// retryNote is the reason kept on a transaction whose re-check failed, and logs the failure: an error
+// once the row is about to leave the window, since nothing retries it after that.
+func (s *TransactionScanner) retryNote(id string, createdAt *time.Time, err error) string {
+	if createdAt == nil {
+		s.log.Warn("txn-scan: re-check failed", "txn", id, "err", err)
+		return "Could not confirm with the payment gateway: " + err.Error()
+	}
+	stop := createdAt.Add(scanMaxAge)
+	if s.now().Add(2 * scanInterval).After(stop) {
+		s.log.Error("txn-scan: re-checks are ending with the outcome unknown", "txn", id, "stop", stop, "err", err)
+	} else {
+		s.log.Warn("txn-scan: re-check failed", "txn", id, "err", err)
+	}
+	return fmt.Sprintf("Could not confirm with the payment gateway: %v. Re-checked automatically until %s.", err, stop.UTC().Format(time.RFC3339))
+}
+
 // Scan runs both halves. Returns the number of transactions
 // examined (attempted), not necessarily advanced — a still-pending gateway status is a no-op.
 func (s *TransactionScanner) Scan(ctx context.Context) (int, error) {
 	now := s.now()
-	from, to := now.Add(-24*time.Hour), now.Add(-20*time.Minute)
+	from, to := now.Add(-scanMaxAge), now.Add(-scanMinAge)
 	n1, err1 := s.scanAccountCredits(ctx, from, to)
 	n2, err2 := s.scanCollects(ctx, from, to)
 	n3 := s.scanRefunds(ctx, now.AddDate(0, 0, -30))
@@ -76,9 +119,8 @@ func (s *TransactionScanner) scanRefunds(ctx context.Context, since time.Time) i
 	return n
 }
 
-// scanAccountCredits re-drives each stuck PENDING deposit with an
-// externalId through ProcessAddFunds; a processing error marks it FAILED with the
-// gateway message, and never aborts the batch.
+// scanAccountCredits re-drives each stuck PENDING deposit with an externalId through ProcessAddFunds. A
+// processing error never aborts the batch: see the file comment for what it does to the row.
 func (s *TransactionScanner) scanAccountCredits(ctx context.Context, from, to time.Time) (int, error) {
 	txns, err := s.billing.PendingAccountCreditTransactions(ctx, from, to)
 	if err != nil {
@@ -106,20 +148,24 @@ func (s *TransactionScanner) scanAccountCredits(ctx context.Context, from, to ti
 		}
 		n++
 		if _, err := s.addFunds.ProcessAddFunds(ctx, t.ID); err != nil {
-			t.Status = "FAILED"
-			t.GatewayMessage = err.Error()
-			if _, serr := s.billing.SaveAccountCreditTransaction(ctx, t); serr != nil {
-				s.log.Error("txn-scan: save failed account-credit txn", "txn", t.ID, "err", serr)
+			status, msg := "PENDING", ""
+			if intentGone(err) {
+				status, msg = "FAILED", err.Error()
+				s.log.Error("txn-scan: deposit has no intent at the gateway", "txn", t.ID, "err", err)
+			} else {
+				msg = s.retryNote(t.ID, t.CreatedAt, err)
 			}
-			s.log.Error("txn-scan: account-credit txn failed", "txn", t.ID, "err", err)
+			if serr := s.billing.UpdatePendingAccountCreditTransaction(ctx, t.ID, status, msg); serr != nil {
+				s.log.Error("txn-scan: save account-credit txn", "txn", t.ID, "err", serr)
+			}
 		}
 	}
 	return n, nil
 }
 
-// scanCollects: bill already PAID → txn CANCELLED (a late duplicate
-// collect must not double-settle); a missing/blank bill errors → FAILED;
-// else re-drive processCollect. Errors mark the txn FAILED and continue the batch.
+// scanCollects: bill already PAID → the charge becomes credit if it succeeded, else CANCELLED (a late
+// duplicate collect must not double-settle); a missing bill → FAILED; else re-drive processCollect. A
+// processing error never aborts the batch: see the file comment for what it does to the row.
 func (s *TransactionScanner) scanCollects(ctx context.Context, from, to time.Time) (int, error) {
 	txns, err := s.billing.PendingCollectTransactions(ctx, from, to)
 	if err != nil {
@@ -138,41 +184,51 @@ func (s *TransactionScanner) scanCollects(ctx context.Context, from, to time.Tim
 }
 
 func (s *TransactionScanner) scanOneCollect(ctx context.Context, t *pricing.CollectTransaction) {
-	fail := func(msg string) {
-		t.Status = pricing.CollectTransactionStatusFailed
-		t.ErrorMessage = msg
-		if _, err := s.billing.SaveCollectTransaction(ctx, t); err != nil {
-			s.log.Error("txn-scan: save failed collect txn", "txn", t.ID, "err", err)
+	save := func(status pricing.CollectTransactionStatus, msg string) {
+		if err := s.billing.UpdatePendingCollectTransaction(ctx, t.ID, status, msg); err != nil {
+			s.log.Error("txn-scan: save collect txn", "txn", t.ID, "err", err)
 		}
+	}
+	failed := func(err error) {
+		if intentGone(err) {
+			s.log.Error("txn-scan: charge has no intent at the gateway", "txn", t.ID, "err", err)
+			save(pricing.CollectTransactionStatusFailed, err.Error())
+			return
+		}
+		save(pricing.CollectTransactionStatusPending, s.retryNote(t.ID, t.CreatedAt, err))
 	}
 	// A deposit-by-card (no bill) with an unknown outcome: ask the gateway — a SUCCESS mints the
 	// credit the customer paid for, a decline fails it. Never fail it blind.
 	if t.BillID == "" {
 		if _, err := s.collect.processCollect(ctx, t); err != nil {
-			fail(err.Error())
+			failed(err)
 		}
 		return
 	}
 	bill, err := s.billing.BillByID(ctx, t.BillID)
-	if err != nil || bill == nil {
-		fail("Bill " + t.BillID + " not found")
+	if err != nil {
+		failed(err)
 		return
 	}
-	if bill.Status == pricing.BillStatusPaid {
+	if bill == nil {
+		save(pricing.CollectTransactionStatusFailed, "Bill "+t.BillID+" not found")
+		return
+	}
+	if bill.Status == pricing.BillStatusPaid && !billHolds(bill, t.ID) {
 		// The bill was settled by something else meanwhile (credits, a bank transfer, another
 		// charge). Ask the gateway before closing the stuck charge: money that DID move must not
-		// vanish from the books — a succeeded charge becomes a spendable account credit for the
-		// customer (surplus, refundable by the operator); anything else is CANCELLED.
-		if s.collect.settleSurplus(ctx, t) {
-			return
-		}
-		t.Status = pricing.CollectTransactionStatusCancelled
-		if _, err := s.billing.SaveCollectTransaction(ctx, t); err != nil {
-			s.log.Error("txn-scan: save cancelled collect txn", "txn", t.ID, "err", err)
+		// vanish from the books; a charge that did not succeed is CANCELLED.
+		settled, err := s.collect.settleSurplus(ctx, t)
+		switch {
+		case settled:
+		case err == nil, intentGone(err):
+			save(pricing.CollectTransactionStatusCancelled, "")
+		default:
+			failed(err)
 		}
 		return
 	}
 	if _, err := s.collect.processCollect(ctx, t); err != nil {
-		fail(err.Error())
+		failed(err)
 	}
 }

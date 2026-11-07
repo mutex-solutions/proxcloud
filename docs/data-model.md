@@ -83,7 +83,7 @@ These hold across the schema; individual tables note only their departures.
   collections (`memberships:[]`, `customInfo:{}`), so the wire shape is stable.
 - **Secrets.** `externalService.secret` (Proxmox API token secret, RGW keys, kubeconfigs) is
   encrypted at rest and decrypted in memory on read; `hmac_keys.secretKey` is
-  stored as-is; `cloudDownload` stores only the hash of its token (the raw token
+  encrypted the same way, since SigV4 needs it back; `cloudDownload` stores only the hash of its token (the raw token
   is returned once and never persisted).
 - **Indexes are Postgres expression indexes** over the jsonb, created
   idempotently at startup by each repo's `EnsureIndexes` (via
@@ -653,7 +653,7 @@ encrypted at rest.
 | `type` | string | `CLOUD` / `CPANEL` / `PAYMENT` |
 | `status` | string | `PUBLIC` / `PRIVATE` / `DISABLED` |
 | `defaultPricePlan` | string | default plan for the service |
-| `config` | object | provider document; `config.provider` ∈ `proxmox` / `ceph-s3` / `kamaji` / `dbaas`. Proxmox: `region`, `regions`, `services{compute,network,volumev3,image}`, `apiUrl`, `tokenId`, `fingerprint`, `insecureTls`, `poolPrefix`, `network{defaultZone, zones, publicNetworks, cidrPool, blockedCidrs, isolation, evpnController}`, `storageProfiles`, `defaultStorageProfile`, `capabilities{detectedAt, storages}`, `storageClasses{<storage>: {class, suggestedClass}}`, `storageHeadroomPct`, `templates`, `gpus`, `overcommit`, `metrics{source}`, `provisioning.quota{…}` (full shape: [cloud-integration.md](cloud-integration.md#the-proxmox-provider-document)) |
+| `config` | object | provider document; `config.provider` ∈ `proxmox` / `ceph-s3` / `kamaji` / `dbaas`. Proxmox: `region`, `regions`, `services{compute,network,volumev3,image}`, `apiUrl`, `tokenId`, `fingerprint`, `insecureTls`, `poolPrefix`, `network{defaultZone, zones, publicNetworks, cidrPool, blockedCidrs, isolation, evpnController}`, `storageProfiles`, `defaultStorageProfile`, `capabilities{detectedAt, storages}`, `storageClasses{<storage>: {class, suggestedClass}}`, `storageHeadroomPct`, `backupStorage`, `templates`, `gpus`, `overcommit`, `metrics{source}`, `provisioning.quota{…}` (full shape: [cloud-integration.md](cloud-integration.md#the-proxmox-provider-document)) |
 | `secret` | object (encrypted) | Proxmox: `tokenSecret`; ceph-s3: `adminAccessKey`, `adminSecretKey`; Prometheus credentials when configured |
 
 Referenced by `cloudResource.serviceId`, `cloudDownload.serviceId`,
@@ -818,7 +818,7 @@ inferred from read/write usage.
 | `imageCategory` | runtime | Top-level image category: `{orderNumber, enabled, bareMetal}`. |
 | `instanceMetadataOption` | runtime | Configurable instance-metadata field shown at create time: `{key, type, displayName, enabled, userEditable, serviceIds[] → externalService, regions[], options[], numericRange}`. |
 | `externalResourceProvider` | runtime | An external resource provider bound to a cloud service: `{name, url, externalServiceId → externalService, auths:[{hmacKeyId → hmac_keys}]}`. |
-| `hmac_keys` | runtime | SigV4 / provider API key pair: `{_id: "pk…" access key (the id column), secretKey: "sk…" signing secret, description, createdAt}`. Used by the Admin API and MCP api-key auth. |
+| `hmac_keys` | runtime | SigV4 / provider API key pair: `{_id: "pk…" access key (the id column), secretKey: the "sk…" signing secret, encrypted, description, createdAt}`. Used by the Admin API and MCP api-key auth. |
 | `affiliateEntry` | yes | Affiliate/referral earning row: `{billingProfileId → billingProfile, amount, originAmount}`. |
 | `reminderNotification` | yes | Scheduled reminder (e.g. savings-contract expiry): `{targetResourceId → savingsContract, messageTemplateId → messageTemplate, resourceType, status, notifications:[{daysBefore, sentAt}]}`. |
 | `builtInInvoice` | runtime | A generated built-in invoice record: `{invoiceGatewayId → thirdPartyIntegration, createdAt, …}`. |

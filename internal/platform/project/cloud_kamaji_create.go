@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
@@ -233,9 +234,10 @@ func (h *Handler) kamajiRWX(ctx context.Context, proj *Project, clusterID string
 	if err != nil {
 		return shareErr(err)
 	}
+	now := time.Now().UTC()
 	if _, err := h.cloud.Insert(ctx, &cloud.CloudResource{
 		ServiceID: es.ID, ProjectID: proj.ID, Region: es.CephRegion(), Type: cloud.TypeShare,
-		ExternalID: sh.Dataset, Data: ts.ShareData(proj.ID, sh),
+		ExternalID: sh.Dataset, Data: ts.ShareData(proj.ID, sh), CreatedAt: &now, UpdatedAt: &now,
 	}); err != nil {
 		return err // the sync adds the row; the cluster's release removes the dataset
 	}

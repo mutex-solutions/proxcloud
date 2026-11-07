@@ -7,6 +7,7 @@ package admin
 //
 // Flow:
 //
+//	POST /object-store/test   = check a ceph-s3 endpoint and admin key, storing nothing
 //	create(es)                = persist the operator-supplied doc (secret encrypted) — no live
 //	                            validation; the Connection tab's Test button probes the provider
 //	update(id,es)             = look up → merge connection fields → save
@@ -26,6 +27,7 @@ package admin
 // — deferred this pass (// TODO(audit)).
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -35,6 +37,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
@@ -51,6 +54,7 @@ const externalServiceCollection = "externalService"
 // single param name at a given path position).
 func (h *Handler) routeExternalServiceMut(r chi.Router) {
 	r.Post("/service", h.externalServiceCreate)
+	r.Post("/service/object-store/test", h.objectStoreTest)
 	r.Put("/service/{id}", h.externalServiceUpdate)
 	r.Delete("/service/{id}", h.externalServiceDelete)
 	// the no-provision re-save (PUT /{id}/update) — get-or-404 then merge + resave.
@@ -102,6 +106,12 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	if _, ok := doc["status"]; !ok {
 		doc["status"] = "PUBLIC"
 	}
+	if cfg, ok := doc["config"].(map[string]any); ok && cfg["provider"] == "truenas" {
+		if _, err := externalservice.ParseSNATSources(cfg["snatSources"]); err != nil {
+			httpx.WriteError(w, httpx.BadRequest(err.Error()))
+			return
+		}
+	}
 	// Stable string _id (String-id convention — same shape as the seeded provider docs;
 	// projects reference the service by this id string).
 	doc["_id"] = pgdoc.NewID()
@@ -117,6 +127,36 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	// TODO(audit): write an admin audit event when a service is created.
 	shapeExternalService(doc) // strips secret, _id→id
 	httpx.OK(w, doc)
+}
+
+// objectStoreTest proves a ceph-s3 connection before it is stored (POST /service/object-store/test): the
+// installer calls it ahead of registering a row, since a stored row that cannot reach RGW fails every new
+// project. A failed check is a 400 with the reason, like the Proxmox connection test.
+func (h *Handler) objectStoreTest(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, externalServiceManagePerm) {
+		return
+	}
+	var body struct {
+		S3Endpoint     string `json:"s3Endpoint"`
+		AdminAPIURL    string `json:"adminApiUrl"`
+		Region         string `json:"region"`
+		AdminAccessKey string `json:"adminAccessKey"`
+		AdminSecretKey string `json:"adminSecretKey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := client.CheckCephS3(ctx, client.ObjectStoreConfig{
+		S3Endpoint: body.S3Endpoint, AdminURL: body.AdminAPIURL, Region: body.Region,
+		AdminAccessKey: body.AdminAccessKey, AdminSecretKey: body.AdminSecretKey,
+	}); err != nil {
+		httpx.WriteError(w, httpx.BadRequest("Object store check failed: "+err.Error()))
+		return
+	}
+	httpx.OK(w, map[string]any{"ok": true})
 }
 
 // externalServiceUpdate is the update path (PUT /service/{id} — the Connection-tab Save): persist
@@ -148,6 +188,11 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 		if raw, ok := c["storageProfiles"]; ok && cfg["provider"] == "proxmox" {
 			if herr := h.validatePVEStorageProfiles(req, cfg, raw); herr != nil {
 				return herr
+			}
+		}
+		if cfg["provider"] == "truenas" {
+			if _, err := externalservice.ParseSNATSources(c["snatSources"]); err != nil {
+				return httpx.BadRequest(err.Error())
 			}
 		}
 	}

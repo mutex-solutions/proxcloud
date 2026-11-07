@@ -10,7 +10,7 @@
   vars:
     vm_config: "VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options"
     roles:
-      ProxCloudPlatform: "Sys.Audit Sys.Console Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.GuestAgent.Unrestricted VM.Migrate VM.PowerMgmt VM.Replicate VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Mapping.Audit Mapping.Use"
+      ProxCloudPlatform: "Sys.Audit Sys.Console Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Backup VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.GuestAgent.Unrestricted VM.Migrate VM.PowerMgmt VM.Replicate VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Mapping.Audit Mapping.Use"
       ProxCloudCAPI: "Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
       ProxCloudCSI: "VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit"
       ProxCloudImages: "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
@@ -54,6 +54,8 @@
       - {path: /pool, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /storage, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /sdn/zones, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      # An ACL on a path replaces what its parent passes down, so the mint grant alone takes SDN.* away from /sdn/zones.
+      - {path: /sdn/zones, role: ProxCloudPlatform, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /nodes, role: ProxCloudKubeMint, propagate: 0, user: proxcloud@pve, token: proxcloud@pve!platform}
   tasks:
     - name: Log in

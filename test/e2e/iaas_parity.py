@@ -146,6 +146,26 @@ def run():
         check("the disk is back", guest(a, "cat /var/tmp/e2e") == "before")
     action(a["id"], "DELETE_SNAPSHOT", name="s1")
 
+    # Backups, when the provider has a store: E2E_BACKUP=1 (needs VM.Backup on the token).
+    if os.environ.get("E2E_BACKUP") == "1":
+        if SSH:
+            guest(a, "echo before-backup > /var/tmp/e2e; sync")
+        st, _ = action(a["id"], "CREATE_BACKUP")
+        check("create a backup", st == 200, st)
+        st, res = action(a["id"], "LIST_BACKUPS")
+        ids = [b["id"] for b in res["result"]]
+        check("lists it", len(ids) == 1, ids)
+        st, _ = action(a["id"], "DELETE_BACKUP", id="nas-backup:backup/not-yours")
+        check("an archive not listed is refused", st == 409, st)
+        if SSH:
+            guest(a, "echo after-backup > /var/tmp/e2e; sync")
+        st, _ = action(a["id"], "RESTORE_BACKUP", id=ids[0])
+        check("restore", st == 200, st)
+        if SSH:
+            check("the disk is back", guest(a, "cat /var/tmp/e2e") == "before-backup")
+        st, _ = action(a["id"], "DELETE_BACKUP", id=ids[0])
+        check("delete it", st == 200, st)
+
     # Rebuild keeps the identity.
     _, before = call("GET", f"/project/{PID}/cloud/{a['id']}")
     st, res = action(a["id"], "REBUILD", imageId=IMAGE2)

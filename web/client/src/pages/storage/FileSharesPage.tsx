@@ -230,6 +230,13 @@ export default function FileSharesPage() {
               <p className="text-xs text-muted-foreground">
                 Allowed: {((share(details).networks as string[]) ?? []).join(", ") || "none"}
               </p>
+              {((share(details).sharedNat as string[]) ?? []).length > 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  This site reaches the NAS through a NAT, so {(share(details).sharedNat as string[]).join(", ")} is also
+                  allowed. Other projects behind that NAT share the address, and the address check does not separate this
+                  share from them.
+                </p>
+              ) : null}
               {share(details).protocol === "SMB" ? (
                 <Button variant="outline" size="sm" disabled={reset.isPending} onClick={() => reset.mutate(details)}>
                   <KeyRound className="size-4" /> Reset password

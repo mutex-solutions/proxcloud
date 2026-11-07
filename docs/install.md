@@ -92,7 +92,7 @@ This is only a suggestion. It lands as `suggestedClass` on the provider, and the
 |---|---|
 | `vm` | A RustFS VM in `proxcloud-system`, cloned from the Debian template, with an XFS data disk on `nas-capacity` when present (qcow2, so the VM can be snapshotted), else on the default profile's storage. |
 | `truenas-app` | The TrueNAS community catalog app on the NAS pool, driven through the TrueNAS REST API (`vault.truenas_api_key`). |
-| `external`, `ceph-rgw` | Nothing is deployed. `ceph-rgw` registers `object_store.{endpoint,access_key,secret_key}` as the `ceph-s3` provider. Its key belongs to an RGW admin user with caps `users=*;buckets=*;usage=*`. |
+| `external`, `ceph-rgw` | Nothing is deployed. `ceph-rgw` registers `object_store.{endpoint,access_key,secret_key,region}` as the `ceph-s3` provider. Its key belongs to an RGW admin user with caps `users=*;buckets=*;usage=*`. Preflight refuses blank values and stage 60 tests the endpoint and key through the API before storing anything. A re-run writes the corrected endpoint or rotated key to the provider. `region` is what tenants see and send, so use the zonegroup's `api_name` or keep `us-east-1`; it is read only when the provider is created. |
 
 For `vm` and `truenas-app`, the public endpoint is `s3.<domain>` through the management ingress with `/rustfs/admin`, `/minio/admin` and the console blocked. The root credentials are generated, FTP, SFTP and WebDAV are off, and the internal buckets `cnpg-backups` and `etcd-snapshots` get versioning, Object Lock GOVERNANCE and a user limited to the bucket.
 

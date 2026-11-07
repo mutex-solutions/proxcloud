@@ -21,7 +21,15 @@ import (
 // refundCountingGW counts the money sent back.
 type refundCountingGW struct {
 	fakeGW
-	refunds atomic.Int32
+	refunds   atomic.Int32
+	onCollect func() // runs while the gateway is taking the charge
+}
+
+func (g *refundCountingGW) CollectPaymentIntent(ctx context.Context, in payment.CollectInput) (payment.PaymentIntentResult, error) {
+	if g.onCollect != nil {
+		g.onCollect()
+	}
+	return g.fakeGW.CollectPaymentIntent(ctx, in)
 }
 
 func (g *refundCountingGW) Refund(context.Context, string) (payment.RefundResult, error) {

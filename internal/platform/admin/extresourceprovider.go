@@ -151,7 +151,7 @@ func (h *Handler) erpCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Generate the HMAC key — local crypto, persisted to hmac_keys.
 	hmacDoc, hmacKeyID := generateHmacKey(fmt.Sprintf("Generated for external service provider %s %s", req.Name, req.URL))
-	if _, err := h.repo.InsertHmacKey(r.Context(), hmacDoc); httpx.WriteError(w, err) {
+	if _, err := h.repo.InsertHmacKey(r.Context(), SealHmacKey(h.hmacEnc, hmacDoc)); httpx.WriteError(w, err) {
 		return
 	}
 	// TODO(audit): write a CREATE audit event for the generated HMAC key.
