@@ -91,3 +91,29 @@ func TestLBOwnerOf(t *testing.T) {
 		}
 	}
 }
+
+func TestLBStopWhileDisabled(t *testing.T) {
+	server := &cloud.CloudResource{Type: cloud.TypeServer}
+	disk := &cloud.CloudResource{Type: cloud.TypeVolume}
+	disabled, enabled := &Project{Status: StatusDisabled}, &Project{Status: StatusEnabled}
+	invoke := map[string]any{"action": "stop"}
+	cases := []struct {
+		name   string
+		proj   *Project
+		cr     *cloud.CloudResource
+		action string
+		data   map[string]any
+		want   bool
+	}{
+		{"suspended, stop", disabled, server, "STOP", nil, true},
+		{"suspended, stop through INVOKEACTION", disabled, server, "INVOKEACTION", invoke, true},
+		{"suspended, set password", disabled, server, "SET_PASSWORD", nil, false},
+		{"suspended, its disk", disabled, disk, "DETACH", nil, false},
+		{"not suspended, stop", enabled, server, "STOP", nil, false},
+	}
+	for _, c := range cases {
+		if got := lbStopWhileDisabled(c.proj, c.cr, c.action, c.data); got != c.want {
+			t.Errorf("%s: got %v", c.name, got)
+		}
+	}
+}

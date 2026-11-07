@@ -1089,7 +1089,7 @@ A `LOAD_BALANCER` row (`internal/platform/project/cloud_lb_pve.go`) is what a te
 
 Privileges: `VM.GuestAgent.Unrestricted` (exec and file-write), which is root in that guest. The token already holds it for Set password, and the platform runs nothing on a VM without this tag.
 
-Traffic on its public NIC is metered and bills as `instance_traffic`, like a server's. Not there: TLS termination, HTTP health checks, a second appliance for failover, security updates of a running appliance (see the guide to replace one). If its node dies the address is down until the node returns, as for any server on local storage.
+Suspension: the VM is paused with the project's other VMs and the sync leaves it alone. Create and `UPDATE_CONFIG` answer 409; `GET_HEALTH`, delete and a stop of the VM stay open, as for any server. A resume unpauses it, and the sync starts it if it was stopped. Traffic on its public NIC is metered and bills as `instance_traffic`, like a server's. Not there: TLS termination, HTTP health checks, a second appliance for failover, security updates of a running appliance (see the guide to replace one). If its node dies the address is down until the node returns, as for any server on local storage.
 
 ## Managed Kubernetes and databases (Kamaji and DBaaS providers)
 

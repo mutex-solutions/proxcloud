@@ -32,6 +32,10 @@ Every server is checked every 3 seconds with a TCP connection. Two failures take
 
 If you delete a server that is in a pool, it stays listed as `gone` and receives no traffic until you remove it.
 
+## While a project is suspended
+
+The load balancer's VM is paused with your servers, so it serves nothing and its configuration cannot change. You can still delete it. It comes back by itself when the project is resumed.
+
 ## Delete one
 
 **Delete** removes the VM and its disk and gives the address back. Your servers are not touched. You cannot delete the VM or its address on their own, stop it, add a volume to it or make an image of it: change or delete the load balancer instead. While it is first being created, **Delete** asks you to try again a moment later.

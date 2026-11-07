@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -246,6 +247,10 @@ func (h *Handler) lbConverge(ctx context.Context, es *externalservice.ExternalSe
 	ctx, cancel := context.WithTimeout(ctx, lbBuildTimeout)
 	defer cancel()
 	for {
+		// A project suspended meanwhile: the sync's reconcile takes over after the resume.
+		if cur, err := h.svc.GetProjectByID(ctx, proj.ID); err == nil && (cur.Deleting() || cur.Status != StatusEnabled) {
+			return
+		}
 		status, err := h.pveLBApply(ctx, es, proj, externalID)
 		if err != nil {
 			slog.Warn("load balancer: apply", "project", proj.ID, "lb", externalID, "err", err)
@@ -676,6 +681,15 @@ func (h *Handler) pveDeleteLoadBalancer(ctx context.Context, es *externalservice
 		}
 	}
 	return nil
+}
+
+// lbStopWhileDisabled: a suspended tenant keeps the right to stop what it pays for (allowedWhileDisabled), the appliance
+// too. Nothing starts it while the project is DISABLED, and the sync does after the resume.
+func lbStopWhileDisabled(proj *Project, cr *cloud.CloudResource, action string, data map[string]any) bool {
+	if action == "INVOKEACTION" {
+		action = strings.ToUpper(strAny(data["action"]))
+	}
+	return proj.IsDisabled() && cr.Type == cloud.TypeServer && (action == "STOP" || action == "SHUTOFF" || action == "SHUTDOWN")
 }
 
 // pveApplianceGuard refuses a tenant's direct action on what makes up a balancer: its VM, its disk, its

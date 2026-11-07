@@ -798,9 +798,11 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 	if cr.Type == cloud.TypeLoadBalancer {
 		return h.pveLoadBalancerAction(w, r, u, proj, es, cr, action, data)
 	}
-	if herr := h.pveApplianceGuard(ctx, es, proj, cr); herr != nil {
-		h.fail(w, herr)
-		return true
+	if !lbStopWhileDisabled(proj, cr, action, data) {
+		if herr := h.pveApplianceGuard(ctx, es, proj, cr); herr != nil {
+			h.fail(w, herr)
+			return true
+		}
 	}
 	if cr.Type == cloud.TypeServer && h.pveProtectionAction(w, r, u, proj, es, cr, action) {
 		return true
