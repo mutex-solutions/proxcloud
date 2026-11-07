@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Protected servers on shared storage
+
+**What changed**
+
+- `ProtectableDisks` takes disks that are all on shared storage as well as all on ZFS. Such a server gets the HA resource alone:
+  no replication job, no node-affinity rule, `mode: shared` on its state, and no `server_protection` bill line. A disk that
+  would not follow it (`refuseUnreplicable`) is refused either way.
+
+**Why**
+
+- On a Full-tier site every server sits on Ceph, so Protected could not be sold there at all, and HA needs nothing from the
+  replication machinery when every node already reaches the disks. There is no replica to bill. Whether to charge for HA
+  on shared storage is an operator decision still to be made.
+
+**Diagrams updated:** `c3-components.md` (Replication and HA row).
+
 ## 2026-11-07: A node that is down loses no rows
 
 **What changed**
