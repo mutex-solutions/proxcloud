@@ -27,7 +27,7 @@ func shareErr(err error) error {
 	if errors.Is(err, truenas.ErrShare) {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, strings.TrimPrefix(err.Error(), truenas.ErrShare.Error()+": "))
 	}
-	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+	return upstreamErr("file server", err)
 }
 
 // shareNetworks lists what a project's clients look like to the NAS: its public addresses, its clusters' addresses on
@@ -110,21 +110,12 @@ func (h *Handler) lockShareAccess(ctx context.Context, projectID string) (func()
 	if h.sdnLock == nil {
 		return func() {}, nil
 	}
-	name := "share-access-" + projectID
-	for range 20 {
-		now := time.Now().UTC()
-		ok, err := h.sdnLock.Lock(ctx, name, shareAccessLockMaxFor, now)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			return func() { _ = h.sdnLock.Unlock(context.WithoutCancel(ctx), name, 0, now, time.Now().UTC()) }, nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
+	release, ok, err := h.sdnLock.Wait(ctx, "share-access-"+projectID, shareAccessLockMaxFor, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return release, nil
 	}
 	return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "Another change to this project's file share access is in progress — retry in a moment")
 }

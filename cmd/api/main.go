@@ -257,8 +257,14 @@ func run() error {
 		return dbaas.New(es.DbaasConfig(), es.ID)
 	})
 	// Proxmox VE — enables proxmox provisioning (project pool) + the VM write surface.
+	holderLocks := lock.New(pg)
 	projectH.SetProxmox(func(es *externalservice.ExternalService) (*pve.Service, error) {
-		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
+		s, err := pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
+		if err != nil {
+			return nil, err
+		}
+		s.HolderLock = holderLocks.Wait
+		return s, nil
 	})
 	// Proxmox flavor catalog (pgdoc `flavor`) — the admin-curated flavors PVE servers
 	// are created from (Proxmox itself has no flavor concept).

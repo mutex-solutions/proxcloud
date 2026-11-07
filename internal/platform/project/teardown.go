@@ -71,8 +71,8 @@ const teardownSweeps = 3
 // TeardownProject cascade-deletes a project's cloud resources (best-effort, dependency-ordered, with
 // a few retry sweeps), tears down the project's provider-side anchors, then marks the project DELETED. It
 // runs to completion regardless of individual failures; the periodic sync/reconcile is the backstop
-// for anything left behind. Returns a non-nil error summarising what could not be deleted (the
-// project is still marked DELETED — a re-run or the sync job mops up the remainder).
+// for anything left behind. Returns a non-nil error summarising what could not be deleted. A leg that needs a re-run keeps
+// the project DELETE_IN_PROGRESS, so the deletion job retries it; otherwise the project is marked DELETED.
 func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 	p, err := h.svc.GetProjectByID(ctx, projectID)
 	if err != nil {
@@ -259,16 +259,19 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 	if sharesLeft {
 		pveTeardownFailed = true
 	}
-	// DNS zones: a failure stays in the remaining rows, and a re-run retries.
+	// DNS zones: one left behind keeps answering for the tenant's domain and holds its name, so a failure asks for a re-run.
+	zonesLeft := false
 	zoneServices, zerr := h.powerDNSServices(ctx, p)
 	if zerr != nil {
 		slog.Error("teardown: list DNS providers", "project", p.ID, "err", zerr)
+		zonesLeft = true
 	}
 	for _, es := range zoneServices {
 		left, terr := h.teardownZones(ctx, p, es, remaining)
 		remaining = left
 		if terr != nil {
 			slog.Error("teardown: DNS zones", "project", p.ID, "serviceId", es.ID, "err", terr)
+			zonesLeft = true
 		}
 	}
 
@@ -435,10 +438,14 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		continue
 	}
 
-	// Terminal state: mark the project DELETED (keep the doc for audit history).
-	p.Status = "DELETED"
+	// ponytail: rows left with no failed leg behind them (a provider since removed) do not ask for a re-run, or a project
+	// could wedge the job's sweep forever. Report them and move on.
+	teardownOutcome(p, cephRevokeFailed || pveTeardownFailed || zonesLeft || kamajiPending > 0 || dbaasPending > 0, time.Now().UTC())
 	if err := h.svc.Save(ctx, p); err != nil {
 		return err
+	}
+	if zonesLeft {
+		return fmt.Errorf("teardown could not remove the project's DNS zones; the deletion job retries")
 	}
 	if cephRevokeFailed {
 		return fmt.Errorf("teardown could not revoke some ceph-s3 credentials; their local records were kept for retry")
@@ -447,7 +454,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		return fmt.Errorf("teardown could not fully tear down the project's cloud resources; re-run teardown to retry")
 	}
 	if len(remaining) > 0 {
-		return fmt.Errorf("teardown left %d resource(s) undeleted; the sync job will reconcile them", len(remaining))
+		return fmt.Errorf("teardown left %d resource(s) undeleted; re-run teardown to retry", len(remaining))
 	}
 	if kamajiPending > 0 {
 		return fmt.Errorf("teardown: %d kamaji cluster remnant(s) still finalizing on the management cluster (project teardown deferred) — the periodic sweep GCs them; re-run teardown afterwards (docs/managed-k8s.md)", kamajiPending)
@@ -456,6 +463,21 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		return fmt.Errorf("teardown: %d managed-database remnant(s) still finalizing on the DB cluster (project teardown deferred) — the periodic sweep GCs them; re-run teardown afterwards (docs/managed-dbaas.md)", dbaasPending)
 	}
 	return nil
+}
+
+// teardownOutcome sets the status one teardown pass leaves. DELETED is terminal: nothing looks at it again, so a pass that
+// needs a re-run stays DELETE_IN_PROGRESS with a past schedule, which is what the deletion job selects (the admin's
+// delete-now path sets no schedule of its own).
+func teardownOutcome(p *Project, retry bool, now time.Time) {
+	if !retry {
+		p.Status = StatusDeleted
+		return
+	}
+	p.Status = StatusDeleteInProgress
+	if p.ScheduledForDeletionAt == nil {
+		past := now.Add(-deletionGrace)
+		p.ScheduledForDeletionAt = &past
+	}
 }
 
 // teardownShares deletes everything the NAS holds for the project, cached or not, and archives the provider's rows.

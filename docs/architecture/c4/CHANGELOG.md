@@ -4,6 +4,53 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: DNS zones cannot overlap across owners; a failed teardown retries
+
+**What changed**
+
+- `powerdns.Service.Create` refuses a name equal to, above or below anything the project does not own, the name server
+  hosts included, and a public suffix. It looks again after the create and removes its zone on an overlap.
+- `TeardownProject` keeps a project `DELETE_IN_PROGRESS` while a leg asks for a re-run (DNS zones, shares, Proxmox, ceph-s3
+  credentials, managed-service remnants), so the deletion job retries. It was marked `DELETED` regardless, and nothing
+  looks at that status again.
+- Cloud creates and actions refuse a project on its way out, for every provider.
+- Tenant errors from a failed DNS or file server no longer carry the raw client error. Record writes are audited with the
+  record's name, type and content.
+
+**Why**
+
+- PowerDNS answers from the longest matching zone with no delegation step, so a child zone took over names of a zone it
+  did not own, including an operator's. Verified against the lab server through two projects.
+- A zone left on the server after a failed teardown kept answering for the former tenant's domain and held its name.
+- The raw error named the DNS server's internal address, which tenants must not learn.
+
+**Diagrams updated:** none; the containers and relations are the same.
+## 2026-11-07: Holder use is serialised, a carrier is left alone
+
+**What changed**
+
+- A cross-node attach carries the disk on a holder tagged `pc-carrier`, which the regular holder lookup skips. Its
+  cleanup runs only once the move is known to have stopped or PVE refused it. Otherwise the empty carrier stays until
+  project teardown.
+- Creating a detached volume, keeping a server's volumes, attaching and deleting a volume take a per-project lock
+  (`ShedLock.Wait`, PostgreSQL). `holderMu` is gone, and `lockShareAccess` uses the same `Wait`.
+- A node where the volume's storage is not active is no attach target, and an attach to one is 409.
+- `VolumeSyncProvider.ListReadable` skips a VM it cannot read, for callers that only add rows. `List` skips only a holder
+  that is gone. A move to another server now ends with a reconcile.
+- `newHolder` removes its VM if it fails before the tags are on.
+
+**Why**
+
+- The destroy behind `dropEmptyHolder` takes every disk on the VM when it runs, and the source no longer names a disk
+  that has moved. A cleanup racing a running move, or another operation adding a disk, could lose a customer's volume
+  for good. A vmid is a cheap price against that.
+- A process mutex cannot serialise replicas, and it covered only the lookup.
+- An untagged VM in a pool counts as a server, so a failed create left a billed row.
+- Retrying a target that could never work moved the disk off its server and answered 502.
+- A deleted VM still listed, or a node that is down, failed the one read after an attach and left the volume without a
+  row until the next good sync. A sync during the carry could leave a row naming the carrier's disk.
+
+**Diagrams updated:** `c2-containers.md` (attach rule), `c3-components.md` (holder row).
 ## 2026-11-07: Share exports can keep a site's NAT addresses
 
 **What changed**
