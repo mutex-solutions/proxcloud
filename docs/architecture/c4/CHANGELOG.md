@@ -47,6 +47,25 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Diagrams updated**: none: no container or component changes.
 
+## 2026-11-07: Kubernetes RWX on the Standard tier (P7-9)
+
+**What changed**
+
+- With `config.cluster.rwxGiB` set, a new tenant cluster gets one NAS dataset with a `refquota`, the `shared-file`
+  StorageClass and csi-driver-nfs, installed by CAAPH. The dataset is an ordinary share of the project named
+  `k8s-<clusterId>`, and goes with the cluster. Chart 0.1.3.
+- A cluster gets a marker secret, and the orphan sweep keys on it instead of the cloud secret.
+
+**Why**
+
+- proxmox-csi and zfspool are RWO only, and the storage plan puts RWX on the NAS for Standard sites. Using the share
+  product means the dataset bills, counts against the share quota and follows the project's addresses with no second
+  code path. Full-tier CephFS remains to be built.
+- CAPMOX takes ownership of the cloud secret, so it is garbage-collected with the `ProxmoxCluster`. The sweep never saw
+  a finished cascade: addresses and minted tokens of a deleted cluster were never released. Found deleting a real one.
+
+**Diagrams updated:** `c2-containers.md` (storage table).
+
 ## 2026-11-07: Full tier run on a real Ceph cluster
 
 **What changed**

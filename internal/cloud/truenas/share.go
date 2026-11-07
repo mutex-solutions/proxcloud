@@ -68,7 +68,8 @@ func (s *Service) datasetFor(projectID, name string) string {
 	return s.Parent + "/" + projectID + "-" + name
 }
 
-func mountPath(dataset string) string { return "/mnt/" + dataset }
+// MountPath is the export path of a dataset.
+func MountPath(dataset string) string { return "/mnt/" + dataset }
 
 // smbName is the share's SMB name: unique per NAS, and free of the characters SMB dislikes.
 func smbName(projectID, name string) string {
@@ -192,7 +193,7 @@ func (s *Service) Create(ctx context.Context, projectID, name, protocol string, 
 }
 
 func (s *Service) export(ctx context.Context, projectID string, sh *Share) error {
-	path := mountPath(sh.Dataset)
+	path := MountPath(sh.Dataset)
 	if sh.Protocol == ProtocolNFS {
 		var job int
 		if err := s.C.Call(ctx, "filesystem.setperm", []any{map[string]any{"path": path, "mode": "777"}}, &job); err != nil {
@@ -305,12 +306,12 @@ func (s *Service) List(ctx context.Context, projectID string) ([]Share, error) {
 			SizeBytes: d.RefQuota.bytes(), UsedBytes: d.Used.bytes(),
 		}
 		for _, n := range nfs {
-			if n.Path == mountPath(d.ID) {
+			if n.Path == MountPath(d.ID) {
 				sh.ShareID, sh.Networks = n.ID, n.Networks
 			}
 		}
 		for _, n := range smb {
-			if n.Path == mountPath(d.ID) {
+			if n.Path == MountPath(d.ID) {
 				sh.ShareID, sh.Networks = n.ID, n.Options.HostsAllow
 				sh.Username = d.Props[smbUserProp].Raw
 				if sh.Username == "" {
@@ -410,6 +411,11 @@ func (s *Service) userID(ctx context.Context, sh *Share) (int, error) {
 	return users[0].ID, nil
 }
 
+// DeleteByName is Delete for a caller that knows the share by name, a cluster's dataset.
+func (s *Service) DeleteByName(ctx context.Context, projectID, name string) error {
+	return s.Delete(ctx, projectID, s.datasetFor(projectID, name))
+}
+
 // Delete removes the share, its SMB user and the dataset with its data. A share already gone is a no-op.
 func (s *Service) Delete(ctx context.Context, projectID, id string) error {
 	if !strings.HasPrefix(id, s.Parent+"/"+projectID+"-") {
@@ -450,7 +456,7 @@ func (s *Service) Delete(ctx context.Context, projectID, id string) error {
 
 // ShareData is the cache row payload.
 func (s *Service) ShareData(projectID string, sh *Share) map[string]any {
-	mount := fmt.Sprintf("mount -t nfs %s:%s /mnt/%s", s.Host, mountPath(sh.Dataset), sh.Name)
+	mount := fmt.Sprintf("mount -t nfs %s:%s /mnt/%s", s.Host, MountPath(sh.Dataset), sh.Name)
 	if sh.Protocol == ProtocolSMB {
 		mount = fmt.Sprintf(`mount -t cifs //%s/%s /mnt/%s -o username=%s`, s.Host, smbName(projectID, sh.Name), sh.Name, sh.Username)
 	}

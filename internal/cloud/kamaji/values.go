@@ -84,7 +84,7 @@ func infraValues(d ClusterDefaults, spec ClusterSpec) map[string]any {
 	if len(dns) == 0 {
 		dns = []string{"1.1.1.1", "8.8.8.8"}
 	}
-	return map[string]any{
+	out := map[string]any{
 		"region":  in.Region,
 		"pool":    in.Pool,
 		"storage": in.Storage,
@@ -102,6 +102,10 @@ func infraValues(d ClusterDefaults, spec ClusterSpec) map[string]any {
 		},
 		"metallb": map[string]any{"addresses": anySlice(in.LBAddresses)},
 	}
+	if in.RWXServer != "" {
+		out["rwx"] = map[string]any{"server": in.RWXServer, "share": in.RWXShare}
+	}
+	return out
 }
 
 func anySlice(in []string) []any {

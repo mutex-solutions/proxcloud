@@ -359,6 +359,17 @@ func TestBuildValuesProxmoxBlock(t *testing.T) {
 	}
 }
 
+func TestInfraValuesRWX(t *testing.T) {
+	if _, ok := infraValues(ClusterDefaults{}, ClusterSpec{})["rwx"]; ok {
+		t.Fatal("no dataset: the chart must not get an rwx block")
+	}
+	v := infraValues(ClusterDefaults{}, ClusterSpec{Infra: ClusterInfra{RWXServer: "192.0.2.10", RWXShare: "/mnt/tank/shares/p-k8s-stc-1"}})
+	rwx, _ := v["rwx"].(map[string]any)
+	if rwx["server"] != "192.0.2.10" || rwx["share"] != "/mnt/tank/shares/p-k8s-stc-1" {
+		t.Fatalf("rwx = %v", v["rwx"])
+	}
+}
+
 func TestTaintRoundTrip(t *testing.T) {
 	for s, want := range map[string]string{
 		"gpu=true:NoSchedule":  "gpu=true:NoSchedule",
@@ -605,12 +616,46 @@ func TestServiceCreateDelete(t *testing.T) {
 	}
 	// The credentials secret must SURVIVE the cluster delete — the infrastructure provider needs
 	// it while the ArgoCD cascade deletes the worker VMs. FinalizeOrphans reaps it afterwards.
-	if len(api.secrets) != 2 {
-		t.Error("credentials secrets must outlive the application delete")
+	if len(api.secrets) != 3 {
+		t.Error("credentials and marker secrets must outlive the application delete")
 	}
 	// Idempotent: deleting again is fine.
 	if err := svc.DeleteCluster(ctx, "p1", "stc-abcd1234"); err != nil {
 		t.Fatalf("DeleteCluster twice: %v", err)
+	}
+}
+
+// CAPMOX owns the cloud secret, so it is gone with the ProxmoxCluster. The release must still run.
+func TestFinalizeAfterCloudSecretCollected(t *testing.T) {
+	api := newFakeAPI()
+	svc := NewWithAPI(api, testCfg(), "svc-1")
+	ctx := context.Background()
+	spec := testSpec()
+	var released []string
+	svc.OnClusterGone(func(_ context.Context, compute, project, cluster string) error {
+		released = append(released, compute+"/"+project+"/"+cluster)
+		return nil
+	})
+	if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}, ComputeServiceID: "cs1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteCluster(ctx, "p1", spec.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{CloudSecretName(spec.ID), CSISecretName(spec.ID)} {
+		delete(api.secrets, "pc-p1/"+n)
+		delete(api.secretObjs, "pc-p1/"+n)
+	}
+	meta := api.secretObjs["pc-p1/"+MarkerSecretName(spec.ID)]["metadata"].(map[string]any)
+	meta["creationTimestamp"] = time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if _, err := svc.FinalizeAllOrphans(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(released) != 1 || released[0] != "cs1/p1/"+spec.ID {
+		t.Fatalf("released = %v", released)
+	}
+	if len(api.secrets) != 0 {
+		t.Fatalf("secrets left: %v", api.secrets)
 	}
 }
 
@@ -627,7 +672,7 @@ func TestFinalizeOrphans(t *testing.T) {
 	if _, err := svc.FinalizeOrphans(ctx, "p1"); err != nil {
 		t.Fatalf("FinalizeOrphans (live): %v", err)
 	}
-	if len(api.secrets) != 2 {
+	if len(api.secrets) != 3 {
 		t.Fatal("live cluster must not be finalized")
 	}
 
@@ -641,20 +686,20 @@ func TestFinalizeOrphans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FinalizeOrphans (cascade): %v", err)
 	}
-	if pending != 1 || len(api.secrets) != 2 {
+	if pending != 1 || len(api.secrets) != 3 {
 		t.Fatalf("in-flight cascade must stay pending (pending=%d)", pending)
 	}
 
 	// Grace window: a fresh secret (mid-create signature) must never be treated as an orphan
 	// even with no Application/TCP — pending, untouched.
 	delete(api.tcps, "pc-p1/"+ControlPlaneName(spec.ID))
-	meta := api.secretObjs["pc-p1/"+CloudSecretName(spec.ID)]["metadata"].(map[string]any)
+	meta := api.secretObjs["pc-p1/"+MarkerSecretName(spec.ID)]["metadata"].(map[string]any)
 	meta["creationTimestamp"] = time.Now().UTC().Format(time.RFC3339)
 	pending, err = svc.FinalizeOrphans(ctx, "p1")
 	if err != nil {
 		t.Fatalf("FinalizeOrphans (grace): %v", err)
 	}
-	if pending != 1 || len(api.secrets) != 2 {
+	if pending != 1 || len(api.secrets) != 3 {
 		t.Fatalf("fresh secret must ride out the grace window (pending=%d)", pending)
 	}
 

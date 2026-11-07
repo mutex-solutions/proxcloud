@@ -31,6 +31,13 @@ func CSISecretName(clusterID string) string { return clusterID + "-csi-config" }
 // cloudSecretSuffix lets FinalizeOrphans map a secret name back to its cluster id.
 const cloudSecretSuffix = "-cloud-config"
 
+// MarkerSecretName is the durable record that a cluster exists. CAPMOX takes ownership of the cloud
+// secret, so that one is garbage-collected with the ProxmoxCluster, before the sweep can see the cascade
+// finished. Nothing owns the marker: the sweep keys on it, and it carries the compute-service annotation.
+func MarkerSecretName(clusterID string) string { return clusterID + markerSuffix }
+
+const markerSuffix = "-marker"
+
 // ControlPlaneName is the KamajiControlPlane the chart renders for a cluster — and therefore the
 // TenantControlPlane, since the Kamaji CAPI provider names the TCP after it. The chart builds it as
 // `<release>-kamaji-cp` (templates/control-plane/kamaji-control-plane.yaml), and Kamaji in turn
@@ -105,6 +112,9 @@ type ClusterDefaults struct {
 	// network, so this is an address on the services subnet that forwards to PVE.
 	PVEAPIURL string
 	PVECSIURL string
+	// RWXGiB, when set, gives every new cluster a NAS dataset of that size and the shared-file
+	// StorageClass on it (csi-driver-nfs). Needs a TrueNAS provider on the project.
+	RWXGiB int
 	// DNSServers go to the worker nodes (default: public resolvers).
 	DNSServers []string
 	// NodeGroupMTU is the worker NIC MTU on a tenant vnet (EVPN: the vnet's own, 1450).
@@ -200,6 +210,8 @@ type ClusterInfra struct {
 	Addresses      []string // worker addresses (IPAM)
 	LBAddresses    []string // MetalLB inside the tenant cluster
 	StorageClasses []StorageClass
+	RWXServer      string // NFS server of the cluster's dataset ("" = no RWX class)
+	RWXShare       string // its export path
 }
 
 // StorageClass is one tenant-side proxmox-csi class.

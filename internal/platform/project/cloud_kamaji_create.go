@@ -14,6 +14,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/truenas"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -191,12 +192,62 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	}
 	sec.Cloud = map[string]string{"url": apiURL, "token": capiID, "secret": capiSecret}
 	sec.CSIManifest = kamajiCSIManifest(csiURL, csiID, csiSecret, in.Region)
+	if d.RWXGiB > 0 {
+		if err = h.kamajiRWX(ctx, proj, spec.ID, d.RWXGiB, &in); err != nil {
+			return sec, err
+		}
+		spec.Infra = in
+	}
 	return sec, nil
 }
 
+// kamajiRWX gives a cluster its dataset: one ordinary share of the project, so it bills, counts against the share
+// quota and follows the project's addresses like any other. No TrueNAS provider on the project: no RWX class.
+func (h *Handler) kamajiRWX(ctx context.Context, proj *Project, clusterID string, sizeGiB int, in *kamaji.ClusterInfra) error {
+	services, err := h.trueNASServices(ctx, proj)
+	if err != nil {
+		return err
+	}
+	if len(services) == 0 {
+		return nil
+	}
+	es := services[0]
+	if err := h.shareQuotaCheck(ctx, proj, es, "", sizeGiB); err != nil {
+		return err
+	}
+	unlock, err := h.lockShareAccess(ctx, proj.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	networks, err := h.shareNetworks(ctx, proj)
+	if err != nil {
+		return err
+	}
+	ts, err := es.TrueNASService()
+	if err != nil {
+		return err
+	}
+	defer ts.C.Close()
+	sh, err := ts.Create(ctx, proj.ID, kamajiRWXShare(clusterID), truenas.ProtocolNFS, sizeGiB, networks)
+	if err != nil {
+		return shareErr(err)
+	}
+	if _, err := h.cloud.Insert(ctx, &cloud.CloudResource{
+		ServiceID: es.ID, ProjectID: proj.ID, Region: es.CephRegion(), Type: cloud.TypeShare,
+		ExternalID: sh.Dataset, Data: ts.ShareData(proj.ID, sh),
+	}); err != nil {
+		return err // the sync adds the row; the cluster's release removes the dataset
+	}
+	in.RWXServer, in.RWXShare = ts.Host, truenas.MountPath(sh.Dataset)
+	return nil
+}
+
+func kamajiRWXShare(clusterID string) string { return "k8s-" + clusterID }
+
 // kamajiReleaseCluster runs after a cluster's delete cascade has finished (kamaji.OnClusterGone).
 func kamajiReleaseCluster(esSvc *externalservice.Service, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, shared bool) func(ctx context.Context, computeID, projectID, clusterID string) error {
-	return func(ctx context.Context, computeID, _, clusterID string) error {
+	return func(ctx context.Context, computeID, projectID, clusterID string) error {
 		es, err := esSvc.Get(ctx, computeID)
 		if err != nil || es == nil {
 			return nil // provider gone, nothing to release on
@@ -208,6 +259,25 @@ func kamajiReleaseCluster(esSvc *externalservice.Service, pveFor func(*externals
 				return err
 			}
 			if err := ps.C.RevokeClusterTokens(ctx, clusterID); err != nil {
+				return err
+			}
+		}
+		// A cluster's dataset goes with it, like its proxmox-csi disks. Missing is fine: the sync drops the row.
+		nas, err := esSvc.ListByType(ctx, "CLOUD")
+		if err != nil {
+			return err
+		}
+		for i := range nas {
+			if !nas[i].IsTrueNAS() {
+				continue
+			}
+			ts, err := nas[i].TrueNASService()
+			if err != nil {
+				return err
+			}
+			err = ts.DeleteByName(ctx, projectID, kamajiRWXShare(clusterID))
+			ts.C.Close()
+			if err != nil {
 				return err
 			}
 		}
