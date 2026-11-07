@@ -139,6 +139,7 @@ The shape is documented in the header of `proxmox.go`:
                           "gateway": "203.0.113.1", "ranges": ["…"], "exclude": ["…"]}],
       "cidrPool": "10.100.0.0/16",                       // required; tenant CIDRs never overlap
       "blockedCidrs": ["192.0.2.0/24"],                  // tenants cannot reach these; node management networks are always added
+      "sandboxCidrs": ["198.51.100.0/24"],               // sandbox cluster workers: fenced off tenants and the blocked networks, both ways
       "isolation": "shared",                             // or "evpn-per-project"
       "evpnController": "proxcloud"
     },
@@ -460,7 +461,8 @@ point (`proxmox.go` header):
   ownership alias, and ownership is checked before any change.
 - Tenant-to-tenant isolation on the SDN is enforced by cluster firewall rules,
   in `shared` mode and with one EVPN zone per project (`evpn-per-project`) alike.
-  They also keep tenants off the nodes' management networks and `blockedCidrs`. Details:
+  They also keep tenants off the nodes' management networks and `blockedCidrs`, and fence the
+  sandbox cluster's workers (`sandboxCidrs`) off tenants and those networks in both directions. Details:
   [C4.1 tenant network isolation](architecture/c4/c4-code.md#c41-tenant-network-isolation).
 - PVE offers DHCP on simple zones only, and a simple zone stays on one node. On EVPN and
   VLAN zones the platform allocates each server's `net0` address and sets it through

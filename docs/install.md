@@ -37,6 +37,7 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 | 35 | `35-local-images.yml` | `images.build`: builds images and chart from this checkout, into a registry on the management cluster. A tag already there is not rebuilt. |
 | 40 | `40-mgmt-platform.yml` | ArgoCD, then Applications with inline values: cert-manager, CloudNativePG, ProxCloud (API, consoles, Keycloak, PostgreSQL, RabbitMQ). The scheduler is on. |
 | 45 | `45-object-store.yml` | The object store, see below. |
+| 55 | `55-sandbox-cluster.yml` | `mode: split` with `sandbox.enabled`: the sandbox cluster's vnet, the cluster from the kamaji chart, then `deploy/sandbox-cluster` on it. See "Sandbox cluster" below. |
 | 60 | `60-register.yml` | Logins, an Admin-API key, the Proxmox provider, fio suggestions; on the first run `deploy/seed/seed-operator.py` (platform and billing configuration, flavors, public price plan, quota). Prints the URLs. |
 
 The RabbitMQ Cluster Operator is applied directly from its release manifest, because upstream ships no chart. k3s's bundled Traefik and ServiceLB serve the portal on the management host's ports 80 and 443. MetalLB and the services cluster arrive with split mode.
@@ -141,3 +142,34 @@ The services subnet must be reachable from tenant networks (it holds the API end
 **What ran where:** `50-services-cluster.yml`'s template and `files/services-platform.sh` ran on a lab through hand-written drivers, against a site already installed in `allinone`. Preflight in split mode and stage 60's registration ran on that lab against that cluster, and a project attached to both providers. The playbook itself and stage 10's split grants have not run end to end on a clean site.
 
 Stage 50 cannot change the machines of a running cluster: a `ProxmoxMachineTemplate` is immutable, so a changed size, template or pool in `proxcloud.services` fails the apply. Moving an `allinone` site with a hand-built services cluster onto this stage means rebuilding that cluster.
+
+## Sandbox cluster (split mode)
+
+`proxcloud.sandbox.enabled: true` with `mode: split` builds the platform's sandbox cluster, where tenant code will run
+under gVisor ([managed-sandbox.md](managed-sandbox.md)). Nothing reaches it yet: the `sandbox` provider kind is refused
+until a later phase.
+
+1. Set `proxcloud.sandbox.network` ([defaults.yml](../installer/playbooks/group_vars/all/defaults.yml)): a subnet outside
+   `network.cidr_pool`, its gateway, the worker range (`nodes`), the cluster's LoadBalancer range (`metallb`) and DNS
+   servers that are not on the management network. Stage 55 refuses a subnet overlapping the tenant pool, the
+   services network, `network.blocked_cidrs` or `network.public`, an address outside the subnet, a VNI
+   (`sandbox.network.tag`) another vnet holds, and a services network outside the private, CGNAT and link-local ranges
+   the sandbox guardrail denies (a sandbox pod would reach the tenants' control planes there). The portal refuses a
+   subnet overlapping a node's management network. With `network.isolation: evpn` set `sandbox.network.zone` to an
+   EVPN zone made for the sandbox: there is no shared zone, and a tenant's zone would put the workers in its VRF.
+2. `make install`, or stages 10, 55 and 60 on an installed site. Stage 10 creates pool `proxcloud-sandbox` and token
+   `capmox@pve!sandbox` ([proxmox-permissions.md](proxmox-permissions.md#managed-kubernetes)). Stage 55 creates the vnet
+   (`sandbox.network.vnet`, in the EVPN zone `sandbox.network.zone`, default the provider's default zone), applies an
+   ArgoCD Application of the kamaji chart this checkout pushed (NodeRestriction on, checked), waits for the workers,
+   keeps `generated/sandbox.kubeconfig`, and applies `deploy/sandbox-cluster` in its README's order, stopping if the
+   cluster has IPv6. Stage 60 writes the subnet to the Proxmox provider's `network.sandboxCidrs`, and the next sync
+   adds the isolation drops for it.
+3. The portal creates the default EVPN zone with the first tenant network. On a first install stage 55 therefore says
+   SKIPPED; create a network, then run stage 55 again (and stage 60 if the provider was registered before
+   `sandbox.enabled`). Until stage 60 and one sync have run, the workers have no isolation drops.
+
+**What ran where:** stage 55 has not run on a lab (it would add an Application to the lab's shared services cluster).
+Its template was rendered and the chart output read; the manifests and the IPv6 check ran against the hand-built SB0
+cluster; the isolation drops ran through a portal on the lab ([managed-sandbox.md](managed-sandbox.md)). Stage 10's
+sandbox grants have only been syntax-checked.
+

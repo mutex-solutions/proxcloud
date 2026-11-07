@@ -146,6 +146,25 @@ pc_defaults:
       rwx_gib: 0                 # NAS dataset per cluster and its RWX class; 0 = none
       csi_shared_stores: false   # proxmox-csi for tenants: gives up isolation between them, docs/managed-k8s.md
 
+  # mode=split: the platform's sandbox cluster (gVisor), stage 55. Not reachable by tenants yet: docs/managed-sandbox.md.
+  sandbox:
+    enabled: false
+    pool: proxcloud-sandbox
+    token: sandbox               # capmox@pve!<token>, the cluster's CAPMOX credential; secret in generated/token-<token>
+    storage: ""                  # boot disks; default: services.storage
+    iso_storage: ""              # bootstrap ISOs, node-local only; default: services.iso_storage
+    network:
+      zone: ""                   # an existing EVPN zone; default: network.default_zone
+      vnet: pcsbx
+      tag: 100900                # VNI; tenant vnets take the next free one above the highest
+      subnet: ""                 # required, e.g. 192.0.2.0/24: outside network.cidr_pool, nothing else in it
+      gateway: ""                # required, inside subnet
+      nodes: ""                  # worker addresses, e.g. 192.0.2.10-192.0.2.29
+      metallb: ""                # LoadBalancer addresses inside the cluster, e.g. 192.0.2.200-192.0.2.209
+      dns: [1.1.1.1, 8.8.8.8]    # never on the management network: the isolation rules drop it
+      mtu: 1450
+    nodes: {count: 2, cores: 4, memory: 8192, disk: 40}
+
   nas:
     host: ""                     # TrueNAS address; empty = no NAS stage
     pool: ""                     # truenas-app: the pool Docker apps run on

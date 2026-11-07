@@ -7,8 +7,11 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 
 > ## Status
 >
-> **Spike only.** No code, no provider kind, no route. Section 0 records what a hand-built sandbox cluster on Proxmox
-> showed. Phase order and decisions: the sandbox plan (owner document, not in this repository).
+> **Not reachable by tenants.** The sandbox service is ported (SB1) with no route, and the admin API refuses the
+> `sandbox` provider kind. SB2a adds the cluster itself: manifests in `deploy/sandbox-cluster/`, installer stages 10
+> and 55, and isolation drops for the sandbox network (section 1, after the spike). The per-NIC VM firewall (SB2b) is still missing,
+> and it is a release gate. Section 0 records the hand-built lab spike. Phase order and decisions: the sandbox plan
+> (owner document, not in this repository).
 
 ## 0. SB0 lab spike (2026-11-07)
 
@@ -276,3 +279,67 @@ Other consequences:
    a Cilium Gateway or a separate terminator (§0.6).
 6. **D10 and pricing**: smallest sandbox 1 vCPU under systrap.
 7. SB2a does not need EE's `cilium-node-config.yaml` on this chart, as long as kube-proxy replacement stays off (§0.5).
+
+## 1. The sandbox cluster (SB2a)
+
+### 1.1 What builds it
+
+| Piece | Where | What |
+|---|---|---|
+| Token and pool | installer stage 10, `sandbox.enabled` | pool `proxcloud-sandbox`; token `capmox@pve!sandbox` with the grants of a tenant cluster's token (token rows only, so `capmox@pve` keeps what it inherits), then a PVE check that it sees one `iso` store, the node-local one |
+| Vnet | stage 55 | `sandbox.network.vnet` in an existing EVPN zone, subnet with SNAT and no DHCP, alias `proxcloud-sandbox` (no `st:` alias, so no project owns it) |
+| Cluster | stage 55, `templates/sandbox-cluster.yml.j2` | an ArgoCD Application `pc-sandbox` of `proxmox-kamaji-cluster` at this checkout's chart version (0.1.7), namespace `pc-sandbox`, no project label: no portal sync lists it. No CSI, no StorageClass, no NAS dataset. One node group `sandbox`, no taint (the SB1 code sets no toleration on CPU sandboxes) |
+| Release gate: NodeRestriction | stage 55 | the chart's `admissionControllers` include it; stage 55 reads the `KamajiControlPlane` and stops if it is missing |
+| Runtime, guardrail, identity | `deploy/sandbox-cluster/` (README has the order) | `cilium-node-config.yaml`, `node-setup.yaml` (runsc 20261102.0, systrap), `runtimeclass.yaml`, agent-sandbox v1.0.9 vendored, `network-policy.yaml` (private ranges and TCP 25 denied), `rbac.yaml` (`proxcloud-system/proxcloud`, no Secret access) |
+| Release gate: IPv4 only | `node-setup.yaml`, `check-ipv4-only.sh`, stage 55 | node-setup refuses a host with a global IPv6 address or an IPv6 default route; the check wants Cilium `enable-ipv6=false`, no IPv6 node address or pod CIDR, and node-setup Ready everywhere. Stage 55 stops before agent-sandbox and the guardrail when it fails |
+| Layer 0: isolation drops | `internal/cloud/pve/network.go`, provider `network.sandboxCidrs` (stage 60 writes it) | section 1.2 |
+
+Not in SB2a: the per-NIC VM firewall with `ipfilter` and the `unsecured` taint (SB2b), a dedicated SNAT address
+(SB2b), the `sandbox-system` node group, `sandbox-proxy` and TLS (SB4), the envd runtime image (SB5).
+
+### 1.2 Layer 0: the sandbox network in the isolation rules
+
+The provider's `network.sandboxCidrs` adds the sandbox subnet to the cluster firewall isolation set in both
+directions ([C4.1](architecture/c4/c4-code.md#c41-tenant-network-isolation)): tenant pool to the sandbox, and sandbox
+to the tenant pool, the node management networks and `blockedCidrs`. These rules see routed traffic, which is what
+both paths of §0.3 are: a tenant VM reaching a worker through the shared VRF, and a worker reaching the NAS or a node
+through the exit node's SNAT. They do not see traffic switched inside the sandbox vnet (HAProxy or node address
+spoofing there is SB2b's `ipfilter`). An entry that overlaps the tenant pool or a blocked network (the management
+networks included) is refused. The services network stays open to the workers here, because tenants need it; until
+SB2b only the guardrail keeps a sandbox pod off it, so stage 55 refuses a services network outside the ranges the
+guardrail denies.
+
+Measured on the lab (2026-11-07) with the SB0 cluster's worker and a tenant VM of a portal stack on this branch,
+packets in both directions, the provider without `sandboxCidrs`, with it, without it again, then with it:
+
+| From → to | Without | With |
+|---|---|---|
+| Tenant VM → worker kubelet :10250, ssh :22 | open | dropped |
+| Tenant VM → worker UDP 8472 (Cilium VXLAN), counted on the worker's tap | 5 of 5 arrive | 0 of 5 |
+| Worker node namespace → NAS NFS :2049, TrueNAS API :443 | open | dropped |
+| Worker node namespace → PVE API on a node that is not the exit node, ssh on another node | open | dropped |
+| Worker node namespace → PVE API on the exit node | refused (RST) | dropped |
+| Worker node namespace → management host ssh, object store | open | dropped |
+| Worker node namespace → the tenant VM :22 | open | dropped |
+| Worker node namespace → its own tenant control plane :6443, internet :443 | open | open |
+
+"Dropped" is a 4 s timeout. The worker namespace probe is a privileged `hostNetwork` pod running `nsenter -t 1 -n`,
+standing in for code that escaped gVisor. The cluster stayed healthy with the drops in place: node Ready, exec and logs
+through konnectivity, cluster DNS and HTTPS from a gVisor sandbox. Each switch took effect within 20 s of a sync.
+
+What layer 0 does not cover: the services cluster's subnet (the control plane endpoint lives there, so it stays
+reachable, as it is for tenants), anything inside the sandbox vnet, and traffic to the internet.
+
+### 1.3 Applied to the SB0 cluster
+
+Stage 55 would add an Application to the lab's shared services cluster, so it did not run on the lab; its rendered
+Application and the chart output were read (no CSI, no NFS objects, NodeRestriction in `admissionControllers`). The
+manifests went to the SB0 cluster in the README's order: everything but `cilium-node-config.yaml` and the IPv6 refusal
+in `node-setup.yaml` was already there unchanged. Results:
+
+- `CiliumNodeConfig` merged into the agent's config (`bpf-lb-sock-hostns-only: true` in its config directory), but
+  with socket LB off the agent reports `BPFSocketLBHostnsOnly: false`: a no-op on this chart, as §0.5 expected.
+- The guardrail after the Cilium restart, from a gVisor sandbox: every private and link-local target dropped,
+  `kubernetes` ClusterIP dropped, internet and cluster DNS open, TCP 25 dropped, 587 open.
+- IPv6 check: passes on the worker; with a ULA address added on a dummy interface of the worker, node-setup refused the
+  node (CrashLoopBackOff, the address in its log) and the check failed; with it removed, both passed again.

@@ -1,0 +1,76 @@
+{# The sandbox cluster as ArgoCD renders a tenant cluster, but in the platform's own namespace and pool, with no
+   project label: no portal sync lists it and no project is billed for its workers (docs/managed-sandbox.md).
+   No CSI token, no StorageClass, no NAS dataset: sandboxes use ephemeral storage only. #}
+{% set sbx = pc.sandbox %}
+{% set net = sbx.network %}
+{% set images = pc.services.templates | dict2items | map(attribute='key') | zip(pc.services.templates | dict2items | map(attribute='value')) | map('join', '=') | join(',') %}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pc-sandbox
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-sandbox-cloud-config
+  namespace: pc-sandbox
+stringData:
+  url: {{ pc_portal_pve_url }}
+  token: {{ pc_sandbox_token_id }}
+  secret: {{ pc_sandbox_token_secret }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pc-sandbox
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: proxcloud-k8s
+  source:
+    repoURL: {{ pc.services.chart_repo }}
+    chart: proxmox-kamaji-cluster
+    targetRevision: "{{ pc_chart_kamaji }}"
+    helm:
+      valuesObject:
+        kubernetesVersion: "{{ pc.services.k8s_version }}"
+        cloudCredentialsSecretName: pc-sandbox-cloud-config
+        # kamajiControlPlane.admissionControllers stays the chart's list, NodeRestriction included; stage 55 checks it.
+        kamajiControlPlane:
+          replicas: 1
+          dataStoreName: default
+          network: {serviceType: LoadBalancer}
+        clusterNetwork: {pods: 10.244.0.0/16, services: 10.96.0.0/12}
+        proxmox:
+          region: {{ pc.provider.region }}
+          pool: {{ sbx.pool }}
+          storage: {{ pc_sandbox_storage }}
+          network:
+            bridge: {{ net.vnet }}
+            gateway: {{ net.gateway }}
+            prefix: {{ net.subnet | split('/') | last | int }}
+            addresses: {{ [net.nodes] | to_json }}
+            dnsServers: {{ net.dns | to_json }}
+            mtu: {{ net.mtu | int }}
+          csi: {configSecretName: "", storageClasses: []}
+          rwx: {server: "", share: "", storageClassName: shared-file}
+          metallb: {addresses: {{ [net.metallb] | to_json }}}
+        nodeGroups:
+          - name: sandbox
+            machineFlavor: sandbox
+            machineImageId: "{{ images }}"
+            machineCores: {{ sbx.nodes.cores | int }}
+            machineMemoryMiB: {{ sbx.nodes.memory | int }}
+            machineRootVolume: {diskSize: {{ sbx.nodes.disk | int }}}
+            machineTags: [proxcloud, pc-sandbox]
+            machineCount: {{ sbx.nodes.count | int }}
+            nodeLabels: {proxcloud.io/sandbox: cpu}
+        addons:
+          metricsServer: {enabled: false}
+          certManager: {enabled: false}
+          ingress: {enabled: false}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: pc-sandbox
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}

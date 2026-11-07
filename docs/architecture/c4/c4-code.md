@@ -45,9 +45,15 @@ Status legend: [README.md](README.md). Everything on this page is **Implemented*
 3. `IN DROP source=<cidrPool> dest=<cidrPool>`: a gateway address lives on the node, so
    pinging another tenant's gateway is input, not forward. The project's own `IN ACCEPT`
    keeps its own gateways reachable.
-4. `FORWARD DROP source=<cidrPool> dest=<management networks, blockedCidrs>`.
-5. `IN DROP source=<cidrPool> dest=<management networks, blockedCidrs>`: an exit node's
-   own addresses are reached through input, not forward.
+4. `FORWARD DROP source=<cidrPool> dest=<management networks, blockedCidrs, sandboxCidrs>`.
+5. `IN DROP source=<cidrPool> dest=<management networks, blockedCidrs, sandboxCidrs>`: an exit
+   node's own addresses are reached through input, not forward.
+6. Only with `network.sandboxCidrs` (the sandbox cluster's worker vnet): `FORWARD DROP` and `IN
+   DROP`, `source=<sandboxCidrs> dest=<cidrPool, management networks, blockedCidrs>`. Sandbox
+   workers leave through an exit node that SNATs them to a node address, which the NAS exports and
+   the management hosts admit, so their drop must happen here, before the rewrite. An entry that
+   overlaps `cidrPool` or a blocked network (the management networks included) is refused (the
+   reconcile fails and writes nothing).
 
 **Who owns the DROPs.** A cluster normally has one portal, which owns its DROPs outright: a
 changed `cidrPool` or `blockedCidrs` replaces them and leaves none behind. Their comment is
@@ -85,10 +91,13 @@ flowchart LR
   inet["Internet via SNAT"]:::impl
 
   mgmt["Node management networks,<br/>blockedCidrs"]:::impl
+  sbx["Sandbox workers<br/>sandboxCidrs"]:::impl
 
   va1 <-->|"ACCEPT: own subnets"| va2
   va1 -.-x|"DROP: dest in cidrPool"| vb1
   va1 -.-x|"DROP"| mgmt
+  va1 -.-x|"DROP"| sbx
+  sbx -.-x|"DROP: to cidrPool, mgmt"| mgmt
   va1 -->|"egress allowed"| inet
   vb1 -->|"egress allowed"| inet
 ```

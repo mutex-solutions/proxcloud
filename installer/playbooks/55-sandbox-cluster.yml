@@ -1,0 +1,199 @@
+# Stage 55, mode=split with sandbox.enabled: the platform's sandbox cluster (docs/managed-sandbox.md). Its vnet, the
+# cluster from the kamaji chart (NodeRestriction on), then deploy/sandbox-cluster on it. Every step is idempotent.
+# Not done here yet: the per-NIC VM firewall on the workers (SB2b), sandbox-proxy, TLS and the public entry (SB4), the
+# `sandbox` provider (SB3). Tenants cannot reach the cluster: the provider kind is refused and no route is mounted.
+- name: Create the sandbox network
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  vars:
+    net: "{{ pc.sandbox.network }}"
+    svc_net: "{{ (pc.services.network.gateway ~ '/' ~ pc.services.network.prefix) if pc.services.network.gateway else '' }}"
+  tasks:
+    - name: Skip unless the sandbox is on
+      ansible.builtin.meta: end_play
+      when: not pc_sandbox_on
+    # The management networks come from PVE at run time; the portal refuses a sandbox subnet overlapping them.
+    - name: Check the sandbox network settings
+      vars:
+        avoid: {services.network: "{{ svc_net }}", network.blocked_cidrs: "{{ pc.network.blocked_cidrs }}", network.public.cidr: "{{ pc.network.public.cidr | default('') }}"}
+        problem: "{{ net | pc_sandbox_net_problem(pc.network.cidr_pool, avoid) }}"
+      ansible.builtin.assert: {that: problem == '', fail_msg: "{{ problem }}", quiet: true}
+    # Tenants reach the services network, so the PVE isolation rules leave it open to the workers too; only the
+    # guardrail keeps a sandbox pod off the control-plane APIs, the database load balancers and pve_proxy_ip.
+    - name: Check the guardrail covers the services network
+      vars:
+        problem: "{{ {'services.network': svc_net} | pc_sandbox_guardrail_problem }}"
+      ansible.builtin.assert: {that: problem == '', fail_msg: "{{ problem }}", quiet: true}
+    - name: Check a zone is named on a site with a zone per project
+      ansible.builtin.assert:
+        that: pc.network.isolation != 'evpn' or pc.sandbox.network.zone
+        fail_msg: >-
+          network.isolation is evpn, so there is no shared zone: set sandbox.network.zone to an EVPN zone made for the
+          sandbox alone. A tenant's zone would put the workers in that tenant's VRF.
+        quiet: true
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Check the bootstrap ISO store
+      vars:
+        problem: "{{ pc_storage_rows | pc_boot_iso_problem(pc_sandbox_iso_storage, pc_sandbox_storage) }}"
+      ansible.builtin.assert: {that: problem == '', fail_msg: "sandbox: {{ problem }}", quiet: true}
+    - name: Read the zones and vnets
+      check_mode: false
+      ansible.builtin.uri: {url: "{{ pc_api }}/cluster/sdn/{{ item }}"}
+      loop: [zones, vnets]
+      register: pc_sdn
+    # The portal creates the default zone with the first tenant network, after stage 60: a first install skips the
+    # cluster and says so, and a re-run of this stage (or of make install) builds it.
+    - name: Find the zone
+      ansible.builtin.set_fact:
+        pc_sbx_zone: "{{ pc_sdn.results[0].json.data | selectattr('zone', 'eq', pc_sandbox_zone) | list }}"
+    - name: Skip the sandbox cluster until the zone exists
+      when: pc_sbx_zone | length == 0
+      block:
+        - name: Say why
+          ansible.builtin.debug:
+            msg: >-
+              SKIPPED: EVPN zone {{ pc_sandbox_zone }} does not exist yet. Create a tenant network once (the portal
+              creates the zone), or set sandbox.network.zone to an existing EVPN zone no tenant uses, then run stage
+              55 again.
+        - name: Remember the skip
+          ansible.builtin.set_fact: {pc_sbx_skip: true}
+        - name: Stop here
+          ansible.builtin.meta: end_play
+    - name: Check the zone is EVPN
+      ansible.builtin.assert:
+        that: pc_sbx_zone[0].type == 'evpn'
+        fail_msg: "zone {{ pc_sandbox_zone }} is {{ pc_sbx_zone[0].type }}; the sandbox vnet needs EVPN (routed, SNAT on the exit node)"
+        quiet: true
+    - name: Check the vnet is ours or free
+      vars:
+        have: "{{ pc_sdn.results[1].json.data | selectattr('vnet', 'eq', net.vnet) | list }}"
+      ansible.builtin.assert:
+        that: have | length == 0 or have[0].zone == pc_sandbox_zone
+        fail_msg: "vnet {{ net.vnet }} exists in zone {{ have[0].zone | default('') }}, not {{ pc_sandbox_zone }}"
+        quiet: true
+    - name: Check no other vnet holds the VNI
+      vars:
+        taken: "{{ pc_sdn.results[1].json.data | rejectattr('vnet', 'eq', net.vnet) | selectattr('tag', 'defined') | map(attribute='tag') | map('string') | select('eq', net.tag | string) | list }}"
+      ansible.builtin.assert:
+        that: taken | length == 0
+        fail_msg: "VNI {{ net.tag }} is taken by another vnet: set sandbox.network.tag to a free one"
+        quiet: true
+    - name: Create the vnet
+      when: pc_sdn.results[1].json.data | selectattr('vnet', 'eq', net.vnet) | list | length == 0
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/cluster/sdn/vnets"
+        method: POST
+        body_format: form-urlencoded
+        # Not an "st:" alias: no project owns it, so the portal's network sync and isolation code leave it alone.
+        body: {vnet: "{{ net.vnet }}", zone: "{{ pc_sandbox_zone }}", tag: "{{ net.tag }}", alias: proxcloud-sandbox}
+      changed_when: true
+      register: pc_vnet_made
+    - name: Read its subnets
+      check_mode: false
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/cluster/sdn/vnets/{{ net.vnet }}/subnets?pending=1"
+        status_code: [200, 500]
+      register: pc_subnets
+    - name: Create the subnet
+      when: pc_subnets.status != 200 or pc_subnets.json.data | selectattr('cidr', 'eq', net.subnet) | list | length == 0
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/cluster/sdn/vnets/{{ net.vnet }}/subnets"
+        method: POST
+        body_format: form-urlencoded
+        # SNAT on the exit node, no DHCP: CAPMOX assigns the worker addresses.
+        body: {subnet: "{{ net.subnet }}", type: subnet, gateway: "{{ net.gateway }}", snat: 1}
+      changed_when: true
+      register: pc_subnet_made
+    - name: Apply the SDN change
+      when: pc_vnet_made is changed or pc_subnet_made is changed
+      ansible.builtin.uri: {url: "{{ pc_api }}/cluster/sdn", method: PUT}
+      register: pc_sdn_apply
+      changed_when: true
+    - name: Wait for it
+      when: pc_sdn_apply is changed
+      ansible.builtin.include_tasks: tasks/pve-wait.yml
+      vars: {wait_upid: "{{ pc_sdn_apply.json.data }}", wait_node: "{{ pc_nodes[0] }}"}
+
+- name: Build the sandbox cluster
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  vars:
+    kc: k3s kubectl --kubeconfig /root/services.kubeconfig
+    pc_sandbox_token_secret: "{{ lookup('ansible.builtin.file', pc_gen ~ '/token-' ~ pc.sandbox.token) | trim }}"
+  tasks:
+    - name: Skip unless the sandbox is on and its network is there
+      ansible.builtin.meta: end_play
+      when: not pc_sandbox_on or hostvars.localhost.pc_sbx_skip | default(false)
+    - name: Apply the cluster on the services cluster
+      ansible.builtin.command:
+        cmd: "{{ kc }} apply -f -"
+        stdin: "{{ lookup('ansible.builtin.template', 'templates/sandbox-cluster.yml.j2') }}"
+      register: pc_sbx_applied
+      changed_when: pc_sbx_applied.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+      no_log: true
+    # The release gate: a worker's kubelet credential must not reach every Secret of a cluster that runs tenant code.
+    - name: Check NodeRestriction on its control plane
+      ansible.builtin.command: "{{ kc }} -n pc-sandbox get kamajicontrolplane pc-sandbox-kamaji-cp -o jsonpath={.spec.admissionControllers}"
+      register: pc_sbx_adm
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: pc_sbx_adm.rc == 0 and 'NodeRestriction' in pc_sbx_adm.stdout
+    - name: Wait for its admin kubeconfig
+      ansible.builtin.command: "{{ kc }} -n pc-sandbox get secret pc-sandbox-kamaji-cp-admin-kubeconfig -o jsonpath={.data.admin\\.conf}"
+      register: pc_sbx_kc
+      changed_when: false
+      no_log: true
+      retries: 60
+      delay: 10
+      until: pc_sbx_kc.rc == 0 and pc_sbx_kc.stdout != ''
+    - name: Keep the kubeconfig on the mgmt host
+      ansible.builtin.copy:
+        dest: /root/sandbox.kubeconfig
+        content: "{{ pc_sbx_kc.stdout | b64decode }}"
+        mode: "0600"
+      no_log: true
+    - name: Keep the kubeconfig in the site directory
+      ansible.builtin.copy:
+        dest: "{{ pc_gen }}/sandbox.kubeconfig"
+        content: "{{ pc_sbx_kc.stdout | b64decode }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+    - name: Wait for every worker to be Ready
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl --kubeconfig /root/sandbox.kubeconfig get nodes --no-headers | awk '$2 == "Ready"' | wc -l
+      args: {executable: /bin/bash}
+      register: pc_sbx_ready
+      changed_when: false
+      retries: 90
+      delay: 20
+      until: pc_sbx_ready.rc == 0 and pc_sbx_ready.stdout | int >= pc.sandbox.nodes.count | int
+    - name: Copy the cluster manifests
+      ansible.builtin.copy:
+        src: "{{ pc_repo_root }}/deploy/sandbox-cluster/"
+        dest: /root/sandbox-bundle/
+        mode: preserve
+    # The README's apply order. check-ipv4-only.sh stops the stage before agent-sandbox and the guardrail if IPv6 is on.
+    - name: Apply the runtime, the guardrail and the portal's identity
+      ansible.builtin.shell: |
+        set -euo pipefail
+        out=$(kubectl apply -f cilium-node-config.yaml)
+        case "$out" in *unchanged*) ;; *) kubectl -n kube-system rollout restart ds/cilium ;; esac
+        kubectl -n kube-system rollout status ds/cilium --timeout=10m
+        kubectl apply -f node-setup.yaml -f runtimeclass.yaml
+        kubectl -n sandbox-system rollout status ds/node-setup --timeout=15m
+        ./check-ipv4-only.sh
+        kubectl apply --server-side -f agent-sandbox/sandbox-with-extensions.yaml
+        kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=5m
+        kubectl apply -f network-policy.yaml -f rbac.yaml
+      args: {executable: /bin/bash, chdir: /root/sandbox-bundle}
+      environment: {KUBECONFIG: /root/sandbox.kubeconfig}
+      changed_when: false

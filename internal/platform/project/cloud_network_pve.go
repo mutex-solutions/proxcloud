@@ -136,7 +136,7 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 			return err
 		}
 		// A new network's subnet is allowed to its project before it goes live.
-		if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs); err != nil {
+		if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs); err != nil {
 			_ = ps.DeleteNetwork(ctx, proj.ID, res.Vnet)
 			return fmt.Errorf("isolation: %w", err)
 		}
@@ -145,7 +145,7 @@ func (h *Handler) pveCreateNetwork(w http.ResponseWriter, r *http.Request, u *us
 			// The apply failed with the vnet staged — unstage and re-apply so the SDN
 			// config never sits pending (risk #2 in the plan).
 			_ = ps.DeleteNetwork(ctx, proj.ID, res.Vnet)
-			_ = ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs)
+			_ = ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs)
 			_ = ps.ApplyAndWait(ctx)
 			return fmt.Errorf("apply: %w", err)
 		}
@@ -231,7 +231,7 @@ func (h *Handler) pveDeleteNetwork(ctx context.Context, w http.ResponseWriter, e
 			// Shrink the project's allow-list (a freed CIDR may be carved for another
 			// tenant next). No pool = nothing was ever isolated.
 			if netCfg.CIDRPool != "" {
-				if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs); err != nil {
+				if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs); err != nil {
 					return fmt.Errorf("isolation: %w", err)
 				}
 			}
@@ -599,7 +599,7 @@ func (h *Handler) pveSubnetAction(w http.ResponseWriter, r *http.Request, u *use
 				if err := ps.RemoveSubnet(ctx, proj.ID, cr.ExternalID, cidr); err != nil {
 					return pveVolumeErr(err)
 				}
-				if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs); err != nil {
+				if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs); err != nil {
 					return fmt.Errorf("isolation: %w", err)
 				}
 				if err := ps.ApplyAndWait(ctx); err != nil {
@@ -612,7 +612,7 @@ func (h *Handler) pveSubnetAction(w http.ResponseWriter, r *http.Request, u *use
 				return pveVolumeErr(err)
 			}
 		}
-		if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs); err != nil {
+		if err := ps.ReconcileIsolation(ctx, proj.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs); err != nil {
 			return fmt.Errorf("isolation: %w", err)
 		}
 		return ps.ApplyAndWait(ctx)

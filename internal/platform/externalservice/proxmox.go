@@ -267,10 +267,13 @@ func (e *ExternalService) PVETemplates() []PVETemplate {
 
 // PVENetwork is the admin network config (config.network).
 type PVENetwork struct {
-	DefaultZone    string
-	Zones          map[string]pve.ZoneConfig
-	CIDRPool       string
-	BlockedCIDRs   []string // networks tenants must not reach, on top of the nodes' management networks
+	DefaultZone  string
+	Zones        map[string]pve.ZoneConfig
+	CIDRPool     string
+	BlockedCIDRs []string // networks tenants must not reach, on top of the nodes' management networks
+	// SandboxCIDRs are the sandbox cluster's worker networks (config.network.sandboxCidrs): tenants may
+	// not reach them, and they may reach neither tenants nor the blocked networks.
+	SandboxCIDRs   []string
 	PublicNetworks []PVEPublicNetwork
 	// Isolation is pve.IsolationShared (default; anything unknown falls back to
 	// it — still isolated) or pve.IsolationEVPN (a zone per project, templated
@@ -326,6 +329,7 @@ func (e *ExternalService) PVENetworkConfig() PVENetwork {
 		DefaultZone:    str(n["defaultZone"]),
 		CIDRPool:       str(n["cidrPool"]),
 		BlockedCIDRs:   strList(n["blockedCidrs"]),
+		SandboxCIDRs:   strList(n["sandboxCidrs"]),
 		Zones:          map[string]pve.ZoneConfig{},
 		Isolation:      pve.IsolationShared,
 		EVPNController: str(n["evpnController"]),

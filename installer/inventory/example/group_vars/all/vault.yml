@@ -12,4 +12,5 @@ proxcloud_vault:
   # images_token_secret: ...
   # capi_token_secret: ...   (mode=split)
   # csi_token_secret: ...    (mode=split)
+  # sandbox_token_secret: ... (mode=split, sandbox.enabled)
   # truenas_api_key: ...     # object_store.mode=truenas-app

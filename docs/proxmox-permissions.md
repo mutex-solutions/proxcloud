@@ -20,6 +20,7 @@ The admin **Test connection** button on the Proxmox provider reads the token's e
 | `pc-<projectId>` | one per project, created by the portal (the prefix is the provider's `poolPrefix`) |
 | `pc-templates` | OS and k8s node templates |
 | `proxcloud-system` | management VMs, the services cluster and its storage VMs. The platform token gets `NoAccess` here. Its name must **not** start with `poolPrefix`. |
+| `proxcloud-sandbox` | `sandbox.enabled` only: the sandbox cluster's workers ([managed-sandbox.md](managed-sandbox.md)). No project owns it, so nothing in it is synced or billed to a tenant. Its name must **not** start with `poolPrefix`. |
 
 ## ProxCloudPlatform
 
@@ -61,7 +62,7 @@ ACLs:
 | `/mapping/pci` | `ProxCloudPlatform` | 1 | GPU clusters only |
 | `/storage/<importStorage>` | `PVEDatastoreAdmin` | 0 | image import only: PVE wants `Datastore.Allocate` to delete any file that is not a backup, and the import store is the one place the portal needs that. Without it an imported image works, the uploaded file stays on the store, and Test connection warns. The installer adds it with a NAS. It shadows the `/storage` grant on that store, so with minted cluster tokens add `ProxCloudKubeMint` on the same path too |
 
-There is no ACL on `/vms`. VMs get their rights only through their pool, so a VM outside `pc-*`/`pc-templates` is invisible to the portal.
+There is no ACL on `/vms`. VMs get their rights only through their pool, so a VM outside `pc-*`/`pc-templates` is invisible to the portal. The exception is `proxcloud-sandbox` (`sandbox.enabled`): it has no `NoAccess` row, so the portal token, and `csi@pve!gateway` through `/pool`, see the sandbox workers like any project VM. Nothing in the portal acts on them yet (no project owns the pool); SB2b decides between a narrower role there and `NoAccess`.
 
 ## ProxCloudCAPI
 
@@ -96,6 +97,7 @@ Each tenant cluster runs under tokens the portal mints at create and revokes aft
 | `capmox@pve!<clusterId>` | `ProxCloudCAPI` on the project pool, the boot store, the vnet, `/sdn/zones/localnetwork` and `/nodes`; `PVETemplateUser` on `pc-templates`; `PVEDatastoreAdmin` on the node-local ISO store (provider `isoStorage`, default `local`), which needs the same role for `capmox@pve` itself | CAPMOX on the services cluster |
 | `csi@pve!gateway` | `ProxCloudCSI` on `/pool` and `/storage` (propagate), one token for every cluster. Created by the installer, not minted | the portal API only (the CSI gateway, below) |
 | `csi@pve!<clusterId>` | `ProxCloudCSI` on the project pool and the stores of the cluster's StorageClasses. Minted only with the provider's `csiSharedStores`: **`Datastore.Allocate` on a store opens every disk on it, of any project** ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)) | the tenant cluster, where a cluster-admin can read it |
+| `capmox@pve!sandbox` | the same grants as `capmox@pve!<clusterId>`, on pool `proxcloud-sandbox` and the sandbox vnet (`/sdn/zones/<zone>/<vnet>`), the services boot store and the node-local ISO store. Created by stage 10 with `sandbox.enabled`, token rows only (`sandbox_acls`), plus a `PVEDatastoreAdmin` row for `capmox@pve` when `sandbox.iso_storage` is not `services.iso_storage`; stage 10 then checks with PVE that it sees one `iso` store | CAPMOX on the services cluster, for the sandbox cluster |
 
 `/sdn/zones/localnetwork` is there because PVE checks a clone against the NICs of the template, which sit on a node bridge (`Permission check failed (/sdn/zones/localnetwork/vmbr0, SDN.Use)`). The token also has it for every other node bridge, so it stays on the management side. It needs no `/`: go-proxmox's `GET /cluster/status` answers 403 and is ignored.
 
