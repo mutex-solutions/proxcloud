@@ -17,6 +17,7 @@ The toggles live in the provider document under `config.services[<slug>][<region
 | `proxmox` | `volumev3` | Volumes and snapshots |
 | `proxmox` | `network` | Private networks and security groups |
 | `ceph-s3` | `object-store` | Object storage buckets and S3 access keys |
+| `powerdns` | `dns` | DNS zones |
 | `kamaji` | `kubernetes` | Managed Kubernetes clusters |
 | `dbaas` | `database` | Managed database clusters |
 

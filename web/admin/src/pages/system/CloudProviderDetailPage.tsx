@@ -456,6 +456,21 @@ function ConnectionTab({ id, provider }: TabProps) {
       </Card>
     )
   }
+  if (provider.config?.provider === "powerdns") {
+    const c = asObj(provider.config)
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-eyebrow">PowerDNS connection</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Row label="API URL" value={str(c.apiUrl)} />
+          <Row label="Name servers of new zones" value={Array.isArray(c.nameservers) ? c.nameservers.join(", ") : ""} />
+          <Row label="Region" value={str(c.region)} />
+        </CardContent>
+      </Card>
+    )
+  }
   return <Note>Unknown provider type "{str(provider.config?.provider)}" — no connection settings to show.</Note>
 }
 

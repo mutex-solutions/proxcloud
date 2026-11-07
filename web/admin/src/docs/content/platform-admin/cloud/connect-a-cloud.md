@@ -2,7 +2,7 @@
 
 ProxCloud provisions and meters against one or more Proxmox VE clusters. You register each cluster as a *cloud provider* in the admin portal. One provider is one cluster, and one cluster is one region. ProxCloud drives the cluster through its REST API on port 8006 with a single API token. Tenancy is enforced on the platform side: every project gets its own resource pool, and ProxCloud checks ownership of every VM, network, firewall group and GPU mapping against its own database before it changes anything.
 
-The **Add provider** dialog also offers three other provider kinds: `ceph-s3` (S3 object storage on Ceph RGW), `kamaji` (managed Kubernetes) and `dbaas` (managed databases). This page covers the `proxmox` kind.
+The **Add provider** dialog also offers other provider kinds: `ceph-s3` (S3 object storage on Ceph RGW), `powerdns` (tenant DNS zones), `kamaji` (managed Kubernetes) and `dbaas` (managed databases). This page covers the `proxmox` kind.
 
 ## Before you start
 

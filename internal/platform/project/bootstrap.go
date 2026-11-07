@@ -36,7 +36,7 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if err != nil {
 		return err
 	}
-	var cephES, kamajiES, dbaasES, pveES, truenasES []*externalservice.ExternalService
+	var cephES, kamajiES, dbaasES, pveES, truenasES, dnsES []*externalservice.ExternalService
 	for i := range services {
 		if services[i].IsDisabled() {
 			continue
@@ -52,9 +52,11 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 			pveES = append(pveES, &services[i])
 		case services[i].IsTrueNAS():
 			truenasES = append(truenasES, &services[i])
+		case services[i].IsPowerDNS():
+			dnsES = append(dnsES, &services[i])
 		}
 	}
-	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 && len(truenasES) == 0 {
+	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 && len(truenasES) == 0 && len(dnsES) == 0 {
 		return nil // no cloud provider configured → nothing to provision
 	}
 	p.Status = StatusEnabled
@@ -85,6 +87,12 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	// TrueNAS: nothing to create until the first share, only the binding.
 	for _, es := range truenasES {
 		if err := h.bootstrapTrueNASOnto(ctx, p, es); err != nil {
+			return err
+		}
+	}
+	// PowerDNS: same, until the first zone.
+	for _, es := range dnsES {
+		if err := h.bootstrapBindingOnto(ctx, p, es, "powerdns"); err != nil {
 			return err
 		}
 	}
@@ -243,8 +251,13 @@ func (h *Handler) BootstrapCephOnto(ctx context.Context, p *Project, es *externa
 
 // bootstrapTrueNASOnto appends the binding {serviceId, provider:"truenas", region}. Idempotent.
 func (h *Handler) bootstrapTrueNASOnto(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
+	return h.bootstrapBindingOnto(ctx, p, es, "truenas")
+}
+
+// bootstrapBindingOnto attaches a provider that needs nothing created for a project up front.
+func (h *Handler) bootstrapBindingOnto(ctx context.Context, p *Project, es *externalservice.ExternalService, provider string) error {
 	if !p.HasService(es.ID) {
-		p.Services = append(p.Services, map[string]any{"serviceId": es.ID, "provider": "truenas", "region": es.CephRegion()})
+		p.Services = append(p.Services, map[string]any{"serviceId": es.ID, "provider": provider, "region": es.CephRegion()})
 	}
 	return h.svc.Save(ctx, p)
 }
@@ -273,6 +286,9 @@ func (h *Handler) BootstrapOnto(ctx context.Context, p *Project, es *externalser
 	}
 	if es.IsTrueNAS() {
 		return h.bootstrapTrueNASOnto(ctx, p, es)
+	}
+	if es.IsPowerDNS() {
+		return h.bootstrapBindingOnto(ctx, p, es, "powerdns")
 	}
 	return fmt.Errorf("bootstrap: unsupported provider kind %q", es.Provider())
 }

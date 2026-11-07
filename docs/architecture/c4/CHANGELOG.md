@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Tenant DNS zones on PowerDNS (P8-3)
+
+**What changed**
+
+- New provider kind `powerdns` and package `internal/cloud/powerdns`: tenants create zones and edit records in the
+  customer console (`DNS_ZONE` rows, `LIST_RECORDS`, `SET_RECORD`, `DELETE_RECORD`). The zone's `account` field names
+  the owning project. The sync reconciles rows, and project teardown deletes zones.
+
+**Why**
+
+- DNS was a gap against the earlier cloud backend. A separate provider keeps the DNS server optional and out of the PVE
+  path, the same shape as TrueNAS shares. The account field is the one ownership proof, since zone names are global on
+  the server.
+- The PVE SDN DNS plugin stays Planned: wiring it means changing the shared EVPN zone, and its value depends on IPAM
+  records this platform does not create today.
+
+**Diagrams updated:** `c1-context.md` (new external system).
+
 ## 2026-11-07: Seeds stay with their project, a retype keeps its row
 
 **What changed**

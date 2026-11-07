@@ -259,6 +259,18 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 	if sharesLeft {
 		pveTeardownFailed = true
 	}
+	// DNS zones: a failure stays in the remaining rows, and a re-run retries.
+	zoneServices, zerr := h.powerDNSServices(ctx, p)
+	if zerr != nil {
+		slog.Error("teardown: list DNS providers", "project", p.ID, "err", zerr)
+	}
+	for _, es := range zoneServices {
+		left, terr := h.teardownZones(ctx, p, es, remaining)
+		remaining = left
+		if terr != nil {
+			slog.Error("teardown: DNS zones", "project", p.ID, "serviceId", es.ID, "err", terr)
+		}
+	}
 
 	// Delete the per-service anchor the project is bootstrapped on (admin-scoped client, not
 	// project-scoped — a project user cannot delete itself). Best-effort per provider kind.
