@@ -65,6 +65,9 @@ spec:
             machineTags: [proxcloud, pc-sandbox]
             machineCount: {{ sbx.nodes.count | int }}
             nodeLabels: {proxcloud.io/sandbox: cpu}
+            # Off only through the portal's sync, once the worker's VM firewall is in place and the join token its disk
+            # holds has expired (docs/managed-sandbox.md §2). NodeRestriction keeps the kubelet from dropping it.
+            taints: [{key: proxcloud.io/unsecured, value: "true", effect: NoSchedule}]
         addons:
           metricsServer: {enabled: false}
           certManager: {enabled: false}

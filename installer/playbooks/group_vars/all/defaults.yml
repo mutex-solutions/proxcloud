@@ -160,7 +160,13 @@ pc_defaults:
       metallb: ""                # LoadBalancer addresses inside the cluster, e.g. 192.0.2.200-192.0.2.209
       dns: [1.1.1.1, 8.8.8.8]    # never on the management network: the isolation rules drop it
       mtu: 1450
+      # required: the sandbox's own egress address (D14), so abuse reports and blocklists hit it and not the nodes,
+      # the portal or tenants. An IPv4 address on the exit node's uplink network that the uplink routes to that node
+      # and nothing else uses; stage 55 puts it on the exit node (root ssh, inventory group pve). "node" shares the
+      # exit node's own address instead (PVE's SNAT), for a site with one public address that accepts the risk.
+      snat: ""
     nodes: {count: 2, cores: 4, memory: 8192, disk: 40}
+    unsecured_min_age_minutes: 20  # a new worker takes tenant pods no earlier: CABPK's bootstrap token TTL (15) + margin
 
   nas:
     host: ""                     # TrueNAS address; empty = no NAS stage

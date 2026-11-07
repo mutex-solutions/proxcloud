@@ -512,6 +512,19 @@ func (c *Client) ListNodes(ctx context.Context) ([]map[string]any, error) {
 	return c.list(ctx, "/api/v1/nodes", "")
 }
 
+// SetNodeTaints replaces a Node's taints, guarded by the resourceVersion it was read at (409 if it changed since).
+func (c *Client) SetNodeTaints(ctx context.Context, name, resourceVersion string, taints []any) error {
+	if taints == nil {
+		taints = []any{}
+	}
+	patch := map[string]any{"metadata": map[string]any{"resourceVersion": resourceVersion}, "spec": map[string]any{"taints": taints}}
+	_, err := c.do(ctx, http.MethodPatch, "/api/v1/nodes/"+url.PathEscape(name), nil, patch, "application/merge-patch+json")
+	return err
+}
+
+// Server is the API server URL of the kubeconfig.
+func (c *Client) Server() string { return c.rc.server }
+
 // ListPersistentVolumes lists the cluster's PersistentVolumes.
 func (c *Client) ListPersistentVolumes(ctx context.Context) ([]map[string]any, error) {
 	return c.list(ctx, "/api/v1/persistentvolumes", "")

@@ -35,6 +35,10 @@ package externalservice
 //	      "isolation": "shared",               // "shared" (default zone + vnet DROP rules) | "evpn-per-project"
 //	      "evpnController": "proxcloud"        // evpn-per-project: the controller every project zone uses
 //	    },
+//	    "sandbox": {                           // the platform's sandbox workers, fenced by the sync (PVESandbox)
+//	      "pool": "proxcloud-sandbox", "nodes": ["192.0.2.10-192.0.2.29"], "loadBalancers": ["192.0.2.200-192.0.2.209"],
+//	      "dns": ["1.1.1.1"], "kubeletSources": ["198.51.100.0/24"], "snat": "203.0.113.50", "unsecuredMinAgeMinutes": 20
+//	    },                                     // + secret.sandboxKubeconfig (nodes get/list/patch)
 //	    "storageProfiles": {                   // Phase 5 — honest capability flags
 //	      "std": {"storages": {"*": "local-zfs"}, "shared": false, "snapshots": true,
 //	              "thin": true, "liveMigrate": false, "replication": false}
@@ -382,6 +386,36 @@ func (e *ExternalService) PVENetworkConfig() PVENetwork {
 		}
 	}
 	return out
+}
+
+// PVESandbox is config.sandbox: the platform's sandbox workers, whose VM firewall the sync job applies and keeps
+// (docs/managed-sandbox.md §2). The subnet is network.sandboxCidrs.
+type PVESandbox struct {
+	Pool           string
+	Nodes          []string // worker addresses (ranges allowed)
+	LoadBalancers  []string // the sandbox cluster's MetalLB addresses
+	DNS            []string // resolvers the workers may ask (port 53 only)
+	KubeletSources []string // who may reach a worker's kubelet
+	SNAT           string   // the sandbox's own egress address (D14) on the exit node, or "node"; never reachable from a worker
+	// UnsecuredMinAge: a new worker keeps the unsecured taint at least this long after it registers, past the
+	// lifetime of the join token its own disk still holds (CABPK's default bootstrap token TTL is 15 minutes; the
+	// default 20 leaves room for a token CABPK refreshed just before the Node registered).
+	UnsecuredMinAge time.Duration
+	Kubeconfig      string // secret.sandboxKubeconfig: the sandbox cluster, nodes get/list/patch
+}
+
+// PVESandboxConfig reads config.sandbox; ok is false when the provider has no sandbox pool.
+func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
+	s, _ := e.Config["sandbox"].(map[string]any)
+	cfg = PVESandbox{
+		Pool: str(s["pool"]), Nodes: strList(s["nodes"]), LoadBalancers: strList(s["loadBalancers"]),
+		DNS: strList(s["dns"]), KubeletSources: strList(s["kubeletSources"]), SNAT: str(s["snat"]),
+		UnsecuredMinAge: 20 * time.Minute, Kubeconfig: str(e.secretMap()["sandboxKubeconfig"]),
+	}
+	if m := intOf(s["unsecuredMinAgeMinutes"]); m > 0 {
+		cfg.UnsecuredMinAge = time.Duration(m) * time.Minute
+	}
+	return cfg, cfg.Pool != ""
 }
 
 // PVEStorageProfile is one admin-curated storage class (config.storageProfiles.<slug>):

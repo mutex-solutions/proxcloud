@@ -194,6 +194,32 @@
           config: {csiGatewayTokenId: csi@pve!gateway}
           secret: {csiGatewaySecret: "{{ lookup('ansible.builtin.file', pc_gen ~ '/token-gateway') | trim }}"}
       no_log: true
+    # Layer 1 of the sandbox network: the sync fences every VM of the sandbox pool and takes the unsecured taint off
+    # with the kubeconfig stage 55 minted (nodes only). Workers take no tenant pods until this has run.
+    - name: Give the provider the sandbox workers
+      vars:
+        sandbox:
+          pool: "{{ pc.sandbox.pool }}"
+          nodes: ["{{ pc.sandbox.network.nodes }}"]
+          loadBalancers: ["{{ pc.sandbox.network.metallb }}"]
+          dns: "{{ pc.sandbox.network.dns }}"
+          kubeletSources: "{{ pc.services.network.nodes }}"
+          snat: "{{ pc.sandbox.network.snat | string }}"
+          unsecuredMinAgeMinutes: "{{ pc.sandbox.unsecured_min_age_minutes | int }}"
+      when:
+        - pc_sandbox_on
+        - (pc_gen ~ '/sandbox-firewall.kubeconfig') is file
+        - (pc_service.config.sandbox | default({})) != sandbox
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service/{{ pc_service.id }}"
+        method: PUT
+        body:
+          name: "{{ pc.provider.name }}"
+          config: {sandbox: "{{ sandbox }}"}
+          secret: {sandboxKubeconfig: "{{ lookup('ansible.builtin.file', pc_gen ~ '/sandbox-firewall.kubeconfig') }}"}
+      no_log: true
     - name: Test the connection with the platform token
       proxcloud_api:
         access_key: "{{ api_key.id }}"

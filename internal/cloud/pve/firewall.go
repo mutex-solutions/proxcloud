@@ -174,8 +174,10 @@ func (c *Client) AddVMGroupRule(ctx context.Context, node string, vmid int, grou
 
 // IPSet is one row of GET .../firewall/ipset (or one entry of a set: CIDR).
 type IPSet struct {
-	Name string `json:"name"`
-	CIDR string `json:"cidr"`
+	Name    string `json:"name"`
+	CIDR    string `json:"cidr"`
+	NoMatch int    `json:"nomatch,omitempty"` // entry rows: 1 = an exception (`!cidr`) inside the set
+	Comment string `json:"comment,omitempty"` // set rows
 }
 
 func (c *Client) ListVMIPSets(ctx context.Context, node string, vmid int) ([]IPSet, error) {
@@ -207,4 +209,67 @@ func (c *Client) DeleteVMIPSet(ctx context.Context, node string, vmid int, name 
 
 func (c *Client) AddVMIPSetEntry(ctx context.Context, node string, vmid int, name, cidr string) error {
 	return c.post(ctx, vmFirewallPath(node, vmid)+"/ipset/"+url.PathEscape(name), formVals{"cidr": cidr}.values(), nil)
+}
+
+// GetVMFirewallOptions reads the VM firewall options (absent keys are PVE's defaults).
+func (c *Client) GetVMFirewallOptions(ctx context.Context, node string, vmid int) (map[string]any, error) {
+	out := map[string]any{}
+	if err := c.get(ctx, vmFirewallPath(node, vmid)+"/options", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ListVMFirewallRules lists the VM's own rules, group references included.
+func (c *Client) ListVMFirewallRules(ctx context.Context, node string, vmid int) ([]FirewallRule, error) {
+	var out []FirewallRule
+	if err := c.get(ctx, vmFirewallPath(node, vmid)+"/rules", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DeleteVMFirewallRule removes the VM rule at pos; PVE refuses it when digest no longer matches.
+func (c *Client) DeleteVMFirewallRule(ctx context.Context, node string, vmid, pos int, digest string) error {
+	return c.delete(ctx, vmFirewallPath(node, vmid)+"/rules/"+itoa0(pos), formVals{"digest": digest}.values(), nil)
+}
+
+// --- cluster IP sets (/cluster/firewall/ipset), referenced from rules as +dc/<name> ---
+
+func (c *Client) ListClusterIPSets(ctx context.Context) ([]IPSet, error) {
+	var out []IPSet
+	if err := c.get(ctx, "/cluster/firewall/ipset", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) ListClusterIPSetEntries(ctx context.Context, name string) ([]IPSet, error) {
+	var out []IPSet
+	if err := c.get(ctx, "/cluster/firewall/ipset/"+url.PathEscape(name), nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) CreateClusterIPSet(ctx context.Context, name, comment string) error {
+	return c.post(ctx, "/cluster/firewall/ipset", formVals{"name": name, "comment": comment}.values(), nil)
+}
+
+// AddClusterIPSetEntry adds a CIDR (PVE 9.2 takes no range and no zero prefix there); nomatch makes it an exception.
+func (c *Client) AddClusterIPSetEntry(ctx context.Context, name, cidr string, nomatch bool) error {
+	f := formVals{"cidr": cidr}
+	if nomatch {
+		f["nomatch"] = "1"
+	}
+	return c.post(ctx, "/cluster/firewall/ipset/"+url.PathEscape(name), f.values(), nil)
+}
+
+// DeleteClusterIPSet drops a set with its entries.
+func (c *Client) DeleteClusterIPSet(ctx context.Context, name string) error {
+	err := c.delete(ctx, "/cluster/firewall/ipset/"+url.PathEscape(name), formVals{"force": "1"}.values(), nil)
+	if err != nil && IsNotFound(err) {
+		return nil
+	}
+	return err
 }

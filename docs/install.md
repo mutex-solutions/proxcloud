@@ -157,19 +157,32 @@ until a later phase.
    the sandbox guardrail denies (a sandbox pod would reach the tenants' control planes there). The portal refuses a
    subnet overlapping a node's management network. With `network.isolation: evpn` set `sandbox.network.zone` to an
    EVPN zone made for the sandbox: there is no shared zone, and a tenant's zone would put the workers in its VRF.
+   Set `sandbox.network.snat` to the sandbox's own egress address: an IPv4 address on the exit node's uplink network
+   that the uplink routes to that node and nothing else uses, so abuse reports and blocklists name it and not the
+   nodes or the portal. The zone needs one exit node (or `exitnodes-primary`), and that node must be in the inventory
+   group `pve` with root ssh. `snat: node` shares the exit node's own address instead.
 2. `make install`, or stages 10, 55 and 60 on an installed site. Stage 10 creates pool `proxcloud-sandbox` and token
    `capmox@pve!sandbox` ([proxmox-permissions.md](proxmox-permissions.md#managed-kubernetes)). Stage 55 creates the vnet
    (`sandbox.network.vnet`, in the EVPN zone `sandbox.network.zone`, default the provider's default zone), applies an
    ArgoCD Application of the kamaji chart this checkout pushed (NodeRestriction on, checked), waits for the workers,
    keeps `generated/sandbox.kubeconfig`, and applies `deploy/sandbox-cluster` in its README's order, stopping if the
-   cluster has IPv6. Stage 60 writes the subnet to the Proxmox provider's `network.sandboxCidrs`, and the next sync
-   adds the isolation drops for it.
+   cluster has IPv6. It also puts `sandbox.network.snat` on the exit node (`/etc/network/interfaces.d/proxcloud-sandbox-snat`),
+   turns PVE's own SNAT off for the subnet, and keeps `generated/sandbox-firewall.kubeconfig` (nodes only). Stage 10
+   also gives the portal token the `ProxCloudSandboxGuard` role on the sandbox pool and checks it. Stage 60 writes the
+   subnet to the Proxmox provider's `network.sandboxCidrs` and the workers to `config.sandbox` with that kubeconfig;
+   the next sync adds the isolation drops and the workers' VM firewall, and takes the `proxcloud.io/unsecured` taint
+   off each worker once it is fenced and 20 minutes old (`sandbox.unsecured_min_age_minutes`).
 3. The portal creates the default EVPN zone with the first tenant network. On a first install stage 55 therefore says
    SKIPPED; create a network, then run stage 55 again (and stage 60 if the provider was registered before
-   `sandbox.enabled`). Until stage 60 and one sync have run, the workers have no isolation drops.
+   `sandbox.enabled`). Until stage 60 and one sync have run, the workers have no isolation drops and no VM firewall,
+   and they keep the taint, so nothing but platform DaemonSets runs on them (CoreDNS and the agent-sandbox
+   controller wait too).
 
 **What ran where:** stage 55 has not run on a lab (it would add an Application to the lab's shared services cluster).
 Its template was rendered and the chart output read; the manifests and the IPv6 check ran against the hand-built SB0
-cluster; the isolation drops ran through a portal on the lab ([managed-sandbox.md](managed-sandbox.md)). Stage 10's
-sandbox grants have only been syntax-checked.
+cluster; the isolation drops ran through a portal on the lab ([managed-sandbox.md](managed-sandbox.md)). The VM
+firewall pass ran on the lab with the portal token against the SB0 cluster, the guard role was granted by hand with
+stage 10's rows, and the exit node's SNAT file was written by hand with the content stage 55 renders
+([managed-sandbox.md §2.5](managed-sandbox.md#25-measured-on-the-lab-2026-11-07)). Stages 10, 55 and 60 themselves
+have only been syntax-checked.
 

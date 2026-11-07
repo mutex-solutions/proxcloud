@@ -55,6 +55,21 @@ Status legend: [README.md](README.md). Everything on this page is **Implemented*
    overlaps `cidrPool` or a blocked network (the management networks included) is refused (the
    reconcile fails and writes nothing).
 
+**Layer 1, the sandbox workers' VM firewall** (`internal/cloud/pve/sandboxfw.go`, `syncjob/sandboxfw.go`, provider
+`config.sandbox`). The rules above see routed traffic only. Every VM of the sandbox pool also gets `firewall=1` on each
+NIC, VM options `policy_in`/`policy_out` `DROP` with `ipfilter` and `macfilter`, and as its only rule a reference to a
+cluster security group `sbx<pool hash><content hash>` whose rules all ACCEPT: its control plane's API and konnectivity
+ports, DNS to the configured resolvers, VXLAN, Cilium health, MetalLB memberlist and the kubelet between workers (IP set
+`<group>-n`), the kubelet from `kubeletSources`, and the internet (IP set `<group>-o`: everything minus the private
+ranges, the management networks, every node address, the sandbox's SNAT address, `blockedCidrs`, `cidrPool`, the
+sandbox subnet and the control plane). With every
+rule an ACCEPT under DROP policies, no order or partial write opens anything; a changed set is a new generation that
+workers move to before the old one is deleted. `ipfilter-net0` is the worker range until its Node joins, then pinned
+to the Node's address once (read only while the worker is tainted, never followed after) plus the MetalLB range. The
+sync job applies it every cycle and only then takes the `proxcloud.io/unsecured` taint off a worker at least 20 minutes
+old; a cleared worker found unfenced (the datacenter firewall off included) gets the taint back. Details:
+[managed-sandbox.md §2](../../managed-sandbox.md#2-layer-1-the-vm-firewall-on-the-workers-sb2b).
+
 **Who owns the DROPs.** A cluster normally has one portal, which owns its DROPs outright: a
 changed `cidrPool` or `blockedCidrs` replaces them and leaves none behind. Their comment is
 `proxcloud:isolation` for the default pool prefix `pc-` (clusters already running need no
@@ -98,6 +113,7 @@ flowchart LR
   va1 -.-x|"DROP"| mgmt
   va1 -.-x|"DROP"| sbx
   sbx -.-x|"DROP: to cidrPool, mgmt"| mgmt
+  sbx -.-x|"layer 1, VM firewall: DROP but own CP, DNS, workers, internet"| mgmt
   va1 -->|"egress allowed"| inet
   vb1 -->|"egress allowed"| inet
 ```

@@ -42,6 +42,7 @@ pc_sandbox_token_id: "capmox@pve!{{ pc.sandbox.token }}"
 pc_sandbox_storage: "{{ pc.sandbox.storage or pc.services.storage }}"
 pc_sandbox_iso_storage: "{{ pc.sandbox.iso_storage or pc.services.iso_storage }}"
 pc_sandbox_zone: "{{ pc.sandbox.network.zone or pc.network.default_zone }}"
+pc_sandbox_own_snat: "{{ pc.sandbox.network.snat | string not in ['', 'node'] }}"
 
 # The k3s-bundled local registry (images.build).
 pc_local_registry: 127.0.0.1:5000

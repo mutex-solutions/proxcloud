@@ -192,6 +192,16 @@ def sandbox_net_problem(net, cidr_pool, avoid=None):
             return "sandbox.network.%s must be a first-last range inside %s" % (key, sub)
         if lo not in sub or hi not in sub or lo > hi or lo <= gw <= hi:
             return "sandbox.network.%s %s must be inside %s and leave out the gateway" % (key, net.get(key), sub)
+    snat = str(net.get("snat") or "").strip()
+    if snat == "node":
+        return ""
+    try:
+        addr = ipaddress.ip_address(snat)
+    except ValueError:
+        return ("sandbox.network.snat must be the sandbox's own egress address (an IPv4 address the uplink routes to "
+                "the exit node, used by nothing else), or 'node' to share the exit node's address; got %r" % snat)
+    if addr.version != 4 or addr in sub or any(addr in ipaddress.ip_network(c, strict=False) for c in _cidrs(cidr_pool)):
+        return "sandbox.network.snat %s must be an IPv4 address outside %s and network.cidr_pool" % (addr, sub)
     return ""
 
 

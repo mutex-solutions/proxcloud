@@ -15,7 +15,7 @@ Design, lab measurements and the threat model: [`docs/managed-sandbox.md`](../..
 | `runtimeclass.yaml` | RuntimeClass `gvisor` |
 | `agent-sandbox/` | kubernetes-sigs/agent-sandbox v1.0.9, vendored (Sandbox CRD and controller); see its README |
 | `network-policy.yaml` | Cilium cluster-wide guardrail for every tenant namespace: private ranges and TCP 25 denied, ingress from `sandbox-proxy` only |
-| `rbac.yaml` | `proxcloud-system/proxcloud` ServiceAccount, its ClusterRole and a token Secret |
+| `rbac.yaml` | `proxcloud-system/proxcloud` ServiceAccount, its ClusterRole and a token Secret; `proxcloud-system/proxcloud-firewall` (nodes get, list, patch) for the Proxmox provider's sync, which fences the workers and takes their `unsecured` taint off |
 | `check-ipv4-only.sh` | The IPv6 precondition: Cilium IPv6 off, no IPv6 on any node |
 
 ## Preconditions
@@ -25,7 +25,11 @@ Design, lab measurements and the threat model: [`docs/managed-sandbox.md`](../..
 2. The workers' vnet is in the provider's `network.sandboxCidrs`, so the PVE isolation rules drop tenant traffic to the
    workers and the workers' traffic to tenants and to the management networks (docs/managed-sandbox.md §1.2).
 3. Single-stack IPv4 (`check-ipv4-only.sh`). Every rule of the guardrail names IPv4 ranges.
-4. Outbound internet from the nodes: `node-setup` pulls from `gvisor.dev` and `storage.googleapis.com`.
+4. The workers join with the `proxcloud.io/unsecured:NoSchedule` taint, and only the Proxmox provider's sync takes it
+   off, once the worker's VM firewall is in place and the worker is 15 minutes old (docs/managed-sandbox.md §2). Until
+   then only DaemonSets that tolerate every taint run there (Cilium, `node-setup`): CoreDNS and the agent-sandbox
+   controller wait, so do not wait for them after step 3.
+5. Outbound internet from the nodes: `node-setup` pulls from `gvisor.dev` and `storage.googleapis.com`.
 
 ## Apply order
 
