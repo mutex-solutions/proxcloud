@@ -13,7 +13,7 @@ package project
 // bucket's keys never leave the portal and the bucket need not be reachable from the internet; build pods fetch their
 // contexts with presigned GETs (the nodes reach the bucket, not the portal). Images go to the template registry as
 // <templateRegistry>/<project>/<template>:<build> with the project's own build account, and sandboxes pin them by digest.
-// Ported from stratos-ee (e2b_templates.go); snapshots (pause, fork) are SB7.
+// Ported from the earlier implementation (EE); snapshots (pause, fork) are SB7.
 
 import (
 	"bytes"

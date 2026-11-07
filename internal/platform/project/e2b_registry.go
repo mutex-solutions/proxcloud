@@ -6,7 +6,7 @@ package project
 //     pushed).
 //   - PruneSandboxRegistry deletes template images nothing references any more (deleted templates, old builds) through
 //     the OCI distribution API of the sandbox registry (Zot), as the registry's gc account (read and delete on t/**
-//     only). Zot's own garbage collection then frees the blobs. Ported from stratos-ee, which pruned through Harbor's API.
+//     only). Zot's own garbage collection then frees the blobs. Ported from the earlier implementation (EE), which pruned through Harbor's API.
 
 import (
 	"context"
