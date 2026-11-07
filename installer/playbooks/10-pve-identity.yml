@@ -14,6 +14,8 @@
       ProxCloudCAPI: "Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
       ProxCloudCSI: "VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit"
       ProxCloudSandboxGuard: "Pool.Audit VM.Audit VM.Config.Network"
+      # The sandbox entry appliance (stage 56): the sync sets its firewall and pushes HAProxy's config through the agent.
+      ProxCloudSandboxEntry: "Pool.Audit VM.Audit VM.Config.Network VM.GuestAgent.Audit VM.GuestAgent.Unrestricted"
       ProxCloudImages: "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone {{ vm_config }} VM.Console VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
     users:
       proxcloud@pve: {comment: ProxCloud portal, token: platform}
@@ -95,6 +97,13 @@
       # sandbox workers (clone, config, power, migrate on VMs that run tenant code), which it never needs. A token row,
       # not a user row: capmox@pve owns the sandbox token, so a user NoAccess here would cap that token to nothing too.
       - {path: "/pool/{{ pc.sandbox.pool }}", role: NoAccess, propagate: 1, user: "", token: capmox@pve!capi}
+    # The entry appliance's pool (stage 56): the portal gets what its sync needs there and nothing else (no power, disk,
+    # console or clone on a VM facing the internet); the CSI and services CAPMOX tokens, which /pool reaches, nothing.
+    sandbox_entry_acls:
+      - {path: "/pool/{{ pc.sandbox.entry.pool }}", role: ProxCloudSandboxEntry, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      - {path: "/pool/{{ pc.sandbox.entry.pool }}", role: NoAccess, propagate: 1, user: csi@pve, token: ""}
+      - {path: "/pool/{{ pc.sandbox.entry.pool }}", role: NoAccess, propagate: 1, user: "", token: capmox@pve!capi}
+    pc_entry_on: "{{ pc_sandbox_on and pc.sandbox.entry.public.bridge | length > 0 }}"
     # On its own ISO store the user holds only ProxCloudCAPI (from /storage), which lacks Datastore.AllocateTemplate,
     # so the token could not upload the bootstrap ISO. The capi token has no row there, so it still sees one ISO store.
     sandbox_iso_user_acls: "{{ [{'path': '/storage/' ~ pc_sandbox_iso_storage, 'role': 'PVEDatastoreAdmin', 'propagate': 0, 'user': 'capmox@pve', 'token': ''}] if pc_sandbox_iso_storage != pc.services.iso_storage else [] }}"
@@ -146,7 +155,7 @@
         body_format: form-urlencoded
         body: {poolid: "{{ item.key }}", comment: "{{ item.value }}"}
       changed_when: true
-      loop: "{{ (pools | combine({pc.sandbox.pool: 'ProxCloud sandbox cluster (not tenant)'} if pc_sandbox_on else {})) | dict2items }}"
+      loop: "{{ (pools | combine({pc.sandbox.pool: 'ProxCloud sandbox cluster (not tenant)'} if pc_sandbox_on else {}) | combine({pc.sandbox.entry.pool: 'ProxCloud sandbox entry (not tenant)'} if pc_entry_on else {})) | dict2items }}"
       loop_control: {label: "{{ item.key }}"}
 
     - name: Create a user
@@ -246,7 +255,7 @@
         body_format: form-urlencoded
         body: "{{ item }}"
       changed_when: true
-      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else []) + (sandbox_acls + sandbox_iso_user_acls if pc_sandbox_on else [])) }}"
+      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else []) + (sandbox_acls + sandbox_iso_user_acls if pc_sandbox_on else []) + (sandbox_entry_acls if pc_entry_on else [])) }}"
       loop_control: {label: "{{ item.path }} {{ item.roles }}"}
 
     # Older installs gave the services token /storage (propagate) and the ISO role on the NAS template store, so it

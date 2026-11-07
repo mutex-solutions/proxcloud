@@ -41,6 +41,7 @@ flowchart LR
   orgadmin -->|"HTTPS, OIDC"| pc
   operator -->|"HTTPS, OIDC or SigV4"| pc
   agent -->|"MCP over HTTPS"| pc
+  tenant -->|"HTTPS to sandbox ports, *.sandbox domain"| pc
 
   pc -->|"token validation, JWKS"| kc
   kc -->|"identity brokering"| idp
@@ -51,6 +52,8 @@ flowchart LR
   pc -->|"transactional mail"| smtp
   pc -->|"RGW admin ops and S3"| rgw
   pc -->|"zones and records"| pdns
+  pc -->|"sandbox wildcard record, RFC2136 DNS-01 (installer, cert-manager)"| pdns
+  pc -->|"wildcard certificate for the sandbox domain (cert-manager)"| dns
   pc -->|"admin API and S3"| rustfs
   pc -->|"WebSocket API: shares"| nas
   pve -->|"NFS, SMB, iSCSI"| nas
@@ -69,6 +72,7 @@ flowchart LR
 | Tenant org admin, SSO self-service | Configures the organization's OIDC/SAML IdP, verified domains and group-to-role mapping. | Implemented |
 | Platform operator | Uses the admin console (`web/admin`) and the admin routes under `/api/v1/admin/**`; automates through the public admin API `/admin-api/v1` (AWS SigV4 keys or the admin-api realm). Configures Proxmox providers, flavors, price plans, quotas, integrations. | Implemented |
 | Platform operator, installer | One-command install, add-node and upgrade of the whole stack. | Implemented |
+| Tenant user, sandbox ports | Reaches a port inside a running sandbox at `https://<port>-<sandboxId>.<sandbox domain>`: the platform's entry appliance passes TCP 443 to `sandbox-proxy`, where TLS ends; a sandbox created with `allowPublicTraffic: false` wants its traffic token. | Implemented |
 | AI agent | Calls `/mcp` with the client toolset (customer realm token or personal access key) or the admin toolset (admin realm token or SigV4 key). Tools dispatch in-process through the same router as the HTTP API. | Implemented |
 
 ## External systems
@@ -86,8 +90,8 @@ flowchart LR
 | S3 store: RustFS | Tenant buckets and internal backups on sites without Ceph. | Implemented |
 | TrueNAS NAS | Capacity storage for Proxmox (NFS, SMB, iSCSI) and tenant file shares created through the TrueNAS WebSocket API. | Implemented (iSCSI not used) |
 | Prometheus-compatible metrics | Optional per-provider source for per-VM network traffic counters, used to bill traffic. Proxmox providers default to their own public-NIC counters instead. | Implemented |
-| DNS and ACME | Hostnames and TLS certificates for the portal, the API and Keycloak, provided by the hosting cluster (the chart renders the routes, not the certificates). | Implemented |
-| PowerDNS Authoritative | Tenant DNS zones and records over its HTTP API, owned through the zone's account field. | Implemented |
+| DNS and ACME | Hostnames and TLS certificates for the portal, the API and Keycloak, provided by the hosting cluster (the chart renders the routes, not the certificates). The sandbox domain's wildcard certificate comes from an ACME CA through cert-manager on the services cluster (or a Secret the operator provides). | Implemented |
+| PowerDNS Authoritative | Tenant DNS zones and records over its HTTP API, owned through the zone's account field. The sandbox domain's zone: installer stage 56 writes its wildcard record and a TSIG key that may update that zone alone, which cert-manager on the services cluster uses for the DNS-01 challenge (RFC2136). | Implemented |
 | DNS TXT verification | Domain ownership checks for per-org SSO (`_proxcloud-challenge.<domain>`). | Implemented |
-| Container registry (ghcr.io) | CI publishes the `proxcloud-api`, `proxcloud-web` and `proxcloud-admin` images and the Helm charts; deployments pull from it. | Implemented |
+| Container registry (ghcr.io) | CI publishes the `proxcloud-api`, `proxcloud-web`, `proxcloud-admin` and `proxcloud-sandbox-proxy` images and the Helm charts; deployments pull from it. | Implemented |
 | VM template pipelines | Image builds that publish OS and Kubernetes node templates into Proxmox. | Planned |

@@ -25,7 +25,8 @@ package externalservice
 //	                 "defaultTimeoutSeconds": 3600, "maxConcurrent": 10, "maxConcurrentGpus": 1}
 //	    }
 //	  },
-//	  "secret": {"kubeconfig": "<proxcloud SA kubeconfig of the sandbox cluster>"}
+//	  "secret": {"kubeconfig": "<proxcloud SA kubeconfig of the sandbox cluster>",
+//	             "proxyWakeToken": "<the bearer sandbox-proxy sends to the wake endpoint (stage 56 generates it)>"}
 //	}
 //
 // Like dbaas, nothing lands on PVE for a project: the sandbox cluster belongs to the platform.

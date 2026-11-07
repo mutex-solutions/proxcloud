@@ -167,6 +167,35 @@ pc_defaults:
       snat: ""
     nodes: {count: 2, cores: 4, memory: 8192, disk: 40}
     unsecured_min_age_minutes: 20  # a new worker takes tenant pods no earlier: CABPK's bootstrap token TTL (15) + margin
+    # Stage 56, the public entry: https://<port>-<id>.<domain> -> entry appliance (TCP 443) -> sandbox-proxy, where TLS
+    # ends (docs/managed-sandbox.md §4).
+    domain: ""                   # required, e.g. sbx.example.org: its own DNS zone; the wildcard certificate covers it
+    proxy:
+      address: ""                # required: sandbox-proxy's MetalLB address, inside network.metallb
+      image: ""                  # default <images.registry>/proxcloud/proxcloud-sandbox-proxy:<release>
+    tls:
+      issuer: acme               # acme (DNS-01 through PowerDNS with RFC2136) | secret (yours) | selfsigned (test sites)
+      secret: ""                 # issuer secret: a kubernetes.io/tls Secret for *.<domain> in pc-sandbox, services cluster
+      acme: {server: https://acme-v02.api.letsencrypt.org/directory, email: "", ca_bundle: ""}  # ca_bundle: PEM of a private ACME server's CA
+    # The zone <domain> on PowerDNS (it must exist): stage 56 writes the wildcard record and, for acme, a TSIG key that may
+    # update this zone alone. Needs `dnsupdate=yes` in pdns.conf and vault pdns_api_key. Empty api_url: you write the
+    # record (*.<domain> A the entry's public address) and pick issuer secret or selfsigned.
+    powerdns:
+      api_url: ""                # e.g. http://192.0.2.53:8081
+      server: localhost
+      nameserver: ""             # host:port cert-manager on the services cluster sends RFC2136 updates to
+    # The platform HAProxy appliance in front of sandbox-proxy (a VM in the system pool). Empty public.bridge: no
+    # appliance, forward TCP 443 to proxy.address yourself.
+    entry:
+      pool: proxcloud-sandbox-entry  # its own pool: the portal gets firewall and guest-agent rights there alone (stage 10)
+      vmid: 9110
+      node: ""                   # default: first node
+      os: debian-13
+      cores: 1
+      memory: 1024
+      disk: 10
+      address: ""                # its address on the sandbox vnet, outside the gateway, network.nodes and network.metallb
+      public: {bridge: "", vlan: 0, address: "", gateway: ""}  # address as CIDR; the record and the internet side
 
   nas:
     host: ""                     # TrueNAS address; empty = no NAS stage

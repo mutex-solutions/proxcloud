@@ -4,6 +4,44 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: Sandbox ports in public: sandbox-proxy with TLS, entry appliance, wildcard certificate, wake (SB4)
+
+**What changed**
+
+- `cmd/sandbox-proxy` + `internal/sandboxproxy`, ported from the earlier implementation: `<port>-<id>.<domain>` to the
+  ready pod, envd's control routes refused, the traffic token enforced, wake on a miss. New: it terminates TLS itself
+  (`SANDBOX_TLS_DIR`, the mounted Secret read again on renewal through `pkg/certfile`, moved out of `csigw`), waits
+  for its first certificate while alive and not ready, and a `cert-sync` mode. The forwarded-host trust is gone.
+  Manifest `deploy/sandbox-cluster/sandbox-proxy.yaml`, image `deploy/sandbox-proxy.Dockerfile` (CI builds
+  `proxcloud-sandbox-proxy` with the other images).
+- Installer stage 56 (`56-sandbox-edge.yml`, also in `make upgrade`): `sandbox-proxy` on a MetalLB address; on the
+  services cluster an issuer (`acme` DNS-01 with RFC2136 to PowerDNS, `secret`, or `selfsigned`), the wildcard
+  `Certificate` and `cert-sync`, which copies it to the sandbox cluster with a credential limited to one Secret; on
+  PowerDNS the wildcard record and a TSIG key allowed to update that zone alone, from the services network; the entry
+  appliance VM in its own pool. Stage 10: pool `proxcloud-sandbox-entry`, role `ProxCloudSandboxEntry` for the portal,
+  `NoAccess` for the CSI and services CAPMOX tokens. Stage 60: the Proxmox provider's `config.sandbox.proxy`.
+- Portal: the layer-1 group admits the entry appliance's vnet address alone to `sandbox-proxy`'s address
+  (`SandboxFirewall.entryRule`); the sync keeps the appliance's firewall and HAProxy config (`pve.SandboxEntry`, the
+  P8-1 render and push), touching only a VM tagged `proxcloud-sandbox-entry`. `POST /api/v1/internal/sandboxes/{id}/wake`
+  (public path, a sandbox provider's `proxyWakeToken` as bearer; 404 for every sandbox until SB7). Native action
+  `GET_ACCESS` returns a sandbox's host pattern and traffic token from the live CR.
+- Fixed in stage 55 on the way: `-o jsonpath={.data.admin\\.conf}` lost its backslash to the command module's word
+  splitting, so the wait for the sandbox cluster's kubeconfig could never succeed.
+
+**Why**
+
+- D15 (after SB0): a Gateway in the sandbox cluster needs kube-proxy replacement, which the chart's Cilium does not
+  run, so TLS ends in the proxy and nothing else is added to the cluster that runs tenant code.
+- D5: the key that changes DNS must not live where an escape could reach it, so cert-manager and the TSIG key stay on
+  the services cluster and only the certificate crosses, with a credential that can write nothing else.
+- D4: no Octavia; the P8-1 appliance already does TCP passthrough with a checked reload through the guest agent, so
+  the entry reuses it rather than adding an ingress. Its pool gets its own narrow role because it faces the internet.
+- A tenant using the native API could set `allowPublicTraffic: false` but had no way to learn the token it then needs.
+
+**Diagrams updated:** `c1-context.md` (sandbox ports, PowerDNS and ACME roles, images), `c2-containers.md` (entry
+appliance, certificate copy), `c3-components.md` (sandbox proxy, entry appliance, `GET_ACCESS`, diagram), `c4-code.md`
+(layer-1 entry rule).
+
 ## 2026-11-08: Sandboxes reach tenants: native API, billing, quota, suspension, release gates (SB3)
 
 ### Review fixes (same PR)

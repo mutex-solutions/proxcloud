@@ -181,4 +181,27 @@ assert fwd.users([_sec("c1-csi-config", "token_secret: x"), _sec("c2-csi-config"
 assert fwd.users([_sec("c1-csi-config", "namespace: csi-proxmox")], [_app("c1", {"storageClasses": SC})]) == ["argocd/c1"]
 assert fwd.users([], [_app("c1", {"storageClasses": SC, "gateway": GW}), _app("c2", {"storageClasses": []}),
                       _app("c3", {}), _app("x", {"storageClasses": SC}, managed=False)]) == []
+
+# The sandbox's public entry (stage 56): the proxy on a MetalLB address, the appliance off every cluster address.
+edge = {"domain": "sbx.example.org", "network": sbx, "proxy": {"address": "10.110.0.200"},
+        "tls": {"issuer": "acme", "acme": {"email": "ops@example.org"}},
+        "powerdns": {"api_url": "http://192.0.2.53:8081", "nameserver": "192.0.2.53:53"},
+        "entry": {"address": "10.110.0.5", "public": {"bridge": "vmbr1", "address": "203.0.113.10/24", "gateway": "203.0.113.1"}}}
+assert f.sandbox_edge_problem(edge) == "", f.sandbox_edge_problem(edge)
+assert "sandbox.domain" in f.sandbox_edge_problem(dict(edge, domain=""))
+assert "sandbox.domain" in f.sandbox_edge_problem(dict(edge, domain="*.sbx.example.org"))
+assert "metallb" in f.sandbox_edge_problem(dict(edge, proxy={"address": "10.110.0.50"}))
+assert "proxy.address is required" in f.sandbox_edge_problem(dict(edge, proxy={}))
+assert "issuer" in f.sandbox_edge_problem(dict(edge, tls={"issuer": "letsencrypt"}))
+assert "tls.secret" in f.sandbox_edge_problem(dict(edge, tls={"issuer": "secret"}))
+assert f.sandbox_edge_problem(dict(edge, tls={"issuer": "secret", "secret": "wild"}, powerdns={})) == ""
+assert "PowerDNS" in f.sandbox_edge_problem(dict(edge, powerdns={}))
+assert f.sandbox_edge_problem(dict(edge, tls={"issuer": "selfsigned"}, powerdns={})) == ""
+for bad in ["10.110.0.1", "10.110.0.12", "10.110.0.205", "10.111.0.5", ""]:  # gateway, worker, MetalLB, outside, unset
+    assert "entry.address" in f.sandbox_edge_problem(dict(edge, entry=dict(edge["entry"], address=bad))), bad
+pub = edge["entry"]["public"]
+assert "public.address" in f.sandbox_edge_problem(dict(edge, entry=dict(edge["entry"], public=dict(pub, address="203.0.113.10"))))
+assert "public.address" in f.sandbox_edge_problem(dict(edge, entry=dict(edge["entry"], public=dict(pub, gateway="198.51.100.1"))))
+assert "public.address" in f.sandbox_edge_problem(dict(edge, entry=dict(edge["entry"], public=dict(pub, address="10.110.0.6/24"))))
+assert f.sandbox_edge_problem(dict(edge, entry={"public": {"bridge": ""}})) == ""  # the operator forwards 443 itself
 print("ok")

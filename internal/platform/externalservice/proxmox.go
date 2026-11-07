@@ -37,7 +37,9 @@ package externalservice
 //	    },
 //	    "sandbox": {                           // the platform's sandbox workers, fenced by the sync (PVESandbox)
 //	      "pool": "proxcloud-sandbox", "nodes": ["192.0.2.10-192.0.2.29"], "loadBalancers": ["192.0.2.200-192.0.2.209"],
-//	      "dns": ["1.1.1.1"], "kubeletSources": ["198.51.100.0/24"], "snat": "203.0.113.50", "unsecuredMinAgeMinutes": 20
+//	      "dns": ["1.1.1.1"], "kubeletSources": ["198.51.100.0/24"], "snat": "203.0.113.50", "unsecuredMinAgeMinutes": 20,
+//	      "proxy": {"address": "192.0.2.200", "port": 443,  // sandbox-proxy's MetalLB address, and the entry appliance
+//	                "entry": {"vmid": 9110, "address": "192.0.2.5"}}  // (its address on the sandbox vnet)
 //	    },                                     // + secret.sandboxKubeconfig (nodes get/list/patch)
 //	    "storageProfiles": {                   // Phase 5 — honest capability flags
 //	      "std": {"storages": {"*": "local-zfs"}, "shared": false, "snapshots": true,
@@ -402,6 +404,17 @@ type PVESandbox struct {
 	// default 20 leaves room for a token CABPK refreshed just before the Node registered).
 	UnsecuredMinAge time.Duration
 	Kubeconfig      string // secret.sandboxKubeconfig: the sandbox cluster, nodes get/list/patch
+	Proxy           PVESandboxProxy
+}
+
+// PVESandboxProxy is config.sandbox.proxy: sandbox-proxy's MetalLB address and port, and the platform HAProxy
+// appliance in front of it (docs/managed-sandbox.md §4). The workers let only EntryAddress reach Address:Port; the sync
+// keeps the appliance EntryVMID passing Port through to it. Empty Address: no public entry.
+type PVESandboxProxy struct {
+	Address      string
+	Port         int
+	EntryVMID    int
+	EntryAddress string // the appliance's address on the sandbox vnet
 }
 
 // PVESandboxConfig reads config.sandbox; ok is false when the provider has no sandbox pool.
@@ -414,6 +427,13 @@ func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
 	}
 	if m := intOf(s["unsecuredMinAgeMinutes"]); m > 0 {
 		cfg.UnsecuredMinAge = time.Duration(m) * time.Minute
+	}
+	if p, _ := s["proxy"].(map[string]any); p != nil {
+		e, _ := p["entry"].(map[string]any)
+		cfg.Proxy = PVESandboxProxy{Address: str(p["address"]), Port: intOf(p["port"]), EntryVMID: intOf(e["vmid"]), EntryAddress: str(e["address"])}
+		if cfg.Proxy.Port == 0 {
+			cfg.Proxy.Port = 443
+		}
 	}
 	return cfg, cfg.Pool != ""
 }

@@ -1,0 +1,148 @@
+# sandbox-proxy: the data path to sandboxes. https://<port>-<sandboxID>.<domain> reaches the platform's entry appliance
+# (TCP passthrough on 443), then this Service's MetalLB address; TLS ends in the proxy, which forwards plain HTTP to
+# <podIP>:<port> of that sandbox (envd on 49983, anything the tenant serves on other ports). It refuses envd's
+# control-plane routes and enforces the per-sandbox traffic access token (docs/managed-sandbox.md §4).
+#
+# Created outside this file (installer stage 56, or by hand, README):
+#   - ConfigMap sandbox-proxy-config: SANDBOX_DOMAIN, PROXCLOUD_WAKE_URL (<portal API>/api/v1/internal/sandboxes)
+#   - Secret sandbox-proxy-wake: PROXCLOUD_WAKE_TOKEN (the sandbox provider's secret.proxyWakeToken); optional
+#   - Secret sandbox-proxy-tls: tls.crt and tls.key, written by cert-sync on the services cluster
+#   - the Service's address: annotation metallb.io/loadBalancerIPs
+#
+# Sandbox pods admit ingress from these pods only (network-policy.yaml).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-proxy
+  namespace: sandbox-system
+---
+# Pod lookup by the proxcloud.io/sandbox-id label across the sb-<project> namespaces. Nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-proxy
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-proxy
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: sandbox-proxy}
+subjects: [{kind: ServiceAccount, name: sandbox-proxy, namespace: sandbox-system}]
+---
+# cert-sync (a Deployment on the services cluster, installer stage 56) writes the wildcard certificate here with this
+# identity: get and patch on that one Secret. The issuer and its DNS update key never come to this cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-cert-sync
+  namespace: sandbox-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sandbox-cert-sync-token
+  namespace: sandbox-system
+  annotations: {kubernetes.io/service-account.name: sandbox-cert-sync}
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-cert-sync
+  namespace: sandbox-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["sandbox-proxy-tls"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-cert-sync
+  namespace: sandbox-system
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: sandbox-cert-sync}
+subjects: [{kind: ServiceAccount, name: sandbox-cert-sync, namespace: sandbox-system}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-proxy
+  namespace: sandbox-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: sandbox-proxy}
+  template:
+    metadata:
+      labels: {app: sandbox-proxy}
+    spec:
+      serviceAccountName: sandbox-proxy
+      # The pod holds the wildcard key and the wake token, and a kubelet reads the Secrets of the pods on its node. A
+      # node group of its own (tainted, so no sandbox lands there) keeps them off the nodes that run tenant code; until a
+      # site has one, the proxy shares the workers (docs/managed-sandbox.md §4.5).
+      tolerations:
+        - {key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions: [{key: node-restriction.kubernetes.io/proxcloud-gpu, operator: DoesNotExist}]
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions: [{key: node-restriction.kubernetes.io/proxcloud-system, operator: Exists}]
+      topologySpreadConstraints:
+        - {maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: ScheduleAnyway, labelSelector: {matchLabels: {app: sandbox-proxy}}}
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: proxy
+          image: ghcr.io/mutex-solutions/proxcloud-sandbox-proxy:latest # stage 56 pins the release
+          env:
+            - {name: SANDBOX_TLS_DIR, value: /etc/sandbox-proxy/tls}
+          envFrom:
+            - configMapRef: {name: sandbox-proxy-config}
+            - secretRef: {name: sandbox-proxy-wake, optional: true}
+          ports:
+            - {name: https, containerPort: 8443}
+            - {name: health, containerPort: 8081}
+          readinessProbe: {httpGet: {path: /readyz, port: health}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: health}, periodSeconds: 10}
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: tls, mountPath: /etc/sandbox-proxy/tls, readOnly: true}
+      volumes:
+        - name: tls
+          secret: {secretName: sandbox-proxy-tls}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sandbox-proxy
+  namespace: sandbox-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: sandbox-proxy}
+---
+# The entry appliance's only target: the workers' VM firewall lets the appliance's address alone reach this address on
+# 443 (config.sandbox.proxy of the Proxmox provider). Local keeps the appliance's address as the source, and MetalLB
+# answers for it only from a node that runs a ready proxy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-proxy
+  namespace: sandbox-system
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector: {app: sandbox-proxy}
+  ports:
+    - {name: https, port: 443, targetPort: https}

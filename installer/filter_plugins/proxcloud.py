@@ -229,6 +229,59 @@ def sandbox_guardrail_problem(nets):
     return ""
 
 
+def sandbox_edge_problem(sb):
+    """Why the sandbox's public entry (stage 56) cannot be built from sandbox (the `sandbox` settings), or "".
+    sandbox-proxy takes one MetalLB address; the entry appliance one address on the sandbox vnet that no worker, load
+    balancer or gateway holds (the workers admit it alone), and a public address on its own bridge."""
+    import ipaddress
+
+    net, proxy, entry, tls = sb.get("network", {}), sb.get("proxy", {}), sb.get("entry", {}), sb.get("tls", {})
+    domain = str(sb.get("domain") or "").strip(".")
+    if not domain or "." not in domain or "*" in domain:
+        return "sandbox.domain is required, e.g. sbx.example.org: sandboxes answer at https://<port>-<id>.<domain>"
+    sub = ipaddress.ip_network(str(net["subnet"]))
+
+    def span(key):
+        first, _, last = str(net.get(key) or "").partition("-")
+        return ipaddress.ip_address(first.strip()), ipaddress.ip_address((last or first).strip())
+
+    try:
+        p = ipaddress.ip_address(str(proxy.get("address") or ""))
+    except ValueError:
+        return "sandbox.proxy.address is required: the MetalLB address of sandbox-proxy, inside sandbox.network.metallb"
+    lo, hi = span("metallb")
+    if not lo <= p <= hi:
+        return "sandbox.proxy.address %s must be inside sandbox.network.metallb %s" % (p, net.get("metallb"))
+    if tls.get("issuer") not in ("acme", "secret", "selfsigned"):
+        return "sandbox.tls.issuer must be acme, secret or selfsigned, got %r" % tls.get("issuer")
+    if tls["issuer"] == "secret" and not tls.get("secret"):
+        return "sandbox.tls.issuer secret needs sandbox.tls.secret: a kubernetes.io/tls Secret in pc-sandbox on the services cluster"
+    if tls["issuer"] == "acme":
+        pdns = sb.get("powerdns", {})
+        if not (tls.get("acme", {}).get("email") and pdns.get("api_url") and pdns.get("nameserver")):
+            return ("sandbox.tls.issuer acme needs sandbox.tls.acme.email and the zone on PowerDNS (sandbox.powerdns.api_url, "
+                    ".nameserver and the vault's pdns_api_key) for the DNS-01 challenge; otherwise use issuer secret")
+    pub = entry.get("public", {})
+    if not pub.get("bridge"):
+        return ""  # no appliance: the operator forwards TCP 443 to sandbox.proxy.address
+    try:
+        a = ipaddress.ip_address(str(entry.get("address") or ""))
+    except ValueError:
+        return "sandbox.entry.address is required with an appliance: its address on the sandbox vnet"
+    if a not in sub or a == ipaddress.ip_address(str(net.get("gateway"))) or any(
+            span(k)[0] <= a <= span(k)[1] for k in ("nodes", "metallb")):
+        return "sandbox.entry.address %s must be inside %s, off the gateway, the workers and the MetalLB range" % (a, sub)
+    try:
+        pa = ipaddress.ip_interface(str(pub.get("address") or ""))
+        gw = ipaddress.ip_address(str(pub.get("gateway") or ""))
+    except ValueError:
+        return "sandbox.entry.public.address (CIDR) and .gateway are required with sandbox.entry.public.bridge"
+    if pa.ip in sub or "/" not in str(pub.get("address")) or gw not in pa.network:
+        return "sandbox.entry.public.address %s must be a CIDR outside %s whose network holds the gateway %s" % (
+            pub.get("address"), sub, gw)
+    return ""
+
+
 class FilterModule:
     def filters(self):
         return {
@@ -247,4 +300,5 @@ class FilterModule:
             "pc_node_with_address": node_with_address,
             "pc_sandbox_net_problem": sandbox_net_problem,
             "pc_sandbox_guardrail_problem": sandbox_guardrail_problem,
+            "pc_sandbox_edge_problem": sandbox_edge_problem,
         }

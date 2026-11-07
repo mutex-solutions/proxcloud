@@ -57,6 +57,11 @@ type SandboxFirewall struct {
 	DNS           []string // resolvers, port 53 only
 	KubeletFrom   []string // sources allowed to the kubelet (10250), e.g. the services network
 	Deny          []string // never reachable on top of the private ranges: management networks, blocked, tenant pool
+	// The public entry (docs/managed-sandbox.md §4): EntryFrom, the entry appliance's address on the sandbox vnet, is
+	// the one source allowed to sandbox-proxy's MetalLB address ProxyAddress on ProxyPort (default 443). Unset: no entry.
+	ProxyAddress string
+	ProxyPort    int
+	EntryFrom    string
 }
 
 // sandboxGen is one generation of the shared rules: the group and its two IP sets.
@@ -277,6 +282,13 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 	if len(kubelet) > 0 {
 		rules = append(rules, rule("in", "tcp", strings.Join(cidrList(kubelet), ","), "", "10250"))
 	}
+	if f.ProxyAddress != "" || f.EntryFrom != "" {
+		r, err := f.entryRule(subnet, nodes, lbs)
+		if err != nil {
+			return g, err
+		}
+		rules = append(rules, r)
+	}
 	rules = append(rules, rule("out", "", "", outRef, "")) // the internet, through the sandbox SNAT address
 
 	content, _ := json.Marshal([]any{g.Nodes, g.Out, rules})
@@ -289,6 +301,28 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 		g.Rules = append(g.Rules, r)
 	}
 	return g, nil
+}
+
+// entryRule lets the entry appliance, and nothing else, reach sandbox-proxy. Whichever worker answers for the
+// address (MetalLB L2) receives it; kube-proxy delivers it to the proxy pod there.
+func (f SandboxFirewall) entryRule(subnet netip.Prefix, nodes, lbs []netip.Prefix) (FirewallRule, error) {
+	proxy, err1 := netip.ParseAddr(strings.TrimSpace(f.ProxyAddress))
+	from, err2 := netip.ParseAddr(strings.TrimSpace(f.EntryFrom))
+	port := f.ProxyPort
+	if port == 0 {
+		port = 443
+	}
+	host := func(a netip.Addr) []netip.Prefix { return []netip.Prefix{netip.PrefixFrom(a, 32)} }
+	switch {
+	case err1 != nil || !proxy.Is4() || !within(lbs, host(proxy)):
+		return FirewallRule{}, fmt.Errorf("pve sandbox: proxy address %q must be one of the load balancer addresses", f.ProxyAddress)
+	case err2 != nil || !from.Is4() || !subnet.Contains(from) || overlap(host(from), nodes) || overlap(host(from), lbs):
+		return FirewallRule{}, fmt.Errorf("pve sandbox: entry address %q must be inside %s, off the worker and load balancer addresses", f.EntryFrom, subnet)
+	case port < 1 || port > 65535:
+		return FirewallRule{}, fmt.Errorf("pve sandbox: invalid proxy port %d", port)
+	}
+	return FirewallRule{Type: "in", Action: "ACCEPT", Proto: "tcp", Source: from.String(), Dest: proxy.String(),
+		DPort: strconv.Itoa(port), Enable: 1, Comment: sandboxComment}, nil
 }
 
 // sandboxFirewallOptions: anti-spoofing on, both policies DROP, no DHCP (CAPMOX gives static addresses) and no IPv6.

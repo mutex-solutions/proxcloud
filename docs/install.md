@@ -38,6 +38,7 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 | 40 | `40-mgmt-platform.yml` | ArgoCD, then Applications with inline values: cert-manager, CloudNativePG, ProxCloud (API, consoles, Keycloak, PostgreSQL, RabbitMQ). The scheduler is on. |
 | 45 | `45-object-store.yml` | The object store, see below. |
 | 55 | `55-sandbox-cluster.yml` | `mode: split` with `sandbox.enabled`: the sandbox cluster's vnet, the cluster from the kamaji chart, then `deploy/sandbox-cluster` on it. See "Sandbox cluster" below. |
+| 56 | `56-sandbox-edge.yml` | `sandbox.enabled`: the public entry of sandbox ports: `sandbox-proxy` and its MetalLB address, the wildcard certificate on the services cluster and its copy, the DNS record and TSIG key on PowerDNS, the HAProxy entry appliance. Also run by `make upgrade`. See "Sandbox ports" below. |
 | 60 | `60-register.yml` | Logins, an Admin-API key, the Proxmox provider, fio suggestions; on the first run `deploy/seed/seed-operator.py` (platform and billing configuration, flavors, public price plan, quota). Prints the URLs. |
 
 The RabbitMQ Cluster Operator is applied directly from its release manifest, because upstream ships no chart. k3s's bundled Traefik and ServiceLB serve the portal on the management host's ports 80 and 443. MetalLB and the services cluster arrive with split mode.
@@ -185,4 +186,29 @@ firewall pass ran on the lab with the portal token against the SB0 cluster, the 
 stage 10's rows, and the exit node's SNAT file was written by hand with the content stage 55 renders
 ([managed-sandbox.md §2.5](managed-sandbox.md#25-measured-on-the-lab-2026-11-07)). Stages 10, 55 and 60 themselves
 have only been syntax-checked.
+
+## Sandbox ports (stage 56)
+
+Sandbox ports answer at `https://<port>-<sandboxId>.<sandbox.domain>` ([managed-sandbox.md §4](managed-sandbox.md#4-public-entry-tls-and-wake-sb4)).
+
+1. Give the sandbox a domain of its own (`sandbox.domain`, e.g. `sbx.example.org`): a zone on PowerDNS, delegated from
+   its parent, with `dnsupdate=yes` in `pdns.conf`, `sandbox.powerdns.api_url` and `.nameserver` set and
+   `pdns_api_key` in the vault. Without PowerDNS set `sandbox.tls.issuer: secret` (your `kubernetes.io/tls` Secret
+   for `*.<domain>` in `pc-sandbox` on the services cluster, `sandbox.tls.secret`) and write `*.<domain>` yourself.
+2. `sandbox.proxy.address`: one address of `sandbox.network.metallb`. `sandbox.entry`: the appliance's address on the
+   sandbox vnet (outside the gateway, the workers and the MetalLB range) and its public bridge, address (CIDR) and
+   gateway. No `entry.public.bridge`: no appliance; forward TCP 443 to `sandbox.proxy.address` yourself.
+3. Stages 10, 55, 56 and 60 (or `make install`). Stage 10 creates pool `proxcloud-sandbox-entry` with the
+   `ProxCloudSandboxEntry` role for the portal. Stage 56 writes the record and, for `acme`, the TSIG key
+   (`generated/sandbox-tsig.json`), builds the appliance (VM `sandbox.entry.vmid`), applies the issuer, the certificate
+   and cert-sync on the services cluster and `sandbox-proxy` on the sandbox cluster, and waits until the proxy serves.
+   It generates `generated/sandbox-wake-token`: put it into the sandbox provider's `secret.proxyWakeToken`. Stage 60
+   gives the Proxmox provider `config.sandbox.proxy`; the next sync opens the workers to the appliance and installs
+   HAProxy's config on it.
+4. Check: `curl https://8000-<id>.<domain>/` with a sandbox serving on 8000 (`GET_ACCESS` gives its host and token).
+
+**What ran where:** stage 56 ran on the lab against the SB0 cluster (a split-mode copy of the lab site, the SB0
+cluster's kubeconfig in place of stage 55's, the services objects in a scratch namespace), with `selfsigned` and then
+`acme` against an ACME test server (DNS-01 through the lab PowerDNS); stage 60's and stage 10's new rows did not run
+there ([managed-sandbox.md §4.6](managed-sandbox.md#46-measured-on-the-lab-2026-11-08)).
 

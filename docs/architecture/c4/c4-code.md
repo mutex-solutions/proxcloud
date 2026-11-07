@@ -60,7 +60,8 @@ Status legend: [README.md](README.md). Everything on this page is **Implemented*
 NIC, VM options `policy_in`/`policy_out` `DROP` with `ipfilter` and `macfilter`, and as its only rule a reference to a
 cluster security group `sbx<pool hash><content hash>` whose rules all ACCEPT: its control plane's API and konnectivity
 ports, DNS to the configured resolvers, VXLAN, Cilium health, MetalLB memberlist and the kubelet between workers (IP set
-`<group>-n`), the kubelet from `kubeletSources`, and the internet (IP set `<group>-o`: everything minus the private
+`<group>-n`), the kubelet from `kubeletSources`, with `config.sandbox.proxy` TCP 443 from the entry appliance's vnet
+address to `sandbox-proxy`'s MetalLB address alone (SB4), and the internet (IP set `<group>-o`: everything minus the private
 ranges, the management networks, every node address, the sandbox's SNAT address, `blockedCidrs`, `cidrPool`, the
 sandbox subnet and the control plane). With every
 rule an ACCEPT under DROP policies, no order or partial write opens anything; a changed set is a new generation that
