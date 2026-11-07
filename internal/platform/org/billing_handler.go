@@ -1336,7 +1336,8 @@ func (h *BillingHandler) requireBillingProfilePermission(w http.ResponseWriter, 
 }
 
 // delete removes a billing profile:
-// gated by BILLING_PROFILE_DELETE on the owning org; returns 202 Accepted (empty).
+// gated by BILLING_PROFILE_DELETE on the owning org; returns 202 Accepted (empty). Refused while it is what stands between a
+// project and running free: a suspended or indebted profile would take its hold with it, and a paying one its rating.
 func (h *BillingHandler) delete(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
@@ -1346,11 +1347,39 @@ func (h *BillingHandler) delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if err := h.refuseDelete(r.Context(), bp); err != nil {
+		fail(w, err)
+		return
+	}
 	if err := h.billing.Delete(r.Context(), bp.ID); err != nil {
 		fail(w, err)
 		return
 	}
 	httpx.Accepted(w)
+}
+
+func (h *BillingHandler) refuseDelete(ctx context.Context, bp *billing.BillingProfile) error {
+	refuse := func(why string) error {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, "This billing profile cannot be deleted: "+why)
+	}
+	if bp.Status == billing.StatusSuspended {
+		return refuse("it is suspended. Settle what it owes first")
+	}
+	balance, err := billing.NewBalanceService(h.billing).CurrentBalance(ctx, bp.ID, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if balance.IsNegative() {
+		return refuse("it has a negative balance. Settle what it owes first")
+	}
+	name, err := h.svc.repo.ProjectPaidBy(ctx, bp.ID)
+	if err != nil {
+		return err
+	}
+	if name != "" {
+		return refuse("it still pays for project " + name + ". Move that project to another profile or delete it first")
+	}
+	return nil
 }
 
 // countries returns the static billing country list. Authed via the RS layer but takes

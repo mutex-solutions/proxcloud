@@ -4,6 +4,73 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: One table holds a project's status changes; a member cannot lift a suspension
+
+**What changed**
+
+- `internal/platform/project/status.go` holds every allowed status change. The client service, the client handler, the admin
+  routes and the billing suspender all ask it, and writes are conditional on the status they read. `DELETED` and
+  `DELETE_IN_PROGRESS` refuse every action.
+- Cancelling a deletion needs `SCHEDULED_FOR_DELETION` and restores the status kept on the doc in `statusBeforeDeletion`.
+- `POST /project/{id}/billing/{bp}` and `POST /project/{id}/init` no longer enable a project. A billing resume leaves a project
+  an operator disabled (`disabledByOperator`).
+
+**Why**
+
+- Enabling was reachable from each path on its own terms: a cancel with nothing scheduled, a profile change, opening a project
+  with no service yet. Each could lift a billing or operator suspension, and each could overwrite `DELETE_IN_PROGRESS`, which
+  drops the project out of the sweep mid-teardown. A rule per handler is what let them differ.
+- The write is conditional because the deletion sweep moves a project between a handler's read and its write.
+
+**Then, on the same PR, what a recheck found**
+
+- `Repo.Save` no longer writes `status`, `scheduledForDeletionAt`, `statusBeforeDeletion` or `disabledByOperator`. Only the
+  conditional writes do: `SaveIfStatus`, `EnableIfDisabled` and `ApplyBillingSuspension`. Admin project update and quota write
+  their own fields, where they replaced the whole doc.
+- `pgdoc.SetFieldsOne` and `DeleteOne` lock the row they select. Without it a write queued behind another rechecked only the id,
+  so two conditional writes could both win. The test that races a suspension against a member's schedule found this.
+- A `DISABLED` project refuses what adds usage (`errProjectDisabled`, 409): every create, an upload, new or rotated S3 keys, and
+  every action outside `allowedWhileDisabled`. Reads, stop and delete stay open.
+- Moving a project to a `NEW` profile, by profile or by organization, is refused while something would keep running.
+- A billing profile's suspend, resume and activation apply only to the projects it pays for (`AllByBillingProfile`, `PaidBy`).
+- Opening a project lifts a `DISABLED` that nothing holds any more: not an operator's, and billing allows it. Activation lifts a
+  provisioned project as well.
+
+**Why**
+
+- `Save` ran from a read that could be minutes old: a bootstrap waiting on a provider put back the status from before a member's
+  delete-now, and the project dropped out of the sweep. Conditional writes on the few status paths do not help while a generic
+  write can overwrite them, so the generic write must not hold the field at all.
+- Metering, the sync and rating cover only `ENABLED` projects, so anything created or started in a `DISABLED` one ran free.
+- Refusing the profile move, rather than pausing through the suspender, because the move is the tenant's own action and
+  activation has no leg that resumes VMs. A refusal has no partial failure and tells them what to do.
+
+**Then, on the same PR, what a second recheck found**
+
+- `ActivationService.Suspend` and `SuspensionJob.suspend` save `SUSPENDED` before the cloud walk. `SuspensionJob.ExecuteDunning`
+  starts by walking every `SUSPENDED` profile again (`finishSuspensions`), before the check that dunning is on. The walk skips what
+  is already down. When a walk ends and the profile reads `ACTIVE`, the resume leg runs once more.
+- A process already `SUSPENDED` on an `ACTIVE` profile no longer stops dunning: it is a suspend whose profile save failed, and the
+  next pass carries on from it.
+- The client's `DELETE /billing-profile/{id}` refuses a `SUSPENDED` profile, a negative balance, or one still paying for a project.
+- `holdForProfile` takes "no profile" as well as a `NEW` one, covers every row type billing rates (`billableRows`) and a `DISABLED`
+  project too, and does nothing when billing is unconfigured.
+- `KeepServerVolumes`, `RebuildServer`, `ResizeServer` and `RestoreServerBackup` test `PoweredOn` before changing a VM: a paused VM
+  reads `paused`, so they skipped the stop. `START` on a paused VM resumes it.
+
+**Why**
+
+- With the walk first, a member opening a project during it saw `DISABLED` on an `ACTIVE` profile and lifted it, and the suspension
+  was lost for good. Saving first closes that, and leaves the failure cases to choose between. `ACTIVE` with projects down and
+  nothing retrying is the one to rule out, so a failed save touches nothing and a failed walk stands as `SUSPENDED`.
+- The pass is level-triggered rather than a retry marker. A marker only knows what a walk reported, and it would miss a crash, a
+  VM whose row appeared after the walk, and a lift racing the save. The price: an operator's enable under a suspended profile lasts
+  until the next pass, because nothing tells it from a missed project.
+- A suspended project could get out by deleting the profile, since `updateOrganization` skips its check when there is none. An org
+  with no profile was skipped too, and left a running project `ENABLED` and unrated.
+- Billing unconfigured leaves every profile `NEW`, so the hold refused or disabled every move on a portal that bills nothing.
+- Buckets and volumes were not in the check, so a tenant could park storage on a `NEW` profile, `DISABLED` and unrated, with its S3
+  keys still working against the store.
 ## 2026-11-07: Cluster ids take a neutral prefix
 
 **What changed**

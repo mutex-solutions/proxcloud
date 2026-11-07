@@ -418,6 +418,10 @@ func (h *Handler) s3KeyCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if err := refuseNewUsage(proj); err != nil {
+		h.fail(w, err)
+		return
+	}
 	var req struct {
 		Name string `json:"name"`
 	}
@@ -468,6 +472,10 @@ func (h *Handler) s3CredentialsRotate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if err := refuseNewUsage(proj); err != nil {
+		h.fail(w, err)
+		return
+	}
 	cc, svcID, ok := h.cephServiceOfProject(r.Context(), w, proj, r)
 	if !ok {
 		return
@@ -513,6 +521,10 @@ func (h *Handler) s3KeyRotate(w http.ResponseWriter, r *http.Request) {
 	}
 	proj, ok := h.project(w, r, u, rbac.ProjectCloudResourceAPIAcc) // credentials → api_access, not manage (F2)
 	if !ok {
+		return
+	}
+	if err := refuseNewUsage(proj); err != nil {
+		h.fail(w, err)
 		return
 	}
 	cc, svcID, ok := h.cephServiceOfProject(r.Context(), w, proj, r)

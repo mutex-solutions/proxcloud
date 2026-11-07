@@ -19,11 +19,36 @@ func (h *Handler) EnableAndBootstrap(ctx context.Context, p *Project) error {
 	return h.enableAndBootstrap(ctx, p)
 }
 
-// enableAndBootstrap provisions the project onto the non-disabled CLOUD services and flips it to
-// ENABLED. Idempotent: a project that already has an attached service is left as-is.
+// ProvisionByOperator is the admin API's provision: the operator's enable of what it asks to provision, so it also ends an
+// operator's disable. A DISABLED project already provisioned has nothing to provision and may hold paused VMs, so it stays:
+// enabling that is the operator's enable, which resumes them.
+func (h *Handler) ProvisionByOperator(ctx context.Context, p *Project) error {
+	if p.IsDisabled() && p.HasServices() {
+		return nil
+	}
+	if p.IsDisabled() {
+		if err := h.svc.EnableIfDisabled(ctx, p, true); err != nil {
+			return err
+		}
+	}
+	return h.enableAndBootstrap(ctx, p)
+}
+
+// enableAndBootstrap flips a DISABLED project to ENABLED (never an operator's disable) and provisions it onto the non-disabled
+// CLOUD services. The caller knows billing allows it. The enable is its own conditional write, made before any provider call:
+// the saves after those calls hold a read that may be minutes old, and a status change landing during them must stand.
+// Idempotent: a project that already has an attached service is only enabled.
 func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if h.esSvc == nil {
 		return nil
+	}
+	if !p.IsEnabled() {
+		if err := CheckTransition(ActionEnable, p.Status); err != nil {
+			return err
+		}
+		if err := h.svc.EnableIfDisabled(ctx, p, false); err != nil {
+			return err
+		}
 	}
 	// Already provisioned (the project carries its attached services) → this is a re-entry; the
 	// provider-side setup was done at first bootstrap. Skip ALL the live calls — they are idempotent
@@ -59,7 +84,6 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 && len(truenasES) == 0 && len(dnsES) == 0 {
 		return nil // no cloud provider configured → nothing to provision
 	}
-	p.Status = StatusEnabled
 	// Ceph-s3 object-store bootstrap — provision the project's RGW user per service.
 	for _, es := range cephES {
 		if err := h.BootstrapCephOnto(ctx, p, es); err != nil {

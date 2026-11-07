@@ -52,14 +52,19 @@ func (j *DeletionJob) ExecuteAll(ctx context.Context) (int, error) {
 // SCHEDULED_FOR_DELETION → DELETE_IN_PROGRESS; cascade-delete the cloud resources; on success
 // remove the doc; on error stay in progress for the next sweep. Returns whether the project was deleted.
 func (j *DeletionJob) deleteProject(ctx context.Context, p *Project) bool {
-	if p.Status == StatusEnabled {
+	if p.Status == StatusEnabled || p.Status == StatusDisabled {
 		j.log.Debug("project no longer scheduled for deletion (canceled)", "id", p.ID)
 		return false
 	}
 	if p.Status == StatusScheduledForDeletion {
 		p.Status = StatusDeleteInProgress
-		if err := j.repo.Save(ctx, p); err != nil {
+		ok, err := j.repo.SaveIfStatus(ctx, p, StatusScheduledForDeletion)
+		if err != nil {
 			j.log.Error("project deletion: mark in-progress", "id", p.ID, "err", err)
+			return false
+		}
+		if !ok {
+			j.log.Info("project deletion: canceled during the sweep", "id", p.ID)
 			return false
 		}
 	}
