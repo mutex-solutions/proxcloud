@@ -3,11 +3,14 @@ package project
 // imageimport_pve.go — IMAGE create from a URL (pve/imageimport.go).
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -83,9 +86,31 @@ func pickImportNode(disk map[string]pve.StorageNodeState, importCap pve.StorageC
 	return nodes[0]
 }
 
+// spoolImage reads a body of unstated size to a temporary file, since PVE takes no upload without a length. The caller
+// removes the file. Over maxBytes: nil.
+func spoolImage(body io.Reader, maxBytes int64) (*os.File, int64, error) {
+	f, err := os.CreateTemp("", "pc-image-*")
+	if err != nil {
+		return nil, 0, err
+	}
+	n, err := io.Copy(f, io.LimitReader(body, maxBytes+1))
+	if err == nil && n <= maxBytes {
+		_, err = f.Seek(0, io.SeekStart)
+	}
+	if err != nil || n > maxBytes {
+		f.Close()
+		os.Remove(f.Name())
+		return nil, n, err
+	}
+	return f, n, nil
+}
+
+func gibUp(b int64) int { return int((b + 1<<30 - 1) >> 30) }
+
 // pveImportImage makes a project template from a URL. Body: {name, url, format?, checksum?, checksumAlgorithm?, profile?}.
 func (h *Handler) pveImportImage(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), pve.ImportTimeout)
+	defer cancel()
 	conflict := func(msg string) { h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, msg)) }
 	store := es.PVEImportStorage()
 	if store == "" {
@@ -110,16 +135,6 @@ func (h *Handler) pveImportImage(w http.ResponseWriter, r *http.Request, u *user
 		conflict("Image import needs a storage profile that takes boot disks")
 		return
 	}
-	target, err := safeurl.Check(ctx, strAny(data["url"]), importAlso(es.PVENetworkConfig().BlockedCIDRs))
-	if err != nil {
-		var refusal *safeurl.Refusal
-		if errors.As(err, &refusal) {
-			h.fail(w, httpx.BadRequest(refusal.Msg))
-			return
-		}
-		h.fail(w, upstreamErr("image URL", err))
-		return
-	}
 	ps, ok := h.pveService(w, es)
 	if !ok {
 		return
@@ -139,19 +154,88 @@ func (h *Handler) pveImportImage(w http.ResponseWriter, r *http.Request, u *user
 		conflict(fmt.Sprintf("No node has both storage %s and storage profile %s active", store, slug))
 		return
 	}
-	if target.Size > 0 && !pve.StorageHasRoom(importCap.Nodes[node], target.Size, es.PVEStorageHeadroomPct()) {
+	release, err := ps.LockImageImport(ctx, proj.ID)
+	if err != nil {
+		h.fail(w, pveVolumeErr(err))
+		return
+	}
+	defer release()
+
+	src, err := safeurl.Open(ctx, strAny(data["url"]), importAlso(es.PVENetworkConfig().BlockedCIDRs))
+	if err != nil {
+		var refusal *safeurl.Refusal
+		if errors.As(err, &refusal) {
+			h.fail(w, httpx.BadRequest(refusal.Msg))
+			return
+		}
+		h.fail(w, upstreamErr("image URL", err))
+		return
+	}
+	defer src.Body.Close()
+	body, size := io.Reader(src.Body), src.Size
+	if size < 0 {
+		maxGiB := es.PVEImportUnknownSizeMaxGiB()
+		if maxGiB == 0 {
+			conflict("The server did not say how large this image is, and this provider only takes images of a known size")
+			return
+		}
+		f, n, err := spoolImage(src.Body, int64(maxGiB)<<30)
+		if err != nil {
+			h.fail(w, upstreamErr("image URL", err))
+			return
+		}
+		if f == nil {
+			conflict(fmt.Sprintf("An image of unknown size can be at most %d GiB on this provider", maxGiB))
+			return
+		}
+		defer os.Remove(f.Name())
+		defer f.Close()
+		body, size = f, n
+	}
+	if size == 0 {
+		conflict("The file at this URL is empty")
+		return
+	}
+	// The file is at most about its disk, so this refuses early what the disk check below would refuse anyway.
+	if size > pve.MaxImportDiskGiB<<30 {
+		conflict(fmt.Sprintf("The image is %d GiB; the limit is %d GiB", size>>30, pve.MaxImportDiskGiB))
+		return
+	}
+	if herr := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{DiskGb: gibUp(size)}); herr != nil {
+		h.fail(w, herr)
+		return
+	}
+	if !pve.StorageHasRoom(importCap.Nodes[node], size, es.PVEStorageHeadroomPct()) {
 		conflict(fmt.Sprintf("Storage %s has no room for this image right now", store))
 		return
 	}
 	started := time.Now().UTC()
-	vmid, size, err := ps.ImportImage(ctx, proj.ID, pve.ImageImport{
-		Name: name, URL: target.URL, Format: format, Checksum: checksum, ChecksumAlgorithm: algorithm,
-		Node: node, ImportStorage: store, DiskStorage: profile.StorageFor(node),
+	vmid, disk, err := ps.ImportImage(ctx, proj.ID, pve.ImageImport{
+		Name: name, Format: format, Source: body, SourceSize: size, Checksum: checksum, ChecksumAlgorithm: algorithm,
+		Node: node, ImportStorage: store, DiskStorage: profile.StorageFor(node), HeadroomPct: es.PVEStorageHeadroomPct(),
+		CheckDisk: func(ctx context.Context, sizeBytes int64) error {
+			if herr := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{DiskGb: gibUp(sizeBytes)}); herr != nil {
+				return herr
+			}
+			caps, err := ps.C.DetectStorage(ctx)
+			if err != nil {
+				return err
+			}
+			if !pve.StorageHasRoom(profile.Placement(caps)[node], sizeBytes, es.PVEStorageHeadroomPct()) {
+				return httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf("Storage profile %s has no room for this image's %d GiB disk right now", slug, gibUp(sizeBytes)))
+			}
+			return nil
+		},
 	})
 	if err != nil {
 		slog.Warn("pve image import", "project", proj.ID, "err", err)
+		var herr *httpx.HTTPError
+		if errors.As(err, &herr) {
+			h.fail(w, herr)
+			return
+		}
 		h.fail(w, pveVolumeErr(err))
 		return
 	}
-	h.pveSaveImageRow(w, r, u, proj, es, name, vmid, size, started)
+	h.pveSaveImageRow(w, r, u, proj, es, name, vmid, disk, started)
 }

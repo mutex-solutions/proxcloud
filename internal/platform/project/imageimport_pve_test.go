@@ -1,10 +1,13 @@
 package project
 
 import (
+	"io"
 	"net/netip"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 )
 
@@ -51,5 +54,34 @@ func TestPickImportNode(t *testing.T) {
 	}
 	if got := pickImportNode(map[string]pve.StorageNodeState{"d": {Avail: 1}}, imp); got != "" {
 		t.Fatalf("no node with both: %q", got)
+	}
+}
+
+func TestSpoolImage(t *testing.T) {
+	f, n, err := spoolImage(strings.NewReader("abcd"), 4)
+	if err != nil || f == nil || n != 4 {
+		t.Fatalf("%v %d %v", f, n, err)
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	got, _ := io.ReadAll(f)
+	if string(got) != "abcd" {
+		t.Fatalf("read back from the start: %q", got)
+	}
+	f2, n, err := spoolImage(strings.NewReader("abcde"), 4)
+	if f2 != nil || err != nil || n != 5 {
+		t.Fatalf("over the limit: %v %d %v", f2, n, err)
+	}
+}
+
+func TestImagesCountInQuota(t *testing.T) {
+	rows := []cloud.CloudResource{
+		{ServiceID: "s", Type: cloud.TypeVolume, Data: map[string]any{"volume": map[string]any{"size": 10}}},
+		{ServiceID: "s", Type: cloud.TypeImage, Data: map[string]any{"image": map[string]any{"size": int64(1 << 30)}}},
+		{ServiceID: "s", Type: cloud.TypeImage, Data: map[string]any{"image": map[string]any{"size": float64(5<<30 + 1)}}},
+		{ServiceID: "other", Type: cloud.TypeImage, Data: map[string]any{"image": map[string]any{"size": int64(50 << 30)}}},
+	}
+	if got := pveUsageOf(rows, "s").DiskGb; got != 17 {
+		t.Fatalf("10 GB of volumes, 1 and 6 of images: %d", got)
 	}
 }

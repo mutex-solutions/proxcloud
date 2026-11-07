@@ -4,6 +4,29 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Image import goes through the portal
+
+**What changed**
+
+- The portal fetches an image URL and streams it to PVE's upload API. `download-url` is gone from the portal, and
+  `ProxCloudPlatform` no longer carries `Sys.AccessNetwork`.
+- `pkg/safeurl.Blocked` blocks everything not globally routable. `Check` became `Open`, which hands back the fetch.
+- Project images count against `diskGb`. One import at a time per project. Room is checked on the import store, on the
+  profile's boot storage for the disk, and on the API node's root disk, where pveproxy spools an upload. A URL with no
+  stated size is refused unless the operator sets `importUnknownSizeMaxGiB`.
+
+**Why**
+
+- The portal checked a URL and then a node fetched it again, following redirects PVE gives no way to turn off. A server
+  answering the portal with an image and the node with a 302 reached the node's network, and the portal could not see
+  it. With the portal as the only client, the check at connect time covers every address the fetch uses, and the node
+  has nothing to fetch.
+- The 200 GiB cap held per image with nothing on the total or on concurrency, so a tenant could fill the store.
+- The block list let through ranges that reach no one on the internet but can reach something inside: benchmarking,
+  IETF protocol, reserved, NAT64 and 6to4 among them. The SSO fetcher uses the same function, so it gains this too.
+
+**Diagrams updated:** `c3-components.md` (the image import row).
+
 ## 2026-11-07: A server's name is checked against PVE's rule
 
 **What changed**
