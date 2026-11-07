@@ -6,6 +6,7 @@ package admin
 // roll customer clusters implicitly) — these endpoints are the operator's explicit override.
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -90,6 +91,42 @@ func (h *Handler) kamajiClusterBump(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, map[string]any{"chartVersion": pin})
+}
+
+// CSIMigrator moves one cluster of a kamaji provider onto the CSI gateway (project.Handler.MigrateClusterCSI). The report
+// comes back with an error too, when the migration stopped on it.
+type CSIMigrator func(ctx context.Context, es *externalservice.ExternalService, ks *kamaji.Service, clusterID string, dryRun, force bool) (any, error)
+
+// SetCSIMigrator wires kamajiClusterCSIGateway (nil = 501).
+func (h *Handler) SetCSIMigrator(f CSIMigrator) { h.csiMigrate = f }
+
+// kamajiClusterCSIGateway moves ONE cluster made with the tenant-side proxmox-csi controller onto the CSI gateway:
+// adopt its disks into the registry, switch the controller in one chart bump onto the provider's current chartVersion,
+// delete the tenant's copy of the old config and revoke csi@pve!<id>. ?dryRun=true only reports; ?force=true goes on
+// past PersistentVolumes it cannot adopt (their pods cannot attach afterwards). ADMIN_SERVICE_MANAGE.
+func (h *Handler) kamajiClusterCSIGateway(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, externalServiceManagePerm) {
+		return
+	}
+	es, ks, ok := h.kamajiService(w, r)
+	if !ok {
+		return
+	}
+	if h.csiMigrate == nil {
+		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "the CSI gateway is not configured"))
+		return
+	}
+	q := r.URL.Query()
+	rep, err := h.csiMigrate(r.Context(), es, ks, chi.URLParam(r, "clusterId"), q.Get("dryRun") == "true", q.Get("force") == "true")
+	var he *httpx.HTTPError
+	if err != nil && rep != nil && errors.As(err, &he) {
+		httpx.Raw(w, he.Status, map[string]any{"data": rep, "errors": httpx.APIError{Code: he.Code, Message: he.Msg}})
+		return
+	}
+	if writeClusterErr(w, err) {
+		return
+	}
+	httpx.OK(w, rep)
 }
 
 // kamajiClusterBumpAll re-pins EVERY managed cluster onto the provider's current chartVersion.

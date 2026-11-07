@@ -78,6 +78,8 @@ type Handler struct {
 	// kamajiFor builds the Managed-Kubernetes service for a kamaji provider (nil in tests →
 	// the cluster chart-pin endpoints answer 501).
 	kamajiFor func(es *externalservice.ExternalService) (*kamaji.Service, error)
+	// csiMigrate moves a cluster onto the CSI gateway (nil → 501).
+	csiMigrate CSIMigrator
 	// pveFlavors is the Proxmox flavor catalog (nil in tests → the surface 503s).
 	pveFlavors *pveflavor.Repo
 	pay        *billing.PayService // bill record-payment (nil → 501)

@@ -294,7 +294,47 @@ Deployments: the chart's `api.csiGateway` (its own port, a Service with `externa
 a CA made with cert-manager, a NetworkPolicy that admits the port from `allowedCIDRs` only); `make install` in split mode
 turns it on with the services nodes (`services.network.nodes`) as the only sources, at the first mgmt node's address.
 A Local Service answers only on a node running an API pod, so with three mgmt nodes the installer pins the API to the
-first. Existing clusters keep the tenant-side controller until their migration.
+first. Existing clusters keep the tenant-side controller until an operator moves them (below).
+
+A PersistentVolume on a node-local store (`zfspool`, `lvmthin`) carries its PVE node as its zone, so its pod runs only on
+workers of that node; on a shared store (NFS, RBD) it follows the pod to any worker.
+
+**Moving a cluster onto the CSI gateway.** A cluster made with `csiSharedStores` before the gateway keeps the
+tenant-side controller and its `csi@pve!<id>` token until an operator moves it, one cluster at a time:
+
+```sh
+# what it would do; writes nothing
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/v1/admin/service/<kubernetesProviderId>/k8s-clusters/<clusterId>/csi-gateway?dryRun=true"
+# do it
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/v1/admin/service/<kubernetesProviderId>/k8s-clusters/<clusterId>/csi-gateway"
+```
+
+It needs what a new cluster needs (the portal's gateway URL and CA, the gateway token on the compute provider, the
+project's own workers) and a Kubernetes provider pinned to chart 0.1.7 or later, which the cluster is bumped onto. The
+portal reads the tenant API through the cluster's Kamaji admin kubeconfig, at the control plane's LoadBalancer
+address: a cluster whose API allowlist leaves the portal out cannot be moved until it is added.
+
+1. **Adopt.** The portal reads the cluster's PersistentVolumes of driver `csi.proxmox.sinextra.dev`, and those of every
+   other cluster of the provider. A PV's disk enters the gateway's registry as the cluster's when that PV is the only one
+   naming it, PVE lists it on one of the cluster's stores, nothing but the cluster's workers has it attached, and no
+   registry row holds it. Any other PV is refused with its reason: another cluster's PV names the disk too (a crafted
+   PV, or a disk passed between clusters), the registry holds it for another cluster, another VM has it attached, it is
+   not on PVE, its name is not one proxmox-csi gives a volume, it is on another region or store, or another cluster's PVs
+   could not be read (the disk could be theirs). A refusal stops the migration with 409 and the report; `?force=true` goes
+   on, and a pod of a refused PV cannot attach afterwards. `-pvc-` disks on the cluster's stores that no PV names, no row
+   holds and no VM has attached are listed as `orphans`, never deleted. Adopted disks bill from now on (the PVE sync
+   never counted them before).
+2. **Switch.** The portal mints the cluster's gateway credential, writes `<id>-csi-gateway`, cuts `<id>-csi-config` down
+   to the `csi-proxmox` namespace, and in one Application apply pins the provider's chart with the gateway values.
+   CAAPH takes the tenant's controller to 0 replicas and the services-side controller takes over the same leases. Pods
+   keep their volumes: their I/O does not pass through the controller. On the lab the switch took about 10 seconds.
+3. **Clean up.** It deletes the tenant's `csi-proxmox/proxmox-csi-plugin` Secret (the resource set does not delete what
+   it no longer carries), then revokes `csi@pve!<id>`.
+
+Running it again is safe: adopted rows stay, a switched cluster is not switched again, and a Secret or token already gone
+counts as done. Its CAPI token stays.
 
 For a cluster without the gateway, a disk is named after its PV alone, so the portal cannot tell whose it is: a PVC still
 there when the cluster is deleted leaves its disk on the store, unbilled. Delete PVCs first. A cluster created with the setting off has no proxmox-csi, no CSI token and no
@@ -304,7 +344,8 @@ such a store needs a ZFS dataset or RBD namespace per project, and we found no P
 
 **Taking the token back.** The setting decides what a cluster is created with. Turning it off, or upgrading from a version
 that always minted the token, does nothing to existing clusters: they keep the plugin, its StorageClasses and a live token
-until they are deleted. To take one back, per cluster (`<id>` is the cluster id, `pveum user token list csi@pve` lists them):
+until they are deleted. A portal with the CSI gateway moves such a cluster onto it instead, volumes and all ("Moving a
+cluster onto the CSI gateway" above). Without the gateway, to take one back, per cluster (`<id>` is the cluster id, `pveum user token list csi@pve` lists them):
 
 1. In the tenant cluster, delete PVCs on those classes and wait for their disks to go. Afterwards the plugin can no longer detach or delete them: a pod that moves answers `proxmox API error 401` on attach, a disk left behind stays on the store unbilled, and a worker replaced while one is attached waits at `WaitingForVolumeDetach`.
 2. On a PVE node: `pveum user token remove csi@pve <id>`. This is the step that closes the hole. PVE drops the token's ACLs with it, and a copy left in the tenant cluster is dead.
