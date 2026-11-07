@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/publicsuffix"
+
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 )
 
@@ -149,11 +151,45 @@ func (s *Service) List(ctx context.Context, projectID string) ([]Zone, error) {
 	return out, nil
 }
 
-// Create makes a native zone owned by the project. A name the server already holds is refused for any owner.
+// checkOverlap refuses a name equal to, above or below anything the project does not own. The server answers from the
+// longest matching zone with no delegation step, so a child zone would take over its parent's names at once, and a parent
+// zone everything its child does not hold. The name server hosts count too: they are not the tenant's to answer for.
+func (s *Service) checkOverlap(ctx context.Context, projectID, name string) error {
+	var all []Zone
+	if err := s.do(ctx, http.MethodGet, "/zones", nil, &all); err != nil {
+		return err
+	}
+	foreign := slices.Clone(s.Nameservers)
+	for _, z := range all {
+		if z.Account != accountPrefix+projectID {
+			foreign = append(foreign, NormalizeZone(z.Name))
+		}
+	}
+	for _, f := range foreign {
+		if name == f {
+			return zonef("zone %s is already taken", name)
+		}
+		if strings.HasSuffix(name, "."+f) || strings.HasSuffix(f, "."+name) {
+			return zonef("zone %s overlaps a zone held elsewhere on this server", name)
+		}
+	}
+	return nil
+}
+
+// Create makes a native zone owned by the project. A name the server already holds is refused for any owner, and so is
+// one that overlaps what the project does not own. A public suffix is refused because holding co.uk would lock everyone
+// else out of every name below it.
 func (s *Service) Create(ctx context.Context, projectID, name string) (*Zone, error) {
 	name = NormalizeZone(name)
 	if !zoneNameRe.MatchString(name) {
 		return nil, zonef("%s is not a valid zone name", name)
+	}
+	bare := strings.TrimSuffix(name, ".")
+	if suffix, _ := publicsuffix.PublicSuffix(bare); suffix == bare {
+		return nil, zonef("%s is a public suffix: use a domain below it", name)
+	}
+	if err := s.checkOverlap(ctx, projectID, name); err != nil {
+		return nil, err
 	}
 	var z Zone
 	err := s.do(ctx, http.MethodPost, "/zones", map[string]any{
@@ -167,6 +203,14 @@ func (s *Service) Create(ctx context.Context, projectID, name string) (*Zone, er
 		return nil, zonef("%s", ae.Msg)
 	}
 	if err != nil {
+		return nil, err
+	}
+	// Two creates can pass the check together and the server takes both. Each one looks again, so an overlap never stays;
+	// when both see it both lose, and a retry settles it.
+	if err := s.checkOverlap(ctx, projectID, name); err != nil {
+		if derr := s.do(ctx, http.MethodDelete, "/zones/"+name, nil, nil); derr != nil {
+			return nil, derr
+		}
 		return nil, err
 	}
 	return &z, nil
@@ -205,13 +249,17 @@ func (s *Service) Records(ctx context.Context, projectID, name string) ([]RRSet,
 	return out, nil
 }
 
-// recordName turns what the user typed ("www", "@", a full name) into a name inside the zone.
+// recordName turns what the user typed ("www", "@", a full name with or without the root dot) into a name inside the
+// zone. A literal www.example.org.example.org. has to be typed with the dot.
 func recordName(zone, name string) (string, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
+	bare := strings.TrimSuffix(zone, ".")
 	switch {
 	case name == "" || name == "@":
 		return zone, nil
 	case strings.HasSuffix(name, "."):
+	case name == bare || strings.HasSuffix(name, "."+bare):
+		name += "."
 	default:
 		name += "." + zone
 	}

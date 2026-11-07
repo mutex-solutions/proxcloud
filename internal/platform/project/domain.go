@@ -16,6 +16,7 @@ const (
 	StatusDisabled             = "DISABLED"
 	StatusScheduledForDeletion = "SCHEDULED_FOR_DELETION"
 	StatusDeleteInProgress     = "DELETE_IN_PROGRESS"
+	StatusDeleted              = "DELETED"
 )
 
 // MembershipRole values (project memberships only know OWNER/MEMBER — no ADMIN
@@ -140,6 +141,11 @@ func (p *Project) HasServices() bool { return len(p.Services) > 0 }
 // ServiceIDs returns the serviceId of each attached ProjectExternalService (the link to
 // ExternalService.id). Services are embedded free-form (map[string]any, whether built in code or
 // decoded from the store), so the id is read by key.
+// Deleting reports a project scheduled for deletion, being torn down or already torn down.
+func (p *Project) Deleting() bool {
+	return p.Status == StatusScheduledForDeletion || p.Status == StatusDeleteInProgress || p.Status == StatusDeleted
+}
+
 func (p *Project) ServiceIDs() []string {
 	out := make([]string, 0, len(p.Services))
 	for _, svc := range p.Services {

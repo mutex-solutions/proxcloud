@@ -726,10 +726,17 @@ The API key goes in `secret.apiKey`. The server needs `api=yes`, a backend that 
 from ProxCloud only. Zones are `Native`, so the operator replicates them (database replication or a second backend).
 
 A zone belongs to the project in its `account` field (`proxcloud:<projectId>`). Every read and write checks it first,
-and another project's zone looks absent. Names are global on the server: a taken name answers `409`. ProxCloud does not
-prove a tenant owns a domain, so a tenant can hold a name it does not own until the owner complains; a zone only takes
-effect once the domain is delegated to these name servers. Tenants may not write the SOA or the apex NS. Zones are not
-billed and have no quota yet.
+and another project's zone looks absent. Names are global on the server: a taken name answers `409`. So does a name above
+or below a zone the project does not own, including zones the operator made by hand (empty `account`) and the name server
+hosts, because the server answers from the longest matching zone with no delegation step. A public suffix (`co.uk`) is
+refused too. ProxCloud does not prove a tenant owns a domain, so a tenant can hold a name it does not own until the owner
+complains, and that hold also blocks the names above and below it; a zone only reaches the internet once the domain is
+delegated to these name servers. Zones that overlapped before this rule are not touched. Tenants may not write the SOA or
+the apex NS. Zones are not billed and have no quota yet.
+
+A project's deletion removes its zones by `account`, with or without rows. If the server is down the project stays
+`DELETE_IN_PROGRESS` and the deletion job retries every sweep. The same holds for shares, Proxmox, ceph-s3 credentials and
+managed-service remnants. Tenants see a generic message when the server fails; the cause is in the API log.
 
 The PVE SDN DNS plugin, which would register VM names from SDN IPAM, is not wired and stays Planned: it needs DNS
 options on the shared EVPN zone, and ProxCloud does not create IPAM records for it to use.
