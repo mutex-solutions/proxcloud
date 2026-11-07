@@ -146,7 +146,8 @@ flowchart TB
 | Standard | TrueNAS NFS as a capacity-class profile ("Capacity HDD (NFS)") | Bulk data volumes only: no boot disks, databases or snapshots (API-enforced) | Implemented |
 | Standard | TrueNAS NFS and SMB tenant file shares, NAS-created stores for templates and backups | `SHARE` product through the WebSocket API; datasets `nas-templates`, `nas-backup` | Implemented |
 | Standard | TrueNAS NFS dataset per tenant cluster, csi-driver-nfs | Kubernetes RWX (`shared-file` class) | Implemented |
-| Standard | TrueNAS iSCSI | Shared block | Planned |
+| Standard | Shared LVM on a TrueNAS iSCSI LUN | Boot-capable shared profile, no snapshots (site setup, no code) | Implemented |
+| Standard | TrueNAS storage plugin, multipath, LINSTOR, democratic-csi iSCSI | Other shared block | Planned |
 | Standard | RustFS | Internal bucket store on sites without Ceph, deployed by the installer | Implemented |
 | Standard | RustFS tenant buckets | Bucket product on sites without Ceph | Implemented |
 | Both | Admin-declared profile flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`), validated on save against detection | Shown to tenants as volume-type specs | Implemented |

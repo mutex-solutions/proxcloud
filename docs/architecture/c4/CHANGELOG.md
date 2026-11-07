@@ -4,6 +4,21 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Shared block on a TrueNAS LUN checked (P8-4, part)
+
+**What changed**
+
+- Shared LVM on a TrueNAS iSCSI LUN ran as a storage profile: documented as a site setup, marked Implemented. A failed
+  volume action now refreshes the project's volume rows.
+
+**Why**
+
+- It needed no code, only proof: detection, profile checks, cross-node clone, live migration and cross-node attach all
+  held. A failed attach had left a stale row naming a disk that had moved to a holder, so the retry failed until the
+  next sync. The storage plugin, multipath, LINSTOR and democratic-csi remain Planned.
+
+**Diagrams updated:** `c2-containers.md` (storage table).
+
 ## 2026-11-07: Tenant DNS zones on PowerDNS (P8-3)
 
 **What changed**

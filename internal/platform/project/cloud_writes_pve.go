@@ -27,6 +27,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pveflavor"
@@ -1367,6 +1368,11 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 		return false
 	}
 	if aerr != nil {
+		// A failed cross-node attach can leave the disk on a holder under a new name, so the old row must go too.
+		prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc())
+		if _, err := providers.Reconcile(ctx, prov, h.cloud, es.ID, time.Now().UTC()); err != nil {
+			slog.Warn("volume action: refresh rows", "project", proj.ID, "err", err)
+		}
 		h.fail(w, pveVolumeErr(aerr))
 		return true
 	}

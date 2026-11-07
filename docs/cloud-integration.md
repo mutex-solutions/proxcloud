@@ -690,6 +690,27 @@ node), never started, tagged `pc-holder`, in the project pool, created on demand
   holder, migrates that holder offline (nothing to copy) and reassigns on the target's node. If a step fails the disk
   stays on that holder as an ordinary detached volume.
 
+## Shared block on a TrueNAS LUN
+
+A LUN with shared LVM on it gives a boot-capable profile on any node without Ceph: live migration and cross-node attach
+work, there are no snapshots and no thin provisioning. No ProxCloud code is specific to it: detection classifies shared
+`lvm` as tier standard, class standard. Checked on TrueNAS 25.10 and PVE 9.2 with one portal and no multipath:
+
+```sh
+# On TrueNAS: a sparse zvol, an iSCSI portal, initiator group, target, extent and target-extent, then start iSCSI.
+# On one node:
+pvesm add iscsi nas-iscsi --portal <nas> --target <iqn> --content none
+pvcreate /dev/disk/by-id/<wwn>; vgcreate shared-vg /dev/disk/by-id/<wwn>
+pvesm add lvm shared-block --vgname shared-vg --base nas-iscsi:0.0.0.<wwn> --shared 1 --content images
+# On every other node, or the storage stays inactive there:
+iscsiadm -m session --rescan; pvscan --cache
+```
+
+Then add a profile: `"block": {"storages": {"*": "shared-block"}, "shared": true, "liveMigrate": true}`. Claiming
+`snapshots` is refused. Restrict the target's initiators to the nodes on a real site. A NAS on HDD RAIDZ is capacity
+class in practice: use this on SSD or mirrors, and set the storage's class by hand if it is not. A portal the nodes
+cannot reach (TrueNAS also advertises its Docker bridges) makes `iscsiadm` log an error on every scan; it is harmless.
+
 ## PowerDNS zones
 
 `config.provider == "powerdns"` serves tenant zones (`DNS_ZONE` resources, service slug `dns`). Code:

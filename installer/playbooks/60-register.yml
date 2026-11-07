@@ -218,6 +218,27 @@
           secret: {adminAccessKey: "{{ pc_rustfs_access_key }}", adminSecretKey: "{{ pc_rustfs_secret_key }}"}
       no_log: true
 
+    - name: Register the Ceph RGW object store
+      when: pc.object_store.mode == 'ceph-rgw' and (pc.provider.name ~ ' S3') not in (pc_services.json.data | map(attribute='name') | list)
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service"
+        method: POST
+        body:
+          name: "{{ pc.provider.name }} S3"
+          type: CLOUD
+          status: PUBLIC
+          config:
+            provider: ceph-s3
+            s3Endpoint: "{{ pc.object_store.endpoint }}"
+            adminApiUrl: "{{ pc.object_store.endpoint | regex_replace('/+$', '') }}/admin"
+            region: "{{ pc.provider.region }}"
+            regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
+            services: {object-store: "{{ {pc.provider.region: true} }}"}
+          secret: {adminAccessKey: "{{ pc.object_store.access_key }}", adminSecretKey: "{{ pc.object_store.secret_key }}"}
+      no_log: true
+
     - name: Has the first-run configuration been seeded
       ansible.builtin.stat: {path: "{{ pc_gen }}/operator-seeded"}
       delegate_to: localhost
