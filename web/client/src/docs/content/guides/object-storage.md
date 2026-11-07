@@ -43,7 +43,7 @@ Open a bucket's menu and choose **Settings**:
 
 By default a bucket is private — only your keys can read it. You can make a bucket's objects **publicly readable**, or serve it as a **static website**.
 
-Enabling a website turns the bucket into a public site served at its own address (`your-bucket.your-website-domain`), with an index document (e.g. `index.html`) and an optional error document. **This makes every object in the bucket readable by anyone on the internet** — the toggle says so, and disabling it removes public access again. Don't enable it on a bucket holding private data.
+Enabling a website turns the bucket into a public site served at its own address (`your-bucket.your-website-domain`), with an index document (e.g. `index.html`) and an optional error document. **This makes every object in the bucket readable by anyone on the internet** — the toggle says so, and disabling it removes public access again. Making the bucket private also turns its website off. Don't enable it on a bucket holding private data.
 
 ## When to reach for it
 

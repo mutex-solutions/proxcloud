@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Object store connection checked at registration, public buckets always closable
+
+**What changed**
+
+- New `POST /admin/service/object-store/test`: the API checks a ceph-s3 endpoint and admin key without storing them.
+  Installer preflight requires the `ceph-rgw` values, stage 60 calls the test before it writes, updates the row's
+  endpoint and key on a re-run, and registers `object_store.region` as the provider's region.
+- A bucket's website state now also reads its public-read statement. Disable website removes that statement before it
+  touches the website config, and making a bucket private removes it too.
+
+**Why**
+
+- A wrong endpoint or key stored as a PUBLIC provider made every new project fail its bootstrap, after a green install,
+  and a re-run skipped the row. Checking from the API tests the network path the running platform will use. The region
+  shown to tenants was the Proxmox region name, which RGW rejects as a location constraint.
+- The statement publishes objects on the S3 endpoint whether or not the gateway has its website API. A gateway answering
+  405, or a provider with no website endpoint, left tenants with a public bucket and no control that closed it.
+
+**Diagrams updated:** none; no container or relationship changed.
+
 ## 2026-11-07: Shared block on a TrueNAS LUN checked (P8-4, part)
 
 **What changed**
