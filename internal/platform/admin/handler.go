@@ -129,6 +129,9 @@ type ProjectCloudOps struct {
 	CanDelete func(ctx context.Context, projectID string) error
 	// DeleteNow flags a project for immediate deletion; the deletion job's next sweep tears it down. nil → 501.
 	DeleteNow func(ctx context.Context, projectID string) error
+	// HoldForMove answers whether a move of an ENABLED project onto this own profile and organization has to disable it, and refuses
+	// one that would leave what it holds unbilled. nil → no hold.
+	HoldForMove func(ctx context.Context, projectID, ownProfileID, organizationID string) (bool, error)
 }
 
 // SetProjectCloudOps wires the live project-cloud legs (cmd/api only).

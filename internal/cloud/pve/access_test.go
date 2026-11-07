@@ -2,6 +2,7 @@ package pve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -44,7 +45,7 @@ func TestMintClusterTokens(t *testing.T) {
 		},
 	})
 	sc := ClusterTokenScope{
-		Pool: "pc-p1", TemplatePool: "pc-templates", Storages: []string{"local-zfs", "ssd"},
+		Pool: "pc-p1", TemplatePool: "pc-templates", BootStorage: "local-zfs", CSIStorages: []string{"local-zfs", "ssd"},
 		ISOStorage: "nas", Zone: "z1", Vnet: "v1",
 	}
 	got, err := c.MintClusterTokens(context.Background(), "pc-c-1", sc)
@@ -69,8 +70,29 @@ func TestMintClusterTokens(t *testing.T) {
 	if !slices.Equal(csi, want) {
 		t.Errorf("csi grants = %v, want %v", csi, want)
 	}
-	if !slices.Contains(acls, "/sdn/zones/z1/v1 ProxCloudCAPI capmox@pve!pc-c-1") {
+	for _, want := range []string{"/sdn/zones/z1/v1 ProxCloudCAPI capmox@pve!pc-c-1", "/sdn/zones/localnetwork ProxCloudCAPI capmox@pve!pc-c-1"} {
+		if !slices.Contains(acls, want) {
+			t.Errorf("capi grants = %v, want %s", acls, want)
+		}
+	}
+	// No store offered to the tenant: no CSI token at all, and CAPMOX still gets the boot store.
+	acls = nil
+	noCSI := sc
+	noCSI.CSIStorages = nil
+	got, err = c.MintClusterTokens(context.Background(), "pc-c-1", noCSI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CSIID != "" || got.CSISecret != "" {
+		t.Errorf("no store offered, yet a CSI token: %+v", got)
+	}
+	if !slices.Contains(acls, "/storage/local-zfs ProxCloudCAPI capmox@pve!pc-c-1") {
 		t.Errorf("capi grants = %v", acls)
+	}
+	for _, a := range acls {
+		if strings.Contains(a, "csi@pve") || strings.Contains(a, roleCSI) {
+			t.Errorf("no store offered, yet a CSI grant: %s", a)
+		}
 	}
 	aclErr = true
 	if _, err := c.MintClusterTokens(context.Background(), "pc-c-1", sc); err == nil {
@@ -91,5 +113,58 @@ func TestIsCSIDisk(t *testing.T) {
 		if isCSIDisk(id) != want {
 			t.Errorf("isCSIDisk(%q) != %v", id, want)
 		}
+	}
+}
+
+// A release retries after a partial revoke, and a cluster without proxmox-csi has no CSI token: a token that is gone must
+// not fail the revoke. PVE answers it with a 500.
+func TestDeleteAPITokenAbsent(t *testing.T) {
+	status, body := http.StatusInternalServerError, `{"errors":{"tokenid":"no such token 'pc-c-1' for user 'csi@pve'"}}`
+	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+		"DELETE /api2/json/access/users/csi@pve/token/pc-c-1": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			fmt.Fprint(w, body)
+		},
+	})
+	if err := c.DeleteAPIToken(context.Background(), "csi@pve", "pc-c-1"); err != nil {
+		t.Fatalf("absent token: %v", err)
+	}
+	status, body = http.StatusForbidden, `{"message":"Permission check failed"}`
+	if err := c.DeleteAPIToken(context.Background(), "csi@pve", "pc-c-1"); err == nil {
+		t.Fatal("a refusal must not count as revoked")
+	}
+	// Our own token gone: an answer with the same words, and the cluster's token is still live.
+	status, body = http.StatusUnauthorized, `{"errors":{"token":"no such token 'platform' for user 'proxcloud@pve'"}}`
+	if err := c.DeleteAPIToken(context.Background(), "csi@pve", "pc-c-1"); err == nil {
+		t.Fatal("a 401 must not count as revoked")
+	}
+	// PVE's reason goes in the status line, which a fake server cannot set.
+	for _, c := range []struct {
+		err  *APIError
+		want bool
+	}{
+		{&APIError{Status: 500, Message: "no such token 'pc-c-1' for user 'csi@pve'"}, true},
+		{&APIError{Status: 500, Message: "no such user ('csi@pve')"}, true},
+		{&APIError{Status: 401, Message: "no such token 'platform' for user 'proxcloud@pve'"}, false},
+		{&APIError{Status: 500, Message: "cluster not ready - no quorum?"}, false},
+		{&APIError{Status: 500, Message: "no such pool"}, false},
+	} {
+		if got := isTokenAbsent(c.err); got != c.want {
+			t.Errorf("isTokenAbsent(%v) = %v", c.err, got)
+		}
+	}
+}
+
+// The dialer has its own "no such host".
+func TestDeleteAPITokenUnresolvableHost(t *testing.T) {
+	c, err := New(Config{APIURL: "https://pve.invalid:8006", TokenID: "proxcloud@pve!t1", Secret: "sec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteAPIToken(context.Background(), "csi@pve", "pc-c-1"); err == nil {
+		t.Fatal("a dial error must not count as revoked")
+	}
+	if isTokenAbsent(errors.New("pve: DELETE /x: dial tcp: lookup pve: no such host")) {
+		t.Fatal("no such host")
 	}
 }

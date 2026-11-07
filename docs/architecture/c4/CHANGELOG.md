@@ -32,6 +32,69 @@ and rules: [README.md](README.md#maintenance-rule).
 - bcrypt takes 72 bytes. Longer failed a create after its clone, and a Set password left the old hash for the next rebuild.
 
 **Diagrams updated:** none, no container or component changed.
+## 2026-11-07: Tenant clusters get no PVE token by default
+
+**What changed**
+
+- A cluster on a project network gets no proxmox-csi, no CSI token and no tenant-side PVE credential, unless the provider sets
+  `config.cluster.csiSharedStores`. Chart 0.1.5 leaves the plugin out when no StorageClass is offered and makes
+  `shared-file` the default class.
+- The minted CAPMOX token gets `/sdn/zones/localnetwork`, worker node groups count against the project's quota, and a
+  revoke treats a missing token as revoked: only PVE's 500 naming it, not any error that says "no such".
+- A provider's numeric config keys accept a string of digits. A node group may keep a retired flavor it already runs, and
+  moves off one; its quota is counted at the size it really holds, root disk included.
+
+**Why**
+
+- First real run of the minted path. PVE checks only `Datastore.Allocate` on the store to attach or delete a disk, not the VM
+  that owns it, and proxmox-csi needs that privilege. A tenant cluster-admin read the token from its own cluster, attached
+  another project's PVC to its own worker and read the files. The token's ACLs cannot prevent this, and moving the plugin
+  to the management side would not either, since a tenant can create a `PersistentVolume` naming any disk. Off by
+  default, opt-in with the cost stated, is the same call as `snatSources`. A store per project would be the real fix.
+- Every clone failed without the node bridge grant, because PVE checks the template's NICs. A revoke failed for ever on a
+  token already gone, because PVE answers that with a 500. Workers bypassed every quota but GPU.
+- Ansible's `{{ x | int }}` reaches the API as a string, which read as 0: a site's `rwx_gib` and `worker_mtu` did nothing
+  and a VLAN zone from the installer had no tags. A revoke that took a DNS error for "no such token" would have left the token
+  live with its marker gone, and nothing retries after that.
+- The setting decides what a cluster is created with. It does not reach an existing cluster's token, so
+  `docs/managed-k8s.md` gives the procedure to take one back rather than a new action that only an operator should run.
+
+**Diagrams updated:** `c3-components.md`.
+## 2026-11-07: A resume is retried, and brings back only what a suspension paused
+
+**What changed**
+
+- The suspension walk writes `pausedBySuspension` on a VM's `cloudResource` row before pausing it. The resume leg touches marked
+  rows only, and clears a mark once it reads the VM as running or stopped on its node. `ResolveVM` reports a failed node read in
+  `ClusterResource.StatusErr`, and the walk leaves such a VM to the next pass.
+- `CloudSuspender` gains `FinishResumes`. Each `autoSuspensionJob` pass resumes marked VMs in `ENABLED` projects, and enables first a
+  project left `DISABLED` under a profile that pays, unless an operator disabled it.
+- `ActivationService.Unsuspend`, `SuspensionJob.resume` and the billing callbacks run the walk on `context.WithoutCancel`.
+- `finishSuspensions` reads each profile again just before walking it.
+- A project move onto what cannot pay skips a provider that has been removed, and answers 503 when a provider that is there cannot
+  be read, in place of a 500.
+- `DELETE /admin/billing-profile/{id}` uses the client path's `ProjectPaidBy` rule, so a profile paying through its organization is
+  refused. `PUT /admin/project/{id}` applies `holdForProfile` to an `ENABLED` or `DISABLED` project whose paying profile changes.
+- CI's integration job also runs `cmd/api`, where the walk's tests live, since `billingCloudSuspender` is in `main`.
+
+**Why**
+
+- A failed resume stayed paused for good on an `ACTIVE` profile and an `ENABLED` project, as passes only looked at `SUSPENDED`
+  profiles. A pass cannot resume every paused VM instead: PVE has no record of why a VM is paused, the old resume leg already undid
+  pauses it did not make, and the walk recorded nothing per VM. The mark goes before the pause because the other order can crash
+  into a paused VM nothing knows about, and a mark on a running VM costs one read.
+- The mark is on the row, not on the VM's PVE config: a config write is one more PVE call that can fail on a VM being paused, and
+  the row already survives a sync because `toDbRecord` writes named fields only. A VM paused by a build older than the mark has
+  none, and comes back through **Start**.
+- `/cluster/resources` reads running for a paused VM, so one failed node read cleared a mark with no resume and no log line, and on
+  a suspend marked a VM someone else had paused. A flag on the result, because the other callers of `ResolveVM` want the fallback.
+- A customer who had just paid could be paused again by a pass working from an old list.
+- Removing a provider left every move of its projects failing with `internal.error`, and a failed read must stay a refusal: the live
+  check is there because a row can lag a start.
+- Operators could delete the profile an organization's projects pay through, and move a project onto a profile that cannot pay,
+  leaving it `ENABLED` and unrated.
+
+**Diagrams updated:** none.
 
 ## 2026-11-07: Database ids take a neutral prefix
 
@@ -404,6 +467,7 @@ and rules: [README.md](README.md#maintenance-rule).
   connection alone skips it, or an RGW outage would stop an operator from turning the service off.
 
 **Diagrams updated:** none.
+
 ## 2026-11-07: A broken NAS no longer blocks an address no export lists
 
 **What changed**
