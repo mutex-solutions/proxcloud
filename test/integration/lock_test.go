@@ -42,3 +42,22 @@ func TestShedLock(t *testing.T) {
 		t.Fatalf("independent lock: ok=%v err=%v", ok, err)
 	}
 }
+
+// TestShedLockWait: Wait gives up when the lock stays busy, and its release lets the next caller in.
+func TestShedLockWait(t *testing.T) {
+	ctx := context.Background()
+	l := lock.New(freshPG(t))
+	release, ok, err := l.Wait(ctx, "w", time.Minute, 0)
+	if err != nil || !ok {
+		t.Fatalf("free lock: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := l.Wait(ctx, "w", time.Minute, time.Second); err != nil || ok {
+		t.Fatalf("busy lock: ok=%v err=%v", ok, err)
+	}
+	go func() { time.Sleep(600 * time.Millisecond); release() }()
+	release2, ok, err := l.Wait(ctx, "w", time.Minute, 10*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("after release: ok=%v err=%v", ok, err)
+	}
+	release2()
+}
