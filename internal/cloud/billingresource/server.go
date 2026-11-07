@@ -31,7 +31,7 @@ func (p *ServerProvider) Type() string { return cloud.TypeServer }
 // statuses (the API's status vocabulary, see pve.MapVMStatus) is excluded from billing (DELETED/ERROR/UNKNOWN/BUILD).
 var serverNotEligibleStatuses = map[string]bool{"DELETED": true, "ERROR": true, "UNKNOWN": true, "BUILD": true}
 
-func (p *ServerProvider) GetBillingInformation(ctx context.Context, _ billingapi.BillingContext, cr *cloud.CloudResource) ([]*billingapi.BillingResource, error) {
+func (p *ServerProvider) GetBillingInformation(ctx context.Context, bc billingapi.BillingContext, cr *cloud.CloudResource) ([]*billingapi.BillingResource, error) {
 	out := []*billingapi.BillingResource{}
 	notEligible := false
 	if server, ok := mapAt(cr.Data, "server"); ok {
@@ -46,7 +46,7 @@ func (p *ServerProvider) GetBillingInformation(ctx context.Context, _ billingapi
 	}
 	// Only create the traffic resource when the server is eligible.
 	if !notEligible {
-		tr, err := p.trafficBR(ctx, cr)
+		tr, err := p.trafficBR(ctx, bc, cr)
 		if err != nil {
 			return nil, err
 		}
@@ -181,8 +181,11 @@ func serverProtectionType() *billingapi.BillingResourceType {
 
 // trafficBR builds the "instance_traffic" resource from the month's UsageMetrics.
 // nil when no metrics exist for the current cycle.
-func (p *ServerProvider) trafficBR(ctx context.Context, cr *cloud.CloudResource) (*billingapi.BillingResource, error) {
-	cycleStart := firstDayOfCurrentMonth(p.now())
+func (p *ServerProvider) trafficBR(ctx context.Context, bc billingapi.BillingContext, cr *cloud.CloudResource) (*billingapi.BillingResource, error) {
+	cycleStart := bc.CycleStart
+	if cycleStart.IsZero() {
+		cycleStart = firstDayOfCurrentMonth(p.now())
+	}
 	m, err := p.usage.FindForCurrentMonth(ctx, cr.ID, cycleStart)
 	if err != nil {
 		return nil, err

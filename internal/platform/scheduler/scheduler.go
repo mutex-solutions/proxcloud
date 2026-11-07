@@ -37,9 +37,10 @@ const (
 	// reconcile stuck PENDING payment transactions.
 	TransactionScanSpec = "0 */20 * * * *"
 
-	// MonthlyBillSpec — daily at 00:00 (send bills): finalize each profile's previous-month
-	// OPEN bill (OPEN→SENT/PAID) so it becomes collectable + dunnable.
-	MonthlyBillSpec = "0 0 0 * * *"
+	// MonthlyBillSpec — daily at 00:30 (send bills): finalize each profile's previous-month
+	// OPEN bill (OPEN→SENT/PAID) so it becomes collectable + dunnable. Not at 00:00: the charges at
+	// 00:00 and 00:00:30 on the 1st still bill the month's last hour and minute onto that bill.
+	MonthlyBillSpec = "0 30 0 * * *"
 
 	// AutoSuspensionSpec — every 30 minutes (auto-suspension job).
 	AutoSuspensionSpec = "0 */30 * * * *"

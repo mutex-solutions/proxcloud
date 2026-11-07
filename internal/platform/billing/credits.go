@@ -88,7 +88,7 @@ func (r *Repo) WithProfileLock(ctx context.Context, profileID string, fn func(ct
 	}
 	db := r.acctCredits.DB()
 	return db.WithTx(ctx, func(ctx context.Context) error {
-		if err := db.LockXact(ctx, "billing-profile-credit:"+profileID); err != nil {
+		if err := db.LockXact(ctx, pricing.ProfileLockKey(profileID)); err != nil {
 			return err
 		}
 		return fn(ctx)

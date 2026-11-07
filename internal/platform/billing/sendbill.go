@@ -68,41 +68,15 @@ func (s *BillSendService) SendBillForProfile(ctx context.Context, profile *Billi
 	if err != nil || bill == nil {
 		return false, err
 	}
-	// delete-if-zero: total amount 0 AND no positive item (an empty/zero accrual bill).
-	positive := false
-	for i := range bill.Items {
-		if bill.Items[i].NetAmount.IsPositive() {
-			positive = true
-			break
-		}
-	}
-	if bill.CalculateTotalAmount().IsZero() && !positive {
-		return false, s.repo.DeleteBill(ctx, bill.ID)
-	}
-	if profile.Status == StatusSkip {
-		return false, nil // SKIP profiles' invoices are not sent
-	}
-	return true, s.sendBill(ctx, profile, bill, now)
+	return s.sendBill(ctx, profile, bill.ID, now)
 }
 
-// sendBill finalizes one bill: scale up, settle against credits, then
-// flip OPEN→PAID (fully covered) or OPEN→SENT (+dueAt = sentAt + 7 days).
-func (s *BillSendService) sendBill(ctx context.Context, profile *BillingProfile, bill *pricing.Bill, now time.Time) error {
-	bill.InvoiceCurrency = profile.Currency
-	pricing.ScaleUpItems(bill)
-
-	grossTotal := pricing.GetUnpaidAmountBillProductCurrency(bill)
-	if grossTotal.IsZero() {
-		bill.Status = pricing.BillStatusPaid
-		bill.SentAt = &now
-		if err := s.stampInvoiceNumber(ctx, bill, now); err != nil {
-			return err
-		}
-		return s.repo.SaveBillDoc(ctx, bill)
-	}
-
-	// Settle the gross against the profile's credit balance (settleBillAmount); persist the
-	// consumed credits, then decide PAID vs SENT on the remaining unpaid amount.
+// sendBill finalizes one bill under the profile lock: delete it if empty, skip SKIP profiles, scale up,
+// settle against credits, then flip OPEN→PAID (fully covered) or OPEN→SENT (+dueAt = sentAt + 7 days).
+// The bill is read again inside the lock: a charge landing after the caller's read would otherwise be
+// replaced by that older copy.
+func (s *BillSendService) sendBill(ctx context.Context, profile *BillingProfile, billID string, now time.Time) (bool, error) {
+	// Read before the lock's transaction: a failed read would abort it, and these tolerate failure.
 	baseCcy, _ := s.repo.BaseCurrency(ctx)
 	x := pricing.NewExchanger(nil)
 	var rates, allRates []pricing.TaxRate
@@ -111,7 +85,44 @@ func (s *BillSendService) sendBill(ctx context.Context, profile *BillingProfile,
 		rates = pricing.SelectTaxRates(allRates, profile.Country, profile.Company, now)
 	}
 	key := "bill_is_paid"
+	var bill *pricing.Bill
+	sent, settled := false, false
 	err := s.repo.WithProfileLock(ctx, profile.ID, func(ctx context.Context) error {
+		var err error
+		if bill, err = s.repo.BillByID(ctx, billID); err != nil || bill == nil || bill.Status != pricing.BillStatusOpen {
+			return err
+		}
+		// delete-if-zero: total amount 0 AND no positive item (an empty/zero accrual bill).
+		positive := false
+		for i := range bill.Items {
+			if bill.Items[i].NetAmount.IsPositive() {
+				positive = true
+				break
+			}
+		}
+		if bill.CalculateTotalAmount().IsZero() && !positive {
+			return s.repo.DeleteBill(ctx, bill.ID)
+		}
+		if profile.Status == StatusSkip {
+			return nil // SKIP profiles' invoices are not sent
+		}
+		sent = true
+		bill.InvoiceCurrency = profile.Currency
+		pricing.ScaleUpItems(bill)
+
+		grossTotal := pricing.GetUnpaidAmountBillProductCurrency(bill)
+		if grossTotal.IsZero() {
+			bill.Status = pricing.BillStatusPaid
+			bill.SentAt = &now
+			if err := s.stampInvoiceNumber(ctx, bill, now); err != nil {
+				return err
+			}
+			return s.repo.SaveBillDoc(ctx, bill)
+		}
+
+		// Settle the gross against the profile's credit balance (settleBillAmount); persist the
+		// consumed credits, then decide PAID vs SENT on the remaining unpaid amount.
+		settled = true
 		promoCredits, err := s.repo.PromotionalCreditCandidates(ctx, profile.ID, now)
 		if err != nil {
 			return err
@@ -160,7 +171,10 @@ func (s *BillSendService) sendBill(ctx context.Context, profile *BillingProfile,
 		return s.repo.SaveBillDoc(ctx, bill)
 	})
 	if err != nil {
-		return err
+		return false, err
+	}
+	if !settled {
+		return sent, nil
 	}
 	// The remainder is charged to the saved card BEFORE the mail (chargesAtIssue), so the customer
 	// gets one mail for the outcome, never a bank-transfer request for a bill the card pays later.
@@ -173,11 +187,11 @@ func (s *BillSendService) sendBill(ctx context.Context, profile *BillingProfile,
 			bill = fresh
 		}
 		if bill.Status == pricing.BillStatusPaid {
-			return nil
+			return true, nil
 		}
 		// The bill was issued just now, so any PENDING charge on it is this one.
 		if pending, _ := s.repo.PendingCollectForBill(ctx, bill.ID); len(pending) > 0 {
-			return nil
+			return true, nil
 		}
 	}
 	// Vars are built after the status/dueAt decision so the mail prints the due date, the unpaid
@@ -185,7 +199,7 @@ func (s *BillSendService) sendBill(ctx context.Context, profile *BillingProfile,
 	// The invoice PDF rides along (same document as the console download); a render failure only
 	// drops the attachment — a notification must never break the billing state machine.
 	notifyWith(ctx, s.notifier, key, profile, billMailVarsFull(ctx, s.repo, s.billLink, profile, bill, rates), invoiceAttachment(ctx, s.repo, s.pricing, profile, bill, now))
-	return nil
+	return true, nil
 }
 
 // chargesAtIssue reports whether the freshly issued remainder is charged right away: always for a
@@ -220,8 +234,10 @@ func (s *BillSendService) lastMonthOpenBill(ctx context.Context, bpID string, no
 	if err != nil {
 		return nil, err
 	}
-	lastT := now.AddDate(0, -1, 0)
-	ly, lm, _ := lastT.Date()
+	// From the 1st: AddDate on the 31st normalises "the 31st of last month" back into this month, which
+	// would issue the running bill and let the next charge open another that re-bills the month.
+	y, m, _ := now.UTC().Date()
+	ly, lm, _ := time.Date(y, m, 1, 0, 0, 0, 0, time.UTC).AddDate(0, -1, 0).Date()
 	for i := range bills {
 		b := &bills[i]
 		if b.Status != pricing.BillStatusOpen {

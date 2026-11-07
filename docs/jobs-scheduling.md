@@ -129,7 +129,7 @@ cron specs from `scheduler.go`. All specs are 6-field seconds-first, UTC.
 | `reminderNotifications` | `0 0 * * * *` | top of every hour | 10m / 30s | Dispatch the due scheduled reminders (re-evaluates days-until-expiry each run) |
 | `paymentGatewayTransactionScanning` | `0 */20 * * * *` | every 20 minutes | 10m / 30s | Reconcile stuck PENDING payment transactions (deposits/collects) |
 | `autoSuspensionJob` | `0 */30 * * * *` | every 30 minutes | 20m / 5m | Walk every `SUSPENDED` profile again (finishes a failed or partial suspension), then run dunning → auto-suspend delinquent billing profiles |
-| `monthlyBill` | `0 0 0 * * *` | daily 00:00 | 1h / 30s | Finalize each profile's previous-month OPEN bill (OPEN → SENT/PAID) so it becomes collectable + dunnable |
+| `monthlyBill` | `0 30 0 * * *` | daily 00:30 | 1h / 30s | Finalize each profile's previous-month OPEN bill (OPEN → SENT/PAID) so it becomes collectable + dunnable; after the passes that bill the month's last hour and minute onto it |
 | `monthlyCollect` | `0 0 7 1,5,9,13,16 * *` | 07:00 on the 1st/5th/9th/13th/16th | 1h / 30s | Collect SENT bills via the stored card |
 | `servicesSync` | `0 */15 * * * *` | every 15 minutes | 10m / 30s | Sync every ENABLED project's cloud resources into the cache |
 | `pveStateSync` | `15 * * * * *` | every minute at :15 | 2m / 30s | Proxmox: SERVER, IMAGE and FLOATING_IP rows of every project off one `/cluster/resources` page per provider; heartbeat and staleness alert |
