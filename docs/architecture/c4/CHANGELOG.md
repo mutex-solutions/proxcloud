@@ -4,6 +4,30 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: PR #PRNUM Sandbox cluster spike (SB0)
+
+**What changed**
+
+- New Planned element in C2b: the sandbox cluster, a platform-owned Kamaji cluster built from the cluster chart, with its
+  workers in pool `proxcloud-sandbox` on their own vnet, running tenant code under gVisor behind a Cilium egress
+  guardrail, with no CSI token and no NAS dataset. Docs only: no code, provider kind or route.
+- `docs/managed-sandbox.md` section 0 records the lab spike that shaped it.
+
+**Why**
+
+- The sandbox port (phases SB0 to SB10) needs a cluster where an escape from gVisor reaches as little as possible. The
+  spike ran one by hand on PVE 9.2 and measured what the diagram now commits to: exec works through konnectivity alone,
+  so the services cluster needs no route into the sandbox vnet; the EE guardrail drops every private destination from a
+  sandbox while the internet stays open.
+- It also showed what is not there yet and why the element stays Planned: from the worker's own network namespace the PVE
+  API, the NAS and the management host are reachable (the per-NIC VM firewall of SB2b is a release gate), Kamaji tenant
+  control planes run without the `NodeRestriction` admission plugin (true of every managed cluster today), and Cilium's
+  Gateway API does not work with the chart's kube-proxy setup, so TLS for sandbox hostnames needs another terminator.
+- The bootstrap ISO's store is chosen by the cluster token's ACL (CAPMOX takes the first ISO store the token can see), so
+  the sandbox token is granted a node-local store only. That is the trust boundary the C2b row names.
+
+**Diagrams updated:** `c2-containers.md` (C2b).
+
 ## 2026-11-07: Load balancers (HAProxy appliance)
 
 **What changed**
