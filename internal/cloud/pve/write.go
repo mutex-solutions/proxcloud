@@ -440,6 +440,10 @@ func (s *Service) PowerAction(ctx context.Context, projectID, externalID, verb s
 		if running {
 			return nil
 		}
+		if vm.Status == "paused" { // a resume that did not reach it: a project that can start things is not held
+			up, err = s.C.ResumeVM(ctx, vm.Node, vm.VMID)
+			break
+		}
 		up, err = s.C.StartVM(ctx, vm.Node, vm.VMID)
 	case "STOP", "SHUTOFF", "SHUTDOWN":
 		if !vm.PoweredOn() {
@@ -485,7 +489,7 @@ func (s *Service) ResizeServer(ctx context.Context, projectID, externalID string
 		return fmt.Errorf("pve: vm %s not found", externalID)
 	}
 	wasRunning := vm.Status == "running"
-	if wasRunning {
+	if vm.PoweredOn() {
 		if up, err := s.C.ShutdownVM(ctx, vm.Node, vm.VMID, 120); err == nil {
 			if werr := s.C.WaitTask(ctx, up); werr != nil {
 				return fmt.Errorf("pve resize: shutdown: %w", werr)
@@ -794,7 +798,7 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 		return conflictf("Image %s has no boot disk", req.ImageSlug)
 	}
 
-	if vm.Status == "running" {
+	if vm.PoweredOn() {
 		up, err := s.C.StopVM(ctx, node, vm.VMID)
 		if err == nil {
 			err = s.C.WaitTask(ctx, up)

@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/org"
+	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -219,6 +221,282 @@ func TestMoveToAProfileThatCannotPay(t *testing.T) {
 		f.seed(t, pgdoc.M{"status": project.StatusDeleteInProgress})
 		if code, body := f.do(http.MethodPut, "/project/p1/organization", org("o1")); code != 400 {
 			t.Fatalf("%d %s", code, body)
+		}
+	})
+}
+
+// TestMoveOntoWhatCannotPayHoldsOrRefuses: an organization with no profile, or a deleted one, follows the NEW-profile rule; so does
+// anything billable a project holds, storage included; and with billing unconfigured there is nothing to hold.
+func TestMoveOntoWhatCannotPayHoldsOrRefuses(t *testing.T) {
+	f := newSuspendedFixture(t)
+	mustInsert(t, f.db, "organization", pgdoc.M{"_id": "o4", "name": "o4"})
+	mustInsert(t, f.db, "organization_members", pgdoc.M{"organizationId": "o4", "sub": suspendedSub, "roles": []string{"OWNER"}})
+	mustInsert(t, f.db, "organization", pgdoc.M{"_id": "o5", "name": "o5", "billingProfileId": "gone"})
+	mustInsert(t, f.db, "organization_members", pgdoc.M{"organizationId": "o5", "sub": suspendedSub, "roles": []string{"OWNER"}})
+	hold := func(t *testing.T, rowType string) {
+		t.Helper()
+		mustInsert(t, f.db, "cloudResource", pgdoc.M{"_id": "r1", "projectId": "p1", "serviceId": "dns", "externalId": "r1", "type": rowType})
+	}
+	for _, target := range []string{"o4", "o5"} {
+		t.Run(target+": holds a cluster, refused", func(t *testing.T) {
+			f.seed(t, pgdoc.M{"status": project.StatusEnabled})
+			hold(t, cloud.TypeKubernetesCluster)
+			code, body := f.do(http.MethodPut, "/project/p1/organization", `{"organizationId":"`+target+`"}`)
+			if code != http.StatusConflict || !strings.Contains(body, "no billing profile") {
+				t.Fatalf("%d %s", code, body)
+			}
+			if p := f.stored(t); p.Status != project.StatusEnabled || p.OrganizationID != "o1" {
+				t.Fatalf("%+v", p)
+			}
+		})
+		t.Run(target+": holds nothing, moved and disabled", func(t *testing.T) {
+			f.seed(t, pgdoc.M{"status": project.StatusEnabled})
+			if code, body := f.do(http.MethodPut, "/project/p1/organization", `{"organizationId":"`+target+`"}`); code != 200 {
+				t.Fatalf("%d %s", code, body)
+			}
+			if p := f.stored(t); p.Status != project.StatusDisabled || p.OrganizationID != target {
+				t.Fatalf("%+v", p)
+			}
+		})
+	}
+	for _, rowType := range []string{cloud.TypeBucket, cloud.TypeVolume, cloud.TypeFloatingIP, cloud.TypeShare, cloud.TypeImage, cloud.TypeServer} {
+		t.Run("refused while it holds "+rowType, func(t *testing.T) {
+			f.seed(t, pgdoc.M{"status": project.StatusEnabled})
+			hold(t, rowType)
+			code, body := f.do(http.MethodPost, "/project/p1/billing/bp-new-o1", "")
+			if code != http.StatusConflict || !strings.Contains(body, "unbilled") {
+				t.Fatalf("%d %s", code, body)
+			}
+			if p := f.stored(t); p.Status != project.StatusEnabled || p.BillingProfileID != "" {
+				t.Fatalf("%+v", p)
+			}
+		})
+	}
+	t.Run("a DISABLED project cannot park what it holds either", func(t *testing.T) {
+		f.seed(t, pgdoc.M{"status": project.StatusDisabled, "billingProfileId": "bp-cur"})
+		hold(t, cloud.TypeBucket)
+		if code, body := f.do(http.MethodPost, "/project/p1/billing/bp-new-o1", ""); code != http.StatusConflict {
+			t.Fatalf("%d %s", code, body)
+		}
+	})
+	t.Run("what is not billable does not refuse", func(t *testing.T) {
+		f.seed(t, pgdoc.M{"status": project.StatusEnabled})
+		hold(t, cloud.TypeNetwork)
+		if code, body := f.do(http.MethodPost, "/project/p1/billing/bp-new-o1", ""); code != 200 {
+			t.Fatalf("%d %s", code, body)
+		}
+	})
+
+	if _, err := f.db.C("billingConfiguration").DeleteMany(context.Background(), pgdoc.M{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range [][2]string{{"o2", "a NEW profile"}, {"o4", "no profile"}} {
+		t.Run("billing unconfigured: a move to "+c[1]+" holds nothing", func(t *testing.T) {
+			f.seed(t, pgdoc.M{"status": project.StatusEnabled})
+			hold(t, cloud.TypeKubernetesCluster)
+			if code, body := f.do(http.MethodPut, "/project/p1/organization", `{"organizationId":"`+c[0]+`"}`); code != 200 {
+				t.Fatalf("%d %s", code, body)
+			}
+			if p := f.stored(t); p.Status != project.StatusEnabled || p.OrganizationID != c[0] {
+				t.Fatalf("%+v", p)
+			}
+		})
+	}
+}
+
+// TestDeletingAProfileThatMatters: deleting the suspended profile, or the one that pays, would free the project from it.
+func TestDeletingAProfileThatMatters(t *testing.T) {
+	f := newSuspendedFixture(t)
+	ctx := context.Background()
+	orgRepo := org.NewRepo(f.db)
+	billingRepo := billing.NewRepo(f.db)
+	org.NewBillingHandler(org.NewService(orgRepo, billingRepo, nil), org.NewPolicy(orgRepo), billingRepo, pricing.NewRepo(f.db),
+		nil, nil, nil, nil, "", user.NewRepo(f.db), nil).Routes(f.router)
+	del := func(t *testing.T, id string, want int, part string) {
+		t.Helper()
+		code, body := f.do(http.MethodDelete, "/billing-profile/"+id, "")
+		if code != want || !strings.Contains(body, part) {
+			t.Fatalf("delete %s: %d %s", id, code, body)
+		}
+	}
+	t.Run("suspended, then the move it would free", func(t *testing.T) {
+		f.seed(t, pgdoc.M{"status": project.StatusDisabled, "organizationId": "o3"})
+		del(t, "bp-sus", http.StatusConflict, "suspended")
+		if code, body := f.do(http.MethodPut, "/project/p1/organization", `{"organizationId":"o1"}`); code != http.StatusBadRequest {
+			t.Fatalf("the suspension must still hold the project: %d %s", code, body)
+		}
+	})
+	t.Run("pays through the organization", func(t *testing.T) {
+		f.seed(t, pgdoc.M{"status": project.StatusEnabled, "name": "web"})
+		del(t, "bp-cur", http.StatusConflict, "project web")
+	})
+	t.Run("pays as the project's own", func(t *testing.T) {
+		f.seed(t, pgdoc.M{"status": project.StatusEnabled, "billingProfileId": "bp-new"})
+		del(t, "bp-new", http.StatusConflict, "still pays")
+	})
+	t.Run("negative balance", func(t *testing.T) {
+		f.seed(t, pgdoc.M{"status": project.StatusEnabled})
+		mustInsert(t, f.db, "bill", pgdoc.M{"billingProfileId": "bp-new", "status": "SENT", "invoiceCurrency": "USD",
+			"items": []any{pgdoc.M{"resourceType": "instance", "currency": "USD", "netAmount": decimalOf(t, "5")}}})
+		del(t, "bp-new", http.StatusConflict, "negative balance")
+		_, _ = f.db.C("bill").DeleteMany(ctx, pgdoc.M{})
+	})
+	t.Run("a deleted project does not hold it, and a free one goes", func(t *testing.T) {
+		f.seed(t, pgdoc.M{"status": project.StatusDeleted, "organizationId": "o2"})
+		del(t, "bp-new", http.StatusAccepted, "")
+		if bp, err := billingRepo.FindByID(ctx, "bp-new"); err != nil || bp != nil {
+			t.Fatalf("%v %v", bp, err)
+		}
+	})
+}
+
+// A walk that behaves like the real one: the status moves first, then it takes as long as the VMs take.
+type walk struct {
+	f             *suspendedFixture
+	t             *testing.T
+	err           error
+	during        func()
+	suspends, res int
+}
+
+func (w *walk) SuspendBillingProfileClouds(ctx context.Context, bp string) error {
+	w.suspends++
+	if w.err != nil {
+		return w.err
+	}
+	if _, err := w.f.repo.ApplyBillingSuspension(ctx, "p1", bp, true); err != nil {
+		return err
+	}
+	if w.during != nil {
+		w.during()
+	}
+	return nil
+}
+
+func (w *walk) ResumeBillingProfileClouds(ctx context.Context, bp string) error {
+	w.res++
+	_, err := w.f.repo.ApplyBillingSuspension(ctx, "p1", bp, false)
+	return err
+}
+
+// TestOpenDuringASuspendWalk: the profile reads SUSPENDED before the walk starts, so a member opening the project it has just
+// disabled does not lift it, on either path.
+func TestOpenDuringASuspendWalk(t *testing.T) {
+	ctx := context.Background()
+	check := func(t *testing.T, f *suspendedFixture) {
+		t.Helper()
+		bp, _ := billing.NewRepo(f.db).FindByID(ctx, "bp-cur")
+		if p := f.stored(t); bp.Status != billing.StatusSuspended || p.Status != project.StatusDisabled {
+			t.Fatalf("suspension lost: profile %s, project %s", bp.Status, p.Status)
+		}
+	}
+	open := func(f *suspendedFixture) func() {
+		return func() { f.do(http.MethodPost, "/project/p1/init", "") }
+	}
+	t.Run("operator suspend", func(t *testing.T) {
+		f := newSuspendedFixture(t)
+		f.seed(t, pgdoc.M{"status": project.StatusEnabled})
+		repo := billing.NewRepo(f.db)
+		svc := billing.NewActivationService(repo, audit.NewService(audit.NewRepo(f.db), slog.Default()), slog.Default())
+		svc.SetClouds(&walk{f: f, t: t, during: open(f)})
+		bp, _ := repo.FindByID(ctx, "bp-cur")
+		if err := svc.Suspend(ctx, bp, billing.SourceAdmin); err != nil {
+			t.Fatal(err)
+		}
+		check(t, f)
+	})
+	t.Run("dunning", func(t *testing.T) {
+		f := newSuspendedFixture(t)
+		f.seed(t, pgdoc.M{"status": project.StatusEnabled})
+		owes(t, f)
+		job := billing.NewSuspensionJob(billing.NewRepo(f.db), nil)
+		job.SetCloudSuspender(&walk{f: f, t: t, during: open(f)})
+		if n, err := job.ExecuteDunning(ctx); err != nil || n != 1 {
+			t.Fatalf("%d %v", n, err)
+		}
+		check(t, f)
+	})
+}
+
+// owes turns on dunning and puts bp-cur past its limit.
+func owes(t *testing.T, f *suspendedFixture) {
+	t.Helper()
+	_, _ = f.db.C("billingConfiguration").DeleteMany(context.Background(), pgdoc.M{})
+	mustInsert(t, f.db, "billingConfiguration", pgdoc.M{"_id": "default", "baseCurrency": "USD", "suspensionConfiguration": pgdoc.M{
+		"enabled": true, "type": "BALANCE", "suspendedAt": pgdoc.M{"balance": decimalOf(t, "-100"), "days": 0}, "notifications": []any{},
+	}})
+	mustInsert(t, f.db, "bill", pgdoc.M{"billingProfileId": "bp-cur", "status": "SENT", "invoiceCurrency": "USD",
+		"items": []any{pgdoc.M{"resourceType": "instance", "currency": "USD", "netAmount": decimalOf(t, "150")}}})
+}
+
+// TestAFailedWalkIsCaughtByTheNextPass: the chosen order. A walk failing leaves the profile SUSPENDED, never ACTIVE with projects
+// down, and the job walks every SUSPENDED profile again, whichever way it got there and with dunning off.
+func TestAFailedWalkIsCaughtByTheNextPass(t *testing.T) {
+	ctx := context.Background()
+	f := newSuspendedFixture(t)
+	f.seed(t, pgdoc.M{"status": project.StatusEnabled})
+	repo := billing.NewRepo(f.db)
+	w := &walk{f: f, t: t, err: errors.New("PVE gone")}
+	svc := billing.NewActivationService(repo, nil, slog.Default())
+	svc.SetClouds(w)
+	bp, _ := repo.FindByID(ctx, "bp-cur")
+	if err := svc.Suspend(ctx, bp, billing.SourceAdmin); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := repo.FindByID(ctx, "bp-cur")
+	if p := f.stored(t); stored.Status != billing.StatusSuspended || p.Status != project.StatusEnabled {
+		t.Fatalf("profile %s, project %s", stored.Status, p.Status)
+	}
+	job := billing.NewSuspensionJob(repo, nil)
+	job.SetCloudSuspender(w)
+	if _, err := job.ExecuteDunning(ctx); err != nil { // the fixture's config has no dunning at all
+		t.Fatal(err)
+	}
+	if p := f.stored(t); p.Status != project.StatusEnabled {
+		t.Fatalf("still failing: %s", p.Status)
+	}
+	w.err = nil
+	if _, err := job.ExecuteDunning(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if p := f.stored(t); p.Status != project.StatusDisabled {
+		t.Fatalf("the pass must finish it: %s", p.Status)
+	}
+
+	t.Run("a resume landing during the walk stands", func(t *testing.T) {
+		w.during = func() {
+			fresh, _ := repo.FindByID(ctx, "bp-cur")
+			if err := svc.Unsuspend(ctx, fresh, billing.SourceAdmin); err != nil {
+				t.Error(err)
+			}
+			// What the resume walked past is taken down by the walk still running.
+			if _, err := f.repo.ApplyBillingSuspension(ctx, "p1", "bp-cur", true); err != nil {
+				t.Error(err)
+			}
+		}
+		if _, err := job.ExecuteDunning(ctx); err != nil {
+			t.Fatal(err)
+		}
+		fresh, _ := repo.FindByID(ctx, "bp-cur")
+		if p := f.stored(t); fresh.Status != billing.StatusActive || p.Status != project.StatusEnabled {
+			t.Fatalf("profile %s, project %s", fresh.Status, p.Status)
+		}
+	})
+	t.Run("a suspend whose profile save failed carries on", func(t *testing.T) {
+		f := newSuspendedFixture(t)
+		f.seed(t, pgdoc.M{"status": project.StatusEnabled})
+		owes(t, f)
+		repo := billing.NewRepo(f.db)
+		if err := repo.SaveSuspensionProcess(ctx, &billing.SuspensionProcess{Status: billing.SuspensionSuspended, BillingProfileID: "bp-cur"}); err != nil {
+			t.Fatal(err)
+		}
+		job := billing.NewSuspensionJob(repo, nil)
+		job.SetCloudSuspender(&walk{f: f, t: t})
+		if n, err := job.ExecuteDunning(ctx); err != nil || n != 1 {
+			t.Fatalf("%d %v", n, err)
+		}
+		if p := f.stored(t); p.Status != project.StatusDisabled {
+			t.Fatalf("%s", p.Status)
 		}
 	})
 }
