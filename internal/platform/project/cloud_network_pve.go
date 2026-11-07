@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -391,6 +392,12 @@ func pveAllowedPublicNetwork(es *externalservice.ExternalService, proj *Project,
 	return nil
 }
 
+// publicNICPlugged: the VM's public NIC is on bridge netID with address ip.
+func publicNICPlugged(cfg pve.VMConfig, netID, ip string) bool {
+	nic, ipcfg := cfg.Str(publicNIC), cfg.Str("ipconfig1")
+	return slices.Contains(strings.Split(nic, ","), "bridge="+netID) && strings.HasPrefix(ipcfg, "ip="+ip+"/")
+}
+
 func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if action != "ATTACH_PUBLIC_NETWORK" && action != "DETACH_PUBLIC_NETWORK" {
 		return false
@@ -467,6 +474,19 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		return true
 	}
 	fresh := ip == nil // a repeat attach to the same network keeps its address
+	if !fresh {
+		// Rewriting a plugged net1 gives it a new MAC, and the guest drops the address until a reboot. A repeat is
+		// refused like the other "already" actions; only an address held by a NIC that never got plugged is re-plugged.
+		cfg, cerr := ps.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+		if cerr != nil {
+			h.fail(w, pveVolumeErr(cerr))
+			return true
+		}
+		if publicNICPlugged(cfg, netID, ip.IP) {
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "The server is already attached to this public network, with address "+ip.IP))
+			return true
+		}
+	}
 	if fresh {
 		if herr := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{FloatingIPs: 1}); herr != nil {
 			h.fail(w, herr)

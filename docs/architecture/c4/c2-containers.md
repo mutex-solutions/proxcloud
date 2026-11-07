@@ -174,8 +174,12 @@ to any server on a node where that storage is active: the disk rides a new holde
 carrier, which nothing else may use), which migrates offline without copying data, and
 is reassigned on the target's node. `LIST_ATTACH_TARGETS` lists the eligible servers;
 anything else is 409. Retype moves the disk to another
-profile's storage on the same node (`move_disk`, source deleted), and a detached
-volume can be deleted on its own. A profile's class is the lowest effective class
+profile's storage on the same node (`move_disk`, source deleted); the volume row is
+marked moving for the copy, so a sync that sees the new volid first keeps the row, and
+the row then follows the disk and keeps its id. The wait and the follow outlive the
+request, and a sync leaves a row alone that took its new volid after the sync listed. A retype of a row still marked moving answers 409. A detached volume can be deleted on its
+own. PVE has no name for a disk: the name a tenant gives a volume is the row's
+(`data.volume.label`), and a sync carries it over. A profile's class is the lowest effective class
 of its storages (admin override, else detected); a capacity-class profile never
 takes boot disks, managed databases or snapshots, whatever it claims, and a save
 that claims them is refused. Each volume row carries its own profile and storage

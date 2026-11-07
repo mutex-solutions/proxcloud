@@ -228,7 +228,8 @@ func TestHolderOperationsTakeTheLock(t *testing.T) {
 			return s.DeleteVolume(context.Background(), "p1", 101, "local-zfs:vm-101-disk-1")
 		}},
 		{"create detached", cfgLocalUnused, func(s *Service) error {
-			return s.CreateDetachedVolume(context.Background(), "p1", "pve1", "local-zfs", 1, 0)
+			_, err := s.CreateDetachedVolume(context.Background(), "p1", "pve1", "local-zfs", 1, 0)
+			return err
 		}},
 		{"keep", cfgLocalUnused, func(s *Service) error {
 			return s.KeepServerVolumes(context.Background(), "p1", "101")

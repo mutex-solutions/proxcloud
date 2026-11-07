@@ -297,6 +297,31 @@ func TestDeleteVolumeStillInSnapshot(t *testing.T) {
 	}
 }
 
+// A status read that fails mid-move (seen on the lab) still returns the error, but only once the move has ended: the
+// caller then finds the disk where it is.
+func TestRetypeVolumeWaitsOutALostStatus(t *testing.T) {
+	polls := 0
+	s := volCluster(t, cfgAttached, map[string][]url.Values{}, fakeRoutes{
+		"GET /api2/json/nodes/pve1/tasks/" + volUPID + "/status": func(w http.ResponseWriter, r *http.Request) {
+			polls++
+			switch polls {
+			case 1:
+				http.Error(w, "refused", http.StatusBadGateway)
+			case 2:
+				fmt.Fprint(w, `{"data":{"status":"running"}}`)
+			default:
+				fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
+			}
+		},
+	})
+	if err := s.RetypeVolume(context.Background(), "p1", 101, "local-zfs:vm-101-disk-1", "nas", 10); err == nil {
+		t.Fatal("the lost status must reach the caller")
+	}
+	if polls < 3 {
+		t.Fatalf("returned after %d status reads, before the move ended", polls)
+	}
+}
+
 func TestRetypeVolume(t *testing.T) {
 	tests := []struct {
 		name, storage string
