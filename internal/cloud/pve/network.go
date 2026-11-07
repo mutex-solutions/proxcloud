@@ -696,9 +696,12 @@ func (s *Service) VnetStaticPoolFor(ctx context.Context, vnet, within string) (c
 
 // VnetInUse reports whether any pool VM NIC sits on the vnet (delete guard).
 func (s *Service) VnetInUse(ctx context.Context, projectID, vnetID string) (bool, error) {
-	vms, _, err := s.poolVMs(ctx, projectID)
+	vms, _, unread, err := s.poolVMs(ctx, projectID)
 	if err != nil {
 		return false, err
+	}
+	if len(unread) > 0 {
+		return false, errUnreadVMs()
 	}
 	for _, vm := range vms {
 		cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)

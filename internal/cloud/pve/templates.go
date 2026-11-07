@@ -40,7 +40,7 @@ type DiscoveredTemplate struct {
 func DiscoverTemplates(rows []ClusterResource) []DiscoveredTemplate {
 	bySlug := map[string]*DiscoveredTemplate{}
 	for _, r := range rows {
-		if r.Template != 1 || r.Pool != TemplatePool || !hasTag(r.Tags, TagTemplatePub) {
+		if r.Template != 1 || r.NodeDown || r.Pool != TemplatePool || !hasTag(r.Tags, TagTemplatePub) {
 			continue
 		}
 		slug := TagValue(r.Tags, TagTemplateImage)

@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: A node that is down loses no rows
+
+**What changed**
+
+- `Client.ClusterResources` marks VM rows of a node that is not online. `providers.UnreadKeeper` is a new optional provider
+  capability: Reconcile keeps a cached row whose object is listed but cannot be read. The server, volume and image sync
+  providers implement it. A server on a down node reads `UNKNOWN`, with all else unchanged.
+- Power actions on a down node's VM and `pve.IsNodeUnreachable` errors answer 409. `VnetInUse` and `SecurityGroupInUse` refuse
+  while a VM of the project cannot be read. A template copy on a down node is not offered.
+
+**Why**
+
+- A node loss drill on Ceph: PVE drops the name of a dead node's VMs after about five minutes, and the sync took a VM with no
+  name for one that is not there yet. Servers, volumes and images were archived as deleted while the data sat safely on RBD,
+  then came back as new resources when the node returned. Until then the portal said `ACTIVE` and billed a dead VM, a full
+  sync wiped its addresses, one unreadable VM stopped the volume sync of its whole project, and a stop answered 200.
+- The node is the only thing that knows, so one check where the list is read covers every caller.
+
+**Diagrams updated:** `c3-components.md` (Reconcile row).
 ## 2026-11-07: Provider actions are audited; a 502 hides its cause from tenants
 
 **What changed**

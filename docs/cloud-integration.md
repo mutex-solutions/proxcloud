@@ -701,6 +701,30 @@ Limits: a volume on another storage cannot be attached to a protected server wit
 VM snapshot older than the last sync can force a full resync (unverified). There is no alert on `degraded` yet; the state
 shows in the console and on the row.
 
+## A node goes down
+
+What Proxmox VE reports for a dead node, measured on PVE 9.2: for about five minutes its VMs read as last seen, `running`
+included; after that as `unknown`, with no name, sizes or template flag. Its storages keep reading as `available`.
+`Client.ClusterResources` therefore marks VM rows of a node that is not online (`NodeDown`, status `unknown`), and the sync
+treats a listed vmid it cannot read as still there.
+
+- **Rows.** Servers, volumes and images on that node keep their ids and everything the row knew. Only the server's status
+  changes, to `UNKNOWN`. A row is archived only when PVE no longer lists the vmid. The same goes for a VM whose config
+  read fails on a node PVE still calls online: that is the first minute of the same outage.
+- **Billing.** An `UNKNOWN` server is not billed for its flavor. Its volumes, addresses and snapshots still are: the data is
+  there and the address stays reserved.
+- **Actions.** Power actions and anything else that needs the node answer 409 with a message the customer can read. A delete
+  fails the same way and the row stays. Deleting a network or a security group is refused while any server of the project
+  cannot be read, since it may be using it.
+- **The rest of the project** keeps working: sync, volumes and new servers on the other nodes. The scheduler skips the node,
+  and a template copy on it is not offered.
+- **Node returns.** The rows refresh at the next sample. VMs that were running come back stopped, unless HA manages them
+  (see Protected servers): the customer starts them, and their data on shared storage is intact.
+
+On Ceph with pools of size 3 and `min_size` 2, one lost node leaves the cluster degraded and writable: RBD, CephFS and RGW all
+kept taking writes on the lab and recovered by themselves when the node returned. A pool of size 2 and `min_size` 1 stays
+writable too, on one copy.
+
 ## Standalone volumes (holder VM)
 
 A Proxmox disk must belong to a VM. A volume with no server sits as `unusedN` on a **holder VM**: one per (project,

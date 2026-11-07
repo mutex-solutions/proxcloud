@@ -197,7 +197,7 @@ func (h *Handler) pveDeleteNetwork(ctx context.Context, w http.ResponseWriter, e
 	}
 	inUse, uerr := ps.VnetInUse(ctx, proj.ID, cr.ExternalID)
 	if uerr != nil {
-		h.fail(w, upstreamErr(computeBackend, uerr))
+		h.fail(w, pveVolumeErr(uerr))
 		return false
 	}
 	if inUse {
