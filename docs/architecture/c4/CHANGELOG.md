@@ -12,7 +12,11 @@ and rules: [README.md](README.md#maintenance-rule).
   moving row, and the follow then moves it onto the new volid (`ChangeExternalID`). `ChangeExternalID` fails when the row is
   gone instead of deleting the sync's row, and an upsert and a follow of one external id are serialised (advisory lock).
 - An upsert that finds a row it did not read first carries the provider's merge (`Repo.Upsert`, `CacheMerger`).
-- A move whose status read failed is waited out before the follow reads the disk's slot.
+- A move whose status read failed is waited out before the follow reads the disk's slot, and a disk the follow finds at its
+  new place answers success.
+- The retype's wait, follow and mark clear run on a context the request cannot cancel (bounded by the 3 hours of the mark).
+- `providers.Reconcile` leaves a row alone whose `ExternalIDSince` is after its listing, and holds the pass's inserts for
+  the next sync when such a row is in scope.
 - The serial console proxy sends termproxy's opening line (`<user>:<ticket>`) itself. The action answers no user, and no ticket
   for a serial session. The events tab shows a digest for the task id and `platform` or `operator` for its user; the audit of
   a task run outside the portal keeps the type, node and status only.
@@ -26,6 +30,10 @@ and rules: [README.md](README.md#maintenance-rule).
   follow deleted the sync's new row and renamed a row that was gone, and the next sync added a third. The bill and history of
   the disk split in two (acceptance pass on the lab). Keeping the row while the portal moves it is what lets the existing
   follow do its work; a failing follow now leaves one row instead of none.
+- The ingress cuts a request after 60 s while a disk copy goes on for minutes. On the cut request the wait returned at once,
+  and the follow and mark clear failed with it: every sync then kept the old row and added one for the new volid, both
+  billed until the mark ran out. A sync lists first and reads the rows last, so a follow landing in between had the row
+  archived and the old volid inserted again. And one lost status read made a retype that had worked answer an error.
 - The serial session's first line named the platform's PVE token to the tenant, and the events and audit carried the UPID
   and PVE user, which name it too, or an operator's account.
 - Rewriting a plugged NIC gives it a new MAC, and the guest loses its public address until a reboot. The API answers other

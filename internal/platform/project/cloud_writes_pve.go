@@ -1355,10 +1355,26 @@ func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.Extern
 	}
 }
 
+// RetypeVolumeRow moves the disk in slot of server vmid onto storage, then has cr (marked moving) follow it. It runs
+// whatever ctx says: the ingress cuts a request after 60 s while the copy goes on, and a follow and mark clear on the
+// cut request failed, so every sync kept the old row and added one for the new volid, both billed for up to
+// MoveKeepFor. A disk found at its new place is a success, even when a status read failed on the way.
+func (h *Handler) RetypeVolumeRow(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, slot, storage string) error {
+	ctx = context.WithoutCancel(ctx)
+	wctx, cancel := context.WithTimeout(ctx, cloud.MoveKeepFor) // past it the mark keeps nothing anyway
+	err := ps.RetypeVolume(wctx, proj.ID, vmid, cr.ExternalID, storage, es.PVEStorageHeadroomPct())
+	cancel()
+	if h.pveFollowRetypedVolume(ctx, ps, es, proj, cr, vmid, slot, storage) && err != nil {
+		slog.Warn("retype: the disk is on its new storage, despite", "project", proj.ID, "volume", cr.ExternalID, "err", err)
+		err = nil
+	}
+	return err
+}
+
 // pveFollowRetypedVolume points the row at the disk's new volid, if the disk in its slot has one, and ends the move
-// mark (cr.MovingSince). A failure only costs what the retype cost before: the sync finds a new disk, and the bill
-// shows two.
-func (h *Handler) pveFollowRetypedVolume(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, slot string) {
+// mark (cr.MovingSince). It reports whether the slot holds a new volid on storage. A failure only costs what the retype
+// cost before: the sync finds a new disk, and the bill shows two.
+func (h *Handler) pveFollowRetypedVolume(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, slot, storage string) (moved bool) {
 	rows, err := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc()).ListReadable(ctx)
 	if err == nil {
 		err = fmt.Errorf("no disk in slot %s of server %d", slot, vmid)
@@ -1367,12 +1383,13 @@ func (h *Handler) pveFollowRetypedVolume(ctx context.Context, ps *pve.Service, e
 			if intAny(vol["vmid"]) != vmid || strAny(vol["slot"]) != slot {
 				continue
 			}
-			if rows[i].ExternalID == cr.ExternalID { // not moved
+			if rows[i].ExternalID == cr.ExternalID { // not moved (a disk already on storage is refused, not moved)
 				err = nil
 				break
 			}
+			moved = strings.HasPrefix(rows[i].ExternalID, storage+":")
 			if err = h.cloud.ChangeExternalID(ctx, cr, rows[i].ExternalID); err == nil {
-				return
+				return moved
 			}
 			break
 		}
@@ -1383,6 +1400,7 @@ func (h *Handler) pveFollowRetypedVolume(ctx context.Context, ps *pve.Service, e
 	if cerr := h.cloud.MarkMoving(ctx, cr, nil); cerr != nil {
 		slog.Error("retype: clear the move mark", "project", proj.ID, "volume", cr.ExternalID, "err", cerr)
 	}
+	return moved
 }
 
 // computeBackend is what a tenant reads when the compute backend fails.
@@ -1528,14 +1546,14 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 		// The move gives the disk a new volid. It is still this disk: the row follows it and keeps its id, which is what
 		// the bill and its history are keyed on. A sync that sees the move end first (the task poller runs one as soon
 		// as the task stops) must not archive the row meanwhile, hence the mark. The follow also runs when the wait
-		// failed: what the slot holds says whether the disk moved.
+		// failed: what the slot holds says whether the disk moved. From here on the request may be cut, the move not.
+		ctx = context.WithoutCancel(ctx)
 		now := time.Now().UTC()
 		if err := h.cloud.MarkMoving(ctx, cr, &now); err != nil {
 			h.fail(w, err)
 			return true
 		}
-		aerr = ps.RetypeVolume(ctx, proj.ID, vmid, cr.ExternalID, storage, es.PVEStorageHeadroomPct())
-		h.pveFollowRetypedVolume(ctx, ps, es, proj, cr, vmid, strAny(vol["slot"]))
+		aerr = h.RetypeVolumeRow(ctx, ps, es, proj, cr, vmid, strAny(vol["slot"]), storage)
 	default:
 		return false
 	}
