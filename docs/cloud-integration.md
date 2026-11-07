@@ -392,7 +392,7 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   that fails. Such a retry skips the volume and NIC checks, and its quota check counts the server by its rows. Backups go with their
   server, on delete and on project teardown, and a failure stops either: PVE lets the token delete an archive only through
   `VM.Backup` on its VM, so on a server delete they go after protection is off, the volumes have moved and a hard stop has
-  worked, just before the destroy. Keeping a server's state past its life is what an image is for. An archive of a VM destroyed outside the portal
+  worked, just before the destroy. A running restore refuses the delete, and so does a store that cannot list them, before anything changes. Keeping a server's state past its life is what an image is for. An archive of a VM destroyed outside the portal
   disappears from the token's listing (PVE filters by the same check), so it stays on the store until an operator
   removes it; its notes name the project. Backups are not billed yet.
 - **Image import** (`POST /project/{id}/cloud` `IMAGE {name, url, format?, checksum?, checksumAlgorithm?, profile?}`, offered

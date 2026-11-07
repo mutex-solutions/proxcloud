@@ -17,7 +17,8 @@ and rules: [README.md](README.md#maintenance-rule).
 - Restore checks vCPUs, RAM, disk and GPUs against the project's quota, on what it would produce, before stopping the
   server and again after. A snapshot rollback checks vCPUs, RAM and GPUs the same way.
 - A server delete removes its backups after protection is off, the volumes have moved and a hard stop has worked, just
-  before the destroy, and refuses a VM holding a lock.
+  before the destroy, and refuses a VM holding a lock or under a running restore. It lists the backups before its first
+  change, so a store that cannot answer refuses with the server untouched.
 
 **Why**
 
@@ -34,6 +35,10 @@ and rules: [README.md](README.md#maintenance-rule).
   detached disk and drop that entry, which frees it, so a failed restore and a retry both do that.
 - A refusal from protection, from moving a volume or from a failed stop left the server alive with its backups gone. The
   delete cannot simply go last: PVE lets the token delete an archive only while its VM exists.
+- A running restore holds no lock on the config it has cut down, so the lock check alone let a delete remove both archives
+  under it. A store that was down refused only after the stop and the volume moves, leaving the server stopped and its data
+  on the holder.
+
 ## 2026-11-07: Leftover holders stop billing; a late lock release frees nothing
 
 **What changed**

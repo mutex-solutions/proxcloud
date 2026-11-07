@@ -37,6 +37,7 @@ type backupCluster struct {
 	leftovers string // the VM's volumes on storage z, as JSON
 	order     []string
 	qmp       string // qmpstatus the VM reports, running when empty
+	storeDown bool   // the backup store answers its listing with an error
 	// destroyedAfter is how many archives were gone when the VM was destroyed, -1 while it stands.
 	destroyedAfter int
 }
@@ -86,6 +87,10 @@ func newBackupCluster(t *testing.T) *backupCluster {
 			fmt.Fprintf(w, `{"data":%s}`, b.cfg)
 		},
 		"GET /api2/json/nodes/pve1/storage/nas-backup/content": func(w http.ResponseWriter, _ *http.Request) {
+			if b.storeDown {
+				http.Error(w, "storage 'nas-backup' is not online", http.StatusInternalServerError)
+				return
+			}
 			fmt.Fprint(w, `{"data":[
 				{"volid":"nas-backup:backup/old","ctime":10,"size":5,"notes":"proxcloud project=p1 server=web"},
 				{"volid":"nas-backup:backup/new","ctime":20,"size":6,"notes":"proxcloud project=p1 server=web"},
@@ -456,6 +461,30 @@ func TestRetireServer(t *testing.T) {
 	}
 	if len(b.deleted) != 0 || b.destroyedAfter != -1 {
 		t.Fatalf("archives %v destroyed %d", b.deleted, b.destroyedAfter)
+	}
+	// A restore running holds no lock on the cut-down config, and the archives have to stay.
+	b = newBackupCluster(t)
+	b.cfg = `{"memory":"128"}`
+	b.active = `[{"upid":"u","type":"qmrestore","id":"101","status":"running"}]`
+	wantConflict(t, b.s.RetireServer(ctx, "p1", "101", "nas-backup", true), "being restored")
+	if len(b.deleted) != 0 || b.destroyedAfter != -1 {
+		t.Fatalf("archives %v destroyed %d", b.deleted, b.destroyedAfter)
+	}
+	// A store that cannot answer refuses before the first change: the server keeps running, with its volumes on it.
+	b = newBackupCluster(t)
+	b.cfg = noMoveOff
+	b.storeDown = true
+	if err := b.s.RetireServer(ctx, "p1", "101", "nas-backup", true); err == nil || !strings.Contains(err.Error(), "list the server's backups") {
+		t.Fatalf("a store down must refuse first: %v", err)
+	}
+	if b.stopped != 0 || len(b.order) != 0 || b.destroyedAfter != -1 {
+		t.Fatalf("stopped %d, changes %v, destroyed %d", b.stopped, b.order, b.destroyedAfter)
+	}
+	// No VM left: a retried delete has nothing to list and must not fail on it.
+	b = newBackupCluster(t)
+	b.storeDown = true
+	if err := b.s.RetireServer(ctx, "p1", "999", "nas-backup", true); err != nil {
+		t.Fatalf("a VM already gone: %v", err)
 	}
 	for name, cfg := range map[string]string{"volume move": noMoveOff, "protection": protected, "lock": locked} {
 		t.Run(name, func(t *testing.T) {

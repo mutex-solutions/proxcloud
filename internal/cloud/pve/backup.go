@@ -458,6 +458,13 @@ func (s *Service) DeleteServerBackups(ctx context.Context, projectID, externalID
 	if cfg.Str("lock") != "" {
 		return conflictf("Server %s is busy with another operation. Try again in a moment", vm.Name)
 	}
+	// A running restore holds no lock on the config it has cut down, and may be reading one of these archives.
+	if running, err := s.C.RestoreRunning(ctx, vm.Node, vm.VMID); err != nil || running {
+		if err != nil {
+			return err
+		}
+		return conflictf("Server %s is being restored right now. Try again when it has finished", vm.Name)
+	}
 	backups, err := s.ListServerBackups(ctx, projectID, externalID, store)
 	if err != nil {
 		return err
@@ -470,15 +477,27 @@ func (s *Service) DeleteServerBackups(ctx context.Context, projectID, externalID
 	return nil
 }
 
-// RetireServer deletes a server for good, in the one order that loses nothing on a refusal. Protection first: HA would
-// restart the VM, and a replicated disk cannot leave it. Then the volumes that outlive it; if one cannot move the server
-// stays, and its data with it. Then a hard stop, which must work: the destroy refuses a running VM. Its backups next, since
-// nothing brings one back, and they cannot wait for the destroy (see DeleteServerBackups). backupStore "" = the provider
-// keeps no backups.
+// RetireServer deletes a server for good, in the one order that loses nothing on a refusal. It lists the backups first: a
+// store that cannot answer would refuse further on, with the server already stopped and its volumes on the holder, and now
+// it refuses with nothing changed. Protection next: HA would restart the VM, and a replicated disk cannot leave it. Then the
+// volumes that outlive it; if one cannot move the server stays, and its data with it. Then a hard stop, which must work: the
+// destroy refuses a running VM. Its backups next, since nothing brings one back, and they cannot wait for the destroy (see
+// DeleteServerBackups). backupStore "" = the provider keeps no backups.
 // ponytail: a tenant's backup or snapshot that takes the VM's lock between DeleteServerBackups' check and the destroy still
 // leaves the server standing, stopped, with its backups gone, and a retried delete finishes it. A portal-side lock across
 // the server's actions would close it, add one if that ever happens.
 func (s *Service) RetireServer(ctx context.Context, projectID, externalID, backupStore string, keepVolumes bool) error {
+	if backupStore != "" {
+		vm, err := s.ResolveVM(ctx, projectID, externalID)
+		if err != nil {
+			return err
+		}
+		if vm != nil { // a VM already gone has no archive the token could reach
+			if _, err := s.C.StorageContents(ctx, vm.Node, backupStore, "backup", vm.VMID); err != nil {
+				return fmt.Errorf("list the server's backups: %w", backupDenied(err, backupStore))
+			}
+		}
+	}
 	if err := s.DisableProtection(ctx, projectID, externalID); err != nil {
 		return fmt.Errorf("disable protection: %w", err)
 	}
