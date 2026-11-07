@@ -32,6 +32,41 @@ and rules: [README.md](README.md#maintenance-rule).
   `docs/managed-k8s.md` gives the procedure to take one back rather than a new action that only an operator should run.
 
 **Diagrams updated:** `c3-components.md`.
+## 2026-11-07: A resume is retried, and brings back only what a suspension paused
+
+**What changed**
+
+- The suspension walk writes `pausedBySuspension` on a VM's `cloudResource` row before pausing it. The resume leg touches marked
+  rows only, and clears a mark once it reads the VM as running or stopped on its node. `ResolveVM` reports a failed node read in
+  `ClusterResource.StatusErr`, and the walk leaves such a VM to the next pass.
+- `CloudSuspender` gains `FinishResumes`. Each `autoSuspensionJob` pass resumes marked VMs in `ENABLED` projects, and enables first a
+  project left `DISABLED` under a profile that pays, unless an operator disabled it.
+- `ActivationService.Unsuspend`, `SuspensionJob.resume` and the billing callbacks run the walk on `context.WithoutCancel`.
+- `finishSuspensions` reads each profile again just before walking it.
+- A project move onto what cannot pay skips a provider that has been removed, and answers 503 when a provider that is there cannot
+  be read, in place of a 500.
+- `DELETE /admin/billing-profile/{id}` uses the client path's `ProjectPaidBy` rule, so a profile paying through its organization is
+  refused. `PUT /admin/project/{id}` applies `holdForProfile` to an `ENABLED` or `DISABLED` project whose paying profile changes.
+- CI's integration job also runs `cmd/api`, where the walk's tests live, since `billingCloudSuspender` is in `main`.
+
+**Why**
+
+- A failed resume stayed paused for good on an `ACTIVE` profile and an `ENABLED` project, as passes only looked at `SUSPENDED`
+  profiles. A pass cannot resume every paused VM instead: PVE has no record of why a VM is paused, the old resume leg already undid
+  pauses it did not make, and the walk recorded nothing per VM. The mark goes before the pause because the other order can crash
+  into a paused VM nothing knows about, and a mark on a running VM costs one read.
+- The mark is on the row, not on the VM's PVE config: a config write is one more PVE call that can fail on a VM being paused, and
+  the row already survives a sync because `toDbRecord` writes named fields only. A VM paused by a build older than the mark has
+  none, and comes back through **Start**.
+- `/cluster/resources` reads running for a paused VM, so one failed node read cleared a mark with no resume and no log line, and on
+  a suspend marked a VM someone else had paused. A flag on the result, because the other callers of `ResolveVM` want the fallback.
+- A customer who had just paid could be paused again by a pass working from an old list.
+- Removing a provider left every move of its projects failing with `internal.error`, and a failed read must stay a refusal: the live
+  check is there because a row can lag a start.
+- Operators could delete the profile an organization's projects pay through, and move a project onto a profile that cannot pay,
+  leaving it `ENABLED` and unrated.
+
+**Diagrams updated:** none.
 
 ## 2026-11-07: Database ids take a neutral prefix
 

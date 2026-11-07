@@ -34,6 +34,8 @@ type ClusterResource struct {
 
 	// NodeDown: a qemu row whose node is not online (see markNodeDown). The VM exists, nothing else in the row counts.
 	NodeDown bool `json:"-"`
+	// StatusErr: ResolveVM could not read the node, so Status is the /cluster/resources one, which reads running for a paused VM.
+	StatusErr error `json:"-"`
 }
 
 // ClusterResources lists cluster-wide resources. kind filters server-side:

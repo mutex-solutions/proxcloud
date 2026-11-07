@@ -100,7 +100,7 @@ func (h *Handler) suspendClouds(w http.ResponseWriter, r *http.Request) {
 		httpx.OK(w, map[string]any{"applied": false, "reason": "cloud suspender not configured"})
 		return
 	}
-	if err := h.clouds.SuspendBillingProfileClouds(r.Context(), id); err != nil {
+	if err := h.clouds.SuspendBillingProfileClouds(context.WithoutCancel(r.Context()), id); err != nil {
 		h.log.Error("billing callback: suspend clouds", "profileId", id, "err", err)
 		httpx.Err(w, http.StatusInternalServerError, 500, "suspend.failed")
 		return
@@ -115,7 +115,7 @@ func (h *Handler) resumeClouds(w http.ResponseWriter, r *http.Request) {
 		httpx.OK(w, map[string]any{"applied": false, "reason": "cloud suspender not configured"})
 		return
 	}
-	if err := h.clouds.ResumeBillingProfileClouds(r.Context(), id); err != nil {
+	if err := h.clouds.ResumeBillingProfileClouds(context.WithoutCancel(r.Context()), id); err != nil {
 		h.log.Error("billing callback: resume clouds", "profileId", id, "err", err)
 		httpx.Err(w, http.StatusInternalServerError, 500, "resume.failed")
 		return

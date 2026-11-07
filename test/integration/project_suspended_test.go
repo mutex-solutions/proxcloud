@@ -373,6 +373,8 @@ func (w *walk) SuspendBillingProfileClouds(ctx context.Context, bp string) error
 	return nil
 }
 
+func (w *walk) FinishResumes(context.Context) error { return nil }
+
 func (w *walk) ResumeBillingProfileClouds(ctx context.Context, bp string) error {
 	w.res++
 	_, err := w.f.repo.ApplyBillingSuspension(ctx, "p1", bp, false)
@@ -464,6 +466,10 @@ func TestAFailedWalkIsCaughtByTheNextPass(t *testing.T) {
 	}
 
 	t.Run("a resume landing during the walk stands", func(t *testing.T) {
+		// Only bp-cur's walk: the hook takes p1 down, which a walk of bp-sus, also SUSPENDED in the fixture, would never do.
+		if _, err := f.db.C("billingProfile").SetByID(ctx, "bp-sus", pgdoc.M{"status": billing.StatusActive}, nil); err != nil {
+			t.Fatal(err)
+		}
 		w.during = func() {
 			fresh, _ := repo.FindByID(ctx, "bp-cur")
 			if err := svc.Unsuspend(ctx, fresh, billing.SourceAdmin); err != nil {

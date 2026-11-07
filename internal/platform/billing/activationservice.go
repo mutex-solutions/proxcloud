@@ -129,7 +129,7 @@ func (s *ActivationService) Suspend(ctx context.Context, bp *BillingProfile, sou
 }
 
 // Unsuspend resumes the profile: ACTIVE + save + audit first, then the live cloud
-// resume (best-effort) and the customer email.
+// resume (resumeClouds says what happens when it fails) and the customer email.
 func (s *ActivationService) Unsuspend(ctx context.Context, bp *BillingProfile, source string) error {
 	bp.Status = StatusActive
 	if _, err := s.repo.Update(ctx, bp); err != nil {
@@ -137,11 +137,7 @@ func (s *ActivationService) Unsuspend(ctx context.Context, bp *BillingProfile, s
 	}
 	s.log.Info("resumed billing profile", "id", bp.ID, "source", source)
 	s.systemEvent(audit.ActionUnsuspend, bp, source)
-	if s.clouds != nil {
-		if err := s.clouds.ResumeBillingProfileClouds(ctx, bp.ID); err != nil {
-			s.log.Error("resume: cloud leg failed (billing flip already done)", "billingProfile", bp.ID, "err", err)
-		}
-	}
+	resumeClouds(ctx, s.clouds, bp.ID, s.log)
 	balance := s.currentBalance(ctx, bp.ID)
 	currency, _ := s.repo.BaseCurrency(ctx)
 	_ = balance // the resume mail renders balance too
