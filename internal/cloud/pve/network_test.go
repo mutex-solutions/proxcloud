@@ -341,6 +341,22 @@ func TestReconcileIsolationRepairsDisabledRules(t *testing.T) {
 	}
 }
 
+// A disabled copy of a project ACCEPT above its enabled twin: the reconcile deletes the disabled copy, not the twin.
+func TestReconcileIsolationDisabledAcceptAboveEnabledTwin(t *testing.T) {
+	own := "10.100.0.0/24,10.100.1.0/24"
+	want := append(projectIsolationRules("p1", strings.Split(own, ",")),
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"}, nil, isolationComment)...)
+	off := want[0]
+	off.Enable = 0
+	srv, rules, _ := isolationFake(t, append([]FirewallRule{off}, want...))
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.EqualFunc(*rules, want, sameLiveRule) {
+		t.Fatalf("rules after the reconcile:\n%+v\nwant:\n%+v", *rules, want)
+	}
+}
+
 // One portal: a changed pool replaces its own DROPs and leaves no stale ones behind.
 func TestReconcileIsolationReplacesOwnRules(t *testing.T) {
 	own := "10.100.0.0/24,10.100.1.0/24"

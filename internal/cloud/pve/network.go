@@ -659,7 +659,8 @@ func (s *Service) rebuildIsolation(ctx context.Context, rules, want []FirewallRu
 // deleteClusterRule removes the lowest rule equal to r. PVE addresses rules by position only, and
 // another portal or an operator can edit the list at any moment, so the position is looked up
 // fresh and sent with the list's digest: PVE refuses the delete if anything changed in between.
-// The lowest match matters while a rebuild has the new copy of a rule on top.
+// The lowest match matters while a rebuild has the new copy of a rule on top. The enable flag is part of the
+// match: deleting a rule disabled by hand must not take its enabled twin instead.
 func (s *Service) deleteClusterRule(ctx context.Context, r FirewallRule) error {
 	var err error
 	for range 5 {
@@ -668,7 +669,7 @@ func (s *Service) deleteClusterRule(ctx context.Context, r FirewallRule) error {
 			return lerr
 		}
 		i := len(rules) - 1
-		for i >= 0 && !sameRule(rules[i], r) {
+		for i >= 0 && !sameLiveRule(rules[i], r) {
 			i--
 		}
 		if i < 0 {

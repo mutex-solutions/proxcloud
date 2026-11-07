@@ -38,6 +38,24 @@ and rules: [README.md](README.md#maintenance-rule).
 **Diagrams updated:** `c2-containers.md` (sandbox cluster), `c3-components.md` (billing resources), `c4-code.md`
 (isolation invariants).
 
+### Review fixes (same PR)
+
+**What changed**
+
+- `pve.deleteClusterRule` finds the rule to delete with `sameLiveRule` (enable flag included), not `sameRule`.
+- Stage 60 skips the sandbox provider when any row has `config.provider: sandbox`, not when a row has the default name.
+- Stage 60 takes the site's `sandbox.templates` as given; the default `python` template is used only when the site
+  sets none.
+
+**Why**
+
+- With `sameRule`, a disabled copy of a project ACCEPT above its enabled twin made the sync delete the enabled twin
+  (the lowest match) and keep the disabled copy, cutting traffic inside that project until the next sync.
+- An operator who renamed the provider in the console got a second, disabled one on the next installer run.
+- `pc` is a recursive merge of the defaults and the site, so a site could not drop the default template.
+
+**Diagrams updated:** `c4-code.md` (isolation invariants).
+
 ## 2026-11-08: Sandboxes reach tenants: native API, billing, quota, suspension, release gates (SB3)
 
 ### Review fixes (same PR)

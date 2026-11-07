@@ -174,8 +174,9 @@ registers, once the operator sets it live (step 2).
    off each worker once it is fenced and 20 minutes old (`sandbox.unsecured_min_age_minutes`). Stage 55 also keeps
    the portal service account's `generated/sandbox-portal.kubeconfig`, and stage 60 registers the sandbox provider
    `<provider name> Sandboxes` with it, stored `DISABLED` (templates and limits from `sandbox.templates` and
-   `sandbox.limits`). Once the taint is off, open it under Cloud providers, run "Check release gates" and set the status
-   to `PUBLIC`. A re-run leaves an existing row alone.
+   `sandbox.limits`; a site's `templates` replace the default `python` one). Once the taint is off, open it under Cloud
+   providers, run "Check release gates" and set the status to `PUBLIC`. A re-run leaves an existing sandbox provider
+   alone, also one renamed in the console.
 3. The portal creates the default EVPN zone with the first tenant network. On a first install stage 55 therefore says
    SKIPPED; create a network, then run stage 55 again (and stage 60 if the provider was registered before
    `sandbox.enabled`). Until stage 60 and one sync have run, the workers have no isolation drops and no VM firewall,

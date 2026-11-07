@@ -222,13 +222,14 @@
       no_log: true
     # The provider tenants create sandboxes on, with the portal's kubeconfig (stage 55). Stored DISABLED: it may go live
     # only while its release gates hold, and the fence gate needs a sync to have fenced the workers first. The operator
-    # checks the gates and sets the status in the console; a re-run never touches an existing row, so an operator's
-    # DISABLED stays and an edited template list is kept.
+    # checks the gates and sets the status in the console; a re-run never touches an existing sandbox row (renamed or
+    # not), so an operator's DISABLED stays and an edited template list is kept.
     - name: Register the sandbox provider
       when:
         - pc_sandbox_on
         - (pc_gen ~ '/sandbox-portal.kubeconfig') is file
-        - (pc.provider.name ~ ' Sandboxes') not in (pc_services.json.data | map(attribute='name') | list)
+        # by kind, not by name: an operator may rename the row in the console
+        - "'sandbox' not in (pc_services.json.data | map(attribute='config.provider', default='') | list)"
       proxcloud_api:
         access_key: "{{ api_key.id }}"
         secret_key: "{{ api_key.secretKey }}"
@@ -245,7 +246,8 @@
             services: {sandbox: "{{ {pc.provider.region: true} }}"}
             sandbox:
               proxmoxServiceId: "{{ pc_service.id }}"
-              templates: "{{ pc.sandbox.templates }}"
+              # the site's list replaces the default one (pc merges dicts, which would always keep python)
+              templates: "{{ ((proxcloud | default({})).sandbox | default({})).templates | default(pc.sandbox.templates) }}"
               limits: "{{ pc.sandbox.limits }}"
           secret: {kubeconfig: "{{ lookup('ansible.builtin.file', pc_gen ~ '/sandbox-portal.kubeconfig') }}"}
       register: pc_sbx_provider
