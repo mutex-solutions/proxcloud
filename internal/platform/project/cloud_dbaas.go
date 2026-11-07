@@ -31,7 +31,7 @@ import (
 
 // newDatabaseID mints the platform identifier every k8s-side object is named by (Application,
 // helm release, engine CR, LB Service). Customer names are display-only — the std- prefix keeps
-// billing rows, audit logs and Argo app names unambiguous next to kamaji's stc-.
+// billing rows, audit logs and Argo app names unambiguous next to kamaji's clusters.
 func newDatabaseID() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)

@@ -275,8 +275,8 @@ func (f *shareAccessFixture) clusterRows(t *testing.T, network string) int {
 func TestProjectNetworkClusterAddressesStayOffExports(t *testing.T) {
 	ctx := context.Background()
 	f := newShareAccessFixture(t)
-	f.reserve(t, "v1", "10.100.0.250", "stc-live")
-	f.reserve(t, "v-deleted", "10.100.9.250", "stc-stale")
+	f.reserve(t, "v1", "10.100.0.250", "pc-c-live")
+	f.reserve(t, "v-deleted", "10.100.9.250", "pc-c-stale")
 	f.nas.networks = []string{"10.100.0.0/24", "10.100.9.250/32"} // written before this rule
 	if err := f.handler.ReconcileShareAccess(ctx, f.projectID); err != nil {
 		t.Fatal(err)
@@ -292,7 +292,7 @@ func TestProjectNetworkClusterAddressesStayOffExports(t *testing.T) {
 func TestSharedPoolClusterAddressLeavesExportsFirst(t *testing.T) {
 	ctx := context.Background()
 	f := newShareAccessFixture(t)
-	f.reserve(t, "vmbrw", "10.89.0.99", "stc-a")
+	f.reserve(t, "vmbrw", "10.89.0.99", "pc-c-a")
 	if err := f.handler.ReconcileShareAccess(ctx, f.projectID); err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestSharedPoolClusterAddressLeavesExportsFirst(t *testing.T) {
 	}
 
 	f.nas.failing = true
-	if err := f.ips.ReleaseServer(ctx, "svc-pve", "k8s:stc-a"); err == nil {
+	if err := f.ips.ReleaseServer(ctx, "svc-pve", "k8s:pc-c-a"); err == nil {
 		t.Fatal("release succeeded with a stale export")
 	}
 	if n := f.clusterRows(t, "vmbrw"); n != 1 {
@@ -311,7 +311,7 @@ func TestSharedPoolClusterAddressLeavesExportsFirst(t *testing.T) {
 	f.nas.failing = false
 	heldAtUpdate := -1
 	f.nas.onUpdate = func() { heldAtUpdate = f.clusterRows(t, "vmbrw") }
-	if err := f.ips.ReleaseServer(ctx, "svc-pve", "k8s:stc-a"); err != nil {
+	if err := f.ips.ReleaseServer(ctx, "svc-pve", "k8s:pc-c-a"); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(f.nas.current(), ","); strings.Contains(got, "10.89.0.99") {
@@ -333,9 +333,9 @@ func (s failingServices) Get(context.Context, string) (*externalservice.External
 func TestClusterReleaseKeepsItsRecordUntilDone(t *testing.T) {
 	ctx := context.Background()
 	f := newShareAccessFixture(t)
-	f.reserve(t, "vmbrw", "10.89.0.99", "stc-a")
+	f.reserve(t, "vmbrw", "10.89.0.99", "pc-c-a")
 	cloudRepo := cloud.NewRepo(f.db)
-	if err := project.KamajiReleaseCluster(failingServices{errors.New("db down")}, cloudRepo, nil, f.ips, false)(ctx, "svc-pve", f.projectID, "stc-a"); err == nil {
+	if err := project.KamajiReleaseCluster(failingServices{errors.New("db down")}, cloudRepo, nil, f.ips, false)(ctx, "svc-pve", f.projectID, "pc-c-a"); err == nil {
 		t.Fatal("release reported success after a failed provider read")
 	}
 	if n := f.clusterRows(t, "vmbrw"); n != 1 {
@@ -343,7 +343,7 @@ func TestClusterReleaseKeepsItsRecordUntilDone(t *testing.T) {
 	}
 
 	es := externalservice.NewService(externalservice.NewRepo(f.db), textcrypt.New("k"))
-	if err := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, false)(ctx, "no-such-provider", f.projectID, "stc-a"); err != nil {
+	if err := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, false)(ctx, "no-such-provider", f.projectID, "pc-c-a"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -360,8 +360,8 @@ func TestClusterReleaseOnlyTouchesTheNASHoldingItsDataset(t *testing.T) {
 	release := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, true)
 
 	// No share row: nothing on any NAS to reach.
-	f.reserve(t, "vmbrw", "10.89.0.99", "stc-a")
-	if err := release(ctx, "svc-pve", f.projectID, "stc-a"); err != nil {
+	f.reserve(t, "vmbrw", "10.89.0.99", "pc-c-a")
+	if err := release(ctx, "svc-pve", f.projectID, "pc-c-a"); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.clusterRows(t, "vmbrw"); n != 0 {
@@ -369,16 +369,16 @@ func TestClusterReleaseOnlyTouchesTheNASHoldingItsDataset(t *testing.T) {
 	}
 
 	// A row on the fake NAS: its dataset goes, even though the dead provider is still registered.
-	nas := &exportNAS{name: "k8s-stc-b"}
+	nas := &exportNAS{name: "k8s-pc-c-b"}
 	url := nas.serve(t, f.projectID)
 	mustInsert(t, f.db, "externalService", pgdoc.M{"_id": "svc-nas2", "type": externalservice.TypeCloud,
 		"config": pgdoc.M{"provider": "truenas", "apiUrl": url, "username": "u", "insecureTls": true, "parentDataset": "tank/shares"},
 		"secret": pgdoc.M{"apiKey": "k"}})
-	dataset := "tank/shares/" + f.projectID + "-k8s-stc-b"
+	dataset := "tank/shares/" + f.projectID + "-k8s-pc-c-b"
 	if _, err := cloudRepo.Insert(ctx, &cloud.CloudResource{ServiceID: "svc-nas2", ProjectID: f.projectID, Type: cloud.TypeShare, ExternalID: dataset}); err != nil {
 		t.Fatal(err)
 	}
-	if err := release(ctx, "svc-pve", f.projectID, "stc-b"); err != nil {
+	if err := release(ctx, "svc-pve", f.projectID, "pc-c-b"); err != nil {
 		t.Fatal(err)
 	}
 	if len(nas.deleted) != 1 || nas.deleted[0] != dataset {
