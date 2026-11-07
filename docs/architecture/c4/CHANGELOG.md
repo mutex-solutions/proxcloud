@@ -23,6 +23,61 @@ and rules: [README.md](README.md#maintenance-rule).
 - The write is conditional because the deletion sweep moves a project between a handler's read and its write.
 
 **Diagrams updated:** none.
+## 2026-11-07: Installer re-runs keep operator settings, split mode passes preflight
+
+**What changed**
+
+- Stage 60 on an existing Proxmox provider keeps its storage profiles, default profile and confirmed classes, and only
+  adds what was newly detected. A value in the site's group_vars still wins.
+- Stage 60 registers the chart versions of the checkout instead of pins in `versions.yml`.
+- Preflight accepts `mode: split` and checks its settings. `object_store.mode` must be `vm` or `truenas-app` there.
+- Stage 10 requires the CAPI and CSI token secrets in split mode, and takes them from the vault when the tokens exist.
+
+**Why**
+
+- `make upgrade` runs stage 60, and each run replaced those fields with fresh detection. A class confirmed in the admin
+  console was lost, and Ceph added to a Standard cluster moved the default profile, so new VMs changed storage with no
+  one asking.
+- Stage 50 pushes the charts of the checkout. The pin had fallen behind, so a clean split install would register a
+  chart version that is not in its registry.
+- Preflight still refused split mode with a message from before it existed, so the documented command could not start.
+
+**Diagrams updated:** none; no container or relationship changed.
+## 2026-11-07: Protected servers on shared storage
+
+**What changed**
+
+- `ProtectableDisks` takes disks that are all on shared storage as well as all on ZFS. Such a server gets the HA resource alone:
+  no replication job, no node-affinity rule, `mode: shared` on its state, and no `server_protection` bill line. A disk that
+  would not follow it (`refuseUnreplicable`) is refused either way.
+
+**Why**
+
+- On a Full-tier site every server sits on Ceph, so Protected could not be sold there at all, and HA needs nothing from the
+  replication machinery when every node already reaches the disks. There is no replica to bill. Whether to charge for HA
+  on shared storage is an operator decision still to be made.
+
+**Diagrams updated:** `c3-components.md` (Replication and HA row).
+
+## 2026-11-07: A node that is down loses no rows
+
+**What changed**
+
+- `Client.ClusterResources` marks VM rows of a node that is not online. `providers.UnreadKeeper` is a new optional provider
+  capability: Reconcile keeps a cached row whose object is listed but cannot be read. The server, volume and image sync
+  providers implement it. A server on a down node reads `UNKNOWN`, with all else unchanged.
+- Power actions on a down node's VM and `pve.IsNodeUnreachable` errors answer 409. `VnetInUse` and `SecurityGroupInUse` refuse
+  while a VM of the project cannot be read. A template copy on a down node is not offered.
+
+**Why**
+
+- A node loss drill on Ceph: PVE drops the name of a dead node's VMs after about five minutes, and the sync took a VM with no
+  name for one that is not there yet. Servers, volumes and images were archived as deleted while the data sat safely on RBD,
+  then came back as new resources when the node returned. Until then the portal said `ACTIVE` and billed a dead VM, a full
+  sync wiped its addresses, one unreadable VM stopped the volume sync of its whole project, and a stop answered 200.
+- The node is the only thing that knows, so one check where the list is read covers every caller.
+
+**Diagrams updated:** `c3-components.md` (Reconcile row).
 ## 2026-11-07: Provider actions are audited; a 502 hides its cause from tenants
 
 **What changed**

@@ -307,7 +307,7 @@ func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int,
 	if !strings.HasPrefix(slot, "unused") {
 		return []ClusterResource{}, nil
 	}
-	vms, _, err := s.poolVMs(ctx, projectID)
+	vms, _, _, err := s.poolVMs(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -375,6 +375,9 @@ func (s *Service) RetypeVolume(ctx context.Context, projectID string, vmid int, 
 	}
 	if d.Storage == storage {
 		return conflictf("The volume is already on storage %s", storage)
+	}
+	if err := s.refuseUnreplicable(ctx, vm, storage); err != nil {
+		return err
 	}
 	caps, err := s.C.DetectStorage(ctx)
 	if err != nil {

@@ -109,3 +109,134 @@ func TestReserveMemLeavesRoomForFailover(t *testing.T) {
 		t.Fatal("placed a VM into memory reserved for failover")
 	}
 }
+
+// sharedProtectionPVE: no replication jobs, storages rbd (shared), zfs (local) and dir (local, not ZFS).
+func sharedProtectionPVE(t *testing.T, disks map[string]any, tags string, managed bool) (*Service, *[]string) {
+	t.Helper()
+	var calls []string
+	reply := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api2/json/cluster/replication", func(w http.ResponseWriter, _ *http.Request) { reply(w, []ReplicationJob{}) })
+	mux.HandleFunc("/api2/json/storage", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, []map[string]any{
+			{"storage": "rbd", "type": "rbd", "shared": 1, "content": "images"},
+			{"storage": "zfs", "type": "zfspool", "content": "images"},
+			{"storage": "dir", "type": "dir", "content": "images"},
+		})
+	})
+	mux.HandleFunc("/api2/json/cluster/resources", func(w http.ResponseWriter, _ *http.Request) { reply(w, []any{}) })
+	mux.HandleFunc("/api2/json/cluster/ha/resources", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			calls = append(calls, "resource")
+			managed = true
+		}
+		if managed {
+			reply(w, []HAResource{{SID: "vm:7"}})
+			return
+		}
+		reply(w, []HAResource{})
+	})
+	mux.HandleFunc("/api2/json/cluster/ha/rules", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			calls = append(calls, "rule")
+		}
+		reply(w, []HARule{})
+	})
+	mux.HandleFunc("/api2/json/nodes/a/qemu/7/config", func(w http.ResponseWriter, _ *http.Request) {
+		cfg := map[string]any{"tags": tags}
+		for k, v := range disks {
+			cfg[k] = v
+		}
+		reply(w, cfg)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	svc, err := NewService(Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc, &calls
+}
+
+func TestProtectableDisksModes(t *testing.T) {
+	for name, tt := range map[string]struct {
+		disks      map[string]any
+		wantShared bool
+		wantErr    bool
+	}{
+		"all local ZFS": {map[string]any{"scsi0": "zfs:vm-7-disk-0,size=1G"}, false, false},
+		"all shared":    {map[string]any{"scsi0": "rbd:vm-7-disk-0,size=1G", "ide2": "rbd:vm-7-cloudinit,media=cdrom"}, true, false},
+		"a mix":         {map[string]any{"scsi0": "rbd:vm-7-disk-0,size=1G", "scsi1": "zfs:vm-7-disk-0,size=1G"}, false, true},
+		"local, no ZFS": {map[string]any{"scsi0": "dir:7/vm-7-disk-0.qcow2,size=1G"}, false, true},
+		"no disk":       {map[string]any{}, false, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc, _ := sharedProtectionPVE(t, nil, "", false)
+			vm := &ClusterResource{VMID: 7, Node: "a"}
+			cfg := VMConfig{}
+			for k, v := range tt.disks {
+				cfg[k] = v
+			}
+			_, shared, err := svc.ProtectableDisks(context.Background(), vm, cfg)
+			if shared != tt.wantShared || (err != nil) != tt.wantErr {
+				t.Fatalf("shared=%v err=%v", shared, err)
+			}
+		})
+	}
+}
+
+// Nothing to wait for on shared storage: HA at the first read, no rule, and the state says so.
+func TestReconcileSharedAddsHAAtOnce(t *testing.T) {
+	rbd := map[string]any{"scsi0": "rbd:vm-7-disk-0,size=1G"}
+	svc, calls := sharedProtectionPVE(t, rbd, tagProtected, false)
+	pr, err := svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "a", Tags: tagProtected})
+	if err != nil || pr["state"] != ProtectionActive || pr["mode"] != ProtectionModeShared {
+		t.Fatalf("%v, %v", pr, err)
+	}
+	if strings.Join(*calls, ",") != "resource" {
+		t.Fatalf("calls = %v", *calls)
+	}
+
+	// Already managed: no config read, so it also answers with the node down (the fake has no node "gone").
+	svc, calls = sharedProtectionPVE(t, rbd, tagProtected, true)
+	pr, err = svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "gone", Tags: tagProtected})
+	if err != nil || pr["state"] != ProtectionActive || len(*calls) != 0 {
+		t.Fatalf("managed: %v, %v, calls %v", pr, err, *calls)
+	}
+}
+
+func TestReconcileSharedLeavesOthersAlone(t *testing.T) {
+	rbd := map[string]any{"scsi0": "rbd:vm-7-disk-0,size=1G"}
+	zfs := map[string]any{"scsi0": "zfs:vm-7-disk-0,size=1G"}
+	for name, tt := range map[string]struct {
+		disks    map[string]any
+		rowTags  string
+		liveTags string
+	}{
+		"no tag":                      {rbd, "", ""},
+		"tag gone since the row read": {rbd, tagProtected, ""},
+		"ZFS whose job was removed":   {zfs, tagProtected, tagProtected},
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc, calls := sharedProtectionPVE(t, tt.disks, tt.liveTags, false)
+			pr, err := svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "a", Tags: tt.rowTags})
+			if err != nil || pr != nil || len(*calls) != 0 {
+				t.Fatalf("%v, %v, calls %v", pr, err, *calls)
+			}
+		})
+	}
+}
+
+func TestRefuseUnreplicableByMode(t *testing.T) {
+	svc, _ := sharedProtectionPVE(t, nil, "", false)
+	vm := &ClusterResource{VMID: 7, Node: "a", Tags: tagProtected}
+	if err := svc.refuseUnreplicable(context.Background(), vm, "rbd"); err != nil {
+		t.Fatalf("shared disk on a shared VM: %v", err)
+	}
+	if err := svc.refuseUnreplicable(context.Background(), vm, "zfs"); err == nil {
+		t.Fatal("a local disk would stay behind on a failover")
+	}
+	if err := svc.refuseUnreplicable(context.Background(), &ClusterResource{VMID: 7}, "zfs"); err != nil {
+		t.Fatalf("an unprotected VM takes anything: %v", err)
+	}
+}

@@ -270,8 +270,8 @@ func TestHolderOperationsTakeTheLock(t *testing.T) {
 	}
 }
 
-// A dropped holder stays listed for a moment. That must not fail the pass; any other VM that cannot be read must,
-// because Reconcile archives what the list leaves out.
+// A dropped holder stays listed for a moment, and its rows go. Any other VM that cannot be read keeps its rows, because
+// Reconcile archives what the list leaves out.
 func TestVolumeListWithVMsGone(t *testing.T) {
 	gone := func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -312,8 +312,12 @@ func TestVolumeListWithVMsGone(t *testing.T) {
 	s = volCluster(t, cfgLocalUnused, map[string][]url.Values{}, fakeRoutes{
 		"GET /api2/json/nodes": nodes, "GET " + carrierPath + "/config": gone, pve2Holder: refuse,
 	})
-	if _, err := vols(s, strict); err == nil {
-		t.Fatal("node unreadable: List must fail the pass")
+	prov := s.VolumeSyncProvider("r", "p1", nil)
+	if got, err := strict(prov); err != nil || len(got) != 4 {
+		t.Fatalf("node unreadable: List = %v, %v", got, err)
+	}
+	if keep, _ := prov.KeepUnread(&cloud.CloudResource{Data: map[string]any{"volume": map[string]any{"vmid": 900}}}); !keep {
+		t.Fatal("node unreadable: the holder's rows must stay")
 	}
 	if got, err := vols(s, readable); err != nil || len(got) != 4 {
 		t.Fatalf("node unreadable: ListReadable = %v, %v", got, err)
@@ -323,8 +327,9 @@ func TestVolumeListWithVMsGone(t *testing.T) {
 		"GET /api2/json/nodes": nodes, "GET " + carrierPath + "/config": gone, pve2Holder: gone,
 		"GET /api2/json/nodes/pve1/qemu/102/config": gone,
 	})
-	if _, err := vols(s, strict); err == nil {
-		t.Fatal("server gone: List must fail the pass")
+	// Its rows stay this pass: Reconcile takes them for unread rather than gone (next pass, unlisted, they go).
+	if got, err := vols(s, strict); err != nil || len(got) != 3 {
+		t.Fatalf("server unread: List = %v, %v", got, err)
 	}
 	if got, err := vols(s, readable); err != nil || len(got) != 3 {
 		t.Fatalf("server gone: ListReadable = %v, %v", got, err)

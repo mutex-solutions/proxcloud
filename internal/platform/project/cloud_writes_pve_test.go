@@ -169,6 +169,13 @@ func TestDbaasProfileRefusal(t *testing.T) {
 	}
 }
 
+func TestPveVolumeErrDeadNode(t *testing.T) {
+	he := pveVolumeErr(fmt.Errorf("disable protection: %w", &pve.APIError{Status: 595, Message: "No route to host"}))
+	if he.Status != http.StatusConflict || strings.Contains(he.Msg, "595") {
+		t.Fatalf("got %d %q", he.Status, he.Msg)
+	}
+}
+
 // A tenant must not learn the backend's address from a failure: transport errors name the API, proxied ones a node.
 func TestPVEErrorsHideTheBackend(t *testing.T) {
 	const addr = "10.0.0.5"

@@ -51,6 +51,13 @@ default user (`debian`, `ubuntu`, ...).
 Replaces the boot disk with a fresh copy of an image, losing everything on it. The server keeps its addresses,
 firewall and data volumes. Delete its snapshots first.
 
+## When a host fails
+
+If the host of a server goes down, the server shows **Unknown**. It keeps its addresses and volumes, you are not charged for
+the server itself while it lasts, and actions on it are refused until the host is back. It then shows as stopped: start it
+again. Other servers in the project are not affected. To have a server restart on another host by itself, enable
+**Protection**.
+
 ## Snapshots
 
 The **Snapshots** tab saves the state of the server's disks and rolls back to it, losing what was written
