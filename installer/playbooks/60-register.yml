@@ -62,6 +62,8 @@
         storageProfiles: "{{ lh.pc_profiles }}"
         defaultStorageProfile: "{{ lh.pc_default_profile }}"
         templates: "{{ pc.provider.templates }}"
+        backupStorage: "{{ pc.nas.names.backup if pc.nas.host | length > 0 and 'backup' in pc.nas.exports else '' }}"
+        importStorage: "{{ pc.nas.names.templates if pc.nas.host | length > 0 and 'templates' in pc.nas.exports else '' }}"
         storageClasses: "{{ storage_classes }}"
     fio_file: "{{ pc_gen }}/storage-classes.json"
     fio: "{{ lookup('ansible.builtin.file', fio_file) | from_json if fio_file is file else {} }}"
@@ -167,7 +169,7 @@
       ansible.builtin.set_fact:
         pc_service: "{{ pc_services.json.data | selectattr('name', 'eq', pc.provider.name) | first }}"
     - name: Keep the configuration of an existing provider in line
-      when: pc_service.config.network != provider.config.network or pc_service.config.storageProfiles != provider.config.storageProfiles or pc_service.config.apiUrl != provider.config.apiUrl or pc_service.config.storageClasses | default({}) != provider.config.storageClasses or pc_service.config.templates | default({}) != provider.config.templates
+      when: pc_service.config.network != provider.config.network or pc_service.config.storageProfiles != provider.config.storageProfiles or pc_service.config.apiUrl != provider.config.apiUrl or pc_service.config.storageClasses | default({}) != provider.config.storageClasses or pc_service.config.templates | default({}) != provider.config.templates or pc_service.config.backupStorage | default('') != provider.config.backupStorage or pc_service.config.importStorage | default('') != provider.config.importStorage
       proxcloud_api:
         access_key: "{{ api_key.id }}"
         secret_key: "{{ api_key.secretKey }}"

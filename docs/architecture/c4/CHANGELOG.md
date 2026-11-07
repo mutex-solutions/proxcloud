@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Customer image import (P5-11)
+
+**What changed**
+
+- `POST /project/{id}/cloud` `IMAGE {url, ...}`: the portal probes the URL (`pkg/safeurl`, the guard that was private to
+  SSO), a node downloads it to `importStorage`, `import-from` builds a template in the project pool. Import dialog on the
+  Images page. `ProxCloudPlatform` adds `Sys.AccessNetwork`; the token gets `PVEDatastoreAdmin` on the import store alone.
+
+**Why**
+
+- Tenants could only make images from their own servers. A node fetches the URL from the management network, so the URL
+  is the attack surface: the probe refuses non-public addresses on the whole redirect chain and the portal hands the node
+  the final URL. A node resolves the name again, so raw images are not accepted and the download goes through PVE's
+  untrusted-image check. `Datastore.Allocate` to delete the download is confined to one store, so the token cannot delete
+  other volumes.
+
+**Diagrams updated:** `c3-components.md` (new row).
+
 ## 2026-11-07: Server backups (P5-3)
 
 **What changed**

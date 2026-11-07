@@ -107,6 +107,11 @@ func (h *Handler) proxmoxAuth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out := PVEAuthResponse{Nodes: []pve.Node{}, Storages: []pve.StorageDef{}, SDNZones: []pve.SDNZone{}, PCIMappings: []pve.PCIMapping{}, Warnings: tokenWarnings(ctx, cc, cfg.TokenID)}
+	if id := r.URL.Query().Get("externalServiceId"); id != "" && h.esSvc != nil {
+		if es, err := h.esSvc.Get(ctx, id); err == nil && es != nil && es.PVEImportStorage() != "" {
+			out.Warnings = append(out.Warnings, importStoreWarnings(ctx, cc, es.PVEImportStorage())...)
+		}
+	}
 	if v, ok := ver["version"].(string); ok {
 		out.Version = v
 	}
@@ -141,6 +146,20 @@ func tokenWarnings(ctx context.Context, cc *pve.Client, tokenID string) []string
 	}
 	for _, m := range missing {
 		out = append(out, "Token lacks "+m+" (see docs/proxmox-permissions.md)")
+	}
+	return out
+}
+
+// importStoreWarnings reports what image import needs on its store beyond the role: deleting the downloaded
+// file takes Datastore.Allocate, which the role holds nowhere.
+func importStoreWarnings(ctx context.Context, cc *pve.Client, store string) []string {
+	missing, err := cc.MissingPrivileges(ctx, []pve.PrivCheck{{Path: "/storage/" + store, Privs: []string{"Datastore.Allocate", "Datastore.AllocateTemplate"}}})
+	if err != nil {
+		return []string{"Could not read the token's permissions on the import store: " + err.Error()}
+	}
+	out := []string{}
+	for _, m := range missing {
+		out = append(out, "Token lacks "+m+": image import needs it, or downloaded files stay on the store (see docs/proxmox-permissions.md)")
 	}
 	return out
 }

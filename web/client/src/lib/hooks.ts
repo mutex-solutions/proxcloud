@@ -205,6 +205,7 @@ export type CloudFeature =
   | "volumeSnapshots"
   | "serverDiskSnapshots"
   | "serverBackups"
+  | "imageImport"
   | "spreadGroups"
   | "publicIp"
 

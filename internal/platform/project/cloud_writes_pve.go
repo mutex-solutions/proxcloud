@@ -1434,6 +1434,10 @@ func (h *Handler) pveCreateSecurityGroup(w http.ResponseWriter, r *http.Request,
 // pveCreateImage snapshots a server into a project template (IMAGE).
 // Body: {name, serverId} — the wizard's create{type:IMAGE, imageType:snapshot} shape.
 func (h *Handler) pveCreateImage(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
+	if strAny(data["url"]) != "" {
+		h.pveImportImage(w, r, u, proj, es, data)
+		return
+	}
 	ctx := r.Context()
 	name := strAny(data["name"])
 	serverRef := strAny(data["serverId"])
@@ -1471,14 +1475,20 @@ func (h *Handler) pveCreateImage(w http.ResponseWriter, r *http.Request, u *user
 		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, cerr.Error()))
 		return
 	}
+	// The source VM's disks are what a clone of the image starts from.
+	h.pveSaveImageRow(w, r, u, proj, es, name, vmid, vm.MaxDisk, started)
+}
+
+// pveSaveImageRow writes the IMAGE row of a new template and answers with it. The sampler would find it within a minute.
+func (h *Handler) pveSaveImageRow(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, name string, vmid int, sizeBytes int64, started time.Time) {
+	ctx := r.Context()
 	now := time.Now().UTC()
 	cr := &cloud.CloudResource{
 		ServiceID: es.ID, Region: h.pveRegion(proj, es), ProjectID: proj.ID,
 		Type: cloud.TypeImage, ExternalID: strconv.Itoa(vmid),
 		Data: map[string]any{"image": map[string]any{
 			"id": strconv.Itoa(vmid), "name": name, "status": "active", "visibility": "private",
-			// The source VM's disks are what a clone of the image starts from.
-			"size": vm.MaxDisk, "min_disk": vm.MaxDisk >> 30,
+			"size": sizeBytes, "min_disk": (sizeBytes + 1<<30 - 1) >> 30,
 		}},
 		CreatedAt: &now, UpdatedAt: &now,
 		Info: &cloud.Info{CreatedAt: &now, UpdatedAt: &now},

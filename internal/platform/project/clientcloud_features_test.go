@@ -27,6 +27,8 @@ func TestCloudFeatures(t *testing.T) {
 		}, []string{"serverSnapshots", "userData", "serverPassword", "serverRebuild", "serverDiskSnapshots", "subnets", "spreadGroups"}},
 		{"proxmox with a backup store", map[string]any{"provider": "proxmox", "backupStorage": "nas-backup"},
 			[]string{"serverSnapshots", "userData", "serverPassword", "serverRebuild", "serverDiskSnapshots", "subnets", "spreadGroups", "serverBackups"}},
+		{"proxmox with an import store", map[string]any{"provider": "proxmox", "importStorage": "nas-templates"},
+			[]string{"serverSnapshots", "userData", "serverPassword", "serverRebuild", "serverDiskSnapshots", "subnets", "spreadGroups", "imageImport"}},
 		{"proxmox with two profiles", map[string]any{
 			"provider": "proxmox", "storageProfiles": map[string]any{"std": profile("local-zfs"), "nas": profile("nas")},
 		}, []string{"serverSnapshots", "userData", "serverPassword", "serverRebuild", "serverDiskSnapshots", "subnets", "spreadGroups", "volumeRetype"}},
