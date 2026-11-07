@@ -64,7 +64,7 @@ pc_defaults:
     operator:                    # first operator login; the password lands in generated/
       username: admin
       email: admin@example.com
-    tenant_users: []             # optional seed logins: [{username, email, password}]
+    tenant_users: []             # optional seed logins: [{username, email, password}]; customers log in with the email
 
   # Tenant networks. Default: one EVPN zone over all nodes, first node as exit node.
   # Needs frr-pythontools on the nodes; on one node use kind: simple.
@@ -88,7 +88,7 @@ pc_defaults:
     name: Proxmox
     region: pve
     region_name: Default
-    default_profile: ""          # default: std when detected, else the first detected
+    default_profile: ""          # default: on the first run the fastest detected (ceph, std, local-lvm); a re-run keeps the provider's
     # Display names for the discovered templates (config.templates overlay).
     templates:
       debian-13: {name: Debian 13, osDistro: debian}

@@ -44,6 +44,29 @@ def default_profile(profiles, wanted=""):
     return sorted(profiles)[0] if profiles else ""
 
 
+def kept_profiles(detected, site, existing):
+    """The profiles a run writes. The site's list is authoritative; otherwise what is on the provider stays as the
+    operator left it and only a newly detected storage is added."""
+    return site or {**detected, **existing}
+
+
+def kept_default_profile(profiles, detected, site, existing):
+    """The default a run writes: the site's pick, else what the provider has, so a storage added later does not
+    move new VMs. A default whose profile is gone falls back to the detected one."""
+    return site or (existing if existing in profiles else detected)
+
+
+def storage_classes(fio, site, existing):
+    """config.storageClasses a run writes: what is stored (a class confirmed in the admin console), then the
+    latest fio suggestion, then the site's class, which wins."""
+    out = {k: dict(v) for k, v in existing.items()}
+    for storage, r in fio.items():
+        out.setdefault(storage, {})["suggestedClass"] = r["class"]
+    for storage, cls in site.items():
+        out.setdefault(storage, {})["class"] = cls
+    return out
+
+
 def fio_class(p99_ms, iops, performance_ms=1, standard_ms=5, capacity_iops=2000):
     """Suggested class from a benchmark (plan S19). NFS randread can be flattered by the NAS ARC, so
     latency decides first and IOPS can only downgrade."""
@@ -78,6 +101,9 @@ class FilterModule:
         return {
             "pc_classify_storages": classify_storages,
             "pc_default_profile": default_profile,
+            "pc_kept_profiles": kept_profiles,
+            "pc_kept_default_profile": kept_default_profile,
+            "pc_storage_classes": storage_classes,
             "pc_fio_class": fio_class,
             "pc_template_nodes": template_nodes,
             "pc_acl_missing": pve_acl_missing,
