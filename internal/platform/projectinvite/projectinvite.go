@@ -7,6 +7,7 @@ package projectinvite
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -168,9 +169,7 @@ func (h *Handler) Routes(r chi.Router) {
 func (h *Handler) invite(w http.ResponseWriter, r *http.Request) {
 	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
 	if err != nil {
-		if !httpx.WriteError(w, err) {
-			httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
-		}
+		httpx.WriteError(w, err)
 		return
 	}
 	var req struct {
@@ -182,21 +181,15 @@ func (h *Handler) invite(w http.ResponseWriter, r *http.Request) {
 	// of any project could mint invites into an arbitrary project by id.
 	proj, err := h.projectSvc.GetProjectByID(r.Context(), req.ProjectID)
 	if err != nil {
-		if !httpx.WriteError(w, err) {
-			httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
-		}
+		httpx.WriteError(w, err)
 		return
 	}
 	if err := h.requireInvitePermission(r.Context(), u.Sub, proj); err != nil {
-		if !httpx.WriteError(w, err) {
-			httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
-		}
+		httpx.WriteError(w, err)
 		return
 	}
 	if err := h.InviteToProject(r.Context(), u, req.Email, req.ProjectID); err != nil {
-		if !httpx.WriteError(w, err) {
-			httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
-		}
+		httpx.WriteError(w, err)
 		return
 	}
 	httpx.Accepted(w)
@@ -242,9 +235,7 @@ func (h *Handler) InviteToProject(ctx context.Context, u *user.User, email, proj
 func (h *Handler) accept(w http.ResponseWriter, r *http.Request) {
 	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
 	if err != nil {
-		if !httpx.WriteError(w, err) {
-			httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
-		}
+		httpx.WriteError(w, err)
 		return
 	}
 	if !u.EmailVerified() {
@@ -263,7 +254,11 @@ func (h *Handler) accept(w http.ResponseWriter, r *http.Request) {
 	projectID, _ := inv["projectId"].(string)
 	proj, err := h.projectSvc.GetProjectByID(r.Context(), projectID)
 	if err != nil || proj == nil {
-		if !httpx.WriteError(w, err) {
+		// An untyped lookup error stays a 404 here, as before: only a typed error keeps its own answer.
+		var he *httpx.HTTPError
+		if errors.As(err, &he) {
+			httpx.WriteError(w, err)
+		} else {
 			httpx.Err(w, http.StatusNotFound, http.StatusNotFound, "Project invite not found")
 		}
 		return
@@ -299,9 +294,7 @@ func callerEmail(u *user.User) string {
 func (h *Handler) decline(w http.ResponseWriter, r *http.Request) {
 	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
 	if err != nil {
-		if !httpx.WriteError(w, err) {
-			httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
-		}
+		httpx.WriteError(w, err)
 		return
 	}
 	inv, err := h.repo.ByEmailAndToken(r.Context(), callerEmail(u), chi.URLParam(r, "token"))
@@ -325,9 +318,7 @@ func (h *Handler) decline(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
 	if err != nil {
-		if !httpx.WriteError(w, err) {
-			httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
-		}
+		httpx.WriteError(w, err)
 		return
 	}
 	inv, err := h.repo.ByEmailAndToken(r.Context(), callerEmail(u), chi.URLParam(r, "token"))
@@ -349,9 +340,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) mine(w http.ResponseWriter, r *http.Request) {
 	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
 	if err != nil {
-		if !httpx.WriteError(w, err) {
-			httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
-		}
+		httpx.WriteError(w, err)
 		return
 	}
 	invs, err := h.repo.ByEmail(r.Context(), callerEmail(u))

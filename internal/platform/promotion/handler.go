@@ -5,6 +5,7 @@ package promotion
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -55,7 +56,8 @@ func (h *Handler) deposit(w http.ResponseWriter, r *http.Request) {
 // redeem redeems a promo code:
 // membership-resolve the bp + its org (the authz gate) → promo-codes-enabled guard →
 // getRedeemableByCode (case-insensitive + ACTIVE/not-DISABLED + in-window + org-targeted) →
-// not-already-redeemed-by-org → mint a PromotionalCredit + record the redemption → single(credit).
+// record the redemption (refused when the org has one) and mint its PromotionalCredit, in one transaction →
+// single(credit).
 func (h *Handler) redeem(w http.ResponseWriter, r *http.Request) {
 	bpID := chi.URLParam(r, "billingProfileId")
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
@@ -93,15 +95,6 @@ func (h *Handler) redeem(w http.ResponseWriter, r *http.Request) {
 	}
 	codeIDHex, _ := pc["_id"].(string) // pgdoc injects _id as a plain string
 
-	exists, err := h.billing.PromotionRedemptionExists(r.Context(), codeIDHex, orgID)
-	if httpx.WriteError(w, err) {
-		return
-	}
-	if exists {
-		httpx.WriteError(w, httpx.BadRequest("This promotion code has already been redeemed by your organization"))
-		return
-	}
-
 	now := time.Now().UTC()
 	amount := promoAmount(pc)
 	credit := &pricing.PromotionalCredit{
@@ -113,11 +106,11 @@ func (h *Handler) redeem(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:        &now,
 		ExpirationDate:   promoExpiry(pc, now),
 	}
-	saved, err := h.billing.InsertPromotionalCredit(r.Context(), credit)
-	if httpx.WriteError(w, err) {
-		return
+	saved, err := h.billing.RedeemPromotion(r.Context(), credit, codeIDHex, orgID, "USER_REDEEM", now)
+	if errors.Is(err, billing.ErrPromotionRedeemed) {
+		err = httpx.BadRequest("This promotion code has already been redeemed by your organization")
 	}
-	if err := h.billing.SavePromotionRedemption(r.Context(), codeIDHex, orgID, resolvedBPID, "USER_REDEEM", now); httpx.WriteError(w, err) {
+	if httpx.WriteError(w, err) {
 		return
 	}
 	httpx.OK(w, saved)

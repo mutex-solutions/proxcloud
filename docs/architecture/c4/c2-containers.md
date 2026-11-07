@@ -100,6 +100,7 @@ flowchart TB
     mgmtvm["Management cluster VMs"]:::planned
     svc["Services cluster<br/>Kamaji, DB operators, CSI"]:::impl
     rfsvm["RustFS VM"]:::planned
+    sbx["Sandbox cluster workers<br/>pool proxcloud-sandbox, vnet pcsbx<br/>gVisor, no CSI, no NAS"]:::planned
   end
 
   subgraph tiers["Storage backends"]
@@ -122,6 +123,7 @@ flowchart TB
   sto --> nas
   ha --> vm
   svc --> nas
+  svc -.->|"control plane, konnectivity"| sbx
   papi -.-> pbs
 ```
 
@@ -137,6 +139,7 @@ flowchart TB
 | HA rules and replication | Protected VMs with replication and node-affinity rules. | Implemented |
 | Platform-owned VMs | Management cluster VMs and the RustFS VM in a dedicated system pool, the platform token has `NoAccess` there. | Implemented |
 | Services cluster VMs | The services cluster, in the same system pool. | Implemented |
+| Sandbox cluster | A platform-owned Kamaji cluster from the cluster chart: control plane on the services cluster, workers in pool `proxcloud-sandbox` on their own vnet, gVisor (`runsc`, systrap) for tenant code, a Cilium egress guardrail, no CSI token and no NAS dataset. Its CAPMOX token sees only a node-local ISO store. Release gates: per-NIC VM firewall and isolation drops for the sandbox CIDR in both directions, NodeRestriction on its control plane, single-stack IPv4. Spike results: [managed-sandbox.md](../../managed-sandbox.md). | Planned |
 | Proxmox Backup Server | Operator nightly backups, then tenant backup schedules and restore. | Planned |
 
 ### Storage tiers
@@ -174,8 +177,12 @@ to any server on a node where that storage is active: the disk rides a new holde
 carrier, which nothing else may use), which migrates offline without copying data, and
 is reassigned on the target's node. `LIST_ATTACH_TARGETS` lists the eligible servers;
 anything else is 409. Retype moves the disk to another
-profile's storage on the same node (`move_disk`, source deleted), and a detached
-volume can be deleted on its own. A profile's class is the lowest effective class
+profile's storage on the same node (`move_disk`, source deleted); the volume row is
+marked moving for the copy, so a sync that sees the new volid first keeps the row, and
+the row then follows the disk and keeps its id. The wait and the follow outlive the
+request, and a sync leaves a row alone that took its new volid after the sync listed. A retype of a row still marked moving answers 409. A detached volume can be deleted on its
+own. PVE has no name for a disk: the name a tenant gives a volume is the row's
+(`data.volume.label`), and a sync carries it over. A profile's class is the lowest effective class
 of its storages (admin override, else detected); a capacity-class profile never
 takes boot disks, managed databases or snapshots, whatever it claims, and a save
 that claims them is refused. Each volume row carries its own profile and storage
