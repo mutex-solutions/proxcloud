@@ -1,0 +1,88 @@
+# RBAC for the portal's service account on the sandbox cluster (the `sandbox` provider's kubeconfig).
+#
+# What the portal does here (internal/cloud/sandbox):
+#   - project namespaces sb-<projectId>: create (server-side apply) with label proxcloud.io/tenant=true,
+#     a ResourceQuota and a LimitRange in them, delete when the project goes
+#   - Sandbox CRs (agents.x-k8s.io) and the warm-pool extensions: full CRUD
+#   - read pod status (node, phase), exec and logs: the data plane goes through the API server
+#   - one CiliumNetworkPolicy per sandbox (its egress), owned by the Sandbox CR
+#   - nodes: read, for the GPU capacity answer at create
+#
+# Cluster-wide by necessity: RBAC cannot wildcard namespaces and the sb-* namespaces are created on
+# demand (the same trade-off as deploy/dbaas-cluster/rbac.yaml). It includes pods/exec, so this token
+# can run commands in ANY pod of this cluster. Accepted because the cluster is single-purpose: keep
+# only platform components without credentials to other systems on it (node-setup, agent-sandbox).
+# No secrets: the token cannot read any Secret.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: proxcloud-system
+  labels:
+    app.kubernetes.io/managed-by: proxcloud
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxcloud
+  namespace: proxcloud-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxcloud-sandbox
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["get", "list", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Exec over WebSocket is an HTTP GET upgrade: the API server authorizes it as `get` on pods/exec and
+  # (Kubernetes >= 1.30, AuthorizePodWebsocketUpgradeCreatePermission) also as `create`. kubectl's SPDY
+  # POST needs only `create`, so a kubectl-based check passes with `create` alone while the portal's
+  # WebSocket exec gets 403. `kubectl auth can-i create pods/exec` answers no even when it works: ask
+  # with `--subresource=exec`.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxcloud-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxcloud-sandbox
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxcloud-token
+  namespace: proxcloud-system
+  annotations:
+    kubernetes.io/service-account.name: proxcloud
+type: kubernetes.io/service-account-token

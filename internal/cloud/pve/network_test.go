@@ -141,13 +141,13 @@ func TestZoneIDFor(t *testing.T) {
 
 func TestIsolationRules(t *testing.T) {
 	const pool, comment = "10.100.0.0/16", isolationComment
-	if got, want := isolationRules(pool, nil, comment), []FirewallRule{
+	if got, want := isolationRules(pool, nil, nil, comment), []FirewallRule{
 		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
 		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("no blocked: got %+v", got)
 	}
-	got := isolationRules(pool, []string{"192.0.2.0/24", "198.51.100.0/24"}, comment)
+	got := isolationRules(pool, []string{"192.0.2.0/24", "198.51.100.0/24"}, nil, comment)
 	want := []FirewallRule{
 		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
 		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
@@ -156,6 +156,60 @@ func TestIsolationRules(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+}
+
+// The sandbox networks are dropped both ways: tenants to the workers (kubelet, VXLAN), and the
+// workers to the tenants and the management networks they would otherwise reach through an exit
+// node's SNAT.
+func TestIsolationRulesSandbox(t *testing.T) {
+	const pool, comment = "10.100.0.0/16", isolationComment
+	got := isolationRules(pool, []string{"192.0.2.0/24"}, []string{"10.110.0.0/24", "10.111.0.0/24"}, comment)
+	want := []FirewallRule{
+		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,10.110.0.0/24,10.111.0.0/24", Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,10.110.0.0/24,10.111.0.0/24", Comment: comment},
+		{Type: "forward", Action: "DROP", Source: "10.110.0.0/24,10.111.0.0/24", Dest: pool + ",192.0.2.0/24", Comment: comment},
+		{Type: "in", Action: "DROP", Source: "10.110.0.0/24,10.111.0.0/24", Dest: pool + ",192.0.2.0/24", Comment: comment},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+	// Nothing blocked but a sandbox: still both directions.
+	got = isolationRules(pool, nil, []string{"10.110.0.0/24"}, comment)
+	if len(got) != 6 || got[2].Dest != "10.110.0.0/24" || got[4].Source != "10.110.0.0/24" || got[4].Dest != pool {
+		t.Fatalf("sandbox without blocked: %+v", got)
+	}
+}
+
+func TestReconcileIsolationSandbox(t *testing.T) {
+	srv, rules, _ := isolationFake(t, nil)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, []string{"10.110.0.5/24", "10.110.0.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	var drops []string
+	for _, r := range *rules {
+		if r.Action == "DROP" {
+			drops = append(drops, r.Type+" "+r.Source+" "+r.Dest)
+		}
+	}
+	want := []string{
+		"forward 10.100.0.0/16 10.100.0.0/16", "in 10.100.0.0/16 10.100.0.0/16",
+		"forward 10.100.0.0/16 192.0.2.0/24,10.110.0.0/24", "in 10.100.0.0/16 192.0.2.0/24,10.110.0.0/24",
+		"forward 10.110.0.0/24 10.100.0.0/16,192.0.2.0/24", "in 10.110.0.0/24 10.100.0.0/16,192.0.2.0/24",
+	}
+	if !reflect.DeepEqual(drops, want) {
+		t.Fatalf("drops:\n%s\nwant:\n%s", strings.Join(drops, "\n"), strings.Join(want, "\n"))
+	}
+	for _, bad := range [][]string{{"10.100.7.0/24"}, {"10.0.0.0/8"}, {"not-a-cidr"}, {"fd00::/64"}} {
+		srv, rules, writes := isolationFake(t, nil)
+		if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, bad); err == nil {
+			t.Fatalf("sandboxCidrs %v accepted", bad)
+		}
+		if *writes != 0 || len(*rules) != 0 {
+			t.Fatalf("sandboxCidrs %v: %d writes before the refusal", bad, *writes)
+		}
 	}
 }
 
@@ -227,7 +281,7 @@ func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
 	ops := FirewallRule{Type: "in", Action: "ACCEPT", Dest: "10.9.9.9", Comment: "ops"}
 	other := projectIsolationRules("p2", []string{"10.100.5.0/24"})[0]
 	srv, rules, _ := isolationFake(t, []FirewallRule{ops, other})
-	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", []string{"198.51.100.0/24"}); err != nil {
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", []string{"198.51.100.0/24"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	const blocked = "192.0.2.0/24,198.51.100.0/24"
@@ -254,9 +308,9 @@ func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
 func TestReconcileIsolationIdempotent(t *testing.T) {
 	own := "10.100.0.0/24,10.100.1.0/24"
 	current := append(projectIsolationRules("p1", strings.Split(own, ",")),
-		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"}, isolationComment)...)
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"}, nil, isolationComment)...)
 	srv, _, writes := isolationFake(t, current)
-	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if *writes != 0 {
@@ -268,9 +322,9 @@ func TestReconcileIsolationIdempotent(t *testing.T) {
 func TestReconcileIsolationReplacesOwnRules(t *testing.T) {
 	own := "10.100.0.0/24,10.100.1.0/24"
 	current := append(projectIsolationRules("p1", strings.Split(own, ",")),
-		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24", "198.51.100.0/24"}, isolationComment)...)
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24", "198.51.100.0/24"}, nil, isolationComment)...)
 	srv, rules, _ := isolationFake(t, current)
-	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var drops []string
@@ -290,10 +344,10 @@ func TestReconcileIsolationReplacesOwnRules(t *testing.T) {
 
 // Two portals: neither may remove the other's DROPs, whatever their pools.
 func TestReconcileIsolationLeavesOtherPortals(t *testing.T) {
-	theirs := isolationRules("10.200.0.0/16", []string{"192.0.2.0/24"}, isolationComment+"/other-")
+	theirs := isolationRules("10.200.0.0/16", []string{"192.0.2.0/24"}, nil, isolationComment+"/other-")
 	theirAccept := projectIsolationRules("p9", []string{"10.200.7.0/24"})[0]
 	srv, rules, _ := isolationFake(t, append([]FirewallRule{theirAccept}, theirs...))
-	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range append(theirs, theirAccept) {
@@ -315,11 +369,11 @@ func TestReconcileIsolationWithNodeDown(t *testing.T) {
 	nodeDown := func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "595 No route to host", 595)
 	}
-	stale := isolationRules("10.100.0.0/16", []string{"192.0.2.0/24", "198.51.100.0/24"}, isolationComment)
+	stale := isolationRules("10.100.0.0/16", []string{"192.0.2.0/24", "198.51.100.0/24"}, nil, isolationComment)
 	srv, rules, _ := isolationFakeNodes(t, stale, map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/nodes/pve2/network": nodeDown,
 	}, `{"type":"node","name":"pve2","ip":"192.0.2.12"}`)
-	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range stale {
@@ -335,7 +389,7 @@ func TestReconcileIsolationWithNodeDown(t *testing.T) {
 	srv, rules, _ = isolationFakeNodes(t, nil, map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/nodes/pve2/network": nodeDown,
 	}, `{"type":"node","name":"pve2","ip":"192.0.2.12"}`)
-	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.ContainsFunc(*rules, func(g FirewallRule) bool { return g.Action == "DROP" && g.Dest == "192.0.2.0/24" }) {

@@ -441,18 +441,28 @@ func (s *Service) DeleteProjectZoneIfEmpty(ctx context.Context, projectID string
 // inside one vnet bridge, and a routed packet never hits them. The IN rules cover the node's own
 // addresses, which forward never sees: another tenant's gateway, and whatever a leaked VRF route
 // reaches on an exit node.
+// The sandbox networks (the platform's sandbox cluster workers, docs/managed-sandbox.md) are fenced
+// both ways: the pool may not reach them, and they may reach neither the pool nor a blocked
+// network. Their traffic to the management networks leaves through an exit node that SNATs it to a
+// node address, so it has to drop here, before the rewrite.
 // There is deliberately no blanket DROP source=pool: it would also drop internet egress (SNAT).
-func isolationRules(pool string, blocked []string, owner string) []FirewallRule {
+func isolationRules(pool string, blocked, sandbox []string, owner string) []FirewallRule {
 	out := []FirewallRule{
 		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: owner},
 		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: owner},
 	}
-	if len(blocked) > 0 {
-		dest := strings.Join(blocked, ",")
+	drop := func(src string, dst []string) {
+		dest := strings.Join(dst, ",")
 		out = append(out,
-			FirewallRule{Type: "forward", Action: "DROP", Source: pool, Dest: dest, Comment: owner},
-			FirewallRule{Type: "in", Action: "DROP", Source: pool, Dest: dest, Comment: owner},
+			FirewallRule{Type: "forward", Action: "DROP", Source: src, Dest: dest, Comment: owner},
+			FirewallRule{Type: "in", Action: "DROP", Source: src, Dest: dest, Comment: owner},
 		)
+	}
+	if dst := append(slices.Clone(blocked), sandbox...); len(dst) > 0 {
+		drop(pool, dst)
+	}
+	if len(sandbox) > 0 {
+		drop(strings.Join(sandbox, ","), append([]string{pool}, blocked...))
 	}
 	return out
 }
@@ -475,15 +485,19 @@ func sameRule(a, b FirewallRule) bool {
 }
 
 // ReconcileIsolation brings the cluster firewall to the isolation rule set: this portal's
-// provider-wide DROPs (blocked = the management networks plus the operator's extra ones) and this
-// project's ACCEPTs over its subnets. Idempotent; call after a vnet of the project is created or
+// provider-wide DROPs (blocked = the management networks plus the operator's extra ones; sandbox =
+// the sandbox cluster's networks, fenced in both directions) and this project's ACCEPTs over its
+// subnets. Idempotent; call after a vnet of the project is created or
 // deleted, and from the sync job, which repairs drift and rolls a changed rule set out to projects
 // made before it. PVE adds a rule on top, and every step fails closed: DROPs go in before anything
 // is removed, and an ACCEPT is only ever replaced by adding it after the old one is gone.
-func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string, blocked []string) error {
+func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string, blocked, sandbox []string) error {
 	_, poolNet, err := net.ParseCIDR(pool)
 	if err != nil {
 		return fmt.Errorf("pve isolation: invalid cidrPool %q", pool)
+	}
+	if sandbox, err = sandboxNets(poolNet, sandbox); err != nil {
+		return err
 	}
 	mgmt, complete, err := s.C.ManagementCIDRs(ctx)
 	if err != nil {
@@ -491,7 +505,7 @@ func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string
 	}
 	blocked = slices.Compact(slices.Sorted(slices.Values(append(mgmt, blocked...))))
 	owner := s.isolationOwner()
-	want := isolationRules(poolNet.String(), blocked, owner)
+	want := isolationRules(poolNet.String(), blocked, sandbox, owner)
 	rules, err := s.C.ListClusterFirewallRules(ctx)
 	if err != nil {
 		return err
@@ -529,6 +543,24 @@ func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string
 	}
 	slices.Sort(cidrs)
 	return s.setProjectIsolation(ctx, projectID, cidrs)
+}
+
+// sandboxNets normalises the sandbox networks. One that overlaps the tenant pool is refused: a
+// tenant subnet inside it would be cut off from its own project, and the pool's DROPs would no
+// longer say which side a packet came from.
+func sandboxNets(pool *net.IPNet, cidrs []string) ([]string, error) {
+	out := make([]string, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(strings.TrimSpace(c))
+		if err != nil || n.IP.To4() == nil {
+			return nil, fmt.Errorf("pve isolation: invalid sandboxCidrs entry %q (IPv4 CIDR)", c)
+		}
+		if pool.Contains(n.IP) || n.Contains(pool.IP) {
+			return nil, fmt.Errorf("pve isolation: sandboxCidrs entry %s overlaps cidrPool %s", n, pool)
+		}
+		out = append(out, n.String())
+	}
+	return slices.Compact(slices.Sorted(slices.Values(out))), nil
 }
 
 // rebuildIsolation replaces this portal's DROPs when they are missing or the networks changed.

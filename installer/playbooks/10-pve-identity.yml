@@ -70,6 +70,17 @@
       # An ACL on a path replaces what its parent passes down, so the mint grant alone takes SDN.* away from /sdn/zones.
       - {path: /sdn/zones, role: ProxCloudPlatform, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /nodes, role: ProxCloudKubeMint, propagate: 0, user: proxcloud@pve, token: proxcloud@pve!platform}
+    # sandbox.enabled: the sandbox cluster's CAPMOX token, with the grants the portal gives a tenant cluster's token
+    # (MintClusterTokens, internal/cloud/pve/access.go). Token rows only: capmox@pve already holds these paths through
+    # split_acls, and a user row on a child path would replace what the user inherits there.
+    sandbox_acls:
+      - {path: "/pool/{{ pc.sandbox.pool }}", role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
+      - {path: "/storage/{{ pc_sandbox_storage }}", role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
+      - {path: /pool/pc-templates, role: PVETemplateUser, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
+      - {path: /nodes, role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
+      - {path: /sdn/zones/localnetwork, role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
+      - {path: "/storage/{{ pc_sandbox_iso_storage }}", role: PVEDatastoreAdmin, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
+      - {path: "/sdn/zones/{{ pc_sandbox_zone }}/{{ pc.sandbox.network.vnet }}", role: ProxCloudCAPI, propagate: 1, user: "", token: "{{ pc_sandbox_token_id }}"}
   tasks:
     - name: Log in
       ansible.builtin.include_tasks: tasks/pve-login.yml
@@ -118,7 +129,7 @@
         body_format: form-urlencoded
         body: {poolid: "{{ item.key }}", comment: "{{ item.value }}"}
       changed_when: true
-      loop: "{{ pools | dict2items }}"
+      loop: "{{ (pools | combine({pc.sandbox.pool: 'ProxCloud sandbox cluster (not tenant)'} if pc_sandbox_on else {})) | dict2items }}"
       loop_control: {label: "{{ item.key }}"}
 
     - name: Create a user
@@ -175,6 +186,27 @@
         mode: "0600"
       no_log: true
 
+    - name: Create the sandbox cluster token
+      when:
+        - pc_sandbox_on
+        - pc.sandbox.token not in (have_users['capmox@pve'] | default([], true) | map(attribute='tokenid') | list)
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/users/capmox@pve/token/{{ pc.sandbox.token }}"
+        method: POST
+        body_format: form-urlencoded
+        body: {privsep: 1, comment: ProxCloud sandbox cluster}
+      changed_when: true
+      no_log: true
+      register: pc_sandbox_token
+
+    - name: Keep the sandbox cluster token secret
+      when: pc_sandbox_token.json is defined
+      ansible.builtin.copy:
+        dest: "{{ pc_gen }}/token-{{ pc.sandbox.token }}"
+        content: "{{ pc_sandbox_token.json.data.value }}\n"
+        mode: "0600"
+      no_log: true
+
     - name: Copy token secrets given in the vault
       when: pc_vault[item.key] is defined
       ansible.builtin.copy:
@@ -182,13 +214,13 @@
         content: "{{ pc_vault[item.key] }}\n"
         mode: "0600"
       no_log: true
-      loop: "{{ {'platform_token_secret': 'platform', 'images_token_secret': 'packer', 'capi_token_secret': 'capi', 'csi_token_secret': 'csi', 'csi_gateway_token_secret': 'gateway'} | dict2items }}"
+      loop: "{{ {'platform_token_secret': 'platform', 'images_token_secret': 'packer', 'capi_token_secret': 'capi', 'csi_token_secret': 'csi', 'csi_gateway_token_secret': 'gateway', 'sandbox_token_secret': pc.sandbox.token} | dict2items }}"
 
     - name: Check the tokens the installer needs are known
       ansible.builtin.stat: {path: "{{ pc_gen }}/token-{{ item }}"}
       register: pc_tokens
       failed_when: not pc_tokens.stat.exists
-      loop: "{{ ['platform', 'packer'] + (['capi', 'csi', 'gateway'] if pc.mode == 'split' else []) }}"
+      loop: "{{ ['platform', 'packer'] + (['capi', 'csi', 'gateway'] if pc.mode == 'split' else []) + ([pc.sandbox.token] if pc_sandbox_on else []) }}"
 
     - name: Grant the missing ACLs
       ansible.builtin.uri:
@@ -197,7 +229,7 @@
         body_format: form-urlencoded
         body: "{{ item }}"
       changed_when: true
-      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else [])) }}"
+      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else []) + (sandbox_acls if pc_sandbox_on else [])) }}"
       loop_control: {label: "{{ item.path }} {{ item.roles }}"}
 
     # Older installs gave the services token /storage (propagate) and the ISO role on the NAS template store, so it
@@ -237,3 +269,21 @@
           on any of them. It must see {{ pc.services.iso_storage }} alone: look for other ACLs on those stores for the
           token or capmox@pve (docs/proxmox-permissions.md).
         success_msg: "{{ pc.services.capi_token_id }} sees the ISO stores {{ seen }}{{ ' (before the changes above: --check writes nothing)' if ansible_check_mode else '' }}"
+
+    # The same for the sandbox cluster's token: its join tokens must land on the node-local store only.
+    - name: Read what the sandbox cluster token may do on each ISO store
+      when: pc_sandbox_on
+      check_mode: false
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/permissions?{{ {'userid': pc_sandbox_token_id, 'path': '/storage/' ~ item} | urlencode }}"
+      loop: "{{ pc_storage_rows | pc_iso_stores }}"
+      register: pc_sandbox_iso
+
+    - name: Check the sandbox cluster token sees one ISO store, the bootstrap one
+      when: pc_sandbox_on
+      vars:
+        seen: "{{ pc_sandbox_iso.results | pc_visible_stores }}"
+      ansible.builtin.assert:
+        that: seen == [pc_sandbox_iso_storage] or ansible_check_mode
+        fail_msg: "{{ pc_sandbox_token_id }} sees the ISO stores {{ seen }}; it must see {{ pc_sandbox_iso_storage }} alone (docs/proxmox-permissions.md)."
+        success_msg: "{{ pc_sandbox_token_id }} sees the ISO stores {{ seen }}"

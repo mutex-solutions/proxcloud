@@ -58,6 +58,8 @@
           cidrPool: "{{ pc.network.cidr_pool }}"
           isolation: "{{ pc.network.isolation }}"
           blockedCidrs: "{{ pc.network.blocked_cidrs }}"
+          # Fenced both ways by the isolation rules: tenants off the sandbox workers, the workers off tenants and mgmt.
+          sandboxCidrs: "{{ [pc.sandbox.network.subnet] if pc_sandbox_on else [] }}"
           evpnController: "{{ pc.network.controller }}"
         storageProfiles: "{{ profiles }}"
         defaultStorageProfile: "{{ default_profile }}"

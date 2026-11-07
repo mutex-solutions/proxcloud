@@ -4,6 +4,42 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Sandbox cluster setup and isolation drops for its network (SB2a)
+
+**What changed**
+
+- `deploy/sandbox-cluster/` (from the earlier implementation, EE): `node-setup` DaemonSet installing runsc with the
+  systrap platform, RuntimeClass `gvisor`, the `CiliumNodeConfig` limiting socket LB to the host namespace, the Cilium
+  guardrail with a TCP 25 deny, RBAC for `proxcloud-system/proxcloud` with no Secret access, agent-sandbox v1.0.9
+  vendored with its licence, and `check-ipv4-only.sh`. node-setup refuses a host with IPv6. Left out: the NVIDIA
+  branch and device plugin (SB9), the envd init container (SB5), EE's legacy egress policy (no old sandboxes here).
+- Installer: `sandbox.*` keys; stage 10 creates pool `proxcloud-sandbox` and token `capmox@pve!sandbox` with a tenant
+  cluster token's grants (token rows only) and checks it sees one ISO store; new stage 55 creates the vnet, applies
+  an ArgoCD Application of the kamaji chart in `pc-sandbox` with no project label, checks NodeRestriction on its
+  control plane, waits for the workers and applies the manifests, stopping on IPv6; stage 60 writes
+  `network.sandboxCidrs` on the Proxmox provider. Filter `pc_sandbox_net_problem` checks the addresses.
+- `pve.ReconcileIsolation` takes the sandbox networks (`PVENetwork.SandboxCIDRs`, provider `network.sandboxCidrs`):
+  the tenant pool's DROPs to the blocked networks also name them, and two new DROPs (`FORWARD`, `IN`) stop them
+  reaching the pool, the management networks and `blockedCidrs`. An entry overlapping `cidrPool` fails the reconcile
+  before any write. A provider without the key gets exactly the old rule set.
+- The rebrand gate's previous-backend check skips `deploy/sandbox-cluster/agent-sandbox/`.
+
+**Why**
+
+- SB0 measured both directions open: tenant VMs reached the sandbox workers on every port, Cilium's VXLAN included,
+  and a worker's own namespace reached the NAS, the PVE API and the management host through the exit node's SNAT.
+  The isolation rules already sit where routed traffic passes, so naming the sandbox subnet there is the smallest fix
+  that closes both paths before SB2b's per-NIC firewall; measured on the lab, both directions now drop while the
+  worker keeps its control plane and the internet.
+- The cluster is the platform's, not a project's: no project label keeps it out of every portal sync and bill, and a
+  token minted per installation keeps its CAPMOX credential off the services token. NodeRestriction and IPv4 are
+  release gates (SB0), so stage 55 checks both instead of trusting the chart default and the vnet.
+- The vendored CRD contains the Kubernetes pod schema, which names another platform's in-tree volume plugin; the file
+  must stay byte-identical to the release for its checksum, so the gate skips that directory instead.
+
+**Diagrams updated:** `c2-containers.md` (Sandbox cluster row), `c3-components.md` (Networks and isolation row),
+`c4-code.md` (C4.1 rule set and diagram).
+
 ## 2026-11-07: proxmox-csi controller on the services cluster (K8s-CSI, PR 2 of 4)
 
 **What changed**

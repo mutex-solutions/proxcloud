@@ -153,6 +153,36 @@ def visible_stores(results):
     return out
 
 
+def sandbox_net_problem(net, cidr_pool):
+    """Why sandbox.network cannot be used, or "". The isolation rules fence the sandbox subnet off the tenant pool in
+    both directions, so the two must not overlap; every address the cluster takes must sit inside the subnet."""
+    import ipaddress
+
+    try:
+        sub = ipaddress.ip_network(str(net.get("subnet") or ""), strict=True)
+    except ValueError:
+        return "sandbox.network.subnet must be an IPv4 network such as 192.0.2.0/24, got %r" % net.get("subnet")
+    if sub.version != 4:
+        return "sandbox.network.subnet must be IPv4: the sandbox guardrail names IPv4 ranges only"
+    if cidr_pool and sub.overlaps(ipaddress.ip_network(cidr_pool, strict=False)):
+        return "sandbox.network.subnet %s overlaps network.cidr_pool %s" % (sub, cidr_pool)
+    try:
+        gw = ipaddress.ip_address(str(net.get("gateway") or ""))
+    except ValueError:
+        return "sandbox.network.gateway is required"
+    if gw not in sub:
+        return "sandbox.network.gateway %s is outside %s" % (gw, sub)
+    for key in ("nodes", "metallb"):
+        first, _, last = str(net.get(key) or "").partition("-")
+        try:
+            lo, hi = ipaddress.ip_address(first.strip()), ipaddress.ip_address((last or first).strip())
+        except ValueError:
+            return "sandbox.network.%s must be a first-last range inside %s" % (key, sub)
+        if lo not in sub or hi not in sub or lo > hi or lo <= gw <= hi:
+            return "sandbox.network.%s %s must be inside %s and leave out the gateway" % (key, net.get(key), sub)
+    return ""
+
+
 class FilterModule:
     def filters(self):
         return {
@@ -169,4 +199,5 @@ class FilterModule:
             "pc_visible_stores": visible_stores,
             "pc_ip_cidrs": ip_cidrs,
             "pc_node_with_address": node_with_address,
+            "pc_sandbox_net_problem": sandbox_net_problem,
         }

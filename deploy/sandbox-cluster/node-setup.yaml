@@ -1,0 +1,108 @@
+# Per-node runtime setup for the sandbox cluster: gVisor (runsc) with the systrap platform on every
+# node. Runs the script below in the host's namespaces (nsenter into PID 1), idempotently, then idles.
+# A config change restarts containerd once; running containers survive that (shim v2).
+#
+# Why a DaemonSet and not a node image: the cluster chart's node images (image-builder) ship a
+# containerd `gvisor` runtime handler and the conf.d import, but no runsc binary. Measured on the lab:
+# 49 s per node, and it survives a hard reset (docs/managed-sandbox.md §0.1, §0.7).
+#
+# systrap: needs no /dev/kvm inside the worker, which a nested or cloud VM may not have. Size the
+# smallest sandbox at 1 vCPU: under systrap the sentry spends the pod's own CFS quota (§0.2).
+#
+# IPv6: the guardrail (network-policy.yaml) names IPv4 ranges only, so the script refuses a node with
+# a global IPv6 address or an IPv6 default route before it installs anything: such a node never gets
+# runsc, its node-setup pod never turns Ready, and check-ipv4-only.sh fails.
+#
+# Not here yet: the init container that copies envd + sandbox-init into /opt/proxcloud-sandbox/bin
+# (the runtime image is built in SB5), and the NVIDIA toolkit + nvproxy branch for GPU nodes (SB9).
+# ponytail: setup runs once per pod start; bumping RUNSC_VERSION = edit + rollout restart.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-setup
+  namespace: sandbox-system
+data:
+  setup.sh: |
+    #!/bin/bash
+    # Runs on the HOST (nsenter -t 1). Idempotent.
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    if [ -n "$(ip -6 addr show scope global 2>/dev/null)" ] || [ -n "$(ip -6 route show default 2>/dev/null)" ]; then
+      echo "REFUSED: this node has IPv6 (global address or default route); the sandbox guardrail is IPv4 only" >&2
+      ip -6 addr show scope global >&2 || true
+      exit 1
+    fi
+    before=$(cat /etc/containerd/conf.d/*.toml /etc/containerd/runsc.toml 2>/dev/null | sha256sum || true)
+    if [ "$(dpkg-query -W -f='${Version}' runsc 2>/dev/null || true)" != "$RUNSC_VERSION" ]; then
+      curl -fsSL https://gvisor.dev/archive.key | gpg --batch --yes --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+        > /etc/apt/sources.list.d/gvisor.list
+      apt-get update -qq
+      apt-get install -y -qq --allow-downgrades "runsc=$RUNSC_VERSION"
+    fi
+    mkdir -p /etc/containerd/conf.d
+    cat > /etc/containerd/conf.d/10-gvisor.toml <<'T'
+    version = 3
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gvisor]
+      runtime_type = 'io.containerd.runsc.v1'
+    [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gvisor.options]
+      TypeUrl = "io.containerd.runsc.v1.options"
+      ConfigPath = "/etc/containerd/runsc.toml"
+    T
+    printf '[runsc_config]\n  platform = "%s"\n' "$RUNSC_PLATFORM" > /etc/containerd/runsc.toml
+    # gVisor docs: large workloads exhaust host VMAs at the default.
+    echo 'vm.max_map_count = 4194304' > /etc/sysctl.d/90-gvisor.conf
+    sysctl -q -w vm.max_map_count=4194304
+    after=$(cat /etc/containerd/conf.d/*.toml /etc/containerd/runsc.toml 2>/dev/null | sha256sum || true)
+    if [ "$before" != "$after" ]; then
+      echo "containerd config changed, restarting containerd"
+      systemctl restart containerd
+    fi
+    echo "node-setup done: runsc $(dpkg-query -W -f='${Version}' runsc), platform $RUNSC_PLATFORM"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-setup
+  namespace: sandbox-system
+spec:
+  selector:
+    matchLabels: {app: node-setup}
+  updateStrategy:
+    rollingUpdate: {maxUnavailable: 1}
+  template:
+    metadata:
+      labels: {app: node-setup}
+    spec:
+      hostPID: true
+      priorityClassName: system-node-critical
+      tolerations: [{operator: Exists}]
+      containers:
+      - name: setup
+        image: busybox:1.37
+        env:
+        - {name: RUNSC_VERSION, value: "20261102.0"}
+        - {name: RUNSC_PLATFORM, value: systrap}
+        command: [sh, -c]
+        args:
+        - |
+          set -e
+          nsenter -t 1 -m -u -i -n -p -- env RUNSC_VERSION="$RUNSC_VERSION" RUNSC_PLATFORM="$RUNSC_PLATFORM" \
+            bash -c "$(cat /setup/setup.sh)"
+          touch /tmp/ready
+          exec sleep 2147483647
+        readinessProbe:
+          exec: {command: [test, -f, /tmp/ready]}
+          periodSeconds: 5
+        securityContext: {privileged: true}
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+        volumeMounts: [{name: setup, mountPath: /setup}]
+      volumes:
+      - name: setup
+        configMap: {name: node-setup}

@@ -111,4 +111,16 @@ try:
     raise AssertionError("an address no node has must fail")
 except ValueError:
     pass
+
+# The sandbox subnet: outside the tenant pool, every cluster address inside it.
+sbx = {"subnet": "10.110.0.0/24", "gateway": "10.110.0.1", "nodes": "10.110.0.10-10.110.0.19", "metallb": "10.110.0.200-10.110.0.209"}
+assert f.sandbox_net_problem(sbx, "10.100.0.0/16") == ""
+assert "overlaps" in f.sandbox_net_problem(dict(sbx, subnet="10.100.9.0/24", gateway="10.100.9.1",
+                                                nodes="10.100.9.10-10.100.9.19", metallb="10.100.9.200-10.100.9.209"), "10.100.0.0/16")
+assert "IPv4 network" in f.sandbox_net_problem(dict(sbx, subnet=""), "10.100.0.0/16")
+assert "IPv4" in f.sandbox_net_problem(dict(sbx, subnet="fd00::/64"), "10.100.0.0/16")
+assert "outside" in f.sandbox_net_problem(dict(sbx, gateway="10.111.0.1"), "10.100.0.0/16")
+assert "nodes" in f.sandbox_net_problem(dict(sbx, nodes="10.110.0.1-10.110.0.9"), "10.100.0.0/16")  # holds the gateway
+assert "metallb" in f.sandbox_net_problem(dict(sbx, metallb="10.111.0.200-10.111.0.209"), "10.100.0.0/16")
+assert "metallb" in f.sandbox_net_problem(dict(sbx, metallb=""), "10.100.0.0/16")
 print("ok")
