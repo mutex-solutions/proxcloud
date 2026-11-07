@@ -195,6 +195,13 @@ def sandbox_net_problem(net, cidr_pool, avoid=None):
     snat = str(net.get("snat") or "").strip()
     if snat == "node":
         return ""
+    if snat == "":
+        return ("sandbox.network.snat is required and has no default (the right value is site-specific): set it to the "
+                "sandbox's own egress address so abuse reports and blocklists name the sandbox, not the nodes, the "
+                "portal or the tenants. Use an IPv4 address on the exit node's uplink network that the uplink routes to "
+                "that node and nothing else uses (stage 55 puts it on the exit node, inventory group pve, root ssh). "
+                "Or set it to 'node' to share the exit node's own address, only for a site with one public address that "
+                "accepts the nodes and the portal sharing it with tenant egress.")
     try:
         addr = ipaddress.ip_address(snat)
     except ValueError:
