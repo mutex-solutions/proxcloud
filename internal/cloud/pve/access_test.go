@@ -17,7 +17,7 @@ func TestMintClusterTokens(t *testing.T) {
 	aclErr := false
 	token := func(user string) func(http.ResponseWriter, *http.Request) {
 		return func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"data":{"full-tokenid":"%s!stc-1","value":"secret-%s"}}`, user, user)
+			fmt.Fprintf(w, `{"data":{"full-tokenid":"%s!pc-c-1","value":"secret-%s"}}`, user, user)
 		}
 	}
 	del := func(name string) func(http.ResponseWriter, *http.Request) {
@@ -27,10 +27,10 @@ func TestMintClusterTokens(t *testing.T) {
 		}
 	}
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
-		"POST /api2/json/access/users/capmox@pve/token/stc-1":   token("capmox@pve"),
-		"POST /api2/json/access/users/csi@pve/token/stc-1":      token("csi@pve"),
-		"DELETE /api2/json/access/users/capmox@pve/token/stc-1": del("capmox"),
-		"DELETE /api2/json/access/users/csi@pve/token/stc-1":    del("csi"),
+		"POST /api2/json/access/users/capmox@pve/token/pc-c-1":   token("capmox@pve"),
+		"POST /api2/json/access/users/csi@pve/token/pc-c-1":      token("csi@pve"),
+		"DELETE /api2/json/access/users/capmox@pve/token/pc-c-1": del("capmox"),
+		"DELETE /api2/json/access/users/csi@pve/token/pc-c-1":    del("csi"),
 		"PUT /api2/json/access/acl": func(w http.ResponseWriter, r *http.Request) {
 			if aclErr {
 				w.WriteHeader(http.StatusForbidden)
@@ -47,29 +47,29 @@ func TestMintClusterTokens(t *testing.T) {
 		Pool: "pc-p1", TemplatePool: "pc-templates", BootStorage: "local-zfs", CSIStorages: []string{"local-zfs", "ssd"},
 		ISOStorage: "nas", Zone: "z1", Vnet: "v1",
 	}
-	got, err := c.MintClusterTokens(context.Background(), "stc-1", sc)
+	got, err := c.MintClusterTokens(context.Background(), "pc-c-1", sc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.CAPIID != "capmox@pve!stc-1" || got.CSIID != "csi@pve!stc-1" || got.CSISecret != "secret-csi@pve" {
+	if got.CAPIID != "capmox@pve!pc-c-1" || got.CSIID != "csi@pve!pc-c-1" || got.CSISecret != "secret-csi@pve" {
 		t.Errorf("tokens = %+v", got)
 	}
 	var csi []string
 	for _, a := range acls {
-		if strings.HasSuffix(a, "csi@pve!stc-1") {
+		if strings.HasSuffix(a, "csi@pve!pc-c-1") {
 			csi = append(csi, a)
 		}
 	}
 	slices.Sort(csi)
 	want := []string{
-		"/pool/pc-p1 ProxCloudCSI csi@pve!stc-1",
-		"/storage/local-zfs ProxCloudCSI csi@pve!stc-1",
-		"/storage/ssd ProxCloudCSI csi@pve!stc-1",
+		"/pool/pc-p1 ProxCloudCSI csi@pve!pc-c-1",
+		"/storage/local-zfs ProxCloudCSI csi@pve!pc-c-1",
+		"/storage/ssd ProxCloudCSI csi@pve!pc-c-1",
 	}
 	if !slices.Equal(csi, want) {
 		t.Errorf("csi grants = %v, want %v", csi, want)
 	}
-	for _, want := range []string{"/sdn/zones/z1/v1 ProxCloudCAPI capmox@pve!stc-1", "/sdn/zones/localnetwork ProxCloudCAPI capmox@pve!stc-1"} {
+	for _, want := range []string{"/sdn/zones/z1/v1 ProxCloudCAPI capmox@pve!pc-c-1", "/sdn/zones/localnetwork ProxCloudCAPI capmox@pve!pc-c-1"} {
 		if !slices.Contains(acls, want) {
 			t.Errorf("capi grants = %v, want %s", acls, want)
 		}
@@ -78,14 +78,14 @@ func TestMintClusterTokens(t *testing.T) {
 	acls = nil
 	noCSI := sc
 	noCSI.CSIStorages = nil
-	got, err = c.MintClusterTokens(context.Background(), "stc-1", noCSI)
+	got, err = c.MintClusterTokens(context.Background(), "pc-c-1", noCSI)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.CSIID != "" || got.CSISecret != "" {
 		t.Errorf("no store offered, yet a CSI token: %+v", got)
 	}
-	if !slices.Contains(acls, "/storage/local-zfs ProxCloudCAPI capmox@pve!stc-1") {
+	if !slices.Contains(acls, "/storage/local-zfs ProxCloudCAPI capmox@pve!pc-c-1") {
 		t.Errorf("capi grants = %v", acls)
 	}
 	for _, a := range acls {
@@ -94,7 +94,7 @@ func TestMintClusterTokens(t *testing.T) {
 		}
 	}
 	aclErr = true
-	if _, err := c.MintClusterTokens(context.Background(), "stc-1", sc); err == nil {
+	if _, err := c.MintClusterTokens(context.Background(), "pc-c-1", sc); err == nil {
 		t.Fatal("a refused ACL must fail the mint")
 	}
 	if !slices.Contains(deleted, "capmox") || !slices.Contains(deleted, "csi") {
@@ -118,18 +118,18 @@ func TestIsCSIDisk(t *testing.T) {
 // A release retries after a partial revoke, and a cluster without proxmox-csi has no CSI token: a token that is gone must
 // not fail the revoke. PVE answers it with a 500.
 func TestDeleteAPITokenAbsent(t *testing.T) {
-	status, body := http.StatusInternalServerError, `{"errors":{"tokenid":"no such token 'stc-1' for user 'csi@pve'"}}`
+	status, body := http.StatusInternalServerError, `{"errors":{"tokenid":"no such token 'pc-c-1' for user 'csi@pve'"}}`
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
-		"DELETE /api2/json/access/users/csi@pve/token/stc-1": func(w http.ResponseWriter, r *http.Request) {
+		"DELETE /api2/json/access/users/csi@pve/token/pc-c-1": func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(status)
 			fmt.Fprint(w, body)
 		},
 	})
-	if err := c.DeleteAPIToken(context.Background(), "csi@pve", "stc-1"); err != nil {
+	if err := c.DeleteAPIToken(context.Background(), "csi@pve", "pc-c-1"); err != nil {
 		t.Fatalf("absent token: %v", err)
 	}
 	status, body = http.StatusForbidden, `{"message":"Permission check failed"}`
-	if err := c.DeleteAPIToken(context.Background(), "csi@pve", "stc-1"); err == nil {
+	if err := c.DeleteAPIToken(context.Background(), "csi@pve", "pc-c-1"); err == nil {
 		t.Fatal("a refusal must not count as revoked")
 	}
 }

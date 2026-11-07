@@ -329,6 +329,17 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 	return pending, errors.Join(errs...)
 }
 
+// RemoveProjectNamespace deletes the namespace of a project being torn down, which its bootstrap made whether or not it
+// ever held any clusters. finalizeNamespace leaves that one alone on purpose, since a live project keeps it. The caller has
+// seen FinalizeOrphans report nothing pending. An Application still there keeps the namespace.
+func (s *Service) RemoveProjectNamespace(ctx context.Context, projectID string) error {
+	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelProject+"="+projectID+","+LabelManagedBy+"="+ManagedByValue)
+	if err != nil || len(apps) > 0 {
+		return err
+	}
+	return s.gcNamespace(ctx, NamespaceFor(projectID))
+}
+
 // gcNamespace deletes the project namespace once it demonstrably holds no cluster remnants —
 // and only if proxcloud created it (ownership label on the namespace).
 func (s *Service) gcNamespace(ctx context.Context, ns string) error {

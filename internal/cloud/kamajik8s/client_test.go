@@ -123,7 +123,7 @@ func TestGetSecretDataAndList(t *testing.T) {
 			if r.URL.Query().Get("labelSelector") != "proxcloud.io/project=p1" {
 				t.Errorf("labelSelector = %s", r.URL.Query().Get("labelSelector"))
 			}
-			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"stc-1"}},{"metadata":{"name":"stc-2"}}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"pc-c-1"}},{"metadata":{"name":"pc-c-2"}}]}`))
 		}
 	})
 	ctx := context.Background()

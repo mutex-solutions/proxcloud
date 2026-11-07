@@ -28,7 +28,7 @@ func TestFreeAddresses(t *testing.T) {
 // The CSI config is a manifest inside a Secret inside a ClusterResourceSet: it must survive as YAML
 // and carry the provider mode that resolves a CAPMOX machine's provider id.
 func TestKamajiCSIManifest(t *testing.T) {
-	m := kamajiCSIManifest("https://192.0.2.60:8006/", "csi@pve!stc-1", `se"cret`, "r1")
+	m := kamajiCSIManifest("https://192.0.2.60:8006/", "csi@pve!pc-c-1", `se"cret`, "r1")
 	for _, want := range []string{"kind: Namespace", "name: proxmox-csi-plugin", "namespace: csi-proxmox", "config.yaml: "} {
 		if !strings.Contains(m, want) {
 			t.Errorf("manifest lacks %q:\n%s", want, m)
@@ -57,7 +57,7 @@ func TestKamajiCSIManifest(t *testing.T) {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 	c := cfg.Clusters[0]
-	if c.URL != "https://192.0.2.60:8006/api2/json" || c.TokenID != "csi@pve!stc-1" || c.TokenSecret != `se"cret` || c.Region != "r1" {
+	if c.URL != "https://192.0.2.60:8006/api2/json" || c.TokenID != "csi@pve!pc-c-1" || c.TokenSecret != `se"cret` || c.Region != "r1" {
 		t.Errorf("cluster = %+v", c)
 	}
 }

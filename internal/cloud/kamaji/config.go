@@ -14,7 +14,7 @@ import (
 
 // Namespace / naming derivations — the ONE place these are derived (ceph RGWUIDFor precedent).
 // Customer-typed names are display-only; every k8s-side identifier is the generated cluster id
-// (`stc-<8 hex>`), so duplicate display names, unicode and the RFC1123/63-char limit are
+// (`pc-c-<8 hex>`, or an older prefix on an older cluster), so duplicate display names, unicode and the RFC1123/63-char limit are
 // non-issues, and the API endpoint/DNS never changes on rename.
 
 // NamespaceFor is the management-cluster namespace holding a project's clusters.
@@ -227,7 +227,7 @@ type StorageClass struct {
 // full generated values live on the Application (spec.source.helm.valuesObject); this struct
 // is what the client API accepts and what actions mutate.
 type ClusterSpec struct {
-	ID          string // generated stc-<8hex>; Application/release/Cluster/TCP name
+	ID          string // generated pc-c-<8hex>; Application/release/Cluster/TCP name
 	DisplayName string // customer-typed, display-only
 	ProjectID   string
 	Version     string // k8s version, must be a key of Defaults.Versions
