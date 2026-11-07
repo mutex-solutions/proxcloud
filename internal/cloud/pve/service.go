@@ -18,6 +18,8 @@ type Service struct {
 	C          *Client
 	ServiceID  string
 	PoolPrefix string
+	// HolderLock serialises holder use per project across API replicas (ShedLock.Wait). Nil = no lock: tools and tests.
+	HolderLock func(ctx context.Context, name string, atMostFor, wait time.Duration) (release func(), acquired bool, err error)
 }
 
 // NewService builds the Service for one provider doc.

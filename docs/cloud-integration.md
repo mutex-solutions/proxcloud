@@ -703,7 +703,13 @@ node), never started, tagged `pc-holder`, in the project pool, created on demand
 - PVE reassigns a disk only within a node. A local disk therefore only attaches to a server on its node. A disk on
   shared storage (`Shared` in the detected capabilities: RBD, NFS) attaches anywhere: `carryToNode` moves it onto a new
   holder, migrates that holder offline (nothing to copy) and reassigns on the target's node. If a step fails the disk
-  stays on that holder as an ordinary detached volume.
+  stays on that holder as an ordinary detached volume. A node where the storage is disabled, restricted away or down is
+  no target: it is left out of `LIST_ATTACH_TARGETS` and an attach answers 409.
+- That holder is a carrier, tagged `pc-carrier` as well as `pc-holder`. No other operation may put a disk on it. It goes
+  once its disk has left, and it stays behind empty when a move may still be running: its delete would take a disk that
+  arrives after the check. An empty carrier costs a vmid and no money. Project teardown removes it.
+- Create detached, keep on server delete, attach and delete volume run under a per-project lock (PostgreSQL, so it holds
+  across API replicas). A caller that waits a minute gets 409.
 
 ## Shared block on a TrueNAS LUN
 

@@ -255,7 +255,19 @@ func (p *VolumeSyncProvider) Superseded(cached, fresh *cloud.CloudResource) bool
 // List derives VOLUME rows from every pool VM's disk entries. There is no
 // standalone volume in the PVE model — a disk belongs to a VM; a detached disk is
 // its VM's unusedN entry (still billed). ExternalID = volid (cluster-unique).
+// Reconcile archives what this leaves out, so a VM that cannot be read fails the pass. Only a holder that is gone is
+// skipped: /cluster/resources still lists one just dropped, and every cross-node attach drops one.
 func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, error) {
+	return p.list(ctx, func(vm ClusterResource, err error) bool { return isHolder(vm.Tags) && IsNotFound(err) })
+}
+
+// ListReadable lists the rows of every VM that can be read. It is for callers that only add and update rows, where a
+// VM just deleted or a node that is down must not hold up the rest of the project.
+func (p *VolumeSyncProvider) ListReadable(ctx context.Context) ([]cloud.CloudResource, error) {
+	return p.list(ctx, func(ClusterResource, error) bool { return true })
+}
+
+func (p *VolumeSyncProvider) list(ctx context.Context, skip func(ClusterResource, error) bool) ([]cloud.CloudResource, error) {
 	vms, err := p.svc.diskVMs(ctx, p.projectID)
 	if err != nil {
 		return nil, err
@@ -265,8 +277,9 @@ func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 	for _, r := range vms {
 		cfg, err := p.svc.C.GetVMConfig(ctx, r.Node, r.VMID)
 		if err != nil {
-			// A vanished/locked VM must not wipe the whole project's volume cache —
-			// fail the sync pass; Reconcile skips this round.
+			if skip(r, err) {
+				continue
+			}
 			return nil, err
 		}
 		profile := TagValue(cfg.Str("tags"), tagProfilePref)
