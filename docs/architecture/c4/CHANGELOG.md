@@ -121,6 +121,31 @@ and rules: [README.md](README.md#maintenance-rule).
 - Billing unconfigured leaves every profile `NEW`, so the hold refused or disabled every move on a portal that bills nothing.
 - Buckets and volumes were not in the check, so a tenant could park storage on a `NEW` profile, `DISABLED` and unrated, with its S3
   keys still working against the store.
+## 2026-11-07: Cluster ids take a neutral prefix
+
+**What changed**
+
+- New Managed Kubernetes clusters get ids of the form `pc-c-<8hex>`. Existing clusters keep the id they have.
+
+**Why**
+
+- The earlier prefix came from the old brand. An id names every object of a cluster (Application, release, CAPI Cluster,
+  TenantControlPlane, secrets, PVE tokens, share dataset, DNS), so it cannot change on a live cluster, and nothing read the
+  prefix, so both forms can live side by side.
+
+**Diagrams updated:** none; no container or relationship changed.
+
+## 2026-11-07: Project teardown removes its services-cluster namespaces
+
+**What changed**
+
+- Teardown deletes the project's `pc-<id>` and `pc-db-<id>` namespaces once nothing is pending and no Application of the
+  project is left, also when the project never had a cluster or a database.
+
+**Why**
+
+- Bootstrap makes both namespaces up front, and the orphan sweep only collects one on a pass that reaped something, so a
+  project that never used them left two empty namespaces behind for good.
 
 **Diagrams updated:** none; no container or relationship changed.
 

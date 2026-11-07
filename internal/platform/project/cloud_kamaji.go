@@ -28,11 +28,12 @@ import (
 
 // newClusterID mints the platform identifier every k8s-side object is named by (Application,
 // helm release, CAPI Cluster, TCP, DNS). Customer names are display-only (plan §9) — this id is
-// what keeps duplicate names, unicode input and the RFC1123/63-char limit out of the system.
+// what keeps duplicate names, unicode input and the RFC1123/63-char limit out of the system. The prefix is for a person
+// reading a listing: clusters made earlier keep another one, so nothing may read a cluster from its id's shape.
 func newClusterID() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
-	return "stc-" + hex.EncodeToString(b)
+	return "pc-c-" + hex.EncodeToString(b)
 }
 
 // kamajiCreate handles the KUBERNETES_CLUSTER leg of cloudCreate for a kamaji provider.
