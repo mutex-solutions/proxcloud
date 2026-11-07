@@ -984,6 +984,7 @@ func (h *Handler) pveRefreshServerRow(ctx context.Context, ps *pve.Service, proj
 	}
 	cr.Data = pve.ServerData(*vm, ps.ServerAddresses(ctx, *vm), nil)
 	ps.StampProtection(ctx, *vm, cr.Data)
+	ps.StampSnapshots(ctx, *vm, cr.Data)
 	if saved, err := h.cloud.Insert(ctx, cr); err == nil {
 		*cr = *saved
 	}

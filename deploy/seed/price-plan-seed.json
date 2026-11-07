@@ -329,6 +329,25 @@
       "modifiers": []
     },
     {
+      "name": "Server snapshots (per provisioned GB, placeholder)",
+      "timeUnit": "hour",
+      "resourceType": "server_snapshot",
+      "pricePlanId": "<PLAN_ID>",
+      "applyMethod": "ADD_TO_TOTAL",
+      "prices": [
+        {
+          "attributeName": "size_gb",
+          "tiers": [
+            {
+              "value": "0.000034"
+            }
+          ]
+        }
+      ],
+      "filters": [],
+      "modifiers": []
+    },
+    {
       "name": "Server protection (per replicated GB)",
       "timeUnit": "hour",
       "resourceType": "server_protection",

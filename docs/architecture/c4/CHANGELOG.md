@@ -4,6 +4,22 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Server snapshots billed (MET-G9)
+
+**What changed**
+
+- The full sync and portal actions stamp `server.snapshots {items, diskGb}` on the SERVER row; the minute sampler
+  carries it. `ServerProvider` turns each snapshot into a `server_snapshot` billing resource with the snapshot's own
+  start time, priced by a new seed rule. `stampResourceValues` keeps a start time a provider set.
+
+**Why**
+
+- Snapshots hold space on the operator's storage and were free. Proxmox reports no per-snapshot usage on any backend
+  (a volume's `used` excludes its snapshots), so the metered size is the provisioned disks: an upper-bound proxy with a
+  placeholder rate, until a node-side read justifies real usage. One line per snapshot because a bill item's first
+  watermark is the resource's start: a single line per server would back-charge a new snapshot to the server's creation.
+
+**Diagrams updated:** none (the metering flow is unchanged, one more billing resource on the SERVER row).
 ## 2026-11-07: Split mode keeps the portal's SDN rights
 
 **What changed**
