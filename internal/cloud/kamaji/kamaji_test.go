@@ -696,6 +696,49 @@ func TestClusterLifeWithEitherIDShape(t *testing.T) {
 	}
 }
 
+// A project that never had a cluster leaves no namespace behind; finalizeNamespace alone would keep it for good.
+func TestRemoveProjectNamespace(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeAPI()
+	svc := NewWithAPI(api, testCfg(), "svc-1")
+	if err := svc.EnsureProjectNamespace(ctx, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := svc.FinalizeOrphans(ctx, "p1"); err != nil || pending != 0 {
+		t.Fatalf("%d %v", pending, err)
+	}
+	if _, ok := api.namespaces["pc-p1"]; !ok {
+		t.Fatal("the sweep must keep an idle project's namespace")
+	}
+	if err := svc.RemoveProjectNamespace(ctx, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.namespaces["pc-p1"]; ok {
+		t.Fatal("teardown removes it")
+	}
+	if err := svc.RemoveProjectNamespace(ctx, "p1"); err != nil {
+		t.Fatalf("a namespace already gone: %v", err)
+	}
+
+	// Not ours, or still in use: it stays.
+	api.namespaces["pc-p2"] = map[string]string{}
+	if err := svc.RemoveProjectNamespace(ctx, "p2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.namespaces["pc-p2"]; !ok {
+		t.Fatal("a namespace without our label stays")
+	}
+	if _, err := svc.CreateCluster(ctx, testSpec(), ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RemoveProjectNamespace(ctx, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.namespaces["pc-p1"]; !ok {
+		t.Fatal("an Application still there keeps the namespace")
+	}
+}
+
 func TestFinalizeOrphans(t *testing.T) {
 	api := newFakeAPI()
 	svc := NewWithAPI(api, testCfg(), "svc-1")

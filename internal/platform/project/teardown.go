@@ -210,6 +210,11 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		if ferr != nil {
 			slog.Warn("teardown: kamaji orphan finalize", "project", p.ID, "serviceId", svcID, "pending", pending, "err", ferr)
 			kamajiPending++
+		} else if pending == 0 {
+			if nerr := ks.RemoveProjectNamespace(ctx, p.ID); nerr != nil {
+				slog.Warn("teardown: kamaji namespace", "project", p.ID, "serviceId", svcID, "err", nerr)
+				kamajiPending++
+			}
 		}
 	}
 	// Same finalize + pending signal for dbaas: while a database's delete cascade is in flight,
@@ -229,6 +234,11 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		if ferr != nil {
 			slog.Warn("teardown: dbaas orphan finalize", "project", p.ID, "serviceId", svcID, "pending", pending, "err", ferr)
 			dbaasPending++
+		} else if pending == 0 {
+			if nerr := ds.RemoveProjectNamespace(ctx, p.ID); nerr != nil {
+				slog.Warn("teardown: dbaas namespace", "project", p.ID, "serviceId", svcID, "err", nerr)
+				dbaasPending++
+			}
 		}
 	}
 
