@@ -62,7 +62,7 @@ type SandboxFirewall struct {
 	ProxyAddress string
 	ProxyPort    int
 	EntryFrom    string
-	// The sandbox registry (docs/managed-sandbox.md §5): the one address and port outside the subnet the workers'
+	// The sandbox registry (docs/managed-sandbox.md §6): the one address and port outside the subnet the workers'
 	// containerd pulls templates and runtime images from (a MetalLB address on the services cluster). Unset: none.
 	RegistryAddress string
 	RegistryPort    int

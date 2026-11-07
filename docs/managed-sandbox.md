@@ -14,10 +14,12 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 > sandboxes on a suspension and on project deletion, and lets an operator create a sandbox provider, which goes live
 > only while its three release gates hold. SB4 (section 4) publishes sandbox ports at
 > `https://<port>-<id>.<domain>`: a platform HAProxy appliance passes TCP 443 to `sandbox-proxy`, where TLS ends with
-> a wildcard certificate issued on the services cluster. SB6a (section 5) adds the sandbox registry: Zot on the
-> services cluster with its blobs in the object store, one pull account per project, the built-in images copied in by
-> digest and pre-pulled on every node. Not yet: the E2B-compatible API and keys (SB5), custom template builds (SB6b),
-> snapshots and pause (SB7, so the wake endpoint has nothing to resume yet), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
+> a wildcard certificate issued on the services cluster. SB5 (section 5) adds the E2B-compatible API at `/e2b` with
+> project-scoped sandbox API keys, envd in every sandbox and the built-in templates `base` and `code-interpreter-v1`;
+> what of E2B does not work is in [e2b-compat.md](e2b-compat.md). SB6a (section 6) adds the sandbox registry: Zot on
+> the services cluster with its blobs in the object store, one pull account per project, the built-in images copied in
+> by digest and pre-pulled on every node. Not yet: custom template builds (SB6b), snapshots and pause (SB7, so the wake
+> endpoint has nothing to resume yet), MCP gateway (SB8), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
 > and decisions: the sandbox plan (owner document, not in this repository).
 
 ## 0. SB0 lab spike (2026-11-07)
@@ -371,7 +373,7 @@ hash><content hash>`, which is the VM's only rule. Every rule in it ACCEPTs:
 | out, in | UDP 8472 (Cilium VXLAN), TCP 4240 and ICMP (Cilium health), TCP and UDP 7946 (MetalLB), TCP 10250 | the other sandbox workers (IP set `<group>-n`) |
 | in | TCP 10250 | `sandbox.kubeletSources` (the services cluster's nodes) |
 | in | TCP 443 (`config.sandbox.proxy.port`) | the entry appliance's vnet address only, to `sandbox-proxy`'s MetalLB address (`config.sandbox.proxy`, SB4) |
-| out | TCP 443 (`config.sandbox.registry.port`) | the sandbox registry's address only (`config.sandbox.registry`, SB6a, §5.4) |
+| out | TCP 443 (`config.sandbox.registry.port`) | the sandbox registry's address only (`config.sandbox.registry`, SB6a, §6.4) |
 | out | anything | IP set `<group>-o`: `0.0.0.0/1` and `128.0.0.0/1` minus the private, CGNAT, link-local, multicast and reserved ranges, the management networks, every address a PVE node holds on any interface (uplinks, bonds and VLANs too), the sandbox's own SNAT address, `blockedCidrs`, the tenant pool, the sandbox subnet itself (its gateway is a PVE node) and the control plane address |
 
 Nothing else comes in: there is no rule for a tenant, for the services cluster beyond the kubelet, or for anyone on the
@@ -912,11 +914,108 @@ manifest passed `kubectl apply --dry-run=server`. MetalLB's speaker ran on the t
 values predate `speakerTolerations`), which is why stage 55 now sets it. The node group and the probes were removed
 afterwards. Not repeated end to end: the full entry path with the proxy on a system node, and wake (now off).
 
-## 5. The sandbox registry (SB6a)
+## 5. The E2B-compatible API (SB5)
 
-The sandbox nodes pull templates and runtime images from a registry of the platform's own, not from ghcr or Docker
+The stock E2B SDKs (`e2b`, `e2b-code-interpreter`) work against a sandbox provider that runs envd under a sandbox
+domain. Feature by feature, what works, what differs and what does not: [e2b-compat.md](e2b-compat.md).
+
+```
+SDK ──REST, X-API-Key──► proxcloud-api /e2b/*  (E2B_API_URL=https://<api host>/e2b)
+ │                          └── same gate, quota and create as the native API ──► Sandbox CR on the sandbox cluster
+ └──HTTPS──► https://<port>-<id>.<domain> ──► entry appliance ──► sandbox-proxy (section 4) ──► pod:49983 (envd)
+```
+
+### 5.1 Keys
+
+A sandbox API key is `e2b_` and 40 hex digits. It belongs to one project and acts as the member who created it; every
+call checks again that this member may manage cloud resources in the project, so removing the member stops the key.
+Only its SHA-256 is stored (table `sandbox_api_keys`, the hash is the id): a database read never yields a usable key.
+The client console's Sandboxes > API keys tab, or `GET`/`POST`/`DELETE /api/v1/project/{id}/sandbox-api-keys[/{keyId}]`,
+lists (name, hint, created, last used), mints (the key is shown once) and revokes keys; a revoked key answers 401 at
+once. A PAT (`pk.sk`) is not accepted here: it reaches every project of its user (D8).
+
+### 5.2 One door more, the same checks
+
+`/e2b/*` is public in `pkg/auth`; its own gate resolves the key. Create, `POST .../timeout`, and `refreshes` or
+`connect` that move the end later call the native `sandboxUsageGate` (a deleting or DISABLED project 409, a suspended
+billing profile 403, a DISABLED provider or a release gate that does not hold 503) and the create carries the project
+quota (429), then creates the sandbox and its row the native API does, so billing, suspension, teardown and the
+cross-project checks are the same. List, get, logs and kill stay open, as on the native API. A create returns once the
+sandbox is ready (envd up, the template's ready command passed), at most 50 s, and records the start on the row then,
+so a sandbox only the E2B API ever touched is billed from that moment. `test/integration/sandbox_e2b_test.go` covers
+each gate on each of these routes, and fails with the gate calls taken out.
+
+### 5.3 envd in the sandbox
+
+With `config.sandbox.envd: true` and a `domain` (the admin form's "Sandbox domain" and "Run envd";
+installer stage 60 sets both when `sandbox.domain` is set), every sandbox mounts `/opt/proxcloud-sandbox/bin` from its node read-only at `/.proxcloud`
+and runs `/.proxcloud/sandbox-init` as PID 1: it creates the template's user if the image has none, starts envd
+(`-isnotfc`, port 49983), posts envd's `/init` over localhost with the sandbox's env, user, workdir and access token,
+runs the template's start command (as root with `startAsRoot`), marks the pod ready once the ready command exits 0,
+restarts envd if it dies, and relays ports bound to localhost to the pod address. A restarted envd has no access token
+until its `/init`, and envd without a token lets every request through, so sandbox-init first drops the ready marker
+(the readiness probe turns the pod NotReady and sandbox-proxy routes only to Ready pods), waits 5 s (probe period plus
+the proxy's 2 s lookup cache), starts envd, and puts the marker back only once `/init` succeeded. The two binaries come
+from `proxcloud-sandbox-runtime` (`deploy/sandbox-runtime.Dockerfile`: envd built unmodified from e2b-dev/infra
+`e85b9f5`, Apache-2.0, notice in the image), which `node-setup`'s init container copies to every node (stage 55 pins its
+tag, and leaves the init container out on a site without a sandbox domain).
+
+### 5.4 Built-in templates
+
+Until custom template builds (SB6b) the provider offers only the templates of its `config.sandbox.templates`. The E2B
+SDKs ask for `base` (`Sandbox.create()`) and `code-interpreter-v1` (`e2b_code_interpreter.Sandbox.create()`).
+`deploy/templates/build.sh` builds both with the other built-in templates (`PUSH=1 REGISTRY=ghcr.io/mutex-solutions
+TAG=<tag>`, prints each reference with its digest); the `sandbox-templates` workflow runs it and pins the digests in
+`deploy/templates/images.yaml`, from where a site with a sandbox registry gets them as `pin:<name>` (section 6.3):
+
+| Template | Image | Config |
+|---|---|---|
+| `base` | `sandbox-base`: E2B's base image plus user `user` with passwordless sudo | `"user": "user", "workdir": "/home/user"`, 1-2 vCPU / 1 GiB |
+| `code-interpreter-v1` | `sandbox-code-interpreter`: Jupyter and E2B's code-interpreter server on :49999 (Python, JavaScript, Bash kernels) | `"startCmd": "/root/.jupyter/start-up.sh", "startAsRoot": true, "readyCmd": "curl -fsS localhost:49999/health", "user": "user", "workdir": "/home/user"`, 2 vCPU / 2 GiB |
+
+The code interpreter's start counts towards the create's 50 s: at 1 vCPU on the nested lab it took 37-40 s on an idle
+node and missed the limit when its node was busy, so offer it at 2 vCPU.
+
+### 5.5 Measured on the lab (2026-11-08)
+
+A compose stack on this branch (`pc-sb5`, scheduler off, jobs by trigger) with its own Proxmox provider (pool prefix
+`pc5-`, the SB0 workers' pool, `config.sandbox.proxy` naming its entry), a sandbox provider with envd under a lab
+domain, two tenants with a key each, the SDKs on the workstation. The SB0 cluster (two workers, 2 vCPU / 3 GiB each)
+got the runtime installed by the runtime image run as node-setup's init container would, the template and proxy images
+loaded into each node's containerd (the workers reach no lab registry), a `sandbox-proxy` with a lab CA's wildcard
+certificate and an entry appliance VM shaped as stage 56 builds it in a scratch pool; the stack's sync fenced the
+workers with the entry rule and pushed the appliance's HAProxy config. Lab deviations: no `sandbox-system` node group
+on SB0, so the proxy ran on a worker; the client reached the appliance through a lab host forward.
+
+- Release check: all three gates held; provider set `PUBLIC`.
+- `tests/e2b-compat/compat.py` with the stock `e2b` 2.63.0 and `e2b-code-interpreter` 2.11.9: all checks pass. Create of
+  `base` in about 9 s; commands as `user` in `/home/user` with `envVars`, streamed output, exit code, background process
+  listed and killed; `python3` run; files written, read, listed, binary round trip; a port served at
+  `https://8000-<id>.<domain>` through the appliance and the proxy; `set_timeout`, `get_info` with metadata, list by
+  metadata, `connect` from a second client; `allow_internet_access=False` blocks egress, the default reaches the
+  internet, 169.254.169.254 stays unreachable; kill, and the port answers 502 afterwards. Code interpreter: create in 37 s,
+  `run_code` result `42`, stdout and stderr, `ZeroDivisionError`.
+- Other project's key: `connect` 404, list empty, kill refused (the sandbox kept running). Revoked key: 401 on list and
+  create at once, the other project's key unaffected; no key or a PAT: 401.
+- Provider `DISABLED`: E2B create 503, list 200; back to `PUBLIC`.
+- Client console (headless browser): API keys tab, key shown once, listed by hint only, works (200), revoked (401).
+  Admin console: the provider's "Sandbox domain" field and "Run envd" switch.
+- MCP client toolset as the tenant: `create_sandbox`, `list_sandboxes` (RUNNING), `exec_in_sandbox` (`42`,
+  `4.19.0-gvisor`), `get_sandbox_logs`, `set_sandbox_timeout`, `delete_sandbox`. On the compose stack the admin and client
+  realms are one, so the check ran with the admin issuer moved off it for the run.
+- The keys table holds hashes, names and hints only. Ended E2B sandboxes are archived with their start.
+- Found: another drill fencing the same pool with a different provider config rolled the workers to its generation
+  while this ran; the fence gate then failed (503 on create) until this stack's sync ran again. Two portals must not
+  fence one sandbox pool.
+
+## 6. The sandbox registry (SB6a)
+
+The sandbox nodes pull templates and `sandbox-proxy` from a registry of the platform's own, not from ghcr or Docker
 Hub, and each project pulls with an account that reads its own images and the built-in ones only (decision D3). EE
-shared one pull account across all tenants, which a node escape could use to read every tenant's templates.
+shared one pull account across all tenants, which a node escape could use to read every tenant's templates. The one
+exception is SB5's runtime image (`proxcloud-sandbox-runtime`, envd and `sandbox-init` for `node-setup`): stage 55
+(cluster) applies it before the registry exists, so it still comes from `images.registry` (or
+`sandbox.runtime_image`).
 
 ```
 CI (sandbox-templates) ──push──► ghcr.io/mutex-solutions/sandbox-*   digest ──PR──► deploy/templates/images.yaml
@@ -925,7 +1024,7 @@ installer stage 55 (registry) ──skopeo copy, same digest──► Zot  <addr
 sandbox node containerd ──TLS (registry CA), project account──┘   prepull DaemonSet: every image on every node
 ```
 
-### 5.1 What runs where
+### 6.1 What runs where
 
 - **Zot** (`ghcr.io/project-zot/zot-minimal-linux-amd64:v2.1.22`, digest-pinned in `versions.yml`) on the services
   cluster, namespace `sandbox.registry.namespace` (default `proxcloud-sandbox-registry`), one replica (upload sessions
@@ -955,7 +1054,7 @@ sandbox node containerd ──TLS (registry CA), project account──┘   prep
   `sandbox-registry-users-pull-secrets-only` in the same file allows this identity only `kubernetes.io/dockerconfigjson`
   Secrets named `sandbox-template-pull` in `sb-*` and `sandbox-registry-nodes` in `sandbox-system`.
 
-### 5.2 Accounts
+### 6.2 Accounts
 
 | Account | Reads | Writes | Where it lives |
 |---|---|---|---|
@@ -974,7 +1073,7 @@ for an image a prepull pod already put on the node, so a pod without them is ref
 longer copies a shared `sandbox-system/sandbox-template-pull` into every project namespace; the sync writes the
 project's own one (the portal's account cannot read Secrets on that cluster at all).
 
-### 5.3 Built-in images and adoption
+### 6.3 Built-in images and adoption
 
 `deploy/templates/` holds the built-in templates (EE's, without `mcp-gateway`, which is SB8; the desktop image drops
 Google Chrome and VS Code, which its comment already said may not be redistributed). The `sandbox-templates` workflow
@@ -996,7 +1095,7 @@ digest-pinned in the same repository to the digest the prepull pods run, once ev
 pulled it, and records an audit event. The write lands only while the template still holds the image it read
 (`SetTemplateImage`), so an operator's edit in between wins. Rollback: revert the pin and upgrade again.
 
-### 5.4 Network
+### 6.4 Network
 
 The nodes reach the registry's address directly: it is on the services network (a MetalLB address), routed by the
 sandbox vnet's gateway like the control plane's. Layer 1 drops it like every private address, so the Proxmox
@@ -1006,7 +1105,7 @@ of it opens. The guardrail (layer 2) is not involved: pulls come from containerd
 pods stay denied every private range, the registry included. The nodes never reach the mgmt registry or the services
 cluster's chart registry.
 
-### 5.5 Installer
+### 6.5 Installer
 
 `sandbox.registry.address` empty (default): no registry, nothing changes. Set: stage `55-sandbox-registry.yml` runs
 after the cluster stage and before stage 56; `make upgrade` runs it too. It needs the object store of stage 45 (or the
@@ -1016,7 +1115,7 @@ stage reports how many nodes have pulled, and a re-run checks again. An existing
 list (stage 60 registers it once): set `Template registry` (`<address>/t`), `Built-in image updates` and the images
 (the `library/` copies) in the console.
 
-### 5.6 Measured on the lab (2026-11-07)
+### 6.6 Measured on the lab (2026-11-07)
 
 Stage 55 (registry) of the branch ran against the lab from a scratch site: the services cluster, the SB0 sandbox
 cluster as the stage's cluster, namespace `sb6a-registry`, one MetalLB address, the account sync limited to

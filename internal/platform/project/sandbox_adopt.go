@@ -10,7 +10,7 @@ import (
 
 // AdoptSandboxImages moves built-in templates to the image digest the prepull DaemonSet runs, once every node has
 // pulled it (sandbox.Adoptions). The installer mirrors a new digest into the sandbox registry and bumps the DaemonSet;
-// this job follows, so a new image never reaches a sandbox before it is on every node (docs/managed-sandbox.md §5).
+// this job follows, so a new image never reaches a sandbox before it is on every node (docs/managed-sandbox.md §6).
 // Off unless a sandbox provider sets imageAdoption ("dry-run" logs only).
 func (h *Handler) AdoptSandboxImages(ctx context.Context) {
 	if h.sandboxFor == nil || h.esSvc == nil {

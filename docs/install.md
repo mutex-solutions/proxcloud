@@ -195,8 +195,8 @@ have only been syntax-checked.
 
 ## Sandbox registry (stage 55)
 
-The sandbox nodes pull templates and runtime images from the platform's own registry, each project with an account
-that reads its own images and the built-in ones only ([managed-sandbox.md §5](managed-sandbox.md#5-the-sandbox-registry-sb6a)).
+The sandbox nodes pull templates and `sandbox-proxy` from the platform's own registry (the envd runtime image still from `images.registry`), each project with an account
+that reads its own images and the built-in ones only ([managed-sandbox.md §6](managed-sandbox.md#6-the-sandbox-registry-sb6a)).
 
 1. `sandbox.registry.address`: one address of `services.network.metallb`, unused. The stage refuses an address
    outside that range.
@@ -230,7 +230,7 @@ and the templates' images (the `library/` copies) in the console.
 
 **What ran where:** stage 55 (registry) ran on the lab against the SB0 cluster from a scratch site, with RustFS and
 then RGW as the backend; stage 60's new keys and the release proxy copy did not run there
-([managed-sandbox.md §5.6](managed-sandbox.md#56-measured-on-the-lab-2026-11-07)).
+([managed-sandbox.md §6.6](managed-sandbox.md#66-measured-on-the-lab-2026-11-07)).
 
 ## Sandbox ports (stage 56)
 

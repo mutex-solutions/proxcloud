@@ -173,7 +173,7 @@ func certSync(ctx context.Context, log *slog.Logger) error {
 	}
 }
 
-// registryUsers runs next to the sandbox registry (Zot) on the services cluster (docs/managed-sandbox.md §5):
+// registryUsers runs next to the sandbox registry (Zot) on the services cluster (docs/managed-sandbox.md §6):
 // ZOT_BASE (Zot's config without auth and access rules), ZOT_DIR (where it writes config.json and htpasswd for Zot),
 // REGISTRY_HOST (the registry as the nodes pull from it), REGISTRY_USERS_DIR (files admin, push, pull-nodes and key),
 // TARGET_KUBECONFIG (the sandbox cluster: list namespaces, read and write the pull Secrets), SYSTEM_NAMESPACE (default

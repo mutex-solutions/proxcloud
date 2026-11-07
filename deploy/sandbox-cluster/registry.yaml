@@ -1,4 +1,4 @@
-# The sandbox registry's side of the sandbox cluster (docs/managed-sandbox.md §5). The registry itself (Zot) runs on the
+# The sandbox registry's side of the sandbox cluster (docs/managed-sandbox.md §6). The registry itself (Zot) runs on the
 # services cluster; installer stage 55 creates the ConfigMap sandbox-system/sandbox-registry (host = the registry's
 # address as image references name it, ca.crt = the CA of its certificate) before it applies this.
 #

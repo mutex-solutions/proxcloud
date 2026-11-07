@@ -9,7 +9,7 @@ pc_versions:
   # Chart + image tag of ProxCloud itself, with images.build=false. It must be a published release.
   proxcloud: v0.3.28
   rustfs: 1.0.4
-  # The sandbox registry (stage 55, docs/managed-sandbox.md §5): Zot, minimal build (no extensions), and the pause
+  # The sandbox registry (stage 55, docs/managed-sandbox.md §6): Zot, minimal build (no extensions), and the pause
   # image the template prepull DaemonSet idles in.
   zot_image: ghcr.io/project-zot/zot-minimal-linux-amd64:v2.1.22@sha256:27729292c45f1dc0a323b69292d15cc13a5ca4b8bf05f81106e7f89a2b1abd08
   pause_image: registry.k8s.io/pause:3.10@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a

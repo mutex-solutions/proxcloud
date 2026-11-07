@@ -1,7 +1,7 @@
 # Builds the built-in sandbox template images (deploy/templates) and pushes them to ghcr.io/mutex-solutions/sandbox-*.
 # On main it then opens a pull request that pins the new digests in deploy/templates/images.yaml; once merged, the
 # installer mirrors them into each site's sandbox registry and the portal moves the templates over once every node
-# pre-pulled them (docs/managed-sandbox.md §5). A pull request only proves the images build.
+# pre-pulled them (docs/managed-sandbox.md §6). A pull request only proves the images build.
 name: sandbox-templates
 
 on:
@@ -110,4 +110,4 @@ jobs:
           git commit -m "chore(sandbox): pin sandbox template images ${GITHUB_SHA::7}" -- deploy/templates/images.yaml
           git push origin "$b"
           gh pr create --base main --head "$b" --title "chore(sandbox): pin sandbox template images ${GITHUB_SHA::7}" \
-            --body "Digests built by run ${GITHUB_RUN_ID} from ${GITHUB_SHA}. Merging lets the installer mirror them into the sandbox registry (docs/managed-sandbox.md §5)."
+            --body "Digests built by run ${GITHUB_RUN_ID} from ${GITHUB_SHA}. Merging lets the installer mirror them into the sandbox registry (docs/managed-sandbox.md §6)."

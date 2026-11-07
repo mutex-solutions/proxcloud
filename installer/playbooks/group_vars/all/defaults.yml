@@ -148,6 +148,7 @@ pc_defaults:
     enabled: false
     pool: proxcloud-sandbox
     token: sandbox               # capmox@pve!<token>, the cluster's CAPMOX credential; secret in generated/token-<token>
+    runtime_image: ""            # envd + sandbox-init for node-setup; default <images.registry>/proxcloud-sandbox-runtime:<release>
     storage: ""                  # boot disks; default: services.storage
     iso_storage: ""              # bootstrap ISOs, node-local only; default: services.iso_storage
     network:
@@ -199,9 +200,9 @@ pc_defaults:
       disk: 10
       address: ""                # its address on the sandbox vnet, outside the gateway, network.nodes and network.metallb
       public: {bridge: "", vlan: 0, address: "", gateway: ""}  # address as CIDR; the record and the internet side
-    # The sandbox registry (stage 55, docs/managed-sandbox.md §5): Zot on the services cluster, its blobs in a bucket
-    # of the object store (RustFS on Standard, RGW on Full). The sandbox nodes pull the built-in templates and the
-    # runtime images from it, each project with an account of its own. Empty address: no registry, the nodes pull
+    # The sandbox registry (stage 55, docs/managed-sandbox.md §6): Zot on the services cluster, its blobs in a bucket
+    # of the object store (RustFS on Standard, RGW on Full). The sandbox nodes pull the built-in templates and
+    # sandbox-proxy from it, each project with an account of its own (the envd runtime image: runtime_image above). Empty address: no registry, the nodes pull
     # from the images' own registries.
     registry:
       address: ""                # a MetalLB address inside services.network.metallb, e.g. 192.0.2.226
@@ -211,7 +212,9 @@ pc_defaults:
     # The sandbox provider stage 60 registers (first run only; the console owns it afterwards). Templates are the only
     # images offered; a site's templates replace this list instead of merging into it. "pin:<name>" is an image of
     # deploy/templates/images.yaml (the registry's copy, or the pinned source without a registry). limits empty = the
-    # portal's defaults (internal/cloud/sandbox/config.go).
+    # portal's defaults (internal/cloud/sandbox/config.go). With a domain the provider runs envd and offers the E2B API;
+    # the E2B SDKs start `base` and `code-interpreter-v1` (images from deploy/templates/build.sh, docs/managed-sandbox.md
+    # §5.4).
     templates:
       python: {image: "pin:python", cpu: 1, memoryGiB: 2, description: Python 3.12}
     limits: {}

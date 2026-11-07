@@ -1,6 +1,6 @@
 //go:build sandboxlive
 
-// Live drill of the sandbox registry (docs/managed-sandbox.md §5) on a sandbox cluster whose registry account sync
+// Live drill of the sandbox registry (docs/managed-sandbox.md §6) on a sandbox cluster whose registry account sync
 // runs (installer stage 55), with the proxcloud service account's kubeconfig:
 //
 //	SANDBOX_KUBECONFIG=~/sa.kubeconfig SANDBOX_SERVICE=<the sync's SERVICE_ID or any> SANDBOX_PROJECTS=a1,b1 \

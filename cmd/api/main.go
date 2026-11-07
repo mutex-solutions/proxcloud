@@ -265,6 +265,8 @@ func run() error {
 	// Sandboxes — enables sandbox provisioning and the SANDBOX surface (Sandbox CRs on the provider's sandbox cluster).
 	// The release gates are wired once the sync job exists, below.
 	projectH.SetSandbox(sandboxServiceFor)
+	// Sandbox API keys (SHA-256 only) for the E2B-compatible API at /e2b.
+	projectH.SetSandboxKeys(pg.C("sandbox_api_keys"))
 	// Proxmox VE — enables proxmox provisioning (project pool) + the VM write surface.
 	holderLocks := lock.New(pg)
 	pveWithHolderLock := func(es *externalservice.ExternalService) (*pve.Service, error) {

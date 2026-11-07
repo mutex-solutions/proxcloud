@@ -619,6 +619,7 @@ func externalServiceDto(es *externalservice.ExternalService) map[string]any {
 		}
 		dto["sandboxTemplates"] = templates
 		dto["sandboxGpuModels"] = scfg.GPUModels
+		dto["sandboxE2B"] = scfg.Envd && scfg.Domain != ""
 		l := scfg.Limits
 		dto["sandboxLimits"] = map[string]any{
 			"maxCpu": l.MaxCPU, "maxMemoryGiB": l.MaxMemoryGiB, "maxGpus": l.MaxGPUs,

@@ -1,4 +1,4 @@
-# Stage 55 (registry), mode=split with sandbox.registry.address: the sandbox registry (docs/managed-sandbox.md §5).
+# Stage 55 (registry), mode=split with sandbox.registry.address: the sandbox registry (docs/managed-sandbox.md §6).
 # Zot on the services cluster behind one MetalLB address, its blobs in a bucket of the object store (RustFS on
 # Standard, RGW on Full), one account per project kept by the account sync next to it. Then the sandbox cluster's
 # side: the nodes trust the registry's CA, the built-in images (deploy/templates/images.yaml, plus the release's

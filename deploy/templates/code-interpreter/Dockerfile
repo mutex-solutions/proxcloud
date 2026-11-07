@@ -23,7 +23,7 @@ COPY --from=upstream template/charts charts
 COPY --from=upstream template/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt \
  && ipython kernel install --name python3 --user
-RUN npm install -g --unsafe-perm git+https://github.com/e2b-dev/ijavascript.git \
+RUN npm install -g --unsafe-perm git+https://github.com/e2b-dev/ijavascript.git#79cb7d56dcfe0df9ff55eff0ca4dc920a6dcc361 \
  && ijsinstall --install=global \
  && pip install --no-cache-dir bash_kernel && python -m bash_kernel.install
 COPY --from=upstream template/server .server

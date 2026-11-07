@@ -152,6 +152,8 @@ func AppRouter(log *slog.Logger, corsOrigins []string, authn *auth.Authenticator
 	})
 	// Public Admin API: SigV4 (hmac_keys) or the admin-api OIDC realm.
 	r.Route("/admin-api/v1", adminAPIH.Routes)
+	// E2B-compatible sandbox API (X-API-Key = a project sandbox API key; public in pkg/auth).
+	r.Route("/e2b", projectH.E2BRoutes)
 
 	// OpenAPI stub (public) so the /openapi.json ingress path resolves.
 	r.Get("/openapi.json", func(w http.ResponseWriter, req *http.Request) {

@@ -410,7 +410,7 @@ type PVESandbox struct {
 	Registry        PVESandboxRegistry
 }
 
-// PVESandboxRegistry is config.sandbox.registry: the sandbox registry's address and port (docs/managed-sandbox.md §5),
+// PVESandboxRegistry is config.sandbox.registry: the sandbox registry's address and port (docs/managed-sandbox.md §6),
 // the one place outside the sandbox subnet the workers pull images from. Empty Address: no registry rule.
 type PVESandboxRegistry struct {
 	Address string

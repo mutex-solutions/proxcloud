@@ -253,6 +253,9 @@
             services: {sandbox: "{{ {pc.provider.region: true} }}"}
             sandbox:
               proxmoxServiceId: "{{ pc_service.id }}"
+              # With a sandbox domain (stage 56) every sandbox runs envd and the E2B API at /e2b serves this provider.
+              envd: "{{ pc_sandbox_edge_on | bool }}"
+              domain: "{{ pc.sandbox.domain if pc_sandbox_edge_on else '' }}"
               # the site's list replaces the default one (pc merges dicts, which would always keep python); "pin:<name>"
               # resolves to the registry's copy, or without a registry to the pinned source
               templates: >-

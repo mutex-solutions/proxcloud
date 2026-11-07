@@ -96,6 +96,7 @@ var publicPrefix = []string{
 	"/api/v1/callbacks/",
 	"/api/v1/admin/onboarding/",
 	"/api/v1/internal/sandboxes/", // sandbox-proxy's wake call — a sandbox provider's proxyWakeToken is the auth
+	"/e2b/",                       // E2B-compatible sandbox API — a project's sandbox API key (X-API-Key) is the auth
 }
 
 // adminJobPrefix drives operator billing/collect/sync jobs — it is NOT public (anon must not be

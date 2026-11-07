@@ -1,6 +1,6 @@
 package sandboxproxy
 
-// registryusers.go — the sandbox registry's accounts (docs/managed-sandbox.md §5). The registry (Zot) runs on the
+// registryusers.go — the sandbox registry's accounts (docs/managed-sandbox.md §6). The registry (Zot) runs on the
 // services cluster; this keeps its users and access rules in step with the projects on the sandbox cluster:
 //
 //	pull-<project>  reads library/** and t/<project>/**     Secret sandbox-template-pull in sb-<project>

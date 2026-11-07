@@ -293,7 +293,7 @@ def _split_ref(ref):
 
 
 def sandbox_images(pins, host):
-    """The mirror list for the sandbox registry (docs/managed-sandbox.md §5): every pinned image of
+    """The mirror list for the sandbox registry (docs/managed-sandbox.md §6): every pinned image of
     deploy/templates/images.yaml (name -> ref@sha256:...) copied to <host>/library/<last path part>:<tag>@<digest>, the
     same digest. A pin without a digest, a bad name or two pins on one target are refused, so a site never pulls an
     unpinned or wrong built-in image."""

@@ -202,4 +202,71 @@ var clientTools = []toolDef{
 			{name: "projectId", typ: "string", desc: "Project id to invite the user into.", required: true, in: "body"},
 		},
 	},
+	// --- Sandboxes (gVisor sandboxes for running code; docs/managed-sandbox.md §3) ---
+	{
+		name:   "list_sandboxes",
+		desc:   "List the project's sandboxes with their live status (PENDING or RUNNING), template, size, GPU and shutdownTime.",
+		method: "POST",
+		path:   "/api/v1/project/{id}/resource?type=SANDBOX",
+		params: []param{
+			{name: "id", typ: "string", desc: "Project id.", required: true, in: "path"},
+		},
+	},
+	{
+		name:   "create_sandbox",
+		desc:   "Start an isolated sandbox (gVisor) to run code in. It is RUNNING within seconds; poll list_sandboxes until it is. It is deleted automatically at its timeout. Billed per minute while running. type must be the string SANDBOX. The templates and limits are listed on the project's sandbox service (list_projects / the project's services).",
+		method: "POST",
+		path:   "/api/v1/project/{id}/cloud",
+		params: []param{
+			{name: "id", typ: "string", desc: "Project id.", required: true, in: "path"},
+			{name: "type", typ: "string", desc: "Always pass \"SANDBOX\".", required: true, in: "body"},
+			{name: "data", typ: "object", desc: "Sandbox spec: {\"template\": string (required), \"name\": string, \"cpu\": integer, \"memoryGiB\": integer, \"timeoutSeconds\": integer (60..max, default 3600), \"env\": {string: string}}.", required: true, in: "body"},
+		},
+	},
+	{
+		name:   "exec_in_sandbox",
+		desc:   "Run one command in a RUNNING sandbox and wait for it (up to timeoutSeconds, default 60, max 600). Returns {result: {stdout, stderr (each capped at 1 MiB), exitCode}}. action must be the string EXEC. Pass data.cmd for a shell string (run with sh -c) or data.command for an argv array; optional data.stdin.",
+		method: "POST",
+		path:   "/api/v1/project/{id}/cloud/{resourceId}/action",
+		params: []param{
+			{name: "id", typ: "string", desc: "Project id.", required: true, in: "path"},
+			{name: "resourceId", typ: "string", desc: "Sandbox resource id (the id field from list_sandboxes or create_sandbox).", required: true, in: "path"},
+			{name: "action", typ: "string", desc: "Always pass \"EXEC\".", required: true, in: "body"},
+			{name: "data", typ: "object", desc: "{\"cmd\": string} or {\"command\": [string]}, plus optional \"stdin\": string and \"timeoutSeconds\": integer.", required: true, in: "body"},
+		},
+	},
+	{
+		name:   "get_sandbox_logs",
+		desc:   "The newest lines of a sandbox's output (its start command and what it wrote to stdout/stderr). action must be the string GET_LOGS.",
+		method: "POST",
+		path:   "/api/v1/project/{id}/cloud/{resourceId}/action",
+		params: []param{
+			{name: "id", typ: "string", desc: "Project id.", required: true, in: "path"},
+			{name: "resourceId", typ: "string", desc: "Sandbox resource id.", required: true, in: "path"},
+			{name: "action", typ: "string", desc: "Always pass \"GET_LOGS\".", required: true, in: "body"},
+			{name: "data", typ: "object", desc: "{\"tailLines\": integer} (default 200, at most 2000).", in: "body"},
+		},
+	},
+	{
+		name:   "set_sandbox_timeout",
+		desc:   "Keep a sandbox alive longer (or end it sooner): its shutdown moves to now + timeoutSeconds. action must be the string SET_TIMEOUT.",
+		method: "POST",
+		path:   "/api/v1/project/{id}/cloud/{resourceId}/action",
+		params: []param{
+			{name: "id", typ: "string", desc: "Project id.", required: true, in: "path"},
+			{name: "resourceId", typ: "string", desc: "Sandbox resource id.", required: true, in: "path"},
+			{name: "action", typ: "string", desc: "Always pass \"SET_TIMEOUT\".", required: true, in: "body"},
+			{name: "data", typ: "object", desc: "{\"timeoutSeconds\": integer}.", required: true, in: "body"},
+		},
+	},
+	{
+		name:   "delete_sandbox",
+		desc:   "Delete a sandbox now (its files are lost). Billing stops at once.",
+		method: "DELETE",
+		path:   "/api/v1/project/{id}/cloud/{resourceId}",
+		params: []param{
+			{name: "id", typ: "string", desc: "Project id.", required: true, in: "path"},
+			{name: "resourceId", typ: "string", desc: "Sandbox resource id (from list_sandboxes).", required: true, in: "path"},
+		},
+	},
 }

@@ -55,9 +55,68 @@ registry config, so the portal gains no credential for the services cluster.
 - `registry-trust` runs busybox pinned by digest (D11); the workflow builds pull requests in a job with a read-only
   token and pushes only from the other events.
 
+**Merged with SB5 (main after #120)**
+
+- The registry design is section 6 of `docs/managed-sandbox.md` now, after SB5's E2B section 5; every reference moved.
+  Why: SB5 landed first and its own section and references kept the number.
+- One sandbox provider from stage 60 carries both sides' keys: `envd` and `domain` (SB5) and the `pin:` templates,
+  `templateRegistry` and `imageAdoption` (SB6a). The admin form edits all four, and a save keeps the template fields
+  the one-line list cannot show (SB5's `mergeTemplates`). Why: either branch alone wrote a provider without the other's
+  keys, and a form missing a field would have saved it empty.
+- `deploy/templates/build.sh` builds every built-in template (SB6a) with SB5's pinned ijavascript commit in the
+  code-interpreter image.
+- C1 and C2 say which images the sandbox nodes take from the registry (templates, `sandbox-proxy`) and that SB5's
+  runtime image still comes from `images.registry`. Why: stage 55 (cluster) applies `node-setup` before the registry
+  stage exists, so "every runtime image from the registry" was not true once both were merged.
+
 **Diagrams:** C1 (ghcr row), C2 (the registry container, its edges to the workers and the object stores, table row),
-C3 (registry component and edges), C4 (layer-1 rule list). Measured on the lab: docs/managed-sandbox.md §5.6. The
+C3 (registry component and edges), C4 (layer-1 rule list). Measured on the lab: docs/managed-sandbox.md §6.6. The
 review fixes change no diagram.
+## 2026-11-08: E2B-compatible API, sandbox API keys, envd in sandboxes, MCP sandbox tools (SB5)
+
+**What changed**
+
+- Portal: `/e2b/*` (`internal/platform/project/e2b.go`), mounted next to `/api/v1` and public in `pkg/auth`; its own gate
+  reads `X-API-Key` (or a bearer) and resolves it to the key's creator in the key's project. Sandbox create (v1 and v2),
+  list, get, kill, timeout, refreshes, connect, network, logs, metrics and the built-in templates, in E2B's shapes and
+  `{code, message}` errors; anything else answers 404 "not supported". `GET /e2b/openapi.json` is E2B's own document
+  cut to those routes (`e2b_openapi_gen.py`), guarded by `TestE2BOpenAPIParity`.
+- Sandbox API keys (D8, `e2b_keys.go`, table `sandbox_api_keys`): `e2b_` + 40 hex, one project each, acting as the member
+  who made it, stored as SHA-256 only; `GET/POST/DELETE /api/v1/project/{id}/sandbox-api-keys` and the client console's
+  Sandboxes > API keys tab (key shown once, then a hint). The project service view says whether the location offers the
+  E2B API (`sandboxE2B`); the admin sandbox provider form edits the sandbox domain and an envd switch separately
+  (`config.sandbox.domain`, `envd`) and keeps a template's start and ready commands when the template list is edited.
+  Teardown deletes a DELETED project's keys.
+- In the sandbox: `cmd/sandbox-init` (PID 1: user, envd, `/init`, start and ready commands, localhost relay) and
+  `deploy/sandbox-runtime.Dockerfile` (envd built unmodified from e2b-dev/infra e85b9f5 plus sandbox-init), installed on
+  every node by a new init container of `node-setup`; stage 55 pins its image and leaves the init container out where
+  there is no sandbox domain, CI builds `proxcloud-sandbox-runtime`. Sandbox pods get a readiness probe on the ready
+  marker, which sandbox-init drops while a crashed envd restarts.
+  Built-in templates `base` and `code-interpreter-v1`: `deploy/templates/` and `build.sh` (pushed by hand until SB6a's
+  workflow); stage 60 registers a provider with a domain with envd on.
+- MCP client toolset: `list_sandboxes`, `create_sandbox`, `exec_in_sandbox`, `get_sandbox_logs`, `set_sandbox_timeout`,
+  `delete_sandbox` over the native routes.
+- `tests/e2b-compat/compat.py`: the stock SDKs end to end (commands, streaming, files, preview URL, metadata, egress,
+  cross-project key, code interpreter). `docs/e2b-compat.md`: what works, what differs and what does not, and why.
+- C2: the sandbox cluster row had two sentences starting "Built by installer stage 55"; merged into one.
+
+**Why**
+
+- The plan's SB5 (§11, D8): the E2B SDKs are how agents use sandboxes, and a key must not reach every project of its
+  user the way a PAT does, so keys are project-scoped and stored as hashes.
+- `/e2b` is a second door to the same sandboxes. If it had its own create, a suspended project or a provider whose
+  release gates fail would run sandboxes through it, so it calls the native gate, quota and create (proved by
+  `test/integration/sandbox_e2b_test.go`, which fails with the gate calls removed).
+- autoPause, autoResume, templates builds, snapshots and MCP are refused with 400 or 404 instead of being accepted and
+  ignored: without pause (SB7) an autoPause sandbox would be deleted at its timeout and its files lost.
+- `PUT /e2b/sandboxes/{id}/network` is a mutation the native allow-list of a DISABLED project does not hold, so it is
+  refused there too (409).
+- envd with no access token serves every request, and a restarted envd has none until its `/init`; sandbox IDs are in
+  every shared preview URL, so that window must not be reachable. Readiness, not just startup, now follows the marker.
+- One domain field that also switched envd made every edit of an SB4 provider (domain, no envd) save an empty domain,
+  which breaks its published ports; a site without envd would also pull a runtime image no release had yet.
+
+**Diagrams updated:** `c1-context.md` (registry images), `c2-containers.md` (API box, sandbox cluster row), `c3-components.md` (sandbox diagram: E2B API and envd; E2B component row).
 
 ## 2026-11-08: Sandbox ports in public: sandbox-proxy with TLS, entry appliance, wildcard certificate, wake (SB4)
 

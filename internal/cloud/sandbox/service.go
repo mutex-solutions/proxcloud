@@ -130,7 +130,7 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string, 
 }
 
 // The project's pull Secret (TemplatePullSecret in sb-<project>) is not written here: the registry's account sync
-// writes one per project with that project's own account (docs/managed-sandbox.md §5). Copying one shared account
+// writes one per project with that project's own account (docs/managed-sandbox.md §6). Copying one shared account
 // into every namespace, as before, let a node escape read every tenant's templates.
 
 var errPullSourceUnreadable = errors.New("cannot read the template registry pull secret")

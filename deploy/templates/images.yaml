@@ -1,4 +1,4 @@
-# The built-in sandbox template images, each pinned by digest (docs/managed-sandbox.md §5). The installer copies
+# The built-in sandbox template images, each pinned by digest (docs/managed-sandbox.md §6). The installer copies
 # every one into the sandbox registry as library/<last path part>, same digest, pre-pulls it on every sandbox node
 # and points the templates at the copy; a template names one as image "pin:<name>" (sandbox.templates).
 #

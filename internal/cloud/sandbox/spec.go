@@ -256,6 +256,13 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 			"periodSeconds":    int64(1),
 			"failureThreshold": int64(startupBudget(t)),
 		}
+		// The same marker afterwards: sandbox-init drops it when envd dies and puts it back only once the restarted
+		// envd has its access token, so sandbox-proxy (Ready pods only) never routes to an envd without one.
+		container["readinessProbe"] = map[string]any{
+			"exec":             map[string]any{"command": []any{RuntimeMountPath + "/sandbox-init", "-ready"}},
+			"periodSeconds":    int64(1),
+			"failureThreshold": int64(1),
+		}
 		podSpec["volumes"] = []any{map[string]any{
 			"name":     "proxcloud-runtime",
 			"hostPath": map[string]any{"path": RuntimeHostDir, "type": "Directory"},

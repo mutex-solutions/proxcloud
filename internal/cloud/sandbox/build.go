@@ -36,7 +36,7 @@ const (
 	BuildTemplatePullSecret = "template-pull"
 	// TemplatePullSecret is the project's own registry account in sb-<project> (pull-<project>: library/** and
 	// t/<project>/**), written by the registry's account sync (sandbox-proxy registry-users, docs/managed-sandbox.md
-	// §5). A build still copies an operator-made sandbox-system/<name> into sbx-build (SB6b replaces that).
+	// §6). A build still copies an operator-made sandbox-system/<name> into sbx-build (SB6b replaces that).
 	TemplatePullSecret = "sandbox-template-pull"
 	pullSecretSourceNS = "sandbox-system"
 	BuildTimeout       = 30 * time.Minute

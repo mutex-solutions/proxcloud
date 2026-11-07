@@ -1,7 +1,7 @@
 {#- Stage 55, on the sandbox cluster: where the nodes pull from (ConfigMap sandbox-registry, read by
     deploy/sandbox-cluster/registry.yaml) and the template prepull. Each init container only pulls its image and exits,
     so a sandbox from a built-in template starts without a download. The portal moves a template to a new digest only
-    once every Ready node runs this pod with it (image adoption, docs/managed-sandbox.md §5). Vars: pc_sbx_images
+    once every Ready node runs this pod with it (image adoption, docs/managed-sandbox.md §6). Vars: pc_sbx_images
     (pc_sandbox_images), pc_sbx_reg_ca, pc_sbx_reg_system_ns. -#}
 {%- set ns = pc_sbx_reg_system_ns | default('sandbox-system') -%}
 apiVersion: v1
