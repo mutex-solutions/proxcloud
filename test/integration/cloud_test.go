@@ -105,3 +105,21 @@ func TestCloudResourcePersistence(t *testing.T) {
 		t.Fatal("wasUserDeletedAfter(nil): want false")
 	}
 }
+
+// A row written without updatedAt (share rows were) must still take sync updates, or its usage and addresses never move.
+func TestCloudUpdateHealsRowWithoutTimestamp(t *testing.T) {
+	ctx := context.Background()
+	repo := cloud.NewRepo(freshPG(t))
+	row := &cloud.CloudResource{ServiceID: "svc", ExternalID: "ext", Type: cloud.TypeShare, Data: map[string]any{"used": 0.0}}
+	if _, err := repo.Insert(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	got, err := repo.Update(ctx, &cloud.CloudResource{ServiceID: "svc", ExternalID: "ext", Type: cloud.TypeShare, Data: map[string]any{"used": 5.0}, UpdatedAt: &now})
+	if err != nil || got == nil || got.Data["used"] != 5.0 {
+		t.Fatalf("got %+v, err %v", got, err)
+	}
+	if rej, err := repo.Update(ctx, &cloud.CloudResource{ServiceID: "svc", ExternalID: "ext", Type: cloud.TypeShare, Data: map[string]any{"used": 9.0}}); err != nil || rej != nil {
+		t.Fatalf("a write without a timestamp was applied: %+v, err %v", rej, err)
+	}
+}

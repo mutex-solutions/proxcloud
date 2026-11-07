@@ -53,6 +53,9 @@ type Service struct {
 	C      *Client
 	Parent string // parent dataset, e.g. tank/shares
 	Host   string // the address clients mount from
+	// SNATSources are the addresses a NAT on the way to the NAS rewrites tenants to, kept on every export. Every
+	// tenant behind such an address passes the NAS's address check on every share. Empty on a site without one.
+	SNATSources []string
 }
 
 // Share is one tenant share. Password is set only by create and password reset.
@@ -62,6 +65,9 @@ type Share struct {
 	Networks                []string
 	ShareID                 int
 	Username, Password      string
+	// MapsRoot marks an NFS export that gives a client's root an identity on the NAS. Portal exports squash
+	// root; older ones do not until SetAccess brings them in line.
+	MapsRoot bool
 }
 
 func (s *Service) datasetFor(projectID, name string) string {
@@ -93,18 +99,26 @@ func legacySMBUser(projectID, name string) string {
 func smbUserFullName(name string) string { return "ProxCloud share " + name }
 
 // SameExport reports whether an export already lists exactly these networks (as exportList would write them).
-func SameExport(current, networks []string) bool {
-	a, b := slices.Clone(current), slices.Clone(exportList(networks))
+func (s *Service) SameExport(current, networks []string) bool {
+	a, b := slices.Clone(current), s.exportList(networks)
 	slices.Sort(a)
 	slices.Sort(b)
 	return slices.Equal(a, b)
 }
 
-func exportList(networks []string) []string {
-	if len(networks) == 0 {
+// exportList is what an export carries: the given networks, then the site's NAT addresses. A caller taking an address
+// off the list cannot take a NAT address off with it.
+func (s *Service) exportList(networks []string) []string {
+	out := slices.Clone(networks)
+	for _, a := range s.SNATSources {
+		if !slices.Contains(out, a) {
+			out = append(out, a)
+		}
+	}
+	if len(out) == 0 {
 		return []string{"127.0.0.1/32"}
 	}
-	return networks
+	return out
 }
 
 type dsValue struct {
@@ -129,9 +143,11 @@ type dataset struct {
 }
 
 type nfsRow struct {
-	ID       int      `json:"id"`
-	Path     string   `json:"path"`
-	Networks []string `json:"networks"`
+	ID           int      `json:"id"`
+	Path         string   `json:"path"`
+	Networks     []string `json:"networks"`
+	MaprootUser  string   `json:"maproot_user"`
+	MaprootGroup string   `json:"maproot_group"`
 }
 
 type smbRow struct {
@@ -183,7 +199,7 @@ func (s *Service) Create(ctx context.Context, projectID, name, protocol string, 
 		}
 		return nil, err
 	}
-	sh := &Share{Name: name, Protocol: protocol, Dataset: id, SizeBytes: size, Networks: exportList(networks)}
+	sh := &Share{Name: name, Protocol: protocol, Dataset: id, SizeBytes: size, Networks: s.exportList(networks)}
 	if err := s.export(ctx, projectID, sh); err != nil {
 		// A dataset nobody can reach is only a bill: remove what was made.
 		_ = s.Delete(ctx, projectID, id)
@@ -308,6 +324,7 @@ func (s *Service) List(ctx context.Context, projectID string) ([]Share, error) {
 		for _, n := range nfs {
 			if n.Path == MountPath(d.ID) {
 				sh.ShareID, sh.Networks = n.ID, n.Networks
+				sh.MapsRoot = n.MaprootUser != "" || n.MaprootGroup != ""
 			}
 		}
 		for _, n := range smb {
@@ -354,7 +371,10 @@ func (s *Service) Resize(ctx context.Context, projectID, id string, sizeGiB int)
 	return s.C.Call(ctx, "pool.dataset.update", []any{id, map[string]any{"refquota": size}}, nil)
 }
 
-// SetAccess replaces the addresses allowed on the share's export.
+// SetAccess replaces the addresses allowed on the share's export, and squashes root on an NFS export that
+// still maps it. A client's root is about to lose its way into a root-owned dataset, so the top directory
+// opens first, as for a new share. Not recursively: files root already wrote keep their owner and mode,
+// and a tenant's own modes are not ours to rewrite.
 func (s *Service) SetAccess(ctx context.Context, projectID, id string, networks []string) error {
 	sh, err := s.get(ctx, projectID, id)
 	if err != nil {
@@ -364,9 +384,18 @@ func (s *Service) SetAccess(ctx context.Context, projectID, id string, networks 
 		return sharef("the share has no export")
 	}
 	if sh.Protocol == ProtocolNFS {
-		return s.C.Call(ctx, "sharing.nfs.update", []any{sh.ShareID, map[string]any{"networks": exportList(networks)}}, nil)
+		if sh.MapsRoot {
+			var job int
+			if err := s.C.Call(ctx, "filesystem.setperm", []any{map[string]any{"path": MountPath(sh.Dataset), "mode": "777"}}, &job); err != nil {
+				return err
+			}
+			if err := s.waitJob(ctx, job); err != nil {
+				return err
+			}
+		}
+		return s.C.Call(ctx, "sharing.nfs.update", []any{sh.ShareID, map[string]any{"networks": s.exportList(networks), "maproot_user": nil, "maproot_group": nil}}, nil)
 	}
-	return s.C.Call(ctx, "sharing.smb.update", []any{sh.ShareID, map[string]any{"purpose": "DEFAULT_SHARE", "options": map[string]any{"hostsallow": exportList(networks)}}}, nil)
+	return s.C.Call(ctx, "sharing.smb.update", []any{sh.ShareID, map[string]any{"purpose": "DEFAULT_SHARE", "options": map[string]any{"hostsallow": s.exportList(networks)}}}, nil)
 }
 
 // ResetPassword issues a new password for an SMB share's user.
@@ -463,7 +492,7 @@ func (s *Service) ShareData(projectID string, sh *Share) map[string]any {
 	return map[string]any{"share": map[string]any{
 		"name": sh.Name, "protocol": sh.Protocol, "dataset": sh.Dataset, "status": "available",
 		"sizeBytes": sh.SizeBytes, "usedBytes": sh.UsedBytes, "networks": sh.Networks,
-		"username": sh.Username, "server": s.Host, "mount": mount,
+		"username": sh.Username, "server": s.Host, "mount": mount, "sharedNat": s.SNATSources,
 	}}
 }
 

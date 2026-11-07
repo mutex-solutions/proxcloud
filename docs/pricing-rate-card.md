@@ -19,6 +19,7 @@ One PUBLIC plan, rules keyed `(resourceType, timeUnit=hour)`:
 | Volume | volume | — | `size` | $0.000137 / GB / hr (≈$0.10/GB-mo) |
 | Public IP | floating_ip | — | `existence` | $0.005 / hr |
 | Project image | image | — | `size_gb` | $0.000068 / GB / hr (≈$0.05/GB-mo) |
+| Server snapshots | server_snapshot | — | `size_gb` | $0.000034 / provisioned GB / snapshot / hr (≈$0.025/GB-mo). **Placeholder, not benchmarked:** the owner sets it. It rates the server's disk size per snapshot, not the snapshot's real usage, so it sits at half the image rate |
 
 GPU rules are ADD_TO_TOTAL **on top of** the CPU/RAM component. RunPod/Lambda headline
 prices bundle CPU+RAM into the per-GPU rate, so either (a) accept our small premium

@@ -152,6 +152,7 @@ The shape is documented in the header of `proxmox.go`:
     "storageClasses": {"nas-capacity": {"class": "capacity",            // admin override (wins)
                                         "suggestedClass": "standard"}}, // installer fio result, display only
     "storageHeadroomPct": 10,                            // % of a storage kept free when placing disks
+    "backupStorage": "nas-backup",                       // shared store of server backups; absent = none
     "templates": {},                                     // optional pins or overlays on the discovered OS templates
     "gpus": {},                                          // {mappingId: {"alias": "nvidia-4090"}}
     "overcommit": {"cpu": 4},
@@ -183,6 +184,7 @@ Typed accessors used by the rest of the code:
 | `PVECapabilities()` | `capabilities` | the last storage capability detection (below) |
 | `PVEStorageClasses()` / `PVEEffectiveStorageClass(id)` | `storageClasses` | per-storage class override and installer suggestion; effective class = valid override, else detected |
 | `PVEStorageHeadroomPct()` | `storageHeadroomPct` (default 10, valid 0–99) | free space kept on a storage when placing a disk |
+| `PVEBackupStorage()` | `backupStorage` | shared store of server backups (NFS, CephFS, PBS); absent = no backups offered |
 | `PVEVolumeProfileFunc()` | `storageProfiles`, `capabilities`, `storageClasses` | resolves each synced disk's own profile and storage class |
 | `PVETemplates()`, `PVEImageCatalog()` | `templates` | OS templates servers are cloned from: discovered from cluster tags ([images/README.md](../images/README.md)); an entry with `vmid` + `node` pins one, any other entry overlays `name`, `osDistro`, `minDiskGb` |
 | `PVEGPUAliases()` / `PVEGPUMappingsFor(alias)` | `gpus` | PCI mapping ids per GPU alias |
@@ -366,6 +368,19 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   attached disk is on storage without snapshots (capacity class by design). ZFS rolls back to the newest
   snapshot only, so an older one is 409 rather than a failed task. A running server restarts after a rollback.
   Replication's `__*` snapshots are hidden and refused.
+- **Backups** (`LIST_/CREATE_/RESTORE_/DELETE_BACKUP {id}`, offered when `config.backupStorage` names a shared store
+  with `backup` content: NFS, CephFS or PBS): vzdump in snapshot mode, zstd, with the store's retention left out so it
+  cannot remove a tenant's archive. `notes-template` stamps each archive with the project, and every action lists the
+  store and goes on only with an archive carrying this project's stamp, so a volid from elsewhere is 409. At most 7
+  per server; 409 when the store lacks room for the server's provisioned disks plus `storageHeadroomPct`. Restore runs
+  in place: PVE destroys the VM's disks and rebuilds them and the config from the archive, and a running server comes
+  back running. 409 up front, with nothing stopped, on a protected server, when the token lacks the privilege, when a
+  disk (a detached one too) is not in the archive, or when the NICs changed since the backup. A failed restore task
+  after that point leaves the VM without disks until another restore. Backups go with their server, on delete and on
+  project teardown, and a failure stops either: PVE lets the token delete an archive only through `VM.Backup` on its
+  VM. Keeping a server's state past its life is what an image is for. An archive of a VM destroyed outside the portal
+  disappears from the token's listing (PVE filters by the same check), so it stays on the store until an operator
+  removes it; its notes name the project. Backups are not billed yet.
 - **Spread groups** (`spreadGroup`, `spreadStrict` on create): a `grp-<name>` tag on the VM. The scheduler
   prefers the node with the fewest members of the group in the project; strict refuses a node that has one.
   At create time only: nothing moves a member later. PVE 9's own affinity rules are HA-only, and strict.
@@ -764,11 +779,31 @@ the project (detach, server delete, public IP delete, subnet or network delete, 
 project's exports first, and if the NAS refuses, the release fails and the address stays held, so it can never reach
 another tenant while an export lists it. Network delete is refused while a live cluster holds addresses on the network,
 and drops the addresses a deleted cluster left there. NFS squashes root: a client's root is `nobody` on the
-NAS, and a new dataset is mode `777` so that unprivileged clients can write. Exports from before this rule keep their
-`maproot` until they are recreated. The NAS tells tenants apart by source address, so a client needs a path to the NAS that keeps
+NAS, and a new dataset is mode `777` so that unprivileged clients can write. An export from before this rule is brought
+in line by the next sync or `REFRESH_ACCESS`: `maproot` goes and its top directory opens to `777`, not recursively. Files
+a client's root wrote before that stay owned by root with their modes, so clients can read them as those modes allow but
+no longer change them. An operator who wants them writable changes their owner on the NAS. The NAS tells tenants apart by source address, so a client needs a path to the NAS that keeps
 its address. A public NIC has one when the NAS is routable from the public network. A private subnet that leaves
 through SNAT arrives with a node's address, and the tenant isolation rules drop traffic from the pool to the nodes'
 management network: on a NAS placed there, private subnets cannot mount.
+
+**A NAT between tenants and the NAS.** When a NAT rewrites tenant traffic on its way to the NAS, the NAS sees the NAT's
+address, which no export lists, so the mount fails. `config.snatSources` (default: none, off) lists those addresses,
+single hosts only:
+
+```json
+{"provider": "truenas", "snatSources": ["192.0.2.1"]}
+```
+
+Each address is added to every export of the provider, Kubernetes RWX datasets included, at create, by
+`REFRESH_ACCESS` and by every sync, and no release of a tenant's address takes it off. Removing it (an empty list)
+takes it off at the next sync; clients that rely on it then get `Stale file handle` or a refused mount.
+
+**This gives up tenant isolation on that NAS.** A NAT address is shared by every tenant behind it, and the address is
+all an NFS export checks. Every tenant behind the NAT can mount every NFS share of every project on this provider, read
+and write its files (a new dataset is mode `777`), and the export path is no secret. On SMB only the share's password
+is left. Use it only for tenants who trust each other, or give the NAS a path that keeps each tenant's address and leave
+the setting off. The customer console tells a share's owner when the setting applies to it.
 
 **Actions:** `EXTEND {sizeGb}` (either direction, not below usage), `REFRESH_ACCESS`, `RESET_PASSWORD`. Delete removes
 the export, the SMB user and the dataset with its data. Project teardown does the same.

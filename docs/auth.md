@@ -204,6 +204,10 @@ Resolution at request time is a single `hmac_keys` lookup by `_id`
 (`cmd/api/main.go`, `hmacLookup`), wired into both the SigV4 verifier
 (`SetHmacLookup`) and the MCP gate.
 
+SigV4 needs the secret back, so it cannot be hashed like a client token. It is stored encrypted
+with the data-at-rest key (`admin.SealHmacKey`), and rows still in plain text are converted at API
+start. A row that does not decrypt, because the key changed, fails authentication.
+
 ## RFC 9728 discovery (MCP OAuth)
 
 An unauthenticated `/mcp` request returns:

@@ -15,11 +15,35 @@ import (
 )
 
 func TestEmptyAccessNeverMeansEveryone(t *testing.T) {
-	if got := exportList(nil); len(got) != 1 || got[0] != "127.0.0.1/32" {
+	s := &Service{}
+	if got := s.exportList(nil); len(got) != 1 || got[0] != "127.0.0.1/32" {
 		t.Fatalf("exportList(nil) = %v", got)
 	}
-	if got := exportList([]string{"10.0.0.0/24"}); got[0] != "10.0.0.0/24" {
+	if got := s.exportList([]string{"10.0.0.0/24"}); len(got) != 1 || got[0] != "10.0.0.0/24" {
 		t.Fatalf("exportList = %v", got)
+	}
+}
+
+// A site's NAT address goes on every export, once, and replaces the placeholder that closes an empty one.
+func TestExportKeepsSNATSources(t *testing.T) {
+	s := &Service{SNATSources: []string{"192.0.2.1/32"}}
+	if got := strings.Join(s.exportList([]string{"10.0.0.0/24"}), ","); got != "10.0.0.0/24,192.0.2.1/32" {
+		t.Fatalf("exportList = %s", got)
+	}
+	if got := strings.Join(s.exportList([]string{"192.0.2.1/32"}), ","); got != "192.0.2.1/32" {
+		t.Fatalf("duplicate address: %s", got)
+	}
+	if got := strings.Join(s.exportList(nil), ","); got != "192.0.2.1/32" {
+		t.Fatalf("empty list: %s", got)
+	}
+	if !s.SameExport([]string{"192.0.2.1/32", "10.0.0.0/24"}, []string{"10.0.0.0/24"}) {
+		t.Fatal("an export holding the NAT address must count as current")
+	}
+	if s.SameExport([]string{"10.0.0.0/24"}, []string{"10.0.0.0/24"}) {
+		t.Fatal("an export missing the NAT address must be rewritten")
+	}
+	if (&Service{}).SameExport([]string{"192.0.2.1/32", "10.0.0.0/24"}, []string{"10.0.0.0/24"}) {
+		t.Fatal("with the setting gone the NAT address must come off")
 	}
 }
 
@@ -69,13 +93,14 @@ func TestShareSizeCappedBeforeTheShift(t *testing.T) {
 }
 
 func TestSameExport(t *testing.T) {
-	if !SameExport([]string{"b", "a"}, []string{"a", "b"}) {
+	s := &Service{}
+	if !s.SameExport([]string{"b", "a"}, []string{"a", "b"}) {
 		t.Fatal("order must not matter")
 	}
-	if SameExport([]string{"a", "b"}, []string{"a"}) {
+	if s.SameExport([]string{"a", "b"}, []string{"a"}) {
 		t.Fatal("a stale address must be a difference")
 	}
-	if !SameExport([]string{"127.0.0.1/32"}, nil) {
+	if !s.SameExport([]string{"127.0.0.1/32"}, nil) {
 		t.Fatal("an empty list is written as localhost")
 	}
 }
@@ -85,6 +110,7 @@ type fakeNAS struct {
 	mu    sync.Mutex
 	calls map[string][]string
 	users []map[string]any
+	nfs   []map[string]any // sharing.nfs.query rows; a share listed here is NFS
 }
 
 func (f *fakeNAS) got(method string) []string {
@@ -113,7 +139,7 @@ func (f *fakeNAS) serve(t *testing.T) *Client {
 			}
 			f.mu.Lock()
 			f.calls[req.Method] = append(f.calls[req.Method], string(req.Params))
-			users := f.users
+			users, nfs := f.users, f.nfs
 			f.mu.Unlock()
 			var result any = true
 			switch req.Method {
@@ -122,7 +148,7 @@ func (f *fakeNAS) serve(t *testing.T) *Client {
 			case "pool.dataset.query":
 				if strings.Contains(string(req.Params), "tank/shares/p-") {
 					result = []any{map[string]any{"id": "tank/shares/p-long", "user_properties": map[string]any{
-						projectProp: map[string]any{"rawvalue": "p"}, protoProp: map[string]any{"rawvalue": ProtocolSMB},
+						projectProp: map[string]any{"rawvalue": "p"}, protoProp: map[string]any{"rawvalue": map[bool]string{true: ProtocolNFS, false: ProtocolSMB}[nfs != nil]},
 					}}}
 				} else {
 					result = []any{map[string]any{"id": "tank/shares", "available": map[string]any{"rawvalue": "999999999999999"}}}
@@ -135,8 +161,14 @@ func (f *fakeNAS) serve(t *testing.T) *Client {
 				result = map[string]any{"id": 11}
 			case "sharing.nfs.query":
 				result = []any{}
+				if nfs != nil {
+					result = nfs
+				}
 			case "sharing.smb.query":
 				result = []any{map[string]any{"id": 11, "path": "/mnt/tank/shares/p-long"}}
+				if nfs != nil {
+					result = []any{}
+				}
 			case "user.query":
 				result = users
 			}
@@ -154,6 +186,36 @@ func (f *fakeNAS) serve(t *testing.T) *Client {
 	return c
 }
 
+// TestSetAccessSquashesAnOldExport: an export from before root squash loses maproot, and its top directory
+// opens first so a client's root does not lose its way in.
+func TestSetAccessSquashesAnOldExport(t *testing.T) {
+	for _, maproot := range []string{"root", ""} {
+		f := &fakeNAS{nfs: []map[string]any{{"id": 12, "path": "/mnt/tank/shares/p-long", "networks": []string{"10.0.0.1/32"}, "maproot_user": maproot}}}
+		s := &Service{C: f.serve(t), Parent: "tank/shares"}
+		list, err := s.List(context.Background(), "p")
+		if err != nil || len(list) != 1 {
+			t.Fatalf("list: %+v, %v", list, err)
+		}
+		if list[0].MapsRoot != (maproot != "") {
+			t.Fatalf("maproot %q: MapsRoot = %v", maproot, list[0].MapsRoot)
+		}
+		if err := s.SetAccess(context.Background(), "p", "tank/shares/p-long", []string{"10.0.0.2/32"}); err != nil {
+			t.Fatal(err)
+		}
+		update := f.got("sharing.nfs.update")
+		if len(update) != 1 || !strings.Contains(update[0], `"maproot_user":null`) || !strings.Contains(update[0], `"maproot_group":null`) {
+			t.Fatalf("update = %v", update)
+		}
+		perms := f.got("filesystem.setperm")
+		if maproot == "" && len(perms) != 0 {
+			t.Fatalf("an export already squashing had its directory changed: %v", perms)
+		}
+		if maproot != "" && (len(perms) != 1 || !strings.Contains(perms[0], `"mode":"777"`) || strings.Contains(perms[0], "recursive")) {
+			t.Fatalf("setperm = %v", perms)
+		}
+	}
+}
+
 func TestNFSExportSquashesRoot(t *testing.T) {
 	f := &fakeNAS{}
 	s := &Service{C: f.serve(t), Parent: "tank/shares"}
@@ -166,6 +228,22 @@ func TestNFSExportSquashesRoot(t *testing.T) {
 	}
 	if perm := f.got("filesystem.setperm"); len(perm) != 1 || !strings.Contains(perm[0], `"777"`) {
 		t.Fatalf("setperm = %v", perm)
+	}
+}
+
+// A new export carries the NAT address from the start: a K8s RWX dataset is created this way and mounted right after.
+func TestCreateExportsSNATSources(t *testing.T) {
+	f := &fakeNAS{}
+	s := &Service{C: f.serve(t), Parent: "tank/shares", SNATSources: []string{"192.0.2.1/32"}}
+	sh, err := s.Create(context.Background(), "p", "k8s-abc", ProtocolNFS, 1, []string{"10.0.0.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exports := f.got("sharing.nfs.create"); len(exports) != 1 || !strings.Contains(exports[0], "192.0.2.1/32") || !strings.Contains(exports[0], "10.0.0.0/24") {
+		t.Fatalf("export = %v", exports)
+	}
+	if data := s.ShareData("p", sh)["share"].(map[string]any); strings.Join(data["sharedNat"].([]string), ",") != "192.0.2.1/32" {
+		t.Fatalf("row = %v", data)
 	}
 }
 

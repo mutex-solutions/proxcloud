@@ -172,7 +172,9 @@ which stay the default. The dataset is an ordinary share of the project named `k
 counts against the share quota, can be resized on the Shares page, and its export follows the project's addresses.
 PVCs are subdirectories of it named after their PV, so `refquota` caps them together, not one by one, and a new PVC with an old name starts empty. They are mode `0777`, since the NAS squashes root and a non-root pod could not write otherwise. It is destroyed with the cluster, by the sweep after the delete cascade (30 minutes after the cluster was created at the earliest).
 For the same reason the CSI controller deletes a PVC's directory as `nobody`: a directory a non-root pod created with mode `755` and filled cannot be removed, the PV stays `Released` with `permission denied` in its events, and its data counts against the `refquota` until the pod's user removes it or the cluster goes. Have such pods use `umask 000`, or empty the volume before deleting the PVC.
-Workers reach it over their egress, so the NAS must see them under the project's addresses: no NAT on the way.
+Workers reach it over their egress, so the NAS must see them under the project's addresses: no NAT on the way. Where a
+NAT cannot be avoided, the TrueNAS provider's `snatSources` keeps its address on the dataset's export, which gives up
+isolation between every tenant behind that NAT (see "TrueNAS file shares" in `cloud-integration.md`).
 Full-tier sites (ceph-csi CephFS) are not built yet.
 
 **A create that fails.** The marker secret is written before the create takes anything. A failure releases the addresses, tokens and dataset at once, and if that release fails too (NAS or PVE down), the marker stays and the sweep retries it after the grace window. A release only reaches the NAS named by the cluster's share row, so a broken NAS holding nothing of the cluster blocks nothing.
