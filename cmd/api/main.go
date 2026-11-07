@@ -512,24 +512,27 @@ func run() error {
 	// endpoint once the engine moves out — both paths must run exactly the same activation.
 	activateProjectsFn := func(ctx context.Context, bpID string) error {
 		orgs, err := orgRepo.FindAllByBillingProfileID(ctx, bpID)
-		if err != nil || len(orgs) == 0 {
+		if err != nil {
 			return err
 		}
 		orgIDs := make([]string, 0, len(orgs))
 		for i := range orgs {
 			orgIDs = append(orgIDs, orgs[i].ID)
 		}
-		members, err := orgRepo.Members(ctx, orgs[0].ID)
-		if err != nil {
-			return err
-		}
-		memberships := make([]project.Membership, 0, len(members))
-		for i := range members {
-			role := project.RoleMember
-			if members[i].Role() == "OWNER" {
-				role = project.RoleOwner
+		// A second profile of an org is referenced by no org, only by the projects attached to it, which keep their members.
+		var memberships []project.Membership
+		if len(orgs) > 0 {
+			members, err := orgRepo.Members(ctx, orgs[0].ID)
+			if err != nil {
+				return err
 			}
-			memberships = append(memberships, project.Membership{Sub: members[i].Sub, Role: role})
+			for i := range members {
+				role := project.RoleMember
+				if members[i].Role() == "OWNER" {
+					role = project.RoleOwner
+				}
+				memberships = append(memberships, project.Membership{Sub: members[i].Sub, Role: role})
+			}
 		}
 		projects, err := projectRepo.AllByBillingProfile(ctx, bpID, orgIDs)
 		if err != nil {
@@ -546,10 +549,12 @@ func run() error {
 			if !p.IsDisabled() || p.DisabledByOperator || !p.PaidBy(bpID) {
 				continue
 			}
-			p.Memberships = memberships
-			if err := projectRepo.Save(ctx, p); err != nil {
-				log.Error("activate: save memberships", "project", p.ID, "err", err)
-				continue
+			if len(orgs) > 0 {
+				p.Memberships = memberships
+				if err := projectRepo.Save(ctx, p); err != nil {
+					log.Error("activate: save memberships", "project", p.ID, "err", err)
+					continue
+				}
 			}
 			if err := projectH.EnableAndBootstrap(ctx, p); err != nil {
 				log.Error("activate: bootstrap", "project", p.ID, "err", err)
