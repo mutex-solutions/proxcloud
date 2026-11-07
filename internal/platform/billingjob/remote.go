@@ -45,13 +45,17 @@ type Resolver interface {
 // type→Provider registry. Rating inputs the billing service cannot know (the resource-type catalog)
 // travel with the request.
 func (s *Service) ResolveByProfileID(ctx context.Context, profileID, timeUnit string, now time.Time) (billingclient.ChargeRequest, error) {
+	// ponytail: the wall-clock cycle on purpose. A closing charge carries the month that ended, and a billing
+	// service without the matching charge code opens a second bill for it and re-bills the month. So the last
+	// hour of a month stays unbilled under the external provider until that service has the closing pass.
 	cycleStart, cycleEnd := monthBounds(now)
+	cycleTimestamp := truncateForTimeUnit(now, timeUnit)
 	req := billingclient.ChargeRequest{
 		ProfileID:      profileID,
 		TimeUnit:       timeUnit,
 		CycleStart:     cycleStart,
 		CycleEnd:       cycleEnd,
-		CycleTimestamp: truncateForTimeUnit(now, timeUnit),
+		CycleTimestamp: cycleTimestamp,
 		Catalog:        billingresource.Catalog(),
 	}
 
@@ -79,8 +83,8 @@ func (s *Service) ResolveByProfileID(ctx context.Context, profileID, timeUnit st
 			return req, err
 		}
 		// Services with no resources are included deliberately, not skipped. The in-process driver
-		// calls ChargeBillingResources once per external service regardless, and that call opens
-		// the current bill via GetCurrentBill — which CREATES it when absent. Dropping empty groups
+		// calls ChargeBillingResources once per external service regardless, and that call
+		// CREATES the current bill when absent. Dropping empty groups
 		// here would mean an ACTIVE profile with nothing billable stops getting a bill created,
 		// which is visible to the customer. The wire cost of an empty array is trivial next to a
 		// behaviour change in billing.

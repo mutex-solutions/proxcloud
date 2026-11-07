@@ -35,7 +35,7 @@ func TestAddVolumeStorageRoom(t *testing.T) {
 						fmt.Fprintf(w, `{"data":[%s]}`, tt.storage)
 						return
 					}
-					fmt.Fprint(w, `{"data":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve1","pool":"st-p1"}]}`)
+					fmt.Fprint(w, `{"data":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve1","pool":"tp-p1"}]}`)
 				},
 				"GET /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, r *http.Request) {
 					fmt.Fprint(w, `{"data":{"scsi0":"local-zfs:vm-101-disk-0,size=32G"}}`)
@@ -52,7 +52,7 @@ func TestAddVolumeStorageRoom(t *testing.T) {
 					fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
 				},
 			})
-			s := &Service{C: c, PoolPrefix: "st-"}
+			s := &Service{C: c, PoolPrefix: "tp-"}
 			slot, err := s.AddVolume(context.Background(), "p1", "101", 20, "local-zfs", tt.headroom)
 			if tt.wantFull {
 				if !errors.Is(err, ErrStorageFull) || setCalls != 0 {
@@ -97,11 +97,11 @@ func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values, ove
 				return
 			}
 			fmt.Fprint(w, `{"data":[
-				{"id":"qemu/101","type":"qemu","vmid":101,"name":"a","node":"pve1","pool":"st-p1"},
-				{"id":"qemu/102","type":"qemu","vmid":102,"name":"b","node":"pve1","pool":"st-p1"},
-				{"id":"qemu/103","type":"qemu","vmid":103,"name":"c","node":"pve2","pool":"st-p1"},
-				{"id":"qemu/104","type":"qemu","vmid":104,"name":"other","node":"pve1","pool":"st-p2"},
-				{"id":"qemu/900","type":"qemu","vmid":900,"name":"pc-holder-pve1","node":"pve1","pool":"st-p1","tags":"pc-holder;proxcloud"}]}`)
+				{"id":"qemu/101","type":"qemu","vmid":101,"name":"a","node":"pve1","pool":"tp-p1"},
+				{"id":"qemu/102","type":"qemu","vmid":102,"name":"b","node":"pve1","pool":"tp-p1"},
+				{"id":"qemu/103","type":"qemu","vmid":103,"name":"c","node":"pve2","pool":"tp-p1"},
+				{"id":"qemu/104","type":"qemu","vmid":104,"name":"other","node":"pve1","pool":"tp-p2"},
+				{"id":"qemu/900","type":"qemu","vmid":900,"name":"pc-holder-pve1","node":"pve1","pool":"tp-p1","tags":"pc-holder;proxcloud"}]}`)
 		},
 		"GET /api2/json/storage": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[
@@ -150,7 +150,7 @@ func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values, ove
 		maps.Copy(routes, o)
 	}
 	_, c := fakePVE(t, routes)
-	return &Service{C: c, PoolPrefix: "st-"}
+	return &Service{C: c, PoolPrefix: "tp-"}
 }
 
 const (

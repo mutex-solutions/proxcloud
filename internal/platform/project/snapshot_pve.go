@@ -3,6 +3,8 @@ package project
 // snapshot_pve.go — the server snapshot actions (pve/snapshot.go).
 
 import (
+	"context"
+	"errors"
 	"net/http"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -61,11 +63,18 @@ func (h *Handler) pveSnapshotAction(w http.ResponseWriter, r *http.Request, u *u
 		}
 		err = ps.RollbackServerSnapshot(ctx, proj.ID, cr.ExternalID, name, func(storage string) bool {
 			return caps[storage].Type == "zfspool" || caps[storage].Type == "zfs"
+		}, func(ctx context.Context, cur, target pve.VMConfig) error {
+			return h.pveRollbackQuota(ctx, proj, es, cur, target)
 		})
 	case "DELETE_SNAPSHOT":
 		err = ps.DeleteServerSnapshot(ctx, proj.ID, cr.ExternalID, name)
 	}
 	if err != nil {
+		var quota *httpx.HTTPError
+		if errors.As(err, &quota) {
+			h.fail(w, quota)
+			return true
+		}
 		h.fail(w, pveVolumeErr(err))
 		return true
 	}
@@ -73,4 +82,17 @@ func (h *Handler) pveSnapshotAction(w http.ResponseWriter, r *http.Request, u *u
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 	httpx.OK(w, map[string]any{"result": map[string]any{"name": name}})
 	return true
+}
+
+// pveRollbackQuota refuses a rollback that would take the project over its quota, like a restore: resize down, spend what
+// that freed, roll back. It adds no disk: a snapshot's disks are the server's own, and only one extended since gets smaller.
+func (h *Handler) pveRollbackQuota(ctx context.Context, proj *Project, es *externalservice.ExternalService, cur, target pve.VMConfig) error {
+	if err := h.enforcePVEGPURestore(ctx, proj, es, cur, target); err != nil {
+		return err
+	}
+	vcpus, ramMb, _ := pve.RestoreDemand(cur, target)
+	if err := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{VCPUs: vcpus, RAMMb: ramMb}); err != nil {
+		return err
+	}
+	return nil
 }

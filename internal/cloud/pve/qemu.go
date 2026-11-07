@@ -227,6 +227,15 @@ func (c *Client) ListSnapshots(ctx context.Context, node string, vmid int) ([]Sn
 	return out, nil
 }
 
+// SnapshotConfig reads the VM config a snapshot holds.
+func (c *Client) SnapshotConfig(ctx context.Context, node string, vmid int, name string) (VMConfig, error) {
+	var out VMConfig
+	if err := c.get(ctx, qemuPath(node, vmid)+"/snapshot/"+url.PathEscape(name)+"/config", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CreateSnapshot snapshots the VM (disk-only; vmstate=false keeps it storage-cheap).
 func (c *Client) CreateSnapshot(ctx context.Context, node string, vmid int, name, description string) (UPID, error) {
 	form := formVals{"snapname": name, "description": description}.values()

@@ -33,9 +33,9 @@ rejected.
 flowchart LR
     proxcloud["ProxCloud"]
     subgraph dbc["DB cluster (ops-built)<br/>ArgoCD + AppProject proxcloud-dbaas<br/>CNPG, Percona PS, mariadb-op, valkey-op, ..."]
-        app["Application std-&lt;id&gt;<br/>(chart database-cluster)"]
+        app["Application pc-d-&lt;id&gt;<br/>(chart database-cluster)"]
         pods["DB pods + PVCs<br/>ns pc-&lt;projectId&gt;"]
-        lb["Service std-&lt;id&gt;-lb<br/>(LoadBalancer)"]
+        lb["Service pc-d-&lt;id&gt;-lb<br/>(LoadBalancer)"]
     end
     client["Customer app"]
     proxcloud -- "Application CRs<br/>(kubeconfig, SSA)" --> app
@@ -173,7 +173,7 @@ POST /api/v1/project/{projectId}/cloud
 {"type": "DATABASE_CLUSTER", "data": {
   "name": "orders-recovered", "engine": "postgresql", "version": "17",
   "replicas": 1, "cpu": 2, "memoryGiB": 4, "storageGiB": 20,
-  "restoreFrom": {"sourceDatabaseId": "std-1a2b3c4d", "targetTime": "2026-11-01T09:30:00Z"}}}
+  "restoreFrom": {"sourceDatabaseId": "pc-d-1a2b3c4d", "targetTime": "2026-11-01T09:30:00Z"}}}
 ```
 
 `sourceDatabaseId` must be a database of the same project and engine with backups enabled;

@@ -19,7 +19,7 @@ network:
     - 192.0.2.0/24
 proxcloud:
   projectId: 665f1a2b3c4d5e6f77889900
-  resourceId: std-3c4d5e6f
+  resourceId: pc-d-3c4d5e6f
   displayName: legacy-mariadb
 monitoring:
   enabled: false
@@ -52,4 +52,4 @@ backup:
     prefix: backups
     region: us-east-1
     pathStyle: true
-    credsSecret: std-3c4d5e6f-backup-s3
+    credsSecret: pc-d-3c4d5e6f-backup-s3

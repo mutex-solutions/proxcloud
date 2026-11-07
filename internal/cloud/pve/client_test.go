@@ -161,22 +161,22 @@ func TestCreatePoolIdempotent(t *testing.T) {
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
 		"POST /api2/json/pools": func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(500)
-			fmt.Fprint(w, `{"errors":{"poolid":"pool 'st-p1' already exists"}}`)
+			fmt.Fprint(w, `{"errors":{"poolid":"pool 'tp-p1' already exists"}}`)
 		},
 	})
-	if err := c.CreatePool(context.Background(), "st-p1", ""); err != nil {
+	if err := c.CreatePool(context.Background(), "tp-p1", ""); err != nil {
 		t.Fatalf("already-exists must be idempotent, got %v", err)
 	}
 }
 
 func TestGetPoolAbsentIsNil(t *testing.T) {
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
-		"GET /api2/json/pools/st-gone": func(w http.ResponseWriter, r *http.Request) {
+		"GET /api2/json/pools/tp-gone": func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(500)
-			fmt.Fprint(w, `{"errors":{"poolid":"pool 'st-gone' does not exist"}}`)
+			fmt.Fprint(w, `{"errors":{"poolid":"pool 'tp-gone' does not exist"}}`)
 		},
 	})
-	p, err := c.GetPool(context.Background(), "st-gone")
+	p, err := c.GetPool(context.Background(), "tp-gone")
 	if err != nil || p != nil {
 		t.Fatalf("p=%v err=%v", p, err)
 	}

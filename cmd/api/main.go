@@ -412,6 +412,7 @@ func run() error {
 	// Admin handler (needs esSvc + region + the cloud-client factory for cloud-admin live reads).
 	adminH := admin.NewHandler(admin.NewRepo(pg), catalog.NewRepo(pg), users, addFundsSvc, pricingRepo, billingRepo, cloudRepo, platformconfig.NewRepo(pg), auditSvc, esSvc, cfg.DefaultRegion, cfg.Auth.Admin.IssuerURI, cfg.Auth.Admin.ClientID)
 	adminH.SetHmacEncryptor(enc)
+	adminH.SetCollectChecker(txnScanner)
 	adminH.SetKamaji(kamajiFactory)
 	adminH.SetDbaas(func(es *externalservice.ExternalService) (*dbaas.Service, error) {
 		return dbaas.New(es.DbaasConfig(), es.ID)

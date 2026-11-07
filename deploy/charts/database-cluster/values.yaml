@@ -125,12 +125,12 @@ databases: []
 users: []
 
 # -- ProxCloud identity of this database. projectId + resourceId REQUIRED.
-# resourceId (std-xxxxxxxx) is the base name of EVERY object this chart
+# resourceId (pc-d-xxxxxxxx) is the base name of EVERY object this chart
 # renders — not the release name, which is an ArgoCD implementation detail.
 proxcloud:
   # -- Owning proxcloud project id (also the pc-<projectId> namespace suffix).
   projectId: ""
-  # -- The DATABASE_CLUSTER resource id, e.g. std-1a2b3c4d.
+  # -- The DATABASE_CLUSTER resource id, e.g. pc-d-1a2b3c4d.
   resourceId: ""
   # -- Human display name (annotation only; free-form).
   displayName: ""

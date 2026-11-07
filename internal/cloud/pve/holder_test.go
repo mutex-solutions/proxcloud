@@ -93,7 +93,7 @@ func TestCarrierKeptUnlessTheMoveStopped(t *testing.T) {
 func TestHolderOnSkipsCarrier(t *testing.T) {
 	rows := func(tags string) fakeRoutes {
 		return fakeRoutes{"GET /api2/json/cluster/resources": say(fmt.Sprintf(`{"data":[
-			{"id":"qemu/900","type":"qemu","vmid":900,"name":"pc-holder-pve1","node":"pve1","pool":"st-p1","tags":%q}]}`, tags))}
+			{"id":"qemu/900","type":"qemu","vmid":900,"name":"pc-holder-pve1","node":"pve1","pool":"tp-p1","tags":%q}]}`, tags))}
 	}
 	for tags, wantCreates := range map[string]int{"pc-holder;proxcloud": 0, "pc-holder;pc-carrier;proxcloud": 1} {
 		writes := map[string][]url.Values{}

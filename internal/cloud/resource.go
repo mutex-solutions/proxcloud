@@ -83,6 +83,12 @@ type CloudResource struct {
 	CreatedAt     *time.Time     `json:"createdAt,omitempty"`
 	UpdatedAt     *time.Time     `json:"updatedAt,omitempty"`
 	Info          *Info          `json:"info,omitempty"`
+	// DataSince is how old a resource's data is when that is older than its row: a disk a restore brought back dates
+	// from the backup. Only SetDataSince writes it, so a sync's update leaves it alone.
+	DataSince *time.Time `json:"dataSince,omitempty"`
+	// ExternalIDSince is when the resource took its current external id, on a row that followed a rename (a retyped disk).
+	// Only ChangeExternalID writes it, so a sync's update leaves it alone.
+	ExternalIDSince *time.Time `json:"externalIdSince,omitempty"`
 }
 
 // ServerIsVolumeBacked recognizes both the platform marker and the legacy

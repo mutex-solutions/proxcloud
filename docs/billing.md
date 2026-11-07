@@ -200,6 +200,10 @@ accrual — by POSTing the resolved resources to a separate billing service inst
 of pricing them here. Resolution stays local because it reads the resource
 cache. Under `external` the billing-only crons in section 14 are not
 scheduled here; the billing service owns them. See `docs/configuration.md`.
+Requests still carry the wall-clock month, because a service without the native
+closing pass would open a second bill for a month that has ended and re-bill it.
+So the last hour of each month stays unbilled under `external` until that service
+has the same charge code and `remote.go` sends the closing cycle.
 
 ### In-process loop vs RabbitMQ fan-out
 
@@ -287,7 +291,8 @@ Adjustments are stored on `bill.Adjustments` and move the taxed gross too.
 `pricing.Bill` (table **`bill`**) has a `status` (`OPEN` → `SENT` → `PAID`), a
 `billingCycle` ([first-of-month, first-of-next-month)), `items[]`, the settlement
 collections (`adjustments`, `appliedAccountCredits`, `appliedPromotionalCredits`,
-`collectedAmounts`), and `dueAt` / `sentAt` / `lockedAt`.
+`collectedAmounts`), and `dueAt` / `sentAt`. Rows older than this release may still carry a
+`lockedAt`, which nothing reads.
 
 Each `BillItem` carries the running `netAmount` (scale 16 during accrual), the
 `appliedPricePlanRules` breakdown (per rule, per attribute), and `timeUnits`
@@ -306,17 +311,28 @@ stateDiagram-v2
     PAID --> [*]
 ```
 
-**Current bill lock.** `GetCurrentBill` ensures an `OPEN` bill exists for the
-cycle, then atomically claims it via a `lockedAt` lease (push `lockedAt` to
-now + 1m; only claimable when `lockedAt ≤ now`). This is a wall-clock lease so
-concurrent chargers on different pods serialize on one bill. Bounded retry (5
-attempts) replaces spinning forever.
+**One bill per cycle.** `ChargeBillingResources` runs in one transaction under the profile lock
+(see [Bill writers and the credit lock](#bill-writers-and-the-credit-lock)): find the cycle's
+`OPEN` bill or create it, rate, save. `hourlyCharge` and `monthlyCharge` share a cron spec and
+have different ShedLock names, so they meet in one process every hour; replicas, the fan-out and
+the debug triggers can join them. The section does no cloud or gateway I/O, and the table has no
+unique index, so the lock is the whole guarantee. A second bill costs real money: an item first
+seen on it starts its watermark at the cycle start and charges the month to date again.
+
+**The month's last interval.** A minute or hour pass bills the interval ending at its timestamp,
+so the pass landing on the 1st at 00:00 belongs to the month that just ended
+(`billingjob.chargeCycle`). It tops up that month's `OPEN` bill and rates usage from that month's
+metrics doc; the new month's bill opens on its next pass and starts at 00:00. A month rule is paid
+up front, so its pass at 00:00 opens the new bill. The closing pass never opens a bill: if the
+month's bill is gone (issued by a very late send, or deleted), that interval goes unbilled with a
+warning in the log rather than re-billing the month. A rollover the charge job misses altogether
+loses the same interval.
 
 ### Finalizing bills (send)
 
 `billing.BillSendService.SendAllBills` (the daily `monthlyBill` cron,
-`0 0 0 * * *`) finalizes each profile's **previous-month** `OPEN` bill
-(`sendBill.go`):
+`0 30 0 * * *`, after the passes closing the month) finalizes each profile's **previous-month**
+`OPEN` bill (`sendBill.go`), all of it under the profile lock:
 
 1. **Delete-if-zero** — a bill with zero total and no positive item is deleted.
 2. Skip `SKIP` profiles.
@@ -535,16 +551,75 @@ rejected credentials, a removed integration) leaves it `PENDING` with the reason
 `gatewayMessage` or `errorMessage`, and the next pass asks again. The 24 hour window is the bound.
 Past it the scanner stops asking and logs an error on the way out, and the row stays `PENDING`,
 because the money may have moved. A late gateway callback or the operator's
-`GET /admin/account-credit-transactions/{id}/sync` can still settle a deposit. A charge past the
-window has no such route yet and needs an operator to look at it at the gateway.
+`GET /admin/account-credit-transactions/{id}/sync` can still settle a deposit, and
+`GET /admin/collect-transactions/{id}/sync` (Re-check in the operator console) asks the gateway about a charge the same
+way a scan does. A bill charge stays in the in-flight guard for as long as it is `PENDING`, however old, so a long gateway
+outage cannot lead to a second charge for the bill; past the window a customer retry is told to contact support. The row's
+`errorMessage` says what the gateway answered. A gateway answer of cancelled ends the charge as `CANCELLED` by itself.
+`POST /admin/collect-transactions/{id}/close` ends a charge by hand: one with a gateway reference only when the gateway,
+asked again at that moment, says it did not succeed (declined or never confirmed). A charge that may still capture
+(processing, waiting for authentication or capture) is refused: cancel it at the gateway, then re-check. A charge with no
+gateway reference (the process stopped between creating the row and the gateway's answer) cannot be asked about: look for
+its id as the reference at the gateway, then close it if nothing was charged.
+
+A bill blocked by such a charge stays `SENT`, so it keeps counting for dunning and auto-suspension (`DueBills`, and the
+balance). That is deliberate: see the C4 changelog entry of 2026-11-07.
 
 ### Bill writers and the credit lock
 
-Everything that reads a bill's unpaid amount and writes the bill holds
-`billing.Repo.WithProfileLock`: pay with credits, issuing a bill, a recorded manual payment, a
-card charge settling. Gateway calls stay outside it. A charge succeeding on a bill that was
-paid some other way meanwhile becomes spendable credit, and one the bill already holds changes
-nothing.
+A bill is replaced whole, so everything that reads one and writes it holds the profile lock
+(`pricing.ProfileLockKey`, through `billing.Repo.WithProfileLock` outside pricing): the charge,
+pay with credits, issuing or deleting at send, a recorded manual payment, a card charge settling,
+and the admin bill update and delete. A move between profiles takes both, in sorted order. Gateway
+calls stay outside it, except a deposit refund, which holds it across the gateway call so the
+credit cannot be spent meanwhile; a charge for that profile waits behind it. A charge succeeding on
+a bill that was paid some other way meanwhile becomes spendable credit, and one the bill already
+holds changes nothing.
+
+### Duplicate bills from older releases
+
+Before the charge took the profile lock, a site could get two bills for one profile and cycle.
+Both are invoiced and both count in the balance and the amount due. Look for them on an installed
+site, before the 1st if you can: an `OPEN` pair becomes two invoices at the next send.
+
+<!-- duplicate-bills-list -->
+```sql
+SELECT doc->>'billingProfileId' AS profile, doc#>>'{billingCycle,startDate}' AS cycle, count(*) AS bills,
+       jsonb_agg(jsonb_build_object('id', id, 'status', doc->>'status', 'net',
+         (SELECT coalesce(sum((v #>> '{}')::numeric), 0) FROM jsonb_path_query(doc, '$.items[*].netAmount') v)) ORDER BY id) AS detail
+FROM bill GROUP BY 1, 2 HAVING count(*) > 1;
+```
+
+A bill that holds no money can go. This removes `OPEN` duplicates with no item above zero and no
+adjustment, keeps one bill in every group, and takes the same lock as the charge, so it is safe on a
+running site:
+
+<!-- duplicate-bills-delete -->
+```sql
+BEGIN;
+SELECT pg_advisory_xact_lock(hashtext('billing-profile-credit:' || p))
+FROM (SELECT DISTINCT doc->>'billingProfileId' AS p FROM bill WHERE doc->>'status' = 'OPEN'
+      GROUP BY doc->>'billingProfileId', doc#>>'{billingCycle,startDate}' HAVING count(*) > 1) d;
+DELETE FROM bill WHERE id IN (
+  SELECT id FROM (
+    SELECT id, has_money, row_number() OVER (PARTITION BY profile, cycle ORDER BY has_money DESC, id) AS n
+    FROM (
+      SELECT id, doc->>'billingProfileId' AS profile, doc#>>'{billingCycle,startDate}' AS cycle,
+             jsonb_path_exists(doc, '$.adjustments[*] ? (@ != null)')
+             OR EXISTS (SELECT 1 FROM jsonb_path_query(doc, '$.items[*].netAmount') v WHERE (v #>> '{}')::numeric <> 0) AS has_money
+      FROM bill WHERE doc->>'status' = 'OPEN'
+    ) o
+  ) r WHERE n > 1 AND NOT has_money
+) RETURNING id, doc->>'billingProfileId' AS profile;
+COMMIT;
+```
+
+Run the first query again. What it still lists holds money on both sides, or was already issued, and
+needs a person: a resource on both bills has been charged twice for the time they overlap, so compare
+the lines, keep the correct total, and delete the other bill (`DELETE /api/v1/admin/bill/{id}`) or
+refund it if it has been paid. Until then the charge keeps writing to the oldest `OPEN` bill of the
+pair. An item only on the newer bill is re-billed on the oldest at the next pass, so clear such a pair
+soon: waiting raises the amount to refund.
 
 ---
 
@@ -824,7 +899,7 @@ consume. Permissions are noted per area.
 | `minutelyCharge` | `30 * * * * *` | accrue `minute`-cadence rules |
 | `hourlyCharge` | `0 0 * * * *` | accrue `hour`-cadence rules |
 | `monthlyCharge` | `0 0 * * * *` | accrue `month`-cadence rules |
-| `monthlyBill` | `0 0 0 * * *` | finalize last-month OPEN bills → SENT/PAID |
+| `monthlyBill` | `0 30 0 * * *` | finalize last-month OPEN bills → SENT/PAID, after the passes closing the month |
 | `monthlyCollect` | `0 0 7 1,5,9,13,16 * *` | collect SENT bills via card |
 | `autoSuspensionJob` | `0 */30 * * * *` | dunning + auto-suspend |
 | `paymentGatewayTransactionScanning` | `0 */20 * * * *` | re-drive stuck PENDING transactions |

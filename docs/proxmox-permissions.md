@@ -26,7 +26,6 @@ The admin **Test connection** button on the Proxmox provider reads the token's e
 | Privilege | Why |
 |---|---|
 | `Sys.Audit` | cluster status, node PCI scan, datacenter firewall options (the preflight) |
-| `Sys.AccessNetwork` | image import: a download makes a node reach a URL. PVE accepts this on `/nodes/<node>`, or `Sys.Audit` with `Sys.Modify` on `/`, and the second is what lets the portal token through today, since this role reaches `/` only. The role carries it so a site moving away from `Sys.Modify` on `/` can grant it on `/nodes` |
 | `Sys.Modify` | cluster firewall security groups and tenant isolation rules (`/cluster/firewall/groups` and `/rules` check `Sys.Modify` on `/`) |
 | `Sys.Console` | HA resources and rules of protected servers (`/cluster/ha/*` checks it on `/`) |
 | `Pool.Allocate`, `Pool.Audit` | create, read, fill and delete project pools |
@@ -44,10 +43,10 @@ The admin **Test connection** button on the Proxmox provider reads the token's e
 | `SDN.Allocate`, `SDN.Audit` | vnets, subnets, per-project EVPN zones, SDN apply |
 | `SDN.Use` | attach NICs to vnets and public bridges |
 | `Datastore.AllocateSpace`, `Datastore.Audit` | VM disks and volumes, storage listing |
-| `Datastore.AllocateTemplate` | upload a server's seed CD (user-data on a network without DHCP), and download a customer image to the import store |
+| `Datastore.AllocateTemplate` | upload a server's seed CD (user-data on a network without DHCP), and a customer image to the import store |
 | `Mapping.Audit`, `Mapping.Use` | GPU PCI mappings |
 
-An existing site adds the two newest with `pveum role modify ProxCloudPlatform --append 1 --privs "VM.GuestAgent.Unrestricted Datastore.AllocateTemplate"`. Without them Test connection warns, and the two actions answer 409 and name the missing privilege. `VM.Backup` is added the same way; without it the backup actions answer 409 naming it, before a running server is stopped. For image import add `Sys.AccessNetwork` and grant `pveum acl modify /storage/<importStorage> --roles PVEDatastoreAdmin --users proxcloud@pve --tokens 'proxcloud@pve!platform' --propagate 0`.
+An existing site adds the two newest with `pveum role modify ProxCloudPlatform --append 1 --privs "VM.GuestAgent.Unrestricted Datastore.AllocateTemplate"`. Without them Test connection warns, and the two actions answer 409 and name the missing privilege. `VM.Backup` is added the same way; without it the backup actions answer 409 naming it, before a running server is stopped. For image import grant `pveum acl modify /storage/<importStorage> --roles PVEDatastoreAdmin --users proxcloud@pve --tokens 'proxcloud@pve!platform' --propagate 0`.
 
 ACLs:
 
@@ -60,7 +59,7 @@ ACLs:
 | `/sdn` | `ProxCloudPlatform` | 1 | zones, vnets, controllers, apply |
 | `/storage` | `ProxCloudPlatform` | 1 | or one ACL per storage the provider's profiles use |
 | `/mapping/pci` | `ProxCloudPlatform` | 1 | GPU clusters only |
-| `/storage/<importStorage>` | `PVEDatastoreAdmin` | 0 | image import only: PVE wants `Datastore.Allocate` to delete any file that is not a backup, and the import store is the one place the portal needs that. Without it an imported image works, the downloaded file stays on the store, and Test connection warns. The installer adds it with a NAS |
+| `/storage/<importStorage>` | `PVEDatastoreAdmin` | 0 | image import only: PVE wants `Datastore.Allocate` to delete any file that is not a backup, and the import store is the one place the portal needs that. Without it an imported image works, the uploaded file stays on the store, and Test connection warns. The installer adds it with a NAS |
 
 There is no ACL on `/vms`. VMs get their rights only through their pool, so a VM outside `pc-*`/`pc-templates` is invisible to the portal.
 
@@ -141,7 +140,7 @@ Run these on any node (cluster config is shared). Replace the `<…>` placeholde
 
 ```sh
 # roles
-pveum role add ProxCloudPlatform --privs "Sys.AccessNetwork Sys.Audit Sys.Console Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Backup VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Console VM.GuestAgent.Audit VM.GuestAgent.Unrestricted VM.Migrate VM.PowerMgmt VM.Replicate VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Mapping.Audit Mapping.Use"
+pveum role add ProxCloudPlatform --privs "Sys.Audit Sys.Console Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Backup VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Console VM.GuestAgent.Audit VM.GuestAgent.Unrestricted VM.Migrate VM.PowerMgmt VM.Replicate VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Mapping.Audit Mapping.Use"
 pveum role add ProxCloudCAPI --privs "Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
 pveum role add ProxCloudCSI --privs "VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit"
 pveum role add ProxCloudImages --privs "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Console VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
