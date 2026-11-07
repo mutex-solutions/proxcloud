@@ -4,6 +4,32 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Restore checks volumes and quota; a server delete drops backups last
+
+**What changed**
+
+- Restore compares volumes, not slots. A volume is held by an archive when the archive names its volid and its VOLUME row
+  is older than the backup; anything else is refused by name. The boot disk always counts.
+- A sync leaves a server's VOLUME rows alone while a restore runs, and a disk with no row before the restore dates from
+  that backup (`dataSince`).
+- Restore checks vCPUs, RAM, disk and GPUs against the project's quota, on what it would produce, before stopping the
+  server and again after.
+- A server delete removes its backups after protection is off and the volumes have moved, just before the destroy, and
+  refuses a VM holding a lock.
+
+**Why**
+
+- A disk added after another left landed on the same slot, and PVE gives it the same name as well, so a forced restore
+  destroyed it while it was in no archive. The row is the one thing the portal holds that tells the two apart, so it has to
+  outlive a restore: PVE cuts the VM's config to `{memory: 128}` meanwhile, and a sync in that window archived every row of
+  the server, which also restarted their bills.
+- Resize down, spend the freed quota, restore: the project ended over its limit, and a disk now on another server was
+  recreated uncounted.
+- A refusal from protection or from moving a volume left the server alive with its backups gone. The delete cannot simply
+  go last: PVE lets the token delete an archive only while its VM exists.
+
+**Diagrams updated:** none; no container or relationship changed.
+
 ## 2026-11-07: Installer re-runs keep operator settings, split mode passes preflight
 
 **What changed**

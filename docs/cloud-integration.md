@@ -377,10 +377,17 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   per server; 409 when the store lacks room for the server's provisioned disks plus `storageHeadroomPct`. Restore runs
   in place: PVE destroys the VM's disks and rebuilds them and the config from the archive, and a running server comes
   back running. 409 up front, with nothing stopped, on a protected server, when the token lacks the privilege, when a
-  disk (a detached one too) is not in the archive, or when the NICs changed since the backup. A failed restore task
-  after that point leaves the VM without disks until another restore. Backups go with their server, on delete and on
-  project teardown, and a failure stops either: PVE lets the token delete an archive only through `VM.Backup` on its
-  VM. Keeping a server's state past its life is what an image is for. An archive of a VM destroyed outside the portal
+  volume (a detached one too) is not in the archive, when what the restore would produce breaks the project's quota
+  (vCPUs, RAM, disk, GPUs), or when the NICs changed since the backup. A volume counts as in the archive when the archive
+  names its volid and its VOLUME row is older than the backup: PVE reuses disk names, so a disk added after another left
+  can carry that one's name. The boot disk always counts, so a restore can roll back a rebuild. A disk with no row before
+  a restore dates from that backup (`dataSince` on the row), so the same archive can restore it again. A disk that left and
+  came back, or was retyped, is refused too, though the archive has an older copy: move it away or take a new backup. The
+  checks run again once the server has stopped. VOLUME rows wait out a restore (PVE cuts the config to `{memory: 128}`
+  meanwhile), so the bill and the row's age carry on. A failed restore task after that point leaves the VM without disks until
+  another restore. Backups go with their server, on delete and on project teardown, and a failure stops either: PVE lets
+  the token delete an archive only through `VM.Backup` on its VM, so on a server delete they go after protection is off
+  and the volumes have moved, just before the destroy. Keeping a server's state past its life is what an image is for. An archive of a VM destroyed outside the portal
   disappears from the token's listing (PVE filters by the same check), so it stays on the store until an operator
   removes it; its notes name the project. Backups are not billed yet.
 - **Image import** (`POST /project/{id}/cloud` `IMAGE {name, url, format?, checksum?, checksumAlgorithm?, profile?}`, offered

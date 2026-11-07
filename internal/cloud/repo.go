@@ -174,6 +174,15 @@ func (r *Repo) ChangeExternalID(ctx context.Context, res *CloudResource, externa
 	})
 }
 
+// SetDataSince records how old the resource's data is (CloudResource.DataSince).
+func (r *Repo) SetDataSince(ctx context.Context, res *CloudResource, t time.Time) error {
+	if _, err := r.resources.SetByID(ctx, res.ID, pgdoc.M{"dataSince": t}, nil); err != nil {
+		return err
+	}
+	res.DataSince = &t
+	return nil
+}
+
 // FindByServiceIDAndExternalID returns the cached resource, or (nil,nil).
 func (r *Repo) FindByServiceIDAndExternalID(ctx context.Context, serviceID, externalID string) (*CloudResource, error) {
 	var out CloudResource

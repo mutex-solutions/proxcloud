@@ -140,19 +140,86 @@ func (s *Service) CreateServerBackup(ctx context.Context, projectID, externalID,
 	return s.C.WaitTask(ctx, up)
 }
 
+// RestoreVolume is what the portal knows about one disk of a server: the name a tenant knows it by, and when its data
+// came to this server. Since comes from the VOLUME row: a disk from elsewhere is a new row, one that stays (extended,
+// detached and attached again, recreated by a restore) keeps its row, and a disk only a restore brought back dates from
+// that backup.
+type RestoreVolume struct {
+	Name  string
+	Since time.Time
+}
+
+// RestoreGuard runs right before a restore goes ahead, on what the server has now and what the archive would make of
+// it. It answers with the server's volumes by volid, or refuses with an error.
+type RestoreGuard func(ctx context.Context, cur, archive VMConfig) (map[string]RestoreVolume, error)
+
+// archivedDisks is what the archive holds and brings back: PVE leaves out detached disks and any with backup=0.
+func archivedDisks(archive VMConfig) []VMDisk {
+	var out []VMDisk
+	for _, d := range ParseDisks(archive) {
+		if !strings.HasPrefix(d.Slot, "unused") && !slices.Contains(strings.Split(archive.Str(d.Slot), ","), "backup=0") {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // restoreConflict says what a restore over cur would lose beyond the tenant's own rollback: PVE destroys every disk
 // of the VM first, a detached one too, and only brings back what the archive holds. NICs must match as well, or a
 // public address the portal holds would lose its NIC (or a restored NIC would keep a released address).
-func restoreConflict(cur, backup VMConfig) string {
-	for _, d := range ParseDisks(cur) {
-		if strings.HasPrefix(d.Slot, "unused") || backup[d.Slot] == nil {
-			return fmt.Sprintf("Disk %s is not in this backup and would be lost. Delete it or move it to another server first", d.Slot)
+//
+// A disk counts as held only if the archive names its volid and the disk was on this server when the backup started.
+// A slot says nothing, since the next disk takes the free one. A volid alone says nothing either: PVE names a disk with
+// the lowest free number, so a disk added after the first one left gets that one's name (lab, PVE 9.2).
+// The boot disk is the exception. It cannot leave its server, so rolling it back is what a restore is, a rebuild included.
+// ponytail: this also refuses a disk that did leave and came back, or was retyped, though the archive has an older copy.
+// Moving it away or taking a new backup gets past that; a per-volume id on the row would tell them apart.
+func restoreConflict(cur, archive VMConfig, archivedAt int64, vols map[string]RestoreVolume) string {
+	held := map[string]bool{}
+	for _, d := range archivedDisks(archive) {
+		held[d.VolID] = true
+	}
+	disks := ParseDisks(cur)
+	slices.SortFunc(disks, func(a, b VMDisk) int { return strings.Compare(a.Slot, b.Slot) })
+	for _, d := range disks {
+		if d.Boot && archive[d.Slot] != nil {
+			continue
+		}
+		v := vols[d.VolID]
+		if strings.HasPrefix(d.Slot, "unused") || !held[d.VolID] || v.Since.IsZero() || v.Since.Unix() > archivedAt {
+			name := v.Name
+			if name == "" {
+				name = d.Slot
+			}
+			return fmt.Sprintf("Volume %s is not in this backup and would be lost. Delete it, move it to another server, or take a new backup first", name)
 		}
 	}
-	if !maps.Equal(nicMACs(cur), nicMACs(backup)) {
+	if !maps.Equal(nicMACs(cur), nicMACs(archive)) {
 		return "The server's network interfaces changed since this backup. Put them back first, or take a new backup"
 	}
 	return ""
+}
+
+// RestoreDemand is what a restore adds to the server as it is now, per quota key. Negative when it would free some.
+func RestoreDemand(cur, archive VMConfig) (vcpus, ramMb, diskGb int) {
+	disk := 0
+	for _, d := range archivedDisks(archive) {
+		disk += d.SizeGiB
+	}
+	return configVCPUs(archive) - configVCPUs(cur), configRAMMb(archive) - configRAMMb(cur), disk - diskGbOf(cur)
+}
+
+// configVCPUs is the vCPU count of a config: PVE's defaults are one socket and one core.
+func configVCPUs(cfg VMConfig) int { return max(cfg.Int("sockets"), 1) * max(cfg.Int("cores"), 1) }
+
+// configRAMMb is the memory of a config, "2048" or "current=2048,...". PVE's default is 512.
+func configRAMMb(cfg VMConfig) int {
+	first, _, _ := strings.Cut(cfg.Str("memory"), ",")
+	mb, err := strconv.Atoi(strings.TrimPrefix(first, "current="))
+	if err != nil {
+		return 512
+	}
+	return mb
 }
 
 var nicKeyRe = regexp.MustCompile(`^net\d+$`)
@@ -170,53 +237,73 @@ func nicMACs(cfg VMConfig) map[string]string {
 
 // RestoreServerBackup replaces a pool VM's disks and config with an archive of it; a running VM comes back running.
 // Past the POST there is no way back: PVE has destroyed the disks, so a failed task leaves the VM without them
-// and only another restore helps.
-func (s *Service) RestoreServerBackup(ctx context.Context, projectID, externalID, store, volid string) error {
+// and only another restore helps. guard runs before the server stops and again once it has, since a stop can take
+// minutes and a disk added meanwhile would go too. It answers with when the archive was taken.
+func (s *Service) RestoreServerBackup(ctx context.Context, projectID, externalID, store, volid string, guard RestoreGuard) (time.Time, error) {
 	ctx, cancel := context.WithTimeout(ctx, backupTimeout)
 	defer cancel()
 	vm, err := s.resolveOwned(ctx, projectID, externalID)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	if HasTag(vm.Tags, tagProtected) {
-		return conflictf("Server %s is protected, and its replica would not follow a restore. Remove the protection first", vm.Name)
+		return time.Time{}, conflictf("Server %s is protected, and its replica would not follow a restore. Remove the protection first", vm.Name)
 	}
-	if err := s.ownBackup(ctx, projectID, externalID, store, volid); err != nil {
-		return err
+	owned, err := s.ownBackup(ctx, projectID, externalID, store, volid)
+	if err != nil {
+		return time.Time{}, err
 	}
+	archivedAt := time.Unix(owned.CreatedAt, 0)
 	backup, err := s.C.BackupConfig(ctx, vm.Node, volid)
 	if err != nil {
-		return backupDenied(err, store)
+		return archivedAt, backupDenied(err, store)
 	}
-	cur, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
-	if err != nil {
-		return err
+	check := func() error {
+		cur, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+		if err != nil {
+			return err
+		}
+		vols, err := guard(ctx, cur, backup)
+		if err != nil {
+			return err
+		}
+		if msg := restoreConflict(cur, backup, owned.CreatedAt, vols); msg != "" {
+			return conflictf("%s", msg)
+		}
+		return nil
 	}
-	if msg := restoreConflict(cur, backup); msg != "" {
-		return conflictf("%s", msg)
+	if err := check(); err != nil {
+		return archivedAt, err
 	}
 	running := vm.Status == "running"
+	restart := func() {
+		if running {
+			if su, serr := s.C.StartVM(ctx, vm.Node, vm.VMID); serr == nil {
+				_ = s.C.WaitTask(ctx, su)
+			}
+		}
+	}
 	if running {
 		up, err := s.C.StopVM(ctx, vm.Node, vm.VMID)
 		if err == nil {
 			err = s.C.WaitTask(ctx, up)
 		}
 		if err != nil {
-			return fmt.Errorf("pve restore: stop: %w", err)
+			return archivedAt, fmt.Errorf("pve restore: stop: %w", err)
+		}
+		if err := check(); err != nil {
+			restart()
+			return archivedAt, err
 		}
 	}
 	up, err := s.C.CreateVM(ctx, vm.Node, map[string]string{"vmid": strconv.Itoa(vm.VMID), "archive": volid, "force": "1"})
 	if err != nil {
 		// Refused before it began: the disks are intact, so the server goes back to how it was.
-		if running {
-			if su, serr := s.C.StartVM(ctx, vm.Node, vm.VMID); serr == nil {
-				_ = s.C.WaitTask(ctx, su)
-			}
-		}
-		return backupDenied(err, store)
+		restart()
+		return archivedAt, backupDenied(err, store)
 	}
 	if err := s.C.WaitTask(ctx, up); err != nil {
-		return err
+		return archivedAt, err
 	}
 	if running {
 		su, err := s.C.StartVM(ctx, vm.Node, vm.VMID)
@@ -224,22 +311,23 @@ func (s *Service) RestoreServerBackup(ctx context.Context, projectID, externalID
 			err = s.C.WaitTask(ctx, su)
 		}
 		if err != nil {
-			return fmt.Errorf("pve restore: restart: %w", err)
+			return archivedAt, fmt.Errorf("pve restore: restart: %w", err)
 		}
 	}
-	return nil
+	return archivedAt, nil
 }
 
 // ownBackup is the ownership check of the actions that take a volid.
-func (s *Service) ownBackup(ctx context.Context, projectID, externalID, store, volid string) error {
+func (s *Service) ownBackup(ctx context.Context, projectID, externalID, store, volid string) (ServerBackup, error) {
 	backups, err := s.ListServerBackups(ctx, projectID, externalID, store)
 	if err != nil {
-		return err
+		return ServerBackup{}, err
 	}
-	if !slices.ContainsFunc(backups, func(b ServerBackup) bool { return b.ID == volid }) {
-		return conflictf("This server has no backup %s", volid)
+	i := slices.IndexFunc(backups, func(b ServerBackup) bool { return b.ID == volid })
+	if i < 0 {
+		return ServerBackup{}, conflictf("This server has no backup %s", volid)
 	}
-	return nil
+	return backups[i], nil
 }
 
 // DeleteServerBackup removes one archive of a pool VM.
@@ -248,7 +336,7 @@ func (s *Service) DeleteServerBackup(ctx context.Context, projectID, externalID,
 	if err != nil {
 		return err
 	}
-	if err := s.ownBackup(ctx, projectID, externalID, store, volid); err != nil {
+	if _, err := s.ownBackup(ctx, projectID, externalID, store, volid); err != nil {
 		return err
 	}
 	return s.deleteArchive(ctx, vm.Node, store, volid)
@@ -262,12 +350,20 @@ func (s *Service) deleteArchive(ctx context.Context, node, store, volid string) 
 	return backupDenied(err, store)
 }
 
-// DeleteServerBackups removes every archive of a pool VM, before the VM goes (see the note on top). A VM already
-// gone has nothing that can be resolved, so nothing to do here.
+// DeleteServerBackups removes every archive of a pool VM, as the last step before the VM goes: nothing brings an archive
+// back, and PVE only lets the token delete one while the VM exists (see the note on top). So a locked VM, whose destroy
+// PVE would refuse, keeps them. A VM already gone has nothing that can be resolved, so nothing to do here.
 func (s *Service) DeleteServerBackups(ctx context.Context, projectID, externalID, store string) error {
 	vm, err := s.ResolveVM(ctx, projectID, externalID)
 	if err != nil || vm == nil {
 		return err
+	}
+	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	if cfg.Str("lock") != "" {
+		return conflictf("Server %s is busy with another operation. Try again in a moment", vm.Name)
 	}
 	backups, err := s.ListServerBackups(ctx, projectID, externalID, store)
 	if err != nil {
@@ -279,6 +375,27 @@ func (s *Service) DeleteServerBackups(ctx context.Context, projectID, externalID
 		}
 	}
 	return nil
+}
+
+// RetireServer deletes a server for good, in the one order that loses nothing on a refusal. Protection first: HA would
+// restart the VM, and a replicated disk cannot leave it. Then the volumes that outlive it; if one cannot move the server
+// stays, and its data with it. Its backups next, since nothing brings one back, and they cannot wait for the destroy
+// (see DeleteServerBackups). backupStore "" = the provider keeps no backups.
+func (s *Service) RetireServer(ctx context.Context, projectID, externalID, backupStore string, keepVolumes bool) error {
+	if err := s.DisableProtection(ctx, projectID, externalID); err != nil {
+		return fmt.Errorf("disable protection: %w", err)
+	}
+	if keepVolumes {
+		if err := s.KeepServerVolumes(ctx, projectID, externalID); err != nil {
+			return fmt.Errorf("keep the server's volumes: %w", err)
+		}
+	}
+	if backupStore != "" {
+		if err := s.DeleteServerBackups(ctx, projectID, externalID, backupStore); err != nil {
+			return fmt.Errorf("delete the server's backups: %w", err)
+		}
+	}
+	return s.DeleteServer(ctx, projectID, externalID)
 }
 
 // DeleteProjectBackups removes every archive of the project the token can see, while its VMs still exist. Fail-closed

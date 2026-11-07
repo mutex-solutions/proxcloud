@@ -339,6 +339,13 @@ func (p *VolumeSyncProvider) list(ctx context.Context, skip func(ClusterResource
 			}
 			continue
 		}
+		// A restore holds this lock, then cuts the config down to {memory: 128} for as long as it takes, while
+		// /cluster/resources still names the VM (lab, PVE 9.2). The disks are coming back: a row archived now would stop the
+		// bill and lose how old the disk is. Every VM with disks the portal made has a name.
+		if cfg.Str("lock") == "create" || (cfg.Str("name") == "" && len(ParseDisks(cfg)) == 0) {
+			p.unread[r.VMID] = false
+			continue
+		}
 		profile := TagValue(cfg.Str("tags"), tagProfilePref)
 		identity := taggedIdentity(cfg.Str("tags"), cfg.Str("lock"))
 		if identity == "" {
