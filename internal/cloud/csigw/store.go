@@ -176,6 +176,13 @@ func (s *Store) ClusterVolumes(ctx context.Context, clusterID, serviceID, storag
 	return out, err
 }
 
+// StorageVolumes lists every cluster's rows on one store of one provider, all states but deleted: who holds which name.
+func (s *Store) StorageVolumes(ctx context.Context, serviceID, storage string) ([]Volume, error) {
+	var out []Volume
+	err := s.vols.Find(ctx, pgdoc.M{"computeServiceId": serviceID, "storage": storage, "state": pgdoc.M{"$ne": StateDeleted}}, &out)
+	return out, err
+}
+
 func (s *Store) ProjectBytes(ctx context.Context, projectID, serviceID string) (int64, error) {
 	var rows []Volume
 	if err := s.vols.Find(ctx, pgdoc.M{"projectId": projectID, "computeServiceId": serviceID,

@@ -139,7 +139,13 @@ func (c *Client) MintClusterTokens(ctx context.Context, clusterID string, sc Clu
 // RevokeClusterTokens deletes the tokens. PVE stops honouring a deleted token's ACL entries at once and drops
 // them from user.cfg at the next write of that file; until then `pveum` warns "ignore invalid acl token".
 func (c *Client) RevokeClusterTokens(ctx context.Context, clusterID string) error {
-	return errors.Join(c.DeleteAPIToken(ctx, capiUser, clusterID), c.DeleteAPIToken(ctx, csiUser, clusterID))
+	return errors.Join(c.DeleteAPIToken(ctx, capiUser, clusterID), c.RevokeClusterCSIToken(ctx, clusterID))
+}
+
+// RevokeClusterCSIToken deletes the cluster's csi@pve!<id> token alone: a cluster moved onto the CSI gateway keeps its
+// CAPI token. A token already gone counts as revoked.
+func (c *Client) RevokeClusterCSIToken(ctx context.Context, clusterID string) error {
+	return c.DeleteAPIToken(ctx, csiUser, clusterID)
 }
 
 // PrivCheck is one ACL path and the privileges the token must hold there.

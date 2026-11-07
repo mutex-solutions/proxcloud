@@ -512,6 +512,11 @@ func (c *Client) ListNodes(ctx context.Context) ([]map[string]any, error) {
 	return c.list(ctx, "/api/v1/nodes", "")
 }
 
+// ListPersistentVolumes lists the cluster's PersistentVolumes.
+func (c *Client) ListPersistentVolumes(ctx context.Context) ([]map[string]any, error) {
+	return c.list(ctx, "/api/v1/persistentvolumes", "")
+}
+
 func metaNameNS(obj map[string]any) (name, ns string) {
 	meta, _ := obj["metadata"].(map[string]any)
 	name, _ = meta["name"].(string)

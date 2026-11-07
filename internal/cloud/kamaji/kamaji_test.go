@@ -593,6 +593,7 @@ func (f *fakeAPI) ListTenantControlPlanes(_ context.Context, ns, labelSelector s
 func (f *fakeAPI) ListMachineDeployments(_ context.Context, _, _ string) ([]map[string]any, error) {
 	return f.mds, nil
 }
+func (f *fakeAPI) ListPersistentVolumes(_ context.Context) ([]map[string]any, error) { return nil, nil }
 
 func TestServiceCreateDelete(t *testing.T) {
 	api := newFakeAPI()

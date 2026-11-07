@@ -26,6 +26,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/csigw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metricsjob"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
@@ -430,6 +431,13 @@ func run() error {
 	adminH.SetHmacEncryptor(enc)
 	adminH.SetCollectChecker(txnScanner)
 	adminH.SetKamaji(kamajiFactory)
+	adminH.SetCSIMigrator(func(ctx context.Context, es *externalservice.ExternalService, ks *kamaji.Service, clusterID string, dryRun, force bool, adoptDetached []string) (any, error) {
+		rep, err := projectH.MigrateClusterCSI(ctx, es, ks, clusterID, dryRun, force, adoptDetached)
+		if rep == nil {
+			return nil, err
+		}
+		return rep, err
+	})
 	adminH.SetDbaas(func(es *externalservice.ExternalService) (*dbaas.Service, error) {
 		return dbaas.New(es.DbaasConfig(), es.ID)
 	})

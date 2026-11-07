@@ -124,6 +124,7 @@ flowchart TB
   ha --> vm
   svc --> nas
   svc -->|"tenant clusters' proxmox-csi controllers, per-cluster credential, TLS"| api
+  api -->|"CSI migration: tenant API servers, Kamaji admin kubeconfig"| svc
   svc -.->|"control plane, konnectivity"| sbx
   papi -.-> pbs
 ```
