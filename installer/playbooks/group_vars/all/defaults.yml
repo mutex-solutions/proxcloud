@@ -175,7 +175,9 @@ pc_defaults:
       train: community
       s3_port: 30900
       console_port: 30901
-    # mode external / ceph-rgw: an existing S3 endpoint. ceph-rgw also registers the ceph-s3 provider.
+    # mode external / ceph-rgw: an existing S3 endpoint. ceph-rgw also registers the ceph-s3 provider
+    # (preflight requires all four) and tenants see region as the store's region: the zonegroup's api_name,
+    # or us-east-1, which AWS clients send no location constraint for.
     endpoint: ""
     access_key: ""
     secret_key: ""

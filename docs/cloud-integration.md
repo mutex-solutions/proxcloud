@@ -865,6 +865,14 @@ Static websites are offered only when `s3WebsiteEndpoint` is set, and the gatewa
 `405` to the website calls; ProxCloud reports that as "does not offer static website hosting". Sites live at
 `<bucket>.<endpoint host>`, so that name needs a wildcard DNS record.
 
+The public-read statement a website installs serves on the S3 endpoint whatever the gateway answers to website calls.
+Turning the option off or clearing `s3WebsiteEndpoint` therefore does not close a live website. The tenant still sees
+the Website tab with **Disable website** on such a bucket, and making the bucket private also removes the website.
+
+`POST /api/v1/admin/service/object-store/test` with `{s3Endpoint, adminApiUrl, region, adminAccessKey, adminSecretKey}`
+tests a connection without storing it: an S3 call, then the key's own Admin Ops user and caps. The answer is `200`, or
+`400` with the reason. The installer calls it before registering the provider.
+
 Accessors: `IsCephS3`, `S3Endpoint`, `AdminAPIURL`, `S3WebsiteEndpoint`,
 `CephRegion`, `UIDPrefix`, `RGWUIDFor(projectID)`, `DefaultQuotaGiB`, and
 `CephConfig(...)` which assembles a `client.CephConfig` for `client.NewCephS3`.
