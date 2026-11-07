@@ -194,8 +194,12 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 	}
 	// A project's own template (E2B-built) by name, name:tag or id; anything else is a built-in.
 	custom, customName, err := h.resolveCustomTemplate(r.Context(), proj.ID, spec.Template)
-	if err != nil {
+	if errors.Is(err, sandbox.ErrBadTemplate) {
 		h.fail(w, httpx.BadRequest(err.Error()))
+		return
+	}
+	if err != nil {
+		h.fail(w, err)
 		return
 	}
 	if custom != nil {
