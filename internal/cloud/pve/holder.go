@@ -13,6 +13,7 @@ package pve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -29,10 +30,17 @@ const (
 	holderLockWait = time.Minute
 )
 
-// carrierTaskWait is how long a failed carry waits to learn its move has stopped before leaving the carrier in place.
-var carrierTaskWait = time.Minute
+// lostTaskWait is how long a failure waits to learn what a task it lost track of did, before assuming the worst.
+var lostTaskWait = time.Minute
 
 func isHolder(tags string) bool { return hasTag(tags, tagHolder) }
+
+// taskRefused: PVE answered no before starting the task. Any other failure could be a lost answer to a started task.
+// PVE checks a VM's lock before it forks, and reports that as a 500.
+func taskRefused(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && (ae.Status < 500 || strings.Contains(ae.Error(), "is locked"))
+}
 
 // lockHolders takes the project's holder lock and returns its release. Busy = ConflictError.
 func (s *Service) lockHolders(ctx context.Context, projectID string) (func(), error) {
@@ -74,6 +82,9 @@ func (s *Service) newHolder(ctx context.Context, projectID, node, tags string) (
 	// The token holds VM.Config.* only on VMs in the pool, so: created empty, configured once it is in there.
 	up, err := s.C.CreateVM(ctx, node, map[string]string{"vmid": strconv.Itoa(vmid), "pool": pool})
 	if err != nil {
+		if !taskRefused(err) && !strings.Contains(err.Error(), "already exist") {
+			s.dropLostCreate(ctx, projectID, vmid)
+		}
 		return nil, err
 	}
 	// From here the VM may exist, and without its tags it counts as a server: billed, and shown to the customer. It
@@ -110,6 +121,31 @@ func (s *Service) newHolder(ctx context.Context, projectID, node, tags string) (
 		}
 	}
 	return nil, fmt.Errorf("pve: holder VM %d not listed yet", vmid)
+}
+
+// dropLostCreate removes the VM a create POST with no answer may have made. It sits untagged in the pool, where the sync
+// bills it as a server. NextID is racy, so the vmid alone proves nothing: only a VM in this pool and as blank as a create
+// leaves it goes, and clones have a name and a disk.
+// ponytail: PVE unreachable for the whole wait leaves the VM; a sync rule for blank VMs if that ever shows up.
+func (s *Service) dropLostCreate(ctx context.Context, projectID string, vmid int) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lostTaskWait)
+	defer cancel()
+	for {
+		// cluster/resources lags, and the task may still be running.
+		if vm, err := s.ResolveVM(ctx, projectID, strconv.Itoa(vmid)); err == nil && vm != nil {
+			if cfg, err := s.C.GetVMConfig(ctx, vm.Node, vmid); err == nil {
+				if cfg.Str("tags") == "" && cfg.Str("name") == "" && len(ParseDisks(cfg)) == 0 {
+					s.destroyBestEffort(ctx, vm.Node, vmid)
+				}
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 // PlaceVolume picks where a standalone volume goes: the node with most free space on the profile's storage, or
@@ -174,6 +210,10 @@ func (s *Service) CreateDetachedVolume(ctx context.Context, projectID, node, sto
 // KeepServerVolumes moves every data volume of a server to its node's holder, attached and detached alike, so the
 // server can be deleted without them. Only the boot disk stays behind. Any failure aborts: the caller must not
 // delete the server then. PVE reassigns a disk only within a node, which is why the holder is per node.
+//
+// A move that may still be running keeps the holder lock until it expires (holderLockMaxFor, far past any rename): the next
+// operation in this project could see the holder empty and destroy it as the disk lands. That blocks the project's volume
+// changes for those minutes, and only a lost answer from PVE gets there.
 func (s *Service) KeepServerVolumes(ctx context.Context, projectID, externalID string) error {
 	vm, err := s.ResolveVM(ctx, projectID, externalID)
 	if err != nil || vm == nil {
@@ -196,7 +236,12 @@ func (s *Service) KeepServerVolumes(ctx context.Context, projectID, externalID s
 	if err != nil {
 		return err
 	}
-	defer release()
+	moveInDoubt := false
+	defer func() {
+		if !moveInDoubt {
+			release()
+		}
+	}()
 	if vm.Status == "running" {
 		up, err := s.C.StopVM(ctx, vm.Node, vm.VMID)
 		if err != nil {
@@ -245,9 +290,11 @@ func (s *Service) KeepServerVolumes(ctx context.Context, projectID, externalID s
 		}
 		up, err := s.C.MoveDisk(ctx, vm.Node, vm.VMID, MoveDiskOpts{Disk: slot, TargetVMID: holder.VMID, TargetDisk: free})
 		if err != nil {
+			moveInDoubt = !taskRefused(err)
 			return err
 		}
 		if err := s.C.WaitTask(ctx, up); err != nil {
+			moveInDoubt = !s.C.TaskStopped(ctx, up, lostTaskWait)
 			return err
 		}
 	}

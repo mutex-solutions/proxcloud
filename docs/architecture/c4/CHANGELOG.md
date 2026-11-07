@@ -4,6 +4,28 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Holders survive a lost answer from PVE
+
+**What changed**
+
+- `KeepServerVolumes` keeps the holder lock until it expires when a move may still be running, the same doubt the carrier
+  path already acted on. `taskRefused` is the one rule for telling a refusal from a lost answer.
+- `newHolder` on a create POST with no answer removes the VM only if it is in the project's pool and as blank as the create
+  leaves it.
+- A VOLUME pass looks for a holder on the other nodes before calling it gone. A node that cannot answer fails the pass.
+
+**Why**
+
+- The lock was released with the move possibly running, so a later `dropEmptyHolder` could see the holder empty and destroy
+  it as the disk landed. A disk lost that way is customer data, and blocking volume changes in one project for 10 minutes is
+  a small price. Only a lost answer gets there.
+- The cleanup defer sat after the POST's error check, so a lost answer left an untagged VM in the project pool, billed as a
+  server. NextID is racy, so the vmid alone does not make the VM ours: a name, a tag or a disk means it is someone else's.
+- `/cluster/resources` names the old node for a moment during a holder's migrate. Skipping that holder archived its volume
+  rows until the next sync, up to 15 minutes hidden and unbilled. Keeping rows of every skipped holder instead would have
+  kept the phantom carrier rows that the same reconcile exists to remove, so the pass tells moved from gone.
+
+**Diagrams updated:** none (no new component or flow).
 ## 2026-11-07: Admin delete-now goes through the deletion job
 
 **What changed**
