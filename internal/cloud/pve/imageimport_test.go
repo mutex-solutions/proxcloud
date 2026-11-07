@@ -99,8 +99,8 @@ func TestImportImage(t *testing.T) {
 	if !strings.HasPrefix(file, "pc-import-p1-") || !strings.HasSuffix(file, ".qcow2") {
 		t.Fatalf("the name comes from the portal, never the tenant: %q", file)
 	}
-	if b.created.Get("pool") != "st-p1" {
-		t.Fatalf("%v", b.created)
+	if b.created.Get("pool") != "st-p1" || b.created.Get("name") != imageBuildPrefix+"golden" {
+		t.Fatalf("in the pool, and named so that no sample takes it for a server: %v", b.created)
 	}
 	if got := b.cfg.Get("scsi0"); got != "local-zfs:0,discard=on,import-from=imp:import/"+file {
 		t.Fatalf("%q", got)

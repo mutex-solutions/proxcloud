@@ -25,7 +25,8 @@ const vanishGrace = 2 * time.Minute
 
 // splitVMs splits /cluster/resources qemu rows of one pool into live VMs and templates. A clone on
 // its way to becoming an image, or the donor of a rebuild's disk, is neither: as a server it would
-// bill a phantom hour, disk included.
+// bill a phantom hour, disk included. Nor is a VM without a name yet: /cluster/resources lags a create by seconds
+// (lab, PVE 9.2), and every VM the portal makes has one.
 func splitVMs(rows []ClusterResource, pool string) (vms, templates []ClusterResource) {
 	for _, r := range rows {
 		if r.Type != "qemu" || r.Pool != pool {
@@ -33,7 +34,7 @@ func splitVMs(rows []ClusterResource, pool string) (vms, templates []ClusterReso
 		}
 		if r.Template == 1 {
 			templates = append(templates, r)
-		} else if !strings.HasPrefix(r.Name, imageBuildPrefix) && !isHolder(r.Tags) {
+		} else if r.Name != "" && !strings.HasPrefix(r.Name, imageBuildPrefix) && !isHolder(r.Tags) {
 			vms = append(vms, r)
 		}
 	}

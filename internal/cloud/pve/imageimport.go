@@ -89,8 +89,9 @@ func (s *Service) ImportImage(ctx context.Context, projectID string, req ImageIm
 	if err != nil {
 		return 0, 0, err
 	}
-	// Empty first: the token holds VM.Config.* through the pool, so only a VM already in the pool can be configured.
-	up, err = s.C.CreateVM(ctx, req.Node, map[string]string{"vmid": strconv.Itoa(vmid), "pool": s.PoolFor(projectID)})
+	// Empty first: the disk and CD need a VM already in the pool. Named from the start, or the sampler bills the
+	// VM as a server for as long as import-from runs (the config, name included, lands when the task ends).
+	up, err = s.C.CreateVM(ctx, req.Node, map[string]string{"vmid": strconv.Itoa(vmid), "pool": s.PoolFor(projectID), "name": imageBuildPrefix + req.Name})
 	if err == nil {
 		err = s.C.WaitTask(ctx, up)
 	}
@@ -103,7 +104,7 @@ func (s *Service) ImportImage(ctx context.Context, projectID string, req ImageIm
 	}
 	// The same shape as a pipeline template (images/build.py), without the NIC: every server gets its own on create.
 	up, err = s.C.SetVMConfig(ctx, req.Node, vmid, map[string]string{
-		"name": imageBuildPrefix + req.Name, "ostype": "l26", "cores": "2", "memory": "2048", "cpu": "host", "agent": "1",
+		"ostype": "l26", "cores": "2", "memory": "2048", "cpu": "host", "agent": "1",
 		"scsihw": "virtio-scsi-single", "serial0": "socket", "vga": "serial0", "tags": TagManaged, "boot": "order=scsi0",
 		"scsi0": fmt.Sprintf("%s:0,discard=on,import-from=%s", req.DiskStorage, volid),
 		"ide2":  req.DiskStorage + ":cloudinit",
