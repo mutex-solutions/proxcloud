@@ -23,6 +23,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/billingresource"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/csigw"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metricsjob"
@@ -977,9 +978,23 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	go serve(appSrv, "app", log, errCh)
 	go serve(mgmtSrv, "mgmt", log, errCh)
+	// CSI gateway for tenant clusters' proxmox-csi controllers: its own TLS listener, never the public port or the mgmt
+	// one (/debug/* there has no auth). Off unless an address is configured.
+	var csiSrv *http.Server
+	if cfg.CSIGateway.Addr != "" {
+		gwPVE, gwPortal := csigw.ProviderClients(esSvc.Get)
+		csiSrv = csigw.NewServer(cfg.CSIGateway.Addr, &csigw.Handler{Reg: csigw.NewStore(pg), PVE: gwPVE, Portal: gwPortal,
+			Quota: projectH.CSIDiskQuota, Audit: auditSvc.LogAsync, Log: log})
+		go func() {
+			log.Info("listening", "server", "csi-gateway", "addr", csiSrv.Addr)
+			if err := csiSrv.ListenAndServeTLS(cfg.CSIGateway.TLSCert, cfg.CSIGateway.TLSKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("csi-gateway server: %w", err)
+			}
+		}()
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -995,6 +1010,9 @@ func run() error {
 	defer cancel()
 	_ = appSrv.Shutdown(sctx)
 	_ = mgmtSrv.Shutdown(sctx)
+	if csiSrv != nil {
+		_ = csiSrv.Shutdown(sctx)
+	}
 	return nil
 }
 
