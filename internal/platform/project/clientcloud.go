@@ -365,8 +365,21 @@ func (h *Handler) projectInit(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	// Entry into a project provisions it on its services (PVE pool, RGW user, …) + ENABLEs (the
-	// cloud-bootstrap slice of project bootstrap). Idempotent — safe on a bootstrapped project.
+	// Entry into an ENABLED project provisions it on its services (PVE pool, RGW user, …): idempotent. A DISABLED one nothing
+	// holds any more (no operator's disable, and billing allows it: an admin API project, or one moved to a paying profile)
+	// comes up the same way, so a suspended profile or an operator is what keeps a project down, never a member's click. Any
+	// other status stays as it is.
+	lift := false
+	if p.IsDisabled() && !p.DisabledByOperator {
+		if lift, err = h.svc.BillingAllowsEnabled(r.Context(), p); err != nil {
+			h.fail(w, err)
+			return
+		}
+	}
+	if !p.IsEnabled() && !lift {
+		httpx.Empty(w)
+		return
+	}
 	if err := h.enableAndBootstrap(r.Context(), p); err != nil {
 		h.fail(w, err)
 		return
