@@ -194,6 +194,7 @@ func TestSplitVMsSkipsImageBuild(t *testing.T) {
 		{Type: "qemu", VMID: 2, Pool: "p", Name: imageBuildPrefix + "golden"},
 		{Type: "qemu", VMID: 3, Pool: "p", Name: "golden", Template: 1},
 		{Type: "qemu", VMID: 4, Pool: "q", Name: "other"},
+		{Type: "qemu", VMID: 5, Pool: "p"}, // just created: the page has no name for it yet
 	}, "p")
 	if len(vms) != 1 || vms[0].VMID != 1 || len(templates) != 1 || templates[0].VMID != 3 {
 		t.Fatalf("vms=%+v templates=%+v", vms, templates)

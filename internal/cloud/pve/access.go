@@ -139,7 +139,7 @@ type PrivCheck struct {
 var PlatformPrivileges = []PrivCheck{
 	// cluster status, PCI scan, datacenter firewall options and the cluster
 	// security groups all check "/" itself (granted with propagate=0).
-	{Path: "/", Privs: []string{"Sys.Audit", "Sys.Modify"}},
+	{Path: "/", Privs: []string{"Sys.AccessNetwork", "Sys.Audit", "Sys.Modify"}},
 	// node firewall options (nftables preflight) and node network list
 	// (management-bridge guard) check /nodes/{node}: PVEAuditor on /nodes.
 	{Path: "/nodes", Privs: []string{"Sys.Audit"}},

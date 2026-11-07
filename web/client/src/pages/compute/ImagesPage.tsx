@@ -1,12 +1,12 @@
 // Images: "My images" = the project's own templates and server snapshots (cache list,
 // POST /project/{pid}/resource?type=IMAGE → CloudResource with data.image); "Public images" =
 // the project templates from the PUBLIC_IMAGES bulk action (flat image maps). Own images can be
-// deleted. There is no image upload: new images come from server snapshots.
+// deleted. New images come from server snapshots, or from a URL a node downloads ("imageImport").
 import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
-import { HardDrive, MoreHorizontal, RefreshCw, Trash2 } from "lucide-react"
+import { Download, HardDrive, MoreHorizontal, RefreshCw, Trash2 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
@@ -19,10 +19,12 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiFetch } from "@/lib/api"
 import { timeAgo } from "@/lib/format"
-import { useCloudCursorList, useCloudScope, useProjectId } from "@/lib/hooks"
+import { useCloudCursorList, useCloudFeatures, useCloudScope, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
 
 const gb = (bytes?: number) => (bytes ? (bytes / 1073741824).toFixed(2) : "0.00")
@@ -83,6 +85,33 @@ export default function ImagesPage() {
       }),
     enabled: !!pid && !!scope,
     select: (d) => d?.result ?? [],
+  })
+
+  const features = useCloudFeatures(pid)
+  const [importing, setImporting] = useState(false)
+  const [imp, setImp] = useState({ name: "", url: "", format: "qcow2", checksum: "" })
+  const importImage = useMutation({
+    mutationFn: () =>
+      apiFetch(`/project/${pid}/cloud`, {
+        method: "POST",
+        cloud: scope,
+        body: {
+          type: "IMAGE",
+          data: {
+            name: imp.name.trim(),
+            url: imp.url.trim(),
+            format: imp.format,
+            ...(imp.checksum.trim() ? { checksum: imp.checksum.trim(), checksumAlgorithm: "sha256" } : {}),
+          },
+        },
+      }),
+    onSuccess: () => {
+      toast.success(`Image "${imp.name.trim()}" imported`)
+      setImporting(false)
+      setImp({ name: "", url: "", format: "qcow2", checksum: "" })
+      void qc.invalidateQueries({ queryKey: ["cloud", pid, "IMAGE"] })
+    },
+    onError: (e: Error) => toast.error(e.message),
   })
 
   const [toDelete, setToDelete] = useState<CloudResource | null>(null)
@@ -170,20 +199,73 @@ export default function ImagesPage() {
         eyebrow="Compute"
         description="Your project's images and snapshots, plus the project templates."
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void mineRefetch()
-              void pub.refetch()
-            }}
-            disabled={mineFetching || pub.isFetching}
-            aria-label="Refresh"
-          >
-            <RefreshCw className={mineFetching || pub.isFetching ? "size-4 animate-spin" : "size-4"} />
-          </Button>
+          <>
+            {features.has("imageImport") && (
+              <Button size="sm" onClick={() => setImporting(true)}>
+                <Download className="size-4" /> Import image
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void mineRefetch()
+                void pub.refetch()
+              }}
+              disabled={mineFetching || pub.isFetching}
+              aria-label="Refresh"
+            >
+              <RefreshCw className={mineFetching || pub.isFetching ? "size-4 animate-spin" : "size-4"} />
+            </Button>
+          </>
         }
       />
+
+      <Dialog open={importing} onOpenChange={(o) => !importImage.isPending && setImporting(o)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Import image</DialogTitle>
+            <DialogDescription>
+              A public cloud image with cloud-init, in qcow2 or VMDK format. Downloading and importing can take minutes, and
+              you can leave this page: the image appears when it is ready.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <div className="grid gap-2">
+              <Label htmlFor="imp-name">Name</Label>
+              <Input id="imp-name" value={imp.name} onChange={(e) => setImp({ ...imp, name: e.target.value })} placeholder="debian-13" />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="imp-url">URL</Label>
+              <Input id="imp-url" value={imp.url} onChange={(e) => setImp({ ...imp, url: e.target.value })} placeholder="https://example.com/image.qcow2" />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="imp-format">Format</Label>
+              <select
+                id="imp-format"
+                className="h-9 rounded-md border bg-transparent px-3 text-sm"
+                value={imp.format}
+                onChange={(e) => setImp({ ...imp, format: e.target.value })}
+              >
+                <option value="qcow2">qcow2</option>
+                <option value="vmdk">VMDK</option>
+              </select>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="imp-sum">SHA-256 checksum (optional)</Label>
+              <Input id="imp-sum" value={imp.checksum} onChange={(e) => setImp({ ...imp, checksum: e.target.value })} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" disabled={importImage.isPending} onClick={() => setImporting(false)}>
+              Cancel
+            </Button>
+            <Button disabled={!imp.name.trim() || !imp.url.trim() || importImage.isPending} onClick={() => importImage.mutate()}>
+              {importImage.isPending ? "Importing…" : "Import"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Tabs defaultValue="mine">
         <TabsList>

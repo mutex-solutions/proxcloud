@@ -153,6 +153,7 @@ The shape is documented in the header of `proxmox.go`:
                                         "suggestedClass": "standard"}}, // installer fio result, display only
     "storageHeadroomPct": 10,                            // % of a storage kept free when placing disks
     "backupStorage": "nas-backup",                       // shared store of server backups; absent = none
+    "importStorage": "nas-templates",                    // store with import content for customer images; absent = none
     "templates": {},                                     // optional pins or overlays on the discovered OS templates
     "gpus": {},                                          // {mappingId: {"alias": "nvidia-4090"}}
     "overcommit": {"cpu": 4},
@@ -185,6 +186,7 @@ Typed accessors used by the rest of the code:
 | `PVEStorageClasses()` / `PVEEffectiveStorageClass(id)` | `storageClasses` | per-storage class override and installer suggestion; effective class = valid override, else detected |
 | `PVEStorageHeadroomPct()` | `storageHeadroomPct` (default 10, valid 0–99) | free space kept on a storage when placing a disk |
 | `PVEBackupStorage()` | `backupStorage` | shared store of server backups (NFS, CephFS, PBS); absent = no backups offered |
+| `PVEImportStorage()` | `importStorage` | store with `import` content customer images are downloaded to; absent = no image import offered |
 | `PVEVolumeProfileFunc()` | `storageProfiles`, `capabilities`, `storageClasses` | resolves each synced disk's own profile and storage class |
 | `PVETemplates()`, `PVEImageCatalog()` | `templates` | OS templates servers are cloned from: discovered from cluster tags ([images/README.md](../images/README.md)); an entry with `vmid` + `node` pins one, any other entry overlays `name`, `osDistro`, `minDiskGb` |
 | `PVEGPUAliases()` / `PVEGPUMappingsFor(alias)` | `gpus` | PCI mapping ids per GPU alias |
@@ -381,6 +383,17 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   VM. Keeping a server's state past its life is what an image is for. An archive of a VM destroyed outside the portal
   disappears from the token's listing (PVE filters by the same check), so it stays on the store until an operator
   removes it; its notes name the project. Backups are not billed yet.
+- **Image import** (`POST /project/{id}/cloud` `IMAGE {name, url, format?, checksum?, checksumAlgorithm?, profile?}`, offered
+  when `config.importStorage` names a store with `import` content): the portal probes the URL, a node downloads it with
+  `download-url`, a VM takes it with `import-from` on the profile's boot storage, and it becomes the project's template.
+  The probe (`pkg/safeurl`) allows http and https without credentials, and refuses any host on the redirect chain that
+  resolves to a non-public address or one in `network.blockedCidrs`, so list public management ranges there; the portal
+  needs internet access for it. The node gets the final URL. `format` is `qcow2` or `vmdk`, not raw: PVE checks those two
+  as untrusted and refuses a backing file, while any bytes are a valid raw image, so a name that resolved differently on
+  the node could otherwise land an internal response on a tenant's disk. A disk over 200 GiB is 409. The client waits;
+  if it gives up the import finishes and the sampler adds the image. Nothing is left on a failure except, with no
+  `Datastore.Allocate` on the store, the downloaded file (Test connection warns, see `docs/proxmox-permissions.md`). A
+  template on local storage clones on its own node only, like any project image. Billed as `image`.
 - **Spread groups** (`spreadGroup`, `spreadStrict` on create): a `grp-<name>` tag on the VM. The scheduler
   prefers the node with the fewest members of the group in the project; strict refuses a node that has one.
   At create time only: nothing moves a member later. PVE 9's own affinity rules are HA-only, and strict.

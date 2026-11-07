@@ -166,6 +166,15 @@ def run():
         st, _ = action(a["id"], "DELETE_BACKUP", id=ids[0])
         check("delete it", st == 200, st)
 
+    # Image import, when the provider has a store: E2E_IMPORT_URL = a small public qcow2.
+    url = os.environ.get("E2E_IMPORT_URL", "")
+    if url:
+        st, _ = call("POST", f"/project/{PID}/cloud", {"type": "IMAGE", "data": {"name": f"{PREFIX}-x", "url": "http://169.254.169.254/"}})
+        check("an internal URL is refused", st == 400, st)
+        img = create("IMAGE", name=f"{PREFIX}-imp", url=url)
+        imported = create("SERVER", name=f"{PREFIX}-imp", flavorId=FLAVOR, imageId=img["externalId"], networkIds=[netid])
+        check("a server starts from it", imported["data"]["server"]["status"] != "ERROR", imported["data"]["server"]["status"])
+
     # Rebuild keeps the identity.
     _, before = call("GET", f"/project/{PID}/cloud/{a['id']}")
     st, res = action(a["id"], "REBUILD", imageId=IMAGE2)
