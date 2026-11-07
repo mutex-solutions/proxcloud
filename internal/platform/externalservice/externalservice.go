@@ -12,6 +12,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/powerdns"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/truenas"
+	"net/netip"
 	"net/url"
 )
 
@@ -68,8 +69,8 @@ func (e *ExternalService) IsCephS3() bool { return e.Provider() == "ceph-s3" }
 func (e *ExternalService) IsRustFS() bool { return e.Provider() == "rustfs" }
 
 // IsTrueNAS reports a TrueNAS file-share provider (config.provider == "truenas"). Config: apiUrl, username,
-// fingerprint/insecureTls, parentDataset, mountHost (default: the host of apiUrl), defaultQuotaGiB, region;
-// secret: apiKey.
+// fingerprint/insecureTls, parentDataset, mountHost (default: the host of apiUrl), defaultQuotaGiB, region,
+// snatSources (default: none, see ParseSNATSources); secret: apiKey.
 func (e *ExternalService) IsTrueNAS() bool { return e.Provider() == "truenas" }
 
 // IsPowerDNS reports a DNS zone provider (config.provider == "powerdns").
@@ -100,7 +101,40 @@ func (e *ExternalService) TrueNASService() (*truenas.Service, error) {
 			host = u.Hostname()
 		}
 	}
-	return &truenas.Service{C: c, Parent: parent, Host: host}, nil
+	snat, err := ParseSNATSources(e.Config["snatSources"])
+	if err != nil {
+		return nil, err
+	}
+	return &truenas.Service{C: c, Parent: parent, Host: host, SNATSources: snat}, nil
+}
+
+// ParseSNATSources reads config.snatSources in export form. Single hosts only: each entry goes on every export of the
+// provider, so a range here would open every share to whole networks.
+func ParseSNATSources(raw any) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("snatSources must be a list of addresses")
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		s, _ := it.(string)
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			a, aerr := netip.ParseAddr(s)
+			if aerr != nil {
+				return nil, fmt.Errorf("snatSources: %q is not an address", s)
+			}
+			p = netip.PrefixFrom(a, a.BitLen())
+		}
+		if !p.IsSingleIP() || p.Addr().IsUnspecified() {
+			return nil, fmt.Errorf("snatSources: %q is not a single host address", s)
+		}
+		out = append(out, p.String())
+	}
+	return out, nil
 }
 
 // IsObjectStore reports a provider that serves only buckets.

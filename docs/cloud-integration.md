@@ -784,6 +784,24 @@ its address. A public NIC has one when the NAS is routable from the public netwo
 through SNAT arrives with a node's address, and the tenant isolation rules drop traffic from the pool to the nodes'
 management network: on a NAS placed there, private subnets cannot mount.
 
+**A NAT between tenants and the NAS.** When a NAT rewrites tenant traffic on its way to the NAS, the NAS sees the NAT's
+address, which no export lists, so the mount fails. `config.snatSources` (default: none, off) lists those addresses,
+single hosts only:
+
+```json
+{"provider": "truenas", "snatSources": ["192.0.2.1"]}
+```
+
+Each address is added to every export of the provider, Kubernetes RWX datasets included, at create, by
+`REFRESH_ACCESS` and by every sync, and no release of a tenant's address takes it off. Removing it (an empty list)
+takes it off at the next sync; clients that rely on it then get `Stale file handle` or a refused mount.
+
+**This gives up tenant isolation on that NAS.** A NAT address is shared by every tenant behind it, and the address is
+all an NFS export checks. Every tenant behind the NAT can mount every NFS share of every project on this provider, read
+and write its files (a new dataset is mode `777`), and the export path is no secret. On SMB only the share's password
+is left. Use it only for tenants who trust each other, or give the NAS a path that keeps each tenant's address and leave
+the setting off. The customer console tells a share's owner when the setting applies to it.
+
 **Actions:** `EXTEND {sizeGb}` (either direction, not below usage), `REFRESH_ACCESS`, `RESET_PASSWORD`. Delete removes
 the export, the SMB user and the dataset with its data. Project teardown does the same.
 

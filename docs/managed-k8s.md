@@ -171,7 +171,9 @@ of that size and the `shared-file` StorageClass (csi-driver-nfs, `ReadWriteMany`
 which stay the default. The dataset is an ordinary share of the project named `k8s-<clusterId>`: it bills as a share,
 counts against the share quota, can be resized on the Shares page, and its export follows the project's addresses.
 PVCs are subdirectories of it, so `refquota` caps them together, not one by one. It is destroyed with the cluster, by the sweep after the delete cascade (30 minutes after the cluster was created at the earliest).
-Workers reach it over their egress, so the NAS must see them under the project's addresses: no NAT on the way.
+Workers reach it over their egress, so the NAS must see them under the project's addresses: no NAT on the way. Where a
+NAT cannot be avoided, the TrueNAS provider's `snatSources` keeps its address on the dataset's export, which gives up
+isolation between every tenant behind that NAT (see "TrueNAS file shares" in `cloud-integration.md`).
 Full-tier sites (ceph-csi CephFS) are not built yet.
 
 **`sharedWorkers`.** For a site that will not give the portal token the right to mint tokens,

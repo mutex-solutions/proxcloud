@@ -145,7 +145,7 @@ flowchart TB
 | Server snapshots | `internal/cloud/pve/snapshot.go`, `internal/platform/project/snapshot_pve.go` | VM snapshots, refused on storage without them, newest-only rollback on ZFS. | Implemented |
 | Server backups | `internal/cloud/pve/backup.go`, `internal/platform/project/backup_pve.go` | vzdump to `config.backupStorage` (NFS, CephFS, PBS), ownership by a project stamp in the archive notes, in-place restore that refuses what it would lose, archives removed with the server and on project teardown. | Implemented |
 | Holder VMs | `internal/cloud/pve/holder.go` | Volumes without a server: one never-started VM per (project, node), hidden from the server sync, billing, quota and the scheduler. | Implemented |
-| TrueNAS client | `internal/cloud/truenas/`, `internal/platform/project/cloud_shares.go` | JSON-RPC over WebSocket; NFS and SMB shares as dataset + refquota + export, limited to the project's addresses: every release of an address goes through the exports first (`PublicIPRepo.release`, `withShareAccessRevoked`) and the sync reconciles them. NFS squashes root. | Implemented |
+| TrueNAS client | `internal/cloud/truenas/`, `internal/platform/project/cloud_shares.go` | JSON-RPC over WebSocket; NFS and SMB shares as dataset + refquota + export, limited to the project's addresses: every release of an address goes through the exports first (`PublicIPRepo.release`, `withShareAccessRevoked`) and the sync reconciles them. NFS squashes root. Optional per-provider `snatSources` keep a site's NAT addresses on every export, at the cost of isolation between tenants behind that NAT. | Implemented |
 
 ## C3c. Metering and billing
 

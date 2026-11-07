@@ -4,6 +4,27 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Share exports can keep a site's NAT addresses
+
+**What changed**
+
+- TrueNAS providers take `config.snatSources`, single host addresses, off by default. `truenas.Service` adds them to
+  every export it writes or compares, so tenant shares and Kubernetes RWX datasets both keep them through create, sync
+  and address release. An empty list takes them off at the next sync. The operator console edits the setting with the
+  isolation cost in its help text, and the customer console tells a share's owner when it applies.
+- Share rows now carry `updatedAt`, and a stored row without one takes sync updates instead of being refused.
+
+**Why**
+
+- An export lists a project's own addresses. Behind a NAT the NAS sees the NAT's address instead, so the mount failed, and an
+  address added by hand was removed by sync, which left mounted pods with `Stale file handle`. A site can now say so
+  explicitly. The address is shared by every tenant behind the NAT, so the setting gives up isolation between them on that NAS.
+  That is why it is off by default, takes hosts only, and is stated plainly wherever it is set.
+- Share rows were written without `updatedAt`, and the sync's optimistic guard refused every update to them. Their
+  addresses and `usedBytes` stayed as created, so a share priced on `size_gb` billed its usage at creation.
+
+**Diagrams updated:** `c3-components.md` (TrueNAS client row).
+
 ## 2026-11-07: Server backups (P5-3)
 
 **What changed**
