@@ -127,8 +127,7 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 	// template's NICs included — or no group / ipfilter applies to it.
 	cloned, err := s.C.GetVMConfig(ctx, node, vmid)
 	if err != nil {
-		s.destroyBestEffort(ctx, node, vmid)
-		return nil, fmt.Errorf("pve create: read config: %w", err)
+		return nil, s.undoCreate(ctx, node, vmid, fmt.Errorf("pve create: read config: %w", err))
 	}
 	req.createdUnix = nowUTC().Unix()
 	params := nicFirewallParams(cloned)
@@ -140,8 +139,7 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 	if req.AssignIP != nil {
 		ip, prefix, gw, aerr := req.AssignIP(ctx, vmid)
 		if aerr != nil {
-			s.destroyBestEffort(ctx, node, vmid)
-			return nil, aerr
+			return nil, s.undoCreate(ctx, node, vmid, aerr)
 		}
 		fixedIP = ip
 		ipconfig0 = fmt.Sprintf("ip=%s/%d,gw=%s", ip, prefix, gw)
@@ -179,8 +177,7 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 	if err != nil {
 		// The clone exists but is misconfigured — destroy it rather than leak a
 		// half-built VM into the pool (billing would meter it).
-		s.destroyBestEffort(ctx, node, vmid)
-		return nil, fmt.Errorf("pve create: configure: %w", err)
+		return nil, s.undoCreate(ctx, node, vmid, fmt.Errorf("pve create: configure: %w", err))
 	}
 
 	// Root disk grow (PVE cannot shrink; template smaller than flavor is the norm).
@@ -215,13 +212,11 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 		err = s.SetIPFilter(ctx, node, vmid, "net0", []string{fixedIP + "/32"})
 	}
 	if err != nil {
-		s.destroyBestEffort(ctx, node, vmid)
-		return nil, fmt.Errorf("pve create: firewall: %w", err)
+		return nil, s.undoCreate(ctx, node, vmid, fmt.Errorf("pve create: firewall: %w", err))
 	}
 	if req.Seed != nil {
 		if err := req.Seed(ctx, node, vmid); err != nil {
-			s.destroyBestEffort(ctx, node, vmid)
-			return nil, fmt.Errorf("pve create: seed: %w", err)
+			return nil, s.undoCreate(ctx, node, vmid, fmt.Errorf("pve create: seed: %w", err))
 		}
 	}
 
@@ -229,7 +224,52 @@ func (s *Service) CreateServer(ctx context.Context, req CreateServerReq) (*cloud
 		_ = s.C.WaitTask(ctx, up)
 	}
 
-	return s.readBackServer(ctx, node, vmid, req)
+	cr, err := s.readBackServer(ctx, node, vmid, req)
+	if err != nil {
+		// A VM with no row that keeps running would hold addresses the caller is about to give back.
+		return nil, s.undoCreate(ctx, node, vmid, err)
+	}
+	return cr, nil
+}
+
+// VMLeftError: a create failed and the VM it made is not known to be gone. Its addresses stay held, since the VM may
+// still be using them: the sync adopts it, and its delete or the orphan sweep frees them.
+type VMLeftError struct {
+	VMID int
+	Err  error
+}
+
+func (e *VMLeftError) Error() string {
+	return fmt.Sprintf("pve create: vm %d not confirmed destroyed: %v", e.VMID, e.Err)
+}
+func (e *VMLeftError) Unwrap() error { return e.Err }
+
+// undoCreate destroys what a failed create made and answers cause, or a VMLeftError unless PVE confirms the VM is gone:
+// its destroy task ended well, or the cluster no longer lists it. Asking the VM itself cannot tell: a token whose rights
+// come from the pool gets 403 for a VM that left it. It has its own clock: the create's may be what ran out.
+func (s *Service) undoCreate(ctx context.Context, node string, vmid int, cause error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), opTimeout)
+	defer cancel()
+	if up, err := s.C.StopVM(ctx, node, vmid); err == nil {
+		_ = s.C.WaitTask(ctx, up)
+	}
+	up, err := s.C.DeleteVM(ctx, node, vmid)
+	if err == nil {
+		err = s.C.WaitTask(ctx, up)
+	}
+	if err == nil {
+		return cause
+	}
+	rows, lerr := s.C.ClusterResources(ctx, "vm")
+	if lerr != nil {
+		return &VMLeftError{VMID: vmid, Err: cause}
+	}
+	for _, r := range rows {
+		if r.Type == "qemu" && r.VMID == vmid {
+			return &VMLeftError{VMID: vmid, Err: cause}
+		}
+	}
+	return cause
 }
 
 // destroyBestEffort reaps a half-created VM (stop → delete, errors swallowed).
@@ -593,6 +633,9 @@ func (s *Service) CreateImage(ctx context.Context, projectID, serverExtID, name 
 	}
 	if vm == nil {
 		return 0, fmt.Errorf("pve: server %s not found", serverExtID)
+	}
+	if err := refuseAppliance(vm); err != nil {
+		return 0, err
 	}
 	newID, err := s.C.NextID(ctx)
 	if err != nil {

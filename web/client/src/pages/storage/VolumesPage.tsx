@@ -483,7 +483,7 @@ export default function VolumesPage() {
                   <SelectContent>
                     <SelectItem value="none">No server (standalone)</SelectItem>
                     {(servers ?? [])
-                      .filter((s) => !!s.externalId)
+                      .filter((s) => !!s.externalId && !s.data?.server?.loadBalancerId)
                       .map((s) => (
                         <SelectItem key={s.id} value={s.externalId as string}>
                           {(s.data?.server?.name as string) || s.name || s.externalId}

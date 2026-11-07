@@ -35,6 +35,9 @@ func (s *Service) AddVolume(ctx context.Context, projectID, serverExtID string, 
 	if vm == nil {
 		return "", fmt.Errorf("pve: server %s not found", serverExtID)
 	}
+	if err := refuseAppliance(vm); err != nil {
+		return "", err
+	}
 	if err := s.refuseUnreplicable(ctx, vm, storage); err != nil {
 		return "", err
 	}
@@ -215,6 +218,9 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 	if target == nil {
 		return conflictf("Server %s not found", targetServerExtID)
 	}
+	if err := refuseAppliance(target); err != nil {
+		return err
+	}
 	if err := s.refuseUnreplicable(ctx, target, slotStorage(volID)); err != nil {
 		return err
 	}
@@ -318,6 +324,9 @@ func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int,
 	st := caps[slotStorage(volID)]
 	out := []ClusterResource{}
 	for _, t := range vms {
+		if refuseAppliance(&t) != nil {
+			continue
+		}
 		if t.Node == vm.Node || (st.Shared && st.Nodes[t.Node].Active) {
 			out = append(out, t)
 		}

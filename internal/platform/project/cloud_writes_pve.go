@@ -108,6 +108,8 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 type pveAppliance struct {
 	loadBalancerID string
 	beforeBoot     func(ctx context.Context, ps *pve.Service, node string, vmid int) error
+	// left is set when the build failed and its VM may still exist: the answer to the tenant cannot say so.
+	left *pve.VMLeftError
 }
 
 // pveBuildServer creates a server and its row. An appliance only reaches it with a data map the
@@ -367,11 +369,19 @@ func (h *Handler) pveBuildServer(ctx context.Context, u *user.User, proj *Projec
 		SecurityGroups: groups,
 	})
 	if cerr != nil {
-		if allocatedVMID != "" {
-			_ = h.publicIPs.ReleaseNIC(ctx, es.ID, allocatedVMID, "net0")
-		}
-		if seededVMID != 0 {
-			h.pveReleaseSeed(ctx, ps, es.ID, strconv.Itoa(seededVMID))
+		var left *pve.VMLeftError
+		if errors.As(cerr, &left) {
+			slog.Error("pve create: vm left behind, keeping its addresses", "project", proj.ID, "vmid", left.VMID, "err", cerr)
+			if ap != nil {
+				ap.left = left
+			}
+		} else {
+			if allocatedVMID != "" {
+				_ = h.publicIPs.ReleaseNIC(ctx, es.ID, allocatedVMID, "net0")
+			}
+			if seededVMID != 0 {
+				h.pveReleaseSeed(ctx, ps, es.ID, strconv.Itoa(seededVMID))
+			}
 		}
 		var he *httpx.HTTPError
 		if errors.As(cerr, &he) { // the pool ran out

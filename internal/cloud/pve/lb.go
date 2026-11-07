@@ -25,6 +25,15 @@ func LBTag(id string) string { return tagLBPref + id }
 // LBOfTags is the load balancer a VM is the appliance of ("" = none).
 func LBOfTags(tags string) string { return TagValue(tags, tagLBPref) }
 
+// refuseAppliance is the check on any VM a tenant's request names as a target: a disk moved onto a balancer's VM
+// cannot be detached and goes with the balancer, and an image of it would carry its tag.
+func refuseAppliance(vm *ClusterResource) error {
+	if LBOfTags(vm.Tags) != "" {
+		return conflictf("This server belongs to a load balancer. Change or delete the load balancer instead")
+	}
+	return nil
+}
+
 // CreatedStamp reads a VM's identity stamp, "" when it has none.
 func CreatedStamp(tags string) string { return TagValue(tags, tagCreatedPref) }
 
@@ -64,6 +73,9 @@ const (
 	lbMaxListeners = 20
 	lbMaxPools     = 20
 	lbMaxMembers   = 50
+	// LBMaxConfig is what a config may render to. PVE's file-write takes 60 KiB of content in a POST of at most
+	// 64 KiB, and form encoding grows this text by about a tenth.
+	LBMaxConfig = 45 << 10
 )
 
 var (
@@ -151,6 +163,9 @@ func (s *LBSpec) Validate() string {
 
 const haproxyGlobal = `global
   log /dev/log local0
+  chroot /var/lib/haproxy
+  user haproxy
+  group haproxy
   maxconn 20000
   stats socket /run/haproxy/admin.sock mode 660 level admin
 
@@ -221,10 +236,23 @@ var ErrLBNotReady = errors.New("the appliance is not ready yet")
 
 const (
 	haproxyConfig = "/etc/haproxy/haproxy.cfg"
-	// haproxyReload checks the new file before it replaces the one in use, so a config HAProxy rejects
-	// leaves the balancer running on the last good one. Nothing a tenant wrote is in this command.
-	// sshd goes first: nobody logs in to an appliance, and a listener may want its port.
-	haproxyReload = "systemctl disable --now ssh ssh.socket 2>/dev/null; set -e; haproxy -c -q -f " + haproxyConfig + ".new; mv " + haproxyConfig + ".new " + haproxyConfig + "; systemctl reload-or-restart haproxy"
+	// haproxyReload checks the new file before it replaces the one in use, and puts the old one back if the
+	// reload still fails, as for a port the check cannot see is taken, so the next boot does not read a config
+	// that never ran. systemctl cannot tell: it reports a reload HAProxy gave up on as done, so this asks the
+	// master process, whose reload answers Success=0 or 1 (HAProxy 2.7 or newer). Nothing a tenant wrote is in
+	// this command. sshd goes first: nobody logs in to an appliance, and a listener may want its port.
+	haproxyReload = `systemctl disable --now ssh ssh.socket 2>/dev/null
+set -e
+F=` + haproxyConfig + `
+haproxy -c -q -f $F.new
+cp $F $F.old
+mv $F.new $F
+swap() {
+  systemctl is-active -q haproxy || { systemctl start haproxy; return; }
+  out=$(printf 'reload\n' | socat -t30 - /run/haproxy-master.sock)
+  case "$out" in Success=1*) ;; *) echo "$out" | grep ALERT >&2; return 1 ;; esac
+}
+swap || { mv $F.old $F; swap; exit 1; }`
 	// haproxyInstall prepares a stock image from its repositories, over the public NIC.
 	// ponytail: a site with no egress bakes haproxy and socat into the image config.lbImage names.
 	haproxyInstall = "pgrep -x apt-get >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq haproxy socat; }"
@@ -255,7 +283,7 @@ func (s *Service) PushHAProxy(ctx context.Context, node string, vmid int, config
 		return err
 	}
 	if exit != 0 {
-		return fmt.Errorf("haproxy refused the config: %s", strings.TrimSpace(stderr))
+		return fmt.Errorf("HAProxy refused the change, the last config stays in use: %s", strings.TrimSpace(stderr))
 	}
 	return nil
 }

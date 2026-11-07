@@ -4,7 +4,7 @@ A load balancer gives your servers one public address and spreads traffic across
 
 ## What you pay for
 
-A load balancer runs on its own small VM in your project, so it costs what a server of that size costs, plus its disk and its public address, and it counts in your quota the same way. The VM does not appear under **Servers**. You will see it, its disk and its address on your bill.
+A load balancer runs on its own small VM in your project, so it costs what a server of that size costs, plus its disk, its public address and the traffic on that address, and it counts in your quota the same way. The VM does not appear under **Servers**. You will see it, its disk and its address on your bill.
 
 ## Create one
 
@@ -18,7 +18,7 @@ The status reads `build` for a minute or two while the VM boots and installs wha
 - Each server in a pool has a **port** and a **weight**. A server with twice the weight gets twice the traffic.
 - A **listener** opens a port on the public address and forwards it to a pool.
 
-Press **Save configuration**. The change reaches the load balancer within seconds.
+Press **Save configuration**. The change reaches the load balancer within seconds. If HAProxy refuses it, the page shows why and the load balancer keeps running the last configuration that worked.
 
 Only servers of this project, on the load balancer's own network and subnet, can be added. HTTP pools add an `X-Forwarded-For` header with the client's address. To serve HTTPS, use a TCP pool on port 443 and terminate TLS on your servers.
 
@@ -34,4 +34,6 @@ If you delete a server that is in a pool, it stays listed as `gone` and receives
 
 ## Delete one
 
-**Delete** removes the VM and its disk and gives the address back. Your servers are not touched. You cannot delete the VM or its address on their own, or stop it: change or delete the load balancer instead.
+**Delete** removes the VM and its disk and gives the address back. Your servers are not touched. You cannot delete the VM or its address on their own, stop it, add a volume to it or make an image of it: change or delete the load balancer instead. While it is first being created, **Delete** asks you to try again a moment later.
+
+Nothing updates the software on a running load balancer. To move to a current one, create a new load balancer and delete the old one. The new one gets a different address.

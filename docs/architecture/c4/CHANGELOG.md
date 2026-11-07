@@ -25,6 +25,13 @@ and rules: [README.md](README.md#maintenance-rule).
   the store. PVE's own cloud-init drive plus the guest agent leaves nothing and needs no extra privilege.
 - Names stay out of the config, and members are named by server, because both are tenant input that ends up in a file root
   reads on a VM with a public address.
+- A failed server create now destroys its VM and frees addresses only once PVE confirms the VM is gone (`VMLeftError`
+  otherwise), on the shared path, because the read-back after boot could fail with the VM running and hand its address to the
+  next tenant.
+- One check on the target VM's tag where a request names a VM, because the guard looked only at the row acted on: a tenant's
+  disk moved onto the appliance could not be detached and was destroyed with the balancer.
+- HAProxy drops to user `haproxy` in a chroot: this config replaces Debian's, whose lines did that, and it faces the public
+  network.
 
 **Diagrams updated:** `c2-containers.md`, `c4-code.md`.
 ## 2026-11-07: Cluster ids take a neutral prefix
