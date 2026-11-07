@@ -3,6 +3,7 @@ package pve
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/url"
 	"strings"
 )
@@ -41,11 +42,22 @@ func (c *Client) CreateAPIToken(ctx context.Context, userid, tokenName string) (
 func (c *Client) DeleteAPIToken(ctx context.Context, userid, tokenName string) error {
 	path := "/access/users/" + url.PathEscape(userid) + "/token/" + url.PathEscape(tokenName)
 	err := c.delete(ctx, path, nil, nil)
-	// PVE answers a missing token or user with a 500 "no such ...", not a 404.
-	if err != nil && (IsNotFound(err) || strings.Contains(err.Error(), "no such ")) {
+	if err != nil && (IsNotFound(err) || isTokenAbsent(err)) {
 		return nil
 	}
 	return err
+}
+
+// isTokenAbsent: PVE answers a missing token or user with a 500 naming it, not a 404. Only that answer: "no such host" from
+// the dialer or a 401 for our own token means the token may still be live, and a release that takes it for revoked
+// never comes back to it.
+func isTokenAbsent(err error) bool {
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Status != http.StatusInternalServerError {
+		return false
+	}
+	msg := ae.Error()
+	return strings.Contains(msg, "no such token") || strings.Contains(msg, "no such user")
 }
 
 // SetACL grants (or with del revokes) a role on a path for users/tokens.

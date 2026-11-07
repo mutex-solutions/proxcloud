@@ -138,7 +138,7 @@ pc_defaults:
       pve_proxy_ip: ""           # inside metallb; tenants' CSI reaches the PVE API here
     control_plane: {node: "", cores: 2, memory: 4096, disk: 30}
     workers: []                  # [{node, cores, memory, disk}]: one per PVE node you want a zone on
-    # Kamaji provider defaults (stage 60).
+    # Kamaji provider defaults: read once, when stage 60 first registers the provider. Later: docs/managed-k8s.md.
     kamaji:
       version_images: {}         # {k8s version: "pve1=9210,pve2=9211"}
       root_volume_gib: 30

@@ -33,7 +33,12 @@ package externalservice
 // Cluster CONTROL PLANES live on the management cluster; worker VMs land in the project's own
 // compute service (plan D4) — so a project must be attached to both.
 
-import "github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
+import (
+	"strconv"
+	"strings"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
+)
 
 // IsKamaji reports whether this is a Kamaji Managed-Kubernetes provider (config.provider == "kamaji").
 func (e *ExternalService) IsKamaji() bool { return e.Provider() == "kamaji" }
@@ -134,9 +139,13 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 	return cfg
 }
 
-// intOf reads a config number, which round-trips through JSON as float64.
+// intOf reads a config number, which round-trips through JSON as float64. Ansible's "{{ x | int }}" sends a string, so the
+// installer's numbers arrive as "100".
 func intOf(v any) int {
 	switch n := v.(type) {
+	case string:
+		i, _ := strconv.Atoi(strings.TrimSpace(n))
+		return i
 	case float64:
 		return int(n)
 	case int:

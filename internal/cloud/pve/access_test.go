@@ -2,6 +2,7 @@ package pve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -131,5 +132,39 @@ func TestDeleteAPITokenAbsent(t *testing.T) {
 	status, body = http.StatusForbidden, `{"message":"Permission check failed"}`
 	if err := c.DeleteAPIToken(context.Background(), "csi@pve", "pc-c-1"); err == nil {
 		t.Fatal("a refusal must not count as revoked")
+	}
+	// Our own token gone: an answer with the same words, and the cluster's token is still live.
+	status, body = http.StatusUnauthorized, `{"errors":{"token":"no such token 'platform' for user 'proxcloud@pve'"}}`
+	if err := c.DeleteAPIToken(context.Background(), "csi@pve", "pc-c-1"); err == nil {
+		t.Fatal("a 401 must not count as revoked")
+	}
+	// PVE's reason goes in the status line, which a fake server cannot set.
+	for _, c := range []struct {
+		err  *APIError
+		want bool
+	}{
+		{&APIError{Status: 500, Message: "no such token 'pc-c-1' for user 'csi@pve'"}, true},
+		{&APIError{Status: 500, Message: "no such user ('csi@pve')"}, true},
+		{&APIError{Status: 401, Message: "no such token 'platform' for user 'proxcloud@pve'"}, false},
+		{&APIError{Status: 500, Message: "cluster not ready - no quorum?"}, false},
+		{&APIError{Status: 500, Message: "no such pool"}, false},
+	} {
+		if got := isTokenAbsent(c.err); got != c.want {
+			t.Errorf("isTokenAbsent(%v) = %v", c.err, got)
+		}
+	}
+}
+
+// The dialer has its own "no such host".
+func TestDeleteAPITokenUnresolvableHost(t *testing.T) {
+	c, err := New(Config{APIURL: "https://pve.invalid:8006", TokenID: "proxcloud@pve!t1", Secret: "sec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteAPIToken(context.Background(), "csi@pve", "pc-c-1"); err == nil {
+		t.Fatal("a dial error must not count as revoked")
+	}
+	if isTokenAbsent(errors.New("pve: DELETE /x: dial tcp: lookup pve: no such host")) {
+		t.Fatal("no such host")
 	}
 }

@@ -63,6 +63,21 @@ Seed-file twin of the form: `deploy/seed/external-service-dev.json`
 | Block volumes for tenants | `config.cluster.csiSharedStores` | Optional, API or installer (`services.kamaji.csi_shared_stores`), default off. **Gives up isolation between tenants on the stores**, see [section 9](#9-how-a-cluster-lands-on-proxmox). Needs chart 0.1.5 or later when off. |
 | Flavors allowlist | `config.cluster.flavors` | Flavor ids offered for node groups. Empty = no restriction. |
 
+**Changing a setting later.** The installer's `services.kamaji.*` keys take effect only when stage 60 first registers the provider: it skips a provider
+whose name already exists, so a re-run neither applies a changed key nor overwrites one set by hand. On an existing site use the
+form above, or for the keys it has no field for (`rwxGiB`, `csiSharedStores`) the API. An update replaces each top-level key of
+`config` whole, so send the complete `cluster` block, or you lose its versions and URLs:
+
+```sh
+# as an operator or with an admin API key
+curl -s -H "$AUTH" "$API/admin/service/$ID" | jq '{config: {cluster: (.data.config.cluster + {rwxGiB: 100})}}' \
+  | curl -s -X PUT -H "$AUTH" -H 'Content-Type: application/json' -d @- "$API/admin/service/$ID"
+```
+
+It applies to clusters created afterwards. Existing clusters keep what they were created with: their dataset, their MTU, their
+StorageClasses and any CSI token (see "Taking the token back" in [section 9](#9-how-a-cluster-lands-on-proxmox)). `csiSharedStores` must be a JSON `true`; anything else is off.
+A numeric key may be a number or a string of digits, since the installer sends strings.
+
 ## 3. How a cluster is represented
 
 ```mermaid
@@ -183,10 +198,25 @@ task ran and failed only because that disk was in use). Moving the plugin to the
 tenant can create a `PersistentVolume` naming any disk. Turn the setting on only for tenants who trust each other, or on a
 store they alone use.
 A disk is named after its PV alone, so the portal cannot tell whose it is: a PVC still there when the cluster is deleted
-leaves its disk on the store, unbilled. Delete PVCs first. Off, a cluster has no proxmox-csi, no CSI token and no
+leaves its disk on the store, unbilled. Delete PVCs first. A cluster created with the setting off has no proxmox-csi, no CSI token and no
 `csi-proxmox` namespace, and `shared-file` is the default StorageClass if it has a dataset. Without a TrueNAS provider on
 the project it has no StorageClass at all. A store per project would give real isolation on block volumes. It is not built:
 such a store needs a ZFS dataset or RBD namespace per project, and we found no PVE API call that creates one.
+
+**Taking the token back.** The setting decides what a cluster is created with. Turning it off, or upgrading from a version
+that always minted the token, does nothing to existing clusters: they keep the plugin, its StorageClasses and a live token
+until they are deleted. To take one back, per cluster (`<id>` is the cluster id, `pveum user token list csi@pve` lists them):
+
+1. In the tenant cluster, delete PVCs on those classes and wait for their disks to go. Afterwards the plugin can no longer delete them, and a disk left behind stays on the store unbilled.
+2. On a PVE node: `pveum user token remove csi@pve <id>`. This is the step that closes the hole. PVE drops the token's ACLs with it, and a copy left in the tenant cluster is dead.
+3. Remove the plugin. On chart 0.1.5 or later, on the management cluster:
+   ```sh
+   kubectl -n argocd patch application <id> --type=json -p '[{"op":"replace","path":"/spec/source/helm/valuesObject/proxmox/csi/storageClasses","value":[]}]'
+   kubectl -n pc-<projectId> delete secret <id>-csi-config
+   ```
+   ArgoCD then prunes the plugin's HelmChartProxy and CAAPH uninstalls it, and the StorageClasses go with it. A pod still using a block volume stays up until it moves, then cannot attach.
+
+A later delete of the cluster finishes as usual: a token already gone counts as revoked.
 
 **RWX volumes.** `config.cluster.rwxGiB` gives each new cluster on a project with a TrueNAS provider one NAS dataset
 of that size and the `shared-file` StorageClass (csi-driver-nfs, `ReadWriteMany`), the default class unless proxmox-csi

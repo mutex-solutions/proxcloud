@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -48,19 +49,34 @@ func (h *Handler) kamajiCompute(ctx context.Context, p *Project, d kamaji.Cluste
 	return nil, httpx.BadRequest("This project has no Proxmox service for the worker nodes")
 }
 
+// kamajiGroupFlavor is the flavor a group may use: an active one, or the retired one it already runs, so that retiring a
+// flavor does not freeze the clusters on it. Like the allowlist in SET_NODE_GROUPS, this holds only for that group.
+func (h *Handler) kamajiGroupFlavor(ctx context.Context, ng *kamaji.NodeGroup, prev []kamaji.NodeGroup) (*pveflavor.Flavor, error) {
+	running := slices.ContainsFunc(prev, func(p kamaji.NodeGroup) bool { return p.Name == ng.Name && p.FlavorID == ng.FlavorID })
+	if running && h.pveFlavors != nil {
+		if fl, err := h.pveFlavors.Get(ctx, ng.FlavorID); err != nil {
+			return nil, err
+		} else if fl != nil {
+			return fl, nil
+		}
+	}
+	fl, herr := h.pveFlavorOf(ctx, ng.FlavorID)
+	if herr != nil {
+		return nil, herr
+	}
+	return fl, nil
+}
+
 // kamajiHydrateGroups fills what the client does not choose: VM size and tags from the flavor. Run on
-// create and on every node group change, because the values carry them.
-func (h *Handler) kamajiHydrateGroups(ctx context.Context, compute *externalservice.ExternalService, d kamaji.ClusterDefaults, clusterID string, groups []kamaji.NodeGroup) error {
+// create and on every node group change, because the values carry them. prev is what the cluster runs now.
+func (h *Handler) kamajiHydrateGroups(ctx context.Context, compute *externalservice.ExternalService, d kamaji.ClusterDefaults, clusterID string, groups, prev []kamaji.NodeGroup) error {
 	total := 0
 	profile := compute.PVEDefaultStorageProfile()
 	for i := range groups {
 		ng := &groups[i]
-		fl, herr := h.pveFlavorOf(ctx, ng.FlavorID)
-		if herr != nil {
-			return herr
-		}
-		if fl == nil || !fl.Active {
-			return httpx.BadRequest(fmt.Sprintf("node group %q: unknown flavor", ng.Name))
+		fl, err := h.kamajiGroupFlavor(ctx, ng, prev)
+		if err != nil {
+			return err
 		}
 		// ponytail: GPU workers need hostpci in the machine template, which CAPMOX has no field for.
 		if fl.GPUCount > 0 {
@@ -93,13 +109,8 @@ func (h *Handler) kamajiEnforceQuota(ctx context.Context, proj *Project, compute
 	if d.Shared != nil {
 		return nil
 	}
-	flavor := func(id string) (*pveflavor.Flavor, error) {
-		fl, herr := h.pveFlavorOf(ctx, id)
-		if herr != nil {
-			return nil, herr
-		}
-		return fl, nil
-	}
+	// The catalog as it is: a group on a flavor retired since still holds that size, and hydrating has already vetted groups.
+	flavor := func(id string) (*pveflavor.Flavor, error) { return h.pveFlavors.Get(ctx, id) }
 	want, err := kamajiWorkerDemand(groups, prev, d.RootVolumeGiB, flavor)
 	if err != nil {
 		return err
@@ -110,7 +121,17 @@ func (h *Handler) kamajiEnforceQuota(ctx context.Context, proj *Project, compute
 	return nil
 }
 
-// kamajiWorkerDemand is what groups add on top of prev. A flavor retired since counts as nothing.
+// KamajiCheckNodeGroups vets a node group edit against what the cluster's row says it runs: flavors, sizes and quota.
+func (h *Handler) KamajiCheckNodeGroups(ctx context.Context, proj *Project, compute *externalservice.ExternalService, d kamaji.ClusterDefaults, cr *cloud.CloudResource, groups []kamaji.NodeGroup) error {
+	prev := nodeGroupsFromCache(cr)
+	if err := h.kamajiHydrateGroups(ctx, compute, d, cr.ExternalID, groups, prev); err != nil {
+		return err
+	}
+	return h.kamajiEnforceQuota(ctx, proj, compute, d, groups, prev)
+}
+
+// kamajiWorkerDemand is what groups add on top of prev. A flavor deleted from the catalog (nil) has no known size, so its
+// workers count as nothing: moving off one asks for the whole new size while the old workers still hold theirs.
 func kamajiWorkerDemand(groups, prev []kamaji.NodeGroup, rootGiB int, flavor func(string) (*pveflavor.Flavor, error)) (pveQuotaDemand, error) {
 	var want pveQuotaDemand
 	add := func(gs []kamaji.NodeGroup, sign int) error {
@@ -169,7 +190,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	if err != nil {
 		return sec, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "proxmox client not ready")
 	}
-	if err := h.kamajiHydrateGroups(ctx, compute, d, spec.ID, spec.NodeGroups); err != nil {
+	if err := h.kamajiHydrateGroups(ctx, compute, d, spec.ID, spec.NodeGroups, nil); err != nil {
 		return sec, err
 	}
 	if err := h.kamajiEnforceQuota(ctx, proj, compute, d, spec.NodeGroups, nil); err != nil {
@@ -183,9 +204,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	if storage == "" {
 		return sec, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "The Proxmox provider has no storage profile for boot disks")
 	}
-	if d.Shared == nil && !d.CSISharedStores {
-		classes = nil // the CSI token would reach the tenant, and it opens every disk on the store (docs/managed-k8s.md)
-	}
+	classes = kamajiTenantClasses(d, classes)
 	in := kamaji.ClusterInfra{Region: compute.PVERegion(), Storage: storage, StorageClasses: classes}
 
 	var pool externalservice.PVEPublicNetwork
@@ -401,6 +420,16 @@ func KamajiFactory(esSvc *externalservice.Service, shares shareRowFinder, pveFor
 		ks.OnClusterGone(KamajiReleaseCluster(esSvc, shares, pveFor, ips, cfg.Defaults.Shared != nil))
 		return ks, nil
 	}
+}
+
+// kamajiTenantClasses is what a new cluster is offered through proxmox-csi. No class means no CSI token: minted tokens stop at
+// that, since the token reaches the tenant and opens every disk on the store (docs/managed-k8s.md). sharedWorkers keeps
+// its classes, because its tenants already share a pool and a token by the operator's choice.
+func kamajiTenantClasses(d kamaji.ClusterDefaults, classes []kamaji.StorageClass) []kamaji.StorageClass {
+	if d.Shared == nil && !d.CSISharedStores {
+		return nil
+	}
+	return classes
 }
 
 // kamajiStorage picks the boot store and the StorageClasses: every profile that can hold a boot disk,

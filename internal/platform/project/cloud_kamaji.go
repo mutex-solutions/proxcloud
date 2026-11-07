@@ -201,11 +201,7 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			h.fail(w, err)
 			return true
 		}
-		if err := h.kamajiHydrateGroups(r.Context(), compute, d, cr.ExternalID, groups); err != nil {
-			h.fail(w, err)
-			return true
-		}
-		if err := h.kamajiEnforceQuota(r.Context(), proj, compute, d, groups, nodeGroupsFromCache(cr)); err != nil {
+		if err := h.KamajiCheckNodeGroups(r.Context(), proj, compute, d, cr, groups); err != nil {
 			h.fail(w, err)
 			return true
 		}
@@ -446,7 +442,7 @@ func nodeGroupsFromCache(cr *cloud.CloudResource) []kamaji.NodeGroup {
 		if !ok {
 			continue
 		}
-		ng := kamaji.NodeGroup{FlavorID: strAny(g["flavor_id"])}
+		ng := kamaji.NodeGroup{Name: strAny(g["name"]), FlavorID: strAny(g["flavor_id"]), RootVolumeGiB: intAny(g["root_volume_gib"])}
 		autoscale, _ := g["autoscale"].(bool)
 		switch {
 		case g["replicas"] != nil:
