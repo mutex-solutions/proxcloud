@@ -80,7 +80,7 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 		}
 	}
 
-	// Items and adjustments are stored in the base currency; the net and gross above are in the profile's. Every amount
+	// Items, adjustments and applied credits are stored in the base currency; the net and gross above are in the profile's. Every amount
 	// goes out in the profile's currency, so the bill's lines add up to its total.
 	items := make([]BillItemDto, 0, len(bill.Items))
 	for i := range bill.Items {
@@ -103,6 +103,29 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 		adjustments = append(adjustments, a)
 	}
 
+	conv := func(d *decimal.Decimal) *decimal.Decimal {
+		if d == nil {
+			return nil
+		}
+		v := rate.Mul(*d)
+		return &v
+	}
+	accountCredits := make([]pricing.AppliedAccountCredit, len(bill.AppliedAccountCredits))
+	for i, c := range bill.AppliedAccountCredits {
+		c.Amount, c.GrossAmount = conv(c.Amount), conv(c.GrossAmount)
+		accountCredits[i] = c
+	}
+	collected := make([]pricing.AppliedCollectedCredit, len(bill.CollectedAmounts))
+	for i, c := range bill.CollectedAmounts {
+		c.Amount, c.GrossAmount = conv(c.Amount), conv(c.GrossAmount)
+		collected[i] = c
+	}
+	promoCredits := make([]pricing.AppliedPromotionalCredit, len(bill.AppliedPromotionalCredits))
+	for i, c := range bill.AppliedPromotionalCredits {
+		c.Amount, c.GrossAmount = conv(c.Amount), conv(c.GrossAmount)
+		promoCredits[i] = c
+	}
+
 	return &BillDto{
 		ID:                        bill.ID,
 		Status:                    string(bill.Status),
@@ -114,9 +137,9 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 		GrossAmount:               num(grossAmount),
 		NetAmount:                 num(netAmount),
 		UnpaidGrossAmount:         num(unpaid),
-		AppliedAccountCredits:     bill.AppliedAccountCredits,
-		CollectedAmounts:          bill.CollectedAmounts,
-		AppliedPromotionalCredits: bill.AppliedPromotionalCredits,
+		AppliedAccountCredits:     accountCredits,
+		CollectedAmounts:          collected,
+		AppliedPromotionalCredits: promoCredits,
 		Adjustments:               adjustments,
 		CreatedAt:                 bill.CreatedAt,
 		UpdatedAt:                 bill.UpdatedAt,

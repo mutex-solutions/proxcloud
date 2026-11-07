@@ -50,3 +50,30 @@ func TestToBillDto_OneCurrency(t *testing.T) {
 		t.Fatalf("the stored adjustment changed: %s", bill.Adjustments[0].Amount)
 	}
 }
+
+// Applied credits are stored in the base currency too: a $10 credit on an EUR bill at 0.9 reads -€9, so the credit
+// lines add up to the amount due.
+func TestToBillDto_CreditsInProfileCurrency(t *testing.T) {
+	bill := goldenBill(pricing.BillStatusSent, "100")
+	ten := decimal.RequireFromString("10")
+	bill.AppliedAccountCredits = []pricing.AppliedAccountCredit{{Amount: &ten, GrossAmount: &ten}}
+	bill.AppliedPromotionalCredits = []pricing.AppliedPromotionalCredit{{Amount: &ten}}
+	bill.CollectedAmounts = []pricing.AppliedCollectedCredit{{Amount: &ten}}
+	x := pricing.NewExchanger(fixedRate(decimal.RequireFromString("0.9")))
+	dto, err := ToBillDto(&BillingProfile{Currency: "EUR"}, bill, nil, "USD", x, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	nine := decimal.RequireFromString("9")
+	for name, d := range map[string]*decimal.Decimal{
+		"account": dto.AppliedAccountCredits[0].Amount, "account gross": dto.AppliedAccountCredits[0].GrossAmount,
+		"promotional": dto.AppliedPromotionalCredits[0].Amount, "collected": dto.CollectedAmounts[0].Amount,
+	} {
+		if d == nil || !d.Equal(nine) {
+			t.Fatalf("%s credit = %v, want 9", name, d)
+		}
+	}
+	if !bill.AppliedAccountCredits[0].Amount.Equal(ten) {
+		t.Fatalf("the stored credit changed: %s", bill.AppliedAccountCredits[0].Amount)
+	}
+}
