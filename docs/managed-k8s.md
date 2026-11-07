@@ -69,7 +69,7 @@ form above, or for the keys it has no field for (`rwxGiB`, `csiSharedStores`) th
 `config` whole, so send the complete `cluster` block, or you lose its versions and URLs:
 
 ```sh
-# as an operator or with an admin API key
+# AUTH='Authorization: Bearer <operator token>', API=<api url>/api/v1, ID=<provider id>
 curl -s -H "$AUTH" "$API/admin/service/$ID" | jq '{config: {cluster: (.data.config.cluster + {rwxGiB: 100})}}' \
   | curl -s -X PUT -H "$AUTH" -H 'Content-Type: application/json' -d @- "$API/admin/service/$ID"
 ```
@@ -207,14 +207,14 @@ such a store needs a ZFS dataset or RBD namespace per project, and we found no P
 that always minted the token, does nothing to existing clusters: they keep the plugin, its StorageClasses and a live token
 until they are deleted. To take one back, per cluster (`<id>` is the cluster id, `pveum user token list csi@pve` lists them):
 
-1. In the tenant cluster, delete PVCs on those classes and wait for their disks to go. Afterwards the plugin can no longer delete them, and a disk left behind stays on the store unbilled.
+1. In the tenant cluster, delete PVCs on those classes and wait for their disks to go. Afterwards the plugin can no longer detach or delete them: a pod that moves answers `proxmox API error 401` on attach, a disk left behind stays on the store unbilled, and a worker replaced while one is attached waits at `WaitingForVolumeDetach`.
 2. On a PVE node: `pveum user token remove csi@pve <id>`. This is the step that closes the hole. PVE drops the token's ACLs with it, and a copy left in the tenant cluster is dead.
 3. Remove the plugin. On chart 0.1.5 or later, on the management cluster:
    ```sh
    kubectl -n argocd patch application <id> --type=json -p '[{"op":"replace","path":"/spec/source/helm/valuesObject/proxmox/csi/storageClasses","value":[]}]'
    kubectl -n pc-<projectId> delete secret <id>-csi-config
    ```
-   ArgoCD then prunes the plugin's HelmChartProxy and CAAPH uninstalls it, and the StorageClasses go with it. A pod still using a block volume stays up until it moves, then cannot attach.
+   ArgoCD prunes the plugin's HelmChartProxy, CAAPH uninstalls it and its StorageClasses go, and `shared-file` becomes the default class if the cluster has one. The tenant's `csi-proxmox` namespace and the dead Secret in it stay until the tenant deletes them.
 
 A later delete of the cluster finishes as usual: a token already gone counts as revoked.
 
