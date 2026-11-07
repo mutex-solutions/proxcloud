@@ -771,7 +771,8 @@ resumed while an earlier one is being walked is left alone.
 **A resume brings back what a suspension paused, and nothing else.** PVE keeps no record of why a VM is paused, so the walk writes
 `pausedBySuspension` on the VM's `cloudResource` row before it pauses the VM, and the resume leg only touches marked rows: a VM
 stopped by a tenant, or paused by someone else, stays as it is, including one a member stopped while the project was held. The
-mark clears once a resume has read the VM as running or stopped. The resume walk runs on `context.WithoutCancel`, like the
+mark clears once a resume has read the VM as running or stopped on its node. A failed node read leaves the VM to the next pass,
+marked or not, since `/cluster/resources` reads running for a paused VM. The resume walk runs on `context.WithoutCancel`, like the
 suspend, and a resume that fails or stops halfway is retried: every `autoSuspensionJob` pass goes through the marked rows, resumes
 those in an `ENABLED` project, and first enables a project a dead resume left `DISABLED`, if billing allows it and no operator
 disabled it. A VM paused by a build older than the mark has none: its resume is **Start**, which a tenant or operator can press.
@@ -797,7 +798,7 @@ a 409 while the project holds anything billing rates: a VM, volume, bucket, file
 managed database. Storage counts because S3 keys already issued keep working while the project sits `DISABLED` and unrated. With
 billing unconfigured profiles stay `NEW` for good and nothing is rated, so none of this applies and the project stays as it is.
 A provider that has been removed has nothing left to ask, so only the project's rows count. A provider that is there and cannot
-be read refuses the move with a 503, since what runs there is not known. An operator's move of an `ENABLED` project
+be read refuses the move with a 503, since what runs there is not known. An operator's move of an `ENABLED` or `DISABLED` project
 (`PUT /admin/project/{id}`) follows the same hold, but not the refusals about leaving a suspended or indebted profile.
 
 ### Billing-profile status lifecycle

@@ -37,6 +37,7 @@ type walkPVE struct {
 	pool   map[int]string
 	calls  []string
 	refuse map[string]bool // "resume 101"
+	noRead map[int]bool    // status/current answers 500 for these
 	down   bool
 	onVerb func(verb string, id int)
 }
@@ -77,6 +78,10 @@ func (f *walkPVE) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id, _ := strconv.Atoi(m[1])
 		verb := m[2]
 		if verb == "current" {
+			if f.noRead[id] {
+				http.Error(w, "read failed", http.StatusInternalServerError)
+				return
+			}
 			st := f.status[id]
 			power := st
 			if st == "paused" {
@@ -152,7 +157,7 @@ func newWalkEnv(t *testing.T) *walkEnv {
 	}
 	t.Cleanup(func() { db.Close(ctx) })
 	enc := textcrypt.New("test-key")
-	fp := &walkPVE{status: map[int]string{}, pool: map[int]string{}, refuse: map[string]bool{}}
+	fp := &walkPVE{status: map[int]string{}, pool: map[int]string{}, refuse: map[string]bool{}, noRead: map[int]bool{}}
 	srv := httptest.NewServer(fp)
 	t.Cleanup(srv.Close)
 	e := &walkEnv{t: t, db: db, pve: fp, bill: billing.NewRepo(db), proj: project.NewRepo(db), rows: cloud.NewRepo(db)}
@@ -281,6 +286,51 @@ func TestResumeFailureRecoversOnALaterPass(t *testing.T) {
 	e.pass()
 	if e.pve.st(101) != "running" || e.pve.st(102) != "running" {
 		t.Fatalf("after PVE came back: %s %s", e.pve.st(101), e.pve.st(102))
+	}
+}
+
+// One failed status read during the resume makes a paused VM look running: the mark stays, and a later pass resumes it.
+func TestFailedReadDuringResumeKeepsTheMark(t *testing.T) {
+	e := newWalkEnv(t)
+	e.project("p1", project.StatusEnabled, 101)
+	e.suspend()
+	e.pve.set(func() { e.pve.noRead[101] = true })
+	e.unsuspend(context.Background())
+	if e.pve.st(101) != "paused" || !e.marked(101) {
+		t.Fatalf("after the failed read: %s mark %v", e.pve.st(101), e.marked(101))
+	}
+	e.pve.set(func() { delete(e.pve.noRead, 101) })
+	e.pve.take()
+	e.pass()
+	if c := e.pve.take(); !slices.Equal(c, []string{"resume 101"}) {
+		t.Fatalf("calls %v", c)
+	}
+	if e.pve.st(101) != "running" || e.marked(101) {
+		t.Fatalf("not recovered: %s %v", e.pve.st(101), e.marked(101))
+	}
+}
+
+// One failed status read during the suspend makes a hand-paused VM look running: the walk must not take it as its own. A VM
+// really running waits for the next pass.
+func TestFailedReadDuringSuspendMarksNothing(t *testing.T) {
+	e := newWalkEnv(t)
+	e.project("p1", project.StatusEnabled, 101, 102)
+	e.pve.set(func() {
+		e.pve.status[101] = "paused"
+		e.pve.noRead[101], e.pve.noRead[102] = true, true
+	})
+	e.suspend()
+	if e.marked(101) || e.marked(102) || e.pve.st(102) != "running" {
+		t.Fatalf("marks %v %v, 102 %s", e.marked(101), e.marked(102), e.pve.st(102))
+	}
+	e.pve.set(func() { e.pve.noRead = map[int]bool{} })
+	e.pass()
+	if e.marked(101) || !e.marked(102) || e.pve.st(102) != "paused" {
+		t.Fatalf("after the pass: marks %v %v, 102 %s", e.marked(101), e.marked(102), e.pve.st(102))
+	}
+	e.unsuspend(context.Background())
+	if e.pve.st(101) != "paused" || e.pve.st(102) != "running" {
+		t.Fatalf("after the resume: 101 %s 102 %s", e.pve.st(101), e.pve.st(102))
 	}
 }
 

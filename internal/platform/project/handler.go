@@ -523,16 +523,17 @@ func billableUnknown(proj *Project, serviceID string, cause error) error {
 		"A provider of this project cannot be reached, so what the project holds there is not known. Try again later")
 }
 
-// HoldForOperatorMove is the hold on an operator's move of an ENABLED project (own profile and organization as they will be
-// afterwards): what the client paths apply through holdForProfile, without their refusals about leaving a profile, which are the
-// operator's to overrule. True means the move has to disable the project. A move that leaves the paying profile as it is holds
-// nothing.
+// HoldForOperatorMove is the hold on an operator's move of an ENABLED or DISABLED project (own profile and organization as they
+// will be afterwards): what the client paths apply through holdForProfile, without their refusals about leaving a profile, which
+// are the operator's to overrule. True means the move has to disable the project. A move that leaves the paying profile as it is
+// holds nothing.
 func (h *Handler) HoldForOperatorMove(ctx context.Context, projectID, ownProfileID, organizationID string) (bool, error) {
 	proj, err := h.svc.GetProjectByID(ctx, projectID)
 	if err != nil {
 		return false, err
 	}
-	if !proj.IsEnabled() {
+	enabled := proj.IsEnabled()
+	if !enabled && !proj.IsDisabled() {
 		return false, nil
 	}
 	cur, err := h.paidByProfile(ctx, proj)
@@ -549,7 +550,7 @@ func (h *Handler) HoldForOperatorMove(ctx context.Context, projectID, ownProfile
 	if err := h.holdForProfile(ctx, proj, next); err != nil {
 		return false, err
 	}
-	return proj.IsDisabled(), nil
+	return enabled && proj.IsDisabled(), nil
 }
 
 // sameOrgBillingProfile reports whether a target billing profile belongs to the project's own

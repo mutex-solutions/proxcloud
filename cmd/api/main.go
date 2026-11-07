@@ -1303,6 +1303,11 @@ func (s billingCloudSuspender) pauseProjectServers(ctx context.Context, p *proje
 			if vm == nil {
 				continue
 			}
+			// Without the node's answer a paused VM reads running: marking or clearing on that loses what the mark is for.
+			if vm.StatusErr != nil {
+				s.log.Error("suspender: server status unknown, left for the next pass", "server", servers[si].ExternalID, "pause", pause, "err", vm.StatusErr)
+				continue
+			}
 			var err error
 			if pause {
 				err = s.pauseVM(ctx, ps, &servers[si], vm)

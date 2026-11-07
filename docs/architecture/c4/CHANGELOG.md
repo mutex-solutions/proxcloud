@@ -9,7 +9,8 @@ and rules: [README.md](README.md#maintenance-rule).
 **What changed**
 
 - The suspension walk writes `pausedBySuspension` on a VM's `cloudResource` row before pausing it. The resume leg touches marked
-  rows only, and clears a mark once it reads the VM as running or stopped.
+  rows only, and clears a mark once it reads the VM as running or stopped on its node. `ResolveVM` reports a failed node read in
+  `ClusterResource.StatusErr`, and the walk leaves such a VM to the next pass.
 - `CloudSuspender` gains `FinishResumes`. Each `autoSuspensionJob` pass resumes marked VMs in `ENABLED` projects, and enables first a
   project left `DISABLED` under a profile that pays, unless an operator disabled it.
 - `ActivationService.Unsuspend`, `SuspensionJob.resume` and the billing callbacks run the walk on `context.WithoutCancel`.
@@ -17,7 +18,7 @@ and rules: [README.md](README.md#maintenance-rule).
 - A project move onto what cannot pay skips a provider that has been removed, and answers 503 when a provider that is there cannot
   be read, in place of a 500.
 - `DELETE /admin/billing-profile/{id}` uses the client path's `ProjectPaidBy` rule, so a profile paying through its organization is
-  refused. `PUT /admin/project/{id}` applies `holdForProfile` to an `ENABLED` project whose paying profile changes.
+  refused. `PUT /admin/project/{id}` applies `holdForProfile` to an `ENABLED` or `DISABLED` project whose paying profile changes.
 - CI's integration job also runs `cmd/api`, where the walk's tests live, since `billingCloudSuspender` is in `main`.
 
 **Why**
@@ -29,6 +30,8 @@ and rules: [README.md](README.md#maintenance-rule).
 - The mark is on the row, not on the VM's PVE config: a config write is one more PVE call that can fail on a VM being paused, and
   the row already survives a sync because `toDbRecord` writes named fields only. A VM paused by a build older than the mark has
   none, and comes back through **Start**.
+- `/cluster/resources` reads running for a paused VM, so one failed node read cleared a mark with no resume and no log line, and on
+  a suspend marked a VM someone else had paused. A flag on the result, because the other callers of `ResolveVM` want the fallback.
 - A customer who had just paid could be paused again by a pass working from an old list.
 - Removing a provider left every move of its projects failing with `internal.error`, and a failed read must stay a refusal: the live
   check is there because a row can lag a start.

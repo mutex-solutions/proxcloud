@@ -212,6 +212,26 @@ func TestOperatorPathsKeepTheBillingRules(t *testing.T) {
 			t.Fatalf("%+v", p)
 		}
 	})
+	t.Run("move of a DISABLED project holding something onto a NEW profile is refused", func(t *testing.T) {
+		f.seed(t, pgdoc.M{"status": project.StatusDisabled})
+		mustInsert(t, f.db, "cloudResource", pgdoc.M{"_id": "r1", "projectId": "p1", "serviceId": "dns", "externalId": "r1", "type": cloud.TypeBucket})
+		code, body := do(http.MethodPut, "/admin/project/p1", `{"name":"p","organizationId":"o1","billingProfileId":"bp-new-o1"}`)
+		if code != http.StatusConflict {
+			t.Fatalf("%d %s", code, body)
+		}
+		if p := f.stored(t); p.Status != project.StatusDisabled || p.BillingProfileID != "" {
+			t.Fatalf("%+v", p)
+		}
+	})
+	t.Run("move of a DISABLED project holding nothing onto a NEW profile goes through", func(t *testing.T) {
+		f.seed(t, pgdoc.M{"status": project.StatusDisabled})
+		if code, body := do(http.MethodPut, "/admin/project/p1", `{"name":"p","organizationId":"o1","billingProfileId":"bp-new-o1"}`); code != 200 {
+			t.Fatalf("%d %s", code, body)
+		}
+		if p := f.stored(t); p.Status != project.StatusDisabled || p.BillingProfileID != "bp-new-o1" {
+			t.Fatalf("%+v", p)
+		}
+	})
 	t.Run("move off a suspended profile is the operator's to make", func(t *testing.T) {
 		f.seed(t, pgdoc.M{"status": project.StatusDisabled, "billingProfileId": "bp-sus"})
 		if code, body := do(http.MethodPut, "/admin/project/p1", `{"name":"p","organizationId":"o1","billingProfileId":"bp-active"}`); code != 200 {
