@@ -65,6 +65,7 @@ func newImportCluster(t *testing.T) *importCluster {
 		},
 		"POST /api2/json/nodes/pve1/storage/imp/upload": func(w http.ResponseWriter, r *http.Request) {
 			if b.deny == "upload" {
+				_, _ = io.Copy(io.Discard, r.Body) // or the server resets the connection and the client may see that first
 				http.Error(w, "Permission check failed", http.StatusForbidden)
 				return
 			}
@@ -88,6 +89,7 @@ func newImportCluster(t *testing.T) *importCluster {
 					b.uploaded[part.FormName()] = string(data)
 				}
 			}
+			_, _ = io.Copy(io.Discard, r.Body) // to the stated length, as pveproxy does: a body cut short never gets an answer
 			task(w, "upload")
 		},
 		"GET /api2/json/cluster/status": func(w http.ResponseWriter, _ *http.Request) {
