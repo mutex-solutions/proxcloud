@@ -45,6 +45,9 @@ spec:
   dataStoreName: {{ .Values.kamajiControlPlane.dataStoreName | default "default" }}
   replicas: {{ .Values.kamajiControlPlane.replicas }}
   version: {{ printf "v%s" (.Values.kubernetesVersion | trimPrefix "v") | quote }}
+  {{- with .Values.kamajiControlPlane.admissionControllers }}
+  admissionControllers: {{ toJson . }}
+  {{- end }}
   addons:
     coreDNS: {}
     kubeProxy: {}
