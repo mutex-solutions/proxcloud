@@ -23,6 +23,7 @@ const (
 	TypeDNSZone              = "DNS_ZONE"
 	TypeKubernetesCluster    = "KUBERNETES_CLUSTER"
 	TypeDatabaseCluster      = "DATABASE_CLUSTER"
+	TypeSandbox              = "SANDBOX" // gVisor sandbox (sandbox provider); nothing syncs or bills it before SB3
 	TypeLoadBalancer         = "LOAD_BALANCER"
 	TypeFloatingIP           = "FLOATING_IP"
 	TypeNetwork              = "NETWORK"

@@ -3,15 +3,20 @@ package kamajik8s
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // API paths for the kinds this client touches. Group/version pins:
@@ -44,6 +49,42 @@ func New(kubeconfigYAML string) (*Client, error) {
 	}
 	return &Client{rc: rc, http: rc.httpClient()}, nil
 }
+
+const saDir = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+// NewInCluster builds a Client from the pod's service account (token + CA) and
+// KUBERNETES_SERVICE_HOST/PORT. The token file is re-read periodically.
+func NewInCluster() (*Client, error) {
+	return newInCluster(saDir, os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT"))
+}
+
+func newInCluster(dir, host, port string) (*Client, error) {
+	if host == "" || port == "" {
+		return nil, errors.New("in-cluster: KUBERNETES_SERVICE_HOST/PORT not set")
+	}
+	ca, err := os.ReadFile(dir + "/ca.crt")
+	if err != nil {
+		return nil, fmt.Errorf("in-cluster: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(ca) {
+		return nil, errors.New("in-cluster: ca.crt has no PEM certs")
+	}
+	rc := &restConfig{
+		server:    "https://" + net.JoinHostPort(host, port),
+		tlsCfg:    &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool},
+		timeout:   30 * time.Second,
+		tokenFile: dir + "/token",
+	}
+	if rc.bearer() == "" {
+		return nil, errors.New("in-cluster: empty service account token")
+	}
+	return &Client{rc: rc, http: rc.httpClient()}, nil
+}
+
+// ErrUnreachable wraps transport failures (dial, TLS, timeout): the API server never answered.
+// Callers map it to "service unavailable" instead of an internal error.
+var ErrUnreachable = errors.New("kubernetes api unreachable")
 
 // NotFound reports whether err is a Kubernetes 404 (returned as *APIError).
 func NotFound(err error) bool {
@@ -87,12 +128,12 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		req.Header.Set("Content-Type", contentType)
 	}
 	req.Header.Set("Accept", "application/json")
-	if c.rc.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.rc.token)
+	if t := c.rc.bearer(); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
 	}
 	res, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 	defer res.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
@@ -362,12 +403,12 @@ func (c *Client) raw(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if c.rc.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.rc.token)
+	if t := c.rc.bearer(); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
 	}
 	res, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 	defer res.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
@@ -385,11 +426,97 @@ func (c *Client) raw(ctx context.Context, path string) ([]byte, error) {
 // list, where the kind differs per engine. A missing CRD 404s the same way an empty list does,
 // which is the right behaviour: an operator that is not installed simply has no backups.
 func (c *Client) ListCRs(ctx context.Context, group, version, plural, ns, labelSelector string) ([]map[string]any, error) {
-	items, err := c.list(ctx, fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s", group, version, ns, plural), labelSelector)
+	items, err := c.list(ctx, crPath(group, version, plural, ns), labelSelector)
 	if NotFound(err) {
 		return nil, nil
 	}
 	return items, err
+}
+
+// crPath is the namespaced collection path of a custom resource.
+func crPath(group, version, plural, ns string) string {
+	return fmt.Sprintf("/apis/%s/%s/namespaces/%s/%s", group, version, ns, plural)
+}
+
+// ApplyCR server-side-applies a namespaced custom resource (obj carries apiVersion, kind,
+// metadata.name and metadata.namespace). Create-or-update, proxcloud as the single field owner.
+func (c *Client) ApplyCR(ctx context.Context, group, version, plural string, obj map[string]any) error {
+	name, ns := metaNameNS(obj)
+	if name == "" || ns == "" {
+		return fmt.Errorf("%s: metadata.name/namespace required", plural)
+	}
+	_, err := c.apply(ctx, crPath(group, version, plural, ns), name, obj)
+	return err
+}
+
+// GetCR returns a namespaced custom resource, or nil when absent.
+func (c *Client) GetCR(ctx context.Context, group, version, plural, ns, name string) (map[string]any, error) {
+	return c.get(ctx, crPath(group, version, plural, ns), name)
+}
+
+// DeleteCR removes a namespaced custom resource (absent = success).
+func (c *Client) DeleteCR(ctx context.Context, group, version, plural, ns, name string) error {
+	return c.delete(ctx, crPath(group, version, plural, ns), name)
+}
+
+// MergePatchCR applies a JSON merge patch to a namespaced custom resource and returns it.
+func (c *Client) MergePatchCR(ctx context.Context, group, version, plural, ns, name string, patch map[string]any) (map[string]any, error) {
+	return c.do(ctx, http.MethodPatch, crPath(group, version, plural, ns)+"/"+name, nil, patch, "application/merge-patch+json")
+}
+
+// ListCRsAllNamespaces lists a custom resource across every namespace, filtered by labelSelector.
+func (c *Client) ListCRsAllNamespaces(ctx context.Context, group, version, plural, labelSelector string) ([]map[string]any, error) {
+	return c.list(ctx, fmt.Sprintf("/apis/%s/%s/%s", group, version, plural), labelSelector)
+}
+
+// ApplyResourceQuota server-side-applies a core/v1 ResourceQuota (create-or-update).
+func (c *Client) ApplyResourceQuota(ctx context.Context, rq map[string]any) error {
+	name, ns := metaNameNS(rq)
+	if name == "" || ns == "" {
+		return fmt.Errorf("resourcequota: metadata.name/namespace required")
+	}
+	_, err := c.apply(ctx, corePath("resourcequotas", ns), name, rq)
+	return err
+}
+
+// corePath is the collection path of a namespaced core (v1) resource, e.g. pods, configmaps.
+func corePath(plural, ns string) string { return fmt.Sprintf("/api/v1/namespaces/%s/%s", ns, plural) }
+
+// ApplyCore server-side-applies a namespaced core/v1 object (Pod, ConfigMap, Secret …).
+func (c *Client) ApplyCore(ctx context.Context, plural string, obj map[string]any) error {
+	name, ns := metaNameNS(obj)
+	if name == "" || ns == "" {
+		return fmt.Errorf("%s: metadata.name/namespace required", plural)
+	}
+	_, err := c.apply(ctx, corePath(plural, ns), name, obj)
+	return err
+}
+
+// GetCore returns a namespaced core/v1 object, or nil when absent.
+func (c *Client) GetCore(ctx context.Context, plural, ns, name string) (map[string]any, error) {
+	return c.get(ctx, corePath(plural, ns), name)
+}
+
+// DeleteCore removes a namespaced core/v1 object (absent = success).
+func (c *Client) DeleteCore(ctx context.Context, plural, ns, name string) error {
+	return c.delete(ctx, corePath(plural, ns), name)
+}
+
+// ListPodsAllNamespaces lists pods in every namespace filtered by labelSelector.
+func (c *Client) ListPodsAllNamespaces(ctx context.Context, labelSelector string) ([]map[string]any, error) {
+	return c.list(ctx, "/api/v1/pods", labelSelector)
+}
+
+// ListNodes lists the cluster's nodes.
+func (c *Client) ListNodes(ctx context.Context) ([]map[string]any, error) {
+	return c.list(ctx, "/api/v1/nodes", "")
+}
+
+func metaNameNS(obj map[string]any) (name, ns string) {
+	meta, _ := obj["metadata"].(map[string]any)
+	name, _ = meta["name"].(string)
+	ns, _ = meta["namespace"].(string)
+	return name, ns
 }
 
 // GetTenantControlPlane returns the Kamaji TCP, or nil when absent.

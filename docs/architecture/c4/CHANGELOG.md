@@ -4,6 +4,44 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Sandbox service ported, not reachable (SB1)
+
+**What changed**
+
+- `internal/cloud/sandbox` ported from the earlier implementation (EE): Sandbox CR rendering under gVisor, per-project
+  namespace with ResourceQuota and the tenant label, per-sandbox Cilium egress policy, GPU capacity, exec, logs,
+  timeouts, template builds, snapshots and the sync provider. Its unit tests came with it.
+- `kamajik8s` gained what the sandbox code and the later `sandbox-proxy` call: `NewInCluster` (service account token
+  re-read every minute), `ErrUnreachable` on transport failures, server-side apply / get / delete / merge patch of custom
+  and core objects, ResourceQuota, lists across namespaces, nodes, and `exec.go` (WebSocket exec and streamed exec).
+- Renames: every EE label and annotation (both of its domains) is now under `proxcloud.io/` (the tenant
+  label is `proxcloud.io/tenant`, the one the SB0 guardrail selects), the GPU node label is
+  `node-restriction.kubernetes.io/proxcloud-gpu`, the sandbox-init environment is `PROXCLOUD_*`, and the node runtime
+  directory is `/opt/proxcloud-sandbox/bin`, mounted at `/.proxcloud`. SB2a's `node-setup` and SB5's `sandbox-init` must
+  use the same names.
+- The template registry is provider config (`config.sandbox.templateRegistry`), not a constant; empty means no image is
+  treated as a private template.
+- Provider kind `sandbox` (`externalservice.IsSandbox`, `SandboxConfig`), with the admin API refusing to create one or to
+  turn a row into one. `cloud_sandbox.go` (create, delete, actions, live list) is in the project package with
+  `Handler.sandboxFor` left nil and no caller. `cloud.TypeSandbox` exists; nothing syncs or bills it.
+
+**Why**
+
+- The plan ports the sandbox code in one piece before anything can reach it, so the later phases change behaviour, not
+  vocabulary. The release gate is SB2b (node firewall) plus SB3 (routes, quota, billing, suspend gate): the SB0 spike
+  showed a node-level foothold on the sandbox cluster reaches the PVE API, the NAS and the management host, so no tenant
+  route and no provider row may exist before those land. Refusing the kind at the admin API keeps an operator from
+  creating a row the later phases would then serve.
+- A kubelet can set any label on its own Node except `node-restriction.kubernetes.io/` ones (with NodeRestriction on),
+  so a placement label outside that prefix lets a compromised node draw other tenants' sandboxes to itself.
+- A hard-coded registry host belongs to one operator; each site has its own.
+- Checked on the SB0 lab cluster through the ported service from a build-tagged test, with the proxcloud service
+  account's token: create to Ready, exec (stdout, stderr, stdin, exit code 7, a missing binary as a 400), pod logs,
+  timeout change, the egress guardrail selecting the namespace the service labels (a private address dropped, the
+  internet open), delete and the CR gone.
+
+**Diagrams updated:** `c3-components.md` (C3e).
+
 ## 2026-11-07: Bootstrap ISOs off shared storage (SB-pre, PR #101)
 
 **What changed**

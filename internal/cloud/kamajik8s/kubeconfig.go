@@ -5,7 +5,8 @@
 //
 // ponytail: hand-rolled REST instead of k8s.io/client-go — we need 6 verbs on 5 kinds, no
 // watch/informers/discovery, and client-go would be the largest dependency in go.mod by far.
-// Upgrade path: swap this package for client-go dynamic if we ever need watches or exec.
+// Upgrade path: swap this package for client-go dynamic if we ever need watches. Exec is
+// hand-rolled too (exec.go, over golang.org/x/net/websocket).
 package kamajik8s
 
 import (
@@ -16,6 +17,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -61,6 +64,27 @@ type restConfig struct {
 	token   string
 	tlsCfg  *tls.Config
 	timeout time.Duration
+
+	// In-cluster only: bound SA tokens rotate, so bearer() re-reads tokenFile every minute.
+	tokenFile string
+	mu        sync.Mutex
+	readAt    time.Time
+}
+
+// bearer returns the current bearer token, refreshing it from tokenFile when stale.
+func (rc *restConfig) bearer() string {
+	if rc.tokenFile == "" {
+		return rc.token
+	}
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	if time.Since(rc.readAt) > time.Minute {
+		if b, err := os.ReadFile(rc.tokenFile); err == nil && len(b) > 0 {
+			rc.token = strings.TrimSpace(string(b))
+			rc.readAt = time.Now()
+		}
+	}
+	return rc.token
 }
 
 // parseKubeconfig resolves the current-context of a kubeconfig into a restConfig.

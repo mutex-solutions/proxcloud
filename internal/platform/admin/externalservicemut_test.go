@@ -152,3 +152,25 @@ func TestApplyServiceConnectionBodyRefusesSNATRange(t *testing.T) {
 		t.Fatalf("save without the key refused: %#v", herr)
 	}
 }
+
+// The sandbox kind is refused on create and on an update that turns a row into one (until SB3).
+// A nil repo means the refusal has to come before any write; other updates still go through.
+func TestSandboxProviderRefused(t *testing.T) {
+	h := &Handler{}
+	ctx := httpx.WithRC(t.Context(), &httpx.RequestContext{SigV4KeyID: "pk-test"})
+	rec := httptest.NewRecorder()
+	h.externalServiceCreate(rec, httptest.NewRequest(http.MethodPost, "/service",
+		strings.NewReader(`{"name":"sbx","config":{"provider":"sandbox"},"secret":{"kubeconfig":"x"}}`)).WithContext(ctx))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Sandbox providers cannot be created yet") {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	put := func(doc pgdoc.M, body string) *httpx.HTTPError {
+		return h.applyServiceConnectionBody(httptest.NewRequest(http.MethodPut, "/service/s", strings.NewReader(body)), doc)
+	}
+	if put(pgdoc.M{"config": pgdoc.M{"provider": "dbaas"}}, `{"config":{"provider":"sandbox"}}`) == nil {
+		t.Fatal("update to the sandbox kind accepted")
+	}
+	if herr := put(pgdoc.M{"config": pgdoc.M{"provider": "dbaas"}}, `{"config":{"region":"r1"}}`); herr != nil {
+		t.Fatalf("an ordinary update refused: %#v", herr)
+	}
+}
