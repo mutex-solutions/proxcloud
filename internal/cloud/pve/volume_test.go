@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -69,9 +70,10 @@ func TestAddVolumeStorageRoom(t *testing.T) {
 // volCluster fakes a pool of VMs 101+102 on pve1 and 103 on pve2. VM 101's config is cfg101;
 // 102/103 have a root disk only. Storages: local-zfs (local, both nodes), nas (shared NFS),
 // isos (dir, iso only), tiny (local, 1 GiB free). Writes are recorded per path. VM 900 is the
-// holder a cross-node attach creates; it only exists for those calls.
-func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values) *Service {
-	const upid = "UPID:pve1:0:0:0:qmmove:101:u:"
+// holder a cross-node attach creates; it only exists for those calls. nas1 is shared, but enabled on pve1 only.
+// overrides replace or add routes.
+func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values, overrides ...fakeRoutes) *Service {
+	const upid = volUPID
 	rec := func(key string) func(http.ResponseWriter, *http.Request) {
 		return func(w http.ResponseWriter, r *http.Request) {
 			_ = r.ParseForm()
@@ -80,7 +82,7 @@ func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values) *Se
 		}
 	}
 	const g = 1 << 30
-	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+	routes := fakeRoutes{
 		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("type") == "storage" {
 				fmt.Fprintf(w, `{"data":[
@@ -88,9 +90,10 @@ func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values) *Se
 					{"type":"storage","storage":"local-zfs","node":"pve2","status":"available","maxdisk":%d,"disk":0},
 					{"type":"storage","storage":"nas","node":"pve1","status":"available","maxdisk":%d,"disk":0},
 					{"type":"storage","storage":"nas","node":"pve2","status":"available","maxdisk":%d,"disk":0},
+					{"type":"storage","storage":"nas1","node":"pve1","status":"available","maxdisk":%d,"disk":0},
 					{"type":"storage","storage":"isos","node":"pve1","status":"available","maxdisk":%d,"disk":0},
 					{"type":"storage","storage":"tiny","node":"pve1","status":"available","maxdisk":%d,"disk":%d}]}`,
-					100*g, 100*g, 100*g, 100*g, 100*g, 10*g, 9*g)
+					100*g, 100*g, 100*g, 100*g, 100*g, 100*g, 10*g, 9*g)
 				return
 			}
 			fmt.Fprint(w, `{"data":[
@@ -104,6 +107,7 @@ func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values) *Se
 			fmt.Fprint(w, `{"data":[
 				{"storage":"local-zfs","type":"zfspool","content":"images,rootdir"},
 				{"storage":"nas","type":"nfs","content":"images"},
+				{"storage":"nas1","type":"nfs","content":"images","nodes":"pve1"},
 				{"storage":"isos","type":"dir","content":"iso"},
 				{"storage":"tiny","type":"lvmthin","content":"images"}]}`)
 		},
@@ -141,11 +145,17 @@ func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values) *Se
 		"GET /api2/json/nodes/pve1/tasks/" + upid + "/status": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
 		},
-	})
+	}
+	for _, o := range overrides {
+		maps.Copy(routes, o)
+	}
+	_, c := fakePVE(t, routes)
 	return &Service{C: c, PoolPrefix: "st-"}
 }
 
 const (
+	volUPID         = "UPID:pve1:0:0:0:qmmove:101:u:"
+	cfgNas1Unused   = `{"scsi0":"local-zfs:vm-101-disk-0,size=10G","unused0":"nas1:101/vm-101-disk-1.raw"}`
 	cfgLocalUnused  = `{"scsi0":"local-zfs:vm-101-disk-0,size=10G","unused0":"local-zfs:vm-101-disk-1"}`
 	cfgSharedUnused = `{"scsi0":"local-zfs:vm-101-disk-0,size=10G","unused0":"nas:101/vm-101-disk-1.raw"}`
 	cfgAttached     = `{"scsi0":"local-zfs:vm-101-disk-0,size=10G","scsi1":"local-zfs:vm-101-disk-1,size=20G"}`
@@ -159,6 +169,7 @@ func TestAttachVolumeCrossNode(t *testing.T) {
 		{"local disk to a VM on another node", cfgLocalUnused, "local-zfs:vm-101-disk-1", "103", true},
 		{"local disk to a VM on the same node", cfgLocalUnused, "local-zfs:vm-101-disk-1", "102", false},
 		{"shared disk to a VM on the same node", cfgSharedUnused, "nas:101/vm-101-disk-1.raw", "102", false},
+		{"shared disk to a VM on a node without its storage", cfgNas1Unused, "nas1:101/vm-101-disk-1.raw", "103", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -201,6 +212,9 @@ func TestAttachVolumeSharedAcrossNodes(t *testing.T) {
 	if len(writes["carrierdelete"]) != 1 {
 		t.Fatalf("the empty holder must go: %v", writes)
 	}
+	if tags := writes["holderconfig"][0].Get("tags"); !hasTag(tags, tagHolder) || !hasTag(tags, tagCarrier) {
+		t.Fatalf("carrier tags = %q", tags)
+	}
 }
 
 func TestAttachTargets(t *testing.T) {
@@ -210,6 +224,7 @@ func TestAttachTargets(t *testing.T) {
 	}{
 		{"local detached disk: VMs on its node only", cfgLocalUnused, "local-zfs:vm-101-disk-1", []int{101, 102}},
 		{"shared detached disk: every VM of the pool", cfgSharedUnused, "nas:101/vm-101-disk-1.raw", []int{101, 102, 103}},
+		{"shared detached disk: not a node without its storage", cfgNas1Unused, "nas1:101/vm-101-disk-1.raw", []int{101, 102}},
 		{"attached disk: none until detached", cfgAttached, "local-zfs:vm-101-disk-1", nil},
 	}
 	for _, tt := range tests {

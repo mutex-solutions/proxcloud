@@ -57,6 +57,30 @@ func (l *ShedLock) Lock(ctx context.Context, name string, atMostFor time.Duratio
 	return tag.RowsAffected() > 0, nil
 }
 
+// Wait is Lock retried for up to wait. It returns the release, or acquired false when the lock stayed busy. The release
+// still works once ctx is cancelled.
+func (l *ShedLock) Wait(ctx context.Context, name string, atMostFor, wait time.Duration) (release func(), acquired bool, err error) {
+	const step = 500 * time.Millisecond
+	for left := wait; ; left -= step {
+		now := time.Now().UTC()
+		ok, err := l.Lock(ctx, name, atMostFor, now)
+		if err != nil {
+			return nil, false, err
+		}
+		if ok {
+			return func() { _ = l.Unlock(context.WithoutCancel(ctx), name, 0, now, time.Now().UTC()) }, true, nil
+		}
+		if left <= 0 {
+			return nil, false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		case <-time.After(step):
+		}
+	}
+}
+
 // Unlock releases the named lock, honouring atLeastFor: lockUntil is set to the later of
 // (acquiredAt + atLeastFor) and now — so a job that finished fast can't be re-run before its
 // minimum interval.

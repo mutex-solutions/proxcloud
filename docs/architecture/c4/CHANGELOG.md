@@ -4,6 +4,32 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Holder use is serialised, a carrier is left alone
+
+**What changed**
+
+- A cross-node attach carries the disk on a holder tagged `pc-carrier`, which the regular holder lookup skips. Its
+  cleanup runs only once the move is known to have stopped or PVE refused it. Otherwise the empty carrier stays until
+  project teardown.
+- Creating a detached volume, keeping a server's volumes, attaching and deleting a volume take a per-project lock
+  (`ShedLock.Wait`, PostgreSQL). `holderMu` is gone, and `lockShareAccess` uses the same `Wait`.
+- A node where the volume's storage is not active is no attach target, and an attach to one is 409.
+- `VolumeSyncProvider.ListReadable` skips a VM it cannot read, for callers that only add rows. `List` skips only a holder
+  that is gone. A move to another server now ends with a reconcile.
+- `newHolder` removes its VM if it fails before the tags are on.
+
+**Why**
+
+- The destroy behind `dropEmptyHolder` takes every disk on the VM when it runs, and the source no longer names a disk
+  that has moved. A cleanup racing a running move, or another operation adding a disk, could lose a customer's volume
+  for good. A vmid is a cheap price against that.
+- A process mutex cannot serialise replicas, and it covered only the lookup.
+- An untagged VM in a pool counts as a server, so a failed create left a billed row.
+- Retrying a target that could never work moved the disk off its server and answered 502.
+- A deleted VM still listed, or a node that is down, failed the one read after an attach and left the volume without a
+  row until the next good sync. A sync during the carry could leave a row naming the carrier's disk.
+
+**Diagrams updated:** `c2-containers.md` (attach rule), `c3-components.md` (holder row).
 ## 2026-11-07: Split mode keeps the portal's SDN rights
 
 **What changed**

@@ -78,6 +78,23 @@ func (c *Client) WaitTask(ctx context.Context, upid UPID) error {
 	}
 }
 
+// TaskStopped reports whether a task has stopped, waiting up to wait for it and retrying failed reads, whatever ctx
+// says. False means unknown, so a caller about to destroy what the task may write to must leave it alone.
+func (c *Client) TaskStopped(ctx context.Context, upid UPID, wait time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), wait)
+	defer cancel()
+	for {
+		if st, err := c.TaskStatus(ctx, upid); err == nil && st.Status == "stopped" {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
 // TaskLog tails a task's log (for surfacing failure detail to the admin UI).
 func (c *Client) TaskLog(ctx context.Context, upid UPID, limit int) ([]string, error) {
 	node := upid.Node()

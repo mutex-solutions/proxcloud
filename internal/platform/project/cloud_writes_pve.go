@@ -1232,7 +1232,7 @@ func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.Extern
 		return
 	}
 	prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc())
-	if rows, err := prov.List(ctx); err == nil {
+	if rows, err := prov.ListReadable(ctx); err == nil {
 		h.pveUpsertRows(ctx, es, rows)
 	}
 }
@@ -1240,7 +1240,7 @@ func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.Extern
 // pveFollowRetypedVolume points the row at the disk's new volid. A failure only costs what the retype
 // cost before: the sync finds a new disk, and the bill shows two.
 func (h *Handler) pveFollowRetypedVolume(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, slot string) {
-	rows, err := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc()).List(ctx)
+	rows, err := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc()).ListReadable(ctx)
 	if err == nil {
 		for i := range rows {
 			vol, _ := rows[i].Data["volume"].(map[string]any)
@@ -1263,7 +1263,7 @@ func pveVolumeErr(err error) *httpx.HTTPError {
 	if errors.As(err, &ce) {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, ce.Msg)
 	}
-	if strings.Contains(err.Error(), "can't lock file") {
+	if msg := err.Error(); strings.Contains(msg, "can't lock file") || strings.Contains(msg, "VM is locked") {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, "The server is busy with another operation. Try again in a moment")
 	}
 	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
@@ -1288,6 +1288,7 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 		return true
 	}
 	var aerr error
+	renamed := false
 	switch action {
 	case "EXTEND":
 		size := intAny(data["size"])
@@ -1316,6 +1317,7 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 		if aerr == nil && target != "" && target != strconv.Itoa(vmid) {
 			// Moving a disk to another server renames it: the sync below adds the new row.
 			_ = h.cloud.DeleteAndArchive(ctx, cr, time.Now().UTC())
+			renamed = true
 		}
 	case "LIST_ATTACH_TARGETS":
 		vms, err := ps.AttachTargets(ctx, proj.ID, vmid, cr.ExternalID)
@@ -1367,16 +1369,24 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 	default:
 		return false
 	}
-	if aerr != nil {
-		// A failed cross-node attach can leave the disk on a holder under a new name, so the old row must go too.
+	reconcile := func() error {
 		prov := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc())
-		if _, err := providers.Reconcile(ctx, prov, h.cloud, es.ID, time.Now().UTC()); err != nil {
+		_, err := providers.Reconcile(ctx, prov, h.cloud, es.ID, time.Now().UTC())
+		if err != nil {
 			slog.Warn("volume action: refresh rows", "project", proj.ID, "err", err)
 		}
+		return err
+	}
+	if aerr != nil {
+		// A failed cross-node attach can leave the disk on a holder under a new name, so the old row must go too.
+		_ = reconcile()
 		h.fail(w, pveVolumeErr(aerr))
 		return true
 	}
-	h.pveSyncVolumes(ctx, es, proj)
+	// A sync during a move can have recorded the disk under its name on the carrier, which only a reconcile removes.
+	if !renamed || reconcile() != nil {
+		h.pveSyncVolumes(ctx, es, proj)
+	}
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 	httpx.OK(w, map[string]any{"result": map[string]any{}})
 	return true
