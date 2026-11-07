@@ -204,6 +204,10 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			h.fail(w, err)
 			return true
 		}
+		if err := h.kamajiEnforceQuota(r.Context(), proj, compute, d, groups, nodeGroupsFromCache(cr)); err != nil {
+			h.fail(w, err)
+			return true
+		}
 		// GPU gate on the DELTA vs the cluster's current groups (their workers are already in
 		// the usage count once synced as servers).
 		if err := h.enforceGPUQuotaForNodeGroups(r.Context(), proj, es.ID, groups, nodeGroupsFromCache(cr)); err != nil {

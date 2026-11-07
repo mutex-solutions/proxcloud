@@ -104,6 +104,28 @@ and rules: [README.md](README.md#maintenance-rule).
   connection alone skips it, or an RGW outage would stop an operator from turning the service off.
 
 **Diagrams updated:** none.
+## 2026-11-07: Tenant clusters get no PVE token by default
+
+**What changed**
+
+- A cluster on a project network gets no proxmox-csi, no CSI token and no tenant-side PVE credential, unless the provider sets
+  `config.cluster.csiSharedStores`. Chart 0.1.5 leaves the plugin out when no StorageClass is offered and makes
+  `shared-file` the default class.
+- The minted CAPMOX token gets `/sdn/zones/localnetwork`, worker node groups count against the project's quota, and a
+  revoke treats a missing token as revoked.
+
+**Why**
+
+- First real run of the minted path. PVE checks only `Datastore.Allocate` on the store to attach or delete a disk, not the VM
+  that owns it, and proxmox-csi needs that privilege. A tenant cluster-admin read the token from its own cluster, attached
+  another project's PVC to its own worker and read the files. The token's ACLs cannot prevent this, and moving the plugin
+  to the management side would not either, since a tenant can create a `PersistentVolume` naming any disk. Off by
+  default, opt-in with the cost stated, is the same call as `snatSources`. A store per project would be the real fix.
+- Every clone failed without the node bridge grant, because PVE checks the template's NICs. A revoke failed for ever on a
+  token already gone, because PVE answers that with a 500. Workers bypassed every quota but GPU.
+
+**Diagrams updated:** `c3-components.md`.
+
 ## 2026-11-07: A broken NAS no longer blocks an address no export lists
 
 **What changed**

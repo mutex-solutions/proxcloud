@@ -118,9 +118,11 @@ func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, sec Clust
 		map[string]string{annotationComputeService: sec.ComputeServiceID}); err != nil {
 		return nil, fmt.Errorf("kamaji: apply cloud credentials secret: %w", err)
 	}
-	if err := s.api.ApplyResourceSetSecret(ctx, ns, CSISecretName(spec.ID),
-		map[string]string{"csi.yaml": sec.CSIManifest}, labels); err != nil {
-		return nil, fmt.Errorf("kamaji: apply csi secret: %w", err)
+	if sec.CSIManifest != "" {
+		if err := s.api.ApplyResourceSetSecret(ctx, ns, CSISecretName(spec.ID),
+			map[string]string{"csi.yaml": sec.CSIManifest}, labels); err != nil {
+			return nil, fmt.Errorf("kamaji: apply csi secret: %w", err)
+		}
 	}
 	if err := s.api.ApplySecret(ctx, ns, MarkerSecretName(spec.ID), nil, labels,
 		map[string]string{annotationComputeService: sec.ComputeServiceID}); err != nil {

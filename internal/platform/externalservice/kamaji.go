@@ -23,7 +23,8 @@ package externalservice
 //	      "imageVariants":     {"nvidia": {"1.35.4": "<node-image-id>"}},  // optional per-version variants
 //	      "pveApiUrl":         "https://192.0.2.11:8006",  // the PVE API as CAPMOX reaches it
 //	      "pveCsiUrl":         "https://192.0.2.60:8006",  // the same as tenant workers reach it
-//	      "workerMtu":         1450                        // EVPN vnets
+//	      "workerMtu":         1450,                       // EVPN vnets
+//	      "csiSharedStores":   false                       // proxmox-csi for tenants: gives up isolation between them
 //	    }
 //	  },
 //	  "secret": {"kubeconfig": "<management-cluster kubeconfig>"}  // encrypted at rest
@@ -112,6 +113,8 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 			PVECSIURL:     str(cl["pveCsiUrl"]),
 			DNSServers:    strList(cl["dnsServers"]),
 			NodeGroupMTU:  intOf(cl["workerMtu"]),
+
+			CSISharedStores: cl["csiSharedStores"] == true,
 
 			ProxmoxServiceID: str(cl["proxmoxServiceId"]),
 		},

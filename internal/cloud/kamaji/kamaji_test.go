@@ -660,12 +660,25 @@ func TestFinalizeAfterCloudSecretCollected(t *testing.T) {
 	}
 }
 
+// No StorageClass offered: no CSI secret, so no token on its way to the tenant.
+func TestCreateClusterWithoutCSI(t *testing.T) {
+	api := newFakeAPI()
+	svc := NewWithAPI(api, testCfg(), "svc-1")
+	spec := testSpec()
+	if _, err := svc.CreateCluster(context.Background(), spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.secrets["pc-p1/"+CSISecretName(spec.ID)]; ok {
+		t.Fatal("a CSI secret without a manifest")
+	}
+}
+
 func TestFinalizeOrphans(t *testing.T) {
 	api := newFakeAPI()
 	svc := NewWithAPI(api, testCfg(), "svc-1")
 	ctx := context.Background()
 	spec := testSpec()
-	if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}}); err != nil {
+	if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}, CSIManifest: "m"}); err != nil {
 		t.Fatal(err)
 	}
 

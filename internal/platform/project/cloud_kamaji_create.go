@@ -19,6 +19,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/truenas"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/internal/platform/pveflavor"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -86,6 +87,59 @@ func (h *Handler) kamajiHydrateGroups(ctx context.Context, compute *externalserv
 	return nil
 }
 
+// kamajiEnforceQuota gates workers like servers: they land in the project's pool and count once synced. prev is what the
+// cluster already runs, so an edit asks only for its difference. Workers on a shared pool are not the project's.
+func (h *Handler) kamajiEnforceQuota(ctx context.Context, proj *Project, compute *externalservice.ExternalService, d kamaji.ClusterDefaults, groups, prev []kamaji.NodeGroup) error {
+	if d.Shared != nil {
+		return nil
+	}
+	flavor := func(id string) (*pveflavor.Flavor, error) {
+		fl, herr := h.pveFlavorOf(ctx, id)
+		if herr != nil {
+			return nil, herr
+		}
+		return fl, nil
+	}
+	want, err := kamajiWorkerDemand(groups, prev, d.RootVolumeGiB, flavor)
+	if err != nil {
+		return err
+	}
+	if herr := h.enforcePVEQuota(ctx, proj, compute, want); herr != nil {
+		return herr
+	}
+	return nil
+}
+
+// kamajiWorkerDemand is what groups add on top of prev. A flavor retired since counts as nothing.
+func kamajiWorkerDemand(groups, prev []kamaji.NodeGroup, rootGiB int, flavor func(string) (*pveflavor.Flavor, error)) (pveQuotaDemand, error) {
+	var want pveQuotaDemand
+	add := func(gs []kamaji.NodeGroup, sign int) error {
+		for _, ng := range gs {
+			fl, err := flavor(ng.FlavorID)
+			if err != nil {
+				return err
+			}
+			if fl == nil {
+				continue
+			}
+			disk := ng.RootVolumeGiB
+			if disk == 0 {
+				disk = max(rootGiB, fl.DiskGb)
+			}
+			n := sign * ng.Count
+			want.Servers += n
+			want.VCPUs += n * fl.VCPUs
+			want.RAMMb += n * fl.RAMMb
+			want.DiskGb += n * disk
+		}
+		return nil
+	}
+	if err := add(groups, 1); err != nil {
+		return want, err
+	}
+	return want, add(prev, -1)
+}
+
 // kamajiNetwork resolves the customer's pick to the vnet row of this project.
 func (h *Handler) kamajiNetwork(ctx context.Context, proj *Project, compute *externalservice.ExternalService, netID string) (vnet, zone string, err error) {
 	if netID == "" {
@@ -118,6 +172,9 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	if err := h.kamajiHydrateGroups(ctx, compute, d, spec.ID, spec.NodeGroups); err != nil {
 		return sec, err
 	}
+	if err := h.kamajiEnforceQuota(ctx, proj, compute, d, spec.NodeGroups, nil); err != nil {
+		return sec, err
+	}
 	if h.publicIPs == nil {
 		return sec, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "IP allocation service not configured")
 	}
@@ -125,6 +182,9 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	storage, classes := kamajiStorage(compute, d, spec)
 	if storage == "" {
 		return sec, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "The Proxmox provider has no storage profile for boot disks")
+	}
+	if d.Shared == nil && !d.CSISharedStores {
+		classes = nil // the CSI token would reach the tenant, and it opens every disk on the store (docs/managed-k8s.md)
 	}
 	in := kamaji.ClusterInfra{Region: compute.PVERegion(), Storage: storage, StorageClasses: classes}
 
@@ -189,7 +249,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 		capiID, capiSecret, csiID, csiSecret = sw.CAPITokenID, sw.CAPISecret, sw.CSITokenID, sw.CSISecret
 	} else {
 		toks, terr := ps.C.MintClusterTokens(ctx, spec.ID, pve.ClusterTokenScope{
-			Pool: in.Pool, TemplatePool: pve.TemplatePool, Storages: classStorages(classes),
+			Pool: in.Pool, TemplatePool: pve.TemplatePool, BootStorage: storage, CSIStorages: classStorages(classes),
 			ISOStorage: pveISOStorage(compute), Zone: zone, Vnet: in.Bridge,
 		})
 		if terr != nil {
@@ -199,7 +259,9 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 		capiID, capiSecret, csiID, csiSecret = toks.CAPIID, toks.CAPISecret, toks.CSIID, toks.CSISecret
 	}
 	sec.Cloud = map[string]string{"url": apiURL, "token": capiID, "secret": capiSecret}
-	sec.CSIManifest = kamajiCSIManifest(csiURL, csiID, csiSecret, in.Region)
+	if len(classes) > 0 {
+		sec.CSIManifest = kamajiCSIManifest(csiURL, csiID, csiSecret, in.Region)
+	}
 	if d.RWXGiB > 0 {
 		if err = h.kamajiRWX(ctx, proj, spec.ID, d.RWXGiB, &in); err != nil {
 			return sec, err
@@ -388,8 +450,8 @@ func pveISOStorage(compute *externalservice.ExternalService) string {
 	return "nas-templates"
 }
 
-// kamajiCSIManifest is the tenant-side config of proxmox-csi. The token is scoped to this cluster's
-// project pool and stores, because a tenant with cluster-admin can read it.
+// kamajiCSIManifest is the tenant-side config of proxmox-csi. A tenant with cluster-admin can read the token, so a
+// provider offers it only with csiSharedStores: its ACLs do not stop it attaching other projects' disks on those stores.
 func kamajiCSIManifest(url, tokenID, tokenSecret, region string) string {
 	cfg, _ := json.Marshal(map[string]any{
 		"features": map[string]any{"provider": "capmox"},

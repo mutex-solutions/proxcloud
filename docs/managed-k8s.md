@@ -8,13 +8,13 @@ cluster's API, and Kamaji runs the cluster's control plane as pods there
 
 > ## Status on Proxmox
 >
-> Creating a cluster works: a tenant control plane on Kamaji, worker VMs through CAPMOX, Cilium, proxmox-csi
-> and MetalLB. Verified on PVE 9.2 with CAPI v1.14.4, CAPMOX v0.9.2 and Kamaji CP provider v0.22.0, with
-> create, worker scale-out and a bound PVC, in `sharedWorkers` mode (section 9). **Workers in the project's
-> pool with per-cluster tokens have only run against a fake PVE**: the required grants
-> ([proxmox-permissions.md](proxmox-permissions.md)) are the operator's call and were not applied on the lab, so
-> syncing and billing workers, suspend coverage and the minted tokens are unverified. Not available: autoscaling
-> node groups, GPU node groups.
+> Creating a cluster works: a tenant control plane on Kamaji, worker VMs through CAPMOX, Cilium and MetalLB, with
+> workers in the project's pool on the project's network, under tokens minted per cluster and revoked after the delete.
+> Verified on PVE 9.2 with CAPI v1.14.4, CAPMOX v0.9.2 and Kamaji CP provider v0.22.0: create, scale-out, RWX volumes on a
+> NAS dataset, a tenant LoadBalancer, project suspend and resume, a refused create, delete with everything it held.
+> **Block volumes (proxmox-csi) are off by default**, because their token opens other tenants' disks: see
+> [section 9](#9-how-a-cluster-lands-on-proxmox). Not available: autoscaling node groups, GPU node groups. Not run: the
+> installer's split mode end to end, and a NAS the workers reach without SNAT (the lab has none).
 
 Code: `internal/cloud/kamaji` (config, values builder, Application builder,
 service, sync provider), `internal/cloud/kamajik8s` (minimal management-cluster
@@ -40,8 +40,7 @@ One-time, per management cluster (apply order:
    pinned versions. Never `latest`: the provider config and every existing
    cluster pin an exact version, and the registry must keep every pinned version.
    The values contract lives in `internal/cloud/kamaji/values.go` and is pinned by
-   `TestBuildValues`. The chart itself is not shipped in this repository
-   (`deploy/charts` holds only `proxcloud` and `database-cluster`), and
+   `TestBuildValues`. The chart is `deploy/charts/proxmox-kamaji-cluster`, and
    `config.argocd.chartName` has no default: the provider config must name it.
 
 ## 2. Provider setup (admin → Cloud providers → Add provider → Kubernetes)
@@ -61,6 +60,7 @@ Seed-file twin of the form: `deploy/seed/external-service-dev.json`
 | Version → image matrix | `config.cluster.versions` | Curated map `k8s version → node image id`: the only versions offered to customers. Textarea grammar: `1.35.4=<image-id>` per line. |
 | Image variants | `config.cluster.imageVariants` | Alternative node-image builds of the same version, e.g. a GPU build. Grammar: `1.35.4@nvidia=<image-id>`. |
 | RWX dataset size | `config.cluster.rwxGiB` | Optional, API only. See [section 9](#9-how-a-cluster-lands-on-proxmox). |
+| Block volumes for tenants | `config.cluster.csiSharedStores` | Optional, API only, default off. **Gives up isolation between tenants on the stores**, see [section 9](#9-how-a-cluster-lands-on-proxmox). Needs chart 0.1.5 or later when off. |
 | Flavors allowlist | `config.cluster.flavors` | Flavor ids offered for node groups. Empty = no restriction. |
 
 ## 3. How a cluster is represented
@@ -138,7 +138,10 @@ kubectl get application <stc-id> -n argocd -o jsonpath='{.status.health}{"\n"}{.
 
 | Symptom | Look at |
 |---|---|
-| Create fails with "not available yet" | Expected on a Proxmox provider: cluster create is planned (see the status box). |
+| Create fails with `Could not mint the cluster's Proxmox tokens` | The portal token lacks a grant: [proxmox-permissions.md](proxmox-permissions.md#managed-kubernetes). The message names the path. |
+| Machines stuck, CAPMOX logs `not authorized to access endpoint` | PVE refused the cluster's token. The PVE access log (`/var/log/pveproxy/access.log`) names the call. `GET /cluster/status` answering 403 is normal and ignored. A refused clone is checked against the template's NICs too. |
+| `error waiting for agent` for a few minutes | Normal while the clone boots. |
+| Tenant `LoadBalancer` Service `<pending>` for up to 10 minutes after create | The MetalLB pool arrives by ClusterResourceSet, which retries until the chart's CRDs exist. |
 | Application `OutOfSync` / `SyncFailed` | `argocd app get <stc-id>` sync error. "not permitted in project proxcloud-k8s" → the chart needs a cluster-scoped resource; add exactly that group/kind to `deploy/mgmt-cluster/appproject.yaml`. Chart pull errors → registry or pin problem (§1.4). |
 | Application Healthy but cluster unusable | Health checks not loaded or wrong: verify the `argocd-health.yaml` keys exist in `argocd-cm` and the application controller was restarted. |
 | Cluster stuck `PROGRESSING`, no endpoint | `kubectl get tcp -n pc-<projectId>` → TenantControlPlane status. Pending CP pods → management-cluster capacity or DataStore. |
@@ -154,8 +157,9 @@ What the create path resolves (`internal/platform/project/cloud_kamaji_create.go
 |---|---|---|
 | Workers' pool | the project's pool | they sync and bill as servers of their flavor (`fl-`, `sp-` tags) |
 | Network | the customer's pick, one of the project's networks | the zone must have no DHCP (EVPN, VLAN) |
+| Quota | the project's limits, like servers | every worker counts against `servers`, `vcpus`, `ramMb` and `diskGb`; a create or node group edit over them answers 409 and takes nothing |
 | Addresses | 16 for workers, 8 for tenant LoadBalancers, reserved from the top of the subnet | hence at most 15 workers: a rolling replacement needs a spare |
-| Credentials | `capmox@pve!<id>` (management side), `csi@pve!<id>` (reaches the tenant cluster) | minted at create, revoked after the delete cascade |
+| Credentials | `capmox@pve!<id>` (management side), `csi@pve!<id>` only with `csiSharedStores` (reaches the tenant cluster) | minted at create, revoked after the delete cascade |
 
 **Node images.** `config.cluster.versions` maps a version to its template per PVE node, as printed by
 `images/k8s-node-template.sh`: `{"1.35.10": "pve1=9210,pve2=9211"}`. PVE clones to local storage only on the
@@ -163,21 +167,40 @@ template's node, so a node group has one MachineDeployment per entry, its replic
 taking the remainder. The zone label comes from that pin, so no cloud controller manager is needed.
 
 **Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
-endpoint and proxmox-csi's PVE API are addresses on the services subnet, which tenants reach over their normal
-egress: MetalLB, and a `pve-api` Service forwarding to the PVE nodes (`config.cluster.pveCsiUrl`).
+endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB. So is
+proxmox-csi's PVE API with `csiSharedStores`: a `pve-api` Service forwarding to the PVE nodes (`config.cluster.pveCsiUrl`).
+
+**Block volumes.** A provider offers its storage profiles to tenant clusters through proxmox-csi only with
+`config.cluster.csiSharedStores: true`. The plugin's token reaches the tenant cluster, where a cluster-admin can read it, and
+**PVE's ACLs do not hold it to the project**: to attach or delete a disk, PVE checks `Datastore.Allocate` on the store and
+not the VM that owns the disk, and proxmox-csi cannot work without that privilege, since all its disks are named
+`vm-9999-pvc-*`. Scoping the token to the project's pool does not help. Seen on PVE 9.2 with a token on the project's pool
+and the store only: it cannot read another project's pool or VM config, but it lists every disk on the store, attaches
+another project's PVC or boot disk to its own worker (a pod then read the files), and passes PVE's check to delete one (the
+task ran and failed only because that disk was in use). Moving the plugin to the management side would not close this, as a
+tenant can create a `PersistentVolume` naming any disk. Turn the setting on only for tenants who trust each other, or on a
+store they alone use.
+A disk is named after its PV alone, so the portal cannot tell whose it is: a PVC still there when the cluster is deleted
+leaves its disk on the store, unbilled. Delete PVCs first. Off, a cluster has no proxmox-csi, no CSI token and no
+`csi-proxmox` namespace, and `shared-file` is the default StorageClass if it has a dataset. Without a TrueNAS provider on
+the project it has no StorageClass at all. A store per project would give real isolation on block volumes. It is not built:
+such a store needs a ZFS dataset or RBD namespace per project, and we found no PVE API call that creates one.
 
 **RWX volumes.** `config.cluster.rwxGiB` gives each new cluster on a project with a TrueNAS provider one NAS dataset
-of that size and the `shared-file` StorageClass (csi-driver-nfs, `ReadWriteMany`), next to the proxmox-csi classes,
-which stay the default. The dataset is an ordinary share of the project named `k8s-<clusterId>`: it bills as a share,
+of that size and the `shared-file` StorageClass (csi-driver-nfs, `ReadWriteMany`), the default class unless proxmox-csi
+classes are offered. The dataset is an ordinary share of the project named `k8s-<clusterId>`: it bills as a share,
 counts against the share quota, can be resized on the Shares page, and its export follows the project's addresses.
 PVCs are subdirectories of it named after their PV, so `refquota` caps them together, not one by one, and a new PVC with an old name starts empty. They are mode `0777`, since the NAS squashes root and a non-root pod could not write otherwise. It is destroyed with the cluster, by the sweep after the delete cascade (30 minutes after the cluster was created at the earliest).
 For the same reason the CSI controller deletes a PVC's directory as `nobody`: a directory a non-root pod created with mode `755` and filled cannot be removed, the PV stays `Released` with `permission denied` in its events, and its data counts against the `refquota` until the pod's user removes it or the cluster goes. Have such pods use `umask 000`, or empty the volume before deleting the PVC.
-Workers reach it over their egress, so the NAS must see them under the project's addresses: no NAT on the way. Where a
+Workers reach it over their egress, so the NAS must see them under the project's addresses: no NAT on the way. A subnet
+that leaves through its exit node's SNAT, the usual case on EVPN, arrives under a node's address. Where a
 NAT cannot be avoided, the TrueNAS provider's `snatSources` keeps its address on the dataset's export, which gives up
-isolation between every tenant behind that NAT (see "TrueNAS file shares" in `cloud-integration.md`).
+isolation between every tenant behind that NAT (see "TrueNAS file shares" in `cloud-integration.md`). The isolation rules
+drop tenant traffic to the nodes' management network, so a NAS with only an address there cannot be mounted at all:
+`mountHost` must be an address tenants can reach.
 Full-tier sites (ceph-csi CephFS) are not built yet.
 
-**A create that fails.** The marker secret is written before the create takes anything. A failure releases the addresses, tokens and dataset at once, and if that release fails too (NAS or PVE down), the marker stays and the sweep retries it after the grace window. A release only reaches the NAS named by the cluster's share row, so a broken NAS holding nothing of the cluster blocks nothing. The exception is a cluster on a shared worker pool: its addresses are on every export of the project, so they stay reserved until the NAS takes them off.
+**A create that fails.** Quota is checked first, so a create over it takes nothing. The marker secret is written before the create takes anything else. A failure releases the addresses, tokens and dataset at once, and if that release fails too (NAS or PVE down), the marker stays and the sweep retries it after the grace window. A release only reaches the NAS named by the cluster's share row, so a broken NAS holding nothing of the cluster blocks nothing. The exception is a cluster on a shared worker pool: its addresses are on every export of the project, so they stay reserved until the NAS takes them off.
 
 **`sharedWorkers`.** For a site that will not give the portal token the right to mint tokens,
 `config.cluster.sharedWorkers` (`pool`, `bridge`, `gateway`, `prefix`, `first`, `last`, `capiTokenId`, `csiTokenId`;
