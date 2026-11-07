@@ -13,6 +13,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/powerdns"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
@@ -30,6 +31,9 @@ func zoneErr(err error) error {
 // upstreamErr logs why a backend failed and tells the tenant only that it did: the raw error names the backend's internal
 // address, which tenants must not learn.
 func upstreamErr(what string, err error) *httpx.HTTPError {
+	if errors.Is(err, pve.ErrNotInProject) {
+		return httpx.NewError(http.StatusNotFound, http.StatusNotFound, "Server not found")
+	}
 	slog.Error("backend request failed", "backend", what, "err", err)
 	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "The "+what+" is unavailable. Try again later.")
 }

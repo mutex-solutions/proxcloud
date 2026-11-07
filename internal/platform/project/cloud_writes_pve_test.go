@@ -131,6 +131,10 @@ func TestPVEVolumeErr(t *testing.T) {
 	if he := pveVolumeErr(errors.New("pve: task failed")); he.Status != http.StatusBadGateway {
 		t.Fatalf("PVE failure mapped to %d", he.Status)
 	}
+	// Attaching to another project's server: a refusal, not a failing backend.
+	if he := pveVolumeErr(fmt.Errorf("%w: vm 100 is not in project pool pc-x", pve.ErrNotInProject)); he.Status != http.StatusNotFound {
+		t.Fatalf("foreign server mapped to %d %q", he.Status, he.Msg)
+	}
 }
 
 func TestPVECapacityDisk(t *testing.T) {
