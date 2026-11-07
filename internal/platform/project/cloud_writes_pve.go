@@ -1498,6 +1498,10 @@ func (h *Handler) pveCreateImage(w http.ResponseWriter, r *http.Request, u *user
 			d.Slot, d.Storage)))
 		return
 	}
+	if herr := h.enforcePVEQuota(ctx, proj, es, pveQuotaDemand{DiskGb: gibUp(vm.MaxDisk)}); herr != nil {
+		h.fail(w, herr)
+		return
+	}
 	started := time.Now().UTC()
 	vmid, cerr := ps.CreateImage(ctx, proj.ID, serverExt, name)
 	if cerr != nil {

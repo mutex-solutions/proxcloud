@@ -122,12 +122,11 @@ func (r *Repo) PendingCollectTransactions(ctx context.Context, from, to time.Tim
 	})
 }
 
-// PendingCollectForBill returns the bill's PENDING collect transactions created after `since` —
-// an in-flight charge (the browser/cron/scanner has not settled it yet). A new charge for the bill
-// must not start while one exists, or the customer is charged twice.
-func (r *Repo) PendingCollectForBill(ctx context.Context, billID string, since time.Time) ([]pricing.CollectTransaction, error) {
+// PendingCollectForBill returns the bill's PENDING collect transactions, however old: a charge whose outcome is
+// unknown. A new charge for the bill must not start while one exists, or the customer may be charged twice.
+func (r *Repo) PendingCollectForBill(ctx context.Context, billID string) ([]pricing.CollectTransaction, error) {
 	return findTyped[pricing.CollectTransaction](ctx, r.collects, pgdoc.M{
-		"billId": billID, "status": string(pricing.CollectTransactionStatusPending), "createdAt": pgdoc.M{"$gt": since},
+		"billId": billID, "status": string(pricing.CollectTransactionStatusPending),
 	})
 }
 
