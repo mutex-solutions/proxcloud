@@ -31,4 +31,8 @@ func TestPVESandboxConfig(t *testing.T) {
 		Port: 443, EntryVMID: 9110, EntryPool: "proxcloud-sandbox-entry", EntryAddress: "192.0.2.5"}) {
 		t.Fatalf("proxy: %+v", p)
 	}
+	es.Config["sandbox"].(map[string]any)["registry"] = map[string]any{"address": "198.51.100.226", "port": float64(443)}
+	if c, _ := es.PVESandboxConfig(); c.Registry != (PVESandboxRegistry{Address: "198.51.100.226", Port: 443}) {
+		t.Fatalf("registry: %+v", c.Registry)
+	}
 }

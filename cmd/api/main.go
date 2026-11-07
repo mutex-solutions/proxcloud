@@ -771,7 +771,7 @@ func run() error {
 	chargeDispatch := func(ctx context.Context, timeUnit string) error {
 		return billingProv.Charge(ctx, timeUnit, time.Now().UTC())
 	}
-	registerJobs(sched, billingProv.Name(), chargeDispatch, metricsJob, syncJob, savingsSvc, suspensionJob, collectSvc, txnScanner, deletionJob, billSendSvc, log)
+	registerJobs(sched, billingProv.Name(), chargeDispatch, metricsJob, syncJob, savingsSvc, suspensionJob, collectSvc, txnScanner, deletionJob, billSendSvc, projectH.AdoptSandboxImages, log)
 	// The fan-out consumer belongs to the native provider: it drains the queue that provider
 	// publishes to. Under the external provider nothing publishes, so a consumer would idle
 	// forever on a queue that never fills.
@@ -1096,7 +1096,7 @@ func startChargeConsumer(rabbit *atomic.Pointer[amqp.Client], charger chargefano
 //
 // Jobs that are not about billing at all (metrics ingestion, cloud sync, project deletion) always
 // run — the external provider still depends on this pod keeping the resource cache fresh.
-func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDispatch func(context.Context, string) error, metrics *metricsjob.Job, sync *syncjob.Job, savings *billing.SavingsService, suspension *billing.SuspensionJob, collect *payment.CollectService, txnScan *payment.TransactionScanner, deletion *project.DeletionJob, billSend *billing.BillSendService, log *slog.Logger) {
+func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDispatch func(context.Context, string) error, metrics *metricsjob.Job, sync *syncjob.Job, savings *billing.SavingsService, suspension *billing.SuspensionJob, collect *payment.CollectService, txnScan *payment.TransactionScanner, deletion *project.DeletionJob, billSend *billing.BillSendService, adoptImages func(context.Context), log *slog.Logger) {
 	chargeFn := func(timeUnit string) func(context.Context) {
 		return func(ctx context.Context) {
 			if err := chargeDispatch(ctx, timeUnit); err != nil {
@@ -1191,6 +1191,8 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 				log.Error("sandbox state sync job", "err", err)
 			}
 		}},
+		// Built-in sandbox templates follow the prepull DaemonSet (off unless a provider sets imageAdoption).
+		{Name: "sandboxTemplateAdopt", Spec: scheduler.SandboxTemplateAdoptSpec, AtMostFor: 10 * time.Minute, AtLeastFor: time.Minute, Fn: adoptImages},
 		{Name: "pveTaskPoll", Spec: scheduler.PVETaskPollSpec, AtMostFor: time.Minute, AtLeastFor: 10 * time.Second, Fn: func(ctx context.Context) {
 			if _, err := sync.RunPVETasks(ctx); err != nil {
 				log.Error("pve task poll job", "err", err)

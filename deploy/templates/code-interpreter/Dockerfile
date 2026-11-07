@@ -2,6 +2,7 @@
 # behind E2B's FastAPI server on :49999, with Python, JavaScript and Bash kernels. Built like
 # e2b-dev/code-interpreter template/template.py with is_docker=True (Apache-2.0; its files come
 # from the pinned "upstream" build context). R and Java kernels are left out (size, start time).
+# BASE_IMAGE=a CUDA PyTorch image builds code-interpreter-gpu.
 ARG BASE_IMAGE=docker.io/library/python@sha256:bcaf104ef2827b827bdd0b8b351742783fc050296e1dc150113e6ec869e652d0
 FROM ${BASE_IMAGE}
 ENV PIP_DEFAULT_TIMEOUT=100 \

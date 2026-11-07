@@ -16,8 +16,10 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 > `https://<port>-<id>.<domain>`: a platform HAProxy appliance passes TCP 443 to `sandbox-proxy`, where TLS ends with
 > a wildcard certificate issued on the services cluster. SB5 (section 5) adds the E2B-compatible API at `/e2b` with
 > project-scoped sandbox API keys, envd in every sandbox and the built-in templates `base` and `code-interpreter-v1`;
-> what of E2B does not work is in [e2b-compat.md](e2b-compat.md). Not yet: template builds, snapshots and pause
-> (SB6-SB7, so the wake endpoint has nothing to resume yet), MCP gateway (SB8), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
+> what of E2B does not work is in [e2b-compat.md](e2b-compat.md). SB6a (section 6) adds the sandbox registry: Zot on
+> the services cluster with its blobs in the object store, one pull account per project, the built-in images copied in
+> by digest and pre-pulled on every node. Not yet: custom template builds (SB6b), snapshots and pause (SB7, so the wake
+> endpoint has nothing to resume yet), MCP gateway (SB8), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
 > and decisions: the sandbox plan (owner document, not in this repository).
 
 ## 0. SB0 lab spike (2026-11-07)
@@ -371,6 +373,7 @@ hash><content hash>`, which is the VM's only rule. Every rule in it ACCEPTs:
 | out, in | UDP 8472 (Cilium VXLAN), TCP 4240 and ICMP (Cilium health), TCP and UDP 7946 (MetalLB), TCP 10250 | the other sandbox workers (IP set `<group>-n`) |
 | in | TCP 10250 | `sandbox.kubeletSources` (the services cluster's nodes) |
 | in | TCP 443 (`config.sandbox.proxy.port`) | the entry appliance's vnet address only, to `sandbox-proxy`'s MetalLB address (`config.sandbox.proxy`, SB4) |
+| out | TCP 443 (`config.sandbox.registry.port`) | the sandbox registry's address only (`config.sandbox.registry`, SB6a, §6.4) |
 | out | anything | IP set `<group>-o`: `0.0.0.0/1` and `128.0.0.0/1` minus the private, CGNAT, link-local, multicast and reserved ranges, the management networks, every address a PVE node holds on any interface (uplinks, bonds and VLANs too), the sandbox's own SNAT address, `blockedCidrs`, the tenant pool, the sandbox subnet itself (its gateway is a PVE node) and the control plane address |
 
 Nothing else comes in: there is no rule for a tenant, for the services cluster beyond the kubelet, or for anyone on the
@@ -959,10 +962,11 @@ tag, and leaves the init container out on a site without a sandbox domain).
 
 ### 5.4 Built-in templates
 
-Until template builds (SB6) the provider offers only the templates of its `config.sandbox.templates`. The E2B SDKs ask
-for `base` (`Sandbox.create()`) and `code-interpreter-v1` (`e2b_code_interpreter.Sandbox.create()`).
-`deploy/templates/build.sh` builds both (`PUSH=1 REGISTRY=ghcr.io/mutex-solutions TAG=<tag>`, prints each reference
-with its digest; SB6a moves this into a CI workflow):
+Until custom template builds (SB6b) the provider offers only the templates of its `config.sandbox.templates`. The E2B
+SDKs ask for `base` (`Sandbox.create()`) and `code-interpreter-v1` (`e2b_code_interpreter.Sandbox.create()`).
+`deploy/templates/build.sh` builds both with the other built-in templates (`PUSH=1 REGISTRY=ghcr.io/mutex-solutions
+TAG=<tag>`, prints each reference with its digest); the `sandbox-templates` workflow runs it and pins the digests in
+`deploy/templates/images.yaml`, from where a site with a sandbox registry gets them as `pin:<name>` (section 6.3):
 
 | Template | Image | Config |
 |---|---|---|
@@ -1003,3 +1007,154 @@ on SB0, so the proxy ran on a worker; the client reached the appliance through a
 - Found: another drill fencing the same pool with a different provider config rolled the workers to its generation
   while this ran; the fence gate then failed (503 on create) until this stack's sync ran again. Two portals must not
   fence one sandbox pool.
+
+## 6. The sandbox registry (SB6a)
+
+The sandbox nodes pull templates and `sandbox-proxy` from a registry of the platform's own, not from ghcr or Docker
+Hub, and each project pulls with an account that reads its own images and the built-in ones only (decision D3). EE
+shared one pull account across all tenants, which a node escape could use to read every tenant's templates. The one
+exception is SB5's runtime image (`proxcloud-sandbox-runtime`, envd and `sandbox-init` for `node-setup`): stage 55
+(cluster) applies it before the registry exists, so it still comes from `images.registry` (or
+`sandbox.runtime_image`).
+
+```
+CI (sandbox-templates) ──push──► ghcr.io/mutex-solutions/sandbox-*   digest ──PR──► deploy/templates/images.yaml
+installer stage 55 (registry) ──skopeo copy, same digest──► Zot  <address>/library/<name>
+                                                              │ blobs in a bucket: RustFS (Standard) / RGW (Full)
+sandbox node containerd ──TLS (registry CA), project account──┘   prepull DaemonSet: every image on every node
+```
+
+### 6.1 What runs where
+
+- **Zot** (`ghcr.io/project-zot/zot-minimal-linux-amd64:v2.1.22`, digest-pinned in `versions.yml`) on the services
+  cluster, namespace `sandbox.registry.namespace` (default `proxcloud-sandbox-registry`), one replica (upload sessions
+  and locks live in the process; the blobs are in the bucket), behind one MetalLB address `sandbox.registry.address`
+  on port 443. TLS from a CA of its own (cert-manager on the services cluster, IP SAN = the address).
+- **The bucket** `sandbox.registry.bucket` on the object store, created by the stage with a service user that reaches
+  this bucket alone: on RustFS (`vm`, `truenas-app`) through the admin API and a policy, on RGW (`ceph-rgw`) through
+  the admin ops API (the user creates and owns the bucket). `external`: the store's own key. No Object Lock: Zot's
+  garbage collection deletes blobs nothing references (`gcDelay` 1 h).
+- **The account sync**, `sandbox-proxy registry-users`, a native sidecar of Zot. Every 30 s it lists the sandbox
+  cluster's tenant namespaces (`managed-by=proxcloud`, `proxcloud.io/tenant=true`, name `sb-<project label>`, project
+  id lowercase alphanumerics only, since it becomes part of a repository pattern), writes Zot's `config.json` and
+  `htpasswd` into a shared `emptyDir` (Zot reloads both when the file changes; Zot starts only once the sync is
+  ready), and writes one Secret per project plus the nodes' Secret on the sandbox cluster. A project's password is an
+  HMAC of the account name with a key the stage generated, so nothing is stored per project and a restart writes the
+  same file. A failed namespace list keeps the users Zot has, also right after the sidecar restarted (its config
+  volume stays with the pod): it writes nothing until a list succeeds, and only a new pod starts from the static users.
+  An unknown subcommand is an error, so an image older than `registry-users` fails with that cause instead of serving.
+- **On the sandbox cluster** (`deploy/sandbox-cluster/registry.yaml` and the stage's prepull template):
+  `registry-trust` writes `/etc/containerd/certs.d/<address>/` on every node, so containerd trusts the registry CA
+  for that host alone; the sync's identity `sandbox-system/sandbox-registry-users` (namespaces `list`, Secrets
+  `create`, and `get`/`patch` only on the two Secret names it writes); `template-prepull`,
+  one init container per pinned image, on every node, the unsecured and system ones too. RBAC cannot limit `create`
+  by name, so on its own that role could create a `kubernetes.io/service-account-token` Secret named
+  `sandbox-template-pull` in `kube-system` for a controller's account, let the token controller fill it and read it
+  back: a cluster-admin token, held on the services cluster. The ValidatingAdmissionPolicy
+  `sandbox-registry-users-pull-secrets-only` in the same file allows this identity only `kubernetes.io/dockerconfigjson`
+  Secrets named `sandbox-template-pull` in `sb-*` and `sandbox-registry-nodes` in `sandbox-system`.
+
+### 6.2 Accounts
+
+| Account | Reads | Writes | Where it lives |
+|---|---|---|---|
+| `pull-<project>` | `library/**`, `t/<project>/**` | nothing | Secret `sandbox-template-pull` in `sb-<project>` |
+| `pull-nodes` | `library/**` | nothing | Secret `sandbox-registry-nodes` in `sandbox-system` (prepull, sandbox-proxy) |
+| `push` | `t/**` | `t/**` (template builds, SB6b) | services cluster only |
+| `admin` | everything | everything (the installer's copies into `library/`) | services cluster and `generated/` |
+
+No anonymous access. Zot applies the most specific matching pattern, so each `t/<project>/**` repeats the push
+user's rights. One push account for every project is what SB6b's build pod starts from; an account per build is
+SB6b's.
+
+A sandbox pod names its project's Secret for every image on the registry's host (`Config.pullsFromRegistry`), the
+built-in `library/` images too: the kubelet (1.35, `KubeletEnsureSecretPulledImages`) checks a pod's credentials even
+for an image a prepull pod already put on the node, so a pod without them is refused (measured below). The portal no
+longer copies a shared `sandbox-system/sandbox-template-pull` into every project namespace; the sync writes the
+project's own one (the portal's account cannot read Secrets on that cluster at all).
+
+### 6.3 Built-in images and adoption
+
+`deploy/templates/` holds the built-in templates (EE's, without `mcp-gateway`, which is SB8; the desktop image drops
+Google Chrome and VS Code, which its comment already said may not be redistributed). The `sandbox-templates` workflow
+builds them, pushes `ghcr.io/mutex-solutions/sandbox-<name>:<date>-<sha>` and opens a pull request that pins each new
+digest in `deploy/templates/images.yaml`. A public base used as is (the default `python` template) is pinned there by
+hand: the digest of its linux/amd64 manifest, which the copy takes alone.
+
+Stage 55 (registry) copies every pin to `<address>/library/<last path part>:<tag>` with the same digest
+(`skopeo copy --preserve-digests`; the stage reads the digest back afterwards), plus the release's
+`proxcloud-sandbox-proxy` (stage 56 then runs sandbox-proxy from that copy, pinned by the digest the copy produced,
+with the nodes' account), and renders the prepull DaemonSet from the pins. A template names a pinned image as
+`image: pin:<name>`; stage 60 resolves it to the copy when it first registers the sandbox provider (or to the pinned
+source on a site without a registry), and sets `templateRegistry: <address>/t` and `imageAdoption`
+(`sandbox.registry.adoption`, default `on`).
+
+A new pin reaches the templates in two steps: `make upgrade` runs the registry stage, which copies the new digest and
+bumps the prepull; then the portal's `sandboxTemplateAdopt` job (every 5 minutes) moves each template whose image is
+digest-pinned in the same repository to the digest the prepull pods run, once every prepull pod on a Ready node has
+pulled it, and records an audit event. The write lands only while the template still holds the image it read
+(`SetTemplateImage`), so an operator's edit in between wins. Rollback: revert the pin and upgrade again.
+
+### 6.4 Network
+
+The nodes reach the registry's address directly: it is on the services network (a MetalLB address), routed by the
+sandbox vnet's gateway like the control plane's. Layer 1 drops it like every private address, so the Proxmox
+provider's `config.sandbox.registry` (`{address, port: 443}`, written by stage 60) adds exactly one rule to the
+workers' firewall generation: `out tcp <address> 443`. The address stays out of the internet set, so no other port
+of it opens. The guardrail (layer 2) is not involved: pulls come from containerd in the node's namespace, and sandbox
+pods stay denied every private range, the registry included. The nodes never reach the mgmt registry or the services
+cluster's chart registry.
+
+### 6.5 Installer
+
+`sandbox.registry.address` empty (default): no registry, nothing changes. Set: stage `55-sandbox-registry.yml` runs
+after the cluster stage and before stage 56; `make upgrade` runs it too. It needs the object store of stage 45 (or the
+`ceph-rgw` / `external` settings) and stage 55's sandbox cluster kubeconfig. On a first install the prepull waits for
+the fence (the workers reach the registry once stage 60 gave the Proxmox provider the address and a sync ran); the
+stage reports how many nodes have pulled, and a re-run checks again. An existing sandbox provider keeps its template
+list (stage 60 registers it once): set `Template registry` (`<address>/t`), `Built-in image updates` and the images
+(the `library/` copies) in the console.
+
+### 6.6 Measured on the lab (2026-11-07)
+
+Stage 55 (registry) of the branch ran against the lab from a scratch site: the services cluster, the SB0 sandbox
+cluster as the stage's cluster, namespace `sb6a-registry`, one MetalLB address, the account sync limited to
+namespaces labelled for one provider (`SERVICE_ID`, so other projects on the shared SB0 cluster were left alone).
+First with RustFS (the installer's RustFS VM) as the backend, then with the lab RGW from a second scratch site with
+the same accounts; the second run moved the same Deployment to the new bucket.
+
+- Stage: bucket and user created, registry up, CA read, `python` copied with its digest, prepull and trust applied.
+  A second run changed nothing but the Secrets kubectl always reports (now ignored in `changed_when`). Bugs the runs
+  found, fixed: a kubeconfig handed to the template came back as a dict; a Jinja comment ate the line break before
+  it; the CA directory was missing; the sync rewrote Zot's config every 30 s when no project existed (no project was
+  read as "nothing written yet"; a unit test now covers it); a TCP readiness probe filled Zot's log with TLS errors
+  (now `/readyz` over HTTPS).
+- Fence: before the registry rule every prepull pull timed out (`dial tcp <address>:443: i/o timeout`); a pass with
+  `config.sandbox.registry` added the one rule (`out tcp <address> 443`, new generation) and both workers pulled
+  `library/python` from Zot. A pass with the earlier config went back to the earlier generation exactly. On the
+  shared lab another portal's sync kept moving the workers back to its own generation (without the rule), so the
+  drills ran with this pass repeating every 15 s.
+- Accounts, the same on both backends (`skopeo` from mgmt): push wrote `t/sb6aproja/app` and `t/sb6aprojb/app`, was
+  refused (403) on `library/evil` and on overwriting `library/python`, and could not read `library/`; project A's
+  account read `library/python` and `t/sb6aproja/app`, was refused `t/sb6aprojb/app` and any write; anonymous was
+  refused. The project Secret appeared 16-30 s after its namespace.
+- Through the portal's code (`TestRegistryLive`, the proxcloud service account): in project A a gVisor sandbox from
+  `library/python` and one from `t/sb6aproja/app` ran with the project's own Secret; one from `t/sb6aprojb/app`
+  stopped at `ErrImagePull ... 403 Forbidden`. A pod without the Secret, on nodes that had the image from the
+  prepull, got `ErrImagePull`. Image adoption: a template pinned at another digest was offered the prepull's digest,
+  2/2 pods.
+- Large layer: a 300 MiB random layer pushed (26 s RustFS, 23 s RGW) and pulled back by project A (3-4 s) with the
+  same digest. In the bucket it is one object written in 10 parts (multipart ETag `...-10` on both). Removing the RGW
+  bucket aborted one incomplete multipart upload Zot had left: no lifecycle rule for incomplete uploads is set yet.
+- Runtime image: the branch's sandbox-proxy (copied in as admin, since the release image is not on ghcr) pulled on a
+  worker with the nodes' account in 1.7 s.
+
+Not run here: the stage's copy of the release sandbox-proxy and stage 56 running from it (no domain on the scratch
+site, and the release image is not published); stage 60's provider writes (`registry`, `templateRegistry`,
+`imageAdoption`, `pin:` resolution) other than through unit tests; the `sandbox-templates` workflow (GitHub Actions is
+stopped by the account's billing); the adoption job writing through a portal (its database write has an integration
+test, the decision a live read). Everything the drill made was removed afterwards.
+
+The admission policy on the sync's identity came after the drill: `kubectl apply --dry-run=server` of
+`registry.yaml` passed on the SB0 cluster (v1.35.10), so the schema and the CEL compile, but applying it there was
+refused by the session's permission check and its denials are not measured (the manifest test checks its shape).

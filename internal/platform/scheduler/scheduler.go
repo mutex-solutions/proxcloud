@@ -57,6 +57,8 @@ const (
 
 	// SandboxStateSyncSpec — every minute at :10 (sandbox rows off the sandbox cluster), before the charge at :30.
 	SandboxStateSyncSpec = "10 * * * * *"
+	// SandboxTemplateAdoptSpec — every 5 minutes: built-in templates follow the prepull DaemonSet (imageAdoption).
+	SandboxTemplateAdoptSpec = "0 */5 * * * *"
 
 	// PVETaskPollSpec — every 20 seconds (Proxmox task log poller).
 	PVETaskPollSpec = "*/20 * * * * *"

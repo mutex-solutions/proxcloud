@@ -221,6 +221,32 @@ func TestResumeFromPublicImageGetsPullSecret(t *testing.T) {
 	}
 }
 
+// A built-in image mirrored to the registry (library/**) needs the project's pull Secret too: the kubelet checks it
+// even for an image the prepull pod already pulled. The portal never writes that Secret itself any more (the
+// registry's account sync does, one account per project), so a shared source in sandbox-system is not copied.
+func TestRegistryImagesGetTheProjectPullSecret(t *testing.T) {
+	cfg := Config{TemplateRegistry: "192.0.2.10/t", Templates: map[string]Template{
+		"base": {Image: "192.0.2.10/library/sandbox-base:1@sha256:" + strings.Repeat("b", 64), CPU: 1, MemoryGiB: 1},
+		"py":   {Image: "docker.io/library/python:3.12", CPU: 1, MemoryGiB: 1},
+		"evil": {Image: "192.0.2.100/library/x:1", CPU: 1, MemoryGiB: 1},
+	}}
+	for tpl, want := range map[string]bool{"base": true, "py": false, "evil": false} {
+		cr := BuildCR(cfg, "svc", Spec{ID: "sbx-00000001", ProjectID: "p1", Template: tpl, CPU: 1, MemoryGiB: 1}, time.Unix(0, 0))
+		got := dig(cr, "spec", "podTemplate", "spec", "imagePullSecrets")
+		if (got != nil) != want {
+			t.Errorf("%s: imagePullSecrets %v, want present=%v", tpl, got, want)
+		}
+	}
+	f := newFake()
+	f.secrets[pullSecretSourceNS+"/"+TemplatePullSecret] = map[string][]byte{".dockerconfigjson": []byte(`{"auths":{}}`)}
+	if err := NewWithAPI(f, cfg, "svc").EnsureProjectNamespace(context.Background(), "p1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if sec, _ := f.GetCore(context.Background(), "secrets", NamespaceFor("p1"), TemplatePullSecret); sec != nil {
+		t.Error("the shared sandbox-system pull secret was copied into the project namespace")
+	}
+}
+
 // TestBuildBaseCredentials: only the `base` init container ever mounts a registry credential, and
 // only when the build needs one; kaniko (user RUN steps) builds offline from base's cache.
 func TestBuildBaseCredentials(t *testing.T) {

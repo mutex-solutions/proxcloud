@@ -211,6 +211,8 @@
             {{ ({'address': pc.sandbox.proxy.address, 'port': 443}
                 | combine({'entry': {'vmid': pc.sandbox.entry.vmid | int, 'pool': pc.sandbox.entry.pool, 'address': pc.sandbox.entry.address}}
                           if pc.sandbox.entry.public.bridge else {})) if pc_sandbox_edge_on else {} }}
+          # Stage 55's registry: the one address and port outside the vnet the workers pull images from.
+          registry: "{{ {'address': pc.sandbox.registry.address, 'port': 443} if pc_sandbox_registry_on else {} }}"
       when:
         - pc_sandbox_on
         - (pc_gen ~ '/sandbox-firewall.kubeconfig') is file
@@ -254,9 +256,14 @@
               # With a sandbox domain (stage 56) every sandbox runs envd and the E2B API at /e2b serves this provider.
               envd: "{{ pc_sandbox_edge_on | bool }}"
               domain: "{{ pc.sandbox.domain if pc_sandbox_edge_on else '' }}"
-              # the site's list replaces the default one (pc merges dicts, which would always keep python)
-              templates: "{{ ((proxcloud | default({})).sandbox | default({})).templates | default(pc.sandbox.templates) }}"
+              # the site's list replaces the default one (pc merges dicts, which would always keep python); "pin:<name>"
+              # resolves to the registry's copy, or without a registry to the pinned source
+              templates: >-
+                {{ ((proxcloud | default({})).sandbox | default({})).templates | default(pc.sandbox.templates)
+                   | pc_sandbox_templates(pc_sandbox_pins, pc_sandbox_registry_host) }}
               limits: "{{ pc.sandbox.limits }}"
+              templateRegistry: "{{ (pc_sandbox_registry_host ~ '/t') if pc_sandbox_registry_on else '' }}"
+              imageAdoption: "{{ pc.sandbox.registry.adoption if pc_sandbox_registry_on else '' }}"
           secret: {kubeconfig: "{{ lookup('ansible.builtin.file', pc_gen ~ '/sandbox-portal.kubeconfig') }}"}
       register: pc_sbx_provider
       no_log: true

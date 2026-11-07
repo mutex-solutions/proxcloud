@@ -271,7 +271,7 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 	if len(env) > 0 {
 		container["env"] = env
 	}
-	if cfg.fromTemplateRegistry(t.Image) {
+	if cfg.pullsFromRegistry(t.Image) {
 		podSpec["imagePullSecrets"] = []any{map[string]any{"name": TemplatePullSecret}}
 	}
 	podSpec["containers"] = []any{container}

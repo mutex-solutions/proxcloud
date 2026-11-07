@@ -34,10 +34,13 @@ const (
 	// chose (a project's own template). It can read every tenant's templates, so user code must
 	// never see it.
 	BuildTemplatePullSecret = "template-pull"
-	TemplatePullSecret      = "sandbox-template-pull" // source: sandbox-system/<name>; copied into every sb-* namespace
-	pullSecretSourceNS      = "sandbox-system"
-	BuildTimeout            = 30 * time.Minute
-	buildDiskLimit          = "30Gi"
+	// TemplatePullSecret is the project's own registry account in sb-<project> (pull-<project>: library/** and
+	// t/<project>/**), written by the registry's account sync (sandbox-proxy registry-users, docs/managed-sandbox.md
+	// §6). A build still copies an operator-made sandbox-system/<name> into sbx-build (SB6b replaces that).
+	TemplatePullSecret = "sandbox-template-pull"
+	pullSecretSourceNS = "sandbox-system"
+	BuildTimeout       = 30 * time.Minute
+	buildDiskLimit     = "30Gi"
 
 	kanikoImage = "ghcr.io/osscontainertools/kaniko:v1.29.0@sha256:0c0b6c02991bba44090fad918ae177d193e1bd3fd0ccc643e7cc1f9f1a5a373d"
 	fetchImage  = "curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40"
@@ -788,7 +791,7 @@ func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map
 		c["image"] = image
 	}
 	// The snapshot image is private even when the sandbox started from a public one.
-	if ps, ok := dig(cr, "spec", "podTemplate", "spec").(map[string]any); ok && s.cfg.fromTemplateRegistry(image) {
+	if ps, ok := dig(cr, "spec", "podTemplate", "spec").(map[string]any); ok && s.cfg.pullsFromRegistry(image) {
 		ps["imagePullSecrets"] = []any{map[string]any{"name": TemplatePullSecret}}
 	}
 	if spec, ok := cr["spec"].(map[string]any); ok {

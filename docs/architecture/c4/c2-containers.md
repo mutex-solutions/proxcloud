@@ -102,6 +102,7 @@ flowchart TB
     rfsvm["RustFS VM"]:::planned
     sbx["Sandbox cluster workers<br/>pool proxcloud-sandbox, vnet pcsbx<br/>gVisor, no CSI, no NAS"]:::impl
     sbxe["Sandbox entry appliance<br/>pool proxcloud-sandbox-entry<br/>HAProxy, TCP 443 passthrough"]:::impl
+    sbxr["Sandbox registry (Zot)<br/>on the services cluster, MetalLB 443<br/>blobs in RustFS / RGW"]:::impl
   end
 
   subgraph tiers["Storage backends"]
@@ -130,6 +131,9 @@ flowchart TB
   sbxe -->|"443 to sandbox-proxy, TLS ends there"| sbx
   svc -.->|"wildcard certificate, cert-sync"| sbx
   api -->|"entry firewall, HAProxy config (guest agent)"| sbxe
+  sbx -->|"image pulls, project account, 443 only"| sbxr
+  sbxr -->|"blobs, S3 multipart (Full: RGW)"| ceph
+  sbxr -.->|"Standard: RustFS"| rfsvm
   papi -.-> pbs
 ```
 
@@ -147,6 +151,7 @@ flowchart TB
 | Services cluster VMs | The services cluster, in the same system pool. | Implemented |
 | Sandbox cluster | A platform-owned Kamaji cluster from the cluster chart: control plane on the services cluster, workers in pool `proxcloud-sandbox` on their own vnet, gVisor (`runsc`, systrap) for tenant code, a Cilium egress guardrail, no CSI token and no NAS dataset. Its CAPMOX token `capmox@pve!sandbox` sees only a node-local ISO store. Its `node-setup` DaemonSet installs E2B's envd and `sandbox-init` on every node (runtime image `proxcloud-sandbox-runtime`), so a provider with envd on and a sandbox domain runs envd as each sandbox's agent (SB5). Tenants reach it only through the portal: the native API (SB3) and the E2B-compatible API at `/e2b` with a project's sandbox API key (SB5); the portal creates, execs into, reads the logs of and deletes Sandbox CRs with its service account, bills them per minute and refuses all new usage while a release gate does not hold, on both APIs alike. Release gates: isolation drops for the sandbox CIDR in both directions (in place, `sandboxCidrs`), NodeRestriction on its control plane (checked by stage 55), single-stack IPv4 (checked by stage 55), per-NIC VM firewall with address pinning and the `unsecured` taint until it is in place (in place, kept by the portal's sync with a narrow `ProxCloudSandboxGuard` role on the pool). Egress leaves through its own SNAT address on the exit node (`sandbox.network.snat`). The portal checks NodeRestriction, the isolation drops and the fence itself before a sandbox provider goes live and again before each create ([managed-sandbox.md §3](../../managed-sandbox.md#3-tenant-api-billing-quota-suspension-and-release-gates-sb3)). Built by installer stage 55 from `deploy/sandbox-cluster/`, with a `sandbox-system` node group (CAPI-set label, tainted) where `sandbox-proxy` runs apart from tenant code when a sandbox domain is set; stage 60 registers its sandbox provider `DISABLED` for the operator to set live once the gates hold. | Implemented |
 | Sandbox entry | Sandbox ports at `https://<port>-<id>.<domain>` (SB4): a platform HAProxy appliance (the P8-1 appliance with one TCP listener) in its own pool, one NIC public and one on the sandbox vnet, passes 443 to `sandbox-proxy`'s MetalLB address; TLS ends in `sandbox-proxy` with a wildcard certificate cert-manager issues on the services cluster (DNS-01 through PowerDNS with a TSIG key limited to the sandbox zone, or the operator's Secret) and `cert-sync` copies across. The workers' VM firewall admits the appliance alone to that address. Installer stage 56 builds it; the portal's sync keeps the appliance's firewall and HAProxy config ([managed-sandbox.md §4](../../managed-sandbox.md#4-public-entry-tls-and-wake-sb4)). | Implemented |
+| Sandbox registry | Zot on the services cluster behind one MetalLB address, TLS from a CA of its own, its blobs in a bucket of the object store (RustFS on Standard, RGW on Full) with a service user limited to that bucket (SB6a). The sandbox nodes pull the built-in templates and `sandbox-proxy` from it (the envd runtime image of SB5 still comes from `images.registry`), each project with an account of its own that reads `library/**` and its own `t/<project>/**` only; the push account cannot write `library/**`. An account sync next to Zot (`sandbox-proxy registry-users`) derives the accounts from the sandbox cluster's tenant namespaces. Installer stage 55 (registry) copies the digest-pinned images of `deploy/templates/images.yaml` in and pre-pulls them on every node; the workers' VM firewall admits that one address and port ([managed-sandbox.md §6](../../managed-sandbox.md#6-the-sandbox-registry-sb6a)). | Implemented |
 | Proxmox Backup Server | Operator nightly backups, then tenant backup schedules and restore. | Planned |
 
 ### Storage tiers

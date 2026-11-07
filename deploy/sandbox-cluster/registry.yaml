@@ -1,0 +1,134 @@
+# The sandbox registry's side of the sandbox cluster (docs/managed-sandbox.md §6). The registry itself (Zot) runs on the
+# services cluster; installer stage 55 creates the ConfigMap sandbox-system/sandbox-registry (host = the registry's
+# address as image references name it, ca.crt = the CA of its certificate) before it applies this.
+#
+# registry-trust: writes /etc/containerd/certs.d/<host>/ on every node so containerd trusts that CA for that host alone
+# (the node images set config_path = /etc/containerd/certs.d; containerd reads it on every pull, no restart).
+#
+# sandbox-registry-users: the identity of the registry's account sync on the services cluster. It lists the tenant
+# namespaces and writes one Secret per project (sandbox-template-pull: that project's own account) plus the nodes'
+# Secret (sandbox-registry-nodes, read-only on library/**). RBAC cannot limit create by name, so a create alone could
+# make a service-account-token Secret named sandbox-template-pull in kube-system that the token controller fills and the
+# sync could then read (a controller's token: cluster-admin). The admission policy at the end allows this identity
+# only pull Secrets (type kubernetes.io/dockerconfigjson) under its two names, each in its own namespaces.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: registry-trust
+  namespace: sandbox-system
+spec:
+  selector:
+    matchLabels: {app: registry-trust}
+  updateStrategy:
+    rollingUpdate: {maxUnavailable: 100%}
+  template:
+    metadata:
+      labels: {app: registry-trust}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: system-node-critical
+      tolerations: [{operator: Exists}]
+      containers:
+      - name: trust
+        image: docker.io/library/busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+        command: [sh, -c]
+        args:
+        - |
+          set -eu
+          while :; do
+            h=$(cat /cfg/host)
+            case "$h" in ""|*[!0-9A-Za-z.:-]*) echo "bad registry host: $h" >&2; exit 1;; esac
+            d=/certs.d/$h
+            mkdir -p "$d"
+            cp /cfg/ca.crt "$d/.ca.crt" && mv "$d/.ca.crt" "$d/ca.crt"
+            printf 'server = "https://%s"\n\n[host."https://%s"]\n  capabilities = ["pull", "resolve"]\n  ca = "/etc/containerd/certs.d/%s/ca.crt"\n' \
+              "$h" "$h" "$h" > "$d/.hosts.toml" && mv "$d/.hosts.toml" "$d/hosts.toml"
+            touch /tmp/ready
+            sleep 300
+          done
+        readinessProbe:
+          exec: {command: [test, -f, /tmp/ready]}
+          periodSeconds: 5
+        securityContext: {readOnlyRootFilesystem: false, allowPrivilegeEscalation: false}
+        resources:
+          requests: {cpu: 1m, memory: 8Mi}
+          limits: {memory: 32Mi}
+        volumeMounts:
+        - {name: cfg, mountPath: /cfg, readOnly: true}
+        - {name: certs, mountPath: /certs.d}
+      volumes:
+      - name: cfg
+        configMap: {name: sandbox-registry}
+      - name: certs
+        hostPath: {path: /etc/containerd/certs.d, type: DirectoryOrCreate}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-registry-users
+  namespace: sandbox-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sandbox-registry-users-token
+  namespace: sandbox-system
+  annotations: {kubernetes.io/service-account.name: sandbox-registry-users}
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-registry-users
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["list"]
+# create cannot be limited by name in RBAC; get and patch (server-side apply) can.
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["sandbox-template-pull", "sandbox-registry-nodes"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-registry-users
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: sandbox-registry-users}
+subjects:
+- {kind: ServiceAccount, name: sandbox-registry-users, namespace: sandbox-system}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: sandbox-registry-users-pull-secrets-only
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["secrets"]
+  matchConditions:
+  - name: account-sync
+    expression: request.userInfo.username == "system:serviceaccount:sandbox-system:sandbox-registry-users"
+  validations:
+  - expression: has(object.type) && object.type == "kubernetes.io/dockerconfigjson"
+    message: the registry account sync writes pull Secrets (kubernetes.io/dockerconfigjson) only
+  - expression: >-
+      (object.metadata.name == "sandbox-template-pull" && request.namespace.startsWith("sb-")) ||
+      (object.metadata.name == "sandbox-registry-nodes" && request.namespace == "sandbox-system")
+    message: the registry account sync writes sandbox-template-pull in sb-* and sandbox-registry-nodes in sandbox-system only
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: sandbox-registry-users-pull-secrets-only
+spec:
+  policyName: sandbox-registry-users-pull-secrets-only
+  validationActions: ["Deny"]

@@ -62,6 +62,10 @@ type SandboxFirewall struct {
 	ProxyAddress string
 	ProxyPort    int
 	EntryFrom    string
+	// The sandbox registry (docs/managed-sandbox.md §6): the one address and port outside the subnet the workers'
+	// containerd pulls templates and runtime images from (a MetalLB address on the services cluster). Unset: none.
+	RegistryAddress string
+	RegistryPort    int
 }
 
 // sandboxGen is one generation of the shared rules: the group and its two IP sets.
@@ -288,6 +292,17 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 			return g, err
 		}
 		rules = append(rules, r)
+	}
+	if f.RegistryAddress != "" {
+		reg, err := netip.ParseAddr(strings.TrimSpace(f.RegistryAddress))
+		port := f.RegistryPort
+		if port == 0 {
+			port = 443
+		}
+		if err != nil || !reg.Is4() || subnet.Contains(reg) || reg == cp || port < 1 || port > 65535 {
+			return g, fmt.Errorf("pve sandbox: invalid registry %s:%d (IPv4 outside the sandbox subnet, not the control plane)", f.RegistryAddress, port)
+		}
+		rules = append(rules, rule("out", "tcp", "", reg.String(), strconv.Itoa(port)))
 	}
 	rules = append(rules, rule("out", "", "", outRef, "")) // the internet, through the sandbox SNAT address
 
