@@ -4,6 +4,20 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Project teardown removes its services-cluster namespaces
+
+**What changed**
+
+- Teardown deletes the project's `pc-<id>` and `pc-db-<id>` namespaces once nothing is pending and no Application of the
+  project is left, also when the project never had a cluster or a database.
+
+**Why**
+
+- Bootstrap makes both namespaces up front, and the orphan sweep only collects one on a pass that reaped something, so a
+  project that never used them left two empty namespaces behind for good.
+
+**Diagrams updated:** none; no container or relationship changed.
+
 ## 2026-11-07: A server's name is checked against PVE's rule
 
 **What changed**

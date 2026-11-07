@@ -107,7 +107,9 @@ secrets and, when the project's last cluster is gone, the `pc-*` namespace is
 **sync-driven**: `syncjob.sweepKamajiOrphans` runs once per sync cycle as a
 service-level sweep, after the cascade completes. It scans the management cluster
 itself, so it also reaps leftovers of projects whose ProxCloud record is already
-gone. A secret younger than the 30-minute grace window is never touched.
+gone. A secret younger than the 30-minute grace window is never touched. Project
+teardown also removes the `pc-*` namespace of a project that never had a cluster,
+once nothing is pending and no Application of the project is left.
 
 ```sh
 # namespaces ProxCloud owns, with what's left inside them
