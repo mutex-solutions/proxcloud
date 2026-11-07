@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-07: PR #PRNUM Sandbox cluster spike (SB0)
+## 2026-11-07: PR #103 Sandbox cluster spike (SB0)
 
 **What changed**
 
