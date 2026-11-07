@@ -4,6 +4,48 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: SB2b follow-ups: host ICMP anti-spoof guard, CAPI off the sandbox pool, SNAT message
+
+**What changed**
+
+- New installer artefact `sandbox-icmp-guard.py` + a systemd service and one-minute timer
+  (`proxcloud-sandbox-icmp-guard`), installed by stage 55 on every `pve` node when `sandbox.enabled`. It reads each
+  local sandbox-pool worker's `ipfilter-net<N>` from PVE's cluster config and installs a host nftables chain
+  (`table bridge proxcloud-sandbox`, prerouting priority -300, ahead of PVE's `vm-out`) that drops an ICMP/ICMPv6 error
+  leaving a worker's tap whose source is not that worker's pinned address. Documented as layer 1b in `c4-code.md` C4.1
+  and `managed-sandbox.md §2.6`.
+- Stage 10 gives `capmox@pve!capi` (the services cluster's CAPMOX token) `NoAccess` on `/pool/<sandbox pool>`, a token
+  row beside the existing `csi@pve` user row. Its identity check now reads each token's effective rights on the pool
+  AND on every worker VM (`/vms/<id>`), not only `/pool/<pool>`: the portal must hold the guard role alone, the CAPI
+  and CSI tokens nothing.
+- `sandbox.network.snat`, left without a default on purpose, now fails stage 55 with a message that says exactly what
+  to set and why (the sandbox's own egress address so abuse reports name it, not the nodes/portal/tenants; or `node`).
+- Review follow-ups to the guard: it now drops any IPv4 frame from a worker's tap whose source is outside its
+  `ipfilter` (not only ICMP errors); it reads every worker's config from `/etc/pve/nodes/*/qemu-server` and pins it on
+  every node, tap present or not; `!` nomatch entries are excluded ahead of the allow list, and non-CIDR entries are
+  skipped (fail closed) instead of breaking the ruleset; drop rules carry counters. Stage 55's check also requires the
+  timer active and the last guard run successful, since the chain is legitimately empty before workers exist. New
+  installer test `tests/test_icmp_guard.py`.
+
+**Why**
+
+- PVE's bridge firewall accepts ICMP error types in `vm-out`/`vm-in` before the per-NIC `ipfilter` and the DROP policy,
+  so a worker could forge their source and reach PVE host input and node addresses off-path (lab, PVE 9.2). The VM
+  firewall cannot close it; a host rule ahead of PVE's chain can. The guard mirrors `ipfilter`, so it drops nothing
+  PVE's anti-spoof would allow, and the timer keeps it current well inside a new worker's 20-minute unsecured taint. It
+  is the installer's and not the sync's because the portal's PVE token reaches the API only, never a node shell.
+- Through `/pool` the services CAPMOX token inherited `ProxCloudCAPI` (clone, config, power, migrate) on the sandbox
+  workers, VMs that run tenant code; it drives only the services and tenant clusters and never the sandbox, which runs
+  through `capmox@pve!sandbox`. A stray per-VM ACL or a group grant would also be invisible to a pool-only check.
+- The review found PVE's `pre-vm-out` also accepts conntrack established/related before `ipfilter`, so a forged packet
+  matching a flow tracked on the node's bridge passes PVE whatever its protocol; pinning every source closes that too
+  and is no stricter than `ipfilter` itself. A worker that live-migrates or HA-restarts already runs tenant pods (no
+  unsecured taint), so the old "tap must be up here, config under this node" rule left it unpinned for up to a minute
+  or more. One malformed `ipfilter` entry used to make `nft -f` fail for the whole node, leaving every worker there on a
+  stale table.
+
+**Diagrams updated:** `c4-code.md` (C4.1 layer 1b).
+
 ## 2026-11-07: SB2b review fixes: pin, datacenter switch, node addresses, re-taint
 
 **What changed**

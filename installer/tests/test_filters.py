@@ -116,8 +116,10 @@ except ValueError:
 sbx = {"subnet": "10.110.0.0/24", "gateway": "10.110.0.1", "nodes": "10.110.0.10-10.110.0.19", "metallb": "10.110.0.200-10.110.0.209",
        "snat": "198.51.100.7"}
 assert f.sandbox_net_problem(sbx, "10.100.0.0/16") == ""
-# Its own egress address (D14): required, outside the subnet and the tenant pool; "node" shares the exit node's.
-assert "sandbox.network.snat must be" in f.sandbox_net_problem(dict(sbx, snat=""), "10.100.0.0/16")
+# Its own egress address (D14): required with no default, outside the subnet and the tenant pool; "node" shares
+# the exit node's. The empty-case message says what to set and why, not just "invalid".
+empty = f.sandbox_net_problem(dict(sbx, snat=""), "10.100.0.0/16")
+assert "sandbox.network.snat is required and has no default" in empty and "abuse reports" in empty, empty
 assert "sandbox.network.snat must be" in f.sandbox_net_problem(dict(sbx, snat="198.51.100.0/24"), "10.100.0.0/16")
 assert "outside" in f.sandbox_net_problem(dict(sbx, snat="10.110.0.250"), "10.100.0.0/16")
 assert "outside" in f.sandbox_net_problem(dict(sbx, snat="10.100.7.1"), "10.100.0.0/16")
