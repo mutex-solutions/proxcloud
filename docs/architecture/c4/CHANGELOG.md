@@ -21,6 +21,27 @@ and rules: [README.md](README.md#maintenance-rule).
   other volumes.
 
 **Diagrams updated:** `c3-components.md` (new row).
+## 2026-11-07: DNS zones cannot overlap across owners; a failed teardown retries
+
+**What changed**
+
+- `powerdns.Service.Create` refuses a name equal to, above or below anything the project does not own, the name server
+  hosts included, and a public suffix. It looks again after the create and removes its zone on an overlap.
+- `TeardownProject` keeps a project `DELETE_IN_PROGRESS` while a leg asks for a re-run (DNS zones, shares, Proxmox, ceph-s3
+  credentials, managed-service remnants), so the deletion job retries. It was marked `DELETED` regardless, and nothing
+  looks at that status again.
+- Cloud creates and actions refuse a project on its way out, for every provider.
+- Tenant errors from a failed DNS or file server no longer carry the raw client error. Record writes are audited with the
+  record's name, type and content.
+
+**Why**
+
+- PowerDNS answers from the longest matching zone with no delegation step, so a child zone took over names of a zone it
+  did not own, including an operator's. Verified against the lab server through two projects.
+- A zone left on the server after a failed teardown kept answering for the former tenant's domain and held its name.
+- The raw error named the DNS server's internal address, which tenants must not learn.
+
+**Diagrams updated:** none; the containers and relations are the same.
 ## 2026-11-07: Holder use is serialised, a carrier is left alone
 
 **What changed**
