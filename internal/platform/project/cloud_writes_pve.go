@@ -167,7 +167,7 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		}
 		inv, ierr := ps.GPUInventoryFor(ctx, alias, mappings)
 		if ierr != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, ierr.Error()))
+			h.fail(w, upstreamErr(computeBackend, ierr))
 			return
 		}
 		gpuInv, gpuFree = inv, inv.FreeCountByNode()
@@ -277,7 +277,7 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		return
 	}
 	if gerr != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Security group lookup failed: "+gerr.Error()))
+		h.fail(w, upstreamErr(computeBackend, gerr))
 		return
 	}
 	// A vnet whose zone has no DHCP (EVPN, VLAN): the platform allocates net0's address.
@@ -285,7 +285,7 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 	allocatedVMID := ""
 	cidr, gateway, first, last, static, serr := ps.VnetStaticPoolFor(ctx, bridge, pveWantedSubnet(data))
 	if serr != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, serr.Error()))
+		h.fail(w, upstreamErr(computeBackend, serr))
 		return
 	}
 	if static {
@@ -364,12 +364,7 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 			h.fail(w, he)
 			return
 		}
-		var ce *pve.ConflictError
-		if errors.As(cerr, &ce) {
-			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, ce.Msg))
-			return
-		}
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Server create failed: "+cerr.Error()))
+		h.fail(w, pveVolumeErr(cerr))
 		return
 	}
 	cr.ServiceID = es.ID
@@ -940,7 +935,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 	case "REMOTECONTROL", "SERIAL_CONSOLE":
 		backendURL, ticketUser, ticket, cerr := ps.Console(ctx, proj.ID, cr.ExternalID, action == "SERIAL_CONSOLE")
 		if cerr != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, cerr.Error()))
+			h.fail(w, pveVolumeErr(cerr))
 			return true
 		}
 		kind := "novnc"
@@ -1266,8 +1261,12 @@ func (h *Handler) pveFollowRetypedVolume(ctx context.Context, ps *pve.Service, e
 	slog.Error("retype: keep the volume's row", "project", proj.ID, "volume", cr.ExternalID, "err", err)
 }
 
+// computeBackend is what a tenant reads when the compute backend fails.
+const computeBackend = "compute backend"
+
 // pveVolumeErr maps a pve server or volume error: a refusal the caller can fix (pve.ConflictError) is
-// 409 with its message, a VM locked by a running task too, anything else is PVE failing (502).
+// 409 with its message, a VM locked by a running task too, anything else is PVE failing (502, cause in the log: the raw
+// text names the API's address, and a proxied call names the node's).
 func pveVolumeErr(err error) *httpx.HTTPError {
 	var ce *pve.ConflictError
 	if errors.As(err, &ce) {
@@ -1279,7 +1278,25 @@ func pveVolumeErr(err error) *httpx.HTTPError {
 	if msg := err.Error(); strings.Contains(msg, "can't lock file") || strings.Contains(msg, "VM is locked") {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, "The server is busy with another operation. Try again in a moment")
 	}
-	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+	if errors.Is(err, pve.ErrStorageFull) {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, "Not enough free space on this storage")
+	}
+	return upstreamErr(computeBackend, err)
+}
+
+// sgRuleErr: the rule's fields come from the tenant and PVE is what validates them, so its 400 names what to fix and
+// holds no address.
+func sgRuleErr(err error) *httpx.HTTPError {
+	var ae *pve.APIError
+	if !errors.As(err, &ae) || ae.Status != http.StatusBadRequest || len(ae.Errors) == 0 {
+		return pveVolumeErr(err)
+	}
+	parts := make([]string, 0, len(ae.Errors))
+	for k, v := range ae.Errors {
+		parts = append(parts, k+": "+strings.TrimSpace(v))
+	}
+	sort.Strings(parts)
+	return httpx.BadRequest("Invalid firewall rule. " + strings.Join(parts, "; "))
 }
 
 // pveVolumeAction handles EXTEND / ATTACH / DETACH / RETYPE / LIST_ATTACH_TARGETS on a
@@ -1423,7 +1440,7 @@ func (h *Handler) pveCreateSecurityGroup(w http.ResponseWriter, r *http.Request,
 	ctx := r.Context()
 	id, err := ps.CreateSecurityGroup(ctx, proj.ID, name)
 	if err != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+		h.fail(w, upstreamErr(computeBackend, err))
 		return
 	}
 	now := time.Now().UTC()
@@ -1473,7 +1490,7 @@ func (h *Handler) pveCreateImage(w http.ResponseWriter, r *http.Request, u *user
 	}
 	cfg, gerr := ps.C.GetVMConfig(ctx, vm.Node, vm.VMID)
 	if gerr != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, gerr.Error()))
+		h.fail(w, upstreamErr(computeBackend, gerr))
 		return
 	}
 	if d := pveCapacityDisk(cfg, es.PVEEffectiveStorageClass); d != nil {
@@ -1485,7 +1502,7 @@ func (h *Handler) pveCreateImage(w http.ResponseWriter, r *http.Request, u *user
 	started := time.Now().UTC()
 	vmid, cerr := ps.CreateImage(ctx, proj.ID, serverExt, name)
 	if cerr != nil {
-		h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, cerr.Error()))
+		h.fail(w, pveVolumeErr(cerr))
 		return
 	}
 	// The source VM's disks are what a clone of the image starts from.
@@ -1526,7 +1543,7 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 	if cr.Type == cloud.TypeServer && action == "LIST_SECURITY_GROUPS" {
 		ids, err := ps.VMSecurityGroups(ctx, proj.ID, cr.ExternalID)
 		if err != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			h.fail(w, upstreamErr(computeBackend, err))
 			return true
 		}
 		rows := []cloud.CloudResource{}
@@ -1559,7 +1576,7 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 			return true
 		}
 		if gerr != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, gerr.Error()))
+			h.fail(w, upstreamErr(computeBackend, gerr))
 			return true
 		}
 		groupID = ids[0]
@@ -1570,7 +1587,7 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 			aerr = ps.DetachSecurityGroup(ctx, proj.ID, cr.ExternalID, groupID)
 		}
 		if aerr != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, aerr.Error()))
+			h.fail(w, pveVolumeErr(aerr))
 			return true
 		}
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
@@ -1604,7 +1621,7 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 			Comment: strAny(data["description"]),
 		}
 		if err := ps.SGAddRule(ctx, proj.ID, cr.ExternalID, rule); err != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			h.fail(w, sgRuleErr(err))
 			return true
 		}
 		h.pveSyncSecurityGroups(ctx, es, proj)
@@ -1622,7 +1639,7 @@ func (h *Handler) pveSecurityGroupAction(w http.ResponseWriter, r *http.Request,
 			}
 		}
 		if err := ps.SGDeleteRule(ctx, proj.ID, cr.ExternalID, pos); err != nil {
-			h.fail(w, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error()))
+			h.fail(w, pveVolumeErr(err))
 			return true
 		}
 		h.pveSyncSecurityGroups(ctx, es, proj)
