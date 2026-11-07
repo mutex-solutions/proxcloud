@@ -36,6 +36,7 @@ type K8sAPI interface {
 	ListTenantControlPlanes(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
 	ListMachineDeployments(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
 	ListCRs(ctx context.Context, group, version, plural, ns, labelSelector string) ([]map[string]any, error)
+	ListPersistentVolumes(ctx context.Context) ([]map[string]any, error)
 }
 
 // defaultFinalizeGrace: a cloud credentials secret younger than this is never treated as an orphan.
