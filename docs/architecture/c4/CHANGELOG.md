@@ -20,6 +20,12 @@ and rules: [README.md](README.md#maintenance-rule).
   and CSI tokens nothing.
 - `sandbox.network.snat`, left without a default on purpose, now fails stage 55 with a message that says exactly what
   to set and why (the sandbox's own egress address so abuse reports name it, not the nodes/portal/tenants; or `node`).
+- Review follow-ups to the guard: it now drops any IPv4 frame from a worker's tap whose source is outside its
+  `ipfilter` (not only ICMP errors); it reads every worker's config from `/etc/pve/nodes/*/qemu-server` and pins it on
+  every node, tap present or not; `!` nomatch entries are excluded ahead of the allow list, and non-CIDR entries are
+  skipped (fail closed) instead of breaking the ruleset; drop rules carry counters. Stage 55's check also requires the
+  timer active and the last guard run successful, since the chain is legitimately empty before workers exist. New
+  installer test `tests/test_icmp_guard.py`.
 
 **Why**
 
@@ -31,6 +37,12 @@ and rules: [README.md](README.md#maintenance-rule).
 - Through `/pool` the services CAPMOX token inherited `ProxCloudCAPI` (clone, config, power, migrate) on the sandbox
   workers, VMs that run tenant code; it drives only the services and tenant clusters and never the sandbox, which runs
   through `capmox@pve!sandbox`. A stray per-VM ACL or a group grant would also be invisible to a pool-only check.
+- The review found PVE's `pre-vm-out` also accepts conntrack established/related before `ipfilter`, so a forged packet
+  matching a flow tracked on the node's bridge passes PVE whatever its protocol; pinning every source closes that too
+  and is no stricter than `ipfilter` itself. A worker that live-migrates or HA-restarts already runs tenant pods (no
+  unsecured taint), so the old "tap must be up here, config under this node" rule left it unpinned for up to a minute
+  or more. One malformed `ipfilter` entry used to make `nft -f` fail for the whole node, leaving every worker there on a
+  stale table.
 
 **Diagrams updated:** `c4-code.md` (C4.1 layer 1b).
 

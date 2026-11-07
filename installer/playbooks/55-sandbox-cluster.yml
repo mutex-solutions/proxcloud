@@ -246,12 +246,13 @@
       register: pc_snat_stale
       changed_when: pc_snat_stale.stdout != ''
 
-# The ICMP anti-spoof guard on every node that can host a worker (the whole pool spans the cluster, so
-# every `pve` node). PVE's bridge firewall accepts ICMP error types before the per-NIC ipfilter and the
-# DROP policy, so a worker can forge their source (docs/managed-sandbox.md §2.6). The guard reads each
-# local worker's ipfilter from PVE's own config and drops a forged-source error ahead of PVE's chain; a
-# timer re-runs it so a joined, moved or rebuilt worker is pinned within a minute (well inside its
-# 20-minute unsecured taint). Installed whenever the sandbox is on, before the cluster exists.
+# The anti-spoof guard on every node that can host a worker (the whole pool spans the cluster, so every
+# `pve` node). PVE's bridge firewall accepts ICMP error types, and conntrack established/related, before the
+# per-NIC ipfilter and the DROP policy, so a worker can forge their source (docs/managed-sandbox.md §2.6).
+# The guard reads every pool worker's ipfilter from PVE's cluster config and drops any IPv4 frame from a
+# worker's tap whose source is outside it, ahead of PVE's chain; a timer re-runs it so a joined, moved or
+# rebuilt worker is pinned within a minute (well inside its 20-minute unsecured taint). Installed whenever
+# the sandbox is on, before the cluster exists, so the chain is empty until workers do.
 - name: Install the sandbox ICMP anti-spoof guard
   hosts: pve
   become: true
@@ -296,8 +297,14 @@
     - name: Apply the guard now
       when: pc_icmp_script is changed or pc_icmp_env is changed or pc_icmp_units is changed
       ansible.builtin.systemd_service: {name: proxcloud-sandbox-icmp-guard.service, state: started}
-    - name: Check the guard chain is installed
-      ansible.builtin.command: nft list chain bridge proxcloud-sandbox antispoof
+    # The chain may be empty here (no workers yet), so check what keeps it current: the timer, and that the
+    # last run of the guard succeeded.
+    - name: Check the guard chain is installed and its timer runs
+      ansible.builtin.shell: |
+        set -e
+        nft list chain bridge proxcloud-sandbox antispoof >/dev/null
+        systemctl is-active --quiet proxcloud-sandbox-icmp-guard.timer
+        test "$(systemctl show -P Result proxcloud-sandbox-icmp-guard.service)" = success
       changed_when: false
 
 - name: Build the sandbox cluster

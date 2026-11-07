@@ -393,8 +393,10 @@ internet. The sandbox entry (HAProxy appliance to `sandbox-proxy`) gets its rule
 - **Spoofed ICMP errors.** PVE's nftables bridge chain accepts ICMP and ICMPv6 error types (destination unreachable,
   source quench, time exceeded) in `vm-out`/`vm-in` before the per-NIC checks, so `ipfilter` and the DROP policy never
   see them (lab, PVE 9.2). A worker could send them with any source to PVE host input and the other workers (routed ones
-  only survive a tracked flow). The host ICMP guard (§2.6) closes it: a host nftables chain on every node, ahead of
-  PVE's, drops a forged-source error leaving a sandbox worker's tap.
+  only survive a tracked flow). Its `pre-vm-out` also accepts conntrack established/related before `ipfilter`, so a
+  forged packet that matches a flow tracked on the node's bridge passes too. The host guard (§2.6) closes both: a host
+  nftables chain on every node, ahead of PVE's, drops any IPv4 frame leaving a sandbox worker's tap whose source is
+  outside its `ipfilter`.
 
 ### 2.2 The unsecured taint
 
@@ -512,9 +514,9 @@ back on, the next pass cleared both, nodes Ready, HTTPS 200.
 Not run here: stages 55 and 60 (they would add an Application to the lab's shared services cluster). The exit node file
 and the subnet change were made by hand with the content stage 55 writes, and the provider config came from a file.
 
-## 2.6 Layer 1b: the host ICMP anti-spoof guard
+## 2.6 Layer 1b: the host anti-spoof guard
 
-Layer 1's `ipfilter` pins the source of every frame a worker sends — except ICMP. PVE's nftables bridge firewall
+Layer 1's `ipfilter` pins the source of every frame a worker sends — except ICMP errors and conntrack hits. PVE's nftables bridge firewall
 (`table bridge proxmox-firewall-guests`) has a chain `allow-icmp` that its `vm-out` (prerouting) and `vm-in`
 (postrouting) base chains `jump` *before* `iifname vmap @vm-map-out` reaches the per-guest `ipfilter` and `macfilter`
 drops. `allow-icmp` accepts the ICMP error types unconditionally (v4 destination-unreachable, source-quench,
@@ -522,28 +524,38 @@ time-exceeded; v6 destination-unreachable, packet-too-big, time-exceeded, parame
 ICMP error with any forged source and neither `ipfilter` nor the `DROP` policy sees it. On the lab a worker reached PVE
 host input on the vnet gateway with the gateway's own address, another worker's address, a management address and an
 arbitrary external address as source; routed ones to another worker only survived a tracked flow, but the host and node
-addresses were reachable off-path. (Upstream Proxmox behaviour, PVE 9.2; a bug report is filed separately.)
+addresses were reachable off-path. The same chain's `pre-vm-out` also accepts `ct state established,related` before
+`ipfilter`, so a forged-source packet of any protocol that matches a flow already tracked on the node's bridge (for
+example one between two other workers on that node) passes untouched. (Upstream Proxmox behaviour, PVE 9.2; a bug
+report is drafted in PR #116, not filed.)
 
 The guard closes it on the host, since the VM firewall cannot. On every node that can host a sandbox worker (the pool
 spans the cluster, so every `pve` node) the installer places `/usr/local/sbin/sandbox-icmp-guard.py` and a systemd
 service plus a one-minute timer (`proxcloud-sandbox-icmp-guard`). The script reads, from PVE's own cluster config
-(`/etc/pve`), each local sandbox-pool worker's NICs on the sandbox vnet and that NIC's `ipfilter-net<N>` set — the
-worker's pinned source addresses, kept correct by the portal's sync — and installs a host nftables chain:
+(`/etc/pve`), every sandbox-pool worker's NICs on the sandbox vnet (from `/etc/pve/nodes/*/qemu-server`, whichever node
+holds the config) and that NIC's `ipfilter-net<N>` set — the worker's pinned source addresses, kept correct by the
+portal's sync — and installs a host nftables chain. Every node pins every worker: a rule matches the tap's name, so it
+is inert where the tap is absent and live the moment a worker migrates or is HA-restarted onto the node.
 
 ```
 table bridge proxcloud-sandbox {
   chain antispoof {
     type filter hook prerouting priority -300; policy accept;   # before PVE's vm-out (priority 0)
-    iifname { <sandbox taps> } icmpv6 type { … } drop            # IPv4-only cluster: any v6 error is spoofed
-    iifname "<tap>" meta l4proto icmp icmp type { … } ip saddr != { <this worker's ipfilter> } drop
+    iifname { <sandbox taps> } icmpv6 type { … } counter drop    # IPv4-only cluster: any v6 error is spoofed
+    iifname "<tap>" ip saddr { <ipfilter nomatch entries> } counter drop      # only if the set has `!` entries
+    iifname "<tap>" ip saddr != { <this worker's ipfilter> } counter drop
   }
 }
 ```
 
-Because the chain is a base chain at an earlier priority with `policy accept`, a non-matching frame (a legitimate
-own-source error, or any non-ICMP) continues to PVE's chain — an `accept` verdict there is not terminal for the hook.
-Only a forged-source error is dropped. The guard mirrors `ipfilter` exactly (a worker's own address plus the MetalLB
-range, which any worker may answer for), so it drops nothing PVE's anti-spoof would allow. The timer re-runs the script
+Because the chain is a base chain at an earlier priority with `policy accept`, a frame with a pinned source continues
+to PVE's chain — an `accept` verdict there is not terminal for the hook. The guard mirrors `ipfilter` (a worker's own
+address plus the MetalLB range, which any worker may answer for; `!` nomatch entries excluded), so it drops nothing
+PVE's anti-spoof would allow; it only stops PVE's early accepts from skipping that check. An entry that is not an IPv4
+address or CIDR (an alias; the portal never writes one) is left out and reported on stderr, which drops more, never
+less, and cannot make the generated ruleset invalid. A NIC with no `ipfilter` set yet (the sync has not fenced the
+worker) gets what PVE gives it, no pin, except that every ICMP error from it is dropped; an empty set drops every IPv4
+frame, as PVE does. The counters reset every run (the table is replaced atomically each minute). The timer re-runs the script
 every minute; a worker that just joined, moved node or had its firewall rebuilt is pinned well within its 20-minute
 unsecured taint, so it never runs tenant code before the guard covers it. It is the installer's and not the sync's
 because the portal's PVE token reaches the API only, never a node shell.
@@ -562,5 +574,15 @@ Measured on the lab (2026-11-08), raw ICMP errors (and raw ICMPv6) from a worker
 | any ICMPv6 error | — | dropped |
 
 The cluster stayed healthy with the guard in place: both workers Ready, the `keep` gVisor sandbox Running, worker-to-
-worker ping (ICMP echo, not an error type) 0% loss. Not run here: the installer stage (it would touch the lab's shared
-services cluster); the guard script was deployed to both worker nodes and run by hand with the content stage 55 writes.
+worker ping (ICMP echo, not an error type) 0% loss.
+
+With the all-source pin (review follow-up, same day): the ICMP drill above gave the same result, and 80 forged UDP and
+TCP packets (sources another worker, the gateway, a management address, an external address) from worker 1 to the
+gateway all hit the guard's drop counter on its tap. The established-flow bypass itself needs two workers on one node,
+which the lab (one per node) does not have; the guard drops those frames by source before PVE's chain runs, whatever
+their conntrack state. The script, env file, service and timer are installed on all three nodes (pve1 included, which
+hosts no worker today), and the generated ruleset passes `nft -c` with nomatch and alias entries.
+
+Not run here: the installer stage (it would touch the lab's shared services cluster); its guard tasks were applied by
+hand with the files and content stage 55 writes. Stage 10's per-VM checks see worker VMs only on a re-run after stage
+55 built the cluster.
