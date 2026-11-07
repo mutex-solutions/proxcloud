@@ -14,6 +14,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -23,6 +25,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
@@ -988,7 +992,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 		return true
 
 	case "LIST_EVENTS":
-		httpx.OK(w, map[string]any{"result": h.pveServerEvents(ctx, es.ID, proj.ID, cr)})
+		httpx.OK(w, map[string]any{"result": h.pveServerEvents(ctx, es, proj.ID, cr)})
 		return true
 	}
 	return false
@@ -996,20 +1000,28 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 
 // pveServerEvents renders a server's recorded Proxmox tasks in the events-tab shape. Only tasks since
 // the row was created: vmids get reused, and the older tasks are another VM's, maybe another tenant's.
-func (h *Handler) pveServerEvents(ctx context.Context, serviceID, projectID string, cr *cloud.CloudResource) []map[string]any {
+// A task's UPID and PVE user name the platform's token or an operator's account, so the tenant sees neither:
+// the id is a digest of the UPID, the user a role.
+func (h *Handler) pveServerEvents(ctx context.Context, es *externalservice.ExternalService, projectID string, cr *cloud.CloudResource) []map[string]any {
 	out := []map[string]any{}
 	var since time.Time
 	if cr.CreatedAt != nil {
 		since = *cr.CreatedAt
 	}
-	events, err := h.cloud.TaskEventsForVM(ctx, serviceID, projectID, cr.ExternalID, since, 200)
+	events, err := h.cloud.TaskEventsForVM(ctx, es.ID, projectID, cr.ExternalID, since, 200)
 	if err != nil {
 		slog.Error("pve list events", "server", cr.ExternalID, "err", err)
 		return out
 	}
+	platformUser, _, _ := strings.Cut(es.PVEConfig().TokenID, "!")
 	for _, e := range events {
+		by := "operator"
+		if e.User == platformUser {
+			by = "platform"
+		}
+		sum := sha256.Sum256([]byte(e.ID))
 		out = append(out, map[string]any{
-			"date": e.StartedAt, "action": e.Type, "message": e.Status, "requestId": e.ID, "userId": e.User,
+			"date": e.StartedAt, "action": e.Type, "message": e.Status, "requestId": hex.EncodeToString(sum[:8]), "userId": by,
 		})
 	}
 	return out
@@ -1137,10 +1149,13 @@ func (h *Handler) pveBulkAction(w http.ResponseWriter, r *http.Request, proj *Pr
 
 	case "LIST_VOLUME_TYPES":
 		out := []map[string]any{}
+		def := es.PVEDefaultStorageProfile()
 		for slug, prof := range es.PVEStorageProfiles() {
 			out = append(out, map[string]any{
 				"name":        slug,
 				"displayName": prof.DisplayName(),
+				// The provider's default profile: the server wizard preselects it.
+				"default": slug == def,
 				"extra_specs": map[string]any{
 					"shared": prof.Shared, "snapshots": prof.Snapshots, "thin": prof.Thin,
 					"liveMigrate": prof.LiveMigrate, "replication": prof.Replication,
@@ -1164,34 +1179,37 @@ func sshFingerprint(pubKey string) string {
 	return ssh.FingerprintSHA256(pk)
 }
 
+// consoleTermUser is the console token's metadata key for the user a serial session opens with.
+const consoleTermUser = "termUser"
+
 // emitPVEConsole mints the console token for a PVE vncwebsocket/termproxy backend.
-// The proxy dials it with the provider's API-token header + pinned TLS; the response carries the VNC ticket as
-// `password` — noVNC must present it as the RFB credential.
+// The proxy dials it with the provider's API-token header + pinned TLS; a VNC response carries the VNC ticket as
+// `password` — noVNC must present it as the RFB credential. A serial response carries neither: the proxy opens it.
 func (h *Handler) emitPVEConsole(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, cr *cloud.CloudResource, svcID, externalID, action, backendURL, kind, ticketUser, password string) {
 	if h.downloads == nil {
 		h.fail(w, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "console not configured"))
 		return
 	}
+	meta := map[string]string{"consoleUrl": backendURL}
+	if kind == "serial" {
+		// termproxy opens with "<user>:<ticket>". The user is the platform's PVE token, so the proxy sends that line
+		// and the tenant never sees it (cloudConsoleProxy).
+		meta[consoleTermUser] = ticketUser
+	}
 	tok, err := h.downloads.CreateWithTTL(r.Context(), &cloud.CloudDownload{
 		Type: cloud.DownloadTypeConsole, ServiceID: svcID, ProjectID: proj.ID, ExternalID: externalID,
-		Metadata: map[string]string{"consoleUrl": backendURL},
+		Metadata: meta,
 	}, cloud.ConsoleTokenTTL)
 	if err != nil {
 		h.fail(w, err)
 		return
 	}
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
-	proto := "vnc"
-	if kind == "serial" {
-		proto = "serial"
+	res := map[string]any{"protocol": "serial", "type": kind, "url": h.consoleWebsocketURL(tok.ID)}
+	if kind != "serial" {
+		res["protocol"], res["password"] = "vnc", password
 	}
-	httpx.OK(w, map[string]any{"result": map[string]any{
-		"protocol": proto,
-		"type":     kind,
-		"url":      h.consoleWebsocketURL(tok.ID),
-		"user":     ticketUser,
-		"password": password,
-	}})
+	httpx.OK(w, map[string]any{"result": res})
 }
 
 // errPVENetworkDelete signals cloudDelete to route through pveDeleteNetwork.
@@ -1208,6 +1226,11 @@ func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *use
 	}
 	if sizeGiB <= 0 {
 		h.fail(w, httpx.BadRequest("sizeGiB is required"))
+		return
+	}
+	name, nerr := pveVolumeName(data)
+	if nerr != nil {
+		h.fail(w, nerr)
 		return
 	}
 	serverRef := strAny(data["serverId"])
@@ -1236,14 +1259,16 @@ func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *use
 	}
 	if serverRef == "" {
 		node, storage, err := ps.PlaceVolume(ctx, profile.StorageFor, strAny(data["availabilityZone"]), int64(sizeGiB)<<30, es.PVEStorageHeadroomPct())
+		volID := ""
 		if err == nil {
-			err = ps.CreateDetachedVolume(ctx, proj.ID, node, storage, sizeGiB, es.PVEStorageHeadroomPct())
+			volID, err = ps.CreateDetachedVolume(ctx, proj.ID, node, storage, sizeGiB, es.PVEStorageHeadroomPct())
 		}
 		if err != nil {
 			h.fail(w, pveVolumeErr(err))
 			return
 		}
 		h.pveSyncVolumes(ctx, es, proj)
+		h.pveNameVolume(ctx, es, proj, name, func(cr *cloud.CloudResource, _ map[string]any) bool { return volID != "" && cr.ExternalID == volID })
 		h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", &cloud.CloudResource{Type: cloud.TypeVolume, ProjectID: proj.ID})
 		httpx.OK(w, map[string]any{"result": map[string]any{"node": node}})
 		return
@@ -1258,7 +1283,8 @@ func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *use
 		h.fail(w, httpx.BadRequest(fmt.Sprintf("Volume type %q is not available on the server's node", slug)))
 		return
 	}
-	if _, err := ps.AddVolume(ctx, proj.ID, serverExt, sizeGiB, storage, es.PVEStorageHeadroomPct()); err != nil {
+	slot, err := ps.AddVolume(ctx, proj.ID, serverExt, sizeGiB, storage, es.PVEStorageHeadroomPct())
+	if err != nil {
 		if errors.Is(err, pve.ErrStorageFull) {
 			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf("Not enough free space for a %d GB volume on the server's storage", sizeGiB)))
 			return
@@ -1269,8 +1295,55 @@ func (h *Handler) pveCreateVolume(w http.ResponseWriter, r *http.Request, u *use
 	// The volid is named server-side; the volume sync provider picks the new disk
 	// up as its own VOLUME row. Reconcile it now so the FE sees it immediately.
 	h.pveSyncVolumes(ctx, es, proj)
+	h.pveNameVolume(ctx, es, proj, name, func(_ *cloud.CloudResource, vol map[string]any) bool {
+		return intAny(vol["vmid"]) == vm.VMID && strAny(vol["slot"]) == slot
+	})
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", &cloud.CloudResource{Type: cloud.TypeVolume, ProjectID: proj.ID})
 	httpx.OK(w, map[string]any{"result": map[string]any{}})
+}
+
+// pveVolumeName reads the name a tenant gives a new volume; "" leaves the derived one (server name and slot).
+func pveVolumeName(data map[string]any) (string, *httpx.HTTPError) {
+	name := strings.TrimSpace(strAny(data["name"]))
+	if utf8.RuneCountInString(name) > 64 || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return "", httpx.BadRequest("The volume name must be at most 64 characters, without control characters")
+	}
+	return name, nil
+}
+
+// pveNameVolume puts name on the new volume's row (is picks it). PVE has no name for a disk, so it is the row's
+// (pve.VolumeLabel), and syncs keep it. A holder made for the volume can be missing from /cluster/resources for a
+// few seconds, and its disk's row with it, so the row is looked for again after a sync.
+func (h *Handler) pveNameVolume(ctx context.Context, es *externalservice.ExternalService, proj *Project, name string, is func(cr *cloud.CloudResource, vol map[string]any) bool) {
+	if name == "" {
+		return
+	}
+	var err error
+	for attempt := 0; attempt < 6; attempt++ {
+		if attempt > 0 {
+			time.Sleep(2 * time.Second)
+			h.pveSyncVolumes(ctx, es, proj)
+		}
+		var rows []cloud.CloudResource
+		if rows, err = h.cloud.FindByServiceProjectAndType(ctx, es.ID, proj.ID, cloud.TypeVolume); err != nil {
+			continue
+		}
+		err = errors.New("no row for the new disk")
+		for i := range rows {
+			vol, _ := rows[i].Data["volume"].(map[string]any)
+			if vol == nil || !is(&rows[i], vol) {
+				continue
+			}
+			vol[pve.VolumeLabel], vol["name"] = name, name
+			now := time.Now().UTC()
+			rows[i].UpdatedAt = &now
+			if _, err = h.cloud.Insert(ctx, &rows[i]); err == nil {
+				return
+			}
+			break
+		}
+	}
+	slog.Error("volume create: keep the name", "project", proj.ID, "name", name, "err", err)
 }
 
 // pveSyncVolumes runs one inline VOLUME reconcile (best-effort, post-mutation).
@@ -1285,23 +1358,52 @@ func (h *Handler) pveSyncVolumes(ctx context.Context, es *externalservice.Extern
 	}
 }
 
-// pveFollowRetypedVolume points the row at the disk's new volid. A failure only costs what the retype
+// RetypeVolumeRow moves the disk in slot of server vmid onto storage, then has cr (marked moving) follow it. It runs
+// whatever ctx says: the ingress cuts a request after 60 s while the copy goes on, and a follow and mark clear on the
+// cut request failed, so every sync kept the old row and added one for the new volid, both billed for up to
+// MoveKeepFor. A disk found at its new place is a success, even when a status read failed on the way.
+func (h *Handler) RetypeVolumeRow(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, slot, storage string) error {
+	ctx = context.WithoutCancel(ctx)
+	wctx, cancel := context.WithTimeout(ctx, cloud.MoveKeepFor) // past it the mark keeps nothing anyway
+	err := ps.RetypeVolume(wctx, proj.ID, vmid, cr.ExternalID, storage, es.PVEStorageHeadroomPct())
+	cancel()
+	if h.pveFollowRetypedVolume(ctx, ps, es, proj, cr, vmid, slot, storage) && err != nil {
+		slog.Warn("retype: the disk is on its new storage, despite", "project", proj.ID, "volume", cr.ExternalID, "err", err)
+		err = nil
+	}
+	return err
+}
+
+// pveFollowRetypedVolume points the row at the disk's new volid, if the disk in its slot has one, and ends the move
+// mark (cr.MovingSince). It reports whether the slot holds a new volid on storage. A failure only costs what the retype
 // cost before: the sync finds a new disk, and the bill shows two.
-func (h *Handler) pveFollowRetypedVolume(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, slot string) {
+func (h *Handler) pveFollowRetypedVolume(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, vmid int, slot, storage string) (moved bool) {
 	rows, err := ps.VolumeSyncProvider(h.pveRegion(proj, es), proj.ID, es.PVEVolumeProfileFunc()).ListReadable(ctx)
 	if err == nil {
+		err = fmt.Errorf("no disk in slot %s of server %d", slot, vmid)
 		for i := range rows {
 			vol, _ := rows[i].Data["volume"].(map[string]any)
-			if intAny(vol["vmid"]) == vmid && strAny(vol["slot"]) == slot {
-				err = h.cloud.ChangeExternalID(ctx, cr, rows[i].ExternalID)
-				if err == nil {
-					return
-				}
+			if intAny(vol["vmid"]) != vmid || strAny(vol["slot"]) != slot {
+				continue
+			}
+			if rows[i].ExternalID == cr.ExternalID { // not moved (a disk already on storage is refused, not moved)
+				err = nil
 				break
 			}
+			moved = strings.HasPrefix(rows[i].ExternalID, storage+":")
+			if err = h.cloud.ChangeExternalID(ctx, cr, rows[i].ExternalID); err == nil {
+				return moved
+			}
+			break
 		}
 	}
-	slog.Error("retype: keep the volume's row", "project", proj.ID, "volume", cr.ExternalID, "err", err)
+	if err != nil {
+		slog.Error("retype: keep the volume's row", "project", proj.ID, "volume", cr.ExternalID, "err", err)
+	}
+	if cerr := h.cloud.MarkMoving(ctx, cr, nil); cerr != nil {
+		slog.Error("retype: clear the move mark", "project", proj.ID, "volume", cr.ExternalID, "err", cerr)
+	}
+	return moved
 }
 
 // computeBackend is what a tenant reads when the compute backend fails.
@@ -1421,6 +1523,12 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 		httpx.OK(w, map[string]any{"result": out})
 		return true
 	case "RETYPE":
+		// A retry after a cut request finds PVE's lock, and its follow (old volid still in the slot) would clear the
+		// running move's mark: the sync at its end then archives the row and inserts a new one.
+		if cr.Moving(time.Now().UTC()) {
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "This volume is still moving to its new type. Try again when it is done"))
+			return true
+		}
 		slug := strAny(data["newType"])
 		if slug == "" {
 			slug = strAny(data["type"])
@@ -1444,12 +1552,17 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 			h.fail(w, httpx.BadRequest(fmt.Sprintf("Volume type %q is not available on the volume's node", slug)))
 			return true
 		}
-		slot := strAny(vol["slot"])
-		if aerr = ps.RetypeVolume(ctx, proj.ID, vmid, cr.ExternalID, storage, es.PVEStorageHeadroomPct()); aerr == nil {
-			// The move gives the disk a new volid. It is still this disk: the row follows it and keeps its
-			// id, which is what the bill and its history are keyed on. The sync below fills in the rest.
-			h.pveFollowRetypedVolume(ctx, ps, es, proj, cr, vmid, slot)
+		// The move gives the disk a new volid. It is still this disk: the row follows it and keeps its id, which is what
+		// the bill and its history are keyed on. A sync that sees the move end first (the task poller runs one as soon
+		// as the task stops) must not archive the row meanwhile, hence the mark. The follow also runs when the wait
+		// failed: what the slot holds says whether the disk moved. From here on the request may be cut, the move not.
+		ctx = context.WithoutCancel(ctx)
+		now := time.Now().UTC()
+		if err := h.cloud.MarkMoving(ctx, cr, &now); err != nil {
+			h.fail(w, err)
+			return true
 		}
+		aerr = h.RetypeVolumeRow(ctx, ps, es, proj, cr, vmid, strAny(vol["slot"]), storage)
 	default:
 		return false
 	}
@@ -1745,8 +1858,9 @@ func (h *Handler) pveUpsertRows(ctx context.Context, es *externalservice.Externa
 		rows[i].ServiceID = es.ID
 		if existing, _ := h.cloud.FindByServiceIDAndExternalID(ctx, es.ID, rows[i].ExternalID); existing == nil {
 			rows[i].CreatedAt, rows[i].UpdatedAt = &now, &now
-			_, _ = h.cloud.Insert(ctx, &rows[i])
+			_, _ = h.cloud.Upsert(ctx, &rows[i], pve.CarryVolumeLabel)
 		} else {
+			pve.CarryVolumeLabel(existing.Data, rows[i].Data)
 			existing.Data = rows[i].Data
 			existing.UpdatedAt = &now
 			_, _ = h.cloud.Insert(ctx, existing)

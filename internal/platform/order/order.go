@@ -139,9 +139,7 @@ func (h *Handler) Routes(r chi.Router) {
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub); err != nil {
-		if !httpx.WriteError(w, err) {
-			httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
-		}
+		httpx.WriteError(w, err)
 		return
 	}
 	doc, err := h.repo.ByID(r.Context(), chi.URLParam(r, "id"))

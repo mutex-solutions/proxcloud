@@ -93,6 +93,13 @@ func (s *ActivationService) Activate(ctx context.Context, bp *BillingProfile, so
 	bp.ActivationConstraints = append(bp.ActivationConstraints, ActivationConstraintPassed{Source: source, PassedAt: &now})
 	bp.Status = StatusActive
 	bp.ActivatedAt = &now
+	// The currency comes with the billing details. An operator can activate a profile that has none, and every bill read
+	// then failed on the blank currency: such a profile bills in the base currency, as saving details would have set.
+	if bp.Currency == "" {
+		if base, err := s.repo.BaseCurrency(ctx); err == nil {
+			bp.Currency = base
+		}
+	}
 	if _, err := s.repo.Update(ctx, bp); err != nil {
 		return err
 	}
