@@ -4,6 +4,21 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: A broken NAS no longer blocks an address no export lists
+
+**What changed**
+
+- The address release guard takes only what `shareNetworks` can put on an export: public addresses and cluster addresses
+  on a shared worker pool. Both now read the same `onExport` rule.
+
+**Why**
+
+- Every cluster address went through the guard, including one on a project network, which the subnet covers. A broken or
+  disabled TrueNAS on the project then blocked the release of a cluster with no dataset, against what `docs/managed-k8s.md`
+  promises. Addresses an export can list still fail closed, because releasing one would let another tenant inherit access.
+
+**Diagrams updated:** none.
+
 ## 2026-11-07: Customer image import (P5-11)
 
 **What changed**
