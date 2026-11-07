@@ -104,14 +104,15 @@ func (p *ServerProvider) instanceBR(cr *cloud.CloudResource, notEligible bool) *
 }
 
 // protectionBR bills the Protected add-on: the replica's space, from the first successful sync until it is disabled.
-// A VM still on its first sync has nothing to fail over to yet, so it costs nothing.
+// A VM still on its first sync has nothing to fail over to yet, so it costs nothing. Neither does one on shared storage:
+// there is no replica to rate.
 func protectionBR(cr *cloud.CloudResource) *billingapi.BillingResource {
 	server, ok := mapAt(cr.Data, "server")
 	if !ok {
 		return nil
 	}
 	pr, ok := mapAt(server, "protection")
-	if !ok || (str(pr["state"]) != "active" && str(pr["state"]) != "degraded") {
+	if !ok || (str(pr["state"]) != "active" && str(pr["state"]) != "degraded") || str(pr["mode"]) == "shared" {
 		return nil
 	}
 	return &billingapi.BillingResource{

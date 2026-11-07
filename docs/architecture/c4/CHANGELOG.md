@@ -24,6 +24,42 @@ and rules: [README.md](README.md#maintenance-rule).
   one, since a re-entry skips provisioning.
 
 **Diagrams updated:** none.
+## 2026-11-07: Installer re-runs keep operator settings, split mode passes preflight
+
+**What changed**
+
+- Stage 60 on an existing Proxmox provider keeps its storage profiles, default profile and confirmed classes, and only
+  adds what was newly detected. A value in the site's group_vars still wins.
+- Stage 60 registers the chart versions of the checkout instead of pins in `versions.yml`.
+- Preflight accepts `mode: split` and checks its settings. `object_store.mode` must be `vm` or `truenas-app` there.
+- Stage 10 requires the CAPI and CSI token secrets in split mode, and takes them from the vault when the tokens exist.
+
+**Why**
+
+- `make upgrade` runs stage 60, and each run replaced those fields with fresh detection. A class confirmed in the admin
+  console was lost, and Ceph added to a Standard cluster moved the default profile, so new VMs changed storage with no
+  one asking.
+- Stage 50 pushes the charts of the checkout. The pin had fallen behind, so a clean split install would register a
+  chart version that is not in its registry.
+- Preflight still refused split mode with a message from before it existed, so the documented command could not start.
+
+**Diagrams updated:** none; no container or relationship changed.
+## 2026-11-07: Protected servers on shared storage
+
+**What changed**
+
+- `ProtectableDisks` takes disks that are all on shared storage as well as all on ZFS. Such a server gets the HA resource alone:
+  no replication job, no node-affinity rule, `mode: shared` on its state, and no `server_protection` bill line. A disk that
+  would not follow it (`refuseUnreplicable`) is refused either way.
+
+**Why**
+
+- On a Full-tier site every server sits on Ceph, so Protected could not be sold there at all, and HA needs nothing from the
+  replication machinery when every node already reaches the disks. There is no replica to bill. Whether to charge for HA
+  on shared storage is an operator decision still to be made.
+
+**Diagrams updated:** `c3-components.md` (Replication and HA row).
+
 ## 2026-11-07: A node that is down loses no rows
 
 **What changed**

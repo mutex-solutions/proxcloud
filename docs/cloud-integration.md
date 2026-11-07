@@ -675,19 +675,25 @@ precedence over `fingerprint`, which only ever matches one node.
 
 ## Protected servers (replication + HA)
 
-An opt-in per server: ZFS replication every 15 minutes to a second node, plus an HA resource with a strict
-node-affinity rule over the two. Code: `internal/cloud/pve/protect.go`, `internal/platform/project/cloud_protect_pve.go`.
+An opt-in per server. On local ZFS: replication every 15 minutes to a second node, plus an HA resource with a strict
+node-affinity rule over the two. On shared storage: the HA resource alone. Code: `internal/cloud/pve/protect.go`, `internal/platform/project/cloud_protect_pve.go`.
 Actions on a server: `GET_PROTECTION`, `ENABLE_PROTECTION`, `DISABLE_PROTECTION`.
 
 - **Availability.** The cluster needs quorum and three nodes, or two with a QDevice. Every disk must be on `zfspool`
-  storage, the VM must have no passthrough device, and another node must have room for its disks and its memory.
+  storage, or every disk on shared storage (RBD, NFS, shared LVM), not a mix. The VM must have no passthrough device, and
+  another node must have room for its memory, and for its disks on ZFS.
+- **Shared storage.** No job, no replica, `mode: shared` on the state, so it takes `Sys.Console` and not `VM.Replicate`. HA is
+  added at enable and the state is `active` from there. Measured on RBD: back up on another node about 2.5 minutes after a
+  hard power-off. A failover loses what the guest had not flushed, as a power cut does. Not billed: `server_protection` rates a
+  replica's space and there is none. No memory is held back for these VMs and there is no node-affinity rule, so a nearly full
+  cluster, or shared storage restricted to some nodes, can fail a restart.
 - **Lifecycle.** Enable creates the job and syncs at once. HA is added only after the first sync has landed, on read or at
   the next sync (`ReconcileProtection`), because HA recovery before that has nothing to start from. State:
   `syncing` → `active`, or `degraded` when the last sync failed or is older than twice the schedule.
-- **Failover.** The dead node's watchdog fences it and the VM starts on the replica with its data as of the last sync.
+- **Failover on ZFS.** The dead node's watchdog fences it and the VM starts on the replica with its data as of the last sync.
   RPO = schedule + sync time. What was written after the last sync is lost.
 - **Node returns.** The VM stays where it is: equal priority in the rule, so no second interruption.
-- **Capacity.** The scheduler keeps each node's protected VMs' memory free for them (`SchedReq.ReserveMem`).
+- **Capacity.** The scheduler keeps each node's replicated VMs' memory free for them (`SchedReq.ReserveMem`).
 - **Billing.** `server_protection` with `size_gb` (replicated disks), from the first successful sync until disabled.
 - **Operator migrate.** `POST /admin/service/{id}/server/{vmid}/migrate {target}`. Sends only the delta when a replica
   exists; PVE turns it into an HA request for a managed VM, and the route waits until the VM is on the target.

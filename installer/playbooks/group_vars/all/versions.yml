@@ -10,8 +10,6 @@ pc_versions:
   proxcloud: v0.3.28
   rustfs: 1.0.4
   # mode=split: Cluster API on the mgmt cluster, and the services cluster's platform.
-  kamaji_cluster_chart: 0.1.2  # deploy/charts/proxmox-kamaji-cluster
-  database_cluster_chart: 0.5.0 # deploy/charts/database-cluster
   capi: v1.14.4
   capmox: v0.9.2
   capi_ipam: v1.1.1

@@ -10,7 +10,7 @@ make preflight INVENTORY=inventory/mysite
 make install INVENTORY=inventory/mysite
 ```
 
-Every stage is idempotent: it reads, then writes only the difference, so re-running `make install` changes nothing on a healthy install.
+Every stage is idempotent: it reads, then writes only the difference, so re-running `make install` changes nothing on a healthy install. A re-run keeps what an operator set on the Proxmox provider in the admin console: its storage profiles, default profile and confirmed classes. A value set in the site's group_vars wins over those; network, API URL and templates always follow the site.
 
 **Back up `inventory/mysite/generated/`.** It holds the encryption key, database passwords and Proxmox token secrets. The encryption key cannot be recovered, and without it the stored provider secrets are lost. The directory is gitignored.
 
@@ -132,9 +132,11 @@ a CNI that enforces policies. The installer does not apply one, since the ranges
 `proxcloud.mode: split` adds stage 50: Cluster API and CAPMOX on the mgmt cluster build a kubeadm **services cluster** of PVE VMs, which then runs Kamaji, its own Cluster API, ArgoCD, MetalLB, proxmox-csi and the database operators. Stage 60 registers the Kubernetes and database providers.
 
 1. Build the node templates (`images/k8s-node-template.sh`, see [images/README.md](../images/README.md)).
-2. Set `proxcloud.services` in the site's group_vars ([defaults.yml](../installer/playbooks/group_vars/all/defaults.yml) documents it): the network, `templates`, `control_plane`, one `workers` entry per PVE node a zone should exist on, and `kamaji.version_images`. A database with replicas needs a worker per replica, on different nodes.
+2. Set `proxcloud.services` in the site's group_vars ([defaults.yml](../installer/playbooks/group_vars/all/defaults.yml) documents it): the network, `templates`, `control_plane`, one `workers` entry per PVE node a zone should exist on, `pve_node_ips` and `kamaji.version_images`. A database with replicas needs a worker per replica, on different nodes. `object_store.mode` must be `vm` or `truenas-app`, because database backups go to the installer's own bucket. Preflight checks all of this.
 3. `make install`.
 
 The services subnet must be reachable from tenant networks (it holds the API endpoints and database addresses) and must reach the PVE API. Stage 10 grants what per-cluster tokens need, see [proxmox-permissions.md](proxmox-permissions.md#managed-kubernetes): read that first, since it gives the portal token `Permissions.Modify`.
 
-**What ran where:** `50-services-cluster.yml`'s template and `files/services-platform.sh` ran on a lab through hand-written drivers, against a site already installed in `allinone`. The playbook itself, stage 10's split grants and stage 60's registration have not run end to end on a clean site.
+**What ran where:** `50-services-cluster.yml`'s template and `files/services-platform.sh` ran on a lab through hand-written drivers, against a site already installed in `allinone`. Preflight in split mode and stage 60's registration ran on that lab against that cluster, and a project attached to both providers. The playbook itself and stage 10's split grants have not run end to end on a clean site.
+
+Stage 50 cannot change the machines of a running cluster: a `ProxmoxMachineTemplate` is immutable, so a changed size, template or pool in `proxcloud.services` fails the apply. Moving an `allinone` site with a hand-built services cluster onto this stage means rebuilding that cluster.
