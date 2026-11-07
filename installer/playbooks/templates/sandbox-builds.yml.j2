@@ -25,7 +25,10 @@ kind: CiliumNetworkPolicy
 metadata: {name: build-egress, namespace: sbx-build}
 spec:
   endpointSelector: {}
-  ingress: []
+  # One empty rule puts ingress into default deny with nothing allowed. An empty list (ingress: []) is no ingress
+  # section at all: Cilium would leave ingress unenforced, and this namespace has no tenant label for the cluster-wide
+  # rule to cover it.
+  ingress: [{}]
   egress:
   - toEndpoints:
     - matchLabels: {k8s:io.kubernetes.pod.namespace: kube-system, k8s:k8s-app: kube-dns}

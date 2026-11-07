@@ -77,7 +77,7 @@ served, answers 404 with E2B's error body (or 400 for a refused field).
 |---|---|---|
 | `GET /templates`, `GET /templates/{id}`, `GET /templates/aliases/{alias}` | yes | The project's own templates (`public: false`), then the location's built-in ones (`public: true`) |
 | `POST /v3/templates` | yes | `name` (or `alias`, `name:tag`), `tags`, `cpuCount`, `memoryMB` (whole GiB); at most 20 templates per project; a built-in name → 409. 503 where the location has no template registry or build bucket |
-| `GET /templates/{id}/files/{hash}` | yes | The upload URL points at this API (`PUT …/upload?token=…`), not at a bucket; up to 2 GiB per context |
+| `GET /templates/{id}/files/{hash}` | yes | The upload URL points at this API (`PUT …/upload?token=…`), not at a bucket; up to 2 GiB per context, 10 GiB per project (507 above) |
 | `POST /v2/templates/{id}/builds/{buildID}` | partial | Steps `RUN`, `COPY`, `ENV`, `WORKDIR`, `USER`; `fromImage`, `fromTemplate`, `fromImageRegistry` types `registry` and `gcp` (`aws` → 400, see below); `startCmd`, `readyCmd`. No layer cache between builds, 30 minutes per build, 2 at once per project; billed like a sandbox of the template's size while it runs; passes the sandbox create's checks (409, 403, 503) |
 | `GET /templates/{id}/builds/{buildID}/status` | yes | `logsOffset`; build logs are kaniko's, crane's and the context fetch's lines |
 | `DELETE /templates/{id}`, `GET /templates/{id}/tags`, `POST /templates/tags`, `DELETE /templates/tags` | yes | A deleted template's images are pruned later (docs/managed-sandbox.md §7.4) |

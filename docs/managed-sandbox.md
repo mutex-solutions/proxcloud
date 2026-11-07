@@ -1185,17 +1185,24 @@ Sandbox.create("<name>[:tag]") → <registry>/t/<project>/<template>@<digest>, p
   `secret.buildStorageAccessKey/SecretKey`; installer `sandbox.registry.builds_bucket`, default `pc-sandbox-builds`, on
   the same object store as the registry's blobs, its own service user). The portal streams a context into it: up to
   16 MiB as one PUT, a larger one as a multipart upload in 16 MiB parts, both with `UNSIGNED-PAYLOAD` (the portal reads
-  the body once as it arrives and does not hash it first); at most 2 GiB per context. A failed multipart upload is
-  aborted. A deleted template's contexts are deleted with it.
+  the body once as it arrives and does not hash it first); at most 2 GiB per context and 10 GiB for all of a
+  project's contexts. Over that cap an upload first deletes the project's contexts older than the presigned URL's
+  lifetime (build deadline plus 10 minutes), oldest first, and is refused with 507 if it still does not fit (an SDK
+  whose cached context was deleted uploads it again). The upload URL and the upload pass the same usage gate as a
+  build, so a suspended project stores nothing. A failed multipart upload is aborted. A deleted template's contexts
+  are deleted with it.
 - **Build pods** run in `sbx-build` on the sandbox workers (`installer/playbooks/templates/sandbox-builds.yml.j2`,
   applied by stage 55 (registry)), under gVisor like a sandbox, on the same nodes as tenant sandboxes: the system node
   keeps the wake token and the wildcard key away from customer code (section 4). They fetch the contexts with presigned
   GETs signed for `podEndpoint` (the address the nodes reach; default `endpoint`), valid for the build deadline plus 10
-  minutes, because the workers reach the bucket but not the portal. At most 2 builds per project at once, 30 minutes
-  each; a build is billed like a sandbox of the template's size while it runs (row `build-<id>`, template
+  minutes, because the workers reach the bucket but not the portal. At most 2 builds per project at once (counted
+  and started under a Postgres advisory lock per project, so parallel requests cannot pass the count together and
+  fill the namespace quota all projects share), 30 minutes each; a build is billed like a sandbox of the template's size while it runs (row `build-<id>`, template
   `build:<template>`).
 - **The template record** (`sandbox_templates`): name, size, tags, the last 10 builds with their logs once the pod is
-  gone (kept 10 minutes after it finished), the image digest of each ready build.
+  gone (kept 10 minutes after it finished), the image digest of each ready build. Trimming to 10 never drops a build
+  a tag names or one that is building, however many builds were requested since: the template keeps resolving and
+  the prune keeps its image.
 
 ### 7.2 Accounts
 
@@ -1251,6 +1258,11 @@ and the clusters again, waits two minutes, reads everything again, and deletes a
 stops it. Zot's own garbage collection frees the blobs an hour later. An image whose age cannot be read (an index, a
 missing `created`) is never deleted. Providers naming two different registries stop it (each would see the other's
 images as unreferenced). `POST :8081/debug/run-registry-prune?grace=10m` runs it with a lower age floor.
+
+The prune skips repositories of projects it does not know (another portal on the same registry), so a deleted
+project's images go at its teardown instead: after its templates, the teardown deletes every image under
+`t/<project>/` with the `gc` account, following `registryPrune` (`dry-run` logs, unset keeps them). A registry error
+fails the teardown, which the deletion job retries.
 
 ### 7.5 Installer
 

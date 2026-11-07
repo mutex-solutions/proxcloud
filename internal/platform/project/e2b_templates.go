@@ -48,6 +48,10 @@ const (
 	maxTemplatesPerProject = 20
 	maxConcurrentBuilds    = 2
 	maxContextBytes        = 2 << 30 // per COPY context upload
+	// maxProjectContextBytes caps all of a project's stored contexts: they share the object store with the registry's
+	// blobs. Over it, contexts older than contextEvictAge go first, oldest first.
+	maxProjectContextBytes = 10 << 30
+	contextEvictAge        = sandbox.BuildTimeout + 10*time.Minute // a presigned fetch URL's lifetime
 	maxStoredLogLines      = 2000
 	keptBuilds             = 10
 	buildPodGrace          = 2 * time.Minute // a finished build pod outlives one charge tick
@@ -151,12 +155,31 @@ func (h *Handler) saveTemplate(ctx context.Context, t *sandboxTemplateDoc) error
 		}
 		now := time.Now().UTC()
 		t.UpdatedAt = &now
-		if len(t.Builds) > keptBuilds {
-			t.Builds = t.Builds[len(t.Builds)-keptBuilds:]
-		}
+		trimBuilds(t)
 		_, err = h.sbTemplates.Replace(tc, t.ID, t)
 		return err
 	})
+}
+
+// trimBuilds drops the oldest builds beyond keptBuilds, but never one a tag names (the template would stop resolving
+// and the prune would lose its image) nor one that is building (its pod is running and billed). Waiting builds are
+// trimmed like finished ones: every POST /v3/templates adds one, so keeping them all would let retries grow the record
+// without bound; the newest keptBuilds of them survive.
+func trimBuilds(t *sandboxTemplateDoc) {
+	keep := map[string]bool{}
+	for _, id := range t.Tags {
+		keep[id] = true
+	}
+	drop := len(t.Builds) - keptBuilds
+	out := t.Builds[:0]
+	for _, b := range t.Builds { // oldest first (mergeConcurrent sorts by createdAt)
+		if drop > 0 && !keep[b.BuildID] && b.Status != sandbox.BuildBuilding {
+			drop--
+			continue
+		}
+		out = append(out, b)
+	}
+	t.Builds = out
 }
 
 // mergeConcurrent folds what others saved since t was read into t, so a request writing back its copy cannot undo
@@ -414,6 +437,44 @@ func (bs *buildStore) fetchURL(ctx context.Context, key string) (string, error) 
 	return req.URL, nil
 }
 
+// contextBudget is how many bytes the next upload of the project may store (at most maxContextBytes). Over the
+// project's cap it first deletes the project's contexts older than contextEvictAge, oldest first, until want bytes
+// (maxContextBytes when unknown) fit.
+// ponytail: listed per upload and not locked, so parallel uploads can overshoot the cap by one context each; a usage
+// row per project if that matters.
+func (bs *buildStore) contextBudget(ctx context.Context, projectID string, want int64) (int64, error) {
+	if want <= 0 || want > maxContextBytes {
+		want = maxContextBytes
+	}
+	prefix := projectID + "/"
+	var objs []s3types.Object
+	var used int64
+	p := s3.NewListObjectsV2Paginator(bs.client, &s3.ListObjectsV2Input{Bucket: &bs.bucket, Prefix: &prefix})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return 0, err
+		}
+		for _, o := range page.Contents {
+			objs = append(objs, o)
+			used += awsv2.ToInt64(o.Size)
+		}
+	}
+	sort.Slice(objs, func(i, j int) bool {
+		return awsv2.ToTime(objs[i].LastModified).Before(awsv2.ToTime(objs[j].LastModified))
+	})
+	for _, o := range objs {
+		if maxProjectContextBytes-used >= want || time.Since(awsv2.ToTime(o.LastModified)) < contextEvictAge {
+			break
+		}
+		if _, err := bs.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &bs.bucket, Key: o.Key}); err != nil {
+			return 0, err
+		}
+		used -= awsv2.ToInt64(o.Size)
+	}
+	return min(int64(maxContextBytes), maxProjectContextBytes-used), nil
+}
+
 // deletePrefix removes a template's contexts (best effort; at most one listing page).
 func (bs *buildStore) deletePrefix(ctx context.Context, prefix string) {
 	out, err := bs.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: &bs.bucket, Prefix: &prefix})
@@ -446,6 +507,11 @@ func (h *Handler) e2bTemplateFile(w http.ResponseWriter, r *http.Request) {
 		e2bErr(w, http.StatusBadRequest, "invalid files hash")
 		return
 	}
+	// Stored contexts are usage: a suspended project gets no upload URL.
+	if err := h.sandboxUsageGate(r.Context(), c.proj, c.es); err != nil {
+		e2bFail(w, err)
+		return
+	}
 	bs, err := buildStorage(c.ss.Config())
 	if err != nil {
 		e2bErr(w, http.StatusServiceUnavailable, "template builds are not available at this location")
@@ -471,7 +537,8 @@ func (h *Handler) publicBase(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
-// templateService is the sandbox service of a template's project (the upload route has no caller).
+// templateService is the sandbox service of a template's project (the upload route has no caller), after the same
+// usage gate as a build: the upload URL outlives a suspension.
 func (h *Handler) templateService(ctx context.Context, projectID string) (*sandbox.Service, error) {
 	p, err := h.svc.repo.FindByID(ctx, projectID)
 	if err != nil || p == nil {
@@ -480,6 +547,9 @@ func (h *Handler) templateService(ctx context.Context, projectID string) (*sandb
 	es, err := h.esSvc.Get(ctx, h.sandboxServiceOf(ctx, p))
 	if err != nil || es == nil || h.sandboxFor == nil {
 		return nil, errors.New("sandboxes are not available")
+	}
+	if err := h.sandboxUsageGate(ctx, p, es); err != nil {
+		return nil, err
 	}
 	return h.sandboxFor(es)
 }
@@ -501,15 +571,29 @@ func (h *Handler) e2bTemplateUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ss, err := h.templateService(r.Context(), t.ProjectID)
+	if err != nil {
+		if status, msg := e2bError(err); status != http.StatusInternalServerError && status != http.StatusServiceUnavailable {
+			e2bErr(w, status, msg) // the usage gate's refusal
+			return
+		}
+	}
 	var bs *buildStore
 	if err == nil {
 		bs, err = buildStorage(ss.Config())
 	}
+	limit := int64(maxContextBytes)
 	if err == nil {
-		err = bs.put(r.Context(), contextKey(t.ProjectID, t.ID, hash), &limitedReader{r: r.Body, n: maxContextBytes})
+		limit, err = bs.contextBudget(r.Context(), t.ProjectID, r.ContentLength)
+	}
+	if err == nil && (limit <= 0 || r.ContentLength > limit) {
+		e2bErr(w, http.StatusInsufficientStorage, fmt.Sprintf("the project's build contexts may use at most %d bytes; delete templates you no longer build", maxProjectContextBytes))
+		return
+	}
+	if err == nil {
+		err = bs.put(r.Context(), contextKey(t.ProjectID, t.ID, hash), &limitedReader{r: r.Body, n: limit})
 	}
 	if errors.Is(err, errContextTooLarge) {
-		e2bErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("a build context may be at most %d bytes", maxContextBytes))
+		e2bErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("a build context may be at most %d bytes (and the project's at most %d)", maxContextBytes, maxProjectContextBytes))
 		return
 	}
 	if err != nil {
@@ -616,30 +700,40 @@ func (h *Handler) e2bTemplateBuild(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
-	running, err := c.ss.ListBuilds(ctx, c.proj.ID)
-	if err != nil {
-		e2bFail(w, err)
-		return
-	}
-	active := 0
-	for _, d := range running {
-		if d["status"] != sandbox.StatusDeleted {
-			active++
-		}
-	}
-	if active >= maxConcurrentBuilds {
-		e2bErr(w, http.StatusTooManyRequests, fmt.Sprintf("at most %d builds may run at once", maxConcurrentBuilds))
-		return
-	}
 	bl.From, bl.StartCmd, bl.ReadyCmd = base.Ref, b.StartCmd, b.ReadyCmd
 	bl.User, bl.Workdir = res.User, res.Workdir
 	inheritFromParent(bl, base.Parent, b.StartCmd, b.ReadyCmd)
-	err = c.ss.StartBuild(ctx, sandbox.BuildRequest{
-		ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: bl.BuildID, Image: templateImage(cfg, t, bl.BuildID), Result: res,
-		CPU: t.CPU, MemoryGiB: t.MemoryGiB,
-		Base: base.Ref, BaseAuth: base.Auth, BaseDockerConfig: base.DockerConfig,
-		FetchURL: func(hsh string) string { return fetch[hsh] },
+	// The count and the start hold one lock per project, across API replicas: without it parallel requests all pass
+	// the count, and one project could fill the build namespace's quota that every project shares.
+	errBusy := errors.New("busy")
+	err = h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
+		if err := h.sbTemplates.DB().LockXact(tc, "sbx-build:"+c.proj.ID); err != nil {
+			return err
+		}
+		running, err := c.ss.ListBuilds(tc, c.proj.ID)
+		if err != nil {
+			return err
+		}
+		active := 0
+		for _, d := range running {
+			if d["status"] != sandbox.StatusDeleted {
+				active++
+			}
+		}
+		if active >= maxConcurrentBuilds {
+			return errBusy
+		}
+		return c.ss.StartBuild(tc, sandbox.BuildRequest{
+			ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: bl.BuildID, Image: templateImage(cfg, t, bl.BuildID), Result: res,
+			CPU: t.CPU, MemoryGiB: t.MemoryGiB,
+			Base: base.Ref, BaseAuth: base.Auth, BaseDockerConfig: base.DockerConfig,
+			FetchURL: func(hsh string) string { return fetch[hsh] },
+		})
 	})
+	if errors.Is(err, errBusy) {
+		e2bErr(w, http.StatusTooManyRequests, fmt.Sprintf("at most %d builds may run at once", maxConcurrentBuilds))
+		return
+	}
 	if err != nil {
 		e2bFail(w, err)
 		return

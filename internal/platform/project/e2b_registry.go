@@ -110,7 +110,8 @@ type registryArtifact struct {
 }
 
 // ownedOnly keeps artifacts of projects that exist in this deployment. A repo of an unknown project is treated as
-// foreign (another portal on the same registry), not as deleted, so a deleted project's images are left alone.
+// foreign (another portal on the same registry), not as deleted: a deleted project's images go at its teardown
+// (deleteProjectImages), not here.
 func (h *Handler) ownedOnly(ctx context.Context, arts []registryArtifact) ([]registryArtifact, error) {
 	known := map[string]bool{}
 	var out []registryArtifact
@@ -201,8 +202,8 @@ func (o *ociRegistry) getJSON(ctx context.Context, path, accept string, out any)
 	return resp.Header, json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(out)
 }
 
-// repos lists the catalog under t/ (the registry shows only what this account may read).
-func (o *ociRegistry) repos(ctx context.Context) ([]string, error) {
+// repos lists the catalog under prefix, which starts with t/ (the registry shows only what this account may read).
+func (o *ociRegistry) repos(ctx context.Context, prefix string) ([]string, error) {
 	var out []string
 	last := ""
 	for {
@@ -217,7 +218,7 @@ func (o *ociRegistry) repos(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		for _, r := range page.Repositories {
-			if strings.HasPrefix(r, "t/") {
+			if strings.HasPrefix(r, prefix) {
 				out = append(out, r)
 			}
 		}
@@ -228,10 +229,10 @@ func (o *ociRegistry) repos(ctx context.Context) ([]string, error) {
 	}
 }
 
-// artifacts lists every tagged image of the template repositories, tags grouped by digest, with the created time of
-// each image's config.
-func (o *ociRegistry) artifacts(ctx context.Context) ([]registryArtifact, error) {
-	repos, err := o.repos(ctx)
+// artifacts lists every tagged image of the template repositories under prefix ("t/" for all, "t/<project>/" for one
+// project), tags grouped by digest, with the created time of each image's config.
+func (o *ociRegistry) artifacts(ctx context.Context, prefix string) ([]registryArtifact, error) {
+	repos, err := o.repos(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -414,6 +415,33 @@ func (h *Handler) PruneSandboxRegistryOlderThan(ctx context.Context, grace time.
 	h.pruneRegistry(ctx, host, svcs, newOCIRegistry(host, ca, cred), mode == "dry-run", grace, time.Sleep)
 }
 
+// deleteProjectImages removes every image of a deleted project's template repositories (its teardown; nothing else
+// may reference them: a build's base is chosen by the server from the project's own templates). It follows the
+// provider's registryPrune: off keeps them (as before), dry-run only logs. An error fails the teardown, which retries.
+func deleteProjectImages(ctx context.Context, cfg sandbox.Config, projectID string) error {
+	host, ca, mode, cred, err := pruneTarget([]sandbox.Config{cfg})
+	if err != nil || host == "" || mode == "" || cred.User == "" {
+		return err
+	}
+	return deleteRepoImages(ctx, newOCIRegistry(host, ca, cred), projectID, mode == "dry-run")
+}
+
+func deleteRepoImages(ctx context.Context, reg *ociRegistry, projectID string, dryRun bool) error {
+	arts, err := reg.artifacts(ctx, "t/"+projectID+"/")
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, a := range arts {
+		if dryRun {
+			slog.Info("registry: would delete a deleted project's image", "repo", a.Repo, "digest", a.Digest)
+			continue
+		}
+		errs = append(errs, reg.delete(ctx, a))
+	}
+	return errors.Join(errs...)
+}
+
 // pruneRegistry returns how many images it deleted (or would have, in a dry run).
 func (h *Handler) pruneRegistry(ctx context.Context, host string, svcs []*sandbox.Service, reg *ociRegistry, dryRun bool, grace time.Duration, sleep func(time.Duration)) int {
 	live, err := h.registryLive(ctx, host, svcs)
@@ -421,7 +449,7 @@ func (h *Handler) pruneRegistry(ctx context.Context, host string, svcs []*sandbo
 		slog.Error("registry prune: live set", "err", err)
 		return 0
 	}
-	arts, err := reg.artifacts(ctx)
+	arts, err := reg.artifacts(ctx, "t/")
 	if err != nil {
 		slog.Error("registry prune: list images", "err", err)
 		return 0

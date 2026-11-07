@@ -584,8 +584,9 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 	return left, failed
 }
 
-// teardownTemplates removes the project's custom templates: their build pods, contexts and records. The images go with
-// the registry's next prune.
+// teardownTemplates removes the project's custom templates: their build pods, contexts and records, then the
+// project's images in the template registry (the prune never touches them: it treats a repo of an unknown project as
+// another portal's).
 func (h *Handler) teardownTemplates(ctx context.Context, ss *sandbox.Service, projectID string) error {
 	if h.sbTemplates == nil {
 		return nil
@@ -598,6 +599,7 @@ func (h *Handler) teardownTemplates(ctx context.Context, ss *sandbox.Service, pr
 	for i := range ts {
 		errs = append(errs, h.deleteTemplate(ctx, ss, &ts[i]))
 	}
+	errs = append(errs, deleteProjectImages(ctx, ss.Config(), projectID))
 	return errors.Join(errs...)
 }
 

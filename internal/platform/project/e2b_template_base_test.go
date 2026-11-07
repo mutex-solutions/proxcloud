@@ -106,3 +106,18 @@ func TestDockerHubKeyAndRepoCase(t *testing.T) {
 		}
 	}
 }
+
+func TestTrimBuildsKeepsTaggedAndBuilding(t *testing.T) {
+	id := func(i int) string { return string(rune('A' + i)) }
+	var tpl sandboxTemplateDoc
+	for i := 0; i < keptBuilds+5; i++ {
+		tpl.Builds = append(tpl.Builds, templateBuild{BuildID: id(i), Status: sandbox.BuildWaiting})
+	}
+	tpl.Builds[0].Status = sandbox.BuildReady
+	tpl.Builds[1].Status = sandbox.BuildBuilding
+	tpl.Tags = map[string]string{"default": id(0)}
+	trimBuilds(&tpl)
+	if len(tpl.Builds) != keptBuilds || tpl.build(id(0)) == nil || tpl.build(id(1)) == nil || tpl.build(id(2)) != nil || tpl.build(id(keptBuilds+4)) == nil {
+		t.Fatalf("kept %+v", tpl.Builds)
+	}
+}

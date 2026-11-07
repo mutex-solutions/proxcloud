@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -108,7 +109,7 @@ func TestOCIRegistryClient(t *testing.T) {
 	srv := fakeOCI(t, &deleted)
 	defer srv.Close()
 	reg := &ociRegistry{base: srv.URL, cred: sandbox.RegistryCredential{User: "gc", Password: "pw"}, http: srv.Client()}
-	arts, err := reg.artifacts(context.Background())
+	arts, err := reg.artifacts(context.Background(), "t/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,8 +122,24 @@ func TestOCIRegistryClient(t *testing.T) {
 		t.Fatalf("delete: %v %v", deleted, err)
 	}
 	bad := &ociRegistry{base: srv.URL, cred: sandbox.RegistryCredential{User: "gc", Password: "wrong"}, http: srv.Client()}
-	if _, err := bad.artifacts(context.Background()); err == nil {
+	if _, err := bad.artifacts(context.Background(), "t/"); err == nil {
 		t.Fatal("a refused listing must be an error (nothing may be deleted on a partial view)")
+	}
+}
+
+func TestDeleteProjectImages(t *testing.T) {
+	var deleted []string
+	srv := fakeOCI(t, &deleted)
+	defer srv.Close()
+	reg := &ociRegistry{base: srv.URL, cred: sandbox.RegistryCredential{User: "gc", Password: "pw"}, http: srv.Client()}
+	if err := deleteRepoImages(context.Background(), reg, "6a4d47094f34c7e7d800e7b1", false); err != nil || len(deleted) != 0 {
+		t.Fatalf("another project's images: %v %v", deleted, err)
+	}
+	if err := deleteRepoImages(context.Background(), reg, tProj, true); err != nil || len(deleted) != 0 {
+		t.Fatalf("dry run deleted: %v %v", deleted, err)
+	}
+	if err := deleteRepoImages(context.Background(), reg, tProj, false); err != nil || len(deleted) != 1 || deleted[0] != tDigest {
+		t.Fatalf("deleted %v %v", deleted, err)
 	}
 }
 
@@ -214,6 +231,58 @@ func TestBuildStorePutSingleAndMultipart(t *testing.T) {
 	u, err := bs.fetchURL(context.Background(), "p/t/h1.tar")
 	if err != nil || !strings.HasPrefix(u, "http://198.51.100.7:9000/b/p/t/h1.tar?") || !strings.Contains(u, "X-Amz-Signature=") {
 		t.Fatalf("presigned %s %v", u, err)
+	}
+}
+
+// A project over its context cap loses its oldest contexts past contextEvictAge, and never a recent one.
+func TestContextBudgetEvictsOldest(t *testing.T) {
+	now := time.Now().UTC()
+	type obj struct {
+		key  string
+		size int64
+		age  time.Duration
+	}
+	objs := []obj{
+		{"p/t/new.tar", 4 << 30, time.Minute},
+		{"p/t/old2.tar", 3 << 30, 48 * time.Hour},
+		{"p/t/old1.tar", 3 << 30, 72 * time.Hour},
+	}
+	var mu sync.Mutex
+	var deleted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2":
+			var b strings.Builder
+			b.WriteString(`<ListBucketResult><Name>b</Name><IsTruncated>false</IsTruncated>`)
+			for _, o := range objs {
+				b.WriteString(`<Contents><Key>` + o.key + `</Key><Size>` + strconv.FormatInt(o.size, 10) + `</Size><LastModified>` +
+					now.Add(-o.age).Format(time.RFC3339) + `</LastModified></Contents>`)
+			}
+			b.WriteString(`</ListBucketResult>`)
+			_, _ = w.Write([]byte(b.String()))
+		case r.Method == http.MethodDelete:
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, "/b/"))
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+	bs, err := buildStorage(sandbox.Config{BuildStorage: sandbox.BuildStorage{Endpoint: srv.URL, Bucket: "b", AccessKey: "a", SecretKey: "s"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 10 GiB used of 10: a 2 GiB upload needs old1 (3 GiB) gone, not old2 nor new.
+	n, err := bs.contextBudget(context.Background(), "p", 2<<30)
+	if err != nil || n != 2<<30 || len(deleted) != 1 || deleted[0] != "p/t/old1.tar" {
+		t.Fatalf("budget %d %v deleted %v", n, err, deleted)
+	}
+	// Only recent contexts over the cap: nothing is evicted and nothing fits.
+	deleted, objs = nil, []obj{{"p/t/a.tar", 6 << 30, time.Minute}, {"p/t/b.tar", 5 << 30, time.Minute}}
+	if n, err := bs.contextBudget(context.Background(), "p", 0); err != nil || n > 0 || len(deleted) != 0 {
+		t.Fatalf("budget %d %v deleted %v", n, err, deleted)
 	}
 }
 

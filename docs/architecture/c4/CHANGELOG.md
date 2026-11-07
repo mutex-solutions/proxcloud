@@ -30,7 +30,12 @@ and rules: [README.md](README.md#maintenance-rule).
   account, `config.sandbox.registryCa`); debug triggers `run-sandbox-builds` and `run-registry-prune?grace=`.
 - Console: a Templates tab on the Sandboxes page (`/project/{id}/sandbox-templates`: list, build logs, delete); the admin
   sandbox provider form edits the build bucket, the prune mode, the gc account and the registry CA.
-- Project teardown deletes the project's templates, their build pods and contexts.
+- Project teardown deletes the project's templates, their build pods and contexts, and its images under
+  `t/<project>/` with the `gc` account (following `registryPrune`).
+- The build limit (2 per project) is counted and the pod started under a Postgres advisory lock per project; a
+  template keeps its last 10 builds plus any a tag names or that is building; a project's contexts are capped at
+  10 GiB (oldest past the presigned URL's lifetime evicted first, else 507), and the upload URL and the upload pass the
+  usage gate. The build namespace's Cilium policy has an explicit empty ingress rule (default deny).
 
 **Why**
 
@@ -45,6 +50,12 @@ and rules: [README.md](README.md#maintenance-rule).
 - EE pruned through Harbor's API; Zot speaks the OCI distribution API, with which the same live-set rules apply.
 - ProxCloud runs on Proxmox only, so an AWS SDK client for one `fromImageRegistry` flavour was not worth carrying; an ECR
   token used as a registry password covers the same images.
+- Review of the first cut: 10 failed build requests trimmed away the build `default` named (the template stopped
+  resolving and the prune lost its image); parallel build requests all passed the count and started 3 pods for a
+  limit of 2, so one project could fill the quota every project's builds share; contexts had no cap and no usage gate
+  on the object store that also holds the registry's blobs; and the prune treats a repo of an unknown project as
+  foreign, so a deleted project's images would have stayed forever. `ingress: []` is no ingress section to Cilium,
+  and `sbx-build` carries no tenant label for the cluster-wide rule.
 
 **Diagrams updated:** C2 (template build bucket, build pod flows), C3 (custom templates component, the account sync's
 accounts), C4 (the fence rule for the bucket).
