@@ -1,10 +1,11 @@
 package pve
 
-// protect.go — the "Protected" add-on: ZFS replication to a second node plus an HA resource with a strict
+// protect.go — the "Protected" add-on. On local ZFS: replication to a second node plus an HA resource with a strict
 // node-affinity rule over those two nodes. RPO = the replication schedule plus the sync time; a failover loses what
-// was written after the last sync.
+// was written after the last sync. On shared storage (RBD, NFS, shared LVM) every node already reaches the disks, so
+// it is the HA resource alone, with no job, no replica and no rule.
 //
-// Lifecycle: enable creates the job and syncs. HA is added only once a first sync has landed, because HA recovery
+// Lifecycle on ZFS: enable creates the job and syncs. HA is added only once a first sync has landed, because HA recovery
 // before that would have nothing to start from. A VM carries tag pc-protected from enable on; ReconcileProtection
 // (run on read and on every sync) moves it forward and reports its state.
 
@@ -30,6 +31,8 @@ const (
 	ProtectionSyncing  = "syncing"  // job exists, no first sync yet: billed nothing, no failover
 	ProtectionActive   = "active"   // synced and HA managed
 	ProtectionDegraded = "degraded" // HA managed, but the last sync failed or is older than twice the schedule
+
+	ProtectionModeShared = "shared" // no replica: the disks are on shared storage
 )
 
 // ReplicationJob is one row of /cluster/replication.
@@ -186,36 +189,45 @@ func (s *Service) ProtectionReady(ctx context.Context) (ready bool, reason strin
 	return true, "", nil
 }
 
-// ProtectableDisks checks every disk of a VM can replicate: zfspool, and the same storage active on some other
-// node. It returns the storages involved. PVE fails the whole job on one disk it cannot replicate, and a disk left out
-// of replication would be missing after a failover, so a mix is refused.
-func (s *Service) ProtectableDisks(ctx context.Context, vm *ClusterResource, cfg VMConfig) (map[string]bool, error) {
+// ProtectableDisks checks every disk of a VM can follow it to another node: all on zfspool, which replicates, or all on
+// shared storage (shared = true). It returns the storages involved. PVE fails the whole job on one disk it cannot
+// replicate, and a disk left out of replication would be missing after a failover, so a mix is refused.
+func (s *Service) ProtectableDisks(ctx context.Context, vm *ClusterResource, cfg VMConfig) (storages map[string]bool, shared bool, err error) {
 	caps, err := s.C.DetectStorage(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if hasPassthrough(cfg) {
-		return nil, conflictf("A server with a passed-through device cannot be protected")
+		return nil, false, conflictf("A server with a passed-through device cannot be protected")
 	}
-	storages := map[string]bool{}
+	storages = map[string]bool{}
+	var local int
 	for _, d := range ParseDisks(cfg) {
 		if strings.Contains(d.VolID, "cloudinit") {
 			continue // regenerated from the VM config on the node it starts on
 		}
 		c, ok := caps[d.Storage]
-		if !ok || c.Type != "zfspool" {
-			return nil, conflictf("Volume %s is on storage %s, which cannot be replicated. Only local ZFS can", d.VolID, d.Storage)
+		switch {
+		case ok && c.Type == "zfspool":
+			local++
+		case ok && c.Shared:
+			shared = true
+		default:
+			return nil, false, conflictf("Volume %s is on storage %s, which is neither local ZFS nor shared", d.VolID, d.Storage)
 		}
 		storages[d.Storage] = true
 	}
 	if len(storages) == 0 {
-		return nil, conflictf("This server has no disk to replicate")
+		return nil, false, conflictf("This server has no disk to protect")
 	}
-	return storages, nil
+	if shared && local > 0 {
+		return nil, false, conflictf("This server has disks on both local ZFS and shared storage. Move them to one kind first")
+	}
+	return storages, shared, nil
 }
 
-// refuseUnreplicable stops a disk from joining a protected VM on a storage that cannot replicate: the job would fail
-// on it, and leaving it out of the job would lose it on a failover.
+// refuseUnreplicable stops a disk from joining a protected VM on a storage that would not follow it: a replication job
+// would fail on it, and a disk left behind would be lost on a failover.
 func (s *Service) refuseUnreplicable(ctx context.Context, vm *ClusterResource, storage string) error {
 	if !HasTag(vm.Tags, tagProtected) {
 		return nil
@@ -224,8 +236,13 @@ func (s *Service) refuseUnreplicable(ctx context.Context, vm *ClusterResource, s
 	if err != nil {
 		return err
 	}
-	if c, ok := caps[storage]; !ok || c.Type != "zfspool" {
-		return conflictf("Server %s is protected, and storage %s cannot be replicated. Remove the protection first", vm.Name, storage)
+	jobs, err := s.C.ListReplicationJobs(ctx)
+	if err != nil {
+		return err
+	}
+	replicated := slices.ContainsFunc(jobs, func(j ReplicationJob) bool { return j.Guest == vm.VMID })
+	if c, ok := caps[storage]; !ok || (replicated && c.Type != "zfspool") || (!replicated && !c.Shared) {
+		return conflictf("Server %s is protected, and storage %s would not follow it to another host. Remove the protection first", vm.Name, storage)
 	}
 	return nil
 }
@@ -334,27 +351,35 @@ func (s *Service) EnableProtection(ctx context.Context, projectID, externalID st
 	if HasTag(cfg.Str("tags"), tagProtected) {
 		return conflictf("This server is already protected")
 	}
-	storages, err := s.ProtectableDisks(ctx, vm, cfg)
+	storages, shared, err := s.ProtectableDisks(ctx, vm, cfg)
 	if err != nil {
 		return err
 	}
 	var diskBytes int64
-	for _, d := range ParseDisks(cfg) {
-		diskBytes += int64(d.SizeGiB) << 30
+	if !shared { // a replica's space; shared disks take none on another node
+		for _, d := range ParseDisks(cfg) {
+			diskBytes += int64(d.SizeGiB) << 30
+		}
 	}
 	target, err := s.PickProtectionTarget(ctx, vm, storages, diskBytes, headroomPct, overcommit)
 	if err != nil {
 		return err
 	}
+	tag := func() error {
+		up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"tags": addTag(cfg.Str("tags"), tagProtected)})
+		if err != nil {
+			return err
+		}
+		return s.C.WaitTask(ctx, up)
+	}
+	if shared {
+		return tag() // HA follows in ReconcileProtection: nothing to wait for, the caller reads it next
+	}
 	id, err := s.C.CreateReplicationJob(ctx, vm.VMID, target, DefaultReplicationSchedule)
 	if err != nil {
 		return err
 	}
-	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"tags": addTag(cfg.Str("tags"), tagProtected)})
-	if err == nil {
-		err = s.C.WaitTask(ctx, up)
-	}
-	if err != nil {
+	if err := tag(); err != nil {
 		_ = s.C.DeleteReplicationJob(ctx, id, false)
 		return err
 	}
@@ -424,7 +449,7 @@ func (s *Service) ReconcileProtection(ctx context.Context, r ClusterResource) (m
 		}
 	}
 	if job == nil {
-		return nil, nil
+		return s.reconcileSharedProtection(ctx, r)
 	}
 	// After a failover the row's node is the one the VM moved to, and the job has already turned around.
 	st, err := s.C.GetReplicationStatus(ctx, r.Node, job.ID)
@@ -470,6 +495,42 @@ func (s *Service) ReconcileProtection(ctx context.Context, r ClusterResource) (m
 	return map[string]any{
 		"state": state, "target": job.Target, "schedule": job.Schedule, "rpoTargetMinutes": replicationScheduleMinutes,
 		"lastSync": st.LastSync, "failCount": st.FailCount, "error": st.Error, "ha": managed,
+	}, nil
+}
+
+// reconcileSharedProtection is ReconcileProtection for a VM on shared storage: tagged, with no job. HA comes at once.
+// nil = not protected, or a tag that does not fit (a ZFS VM whose job was removed by hand).
+// ponytail: no node-affinity rule, so HA may try a node a storage is restricted away from, and the one relocate then
+// moves on. ReserveMem counts jobs, so no memory is held back for these VMs and a full cluster can fail to restart one.
+// Add both if a site restricts shared storage or runs close to full.
+func (s *Service) reconcileSharedProtection(ctx context.Context, r ClusterResource) (map[string]any, error) {
+	if !HasTag(r.Tags, tagProtected) {
+		return nil, nil
+	}
+	ha, err := s.C.ListHAResources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sid := "vm:" + strconv.Itoa(r.VMID)
+	if !slices.ContainsFunc(ha, func(h HAResource) bool { return h.SID == sid }) {
+		cfg, err := s.C.GetVMConfig(ctx, r.Node, r.VMID)
+		if err != nil {
+			return nil, err
+		}
+		// Fresh tags: this row may predate a disable, and an HA resource left behind would restart a VM nobody protects.
+		if !HasTag(cfg.Str("tags"), tagProtected) {
+			return nil, nil
+		}
+		if _, shared, err := s.ProtectableDisks(ctx, &r, cfg); err != nil || !shared {
+			return nil, nil
+		}
+		if err := s.C.AddHAResource(ctx, r.VMID); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{
+		"state": ProtectionActive, "mode": ProtectionModeShared, "target": "", "schedule": "", "rpoTargetMinutes": 0,
+		"lastSync": 0, "failCount": 0, "error": "", "ha": true,
 	}, nil
 }
 
