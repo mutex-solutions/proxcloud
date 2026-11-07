@@ -7,7 +7,8 @@ package pve
 //
 // Lifecycle on ZFS: enable creates the job and syncs. HA is added only once a first sync has landed, because HA recovery
 // before that would have nothing to start from. A VM carries tag pc-protected from enable on; ReconcileProtection
-// (run on read and on every sync) moves it forward and reports its state.
+// (run on read and on every sync) moves it forward and reports its state. A live job outranks the tag, which a rollback
+// to an older snapshot can take away: the tag is derived again from the job.
 
 import (
 	"context"
@@ -22,7 +23,7 @@ import (
 
 const (
 	tagProtected = "pc-protected"
-	// tagProtectedSince carries when protection was enabled: what the add-on is billed from.
+	// tagProtectedSince carries when the first sync was seen to land: what the add-on is billed from.
 	tagProtectedSince = "pc-p-"
 	// DefaultReplicationSchedule is a pvesr calendar event: every 15 minutes.
 	DefaultReplicationSchedule = "*/15"
@@ -359,8 +360,22 @@ func (s *Service) EnableProtection(ctx context.Context, projectID, externalID st
 	if err != nil {
 		return err
 	}
+	jobs, err := s.C.ListReplicationJobs(ctx)
+	if err != nil {
+		return err
+	}
+	removing := false
+	for _, j := range jobs {
+		if j.Guest == vm.VMID && j.RemoveJob == "" {
+			return conflictf("This server is already protected")
+		}
+		removing = removing || j.Guest == vm.VMID
+	}
 	if HasTag(cfg.Str("tags"), tagProtected) {
 		return conflictf("This server is already protected")
+	}
+	if removing {
+		return conflictf("The last protection of this server is still being removed. Try again in a minute")
 	}
 	storages, shared, err := s.ProtectableDisks(ctx, vm, cfg)
 	if err != nil {
@@ -397,8 +412,9 @@ func (s *Service) EnableProtection(ctx context.Context, projectID, externalID st
 	return s.C.ScheduleReplicationNow(ctx, vm.Node, id)
 }
 
-// DisableProtection undoes it in reverse: rule, HA, job, tag. A target that is down is no reason to stay protected:
-// the job goes with force and its replica stays on that node until cleaned by hand.
+// DisableProtection undoes it: job, tag, rule, HA. The job goes first and HA last, because ReconcileProtection adds HA to a
+// VM with a live job or a shared VM with the tag, and may run at any point in between. A target that is down is no reason to
+// stay protected: the job goes with force and its replica stays on that node until cleaned by hand.
 func (s *Service) DisableProtection(ctx context.Context, projectID, externalID string) error {
 	vm, err := s.ResolveVM(ctx, projectID, externalID)
 	if err != nil {
@@ -410,24 +426,39 @@ func (s *Service) DisableProtection(ctx context.Context, projectID, externalID s
 	return s.disableProtectionOn(ctx, vm)
 }
 
+// DisableProtectionAndWait is DisableProtection for what takes the VM's disks away next: it returns once pvesr has removed
+// the replica, which it does from the VM's config as it is at that moment.
+func (s *Service) DisableProtectionAndWait(ctx context.Context, projectID, externalID string) error {
+	vm, err := s.ResolveVM(ctx, projectID, externalID)
+	if err != nil || vm == nil {
+		return err
+	}
+	if err := s.disableProtectionOn(ctx, vm); err != nil {
+		return err
+	}
+	s.waitReplicaRemoved(ctx, vm.VMID)
+	return nil
+}
+
 func (s *Service) disableProtectionOn(ctx context.Context, vm *ClusterResource) error {
-	// An unprotected VM touches none of this, so a server delete keeps working on a token without HA rights.
 	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
 	if err != nil {
-		return err
-	}
-	if !HasTag(cfg.Str("tags"), tagProtected) {
-		return nil
-	}
-	if err := s.C.DeleteHARule(ctx, vm.VMID); err != nil && !IsNotFound(err) {
-		return err
-	}
-	if err := s.C.RemoveHAResource(ctx, vm.VMID); err != nil && !IsNotFound(err) {
 		return err
 	}
 	jobs, err := s.C.ListReplicationJobs(ctx)
 	if err != nil {
 		return err
+	}
+	tags := cfg.Str("tags")
+	live := slices.ContainsFunc(jobs, func(j ReplicationJob) bool { return j.Guest == vm.VMID && j.RemoveJob == "" })
+	if !live && !HasTag(tags, tagProtected) {
+		// HA alone is a shared VM that lost its tag, or an earlier disable stopped short. A failed read counts as unprotected,
+		// so an unprotected VM's delete keeps working on a token without HA rights.
+		ha, err := s.C.ListHAResources(ctx)
+		sid := "vm:" + strconv.Itoa(vm.VMID)
+		if err != nil || !slices.ContainsFunc(ha, func(h HAResource) bool { return h.SID == sid }) {
+			return nil
+		}
 	}
 	nodes, err := s.C.Nodes(ctx)
 	if err != nil {
@@ -444,9 +475,50 @@ func (s *Service) disableProtectionOn(ctx context.Context, vm *ClusterResource) 
 			}
 		}
 	}
-	tags := removeTag(cfg.Str("tags"), tagProtected)
-	if since := TagValue(tags, tagProtectedSince); since != "" {
-		tags = removeTag(tags, tagProtectedSince+since)
+	if kept := withoutProtectionTags(tags); kept != tags {
+		up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"tags": kept})
+		if err == nil {
+			err = s.C.WaitTask(ctx, up)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := s.C.DeleteHARule(ctx, vm.VMID); err != nil && !IsNotFound(err) {
+		return err
+	}
+	if err := s.C.RemoveHAResource(ctx, vm.VMID); err != nil && !IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+func withoutProtectionTags(tags string) string {
+	kept := removeTag(tags, tagProtected)
+	if since := TagValue(kept, tagProtectedSince); since != "" {
+		kept = removeTag(kept, tagProtectedSince+since)
+	}
+	return kept
+}
+
+// keepProtectionTags puts a VM's protection tags back as they were before a rollback or a restore, which bring back the tags
+// of their own moment. Older than the enable, they lose protection while the job and HA run on. From an earlier protection,
+// they bring back its pc-p- tag, and so its bill line, or on shared storage turn HA back on.
+func (s *Service) keepProtectionTags(ctx context.Context, vm *ClusterResource, before string) error {
+	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	now := cfg.Str("tags")
+	if HasTag(now, tagProtected) == HasTag(before, tagProtected) && TagValue(now, tagProtectedSince) == TagValue(before, tagProtectedSince) {
+		return nil
+	}
+	tags := withoutProtectionTags(now)
+	if HasTag(before, tagProtected) {
+		tags = addTag(tags, tagProtected)
+	}
+	if since := TagValue(before, tagProtectedSince); since != "" {
+		tags = addTag(tags, tagProtectedSince+since)
 	}
 	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"tags": tags})
 	if err != nil {
@@ -508,7 +580,24 @@ func (s *Service) ReconcileProtection(ctx context.Context, r ClusterResource) (m
 	for _, h := range ha {
 		managed = managed || h.SID == sid
 	}
-	if st.LastSync > 0 && !managed {
+	synced := st.LastSync > 0
+	stamp := !HasTag(r.Tags, tagProtected) || (synced && TagValue(r.Tags, tagProtectedSince) == "")
+	if stamp || (synced && !managed) {
+		// About to write, on a read that may be stale by now: a disable in between would get its HA or its tag back.
+		jobs, err := s.C.ListReplicationJobs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.ContainsFunc(jobs, func(j ReplicationJob) bool { return j.ID == job.ID && j.RemoveJob == "" }) {
+			return s.reconcileSharedProtection(ctx, r)
+		}
+	}
+	if stamp { // before HA, or an active row with no stamp would bill from the server's creation
+		if err := s.stampProtectionTags(ctx, r, synced); err != nil {
+			return nil, err
+		}
+	}
+	if synced && !managed {
 		if err := s.C.AddHAResource(ctx, r.VMID); err != nil {
 			return nil, err
 		}
@@ -538,6 +627,28 @@ func (s *Service) ReconcileProtection(ctx context.Context, r ClusterResource) (m
 		"state": state, "target": job.Target, "schedule": job.Schedule, "rpoTargetMinutes": replicationScheduleMinutes,
 		"lastSync": st.LastSync, "failCount": st.FailCount, "error": st.Error, "ha": managed,
 	}, nil
+}
+
+// stampProtectionTags sets what a live job implies: the protected tag and, once synced, when that was first seen. Not the
+// job's last_sync, which is when that sync started: after a long first sync, that would bill for the sync itself.
+func (s *Service) stampProtectionTags(ctx context.Context, r ClusterResource, synced bool) error {
+	cfg, err := s.C.GetVMConfig(ctx, r.Node, r.VMID)
+	if err != nil {
+		return err
+	}
+	now := cfg.Str("tags")
+	tags := addTag(now, tagProtected)
+	if synced && TagValue(tags, tagProtectedSince) == "" {
+		tags = addTag(tags, tagProtectedSince+strconv.FormatInt(time.Now().Unix(), 10))
+	}
+	if tags == now {
+		return nil
+	}
+	up, err := s.C.SetVMConfig(ctx, r.Node, r.VMID, map[string]string{"tags": tags})
+	if err != nil {
+		return err
+	}
+	return s.C.WaitTask(ctx, up)
 }
 
 // reconcileSharedProtection is ReconcileProtection for a VM on shared storage: tagged, with no job. HA comes at once.
@@ -579,17 +690,16 @@ func (s *Service) reconcileSharedProtection(ctx context.Context, r ClusterResour
 // StampProtection adds a protected VM's state to its row, including the replicated size billing rates. It moves the
 // VM's protection forward too. Best effort: a failed read leaves the row without it until the next pass.
 func (s *Service) StampProtection(ctx context.Context, r ClusterResource, data map[string]any) {
-	if !HasTag(r.Tags, tagProtected) {
-		return
-	}
 	pr, err := s.ReconcileProtection(ctx, r)
 	if err != nil || pr == nil {
 		return
 	}
+	tags := r.Tags // lags the stamp the call above may have just written, which is why the config is asked first
 	if cfg, err := s.C.GetVMConfig(ctx, r.Node, r.VMID); err == nil {
 		pr["diskGb"] = diskGbOf(cfg)
+		tags = cfg.Str("tags")
 	}
-	if since, err := strconv.ParseInt(TagValue(r.Tags, tagProtectedSince), 10, 64); err == nil {
+	if since, err := strconv.ParseInt(TagValue(tags, tagProtectedSince), 10, 64); err == nil {
 		pr["since"] = time.Unix(since, 0).UTC().Format(time.RFC3339)
 	}
 	if srv, ok := data["server"].(map[string]any); ok {
@@ -599,33 +709,60 @@ func (s *Service) StampProtection(ctx context.Context, r ClusterResource, data m
 
 // waitHAPower: for an HA-managed VM the power task only asks the HA stack and returns at once (lab: 2 s, the VM
 // changed state up to 20 s later), so a row refreshed right after would say the opposite of what the tenant just did.
-// Best effort: after a minute the row just follows at the next sample.
-func (s *Service) waitHAPower(ctx context.Context, vm *ClusterResource, verb string) {
+// Best effort: after a minute the row just follows at the next sample. Says whether the VM got there.
+func (s *Service) waitHAPower(ctx context.Context, vm *ClusterResource, verb string) bool {
 	want := "stopped"
 	switch verb {
 	case "START":
 		want = "running"
 	case "STOP", "SHUTOFF", "SHUTDOWN":
 	default:
-		return // a reboot stays running
+		return true // a reboot stays running
 	}
 	for range 30 {
 		if st, err := s.C.GetVMStatus(ctx, vm.Node, vm.VMID); err == nil && st.Status == want {
-			return
+			return true
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-time.After(2 * time.Second):
 		}
 	}
+	return false
 }
 
-// waitUnderHA is for what changes a VM once it is down, or reads it once it is back. The power task of an HA-managed
-// VM is done before the VM is: a start sent in that window is lost, and a resize left the VM off.
-func (s *Service) waitUnderHA(ctx context.Context, vm *ClusterResource, verb string) {
-	if HasTag(vm.Tags, tagProtected) {
-		s.waitHAPower(ctx, vm, verb)
+// waitUnderHA is for what reads a VM once it is back. See waitHAPower.
+func (s *Service) waitUnderHA(ctx context.Context, vm *ClusterResource, verb string) bool {
+	return !HasTag(vm.Tags, tagProtected) || s.waitHAPower(ctx, vm, verb)
+}
+
+// vmStopWait outlasts the longest stop the portal asks for (a resize's 120 s shutdown) plus HA's own delay. Variables for tests.
+var vmStopWait, vmStopPoll = 3 * time.Minute, 2 * time.Second
+
+// waitStopped holds what changes a VM once it is down. The stop task of an HA-managed VM is done before the VM is, and a
+// config written or a start sent in that window goes to a running VM: the start is lost and a resize left the VM off. A VM
+// that never stops is an error. HA may still be stopping it, so it is asked to keep the VM up: the caller changed nothing yet.
+// Without HA the stop task ends with the VM.
+func (s *Service) waitStopped(ctx context.Context, vm *ClusterResource) error {
+	if !HasTag(vm.Tags, tagProtected) {
+		return nil
+	}
+	wait, cancel := context.WithTimeout(ctx, vmStopWait)
+	defer cancel()
+	for {
+		if st, err := s.C.GetVMStatus(wait, vm.Node, vm.VMID); err == nil && st.Status == "stopped" {
+			return nil
+		}
+		select {
+		case <-wait.Done():
+			rctx := context.WithoutCancel(ctx)
+			if up, err := s.C.StartVM(rctx, vm.Node, vm.VMID); err == nil {
+				_ = s.C.WaitTask(rctx, up)
+			}
+			return conflictf("Server %s did not stop in time, so nothing was changed. Try again", vm.Name)
+		case <-time.After(vmStopPoll):
+		}
 	}
 }
 

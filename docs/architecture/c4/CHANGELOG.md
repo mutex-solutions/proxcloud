@@ -4,6 +4,35 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Protection survives a rollback; seed CD removal is retried
+
+**What changed**
+
+- A rollback or a restore keeps the VM's protection tags as they were. A live replication job outranks the tag: the sync
+  and a read derive the tag again from it, and disable and delete act on a job or an HA resource with no tag.
+- Remove protection flags the job first, then drops the tag, then removes the rule and HA.
+- An HA-managed VM must be down before a resize, rebuild or holder move goes on: up to 3 minutes, then an error, and HA is
+  asked to keep the VM up. A resize reports a failed start, and an HA start that has not landed after a minute.
+- A keep-volumes delete waits for pvesr before moving disks to the holder.
+- `DeleteSeedVolume` returns an error, overwrites after any failed delete, and tries a shared store from other nodes. A CD
+  still holding content leaves a row with only its file name, which the sync retries. A failed attach cleans up the same way.
+- Set password with no username goes to the seed's login user. Passwords over 72 bytes answer 400.
+
+**Why**
+
+- PVE puts tags back with the config on a rollback (lab, PVE 9.2), and the job and HA carry on. Billing stopped for live
+  protection, disable did nothing, and an older snapshot could revive a closed bill line. Keeping the tags at the rollback covers
+  all of these in one place, and deriving them from the job covers a rollback run outside the portal.
+- A stop under HA can take the full 120 s of a shutdown, and the old one-minute wait then let the config write and the start go
+  to a running VM. The start was lost, and the resize still reported success.
+- A reconcile between HA's removal and the job's would add HA back with nothing left to heal it. With the job flagged first it
+  no longer counts the job, and with the tag gone it leaves a shared VM alone.
+- A CD whose removal failed lost its row and so any retry, with the tenant's user-data still on the store. The kept row has no
+  server id because PVE reuses vmids: the next server must not read this seed, nor hold up the retry by having a row.
+- bcrypt takes 72 bytes. Longer failed a create after its clone, and a Set password left the old hash for the next rebuild.
+
+**Diagrams updated:** none, no container or component changed.
+
 ## 2026-11-07: Leftover holders stop billing; a late lock release frees nothing
 
 **What changed**
@@ -404,17 +433,19 @@ and rules: [README.md](README.md#maintenance-rule).
   archive only through `VM.Backup` on its VM, and an ACL on `/vms` would break the rule that the token only sees pool VMs.
 
 **Diagrams updated:** `c3-components.md` (PVE service).
-## 2026-11-07: Protection billed from its enable
+## 2026-11-07: Protection billed from its first sync
 
 **What changed**
 
-- Enable stamps a `pc-p-<unix>` tag. The row carries it as `protection.since`, and each enable is its own
-  `server_protection` bill line starting there.
+- The first read that sees a first sync done stamps a `pc-p-<unix>` tag, before HA is added. The row carries it as
+  `protection.since`, and each protection is its own `server_protection` bill line starting there.
 
 **Why**
 
 - A bill item's first watermark is the resource's creation, so protecting an old server charged the add-on back to the
-  server's creation or the start of the cycle, and a disable then enable charged the gap between them.
+  server's creation or the start of the cycle, and a disable then enable charged the gap between them. Stamping at the
+  enable would still charge the first sync, 73 hours after a three-day one, while the VM has nothing to fail over to. PVE's
+  `last_sync` is no use: it is when the sync began (seen on the lab).
 
 **Diagrams updated:** none, no container or component changed.
 

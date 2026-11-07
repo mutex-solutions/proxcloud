@@ -110,11 +110,11 @@ func (s *Service) RollbackServerSnapshot(ctx context.Context, projectID, externa
 	if idx < 0 {
 		return conflictf("Server %s has no snapshot named %s", vm.Name, name)
 	}
+	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+	if err != nil {
+		return err
+	}
 	if !snaps[idx].Latest {
-		cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
-		if err != nil {
-			return err
-		}
 		for _, d := range ParseDisks(cfg) {
 			if !strings.HasPrefix(d.Slot, "unused") && onlyLatest(d.Storage) {
 				return conflictf("Disk %s is on storage %s, which only rolls back to the newest snapshot. Delete the newer snapshots first", d.Slot, d.Storage)
@@ -128,6 +128,7 @@ func (s *Service) RollbackServerSnapshot(ctx context.Context, projectID, externa
 	if err != nil {
 		return err
 	}
+	tagErr := s.keepProtectionTags(ctx, vm, cfg.Str("tags"))
 	// Rollback leaves a snapshot without vmstate stopped.
 	if vm.Status == "running" {
 		up, err := s.C.StartVM(ctx, vm.Node, vm.VMID)
@@ -137,6 +138,9 @@ func (s *Service) RollbackServerSnapshot(ctx context.Context, projectID, externa
 		if err != nil {
 			return fmt.Errorf("pve rollback: restart: %w", err)
 		}
+	}
+	if tagErr != nil {
+		return fmt.Errorf("pve rollback: protection tags: %w", tagErr)
 	}
 	return nil
 }

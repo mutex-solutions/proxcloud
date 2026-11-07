@@ -331,7 +331,7 @@ func (s *Service) AttachSeedISO(ctx context.Context, node string, vmid int, stor
 			derr = s.C.WaitTask(ctx, cfgUp)
 		}
 		if derr != nil {
-			_ = s.C.DeleteStorageVolume(ctx, node, storage, "iso/"+name)
+			s.dropUnattachedSeed(ctx, node, vol)
 			return "", fmt.Errorf("pve seed: drop cloud-init drive: %w", derr)
 		}
 	}
@@ -340,13 +340,21 @@ func (s *Service) AttachSeedISO(ctx context.Context, node string, vmid int, stor
 		err = s.C.WaitTask(ctx, up)
 	}
 	if err != nil {
-		_ = s.C.DeleteStorageVolume(ctx, node, storage, "iso/"+name)
+		s.dropUnattachedSeed(ctx, node, vol)
 		return "", fmt.Errorf("pve seed: attach: %w", err)
 	}
 	if old != "" {
-		s.DeleteSeedVolume(ctx, node, old)
+		s.dropUnattachedSeed(ctx, node, old)
 	}
 	return vol, nil
+}
+
+// dropUnattachedSeed is for a CD no seed row points at: nothing can retry it, so a failure is only logged.
+// ponytail: such a CD keeps its user-data until removed by hand; a row per file would let the sync retry it.
+func (s *Service) dropUnattachedSeed(ctx context.Context, node, volid string) {
+	if err := s.DeleteSeedVolume(ctx, node, volid); err != nil {
+		slog.Error("seed CD left on storage with its user-data", "volume", volid, "err", err)
+	}
 }
 
 // SetSeedURL points the VM's smbios1 serial at a URL seed and drops PVE's drive, whose user-data the
@@ -374,21 +382,45 @@ func (s *Service) SetSeedURL(ctx context.Context, node string, vmid int, seedURL
 
 // DeleteSeedVolume removes a seed CD's file, which holds the tenant's user-data in plain text. PVE wants
 // Datastore.Allocate on the storage to delete an ISO, a right that also defines storages, so the platform role leaves it
-// out. Without it the file is overwritten with an empty CD: upload replaces a file of the same name. Best-effort: a
-// failure here must not stop a server delete, so it is logged.
+// out. Without it, or on any other failure, the file is overwritten with an empty CD: upload replaces a file of the same
+// name. node is where the CD was written, which a failover can leave dead, so a shared store is tried from the other nodes
+// too. An error means the file still holds its content: the caller keeps what it needs to retry.
 // ponytail: emptied files stay on the storage at 50 KiB each; grant Datastore.Allocate on the seed store to remove them.
-func (s *Service) DeleteSeedVolume(ctx context.Context, node, volid string) {
+func (s *Service) DeleteSeedVolume(ctx context.Context, node, volid string) error {
 	storage, vol, ok := strings.Cut(volid, ":")
 	if !ok || !strings.Contains(vol, "iso/"+SeedISOPrefix) {
-		return
+		return nil
 	}
-	err := s.C.DeleteStorageVolume(ctx, node, storage, vol)
-	if IsForbidden(err) {
-		err = s.emptySeedVolume(ctx, node, storage, strings.TrimPrefix(vol, "iso/"))
+	var err error
+	for _, n := range s.seedNodes(ctx, node, storage) {
+		err = s.C.DeleteStorageVolume(ctx, n, storage, vol)
+		if err == nil || IsNotFound(err) {
+			return nil
+		}
+		if err = s.emptySeedVolume(ctx, n, storage, strings.TrimPrefix(vol, "iso/")); err == nil {
+			return nil
+		}
 	}
+	return err
+}
+
+// seedNodes lists the nodes to reach a seed store from: the given one first, then for a shared store the others online.
+func (s *Service) seedNodes(ctx context.Context, node, storage string) []string {
+	out := []string{node}
+	caps, err := s.C.DetectStorage(ctx)
+	if err != nil || !caps[storage].Shared {
+		return out
+	}
+	nodes, err := s.C.Nodes(ctx)
 	if err != nil {
-		slog.Error("seed CD left on storage with its user-data", "volume", volid, "err", err)
+		return out
 	}
+	for _, n := range nodes {
+		if n.Node != node && n.Status == "online" {
+			out = append(out, n.Node)
+		}
+	}
+	return out
 }
 
 func (s *Service) emptySeedVolume(ctx context.Context, node, storage, name string) error {
@@ -448,7 +480,11 @@ func (c *Client) UploadISO(ctx context.Context, node, storage, filename string, 
 
 // DeleteStorageVolume removes a volume from a storage (vol is the part after "storage:").
 func (c *Client) DeleteStorageVolume(ctx context.Context, node, storage, vol string) error {
-	return c.delete(ctx, "/nodes/"+node+"/storage/"+url.PathEscape(storage)+"/content/"+url.PathEscape(vol), nil, nil)
+	up, err := c.deleteTask(ctx, "/nodes/"+node+"/storage/"+url.PathEscape(storage)+"/content/"+url.PathEscape(vol), nil)
+	if err != nil || up == "" {
+		return err
+	}
+	return c.WaitTask(ctx, up) // the request only starts it: a delete that fails, fails here
 }
 
 // ServerImageSlug reads the image slug out of a cached server row's data ("" = unknown).

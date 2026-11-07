@@ -322,6 +322,10 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 		h.fail(w, httpx.BadRequest("A login user needs a password and a name of lowercase letters, digits, - and _"))
 		return
 	}
+	if herr := pvePasswordErr(strAny(data["adminPass"])); herr != nil {
+		h.fail(w, herr)
+		return
+	}
 	seedIn := pveSeedInput{Name: name, UserData: userData, Password: strAny(data["adminPass"]), LoginUser: loginUser, SSHKeys: sshKeys, Metadata: metadata}
 	if pveNeedsSeed(es, seedIn) {
 		if h.seeds == nil {
@@ -659,7 +663,7 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		// and its data with it.
 		if !deleteVolumes {
 			// A replicated disk cannot leave its VM, and neither may HA restart the VM meanwhile.
-			if err := ps.DisableProtection(ctx, proj.ID, cr.ExternalID); err != nil {
+			if err := ps.DisableProtectionAndWait(ctx, proj.ID, cr.ExternalID); err != nil {
 				return fmt.Errorf("disable protection: %w", err)
 			}
 			if err := ps.KeepServerVolumes(ctx, proj.ID, cr.ExternalID); err != nil {
@@ -852,23 +856,34 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 			h.fail(w, httpx.BadRequest("password is required"))
 			return true
 		}
-		username := strAny(data["username"])
-		if username == "" {
-			username = pve.DefaultUserOf(pve.ServerImageSlug(cr.Data))
+		if herr := pvePasswordErr(password); herr != nil {
+			h.fail(w, herr)
+			return true
 		}
+		// The seed's login user is who the tenant logs in as: rotating a password must reach that account.
+		var seed *ServerSeed
+		if h.seeds != nil {
+			var err error
+			if seed, err = h.seeds.ForServer(ctx, es.ID, proj.ID, cr.ExternalID); err != nil {
+				h.fail(w, err)
+				return true
+			}
+		}
+		loginUser := pve.DefaultUserOf(pve.ServerImageSlug(cr.Data))
+		if seed != nil {
+			loginUser = cmp.Or(seed.LoginUser, loginUser)
+		}
+		username := cmp.Or(strAny(data["username"]), loginUser)
 		if err := ps.SetPassword(ctx, proj.ID, cr.ExternalID, username, password); err != nil {
 			h.fail(w, pveVolumeErr(err))
 			return true
 		}
 		// A later rebuild of a seeded server sets the password from its seed: only the user the seed holds it for.
-		if h.seeds != nil {
-			if seed, err := h.seeds.ForServer(ctx, es.ID, proj.ID, cr.ExternalID); err == nil && seed != nil && seed.PasswordHash != "" &&
-				username == cmp.Or(seed.LoginUser, pve.DefaultUserOf(pve.ServerImageSlug(cr.Data))) {
-				if b, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); err == nil {
-					seed.PasswordHash = string(b)
-					if err := h.seeds.put(ctx, seed); err != nil {
-						slog.Error("seed password", "server", cr.ExternalID, "err", err)
-					}
+		if seed != nil && seed.PasswordHash != "" && username == loginUser {
+			if b, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); err == nil {
+				seed.PasswordHash = string(b)
+				if err := h.seeds.put(ctx, seed); err != nil {
+					slog.Error("seed password", "server", cr.ExternalID, "err", err)
 				}
 			}
 		}
@@ -999,6 +1014,14 @@ func (h *Handler) pveRefreshServerRow(ctx context.Context, ps *pve.Service, proj
 	if saved, err := h.cloud.Insert(ctx, cr); err == nil {
 		*cr = *saved
 	}
+}
+
+// pvePasswordErr refuses what bcrypt cannot hash, up front: a seed holds the password as bcrypt, which takes 72 bytes.
+func pvePasswordErr(password string) *httpx.HTTPError {
+	if len(password) > 72 {
+		return httpx.BadRequest("Password must be at most 72 bytes")
+	}
+	return nil
 }
 
 func (h *Handler) pveFlavorOf(ctx context.Context, flavorID string) (*pveflavor.Flavor, *httpx.HTTPError) {

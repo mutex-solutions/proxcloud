@@ -92,7 +92,7 @@ func TestEmptyImageVolumeBackedShapeDoesNotBillFlavorRootDiskWithoutMarker(t *te
 	}
 }
 
-func TestProtectionBilledFromItsEnable(t *testing.T) {
+func TestProtectionBilledFromItsStamp(t *testing.T) {
 	cr := &cloud.CloudResource{ID: "r1", ProjectID: "p", Data: map[string]any{"server": map[string]any{
 		"name": "a", "protection": map[string]any{"state": "active", "diskGb": 10.0, "since": "2026-11-07T01:00:00Z"},
 	}}}

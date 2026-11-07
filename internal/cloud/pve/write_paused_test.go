@@ -51,7 +51,11 @@ func TestStopAndDeleteReachAPausedVM(t *testing.T) {
 	})
 	t.Run("delete", func(t *testing.T) {
 		var calls []string
-		_, c := fakePVE(t, routes(&calls))
+		r := routes(&calls)
+		r["GET /api2/json/nodes/pve1/qemu/101/config"] = say(`{"data":{"name":"a"}}`)
+		r["GET /api2/json/cluster/replication"] = say(`{"data":[]}`)
+		r["GET /api2/json/cluster/ha/resources"] = say(`{"data":[]}`)
+		_, c := fakePVE(t, r)
 		s := &Service{C: c, PoolPrefix: "st-"}
 		if err := s.DeleteServer(context.Background(), "p1", "101"); err != nil {
 			t.Fatal(err)

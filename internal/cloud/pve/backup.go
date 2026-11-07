@@ -218,6 +218,7 @@ func (s *Service) RestoreServerBackup(ctx context.Context, projectID, externalID
 	if err := s.C.WaitTask(ctx, up); err != nil {
 		return err
 	}
+	tagErr := s.keepProtectionTags(ctx, vm, cur.Str("tags"))
 	if running {
 		su, err := s.C.StartVM(ctx, vm.Node, vm.VMID)
 		if err == nil {
@@ -226,6 +227,9 @@ func (s *Service) RestoreServerBackup(ctx context.Context, projectID, externalID
 		if err != nil {
 			return fmt.Errorf("pve restore: restart: %w", err)
 		}
+	}
+	if tagErr != nil {
+		return fmt.Errorf("pve restore: protection tags: %w", tagErr)
 	}
 	return nil
 }

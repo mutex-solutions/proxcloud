@@ -401,11 +401,9 @@ func (s *Service) DeleteServer(ctx context.Context, projectID, externalID string
 	if vm == nil {
 		return nil // already gone
 	}
-	if HasTag(vm.Tags, tagProtected) {
-		// HA would restart what we stop below.
-		if err := s.DisableProtection(ctx, projectID, externalID); err != nil {
-			return err
-		}
+	// HA would restart what we stop below.
+	if err := s.disableProtectionOn(ctx, vm); err != nil {
+		return err
 	}
 	s.waitReplicaRemoved(ctx, vm.VMID)
 	if vm.PoweredOn() {
@@ -495,7 +493,9 @@ func (s *Service) ResizeServer(ctx context.Context, projectID, externalID string
 			if werr := s.C.WaitTask(ctx, up); werr != nil {
 				return fmt.Errorf("pve resize: shutdown: %w", werr)
 			}
-			s.waitUnderHA(ctx, vm, "STOP")
+			if werr := s.waitStopped(ctx, vm); werr != nil {
+				return werr
+			}
 		} else {
 			return fmt.Errorf("pve resize: shutdown: %w", err)
 		}
@@ -532,10 +532,16 @@ func (s *Service) ResizeServer(ctx context.Context, projectID, externalID string
 		}
 	}
 	if wasRunning {
-		if up, serr := s.C.StartVM(ctx, vm.Node, vm.VMID); serr == nil {
-			_ = s.C.WaitTask(ctx, up)
+		up, err := s.C.StartVM(ctx, vm.Node, vm.VMID)
+		if err == nil {
+			err = s.C.WaitTask(ctx, up)
 		}
-		s.waitUnderHA(ctx, vm, "START")
+		if err != nil {
+			return fmt.Errorf("pve resize: start: %w", err)
+		}
+		if !s.waitUnderHA(ctx, vm, "START") {
+			return conflictf("Server %s was resized but has not come back yet. Start it if it stays off", vm.Name)
+		}
 	}
 	return nil
 }
@@ -809,7 +815,9 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 		if err != nil {
 			return fmt.Errorf("pve rebuild: stop: %w", err)
 		}
-		s.waitUnderHA(ctx, vm, "STOP")
+		if err := s.waitStopped(ctx, vm); err != nil {
+			return err
+		}
 	}
 	// Removing a disk from its slot parks it as unusedN.
 	up, err := s.C.SetVMConfig(ctx, node, vm.VMID, nil, slot)

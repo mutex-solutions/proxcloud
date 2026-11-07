@@ -64,3 +64,13 @@ func TestPveNeedsSeed(t *testing.T) {
 		t.Fatal("the operator's vendor-data needs a seed")
 	}
 }
+
+// bcrypt takes 72 bytes: longer fails a create after its clone, and a Set password would leave the old hash on the seed.
+func TestPvePasswordErr(t *testing.T) {
+	if pvePasswordErr(strings.Repeat("x", 72)) != nil {
+		t.Fatal("72 bytes fit")
+	}
+	if pvePasswordErr(strings.Repeat("é", 37)) == nil {
+		t.Fatal("74 bytes in 37 characters do not")
+	}
+}

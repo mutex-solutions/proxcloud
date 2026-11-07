@@ -3,9 +3,12 @@ package pve
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +44,17 @@ func protectionPVE(t *testing.T, lastSync int64, managed bool) (*Service, *[]str
 		}
 		reply(w, []HARule{})
 	})
+	mux.HandleFunc("/api2/json/nodes/a/qemu/7/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			calls = append(calls, "tags")
+			reply(w, "UPID:a:0:0:0:qmconfig:7:t:")
+			return
+		}
+		reply(w, map[string]any{"tags": tagProtected})
+	})
+	mux.HandleFunc("/api2/json/nodes/a/tasks/", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, map[string]any{"status": "stopped", "exitstatus": "OK"})
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	svc, err := NewService(Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
@@ -52,24 +66,24 @@ func protectionPVE(t *testing.T, lastSync int64, managed bool) (*Service, *[]str
 
 func TestReconcileAddsHAOnlyAfterFirstSync(t *testing.T) {
 	svc, calls := protectionPVE(t, 0, false)
-	pr, err := svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "a"})
+	pr, err := svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "a", Tags: tagProtected})
 	if err != nil || pr["state"] != ProtectionSyncing || len(*calls) != 0 {
 		t.Fatalf("before the first sync: %v, %v, calls %v", pr, err, *calls)
 	}
 	svc, calls = protectionPVE(t, time.Now().Unix(), false)
-	pr, err = svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "a"})
+	pr, err = svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "a", Tags: tagProtected})
 	if err != nil || pr["state"] != ProtectionActive {
 		t.Fatalf("after the first sync: %v, %v", pr, err)
 	}
 	// PVE refuses a rule over an unmanaged resource, so the order matters.
-	if want := "resource,rule a,b strict=1"; strings.Join(*calls, ",") != want {
+	if want := "tags,resource,rule a,b strict=1"; strings.Join(*calls, ",") != want {
 		t.Fatalf("calls = %v, want %s", *calls, want)
 	}
 }
 
 func TestReconcileReportsALateSyncAsDegraded(t *testing.T) {
 	svc, _ := protectionPVE(t, time.Now().Unix()-3*replicationScheduleMinutes*60, true)
-	pr, err := svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "a"})
+	pr, err := svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "a", Tags: tagProtected + ";pc-p-5"})
 	if err != nil || pr["state"] != ProtectionDegraded {
 		t.Fatalf("%v, %v", pr, err)
 	}
@@ -163,7 +177,9 @@ func TestDeleteSeedVolumeEmptiesWhatItCannotDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc.DeleteSeedVolume(context.Background(), "a", "iso:iso/pcseed-7-x.iso")
+	if err := svc.DeleteSeedVolume(context.Background(), "a", "iso:iso/pcseed-7-x.iso"); err != nil {
+		t.Fatal(err)
+	}
 	if uploaded != "pcseed-7-x.iso" {
 		t.Fatalf("uploaded %q", uploaded)
 	}
@@ -322,5 +338,316 @@ func TestRefuseUnreplicableByMode(t *testing.T) {
 	}
 	if err := svc.refuseUnreplicable(context.Background(), &ClusterResource{VMID: 7}, "zfs"); err != nil {
 		t.Fatalf("an unprotected VM takes anything: %v", err)
+	}
+}
+
+// lifecyclePVE is one VM 7 on node a under protection: config, jobs and HA are state, and writes are recorded in order.
+type lifecyclePVE struct {
+	tags    string
+	jobs    []ReplicationJob
+	ha      bool
+	rule    bool
+	status  func() string
+	calls   []string
+	onWrite func(call string)
+}
+
+func (p *lifecyclePVE) service(t *testing.T) *Service {
+	t.Helper()
+	reply := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
+	rec := func(c string) {
+		p.calls = append(p.calls, c)
+		if p.onWrite != nil {
+			p.onWrite(c)
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api2/json/nodes", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, []Node{{Node: "a", Status: "online"}, {Node: "b", Status: "online"}})
+	})
+	mux.HandleFunc("/api2/json/cluster/replication", func(w http.ResponseWriter, _ *http.Request) { reply(w, p.jobs) })
+	mux.HandleFunc("/api2/json/cluster/replication/", func(w http.ResponseWriter, _ *http.Request) {
+		for i := range p.jobs {
+			p.jobs[i].RemoveJob = "full"
+		}
+		rec("job")
+		reply(w, nil)
+	})
+	mux.HandleFunc("/api2/json/nodes/a/replication/7-0/status", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, ReplicationStatus{LastSync: 1000})
+	})
+	mux.HandleFunc("/api2/json/cluster/ha/resources", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			p.ha = true
+			rec("ha+")
+		}
+		if p.ha {
+			reply(w, []HAResource{{SID: "vm:7"}})
+			return
+		}
+		reply(w, []HAResource{})
+	})
+	mux.HandleFunc("/api2/json/cluster/ha/resources/", func(w http.ResponseWriter, _ *http.Request) {
+		p.ha = false
+		rec("ha-")
+		reply(w, nil)
+	})
+	mux.HandleFunc("/api2/json/cluster/ha/rules", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			p.rule = true
+			rec("rule+")
+		}
+		if p.rule {
+			reply(w, []HARule{{Rule: haRuleID(7)}})
+			return
+		}
+		reply(w, []HARule{})
+	})
+	mux.HandleFunc("/api2/json/cluster/ha/rules/", func(w http.ResponseWriter, _ *http.Request) {
+		p.rule = false
+		rec("rule-")
+		reply(w, nil)
+	})
+	mux.HandleFunc("/api2/json/nodes/a/qemu/7/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			_ = r.ParseForm()
+			if _, ok := r.Form["tags"]; ok {
+				p.tags = r.Form.Get("tags")
+				rec("tags")
+			} else {
+				rec("config")
+			}
+			reply(w, "UPID:a:0:0:0:qmconfig:7:t:")
+			return
+		}
+		reply(w, map[string]any{"tags": p.tags, "scsi0": "zfs:vm-7-disk-0,size=10G"})
+	})
+	mux.HandleFunc("/api2/json/nodes/a/qemu/7/status/current", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, map[string]any{"status": p.status()})
+	})
+	mux.HandleFunc("/api2/json/nodes/a/qemu/7/status/", func(w http.ResponseWriter, r *http.Request) {
+		rec(strings.TrimPrefix(r.URL.Path, "/api2/json/nodes/a/qemu/7/status/"))
+		reply(w, "UPID:a:0:0:0:qmpower:7:t:")
+	})
+	mux.HandleFunc("/api2/json/nodes/a/tasks/", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, map[string]any{"status": "stopped", "exitstatus": "OK"})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { t.Errorf("unexpected %s %s", r.Method, r.URL.Path) })
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	svc, err := NewService(Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc
+}
+
+// A rollback older than the enable takes the tag while the job and HA run on: disable must still undo them.
+func TestDisableKeysOnTheJobNotTheTag(t *testing.T) {
+	p := &lifecyclePVE{tags: "proxcloud", jobs: []ReplicationJob{{ID: "7-0", Guest: 7, Target: "b"}}, ha: true}
+	svc := p.service(t)
+	if err := svc.disableProtectionOn(context.Background(), &ClusterResource{VMID: 7, Node: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(p.calls, ","); got != "job,rule-,ha-" { // tags already bare
+		t.Fatalf("calls = %s", got)
+	}
+}
+
+// An unprotected VM reads and writes nothing else, and a shared VM that lost its tag still loses its HA.
+func TestDisableWithoutJobOrTag(t *testing.T) {
+	p := &lifecyclePVE{tags: "proxcloud"}
+	if err := p.service(t).disableProtectionOn(context.Background(), &ClusterResource{VMID: 7, Node: "a"}); err != nil || len(p.calls) != 0 {
+		t.Fatalf("%v, calls %v", err, p.calls)
+	}
+	p = &lifecyclePVE{tags: "proxcloud", ha: true}
+	if err := p.service(t).disableProtectionOn(context.Background(), &ClusterResource{VMID: 7, Node: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(p.calls, ","); got != "rule-,ha-" {
+		t.Fatalf("calls = %s", got)
+	}
+}
+
+// Reconcile may run between any two steps of a disable and must never add HA back.
+func TestDisableRacingReconcileLeavesNoHA(t *testing.T) {
+	p := &lifecyclePVE{tags: "proxcloud;" + tagProtected + ";pc-p-5", jobs: []ReplicationJob{{ID: "7-0", Guest: 7, Target: "b"}}, ha: true, rule: true}
+	svc := p.service(t)
+	row := ClusterResource{VMID: 7, Node: "a", Tags: p.tags} // a read from before the disable
+	reconciling := false
+	p.onWrite = func(string) {
+		if reconciling {
+			return
+		}
+		reconciling = true
+		defer func() { reconciling = false }()
+		if _, err := svc.ReconcileProtection(context.Background(), row); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := svc.disableProtectionOn(context.Background(), &ClusterResource{VMID: 7, Node: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if p.ha || HasTag(p.tags, tagProtected) || slices.Contains(p.calls, "ha+") || slices.Contains(p.calls, "rule+") {
+		t.Fatalf("ha=%v tags=%q calls=%v", p.ha, p.tags, p.calls)
+	}
+	if strings.Join(p.calls, ",") != "job,tags,rule-,ha-" {
+		t.Fatalf("calls = %v", p.calls)
+	}
+}
+
+// A live job with no tag gets it back, so billing and the console see protection again.
+func TestStampDerivesTheTagFromTheJob(t *testing.T) {
+	p := &lifecyclePVE{tags: "proxcloud", jobs: []ReplicationJob{{ID: "7-0", Guest: 7, Target: "b"}}, ha: true}
+	svc := p.service(t)
+	before := time.Now().Unix()
+	data := map[string]any{"server": map[string]any{}}
+	svc.StampProtection(context.Background(), ClusterResource{VMID: 7, Node: "a", Tags: "proxcloud"}, data)
+	if !HasTag(p.tags, tagProtected) {
+		t.Fatalf("tags = %q", p.tags)
+	}
+	pr, _ := data["server"].(map[string]any)["protection"].(map[string]any)
+	since, err := time.Parse(time.RFC3339, fmt.Sprint(pr["since"]))
+	if err != nil || since.Unix() < before {
+		t.Fatalf("since = %v (%v)", pr["since"], err)
+	}
+}
+
+// The stamp is when the first sync was seen, not PVE's last_sync (1000 in the fake), which is when that sync began: after
+// a three-day sync that would bill the three days. It goes on before HA, so an active row always has it.
+func TestFirstSyncStampsBeforeHA(t *testing.T) {
+	p := &lifecyclePVE{tags: tagProtected, jobs: []ReplicationJob{{ID: "7-0", Guest: 7, Target: "b"}}}
+	svc := p.service(t)
+	before := time.Now().Unix()
+	if _, err := svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "a", Tags: tagProtected}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(p.calls, ","); got != "tags,ha+,rule+" {
+		t.Fatalf("calls = %s", got)
+	}
+	since, err := strconv.ParseInt(TagValue(p.tags, tagProtectedSince), 10, 64)
+	if err != nil || since < before {
+		t.Fatalf("tags = %q", p.tags)
+	}
+	// A second read changes nothing.
+	p.calls = nil
+	if _, err := svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "a", Tags: p.tags}); err != nil || len(p.calls) != 0 {
+		t.Fatalf("%v, calls %v", err, p.calls)
+	}
+}
+
+func TestKeepProtectionTags(t *testing.T) {
+	for name, tt := range map[string]struct{ now, before, want string }{
+		"snapshot older than the enable": {"fl-a;proxcloud", "fl-b;pc-protected;pc-p-9;proxcloud", "fl-a;proxcloud;pc-protected;pc-p-9"},
+		"snapshot of an earlier enable":  {"pc-protected;pc-p-1;proxcloud", "pc-protected;pc-p-9;proxcloud", "proxcloud;pc-protected;pc-p-9"},
+		"snapshot from before a disable": {"pc-protected;pc-p-1;proxcloud", "proxcloud", "proxcloud"},
+		"same protection":                {"fl-a;pc-protected;pc-p-9", "fl-b;pc-protected;pc-p-9", "fl-a;pc-protected;pc-p-9"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := &lifecyclePVE{tags: tt.now}
+			if err := p.service(t).keepProtectionTags(context.Background(), &ClusterResource{VMID: 7, Node: "a"}, tt.before); err != nil {
+				t.Fatal(err)
+			}
+			if p.tags != tt.want {
+				t.Fatalf("tags = %q, want %q", p.tags, tt.want)
+			}
+		})
+	}
+}
+
+func shortStopWait(t *testing.T, wait time.Duration) {
+	t.Helper()
+	w, p := vmStopWait, vmStopPoll
+	vmStopWait, vmStopPoll = wait, time.Millisecond
+	t.Cleanup(func() { vmStopWait, vmStopPoll = w, p })
+}
+
+// An HA stop outlasting the old one-minute wait must hold the config write and the start until the VM is down.
+func TestWaitStoppedHoldsUntilTheVMIsDown(t *testing.T) {
+	shortStopWait(t, time.Minute)
+	reads := 0
+	p := &lifecyclePVE{status: func() string {
+		reads++
+		if reads < 5 {
+			return "running"
+		}
+		return "stopped"
+	}}
+	if err := p.service(t).waitStopped(context.Background(), &ClusterResource{VMID: 7, Node: "a", Tags: tagProtected}); err != nil || reads != 5 || len(p.calls) != 0 {
+		t.Fatalf("%v, reads %d, calls %v", err, reads, p.calls)
+	}
+}
+
+// A VM that never stops: an error, and HA is told to keep it up, so nothing leaves it off later.
+func TestWaitStoppedFailsAndKeepsTheVMUp(t *testing.T) {
+	shortStopWait(t, 20*time.Millisecond)
+	p := &lifecyclePVE{status: func() string { return "running" }}
+	err := p.service(t).waitStopped(context.Background(), &ClusterResource{VMID: 7, Node: "a", Name: "x", Tags: tagProtected})
+	if err == nil || !strings.Contains(err.Error(), "did not stop") {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Join(p.calls, ",") != "start" {
+		t.Fatalf("calls = %v", p.calls)
+	}
+}
+
+// seedPVE: a store on two nodes. Node a is dead, node b refuses the delete and takes the overwrite.
+func TestDeleteSeedVolumeReachesSharedStoreFromAnotherNode(t *testing.T) {
+	reply := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
+	uploads := []string{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api2/json/storage", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, []map[string]any{{"storage": "iso", "type": "nfs", "shared": 1, "content": "iso"}})
+	})
+	mux.HandleFunc("/api2/json/cluster/resources", func(w http.ResponseWriter, _ *http.Request) { reply(w, []any{}) })
+	mux.HandleFunc("/api2/json/nodes", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, []Node{{Node: "a", Status: "offline"}, {Node: "b", Status: "online"}, {Node: "c", Status: "offline"}})
+	})
+	mux.HandleFunc("/api2/json/nodes/a/", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no route to host", 595)
+	})
+	mux.HandleFunc("/api2/json/nodes/b/storage/iso/content/", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "Permission check failed", http.StatusForbidden)
+	})
+	mux.HandleFunc("/api2/json/nodes/b/storage/iso/upload", func(w http.ResponseWriter, _ *http.Request) {
+		uploads = append(uploads, "b")
+		reply(w, "UPID:b:0:0:0:imgcopy::t:")
+	})
+	mux.HandleFunc("/api2/json/nodes/b/tasks/", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, map[string]any{"status": "stopped", "exitstatus": "OK"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	svc, err := NewService(Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteSeedVolume(context.Background(), "a", "iso:iso/pcseed-7-x.iso"); err != nil {
+		t.Fatal(err)
+	}
+	if len(uploads) != 1 {
+		t.Fatalf("uploads %v", uploads)
+	}
+}
+
+// Nothing can take the content off: the caller has to hear it, to keep its row and retry.
+func TestDeleteSeedVolumeReportsWhatItCouldNotRemove(t *testing.T) {
+	reply := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api2/json/storage", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, []map[string]any{{"storage": "iso", "type": "dir", "content": "iso"}})
+	})
+	mux.HandleFunc("/api2/json/cluster/resources", func(w http.ResponseWriter, _ *http.Request) { reply(w, []any{}) })
+	mux.HandleFunc("/api2/json/nodes/a/", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no route to host", 595)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	svc, err := NewService(Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteSeedVolume(context.Background(), "a", "iso:iso/pcseed-7-x.iso"); err == nil {
+		t.Fatal("want an error")
 	}
 }

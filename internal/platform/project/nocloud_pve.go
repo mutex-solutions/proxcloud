@@ -388,11 +388,24 @@ func (h *Handler) pveReleaseProjectSeeds(ctx context.Context, ps *pve.Service, s
 func (h *Handler) pveDropSeeds(ctx context.Context, ps *pve.Service, rows []ServerSeed) {
 	for _, s := range rows {
 		if s.ISO != "" {
-			ps.DeleteSeedVolume(ctx, s.Node, s.ISO)
+			if err := ps.DeleteSeedVolume(ctx, s.Node, s.ISO); err != nil {
+				slog.Error("seed CD left on storage with its user-data, will retry", "server", s.ServerID, "volume", s.ISO, "err", err)
+				h.keepSeedForRetry(ctx, s)
+				continue
+			}
 		}
 		if _, err := h.seeds.col.DeleteByID(ctx, s.ID); err != nil {
 			slog.Error("drop seed", "server", s.ServerID, "err", err)
 		}
+	}
+}
+
+// keepSeedForRetry leaves only what DropStaleSeeds needs to try the CD again. No server id: PVE reuses vmids, and the next
+// server with this one must not get this seed's user-data or password, nor hold up the retry by having a row.
+func (h *Handler) keepSeedForRetry(ctx context.Context, s ServerSeed) {
+	kept := ServerSeed{ID: s.ID, ServiceID: s.ServiceID, ProjectID: s.ProjectID, Node: s.Node, Mode: s.Mode, ISO: s.ISO, CreatedAt: s.CreatedAt}
+	if err := h.seeds.put(ctx, &kept); err != nil {
+		slog.Error("keep seed for retry", "server", s.ServerID, "err", err)
 	}
 }
 
