@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,12 +13,13 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/admin"
+	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
 // TestAdminProjectDeletionLegs guards wave-4: DELETE /admin/project/{id} runs the CanDelete pre-check
-// then flips SCHEDULED_FOR_DELETION; DELETE /admin/project/{id}/now flips DELETE_IN_PROGRESS and
-// dispatches the Teardown leg. Without the cloud legs wired, both stay 501 (the unit-test posture).
+// then flips SCHEDULED_FOR_DELETION; DELETE /admin/project/{id}/now flags DELETE_IN_PROGRESS where the
+// deletion job looks. Without the cloud legs wired, both stay 501 (the unit-test posture).
 func TestAdminProjectDeletionLegs(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
@@ -59,10 +61,11 @@ func TestAdminProjectDeletionLegs(t *testing.T) {
 	}
 
 	// wired
-	var teardownFor string
+	repo := project.NewRepo(db)
+	svc := project.NewService(repo, nil, nil, nil, nil)
 	wired := newH(&admin.ProjectCloudOps{
 		CanDelete: func(context.Context, string) error { return nil },
-		Teardown:  func(_ context.Context, pid string) error { teardownFor = pid; return nil },
+		DeleteNow: func(ctx context.Context, pid string) error { _, err := svc.DeleteNow(ctx, pid); return err },
 	})
 
 	reseed()
@@ -79,7 +82,45 @@ func TestAdminProjectDeletionLegs(t *testing.T) {
 	if status() != "DELETE_IN_PROGRESS" {
 		t.Fatalf("deleteNow should flip DELETE_IN_PROGRESS, got %s", status())
 	}
-	if teardownFor != "proj-1" {
-		t.Fatalf("teardown leg should fire for proj-1, got %q", teardownFor)
+
+	// Nothing runs in the request, so a restart or a failed pass cannot strand it: the job retries until a clean pass.
+	deleter := &flakyDeleter{fails: 1}
+	job := project.NewDeletionJob(repo, deleter, nil)
+	if n, err := job.ExecuteAll(ctx); err != nil || n != 0 {
+		t.Fatalf("failed pass: n=%d err=%v", n, err)
 	}
+	if status() != "DELETE_IN_PROGRESS" {
+		t.Fatalf("a failed pass must stay in progress, got %s", status())
+	}
+	if n, err := job.ExecuteAll(ctx); err != nil || n != 1 || deleter.calls != 2 {
+		t.Fatalf("retry: n=%d err=%v calls=%d", n, err, deleter.calls)
+	}
+	if status() != "" {
+		t.Fatalf("a clean pass removes the project, got %s", status())
+	}
+
+	// Past the point of no return, neither cancel may bring it back.
+	for _, st := range []string{"DELETE_IN_PROGRESS", "DELETED"} {
+		_, _ = db.C("project").DeleteMany(ctx, pgdoc.M{})
+		_, _ = db.C("project").InsertOne(ctx, pgdoc.M{"_id": "proj-1", "status": st})
+		if w := do(wired, "/admin/project/proj-1/cancel"); w.Code != http.StatusBadRequest {
+			t.Fatalf("admin cancel of %s: status=%d", st, w.Code)
+		}
+		if _, err := svc.CancelDeletion(ctx, "proj-1"); err == nil {
+			t.Fatalf("client cancel of %s must be refused", st)
+		}
+		if status() != st {
+			t.Fatalf("cancel flipped %s to %s", st, status())
+		}
+	}
+}
+
+type flakyDeleter struct{ fails, calls int }
+
+func (d *flakyDeleter) DeleteProjectResources(context.Context, string) error {
+	d.calls++
+	if d.calls <= d.fails {
+		return errors.New("upstream down")
+	}
+	return nil
 }
