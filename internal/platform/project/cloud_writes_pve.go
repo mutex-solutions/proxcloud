@@ -1366,11 +1366,12 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 	default:
 		return false
 	}
+	// A failed cross-node attach can leave the disk on a holder, under a new name: refresh the rows either way.
+	h.pveSyncVolumes(ctx, es, proj)
 	if aerr != nil {
 		h.fail(w, pveVolumeErr(aerr))
 		return true
 	}
-	h.pveSyncVolumes(ctx, es, proj)
 	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", action, cr)
 	httpx.OK(w, map[string]any{"result": map[string]any{}})
 	return true
