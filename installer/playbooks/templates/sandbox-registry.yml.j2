@@ -1,0 +1,149 @@
+{#- Stage 55, on the services cluster: the sandbox registry (docs/managed-sandbox.md §5). Zot with its blobs in a bucket
+    of the object store, TLS from a CA of its own (the sandbox nodes trust that CA alone for this address), and the
+    account sync next to it (sandbox-proxy registry-users), which writes Zot's users and access rules from the sandbox
+    cluster's projects. Vars: pc_sbx_reg_ns, pc_sbx_reg_s3 {endpoint, region, bucket, access, secret},
+    pc_sbx_reg_users {admin, push, pull-nodes, key}, pc_sbx_reg_kubeconfig, pc_sbx_reg_sync_image. -#}
+{%- set ns = pc_sbx_reg_ns -%}
+{%- set addr = pc.sandbox.registry.address -%}
+{%- set s3 = pc_sbx_reg_s3 -%}
+apiVersion: v1
+kind: Namespace
+metadata: {name: "{{ ns }}"}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata: {name: sandbox-registry-selfsigned, namespace: "{{ ns }}"}
+spec: {selfSigned: {}}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: sandbox-registry-ca, namespace: "{{ ns }}"}
+spec:
+  isCA: true
+  commonName: sandbox registry CA
+  secretName: sandbox-registry-ca
+  duration: 87600h
+  privateKey: {algorithm: ECDSA, size: 256}
+  issuerRef: {name: sandbox-registry-selfsigned, kind: Issuer}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata: {name: sandbox-registry-ca, namespace: "{{ ns }}"}
+spec: {ca: {secretName: sandbox-registry-ca}}
+---
+# ponytail: Zot reads its certificate at start; a long-lived one and a restart by this stage when it changes, instead
+# of a reloader. Renewal comes at 4 of 5 years.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: sandbox-registry, namespace: "{{ ns }}"}
+spec:
+  secretName: sandbox-registry-tls
+  duration: 43800h
+  renewBefore: 8760h
+  ipAddresses: ["{{ addr }}"]
+  dnsNames: ["sandbox-registry.{{ ns }}.svc"]
+  privateKey: {algorithm: ECDSA, size: 256}
+  issuerRef: {name: sandbox-registry-ca, kind: Issuer}
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: sandbox-registry-base, namespace: "{{ ns }}"}
+type: Opaque
+stringData:
+  config.json: |
+    {{ {'distSpecVersion': '1.1.1',
+        'storage': {'rootDirectory': '/var/lib/registry', 'dedupe': false, 'gc': true, 'gcDelay': '1h', 'gcInterval': '24h',
+                    'storageDriver': {'name': 's3', 'rootdirectory': '/zot', 'bucket': s3.bucket, 'region': s3.region,
+                                      'regionendpoint': s3.endpoint, 'forcepathstyle': true,
+                                      'secure': s3.endpoint.startswith('https://'), 'skipverify': false,
+                                      'accesskey': s3.access, 'secretkey': s3.secret}},
+        'http': {'address': '0.0.0.0', 'port': '5000', 'tls': {'cert': '/tls/tls.crt', 'key': '/tls/tls.key'}},
+        'log': {'level': 'info'}} | to_json }}
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: sandbox-registry-users, namespace: "{{ ns }}"}
+type: Opaque
+stringData: {{ pc_sbx_reg_users | to_json }}
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: sandbox-registry-kubeconfig, namespace: "{{ ns }}"}
+type: Opaque
+stringData:
+  # Ansible turns the JSON kubeconfig into a dict on the way in: back to one string.
+  kubeconfig: {{ (pc_sbx_reg_kubeconfig if pc_sbx_reg_kubeconfig is string else pc_sbx_reg_kubeconfig | to_json) | to_json }}
+---
+# One replica: Zot keeps its upload sessions and locks in the process; the blobs are in the bucket, so a new pod
+# serves the same images.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: sandbox-registry, namespace: "{{ ns }}", labels: {app: sandbox-registry}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: sandbox-registry}}
+  template:
+    metadata:
+      labels: {app: sandbox-registry}
+      annotations:
+        proxcloud.io/config: "{{ (pc_sbx_reg_s3 | to_json ~ pc_sbx_reg_users | to_json) | hash('sha256') }}"
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+      initContainers:
+        # A native sidecar: Zot starts once this has written its config (readiness on :8081).
+        - name: users
+          image: "{{ pc_sbx_reg_sync_image }}"
+          restartPolicy: Always
+          args: [registry-users]
+          env:
+            - {name: ZOT_BASE, value: /base/config.json}
+            - {name: ZOT_DIR, value: /etc/zot}
+            - {name: REGISTRY_HOST, value: "{{ addr }}"}
+            - {name: REGISTRY_USERS_DIR, value: /users}
+            - {name: TARGET_KUBECONFIG, value: /kubeconfig/kubeconfig}
+            - {name: SYSTEM_NAMESPACE, value: "{{ pc_sbx_reg_system_ns | default('sandbox-system') }}"}
+            - {name: SERVICE_ID, value: "{{ pc_sbx_reg_service_id | default('') }}"}
+          startupProbe: {httpGet: {path: /readyz, port: 8081}, periodSeconds: 2, failureThreshold: 150}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 128Mi}}
+          volumeMounts:
+            - {name: zot-config, mountPath: /etc/zot}
+            - {name: base, mountPath: /base, readOnly: true}
+            - {name: users, mountPath: /users, readOnly: true}
+            - {name: kubeconfig, mountPath: /kubeconfig, readOnly: true}
+      containers:
+        - name: zot
+          image: "{{ pc_ver.zot_image }}"
+          args: [serve, /etc/zot/config.json]
+          ports: [{name: https, containerPort: 5000}]
+          readinessProbe: {httpGet: {path: /readyz, port: 5000, scheme: HTTPS}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /livez, port: 5000, scheme: HTTPS}, periodSeconds: 20, failureThreshold: 6}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 2Gi}}
+          volumeMounts:
+            - {name: zot-config, mountPath: /etc/zot, readOnly: true}
+            - {name: tls, mountPath: /tls, readOnly: true}
+            - {name: data, mountPath: /var/lib/registry}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: zot-config, emptyDir: {}}
+        - {name: data, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+        - {name: base, secret: {secretName: sandbox-registry-base}}
+        - {name: users, secret: {secretName: sandbox-registry-users}}
+        - {name: kubeconfig, secret: {secretName: sandbox-registry-kubeconfig}}
+        - {name: tls, secret: {secretName: sandbox-registry-tls}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-registry
+  namespace: "{{ ns }}"
+  annotations: {metallb.io/loadBalancerIPs: "{{ addr }}"}
+spec:
+  type: LoadBalancer
+  selector: {app: sandbox-registry}
+  ports: [{name: https, port: 443, targetPort: 5000}]

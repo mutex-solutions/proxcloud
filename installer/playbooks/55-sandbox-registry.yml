@@ -1,0 +1,216 @@
+# Stage 55 (registry), mode=split with sandbox.registry.address: the sandbox registry (docs/managed-sandbox.md §5).
+# Zot on the services cluster behind one MetalLB address, its blobs in a bucket of the object store (RustFS on
+# Standard, RGW on Full), one account per project kept by the account sync next to it. Then the sandbox cluster's
+# side: the nodes trust the registry's CA, the built-in images (deploy/templates/images.yaml, plus the release's
+# sandbox-proxy) are copied in under the same digests and pre-pulled on every node. Stage 56 runs sandbox-proxy from
+# the copy and stage 60 points the templates and the workers' firewall at it. Every step is idempotent.
+- name: Check the sandbox registry settings
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Skip unless the registry is on
+      ansible.builtin.meta: end_play
+      when: not pc_sandbox_registry_on
+    - name: Check the address and the object store
+      vars:
+        problem: "{{ pc.sandbox | pc_sandbox_registry_problem(pc.services.network.metallb, pc.object_store.mode) }}"
+      ansible.builtin.assert: {that: problem == '', fail_msg: "{{ problem }}", quiet: true}
+    - name: Check the pinned images
+      ansible.builtin.set_fact:
+        pc_sbx_images: "{{ pc_sandbox_pins | pc_sandbox_images(pc_sandbox_registry_host) }}"
+
+- name: Build the sandbox registry
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  vars:
+    kc: k3s kubectl --kubeconfig /root/services.kubeconfig
+    pc_sbx_kubeconfig: /root/sandbox.kubeconfig  # stage 55 writes it
+    pc_sbx_reg_ns: "{{ pc.sandbox.registry.namespace }}"
+    pc_sbx_reg_system_ns: sandbox-system
+    host: "{{ pc_sandbox_registry_host }}"
+    store: "{{ lookup('ansible.builtin.file', pc_gen ~ '/object-store.json') | from_json }}"
+    own_store: "{{ pc.object_store.mode in ['vm', 'truenas-app'] }}"
+    bucket_secret: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-s3-secret ' ~ pc_alnum) }}"
+    pc_sbx_reg_s3:
+      endpoint: "{{ store.internalEndpoint if own_store else pc.object_store.endpoint }}"
+      region: "{{ 'us-east-1' if own_store else pc.object_store.region }}"
+      bucket: "{{ pc.sandbox.registry.bucket }}"
+      # rustfs and rgw: a service user of its own that reaches this bucket alone; external: the store's key
+      access: "{{ (pc.sandbox.registry.bucket ~ '-svc') if pc.object_store.mode != 'external' else pc.object_store.access_key }}"
+      secret: "{{ bucket_secret if pc.object_store.mode != 'external' else pc.object_store.secret_key }}"
+    pc_sbx_reg_users:
+      admin: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-admin ' ~ pc_alnum) }}"
+      push: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-push ' ~ pc_alnum) }}"
+      pull-nodes: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-pull-nodes ' ~ pc_alnum) }}"
+      key: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-registry-key ' ~ pc_alnum) }}"
+    pc_sbx_proxy_source: "{{ pc.sandbox.proxy.image or (pc.images.registry ~ '/proxcloud-sandbox-proxy:' ~ pc_ver.proxcloud) }}"
+    pc_sbx_reg_sync_image: "{{ pc_sbx_proxy_source }}"
+    images: "{{ hostvars.localhost.pc_sbx_images | default([]) }}"
+    ca_dir: /root/sandbox-registry-certs
+  tasks:
+    - name: Skip unless the registry is on
+      ansible.builtin.meta: end_play
+      when: not pc_sandbox_registry_on
+    - name: Look for the sandbox cluster's kubeconfig
+      ansible.builtin.stat: {path: "{{ pc_sbx_kubeconfig }}"}
+      register: pc_sbx_kc
+    - name: Skip until stage 55 built the cluster
+      ansible.builtin.meta: end_play
+      when: not pc_sbx_kc.stat.exists
+    # A plain bucket (no Object Lock): Zot's garbage collection deletes blobs nothing references any more.
+    - name: Create the bucket and its user
+      ansible.builtin.script: files/rustfs-bootstrap.py
+      environment:
+        S3_URL: "{{ pc_sbx_reg_s3.endpoint }}"
+        REGION: "{{ pc_sbx_reg_s3.region }}"
+        FLAVOR: "{{ {'vm': 'rustfs', 'truenas-app': 'rustfs', 'ceph-rgw': 'rgw', 'external': 'external'}[pc.object_store.mode] }}"
+        ROOT_ACCESS: "{{ pc_rustfs_access_key if own_store else pc.object_store.access_key }}"
+        ROOT_SECRET: "{{ pc_rustfs_secret_key if own_store else pc.object_store.secret_key }}"
+        BUCKETS: "{{ {pc.sandbox.registry.bucket: {'secret': bucket_secret, 'lock': false}} | to_json }}"
+      args: {executable: python3}
+      register: pc_sbx_bucket
+      changed_when: (pc_sbx_bucket.stdout | from_json).changed
+      no_log: true
+    - name: Copy the cluster manifests
+      ansible.builtin.copy:
+        src: "{{ pc_repo_root }}/deploy/sandbox-cluster/"
+        dest: /root/sandbox-bundle/
+        mode: preserve
+    - name: Apply the account sync's identity and the CA trust on the sandbox cluster
+      ansible.builtin.command: kubectl apply -f /root/sandbox-bundle/registry.yaml
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      register: pc_sbx_reg_rbac
+      changed_when: pc_sbx_reg_rbac.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+    - name: Build the account sync's kubeconfig
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for i in $(seq 30); do
+          t=$(kubectl -n sandbox-system get secret sandbox-registry-users-token -o jsonpath='{.data.token}' | base64 -d)
+          [ -n "$t" ] && break; sleep 2
+        done
+        [ -n "$t" ]
+        kubectl config view --raw --minify -o json | T="$t" python3 -c '
+        import json, os, sys
+        c = json.load(sys.stdin)["clusters"][0]
+        print(json.dumps({"apiVersion": "v1", "kind": "Config", "current-context": "sync",
+          "clusters": [{"name": "sandbox", "cluster": c["cluster"]}],
+          "users": [{"name": "sync", "user": {"token": os.environ["T"]}}],
+          "contexts": [{"name": "sync", "context": {"cluster": "sandbox", "user": "sync"}}]}))'
+      args: {executable: /bin/bash}
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      register: pc_sbx_reg_kc
+      changed_when: false
+      no_log: true
+    - name: Apply the registry on the services cluster
+      vars:
+        pc_sbx_reg_kubeconfig: "{{ pc_sbx_reg_kc.stdout }}"
+      ansible.builtin.command:
+        cmd: "{{ kc }} apply -f -"
+        stdin: "{{ lookup('ansible.builtin.template', 'templates/sandbox-registry.yml.j2') }}"
+      register: pc_sbx_reg_applied
+      # a Secret written from stringData reads "configured" on every apply
+      changed_when: pc_sbx_reg_applied.stdout_lines | reject('search', ' unchanged$') | reject('search', '^secret/') | list | length > 0
+      no_log: true
+    - name: Wait for its certificate
+      ansible.builtin.command: "{{ kc }} -n {{ pc_sbx_reg_ns }} wait certificate/sandbox-registry --for=condition=Ready --timeout=10m"
+      changed_when: false
+    - name: Wait for the registry
+      ansible.builtin.command: "{{ kc }} -n {{ pc_sbx_reg_ns }} rollout status deploy/sandbox-registry --timeout=10m"
+      changed_when: false
+    - name: Read the CA
+      ansible.builtin.command: "{{ kc }} -n {{ pc_sbx_reg_ns }} get secret sandbox-registry-ca -o 'jsonpath={.data.ca\\.crt}'"
+      register: pc_sbx_reg_ca_b64
+      failed_when: pc_sbx_reg_ca_b64.rc != 0 or pc_sbx_reg_ca_b64.stdout == ''
+      changed_when: false
+    - name: Make a directory for it
+      ansible.builtin.file: {path: "{{ ca_dir }}", state: directory, mode: "0755"}
+    - name: Trust the CA here for the copies
+      ansible.builtin.copy:
+        dest: "{{ ca_dir }}/ca.crt"
+        content: "{{ pc_sbx_reg_ca_b64.stdout | b64decode }}"
+        mode: "0644"
+    - name: Wait for the registry's address
+      ansible.builtin.uri: {url: "https://{{ host }}/v2/", ca_path: "{{ ca_dir }}/ca.crt", status_code: [401]}
+      register: pc_sbx_reg_up
+      retries: 30
+      delay: 5
+      until: pc_sbx_reg_up is succeeded
+    # skopeo comes with stage 35 on images.build sites; the others get it here.
+    - name: Install skopeo
+      ansible.builtin.apt: {name: skopeo, update_cache: true, cache_valid_time: 86400}
+    # Same digest, so a pinned reference means the same image on both sides (--preserve-digests refuses otherwise).
+    - name: Copy the pinned images in
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if skopeo inspect --raw --cert-dir "$CERTS" --creds "admin:$ADMIN" "docker://$TARGET" >/dev/null 2>&1; then echo present; exit 0; fi
+        skopeo copy --all --preserve-digests --retry-times 3 --dest-cert-dir "$CERTS" --dest-creds "admin:$ADMIN" \
+          ${SRC_CREDS:+--src-creds "$SRC_CREDS"} "docker://$SOURCE" "docker://$TAGGED"
+        skopeo inspect --raw --cert-dir "$CERTS" --creds "admin:$ADMIN" "docker://$TARGET" >/dev/null
+        echo copied
+      args: {executable: /bin/bash}
+      environment:
+        SOURCE: "{{ item.source_ref }}"
+        TARGET: "{{ item.target_ref }}"
+        TAGGED: "{{ item.target_tagged }}"
+        CERTS: "{{ ca_dir }}"
+        ADMIN: "{{ pc_sbx_reg_users.admin }}"
+        SRC_CREDS: "{{ (pc.images.pull_secret.username ~ ':' ~ pc.images.pull_secret.password) if pc.images.pull_secret.username | default('') else '' }}"
+      loop: "{{ images }}"
+      loop_control: {label: "{{ item.name }}"}
+      register: pc_sbx_copied
+      changed_when: "'copied' in pc_sbx_copied.stdout"
+    # sandbox-proxy follows the release tag; the copy is recorded by digest, so the nodes run exactly what was copied.
+    - name: Copy the release's sandbox-proxy in
+      ansible.builtin.shell: |
+        set -euo pipefail
+        dst="$HOST/library/proxcloud-sandbox-proxy:${SOURCE##*:}"
+        skopeo copy --all --retry-times 3 --dest-cert-dir "$CERTS" --dest-creds "admin:$ADMIN" \
+          ${SRC_CREDS:+--src-creds "$SRC_CREDS"} "docker://$SOURCE" "docker://$dst" >&2
+        echo "$dst@$(skopeo inspect --raw --cert-dir "$CERTS" --creds "admin:$ADMIN" "docker://$dst" | sha256sum | cut -d' ' -f1 | sed 's/^/sha256:/')"
+      args: {executable: /bin/bash}
+      environment:
+        SOURCE: "{{ pc_sbx_proxy_source }}"
+        HOST: "{{ host }}"
+        CERTS: "{{ ca_dir }}"
+        ADMIN: "{{ pc_sbx_reg_users.admin }}"
+        SRC_CREDS: "{{ (pc.images.pull_secret.username ~ ':' ~ pc.images.pull_secret.password) if pc.images.pull_secret.username | default('') else '' }}"
+      when: pc_sandbox_edge_on
+      register: pc_sbx_proxy_copy
+      changed_when: false
+    - name: Apply the prepull and the registry's address on the sandbox cluster
+      vars:
+        pc_sbx_images: "{{ images }}"
+        pc_sbx_reg_ca: "{{ pc_sbx_reg_ca_b64.stdout | b64decode }}"
+      ansible.builtin.command:
+        cmd: kubectl apply -f -
+        stdin: "{{ lookup('ansible.builtin.template', 'templates/sandbox-prepull.yml.j2') }}"
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      register: pc_sbx_prepull
+      changed_when: pc_sbx_prepull.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+    - name: Record the registry for stages 56 and 60
+      delegate_to: localhost
+      become: false
+      ansible.builtin.copy:
+        dest: "{{ pc_gen }}/sandbox-registry.json"
+        mode: "0600"
+        content: >-
+          {{ {'host': host, 'templateRegistry': host ~ '/t',
+              'proxyImage': (pc_sbx_proxy_copy.stdout | default('')) if pc_sandbox_edge_on else ''} | to_nice_json }}
+    # The workers reach the registry once stage 60 gave the Proxmox provider its address (config.sandbox.registry)
+    # and the sync fenced them with it: on a first install the prepull waits for that, and a re-run checks it.
+    - name: Count the prepull pods that pulled everything
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n sandbox-system get pods -l app=template-prepull -o json | python3 -c '
+        import json, sys
+        p = json.load(sys.stdin)["items"]
+        print("%d/%d" % (sum(1 for x in p if x["status"].get("phase") == "Running"), len(p)))'
+      args: {executable: /bin/bash}
+      environment: {KUBECONFIG: "{{ pc_sbx_kubeconfig }}"}
+      register: pc_sbx_prepulled
+      changed_when: false
+    - name: Say how far the prepull is
+      ansible.builtin.debug:
+        msg: "template prepull running on {{ pc_sbx_prepulled.stdout }} nodes (the rest pull once the sync fenced them with the registry rule, after stage 60)"

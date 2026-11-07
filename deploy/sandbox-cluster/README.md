@@ -17,6 +17,7 @@ Design, lab measurements and the threat model: [`docs/managed-sandbox.md`](../..
 | `network-policy.yaml` | Cilium cluster-wide guardrail for every tenant namespace: private ranges and TCP 25 denied, ingress from `sandbox-proxy` only |
 | `rbac.yaml` | `proxcloud-system/proxcloud` ServiceAccount, its ClusterRole and a token Secret; `proxcloud-system/proxcloud-firewall` (nodes get, list, patch; impersonating only the node `proxcloud-noderestriction-probe` for the NodeRestriction release gate) for the Proxmox provider's sync, which fences the workers and takes their `unsecured` taint off |
 | `check-ipv4-only.sh` | The IPv6 precondition: Cilium IPv6 off, no IPv6 on any node |
+| `registry.yaml` | The sandbox registry's side (docs/managed-sandbox.md §5): `registry-trust` puts the registry CA under `/etc/containerd/certs.d/<address>/` on every node, from the ConfigMap `sandbox-registry` stage 55 writes; `sandbox-registry-users`, the identity of the account sync on the services cluster (namespaces `list`, and only the two pull Secrets it writes). The template prepull DaemonSet is rendered by stage 55 from `deploy/templates/images.yaml` |
 | `sandbox-proxy.yaml` | `sandbox-proxy` (two replicas on the `sandbox-system` nodes only, TLS ends there), its LoadBalancer Service on one MetalLB address, and `sandbox-cert-sync`: the identity that may get and patch `sandbox-proxy-tls` alone, for the copy from the services cluster (docs/managed-sandbox.md §4) |
 
 ## Preconditions

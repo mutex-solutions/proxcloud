@@ -282,9 +282,85 @@ def sandbox_edge_problem(sb):
     return ""
 
 
+def _split_ref(ref):
+    """'host/path/name:tag@sha256:d' -> (repo, tag, digest); tag '' when absent, digest '' when not pinned."""
+    ref = str(ref).strip()
+    repo, _, digest = ref.partition("@")
+    tag = ""
+    if repo.rfind(":") > repo.rfind("/"):
+        repo, tag = repo.rsplit(":", 1)
+    return repo, tag, digest
+
+
+def sandbox_images(pins, host):
+    """The mirror list for the sandbox registry (docs/managed-sandbox.md §5): every pinned image of
+    deploy/templates/images.yaml (name -> ref@sha256:...) copied to <host>/library/<last path part>:<tag>@<digest>, the
+    same digest. A pin without a digest, a bad name or two pins on one target are refused, so a site never pulls an
+    unpinned or wrong built-in image."""
+    import re
+
+    out, seen = [], {}
+    for name, ref in sorted((pins or {}).items()):
+        if not re.match(r"^[a-z0-9][a-z0-9-]{0,62}$", str(name)):
+            raise ValueError("pinned image name %r: lowercase letters, digits and '-'" % name)
+        repo, tag, digest = _split_ref(ref)
+        if not re.match(r"^sha256:[0-9a-f]{64}$", digest) or "/" not in repo:
+            raise ValueError("pinned image %s = %r: want <registry>/<repository>[:tag]@sha256:<64 hex>" % (name, ref))
+        trepo = "%s/library/%s" % (host, repo.rsplit("/", 1)[1])
+        if trepo in seen:
+            raise ValueError("pinned images %s and %s land on the same repository %s" % (seen[trepo], name, trepo))
+        seen[trepo] = name
+        # skopeo takes a tag or a digest, not both: source_ref and target_ref are by digest, target_tagged by tag.
+        out.append({"name": name, "source": str(ref).strip(), "source_ref": repo + "@" + digest,
+                    "target": "%s:%s@%s" % (trepo, tag or "pinned", digest), "target_ref": trepo + "@" + digest,
+                    "target_tagged": "%s:%s" % (trepo, tag or "pinned"), "digest": digest})
+    return out
+
+
+def sandbox_templates(templates, pins, host=""):
+    """The sandbox provider's templates with every image "pin:<name>" resolved: to the mirrored ref on the sandbox
+    registry when host is set, else to the pinned source (straight from its registry). Other images stay as given."""
+    mirror = {i["name"]: i for i in sandbox_images(pins, host or "x")}
+    out = {}
+    for name, t in (templates or {}).items():
+        t = dict(t)
+        img = str(t.get("image", ""))
+        if img.startswith("pin:"):
+            key = img[4:]
+            if key not in mirror:
+                raise ValueError("template %s: no pinned image %r in deploy/templates/images.yaml" % (name, key))
+            t["image"] = mirror[key]["target"] if host else mirror[key]["source"]
+        out[name] = t
+    return out
+
+
+def sandbox_registry_problem(sb, services_metallb, object_store_mode):
+    """Why the sandbox registry (stage 55, Zot on the services cluster) cannot be built from these settings, or ""."""
+    import ipaddress
+
+    reg = sb.get("registry", {})
+    try:
+        a = ipaddress.ip_address(str(reg.get("address") or ""))
+    except ValueError:
+        return "sandbox.registry.address must be an IPv4 address: the registry's MetalLB address on the services cluster"
+    first, _, last = str(services_metallb or "").partition("-")
+    try:
+        lo, hi = ipaddress.ip_address(first.strip()), ipaddress.ip_address((last or first).strip())
+    except ValueError:
+        return "services.network.metallb must be set (a-b) to place the sandbox registry"
+    if a.version != 4 or not lo <= a <= hi:
+        return "sandbox.registry.address %s must be inside services.network.metallb %s" % (a, services_metallb)
+    if object_store_mode not in ("vm", "truenas-app", "ceph-rgw", "external"):
+        return "object_store.mode %r has no bucket for the sandbox registry" % object_store_mode
+    return ""
+
+
 class FilterModule:
     def filters(self):
         return {
+            "pc_sandbox_images": sandbox_images,
+            "pc_sandbox_templates": sandbox_templates,
+            "pc_sandbox_registry_problem": sandbox_registry_problem,
             "pc_classify_storages": classify_storages,
             "pc_default_profile": default_profile,
             "pc_kept_profiles": kept_profiles,

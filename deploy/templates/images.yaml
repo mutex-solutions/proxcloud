@@ -1,0 +1,9 @@
+# The built-in sandbox template images, each pinned by digest (docs/managed-sandbox.md §5). The installer copies
+# every one into the sandbox registry as library/<last path part>, same digest, pre-pulls it on every sandbox node
+# and points the templates at the copy; a template names one as image "pin:<name>" (sandbox.templates).
+#
+# The sandbox-templates workflow builds deploy/templates, pushes to ghcr and opens a pull request that adds or bumps
+# the sandbox-* entries here. Others (a public base image used as is) are edited by hand: the digest of the linux/amd64
+# manifest, which the mirror copies alone.
+images:
+  python: docker.io/library/python:3.12-slim@sha256:05a994d2344eb364cc186910f4fc8786a38215f39f00d0acc25bff33a08f4177

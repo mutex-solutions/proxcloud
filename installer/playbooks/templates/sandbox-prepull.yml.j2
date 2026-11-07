@@ -1,0 +1,46 @@
+{#- Stage 55, on the sandbox cluster: where the nodes pull from (ConfigMap sandbox-registry, read by
+    deploy/sandbox-cluster/registry.yaml) and the template prepull. Each init container only pulls its image and exits,
+    so a sandbox from a built-in template starts without a download. The portal moves a template to a new digest only
+    once every Ready node runs this pod with it (image adoption, docs/managed-sandbox.md §5). Vars: pc_sbx_images
+    (pc_sandbox_images), pc_sbx_reg_ca, pc_sbx_reg_system_ns. -#}
+{%- set ns = pc_sbx_reg_system_ns | default('sandbox-system') -%}
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: sandbox-registry, namespace: "{{ ns }}"}
+data:
+  host: "{{ pc.sandbox.registry.address }}"
+  ca.crt: {{ pc_sbx_reg_ca | to_json }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: template-prepull
+  namespace: "{{ ns }}"
+  labels: {app: template-prepull}
+spec:
+  selector:
+    matchLabels: {app: template-prepull}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 100%}
+  template:
+    metadata:
+      labels: {app: template-prepull}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 1
+      # Every node, the unsecured and the system ones too: nothing here runs tenant code.
+      tolerations: [{operator: Exists}]
+      imagePullSecrets: [{name: sandbox-registry-nodes}]
+      initContainers:
+{% for i in pc_sbx_images %}
+        - name: p{{ loop.index0 }}
+          image: "{{ i.target }}"
+          command: ["sh", "-c", "true"]
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {cpu: 100m, memory: 64Mi}}
+{% endfor %}
+      containers:
+        - name: pause
+          image: "{{ pc_ver.pause_image }}"
+          resources: {requests: {cpu: 1m, memory: 4Mi}, limits: {cpu: 10m, memory: 16Mi}}

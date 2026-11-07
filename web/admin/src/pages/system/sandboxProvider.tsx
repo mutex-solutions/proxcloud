@@ -31,6 +31,10 @@ export type SandboxFormState = {
   quotaVcpus: string
   quotaRamMb: string
   quotaGpus: string
+  // The sandbox registry (docs/managed-sandbox.md §5): where custom templates go, and whether built-in templates follow
+  // the prepull DaemonSet to a new digest.
+  templateRegistry: string
+  imageAdoption: string
   storedSandbox: Record<string, any>
 }
 
@@ -50,6 +54,8 @@ export const emptySandboxForm: SandboxFormState = {
   quotaVcpus: "",
   quotaRamMb: "",
   quotaGpus: "",
+  templateRegistry: "",
+  imageAdoption: "off",
   storedSandbox: {},
 }
 
@@ -92,6 +98,8 @@ export function sandboxConfigBlocks(f: SandboxFormState) {
       ...f.storedSandbox,
       proxmoxServiceId: f.proxmoxServiceId.trim(),
       templates: parseTemplates(f.templates) ?? {},
+      templateRegistry: f.templateRegistry.trim(),
+      imageAdoption: f.imageAdoption === "off" ? "" : f.imageAdoption,
       limits: compact({
         maxCpu: num(f.maxCpu),
         maxMemoryGiB: num(f.maxMemoryGiB),
@@ -144,6 +152,8 @@ export function sandboxFormFromService(svc: { name?: string; status?: string; co
     quotaVcpus: s(q.sandboxVcpus),
     quotaRamMb: s(q.sandboxRamMb),
     quotaGpus: s(q.sandboxGpus),
+    templateRegistry: s(sb.templateRegistry),
+    imageAdoption: s(sb.imageAdoption) || "off",
     storedSandbox: sb,
   }
 }
@@ -226,6 +236,25 @@ export function SandboxProviderForm({ form, setForm, mode = "create" }: {
           placeholder={"python=python:3.12-slim 1 2 Python 3.12\nnode=node:22-slim 1 2 Node.js 22"}
         />
         <p className="text-xs text-muted-foreground">Only these images are offered. Customers may raise CPU and memory up to the limits below.</p>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field id="sb-registry" label="Template registry" value={form.templateRegistry} onChange={set("templateRegistry")}
+          placeholder="192.0.2.226/t" hint="The sandbox registry's address with /t. Sandboxes pull images there with their project's own account." />
+        <div className="grid gap-2">
+          <Label htmlFor="sb-adopt">Built-in image updates</Label>
+          <Select value={form.imageAdoption} onValueChange={set("imageAdoption")}>
+            <SelectTrigger id="sb-adopt"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="off">Off</SelectItem>
+              <SelectItem value="dry-run">Dry run (log only)</SelectItem>
+              <SelectItem value="on">On</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Every 5 minutes, a template with a digest-pinned image moves to the digest the prepull DaemonSet runs, once every node
+            has pulled it. To pin an image by hand, set this to Off first.
+          </p>
+        </div>
       </div>
       <div className="grid gap-4 sm:grid-cols-3">
         <Field id="sb-maxcpu" label="Max vCPU per sandbox" value={form.maxCpu} onChange={set("maxCpu")} placeholder="8" />

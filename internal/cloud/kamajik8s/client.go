@@ -240,6 +240,11 @@ func (c *Client) GetNamespace(ctx context.Context, name string) (map[string]any,
 	return c.get(ctx, pathNamespaces, name)
 }
 
+// ListNamespaces lists the namespaces matching labelSelector.
+func (c *Client) ListNamespaces(ctx context.Context, labelSelector string) ([]map[string]any, error) {
+	return c.list(ctx, pathNamespaces, labelSelector)
+}
+
 // DeleteNamespace removes the namespace (absent = success). Kubernetes finalizes the delete
 // asynchronously, cascading to everything still inside.
 func (c *Client) DeleteNamespace(ctx context.Context, name string) error {

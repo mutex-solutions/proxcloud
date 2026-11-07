@@ -292,6 +292,7 @@ flowchart LR
   sbxp["sandbox-proxy<br/>TLS, routing, traffic token"]:::impl
   sbxe["entry appliance<br/>HAProxy 443 passthrough"]:::impl
   csync["cert-sync<br/>services cluster"]:::impl
+  zot["sandbox registry (Zot)<br/>+ registry-users sync"]:::impl
   obj["client objectstore<br/>objectBackend"]:::impl
   ccred["cephcred"]:::impl
   argo["ArgoCD on the management cluster"]:::impl
@@ -316,6 +317,10 @@ flowchart LR
   sbxp -->|"pod IP:port"| sbxc
   csync -->|"sandbox-proxy-tls"| sbxp
   sbxp -.->|"wake (SB7)"| ph
+  zot -->|"pull Secret per project"| sbxc
+  sbxc -->|"image pulls"| zot
+  zot -->|"blobs"| rustfs
+  zot -->|"blobs"| rgw
 ```
 
 | Component | Path | Responsibility | Status |
@@ -327,6 +332,7 @@ flowchart LR
 | Sandboxes | `internal/cloud/sandbox/`, `internal/platform/externalservice/sandbox.go`, `internal/platform/project/cloud_sandbox.go` | One agent-sandbox `Sandbox` CR per sandbox in `sb-<project>` on a platform sandbox cluster: gVisor runtime class, no service account token, per-namespace ResourceQuota, per-sandbox Cilium egress policy, GPU capacity, template builds, snapshots, sync payloads. Labels in `proxcloud.io/`; the GPU placement label in `node-restriction.kubernetes.io/`. Template registry from `config.sandbox.templateRegistry`. Native REST (SB3): `SANDBOX` create, list, delete and the actions EXEC, GET_LOGS, SET_TIMEOUT, REFRESH and GET_ACCESS (host and traffic token, from the live CR) on the project cloud routes; the project quota (`sandbox.ProjectQuota`, D10) is checked against the live sandboxes and carried by the namespace ResourceQuota; the release gates (`sandbox.Gate`, `syncjob.SandboxReleaseGates`) and the suspension gate run before anything that adds usage; a billing suspension deletes running sandboxes (`project.DeleteProjectSandboxes`); project teardown deletes them and the namespace. | Implemented |
 | Sandbox proxy | `cmd/sandbox-proxy`, `internal/sandboxproxy/`, `pkg/certfile`, `deploy/sandbox-cluster/sandbox-proxy.yaml` | The data path to sandbox ports (SB4): `<port>-<id>.<domain>` to the ready pod's IP and port, envd's control routes refused, the traffic token enforced; TLS ends here with the wildcard certificate from a mounted Secret, read again on renewal; it runs only on the sandbox cluster's `sandbox-system` nodes (a CAPI-set `node-restriction.kubernetes.io/` label and a taint), never next to tenant code. A miss can ask the portal's wake endpoint (`POST /api/v1/internal/sandboxes/{id}/wake`, `project/sandbox_wake.go`, a provider's `proxyWakeToken`), which stage 56 leaves off until SB7. Its `cert-sync` mode runs on the services cluster and copies the certificate cert-manager issued there to the sandbox cluster, only when it is valid now and covers `*.<domain>`. | Implemented |
 | Sandbox entry appliance | `internal/cloud/pve/sandboxentry.go`, `internal/cloud/syncjob/sandboxfw.go`, `installer/playbooks/56-sandbox-edge.yml` | The P8-1 HAProxy appliance as a platform VM: the installer builds it, the Proxmox provider's sync keeps its firewall and its one TCP listener to `sandbox-proxy` (`SandboxEntryConfig`, `PushHAProxy`) and adds the workers' rule that admits it alone (`SandboxFirewall.entryRule`). | Implemented |
+| Sandbox registry | `internal/sandboxproxy/registryusers.go`, `cmd/sandbox-proxy` (`registry-users`), `installer/playbooks/55-sandbox-registry.yml`, `templates/sandbox-registry.yml.j2`, `templates/sandbox-prepull.yml.j2`, `deploy/sandbox-cluster/registry.yaml`, `deploy/templates/` | Zot on the services cluster with an S3 backend (SB6a). The account sync, a native sidecar of Zot, lists the sandbox cluster's tenant namespaces every 30 s and writes Zot's `htpasswd` and access rules (`pull-<project>`: `library/**` and `t/<project>/**`; `pull-nodes`: `library/**`; `push`: `t/**`; `admin`) with HMAC-derived project passwords, plus one pull Secret per project and the nodes' one; a failed list keeps the users Zot has. Sandbox pods name the project's Secret for every image on the registry's host (`Config.pullsFromRegistry`); the portal no longer copies a shared one. Image adoption: `project.AdoptSandboxImages` (job `sandboxTemplateAdopt`) moves a built-in template to the digest the prepull DaemonSet runs once every node has it (`sandbox.Adoptions`, `externalservice.SetTemplateImage`, compare-and-set). The workers' firewall admits the registry's address and port alone (`SandboxFirewall.RegistryAddress`, `config.sandbox.registry`). | Implemented |
 | Object store client | `internal/cloud/client/client.go`, `objectstore.go`, `objectstore_ceph.go`, `objectstore_ceph_policy.go`, `objectstore_ceph_settings.go` | `objectBackend` + `Caps()`: bucket and object operations, policies, settings. `cephBackend` talks to RGW. | Implemented |
 | Ceph credentials | `internal/cloud/cephcred/` | Per-project RGW user and S3 keys, secret encrypted at rest. | Implemented |
 | Bucket settings | `internal/platform/project/cloud_bucket_settings.go` | Bucket actions (versioning, object lock, quota, lifecycle, CORS, tags, policy, per-key grants) and project S3 keys. | Implemented |

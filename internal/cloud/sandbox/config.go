@@ -247,6 +247,18 @@ func (c Config) fromTemplateRegistry(image string) bool {
 	return c.TemplateRegistry != "" && strings.HasPrefix(image, strings.TrimRight(c.TemplateRegistry, "/")+"/")
 }
 
+// pullsFromRegistry reports an image on the template registry's host: the built-in library/** images as well as the
+// project's own t/<project>/**. The pod then names the project's pull Secret. The kubelet checks that Secret even for an
+// image a prepull pod already put on the node (KubeletEnsureSecretPulledImages), so a library image needs it too.
+func (c Config) pullsFromRegistry(image string) bool {
+	reg := strings.TrimRight(c.TemplateRegistry, "/")
+	if reg == "" {
+		return false
+	}
+	host, _, _ := strings.Cut(reg, "/")
+	return strings.HasPrefix(image, host+"/")
+}
+
 func (c Config) hasGPUModel(m string) bool {
 	for _, g := range c.GPUModels {
 		if g == m {

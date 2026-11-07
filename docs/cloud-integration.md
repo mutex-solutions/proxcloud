@@ -146,7 +146,8 @@ The shape is documented in the header of `proxmox.go`:
     "sandbox": {                                         // the sandbox workers' VM firewall, applied by the sync; secret.sandboxKubeconfig
       "pool": "proxcloud-sandbox", "nodes": ["198.51.100.10-198.51.100.29"],
       "loadBalancers": ["198.51.100.200-198.51.100.209"], "dns": ["1.1.1.1"],
-      "kubeletSources": ["192.0.2.201-192.0.2.209"], "snat": "203.0.113.50", "unsecuredMinAgeMinutes": 20
+      "kubeletSources": ["192.0.2.201-192.0.2.209"], "snat": "203.0.113.50", "unsecuredMinAgeMinutes": 20,
+      "registry": {"address": "192.0.2.226", "port": 443}   // the sandbox registry, the one image source (SB6a)
     },
     "storageProfiles": {"std": {"label": "Local NVMe (ZFS)", "storages": {"*": "local-zfs"},
                                 "shared": false, "snapshots": true, "thin": true,

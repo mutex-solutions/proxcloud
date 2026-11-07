@@ -38,6 +38,7 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 | 40 | `40-mgmt-platform.yml` | ArgoCD, then Applications with inline values: cert-manager, CloudNativePG, ProxCloud (API, consoles, Keycloak, PostgreSQL, RabbitMQ). The scheduler is on. |
 | 45 | `45-object-store.yml` | The object store, see below. |
 | 55 | `55-sandbox-cluster.yml` | `mode: split` with `sandbox.enabled`: the sandbox cluster's vnet, the cluster from the kamaji chart, then `deploy/sandbox-cluster` on it. See "Sandbox cluster" below. |
+| 55 | `55-sandbox-registry.yml` | `sandbox.registry.address` set: the sandbox registry (Zot on the services cluster, its bucket on the object store), the images of `deploy/templates/images.yaml` copied in and pre-pulled on every sandbox node. Also run by `make upgrade`. See "Sandbox registry" below. |
 | 56 | `56-sandbox-edge.yml` | `sandbox.enabled`: the public entry of sandbox ports: `sandbox-proxy` and its MetalLB address, the wildcard certificate on the services cluster and its copy, the DNS record and TSIG key on PowerDNS, the HAProxy entry appliance. Also run by `make upgrade`. See "Sandbox ports" below. |
 | 60 | `60-register.yml` | Logins, an Admin-API key, the Proxmox provider, fio suggestions; on the first run `deploy/seed/seed-operator.py` (platform and billing configuration, flavors, public price plan, quota). Prints the URLs. |
 
@@ -191,6 +192,42 @@ firewall pass ran on the lab with the portal token against the SB0 cluster, the 
 stage 10's rows, and the exit node's SNAT file was written by hand with the content stage 55 renders
 ([managed-sandbox.md §2.5](managed-sandbox.md#25-measured-on-the-lab-2026-11-07)). Stages 10, 55 and 60 themselves
 have only been syntax-checked.
+
+## Sandbox registry (stage 55)
+
+The sandbox nodes pull templates and runtime images from the platform's own registry, each project with an account
+that reads its own images and the built-in ones only ([managed-sandbox.md §5](managed-sandbox.md#5-the-sandbox-registry-sb6a)).
+
+1. `sandbox.registry.address`: one address of `services.network.metallb`, unused. The stage refuses an address
+   outside that range.
+2. The bucket `sandbox.registry.bucket` (default `pc-sandbox-registry`) goes on the object store of stage 45:
+   - **Standard** (`object_store.mode: vm` or `truenas-app`): RustFS. The stage creates the bucket and a user
+     `<bucket>-svc` limited to it with the RustFS root key (`generated/rustfs-*`).
+   - **Full** (`object_store.mode: ceph-rgw`): RGW. `object_store.access_key`/`secret_key` must be an RGW user with
+     `users=*` caps (the same key the ceph-s3 provider uses); the stage creates the user `<bucket>-svc` through the
+     admin ops API, and that user creates and owns the bucket. `object_store.region` is the zonegroup's `api_name`.
+   - `external`: the store's own key creates and keeps the bucket.
+   The bucket has no Object Lock (Zot's garbage collection deletes unreferenced blobs); its secret is
+   `generated/sandbox-registry-s3-secret`.
+3. `make install`, or stages 55 (both), 56 and 60 on an installed site. Stage 55 (registry) runs Zot in
+   `sandbox.registry.namespace` with a CA of its own, writes `generated/sandbox-registry-{admin,push,pull-nodes,key}`
+   (the accounts and the key project passwords derive from), copies each pinned image and the release's
+   `proxcloud-sandbox-proxy` in (skopeo on the first mgmt host; `images.pull_secret` if ghcr needs a login) and
+   applies `deploy/sandbox-cluster/registry.yaml` and the prepull on the sandbox cluster. Stage 56 runs
+   sandbox-proxy from the copy. Stage 60 gives the Proxmox provider `config.sandbox.registry` (the workers' firewall
+   then admits that address and port) and, when it first registers the sandbox provider, the templates with
+   `pin:<name>` resolved to the copies, `templateRegistry` and `imageAdoption` (`sandbox.registry.adoption`).
+4. Check: after the next sync, `kubectl -n sandbox-system get pods -l app=template-prepull` on the sandbox cluster
+   shows one Running pod per node; a re-run of stage 55 reports the count.
+5. New template images: merge the `sandbox-templates` workflow's pull request, then `make upgrade`. The portal moves
+   the templates to the new digests once every node pre-pulled them (`imageAdoption: on`).
+
+An existing sandbox provider keeps its templates: set `Template registry` (`<address>/t`), `Built-in image updates`
+and the templates' images (the `library/` copies) in the console.
+
+**What ran where:** stage 55 (registry) ran on the lab against the SB0 cluster from a scratch site, with RustFS and
+then RGW as the backend; stage 60's new keys and the release proxy copy did not run there
+([managed-sandbox.md §5.6](managed-sandbox.md#56-measured-on-the-lab-2026-11-07)).
 
 ## Sandbox ports (stage 56)
 

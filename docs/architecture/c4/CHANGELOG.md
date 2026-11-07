@@ -4,6 +4,46 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: The sandbox registry: Zot on the services cluster, a pull account per project, pinned built-in images (SB6a)
+
+**What changed**
+
+- New container: the sandbox registry, Zot (minimal build, digest-pinned) on the services cluster behind one MetalLB
+  address, TLS from a CA of its own, its blobs in a bucket of the object store: RustFS on Standard, RGW on Full,
+  through a service user limited to that bucket (`files/rustfs-bootstrap.py` learned plain buckets, RGW and external
+  stores). Installer stage `55-sandbox-registry.yml` (also in `make upgrade`), on when `sandbox.registry.address` is set.
+- `sandbox-proxy registry-users` (`internal/sandboxproxy/registryusers.go`), a native sidecar of Zot: from the sandbox
+  cluster's tenant namespaces it writes Zot's users and access rules (`pull-<project>` reads `library/**` and
+  `t/<project>/**`, `pull-nodes` reads `library/**`, `push` writes `t/**` only, `admin`) and one pull Secret per project;
+  project passwords are an HMAC of the account name, so nothing is stored per project. Its identity on the sandbox
+  cluster (`deploy/sandbox-cluster/registry.yaml`) lists namespaces and touches only the two Secret names it writes.
+- Sandbox pods name their project's Secret for every image on the registry's host; the portal no longer copies one
+  shared pull Secret into every project namespace.
+- Built-in images: `deploy/templates/` (from the earlier implementation, minus `mcp-gateway`; the desktop image without
+  Chrome and VS Code), the `sandbox-templates` workflow (ghcr, then a pull request that pins the digests) and the pin
+  file `deploy/templates/images.yaml`. Stage 55 copies every pin and the release's sandbox-proxy in by digest, pre-pulls
+  them on every node (`template-prepull`) and makes containerd trust the registry CA for that address alone
+  (`registry-trust`). Stage 56 runs sandbox-proxy from the copy; stage 60 resolves `pin:<name>` templates and sets
+  `templateRegistry` and `imageAdoption`.
+- Image adoption ported: job `sandboxTemplateAdopt` (`project.AdoptSandboxImages`) moves a built-in template to the
+  digest the prepull runs once every node has it, with a compare-and-set write (`externalservice.SetTemplateImage`) and an
+  audit event. The admin form edits `templateRegistry` and `imageAdoption`.
+- Layer 1: `config.sandbox.registry` adds one rule to the workers' generation, TCP out to the registry's address and
+  port (`SandboxFirewall.RegistryAddress`).
+
+**Why**
+
+The nodes pulled templates straight from public registries (plan §6: until SB6a), and the earlier implementation gave
+every tenant namespace the same pull account, so a node escape read every tenant's templates and a compromised build
+could overwrite another tenant's. A registry of the platform's own, with one account per project and a push account
+that cannot touch `library/**`, closes both; digest pins plus prepull plus adoption mean a new image reaches a sandbox
+only after every node has it. Zot over distribution: garbage collection while serving, access rules reloaded without a
+restart (measured), one binary. The account sync derives the accounts from the cluster instead of the portal writing
+registry config, so the portal gains no credential for the services cluster.
+
+**Diagrams:** C1 (ghcr row), C2 (the registry container, its edges to the workers and the object stores, table row),
+C3 (registry component and edges), C4 (layer-1 rule list). Measured on the lab: docs/managed-sandbox.md §5.6.
+
 ## 2026-11-08: Sandbox ports in public: sandbox-proxy with TLS, entry appliance, wildcard certificate, wake (SB4)
 
 **What changed**

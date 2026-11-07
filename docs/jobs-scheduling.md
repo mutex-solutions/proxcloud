@@ -134,6 +134,7 @@ cron specs from `scheduler.go`. All specs are 6-field seconds-first, UTC.
 | `servicesSync` | `0 */15 * * * *` | every 15 minutes | 10m / 30s | Sync every ENABLED project's cloud resources into the cache |
 | `pveStateSync` | `15 * * * * *` | every minute at :15 | 2m / 30s | Proxmox: SERVER, IMAGE and FLOATING_IP rows of every project off one `/cluster/resources` page per provider; heartbeat and staleness alert |
 | `sandboxStateSync` | `10 * * * * *` | every minute at :10 | 2m / 30s | Sandboxes: every enabled project's SANDBOX rows off the sandbox cluster before the minutely charge (pins each start, ends each vanished row) |
+| `sandboxTemplateAdopt` | `0 */5 * * * *` | every 5 minutes | 10m / 1m | Sandboxes: a built-in template moves to the digest the prepull DaemonSet runs once every Ready node has pulled it; only for providers with `imageAdoption` `on` (`dry-run` logs) (docs/managed-sandbox.md §5) |
 | `pveTaskPoll` | `*/20 * * * * *` | every 20 seconds | 1m / 10s | Proxmox: finished VM tasks past each node's cursor; records them (`LIST_EVENTS`), audits the ones the platform did not run, re-syncs their project |
 | `pveTrafficSample` | `45 * * * * *` | every minute at :45 | 2m / 30s | Proxmox: public-NIC counters of the VMs holding a public IP into `usageMetrics` |
 | `executeProjectDeletion` | `30 * * * * *` | every minute at :30 | 1m / 30s | Delete projects past their deletion grace window (cascade live cloud delete → remove the doc) |

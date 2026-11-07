@@ -198,7 +198,9 @@
     pc_sbx_kubeconfig: /root/sandbox.kubeconfig  # stage 55 writes it
     pc_sbx_edge_ns: pc-sandbox
     pc_sbx_tls_secret: "{{ pc.sandbox.tls.secret if pc.sandbox.tls.issuer == 'secret' else 'sandbox-wildcard-tls' }}"
-    pc_sbx_proxy_image: "{{ pc.sandbox.proxy.image or (pc.images.registry ~ '/proxcloud-sandbox-proxy:' ~ pc_ver.proxcloud) }}"
+    # With the sandbox registry, the copy stage 55 made of it (pinned by digest, pulled with the nodes' account).
+    pc_sbx_registry: "{{ (lookup('ansible.builtin.file', pc_gen ~ '/sandbox-registry.json') | from_json) if pc_sandbox_registry_on else {} }}"
+    pc_sbx_proxy_image: "{{ pc_sbx_registry.proxyImage | default('', true) or pc.sandbox.proxy.image or (pc.images.registry ~ '/proxcloud-sandbox-proxy:' ~ pc_ver.proxcloud) }}"
     pc_sbx_tsig: "{{ (lookup('ansible.builtin.file', pc_gen ~ '/sandbox-tsig.json') | from_json) if pc.sandbox.tls.issuer == 'acme' else {} }}"
     pc_sbx_wake: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sandbox-wake-token ' ~ pc_alnum) }}"
   tasks:
@@ -230,6 +232,9 @@
         kubectl $ns get secret sandbox-proxy-tls >/dev/null 2>&1 || kubectl $ns create secret generic sandbox-proxy-tls
         kubectl apply -f sandbox-proxy.yaml
         kubectl $ns set image deploy/sandbox-proxy proxy="$IMAGE"
+        if [ -n "$PULL" ]; then
+          kubectl $ns patch deploy/sandbox-proxy --type merge -p "{\"spec\":{\"template\":{\"spec\":{\"imagePullSecrets\":[{\"name\":\"$PULL\"}]}}}}"
+        fi
         kubectl $ns annotate svc sandbox-proxy metallb.io/loadBalancerIPs="$ADDRESS" --overwrite
       args: {executable: /bin/bash, chdir: /root/sandbox-bundle}
       environment:
@@ -237,6 +242,7 @@
         DOMAIN: "{{ pc.sandbox.domain }}"
         WAKE: "{{ pc_sbx_wake }}"
         IMAGE: "{{ pc_sbx_proxy_image }}"
+        PULL: "{{ 'sandbox-registry-nodes' if pc_sbx_registry.proxyImage | default('') else '' }}"
         ADDRESS: "{{ pc.sandbox.proxy.address }}"
       changed_when: false
       no_log: true

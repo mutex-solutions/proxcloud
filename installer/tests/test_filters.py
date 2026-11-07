@@ -204,4 +204,34 @@ assert "public.address" in f.sandbox_edge_problem(dict(edge, entry=dict(edge["en
 assert "public.address" in f.sandbox_edge_problem(dict(edge, entry=dict(edge["entry"], public=dict(pub, gateway="198.51.100.1"))))
 assert "public.address" in f.sandbox_edge_problem(dict(edge, entry=dict(edge["entry"], public=dict(pub, address="10.110.0.6/24"))))
 assert f.sandbox_edge_problem(dict(edge, entry={"public": {"bridge": ""}})) == ""  # the operator forwards 443 itself
+
+# The sandbox registry (stage 55): pinned images land under library/ with the same digest; templates name them.
+D = "sha256:" + "a" * 64
+pins = {"python": "docker.io/library/python:3.12-slim@" + D, "base": "ghcr.io/example/sandbox-base@" + D}
+imgs = f.sandbox_images(pins, "192.0.2.226")
+assert [i["target"] for i in imgs] == ["192.0.2.226/library/sandbox-base:pinned@" + D,
+                                      "192.0.2.226/library/python:3.12-slim@" + D], imgs
+assert imgs[1]["source_ref"] == "docker.io/library/python@" + D and imgs[1]["target_ref"] == "192.0.2.226/library/python@" + D
+assert imgs[1]["target_tagged"] == "192.0.2.226/library/python:3.12-slim" and imgs[0]["target_tagged"].endswith(":pinned")
+assert f.sandbox_images({"r": "reg.example.org:5000/x/y@" + D}, "h")[0]["source_ref"] == "reg.example.org:5000/x/y@" + D
+for bad in [{"x": "docker.io/library/python:3.12"}, {"x": "python@" + D}, {"Bad": "docker.io/a/b@" + D},
+            {"a": "docker.io/x/python:1@" + D, "b": "ghcr.io/y/python:1@" + D}]:  # unpinned, no registry, name, clash
+    try:
+        f.sandbox_images(bad, "h")
+        raise AssertionError(bad)
+    except ValueError:
+        pass
+tpl = {"python": {"image": "pin:python", "cpu": 1}, "own": {"image": "docker.io/library/node:22"}}
+assert f.sandbox_templates(tpl, pins, "192.0.2.226")["python"] == {"image": "192.0.2.226/library/python:3.12-slim@" + D, "cpu": 1}
+assert f.sandbox_templates(tpl, pins)["python"]["image"] == pins["python"]  # no registry: straight from the source
+assert f.sandbox_templates(tpl, pins)["own"]["image"] == "docker.io/library/node:22"
+try:
+    f.sandbox_templates({"x": {"image": "pin:nope"}}, pins)
+    raise AssertionError("unknown pin")
+except ValueError:
+    pass
+assert f.sandbox_registry_problem({"registry": {"address": "192.0.2.226"}}, "192.0.2.210-192.0.2.229", "vm") == ""
+assert "inside" in f.sandbox_registry_problem({"registry": {"address": "192.0.2.230"}}, "192.0.2.210-192.0.2.229", "vm")
+assert "IPv4" in f.sandbox_registry_problem({"registry": {"address": ""}}, "192.0.2.210-192.0.2.229", "vm")
+assert "bucket" in f.sandbox_registry_problem({"registry": {"address": "192.0.2.226"}}, "192.0.2.210-192.0.2.229", "none")
 print("ok")

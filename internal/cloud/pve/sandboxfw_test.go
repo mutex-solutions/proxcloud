@@ -49,6 +49,47 @@ func TestRangeCIDRs(t *testing.T) {
 	}
 }
 
+// The registry is one address and one port, nothing wider: its address stays out of the internet set, so no other
+// port of it opens, and a registry inside the subnet or on the control plane is refused.
+func TestSandboxGenerationRegistry(t *testing.T) {
+	f := testSandbox()
+	base, _ := f.generation()
+	f.RegistryAddress = "10.20.0.226"
+	g, err := f.generation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg []FirewallRule
+	for _, r := range g.Rules {
+		if r.Dest == "10.20.0.226" {
+			reg = append(reg, r)
+		}
+	}
+	if len(reg) != 1 || reg[0].Type != "out" || reg[0].Proto != "tcp" || reg[0].DPort != "443" {
+		t.Fatalf("registry rules %+v", reg)
+	}
+	if len(g.Rules) != len(base.Rules)+1 || g.Group == base.Group {
+		t.Fatalf("the registry adds exactly one rule and a new generation: %d -> %d", len(base.Rules), len(g.Rules))
+	}
+	f.RegistryPort = 5000
+	if g, _ := f.generation(); !slices.ContainsFunc(g.Rules, func(r FirewallRule) bool { return r.Dest == "10.20.0.226" && r.DPort == "5000" }) {
+		t.Fatal("the registry port is taken from the config")
+	}
+	for name, mod := range map[string]func(*SandboxFirewall){
+		"inside subnet":     func(f *SandboxFirewall) { f.RegistryAddress = "10.110.0.250" },
+		"control plane":     func(f *SandboxFirewall) { f.RegistryAddress = "10.20.0.214" },
+		"a name":            func(f *SandboxFirewall) { f.RegistryAddress = "registry.example.org" },
+		"a network":         func(f *SandboxFirewall) { f.RegistryAddress = "10.20.0.0/24" },
+		"port out of range": func(f *SandboxFirewall) { f.RegistryAddress, f.RegistryPort = "10.20.0.226", 70000 },
+	} {
+		f := testSandbox()
+		mod(&f)
+		if _, err := f.generation(); err == nil {
+			t.Errorf("%s: want an error", name)
+		}
+	}
+}
+
 func TestSandboxGeneration(t *testing.T) {
 	g, err := testSandbox().generation()
 	if err != nil {

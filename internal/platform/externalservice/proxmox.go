@@ -41,6 +41,7 @@ package externalservice
 //	      "proxy": {"address": "192.0.2.200", "port": 443,  // sandbox-proxy's MetalLB address, and the entry appliance
 //	                "entry": {"vmid": 9110, "pool": "proxcloud-sandbox-entry", "address": "192.0.2.5"}}  // (its pool,
 //	                                                                         // its address on the sandbox vnet)
+//	      "registry": {"address": "198.51.100.226", "port": 443}  // the sandbox registry the workers pull from
 //	    },                                     // + secret.sandboxKubeconfig (nodes get/list/patch)
 //	    "storageProfiles": {                   // Phase 5 — honest capability flags
 //	      "std": {"storages": {"*": "local-zfs"}, "shared": false, "snapshots": true,
@@ -406,6 +407,14 @@ type PVESandbox struct {
 	UnsecuredMinAge time.Duration
 	Kubeconfig      string // secret.sandboxKubeconfig: the sandbox cluster, nodes get/list/patch
 	Proxy           PVESandboxProxy
+	Registry        PVESandboxRegistry
+}
+
+// PVESandboxRegistry is config.sandbox.registry: the sandbox registry's address and port (docs/managed-sandbox.md §5),
+// the one place outside the sandbox subnet the workers pull images from. Empty Address: no registry rule.
+type PVESandboxRegistry struct {
+	Address string
+	Port    int
 }
 
 // PVESandboxProxy is config.sandbox.proxy: sandbox-proxy's MetalLB address and port, and the platform HAProxy
@@ -436,6 +445,9 @@ func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
 		if cfg.Proxy.Port == 0 {
 			cfg.Proxy.Port = 443
 		}
+	}
+	if r, _ := s["registry"].(map[string]any); r != nil {
+		cfg.Registry = PVESandboxRegistry{Address: str(r["address"]), Port: intOf(r["port"])}
 	}
 	return cfg, cfg.Pool != ""
 }

@@ -51,6 +51,11 @@ func (s *Service) Get(ctx context.Context, id string) (*ExternalService, error) 
 	return s.decrypt(es), nil
 }
 
+// SetTemplateImage is Repo.SetTemplateImage (image adoption of a sandbox provider's built-in template).
+func (s *Service) SetTemplateImage(ctx context.Context, id, tmpl, from, to string) (bool, error) {
+	return s.repo.SetTemplateImage(ctx, id, tmpl, from, to)
+}
+
 // SetProvisionError records a failed provisioning on the row, or with a nil err clears the record.
 func (s *Service) SetProvisionError(ctx context.Context, id, projectID string, cause error) error {
 	if cause == nil {

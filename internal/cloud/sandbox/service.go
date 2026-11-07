@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -105,9 +104,6 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string, 
 	if err := s.api.EnsureNamespace(ctx, ns, labels); err != nil {
 		return err
 	}
-	if err := s.ensurePullSecret(ctx, ns, projectID); err != nil {
-		return err
-	}
 	l := s.cfg.Limits
 	pods, cpu, memMb, gpus := l.MaxConcurrent, l.MaxConcurrent*l.MaxCPU, l.MaxConcurrent*l.MaxMemoryGiB*1024, l.MaxConcurrentGPUs
 	if q != nil {
@@ -133,20 +129,9 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string, 
 	})
 }
 
-// ensurePullSecret copies the template registry's pull-only credentials (sandbox-system source,
-// created by the operator) into the project namespace, so sandboxes can start from custom
-// templates. Pods never mount it and have no API access, so customer code cannot read it. No
-// source = custom templates are not set up on this cluster: nothing to copy. A source that
-// cannot be read (RBAC, cluster error) is logged and skipped: sandboxes from the public
-// templates do not need it, and custom ones would otherwise fail at image pull with no cause.
-func (s *Service) ensurePullSecret(ctx context.Context, ns, projectID string) error {
-	_, err := s.copyPullSecret(ctx, ns, TemplatePullSecret, map[string]any{LabelProject: projectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue})
-	if errors.Is(err, errPullSourceUnreadable) {
-		slog.Warn("sandbox: template pull secret not copied, custom templates will not pull", "namespace", ns, "err", err)
-		return nil
-	}
-	return err
-}
+// The project's pull Secret (TemplatePullSecret in sb-<project>) is not written here: the registry's account sync
+// writes one per project with that project's own account (docs/managed-sandbox.md §5). Copying one shared account
+// into every namespace, as before, let a node escape read every tenant's templates.
 
 var errPullSourceUnreadable = errors.New("cannot read the template registry pull secret")
 
