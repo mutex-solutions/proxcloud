@@ -324,12 +324,10 @@ func (h *Handler) pveBuildServer(ctx context.Context, u *user.User, proj *Projec
 	seededVMID := 0
 	loginUser := strAny(data["adminUser"])
 	if loginUser != "" && (strAny(data["adminPass"]) == "" || !seedLoginUserRe.MatchString(loginUser)) {
-		h.fail(w, httpx.BadRequest("A login user needs a password and a name of lowercase letters, digits, - and _"))
-		return
+		return nil, httpx.BadRequest("A login user needs a password and a name of lowercase letters, digits, - and _")
 	}
 	if herr := pvePasswordErr(strAny(data["adminPass"])); herr != nil {
-		h.fail(w, herr)
-		return
+		return nil, herr
 	}
 	seedIn := pveSeedInput{Name: name, UserData: userData, Password: strAny(data["adminPass"]), LoginUser: loginUser, SSHKeys: sshKeys, Metadata: metadata}
 	if pveNeedsSeed(es, seedIn) {
