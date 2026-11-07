@@ -400,6 +400,7 @@ func (s *Service) DeleteServer(ctx context.Context, projectID, externalID string
 			return err
 		}
 	}
+	s.waitReplicaRemoved(ctx, vm.VMID)
 	if vm.Status == "running" {
 		if up, err := s.C.StopVM(ctx, vm.Node, vm.VMID); err == nil {
 			_ = s.C.WaitTask(ctx, up)
@@ -480,6 +481,7 @@ func (s *Service) ResizeServer(ctx context.Context, projectID, externalID string
 			if werr := s.C.WaitTask(ctx, up); werr != nil {
 				return fmt.Errorf("pve resize: shutdown: %w", werr)
 			}
+			s.waitUnderHA(ctx, vm, "STOP")
 		} else {
 			return fmt.Errorf("pve resize: shutdown: %w", err)
 		}
@@ -519,6 +521,7 @@ func (s *Service) ResizeServer(ctx context.Context, projectID, externalID string
 		if up, serr := s.C.StartVM(ctx, vm.Node, vm.VMID); serr == nil {
 			_ = s.C.WaitTask(ctx, up)
 		}
+		s.waitUnderHA(ctx, vm, "START")
 	}
 	return nil
 }
@@ -792,6 +795,7 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 		if err != nil {
 			return fmt.Errorf("pve rebuild: stop: %w", err)
 		}
+		s.waitUnderHA(ctx, vm, "STOP")
 	}
 	// Removing a disk from its slot parks it as unusedN.
 	up, err := s.C.SetVMConfig(ctx, node, vm.VMID, nil, slot)
@@ -862,6 +866,7 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 	if err != nil {
 		return fmt.Errorf("pve rebuild: start: %w", err)
 	}
+	s.waitUnderHA(ctx, vm, "START")
 	return nil
 }
 

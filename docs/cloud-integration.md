@@ -349,7 +349,17 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   `GET /api/v1/nocloud/{token}/{meta-data,user-data,vendor-data,network-config}`. Deleting the server or
   tearing down the project revokes it and removes the CD.
 - **Secrets.** User-data is encrypted at rest in the database. On an ISO seed it is a plain file on the
-  ISO storage and in the guest's CD drive for the server's lifetime, as any cloud-init seed is.
+  ISO storage and in the guest's CD drive for the server's lifetime, as any cloud-init seed is. A create
+  password is only ever there as a bcrypt hash, also for a login user (`adminUser`). The portal offers no
+  tenant a path to the file, so what protects it is who can read the store: **export a NAS store to the node
+  addresses, not to a subnet.** With a subnet, any VM whose traffic reaches the NAS from inside it can mount
+  the store and read every seed on it, along with every disk. Private vnets cannot get there
+  (`blockedCidrs` plus the node networks); a public NIC is bridged to the uplink and only the site's routing
+  stops it. CephFS asks for a key, so reaching a monitor is not enough.
+- **Removal.** Deleting the server removes the CD, or without `Datastore.Allocate` overwrites it with an
+  empty one (docs/proxmox-permissions.md).
+- **Password login.** A create password always goes through a seed: PVE's own drive sets the password but
+  cannot turn on `ssh_pwauth`, and a cloud image then refuses it over ssh.
 - **Later changes.** Attaching or detaching a public NIC re-delivers the seed with the same instance id
   and the seed asks cloud-init to re-read the network at each boot (`updates.network.when: [boot]`), so
   user-data does not run again. Rebuild delivers it with a new instance id: the new disk runs it once.

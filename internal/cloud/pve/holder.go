@@ -205,6 +205,7 @@ func (s *Service) KeepServerVolumes(ctx context.Context, projectID, externalID s
 		if err := s.C.WaitTask(ctx, up); err != nil {
 			return err
 		}
+		s.waitUnderHA(ctx, vm, "STOP")
 	}
 	holder, err := s.holderOn(ctx, projectID, vm.Node)
 	if err != nil {

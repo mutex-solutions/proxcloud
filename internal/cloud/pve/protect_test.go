@@ -3,6 +3,7 @@ package pve
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -107,5 +108,88 @@ func TestReserveMemLeavesRoomForFailover(t *testing.T) {
 	req.ReserveMem = map[string]int64{"a": 7 << 30, "b": 7 << 30}
 	if _, err := PickNode(nodes, nil, req); err == nil {
 		t.Fatal("placed a VM into memory reserved for failover")
+	}
+}
+
+// PVE keeps a deleted job listed until pvesr's next pass. A read in that window once put HA back on the VM.
+func TestReconcileIgnoresAJobBeingRemoved(t *testing.T) {
+	reply := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api2/json/cluster/replication", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, []ReplicationJob{{ID: "7-0", Guest: 7, Target: "b", RemoveJob: "full"}})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	svc, err := NewService(Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := svc.ReconcileProtection(context.Background(), ClusterResource{VMID: 7, Node: "a"})
+	if err != nil || pr != nil {
+		t.Fatalf("got %v, %v", pr, err)
+	}
+}
+
+// Without Datastore.Allocate PVE refuses the delete: the file must still lose its content.
+func TestDeleteSeedVolumeEmptiesWhatItCannotDelete(t *testing.T) {
+	reply := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
+	var uploaded string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api2/json/nodes/a/storage/iso/content/", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "Permission check failed", http.StatusForbidden)
+	})
+	mux.HandleFunc("/api2/json/nodes/a/storage/iso/upload", func(w http.ResponseWriter, r *http.Request) {
+		f, h, err := r.FormFile("filename")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		body, _ := io.ReadAll(f)
+		if strings.Contains(string(body), "secret") {
+			t.Error("the replacement must be empty")
+		}
+		uploaded = h.Filename
+		reply(w, "UPID:a:0:0:0:imgcopy::t:")
+	})
+	mux.HandleFunc("/api2/json/nodes/a/tasks/", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, map[string]any{"status": "stopped", "exitstatus": "OK"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	svc, err := NewService(Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.DeleteSeedVolume(context.Background(), "a", "iso:iso/pcseed-7-x.iso")
+	if uploaded != "pcseed-7-x.iso" {
+		t.Fatalf("uploaded %q", uploaded)
+	}
+}
+
+func TestWaitReplicaRemoved(t *testing.T) {
+	defer func(d time.Duration) { replicaRemovePoll = d }(replicaRemovePoll)
+	replicaRemovePoll = time.Millisecond
+	reads := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api2/json/cluster/replication", func(w http.ResponseWriter, _ *http.Request) {
+		reads++
+		jobs := []ReplicationJob{{ID: "8-0", Guest: 8}}
+		if reads < 3 {
+			jobs = append(jobs, ReplicationJob{ID: "7-0", Guest: 7, RemoveJob: "full"})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": jobs})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	svc, err := NewService(Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.waitReplicaRemoved(context.Background(), 7)
+	if reads != 3 {
+		t.Fatalf("a delete must wait for the job to go: %d reads", reads)
 	}
 }

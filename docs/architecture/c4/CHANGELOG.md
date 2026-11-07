@@ -104,6 +104,28 @@ and rules: [README.md](README.md#maintenance-rule).
   archive only through `VM.Backup` on its VM, and an ACL on `/vms` would break the rule that the token only sees pool VMs.
 
 **Diagrams updated:** `c3-components.md` (PVE service).
+## 2026-11-07: Grant-blocked IaaS flows run on a real cluster
+
+**What changed**
+
+- A create password always goes through a seed, and a login user (`adminUser`) is rendered by the API from the bcrypt
+  hash. The wizard no longer sends the password as plain text user-data, and a typed user-data is no longer dropped.
+- A removed seed CD is overwritten with an empty one when the token may not delete it.
+- A replication job PVE is still removing no longer counts as protection. Deleting a protected server, or the project
+  holding one, waits for pvesr to remove the replica before destroying the VM. A seed CD on node-local storage refuses
+  protection. A resize or rebuild of an HA-managed server waits for it to be down first. Test connection names
+  `Sys.Console` and `VM.Replicate`.
+
+**Why**
+
+- With the privileges in place, each flow ran for the first time through a portal. Remove protection put HA straight
+  back on the VM. PVE wants `Datastore.Allocate` to delete an ISO and the error was ignored, so every seed CD stayed
+  forever with its user-data. A password-only server refused that password over ssh. The wizard's login user put the
+  password in clear on a CD that another tenant's VM could read from a NAS export covering a subnet. Deleting a
+  protected server left its disks on the replica node for good: PVE drops the job with the VM, so nothing removed them.
+  A resize left a protected server off: HA took the start request before it had finished the stop.
+
+**Diagrams updated:** none, no container or component changed.
 
 ## 2026-11-07: Server snapshots billed (MET-G9)
 

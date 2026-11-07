@@ -10,6 +10,7 @@ package project
 // alone is never trusted for a mutation.
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -316,7 +317,12 @@ func (h *Handler) pveCreateServer(w http.ResponseWriter, r *http.Request, u *use
 	}
 	var seedStep func(context.Context, string, int) error
 	seededVMID := 0
-	seedIn := pveSeedInput{Name: name, UserData: userData, Password: strAny(data["adminPass"]), SSHKeys: sshKeys, Metadata: metadata}
+	loginUser := strAny(data["adminUser"])
+	if loginUser != "" && (strAny(data["adminPass"]) == "" || !seedLoginUserRe.MatchString(loginUser)) {
+		h.fail(w, httpx.BadRequest("A login user needs a password and a name of lowercase letters, digits, - and _"))
+		return
+	}
+	seedIn := pveSeedInput{Name: name, UserData: userData, Password: strAny(data["adminPass"]), LoginUser: loginUser, SSHKeys: sshKeys, Metadata: metadata}
 	if pveNeedsSeed(es, seedIn) {
 		if h.seeds == nil {
 			httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "Server seed store not configured")
@@ -859,9 +865,10 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 			h.fail(w, pveVolumeErr(err))
 			return true
 		}
-		// A later rebuild of a seeded server sets the password from its seed.
+		// A later rebuild of a seeded server sets the password from its seed: only the user the seed holds it for.
 		if h.seeds != nil {
-			if seed, err := h.seeds.ForServer(ctx, es.ID, proj.ID, cr.ExternalID); err == nil && seed != nil && seed.PasswordHash != "" {
+			if seed, err := h.seeds.ForServer(ctx, es.ID, proj.ID, cr.ExternalID); err == nil && seed != nil && seed.PasswordHash != "" &&
+				username == cmp.Or(seed.LoginUser, pve.DefaultUserOf(pve.ServerImageSlug(cr.Data))) {
 				if b, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); err == nil {
 					seed.PasswordHash = string(b)
 					if err := h.seeds.put(ctx, seed); err != nil {

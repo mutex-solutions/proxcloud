@@ -11,6 +11,7 @@ package pve
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"slices"
 	"strconv"
@@ -39,6 +40,8 @@ type ReplicationJob struct {
 	Target   string `json:"target"`
 	Source   string `json:"source"`
 	Schedule string `json:"schedule"`
+	// RemoveJob is set between a job's delete and pvesr's next pass, which removes the replica and then the job.
+	RemoveJob string `json:"remove_job"`
 }
 
 // ReplicationStatus is GET /nodes/{node}/replication/{id}/status.
@@ -197,6 +200,10 @@ func (s *Service) ProtectableDisks(ctx context.Context, vm *ClusterResource, cfg
 	if hasPassthrough(cfg) {
 		return nil, conflictf("A server with a passed-through device cannot be protected")
 	}
+	// HA moves the VM with its config: a seed CD on storage only this node has would stop it starting anywhere else.
+	if vol := seedVolOf(cfg); vol != "" && !caps[slotStorage(vol)].Shared {
+		return nil, conflictf("This server's seed CD is on storage %s, which the other node does not have", slotStorage(vol))
+	}
 	storages := map[string]bool{}
 	for _, d := range ParseDisks(cfg) {
 		if strings.Contains(d.VolID, "cloudinit") {
@@ -258,7 +265,9 @@ func (s *Service) ReserveMem(ctx context.Context, vms []ClusterResource) (map[st
 	}
 	out := map[string]int64{}
 	for _, j := range jobs {
-		out[j.Target] += mem[j.Guest]
+		if j.RemoveJob == "" {
+			out[j.Target] += mem[j.Guest]
+		}
 	}
 	return out, nil
 }
@@ -346,6 +355,13 @@ func (s *Service) EnableProtection(ctx context.Context, projectID, externalID st
 	if err != nil {
 		return err
 	}
+	jobs, err := s.C.ListReplicationJobs(ctx)
+	if err != nil {
+		return err
+	}
+	if slices.ContainsFunc(jobs, func(j ReplicationJob) bool { return j.Guest == vm.VMID }) {
+		return conflictf("The last protection of this server is still being removed. Try again in a minute")
+	}
 	id, err := s.C.CreateReplicationJob(ctx, vm.VMID, target, DefaultReplicationSchedule)
 	if err != nil {
 		return err
@@ -371,6 +387,10 @@ func (s *Service) DisableProtection(ctx context.Context, projectID, externalID s
 	if vm == nil {
 		return nil
 	}
+	return s.disableProtectionOn(ctx, vm)
+}
+
+func (s *Service) disableProtectionOn(ctx context.Context, vm *ClusterResource) error {
 	// An unprotected VM touches none of this, so a server delete keeps working on a token without HA rights.
 	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
 	if err != nil {
@@ -411,6 +431,29 @@ func (s *Service) DisableProtection(ctx context.Context, projectID, externalID s
 	return s.C.WaitTask(ctx, up)
 }
 
+// replicaRemovePoll is how often a delete looks at the job pvesr has to remove. pvesr passes once a minute.
+var replicaRemovePoll = 5 * time.Second
+
+// waitReplicaRemoved holds a VM delete until pvesr has removed the replica. PVE drops the VM's jobs with the VM, and
+// pvesr then has nothing left that says the target holds a copy: the tenant's disks would stay there, and the next VM
+// with this id would find its volume names taken. Best effort: past the deadline the delete goes on, and says so.
+func (s *Service) waitReplicaRemoved(ctx context.Context, vmid int) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	for {
+		jobs, err := s.C.ListReplicationJobs(ctx)
+		if err == nil && !slices.ContainsFunc(jobs, func(j ReplicationJob) bool { return j.Guest == vmid }) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			slog.Error("server deleted while its replica was still being removed", "vmid", vmid, "err", err)
+			return
+		case <-time.After(replicaRemovePoll):
+		}
+	}
+}
+
 // ReconcileProtection reads a protected VM's state and adds HA once the first sync has landed. nil = not protected.
 func (s *Service) ReconcileProtection(ctx context.Context, r ClusterResource) (map[string]any, error) {
 	jobs, err := s.C.ListReplicationJobs(ctx)
@@ -419,7 +462,7 @@ func (s *Service) ReconcileProtection(ctx context.Context, r ClusterResource) (m
 	}
 	var job *ReplicationJob
 	for i := range jobs {
-		if jobs[i].Guest == r.VMID {
+		if jobs[i].Guest == r.VMID && jobs[i].RemoveJob == "" {
 			job = &jobs[i]
 		}
 	}
@@ -512,6 +555,14 @@ func (s *Service) waitHAPower(ctx context.Context, vm *ClusterResource, verb str
 			return
 		case <-time.After(2 * time.Second):
 		}
+	}
+}
+
+// waitUnderHA is for what changes a VM once it is down, or reads it once it is back. The power task of an HA-managed
+// VM is done before the VM is: a start sent in that window is lost, and a resize left the VM off.
+func (s *Service) waitUnderHA(ctx context.Context, vm *ClusterResource, verb string) {
+	if HasTag(vm.Tags, tagProtected) {
+		s.waitHAPower(ctx, vm, verb)
 	}
 }
 

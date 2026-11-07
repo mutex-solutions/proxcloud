@@ -117,23 +117,6 @@ function rootDefaultDisk(flavor?: Flavor, image?: TemplateImage): number {
   return Math.max(imageMinimumDisk(image), Number.isFinite(flavorDisk) ? flavorDisk : 0)
 }
 
-// cloudInitUser builds a #cloud-config that creates a sudo login user with a password and enables
-// password SSH — the reliable way to do username+password login across images. JSON.stringify quotes
-// each value as a YAML double-quoted scalar so special characters can't break the document.
-function cloudInitUser(username: string, password: string): string {
-  return [
-    "#cloud-config",
-    "ssh_pwauth: true",
-    "users:",
-    "  - default",
-    `  - name: ${JSON.stringify(username)}`,
-    "    lock_passwd: false",
-    "    shell: /bin/bash",
-    "    sudo: 'ALL=(ALL) NOPASSWD:ALL'",
-    `    plain_text_passwd: ${JSON.stringify(password)}`,
-  ].join("\n")
-}
-
 // Collection-level cloud action (POST /project/{pid}/cloud/action → {result}).
 function useBulkAction<T>(pid: string, scope: CloudScope | undefined, action: string) {
   return useQuery({
@@ -340,14 +323,9 @@ export default function CreateServerPage() {
       if (latestViolations.length > 0) {
         throw new Error(latestViolations.map((violation) => violation.message).join(" "))
       }
-      // Password login with a username creates that user via cloud-init (reliable on any cloud-init
-      // image); the generated user-data wins over a manually-typed one. Without a username, fall back
-      // to adminPass on the image's default account.
-      const genUserData =
-        userDataSupported && loginMethod === "password" && username.trim() && password
-          ? cloudInitUser(username.trim(), password)
-          : ""
-      const finalUserData = userDataSupported ? genUserData || userData : ""
+      // Password login with a username creates that user next to the image's default account. The API
+      // hashes it, so the password itself never sits on the server's seed.
+      const finalUserData = userDataSupported ? userData : ""
       return apiFetch<CloudResource>(`/project/${pid}/cloud`, {
         method: "POST",
         cloud: scope,
@@ -370,7 +348,9 @@ export default function CreateServerPage() {
               ? { metadata: Object.fromEntries(Object.entries(metadata).filter(([, v]) => v)) }
               : {}),
             ...(loginMethod === "key" && keyName ? { keyName } : {}),
-            ...(loginMethod === "password" && !genUserData && password ? { adminPass: password } : {}),
+            ...(loginMethod === "password" && password
+              ? { adminPass: password, ...(username.trim() ? { adminUser: username.trim() } : {}) }
+              : {}),
             ...(finalUserData.trim() ? { userData: finalUserData } : {}),
             ...(sgNames.length ? { securityGroupNames: sgNames } : {}),
           },
