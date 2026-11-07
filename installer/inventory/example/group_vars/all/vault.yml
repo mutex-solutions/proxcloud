@@ -10,4 +10,6 @@ proxcloud_vault:
   # Tokens that already exist on the cluster (their secret is shown once, on creation):
   # platform_token_secret: ...
   # images_token_secret: ...
+  # capi_token_secret: ...   (mode=split)
+  # csi_token_secret: ...    (mode=split)
   # truenas_api_key: ...     # object_store.mode=truenas-app
