@@ -1669,6 +1669,8 @@ function TaxTab({ bpId, raw }: { bpId: string; raw: Doc | null }) {
 //   GET /admin/collect-transactions/{bp}/billing-profile
 //   POST /admin/account-credit-transactions/refund/{txnId}
 //   GET /admin/account-credit-transactions/{txnId}/sync (re-drives the gateway status)
+//   GET /admin/collect-transactions/{txnId}/sync (asks the gateway about a PENDING charge)
+//   POST /admin/collect-transactions/{txnId}/close (ends a PENDING charge the gateway says did not succeed, or one with no reference)
 
 function TransactionsTab({ bpId }: { bpId: string }) {
   const qc = useQueryClient()
@@ -1698,6 +1700,31 @@ function TransactionsTab({ bpId }: { bpId: string }) {
     onSuccess: () => {
       toast.success("Transaction synced with the gateway")
       invalidate()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const invalidateCollects = () =>
+    void qc.invalidateQueries({ queryKey: ["admin-list", `/admin/collect-transactions/${bpId}/billing-profile`] })
+
+  const recheck = useMutation({
+    mutationFn: (txnId: string) => apiFetch<Doc>(`/admin/collect-transactions/${txnId}/sync`),
+    onSuccess: (txn) => {
+      const note = txn?.errorMessage ? `: ${txn.errorMessage}` : ""
+      if (txn?.status === "PENDING") toast.warning(txn.errorMessage || "The gateway gave no final answer. The charge is still pending.")
+      else if (txn?.status === "SUCCESS") toast.success(`The gateway reports the charge succeeded${note}`)
+      else toast.info(`Charge is now ${txn?.status}${note}`)
+      invalidateCollects()
+      void qc.invalidateQueries({ queryKey: ["admin-bp", bpId] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const closeCharge = useMutation({
+    mutationFn: (txnId: string) => apiFetch(`/admin/collect-transactions/${txnId}/close`, { method: "POST" }),
+    onSuccess: () => {
+      toast.success("Charge closed")
+      invalidateCollects()
     },
     onError: (e: Error) => toast.error(e.message),
   })
@@ -1813,14 +1840,41 @@ function TransactionsTab({ bpId }: { bpId: string }) {
                       {fmtMoney(t.grossAmount, t.currency)}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={download.isPending}
-                        onClick={() => download.mutate(t.id)}
-                      >
-                        <Download className="size-4" /> Download
-                      </Button>
+                      <div className="flex justify-end gap-2">
+                        {t.status === "PENDING" && t.externalId && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={recheck.isPending}
+                            onClick={() => recheck.mutate(t.id)}
+                          >
+                            <RefreshCw className="size-4" /> Re-check
+                          </Button>
+                        )}
+                        {t.status === "PENDING" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            title={t.externalId ? "The gateway is asked first: closes only if it says the charge did not succeed." : `No gateway reference. Look for ${t.id} at the gateway first: close it only if nothing was charged.`}
+                            disabled={closeCharge.isPending}
+                            onClick={() => {
+                              if (window.confirm(t.externalId ? `Close charge ${t.id}? The gateway is asked first, and a charge that may still complete stays open.` : `Close charge ${t.id}? Look for this reference at the gateway first: close it only if nothing was charged.`)) {
+                                closeCharge.mutate(t.id)
+                              }
+                            }}
+                          >
+                            Close
+                          </Button>
+                        )}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={download.isPending}
+                          onClick={() => download.mutate(t.id)}
+                        >
+                          <Download className="size-4" /> Download
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}

@@ -18,14 +18,16 @@ func NewRepo(db *pgdoc.DB) *Repo {
 	return &Repo{col: db.C("usageMetrics")}
 }
 
-// FindForCurrentMonth mirrors findResourceMetricsForCurrentMonth: the doc for resourceId
-// whose billingCycle.startDate ≥ cycleStart. (nil,nil) when absent.
+// FindForCurrentMonth mirrors findResourceMetricsForCurrentMonth: the earliest doc for resourceId
+// whose billingCycle.startDate ≥ cycleStart. (nil,nil) when absent. Earliest, because the pass
+// closing a month asks for that month while the next month's doc may already exist, and rating the
+// next month's near-zero traffic would overwrite the month's total on its bill.
 func (r *Repo) FindForCurrentMonth(ctx context.Context, resourceID string, cycleStart time.Time) (*UsageMetrics, error) {
 	var m UsageMetrics
 	found, err := r.col.FindOne(ctx, pgdoc.M{
 		"resourceId":             resourceID,
 		"billingCycle.startDate": pgdoc.M{"$gte": cycleStart},
-	}, &m)
+	}, &m, pgdoc.Sort(pgdoc.AscK("billingCycle.startDate", pgdoc.KTime)))
 	if err != nil || !found {
 		return nil, err
 	}

@@ -34,6 +34,132 @@ and rules: [README.md](README.md#maintenance-rule).
   network.
 
 **Diagrams updated:** `c2-containers.md`, `c4-code.md`.
+## 2026-11-07: Database ids take a neutral prefix
+
+**What changed**
+
+- New managed databases get ids of the form `pc-d-<8hex>`. Existing databases keep the id they have.
+- A restore's source id may carry either prefix.
+
+**Why**
+
+- The earlier prefix came from the old brand, and it was the last one in use. An id names every object of a database
+  (Application, release, engine CR, secrets, Service, its folder in the backup store), so it cannot change on a live database.
+  The one place that read the prefix was that restore check, which would have refused a source with the new one.
+
+**Diagrams updated:** none; no container or relationship changed.
+
+## 2026-11-07: One bill per profile and cycle, the month's last hour billed once
+
+**What changed**
+
+- `ChargeBillingResources` runs get-or-create, rating and save in one transaction under the profile lock, the same
+  advisory lock payments already hold. The `lockedAt` lease and its retry are gone.
+- The admin bill update and delete, and the whole of the bill send, now hold that lock too. The send reads the bill
+  again inside it.
+- A minute or hour pass on the 1st at 00:00 bills the month that just ended, using that month's metrics. It never opens
+  a bill. `monthlyBill` moved from 00:00 to 00:30 so those passes run first.
+- The send worked out "last month" from the 1st. On the 31st after a shorter month it landed in the current month.
+- `docs/billing.md` has queries to find duplicate bills on an installed site and to delete the empty ones.
+
+**Why**
+
+- `hourlyCharge` and `monthlyCharge` share a cron spec and have different ShedLock names, so they ran at once and both
+  inserted a bill. An item first seen on the second bill starts at the cycle start and charges the month again, and both
+  bills get invoiced: two OPEN bills in 113 of 200 passes in the review's repro, over-billed in 27 of 40 rounds.
+- The lease did not hold, because a retry added a minute to its own clock instead of waiting. A second claimant got the
+  same bill and its save replaced the first one's charge. Under a real lock a lease would only refuse the second pass.
+- One lock rather than a charge-only one: the send and the admin update replace the same document. A test with a
+  separate key lost a closing charge to a racing send within 7 rounds.
+- The 00:00 charge opened the new bill with nothing elapsed, so the month's last hour was never billed: a VM running
+  21:00 to 01:00 paid for 3 hours of 4. On the old wall clock the same pass would have read the new month's metrics and
+  overwritten the month's traffic total.
+- Issuing the running bill on the 31st let the next charge open another one that re-billed the month.
+
+**Diagrams updated:** `c4-code.md` (charge rows). No container or relationship changed.
+
+## 2026-11-07: Restore checks volumes and quota; a server delete drops backups last
+
+**What changed**
+
+- Restore compares volumes, not slots. A volume is held by an archive when the archive names its volid and its VOLUME row
+  is older than the backup; anything else is refused by name. The boot disk always counts.
+- A sync leaves a server's VOLUME rows alone while a restore task runs, and a disk with no row before the restore dates from
+  that backup (`dataSince`). A retype keeps the row and records when it took the new volid (`externalIdSince`).
+- A failed restore: the rows of the destroyed disks are archived, and the next restore is allowed through and counted by
+  what the rows say.
+- Restore checks vCPUs, RAM, disk and GPUs against the project's quota, on what it would produce, before stopping the
+  server and again after. A snapshot rollback checks vCPUs, RAM and GPUs the same way.
+- A server delete removes its backups after protection is off, the volumes have moved and a hard stop has worked, just
+  before the destroy, and refuses a VM holding a lock or under a running restore. It lists the backups before its first
+  change, so a store that cannot answer refuses with the server untouched.
+
+**Why**
+
+- A disk added after another left landed on the same slot, and PVE gives it the same name as well, so a forced restore
+  destroyed it while it was in no archive. The row is the one thing the portal holds that tells the two apart, so it has to
+  outlive a restore: PVE cuts the VM's config to `{memory: 128}` meanwhile, and a sync in that window archived every row of
+  the server, which also restarted their bills.
+- A retype can land on the name of a disk that left, on a row older than the backup, so the row's age said nothing there.
+- Resize down, spend the freed quota, restore: the project ended over its limit, and a disk now on another server was
+  recreated uncounted. A rollback restores cores and memory too, so it was the same bypass.
+- After a failed restore the VM kept billing for destroyed disks, a retry counted them twice, and the NIC check refused the
+  retry because the cut-down config has no NICs. A restore killed halfway also leaves its volumes on the storage in no
+  config, and the next restore fails on them. The token cannot delete a volume from the storage, but it can list one as a
+  detached disk and drop that entry, which frees it, so a failed restore and a retry both do that.
+- A refusal from protection, from moving a volume or from a failed stop left the server alive with its backups gone. The
+  delete cannot simply go last: PVE lets the token delete an archive only while its VM exists.
+- A running restore holds no lock on the config it has cut down, so the lock check alone let a delete remove both archives
+  under it. A store that was down refused only after the stop and the volume moves, leaving the server stopped and its data
+  on the holder.
+
+## 2026-11-07: Image import goes through the portal
+
+**What changed**
+
+- The portal fetches an image URL and streams it to PVE's upload API. `download-url` is gone from the portal, and
+  `ProxCloudPlatform` no longer carries `Sys.AccessNetwork`.
+- `pkg/safeurl.Blocked` blocks everything not globally routable. `Check` became `Open`, which hands back the fetch.
+- Project images count against `diskGb`. One import at a time per project, and one upload at a time per provider. Room is
+  checked on the import store, on the profile's boot storage for the disk, and on the API node's root disk, where pveproxy
+  spools an upload. A URL with no stated size is refused unless the operator sets `importUnknownSizeMaxGiB`.
+- An import waits for its upload task, whatever happens to its call, before releasing the lock and removing the file.
+- A source that sends nothing for a minute, or averages under 2 MiB/s past a two-minute grace, ends the import (409).
+
+**Why**
+
+- The portal checked a URL and then a node fetched it again, following redirects PVE gives no way to turn off. A server
+  answering the portal with an image and the node with a 302 reached the node's network, and the portal could not see
+  it. With the portal as the only client, the check at connect time covers every address the fetch uses, and the node
+  has nothing to fetch.
+- The 200 GiB cap held per image with nothing on the total or on concurrency, so a tenant could fill the store.
+- The room check on the API node is per upload, so uploads of several projects could each pass it and together fill the
+  root disk. A failed poll of the upload task returned with the file still landing, the lock released and nothing to remove it.
+- The block list let through ranges that reach no one on the internet but can reach something inside: benchmarking,
+  IETF protocol, reserved, NAT64 and 6to4 among them. The SSO fetcher uses the same function, so it gains this too.
+- A slow URL held the provider-wide upload lock for as long as the import timeout, an hour, so one tenant could keep other
+  projects' imports at 409 at almost no cost. A stall limit alone would not stop a drip, so the source also has to keep up a
+  floor: holding the lock now takes really sending the bytes.
+
+**Diagrams updated:** `c3-components.md` (the image import row).
+## 2026-11-07: A charge with an unknown outcome blocks new charges until resolved
+
+**What changed**
+
+- The in-flight guard covers every `PENDING` charge of a bill, not only those younger than 24 hours.
+- `GET /admin/collect-transactions/{id}/sync` re-checks a charge at the gateway, and
+  `POST /admin/collect-transactions/{id}/close` ends one the gateway says did not succeed, or one with no gateway
+  reference. Both are in the operator console.
+- A gateway answer of cancelled now ends a charge; it used to stay `PENDING`.
+
+**Why**
+
+- Past the scanner's 24 hours the guard let a new charge through while the old one's outcome was still unknown, so a long
+  gateway outage could charge a customer twice. Lifting the age limit needed a way to resolve the charge, or the bill
+  would stay blocked for good: a lost confirm on a declined card stayed `PENDING` with nothing able to end it.
+- A blocked bill still counts for dunning and auto-suspension. Leaving it out of `DueBills` would cover the due-date type
+  only (the balance type reads the balance), and a customer whose card needs an action nobody completes would never be
+  suspended. A re-check that settles the charge resumes the profile, as any collect does.
 ## 2026-11-07: Leftover holders stop billing; a late lock release frees nothing
 
 **What changed**

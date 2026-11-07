@@ -224,18 +224,18 @@ flowchart TB
 |---|---|---|
 | `MinutelyChargeSpec` and siblings | `internal/platform/scheduler/scheduler.go:20` | Charge crons (minute, hour, month) |
 | `nativeProvider.Charge` | `internal/platform/billingprovider/billingprovider.go:72` | In-process loop, or RabbitMQ fan-out when enabled |
-| `Service.Charge`, `ChargeProfileByID` | `internal/platform/billingjob/billingjob.go:56`, `:105` | Per active billing profile |
-| `Service.chargeBillingResource` | `billingjob.go:130` | Per provider: resolve resources, select plans and rules, rate |
-| `Service.billingResources` | `billingjob.go:246` | Every active project of the profile bound to the provider |
+| `chargeCycle` | `internal/platform/billingjob/billingjob.go:326` | The cycle of a pass: a minute or hour pass on the 1st at 00:00 closes the month before |
+| `Service.Charge`, `ChargeProfileByID` | `internal/platform/billingjob/billingjob.go:56`, `:104` | Per active billing profile |
+| `Service.chargeBillingResource` | `billingjob.go:128` | Per provider: resolve resources, select plans and rules, rate |
+| `Service.billingResources` | `billingjob.go:252` | Every active project of the profile bound to the provider |
 | `GetBillingResources`, `stampResourceValues` | `internal/cloud/billingresource/billingresource.go:26`, `:55` | Cache rows to billing resources via the type registry; stamps region, service id, createdAt |
 | Registry | `cmd/api/main.go:407` | Server, volume, floating IP, K8s cluster, DB cluster, bucket. A load balancer bills as the VM, disk and address it is made of |
 | `ServerProvider.GetBillingInformation` | `internal/cloud/billingresource/server.go:34` | `instance` unit (flavor, GPU) plus `instance_traffic` unit; not billed in DELETED, ERROR, UNKNOWN, BUILD |
 | `SelectPricePlansForService`, `ApplicableRules` | `internal/platform/pricing/planselect.go:46`, `:60` | Profile plans plus public plans for the provider, filtered by time unit |
-| `ChargeBillingResources` | `internal/platform/pricing/charge.go:17` | Current bill, rate each resource, adjustments, save |
-| `Repo.GetCurrentBill` | `internal/platform/pricing/billrepo.go:84` | Month bill, created on demand, leased with a wall-clock lock |
+| `ChargeBillingResources` | `internal/platform/pricing/charge.go:26` | Under the profile lock: current bill, created on demand, rate each resource, adjustments, save |
 | `Engine.ApplyPricePlanRules` | `internal/platform/pricing/engine.go:30` | Filters, tiers, modifiers per rule |
 | `SaveChargingToBill`, `getTimeUnitsDiff` | `internal/platform/pricing/bill_build.go:28`, `:155` | Bill item upsert; units elapsed since the last rating |
-| `Service.billAdjuster` | `billingjob.go:167` | Savings-contract discounts and price-adjustment rules after rating |
+| `Service.billAdjuster` | `billingjob.go:165` | Savings-contract discounts and price-adjustment rules after rating |
 
 ```mermaid
 flowchart LR

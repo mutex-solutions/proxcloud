@@ -9,7 +9,7 @@ import (
 )
 
 // The real shapes, read on PVE 9.2 after POST /nodes/{n}/qemu with only vmid and pool.
-const blankRowJSON = `{"id":"qemu/%d","type":"qemu","vmid":%d,"node":"pve1","name":"VM %d","status":"stopped","pool":"st-p1","maxcpu":1,"maxmem":536870912,"maxdisk":0}`
+const blankRowJSON = `{"id":"qemu/%d","type":"qemu","vmid":%d,"node":"pve1","name":"VM %d","status":"stopped","pool":"tp-p1","maxcpu":1,"maxmem":536870912,"maxdisk":0}`
 
 func blankConfigJSON(ctime int64) string {
 	return fmt.Sprintf(`{"data":{"boot":" ","digest":"b4ca","meta":"creation-qemu=11.1.3,ctime=%d","smbios1":"uuid=529f","vmgenid":"3efe"}}`, ctime)
@@ -61,7 +61,7 @@ func TestServerSyncSkipsBlankVMs(t *testing.T) {
 		fmt.Sprintf("GET /api2/json/nodes/pve1/qemu/%d/config", customer):   say(`{"data":{"scsi1":"local-zfs:vm-202-disk-0,size=8G","meta":"ctime=1"}}`),
 		fmt.Sprintf("GET /api2/json/nodes/pve1/qemu/%d/config", unreadable): refuse,
 	})
-	s := &Service{C: c, PoolPrefix: "st-"}
+	s := &Service{C: c, PoolPrefix: "tp-"}
 
 	for name, p := range map[string]*ServerSyncProvider{
 		"full": s.ServerSyncProvider("r", "p1", nil),
@@ -134,7 +134,7 @@ func TestRemoveBlankVMs(t *testing.T) {
 				"DELETE /api2/json/nodes/pve1/qemu/201":                                   deleteRoute(&dels, tt.del),
 				"GET /api2/json/nodes/pve1/tasks/UPID:pve1:0:0:0:qmdestroy:201:u:/status": say(`{"data":{"status":"stopped","exitstatus":"OK"}}`),
 			})
-			s := &Service{C: c, PoolPrefix: "st-"}
+			s := &Service{C: c, PoolPrefix: "tp-"}
 			if tt.lockBusy {
 				s.HolderLock = func(context.Context, string, time.Duration, time.Duration) (func(), bool, error) {
 					return nil, false, nil
@@ -157,7 +157,7 @@ func TestRemoveBlankVMs(t *testing.T) {
 			"GET /api2/json/nodes/pve1/qemu/201/config": say(blankConfigJSON(old)),
 			"DELETE /api2/json/nodes/pve1/qemu/201":     deleteRoute(&dels, upid),
 		})
-		s := &Service{C: c, PoolPrefix: "st-"}
+		s := &Service{C: c, PoolPrefix: "tp-"}
 		if n, err := s.RemoveBlankVMs(context.Background(), "p2"); err != nil || n != 0 || dels != 0 {
 			t.Fatalf("removed %d, deletes %d, err %v", n, dels, err)
 		}
@@ -169,7 +169,7 @@ func TestRemoveBlankVMs(t *testing.T) {
 			"GET /api2/json/nodes/pve1/qemu/201/config": say(blankConfigJSON(old)),
 			"DELETE /api2/json/nodes/pve1/qemu/201":     refuse,
 		})
-		s := &Service{C: c, PoolPrefix: "st-"}
+		s := &Service{C: c, PoolPrefix: "tp-"}
 		if n, err := s.RemoveBlankVMs(context.Background(), "p1"); err != nil || n != 0 {
 			t.Fatalf("removed %d, err %v", n, err)
 		}
@@ -187,7 +187,7 @@ func TestRemoveBlankVMsBoundsAHungDestroy(t *testing.T) {
 		"DELETE /api2/json/nodes/pve1/qemu/201":                                   say(`{"data":"UPID:pve1:0:0:0:qmdestroy:201:u:"}`),
 		"GET /api2/json/nodes/pve1/tasks/UPID:pve1:0:0:0:qmdestroy:201:u:/status": say(`{"data":{"status":"running"}}`),
 	})
-	s := &Service{C: c, PoolPrefix: "st-"}
+	s := &Service{C: c, PoolPrefix: "tp-"}
 	start := time.Now()
 	n, err := s.RemoveBlankVMs(context.Background(), "p1")
 	if err != nil || n != 0 {
@@ -222,7 +222,7 @@ func TestDropLostCreateUsesTheBlankTest(t *testing.T) {
 				},
 				"GET /api2/json/nodes/pve1/tasks/UPID:pve1:0:0:0:qmdestroy:201:u:/status": say(`{"data":{"status":"stopped","exitstatus":"OK"}}`),
 			})
-			s := &Service{C: pc, PoolPrefix: "st-"}
+			s := &Service{C: pc, PoolPrefix: "tp-"}
 			s.dropLostCreate(context.Background(), "p1", 201)
 			if dels != c.dels {
 				t.Fatalf("deletes %d, want %d", dels, c.dels)

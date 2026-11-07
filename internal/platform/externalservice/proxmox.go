@@ -53,6 +53,7 @@ package externalservice
 //	    "storageHeadroomPct": 10,              // % of a storage kept free when placing disks
 //	    "backupStorage": "nas-backup",         // shared store of server backups (NFS, CephFS, PBS); absent = none
 //	    "importStorage": "nas-templates",      // store with import content for customer images; absent = no import
+//	    "importUnknownSizeMaxGiB": 20,         // spool limit for a URL that states no size; absent = refuse such a URL
 //	    "gpus": {},                            // Phase 6 — {mappingId: {"alias": "nvidia-4090"}}
 //	    "overcommit": {"cpu": 4},              // scheduler capacity multiplier
 //	    "metrics": {"source": "none"},         // until prometheus-pve-exporter is wired
@@ -126,9 +127,18 @@ func (e *ExternalService) PVEConfig() pve.Config {
 // PVEBackupStorage is config.backupStorage: the shared store server backups go to ("" = no backups offered).
 func (e *ExternalService) PVEBackupStorage() string { return str(e.Config["backupStorage"]) }
 
-// PVEImportStorage is config.importStorage: the store with import content a node downloads customer images to
+// PVEImportStorage is config.importStorage: the store with import content the portal streams customer images to
 // ("" = no image import offered).
 func (e *ExternalService) PVEImportStorage() string { return str(e.Config["importStorage"]) }
+
+// PVEImportUnknownSizeMaxGiB is config.importUnknownSizeMaxGiB: how large an image whose server states no size may get,
+// spooled to the portal's temporary directory on the way. 0 (the default) refuses such a URL.
+func (e *ExternalService) PVEImportUnknownSizeMaxGiB() int {
+	if n, ok := e.Config["importUnknownSizeMaxGiB"].(float64); ok && n > 0 {
+		return int(n)
+	}
+	return 0
+}
 
 // PVEOvercommitCPU is the scheduler's CPU overcommit factor (default 4).
 func (e *ExternalService) PVEOvercommitCPU() float64 {

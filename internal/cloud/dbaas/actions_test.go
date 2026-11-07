@@ -16,16 +16,16 @@ import (
 // Logs tab returned an internal error because the pod list came back empty.
 func TestPodSelectorFor(t *testing.T) {
 	cases := map[string]string{
-		EnginePostgreSQL: "app.kubernetes.io/instance=std-1",
-		EngineMySQL:      "app.kubernetes.io/instance=std-1",
-		EngineMariaDB:    "app.kubernetes.io/instance=std-1",
-		EngineFerretDB:   "app.kubernetes.io/instance=std-1",
-		EngineValkey:     "valkey.io/cluster=std-1",
-		EngineOpenSearch: "opensearch.org/opensearch-cluster=std-1",
-		EngineKafka:      "strimzi.io/cluster=std-1",
+		EnginePostgreSQL: "app.kubernetes.io/instance=pc-d-1",
+		EngineMySQL:      "app.kubernetes.io/instance=pc-d-1",
+		EngineMariaDB:    "app.kubernetes.io/instance=pc-d-1",
+		EngineFerretDB:   "app.kubernetes.io/instance=pc-d-1",
+		EngineValkey:     "valkey.io/cluster=pc-d-1",
+		EngineOpenSearch: "opensearch.org/opensearch-cluster=pc-d-1",
+		EngineKafka:      "strimzi.io/cluster=pc-d-1",
 	}
 	for engine, want := range cases {
-		if got := PodSelectorFor(engine, "std-1"); got != want {
+		if got := PodSelectorFor(engine, "pc-d-1"); got != want {
 			t.Errorf("%s: selector %q, want %q", engine, got, want)
 		}
 	}
@@ -45,23 +45,23 @@ func TestLogs(t *testing.T) {
 			"metadata": map[string]any{"name": name, "labels": labels},
 		}
 	}
-	seed("valkey-std-v-0-0-0", map[string]any{
-		"valkey.io/cluster":          "std-v",
-		"app.kubernetes.io/instance": "std-v-0-0", // per-node, NOT the cluster id
+	seed("valkey-pc-d-v-0-0-0", map[string]any{
+		"valkey.io/cluster":          "pc-d-v",
+		"app.kubernetes.io/instance": "pc-d-v-0-0", // per-node, NOT the cluster id
 	})
-	seed("std-p-1", map[string]any{"app.kubernetes.io/instance": "std-p"})
+	seed("pc-d-p-1", map[string]any{"app.kubernetes.io/instance": "pc-d-p"})
 	// A sibling database in the same namespace must never leak into the read.
-	seed("std-x-1", map[string]any{"app.kubernetes.io/instance": "std-x"})
+	seed("pc-d-x-1", map[string]any{"app.kubernetes.io/instance": "pc-d-x"})
 
-	logs, err := s.Logs(context.Background(), "p1", "std-v", EngineValkey, 100)
+	logs, err := s.Logs(context.Background(), "p1", "pc-d-v", EngineValkey, 100)
 	if err != nil {
 		t.Fatalf("valkey logs: %v", err)
 	}
-	if len(logs) != 1 || logs[0]["pod"] != "valkey-std-v-0-0-0" || logs[0]["container"] != "server" {
+	if len(logs) != 1 || logs[0]["pod"] != "valkey-pc-d-v-0-0-0" || logs[0]["container"] != "server" {
 		t.Fatalf("valkey logs = %v", logs)
 	}
-	logs, err = s.Logs(context.Background(), "p1", "std-p", EnginePostgreSQL, 100)
-	if err != nil || len(logs) != 1 || logs[0]["pod"] != "std-p-1" {
+	logs, err = s.Logs(context.Background(), "p1", "pc-d-p", EnginePostgreSQL, 100)
+	if err != nil || len(logs) != 1 || logs[0]["pod"] != "pc-d-p-1" {
 		t.Fatalf("postgres logs = %v (%v)", logs, err)
 	}
 }
@@ -517,7 +517,7 @@ func TestListBackups(t *testing.T) {
 	ns := NamespaceFor("p1")
 	mine := map[string]any{
 		"metadata": map[string]any{
-			"name": "std-mine-ondemand-1", "namespace": ns,
+			"name": "pc-d-mine-ondemand-1", "namespace": ns,
 			"labels":            map[string]any{LabelManagedBy: ManagedByValue},
 			"creationTimestamp": "2026-08-03T10:00:00Z",
 		},
@@ -525,7 +525,7 @@ func TestListBackups(t *testing.T) {
 	}
 	sibling := map[string]any{
 		"metadata": map[string]any{
-			"name": "std-other-ondemand-1", "namespace": ns,
+			"name": "pc-d-other-ondemand-1", "namespace": ns,
 			"labels": map[string]any{LabelManagedBy: ManagedByValue},
 		},
 		"status": map[string]any{"phase": "completed"},
@@ -535,18 +535,18 @@ func TestListBackups(t *testing.T) {
 	// filtering on the proxcloud label hid every unattended backup and left the schedule decorative.
 	scheduled := map[string]any{
 		"metadata": map[string]any{
-			"name": "std-mine-schedule-20260805165026", "namespace": ns,
-			"labels":            map[string]any{"cnpg.io/cluster": "std-mine", "cnpg.io/scheduled-backup": "std-mine-schedule"},
+			"name": "pc-d-mine-schedule-20260805165026", "namespace": ns,
+			"labels":            map[string]any{"cnpg.io/cluster": "pc-d-mine", "cnpg.io/scheduled-backup": "pc-d-mine-schedule"},
 			"creationTimestamp": "2026-08-05T16:50:26Z",
 		},
 		"status": map[string]any{"phase": "completed"},
 	}
 	api.crs["backups"] = map[string]map[string]any{
-		key(ns, "std-mine-ondemand-1"):              mine,
-		key(ns, "std-other-ondemand-1"):             sibling,
-		key(ns, "std-mine-schedule-20260805165026"): scheduled,
+		key(ns, "pc-d-mine-ondemand-1"):              mine,
+		key(ns, "pc-d-other-ondemand-1"):             sibling,
+		key(ns, "pc-d-mine-schedule-20260805165026"): scheduled,
 	}
-	got, err := svc.ListBackups(context.Background(), "p1", "std-mine", EnginePostgreSQL)
+	got, err := svc.ListBackups(context.Background(), "p1", "pc-d-mine", EnginePostgreSQL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,10 +554,10 @@ func TestListBackups(t *testing.T) {
 	for _, b := range got {
 		names[b["name"].(string)] = b["phase"].(string)
 	}
-	if len(got) != 2 || names["std-mine-ondemand-1"] != "completed" || names["std-mine-schedule-20260805165026"] != "completed" {
+	if len(got) != 2 || names["pc-d-mine-ondemand-1"] != "completed" || names["pc-d-mine-schedule-20260805165026"] != "completed" {
 		t.Fatalf("list = %v, want this database's on-demand AND scheduled backups only", got)
 	}
-	if _, err := svc.ListBackups(context.Background(), "p1", "std-mine", EngineValkey); err == nil {
+	if _, err := svc.ListBackups(context.Background(), "p1", "pc-d-mine", EngineValkey); err == nil {
 		t.Error("an engine with no backup CR must report that, not an empty list")
 	}
 }
@@ -574,7 +574,7 @@ func TestRestoreFrom(t *testing.T) {
 	}
 	svc := NewWithAPI(api, cfg, "svc-1")
 	spec := testSpec(EnginePostgreSQL, "17")
-	spec.RestoreFrom = &RestoreSource{SourceID: "std-source01", TargetTime: "2026-08-03T10:00:00Z"}
+	spec.RestoreFrom = &RestoreSource{SourceID: "pc-d-source01", TargetTime: "2026-08-03T10:00:00Z"}
 	if _, err := svc.CreateDatabase(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +594,7 @@ func TestRestoreFrom(t *testing.T) {
 	app, _ := api.GetApplication(context.Background(), cfg.ArgoNamespace, spec.ID)
 	values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
 	restore, _ := values["restore"].(map[string]any)
-	if restore["sourceId"] != "std-source01" || restore["targetTime"] != "2026-08-03T10:00:00Z" {
+	if restore["sourceId"] != "pc-d-source01" || restore["targetTime"] != "2026-08-03T10:00:00Z" {
 		t.Fatalf("restore values = %v", restore)
 	}
 	if restore["credsSecret"] != BackupSecretName(spec.ID) {
@@ -612,7 +612,7 @@ func TestRestoreFrom(t *testing.T) {
 
 	// mysql backs up but cannot bootstrap from a backup — refuse rather than half-wire it.
 	my := testSpec(EngineMySQL, "8.4")
-	my.RestoreFrom = &RestoreSource{SourceID: "std-source01"}
+	my.RestoreFrom = &RestoreSource{SourceID: "pc-d-source01"}
 	if err := my.Validate(cfg); err == nil {
 		t.Error("mysql restore-into-new-database must be refused")
 	}
@@ -622,7 +622,7 @@ func TestRestoreFrom(t *testing.T) {
 	if err := bad.Validate(cfg); err == nil {
 		t.Error("a source id that is not a database id must be rejected")
 	}
-	bad.RestoreFrom = &RestoreSource{SourceID: "std-source01", TargetTime: "yesterday"}
+	bad.RestoreFrom = &RestoreSource{SourceID: "pc-d-source01", TargetTime: "yesterday"}
 	if err := bad.Validate(cfg); err == nil {
 		t.Error("a non-RFC3339 target time must be rejected")
 	}
@@ -744,7 +744,7 @@ func TestDatabaseDataCarriesBackupPosture(t *testing.T) {
 func TestDatabaseStatusNotReadyWhenOutOfSync(t *testing.T) {
 	app := func(health, sync string) map[string]any {
 		return map[string]any{
-			"metadata": map[string]any{"name": "std-1"},
+			"metadata": map[string]any{"name": "pc-d-1"},
 			"spec": map[string]any{"source": map[string]any{"helm": map[string]any{
 				"valuesObject": map[string]any{"engine": EngineValkey, "engineVersion": "7.2"},
 			}}},

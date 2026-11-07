@@ -173,6 +173,18 @@ func (f *fakeAirwallex) browserVerifies(intentID string) string {
 	return cst
 }
 
+// An intent nobody is trying to charge must read differently from one being charged: only the first can be closed by hand.
+func TestAirwallexIntentResultKeepsNoAttemptApart(t *testing.T) {
+	if got := intentResult(awxIntent{Status: "REQUIRES_PAYMENT_METHOD"}).Status; !chargeDidNotSucceed(got) {
+		t.Errorf("REQUIRES_PAYMENT_METHOD reads %q", got)
+	}
+	for _, s := range []string{"PENDING", "REQUIRES_CUSTOMER_ACTION", "REQUIRES_CAPTURE"} {
+		if got := intentResult(awxIntent{Status: s}).Status; chargeDidNotSucceed(got) {
+			t.Errorf("%s reads %q, which could be closed", s, got)
+		}
+	}
+}
+
 func TestAirwallexStatusMapping(t *testing.T) {
 	for in, want := range map[string]string{"SUCCEEDED": "succeeded", "CANCELLED": "canceled", "REQUIRES_CAPTURE": "requires_capture",
 		"REQUIRES_PAYMENT_METHOD": "pending", "REQUIRES_CUSTOMER_ACTION": "pending", "PENDING": "pending", "": "pending"} {
@@ -214,7 +226,7 @@ func TestAirwallexGatewayFlows(t *testing.T) {
 	if got := f.intents[pi.ID]["amount"]; got != 12.34 || f.intents[pi.ID]["currency"] != "USD" {
 		t.Fatalf("intent amount/currency on the wire: %v %v", got, f.intents[pi.ID]["currency"])
 	}
-	if r, _ := g.RetrievePaymentIntent(ctx, pi.ID); r.Status != "pending" {
+	if r, _ := g.RetrievePaymentIntent(ctx, pi.ID); r.Status != "requires_payment_method" {
 		t.Fatalf("retrieve pending: %+v", r)
 	}
 	f.intents[pi.ID]["status"] = "SUCCEEDED"

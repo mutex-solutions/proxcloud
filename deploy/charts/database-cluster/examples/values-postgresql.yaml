@@ -20,7 +20,7 @@ network:
     - 192.0.2.0/24
 proxcloud:
   projectId: 665f1a2b3c4d5e6f77889900
-  resourceId: std-1a2b3c4d
+  resourceId: pc-d-1a2b3c4d
   displayName: orders-db
 monitoring:
   enabled: true
@@ -63,4 +63,4 @@ backup:
     prefix: backups
     region: us-east-1
     pathStyle: true
-    credsSecret: std-1a2b3c4d-backup-s3
+    credsSecret: pc-d-1a2b3c4d-backup-s3

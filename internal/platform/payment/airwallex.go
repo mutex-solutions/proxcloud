@@ -316,6 +316,9 @@ func intentResult(pi awxIntent) PaymentIntentResult {
 	if a := pi.LatestPaymentAttempt; a != nil && (a.FailureReason != "" || a.FailureCode != "") {
 		res.ErrorMessage, res.ErrorCode = a.FailureReason, a.FailureCode
 	}
+	if strings.EqualFold(pi.Status, "REQUIRES_PAYMENT_METHOD") { // not "pending": no attempt is running, see chargeDidNotSucceed
+		res.Status = "requires_payment_method"
+	}
 	return res
 }
 

@@ -1,7 +1,7 @@
 // Images: "My images" = the project's own templates and server snapshots (cache list,
 // POST /project/{pid}/resource?type=IMAGE → CloudResource with data.image); "Public images" =
 // the project templates from the PUBLIC_IMAGES bulk action (flat image maps). Own images can be
-// deleted. New images come from server snapshots, or from a URL a node downloads ("imageImport").
+// deleted. New images come from server snapshots, or from a URL the portal fetches ("imageImport").
 import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
