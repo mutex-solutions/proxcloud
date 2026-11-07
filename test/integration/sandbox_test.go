@@ -315,6 +315,24 @@ func TestSandboxUsageGatesFailClosed(t *testing.T) {
 		}
 	})
 
+	// The usual project holds a Proxmox provider too, which the default resolution picks: a create naming no service
+	// must still reach the DISABLED sandbox provider and answer 503, not Proxmox's "SANDBOX is not supported" 400.
+	t.Run("provider disabled, project on Proxmox too", func(t *testing.T) {
+		f := newSbxFixture(t, gatesHold)
+		mustInsert(t, f.db, "externalService", pgdoc.M{"_id": "pve", "name": "pve", "type": externalservice.TypeCloud, "status": externalservice.StatusPublic,
+			"config": pgdoc.M{"provider": "proxmox", "region": "az1", "services": pgdoc.M{"compute": pgdoc.M{"az1": true}}}})
+		if _, err := f.db.C("project").SetByID(context.Background(), "pa", pgdoc.M{"services": []any{
+			pgdoc.M{"serviceId": "pve", "provider": "proxmox", "region": "az1"},
+			pgdoc.M{"serviceId": "sbx", "provider": "sandbox", "region": "az1"}}}, nil); err != nil {
+			t.Fatal(err)
+		}
+		f.create() // a live sandbox provider is found without naming it
+		f.setProvider(externalservice.StatusDisabled)
+		if code, body := f.do(sbxA, http.MethodPost, "/project/pa/cloud", `{"type":"SANDBOX","data":{"template":"python"}}`); code != http.StatusServiceUnavailable {
+			t.Errorf("create naming no service: %d %s", code, body)
+		}
+	})
+
 	t.Run("project disabled, profile suspended", func(t *testing.T) {
 		f := newSbxFixture(t, gatesHold)
 		sb := f.create()

@@ -617,7 +617,9 @@ the sandbox's project labels again).
 ### 3.2 Billing
 
 `sandbox` is billed per minute from the moment the sandbox was Ready (`runningSince`, never the create: an image pull
-is not the customer's) to its end, rounded up to whole minutes, at least one. Attributes: `vcpus`, `ram_gb`,
+is not the customer's) to its end, rounded up to whole minutes, at least one. The engine bills every clock minute an
+item spans, so the billed window starts at the minute `runningSince` falls in and is that many minutes long: from
+`runningSince` itself, a 39 s sandbox started at :07 would span two clock minutes. Attributes: `vcpus`, `ram_gb`,
 `gpu_count`, `gpu_model`, `template`, `status`, `display_name`. The start is recorded by any read that sees the pod
 Ready: the minutely `sandboxStateSync` (at :10, before the charge at :30), the client list, an `EXEC`, a delete. An
 ended row is `DELETED` with its end and archived; the charge rates archived rows of the cycle to their end. A
@@ -697,8 +699,37 @@ it was refused by the session's permission check, so its effect is not measured.
 `test/integration/sandbox_test.go` (handler on Postgres, in-memory sandbox cluster) and
 `cmd/api/suspension_walk_test.go`; still not run live.
 
-Found while measuring, not changed here: `ReconcileIsolation` compares rules without their `enable` flag, so a rule
-disabled by hand is not repaired by the sync; the isolation gate refuses it.
+### 3.8 Measured on the lab, with the RBAC applied (2026-11-08)
+
+The same kind of stack from main after #117 (scheduler off, jobs by trigger), its own pool prefix, the SB0 cluster with
+this repo's `rbac.yaml` applied; two tenants. Fixes from this run are in the same PR and were measured again on it.
+
+- Release check in the operator console: all three gates held. Status set `PUBLIC` in the console: stored.
+- Client console (headless Chromium): create (Running in about a minute, ends in 1 h), Run command (`6*7` = 42, kernel
+  `4.19.0-gvisor`, uid 0), Logs, Extend by 1 hour (ends in 2 h), delete; the quota refusal shows its message.
+- API: create, `EXEC` (`cmd` with exit code 3 kept; `command` with `stdin`), `GET_LOGS` (a line written to the
+  container's stdout), `SET_TIMEOUT` (moved the end; 99999 s: 400 out of range). The other tenant: 404 on `EXEC`,
+  `GET_LOGS` and delete of that id in its own project, 404 on the project. Quota `sandboxes: 2` with two running: 429;
+  `sandboxVcpus: 2`: 429, and the namespace ResourceQuota followed the change.
+- Profile suspended with two running: both deleted, rows `DELETED` with their end, project `DISABLED`, create 409;
+  resumed: `ENABLED`, a create runs. Project deleted now with a running sandbox: namespace gone, row archived with its
+  start and end. Provider `DISABLED` in the console: create, `EXEC`, `SET_TIMEOUT` 503, `GET_LOGS` and delete work.
+- Billing: a 39 s sandbox no read saw running (the controller removed it at its limit) was archived by
+  `run-sandbox-state` with an assumed start and billed; a 9 min one and a 4 min 50 s one were rated while running and
+  after their end.
+
+Bugs found and fixed:
+
+- Every ended sandbox paid one minute too many (the 39 s one 2, 9 min 10, 4 min 50 s 6), for two reasons: the window
+  started mid-minute, so it spanned an extra clock minute; and a row deleted after a charge's cycle timestamp but
+  before that charge ran was rated up to its end with the watermark left at the cycle, so the next charge rated that
+  minute again (the same holds for hourly resources). Now: 37 s read running, 1 minute; 2 min 51 s, 3 minutes; a 30 s
+  one nothing read, 1 minute.
+- A create naming no service, with the project's sandbox provider `DISABLED`, went to the Proxmox provider and
+  answered 400 "SANDBOX is not supported on a Proxmox provider"; now 503 like the create naming it.
+- `ReconcileIsolation` compared rules without their `enable` flag, so a rule disabled by hand was never repaired. Now
+  a disabled DROP (or project ACCEPT) counts as missing: one of the stack's DROPs disabled by hand failed the
+  isolation gate (`rule 12 ... is disabled`), and the next sync put it back enabled and the gate held.
 
 
 ## 4. Public entry, TLS and wake (SB4)

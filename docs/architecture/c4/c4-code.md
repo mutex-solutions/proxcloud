@@ -133,7 +133,9 @@ Invariants:
   vnet is unstaged and the apply re-run. New DROPs go in before old rules go, so every
   step fails closed.
 - Every sync cycle reconciles each project, so a project made before a rule change gets it
-  within 15 minutes and a rule deleted by hand comes back. An up-to-date cluster takes no write.
+  within 15 minutes and a rule deleted or disabled by hand comes back (the compare includes
+  `enable`; so does the lookup of a rule to delete, so a disabled copy goes and its enabled twin stays). An
+  up-to-date cluster takes no write.
 - A node that is down does not block a network change: its networks are left out of the check,
   DROPs already in place stay until it is back, and the project's ACCEPTs are still set.
 - Rules are deleted by identity with the list's digest. PVE has no rule ids and refuses a

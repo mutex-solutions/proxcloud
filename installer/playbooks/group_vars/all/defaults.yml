@@ -199,6 +199,12 @@ pc_defaults:
       disk: 10
       address: ""                # its address on the sandbox vnet, outside the gateway, network.nodes and network.metallb
       public: {bridge: "", vlan: 0, address: "", gateway: ""}  # address as CIDR; the record and the internet side
+    # The sandbox provider stage 60 registers (first run only; the console owns it afterwards). Templates are the only
+    # images offered; a site's templates replace this list instead of merging into it. limits empty = the portal's
+    # defaults (internal/cloud/sandbox/config.go).
+    templates:
+      python: {image: "python:3.12-slim", cpu: 1, memoryGiB: 2, description: Python 3.12}
+    limits: {}
 
   nas:
     host: ""                     # TrueNAS address; empty = no NAS stage
