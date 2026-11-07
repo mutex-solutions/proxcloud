@@ -60,9 +60,7 @@ func (h *Handler) Routes(r chi.Router) {
 
 // fail writes a typed *HTTPError envelope, else a 500.
 func (h *Handler) fail(w http.ResponseWriter, err error) {
-	if !httpx.WriteError(w, err) {
-		httpx.Err(w, http.StatusInternalServerError, 500, "internal.error")
-	}
+	httpx.WriteError(w, err)
 }
 
 // principal loads the initialized User (400 if not).
