@@ -143,11 +143,8 @@ type ClusterDefaults struct {
 	// AllowedCIDRs is the provider-wide default API-server ingress allowlist; a cluster's own
 	// AllowedCIDRs overrides it. Empty on both = open.
 	AllowedCIDRs []string
-	// PVEAPIURL is the PVE API as CAPMOX on the services cluster reaches it. PVECSIURL is the same
-	// API as a tenant's workers reach it: they sit on a tenant vnet with no route to the management
-	// network, so this is an address on the services subnet that forwards to PVE.
+	// PVEAPIURL is the PVE API as CAPMOX on the services cluster reaches it (and, with Shared, the workers' proxmox-csi).
 	PVEAPIURL string
-	PVECSIURL string
 	// RWXGiB, when set, gives every new cluster a NAS dataset of that size and the shared-file
 	// StorageClass on it (csi-driver-nfs). Needs a TrueNAS provider on the project.
 	RWXGiB int
@@ -158,9 +155,6 @@ type ClusterDefaults struct {
 	// ProxmoxServiceID names the compute provider whose PVE cluster hosts the workers. Empty: the
 	// project's only proxmox service.
 	ProxmoxServiceID string
-	// CSISharedStores offers the provider's storage profiles to tenant clusters through proxmox-csi. Off by default:
-	// the plugin's token reaches the tenant cluster, and on a store other projects use it opens their disks too.
-	CSISharedStores bool
 	// Shared, when set, puts every cluster's workers on one provider-run placement and credential
 	// instead of the project's pool and vnet with tokens minted per cluster. For a site whose portal
 	// token may not mint tokens. Workers then neither sync nor bill, and tenants share a network.

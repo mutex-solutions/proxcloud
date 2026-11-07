@@ -11,7 +11,7 @@ import (
 )
 
 // A new cluster takes the gateway only when the portal has an endpoint, the workers are the project's, and the compute
-// provider holds the gateway's PVE token. Anything else keeps the tenant-side controller and its csiSharedStores gate.
+// provider holds the gateway's PVE token. Anything else gets no block volumes (sharedWorkers: the operator's token).
 func TestKamajiGatewayCSI(t *testing.T) {
 	withToken := &externalservice.ExternalService{Config: map[string]any{"csiGatewayTokenId": "csi@pve!gateway"},
 		Secret: map[string]any{"csiGatewaySecret": "s"}}
@@ -27,16 +27,15 @@ func TestKamajiGatewayCSI(t *testing.T) {
 		want    bool
 		refused bool
 	}{
-		"on":                {on, cfg("0.1.7", kamaji.ClusterDefaults{}), withToken, true, false},
-		"drill tag":         {on, cfg("0.1.7-csi.2", kamaji.ClusterDefaults{}), withToken, true, false},
-		"later chart":       {on, cfg("0.2.0", kamaji.ClusterDefaults{}), withToken, true, false},
-		"old chart":         {on, cfg("0.1.6", kamaji.ClusterDefaults{}), withToken, false, true},
-		"malformed pin":     {on, cfg("latest", kamaji.ClusterDefaults{}), withToken, false, true},
-		"no gateway":        {nil, cfg("0.1.5", kamaji.ClusterDefaults{}), withToken, false, false},
-		"registry only":     {&CSIGateway{}, cfg("0.1.5", kamaji.ClusterDefaults{}), withToken, false, false},
-		"no token":          {on, cfg("0.1.5", kamaji.ClusterDefaults{}), noToken, false, false},
-		"shared workers":    {on, cfg("0.1.5", kamaji.ClusterDefaults{Shared: &kamaji.SharedWorkers{Pool: "p"}}), withToken, false, false},
-		"shared stores too": {on, cfg("0.1.7", kamaji.ClusterDefaults{CSISharedStores: true}), withToken, true, false},
+		"on":             {on, cfg("0.1.7", kamaji.ClusterDefaults{}), withToken, true, false},
+		"drill tag":      {on, cfg("0.1.7-csi.2", kamaji.ClusterDefaults{}), withToken, true, false},
+		"later chart":    {on, cfg("0.2.0", kamaji.ClusterDefaults{}), withToken, true, false},
+		"old chart":      {on, cfg("0.1.6", kamaji.ClusterDefaults{}), withToken, false, true},
+		"malformed pin":  {on, cfg("latest", kamaji.ClusterDefaults{}), withToken, false, true},
+		"no gateway":     {nil, cfg("0.1.5", kamaji.ClusterDefaults{}), withToken, false, false},
+		"registry only":  {&CSIGateway{}, cfg("0.1.5", kamaji.ClusterDefaults{}), withToken, false, false},
+		"no token":       {on, cfg("0.1.5", kamaji.ClusterDefaults{}), noToken, false, false},
+		"shared workers": {on, cfg("0.1.5", kamaji.ClusterDefaults{Shared: &kamaji.SharedWorkers{Pool: "p"}}), withToken, false, false},
 	} {
 		h := &Handler{csiGW: tc.gw}
 		got, err := h.kamajiGatewayCSI(tc.cfg, tc.compute)

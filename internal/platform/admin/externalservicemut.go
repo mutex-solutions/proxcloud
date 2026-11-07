@@ -83,6 +83,21 @@ func serviceNotFoundErr(id string) *httpx.HTTPError {
 // the node firewall, quota, billing and suspend gate are in place (phases SB2b and SB3).
 var errSandboxNotYet = httpx.BadRequest("Sandbox providers cannot be created yet")
 
+// kamajiRemovedKeysErr refuses a kamaji config that still sets a key of the tenant-side proxmox-csi controller, so an
+// operator learns it no longer does anything instead of finding out from a cluster without volumes.
+func kamajiRemovedKeysErr(cfg map[string]any) *httpx.HTTPError {
+	if cfg["provider"] != "kamaji" {
+		return nil
+	}
+	keys := externalservice.KamajiRemovedKeys(cfg)
+	if len(keys) == 0 {
+		return nil
+	}
+	return httpx.BadRequest("config.cluster." + strings.Join(keys, ", config.cluster.") + " no longer exist: tenant block " +
+		"volumes go through the CSI gateway and no PVE address is given to tenants. Remove them from the cluster block " +
+		"and send it again (docs/managed-k8s.md)")
+}
+
 // externalServiceCreate persists the operator-supplied doc (secret encrypted). Only a PUBLIC ceph-s3 row is checked
 // live (checkPublicCeph); others are exercised by the detail page's Test connection and the live provider reads.
 func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +135,10 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	}
 	if cfg, _ := doc["config"].(map[string]any); cfg["provider"] == "sandbox" {
 		httpx.WriteError(w, errSandboxNotYet)
+		return
+	}
+	if cfg, _ := doc["config"].(map[string]any); kamajiRemovedKeysErr(cfg) != nil {
+		httpx.WriteError(w, kamajiRemovedKeysErr(cfg))
 		return
 	}
 	// Stable string _id (String-id convention — same shape as the seeded provider docs;
@@ -267,6 +286,11 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 		}
 		if cfg["provider"] == "sandbox" {
 			return errSandboxNotYet
+		}
+		if _, ok := c["cluster"]; ok { // the body's cluster block replaced the stored one
+			if herr := kamajiRemovedKeysErr(cfg); herr != nil {
+				return herr
+			}
 		}
 		if raw, ok := c["storageProfiles"]; ok && cfg["provider"] == "proxmox" {
 			if herr := h.validatePVEStorageProfiles(req, cfg, raw); herr != nil {

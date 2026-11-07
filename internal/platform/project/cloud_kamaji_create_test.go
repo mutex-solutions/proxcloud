@@ -88,21 +88,23 @@ func TestKamajiWorkerDemand(t *testing.T) {
 	}
 }
 
-// The switch that keeps the CSI token out of tenant clusters. No class on the way out means no token minted, no CSI
-// secret written and no plugin rendered, so a regression here hands tenants other projects' disks without failing anything.
+// The switch that keeps PVE tokens out of tenant clusters. Without the gateway no class goes out, so the tenant-side
+// controller is never rendered with a token; a regression here hands tenants other projects' disks without failing
+// anything.
 func TestKamajiTenantClasses(t *testing.T) {
 	classes := []kamaji.StorageClass{{Name: "std", Storage: "local-zfs"}}
 	shared := &kamaji.SharedWorkers{Pool: "p"}
 	for _, c := range []struct {
-		name string
-		d    kamaji.ClusterDefaults
-		want int
+		name    string
+		gateway bool
+		d       kamaji.ClusterDefaults
+		want    int
 	}{
-		{"default", kamaji.ClusterDefaults{}, 0},
-		{"opted in", kamaji.ClusterDefaults{CSISharedStores: true}, 1},
-		{"shared workers", kamaji.ClusterDefaults{Shared: shared}, 1},
+		{"no gateway", false, kamaji.ClusterDefaults{}, 0},
+		{"gateway", true, kamaji.ClusterDefaults{}, 1},
+		{"shared workers", false, kamaji.ClusterDefaults{Shared: shared}, 1},
 	} {
-		if got := kamajiTenantClasses(c.d, classes); len(got) != c.want {
+		if got := kamajiTenantClasses(c.gateway, c.d, classes); len(got) != c.want {
 			t.Errorf("%s: %v, want %d classes", c.name, got, c.want)
 		}
 	}

@@ -44,14 +44,28 @@
           - svc.templates and svc.control_plane.node in svc.templates
           - svc.workers and svc.workers | map(attribute='node') | difference(svc.templates) | length == 0
           - svc.network.bridge and svc.network.gateway and svc.network.endpoint and svc.network.nodes
-          - svc.network.metallb and svc.network.pve_proxy_ip and svc.pve_node_ips
+          - svc.network.metallb
           - svc.kamaji.version_images
           - pc.object_store.mode in ['vm', 'truenas-app']
         fail_msg: >-
-          mode=split needs proxcloud.services: templates (one per node used), control_plane.node, workers, pve_node_ips,
-          kamaji.version_images and network.{bridge,gateway,endpoint,nodes,metallb,pve_proxy_ip}. Database backups go to
+          mode=split needs proxcloud.services: templates (one per node used), control_plane.node, workers,
+          kamaji.version_images and network.{bridge,gateway,endpoint,nodes,metallb}. Database backups go to
           the installer's own bucket, so object_store.mode must be vm or truenas-app.
         quiet: true
+
+    - name: Report settings that no longer do anything
+      when: pc.mode == 'split' and removed | length > 0
+      vars:
+        svc: "{{ pc.services }}"
+        removed: >-
+          {{ (['services.pve_node_ips'] if svc.pve_node_ips is defined else [])
+             + (['services.network.pve_proxy_ip'] if svc.network.pve_proxy_ip is defined else [])
+             + (['services.kamaji.csi_shared_stores'] if svc.kamaji.csi_shared_stores is defined else []) }}
+      ansible.builtin.debug:
+        msg: >-
+          {{ removed | join(', ') }}: removed, and ignored. Tenant clusters get block volumes through the CSI gateway,
+          not a proxmox-csi token and the pve-api forward; stage 60 deletes the forward once no cluster still uses it
+          (docs/managed-k8s.md). Take the keys out of the site's group_vars.
 
     - name: Check the build tools
       when: pc.images.build

@@ -3,7 +3,7 @@
 # --install or an apply. Reads its settings from the environment (50-services-cluster.yml sets them).
 set -euo pipefail
 
-: "${KUBECONFIG:?}" "${METALLB_RANGE:?}" "${PVE_API_URL:?}" "${PVE_NODE_IPS:?}" "${PVE_PROXY_IP:?}"
+: "${KUBECONFIG:?}" "${METALLB_RANGE:?}" "${PVE_API_URL:?}"
 : "${CSI_TOKEN_ID:?}" "${CSI_TOKEN_SECRET:?}" "${REGION:?}" "${STORAGE:?}"
 : "${CILIUM_VERSION:?}" "${CERT_MANAGER_VERSION:?}" "${METALLB_VERSION:?}" "${CSI_VERSION:?}" "${ARGOCD_VERSION:?}" "${CNPG_VERSION:?}"
 : "${CAPI_VERSION:?}" "${CAPMOX_VERSION:?}" "${IPAM_VERSION:?}" "${KAMAJI_CP_VERSION:?}" "${CAAPH_VERSION:?}"
@@ -70,34 +70,6 @@ up proxmox-csi oci://ghcr.io/sergelogvinov/charts/proxmox-csi-plugin --version "
   --set "storageClass[0].reclaimPolicy=Delete" \
   --set-string 'storageClass[0].annotations.storageclass\.kubernetes\.io/is-default-class=true' \
   --set 'node.tolerations[0].operator=Exists'
-
-# Tenant workers have no route to the management network, only to this subnet. Their proxmox-csi talks
-# to the PVE API through this address, which forwards to the nodes.
-log pve api forwarder
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Namespace
-metadata: {name: proxcloud-system}
----
-apiVersion: v1
-kind: Service
-metadata: {name: pve-api, namespace: proxcloud-system}
-spec:
-  type: LoadBalancer
-  loadBalancerIP: $PVE_PROXY_IP
-  ports: [{name: api, port: 8006, targetPort: 8006}]
----
-apiVersion: discovery.k8s.io/v1
-kind: EndpointSlice
-metadata:
-  name: pve-api
-  namespace: proxcloud-system
-  labels: {kubernetes.io/service-name: pve-api}
-addressType: IPv4
-ports: [{name: api, port: 8006, protocol: TCP}]
-endpoints:
-$(for ip in $PVE_NODE_IPS; do echo "  - addresses: [$ip]"; done)
-EOF
 
 log cluster api
 # Empty on purpose: a manager-level credential silently wins over every ProxmoxCluster.credentialsRef,

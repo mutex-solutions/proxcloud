@@ -209,9 +209,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	if err != nil {
 		return sec, err
 	}
-	if !gatewayCSI {
-		classes = kamajiTenantClasses(d, classes)
-	}
+	classes = kamajiTenantClasses(gatewayCSI, d, classes)
 	in := kamaji.ClusterInfra{Region: compute.PVERegion(), Storage: storage, StorageClasses: classes, CSIGateway: gatewayCSI}
 
 	var pool externalservice.PVEPublicNetwork
@@ -269,27 +267,19 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	if apiURL == "" {
 		apiURL = strAny(compute.Config["apiUrl"])
 	}
-	csiURL := d.PVECSIURL
-	if csiURL == "" {
-		csiURL = apiURL
-	}
-	var capiID, capiSecret, csiID, csiSecret string
+	var capiID, capiSecret string
 	if sw := d.Shared; sw != nil {
-		capiID, capiSecret, csiID, csiSecret = sw.CAPITokenID, sw.CAPISecret, sw.CSITokenID, sw.CSISecret
+		capiID, capiSecret = sw.CAPITokenID, sw.CAPISecret
 	} else {
-		csiStores := classStorages(classes)
-		if gatewayCSI {
-			csiStores = nil // the gateway's token reaches PVE, the cluster's never does
-		}
 		toks, terr := ps.C.MintClusterTokens(ctx, spec.ID, pve.ClusterTokenScope{
-			Pool: in.Pool, TemplatePool: pve.TemplatePool, BootStorage: storage, CSIStorages: csiStores,
+			Pool: in.Pool, TemplatePool: pve.TemplatePool, BootStorage: storage,
 			ISOStorage: compute.PVEBootISOStorage(), Zone: zone, Vnet: in.Bridge,
 		})
 		if terr != nil {
 			err = upstreamErr(computeBackend, terr)
 			return sec, err
 		}
-		capiID, capiSecret, csiID, csiSecret = toks.CAPIID, toks.CAPISecret, toks.CSIID, toks.CSISecret
+		capiID, capiSecret = toks.CAPIID, toks.CAPISecret
 	}
 	sec.Cloud = map[string]string{"url": apiURL, "token": capiID, "secret": capiSecret}
 	switch {
@@ -300,8 +290,8 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 			return sec, err
 		}
 		sec.CSIManifest = kamajiCSINamespace
-	case len(classes) > 0:
-		sec.CSIManifest = kamajiCSIManifest(csiURL, csiID, csiSecret, in.Region)
+	case len(classes) > 0: // sharedWorkers: the operator's token, on the API URL CAPMOX uses
+		sec.CSIManifest = kamajiCSIManifest(apiURL, d.Shared.CSITokenID, d.Shared.CSISecret, in.Region)
 	}
 	if d.RWXGiB > 0 {
 		if err = h.kamajiRWX(ctx, proj, spec.ID, d.RWXGiB, &in); err != nil {
@@ -487,14 +477,14 @@ func KamajiPinBootISO(services serviceGetter, pveFor func(*externalservice.Exter
 	}
 }
 
-// kamajiTenantClasses is what a new cluster is offered through proxmox-csi. No class means no CSI token: minted tokens stop at
-// that, since the token reaches the tenant and opens every disk on the store (docs/managed-k8s.md). sharedWorkers keeps
-// its classes, because its tenants already share a pool and a token by the operator's choice.
-func kamajiTenantClasses(d kamaji.ClusterDefaults, classes []kamaji.StorageClass) []kamaji.StorageClass {
-	if d.Shared == nil && !d.CSISharedStores {
-		return nil
+// kamajiTenantClasses is what a new cluster is offered through proxmox-csi: every class through the CSI gateway, none
+// without it, since no PVE token goes to a tenant cluster. sharedWorkers keeps its classes on the operator's token:
+// its tenants already share a pool and a token by the operator's choice.
+func kamajiTenantClasses(gateway bool, d kamaji.ClusterDefaults, classes []kamaji.StorageClass) []kamaji.StorageClass {
+	if gateway || d.Shared != nil {
+		return classes
 	}
-	return classes
+	return nil
 }
 
 // kamajiStorage picks the boot store and the StorageClasses: every profile that can hold a boot disk,
@@ -567,7 +557,7 @@ metadata:
 
 // kamajiGatewayCSI reports whether a new cluster's block volumes go through the CSI gateway: the portal serves one,
 // the workers sit in the project's pool (sharedWorkers keeps its operator-run token), and the compute provider holds
-// the gateway's PVE token. Every storage profile is then offered, csiSharedStores or not. A pinned chart older than
+// the gateway's PVE token. Every storage profile is then offered. A pinned chart older than
 // kamaji.GatewayChartVersion is refused: it has no services-side controller, so the cluster's PVCs would never bind.
 func (h *Handler) kamajiGatewayCSI(cfg kamaji.Config, compute *externalservice.ExternalService) (bool, error) {
 	if h.csiGW == nil || h.csiGW.Endpoint.URL == "" || cfg.Defaults.Shared != nil {
@@ -584,8 +574,8 @@ func (h *Handler) kamajiGatewayCSI(cfg kamaji.Config, compute *externalservice.E
 }
 
 // CSIGateway is what a cluster's block volumes need from the portal: the gateway's registry, and where the controllers
-// on the services cluster reach the gateway. With no Endpoint.URL new clusters keep the tenant-side controller, and the
-// release still removes the disks of clusters made while it was set.
+// on the services cluster reach the gateway. With no Endpoint.URL new clusters get no block volumes, and the release
+// still removes the disks of clusters made while it was set.
 type CSIGateway struct {
 	Reg      *csigw.Store
 	Endpoint csigw.Endpoint
@@ -593,11 +583,11 @@ type CSIGateway struct {
 	GW func(ctx context.Context, serviceID string) (*pve.Client, error)
 }
 
-// SetCSIGateway turns on gateway CSI for new clusters (nil = the tenant-side controller of csiSharedStores).
+// SetCSIGateway turns on gateway CSI for new clusters (nil = no block volumes, except on sharedWorkers).
 func (h *Handler) SetCSIGateway(g *CSIGateway) { h.csiGW = g }
 
-// kamajiCSIManifest is the tenant-side config of proxmox-csi. A tenant with cluster-admin can read the token, so a
-// provider offers it only with csiSharedStores: its ACLs do not stop it attaching other projects' disks on those stores.
+// kamajiCSIManifest is the tenant-side config of proxmox-csi, for sharedWorkers alone: a tenant with cluster-admin can
+// read the operator's token, and its ACLs do not stop it attaching other tenants' disks.
 func kamajiCSIManifest(url, tokenID, tokenSecret, region string) string {
 	cfg, _ := json.Marshal(map[string]any{
 		"features": map[string]any{"provider": "capmox"},
