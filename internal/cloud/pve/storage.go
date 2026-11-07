@@ -13,7 +13,10 @@ type StorageDef struct {
 	Nodes   string `json:"nodes"`   // comma-separated node restriction; "" = all nodes
 	Shared  int    `json:"shared"`
 	Disable int    `json:"disable"`
-	Sparse  int    `json:"sparse"` // zfspool / zfs: thin-provisioned zvols
+	Sparse  int    `json:"sparse"`  // zfspool / zfs: thin-provisioned zvols
+	Server  string `json:"server"`  // nfs / cifs / glusterfs: the file server's address
+	Monhost string `json:"monhost"` // rbd / cephfs on an external Ceph: its monitors; empty = the nodes' own Ceph
+	Portal  string `json:"portal"`  // iscsi / iscsidirect: the target's address
 }
 
 // ListStorage lists cluster storage definitions (validates admin storage-profile config).

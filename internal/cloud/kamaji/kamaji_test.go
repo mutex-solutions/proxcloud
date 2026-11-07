@@ -666,6 +666,45 @@ func TestFinalizeAfterCloudSecretCollected(t *testing.T) {
 	}
 }
 
+// The sweep hands every live cluster past its grace window to the live hook, which is how an old cluster gets new
+// grants; a failing hook reaps nothing and fails nothing. A deleting cluster is not live.
+func TestFinalizeCallsLiveHook(t *testing.T) {
+	api := newFakeAPI()
+	svc := NewWithAPI(api, testCfg(), "svc-1")
+	ctx := context.Background()
+	spec := testSpec()
+	var live []string
+	svc.OnClusterLive(func(_ context.Context, compute, project, cluster string) error {
+		live = append(live, compute+"/"+project+"/"+cluster)
+		return errors.New("PVE down")
+	})
+	if _, err := svc.CreateCluster(ctx, spec, ClusterSecrets{Cloud: map[string]string{"token": "t"}, ComputeServiceID: "cs1"}); err != nil {
+		t.Fatal(err)
+	}
+	meta := api.secretObjs["pc-p1/"+MarkerSecretName(spec.ID)]["metadata"].(map[string]any)
+	meta["creationTimestamp"] = time.Now().UTC().Format(time.RFC3339)
+	if _, err := svc.FinalizeAllOrphans(ctx); err != nil || len(live) != 0 {
+		t.Fatalf("inside the grace window: live %v, err %v", live, err)
+	}
+	meta["creationTimestamp"] = time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if pending, err := svc.FinalizeAllOrphans(ctx); err != nil || pending != 0 {
+		t.Fatalf("pending %d, err %v", pending, err)
+	}
+	if len(live) != 1 || live[0] != "cs1/p1/"+spec.ID {
+		t.Fatalf("live = %v", live)
+	}
+	if _, ok := api.secrets["pc-p1/"+MarkerSecretName(spec.ID)]; !ok {
+		t.Fatal("a live cluster lost its marker")
+	}
+	if err := svc.DeleteCluster(ctx, "p1", spec.ID); err != nil {
+		t.Fatal(err)
+	}
+	live = nil
+	if _, err := svc.FinalizeAllOrphans(ctx); err != nil || len(live) != 0 {
+		t.Fatalf("deleting: live %v, err %v", live, err)
+	}
+}
+
 // No StorageClass offered: no CSI secret, so no token on its way to the tenant.
 func TestCreateClusterWithoutCSI(t *testing.T) {
 	api := newFakeAPI()

@@ -34,6 +34,99 @@ and rules: [README.md](README.md#maintenance-rule).
   the sandbox token is granted a node-local store only. That is the trust boundary the C2b row names.
 
 **Diagrams updated:** `c2-containers.md` (C2b).
+## 2026-11-07: Bootstrap ISOs off shared storage (SB-pre, PR #101)
+
+**What changed**
+
+- A Kubernetes cluster's CAPMOX token gets its ISO grant on the Proxmox provider's `isoStorage`, now `local` by default
+  (was `nas-templates`). A create answers 409 when that store is shared, takes no ISO images, when the boot store also
+  takes ISO images, or when `capmox@pve` lacks `PVEDatastoreAdmin` there (`pve.BootISOProblem`, `CheckBootISOGrant`).
+- The kamaji sweep calls a new live-cluster hook, `OnClusterLive`; `KamajiPinBootISO` moves an older cluster's grant to
+  the new store (`pve.PinClusterISO`) once no bootstrap ISO is left on the old one.
+- Installer: `services.iso_storage` defaults to `local` and preflight refuses a shared one; stage 10 gives the services
+  token `capmox@pve!capi` only its boot store and the ISO store, keeps `/storage` on the user, and takes the old
+  `/storage` and NAS grants off the token. It then asks PVE (`/access/permissions`) which `iso` stores the token sees and
+  fails unless that is the ISO store alone. `make upgrade` now runs stage 10; `make identity-check` runs it with
+  `--check` (logins and reads run there too) to show what it would change.
+- The move gives an old store back when a node started booting from it during the move, and waits. The user's ISO grant
+  is read off the ACL list the way PVE resolves it (`effectiveRoles`: groups, propagate, a deeper entry replacing its
+  parents) instead of one exact row.
+- Test connection warns about each network store outside `blockedCidrs` and the nodes' management networks (NFS, CIFS,
+  GlusterFS, iSCSI portals, an external Ceph's monitors; `StorageDef` carries `server`, `monhost`, `portal`), and when
+  the provider's `isoStorage` is unfit (`bootISOWarnings`). `externalservice.PVEBootISOStorage` replaces the project
+  package's own reading of `isoStorage`.
+
+**Why**
+
+- A bootstrap ISO holds the node's kubeadm join token, renewed until the node joins. On the NAS any VM whose traffic
+  reaches the export can read it and join a node of its own to the cluster, the services cluster included. Drilled on the
+  lab with CAPMOX's own go-proxmox calls: a VM with a public NIC mounted `nas-templates` and read the token; with the new
+  grant the same ISO went to `local` and nothing reached the NAS.
+- CAPMOX v0.9.2 names no store, so go-proxmox takes the first `iso` store in the token's view, and PVE lists stores in
+  Perl hash order: the old services token saw three and the pick changed between calls. Pinning one store by ACL is the
+  only lever, hence one iso store per token and the check on the boot store.
+- Moving an old grant while a node is still booting from the NAS would leave that ISO there for good: CAPMOX deletes it
+  only on stores its token still sees. The sweep waits instead, and looks again after the revoke, since a node can start
+  booting between the first look and the revoke.
+- The services cluster's join ISOs are the most valuable ones, and `make upgrade` did not run stage 10, so an existing
+  site kept a services token that saw every iso store. The check makes the rule hold on the site rather than only in the
+  ACL list the installer meant to write. Dry-run on the lab: stage 10 would grant `/storage/local-zfs` and
+  `/storage/local` to the token and take `/storage` and `/storage/nas-templates` off it; today the token sees `cephfs`,
+  `nas-templates` and `local`.
+- A false 409 on a group grant, a missed Ceph or iSCSI store, and a shared `isoStorage` that held existing clusters in
+  place silently were all review findings on this PR.
+- Server seed CDs stay on shared storage, since PVE does not migrate a VM with a node-local CD. They are as safe as the
+  store's reach, and a vnet reaches a NAS under a node's address through its NAT, so a node-only export does not stop
+  it: the isolation rules do, and the warning says when a store is outside them.
+
+**Diagrams updated:** `c3-components.md`, `c4-code.md`.
+## 2026-11-07: CSI gateway and volume registry (K8s-CSI, PR 1 of 4)
+
+**What changed**
+
+- `internal/cloud/csigw`: a listener in `cmd/api` (`PROXCLOUD_CSI_GATEWAY_ADDR`, TLS only, off by default) that answers
+  proxmox-csi-plugin v0.22.0's controller as if it were PVE. Thirteen calls are allowed, each with its own check; every
+  other path, nextid, VM create, replication, migrate and `/access/ticket` included, answers 403 and writes an audit
+  event (`CSI_GATEWAY` / `DENY`).
+- Per-cluster credential `csi@proxcloud!<clusterId>` (`csiGatewayCredential`, SHA-256 only), minted and revoked by
+  `Store.MintCredential` / `RevokeCredential` for PR 2 to call at cluster create and release.
+- `csiVolume`: the gateway's record of the disks it created, keyed provider/store/name and written before PVE is asked,
+  so a name is taken once across clusters. `csiTask`: the UPIDs it answered, the only ones a cluster may poll; a finished
+  delete, copy or resize lands on its row once.
+- `pve.Client.Raw`; `ExternalService.PVECSIGatewayConfig` (`config.csiGatewayTokenId`, `secret.csiGatewaySecret`);
+  `project.Handler.CSIDiskQuota` counts registry volumes against `diskGb`.
+- Installer: stage 10 creates `csi@pve!gateway` (role `ProxCloudCSI` on `/pool` and `/storage`) in split mode, stage 60
+  puts it on the compute provider.
+
+**Why**
+
+- The tenant-side CSI token opens every disk on a store, since PVE checks only `Datastore.Allocate` there, and moving the
+  controller out of the tenant is not enough: a tenant still writes the PV that names the disk. A gateway that checks
+  ownership is the boundary, and only it holds a PVE token.
+- Ownership is a registry row, not a tag or a name prefix, because the plugin's disks carry neither, and nothing a tenant
+  controls (volumeHandle, NodeID, providerID, StorageClass) is taken as proof.
+- The worker check reads `/cluster/resources` with the portal token: a token without `Pool.Audit` gets no `pool` field
+  there (PVE 9.2, lab), and `ProxCloudCSI` stays as it is. The portal token also cannot see `proxcloud-system`.
+- Its own port, not `:8080` (public) or `:8081` (`/debug/*` has no auth).
+
+**Review fixes in the same PR**
+
+- The worker list is read on every VM call, not cached for 10 s as the design had it, and the `pc-k8s-<id>` tag is
+  checked again on the VM config the gateway reads. Why: PVE gives a freed vmid to the next VM at once, so a cached list
+  let a cluster read the config of, attach to and revert another project's VM under its old worker's id for up to 10 s.
+  The store list stays cached: stores never change hands.
+- Quota check and registry write run under a Postgres advisory lock per project (`Registry.Locked`). Why: concurrent
+  creates, copies or resizes each passed on the same usage.
+- A resize writes the new size to its row when PVE accepts the call (set back if PVE refuses). Why: the row only moved
+  when the cluster polled the task, so a cluster that skipped the poll could grow each disk to the whole quota, and
+  billing from the registry would undercount.
+- A create or copy whose name PVE already holds without a row is refused (409). A create whose answer is lost asks PVE
+  whether the disk exists: yes, the row turns ready; no, it goes; no answer, it stays `creating`. A copy whose answer is
+  lost keeps its `creating` row. Why: an older disk with no row (another cluster's, before the gateway) must not be taken
+  over or blocked for the migration's adopt step, and a disk must never be left without a row.
+- The listener has read, write and idle timeouts, and an unknown cluster id costs the same hash compare as a known one.
+
+**Diagrams updated:** `c2-containers.md`, `c3-components.md`.
 
 ## 2026-11-07: Load balancers (HAProxy appliance)
 

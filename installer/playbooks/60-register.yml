@@ -178,6 +178,20 @@
         url: "{{ pc_svc_api }}/admin/service/{{ pc_service.id }}"
         method: PUT
         body: {name: "{{ pc.provider.name }}", config: "{{ pc_service.config | combine(provider.config) }}"}
+    # The CSI gateway calls PVE with csi@pve!gateway (stage 10), read from the compute provider. Written once, so a
+    # rotation done in the console stays.
+    - name: Give the provider the CSI gateway token
+      when: pc.mode == 'split' and (pc_service.config.csiGatewayTokenId | default('')) == ''
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service/{{ pc_service.id }}"
+        method: PUT
+        body:
+          name: "{{ pc.provider.name }}"
+          config: {csiGatewayTokenId: csi@pve!gateway}
+          secret: {csiGatewaySecret: "{{ lookup('ansible.builtin.file', pc_gen ~ '/token-gateway') | trim }}"}
+      no_log: true
     - name: Test the connection with the platform token
       proxcloud_api:
         access_key: "{{ api_key.id }}"

@@ -1,7 +1,9 @@
 # Sets pc_pve_headers from the install credential in the vault (token, else user + password) and the
 # facts the stages share. The uri defaults live in each play's module_defaults.
+# Logging in and reading change nothing, so they also run under --check (make identity-check).
 - name: Log in to Proxmox with a password
   when: not pc_vault.pve_token_id | default('')
+  check_mode: false
   ansible.builtin.uri:
     url: "{{ pc_api }}/access/ticket"
     method: POST
@@ -22,6 +24,7 @@
           'CSRFPreventionToken': pc_ticket.json.data.CSRFPreventionToken} }}
 
 - name: Read storages and nodes
+  check_mode: false
   ansible.builtin.uri: {url: "{{ pc_api }}/{{ item }}"}
   loop: [storage, nodes]
   register: pc_reads

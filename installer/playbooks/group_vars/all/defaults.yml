@@ -117,7 +117,7 @@ pc_defaults:
     k8s_version: 1.35.10
     templates: {}                # {pve node: template vmid}, what the script prints
     storage: local-zfs           # boot disks and the databases' StorageClass
-    iso_storage: nas-templates   # CAPMOX uploads the bootstrap ISO here
+    iso_storage: local           # bootstrap ISOs (kubeadm join tokens): node-local only, never shared (docs/managed-k8s.md)
     pool: proxcloud-system
     capi_token_id: capmox@pve!capi
     capi_token_file: token-capi   # in generated/

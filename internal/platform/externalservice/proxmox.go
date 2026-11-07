@@ -124,12 +124,29 @@ func (e *ExternalService) PVEConfig() pve.Config {
 	}
 }
 
+// PVECSIGatewayConfig is PVEConfig with the CSI gateway's token (config.csiGatewayTokenId, secret.csiGatewaySecret)
+// in place of the portal's. ok is false when the provider has none: the gateway then refuses its clusters.
+func (e *ExternalService) PVECSIGatewayConfig() (cfg pve.Config, ok bool) {
+	cfg = e.PVEConfig()
+	cfg.TokenID, cfg.Secret = str(e.Config["csiGatewayTokenId"]), str(e.secretMap()["csiGatewaySecret"])
+	return cfg, cfg.TokenID != "" && cfg.Secret != ""
+}
+
 // PVEBackupStorage is config.backupStorage: the shared store server backups go to ("" = no backups offered).
 func (e *ExternalService) PVEBackupStorage() string { return str(e.Config["backupStorage"]) }
 
 // PVEImportStorage is config.importStorage: the store with import content the portal streams customer images to
 // ("" = no image import offered).
 func (e *ExternalService) PVEImportStorage() string { return str(e.Config["importStorage"]) }
+
+// PVEBootISOStorage is config.isoStorage: the one iso store a Kubernetes cluster's CAPMOX token sees, where its workers'
+// bootstrap ISOs (kubeadm join tokens) land. Default `local`.
+func (e *ExternalService) PVEBootISOStorage() string {
+	if s := str(e.Config["isoStorage"]); s != "" {
+		return s
+	}
+	return pve.DefaultBootISOStorage
+}
 
 // PVEImportUnknownSizeMaxGiB is config.importUnknownSizeMaxGiB: how large an image whose server states no size may get,
 // spooled to the portal's temporary directory on the way. 0 (the default) refuses such a URL.
