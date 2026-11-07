@@ -163,6 +163,11 @@ func (r *Repo) SetFields(ctx context.Context, collection, id string, set pgdoc.M
 	return 0, nil
 }
 
+// SetFieldsIfStatus applies `$set` while the document's status is still expect; false = no match (gone, or the status moved).
+func (r *Repo) SetFieldsIfStatus(ctx context.Context, collection, id, expect string, set pgdoc.M) (bool, error) {
+	return r.c(collection).SetFieldsOne(ctx, pgdoc.M{"_id": id, "status": expect}, set, nil)
+}
+
 // SetAndUnsetFields applies `$set` + `$unset` in one update — the faithful shape for an
 // entity-save that nulls a field (null fields are dropped from the stored doc, not
 // stored as literal nulls; a stored null would serialize as `"field":null` and break null-omission).

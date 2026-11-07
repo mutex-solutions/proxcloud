@@ -29,13 +29,41 @@ var (
 	provisionRetryAfter     = 5 * time.Minute
 )
 
-// enableAndBootstrap provisions the project onto the non-disabled CLOUD services and flips it to
-// ENABLED. One provider failing leaves the others provisioned: the failure goes on the project, for a retry, and on the
-// provider's row, for the operator. It is an error only when the project ends up on no provider at all.
-// Idempotent: a project that already has an attached service is left as-is, but for what failed.
+// provisionRecordTimeout bounds writing down a failure. It has its own context: the attempt's may be what just ran out.
+const provisionRecordTimeout = 5 * time.Second
+
+// ProvisionByOperator is the admin API's provision: the operator's enable of what it asks to provision, so it also ends an
+// operator's disable. A DISABLED project already provisioned has nothing to provision and may hold paused VMs, so it stays:
+// enabling that is the operator's enable, which resumes them.
+func (h *Handler) ProvisionByOperator(ctx context.Context, p *Project) error {
+	if p.IsDisabled() && p.HasServices() {
+		return nil
+	}
+	if p.IsDisabled() {
+		if err := h.svc.EnableIfDisabled(ctx, p, true); err != nil {
+			return err
+		}
+	}
+	return h.enableAndBootstrap(ctx, p)
+}
+
+// enableAndBootstrap flips a DISABLED project to ENABLED (never an operator's disable) and provisions it onto the non-disabled
+// CLOUD services. The caller knows billing allows it. The enable is its own conditional write, made before any provider call:
+// the saves after those calls hold a read that may be minutes old, and a status change landing during them must stand.
+// One provider failing leaves the others provisioned: the failure goes on the project, for a retry, and on the provider's row,
+// for the operator. It is an error only when the project ends up on no provider at all.
+// Idempotent: a project that already has an attached service is only enabled, but for what failed.
 func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if h.esSvc == nil {
 		return nil
+	}
+	if !p.IsEnabled() {
+		if err := CheckTransition(ActionEnable, p.Status); err != nil {
+			return err
+		}
+		if err := h.svc.EnableIfDisabled(ctx, p, false); err != nil {
+			return err
+		}
 	}
 	// Already provisioned (the project carries its attached services) → this is a re-entry; the
 	// provider-side setup was done at first bootstrap. Skip ALL the live calls — they are idempotent
@@ -72,8 +100,7 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 && len(truenasES) == 0 && len(dnsES) == 0 {
 		return nil // no cloud provider configured → nothing to provision
 	}
-	changed := p.Status != StatusEnabled
-	p.Status = StatusEnabled
+	changed := false
 	// A failure on a provider that has since gone or been disabled is nothing to retry.
 	live := map[string]bool{}
 	var lastErr error
@@ -102,12 +129,19 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 		}
 	}
 	if changed {
-		if err := h.svc.Save(ctx, p); err != nil {
+		if err := h.svc.Save(context.WithoutCancel(ctx), p); err != nil {
 			return err
 		}
 	}
-	if len(p.ServiceIDs()) == 0 {
+	if len(p.ServiceIDs()) > 0 {
+		return nil
+	}
+	if lastErr != nil {
 		return lastErr
+	}
+	// On no provider, with the retry not due yet: nothing was tried, but the project still does not work.
+	for _, f := range p.ProvisionFailures {
+		return fmt.Errorf("project is on no provider, retrying later: %s", f.Message)
 	}
 	return nil
 }
@@ -127,7 +161,9 @@ func (h *Handler) provisionOn(ctx context.Context, p *Project, es *externalservi
 		delete(p.ProvisionFailures, es.ID)
 	}
 	if err != nil || es.ProvisionError != nil {
-		if rerr := h.esSvc.SetProvisionError(attempt, es.ID, p.ID, err); rerr != nil {
+		record, cancel := context.WithTimeout(context.WithoutCancel(ctx), provisionRecordTimeout)
+		defer cancel()
+		if rerr := h.esSvc.SetProvisionError(record, es.ID, p.ID, err); rerr != nil {
 			slog.Error("project provisioning: record on the provider", "service", es.ID, "err", rerr)
 		}
 	}

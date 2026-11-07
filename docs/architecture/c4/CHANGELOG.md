@@ -22,6 +22,60 @@ and rules: [README.md](README.md#maintenance-rule).
   error, so a `PRIVATE` or `rustfs` typo blocked every new project. A row can also go bad after it is stored, so the check
   alone would not be enough. Without the record on the project, a project that had any provider would never get the failed
   one, since a re-entry skips provisioning.
+## 2026-11-07: One table holds a project's status changes; a member cannot lift a suspension
+
+**What changed**
+
+- `internal/platform/project/status.go` holds every allowed status change. The client service, the client handler, the admin
+  routes and the billing suspender all ask it, and writes are conditional on the status they read. `DELETED` and
+  `DELETE_IN_PROGRESS` refuse every action.
+- Cancelling a deletion needs `SCHEDULED_FOR_DELETION` and restores the status kept on the doc in `statusBeforeDeletion`.
+- `POST /project/{id}/billing/{bp}` and `POST /project/{id}/init` no longer enable a project. A billing resume leaves a project
+  an operator disabled (`disabledByOperator`).
+
+**Why**
+
+- Enabling was reachable from each path on its own terms: a cancel with nothing scheduled, a profile change, opening a project
+  with no service yet. Each could lift a billing or operator suspension, and each could overwrite `DELETE_IN_PROGRESS`, which
+  drops the project out of the sweep mid-teardown. A rule per handler is what let them differ.
+- The write is conditional because the deletion sweep moves a project between a handler's read and its write.
+
+**Then, on the same PR, what a recheck found**
+
+- `Repo.Save` no longer writes `status`, `scheduledForDeletionAt`, `statusBeforeDeletion` or `disabledByOperator`. Only the
+  conditional writes do: `SaveIfStatus`, `EnableIfDisabled` and `ApplyBillingSuspension`. Admin project update and quota write
+  their own fields, where they replaced the whole doc.
+- `pgdoc.SetFieldsOne` and `DeleteOne` lock the row they select. Without it a write queued behind another rechecked only the id,
+  so two conditional writes could both win. The test that races a suspension against a member's schedule found this.
+- A `DISABLED` project refuses what adds usage (`errProjectDisabled`, 409): every create, an upload, new or rotated S3 keys, and
+  every action outside `allowedWhileDisabled`. Reads, stop and delete stay open.
+- Moving a project to a `NEW` profile, by profile or by organization, is refused while something would keep running.
+- A billing profile's suspend, resume and activation apply only to the projects it pays for (`AllByBillingProfile`, `PaidBy`).
+- Opening a project lifts a `DISABLED` that nothing holds any more: not an operator's, and billing allows it. Activation lifts a
+  provisioned project as well.
+
+**Why**
+
+- `Save` ran from a read that could be minutes old: a bootstrap waiting on a provider put back the status from before a member's
+  delete-now, and the project dropped out of the sweep. Conditional writes on the few status paths do not help while a generic
+  write can overwrite them, so the generic write must not hold the field at all.
+- Metering, the sync and rating cover only `ENABLED` projects, so anything created or started in a `DISABLED` one ran free.
+- Refusing the profile move, rather than pausing through the suspender, because the move is the tenant's own action and
+  activation has no leg that resumes VMs. A refusal has no partial failure and tells them what to do.
+
+**Diagrams updated:** none; no container or relationship changed.
+
+## 2026-11-07: A server's name is checked against PVE's rule
+
+**What changed**
+
+- Create, rename and image-from-server check the name with `pve.ValidVMName`, PVE's `dns-name` format plus a DNS name's
+  length limits, and answer 400 with what to fix. The create and rename forms apply the same rule as you type.
+
+**Why**
+
+- PVE refuses anything else with a field error, which the API now hides on a 502, so a name with a space read "compute
+  backend is unavailable". Only the API and the client can say what is wrong with it.
 
 **Diagrams updated:** none.
 ## 2026-11-07: Installer re-runs keep operator settings, split mode passes preflight

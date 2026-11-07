@@ -682,6 +682,24 @@ paid bill, a successful deposit/collect) re-evaluates a profile with an
 open/suspended process; when it is no longer eligible it flips the profile back to
 `ACTIVE` (best-effort cloud resume) and marks the process `RESOLVED`.
 
+A suspend, resume or activation applies to the projects the profile pays for: attached to it directly, or in an organization
+that references it with no profile of their own. The project's status moves first, on a fresh read, with a retry when another
+status change wins meanwhile. A loss that survives the retries is logged as an error.
+
+**What `DISABLED` means** — metering, the sync and rating cover only `ENABLED` projects, so a `DISABLED` project refuses what
+would add usage with a 409: every create, an object upload, new or rotated S3 keys, and every cloud action outside
+`allowedWhileDisabled` (`internal/platform/project/cloud_writes.go`). That list is reads, stop, delete, detach, and removing
+snapshots, backups and objects. S3 keys already issued keep working against the object store itself until the project is
+deleted.
+
+**What lifts `DISABLED`** — an operator's enable, a resume of the profile that paid for it, its activation, or opening the
+project when nothing holds it any more: billing is unconfigured or the paying profile is `ACTIVE`. A project an operator disabled
+(`disabledByOperator`) comes back only through an operator, whatever billing does. Disabling a project billing already holds
+sets that flag, so the operator can keep it down past a resume.
+
+Moving a project to a `NEW` profile, by changing its profile or its organization, disables it. The move is refused with a 409
+while a VM is not stopped or the project has a Kubernetes cluster or managed database, since those would run unbilled.
+
 ### Billing-profile status lifecycle
 
 ```mermaid

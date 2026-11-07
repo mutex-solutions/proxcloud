@@ -536,8 +536,14 @@ func run() error {
 			return err
 		}
 		for pi := range projects {
-			p := &projects[pi]
-			if p.IsEnabled() {
+			// A fresh read: an earlier project's bootstrap can take minutes.
+			p, err := projectRepo.FindByID(ctx, projects[pi].ID)
+			if err != nil || p == nil {
+				log.Error("activate: read project", "project", projects[pi].ID, "err", err)
+				continue
+			}
+			// Only a project waiting on billing: one an operator disabled stays so, and one on its way out must not come back.
+			if !p.IsDisabled() || p.DisabledByOperator || !p.PaidBy(bpID) {
 				continue
 			}
 			p.Memberships = memberships
@@ -621,7 +627,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		return projectH.EnableAndBootstrap(ctx, p)
+		return projectH.ProvisionByOperator(ctx, p)
 	})
 	payService.SetReviewer(suspensionJob) // auto-resume a suspended profile when a bill is paid
 	adminH.SetPayService(payService)      // admin record-payment shares the same mail + review hooks
@@ -1183,16 +1189,20 @@ func (s billingCloudSuspender) forEachProjectServer(ctx context.Context, bpID st
 		return err
 	}
 	for pi := range projects {
-		p := &projects[pi]
-		s.pauseProjectServers(ctx, p, pause)
-		// suspend/resume: ENABLED → DISABLED on suspend, back on resume.
-		if pause && p.IsEnabled() {
-			p.Status = project.StatusDisabled
-			_ = s.projects.Save(ctx, p)
-		} else if !pause && p.IsDisabled() {
-			p.Status = project.StatusEnabled
-			_ = s.projects.Save(ctx, p)
+		// The status moves first, on a fresh read: from here a member cannot start what the walk below has already passed.
+		p, err := s.projects.ApplyBillingSuspension(ctx, projects[pi].ID, bpID, pause)
+		if err != nil {
+			s.log.Error("suspender: project status not changed, its billing suspension is lost", "project", projects[pi].ID, "billingProfile", bpID, "suspend", pause, "err", err)
+			p = &projects[pi]
 		}
+		if p == nil {
+			continue
+		}
+		// A resume can follow a member paying a bill: it leaves what an operator disabled alone.
+		if !pause && p.DisabledByOperator {
+			continue
+		}
+		s.pauseProjectServers(ctx, p, pause)
 	}
 	return nil
 }

@@ -440,8 +440,9 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 
 	// ponytail: rows left with no failed leg behind them (a provider since removed) do not ask for a re-run, or a project
 	// could wedge the job's sweep forever. Report them and move on.
+	expect := p.Status
 	teardownOutcome(p, cephRevokeFailed || pveTeardownFailed || zonesLeft || kamajiPending > 0 || dbaasPending > 0)
-	if err := h.svc.Save(ctx, p); err != nil {
+	if _, err := h.svc.SaveIfStatus(ctx, p, expect); err != nil {
 		return err
 	}
 	if zonesLeft {

@@ -193,7 +193,7 @@ export default function ProjectsPage() {
                     <DropdownMenuItem onClick={() => setPending({ project: p, kind: "DISABLED" })}>
                       <Pause className="size-4" /> Disable
                     </DropdownMenuItem>
-                  ) : (
+                  ) : (p.status ?? "").toUpperCase() === "DISABLED" && (
                     <DropdownMenuItem onClick={() => setPending({ project: p, kind: "ENABLED" })}>
                       <Play className="size-4" /> Enable
                     </DropdownMenuItem>

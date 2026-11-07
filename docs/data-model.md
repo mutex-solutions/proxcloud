@@ -193,7 +193,9 @@ erDiagram
     project {
         string _id PK
         string name
-        string status "ENABLED|DISABLED|SCHEDULED_FOR_DELETION|DELETE_IN_PROGRESS"
+        string status "ENABLED|DISABLED|SCHEDULED_FOR_DELETION|DELETE_IN_PROGRESS|DELETED"
+        string statusBeforeDeletion "what a cancelled deletion restores"
+        bool disabledByOperator "a billing resume, activation and opening leave it DISABLED"
         string organizationId FK
         string billingProfileId FK
         array memberships "embedded {sub, role}"
