@@ -39,6 +39,8 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
   managed K8s/DBaaS providers.
 - [managed-k8s.md](managed-k8s.md) and [managed-dbaas.md](managed-dbaas.md) —
   managed Kubernetes and database clusters delivered through ArgoCD.
+- [managed-sandbox.md](managed-sandbox.md) — gVisor sandboxes on a platform-owned
+  Kamaji cluster (planned): the SB0 lab spike and its findings.
 - [proxmox-permissions.md](proxmox-permissions.md) — least-privilege PVE roles
   (ProxCloudPlatform / ProxCloudCAPI / ProxCloudCSI), ACL paths, privsep tokens
   and the `pveum` commands to create them.

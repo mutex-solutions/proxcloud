@@ -184,6 +184,7 @@ export default function ProjectDetailPage() {
 
   const [statusConfirm, setStatusConfirm] = useState<"ENABLED" | "DISABLED" | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [confirmNow, setConfirmNow] = useState(false)
   const [bpOpen, setBpOpen] = useState(false)
   const [bpChoice, setBpChoice] = useState("")
   const [orgOpen, setOrgOpen] = useState(false)
@@ -399,14 +400,16 @@ export default function ProjectDetailPage() {
 
   // DELETE /admin/project/{id} (projectmut.go projectScheduleDeletion — cloud pre-check is a 501
   // seam on this deployment).
+  // DELETE …/now flags the project for the deletion job's next sweep instead of the grace period.
   const deleteProject = useMutation({
-    mutationFn: () => apiFetch(projectPath, { method: "DELETE" }),
-    onSuccess: () => {
-      toast.success("Project deletion scheduled")
+    mutationFn: (now: boolean) => apiFetch(now ? `${projectPath}/now` : projectPath, { method: "DELETE" }),
+    onSuccess: (_d, now) => {
+      toast.success(now ? "Project deletion started" : "Project deletion scheduled")
       navigate("/clients/projects")
     },
     onError: (e: Error) => {
       setDeleteOpen(false)
+      setConfirmNow(false)
       if (e instanceof ApiError && e.status === 501) {
         toast.info("Not available: project deletion is not supported on this deployment.")
       } else {
@@ -1278,16 +1281,41 @@ export default function ProjectDetailPage() {
           <DialogHeader>
             <DialogTitle>Delete project</DialogTitle>
             <DialogDescription>
-              Schedules {project?.name ?? "this project"} for deletion, including its cloud resources. This cannot be
-              undone once the deletion runs.
+              Deletes {project?.name ?? "this project"} with its cloud resources. Schedule keeps it for the grace
+              period, during which the deletion can be cancelled; Delete now hands it to the deletion job at once. This
+              cannot be undone once the deletion runs.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteOpen(false)}>
               Cancel
             </Button>
-            <Button variant="destructive" disabled={deleteProject.isPending} onClick={() => deleteProject.mutate()}>
-              {deleteProject.isPending ? "Deleting…" : "Delete project"}
+            <Button variant="outline" disabled={deleteProject.isPending} onClick={() => deleteProject.mutate(false)}>
+              Schedule deletion
+            </Button>
+            <Button variant="destructive" disabled={deleteProject.isPending} onClick={() => setConfirmNow(true)}>
+              Delete now…
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete now: one more confirm, since nothing can stop it once sent */}
+      <Dialog open={confirmNow} onOpenChange={setConfirmNow}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {project?.name ?? "this project"} now?</DialogTitle>
+            <DialogDescription>
+              The deletion job tears down every server, volume, network and other cloud resource of this project within
+              about a minute. There is no grace period and the deletion cannot be cancelled.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmNow(false)}>
+              Back
+            </Button>
+            <Button variant="destructive" disabled={deleteProject.isPending} onClick={() => deleteProject.mutate(true)}>
+              {deleteProject.isPending ? "Deleting…" : "Delete now"}
             </Button>
           </DialogFooter>
         </DialogContent>

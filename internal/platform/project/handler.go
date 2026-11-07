@@ -17,6 +17,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
@@ -87,6 +88,10 @@ type Handler struct {
 	// csiGW gives new Kubernetes clusters block volumes through the CSI gateway (SetCSIGateway; nil = the tenant-side
 	// controller, offered only with csiSharedStores).
 	csiGW *CSIGateway
+	// sandboxFor builds the sandbox service for a sandbox provider (sandbox-cluster client from
+	// the provider's kubeconfig). Always nil until phase SB3 adds its setter and mounts the
+	// SANDBOX legs of cloud_sandbox.go; until then no route reaches them.
+	sandboxFor func(es *externalservice.ExternalService) (*sandbox.Service, error)
 }
 
 // SetCustomMenu wires the customMenuItem reader into the /init menu build.

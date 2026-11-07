@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"maps"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -301,6 +302,23 @@ func (s *Service) VolumeSyncProvider(region, projectID string, profileOf VolumeP
 	return &VolumeSyncProvider{svc: s, region: region, projectID: projectID, profileOf: profileOf}
 }
 
+// VolumeLabel is the data.volume key of the name a tenant gave a volume. PVE has no name for a disk, so the name lives
+// on the row only: a sync carries it over (MergeCached), and a re-read without it would show the derived name again.
+const VolumeLabel = "label"
+
+// CarryVolumeLabel keeps a volume row's label, and so its name, over a fresh read of the disk.
+func CarryVolumeLabel(cached, fresh map[string]any) {
+	c, _ := cached["volume"].(map[string]any)
+	f, _ := fresh["volume"].(map[string]any)
+	if l, _ := c[VolumeLabel].(string); l != "" && f != nil {
+		f[VolumeLabel], f["name"] = l, l
+	}
+}
+
+func (p *VolumeSyncProvider) MergeCached(cached, fresh map[string]any) {
+	CarryVolumeLabel(cached, fresh)
+}
+
 func (p *VolumeSyncProvider) Type() string          { return cloud.TypeVolume }
 func (p *VolumeSyncProvider) ProjectID() string     { return p.projectID }
 func (p *VolumeSyncProvider) CompareKeys() []string { return []string{} }
@@ -380,8 +398,9 @@ func (p *VolumeSyncProvider) list(ctx context.Context, skip func(ClusterResource
 				attachments = []any{}
 			}
 			name := r.Name + "-" + d.Slot
-			if isHolder(r.Tags) { // no server to name it after
-				name = d.VolID[strings.IndexByte(d.VolID, ':')+1:]
+			if isHolder(r.Tags) { // no server to name it after: the disk's file name, not its path on the store
+				name = path.Base(d.VolID[strings.IndexByte(d.VolID, ':')+1:])
+				name = strings.TrimSuffix(name, path.Ext(name))
 			}
 			diskProfile, class := "", ""
 			if p.profileOf != nil {

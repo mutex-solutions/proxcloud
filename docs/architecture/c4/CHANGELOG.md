@@ -62,6 +62,215 @@ and rules: [README.md](README.md#maintenance-rule).
 - New clusters only; existing ones keep their tenant controller until the migration (PR 3).
 
 **Diagrams updated:** `c2-containers.md`, `c3-components.md`.
+## 2026-11-07: Sandbox service ported, not reachable (SB1)
+
+**What changed**
+
+- `internal/cloud/sandbox` ported from the earlier implementation (EE): Sandbox CR rendering under gVisor, per-project
+  namespace with ResourceQuota and the tenant label, per-sandbox Cilium egress policy, GPU capacity, exec, logs,
+  timeouts, template builds, snapshots and the sync provider. Its unit tests came with it.
+- `kamajik8s` gained what the sandbox code and the later `sandbox-proxy` call: `NewInCluster` (service account token
+  re-read every minute), `ErrUnreachable` on transport failures, server-side apply / get / delete / merge patch of custom
+  and core objects, ResourceQuota, lists across namespaces, nodes, and `exec.go` (WebSocket exec and streamed exec).
+- Renames: every EE label and annotation (both of its domains) is now under `proxcloud.io/` (the tenant
+  label is `proxcloud.io/tenant`, the one the SB0 guardrail selects), the GPU node label is
+  `node-restriction.kubernetes.io/proxcloud-gpu`, the sandbox-init environment is `PROXCLOUD_*`, and the node runtime
+  directory is `/opt/proxcloud-sandbox/bin`, mounted at `/.proxcloud`. SB2a's `node-setup` and SB5's `sandbox-init` must
+  use the same names.
+- The template registry is provider config (`config.sandbox.templateRegistry`), not a constant; empty means no image is
+  treated as a private template.
+- Provider kind `sandbox` (`externalservice.IsSandbox`, `SandboxConfig`), with the admin API refusing to create one or to
+  turn a row into one. `cloud_sandbox.go` (create, delete, actions, live list) is in the project package with
+  `Handler.sandboxFor` left nil and no caller. `cloud.TypeSandbox` exists; nothing syncs or bills it.
+
+**Why**
+
+- The plan ports the sandbox code in one piece before anything can reach it, so the later phases change behaviour, not
+  vocabulary. The release gate is SB2b (node firewall) plus SB3 (routes, quota, billing, suspend gate): the SB0 spike
+  showed a node-level foothold on the sandbox cluster reaches the PVE API, the NAS and the management host, so no tenant
+  route and no provider row may exist before those land. Refusing the kind at the admin API keeps an operator from
+  creating a row the later phases would then serve.
+- A kubelet can set any label on its own Node except `node-restriction.kubernetes.io/` ones (with NodeRestriction on),
+  so a placement label outside that prefix lets a compromised node draw other tenants' sandboxes to itself.
+- A hard-coded registry host belongs to one operator; each site has its own.
+- Checked on the SB0 lab cluster through the ported service from a build-tagged test, with the proxcloud service
+  account's token: create to Ready, exec (stdout, stderr, stdin, exit code 7, a missing binary as a 400), pod logs,
+  timeout change, the egress guardrail selecting the namespace the service labels (a private address dropped, the
+  internet open), delete and the CR gone.
+
+**Review fixes (same PR)**
+
+- What: exec (`Exec` and `ExecStream`) treats a stream that ends without its status frame as an error (it returned
+  exit 0); a refused exec upgrade reads the pod and answers 404 (pod gone) or 403 (no `pods/exec`) instead of
+  `ErrUnreachable`; a pull secret source that cannot be read (RBAC, API error) is an error for a template build and a
+  logged warning for a namespace ensure, not "no source". Comments now name ProxCloud's `pc-`/`pc-db-` namespaces and
+  `pc-c-`/`pc-d-` ids and mark the cluster files SB2a adds.
+- Why: v4 and v5 always send a status, Success included, so a missing one means konnectivity or the kubelet cut the
+  stream and the command's outcome is unknown; an agent would have read a half-run command as success. A 403 or a
+  deleted pod logged as an unreachable cluster sends the operator to the network. The lab service account cannot read
+  secrets, so custom templates would have failed at image pull with nothing in the log.
+
+**Diagrams updated:** `c3-components.md` (C3e).
+## 2026-11-07: NodeRestriction on tenant API servers (PR #108)
+
+**What changed**
+
+- Chart `proxmox-kamaji-cluster` 0.1.6 sets `KamajiControlPlane.spec.admissionControllers` to Kamaji's default list plus
+  `NodeRestriction`, from a new chart value `kamajiControlPlane.admissionControllers`. The portal's values do not carry the
+  key, so every cluster on 0.1.6 gets the chart default. Existing clusters get it through the usual chart bump: the
+  provider's `chartVersion` to 0.1.6, then Bump. `TestChartEnablesNodeRestriction` renders the portal's values through the
+  chart and checks the plugin.
+- Docs: `docs/managed-k8s.md` section 9 (what a node credential can do with and without it), section 3 (the admin Bump has
+  now run on Proxmox); c3 row of the managed Kubernetes create.
+
+**Why**
+
+- Kamaji's default list has no `NodeRestriction`, and the chart did not set one, so every tenant cluster ran without it.
+  The SB0 sandbox spike found it (PR #103) and patched its own cluster by hand. Measured on the lab, same cluster before and
+  after the Bump: with 0.1.5 a worker's kubelet certificate patched another Node's labels, taints and cordon (200) and read a
+  Secret of another namespace by creating a pod bound to itself that mounts it; with 0.1.6 both are refused (`is not allowed
+  to modify node`, `can only create mirror pods`, `a mirror pod may not reference secrets`). Root on one worker no longer
+  reaches the other nodes' scheduling or the cluster's Secrets through the node identity.
+- Kubelets, Cilium, the proxmox-csi node plugin, MetalLB and workloads kept working after the roll, and a worker that joined
+  afterwards registered with its group's label and taint, so turning it on for every cluster costs nothing on the workers.
+
+Files: `deploy/charts/proxmox-kamaji-cluster/{Chart.yaml,values.yaml,templates/cluster.yaml}`,
+`internal/cloud/kamaji/chart_admission_test.go`, `docs/managed-k8s.md`, `docs/architecture/c4/c3-components.md`.
+## 2026-11-07: Delete-now frees a project stranded in deletion
+
+**What changed**
+
+- Delete-now (client `DELETE /project/{id}/now` and operator `DELETE /admin/project/{id}/now`, both
+  `project.Service.DeleteNow`) accepts a `DELETE_IN_PROGRESS` project that has no `scheduledForDeletionAt`, and stamps the
+  past schedule the deletion job selects by. The next sweep tears it down and removes the row. A `DELETE_IN_PROGRESS`
+  project that has a schedule is the sweep's to retry and still answers 400 "Project is deleting".
+
+**Why**
+
+- Before PR #76 the operator's delete-now wrote `DELETE_IN_PROGRESS` alone and ran the teardown in a goroutine. A restart
+  or a failed teardown left the row in that status with no schedule, which the sweep never selects. #76 stopped new rows
+  getting there and named delete-now as the way out for old ones, but the status machine of PR #84 refuses delete-now from
+  `DELETE_IN_PROGRESS`, so an old row had no way out at all. No current path writes that status without a schedule, so the
+  exception covers only those rows. Delete-now rather than widening the sweep: the operator decides when a project
+  stranded that long is torn down.
+
+**Diagrams updated:** none (no new component or flow).
+## 2026-11-07: PR #103 Sandbox cluster spike (SB0)
+
+**What changed**
+
+- New Planned element in C2b: the sandbox cluster, a platform-owned Kamaji cluster built from the cluster chart, with its
+  workers in pool `proxcloud-sandbox` on their own vnet, running tenant code under gVisor behind a Cilium egress
+  guardrail, with no CSI token and no NAS dataset. Docs only: no code, provider kind or route.
+- `docs/managed-sandbox.md` section 0 records the lab spike that shaped it.
+
+**Why**
+
+- The sandbox port (phases SB0 to SB10) needs a cluster where an escape from gVisor reaches as little as possible. The
+  spike ran one by hand on PVE 9.2 and measured what the diagram now commits to: exec works through konnectivity alone,
+  so the services cluster needs no route into the sandbox vnet; the EE guardrail drops every private destination from a
+  sandbox while the internet stays open.
+- It also showed what is not there yet and why the element stays Planned: from the worker's own network namespace the PVE
+  API, the NAS and the management host are reachable (the per-NIC VM firewall of SB2b is a release gate), Kamaji tenant
+  control planes run without the `NodeRestriction` admission plugin (true of every managed cluster today), and Cilium's
+  Gateway API does not work with the chart's kube-proxy setup, so TLS for sandbox hostnames ends in `sandbox-proxy`
+  itself (D15: Go TLS listener, wildcard Secret issued by cert-manager on the services cluster).
+- A review of the spike added three release gates the diagram's Planned element now carries. Without NodeRestriction a
+  node credential can create a pod bound to itself that mounts any Secret and then read it, so one worker reads every
+  tenant's secrets. Tenant VMs reach the sandbox workers on every port (one VRF holds both, the isolation rules do not
+  name the sandbox CIDR, the worker NIC has no VM firewall), and forged Cilium VXLAN packets can skip sandbox ingress
+  policy, so the sandbox CIDR must be dropped in both directions. Sandbox traffic reaches the NAS as a node address after
+  the exit node's SNAT, which the exports accept. And the guardrail is IPv4 only, so the cluster must be single-stack.
+- The bootstrap ISO's store is chosen by the cluster token's ACL (CAPMOX takes the first ISO store the token can see), so
+  the sandbox token is granted a node-local store only. That is the trust boundary the C2b row names.
+
+**Diagrams updated:** `c2-containers.md` (C2b).
+## 2026-11-07: Acceptance pass: statuses and messages the consoles got wrong
+
+**What changed**
+
+- A Kubernetes cluster reads `READY` when Argo CD still says `Progressing` but the control plane is Ready with an endpoint,
+  every node group runs its count of Ready nodes, the Application is Synced, and the one part of it not done is its
+  ClusterResourceSet: every HelmChartProxy Ready, read off the management cluster. That
+  holds for 30 minutes from the Application's creation; past it a ClusterResourceSet that never applies leaves the cluster
+  `PROGRESSING`. `deploy/mgmt-cluster/rbac.yaml` gives the ProxCloud ServiceAccount read on HelmChartProxies and
+  ClusterResourceSets; on an existing install re-run the services-cluster step to apply it. Without it the reads are refused
+  and Argo's answer stands. The sync also reports the cluster's
+  StorageClasses and whether it has ReadWriteMany, and the cluster page says when a claim will stay Pending.
+- `LIST_VOLUME_TYPES` marks the provider's default storage profile; the server wizard preselects it.
+- Activating a billing profile that has no currency gives it the base currency, an ACTIVE profile already stored without
+  one gets it when read (and stored once), and a bill of such a profile reads in the base currency.
+- Operator Delete now asks once more before it runs, answers a failure underneath as a 500 instead of 200, and its audit
+  event records the flip to `DELETE_IN_PROGRESS`, which tells it from a scheduled deletion.
+- The bill page's lines add up to the total: the subtotal is the items before adjustments, tax keeps its sign (credit-note
+  bills), and a sub-cent remainder dropped by the cent-rounded total shows as Rounding. The bill DTO (`ToBillDto`) converts
+  items and adjustments to the profile's currency at the rate its net and gross use, so every amount on a bill is in one
+  currency.
+- The refusal on a suspended project says who lifts it: paying the balance, or the operator for an operator's disable.
+- The admin Kubernetes and database cluster lists answer a management-cluster error as a 502.
+- Consoles: Delete now for operators, Test connection on Kubernetes and database providers, a first-project form for an
+  organization member with no project, operator-activated profiles get deposits, and several labels (open bills, sub-cent
+  amounts, deleted projects, inherited billing profiles, servers being deleted, SMB passwords, backups on delete).
+
+**Why**
+
+- Argo's health covers the whole Application, and its ClusterResourceSet fails until MetalLB's webhook answers, then waits
+  out CAPI's retry backoff: on the lab the Application read `Progressing` 8 minutes past CAPI's `Available`, and the page
+  said "Working on it" with every step done. Five lab creates turned Healthy 9.5 to 16 minutes after the Application was
+  created, the last change each time the ClusterResourceSet. Argo stays the source for everything else: a broken chart or a
+  ClusterResourceSet that never applies is not hidden behind READY for good. Argo 3 no longer keeps per-resource health in
+  `app.status.resources`, so the parts are read from the management cluster.
+- An operator can activate a profile before its owner saves billing details, which is where the currency came from. Its
+  bill list then answered 500.
+- An unreachable management cluster answered 200 with no clusters, and a Test connection built on that list would have
+  said connected. Since #109 any untyped error answers 500; a cluster error answers 502, the cluster's fault.
+- The bill net was converted to the profile's currency but the adjustments were not, so the subtotal (net minus
+  adjustments) mixed currencies: EUR at 0.9, items $100 and an adjustment of -$10 printed a subtotal of 91.00, not 90.
+- A new project's services are attached by the entry call that runs alongside the pages' first reads, so they read no
+  location and showed "No region" until a reload. They read again once that call is done.
+
+**Diagrams updated:** none (no new container, component or relation).
+## 2026-11-07: Retype keeps one row; tenant views lose platform identities; named volumes
+
+**What changed**
+
+- A retype marks the volume row moving (`CloudResource.MovingSince`, at most 3 hours). A sync's delete-of-vanished keeps a
+  moving row, and the follow then moves it onto the new volid (`ChangeExternalID`). `ChangeExternalID` fails when the row is
+  gone instead of deleting the sync's row, and an upsert and a follow of one external id are serialised (advisory lock).
+- An upsert that finds a row it did not read first carries the provider's merge (`Repo.Upsert`, `CacheMerger`).
+- A move whose status read failed is waited out before the follow reads the disk's slot, and a disk the follow finds at its
+  new place answers success.
+- The retype's wait, follow and mark clear run on a context the request cannot cancel (bounded by the 3 hours of the mark).
+- A retype of a row still marked moving answers 409.
+- `providers.Reconcile` leaves a row alone whose `ExternalIDSince` is after its listing, and holds the pass's inserts for
+  the next sync when such a row is in scope.
+- The serial console proxy sends termproxy's opening line (`<user>:<ticket>`) itself. The action answers no user, and no ticket
+  for a serial session. The events tab shows a digest for the task id and `platform` or `operator` for its user; the audit of
+  a task run outside the portal keeps the type, node and status only.
+- A repeated `ATTACH_PUBLIC_NETWORK` on a server whose public NIC is plugged answers 409.
+- Volume create takes a name, kept on the row as `data.volume.label`; an unnamed standalone volume reads as its disk's file
+  name instead of its path on the store.
+
+**Why**
+
+- The task poller syncs a project as soon as a move ends, before the retype's follow ran: the sync archived the row, the
+  follow deleted the sync's new row and renamed a row that was gone, and the next sync added a third. The bill and history of
+  the disk split in two (acceptance pass on the lab). Keeping the row while the portal moves it is what lets the existing
+  follow do its work; a failing follow now leaves one row instead of none.
+- The ingress cuts a request after 60 s while a disk copy goes on for minutes. On the cut request the wait returned at once,
+  and the follow and mark clear failed with it: every sync then kept the old row and added one for the new volid, both
+  billed until the mark ran out. A sync lists first and reads the rows last, so a follow landing in between had the row
+  archived and the old volid inserted again. And one lost status read made a retype that had worked answer an error.
+- The serial session's first line named the platform's PVE token to the tenant, and the events and audit carried the UPID
+  and PVE user, which name it too, or an operator's account.
+- Rewriting a plugged NIC gives it a new MAC, and the guest loses its public address until a reboot. The API answers other
+  repeats ("already attached", "already on storage") with 409.
+- PVE names disks itself and has no field for a name, so a tenant's name can only live on the row.
+- A tenant whose request was cut may retype again while the copy runs. PVE refuses that retry ("can't lock file"), but its
+  follow found the old volid in the slot and cleared the first move's mark, so the sync at the move's end archived the row
+  and inserted a new one.
+
+**Diagrams updated:** `c2-containers.md`.
 
 ## 2026-11-07: An untyped handler error answers 500
 

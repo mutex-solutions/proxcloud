@@ -78,6 +78,11 @@ func serviceNotFoundErr(id string) *httpx.HTTPError {
 	return httpx.NotFound(fmt.Sprintf("Service not found: %s", id))
 }
 
+// errSandboxNotYet refuses the sandbox provider kind on create and on an update that turns a row
+// into one. The kind exists in code (internal/cloud/sandbox) but tenant code must not run before
+// the node firewall, quota, billing and suspend gate are in place (phases SB2b and SB3).
+var errSandboxNotYet = httpx.BadRequest("Sandbox providers cannot be created yet")
+
 // externalServiceCreate persists the operator-supplied doc (secret encrypted). Only a PUBLIC ceph-s3 row is checked
 // live (checkPublicCeph); others are exercised by the detail page's Test connection and the live provider reads.
 func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +117,10 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 			httpx.WriteError(w, httpx.BadRequest(err.Error()))
 			return
 		}
+	}
+	if cfg, _ := doc["config"].(map[string]any); cfg["provider"] == "sandbox" {
+		httpx.WriteError(w, errSandboxNotYet)
+		return
 	}
 	// Stable string _id (String-id convention — same shape as the seeded provider docs;
 	// projects reference the service by this id string).
@@ -255,6 +264,9 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 		cfg := ensureConfig(doc)
 		for k, v := range c {
 			cfg[k] = v
+		}
+		if cfg["provider"] == "sandbox" {
+			return errSandboxNotYet
 		}
 		if raw, ok := c["storageProfiles"]; ok && cfg["provider"] == "proxmox" {
 			if herr := h.validatePVEStorageProfiles(req, cfg, raw); herr != nil {

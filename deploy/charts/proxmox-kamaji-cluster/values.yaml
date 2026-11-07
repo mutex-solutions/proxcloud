@@ -11,6 +11,27 @@ cloudCredentialsSecretName: example-cloud-config
 kamajiControlPlane:
   replicas: 1
   dataStoreName: default
+  # -- kube-apiserver admission plugins: Kamaji's default list plus NodeRestriction, which Kamaji leaves out. Without it
+  # a worker's kubelet credential can label and taint any Node and read any Secret through a pod it binds to itself.
+  admissionControllers:
+    - CertificateApproval
+    - CertificateSigning
+    - CertificateSubjectRestriction
+    - DefaultIngressClass
+    - DefaultStorageClass
+    - DefaultTolerationSeconds
+    - LimitRanger
+    - MutatingAdmissionWebhook
+    - NamespaceLifecycle
+    - NodeRestriction
+    - PersistentVolumeClaimResize
+    - Priority
+    - ResourceQuota
+    - RuntimeClass
+    - ServiceAccount
+    - StorageObjectInUseProtection
+    - TaintNodesByCondition
+    - ValidatingAdmissionWebhook
   network:
     serviceType: LoadBalancer
     # loadBalancerSourceRanges: [192.0.2.0/24]

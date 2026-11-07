@@ -111,8 +111,9 @@ sequenceDiagram
   whole Application. Every cluster pins the chart version it was created with;
   the provider's `chartVersion` only affects new clusters. An existing cluster
   moves through the customer's *Apply platform update* or the admin's per-cluster
-  **Bump** / **Bump all** on the provider page. These paths were built against the
-  previous infrastructure backend and have not been exercised on Proxmox.
+  **Bump** / **Bump all** on the provider page. The admin Bump was run on Proxmox
+  (0.1.5 to 0.1.6 on the lab: ArgoCD synced the new pin, the workers stayed); the
+  customer's *Apply platform update* has not been.
 
 ### Deletion and orphan finalization
 
@@ -158,7 +159,7 @@ kubectl get application <cluster-id> -n argocd -o jsonpath='{.status.health}{"\n
 | Create fails with `Could not mint the cluster's Proxmox tokens` | The portal token lacks a grant: [proxmox-permissions.md](proxmox-permissions.md#managed-kubernetes). The message names the path. |
 | Machines stuck, CAPMOX logs `not authorized to access endpoint` | PVE refused the cluster's token. The PVE access log (`/var/log/pveproxy/access.log`) names the call. `GET /cluster/status` answering 403 is normal and ignored. A refused clone is checked against the template's NICs too. |
 | `error waiting for agent` for a few minutes | Normal while the clone boots. |
-| Tenant `LoadBalancer` Service `<pending>` for up to 10 minutes after create | The MetalLB pool arrives by ClusterResourceSet, which retries until the chart's CRDs exist. |
+| Tenant `LoadBalancer` Service `<pending>` for up to 15 minutes after create | The MetalLB pool arrives by ClusterResourceSet, which retries until the chart's CRDs and MetalLB's webhook answer, with CAPI's growing backoff between tries: on the lab it applied 8 minutes after the cluster was Available. The Application reads `Progressing` until then; the portal shows the cluster READY once the control plane, every node group and the sync are done and the ClusterResourceSet is the one part left, for up to 30 minutes after create. A cluster still `PROGRESSING` past that: `kubectl get clusterresourceset -n pc-<projectId>` and its `ResourcesApplied` condition. |
 | Application `OutOfSync` / `SyncFailed` | `argocd app get <cluster-id>` sync error. "not permitted in project proxcloud-k8s" → the chart needs a cluster-scoped resource; add exactly that group/kind to `deploy/mgmt-cluster/appproject.yaml`. Chart pull errors → registry or pin problem (§1.4). |
 | Application Healthy but cluster unusable | Health checks not loaded or wrong: verify the `argocd-health.yaml` keys exist in `argocd-cm` and the application controller was restarted. |
 | Cluster stuck `PROGRESSING`, no endpoint | `kubectl get tcp -n pc-<projectId>` → TenantControlPlane status. Pending CP pods → management-cluster capacity or DataStore. |
@@ -187,6 +188,27 @@ taking the remainder. The zone label comes from that pin, so no cloud controller
 **Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
 endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB. So is
 proxmox-csi's PVE API with `csiSharedStores`: a `pve-api` Service forwarding to the PVE nodes (`config.cluster.pveCsiUrl`).
+
+**Node credentials (NodeRestriction).** Kamaji's default admission plugin list leaves out `NodeRestriction`, so on a
+tenant API server without it a worker's kubelet credential (`/var/lib/kubelet/pki/kubelet-client-current.pem`, readable
+by anything that gets root on the node) can label, taint and cordon any other Node, set `node-restriction.kubernetes.io/`
+labels, and read any Secret of the cluster by creating a pod bound to its own node that mounts it. Chart 0.1.6 sets
+`KamajiControlPlane.spec.admissionControllers` to Kamaji's list plus `NodeRestriction` (`kamajiControlPlane.admissionControllers`
+in the chart values; the portal does not render the key, so the chart default applies). A node can then change only its own
+Node and create only mirror pods, which may not reference Secrets. Measured on the lab, Kubernetes 1.35.10, same cluster
+before and after a Bump from 0.1.5:
+
+| As a worker's kubelet credential | 0.1.5 | 0.1.6 |
+|---|---|---|
+| PATCH another Node: label, taint, cordon | allowed (200) | refused: `is not allowed to modify node` |
+| create a pod bound to itself mounting a Secret, then read the Secret | allowed, Secret read | refused: `can only create mirror pods`; a mirror pod: `may not reference secrets` |
+| label its own Node `node-restriction.kubernetes.io/…` | allowed | refused |
+
+Kubelet heartbeats, Cilium, the proxmox-csi node plugin (PVC attach and mount), MetalLB (L2 announcement) and pods,
+`exec` and `logs` kept working, and a worker joining afterwards registered with its node group's label and taint. The
+API server rolls in under a minute; `exec` and `logs` answer `No agent available` for about 30 seconds after, until the
+konnectivity agents reconnect. A cluster created before 0.1.6 gets the plugin with a **Bump** onto 0.1.6 or later; nothing
+on the workers changes.
 
 **Bootstrap ISOs.** CAPMOX writes each new worker's user-data, kubeadm join token included, to
 `user-data-<vmid>.iso`, mounts it as a CD, and after the node has joined unmounts and deletes it. The token

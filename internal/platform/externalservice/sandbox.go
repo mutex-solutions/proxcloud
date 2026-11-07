@@ -1,0 +1,106 @@
+package externalservice
+
+// sandbox.go — typed accessors for the "sandbox" provider kind (config.provider == "sandbox"):
+// customer sandboxes as gVisor pods on a dedicated Kubernetes cluster. Document shape:
+//
+//	{
+//	  "name": "Sandboxes AZ1", "type": "CLOUD", "status": "PRIVATE",
+//	  "config": {
+//	    "provider": "sandbox",
+//	    "region":   "az1",
+//	    "regions":  {"az1": {}},
+//	    "services": {"sandbox": {"az1": true}},
+//	    "sandbox": {
+//	      "runtimeClass": "gvisor",                    // default
+//	      "templates": {                               // the ONLY images offered
+//	        "python":  {"image": "python:3.12-slim", "cpu": 1, "memoryGiB": 2, "description": "Python 3.12"},
+//	        "pytorch": {"image": "pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime", "cpu": 4, "memoryGiB": 16,
+//	                    "gpu": {"model": "nvidia-3090", "count": 1}}  // optional default GPU
+//	      },
+//	      "gpuModels": ["nvidia-3090"],                // node label node-restriction.kubernetes.io/proxcloud-gpu values
+//	      "envd":      true,                           // run E2B's envd (E2B-compatible API)
+//	      "domain":    "sbx.example.org",              // E2B_DOMAIN served by sandbox-proxy
+//	      "templateRegistry": "registry.example.org/sandbox-templates", // custom templates + snapshots
+//	      "limits": {"maxCpu": 8, "maxMemoryGiB": 32, "maxGpus": 1, "maxTimeoutSeconds": 86400,
+//	                 "defaultTimeoutSeconds": 3600, "maxConcurrent": 10, "maxConcurrentGpus": 1}
+//	    }
+//	  },
+//	  "secret": {"kubeconfig": "<proxcloud SA kubeconfig of the sandbox cluster>"}
+//	}
+//
+// Like dbaas, nothing lands on PVE for a project: the sandbox cluster belongs to the platform.
+// Until phase SB3 an operator cannot create one (admin.externalServiceCreate refuses the kind).
+
+import "github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+
+// IsSandbox reports whether this is a sandbox provider (config.provider == "sandbox").
+func (e *ExternalService) IsSandbox() bool { return e.Provider() == "sandbox" }
+
+// SandboxRegion is config.region, falling back to the first configured region.
+func (e *ExternalService) SandboxRegion() string {
+	if r := str(e.Config["region"]); r != "" {
+		return r
+	}
+	if rs := e.RegionNames(); len(rs) > 0 {
+		return rs[0]
+	}
+	return ""
+}
+
+// SandboxConfig assembles sandbox.Config: the decrypted kubeconfig (secret.kubeconfig) plus the
+// config.sandbox block.
+func (e *ExternalService) SandboxConfig() sandbox.Config {
+	sb, _ := e.Config["sandbox"].(map[string]any)
+	templates := map[string]sandbox.Template{}
+	if ts, ok := sb["templates"].(map[string]any); ok {
+		for name, raw := range ts {
+			m, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			templates[name] = sandbox.Template{
+				Image:       str(m["image"]),
+				Description: str(m["description"]),
+				CPU:         intOf(m["cpu"]),
+				MemoryGiB:   intOf(m["memoryGiB"]),
+				Command:     strList(m["command"]),
+				StartCmd:    str(m["startCmd"]),
+				ReadyCmd:    str(m["readyCmd"]),
+				User:        str(m["user"]),
+				Workdir:     str(m["workdir"]),
+				StartAsRoot: m["startAsRoot"] == true,
+			}
+			if g, ok := m["gpu"].(map[string]any); ok && str(g["model"]) != "" {
+				t := templates[name]
+				t.GPU = &sandbox.GPURequest{Model: str(g["model"]), Count: intOf(g["count"])}
+				templates[name] = t
+			}
+		}
+	}
+	limits, _ := sb["limits"].(map[string]any)
+	return sandbox.Config{
+		Kubeconfig:       str(e.secretMap()["kubeconfig"]),
+		Region:           e.SandboxRegion(),
+		RuntimeClass:     str(sb["runtimeClass"]),
+		Templates:        templates,
+		GPUModels:        strList(sb["gpuModels"]),
+		Envd:             sb["envd"] == true,
+		Domain:           str(sb["domain"]),
+		RegistryPrune:    str(sb["registryPrune"]),
+		ImageAdoption:    str(sb["imageAdoption"]),
+		TemplateRegistry: str(sb["templateRegistry"]),
+		ProxyWakeToken:   str(e.secretMap()["proxyWakeToken"]),
+		RegistryGC: sandbox.RegistryCredential{
+			User: str(e.secretMap()["registryGcUser"]), Password: str(e.secretMap()["registryGcPassword"]),
+		},
+		Limits: sandbox.Limits{
+			MaxCPU:                intOf(limits["maxCpu"]),
+			MaxMemoryGiB:          intOf(limits["maxMemoryGiB"]),
+			MaxGPUs:               intOf(limits["maxGpus"]),
+			MaxTimeoutSeconds:     intOf(limits["maxTimeoutSeconds"]),
+			DefaultTimeoutSeconds: intOf(limits["defaultTimeoutSeconds"]),
+			MaxConcurrent:         intOf(limits["maxConcurrent"]),
+			MaxConcurrentGPUs:     intOf(limits["maxConcurrentGpus"]),
+		},
+	}
+}

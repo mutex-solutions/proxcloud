@@ -100,7 +100,7 @@ type Flavor = {
   }
 }
 
-type VolumeType = { id?: string; name: string; displayName?: string; extra_specs?: { bootDisk?: boolean } }
+type VolumeType = { id?: string; name: string; displayName?: string; default?: boolean; extra_specs?: { bootDisk?: boolean } }
 type DataVolumeDraft = { id: number; sizeGiB: number; type: string }
 
 const gb = (bytes?: number) => (bytes ? (bytes / 1073741824).toFixed(2) : "0.00")
@@ -262,7 +262,9 @@ export default function CreateServerPage() {
   )
   const resolveVolumeType = (type: string) =>
     soleVolumeType?.name || (availableVolumeTypeNames.has(type) ? type : "")
-  const selectedRootVolumeType = resolveVolumeType(rootVolumeType)
+  // Nothing picked yet: the provider's default profile, when it takes boot disks.
+  const defaultVolumeType = availableVolumeTypes.find((type) => type.default)?.name ?? ""
+  const selectedRootVolumeType = resolveVolumeType(rootVolumeType || defaultVolumeType)
   // A provider without boot-time data volumes never receives (or quota-checks) stale drafts.
   const resolvedDataVolumes = (features.has("createDataVolumes") ? dataVolumes : []).map((volume) => ({
     ...volume,
@@ -682,7 +684,7 @@ export default function CreateServerPage() {
                             {
                               id: Date.now() + volumes.length,
                               sizeGiB: 10,
-                              type: soleVolumeType?.name || "",
+                              type: soleVolumeType?.name || defaultVolumeType,
                             },
                           ])
                         }

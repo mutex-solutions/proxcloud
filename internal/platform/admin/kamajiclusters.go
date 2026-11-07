@@ -6,6 +6,7 @@ package admin
 // roll customer clusters implicitly) — these endpoints are the operator's explicit override.
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -14,6 +15,17 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
+
+// writeClusterErr answers any error of a management-cluster call: a typed one as itself, anything else
+// (an unreachable cluster, a bad kubeconfig) as a 502, the cluster's fault rather than the portal's.
+func writeClusterErr(w http.ResponseWriter, err error) bool {
+	var he *httpx.HTTPError
+	if err == nil || errors.As(err, &he) {
+		return httpx.WriteError(w, err)
+	}
+	httpx.Err(w, http.StatusBadGateway, http.StatusBadGateway, "management cluster: "+err.Error())
+	return true
+}
 
 // kamajiService resolves the kamaji provider + its Service, writing the error response on
 // failure. 501 when the factory is unwired (tests), 400 when the service is not kamaji.
@@ -33,7 +45,7 @@ func (h *Handler) kamajiService(w http.ResponseWriter, r *http.Request) (*extern
 	}
 	ks, err := h.kamajiFor(es)
 	if err != nil {
-		httpx.WriteError(w, err)
+		writeClusterErr(w, err)
 		return nil, nil, false
 	}
 	return es, ks, true
@@ -50,7 +62,7 @@ func (h *Handler) kamajiClusterPins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pins, err := ks.ListClusterPins(r.Context())
-	if httpx.WriteError(w, err) {
+	if writeClusterErr(w, err) {
 		return
 	}
 	httpx.OK(w, map[string]any{
@@ -74,7 +86,7 @@ func (h *Handler) kamajiClusterBump(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("the provider has no pinned chart version"))
 		return
 	}
-	if err := ks.SetChartVersion(r.Context(), chi.URLParam(r, "clusterId"), pin); httpx.WriteError(w, err) {
+	if err := ks.SetChartVersion(r.Context(), chi.URLParam(r, "clusterId"), pin); writeClusterErr(w, err) {
 		return
 	}
 	httpx.OK(w, map[string]any{"chartVersion": pin})
@@ -97,7 +109,7 @@ func (h *Handler) kamajiClusterBumpAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pins, err := ks.ListClusterPins(r.Context())
-	if httpx.WriteError(w, err) {
+	if writeClusterErr(w, err) {
 		return
 	}
 	bumped := 0

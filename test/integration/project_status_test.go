@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -96,7 +97,8 @@ func TestProjectStatusMachine(t *testing.T) {
 
 	t.Run("client schedule and delete-now refuse what is going or gone", func(t *testing.T) {
 		for _, st := range []string{project.StatusDeleteInProgress, project.StatusDeleted} {
-			seed(pgdoc.M{"status": st})
+			// with the schedule the sweep retries it by; a row without one is the stranded case delete-now takes
+			seed(pgdoc.M{"status": st, "scheduledForDeletionAt": time.Now().UTC().Add(-time.Hour)})
 			p := stored()
 			if _, err := svc.ScheduleDeletion(ctx, &p, false); err == nil {
 				t.Fatalf("schedule of %s must be refused", st)
@@ -178,7 +180,8 @@ func TestProjectStatusMachine(t *testing.T) {
 			t.Fatalf("cancel of a DISABLED project: %d", code)
 		}
 		for _, st := range []string{project.StatusDeleteInProgress, project.StatusDeleted} {
-			seed(pgdoc.M{"status": st})
+			// with the schedule the sweep retries it by; a row without one is the stranded case delete-now takes
+			seed(pgdoc.M{"status": st, "scheduledForDeletionAt": time.Now().UTC().Add(-time.Hour)})
 			if code := do(http.MethodDelete, "/admin/project/p1"); code != 400 {
 				t.Errorf("schedule of %s: %d", st, code)
 			}
