@@ -312,9 +312,15 @@ func (c *Client) doBody(ctx context.Context, method, path string, body io.Reader
 	if err != nil {
 		return err
 	}
+	return c.sendBody(c.http, req, contentType, out)
+}
+
+// sendBody sends a request with a body on client and reads the answer.
+func (c *Client) sendBody(client *http.Client, req *http.Request, contentType string, out any) error {
+	method, path := req.Method, strings.TrimPrefix(req.URL.Path, "/api2/json")
 	req.Header.Set("Authorization", c.token)
 	req.Header.Set("Content-Type", contentType)
-	res, err := c.http.Do(req)
+	res, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("pve: %s %s: %w", method, path, err)
 	}
