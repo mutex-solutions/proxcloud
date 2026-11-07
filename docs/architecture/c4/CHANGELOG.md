@@ -11,9 +11,10 @@ and rules: [README.md](README.md#maintenance-rule).
 - The portal fetches an image URL and streams it to PVE's upload API. `download-url` is gone from the portal, and
   `ProxCloudPlatform` no longer carries `Sys.AccessNetwork`.
 - `pkg/safeurl.Blocked` blocks everything not globally routable. `Check` became `Open`, which hands back the fetch.
-- Project images count against `diskGb`. One import at a time per project. Room is checked on the import store, on the
-  profile's boot storage for the disk, and on the API node's root disk, where pveproxy spools an upload. A URL with no
-  stated size is refused unless the operator sets `importUnknownSizeMaxGiB`.
+- Project images count against `diskGb`. One import at a time per project, and one upload at a time per provider. Room is
+  checked on the import store, on the profile's boot storage for the disk, and on the API node's root disk, where pveproxy
+  spools an upload. A URL with no stated size is refused unless the operator sets `importUnknownSizeMaxGiB`.
+- An import waits for its upload task, whatever happens to its call, before releasing the lock and removing the file.
 
 **Why**
 
@@ -22,6 +23,8 @@ and rules: [README.md](README.md#maintenance-rule).
   it. With the portal as the only client, the check at connect time covers every address the fetch uses, and the node
   has nothing to fetch.
 - The 200 GiB cap held per image with nothing on the total or on concurrency, so a tenant could fill the store.
+- The room check on the API node is per upload, so uploads of several projects could each pass it and together fill the
+  root disk. A failed poll of the upload task returned with the file still landing, the lock released and nothing to remove it.
 - The block list let through ranges that reach no one on the internet but can reach something inside: benchmarking,
   IETF protocol, reserved, NAT64 and 6to4 among them. The SSO fetcher uses the same function, so it gains this too.
 

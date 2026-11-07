@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -61,6 +62,24 @@ func (s *Service) LockImageImport(ctx context.Context, projectID string) (func()
 	}
 	if !acquired {
 		return nil, conflictf("Another image import is running in this project. Try again when it has finished")
+	}
+	return release, nil
+}
+
+// lockImportUpload allows one upload at a time per provider: pveproxy spools a body to the API node's root disk before PVE
+// sees it, so uploads of several projects could each pass the room check and together fill that disk.
+// ponytail: per provider, not per API node, because a provider has one API address in use at a time. One large upload holds
+// up every other project's for as long as it takes (409 meanwhile); a byte budget on the disk would let small ones through.
+func (s *Service) lockImportUpload(ctx context.Context) (func(), error) {
+	if s.HolderLock == nil {
+		return func() {}, nil
+	}
+	release, acquired, err := s.HolderLock(ctx, "pve-image-upload-"+s.ServiceID, ImportTimeout+time.Minute, 0)
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return nil, conflictf("Another image is being uploaded on this provider. Try again in a few minutes")
 	}
 	return release, nil
 }
@@ -151,7 +170,12 @@ func (c *Client) VolumeSizeBytes(ctx context.Context, node, storage, volid strin
 func (s *Service) ImportImage(ctx context.Context, projectID string, req ImageImport) (int, int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, ImportTimeout)
 	defer cancel()
-	// ponytail: per project, so several projects' uploads can still add up on this disk; a provider-wide limit if that shows.
+	releaseUpload, err := s.lockImportUpload(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	releaseUpload = sync.OnceFunc(releaseUpload)
+	defer releaseUpload()
 	space, err := s.C.uploadSpace(ctx)
 	if err != nil {
 		if IsForbidden(err) {
@@ -171,12 +195,28 @@ func (s *Service) ImportImage(ctx context.Context, projectID string, req ImageIm
 		}
 		return 0, 0, err
 	}
-	if err := s.C.WaitTask(ctx, up); err != nil {
-		slog.Warn("pve image import: upload", "project", projectID, "err", err)
+	// The node has the body now and works on it whatever happens to this call. So the wait outlives ctx, or the file would
+	// land after everything here had given up on it, with the project's lock released and nothing to remove it.
+	volid := req.ImportStorage + ":import/" + file
+	refused := false // the node keeps no file of an upload it refused
+	defer func() {
+		if !refused {
+			s.dropImportFile(ctx, req.Node, volid)
+		}
+	}()
+	if !s.C.TaskStopped(ctx, up, ImportTimeout) {
+		return 0, 0, fmt.Errorf("pve image import: upload task %s: no answer from the node", up)
+	}
+	st, err := s.C.TaskStatus(context.WithoutCancel(ctx), up)
+	if err != nil {
+		return 0, 0, err
+	}
+	if st.ExitStatus != "OK" {
+		refused = true
+		slog.Warn("pve image import: upload", "project", projectID, "err", st.ExitStatus)
 		return 0, 0, conflictf("The image is not a valid %s file, or does not match its checksum (a backing file is not allowed)", req.Format)
 	}
-	volid := req.ImportStorage + ":import/" + file
-	defer s.dropImportFile(ctx, req.Node, volid)
+	releaseUpload() // it is off the API node's disk
 
 	size, err := s.C.VolumeSizeBytes(ctx, req.Node, req.ImportStorage, volid)
 	if err != nil {

@@ -1,10 +1,12 @@
 package pve
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,6 +28,13 @@ type importCluster struct {
 	size       int64
 	deny       string
 	failTask   string
+	noFile     bool
+	// onUploadPoll answers a poll of the task, true when it did.
+	onUploadPoll     func(http.ResponseWriter) bool
+	taskDone         bool
+	deletedAfterTask bool
+	onCreate         func()
+	onRootCheck      func()
 }
 
 func newImportCluster(t *testing.T) *importCluster {
@@ -45,7 +54,12 @@ func newImportCluster(t *testing.T) *importCluster {
 			fmt.Fprintf(w, `{"data":{"size":%d}}`, b.size)
 		},
 		"DELETE /api2/json/nodes/pve1/storage/imp/content/import/pc-import-p1-abc.qcow2": func(w http.ResponseWriter, _ *http.Request) {
+			if b.noFile {
+				http.Error(w, "volume does not exist", http.StatusInternalServerError)
+				return
+			}
 			b.deletedVol = "pc-import-p1-abc.qcow2"
+			b.deletedAfterTask = b.taskDone
 			task(w, "dropfile")
 		},
 		"POST /api2/json/nodes/pve1/storage/imp/upload": func(w http.ResponseWriter, r *http.Request) {
@@ -79,12 +93,18 @@ func newImportCluster(t *testing.T) *importCluster {
 			fmt.Fprint(w, `{"data":[{"type":"cluster","name":"lab"},{"type":"node","name":"pve3","local":0},{"type":"node","name":"pve2","local":1}]}`)
 		},
 		"GET /api2/json/nodes/pve2/status": func(w http.ResponseWriter, _ *http.Request) {
+			if b.onRootCheck != nil {
+				b.onRootCheck()
+			}
 			fmt.Fprintf(w, `{"data":{"rootfs":{"total":%d,"avail":%d}}}`, int64(100)<<30, b.rootAvail)
 		},
 		"GET /api2/json/cluster/nextid": func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"data":"300"}`) },
 		"POST /api2/json/nodes/pve1/qemu": func(w http.ResponseWriter, r *http.Request) {
 			_ = r.ParseForm()
 			b.created = r.PostForm
+			if b.onCreate != nil {
+				b.onCreate()
+			}
 			task(w, "create")
 		},
 		"POST /api2/json/nodes/pve1/qemu/300/config": func(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +124,9 @@ func newImportCluster(t *testing.T) *importCluster {
 			task(w, "delete")
 		},
 		"GET /api2/json/nodes/pve1/tasks/" + ok + "/status": func(w http.ResponseWriter, _ *http.Request) {
+			if b.onUploadPoll != nil && b.onUploadPoll(w) {
+				return
+			}
 			fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
 		},
 		"GET /api2/json/nodes/pve1/tasks/" + bad + "/status": func(w http.ResponseWriter, _ *http.Request) {
@@ -225,6 +248,94 @@ func TestImportImageFailures(t *testing.T) {
 	b.failTask = "template"
 	if err := firstErr(b.s.ImportImage(ctx, "p1", goodImport())); err == nil || !b.deletedVM || b.deletedVol == "" {
 		t.Fatalf("no VM and no file left: %v %+v", err, b)
+	}
+}
+
+// The upload's task runs on the node whatever becomes of the call that started it. A cancelled call or a failed poll must
+// not return before the task is over, or the file lands with the project's lock released and nothing to remove it.
+func TestImportImageWaitsOutTheUploadTask(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := newImportCluster(t)
+	polls := 0
+	b.onUploadPoll = func(w http.ResponseWriter) bool {
+		polls++
+		switch polls {
+		case 1:
+			cancel() // the caller is gone
+			http.Error(w, "proxy error", http.StatusBadGateway)
+		case 2:
+			http.Error(w, "proxy error", http.StatusBadGateway)
+		case 3:
+			fmt.Fprint(w, `{"data":{"status":"running"}}`)
+		default:
+			b.taskDone = true
+			return false
+		}
+		return true
+	}
+	if err := firstErr(b.s.ImportImage(ctx, "p1", goodImport())); err == nil {
+		t.Fatal("a cancelled import goes no further than the upload")
+	}
+	if !b.taskDone || b.deletedVol == "" || !b.deletedAfterTask {
+		t.Fatalf("the file goes, and only after its task: done=%v deleted=%q after=%v", b.taskDone, b.deletedVol, b.deletedAfterTask)
+	}
+	if b.created != nil {
+		t.Fatalf("no VM from a cancelled import: %v", b.created)
+	}
+}
+
+// A refused upload keeps no file, so there is nothing to drop and no cause to report a file as left behind.
+func TestRefusedUploadDropsNoFile(t *testing.T) {
+	b := newImportCluster(t)
+	b.failTask = "upload"
+	b.noFile = true
+	var logged bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	defer slog.SetDefault(old)
+	wantConflict(t, firstErr(b.s.ImportImage(context.Background(), "p1", goodImport())), "not a valid")
+	if strings.Contains(logged.String(), "stays on the store") {
+		t.Fatalf("%s", logged.String())
+	}
+}
+
+// One upload at a time per provider, for as long as the body is on the API node's disk: not through the rest of the import.
+func TestImportUploadLock(t *testing.T) {
+	b := newImportCluster(t)
+	held := map[string]bool{}
+	var heldAtCreate bool
+	b.s.ServiceID = "svc"
+	b.s.HolderLock = func(_ context.Context, name string, _, wait time.Duration) (func(), bool, error) {
+		if held[name] {
+			return nil, false, nil
+		}
+		held[name] = true
+		return func() { held[name] = false }, true, nil
+	}
+	const lock = "pve-image-upload-svc"
+	b.onCreate = func() { heldAtCreate = held[lock] }
+	// Taken before the room check, or two could pass it.
+	b.onRootCheck = func() {
+		if !held[lock] {
+			t.Error("the room check ran outside the lock")
+		}
+	}
+	if err := firstErr(b.s.ImportImage(context.Background(), "p1", goodImport())); err != nil {
+		t.Fatal(err)
+	}
+	if heldAtCreate || held[lock] {
+		t.Fatalf("released once the body is off the node: at create %v, after %v", heldAtCreate, held[lock])
+	}
+	// Another project's import while one uploads: refused with nothing sent.
+	b = newImportCluster(t)
+	b.s.ServiceID = "svc"
+	b.s.HolderLock = func(context.Context, string, time.Duration, time.Duration) (func(), bool, error) {
+		return nil, false, nil
+	}
+	wantConflict(t, firstErr(b.s.ImportImage(context.Background(), "p2", goodImport())), "being uploaded on this provider")
+	if b.uploaded != nil {
+		t.Fatalf("%v", b.uploaded)
 	}
 }
 

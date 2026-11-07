@@ -396,10 +396,13 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   time per project; a disk over 200 GiB is 409; the disk counts against `diskGb` (project images count there now, from a
   snapshot too), checked on the file's size before the upload and on the disk's virtual size after it; room on the
   import store and, for the disk, on the profile's storage, both with `storageHeadroomPct`. pveproxy spools an upload to
-  `/var/tmp` on the API node, on any node's behalf, so an image also needs room on that node's root disk or it is 409. A
+  `/var/tmp` on the API node, on any node's behalf, so an image also needs room on that node's root disk or it is 409, and
+  only one upload runs at a time per provider (409 for the others), since each passing the room check on its own could fill
+  that disk together. A
   URL whose server states no size is refused unless `config.importUnknownSizeMaxGiB` allows it: then it is spooled to the
   portal's temporary directory up to that limit, first. The client waits; if it gives up the import finishes and the
-  sampler adds the image. Nothing is left on a failure except, with no `Datastore.Allocate` on the store, the uploaded
+  sampler adds the image, and whatever ends an import, the portal waits for the upload's task on the node before it lets go of
+  the project's lock and removes the file. Nothing is left on a failure except, with no `Datastore.Allocate` on the store, the uploaded
   file (Test connection warns, see `docs/proxmox-permissions.md`). A template on local storage clones on its own node
   only, like any project image. Billed as `image`.
 - **Spread groups** (`spreadGroup`, `spreadStrict` on create): a `grp-<name>` tag on the VM. The scheduler

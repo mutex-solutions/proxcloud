@@ -108,8 +108,9 @@ func spoolImage(body io.Reader, maxBytes int64) (*os.File, int64, error) {
 func gibUp(b int64) int { return int((b + 1<<30 - 1) >> 30) }
 
 // pveImportImage makes a project template from a URL. Body: {name, url, format?, checksum?, checksumAlgorithm?, profile?}.
+// A client that goes away cancels nothing: the import finishes and the sampler adds the image.
 func (h *Handler) pveImportImage(w http.ResponseWriter, r *http.Request, u *user.User, proj *Project, es *externalservice.ExternalService, data map[string]any) {
-	ctx, cancel := context.WithTimeout(r.Context(), pve.ImportTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), pve.ImportTimeout)
 	defer cancel()
 	conflict := func(msg string) { h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, msg)) }
 	store := es.PVEImportStorage()
