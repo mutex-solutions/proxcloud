@@ -21,6 +21,8 @@ import (
 
 const (
 	tagProtected = "pc-protected"
+	// tagProtectedSince carries when protection was enabled: what the add-on is billed from.
+	tagProtectedSince = "pc-p-"
 	// DefaultReplicationSchedule is a pvesr calendar event: every 15 minutes.
 	DefaultReplicationSchedule = "*/15"
 	replicationScheduleMinutes = 15
@@ -366,7 +368,8 @@ func (s *Service) EnableProtection(ctx context.Context, projectID, externalID st
 	if err != nil {
 		return err
 	}
-	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"tags": addTag(cfg.Str("tags"), tagProtected)})
+	tags := addTag(addTag(cfg.Str("tags"), tagProtected), tagProtectedSince+strconv.FormatInt(time.Now().Unix(), 10))
+	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"tags": tags})
 	if err == nil {
 		err = s.C.WaitTask(ctx, up)
 	}
@@ -424,7 +427,11 @@ func (s *Service) disableProtectionOn(ctx context.Context, vm *ClusterResource) 
 			}
 		}
 	}
-	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"tags": removeTag(cfg.Str("tags"), tagProtected)})
+	tags := removeTag(cfg.Str("tags"), tagProtected)
+	if since := TagValue(tags, tagProtectedSince); since != "" {
+		tags = removeTag(tags, tagProtectedSince+since)
+	}
+	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"tags": tags})
 	if err != nil {
 		return err
 	}
@@ -528,6 +535,9 @@ func (s *Service) StampProtection(ctx context.Context, r ClusterResource, data m
 	}
 	if cfg, err := s.C.GetVMConfig(ctx, r.Node, r.VMID); err == nil {
 		pr["diskGb"] = diskGbOf(cfg)
+	}
+	if since, err := strconv.ParseInt(TagValue(r.Tags, tagProtectedSince), 10, 64); err == nil {
+		pr["since"] = time.Unix(since, 0).UTC().Format(time.RFC3339)
 	}
 	if srv, ok := data["server"].(map[string]any); ok {
 		srv["protection"] = pr

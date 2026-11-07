@@ -2,6 +2,7 @@ package billingresource
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -88,5 +89,22 @@ func TestEmptyImageVolumeBackedShapeDoesNotBillFlavorRootDiskWithoutMarker(t *te
 	got := (&ServerProvider{}).instanceBR(cr, false)
 	if got == nil || got.Values["root_disk_gb"] != 0 {
 		t.Fatalf("root_disk_gb = %#v, want 0 from an empty image reference", got)
+	}
+}
+
+func TestProtectionBilledFromItsEnable(t *testing.T) {
+	cr := &cloud.CloudResource{ID: "r1", ProjectID: "p", Data: map[string]any{"server": map[string]any{
+		"name": "a", "protection": map[string]any{"state": "active", "diskGb": 10.0, "since": "2026-11-07T01:00:00Z"},
+	}}}
+	br := protectionBR(cr)
+	if br == nil || br.CreatedAt == nil || br.CreatedAt.Format(time.RFC3339) != "2026-11-07T01:00:00Z" {
+		t.Fatalf("got %+v", br)
+	}
+	if br.ResourceID != fmt.Sprintf("server_protection-r1-%d", br.CreatedAt.Unix()) {
+		t.Fatalf("each enable is its own line: %s", br.ResourceID)
+	}
+	delete(cr.Data["server"].(map[string]any)["protection"].(map[string]any), "since")
+	if br := protectionBR(cr); br.ResourceID != "server_protection-r1" || br.CreatedAt != nil {
+		t.Fatalf("a server protected before the stamp keeps its line: %+v", br)
 	}
 }

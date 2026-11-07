@@ -104,7 +104,9 @@ func (p *ServerProvider) instanceBR(cr *cloud.CloudResource, notEligible bool) *
 }
 
 // protectionBR bills the Protected add-on: the replica's space, from the first successful sync until it is disabled.
-// A VM still on its first sync has nothing to fail over to yet, so it costs nothing.
+// A VM still on its first sync has nothing to fail over to yet, so it costs nothing. Each enable is its own line starting
+// when it was enabled: one line per server would start at the server's creation (a bill item's first watermark) and
+// charge that gap, and again the gap between a disable and the next enable.
 func protectionBR(cr *cloud.CloudResource) *billingapi.BillingResource {
 	server, ok := mapAt(cr.Data, "server")
 	if !ok {
@@ -114,7 +116,7 @@ func protectionBR(cr *cloud.CloudResource) *billingapi.BillingResource {
 	if !ok || (str(pr["state"]) != "active" && str(pr["state"]) != "degraded") {
 		return nil
 	}
-	return &billingapi.BillingResource{
+	br := &billingapi.BillingResource{
 		ResourceID:   fmt.Sprintf("server_protection-%s", cr.ID),
 		ProjectID:    cr.ProjectID,
 		ResourceType: "server_protection",
@@ -125,6 +127,11 @@ func protectionBR(cr *cloud.CloudResource) *billingapi.BillingResource {
 		},
 		BillingResourceType: serverProtectionType(),
 	}
+	if since, err := time.Parse(time.RFC3339, str(pr["since"])); err == nil {
+		br.ResourceID = fmt.Sprintf("server_protection-%s-%d", cr.ID, since.Unix())
+		br.CreatedAt = &since
+	}
+	return br
 }
 
 // snapshotBRs bills each disk snapshot of a server as its own line, from the moment it was taken: one line per

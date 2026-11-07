@@ -123,6 +123,20 @@ and rules: [README.md](README.md#maintenance-rule).
   archive only through `VM.Backup` on its VM, and an ACL on `/vms` would break the rule that the token only sees pool VMs.
 
 **Diagrams updated:** `c3-components.md` (PVE service).
+## 2026-11-07: Protection billed from its enable
+
+**What changed**
+
+- Enable stamps a `pc-p-<unix>` tag. The row carries it as `protection.since`, and each enable is its own
+  `server_protection` bill line starting there.
+
+**Why**
+
+- A bill item's first watermark is the resource's creation, so protecting an old server charged the add-on back to the
+  server's creation or the start of the cycle, and a disable then enable charged the gap between them.
+
+**Diagrams updated:** none, no container or component changed.
+
 ## 2026-11-07: Grant-blocked IaaS flows run on a real cluster
 
 **What changed**
