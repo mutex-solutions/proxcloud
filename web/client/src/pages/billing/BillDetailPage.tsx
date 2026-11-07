@@ -195,6 +195,11 @@ export default function BillDetailPage() {
   const adjTotal = adjustments.reduce((s, a) => s + Number(a.amount ?? 0), 0)
   const rounding = cents(net) - net
   const tax = cents(gross - cents(net))
+  // The two lines that carry the sub-cent part show it, so the block adds up as printed.
+  const fine = (v: number) =>
+    new Intl.NumberFormat("en-US", { style: "currency", currency: ccy || "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(
+      Math.abs(v) < 1e-6 ? 0 : v,
+    )
   const unpaid = Number(bill.unpaidGrossAmount ?? 0)
   // An OPEN bill is still accruing: nothing is due on it yet, though the balance already counts it.
   const open = bill.status === "OPEN"
@@ -438,7 +443,7 @@ export default function BillDetailPage() {
                 <div className="my-2 border-t border-dashed" />
               </>
             ) : null}
-            <TotalRow label="Subtotal" value={fmtMoney(net - adjTotal, ccy)} />
+            <TotalRow label="Subtotal" value={fine(net - adjTotal)} />
             {adjustments.map((a, i) => (
               <TotalRow
                 key={`adj-${i}`}
@@ -447,7 +452,7 @@ export default function BillDetailPage() {
                 muted
               />
             ))}
-            {Math.abs(rounding) >= 1e-6 ? <TotalRow label="Rounding" value={fmtMoney(rounding, ccy)} muted /> : null}
+            {Math.abs(rounding) >= 1e-6 ? <TotalRow label="Rounding" value={fine(rounding)} muted /> : null}
             <TotalRow label="Tax" value={fmtMoney(tax, ccy)} muted />
             <div className="my-2 border-t" />
             <TotalRow label="Total" value={fmtMoney(gross, ccy)} strong />
