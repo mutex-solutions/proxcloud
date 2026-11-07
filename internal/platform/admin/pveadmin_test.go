@@ -251,3 +251,57 @@ func TestStoreReachWarnings(t *testing.T) {
 		t.Fatalf("unresolvable: %q", got)
 	}
 }
+
+// Ceph monitors, iSCSI portals and gluster servers are network stores too, in every spelling PVE takes.
+func TestStoreHostsAndCephReach(t *testing.T) {
+	for _, c := range []struct {
+		def  pve.StorageDef
+		want []string
+	}{
+		{pve.StorageDef{Type: "rbd", Monhost: "10.0.0.1 10.0.0.2"}, []string{"10.0.0.1", "10.0.0.2"}},
+		{pve.StorageDef{Type: "cephfs", Monhost: "10.0.0.1:6789;10.0.0.2,ceph3"}, []string{"10.0.0.1", "10.0.0.2", "ceph3"}},
+		{pve.StorageDef{Type: "cephfs", Monhost: "[v2:10.0.0.1:3300/0,v1:10.0.0.1:6789/0]"}, []string{"10.0.0.1"}},
+		{pve.StorageDef{Type: "rbd"}, nil}, // the nodes' own Ceph
+		{pve.StorageDef{Type: "iscsi", Portal: "10.0.0.20:3260"}, []string{"10.0.0.20"}},
+		{pve.StorageDef{Type: "glusterfs", Server: "gl1"}, []string{"gl1"}},
+		{pve.StorageDef{Type: "dir", Server: "10.0.0.9"}, nil},
+	} {
+		if got := storeHosts(c.def); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("storeHosts(%+v) = %q, want %q", c.def, got, c.want)
+		}
+	}
+	defs := []pve.StorageDef{
+		{Storage: "ext-ceph", Type: "rbd", Monhost: "10.0.0.5 10.70.0.5"},
+		{Storage: "p8-iscsi", Type: "iscsi", Portal: "10.80.0.20"},
+		{Storage: "own-ceph", Type: "cephfs"},
+	}
+	got := unblockedStores(defs, []string{"10.0.0.0/24"}, nil)
+	if len(got) != 2 || !strings.Contains(got[0], "Storage ext-ceph (rbd at 10.70.0.5)") || !strings.Contains(got[1], "Storage p8-iscsi (iscsi at 10.80.0.20)") {
+		t.Fatalf("warnings = %q", got)
+	}
+}
+
+// A shared or ISO-less bootstrap ISO store is said at Test connection, not only at the next create.
+func TestBootISOWarnings(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/storage":
+			fmt.Fprint(w, `{"data":[{"storage":"local","type":"dir","content":"iso"},{"storage":"nas-templates","type":"nfs","content":"iso","shared":1}]}`)
+		case "/api2/json/cluster/resources":
+			fmt.Fprint(w, `{"data":[]}`)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+	cc, err := pve.New(pve.Config{APIURL: srv.URL, TokenID: "proxcloud@pve!t1", Secret: "sec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bootISOWarnings(context.Background(), cc, "local"); len(got) != 0 {
+		t.Fatalf("local: %q", got)
+	}
+	if got := bootISOWarnings(context.Background(), cc, "nas-templates"); len(got) != 1 || !strings.Contains(got[0], "is shared") {
+		t.Fatalf("nas-templates: %q", got)
+	}
+}

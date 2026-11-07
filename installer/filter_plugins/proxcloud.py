@@ -113,6 +113,22 @@ def boot_iso_problem(storages, iso, boot):
     return ""
 
 
+def iso_stores(storages):
+    """The enabled stores with iso content: the ones go-proxmox may pick for a bootstrap ISO."""
+    return [s["storage"] for s in storages if "iso" in _content(s) and not int(s.get("disable", 0))]
+
+
+def visible_stores(results):
+    """Of uri results of GET /access/permissions?path=/storage/<item>, the stores the user or token sees: PVE lists a
+    store to whoever holds Datastore.Audit or Datastore.AllocateSpace on it."""
+    out = []
+    for r in results:
+        privs = (r.get("json") or {}).get("data", {}).get("/storage/" + r["item"]) or {}
+        if "Datastore.Audit" in privs or "Datastore.AllocateSpace" in privs:
+            out.append(r["item"])
+    return out
+
+
 class FilterModule:
     def filters(self):
         return {
@@ -125,4 +141,6 @@ class FilterModule:
             "pc_template_nodes": template_nodes,
             "pc_acl_missing": pve_acl_missing,
             "pc_boot_iso_problem": boot_iso_problem,
+            "pc_iso_stores": iso_stores,
+            "pc_visible_stores": visible_stores,
         }

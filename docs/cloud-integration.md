@@ -359,7 +359,8 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   (`blockedCidrs` plus the node networks); a public NIC is bridged to the uplink and only the site's routing
   stops it. CephFS asks for a key, so reaching a monitor is not enough. A vnet leaves through its exit node's
   NAT under the node's address, which a node-only export admits, so the isolation rules are what keeps it
-  out: **Test connection warns about every NFS or CIFS store whose server is outside `blockedCidrs` and the
+  out: **Test connection warns about every network store (NFS, CIFS, GlusterFS, iSCSI portal, monitors of an
+  external Ceph) whose server is outside `blockedCidrs` and the
   nodes' management networks.** Seeds stay on a shared store by default because PVE refuses to migrate a VM
   with a CD on a node-local one (`local cdrom image`, `QemuMigrate.pm`). Bootstrap ISOs of Kubernetes
   workers are different, live only until the node joins, and must be node-local (docs/managed-k8s.md).

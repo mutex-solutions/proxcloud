@@ -15,9 +15,16 @@ and rules: [README.md](README.md#maintenance-rule).
   the new store (`pve.PinClusterISO`) once no bootstrap ISO is left on the old one.
 - Installer: `services.iso_storage` defaults to `local` and preflight refuses a shared one; stage 10 gives the services
   token `capmox@pve!capi` only its boot store and the ISO store, keeps `/storage` on the user, and takes the old
-  `/storage` and NAS grants off the token.
-- Test connection warns about each NFS or CIFS store outside `blockedCidrs` and the nodes' management networks.
-  `StorageDef` carries the store's `server`.
+  `/storage` and NAS grants off the token. It then asks PVE (`/access/permissions`) which `iso` stores the token sees and
+  fails unless that is the ISO store alone. `make upgrade` now runs stage 10; `make identity-check` runs it with
+  `--check` (logins and reads run there too) to show what it would change.
+- The move gives an old store back when a node started booting from it during the move, and waits. The user's ISO grant
+  is read off the ACL list the way PVE resolves it (`effectiveRoles`: groups, propagate, a deeper entry replacing its
+  parents) instead of one exact row.
+- Test connection warns about each network store outside `blockedCidrs` and the nodes' management networks (NFS, CIFS,
+  GlusterFS, iSCSI portals, an external Ceph's monitors; `StorageDef` carries `server`, `monhost`, `portal`), and when
+  the provider's `isoStorage` is unfit (`bootISOWarnings`). `externalservice.PVEBootISOStorage` replaces the project
+  package's own reading of `isoStorage`.
 
 **Why**
 
@@ -29,7 +36,15 @@ and rules: [README.md](README.md#maintenance-rule).
   Perl hash order: the old services token saw three and the pick changed between calls. Pinning one store by ACL is the
   only lever, hence one iso store per token and the check on the boot store.
 - Moving an old grant while a node is still booting from the NAS would leave that ISO there for good: CAPMOX deletes it
-  only on stores its token still sees. The sweep waits instead.
+  only on stores its token still sees. The sweep waits instead, and looks again after the revoke, since a node can start
+  booting between the first look and the revoke.
+- The services cluster's join ISOs are the most valuable ones, and `make upgrade` did not run stage 10, so an existing
+  site kept a services token that saw every iso store. The check makes the rule hold on the site rather than only in the
+  ACL list the installer meant to write. Dry-run on the lab: stage 10 would grant `/storage/local-zfs` and
+  `/storage/local` to the token and take `/storage` and `/storage/nas-templates` off it; today the token sees `cephfs`,
+  `nas-templates` and `local`.
+- A false 409 on a group grant, a missed Ceph or iSCSI store, and a shared `isoStorage` that held existing clusters in
+  place silently were all review findings on this PR.
 - Server seed CDs stay on shared storage, since PVE does not migrate a VM with a node-local CD. They are as safe as the
   store's reach, and a vnet reaches a NAS under a node's address through its NAT, so a node-only export does not stop
   it: the isolation rules do, and the warning says when a store is outside them.

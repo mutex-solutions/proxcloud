@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -20,8 +21,8 @@ const DefaultBootISOStorage = "local"
 // cloudInitISOPrefix is the name go-proxmox gives a bootstrap ISO.
 const cloudInitISOPrefix = "user-data-"
 
-// ErrBootISOGrant: capmox@pve itself lacks PVEDatastoreAdmin on the store. A privsep token gets the user's rights
-// intersected with its own, so a cluster token there could neither upload nor delete its ISO.
+// ErrBootISOGrant: capmox@pve itself lacks the ISO rights on the store (PVEDatastoreAdmin gives them). A privsep token
+// gets the user's rights intersected with its own, so a cluster token there could neither upload nor delete its ISO.
 var ErrBootISOGrant = errors.New("capmox@pve lacks PVEDatastoreAdmin on the bootstrap ISO store")
 
 // BootISOProblem says why iso cannot hold the bootstrap ISOs of workers booting from boot, or "".
@@ -59,25 +60,94 @@ func (c *Client) ListACL(ctx context.Context) ([]ACLEntry, error) {
 	return out, nil
 }
 
-func hasBootISOGrant(acls []ACLEntry, store string) bool {
-	for _, a := range acls {
-		if a.Type == "user" && a.UGID == capiUser && a.RoleID == roleISOStorage && a.Path == "/storage/"+store {
-			return true
+// bootISOPrivs is what CAPMOX does with its ISO: upload it, list it, delete it after the join.
+var bootISOPrivs = []string{"Datastore.AllocateTemplate", "Datastore.Audit", "Datastore.Allocate"}
+
+// effectiveRoles is PVE::AccessControl::roles for a user on path, read off the ACL list: walking down from /, the
+// user's own entries on a level replace what came before, else its groups' entries do, and an entry above path counts
+// only with propagate. The portal token may not ask PVE instead: GET /access/permissions for another user wants
+// Sys.Audit on /access.
+func effectiveRoles(acls []ACLEntry, user string, groups []string, path string) []string {
+	levels := []string{"/"}
+	for i := 1; i < len(path); i++ {
+		if path[i] == '/' {
+			levels = append(levels, path[:i])
 		}
 	}
-	return false
+	if path != "/" {
+		levels = append(levels, path)
+	}
+	var roles []string
+	for _, lvl := range levels {
+		pick := func(match func(ACLEntry) bool) []string {
+			var out []string
+			for _, a := range acls {
+				if a.Path == lvl && match(a) && (lvl == path || a.Propagate == 1) {
+					out = append(out, a.RoleID)
+				}
+			}
+			return out
+		}
+		if r := pick(func(a ACLEntry) bool { return a.Type == "user" && a.UGID == user }); r != nil {
+			roles = r
+		} else if r := pick(func(a ACLEntry) bool { return a.Type == "group" && slices.Contains(groups, a.UGID) }); r != nil {
+			roles = r
+		}
+	}
+	return roles
 }
 
-// CheckBootISOGrant fails with ErrBootISOGrant when capmox@pve holds no PVEDatastoreAdmin on store.
+// missingBootISOPrivs lists what capmox@pve itself lacks of bootISOPrivs on store, given the ACL list.
+func (c *Client) missingBootISOPrivs(ctx context.Context, acls []ACLEntry, store string) ([]string, error) {
+	var u struct {
+		Groups []string `json:"groups"`
+	}
+	if err := c.get(ctx, "/access/users/"+capiUser, nil, &u); err != nil {
+		return nil, err
+	}
+	var defs []struct {
+		RoleID string `json:"roleid"`
+		Privs  string `json:"privs"`
+	}
+	if err := c.get(ctx, "/access/roles", nil, &defs); err != nil {
+		return nil, err
+	}
+	have := map[string]bool{}
+	for _, r := range effectiveRoles(acls, capiUser, u.Groups, "/storage/"+store) {
+		for _, d := range defs {
+			if d.RoleID == r {
+				for _, p := range strings.Split(d.Privs, ",") {
+					have[p] = true
+				}
+			}
+		}
+	}
+	var miss []string
+	for _, p := range bootISOPrivs {
+		if !have[p] {
+			miss = append(miss, p)
+		}
+	}
+	return miss, nil
+}
+
+// bootISOGrantErr is ErrBootISOGrant with what is missing, or nil.
+func (c *Client) bootISOGrantErr(ctx context.Context, acls []ACLEntry, store string) error {
+	miss, err := c.missingBootISOPrivs(ctx, acls, store)
+	if err != nil || len(miss) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w %q, missing %s (pveum acl modify /storage/%s --users %s --roles %s --propagate 0)",
+		ErrBootISOGrant, store, strings.Join(miss, ", "), store, capiUser, roleISOStorage)
+}
+
+// CheckBootISOGrant fails with ErrBootISOGrant when capmox@pve lacks what CAPMOX needs on store.
 func (c *Client) CheckBootISOGrant(ctx context.Context, store string) error {
 	acls, err := c.ListACL(ctx)
 	if err != nil {
 		return err
 	}
-	if !hasBootISOGrant(acls, store) {
-		return fmt.Errorf("%w %q (pveum acl modify /storage/%s --users %s --roles %s --propagate 0)", ErrBootISOGrant, store, store, capiUser, roleISOStorage)
-	}
-	return nil
+	return c.bootISOGrantErr(ctx, acls, store)
 }
 
 // PinClusterISO moves a cluster's ISO grant onto store, for clusters minted with another one. It waits, returning
@@ -105,8 +175,8 @@ func (c *Client) PinClusterISO(ctx context.Context, clusterID, store string) (wa
 	if len(old) == 0 {
 		return "", nil // pinned already, or not a token the portal minted
 	}
-	if !hasBootISOGrant(acls, store) {
-		return "", fmt.Errorf("%w %q", ErrBootISOGrant, store)
+	if err := c.bootISOGrantErr(ctx, acls, store); err != nil {
+		return "", err
 	}
 	for _, st := range old {
 		// ponytail: any cluster's ISO on the old store holds every move; per-pool matching if that ever stalls one.
@@ -122,6 +192,18 @@ func (c *Client) PinClusterISO(ctx context.Context, clusterID, store string) (wa
 	for _, st := range old {
 		if err := c.SetACL(ctx, "/storage/"+st, roleISOStorage, []string{token}, true); err != nil {
 			return "", err
+		}
+	}
+	// A node may have started booting between the look above and the revoke, its ISO on an old store: give that
+	// store back, so CAPMOX can still delete the file after the join, and move on a later pass.
+	// ponytail: an upload PVE admitted before the revoke and wrote after this look still slips by; catching it would
+	// need the old store remembered for another pass.
+	for _, st := range old {
+		if waiting, err = c.firstBootISO(ctx, st); err != nil || waiting != "" {
+			if gerr := c.SetACL(ctx, "/storage/"+st, roleISOStorage, []string{token}, false); gerr != nil {
+				err = errors.Join(err, gerr)
+			}
+			return waiting, err
 		}
 	}
 	return "", nil

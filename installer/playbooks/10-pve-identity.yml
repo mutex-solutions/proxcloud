@@ -71,6 +71,7 @@
       ansible.builtin.include_tasks: tasks/pve-login.yml
 
     - name: Read what exists
+      check_mode: false
       ansible.builtin.uri: {url: "{{ pc_api }}/{{ item }}"}
       loop: [access/roles, access/users?full=1, pools, access/acl]
       register: pc_id
@@ -189,3 +190,25 @@
       changed_when: true
       loop: "{{ pc_id.results[3].json.data | selectattr('type', 'eq', 'token') | selectattr('ugid', 'eq', 'capmox@pve!capi') | list }}"
       loop_control: {label: "{{ item.path }} {{ item.roleid }}"}
+
+    # CAPMOX puts each join token on the first iso store the services token sees, in no fixed order, so it must see
+    # the bootstrap store alone. Asked of PVE (user ∩ token, inheritance, groups), not worked out from the rows above.
+    - name: Read what the services cluster token may do on each ISO store
+      when: pc.mode == 'split'
+      check_mode: false
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/access/permissions?{{ {'userid': pc.services.capi_token_id, 'path': '/storage/' ~ item} | urlencode }}"
+      loop: "{{ pc_storage_rows | pc_iso_stores }}"
+      register: pc_capi_iso
+
+    - name: Check the services cluster token sees one ISO store, the bootstrap one
+      when: pc.mode == 'split'
+      vars:
+        seen: "{{ pc_capi_iso.results | pc_visible_stores }}"
+      ansible.builtin.assert:
+        that: seen == [pc.services.iso_storage] or ansible_check_mode
+        fail_msg: >-
+          {{ pc.services.capi_token_id }} sees the ISO stores {{ seen }}; CAPMOX would put the services cluster's join tokens
+          on any of them. It must see {{ pc.services.iso_storage }} alone: look for other ACLs on those stores for the
+          token or capmox@pve (docs/proxmox-permissions.md).
+        success_msg: "{{ pc.services.capi_token_id }} sees the ISO stores {{ seen }}{{ ' (before the changes above: --check writes nothing)' if ansible_check_mode else '' }}"

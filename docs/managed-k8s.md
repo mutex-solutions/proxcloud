@@ -205,8 +205,14 @@ Clusters created before this release have their token's ISO grant on the old sto
 installer site). After upgrading the portal, the sync's sweep moves each one: it grants the new store and
 revokes the old, once no `user-data-*.iso` is left on the old store (a node still booting from it would
 otherwise keep its file for ever, since CAPMOX deletes it only on stores its token sees). Until then the log
-says `bootstrap ISO move waits for a node to join` with the file's name. The user grant comes first, on any
-node, or by stage 10 (`make install` re-runs it, writing only what is missing):
+says `bootstrap ISO move waits for a node to join` with the file's name. A node that starts booting from the old
+store while its grant is being taken away gets the old store back, and the move waits for it the same way. A
+worker that never joins holds every old cluster's move until it is removed. Test connection on the Proxmox provider
+warns when `isoStorage` is shared or takes no ISO images: existing clusters only ever move to that store, so a
+shared one would otherwise leave them where they are without a word. The user grant comes first; the create and
+the move read it off the ACL list the way PVE does, so a grant through a group or a parent path with propagate
+counts. Give it on any node, or by stage 10 (`make install` and `make upgrade` run it, writing only what is
+missing):
 
 ```sh
 pveum acl modify /storage/local --users capmox@pve --roles PVEDatastoreAdmin --propagate 0

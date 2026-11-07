@@ -83,7 +83,8 @@ The ISO storage holds each new node's kubeadm join token until it has joined, an
 `iso` store the token sees, in no fixed order: make it node-local (`local`, the installer's default), and give the
 token no other store with `iso` content ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox),
 "Bootstrap ISOs"). Installs before this rule gave `capmox@pve!capi` `ProxCloudCAPI` on all of `/storage` and the ISO
-role on the NAS template store; stage 10 now takes both off the token after granting the two rows above, and keeps
+role on the NAS template store; stage 10 (run by `make install` and `make upgrade`; `make identity-check` previews it)
+now takes both off the token after granting the two rows above, checks with PVE that the token sees no other `iso` store, and keeps
 `/storage` on the user, which the tenant clusters' tokens need.
 
 ### Managed Kubernetes

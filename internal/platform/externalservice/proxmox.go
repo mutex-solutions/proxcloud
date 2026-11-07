@@ -131,6 +131,15 @@ func (e *ExternalService) PVEBackupStorage() string { return str(e.Config["backu
 // ("" = no image import offered).
 func (e *ExternalService) PVEImportStorage() string { return str(e.Config["importStorage"]) }
 
+// PVEBootISOStorage is config.isoStorage: the one iso store a Kubernetes cluster's CAPMOX token sees, where its workers'
+// bootstrap ISOs (kubeadm join tokens) land. Default `local`.
+func (e *ExternalService) PVEBootISOStorage() string {
+	if s := str(e.Config["isoStorage"]); s != "" {
+		return s
+	}
+	return pve.DefaultBootISOStorage
+}
+
 // PVEImportUnknownSizeMaxGiB is config.importUnknownSizeMaxGiB: how large an image whose server states no size may get,
 // spooled to the portal's temporary directory on the way. 0 (the default) refuses such a URL.
 func (e *ExternalService) PVEImportUnknownSizeMaxGiB() int {

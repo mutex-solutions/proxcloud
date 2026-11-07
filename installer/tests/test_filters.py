@@ -69,6 +69,14 @@ assert "is shared" in f.boot_iso_problem(STD + [{"storage": "d", "type": "dir", 
 assert "does not take ISO" in f.boot_iso_problem(STD, "local-zfs", "local-zfs")
 assert "does not exist" in f.boot_iso_problem(STD, "gone", "local-zfs")
 assert "on either" in f.boot_iso_problem(STD, "local", "nas-templates")
+assert f.iso_stores(STD + [{"storage": "off", "type": "dir", "content": "iso", "disable": 1}]) == [s["storage"] for s in STD if "iso" in s.get("content", "")]
+# Stage 10's check: a store is in the token's view with Datastore.Audit or AllocateSpace there, as PVE answers it.
+res = [{"item": "local", "json": {"data": {"/storage/local": {"Datastore.Audit": 1, "Datastore.AllocateTemplate": 1}}}},
+       {"item": "nas-templates", "json": {"data": {"/storage/nas-templates": {}}}},
+       {"item": "cephfs", "json": {"data": {"/storage/cephfs": {"Datastore.AllocateSpace": 1}}}},
+       {"item": "gone", "json": {"data": {}}}]
+assert f.visible_stores(res) == ["local", "cephfs"]
+assert "playbooks/10-pve-identity.yml playbooks/30" in open(os.path.join(os.path.dirname(__file__), "..", "Makefile")).read()  # make upgrade runs stage 10
 
 # The services cluster's CAPMOX token sees only its boot and ISO stores, so CAPMOX cannot pick another iso store;
 # its user keeps /storage for the boot stores of the tenant clusters' tokens.

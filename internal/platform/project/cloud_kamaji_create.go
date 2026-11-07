@@ -232,7 +232,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 		ones, _ := ipnet.Mask.Size()
 		in.Bridge, in.Gateway, in.Prefix = vnet, gateway, ones
 		pool = externalservice.PVEPublicNetwork{ID: vnet, CIDR: cidr, Gateway: gateway, Ranges: []string{first + "-" + last}}
-		if err = kamajiCheckBootISO(ctx, ps, pveISOStorage(compute), storage); err != nil {
+		if err = kamajiCheckBootISO(ctx, ps, compute.PVEBootISOStorage(), storage); err != nil {
 			return sec, err
 		}
 	}
@@ -272,7 +272,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	} else {
 		toks, terr := ps.C.MintClusterTokens(ctx, spec.ID, pve.ClusterTokenScope{
 			Pool: in.Pool, TemplatePool: pve.TemplatePool, BootStorage: storage, CSIStorages: classStorages(classes),
-			ISOStorage: pveISOStorage(compute), Zone: zone, Vnet: in.Bridge,
+			ISOStorage: compute.PVEBootISOStorage(), Zone: zone, Vnet: in.Bridge,
 		})
 		if terr != nil {
 			err = upstreamErr(computeBackend, terr)
@@ -440,7 +440,7 @@ func KamajiPinBootISO(services serviceGetter, pveFor func(*externalservice.Exter
 		if err != nil {
 			return err
 		}
-		waiting, err := ps.C.PinClusterISO(ctx, clusterID, pveISOStorage(es))
+		waiting, err := ps.C.PinClusterISO(ctx, clusterID, es.PVEBootISOStorage())
 		if waiting != "" {
 			slog.Info("kamaji: bootstrap ISO move waits for a node to join", "cluster", clusterID, "iso", waiting)
 		}
@@ -495,14 +495,6 @@ func classStorages(classes []kamaji.StorageClass) []string {
 		out = append(out, c.Storage)
 	}
 	return out
-}
-
-// pveISOStorage is the store a cluster token may upload its bootstrap ISOs to, and so the only iso store it sees.
-func pveISOStorage(compute *externalservice.ExternalService) string {
-	if s := strAny(compute.Config["isoStorage"]); s != "" {
-		return s
-	}
-	return pve.DefaultBootISOStorage
 }
 
 // kamajiCheckBootISO refuses a create whose workers' join tokens would sit on a shared store, or on a store the
