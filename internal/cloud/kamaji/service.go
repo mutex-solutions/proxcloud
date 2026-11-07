@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"strings"
@@ -50,6 +51,13 @@ type Service struct {
 	serviceID     string
 	finalizeGrace time.Duration
 	onClusterGone func(ctx context.Context, computeServiceID, projectID, clusterID string) error
+	onClusterLive func(ctx context.Context, computeServiceID, projectID, clusterID string) error
+}
+
+// OnClusterLive registers what the sweep runs on every live cluster it passes: bringing a cluster made by an older
+// release onto the current grants. An error is logged and changes nothing else.
+func (s *Service) OnClusterLive(f func(ctx context.Context, computeServiceID, projectID, clusterID string) error) {
+	s.onClusterLive = f
 }
 
 // OnClusterGone registers what must outlive the delete cascade and run after it: revoking the
@@ -274,6 +282,10 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		if app != nil {
 			if dig(app, "metadata", "deletionTimestamp") != nil {
 				pending++ // delete cascade in flight
+			} else if compute := digStr(sec, "metadata", "annotations", annotationComputeService); s.onClusterLive != nil && compute != "" {
+				if err := s.onClusterLive(ctx, compute, projectID, cid); err != nil {
+					slog.Warn("kamaji: live cluster hook", "cluster", cid, "err", err) // the sweep and teardown go on
+				}
 			}
 			continue // cluster alive (or deleting) — its secret is in use
 		}

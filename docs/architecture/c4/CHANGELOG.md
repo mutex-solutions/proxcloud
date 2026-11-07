@@ -4,6 +4,52 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Bootstrap ISOs off shared storage (SB-pre, PR #101)
+
+**What changed**
+
+- A Kubernetes cluster's CAPMOX token gets its ISO grant on the Proxmox provider's `isoStorage`, now `local` by default
+  (was `nas-templates`). A create answers 409 when that store is shared, takes no ISO images, when the boot store also
+  takes ISO images, or when `capmox@pve` lacks `PVEDatastoreAdmin` there (`pve.BootISOProblem`, `CheckBootISOGrant`).
+- The kamaji sweep calls a new live-cluster hook, `OnClusterLive`; `KamajiPinBootISO` moves an older cluster's grant to
+  the new store (`pve.PinClusterISO`) once no bootstrap ISO is left on the old one.
+- Installer: `services.iso_storage` defaults to `local` and preflight refuses a shared one; stage 10 gives the services
+  token `capmox@pve!capi` only its boot store and the ISO store, keeps `/storage` on the user, and takes the old
+  `/storage` and NAS grants off the token. It then asks PVE (`/access/permissions`) which `iso` stores the token sees and
+  fails unless that is the ISO store alone. `make upgrade` now runs stage 10; `make identity-check` runs it with
+  `--check` (logins and reads run there too) to show what it would change.
+- The move gives an old store back when a node started booting from it during the move, and waits. The user's ISO grant
+  is read off the ACL list the way PVE resolves it (`effectiveRoles`: groups, propagate, a deeper entry replacing its
+  parents) instead of one exact row.
+- Test connection warns about each network store outside `blockedCidrs` and the nodes' management networks (NFS, CIFS,
+  GlusterFS, iSCSI portals, an external Ceph's monitors; `StorageDef` carries `server`, `monhost`, `portal`), and when
+  the provider's `isoStorage` is unfit (`bootISOWarnings`). `externalservice.PVEBootISOStorage` replaces the project
+  package's own reading of `isoStorage`.
+
+**Why**
+
+- A bootstrap ISO holds the node's kubeadm join token, renewed until the node joins. On the NAS any VM whose traffic
+  reaches the export can read it and join a node of its own to the cluster, the services cluster included. Drilled on the
+  lab with CAPMOX's own go-proxmox calls: a VM with a public NIC mounted `nas-templates` and read the token; with the new
+  grant the same ISO went to `local` and nothing reached the NAS.
+- CAPMOX v0.9.2 names no store, so go-proxmox takes the first `iso` store in the token's view, and PVE lists stores in
+  Perl hash order: the old services token saw three and the pick changed between calls. Pinning one store by ACL is the
+  only lever, hence one iso store per token and the check on the boot store.
+- Moving an old grant while a node is still booting from the NAS would leave that ISO there for good: CAPMOX deletes it
+  only on stores its token still sees. The sweep waits instead, and looks again after the revoke, since a node can start
+  booting between the first look and the revoke.
+- The services cluster's join ISOs are the most valuable ones, and `make upgrade` did not run stage 10, so an existing
+  site kept a services token that saw every iso store. The check makes the rule hold on the site rather than only in the
+  ACL list the installer meant to write. Dry-run on the lab: stage 10 would grant `/storage/local-zfs` and
+  `/storage/local` to the token and take `/storage` and `/storage/nas-templates` off it; today the token sees `cephfs`,
+  `nas-templates` and `local`.
+- A false 409 on a group grant, a missed Ceph or iSCSI store, and a shared `isoStorage` that held existing clusters in
+  place silently were all review findings on this PR.
+- Server seed CDs stay on shared storage, since PVE does not migrate a VM with a node-local CD. They are as safe as the
+  store's reach, and a vnet reaches a NAS under a node's address through its NAT, so a node-only export does not stop
+  it: the isolation rules do, and the warning says when a store is outside them.
+
+**Diagrams updated:** `c3-components.md`, `c4-code.md`.
 ## 2026-11-07: CSI gateway and volume registry (K8s-CSI, PR 1 of 4)
 
 **What changed**

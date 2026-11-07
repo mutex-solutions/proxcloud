@@ -177,6 +177,7 @@ What the create path resolves (`internal/platform/project/cloud_kamaji_create.go
 | Quota | the project's limits, like servers | every worker counts against `servers`, `vcpus`, `ramMb` and `diskGb`; a create or node group edit over them answers 409 and takes nothing |
 | Addresses | 16 for workers, 8 for tenant LoadBalancers, reserved from the top of the subnet | hence at most 15 workers: a rolling replacement needs a spare |
 | Credentials | `capmox@pve!<id>` (management side), `csi@pve!<id>` only with `csiSharedStores` (reaches the tenant cluster) | minted at create, revoked after the delete cascade |
+| Bootstrap ISO store | the Proxmox provider's `config.isoStorage`, default `local` | must be node-local, see "Bootstrap ISOs" below |
 
 **Node images.** `config.cluster.versions` maps a version to its template per PVE node, as printed by
 `images/k8s-node-template.sh`: `{"1.35.10": "pve1=9210,pve2=9211"}`. PVE clones to local storage only on the
@@ -186,6 +187,39 @@ taking the remainder. The zone label comes from that pin, so no cloud controller
 **Reaching the platform.** Workers sit on a tenant vnet with no route to the management network. The API-server
 endpoint is an address on the services subnet, which tenants reach over their normal egress: MetalLB. So is
 proxmox-csi's PVE API with `csiSharedStores`: a `pve-api` Service forwarding to the PVE nodes (`config.cluster.pveCsiUrl`).
+
+**Bootstrap ISOs.** CAPMOX writes each new worker's user-data, kubeadm join token included, to
+`user-data-<vmid>.iso`, mounts it as a CD, and after the node has joined unmounts and deletes it. The token
+lives 15 minutes (CABPK's default) but is renewed until the machine is up, so a node that never joins keeps a
+live one. Whoever can read the store can join a node of their own to the cluster. CAPMOX v0.9.2 passes no store
+to go-proxmox, which uploads to the first enabled `iso` store in `GET /nodes/<node>/storage` as the token sees
+it, and PVE lists stores in Perl hash order: with two iso stores visible the pick changes from call to call.
+So each cluster's token sees one iso store, the provider's `config.isoStorage` (default `local`, PVE's stock
+directory store on every node), and a create answers 409 when that store is shared (NFS, CIFS, CephFS, ...),
+takes no ISO images, when the boot store takes ISO images as well, or when `capmox@pve` itself lacks
+`PVEDatastoreAdmin` there. The services cluster's token follows the same rule (installer `services.iso_storage`,
+default `local`, checked in preflight). Clusters on `sharedWorkers` use the operator's token: give it
+`PVEDatastoreAdmin` on one node-local store and no other iso store.
+
+Clusters created before this release have their token's ISO grant on the old store (`nas-templates` on an
+installer site). After upgrading the portal, the sync's sweep moves each one: it grants the new store and
+revokes the old, once no `user-data-*.iso` is left on the old store (a node still booting from it would
+otherwise keep its file for ever, since CAPMOX deletes it only on stores its token sees). Until then the log
+says `bootstrap ISO move waits for a node to join` with the file's name. A node that starts booting from the old
+store while its grant is being taken away gets the old store back, and the move waits for it the same way. A
+worker that never joins holds every old cluster's move until it is removed. Test connection on the Proxmox provider
+warns when `isoStorage` is shared or takes no ISO images: existing clusters only ever move to that store, so a
+shared one would otherwise leave them where they are without a word. The user grant comes first; the create and
+the move read it off the ACL list the way PVE does, so a grant through a group or a parent path with propagate
+counts. Give it on any node, or by stage 10 (`make install` and `make upgrade` run it, writing only what is
+missing):
+
+```sh
+pveum acl modify /storage/local --users capmox@pve --roles PVEDatastoreAdmin --propagate 0
+# check one cluster after the next sync: Datastore.* on local, nothing on the old store
+pveum user token permissions capmox@pve <clusterId> --path /storage/local
+pveum user token permissions capmox@pve <clusterId> --path /storage/nas-templates
+```
 
 **Block volumes.** A provider offers its storage profiles to tenant clusters through proxmox-csi only with
 `config.cluster.csiSharedStores: true`. The plugin's token reaches the tenant cluster, where a cluster-admin can read it, and

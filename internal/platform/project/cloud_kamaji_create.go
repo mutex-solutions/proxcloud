@@ -232,6 +232,9 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 		ones, _ := ipnet.Mask.Size()
 		in.Bridge, in.Gateway, in.Prefix = vnet, gateway, ones
 		pool = externalservice.PVEPublicNetwork{ID: vnet, CIDR: cidr, Gateway: gateway, Ranges: []string{first + "-" + last}}
+		if err = kamajiCheckBootISO(ctx, ps, compute.PVEBootISOStorage(), storage); err != nil {
+			return sec, err
+		}
 	}
 
 	// The marker goes first: nothing else records this cluster until CreateCluster, and a rollback can fail too.
@@ -269,7 +272,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	} else {
 		toks, terr := ps.C.MintClusterTokens(ctx, spec.ID, pve.ClusterTokenScope{
 			Pool: in.Pool, TemplatePool: pve.TemplatePool, BootStorage: storage, CSIStorages: classStorages(classes),
-			ISOStorage: pveISOStorage(compute), Zone: zone, Vnet: in.Bridge,
+			ISOStorage: compute.PVEBootISOStorage(), Zone: zone, Vnet: in.Bridge,
 		})
 		if terr != nil {
 			err = upstreamErr(computeBackend, terr)
@@ -418,7 +421,30 @@ func KamajiFactory(esSvc *externalservice.Service, shares shareRowFinder, pveFor
 			return nil, err
 		}
 		ks.OnClusterGone(KamajiReleaseCluster(esSvc, shares, pveFor, ips, cfg.Defaults.Shared != nil))
+		if cfg.Defaults.Shared == nil && pveFor != nil {
+			ks.OnClusterLive(KamajiPinBootISO(esSvc, pveFor))
+		}
 		return ks, nil
+	}
+}
+
+// KamajiPinBootISO moves a cluster minted before bootstrap ISOs left shared storage onto the provider's ISO store, on
+// the sweep's pass after the portal upgrade (docs/managed-k8s.md, "Bootstrap ISOs").
+func KamajiPinBootISO(services serviceGetter, pveFor func(*externalservice.ExternalService) (*pve.Service, error)) func(ctx context.Context, computeID, projectID, clusterID string) error {
+	return func(ctx context.Context, computeID, _, clusterID string) error {
+		es, err := services.Get(ctx, computeID)
+		if err != nil {
+			return err
+		}
+		ps, err := pveFor(es)
+		if err != nil {
+			return err
+		}
+		waiting, err := ps.C.PinClusterISO(ctx, clusterID, es.PVEBootISOStorage())
+		if waiting != "" {
+			slog.Info("kamaji: bootstrap ISO move waits for a node to join", "cluster", clusterID, "iso", waiting)
+		}
+		return err
 	}
 }
 
@@ -471,12 +497,23 @@ func classStorages(classes []kamaji.StorageClass) []string {
 	return out
 }
 
-// pveISOStorage is the store CAPMOX uploads its bootstrap ISO to: the one holding templates and ISOs.
-func pveISOStorage(compute *externalservice.ExternalService) string {
-	if s := strAny(compute.Config["isoStorage"]); s != "" {
-		return s
+// kamajiCheckBootISO refuses a create whose workers' join tokens would sit on a shared store, or on a store the
+// token could not use: CAPMOX would then wait on the first upload for ever.
+func kamajiCheckBootISO(ctx context.Context, ps *pve.Service, iso, boot string) error {
+	caps, err := ps.C.DetectStorage(ctx)
+	if err != nil {
+		return upstreamErr(computeBackend, err)
 	}
-	return "nas-templates"
+	if p := pve.BootISOProblem(caps, iso, boot); p != "" {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, "Bootstrap ISO storage: "+p+" (Proxmox provider setting isoStorage)")
+	}
+	if err := ps.C.CheckBootISOGrant(ctx, iso); err != nil {
+		if errors.Is(err, pve.ErrBootISOGrant) {
+			return httpx.NewError(http.StatusConflict, http.StatusConflict, err.Error())
+		}
+		return upstreamErr(computeBackend, err)
+	}
+	return nil
 }
 
 // kamajiCSIManifest is the tenant-side config of proxmox-csi. A tenant with cluster-admin can read the token, so a
