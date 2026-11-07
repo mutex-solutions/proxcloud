@@ -32,6 +32,10 @@ pc_url_admin: "{{ pc_scheme }}://admin.{{ pc_domain }}"
 pc_url_api: "{{ pc_scheme }}://api.{{ pc_domain }}"
 pc_url_id: "{{ pc_scheme }}://id.{{ pc_domain }}"
 
+# mode=split: stage 50 pushes the charts of this checkout, so their versions are what stage 60 registers.
+pc_chart_kamaji: "{{ (lookup('ansible.builtin.file', pc_repo_root ~ '/deploy/charts/proxmox-kamaji-cluster/Chart.yaml') | from_yaml).version }}"
+pc_chart_database: "{{ (lookup('ansible.builtin.file', pc_repo_root ~ '/deploy/charts/database-cluster/Chart.yaml') | from_yaml).version }}"
+
 # The k3s-bundled local registry (images.build).
 pc_local_registry: 127.0.0.1:5000
 pc_cluster_registry: pc-registry.proxcloud-registry.svc.cluster.local:5000

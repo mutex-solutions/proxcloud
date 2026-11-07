@@ -149,13 +149,13 @@
         content: "{{ pc_vault[item.key] }}\n"
         mode: "0600"
       no_log: true
-      loop: "{{ {'platform_token_secret': 'platform', 'images_token_secret': 'packer'} | dict2items }}"
+      loop: "{{ {'platform_token_secret': 'platform', 'images_token_secret': 'packer', 'capi_token_secret': 'capi', 'csi_token_secret': 'csi'} | dict2items }}"
 
     - name: Check the tokens the installer needs are known
       ansible.builtin.stat: {path: "{{ pc_gen }}/token-{{ item }}"}
       register: pc_tokens
       failed_when: not pc_tokens.stat.exists
-      loop: [platform, packer]
+      loop: "{{ ['platform', 'packer'] + (['capi', 'csi'] if pc.mode == 'split' else []) }}"
 
     - name: Grant the missing ACLs
       ansible.builtin.uri:
