@@ -4,6 +4,31 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: NodeRestriction on tenant API servers (PR #108)
+
+**What changed**
+
+- Chart `proxmox-kamaji-cluster` 0.1.6 sets `KamajiControlPlane.spec.admissionControllers` to Kamaji's default list plus
+  `NodeRestriction`, from a new chart value `kamajiControlPlane.admissionControllers`. The portal's values do not carry the
+  key, so every cluster on 0.1.6 gets the chart default. Existing clusters get it through the usual chart bump: the
+  provider's `chartVersion` to 0.1.6, then Bump. `TestChartEnablesNodeRestriction` renders the portal's values through the
+  chart and checks the plugin.
+- Docs: `docs/managed-k8s.md` section 9 (what a node credential can do with and without it), section 3 (the admin Bump has
+  now run on Proxmox); c3 row of the managed Kubernetes create.
+
+**Why**
+
+- Kamaji's default list has no `NodeRestriction`, and the chart did not set one, so every tenant cluster ran without it.
+  The SB0 sandbox spike found it (PR #103) and patched its own cluster by hand. Measured on the lab, same cluster before and
+  after the Bump: with 0.1.5 a worker's kubelet certificate patched another Node's labels, taints and cordon (200) and read a
+  Secret of another namespace by creating a pod bound to itself that mounts it; with 0.1.6 both are refused (`is not allowed
+  to modify node`, `can only create mirror pods`, `a mirror pod may not reference secrets`). Root on one worker no longer
+  reaches the other nodes' scheduling or the cluster's Secrets through the node identity.
+- Kubelets, Cilium, the proxmox-csi node plugin, MetalLB and workloads kept working after the roll, and a worker that joined
+  afterwards registered with its group's label and taint, so turning it on for every cluster costs nothing on the workers.
+
+Files: `deploy/charts/proxmox-kamaji-cluster/{Chart.yaml,values.yaml,templates/cluster.yaml}`,
+`internal/cloud/kamaji/chart_admission_test.go`, `docs/managed-k8s.md`, `docs/architecture/c4/c3-components.md`.
 ## 2026-11-07: Delete-now frees a project stranded in deletion
 
 **What changed**
