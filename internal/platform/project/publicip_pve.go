@@ -97,14 +97,21 @@ func (r *PublicIPRepo) ReleaseServer(ctx context.Context, serviceID, serverID st
 	return r.release(ctx, pgdoc.M{"serviceId": serviceID, "serverId": serverID})
 }
 
+// purgeClusterRows drops the cluster addresses left on a vnet being deleted. The caller holds the share-access guard:
+// going through release here would wait on that same lock.
+func (r *PublicIPRepo) purgeClusterRows(ctx context.Context, serviceID, networkID string) error {
+	_, err := r.col.DeleteMany(ctx, pgdoc.M{"serviceId": serviceID, "networkId": networkID, "nic": ReservedNIC})
+	return err
+}
+
 // ReleaseProject frees every address the project holds on the service (teardown).
 func (r *PublicIPRepo) ReleaseProject(ctx context.Context, serviceID, projectID string) error {
 	return r.release(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID})
 }
 
-// release frees the matching rows, the one way an address gets back to the pool. A public address goes through the
-// guard of each project holding one first; a failed guard keeps the row, so the address cannot be reallocated. A net0
-// row has nothing to guard: the export lists the subnet, which network delete guards.
+// release frees the matching rows, the one way an address gets back to the pool. A public or cluster address goes
+// through the guard of each project holding one first; a failed guard keeps the row, so the address cannot be
+// reallocated. A net0 row has nothing to guard: the export lists the subnet, which network delete guards.
 func (r *PublicIPRepo) release(ctx context.Context, filter pgdoc.M) error {
 	del := func() error {
 		_, err := r.col.DeleteMany(ctx, filter)
@@ -119,7 +126,7 @@ func (r *PublicIPRepo) release(ctx context.Context, filter pgdoc.M) error {
 	}
 	drop := map[string][]string{}
 	for _, row := range rows {
-		if row.IsPublic() {
+		if row.IsPublic() || row.NIC == ReservedNIC {
 			drop[row.ProjectID] = append(drop[row.ProjectID], row.IP+"/32")
 		}
 	}

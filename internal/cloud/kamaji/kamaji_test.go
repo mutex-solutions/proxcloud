@@ -3,6 +3,7 @@ package kamaji
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -1030,5 +1031,57 @@ func TestSyncProviderList(t *testing.T) {
 	g0 := groups[0].(map[string]any)
 	if g0["ready_replicas"] != float64(2) || g0["phase"] != "ScalingUp" {
 		t.Errorf("live merge = %v", g0)
+	}
+}
+
+// A create that fails after taking something: released at once and nothing left. A failed release keeps the marker, and
+// the sweep finishes the job.
+func TestAbandonCluster(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeAPI()
+	svc := NewWithAPI(api, testCfg(), "svc-k")
+	svc.finalizeGrace = 0
+	releases, failing := 0, true
+	svc.OnClusterGone(func(_ context.Context, compute, project, cluster string) error {
+		if compute != "svc-pve" || project != "p1" || cluster != "stc-x" {
+			t.Errorf("release of %s/%s/%s", compute, project, cluster)
+		}
+		releases++
+		if failing {
+			return errors.New("nas down")
+		}
+		return nil
+	})
+	if err := svc.RecordCluster(ctx, "p1", "stc-x", "svc-pve"); err != nil {
+		t.Fatal(err)
+	}
+	marker := NamespaceFor("p1") + "/" + MarkerSecretName("stc-x")
+	if _, ok := api.secrets[marker]; !ok {
+		t.Fatal("no marker written")
+	}
+
+	if err := svc.AbandonCluster(ctx, "p1", "stc-x", "svc-pve"); err == nil {
+		t.Fatal("want the release error")
+	}
+	if _, ok := api.secrets[marker]; !ok {
+		t.Fatal("a failed release must keep the marker")
+	}
+
+	failing = false
+	if _, err := svc.FinalizeAllOrphans(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.secrets[marker]; ok || releases != 2 {
+		t.Fatalf("after the sweep: marker kept = %v, releases = %d", ok, releases)
+	}
+
+	if err := svc.RecordCluster(ctx, "p1", "stc-x", "svc-pve"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AbandonCluster(ctx, "p1", "stc-x", "svc-pve"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.secrets[marker]; ok {
+		t.Fatal("marker left after a clean release")
 	}
 }

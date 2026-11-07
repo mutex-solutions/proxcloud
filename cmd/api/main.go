@@ -272,7 +272,7 @@ func run() error {
 	// Kamaji Managed Kubernetes — enables kamaji provisioning + the KUBERNETES_CLUSTER write
 	// surface (Application CRs on the provider's management cluster). The sync job's orphan sweep
 	// uses the same factory: it releases a deleted cluster's PVE tokens and addresses.
-	kamajiFactory := project.KamajiFactory(esSvc, func(es *externalservice.ExternalService) (*pve.Service, error) {
+	kamajiFactory := project.KamajiFactory(esSvc, cloudRepo, func(es *externalservice.ExternalService) (*pve.Service, error) {
 		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
 	}, publicIPRepo)
 	projectH.SetKamaji(kamajiFactory)
