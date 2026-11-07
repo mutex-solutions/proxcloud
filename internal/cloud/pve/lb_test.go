@@ -150,7 +150,7 @@ func lbCreateCluster(t *testing.T, del, resources func(http.ResponseWriter, *htt
 		"DELETE " + lbCreatePath:                                           del,
 		"GET /api2/json/cluster/resources":                                 resources,
 	})
-	return &Service{C: c, PoolPrefix: "st-"}
+	return &Service{C: c, PoolPrefix: "tp-"}
 }
 
 // A read-back that fails must not leave a running VM behind a failed create: the caller frees its addresses when told
@@ -208,8 +208,8 @@ func TestAttachTargetsHideAppliance(t *testing.T) {
 	s := volCluster(t, cfgLocalUnused, writes, fakeRoutes{
 		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[
-				{"id":"qemu/101","type":"qemu","vmid":101,"name":"a","node":"pve1","pool":"st-p1"},
-				{"id":"qemu/102","type":"qemu","vmid":102,"name":"lb","node":"pve1","pool":"st-p1","tags":"proxcloud;pc-lb-abc"}]}`)
+				{"id":"qemu/101","type":"qemu","vmid":101,"name":"a","node":"pve1","pool":"tp-p1"},
+				{"id":"qemu/102","type":"qemu","vmid":102,"name":"lb","node":"pve1","pool":"tp-p1","tags":"proxcloud;pc-lb-abc"}]}`)
 		},
 	})
 	vms, err := s.AttachTargets(context.Background(), "p1", 101, "local-zfs:vm-101-disk-1")
