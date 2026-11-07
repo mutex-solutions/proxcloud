@@ -535,8 +535,19 @@ rejected credentials, a removed integration) leaves it `PENDING` with the reason
 `gatewayMessage` or `errorMessage`, and the next pass asks again. The 24 hour window is the bound.
 Past it the scanner stops asking and logs an error on the way out, and the row stays `PENDING`,
 because the money may have moved. A late gateway callback or the operator's
-`GET /admin/account-credit-transactions/{id}/sync` can still settle a deposit. A charge past the
-window has no such route yet and needs an operator to look at it at the gateway.
+`GET /admin/account-credit-transactions/{id}/sync` can still settle a deposit, and
+`GET /admin/collect-transactions/{id}/sync` (Re-check in the operator console) asks the gateway about a charge the same
+way a scan does. A bill charge stays in the in-flight guard for as long as it is `PENDING`, however old, so a long gateway
+outage cannot lead to a second charge for the bill; past the window a customer retry is told to contact support. The row's
+`errorMessage` says what the gateway answered. A gateway answer of cancelled ends the charge as `CANCELLED` by itself.
+`POST /admin/collect-transactions/{id}/close` ends a charge by hand: one with a gateway reference only when the gateway,
+asked again at that moment, says it did not succeed (declined or never confirmed). A charge that may still capture
+(processing, waiting for authentication or capture) is refused: cancel it at the gateway, then re-check. A charge with no
+gateway reference (the process stopped between creating the row and the gateway's answer) cannot be asked about: look for
+its id as the reference at the gateway, then close it if nothing was charged.
+
+A bill blocked by such a charge stays `SENT`, so it keeps counting for dunning and auto-suspension (`DueBills`, and the
+balance). That is deliberate: see the C4 changelog entry of 2026-11-07.
 
 ### Bill writers and the credit lock
 

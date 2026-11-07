@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: A charge with an unknown outcome blocks new charges until resolved
+
+**What changed**
+
+- The in-flight guard covers every `PENDING` charge of a bill, not only those younger than 24 hours.
+- `GET /admin/collect-transactions/{id}/sync` re-checks a charge at the gateway, and
+  `POST /admin/collect-transactions/{id}/close` ends one the gateway says did not succeed, or one with no gateway
+  reference. Both are in the operator console.
+- A gateway answer of cancelled now ends a charge; it used to stay `PENDING`.
+
+**Why**
+
+- Past the scanner's 24 hours the guard let a new charge through while the old one's outcome was still unknown, so a long
+  gateway outage could charge a customer twice. Lifting the age limit needed a way to resolve the charge, or the bill
+  would stay blocked for good: a lost confirm on a declined card stayed `PENDING` with nothing able to end it.
+- A blocked bill still counts for dunning and auto-suspension. Leaving it out of `DueBills` would cover the due-date type
+  only (the balance type reads the balance), and a customer whose card needs an action nobody completes would never be
+  suspended. A re-check that settles the charge resumes the profile, as any collect does.
 ## 2026-11-07: Leftover holders stop billing; a late lock release frees nothing
 
 **What changed**
