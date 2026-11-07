@@ -387,32 +387,40 @@
       args: {executable: /bin/bash, chdir: /root/sandbox-bundle}
       environment: {KUBECONFIG: /root/sandbox.kubeconfig}
       changed_when: false
-    # The proxmox provider's sync reads Nodes and takes the unsecured taint off with this (stage 60 stores it).
-    - name: Build the firewall pass's kubeconfig
+    # Two service-account kubeconfigs, both stored by stage 60: the proxmox provider's sync reads Nodes and takes the
+    # unsecured taint off with the firewall one (nodes only); the sandbox provider runs sandboxes with the portal one
+    # (namespaces, quotas and Sandbox CRs of sb-* projects).
+    - name: Build the service-account kubeconfigs
       ansible.builtin.shell: |
         set -euo pipefail
         for i in $(seq 30); do
-          t=$(kubectl -n proxcloud-system get secret proxcloud-firewall-token -o jsonpath='{.data.token}' | base64 -d)
+          t=$(kubectl -n proxcloud-system get secret "$SECRET" -o jsonpath='{.data.token}' | base64 -d)
           [ -n "$t" ] && break; sleep 2
         done
         [ -n "$t" ]
         kubectl config view --raw --minify -o json | T="$t" python3 -c '
         import json, os, sys
         c = json.load(sys.stdin)["clusters"][0]
-        print(json.dumps({"apiVersion": "v1", "kind": "Config", "current-context": "fw",
+        print(json.dumps({"apiVersion": "v1", "kind": "Config", "current-context": "sa",
           "clusters": [{"name": "sandbox", "cluster": c["cluster"]}],
-          "users": [{"name": "fw", "user": {"token": os.environ["T"]}}],
-          "contexts": [{"name": "fw", "context": {"cluster": "sandbox", "user": "fw"}}]}))'
+          "users": [{"name": "sa", "user": {"token": os.environ["T"]}}],
+          "contexts": [{"name": "sa", "context": {"cluster": "sandbox", "user": "sa"}}]}))'
       args: {executable: /bin/bash}
-      environment: {KUBECONFIG: /root/sandbox.kubeconfig}
-      register: pc_sbx_fw
+      environment: {KUBECONFIG: /root/sandbox.kubeconfig, SECRET: "{{ item.secret }}"}
+      loop:
+        - {secret: proxcloud-firewall-token, file: sandbox-firewall.kubeconfig}
+        - {secret: proxcloud-token, file: sandbox-portal.kubeconfig}
+      loop_control: {label: "{{ item.file }}"}
+      register: pc_sbx_sa
       changed_when: false
       no_log: true
-    - name: Keep it in the site directory
+    - name: Keep them in the site directory
       ansible.builtin.copy:
-        dest: "{{ pc_gen }}/sandbox-firewall.kubeconfig"
-        content: "{{ pc_sbx_fw.stdout }}\n"
+        dest: "{{ pc_gen }}/{{ item.item.file }}"
+        content: "{{ item.stdout }}\n"
         mode: "0600"
+      loop: "{{ pc_sbx_sa.results }}"
+      loop_control: {label: "{{ item.item.file }}"}
       delegate_to: localhost
       become: false
       no_log: true

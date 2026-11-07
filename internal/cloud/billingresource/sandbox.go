@@ -19,12 +19,14 @@ import (
 //   - the engine creates a bill item even for a NotEligibleForBilling resource, with its
 //     minute watermark at the resource's createdAt, and later back-bills from there. So while
 //     PENDING this provider returns NO billing resource at all (no item, no watermark);
-//   - once RUNNING, cr.Info.CreatedAt is set to runningSince. stampResourceValues prefers
-//     Info.CreatedAt, so the item is created with its watermark at the moment the sandbox started.
+//   - once RUNNING, cr.Info.CreatedAt is set to runningSince, cut to its minute. stampResourceValues prefers
+//     Info.CreatedAt, so the item is created with its watermark at the minute the sandbox started.
 //
 // End of life: an ended sandbox's row is DELETED with its end (sandbox.MarkVanished, or the delete) and archived; the
-// charge rates archived rows too, up to DeletedAt = its runtime rounded UP to whole minutes from runningSince, at least
-// one minute. An agent that creates and kills a sandbox within seconds still pays one minute. A row never read while
+// charge rates archived rows too, up to DeletedAt = that minute plus the runtime rounded UP to whole minutes, at least
+// one. The engine bills every clock minute an item spans, so both ends sit on a minute boundary: from runningSince
+// itself, a 39 s sandbox started at :07 would span two clock minutes and pay two (seen on the lab).
+// An agent that creates and kills a sandbox within seconds still pays one minute. A row never read while
 // running gets an assumed runningSince (its last pending read) when it ends, so a short sandbox is never free.
 // ponytail: minute granularity; per-second billing would need its own ledger.
 type SandboxProvider struct{}
@@ -40,7 +42,8 @@ func (p *SandboxProvider) GetBillingInformation(_ context.Context, _ billingapi.
 	if err != nil || (status != "RUNNING" && status != "DELETED") {
 		return nil, nil
 	}
-	cr.Info = &cloud.Info{CreatedAt: &running}
+	start := running.Truncate(time.Minute)
+	cr.Info = &cloud.Info{CreatedAt: &start}
 	// The charge stops at the sandbox's end: endedAt once it is marked DELETED, or its
 	// shutdownTime once that has passed (the controller removes it then, and the sync that
 	// notices may come minutes later).
@@ -78,14 +81,14 @@ func (p *SandboxProvider) GetBillingInformation(_ context.Context, _ billingapi.
 	}}, nil
 }
 
-// billedEnd is runningSince plus the runtime rounded up to whole minutes, at least one.
+// billedEnd is the minute runningSince falls in plus the runtime rounded up to whole minutes, at least one.
 func billedEnd(running time.Time, endedAt string) time.Time {
 	end, err := time.Parse(time.RFC3339, endedAt)
 	if err != nil || end.Before(running) {
 		end = running
 	}
 	minutes := (end.Sub(running) + time.Minute - 1) / time.Minute
-	return running.Add(max(minutes, 1) * time.Minute)
+	return running.Truncate(time.Minute).Add(max(minutes, 1) * time.Minute)
 }
 
 func sandboxType() *billingapi.BillingResourceType {

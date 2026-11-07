@@ -251,7 +251,9 @@ Each cadence tick **accumulates** onto a per-resource `BillItem`:
 - Rows archived during the cycle are fed back in with their `deletedAt` (the charge job,
   `GetArchivedBillingResources`), which is what bills the last partial interval. Re-rating
   one is a no-op: its `deletedAt` is behind the watermark and the floor at 0 keeps that
-  from being a refund. `month` rules skip them, being paid up front when first rated.
+  from being a refund. A row deleted after the cycle's timestamp but before its charge ran is
+  rated up to its `deletedAt`, and the watermark moves there, not to the cycle: otherwise the
+  next charge rates the unit between the two again. `month` rules skip them, being paid up front when first rated.
 - Update per-rule/per-attribute applied amounts: `round16(perUnit) × diff` (a new
   amount), accumulated for `ADD_TO_TOTAL`. `OVERWRITE_TOTAL` stores the amount as is, on
   the first charge too: it is a month-to-date total, not a per-unit price.

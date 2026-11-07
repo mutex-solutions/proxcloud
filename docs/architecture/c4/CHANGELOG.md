@@ -4,6 +4,40 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: SB3 live drills: sandbox minutes, isolation repair, stage 60 registers the sandbox provider
+
+**What changed**
+
+- `pricing.advanceWatermark`: a row whose `DeletedAt` is past the charge's cycle timestamp moves the item's watermark to
+  `DeletedAt`, not to the cycle.
+- `billingresource.SandboxProvider`: the billed window starts at the minute `runningSince` falls in
+  (`Info.CreatedAt` and `billedEnd` cut to the minute), and is the runtime rounded up to whole minutes, at least one.
+- `pve.ReconcileIsolation`: the rule compare includes `enable` (`sameLiveRule`), and the rules it writes carry
+  `enable: 1`, so a DROP or project ACCEPT disabled by hand is rewritten by the next sync.
+- `project.sandboxServiceOf` falls back to a `DISABLED` sandbox provider, so a create that names no service is
+  refused with 503 instead of being handed to Proxmox.
+- Installer: stage 55 also keeps `generated/sandbox-portal.kubeconfig` (service account `proxcloud-system/proxcloud`);
+  stage 60, with `sandbox.enabled`, registers `<provider> Sandboxes` with it, stored `DISABLED`, templates and limits
+  from `sandbox.templates` / `sandbox.limits`, first run only.
+
+**Why**
+
+- Measured on the lab with the SB3 RBAC applied: every ended sandbox paid one minute more than its runtime rounded up
+  (39 s → 2, 4 min 50 s → 6, 9 min → 10). The engine bills every clock minute an item spans, so a window starting
+  mid-minute spans one more; and a row ended after a charge's cycle but before that charge ran was rated to its end
+  with the watermark left at the cycle, so the next charge rated that last unit again. The second holds for hourly
+  resources deleted in the minutes between the hour and the hourly charge.
+- With the sandbox provider `DISABLED`, an API create naming no service answered "SANDBOX is not supported on a Proxmox
+  provider" (400), which reads as a product limit rather than an operator switch.
+- The SB3 review found the reconcile blind to `enable`: the isolation gate refused a disabled rule, but nothing
+  repaired it, so sandboxes stayed refused until someone re-enabled it by hand.
+- A site with `sandbox.enabled` had the cluster and the fenced workers but no provider for tenants to use: the
+  operator had to build the kubeconfig and the provider by hand. Stored `DISABLED` because the fence gate needs a sync
+  to have fenced the workers first, and a re-run must not undo an operator's status or template edits.
+
+**Diagrams updated:** `c2-containers.md` (sandbox cluster), `c3-components.md` (billing resources), `c4-code.md`
+(isolation invariants).
+
 ## 2026-11-08: Sandboxes reach tenants: native API, billing, quota, suspension, release gates (SB3)
 
 ### Review fixes (same PR)

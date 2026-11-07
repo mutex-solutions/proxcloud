@@ -45,16 +45,18 @@ func TestSandboxBilling(t *testing.T) {
 	}
 }
 
-// An ended sandbox is rated up to its runtime rounded up to whole minutes, at least one.
+// An ended sandbox is rated from the minute it started in, for its runtime rounded up to whole minutes, at least one:
+// both ends on a minute boundary, since the engine bills every clock minute an item spans.
 func TestSandboxBillingEnd(t *testing.T) {
 	rs := time.Date(2026, 11, 6, 1, 0, 30, 0, time.UTC)
+	start := rs.Truncate(time.Minute)
 	for ended, want := range map[string]time.Duration{
 		"2026-11-06T01:00:40Z": time.Minute,     // 10 s → 1 min
 		"2026-11-06T01:01:30Z": time.Minute,     // exactly 1 min
 		"2026-11-06T01:01:31Z": 2 * time.Minute, // 61 s → 2 min
 		"garbage":              time.Minute,
 	} {
-		if got := billedEnd(rs, ended).Sub(rs); got != want {
+		if got := billedEnd(rs, ended).Sub(start); got != want {
 			t.Errorf("ended %s: billed %v, want %v", ended, got, want)
 		}
 	}
@@ -62,8 +64,11 @@ func TestSandboxBillingEnd(t *testing.T) {
 		"status": "DELETED", "runningSince": "2026-11-06T01:00:30Z", "endedAt": "2026-11-06T01:00:40Z", "cpu": 1, "memoryGiB": 2,
 	}}
 	res, err := NewSandboxProvider().GetBillingInformation(context.Background(), billingapi.BillingContext{}, cr)
-	if err != nil || len(res) != 1 || res[0].DeletedAt == nil || !res[0].DeletedAt.Equal(rs.Add(time.Minute)) {
+	if err != nil || len(res) != 1 || res[0].DeletedAt == nil || !res[0].DeletedAt.Equal(start.Add(time.Minute)) {
 		t.Fatalf("deleted sandbox billing = %+v, %v", res, err)
+	}
+	if cr.Info == nil || cr.Info.CreatedAt == nil || !cr.Info.CreatedAt.Equal(start) {
+		t.Fatalf("billing start = %+v, want %v", cr.Info, start)
 	}
 }
 

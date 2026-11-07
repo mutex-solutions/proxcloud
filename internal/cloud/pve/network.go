@@ -449,14 +449,14 @@ func (s *Service) DeleteProjectZoneIfEmpty(ctx context.Context, projectID string
 // There is deliberately no blanket DROP source=pool: it would also drop internet egress (SNAT).
 func isolationRules(pool string, blocked, sandbox []string, owner string) []FirewallRule {
 	out := []FirewallRule{
-		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: owner},
-		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Comment: owner},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: owner},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: owner},
 	}
 	drop := func(src string, dst []string) {
 		dest := strings.Join(dst, ",")
 		out = append(out,
-			FirewallRule{Type: "forward", Action: "DROP", Source: src, Dest: dest, Comment: owner},
-			FirewallRule{Type: "in", Action: "DROP", Source: src, Dest: dest, Comment: owner},
+			FirewallRule{Type: "forward", Action: "DROP", Source: src, Dest: dest, Enable: 1, Comment: owner},
+			FirewallRule{Type: "in", Action: "DROP", Source: src, Dest: dest, Enable: 1, Comment: owner},
 		)
 	}
 	if dst := append(slices.Clone(blocked), sandbox...); len(dst) > 0 {
@@ -476,14 +476,17 @@ func projectIsolationRules(projectID string, cidrs []string) []FirewallRule {
 	own := strings.Join(cidrs, ",")
 	c := isolationComment + ":" + projectID
 	return []FirewallRule{
-		{Type: "forward", Action: "ACCEPT", Source: own, Dest: own, Comment: c},
-		{Type: "in", Action: "ACCEPT", Source: own, Dest: own, Comment: c},
+		{Type: "forward", Action: "ACCEPT", Source: own, Dest: own, Enable: 1, Comment: c},
+		{Type: "in", Action: "ACCEPT", Source: own, Dest: own, Enable: 1, Comment: c},
 	}
 }
 
 func sameRule(a, b FirewallRule) bool {
 	return a.Type == b.Type && a.Action == b.Action && a.Source == b.Source && a.Dest == b.Dest && a.Comment == b.Comment
 }
+
+// sameLiveRule is sameRule plus the enable flag: a rule disabled by hand reads as missing, so the reconcile puts it back.
+func sameLiveRule(a, b FirewallRule) bool { return sameRule(a, b) && a.Enable == b.Enable }
 
 // ReconcileIsolation brings the cluster firewall to the isolation rule set: this portal's
 // provider-wide DROPs (blocked = the management networks plus the operator's extra ones; sandbox =
@@ -509,7 +512,7 @@ func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string
 	}
 	// With a node down the list may miss a network only it knew, so DROPs in place stay until it is
 	// back. The project's own ACCEPTs below do not depend on it.
-	if !slices.EqualFunc(mine, want, sameRule) && (complete || len(mine) == 0) {
+	if !slices.EqualFunc(mine, want, sameLiveRule) && (complete || len(mine) == 0) {
 		if err := s.rebuildIsolation(ctx, rules, want, owner, poolNet); err != nil {
 			return err
 		}
@@ -702,7 +705,7 @@ func (s *Service) setProjectIsolation(ctx context.Context, projectID string, cid
 		if r.Comment != comment {
 			continue
 		}
-		if i := slices.IndexFunc(missing, func(w FirewallRule) bool { return sameRule(w, r) }); i >= 0 {
+		if i := slices.IndexFunc(missing, func(w FirewallRule) bool { return sameLiveRule(w, r) }); i >= 0 {
 			missing = slices.Delete(missing, i, i+1)
 			continue
 		}
