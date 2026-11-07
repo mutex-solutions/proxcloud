@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Leftover holders stop billing; a late lock release frees nothing
+
+**What changed**
+
+- A VM with no name, no tags, no disk and a config holding only what PVE writes for an empty create is no server: the sync
+  neither lists nor bills it. `Service.RemoveBlankVMs` removes it on each full sync, under the holder lock, once it is past 15
+  minutes old. A VM that matches on its row but not its config is listed as ever; one whose config cannot be read keeps its row.
+- `ShedLock.Unlock` writes only if the row still carries the caller's `lockedBy` and `lockedAt`.
+
+**Why**
+
+- A holder VM is created empty and configured once it is in the pool. The cleanup ran only in the request, so PVE staying away,
+  a restart or a failed destroy left a VM billed and shown as a server. The check reads the config, not only the row, because a
+  row with no name can be a customer's VM with a data disk. The grace outlives the holder lock's 10 minute ceiling.
+- A holder past its lock's ceiling released whatever row was there, freeing the next owner's lock. A later owner's lock now
+  survives this. Two holders can still overlap once the first runs past the ceiling: this fixes the release, not the ceiling.
+
+**Diagrams updated:** none.
 ## 2026-11-07: Protected servers on shared storage
 
 **What changed**

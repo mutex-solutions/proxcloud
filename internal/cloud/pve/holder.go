@@ -87,8 +87,8 @@ func (s *Service) newHolder(ctx context.Context, projectID, node, tags string) (
 		}
 		return nil, err
 	}
-	// From here the VM may exist, and without its tags it counts as a server: billed, and shown to the customer. It
-	// holds no disk yet, so a failure removes it.
+	// From here the VM may exist. It holds no disk yet, so a failure removes it, and if that fails too the sync keeps it
+	// out of the servers and retries (RemoveBlankVMs).
 	ready := false
 	defer func() {
 		if !ready {
