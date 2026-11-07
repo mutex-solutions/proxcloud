@@ -62,6 +62,9 @@ type Share struct {
 	Networks                []string
 	ShareID                 int
 	Username, Password      string
+	// MapsRoot marks an NFS export that gives a client's root an identity on the NAS. Portal exports squash
+	// root; older ones do not until SetAccess brings them in line.
+	MapsRoot bool
 }
 
 func (s *Service) datasetFor(projectID, name string) string {
@@ -129,9 +132,11 @@ type dataset struct {
 }
 
 type nfsRow struct {
-	ID       int      `json:"id"`
-	Path     string   `json:"path"`
-	Networks []string `json:"networks"`
+	ID           int      `json:"id"`
+	Path         string   `json:"path"`
+	Networks     []string `json:"networks"`
+	MaprootUser  string   `json:"maproot_user"`
+	MaprootGroup string   `json:"maproot_group"`
 }
 
 type smbRow struct {
@@ -308,6 +313,7 @@ func (s *Service) List(ctx context.Context, projectID string) ([]Share, error) {
 		for _, n := range nfs {
 			if n.Path == MountPath(d.ID) {
 				sh.ShareID, sh.Networks = n.ID, n.Networks
+				sh.MapsRoot = n.MaprootUser != "" || n.MaprootGroup != ""
 			}
 		}
 		for _, n := range smb {
@@ -354,7 +360,10 @@ func (s *Service) Resize(ctx context.Context, projectID, id string, sizeGiB int)
 	return s.C.Call(ctx, "pool.dataset.update", []any{id, map[string]any{"refquota": size}}, nil)
 }
 
-// SetAccess replaces the addresses allowed on the share's export.
+// SetAccess replaces the addresses allowed on the share's export, and squashes root on an NFS export that
+// still maps it. A client's root is about to lose its way into a root-owned dataset, so the top directory
+// opens first, as for a new share. Not recursively: files root already wrote keep their owner and mode,
+// and a tenant's own modes are not ours to rewrite.
 func (s *Service) SetAccess(ctx context.Context, projectID, id string, networks []string) error {
 	sh, err := s.get(ctx, projectID, id)
 	if err != nil {
@@ -364,7 +373,16 @@ func (s *Service) SetAccess(ctx context.Context, projectID, id string, networks 
 		return sharef("the share has no export")
 	}
 	if sh.Protocol == ProtocolNFS {
-		return s.C.Call(ctx, "sharing.nfs.update", []any{sh.ShareID, map[string]any{"networks": exportList(networks)}}, nil)
+		if sh.MapsRoot {
+			var job int
+			if err := s.C.Call(ctx, "filesystem.setperm", []any{map[string]any{"path": MountPath(sh.Dataset), "mode": "777"}}, &job); err != nil {
+				return err
+			}
+			if err := s.waitJob(ctx, job); err != nil {
+				return err
+			}
+		}
+		return s.C.Call(ctx, "sharing.nfs.update", []any{sh.ShareID, map[string]any{"networks": exportList(networks), "maproot_user": nil, "maproot_group": nil}}, nil)
 	}
 	return s.C.Call(ctx, "sharing.smb.update", []any{sh.ShareID, map[string]any{"purpose": "DEFAULT_SHARE", "options": map[string]any{"hostsallow": exportList(networks)}}}, nil)
 }

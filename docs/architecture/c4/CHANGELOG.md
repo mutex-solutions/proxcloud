@@ -56,6 +56,22 @@ and rules: [README.md](README.md#maintenance-rule).
   payments of 5 kept 50 of the 80 on the bill. A scanner marking a deposit `FAILED` on a network error needed a manual
   repair if the money had moved, since `FAILED` is terminal, and it could also overwrite a settle that won meanwhile.
   Upfront contracts bought before payments were enforced discounted every bill for money nobody paid.
+## 2026-11-07: Admin hmac key secrets encrypted at rest, old NFS exports squash root
+
+**What changed**
+
+- `hmac_keys.secretKey` is stored encrypted with the data-at-rest key. Every writer seals it, the SigV4 and MCP lookup
+  opens it, and rows in plain text are converted at API start. Creating a key still returns its secret once.
+- The share reconcile treats an NFS export with `maproot` as drifted: it opens the top directory and clears `maproot`.
+
+**Why**
+
+- A database read handed over every Admin API credential in the clear. SigV4 has to get the secret back, so a hash like
+  the one client tokens use cannot work. A key changed without re-sealing fails closed: the stored text does not start
+  working as the secret.
+- Root squash only covered new shares, so the oldest ones, with the most data, kept giving a client's root full access
+  on the NAS. The top directory opens because otherwise a squashed client could not write to a root-owned dataset at all.
+  It is not recursive, so files root wrote before stay owned by root, which `docs/cloud-integration.md` tells operators.
 
 **Diagrams updated:** none, no container or component changed.
 
