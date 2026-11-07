@@ -30,7 +30,7 @@ import (
 // collectChecker is the operator's way out of a charge whose outcome is unknown (payment.TransactionScanner).
 type collectChecker interface {
 	RecheckCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error)
-	CancelUnreferencedCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error)
+	CloseCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error)
 }
 
 // txnRefunder is the narrow interface the admin refund + bank-transfer endpoints need
@@ -441,9 +441,10 @@ func (h *Handler) collectTxnSync(w http.ResponseWriter, r *http.Request) {
 	h.collectTxnAction(w, r, h.collects.RecheckCollect)
 }
 
-// collectTxnClose ends a PENDING charge that has no gateway reference, once the operator found no charge at the gateway.
+// collectTxnClose ends a PENDING charge the gateway says did not succeed, or one with no gateway reference once the
+// operator found no charge at the gateway.
 func (h *Handler) collectTxnClose(w http.ResponseWriter, r *http.Request) {
-	h.collectTxnAction(w, r, h.collects.CancelUnreferencedCollect)
+	h.collectTxnAction(w, r, h.collects.CloseCollect)
 }
 
 // collectTxnByID handles the collect transaction by-id read (ADMIN_TRANSACTION_READ).

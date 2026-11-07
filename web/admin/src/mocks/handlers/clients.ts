@@ -426,7 +426,7 @@ on("GET /admin/collect-transactions/:id/sync", ({ params }) => {
 
 on("POST /admin/collect-transactions/:id/close", ({ params }) => {
   const t = db.collectTransactions.find((x) => x.id === params.id) ?? notFound("Transaction")
-  if (t.status === "PENDING" && !t.externalId) t.status = "CANCELLED"
+  if (t.status === "PENDING") t.status = "CANCELLED"
   return { data: t }
 })
 

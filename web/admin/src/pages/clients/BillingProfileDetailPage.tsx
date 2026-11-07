@@ -1670,7 +1670,7 @@ function TaxTab({ bpId, raw }: { bpId: string; raw: Doc | null }) {
 //   POST /admin/account-credit-transactions/refund/{txnId}
 //   GET /admin/account-credit-transactions/{txnId}/sync (re-drives the gateway status)
 //   GET /admin/collect-transactions/{txnId}/sync (asks the gateway about a PENDING charge)
-//   POST /admin/collect-transactions/{txnId}/close (ends a PENDING charge with no gateway reference)
+//   POST /admin/collect-transactions/{txnId}/close (ends a PENDING charge the gateway says did not succeed, or one with no reference)
 
 function TransactionsTab({ bpId }: { bpId: string }) {
   const qc = useQueryClient()
@@ -1708,9 +1708,12 @@ function TransactionsTab({ bpId }: { bpId: string }) {
     void qc.invalidateQueries({ queryKey: ["admin-list", `/admin/collect-transactions/${bpId}/billing-profile`] })
 
   const recheck = useMutation({
-    mutationFn: (txnId: string) => apiFetch(`/admin/collect-transactions/${txnId}/sync`),
-    onSuccess: () => {
-      toast.success("Charge checked with the gateway")
+    mutationFn: (txnId: string) => apiFetch<Doc>(`/admin/collect-transactions/${txnId}/sync`),
+    onSuccess: (txn) => {
+      const note = txn?.errorMessage ? `: ${txn.errorMessage}` : ""
+      if (txn?.status === "PENDING") toast.warning(txn.errorMessage || "The gateway gave no final answer. The charge is still pending.")
+      else if (txn?.status === "SUCCESS") toast.success(`The gateway reports the charge succeeded${note}`)
+      else toast.info(`Charge is now ${txn?.status}${note}`)
       invalidateCollects()
       void qc.invalidateQueries({ queryKey: ["admin-bp", bpId] })
     },
@@ -1848,14 +1851,14 @@ function TransactionsTab({ bpId }: { bpId: string }) {
                             <RefreshCw className="size-4" /> Re-check
                           </Button>
                         )}
-                        {t.status === "PENDING" && !t.externalId && (
+                        {t.status === "PENDING" && (
                           <Button
                             variant="outline"
                             size="sm"
-                            title={`No gateway reference. Look for ${t.id} at the gateway first: close it only if nothing was charged.`}
+                            title={t.externalId ? "The gateway is asked first: closes only if it says the charge did not succeed." : `No gateway reference. Look for ${t.id} at the gateway first: close it only if nothing was charged.`}
                             disabled={closeCharge.isPending}
                             onClick={() => {
-                              if (window.confirm(`Close charge ${t.id}? Look for this reference at the gateway first: close it only if nothing was charged.`)) {
+                              if (window.confirm(t.externalId ? `Close charge ${t.id}? The gateway is asked first, and a charge that may still complete stays open.` : `Close charge ${t.id}? Look for this reference at the gateway first: close it only if nothing was charged.`)) {
                                 closeCharge.mutate(t.id)
                               }
                             }}

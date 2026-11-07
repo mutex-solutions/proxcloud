@@ -26,7 +26,8 @@ import (
 // no such intent is terminal. Everything else stays PENDING with the reason on the row, re-checked until
 // it ages out of the window. That window is the bound: past it the scanner stops asking and the row stays
 // PENDING, where a late gateway callback or an operator re-check can still settle it. A bill charge in that state keeps
-// blocking new charges for the bill (chargeBusy): the money may have moved, so only an answer may lift the guard.
+// blocking new charges for the bill (chargeBusy): the money may have moved, so only an answer may lift the guard. A gateway
+// answer of cancelled ends a charge by itself; one of declined or never confirmed lets an operator close it (CloseCollect).
 
 // TransactionScanner re-drives stuck PENDING transactions through the same Process paths the
 // callbacks use (ProcessAddFunds / processCollect — both idempotent; a still-pending gateway
@@ -190,8 +191,8 @@ func (s *TransactionScanner) scanCollects(ctx context.Context, from, to time.Tim
 }
 
 // RecheckCollect is the operator's re-check of one charge, past the scan window too: it asks the gateway the way a scan
-// pass does and returns the row as it then stands. A charge with no gateway reference cannot be asked about (see
-// CancelUnreferencedCollect). Nil when there is no such charge.
+// pass does and returns the row as it then stands, with the gateway's answer on it. A charge with no gateway reference
+// cannot be asked about (see CloseCollect). Nil when there is no such charge.
 func (s *TransactionScanner) RecheckCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error) {
 	t, err := s.billing.CollectTransactionByID(ctx, id)
 	if err != nil || t == nil || t.Status != pricing.CollectTransactionStatusPending {
@@ -204,21 +205,34 @@ func (s *TransactionScanner) RecheckCollect(ctx context.Context, id string) (*pr
 	return s.billing.CollectTransactionByID(ctx, id)
 }
 
-// CancelUnreferencedCollect closes a PENDING charge that never got a gateway reference: the process stopped between the
-// row and the gateway's answer. Nothing can ask the gateway about one and it blocks new charges for its bill, so an
-// operator who found no charge at the gateway ends it. Refused while the live flow could still be running.
-func (s *TransactionScanner) CancelUnreferencedCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error) {
+// CloseCollect is the operator's way to end a PENDING charge that blocks its bill. With a gateway reference the gateway is
+// asked again here, and only an answer that the charge did not succeed closes it, so nothing that may still capture is
+// closed by hand: cancelling it at the gateway and re-checking ends those. With no reference nothing can ask the gateway
+// (the process stopped between the row and its answer), so the operator who found no charge there vouches for it. Refused
+// while the live flow could still be running.
+func (s *TransactionScanner) CloseCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error) {
 	t, err := s.billing.CollectTransactionByID(ctx, id)
 	if err != nil || t == nil {
 		return nil, err
 	}
-	if t.Status != pricing.CollectTransactionStatusPending || t.ExternalID != "" {
-		return nil, httpx.NewError(409, 409, "Only a PENDING charge with no gateway reference can be closed. Re-check any other.")
+	if t.Status != pricing.CollectTransactionStatusPending {
+		return nil, httpx.NewError(409, 409, "Only a PENDING charge can be closed.")
 	}
 	if t.CreatedAt != nil && s.now().Sub(*t.CreatedAt) < scanMinAge {
 		return nil, httpx.NewError(409, 409, "This charge is too recent: it may still be running. Try again later.")
 	}
-	if err := s.billing.UpdatePendingCollectTransaction(ctx, id, pricing.CollectTransactionStatusCancelled, "Closed by an operator: no charge found at the gateway"); err != nil {
+	msg := "Closed by an operator: no charge found at the gateway"
+	if t.ExternalID != "" {
+		pi, err := s.collect.retrieveCharge(ctx, t)
+		if err != nil {
+			return nil, httpx.NewError(409, 409, fmt.Sprintf("The gateway could not be asked, so the charge was not closed: %v", err))
+		}
+		if !chargeDidNotSucceed(pi.Status) {
+			return nil, httpx.NewError(409, 409, fmt.Sprintf("The gateway reports %s, so the charge was not closed. Re-check records a final answer; one that may still complete has to be cancelled at the gateway first.", pi.Status))
+		}
+		msg = "Closed by an operator. " + chargeNote(pi)
+	}
+	if err := s.billing.UpdatePendingCollectTransaction(ctx, id, pricing.CollectTransactionStatusCancelled, msg); err != nil {
 		return nil, err
 	}
 	return s.billing.CollectTransactionByID(ctx, id)
@@ -240,10 +254,17 @@ func (s *TransactionScanner) scanOneCollect(ctx context.Context, t *pricing.Coll
 	}
 	// A deposit-by-card (no bill) with an unknown outcome: ask the gateway — a SUCCESS mints the
 	// credit the customer paid for, a decline fails it. Never fail it blind.
-	if t.BillID == "" {
-		if _, err := s.collect.processCollect(ctx, t); err != nil {
+	process := func() {
+		done, err := s.collect.processCollect(ctx, t)
+		switch {
+		case err != nil:
 			failed(err)
+		case done.Status == pricing.CollectTransactionStatusPending:
+			save(pricing.CollectTransactionStatusPending, done.ErrorMessage)
 		}
+	}
+	if t.BillID == "" {
+		process()
 		return
 	}
 	bill, err := s.billing.BillByID(ctx, t.BillID)
@@ -269,7 +290,5 @@ func (s *TransactionScanner) scanOneCollect(ctx context.Context, t *pricing.Coll
 		}
 		return
 	}
-	if _, err := s.collect.processCollect(ctx, t); err != nil {
-		failed(err)
-	}
+	process()
 }

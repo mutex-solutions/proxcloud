@@ -2,6 +2,7 @@ package payment
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -157,7 +158,12 @@ func (s *CollectService) CollectBill(ctx context.Context, profile *billing.Billi
 		return nil, err
 	} else if len(pending) > 0 {
 		if pending[0].ExternalID != "" {
-			if done, err := s.processCollect(ctx, &pending[0]); err == nil && done.Status != pricing.CollectTransactionStatusPending {
+			done, err := s.processCollect(ctx, &pending[0])
+			if err == nil && done.Status == pricing.CollectTransactionStatusCancelled {
+				// It took no money and leaves nothing to answer with, and the customer came to pay.
+				return s.collectBill(ctx, profile, bill, card, now)
+			}
+			if err == nil && done.Status != pricing.CollectTransactionStatusPending {
 				return done, nil
 			}
 		}
@@ -367,23 +373,48 @@ func (s *CollectService) failCollect(ctx context.Context, txn *pricing.CollectTr
 // outcome is shown on the page, so a decline does not also send the failure e-mail.
 type ctxKeyManual struct{}
 
-// processCollect retrieves the PaymentIntent, and on
-// SUCCESS settle it — billId → applyPaidCollectOnBill (→ bill PAID + bill_is_paid mail); else
-// (deposit) → create a spendable AccountCredit. FAILED marks it failed (+ the failure mail for a
-// bill charge).
-func (s *CollectService) processCollect(ctx context.Context, txn *pricing.CollectTransaction) (*pricing.CollectTransaction, error) {
+// retrieveCharge asks the charge's gateway about its intent.
+func (s *CollectService) retrieveCharge(ctx context.Context, txn *pricing.CollectTransaction) (PaymentIntentResult, error) {
 	gw, err := s.billing.GetGateway(ctx, txn.PaymentGatewayID)
 	if err != nil {
-		return nil, err
+		return PaymentIntentResult{}, err
 	}
 	if gw == nil {
-		return nil, httpx.NotFound("Payment gateway not found")
+		return PaymentIntentResult{}, httpx.NotFound("Payment gateway not found")
 	}
 	g, err := cardGateway(s.gatewayFor, gw)
 	if err != nil {
-		return nil, err
+		return PaymentIntentResult{}, err
 	}
-	pi, err := g.RetrievePaymentIntent(ctx, txn.ExternalID)
+	return g.RetrievePaymentIntent(ctx, txn.ExternalID)
+}
+
+// chargeDidNotSucceed reports a gateway answer that says no money moved and none will without a new confirm, which only
+// this portal could send: declined or never confirmed. Everything else that is not terminal (processing, requires_action,
+// requires_capture, Airwallex's pending) may still capture.
+func chargeDidNotSucceed(status string) bool {
+	return status == "requires_payment_method" || status == "requires_confirmation"
+}
+
+// chargeNote says what the gateway answered about a charge that stays PENDING.
+func chargeNote(pi PaymentIntentResult) string {
+	if chargeDidNotSucceed(pi.Status) {
+		note := "The gateway reports " + pi.Status + ": the charge did not succeed"
+		if m := gatewayErrorMessage(pi.ErrorMessage, pi.ErrorCode); m != "" {
+			note += " (" + m + ")"
+		}
+		return note + "."
+	}
+	return "The gateway reports " + pi.Status + ": the charge may still complete."
+}
+
+// processCollect retrieves the PaymentIntent, and on
+// SUCCESS settle it — billId → applyPaidCollectOnBill (→ bill PAID + bill_is_paid mail); else
+// (deposit) → create a spendable AccountCredit. FAILED marks it failed (+ the failure mail for a
+// bill charge). CANCELLED ends it: no money moved and none can, and the bill can be charged again. Anything
+// else stays PENDING, with the answer in txn.ErrorMessage for the caller to keep or not.
+func (s *CollectService) processCollect(ctx context.Context, txn *pricing.CollectTransaction) (*pricing.CollectTransaction, error) {
+	pi, err := s.retrieveCharge(ctx, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -443,7 +474,15 @@ func (s *CollectService) processCollect(ctx context.Context, txn *pricing.Collec
 	case "FAILED":
 		markDecline(txn)
 		return s.failCollect(ctx, txn, gatewayErrorMessage(pi.ErrorMessage, pi.ErrorCode), true)
-	default: // still pending (a CANCELLED PI is not terminal here — the collect switch has no CANCELLED case)
+	case "CANCELLED":
+		txn.Status = pricing.CollectTransactionStatusCancelled
+		txn.ErrorMessage = "The gateway reports the charge was cancelled"
+		if pi.CancellationReason != "" {
+			txn.ErrorMessage += " (" + pi.CancellationReason + ")"
+		}
+		return s.billing.SaveCollectTransaction(ctx, txn)
+	default:
+		txn.ErrorMessage = chargeNote(pi)
 		return txn, nil
 	}
 }
@@ -451,28 +490,20 @@ func (s *CollectService) processCollect(ctx context.Context, txn *pricing.Collec
 // settleSurplus is the scanner's leg for a stuck bill charge whose bill is already PAID: when the
 // gateway reports the charge succeeded, the money becomes a spendable account credit. Reports whether it
 // settled that way; a charge that did not succeed changes nothing, and an error means the gateway could
-// not say.
+// not say, or says the charge may still complete.
 func (s *CollectService) settleSurplus(ctx context.Context, txn *pricing.CollectTransaction) (bool, error) {
-	gw, err := s.billing.GetGateway(ctx, txn.PaymentGatewayID)
+	pi, err := s.retrieveCharge(ctx, txn)
 	if err != nil {
 		return false, err
 	}
-	if gw == nil {
-		return false, httpx.NotFound("Payment gateway not found")
-	}
-	g, err := cardGateway(s.gatewayFor, gw)
-	if err != nil {
-		return false, err
-	}
-	pi, err := g.RetrievePaymentIntent(ctx, txn.ExternalID)
-	if err != nil {
-		return false, err
-	}
-	if mapStatus(pi.Status) != "SUCCESS" {
+	switch st := mapStatus(pi.Status); {
+	case st == "SUCCESS":
+		_, err = s.creditSurplus(ctx, txn)
+		return err == nil, err
+	case st != "PENDING", chargeDidNotSucceed(pi.Status):
 		return false, nil
 	}
-	_, err = s.creditSurplus(ctx, txn)
-	return err == nil, err
+	return false, errors.New(chargeNote(pi))
 }
 
 // creditSurplus closes a succeeded charge whose bill was settled by something else (credits, a bank
