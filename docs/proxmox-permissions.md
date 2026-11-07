@@ -59,7 +59,7 @@ ACLs:
 | `/sdn` | `ProxCloudPlatform` | 1 | zones, vnets, controllers, apply |
 | `/storage` | `ProxCloudPlatform` | 1 | or one ACL per storage the provider's profiles use |
 | `/mapping/pci` | `ProxCloudPlatform` | 1 | GPU clusters only |
-| `/storage/<importStorage>` | `PVEDatastoreAdmin` | 0 | image import only: PVE wants `Datastore.Allocate` to delete any file that is not a backup, and the import store is the one place the portal needs that. Without it an imported image works, the uploaded file stays on the store, and Test connection warns. The installer adds it with a NAS |
+| `/storage/<importStorage>` | `PVEDatastoreAdmin` | 0 | image import only: PVE wants `Datastore.Allocate` to delete any file that is not a backup, and the import store is the one place the portal needs that. Without it an imported image works, the uploaded file stays on the store, and Test connection warns. The installer adds it with a NAS. It shadows the `/storage` grant on that store, so with minted cluster tokens add `ProxCloudKubeMint` on the same path too |
 
 There is no ACL on `/vms`. VMs get their rights only through their pool, so a VM outside `pc-*`/`pc-templates` is invisible to the portal.
 
