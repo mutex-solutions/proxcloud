@@ -963,12 +963,22 @@ The public-read statement a website installs serves on the S3 endpoint whatever 
 Turning the option off or clearing `s3WebsiteEndpoint` therefore does not close a live website. The tenant still sees
 the Website tab with **Disable website** on such a bucket, and making the bucket private also removes the website.
 
-`POST /api/v1/admin/service/object-store/test` with `{s3Endpoint, adminApiUrl, region, adminAccessKey, adminSecretKey}`
-tests a connection without storing it: an S3 call, then the key's own Admin Ops user and caps. The answer is `200`, or
-`400` with the reason. The installer calls it before registering the provider, and the Add dialog's **Test connection**
-button calls it for a `ceph-s3` provider. The same check runs on `POST /admin/service` for a `ceph-s3` row with status
-`PUBLIC`, and on an update that changes such a row's status, endpoints, region or keys, because a row that cannot reach
-RGW fails the bootstrap of every new project. A write that changes none of those still works while RGW is down.
+`POST /api/v1/admin/service/object-store/test` with `{provider, s3Endpoint, adminApiUrl, region, adminAccessKey, adminSecretKey}`
+tests a connection without storing it: an S3 call, then an admin read (on `ceph-s3` the key's own Admin Ops user and caps,
+on `rustfs` the canned policy list). A blank `provider` means `ceph-s3`. The answer is `200`, or `400` with the reason. The
+installer calls it before registering the provider, and the Add dialog's **Test connection** button calls it.
+`POST /api/v1/admin/service/{id}/object-store/test` runs it on a stored row with its stored key: **Test connection** on
+the provider's Connection tab.
+
+The same check runs on `POST /admin/service` for an object-store row of any status, and on an update that changes a row's
+endpoints, region or keys or turns it to anything but `DISABLED`. A write that changes none of those still works while the
+store is down, turning a service off included.
+
+A row can still go bad after it is stored, so bootstrap does not depend on the check. Each provider gets its own attempt,
+bounded to 45 seconds. A failed one leaves the others provisioned, and it is recorded twice: in `provisionFailures` on the
+project, retried when the project is next opened and no more than once in 5 minutes, and in `provisionError` on the
+provider's row, which the provider's page shows. A project on no provider at all gets an error on every open until one attaches, also inside
+the 5 minutes when nothing is tried. An operator can also attach the provider by hand.
 
 Accessors: `IsCephS3`, `S3Endpoint`, `AdminAPIURL`, `S3WebsiteEndpoint`,
 `CephRegion`, `UIDPrefix`, `RGWUIDFor(projectID)`, `DefaultQuotaGiB`, and

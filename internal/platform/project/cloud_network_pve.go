@@ -411,6 +411,10 @@ func (h *Handler) pvePublicNetworkAction(w http.ResponseWriter, r *http.Request,
 		return true
 	}
 	if action == "DETACH_PUBLIC_NETWORK" {
+		if vm.Status == "paused" { // a hot-unplug waits on the guest, which cannot answer
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "This server is suspended. Stop it first to detach its public network"))
+			return true
+		}
 		if derr := h.pveDetachPublicNIC(ctx, ps, es, proj, vm, cr.ExternalID); derr != nil {
 			h.fail(w, pveVolumeErr(derr))
 			return true

@@ -258,14 +258,15 @@ func run() error {
 	})
 	// Proxmox VE — enables proxmox provisioning (project pool) + the VM write surface.
 	holderLocks := lock.New(pg)
-	projectH.SetProxmox(func(es *externalservice.ExternalService) (*pve.Service, error) {
+	pveWithHolderLock := func(es *externalservice.ExternalService) (*pve.Service, error) {
 		s, err := pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
 		if err != nil {
 			return nil, err
 		}
 		s.HolderLock = holderLocks.Wait
 		return s, nil
-	})
+	}
+	projectH.SetProxmox(pveWithHolderLock)
 	// Proxmox flavor catalog (pgdoc `flavor`) — the admin-curated flavors PVE servers
 	// are created from (Proxmox itself has no flavor concept).
 	pveFlavorRepo := pveflavor.New(pg)
@@ -491,6 +492,7 @@ func run() error {
 		WithPublicIPs(publicIPRepo.ForProject, publicIPRepo.ReleaseNIC).
 		WithKamajiFactory(kamajiFactory).
 		WithAudit(auditSvc).
+		WithProxmoxFactory(pveWithHolderLock).
 		WithSDNLock(lock.New(pg)).
 		WithShareAccess(projectH.ReconcileShareAccess).
 		WithStaleSeeds(projectH.DropStaleSeeds).
@@ -513,38 +515,49 @@ func run() error {
 	// endpoint once the engine moves out — both paths must run exactly the same activation.
 	activateProjectsFn := func(ctx context.Context, bpID string) error {
 		orgs, err := orgRepo.FindAllByBillingProfileID(ctx, bpID)
-		if err != nil || len(orgs) == 0 {
+		if err != nil {
 			return err
 		}
 		orgIDs := make([]string, 0, len(orgs))
 		for i := range orgs {
 			orgIDs = append(orgIDs, orgs[i].ID)
 		}
-		members, err := orgRepo.Members(ctx, orgs[0].ID)
-		if err != nil {
-			return err
-		}
-		memberships := make([]project.Membership, 0, len(members))
-		for i := range members {
-			role := project.RoleMember
-			if members[i].Role() == "OWNER" {
-				role = project.RoleOwner
+		// A second profile of an org is referenced by no org, only by the projects attached to it, which keep their members.
+		var memberships []project.Membership
+		if len(orgs) > 0 {
+			members, err := orgRepo.Members(ctx, orgs[0].ID)
+			if err != nil {
+				return err
 			}
-			memberships = append(memberships, project.Membership{Sub: members[i].Sub, Role: role})
+			for i := range members {
+				role := project.RoleMember
+				if members[i].Role() == "OWNER" {
+					role = project.RoleOwner
+				}
+				memberships = append(memberships, project.Membership{Sub: members[i].Sub, Role: role})
+			}
 		}
 		projects, err := projectRepo.AllByBillingProfile(ctx, bpID, orgIDs)
 		if err != nil {
 			return err
 		}
 		for pi := range projects {
-			p := &projects[pi]
-			if p.IsEnabled() {
+			// A fresh read: an earlier project's bootstrap can take minutes.
+			p, err := projectRepo.FindByID(ctx, projects[pi].ID)
+			if err != nil || p == nil {
+				log.Error("activate: read project", "project", projects[pi].ID, "err", err)
 				continue
 			}
-			p.Memberships = memberships
-			if err := projectRepo.Save(ctx, p); err != nil {
-				log.Error("activate: save memberships", "project", p.ID, "err", err)
+			// Only a project waiting on billing: one an operator disabled stays so, and one on its way out must not come back.
+			if !p.IsDisabled() || p.DisabledByOperator || !p.PaidBy(bpID) {
 				continue
+			}
+			if len(orgs) > 0 {
+				p.Memberships = memberships
+				if err := projectRepo.Save(ctx, p); err != nil {
+					log.Error("activate: save memberships", "project", p.ID, "err", err)
+					continue
+				}
 			}
 			if err := projectH.EnableAndBootstrap(ctx, p); err != nil {
 				log.Error("activate: bootstrap", "project", p.ID, "err", err)
@@ -622,7 +635,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		return projectH.EnableAndBootstrap(ctx, p)
+		return projectH.ProvisionByOperator(ctx, p)
 	})
 	payService.SetReviewer(suspensionJob) // auto-resume a suspended profile when a bill is paid
 	adminH.SetPayService(payService)      // admin record-payment shares the same mail + review hooks
@@ -1184,16 +1197,20 @@ func (s billingCloudSuspender) forEachProjectServer(ctx context.Context, bpID st
 		return err
 	}
 	for pi := range projects {
-		p := &projects[pi]
-		s.pauseProjectServers(ctx, p, pause)
-		// suspend/resume: ENABLED → DISABLED on suspend, back on resume.
-		if pause && p.IsEnabled() {
-			p.Status = project.StatusDisabled
-			_ = s.projects.Save(ctx, p)
-		} else if !pause && p.IsDisabled() {
-			p.Status = project.StatusEnabled
-			_ = s.projects.Save(ctx, p)
+		// The status moves first, on a fresh read: from here a member cannot start what the walk below has already passed.
+		p, err := s.projects.ApplyBillingSuspension(ctx, projects[pi].ID, bpID, pause)
+		if err != nil {
+			s.log.Error("suspender: project status not changed, its billing suspension is lost", "project", projects[pi].ID, "billingProfile", bpID, "suspend", pause, "err", err)
+			p = &projects[pi]
 		}
+		if p == nil {
+			continue
+		}
+		// A resume can follow a member paying a bill: it leaves what an operator disabled alone.
+		if !pause && p.DisabledByOperator {
+			continue
+		}
+		s.pauseProjectServers(ctx, p, pause)
 	}
 	return nil
 }
@@ -1219,7 +1236,12 @@ func (s billingCloudSuspender) pauseProjectServers(ctx context.Context, p *proje
 		}
 		for si := range servers {
 			vm, rerr := ps.ResolveVM(ctx, p.ID, servers[si].ExternalID)
-			if rerr != nil || vm == nil {
+			if rerr != nil {
+				s.log.Error("suspender: read server", "server", servers[si].ExternalID, "pause", pause, "err", rerr)
+				continue
+			}
+			// A walk repeats until the profile is settled, so it skips what is already where it should be.
+			if vm == nil || (pause && vm.Status != "running") || (!pause && vm.Status != "paused") {
 				continue
 			}
 			var upid pve.UPID

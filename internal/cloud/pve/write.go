@@ -329,6 +329,10 @@ func (s *Service) readBackServer(ctx context.Context, node string, vmid int, req
 // opTimeout bounds one power/config operation.
 const opTimeout = 5 * time.Minute
 
+// PoweredOn reports a VM holding a QEMU process, which has to be stopped before it is off or can be destroyed. A suspended VM
+// reads "paused", not "running": a project's VMs are paused while it is DISABLED, and its members can still stop and delete them.
+func (r *ClusterResource) PoweredOn() bool { return r.Status == "running" || r.Status == "paused" }
+
 // ResolveVM finds a pool VM by vmid string, verifying pool membership — the
 // per-op ownership re-check (platform-is-the-PDP): a cached row names the vmid,
 // but the pool is re-verified against the live cluster before any mutation.
@@ -448,7 +452,7 @@ func (s *Service) DeleteServer(ctx context.Context, projectID, externalID string
 			return err
 		}
 	}
-	if vm.Status == "running" {
+	if vm.PoweredOn() {
 		if up, err := s.C.StopVM(ctx, vm.Node, vm.VMID); err == nil {
 			_ = s.C.WaitTask(ctx, up)
 		}
@@ -481,12 +485,16 @@ func (s *Service) PowerAction(ctx context.Context, projectID, externalID, verb s
 		if running {
 			return nil
 		}
+		if vm.Status == "paused" { // a resume that did not reach it: a project that can start things is not held
+			up, err = s.C.ResumeVM(ctx, vm.Node, vm.VMID)
+			break
+		}
 		up, err = s.C.StartVM(ctx, vm.Node, vm.VMID)
 	case "STOP", "SHUTOFF", "SHUTDOWN":
-		if !running {
+		if !vm.PoweredOn() {
 			return nil
 		}
-		up, err = s.C.ShutdownVM(ctx, vm.Node, vm.VMID, 60)
+		up, err = s.C.ShutdownVM(ctx, vm.Node, vm.VMID, 60) // forceStop: PVE stops a paused VM at once
 	case "REBOOT_SOFT", "SOFTREBOOT", "REBOOT":
 		if !running {
 			return conflictf("Server %s is not running", vm.Name)
@@ -526,7 +534,7 @@ func (s *Service) ResizeServer(ctx context.Context, projectID, externalID string
 		return fmt.Errorf("pve: vm %s not found", externalID)
 	}
 	wasRunning := vm.Status == "running"
-	if wasRunning {
+	if vm.PoweredOn() {
 		if up, err := s.C.ShutdownVM(ctx, vm.Node, vm.VMID, 120); err == nil {
 			if werr := s.C.WaitTask(ctx, up); werr != nil {
 				return fmt.Errorf("pve resize: shutdown: %w", werr)
@@ -838,7 +846,7 @@ func (s *Service) RebuildServer(ctx context.Context, req RebuildReq) error {
 		return conflictf("Image %s has no boot disk", req.ImageSlug)
 	}
 
-	if vm.Status == "running" {
+	if vm.PoweredOn() {
 		up, err := s.C.StopVM(ctx, node, vm.VMID)
 		if err == nil {
 			err = s.C.WaitTask(ctx, up)

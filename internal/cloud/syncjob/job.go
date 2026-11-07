@@ -346,6 +346,9 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 		count += st.Created + st.Updated
 	}
 	j.reconcileIsolation(ctx, ps, p, es)
+	if _, err := ps.RemoveBlankVMs(ctx, p.ID); err != nil {
+		j.log.Warn("syncjob: remove blank VMs, retrying on the next sync", "project", p.ID, "serviceId", es.ID, "err", err)
+	}
 	return count
 }
 

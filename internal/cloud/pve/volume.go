@@ -155,6 +155,10 @@ func (s *Service) DetachVolume(ctx context.Context, projectID string, vmid int, 
 	if slot == "scsi0" || slot == "virtio0" {
 		return conflictf("The boot disk cannot be detached")
 	}
+	if vm.Status == "paused" {
+		// A hot-unplug waits on the guest, which cannot answer: the task fails and leaves the change pending.
+		return conflictf("Server %s is suspended. Stop it first to detach this volume", vm.Name)
+	}
 	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, nil, slot)
 	if err != nil {
 		return err
