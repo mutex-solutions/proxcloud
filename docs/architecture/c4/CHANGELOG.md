@@ -4,6 +4,36 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: One bad provider no longer blocks a project; every object-store row is checked
+
+**What changed**
+
+- `POST /admin/service` and the updates check every `ceph-s3` and `rustfs` row whatever its status (`CheckRustFS` is new).
+  Turning a row off stays unchecked.
+- `POST /admin/service/{id}/object-store/test` tests a stored row with its stored key, as **Test connection** on the
+  provider's Connection tab. The Add dialog's button now works for `rustfs` too.
+- Bootstrap gives each provider its own bounded attempt. A failure goes in `project.provisionFailures`, retried on the next
+  open at most every 5 minutes, and in `externalService.provisionError`, shown on the provider's page. Opening a project
+  fails only when it ends up on no provider.
+
+**Why**
+
+- Only a `PUBLIC` `ceph-s3` row was proved, yet bootstrap provisions every non-disabled object store and stopped at the first
+  error, so a `PRIVATE` or `rustfs` typo blocked every new project. A row can also go bad after it is stored, so the check
+  alone would not be enough. Without the record on the project, a project that had any provider would never get the failed
+  one, since a re-entry skips provisioning.
+
+**Then, on the same PR, what a recheck found**
+
+- A failed attempt is recorded on the provider under its own short context. The attempt's had often just expired, so a hung
+  store, the likeliest failure, never reached the provider's page.
+- A project on no provider gets an error on every open, not only the first. Inside the retry window it looked fine and was not.
+- The admin API's project answer carries `provision_failures`, because a partial provision answers 200.
+- Stage 60 checks a `rustfs` store from the API and shows the reason, as it does for Ceph. The task that registers it is
+  `no_log`, so a refused row used to abort the install with the reason hidden.
+
+**Diagrams updated:** none; no container or relationship changed.
+
 ## 2026-11-07: One table holds a project's status changes; a member cannot lift a suspension
 
 **What changed**

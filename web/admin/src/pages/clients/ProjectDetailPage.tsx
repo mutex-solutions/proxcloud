@@ -53,6 +53,8 @@ type ProjectDoc = {
   memberships?: Array<{ sub?: string; role?: string }>
   // proxmox bindings carry provider/region/pool; ceph-s3 bindings carry provider/region/rgwUid.
   services?: Array<{ serviceId?: string; provider?: string; region?: string; pool?: string; rgwUid?: string }>
+  // Per provider id: a provisioning attempt that failed and is retried when the project is next opened.
+  provisionFailures?: Record<string, { message?: string; at?: string }>
   // absent/null = all public networks allowed; array = allow-list of public network ids.
   publicNetworkIds?: string[] | null
   // false/absent = the client can't choose an external network (server auto-picks); true = client picks.
@@ -704,6 +706,11 @@ export default function ProjectDetailPage() {
                 </Button>
               </CardHeader>
               <CardContent>
+                {Object.entries(project?.provisionFailures ?? {}).map(([id, f]) => (
+                  <p key={id} role="alert" className="mb-2 text-sm text-destructive">
+                    Not provisioned on <span className="font-mono text-xs">{id}</span>: {f.message}
+                  </p>
+                ))}
                 {(project?.services ?? []).length === 0 ? (
                   <p className="text-sm text-muted-foreground">No external service attached.</p>
                 ) : (

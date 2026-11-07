@@ -200,27 +200,50 @@
       changed_when: false
 
     - name: Register the object store
-      when: pc.object_store.mode in ['vm', 'truenas-app'] and (pc.provider.name ~ ' S3') not in (pc_services.json.data | map(attribute='name') | list)
+      when: pc.object_store.mode in ['vm', 'truenas-app']
       vars:
         store: "{{ lookup('ansible.builtin.file', pc_gen ~ '/object-store.json') | from_json }}"
-      proxcloud_api:
-        access_key: "{{ api_key.id }}"
-        secret_key: "{{ api_key.secretKey }}"
-        url: "{{ pc_svc_api }}/admin/service"
-        method: POST
-        body:
-          name: "{{ pc.provider.name }} S3"
-          type: CLOUD
-          status: PUBLIC
-          config:
-            provider: rustfs
-            s3Endpoint: "{{ store.endpoint }}"
-            adminApiUrl: "{{ store.internalEndpoint }}"
-            region: "{{ pc.provider.region }}"
-            regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
-            services: {object-store: "{{ {pc.provider.region: true} }}"}
-          secret: {adminAccessKey: "{{ pc_rustfs_access_key }}", adminSecretKey: "{{ pc_rustfs_secret_key }}"}
-      no_log: true
+        store_connection:
+          provider: rustfs
+          s3Endpoint: "{{ store.endpoint }}"
+          adminApiUrl: "{{ store.internalEndpoint }}"
+          region: "{{ pc.provider.region }}"
+        store_secret: {adminAccessKey: "{{ pc_rustfs_access_key }}", adminSecretKey: "{{ pc_rustfs_secret_key }}"}
+      block:
+        - name: Check the object store from the API
+          # The API checks a row before storing it, and has to reach the public S3 endpoint to do so. The request carries
+          # the key, hence no_log and the assert that shows the reason.
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service/object-store/test"
+            method: POST
+            body: "{{ store_connection | combine(store_secret) }}"
+            ok_status: [200, 400]
+          changed_when: false
+          register: pc_store_check
+          no_log: true
+        - name: Report the object store check
+          ansible.builtin.assert:
+            that: pc_store_check.status == 200
+            fail_msg: "{{ pc_store_check.json.errors.message | default('The object store check did not pass') }}"
+            quiet: true
+        - name: Create the object store provider
+          when: (pc.provider.name ~ ' S3') not in (pc_services.json.data | map(attribute='name') | list)
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service"
+            method: POST
+            body:
+              name: "{{ pc.provider.name }} S3"
+              type: CLOUD
+              status: PUBLIC
+              config: >-
+                {{ store_connection | combine({'regions': {pc.provider.region: {'displayName': pc.provider.region_name}},
+                  'services': {'object-store': {pc.provider.region: true}}}) }}
+              secret: "{{ store_secret }}"
+          no_log: true
 
     - name: Register the Ceph RGW object store
       when: pc.object_store.mode == 'ceph-rgw'

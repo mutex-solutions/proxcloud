@@ -108,15 +108,16 @@ func saveFields(p *Project) pgdoc.M {
 	now := time.Now().UTC()
 	p.UpdatedAt = &now
 	return pgdoc.M{
-		"name":             p.Name,
-		"data":             p.Data,
-		"owner":            p.Owner,
-		"memberships":      p.Memberships,
-		"organizationId":   p.OrganizationID,
-		"billingProfileId": p.BillingProfileID,
-		"customInfo":       p.CustomInfo,
-		"services":         p.Services,
-		"updatedAt":        now,
+		"name":              p.Name,
+		"data":              p.Data,
+		"owner":             p.Owner,
+		"memberships":       p.Memberships,
+		"organizationId":    p.OrganizationID,
+		"billingProfileId":  p.BillingProfileID,
+		"customInfo":        p.CustomInfo,
+		"services":          p.Services,
+		"provisionFailures": p.ProvisionFailures,
+		"updatedAt":         now,
 	}
 }
 
