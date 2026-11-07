@@ -175,3 +175,58 @@ func TestRemoveBlankVMs(t *testing.T) {
 		}
 	})
 }
+
+// A hung destroy must not stall the sequential sync.
+func TestRemoveBlankVMsBoundsAHungDestroy(t *testing.T) {
+	lostTaskWait = 50 * time.Millisecond
+	t.Cleanup(func() { lostTaskWait = time.Minute })
+	old := time.Now().Add(-2 * blankVMGrace).Unix()
+	_, c := fakePVE(t, fakeRoutes{
+		"GET /api2/json/cluster/resources":                                        say(fmt.Sprintf(`{"data":[`+blankRowJSON+`]}`, 201, 201, 201)),
+		"GET /api2/json/nodes/pve1/qemu/201/config":                               say(blankConfigJSON(old)),
+		"DELETE /api2/json/nodes/pve1/qemu/201":                                   say(`{"data":"UPID:pve1:0:0:0:qmdestroy:201:u:"}`),
+		"GET /api2/json/nodes/pve1/tasks/UPID:pve1:0:0:0:qmdestroy:201:u:/status": say(`{"data":{"status":"running"}}`),
+	})
+	s := &Service{C: c, PoolPrefix: "st-"}
+	start := time.Now()
+	n, err := s.RemoveBlankVMs(context.Background(), "p1")
+	if err != nil || n != 0 {
+		t.Fatalf("removed %d, err %v", n, err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("waited %s", d)
+	}
+}
+
+// Only what is as blank as a create leaves it goes: a nameless VM holding a NIC or a description is someone's.
+func TestDropLostCreateUsesTheBlankTest(t *testing.T) {
+	lostTaskWait = 5 * time.Second
+	t.Cleanup(func() { lostTaskWait = time.Minute })
+	for name, c := range map[string]struct {
+		cfg  string
+		dels int
+	}{
+		"blank":          {blankConfigJSON(time.Now().Unix()), 1},
+		"nameless + NIC": {`{"data":{"meta":"ctime=1","net0":"virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0"}}`, 0},
+		"description":    {`{"data":{"meta":"ctime=1","description":"keep me"}}`, 0},
+		"memory set":     {`{"data":{"meta":"ctime=1","memory":"2048"}}`, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dels := 0
+			_, pc := fakePVE(t, fakeRoutes{
+				"GET /api2/json/cluster/resources":          say(fmt.Sprintf(`{"data":[`+blankRowJSON+`]}`, 201, 201, 201)),
+				"GET /api2/json/nodes/pve1/qemu/201/config": say(c.cfg),
+				"DELETE /api2/json/nodes/pve1/qemu/201": func(w http.ResponseWriter, _ *http.Request) {
+					dels++
+					fmt.Fprint(w, `{"data":"UPID:pve1:0:0:0:qmdestroy:201:u:"}`)
+				},
+				"GET /api2/json/nodes/pve1/tasks/UPID:pve1:0:0:0:qmdestroy:201:u:/status": say(`{"data":{"status":"stopped","exitstatus":"OK"}}`),
+			})
+			s := &Service{C: pc, PoolPrefix: "st-"}
+			s.dropLostCreate(context.Background(), "p1", 201)
+			if dels != c.dels {
+				t.Fatalf("deletes %d, want %d", dels, c.dels)
+			}
+		})
+	}
+}

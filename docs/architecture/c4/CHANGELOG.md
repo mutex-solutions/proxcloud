@@ -12,6 +12,8 @@ and rules: [README.md](README.md#maintenance-rule).
   neither lists nor bills it. `Service.RemoveBlankVMs` removes it on each full sync, under the holder lock, once it is past 15
   minutes old. A VM that matches on its row but not its config is listed as ever; one whose config cannot be read keeps its row.
 - `ShedLock.Unlock` writes only if the row still carries the caller's `lockedBy` and `lockedAt`.
+- `RemoveBlankVMs` bounds its pass, as the sync goes through projects one at a time and a hung destroy would hold them all.
+  `dropLostCreate` uses the same `blankConfig` test, so a nameless VM holding a NIC or a description stays.
 
 **Why**
 
@@ -22,6 +24,7 @@ and rules: [README.md](README.md#maintenance-rule).
   survives this. Two holders can still overlap once the first runs past the ceiling: this fixes the release, not the ceiling.
 
 **Diagrams updated:** none.
+
 ## 2026-11-07: Installer re-runs keep operator settings, split mode passes preflight
 
 **What changed**

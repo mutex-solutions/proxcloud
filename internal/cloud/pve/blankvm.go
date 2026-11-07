@@ -77,6 +77,10 @@ func (s *Service) RemoveBlankVMs(ctx context.Context, projectID string) (int, er
 		return 0, err
 	}
 	defer release()
+	// The sync goes through projects one at a time, so a destroy that hangs must not hold it, or this project's lock. What is
+	// left goes on the next sync.
+	ctx, cancel := context.WithTimeout(ctx, lostTaskWait)
+	defer cancel()
 	removed := 0
 	for _, r := range candidates {
 		if !s.blankPastGrace(ctx, r) { // it may have been configured while this waited for the lock
