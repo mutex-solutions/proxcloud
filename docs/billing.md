@@ -686,6 +686,15 @@ A suspend, resume or activation applies to the projects the profile pays for: at
 that references it with no profile of their own. The project's status moves first, on a fresh read, with a retry when another
 status change wins meanwhile. A loss that survives the retries is logged as an error.
 
+**A suspension saves `SUSPENDED` before its cloud walk.** The walk disables each project and then pauses its VMs, which takes as
+long as the VMs take, and a member opening a project during it must find the profile suspended. A walk that fails or stops halfway
+never undoes the suspension: the profile stays `SUSPENDED`, and every `autoSuspensionJob` pass walks each `SUSPENDED` profile again,
+whatever suspended it and whether or not automatic suspension is on. A project an operator enables under a suspended profile is
+disabled again by that pass; to keep it up, resume the profile.
+
+**A billing profile cannot be deleted by its owner** while it is `SUSPENDED`, has a negative balance, or still pays for a project
+(409). Deleting it would free the project from the suspension, or leave it `ENABLED` with nothing to rate it.
+
 **What `DISABLED` means** — metering, the sync and rating cover only `ENABLED` projects, so a `DISABLED` project refuses what
 would add usage with a 409: every create, an object upload, new or rotated S3 keys, and every cloud action outside
 `allowedWhileDisabled` (`internal/platform/project/cloud_writes.go`). That list is reads, stop, delete, detach, and removing
@@ -697,8 +706,10 @@ project when nothing holds it any more: billing is unconfigured or the paying pr
 (`disabledByOperator`) comes back only through an operator, whatever billing does. Disabling a project billing already holds
 sets that flag, so the operator can keep it down past a resume.
 
-Moving a project to a `NEW` profile, by changing its profile or its organization, disables it. The move is refused with a 409
-while a VM is not stopped or the project has a Kubernetes cluster or managed database, since those would run unbilled.
+Moving a project to a `NEW` profile, or to an organization with no profile or a deleted one, disables it. The move is refused with
+a 409 while the project holds anything billing rates: a VM, volume, bucket, file share, public IP, image, Kubernetes cluster or
+managed database. Storage counts because S3 keys already issued keep working while the project sits `DISABLED` and unrated. With
+billing unconfigured profiles stay `NEW` for good and nothing is rated, so none of this applies and the project stays as it is.
 
 ### Billing-profile status lifecycle
 
