@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: One bad provider no longer blocks a project; every object-store row is checked
+
+**What changed**
+
+- `POST /admin/service` and the updates check every `ceph-s3` and `rustfs` row whatever its status (`CheckRustFS` is new).
+  Turning a row off stays unchecked.
+- `POST /admin/service/{id}/object-store/test` tests a stored row with its stored key, as **Test connection** on the
+  provider's Connection tab. The Add dialog's button now works for `rustfs` too.
+- Bootstrap gives each provider its own bounded attempt. A failure goes in `project.provisionFailures`, retried on the next
+  open at most every 5 minutes, and in `externalService.provisionError`, shown on the provider's page. Opening a project
+  fails only when it ends up on no provider.
+
+**Why**
+
+- Only a `PUBLIC` `ceph-s3` row was proved, yet bootstrap provisions every non-disabled object store and stopped at the first
+  error, so a `PRIVATE` or `rustfs` typo blocked every new project. A row can also go bad after it is stored, so the check
+  alone would not be enough. Without the record on the project, a project that had any provider would never get the failed
+  one, since a re-entry skips provisioning.
+
+**Diagrams updated:** none.
 ## 2026-11-07: A node that is down loses no rows
 
 **What changed**

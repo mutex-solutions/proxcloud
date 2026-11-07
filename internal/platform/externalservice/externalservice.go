@@ -14,6 +14,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/truenas"
 	"net/netip"
 	"net/url"
+	"time"
 )
 
 // ExternalServiceType values. Only CLOUD matters to the cloud slice.
@@ -44,6 +45,16 @@ type ExternalService struct {
 	// wire: this struct is not serialized to any response — admin reads go through a secret-stripped
 	// path and cloud ops use it only in-memory.
 	Secret any `json:"secret,omitempty"`
+	// ProvisionError is the last failed attempt to provision a project on this provider, for the operator; a success
+	// clears it. Set through Service.SetProvisionError only.
+	ProvisionError *ProvisionError `json:"provisionError,omitempty"`
+}
+
+// ProvisionError says which project could not be provisioned on a provider, and why.
+type ProvisionError struct {
+	ProjectID string    `json:"projectId"`
+	Message   string    `json:"message"`
+	At        time.Time `json:"at"`
 }
 
 // IsDisabled / IsNotDisabled are the status helpers.

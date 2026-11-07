@@ -51,6 +51,7 @@ func (r *Repo) Save(ctx context.Context, p *Project) error {
 		"billingProfileId":       p.BillingProfileID,
 		"customInfo":             p.CustomInfo,
 		"services":               p.Services,
+		"provisionFailures":      p.ProvisionFailures,
 		"scheduledForDeletionAt": p.ScheduledForDeletionAt,
 		"updatedAt":              now,
 	}, nil)

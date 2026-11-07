@@ -433,8 +433,8 @@ function ConnectionTab({ id, provider }: TabProps) {
       </div>
     )
   }
-  // ceph-s3: show the S3/Admin Ops config. The API proves a public row when it is stored or its
-  // connection changes, and the Add dialog has the Test button.
+  // Object stores: show the S3/Admin Ops config. The API proves a row when it is stored or its connection changes;
+  // the Test button proves it now, with the stored key.
   if (provider.config?.provider === "ceph-s3" || provider.config?.provider === "rustfs") {
     const c = asObj(provider.config)
     return (
@@ -453,6 +453,7 @@ function ConnectionTab({ id, provider }: TabProps) {
             Projects are provisioned as dedicated object-store users on entry (or via the project's "attach external
             service" action). The admin keys are stored encrypted and never returned by the API.
           </p>
+          <ObjectStoreTest id={id} />
         </CardContent>
       </Card>
     )
@@ -496,6 +497,20 @@ function ConnectionTab({ id, provider }: TabProps) {
     )
   }
   return <Note>Unknown provider type "{str(provider.config?.provider)}" — no connection settings to show.</Note>
+}
+
+// Test connection for a stored object-store row.
+function ObjectStoreTest({ id }: { id: string }) {
+  const test = useMutation({ mutationFn: () => apiFetch(`/admin/service/${id}/object-store/test`, { method: "POST" }) })
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-3">
+      <Button variant="outline" size="sm" onClick={() => test.mutate()} disabled={test.isPending}>
+        {test.isPending ? "Testing…" : "Test connection"}
+      </Button>
+      {test.isSuccess ? <span className="text-xs text-emerald-600">Connection OK</span> : null}
+      {test.isError ? <span className="text-xs text-destructive">{test.error.message}</span> : null}
+    </div>
+  )
 }
 
 // ── 2. Services (per-region service toggle grid; Save sends the FULL map) ─────
@@ -1242,6 +1257,13 @@ export default function CloudProviderDetailPage() {
         description={`${p.type ?? "CLOUD"} provider ${id}`}
         actions={<StatusBadge status={p.status} />}
       />
+      {p.provisionError ? (
+        <p role="alert" className="mb-4 rounded-md border border-destructive/40 p-3 text-sm text-destructive">
+          Project <span className="font-mono">{p.provisionError.projectId}</span> could not be provisioned on this
+          provider: {p.provisionError.message}. It tries again when it is next opened, and this clears when one
+          succeeds.
+        </p>
+      ) : null}
       <Tabs defaultValue="connection">
         <div className="-mx-1 overflow-x-auto px-1 pb-1">
           <TabsList className="w-max">

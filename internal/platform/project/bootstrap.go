@@ -8,6 +8,9 @@ package project
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"slices"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
@@ -19,8 +22,17 @@ func (h *Handler) EnableAndBootstrap(ctx context.Context, p *Project) error {
 	return h.enableAndBootstrap(ctx, p)
 }
 
+// A provider that cannot be reached must not hold up the others, so one attempt is bounded, and a failed one is retried
+// when the project is next opened but not on every open.
+var (
+	provisionAttemptTimeout = 45 * time.Second
+	provisionRetryAfter     = 5 * time.Minute
+)
+
 // enableAndBootstrap provisions the project onto the non-disabled CLOUD services and flips it to
-// ENABLED. Idempotent: a project that already has an attached service is left as-is.
+// ENABLED. One provider failing leaves the others provisioned: the failure goes on the project, for a retry, and on the
+// provider's row, for the operator. It is an error only when the project ends up on no provider at all.
+// Idempotent: a project that already has an attached service is left as-is, but for what failed.
 func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if h.esSvc == nil {
 		return nil
@@ -29,7 +41,8 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	// provider-side setup was done at first bootstrap. Skip ALL the live calls — they are idempotent
 	// setup, not per-entry work, and re-running them on every project-open is both wasteful and a
 	// failure surface (a provider config change must not 500 an already-working project).
-	if len(p.ServiceIDs()) > 0 {
+	attached := len(p.ServiceIDs()) > 0
+	if attached && len(p.ProvisionFailures) == 0 {
 		return nil
 	}
 	services, err := h.esSvc.ListByType(ctx, externalservice.TypeCloud)
@@ -59,44 +72,66 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if len(cephES) == 0 && len(kamajiES) == 0 && len(dbaasES) == 0 && len(pveES) == 0 && len(truenasES) == 0 && len(dnsES) == 0 {
 		return nil // no cloud provider configured → nothing to provision
 	}
+	changed := p.Status != StatusEnabled
 	p.Status = StatusEnabled
-	// Ceph-s3 object-store bootstrap — provision the project's RGW user per service.
-	for _, es := range cephES {
-		if err := h.BootstrapCephOnto(ctx, p, es); err != nil {
+	// A failure on a provider that has since gone or been disabled is nothing to retry.
+	live := map[string]bool{}
+	var lastErr error
+	for _, es := range slices.Concat(cephES, kamajiES, dbaasES, pveES, truenasES, dnsES) {
+		live[es.ID] = true
+		failed, known := p.ProvisionFailures[es.ID]
+		switch {
+		case attached && !known: // a provider added after this project's bootstrap: the operator attaches it
+			continue
+		case known && p.HasService(es.ID): // attached by the operator meanwhile
+			delete(p.ProvisionFailures, es.ID)
+			changed = true
+			continue
+		case known && time.Since(failed.At) < provisionRetryAfter:
+			continue
+		}
+		if err := h.provisionOn(ctx, p, es); err != nil {
+			lastErr = err
+		}
+		changed = true
+	}
+	for id := range p.ProvisionFailures {
+		if !live[id] {
+			delete(p.ProvisionFailures, id)
+			changed = true
+		}
+	}
+	if changed {
+		if err := h.svc.Save(ctx, p); err != nil {
 			return err
 		}
 	}
-	// Kamaji managed-k8s bootstrap — ensure the project's management-cluster namespace.
-	for _, es := range kamajiES {
-		if err := h.BootstrapKamajiOnto(ctx, p, es); err != nil {
-			return err
-		}
-	}
-	// Dbaas managed-database bootstrap — ensure the project's DB-cluster namespace.
-	for _, es := range dbaasES {
-		if err := h.BootstrapDbaasOnto(ctx, p, es); err != nil {
-			return err
-		}
-	}
-	// Proxmox bootstrap — ensure the project's PVE pool.
-	for _, es := range pveES {
-		if err := h.BootstrapProxmoxOnto(ctx, p, es); err != nil {
-			return err
-		}
-	}
-	// TrueNAS: nothing to create until the first share, only the binding.
-	for _, es := range truenasES {
-		if err := h.bootstrapTrueNASOnto(ctx, p, es); err != nil {
-			return err
-		}
-	}
-	// PowerDNS: same, until the first zone.
-	for _, es := range dnsES {
-		if err := h.bootstrapBindingOnto(ctx, p, es, "powerdns"); err != nil {
-			return err
-		}
+	if len(p.ServiceIDs()) == 0 {
+		return lastErr
 	}
 	return nil
+}
+
+// provisionOn makes one bounded attempt, past the request's own life: it may have created things on the provider.
+func (h *Handler) provisionOn(ctx context.Context, p *Project, es *externalservice.ExternalService) error {
+	attempt, cancel := context.WithTimeout(context.WithoutCancel(ctx), provisionAttemptTimeout)
+	defer cancel()
+	err := h.BootstrapOnto(attempt, p, es)
+	if err != nil {
+		slog.Error("project provisioning failed", "project", p.ID, "service", es.ID, "provider", es.Provider(), "err", err)
+		if p.ProvisionFailures == nil {
+			p.ProvisionFailures = map[string]ProvisionFailure{}
+		}
+		p.ProvisionFailures[es.ID] = ProvisionFailure{Message: err.Error(), At: time.Now().UTC()}
+	} else {
+		delete(p.ProvisionFailures, es.ID)
+	}
+	if err != nil || es.ProvisionError != nil {
+		if rerr := h.esSvc.SetProvisionError(attempt, es.ID, p.ID, err); rerr != nil {
+			slog.Error("project provisioning: record on the provider", "service", es.ID, "err", rerr)
+		}
+	}
+	return err
 }
 
 // BootstrapProxmoxOnto provisions the project onto a Proxmox VE service: ensure the project's
