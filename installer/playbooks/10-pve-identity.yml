@@ -88,7 +88,13 @@
       # no guest agent, console, disk, power or ACL rights on a VM that runs tenant code.
       - {path: "/pool/{{ pc.sandbox.pool }}", role: ProxCloudSandboxGuard, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       # The CSI tokens hold ProxCloudCSI on /pool for tenant clusters; nothing of theirs is in the sandbox pool.
+      # A user row on csi@pve: its tokens are privilege-separated, so this caps them there (min with the user) to nothing.
       - {path: "/pool/{{ pc.sandbox.pool }}", role: NoAccess, propagate: 1, user: csi@pve, token: ""}
+      # The services cluster's own CAPMOX token manages the services cluster only; the sandbox cluster runs through
+      # capmox@pve!{{ pc.sandbox.token }} (above). Through /pool, capmox@pve!capi otherwise inherits ProxCloudCAPI on the
+      # sandbox workers (clone, config, power, migrate on VMs that run tenant code), which it never needs. A token row,
+      # not a user row: capmox@pve owns the sandbox token, so a user NoAccess here would cap that token to nothing too.
+      - {path: "/pool/{{ pc.sandbox.pool }}", role: NoAccess, propagate: 1, user: "", token: capmox@pve!capi}
     # On its own ISO store the user holds only ProxCloudCAPI (from /storage), which lacks Datastore.AllocateTemplate,
     # so the token could not upload the bootstrap ISO. The capi token has no row there, so it still sees one ISO store.
     sandbox_iso_user_acls: "{{ [{'path': '/storage/' ~ pc_sandbox_iso_storage, 'role': 'PVEDatastoreAdmin', 'propagate': 0, 'user': 'capmox@pve', 'token': ''}] if pc_sandbox_iso_storage != pc.services.iso_storage else [] }}"
@@ -299,19 +305,39 @@
         fail_msg: "{{ pc_sandbox_token_id }} sees the ISO stores {{ seen }}; it must see {{ pc_sandbox_iso_storage }} alone (docs/proxmox-permissions.md)."
         success_msg: "{{ pc_sandbox_token_id }} sees the ISO stores {{ seen }}"
 
-    # What the portal may do to a sandbox worker, as PVE computes it: an extra row on /pool/<pool> (a group, a role
-    # added by hand) would hand back guest agent, console or disk rights on VMs that run tenant code.
-    - name: Read what the portal token may do on the sandbox pool
+    # What the portal and the cluster tokens may do to a sandbox worker, as PVE computes it (user ∩ token, inheritance,
+    # groups), on /pool/<pool> AND on each worker VM: a stray per-VM ACL or a group grant would hand back rights the
+    # pool-level read misses. The portal keeps the guard role alone; the services CAPMOX and the CSI tokens get nothing
+    # (they drive tenant clusters, never the sandbox). Worker VMs appear on a re-run once the cluster is built.
+    - name: Read the sandbox pool members
+      when: pc_sandbox_on
+      check_mode: false
+      ansible.builtin.uri: {url: "{{ pc_api }}/pools/{{ pc.sandbox.pool }}", status_code: [200, 404]}
+      register: pc_sandbox_pool
+    - name: List the tokens to check and the paths to check them on
+      when: pc_sandbox_on
+      ansible.builtin.set_fact:
+        pc_sandbox_checks: >-
+          {{ [{'id': 'proxcloud@pve!platform', 'want': roles.ProxCloudSandboxGuard | split | sort},
+              {'id': 'capmox@pve!capi', 'want': []}, {'id': 'csi@pve!csi', 'want': []}, {'id': 'csi@pve!gateway', 'want': []}] }}
+        pc_sandbox_paths: >-
+          {{ ['/pool/' ~ pc.sandbox.pool] + (pc_sandbox_pool.json.data.members | default([])
+             | selectattr('type', 'eq', 'qemu') | map(attribute='vmid') | map('regex_replace', '^', '/vms/') | list) }}
+    - name: Read each token's effective rights on the pool and every worker
       when: pc_sandbox_on
       check_mode: false
       ansible.builtin.uri:
-        url: "{{ pc_api }}/access/permissions?{{ {'userid': 'proxcloud@pve!platform', 'path': '/pool/' ~ pc.sandbox.pool} | urlencode }}"
-      register: pc_sandbox_guard
-    - name: Check the portal token holds the guard role alone there
+        url: "{{ pc_api }}/access/permissions?{{ {'userid': item.0.id, 'path': item.1} | urlencode }}"
+      register: pc_sandbox_rights
+      loop: "{{ pc_sandbox_checks | product(pc_sandbox_paths) | list }}"
+      loop_control: {label: "{{ item.0.id }} {{ item.1 }}"}
+    - name: Check each token holds only what it should there
       when: pc_sandbox_on
       vars:
-        privs: "{{ (pc_sandbox_guard.json.data.values() | first | default({})).keys() | sort }}"
+        have: "{{ (item.json.data.values() | first | default({})).keys() | sort }}"
       ansible.builtin.assert:
-        that: privs == (roles.ProxCloudSandboxGuard | split | sort) or ansible_check_mode
-        fail_msg: "proxcloud@pve!platform holds {{ privs }} on /pool/{{ pc.sandbox.pool }}; it must hold ProxCloudSandboxGuard alone (docs/proxmox-permissions.md)."
-        success_msg: "proxcloud@pve!platform on /pool/{{ pc.sandbox.pool }}: {{ privs }}"
+        that: have == item.item.0.want or ansible_check_mode
+        fail_msg: "{{ item.item.0.id }} holds [{{ have | join(', ') }}] on {{ item.item.1 }}; it must hold {{ (item.item.0.want | join(', ')) or 'nothing' }} (docs/proxmox-permissions.md)."
+        success_msg: "{{ item.item.0.id }} on {{ item.item.1 }}: {{ (have | join(', ')) or 'nothing' }}"
+      loop: "{{ pc_sandbox_rights.results }}"
+      loop_control: {label: "{{ item.item.0.id }} {{ item.item.1 }}"}

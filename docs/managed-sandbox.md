@@ -390,11 +390,11 @@ internet. The sandbox entry (HAProxy appliance to `sandbox-proxy`) gets its rule
   end in a host (`.10-.20` is `.10/31 .12/30 .16/30 .20`). A NIC off the sandbox vnet gets an empty filter, which drops every
   IPv4 frame it sends. `macfilter` keeps the NIC's own MAC.
 - **IPv6.** No IPv6 rule: the policies drop it.
-- **Spoofed ICMP errors are not dropped.** PVE's nftables bridge chain accepts ICMP and ICMPv6 error types
-  (destination unreachable, source quench, time exceeded) before the per-NIC checks, so `ipfilter` and the DROP policy
-  never see them (lab, PVE 9.2). A worker can send them with any source to the other workers and to PVE host input;
-  routed ones only survive when they match a tracked flow. Everything else with a forged source is dropped. A host
-  nftables rule on the sandbox bridge ahead of PVE's chain would close it; not built yet.
+- **Spoofed ICMP errors.** PVE's nftables bridge chain accepts ICMP and ICMPv6 error types (destination unreachable,
+  source quench, time exceeded) in `vm-out`/`vm-in` before the per-NIC checks, so `ipfilter` and the DROP policy never
+  see them (lab, PVE 9.2). A worker could send them with any source to PVE host input and the other workers (routed ones
+  only survive a tracked flow). The host ICMP guard (§2.6) closes it: a host nftables chain on every node, ahead of
+  PVE's, drops a forged-source error leaving a sandbox worker's tap.
 
 ### 2.2 The unsecured taint
 
@@ -436,9 +436,15 @@ The portal token keeps its inherited roles everywhere except the sandbox pool, w
 and `proxcloud@pve!platform` the role `ProxCloudSandboxGuard` (`Pool.Audit VM.Audit VM.Config.Network`). An ACL on a
 path replaces what the parent passes down, so on the pool and its VMs the token loses `ProxCloudPlatform` and
 `ProxCloudKubeMint` from `/pool`: no guest agent (`VM.GuestAgent.Unrestricted`), console, disk, power, snapshot, backup
-or ACL rights on a VM that runs tenant code. `csi@pve` gets `NoAccess` there. Stage 10 reads the token's effective
-rights on the pool from PVE and stops unless they are exactly the guard role. The groups and IP sets are cluster
-firewall objects, written with the `Sys.Modify` the token holds on `/`.
+or ACL rights on a VM that runs tenant code. The CSI tokens and the services cluster's own CAPMOX token get nothing
+there: `csi@pve` as a user row (its tokens are privilege-separated, so the row caps them), and `capmox@pve!capi` as a
+token row — the sandbox cluster runs through `capmox@pve!sandbox`, so the services CAPMOX token never manages the pool,
+and through `/pool` it would otherwise inherit `ProxCloudCAPI` (clone, config, power, migrate) on the workers. It is a
+token row, not a user row, because `capmox@pve` owns the sandbox token and a user `NoAccess` would cap that too. Stage
+10 reads each token's effective rights from PVE — on the pool and on every worker VM, where a stray per-VM ACL or a
+group grant would hand back rights the pool-level read misses — and stops unless the portal holds the guard role alone
+and the CSI and services-CAPMOX tokens hold nothing. The groups and IP sets are cluster firewall objects, written with
+the `Sys.Modify` the token holds on `/`.
 
 The pass reads the sandbox cluster with the `proxcloud-system/proxcloud-firewall` service account
 (`deploy/sandbox-cluster/rbac.yaml`: nodes get, list, patch). Stage 55 turns its token into
@@ -505,3 +511,56 @@ back on, the next pass cleared both, nodes Ready, HTTPS 200.
 
 Not run here: stages 55 and 60 (they would add an Application to the lab's shared services cluster). The exit node file
 and the subnet change were made by hand with the content stage 55 writes, and the provider config came from a file.
+
+## 2.6 Layer 1b: the host ICMP anti-spoof guard
+
+Layer 1's `ipfilter` pins the source of every frame a worker sends — except ICMP. PVE's nftables bridge firewall
+(`table bridge proxmox-firewall-guests`) has a chain `allow-icmp` that its `vm-out` (prerouting) and `vm-in`
+(postrouting) base chains `jump` *before* `iifname vmap @vm-map-out` reaches the per-guest `ipfilter` and `macfilter`
+drops. `allow-icmp` accepts the ICMP error types unconditionally (v4 destination-unreachable, source-quench,
+time-exceeded; v6 destination-unreachable, packet-too-big, time-exceeded, parameter-problem). So a worker can send an
+ICMP error with any forged source and neither `ipfilter` nor the `DROP` policy sees it. On the lab a worker reached PVE
+host input on the vnet gateway with the gateway's own address, another worker's address, a management address and an
+arbitrary external address as source; routed ones to another worker only survived a tracked flow, but the host and node
+addresses were reachable off-path. (Upstream Proxmox behaviour, PVE 9.2; a bug report is filed separately.)
+
+The guard closes it on the host, since the VM firewall cannot. On every node that can host a sandbox worker (the pool
+spans the cluster, so every `pve` node) the installer places `/usr/local/sbin/sandbox-icmp-guard.py` and a systemd
+service plus a one-minute timer (`proxcloud-sandbox-icmp-guard`). The script reads, from PVE's own cluster config
+(`/etc/pve`), each local sandbox-pool worker's NICs on the sandbox vnet and that NIC's `ipfilter-net<N>` set — the
+worker's pinned source addresses, kept correct by the portal's sync — and installs a host nftables chain:
+
+```
+table bridge proxcloud-sandbox {
+  chain antispoof {
+    type filter hook prerouting priority -300; policy accept;   # before PVE's vm-out (priority 0)
+    iifname { <sandbox taps> } icmpv6 type { … } drop            # IPv4-only cluster: any v6 error is spoofed
+    iifname "<tap>" meta l4proto icmp icmp type { … } ip saddr != { <this worker's ipfilter> } drop
+  }
+}
+```
+
+Because the chain is a base chain at an earlier priority with `policy accept`, a non-matching frame (a legitimate
+own-source error, or any non-ICMP) continues to PVE's chain — an `accept` verdict there is not terminal for the hook.
+Only a forged-source error is dropped. The guard mirrors `ipfilter` exactly (a worker's own address plus the MetalLB
+range, which any worker may answer for), so it drops nothing PVE's anti-spoof would allow. The timer re-runs the script
+every minute; a worker that just joined, moved node or had its firewall rebuilt is pinned well within its 20-minute
+unsecured taint, so it never runs tenant code before the guard covers it. It is the installer's and not the sync's
+because the portal's PVE token reaches the API only, never a node shell.
+
+Measured on the lab (2026-11-08), raw ICMP errors (and raw ICMPv6) from a worker's node namespace to the vnet gateway
+(PVE host input, a node address) and to another worker, five per type and source, counted on the receiving tap:
+
+| Source on the forged error | To PVE host input, before the guard | After the guard |
+|---|---|---|
+| the worker's own address | arrives | arrives |
+| a MetalLB address in its `ipfilter` | arrives | arrives |
+| another worker's address | arrives | dropped |
+| the vnet gateway | arrives | dropped |
+| a management address | arrives | dropped |
+| an arbitrary external address | arrives | dropped |
+| any ICMPv6 error | — | dropped |
+
+The cluster stayed healthy with the guard in place: both workers Ready, the `keep` gVisor sandbox Running, worker-to-
+worker ping (ICMP echo, not an error type) 0% loss. Not run here: the installer stage (it would touch the lab's shared
+services cluster); the guard script was deployed to both worker nodes and run by hand with the content stage 55 writes.

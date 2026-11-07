@@ -70,6 +70,12 @@ sync job applies it every cycle and only then takes the `proxcloud.io/unsecured`
 old; a cleared worker found unfenced (the datacenter firewall off included) gets the taint back. Details:
 [managed-sandbox.md §2](../../managed-sandbox.md#2-layer-1-the-vm-firewall-on-the-workers-sb2b).
 
+**Layer 1b, the host ICMP anti-spoof guard** (installer `sandbox-icmp-guard.py` + a systemd timer on every `pve` node).
+PVE's bridge firewall accepts ICMP error types before the per-NIC `ipfilter`, so a worker can forge their source. The
+guard installs a host nftables chain (`table bridge proxcloud-sandbox`, prerouting priority -300, before PVE's) that
+drops an ICMP error leaving a worker's tap whose source is not that worker's `ipfilter` set, read from PVE's own config
+each run. It is the installer's and not the sync's: the portal's PVE token reaches the API, never a node shell.
+
 **Who owns the DROPs.** A cluster normally has one portal, which owns its DROPs outright: a
 changed `cidrPool` or `blockedCidrs` replaces them and leaves none behind. Their comment is
 `proxcloud:isolation` for the default pool prefix `pc-` (clusters already running need no

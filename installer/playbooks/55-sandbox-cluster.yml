@@ -246,6 +246,60 @@
       register: pc_snat_stale
       changed_when: pc_snat_stale.stdout != ''
 
+# The ICMP anti-spoof guard on every node that can host a worker (the whole pool spans the cluster, so
+# every `pve` node). PVE's bridge firewall accepts ICMP error types before the per-NIC ipfilter and the
+# DROP policy, so a worker can forge their source (docs/managed-sandbox.md §2.6). The guard reads each
+# local worker's ipfilter from PVE's own config and drops a forged-source error ahead of PVE's chain; a
+# timer re-runs it so a joined, moved or rebuilt worker is pinned within a minute (well inside its
+# 20-minute unsecured taint). Installed whenever the sandbox is on, before the cluster exists.
+- name: Install the sandbox ICMP anti-spoof guard
+  hosts: pve
+  become: true
+  gather_facts: false
+  vars:
+    lh: "{{ hostvars.localhost }}"
+  tasks:
+    - name: Skip unless the sandbox is on
+      ansible.builtin.meta: end_host
+      when: not pc_sandbox_on
+    - name: Install the guard script
+      ansible.builtin.copy:
+        src: files/sandbox-icmp-guard.py
+        dest: /usr/local/sbin/sandbox-icmp-guard.py
+        mode: "0755"
+      register: pc_icmp_script
+    - name: Make its config directory
+      ansible.builtin.file: {path: /etc/proxcloud, state: directory, mode: "0755"}
+    - name: Write its pool and vnet
+      ansible.builtin.copy:
+        dest: /etc/proxcloud/sandbox-icmp-guard.env
+        mode: "0644"
+        content: |
+          POOL={{ pc.sandbox.pool }}
+          VNET={{ pc.sandbox.network.vnet }}
+      register: pc_icmp_env
+    - name: Install its service and timer
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: "0644"
+      loop:
+        - proxcloud-sandbox-icmp-guard.service
+        - proxcloud-sandbox-icmp-guard.timer
+      register: pc_icmp_units
+    - name: Enable the timer
+      ansible.builtin.systemd_service:
+        name: proxcloud-sandbox-icmp-guard.timer
+        enabled: true
+        state: started
+        daemon_reload: "{{ pc_icmp_units is changed }}"
+    - name: Apply the guard now
+      when: pc_icmp_script is changed or pc_icmp_env is changed or pc_icmp_units is changed
+      ansible.builtin.systemd_service: {name: proxcloud-sandbox-icmp-guard.service, state: started}
+    - name: Check the guard chain is installed
+      ansible.builtin.command: nft list chain bridge proxcloud-sandbox antispoof
+      changed_when: false
+
 - name: Build the sandbox cluster
   hosts: mgmt[0]
   become: true

@@ -68,9 +68,10 @@ There is no ACL on `/vms`. VMs get their rights only through their pool, so a VM
 | Path | Role | Propagate | Note |
 |---|---|---|---|
 | `/pool/proxcloud-sandbox` | `ProxCloudSandboxGuard` (`Pool.Audit VM.Audit VM.Config.Network`) | 1 | user and token rows. It replaces, on that pool and its VMs, the `ProxCloudPlatform` and `ProxCloudKubeMint` the token inherits from `/pool`: the sync reads the workers and sets their NIC flag, firewall options, rules and IP filters, and can do nothing else to them (no guest agent, console, disk, power, snapshot or ACL rights). The cluster security group and IP sets it references are written with `Sys.Modify` on `/`. Stage 10 reads the token's effective rights there and stops unless they are exactly these three ([managed-sandbox.md](managed-sandbox.md#24-permissions)) |
-| `/pool/proxcloud-sandbox` | `NoAccess` | 1 | user `csi@pve`: its tokens hold `ProxCloudCSI` on `/pool` for tenant clusters, and nothing of theirs is in this pool |
+| `/pool/proxcloud-sandbox` | `NoAccess` | 1 | user `csi@pve`: its tokens hold `ProxCloudCSI` on `/pool` for tenant clusters, and nothing of theirs is in this pool. A user row: the CSI tokens are privilege-separated, so capping the user caps them |
+| `/pool/proxcloud-sandbox` | `NoAccess` | 1 | token `capmox@pve!capi`: the services cluster's CAPMOX holds `ProxCloudCAPI` on `/pool` and would inherit it on the workers, but the sandbox cluster runs through `capmox@pve!sandbox`, so it never manages this pool. A token row, not a user row: `capmox@pve` owns the sandbox token, which the user `NoAccess` would cap too |
 
-Lab, PVE 9.2: before, the platform token held all 35 privileges on a worker (`/vms/<id>`); after, the three above, with project pools and their VMs, the sandbox vnet, the stores and `/` unchanged.
+Lab, PVE 9.2: before, the platform token held all 35 privileges on a worker (`/vms/<id>`) and `capmox@pve!capi` the 19 of `ProxCloudCAPI`; after, the three above for the platform token and nothing for the CAPI and CSI tokens, on the pool and on each worker VM (stage 10 checks both), with project pools and their VMs, the sandbox vnet, the stores and `/` unchanged.
 
 ## ProxCloudCAPI
 
