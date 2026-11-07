@@ -15,6 +15,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/netip"
+	"regexp"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -24,6 +27,25 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
+
+var bucketNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+
+// bucketNameErr refuses a name the S3 backends refuse, with what to fix: their own 400 reached the tenant as a 500.
+func bucketNameErr(name string) *httpx.HTTPError {
+	if _, err := netip.ParseAddr(name); err == nil || !bucketNameRe.MatchString(name) || strings.Contains(name, "..") {
+		return httpx.BadRequest("A bucket name uses 3 to 63 lowercase letters, digits, dots and hyphens, starts and ends with a letter or digit, and is not an IP address")
+	}
+	return nil
+}
+
+// grantPermissionErr refuses a grant level the backends do not know: it reached the tenant as a 500.
+func grantPermissionErr(p string) *httpx.HTTPError {
+	switch client.BucketPermission(p) {
+	case client.PermissionRead, client.PermissionReadWrite, client.PermissionFull:
+		return nil
+	}
+	return httpx.BadRequest("permission must be READ, READ_WRITE or FULL")
+}
 
 // decodeInto re-decodes a free-form action `data` map into a typed request struct.
 func decodeInto(data map[string]any, out any) error {
@@ -246,6 +268,12 @@ func (h *Handler) bucketSettingsAction(w http.ResponseWriter, r *http.Request, p
 		if err := decodeInto(data, &req); err != nil {
 			h.fail(w, httpx.BadRequest("invalid request body"))
 			return true
+		}
+		if action == "GRANT_KEY" {
+			if herr := grantPermissionErr(req.Permission); herr != nil {
+				h.fail(w, herr)
+				return true
+			}
 		}
 		if h.cephKeys == nil {
 			httpx.Err(w, http.StatusServiceUnavailable, http.StatusServiceUnavailable, "s3 keys not configured")
