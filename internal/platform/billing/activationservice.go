@@ -109,23 +109,20 @@ func (s *ActivationService) Activate(ctx context.Context, bp *BillingProfile, so
 	return nil
 }
 
-// Suspend suspends the profile: live cloud suspend FIRST (best-effort — an error never
-// blocks the billing flip), then the customer email, then SUSPENDED + save + SYSTEM audit.
+// Suspend suspends the profile: SUSPENDED + save FIRST, so a member opening a project the walk has just disabled cannot lift
+// it, then the cloud leg (suspendClouds says what happens when it fails), the customer email and the SYSTEM audit.
 func (s *ActivationService) Suspend(ctx context.Context, bp *BillingProfile, source string) error {
-	if s.clouds != nil {
-		if err := s.clouds.SuspendBillingProfileClouds(ctx, bp.ID); err != nil {
-			s.log.Error("suspend: cloud leg failed (billing flip proceeds)", "billingProfile", bp.ID, "err", err)
-		}
+	bp.Status = StatusSuspended
+	if _, err := s.repo.Update(ctx, bp); err != nil {
+		return err
 	}
+	// The walk outlives the request: the status is saved, so stopping halfway only leaves work for the next pass.
+	suspendClouds(context.WithoutCancel(ctx), s.repo, s.clouds, bp.ID, s.log)
 	balance := s.currentBalance(ctx, bp.ID)
 	currency, _ := s.repo.BaseCurrency(ctx)
 	notify(ctx, s.notifier, "notify_customer_is_suspended", bp, map[string]any{
 		"fullName": profileFullName(bp), "balance": balance.StringFixed(2), "currency": currency,
 	})
-	bp.Status = StatusSuspended
-	if _, err := s.repo.Update(ctx, bp); err != nil {
-		return err
-	}
 	s.log.Info("suspended billing profile", "id", bp.ID, "source", source)
 	s.systemEvent(audit.ActionSuspend, bp, source)
 	return nil
