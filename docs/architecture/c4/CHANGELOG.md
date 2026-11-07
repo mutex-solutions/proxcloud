@@ -15,6 +15,7 @@ and rules: [README.md](README.md#maintenance-rule).
 - A move whose status read failed is waited out before the follow reads the disk's slot, and a disk the follow finds at its
   new place answers success.
 - The retype's wait, follow and mark clear run on a context the request cannot cancel (bounded by the 3 hours of the mark).
+- A retype of a row still marked moving answers 409.
 - `providers.Reconcile` leaves a row alone whose `ExternalIDSince` is after its listing, and holds the pass's inserts for
   the next sync when such a row is in scope.
 - The serial console proxy sends termproxy's opening line (`<user>:<ticket>`) itself. The action answers no user, and no ticket
@@ -39,8 +40,12 @@ and rules: [README.md](README.md#maintenance-rule).
 - Rewriting a plugged NIC gives it a new MAC, and the guest loses its public address until a reboot. The API answers other
   repeats ("already attached", "already on storage") with 409.
 - PVE names disks itself and has no field for a name, so a tenant's name can only live on the row.
+- A tenant whose request was cut may retype again while the copy runs. PVE refuses that retry ("can't lock file"), but its
+  follow found the old volid in the slot and cleared the first move's mark, so the sync at the move's end archived the row
+  and inserted a new one.
 
 **Diagrams updated:** `c2-containers.md`.
+
 ## 2026-11-07: An untyped handler error answers 500
 
 **What changed**

@@ -1520,6 +1520,12 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 		httpx.OK(w, map[string]any{"result": out})
 		return true
 	case "RETYPE":
+		// A retry after a cut request finds PVE's lock, and its follow (old volid still in the slot) would clear the
+		// running move's mark: the sync at its end then archives the row and inserts a new one.
+		if cr.Moving(time.Now().UTC()) {
+			h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "This volume is still moving to its new type. Try again when it is done"))
+			return true
+		}
 		slug := strAny(data["newType"])
 		if slug == "" {
 			slug = strAny(data["type"])
