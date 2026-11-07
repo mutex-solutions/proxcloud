@@ -36,6 +36,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiFetch, type CloudScope } from "@/lib/api"
+import { isValidServerName, SERVER_NAME_RULE } from "@/lib/server-name"
 import { fmtDateTime, timeAgo } from "@/lib/format"
 import { useCloudFeatures, useCloudList, useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
 import type { CloudResource } from "@/lib/types"
@@ -450,14 +451,20 @@ export function ServerDetailPage() {
           </DialogHeader>
           <div className="grid gap-2">
             <Label htmlFor="rename-input">Name</Label>
-            <Input id="rename-input" value={renameVal} onChange={(e) => setRenameVal(e.target.value)} />
+            <Input
+              id="rename-input"
+              value={renameVal}
+              onChange={(e) => setRenameVal(e.target.value)}
+              aria-invalid={!!renameVal.trim() && !isValidServerName(renameVal.trim())}
+            />
+            {renameVal.trim() && !isValidServerName(renameVal.trim()) ? <p className="text-xs text-destructive">{SERVER_NAME_RULE}</p> : null}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={closeForm}>
               Cancel
             </Button>
             <Button
-              disabled={!renameVal.trim()}
+              disabled={!isValidServerName(renameVal.trim())}
               onClick={() => {
                 act.mutate({ action: "RENAME", data: { name: renameVal.trim() } })
                 closeForm()
