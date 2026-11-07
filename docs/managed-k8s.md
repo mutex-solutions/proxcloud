@@ -60,7 +60,7 @@ Seed-file twin of the form: `deploy/seed/external-service-dev.json`
 | Version → image matrix | `config.cluster.versions` | Curated map `k8s version → node image id`: the only versions offered to customers. Textarea grammar: `1.35.4=<image-id>` per line. |
 | Image variants | `config.cluster.imageVariants` | Alternative node-image builds of the same version, e.g. a GPU build. Grammar: `1.35.4@nvidia=<image-id>`. |
 | RWX dataset size | `config.cluster.rwxGiB` | Optional, API or installer (`services.kamaji.rwx_gib`). See [section 9](#9-how-a-cluster-lands-on-proxmox). |
-| Block volumes for tenants | `config.cluster.csiSharedStores` | Optional, API or installer (`services.kamaji.csi_shared_stores`), default off. **Gives up isolation between tenants on the stores**, see [section 9](#9-how-a-cluster-lands-on-proxmox). Needs chart 0.1.5 or later when off. |
+| Block volumes for tenants | `config.cluster.csiSharedStores` | Optional, API or installer (`services.kamaji.csi_shared_stores`), default off. **Gives up isolation between tenants on the stores**, see [section 9](#9-how-a-cluster-lands-on-proxmox). Needs chart 0.1.5 or later when off. Ignored for new clusters when the portal runs the CSI gateway: they get block volumes with no credential in the tenant. |
 | Flavors allowlist | `config.cluster.flavors` | Flavor ids offered for node groups. Empty = no restriction. |
 
 **Changing a setting later.** The installer's `services.kamaji.*` keys take effect only when stage 60 first registers the provider: it skips a provider
@@ -254,7 +254,7 @@ task ran and failed only because that disk was in use). Moving the plugin to the
 tenant can create a `PersistentVolume` naming any disk. Turn the setting on only for tenants who trust each other, or on a
 store they alone use.
 
-**Block volumes through the CSI gateway (in progress).** The replacement keeps every PVE credential out of the tenant
+**Block volumes through the CSI gateway.** The replacement keeps every PVE credential out of the tenant
 cluster. The portal API serves a CSI gateway (`internal/cloud/csigw`, its own TLS listener, `PROXCLOUD_CSI_GATEWAY_ADDR`,
 off by default) that the proxmox-csi controller calls as if it were PVE, with a credential per cluster
 (`csi@proxcloud!<clusterId>`). The gateway allows only the calls proxmox-csi-plugin v0.22.0 makes and checks each one: a
@@ -264,11 +264,40 @@ every call, since PVE reuses a freed vmid at once), a task when the gateway
 answered with its UPID. A crafted `volumeHandle`, NodeID or StorageClass is only an input it checks; another cluster's disk
 does not even show in a listing, so a delete of it is a no-op and an attach finds nothing. It refuses replication,
 `/cluster/nextid`, VM create, migrate and `/access/ticket`, and records every refusal in the audit log. It calls PVE with
-one token, `csi@pve!gateway` ([proxmox-permissions.md](proxmox-permissions.md#the-csi-gateway-token)). Not wired yet: the
-controller still runs in the tenant until the services-cluster deployment, credential minting at create and the
-migration of existing clusters land.
-A disk is named after its PV alone, so the portal cannot tell whose it is: a PVC still there when the cluster is deleted
-leaves its disk on the store, unbilled. Delete PVCs first. A cluster created with the setting off has no proxmox-csi, no CSI token and no
+one token, `csi@pve!gateway` ([proxmox-permissions.md](proxmox-permissions.md#the-csi-gateway-token)).
+
+A **new** cluster takes this path when the portal has `PROXCLOUD_CSI_GATEWAY_URL` and its CA
+([configuration.md](configuration.md)), the compute provider holds the gateway token (`config.csiGatewayTokenId`,
+`secret.csiGatewaySecret`) and the workers are the project's (not `sharedWorkers`). Every storage profile is then a
+StorageClass, `csiSharedStores` or not, and chart 0.1.7 or later is needed: with an older `chartVersion` on the
+Kubernetes provider the create answers 503.
+
+- The create mints the cluster's credential and writes `<id>-csi-gateway` (the controller's `config.yaml` and the
+  gateway CA) next to the cloud secret on the services cluster. No CSI token is minted on PVE, and the resource set
+  carries only the privileged `csi-proxmox` namespace.
+- The chart runs the controller in `pc-<projectId>` on the services cluster (`templates/csi-controller.yaml`): the plugin,
+  attacher, provisioner and resizer, each with the Kamaji admin kubeconfig (`admin.svc`, the in-cluster address, so the
+  API allowlist does not apply). Leases and storage capacity objects stay in the tenant's `csi-proxmox`; the lease names
+  depend on the driver name only. The tenant keeps the node plugin, the CSIDriver and the StorageClasses, with the
+  upstream controller at 0 replicas and no config Secret. Snapshots are not offered.
+- The tenant's disks are VOLUME rows of the project (`data.volume.k8sCluster`), from the registry, at the size PVE
+  reports, and bill like volumes from the disk's creation. The portal refuses to delete or change them itself (409):
+  the PersistentVolumeClaim owns them. The sync's reconcile leaves a `creating` row alone for 15 minutes; after that it
+  makes the row `ready` if PVE has the disk (a create whose answer was lost) and drops it if not. It closes a row whose
+  disk is gone, and takes size and volid from PVE.
+- Once a deleted cluster's workers are gone, the release revokes the credential, then deletes every disk the registry
+  still holds for it, `Retain` PersistentVolumes included: with the cluster gone nothing can mount them. A disk PVE
+  refuses to delete (still in use) keeps the cluster's marker, and the sweep tries again; the cluster's PVE tokens,
+  addresses and dataset are released in the meantime.
+
+Deployments: the chart's `api.csiGateway` (its own port, a Service with `externalTrafficPolicy: Local`, a certificate from
+a CA made with cert-manager, a NetworkPolicy that admits the port from `allowedCIDRs` only); `make install` in split mode
+turns it on with the services nodes (`services.network.nodes`) as the only sources, at the first mgmt node's address.
+A Local Service answers only on a node running an API pod, so with three mgmt nodes the installer pins the API to the
+first. Existing clusters keep the tenant-side controller until their migration.
+
+For a cluster without the gateway, a disk is named after its PV alone, so the portal cannot tell whose it is: a PVC still
+there when the cluster is deleted leaves its disk on the store, unbilled. Delete PVCs first. A cluster created with the setting off has no proxmox-csi, no CSI token and no
 `csi-proxmox` namespace, and `shared-file` is the default StorageClass if it has a dataset. Without a TrueNAS provider on
 the project it has no StorageClass at all. A store per project would give real isolation on block volumes. It is not built:
 such a store needs a ZFS dataset or RBD namespace per project, and we found no PVE API call that creates one.

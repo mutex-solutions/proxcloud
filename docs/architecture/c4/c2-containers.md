@@ -70,7 +70,7 @@ router in `internal/server/server.go`).
 | `/actuator/health*`, `/__build` | 8081 | none; not routed by the chart's gateway or ingress | Liveness, readiness, build info | Implemented |
 | `POST /debug/<job>` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (when the scheduler is enabled) | Implemented |
 | Billing service callbacks | 8081 | shared token | Suspend/resume and mail callbacks from an external billing service | Implemented |
-| CSI gateway `/api2/json/**` | `PROXCLOUD_CSI_GATEWAY_ADDR` (TLS only; off when empty) | per-cluster credential `csi@proxcloud!<clusterId>`, only its SHA-256 stored | The PVE calls a tenant cluster's proxmox-csi controller may make, each checked for ownership, sent on with one gateway token. Nothing calls it until the controller moves to the services cluster | Implemented (not wired) |
+| CSI gateway `/api2/json/**` | `PROXCLOUD_CSI_GATEWAY_ADDR` (TLS only; off when empty) | per-cluster credential `csi@proxcloud!<clusterId>`, only its SHA-256 stored | The PVE calls a tenant cluster's proxmox-csi controller may make, each checked for ownership, sent on with one gateway token. Called by the proxmox-csi controllers of new tenant clusters, which run on the services cluster (`PROXCLOUD_CSI_GATEWAY_URL`); only the services nodes reach the port (chart NetworkPolicy) | Implemented |
 | SSO discovery and per-org SSO routes (`/api/v1/auth/sso/discover`, `/api/v1/organizations/{id}/sso`, `/api/v1/admin/sso`) | 8080 | public / OIDC | Email-first login, SSO self-service, operator stop | Implemented |
 
 ## C2b. Proxmox cluster and storage tiers
@@ -123,6 +123,7 @@ flowchart TB
   sto --> nas
   ha --> vm
   svc --> nas
+  svc -->|"tenant clusters' proxmox-csi controllers, per-cluster credential, TLS"| api
   svc -.->|"control plane, konnectivity"| sbx
   papi -.-> pbs
 ```
@@ -234,7 +235,7 @@ flowchart LR
 | Gateway / Ingress | Gateway API `HTTPRoute` or `Ingress` per host (`deploy/charts/proxcloud/templates/gateway`, `api`, `web`) | Management cluster | Implemented |
 | ArgoCD | Reconciles the platform (installer `Application` objects with inline values); receives `Application` objects for managed K8s and DBaaS | Management cluster (deployed by the installer, not the chart) | Implemented |
 | Cluster API + CAPMOX, MetalLB | Services cluster and tenant K8s workers on Proxmox, load-balancer IPs | Management and services clusters | Implemented |
-| Services cluster | Kamaji, DB operators, proxmox-csi, csi-driver-nfs | VMs in a system pool | Implemented, without csi-driver-nfs |
+| Services cluster | Kamaji, DB operators, proxmox-csi (its own, and the controller of each new tenant cluster, against the CSI gateway), csi-driver-nfs | VMs in a system pool | Implemented, without csi-driver-nfs |
 | Proxmox VE hosts | pveproxy, SDN, proxmox-firewall (nftables), storage, PCI mappings | Proxmox cluster | Implemented |
 | Tenant VMs | QEMU full clones in the project pool | Proxmox cluster | Implemented |
 | HA rules and replication | `ha-manager` rules, `pvesr` | Proxmox cluster | Implemented |

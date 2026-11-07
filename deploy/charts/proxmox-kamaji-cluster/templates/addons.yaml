@@ -14,7 +14,10 @@ the chart's CRDs first (ClusterResourceSet retries until they exist).
 {{- $classes = append $classes $class }}
 {{- end }}
 {{- if $classes }}
-{{- $proxies = append $proxies (dict "key" "proxmoxCsi" "ns" "csi-proxmox" "values" (dict "existingConfigSecret" "proxmox-csi-plugin" "storageClass" $classes "node" (dict "tolerations" (list (dict "operator" "Exists"))) "controller" (dict "replicaCount" 1))) }}
+{{- /* With the gateway the controller runs on the services cluster (csi-controller.yaml): the tenant's stays at 0
+replicas (the chart's top-level replicaCount; it has no controller.replicaCount) and its config Secret never exists. */ -}}
+{{- $tenantController := ternary 0 1 (not (empty (.Values.proxmox.csi.gateway | default dict).secretName)) }}
+{{- $proxies = append $proxies (dict "key" "proxmoxCsi" "ns" "csi-proxmox" "values" (dict "existingConfigSecret" "proxmox-csi-plugin" "storageClass" $classes "node" (dict "tolerations" (list (dict "operator" "Exists"))) "replicaCount" $tenantController)) }}
 {{- end }}
 {{- $proxies = append $proxies (dict "key" "metallb" "ns" "metallb-system" "values" (dict "speaker" (dict "frr" (dict "enabled" false)) "frrk8s" (dict "enabled" false))) }}
 {{- with .Values.proxmox.rwx }}{{- if .server }}

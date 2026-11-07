@@ -66,3 +66,39 @@ func TestChartRendersTheCSISwitch(t *testing.T) {
 		t.Errorf("on: exactly one default class, proxmox-csi's first\n%s", on)
 	}
 }
+
+// With the gateway, the controller runs on the services cluster with the tenant's kubeconfig on every container, and the
+// tenant's own controller is rendered at 0 replicas: nothing in the tenant reads a config.
+func TestChartRendersTheGatewayController(t *testing.T) {
+	spec := testSpec()
+	spec.Infra = ClusterInfra{Region: "r", Pool: "pc-p1", Storage: "local-zfs", Bridge: "v1", Gateway: "192.0.2.1", Prefix: 24,
+		Addresses: []string{"192.0.2.200"}, LBAddresses: []string{"192.0.2.216/32"},
+		StorageClasses: []StorageClass{{Name: "std", Storage: "local-zfs"}}}
+	tenant := renderChart(t, spec)
+	if strings.Contains(tenant, "-csi-controller") || !strings.Contains(tenant, `\"replicaCount\":1`) {
+		t.Fatalf("without the gateway the tenant runs its own controller\n%s", tenant)
+	}
+
+	spec.Infra.CSIGateway = true
+	out := renderChart(t, spec)
+	if !strings.Contains(out, `\"replicaCount\":0`) {
+		t.Errorf("the tenant's controller must be at 0 replicas\n%s", out)
+	}
+	_, dep, ok := strings.Cut(out, "name: "+spec.ID+"-csi-controller")
+	if !ok {
+		t.Fatalf("no services-side controller\n%s", out)
+	}
+	dep, _, _ = strings.Cut(dep, "\n---")
+	if n := strings.Count(dep, `"--kubeconfig=/etc/tenant/kubeconfig"`); n != 4 {
+		t.Errorf("%d containers with the tenant kubeconfig, want 4\n%s", n, dep)
+	}
+	if n := strings.Count(dep, `"--leader-election-namespace=csi-proxmox"`); n != 3 {
+		t.Errorf("%d sidecars electing in the tenant, want 3\n%s", n, dep)
+	}
+	for _, want := range []string{"secretName: " + CSIGatewaySecretName(spec.ID), "secretName: " + AdminKubeconfigSecretName(spec.ID),
+		"key: admin.svc", "automountServiceAccountToken: false"} {
+		if !strings.Contains(dep, want) {
+			t.Errorf("controller lacks %q\n%s", want, dep)
+		}
+	}
+}

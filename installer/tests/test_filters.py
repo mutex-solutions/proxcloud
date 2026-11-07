@@ -95,4 +95,20 @@ h = api.sigv4_headers("POST", "http://10.0.0.1:8080/api/v1/admin/service?b=1&a=2
 assert h["Host"] == "10.0.0.1:8080"
 assert h["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=pkA/20261107/us-east-1/execute-api/aws4_request, SignedHeaders=host;x-amz-date, Signature=")
 assert h["Authorization"] != api.sigv4_headers("POST", "http://10.0.0.1:8080/api/v1/admin/service?a=2&b=1", b"{}", "pkA", "skB", "20261107T010203Z")["Authorization"]
+
+# The CSI gateway admits the services nodes: a range covers exactly its addresses, nothing next to it.
+assert f.ip_cidrs(["192.0.2.201-192.0.2.209"]) == ["192.0.2.201/32", "192.0.2.202/31", "192.0.2.204/30", "192.0.2.208/31"]
+assert f.ip_cidrs(["192.0.2.7", "198.51.100.0/28"]) == ["192.0.2.7/32", "198.51.100.0/28"]
+
+# The gateway's URL names the first mgmt node by address; the API is pinned to the node that has it.
+nodes = {"items": [
+    {"metadata": {"name": "m2"}, "status": {"addresses": [{"type": "InternalIP", "address": "192.0.2.11"}]}},
+    {"metadata": {"name": "m1"}, "status": {"addresses": [{"type": "InternalIP", "address": "192.0.2.10"}, {"type": "Hostname", "address": "m1"}]}},
+]}
+assert f.node_with_address(nodes, "192.0.2.10") == "m1"
+try:
+    f.node_with_address(nodes, "192.0.2.99")
+    raise AssertionError("an address no node has must fail")
+except ValueError:
+    pass
 print("ok")

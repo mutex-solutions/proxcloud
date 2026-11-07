@@ -59,6 +59,7 @@ type Job struct {
 	shareAccess   func(ctx context.Context, projectID string) error
 	staleSeeds    func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
 	loadBalancers func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
+	csiVolumes    func(region, projectID string, es *externalservice.ExternalService) providers.Provider
 	now           func() time.Time
 	log           *slog.Logger
 }
@@ -140,6 +141,13 @@ func (j *Job) SyncOne(ctx context.Context, projectID, serviceID string) error {
 // WithStaleSeeds wires the cleanup of seeds whose VM is gone (nil = none).
 func (j *Job) WithStaleSeeds(f func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error) *Job {
 	j.staleSeeds = f
+	return j
+}
+
+// WithCSIVolumes wires the VOLUME rows of a project's tenant cluster disks on a Proxmox provider, from the CSI
+// gateway's registry (nil = none). They reconcile after the PVE volumes, which leave them alone.
+func (j *Job) WithCSIVolumes(f func(region, projectID string, es *externalservice.ExternalService) providers.Provider) *Job {
+	j.csiVolumes = f
 	return j
 }
 
@@ -337,6 +345,9 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 		ps.NetworkSyncProvider(region, p.ID),
 		ps.SecurityGroupSyncProvider(region, p.ID),
 		j.floatingIPProvider(region, p.ID, es.ID),
+	}
+	if j.csiVolumes != nil {
+		provs = append(provs, j.csiVolumes(region, p.ID, es))
 	}
 	for _, prov := range provs {
 		st, err := providers.Reconcile(ctx, prov, j.cloud, es.ID, now)

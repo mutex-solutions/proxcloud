@@ -85,6 +85,9 @@ type Handler struct {
 	publicIPs *PublicIPRepo
 	// seeds holds Proxmox server seeds (SetSeeds; nil = user-data is refused).
 	seeds *SeedRepo
+	// csiGW gives new Kubernetes clusters block volumes through the CSI gateway (SetCSIGateway; nil = the tenant-side
+	// controller, offered only with csiSharedStores).
+	csiGW *CSIGateway
 	// sandboxFor builds the sandbox service for a sandbox provider (sandbox-cluster client from
 	// the provider's kubeconfig). Always nil until phase SB3 adds its setter and mounts the
 	// SANDBOX legs of cloud_sandbox.go; until then no route reaches them.

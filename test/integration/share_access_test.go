@@ -335,7 +335,7 @@ func TestClusterReleaseKeepsItsRecordUntilDone(t *testing.T) {
 	f := newShareAccessFixture(t)
 	f.reserve(t, "vmbrw", "10.89.0.99", "pc-c-a")
 	cloudRepo := cloud.NewRepo(f.db)
-	if err := project.KamajiReleaseCluster(failingServices{errors.New("db down")}, cloudRepo, nil, f.ips, false)(ctx, "svc-pve", f.projectID, "pc-c-a"); err == nil {
+	if err := project.KamajiReleaseCluster(failingServices{errors.New("db down")}, cloudRepo, nil, f.ips, false, nil)(ctx, "svc-pve", f.projectID, "pc-c-a"); err == nil {
 		t.Fatal("release reported success after a failed provider read")
 	}
 	if n := f.clusterRows(t, "vmbrw"); n != 1 {
@@ -343,8 +343,28 @@ func TestClusterReleaseKeepsItsRecordUntilDone(t *testing.T) {
 	}
 
 	es := externalservice.NewService(externalservice.NewRepo(f.db), textcrypt.New("k"))
-	if err := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, false)(ctx, "no-such-provider", f.projectID, "pc-c-a"); err != nil {
+	if err := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, false, nil)(ctx, "no-such-provider", f.projectID, "pc-c-a"); err != nil {
 		t.Fatal(err)
+	}
+
+	// A CSI step that fails keeps the marker (an error), and the addresses go all the same; it runs on every retry.
+	f.reserve(t, "vmbrx", "10.89.0.98", "pc-c-b")
+	calls := 0
+	csiFails := func(_ context.Context, id string) error {
+		calls++
+		if id != "pc-c-b" {
+			t.Errorf("csi release of %s", id)
+		}
+		return errors.New("disk in use")
+	}
+	release := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, false, csiFails)
+	for i := 0; i < 2; i++ {
+		if err := release(ctx, "svc-pve", f.projectID, "pc-c-b"); err == nil || !strings.Contains(err.Error(), "disk in use") {
+			t.Fatalf("release with a failing CSI step: %v", err)
+		}
+	}
+	if n := f.clusterRows(t, "vmbrx"); n != 0 || calls != 2 {
+		t.Fatalf("%d address rows left, %d CSI calls", n, calls)
 	}
 }
 
@@ -357,7 +377,7 @@ func TestClusterReleaseOnlyTouchesTheNASHoldingItsDataset(t *testing.T) {
 		"secret": pgdoc.M{"apiKey": "k"}})
 	es := externalservice.NewService(externalservice.NewRepo(f.db), textcrypt.New("k"))
 	cloudRepo := cloud.NewRepo(f.db)
-	release := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, true)
+	release := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, true, nil)
 
 	// No share row: nothing on any NAS to reach.
 	f.reserve(t, "vmbrw", "10.89.0.99", "pc-c-a")

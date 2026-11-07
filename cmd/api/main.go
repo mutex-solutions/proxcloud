@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metricsjob"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/syncjob"
 	"github.com/mutex-solutions/proxcloud/internal/config"
@@ -280,9 +282,22 @@ func run() error {
 	// Kamaji Managed Kubernetes — enables kamaji provisioning + the KUBERNETES_CLUSTER write
 	// surface (Application CRs on the provider's management cluster). The sync job's orphan sweep
 	// uses the same factory: it releases a deleted cluster's PVE tokens and addresses.
+	// Block volumes of new clusters through the CSI gateway: its registry always (a release deletes what clusters made
+	// while it was on), the endpoint the services cluster's controllers reach only when configured.
+	csiStore := csigw.NewStore(pg)
+	gwPVE, gwPortal := csigw.ProviderClients(esSvc.Get)
+	csiGateway := &project.CSIGateway{Reg: csiStore, GW: gwPVE}
+	if cfg.CSIGateway.URL != "" {
+		ca, err := os.ReadFile(cfg.CSIGateway.CAFile)
+		if err != nil {
+			return fmt.Errorf("csi gateway ca: %w", err)
+		}
+		csiGateway.Endpoint = csigw.Endpoint{URL: cfg.CSIGateway.URL, CA: string(ca)}
+	}
+	projectH.SetCSIGateway(csiGateway)
 	kamajiFactory := project.KamajiFactory(esSvc, cloudRepo, func(es *externalservice.ExternalService) (*pve.Service, error) {
 		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
-	}, publicIPRepo)
+	}, publicIPRepo, csiGateway)
 	projectH.SetKamaji(kamajiFactory)
 	projectH.SetSeeds(project.NewSeedRepo(pg, enc))
 
@@ -498,7 +513,11 @@ func run() error {
 		WithSDNLock(lock.New(pg)).
 		WithShareAccess(projectH.ReconcileShareAccess).
 		WithStaleSeeds(projectH.DropStaleSeeds).
-		WithLoadBalancers(projectH.ReconcileLoadBalancers)
+		WithLoadBalancers(projectH.ReconcileLoadBalancers).
+		WithCSIVolumes(func(region, projectID string, es *externalservice.ExternalService) providers.Provider {
+			return &csigw.VolumeRows{Reg: csiStore, ServiceID: es.ID, Project: projectID, Region: region, GW: gwPVE,
+				ProfileOf: es.PVEVolumeProfileFunc()}
+		})
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)
@@ -985,12 +1004,16 @@ func run() error {
 	// one (/debug/* there has no auth). Off unless an address is configured.
 	var csiSrv *http.Server
 	if cfg.CSIGateway.Addr != "" {
-		gwPVE, gwPortal := csigw.ProviderClients(esSvc.Get)
-		csiSrv = csigw.NewServer(cfg.CSIGateway.Addr, &csigw.Handler{Reg: csigw.NewStore(pg), PVE: gwPVE, Portal: gwPortal,
+		csiSrv = csigw.NewServer(cfg.CSIGateway.Addr, &csigw.Handler{Reg: csiStore, PVE: gwPVE, Portal: gwPortal,
 			Quota: projectH.CSIDiskQuota, Audit: auditSvc.LogAsync, Log: log})
+		getCert, err := csigw.CertFiles(cfg.CSIGateway.TLSCert, cfg.CSIGateway.TLSKey)
+		if err != nil {
+			return fmt.Errorf("csi gateway certificate: %w", err)
+		}
+		csiSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: getCert}
 		go func() {
 			log.Info("listening", "server", "csi-gateway", "addr", csiSrv.Addr)
-			if err := csiSrv.ListenAndServeTLS(cfg.CSIGateway.TLSCert, cfg.CSIGateway.TLSKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := csiSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- fmt.Errorf("csi-gateway server: %w", err)
 			}
 		}()

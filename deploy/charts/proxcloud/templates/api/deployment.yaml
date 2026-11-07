@@ -38,7 +38,23 @@ spec:
               containerPort: {{ .Values.api.port }}
             - name: mgmt
               containerPort: {{ .Values.api.managementPort }}
+            {{- if .Values.api.csiGateway.enabled }}
+            - name: csi-gateway
+              containerPort: {{ .Values.api.csiGateway.port }}
+            {{- end }}
           env:
+            {{- if .Values.api.csiGateway.enabled }}
+            - name: PROXCLOUD_CSI_GATEWAY_ADDR
+              value: {{ printf ":%v" .Values.api.csiGateway.port | quote }}
+            - name: PROXCLOUD_CSI_GATEWAY_TLS_CERT
+              value: /etc/proxcloud/csi-gateway/tls.crt
+            - name: PROXCLOUD_CSI_GATEWAY_TLS_KEY
+              value: /etc/proxcloud/csi-gateway/tls.key
+            - name: PROXCLOUD_CSI_GATEWAY_URL
+              value: {{ .Values.api.csiGateway.url | quote }}
+            - name: PROXCLOUD_CSI_GATEWAY_CA_FILE
+              value: /etc/proxcloud/csi-gateway/ca.crt
+            {{- end }}
             - name: PROXCLOUD_DB_URL
               valueFrom:
                 secretKeyRef:
@@ -213,8 +229,13 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if or .Values.api.applicationYml .Values.api.extraVolumeMounts }}
+          {{- if or .Values.api.applicationYml .Values.api.extraVolumeMounts .Values.api.csiGateway.enabled }}
           volumeMounts:
+            {{- if .Values.api.csiGateway.enabled }}
+            - name: csi-gateway-tls
+              mountPath: /etc/proxcloud/csi-gateway
+              readOnly: true
+            {{- end }}
             {{- if .Values.api.applicationYml }}
             - name: app-config
               mountPath: /opt/proxcloud/api/application.yml
@@ -225,8 +246,14 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           {{- end }}
-      {{- if or .Values.api.applicationYml .Values.api.extraVolumes }}
+      {{- if or .Values.api.applicationYml .Values.api.extraVolumes .Values.api.csiGateway.enabled }}
       volumes:
+        {{- if .Values.api.csiGateway.enabled }}
+        # cert-manager renews it in place; the listener reads the files again on a handshake a minute after the last.
+        - name: csi-gateway-tls
+          secret:
+            secretName: {{ include "proxcloud.fullname" . }}-csi-gateway-tls
+        {{- end }}
         {{- if .Values.api.applicationYml }}
         - name: app-config
           configMap:

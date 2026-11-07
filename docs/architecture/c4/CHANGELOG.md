@@ -4,6 +4,64 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: proxmox-csi controller on the services cluster (K8s-CSI, PR 2 of 4)
+
+**What changed**
+
+- New clusters run proxmox-csi's controller on the services cluster, in `pc-<projectId>`, from a new chart template
+  (`proxmox-kamaji-cluster` 0.1.7, `templates/csi-controller.yaml`): plugin, attacher, provisioner and resizer, each with
+  the Kamaji admin kubeconfig (`admin.svc`) and the gateway config from `<id>-csi-gateway`. The tenant keeps the node
+  plugin with the upstream controller at 0 replicas (the chart's top-level `replicaCount`; the `controller.replicaCount`
+  the chart set before is no key of the upstream chart) and no config Secret; the resource set carries only the
+  `csi-proxmox` namespace. No `csi@pve!<id>` token is minted.
+- The create path mints the cluster's gateway credential (`Store.ControllerSecret`) when the portal has
+  `PROXCLOUD_CSI_GATEWAY_URL` + `PROXCLOUD_CSI_GATEWAY_CA_FILE`, the compute provider holds the gateway token and the
+  workers are the project's. Every storage profile is then a StorageClass; `csiSharedStores` no longer gates them. A
+  provider whose pinned `chartVersion` is older than 0.1.7 (`kamaji.ChartHasGatewayCSI`) refuses the create with 503.
+- `KamajiReleaseCluster` first revokes the credential and deletes every disk the registry still holds for the cluster
+  (`Store.ReleaseCluster`, gateway token), and keeps the marker while PVE refuses one. The cluster's PVE tokens,
+  addresses and dataset are released in the same pass even when that step fails.
+- Registry-driven billing: `csigw.VolumeRows` (a VOLUME sync provider in the PVE sync) makes each `ready`/`deleting` row a
+  VOLUME row of the project (`data.volume.k8sCluster`, the profile of its store, created at the disk's creation). It
+  leaves a `creating` row alone for 15 minutes; after that the row turns `ready` if PVE lists its disk and goes if not.
+  It closes rows whose disk is gone and takes size and volid from PVE. Disks match by name, so a file store's
+  `<vmid>/` directory does not hide one, in the reconcile and in the release. The PVE volume
+  sync keeps rows with `k8sCluster`; `VolumeRows` keeps all others. The portal answers 409 to a delete or action on one.
+  `CSIDiskQuota` counts the registry, not those rows, so a disk is counted once; other quota checks now see the disks.
+- Deployment: proxcloud chart `api.csiGateway` (port, Service with `externalTrafficPolicy: Local`, cert-manager CA and
+  leaf certificate, NetworkPolicy admitting the port from `allowedCIDRs` only, the API's other ports unchanged); the
+  listener reloads its certificate files. Installer stage 40 turns it on in split mode with the services nodes as the
+  sources (`pc_ip_cidrs`). With three mgmt nodes it pins the API to the first one (`pc_node_with_address`), the node
+  the gateway URL names.
+
+**Why**
+
+- The upstream chart cannot give its sidecars a kubeconfig, so the controller is our template; the in-cluster
+  kubeconfig avoids the tenant API allowlist. Leases and capacity objects stay in the tenant: the scheduler needs the
+  capacity objects (the CSIDriver says `storageCapacity`), and the lease names depend on the driver name only (seen on the
+  lab), so PR 3 can switch a cluster with one sync.
+- The release revokes the credential before it deletes, so nothing can create a disk behind it, and deletes from the
+  registry, so no disk of a deleted cluster stays on the store unbilled and with no owner, as the tenant-side controller
+  left any PVC still there at delete.
+- Two VOLUME providers reconcile one (provider, project, type) set, so each keeps the other's rows instead of archiving
+  them; a second row type or service id would have broken pricing rules and the project teardown.
+- The gateway port must not be reachable from tenant networks: a Local Service keeps the caller's address, which the
+  NetworkPolicy checks. On k3s a call to the node address meets kube-proxy's "loadbalancer IP" rule in `PREROUTING`
+  before the svclb pod's hostPort rule, so klipper-lb's MASQUERADE never sees it. Checked on the lab with a test
+  Service of the same shape: a services pod arrived as its node's address and was let in, the lab host was refused.
+  Local answers only on a node with an API pod, hence the pin with three mgmt nodes; a mgmt VIP would let the API move.
+  The CA keeps its key (`rotationPolicy: Never`) because every cluster's Secret holds it.
+- The chart gate: a cluster on a chart without the services-side controller would get the tenant controller at 0
+  replicas and no controller anywhere, so its PVCs would never bind. 0.1.7, because 0.1.6 is #108's NodeRestriction
+  chart.
+- A `creating` row whose disk exists is a create whose answer and confirm read were both lost (the name was unused
+  before, so the disk is the row's). Left creating, the plugin's retry got 409 forever and the disk was in quota but
+  not billed. Matching by exact volid missed file-store disks: the release closed the row and left the disk.
+- A release that cannot run its CSI step (a disk in use, a provider without the gateway token) must not keep the
+  cluster's PVE tokens and addresses: each part is safe to run again, so the sweep retries the whole release.
+- New clusters only; existing ones keep their tenant controller until the migration (PR 3).
+
+**Diagrams updated:** `c2-containers.md`, `c3-components.md`.
 ## 2026-11-07: Sandbox service ported, not reachable (SB1)
 
 **What changed**
@@ -283,6 +341,7 @@ Files: `deploy/charts/proxmox-kamaji-cluster/{Chart.yaml,values.yaml,templates/c
   it: the isolation rules do, and the warning says when a store is outside them.
 
 **Diagrams updated:** `c3-components.md`, `c4-code.md`.
+
 ## 2026-11-07: CSI gateway and volume registry (K8s-CSI, PR 1 of 4)
 
 **What changed**

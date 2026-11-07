@@ -79,6 +79,19 @@
               solvers:
                 - http01: {ingress: {ingressClassName: traefik}}
 
+    # The CSI gateway's Service keeps the caller's address (externalTrafficPolicy: Local), so only a node running an API
+    # pod answers on it, and its URL names the first mgmt node: with three, the API is pinned there.
+    - name: Read the k3s nodes for the CSI gateway
+      when: pc.mode == 'split' and groups['mgmt'] | length > 1
+      ansible.builtin.command: k3s kubectl get nodes -o json
+      register: pc_mgmt_nodes
+      changed_when: false
+      check_mode: false
+    - name: Name the first mgmt node
+      when: pc_mgmt_nodes.stdout is defined
+      ansible.builtin.set_fact:
+        pc_gateway_node: "{{ pc_mgmt_nodes.stdout | from_json | pc_node_with_address(pc_first_mgmt_ip) }}"
+
     - name: Apply the ProxCloud Application
       ansible.builtin.include_tasks: tasks/kube-apply.yml
       vars: {manifest: "{{ app_proxcloud }}", apply_name: proxcloud}
