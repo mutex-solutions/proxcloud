@@ -643,24 +643,7 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		if err != nil {
 			return err
 		}
-		// A backup goes with its server (pve/backup.go). If one cannot, the server stays and can be retried.
-		if store := es.PVEBackupStorage(); store != "" {
-			if err := ps.DeleteServerBackups(ctx, proj.ID, cr.ExternalID, store); err != nil {
-				return fmt.Errorf("delete the server's backups: %w", err)
-			}
-		}
-		// Volumes outlive the server unless the caller says otherwise. If moving one fails the server stays,
-		// and its data with it.
-		if !deleteVolumes {
-			// A replicated disk cannot leave its VM, and neither may HA restart the VM meanwhile.
-			if err := ps.DisableProtection(ctx, proj.ID, cr.ExternalID); err != nil {
-				return fmt.Errorf("disable protection: %w", err)
-			}
-			if err := ps.KeepServerVolumes(ctx, proj.ID, cr.ExternalID); err != nil {
-				return fmt.Errorf("keep the server's volumes: %w", err)
-			}
-		}
-		if err := ps.DeleteServer(ctx, proj.ID, cr.ExternalID); err != nil {
+		if err := ps.RetireServer(ctx, proj.ID, cr.ExternalID, es.PVEBackupStorage(), !deleteVolumes); err != nil {
 			return err
 		}
 		// The VM and its public NIC are gone: its addresses go back to the pool. A

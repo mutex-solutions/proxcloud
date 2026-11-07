@@ -4,6 +4,41 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Restore checks volumes and quota; a server delete drops backups last
+
+**What changed**
+
+- Restore compares volumes, not slots. A volume is held by an archive when the archive names its volid and its VOLUME row
+  is older than the backup; anything else is refused by name. The boot disk always counts.
+- A sync leaves a server's VOLUME rows alone while a restore task runs, and a disk with no row before the restore dates from
+  that backup (`dataSince`). A retype keeps the row and records when it took the new volid (`externalIdSince`).
+- A failed restore: the rows of the destroyed disks are archived, and the next restore is allowed through and counted by
+  what the rows say.
+- Restore checks vCPUs, RAM, disk and GPUs against the project's quota, on what it would produce, before stopping the
+  server and again after. A snapshot rollback checks vCPUs, RAM and GPUs the same way.
+- A server delete removes its backups after protection is off, the volumes have moved and a hard stop has worked, just
+  before the destroy, and refuses a VM holding a lock or under a running restore. It lists the backups before its first
+  change, so a store that cannot answer refuses with the server untouched.
+
+**Why**
+
+- A disk added after another left landed on the same slot, and PVE gives it the same name as well, so a forced restore
+  destroyed it while it was in no archive. The row is the one thing the portal holds that tells the two apart, so it has to
+  outlive a restore: PVE cuts the VM's config to `{memory: 128}` meanwhile, and a sync in that window archived every row of
+  the server, which also restarted their bills.
+- A retype can land on the name of a disk that left, on a row older than the backup, so the row's age said nothing there.
+- Resize down, spend the freed quota, restore: the project ended over its limit, and a disk now on another server was
+  recreated uncounted. A rollback restores cores and memory too, so it was the same bypass.
+- After a failed restore the VM kept billing for destroyed disks, a retry counted them twice, and the NIC check refused the
+  retry because the cut-down config has no NICs. A restore killed halfway also leaves its volumes on the storage in no
+  config, and the next restore fails on them. The token cannot delete a volume from the storage, but it can list one as a
+  detached disk and drop that entry, which frees it, so a failed restore and a retry both do that.
+- A refusal from protection, from moving a volume or from a failed stop left the server alive with its backups gone. The
+  delete cannot simply go last: PVE lets the token delete an archive only while its VM exists.
+- A running restore holds no lock on the config it has cut down, so the lock check alone let a delete remove both archives
+  under it. A store that was down refused only after the stop and the volume moves, leaving the server stopped and its data
+  on the holder.
+
 ## 2026-11-07: Image import goes through the portal
 
 **What changed**
