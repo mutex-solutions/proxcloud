@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
@@ -146,6 +147,21 @@ func (h *Handler) cloudResourceAudit(u *user.User, p *Project, action, verb stri
 		return
 	}
 	h.audit.LogAsync(newCloudResourceEvent(u, p, action, verb, cr))
+}
+
+// unauditedActions change nothing and hand out no credential. GET_KUBECONFIG and GET_CONNECTION_INFO are reads too, but
+// who took a credential is what an audit trail is for.
+var unauditedActions = map[string]bool{"GET_SETTINGS": true, "GET_POLICY": true, "GET_LOGS": true, "LIST_BACKUPS": true}
+
+// runAudited runs a provider's action handler and logs once it handled the action and succeeded, so a handler with many
+// actions needs no audit call on each success path. The event never carries the action's data: much of it is secret.
+func runAudited(w http.ResponseWriter, protoMajor int, action string, handle func(http.ResponseWriter) bool, log func()) bool {
+	ww := middleware.NewWrapResponseWriter(w, protoMajor)
+	handled := handle(ww)
+	if handled && ww.Status()/100 == 2 && !unauditedActions[action] {
+		log()
+	}
+	return handled
 }
 
 // newCloudResourceEvent builds the cloud-resource audit event (pure — no I/O, unit-testable).

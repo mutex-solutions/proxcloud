@@ -141,14 +141,14 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 		}
 		cidr, gateway, first, last, static, serr := ps.VnetStaticPool(ctx, vnet)
 		if serr != nil {
-			return sec, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, serr.Error())
+			return sec, upstreamErr(computeBackend, serr)
 		}
 		if !static {
 			return sec, httpx.BadRequest("Worker nodes need a network without DHCP (an EVPN or VLAN zone)")
 		}
 		_, ipnet, perr := net.ParseCIDR(cidr)
 		if perr != nil {
-			return sec, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, perr.Error())
+			return sec, upstreamErr(computeBackend, perr)
 		}
 		ones, _ := ipnet.Mask.Size()
 		in.Bridge, in.Gateway, in.Prefix = vnet, gateway, ones
@@ -157,7 +157,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 
 	// The marker goes first: nothing else records this cluster until CreateCluster, and a rollback can fail too.
 	if err = ks.RecordCluster(ctx, proj.ID, spec.ID, compute.ID); err != nil {
-		return sec, httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+		return sec, upstreamErr("Kubernetes backend", err)
 	}
 	defer func() {
 		if err != nil {
@@ -193,7 +193,7 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 			ISOStorage: pveISOStorage(compute), Zone: zone, Vnet: in.Bridge,
 		})
 		if terr != nil {
-			err = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "Could not mint the cluster's Proxmox tokens: "+terr.Error())
+			err = upstreamErr(computeBackend, terr)
 			return sec, err
 		}
 		capiID, capiSecret, csiID, csiSecret = toks.CAPIID, toks.CAPISecret, toks.CSIID, toks.CSISecret

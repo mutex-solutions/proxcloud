@@ -4,6 +4,23 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Provider actions are audited; a 502 hides its cause from tenants
+
+**What changed**
+
+- Share, managed Kubernetes, managed database and bucket settings actions write an audit event on success, in one place in
+  `cloudAction` through `cloudResourceAudit`. Plain reads do not. Taking a kubeconfig or a database's connection info does.
+- About 30 sites in `internal/platform/project` stopped returning a raw upstream error on a 502. What the tenant can act on
+  stays: a `ConflictError` is a 409 with its text, a full storage is a 409, and PVE's 400 on a firewall rule names the field.
+
+**Why**
+
+- Who changed a bucket policy or took a kubeconfig could not be traced, unlike a DNS record. A wrapper at the dispatch covers
+  every action, including those added later.
+- Raw errors carried the API's address, and on a proxied call a node's. Some user-facing refusals in `internal/cloud/pve`
+  were plain errors relying on that passthrough, so they became `ConflictError`. A test scans the package for new raw sites.
+
+**Diagrams updated:** none.
 ## 2026-11-07: The console proves a ceph-s3 row before storing it
 
 **What changed**
