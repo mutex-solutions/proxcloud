@@ -176,7 +176,7 @@ func (s *BillSendService) sendBill(ctx context.Context, profile *BillingProfile,
 			return nil
 		}
 		// The bill was issued just now, so any PENDING charge on it is this one.
-		if pending, _ := s.repo.PendingCollectForBill(ctx, bill.ID, time.Time{}); len(pending) > 0 {
+		if pending, _ := s.repo.PendingCollectForBill(ctx, bill.ID); len(pending) > 0 {
 			return nil
 		}
 	}
