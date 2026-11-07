@@ -6,6 +6,7 @@ package httpx
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 )
 
@@ -32,15 +33,26 @@ func Forbidden(msg string) *HTTPError {
 	return NewError(http.StatusForbidden, http.StatusForbidden, msg)
 }
 
-// WriteError writes a typed *HTTPError as the envelope and returns true; returns
-// false if err is not an *HTTPError (caller should 500).
+// RequestIDHeader carries the request id on every response (set by the server's middleware), so
+// WriteError can log it and a user can quote it.
+const RequestIDHeader = "X-Request-Id"
+
+// WriteError writes the error response for any non-nil err and returns true: a typed *HTTPError as
+// its envelope, anything else as a generic 500 "internal.error", with the error logged against the
+// request id and never sent to the client. A nil err writes nothing and returns false, so
+// `if httpx.WriteError(w, err) { return }` falls through on success.
 func WriteError(w http.ResponseWriter, err error) bool {
+	if err == nil {
+		return false
+	}
 	var he *HTTPError
 	if errors.As(err, &he) {
 		Err(w, he.Status, he.Code, he.Msg)
 		return true
 	}
-	return false
+	slog.Error("internal error", "err", err, "reqid", w.Header().Get(RequestIDHeader))
+	Err(w, http.StatusInternalServerError, http.StatusInternalServerError, "internal.error")
+	return true
 }
 
 // Response is the CustomHttpResponse<T> envelope. NOTE: `errors` is a single

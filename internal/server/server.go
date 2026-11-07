@@ -66,6 +66,15 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
+// exposeRequestID returns the request id as a response header, so httpx.WriteError can log an
+// internal error against it and a user can quote it.
+func exposeRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(httpx.RequestIDHeader, middleware.GetReqID(r.Context()))
+		next.ServeHTTP(w, r)
+	})
+}
+
 // corsMiddleware allows the browser FE origins (the UI + admin SPAs, which are served from
 // different subdomains than the api) to call the api cross-origin. The SPAs run on separate
 // subdomains from the api, so cross-origin support is required. Credentialed (Bearer) → echo
@@ -107,6 +116,7 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 func AppRouter(log *slog.Logger, corsOrigins []string, authn *auth.Authenticator, acct *account.Handler, orgH *org.Handler, roleH *org.RoleHandler, orgAuditH *org.AuditHandler, billingH *org.BillingHandler, billingCfgH *billing.ConfigHandler, projectH *project.Handler, pcfgH *platformconfig.Handler, featureH *feature.Handler, promotionH *promotion.Handler, affiliateH *affiliate.Handler, catalogH *catalog.Handler, orderH *order.Handler, inviteH *projectinvite.Handler, adminH *admin.Handler, adminAPIH *adminapi.Handler, sseH *sse.Handler, jobH *job.Handler, mcpH *mcp.Handler, ssoH *sso.Handler) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	r.Use(exposeRequestID)
 	r.Use(requestLogger(log)) // access log: method/path/status/latency per request (JSON, one line each)
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(corsOrigins)) // CORS + preflight, BEFORE auth (preflight must not 401)

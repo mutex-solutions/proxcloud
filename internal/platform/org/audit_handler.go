@@ -148,7 +148,5 @@ func (h *AuditHandler) list(w http.ResponseWriter, r *http.Request) {
 
 // fail is shared by the org-package handlers.
 func fail(w http.ResponseWriter, err error) {
-	if !httpx.WriteError(w, err) {
-		httpx.Err(w, http.StatusInternalServerError, 500, "internal.error")
-	}
+	httpx.WriteError(w, err)
 }
