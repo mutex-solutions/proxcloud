@@ -49,16 +49,22 @@ func (h *Handler) projectSetQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(doc)
+	// Only the quota: a replace of the whole doc from this read would put back a status changed since.
+	var err error
 	if len(body) == 0 {
-		delete(doc, "quota")
+		_, err = h.repo.SetAndUnsetFields(r.Context(), projectCollection, id, nil, pgdoc.M{"quota": nil})
 	} else {
-		doc["quota"] = body
+		_, err = h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"quota": body})
 	}
-	if err := h.repo.ReplaceDoc(r.Context(), projectCollection, id, doc); httpx.WriteError(w, err) {
+	if httpx.WriteError(w, err) {
 		return
 	}
-	audit.RecordSnapshots(r.Context(), before, doc)
-	httpx.OK(w, shapeDoc(doc))
+	after, err := h.repo.FindDoc(r.Context(), projectCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	audit.RecordSnapshots(r.Context(), before, after)
+	httpx.OK(w, shapeDoc(after))
 }
 
 type projectGPUUsageResponse struct {

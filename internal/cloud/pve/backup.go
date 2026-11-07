@@ -368,7 +368,7 @@ func (s *Service) RestoreServerBackup(ctx context.Context, projectID, externalID
 			}
 		}
 	}
-	if running {
+	if vm.PoweredOn() {
 		up, err := s.C.StopVM(ctx, vm.Node, vm.VMID)
 		if err == nil {
 			err = s.C.WaitTask(ctx, up)

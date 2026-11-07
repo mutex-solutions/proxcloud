@@ -18,9 +18,9 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
-// A stored PUBLIC ceph-s3 row that cannot reach RGW blocks provisioning of every new project, so the console's writes
-// prove it first. Writes that leave the connection alone must still work with RGW down.
-func TestConsoleChecksPublicCephRow(t *testing.T) {
+// A stored object-store row that cannot reach its store blocks provisioning of every new project, so the console's writes
+// prove it first, whatever its status. Writes that leave the connection alone must still work with RGW down.
+func TestConsoleChecksObjectStoreRow(t *testing.T) {
 	var keysSeen []string
 	rgwUp := true
 	rgw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,8 +66,15 @@ func TestConsoleChecksPublicCephRow(t *testing.T) {
 		return n
 	}
 
-	if w := do(http.MethodPost, "/admin/service", row("http://127.0.0.1:1", "PUBLIC")); w.Code != http.StatusBadRequest || stored() != 0 {
-		t.Fatalf("bad endpoint: status %d, stored %d: %s", w.Code, stored(), w.Body)
+	for _, status := range []string{"PUBLIC", "PRIVATE", "DISABLED"} {
+		if w := do(http.MethodPost, "/admin/service", row("http://127.0.0.1:1", status)); w.Code != http.StatusBadRequest || stored() != 0 {
+			t.Fatalf("bad %s endpoint: status %d, stored %d: %s", status, w.Code, stored(), w.Body)
+		}
+	}
+	rustfs := row("http://127.0.0.1:1", "PRIVATE")
+	rustfs["config"].(map[string]any)["provider"] = "rustfs"
+	if w := do(http.MethodPost, "/admin/service", rustfs); w.Code != http.StatusBadRequest || stored() != 0 {
+		t.Fatalf("bad rustfs endpoint: status %d, stored %d: %s", w.Code, stored(), w.Body)
 	}
 	w := do(http.MethodPost, "/admin/service", row(rgw.URL, "PUBLIC"))
 	if w.Code != http.StatusOK || stored() != 1 {
@@ -95,7 +102,26 @@ func TestConsoleChecksPublicCephRow(t *testing.T) {
 		t.Fatalf("bad update: status %d: %s", w.Code, w.Body)
 	}
 
+	// A stored row is tested with its stored key, and the answer follows the store.
+	keysSeen = nil
+	if w := do(http.MethodPost, path+"/object-store/test", nil); w.Code != http.StatusOK || len(keysSeen) != 1 || keysSeen[0] != "AK" {
+		t.Fatalf("test of a stored row: status %d, keys %q: %s", w.Code, keysSeen, w.Body)
+	}
+	if w := do(http.MethodPost, "/admin/service/no-such-row/object-store/test", nil); w.Code == http.StatusOK {
+		t.Fatalf("test of a missing row: status %d", w.Code)
+	}
+	var doc pgdoc.M
+	if _, err := db.C("externalService").Get(t.Context(), created.Data.ID, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if secret, _ := doc["secret"].(map[string]any); secret["adminAccessKey"] == "AK" {
+		t.Fatal("a check must not leave the secret decrypted in the store")
+	}
+
 	rgwUp = false
+	if w := do(http.MethodPost, path+"/object-store/test", nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("test of a stored row with RGW down: status %d: %s", w.Code, w.Body)
+	}
 	if w := do(http.MethodPut, path, map[string]any{"config": map[string]any{"services": map[string]any{}}}); w.Code != http.StatusOK {
 		t.Fatalf("RGW down, connection untouched: status %d: %s", w.Code, w.Body)
 	}

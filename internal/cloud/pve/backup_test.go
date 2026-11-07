@@ -36,6 +36,7 @@ type backupCluster struct {
 	active    string // the active qmrestore tasks, as JSON
 	leftovers string // the VM's volumes on storage z, as JSON
 	order     []string
+	qmp       string // qmpstatus the VM reports, running when empty
 	// destroyedAfter is how many archives were gone when the VM was destroyed, -1 while it stands.
 	destroyedAfter int
 }
@@ -79,7 +80,7 @@ func newBackupCluster(t *testing.T) *backupCluster {
 			task(w, r)
 		},
 		"GET /api2/json/nodes/pve1/qemu/101/status/current": func(w http.ResponseWriter, _ *http.Request) {
-			fmt.Fprint(w, `{"data":{"status":"running","name":"web"}}`)
+			fmt.Fprintf(w, `{"data":{"status":"running","qmpstatus":%q,"name":"web"}}`, b.qmp)
 		},
 		"GET /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprintf(w, `{"data":%s}`, b.cfg)
@@ -228,6 +229,16 @@ func TestRestoreServerBackup(t *testing.T) {
 	}
 	if b.stopped != 1 || b.started != 1 {
 		t.Fatalf("a running server comes back running: stop %d start %d", b.stopped, b.started)
+	}
+
+	// A paused server has to stop as well, or PVE refuses to restore over it, and it does not come back running.
+	b = newBackupCluster(t)
+	b.qmp = "paused"
+	if _, err := b.s.RestoreServerBackup(ctx, "p1", "101", "nas-backup", "nas-backup:backup/old", heldVolumes); err != nil {
+		t.Fatal(err)
+	}
+	if b.stopped != 1 || b.started != 0 {
+		t.Fatalf("paused: stop %d start %d", b.stopped, b.started)
 	}
 
 	// Without the privilege: refused at the config read, and the server was not even stopped.

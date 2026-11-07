@@ -242,7 +242,7 @@ func (s *Service) KeepServerVolumes(ctx context.Context, projectID, externalID s
 			release()
 		}
 	}()
-	if vm.Status == "running" {
+	if vm.PoweredOn() {
 		up, err := s.C.StopVM(ctx, vm.Node, vm.VMID)
 		if err != nil {
 			return err
