@@ -20,6 +20,60 @@ and rules: [README.md](README.md#maintenance-rule).
   watermark is the resource's start: a single line per server would back-charge a new snapshot to the server's creation.
 
 **Diagrams updated:** none (the metering flow is unchanged, one more billing resource on the SERVER row).
+## 2026-11-07: Split mode keeps the portal's SDN rights
+
+**What changed**
+
+- `mode: split` also grants `ProxCloudPlatform` on `/sdn/zones` to the portal token. Test connection reads `/sdn/zones`
+  as well as `/sdn`.
+
+**Why**
+
+- An ACL on a path replaces what its parent passes down. The mint grant alone took `SDN.*` away from the portal, so on
+  a split site no tenant network could be created. The lab showed it as soon as the grants were applied. No diagram
+  shows ACLs.
+
+**Diagrams updated:** none.
+
+## 2026-11-07: Object store connection checked at registration, public buckets always closable
+
+**What changed**
+
+- New `POST /admin/service/object-store/test`: the API checks a ceph-s3 endpoint and admin key without storing them.
+  Installer preflight requires the `ceph-rgw` values, stage 60 calls the test before it writes, updates the row's
+  endpoint and key on a re-run, and registers `object_store.region` as the provider's region.
+- A bucket's website state now also reads its public-read statement. Disable website removes that statement before it
+  touches the website config, and making a bucket private removes it too.
+
+**Why**
+
+- A wrong endpoint or key stored as a PUBLIC provider made every new project fail its bootstrap, after a green install,
+  and a re-run skipped the row. Checking from the API tests the network path the running platform will use. The region
+  shown to tenants was the Proxmox region name, which RGW rejects as a location constraint.
+- The statement publishes objects on the S3 endpoint whether or not the gateway has its website API. A gateway answering
+  405, or a provider with no website endpoint, left tenants with a public bucket and no control that closed it.
+
+**Diagrams updated:** none; no container or relationship changed.
+## 2026-11-07: Money paths: bill writers under the credit lock, unknown outcomes stay PENDING, unpaid upfront contracts held
+
+**What changed**
+
+- A recorded manual payment and a card charge settling on a bill now hold the profile's credit lock, like paying with
+  credits and issuing a bill. A charge the bill already holds changes nothing, and one succeeding on a bill paid some
+  other way becomes credit.
+- The transaction scanner closes a transaction only when the gateway answers it has no such intent. Any other error
+  leaves it `PENDING` with the reason, re-checked until it leaves the 24 hour window.
+- An upfront savings contract with no deposit and no operator on record never discounts. Such contracts that are `ACTIVE`
+  move to `PENDING_PAYMENT` at API start, and a new operator action records a payment taken outside the portal.
+
+**Why**
+
+- Each bill writer replaces the whole bill it read, so concurrent payments overwrote each other: a race test of 16
+  payments of 5 kept 50 of the 80 on the bill. A scanner marking a deposit `FAILED` on a network error needed a manual
+  repair if the money had moved, since `FAILED` is terminal, and it could also overwrite a settle that won meanwhile.
+  Upfront contracts bought before payments were enforced discounted every bill for money nobody paid.
+
+**Diagrams updated:** none, no container or component changed.
 
 ## 2026-11-07: Shared block on a TrueNAS LUN checked (P8-4, part)
 

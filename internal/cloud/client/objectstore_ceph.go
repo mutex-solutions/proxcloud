@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -699,25 +700,35 @@ func websiteErr(err error) error {
 	return err
 }
 
-// disableWebsite removes the website config AND the public-read statement enableWebsite installed, so
+// disableWebsite removes the public-read statement enableWebsite installed AND the website config, so
 // turning the website off closes anonymous access again — while LEAVING every other statement (customer
-// policy, per-key grants) untouched.
+// policy, per-key grants) untouched. CLOSE FIRST, the mirror of enableWebsite's publish last: the statement
+// is what exposes the objects, and it serves on the S3 endpoint whether or not the gateway still answers
+// website calls, so nothing about the config may stand in the way of removing it.
 func (b *cephBackend) disableWebsite(ctx context.Context, bucket string) error {
 	if err := b.needS3(); err != nil {
 		return err
-	}
-	if _, err := b.s3.DeleteBucketWebsite(ctx, &s3.DeleteBucketWebsiteInput{Bucket: &bucket}); err != nil &&
-		!strings.Contains(err.Error(), "NoSuchWebsiteConfiguration") {
-		return websiteErr(err)
 	}
 	doc, err := b.getPolicyDoc(ctx, bucket)
 	if err != nil {
 		return err
 	}
-	if !doc.removeStmt(sidWebsiteRead) {
-		return nil // nothing of ours to remove; never touch a policy we did not write
+	if doc.removeStmt(sidWebsiteRead) { // no statement of ours: never touch a policy we did not write
+		if err := b.putPolicyDoc(ctx, bucket, doc); err != nil {
+			return err
+		}
 	}
-	return b.putPolicyDoc(ctx, bucket, doc)
+	return b.dropWebsiteConfig(ctx, bucket)
+}
+
+// dropWebsiteConfig deletes the bucket's website config. No config, or a gateway without the website API
+// (405: the config is not in effect there), is already the wanted end state.
+func (b *cephBackend) dropWebsiteConfig(ctx context.Context, bucket string) error {
+	_, err := b.s3.DeleteBucketWebsite(ctx, &s3.DeleteBucketWebsiteInput{Bucket: &bucket})
+	if err == nil || strings.Contains(err.Error(), "NoSuchWebsiteConfiguration") || errors.Is(websiteErr(err), ErrWebsiteUnsupported) {
+		return nil
+	}
+	return err
 }
 
 // getWebsite reports the bucket's website config. A bucket with no config is NOT an error (enabled=false).
@@ -753,13 +764,20 @@ func (b *cephBackend) UpdateBucketMetadata(_ context.Context, _ string, _ map[st
 	return nil
 }
 
-// GetBucketWebsite reports the bucket's static-website configuration.
+// GetBucketWebsite reports the bucket's static-website state. The statement, not the config, is what
+// publishes the objects, and it outlives the config on a gateway that lost the website API (405) or after a
+// client deleted the config directly. Either counts as enabled, so the panel still offers the way to close it.
 func (b *cephBackend) GetBucketWebsite(ctx context.Context, bucket string) (*BucketWebsite, error) {
 	enabled, index, errDoc, err := b.getWebsite(ctx, bucket)
+	if err != nil && !errors.Is(websiteErr(err), ErrWebsiteUnsupported) {
+		return nil, err
+	}
+	doc, err := b.getPolicyDoc(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
-	w := &BucketWebsite{Enabled: enabled, IndexDocument: index, ErrorDocument: errDoc, PublicObjects: enabled}
+	public := slices.ContainsFunc(doc.Statement, func(s json.RawMessage) bool { return sidOf(s) == sidWebsiteRead })
+	w := &BucketWebsite{Enabled: enabled || public, IndexDocument: index, ErrorDocument: errDoc, PublicObjects: public}
 	if enabled {
 		w.URL = b.websiteURL(bucket)
 	}
@@ -779,6 +797,48 @@ func (b *cephBackend) EnableBucketWebsite(ctx context.Context, bucket, indexDoc,
 // DisableBucketWebsite stops serving the bucket as a website and removes the public-read policy.
 func (b *cephBackend) DisableBucketWebsite(ctx context.Context, bucket string) error {
 	return b.disableWebsite(ctx, bucket)
+}
+
+// --- registration check ---
+
+// adminCap is one entry of an RGW user's caps.
+type adminCap struct {
+	Type string `json:"type"`
+	Perm string `json:"perm"`
+}
+
+// CheckCephS3 proves a ceph-s3 connection before it is stored: a stored row that cannot reach RGW fails the
+// bootstrap of every new project. It reads the admin key's own user, so an endpoint that is not RGW or a key
+// that does not exist fails instead of reading as "user absent".
+func CheckCephS3(ctx context.Context, cfg ObjectStoreConfig) error {
+	for _, u := range []string{cfg.S3Endpoint, cfg.AdminURL} {
+		if p, err := url.Parse(u); err != nil || p.Host == "" || (p.Scheme != "http" && p.Scheme != "https") {
+			return fmt.Errorf("%q is not an http(s) URL", u)
+		}
+	}
+	if cfg.AdminAccessKey == "" || cfg.AdminSecretKey == "" {
+		return errors.New("the admin access key and secret key are required")
+	}
+	cfg.ProjectAccessKey, cfg.ProjectSecretKey = cfg.AdminAccessKey, cfg.AdminSecretKey // the S3 leg signs with the same key
+	b, err := newCephBackend(cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := b.s3.ListBuckets(ctx, &s3.ListBucketsInput{}); err != nil {
+		return fmt.Errorf("S3 endpoint %s: %w", cfg.S3Endpoint, err)
+	}
+	var self struct {
+		Caps []adminCap `json:"caps"`
+	}
+	if err := b.adminDo(ctx, "GET", "/user", url.Values{"access-key": {cfg.AdminAccessKey}}, nil, &self); err != nil {
+		return fmt.Errorf("Admin Ops %s: %w", cfg.AdminURL, err)
+	}
+	for _, want := range []string{"users", "buckets", "usage"} {
+		if !slices.Contains(self.Caps, adminCap{Type: want, Perm: "*"}) {
+			return fmt.Errorf("the admin key lacks the RGW cap %s=* (it needs users=*;buckets=*;usage=*)", want)
+		}
+	}
+	return nil
 }
 
 // --- provisioning (used by the bootstrap) ---

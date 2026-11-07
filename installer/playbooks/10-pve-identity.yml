@@ -54,6 +54,8 @@
       - {path: /pool, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /storage, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /sdn/zones, role: ProxCloudKubeMint, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
+      # An ACL on a path replaces what its parent passes down, so the mint grant alone takes SDN.* away from /sdn/zones.
+      - {path: /sdn/zones, role: ProxCloudPlatform, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}
       - {path: /nodes, role: ProxCloudKubeMint, propagate: 0, user: proxcloud@pve, token: proxcloud@pve!platform}
   tasks:
     - name: Log in

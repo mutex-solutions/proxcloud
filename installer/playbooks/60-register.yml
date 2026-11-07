@@ -219,25 +219,72 @@
       no_log: true
 
     - name: Register the Ceph RGW object store
-      when: pc.object_store.mode == 'ceph-rgw' and (pc.provider.name ~ ' S3') not in (pc_services.json.data | map(attribute='name') | list)
-      proxcloud_api:
-        access_key: "{{ api_key.id }}"
-        secret_key: "{{ api_key.secretKey }}"
-        url: "{{ pc_svc_api }}/admin/service"
-        method: POST
-        body:
-          name: "{{ pc.provider.name }} S3"
-          type: CLOUD
-          status: PUBLIC
-          config:
-            provider: ceph-s3
-            s3Endpoint: "{{ pc.object_store.endpoint }}"
-            adminApiUrl: "{{ pc.object_store.endpoint | regex_replace('/+$', '') }}/admin"
-            region: "{{ pc.provider.region }}"
-            regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
-            services: {object-store: "{{ {pc.provider.region: true} }}"}
-          secret: {adminAccessKey: "{{ pc.object_store.access_key }}", adminSecretKey: "{{ pc.object_store.secret_key }}"}
-      no_log: true
+      when: pc.object_store.mode == 'ceph-rgw'
+      vars:
+        rgw_name: "{{ pc.provider.name }} S3"
+        rgw_row: "{{ pc_services.json.data | selectattr('name', 'eq', rgw_name) | list | first | default({}) }}"
+        rgw_connection:
+          s3Endpoint: "{{ pc.object_store.endpoint }}"
+          adminApiUrl: "{{ pc.object_store.endpoint | regex_replace('/+$', '') }}/admin"
+        rgw_secret: {adminAccessKey: "{{ pc.object_store.access_key }}", adminSecretKey: "{{ pc.object_store.secret_key }}"}
+      block:
+        - name: Check the RGW endpoint and admin key
+          # A stored row that cannot reach RGW fails the bootstrap of every new project, so nothing is stored
+          # until this passes. The request carries the key, hence no_log and the assert that shows the reason.
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service/object-store/test"
+            method: POST
+            body: "{{ rgw_connection | combine(rgw_secret) | combine({'region': pc.object_store.region}) }}"
+            ok_status: [200, 400]
+          changed_when: false
+          register: pc_rgw_check
+          no_log: true
+        - name: Report the RGW check
+          ansible.builtin.assert:
+            that: pc_rgw_check.status == 200
+            fail_msg: "{{ pc_rgw_check.json.errors.message | default('The object store check did not pass') }}"
+            quiet: true
+        - name: Refuse to turn another object store's row into Ceph RGW
+          # Its buckets live on the old store, so re-pointing the row would hide them. Not a supported move.
+          when: rgw_row and rgw_row.config.provider != 'ceph-s3'
+          ansible.builtin.fail:
+            msg: "{{ rgw_name }} is a {{ rgw_row.config.provider }} provider. Changing object_store.mode on an installed site is not supported."
+        - name: Create the Ceph RGW provider
+          when: not rgw_row
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service"
+            method: POST
+            body:
+              name: "{{ rgw_name }}"
+              type: CLOUD
+              status: PUBLIC
+              config: >-
+                {{ rgw_connection | combine({'provider': 'ceph-s3',
+                  'region': pc.object_store.region,
+                  'regions': {pc.object_store.region: {'displayName': pc.provider.region_name}},
+                  'services': {'object-store': {pc.object_store.region: true}}}) }}
+              secret: "{{ rgw_secret }}"
+          no_log: true
+        - name: Keep the Ceph RGW connection in line
+          # The inventory owns the endpoint and key: a corrected value or a rotated key lands on a re-run. The
+          # secret cannot be read back to compare, so this always writes.
+          when: rgw_row
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service/{{ rgw_row.id }}"
+            method: PUT
+            body: {config: "{{ rgw_connection }}", secret: "{{ rgw_secret }}"}
+          no_log: true
+        - name: Report a region that no longer applies
+          # Projects store the region at bootstrap, so the row keeps the one it was created with.
+          when: rgw_row and rgw_row.config.region != pc.object_store.region
+          ansible.builtin.debug:
+            msg: "{{ rgw_name }} keeps region {{ rgw_row.config.region }}; object_store.region {{ pc.object_store.region }} applies only when the row is created."
 
     - name: Has the first-run configuration been seeded
       ansible.builtin.stat: {path: "{{ pc_gen }}/operator-seeded"}

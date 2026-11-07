@@ -46,6 +46,13 @@ assert f.pve_acl_missing(rows, want) == [{"path": "/pool", "roles": "R", "propag
 rows.append({"path": "/pool", "roleid": "R", "type": "token", "ugid": "u@pve!t", "propagate": 1})
 assert f.pve_acl_missing(rows, want) == []
 
+# An ACL on a path replaces what its parent passes down: wherever split mode grants the portal token the mint role on
+# a path it works under, the same path must keep its platform role.
+stage = open(os.path.join(os.path.dirname(__file__), "..", "playbooks", "10-pve-identity.yml")).read()
+for path in ("/pool", "/storage", "/sdn/zones"):
+    for role in ("ProxCloudKubeMint", "ProxCloudPlatform"):
+        assert f"{{path: {path}, role: {role}, propagate: 1, user: proxcloud@pve, token: proxcloud@pve!platform}}" in stage, (path, role)
+
 # SigV4 against the worked example the Go verifier also accepts (pkg/auth/sigv4_test.go signs the same way).
 h = api.sigv4_headers("POST", "http://10.0.0.1:8080/api/v1/admin/service?b=1&a=2", b'{"x":1}', "pkA", "skB", "20261107T010203Z")
 assert h["Host"] == "10.0.0.1:8080"

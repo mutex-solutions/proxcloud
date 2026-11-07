@@ -119,7 +119,17 @@ func upfrontPrice(monthly decimal.Decimal, months int, discountRate decimal.Deci
 // ActivatePaidSavingsContract flips a contract from PENDING_PAYMENT to ACTIVE, once: a concurrent
 // settle or cancel loses. Reports whether this caller won.
 func (r *Repo) ActivatePaidSavingsContract(ctx context.Context, c *SavingsContract, txnID string, now time.Time) (bool, error) {
-	set := map[string]any{"status": SavingsStatusActive, "paymentTransactionId": txnID, "updatedAt": now}
+	return r.activateUpfront(ctx, c, map[string]any{"paymentTransactionId": txnID}, now)
+}
+
+// RecordUpfrontPayment is ActivatePaidSavingsContract for money an operator took outside the portal: they
+// answer for it, where a deposit would be the record.
+func (r *Repo) RecordUpfrontPayment(ctx context.Context, c *SavingsContract, reference, recordedBy string, now time.Time) (bool, error) {
+	return r.activateUpfront(ctx, c, map[string]any{"paymentReference": reference, "paymentRecordedBy": recordedBy}, now)
+}
+
+func (r *Repo) activateUpfront(ctx context.Context, c *SavingsContract, set map[string]any, now time.Time) (bool, error) {
+	set["status"], set["updatedAt"] = SavingsStatusActive, now
 	// A term whose start went by while the contract waited for its money starts now: the customer
 	// paid for all of it.
 	if c.StartDate != nil && c.StartDate.Before(firstOfMonth(now, 0)) {
@@ -129,6 +139,37 @@ func (r *Repo) ActivatePaidSavingsContract(ctx context.Context, c *SavingsContra
 		c.StartDate, c.EndDate = &start, &end
 	}
 	return r.savingCtrs.SetFieldsOne(ctx, map[string]any{"_id": c.ID, "status": SavingsStatusPendingPayment}, set, nil)
+}
+
+// HoldUnpaidUpfrontContracts moves the upfront contracts that are ACTIVE with no record of their money to
+// PENDING_PAYMENT, priced, where the customer can pay them and an operator can record a payment taken
+// elsewhere. Those exist because a customer's upfront purchase used to go ACTIVE at once, and they would
+// otherwise discount every bill for nothing. What they already discounted stays on those bills. Runs at
+// boot: a held contract no longer matches, so a second run changes nothing. Returns the ids it moved.
+func (r *Repo) HoldUnpaidUpfrontContracts(ctx context.Context, now time.Time) ([]string, error) {
+	contracts, err := findTyped[SavingsContract](ctx, r.savingCtrs, map[string]any{"status": SavingsStatusActive, "paidUpfront": true})
+	if err != nil {
+		return nil, err
+	}
+	held := []string{}
+	for i := range contracts {
+		c := &contracts[i]
+		if !c.UpfrontUnpaid() || (c.EndDate != nil && c.EndDate.Before(now)) { // the expiry job closes those
+			continue
+		}
+		set := map[string]any{"status": SavingsStatusPendingPayment, "updatedAt": now}
+		if c.MonthlyCommittedAmount != nil && c.DiscountRate != nil {
+			set["upfrontAmount"] = upfrontPrice(*c.MonthlyCommittedAmount, c.DurationMonths, *c.DiscountRate)
+		}
+		won, err := r.savingCtrs.SetFieldsOne(ctx, map[string]any{"_id": c.ID, "status": SavingsStatusActive}, set, nil)
+		if err != nil {
+			return held, err
+		}
+		if won {
+			held = append(held, c.ID)
+		}
+	}
+	return held, nil
 }
 
 // firstOfMonth returns the first day of the month addMonths from now (UTC midnight).
