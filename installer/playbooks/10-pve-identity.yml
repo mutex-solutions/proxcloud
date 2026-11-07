@@ -38,6 +38,9 @@
       - {path: /sdn/zones/localnetwork, role: ProxCloudImages, propagate: 1, user: images@pve, token: images@pve!packer}
     # Image import deletes what it downloaded, and deleting a file takes Datastore.Allocate. Only on this store.
     nas_acls: "{{ [{'path': '/storage/' ~ pc.nas.names.templates, 'role': 'PVEDatastoreAdmin', 'propagate': 0, 'user': 'proxcloud@pve', 'token': 'proxcloud@pve!platform'}] if pc.nas.host | length > 0 and 'templates' in pc.nas.exports else [] }}"
+    # That ACL shadows /storage for the token, so mode=split repeats the mint role there: a cluster's token gets its ACL on
+    # the ISO store, which is usually this one, and writing it takes Permissions.Modify on the path.
+    nas_mint_acls: "{{ [{'path': '/storage/' ~ pc.nas.names.templates, 'role': 'ProxCloudKubeMint', 'propagate': 0, 'user': 'proxcloud@pve', 'token': 'proxcloud@pve!platform'}] if nas_acls | length > 0 else [] }}"
     # mode=split: what the services cluster and the per-cluster tokens of tenant clusters hang off.
     # Unexercised on a lab so far: see "Managed Kubernetes" in docs/proxmox-permissions.md.
     split_roles:
@@ -164,5 +167,5 @@
         body_format: form-urlencoded
         body: "{{ item }}"
       changed_when: true
-      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls if pc.mode == 'split' else [])) }}"
+      loop: "{{ pc_id.results[3].json.data | pc_acl_missing(acls + nas_acls + (split_acls + nas_mint_acls if pc.mode == 'split' else [])) }}"
       loop_control: {label: "{{ item.path }} {{ item.roles }}"}
