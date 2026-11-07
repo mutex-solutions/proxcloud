@@ -41,6 +41,7 @@ func TestMemberCannotLiftSuspension(t *testing.T) {
 		"organization":         {"_id": "o1", "name": "o", "billingProfileId": "bp-cur"},
 		"organization_members": {"organizationId": "o1", "sub": sub, "roles": []string{"OWNER"}},
 		"users":                {"sub": sub, "email": "o@example.org"},
+		"billingConfiguration": {"_id": "default", "baseCurrency": "USD"},
 	} {
 		if _, err := db.C(coll).InsertOne(ctx, doc); err != nil {
 			t.Fatal(err)

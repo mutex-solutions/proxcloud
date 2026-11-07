@@ -95,6 +95,33 @@ and rules: [README.md](README.md#maintenance-rule).
 - Refusing the profile move, rather than pausing through the suspender, because the move is the tenant's own action and
   activation has no leg that resumes VMs. A refusal has no partial failure and tells them what to do.
 
+**Then, on the same PR, what a second recheck found**
+
+- `ActivationService.Suspend` and `SuspensionJob.suspend` save `SUSPENDED` before the cloud walk. `SuspensionJob.ExecuteDunning`
+  starts by walking every `SUSPENDED` profile again (`finishSuspensions`), before the check that dunning is on. The walk skips what
+  is already down. When a walk ends and the profile reads `ACTIVE`, the resume leg runs once more.
+- A process already `SUSPENDED` on an `ACTIVE` profile no longer stops dunning: it is a suspend whose profile save failed, and the
+  next pass carries on from it.
+- The client's `DELETE /billing-profile/{id}` refuses a `SUSPENDED` profile, a negative balance, or one still paying for a project.
+- `holdForProfile` takes "no profile" as well as a `NEW` one, covers every row type billing rates (`billableRows`) and a `DISABLED`
+  project too, and does nothing when billing is unconfigured.
+- `KeepServerVolumes`, `RebuildServer`, `ResizeServer` and `RestoreServerBackup` test `PoweredOn` before changing a VM: a paused VM
+  reads `paused`, so they skipped the stop. `START` on a paused VM resumes it.
+
+**Why**
+
+- With the walk first, a member opening a project during it saw `DISABLED` on an `ACTIVE` profile and lifted it, and the suspension
+  was lost for good. Saving first closes that, and leaves the failure cases to choose between. `ACTIVE` with projects down and
+  nothing retrying is the one to rule out, so a failed save touches nothing and a failed walk stands as `SUSPENDED`.
+- The pass is level-triggered rather than a retry marker. A marker only knows what a walk reported, and it would miss a crash, a
+  VM whose row appeared after the walk, and a lift racing the save. The price: an operator's enable under a suspended profile lasts
+  until the next pass, because nothing tells it from a missed project.
+- A suspended project could get out by deleting the profile, since `updateOrganization` skips its check when there is none. An org
+  with no profile was skipped too, and left a running project `ENABLED` and unrated.
+- Billing unconfigured leaves every profile `NEW`, so the hold refused or disabled every move on a portal that bills nothing.
+- Buckets and volumes were not in the check, so a tenant could park storage on a `NEW` profile, `DISABLED` and unrated, with its S3
+  keys still working against the store.
+
 **Diagrams updated:** none; no container or relationship changed.
 
 ## 2026-11-07: A server's name is checked against PVE's rule

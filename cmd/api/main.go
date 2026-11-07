@@ -1235,7 +1235,12 @@ func (s billingCloudSuspender) pauseProjectServers(ctx context.Context, p *proje
 		}
 		for si := range servers {
 			vm, rerr := ps.ResolveVM(ctx, p.ID, servers[si].ExternalID)
-			if rerr != nil || vm == nil {
+			if rerr != nil {
+				s.log.Error("suspender: read server", "server", servers[si].ExternalID, "pause", pause, "err", rerr)
+				continue
+			}
+			// A walk repeats until the profile is settled, so it skips what is already where it should be.
+			if vm == nil || (pause && vm.Status != "running") || (!pause && vm.Status != "paused") {
 				continue
 			}
 			var upid pve.UPID

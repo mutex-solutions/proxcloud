@@ -337,8 +337,8 @@ func (h *Handler) billingSummary(w http.ResponseWriter, r *http.Request) {
 // project's own billingProfileId by-id 404 (no org fallback); the target resolves through the
 // getBillingProfile(sub,id) read gate (bp 404 → org 404 → BILLING_PROFILE_READ 403). Then the
 // project status is synced (NEW → DISABLED) + the billingProfileId swap.
-// A move to a profile that cannot pay disables the project, and is refused while something runs (holdForProfile), so there is
-// nothing to suspend here.
+// A move to a profile that cannot pay disables the project, and is refused while it holds anything billable (holdForProfile), so
+// there is nothing to suspend here.
 func (h *Handler) changeBillingProfile(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
@@ -426,37 +426,60 @@ func (h *Handler) changeBillingProfile(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, *proj)
 }
 
-// holdForProfile disables the project when the profile it is moving to cannot pay. Metering and rating cover only ENABLED
-// projects, so what runs under such a profile would run free. Pausing it from here would be a tenant's own billing change
-// freezing its workloads, and activation has no leg to resume them, so the move is refused until they are stopped.
+// holdForProfile disables the project when what it is moving to cannot pay: a profile not active yet, or none at all (nil).
+// Metering and rating cover only ENABLED projects, so what it holds there would go unbilled. Pausing it from here would be a
+// tenant's own billing change freezing its workloads, and activation has no leg to resume them, so the move is refused until
+// nothing billable is left. With billing unconfigured profiles stay NEW for good and nothing is rated anywhere: nothing to hold.
 func (h *Handler) holdForProfile(ctx context.Context, proj *Project, target *billing.BillingProfile) error {
-	if target.Status != billing.StatusNew && target.Status != billing.StatusSuspended {
+	if target != nil && target.Status != billing.StatusNew && target.Status != billing.StatusSuspended {
 		return nil
 	}
-	if proj.IsEnabled() {
-		what, err := h.runningResource(ctx, proj)
-		if err != nil {
-			return err
+	_, _, configured, err := h.billing.Configuration(ctx)
+	if err != nil {
+		return err
+	}
+	if !configured {
+		return nil
+	}
+	what, err := h.billableResource(ctx, proj)
+	if err != nil {
+		return err
+	}
+	if what != "" {
+		why, fix := "This billing profile is not active yet", "activate the profile"
+		if target == nil {
+			why, fix = "That organization has no billing profile", "add one"
 		}
-		if what != "" {
-			return httpx.NewError(http.StatusConflict, http.StatusConflict,
-				"This billing profile is not active yet, and "+what+" would run unbilled on it. Stop or delete it first, or activate the profile")
-		}
+		return httpx.NewError(http.StatusConflict, http.StatusConflict,
+			why+", and "+what+" in this project would go unbilled. Delete it first, or "+fix)
 	}
 	proj.Status = StatusDisabled
 	return nil
 }
 
-// runningResource names one thing in the project that would keep running if it were disabled, "" when there is none. Live for
-// VMs: a row can lag a start, and not knowing refuses the change.
-func (h *Handler) runningResource(ctx context.Context, proj *Project) (string, error) {
-	for t, what := range map[string]string{cloud.TypeKubernetesCluster: "a Kubernetes cluster", cloud.TypeDatabaseCluster: "a managed database"} {
-		rows, err := h.cloud.FindByProjectAndType(ctx, proj.ID, t)
+// billableRows is every row type the charge job rates (the billing registry in cmd/api), with the words the refusal uses. Storage
+// counts as much as what runs: S3 keys already issued keep working against the store while the project sits DISABLED.
+var billableRows = []struct{ rowType, what string }{
+	{cloud.TypeKubernetesCluster, "a Kubernetes cluster"},
+	{cloud.TypeDatabaseCluster, "a managed database"},
+	{cloud.TypeServer, "a server"},
+	{cloud.TypeVolume, "a volume"},
+	{cloud.TypeBucket, "a bucket"},
+	{cloud.TypeShare, "a file share"},
+	{cloud.TypeFloatingIP, "a public IP"},
+	{cloud.TypeImage, "an image"},
+}
+
+// billableResource names one thing the project holds that billing would rate, "" when there is none. Live for VMs as well as
+// from rows: a row can lag a start, and not knowing refuses the change.
+func (h *Handler) billableResource(ctx context.Context, proj *Project) (string, error) {
+	for _, b := range billableRows {
+		rows, err := h.cloud.FindByProjectAndType(ctx, proj.ID, b.rowType)
 		if err != nil {
 			return "", err
 		}
 		if len(rows) > 0 {
-			return what, nil
+			return b.what, nil
 		}
 	}
 	if h.pveFor == nil {
@@ -481,7 +504,7 @@ func (h *Handler) runningResource(ctx context.Context, proj *Project) (string, e
 		pool := ps.PoolFor(proj.ID)
 		for _, r := range rows {
 			if r.Pool == pool && r.Status != "stopped" && r.Template != 1 {
-				return "VM " + r.Name, nil
+				return "server " + r.Name, nil
 			}
 		}
 	}
@@ -728,22 +751,22 @@ func (h *Handler) updateOrganization(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	expect := proj.Status
+	var next *billing.BillingProfile // stays nil for an organization with no profile, or a deleted one
 	if target.BillingProfileID != "" {
-		next, err := h.billing.FindByID(r.Context(), target.BillingProfileID)
-		if err != nil {
+		if next, err = h.billing.FindByID(r.Context(), target.BillingProfileID); err != nil {
 			h.fail(w, err)
 			return
 		}
-		if next != nil {
-			if err := profileValidForChanging(r.Context(), bal, next, now); err != nil {
-				h.fail(w, err)
-				return
-			}
-			if err := h.holdForProfile(r.Context(), proj, next); err != nil {
-				h.fail(w, err)
-				return
-			}
+	}
+	if next != nil {
+		if err := profileValidForChanging(r.Context(), bal, next, now); err != nil {
+			h.fail(w, err)
+			return
 		}
+	}
+	if err := h.holdForProfile(r.Context(), proj, next); err != nil {
+		h.fail(w, err)
+		return
 	}
 	proj.OrganizationID = target.ID
 	proj.BillingProfileID = ""
