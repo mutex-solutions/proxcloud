@@ -10,6 +10,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
@@ -129,4 +130,25 @@ func TestExternalServiceMutRoutesNoPanic(t *testing.T) {
 		}
 	}()
 	(&Handler{}).routeExternalServiceMut(chi.NewRouter())
+}
+
+// A range in snatSources would open every share of the provider to it, so the save refuses it.
+func TestApplyServiceConnectionBodyRefusesSNATRange(t *testing.T) {
+	h := &Handler{}
+	nas := func() pgdoc.M { return pgdoc.M{"config": pgdoc.M{"provider": "truenas"}} }
+	put := func(doc pgdoc.M, cfg string) *httpx.HTTPError {
+		return h.applyServiceConnectionBody(httptest.NewRequest(http.MethodPut, "/service/n", strings.NewReader(`{"config":{`+cfg+`}}`)), doc)
+	}
+	if put(nas(), `"snatSources":["192.0.2.0/24"]`) == nil {
+		t.Fatal("range accepted")
+	}
+	if herr := put(nas(), `"snatSources":["192.0.2.1"]`); herr != nil {
+		t.Fatalf("host refused: %#v", herr)
+	}
+	if herr := put(nas(), `"snatSources":[]`); herr != nil {
+		t.Fatalf("clearing refused: %#v", herr)
+	}
+	if herr := put(nas(), `"parentDataset":"tank/shares"`); herr != nil {
+		t.Fatalf("save without the key refused: %#v", herr)
+	}
 }

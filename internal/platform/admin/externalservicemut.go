@@ -106,6 +106,12 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	if _, ok := doc["status"]; !ok {
 		doc["status"] = "PUBLIC"
 	}
+	if cfg, ok := doc["config"].(map[string]any); ok && cfg["provider"] == "truenas" {
+		if _, err := externalservice.ParseSNATSources(cfg["snatSources"]); err != nil {
+			httpx.WriteError(w, httpx.BadRequest(err.Error()))
+			return
+		}
+	}
 	// Stable string _id (String-id convention — same shape as the seeded provider docs;
 	// projects reference the service by this id string).
 	doc["_id"] = pgdoc.NewID()
@@ -182,6 +188,11 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 		if raw, ok := c["storageProfiles"]; ok && cfg["provider"] == "proxmox" {
 			if herr := h.validatePVEStorageProfiles(req, cfg, raw); herr != nil {
 				return herr
+			}
+		}
+		if cfg["provider"] == "truenas" {
+			if _, err := externalservice.ParseSNATSources(c["snatSources"]); err != nil {
+				return httpx.BadRequest(err.Error())
 			}
 		}
 	}

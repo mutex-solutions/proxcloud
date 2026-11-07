@@ -242,3 +242,48 @@ func TestReconcileShareAccessRewritesStaleExports(t *testing.T) {
 		t.Fatalf("%d writes, want 1: an unchanged export must not be rewritten", f.nas.updates)
 	}
 }
+
+// A provider's NAT address stays on the export through the sync and through a release, and leaves with the setting. A
+// provider without the setting holds only the project's addresses, as the other tests here show.
+func TestSNATSourceFollowsTheProviderSetting(t *testing.T) {
+	ctx := context.Background()
+	f := newShareAccessFixture(t)
+	setSNAT := func(v any) {
+		t.Helper()
+		if _, err := f.db.Pool.Exec(ctx, `UPDATE "externalService" SET doc = jsonb_set(doc, '{config,snatSources}', $1::jsonb) WHERE id = 'svc-nas'`, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const own = "10.100.0.0/24,10.100.1.0/24,10.89.0.10/32"
+
+	setSNAT(`["192.0.2.1"]`)
+	f.nas.networks = []string{"10.100.0.0/24", "10.89.0.10/32"}
+	if err := f.handler.ReconcileShareAccess(ctx, f.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.nas.current(), ","); got != own+",192.0.2.1/32" {
+		t.Fatalf("with the setting: %s", got)
+	}
+	writes := f.nas.updates
+	if err := f.handler.ReconcileShareAccess(ctx, f.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if f.nas.updates != writes {
+		t.Fatal("a current export was rewritten")
+	}
+
+	if err := f.ips.ReleaseServer(ctx, "svc-pve", "100"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.nas.current(), ","); got != "10.100.0.0/24,10.100.1.0/24,192.0.2.1/32" {
+		t.Fatalf("after a release: %s", got)
+	}
+
+	setSNAT(`[]`)
+	if err := f.handler.ReconcileShareAccess(ctx, f.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.nas.current(), ","); got != "10.100.0.0/24,10.100.1.0/24" {
+		t.Fatalf("setting removed: %s", got)
+	}
+}
