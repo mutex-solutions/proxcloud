@@ -306,6 +306,45 @@ func (h *Handler) tryTenantClient(ctx context.Context, p *Project, svcID string)
 // made after that would stay behind with nothing to remove it. Deletes stay open.
 var errProjectDeleting = httpx.NewError(http.StatusConflict, http.StatusConflict, "This project is being deleted")
 
+// errProjectDisabled refuses what would add usage to a DISABLED project: metering, the sync and rating cover only ENABLED ones,
+// so anything started here would run free.
+var errProjectDisabled = httpx.NewError(http.StatusConflict, http.StatusConflict,
+	"This project is suspended: nothing can be created or started until it is enabled again. You can still read, stop and delete its resources")
+
+// refuseNewUsage is the gate of whatever adds to a project: a create, an upload, a new key.
+func refuseNewUsage(p *Project) error {
+	switch {
+	case p.Deleting():
+		return errProjectDeleting
+	case p.IsDisabled():
+		return errProjectDisabled
+	}
+	return nil
+}
+
+// allowedWhileDisabled is every action a DISABLED project keeps: reads, and what lowers its usage or clears the way for a
+// delete. An allow-list, so an action added later is refused until someone decides otherwise. Reads go by name: every action
+// reading state is called GET_, LIST_, SHOW_ or IS_, and DOWNLOAD reads an object.
+func allowedWhileDisabled(action string, data map[string]any) bool {
+	if action == "INVOKEACTION" {
+		action = strings.ToUpper(strAny(data["action"]))
+	}
+	for _, read := range []string{"GET_", "LIST_", "SHOW_", "IS_"} {
+		if strings.HasPrefix(action, read) {
+			return true
+		}
+	}
+	switch action {
+	case "DOWNLOAD",
+		"STOP", "SHUTOFF", "SHUTDOWN",
+		"DETACH", "DETACH_PUBLIC_NETWORK", "DISABLE_PROTECTION",
+		"DELETE_SNAPSHOT", "DELETE_BACKUP", "DELETE_OBJECT",
+		"DISABLE_WEBSITE", "MAKE_BUCKET_PRIVATE", "REVOKE_KEY":
+		return true
+	}
+	return false
+}
+
 func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
@@ -315,8 +354,8 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if proj.Deleting() {
-		h.fail(w, errProjectDeleting)
+	if err := refuseNewUsage(proj); err != nil {
+		h.fail(w, err)
 		return
 	}
 	svcID := h.resolveServiceID(r, proj)
@@ -514,7 +553,7 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 			if err := h.pveDeleteResource(r.Context(), es, proj, cr, r.URL.Query().Get("deleteVolumes") == "true"); err != nil {
 				var he *httpx.HTTPError
 				if !errors.As(err, &he) {
-					he = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+					he = pveVolumeErr(err)
 				}
 				h.fail(w, he)
 				return
@@ -633,16 +672,27 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, httpx.BadRequest("invalid request body"))
 		return
 	}
+	if proj.IsDisabled() && !allowedWhileDisabled(req.Action, req.Data) {
+		h.fail(w, errProjectDisabled)
+		return
+	}
 
 	// ceph-s3 bucket configuration + per-key grants (GET_SETTINGS, SET_VERSIONING, SET_QUOTA, …).
 	// Handled first: they act on THIS bucket and already run against cr.ServiceID.
-	if h.bucketSettingsAction(w, r, proj, svcID, externalID, req.Action, req.Data) {
+	audited := func(handle func(http.ResponseWriter) bool) bool {
+		return runAudited(w, r.ProtoMajor, req.Action, handle, func() {
+			h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", req.Action, cr)
+		})
+	}
+	if audited(func(w http.ResponseWriter) bool {
+		return h.bucketSettingsAction(w, r, proj, svcID, externalID, req.Action, req.Data)
+	}) {
 		return
 	}
 
 	if cr.Type == cloud.TypeShare {
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsTrueNAS() {
-			if h.shareAction(w, r, proj, es, cr, req.Action, req.Data) {
+			if audited(func(w http.ResponseWriter) bool { return h.shareAction(w, r, proj, es, cr, req.Action, req.Data) }) {
 				return
 			}
 		}
@@ -663,7 +713,7 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	// act-on-THIS-resource rule, against the resource's own (kamaji) service.
 	if cr.Type == cloud.TypeKubernetesCluster {
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil {
-			if h.kamajiAction(w, r, proj, es, cr, req.Action, req.Data) {
+			if audited(func(w http.ResponseWriter) bool { return h.kamajiAction(w, r, proj, es, cr, req.Action, req.Data) }) {
 				return
 			}
 		}
@@ -672,7 +722,7 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	// dbaas managed database actions (GET_CONNECTION_INFO, RESIZE, SCALE_REPLICAS, …).
 	if cr.Type == cloud.TypeDatabaseCluster {
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil {
-			if h.dbaasAction(w, r, proj, es, cr, req.Action, req.Data) {
+			if audited(func(w http.ResponseWriter) bool { return h.dbaasAction(w, r, proj, es, cr, req.Action, req.Data) }) {
 				return
 			}
 		}
@@ -1031,6 +1081,10 @@ func (h *Handler) cloudUploadBucketFile(w http.ResponseWriter, r *http.Request) 
 	}
 	proj, ok := h.project(w, r, u, rbac.ProjectCloudResourceManage)
 	if !ok {
+		return
+	}
+	if err := refuseNewUsage(proj); err != nil {
+		h.fail(w, err)
 		return
 	}
 	cr, _ := h.cloud.FindByID(r.Context(), chi.URLParam(r, "resourceId"))

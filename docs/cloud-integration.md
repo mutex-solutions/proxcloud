@@ -685,19 +685,25 @@ precedence over `fingerprint`, which only ever matches one node.
 
 ## Protected servers (replication + HA)
 
-An opt-in per server: ZFS replication every 15 minutes to a second node, plus an HA resource with a strict
-node-affinity rule over the two. Code: `internal/cloud/pve/protect.go`, `internal/platform/project/cloud_protect_pve.go`.
+An opt-in per server. On local ZFS: replication every 15 minutes to a second node, plus an HA resource with a strict
+node-affinity rule over the two. On shared storage: the HA resource alone. Code: `internal/cloud/pve/protect.go`, `internal/platform/project/cloud_protect_pve.go`.
 Actions on a server: `GET_PROTECTION`, `ENABLE_PROTECTION`, `DISABLE_PROTECTION`.
 
 - **Availability.** The cluster needs quorum and three nodes, or two with a QDevice. Every disk must be on `zfspool`
-  storage, the VM must have no passthrough device, and another node must have room for its disks and its memory.
+  storage, or every disk on shared storage (RBD, NFS, shared LVM), not a mix. The VM must have no passthrough device, and
+  another node must have room for its memory, and for its disks on ZFS.
+- **Shared storage.** No job, no replica, `mode: shared` on the state, so it takes `Sys.Console` and not `VM.Replicate`. HA is
+  added at enable and the state is `active` from there. Measured on RBD: back up on another node about 2.5 minutes after a
+  hard power-off. A failover loses what the guest had not flushed, as a power cut does. Not billed: `server_protection` rates a
+  replica's space and there is none. No memory is held back for these VMs and there is no node-affinity rule, so a nearly full
+  cluster, or shared storage restricted to some nodes, can fail a restart.
 - **Lifecycle.** Enable creates the job and syncs at once. HA is added only after the first sync has landed, on read or at
   the next sync (`ReconcileProtection`), because HA recovery before that has nothing to start from. State:
   `syncing` → `active`, or `degraded` when the last sync failed or is older than twice the schedule.
-- **Failover.** The dead node's watchdog fences it and the VM starts on the replica with its data as of the last sync.
+- **Failover on ZFS.** The dead node's watchdog fences it and the VM starts on the replica with its data as of the last sync.
   RPO = schedule + sync time. What was written after the last sync is lost.
 - **Node returns.** The VM stays where it is: equal priority in the rule, so no second interruption.
-- **Capacity.** The scheduler keeps each node's protected VMs' memory free for them (`SchedReq.ReserveMem`).
+- **Capacity.** The scheduler keeps each node's replicated VMs' memory free for them (`SchedReq.ReserveMem`).
 - **Billing.** `server_protection` with `size_gb` (replicated disks), from the first successful sync until disabled.
 - **Operator migrate.** `POST /admin/service/{id}/server/{vmid}/migrate {target}`. Sends only the delta when a replica
   exists; PVE turns it into an HA request for a managed VM, and the route waits until the VM is on the target.
@@ -710,6 +716,30 @@ Actions on a server: `GET_PROTECTION`, `ENABLE_PROTECTION`, `DISABLE_PROTECTION`
 Limits: a volume on another storage cannot be attached to a protected server without breaking its job; rollback of a
 VM snapshot older than the last sync can force a full resync (unverified). There is no alert on `degraded` yet; the state
 shows in the console and on the row.
+
+## A node goes down
+
+What Proxmox VE reports for a dead node, measured on PVE 9.2: for about five minutes its VMs read as last seen, `running`
+included; after that as `unknown`, with no name, sizes or template flag. Its storages keep reading as `available`.
+`Client.ClusterResources` therefore marks VM rows of a node that is not online (`NodeDown`, status `unknown`), and the sync
+treats a listed vmid it cannot read as still there.
+
+- **Rows.** Servers, volumes and images on that node keep their ids and everything the row knew. Only the server's status
+  changes, to `UNKNOWN`. A row is archived only when PVE no longer lists the vmid. The same goes for a VM whose config
+  read fails on a node PVE still calls online: that is the first minute of the same outage.
+- **Billing.** An `UNKNOWN` server is not billed for its flavor. Its volumes, addresses and snapshots still are: the data is
+  there and the address stays reserved.
+- **Actions.** Power actions and anything else that needs the node answer 409 with a message the customer can read. A delete
+  fails the same way and the row stays. Deleting a network or a security group is refused while any server of the project
+  cannot be read, since it may be using it.
+- **The rest of the project** keeps working: sync, volumes and new servers on the other nodes. The scheduler skips the node,
+  and a template copy on it is not offered.
+- **Node returns.** The rows refresh at the next sample. VMs that were running come back stopped, unless HA manages them
+  (see Protected servers): the customer starts them, and their data on shared storage is intact.
+
+On Ceph with pools of size 3 and `min_size` 2, one lost node leaves the cluster degraded and writable: RBD, CephFS and RGW all
+kept taking writes on the lab and recovered by themselves when the node returned. A pool of size 2 and `min_size` 1 stays
+writable too, on one copy.
 
 ## Standalone volumes (holder VM)
 
@@ -943,9 +973,22 @@ The public-read statement a website installs serves on the S3 endpoint whatever 
 Turning the option off or clearing `s3WebsiteEndpoint` therefore does not close a live website. The tenant still sees
 the Website tab with **Disable website** on such a bucket, and making the bucket private also removes the website.
 
-`POST /api/v1/admin/service/object-store/test` with `{s3Endpoint, adminApiUrl, region, adminAccessKey, adminSecretKey}`
-tests a connection without storing it: an S3 call, then the key's own Admin Ops user and caps. The answer is `200`, or
-`400` with the reason. The installer calls it before registering the provider.
+`POST /api/v1/admin/service/object-store/test` with `{provider, s3Endpoint, adminApiUrl, region, adminAccessKey, adminSecretKey}`
+tests a connection without storing it: an S3 call, then an admin read (on `ceph-s3` the key's own Admin Ops user and caps,
+on `rustfs` the canned policy list). A blank `provider` means `ceph-s3`. The answer is `200`, or `400` with the reason. The
+installer calls it before registering the provider, and the Add dialog's **Test connection** button calls it.
+`POST /api/v1/admin/service/{id}/object-store/test` runs it on a stored row with its stored key: **Test connection** on
+the provider's Connection tab.
+
+The same check runs on `POST /admin/service` for an object-store row of any status, and on an update that changes a row's
+endpoints, region or keys or turns it to anything but `DISABLED`. A write that changes none of those still works while the
+store is down, turning a service off included.
+
+A row can still go bad after it is stored, so bootstrap does not depend on the check. Each provider gets its own attempt,
+bounded to 45 seconds. A failed one leaves the others provisioned, and it is recorded twice: in `provisionFailures` on the
+project, retried when the project is next opened and no more than once in 5 minutes, and in `provisionError` on the
+provider's row, which the provider's page shows. A project on no provider at all gets an error on every open until one attaches, also inside
+the 5 minutes when nothing is tried. An operator can also attach the provider by hand.
 
 Accessors: `IsCephS3`, `S3Endpoint`, `AdminAPIURL`, `S3WebsiteEndpoint`,
 `CephRegion`, `UIDPrefix`, `RGWUIDFor(projectID)`, `DefaultQuotaGiB`, and

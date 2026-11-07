@@ -64,7 +64,7 @@ func (s *Service) AddVolume(ctx context.Context, projectID, serverExtID string, 
 		}
 	}
 	if slot == "" {
-		return "", fmt.Errorf("pve: no free disk slot on server %s", serverExtID)
+		return "", conflictf("Server %s has no free disk slot", serverExtID)
 	}
 	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{
 		slot: fmt.Sprintf("%s:%d", storage, sizeGiB),
@@ -131,7 +131,7 @@ func (s *Service) ExtendVolume(ctx context.Context, projectID string, vmid int, 
 		return err
 	}
 	if strings.HasPrefix(slot, "unused") {
-		return fmt.Errorf("pve: attach the disk before extending it")
+		return conflictf("Attach the disk before extending it")
 	}
 	up, err := s.C.ResizeDisk(ctx, vm.Node, vm.VMID, slot, fmt.Sprintf("%dG", sizeGiB))
 	if err != nil {
@@ -151,6 +151,10 @@ func (s *Service) DetachVolume(ctx context.Context, projectID string, vmid int, 
 	}
 	if slot == "scsi0" || slot == "virtio0" {
 		return conflictf("The boot disk cannot be detached")
+	}
+	if vm.Status == "paused" {
+		// A hot-unplug waits on the guest, which cannot answer: the task fails and leaves the change pending.
+		return conflictf("Server %s is suspended. Stop it first to detach this volume", vm.Name)
 	}
 	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, nil, slot)
 	if err != nil {
@@ -176,7 +180,7 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 		return err
 	}
 	if !strings.HasPrefix(slot, "unused") {
-		return fmt.Errorf("pve: disk is already attached")
+		return conflictf("The disk is already attached")
 	}
 	if isHolder(vm.Tags) {
 		if targetServerExtID == "" || targetServerExtID == strconv.Itoa(vmid) {
@@ -199,7 +203,7 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 			}
 		}
 		if free == "" {
-			return fmt.Errorf("pve: no free disk slot")
+			return conflictf("This server has no free disk slot")
 		}
 		up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{free: volID})
 		if err != nil {
@@ -213,7 +217,7 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 		return err
 	}
 	if target == nil {
-		return fmt.Errorf("pve: target server %s not found", targetServerExtID)
+		return conflictf("Server %s not found", targetServerExtID)
 	}
 	if err := s.refuseUnreplicable(ctx, target, slotStorage(volID)); err != nil {
 		return err
@@ -274,15 +278,13 @@ func (s *Service) carryToNode(ctx context.Context, projectID string, vm *Cluster
 	const carried = "unused0"
 	up, err := s.C.MoveDisk(ctx, vm.Node, vm.VMID, MoveDiskOpts{Disk: slot, TargetVMID: carrier.VMID, TargetDisk: carried})
 	if err != nil {
-		// PVE checks a VM's lock before it starts the task. Any other failure could be a lost answer to a started move.
-		var ae *APIError
-		if errors.As(err, &ae) && (ae.Status < 500 || strings.Contains(ae.Error(), "is locked")) {
+		if taskRefused(err) {
 			s.dropEmptyHolder(context.WithoutCancel(ctx), carrier)
 		}
 		return nil, "", err
 	}
 	if err := s.C.WaitTask(ctx, up); err != nil {
-		if s.C.TaskStopped(ctx, up, carrierTaskWait) {
+		if s.C.TaskStopped(ctx, up, lostTaskWait) {
 			s.dropEmptyHolder(context.WithoutCancel(ctx), carrier)
 		}
 		return nil, "", err
@@ -309,7 +311,7 @@ func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int,
 	if !strings.HasPrefix(slot, "unused") {
 		return []ClusterResource{}, nil
 	}
-	vms, _, err := s.poolVMs(ctx, projectID)
+	vms, _, _, err := s.poolVMs(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -377,6 +379,9 @@ func (s *Service) RetypeVolume(ctx context.Context, projectID string, vmid int, 
 	}
 	if d.Storage == storage {
 		return conflictf("The volume is already on storage %s", storage)
+	}
+	if err := s.refuseUnreplicable(ctx, vm, storage); err != nil {
+		return err
 	}
 	caps, err := s.C.DetectStorage(ctx)
 	if err != nil {

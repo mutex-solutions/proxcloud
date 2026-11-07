@@ -59,17 +59,19 @@
           isolation: "{{ pc.network.isolation }}"
           blockedCidrs: "{{ pc.network.blocked_cidrs }}"
           evpnController: "{{ pc.network.controller }}"
-        storageProfiles: "{{ lh.pc_profiles }}"
-        defaultStorageProfile: "{{ lh.pc_default_profile }}"
+        storageProfiles: "{{ profiles }}"
+        defaultStorageProfile: "{{ default_profile }}"
         templates: "{{ pc.provider.templates }}"
         backupStorage: "{{ pc.nas.names.backup if pc.nas.host | length > 0 and 'backup' in pc.nas.exports else '' }}"
         importStorage: "{{ pc.nas.names.templates if pc.nas.host | length > 0 and 'templates' in pc.nas.exports else '' }}"
         storageClasses: "{{ storage_classes }}"
     fio_file: "{{ pc_gen }}/storage-classes.json"
     fio: "{{ lookup('ansible.builtin.file', fio_file) | from_json if fio_file is file else {} }}"
-    storage_classes: >-
-      {% set out = {} %}{% for id, r in fio.items() %}{% set _ = out.update({id: {'suggestedClass': r.class}}) %}{% endfor
-      %}{% for id, c in pc.storage_classes.items() %}{% set _ = out.update({id: dict(out.get(id, {}), **{'class': c})}) %}{% endfor %}{{ out }}
+    # What the provider holds now, empty on the first run: an operator's console edits survive a re-run.
+    stored: "{{ (pc_service | default({})).config | default({}) }}"
+    profiles: "{{ lh.pc_profiles | pc_kept_profiles(pc.storage_profiles, stored.storageProfiles | default({})) }}"
+    default_profile: "{{ profiles | pc_kept_default_profile(lh.pc_default_profile, pc.provider.default_profile, stored.defaultStorageProfile | default('')) }}"
+    storage_classes: "{{ fio | pc_storage_classes(pc.storage_classes, stored.storageClasses | default({})) }}"
   tasks:
     - name: Find the services
       ansible.builtin.command: k3s kubectl -n {{ ns }} get svc proxcloud-api proxcloud-keycloak-http -o jsonpath={.items[*].spec.clusterIP}
@@ -169,7 +171,7 @@
       ansible.builtin.set_fact:
         pc_service: "{{ pc_services.json.data | selectattr('name', 'eq', pc.provider.name) | first }}"
     - name: Keep the configuration of an existing provider in line
-      when: pc_service.config.network != provider.config.network or pc_service.config.storageProfiles != provider.config.storageProfiles or pc_service.config.apiUrl != provider.config.apiUrl or pc_service.config.storageClasses | default({}) != provider.config.storageClasses or pc_service.config.templates | default({}) != provider.config.templates or pc_service.config.backupStorage | default('') != provider.config.backupStorage or pc_service.config.importStorage | default('') != provider.config.importStorage
+      when: pc_service.config.network != provider.config.network or pc_service.config.storageProfiles != provider.config.storageProfiles or pc_service.config.defaultStorageProfile | default('') != provider.config.defaultStorageProfile or pc_service.config.apiUrl != provider.config.apiUrl or pc_service.config.storageClasses | default({}) != provider.config.storageClasses or pc_service.config.templates | default({}) != provider.config.templates or pc_service.config.backupStorage | default('') != provider.config.backupStorage or pc_service.config.importStorage | default('') != provider.config.importStorage
       proxcloud_api:
         access_key: "{{ api_key.id }}"
         secret_key: "{{ api_key.secretKey }}"
@@ -198,27 +200,50 @@
       changed_when: false
 
     - name: Register the object store
-      when: pc.object_store.mode in ['vm', 'truenas-app'] and (pc.provider.name ~ ' S3') not in (pc_services.json.data | map(attribute='name') | list)
+      when: pc.object_store.mode in ['vm', 'truenas-app']
       vars:
         store: "{{ lookup('ansible.builtin.file', pc_gen ~ '/object-store.json') | from_json }}"
-      proxcloud_api:
-        access_key: "{{ api_key.id }}"
-        secret_key: "{{ api_key.secretKey }}"
-        url: "{{ pc_svc_api }}/admin/service"
-        method: POST
-        body:
-          name: "{{ pc.provider.name }} S3"
-          type: CLOUD
-          status: PUBLIC
-          config:
-            provider: rustfs
-            s3Endpoint: "{{ store.endpoint }}"
-            adminApiUrl: "{{ store.internalEndpoint }}"
-            region: "{{ pc.provider.region }}"
-            regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
-            services: {object-store: "{{ {pc.provider.region: true} }}"}
-          secret: {adminAccessKey: "{{ pc_rustfs_access_key }}", adminSecretKey: "{{ pc_rustfs_secret_key }}"}
-      no_log: true
+        store_connection:
+          provider: rustfs
+          s3Endpoint: "{{ store.endpoint }}"
+          adminApiUrl: "{{ store.internalEndpoint }}"
+          region: "{{ pc.provider.region }}"
+        store_secret: {adminAccessKey: "{{ pc_rustfs_access_key }}", adminSecretKey: "{{ pc_rustfs_secret_key }}"}
+      block:
+        - name: Check the object store from the API
+          # The API checks a row before storing it, and has to reach the public S3 endpoint to do so. The request carries
+          # the key, hence no_log and the assert that shows the reason.
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service/object-store/test"
+            method: POST
+            body: "{{ store_connection | combine(store_secret) }}"
+            ok_status: [200, 400]
+          changed_when: false
+          register: pc_store_check
+          no_log: true
+        - name: Report the object store check
+          ansible.builtin.assert:
+            that: pc_store_check.status == 200
+            fail_msg: "{{ pc_store_check.json.errors.message | default('The object store check did not pass') }}"
+            quiet: true
+        - name: Create the object store provider
+          when: (pc.provider.name ~ ' S3') not in (pc_services.json.data | map(attribute='name') | list)
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service"
+            method: POST
+            body:
+              name: "{{ pc.provider.name }} S3"
+              type: CLOUD
+              status: PUBLIC
+              config: >-
+                {{ store_connection | combine({'regions': {pc.provider.region: {'displayName': pc.provider.region_name}},
+                  'services': {'object-store': {pc.provider.region: true}}}) }}
+              secret: "{{ store_secret }}"
+          no_log: true
 
     - name: Register the Ceph RGW object store
       when: pc.object_store.mode == 'ceph-rgw'
@@ -388,7 +413,7 @@
               project: proxcloud-k8s
               chartRepo: "{{ pc.services.chart_repo }}"
               chartName: proxmox-kamaji-cluster
-              chartVersion: "{{ pc_ver.kamaji_cluster_chart }}"
+              chartVersion: "{{ pc_chart_kamaji }}"
             cluster:
               dataStoreName: default
               versions: "{{ pc.services.kamaji.version_images }}"
@@ -410,7 +435,7 @@
               project: proxcloud-dbaas
               chartRepo: "{{ pc.services.chart_repo }}"
               chartName: database-cluster
-              chartVersion: "{{ pc_ver.database_cluster_chart }}"
+              chartVersion: "{{ pc_chart_database }}"
             database:
               lbAddressPool: services
               storageClasses: [std]

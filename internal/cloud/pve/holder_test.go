@@ -34,8 +34,8 @@ func refuse(w http.ResponseWriter, _ *http.Request) {
 
 // The destroy takes whatever the carrier holds when it runs, so it must only follow a move known to have stopped.
 func TestCarrierKeptUnlessTheMoveStopped(t *testing.T) {
-	carrierTaskWait = 50 * time.Millisecond
-	t.Cleanup(func() { carrierTaskWait = time.Minute })
+	lostTaskWait = 50 * time.Millisecond
+	t.Cleanup(func() { lostTaskWait = time.Minute })
 	moveStarts := say(fmt.Sprintf(`{"data":%q}`, moveUPID))
 	polls := func(answers ...func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +125,96 @@ func TestNewHolderRemovesTheVMOnFailure(t *testing.T) {
 	}
 }
 
+// A create POST with no answer may have made the VM, and only the POST's own blank VM may be removed for it.
+func TestNewHolderLostCreateAnswer(t *testing.T) {
+	lostTaskWait = 50 * time.Millisecond
+	t.Cleanup(func() { lostTaskWait = time.Minute })
+	const createPath = "POST /api2/json/nodes/pve1/qemu"
+	answer := func(status int, body string) func(http.ResponseWriter, *http.Request) {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			fmt.Fprint(w, body)
+		}
+	}
+	blank := `{"data":{"boot":" ","meta":"creation-qemu=11.1.3,ctime=1","smbios1":"uuid=x","vmgenid":"x"}}` // what PVE 9.2 leaves
+	tests := []struct {
+		name     string
+		create   func(http.ResponseWriter, *http.Request)
+		cfg      string
+		wantDrop int
+	}{
+		{"no answer, blank VM in the pool", refuse, blank, 1},
+		{"no answer, the vmid went to someone's named VM", refuse, `{"data":{"name":"web"}}`, 0},
+		{"no answer, the vmid went to a tagged VM", refuse, `{"data":{"tags":"proxcloud"}}`, 0},
+		{"no answer, the vmid went to a VM with a disk", refuse, `{"data":{"scsi0":"local-zfs:vm-900-disk-0,size=1G"}}`, 0},
+		{"refused: nothing was created", answer(http.StatusForbidden, `{"errors":{"x":"denied"}}`), blank, 0},
+		{"vmid taken by a racing create", answer(http.StatusInternalServerError, `{"errors":{"x":"VM 900 already exists on node pve2"}}`), blank, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var deletes int
+			s := volCluster(t, cfgLocalUnused, map[string][]url.Values{}, fakeRoutes{
+				createPath:                       tt.create,
+				"GET " + carrierPath + "/config": say(tt.cfg),
+				"DELETE " + carrierPath: func(w http.ResponseWriter, _ *http.Request) {
+					deletes++
+					fmt.Fprintf(w, `{"data":%q}`, volUPID)
+				},
+			})
+			if _, err := s.newHolder(context.Background(), "p1", "pve1", tagHolder); err == nil {
+				t.Fatal("want the create to fail")
+			}
+			if deletes != tt.wantDrop {
+				t.Fatalf("deletes = %d, want %d", deletes, tt.wantDrop)
+			}
+		})
+	}
+}
+
+// Another operation could see the holder empty and destroy it as the disk lands, so a move in doubt keeps the lock.
+func TestKeepServerVolumesHoldsTheLockWhileAMoveIsInDoubt(t *testing.T) {
+	lostTaskWait = 50 * time.Millisecond
+	t.Cleanup(func() { lostTaskWait = time.Minute })
+	moveStarts := say(fmt.Sprintf(`{"data":%q}`, moveUPID))
+	tests := []struct {
+		name        string
+		move, poll  func(http.ResponseWriter, *http.Request)
+		wantRelease bool
+	}{
+		{"no answer to the move request", refuse, nil, false},
+		{"PVE refused the move: the source is locked", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"errors":{"x":"VM is locked (backup)"}}`)
+		}, nil, true},
+		{"status unreadable", moveStarts, refuse, false},
+		{"task still running at the deadline", moveStarts, say(`{"data":{"status":"running"}}`), false},
+		{"the move failed: nothing left to wait for", moveStarts, say(`{"data":{"status":"stopped","exitstatus":"boom"}}`), true},
+		{"the move worked", moveStarts, say(`{"data":{"status":"stopped","exitstatus":"OK"}}`), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			routes := fakeRoutes{
+				movePath:                         tt.move,
+				"GET " + carrierPath + "/config": say(`{"data":{"tags":"pc-holder;proxcloud"}}`),
+			}
+			if tt.poll != nil {
+				routes[moveStatus] = tt.poll
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			s := volCluster(t, cfgLocalUnused, map[string][]url.Values{}, routes)
+			released := false
+			s.HolderLock = func(context.Context, string, time.Duration, time.Duration) (func(), bool, error) {
+				return func() { released = true }, true, nil
+			}
+			err := s.KeepServerVolumes(ctx, "p1", "101")
+			if released != tt.wantRelease {
+				t.Fatalf("released = %v, want %v (err %v)", released, tt.wantRelease, err)
+			}
+		})
+	}
+}
+
 // Everything that picks, fills or drops a holder runs under the lock, and refuses when it is busy.
 func TestHolderOperationsTakeTheLock(t *testing.T) {
 	ops := []struct {
@@ -180,8 +270,8 @@ func TestHolderOperationsTakeTheLock(t *testing.T) {
 	}
 }
 
-// A dropped holder stays listed for a moment. That must not fail the pass; any other VM that cannot be read must,
-// because Reconcile archives what the list leaves out.
+// A dropped holder stays listed for a moment, and its rows go. Any other VM that cannot be read keeps its rows, because
+// Reconcile archives what the list leaves out.
 func TestVolumeListWithVMsGone(t *testing.T) {
 	gone := func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -199,17 +289,47 @@ func TestVolumeListWithVMsGone(t *testing.T) {
 		return volIDs(rows), err
 	}
 
-	s := volCluster(t, cfgLocalUnused, map[string][]url.Values{}, fakeRoutes{"GET " + carrierPath + "/config": gone})
+	nodes := say(`{"data":[{"node":"pve1","status":"online"},{"node":"pve2","status":"online"}]}`)
+	const pve2Holder = "GET /api2/json/nodes/pve2/qemu/900/config"
+	s := volCluster(t, cfgLocalUnused, map[string][]url.Values{}, fakeRoutes{
+		"GET /api2/json/nodes": nodes, "GET " + carrierPath + "/config": gone, pve2Holder: gone,
+	})
 	if got, err := vols(s, strict); err != nil || len(got) != 4 {
 		t.Fatalf("holder gone: %v, %v", got, err)
 	}
 
+	// Mid-migrate the list still names the old node. Left out, the disk's row would be archived and go unbilled.
 	s = volCluster(t, cfgLocalUnused, map[string][]url.Values{}, fakeRoutes{
-		"GET " + carrierPath + "/config":            gone,
+		"GET /api2/json/nodes": nodes, "GET " + carrierPath + "/config": gone,
+		pve2Holder: say(`{"data":{"tags":"pc-holder;proxcloud","unused0":"nas:900/vm-900-disk-0.raw"}}`),
+	})
+	rows, err := s.VolumeSyncProvider("r", "p1", nil).List(context.Background())
+	if err != nil || len(rows) != 5 || rows[4].Data["volume"].(map[string]any)["availability_zone"] != "pve2" {
+		t.Fatalf("holder migrating: %v, %v", rows, err)
+	}
+
+	// The node that could have it cannot say, so nothing may be archived.
+	s = volCluster(t, cfgLocalUnused, map[string][]url.Values{}, fakeRoutes{
+		"GET /api2/json/nodes": nodes, "GET " + carrierPath + "/config": gone, pve2Holder: refuse,
+	})
+	prov := s.VolumeSyncProvider("r", "p1", nil)
+	if got, err := strict(prov); err != nil || len(got) != 4 {
+		t.Fatalf("node unreadable: List = %v, %v", got, err)
+	}
+	if keep, _ := prov.KeepUnread(&cloud.CloudResource{Data: map[string]any{"volume": map[string]any{"vmid": 900}}}); !keep {
+		t.Fatal("node unreadable: the holder's rows must stay")
+	}
+	if got, err := vols(s, readable); err != nil || len(got) != 4 {
+		t.Fatalf("node unreadable: ListReadable = %v, %v", got, err)
+	}
+
+	s = volCluster(t, cfgLocalUnused, map[string][]url.Values{}, fakeRoutes{
+		"GET /api2/json/nodes": nodes, "GET " + carrierPath + "/config": gone, pve2Holder: gone,
 		"GET /api2/json/nodes/pve1/qemu/102/config": gone,
 	})
-	if _, err := vols(s, strict); err == nil {
-		t.Fatal("server gone: List must fail the pass")
+	// Its rows stay this pass: Reconcile takes them for unread rather than gone (next pass, unlisted, they go).
+	if got, err := vols(s, strict); err != nil || len(got) != 3 {
+		t.Fatalf("server unread: List = %v, %v", got, err)
 	}
 	if got, err := vols(s, readable); err != nil || len(got) != 3 {
 		t.Fatalf("server gone: ListReadable = %v, %v", got, err)

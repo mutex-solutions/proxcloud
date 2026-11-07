@@ -52,6 +52,13 @@ type VanishGrace interface {
 	VanishGrace() time.Duration
 }
 
+// UnreadKeeper is an optional Provider capability for a cloud that can list an object without being able to read it
+// (its node is down): such a cached row is not gone, however absent from List. The provider may change the row's data
+// in place; changed says to store it.
+type UnreadKeeper interface {
+	KeepUnread(cached *cloud.CloudResource) (keep, changed bool)
+}
+
 // CacheMerger is an optional Provider capability: before comparing, carry over what the fresh read did not
 // know from the cached row (a RustFS bucket whose usage the scanner could not answer).
 type CacheMerger interface {
@@ -233,6 +240,19 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		}
 		if grace > 0 && cr.CreatedAt != nil && now.Sub(*cr.CreatedAt) < grace {
 			continue
+		}
+		if k, ok := p.(UnreadKeeper); ok {
+			if keep, changed := k.KeepUnread(&cr); keep {
+				if changed {
+					t := now
+					cr.UpdatedAt = &t
+					if _, err := repo.Update(ctx, &cr); err != nil {
+						return st, err
+					}
+					st.Updated++
+				}
+				continue
+			}
 		}
 		if err := repo.DeleteAndArchive(ctx, &cr, now); err != nil {
 			return st, err

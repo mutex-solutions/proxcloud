@@ -9,6 +9,7 @@ import { timeAgo } from "@/lib/format"
 
 type Protection = {
   state: "syncing" | "active" | "degraded"
+  mode?: "shared"
   target: string
   rpoTargetMinutes: number
   lastSync: number
@@ -19,7 +20,8 @@ type Result = { available: boolean; reason?: string; protection?: Protection | n
 
 const LABEL = { syncing: "First sync running", active: "Protected", degraded: "Protected, replication behind" }
 
-// The add-on: a copy of the disks on a second node and automatic restart there if this node fails.
+// The add-on: automatic restart on another node if this node fails, with a copy of the disks there unless they are on
+// shared storage.
 export function ServerProtection({ pid, resourceId }: { pid: string; resourceId: string }) {
   const qc = useQueryClient()
   const key = ["server-protection", pid, resourceId]
@@ -34,7 +36,9 @@ export function ServerProtection({ pid, resourceId }: { pid: string; resourceId:
     mutationFn: action,
     onSuccess: (r) => {
       qc.setQueryData(key, r)
-      toast.success(r.protection ? "Protection is starting: the first sync can take a while" : "Protection removed")
+      if (!r.protection) toast.success("Protection removed")
+      else if (r.protection.mode === "shared") toast.success("Protection is on")
+      else toast.success("Protection is starting: the first sync can take a while")
     },
     onError: (e: Error) => toast.error(e.message),
   })
@@ -48,20 +52,30 @@ export function ServerProtection({ pid, resourceId }: { pid: string; resourceId:
       </CardHeader>
       <CardContent className="grid gap-4 text-sm">
         <p className="text-muted-foreground">
-          Keeps a copy of this server's disks on a second host. If its host fails, the server restarts there, with its
-          data as of the last sync: anything written after that is lost. Billed per replicated GB once the first sync is
-          done.
+          If this server's host fails, the server restarts on another one. On local disks that takes a copy on a second
+          host, with the data as of the last sync: anything written after that is lost, and it is billed per replicated
+          GB once the first sync is done. On shared storage every host already reaches the disks: nothing is copied, the
+          restart is like a power cut, and there is no charge.
         </p>
         {p ? (
           <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1">
             <dt className="text-muted-foreground">Status</dt>
             <dd>{LABEL[p.state]}</dd>
-            <dt className="text-muted-foreground">Copy on</dt>
-            <dd>{p.target}</dd>
-            <dt className="text-muted-foreground">Target data loss</dt>
-            <dd>at most {p.rpoTargetMinutes} minutes</dd>
-            <dt className="text-muted-foreground">Last sync</dt>
-            <dd>{p.lastSync ? timeAgo(new Date(p.lastSync * 1000)) : "not yet"}</dd>
+            {p.mode === "shared" ? (
+              <>
+                <dt className="text-muted-foreground">Disks</dt>
+                <dd>On shared storage, no copy needed</dd>
+              </>
+            ) : (
+              <>
+                <dt className="text-muted-foreground">Copy on</dt>
+                <dd>{p.target}</dd>
+                <dt className="text-muted-foreground">Target data loss</dt>
+                <dd>at most {p.rpoTargetMinutes} minutes</dd>
+                <dt className="text-muted-foreground">Last sync</dt>
+                <dd>{p.lastSync ? timeAgo(new Date(p.lastSync * 1000)) : "not yet"}</dd>
+              </>
+            )}
           </dl>
         ) : null}
         {p?.error ? (

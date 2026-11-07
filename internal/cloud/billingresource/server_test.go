@@ -108,3 +108,16 @@ func TestProtectionBilledFromItsEnable(t *testing.T) {
 		t.Fatalf("a server protected before the stamp keeps its line: %+v", br)
 	}
 }
+
+// There is no replica on shared storage, so no space to rate.
+func TestProtectionBRSkipsSharedStorage(t *testing.T) {
+	row := func(pr map[string]any) *cloud.CloudResource {
+		return &cloud.CloudResource{ID: "r", Data: map[string]any{"server": map[string]any{"name": "a", "protection": pr}}}
+	}
+	if br := protectionBR(row(map[string]any{"state": "active", "diskGb": 10})); br == nil {
+		t.Fatal("replicated: want a bill line")
+	}
+	if br := protectionBR(row(map[string]any{"state": "active", "mode": "shared", "diskGb": 10})); br != nil {
+		t.Fatalf("shared: %+v", br)
+	}
+}

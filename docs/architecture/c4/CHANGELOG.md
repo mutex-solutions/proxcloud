@@ -4,6 +4,287 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Leftover holders stop billing; a late lock release frees nothing
+
+**What changed**
+
+- A VM with no name, no tags, no disk and a config holding only what PVE writes for an empty create is no server: the sync
+  neither lists nor bills it. `Service.RemoveBlankVMs` removes it on each full sync, under the holder lock, once it is past 15
+  minutes old. A VM that matches on its row but not its config is listed as ever; one whose config cannot be read keeps its row.
+- `ShedLock.Unlock` writes only if the row still carries the caller's `lockedBy` and `lockedAt`.
+- `RemoveBlankVMs` bounds its pass, as the sync goes through projects one at a time and a hung destroy would hold them all.
+  `dropLostCreate` uses the same `blankConfig` test, so a nameless VM holding a NIC or a description stays.
+
+**Why**
+
+- A holder VM is created empty and configured once it is in the pool. The cleanup ran only in the request, so PVE staying away,
+  a restart or a failed destroy left a VM billed and shown as a server. The check reads the config, not only the row, because a
+  row with no name can be a customer's VM with a data disk. The grace outlives the holder lock's 10 minute ceiling.
+- A holder past its lock's ceiling released whatever row was there, freeing the next owner's lock. A later owner's lock now
+  survives this. Two holders can still overlap once the first runs past the ceiling: this fixes the release, not the ceiling.
+
+**Diagrams updated:** none.
+## 2026-11-07: One bad provider no longer blocks a project; every object-store row is checked
+
+**What changed**
+
+- `POST /admin/service` and the updates check every `ceph-s3` and `rustfs` row whatever its status (`CheckRustFS` is new).
+  Turning a row off stays unchecked.
+- `POST /admin/service/{id}/object-store/test` tests a stored row with its stored key, as **Test connection** on the
+  provider's Connection tab. The Add dialog's button now works for `rustfs` too.
+- Bootstrap gives each provider its own bounded attempt. A failure goes in `project.provisionFailures`, retried on the next
+  open at most every 5 minutes, and in `externalService.provisionError`, shown on the provider's page. Opening a project
+  fails only when it ends up on no provider.
+
+**Why**
+
+- Only a `PUBLIC` `ceph-s3` row was proved, yet bootstrap provisions every non-disabled object store and stopped at the first
+  error, so a `PRIVATE` or `rustfs` typo blocked every new project. A row can also go bad after it is stored, so the check
+  alone would not be enough. Without the record on the project, a project that had any provider would never get the failed
+  one, since a re-entry skips provisioning.
+
+**Then, on the same PR, what a recheck found**
+
+- A failed attempt is recorded on the provider under its own short context. The attempt's had often just expired, so a hung
+  store, the likeliest failure, never reached the provider's page.
+- A project on no provider gets an error on every open, not only the first. Inside the retry window it looked fine and was not.
+- The admin API's project answer carries `provision_failures`, because a partial provision answers 200.
+- Stage 60 checks a `rustfs` store from the API and shows the reason, as it does for Ceph. The task that registers it is
+  `no_log`, so a refused row used to abort the install with the reason hidden.
+
+**Diagrams updated:** none; no container or relationship changed.
+
+## 2026-11-07: One table holds a project's status changes; a member cannot lift a suspension
+
+**What changed**
+
+- `internal/platform/project/status.go` holds every allowed status change. The client service, the client handler, the admin
+  routes and the billing suspender all ask it, and writes are conditional on the status they read. `DELETED` and
+  `DELETE_IN_PROGRESS` refuse every action.
+- Cancelling a deletion needs `SCHEDULED_FOR_DELETION` and restores the status kept on the doc in `statusBeforeDeletion`.
+- `POST /project/{id}/billing/{bp}` and `POST /project/{id}/init` no longer enable a project. A billing resume leaves a project
+  an operator disabled (`disabledByOperator`).
+
+**Why**
+
+- Enabling was reachable from each path on its own terms: a cancel with nothing scheduled, a profile change, opening a project
+  with no service yet. Each could lift a billing or operator suspension, and each could overwrite `DELETE_IN_PROGRESS`, which
+  drops the project out of the sweep mid-teardown. A rule per handler is what let them differ.
+- The write is conditional because the deletion sweep moves a project between a handler's read and its write.
+
+**Then, on the same PR, what a recheck found**
+
+- `Repo.Save` no longer writes `status`, `scheduledForDeletionAt`, `statusBeforeDeletion` or `disabledByOperator`. Only the
+  conditional writes do: `SaveIfStatus`, `EnableIfDisabled` and `ApplyBillingSuspension`. Admin project update and quota write
+  their own fields, where they replaced the whole doc.
+- `pgdoc.SetFieldsOne` and `DeleteOne` lock the row they select. Without it a write queued behind another rechecked only the id,
+  so two conditional writes could both win. The test that races a suspension against a member's schedule found this.
+- A `DISABLED` project refuses what adds usage (`errProjectDisabled`, 409): every create, an upload, new or rotated S3 keys, and
+  every action outside `allowedWhileDisabled`. Reads, stop and delete stay open.
+- Moving a project to a `NEW` profile, by profile or by organization, is refused while something would keep running.
+- A billing profile's suspend, resume and activation apply only to the projects it pays for (`AllByBillingProfile`, `PaidBy`).
+- Opening a project lifts a `DISABLED` that nothing holds any more: not an operator's, and billing allows it. Activation lifts a
+  provisioned project as well.
+
+**Why**
+
+- `Save` ran from a read that could be minutes old: a bootstrap waiting on a provider put back the status from before a member's
+  delete-now, and the project dropped out of the sweep. Conditional writes on the few status paths do not help while a generic
+  write can overwrite them, so the generic write must not hold the field at all.
+- Metering, the sync and rating cover only `ENABLED` projects, so anything created or started in a `DISABLED` one ran free.
+- Refusing the profile move, rather than pausing through the suspender, because the move is the tenant's own action and
+  activation has no leg that resumes VMs. A refusal has no partial failure and tells them what to do.
+
+**Then, on the same PR, what a second recheck found**
+
+- `ActivationService.Suspend` and `SuspensionJob.suspend` save `SUSPENDED` before the cloud walk. `SuspensionJob.ExecuteDunning`
+  starts by walking every `SUSPENDED` profile again (`finishSuspensions`), before the check that dunning is on. The walk skips what
+  is already down. When a walk ends and the profile reads `ACTIVE`, the resume leg runs once more.
+- A process already `SUSPENDED` on an `ACTIVE` profile no longer stops dunning: it is a suspend whose profile save failed, and the
+  next pass carries on from it.
+- The client's `DELETE /billing-profile/{id}` refuses a `SUSPENDED` profile, a negative balance, or one still paying for a project.
+- `holdForProfile` takes "no profile" as well as a `NEW` one, covers every row type billing rates (`billableRows`) and a `DISABLED`
+  project too, and does nothing when billing is unconfigured.
+- `KeepServerVolumes`, `RebuildServer`, `ResizeServer` and `RestoreServerBackup` test `PoweredOn` before changing a VM: a paused VM
+  reads `paused`, so they skipped the stop. `START` on a paused VM resumes it.
+
+**Why**
+
+- With the walk first, a member opening a project during it saw `DISABLED` on an `ACTIVE` profile and lifted it, and the suspension
+  was lost for good. Saving first closes that, and leaves the failure cases to choose between. `ACTIVE` with projects down and
+  nothing retrying is the one to rule out, so a failed save touches nothing and a failed walk stands as `SUSPENDED`.
+- The pass is level-triggered rather than a retry marker. A marker only knows what a walk reported, and it would miss a crash, a
+  VM whose row appeared after the walk, and a lift racing the save. The price: an operator's enable under a suspended profile lasts
+  until the next pass, because nothing tells it from a missed project.
+- A suspended project could get out by deleting the profile, since `updateOrganization` skips its check when there is none. An org
+  with no profile was skipped too, and left a running project `ENABLED` and unrated.
+- Billing unconfigured leaves every profile `NEW`, so the hold refused or disabled every move on a portal that bills nothing.
+- Buckets and volumes were not in the check, so a tenant could park storage on a `NEW` profile, `DISABLED` and unrated, with its S3
+  keys still working against the store.
+## 2026-11-07: Cluster ids take a neutral prefix
+
+**What changed**
+
+- New Managed Kubernetes clusters get ids of the form `pc-c-<8hex>`. Existing clusters keep the id they have.
+
+**Why**
+
+- The earlier prefix came from the old brand. An id names every object of a cluster (Application, release, CAPI Cluster,
+  TenantControlPlane, secrets, PVE tokens, share dataset, DNS), so it cannot change on a live cluster, and nothing read the
+  prefix, so both forms can live side by side.
+
+**Diagrams updated:** none; no container or relationship changed.
+
+## 2026-11-07: Project teardown removes its services-cluster namespaces
+
+**What changed**
+
+- Teardown deletes the project's `pc-<id>` and `pc-db-<id>` namespaces once nothing is pending and no Application of the
+  project is left, also when the project never had a cluster or a database.
+
+**Why**
+
+- Bootstrap makes both namespaces up front, and the orphan sweep only collects one on a pass that reaped something, so a
+  project that never used them left two empty namespaces behind for good.
+
+**Diagrams updated:** none; no container or relationship changed.
+
+## 2026-11-07: A server's name is checked against PVE's rule
+
+**What changed**
+
+- Create, rename and image-from-server check the name with `pve.ValidVMName`, PVE's `dns-name` format plus a DNS name's
+  length limits, and answer 400 with what to fix. The create and rename forms apply the same rule as you type.
+
+**Why**
+
+- PVE refuses anything else with a field error, which the API now hides on a 502, so a name with a space read "compute
+  backend is unavailable". Only the API and the client can say what is wrong with it.
+
+**Diagrams updated:** none.
+## 2026-11-07: Installer re-runs keep operator settings, split mode passes preflight
+
+**What changed**
+
+- Stage 60 on an existing Proxmox provider keeps its storage profiles, default profile and confirmed classes, and only
+  adds what was newly detected. A value in the site's group_vars still wins.
+- Stage 60 registers the chart versions of the checkout instead of pins in `versions.yml`.
+- Preflight accepts `mode: split` and checks its settings. `object_store.mode` must be `vm` or `truenas-app` there.
+- Stage 10 requires the CAPI and CSI token secrets in split mode, and takes them from the vault when the tokens exist.
+
+**Why**
+
+- `make upgrade` runs stage 60, and each run replaced those fields with fresh detection. A class confirmed in the admin
+  console was lost, and Ceph added to a Standard cluster moved the default profile, so new VMs changed storage with no
+  one asking.
+- Stage 50 pushes the charts of the checkout. The pin had fallen behind, so a clean split install would register a
+  chart version that is not in its registry.
+- Preflight still refused split mode with a message from before it existed, so the documented command could not start.
+
+**Diagrams updated:** none; no container or relationship changed.
+## 2026-11-07: Protected servers on shared storage
+
+**What changed**
+
+- `ProtectableDisks` takes disks that are all on shared storage as well as all on ZFS. Such a server gets the HA resource alone:
+  no replication job, no node-affinity rule, `mode: shared` on its state, and no `server_protection` bill line. A disk that
+  would not follow it (`refuseUnreplicable`) is refused either way.
+
+**Why**
+
+- On a Full-tier site every server sits on Ceph, so Protected could not be sold there at all, and HA needs nothing from the
+  replication machinery when every node already reaches the disks. There is no replica to bill. Whether to charge for HA
+  on shared storage is an operator decision still to be made.
+
+**Diagrams updated:** `c3-components.md` (Replication and HA row).
+
+## 2026-11-07: A node that is down loses no rows
+
+**What changed**
+
+- `Client.ClusterResources` marks VM rows of a node that is not online. `providers.UnreadKeeper` is a new optional provider
+  capability: Reconcile keeps a cached row whose object is listed but cannot be read. The server, volume and image sync
+  providers implement it. A server on a down node reads `UNKNOWN`, with all else unchanged.
+- Power actions on a down node's VM and `pve.IsNodeUnreachable` errors answer 409. `VnetInUse` and `SecurityGroupInUse` refuse
+  while a VM of the project cannot be read. A template copy on a down node is not offered.
+
+**Why**
+
+- A node loss drill on Ceph: PVE drops the name of a dead node's VMs after about five minutes, and the sync took a VM with no
+  name for one that is not there yet. Servers, volumes and images were archived as deleted while the data sat safely on RBD,
+  then came back as new resources when the node returned. Until then the portal said `ACTIVE` and billed a dead VM, a full
+  sync wiped its addresses, one unreadable VM stopped the volume sync of its whole project, and a stop answered 200.
+- The node is the only thing that knows, so one check where the list is read covers every caller.
+
+**Diagrams updated:** `c3-components.md` (Reconcile row).
+## 2026-11-07: Provider actions are audited; a 502 hides its cause from tenants
+
+**What changed**
+
+- Share, managed Kubernetes, managed database and bucket settings actions write an audit event on success, in one place in
+  `cloudAction` through `cloudResourceAudit`. Plain reads do not. Taking a kubeconfig or a database's connection info does.
+- About 30 sites in `internal/platform/project` stopped returning a raw upstream error on a 502. What the tenant can act on
+  stays: a `ConflictError` is a 409 with its text, a full storage is a 409, and PVE's 400 on a firewall rule names the field.
+
+**Why**
+
+- Who changed a bucket policy or took a kubeconfig could not be traced, unlike a DNS record. A wrapper at the dispatch covers
+  every action, including those added later.
+- Raw errors carried the API's address, and on a proxied call a node's. Some user-facing refusals in `internal/cloud/pve`
+  were plain errors relying on that passthrough, so they became `ConflictError`. A test scans the package for new raw sites.
+
+**Diagrams updated:** none.
+## 2026-11-07: The console proves a ceph-s3 row before storing it
+
+**What changed**
+
+- `POST /admin/service` and the field-set PUTs run `CheckCephS3` on a `PUBLIC` `ceph-s3` row, for an update only when its
+  status, endpoints, region or keys changed. A failed check is a 400 and nothing is stored.
+- The Add dialog has a **Test connection** button for `ceph-s3`, calling `POST /admin/service/object-store/test`.
+
+**Why**
+
+- The installer checked before registering, and the console did not. A form typo stored a `PUBLIC` row, which blocks the
+  provisioning of every new project. The check sits in the API so that every console path gets it. A write that leaves the
+  connection alone skips it, or an RGW outage would stop an operator from turning the service off.
+
+**Diagrams updated:** none.
+## 2026-11-07: A broken NAS no longer blocks an address no export lists
+
+**What changed**
+
+- The address release guard takes only what `shareNetworks` can put on an export: public addresses and cluster addresses
+  on a shared worker pool. Both now read the same `onExport` rule.
+
+**Why**
+
+- Every cluster address went through the guard, including one on a project network, which the subnet covers. A broken or
+  disabled TrueNAS on the project then blocked the release of a cluster with no dataset, against what `docs/managed-k8s.md`
+  promises. Addresses an export can list still fail closed, because releasing one would let another tenant inherit access.
+
+**Diagrams updated:** none.
+## 2026-11-07: Holders survive a lost answer from PVE
+
+**What changed**
+
+- `KeepServerVolumes` keeps the holder lock until it expires when a move may still be running, the same doubt the carrier
+  path already acted on. `taskRefused` is the one rule for telling a refusal from a lost answer.
+- `newHolder` on a create POST with no answer removes the VM only if it is in the project's pool and as blank as the create
+  leaves it.
+- A VOLUME pass looks for a holder on the other nodes before calling it gone. A node that cannot answer fails the pass.
+
+**Why**
+
+- The lock was released with the move possibly running, so a later `dropEmptyHolder` could see the holder empty and destroy
+  it as the disk landed. A disk lost that way is customer data, and blocking volume changes in one project for 10 minutes is
+  a small price. Only a lost answer gets there.
+- The cleanup defer sat after the POST's error check, so a lost answer left an untagged VM in the project pool, billed as a
+  server. NextID is racy, so the vmid alone does not make the VM ours: a name, a tag or a disk means it is someone else's.
+- `/cluster/resources` names the old node for a moment during a holder's migrate. Skipping that holder archived its volume
+  rows until the next sync, up to 15 minutes hidden and unbilled. Keeping rows of every skipped holder instead would have
+  kept the phantom carrier rows that the same reconcile exists to remove, so the pass tells moved from gone.
+
+**Diagrams updated:** none (no new component or flow).
 ## 2026-11-07: Admin delete-now goes through the deletion job
 
 **What changed**

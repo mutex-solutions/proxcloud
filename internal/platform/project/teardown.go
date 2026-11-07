@@ -210,6 +210,11 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		if ferr != nil {
 			slog.Warn("teardown: kamaji orphan finalize", "project", p.ID, "serviceId", svcID, "pending", pending, "err", ferr)
 			kamajiPending++
+		} else if pending == 0 {
+			if nerr := ks.RemoveProjectNamespace(ctx, p.ID); nerr != nil {
+				slog.Warn("teardown: kamaji namespace", "project", p.ID, "serviceId", svcID, "err", nerr)
+				kamajiPending++
+			}
 		}
 	}
 	// Same finalize + pending signal for dbaas: while a database's delete cascade is in flight,
@@ -229,6 +234,11 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		if ferr != nil {
 			slog.Warn("teardown: dbaas orphan finalize", "project", p.ID, "serviceId", svcID, "pending", pending, "err", ferr)
 			dbaasPending++
+		} else if pending == 0 {
+			if nerr := ds.RemoveProjectNamespace(ctx, p.ID); nerr != nil {
+				slog.Warn("teardown: dbaas namespace", "project", p.ID, "serviceId", svcID, "err", nerr)
+				dbaasPending++
+			}
 		}
 	}
 
@@ -440,8 +450,9 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 
 	// ponytail: rows left with no failed leg behind them (a provider since removed) do not ask for a re-run, or a project
 	// could wedge the job's sweep forever. Report them and move on.
+	expect := p.Status
 	teardownOutcome(p, cephRevokeFailed || pveTeardownFailed || zonesLeft || kamajiPending > 0 || dbaasPending > 0)
-	if err := h.svc.Save(ctx, p); err != nil {
+	if _, err := h.svc.SaveIfStatus(ctx, p, expect); err != nil {
 		return err
 	}
 	if zonesLeft {

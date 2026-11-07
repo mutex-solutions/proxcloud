@@ -29,7 +29,7 @@ func zoneErr(err error) error {
 
 // upstreamErr logs why a backend failed and tells the tenant only that it did: the raw error names the backend's internal
 // address, which tenants must not learn.
-func upstreamErr(what string, err error) error {
+func upstreamErr(what string, err error) *httpx.HTTPError {
 	slog.Error("backend request failed", "backend", what, "err", err)
 	return httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, "The "+what+" is unavailable. Try again later.")
 }
