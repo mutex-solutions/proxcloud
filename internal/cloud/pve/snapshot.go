@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 )
 
 // ServerSnapshot is one snapshot as the API shows it.
@@ -154,6 +155,35 @@ func (s *Service) DeleteServerSnapshot(ctx context.Context, projectID, externalI
 		return err
 	}
 	return s.C.WaitTask(ctx, up)
+}
+
+// StampSnapshots adds a VM's tenant snapshots to its row for billing, each with its own start time so a new one
+// is not charged back to when the VM was created. PVE reports no per-snapshot usage on any storage (a volume's
+// "used" excludes its snapshots), so the metered size is the VM's provisioned disks.
+// ponytail: provisioned GiB per snapshot is a proxy for the blocks each one pins; real usage needs a node-side read
+// (zfs list -t snapshot, rbd du), add it if the price is ever to follow the actual delta.
+// Best effort: a failed read leaves the row without them until the next pass.
+func (s *Service) StampSnapshots(ctx context.Context, r ClusterResource, data map[string]any) {
+	rows, err := s.C.ListSnapshots(ctx, r.Node, r.VMID)
+	if err != nil {
+		return
+	}
+	rows = slices.DeleteFunc(rows, func(x Snapshot) bool { return isPlatformSnapshot(x.Name) })
+	if len(rows) == 0 {
+		return
+	}
+	cfg, err := s.C.GetVMConfig(ctx, r.Node, r.VMID)
+	if err != nil {
+		return
+	}
+	slices.SortFunc(rows, func(a, b Snapshot) int { return strings.Compare(a.Name, b.Name) })
+	items := make([]any, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, map[string]any{"name": row.Name, "createdAt": time.Unix(row.SnapTime, 0).UTC().Format(time.RFC3339)})
+	}
+	if srv, ok := data["server"].(map[string]any); ok {
+		srv["snapshots"] = map[string]any{"items": items, "diskGb": diskGbOf(cfg)}
+	}
 }
 
 func (s *Service) resolveOwned(ctx context.Context, projectID, externalID string) (*ClusterResource, error) {
