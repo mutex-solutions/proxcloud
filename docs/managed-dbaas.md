@@ -141,7 +141,7 @@ sequenceDiagram
   Dashboards). Engine-gated via `dbaas.Capabilities`.
 - **Delete** — Application delete only; the ArgoCD resources-finalizer cascades the chart. The
   periodic sweep (`syncjob.sweepDbaasOrphans`) then reaps the marker, auth, backup-credential and customer-user secrets and
-  GCs the emptied namespace.
+  GCs the emptied namespace. Project teardown also removes the namespace of a project that never had a database, once nothing is pending and no Application of the project is left.
 
 ## Backups and restore
 
