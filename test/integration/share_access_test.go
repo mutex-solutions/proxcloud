@@ -25,6 +25,8 @@ import (
 type exportNAS struct {
 	mu       sync.Mutex
 	networks []string
+	maproot  string
+	setperms int
 	failing  bool
 	updates  int
 	onUpdate func() // runs at the moment the export changes
@@ -65,7 +67,16 @@ func (n *exportNAS) serve(t *testing.T, projectID string) string {
 					"proxcloud:project": map[string]any{"rawvalue": projectID}, "proxcloud:protocol": map[string]any{"rawvalue": "NFS"},
 				}}}
 			case "sharing.nfs.query":
-				result = []any{map[string]any{"id": 11, "path": "/mnt/" + dataset, "networks": n.networks}}
+				row := map[string]any{"id": 11, "path": "/mnt/" + dataset, "networks": n.networks, "maproot_user": nil, "maproot_group": nil}
+				if n.maproot != "" {
+					row["maproot_user"] = n.maproot
+				}
+				result = []any{row}
+			case "filesystem.setperm":
+				n.setperms++
+				result = 7
+			case "core.get_jobs":
+				result = []any{map[string]any{"state": "SUCCESS"}}
 			case "sharing.smb.query":
 				result = []any{}
 			case "sharing.nfs.update":
@@ -75,10 +86,14 @@ func (n *exportNAS) serve(t *testing.T, projectID string) string {
 					break
 				}
 				var body struct {
-					Networks []string `json:"networks"`
+					Networks    []string `json:"networks"`
+					MaprootUser *string  `json:"maproot_user"`
 				}
 				_ = json.Unmarshal(req.Params[1], &body)
 				n.networks = body.Networks
+				if body.MaprootUser == nil {
+					n.maproot = ""
+				}
 				n.updates++
 				if n.onUpdate != nil {
 					n.onUpdate()
@@ -185,6 +200,26 @@ func TestReleaseFailsClosedWhenTheExportCannotBeUpdated(t *testing.T) {
 	}
 	if n := f.held(t); n != 0 {
 		t.Fatalf("retry left %d rows", n)
+	}
+}
+
+// An export from before root squash, with the right addresses: the sync still brings it in line, once.
+func TestReconcileShareAccessSquashesAnOldExport(t *testing.T) {
+	ctx := context.Background()
+	f := newShareAccessFixture(t)
+	f.nas.networks = []string{"10.100.0.0/24", "10.100.1.0/24", "10.89.0.10/32"}
+	f.nas.maproot = "root"
+	if err := f.handler.ReconcileShareAccess(ctx, f.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if f.nas.maproot != "" || f.nas.updates != 1 || f.nas.setperms != 1 {
+		t.Fatalf("maproot=%q updates=%d setperms=%d", f.nas.maproot, f.nas.updates, f.nas.setperms)
+	}
+	if err := f.handler.ReconcileShareAccess(ctx, f.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if f.nas.updates != 1 || f.nas.setperms != 1 {
+		t.Fatalf("a second pass changed it again: updates=%d setperms=%d", f.nas.updates, f.nas.setperms)
 	}
 }
 

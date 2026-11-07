@@ -110,6 +110,7 @@ type fakeNAS struct {
 	mu    sync.Mutex
 	calls map[string][]string
 	users []map[string]any
+	nfs   []map[string]any // sharing.nfs.query rows; a share listed here is NFS
 }
 
 func (f *fakeNAS) got(method string) []string {
@@ -138,7 +139,7 @@ func (f *fakeNAS) serve(t *testing.T) *Client {
 			}
 			f.mu.Lock()
 			f.calls[req.Method] = append(f.calls[req.Method], string(req.Params))
-			users := f.users
+			users, nfs := f.users, f.nfs
 			f.mu.Unlock()
 			var result any = true
 			switch req.Method {
@@ -147,7 +148,7 @@ func (f *fakeNAS) serve(t *testing.T) *Client {
 			case "pool.dataset.query":
 				if strings.Contains(string(req.Params), "tank/shares/p-") {
 					result = []any{map[string]any{"id": "tank/shares/p-long", "user_properties": map[string]any{
-						projectProp: map[string]any{"rawvalue": "p"}, protoProp: map[string]any{"rawvalue": ProtocolSMB},
+						projectProp: map[string]any{"rawvalue": "p"}, protoProp: map[string]any{"rawvalue": map[bool]string{true: ProtocolNFS, false: ProtocolSMB}[nfs != nil]},
 					}}}
 				} else {
 					result = []any{map[string]any{"id": "tank/shares", "available": map[string]any{"rawvalue": "999999999999999"}}}
@@ -160,8 +161,14 @@ func (f *fakeNAS) serve(t *testing.T) *Client {
 				result = map[string]any{"id": 11}
 			case "sharing.nfs.query":
 				result = []any{}
+				if nfs != nil {
+					result = nfs
+				}
 			case "sharing.smb.query":
 				result = []any{map[string]any{"id": 11, "path": "/mnt/tank/shares/p-long"}}
+				if nfs != nil {
+					result = []any{}
+				}
 			case "user.query":
 				result = users
 			}
@@ -177,6 +184,36 @@ func (f *fakeNAS) serve(t *testing.T) *Client {
 	}
 	t.Cleanup(c.Close)
 	return c
+}
+
+// TestSetAccessSquashesAnOldExport: an export from before root squash loses maproot, and its top directory
+// opens first so a client's root does not lose its way in.
+func TestSetAccessSquashesAnOldExport(t *testing.T) {
+	for _, maproot := range []string{"root", ""} {
+		f := &fakeNAS{nfs: []map[string]any{{"id": 12, "path": "/mnt/tank/shares/p-long", "networks": []string{"10.0.0.1/32"}, "maproot_user": maproot}}}
+		s := &Service{C: f.serve(t), Parent: "tank/shares"}
+		list, err := s.List(context.Background(), "p")
+		if err != nil || len(list) != 1 {
+			t.Fatalf("list: %+v, %v", list, err)
+		}
+		if list[0].MapsRoot != (maproot != "") {
+			t.Fatalf("maproot %q: MapsRoot = %v", maproot, list[0].MapsRoot)
+		}
+		if err := s.SetAccess(context.Background(), "p", "tank/shares/p-long", []string{"10.0.0.2/32"}); err != nil {
+			t.Fatal(err)
+		}
+		update := f.got("sharing.nfs.update")
+		if len(update) != 1 || !strings.Contains(update[0], `"maproot_user":null`) || !strings.Contains(update[0], `"maproot_group":null`) {
+			t.Fatalf("update = %v", update)
+		}
+		perms := f.got("filesystem.setperm")
+		if maproot == "" && len(perms) != 0 {
+			t.Fatalf("an export already squashing had its directory changed: %v", perms)
+		}
+		if maproot != "" && (len(perms) != 1 || !strings.Contains(perms[0], `"mode":"777"`) || strings.Contains(perms[0], "recursive")) {
+			t.Fatalf("setperm = %v", perms)
+		}
+	}
 }
 
 func TestNFSExportSquashesRoot(t *testing.T) {

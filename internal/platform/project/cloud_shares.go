@@ -156,7 +156,7 @@ func (h *Handler) reconcileShareExports(ctx context.Context, p *Project, service
 				return err
 			}
 			for i := range list {
-				if ts.SameExport(list[i].Networks, networks) {
+				if !list[i].MapsRoot && ts.SameExport(list[i].Networks, networks) {
 					continue
 				}
 				if err := ts.SetAccess(ctx, p.ID, list[i].Dataset, networks); err != nil {
