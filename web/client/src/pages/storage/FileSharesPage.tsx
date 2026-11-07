@@ -222,10 +222,18 @@ export default function FileSharesPage() {
             <div className="grid gap-3">
               <CopyLine text={String(share(details).mount ?? "")} />
               {password ? (
-                <div className="grid gap-1">
-                  <Label>Password for {String(share(details).username ?? "")} (shown once)</Label>
+                <div className="grid gap-1 rounded-md border border-amber-500/40 bg-amber-500/5 p-3">
+                  <Label>Password for {String(share(details).username ?? "")}</Label>
                   <CopyLine text={password} />
+                  <p className="text-xs text-muted-foreground">
+                    Save it now: it is shown only this once and the platform does not keep it.
+                  </p>
                 </div>
+              ) : share(details).protocol === "SMB" ? (
+                <p className="text-xs text-muted-foreground">
+                  The password of {String(share(details).username ?? "the share's user")} was shown once, when the share
+                  was created. Lost it? Reset password issues a new one and the old one stops working.
+                </p>
               ) : null}
               <p className="text-xs text-muted-foreground">
                 Allowed: {((share(details).networks as string[]) ?? []).join(", ") || "none"}

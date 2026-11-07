@@ -55,12 +55,17 @@ type BillDto struct {
 // (same-currency ⇒ identity, no fetch); `now` is the FX-rate instant. The net base is the
 // with-adjustments product-currency net (matches getNetAmountBillProductCurrencyWithAdjustments).
 func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxRate, baseCurrency string, x *pricing.Exchanger, now time.Time) (*BillDto, error) {
+	// A profile an operator activated before it had billing details carries no currency: it bills in the base currency.
+	currency := profile.Currency
+	if currency == "" {
+		currency = baseCurrency
+	}
 	netBase := pricing.GetNetAmountBillProductCurrencyWithAdjustments(bill)
-	netAmount, err := x.ExchangeToBillingProfileCurrency(netBase, profile.Currency, baseCurrency, now)
+	netAmount, err := x.ExchangeToBillingProfileCurrency(netBase, currency, baseCurrency, now)
 	if err != nil {
 		return nil, err
 	}
-	rate, err := x.GetExchangeRate(baseCurrency, profile.Currency, now)
+	rate, err := x.GetExchangeRate(baseCurrency, currency, now)
 	if err != nil {
 		return nil, err
 	}
@@ -69,12 +74,14 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 	unpaid := decimal.Zero
 	if bill.Status == pricing.BillStatusSent {
 		unpaidGrossBase := pricing.CalculateGrossAmount(pricing.GetUnpaidAmountBillProductCurrency(bill), rates)
-		unpaid, err = x.ExchangeToBillingProfileCurrency(unpaidGrossBase, profile.Currency, baseCurrency, now)
+		unpaid, err = x.ExchangeToBillingProfileCurrency(unpaidGrossBase, currency, baseCurrency, now)
 		if err != nil {
 			return nil, err
 		}
 	}
 
+	// Items, adjustments and applied credits are stored in the base currency; the net and gross above are in the profile's. Every amount
+	// goes out in the profile's currency, so the bill's lines add up to its total.
 	items := make([]BillItemDto, 0, len(bill.Items))
 	for i := range bill.Items {
 		it := &bill.Items[i]
@@ -83,9 +90,40 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 			ResourceID:   it.ResourceID,
 			ResourceType: it.ResourceType,
 			ProjectID:    it.ProjectID,
-			Currency:     it.Currency,
-			NetAmount:    num(it.NetAmount),
+			Currency:     currency,
+			NetAmount:    num(rate.Mul(it.NetAmount)),
 		})
+	}
+	var adjustments []pricing.BillAdjustment
+	for _, a := range bill.Adjustments {
+		if a.Amount != nil {
+			v := rate.Mul(*a.Amount)
+			a.Amount = &v
+		}
+		adjustments = append(adjustments, a)
+	}
+
+	conv := func(d *decimal.Decimal) *decimal.Decimal {
+		if d == nil {
+			return nil
+		}
+		v := rate.Mul(*d)
+		return &v
+	}
+	accountCredits := make([]pricing.AppliedAccountCredit, len(bill.AppliedAccountCredits))
+	for i, c := range bill.AppliedAccountCredits {
+		c.Amount, c.GrossAmount = conv(c.Amount), conv(c.GrossAmount)
+		accountCredits[i] = c
+	}
+	collected := make([]pricing.AppliedCollectedCredit, len(bill.CollectedAmounts))
+	for i, c := range bill.CollectedAmounts {
+		c.Amount, c.GrossAmount = conv(c.Amount), conv(c.GrossAmount)
+		collected[i] = c
+	}
+	promoCredits := make([]pricing.AppliedPromotionalCredit, len(bill.AppliedPromotionalCredits))
+	for i, c := range bill.AppliedPromotionalCredits {
+		c.Amount, c.GrossAmount = conv(c.Amount), conv(c.GrossAmount)
+		promoCredits[i] = c
 	}
 
 	return &BillDto{
@@ -99,10 +137,10 @@ func ToBillDto(profile *BillingProfile, bill *pricing.Bill, rates []pricing.TaxR
 		GrossAmount:               num(grossAmount),
 		NetAmount:                 num(netAmount),
 		UnpaidGrossAmount:         num(unpaid),
-		AppliedAccountCredits:     bill.AppliedAccountCredits,
-		CollectedAmounts:          bill.CollectedAmounts,
-		AppliedPromotionalCredits: bill.AppliedPromotionalCredits,
-		Adjustments:               bill.Adjustments,
+		AppliedAccountCredits:     accountCredits,
+		CollectedAmounts:          collected,
+		AppliedPromotionalCredits: promoCredits,
+		Adjustments:               adjustments,
 		CreatedAt:                 bill.CreatedAt,
 		UpdatedAt:                 bill.UpdatedAt,
 	}, nil

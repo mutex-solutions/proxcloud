@@ -32,13 +32,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 // POST the console action and return the ProxCloud-proxied socket URL (+ the VNC
 // password when the backend needs one — Proxmox presents its ticket as the RFB credential).
 async function fetchConsoleURL(pid: string, resourceId: string, cloud: Scope, action: string) {
-  const res = await apiFetch<{ result?: { url?: string; password?: string; user?: string } }>(
+  const res = await apiFetch<{ result?: { url?: string; password?: string } }>(
     `/project/${pid}/cloud/${resourceId}/action`,
     { method: "POST", body: { action }, cloud },
   )
   const url = res?.result?.url
   if (!url) throw new Error("No console URL returned.")
-  return { url, password: res?.result?.password, user: res?.result?.user }
+  return { url, password: res?.result?.password }
 }
 
 export default function ServerConsolePage() {
@@ -325,7 +325,7 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
 
     void (async () => {
       try {
-        const { url, user, password } = await fetchConsoleURL(pid, resourceId, { serviceId, region }, "SERIAL_CONSOLE")
+        const { url } = await fetchConsoleURL(pid, resourceId, { serviceId, region }, "SERIAL_CONSOLE")
         if (cancelled || !hostRef.current) return
 
         term = new Terminal({
@@ -361,8 +361,8 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
           return true
         })
 
-        // Proxmox termproxy framing: the session opens with "<user>:<ticket>\n" and answers "OK";
-        // after that input is "0:<bytes>:<data>", a resize "1:<cols>:<rows>:" and a keep-alive "2".
+        // Proxmox termproxy framing: the session opens with "<user>:<ticket>\n" (ProxCloud's proxy sends it) and
+        // answers "OK"; after that input is "0:<bytes>:<data>", a resize "1:<cols>:<rows>:" and a keep-alive "2".
         const encoder = new TextEncoder()
         const sendInput = (data: string) => {
           if (ws?.readyState !== WebSocket.OPEN) return
@@ -389,7 +389,6 @@ function SerialConsole({ pid, resourceId, cloud }: { pid: string; resourceId: st
         let authed = false
         ws.onopen = () => {
           if (cancelled) return
-          ws?.send(encoder.encode(`${user}:${password}\n`))
           keepAlive = setInterval(() => {
             if (ws?.readyState === WebSocket.OPEN) ws.send(encoder.encode("2"))
           }, 30_000)

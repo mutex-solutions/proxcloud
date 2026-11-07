@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useParams } from "react-router-dom"
 import { apiFetch, apiFetchEnvelope, type CloudScope } from "./api"
 import type {
@@ -262,12 +262,17 @@ export function useCursorList<T = unknown>(
   return { ...q, rows }
 }
 
-// Ensures the project is bootstrapped (project pool) — fire-and-forget on entry.
+// Ensures the project is bootstrapped (project pool) — fire-and-forget on entry. A new project
+// gets its services attached by this very call, and the pages asked for its locations in
+// parallel and got none ("No region" until a reload): ask again once it is done.
 export function useProjectInit(pid: string) {
+  const qc = useQueryClient()
   return useQuery({
     queryKey: ["project-init", pid],
     queryFn: async () => {
       await apiFetchEnvelope(`/project/${pid}/init`, { method: "POST" })
+      void qc.invalidateQueries({ queryKey: ["locations", pid] })
+      void qc.invalidateQueries({ queryKey: ["ui-menu", pid] })
       return true
     },
     enabled: !!pid,

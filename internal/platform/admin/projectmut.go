@@ -711,7 +711,8 @@ func (h *Handler) projectDeleteNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	if _, ok := h.findProjectOr404(w, r, id); !ok {
+	before, ok := h.findProjectOr404(w, r, id)
+	if !ok {
 		return
 	}
 	if h.projectCloud == nil || h.projectCloud.DeleteNow == nil {
@@ -726,7 +727,9 @@ func (h *Handler) projectDeleteNow(w http.ResponseWriter, r *http.Request) {
 	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): write a DELETE PROJECT scheduled=false admin audit event.
+	// The middleware's DELETE PROJECT event carries the status flip to DELETE_IN_PROGRESS, which is
+	// what tells an immediate delete from a scheduled one in the audit log.
+	audit.RecordSnapshots(r.Context(), maps.Clone(before), updated)
 	httpx.OK(w, shapeDoc(updated))
 }
 

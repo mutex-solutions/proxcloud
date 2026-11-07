@@ -1400,6 +1400,26 @@ function ClusterDetail({
             </div>
           )}
 
+          {/* Why a PersistentVolumeClaim can sit Pending: what storage this cluster was given. */}
+          {Array.isArray(c.storage_classes) && (
+            (c.storage_classes as string[]).length === 0 && !c.rwx ? (
+              <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4 text-sm">
+                <div className="font-medium">No storage in this cluster</div>
+                <p className="text-muted-foreground">
+                  The cluster has no StorageClass, so a PersistentVolumeClaim stays Pending. Your platform operator
+                  decides whether Kubernetes clusters get storage.
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Storage: {(c.storage_classes as string[]).length > 0
+                  ? <>StorageClass <span className="font-mono">{(c.storage_classes as string[]).join(", ")}</span> (ReadWriteOnce)</>
+                  : "no block StorageClass"}
+                {c.rwx ? " · ReadWriteMany from a NAS share" : " · no ReadWriteMany: a RWX claim stays Pending"}
+              </p>
+            )
+          )}
+
           <div className="overflow-hidden rounded-xl border bg-card">
             <Table>
               <TableHeader>

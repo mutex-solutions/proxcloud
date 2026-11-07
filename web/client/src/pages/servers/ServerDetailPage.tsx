@@ -620,7 +620,6 @@ export function ServerDetailPage() {
             <DialogTitle>Delete server</DialogTitle>
             <DialogDescription>
               Are you sure you want to delete "{name}"? This cannot be undone.
-              {features.has("serverBackups") ? " Its backups are deleted with it." : ""}
             </DialogDescription>
           </DialogHeader>
           <ServerDeleteVolumes checked={deleteVolumes} onChange={setDeleteVolumes} />

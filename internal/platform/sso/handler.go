@@ -63,9 +63,7 @@ func (h *Handler) Routes(r chi.Router) {
 }
 
 func fail(w http.ResponseWriter, err error) {
-	if !httpx.WriteError(w, err) {
-		httpx.Err(w, http.StatusInternalServerError, 500, "internal.error")
-	}
+	httpx.WriteError(w, err)
 }
 
 // orgAdmin gates org endpoints on organization:manage_roles: whoever can hand out roles is who may
