@@ -761,8 +761,10 @@ create or reset response, and is never stored.
 action and by every sync. An address leaving the project (detach, server delete, public IP delete, subnet or network
 delete, teardown) comes off the project's exports first, and if the NAS refuses, the release fails and the address stays
 held, so it can never reach another tenant while an export lists it. NFS squashes root: a client's root is `nobody` on the
-NAS, and a new dataset is mode `777` so that unprivileged clients can write. Exports from before this rule keep their
-`maproot` until they are recreated. The NAS tells tenants apart by source address, so a client needs a path to the NAS that keeps
+NAS, and a new dataset is mode `777` so that unprivileged clients can write. An export from before this rule is brought
+in line by the next sync or `REFRESH_ACCESS`: `maproot` goes and its top directory opens to `777`, not recursively. Files
+a client's root wrote before that stay owned by root with their modes, so clients can read them as those modes allow but
+no longer change them. An operator who wants them writable changes their owner on the NAS. The NAS tells tenants apart by source address, so a client needs a path to the NAS that keeps
 its address. A public NIC has one when the NAS is routable from the public network. A private subnet that leaves
 through SNAT arrives with a node's address, and the tenant isolation rules drop traffic from the pool to the nodes'
 management network: on a NAS placed there, private subnets cannot mount.

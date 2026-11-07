@@ -65,7 +65,9 @@ or external codec) and stored verbatim in each table's `doc` jsonb column.
 | Default key | `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` | `proxcloud.encryption.default.key` (alias `default-key`) | `api.encryptionKey` (or `api.existingSecret`) | — | Key used to encrypt sensitive fields at rest. |
 
 The chart renders `api.encryptionKey` into a Secret and injects it as
-`PROXCLOUD_ENCRYPTION_DEFAULT_KEY`. Alternatively, point `api.existingSecret` at a
+`PROXCLOUD_ENCRYPTION_DEFAULT_KEY`. It protects provider and integration secrets and the secrets of admin hmac keys, and
+changing it locks all of those out: hmac key rows that no longer decrypt fail authentication until they are minted again.
+Alternatively, point `api.existingSecret` at a
 pre-made Secret carrying `db-url` / `rabbitmq-password` / `encryption-key`.
 
 ### Self URLs

@@ -83,7 +83,7 @@ These hold across the schema; individual tables note only their departures.
   collections (`memberships:[]`, `customInfo:{}`), so the wire shape is stable.
 - **Secrets.** `externalService.secret` (Proxmox API token secret, RGW keys, kubeconfigs) is
   encrypted at rest and decrypted in memory on read; `hmac_keys.secretKey` is
-  stored as-is; `cloudDownload` stores only the hash of its token (the raw token
+  encrypted the same way, since SigV4 needs it back; `cloudDownload` stores only the hash of its token (the raw token
   is returned once and never persisted).
 - **Indexes are Postgres expression indexes** over the jsonb, created
   idempotently at startup by each repo's `EnsureIndexes` (via
@@ -818,7 +818,7 @@ inferred from read/write usage.
 | `imageCategory` | runtime | Top-level image category: `{orderNumber, enabled, bareMetal}`. |
 | `instanceMetadataOption` | runtime | Configurable instance-metadata field shown at create time: `{key, type, displayName, enabled, userEditable, serviceIds[] → externalService, regions[], options[], numericRange}`. |
 | `externalResourceProvider` | runtime | An external resource provider bound to a cloud service: `{name, url, externalServiceId → externalService, auths:[{hmacKeyId → hmac_keys}]}`. |
-| `hmac_keys` | runtime | SigV4 / provider API key pair: `{_id: "pk…" access key (the id column), secretKey: "sk…" signing secret, description, createdAt}`. Used by the Admin API and MCP api-key auth. |
+| `hmac_keys` | runtime | SigV4 / provider API key pair: `{_id: "pk…" access key (the id column), secretKey: the "sk…" signing secret, encrypted, description, createdAt}`. Used by the Admin API and MCP api-key auth. |
 | `affiliateEntry` | yes | Affiliate/referral earning row: `{billingProfileId → billingProfile, amount, originAmount}`. |
 | `reminderNotification` | yes | Scheduled reminder (e.g. savings-contract expiry): `{targetResourceId → savingsContract, messageTemplateId → messageTemplate, resourceType, status, notifications:[{daysBefore, sentAt}]}`. |
 | `builtInInvoice` | runtime | A generated built-in invoice record: `{invoiceGatewayId → thirdPartyIntegration, createdAt, …}`. |

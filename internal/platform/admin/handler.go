@@ -24,6 +24,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
+	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
 // txnRefunder is the narrow interface the admin refund + bank-transfer endpoints need
@@ -76,7 +77,11 @@ type Handler struct {
 	// dbaasFor builds the Managed-Database service for a dbaas provider (nil in tests → the
 	// database chart-pin endpoints answer 501).
 	dbaasFor func(es *externalservice.ExternalService) (*dbaas.Service, error)
+	hmacEnc  *textcrypt.Encryptor // seals the secrets of generated hmac keys
 }
+
+// SetHmacEncryptor wires the data-at-rest key for hmac key secrets.
+func (h *Handler) SetHmacEncryptor(enc *textcrypt.Encryptor) { h.hmacEnc = enc }
 
 // SetKamaji wires the kamaji Managed-Kubernetes service factory (the admin chart-pin surface).
 // SetPayService wires the bill PayService (record-payment; carries the bill_is_paid mail +

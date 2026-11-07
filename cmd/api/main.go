@@ -353,9 +353,16 @@ func run() error {
 		if err != nil || !found {
 			return "", false
 		}
-		return doc.SecretKey, true
+		return admin.OpenHmacSecret(enc, doc.SecretKey)
 	}
 	authn.SetHmacLookup(hmacLookup)
+	if !enc.HasKey() {
+		log.Warn("no encryption key configured: hmac key secrets stay in plain text")
+	} else if n, err := admin.SealStoredHmacKeys(ctx, pg.C("hmac_keys"), enc); err != nil {
+		log.Error("encrypt stored hmac key secrets", "converted", n, "err", err)
+	} else if n > 0 {
+		log.Info("encrypted stored hmac key secrets", "count", n)
+	}
 
 	// Client PAT verification: resolve `Bearer pk.sk` tokens from the client_api_keys collection
 	// (SEPARATE from admin hmac_keys — a client PAT can never resolve on the Admin-API SigV4 path).
@@ -397,6 +404,7 @@ func run() error {
 	// gated live rating run turns it on.
 	// Admin handler (needs esSvc + region + the cloud-client factory for cloud-admin live reads).
 	adminH := admin.NewHandler(admin.NewRepo(pg), catalog.NewRepo(pg), users, addFundsSvc, pricingRepo, billingRepo, cloudRepo, platformconfig.NewRepo(pg), auditSvc, esSvc, cfg.DefaultRegion, cfg.Auth.Admin.IssuerURI, cfg.Auth.Admin.ClientID)
+	adminH.SetHmacEncryptor(enc)
 	adminH.SetKamaji(kamajiFactory)
 	adminH.SetDbaas(func(es *externalservice.ExternalService) (*dbaas.Service, error) {
 		return dbaas.New(es.DbaasConfig(), es.ID)
@@ -889,11 +897,11 @@ func run() error {
 		// gen-hmac-key mints an Admin-API SigV4 key pair on the operator mgmt port and is
 		// UNAUTHENTICATED, so it is gated on DebugTriggers ONLY — deliberately NOT the scheduler. A
 		// production billing deploy must set SchedulerEnabled=true to run the charge crons; that must
-		// not also expose unauthenticated key-minting. The secret is returned ONCE and stored verbatim.
+		// not also expose unauthenticated key-minting. The secret is returned ONCE and stored encrypted.
 		if cfg.Jobs.DebugTriggers {
 			jobsDebug["gen-hmac-key"] = func(w http.ResponseWriter, r *http.Request) {
 				doc := admin.NewAdminAPIKey(r.URL.Query().Get("description"))
-				_, err := pg.C("hmac_keys").InsertOne(r.Context(), doc)
+				_, err := pg.C("hmac_keys").InsertOne(r.Context(), admin.SealHmacKey(enc, doc))
 				jobResult(w, map[string]any{"id": doc["_id"], "secretKey": doc["secretKey"]}, err)
 			}
 		}

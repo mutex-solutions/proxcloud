@@ -59,6 +59,25 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Diagrams updated:** none, no container or component changed.
 
+## 2026-11-07: Admin hmac key secrets encrypted at rest, old NFS exports squash root
+
+**What changed**
+
+- `hmac_keys.secretKey` is stored encrypted with the data-at-rest key. Every writer seals it, the SigV4 and MCP lookup
+  opens it, and rows in plain text are converted at API start. Creating a key still returns its secret once.
+- The share reconcile treats an NFS export with `maproot` as drifted: it opens the top directory and clears `maproot`.
+
+**Why**
+
+- A database read handed over every Admin API credential in the clear. SigV4 has to get the secret back, so a hash like
+  the one client tokens use cannot work. A key changed without re-sealing fails closed: the stored text does not start
+  working as the secret.
+- Root squash only covered new shares, so the oldest ones, with the most data, kept giving a client's root full access
+  on the NAS. The top directory opens because otherwise a squashed client could not write to a root-owned dataset at all.
+  It is not recursive, so files root wrote before stay owned by root, which `docs/cloud-integration.md` tells operators.
+
+**Diagrams updated:** none, no container or component changed.
+
 ## 2026-11-07: Shared block on a TrueNAS LUN checked (P8-4, part)
 
 **What changed**
