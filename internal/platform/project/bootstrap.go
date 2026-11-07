@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"time"
 
@@ -198,8 +199,13 @@ func (h *Handler) BootstrapProxmoxOnto(ctx context.Context, p *Project, es *exte
 	}
 	// Seed the provider default quota onto a project that has none, so it is
 	// visible/editable per project and survives later default changes.
-	if len(p.Quota) == 0 {
-		p.Quota = es.PVEDefaultQuota()
+	if !hasPVEQuota(p.Quota) { // sandbox keys set first stay next to it
+		q := maps.Clone(es.PVEDefaultQuota())
+		if q == nil && len(p.Quota) > 0 {
+			q = map[string]any{}
+		}
+		maps.Copy(q, p.Quota)
+		p.Quota = q
 	}
 	region := es.PVERegion()
 	if region == "" {

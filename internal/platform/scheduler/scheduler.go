@@ -55,6 +55,9 @@ const (
 	// PVEStateSyncSpec — every minute at :15 (Proxmox state sampler), clear of the charge at :30.
 	PVEStateSyncSpec = "15 * * * * *"
 
+	// SandboxStateSyncSpec — every minute at :10 (sandbox rows off the sandbox cluster), before the charge at :30.
+	SandboxStateSyncSpec = "10 * * * * *"
+
 	// PVETaskPollSpec — every 20 seconds (Proxmox task log poller).
 	PVETaskPollSpec = "*/20 * * * * *"
 

@@ -85,7 +85,7 @@ func GetArchivedBillingResources(ctx context.Context, repo *cloud.Repo, registry
 }
 
 // archivedEnd is where an archived resource's charge stops: its archive time, unless its provider knows an earlier end
-// (an ended sandbox lingers a few minutes before it is archived, and those minutes are not the customer's).
+// (an ended sandbox row is archived at the next read after its end, and the time between is not the customer's).
 func archivedEnd(provider, archived *time.Time) *time.Time {
 	if provider != nil && (archived == nil || provider.Before(*archived)) {
 		return provider

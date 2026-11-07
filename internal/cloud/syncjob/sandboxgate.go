@@ -141,7 +141,7 @@ func openWorkers(ctx context.Context, kc SandboxNodes) (map[string]string, error
 }
 
 // syncSandboxService reconciles the project's SANDBOX rows off the sandbox cluster. A sandbox the controller removed at
-// its shutdownTime vanishes from the list; its row lingers as DELETED for the minutely charge, then is archived.
+// its shutdownTime vanishes from the list; its row is ended (sandbox.MarkVanished) and archived, and the charge rates it to its end.
 func (j *Job) syncSandboxService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
 	if j.sandboxFor == nil {
 		return 0
@@ -157,4 +157,33 @@ func (j *Job) syncSandboxService(ctx context.Context, p *project.Project, es *ex
 		j.log.Error("syncjob: reconcile sandboxes", "project", p.ID, "serviceId", es.ID, "err", err)
 	}
 	return st.Created + st.Updated
+}
+
+// RunSandboxState is the minutely sandbox read, ahead of the minutely charge: every enabled project on every sandbox
+// provider (a DISABLED provider's sandboxes still run until they end). A sandbox lives for seconds to hours, so the
+// 15-minute sync alone would see many start and end unread: this pins each start (runningSince) within a minute and
+// ends each vanished row (sandbox.MarkVanished). Returns the rows changed.
+// ponytail: one list per project per minute; one cluster-wide list per provider if the project count grows.
+func (j *Job) RunSandboxState(ctx context.Context) (int, error) {
+	services, err := j.services.ListByType(ctx, externalservice.TypeCloud)
+	if err != nil {
+		return 0, err
+	}
+	projects, err := j.projects.AllEnabled(ctx)
+	if err != nil {
+		return 0, err
+	}
+	total := 0
+	for i := range services {
+		es := &services[i]
+		if !es.IsSandbox() {
+			continue
+		}
+		for k := range projects {
+			if projects[k].HasService(es.ID) {
+				total += j.syncSandboxService(ctx, &projects[k], es)
+			}
+		}
+	}
+	return total, nil
 }

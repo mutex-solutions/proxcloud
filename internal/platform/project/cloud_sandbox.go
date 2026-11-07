@@ -111,6 +111,9 @@ func (h *Handler) sandboxUsageGate(ctx context.Context, proj *Project, es *exter
 	if err := h.sandboxBillingGate(ctx, proj); err != nil {
 		return err
 	}
+	if es.IsDisabled() { // an operator switched the provider off: what runs may finish, nothing new starts
+		return errSandboxesUnavailable
+	}
 	if err := h.sandboxReleaseGate(ctx, es); err != nil {
 		slog.Error("sandbox: release gates do not hold, usage refused", "service", es.ID, "project", proj.ID, "err", err)
 		return errSandboxesUnavailable
@@ -230,10 +233,9 @@ func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *
 	return saved, nil
 }
 
-// sandboxDelete handles the SANDBOX leg of cloudDelete: delete the CR (the pod goes with it) and
-// end the cache row. A sandbox that ran keeps its row as DELETED for a few minutes so the billing
-// job charges it up to now (sandbox.SyncProvider.Linger archives it afterwards); one that never
-// ran is archived at once.
+// sandboxDelete handles the SANDBOX leg of cloudDelete: delete the CR (the pod goes with it) and end the cache row. A
+// sandbox that ran keeps its row as DELETED with its end, which the charge bills up to and the next read archives;
+// one that never ran is archived at once.
 func (h *Handler) sandboxDelete(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) error {
 	if h.sandboxFor == nil {
 		return fmt.Errorf("sandboxes are not configured")
@@ -245,15 +247,11 @@ func (h *Handler) sandboxDelete(ctx context.Context, es *externalservice.Externa
 	if err != nil {
 		return err
 	}
-	// Billing reads the archived row: refresh it first so a sandbox deleted before any list or
-	// sync still carries RUNNING + runningSince instead of the PENDING payload from create.
-	if live, err := ss.GetSandbox(ctx, proj.ID, cr.ExternalID); err == nil {
-		cr.Data = live
-	}
+	now := time.Now().UTC()
+	refreshSandboxRow(ctx, ss, proj.ID, cr, now)
 	if err := ss.DeleteSandbox(ctx, proj.ID, cr.ExternalID); err != nil {
 		return err
 	}
-	now := time.Now().UTC()
 	if rs, _ := cr.Data["runningSince"].(string); rs != "" {
 		cr.Data = sandbox.MarkDeleted(cr.Data, now)
 		cr.UpdatedAt = &now
@@ -261,6 +259,19 @@ func (h *Handler) sandboxDelete(ctx context.Context, es *externalservice.Externa
 		return err
 	}
 	return h.cloud.DeleteAndArchive(ctx, cr, now)
+}
+
+// refreshSandboxRow reads the sandbox before its row ends, so billing sees RUNNING + runningSince and not the PENDING
+// payload of the create. A sandbox already gone ends the way the sync ends it (sandbox.MarkVanished); on any other
+// read error the row keeps what it knew.
+func refreshSandboxRow(ctx context.Context, ss *sandbox.Service, projectID string, cr *cloud.CloudResource, now time.Time) {
+	live, err := ss.GetSandbox(ctx, projectID, cr.ExternalID)
+	switch {
+	case err == nil:
+		cr.Data = live
+	case errors.Is(err, sandbox.ErrNotFound):
+		sandbox.MarkVanished(cr, now)
+	}
 }
 
 // sandboxAction handles SANDBOX actions. Returns false when the action is not a sandbox action
@@ -370,6 +381,14 @@ func (h *Handler) sandboxExec(w http.ResponseWriter, r *http.Request, proj *Proj
 	case err != nil:
 		h.sandboxFail(w, err)
 	default:
+		// The exec ran, so the sandbox is Ready: record it now (runningSince) rather than at the next read.
+		if live, err := ss.GetSandbox(r.Context(), proj.ID, cr.ExternalID); err == nil {
+			now := time.Now().UTC()
+			cr.Data, cr.UpdatedAt = live, &now
+			if _, err := h.cloud.Update(r.Context(), cr); err != nil {
+				slog.Warn("sandbox: cache update after exec", "sandbox", cr.ExternalID, "err", err)
+			}
+		}
 		httpx.OK(w, map[string]any{"result": *res})
 	}
 }
@@ -430,17 +449,22 @@ func (h *Handler) DeleteProjectSandboxes(ctx context.Context, p *Project) (int, 
 			keep(err)
 			continue
 		}
-		byID := map[string]*cloud.CloudResource{}
+		// Every row ends, also one whose sandbox is already gone: a DISABLED project is not synced, so nothing else
+		// would end it before a resume, and its end must not become the resume.
 		for i := range rows {
-			byID[rows[i].ExternalID] = &rows[i]
-		}
-		for id := range live {
-			if cr := byID[id]; cr != nil {
-				err = h.sandboxDelete(ctx, es, p, cr)
-			} else {
-				err = ss.DeleteSandbox(ctx, p.ID, id)
+			id := rows[i].ExternalID
+			if err := h.sandboxDelete(ctx, es, p, &rows[i]); err != nil {
+				keep(fmt.Errorf("sandbox %s: %w", id, err))
+				delete(live, id)
+				continue
 			}
-			if err != nil {
+			if _, ok := live[id]; ok {
+				n++
+				delete(live, id)
+			}
+		}
+		for id := range live { // on the cluster with no row yet
+			if err := ss.DeleteSandbox(ctx, p.ID, id); err != nil {
 				keep(fmt.Errorf("sandbox %s: %w", id, err))
 				continue
 			}
@@ -469,7 +493,8 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 			continue
 		}
 		ss, err := h.sandboxFor(es)
-		if err == nil {
+		if err == nil && res.Data["status"] != sandbox.StatusDeleted {
+			refreshSandboxRow(ctx, ss, p.ID, res, now)
 			err = ss.DeleteSandbox(ctx, p.ID, res.ExternalID)
 		}
 		if err != nil {

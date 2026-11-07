@@ -94,7 +94,8 @@ type: kubernetes.io/service-account-token
 # The NodeRestriction release gate (docs/managed-sandbox.md §3) runs two dry-run Node creates as the node
 # `proxcloud-noderestriction-probe`: impersonating that one user and the system:nodes group is all it may impersonate.
 # That identity can do what any node can (the Node authorizer): read nodes, services and endpoints, and register a Node
-# of that name. A Node registered that way has no VM in the sandbox pool, which the fence gate refuses.
+# of that name. The policy at the end of this file refuses it every write that is not a dry run, so a leaked firewall
+# token cannot register that Node, take tenant pods onto it or ask for a node certificate. Needs Kubernetes 1.30+.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -139,3 +140,33 @@ metadata:
   annotations:
     kubernetes.io/service-account.name: proxcloud-firewall
 type: kubernetes.io/service-account-token
+---
+# The NodeRestriction probe identity may only dry-run (see the firewall service account above): every create, update,
+# delete or connect it sends without dryRun is refused. The probe's own dry runs pass here and are then judged by
+# NodeRestriction, which is what the gate reads.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: proxcloud-noderestriction-probe-dry-run-only
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE", "CONNECT"]
+        resources: ["*/*"]
+  matchConditions:
+    - name: probe-identity
+      expression: request.userInfo.username == "system:node:proxcloud-noderestriction-probe"
+  validations:
+    - expression: has(request.dryRun) && request.dryRun
+      message: the proxcloud NodeRestriction probe identity may only dry-run
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: proxcloud-noderestriction-probe-dry-run-only
+spec:
+  policyName: proxcloud-noderestriction-probe-dry-run-only
+  validationActions: ["Deny"]

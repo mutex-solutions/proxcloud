@@ -369,7 +369,16 @@ func (s *Service) GetSandbox(ctx context.Context, projectID, id string) (map[str
 		return nil, err
 	}
 	s.pinRunningSince(ctx, obj)
-	return sandboxData(obj), nil
+	return s.observed(sandboxData(obj)), nil
+}
+
+// observed stamps a PENDING payload with when it was read (seenPendingAt): the latest moment the sandbox is known not to
+// have been running, which bills a sandbox that ends before any read sees it running (MarkVanished).
+func (s *Service) observed(d map[string]any) map[string]any {
+	if d["status"] == StatusPending {
+		d["seenPendingAt"] = s.now().UTC().Format(time.RFC3339)
+	}
+	return d
 }
 
 // pinRunningSince records, once, when the sandbox first became Ready (AnnotationRunningSince).
@@ -485,7 +494,7 @@ func (s *Service) ListSandboxes(ctx context.Context, projectID string) (map[stri
 	for _, it := range items {
 		if id := digStr(it, "metadata", "name"); id != "" {
 			s.pinRunningSince(ctx, it)
-			out[id] = sandboxData(it)
+			out[id] = s.observed(sandboxData(it))
 		}
 	}
 	return out, nil
@@ -497,8 +506,8 @@ func (s *Service) owns(obj map[string]any, projectID string) bool {
 		digStr(obj, "metadata", "labels", LabelProject) == projectID
 }
 
-// Status values in the cached payload. DELETED rows linger briefly after the sandbox is gone so
-// the billing job charges up to its end (see MarkDeleted and SyncProvider.Linger).
+// Status values in the cached payload. A DELETED row carries its end (endedAt), which the charge bills up to (see
+// MarkDeleted and MarkVanished).
 const (
 	StatusPending = "PENDING"
 	StatusRunning = "RUNNING"

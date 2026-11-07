@@ -22,10 +22,10 @@ import (
 //   - once RUNNING, cr.Info.CreatedAt is set to runningSince. stampResourceValues prefers
 //     Info.CreatedAt, so the item is created with its watermark at the moment the sandbox started.
 //
-// End of life: an ended sandbox's row lingers as DELETED (sandbox.SyncProvider.Linger) and is
-// rated up to DeletedAt = its runtime rounded UP to whole minutes from runningSince, at least one
-// minute. The engine stops at DeletedAt, so the lingering ticks add nothing beyond that; an
-// agent that creates and kills a sandbox within seconds still pays one minute.
+// End of life: an ended sandbox's row is DELETED with its end (sandbox.MarkVanished, or the delete) and archived; the
+// charge rates archived rows too, up to DeletedAt = its runtime rounded UP to whole minutes from runningSince, at least
+// one minute. An agent that creates and kills a sandbox within seconds still pays one minute. A row never read while
+// running gets an assumed runningSince (its last pending read) when it ends, so a short sandbox is never free.
 // ponytail: minute granularity; per-second billing would need its own ledger.
 type SandboxProvider struct{}
 

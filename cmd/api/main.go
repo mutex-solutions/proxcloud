@@ -809,6 +809,10 @@ func run() error {
 				n, err := syncJob.RunPVEState(r.Context())
 				jobResult(w, map[string]any{"changed": n}, err)
 			},
+			"run-sandbox-state": func(w http.ResponseWriter, r *http.Request) {
+				n, err := syncJob.RunSandboxState(r.Context())
+				jobResult(w, map[string]any{"changed": n}, err)
+			},
 			"run-pve-tasks": func(w http.ResponseWriter, r *http.Request) {
 				n, err := syncJob.RunPVETasks(r.Context())
 				jobResult(w, map[string]any{"recorded": n}, err)
@@ -1177,6 +1181,11 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 		{Name: "pveStateSync", Spec: scheduler.PVEStateSyncSpec, AtMostFor: 2 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
 			if _, err := sync.RunPVEState(ctx); err != nil {
 				log.Error("pve state sync job", "err", err)
+			}
+		}},
+		{Name: "sandboxStateSync", Spec: scheduler.SandboxStateSyncSpec, AtMostFor: 2 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
+			if _, err := sync.RunSandboxState(ctx); err != nil {
+				log.Error("sandbox state sync job", "err", err)
 			}
 		}},
 		{Name: "pveTaskPoll", Spec: scheduler.PVETaskPollSpec, AtMostFor: time.Minute, AtLeastFor: 10 * time.Second, Fn: func(ctx context.Context) {

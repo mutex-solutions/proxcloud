@@ -6,6 +6,35 @@ and rules: [README.md](README.md#maintenance-rule).
 
 ## 2026-11-08: Sandboxes reach tenants: native API, billing, quota, suspension, release gates (SB3)
 
+### Review fixes (same PR)
+
+**What changed**
+
+- New minutely job `sandboxStateSync` (`syncjob.RunSandboxState`, at :10, debug trigger `run-sandbox-state`): every
+  enabled project's `SANDBOX` rows off the sandbox cluster before the minutely charge. `EXEC` records the read too.
+- `sandbox.SyncProvider.KeepUnread` (replacing the never-called `Linger`): a vanished sandbox's row ends
+  (`sandbox.MarkVanished`) and is archived; a row never read Ready gets its start from its last pending read
+  (`seenPendingAt`, stamped on every read of a PENDING sandbox) or its create. Delete, the suspension's delete and the
+  teardown read each sandbox first and end rows whose sandbox is already gone the same way.
+- `sandboxUsageGate` refuses create, `EXEC` and `SET_TIMEOUT` on a `DISABLED` provider (503).
+- `pveQuotaLimits` and the Proxmox bootstrap ignore the sandbox quota keys when deciding whether a project has its own
+  Proxmox quota.
+- `deploy/sandbox-cluster/rbac.yaml`: a ValidatingAdmissionPolicy refuses the NodeRestriction probe identity every
+  write that is not a dry run.
+
+**Why**
+
+- A sandbox row was the create payload until a list, a delete or the 15-minute sync read it; exec did not. An API
+  user who only ran `EXEC` and let each sandbox time out before the next sync was never billed (archived `PENDING`,
+  nothing to rate). The charge does rate archived rows, so the fix is that every ended row carries a start.
+- Disabling a provider is how an operator takes it off: tenants could still create through `x-service-id`.
+- A project attached to sandboxes before Proxmox held only sandbox keys, which counted as "its own quota" and made
+  every Proxmox key unlimited.
+- The impersonation grant allows a real Node create, not only the dry run: a leaked firewall token could register
+  a Node and receive tenant pods until the fence gate noticed.
+
+**Diagrams updated:** `c3-components.md` (sync job, billing resources).
+
 **What changed**
 
 - Project cloud routes serve `SANDBOX`: create (a create with no service goes to the project's sandbox provider),

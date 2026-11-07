@@ -518,14 +518,14 @@ On the project cloud routes (`/api/v1/project/{id}/...`), for a project attached
 |---|---|
 | `POST /cloud` `{type: SANDBOX, data: {template, name?, cpu?, memoryGiB?, timeoutSeconds?, gpu?, env?, metadata?, network?}}` | Create. A create that names no service goes to the project's first enabled sandbox provider. 200 with the row; the sandbox is `PENDING` until its pod is Ready |
 | `POST /resource?type=SANDBOX` | List, read through the cluster (a sandbox goes `RUNNING` in seconds and ends at its time limit) |
-| `DELETE /cloud/{id}` | Delete the Sandbox CR (its pod goes with it); the row ends now and lingers `DELETED` for the minutely charge |
+| `DELETE /cloud/{id}` | Delete the Sandbox CR (its pod goes with it); the row ends now (`DELETED` with its end) and the next read archives it |
 | `POST /cloud/{id}/action` `EXEC {cmd \| command[], stdin?, timeoutSeconds?}` | Run one command and wait: `{stdout, stderr, exitCode, truncated}` |
 | `GET_LOGS {tailLines?}` | The newest lines of its output (default 200, at most 2000) |
 | `SET_TIMEOUT {timeoutSeconds}` | The end moves to now plus that (keepalive or shorten), within the provider's maximum |
 | `REFRESH` | The live state |
 
-Errors: 409 for a DISABLED or deleting project, 403 for a SUSPENDED billing profile, 503 while a release gate does not
-hold or the cluster is unreachable, 429 over the project quota or the cluster ResourceQuota, 400 for a bad request,
+Errors: 409 for a DISABLED or deleting project, 403 for a SUSPENDED billing profile, 503 while the provider is
+`DISABLED` (what runs may finish: logs, delete), while a release gate does not hold or the cluster is unreachable, 429 over the project quota or the cluster ResourceQuota, 400 for a bad request,
 404 for a sandbox of another project (every action and delete needs a row the project owns, and the service checks
 the sandbox's project labels again).
 
@@ -533,9 +533,12 @@ the sandbox's project labels again).
 
 `sandbox` is billed per minute from the moment the sandbox was Ready (`runningSince`, never the create: an image pull
 is not the customer's) to its end, rounded up to whole minutes, at least one. Attributes: `vcpus`, `ram_gb`,
-`gpu_count`, `gpu_model`, `template`, `status`, `display_name`. A sandbox that never ran bills nothing. An ended row
-lingers `DELETED` for three minutes so the minutely charge sees it; an archived row keeps the earlier end its provider
-knows. `sandbox_snapshot` is per stored GB-hour (`size_gb`); nothing writes one before SB7. The seed's rules for both
+`gpu_count`, `gpu_model`, `template`, `status`, `display_name`. The start is recorded by any read that sees the pod
+Ready: the minutely `sandboxStateSync` (at :10, before the charge at :30), the client list, an `EXEC`, a delete. An
+ended row is `DELETED` with its end and archived; the charge rates archived rows of the cycle to their end. A
+sandbox can start and end between two reads: a row that ends without ever being read Ready is billed from the last
+read that saw it pending (`seenPendingAt`, else its create, marked `runningSinceAssumed`), so a short sandbox is
+never free and one that never started pays at most about a minute. `sandbox_snapshot` is per stored GB-hour (`size_gb`); nothing writes one before SB7. The seed's rules for both
 are named `PLACEHOLDER ...` until a rate is signed. The worker VMs sit in the platform's pool and bill nobody.
 
 ### 3.3 Quota (D10)
@@ -552,13 +555,17 @@ Create, `EXEC` and `SET_TIMEOUT` pass `refuseNewUsage` (`cloudAction`'s allow-li
 `SET_TIMEOUT` and `REFRESH` for a DISABLED project) and then the billing profile check, which covers the moment between a
 profile's suspension and the walk that disables its projects. List, `GET_LOGS` and delete stay open. On a suspension
 (and an operator's disable through the same walk) `billingCloudSuspender` deletes every running sandbox of the
-project and ends its row; snapshots are kept (none exist before SB7); a resume brings none back.
+project and ends every row (also one whose sandbox was already gone, since a DISABLED project is not synced);
+snapshots are kept (none exist before SB7); a resume brings none back. An operator's disable deletes them once, with
+no retry pass. A create already past the gate when the profile is suspended can survive until the next dunning pass;
+it is billed. A provider set `DISABLED` stops new usage (create, `EXEC`, `SET_TIMEOUT`) but deletes nothing.
 
 ### 3.5 Project deletion
 
 Teardown handles sandboxes first: every row's sandbox is deleted, the row ended and archived, then the project's
-`sb-<project>` namespace is deleted. A failure on either keeps the project `DELETE_IN_PROGRESS`, so the deletion job
-retries.
+`sb-<project>` namespace is deleted. Each sandbox is read before it goes, so its archived row carries its start. A
+failure on either keeps the project `DELETE_IN_PROGRESS`, so the deletion job retries. A deleting project is not
+charged, so the time between the delete request and the teardown is not billed.
 
 ### 3.6 Release gates: how the portal checks each
 
@@ -568,11 +575,13 @@ sync fences them (section 2), and the gates read through its PVE token and its s
 `DISABLED` at any time; create or update leaving it live answers 409 with each failing gate, and
 `POST /admin/service/{id}/sandbox/release-check` (the provider page's "Check release gates") shows all three. Every
 create, `EXEC` and `SET_TIMEOUT` checks them again (one verdict per provider kept for a minute; no checker or any
-failure refuses).
+failure refuses). Fail closed is platform-wide: one PVE node that does not report its networks, a firewall
+generation roll or a Node address change fails a gate, and every create and exec on that provider is refused until
+the next check passes (up to a minute after it holds again).
 
 | Gate | How the portal checks it |
 |---|---|
-| NodeRestriction on the sandbox cluster's API server | Impersonating the node `system:node:proxcloud-noderestriction-probe` (group `system:nodes`), it asks the API server for two dry-run creates of that node's own Node: plain, which the Node authorizer allows (so the identity works), then with a `node-restriction.kubernetes.io/` label, which only NodeRestriction refuses (`is not allowed to set the following labels`). Holds only when the first passes and the second is refused that way. Admission runs on dry runs; nothing is stored. The firewall service account may impersonate that one user and that group, nothing else (`rbac.yaml`) |
+| NodeRestriction on the sandbox cluster's API server | Impersonating the node `system:node:proxcloud-noderestriction-probe` (group `system:nodes`), it asks the API server for two dry-run creates of that node's own Node: plain, which the Node authorizer allows (so the identity works), then with a `node-restriction.kubernetes.io/` label, which only NodeRestriction refuses (`is not allowed to set the following labels`). Holds only when the first passes and the second is refused that way. Admission runs on dry runs; nothing is stored. The firewall service account may impersonate that one user and that group, nothing else (`rbac.yaml`), and a ValidatingAdmissionPolicy in the same file refuses that identity every write that is not a dry run (Kubernetes 1.30+), so a leaked token cannot register the probe Node |
 | Isolation DROP for the sandbox CIDR | With the portal's token: the datacenter firewall is on, and this portal's rules in the cluster firewall are exactly, and enabled, the set `ReconcileIsolation` writes with `network.sandboxCidrs` (tenant pool to the sandbox network, sandbox network to the pool and the blocked networks, `forward` and `in`) |
 | The SB2b fence on every worker | Read-only with the portal's token: PVE enforces VM firewalls, the current generation's IP sets and group hold exactly what the pass writes, and every Node without the `unsecured` taint (a tainted one takes no tenant pod, and NodeRestriction keeps the kubelet from dropping the taint) is a VM of the sandbox pool whose firewall reads back as the pass leaves it, with its filter pinned to the address the Node reports. At least one worker must be open |
 
@@ -597,6 +606,11 @@ projects. The portal reached the sandbox API server through a lab host forward.
 - Not run: anything with a running sandbox (console create, exec, logs, timeout, delete, quota refusal, suspension
   deleting a running sandbox, the minutely charge, a cross-tenant action on a sandbox id). They wait for `rbac.yaml`
   on the SB0 cluster; the service-level create, exec, logs, timeout and delete ran there in SB1.
+
+After review (same day): the dry-run-only policy passed a server-side dry run on the SB0 cluster (v1.35); applying
+it was refused by the session's permission check, so its effect is not measured. The fixes below are covered by
+`test/integration/sandbox_test.go` (handler on Postgres, in-memory sandbox cluster) and
+`cmd/api/suspension_walk_test.go`; still not run live.
 
 Found while measuring, not changed here: `ReconcileIsolation` compares rules without their `enable` flag, so a rule
 disabled by hand is not repaired by the sync; the isolation gate refuses it.
