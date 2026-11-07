@@ -737,6 +737,7 @@ Actions on a server: `GET_PROTECTION`, `ENABLE_PROTECTION`, `DISABLE_PROTECTION`
 - **Capacity.** The scheduler keeps each node's replicated VMs' memory free for them (`SchedReq.ReserveMem`).
 - **Billing.** `server_protection` with `size_gb` (replicated disks), from the first successful sync until disabled. The
   start is when a read first saw that sync done (tag `pc-p-<unix>`), not PVE's `last_sync`, which is when that sync began.
+  A row with no stamp has no line. Any live replication job on a tenant VM counts, including one an operator made by hand.
 - **Operator migrate.** `POST /admin/service/{id}/server/{vmid}/migrate {target}`. Sends only the delta when a replica
   exists; PVE turns it into an HA request for a managed VM, and the route waits until the VM is on the target.
 - **After a failover**, the node the VM left keeps its cloud-init volume, because PVE regenerates that volume on start

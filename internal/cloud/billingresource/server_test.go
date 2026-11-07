@@ -104,8 +104,8 @@ func TestProtectionBilledFromItsStamp(t *testing.T) {
 		t.Fatalf("each enable is its own line: %s", br.ResourceID)
 	}
 	delete(cr.Data["server"].(map[string]any)["protection"].(map[string]any), "since")
-	if br := protectionBR(cr); br.ResourceID != "server_protection-r1" || br.CreatedAt != nil {
-		t.Fatalf("a server protected before the stamp keeps its line: %+v", br)
+	if br := protectionBR(cr); br != nil {
+		t.Fatalf("no stamp, no line, or it charges from the server's creation: %+v", br)
 	}
 }
 
@@ -114,10 +114,10 @@ func TestProtectionBRSkipsSharedStorage(t *testing.T) {
 	row := func(pr map[string]any) *cloud.CloudResource {
 		return &cloud.CloudResource{ID: "r", Data: map[string]any{"server": map[string]any{"name": "a", "protection": pr}}}
 	}
-	if br := protectionBR(row(map[string]any{"state": "active", "diskGb": 10})); br == nil {
+	if br := protectionBR(row(map[string]any{"state": "active", "diskGb": 10, "since": "2026-11-07T01:00:00Z"})); br == nil {
 		t.Fatal("replicated: want a bill line")
 	}
-	if br := protectionBR(row(map[string]any{"state": "active", "mode": "shared", "diskGb": 10})); br != nil {
+	if br := protectionBR(row(map[string]any{"state": "active", "mode": "shared", "diskGb": 10, "since": "2026-11-07T01:00:00Z"})); br != nil {
 		t.Fatalf("shared: %+v", br)
 	}
 }

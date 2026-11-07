@@ -564,7 +564,8 @@ and rules: [README.md](README.md#maintenance-rule).
 **What changed**
 
 - The first read that sees a first sync done stamps a `pc-p-<unix>` tag, before HA is added. The row carries it as
-  `protection.since`, and each protection is its own `server_protection` bill line starting there.
+  `protection.since`, and each protection is its own `server_protection` bill line starting there. A row with no stamp
+  has no line. The next read stamps a server protected before this change.
 
 **Why**
 

@@ -117,8 +117,12 @@ func protectionBR(cr *cloud.CloudResource) *billingapi.BillingResource {
 	if !ok || (str(pr["state"]) != "active" && str(pr["state"]) != "degraded") || str(pr["mode"]) == "shared" {
 		return nil
 	}
-	br := &billingapi.BillingResource{
-		ResourceID:   fmt.Sprintf("server_protection-%s", cr.ID),
+	since, err := time.Parse(time.RFC3339, str(pr["since"]))
+	if err != nil {
+		return nil // no stamp yet: the next read adds it to a server with a synced job
+	}
+	return &billingapi.BillingResource{
+		ResourceID:   fmt.Sprintf("server_protection-%s-%d", cr.ID, since.Unix()),
 		ProjectID:    cr.ProjectID,
 		ResourceType: "server_protection",
 		Values: map[string]any{
@@ -127,12 +131,8 @@ func protectionBR(cr *cloud.CloudResource) *billingapi.BillingResource {
 			"state":        str(pr["state"]),
 		},
 		BillingResourceType: serverProtectionType(),
+		CreatedAt:           &since,
 	}
-	if since, err := time.Parse(time.RFC3339, str(pr["since"])); err == nil {
-		br.ResourceID = fmt.Sprintf("server_protection-%s-%d", cr.ID, since.Unix())
-		br.CreatedAt = &since
-	}
-	return br
 }
 
 // snapshotBRs bills each disk snapshot of a server as its own line, from the moment it was taken: one line per

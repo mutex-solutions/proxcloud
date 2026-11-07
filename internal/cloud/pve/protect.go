@@ -592,7 +592,7 @@ func (s *Service) ReconcileProtection(ctx context.Context, r ClusterResource) (m
 			return s.reconcileSharedProtection(ctx, r)
 		}
 	}
-	if stamp { // before HA, or an active row with no stamp would bill from the server's creation
+	if stamp { // before HA, or a server HA looks after would have no bill line
 		if err := s.stampProtectionTags(ctx, r, synced); err != nil {
 			return nil, err
 		}
