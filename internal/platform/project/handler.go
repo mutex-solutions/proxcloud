@@ -589,10 +589,7 @@ func profileValidForChanging(ctx context.Context, bal *billing.BalanceService, b
 }
 
 func (h *Handler) fail(w http.ResponseWriter, err error) {
-	if !httpx.WriteError(w, err) {
-		slog.Error("project handler internal error", "err", err)
-		httpx.Err(w, http.StatusInternalServerError, 500, "internal.error")
-	}
+	httpx.WriteError(w, err)
 }
 
 // principal loads the initialized User (400 if not).
