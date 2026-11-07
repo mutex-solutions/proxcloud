@@ -42,8 +42,8 @@ type PublicIP struct {
 // collide on insert and the loser picks again.
 type PublicIPRepo struct {
 	col *pgdoc.Store
-	// guard wraps every release of a public address: it may refuse to let the address go (file share exports).
-	guard func(ctx context.Context, projectID string, drop []string, release func() error) error
+	// guard wraps every release of a public or cluster address: it may refuse to let the address go (file share exports).
+	guard func(ctx context.Context, projectID string, rows []PublicIP, release func() error) error
 }
 
 func NewPublicIPRepo(db *pgdoc.DB) *PublicIPRepo { return &PublicIPRepo{col: db.C("pvePublicIp")} }
@@ -52,7 +52,7 @@ func NewPublicIPRepo(db *pgdoc.DB) *PublicIPRepo { return &PublicIPRepo{col: db.
 func (h *Handler) SetPublicIPs(r *PublicIPRepo) {
 	h.publicIPs = r
 	if r != nil {
-		r.guard = h.withShareAccessRevoked
+		r.guard = h.guardAddressRelease
 	}
 }
 
@@ -111,7 +111,8 @@ func (r *PublicIPRepo) ReleaseProject(ctx context.Context, serviceID, projectID 
 
 // release frees the matching rows, the one way an address gets back to the pool. A public or cluster address goes
 // through the guard of each project holding one first; a failed guard keeps the row, so the address cannot be
-// reallocated. A net0 row has nothing to guard: the export lists the subnet, which network delete guards.
+// reallocated. A net0 row has nothing to guard: the export lists the subnet, which network delete guards. Whether a
+// cluster address can be on an export takes the project's providers to tell, so the guard decides that.
 func (r *PublicIPRepo) release(ctx context.Context, filter pgdoc.M) error {
 	del := func() error {
 		_, err := r.col.DeleteMany(ctx, filter)
@@ -124,15 +125,15 @@ func (r *PublicIPRepo) release(ctx context.Context, filter pgdoc.M) error {
 	if err != nil {
 		return err
 	}
-	drop := map[string][]string{}
+	guarded := map[string][]PublicIP{}
 	for _, row := range rows {
 		if row.IsPublic() || row.NIC == ReservedNIC {
-			drop[row.ProjectID] = append(drop[row.ProjectID], row.IP+"/32")
+			guarded[row.ProjectID] = append(guarded[row.ProjectID], row)
 		}
 	}
-	for projectID, ips := range drop {
+	for projectID, held := range guarded {
 		inner := del
-		del = func() error { return r.guard(ctx, projectID, ips, inner) }
+		del = func() error { return r.guard(ctx, projectID, held, inner) }
 	}
 	return del()
 }

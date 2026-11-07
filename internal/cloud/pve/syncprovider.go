@@ -256,8 +256,8 @@ func (p *VolumeSyncProvider) Superseded(cached, fresh *cloud.CloudResource) bool
 // List derives VOLUME rows from every pool VM's disk entries. There is no
 // standalone volume in the PVE model — a disk belongs to a VM; a detached disk is
 // its VM's unusedN entry (still billed). ExternalID = volid (cluster-unique).
-// Reconcile archives what this leaves out, so a VM that cannot be read fails the pass. Only a holder that is gone is
-// skipped: /cluster/resources still lists one just dropped, and every cross-node attach drops one.
+// Reconcile archives what this leaves out, so a VM that cannot be read fails the pass. Only a holder gone from every node
+// is skipped: /cluster/resources still lists one just dropped, and every cross-node attach drops one.
 func (p *VolumeSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, error) {
 	return p.list(ctx, func(vm ClusterResource, err error) bool { return isHolder(vm.Tags) && IsNotFound(err) })
 }
@@ -277,6 +277,9 @@ func (p *VolumeSyncProvider) list(ctx context.Context, skip func(ClusterResource
 	var out []cloud.CloudResource
 	for _, r := range vms {
 		cfg, err := p.svc.C.GetVMConfig(ctx, r.Node, r.VMID)
+		if isHolder(r.Tags) && IsNotFound(err) {
+			r.Node, cfg, err = p.svc.holderElsewhere(ctx, r, err)
+		}
 		if err != nil {
 			if skip(r, err) {
 				continue
@@ -339,6 +342,29 @@ func (p *VolumeSyncProvider) list(ctx context.Context, skip func(ClusterResource
 		}
 	}
 	return out, nil
+}
+
+// holderElsewhere finds a holder its listed node does not have: mid-migrate, /cluster/resources still names the old node
+// while the disk is billed and in use on the new one. notFound comes back when no node has it. A node that cannot say is
+// an error of its own, so the pass fails instead of archiving a volume that is only out of sight.
+func (s *Service) holderElsewhere(ctx context.Context, vm ClusterResource, notFound error) (string, VMConfig, error) {
+	nodes, err := s.C.Nodes(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, n := range nodes {
+		if n.Node == vm.Node {
+			continue
+		}
+		cfg, err := s.C.GetVMConfig(ctx, n.Node, vm.VMID)
+		if err == nil {
+			return n.Node, cfg, nil
+		}
+		if !IsNotFound(err) {
+			return "", nil, err
+		}
+	}
+	return "", nil, notFound
 }
 
 // isCSIDisk recognises proxmox-csi's volume names, <store>:vm-9999-pvc-<uuid> (with a file store's

@@ -353,7 +353,7 @@ sequenceDiagram
   participant IP as PublicIPRepo
   participant R as cloud.Repo
 
-  OP->>T: delete project now (or scheduled deletion)
+  OP->>T: deletion job sweep (flagged by delete now, or past its grace window)
   T->>T: managed K8s and DBaaS rows first
   T->>PS: TeardownProjectPool
   PS->>PVE: stop and destroy every VM in the pool, delete pool
@@ -368,7 +368,7 @@ sequenceDiagram
   T->>L: unlock
   T->>IP: ReleaseProject
   T->>R: archive the project's rows
-  T->>T: mark project DELETED
+  T->>T: mark project DELETED (or stay DELETE_IN_PROGRESS for the next sweep)
 ```
 
 ## Sequence (d): per-org SSO login
