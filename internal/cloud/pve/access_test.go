@@ -17,7 +17,7 @@ func TestMintClusterTokens(t *testing.T) {
 	aclErr := false
 	token := func(user string) func(http.ResponseWriter, *http.Request) {
 		return func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"data":{"full-tokenid":"%s!stc-1","value":"secret-%s"}}`, user, user)
+			fmt.Fprintf(w, `{"data":{"full-tokenid":"%s!pc-c-1","value":"secret-%s"}}`, user, user)
 		}
 	}
 	del := func(name string) func(http.ResponseWriter, *http.Request) {
@@ -27,10 +27,10 @@ func TestMintClusterTokens(t *testing.T) {
 		}
 	}
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
-		"POST /api2/json/access/users/capmox@pve/token/stc-1":   token("capmox@pve"),
-		"POST /api2/json/access/users/csi@pve/token/stc-1":      token("csi@pve"),
-		"DELETE /api2/json/access/users/capmox@pve/token/stc-1": del("capmox"),
-		"DELETE /api2/json/access/users/csi@pve/token/stc-1":    del("csi"),
+		"POST /api2/json/access/users/capmox@pve/token/pc-c-1":   token("capmox@pve"),
+		"POST /api2/json/access/users/csi@pve/token/pc-c-1":      token("csi@pve"),
+		"DELETE /api2/json/access/users/capmox@pve/token/pc-c-1": del("capmox"),
+		"DELETE /api2/json/access/users/csi@pve/token/pc-c-1":    del("csi"),
 		"PUT /api2/json/access/acl": func(w http.ResponseWriter, r *http.Request) {
 			if aclErr {
 				w.WriteHeader(http.StatusForbidden)
@@ -47,33 +47,33 @@ func TestMintClusterTokens(t *testing.T) {
 		Pool: "pc-p1", TemplatePool: "pc-templates", Storages: []string{"local-zfs", "ssd"},
 		ISOStorage: "nas", Zone: "z1", Vnet: "v1",
 	}
-	got, err := c.MintClusterTokens(context.Background(), "stc-1", sc)
+	got, err := c.MintClusterTokens(context.Background(), "pc-c-1", sc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.CAPIID != "capmox@pve!stc-1" || got.CSIID != "csi@pve!stc-1" || got.CSISecret != "secret-csi@pve" {
+	if got.CAPIID != "capmox@pve!pc-c-1" || got.CSIID != "csi@pve!pc-c-1" || got.CSISecret != "secret-csi@pve" {
 		t.Errorf("tokens = %+v", got)
 	}
 	var csi []string
 	for _, a := range acls {
-		if strings.HasSuffix(a, "csi@pve!stc-1") {
+		if strings.HasSuffix(a, "csi@pve!pc-c-1") {
 			csi = append(csi, a)
 		}
 	}
 	slices.Sort(csi)
 	want := []string{
-		"/pool/pc-p1 ProxCloudCSI csi@pve!stc-1",
-		"/storage/local-zfs ProxCloudCSI csi@pve!stc-1",
-		"/storage/ssd ProxCloudCSI csi@pve!stc-1",
+		"/pool/pc-p1 ProxCloudCSI csi@pve!pc-c-1",
+		"/storage/local-zfs ProxCloudCSI csi@pve!pc-c-1",
+		"/storage/ssd ProxCloudCSI csi@pve!pc-c-1",
 	}
 	if !slices.Equal(csi, want) {
 		t.Errorf("csi grants = %v, want %v", csi, want)
 	}
-	if !slices.Contains(acls, "/sdn/zones/z1/v1 ProxCloudCAPI capmox@pve!stc-1") {
+	if !slices.Contains(acls, "/sdn/zones/z1/v1 ProxCloudCAPI capmox@pve!pc-c-1") {
 		t.Errorf("capi grants = %v", acls)
 	}
 	aclErr = true
-	if _, err := c.MintClusterTokens(context.Background(), "stc-1", sc); err == nil {
+	if _, err := c.MintClusterTokens(context.Background(), "pc-c-1", sc); err == nil {
 		t.Fatal("a refused ACL must fail the mint")
 	}
 	if !slices.Contains(deleted, "capmox") || !slices.Contains(deleted, "csi") {
