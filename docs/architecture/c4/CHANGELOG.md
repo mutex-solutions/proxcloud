@@ -38,6 +38,26 @@ and rules: [README.md](README.md#maintenance-rule).
   405, or a provider with no website endpoint, left tenants with a public bucket and no control that closed it.
 
 **Diagrams updated:** none; no container or relationship changed.
+## 2026-11-07: Money paths: bill writers under the credit lock, unknown outcomes stay PENDING, unpaid upfront contracts held
+
+**What changed**
+
+- A recorded manual payment and a card charge settling on a bill now hold the profile's credit lock, like paying with
+  credits and issuing a bill. A charge the bill already holds changes nothing, and one succeeding on a bill paid some
+  other way becomes credit.
+- The transaction scanner closes a transaction only when the gateway answers it has no such intent. Any other error
+  leaves it `PENDING` with the reason, re-checked until it leaves the 24 hour window.
+- An upfront savings contract with no deposit and no operator on record never discounts. Such contracts that are `ACTIVE`
+  move to `PENDING_PAYMENT` at API start, and a new operator action records a payment taken outside the portal.
+
+**Why**
+
+- Each bill writer replaces the whole bill it read, so concurrent payments overwrote each other: a race test of 16
+  payments of 5 kept 50 of the 80 on the bill. A scanner marking a deposit `FAILED` on a network error needed a manual
+  repair if the money had moved, since `FAILED` is terminal, and it could also overwrite a settle that won meanwhile.
+  Upfront contracts bought before payments were enforced discounted every bill for money nobody paid.
+
+**Diagrams updated:** none, no container or component changed.
 
 ## 2026-11-07: Shared block on a TrueNAS LUN checked (P8-4, part)
 

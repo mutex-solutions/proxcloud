@@ -365,6 +365,11 @@ func run() error {
 	} else if n > 0 {
 		log.Info("hashed stored API tokens", "count", n)
 	}
+	if held, err := billingRepo.HoldUnpaidUpfrontContracts(ctx, time.Now().UTC()); err != nil {
+		log.Error("hold unpaid upfront savings contracts", "held", held, "err", err)
+	} else if len(held) > 0 {
+		log.Warn("upfront savings contracts with no payment on record are now PENDING_PAYMENT", "contracts", held)
+	}
 	clientKeyLookup := func(r *http.Request, keyID string) (auth.ClientKey, bool) {
 		var doc struct {
 			SecretHash string     `json:"secretHash"`

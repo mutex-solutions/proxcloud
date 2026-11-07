@@ -27,6 +27,12 @@ const (
 
 // --- decode structs (money = decimal.Decimal) ---
 
+// UpfrontUnpaid reports an upfront contract with no record of its money: no deposit paid it and no
+// operator answers for it. It must not discount, whatever its status says.
+func (c *SavingsContract) UpfrontUnpaid() bool {
+	return c.PaidUpfront && c.PaymentTransactionID == "" && c.PaymentRecordedBy == ""
+}
+
 type SavingsContract struct {
 	ID                     string              `json:"id,omitempty"`
 	BillingProfileID       string              `json:"billingProfileId,omitempty"`
@@ -43,10 +49,14 @@ type SavingsContract struct {
 	// UpfrontAmount is what an upfront contract costs: the term's commitment less its discount.
 	UpfrontAmount *decimal.Decimal `json:"upfrontAmount,omitempty"`
 	// PaymentTransactionID is the deposit that paid it, which makes a retried settle a no-op.
-	PaymentTransactionID string     `json:"paymentTransactionId,omitempty"`
-	OrderID              string     `json:"orderId,omitempty"`
-	CreatedAt            *time.Time `json:"createdAt,omitempty"`
-	UpdatedAt            *time.Time `json:"updatedAt,omitempty"`
+	PaymentTransactionID string `json:"paymentTransactionId,omitempty"`
+	// PaymentRecordedBy is the operator answering for money taken outside the portal, PaymentReference
+	// their note of it (a bank reference, a receipt number).
+	PaymentRecordedBy string     `json:"paymentRecordedBy,omitempty"`
+	PaymentReference  string     `json:"paymentReference,omitempty"`
+	OrderID           string     `json:"orderId,omitempty"`
+	CreatedAt         *time.Time `json:"createdAt,omitempty"`
+	UpdatedAt         *time.Time `json:"updatedAt,omitempty"`
 }
 
 type SavingsPlan struct {

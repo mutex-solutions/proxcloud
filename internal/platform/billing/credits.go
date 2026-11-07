@@ -74,14 +74,14 @@ func (r *Repo) PromotionalCreditCandidates(ctx context.Context, billingProfileID
 }
 
 // WithProfileLock runs fn in one transaction holding the profile's credit lock. Everything that reads
-// a credit balance and then writes it goes through here: two payers otherwise both read the same
-// balance, both pass the check and both spend it. Keep gateway calls out where you can, it blocks
-// that profile's other credit operations.
+// a credit balance or a bill's unpaid amount and then writes it goes through here: two payers otherwise
+// both read the same state, and one spends the same balance twice or overwrites the other's payment.
+// Keep gateway calls out where you can, it blocks that profile's other credit operations.
 //
 // Reads inside fn must hit tables that exist: an undefined table aborts the transaction, so the ones
 // a fresh install may not have yet are created first.
 func (r *Repo) WithProfileLock(ctx context.Context, profileID string, fn func(ctx context.Context) error) error {
-	for _, t := range []*pgdoc.Store{r.acctCredits, r.promoCredit, r.counters} {
+	for _, t := range []*pgdoc.Store{r.acctCredits, r.promoCredit, r.counters, r.bills, r.collects} {
 		if err := t.Ensure(ctx); err != nil {
 			return err
 		}
@@ -140,6 +140,14 @@ func (r *Repo) CreditCardByToken(ctx context.Context, bpID, tokenID string) (*Cr
 		return nil, err
 	}
 	return &c, nil
+}
+
+// UpdatePendingCollectTransaction sets the status and message of a charge still PENDING. A settle that
+// won meanwhile is left alone, which a replace of the row read earlier would undo.
+func (r *Repo) UpdatePendingCollectTransaction(ctx context.Context, id string, status pricing.CollectTransactionStatus, message string) error {
+	_, err := r.collects.SetFieldsOne(ctx, pgdoc.M{"_id": id, "status": string(pricing.CollectTransactionStatusPending)},
+		pgdoc.M{"status": string(status), "errorMessage": message, "updatedAt": time.Now().UTC()}, nil)
+	return err
 }
 
 // SaveCollectTransaction upserts a collect transaction (insert on a blank id, else replace

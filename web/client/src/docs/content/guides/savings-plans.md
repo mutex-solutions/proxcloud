@@ -21,7 +21,7 @@ Find them under **Billing → Savings plans**.
 5. Set the start: **This month** or **Next month**.
 6. Optionally tick **Pay upfront** for the upfront tiers — bear in mind a paid upfront contract can't be cancelled.
 7. Click **Purchase**. The contract shows up in your contracts table: **ACTIVE** without upfront payment, **PENDING_PAYMENT** with it.
-8. For an upfront contract, open its menu and pay by card or bank transfer. It costs the whole term's commitment less its discount, and it starts discounting once the money has arrived. If its start month has gone by then, the term starts in the current month, so you get every month you paid for. Until you pay you can still cancel it.
+8. For an upfront contract, open its menu and pay by card or bank transfer. It costs the whole term's commitment less its discount, and it starts discounting once the money has arrived. If its start month has gone by then, the term starts in the current month, so you get every month you paid for. Until you pay you can still cancel it. An upfront contract bought before payments were enforced shows as **PENDING_PAYMENT** too, and gives no discount until it is paid. If you already paid your provider, ask them to record the payment.
 
 <!-- screenshot: /docs-img/savings-plans-purchase.png — Purchase form with duration selected, monthly committed amount filled in, start-month selector and the "Pay upfront" checkbox -->
 
