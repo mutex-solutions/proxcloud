@@ -45,7 +45,11 @@ type Resolver interface {
 // type→Provider registry. Rating inputs the billing service cannot know (the resource-type catalog)
 // travel with the request.
 func (s *Service) ResolveByProfileID(ctx context.Context, profileID, timeUnit string, now time.Time) (billingclient.ChargeRequest, error) {
-	cycleStart, cycleEnd, cycleTimestamp := chargeCycle(now, timeUnit)
+	// ponytail: the wall-clock cycle on purpose. A closing charge carries the month that ended, and a billing
+	// service without the matching charge code opens a second bill for it and re-bills the month. So the last
+	// hour of a month stays unbilled under the external provider until that service has the closing pass.
+	cycleStart, cycleEnd := monthBounds(now)
+	cycleTimestamp := truncateForTimeUnit(now, timeUnit)
 	req := billingclient.ChargeRequest{
 		ProfileID:      profileID,
 		TimeUnit:       timeUnit,

@@ -73,6 +73,20 @@ func GPUSpecsFromConfig(cfg VMConfig, aliasOf func(mappingID string) string) map
 	if aliasOf == nil {
 		return nil
 	}
+	counts := GPUCounts(cfg, aliasOf)
+	if len(counts) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(counts))
+	for alias, n := range counts {
+		parts = append(parts, fmt.Sprintf("%s:%d", alias, n))
+	}
+	sort.Strings(parts) // the cached payload is compared whole: keep the order stable
+	return map[string]any{"pci_passthrough:alias": strings.Join(parts, ",")}
+}
+
+// GPUCounts counts a VM's GPUs per model from its hostpciN mapping= entries.
+func GPUCounts(cfg VMConfig, aliasOf func(mappingID string) string) map[string]int {
 	counts := map[string]int{}
 	for key := range cfg {
 		if !strings.HasPrefix(key, "hostpci") {
@@ -86,15 +100,7 @@ func GPUSpecsFromConfig(cfg VMConfig, aliasOf func(mappingID string) string) map
 			}
 		}
 	}
-	if len(counts) == 0 {
-		return nil
-	}
-	parts := make([]string, 0, len(counts))
-	for alias, n := range counts {
-		parts = append(parts, fmt.Sprintf("%s:%d", alias, n))
-	}
-	sort.Strings(parts) // the cached payload is compared whole: keep the order stable
-	return map[string]any{"pci_passthrough:alias": strings.Join(parts, ",")}
+	return counts
 }
 
 // GPUSlot is one assignable passthrough device: a mapping id plus the node its

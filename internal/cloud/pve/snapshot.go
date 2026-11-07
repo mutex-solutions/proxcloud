@@ -96,8 +96,9 @@ func (s *Service) CreateServerSnapshot(ctx context.Context, projectID, externalI
 
 // RollbackServerSnapshot returns a pool VM to a snapshot; a running VM comes back running. onlyLatest
 // reports whether a storage rolls back to its newest snapshot only (ZFS). The guest's disk state after
-// the snapshot is gone, so the caller confirms with the tenant first.
-func (s *Service) RollbackServerSnapshot(ctx context.Context, projectID, externalID, name string, onlyLatest func(storage string) bool) error {
+// the snapshot is gone, so the caller confirms with the tenant first. A rollback brings back the snapshot's cores, memory
+// and devices too (lab, PVE 9.2), so guard gets the VM's config and the snapshot's and can refuse.
+func (s *Service) RollbackServerSnapshot(ctx context.Context, projectID, externalID, name string, onlyLatest func(storage string) bool, guard func(ctx context.Context, cur, target VMConfig) error) error {
 	vm, err := s.resolveOwned(ctx, projectID, externalID)
 	if err != nil {
 		return err
@@ -110,11 +111,18 @@ func (s *Service) RollbackServerSnapshot(ctx context.Context, projectID, externa
 	if idx < 0 {
 		return conflictf("Server %s has no snapshot named %s", vm.Name, name)
 	}
+	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	target, err := s.C.SnapshotConfig(ctx, vm.Node, vm.VMID, name)
+	if err != nil {
+		return err
+	}
+	if err := guard(ctx, cfg, target); err != nil {
+		return err
+	}
 	if !snaps[idx].Latest {
-		cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
-		if err != nil {
-			return err
-		}
 		for _, d := range ParseDisks(cfg) {
 			if !strings.HasPrefix(d.Slot, "unused") && onlyLatest(d.Storage) {
 				return conflictf("Disk %s is on storage %s, which only rolls back to the newest snapshot. Delete the newer snapshots first", d.Slot, d.Storage)

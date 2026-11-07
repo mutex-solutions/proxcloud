@@ -200,6 +200,10 @@ accrual — by POSTing the resolved resources to a separate billing service inst
 of pricing them here. Resolution stays local because it reads the resource
 cache. Under `external` the billing-only crons in section 14 are not
 scheduled here; the billing service owns them. See `docs/configuration.md`.
+Requests still carry the wall-clock month, because a service without the native
+closing pass would open a second bill for a month that has ended and re-bill it.
+So the last hour of each month stays unbilled under `external` until that service
+has the same charge code and `remote.go` sends the closing cycle.
 
 ### In-process loop vs RabbitMQ fan-out
 
@@ -547,8 +551,19 @@ rejected credentials, a removed integration) leaves it `PENDING` with the reason
 `gatewayMessage` or `errorMessage`, and the next pass asks again. The 24 hour window is the bound.
 Past it the scanner stops asking and logs an error on the way out, and the row stays `PENDING`,
 because the money may have moved. A late gateway callback or the operator's
-`GET /admin/account-credit-transactions/{id}/sync` can still settle a deposit. A charge past the
-window has no such route yet and needs an operator to look at it at the gateway.
+`GET /admin/account-credit-transactions/{id}/sync` can still settle a deposit, and
+`GET /admin/collect-transactions/{id}/sync` (Re-check in the operator console) asks the gateway about a charge the same
+way a scan does. A bill charge stays in the in-flight guard for as long as it is `PENDING`, however old, so a long gateway
+outage cannot lead to a second charge for the bill; past the window a customer retry is told to contact support. The row's
+`errorMessage` says what the gateway answered. A gateway answer of cancelled ends the charge as `CANCELLED` by itself.
+`POST /admin/collect-transactions/{id}/close` ends a charge by hand: one with a gateway reference only when the gateway,
+asked again at that moment, says it did not succeed (declined or never confirmed). A charge that may still capture
+(processing, waiting for authentication or capture) is refused: cancel it at the gateway, then re-check. A charge with no
+gateway reference (the process stopped between creating the row and the gateway's answer) cannot be asked about: look for
+its id as the reference at the gateway, then close it if nothing was charged.
+
+A bill blocked by such a charge stays `SENT`, so it keeps counting for dunning and auto-suspension (`DueBills`, and the
+balance). That is deliberate: see the C4 changelog entry of 2026-11-07.
 
 ### Bill writers and the credit lock
 
@@ -603,7 +618,8 @@ Run the first query again. What it still lists holds money on both sides, or was
 needs a person: a resource on both bills has been charged twice for the time they overlap, so compare
 the lines, keep the correct total, and delete the other bill (`DELETE /api/v1/admin/bill/{id}`) or
 refund it if it has been paid. Until then the charge keeps writing to the oldest `OPEN` bill of the
-pair, so the amounts stop diverging.
+pair. An item only on the newer bill is re-billed on the oldest at the next pass, so clear such a pair
+soon: waiting raises the amount to refund.
 
 ---
 
