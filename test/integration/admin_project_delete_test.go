@@ -5,14 +5,17 @@ package integration
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/admin"
+	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -34,8 +37,9 @@ func TestAdminProjectDeletionLegs(t *testing.T) {
 		s, _ := p["status"].(string)
 		return s
 	}
+	auditSvc := audit.NewService(audit.NewRepo(db), slog.Default())
 	newH := func(ops *admin.ProjectCloudOps) http.Handler {
-		h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, nil, nil, "", iss, cid)
+		h := admin.NewHandler(admin.NewRepo(db), nil, nil, nil, nil, nil, nil, nil, auditSvc, nil, "", iss, cid)
 		if ops != nil {
 			h.SetProjectCloudOps(ops)
 		}
@@ -81,6 +85,37 @@ func TestAdminProjectDeletionLegs(t *testing.T) {
 	}
 	if status() != "DELETE_IN_PROGRESS" {
 		t.Fatalf("deleteNow should flip DELETE_IN_PROGRESS, got %s", status())
+	}
+	// The audit log tells an immediate delete from a scheduled one by the status it recorded.
+	var nowEvent bool
+	for deadline := time.Now().Add(5 * time.Second); !nowEvent && time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		evs, err := auditSvc.QueryAll(ctx, audit.Filter{}, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range evs {
+			for _, c := range ev.Changes {
+				if ev.Action == audit.ActionDelete && ev.ResourceID == "proj-1" && c.Field == "status" && c.NewValue == "DELETE_IN_PROGRESS" {
+					nowEvent = true
+				}
+			}
+		}
+	}
+	if !nowEvent {
+		t.Fatal("deleteNow wrote no audit event with its status flip")
+	}
+
+	// A failure underneath (here the save) answers 500, never 200.
+	reseed()
+	failing := newH(&admin.ProjectCloudOps{
+		CanDelete: func(context.Context, string) error { return nil },
+		DeleteNow: func(context.Context, string) error { return errors.New("database down") },
+	})
+	if w := do(failing, "/admin/project/proj-1/now"); w.Code != http.StatusInternalServerError {
+		t.Fatalf("deleteNow on a failing save: status=%d body=%s", w.Code, w.Body)
+	}
+	if w := do(wired, "/admin/project/proj-1/now"); w.Code != 200 || status() != "DELETE_IN_PROGRESS" {
+		t.Fatalf("deleteNow again: status=%d project=%s", w.Code, status())
 	}
 
 	// Nothing runs in the request, so a restart or a failed pass cannot strand it: the job retries until a clean pass.

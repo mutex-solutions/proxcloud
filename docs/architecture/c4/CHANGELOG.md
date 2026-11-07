@@ -9,11 +9,19 @@ and rules: [README.md](README.md#maintenance-rule).
 **What changed**
 
 - A Kubernetes cluster reads `READY` when Argo CD still says `Progressing` but the control plane is Ready with an endpoint,
-  every node group runs its count of Ready nodes and the Application is Synced. The sync also reports the cluster's
+  every node group runs its count of Ready nodes, the Application is Synced, and the one part of it not done is its
+  ClusterResourceSet: every HelmChartProxy Ready and every Deployment available, read off the management cluster. That
+  holds for 30 minutes from the Application's creation; past it a ClusterResourceSet that never applies leaves the cluster
+  `PROGRESSING`. `deploy/mgmt-cluster/rbac.yaml` gives the ProxCloud ServiceAccount read on those three kinds (the
+  services-cluster step applies it again on a re-run); without it the reads are refused and Argo's answer stands. The sync also reports the cluster's
   StorageClasses and whether it has ReadWriteMany, and the cluster page says when a claim will stay Pending.
 - `LIST_VOLUME_TYPES` marks the provider's default storage profile; the server wizard preselects it.
-- Activating a billing profile that has no currency gives it the base currency, and a bill of such a profile reads in the
-  base currency.
+- Activating a billing profile that has no currency gives it the base currency, an ACTIVE profile already stored without
+  one gets it when read (and stored once), and a bill of such a profile reads in the base currency.
+- Operator Delete now asks once more before it runs, answers a failure underneath as a 500 instead of 200, and its audit
+  event records the flip to `DELETE_IN_PROGRESS`, which tells it from a scheduled deletion.
+- The bill page's lines add up to the total: the subtotal is the items before adjustments, tax keeps its sign (credit-note
+  bills), and a sub-cent remainder dropped by the cent-rounded total shows as Rounding.
 - The refusal on a suspended project says who lifts it: paying the balance, or the operator for an operator's disable.
 - The admin Kubernetes and database cluster lists answer a management-cluster error as a 502.
 - Consoles: Delete now for operators, Test connection on Kubernetes and database providers, a first-project form for an
@@ -24,8 +32,10 @@ and rules: [README.md](README.md#maintenance-rule).
 
 - Argo's health covers the whole Application, and its ClusterResourceSet fails until MetalLB's webhook answers, then waits
   out CAPI's retry backoff: on the lab the Application read `Progressing` 8 minutes past CAPI's `Available`, and the page
-  said "Working on it" with every step done. Argo stays the source for everything else; only a `Progressing` that the parts
-  the customer uses contradict is overridden.
+  said "Working on it" with every step done. Five lab creates turned Healthy 9.5 to 16 minutes after the Application was
+  created, the last change each time the ClusterResourceSet. Argo stays the source for everything else: a broken chart or a
+  ClusterResourceSet that never applies is not hidden behind READY for good. Argo 3 no longer keeps per-resource health in
+  `app.status.resources`, so the parts are read from the management cluster.
 - An operator can activate a profile before its owner saves billing details, which is where the currency came from. Its
   bill list then answered 500.
 - `httpx.WriteError` writes only a typed error and returns false for any other, so an unreachable management cluster

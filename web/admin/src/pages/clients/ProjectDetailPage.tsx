@@ -184,6 +184,7 @@ export default function ProjectDetailPage() {
 
   const [statusConfirm, setStatusConfirm] = useState<"ENABLED" | "DISABLED" | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [confirmNow, setConfirmNow] = useState(false)
   const [bpOpen, setBpOpen] = useState(false)
   const [bpChoice, setBpChoice] = useState("")
   const [orgOpen, setOrgOpen] = useState(false)
@@ -408,6 +409,7 @@ export default function ProjectDetailPage() {
     },
     onError: (e: Error) => {
       setDeleteOpen(false)
+      setConfirmNow(false)
       if (e instanceof ApiError && e.status === 501) {
         toast.info("Not available: project deletion is not supported on this deployment.")
       } else {
@@ -1290,6 +1292,27 @@ export default function ProjectDetailPage() {
             </Button>
             <Button variant="outline" disabled={deleteProject.isPending} onClick={() => deleteProject.mutate(false)}>
               Schedule deletion
+            </Button>
+            <Button variant="destructive" disabled={deleteProject.isPending} onClick={() => setConfirmNow(true)}>
+              Delete now…
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete now: one more confirm, since nothing can stop it once sent */}
+      <Dialog open={confirmNow} onOpenChange={setConfirmNow}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {project?.name ?? "this project"} now?</DialogTitle>
+            <DialogDescription>
+              The deletion job tears down every server, volume, network and other cloud resource of this project within
+              about a minute. There is no grace period and the deletion cannot be cancelled.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmNow(false)}>
+              Back
             </Button>
             <Button variant="destructive" disabled={deleteProject.isPending} onClick={() => deleteProject.mutate(true)}>
               {deleteProject.isPending ? "Deleting…" : "Delete now"}

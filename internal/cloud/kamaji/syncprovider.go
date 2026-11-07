@@ -2,6 +2,7 @@ package kamaji
 
 import (
 	"context"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 )
@@ -55,15 +56,42 @@ func (p *ClusterSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 		if err != nil {
 			return nil, err
 		}
+		data := clusterData(app, tcp, mds)
+		if c := data["cluster"].(map[string]any); settledButProgressing(app, c) {
+			// A failed read keeps Argo's Progressing: the next sync tries again.
+			if parts, err := s.addonParts(ctx, ns); err == nil && readyPastResourceSet(app, parts, time.Now()) {
+				c["status"] = "READY"
+			}
+		}
 		out = append(out, cloud.CloudResource{
 			Type:       cloud.TypeKubernetesCluster,
 			ExternalID: id,
 			Region:     p.region,
 			ProjectID:  p.projectID,
-			Data:       clusterData(app, tcp, mds),
+			Data:       data,
 		})
 	}
 	return out, nil
+}
+
+// addonParts reads the namespace's HelmChartProxies, ClusterResourceSets and Deployments, keyed
+// Kind/name, for readyPastResourceSet.
+func (s *Service) addonParts(ctx context.Context, ns string) (map[string]map[string]any, error) {
+	parts := map[string]map[string]any{}
+	for _, k := range []struct{ group, version, plural, kind string }{
+		{"addons.cluster.x-k8s.io", "v1alpha1", "helmchartproxies", "HelmChartProxy"},
+		{"addons.cluster.x-k8s.io", "v1beta2", "clusterresourcesets", "ClusterResourceSet"},
+		{"apps", "v1", "deployments", "Deployment"},
+	} {
+		items, err := s.api.ListCRs(ctx, k.group, k.version, k.plural, ns, "")
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range items {
+			parts[k.kind+"/"+digStr(it, "metadata", "name")] = it
+		}
+	}
+	return parts, nil
 }
 
 // clusterData maps Application (+ optional TCP/MachineDeployments) → the cached `data` payload.
@@ -199,14 +227,81 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 	}
 	c["node_groups"] = groups
 
-	// Argo's health is the whole Application's. Its ClusterResourceSet (the MetalLB pool) fails
-	// until MetalLB's webhook answers, and CAPI's retry backoff then leaves it unapplied for up
-	// to ~15 min after the cluster works: on the lab the app read Progressing 8 min past CAPI's
-	// Available. When everything the customer uses reports done, the cluster is ready.
-	if h == "Progressing" && c["sync_status"] == "Synced" && c["cp_status"] == "Ready" && c["endpoint"] != nil && groupsReady(groups) {
-		c["status"] = "READY"
-	}
 	return map[string]any{"cluster": c}
+}
+
+// settledButProgressing: Argo still says Progressing, but the control plane, every node group
+// and the sync are done. Only then are the add-on objects worth reading (readyPastResourceSet).
+func settledButProgressing(app, c map[string]any) bool {
+	groups, _ := c["node_groups"].([]any)
+	return digStr(app, "status", "health", "status") == "Progressing" && c["sync_status"] == "Synced" &&
+		c["cp_status"] == "Ready" && c["endpoint"] != nil && groupsReady(groups)
+}
+
+// resourceSetGrace bounds how long a cluster reads READY while its ClusterResourceSet has not
+// applied: past it a CRS that never applies leaves the cluster PROGRESSING, as Argo says. Five lab
+// creates turned Healthy 9.5 to 16 min after the Application was created. ponytail: a fixed value
+// from the Application's creation; a provider setting if a slower site needs one.
+const resourceSetGrace = 30 * time.Minute
+
+// readyPastResourceSet reports whether the one part of the Application still not done is its
+// ClusterResourceSet (the MetalLB address pool, plus the CSI config). It fails until MetalLB's
+// webhook answers, and CAPI's retry backoff then leaves it unapplied for minutes after the
+// cluster works: on the lab it applied 15 min after the Application was created, 8 min past
+// CAPI's Available. Argo 3 no longer keeps per-resource health in app.status.resources, so the
+// HelmChartProxies, Deployments and the CRS that list names are read off the management cluster
+// (parts, keyed Kind/name). Anything else not done, or a CRS past the grace, keeps Argo's answer.
+func readyPastResourceSet(app map[string]any, parts map[string]map[string]any, now time.Time) bool {
+	created, err := time.Parse(time.RFC3339, digStr(app, "metadata", "creationTimestamp"))
+	if err != nil || now.Sub(created) > resourceSetGrace {
+		return false
+	}
+	resources, _ := dig(app, "status", "resources").([]any)
+	waiting := 0
+	for _, raw := range resources {
+		r, _ := raw.(map[string]any)
+		kind, _ := r["kind"].(string)
+		name, _ := r["name"].(string)
+		obj := parts[kind+"/"+name]
+		switch kind {
+		case "HelmChartProxy":
+			if !conditionTrue(obj, "Ready") {
+				return false
+			}
+		case "Deployment":
+			if !deploymentAvailable(obj) {
+				return false
+			}
+		case "ClusterResourceSet":
+			if !conditionTrue(obj, "ResourcesApplied") {
+				waiting++
+			}
+		}
+	}
+	return waiting == 1
+}
+
+func conditionTrue(obj map[string]any, typ string) bool {
+	conds, _ := dig(obj, "status", "conditions").([]any)
+	for _, raw := range conds {
+		if c, _ := raw.(map[string]any); c["type"] == typ {
+			return c["status"] == "True"
+		}
+	}
+	return false
+}
+
+// deploymentAvailable: every desired replica of the current spec is up (nil = not found).
+func deploymentAvailable(d map[string]any) bool {
+	if d == nil {
+		return false
+	}
+	want := count(dig(d, "spec", "replicas"))
+	avail, _ := dig(d, "status", "availableReplicas").(float64)
+	updated, _ := dig(d, "status", "updatedReplicas").(float64)
+	gen, _ := dig(d, "metadata", "generation").(float64)
+	seen, _ := dig(d, "status", "observedGeneration").(float64)
+	return seen >= gen && avail >= want && updated >= want
 }
 
 // groupsReady: every node group runs its desired count of Ready nodes.

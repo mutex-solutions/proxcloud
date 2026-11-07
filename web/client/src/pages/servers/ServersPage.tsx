@@ -138,13 +138,14 @@ export function ServersPage() {
     mutationFn: (id: string) =>
       apiFetch(`/project/${pid}/cloud/${id}${deleteVolumes ? "?deleteVolumes=true" : ""}`, { method: "DELETE", cloud: scope }),
     onMutate: (id) => markDeleting(id, true),
-    onSuccess: () => {
-      toast.success("Server deletion requested")
-      void qc.invalidateQueries({ queryKey: ["cloud", pid, "SERVER"] })
-    },
-    onError: (e: Error, id) => {
+    onSuccess: () => toast.success("Server deletion requested"),
+    onError: (e: Error) => toast.error(e.message),
+    // Each delete clears its own mark once the list has been read again: by then the row is gone,
+    // or, when the destroy failed partway, it shows the state the server is really in. Several
+    // deletes in flight each carry their own id.
+    onSettled: async (_d, _e, id) => {
+      await qc.invalidateQueries({ queryKey: ["cloud", pid, "SERVER"] })
       markDeleting(id, false)
-      toast.error(e.message)
     },
   })
 

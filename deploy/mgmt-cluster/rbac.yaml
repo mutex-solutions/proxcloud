@@ -62,6 +62,13 @@ rules:
   - apiGroups: ["cluster.x-k8s.io"]
     resources: ["machinedeployments"]
     verbs: ["get", "list"]
+  # Read-only: the sync checks a cluster's add-ons and Deployments while Argo still says Progressing.
+  - apiGroups: ["addons.cluster.x-k8s.io"]
+    resources: ["helmchartproxies", "clusterresourcesets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

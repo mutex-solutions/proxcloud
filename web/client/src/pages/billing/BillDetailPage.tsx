@@ -43,9 +43,9 @@ export default function BillDetailPage() {
   // so an org admin can read per-project spend on the same bill.
   const { data: projects } = useProjects()
   const [projFilter, setProjFilter] = useState("__all__")
-  // A bill outlives its projects: an id no longer in the list is a deleted project.
-  const projName = (id?: string) =>
-    !id ? "—" : projects?.find((p) => p.id === id)?.name || (projects ? `Deleted project …${id.slice(-6)}` : id)
+  // An id not in the caller's project list is a deleted project, or a live one this member cannot
+  // see (the org bill is wider than their projects): the bill carries no name, so neither is claimed.
+  const projName = (id?: string) => (!id ? "—" : projects?.find((p) => p.id === id)?.name || `Project …${id.slice(-6)}`)
 
   const { data: bill, isLoading, error } = useQuery({
     queryKey: ["bill", bp, billId],
@@ -185,11 +185,16 @@ export default function BillDetailPage() {
   const filtered = projFilter !== "__all__"
   const itemsSubtotal = items.reduce((s, it) => s + Number(it.netAmount ?? 0), 0)
 
-  // Invoice math: net (subtotal) + tax = gross; credits reduce what was collected.
+  // Invoice lines that add up to the total: the bill's net already holds the adjustments, and the
+  // gross is net plus tax rounded half-up to cents. Tax keeps its sign (a credit-note bill is
+  // negative); the sub-cent part that rounding dropped gets its own line instead of reading as tax.
+  // Credits reduce what was collected.
+  const cents = (n: number) => (Math.sign(n) * Math.round(Math.abs(n) * 100)) / 100
   const net = Number(bill.netAmount ?? 0)
   const gross = Number(bill.grossAmount ?? 0)
-  // The gross is rounded to cents and the net is not, so a sub-cent bill would read "Tax -$0.00".
-  const tax = Math.max(0, gross - Math.round(net * 100) / 100)
+  const adjTotal = adjustments.reduce((s, a) => s + Number(a.amount ?? 0), 0)
+  const rounding = cents(net) - net
+  const tax = cents(gross - cents(net))
   const unpaid = Number(bill.unpaidGrossAmount ?? 0)
   // An OPEN bill is still accruing: nothing is due on it yet, though the balance already counts it.
   const open = bill.status === "OPEN"
@@ -433,8 +438,7 @@ export default function BillDetailPage() {
                 <div className="my-2 border-t border-dashed" />
               </>
             ) : null}
-            <TotalRow label="Subtotal" value={fmtMoney(net, ccy)} />
-            <TotalRow label="Tax" value={fmtMoney(tax, ccy)} muted />
+            <TotalRow label="Subtotal" value={fmtMoney(net - adjTotal, ccy)} />
             {adjustments.map((a, i) => (
               <TotalRow
                 key={`adj-${i}`}
@@ -443,6 +447,8 @@ export default function BillDetailPage() {
                 muted
               />
             ))}
+            {Math.abs(rounding) >= 1e-6 ? <TotalRow label="Rounding" value={fmtMoney(rounding, ccy)} muted /> : null}
+            <TotalRow label="Tax" value={fmtMoney(tax, ccy)} muted />
             <div className="my-2 border-t" />
             <TotalRow label="Total" value={fmtMoney(gross, ccy)} strong />
             {appliedCredits.length > 0 ? (
