@@ -98,9 +98,9 @@ These hold across the schema; individual tables note only their departures.
   `FindOneAndUpdate` / optimistic-concurrency patterns are replaced by
   `DB.WithTx` + row locks: `GetForUpdate` / `FindOneForUpdate` issue
   `SELECT … FOR UPDATE`, and every `Store` call made with the transaction's ctx
-  runs on that transaction. The cloud-cache upsert/OCC and the bill lock (claim
-  the current OPEN bill, push its `lockedAt`, return the pre-image) run inside
-  `WithTx`.
+  runs on that transaction. The cloud-cache upsert/OCC runs inside `WithTx`, and
+  so does the charge, under an advisory lock on the billing profile
+  (`pgdoc.LockXact`).
 
 ### Filter operator subset
 
@@ -429,8 +429,8 @@ sub-docs.
 
 ### `bill`
 A billing-cycle invoice for a profile. Line items and applied credits are
-**embedded**. Claimed under a row lock (`FindOneForUpdate` inside `WithTx`) so a
-cron worker can push its `lockedAt` lease atomically.
+**embedded**. Replaced whole, so every writer holds the profile's advisory lock.
+Nothing enforces one bill per profile and cycle except that lock.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -444,7 +444,7 @@ cron worker can push its `lockedAt` lease atomically.
 | `appliedAccountCredits` | array | `accountCreditId → accountCredit` applications |
 | `appliedPromotionalCredits` | array | `promotionalCreditId → promotionalCredit` |
 | `collectedAmounts` | array | `collectTransactionId → collectTransaction` |
-| `dueAt`, `sentAt`, `lockedAt` | time | lifecycle timestamps (`lockedAt` is the lease compare key) |
+| `dueAt`, `sentAt` | time | lifecycle timestamps (older rows may also carry an unread `lockedAt`) |
 
 ### `accountCredit`
 A spendable prepaid-balance document (a deposit becomes credit).

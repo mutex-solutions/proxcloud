@@ -30,6 +30,12 @@ func rebuildClusterQMP(t *testing.T, qmp, snapshots string, moveFails bool, writ
 		"GET /api2/json/nodes/pve1/qemu/101/snapshot": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, `{"data":[%s]}`, snapshots)
 		},
+		"GET /api2/json/nodes/pve1/qemu/101/snapshot/s2/config": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":{"cores":4,"memory":"8192","scsi0":"local-zfs:vm-101-disk-0,size=8G"}}`)
+		},
+		"GET /api2/json/nodes/pve1/qemu/101/snapshot/s1/config": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":{"cores":4,"memory":"8192","scsi0":"local-zfs:vm-101-disk-0,size=8G"}}`)
+		},
 		"GET /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, r *http.Request) {
 			// After the detach the old disk sits in unused0, once the move is done the new one in scsi0.
 			moved := false
@@ -157,8 +163,19 @@ func TestSnapshotGuards(t *testing.T) {
 		t.Fatalf("list %v %v", got, err)
 	}
 	var ce *ConflictError
-	if err := s.RollbackServerSnapshot(ctx, "p1", "101", "s1", func(st string) bool { return st == "local-zfs" }); !errors.As(err, &ce) {
+	if err := s.RollbackServerSnapshot(ctx, "p1", "101", "s1", func(st string) bool { return st == "local-zfs" }, func(context.Context, VMConfig, VMConfig) error { return nil }); !errors.As(err, &ce) {
 		t.Fatalf("older snapshot on ZFS must be refused, got %v", err)
+	}
+	// The guard sees what the rollback would produce, and its refusal stops it (no rollback route in this fake).
+	refused := errors.New("quota")
+	err = s.RollbackServerSnapshot(ctx, "p1", "101", "s2", func(string) bool { return false }, func(_ context.Context, cur, target VMConfig) error {
+		if v, r, _ := RestoreDemand(cur, target); v != 3 || r != 7680 {
+			t.Errorf("demand %d %d", v, r)
+		}
+		return refused
+	})
+	if !errors.Is(err, refused) {
+		t.Fatalf("the guard's refusal must come back: %v", err)
 	}
 	if err := s.CreateServerSnapshot(ctx, "p1", "101", "s3", "", func(string) bool { return false }); !errors.As(err, &ce) || !strings.Contains(ce.Msg, "no snapshots") {
 		t.Fatalf("a storage without snapshots must refuse, got %v", err)

@@ -612,6 +612,25 @@ export const collectTransactions: Doc[] = [
     paymentGatewayId: "int-stripe-01",
     createdAt: "2026-06-15T00:22:00Z",
   },
+  {
+    id: "clt-0003",
+    billingProfileId: "bp-0001",
+    status: "PENDING",
+    amount: 120.5,
+    currency: "USD",
+    externalId: "ch_3PxD4e5F6g7H8i9J",
+    paymentGatewayId: "int-stripe-01",
+    createdAt: "2026-06-16T00:20:00Z",
+  },
+  {
+    id: "clt-0004",
+    billingProfileId: "bp-0001",
+    status: "PENDING",
+    amount: 64,
+    currency: "USD",
+    paymentGatewayId: "int-stripe-01",
+    createdAt: "2026-06-17T00:20:00Z",
+  },
 ]
 
 // ─── Account credits (spendable balances per profile) ─────────────────────────
