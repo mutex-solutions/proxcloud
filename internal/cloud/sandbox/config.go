@@ -2,7 +2,7 @@
 // (CPU or GPU) that run as gVisor pods on a dedicated Kubernetes cluster. One sandbox is one
 // agent-sandbox `Sandbox` CR (agents.x-k8s.io/v1beta1) in the project's sb-<projectId>
 // namespace. The cluster-side contract (runtime classes, device plugin, egress guardrail, the
-// proxcloud service account) lives in deploy/sandbox-cluster/ and docs/managed-sandbox.md.
+// proxcloud service account) is deploy/sandbox-cluster/ (added in SB2a) and docs/managed-sandbox.md.
 package sandbox
 
 import (
@@ -32,8 +32,8 @@ const (
 	ManagedByValue        = "proxcloud"
 	AnnotationDisplayName = "proxcloud.io/display-name"
 	AnnotationTemplate    = "proxcloud.io/template"
-	// LabelTenant selects the namespace into deploy/sandbox-cluster/network-policy.yaml (the
-	// cluster-wide egress guardrail). Without it a sandbox has unrestricted egress.
+	// LabelTenant selects the namespace into the cluster-wide egress guardrail (SB0 spike policy;
+	// deploy/sandbox-cluster/network-policy.yaml from SB2a). Without it a sandbox has unrestricted egress.
 	LabelTenant = "proxcloud.io/tenant"
 	// LabelGPU is the node label carrying a GPU node group's model alias (e.g. nvidia-3090). GPU
 	// sandboxes select on it. node-restriction.kubernetes.io/ is the one prefix a kubelet cannot
@@ -44,12 +44,12 @@ const (
 	ResourceGPU = "nvidia.com/gpu"
 )
 
-// NamespaceFor is the project's namespace on the sandbox cluster. Distinct from kamaji's st-
-// and dbaas's stdb- so no prefix glob of one provider can ever match another's namespace.
+// NamespaceFor is the project's namespace on the sandbox cluster. Distinct from kamaji's pc-
+// and dbaas's pc-db- so no prefix glob of one provider can ever match another's namespace.
 func NamespaceFor(projectID string) string { return "sb-" + projectID }
 
 // newSandboxID mints the platform identifier (CR name, cache external id). The sbx- prefix keeps
-// billing rows and audit logs unambiguous next to kamaji's stc- and dbaas's std-. 64 random bits:
+// billing rows and audit logs unambiguous next to kamaji's pc-c- and dbaas's pc-d-. 64 random bits:
 // the ID is also the sandbox's host name (<port>-<id>.<domain>), so it must not be guessable.
 func newSandboxID() string {
 	b := make([]byte, 8)
@@ -123,7 +123,7 @@ type Config struct {
 	Limits       Limits
 	// Envd runs E2B's envd in every sandbox (via sandbox-init from the node runtime dir), which is
 	// what the E2B-compatible API and SDKs talk to. Requires the node runtime installed by
-	// deploy/sandbox-cluster (proxcloud-sandbox-runtime) and sandbox-proxy serving Domain.
+	// deploy/sandbox-cluster (proxcloud-sandbox-runtime, SB2a) and sandbox-proxy serving Domain.
 	Envd bool
 	// Domain is the E2B_DOMAIN of this provider: sandboxes are reached at
 	// <port>-<sandboxID>.<Domain> through sandbox-proxy.
@@ -152,12 +152,12 @@ type RegistryCredential struct{ User, Password string }
 // AutoPauseGrace is how long an auto-pause sandbox outlives its end if pausing it fails.
 const AutoPauseGrace = 15 * time.Minute
 
-// Node runtime contract (deploy/sandbox-cluster/README.md).
+// Node runtime contract (deploy/sandbox-cluster/README.md, added in SB2a).
 const (
 	RuntimeHostDir   = "/opt/proxcloud-sandbox/bin"
 	RuntimeMountPath = "/.proxcloud"
 	EnvdPort         = 49983
-	// EnvdVersion is the envd release vendored by deploy/sandbox-runtime.Dockerfile. The E2B SDK
+	// EnvdVersion is the envd release vendored by deploy/sandbox-runtime.Dockerfile (ported later). The E2B SDK
 	// refuses sandboxes whose envd is older than it supports, so this must track that pin.
 	EnvdVersion = "0.10.2"
 	// AnnotationTrafficToken on the pod: when set, sandbox-proxy requires it on every port but envd.

@@ -81,8 +81,7 @@ func (c *Client) Exec(ctx context.Context, ns, pod, container string, cmd []stri
 	}
 	ws, err := cfg.DialContext(ctx)
 	if err != nil {
-		// Also a refused upgrade (e.g. RBAC): the handshake never became a stream.
-		return nil, fmt.Errorf("%w: exec: dial: %w", ErrUnreachable, err)
+		return nil, c.execDialError(ctx, ns, pod, err)
 	}
 	defer ws.Close()
 	// Unblock the read loop when ctx ends (timeout or client gone).
@@ -140,12 +139,32 @@ func (c *Client) Exec(ctx context.Context, ns, pod, container string, cmd []stri
 	return res, nil
 }
 
+// execDialError classifies a failed exec handshake. A non-101 answer (x/net only reports "bad
+// status", not the code) means the API server refused the upgrade: the pod is gone (404) or the
+// credential lacks create on pods/exec (403). Only a transport failure is ErrUnreachable.
+func (c *Client) execDialError(ctx context.Context, ns, pod string, err error) error {
+	var de *websocket.DialError
+	if !errors.As(err, &de) || de.Err != websocket.ErrBadStatus {
+		return fmt.Errorf("%w: exec: dial: %w", ErrUnreachable, err)
+	}
+	obj, gerr := c.get(ctx, corePath("pods", ns), pod)
+	switch {
+	case gerr != nil:
+		return gerr
+	case obj == nil:
+		return &APIError{Status: http.StatusNotFound, Message: fmt.Sprintf("exec: pod %s/%s not found", ns, pod)}
+	}
+	return &APIError{Status: http.StatusForbidden, Message: fmt.Sprintf("exec: upgrade refused for pod %s/%s (check create on pods/exec)", ns, pod)}
+}
+
 // exitCodeFromStatus reads the metav1.Status the API server writes on the error channel:
 // Success → 0; NonZeroExitCode → details.causes[reason=ExitCode].message; anything else (the
 // command could not be started, e.g. not found in the image) is an error.
 func exitCodeFromStatus(raw []byte) (int, error) {
 	if len(raw) == 0 {
-		return 0, nil // v4 servers may close without a status on success
+		// v4 and v5 always end with a Status, Success included: none means the stream was cut
+		// (API server, konnectivity or kubelet went away) and the command's outcome is unknown.
+		return 0, fmt.Errorf("%w: exec: stream closed without an exit status", ErrUnreachable)
 	}
 	var st struct {
 		Status  string `json:"status"`
@@ -214,7 +233,7 @@ func (c *Client) ExecStream(ctx context.Context, ns, pod, container string, cmd 
 	}
 	ws, err := cfg.DialContext(ctx)
 	if err != nil {
-		return 0, "", fmt.Errorf("%w: exec: dial: %w", ErrUnreachable, err)
+		return 0, "", c.execDialError(ctx, ns, pod, err)
 	}
 	defer ws.Close()
 	stop := context.AfterFunc(ctx, func() { _ = ws.Close() })

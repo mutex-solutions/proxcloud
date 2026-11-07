@@ -40,6 +40,18 @@ and rules: [README.md](README.md#maintenance-rule).
   timeout change, the egress guardrail selecting the namespace the service labels (a private address dropped, the
   internet open), delete and the CR gone.
 
+**Review fixes (same PR)**
+
+- What: exec (`Exec` and `ExecStream`) treats a stream that ends without its status frame as an error (it returned
+  exit 0); a refused exec upgrade reads the pod and answers 404 (pod gone) or 403 (no `pods/exec`) instead of
+  `ErrUnreachable`; a pull secret source that cannot be read (RBAC, API error) is an error for a template build and a
+  logged warning for a namespace ensure, not "no source". Comments now name ProxCloud's `pc-`/`pc-db-` namespaces and
+  `pc-c-`/`pc-d-` ids and mark the cluster files SB2a adds.
+- Why: v4 and v5 always send a status, Success included, so a missing one means konnectivity or the kubelet cut the
+  stream and the command's outcome is unknown; an agent would have read a half-run command as success. A 403 or a
+  deleted pod logged as an unreachable cluster sends the operator to the network. The lab service account cannot read
+  secrets, so custom templates would have failed at image pull with nothing in the log.
+
 **Diagrams updated:** `c3-components.md` (C3e).
 
 ## 2026-11-07: Bootstrap ISOs off shared storage (SB-pre, PR #101)

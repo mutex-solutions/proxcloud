@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 )
 
 func TestRenderDockerfile(t *testing.T) {
@@ -302,6 +304,28 @@ func TestStartBuildFromProjectTemplateCopiesPullSecret(t *testing.T) {
 	}
 	if sec, _ := f.GetCore(context.Background(), "secrets", BuildNamespace, BuildTemplatePullSecret); sec == nil {
 		t.Error("the pull robot copy was not written to sbx-build")
+	}
+}
+
+// An unreadable pull secret source (RBAC 403) is not "no source": a build from a project template
+// reports the read error, and a namespace ensure goes on without the copy instead of failing create.
+func TestPullSecretReadErrorIsNotNoSource(t *testing.T) {
+	f := newFake()
+	f.secretErr = &kamajik8s.APIError{Status: 403, Message: "secrets is forbidden"}
+	s := NewWithAPI(f, Config{}, "svc")
+	res, _ := RenderDockerfile(testRegistry+"/p1/t0@sha256:"+strings.Repeat("a", 64), nil)
+	req := BuildRequest{ProjectID: "p1", TemplateID: "t1", BuildID: "b1", Image: testRegistry + "/p1/t1:b1",
+		Result: res, Base: testRegistry + "/p1/t0@sha256:" + strings.Repeat("a", 64), BaseAuth: BaseAuthTemplate, FetchURL: func(string) string { return "" }}
+	err := s.StartBuild(context.Background(), req)
+	var ae *kamajik8s.APIError
+	if errors.Is(err, ErrBadBuild) || !errors.As(err, &ae) || ae.Status != 403 {
+		t.Fatalf("unreadable source: want the 403, got %v", err)
+	}
+	if err := s.EnsureProjectNamespace(context.Background(), "p1"); err != nil {
+		t.Fatalf("namespace ensure must not fail on an unreadable pull secret: %v", err)
+	}
+	if sec, _ := f.GetCore(context.Background(), "secrets", NamespaceFor("p1"), TemplatePullSecret); sec != nil {
+		t.Error("no secret may be written when the source was not read")
 	}
 }
 

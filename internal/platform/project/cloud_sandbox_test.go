@@ -10,7 +10,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 )
 
-// The documented sandbox error contract (docs/sandbox-api.md § Errors).
+// The sandbox error contract (sandboxHTTPError; documented with the routes in SB3).
 func TestSandboxHTTPError(t *testing.T) {
 	cases := []struct {
 		name   string

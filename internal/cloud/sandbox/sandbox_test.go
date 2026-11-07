@@ -22,6 +22,7 @@ type fakeAPI struct {
 	execs      []string
 	core       map[string]map[string]any // "plural/ns/name"
 	secrets    map[string]map[string][]byte
+	secretErr  error            // GetSecretData fails with this (e.g. RBAC 403)
 	nodes      []map[string]any // nil = no GPU check data (ListNodes returns none)
 	extraPods  []map[string]any
 }
@@ -76,6 +77,9 @@ func (f *fakeAPI) ListPodsAllNamespaces(_ context.Context, _ string) ([]map[stri
 	return append(out, f.extraPods...), nil
 }
 func (f *fakeAPI) GetSecretData(_ context.Context, ns, name string) (map[string][]byte, error) {
+	if f.secretErr != nil {
+		return nil, f.secretErr
+	}
 	return f.secrets[ns+"/"+name], nil
 }
 

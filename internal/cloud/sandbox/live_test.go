@@ -1,7 +1,7 @@
 //go:build sandboxlive
 
-// Live drill against a real sandbox cluster (deploy/sandbox-cluster applied), run with the
-// proxcloud service account's kubeconfig:
+// Live drill against a real sandbox cluster (the SB0 spike, or deploy/sandbox-cluster from
+// SB2a), run with the proxcloud service account's kubeconfig:
 //
 //	SANDBOX_KUBECONFIG=~/sbx.kubeconfig [SANDBOX_GPU_MODEL=nvidia-3090] \
 //	  go test -tags sandboxlive ./internal/cloud/sandbox/ -run TestLive -v

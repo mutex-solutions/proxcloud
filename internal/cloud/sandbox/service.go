@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -130,17 +131,29 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) 
 // ensurePullSecret copies the template registry's pull-only credentials (sandbox-system source,
 // created by the operator) into the project namespace, so sandboxes can start from custom
 // templates. Pods never mount it and have no API access, so customer code cannot read it. No
-// source = custom templates are not set up on this cluster: nothing to copy.
+// source = custom templates are not set up on this cluster: nothing to copy. A source that
+// cannot be read (RBAC, cluster error) is logged and skipped: sandboxes from the public
+// templates do not need it, and custom ones would otherwise fail at image pull with no cause.
 func (s *Service) ensurePullSecret(ctx context.Context, ns, projectID string) error {
 	_, err := s.copyPullSecret(ctx, ns, TemplatePullSecret, map[string]any{LabelProject: projectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue})
+	if errors.Is(err, errPullSourceUnreadable) {
+		slog.Warn("sandbox: template pull secret not copied, custom templates will not pull", "namespace", ns, "err", err)
+		return nil
+	}
 	return err
 }
 
+var errPullSourceUnreadable = errors.New("cannot read the template registry pull secret")
+
 // copyPullSecret writes the template registry pull credentials into ns/name. false = no source
-// (custom templates are not set up on this cluster).
+// (custom templates are not set up on this cluster); an unreadable source is an error
+// (errPullSourceUnreadable), not "no source".
 func (s *Service) copyPullSecret(ctx context.Context, ns, name string, labels map[string]any) (bool, error) {
 	src, err := s.api.GetSecretData(ctx, pullSecretSourceNS, TemplatePullSecret)
-	if err != nil || len(src[".dockerconfigjson"]) == 0 {
+	if err != nil {
+		return false, fmt.Errorf("%w %s/%s: %w", errPullSourceUnreadable, pullSecretSourceNS, TemplatePullSecret, err)
+	}
+	if len(src[".dockerconfigjson"]) == 0 {
 		return false, nil
 	}
 	return true, s.api.ApplyCore(ctx, "secrets", map[string]any{
