@@ -496,6 +496,40 @@ func TestOwnershipGuards(t *testing.T) {
 	}
 }
 
+// A project that never had a database leaves no namespace behind; finalizeNamespace alone would keep it for good.
+func TestRemoveProjectNamespace(t *testing.T) {
+	ctx := context.Background()
+	api := newFakeAPI()
+	s := NewWithAPI(api, testConfig(), "svc-dbaas")
+	if err := s.EnsureProjectNamespace(ctx, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := s.FinalizeOrphans(ctx, "p1"); err != nil || pending != 0 {
+		t.Fatalf("%d %v", pending, err)
+	}
+	if _, has := api.namespaces["pc-db-p1"]; !has {
+		t.Fatal("the sweep must keep an idle project's namespace")
+	}
+	if err := s.RemoveProjectNamespace(ctx, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := api.namespaces["pc-db-p1"]; has {
+		t.Fatal("teardown removes it")
+	}
+	// Still in use: it stays.
+	if err := s.EnsureProjectNamespace(ctx, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	api.apps[key(testConfig().ArgoNamespace, "db")] = map[string]any{"metadata": map[string]any{
+		"name": "db", "labels": map[string]any{LabelProject: "p1", LabelManagedBy: ManagedByValue}}}
+	if err := s.RemoveProjectNamespace(ctx, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := api.namespaces["pc-db-p1"]; !has {
+		t.Fatal("an Application still there keeps the namespace")
+	}
+}
+
 func TestFinalizeOrphans(t *testing.T) {
 	ctx := context.Background()
 	mkMarker := func(api *fakeAPI, dbID string, age time.Duration) {
