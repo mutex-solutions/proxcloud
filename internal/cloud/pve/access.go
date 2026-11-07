@@ -157,7 +157,7 @@ type PrivCheck struct {
 var PlatformPrivileges = []PrivCheck{
 	// cluster status, PCI scan, datacenter firewall options and the cluster
 	// security groups all check "/" itself (granted with propagate=0).
-	{Path: "/", Privs: []string{"Sys.Audit", "Sys.Modify"}},
+	{Path: "/", Privs: []string{"Sys.Audit", "Sys.Console", "Sys.Modify"}},
 	// node firewall options (nftables preflight) and node network list
 	// (management-bridge guard) check /nodes/{node}: PVEAuditor on /nodes.
 	{Path: "/nodes", Privs: []string{"Sys.Audit"}},
@@ -167,7 +167,7 @@ var PlatformPrivileges = []PrivCheck{
 		"VM.Config.CDROM", "VM.Config.CPU", "VM.Config.Cloudinit", "VM.Config.Disk",
 		"VM.Config.HWType", "VM.Config.Memory", "VM.Config.Network", "VM.Config.Options",
 		"VM.Backup", "VM.Console", "VM.GuestAgent.Audit", "VM.GuestAgent.Unrestricted", "VM.Migrate", "VM.PowerMgmt",
-		"VM.Snapshot", "VM.Snapshot.Rollback",
+		"VM.Replicate", "VM.Snapshot", "VM.Snapshot.Rollback",
 	}},
 	{Path: "/sdn", Privs: []string{"SDN.Allocate", "SDN.Audit", "SDN.Use"}},
 	// Read apart from /sdn: an ACL on /sdn/zones replaces what /sdn passes down, and zones and NICs check here.

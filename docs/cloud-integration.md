@@ -350,7 +350,19 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   `GET /api/v1/nocloud/{token}/{meta-data,user-data,vendor-data,network-config}`. Deleting the server or
   tearing down the project revokes it and removes the CD.
 - **Secrets.** User-data is encrypted at rest in the database. On an ISO seed it is a plain file on the
-  ISO storage and in the guest's CD drive for the server's lifetime, as any cloud-init seed is.
+  ISO storage and in the guest's CD drive for the server's lifetime, as any cloud-init seed is. A create
+  password is only ever there as a bcrypt hash, also for a login user (`adminUser`). The portal offers no
+  tenant a path to the file, so what protects it is who can read the store: **export a NAS store to the node
+  addresses, not to a subnet.** With a subnet, any VM whose traffic reaches the NAS from inside it can mount
+  the store and read every seed on it, along with every disk. Private vnets cannot get there
+  (`blockedCidrs` plus the node networks); a public NIC is bridged to the uplink and only the site's routing
+  stops it. CephFS asks for a key, so reaching a monitor is not enough.
+- **Removal.** Deleting the server removes the CD, or without `Datastore.Allocate` overwrites it with an
+  empty one (docs/proxmox-permissions.md). A shared store is tried from the other nodes when the CD's node is
+  down. If nothing works, a row holding only the file name stays and each sync tries again. A CD replaced on a
+  NIC change, or left by a failed attach, has no row: a failure there is only logged.
+- **Password login.** A create password always goes through a seed: PVE's own drive sets the password but
+  cannot turn on `ssh_pwauth`, and a cloud image then refuses it over ssh.
 - **Later changes.** Attaching or detaching a public NIC re-delivers the seed with the same instance id
   and the seed asks cloud-init to re-read the network at each boot (`updates.network.when: [boot]`), so
   user-data does not run again. Rebuild delivers it with a new instance id: the new disk runs it once.
@@ -713,12 +725,19 @@ Actions on a server: `GET_PROTECTION`, `ENABLE_PROTECTION`, `DISABLE_PROTECTION`
   cluster, or shared storage restricted to some nodes, can fail a restart.
 - **Lifecycle.** Enable creates the job and syncs at once. HA is added only after the first sync has landed, on read or at
   the next sync (`ReconcileProtection`), because HA recovery before that has nothing to start from. State:
-  `syncing` → `active`, or `degraded` when the last sync failed or is older than twice the schedule.
+  `syncing` → `active`, or `degraded` when the last sync failed or is older than twice the schedule. Remove protection flags
+  the job, drops the tag, then removes the rule and HA, so a read in between cannot add HA back.
+- **Rollback and restore.** PVE puts a VM's tags back with its config, and the job and HA carry on regardless. The portal
+  keeps the protection tags as they were before the rollback or restore, so an older snapshot neither loses protection nor
+  brings back an earlier one. A rollback run outside the portal is healed on ZFS at the next sync, where a live job brings the
+  tag back. On shared storage it is not, but Remove protection and a delete still find the HA resource.
 - **Failover on ZFS.** The dead node's watchdog fences it and the VM starts on the replica with its data as of the last sync.
   RPO = schedule + sync time. What was written after the last sync is lost.
 - **Node returns.** The VM stays where it is: equal priority in the rule, so no second interruption.
 - **Capacity.** The scheduler keeps each node's replicated VMs' memory free for them (`SchedReq.ReserveMem`).
-- **Billing.** `server_protection` with `size_gb` (replicated disks), from the first successful sync until disabled.
+- **Billing.** `server_protection` with `size_gb` (replicated disks), from the first successful sync until disabled. The
+  start is when a read first saw that sync done (tag `pc-p-<unix>`), not PVE's `last_sync`, which is when that sync began.
+  A row with no stamp has no line. Any live replication job on a tenant VM counts, including one an operator made by hand.
 - **Operator migrate.** `POST /admin/service/{id}/server/{vmid}/migrate {target}`. Sends only the delta when a replica
   exists; PVE turns it into an HA request for a managed VM, and the route waits until the VM is on the target.
 - **After a failover**, the node the VM left keeps its cloud-init volume, because PVE regenerates that volume on start

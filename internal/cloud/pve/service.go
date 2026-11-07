@@ -61,6 +61,11 @@ func (s *Service) TeardownProjectPool(ctx context.Context, pool string) error {
 		if m.Type != "qemu" {
 			continue
 		}
+		// HA would restart what is stopped below, and a replica needs its job to be removed.
+		if err := s.disableProtectionOn(ctx, &ClusterResource{Node: m.Node, VMID: m.VMID}); err != nil {
+			return fmt.Errorf("pve teardown: unprotect vm %d: %w", m.VMID, err)
+		}
+		s.waitReplicaRemoved(ctx, m.VMID)
 		// Stop hard (a running VM refuses destroy), then delete. Best-effort stop:
 		// a stopped VM's stop task fails harmlessly.
 		if upid, err := s.C.StopVM(ctx, m.Node, m.VMID); err == nil {

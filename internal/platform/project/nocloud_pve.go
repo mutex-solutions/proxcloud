@@ -54,6 +54,7 @@ type ServerSeed struct {
 	InstanceID    string            `json:"instanceId"`
 	Hostname      string            `json:"hostname"`
 	UserData      string            `json:"userData,omitempty"`
+	LoginUser     string            `json:"loginUser,omitempty"`
 	PasswordHash  string            `json:"passwordHash,omitempty"`
 	SSHKeys       string            `json:"sshKeys,omitempty"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
@@ -139,9 +140,13 @@ func seedHostname(name string) string {
 
 // pveSeedInput is what a server create asks of its seed.
 type pveSeedInput struct {
-	Name, UserData, Password, SSHKeys string
-	Metadata                          map[string]string
+	Name, UserData, Password, LoginUser, SSHKeys string
+	Metadata                                     map[string]string
 }
+
+// seedLoginUserRe is a name useradd takes on every image. It goes into a JSON document, so this is about a create that
+// would otherwise boot without its login, not about quoting.
+var seedLoginUserRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
 // pveSeedMetadata validates a create's instance metadata against the admin's options: an option a
 // tenant may not edit is not theirs to set, and a value outside an option's list is refused.
@@ -193,9 +198,10 @@ func (h *Handler) pveSeedMetadata(ctx context.Context, serviceID, region string,
 	return out, nil
 }
 
-// pveNeedsSeed reports whether a server needs a platform seed instead of PVE's drive.
+// pveNeedsSeed reports whether a server needs a platform seed instead of PVE's drive. PVE's drive sets a password but
+// not ssh_pwauth, and a cloud image then refuses that password over ssh, the one place a tenant would type it.
 func pveNeedsSeed(es *externalservice.ExternalService, in pveSeedInput) bool {
-	return in.UserData != "" || len(in.Metadata) > 0 || es.PVEMetadataSettings().VendorData != ""
+	return in.UserData != "" || in.Password != "" || len(in.Metadata) > 0 || es.PVEMetadataSettings().VendorData != ""
 }
 
 // pveSeedStep returns the CreateServer hook writing the server's seed before its first boot. static
@@ -217,7 +223,7 @@ func (h *Handler) pveSeedStep(ps *pve.Service, es *externalservice.ExternalServi
 		now := time.Now().UTC()
 		s := &ServerSeed{
 			ServiceID: es.ID, ProjectID: proj.ID, ServerID: strconv.Itoa(vmid), Node: node,
-			InstanceID: "iid-" + iid, Hostname: seedHostname(in.Name), UserData: in.UserData,
+			InstanceID: "iid-" + iid, Hostname: seedHostname(in.Name), UserData: in.UserData, LoginUser: in.LoginUser,
 			PasswordHash: hash, SSHKeys: in.SSHKeys, Metadata: in.Metadata, CreatedAt: &now,
 		}
 		settings := es.PVEMetadataSettings()
@@ -297,7 +303,7 @@ func seedSpec(es *externalservice.ExternalService, s *ServerSeed) pve.SeedSpec {
 	return pve.SeedSpec{
 		InstanceID: s.InstanceID, Hostname: s.Hostname, UserData: s.UserData,
 		OperatorVendorData: es.PVEMetadataSettings().VendorData,
-		PasswordHash:       s.PasswordHash, SSHKeys: s.SSHKeys, Metadata: s.Metadata,
+		PasswordHash:       s.PasswordHash, LoginUser: s.LoginUser, SSHKeys: s.SSHKeys, Metadata: s.Metadata,
 		Network: s.NetworkConfig,
 	}
 }
@@ -382,11 +388,24 @@ func (h *Handler) pveReleaseProjectSeeds(ctx context.Context, ps *pve.Service, s
 func (h *Handler) pveDropSeeds(ctx context.Context, ps *pve.Service, rows []ServerSeed) {
 	for _, s := range rows {
 		if s.ISO != "" {
-			ps.DeleteSeedVolume(ctx, s.Node, s.ISO)
+			if err := ps.DeleteSeedVolume(ctx, s.Node, s.ISO); err != nil {
+				slog.Error("seed CD left on storage with its user-data, will retry", "server", s.ServerID, "volume", s.ISO, "err", err)
+				h.keepSeedForRetry(ctx, s)
+				continue
+			}
 		}
 		if _, err := h.seeds.col.DeleteByID(ctx, s.ID); err != nil {
 			slog.Error("drop seed", "server", s.ServerID, "err", err)
 		}
+	}
+}
+
+// keepSeedForRetry leaves only what DropStaleSeeds needs to try the CD again. No server id: PVE reuses vmids, and the next
+// server with this one must not get this seed's user-data or password, nor hold up the retry by having a row.
+func (h *Handler) keepSeedForRetry(ctx context.Context, s ServerSeed) {
+	kept := ServerSeed{ID: s.ID, ServiceID: s.ServiceID, ProjectID: s.ProjectID, Node: s.Node, Mode: s.Mode, ISO: s.ISO, CreatedAt: s.CreatedAt}
+	if err := h.seeds.put(ctx, &kept); err != nil {
+		slog.Error("keep seed for retry", "server", s.ServerID, "err", err)
 	}
 }
 

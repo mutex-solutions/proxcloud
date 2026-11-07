@@ -343,11 +343,13 @@ func (s *Service) RestoreServerBackup(ctx context.Context, projectID, externalID
 	if err != nil {
 		return archivedAt, backupDenied(err, store)
 	}
+	var tagsBefore string
 	check := func() error {
 		cur, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
 		if err != nil {
 			return err
 		}
+		tagsBefore = cur.Str("tags")
 		vols, err := guard(ctx, cur, backup)
 		if err != nil {
 			return err
@@ -398,6 +400,7 @@ func (s *Service) RestoreServerBackup(ctx context.Context, projectID, externalID
 		}
 		return archivedAt, conflictf("The restore of server %s failed and its disks are gone. Restore a backup again, or delete the server", vm.Name)
 	}
+	tagErr := s.keepProtectionTags(ctx, vm, tagsBefore)
 	if running {
 		su, err := s.C.StartVM(ctx, vm.Node, vm.VMID)
 		if err == nil {
@@ -406,6 +409,9 @@ func (s *Service) RestoreServerBackup(ctx context.Context, projectID, externalID
 		if err != nil {
 			return archivedAt, fmt.Errorf("pve restore: restart: %w", err)
 		}
+	}
+	if tagErr != nil {
+		return archivedAt, fmt.Errorf("pve restore: protection tags: %w", tagErr)
 	}
 	return archivedAt, nil
 }
@@ -479,8 +485,8 @@ func (s *Service) DeleteServerBackups(ctx context.Context, projectID, externalID
 
 // RetireServer deletes a server for good, in the one order that loses nothing on a refusal. It lists the backups first: a
 // store that cannot answer would refuse further on, with the server already stopped and its volumes on the holder, and now
-// it refuses with nothing changed. Protection next: HA would restart the VM, and a replicated disk cannot leave it. Then the
-// volumes that outlive it; if one cannot move the server stays, and its data with it. Then a hard stop, which must work: the
+// it refuses with nothing changed. Protection next, waiting for pvesr to remove the replica: HA would restart the VM, and a
+// replicated disk cannot leave it. Then the volumes that outlive it; if one cannot move the server stays, and its data with it. Then a hard stop, which must work: the
 // destroy refuses a running VM. Its backups next, since nothing brings one back, and they cannot wait for the destroy (see
 // DeleteServerBackups). backupStore "" = the provider keeps no backups.
 // ponytail: a tenant's backup or snapshot that takes the VM's lock between DeleteServerBackups' check and the destroy still
@@ -498,7 +504,7 @@ func (s *Service) RetireServer(ctx context.Context, projectID, externalID, backu
 			}
 		}
 	}
-	if err := s.DisableProtection(ctx, projectID, externalID); err != nil {
+	if err := s.DisableProtectionAndWait(ctx, projectID, externalID); err != nil {
 		return fmt.Errorf("disable protection: %w", err)
 	}
 	if keepVolumes {

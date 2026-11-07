@@ -15,9 +15,11 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/adminapi"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
@@ -41,6 +43,66 @@ func TestSeedOfAReusedVMIDStaysWithItsProject(t *testing.T) {
 	got, err = repo.ForServer(ctx, "svc", "tenant-a", "106")
 	if err != nil || got == nil || got.ID != "seed-a" {
 		t.Fatalf("tenant A: %+v, %v", got, err)
+	}
+}
+
+// A CD that cannot be emptied keeps a row so the sync can retry, but no user-data, and no claim on the vmid.
+func TestFailedSeedRemovalIsRetried(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	seeds := project.NewSeedRepo(db, textcrypt.New("k"))
+	mustInsert(t, db, "pveServerSeed", pgdoc.M{"_id": "seed-a", "serviceId": "svc", "projectId": "p", "serverId": "106", "node": "a", "mode": "iso",
+		"iso": "iso:iso/pcseed-106-x.iso", "passwordHash": "h", "userData": textcrypt.New("k").Encrypt("secret")})
+
+	down := true
+	reply := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api2/json/storage", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, []map[string]any{{"storage": "iso", "type": "dir", "content": "iso"}})
+	})
+	mux.HandleFunc("/api2/json/cluster/resources", func(w http.ResponseWriter, _ *http.Request) { reply(w, []any{}) })
+	mux.HandleFunc("/api2/json/nodes/a/storage/iso/content/", func(w http.ResponseWriter, _ *http.Request) {
+		if down {
+			http.Error(w, "no route to host", 595)
+			return
+		}
+		reply(w, nil)
+	})
+	mux.HandleFunc("/api2/json/nodes/a/storage/iso/upload", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no route to host", 595)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	ps, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := project.NewHandler(project.NewService(project.NewRepo(db), nil, nil, nil, nil), nil, nil, nil, nil, nil, cloud.NewRepo(db), nil, nil, nil, "r")
+	h.SetSeeds(seeds)
+	es := &externalservice.ExternalService{ID: "svc"}
+
+	if err := h.DropStaleSeeds(ctx, ps, es); err != nil {
+		t.Fatal(err)
+	}
+	var kept []project.ServerSeed
+	if err := db.C("pveServerSeed").Find(ctx, pgdoc.M{"serviceId": "svc"}, &kept); err != nil {
+		t.Fatal(err)
+	}
+	if len(kept) != 1 || kept[0].ISO != "iso:iso/pcseed-106-x.iso" || kept[0].UserData != "" || kept[0].PasswordHash != "" {
+		t.Fatalf("kept %+v", kept)
+	}
+	// The next server with this vmid must not read it.
+	if got, err := seeds.ForServer(ctx, "svc", "p", "106"); err != nil || got != nil {
+		t.Fatalf("reused vmid got %+v, %v", got, err)
+	}
+
+	down = false
+	if err := h.DropStaleSeeds(ctx, ps, es); err != nil {
+		t.Fatal(err)
+	}
+	kept = nil
+	if err := db.C("pveServerSeed").Find(ctx, pgdoc.M{"serviceId": "svc"}, &kept); err != nil || len(kept) != 0 {
+		t.Fatalf("after the retry: %+v, %v", kept, err)
 	}
 }
 

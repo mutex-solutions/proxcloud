@@ -136,6 +136,7 @@ func (s *Service) RollbackServerSnapshot(ctx context.Context, projectID, externa
 	if err != nil {
 		return err
 	}
+	tagErr := s.keepProtectionTags(ctx, vm, cfg.Str("tags"))
 	// Rollback leaves a snapshot without vmstate stopped.
 	if vm.Status == "running" {
 		up, err := s.C.StartVM(ctx, vm.Node, vm.VMID)
@@ -145,6 +146,9 @@ func (s *Service) RollbackServerSnapshot(ctx context.Context, projectID, externa
 		if err != nil {
 			return fmt.Errorf("pve rollback: restart: %w", err)
 		}
+	}
+	if tagErr != nil {
+		return fmt.Errorf("pve rollback: protection tags: %w", tagErr)
 	}
 	return nil
 }

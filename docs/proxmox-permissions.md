@@ -43,7 +43,7 @@ The admin **Test connection** button on the Proxmox provider reads the token's e
 | `SDN.Allocate`, `SDN.Audit` | vnets, subnets, per-project EVPN zones, SDN apply |
 | `SDN.Use` | attach NICs to vnets and public bridges |
 | `Datastore.AllocateSpace`, `Datastore.Audit` | VM disks and volumes, storage listing |
-| `Datastore.AllocateTemplate` | upload a server's seed CD (user-data on a network without DHCP), and a customer image to the import store |
+| `Datastore.AllocateTemplate` | upload a server's seed CD (user-data or a password on a network without DHCP), and a customer image to the import store. Deleting a CD needs `Datastore.Allocate`, which also defines storages, so the role leaves it out: the portal then overwrites a removed server's CD with an empty one and the file stays. To have them removed, grant `Datastore.Allocate` on the seed store alone, next to `ProxCloudPlatform` on that path, because an ACL on a path replaces what its parent passes down. |
 | `Mapping.Audit`, `Mapping.Use` | GPU PCI mappings |
 
 An existing site adds the two newest with `pveum role modify ProxCloudPlatform --append 1 --privs "VM.GuestAgent.Unrestricted Datastore.AllocateTemplate"`. Without them Test connection warns, and the two actions answer 409 and name the missing privilege. `VM.Backup` is added the same way; without it the backup actions answer 409 naming it, before a running server is stopped. For image import grant `pveum acl modify /storage/<importStorage> --roles PVEDatastoreAdmin --users proxcloud@pve --tokens 'proxcloud@pve!platform' --propagate 0`.

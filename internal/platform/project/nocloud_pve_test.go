@@ -48,8 +48,11 @@ func TestStaleSeed(t *testing.T) {
 func TestPveNeedsSeed(t *testing.T) {
 	plain := &externalservice.ExternalService{Config: map[string]any{"provider": "proxmox"}}
 	vendor := &externalservice.ExternalService{Config: map[string]any{"provider": "proxmox", "metadata": map[string]any{"vendorData": "#!/bin/sh\n"}}}
-	if pveNeedsSeed(plain, pveSeedInput{Password: "x", SSHKeys: "k"}) {
-		t.Fatal("a password and keys stay on PVE's own drive")
+	if pveNeedsSeed(plain, pveSeedInput{SSHKeys: "k"}) {
+		t.Fatal("keys stay on PVE's own drive")
+	}
+	if !pveNeedsSeed(plain, pveSeedInput{Password: "x"}) {
+		t.Fatal("a password needs ssh_pwauth, which PVE's drive cannot carry")
 	}
 	if !pveNeedsSeed(plain, pveSeedInput{UserData: "#cloud-config\n"}) {
 		t.Fatal("user-data needs a seed")
@@ -59,5 +62,15 @@ func TestPveNeedsSeed(t *testing.T) {
 	}
 	if !pveNeedsSeed(vendor, pveSeedInput{}) {
 		t.Fatal("the operator's vendor-data needs a seed")
+	}
+}
+
+// bcrypt takes 72 bytes: longer fails a create after its clone, and a Set password would leave the old hash on the seed.
+func TestPvePasswordErr(t *testing.T) {
+	if pvePasswordErr(strings.Repeat("x", 72)) != nil {
+		t.Fatal("72 bytes fit")
+	}
+	if pvePasswordErr(strings.Repeat("é", 37)) == nil {
+		t.Fatal("74 bytes in 37 characters do not")
 	}
 }
