@@ -64,12 +64,14 @@ func TestTokenWarnings(t *testing.T) {
 		tokenID string
 		status  int             // non-200 = /access/permissions fails
 		privs   map[string]bool // granted on every path
+		zones   map[string]bool // granted on /sdn/zones instead, when set: an ACL there replaces what /sdn passes down
 		want    []string        // substrings, in order
 	}{
-		{"complete platform token", "proxcloud@pve!platform", 200, full, nil},
-		{"root token", "root@pam!x", 200, full, []string{"belongs to root@pam"}},
-		{"missing privilege", "proxcloud@pve!platform", 200, without(full, "SDN.Allocate"), []string{"Token lacks SDN.Allocate on /sdn"}},
-		{"permissions unreadable", "proxcloud@pve!platform", 500, nil, []string{"Could not read the token's permissions"}},
+		{"complete platform token", "proxcloud@pve!platform", 200, full, nil, nil},
+		{"root token", "root@pam!x", 200, full, nil, []string{"belongs to root@pam"}},
+		{"missing privilege", "proxcloud@pve!platform", 200, without(full, "VM.Audit"), nil, []string{"Token lacks VM.Audit on /pool"}},
+		{"permissions unreadable", "proxcloud@pve!platform", 500, nil, nil, []string{"Could not read the token's permissions"}},
+		{"sdn rights shadowed on zones", "proxcloud@pve!platform", 200, full, map[string]bool{"User.Modify": true}, []string{"Token lacks SDN.Allocate, SDN.Audit, SDN.Use on /sdn/zones"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -78,8 +80,12 @@ func TestTokenWarnings(t *testing.T) {
 					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
+				privs := tt.privs
+				if tt.zones != nil && r.URL.Query().Get("path") == "/sdn/zones" {
+					privs = tt.zones
+				}
 				var ps []string
-				for p := range tt.privs {
+				for p := range privs {
 					ps = append(ps, fmt.Sprintf("%q:1", p))
 				}
 				fmt.Fprintf(w, `{"data":{%q:{%s}}}`, r.URL.Query().Get("path"), strings.Join(ps, ","))

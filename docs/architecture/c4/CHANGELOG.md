@@ -4,6 +4,21 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Split mode keeps the portal's SDN rights
+
+**What changed**
+
+- `mode: split` also grants `ProxCloudPlatform` on `/sdn/zones` to the portal token. Test connection reads `/sdn/zones`
+  as well as `/sdn`.
+
+**Why**
+
+- An ACL on a path replaces what its parent passes down. The mint grant alone took `SDN.*` away from the portal, so on
+  a split site no tenant network could be created. The lab showed it as soon as the grants were applied. No diagram
+  shows ACLs.
+
+**Diagrams updated:** none.
+
 ## 2026-11-07: Object store connection checked at registration, public buckets always closable
 
 **What changed**
