@@ -152,6 +152,8 @@ var PlatformPrivileges = []PrivCheck{
 		"VM.Snapshot", "VM.Snapshot.Rollback",
 	}},
 	{Path: "/sdn", Privs: []string{"SDN.Allocate", "SDN.Audit", "SDN.Use"}},
+	// Read apart from /sdn: an ACL on /sdn/zones replaces what /sdn passes down, and zones and NICs check here.
+	{Path: "/sdn/zones", Privs: []string{"SDN.Allocate", "SDN.Audit", "SDN.Use"}},
 	{Path: "/storage", Privs: []string{"Datastore.AllocateSpace", "Datastore.AllocateTemplate", "Datastore.Audit"}},
 	{Path: "/mapping/pci", Privs: []string{"Mapping.Audit", "Mapping.Use"}},
 }

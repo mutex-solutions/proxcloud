@@ -94,8 +94,11 @@ grant /access/groups ProxCloudKubeMint 1 proxcloud@pve platform
 grant /pool          ProxCloudKubeMint 1 proxcloud@pve platform
 grant /storage       ProxCloudKubeMint 1 proxcloud@pve platform
 grant /sdn/zones     ProxCloudKubeMint 1 proxcloud@pve platform
+grant /sdn/zones     ProxCloudPlatform 1 proxcloud@pve platform
 grant /nodes         ProxCloudKubeMint 0 proxcloud@pve platform
 ```
+
+An ACL on a path replaces what the parent passes down for that user or token. The `/sdn/zones` mint grant on its own leaves the portal token without `SDN.*` under `/sdn/zones`, so every network create fails with `Permission check failed (/sdn/zones, SDN.Allocate)` and no NIC can attach, hence the second `/sdn/zones` line. `/pool` and `/storage` already hold `ProxCloudPlatform` directly. `/nodes/<node>` does not inherit the mint grant (propagate 0), by design. After any ACL change, read the result with `pveum user token permissions proxcloud@pve platform --path <path>`, not the ACL list; Test connection warns when the portal token lacks a privilege on `/sdn/zones`.
 
 `Permissions.Modify` is a big right: a stolen portal token can grant itself anything on those paths. Without these grants a cluster create fails with PVE's `Permission check failed`, or the provider runs in `sharedWorkers` mode (docs/managed-k8s.md). **The minted path has only run against a fake PVE, not a real one, so check this list on the first real install.** What is known from the lab (PVE 9.2): without these grants, `POST /access/users/{user}/token/{name}` answers 403 even for the token's own user, and `PUT /access/acl` wants `Permissions.Modify` on `/sdn/zones/...` and `/nodes`, and `Permissions.Modify` or `Datastore.Allocate` on `/storage/...`.
 
