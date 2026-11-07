@@ -21,7 +21,7 @@ func heldVolumes(context.Context, VMConfig, VMConfig) (map[string]RestoreVolume,
 	}, nil
 }
 
-// backupCluster fakes VM 101 on pve1 (pool st-p1) with one archive of p1 and one of another project on nas-backup.
+// backupCluster fakes VM 101 on pve1 (pool tp-p1) with one archive of p1 and one of another project on nas-backup.
 type backupCluster struct {
 	s         *Service
 	vzdump    url.Values
@@ -67,7 +67,7 @@ func newBackupCluster(t *testing.T) *backupCluster {
 				fmt.Fprint(w, `{"data":[{"type":"storage","storage":"z","node":"pve1","status":"available","maxdisk":100,"disk":1}]}`)
 				return
 			}
-			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"st-p1","name":"web","status":"running"}]}`)
+			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":101,"node":"pve1","pool":"tp-p1","name":"web","status":"running"}]}`)
 		},
 		"GET /api2/json/storage": func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprint(w, `{"data":[{"storage":"z","type":"zfspool","content":"images"}]}`)
@@ -150,7 +150,7 @@ func newBackupCluster(t *testing.T) *backupCluster {
 			fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
 		},
 	})
-	b.s = &Service{C: c, ServiceID: "svc", PoolPrefix: "st-"}
+	b.s = &Service{C: c, ServiceID: "svc", PoolPrefix: "tp-"}
 	return b
 }
 

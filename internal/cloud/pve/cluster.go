@@ -11,7 +11,7 @@ import (
 // ClusterResource is one row of GET /cluster/resources — the sync workhorse: a
 // single call returns every VM, storage, node and pool in the cluster.
 type ClusterResource struct {
-	ID       string  `json:"id"`   // "qemu/101", "storage/pve1/local-zfs", "node/pve1", "/pool/st-abc"
+	ID       string  `json:"id"`   // "qemu/101", "storage/pve1/local-zfs", "node/pve1", "/pool/tp-abc"
 	Type     string  `json:"type"` // "qemu" | "lxc" | "storage" | "node" | "sdn" | "pool"
 	Node     string  `json:"node"`
 	VMID     int     `json:"vmid"`

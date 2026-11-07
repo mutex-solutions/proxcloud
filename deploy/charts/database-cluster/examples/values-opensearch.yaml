@@ -21,7 +21,7 @@ network:
     - 192.0.2.0/24
 proxcloud:
   projectId: 665f1a2b3c4d5e6f77889900
-  resourceId: std-6f708192
+  resourceId: pc-d-6f708192
   displayName: search-cluster
 monitoring:
   enabled: false

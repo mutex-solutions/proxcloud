@@ -48,7 +48,7 @@ func (c *Client) DeleteAPIToken(ctx context.Context, userid, tokenName string) e
 }
 
 // SetACL grants (or with del revokes) a role on a path for users/tokens.
-// path e.g. "/pool/st-abc123", roles e.g. "PVEVMAdmin".
+// path e.g. "/pool/tp-abc123", roles e.g. "PVEVMAdmin".
 func (c *Client) SetACL(ctx context.Context, path, roles string, tokens []string, del bool) error {
 	form := formVals{
 		"path":   path,

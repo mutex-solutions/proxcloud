@@ -20,7 +20,7 @@ network:
     - 192.0.2.0/24
 proxcloud:
   projectId: 665f1a2b3c4d5e6f77889900
-  resourceId: std-5e6f7081
+  resourceId: pc-d-5e6f7081
   displayName: docs-store
 monitoring:
   enabled: true
@@ -41,4 +41,4 @@ backup:
     prefix: backups
     region: us-east-1
     pathStyle: true
-    credsSecret: std-5e6f7081-backup-s3
+    credsSecret: pc-d-5e6f7081-backup-s3

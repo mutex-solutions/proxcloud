@@ -4,6 +4,21 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: Database ids take a neutral prefix
+
+**What changed**
+
+- New managed databases get ids of the form `pc-d-<8hex>`. Existing databases keep the id they have.
+- A restore's source id may carry either prefix.
+
+**Why**
+
+- The earlier prefix came from the old brand, and it was the last one in use. An id names every object of a database
+  (Application, release, engine CR, secrets, Service, its folder in the backup store), so it cannot change on a live database.
+  The one place that read the prefix was that restore check, which would have refused a source with the new one.
+
+**Diagrams updated:** none; no container or relationship changed.
+
 ## 2026-11-07: One bill per profile and cycle, the month's last hour billed once
 
 **What changed**

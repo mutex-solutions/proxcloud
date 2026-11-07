@@ -267,7 +267,7 @@ func testConfig() Config {
 
 func testSpec(engine, version string) DatabaseSpec {
 	return DatabaseSpec{
-		ID: "std-abc12345", DisplayName: "my db", ProjectID: "p1",
+		ID: "pc-d-abc12345", DisplayName: "my db", ProjectID: "p1",
 		Engine: engine, Version: version, Replicas: 1,
 		CPU: 2, MemoryGiB: 4, StorageGiB: 20,
 		AllowedCIDRs: []string{"10.1.0.0/24"},
@@ -313,7 +313,7 @@ func TestSpecValidate(t *testing.T) {
 	s.ReadEndpoint = true
 	cases["read endpoint on an engine without one"] = s
 	s = testSpec(EnginePostgreSQL, "17")
-	s.RestoreFrom = &RestoreSource{SourceID: "std-0abc1234"}
+	s.RestoreFrom = &RestoreSource{SourceID: "pc-d-0abc1234"}
 	cases["restore without an object store"] = s
 	for name, spec := range cases {
 		if err := spec.Validate(cfg); err == nil {
@@ -332,13 +332,13 @@ func TestNames(t *testing.T) {
 	if NamespaceFor("p1") != "pc-db-p1" {
 		t.Fatal("NamespaceFor")
 	}
-	if LBServiceName("std-x") != "std-x-lb" {
+	if LBServiceName("pc-d-x") != "pc-d-x-lb" {
 		t.Fatal("LBServiceName")
 	}
-	if AuthSecretName("std-x") != "std-x-auth" {
+	if AuthSecretName("pc-d-x") != "pc-d-x-auth" {
 		t.Fatal("AuthSecretName")
 	}
-	if MarkerSecretName("std-x") != "std-x-marker" {
+	if MarkerSecretName("pc-d-x") != "pc-d-x-marker" {
 		t.Fatal("MarkerSecretName")
 	}
 }
@@ -463,7 +463,7 @@ func TestServiceCreateDelete(t *testing.T) {
 	if _, err := s2.CreateDatabase(ctx, testSpec(EnginePostgreSQL, "17")); err != nil {
 		t.Fatal(err)
 	}
-	if _, has := api2.secrets[key("pc-db-p1", AuthSecretName("std-abc12345"))]; has {
+	if _, has := api2.secrets[key("pc-db-p1", AuthSecretName("pc-d-abc12345"))]; has {
 		t.Fatal("postgresql must not get a proxcloud auth secret")
 	}
 
@@ -479,19 +479,63 @@ func TestServiceCreateDelete(t *testing.T) {
 	}
 }
 
+// Databases made before the prefix changed keep their ids, and everything has to go on working for both shapes.
+func TestDatabaseLifeWithEitherIDShape(t *testing.T) {
+	const legacy = "std-abcd1234" // the one place the old shape stays: it is what such a database is called
+	for _, id := range []string{"pc-d-abcd1234", legacy} {
+		t.Run(id, func(t *testing.T) {
+			ctx := context.Background()
+			api := newFakeAPI()
+			s := NewWithAPI(api, testConfig(), "svc-dbaas")
+			spec := testSpec(EngineMariaDB, "11.8")
+			spec.ID = id
+			if _, err := s.CreateDatabase(ctx, spec); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{MarkerSecretName(id), AuthSecretName(id)} {
+				if _, has := api.secrets[key("pc-db-p1", name)]; !has || !strings.HasPrefix(name, id+"-") {
+					t.Fatalf("secret %s: %v", name, api.secrets)
+				}
+			}
+			if api.apps[key("argocd", id)] == nil || LBServiceName(id) != id+"-lb" {
+				t.Fatalf("application or names: %v", api.apps)
+			}
+			rows, err := s.SyncProvider("r", "p1").List(ctx)
+			if err != nil || len(rows) != 1 || rows[0].ExternalID != id {
+				t.Fatalf("the sync sees it: %+v %v", rows, err)
+			}
+			// A restore names its source by id, whichever shape that has.
+			if err := (RestoreSource{SourceID: id}).Validate(); err != nil {
+				t.Fatalf("restore from %s: %v", id, err)
+			}
+			if err := s.DeleteDatabase(ctx, "p1", id); err != nil {
+				t.Fatal(err)
+			}
+			if api.apps[key("argocd", id)] != nil {
+				t.Fatal("delete")
+			}
+		})
+	}
+	for _, id := range []string{"", "not-an-id"} {
+		if err := (RestoreSource{SourceID: id}).Validate(); err == nil {
+			t.Fatalf("a restore from %q", id)
+		}
+	}
+}
+
 func TestOwnershipGuards(t *testing.T) {
 	api := newFakeAPI()
 	s := NewWithAPI(api, testConfig(), "svc-dbaas")
 	ctx := context.Background()
 	// A foreign Application (no managed-by label) must refuse delete AND patch.
-	api.apps[key("argocd", "std-foreign")] = map[string]any{
-		"metadata": map[string]any{"name": "std-foreign", "namespace": "argocd"},
+	api.apps[key("argocd", "pc-d-foreign")] = map[string]any{
+		"metadata": map[string]any{"name": "pc-d-foreign", "namespace": "argocd"},
 		"spec":     map[string]any{},
 	}
-	if err := s.DeleteDatabase(ctx, "p1", "std-foreign"); err == nil {
+	if err := s.DeleteDatabase(ctx, "p1", "pc-d-foreign"); err == nil {
 		t.Fatal("delete of unmanaged application must refuse")
 	}
-	if err := s.PatchDatabaseApp(ctx, "std-foreign", func(map[string]any) error { return nil }); err == nil {
+	if err := s.PatchDatabaseApp(ctx, "pc-d-foreign", func(map[string]any) error { return nil }); err == nil {
 		t.Fatal("patch of unmanaged application must refuse")
 	}
 }
@@ -544,7 +588,7 @@ func TestFinalizeOrphans(t *testing.T) {
 	// Fresh marker (inside grace) → pending, untouched.
 	api := newFakeAPI()
 	s := NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkMarker(api, "std-new", time.Minute)
+	mkMarker(api, "pc-d-new", time.Minute)
 	pending, err := s.FinalizeOrphans(ctx, "p1")
 	if err != nil || pending != 1 {
 		t.Fatalf("grace window: pending=%d err=%v", pending, err)
@@ -553,23 +597,23 @@ func TestFinalizeOrphans(t *testing.T) {
 	// Live Application → skipped, not pending.
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkMarker(api, "std-live", 2*time.Hour)
-	api.apps[key("argocd", "std-live")] = map[string]any{"metadata": map[string]any{
-		"name": "std-live", "namespace": "argocd",
+	mkMarker(api, "pc-d-live", 2*time.Hour)
+	api.apps[key("argocd", "pc-d-live")] = map[string]any{"metadata": map[string]any{
+		"name": "pc-d-live", "namespace": "argocd",
 		"labels": map[string]any{LabelProject: "p1", LabelManagedBy: ManagedByValue},
 	}}
 	if pending, err = s.FinalizeOrphans(ctx, "p1"); err != nil || pending != 0 {
 		t.Fatalf("live app: pending=%d err=%v", pending, err)
 	}
-	if _, has := api.secrets[key("pc-db-p1", MarkerSecretName("std-live"))]; !has {
+	if _, has := api.secrets[key("pc-db-p1", MarkerSecretName("pc-d-live"))]; !has {
 		t.Fatal("live database's marker must stay")
 	}
 
 	// LB Service still present → cascade in flight → pending.
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkMarker(api, "std-lb", 2*time.Hour)
-	api.services[key("pc-db-p1", LBServiceName("std-lb"))] = map[string]any{"metadata": map[string]any{"name": LBServiceName("std-lb")}}
+	mkMarker(api, "pc-d-lb", 2*time.Hour)
+	api.services[key("pc-db-p1", LBServiceName("pc-d-lb"))] = map[string]any{"metadata": map[string]any{"name": LBServiceName("pc-d-lb")}}
 	if pending, err = s.FinalizeOrphans(ctx, "p1"); err != nil || pending != 1 {
 		t.Fatalf("lb present: pending=%d err=%v", pending, err)
 	}
@@ -577,15 +621,15 @@ func TestFinalizeOrphans(t *testing.T) {
 	// Auth-secret delete failure → marker STAYS (it is the only retry driver), pending.
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkMarker(api, "std-x", 2*time.Hour)
-	api.secrets[key("pc-db-p1", AuthSecretName("std-x"))] = map[string]any{"metadata": map[string]any{
-		"name": AuthSecretName("std-x"), "namespace": "pc-db-p1"}}
-	api.failDelete[AuthSecretName("std-x")] = true
+	mkMarker(api, "pc-d-x", 2*time.Hour)
+	api.secrets[key("pc-db-p1", AuthSecretName("pc-d-x"))] = map[string]any{"metadata": map[string]any{
+		"name": AuthSecretName("pc-d-x"), "namespace": "pc-db-p1"}}
+	api.failDelete[AuthSecretName("pc-d-x")] = true
 	pending, err = s.FinalizeOrphans(ctx, "p1")
 	if pending != 1 || err == nil {
 		t.Fatalf("auth delete failure: pending=%d err=%v", pending, err)
 	}
-	if _, has := api.secrets[key("pc-db-p1", MarkerSecretName("std-x"))]; !has {
+	if _, has := api.secrets[key("pc-db-p1", MarkerSecretName("pc-d-x"))]; !has {
 		t.Fatal("marker must survive an auth-secret delete failure (retry driver)")
 	}
 
@@ -594,17 +638,17 @@ func TestFinalizeOrphans(t *testing.T) {
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
 	api.namespaces["pc-db-p1"] = map[string]any{"metadata": map[string]any{
 		"name": "pc-db-p1", "labels": map[string]any{LabelManagedBy: ManagedByValue}}}
-	mkMarker(api, "std-x", 2*time.Hour)
-	api.secrets[key("pc-db-p1", AuthSecretName("std-x"))] = map[string]any{"metadata": map[string]any{
-		"name": AuthSecretName("std-x"), "namespace": "pc-db-p1"}}
+	mkMarker(api, "pc-d-x", 2*time.Hour)
+	api.secrets[key("pc-db-p1", AuthSecretName("pc-d-x"))] = map[string]any{"metadata": map[string]any{
+		"name": AuthSecretName("pc-d-x"), "namespace": "pc-db-p1"}}
 	pending, err = s.FinalizeAllOrphans(ctx)
 	if err != nil || pending != 0 {
 		t.Fatalf("clean orphan: pending=%d err=%v", pending, err)
 	}
-	if _, has := api.secrets[key("pc-db-p1", MarkerSecretName("std-x"))]; has {
+	if _, has := api.secrets[key("pc-db-p1", MarkerSecretName("pc-d-x"))]; has {
 		t.Fatal("finished-cascade marker must be reaped")
 	}
-	if _, has := api.secrets[key("pc-db-p1", AuthSecretName("std-x"))]; has {
+	if _, has := api.secrets[key("pc-db-p1", AuthSecretName("pc-d-x"))]; has {
 		t.Fatal("auth secret must be reaped with the marker")
 	}
 	if _, has := api.namespaces["pc-db-p1"]; has {
@@ -630,8 +674,8 @@ func TestSyncProviderList(t *testing.T) {
 		"status": map[string]any{"loadBalancer": map[string]any{"ingress": []any{map[string]any{"ip": "10.1.0.5"}}}},
 	}
 	// A terminating sibling must NOT re-enter the cache.
-	api.apps[key("argocd", "std-dying")] = map[string]any{
-		"metadata": map[string]any{"name": "std-dying", "namespace": "argocd",
+	api.apps[key("argocd", "pc-d-dying")] = map[string]any{
+		"metadata": map[string]any{"name": "pc-d-dying", "namespace": "argocd",
 			"deletionTimestamp": "2026-01-01T00:00:00Z",
 			"labels":            map[string]any{LabelProject: "p1", LabelManagedBy: ManagedByValue}},
 		"spec": map[string]any{},
@@ -676,33 +720,33 @@ func TestConnectionSecretContract(t *testing.T) {
 	}{
 		// The exposed postgres account is the SUPERUSER (chart sets enableSuperuserAccess); the
 		// database name is fixed, not read off that secret.
-		{EnginePostgreSQL, "std-1-superuser", "username", "password", "", 5432, "", "app"},
-		{EngineFerretDB, "std-1-pg-app", "username", "password", "dbname", 27017, "", ""},
-		{EngineMySQL, "std-1-secrets", "", "root", "", 3306, "root", ""},
-		{EngineMariaDB, "std-1-auth", "", "password", "", 3306, "app", "app"},
+		{EnginePostgreSQL, "pc-d-1-superuser", "username", "password", "", 5432, "", "app"},
+		{EngineFerretDB, "pc-d-1-pg-app", "username", "password", "dbname", 27017, "", ""},
+		{EngineMySQL, "pc-d-1-secrets", "", "root", "", 3306, "root", ""},
+		{EngineMariaDB, "pc-d-1-auth", "", "password", "", 3306, "app", "app"},
 		// valkey's exposed account is the `default` ACL user the chart wires to <id>-auth.
-		{EngineValkey, "std-1-auth", "", "password", "", 6379, "default", ""},
-		{EngineOpenSearch, "std-1-admin-password", "username", "password", "", 9200, "", ""},
-		{EngineKafka, "std-1-auth", "", "password", "", 9094, "std-1-app", ""},
+		{EngineValkey, "pc-d-1-auth", "", "password", "", 6379, "default", ""},
+		{EngineOpenSearch, "pc-d-1-admin-password", "username", "password", "", 9200, "", ""},
+		{EngineKafka, "pc-d-1-auth", "", "password", "", 9094, "pc-d-1-app", ""},
 	}
 	for _, c := range cases {
-		name, uk, pk, dk := ConnectionSecret(c.engine, "std-1")
+		name, uk, pk, dk := ConnectionSecret(c.engine, "pc-d-1")
 		if name != c.name || uk != c.userKey || pk != c.passKey || dk != c.dbKey {
 			t.Errorf("%s: got (%s,%s,%s,%s)", c.engine, name, uk, pk, dk)
 		}
 		if Port(c.engine) != c.port {
 			t.Errorf("%s: port %d", c.engine, Port(c.engine))
 		}
-		if DefaultUser(c.engine, "std-1") != c.defUser || DefaultDB(c.engine) != c.defDB {
-			t.Errorf("%s: defaults (%s,%s)", c.engine, DefaultUser(c.engine, "std-1"), DefaultDB(c.engine))
+		if DefaultUser(c.engine, "pc-d-1") != c.defUser || DefaultDB(c.engine) != c.defDB {
+			t.Errorf("%s: defaults (%s,%s)", c.engine, DefaultUser(c.engine, "pc-d-1"), DefaultDB(c.engine))
 		}
 	}
 	// Databases predating the superuser switch keep working off the scoped app role.
-	if n, uk, pk, dk := PriorConnectionSecret(EnginePostgreSQL, "std-1"); n != "std-1-app" || uk != "username" || pk != "password" || dk != "dbname" {
+	if n, uk, pk, dk := PriorConnectionSecret(EnginePostgreSQL, "pc-d-1"); n != "pc-d-1-app" || uk != "username" || pk != "password" || dk != "dbname" {
 		t.Errorf("postgres fallback = (%s,%s,%s,%s)", n, uk, pk, dk)
 	}
 	for _, e := range []string{EngineMySQL, EngineMariaDB, EngineValkey, EngineOpenSearch, EngineKafka, EngineFerretDB} {
-		if n, _, _, _ := PriorConnectionSecret(e, "std-1"); n != "" {
+		if n, _, _, _ := PriorConnectionSecret(e, "pc-d-1"); n != "" {
 			t.Errorf("%s must have no fallback, got %s", e, n)
 		}
 	}
@@ -710,8 +754,8 @@ func TestConnectionSecretContract(t *testing.T) {
 		NeedsAuthSecret(EnginePostgreSQL) || NeedsAuthSecret(EngineMySQL) || NeedsAuthSecret(EngineOpenSearch) {
 		t.Fatal("NeedsAuthSecret set")
 	}
-	if LBServiceNameFor(EngineKafka, "std-1") != "std-1-kafka-external-bootstrap" ||
-		LBServiceNameFor(EnginePostgreSQL, "std-1") != "std-1-lb" {
+	if LBServiceNameFor(EngineKafka, "pc-d-1") != "pc-d-1-kafka-external-bootstrap" ||
+		LBServiceNameFor(EnginePostgreSQL, "pc-d-1") != "pc-d-1-lb" {
 		t.Fatal("LBServiceNameFor")
 	}
 }
@@ -959,7 +1003,7 @@ func TestFinalizeReapsDatabaseSecrets(t *testing.T) {
 	s := NewWithAPI(api, cfg, "svc-dbaas")
 	s.finalizeGrace = 0
 	gone, kept := testSpec(EnginePostgreSQL, "17"), testSpec(EnginePostgreSQL, "17")
-	kept.ID = "std-keep0001"
+	kept.ID = "pc-d-keep0001"
 	for _, spec := range []DatabaseSpec{gone, kept} {
 		if _, err := s.CreateDatabase(ctx, spec); err != nil {
 			t.Fatal(err)
