@@ -59,8 +59,8 @@ Seed-file twin of the form: `deploy/seed/external-service-dev.json`
 | DNS zone | `config.cluster.dnsZone` | Optional. API FQDN = `<clusterId>.<zone>`. Cluster ids (`stc-<8hex>`) never change. |
 | Version → image matrix | `config.cluster.versions` | Curated map `k8s version → node image id`: the only versions offered to customers. Textarea grammar: `1.35.4=<image-id>` per line. |
 | Image variants | `config.cluster.imageVariants` | Alternative node-image builds of the same version, e.g. a GPU build. Grammar: `1.35.4@nvidia=<image-id>`. |
-| RWX dataset size | `config.cluster.rwxGiB` | Optional, API only. See [section 9](#9-how-a-cluster-lands-on-proxmox). |
-| Block volumes for tenants | `config.cluster.csiSharedStores` | Optional, API only, default off. **Gives up isolation between tenants on the stores**, see [section 9](#9-how-a-cluster-lands-on-proxmox). Needs chart 0.1.5 or later when off. |
+| RWX dataset size | `config.cluster.rwxGiB` | Optional, API or installer (`services.kamaji.rwx_gib`). See [section 9](#9-how-a-cluster-lands-on-proxmox). |
+| Block volumes for tenants | `config.cluster.csiSharedStores` | Optional, API or installer (`services.kamaji.csi_shared_stores`), default off. **Gives up isolation between tenants on the stores**, see [section 9](#9-how-a-cluster-lands-on-proxmox). Needs chart 0.1.5 or later when off. |
 | Flavors allowlist | `config.cluster.flavors` | Flavor ids offered for node groups. Empty = no restriction. |
 
 ## 3. How a cluster is represented

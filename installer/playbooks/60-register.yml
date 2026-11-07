@@ -396,6 +396,8 @@
               versions: "{{ pc.services.kamaji.version_images }}"
               rootVolumeGiB: "{{ pc.services.kamaji.root_volume_gib | int }}"
               workerMtu: "{{ pc.services.kamaji.worker_mtu | int }}"
+              rwxGiB: "{{ pc.services.kamaji.rwx_gib | int }}"
+              csiSharedStores: "{{ pc.services.kamaji.csi_shared_stores | bool }}"
               pveApiUrl: "{{ pc_portal_pve_url }}"
               pveCsiUrl: "https://{{ pc.services.network.pve_proxy_ip }}:8006"
           secret: {kubeconfig: "{{ kubeconfig }}"}

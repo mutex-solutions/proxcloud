@@ -143,6 +143,8 @@ pc_defaults:
       version_images: {}         # {k8s version: "pve1=9210,pve2=9211"}
       root_volume_gib: 30
       worker_mtu: 1450
+      rwx_gib: 0                 # NAS dataset per cluster and its RWX class; 0 = none
+      csi_shared_stores: false   # proxmox-csi for tenants: gives up isolation between them, docs/managed-k8s.md
 
   nas:
     host: ""                     # TrueNAS address; empty = no NAS stage
