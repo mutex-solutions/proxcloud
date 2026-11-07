@@ -4,6 +4,35 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: SB2b review fixes: pin, datacenter switch, node addresses, re-taint
+
+**What changed**
+
+- `pve.SandboxPass`: a filter counts as pinned only when it holds one worker-range entry and that is a host;
+  `StartSandboxPass` reads the datacenter firewall switch and, with it off, `Secure` still writes the worker's
+  firewall but returns `ErrSandboxUnenforced` and never reports it Secured. New `Client.NodeAddresses`: every IPv4
+  address on every node interface.
+- `syncjob.reconcileSandboxWorkers`: the internet set also leaves out every node address and `config.sandbox.snat`;
+  a node that does not report its networks stops the pass; the Node's address is passed to `Secure` only while the
+  worker is tainted; a cleared worker that fails, reads back not in place or loses its pin gets the taint back.
+- Stage 55: the SNAT dummy interface drops new connections to its address in `INPUT` (`pre-up`). Stage 60 writes
+  `config.sandbox.snat`. `unsecuredMinAgeMinutes` defaults to 20.
+
+**Why**
+
+- A worker range like `.10-.20` covers as CIDRs ending in one host, which the pass read as a pin: every unjoined
+  worker lost its own address and never joined.
+- With the datacenter firewall off PVE applies no VM rule, yet workers read back in place and lost their taint.
+- The deny list held only bridges with a gateway: a node's PVE API and ssh on another uplink, and the SNAT address on
+  a dummy interface, stayed in the internet set, and the SNAT address put the exit node's API and ssh on a new,
+  often public, address. Found by review, confirmed on the lab (pveproxy answered on the SNAT address).
+- The Node address is the kubelet's: trusting it after tenant pods land would let a lost pin move to another
+  worker's address. A partial node read must not shrink the deny list (layer 0 refuses the same way). The taint only
+  ever came off, so a worker unfenced later kept taking tenant pods. CABPK can refresh the token shortly before the
+  Node registers, so 15 minutes could end a few seconds early.
+
+**Diagrams updated:** `c4-code.md` (C4.1 layer 1).
+
 ## 2026-11-07: The sandbox workers' VM firewall, the unsecured taint and their own egress address (SB2b)
 
 **What changed**

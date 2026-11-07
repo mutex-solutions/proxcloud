@@ -35,6 +35,10 @@ const (
 // is not rewritten in place (that could open a gap); the pass reports it and no worker is cleared for tenants.
 var ErrSandboxDrift = errors.New("pve sandbox: the firewall group or IP set in use was changed outside the portal")
 
+// ErrSandboxUnenforced: the datacenter firewall is off, so PVE enforces no VM rule anywhere. The pass still writes
+// every worker's firewall, and Secure reports this for each one so that none is cleared for tenants.
+var ErrSandboxUnenforced = errors.New("pve sandbox: the datacenter firewall is off, so PVE enforces no VM firewall")
+
 // sandboxPrivate are the destinations a worker never reaches except through an explicit rule (EE's guardrail set).
 var sandboxPrivate = []string{
 	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
@@ -309,6 +313,7 @@ type SandboxPass struct {
 	vnet    string
 	nodes   []netip.Prefix
 	lbs     []netip.Prefix
+	on      bool // the datacenter firewall is on
 	Workers []SandboxWorker
 }
 
@@ -319,6 +324,9 @@ func (s *Service) StartSandboxPass(ctx context.Context, f SandboxFirewall) (*San
 		return nil, err
 	}
 	p := &SandboxPass{s: s, g: g}
+	if p.on, err = s.C.DatacenterFirewallEnabled(ctx); err != nil {
+		return nil, err
+	}
 	p.nodes, _ = toCIDRs(f.Nodes)
 	p.lbs, _ = toCIDRs(f.LoadBalancers)
 	if p.vnet, err = s.vnetOfSubnet(ctx, f.Subnet); err != nil {
@@ -500,17 +508,16 @@ type SandboxWorkerState struct {
 
 // Secure brings one worker to the current generation: IP filters, the group as its only rule, the options, then
 // firewall=1 on every NIC (until that flag is on nothing of the rest applies, so it goes last). nodeAddr is the
-// address the worker's Node reports ("" before it joins); see ipfilterFor for how far it is trusted.
+// address the worker's Node reports. The caller passes it only while the worker still has its unsecured taint (the
+// kubelet writes its Node, and once tenant code runs there it may lie), "" otherwise; see ipfilterFor.
 func (p *SandboxPass) Secure(ctx context.Context, w SandboxWorker, nodeAddr string) (SandboxWorkerState, error) {
 	st, changed, err := p.secure(ctx, w, nodeAddr, true)
-	if err != nil {
-		return st, err
+	if err == nil && changed { // read it all back after the changes
+		st, changed, err = p.secure(ctx, w, nodeAddr, false)
 	}
-	if !changed { // everything was read as wanted
-		st.Secured = true
-		return st, nil
+	if err == nil && !p.on {
+		err = ErrSandboxUnenforced
 	}
-	st, changed, err = p.secure(ctx, w, nodeAddr, false)
 	st.Secured = err == nil && !changed
 	return st, err
 }
@@ -631,8 +638,8 @@ func (p *SandboxPass) secure(ctx context.Context, w SandboxWorker, nodeAddr stri
 }
 
 // ipfilterFor is the filter of a worker's sandbox NIC. The Node object is the kubelet's to write, so its address is
-// trusted once, before the worker takes tenant pods (the unsecured taint), and then pinned: a host address inside the
-// worker range that the set already holds stays, whatever the Node says later. Before that the whole worker range is
+// trusted once, before the worker takes tenant pods (the caller passes it only while the unsecured taint is on), and
+// then pinned: a host address inside the worker range that the set already holds stays, whatever the Node says later. Before that the whole worker range is
 // admitted. The load balancer addresses are always in, since any worker may answer for them.
 func (p *SandboxPass) ipfilterFor(have []IPSet, nodeAddr string) (want []string, pinned string) {
 	inRange := func(a netip.Addr) bool {
@@ -641,14 +648,20 @@ func (p *SandboxPass) ipfilterFor(have []IPSet, nodeAddr string) (want []string,
 		}
 		return in(p.nodes) && !in(p.lbs)
 	}
-	var hosts []string
+	// Pinned means the set holds exactly one worker-range entry and it is a host. The unpinned set can end in a host
+	// too (a range .10-.20 is .10/31 .12/30 .16/30 .20), so a lone host among other range entries is not a pin.
+	var held []netip.Prefix
 	for _, e := range have {
-		if a, err := netip.ParseAddr(strings.TrimSuffix(e.CIDR, "/32")); err == nil && inRange(a) {
-			hosts = append(hosts, a.String())
+		raw := e.CIDR
+		if !strings.Contains(raw, "/") {
+			raw += "/32"
+		}
+		if pf, err := netip.ParsePrefix(raw); err == nil && inRange(pf.Addr()) {
+			held = append(held, pf)
 		}
 	}
-	if len(hosts) == 1 {
-		pinned = hosts[0]
+	if len(held) == 1 && held[0].Bits() == 32 {
+		pinned = held[0].Addr().String()
 	} else if a, err := netip.ParseAddr(nodeAddr); err == nil && a.Is4() && inRange(a) {
 		pinned = a.String()
 	}

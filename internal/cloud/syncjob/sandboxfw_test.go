@@ -1,6 +1,7 @@
 package syncjob
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -67,5 +68,41 @@ func TestAPIEndpoint(t *testing.T) {
 	}
 	if _, _, err := apiEndpoint("https://cp.example.org:6443"); err == nil {
 		t.Fatal("a name cannot go in a firewall rule")
+	}
+}
+
+// The Node's address is trusted only while the worker has its unsecured taint; a cleared worker that is no longer
+// fenced as it was gets the taint back.
+func TestTrustAndLostFence(t *testing.T) {
+	now := time.Now()
+	tainted, cleared := sandboxNode("10.110.0.11", now, pve.SandboxUnsecuredTaint), sandboxNode("10.110.0.11", now)
+	if trustedAddr(tainted) != "10.110.0.11" || trustedAddr(cleared) != "" || trustedAddr(nil) != "" {
+		t.Fatal("the Node's address is trusted before tenant pods only")
+	}
+	fenced := pve.SandboxWorkerState{Pinned: "10.110.0.11", Secured: true}
+	cases := []struct {
+		name string
+		n    map[string]any
+		st   pve.SandboxWorkerState
+		err  error
+		lost bool
+	}{
+		{"cleared, fenced", cleared, fenced, nil, false},
+		{"cleared, pass failed on it", cleared, pve.SandboxWorkerState{}, errors.New("boom"), true},
+		{"cleared, datacenter firewall off", cleared, fenced, pve.ErrSandboxUnenforced, true},
+		{"cleared, not read back", cleared, pve.SandboxWorkerState{Pinned: "10.110.0.11"}, nil, true},
+		{"cleared, pin lost", cleared, pve.SandboxWorkerState{Secured: true}, nil, true},
+		{"cleared, Node names another address", sandboxNode("10.110.0.12", now), fenced, nil, true},
+		{"still tainted", tainted, pve.SandboxWorkerState{}, errors.New("boom"), false},
+		{"no Node", nil, pve.SandboxWorkerState{}, errors.New("boom"), false},
+	}
+	for _, c := range cases {
+		if got := lostFence(c.n, c.st, c.err); got != c.lost {
+			t.Errorf("%s: lost=%v", c.name, got)
+		}
+	}
+	got := withTaint(sandboxNode("x", now, "node.cilium.io/agent-not-ready"), pve.SandboxUnsecuredTaint)
+	if len(got) != 2 || got[1].(map[string]any)["key"] != pve.SandboxUnsecuredTaint || got[1].(map[string]any)["effect"] != "NoSchedule" {
+		t.Fatalf("withTaint: %v", got)
 	}
 }

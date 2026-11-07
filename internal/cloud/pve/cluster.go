@@ -151,6 +151,37 @@ func (c *Client) ManagementCIDRs(ctx context.Context) (cidrs []string, complete 
 	return cidrs, complete, nil
 }
 
+// NodeAddresses lists every IPv4 address the nodes hold, as /32: the /cluster/status address and the address of every
+// interface in /nodes/{node}/network (uplinks, bonds and VLANs too, not only bridges with a gateway). What a node
+// cannot answer for is left out and complete comes back false, as in ManagementCIDRs.
+func (c *Client) NodeAddresses(ctx context.Context) (addrs []string, complete bool, err error) {
+	nodeIP, err := c.clusterNodeIPs(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	complete = true
+	add := func(a string) {
+		if ip := net.ParseIP(a); ip != nil && ip.To4() != nil && !slices.Contains(addrs, ip.String()+"/32") {
+			addrs = append(addrs, ip.String()+"/32")
+		}
+	}
+	for node, ip := range nodeIP {
+		add(ip)
+		var ifaces []struct {
+			Address string `json:"address"`
+		}
+		if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", nil, &ifaces); err != nil {
+			complete = false
+			continue
+		}
+		for _, i := range ifaces {
+			add(i.Address)
+		}
+	}
+	slices.Sort(addrs)
+	return addrs, complete, nil
+}
+
 type mgmtIface struct{ iface, node, cidr string }
 
 func (c *Client) managementIfaces(ctx context.Context, nodes ...string) ([]mgmtIface, error) {

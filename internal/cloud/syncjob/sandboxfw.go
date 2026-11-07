@@ -23,7 +23,8 @@ type SandboxNodes interface {
 
 // reconcileSandboxWorkers is layer 1 of the sandbox network (docs/managed-sandbox.md §2): the VM firewall of every
 // worker in the provider's sandbox pool, then the unsecured taint off each worker that is fenced, pinned to its own
-// address and older than the join token on its disk. A worker that fails any step keeps its taint.
+// address and older than the join token on its disk. A worker that fails any step keeps its taint, and one already
+// cleared that fails a later pass gets it back.
 func (j *Job) reconcileSandboxWorkers(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error {
 	cfg, ok := es.PVESandboxConfig()
 	if !ok {
@@ -48,11 +49,10 @@ func (j *Job) fenceSandbox(ctx context.Context, ps *pve.Service, es *externalser
 	if err != nil {
 		return err
 	}
-	mgmt, _, err := ps.C.ManagementCIDRs(ctx)
+	deny, err := sandboxDeny(ctx, ps, netCfg, cfg)
 	if err != nil {
 		return err
 	}
-	deny := append(append(mgmt, netCfg.BlockedCIDRs...), netCfg.CIDRPool)
 	pass, err := ps.StartSandboxPass(ctx, pve.SandboxFirewall{
 		Pool: cfg.Pool, Subnet: netCfg.SandboxCIDRs[0], Nodes: cfg.Nodes, LoadBalancers: cfg.LoadBalancers,
 		ControlPlane: host, APIPort: port, DNS: cfg.DNS, KubeletFrom: cfg.KubeletSources, Deny: deny,
@@ -71,7 +71,15 @@ func (j *Job) fenceSandbox(ctx context.Context, ps *pve.Service, es *externalser
 	for _, w := range pass.Workers {
 		n := byName[w.Name]
 		addr := internalIP(n)
-		st, err := pass.Secure(ctx, w, addr)
+		st, err := pass.Secure(ctx, w, trustedAddr(n))
+		if lostFence(n, st, err) {
+			j.log.Error("syncjob: sandbox worker no longer fenced, tainting it again", "serviceId", es.ID, "vmid", w.VMID,
+				"node", w.Name, "address", addr, "pinned", st.Pinned, "secured", st.Secured, "err", err)
+			if err := kc.SetNodeTaints(ctx, w.Name, strAt(n, "metadata", "resourceVersion"), withTaint(n, pve.SandboxUnsecuredTaint)); err != nil {
+				j.log.Error("syncjob: sandbox worker taint", "serviceId", es.ID, "node", w.Name, "err", err)
+			}
+			continue
+		}
 		if err != nil {
 			j.log.Error("syncjob: sandbox worker firewall", "serviceId", es.ID, "vmid", w.VMID, "err", err)
 			continue
@@ -89,6 +97,48 @@ func (j *Job) fenceSandbox(ctx context.Context, ps *pve.Service, es *externalser
 		j.log.Info("syncjob: sandbox worker fenced, open to tenant pods", "serviceId", es.ID, "node", w.Name, "address", addr, "group", pass.Group())
 	}
 	return pass.Sweep(ctx)
+}
+
+// sandboxDeny is what a worker's internet set leaves out on top of the private ranges: the nodes' management
+// networks and every address a node holds (its PVE API and ssh, on whatever interface), the sandbox's own SNAT address
+// (on the exit node, often public, and not on an interface PVE lists), the blocked networks and the tenant pool. A node
+// that does not answer stops the pass: a new generation must never deny less than the one the workers hold.
+func sandboxDeny(ctx context.Context, ps *pve.Service, netCfg externalservice.PVENetwork, cfg externalservice.PVESandbox) ([]string, error) {
+	mgmt, complete, err := ps.C.ManagementCIDRs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	hosts, hostsComplete, err := ps.C.NodeAddresses(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !complete || !hostsComplete {
+		// ponytail: a down node pauses the whole pass (new workers stay tainted); keep the last complete list if that hurts.
+		return nil, errors.New("sandbox: a PVE node did not report its networks; the workers keep their current firewall this pass")
+	}
+	deny := append(append(append(mgmt, hosts...), netCfg.BlockedCIDRs...), netCfg.CIDRPool)
+	if ip := net.ParseIP(cfg.SNAT); ip != nil {
+		deny = append(deny, cfg.SNAT)
+	}
+	return deny, nil
+}
+
+// trustedAddr is the Node's address while it still has the unsecured taint, "" after: the kubelet writes its Node, and
+// once tenant pods run there it may name another worker's address.
+func trustedAddr(n map[string]any) string {
+	if hasTaint(n, pve.SandboxUnsecuredTaint) {
+		return internalIP(n)
+	}
+	return ""
+}
+
+// lostFence says a worker already cleared for tenants is not fenced as it was: the pass failed on it, its firewall
+// did not read back in place, or its filter no longer admits exactly its Node's address. It gets the taint back.
+func lostFence(n map[string]any, st pve.SandboxWorkerState, err error) bool {
+	if n == nil || hasTaint(n, pve.SandboxUnsecuredTaint) {
+		return false
+	}
+	return err != nil || !st.Secured || st.Pinned == "" || st.Pinned != internalIP(n)
 }
 
 // clearForTenants says whether a worker's unsecured taint may come off: its firewall read back in place, its filter
@@ -159,6 +209,11 @@ func hasTaint(n map[string]any, key string) bool {
 		}
 	}
 	return false
+}
+
+// withTaint is the Node's taints plus key as NoSchedule, the way the node group sets it at join.
+func withTaint(n map[string]any, key string) []any {
+	return append(append([]any{}, taints(n)...), map[string]any{"key": key, "value": "true", "effect": "NoSchedule"})
 }
 
 func withoutTaint(n map[string]any, key string) []any {

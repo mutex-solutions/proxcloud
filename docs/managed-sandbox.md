@@ -364,7 +364,7 @@ hash><content hash>`, which is the VM's only rule. Every rule in it ACCEPTs:
 | out | UDP and TCP 53 | `sandbox.dns` only |
 | out, in | UDP 8472 (Cilium VXLAN), TCP 4240 and ICMP (Cilium health), TCP and UDP 7946 (MetalLB), TCP 10250 | the other sandbox workers (IP set `<group>-n`) |
 | in | TCP 10250 | `sandbox.kubeletSources` (the services cluster's nodes) |
-| out | anything | IP set `<group>-o`: `0.0.0.0/1` and `128.0.0.0/1` minus the private, CGNAT, link-local, multicast and reserved ranges, the management networks, `blockedCidrs`, the tenant pool, the sandbox subnet itself (its gateway is a PVE node) and the control plane address |
+| out | anything | IP set `<group>-o`: `0.0.0.0/1` and `128.0.0.0/1` minus the private, CGNAT, link-local, multicast and reserved ranges, the management networks, every address a PVE node holds on any interface (uplinks, bonds and VLANs too), the sandbox's own SNAT address, `blockedCidrs`, the tenant pool, the sandbox subnet itself (its gateway is a PVE node) and the control plane address |
 
 Nothing else comes in: there is no rule for a tenant, for the services cluster beyond the kubelet, or for anyone on the
 internet. The sandbox entry (HAProxy appliance to `sandbox-proxy`) gets its rule with SB4.
@@ -377,21 +377,40 @@ internet. The sandbox entry (HAProxy appliance to `sandbox-proxy`) gets its rule
   worker then gets the new reference before the old one is removed (for that moment it allows the union of two
   complete sets), and the old generation is deleted once no worker holds it. A generation that a worker uses and that
   differs from what the portal would build is not rewritten in place: the pass fails with `ErrSandboxDrift` and clears
-  no worker for tenants.
+  no worker for tenants. A PVE node that does not report its networks also stops the pass, so a new generation never
+  denies less than the one the workers hold.
+- **Why node addresses and the SNAT address.** The management networks are the bridges with a gateway; a node's PVE
+  API and ssh also listen on its other addresses, and the SNAT address sits on a dummy interface PVE does not list. On
+  a site where those are public, the internet set would have let a worker reach them.
 - **Address pinning.** `ipfilter-net0` admits the worker's address and the MetalLB range (any worker may answer for a
   VIP). Before the worker's Node exists, the filter admits the whole worker range. The Node's `InternalIP` is the
-  kubelet's to write, so it is trusted once, before the worker takes tenant pods, and then pinned: an address the set
-  already holds is never replaced by a later claim. A NIC off the sandbox vnet gets an empty filter, which drops every
+  kubelet's to write, so it is trusted only while the worker still has its unsecured taint, and then pinned: an address
+  the set already holds is never replaced by a later claim, and once the taint is off the Node is not read for it at
+  all. The set counts as pinned only when it holds a single worker-range entry and that is a host: the range itself can
+  end in a host (`.10-.20` is `.10/31 .12/30 .16/30 .20`). A NIC off the sandbox vnet gets an empty filter, which drops every
   IPv4 frame it sends. `macfilter` keeps the NIC's own MAC.
 - **IPv6.** No IPv6 rule: the policies drop it.
+- **Spoofed ICMP errors are not dropped.** PVE's nftables bridge chain accepts ICMP and ICMPv6 error types
+  (destination unreachable, source quench, time exceeded) before the per-NIC checks, so `ipfilter` and the DROP policy
+  never see them (lab, PVE 9.2). A worker can send them with any source to the other workers and to PVE host input;
+  routed ones only survive when they match a tracked flow. Everything else with a forged source is dropped. A host
+  nftables rule on the sandbox bridge ahead of PVE's chain would close it; not built yet.
 
 ### 2.2 The unsecured taint
 
 The node group gives every worker `proxcloud.io/unsecured=true:NoSchedule` at join (`templates/sandbox-cluster.yml.j2`),
 and NodeRestriction keeps the kubelet from removing it. The pass removes it only when all of these hold: the firewall
 was read back in place in this pass, the filter is pinned to exactly the address the Node reports, and the Node is at
-least `unsecuredMinAgeMinutes` old (default 15, CABPK's bootstrap token TTL: by then the join token on the worker's own
-disk is dead, §0.6). A Node the pass cannot match to a VM of the pool keeps the taint. DaemonSets that tolerate every
+least `unsecuredMinAgeMinutes` old (default 20: CABPK's bootstrap token TTL is 15 minutes, and a token it refreshed
+just before the Node registered lives a little longer; by then the join token on the worker's own disk is dead, §0.6).
+A Node the pass cannot match to a VM of the pool keeps the taint. With the datacenter firewall off PVE enforces no VM
+rule at all, so the pass still writes every worker's firewall but reads none back as in place
+(`ErrSandboxUnenforced`).
+
+The taint also comes back. A worker already cleared that a later pass fails on, finds not in place (the datacenter
+firewall off included), or whose filter no longer admits exactly its Node's address (the pin lost, or the Node now
+naming another address) gets `proxcloud.io/unsecured:NoSchedule` again, and the next pass treats it as new. The effect
+is `NoSchedule`: pods already there keep running. DaemonSets that tolerate every
 taint (Cilium, `node-setup`) run before; CoreDNS, the agent-sandbox controller, konnectivity's agent and MetalLB's
 speaker schedule after, which is why stage 55 no longer waits for the controller.
 
@@ -400,7 +419,9 @@ speaker schedule after, which is why stage 55 no longer waits for the controller
 `sandbox.network.snat` is required with the sandbox on. Stage 55 puts it on the zone's exit node (one exit node, or
 `exitnodes-primary`; root ssh to it through the inventory group `pve`) as an ifupdown2 dummy interface in
 `/etc/network/interfaces.d/proxcloud-sandbox-snat`, whose `post-up` inserts `SNAT -s <subnet> -o <uplink>
---to-source <address>` above PVE's own rules. It then turns the subnet's PVE `snat` off and deletes the rules PVE left
+--to-source <address>` above PVE's own rules, and whose `pre-up` (so the address is never up without it) drops every
+new connection to the address in `INPUT`: otherwise the exit node's PVE API and ssh would answer on it, from the
+internet and from the sandbox. Replies to the SNAT are not new connections. It then turns the subnet's PVE `snat` off and deletes the rules PVE left
 behind. With the interface down the subnet's traffic leaves with its private source, which an uplink drops: it never
 falls back to the node's address. `snat: node` keeps PVE's SNAT to the exit node's own address, for a site with one
 public address that accepts sharing it with the nodes and the portal.
@@ -422,7 +443,7 @@ firewall objects, written with the `Sys.Modify` the token holds on `/`.
 The pass reads the sandbox cluster with the `proxcloud-system/proxcloud-firewall` service account
 (`deploy/sandbox-cluster/rbac.yaml`: nodes get, list, patch). Stage 55 turns its token into
 `generated/sandbox-firewall.kubeconfig`, and stage 60 stores it as the provider's `secret.sandboxKubeconfig`, next to
-`config.sandbox` (`pool`, `nodes`, `loadBalancers`, `dns`, `kubeletSources`, `unsecuredMinAgeMinutes`).
+`config.sandbox` (`pool`, `nodes`, `loadBalancers`, `dns`, `kubeletSources`, `snat`, `unsecuredMinAgeMinutes`).
 
 ### 2.5 Measured on the lab (2026-11-07)
 
@@ -473,6 +494,14 @@ its sets were deleted, and the cluster stayed Ready with exec working.
 
 Egress (D14), SYNs from the worker to 1.1.1.1:443 seen on the uplink: before, source = the exit node's address; after
 the interface file on the exit node and `snat` off on the subnet, source = the dedicated address, HTTPS 200.
+
+Review fixes, the same pass with the fixed build (2026-11-07, ~16:50 UTC): from the management host the SNAT address
+answered PVE API and ssh (open) before the `INPUT` guard and dropped both after, with the exit node's own address still
+open and the worker's HTTPS still 200; `ifreload -a` left one copy of the guard and of the SNAT rule. A pass with the
+cluster as it was changed nothing. Worker 2's pinned address deleted from its filter by hand: the next pass logged it
+no longer fenced, put the taint back and the worker range in the filter; the pass after pinned its own address again
+and took the taint off. Datacenter firewall turned off: one pass tainted both workers (`ErrSandboxUnenforced`); turned
+back on, the next pass cleared both, nodes Ready, HTTPS 200.
 
 Not run here: stages 55 and 60 (they would add an Application to the lab's shared services cluster). The exit node file
 and the subnet change were made by hand with the content stage 55 writes, and the provider config came from a file.

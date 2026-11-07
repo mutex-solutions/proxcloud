@@ -169,7 +169,7 @@ pc_defaults:
       # exit node's own address instead (PVE's SNAT), for a site with one public address that accepts the risk.
       snat: ""
     nodes: {count: 2, cores: 4, memory: 8192, disk: 40}
-    unsecured_min_age_minutes: 15  # a new worker takes tenant pods no earlier: CABPK's bootstrap token TTL
+    unsecured_min_age_minutes: 20  # a new worker takes tenant pods no earlier: CABPK's bootstrap token TTL (15) + margin
 
   nas:
     host: ""                     # TrueNAS address; empty = no NAS stage

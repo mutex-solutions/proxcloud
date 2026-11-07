@@ -171,7 +171,7 @@ until a later phase.
    also gives the portal token the `ProxCloudSandboxGuard` role on the sandbox pool and checks it. Stage 60 writes the
    subnet to the Proxmox provider's `network.sandboxCidrs` and the workers to `config.sandbox` with that kubeconfig;
    the next sync adds the isolation drops and the workers' VM firewall, and takes the `proxcloud.io/unsecured` taint
-   off each worker once it is fenced and 15 minutes old (`sandbox.unsecured_min_age_minutes`).
+   off each worker once it is fenced and 20 minutes old (`sandbox.unsecured_min_age_minutes`).
 3. The portal creates the default EVPN zone with the first tenant network. On a first install stage 55 therefore says
    SKIPPED; create a network, then run stage 55 again (and stage 60 if the provider was registered before
    `sandbox.enabled`). Until stage 60 and one sync have run, the workers have no isolation drops and no VM firewall,

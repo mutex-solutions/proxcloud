@@ -171,6 +171,9 @@
       vars:
         dev: "{{ pc_uplink.stdout | regex_search('dev (\\S+)', '\\1') | first }}"
         rule: "POSTROUTING -s {{ net.subnet }} -o {{ dev }} -j SNAT --to-source {{ net.snat }}"
+        # Nothing may open a connection to the address: it would put this node's PVE API and ssh on a new (often
+        # public) address, reachable from the internet and from the sandbox. Replies to the SNAT are not NEW.
+        guard: "INPUT -d {{ net.snat }}/32 -m conntrack --ctstate NEW -j DROP"
       ansible.builtin.copy:
         dest: /etc/network/interfaces.d/proxcloud-sandbox-snat
         mode: "0644"
@@ -180,9 +183,11 @@
           iface pcsbxsnat inet static
               address {{ net.snat }}/32
               link-type dummy
+              pre-up iptables -C {{ guard }} 2>/dev/null || iptables -I {{ guard }}
               post-up iptables -t nat -C {{ rule }} 2>/dev/null || iptables -t nat -I {{ rule }}
-              post-down iptables -t nat -D {{ rule }}
-      # -C first: every SDN apply runs ifreload, which runs post-up again without post-down (lab, PVE 9.2).
+              post-down iptables -t nat -D {{ rule }}; iptables -D {{ guard }}
+      # -C first: every SDN apply runs ifreload, which runs post-up again without post-down (lab, PVE 9.2). The guard
+      # goes in pre-up, so the address is never up without it.
       register: pc_snat_file
     - name: Bring it up
       when: pc_snat_file is changed
@@ -190,6 +195,9 @@
       changed_when: true
     - name: Check the rule is in
       ansible.builtin.shell: iptables -t nat -S POSTROUTING | grep -F -- '--to-source {{ net.snat }}' | grep -F -- '-s {{ net.subnet }}'
+      changed_when: false
+    - name: Check nothing can connect to the address
+      ansible.builtin.shell: iptables -S INPUT | grep -F -- '-d {{ net.snat }}/32' | grep -F -- '--ctstate NEW -j DROP'
       changed_when: false
 
 - name: Turn PVE's own SNAT off for the sandbox subnet

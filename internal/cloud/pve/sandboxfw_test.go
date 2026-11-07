@@ -151,6 +151,7 @@ type sandboxFake struct {
 	groups  map[string][]FirewallRule
 	grpNote map[string]string
 	writes  []string
+	dcOff   bool // the datacenter firewall's master switch is off
 }
 
 type fakeVM struct {
@@ -210,6 +211,17 @@ func (f *sandboxFake) serve(w http.ResponseWriter, r *http.Request) {
 		return IPSet{CIDR: strings.TrimSuffix(r.Form.Get("cidr"), "/32"), NoMatch: nm}
 	}
 	switch {
+	case p == "/cluster/firewall/options":
+		reply(w, map[string]any{"enable": map[bool]int{false: 1, true: 0}[f.dcOff]})
+	case p == "/cluster/status":
+		reply(w, []map[string]any{{"type": "cluster", "name": "lab"}, {"type": "node", "name": "pve1", "ip": "192.0.2.11"}})
+	case p == "/nodes/pve1/network":
+		reply(w, []map[string]any{
+			{"iface": "vmbr0", "address": "192.0.2.11", "cidr": "192.0.2.11/24", "gateway": "192.0.2.1"},
+			{"iface": "bond0.40", "address": "198.51.100.11", "cidr": "198.51.100.11/24"},
+			{"iface": "eno2", "address": "203.0.113.7", "cidr": "203.0.113.7/28"},
+			{"iface": "vmbr1"},
+		})
 	case p == "/cluster/sdn/vnets":
 		reply(w, []map[string]any{{"vnet": "vtenant", "zone": "overlay"}, {"vnet": "pcsbx", "zone": "overlay"}})
 	case strings.HasPrefix(p, "/cluster/sdn/vnets/") && seg[len(seg)-1] == "subnets":
@@ -461,5 +473,85 @@ func TestSandboxGenerationDrift(t *testing.T) {
 	f2.groups[g.Group], f2.grpNote[g.Group] = g.Rules[:3], sandboxComment
 	if _, err := s2.StartSandboxPass(ctx, testSandbox()); err != nil || len(f2.groups[g.Group]) != len(g.Rules) {
 		t.Fatalf("rebuild: %v, %d rules", err, len(f2.groups[g.Group]))
+	}
+}
+
+// A worker range whose cover ends in a single host (.10-.20 is .10/31 .12/30 .16/30 .20) is not a pin to that host:
+// the worker would lose its own address and never join.
+func TestSandboxRangeEndingInAHostIsNotAPin(t *testing.T) {
+	ctx := context.Background()
+	f, s := newSandboxFake(t)
+	vm := f.addVM(121, "w1", "proxcloud-sandbox", "virtio=BC:24:11:00:00:01,bridge=pcsbx")
+	fw := testSandbox()
+	fw.Nodes = []string{"10.110.0.10-10.110.0.20"}
+	p, err := s.StartSandboxPass(ctx, fw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 { // two passes before the Node joins
+		if st, err := p.Secure(ctx, p.Workers[0], ""); err != nil || st.Pinned != "" {
+			t.Fatalf("pass %d: pinned %q before any Node (%v); filter %v", i, st.Pinned, err, cidrsOf(vm.sets["ipfilter-net0"]))
+		}
+	}
+	if st, _ := p.Secure(ctx, p.Workers[0], "10.110.0.11"); st.Pinned != "10.110.0.11" || !st.Secured {
+		t.Fatalf("the worker's own address was never pinned: %+v, filter %v", st, cidrsOf(vm.sets["ipfilter-net0"]))
+	}
+	if got := cidrsOf(vm.sets["ipfilter-net0"]); !slices.Equal(got, []string{"10.110.0.11", "10.110.0.200/29", "10.110.0.208/31"}) {
+		t.Fatalf("pinned filter %v", got)
+	}
+}
+
+// A pinned worker whose set is lost (a pass failing inside SetIPFilter between its delete and its adds, a hand edit)
+// does not hand the pin to whatever the Node says next: the caller passes no address once tenant pods may run there,
+// so the filter goes back to the worker range and the worker reads back unpinned (the sync taints it again).
+func TestSandboxLostPinIsNotRetakenFromAnUntrustedNode(t *testing.T) {
+	ctx := context.Background()
+	f, s := newSandboxFake(t)
+	vm := f.addVM(121, "w1", "proxcloud-sandbox", "virtio=BC:24:11:00:00:01,bridge=pcsbx")
+	p, err := s.StartSandboxPass(ctx, testSandbox())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := p.Secure(ctx, p.Workers[0], "10.110.0.11"); st.Pinned != "10.110.0.11" {
+		t.Fatalf("pin: %+v", st)
+	}
+	vm.sets["ipfilter-net0"] = nil
+	st, err := p.Secure(ctx, p.Workers[0], "")
+	if err != nil || st.Pinned != "" {
+		t.Fatalf("pinned %q with no trusted address: %v", st.Pinned, err)
+	}
+	if got := cidrsOf(vm.sets["ipfilter-net0"]); slices.Contains(got, "10.110.0.12") || slices.Contains(got, "10.110.0.11") {
+		t.Fatalf("a host was pinned without a trusted Node address: %v", got)
+	}
+}
+
+// With the datacenter firewall off PVE enforces no VM rule at all: the pass writes the firewall but no worker reads
+// back Secured.
+func TestSandboxDatacenterFirewallOff(t *testing.T) {
+	ctx := context.Background()
+	f, s := newSandboxFake(t)
+	f.dcOff = true
+	vm := f.addVM(121, "w1", "proxcloud-sandbox", "virtio=BC:24:11:00:00:01,bridge=pcsbx")
+	p, err := s.StartSandboxPass(ctx, testSandbox())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if st, err := p.Secure(ctx, p.Workers[0], "10.110.0.11"); !errors.Is(err, ErrSandboxUnenforced) || st.Secured {
+			t.Fatalf("datacenter firewall off: %+v %v", st, err)
+		}
+	}
+	if vm.opts["policy_in"] != "DROP" || !strings.Contains(vm.cfg.Str("net0"), "firewall=1") {
+		t.Fatalf("the worker's own firewall still goes on: %v %s", vm.opts, vm.cfg.Str("net0"))
+	}
+}
+
+// Every address a node holds, on any interface, so a worker's internet set can leave out the PVE API and ssh on an
+// uplink that is not the bridge with the gateway.
+func TestNodeAddresses(t *testing.T) {
+	_, s := newSandboxFake(t)
+	got, complete, err := s.C.NodeAddresses(context.Background())
+	if err != nil || !complete || !slices.Equal(got, []string{"192.0.2.11/32", "198.51.100.11/32", "203.0.113.7/32"}) {
+		t.Fatalf("got %v %v %v", got, complete, err)
 	}
 }

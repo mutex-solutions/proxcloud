@@ -61,11 +61,13 @@ NIC, VM options `policy_in`/`policy_out` `DROP` with `ipfilter` and `macfilter`,
 cluster security group `sbx<pool hash><content hash>` whose rules all ACCEPT: its control plane's API and konnectivity
 ports, DNS to the configured resolvers, VXLAN, Cilium health, MetalLB memberlist and the kubelet between workers (IP set
 `<group>-n`), the kubelet from `kubeletSources`, and the internet (IP set `<group>-o`: everything minus the private
-ranges, the management networks, `blockedCidrs`, `cidrPool`, the sandbox subnet and the control plane). With every
+ranges, the management networks, every node address, the sandbox's SNAT address, `blockedCidrs`, `cidrPool`, the
+sandbox subnet and the control plane). With every
 rule an ACCEPT under DROP policies, no order or partial write opens anything; a changed set is a new generation that
 workers move to before the old one is deleted. `ipfilter-net0` is the worker range until its Node joins, then pinned
-to the Node's address once (never followed after) plus the MetalLB range. The sync job applies it every cycle and only
-then takes the `proxcloud.io/unsecured` taint off a worker at least 15 minutes old. Details:
+to the Node's address once (read only while the worker is tainted, never followed after) plus the MetalLB range. The
+sync job applies it every cycle and only then takes the `proxcloud.io/unsecured` taint off a worker at least 20 minutes
+old; a cleared worker found unfenced (the datacenter firewall off included) gets the taint back. Details:
 [managed-sandbox.md §2](../../managed-sandbox.md#2-layer-1-the-vm-firewall-on-the-workers-sb2b).
 
 **Who owns the DROPs.** A cluster normally has one portal, which owns its DROPs outright: a
