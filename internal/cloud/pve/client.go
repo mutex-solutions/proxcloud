@@ -384,6 +384,16 @@ func (c *Client) deleteTask(ctx context.Context, path string, form url.Values) (
 	return upid, nil
 }
 
+// Raw performs one call and returns the "data" field as PVE sent it (nil for a null answer). The CSI gateway
+// forwards the answers of the calls it allows with it.
+func (c *Client) Raw(ctx context.Context, method, path string, form url.Values) (json.RawMessage, error) {
+	var out json.RawMessage
+	if err := c.do(ctx, method, path, form, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Version probes connectivity + auth. GET /version.
 func (c *Client) Version(ctx context.Context) (map[string]any, error) {
 	var v map[string]any

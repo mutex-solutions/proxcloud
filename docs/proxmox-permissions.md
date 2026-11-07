@@ -6,7 +6,7 @@ ProxCloud needs no `root@pam` access on the cluster. The [installer](install.md)
 |---|---|---|
 | `ProxCloudPlatform` | `proxcloud@pve!platform` | the portal API (the token configured on the Proxmox provider) |
 | `ProxCloudCAPI` | `capmox@pve!capi` | Cluster API provider for Proxmox (CAPMOX), services cluster |
-| `ProxCloudCSI` | `csi@pve!csi` | `proxmox-csi-plugin` in the services cluster |
+| `ProxCloudCSI` | `csi@pve!csi`, `csi@pve!gateway` | `proxmox-csi-plugin` in the services cluster; the CSI gateway of the portal API (split mode) |
 | `ProxCloudImages` | `images@pve!packer` | the image pipeline ([images/README.md](../images/README.md)) |
 
 Every token is created with **privilege separation** (`--privsep 1`). A privilege-separated token's rights are the **intersection** of the user's ACLs and the token's ACLs, so each ACL below is granted to both the user and the token.
@@ -86,6 +86,7 @@ Each tenant cluster runs under tokens the portal mints at create and revokes aft
 | Token | Grants | Reaches |
 |---|---|---|
 | `capmox@pve!<clusterId>` | `ProxCloudCAPI` on the project pool, the boot store, the vnet, `/sdn/zones/localnetwork` and `/nodes`; `PVETemplateUser` on `pc-templates`; `PVEDatastoreAdmin` on the ISO store | CAPMOX on the services cluster |
+| `csi@pve!gateway` | `ProxCloudCSI` on `/pool` and `/storage` (propagate), one token for every cluster. Created by the installer, not minted | the portal API only (the CSI gateway, below) |
 | `csi@pve!<clusterId>` | `ProxCloudCSI` on the project pool and the stores of the cluster's StorageClasses. Minted only with the provider's `csiSharedStores`: **`Datastore.Allocate` on a store opens every disk on it, of any project** ([managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox)) | the tenant cluster, where a cluster-admin can read it |
 
 `/sdn/zones/localnetwork` is there because PVE checks a clone against the NICs of the template, which sit on a node bridge (`Permission check failed (/sdn/zones/localnetwork/vmbr0, SDN.Use)`). The token also has it for every other node bridge, so it stays on the management side. It needs no `/`: go-proxmox's `GET /cluster/status` answers 403 and is ignored.
@@ -110,14 +111,43 @@ PVE stops honouring a deleted token's ACL entries at once, but leaves them in `u
 
 ## ProxCloudCSI
 
-These are the privileges from the `proxmox-csi-plugin` install guide. That guide grants them on `/`; here they are scoped to the services cluster.
+These are the privileges from the `proxmox-csi-plugin` install guide. That guide grants them on `/`; here they are scoped.
 
 Privileges: `VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit`
 
-| Path | Role | Propagate |
-|---|---|---|
-| `/pool/proxcloud-system` | `ProxCloudCSI` | 1 |
-| `/storage/<csi storage>` | `ProxCloudCSI` | 0 |
+| Token | Path | Role | Propagate | Note |
+|---|---|---|---|---|
+| `csi@pve!csi` | `/pool/proxcloud-system` | `ProxCloudCSI` | 1 | the services cluster's own disks; `make install` (split) grants `/pool` instead |
+| `csi@pve!csi` | `/storage/<csi storage>` | `ProxCloudCSI` | 0 | `make install` (split) grants `/storage`, propagate 1 |
+| `csi@pve!gateway` | `/pool` | `ProxCloudCSI` | 1 | the workers of every tenant cluster sit in project pools under it |
+| `csi@pve!gateway` | `/storage` | `ProxCloudCSI` | 1 | the stores of the clusters' StorageClasses are chosen after stage 10 |
+
+The user `csi@pve` holds the same role on `/pool` and `/storage`, since a privilege-separated token gets the intersection.
+
+### The CSI gateway token
+
+`csi@pve!gateway` is the only PVE credential tenant block volumes use (`internal/cloud/csigw`). Tenant clusters' proxmox-csi
+controllers present a per-cluster credential to the gateway, never a PVE token, and the gateway sends on only the calls
+it allows. Its rights are broad on purpose: `Datastore.Allocate` on a store reaches every disk there, and the gateway's
+registry, not PVE, decides which disk and which VM a cluster may touch. Keep the token on the portal API alone.
+
+The gateway does not read pools with this token. `ProxCloudCSI` has no `Pool.Audit`, and without it `/cluster/resources`
+leaves out a VM's `pool` field (seen on PVE 9.2), so the gateway reads which VMs are a cluster's workers with the
+portal's own token, which also never sees `proxcloud-system`.
+
+The installer (split mode) creates the token in stage 10 and writes it to the compute provider in stage 60
+(`config.csiGatewayTokenId`, `secret.csiGatewaySecret`). By hand:
+
+```sh
+pveum user token add csi@pve gateway --privsep 1
+pveum acl modify /pool    --tokens 'csi@pve!gateway' --roles ProxCloudCSI --propagate 1
+pveum acl modify /storage --tokens 'csi@pve!gateway' --roles ProxCloudCSI --propagate 1
+pveum user token permissions csi@pve gateway --path /pool/<a project pool>
+pveum user token permissions csi@pve gateway --path /storage/<a store>
+```
+
+Neither path holds another ACL for this token, so nothing is shadowed. The user's own `/pool` and `/storage` grants must
+stay: removing them leaves the token with nothing.
 
 ## ProxCloudImages
 
@@ -186,6 +216,10 @@ grant /storage/<iso-storage>   PVEDatastoreAdmin 0 capmox@pve capi
 # CSI
 grant /pool/proxcloud-system  ProxCloudCSI 1 csi@pve csi
 grant /storage/<csi-storage>  ProxCloudCSI 0 csi@pve csi
+# CSI gateway (managed Kubernetes block volumes)
+pveum user token add csi@pve gateway --privsep 1
+grant /pool                   ProxCloudCSI 1 csi@pve gateway
+grant /storage                ProxCloudCSI 1 csi@pve gateway
 
 # images
 grant /pool/pc-templates        ProxCloudImages 1 images@pve packer

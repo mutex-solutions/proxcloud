@@ -20,7 +20,7 @@ flowchart TB
     gw["Gateway / Ingress<br/>HTTPRoute or Ingress per host"]:::impl
     webc["web/client SPA<br/>React, nginx"]:::impl
     weba["web/admin SPA<br/>React, nginx"]:::impl
-    api["proxcloud-api (Go)<br/>:8080 /api/v1, /admin-api/v1, /mcp, SSE<br/>:8081 health, job triggers, callbacks"]:::impl
+    api["proxcloud-api (Go)<br/>:8080 /api/v1, /admin-api/v1, /mcp, SSE<br/>:8081 health, job triggers, callbacks<br/>CSI gateway listener (off by default)"]:::impl
     sched["Scheduler and jobs<br/>in the API process, PostgreSQL lock"]:::impl
     pg["PostgreSQL<br/>pgdoc JSONB document store"]:::impl
     mq["RabbitMQ<br/>charge fan-out"]:::impl
@@ -44,6 +44,7 @@ flowchart TB
   api -->|"JWKS"| kc
   api -->|"Applications"| argo
   api -->|"API token"| pve
+  api -->|"CSI gateway token csi@pve!gateway"| pve
   capi -.->|"services cluster VMs"| pve
   pg -.->|"WAL archive"| s3off
 ```
@@ -69,6 +70,7 @@ router in `internal/server/server.go`).
 | `/actuator/health*`, `/__build` | 8081 | none; not routed by the chart's gateway or ingress | Liveness, readiness, build info | Implemented |
 | `POST /debug/<job>` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (when the scheduler is enabled) | Implemented |
 | Billing service callbacks | 8081 | shared token | Suspend/resume and mail callbacks from an external billing service | Implemented |
+| CSI gateway `/api2/json/**` | `PROXCLOUD_CSI_GATEWAY_ADDR` (TLS only; off when empty) | per-cluster credential `csi@proxcloud!<clusterId>`, only its SHA-256 stored | The PVE calls a tenant cluster's proxmox-csi controller may make, each checked for ownership, sent on with one gateway token. Nothing calls it until the controller moves to the services cluster | Implemented (not wired) |
 | SSO discovery and per-org SSO routes (`/api/v1/auth/sso/discover`, `/api/v1/organizations/{id}/sso`, `/api/v1/admin/sso`) | 8080 | public / OIDC | Email-first login, SSO self-service, operator stop | Implemented |
 
 ## C2b. Proxmox cluster and storage tiers
