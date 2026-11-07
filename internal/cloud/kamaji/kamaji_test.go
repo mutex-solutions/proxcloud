@@ -94,6 +94,12 @@ func TestSpecValidate(t *testing.T) {
 	if err := testSpec().Validate(noDisk); err == nil {
 		t.Error("no root volume size anywhere: want error")
 	}
+	// A negative size would cancel another group's in the disk quota check.
+	bad = testSpec()
+	bad.NodeGroups[0].RootVolumeGiB = -100000
+	if err := bad.Validate(d); err == nil || !strings.Contains(err.Error(), "negative") {
+		t.Errorf("negative root volume: want error, got %v", err)
+	}
 }
 
 func TestNames(t *testing.T) {

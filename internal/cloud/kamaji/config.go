@@ -328,6 +328,9 @@ func (s ClusterSpec) Validate(d ClusterDefaults) error {
 		}
 		// Every node gets an explicitly sized root disk (the images are bigger than most
 		// flavors' disk), so a size has to come from somewhere.
+		if ng.RootVolumeGiB < 0 {
+			return fmt.Errorf("cluster: node group %q: rootVolumeGiB must not be negative", ng.Name)
+		}
 		if ng.RootVolumeGiB == 0 && d.RootVolumeGiB == 0 {
 			return fmt.Errorf("cluster: node group %q: rootVolumeGiB is required (no provider default configured)", ng.Name)
 		}
