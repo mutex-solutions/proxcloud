@@ -62,8 +62,12 @@ type Project struct {
 	// ProxCloud cloud gate, never pushed to the provider). Shape: {"gpu": {"<model>": n, "*": n}}.
 	Quota                  map[string]any `json:"quota,omitempty"`
 	ScheduledForDeletionAt *time.Time     `json:"scheduledForDeletionAt,omitempty"`
-	CreatedAt              *time.Time     `json:"createdAt,omitempty"`
-	UpdatedAt              *time.Time     `json:"updatedAt,omitempty"`
+	// StatusBeforeDeletion is the status a cancelled deletion restores. DisabledByOperator marks a DISABLED an operator set,
+	// which a billing resume must not lift. Both stay on the stored doc; MarshalJSON leaves them out of API answers.
+	StatusBeforeDeletion string     `json:"statusBeforeDeletion,omitempty"`
+	DisabledByOperator   bool       `json:"disabledByOperator,omitempty"`
+	CreatedAt            *time.Time `json:"createdAt,omitempty"`
+	UpdatedAt            *time.Time `json:"updatedAt,omitempty"`
 }
 
 // MarshalJSON serializes Project with NULL fields OMITTED (data, billingProfileId,

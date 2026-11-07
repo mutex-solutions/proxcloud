@@ -602,7 +602,7 @@ export default function ProjectDetailPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={!project}
+              disabled={!project || !["ENABLED", "DISABLED"].includes((project.status ?? "").toUpperCase())}
               onClick={() => setStatusConfirm(enabled ? "DISABLED" : "ENABLED")}
             >
               {enabled ? <Pause className="size-4" /> : <Play className="size-4" />}

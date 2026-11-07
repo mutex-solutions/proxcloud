@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-07: One table holds a project's status changes; a member cannot lift a suspension
+
+**What changed**
+
+- `internal/platform/project/status.go` holds every allowed status change. The client service, the client handler, the admin
+  routes and the billing suspender all ask it, and writes are conditional on the status they read. `DELETED` and
+  `DELETE_IN_PROGRESS` refuse every action.
+- Cancelling a deletion needs `SCHEDULED_FOR_DELETION` and restores the status kept on the doc in `statusBeforeDeletion`.
+- `POST /project/{id}/billing/{bp}` and `POST /project/{id}/init` no longer enable a project. A billing resume leaves a project
+  an operator disabled (`disabledByOperator`).
+
+**Why**
+
+- Enabling was reachable from each path on its own terms: a cancel with nothing scheduled, a profile change, opening a project
+  with no service yet. Each could lift a billing or operator suspension, and each could overwrite `DELETE_IN_PROGRESS`, which
+  drops the project out of the sweep mid-teardown. A rule per handler is what let them differ.
+- The write is conditional because the deletion sweep moves a project between a handler's read and its write.
+
+**Diagrams updated:** none.
 ## 2026-11-07: Provider actions are audited; a 502 hides its cause from tenants
 
 **What changed**

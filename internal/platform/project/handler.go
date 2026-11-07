@@ -350,6 +350,10 @@ func (h *Handler) changeBillingProfile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if err := CheckTransition(ActionChangeBilling, proj.Status); err != nil {
+		h.fail(w, err)
+		return
+	}
 	now := time.Now().UTC()
 	bal := billing.NewBalanceService(h.billing)
 	// Current profile = the project's own, else the owning org's (the raw-field read 404s/500s
@@ -409,15 +413,14 @@ func (h *Handler) changeBillingProfile(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	// syncProjectStatusByBillingProfile: NEW/SUSPENDED → DISABLED, ACTIVE → ENABLED.
-	switch target.Status {
-	case billing.StatusNew, billing.StatusSuspended:
+	// A profile that cannot pay disables the project. Nothing here enables one: this is a member's action, and a DISABLED
+	// project may be under suspension. An operator or the profile's activation lifts it.
+	expect := proj.Status
+	if target.Status == billing.StatusNew || target.Status == billing.StatusSuspended {
 		proj.Status = StatusDisabled
-	case billing.StatusActive:
-		proj.Status = StatusEnabled
 	}
 	proj.BillingProfileID = target.ID
-	if err := h.svc.Save(r.Context(), proj); err != nil {
+	if _, err := h.svc.SaveIfStatus(r.Context(), proj, expect); err != nil {
 		h.fail(w, err)
 		return
 	}

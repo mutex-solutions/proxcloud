@@ -537,7 +537,8 @@ func run() error {
 		}
 		for pi := range projects {
 			p := &projects[pi]
-			if p.IsEnabled() {
+			// Only a project waiting on billing: one an operator disabled stays so, and one on its way out must not come back.
+			if !p.IsDisabled() || p.DisabledByOperator {
 				continue
 			}
 			p.Memberships = memberships
@@ -1184,14 +1185,16 @@ func (s billingCloudSuspender) forEachProjectServer(ctx context.Context, bpID st
 	}
 	for pi := range projects {
 		p := &projects[pi]
+		// A resume can follow a member paying a bill: it leaves what an operator disabled alone.
+		if !pause && p.DisabledByOperator {
+			continue
+		}
 		s.pauseProjectServers(ctx, p, pause)
-		// suspend/resume: ENABLED → DISABLED on suspend, back on resume.
-		if pause && p.IsEnabled() {
-			p.Status = project.StatusDisabled
-			_ = s.projects.Save(ctx, p)
-		} else if !pause && p.IsDisabled() {
-			p.Status = project.StatusEnabled
-			_ = s.projects.Save(ctx, p)
+		expect := p.Status
+		if p.ApplyBillingSuspension(pause) {
+			if _, err := s.projects.SaveIfStatus(ctx, p, expect); err != nil {
+				s.log.Error("suspender: save project", "project", p.ID, "err", err)
+			}
 		}
 	}
 	return nil

@@ -25,6 +25,11 @@ func (h *Handler) enableAndBootstrap(ctx context.Context, p *Project) error {
 	if h.esSvc == nil {
 		return nil
 	}
+	if !p.IsEnabled() {
+		if err := CheckTransition(ActionEnable, p.Status); err != nil {
+			return err
+		}
+	}
 	// Already provisioned (the project carries its attached services) → this is a re-entry; the
 	// provider-side setup was done at first bootstrap. Skip ALL the live calls — they are idempotent
 	// setup, not per-entry work, and re-running them on every project-open is both wasteful and a

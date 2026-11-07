@@ -365,8 +365,12 @@ func (h *Handler) projectInit(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	// Entry into a project provisions it on its services (PVE pool, RGW user, …) + ENABLEs (the
-	// cloud-bootstrap slice of project bootstrap). Idempotent — safe on a bootstrapped project.
+	// Entry into an ENABLED project provisions it on its services (PVE pool, RGW user, …): idempotent. Any other status
+	// stays as it is: a member opening a project must not enable it, and activation provisions a DISABLED one.
+	if !p.IsEnabled() {
+		httpx.Empty(w)
+		return
+	}
 	if err := h.enableAndBootstrap(r.Context(), p); err != nil {
 		h.fail(w, err)
 		return

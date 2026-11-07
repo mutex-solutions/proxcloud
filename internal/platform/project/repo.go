@@ -39,9 +39,20 @@ func (r *Repo) Insert(ctx context.Context, p *Project) (*Project, error) {
 
 // Save persists the mutable project fields.
 func (r *Repo) Save(ctx context.Context, p *Project) error {
+	_, err := r.col.SetByID(ctx, p.ID, saveFields(p), nil)
+	return err
+}
+
+// SaveIfStatus is Save for a status change: it writes only while the stored status is still expect, so a change decided on a
+// read cannot undo one that won meanwhile, such as the deletion sweep moving the project on. False means it lost.
+func (r *Repo) SaveIfStatus(ctx context.Context, p *Project, expect string) (bool, error) {
+	return r.col.SetFieldsOne(ctx, pgdoc.M{"_id": p.ID, "status": expect}, saveFields(p), nil)
+}
+
+func saveFields(p *Project) pgdoc.M {
 	now := time.Now().UTC()
 	p.UpdatedAt = &now
-	_, err := r.col.SetByID(ctx, p.ID, pgdoc.M{
+	return pgdoc.M{
 		"name":                   p.Name,
 		"status":                 p.Status,
 		"data":                   p.Data,
@@ -52,9 +63,10 @@ func (r *Repo) Save(ctx context.Context, p *Project) error {
 		"customInfo":             p.CustomInfo,
 		"services":               p.Services,
 		"scheduledForDeletionAt": p.ScheduledForDeletionAt,
+		"statusBeforeDeletion":   p.StatusBeforeDeletion,
+		"disabledByOperator":     p.DisabledByOperator,
 		"updatedAt":              now,
-	}, nil)
-	return err
+	}
 }
 
 func (r *Repo) FindByID(ctx context.Context, id string) (*Project, error) {

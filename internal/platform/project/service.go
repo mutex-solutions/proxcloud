@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -246,14 +247,25 @@ func (s *Service) UpdateOrganization(ctx context.Context, sub, id, targetOrgID s
 // ScheduleDeletion marks the project for deferred deletion. The cloud-side
 // deletability check is deferred.
 func (s *Service) ScheduleDeletion(ctx context.Context, p *Project, _ bool) (*Project, error) {
-	if p.Status == StatusScheduledForDeletion || p.Status == StatusDeleteInProgress {
-		return nil, httpx.BadRequest("Project is already scheduled for deletion")
+	if err := CheckTransition(ActionSchedule, p.Status); err != nil {
+		return nil, err
 	}
 	now := time.Now().UTC()
+	held := p.Status
+	p.StatusBeforeDeletion = held
 	p.Status = StatusScheduledForDeletion
 	p.ScheduledForDeletionAt = &now
-	if err := s.repo.Save(ctx, p); err != nil {
+	return s.SaveIfStatus(ctx, p, held)
+}
+
+// SaveIfStatus writes a status change decided on a read of status expect; a change that won meanwhile is a 409.
+func (s *Service) SaveIfStatus(ctx context.Context, p *Project, expect string) (*Project, error) {
+	ok, err := s.repo.SaveIfStatus(ctx, p, expect)
+	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The project changed meanwhile. Try again")
 	}
 	return p, nil
 }
@@ -265,33 +277,29 @@ func (s *Service) DeleteNow(ctx context.Context, id string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := CheckTransition(ActionDeleteNow, p.Status); err != nil {
+		return nil, err
+	}
+	expect := p.Status
 	p.Status = StatusDeleteInProgress
 	past := time.Now().UTC().Add(-deletionGrace)
 	p.ScheduledForDeletionAt = &past
-	if err := s.repo.Save(ctx, p); err != nil {
-		return nil, err
-	}
-	return p, nil
+	return s.SaveIfStatus(ctx, p, expect)
 }
 
-// CancelDeletion re-enables a project scheduled for deletion.
+// CancelDeletion returns a project scheduled for deletion to the status it held before.
 func (s *Service) CancelDeletion(ctx context.Context, id string) (*Project, error) {
 	p, err := s.GetProjectByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if p.Status == StatusDeleteInProgress {
-		return nil, httpx.BadRequest("Project is deleting. Cannot cancel deletion")
-	}
-	if p.Status == StatusDeleted {
-		return nil, httpx.BadRequest("Project is deleted. Cannot cancel deletion")
-	}
-	p.Status = StatusEnabled
-	p.ScheduledForDeletionAt = nil
-	if err := s.repo.Save(ctx, p); err != nil {
+	if err := CheckTransition(ActionCancel, p.Status); err != nil {
 		return nil, err
 	}
-	return p, nil
+	p.Status = StatusAfterCancel(p.StatusBeforeDeletion)
+	p.StatusBeforeDeletion = ""
+	p.ScheduledForDeletionAt = nil
+	return s.SaveIfStatus(ctx, p, StatusScheduledForDeletion)
 }
 
 // AddMember adds a user to the project (with the org-membership and
