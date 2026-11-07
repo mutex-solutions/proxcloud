@@ -22,7 +22,7 @@
         problem: "{{ net | pc_sandbox_net_problem(pc.network.cidr_pool, avoid) }}"
       ansible.builtin.assert: {that: problem == '', fail_msg: "{{ problem }}", quiet: true}
     # Tenants reach the services network, so the PVE isolation rules leave it open to the workers too; only the
-    # guardrail keeps a sandbox pod off the control-plane APIs, the database load balancers and pve_proxy_ip.
+    # guardrail keeps a sandbox pod off the control-plane APIs and the database load balancers.
     - name: Check the guardrail covers the services network
       vars:
         problem: "{{ {'services.network': svc_net} | pc_sandbox_guardrail_problem }}"

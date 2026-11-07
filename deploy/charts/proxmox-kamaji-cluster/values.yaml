@@ -63,7 +63,7 @@ proxmox:
     # -- Secret with the manifest of the tenant-side proxmox-csi config (type addons.cluster.x-k8s.io/resource-set).
     configSecretName: example-csi-config
     # -- One tenant StorageClass per storage. The first is the default class. Empty = no proxmox-csi and no token in the
-    # tenant cluster, which is what the portal renders unless the provider sets csiSharedStores; see docs/managed-k8s.md.
+    # tenant cluster. The portal renders classes with the gateway below (or on sharedWorkers); see docs/managed-k8s.md.
     storageClasses:
       - {name: std, storage: local-zfs}
     # -- Set by the portal when the CSI gateway is on: the controller runs on this (services) cluster against the
