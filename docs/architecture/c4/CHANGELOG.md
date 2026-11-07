@@ -21,6 +21,32 @@ and rules: [README.md](README.md#maintenance-rule).
   with no service yet. Each could lift a billing or operator suspension, and each could overwrite `DELETE_IN_PROGRESS`, which
   drops the project out of the sweep mid-teardown. A rule per handler is what let them differ.
 - The write is conditional because the deletion sweep moves a project between a handler's read and its write.
+
+**Then, on the same PR, what a recheck found**
+
+- `Repo.Save` no longer writes `status`, `scheduledForDeletionAt`, `statusBeforeDeletion` or `disabledByOperator`. Only the
+  conditional writes do: `SaveIfStatus`, `EnableIfDisabled` and `ApplyBillingSuspension`. Admin project update and quota write
+  their own fields, where they replaced the whole doc.
+- `pgdoc.SetFieldsOne` and `DeleteOne` lock the row they select. Without it a write queued behind another rechecked only the id,
+  so two conditional writes could both win. The test that races a suspension against a member's schedule found this.
+- A `DISABLED` project refuses what adds usage (`errProjectDisabled`, 409): every create, an upload, new or rotated S3 keys, and
+  every action outside `allowedWhileDisabled`. Reads, stop and delete stay open.
+- Moving a project to a `NEW` profile, by profile or by organization, is refused while something would keep running.
+- A billing profile's suspend, resume and activation apply only to the projects it pays for (`AllByBillingProfile`, `PaidBy`).
+- Opening a project lifts a `DISABLED` that nothing holds any more: not an operator's, and billing allows it. Activation lifts a
+  provisioned project as well.
+
+**Why**
+
+- `Save` ran from a read that could be minutes old: a bootstrap waiting on a provider put back the status from before a member's
+  delete-now, and the project dropped out of the sweep. Conditional writes on the few status paths do not help while a generic
+  write can overwrite them, so the generic write must not hold the field at all.
+- Metering, the sync and rating cover only `ENABLED` projects, so anything created or started in a `DISABLED` one ran free.
+- Refusing the profile move, rather than pausing through the suspender, because the move is the tenant's own action and
+  activation has no leg that resumes VMs. A refusal has no partial failure and tells them what to do.
+
+**Diagrams updated:** none; no container or relationship changed.
+
 ## 2026-11-07: A server's name is checked against PVE's rule
 
 **What changed**

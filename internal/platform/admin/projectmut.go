@@ -441,27 +441,26 @@ func (h *Handler) projectUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(existing)
-	// Overwrite name / billingProfileId / organizationId — drop old values first so an
-	// omitted (null) field is cleared. A blank value persists as cleared (omitted on read).
-	for _, k := range []string{"name", "billingProfileId", "organizationId"} {
-		delete(existing, k)
+	// Only these three fields: a replace of the whole doc from this read would put back a status changed since. An omitted
+	// (null) or blank field is cleared.
+	set, unset := pgdoc.M{}, pgdoc.M{}
+	for k, v := range map[string]string{"name": req.Name, "billingProfileId": req.BillingProfileId, "organizationId": req.OrganizationId} {
+		if v != "" {
+			set[k] = v
+		} else {
+			unset[k] = nil
+		}
 	}
-	if req.Name != "" {
-		existing["name"] = req.Name
-	}
-	if req.BillingProfileId != "" {
-		existing["billingProfileId"] = req.BillingProfileId
-	}
-	if req.OrganizationId != "" {
-		existing["organizationId"] = req.OrganizationId
-	}
-	if err := h.repo.ReplaceDoc(r.Context(), projectCollection, id, existing); httpx.WriteError(w, err) {
+	if _, err := h.repo.SetAndUnsetFields(r.Context(), projectCollection, id, set, unset); httpx.WriteError(w, err) {
 		return
 	}
 	// UPDATE PROJECT: field-level diff (the middleware diffs before vs after).
-	after, _ := h.repo.FindDoc(r.Context(), projectCollection, id)
+	after, err := h.repo.FindDoc(r.Context(), projectCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
 	audit.RecordSnapshots(r.Context(), before, after)
-	httpx.OK(w, shapeDoc(existing))
+	httpx.OK(w, shapeDoc(after))
 }
 
 // projectUpdateReq is the project-update request body. `data` + `customInfo` are accepted on the
@@ -552,7 +551,9 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current, _ := existing["status"].(string)
-	if current == status {
+	pinned, _ := existing["disabledByOperator"].(bool)
+	// A DISABLED only billing holds can still be pinned, so a resume leaves it.
+	if current == status && (status != "DISABLED" || pinned) {
 		// "Project is already in desired status " (trailing space).
 		httpx.WriteError(w, httpx.BadRequest("Project is already in desired status "))
 		return

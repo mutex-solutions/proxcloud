@@ -336,11 +336,9 @@ func (h *Handler) billingSummary(w http.ResponseWriter, r *http.Request) {
 // must be valid for changing (negative balance or SUSPENDED → 400). The current profile is the
 // project's own billingProfileId by-id 404 (no org fallback); the target resolves through the
 // getBillingProfile(sub,id) read gate (bp 404 → org 404 → BILLING_PROFILE_READ 403). Then the
-// project status is synced (NEW/SUSPENDED → DISABLED, ACTIVE → ENABLED) + the billingProfileId swap.
-// A live PVE suspend/resume would follow when the status actually flips; the flip persists DB-only
-// here.
-// ponytail: live per-project suspend on flip not driven — extract billingCloudSuspender's
-// per-project leg (cmd/api) if this path ever needs it.
+// project status is synced (NEW → DISABLED) + the billingProfileId swap.
+// A move to a profile that cannot pay disables the project, and is refused while something runs (holdForProfile), so there is
+// nothing to suspend here.
 func (h *Handler) changeBillingProfile(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
@@ -413,11 +411,12 @@ func (h *Handler) changeBillingProfile(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	// A profile that cannot pay disables the project. Nothing here enables one: this is a member's action, and a DISABLED
-	// project may be under suspension. An operator or the profile's activation lifts it.
+	// Nothing here enables a project: this is a member's action. A DISABLED one comes up when its profile activates, or on the
+	// next open once it is on a profile that pays.
 	expect := proj.Status
-	if target.Status == billing.StatusNew || target.Status == billing.StatusSuspended {
-		proj.Status = StatusDisabled
+	if err := h.holdForProfile(r.Context(), proj, target); err != nil {
+		h.fail(w, err)
+		return
 	}
 	proj.BillingProfileID = target.ID
 	if _, err := h.svc.SaveIfStatus(r.Context(), proj, expect); err != nil {
@@ -427,10 +426,88 @@ func (h *Handler) changeBillingProfile(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, *proj)
 }
 
+// holdForProfile disables the project when the profile it is moving to cannot pay. Metering and rating cover only ENABLED
+// projects, so what runs under such a profile would run free. Pausing it from here would be a tenant's own billing change
+// freezing its workloads, and activation has no leg to resume them, so the move is refused until they are stopped.
+func (h *Handler) holdForProfile(ctx context.Context, proj *Project, target *billing.BillingProfile) error {
+	if target.Status != billing.StatusNew && target.Status != billing.StatusSuspended {
+		return nil
+	}
+	if proj.IsEnabled() {
+		what, err := h.runningResource(ctx, proj)
+		if err != nil {
+			return err
+		}
+		if what != "" {
+			return httpx.NewError(http.StatusConflict, http.StatusConflict,
+				"This billing profile is not active yet, and "+what+" would run unbilled on it. Stop or delete it first, or activate the profile")
+		}
+	}
+	proj.Status = StatusDisabled
+	return nil
+}
+
+// runningResource names one thing in the project that would keep running if it were disabled, "" when there is none. Live for
+// VMs: a row can lag a start, and not knowing refuses the change.
+func (h *Handler) runningResource(ctx context.Context, proj *Project) (string, error) {
+	for t, what := range map[string]string{cloud.TypeKubernetesCluster: "a Kubernetes cluster", cloud.TypeDatabaseCluster: "a managed database"} {
+		rows, err := h.cloud.FindByProjectAndType(ctx, proj.ID, t)
+		if err != nil {
+			return "", err
+		}
+		if len(rows) > 0 {
+			return what, nil
+		}
+	}
+	if h.pveFor == nil {
+		return "", nil
+	}
+	for _, id := range proj.ServiceIDs() {
+		if proj.ServiceProvider(id) != "proxmox" {
+			continue
+		}
+		es, err := h.esSvc.Get(ctx, id)
+		if err != nil || es == nil {
+			return "", fmt.Errorf("provider %s of the project: %w", id, err)
+		}
+		ps, err := h.pveFor(es)
+		if err != nil {
+			return "", err
+		}
+		rows, err := ps.C.ClusterResources(ctx, "vm")
+		if err != nil {
+			return "", err
+		}
+		pool := ps.PoolFor(proj.ID)
+		for _, r := range rows {
+			if r.Pool == pool && r.Status != "stopped" && r.Template != 1 {
+				return "VM " + r.Name, nil
+			}
+		}
+	}
+	return "", nil
+}
+
 // sameOrgBillingProfile reports whether a target billing profile belongs to the project's own
 // organization — the cross-org attach guard for changeBillingProfile.
 func sameOrgBillingProfile(target *billing.BillingProfile, proj *Project) bool {
 	return target != nil && proj != nil && target.OrganizationID == proj.OrganizationID
+}
+
+// paidByProfile is the profile that pays for the project: its own, else the organization's. Nil when it has none.
+func (h *Handler) paidByProfile(ctx context.Context, proj *Project) (*billing.BillingProfile, error) {
+	id := proj.BillingProfileID
+	if id == "" {
+		o, err := h.orgSvc.FindOrganization(ctx, proj.OrganizationID)
+		if err != nil || o == nil {
+			return nil, err
+		}
+		id = o.BillingProfileID
+	}
+	if id == "" {
+		return nil, nil
+	}
+	return h.billing.FindByID(ctx, id)
 }
 
 // profileValidForChanging: current balance < 0 or a SUSPENDED profile blocks the change with the
@@ -630,12 +707,51 @@ func (h *Handler) updateOrganization(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	p, err := h.svc.UpdateOrganization(r.Context(), u.Sub, proj.ID, target.ID)
+	if err := CheckTransition(ActionChangeBilling, proj.Status); err != nil {
+		h.fail(w, err)
+		return
+	}
+	// A move changes who pays, so it passes the checks of changeBillingProfile: a project cannot leave a suspended or
+	// indebted profile this way. It then pays through the target organization, as a profile of another organization may not
+	// stay attached.
+	now := time.Now().UTC()
+	bal := billing.NewBalanceService(h.billing)
+	cur, err := h.paidByProfile(r.Context(), proj)
 	if err != nil {
 		h.fail(w, err)
 		return
 	}
-	httpx.OK(w, *p)
+	if cur != nil {
+		if err := profileValidForChanging(r.Context(), bal, cur, now); err != nil {
+			h.fail(w, err)
+			return
+		}
+	}
+	expect := proj.Status
+	if target.BillingProfileID != "" {
+		next, err := h.billing.FindByID(r.Context(), target.BillingProfileID)
+		if err != nil {
+			h.fail(w, err)
+			return
+		}
+		if next != nil {
+			if err := profileValidForChanging(r.Context(), bal, next, now); err != nil {
+				h.fail(w, err)
+				return
+			}
+			if err := h.holdForProfile(r.Context(), proj, next); err != nil {
+				h.fail(w, err)
+				return
+			}
+		}
+	}
+	proj.OrganizationID = target.ID
+	proj.BillingProfileID = ""
+	if _, err := h.svc.SaveIfStatus(r.Context(), proj, expect); err != nil {
+		h.fail(w, err)
+		return
+	}
+	httpx.OK(w, *proj)
 }
 
 func (h *Handler) getMembers(w http.ResponseWriter, r *http.Request) {

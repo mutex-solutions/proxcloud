@@ -195,7 +195,7 @@ erDiagram
         string name
         string status "ENABLED|DISABLED|SCHEDULED_FOR_DELETION|DELETE_IN_PROGRESS|DELETED"
         string statusBeforeDeletion "what a cancelled deletion restores"
-        bool disabledByOperator "a billing resume leaves it DISABLED"
+        bool disabledByOperator "a billing resume, activation and opening leave it DISABLED"
         string organizationId FK
         string billingProfileId FK
         array memberships "embedded {sub, role}"

@@ -2,6 +2,7 @@ package project
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -37,35 +38,85 @@ func (r *Repo) Insert(ctx context.Context, p *Project) (*Project, error) {
 	return p, nil
 }
 
-// Save persists the mutable project fields.
+// Save persists the project's fields other than its status. Callers hold a read that may be minutes old (bootstrap waits on
+// providers), so it must not be able to put a status back: status, its deletion fields and disabledByOperator change only
+// through the conditional writes below.
 func (r *Repo) Save(ctx context.Context, p *Project) error {
 	_, err := r.col.SetByID(ctx, p.ID, saveFields(p), nil)
 	return err
 }
 
-// SaveIfStatus is Save for a status change: it writes only while the stored status is still expect, so a change decided on a
-// read cannot undo one that won meanwhile, such as the deletion sweep moving the project on. False means it lost.
+// SaveIfStatus writes a status change, with the rest of the project: it writes only while the stored status is still expect,
+// so a change decided on a read cannot undo one that won meanwhile, such as the deletion sweep moving the project on. False
+// means it lost.
 func (r *Repo) SaveIfStatus(ctx context.Context, p *Project, expect string) (bool, error) {
-	return r.col.SetFieldsOne(ctx, pgdoc.M{"_id": p.ID, "status": expect}, saveFields(p), nil)
+	set := saveFields(p)
+	set["status"] = p.Status
+	set["scheduledForDeletionAt"] = p.ScheduledForDeletionAt
+	set["statusBeforeDeletion"] = p.StatusBeforeDeletion
+	set["disabledByOperator"] = p.DisabledByOperator
+	return r.col.SetFieldsOne(ctx, pgdoc.M{"_id": p.ID, "status": expect}, set, nil)
+}
+
+// EnableIfDisabled is the enable of a project waiting on billing or on its provisioning: it writes only the status, and only
+// from DISABLED. An operator's disable stays, unless the operator is the one asking. False means it lost.
+func (r *Repo) EnableIfDisabled(ctx context.Context, p *Project, byOperator bool) (bool, error) {
+	filter := pgdoc.M{"_id": p.ID, "status": StatusDisabled}
+	if !byOperator {
+		filter["disabledByOperator"] = pgdoc.M{"$ne": true}
+	}
+	now := time.Now().UTC()
+	ok, err := r.col.SetFieldsOne(ctx, filter, pgdoc.M{"status": StatusEnabled, "disabledByOperator": false, "updatedAt": now}, nil)
+	if err == nil && ok {
+		p.Status, p.DisabledByOperator, p.UpdatedAt = StatusEnabled, false, &now
+	}
+	return ok, err
+}
+
+// statusWriteTries bounds ApplyBillingSuspension against writers that keep winning. Each loss is a change that went through,
+// so running out takes a project changing status several times within a few milliseconds.
+const statusWriteTries = 5
+
+// ErrStatusWriteLost means a billing suspend or resume kept losing to other status changes and was not applied.
+var ErrStatusWriteLost = errors.New("project status kept changing, the billing suspension was not applied")
+
+// ApplyBillingSuspension moves the project with its billing profile on a fresh read, retrying when another status change wins
+// meanwhile: losing to a member scheduling a deletion must not lose the suspension. It answers the project as it now stands,
+// nil when it is gone.
+func (r *Repo) ApplyBillingSuspension(ctx context.Context, id, billingProfileID string, suspend bool) (*Project, error) {
+	for range statusWriteTries {
+		p, err := r.FindByID(ctx, id)
+		if err != nil || p == nil {
+			return nil, err
+		}
+		expect := p.Status
+		if !p.ApplyBillingSuspension(billingProfileID, suspend) {
+			return p, nil
+		}
+		ok, err := r.SaveIfStatus(ctx, p, expect)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return p, nil
+		}
+	}
+	return nil, ErrStatusWriteLost
 }
 
 func saveFields(p *Project) pgdoc.M {
 	now := time.Now().UTC()
 	p.UpdatedAt = &now
 	return pgdoc.M{
-		"name":                   p.Name,
-		"status":                 p.Status,
-		"data":                   p.Data,
-		"owner":                  p.Owner,
-		"memberships":            p.Memberships,
-		"organizationId":         p.OrganizationID,
-		"billingProfileId":       p.BillingProfileID,
-		"customInfo":             p.CustomInfo,
-		"services":               p.Services,
-		"scheduledForDeletionAt": p.ScheduledForDeletionAt,
-		"statusBeforeDeletion":   p.StatusBeforeDeletion,
-		"disabledByOperator":     p.DisabledByOperator,
-		"updatedAt":              now,
+		"name":             p.Name,
+		"data":             p.Data,
+		"owner":            p.Owner,
+		"memberships":      p.Memberships,
+		"organizationId":   p.OrganizationID,
+		"billingProfileId": p.BillingProfileID,
+		"customInfo":       p.CustomInfo,
+		"services":         p.Services,
+		"updatedAt":        now,
 	}
 }
 
@@ -148,14 +199,13 @@ func (r *Repo) ScheduledForDeletion(ctx context.Context, now time.Time) ([]Proje
 	return out, nil
 }
 
-// AllByBillingProfile returns projects attached to
-// the billing profile directly (billingProfileId == bpID) OR belonging to an org that
-// references it (organizationId ∈ orgIDs — the caller resolves those via
-// org.Repo.FindAllByBillingProfileID). Deduped by the $or.
+// AllByBillingProfile returns the projects the billing profile pays for: attached to it directly (billingProfileId == bpID), or
+// belonging to an org that references it (organizationId ∈ orgIDs — the caller resolves those via
+// org.Repo.FindAllByBillingProfileID) with no profile of their own. A project on its own profile is that profile's alone.
 func (r *Repo) AllByBillingProfile(ctx context.Context, bpID string, orgIDs []string) ([]Project, error) {
 	or := []pgdoc.M{{"billingProfileId": bpID}}
 	if len(orgIDs) > 0 {
-		or = append(or, pgdoc.M{"organizationId": pgdoc.M{"$in": orgIDs}})
+		or = append(or, pgdoc.M{"organizationId": pgdoc.M{"$in": orgIDs}, "$or": []pgdoc.M{{"billingProfileId": nil}, {"billingProfileId": ""}}})
 	}
 	out := []Project{}
 	if err := r.col.Find(ctx, pgdoc.M{"$or": or}, &out); err != nil {

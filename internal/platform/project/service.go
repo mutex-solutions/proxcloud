@@ -141,7 +141,7 @@ func (s *Service) HiddenServices(ctx context.Context) []string {
 	return cfg.HiddenServices
 }
 
-// Save persists a project (status/services updates from cloud bootstrap).
+// Save persists a project's fields other than its status (services from cloud bootstrap).
 func (s *Service) Save(ctx context.Context, p *Project) error { return s.repo.Save(ctx, p) }
 
 // GetProject loads a project the user can access: either an explicit member, or an
@@ -230,18 +230,22 @@ func (s *Service) Rename(ctx context.Context, sub, id, name string) (*Project, e
 	return p, nil
 }
 
-// UpdateOrganization moves the project to a different org. The handler validates
-// target-org membership first.
-func (s *Service) UpdateOrganization(ctx context.Context, sub, id, targetOrgID string) (*Project, error) {
-	p, err := s.GetProject(ctx, sub, id)
-	if err != nil {
-		return nil, err
+// BillingAllowsEnabled reports whether nothing on the billing side holds the project DISABLED: billing is not configured, or the
+// profile that pays for it (its own, else the organization's) is ACTIVE.
+func (s *Service) BillingAllowsEnabled(ctx context.Context, p *Project) (bool, error) {
+	_, _, configured, err := s.billing.Configuration(ctx)
+	if err != nil || !configured {
+		return !configured, err
 	}
-	p.OrganizationID = targetOrgID
-	if err := s.repo.Save(ctx, p); err != nil {
-		return nil, err
+	bpID := p.BillingProfileID
+	if bpID == "" {
+		o, err := s.orgRepo.FindByID(ctx, p.OrganizationID)
+		if err != nil || o == nil {
+			return false, err
+		}
+		bpID = o.BillingProfileID
 	}
-	return p, nil
+	return s.billing.IsActive(ctx, bpID)
 }
 
 // ScheduleDeletion marks the project for deferred deletion. The cloud-side
@@ -265,9 +269,24 @@ func (s *Service) SaveIfStatus(ctx context.Context, p *Project, expect string) (
 		return nil, err
 	}
 	if !ok {
-		return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "The project changed meanwhile. Try again")
+		return nil, errProjectChanged
 	}
 	return p, nil
+}
+
+var errProjectChanged = httpx.NewError(http.StatusConflict, http.StatusConflict, "The project changed meanwhile. Try again")
+
+// EnableIfDisabled enables a DISABLED project; a change that won meanwhile, or an operator's disable when the operator is not
+// the one asking, is a 409.
+func (s *Service) EnableIfDisabled(ctx context.Context, p *Project, byOperator bool) error {
+	ok, err := s.repo.EnableIfDisabled(ctx, p, byOperator)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errProjectChanged
+	}
+	return nil
 }
 
 // DeleteNow flags the project for immediate deletion: the deletion job's next sweep (every

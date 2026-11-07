@@ -8,7 +8,7 @@ Manage cloud projects. Base path: `/admin-api/v1/projects`.
 |---|---|---|
 | `id` | string | Project id. |
 | `name` | string | Display name. |
-| `status` | string | Project status. Newly created projects are `DISABLED`; provisioning sets `ENABLED`. |
+| `status` | string | Project status. Newly created projects are `DISABLED`; provisioning sets `ENABLED`, and so does a member opening one under an `ACTIVE` billing profile or with billing unconfigured. |
 | `organization_id` | string | Owning organization. |
 | `billing_profile_id` | string | The **effective** billing profile: the project's own, or the owning organization's when the project has none. |
 | `provisioned_services` | array | Always present. One entry per provider binding: `service_id`, `provider` (`PROXMOX`, `CEPH_S3`, `KAMAJI` or `DBAAS`), `region`, and `pool` (the project's PVE pool; Proxmox bindings only). Empty fields are omitted. |
@@ -89,7 +89,7 @@ Errors:
 
 ## POST /admin-api/v1/projects/{id}/provision
 
-Provisions an existing project onto the platform cloud. It bootstraps the project onto the Proxmox provider (project pool, default security group, default quota) and sets the project `ENABLED`. Returns the refreshed project, including its new `provisioned_services` entry.
+Provisions an existing project onto the platform cloud. It bootstraps the project onto the Proxmox provider (project pool, default security group, default quota) and sets the project `ENABLED`, ending an operator's disable. Returns the refreshed project, including its new `provisioned_services` entry. A `DISABLED` project that is already provisioned stays `DISABLED`: enable it from the console, which also resumes its VMs.
 
 No request body.
 

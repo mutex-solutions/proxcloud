@@ -47,6 +47,7 @@ type ProjectDoc = {
   id?: string
   name?: string
   status?: string
+  disabledByOperator?: boolean
   organizationId?: string
   billingProfileId?: string
   memberships?: Array<{ sub?: string; role?: string }>
@@ -608,6 +609,12 @@ export default function ProjectDetailPage() {
               {enabled ? <Pause className="size-4" /> : <Play className="size-4" />}
               {enabled ? "Disable" : "Enable"}
             </Button>
+            {/* Held only by billing: a resume would lift it, unless an operator pins it. */}
+            {(project?.status ?? "").toUpperCase() === "DISABLED" && !project?.disabledByOperator && (
+              <Button variant="outline" size="sm" onClick={() => setStatusConfirm("DISABLED")}>
+                <Pause className="size-4" /> Keep disabled
+              </Button>
+            )}
             <Button variant="destructive" size="sm" disabled={!project} onClick={() => setDeleteOpen(true)}>
               <Trash2 className="size-4" /> Delete project
             </Button>
@@ -1236,7 +1243,9 @@ export default function ProjectDetailPage() {
             <DialogTitle>{statusConfirm === "DISABLED" ? "Disable project" : "Enable project"}</DialogTitle>
             <DialogDescription>
               {statusConfirm === "DISABLED"
-                ? "Pauses every server in the project before disabling it."
+                ? enabled
+                  ? "Pauses every server in the project before disabling it."
+                  : "Keeps the project disabled when its billing profile resumes or activates. Only an operator can then enable it."
                 : "Unpauses the project's servers and re-enables it."}{" "}
               Project: <span className="font-medium">{project?.name}</span>
             </DialogDescription>

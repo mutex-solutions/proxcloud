@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
@@ -31,7 +32,7 @@ func TestMemberCannotLiftSuspension(t *testing.T) {
 	users := user.NewRepo(db)
 	svc := project.NewService(repo, orgRepo, billingRepo, users, nil)
 	orgSvc := org.NewService(orgRepo, billingRepo, nil)
-	h := project.NewHandler(svc, project.NewPolicy(org.NewPolicy(orgRepo)), orgSvc, users, audit.NewService(audit.NewRepo(db), slog.Default()), billingRepo, nil, nil, nil, nil, "")
+	h := project.NewHandler(svc, project.NewPolicy(org.NewPolicy(orgRepo)), orgSvc, users, audit.NewService(audit.NewRepo(db), slog.Default()), billingRepo, cloud.NewRepo(db), nil, nil, nil, "")
 	router := chi.NewRouter()
 	h.Routes(router)
 

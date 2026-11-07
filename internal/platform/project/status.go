@@ -22,7 +22,7 @@ const (
 
 var allowedFrom = map[StatusAction][]string{
 	ActionEnable:        {StatusDisabled},
-	ActionDisable:       {StatusEnabled},
+	ActionDisable:       {StatusEnabled, StatusDisabled}, // on DISABLED it pins a billing disable, which a resume then leaves
 	ActionSchedule:      {StatusEnabled, StatusDisabled},
 	ActionCancel:        {StatusScheduledForDeletion},
 	ActionDeleteNow:     {StatusEnabled, StatusDisabled, StatusScheduledForDeletion},
@@ -58,15 +58,22 @@ func StatusAfterCancel(held string) string {
 	return StatusDisabled
 }
 
-// ApplyBillingSuspension moves the project with its billing profile's suspend or resume, and reports a change. A project
-// scheduled for deletion keeps its status and the held one moves, so a cancel cannot bring back what billing took away.
-// What an operator disabled stays disabled: a resume can follow a member paying a bill.
-func (p *Project) ApplyBillingSuspension(suspend bool) bool {
+// PaidBy reports whether this billing profile is the one that applies to the project: its own, or with none of its own the
+// organization's, which the caller selected it through.
+func (p *Project) PaidBy(billingProfileID string) bool {
+	return p.BillingProfileID == "" || p.BillingProfileID == billingProfileID
+}
+
+// ApplyBillingSuspension moves the project with the suspend or resume of the billing profile that pays for it, and reports a
+// change. Another profile's says nothing about it. A project scheduled for deletion keeps its status and the held one moves,
+// so a cancel cannot bring back what billing took away. What an operator disabled stays disabled: a resume can follow a
+// member paying a bill.
+func (p *Project) ApplyBillingSuspension(billingProfileID string, suspend bool) bool {
 	from, to := StatusDisabled, StatusEnabled
 	if suspend {
 		from, to = StatusEnabled, StatusDisabled
 	}
-	if !suspend && p.DisabledByOperator {
+	if !p.PaidBy(billingProfileID) || (!suspend && p.DisabledByOperator) {
 		return false
 	}
 	switch {
