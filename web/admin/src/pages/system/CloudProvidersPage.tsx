@@ -251,7 +251,26 @@ function cephFormToBody(f: CephFormState, provider: "ceph-s3" | "rustfs" = "ceph
   }
 }
 
-function CephProviderForm({ form, setForm }: { form: CephFormState; setForm: (f: CephFormState) => void }) {
+function CephProviderForm({ form, setForm, canTest }: { form: CephFormState; setForm: (f: CephFormState) => void; canTest: boolean }) {
+  // The answer belongs to the values it tested, so it goes when they change.
+  const [tested, setTested] = useState<{ form: CephFormState; error?: string } | null>(null)
+  const [testing, setTesting] = useState(false)
+  const result = tested?.form === form ? tested : null
+  const test = async () => {
+    setTesting(true)
+    const { config, secret } = cephFormToBody(form)
+    try {
+      await apiFetch("/admin/service/object-store/test", {
+        method: "POST",
+        body: { s3Endpoint: config.s3Endpoint, adminApiUrl: config.adminApiUrl, region: config.region, ...secret },
+      })
+      setTested({ form })
+    } catch (e) {
+      setTested({ form, error: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setTesting(false)
+    }
+  }
   return (
     <div className="grid gap-4">
       <div className="grid gap-2">
@@ -303,6 +322,15 @@ function CephProviderForm({ form, setForm }: { form: CephFormState; setForm: (f:
       <p className="text-xs text-muted-foreground">
         The admin keys belong to an RGW admin user with caps <code>users=*;buckets=*;usage=*</code>.
       </p>
+      {canTest ? (
+        <div className="flex items-center gap-3">
+          <Button type="button" variant="outline" onClick={() => void test()} disabled={testing || !cephFormValid({ ...form, name: form.name || "-" })}>
+            {testing ? "Testing…" : "Test connection"}
+          </Button>
+          {result && !result.error ? <span className="text-xs text-emerald-600">Connection OK</span> : null}
+          {result?.error ? <span className="text-xs text-destructive">{result.error}</span> : null}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -501,7 +529,7 @@ export default function CloudProvidersPage() {
           ) : kind === "truenas" ? (
             <TrueNASProviderForm form={trueNASForm} setForm={setTrueNASForm} />
           ) : kind === "ceph-s3" || kind === "rustfs" ? (
-            <CephProviderForm form={cephForm} setForm={setCephForm} />
+            <CephProviderForm form={cephForm} setForm={setCephForm} canTest={kind === "ceph-s3"} />
           ) : kind === "kamaji" ? (
             <KamajiProviderForm form={kamajiForm} setForm={setKamajiForm} />
           ) : kind === "dbaas" ? (

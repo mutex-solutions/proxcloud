@@ -433,8 +433,8 @@ function ConnectionTab({ id, provider }: TabProps) {
       </div>
     )
   }
-  // ceph-s3: show the S3/Admin Ops config. There is no backend test endpoint for RGW (the
-  // connection is exercised by bootstrap/sync), so no Test button.
+  // ceph-s3: show the S3/Admin Ops config. The API proves a public row when it is stored or its
+  // connection changes, and the Add dialog has the Test button.
   if (provider.config?.provider === "ceph-s3" || provider.config?.provider === "rustfs") {
     const c = asObj(provider.config)
     return (
