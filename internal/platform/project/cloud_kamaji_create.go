@@ -205,7 +205,10 @@ func (h *Handler) kamajiProvisionCluster(ctx context.Context, proj *Project, ks 
 	if storage == "" {
 		return sec, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, "The Proxmox provider has no storage profile for boot disks")
 	}
-	gatewayCSI := h.kamajiGatewayCSI(d, compute)
+	gatewayCSI, err := h.kamajiGatewayCSI(ks.Config(), compute)
+	if err != nil {
+		return sec, err
+	}
 	if !gatewayCSI {
 		classes = kamajiTenantClasses(d, classes)
 	}
@@ -364,12 +367,20 @@ func kamajiRWXShare(clusterID string) string { return "k8s-" + clusterID }
 // counts as nothing to release on. csi, when set, goes first: it revokes the cluster's gateway credential and deletes the
 // disks of its volumes (csigw.Store.ReleaseCluster).
 func KamajiReleaseCluster(services serviceGetter, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, shared bool, csi func(ctx context.Context, clusterID string) error) func(ctx context.Context, computeID, projectID, clusterID string) error {
+	rest := kamajiReleaseInfra(services, shares, pveFor, ips, shared)
 	return func(ctx context.Context, computeID, projectID, clusterID string) error {
+		// A CSI step that fails (a disk in use, a provider that lost its gateway token) keeps the marker, but does not
+		// hold back the tokens, addresses and dataset: each part is safe to run again.
+		var csiErr error
 		if csi != nil {
-			if err := csi(ctx, clusterID); err != nil {
-				return err
-			}
+			csiErr = csi(ctx, clusterID)
 		}
+		return errors.Join(csiErr, rest(ctx, computeID, projectID, clusterID))
+	}
+}
+
+func kamajiReleaseInfra(services serviceGetter, shares shareRowFinder, pveFor func(*externalservice.ExternalService) (*pve.Service, error), ips *PublicIPRepo, shared bool) func(ctx context.Context, computeID, projectID, clusterID string) error {
+	return func(ctx context.Context, computeID, projectID, clusterID string) error {
 		es, err := services.Get(ctx, computeID)
 		if err != nil && !errors.Is(err, externalservice.ErrNotFound) {
 			return err
@@ -556,13 +567,20 @@ metadata:
 
 // kamajiGatewayCSI reports whether a new cluster's block volumes go through the CSI gateway: the portal serves one,
 // the workers sit in the project's pool (sharedWorkers keeps its operator-run token), and the compute provider holds
-// the gateway's PVE token. Every storage profile is then offered, csiSharedStores or not.
-func (h *Handler) kamajiGatewayCSI(d kamaji.ClusterDefaults, compute *externalservice.ExternalService) bool {
-	if h.csiGW == nil || h.csiGW.Endpoint.URL == "" || d.Shared != nil {
-		return false
+// the gateway's PVE token. Every storage profile is then offered, csiSharedStores or not. A pinned chart older than
+// kamaji.GatewayChartVersion is refused: it has no services-side controller, so the cluster's PVCs would never bind.
+func (h *Handler) kamajiGatewayCSI(cfg kamaji.Config, compute *externalservice.ExternalService) (bool, error) {
+	if h.csiGW == nil || h.csiGW.Endpoint.URL == "" || cfg.Defaults.Shared != nil {
+		return false, nil
 	}
-	_, ok := compute.PVECSIGatewayConfig()
-	return ok
+	if _, ok := compute.PVECSIGatewayConfig(); !ok {
+		return false, nil
+	}
+	if !kamaji.ChartHasGatewayCSI(cfg.ChartVersion) {
+		return false, httpx.NewError(http.StatusServiceUnavailable, http.StatusServiceUnavailable, fmt.Sprintf(
+			"The Kubernetes provider pins cluster chart %s; the CSI gateway needs %s or later", cfg.ChartVersion, kamaji.GatewayChartVersion))
+	}
+	return true, nil
 }
 
 // CSIGateway is what a cluster's block volumes need from the portal: the gateway's registry, and where the controllers

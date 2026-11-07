@@ -95,30 +95,44 @@ func (s *Store) ReleaseCluster(ctx context.Context, clusterID string, gw func(co
 }
 
 // deleteDisk removes v's disk when its store still lists it. Asking first keeps "already gone" from being read off an
-// error message.
+// error message. The disk is matched by name: a creating row on a file store holds "<s>:<name>" while PVE lists
+// "<s>:<vmid>/<name>", and the delete takes the listed one.
 func deleteDisk(ctx context.Context, cl *pve.Client, v *Volume) error {
-	sizes, err := diskSizes(ctx, cl, v.Node, v.Storage)
+	disks, err := listDisks(ctx, cl, v.Node, v.Storage)
 	if err != nil {
 		return err
 	}
-	if _, there := sizes[v.VolID]; !there {
+	d, there := disks[diskBase(v.VolID)]
+	if !there {
 		return nil
 	}
-	_, disk, _ := strings.Cut(v.VolID, ":")
-	return cl.DeleteStorageVolume(ctx, v.Node, v.Storage, disk)
+	_, name, _ := strings.Cut(d.VolID, ":")
+	return cl.DeleteStorageVolume(ctx, v.Node, v.Storage, name)
 }
 
-// diskSizes lists the disks store s holds on node, volid → bytes.
-func diskSizes(ctx context.Context, cl *pve.Client, node, s string) (map[string]int64, error) {
+// listedDisk is a disk as its store lists it.
+type listedDisk struct {
+	VolID string
+	Size  int64
+}
+
+// listDisks lists the disks store s holds on node by name (diskBase).
+func listDisks(ctx context.Context, cl *pve.Client, node, s string) (map[string]listedDisk, error) {
 	list, err := cl.StorageContents(ctx, node, s, "images", 0)
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]int64, len(list))
+	out := make(map[string]listedDisk, len(list))
 	for _, c := range list {
-		out[c.VolID] = c.Size
+		out[diskBase(c.VolID)] = listedDisk{VolID: c.VolID, Size: c.Size}
 	}
 	return out, nil
+}
+
+// diskBase is a volid's disk name without the store and a file store's "<vmid>/" directory: the name in a row's id.
+func diskBase(volid string) string {
+	_, disk, _ := strings.Cut(volid, ":")
+	return disk[strings.LastIndex(disk, "/")+1:]
 }
 
 func (s *Store) markDeleted(ctx context.Context, id string) error {

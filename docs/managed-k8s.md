@@ -247,7 +247,8 @@ one token, `csi@pve!gateway` ([proxmox-permissions.md](proxmox-permissions.md#th
 A **new** cluster takes this path when the portal has `PROXCLOUD_CSI_GATEWAY_URL` and its CA
 ([configuration.md](configuration.md)), the compute provider holds the gateway token (`config.csiGatewayTokenId`,
 `secret.csiGatewaySecret`) and the workers are the project's (not `sharedWorkers`). Every storage profile is then a
-StorageClass, `csiSharedStores` or not, and chart 0.1.6 or later is needed:
+StorageClass, `csiSharedStores` or not, and chart 0.1.7 or later is needed: with an older `chartVersion` on the
+Kubernetes provider the create answers 503.
 
 - The create mints the cluster's credential and writes `<id>-csi-gateway` (the controller's `config.yaml` and the
   gateway CA) next to the cloud secret on the services cluster. No CSI token is minted on PVE, and the resource set
@@ -259,16 +260,19 @@ StorageClass, `csiSharedStores` or not, and chart 0.1.6 or later is needed:
   upstream controller at 0 replicas and no config Secret. Snapshots are not offered.
 - The tenant's disks are VOLUME rows of the project (`data.volume.k8sCluster`), from the registry, at the size PVE
   reports, and bill like volumes from the disk's creation. The portal refuses to delete or change them itself (409):
-  the PersistentVolumeClaim owns them. The sync's reconcile drops a `creating` row older than 15 minutes with no disk,
-  closes a row whose disk is gone, and takes the size from PVE.
-- Deleting the cluster revokes the credential first, then, once its workers are gone, deletes every disk the registry
+  the PersistentVolumeClaim owns them. The sync's reconcile leaves a `creating` row alone for 15 minutes; after that it
+  makes the row `ready` if PVE has the disk (a create whose answer was lost) and drops it if not. It closes a row whose
+  disk is gone, and takes size and volid from PVE.
+- Once a deleted cluster's workers are gone, the release revokes the credential, then deletes every disk the registry
   still holds for it, `Retain` PersistentVolumes included: with the cluster gone nothing can mount them. A disk PVE
-  refuses to delete (still in use) keeps the cluster's marker, and the sweep tries again.
+  refuses to delete (still in use) keeps the cluster's marker, and the sweep tries again; the cluster's PVE tokens,
+  addresses and dataset are released in the meantime.
 
 Deployments: the chart's `api.csiGateway` (its own port, a Service with `externalTrafficPolicy: Local`, a certificate from
 a CA made with cert-manager, a NetworkPolicy that admits the port from `allowedCIDRs` only); `make install` in split mode
-turns it on with the services nodes (`services.network.nodes`) as the only sources. Existing clusters keep the tenant-side
-controller until their migration.
+turns it on with the services nodes (`services.network.nodes`) as the only sources, at the first mgmt node's address.
+A Local Service answers only on a node running an API pod, so with three mgmt nodes the installer pins the API to the
+first. Existing clusters keep the tenant-side controller until their migration.
 
 For a cluster without the gateway, a disk is named after its PV alone, so the portal cannot tell whose it is: a PVC still
 there when the cluster is deleted leaves its disk on the store, unbilled. Delete PVCs first. A cluster created with the setting off has no proxmox-csi, no CSI token and no

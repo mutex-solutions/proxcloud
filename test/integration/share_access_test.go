@@ -346,6 +346,26 @@ func TestClusterReleaseKeepsItsRecordUntilDone(t *testing.T) {
 	if err := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, false, nil)(ctx, "no-such-provider", f.projectID, "pc-c-a"); err != nil {
 		t.Fatal(err)
 	}
+
+	// A CSI step that fails keeps the marker (an error), and the addresses go all the same; it runs on every retry.
+	f.reserve(t, "vmbrx", "10.89.0.98", "pc-c-b")
+	calls := 0
+	csiFails := func(_ context.Context, id string) error {
+		calls++
+		if id != "pc-c-b" {
+			t.Errorf("csi release of %s", id)
+		}
+		return errors.New("disk in use")
+	}
+	release := project.KamajiReleaseCluster(es, cloudRepo, nil, f.ips, false, csiFails)
+	for i := 0; i < 2; i++ {
+		if err := release(ctx, "svc-pve", f.projectID, "pc-c-b"); err == nil || !strings.Contains(err.Error(), "disk in use") {
+			t.Fatalf("release with a failing CSI step: %v", err)
+		}
+	}
+	if n := f.clusterRows(t, "vmbrx"); n != 0 || calls != 2 {
+		t.Fatalf("%d address rows left, %d CSI calls", n, calls)
+	}
 }
 
 // The dataset goes from the NAS its share row names. A broken provider holding nothing of this cluster is not asked.

@@ -37,6 +37,11 @@ spec:
             enabled: true
             url: https://{{ pc_first_mgmt_ip }}:8443
             allowedCIDRs: {{ pc.services.network.nodes | pc_ip_cidrs | to_json }}
+{% if pc_gateway_node is defined %}
+          # The gateway Service answers only on a node with an API pod, and its URL names this one.
+          # ponytail: the API follows the first mgmt node; a mgmt VIP for the URL would let it move.
+          affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [{key: kubernetes.io/hostname, operator: In, values: [{{ pc_gateway_node | to_json }}]}]}]}}}
+{% endif %}
 {% endif %}
         ui:
           image: {repository: {{ pc_image_prefix }}-web, tag: {{ pc_image_tag | to_json }}}

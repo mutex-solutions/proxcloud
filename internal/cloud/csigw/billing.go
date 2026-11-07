@@ -69,41 +69,49 @@ func (p *VolumeRows) List(ctx context.Context) ([]cloud.CloudResource, error) {
 	return out, nil
 }
 
-// settle applies what PVE shows: a creating row past the grace with no disk goes, a live row whose disk is gone is
-// deleted, a ready row takes the disk's real size. It returns the rows as they are now.
+// settle applies what PVE shows. A creating row is left to its create or copy for the grace; past it, the row of a
+// disk PVE lists turns ready (a create whose answer and confirm were both lost: the name was unused, so the disk is
+// this row's), and the row of none goes. A live row whose disk is gone is deleted; a ready row takes the disk's real
+// size and volid. Disks match by name (diskBase), since a file store lists them under "<vmid>/". It returns the rows as
+// they are now.
 func (p *VolumeRows) settle(ctx context.Context, cl *pve.Client, rows []Volume) []Volume {
-	listed := map[string]map[string]int64{}
+	listed := map[string]map[string]listedDisk{}
 	now := p.now()
 	out := rows[:0]
 	for _, v := range rows {
 		key := v.Node + "/" + v.Storage
-		sizes, ok := listed[key]
+		disks, ok := listed[key]
 		if !ok {
 			var err error
-			if sizes, err = diskSizes(ctx, cl, v.Node, v.Storage); err != nil {
-				sizes = nil
+			if disks, err = listDisks(ctx, cl, v.Node, v.Storage); err != nil {
+				disks = nil
 			}
-			listed[key] = sizes
+			listed[key] = disks
 		}
-		if sizes == nil {
+		if disks == nil {
 			out = append(out, v)
 			continue
 		}
-		size, there := sizes[v.VolID]
+		d, there := disks[diskBase(v.VolID)]
+		old := v.State == StateCreating && v.CreatedAt != nil && now.Sub(*v.CreatedAt) > creatingGrace
 		switch {
+		case v.State == StateCreating && !old:
 		case v.State == StateCreating && !there:
-			if v.CreatedAt != nil && now.Sub(*v.CreatedAt) > creatingGrace {
-				if p.Reg.DeleteVolume(ctx, v.ID) == nil {
-					continue
-				}
+			if p.Reg.DeleteVolume(ctx, v.ID) == nil {
+				continue
 			}
-		case !there && v.State != StateCreating:
+		case !there:
 			if p.Reg.markDeleted(ctx, v.ID) == nil {
 				continue
 			}
-		case v.State == StateReady && size > 0 && size != v.SizeBytes:
-			if p.Reg.UpdateVolume(ctx, v.ID, pgdoc.M{"sizeBytes": size}) == nil {
-				v.SizeBytes = size
+		case v.State == StateCreating || v.State == StateReady:
+			w := v
+			w.State, w.VolID = StateReady, d.VolID
+			if d.Size > 0 {
+				w.SizeBytes = d.Size
+			}
+			if w != v && p.Reg.UpdateVolume(ctx, v.ID, pgdoc.M{"state": w.State, "volid": w.VolID, "sizeBytes": w.SizeBytes}) == nil {
+				v = w
 			}
 		}
 		out = append(out, v)

@@ -17,22 +17,31 @@ func TestKamajiGatewayCSI(t *testing.T) {
 		Secret: map[string]any{"csiGatewaySecret": "s"}}
 	noToken := &externalservice.ExternalService{Config: map[string]any{}}
 	on := &CSIGateway{Endpoint: csigw.Endpoint{URL: "https://gw:8443", CA: "CA"}}
+	cfg := func(version string, d kamaji.ClusterDefaults) kamaji.Config {
+		return kamaji.Config{ChartVersion: version, Defaults: d}
+	}
 	for name, tc := range map[string]struct {
 		gw      *CSIGateway
-		d       kamaji.ClusterDefaults
+		cfg     kamaji.Config
 		compute *externalservice.ExternalService
 		want    bool
+		refused bool
 	}{
-		"on":                {on, kamaji.ClusterDefaults{}, withToken, true},
-		"no gateway":        {nil, kamaji.ClusterDefaults{}, withToken, false},
-		"registry only":     {&CSIGateway{}, kamaji.ClusterDefaults{}, withToken, false},
-		"no token":          {on, kamaji.ClusterDefaults{}, noToken, false},
-		"shared workers":    {on, kamaji.ClusterDefaults{Shared: &kamaji.SharedWorkers{Pool: "p"}}, withToken, false},
-		"shared stores too": {on, kamaji.ClusterDefaults{CSISharedStores: true}, withToken, true},
+		"on":                {on, cfg("0.1.7", kamaji.ClusterDefaults{}), withToken, true, false},
+		"drill tag":         {on, cfg("0.1.7-csi.2", kamaji.ClusterDefaults{}), withToken, true, false},
+		"later chart":       {on, cfg("0.2.0", kamaji.ClusterDefaults{}), withToken, true, false},
+		"old chart":         {on, cfg("0.1.6", kamaji.ClusterDefaults{}), withToken, false, true},
+		"malformed pin":     {on, cfg("latest", kamaji.ClusterDefaults{}), withToken, false, true},
+		"no gateway":        {nil, cfg("0.1.5", kamaji.ClusterDefaults{}), withToken, false, false},
+		"registry only":     {&CSIGateway{}, cfg("0.1.5", kamaji.ClusterDefaults{}), withToken, false, false},
+		"no token":          {on, cfg("0.1.5", kamaji.ClusterDefaults{}), noToken, false, false},
+		"shared workers":    {on, cfg("0.1.5", kamaji.ClusterDefaults{Shared: &kamaji.SharedWorkers{Pool: "p"}}), withToken, false, false},
+		"shared stores too": {on, cfg("0.1.7", kamaji.ClusterDefaults{CSISharedStores: true}), withToken, true, false},
 	} {
 		h := &Handler{csiGW: tc.gw}
-		if got := h.kamajiGatewayCSI(tc.d, tc.compute); got != tc.want {
-			t.Errorf("%s: %v, want %v", name, got, tc.want)
+		got, err := h.kamajiGatewayCSI(tc.cfg, tc.compute)
+		if got != tc.want || (err != nil) != tc.refused {
+			t.Errorf("%s: %v %v, want %v (refused %v)", name, got, err, tc.want, tc.refused)
 		}
 	}
 }

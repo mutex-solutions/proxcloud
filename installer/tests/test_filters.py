@@ -99,4 +99,16 @@ assert h["Authorization"] != api.sigv4_headers("POST", "http://10.0.0.1:8080/api
 # The CSI gateway admits the services nodes: a range covers exactly its addresses, nothing next to it.
 assert f.ip_cidrs(["192.0.2.201-192.0.2.209"]) == ["192.0.2.201/32", "192.0.2.202/31", "192.0.2.204/30", "192.0.2.208/31"]
 assert f.ip_cidrs(["192.0.2.7", "198.51.100.0/28"]) == ["192.0.2.7/32", "198.51.100.0/28"]
+
+# The gateway's URL names the first mgmt node by address; the API is pinned to the node that has it.
+nodes = {"items": [
+    {"metadata": {"name": "m2"}, "status": {"addresses": [{"type": "InternalIP", "address": "192.0.2.11"}]}},
+    {"metadata": {"name": "m1"}, "status": {"addresses": [{"type": "InternalIP", "address": "192.0.2.10"}, {"type": "Hostname", "address": "m1"}]}},
+]}
+assert f.node_with_address(nodes, "192.0.2.10") == "m1"
+try:
+    f.node_with_address(nodes, "192.0.2.99")
+    raise AssertionError("an address no node has must fail")
+except ValueError:
+    pass
 print("ok")

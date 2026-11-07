@@ -99,6 +99,15 @@ def ip_cidrs(entries):
     return out
 
 
+def node_with_address(nodes, address):
+    """The name of the node in `kubectl get nodes -o json` that has address. None is an error: the gateway would
+    have no node to answer on."""
+    for n in nodes.get("items", []):
+        if any(a.get("address") == address for a in n.get("status", {}).get("addresses", [])):
+            return n["metadata"]["name"]
+    raise ValueError("no k3s node has address %s" % address)
+
+
 def pve_acl_missing(rows, wanted):
     """Which wanted ACL entries GET /access/acl does not hold yet. A wanted entry is {path, role,
     propagate, user, token}; both the user and its privsep token need it, unless one of them is empty."""
@@ -159,4 +168,5 @@ class FilterModule:
             "pc_iso_stores": iso_stores,
             "pc_visible_stores": visible_stores,
             "pc_ip_cidrs": ip_cidrs,
+            "pc_node_with_address": node_with_address,
         }

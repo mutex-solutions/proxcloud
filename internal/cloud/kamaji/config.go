@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
+	"strings"
 )
 
 // Namespace / naming derivations — the ONE place these are derived (ceph RGWUIDFor precedent).
@@ -31,6 +33,36 @@ func CSISecretName(clusterID string) string { return clusterID + "-csi-config" }
 // CSIGatewaySecretName is the Secret of the cluster's proxmox-csi controller on the services cluster: its config with
 // the cluster's gateway credential, and the CA of the gateway. Management side only, never in the resource set.
 func CSIGatewaySecretName(clusterID string) string { return clusterID + "-csi-gateway" }
+
+// GatewayChartVersion is the first cluster chart that renders the services-side proxmox-csi controller.
+const GatewayChartVersion = "0.1.7"
+
+// ChartHasGatewayCSI reports whether chart version v ("x.y.z", optionally "-pre"/"+build", which counts as x.y.z so a
+// drill can tag one) renders that controller. Anything else, a pinned 0.1.5 or a malformed pin, does not: a cluster on
+// it would get the tenant controller at 0 replicas and no controller here.
+func ChartHasGatewayCSI(v string) bool {
+	parse := func(s string) (out [3]int, ok bool) {
+		s = strings.TrimPrefix(s, "v")
+		if i := strings.IndexAny(s, "-+"); i >= 0 {
+			s = s[:i]
+		}
+		parts := strings.Split(s, ".")
+		if len(parts) != 3 {
+			return out, false
+		}
+		for i, p := range parts {
+			n, err := strconv.Atoi(p)
+			if err != nil || n < 0 {
+				return out, false
+			}
+			out[i] = n
+		}
+		return out, true
+	}
+	have, ok := parse(v)
+	want, _ := parse(GatewayChartVersion)
+	return ok && slices.Compare(have[:], want[:]) >= 0
+}
 
 // cloudSecretSuffix lets FinalizeOrphans map a secret name back to its cluster id.
 const cloudSecretSuffix = "-cloud-config"
