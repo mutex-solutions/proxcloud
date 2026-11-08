@@ -23,6 +23,14 @@ func TestRotationDefaultsOffAndExactScope(t *testing.T) {
 	}
 }
 func TestSandboxInstallerSafetyContracts(t *testing.T) {
+	stage, e := os.ReadFile("../../../installer/playbooks/55-sandbox-cluster.yml")
+	if e != nil {
+		t.Fatal(e)
+	}
+	text := string(stage)
+	if strings.Index(text, "kubectl apply -f node-setup.yaml") > strings.Index(text, "ready=$(kubectl get nodes") || strings.Contains(text, "- name: Wait for every worker to be Ready") {
+		t.Fatal("Ready wait precedes host CNI bootstrap")
+	}
 	for path, wants := range map[string][]string{
 		"../../../deploy/sandbox-cluster/node-setup.yaml":               {"hostNetwork: true", "sandbox-netguard -install", "serviceAccountName: sandbox-netguard"},
 		"../../../deploy/sandbox-cluster/telemetry.yaml":                {"resources: [nodes/stats]", "runAsUser: 65534", "/var/lib/kubelet/pki/kubelet.crt"},

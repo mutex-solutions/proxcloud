@@ -21,7 +21,8 @@ and rules: [README.md](README.md#maintenance-rule).
   labels and CAPI nodeRef UID, empty preflight, cordon/recheck, durable provider start fence and beta2 `rollout.after`.
   Creates, resumes, builds and snapshot assembly serialize with the fence; replacement must converge before reopening.
   No eviction, drain, force delete or automatic pause. Read-only admin plan and mgmt-only job triggers.
-- Installer upgrade now reapplies stage 55 cluster as well as fresh installs. Admin settings, client effective cap,
+- Installer upgrade now reapplies stage 55 cluster as well as fresh installs. The worker Ready wait follows
+  hostNetwork node-setup/CNI installation, preventing fresh-install deadlock when Cilium customConf disables its own chain writer. Admin settings, client effective cap,
   SDK-visible limits and operator runbook updated.
 
 **Why**
