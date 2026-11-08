@@ -434,3 +434,85 @@ func TestSandboxSnapshotBilledPerGBHour(t *testing.T) {
 		t.Fatalf("after the resume: %s, want 0.40", got)
 	}
 }
+
+// failingAssembly: every snapshot assembly pod fails (crane could not read the layer, the registry is full, ...).
+type failingAssembly struct{ *pauseCluster }
+
+func (c failingAssembly) ApplyCore(ctx context.Context, plural string, obj map[string]any) error {
+	if err := c.pauseCluster.ApplyCore(ctx, plural, obj); err != nil || plural != "pods" {
+		return err
+	}
+	obj["status"] = map[string]any{"phase": "Failed", "message": "crane: unexpected EOF"}
+	return nil
+}
+
+// A pause whose snapshot cannot be assembled fails while the sandbox still runs: nothing is deleted, paused or billed.
+func TestE2BPauseFailedAssemblyKeepsSandbox(t *testing.T) {
+	f, pc, keyA, _ := newPauseFixture(t)
+	ctx := context.Background()
+	f.h.SetSandbox(func(es *externalservice.ExternalService) (*sandbox.Service, error) {
+		return sandbox.NewWithAPI(failingAssembly{pc}, es.SandboxConfig(), es.ID), nil
+	})
+	code, body := f.e2b(keyA, http.MethodPost, "/sandboxes", `{"templateID":"base","timeout":300}`)
+	var sb struct{ SandboxID string }
+	if code != http.StatusCreated || json.Unmarshal([]byte(body), &sb) != nil {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+sb.SandboxID+"/pause", `{}`); code < 500 {
+		t.Fatalf("pause with a failing assembly: %d %s", code, body)
+	}
+	n, _ := f.db.C("sandbox_paused").Count(ctx, pgdoc.M{})
+	tpls, _ := f.db.C("sandbox_templates").Count(ctx, pgdoc.M{})
+	if f.cluster.count() != 1 || n != 0 || tpls != 0 || len(f.snapshotRows("pa")) != 0 {
+		t.Fatalf("running %d, paused %d, snapshots %d, rows %d", f.cluster.count(), n, tpls, len(f.snapshotRows("pa")))
+	}
+	if code, body := f.e2b(keyA, http.MethodGet, "/sandboxes/"+sb.SandboxID, ""); code != http.StatusOK || !strings.Contains(body, `"state":"running"`) {
+		t.Fatalf("the sandbox after the failed pause: %d %s", code, body)
+	}
+}
+
+// A named snapshot taken again keeps one image (the previous build leaves the record, so the prune takes its image),
+// and its row bills that image's size.
+func TestE2BSnapshotRetakenBillsKeptImage(t *testing.T) {
+	f, _, keyA, _ := newPauseFixture(t)
+	ctx := context.Background()
+	code, body := f.e2b(keyA, http.MethodPost, "/sandboxes", `{"templateID":"base","timeout":300}`)
+	var sb struct{ SandboxID string }
+	if code != http.StatusCreated || json.Unmarshal([]byte(body), &sb) != nil {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	type rec struct {
+		Builds []struct {
+			Image     string `json:"image"`
+			SizeBytes int64  `json:"sizeBytes"`
+		} `json:"builds"`
+	}
+	var tpl rec
+	for i := range 2 {
+		if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+sb.SandboxID+"/snapshots", `{"name":"again"}`); code != http.StatusCreated {
+			t.Fatalf("snapshot %d: %d %s", i, code, body)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			tpl = rec{}
+			found, err := f.db.C("sandbox_templates").FindOne(ctx, pgdoc.M{"projectId": "pa", "name": "again"}, &tpl)
+			if err != nil || !found {
+				t.Fatalf("template: %v %v", found, err)
+			}
+			if len(tpl.Builds) == 1 && tpl.Builds[0].Image != "" || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	if len(tpl.Builds) != 1 || tpl.Builds[0].Image == "" || tpl.Builds[0].SizeBytes <= 0 {
+		t.Fatalf("builds kept: %+v", tpl.Builds)
+	}
+	rows := f.snapshotRows("pa")
+	if len(rows) != 1 {
+		t.Fatalf("rows: %d", len(rows))
+	}
+	if got, want := rows[0].Data["sizeGB"].(float64), float64(tpl.Builds[0].SizeBytes)/(1<<30); got != want {
+		t.Fatalf("billed %v GB, kept %v GB", got, want)
+	}
+}

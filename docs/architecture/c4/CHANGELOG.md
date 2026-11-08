@@ -37,8 +37,16 @@ and rules: [README.md](README.md#maintenance-rule).
   had to be refused, since it would have been deleted at its timeout.
 - gVisor in a pod has no memory snapshot. Serving a memory pause as a filesystem pause would drop processes the caller
   asked to keep, so it is refused.
-- Pause deletes the sandbox before the image is assembled; the earlier attempt's lab drill had a 191 MB capture that
-  crane could not read, and that paused sandbox was lost. The archive is now checked before the sandbox goes.
+- The earlier attempt's lab drill had a 191 MB capture that crane could not read; that pause had already deleted the
+  sandbox, which was lost. The archive is now checked while it uploads, and a pause deletes the sandbox only once its
+  image is pushed: a failed assembly (crane, the registry, the 30 GiB disk limit) then fails the pause and the
+  sandbox runs on, instead of a 204 followed by lost files. autoPause runs four pauses at a time, since each now waits
+  for its image.
+- A named snapshot taken again keeps only its newest ready build, so the stored size billed is that of the one image
+  kept (keeping older builds kept their images unbilled). The size is the bytes counted while the archive is checked,
+  not a HEAD that could fail and bill 0.
+- The wake checks the location's token before the sandbox's own, and a resume gives up before its lease lapses, so a
+  second caller cannot take over a resume still starting the sandbox.
 - Concurrent connects of one paused sandbox (an SDK retry, autoResume traffic) must start it once.
 - A resume or fork that skipped the quota would let a project exceed its sandbox caps by pausing and resuming.
 - D9: suspension keeps the tenant's files but must not let them run; the wake answers 403 so the proxy does not keep

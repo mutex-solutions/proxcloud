@@ -81,6 +81,7 @@ type templateBuild struct {
 	Logs        []string   `json:"logs,omitempty"` // kept once the build pod is gone
 	CreatedAt   *time.Time `json:"createdAt,omitempty"`
 	FinishedAt  *time.Time `json:"finishedAt,omitempty"`
+	SizeBytes   int64      `json:"sizeBytes,omitempty"` // a snapshot's layer as captured (billed while ready)
 }
 
 type sandboxTemplateDoc struct {
@@ -98,7 +99,6 @@ type sandboxTemplateDoc struct {
 	Internal      bool                `json:"internal,omitempty"`
 	SourceSandbox string              `json:"sourceSandbox,omitempty"`
 	GPU           *sandbox.GPURequest `json:"gpu,omitempty"`
-	SizeBytes     int64               `json:"sizeBytes,omitempty"`
 	CreatedAt     *time.Time          `json:"createdAt"`
 	UpdatedAt     *time.Time          `json:"updatedAt"`
 }
@@ -167,6 +167,8 @@ func (h *Handler) saveTemplate(ctx context.Context, t *sandboxTemplateDoc) error
 // and the prune would lose its image) nor one that is building (its pod is running and billed). Waiting builds are
 // trimmed like finished ones: every POST /v3/templates adds one, so keeping them all would let retries grow the record
 // without bound; the newest keptBuilds of them survive.
+// A snapshot keeps no ready build but the tagged one: a named snapshot taken again supersedes the previous image, which
+// the prune then deletes, so the stored size billed is that of the image kept.
 func trimBuilds(t *sandboxTemplateDoc) {
 	keep := map[string]bool{}
 	for _, id := range t.Tags {
@@ -175,6 +177,10 @@ func trimBuilds(t *sandboxTemplateDoc) {
 	drop := len(t.Builds) - keptBuilds
 	out := t.Builds[:0]
 	for _, b := range t.Builds { // oldest first (mergeConcurrent sorts by createdAt)
+		if t.Kind == "snapshot" && b.Status == sandbox.BuildReady && !keep[b.BuildID] {
+			drop--
+			continue
+		}
 		if drop > 0 && !keep[b.BuildID] && b.Status != sandbox.BuildBuilding {
 			drop--
 			continue

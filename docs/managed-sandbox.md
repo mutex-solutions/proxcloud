@@ -1315,17 +1315,22 @@ the 20-template limit). Taking one:
    30 GB worker. `crane append` keeps the base image's manifest type, so Zot accepts Docker manifests
    (`compat: [docker2s2]`).
 
-The capture (exec and upload, seconds) happens in the request; the assembly finishes in the background, and whoever
-sees its pod finish first records it (the request's follower, a waiting resume or create, the build status read, or
-job `sandboxBuildSync` after an API restart). The layer in the bucket goes with the pod.
+The capture (exec and upload, seconds) happens in the request; for a named snapshot the assembly finishes in the
+background, and whoever sees its pod finish first records it (the request's follower, a waiting resume or create, the
+build status read, or job `sandboxBuildSync` after an API restart). The layer in the bucket goes with the pod. The size
+billed is the size of the archive as uploaded, counted while it is checked. A named snapshot taken again keeps only its
+newest ready build: the previous one leaves the record, and the registry prune deletes its image (section 7.4).
 
 ### 8.2 Pause, resume, fork
 
-- **Pause** (`POST /sandboxes/{id}/pause`, or autoPause): snapshot, save the sandbox's CR (tokens, env, metadata,
-  network) in `sandbox_paused`, delete the sandbox (its row ends as at a delete). `GET /sandboxes`,
-  `GET /sandboxes/{id}` and `state=paused` show it as paused.
-- **Resume** (`POST /sandboxes/{id}/resume`, `connect` of a paused sandbox, or the wake endpoint): waits for the snapshot
-  if it is still being assembled, recreates the sandbox under the same id and tokens from the snapshot image, with the
+- **Pause** (`POST /sandboxes/{id}/pause`, or autoPause): snapshot, wait until its image is pushed (up to 15
+  minutes, also if the client leaves), save the sandbox's CR (tokens, env, metadata, network) in `sandbox_paused`,
+  delete the sandbox (its row ends as at a delete). Until the image is ready the sandbox keeps running and billing; a
+  failed assembly fails the pause with 500 and the sandbox runs on, so a pause never loses files it answered 204 for.
+  Files written after the capture and before the delete are not kept. `GET /sandboxes`, `GET /sandboxes/{id}` and
+  `state=paused` show it as paused.
+- **Resume** (`POST /sandboxes/{id}/resume`, `connect` of a paused sandbox, or the wake endpoint): gives up a minute
+  before its lease ends, so a second caller never takes over a resume still starting the sandbox; recreates the sandbox under the same id and tokens from the snapshot image, with the
   provider's limits and the project quota counted as for a create, and starts a new `sandbox` row. The paused record,
   the snapshot record and its storage row go; the image stays while the sandbox runs from it (the registry prune keeps
   the images of running and paused sandboxes).
@@ -1341,15 +1346,16 @@ at the cluster (the sandbox runs: the pause is dropped; it does not: the record 
 
 ### 8.3 autoPause and autoResume
 
-A create with `autoPause` marks the sandbox; job `sandboxAutoPause` (every minute) pauses those past their end. Their
+A create with `autoPause` marks the sandbox; job `sandboxAutoPause` (every minute) pauses those past their end, four at
+a time since each waits for its image. Their
 cluster deadline is the end plus 15 minutes, so a pause that fails leaves the sandbox running until then, when the
 cluster removes it. A create with `autoPause` answers 400 where the provider has no template registry and build bucket,
 and `autoResume` (with `autoPause`) where it has no `proxyWakeToken`.
 
 `autoResume` goes through the wake endpoint (section 4.4): when traffic for a paused sandbox reaches `sandbox-proxy`, it
 calls `POST <PROXCLOUD_WAKE_URL>/<id>/wake` with the provider's wake token and the client's envd and traffic tokens.
-The portal accepts the call only if the bearer is the wake token of the paused sandbox's own provider and the client's
-token is the sandbox's own (envd's for the envd port, the traffic token for other ports when it has one), so only
+The portal accepts the call only if the bearer is the wake token of the paused sandbox's own provider (checked first,
+401) and the client's token is the sandbox's own (403) (envd's for the envd port, the traffic token for other ports when it has one), so only
 someone who could talk to the sandbox can wake it. Stage 56 sets `PROXCLOUD_WAKE_URL` (`sandbox.proxy.wake_url`,
 default `<API URL>/api/v1/internal/sandboxes`) and rolls the proxy when its config or token changes; the proxy must
 resolve that name and trust its certificate. Stage 60 gives the Proxmox provider `config.sandbox.portal`
@@ -1361,7 +1367,7 @@ the workers' VM firewall opens that one address and port (`SandboxFirewall.Porta
 A stored snapshot is a `SANDBOX_SNAPSHOT` row (`kind` `pause` or `snapshot`, `sizeGB` of the uploaded layer) from the
 moment its image is ready until a resume, a kill of the paused sandbox, `DELETE /templates/{id}` or the project's
 teardown ends it. The charge rates `size_gb` per GB-hour (`sandbox_snapshot`, `hour` rules), each hour once across
-charges. A named snapshot taken again keeps its row and start; its size follows the newest build. The time a resumed
+charges. A named snapshot taken again keeps its row and start; its size is that of the one image it keeps. The time a resumed
 or forked sandbox runs bills as `sandbox`, on a new row from the resume.
 
 ### 8.5 Suspension and teardown (D9)
@@ -1380,13 +1386,14 @@ Teardown archives the project's snapshot rows, deletes its templates and snapsho
   that cluster (not stage 55): a named snapshot was captured, appended and pushed, and came back ready with a digest.
   The pause of a sandbox with a 191 MB capture never assembled: `crane append` answered `reading layer: unexpected
   EOF` on every retry until the pod's deadline, so that paused sandbox could not come back. Where the archive was cut
-  is not known (the capture's logs went with the stack); the portal now checks the archive while it uploads and fails
-  the pause before the sandbox is deleted.
+  is not known (the capture's logs went with the stack); the portal now checks the archive while it uploads, and a
+  pause deletes the sandbox only once its image is pushed.
 - Not run on the lab: resume, fork, autoPause, the wake through `sandbox-proxy`, and a pause with the capture check.
   The workers were in use by another drill, and two portals fencing one sandbox pool roll each other's firewall back.
   These paths have integration tests on Postgres with an in-memory cluster and a fake bucket (another project cannot
   pause, resume, fork, connect or wake; a suspended profile keeps the snapshot and is refused resume and wake; a cut
-  capture pauses nothing; concurrent connects start one sandbox; teardown leaves no record, template or row), a test on
+  capture or a failed assembly pauses nothing and leaves the sandbox running; a named snapshot taken again keeps and
+  bills one image; concurrent connects start one sandbox; teardown leaves no record, template or row), a test on
   the real charge driver (a 2 GB snapshot bills 0.30 for three hours at 0.05 per GB-hour, 0.40 after a fourth, nothing
   more after the resume), and unit tests (the capture's archive, the quota on resume, the pod's disk request, the
   portal rule).

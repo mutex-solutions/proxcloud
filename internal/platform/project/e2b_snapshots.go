@@ -9,7 +9,7 @@ package project
 //  2. a pod in sbx-build fetches it with a presigned GET and `crane append`s it as one layer onto the sandbox's image,
 //     pushing <templateRegistry>/<project>/<template>:<build> with the project's build account.
 //
-// Pause = snapshot + save the sandbox's CR (tokens, env, metadata, network) + delete it. Resume (POST
+// Pause = snapshot + wait for its image + save the sandbox's CR (tokens, env, metadata, network) + delete it. Resume (POST
 // /sandboxes/{id}/resume, connect to a paused sandbox, or the wake endpoint for autoResume) recreates it under the
 // same id from the snapshot image. Processes, memory and open connections are not kept (E2B's mode "filesystem"); a
 // request for memory (memory: true, autoPauseMemory: true) is refused with 400, never served as a filesystem pause.
@@ -44,6 +44,8 @@ import (
 const (
 	snapshotWait = 15 * time.Minute // how long a background assembly is followed
 	maxForkCount = 10
+	// autoPauseParallel: pauses the job runs at once (each holds a capture stream and an assembly pod).
+	autoPauseParallel = 4
 
 	pausedPausing  = "pausing"
 	pausedResuming = "resuming"
@@ -170,8 +172,9 @@ func memoryFlag(w http.ResponseWriter, r *http.Request) (name string, ok bool) {
 
 // snapshotSandbox captures the sandbox's filesystem changes and starts assembling the snapshot image, returning the
 // snapshot template with its build still "building". The capture (exec + upload, seconds) happens in the request; the
-// assembly (a pod running crane append, tens of seconds) finishes in the background, so pause and create_snapshot
-// answer fast and survive the client going away. awaitSnapshot waits for (or completes) it.
+// assembly (a pod running crane append, tens of seconds) finishes in the background, so create_snapshot answers fast
+// and survives the client going away; a pause waits for it before deleting the sandbox. awaitSnapshot waits for (or
+// completes) it.
 // internal = a pause's or fork's snapshot (hidden from GET /snapshots and /templates).
 func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name string, internal bool) (*sandboxTemplateDoc, error) {
 	if err := h.snapshotsOn(c); err != nil {
@@ -235,31 +238,33 @@ func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name st
 
 	// 1. Stream the filesystem changes into the bucket (the size is not known up front).
 	t0 := time.Now()
-	// The archive is read as it is uploaded: a pause deletes the sandbox before the assembly runs, so a capture that
-	// is not a whole gzip tar must fail here, while the sandbox still exists (seen on the lab: a 191 MB layer crane
-	// could not read, "unexpected EOF", and the paused sandbox could never come back).
+	// The archive is read and counted as it is uploaded: a capture that is not a whole gzip tar fails here, before an
+	// assembly is started (seen on the lab: a 191 MB layer crane could not read, "unexpected EOF"). The count is the
+	// billed size.
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(c.ss.SnapshotFS(ctx, c.proj.ID, id, pw)) }()
 	vr, vw := io.Pipe()
-	checked := make(chan error, 1)
+	type checkResult struct {
+		size int64
+		err  error
+	}
+	checked := make(chan checkResult, 1)
 	go func() {
-		err := checkLayer(vr)
+		n, err := checkLayer(vr)
 		_ = vr.CloseWithError(err) // unblocks the upload if the check stops reading early
-		checked <- err
+		checked <- checkResult{n, err}
 	}()
 	err = bs.put(ctx, key, io.TeeReader(pr, vw))
 	vw.CloseWithError(err)
-	if cerr := <-checked; err == nil && cerr != nil {
-		err = fmt.Errorf("the capture is not a complete archive: %w", cerr)
+	res := <-checked
+	if err == nil && res.err != nil {
+		err = fmt.Errorf("the capture is not a complete archive: %w", res.err)
 	}
 	if err != nil {
 		_ = pr.CloseWithError(err)
 		return undo(fmt.Errorf("snapshot upload: %w", err))
 	}
-	var size int64
-	if head, err := bs.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &bs.bucket, Key: &key}); err == nil && head.ContentLength != nil {
-		size = *head.ContentLength
-	}
+	size := res.size
 	slog.Info("e2b: snapshot captured", "sandbox", id, "template", t.ID, "bytes", size, "took", time.Since(t0))
 	layerURL, err := bs.fetchURL(ctx, key)
 	if err != nil {
@@ -270,10 +275,10 @@ func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name st
 	if t, err = h.loadTemplate(ctx, c.proj.ID, t.ID); err != nil || t == nil {
 		return undo(fmt.Errorf("snapshot record: %v", err))
 	}
-	t.CPU, t.MemoryGiB, t.GPU, t.SizeBytes = tm.CPU, tm.MemoryGiB, tm.GPU, size
+	t.CPU, t.MemoryGiB, t.GPU = tm.CPU, tm.MemoryGiB, tm.GPU
 	bl := templateBuild{BuildID: buildID, Status: sandbox.BuildBuilding, StartCmd: tm.StartCmd, ReadyCmd: tm.ReadyCmd,
 		StartAsRoot: tm.StartAsRoot, User: tm.User, Workdir: tm.Workdir, From: sandbox.ImageOfSaved(saved),
-		Tags: []string{"default"}, CreatedAt: &now}
+		Tags: []string{"default"}, CreatedAt: &now, SizeBytes: size}
 	t.Builds = append(t.Builds, bl)
 	if err := h.saveTemplate(ctx, t); err != nil {
 		return undo(err)
@@ -301,25 +306,41 @@ func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name st
 
 func snapshotHash(buildID string) string { return "snapshot-" + buildID }
 
-// checkLayer reads r to its end as a gzip tar (the gzip CRC and length included) and reports whether it is whole.
-func checkLayer(r io.Reader) error {
-	gz, err := gzip.NewReader(r)
+// checkLayer reads r to its end as a gzip tar (the gzip CRC and length included), reports whether it is whole, and
+// returns how many compressed bytes it read.
+func checkLayer(r io.Reader) (int64, error) {
+	cr := &countReader{r: r}
+	gz, err := gzip.NewReader(cr)
 	if err != nil {
-		return err
+		return cr.n, err
 	}
 	tr := tar.NewReader(gz)
 	for {
 		if _, err := tr.Next(); err == io.EOF {
 			break
 		} else if err != nil {
-			return err
+			return cr.n, err
 		}
 		if _, err := io.Copy(io.Discard, tr); err != nil {
-			return err
+			return cr.n, err
 		}
 	}
-	_, err = io.Copy(io.Discard, gz) // past tar's end blocks: the gzip trailer is checked at EOF
-	return err
+	if _, err = io.Copy(io.Discard, gz); err != nil { // past tar's end blocks: the gzip trailer is checked at EOF
+		return cr.n, err
+	}
+	_, err = io.Copy(io.Discard, cr) // gzip stops at its trailer: count anything after it too
+	return cr.n, err
+}
+
+type countReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // failSnapshot records a failed snapshot build.
@@ -404,14 +425,21 @@ func (h *Handler) finishSnapshot(ctx context.Context, c *e2bCaller, t *sandboxTe
 }
 
 // snapshotStorageRow bills the stored snapshot by size (SANDBOX_SNAPSHOT, hourly per GB) from the moment it is ready.
-// A named snapshot taken again keeps its row and its start; the size follows the newest build.
+// A named snapshot taken again keeps its row and its start; the size is that of every ready build the record keeps
+// (trimBuilds drops a superseded one, and the registry prune then deletes its image).
 func (h *Handler) snapshotStorageRow(ctx context.Context, c *e2bCaller, t *sandboxTemplateDoc) {
 	kind := "snapshot"
 	if t.Internal {
 		kind = "pause"
 	}
 	now := time.Now().UTC()
-	data := map[string]any{"name": t.Name, "kind": kind, "sizeGB": float64(t.SizeBytes) / (1 << 30), "createdAt": now.Format(time.RFC3339)}
+	var size int64
+	for _, b := range t.Builds {
+		if b.Status == sandbox.BuildReady {
+			size += b.SizeBytes
+		}
+	}
+	data := map[string]any{"name": t.Name, "kind": kind, "sizeGB": float64(size) / (1 << 30), "createdAt": now.Format(time.RFC3339)}
 	if cr, _ := h.cloud.FindByServiceIDAndExternalID(ctx, c.es.ID, t.ID); cr != nil && cr.ProjectID == c.proj.ID {
 		if prev, _ := cr.Data["createdAt"].(string); prev != "" {
 			data["createdAt"] = prev
@@ -460,7 +488,9 @@ func (h *Handler) loadPaused(ctx context.Context, projectID, id string) *pausedS
 	return &p
 }
 
-// pauseSandbox snapshots, saves and deletes a running sandbox.
+// pauseSandbox snapshots, saves and deletes a running sandbox. The sandbox is deleted only once its snapshot image is
+// assembled and pushed: until then it keeps running (and billing), so a failed assembly (crane, the registry, a full
+// disk) fails the pause and loses nothing.
 func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) error {
 	if err := h.snapshotsOn(c); err != nil {
 		return err
@@ -474,8 +504,18 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 		return err
 	}
 	ctx = context.WithoutCancel(ctx) // past this point a half-done pause would lose the sandbox
+	wctx, cancel := context.WithTimeout(ctx, snapshotWait)
+	ready, err := h.awaitSnapshot(wctx, c, t.ID)
+	cancel()
+	if err == nil && ready.defaultBuild() == nil {
+		err = errors.New("no ready build")
+	}
+	if err != nil {
+		h.dropSnapshot(ctx, c, t.ID)
+		return e2bStatusErr{http.StatusInternalServerError, "the snapshot could not be assembled, the sandbox keeps running: " + err.Error()}
+	}
 	if _, err := c.ss.GetSandbox(ctx, c.proj.ID, id); err != nil {
-		h.dropSnapshot(ctx, c, t.ID) // killed while its files were being captured: nothing to pause
+		h.dropSnapshot(ctx, c, t.ID) // killed while its snapshot was being made: nothing to pause
 		return err
 	}
 	now := time.Now().UTC()
@@ -658,8 +698,12 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 		}
 		break // claimed
 	}
+	// The claim holds for resumeLease: give up before it lapses, so a second caller can never take over a resume
+	// that is still starting the sandbox (and archive its billing row).
+	ctx, cancel := context.WithTimeout(ctx, resumeLease-time.Minute)
+	defer cancel()
 	release := func(cause error) (map[string]any, error) {
-		_ = h.updatePaused(ctx, c.proj.ID, p.ID, func(cur *pausedSandbox) (bool, error) {
+		_ = h.updatePaused(context.WithoutCancel(ctx), c.proj.ID, p.ID, func(cur *pausedSandbox) (bool, error) {
 			if cur.State == pausedResuming {
 				cur.State, cur.LeaseUntil = "", nil
 			}
@@ -912,18 +956,27 @@ func (h *Handler) AutoPauseSandboxes(ctx context.Context) {
 			slog.Warn("autopause: list", "service", es.ID, "err", err)
 			continue
 		}
+		// A pause waits for its snapshot image (tens of seconds): a few at a time, so one slow assembly does not hold
+		// the others past their grace.
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, autoPauseParallel)
 		for _, d := range due {
 			proj, err := h.svc.repo.FindByID(ctx, d.ProjectID)
 			if err != nil || proj == nil {
 				continue
 			}
 			c := &e2bCaller{proj: proj, es: es, ss: ss}
-			if err := h.pauseSandbox(ctx, c, d.ID); err != nil {
-				slog.Error("autopause: pause", "sandbox", d.ID, "err", err)
-				continue
-			}
-			slog.Info("autopause: paused", "sandbox", d.ID, "project", d.ProjectID)
+			sem <- struct{}{}
+			wg.Go(func() {
+				defer func() { <-sem }()
+				if err := h.pauseSandbox(ctx, c, d.ID); err != nil {
+					slog.Error("autopause: pause", "sandbox", d.ID, "err", err)
+					return
+				}
+				slog.Info("autopause: paused", "sandbox", d.ID, "project", d.ProjectID)
+			})
 		}
+		wg.Wait()
 	}
 }
 
@@ -1062,16 +1115,6 @@ func (h *Handler) wakePaused(w http.ResponseWriter, r *http.Request, bearer, id 
 		notFound()
 		return
 	}
-	a := sandbox.AccessOf(p.Saved)
-	if port == sandbox.EnvdPort {
-		if !tokenEq(envdToken, a.EnvdAccessToken) {
-			httpx.Err(w, http.StatusForbidden, http.StatusForbidden, "invalid access token")
-			return
-		}
-	} else if a.TrafficAccessToken != "" && !tokenEq(trafficToken, a.TrafficAccessToken) {
-		httpx.Err(w, http.StatusForbidden, http.StatusForbidden, "invalid traffic access token")
-		return
-	}
 	proj, err := h.svc.repo.FindByID(r.Context(), p.ProjectID)
 	if err != nil || proj == nil {
 		notFound()
@@ -1082,8 +1125,19 @@ func (h *Handler) wakePaused(w http.ResponseWriter, r *http.Request, bearer, id 
 		httpx.Err(w, status, status, msg)
 		return
 	}
-	if c.es.ID != p.ServiceID || !tokenEq(bearer, c.ss.Config().ProxyWakeToken) { // the token of the sandbox's own location
+	// The token of the sandbox's own location first: another location's proxy learns nothing about its tokens.
+	if c.es.ID != p.ServiceID || !tokenEq(bearer, c.ss.Config().ProxyWakeToken) {
 		httpx.Err(w, http.StatusUnauthorized, http.StatusUnauthorized, "invalid wake token")
+		return
+	}
+	a := sandbox.AccessOf(p.Saved)
+	if port == sandbox.EnvdPort {
+		if !tokenEq(envdToken, a.EnvdAccessToken) {
+			httpx.Err(w, http.StatusForbidden, http.StatusForbidden, "invalid access token")
+			return
+		}
+	} else if a.TrafficAccessToken != "" && !tokenEq(trafficToken, a.TrafficAccessToken) {
+		httpx.Err(w, http.StatusForbidden, http.StatusForbidden, "invalid traffic access token")
 		return
 	}
 	// A suspended project or profile keeps the snapshot but is not woken (D9): 403, which the proxy passes on, rather
