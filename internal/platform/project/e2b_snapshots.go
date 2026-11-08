@@ -73,6 +73,10 @@ var (
 	// SnapshotRequestWait: how long after it arrived a fork or a create from a snapshot waits for the snapshot image;
 	// past it the call answers 503 (retry) and leaves e2bReadyTimeout for the start.
 	SnapshotRequestWait = 60 * time.Second
+	// ForkReuseWindow: how long after a fork arrived its snapshot serves a retry of that fork (the same sandbox in the
+	// same project) instead of a new capture, so a client retrying the 503 gets its forks once the image is ready on a
+	// site where the assembly takes longer than SnapshotRequestWait. Job sandboxBuildSync drops one left unused.
+	ForkReuseWindow = 5 * time.Minute
 )
 
 // SetSandboxPaused wires the sandbox_paused collection (nil = pause and resume off).
@@ -203,8 +207,9 @@ func memoryFlag(w http.ResponseWriter, r *http.Request) (name string, ok bool) {
 // assembly (a pod running crane append, tens of seconds) finishes in the background, so create_snapshot answers fast
 // and survives the client going away; a pause waits for it before deleting the sandbox. awaitSnapshot waits for (or
 // completes) it.
-// internal = a pause's or fork's snapshot (hidden from GET /snapshots and /templates).
-func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name string, internal bool) (*sandboxTemplateDoc, error) {
+// internal = a pause's or fork's snapshot (hidden from GET /snapshots and /templates); forkUntil: a fork's, reused by a
+// retry of that fork until then.
+func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name string, internal bool, forkUntil *time.Time) (*sandboxTemplateDoc, error) {
 	if err := h.snapshotsOn(c); err != nil {
 		return nil, err
 	}
@@ -241,7 +246,7 @@ func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name st
 			return nil, e2bStatusErr{http.StatusTooManyRequests, fmt.Sprintf("at most %d templates per project", maxTemplatesPerProject)}
 		}
 		t = &sandboxTemplateDoc{ID: newTemplateID(), ProjectID: c.proj.ID, Name: name, Tags: map[string]string{},
-			UploadToken: newToken(24), CreatedAt: &now, Kind: "snapshot", Internal: internal, SourceSandbox: id}
+			UploadToken: newToken(24), CreatedAt: &now, Kind: "snapshot", Internal: internal, SourceSandbox: id, ForkUntil: forkUntil}
 		if _, err := h.sbTemplates.InsertOne(ctx, pgdoc.M{"_id": t.ID, "projectId": t.ProjectID, "name": name}); err != nil {
 			return nil, err
 		}
@@ -536,7 +541,7 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 	if err != nil {
 		return err
 	}
-	t, err := h.snapshotSandbox(ctx, c, id, "", true)
+	t, err := h.snapshotSandbox(ctx, c, id, "", true, nil)
 	if err != nil {
 		return err
 	}
@@ -1058,7 +1063,7 @@ func (h *Handler) e2bSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
-	t, err := h.snapshotSandbox(r.Context(), c, chi.URLParam(r, "sandboxID"), name, false)
+	t, err := h.snapshotSandbox(r.Context(), c, chi.URLParam(r, "sandboxID"), name, false, nil)
 	if err != nil {
 		h.e2bSnapshotFail(w, err)
 		return
@@ -1139,21 +1144,31 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 		h.e2bSnapshotFail(w, err)
 		return
 	}
-	t, err := h.snapshotSandbox(ctx, c, id, "", true)
-	if err != nil {
-		h.e2bSnapshotFail(w, err)
-		return
+	// A retry of a fork that answered 503 takes that fork's snapshot, still being assembled or ready, instead of a new
+	// one: on a site where the assembly takes longer than SnapshotRequestWait, a new capture each time never finishes.
+	t := h.pendingFork(ctx, c.proj.ID, id)
+	if t == nil {
+		until := arrived.Add(ForkReuseWindow)
+		if t, err = h.snapshotSandbox(ctx, c, id, "", true, &until); err != nil {
+			h.e2bSnapshotFail(w, err)
+			return
+		}
 	}
-	// Answer within the SDK's request timeout: a snapshot not ready by then is dropped (its pod with it) and the call
-	// answers 503, so a retry takes a fresh one. Before, a fork the client left kept its internal snapshot, billed.
+	// Answer within the SDK's request timeout: a snapshot not ready by then is kept for a retry (job sandboxBuildSync
+	// drops it past ForkReuseWindow) and the call answers 503; a failed one is dropped.
 	wctx, cancel := context.WithDeadline(ctx, arrived.Add(SnapshotRequestWait))
 	ready, err := h.awaitSnapshot(wctx, c, t.ID)
 	cancel()
 	if err == nil && ready.defaultBuild() == nil {
 		err = errSnapshotNotReady
 	}
+	if errors.Is(err, errSnapshotGone) { // taken by a concurrent fork or past its window: a retry takes a new one
+		err = errSnapshotNotReady
+	}
 	if err != nil {
-		h.dropSnapshot(context.WithoutCancel(ctx), c, t.ID)
+		if !errors.Is(err, errSnapshotNotReady) {
+			h.dropSnapshot(context.WithoutCancel(ctx), c, t.ID)
+		}
 		h.e2bSnapshotFail(w, err)
 		return
 	}
@@ -1183,6 +1198,24 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 	// The forks run from the snapshot image; its template record is not needed any more.
 	h.dropSnapshot(context.WithoutCancel(ctx), c, t.ID)
 	e2bJSON(w, http.StatusCreated, results)
+}
+
+// pendingFork is a fork snapshot of the project's sandbox id still within its reuse window and not failed (nil: none).
+// Keyed by project: another project's fork never sees it.
+func (h *Handler) pendingFork(ctx context.Context, projectID, sourceID string) *sandboxTemplateDoc {
+	var ts []sandboxTemplateDoc
+	if err := h.sbTemplates.Find(ctx, pgdoc.M{"projectId": projectID, "sourceSandbox": sourceID, "internal": true}, &ts); err != nil {
+		return nil
+	}
+	now := time.Now()
+	for i := range ts {
+		t := &ts[i]
+		if t.ProjectID == projectID && t.ForkUntil != nil && now.Before(*t.ForkUntil) &&
+			len(t.Builds) > 0 && t.Builds[len(t.Builds)-1].Status != sandbox.BuildError {
+			return t
+		}
+	}
+	return nil
 }
 
 // ---- autoPause -------------------------------------------------------------------------------------------------

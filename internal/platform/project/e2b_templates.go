@@ -99,8 +99,11 @@ type sandboxTemplateDoc struct {
 	Internal      bool                `json:"internal,omitempty"`
 	SourceSandbox string              `json:"sourceSandbox,omitempty"`
 	GPU           *sandbox.GPURequest `json:"gpu,omitempty"`
-	CreatedAt     *time.Time          `json:"createdAt"`
-	UpdatedAt     *time.Time          `json:"updatedAt"`
+	// ForkUntil: a fork's snapshot, which a fork of the same sandbox in the same project reuses until then (the first
+	// fork answered 503 while the image was assembled); job sandboxBuildSync drops it after then if no fork took it.
+	ForkUntil *time.Time `json:"forkUntil,omitempty"`
+	CreatedAt *time.Time `json:"createdAt"`
+	UpdatedAt *time.Time `json:"updatedAt"`
 }
 
 func (t *sandboxTemplateDoc) build(id string) *templateBuild {

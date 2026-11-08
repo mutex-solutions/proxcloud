@@ -69,7 +69,7 @@ served, answers 404 with E2B's error body (or 400 for a refused field).
 | `PUT /sandboxes/{id}/network` | partial | `allowOut` / `denyOut` / `dnsServers`. `egressProxy`, `rules`, `maskRequestHost`, `httpsPorts` → 400. `allowPublicTraffic` only at create |
 | `GET /sandboxes/{id}/logs`, `/v2/…/logs` | partial | The sandbox's stdout/stderr (envd and the template's start command), newest 1000 lines; no `start`/`limit` or cursor |
 | `GET /sandboxes/{id}/metrics`, `GET /sandboxes/metrics` | partial | Always empty |
-| `POST /sandboxes/{id}/pause`, `/resume`, `/snapshots`, `/fork`, `GET /snapshots` | partial | Filesystem only: `memory: true` → 400, a resume or fork is a cold boot. At most 10 forks. Snapshots are templates of the project, billed per GB-hour until deleted |
+| `POST /sandboxes/{id}/pause`, `/resume`, `/snapshots`, `/fork`, `GET /snapshots` | partial | Filesystem only: `memory: true` → 400, a resume or fork is a cold boot. At most 10 forks. Snapshots are templates of the project, billed per GB-hour until deleted. Fork and create from a snapshot whose image is still being assembled answer 503 after 60 s; retry (see below) |
 
 ### Templates
 
@@ -115,10 +115,21 @@ dashboard APIs. They answer 404 with E2B's error body.
 1. **Pause, resume, snapshots and fork** keep the filesystem only: files are back after a resume; processes, memory
    and open connections are not. Files deleted from the template's image come back too.
 2. **`autoPause` and `autoResume`** pause at the timeout (within a minute) and wake on traffic to a port; both answer
-   400 where the location cannot take snapshots or has no wake token.
+   400 where the location cannot take snapshots or has no wake token. The stock Python SDK (2.63) refuses
+   `auto_resume=True` together with `on_timeout={"action": "pause", "mode": "filesystem"}` before it sends anything
+   ("a filesystem-only snapshot cannot be auto-resumed by traffic"). Leave `mode` out
+   (`lifecycle={"on_timeout": "pause", "auto_resume": True}`): the SDK then sends no `autoPauseMemory`, and ProxCloud
+   pauses the filesystem, as it always does. With `mode: "filesystem"` and no `auto_resume`, a paused sandbox comes
+   back with `connect`.
 3. **Pause with memory** (`memory: true`, `mode: "full"`, `autoPauseMemory`): never. gVisor in a pod has no microVM
    snapshot; a later resume is a cold boot (files kept, processes, memory and open connections not).
-4. **Custom templates**: the v3 build API works (`Template()` builder, `from_dockerfile`, `e2b template build`, tags,
+4. **Fork and create from a snapshot on a slow site.** A snapshot image takes tens of seconds to assemble (66 s on the
+   lab). Both calls wait for it at most 60 s, so that they answer within the SDK's 120 s cut, then answer 503 "the
+   snapshot is still being assembled; retry" (`ServiceBusyException`); the SDK does not retry it itself, since its
+   retry budget is spent by then. Retry the call: a create from a named snapshot takes no new snapshot, and a fork
+   retried within 5 minutes reuses the snapshot of the fork that answered 503 (its files as of that first call)
+   instead of capturing again, so both succeed once the image is ready.
+5. **Custom templates**: the v3 build API works (`Template()` builder, `from_dockerfile`, `e2b template build`, tags,
    delete). `fromImageRegistry` with `type: "aws"` (AWS keys exchanged for an ECR token) answers 400: use
    `type: "registry"` with username `AWS` and the output of `aws ecr get-login-password` as the password. No layer cache
    between builds, so a large base image is pulled again on every build. A template belongs to its project; no public
@@ -192,6 +203,7 @@ token is missing or wrong.
 `tests/e2b-compat/compat.py` runs the stock SDKs end to end against a location (commands, streaming, exit codes, files,
 preview URL, metadata, connect, egress rules, the metadata address, a second project's key, the code interpreter):
 `E2B_API_URL`, `E2B_API_KEY`, optionally `E2B_OTHER_API_KEY` (a key of another project) and `SSL_CERT_FILE` for a
-private CA. `tests/e2b-compat/pause.py` does the same for pause, resume, fork, snapshots and autoPause
+private CA. `tests/e2b-compat/pause.py` does the same for pause, resume, fork (retried on 503), snapshots, autoPause
+and the autoResume wake
 ([managed-sandbox.md §8](managed-sandbox.md#8-pause-resume-snapshots-and-fork-sb7)), with `E2B_AUTOPAUSE_URL` to
 trigger the autoPause job where the scheduler is off.
