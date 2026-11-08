@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: Quick start guide
+
+**What changed**
+
+- New `docs/quickstart.md`: a use-case table (laptop with Docker Compose, one Proxmox node, production `allinone`,
+  `split` with managed Kubernetes, databases and sandboxes, the Helm chart alone), and per path the components it
+  deploys, the inventory keys to fill, the command, the first login and the first steps after install. Also the
+  Standard and Full storage tiers, the add-ons (GPU, PowerDNS, load balancers, backups, per-organization SSO,
+  payments), what each installer stage installs and which key switches it, and the common first-install failures.
+- The README's Quickstart section now points at it with a short path table.
+
+**Why**
+
+- A new operator had to read `docs/install.md` end to end, plus `defaults.yml`, to learn which keys a single node or
+  a split site needs. The Helm instructions also missed the `helm repo add` lines `helm dependency build` needs on a
+  clean machine.
+
+**Diagrams updated:** none; no container or component changed.
+
 ## 2026-11-08: Custom sandbox templates: build pods, a build account per project, pruning through the OCI API (SB6b)
 
 **What changed**
