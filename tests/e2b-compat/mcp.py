@@ -70,8 +70,8 @@ KEY = "mcp-check-" + uuid.uuid4().hex
 s = Sandbox.create(mcp={"brave": {"apiKey": KEY}}, timeout=300)
 try:
     root = lambda cmd: s.commands.run(cmd, user="root", timeout=60).stdout
-    pids = root("for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null | grep -q brave-search && echo ${p#/proc/}; done").split()
-    env = "\n".join(root(f"tr '\\0' '\\n' < /proc/{p}/environ") for p in pids)
+    pids = root("for p in /proc/[0-9]*; do [ ${p#/proc/} = $$ ] && continue; tr '\\0' ' ' < $p/cmdline 2>/dev/null | grep -q brave-search && echo ${p#/proc/}; done; true").split()
+    env = "\n".join(root(f"tr '\\0' '\\n' < /proc/{p}/environ 2>/dev/null || true") for p in pids)
     check("a keyed server gets the tenant's key", f"BRAVE_API_KEY={KEY}" in env, str(pids))
     check("no platform variable reaches it", "PROXCLOUD_" not in env and "KUBERNETES_" not in env, env[:300])
     check("no service account token in the sandbox",
