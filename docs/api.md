@@ -2,7 +2,7 @@
 
 This is an orientation and conventions doc for contributors — not an exhaustive
 endpoint reference. For the interactive, always-current endpoint reference, open
-the admin console at `/docs/api` (and the MCP tool reference at `/docs/api/mcp`).
+the admin console at `/docs/reference/overview` (and the MCP tool reference at `/docs/reference/mcp-server`).
 
 ProxCloud exposes three HTTP surfaces, all mounted on the same router
 (`internal/server/server.go`):
@@ -127,16 +127,19 @@ A stateless streamable-HTTP Model Context Protocol endpoint
 (`internal/platform/mcp`). The principal's realm (or an admin API key) selects a
 toolset:
 
-- **client tools** (`clients` realm) — read/act on the caller's own projects and
-  billing (list projects/servers/volumes/networks/security groups/images, get
-  cost/billing, run server power actions, create
-  and delete volumes, invite users). See `tools_client.go`.
-- **admin tools** (`master` realm or `pk.sk` API key) — the operator toolset. See
-  `tools_admin.go`.
+- **client tools** (`clients` realm, or a client personal access token) — read/act
+  on the caller's own projects and billing: resources and costs, servers (create,
+  power actions, backups, snapshots, protection), volumes, Kubernetes clusters,
+  databases, DNS records, load balancers (list), floating IPs, sandboxes, invites.
+  See `tools_client.go`.
+- **admin tools** (`master` realm or an Admin API `pk.sk` key) — the operator
+  toolset. See the `tools_admin*.go` files.
 
 Each tool maps to a real REST endpoint and is dispatched in-process through the
 full router, so authorization, DTO shapes, and audit are identical to a direct
-API call. Browse the live tool catalog at `/docs/api/mcp` in the admin console.
+API call; `TestMCPToolRoutesExist` (`internal/server`) checks every tool's route
+against the router. The tool catalog is documented at `/docs/reference/mcp-server`
+in the admin console.
 
 ## Error model
 

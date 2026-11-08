@@ -99,10 +99,14 @@ The MCP endpoint (`internal/platform/mcp/mcp.go`) accepts either scheme:
   whitelist, but a valid bearer is still processed into the `RequestContext`). The
   MCP gate maps the token issuer to a toolset: `master` realm → admin tools,
   `clients` realm → client tools, anything else → `403`. MCP clients obtain the
-  token through the standard MCP OAuth flow (see RFC 9728 discovery below).
-- **API key** — `Authorization: Bearer <pk>.<sk>`, an `hmac_keys` pair joined by a
-  dot, matching `^(pk[0-9a-f]{32})\.(sk[0-9a-f]{40})$`. The `sk` is compared
-  constant-time against the stored secret; a match grants the **admin** toolset.
+  token through the standard MCP OAuth flow (see RFC 9728 discovery below). The
+  `azp` binding is skipped on `/mcp` and on the tool calls it dispatches (see
+  In-process tool dispatch), because an MCP client is its own OAuth client.
+- **Key** — `Authorization: Bearer <pk>.<sk>`, matching
+  `^(pk[0-9a-f]{32})\.(sk[0-9a-f]{40})$`. A client personal access token is resolved
+  by `Enforce` as its user (next section) and gets the **client** toolset. Otherwise
+  the gate looks the pair up in `hmac_keys`, compares the `sk` constant-time against
+  the stored secret, and a match grants the **admin** toolset.
 
 Unauthenticated requests get an RFC 9728 challenge (below), which drives compliant
 MCP clients into the OAuth flow.
@@ -191,7 +195,7 @@ full by the read endpoints.
 
 Create a key three ways:
 
-- **Admin console** → System → HMAC Keys, which calls `POST /api/v1/admin/hmac-keys`
+- **Admin console** → System → API keys, which calls `POST /api/v1/admin/hmac-keys`
   (permission `admin:hmac_key:manage`). See `internal/platform/admin/hmackey.go`.
 - **Operator management port** → `POST :8081/debug/gen-hmac-key?description=...`
   (only registered when job debug triggers are enabled). See `cmd/api/main.go`.
@@ -230,14 +234,21 @@ client should use:
 
 Compliant MCP clients then run discovery + dynamic client registration + a PKCE
 localhost-redirect flow against the advertised Keycloak realm and return with a
-Bearer JWT.
+Bearer JWT. The chart creates no MCP client: dynamic registration must be allowed by
+the realm's client-registration policies, or an operator registers a public PKCE
+client with a localhost redirect URI. A client-realm token from such a client drives
+the client toolset. An admin-realm token from it does not drive the admin toolset:
+the admin routes still require `azp` = the admin console client (`adminContext`) and
+the Admin API `azp` = the admin-api client, so operators use an API key.
 
 ### In-process tool dispatch
 
-MCP tools are declarative rows (`tools_client.go`, `tools_admin.go`) that map to
-existing REST endpoints. Each call is dispatched **through the full router
+MCP tools are declarative rows (`tools_client.go` and the `tools_admin*.go` files)
+that map to existing REST endpoints. Each call is dispatched **through the full router
 in-process**, so org/project policy, DTO shapes, and audit behave exactly like the
-public API. JWT principals dispatch with their own bearer; API-key principals
+public API. JWT and personal-access-token principals dispatch with their own bearer,
+on a context marked by `auth.WithMCPDispatch` so `verifyJWT` skips the `azp` binding
+for exactly the token `/mcp` accepted (an HTTP caller cannot set the mark); API-key principals
 dispatch with a SigV4 signature minted on the fly from the validated pair
 (`pkg/auth/sigv4sign.go`, `SignSigV4`, using the conventional `us-east-1` /
 `execute-api` scope).

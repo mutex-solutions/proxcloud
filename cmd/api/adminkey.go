@@ -26,6 +26,9 @@ func adminKeyCmd(args []string, out io.Writer) error {
 		return errors.New("usage: proxcloud-api admin-key create [-description text]")
 	}
 	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil // -help printed the flags; asking for help is not a failure
+		}
 		return err
 	}
 	dsn := os.Getenv("PROXCLOUD_DB_URL")
