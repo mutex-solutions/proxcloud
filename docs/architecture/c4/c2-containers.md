@@ -244,6 +244,10 @@ flowchart LR
   k8st -->|"node templates"| pve
 ```
 
+Both SPA images normalize only nginx's public document root to 0755 directories
+and 0644 files; the entrypoint also sets generated `config.js` to 0644 so nginx
+workers can serve public assets regardless of checkout or runtime umask.
+
 ## Container table
 
 | Container | Technology | Runs where | Status |
