@@ -408,7 +408,7 @@ function CreateSandboxDialog({
             </div>
           )}
           <p className="text-xs text-muted-foreground">
-            Limits: up to {limits.maxCpu ?? 8} vCPU and {limits.maxMemoryGiB ?? 32} GiB per sandbox, {maxHours} h. Your
+            Limits: up to {limits.maxCpu ?? 8} vCPU and {limits.maxMemoryGiB ?? 32} GiB per sandbox, {maxHours} h; egress capped at {tpl?.egressMbps ?? limits.egressMbps ?? 100} Mbps. Your
             project&apos;s sandbox quota caps what all its sandboxes hold together.
           </p>
         </div>
