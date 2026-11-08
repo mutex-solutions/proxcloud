@@ -1,0 +1,90 @@
+# Host-owned CPU/network samples, no kubelet write / nodes/proxy permission.
+# Only public kubelet serving cert is mounted, never its client key or pki directory.
+apiVersion: v1
+kind: Namespace
+metadata: {name: sandbox-system}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: sandbox-telemetry}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: sandbox-netguard, namespace: sandbox-system}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: sandbox-netguard}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [nodes/stats]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: sandbox-netguard}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: sandbox-netguard}
+subjects: [{kind: ServiceAccount, name: sandbox-netguard, namespace: sandbox-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: sandbox-netguard, namespace: sandbox-telemetry}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: sandbox-netguard, namespace: sandbox-telemetry}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: sandbox-netguard}
+subjects: [{kind: ServiceAccount, name: sandbox-netguard, namespace: sandbox-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: proxcloud-telemetry-reader, namespace: sandbox-telemetry}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: proxcloud-telemetry-reader, namespace: sandbox-telemetry}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: proxcloud-telemetry-reader}
+subjects: [{kind: ServiceAccount, name: proxcloud, namespace: proxcloud-system}]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: sandbox-telemetry, namespace: sandbox-system}
+spec:
+  selector: {matchLabels: {app: sandbox-telemetry}}
+  template:
+    metadata: {labels: {app: sandbox-telemetry}}
+    spec:
+      hostNetwork: true
+      serviceAccountName: sandbox-netguard
+      tolerations: [{operator: Exists}]
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: collect
+          image: busybox:1.37
+          command: [/runtime/sandbox-netguard, -collect]
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: API_SERVER
+              value: https://kubernetes.default.svc
+          securityContext: {runAsUser: 65534, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
+          volumeMounts:
+            - {name: runtime, mountPath: /runtime, readOnly: true}
+            - {name: serving-cert, mountPath: /kubelet-serving.crt, readOnly: true}
+      volumes:
+        - name: runtime
+          hostPath: {path: /opt/proxcloud-sandbox/bin, type: Directory}
+        - name: serving-cert
+          hostPath: {path: /var/lib/kubelet/pki/kubelet.crt, type: File}

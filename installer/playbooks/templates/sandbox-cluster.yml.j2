@@ -34,6 +34,7 @@ spec:
     helm:
       valuesObject:
         kubernetesVersion: "{{ pc.services.k8s_version }}"
+        sandboxBandwidth: true
         cloudCredentialsSecretName: pc-sandbox-cloud-config
         # kamajiControlPlane.admissionControllers stays the chart's list, NodeRestriction included; stage 55 checks it.
         kamajiControlPlane:
@@ -67,6 +68,7 @@ spec:
             machineTags: [proxcloud, pc-sandbox]
             machineCount: {{ sbx.nodes.count | int }}
             nodeLabels: {proxcloud.io/sandbox: cpu}
+            machineLabels: {node-restriction.kubernetes.io/proxcloud-sandbox-worker: "true"}
             # Off only through the portal's sync, once the worker's VM firewall is in place and the join token its disk
             # holds has expired (docs/managed-sandbox.md §2). NodeRestriction keeps the kubelet from dropping it.
             taints: [{key: proxcloud.io/unsecured, value: "true", effect: NoSchedule}]

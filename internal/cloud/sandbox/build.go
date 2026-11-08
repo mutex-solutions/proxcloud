@@ -786,6 +786,19 @@ func (s *Service) SavedSandbox(ctx context.Context, projectID, id string) (map[s
 // (nil = none), checked against the live cluster.
 func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map[string]any, image string, shutdown time.Time, q *ProjectQuota) error {
 	cr := saved
+	// Saved annotations are historical, never an authority for the current cap.
+	mbps := s.cfg.WithDefaults().EgressMbps
+	if t, ok := s.cfg.Templates[digStr(cr, "metadata", "annotations", AnnotationTemplate)]; ok && digStr(cr, "metadata", "annotations", "proxcloud.io/curated-template") == "true" && t.EgressMbps > 0 {
+		mbps = t.EgressMbps
+	}
+	if pm, ok := dig(cr, "spec", "podTemplate", "metadata").(map[string]any); ok {
+		ann, _ := pm["annotations"].(map[string]any)
+		if ann == nil {
+			ann = map[string]any{}
+			pm["annotations"] = ann
+		}
+		ann["kubernetes.io/egress-bandwidth"] = fmt.Sprintf("%dM", mbps)
+	}
 	if digStr(cr, "metadata", "namespace") != NamespaceFor(projectID) || digStr(cr, "metadata", "labels", LabelProject) != projectID {
 		return ErrNotFound
 	}

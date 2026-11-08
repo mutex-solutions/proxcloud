@@ -64,6 +64,8 @@ func ValidID(id string) bool { return sandboxIDRe.MatchString(id) }
 
 // Template is one curated environment customers can start a sandbox from.
 type Template struct {
+	// EgressMbps overrides the provider default (0 inherits); operator-curated templates only.
+	EgressMbps  int      `json:"egressMbps,omitempty"`
 	Image       string   `json:"image"`
 	Description string   `json:"description,omitempty"`
 	CPU         int      `json:"cpu"`       // default vCPUs
@@ -115,6 +117,9 @@ var defaultLimits = Limits{
 
 // Config is one sandbox provider (one sandbox cluster).
 type Config struct {
+	EgressMbps   int
+	Abuse        AbusePolicy
+	Rotation     RotationPolicy
 	Kubeconfig   string
 	Region       string
 	RuntimeClass string
@@ -195,6 +200,10 @@ const (
 
 // WithDefaults fills unset fields.
 func (c Config) WithDefaults() Config {
+	if c.EgressMbps == 0 {
+		c.EgressMbps = 100
+	}
+	c.Abuse = c.Abuse.WithDefaults()
 	if c.RuntimeClass == "" {
 		c.RuntimeClass = "gvisor"
 	}
@@ -222,6 +231,15 @@ func (c Config) WithDefaults() Config {
 // "not available" instead of half-creating sandboxes.
 func (c Config) Validate() error {
 	var errs []string
+	if c.EgressMbps < 0 || c.EgressMbps > 100000 {
+		errs = append(errs, "sandbox.egressMbps must be 1-100000 (0 defaults to 100)")
+	}
+	if err := c.Abuse.Validate(); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if err := c.Rotation.Validate(); err != nil {
+		errs = append(errs, err.Error())
+	}
 	if strings.TrimSpace(c.Kubeconfig) == "" {
 		errs = append(errs, "secret.kubeconfig is required")
 	}
@@ -229,6 +247,9 @@ func (c Config) Validate() error {
 		errs = append(errs, "sandbox.templates: at least one template is required")
 	}
 	for name, t := range c.Templates {
+		if t.EgressMbps < 0 || t.EgressMbps > 100000 {
+			errs = append(errs, "template egressMbps must be 0-100000")
+		}
 		if !validName(name) {
 			errs = append(errs, fmt.Sprintf("sandbox.templates: invalid template name %q", name))
 		}

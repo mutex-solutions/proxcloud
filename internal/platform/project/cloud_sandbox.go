@@ -244,7 +244,8 @@ func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *
 	if err := h.pauseRefusal(ss.Config(), spec); err != nil {
 		return nil, err
 	}
-	data, err := ss.CreateSandbox(ctx, spec)
+	var data map[string]any
+	err := h.withSandboxStart(ctx, es.ID, func(tc context.Context) error { var e error; data, e = ss.CreateSandbox(tc, spec); return e })
 	if err != nil {
 		return nil, err
 	}

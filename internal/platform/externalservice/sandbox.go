@@ -35,7 +35,10 @@ package externalservice
 // Like dbaas, nothing lands on PVE for a project: the sandbox cluster belongs to the platform.
 // It goes live only while its release gates hold (docs/managed-sandbox.md §3, admin/sandboxprovider.go).
 
-import "github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+import (
+	"encoding/json"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+)
 
 // IsSandbox reports whether this is a sandbox provider (config.provider == "sandbox").
 func (e *ExternalService) IsSandbox() bool { return e.Provider() == "sandbox" }
@@ -99,6 +102,7 @@ func (e *ExternalService) SandboxConfig() sandbox.Config {
 				continue
 			}
 			templates[name] = sandbox.Template{
+				EgressMbps:  intOf(m["egressMbps"]),
 				Image:       str(m["image"]),
 				Description: str(m["description"]),
 				CPU:         intOf(m["cpu"]),
@@ -119,7 +123,17 @@ func (e *ExternalService) SandboxConfig() sandbox.Config {
 	}
 	limits, _ := sb["limits"].(map[string]any)
 	bs, _ := sb["buildStorage"].(map[string]any)
+	var abuse sandbox.AbusePolicy
+	var rotation sandbox.RotationPolicy
+	if b, err := json.Marshal(sb["abuse"]); err == nil {
+		_ = json.Unmarshal(b, &abuse)
+	}
+	if b, err := json.Marshal(sb["rotation"]); err == nil {
+		_ = json.Unmarshal(b, &rotation)
+	}
+	rotation.Kubeconfig = str(e.secretMap()["rotationKubeconfig"])
 	return sandbox.Config{
+		EgressMbps: intOf(sb["egressMbps"]), Abuse: abuse, Rotation: rotation,
 		BuildStorage: sandbox.BuildStorage{
 			Endpoint: str(bs["endpoint"]), PodEndpoint: str(bs["podEndpoint"]), Bucket: str(bs["bucket"]), Region: str(bs["region"]),
 			AccessKey: str(e.secretMap()["buildStorageAccessKey"]), SecretKey: str(e.secretMap()["buildStorageSecretKey"]),

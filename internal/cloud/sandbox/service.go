@@ -471,6 +471,15 @@ func (s *Service) Exec(ctx context.Context, projectID, id string, cmd []string, 
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	// Record trusted native exec activity before and after the call (never its command/output).
+	mark := func(at time.Time) error {
+		_, err := s.api.MergePatchCR(context.WithoutCancel(ctx), CRGroup, CRVersion, CRPlural, NamespaceFor(projectID), id, map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationLastExec: at.UTC().Format(time.RFC3339Nano)}}})
+		return err
+	}
+	if err := mark(s.now().Add(timeout)); err != nil {
+		return nil, err
+	}
+	defer func() { _ = mark(s.now()) }()
 	// agent-sandbox names the pod after the Sandbox; "main" is the container BuildCR renders.
 	return s.api.Exec(ctx, NamespaceFor(projectID), id, "main", cmd, stdin, MaxExecOutput)
 }
@@ -533,15 +542,16 @@ func sandboxData(obj map[string]any) map[string]any {
 		runningSince = conditionTransition(obj, "Ready")
 	}
 	d := map[string]any{
-		"name":         digStr(obj, "metadata", "annotations", AnnotationDisplayName),
-		"template":     digStr(obj, "metadata", "annotations", AnnotationTemplate),
-		"image":        str(c["image"]),
-		"cpu":          intOf(dig(c, "resources", "limits", "cpu")),
-		"memoryGiB":    memGiB(dig(c, "resources", "limits", "memory")),
-		"gpuCount":     intOf(dig(c, "resources", "limits", ResourceGPU)),
-		"gpuModel":     digStr(obj, "spec", "podTemplate", "spec", "nodeSelector", LabelGPU),
-		"status":       status,
-		"shutdownTime": endOf(obj),
+		"name":            digStr(obj, "metadata", "annotations", AnnotationDisplayName),
+		"template":        digStr(obj, "metadata", "annotations", AnnotationTemplate),
+		"image":           str(c["image"]),
+		"cpu":             intOf(dig(c, "resources", "limits", "cpu")),
+		"memoryGiB":       memGiB(dig(c, "resources", "limits", "memory")),
+		"gpuCount":        intOf(dig(c, "resources", "limits", ResourceGPU)),
+		"gpuModel":        digStr(obj, "spec", "podTemplate", "spec", "nodeSelector", LabelGPU),
+		"status":          status,
+		"shutdownTime":    endOf(obj),
+		"egressBandwidth": digStr(obj, "spec", "podTemplate", "metadata", "annotations", "kubernetes.io/egress-bandwidth"),
 	}
 	if created := digStr(obj, "metadata", "creationTimestamp"); created != "" {
 		d["startedAt"] = created

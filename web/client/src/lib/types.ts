@@ -249,9 +249,10 @@ export type CreditCard = {
 /** Providers that serve only storage products (no compute). */
 export const isObjectProvider = (provider?: string) => provider === "ceph-s3" || provider === "rustfs" || provider === "truenas"
 
-export type SandboxTemplate = { name: string; image: string; description?: string; cpu?: number; memoryGiB?: number; gpu?: { model: string; count: number } }
+export type SandboxTemplate = { egressMbps?: number; name: string; image: string; description?: string; cpu?: number; memoryGiB?: number; gpu?: { model: string; count: number } }
 
 export type SandboxLimits = {
+  egressMbps?: number
   maxCpu?: number
   maxMemoryGiB?: number
   maxGpus?: number

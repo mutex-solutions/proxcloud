@@ -274,6 +274,9 @@
                 {{ ((proxcloud | default({})).sandbox | default({})).templates | default(pc.sandbox.templates)
                    | pc_sandbox_templates(pc_sandbox_pins, pc_sandbox_registry_host) }}
               limits: "{{ pc.sandbox.limits }}"
+              egressMbps: "{{ pc.sandbox.egress_mbps | int }}"
+              abuse: "{{ pc.sandbox.abuse }}"
+              rotation: "{{ pc.sandbox.rotation }}"
               templateRegistry: "{{ (pc_sandbox_registry_host ~ '/t') if pc_sandbox_registry_on else '' }}"
               imageAdoption: "{{ pc.sandbox.registry.adoption if pc_sandbox_registry_on else '' }}"
               # Custom template builds and the pruning of their images (docs/managed-sandbox.md §7).

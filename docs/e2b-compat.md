@@ -36,6 +36,22 @@ Billing: the native sandbox price rules, per minute from the moment the sandbox 
 out, rounded up to the minute with a one-minute minimum (E2B bills per second). The project's sandbox quota, the
 suspension of a project or its billing profile and the provider's release gates apply exactly as on the native API.
 
+## Bandwidth and unattended compute (SB10)
+
+Every new sandbox, including SDK-created ones, has a provider default egress cap of **100 Mbps**. An operator-curated
+built-in template may override it; tenants cannot disable or raise it through `envVars`, metadata, network rules or
+custom templates. It covers TCP, UDP, same-node traffic and responses through sandbox-proxy (not ingress downloads).
+The host configures the real pod network namespace before any customer code starts; gVisor root cannot remove it.
+The native console/service limits show the configured effective cap. Existing pods keep their old cap until recreated;
+resume/fork uses the current provider/trusted-template cap. Short bursts are possible (at least 64 KiB token bucket).
+
+A minutely heuristic alerts the operator when a sandbox stays near its CPU limit without observed exec or traffic
+activity for 15 minutes by default. This is **not proof of mining**: a legitimate long unattended job may match.
+Alerts do not stop sandboxes by default. An operator may explicitly opt its provider into filesystem pause or destructive
+kill. Pause is the existing asynchronous filesystem-only path; it keeps the original until a usable snapshot exists.
+SDK exec/file/proxy traffic counts as node-observed network activity. Periodic traffic or native exec can evade the rule;
+it is a triage signal, not a guarantee. Details: [operator controls](managed-sandbox.md#10-abuse-controls-sb10).
+
 ## API keys
 
 Create keys in the console (Sandboxes > API keys) or with the client API:

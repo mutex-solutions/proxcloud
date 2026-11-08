@@ -110,6 +110,38 @@ func (d *DB) LockXact(ctx context.Context, key string) error {
 	return err
 }
 
+// WithAdvisoryLock holds a connection-level lock without wrapping fn in a SQL
+// transaction. Long capture operations must commit their progress independently.
+// A nonblocking loser returns acquired=false and never calls fn.
+func (d *DB) WithAdvisoryLock(ctx context.Context, key string, try bool, fn func() error) (acquired bool, err error) {
+	c, err := d.Pool.Acquire(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer c.Release()
+	if try {
+		if err := c.QueryRow(ctx, "SELECT pg_try_advisory_lock(hashtext($1))", key).Scan(&acquired); err != nil {
+			return false, err
+		}
+		if !acquired {
+			return false, nil
+		}
+	} else {
+		if _, err := c.Exec(ctx, "SELECT pg_advisory_lock(hashtext($1))", key); err != nil {
+			return false, err
+		}
+		acquired = true
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, e := c.Exec(cleanup, "SELECT pg_advisory_unlock(hashtext($1))", key); e != nil {
+			_ = c.Conn().Close(cleanup)
+		}
+	}()
+	return true, fn()
+}
+
 func (d *DB) q(ctx context.Context) querier {
 	if tx, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
 		return tx

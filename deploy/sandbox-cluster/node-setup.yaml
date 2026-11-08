@@ -94,6 +94,9 @@ spec:
       labels: {app: node-setup}
     spec:
       hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: sandbox-netguard
       priorityClassName: system-node-critical
       tolerations: [{operator: Exists}]
       initContainers:
@@ -109,6 +112,8 @@ spec:
       - name: setup
         image: busybox:1.37
         env:
+        - name: NODE_NAME
+          valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
         - {name: RUNSC_VERSION, value: "20261102.0"}
         - {name: RUNSC_PLATFORM, value: systrap}
         - {name: RUNSC_ALLOW_SUID, value: "true"}   # sudo in sandboxes; see setup.sh. Installer: sandbox.allow_suid
@@ -118,16 +123,30 @@ spec:
           set -e
           nsenter -t 1 -m -u -i -n -p -- env RUNSC_VERSION="$RUNSC_VERSION" RUNSC_PLATFORM="$RUNSC_PLATFORM" \
             RUNSC_ALLOW_SUID="$RUNSC_ALLOW_SUID" bash -c "$(cat /setup/setup.sh)"
-          touch /tmp/ready
-          exec sleep 2147483647
+          # Static CNI guard runs on the host, before any customer container starts.
+          # tc is host iproute2; update the token/config without letting Cilium own/rewrite the chain.
+          nsenter -t 1 -m -u -i -n -p -- bash -c 'command -v tc >/dev/null || (apt-get update -qq && apt-get install -y -qq iproute2)'
+          while true; do
+            API_SERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" /runtime/sandbox-netguard -install
+            touch /tmp/ready
+            sleep 30
+          done
         readinessProbe:
           exec: {command: [test, -f, /tmp/ready]}
           periodSeconds: 5
         securityContext: {privileged: true}
         resources:
           requests: {cpu: 10m, memory: 16Mi}
-        volumeMounts: [{name: setup, mountPath: /setup}]
+        volumeMounts:
+        - {name: setup, mountPath: /setup}
+        - {name: sandbox-runtime, mountPath: /runtime, subPath: bin, readOnly: true}
+        - {name: cni-config, mountPath: /host/etc/cni/net.d}
+        - {name: cni-bin, mountPath: /host/opt/cni/bin}
       volumes:
+      - name: cni-config
+        hostPath: {path: /etc/cni/net.d, type: DirectoryOrCreate}
+      - name: cni-bin
+        hostPath: {path: /opt/cni/bin, type: Directory}
       - name: setup
         configMap: {name: node-setup}
       - name: sandbox-runtime

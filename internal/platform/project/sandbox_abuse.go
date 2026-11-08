@@ -1,0 +1,322 @@
+package project
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"regexp"
+	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
+)
+
+const SandboxAbuseResource = "SANDBOX_ABUSE"
+
+type captureLockKey struct{}
+
+type sandboxNotifier interface {
+	SendTemplate(context.Context, string, []string, map[string]any) error
+}
+
+// SetSandboxSafety wires durable observation/rotation state and the existing mail path.
+func (h *Handler) SetSandboxSafety(store *pgdoc.Store, n sandboxNotifier) {
+	h.sbSafety = store
+	h.sbNotifier = n
+}
+func (h *Handler) RunSandboxAbuse(ctx context.Context) {
+	if h.sbSafety == nil || h.sandboxFor == nil || h.esSvc == nil || h.audit == nil {
+		return
+	}
+	services, err := h.esSvc.List(ctx)
+	if err != nil {
+		return
+	}
+	for i := range services {
+		es := &services[i]
+		if !es.IsSandbox() {
+			continue
+		}
+		ss, err := h.sandboxFor(es)
+		if err != nil {
+			continue
+		}
+		p := ss.Config().Abuse.WithDefaults()
+		if p.Disabled {
+			continue
+		}
+		samples, err := ss.AbuseSamples(ctx)
+		if err != nil {
+			slog.Warn("sandbox abuse: telemetry unavailable; no action", "service", es.ID)
+			// Invalidate previous windows immediately, even if a manual retry happens inside maxGap.
+			_, _ = h.sbSafety.DeleteMany(ctx, pgdoc.M{"_id": pgdoc.M{"$regex": "^abuse:" + regexp.QuoteMeta(es.ID) + ":"}})
+			continue
+		}
+		for _, x := range samples {
+			proj, err := h.svc.repo.FindByID(ctx, x.ProjectID)
+			if err != nil || proj == nil {
+				continue
+			}
+			attached := false
+			for _, id := range proj.ServiceIDs() {
+				if id == es.ID {
+					attached = true
+				}
+			}
+			if !attached {
+				continue
+			}
+			flag := false
+			key := "abuse:" + es.ID + ":" + x.ProjectID + ":" + x.SandboxID
+			err = h.sbSafety.DB().WithTx(ctx, func(tc context.Context) error {
+				if err := h.sbSafety.DB().LockXact(tc, key); err != nil {
+					return err
+				}
+				var o sandbox.Observation
+				if _, err := h.sbSafety.GetForUpdate(tc, key, &o); err != nil {
+					return err
+				}
+				next, f := o.Next(x, p, time.Now().UTC())
+				flag = f
+				if err := h.sbSafety.Upsert(tc, key, next); err != nil {
+					return err
+				}
+				if !flag {
+					return nil
+				}
+				ev := audit.SystemEvent()
+				ev.EventContext = audit.ContextProject
+				ev.OrganizationID = proj.OrganizationID
+				ev.ProjectID = proj.ID
+				ev.ResourceType = SandboxAbuseResource
+				ev.ResourceID = x.SandboxID
+				ev.Action = "DETECTED"
+				ev.Outcome = audit.OutcomeSuccess
+				ev.ResourceMetadata = map[string]any{"serviceId": es.ID, "rule": "sustained-cpu-without-activity", "windowSeconds": p.WindowSeconds, "cpuPercent": p.CPUPercent, "action": p.Action}
+				return h.audit.Log(tc, ev)
+			})
+			if err != nil {
+				slog.Error("sandbox abuse: persist failed", "service", es.ID)
+				continue
+			}
+			if !flag {
+				continue
+			}
+			// Event is durable before any notification/action. Email includes only scoped identifiers,
+			// never image/env/exec/network addresses or credentials.
+			if h.sbNotifier != nil {
+				if err := h.sbNotifier.SendTemplate(ctx, "sandbox_abuse_alert", p.NotifyEmails, map[string]any{"projectId": proj.ID, "sandboxId": x.SandboxID, "serviceId": es.ID, "action": p.Action}); err != nil {
+					slog.Warn("sandbox abuse: mail delivery failed", "service", es.ID)
+				}
+			}
+			if p.Action == "alert" {
+				continue
+			}
+			// Re-resolve attachment and provider settings after notification: no action with stale ownership/config.
+			freshProject, pe := h.svc.repo.FindByID(ctx, proj.ID)
+			freshES, se := h.esSvc.Get(ctx, es.ID)
+			if pe != nil || se != nil || freshProject == nil || freshES == nil || !freshProject.HasService(es.ID) || freshES.SandboxConfig().Abuse.WithDefaults().Action != p.Action {
+				continue
+			}
+			acquired, actionErr := h.sbSafety.DB().WithAdvisoryLock(ctx, "sandbox-capture:"+es.ID+":"+proj.ID+":"+x.SandboxID, true, func() error {
+				ctx := context.WithValue(ctx, captureLockKey{}, x.SandboxID)
+				err := ss.CheckIdentity(ctx, x)
+				if err == nil {
+					c := &e2bCaller{proj: proj, es: es, ss: ss}
+					// A pause/resume/capture in progress is never cancelled by this heuristic.
+					if h.loadPaused(ctx, proj.ID, x.SandboxID) != nil {
+						err = errSandboxBusy
+					} else if p.Action == "pause" {
+						err = h.pauseSandbox(ctx, c, x.SandboxID)
+					} else {
+						// Never kill during snapshot assembly, including a named snapshot (no paused record).
+						builds, be := ss.ListBuilds(ctx, proj.ID)
+						if be != nil {
+							return be
+						}
+						for _, b := range builds {
+							if b["status"] != sandbox.StatusDeleted {
+								return errSandboxBusy
+							}
+						}
+						err = h.underPauseLock(ctx, c, x.SandboxID, func() error {
+							if err := ss.CheckIdentity(ctx, x); err != nil {
+								return err
+							}
+							if cr := h.e2bRow(ctx, c, x.SandboxID); cr != nil {
+								return h.sandboxDelete(ctx, es, proj, cr)
+							}
+							return ss.DeleteSandbox(ctx, proj.ID, x.SandboxID)
+						})
+					}
+				}
+				return err
+			})
+			err = actionErr
+			if !acquired && err == nil {
+				err = errSandboxBusy
+			}
+			ev := audit.SystemEvent()
+			ev.EventContext = audit.ContextProject
+			ev.OrganizationID = proj.OrganizationID
+			ev.ProjectID = proj.ID
+			ev.ResourceType = SandboxAbuseResource
+			ev.ResourceID = x.SandboxID
+			ev.Action = "ACTION_" + p.Action
+			ev.Outcome = audit.OutcomeSuccess
+			ev.ResourceMetadata = map[string]any{"serviceId": es.ID, "status": "requested"}
+			if err != nil {
+				ev.Outcome = audit.OutcomeFailure
+				ev.ResourceMetadata["status"] = "refused-or-failed"
+			}
+			if e := h.audit.Log(ctx, ev); e != nil {
+				slog.Error("sandbox abuse: action audit failed")
+			}
+		}
+	}
+}
+
+type rotationState struct {
+	Started   time.Time `json:"started"`
+	Completed time.Time `json:"completed"`
+	Nodes     []string  `json:"nodes"`
+	Active    bool      `json:"active"`
+	Scope     string    `json:"scope"`
+}
+
+// withSandboxStart excludes rotation using a provider-wide database lock across
+// CR creation/resume. It also fences starts while a durable rollout is active.
+func (h *Handler) withSandboxStart(ctx context.Context, service string, fn func(context.Context) error) error {
+	if h.sbSafety == nil {
+		return fn(ctx)
+	}
+	return h.sbSafety.DB().WithTx(ctx, func(tc context.Context) error {
+		if err := h.sbSafety.DB().LockXact(tc, "sandbox-start:"+service); err != nil {
+			return err
+		}
+		var state rotationState
+		if _, err := h.sbSafety.Get(tc, "rotation:"+service, &state); err != nil {
+			return err
+		}
+		if state.Active {
+			return fmt.Errorf("sandbox worker rotation in progress; retry later")
+		}
+		return fn(tc)
+	})
+}
+
+// RunSandboxRotation is wait-only and default-off. A failed patch/unknown
+// convergence keeps the durable start fence closed for operator intervention.
+func (h *Handler) RunSandboxRotation(ctx context.Context) {
+	if h.sbSafety == nil || h.sandboxFor == nil {
+		return
+	}
+	services, err := h.esSvc.List(ctx)
+	if err != nil {
+		return
+	}
+	for i := range services {
+		es := &services[i]
+		if !es.IsSandbox() {
+			continue
+		}
+		ss, err := h.sandboxFor(es)
+		if err != nil {
+			continue
+		}
+		p := ss.Config().Rotation
+		if !p.Enabled {
+			continue
+		}
+		var cordoned []string
+		err = h.sbSafety.DB().WithTx(ctx, func(tc context.Context) error {
+			if err := h.sbSafety.DB().LockXact(tc, "sandbox-start:"+es.ID); err != nil {
+				return err
+			}
+			key := "rotation:" + es.ID
+			var state rotationState
+			if _, err := h.sbSafety.GetForUpdate(tc, key, &state); err != nil {
+				return err
+			}
+			now := time.Now().UTC()
+			if state.Active {
+				scope, _ := json.Marshal(p)
+				if state.Scope != string(scope) {
+					return fmt.Errorf("active rotation scope changed: restore settings before continuing")
+				}
+				done, err := ss.RotationConverged(ctx, state.Nodes)
+				if err != nil {
+					return err
+				}
+				if !done {
+					return nil
+				}
+				state.Active = false
+				state.Completed = now
+				return h.sbSafety.Upsert(tc, key, state)
+			}
+			if state.Completed.IsZero() {
+				state.Completed = now
+				return h.sbSafety.Upsert(tc, key, state)
+			}
+			if now.Sub(state.Completed) < time.Duration(p.IntervalHours)*time.Hour {
+				return nil
+			}
+			plan, err := ss.RotationInspect(ctx)
+			if err != nil {
+				return err
+			}
+			if !plan.Ready {
+				return nil
+			}
+			if err := ss.CordonRotationNodes(ctx, plan.Nodes, true); err != nil {
+				return err
+			}
+			cordoned = plan.Nodes
+			again, err := ss.RotationRecheck(ctx)
+			if err != nil || !again.Ready {
+				_ = ss.CordonRotationNodes(context.WithoutCancel(ctx), plan.Nodes, false)
+				if err != nil {
+					return err
+				}
+				return nil
+			}
+			scope, _ := json.Marshal(p)
+			state.Scope = string(scope)
+			state.Active = true
+			state.Started = now
+			state.Nodes = plan.Nodes
+			if err := h.sbSafety.Upsert(tc, key, state); err != nil {
+				return err
+			}
+			ev := audit.SystemEvent()
+			ev.ResourceType = "SANDBOX_ROTATION"
+			ev.ResourceID = es.ID
+			ev.Action = "ROLLOUT_REQUESTED"
+			ev.Outcome = audit.OutcomeSuccess
+			return h.audit.Log(tc, ev)
+		})
+		if err != nil {
+			if len(cordoned) > 0 {
+				_ = ss.CordonRotationNodes(context.WithoutCancel(ctx), cordoned, false)
+			}
+			slog.Warn("sandbox rotation preflight failed", "service", es.ID)
+			continue
+		}
+		// Fence must commit BEFORE the first CAPI patch; crash here is safe and resumed
+		// on the next tick. rolloutAfter is idempotent for this fixed timestamp.
+		var state rotationState
+		if _, err := h.sbSafety.Get(ctx, "rotation:"+es.ID, &state); err != nil || !state.Active {
+			continue
+		}
+		scope, _ := json.Marshal(p)
+		if state.Scope != string(scope) {
+			continue
+		}
+		if err := ss.StartRotation(ctx, state.Started); err != nil {
+			slog.Warn("sandbox rotation patch failed; start fence retained", "service", es.ID)
+		}
+	}
+}

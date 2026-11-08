@@ -232,6 +232,10 @@ pc_defaults:
     templates:
       python: {image: "pin:python", cpu: 1, memoryGiB: 2, description: Python 3.12}
     limits: {}
+    egress_mbps: 100
+    abuse: {disabled: false, cpuPercent: 90, windowSeconds: 900, maxGapSeconds: 90, trafficBytes: 65536, action: alert, notifyEmails: []}
+    # Enable only after configuring a separate management credential + exact MD allowlist in the provider.
+    rotation: {enabled: false, intervalHours: 168, namespace: pc-sandbox, cluster: pc-sandbox, machineDeployments: []}
 
   nas:
     host: ""                     # TrueNAS address; empty = no NAS stage
