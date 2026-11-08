@@ -1,0 +1,528 @@
+{
+ "astroDocs": {
+  "fields": [],
+  "name": "astro-docs",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://mcp.docs.astro.build/mcp"
+ },
+ "brave": {
+  "cmd": [
+   "brave-search-mcp-server"
+  ],
+  "env": {
+   "BRAVE_API_KEY": "{apiKey}",
+   "BRAVE_MCP_TRANSPORT": "stdio"
+  },
+  "fields": [
+   "apiKey"
+  ],
+  "name": "brave",
+  "required": [
+   "apiKey"
+  ]
+ },
+ "close": {
+  "fields": [
+   "apiKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {apiKey}"
+  },
+  "name": "close",
+  "required": [
+   "apiKey"
+  ],
+  "transport": "streamable-http",
+  "url": "https://mcp.close.com/mcp"
+ },
+ "cloudflareDocs": {
+  "fields": [],
+  "name": "cloudflare-docs",
+  "required": [],
+  "transport": "sse",
+  "url": "https://docs.mcp.cloudflare.com/sse"
+ },
+ "context7": {
+  "fields": [
+   "apiKey"
+  ],
+  "headers": {
+   "CONTEXT7_API_KEY": "{apiKey}"
+  },
+  "name": "context7",
+  "required": [
+   "apiKey"
+  ],
+  "transport": "streamable-http",
+  "url": "https://mcp.context7.com/mcp"
+ },
+ "dappierRemote": {
+  "fields": [
+   "dappierRemoteApiKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {dappierRemoteApiKey}"
+  },
+  "name": "dappier-remote",
+  "required": [
+   "dappierRemoteApiKey"
+  ],
+  "transport": "streamable-http",
+  "url": "https://mcp.dappier.com/mcp"
+ },
+ "deepwiki": {
+  "fields": [],
+  "name": "deepwiki",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://mcp.deepwiki.com/mcp"
+ },
+ "desktopCommander": {
+  "cmd": [
+   "desktop-commander"
+  ],
+  "fields": [
+   "paths"
+  ],
+  "name": "desktop-commander",
+  "required": [
+   "paths"
+  ]
+ },
+ "dodoPayments": {
+  "fields": [
+   "dodoPaymentsApiKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {dodoPaymentsApiKey}"
+  },
+  "name": "dodo-payments",
+  "required": [
+   "dodoPaymentsApiKey"
+  ],
+  "transport": "sse",
+  "url": "https://mcp.dodopayments.com/sse"
+ },
+ "duckduckgo": {
+  "cmd": [
+   "duckduckgo-mcp-server"
+  ],
+  "fields": [],
+  "name": "duckduckgo",
+  "required": []
+ },
+ "exa": {
+  "cmd": [
+   "exa-mcp-server"
+  ],
+  "env": {
+   "EXA_API_KEY": "{apiKey}"
+  },
+  "fields": [
+   "apiKey"
+  ],
+  "name": "exa",
+  "required": [
+   "apiKey"
+  ]
+ },
+ "fetch": {
+  "cmd": [
+   "mcp-server-fetch"
+  ],
+  "fields": [],
+  "name": "fetch",
+  "required": []
+ },
+ "filesystem": {
+  "cmd": [
+   "mcp-server-filesystem",
+   "{paths...}"
+  ],
+  "fields": [
+   "paths"
+  ],
+  "name": "filesystem",
+  "required": [
+   "paths"
+  ]
+ },
+ "findADomain": {
+  "fields": [],
+  "name": "find-a-domain",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://api.findadomain.dev/mcp"
+ },
+ "firecrawl": {
+  "cmd": [
+   "firecrawl-mcp"
+  ],
+  "env": {
+   "FIRECRAWL_API_KEY": "{apiKey}",
+   "FIRECRAWL_API_URL": "{url}"
+  },
+  "fields": [
+   "apiKey",
+   "creditCriticalThreshold",
+   "creditWarningThreshold",
+   "retryBackoffFactor",
+   "retryDelay",
+   "retryMax",
+   "retryMaxDelay",
+   "url"
+  ],
+  "name": "firecrawl",
+  "required": [
+   "apiKey",
+   "creditCriticalThreshold",
+   "creditWarningThreshold",
+   "retryBackoffFactor",
+   "retryDelay",
+   "retryMax",
+   "retryMaxDelay",
+   "url"
+  ]
+ },
+ "git": {
+  "cmd": [
+   "mcp-server-git"
+  ],
+  "fields": [
+   "paths"
+  ],
+  "name": "git",
+  "required": [
+   "paths"
+  ]
+ },
+ "githubOfficial": {
+  "fields": [
+   "githubPersonalAccessToken"
+  ],
+  "headers": {
+   "Authorization": "Bearer {githubPersonalAccessToken}"
+  },
+  "name": "github-official",
+  "required": [
+   "githubPersonalAccessToken"
+  ],
+  "transport": "streamable-http",
+  "url": "https://api.githubcopilot.com/mcp/"
+ },
+ "gitmcp": {
+  "fields": [],
+  "name": "gitmcp",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://gitmcp.io/docs"
+ },
+ "hubspot": {
+  "fields": [
+   "apiKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {apiKey}"
+  },
+  "name": "hubspot",
+  "required": [
+   "apiKey"
+  ],
+  "transport": "streamable-http",
+  "url": "https://app.hubspot.com/mcp/v1/http"
+ },
+ "huggingFace": {
+  "fields": [],
+  "name": "hugging-face",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://huggingface.co/mcp"
+ },
+ "javadocs": {
+  "fields": [],
+  "name": "javadocs",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://www.javadocs.dev/mcp"
+ },
+ "llmtxt": {
+  "fields": [],
+  "name": "llmtxt",
+  "required": [],
+  "transport": "sse",
+  "url": "https://mcp.llmtxt.dev/sse"
+ },
+ "manifold": {
+  "fields": [],
+  "name": "manifold",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://api.manifold.markets/v0/mcp"
+ },
+ "markitdown": {
+  "cmd": [
+   "markitdown-mcp"
+  ],
+  "fields": [
+   "paths"
+  ],
+  "name": "markitdown",
+  "required": [
+   "paths"
+  ]
+ },
+ "memory": {
+  "cmd": [
+   "mcp-server-memory"
+  ],
+  "fields": [],
+  "name": "memory",
+  "required": []
+ },
+ "mercadoLibre": {
+  "fields": [
+   "mercadoLibreApiKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {mercadoLibreApiKey}"
+  },
+  "name": "mercado-libre",
+  "required": [
+   "mercadoLibreApiKey"
+  ],
+  "transport": "streamable-http",
+  "url": "https://mcp.mercadolibre.com"
+ },
+ "mercadoPago": {
+  "fields": [
+   "mercadoPagoApiKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {mercadoPagoApiKey}"
+  },
+  "name": "mercado-pago",
+  "required": [
+   "mercadoPagoApiKey"
+  ],
+  "transport": "streamable-http",
+  "url": "https://mcp.mercadopago.com"
+ },
+ "mongodb": {
+  "cmd": [
+   "mongodb-mcp-server"
+  ],
+  "env": {
+   "MDB_MCP_CONNECTION_STRING": "{mdbMcpConnectionString}"
+  },
+  "fields": [
+   "mdbMcpConnectionString"
+  ],
+  "name": "mongodb",
+  "required": [
+   "mdbMcpConnectionString"
+  ]
+ },
+ "notion": {
+  "cmd": [
+   "notion-mcp-server"
+  ],
+  "env": {
+   "OPENAPI_MCP_HEADERS": "{\"Authorization\": \"Bearer {internalIntegrationToken}\", \"Notion-Version\": \"2022-06-28\"}"
+  },
+  "fields": [
+   "internalIntegrationToken"
+  ],
+  "name": "notion",
+  "required": [
+   "internalIntegrationToken"
+  ]
+ },
+ "openmesh": {
+  "fields": [],
+  "name": "openmesh",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://api.openmesh.dev/mcp"
+ },
+ "openzeppelinCairo": {
+  "fields": [],
+  "name": "openzeppelin-cairo",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://mcp.openzeppelin.com/contracts/cairo/mcp"
+ },
+ "openzeppelinSolidity": {
+  "fields": [],
+  "name": "openzeppelin-solidity",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://mcp.openzeppelin.com/contracts/solidity/mcp"
+ },
+ "openzeppelinStellar": {
+  "fields": [],
+  "name": "openzeppelin-stellar",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://mcp.openzeppelin.com/contracts/stellar/mcp"
+ },
+ "openzeppelinStylus": {
+  "fields": [],
+  "name": "openzeppelin-stylus",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://mcp.openzeppelin.com/contracts/stylus/mcp"
+ },
+ "perplexityAsk": {
+  "cmd": [
+   "mcp-server-perplexity-ask"
+  ],
+  "env": {
+   "PERPLEXITY_API_KEY": "{perplexityApiKey}"
+  },
+  "fields": [
+   "perplexityApiKey"
+  ],
+  "name": "perplexity-ask",
+  "required": [
+   "perplexityApiKey"
+  ]
+ },
+ "polarSignals": {
+  "fields": [
+   "polarSignalsApiKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {polarSignalsApiKey}"
+  },
+  "name": "polar-signals",
+  "required": [
+   "polarSignalsApiKey"
+  ],
+  "transport": "streamable-http",
+  "url": "https://api.polarsignals.com/api/mcp/"
+ },
+ "remote": {
+  "fields": [],
+  "name": "remote-mcp",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://mcp.remote-mcp.com"
+ },
+ "rube": {
+  "fields": [
+   "apiKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {apiKey}"
+  },
+  "name": "rube",
+  "required": [
+   "apiKey"
+  ],
+  "transport": "streamable-http",
+  "url": "https://rube.app/mcp"
+ },
+ "semgrep": {
+  "fields": [],
+  "name": "semgrep",
+  "required": [],
+  "transport": "streamable-http",
+  "url": "https://mcp.semgrep.ai/mcp"
+ },
+ "sequentialthinking": {
+  "cmd": [
+   "mcp-server-sequential-thinking"
+  ],
+  "fields": [],
+  "name": "sequentialthinking",
+  "required": []
+ },
+ "shortIo": {
+  "fields": [
+   "shortIoApiKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {shortIoApiKey}"
+  },
+  "name": "short-io",
+  "required": [
+   "shortIoApiKey"
+  ],
+  "transport": "streamable-http",
+  "url": "https://ai-assistant.short.io/mcp"
+ },
+ "stripe": {
+  "fields": [
+   "secretKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {secretKey}"
+  },
+  "name": "stripe",
+  "required": [
+   "secretKey"
+  ],
+  "transport": "streamable-http",
+  "url": "https://mcp.stripe.com"
+ },
+ "tavily": {
+  "cmd": [
+   "tavily-mcp"
+  ],
+  "env": {
+   "TAVILY_API_KEY": "{apiKey}"
+  },
+  "fields": [
+   "apiKey"
+  ],
+  "name": "tavily",
+  "required": [
+   "apiKey"
+  ]
+ },
+ "telnyx": {
+  "fields": [
+   "apiKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {apiKey}"
+  },
+  "name": "telnyx",
+  "required": [
+   "apiKey"
+  ],
+  "transport": "streamable-http",
+  "url": "https://api.telnyx.com/v2/mcp"
+ },
+ "time": {
+  "cmd": [
+   "mcp-server-time"
+  ],
+  "fields": [],
+  "name": "time",
+  "required": []
+ },
+ "wayfound": {
+  "fields": [
+   "mcpApiKey"
+  ],
+  "headers": {
+   "Authorization": "Bearer {mcpApiKey}"
+  },
+  "name": "wayfound",
+  "required": [
+   "mcpApiKey"
+  ],
+  "transport": "sse",
+  "url": "https://app.wayfound.ai/sse"
+ },
+ "wikipedia": {
+  "cmd": [
+   "wikipedia-mcp"
+  ],
+  "fields": [],
+  "name": "wikipedia-mcp",
+  "required": []
+ }
+}
