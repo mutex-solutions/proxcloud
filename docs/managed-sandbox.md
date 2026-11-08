@@ -19,8 +19,10 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 > what of E2B does not work is in [e2b-compat.md](e2b-compat.md). SB6a (section 6) adds the sandbox registry: Zot on
 > the services cluster with its blobs in the object store, one pull account per project, the built-in images copied in
 > by digest and pre-pulled on every node. SB6b (section 7) adds custom templates built with the E2B SDKs (a build pod
-> per build, a build account per project, presigned contexts) and the pruning of unreferenced images. Not yet: snapshots
-> and pause (SB7, so the wake endpoint has nothing to resume yet), MCP gateway (SB8), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
+> per build, a build account per project, presigned contexts) and the pruning of unreferenced images. SB8 (section 9)
+> adds the `mcp-gateway` template for `Sandbox.create(mcp=...)`: the gateway and its 47-server catalog, each server's
+> keys from the tenant only. Not yet: snapshots and pause (SB7, so the wake endpoint has nothing to resume yet), GPUs
+> (SB9). Section 0 records the hand-built lab spike. Phase order
 > and decisions: the sandbox plan (owner document, not in this repository).
 
 ## 0. SB0 lab spike (2026-11-07)
@@ -353,6 +355,30 @@ in `node-setup.yaml` was already there unchanged. Results:
   `kubernetes` ClusterIP dropped, internet and cluster DNS open, TCP 25 dropped, 587 open.
 - IPv6 check: passes on the worker; with a ULA address added on a dummy interface of the worker, node-setup refused the
   node (CrashLoopBackOff, the address in its log) and the check failed; with it removed, both passed again.
+
+### 1.4 sudo in sandboxes: runsc `allow-suid`
+
+`node-setup` writes `allow-suid = "true"` into the nodes' runsc config unless `RUNSC_ALLOW_SUID` is `false`
+(installer: `sandbox.allow_suid`, default `true`). Without it gVisor ignores the setuid bit, and the SB8 lab drill saw
+every `sudo` in the base template fail with "effective uid is not 0 ... nosuid"; the base template gives user `user`
+passwordless sudo, and E2B templates and agents expect it to work. The earlier implementation runs runsc the same way
+(its owner approved it for E2B parity). For ProxCloud it is the default chosen pending the owner's decision.
+
+What it changes:
+
+- Every setuid binary in a sandbox's image works, so any process in the sandbox can become root of that sandbox.
+- The tenant gains nothing: envd already runs commands as root for whoever holds the sandbox's access token, and
+  `startAsRoot` templates start as root.
+- The node gains no exposure from root alone: root inside gVisor is root of gVisor's own kernel; the sentry keeps
+  its seccomp filter and namespaces, and the guardrail, the VM firewall and the isolation rules see the same packets.
+- What it does widen: code that got in as `user` (a compromised dependency, a prompt-injected agent) can start an
+  escape attempt from root inside the sentry instead of from an unprivileged user.
+- It is a node-wide runsc setting, so it also applies to the template build and snapshot pods on the sandbox nodes,
+  not only to sandboxes. That widens nothing there: the build (kaniko) already runs as root.
+
+Setting it off: `sandbox.allow_suid: false` and stage 55, or `RUNSC_ALLOW_SUID=false` in the DaemonSet; node-setup
+rewrites `/etc/containerd/runsc.toml` and restarts containerd. New sandboxes pick the change up; running ones keep
+theirs.
 
 ## 2. Layer 1: the VM firewall on the workers (SB2b)
 
@@ -953,7 +979,15 @@ installer stage 60 sets both when `sandbox.domain` is set), every sandbox mounts
 and runs `/.proxcloud/sandbox-init` as PID 1: it creates the template's user if the image has none, starts envd
 (`-isnotfc`, port 49983), posts envd's `/init` over localhost with the sandbox's env, user, workdir and access token,
 runs the template's start command (as root with `startAsRoot`), marks the pod ready once the ready command exits 0,
-restarts envd if it dies, and relays ports bound to localhost to the pod address. A restarted envd has no access token
+restarts envd if it dies, and relays ports bound to localhost to the pod address. The sandbox's env (envd's own and
+the defaults it gives every process) is the image's ENV plus the tenant's `envVars`, without the `PROXCLOUD_*` control
+variables and without the `KUBERNETES_*` ones the kubelet puts into every container even with service links off (the
+SB8 drill found `KUBERNETES_SERVICE_*` in every process); the API refuses `envVars` with either prefix. sandbox-init's
+own `/proc/1/environ` still holds both sets as the kubelet passed them (a process cannot rewrite its start
+environment); it is readable by root in the sandbox, which with sudo includes `user`, and holds nothing that root there
+does not already have: envd's access token, which root can use anyway, and the API server's cluster address, which the
+guardrail blocks. A restarted
+envd has no access token
 until its `/init`, and envd without a token lets every request through, so sandbox-init first drops the ready marker
 (the readiness probe turns the pod NotReady and sandbox-proxy routes only to Ready pods), waits 5 s (probe period plus
 the proxy's 2 s lookup cache), starts envd, and puts the marker back only once `/init` succeeded. The two binaries come
@@ -1287,3 +1321,117 @@ policy, the registry CA and both Roles, and records the bucket (endpoint, addres
   same objects by hand; nothing of the registry or the build namespace was left on either cluster. These paths have unit
   tests only (build pod shape and accounts, the account sync's rules and Secrets, the OCI client against a fake
   registry, the S3 store against a fake S3, the fence rule, the OpenAPI parity).
+
+## 9. MCP gateway (SB8)
+
+`Sandbox.create(mcp={...})` in the E2B SDKs starts a sandbox from the template `mcp-gateway`, runs
+`mcp-gateway --config '<json>'` in it as root with a token of its own (`GATEWAY_ACCESS_TOKEN`), and then talks MCP
+(streamable HTTP) to `https://50005-<id>.<domain>/mcp` with that bearer (`get_mcp_url()`, `get_mcp_token()`). The
+portal is not on that path: it only accepts `mcp` as an object on create and never stores or logs it, since it holds
+the tenant's server keys. The section number follows the phases (§8 is SB7's).
+
+```
+SDK ──POST /e2b/sandboxes {templateID: mcp-gateway, mcp: {...}}──► portal (shape check only, mcp dropped)
+ ├─envd: mcp-gateway --config '<json>' (root, GATEWAY_ACCESS_TOKEN) ── writes /etc/mcp-gateway/{config.json,.token} 0600
+ │        └─ mcp-gateway serve (own session, log /var/log/mcp-gateway) ── per server: stdio process or remote client
+ └─https://50005-<id>.<domain>/mcp (Bearer token) ──► sandbox-proxy ──► gateway: tools "<server>-<tool>"
+```
+
+### 9.1 What runs in the sandbox
+
+- **`cmd/mcp-gateway`** (ported from EE): resolves the config against the embedded catalog, fills each server's
+  placeholders (`{apiKey}`, `{paths...}`) from the tenant's values, starts package servers as child processes and
+  connects to remote ones (streamable HTTP or SSE, headers filled the same way), and offers every upstream tool as
+  `<catalog name>-<tool>`. `/health` answers 503 while starting, 500 with the cause when a server failed, 200 once all
+  are up; `--config` waits up to 50 s for that (under the SDK's 60 s command limit). `github/<owner>/<repo>` keys clone
+  that repository and run its `run_cmd`, as on E2B.
+- **The catalog** (`cmd/mcp-gateway/catalog.json`, regenerated by `gencatalog.py` from E2B's SDK spec and Docker's MCP
+  catalog): 47 servers. Remote ones need nothing in the image; package ones (`fetch`, `time`, `git`, `filesystem`,
+  `memory`, `sequentialthinking`, `duckduckgo`, `wikipedia`, `markitdown`, `desktopCommander`, `notion`, `brave`,
+  `exa`, `firecrawl`, `tavily`, `mongodb`, `perplexityAsk`) are baked into the template, pinned. E2B servers that only
+  exist as Docker images are not offered; an unknown name fails the create.
+- **The template** (`deploy/templates/mcp-gateway`, built by `build.sh` and the `sandbox-templates` workflow, which
+  now also runs on changes under `cmd/mcp-gateway/`): the base template, the gateway binary, the npm servers under
+  `/opt/mcp/npm` and the Python ones as uv tools under `/opt/mcp/bin`. The servers run on a Node 22 of their own
+  (`/opt/mcp/node`, first on the servers' PATH): the base image's Node 20.9 cannot run `brave`, `firecrawl` or `mongodb`
+  (found on the lab, below); the sandbox user's `node` stays the base's. The build fails unless every package server
+  starts and answers MCP `initialize` and `tools/list` (`mcp-gateway pull`, with placeholder values), not only when a
+  binary is missing.
+- **Restart**: the template's start command is `mcp-gateway boot`, which restarts the gateway from the saved config,
+  so a sandbox that comes back after a resume or fork (SB7: processes are gone, files stay) serves the same tools.
+
+Provider template entry (as stage 60 would write it once `mcp-gateway` is pinned in `deploy/templates/images.yaml` by
+the workflow; until then an operator adds it with the registry's copy):
+
+```json
+"mcp-gateway": {"image": "<registry>/library/sandbox-mcp-gateway:<tag>@sha256:<digest>", "cpu": 2, "memoryGiB": 4,
+                "startCmd": "mcp-gateway boot", "startAsRoot": true, "user": "user", "workdir": "/home/user"}
+```
+
+With the pin in `images.yaml` the registry stage copies it into Zot and the template prepull pulls it on every node,
+like every other built-in image (section 6.3): the image is about 6 GB, which a cold pull cannot fit into the create's
+50 s.
+
+### 9.2 Where a server's secrets come from
+
+Only from the tenant. A server's key is a field of the tenant's `mcp` config (`{"brave": {"apiKey": "..."}}`), filled
+into that server's environment, command or headers by the gateway inside the sandbox; a missing required field fails
+the create (`brave: missing "apiKey"`), and nothing falls back to a platform value:
+
+- the image holds no account or key of any server (the catalog has placeholders only);
+- the portal drops `mcp` after the shape check: it is not in the sandbox row, the Sandbox CR, the database or the log;
+- the sandbox gets no platform credential to leak: no service account token, no service links, and `sandbox-init`
+  strips every `PROXCLOUD_` and `KUBERNETES_` variable before envd and its children (section 5.3);
+- each package server's environment holds only what it needs: its own catalog env (or a `github/...` server's `envs`), `PATH` with the
+  servers' directories first, and an allowlist of the gateway's environment (`HOME`, `USER`, `LOGNAME`, `LANG`,
+  `LC_ALL`, `TZ`, `TERM`, `TMPDIR`, the proxy variables, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`).
+  Its environment carries neither the gateway's bearer (`GATEWAY_ACCESS_TOKEN`, which the SDK puts in the gateway's
+  environment) nor another server's key nor the sandbox's other `envVars`. This is environment hygiene, not a
+  boundary between servers: every package server runs as root, as the gateway does, so one that wants to can read
+  `/etc/mcp-gateway/config.json` (all servers' keys), `/etc/mcp-gateway/.token` and `/proc/<gateway pid>/environ`.
+  The servers are the ones the tenant picked, in the tenant's sandbox; running them under a uid of their own is the
+  step that would make it a boundary (not done);
+- a remote server's headers go to that server's own scheme and host only: a redirect to another host (or to plain
+  http) is followed without them;
+- the config and the gateway token are root-only files (0600) in the sandbox, out of reach of `user` code without
+  sudo; the gateway's own process does not carry the keys in its environment.
+
+Vendor telemetry is off by default: every server starts with `DO_NOT_TRACK=1`, `DESKTOP_COMMANDER_DISABLE_TELEMETRY=1`,
+`MDB_MCP_TELEMETRY=disabled` and `ORT_DISABLE_TELEMETRY=1` (desktopCommander sends analytics and mongodb telemetry
+unless told not to; markitdown's onnxruntime writes a device id and a session file). The build check runs the servers
+with a throwaway `HOME` and `TMPDIR`, so the image carries no state from it (desktopCommander's client id, mongodb's log,
+onnxruntime's device id), and the build fails if any of it is left. Not covered by the switches: desktopCommander
+fetches its feature flags from desktopcommander.app every 5 minutes from every sandbox that runs it (no client id is
+sent), and its npm postinstall sends an install event during the image build.
+
+A tenant's keys are as safe as anything else in their sandbox: whoever runs code in it as root can read them, which is
+the tenant's choice. `tests/e2b-compat/mcp.py` checks the keyed path with a dummy key (the server has it, no platform
+variable or gateway bearer is in its environment, no token is mounted, a missing key fails the create).
+
+### 9.3 Measured on the lab (2026-11-08)
+
+A compose stack on this branch (`pc-sb8`, scheduler off), its own Proxmox provider (pool prefix `pc8-`, the SB0
+workers' pool, the registry address in `config.sandbox.registry`, an entry appliance VM of its own) and a sandbox
+provider with envd under a lab domain and the templates `base` and `mcp-gateway`, both pinned by digest on a Zot of
+this drill (namespace `sb8-registry` on the services cluster, own MetalLB address, RustFS bucket with its own service
+user, the account sync limited to this provider's namespaces with `SERVICE_ID`), deployed from stage 55's own template.
+
+- **Registry**: the runtime, proxy, base and mcp-gateway images (the last about 6 GB) copied in with `skopeo` as the
+  stage does, recorded by digest. Attaching the provider to two projects made their namespaces; the account sync wrote
+  each one's `sandbox-template-pull` within 30 s. With project A's account `library/sandbox-mcp-gateway` resolved to the
+  pushed digest, anonymous reads were refused and a write to `library/` was denied. The 6 GB push was reset once by the
+  registry's address mid-blob and went through on skopeo's retry (both pushes).
+- **The gateway image** (the same image, run under Docker on the workstation as the SDK drives it: `--config` as root
+  with a token, then MCP over HTTP; runc, not gVisor): with `deepwiki` (remote), `fetch`, `time` and `brave` (dummy key)
+  it was up in about 1 s, `tools/list` answered 15 tools named `<server>-<tool>`, `time-get_current_time` and
+  `deepwiki-read_wiki_structure` ran, no bearer got 401, the token file is 0600, `brave`'s process had the tenant's key
+  and the gateway's did not, the key was in no file but the 0600 config, `{"brave": {}}` failed with
+  `missing "apiKey"`, an unknown name with "not available on ProxCloud", and after a container restart `mcp-gateway boot`
+  served the same tools. **Found and fixed:** on the base image's Node 20.9 `brave`, `firecrawl` and `mongodb` crashed
+  at start (`SyntaxError: Unexpected token 'with'`, `process.loadEnvFile is not a function`), so a create with any of
+  them failed; EE's image has the same base. EE's build check only looked for the binaries; it now starts each server.
+- **Not run on the lab**: the sandbox path itself (the SDK creating an `mcp-gateway` sandbox on the SB0 workers,
+  `tests/e2b-compat/mcp.py` and `catalog.py base mcp-gateway`). It needs the nodes to trust this Zot's CA, and applying
+  the trust DaemonSet (the hostPath writer of `registry.yaml`, under this drill's own names) on SB0 was refused by the
+  session's permission check; without it no node can pull from the registry. Pause and resume of a gateway sandbox
+  wait for SB7, which is not merged.

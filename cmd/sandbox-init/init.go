@@ -23,15 +23,19 @@ var readyPath = "/run/proxcloud/ready"
 // container would otherwise leak into every `user` process.
 var perUserEnv = map[string]bool{"HOME": true, "USER": true, "LOGNAME": true, "HOSTNAME": true, "PWD": true, "SHLVL": true, "_": true}
 
+// kubeEnvPrefix: the kubelet sets KUBERNETES_SERVICE_HOST/PORT and KUBERNETES_PORT* in every container, even with
+// enableServiceLinks off. They only point sandbox code at the cluster's API server, so they go like PROXCLOUD_*.
+const kubeEnvPrefix = "KUBERNETES_"
+
 // splitEnv separates user env (returned as a map: the image ENV plus the caller's envVars, which
-// become envd's defaults) from PROXCLOUD_* control vars (dropped). The returned slice is envd's own
-// environment: everything except PROXCLOUD_* entries.
+// become envd's defaults) from PROXCLOUD_* control vars and KUBERNETES_* (dropped). The returned slice is envd's own
+// environment: everything except those entries.
 func splitEnv(environ []string) (map[string]string, []string) {
 	user := map[string]string{}
 	var list []string
 	for _, kv := range environ {
 		k, v, ok := strings.Cut(kv, "=")
-		if !ok || strings.HasPrefix(k, envPrefix) {
+		if !ok || strings.HasPrefix(k, envPrefix) || strings.HasPrefix(k, kubeEnvPrefix) {
 			continue
 		}
 		list = append(list, kv)

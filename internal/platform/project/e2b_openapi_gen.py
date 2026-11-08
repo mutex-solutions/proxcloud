@@ -18,7 +18,7 @@ UPSTREAM = "e2b-dev/runtime@e85b9f5 spec/openapi.yml"
 # (method, path) -> ProxCloud difference, appended to the description. None = same as E2B.
 OPS = {
     ("get", "/health"): None,
-    ("post", "/sandboxes"): "ProxCloud: `secure` is ignored (envd always needs its token); `volumeMounts`, `mcp`, `autoPause` and `autoResume` → 400. Waits until the sandbox is ready, at most about 50 s, else 503. Passes the same checks as the native create: suspended project 409, suspended billing profile 403, provider DISABLED or a release gate not holding 503, project quota 429. Extensions: `gpu`, `cpuCount`, `memoryMB`.",
+    ("post", "/sandboxes"): "ProxCloud: `secure` is ignored (envd always needs its token); `volumeMounts`, `autoPause` and `autoResume` → 400; `mcp` must be an object (the SDK starts the gateway). Waits until the sandbox is ready, at most about 50 s, else 503. Passes the same checks as the native create: suspended project 409, suspended billing profile 403, provider DISABLED or a release gate not holding 503, project quota 429. Extensions: `gpu`, `cpuCount`, `memoryMB`.",
     ("post", "/v2/sandboxes"): "Same as POST /sandboxes.",
     ("get", "/sandboxes"): "ProxCloud: everything in one page.",
     ("get", "/v2/sandboxes"): "ProxCloud: running sandboxes only (nothing is paused); everything in one page.",

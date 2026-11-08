@@ -1917,7 +1917,7 @@
    },
    "post": {
     "deprecated": true,
-    "description": "Create a sandbox from the template. All system communication with the sandbox is secured. Use POST /v2/sandboxes instead.\n\nProxCloud: `secure` is ignored (envd always needs its token); `volumeMounts`, `mcp`, `autoPause` and `autoResume` \u2192 400. Waits until the sandbox is ready, at most about 50 s, else 503. Passes the same checks as the native create: suspended project 409, suspended billing profile 403, provider DISABLED or a release gate not holding 503, project quota 429. Extensions: `gpu`, `cpuCount`, `memoryMB`.",
+    "description": "Create a sandbox from the template. All system communication with the sandbox is secured. Use POST /v2/sandboxes instead.\n\nProxCloud: `secure` is ignored (envd always needs its token); `volumeMounts`, `autoPause` and `autoResume` \u2192 400; `mcp` must be an object (the SDK starts the gateway). Waits until the sandbox is ready, at most about 50 s, else 503. Passes the same checks as the native create: suspended project 409, suspended billing profile 403, provider DISABLED or a release gate not holding 503, project quota 429. Extensions: `gpu`, `cpuCount`, `memoryMB`.",
     "requestBody": {
      "content": {
       "application/json": {

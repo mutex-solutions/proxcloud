@@ -385,6 +385,8 @@
           # No sandbox domain, so no envd (stage 60): nothing to install, and no runtime image to pull.
           sed -i '/^      initContainers:/,/^      containers:/{/^      containers:/!d}' node-setup.yaml
         fi
+        sed -i "s#{name: RUNSC_ALLOW_SUID, value: \"true\"}#{name: RUNSC_ALLOW_SUID, value: \"$ALLOW_SUID\"}#" node-setup.yaml
+        grep -q "{name: RUNSC_ALLOW_SUID, value: \"$ALLOW_SUID\"}" node-setup.yaml
         kubectl apply -f node-setup.yaml -f runtimeclass.yaml
         kubectl -n sandbox-system rollout status ds/node-setup --timeout=15m
         ./check-ipv4-only.sh
@@ -396,6 +398,7 @@
         # envd + sandbox-init, which node-setup's init container installs on every node (SB5); only where stage 60 turns
         # envd on (a sandbox domain). The image is published from the release after v0.3.28; set sandbox.runtime_image
         # to run this stage from main before that release.
+        ALLOW_SUID: "{{ 'true' if (pc.sandbox.allow_suid | default(true) | bool) else 'false' }}"
         RUNTIME: "{{ (pc.sandbox.runtime_image or (pc.images.registry ~ '/proxcloud-sandbox-runtime:' ~ pc_ver.proxcloud)) if (pc_sandbox_edge_on | bool) else '' }}"
       changed_when: false
     # Two service-account kubeconfigs, both stored by stage 60: the proxmox provider's sync reads Nodes and takes the
