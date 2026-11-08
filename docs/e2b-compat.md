@@ -192,4 +192,6 @@ token is missing or wrong.
 `tests/e2b-compat/compat.py` runs the stock SDKs end to end against a location (commands, streaming, exit codes, files,
 preview URL, metadata, connect, egress rules, the metadata address, a second project's key, the code interpreter):
 `E2B_API_URL`, `E2B_API_KEY`, optionally `E2B_OTHER_API_KEY` (a key of another project) and `SSL_CERT_FILE` for a
-private CA.
+private CA. `tests/e2b-compat/pause.py` does the same for pause, resume, fork, snapshots and autoPause
+([managed-sandbox.md §8](managed-sandbox.md#8-pause-resume-snapshots-and-fork-sb7)), with `E2B_AUTOPAUSE_URL` to
+trigger the autoPause job where the scheduler is off.

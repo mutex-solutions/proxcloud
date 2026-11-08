@@ -81,7 +81,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -462,6 +464,28 @@ func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
 		cfg.Portal = PVESandboxRegistry{Address: str(p["address"]), Port: intOf(p["port"])}
 	}
 	return cfg, cfg.Pool != ""
+}
+
+// PVESandboxEndpoints are the "address:port" places outside the sandbox subnet the workers' VM firewall opens
+// (registry, build storage, portal; port 443 when unset). The cluster isolation lets the sandbox networks reach exactly
+// these, above its DROPs, or one on a management network would stay unreachable (docs/managed-sandbox.md §2).
+func (e *ExternalService) PVESandboxEndpoints() []string {
+	cfg, ok := e.PVESandboxConfig()
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, ep := range []PVESandboxRegistry{cfg.Registry, cfg.BuildStorage, cfg.Portal} {
+		if ep.Address == "" {
+			continue
+		}
+		port := ep.Port
+		if port == 0 {
+			port = 443
+		}
+		out = append(out, net.JoinHostPort(ep.Address, strconv.Itoa(port)))
+	}
+	return out
 }
 
 // PVEStorageProfile is one admin-curated storage class (config.storageProfiles.<slug>):

@@ -73,7 +73,7 @@ func (j *Job) SandboxReleaseGates(ctx context.Context, es *externalservice.Exter
 	}
 	set(0, probeNodeRestriction(ctx, kc), "a node identity is refused a node-restriction.kubernetes.io/ label on its own Node")
 	netCfg := pes.PVENetworkConfig()
-	set(1, ps.CheckSandboxIsolation(ctx, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs),
+	set(1, ps.CheckSandboxIsolation(ctx, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs, pes.PVESandboxEndpoints()...),
 		"the cluster firewall drops "+strings.Join(netCfg.SandboxCIDRs, ",")+" to and from the tenant pool and the blocked networks")
 	open, ferr := openWorkers(ctx, kc)
 	if ferr == nil {

@@ -294,7 +294,7 @@ while read -r hash url; do
   [ -n "$hash" ] || continue
   mkdir -p "/workspace/files/$hash"
   echo "fetching context $hash"
-  curl -fsS --retry 3 -o /tmp/ctx.tar "$url"
+  curl -fsS --connect-timeout 10 --retry 3 -o /tmp/ctx.tar "$url"
   tar -xf /tmp/ctx.tar -C "/workspace/files/$hash"
   rm -f /tmp/ctx.tar
 done < /config/fetch.list
@@ -706,7 +706,7 @@ func SnapshotObjects(cfg Config, req SnapshotRequest) map[string]any {
 			"terminationGracePeriodSeconds": int64(5),
 			"initContainers": []any{map[string]any{
 				"name": "fetch", "image": fetchImage,
-				"command":      []any{"sh", "-c", `set -eu; echo "fetching snapshot layer"; curl -fsS --retry 3 -o /work/layer.tar.gz "$LAYER_URL"; ls -l /work/layer.tar.gz`},
+				"command":      []any{"sh", "-c", `set -eu; echo "fetching snapshot layer"; curl -fsS --connect-timeout 10 --retry 3 -o /work/layer.tar.gz "$LAYER_URL"; ls -l /work/layer.tar.gz`},
 				"env":          []any{map[string]any{"name": "LAYER_URL", "value": req.LayerURL}},
 				"resources":    map[string]any{"requests": small, "limits": small},
 				"volumeMounts": []any{mount("work", "/work")},

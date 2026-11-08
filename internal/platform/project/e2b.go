@@ -344,7 +344,7 @@ func (b *e2bCreateBody) e2bRefusal() string {
 }
 
 func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
-	c := e2bFrom(r)
+	c, arrived := e2bFrom(r), time.Now()
 	var b e2bCreateBody
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&b); err != nil {
 		e2bErr(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -365,7 +365,10 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
-	h.awaitIfSnapshot(r.Context(), c, b.TemplateID)
+	if err := h.awaitIfSnapshot(r.Context(), c, b.TemplateID, arrived.Add(SnapshotRequestWait)); err != nil {
+		e2bFail(w, err)
+		return
+	}
 	custom, customName, err := h.resolveCustomTemplate(r.Context(), c.proj.ID, b.TemplateID)
 	if errors.Is(err, sandbox.ErrBadTemplate) {
 		e2bErr(w, http.StatusBadRequest, err.Error())
@@ -468,6 +471,12 @@ func (h *Handler) e2bList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := []any{}
+	// A pausing sandbox still runs but lists once, as paused.
+	paused := h.projectPaused(r.Context(), c.proj.ID)
+	isPaused := make(map[string]bool, len(paused))
+	for _, p := range paused {
+		isPaused[p.ID] = true
+	}
 	if st == "" || strings.Contains(st, "running") {
 		items, err := c.ss.ListSandboxes(r.Context(), c.proj.ID)
 		if err != nil {
@@ -481,14 +490,13 @@ func (h *Handler) e2bList(w http.ResponseWriter, r *http.Request) {
 		sort.Strings(ids)
 		for _, id := range ids {
 			d := items[id]
-			if d["status"] != sandbox.StatusRunning || !metadataMatches(d["metadata"], want) {
+			if d["status"] != sandbox.StatusRunning || isPaused[id] || !metadataMatches(d["metadata"], want) {
 				continue
 			}
 			out = append(out, e2bListed(id, d))
 		}
 	}
 	if st == "" || strings.Contains(st, "paused") {
-		paused := h.projectPaused(r.Context(), c.proj.ID)
 		for i := range paused {
 			if metadataMatches(sandbox.PayloadOf(paused[i].Saved)["metadata"], want) {
 				out = append(out, pausedListed(&paused[i]))
@@ -560,34 +568,92 @@ func (h *Handler) e2bRow(ctx context.Context, c *e2bCaller, id string) *cloud.Cl
 func (h *Handler) e2bKill(w http.ResponseWriter, r *http.Request) {
 	c := e2bFrom(r)
 	id := chi.URLParam(r, "sandboxID")
-	if p := h.loadPaused(r.Context(), c.proj.ID, id); p != nil {
-		if err := h.killPaused(r.Context(), c, p); err != nil {
-			e2bFail(w, err)
+	ctx := r.Context()
+	var err error = errSandboxBusy
+	for attempt := 0; attempt < 3 && errors.Is(err, errSandboxBusy); attempt++ {
+		endedPause := false
+		if p := h.loadPaused(ctx, c.proj.ID, id); p != nil {
+			if err := h.killPaused(ctx, c, p); err != nil {
+				e2bFail(w, err)
+				return
+			}
+			endedPause = true
+		}
+		if _, gerr := c.ss.GetSandbox(ctx, c.proj.ID, id); gerr != nil {
+			if endedPause { // a paused one; a resume that finished meanwhile left a running one, which the kill covers
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			e2bFail(w, gerr)
 			return
 		}
-		// A resume that finished meanwhile (or crashed after starting it) left a running sandbox: the kill covers it.
-		if _, err := c.ss.GetSandbox(r.Context(), c.proj.ID, id); err != nil {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-	}
-	if _, err := c.ss.GetSandbox(r.Context(), c.proj.ID, id); err != nil {
-		e2bFail(w, err)
-		return
-	}
-	var err error
-	if cr := h.e2bRow(r.Context(), c, id); cr != nil {
-		if err = h.sandboxDelete(r.Context(), c.es, c.proj, cr); err == nil {
-			h.cloudResourceAudit(c.user, c.proj, "CLOUD_RESOURCE_DELETE", "E2B_KILL", cr)
-		}
-	} else {
-		err = c.ss.DeleteSandbox(r.Context(), c.proj.ID, id)
+		err = h.killUnpaused(ctx, c, id)
 	}
 	if err != nil {
 		e2bFail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// killUnpaused deletes a running sandbox under its pause lock, so a pause whose capture is under way cannot record it
+// after the kill (and bring it back as paused); errSandboxBusy when a pause recorded it meanwhile (the caller ends it
+// first).
+func (h *Handler) killUnpaused(ctx context.Context, c *e2bCaller, id string) error {
+	return h.underPauseLock(ctx, c, id, func() error {
+		if cr := h.e2bRow(ctx, c, id); cr != nil {
+			if err := h.sandboxDelete(ctx, c.es, c.proj, cr); err != nil {
+				return err
+			}
+			h.cloudResourceAudit(c.user, c.proj, "CLOUD_RESOURCE_DELETE", "E2B_KILL", cr)
+			return nil
+		}
+		return c.ss.DeleteSandbox(ctx, c.proj.ID, id)
+	})
+}
+
+// sandboxKill is the native delete of a live sandbox row: like the E2B kill it ends a pause under way first, then
+// deletes the sandbox under its pause lock, so the pause can neither record it after the delete nor finish it as
+// paused.
+func (h *Handler) sandboxKill(ctx context.Context, u *user.User, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) error {
+	kill := func() error { return h.sandboxDelete(ctx, es, proj, cr) }
+	if h.sbPaused == nil || h.sandboxFor == nil || cr.Data["status"] == sandbox.StatusDeleted {
+		return kill()
+	}
+	ss, err := h.sandboxFor(es)
+	if err != nil {
+		return err
+	}
+	c := &e2bCaller{user: u, proj: proj, es: es, ss: ss}
+	err = errSandboxBusy
+	for attempt := 0; attempt < 3 && errors.Is(err, errSandboxBusy); attempt++ {
+		if p := h.loadPaused(ctx, proj.ID, cr.ExternalID); p != nil {
+			if err = h.killPaused(ctx, c, p); err != nil {
+				return err
+			}
+		}
+		err = h.underPauseLock(ctx, c, cr.ExternalID, kill)
+	}
+	return err
+}
+
+// underPauseLock runs kill under the sandbox's pause lock; errSandboxBusy when the project has a paused record for it.
+func (h *Handler) underPauseLock(ctx context.Context, c *e2bCaller, id string, kill func() error) error {
+	if h.sbPaused == nil {
+		return kill()
+	}
+	return h.sbPaused.DB().WithTx(context.WithoutCancel(ctx), func(tc context.Context) error {
+		if err := h.lockPaused(tc, id); err != nil {
+			return err
+		}
+		var p pausedSandbox
+		if found, err := h.sbPaused.GetForUpdate(tc, id, &p); err != nil {
+			return err
+		} else if found && p.ProjectID == c.proj.ID {
+			return errSandboxBusy
+		}
+		return kill()
+	})
 }
 
 func decodeE2B(w http.ResponseWriter, r *http.Request, v any) bool {

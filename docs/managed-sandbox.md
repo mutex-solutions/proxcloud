@@ -406,6 +406,16 @@ hash><content hash>`, which is the VM's only rule. Every rule in it ACCEPTs:
 Nothing else comes in: there is no rule for a tenant, for the services cluster beyond the kubelet, or for anyone on the
 internet, except the entry appliance, which may reach `sandbox-proxy`'s address on 443 (SB4, §4.3).
 
+The registry, build bucket and portal rules open one address and port each, and such an endpoint may sit on a
+management network, which layer 0 (§1.2) drops from the sandbox subnet before the exit node's SNAT. So the cluster
+isolation set also holds a TCP `ACCEPT` from `sandboxCidrs` to exactly each of these `address:port`, above its sandbox
+`DROP`s (`ExternalService.PVESandboxEndpoints`), and the isolation release gate reads them as part of the exact set.
+Only a management-side endpoint is opened: one inside the tenant pool or an operator-blocked range (`blockedCidrs`)
+is left out (and logged), so a misconfigured endpoint can never open a tenant's network to the sandboxes.
+Without it the lab's build bucket (10.88.0.41:9000) answered nothing to build and snapshot pods: every fetch timed out
+on connect (127 s per attempt) while the VM firewall said yes, so no snapshot was ever assembled. The fetch steps now
+give up a connect after 10 s.
+
 - **Why the kubelet between workers.** Kamaji starts the konnectivity server with the default proxy strategy, so
   exec and logs for a pod on one worker can leave through the agent on another. The kubelet still wants an API server
   credential.
@@ -1356,32 +1366,57 @@ newest ready build: the previous one leaves the record, and the registry prune d
 
 ### 8.2 Pause, resume, fork
 
-- **Pause** (`POST /sandboxes/{id}/pause`, or autoPause): snapshot, wait until its image is pushed (up to 15
-  minutes, also if the client leaves), save the sandbox's CR (tokens, env, metadata, network) in `sandbox_paused`,
-  delete the sandbox (its row ends as at a delete). Until the image is ready the sandbox keeps running and billing; a
-  failed assembly fails the pause with 500 and the sandbox runs on, so a pause never loses files it answered 204 for.
-  Files written after the capture and before the delete are not kept. `GET /sandboxes`, `GET /sandboxes/{id}` and
-  `state=paused` show it as paused.
+- **Pause** (`POST /sandboxes/{id}/pause`, or autoPause): capture the files into the bucket, save the sandbox's CR
+  (tokens, env, metadata, network) in `sandbox_paused` with state `pausing`, and answer 204, in seconds. From then on
+  `GET /sandboxes`, `GET /sandboxes/{id}` and `state=paused` show it once, as paused. The sandbox keeps running and
+  billing while its image is assembled in the background (its cluster deadline is held 25 minutes from the pause if
+  it would end sooner, and put back if the pause fails). Once the image is pushed, the record goes to `stopping`, the
+  sandbox is deleted (its row ends as at a delete) and the record is paused. The image is followed until it is pushed
+  or its build fails, however long that takes, also by a driver that takes the pause over after a portal restart: past
+  the hold the image is the only copy of the files. Only a failed assembly drops the record and the snapshot, and the
+  sandbox, if it still exists, runs on, so a pause never deletes the files it answered 204 for before their copy is
+  usable. Files written after the capture are not kept. A second pause while one is under way answers 409.
 - **Resume** (`POST /sandboxes/{id}/resume`, `connect` of a paused sandbox, or the wake endpoint): gives up a minute
   before its lease ends, so a second caller never takes over a resume still starting the sandbox; recreates the sandbox under the same id and tokens from the snapshot image, with the
   provider's limits and the project quota counted as for a create, and starts a new `sandbox` row. The paused record,
   the snapshot record and its storage row go; the image stays while the sandbox runs from it (the registry prune keeps
-  the images of running and paused sandboxes).
+  the images of running and paused sandboxes). One that finds a pause still assembling waits up to 45 s for it to
+  finish; then it cancels that pause (the snapshot goes) and answers with the sandbox as it runs, with every file and
+  the timeout asked for.
 - **Fork** (`POST /sandboxes/{id}/fork`, at most 10): one snapshot of a running sandbox, then that many sandboxes with
   new ids and tokens, same template, size, env, metadata and network, counted against the quota before anything starts.
-- **Kill** of a paused sandbox deletes its record and its snapshot.
+  The snapshot gets 60 s from the request's arrival, capture included; one not ready by then is dropped and the fork
+  answers 503 (retry), so the call answers within the SDK's request timeout (below) with the forks started.
+- **Create from a snapshot** still being assembled waits for it up to 60 s from the request's arrival, then answers
+  503 (retry) while the assembly goes on.
+- **Kill** of a paused sandbox deletes its record and its snapshot; of one still pausing, also the running sandbox.
+
+**Why every call answers within 120 s.** The stock E2B SDK (2.63) sends REST calls through pyqwest with
+`request_timeout` 60 s, which pyqwest applies as one deadline of read plus write timeouts: 120 s for the whole call.
+A call still waiting then is cut (`operation timed out after 120.0s`) and its work is lost to the client. The first
+pause waited for the image inside the request, as did fork and create from a snapshot, and every one of them on the
+lab was cut at exactly 120 s. The waits are now 60 s for a snapshot plus 50 s for envd, and a pause no longer waits.
 
 **Lease serialisation.** Every transition of one id takes a Postgres transaction lock on that id (also before the
-record exists) and writes `state` (`pausing`, `resuming`) with `leaseUntil` (10 and 20 minutes). A resume that finds
-another resume under way waits for it and answers with the same sandbox; one that finds a pause under way waits up to
-a minute; a pause or kill that finds either answers 409. An expired lease is a crashed caller's: the next caller looks
-at the cluster (the sandbox runs: the pause is dropped; it does not: the record counts as paused again) and goes on.
+record exists) and writes `state` (`pausing` and `stopping` for 2 minutes, renewed every 30 s by the step that
+drives the pause; `resuming` for 20) with `leaseUntil`. A resume that finds another resume under way waits for it and
+answers with the same sandbox; one that finds a pause waits or cancels it, as above; a pause that finds either
+answers 409; a kill ends a pause still assembling and answers 409 to a resume or a stopping pause. A kill of a
+running sandbox takes the same lock, and a pause records its sandbox only if it still exists and is not being
+deleted, so a kill during the capture (204) never comes back as a paused sandbox with a billed snapshot.
+An API restart loses the background step of a pause, and its lease lapses: job `sandboxAutoPause` takes over every
+`pausing` or `stopping` record with an expired lease and finishes it (the image wait is bounded from the pause's
+start), so a pause answered 204 never stays half-done, running and billing. A resume that finds an expired lease
+first looks at the cluster: the sandbox runs (and is not being deleted), so the pause and its snapshot are dropped and
+the sandbox gets the timeout asked for, not the dead pause's hold; it does not, so the record counts as paused again.
+A failed pause gives the sandbox its own end back, or 5 minutes when that has passed (an autoPause sandbox is paused
+after its end), so the next tick pauses it again instead of the cluster removing it at once.
 
 ### 8.3 autoPause and autoResume
 
-A create with `autoPause` marks the sandbox; job `sandboxAutoPause` (every minute) pauses those past their end, four at
-a time since each waits for its image. Their
-cluster deadline is the end plus 15 minutes, so a pause that fails leaves the sandbox running until then, when the
+A create with `autoPause` marks the sandbox; job `sandboxAutoPause` (every minute) pauses those past their end, four
+captures at a time; one already pausing is left to finish. Their cluster deadline is the end plus 15 minutes (held
+longer while a pause assembles its image), so a pause that fails leaves the sandbox running until then, when the
 cluster removes it. A create with `autoPause` answers 400 where the provider has no template registry and build bucket,
 `autoResume` without `autoPause` answers 400, and so does `autoResume` where the provider has no `proxyWakeToken`. The
 same checks (`pauseRefusal`, run by `createSandboxResource`) apply to the E2B create and to the native create the
@@ -1428,11 +1463,18 @@ Teardown archives the project's snapshot rows, deletes its templates and snapsho
   pause failed with 500 after 126 s and the sandbox was not deleted, but it stayed unready (503) until killed.
   `sandbox-init` now refuses an unknown argument and runs the init only as PID 1. Roll node-setup (the runtime image)
   before a portal that uses a new `sandbox-init` mode.
+- A third attempt (pc-sb8, 2026-11-08) with the stock SDK: pause, fork and create from a snapshot were each cut by
+  the SDK at exactly 120 s (section 8.2), and no snapshot assembled because the cluster isolation dropped the
+  sandbox subnet's traffic to the build bucket on a management network (section 2.1). Both are fixed; the strict
+  drill is `tests/e2b-compat/pause.py` (a connect counts as a resume only after the sandbox was seen paused and
+  stopped; every resumed, forked or snapshot sandbox must read back the file written before), not yet rerun.
 - Not run on the lab: resume, fork, autoPause, the wake through `sandbox-proxy`, and a pause with the capture check.
   The workers were in use by another drill, and two portals fencing one sandbox pool roll each other's firewall back.
   These paths have integration tests on Postgres with an in-memory cluster and a fake bucket (another project cannot
   pause, resume, fork, connect or wake; a suspended profile keeps the snapshot and is refused resume and wake; a cut
-  capture or a failed assembly pauses nothing and leaves the sandbox running; a named snapshot taken again keeps and
+  capture or a failed assembly pauses nothing and leaves the sandbox running, to its own end; on a slow site a pause
+  answers at once and holds the sandbox, a connect cancels it, a kill ends it, fork and create from a late snapshot
+  answer 503, and the pause completes once the image is ready; a named snapshot taken again keeps and
   bills one image; concurrent connects start one sandbox; teardown leaves no record, template or row), a test on
   the real charge driver (a 2 GB snapshot bills 0.30 for three hours at 0.05 per GB-hour, 0.40 after a fourth, nothing
   more after the resume), and unit tests (the capture's archive, the quota on resume, the pod's disk request, the

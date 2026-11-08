@@ -8,7 +8,9 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -28,6 +30,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/org"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
+	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 )
 
 // pauseCluster is the in-memory cluster with what a snapshot needs: exec streaming the changed files, and assembly
@@ -38,6 +41,24 @@ type pauseCluster struct {
 	pods map[string]map[string]any
 	// cut: the capture stream ends early although the exec reports success.
 	cut bool
+	// hold: assembly pods stay Pending (a slow site) until release.
+	hold bool
+}
+
+func succeeded() map[string]any {
+	return map[string]any{"phase": "Succeeded", "containerStatuses": []any{map[string]any{"name": "push",
+		"state": map[string]any{"terminated": map[string]any{"exitCode": 0, "message": "192.0.2.226/t/x@sha256:" + strings.Repeat("a", 64),
+			"finishedAt": time.Now().UTC().Format(time.RFC3339)}}}}}
+}
+
+// release lets every held assembly pod finish, and the next ones finish at once.
+func (c *pauseCluster) release() {
+	c.pmu.Lock()
+	defer c.pmu.Unlock()
+	c.hold = false
+	for _, p := range c.pods {
+		p["status"] = succeeded()
+	}
 }
 
 func (c *pauseCluster) ExecStream(_ context.Context, _, _, _ string, cmd []string, w io.Writer, _ int) (int, string, error) {
@@ -66,9 +87,10 @@ func (c *pauseCluster) ApplyCore(_ context.Context, plural string, obj map[strin
 	c.pmu.Lock()
 	defer c.pmu.Unlock()
 	md := obj["metadata"].(map[string]any)
-	obj["status"] = map[string]any{"phase": "Succeeded", "containerStatuses": []any{map[string]any{"name": "push",
-		"state": map[string]any{"terminated": map[string]any{"exitCode": 0, "message": "192.0.2.226/t/x@sha256:" + strings.Repeat("a", 64),
-			"finishedAt": time.Now().UTC().Format(time.RFC3339)}}}}}
+	obj["status"] = succeeded()
+	if c.hold {
+		obj["status"] = map[string]any{"phase": "Pending", "startTime": time.Now().UTC().Format(time.RFC3339)}
+	}
 	c.pods[md["name"].(string)] = obj
 	return nil
 }
@@ -76,8 +98,13 @@ func (c *pauseCluster) GetCore(_ context.Context, plural, _, name string) (map[s
 	c.pmu.Lock()
 	defer c.pmu.Unlock()
 	if plural == "pods" {
-		return c.pods[name], nil
+		return maps.Clone(c.pods[name]), nil // release rewrites a pod's status under pmu: hand out a copy
 	}
+	return nil, nil
+}
+
+// ListCRsAllNamespaces: no sandbox is due for autoPause (the job's listing).
+func (c *pauseCluster) ListCRsAllNamespaces(context.Context, string, string, string, string) ([]map[string]any, error) {
 	return nil, nil
 }
 func (c *pauseCluster) DeleteCore(_ context.Context, plural, _, name string) error {
@@ -141,6 +168,41 @@ func newPauseFixture(t *testing.T) (*sbxFixture, *pauseCluster, string, string) 
 	return f, pc, keyA, keyB
 }
 
+// pausedState waits up to 10 s for the sandbox's paused record to reach state ("" = paused; "gone" = no record).
+func (f *sbxFixture) pausedState(id, want string) {
+	f.t.Helper()
+	got := ""
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		var rec struct{ State string }
+		found, err := f.db.C("sandbox_paused").Get(context.Background(), id, &rec)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		if got = rec.State; !found {
+			got = "gone"
+		}
+		if got == want {
+			return
+		}
+	}
+	f.t.Fatalf("paused record of %s: %q, want %q", id, got, want)
+}
+
+// shutdownWithin waits up to 10 s for the sandbox's cluster deadline (spec.shutdownTime) to fall in [lo, hi] from now.
+func (f *sbxFixture) shutdownWithin(pc *pauseCluster, id string, lo, hi time.Duration) {
+	f.t.Helper()
+	left := time.Duration(0)
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		cr, _ := pc.GetCR(context.Background(), "", "", "", sandbox.NamespaceFor("pa"), id)
+		spec, _ := cr["spec"].(map[string]any)
+		end, err := time.Parse(time.RFC3339, fmt.Sprint(spec["shutdownTime"]))
+		if left = time.Until(end); err == nil && left >= lo && left <= hi {
+			return
+		}
+	}
+	f.t.Fatalf("sandbox %s ends in %v, want %v..%v", id, left, lo, hi)
+}
+
 func (f *sbxFixture) snapshotRows(proj string) []cloud.CloudResource {
 	f.t.Helper()
 	rows, err := f.rows.FindByServiceProjectAndType(context.Background(), "sbx", proj, cloud.TypeSandboxSnapshot)
@@ -198,6 +260,7 @@ func TestE2BPauseResumeForkWake(t *testing.T) {
 	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
 		t.Fatalf("pause: %d %s", code, body)
 	}
+	f.pausedState(id, "")
 	if _, err := pc.GetCR(ctx, "", "", "", ns, id); err != nil || f.cluster.count() != 0 {
 		t.Fatalf("the paused sandbox still runs: %d", f.cluster.count())
 	}
@@ -309,6 +372,7 @@ func TestE2BPauseResumeForkWake(t *testing.T) {
 	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
 		t.Fatalf("pause again: %d %s", code, body)
 	}
+	f.pausedState(id, "")
 	before := f.cluster.count()
 	var wg sync.WaitGroup
 	codes := make([]int, 4)
@@ -329,6 +393,7 @@ func TestE2BPauseResumeForkWake(t *testing.T) {
 	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
 		t.Fatalf("pause again: %d %s", code, body)
 	}
+	f.pausedState(id, "")
 	if err := f.h.TeardownProject(ctx, "pa"); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
@@ -358,6 +423,7 @@ func TestSandboxSnapshotBilledPerGBHour(t *testing.T) {
 	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+sb.SandboxID+"/pause", `{}`); code != http.StatusNoContent {
 		t.Fatalf("pause: %d %s", code, body)
 	}
+	f.pausedState(sb.SandboxID, "")
 	deadline := time.Now().Add(10 * time.Second)
 	for len(f.snapshotRows("pa")) == 0 && time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
@@ -446,7 +512,8 @@ func (c failingAssembly) ApplyCore(ctx context.Context, plural string, obj map[s
 	return nil
 }
 
-// A pause whose snapshot cannot be assembled fails while the sandbox still runs: nothing is deleted, paused or billed.
+// A pause whose snapshot cannot be assembled ends while the sandbox still runs: nothing is deleted, paused or billed.
+// The pause answers once the capture is stored, so the failure shows as the sandbox running again.
 func TestE2BPauseFailedAssemblyKeepsSandbox(t *testing.T) {
 	f, pc, keyA, _ := newPauseFixture(t)
 	ctx := context.Background()
@@ -458,9 +525,11 @@ func TestE2BPauseFailedAssemblyKeepsSandbox(t *testing.T) {
 	if code != http.StatusCreated || json.Unmarshal([]byte(body), &sb) != nil {
 		t.Fatalf("create: %d %s", code, body)
 	}
-	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+sb.SandboxID+"/pause", `{}`); code < 500 {
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+sb.SandboxID+"/pause", `{}`); code != http.StatusNoContent {
 		t.Fatalf("pause with a failing assembly: %d %s", code, body)
 	}
+	f.pausedState(sb.SandboxID, "gone")
+	f.shutdownWithin(pc, sb.SandboxID, 0, 300*time.Second) // the pause's hold is gone: its own end again
 	n, _ := f.db.C("sandbox_paused").Count(ctx, pgdoc.M{})
 	tpls, _ := f.db.C("sandbox_templates").Count(ctx, pgdoc.M{})
 	if f.cluster.count() != 1 || n != 0 || tpls != 0 || len(f.snapshotRows("pa")) != 0 {
@@ -468,6 +537,145 @@ func TestE2BPauseFailedAssemblyKeepsSandbox(t *testing.T) {
 	}
 	if code, body := f.e2b(keyA, http.MethodGet, "/sandboxes/"+sb.SandboxID, ""); code != http.StatusOK || !strings.Contains(body, `"state":"running"`) {
 		t.Fatalf("the sandbox after the failed pause: %d %s", code, body)
+	}
+	// One past its end (an autoPause sandbox the job pauses after its end) is not given that end back, which would
+	// remove it at once: it runs a few minutes, for the next tick to pause it again.
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	if _, err := pc.MergePatchCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), sb.SandboxID, map[string]any{"spec": map[string]any{"shutdownTime": past}}); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+sb.SandboxID+"/pause", `{}`); code != http.StatusNoContent {
+		t.Fatalf("pause past its end: %d %s", code, body)
+	}
+	f.pausedState(sb.SandboxID, "gone")
+	f.shutdownWithin(pc, sb.SandboxID, 4*time.Minute, 5*time.Minute)
+}
+
+// A portal that stops mid-pause leaves its lease to lapse: the autoPause tick takes the pause over and finishes it
+// (the sandbox deleted, the record paused, resumable from its image); the old driver finds the pause taken.
+func TestE2BPauseRedrivenAfterRestart(t *testing.T) {
+	f, pc, keyA, _ := newPauseFixture(t)
+	ctx := context.Background()
+	pc.pmu.Lock()
+	pc.hold = true
+	pc.pmu.Unlock()
+	id := f.e2bCreate(keyA)
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
+		t.Fatalf("pause: %d %s", code, body)
+	}
+	f.pausedState(id, "pausing")
+	past := time.Now().UTC().Add(-time.Second).Format(time.RFC3339)
+	if _, err := f.db.C("sandbox_paused").SetByID(ctx, id, pgdoc.M{"leaseUntil": past}, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.h.AutoPauseSandboxes(ctx)
+	var rec struct{ LeaseUntil time.Time }
+	if _, err := f.db.C("sandbox_paused").Get(ctx, id, &rec); err != nil || time.Until(rec.LeaseUntil) <= 0 {
+		t.Fatalf("not taken over: lease %v, %v", rec.LeaseUntil, err)
+	}
+	pc.release()
+	f.pausedState(id, "")
+	if f.cluster.count() != 0 {
+		t.Fatalf("paused, still running: %d", f.cluster.count())
+	}
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/connect", `{"timeout":60}`); code != http.StatusCreated {
+		t.Fatalf("connect of the re-driven pause: %d %s", code, body)
+	}
+}
+
+// A pause re-driven long after it started (the portal down past snapshotWait, or past the pause's hold, when the
+// cluster has already removed the sandbox) still follows its image: a late build ends paused and resumable, and only a
+// failed build gives the pause up, leaving the sandbox running if it still exists. The pause's start is set back in
+// its record, which is the only clock the drive reads.
+func TestE2BPauseRedrivenLate(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		age        time.Duration
+		gone, fail bool
+	}{
+		{"past snapshotWait", 16 * time.Minute, false, false},
+		{"past the hold, sandbox removed", 26 * time.Minute, true, false},
+		{"past snapshotWait, build failed", 16 * time.Minute, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, pc, keyA, _ := newPauseFixture(t)
+			ctx := context.Background()
+			pc.pmu.Lock()
+			pc.hold = true
+			pc.pmu.Unlock()
+			id := f.e2bCreate(keyA)
+			if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
+				t.Fatalf("pause: %d %s", code, body)
+			}
+			f.pausedState(id, "pausing")
+			now := time.Now().UTC()
+			if _, err := f.db.C("sandbox_paused").SetByID(ctx, id, pgdoc.M{"pausedAt": now.Add(-tc.age).Format(time.RFC3339),
+				"leaseUntil": now.Add(-time.Second).Format(time.RFC3339)}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if tc.gone { // removed by the cluster at the pause's hold while nobody drove the pause
+				if err := pc.DeleteCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.h.AutoPauseSandboxes(ctx)
+			time.Sleep(3 * time.Second) // past the re-drive's first reads of the build
+			f.pausedState(id, "pausing")
+			if n, _ := f.db.C("sandbox_templates").Count(ctx, pgdoc.M{"projectId": "pa"}); n != 1 {
+				t.Fatalf("the re-drive dropped the snapshot of a build still running: %d", n)
+			}
+			if tc.fail {
+				pc.pmu.Lock()
+				for _, p := range pc.pods {
+					p["status"] = map[string]any{"phase": "Failed", "message": "crane: unexpected EOF"}
+				}
+				pc.pmu.Unlock()
+				f.pausedState(id, "gone")
+				if f.cluster.count() != 1 {
+					t.Fatalf("the failed build took the sandbox: running %d", f.cluster.count())
+				}
+				return
+			}
+			pc.release()
+			f.pausedState(id, "")
+			if f.cluster.count() != 0 {
+				t.Fatalf("paused, still running: %d", f.cluster.count())
+			}
+			if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/connect", `{"timeout":60}`); code != http.StatusCreated {
+				t.Fatalf("connect of the late pause: %d %s", code, body)
+			}
+			if cr, _ := pc.GetCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), id); cr == nil || !strings.Contains(fmtJSON(cr), "192.0.2.226/t/pa/") {
+				t.Fatalf("not resumed from the snapshot image: %v", cr)
+			}
+		})
+	}
+}
+
+// A native delete of a sandbox whose pause is under way ends the pause like the E2B kill: the sandbox is gone and
+// stays gone once the image is ready (no paused record, no snapshot).
+func TestSandboxNativeDeleteDuringPause(t *testing.T) {
+	f, pc, keyA, _ := newPauseFixture(t)
+	ctx := context.Background()
+	pc.pmu.Lock()
+	pc.hold = true
+	pc.pmu.Unlock()
+	id := f.e2bCreate(keyA)
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
+		t.Fatalf("pause: %d %s", code, body)
+	}
+	f.pausedState(id, "pausing")
+	rows, err := f.rows.FindByServiceProjectAndType(ctx, "sbx", "pa", cloud.TypeSandbox)
+	if err != nil || len(rows) != 1 || rows[0].ExternalID != id {
+		t.Fatalf("rows: %v %+v", err, rows)
+	}
+	if code, body := f.do(sbxA, http.MethodDelete, "/project/pa/cloud/"+rows[0].ID, ""); code != http.StatusAccepted {
+		t.Fatalf("native delete while pausing: %d %s", code, body)
+	}
+	pc.release()
+	time.Sleep(3 * time.Second) // the pause's driver sees the image ready
+	f.pausedState(id, "gone")
+	if n, _ := f.db.C("sandbox_templates").Count(ctx, pgdoc.M{"projectId": "pa"}); n != 0 || f.cluster.count() != 0 {
+		t.Fatalf("after the delete: snapshots %d, running %d", n, f.cluster.count())
 	}
 }
 
@@ -514,5 +722,131 @@ func TestE2BSnapshotRetakenBillsKeptImage(t *testing.T) {
 	}
 	if got, want := rows[0].Data["sizeGB"].(float64), float64(tpl.Builds[0].SizeBytes)/(1<<30); got != want {
 		t.Fatalf("billed %v GB, kept %v GB", got, want)
+	}
+}
+
+// On a slow site (assembly pods Pending) every call answers within the E2B SDK's 120 s: the pause once the capture is
+// stored (the sandbox lists once, as paused, and still runs), a connect after PauseJoinWait with the running sandbox
+// (the pause cancelled, nothing left of it), a kill at once, and a fork or a create from a snapshot with 503 after
+// SnapshotRequestWait (the fork's snapshot dropped, the named one still assembling). Once the image is ready the pause
+// deletes the sandbox and a connect resumes it from the image.
+func TestE2BPauseOnASlowSite(t *testing.T) {
+	f, pc, keyA, _ := newPauseFixture(t)
+	ctx := context.Background()
+	defer func(j, w time.Duration) { project.PauseJoinWait, project.SnapshotRequestWait = j, w }(project.PauseJoinWait, project.SnapshotRequestWait)
+	project.PauseJoinWait, project.SnapshotRequestWait = time.Second, time.Second
+	pc.pmu.Lock()
+	pc.hold = true
+	pc.pmu.Unlock()
+	id := f.e2bCreate(keyA)
+	templates := func() int64 {
+		n, _ := f.db.C("sandbox_templates").Count(ctx, pgdoc.M{"projectId": "pa"})
+		return n
+	}
+
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
+		t.Fatalf("pause: %d %s", code, body)
+	}
+	f.pausedState(id, "pausing")
+	if f.cluster.count() != 1 {
+		t.Fatal("the sandbox was deleted before its image was ready")
+	}
+	// Created for 300 s: held past that while its image is assembled, so its end cannot remove it first.
+	f.shutdownWithin(pc, id, 20*time.Minute, 26*time.Minute)
+	if code, body := f.e2b(keyA, http.MethodGet, "/sandboxes/"+id, ""); code != http.StatusOK || !strings.Contains(body, `"state":"paused"`) {
+		t.Fatalf("get while pausing: %d %s", code, body)
+	}
+	if code, body := f.e2b(keyA, http.MethodGet, "/v2/sandboxes", ""); code != http.StatusOK || strings.Count(body, id) != 1 || !strings.Contains(body, `"state":"paused"`) {
+		t.Fatalf("list while pausing (once, paused): %d %s", code, body)
+	}
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusConflict {
+		t.Fatalf("pause while pausing: %d %s", code, body)
+	}
+	// The connect waits PauseJoinWait, then cancels the pause and answers with the sandbox as it runs.
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/connect", `{"timeout":60}`); code != http.StatusCreated || !strings.Contains(body, id) {
+		t.Fatalf("connect while pausing: %d %s", code, body)
+	}
+	f.pausedState(id, "gone")
+	f.shutdownWithin(pc, id, 50*time.Second, 61*time.Second) // the connect's timeout, not the pause's hold
+	if f.cluster.count() != 1 || templates() != 0 || len(f.snapshotRows("pa")) != 0 {
+		t.Fatalf("after the cancelled pause: running %d, snapshots %d, rows %d", f.cluster.count(), templates(), len(f.snapshotRows("pa")))
+	}
+	if code, body := f.e2b(keyA, http.MethodGet, "/sandboxes/"+id, ""); code != http.StatusOK || !strings.Contains(body, `"state":"running"`) {
+		t.Fatalf("get after the cancelled pause: %d %s", code, body)
+	}
+
+	// A kill while pausing ends the pause and the sandbox.
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
+		t.Fatalf("pause: %d %s", code, body)
+	}
+	if code, body := f.e2b(keyA, http.MethodDelete, "/sandboxes/"+id, ""); code != http.StatusNoContent {
+		t.Fatalf("kill while pausing: %d %s", code, body)
+	}
+	f.pausedState(id, "gone")
+	if f.cluster.count() != 0 || templates() != 0 {
+		t.Fatalf("after the kill: running %d, snapshots %d", f.cluster.count(), templates())
+	}
+
+	// Fork and create from a snapshot answer 503 when the image is late.
+	id = f.e2bCreate(keyA)
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/fork", `{"count":1,"timeout":60}`); code != http.StatusServiceUnavailable {
+		t.Fatalf("fork on a slow site: %d %s", code, body)
+	}
+	if templates() != 0 || f.cluster.count() != 1 {
+		t.Fatalf("the late fork left %d snapshots, %d sandboxes", templates(), f.cluster.count())
+	}
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/snapshots", `{"name":"late"}`); code != http.StatusCreated {
+		t.Fatalf("named snapshot: %d %s", code, body)
+	}
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes", `{"templateID":"late","timeout":60}`); code != http.StatusServiceUnavailable {
+		t.Fatalf("create from a late snapshot: %d %s", code, body)
+	}
+
+	// The pause completes once the image is ready; then a connect resumes from it.
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
+		t.Fatalf("pause: %d %s", code, body)
+	}
+	f.pausedState(id, "pausing")
+	pc.release()
+	f.pausedState(id, "")
+	if f.cluster.count() != 0 {
+		t.Fatalf("paused, still running: %d", f.cluster.count())
+	}
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/connect", `{"timeout":60}`); code != http.StatusCreated {
+		t.Fatalf("connect of the paused sandbox: %d %s", code, body)
+	}
+	if cr, _ := pc.GetCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), id); cr == nil || !strings.Contains(fmtJSON(cr), "192.0.2.226/t/pa/") {
+		t.Fatalf("not resumed from the snapshot image: %v", cr)
+	}
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes", `{"templateID":"late","timeout":60}`); code != http.StatusCreated {
+		t.Fatalf("create from the snapshot once ready: %d %s", code, body)
+	}
+}
+
+// A connect on a pause whose sandbox the cluster already removed (the hold passed while the build was still running)
+// must not cancel the pause: the snapshot is the only copy. It waits and resumes from the image once it is ready.
+func TestE2BConnectWaitsWhenPausedSandboxIsGone(t *testing.T) {
+	f, pc, keyA, _ := newPauseFixture(t)
+	ctx := context.Background()
+	old := project.PauseJoinWait
+	project.PauseJoinWait = 0
+	t.Cleanup(func() { project.PauseJoinWait = old })
+	pc.pmu.Lock()
+	pc.hold = true
+	pc.pmu.Unlock()
+	id := f.e2bCreate(keyA)
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
+		t.Fatalf("pause: %d %s", code, body)
+	}
+	f.pausedState(id, "pausing")
+	if err := pc.DeleteCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), id); err != nil {
+		t.Fatal(err)
+	}
+	go func() { time.Sleep(3 * time.Second); pc.release() }()
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/connect", `{"timeout":60}`); code != http.StatusCreated {
+		t.Fatalf("connect while the build still runs and the sandbox is gone: %d %s", code, body)
+	}
+	if cr, _ := pc.GetCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), id); cr == nil || !strings.Contains(fmtJSON(cr), "192.0.2.226/t/pa/") {
+		t.Fatalf("not resumed from the snapshot image: %v", cr)
 	}
 }

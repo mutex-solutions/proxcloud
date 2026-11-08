@@ -334,6 +334,16 @@ func (s *Service) get(ctx context.Context, projectID, id string) (map[string]any
 	return obj, nil
 }
 
+// Alive is nil when the sandbox exists and is not being deleted (ErrNotFound otherwise): a sandbox a kill is removing
+// still reads with GetSandbox until its pod is gone.
+func (s *Service) Alive(ctx context.Context, projectID, id string) error {
+	obj, err := s.get(ctx, projectID, id)
+	if err == nil && dig(obj, "metadata", "deletionTimestamp") != nil {
+		return ErrNotFound
+	}
+	return err
+}
+
 // GetSandbox returns the live data payload of one sandbox.
 func (s *Service) GetSandbox(ctx context.Context, projectID, id string) (map[string]any, error) {
 	obj, err := s.get(ctx, projectID, id)
@@ -411,6 +421,18 @@ func (s *Service) SetTimeout(ctx context.Context, projectID, id string, timeoutS
 		return nil, err
 	}
 	return sandboxData(obj), nil
+}
+
+// ShutdownAt sets the time the cluster removes the sandbox (spec.shutdownTime), outside the timeout limits: a pause
+// holds a sandbox past its end until its image is ready, and puts the old time back if the pause fails. Its end-at
+// (autoPause) stays as it is.
+func (s *Service) ShutdownAt(ctx context.Context, projectID, id string, t time.Time) error {
+	if _, err := s.get(ctx, projectID, id); err != nil {
+		return err
+	}
+	_, err := s.api.MergePatchCR(ctx, CRGroup, CRVersion, CRPlural, NamespaceFor(projectID), id,
+		map[string]any{"spec": map[string]any{"shutdownTime": t.UTC().Format(time.RFC3339)}})
+	return err
 }
 
 // Exec limits. The output cap keeps one call's response bounded; long-running work belongs in

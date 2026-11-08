@@ -158,6 +158,8 @@ func sandboxHTTPError(err error) (status int, msg string, ok bool) {
 		return http.StatusConflict, err.Error(), true
 	case errors.Is(err, sandbox.ErrNotFound):
 		return http.StatusNotFound, "sandbox not found", true
+	case errors.Is(err, errSandboxBusy):
+		return http.StatusConflict, err.Error(), true
 	case errors.Is(err, kamajik8s.ErrUnreachable):
 		return http.StatusServiceUnavailable, "sandboxes are not available", true
 	case errors.As(err, &kerr):
