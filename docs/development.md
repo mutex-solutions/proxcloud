@@ -181,8 +181,10 @@ there when calling cross-origin.
 - Full stack: `docker compose up --build` after a change rebuilds the images.
 - Chart: `make deploy` runs `helm upgrade --install` with `api.image.tag=$(TAG)` (see
   [ADR-0005](adr/0005-self-contained-helm-chart.md)). `TAG` defaults to
-  `dev-<7-char sha of HEAD>`, the tag CI publishes for a main commit: for a local
-  commit run `make image push` first, or pass a published `TAG=`.
+  `dev-<7-char sha of HEAD>`, the tag CI gives a main commit, but CI publishes it only
+  when that commit changed an image's sources (a docs- or chart-only commit has none),
+  and there is no release tag yet to default to. Otherwise run `make image push` first,
+  or pass a published `TAG=`.
 
 ## Where things live
 

@@ -1,5 +1,7 @@
 REGISTRY ?= ghcr.io/mutex-solutions
-# The tag CI publishes for a main commit (dev-<7-char sha>); `make deploy` without `make image push` needs it published.
+# Default: dev-<7-char sha of HEAD>, the tag CI gives a main commit. CI publishes it only when that commit changed an
+# image's sources (a docs/chart-only commit gets no image), and no release tag exists yet to fall back to. So for any
+# other commit run `make image push` first, or pass a published tag: make deploy TAG=dev-<sha> (see ghcr.io packages).
 TAG      ?= dev-$(shell git rev-parse --short=7 HEAD 2>/dev/null || echo local)
 CHART    ?= deploy/charts/proxcloud
 NS       ?= proxcloud
