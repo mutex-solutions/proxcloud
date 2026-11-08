@@ -34,6 +34,11 @@ and rules: [README.md](README.md#maintenance-rule).
   installer `sandbox.allow_suid`), so `sudo` works in sandboxes as on E2B; it failed in the base template with
   "effective uid is not 0 ... nosuid". Security effect in `docs/managed-sandbox.md` §1.4. Default chosen pending the
   owner's decision (the earlier implementation's owner approved it for E2B parity).
+- Second review, docs only: `docs/managed-sandbox.md` §9.2 now says the per-server allowlist is environment hygiene,
+  not a boundary (every package server runs as root like the gateway and can read the config, the token file and the
+  gateway's `/proc/<pid>/environ`); §1.4 says `allow-suid` is node-wide, so it also covers the gVisor build and
+  snapshot pods; §5.3 says sandbox-init's own `/proc/1/environ` keeps the variables it strips for its children;
+  §9.2 lists desktopCommander's feature-flag fetch and build-time install event, which no switch turns off.
 - Diagrams: C3 sandbox diagram (node `mcp-gateway`, edge from `sandbox-proxy`), C3 component row "MCP gateway".
 
 **Why**
@@ -47,6 +52,8 @@ The review fixes keep each key with the one server it is for: a third-party serv
 that reads its environment, saw the tenant's key or the gateway's bearer before. State written by the build check
 would have given every sandbox the same vendor client id with analytics on. The `KUBERNETES_*` variables pointed
 sandbox code at the cluster's API server for nothing, and sudo is what E2B templates and agents expect to work.
+The second review's doc changes stop §9.2 promising more than the code does: a reader planning around "a server never
+sees another server's key" would be wrong, since any server can read the root-only files as root.
 
 ## 2026-11-08: Custom sandbox templates: build pods, a build account per project, pruning through the OCI API (SB6b)
 

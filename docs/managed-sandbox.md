@@ -373,6 +373,8 @@ What it changes:
   its seccomp filter and namespaces, and the guardrail, the VM firewall and the isolation rules see the same packets.
 - What it does widen: code that got in as `user` (a compromised dependency, a prompt-injected agent) can start an
   escape attempt from root inside the sentry instead of from an unprivileged user.
+- It is a node-wide runsc setting, so it also applies to the template build and snapshot pods on the sandbox nodes,
+  not only to sandboxes. That widens nothing there: the build (kaniko) already runs as root.
 
 Setting it off: `sandbox.allow_suid: false` and stage 55, or `RUNSC_ALLOW_SUID=false` in the DaemonSet; node-setup
 rewrites `/etc/containerd/runsc.toml` and restarts containerd. New sandboxes pick the change up; running ones keep
@@ -980,7 +982,11 @@ runs the template's start command (as root with `startAsRoot`), marks the pod re
 restarts envd if it dies, and relays ports bound to localhost to the pod address. The sandbox's env (envd's own and
 the defaults it gives every process) is the image's ENV plus the tenant's `envVars`, without the `PROXCLOUD_*` control
 variables and without the `KUBERNETES_*` ones the kubelet puts into every container even with service links off (the
-SB8 drill found `KUBERNETES_SERVICE_*` in every process); the API refuses `envVars` with either prefix. A restarted
+SB8 drill found `KUBERNETES_SERVICE_*` in every process); the API refuses `envVars` with either prefix. sandbox-init's
+own `/proc/1/environ` still holds both sets as the kubelet passed them (a process cannot rewrite its start
+environment); it is readable by root in the sandbox, which with sudo includes `user`, and holds nothing that root there
+does not already have: envd's access token, which root can use anyway, and the API server's cluster address, which the
+guardrail blocks. A restarted
 envd has no access token
 until its `/init`, and envd without a token lets every request through, so sandbox-init first drops the ready marker
 (the readiness probe turns the pod NotReady and sandbox-proxy routes only to Ready pods), waits 5 s (probe period plus
@@ -1376,25 +1382,31 @@ the create (`brave: missing "apiKey"`), and nothing falls back to a platform val
 - the portal drops `mcp` after the shape check: it is not in the sandbox row, the Sandbox CR, the database or the log;
 - the sandbox gets no platform credential to leak: no service account token, no service links, and `sandbox-init`
   strips every `PROXCLOUD_` and `KUBERNETES_` variable before envd and its children (section 5.3);
-- each package server gets only what it needs: its own catalog env (or a `github/...` server's `envs`), `PATH` with the
+- each package server's environment holds only what it needs: its own catalog env (or a `github/...` server's `envs`), `PATH` with the
   servers' directories first, and an allowlist of the gateway's environment (`HOME`, `USER`, `LOGNAME`, `LANG`,
   `LC_ALL`, `TZ`, `TERM`, `TMPDIR`, the proxy variables, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`).
-  Not the gateway's bearer (`GATEWAY_ACCESS_TOKEN`, which the SDK puts in the gateway's environment), not another
-  server's key, not the sandbox's other `envVars`;
+  Its environment carries neither the gateway's bearer (`GATEWAY_ACCESS_TOKEN`, which the SDK puts in the gateway's
+  environment) nor another server's key nor the sandbox's other `envVars`. This is environment hygiene, not a
+  boundary between servers: every package server runs as root, as the gateway does, so one that wants to can read
+  `/etc/mcp-gateway/config.json` (all servers' keys), `/etc/mcp-gateway/.token` and `/proc/<gateway pid>/environ`.
+  The servers are the ones the tenant picked, in the tenant's sandbox; running them under a uid of their own is the
+  step that would make it a boundary (not done);
 - a remote server's headers go to that server's own scheme and host only: a redirect to another host (or to plain
   http) is followed without them;
-- the config and the gateway token are root-only files (0600) in the sandbox; the gateway's own process does not carry
-  the keys in its environment.
+- the config and the gateway token are root-only files (0600) in the sandbox, out of reach of `user` code without
+  sudo; the gateway's own process does not carry the keys in its environment.
 
 Vendor telemetry is off by default: every server starts with `DO_NOT_TRACK=1`, `DESKTOP_COMMANDER_DISABLE_TELEMETRY=1`,
 `MDB_MCP_TELEMETRY=disabled` and `ORT_DISABLE_TELEMETRY=1` (desktopCommander sends analytics and mongodb telemetry
 unless told not to; markitdown's onnxruntime writes a device id and a session file). The build check runs the servers
 with a throwaway `HOME` and `TMPDIR`, so the image carries no state from it (desktopCommander's client id, mongodb's log,
-onnxruntime's device id), and the build fails if any of it is left.
+onnxruntime's device id), and the build fails if any of it is left. Not covered by the switches: desktopCommander
+fetches its feature flags from desktopcommander.app every 5 minutes from every sandbox that runs it (no client id is
+sent), and its npm postinstall sends an install event during the image build.
 
 A tenant's keys are as safe as anything else in their sandbox: whoever runs code in it as root can read them, which is
 the tenant's choice. `tests/e2b-compat/mcp.py` checks the keyed path with a dummy key (the server has it, no platform
-variable or gateway bearer reaches it, no token is mounted, a missing key fails the create).
+variable or gateway bearer is in its environment, no token is mounted, a missing key fails the create).
 
 ### 9.3 Measured on the lab (2026-11-08)
 

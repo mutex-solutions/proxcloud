@@ -488,6 +488,7 @@ func transportFor(u upstream) (mcp.Transport, error) {
 // passEnv is what a server may take from the gateway's environment: where it runs, locale, proxies and CA files. The
 // rest stays with the gateway: GATEWAY_ACCESS_TOKEN (the bearer for every tool), the other servers' keys and the
 // sandbox's envVars. A server gets these, telemetryOff and its own catalog env (or a github server's envs).
+// Environment only: servers run as root like the gateway, so they can still read its files and /proc/<pid>/environ.
 var passEnv = []string{"HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR",
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 	"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"}
