@@ -83,3 +83,24 @@ func TestReadyCheck(t *testing.T) {
 		t.Fatal("want 0 when present")
 	}
 }
+
+func TestRunMode(t *testing.T) {
+	for _, c := range []struct {
+		args    []string
+		pid     int
+		want    string
+		wantErr bool
+	}{
+		{nil, 1, "", false},
+		{nil, 83, "", true}, // exec'd without a mode: never a second init
+		{[]string{"-snapshot"}, 83, "-snapshot", false},
+		{[]string{"-ready"}, 90, "-ready", false},
+		{[]string{"-resume"}, 83, "", true}, // a mode this binary does not know
+		{[]string{"-resume"}, 1, "", true},
+	} {
+		got, err := runMode(c.args, c.pid)
+		if got != c.want || (err != nil) != c.wantErr {
+			t.Errorf("runMode(%v, %d) = %q, %v", c.args, c.pid, got, err)
+		}
+	}
+}

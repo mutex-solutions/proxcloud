@@ -4,6 +4,21 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: sandbox-init runs the init only as PID 1 without arguments
+
+**What changed**
+
+- `cmd/sandbox-init`: an exec with an argument it does not know, or with no argument from a process that is not
+  PID 1, now exits 2 with the reason. Before, both ran a second init inside the running sandbox.
+
+**Why**
+
+- Found in the SB7 lab drill: the portal asked a node with an older runtime for `sandbox-init -snapshot` (pause).
+  The old binary did not know the flag and started a second init, which removed the ready marker and looped on
+  envd's port; the pause failed after 126 s as it should, but the sandbox stayed unready (503 from the proxy) until it
+  was killed. The same happens to any future mode on a node node-setup has not rolled yet.
+
+**Diagrams updated:** none; no container or component changed.
 ## 2026-11-08: C2 caught up with the code: token-authenticated surfaces and the delivery pipeline
 
 **What changed** (documentation only; no code or behaviour change)
