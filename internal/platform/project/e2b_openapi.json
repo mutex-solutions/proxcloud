@@ -726,6 +726,26 @@
     ],
     "type": "string"
    },
+   "ResumedSandbox": {
+    "properties": {
+     "autoPause": {
+      "deprecated": true,
+      "description": "Automatically pauses the sandbox after the timeout",
+      "type": "boolean"
+     },
+     "memory": {
+      "description": "Defaults to true. When false, resume from disk state only: the sandbox cold-boots fresh and any memory in the snapshot is ignored, never modified or deleted. Disk state has crash-recovery semantics \u2014 writes not flushed before the pause may be lost. A no-op for snapshots that contain no memory. Rejected with an error in environments where this capability is not enabled, never silently downgraded to a memory restore. A snapshot taken while the sandbox guest agent was not responding (envdUnresponsiveAtPause) can only be resumed this way, and needs no enablement.",
+      "type": "boolean"
+     },
+     "timeout": {
+      "default": 15,
+      "description": "Time to live for the sandbox in seconds.",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     }
+    }
+   },
    "Sandbox": {
     "properties": {
      "alias": {
@@ -942,6 +962,38 @@
      "object",
      "null"
     ]
+   },
+   "SandboxForkRequest": {
+    "properties": {
+     "count": {
+      "default": 1,
+      "description": "Number of forked sandboxes to create. All forks boot from the same snapshot, so the snapshot is captured once regardless of count. Each fork succeeds or fails independently; the outcome of each is reported in its entry of the response list.",
+      "format": "int32",
+      "maximum": 100,
+      "minimum": 1,
+      "type": "integer"
+     },
+     "timeout": {
+      "default": 15,
+      "description": "Time to live for the new forked sandboxes in seconds.",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "SandboxForkResult": {
+    "description": "Result of one requested fork. Exactly one of sandbox or error is set: sandbox when the fork started successfully, error when it failed to start.",
+    "properties": {
+     "error": {
+      "$ref": "#/components/schemas/Error"
+     },
+     "sandbox": {
+      "$ref": "#/components/schemas/Sandbox"
+     }
+    },
+    "type": "object"
    },
    "SandboxIam": {
     "description": "Sandbox workload identity configuration. A non-empty, valid tokens map enables workload identity for the sandbox.",
@@ -1290,6 +1342,21 @@
     ],
     "type": "string"
    },
+   "SandboxPauseRequest": {
+    "properties": {
+     "memory": {
+      "default": true,
+      "description": "Whether to capture a full memory snapshot. When false, only the filesystem is persisted and resuming the sandbox cold-boots (reboots) it from disk, losing in-memory state, running processes, and open connections. Resume it with an explicit request (connect or resume); auto-resume, which can be triggered by arbitrary traffic, refuses such a sandbox. Defaults to true.",
+      "type": "boolean"
+     },
+     "requireHealthyGuest": {
+      "default": false,
+      "description": "The pause checks that the sandbox guest agent answers before it takes the snapshot. By default an unresponsive agent is recorded on the snapshot and the pause proceeds; the sandbox then shows `envdUnresponsiveAtPause` and a later resume must ask for `memory: false`, since restoring that memory would bring the unresponsive agent back. With this true, the pause is instead refused with 503 while the agent does not answer, and the sandbox keeps running. A filesystem-only pause (`memory: false`) is always refused while the agent does not answer, whatever this says.",
+      "type": "boolean"
+     }
+    },
+    "type": "object"
+   },
    "SandboxRefreshRequest": {
     "properties": {
      "duration": {
@@ -1297,6 +1364,19 @@
       "maximum": 3600,
       "minimum": 0,
       "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "SandboxSnapshotRequest": {
+    "properties": {
+     "memory": {
+      "description": "Whether to capture a full memory snapshot. When false, only the filesystem is persisted: the snapshot is smaller and faster to take, and sandboxes created from it cold-boot (start fresh from disk) instead of restoring memory, so they begin without the source sandbox's running processes, in-memory state, and open connections. The source sandbox keeps running in both cases. Defaults to true.",
+      "type": "boolean"
+     },
+     "name": {
+      "description": "Optional name for the snapshot template. If a snapshot template with this name already exists, a new build will be assigned to the existing template instead of creating a new one.",
+      "type": "string"
      }
     },
     "type": "object"
@@ -1351,6 +1431,26 @@
     "required": [
      "sandboxes"
     ]
+   },
+   "SnapshotInfo": {
+    "properties": {
+     "names": {
+      "description": "Full names of the snapshot template including team namespace and tag (e.g. team-slug/my-snapshot:v2)",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "snapshotID": {
+      "description": "Identifier of the snapshot template including the tag. Uses namespace/alias when a name was provided (e.g. team-slug/my-snapshot:default), otherwise falls back to the raw template ID (e.g. abc123:default).",
+      "type": "string"
+     }
+    },
+    "required": [
+     "snapshotID",
+     "names"
+    ],
+    "type": "object"
    },
    "TeamUser": {
     "properties": {
@@ -1862,7 +1962,7 @@
   "/sandboxes": {
    "get": {
     "deprecated": true,
-    "description": "List all running sandboxes. Returns 400 when more than 5000 running sandboxes match; use GET /v2/sandboxes to page through them.\n\nProxCloud: everything in one page.",
+    "description": "List all running sandboxes. Returns 400 when more than 5000 running sandboxes match; use GET /v2/sandboxes to page through them.\n\nProxCloud: running and paused sandboxes; everything in one page.",
     "parameters": [
      {
       "description": "Metadata query used to filter the sandboxes (e.g. \"user=abc&app=prod\"). Each key and values must be URL encoded.",
@@ -1917,7 +2017,7 @@
    },
    "post": {
     "deprecated": true,
-    "description": "Create a sandbox from the template. All system communication with the sandbox is secured. Use POST /v2/sandboxes instead.\n\nProxCloud: `secure` is ignored (envd always needs its token); `volumeMounts`, `mcp`, `autoPause` and `autoResume` \u2192 400. Waits until the sandbox is ready, at most about 50 s, else 503. Passes the same checks as the native create: suspended project 409, suspended billing profile 403, provider DISABLED or a release gate not holding 503, project quota 429. Extensions: `gpu`, `cpuCount`, `memoryMB`.",
+    "description": "Create a sandbox from the template. All system communication with the sandbox is secured. Use POST /v2/sandboxes instead.\n\nProxCloud: `secure` is ignored (envd always needs its token); `volumeMounts` and `mcp` \u2192 400. `autoPause` pauses the filesystem only: `autoPauseMemory: true` \u2192 400, absent or false is a filesystem pause; 400 where the location cannot take snapshots. `autoResume` (with `autoPause`) works on that filesystem pause: traffic to the paused sandbox's ports cold-boots it; 400 where the location has no wake token. Waits until the sandbox is ready, at most about 50 s, else 503. Passes the same checks as the native create: suspended project 409, suspended billing profile 403, provider DISABLED or a release gate not holding 503, project quota 429. Extensions: `gpu`, `cpuCount`, `memoryMB`.",
     "requestBody": {
      "content": {
       "application/json": {
@@ -2121,7 +2221,7 @@
   "/sandboxes/{sandboxID}/connect": {
    "post": {
     "deprecated": true,
-    "description": "Returns sandbox details. If the sandbox is paused, it will be resumed. TTL is only extended. Use POST /v2/sandboxes/{sandboxID}/connect instead. Answers 409 with error_code sandbox_snapshot_guest_agent_unresponsive when the paused sandbox's snapshot was taken while its guest agent was not responding and the request did not ask for `memory: false`.\n\nProxCloud: running sandboxes only; an extension passes the usage checks of the create.",
+    "description": "Returns sandbox details. If the sandbox is paused, it will be resumed. TTL is only extended. Use POST /v2/sandboxes/{sandboxID}/connect instead. Answers 409 with error_code sandbox_snapshot_guest_agent_unresponsive when the paused sandbox's snapshot was taken while its guest agent was not responding and the request did not ask for `memory: false`.\n\nProxCloud: a paused sandbox is resumed (201) as a cold boot whatever `memory` says, after the usage checks of the create; an extension of a running one passes them too.",
     "parameters": [
      {
       "$ref": "#/components/parameters/sandboxID"
@@ -2192,6 +2292,71 @@
      }
     ],
     "summary": "Connect sandbox",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/sandboxes/{sandboxID}/fork": {
+   "post": {
+    "description": "Fork the sandbox: checkpoint the running sandbox in place (it is briefly paused, snapshotted with its full memory state, and resumed on its node, keeping its ID and expiration untouched) and create count new sandboxes from that snapshot. Returns one result per requested fork, each carrying either the created sandbox or the error that prevented it from starting. A non-201 status means the request failed before any fork was attempted.\n\nProxCloud: filesystem only (the forks cold-boot from a snapshot of the source, with new ids and tokens); at most 10 forks; passes the usage checks of the create and the project quota.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SandboxForkRequest"
+       }
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "$ref": "#/components/schemas/SandboxForkResult"
+         },
+         "type": "array"
+        }
+       }
+      },
+      "description": "The sandbox was snapshotted and the forks were attempted; each entry reports one fork's outcome"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "409": {
+      "$ref": "#/components/responses/409"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     },
+     "503": {
+      "$ref": "#/components/responses/503"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Fork sandbox",
     "tags": [
      "sandboxes"
     ]
@@ -2389,6 +2554,61 @@
     ]
    }
   },
+  "/sandboxes/{sandboxID}/pause": {
+   "post": {
+    "description": "Pause the sandbox. Answers 503 and leaves the sandbox running when it cannot be paused right now: its node is busy, it is being snapshotted, or `requireHealthyGuest` was set and the sandbox guest agent is not responding; retry later.\n\nProxCloud: filesystem only. `memory: true` \u2192 400; absent or false pauses the filesystem (the default here, unlike E2B's). `requireHealthyGuest` is implied: the capture runs in the sandbox. The paused snapshot is billed per GB-hour until the sandbox is resumed or killed.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SandboxPauseRequest"
+       }
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "204": {
+      "description": "The sandbox was paused successfully and can be resumed"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "409": {
+      "$ref": "#/components/responses/409"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     },
+     "503": {
+      "$ref": "#/components/responses/503"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Pause sandbox",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
   "/sandboxes/{sandboxID}/refreshes": {
    "post": {
     "description": "Refresh the sandbox extending its time to live\n\nProxCloud: an extension passes the usage checks of the create.",
@@ -2429,6 +2649,137 @@
      }
     ],
     "summary": "Refresh sandbox",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/sandboxes/{sandboxID}/resume": {
+   "post": {
+    "deprecated": true,
+    "description": "Resume the sandbox. Answers 409 when the sandbox is already running, or when its snapshot was taken while the sandbox guest agent was not responding and a plain resume would restore that memory (error_code sandbox_snapshot_guest_agent_unresponsive); resume such a sandbox without memory (`memory: false`).\n\nProxCloud: always a cold boot from the filesystem snapshot. Passes the usage checks of the create (409, 403, 503) and the project quota (429). Default timeout 300 s.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ResumedSandbox"
+       }
+      }
+     },
+     "required": false
+    },
+    "responses": {
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Sandbox"
+        }
+       }
+      },
+      "description": "The sandbox was resumed successfully"
+     },
+     "400": {
+      "$ref": "#/components/responses/400"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "409": {
+      "$ref": "#/components/responses/409"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     },
+     "503": {
+      "$ref": "#/components/responses/503"
+     },
+     "504": {
+      "$ref": "#/components/responses/504"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Resume sandbox",
+    "tags": [
+     "sandboxes"
+    ]
+   }
+  },
+  "/sandboxes/{sandboxID}/snapshots": {
+   "post": {
+    "description": "Create a persistent snapshot from the sandbox's current state. Snapshots can be used to create new sandboxes and persist beyond the original sandbox's lifetime.\n\nProxCloud: filesystem only, `memory: true` \u2192 400. Passes the usage checks of the create. Billed per GB-hour until DELETE /templates/{templateID}.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/sandboxID"
+     }
+    ],
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SandboxSnapshotRequest"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "201": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SnapshotInfo"
+        }
+       }
+      },
+      "description": "Snapshot created successfully"
+     },
+     "400": {
+      "$ref": "#/components/responses/400"
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "404": {
+      "$ref": "#/components/responses/404"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     },
+     "503": {
+      "$ref": "#/components/responses/503"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "Create snapshot",
     "tags": [
      "sandboxes"
     ]
@@ -2480,6 +2831,79 @@
     "tags": [
      "sandboxes"
     ]
+   }
+  },
+  "/snapshots": {
+   "get": {
+    "description": "List all snapshots for the team\n\nProxCloud: everything in one page.",
+    "parameters": [
+     {
+      "in": "query",
+      "name": "sandboxID",
+      "required": false,
+      "schema": {
+       "description": "Filter snapshots by source sandbox ID",
+       "type": "string"
+      }
+     },
+     {
+      "description": "Filter snapshots by name or ID, optionally tag-qualified (e.g. \"my-snapshot\", \"my-team/my-snapshot\" or \"my-snapshot:v1\").",
+      "in": "query",
+      "name": "name",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "$ref": "#/components/parameters/paginationLimit"
+     },
+     {
+      "$ref": "#/components/parameters/paginationNextToken"
+     }
+    ],
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "items": {
+          "$ref": "#/components/schemas/SnapshotInfo"
+         },
+         "type": "array"
+        }
+       }
+      },
+      "description": "Successfully returned snapshots",
+      "headers": {
+       "X-Next-Token": {
+        "$ref": "#/components/headers/XNextToken"
+       }
+      }
+     },
+     "401": {
+      "$ref": "#/components/responses/401"
+     },
+     "429": {
+      "$ref": "#/components/responses/429"
+     },
+     "500": {
+      "$ref": "#/components/responses/500"
+     }
+    },
+    "security": [
+     {
+      "ApiKeyAuth": []
+     },
+     {
+      "ApiKeyBearer": []
+     }
+    ],
+    "summary": "List snapshots",
+    "tags": [
+     "snapshots"
+    ],
+    "x-api-group": "list"
    }
   },
   "/templates": {
@@ -2976,7 +3400,7 @@
   },
   "/v2/sandboxes": {
    "get": {
-    "description": "List all sandboxes\n\nProxCloud: running sandboxes only (nothing is paused); everything in one page.",
+    "description": "List all sandboxes\n\nProxCloud: everything in one page.",
     "parameters": [
      {
       "description": "Metadata query used to filter the sandboxes (e.g. \"user=abc&app=prod\"). Each key and values must be URL encoded.",

@@ -60,9 +60,10 @@ kubectl apply -f network-policy.yaml -f rbac.yaml
 # 5. sandbox-proxy (installer stage 56 does this, plus the certificate and the entry appliance). It runs only on nodes
 #    labelled node-restriction.kubernetes.io/proxcloud-system by CAPI (stage 55's sandbox-system node group, chart
 #    value machineLabels), never on a sandbox worker. Its config, wake token and an empty certificate Secret first;
-#    cert-sync on the services cluster fills the certificate. PROXCLOUD_WAKE_URL
-#    (https://api.example.org/api/v1/internal/sandboxes) only from SB7 on, when there is something to resume.
-kubectl -n sandbox-system create configmap sandbox-proxy-config --from-literal=SANDBOX_DOMAIN=example-sandbox.net
+#    cert-sync on the services cluster fills the certificate. PROXCLOUD_WAKE_URL is where the proxy wakes paused
+#    autoResume sandboxes; the workers' firewall must let it reach that address (Proxmox provider config.sandbox.portal).
+kubectl -n sandbox-system create configmap sandbox-proxy-config --from-literal=SANDBOX_DOMAIN=example-sandbox.net \
+  --from-literal=PROXCLOUD_WAKE_URL=https://api.example.org/api/v1/internal/sandboxes
 kubectl -n sandbox-system create secret generic sandbox-proxy-wake --from-literal=PROXCLOUD_WAKE_TOKEN=<proxyWakeToken>
 kubectl -n sandbox-system create secret generic sandbox-proxy-tls
 kubectl apply -f sandbox-proxy.yaml

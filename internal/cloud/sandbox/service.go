@@ -83,6 +83,9 @@ func NewWithAPI(api K8sAPI, cfg Config, serviceID string) *Service {
 // Config exposes the defaulted provider config (catalog, limits).
 func (s *Service) Config() Config { return s.cfg }
 
+// ServiceID is the sandbox provider this service belongs to.
+func (s *Service) ServiceID() string { return s.serviceID }
+
 func (s *Service) ownerSelector(projectID string) string {
 	return LabelProject + "=" + projectID + "," + LabelManagedBy + "=" + ManagedByValue + "," + LabelService + "=" + s.serviceID
 }

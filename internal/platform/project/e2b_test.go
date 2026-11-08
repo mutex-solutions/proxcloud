@@ -78,8 +78,10 @@ func TestE2BNetworkMapping(t *testing.T) {
 func TestE2BCreateRefusals(t *testing.T) {
 	for body, want := range map[string]string{
 		`{}`:                                     "templateID",
-		`{"templateID":"base","autoPause":true}`: "autoPause",
-		`{"templateID":"base","autoResume":{"enabled":true}}`:     "autoResume",
+		`{"templateID":"base","autoPause":true}`: "",
+		`{"templateID":"base","autoPause":true,"autoPauseMemory":true}`:  "memory snapshots",
+		`{"templateID":"base","autoPause":true,"autoPauseMemory":false}`: "",
+		`{"templateID":"base","autoResume":{"enabled":true}}`:            "autoResume needs autoPause",
 		`{"templateID":"base","volumeMounts":[{"name":"v"}]}`:     "volumeMounts",
 		`{"templateID":"base","mcp":{"github":{}}}`:               "mcp",
 		`{"templateID":"base","network":{"httpsPorts":[8443]}}`:   "httpsPorts",
@@ -113,7 +115,10 @@ func TestE2BAuthAndErrors(t *testing.T) {
 		{"GET", "/e2b/volumes", "", 404},
 		{"POST", "/e2b/v3/templates", "", 401},
 		{"PUT", "/e2b/templates/t1/files/0123456789/upload?token=x", "", 403},
-		{"POST", "/e2b/sandboxes/sbx-0123456789abcdef/pause", "", 404},
+		{"POST", "/e2b/sandboxes/sbx-0123456789abcdef/pause", "", 401},
+		{"POST", "/e2b/sandboxes/sbx-0123456789abcdef/fork", "", 401},
+		{"GET", "/e2b/snapshots", "", 401},
+		{"GET", "/e2b/volumes/v1", "", 404},
 	} {
 		req := httptest.NewRequest(c.method, c.path, nil)
 		if c.key != "" {

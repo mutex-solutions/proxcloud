@@ -92,9 +92,11 @@ type sandboxTemplateDoc struct {
 	Tags        map[string]string `json:"tags"` // tag → buildID
 	UploadToken string            `json:"uploadToken"`
 	Builds      []templateBuild   `json:"builds"`
-	// Kind "snapshot" and Internal (a pause's or fork's snapshot) come with SB7; until then every record is a template.
-	Kind      string              `json:"kind,omitempty"`
-	Internal  bool                `json:"internal,omitempty"`
+	// Kind "snapshot": a sandbox's filesystem (e2b_snapshots.go), taken from SourceSandbox. Internal: a pause's or a
+	// fork's snapshot, hidden from the template lists and from their limit.
+	Kind          string `json:"kind,omitempty"`
+	Internal      bool   `json:"internal,omitempty"`
+	SourceSandbox string `json:"sourceSandbox,omitempty"`
 	GPU       *sandbox.GPURequest `json:"gpu,omitempty"`
 	SizeBytes int64               `json:"sizeBytes,omitempty"`
 	CreatedAt *time.Time          `json:"createdAt"`
@@ -275,7 +277,7 @@ func (h *Handler) e2bTemplateRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	if t == nil {
-		n, err := h.sbTemplates.Count(ctx, pgdoc.M{"projectId": c.proj.ID})
+		n, err := h.sbTemplates.Count(ctx, pgdoc.M{"projectId": c.proj.ID, "internal": pgdoc.M{"$ne": true}})
 		if err != nil {
 			e2bFail(w, err)
 			return
@@ -782,7 +784,14 @@ func (h *Handler) e2bTemplateBuildStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	logs := bl.Logs
-	if bl.Status == sandbox.BuildBuilding || bl.Status == sandbox.BuildReady && bl.FinishedAt == nil {
+	if t.Kind == "snapshot" && bl.Status == sandbox.BuildBuilding { // its result starts the storage billing
+		if done, _ := h.finishSnapshot(ctx, c, t, bl, false); done {
+			if ft, _ := h.loadTemplate(ctx, c.proj.ID, t.ID); ft != nil {
+				adoptBuild(t, bl, ft)
+			}
+		}
+		logs = bl.Logs
+	} else if bl.Status == sandbox.BuildBuilding || bl.Status == sandbox.BuildReady && bl.FinishedAt == nil {
 		logs = h.syncBuildPod(ctx, c, t, bl, true)
 	} else if bl.FinishedAt != nil && time.Since(*bl.FinishedAt) > buildPodGrace {
 		_ = c.ss.DeleteBuild(ctx, bl.BuildID)
@@ -991,7 +1000,7 @@ func (h *Handler) e2bTemplateDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := h.loadTemplate(r.Context(), c.proj.ID, chi.URLParam(r, "templateID"))
-	if err != nil || t == nil {
+	if err != nil || t == nil || t.Internal { // a paused sandbox's snapshot goes with the sandbox (DELETE /sandboxes/{id})
 		e2bErr(w, http.StatusNotFound, "template not found")
 		return
 	}
@@ -1002,10 +1011,21 @@ func (h *Handler) e2bTemplateDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// deleteTemplate removes a template's build pods, its contexts and its record. Its images go with the next registry
-// prune (nothing references them any more).
+// deleteTemplate removes a template's build pods, its contexts and its record, and ends a snapshot's storage billing.
+// Its images go with the next registry prune (nothing references them any more).
 func (h *Handler) deleteTemplate(ctx context.Context, ss *sandbox.Service, t *sandboxTemplateDoc) error {
 	ctx = context.WithoutCancel(ctx)
+	if t.Kind == "snapshot" {
+		cr, err := h.cloud.FindByServiceIDAndExternalID(ctx, ss.ServiceID(), t.ID)
+		if err != nil {
+			return err
+		}
+		if cr != nil && cr.ProjectID == t.ProjectID && cr.Type == cloud.TypeSandboxSnapshot {
+			if err := h.cloud.DeleteAndArchive(ctx, cr, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
+	}
 	for _, b := range t.Builds {
 		_ = ss.DeleteBuild(ctx, b.BuildID) // running or finished: no pod outlives its template
 	}

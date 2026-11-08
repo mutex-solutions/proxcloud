@@ -60,6 +60,11 @@ func (h *Handler) E2BRoutes(r chi.Router) {
 		r.Get("/sandboxes/{sandboxID}/logs", h.e2bLogs)
 		r.Get("/v2/sandboxes/{sandboxID}/logs", h.e2bLogs)
 		r.Get("/sandboxes/{sandboxID}/metrics", h.e2bMetrics)
+		r.Post("/sandboxes/{sandboxID}/pause", h.e2bPause)
+		r.Post("/sandboxes/{sandboxID}/resume", h.e2bResume)
+		r.Post("/sandboxes/{sandboxID}/snapshots", h.e2bSnapshotCreate)
+		r.Post("/sandboxes/{sandboxID}/fork", h.e2bFork)
+		r.Get("/snapshots", h.e2bSnapshotList)
 		r.Get("/templates", h.e2bTemplates)
 		r.Get("/templates/aliases/{alias}", h.e2bTemplateAlias)
 		r.Get("/templates/{templateID}", h.e2bTemplateGet)
@@ -101,6 +106,10 @@ func e2bFail(w http.ResponseWriter, err error) {
 
 // e2bError maps err to the status and message shown to the caller (internals are logged only).
 func e2bError(err error) (int, string) {
+	var se e2bStatusErr
+	if errors.As(err, &se) {
+		return se.code, se.msg
+	}
 	if status, msg, ok := sandboxHTTPError(err); ok {
 		var kerr *kamajik8s.APIError
 		switch {
@@ -322,9 +331,10 @@ func (b *e2bCreateBody) e2bRefusal() string {
 	switch {
 	case b.TemplateID == "":
 		return "templateID is required"
-	case b.AutoPause || (b.AutoResume != nil && b.AutoResume.Enabled) || (b.AutoPauseMemory != nil && *b.AutoPauseMemory):
-		// Without pause (SB7) a sandbox would be deleted at its timeout, not paused: refuse rather than lose files.
-		return "autoPause and autoResume are not available at this location yet"
+	case b.AutoPauseMemory != nil && *b.AutoPauseMemory:
+		return errMemorySnapshot.msg // a filesystem pause instead would drop the processes the caller asked to keep
+	case b.AutoResume != nil && b.AutoResume.Enabled && !b.AutoPause:
+		return "autoResume needs autoPause"
 	case len(b.VolumeMounts) > 0:
 		return "volumeMounts are not supported"
 	case len(b.MCP) > 0 && string(b.MCP) != "null":
@@ -344,11 +354,23 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		e2bErr(w, http.StatusBadRequest, msg)
 		return
 	}
+	// Without pause here, an autoPause sandbox would be deleted at its timeout, not paused: refuse rather than lose
+	// files. autoResume needs the wake token the proxy calls with.
+	autoResume := b.AutoPause && b.AutoResume != nil && b.AutoResume.Enabled
+	if b.AutoPause && h.snapshotsOn(c) != nil {
+		e2bErr(w, http.StatusBadRequest, "autoPause is not available at this location")
+		return
+	}
+	if autoResume && c.ss.Config().ProxyWakeToken == "" {
+		e2bErr(w, http.StatusBadRequest, "autoResume is not available at this location")
+		return
+	}
 	// The native create's checks, in its order: suspension, the provider's state, the release gates, then the quota.
 	if err := h.sandboxUsageGate(r.Context(), c.proj, c.es); err != nil {
 		e2bFail(w, err)
 		return
 	}
+	h.awaitIfSnapshot(r.Context(), c, b.TemplateID)
 	custom, customName, err := h.resolveCustomTemplate(r.Context(), c.proj.ID, b.TemplateID)
 	if errors.Is(err, sandbox.ErrBadTemplate) {
 		e2bErr(w, http.StatusBadRequest, err.Error())
@@ -359,13 +381,15 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec := sandbox.Spec{
-		ProjectID: c.proj.ID,
-		Template:  b.TemplateID,
-		Custom:    custom,
-		Env:       b.EnvVars,
-		Metadata:  b.Metadata,
-		GPU:       b.GPU,
-		Network:   b.Network.policy(b.AllowInternetAccess),
+		ProjectID:  c.proj.ID,
+		Template:   b.TemplateID,
+		Custom:     custom,
+		Env:        b.EnvVars,
+		Metadata:   b.Metadata,
+		GPU:        b.GPU,
+		Network:    b.Network.policy(b.AllowInternetAccess),
+		AutoPause:  b.AutoPause,
+		AutoResume: autoResume,
 	}
 	if custom != nil {
 		spec.Template = customName
@@ -437,9 +461,8 @@ func (h *Handler) e2bWaitReady(ctx context.Context, c *e2bCaller, cr *cloud.Clou
 	}
 }
 
-// e2bList: GET /sandboxes and /v2/sandboxes. Filters: metadata (url-encoded k=v&k2=v2) and state; nothing is ever
-// paused before SB7, so state=paused alone answers an empty list. Everything fits in one page (a project runs at most
-// its quota of sandboxes).
+// e2bList: GET /sandboxes and /v2/sandboxes. Filters: metadata (url-encoded k=v&k2=v2) and state (running, paused).
+// Everything fits in one page (a project runs at most its quota of sandboxes).
 func (h *Handler) e2bList(w http.ResponseWriter, r *http.Request) {
 	c := e2bFrom(r)
 	q := r.URL.Query()
@@ -467,6 +490,14 @@ func (h *Handler) e2bList(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			out = append(out, e2bListed(id, d))
+		}
+	}
+	if st == "" || strings.Contains(st, "paused") {
+		paused := h.projectPaused(r.Context(), c.proj.ID)
+		for i := range paused {
+			if metadataMatches(sandbox.PayloadOf(paused[i].Saved)["metadata"], want) {
+				out = append(out, pausedListed(&paused[i]))
+			}
 		}
 	}
 	w.Header().Set("X-Total-Running", fmt.Sprint(len(out)))
@@ -500,6 +531,10 @@ func (h *Handler) e2bLive(w http.ResponseWriter, r *http.Request) (string, map[s
 
 func (h *Handler) e2bGet(w http.ResponseWriter, r *http.Request) {
 	c := e2bFrom(r)
+	if p := h.loadPaused(r.Context(), c.proj.ID, chi.URLParam(r, "sandboxID")); p != nil {
+		e2bJSON(w, http.StatusOK, pausedListed(p))
+		return
+	}
 	id, d, a, ok := h.e2bLive(w, r)
 	if !ok {
 		return
@@ -530,6 +565,17 @@ func (h *Handler) e2bRow(ctx context.Context, c *e2bCaller, id string) *cloud.Cl
 func (h *Handler) e2bKill(w http.ResponseWriter, r *http.Request) {
 	c := e2bFrom(r)
 	id := chi.URLParam(r, "sandboxID")
+	if p := h.loadPaused(r.Context(), c.proj.ID, id); p != nil {
+		if err := h.killPaused(r.Context(), c, p); err != nil {
+			e2bFail(w, err)
+			return
+		}
+		// A resume that finished meanwhile (or crashed after starting it) left a running sandbox: the kill covers it.
+		if _, err := c.ss.GetSandbox(r.Context(), c.proj.ID, id); err != nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
 	if _, err := c.ss.GetSandbox(r.Context(), c.proj.ID, id); err != nil {
 		e2bFail(w, err)
 		return
@@ -632,13 +678,27 @@ func (h *Handler) e2bExtendTo(w http.ResponseWriter, r *http.Request, seconds in
 }
 
 // e2bConnect: POST /sandboxes/{id}/connect {timeout}: the Sandbox (with its tokens), its life extended to at least
-// timeout seconds. Nothing is paused before SB7, so there is nothing to resume.
+// timeout seconds. A paused sandbox is resumed (201), always as a cold boot: memory: false (E2B's reboot) and the
+// default restore read the same here, since no pause keeps memory.
 func (h *Handler) e2bConnect(w http.ResponseWriter, r *http.Request) {
 	c := e2bFrom(r)
 	var b struct {
 		Timeout *int `json:"timeout"`
 	}
 	if !decodeE2B(w, r, &b) {
+		return
+	}
+	if p := h.loadPaused(r.Context(), c.proj.ID, chi.URLParam(r, "sandboxID")); p != nil {
+		timeout := 300
+		if b.Timeout != nil {
+			timeout = *b.Timeout
+		}
+		sb, err := h.resumePaused(r.Context(), c, p, timeout)
+		if err != nil {
+			e2bFail(w, err)
+			return
+		}
+		e2bJSON(w, http.StatusCreated, sb)
 		return
 	}
 	if b.Timeout != nil && !h.e2bExtendTo(w, r, *b.Timeout) {
