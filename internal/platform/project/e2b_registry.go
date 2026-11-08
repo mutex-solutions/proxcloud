@@ -28,7 +28,8 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 )
 
-// SyncSandboxBuilds folds finished build pods into their templates (scheduled every minute).
+// SyncSandboxBuilds folds finished build pods into their templates and drops fork snapshots past their reuse window
+// (scheduled every minute).
 func (h *Handler) SyncSandboxBuilds(ctx context.Context) {
 	if h.sbTemplates == nil || h.sandboxFor == nil {
 		return
@@ -52,6 +53,14 @@ func (h *Handler) SyncSandboxBuilds(ctx context.Context) {
 	}
 	for i := range all {
 		t := &all[i]
+		if t.ForkUntil != nil && time.Now().After(*t.ForkUntil) { // a fork's snapshot no retry took
+			if c := callerOf(t.ProjectID); c != nil {
+				if err := h.deleteTemplate(ctx, c.ss, t); err != nil {
+					slog.Warn("build sync: drop fork snapshot", "template", t.ID, "err", err)
+				}
+			}
+			continue
+		}
 		for j := range t.Builds {
 			bl := &t.Builds[j]
 			if bl.Status != sandbox.BuildBuilding {

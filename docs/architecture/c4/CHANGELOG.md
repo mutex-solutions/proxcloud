@@ -4,6 +4,27 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: a fork retried after 503 reuses the snapshot still being assembled
+
+**What changed**
+
+- E2B fork (`internal/platform/project/e2b_snapshots.go`): a fork whose snapshot is not ready within 60 s keeps it
+  (template field `forkUntil`, 5 minutes from the request) and answers 503. A fork of the same sandbox in the same
+  project before then takes that snapshot instead of capturing again, waits up to 60 s for it, and forks from it once
+  the image is ready; the snapshot then goes. A failed assembly still drops it. Job `sandboxBuildSync` drops a fork
+  snapshot past its window that no retry took (also after an API restart).
+- `tests/e2b-compat/pause.py`: fork and create from a snapshot are retried on `ServiceBusyException` (5 tries with
+  backoff); autoPause is drilled without autoResume (the SDK refuses it with `mode: "filesystem"`), and the
+  autoResume wake separately, with `on_timeout: "pause"` and no mode.
+
+**Why**
+
+- The strict lab drill (stock SDK 2.63, main 5df7f4e) on a site where a snapshot image takes about 66 s to assemble:
+  fork answered 503 after 60 s, as designed, but every retry took a new snapshot that again needed 66 s, so a fork
+  could never succeed there. A create from a named snapshot already converged (a retry takes no new snapshot).
+
+**Diagrams updated:** none; no container or component changed.
+
 ## 2026-11-08: sandbox pause answers before its image is ready; isolation lets workers reach their VM firewall endpoints
 
 **What changed**

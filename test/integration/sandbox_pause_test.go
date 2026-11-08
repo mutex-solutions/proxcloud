@@ -43,6 +43,8 @@ type pauseCluster struct {
 	cut bool
 	// hold: assembly pods stay Pending (a slow site) until release.
 	hold bool
+	// captures: snapshot captures taken (exec of sandbox-init -snapshot).
+	captures int
 }
 
 func succeeded() map[string]any {
@@ -65,6 +67,9 @@ func (c *pauseCluster) ExecStream(_ context.Context, _, _, _ string, cmd []strin
 	if len(cmd) != 2 || cmd[1] != "-snapshot" {
 		return 1, "unexpected command", nil
 	}
+	c.pmu.Lock()
+	c.captures++
+	c.pmu.Unlock()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
@@ -728,7 +733,7 @@ func TestE2BSnapshotRetakenBillsKeptImage(t *testing.T) {
 // On a slow site (assembly pods Pending) every call answers within the E2B SDK's 120 s: the pause once the capture is
 // stored (the sandbox lists once, as paused, and still runs), a connect after PauseJoinWait with the running sandbox
 // (the pause cancelled, nothing left of it), a kill at once, and a fork or a create from a snapshot with 503 after
-// SnapshotRequestWait (the fork's snapshot dropped, the named one still assembling). Once the image is ready the pause
+// SnapshotRequestWait (the fork's snapshot kept for a retry, the named one still assembling). Once the image is ready the pause
 // deletes the sandbox and a connect resumes it from the image.
 func TestE2BPauseOnASlowSite(t *testing.T) {
 	f, pc, keyA, _ := newPauseFixture(t)
@@ -792,8 +797,8 @@ func TestE2BPauseOnASlowSite(t *testing.T) {
 	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/fork", `{"count":1,"timeout":60}`); code != http.StatusServiceUnavailable {
 		t.Fatalf("fork on a slow site: %d %s", code, body)
 	}
-	if templates() != 0 || f.cluster.count() != 1 {
-		t.Fatalf("the late fork left %d snapshots, %d sandboxes", templates(), f.cluster.count())
+	if templates() != 1 || f.cluster.count() != 1 {
+		t.Fatalf("the late fork left %d snapshots (want its own, for a retry), %d sandboxes", templates(), f.cluster.count())
 	}
 	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/snapshots", `{"name":"late"}`); code != http.StatusCreated {
 		t.Fatalf("named snapshot: %d %s", code, body)
@@ -848,5 +853,96 @@ func TestE2BConnectWaitsWhenPausedSandboxIsGone(t *testing.T) {
 	}
 	if cr, _ := pc.GetCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), id); cr == nil || !strings.Contains(fmtJSON(cr), "192.0.2.226/t/pa/") {
 		t.Fatalf("not resumed from the snapshot image: %v", cr)
+	}
+}
+
+// On a site where the assembly takes longer than SnapshotRequestWait, a fork answers 503 and keeps its snapshot: a
+// retry within ForkReuseWindow waits for that same snapshot instead of capturing again, and gets the fork once the
+// image is ready. Another project's fork of the sandbox stays refused and never sees it; one no retry takes is dropped
+// by job sandboxBuildSync past the window.
+func TestE2BForkRetryReusesSnapshot(t *testing.T) {
+	f, pc, keyA, keyB := newPauseFixture(t)
+	ctx := context.Background()
+	defer func(w, r time.Duration) { project.SnapshotRequestWait, project.ForkReuseWindow = w, r }(project.SnapshotRequestWait, project.ForkReuseWindow)
+	project.SnapshotRequestWait = time.Second
+	pc.pmu.Lock()
+	pc.hold = true
+	pc.pmu.Unlock()
+	id := f.e2bCreate(keyA)
+	snapshots := func(proj string) []map[string]any {
+		var ts []map[string]any
+		if err := f.db.C("sandbox_templates").Find(ctx, pgdoc.M{"projectId": proj}, &ts); err != nil {
+			t.Fatal(err)
+		}
+		return ts
+	}
+	captures := func() int {
+		pc.pmu.Lock()
+		defer pc.pmu.Unlock()
+		return pc.captures
+	}
+	fork := func(key string) (int, string) {
+		return f.e2b(key, http.MethodPost, "/sandboxes/"+id+"/fork", `{"count":1,"timeout":60}`)
+	}
+
+	if code, body := fork(keyA); code != http.StatusServiceUnavailable || !strings.Contains(body, "retry") {
+		t.Fatalf("fork on a slow site: %d %s", code, body)
+	}
+	first := snapshots("pa")
+	if len(first) != 1 || captures() != 1 || f.cluster.count() != 1 {
+		t.Fatalf("after the late fork: %d snapshots, %d captures, %d sandboxes", len(first), captures(), f.cluster.count())
+	}
+	snapID := fmt.Sprint(first[0]["id"])
+
+	// Another project cannot fork the sandbox, and takes nothing from its pending snapshot.
+	if code, body := fork(keyB); code != http.StatusNotFound {
+		t.Fatalf("tenant B forked: %d %s", code, body)
+	}
+	if len(snapshots("pb")) != 0 || captures() != 1 {
+		t.Fatalf("tenant B's fork: %d snapshots, %d captures", len(snapshots("pb")), captures())
+	}
+
+	// A retry while the image is still assembled: 503 again, no second capture.
+	if code, body := fork(keyA); code != http.StatusServiceUnavailable {
+		t.Fatalf("retry while assembling: %d %s", code, body)
+	}
+	if ts := snapshots("pa"); len(ts) != 1 || fmt.Sprint(ts[0]["id"]) != snapID || captures() != 1 {
+		t.Fatalf("the retry took a new snapshot: %d snapshots, %d captures", len(ts), captures())
+	}
+
+	// Once the image is ready the retry forks from that snapshot, and the snapshot goes.
+	pc.release()
+	code, body := fork(keyA)
+	var forks []struct {
+		Sandbox *struct{ SandboxID string } `json:"sandbox"`
+	}
+	if code != http.StatusCreated || json.Unmarshal([]byte(body), &forks) != nil || len(forks) != 1 || forks[0].Sandbox == nil ||
+		forks[0].Sandbox.SandboxID == id {
+		t.Fatalf("retry once ready: %d %s", code, body)
+	}
+	if captures() != 1 || len(snapshots("pa")) != 0 || f.cluster.count() != 2 {
+		t.Fatalf("after the fork: %d captures, %d snapshots, %d sandboxes", captures(), len(snapshots("pa")), f.cluster.count())
+	}
+	if cr, _ := pc.GetCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), forks[0].Sandbox.SandboxID); cr == nil ||
+		!strings.Contains(fmtJSON(cr), "192.0.2.226/t/pa/"+snapID+"@") {
+		t.Fatalf("the fork does not run from the first snapshot %s: %v", snapID, cr)
+	}
+
+	// The next fork captures afresh (the files may have changed since).
+	if code, body := fork(keyA); code != http.StatusCreated || captures() != 2 {
+		t.Fatalf("a later fork: %d %s, %d captures", code, body, captures())
+	}
+
+	// A late fork's snapshot no retry takes is dropped by the build sync past its window.
+	pc.pmu.Lock()
+	pc.hold = true
+	pc.pmu.Unlock()
+	project.ForkReuseWindow = 0
+	if code, body := fork(keyA); code != http.StatusServiceUnavailable || len(snapshots("pa")) != 1 {
+		t.Fatalf("late fork: %d %s, %d snapshots", code, body, len(snapshots("pa")))
+	}
+	f.h.SyncSandboxBuilds(ctx)
+	if n := len(snapshots("pa")); n != 0 || len(f.snapshotRows("pa")) != 0 {
+		t.Fatalf("the unused fork snapshot stayed: %d snapshots, %d rows", n, len(f.snapshotRows("pa")))
 	}
 }

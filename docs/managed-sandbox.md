@@ -1385,10 +1385,16 @@ newest ready build: the previous one leaves the record, and the registry prune d
   the timeout asked for.
 - **Fork** (`POST /sandboxes/{id}/fork`, at most 10): one snapshot of a running sandbox, then that many sandboxes with
   new ids and tokens, same template, size, env, metadata and network, counted against the quota before anything starts.
-  The snapshot gets 60 s from the request's arrival, capture included; one not ready by then is dropped and the fork
-  answers 503 (retry), so the call answers within the SDK's request timeout (below) with the forks started.
+  The snapshot gets 60 s from the request's arrival, capture included, so the call answers within the SDK's request
+  timeout (below) with the forks started. One not ready by then is kept and the fork answers 503 (retry): a fork of the
+  same sandbox in the same project within 5 minutes of that request takes that snapshot (its files as of the first
+  request) instead of capturing again, waits for it up to 60 s from its own arrival, and once the image is ready
+  starts the forks from it. On a site where the assembly takes longer than 60 s a new capture on every retry would
+  never finish. The fork's snapshot goes once the forks are started, when its assembly fails, or, unused, at the next
+  `sandboxBuildSync` run past the 5 minutes; another project's fork never sees it.
 - **Create from a snapshot** still being assembled waits for it up to 60 s from the request's arrival, then answers
-  503 (retry) while the assembly goes on.
+  503 (retry) while the assembly goes on. A retry takes no new snapshot, so it converges: it answers 201 once the
+  image is ready.
 - **Kill** of a paused sandbox deletes its record and its snapshot; of one still pausing, also the running sandbox.
 
 **Why every call answers within 120 s.** The stock E2B SDK (2.63) sends REST calls through pyqwest with
@@ -1474,7 +1480,8 @@ Teardown archives the project's snapshot rows, deletes its templates and snapsho
   pause, resume, fork, connect or wake; a suspended profile keeps the snapshot and is refused resume and wake; a cut
   capture or a failed assembly pauses nothing and leaves the sandbox running, to its own end; on a slow site a pause
   answers at once and holds the sandbox, a connect cancels it, a kill ends it, fork and create from a late snapshot
-  answer 503, and the pause completes once the image is ready; a named snapshot taken again keeps and
+  answer 503, a fork retried within its window forks from the first fork's snapshot without capturing again, and
+  the pause completes once the image is ready; a named snapshot taken again keeps and
   bills one image; concurrent connects start one sandbox; teardown leaves no record, template or row), a test on
   the real charge driver (a 2 GB snapshot bills 0.30 for three hours at 0.05 per GB-hour, 0.40 after a fourth, nothing
   more after the resume), and unit tests (the capture's archive, the quota on resume, the pod's disk request, the
