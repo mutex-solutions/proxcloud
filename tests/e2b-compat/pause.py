@@ -168,8 +168,10 @@ try:
 
     t("kill first", sb.kill)
 
-    def auto_paused(a):
-        """Write the mark, wait for the job to pause the sandbox at its timeout and for the pause to complete."""
+    def auto_paused(a, probe=True):
+        """Write the mark, wait for the job to pause the sandbox at its timeout and for the pause to complete.
+        probe=False (autoResume): any request through the proxy, envd's health included, wakes the sandbox, so wait
+        a fixed time for the image instead of probing."""
         made.append(a.sandbox_id)
         a.files.write(MARK, want)
         print("     waiting for the auto-pause (job sandboxAutoPause, every minute)", flush=True)
@@ -181,6 +183,9 @@ try:
             if "paused" in (st := state(a.sandbox_id)):
                 break
         check("auto-paused", "paused" in st, st)
+        if not probe:
+            time.sleep(150)
+            return "paused" in state(a.sandbox_id)
         stopped = t("auto-pause completes", lambda: wait_stopped(a))
         check("the auto-paused sandbox stops once its image is ready", stopped is True, str(stopped))
         return stopped is True
@@ -203,7 +208,7 @@ try:
         a = t("create autoPause+autoResume 60s", lambda: Sandbox.create(
             "base", timeout=60, lifecycle={"on_timeout": "pause", "auto_resume": True}))
         check("create with autoResume", isinstance(a, Sandbox), str(a))
-        if isinstance(a, Sandbox) and auto_paused(a):
+        if isinstance(a, Sandbox) and auto_paused(a, probe=False):
             url = f"https://{a.get_host(8000)}/"
             r = t("HTTP hit through the proxy", lambda: httpx.get(url, timeout=120,
                   headers={"e2b-traffic-access-token": a.traffic_access_token or ""}))
