@@ -4,6 +4,15 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: show the effective egress cap before sandbox creation
+
+**What changed:** the sandbox create dialog's limits include the selected curated
+template's egress cap, falling back to the provider's default before selection.
+**Why:** the API and running rows already exposed the cap, but a customer could not
+see that constraint before starting a sandbox. This is display-only; the host CNI
+remains the enforcement boundary. **Diagrams updated:** none; C3 sandbox component
+text records the client-facing limits contract and the measured SB10 status.
+
 ## 2026-11-09: nginx public asset modes independent of umask
 
 **What changed:** both SPA images normalize only nginx's public document root to
