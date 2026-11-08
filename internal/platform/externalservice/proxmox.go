@@ -411,6 +411,9 @@ type PVESandbox struct {
 	// BuildStorage is config.sandbox.buildStorage: the template build bucket's endpoint as the workers reach it
 	// (docs/managed-sandbox.md §7), the one more place outside the subnet build pods fetch from. Empty: no rule.
 	BuildStorage PVESandboxRegistry
+	// Portal is config.sandbox.portal: the portal API's address and port as sandbox-proxy reaches it to wake a paused
+	// sandbox (docs/managed-sandbox.md §8), when it is a private address. Empty: no rule.
+	Portal PVESandboxRegistry
 }
 
 // PVESandboxRegistry is config.sandbox.registry: the sandbox registry's address and port (docs/managed-sandbox.md §6),
@@ -454,6 +457,9 @@ func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
 	}
 	if b, _ := s["buildStorage"].(map[string]any); b != nil {
 		cfg.BuildStorage = PVESandboxRegistry{Address: str(b["address"]), Port: intOf(b["port"])}
+	}
+	if p, _ := s["portal"].(map[string]any); p != nil {
+		cfg.Portal = PVESandboxRegistry{Address: str(p["address"]), Port: intOf(p["port"])}
 	}
 	return cfg, cfg.Pool != ""
 }

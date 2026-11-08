@@ -263,7 +263,7 @@ Sandbox ports answer at `https://<port>-<sandboxId>.<sandbox.domain>` ([managed-
    writes the record and, for `acme`, the TSIG key (`generated/sandbox-tsig.json`), builds the appliance (VM
    `sandbox.entry.vmid`), applies the issuer, the certificate and cert-sync on the services cluster and `sandbox-proxy`
    on the sandbox cluster. It generates `generated/sandbox-wake-token`: put it into the sandbox provider's
-   `secret.proxyWakeToken` (the proxy calls the wake endpoint from SB7 on). Stage 60 gives the Proxmox provider
+   `secret.proxyWakeToken` (the proxy calls the wake endpoint at `sandbox.proxy.wake_url` to resume paused sandboxes). Stage 60 gives the Proxmox provider
    `config.sandbox.proxy`; the next sync fences the system nodes, opens the workers to the appliance and installs
    HAProxy's config on it. Run stage 56 again after that sync: it then waits until the proxy serves.
 4. Check: `curl https://8000-<id>.<domain>/` with a sandbox serving on 8000 (`GET_ACCESS` gives its host and token).

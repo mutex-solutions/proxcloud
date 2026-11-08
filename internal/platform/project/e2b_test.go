@@ -73,20 +73,23 @@ func TestE2BNetworkMapping(t *testing.T) {
 	}
 }
 
-// What a create asks for that this location cannot honour is refused, never silently dropped: without pause (SB7) an
-// autoPause sandbox would be deleted at its timeout.
+// What a create asks for that this location cannot honour is refused, never silently dropped: a memory pause would
+// drop the processes the caller asked to keep, and autoResume needs autoPause.
 func TestE2BCreateRefusals(t *testing.T) {
 	for body, want := range map[string]string{
 		`{}`:                                     "templateID",
-		`{"templateID":"base","autoPause":true}`: "autoPause",
-		`{"templateID":"base","autoResume":{"enabled":true}}`:     "autoResume",
-		`{"templateID":"base","volumeMounts":[{"name":"v"}]}`:     "volumeMounts",
-		`{"templateID":"mcp-gateway","mcp":{"time":{}}}`:          "",
-		`{"templateID":"mcp-gateway","mcp":["time"]}`:             "mcp must be an object",
-		`{"templateID":"mcp-gateway","mcp":"time"}`:               "mcp must be an object",
-		`{"templateID":"base","network":{"httpsPorts":[8443]}}`:   "httpsPorts",
-		`{"templateID":"base","mcp":null,"network":{"rules":{}}}`: "",
-		`{"templateID":"base","autoPause":false}`:                 "",
+		`{"templateID":"base","autoPause":true}`: "",
+		`{"templateID":"base","autoPause":true,"autoPauseMemory":true}`:   "memory snapshots",
+		`{"templateID":"base","autoPause":true,"autoPauseMemory":false}`:  "",
+		`{"templateID":"base","autoResume":{"enabled":true}}`:             "autoResume needs autoPause",
+		`{"templateID":"base","volumeMounts":[{"name":"v"}]}`:             "volumeMounts",
+		`{"templateID":"mcp-gateway","mcp":{"time":{}}}`:                  "",
+		`{"templateID":"mcp-gateway","mcp":["time"]}`:                     "mcp must be an object",
+		`{"templateID":"mcp-gateway","mcp":"time"}`:                       "mcp must be an object",
+		`{"templateID":"mcp-gateway","autoPause":true,"mcp":{"time":{}}}`: "",
+		`{"templateID":"base","network":{"httpsPorts":[8443]}}`:           "httpsPorts",
+		`{"templateID":"base","mcp":null,"network":{"rules":{}}}`:         "",
+		`{"templateID":"base","autoPause":false}`:                         "",
 	} {
 		var b e2bCreateBody
 		if err := json.Unmarshal([]byte(body), &b); err != nil {
@@ -115,7 +118,10 @@ func TestE2BAuthAndErrors(t *testing.T) {
 		{"GET", "/e2b/volumes", "", 404},
 		{"POST", "/e2b/v3/templates", "", 401},
 		{"PUT", "/e2b/templates/t1/files/0123456789/upload?token=x", "", 403},
-		{"POST", "/e2b/sandboxes/sbx-0123456789abcdef/pause", "", 404},
+		{"POST", "/e2b/sandboxes/sbx-0123456789abcdef/pause", "", 401},
+		{"POST", "/e2b/sandboxes/sbx-0123456789abcdef/fork", "", 401},
+		{"GET", "/e2b/snapshots", "", 401},
+		{"GET", "/e2b/volumes/v1", "", 404},
 	} {
 		req := httptest.NewRequest(c.method, c.path, nil)
 		if c.key != "" {

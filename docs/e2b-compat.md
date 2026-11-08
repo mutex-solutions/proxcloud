@@ -59,17 +59,17 @@ served, answers 404 with E2B's error body (or 400 for a refused field).
 | Endpoint | Status | Notes |
 |---|---|---|
 | `GET /health` | yes | |
-| `POST /sandboxes`, `POST /v2/sandboxes` | partial | `templateID` (a built-in template), `timeout` (1 s up to the provider's maximum, 24 h by default; 300 s when not sent), `metadata`, `envVars`, `network`, `allow_internet_access`. Returns once the sandbox is ready (envd up, the template's ready command passed); a sandbox not ready within 50 s is removed and the call answers 503. `secure` is ignored (envd always requires its token). `autoPause`, `autoResume`, `autoPauseMemory`, `volumeMounts` → 400; `mcp` must be an object (the SDK starts the gateway in an `mcp-gateway` sandbox; the API never stores or logs it). `iam` and `Idempotency-Key` are ignored. ProxCloud extensions: `cpuCount`, `memoryMB` (rounded up to whole GiB), `gpu {model, count}` (no GPU nodes before SB9) |
-| `GET /sandboxes`, `GET /v2/sandboxes` | partial | `metadata` and `state` filters; running sandboxes only (nothing is ever paused); one page holds everything, so `nextToken` is never set |
+| `POST /sandboxes`, `POST /v2/sandboxes` | partial | `templateID` (a built-in template), `timeout` (1 s up to the provider's maximum, 24 h by default; 300 s when not sent), `metadata`, `envVars`, `network`, `allow_internet_access`. Returns once the sandbox is ready (envd up, the template's ready command passed); a sandbox not ready within 50 s is removed and the call answers 503. `secure` is ignored (envd always requires its token). `autoPause` pauses the filesystem only (`autoPauseMemory: true` → 400); `autoResume` with `autoPause` cold-boots a paused sandbox on traffic to its ports. `volumeMounts` → 400; `mcp` must be an object (the SDK starts the gateway in an `mcp-gateway` sandbox; the API never stores or logs it). `iam` and `Idempotency-Key` are ignored. ProxCloud extensions: `cpuCount`, `memoryMB` (rounded up to whole GiB), `gpu {model, count}` (no GPU nodes before SB9) |
+| `GET /sandboxes`, `GET /v2/sandboxes` | partial | `metadata` and `state` filters; running and paused sandboxes; one page holds everything, so `nextToken` is never set |
 | `GET /sandboxes/{id}` | yes | `diskSizeMB` is 0 |
 | `DELETE /sandboxes/{id}` | yes | |
 | `POST /sandboxes/{id}/timeout` | yes | |
 | `POST /sandboxes/{id}/refreshes` | yes | |
-| `POST /sandboxes/{id}/connect`, `/v2/…/connect` | partial | Returns the sandbox and extends its timeout; a running sandbox only |
+| `POST /sandboxes/{id}/connect`, `/v2/…/connect` | partial | Returns the sandbox and extends its timeout; a paused sandbox is resumed (201) as a cold boot, whatever `memory` says |
 | `PUT /sandboxes/{id}/network` | partial | `allowOut` / `denyOut` / `dnsServers`. `egressProxy`, `rules`, `maskRequestHost`, `httpsPorts` → 400. `allowPublicTraffic` only at create |
 | `GET /sandboxes/{id}/logs`, `/v2/…/logs` | partial | The sandbox's stdout/stderr (envd and the template's start command), newest 1000 lines; no `start`/`limit` or cursor |
 | `GET /sandboxes/{id}/metrics`, `GET /sandboxes/metrics` | partial | Always empty |
-| `POST /sandboxes/{id}/pause`, `/resume`, `/snapshots`, `/fork`, `GET /snapshots` | no | SB7 |
+| `POST /sandboxes/{id}/pause`, `/resume`, `/snapshots`, `/fork`, `GET /snapshots` | partial | Filesystem only: `memory: true` → 400, a resume or fork is a cold boot. At most 10 forks. Snapshots are templates of the project, billed per GB-hour until deleted |
 
 ### Templates
 
@@ -112,10 +112,10 @@ dashboard APIs. They answer 404 with E2B's error body.
 
 ## What does not work, and why
 
-1. **Pause, resume, snapshots and fork** (`pause`, `resume`, `snapshots`, `fork`, `connect` of a paused sandbox,
-   `state=paused`): not before SB7. A sandbox is deleted at its timeout.
-2. **`autoPause` and `autoResume`**: refused with 400 rather than accepted, because without pause a sandbox that should
-   pause at its timeout would be deleted and its files lost. After SB7: filesystem only.
+1. **Pause, resume, snapshots and fork** keep the filesystem only: files are back after a resume; processes, memory
+   and open connections are not. Files deleted from the template's image come back too.
+2. **`autoPause` and `autoResume`** pause at the timeout (within a minute) and wake on traffic to a port; both answer
+   400 where the location cannot take snapshots or has no wake token.
 3. **Pause with memory** (`memory: true`, `mode: "full"`, `autoPauseMemory`): never. gVisor in a pod has no microVM
    snapshot; a later resume is a cold boot (files kept, processes, memory and open connections not).
 4. **Custom templates**: the v3 build API works (`Template()` builder, `from_dockerfile`, `e2b template build`, tags,

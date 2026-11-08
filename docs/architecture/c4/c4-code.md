@@ -63,7 +63,8 @@ ports, DNS to the configured resolvers, VXLAN, Cilium health, MetalLB memberlist
 `<group>-n`), the kubelet from `kubeletSources`, with `config.sandbox.proxy` TCP 443 from the entry appliance's vnet
 address to `sandbox-proxy`'s MetalLB address alone (SB4), with `config.sandbox.registry` TCP out to the sandbox
 registry's address and port alone (SB6a), with `config.sandbox.buildStorage` TCP out to the template build bucket's
-address and port alone (SB6b), and the internet (IP set `<group>-o`: everything minus the private
+address and port alone (SB6b), with `config.sandbox.portal` TCP out to the portal API for wakes (SB7), and the
+internet (IP set `<group>-o`: everything minus the private
 ranges, the management networks, every node address, the sandbox's SNAT address, `blockedCidrs`, `cidrPool`, the
 sandbox subnet and the control plane). With every
 rule an ACCEPT under DROP policies, no order or partial write opens anything; a changed set is a new generation that

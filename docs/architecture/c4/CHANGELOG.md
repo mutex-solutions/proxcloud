@@ -4,6 +4,59 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: Sandbox pause, resume, snapshots and fork of the filesystem; autoPause and autoResume (SB7)
+
+**What changed**
+
+- E2B `pause`, `resume`, `snapshots` (create, list), `fork`, `connect` of a paused sandbox, `state=paused`, and the
+  create's `autoPause` and `autoResume`, ported from the earlier implementation
+  (`internal/platform/project/e2b_snapshots.go`). Filesystem only: `memory: true` and `autoPauseMemory: true` answer
+  400.
+- New component, pause and snapshots: `sandbox-init -snapshot` (`cmd/sandbox-init/snapshot.go`) writes a gzip tar of
+  what changed since boot; the portal uploads it to the template build bucket and reads it as a whole archive while it
+  uploads; a pod in `sbx-build` `crane append`s it onto the sandbox's image and pushes it with the project's build
+  account. A snapshot is a `kind: snapshot` record in `sandbox_templates`; a paused sandbox is its saved CR in the new
+  table `sandbox_paused`, every transition under a per-id transaction lock and a lease.
+- Resume and fork count against the provider's limits and the project quota like a create
+  (`Service.ResumeSandbox(..., quota)`).
+- Job `sandboxAutoPause` (every minute) and debug trigger `run-sandbox-autopause`.
+- The wake endpoint resumes autoResume sandboxes: the bearer must be the paused sandbox's own provider's wake token, and
+  the client's envd or traffic token the sandbox's own; a suspended project or profile answers 403. Stage 56 sets
+  `PROXCLOUD_WAKE_URL` (`sandbox.proxy.wake_url`) and rolls the proxy on a change; stage 60 writes
+  `config.sandbox.portal` (`sandbox.proxy.wake_address`), and the workers' VM firewall admits that address and port
+  (`SandboxFirewall.PortalAddress`).
+- Billing: a stored snapshot is a `SANDBOX_SNAPSHOT` row per GB-hour from ready to resume, kill, template delete or
+  teardown. Teardown archives those rows and forgets paused sandboxes; the registry prune keeps the images paused
+  sandboxes ran.
+- Build and snapshot pods request 2 GiB of ephemeral storage under the 30 GiB limit; Zot accepts Docker manifests
+  (`compat: [docker2s2]`).
+
+**Why**
+
+- E2B users pause sandboxes to stop paying for compute and come back to their files; until SB7 an autoPause sandbox
+  had to be refused, since it would have been deleted at its timeout.
+- gVisor in a pod has no memory snapshot. Serving a memory pause as a filesystem pause would drop processes the caller
+  asked to keep, so it is refused.
+- The earlier attempt's lab drill had a 191 MB capture that crane could not read; that pause had already deleted the
+  sandbox, which was lost. The archive is now checked while it uploads, and a pause deletes the sandbox only once its
+  image is pushed: a failed assembly (crane, the registry, the 30 GiB disk limit) then fails the pause and the
+  sandbox runs on, instead of a 204 followed by lost files. autoPause runs four pauses at a time, since each now waits
+  for its image.
+- A named snapshot taken again keeps only its newest ready build, so the stored size billed is that of the one image
+  kept (keeping older builds kept their images unbilled). The size is the bytes counted while the archive is checked,
+  not a HEAD that could fail and bill 0.
+- The wake checks the location's token before the sandbox's own, and a resume gives up before its lease lapses, so a
+  second caller cannot take over a resume still starting the sandbox.
+- Concurrent connects of one paused sandbox (an SDK retry, autoResume traffic) must start it once.
+- A resume or fork that skipped the quota would let a project exceed its sandbox caps by pausing and resuming.
+- D9: suspension keeps the tenant's files but must not let them run; the wake answers 403 so the proxy does not keep
+  retrying for the length of the suspension.
+- A build pod with a limit and no request requests the limit; no 30 GB worker has 30 GiB allocatable (seen on the lab:
+  Pending, "Insufficient ephemeral-storage"). `crane append` keeps a Docker base image's manifest type, which Zot
+  refuses without the compat setting.
+
+**Diagrams updated:** C3 (pause and snapshots component and its flows, the proxy's wake), C4 (the fence rule for the
+portal).
 ## 2026-11-08: MCP gateway template for E2B's `Sandbox.create(mcp=...)` (SB8)
 
 **What changed**
