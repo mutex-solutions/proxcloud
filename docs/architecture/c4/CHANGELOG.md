@@ -85,6 +85,7 @@ Diagrams: none changed (no new container or component).
   clean machine.
 
 **Diagrams updated:** none; no container or component changed.
+
 ## 2026-11-08: PR #127 Helm quickstart install and first-run seed Job
 
 **What changed**
