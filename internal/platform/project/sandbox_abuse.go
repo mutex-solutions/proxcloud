@@ -2,6 +2,7 @@ package project
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -221,6 +222,11 @@ func (h *Handler) RunSandboxAbuse(ctx context.Context) {
 	}
 }
 
+func rotationScope(p sandbox.RotationPolicy) string {
+	b, _ := json.Marshal(p)
+	return fmt.Sprintf("%x:%x", sha256.Sum256(b), sha256.Sum256([]byte(p.Kubeconfig)))
+}
+
 type rotationState struct {
 	Started   time.Time `json:"started"`
 	Completed time.Time `json:"completed"`
@@ -285,8 +291,8 @@ func (h *Handler) RunSandboxRotation(ctx context.Context) {
 			}
 			now := time.Now().UTC()
 			if state.Active {
-				scope, _ := json.Marshal(p)
-				if state.Scope != string(scope) {
+				scope := rotationScope(p)
+				if state.Scope != scope {
 					return fmt.Errorf("active rotation scope changed: restore settings before continuing")
 				}
 				done, err := ss.RotationConverged(ctx, state.Nodes)
@@ -326,8 +332,7 @@ func (h *Handler) RunSandboxRotation(ctx context.Context) {
 				}
 				return nil
 			}
-			scope, _ := json.Marshal(p)
-			state.Scope = string(scope)
+			state.Scope = rotationScope(p)
 			state.Active = true
 			state.Started = now
 			state.Nodes = plan.Nodes
@@ -354,8 +359,8 @@ func (h *Handler) RunSandboxRotation(ctx context.Context) {
 		if _, err := h.sbSafety.Get(ctx, "rotation:"+es.ID, &state); err != nil || !state.Active {
 			continue
 		}
-		scope, _ := json.Marshal(p)
-		if state.Scope != string(scope) {
+		scope := rotationScope(p)
+		if state.Scope != scope {
 			continue
 		}
 		if err := ss.StartRotation(ctx, state.Started); err != nil {

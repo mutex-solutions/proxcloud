@@ -9,6 +9,13 @@ import (
 // CheckNetworkGuard requires fresh host-installed CNI chaining on every schedulable
 // node. Old installations fail closed until stage 55 is reapplied. Read-only.
 func (s *Service) CheckNetworkGuard(ctx context.Context) error {
+	cm, ce := s.api.GetCore(ctx, "configmaps", "kube-system", "cilium-config")
+	if ce != nil {
+		return ce
+	}
+	if digStr(cm, "data", "custom-cni-conf") != "true" || digStr(cm, "data", "write-cni-conf-when-ready") != "" {
+		return fmt.Errorf("Cilium still owns the CNI config")
+	}
 	a, ok := s.api.(telemetryAPI)
 	if !ok {
 		return fmt.Errorf("sandbox network guard reader unavailable")

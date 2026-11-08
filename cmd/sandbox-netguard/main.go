@@ -26,6 +26,7 @@ type config struct {
 	API        string          `json:"api"`
 	CAFile     string          `json:"caFile"`
 	TokenFile  string          `json:"tokenFile"`
+	NodeName   string          `json:"nodeName"`
 }
 
 var run = func(name string, args ...string) ([]byte, error) { return exec.Command(name, args...).CombinedOutput() }
@@ -133,13 +134,20 @@ func process(b []byte) error {
 				return err
 			}
 			var pod struct {
-				Metadata struct{ Labels, Annotations map[string]string }
+				Metadata struct {
+					UID                 string
+					Labels, Annotations map[string]string
+				}
+				Spec struct{ NodeName string }
 			}
 			if err := request(client, token, "GET", c.API+"/api/v1/namespaces/"+ns+"/pods/"+name, nil, &pod); err != nil {
 				return err
 			}
 			l := pod.Metadata.Labels
 			if l["app.kubernetes.io/managed-by"] == "proxcloud" && l["proxcloud.io/sandbox-id"] != "" {
+				if err := bindPod(c.NodeName, arg(os.Getenv("CNI_ARGS"), "K8S_POD_UID"), pod.Metadata.UID, pod.Spec.NodeName); err != nil {
+					return err
+				}
 				if ns != "sb-"+l["proxcloud.io/project"] || l["proxcloud.io/sandbox-id"] != name || l["proxcloud.io/service"] == "" {
 					return errors.New("sandbox identity mismatch")
 				}
@@ -164,6 +172,12 @@ func process(b []byte) error {
 	}
 	_, err := os.Stdout.Write(c.PrevResult)
 	return err
+}
+func bindPod(node, requestedUID, liveUID, liveNode string) error {
+	if node == "" || liveUID == "" || requestedUID != liveUID || liveNode != node {
+		return errors.New("CNI pod UID/node binding mismatch")
+	}
+	return nil
 }
 func parseRate(s string) (int, error) {
 	if !regexp.MustCompile(`^[1-9][0-9]*M$`).MatchString(s) {
@@ -203,6 +217,20 @@ func police(netns string, mbps int) error {
 // install atomically appends the guard to Cilium's conflist. Re-run periodically:
 // Cilium can rewrite it on upgrades. Refuse unknown/multi-network configurations.
 func install() error {
+	// A former Cilium config writer must be disabled before installing/publishing
+	// our chain, otherwise it can race a rewrite behind a valid heartbeat.
+	check := config{API: os.Getenv("API_SERVER"), CAFile: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt", TokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token"}
+	client, token, e := apiClient(check)
+	if e != nil {
+		return e
+	}
+	var cm struct{ Data map[string]string }
+	if e := request(client, token, "GET", check.API+"/api/v1/namespaces/kube-system/configmaps/cilium-config", nil, &cm); e != nil {
+		return e
+	}
+	if cm.Data["custom-cni-conf"] != "true" || cm.Data["write-cni-conf-when-ready"] != "" {
+		return errors.New("Cilium still owns CNI config; wait for customConf rollout")
+	}
 	path := "/host/etc/cni/net.d/05-cilium.conflist"
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -229,7 +257,7 @@ func install() error {
 			clean = append(clean, v)
 		}
 	}
-	clean = append(clean, map[string]any{"type": "sandbox-netguard", "api": os.Getenv("API_SERVER"), "caFile": "/etc/cni/net.d/sandbox-netguard-ca.crt", "tokenFile": "/etc/cni/net.d/sandbox-netguard-token"})
+	clean = append(clean, map[string]any{"type": "sandbox-netguard", "api": os.Getenv("API_SERVER"), "caFile": "/etc/cni/net.d/sandbox-netguard-ca.crt", "tokenFile": "/etc/cni/net.d/sandbox-netguard-token", "nodeName": os.Getenv("NODE_NAME")})
 	conf["plugins"] = clean
 	if err := os.MkdirAll("/host/opt/cni/bin", 0755); err != nil {
 		return err

@@ -7,6 +7,22 @@ import (
 	"testing"
 )
 
+func TestCNIRejectsUnknownCommand(t *testing.T) {
+	t.Setenv("CNI_COMMAND", "FORCE")
+	if process([]byte(`{"cniVersion":"0.3.1"}`)) == nil {
+		t.Fatal("unknown CNI command succeeded")
+	}
+}
+func TestCNIUIDAndNodeBinding(t *testing.T) {
+	for _, a := range [][4]string{{"n", "old", "new", "n"}, {"n", "", "uid", "n"}, {"n", "uid", "uid", "other"}, {"", "uid", "uid", "n"}} {
+		if bindPod(a[0], a[1], a[2], a[3]) == nil {
+			t.Fatal(a)
+		}
+	}
+	if err := bindPod("n", "uid", "uid", "n"); err != nil {
+		t.Fatal(err)
+	}
+}
 func TestRateValidation(t *testing.T) {
 	for _, s := range []string{"", "0M", "-1M", "1G", "100001M", "1M;reboot"} {
 		if _, e := parseRate(s); e == nil {

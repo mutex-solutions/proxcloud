@@ -370,6 +370,16 @@
         set -euo pipefail
         out=$(kubectl apply -f cilium-node-config.yaml)
         case "$out" in *unchanged*) ;; *) kubectl -n kube-system rollout restart ds/cilium ;; esac
+        # Wait for Argo/CAAPH to deliver the desired custom chain mode, not merely
+        # for the OLD Cilium DaemonSet to be healthy. Then restart all old writers.
+        for attempt in $(seq 1 90); do
+          custom=$(kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.custom-cni-conf}' || true)
+          writer=$(kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.write-cni-conf-when-ready}' || true)
+          if [ "$custom" = true ] && [ -z "$writer" ]; then break; fi
+          if [ "$attempt" -eq 90 ]; then echo 'Cilium customConf mode has not converged' >&2; exit 1; fi
+          sleep 10
+        done
+        kubectl -n kube-system rollout restart ds/cilium
         kubectl -n kube-system rollout status ds/cilium --timeout=10m
         # SB10 always needs the static host CNI guard, including sites without envd.
         sed -i "s#ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:latest#$RUNTIME#" node-setup.yaml

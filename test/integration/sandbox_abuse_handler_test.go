@@ -44,7 +44,7 @@ func (n abuseNotify) SendTemplate(context.Context, string, []string, map[string]
 	return nil
 }
 func TestSandboxAbuseHandlerSafeActions(t *testing.T) {
-	for _, scenario := range []string{"kill", "alert", "envd-kill", "envd-pause", "fresh-disabled", "fresh-threshold", "fresh-connection", "capture-busy", "reused-pod", "fresh-exec", "fresh-traffic", "pause-unavailable"} {
+	for _, scenario := range []string{"kill", "alert", "envd-kill", "envd-pause", "fresh-disabled", "fresh-threshold", "fresh-connection", "capture-busy", "reused-pod", "fresh-exec", "fresh-traffic", "frozen-metrics", "pause-unavailable"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newSbxFixture(t, gatesHold)
 			row := f.create()
@@ -107,6 +107,9 @@ func TestSandboxAbuseHandlerSafeActions(t *testing.T) {
 					a.podUID = "recreated"
 				case "fresh-exec":
 					_, _ = a.MergePatchCR(ctx, "", "", "", "sb-pa", id, map[string]any{"metadata": map[string]any{"annotations": map[string]any{sandbox.AnnotationLastExec: time.Now().UTC().Format(time.RFC3339Nano)}}})
+				case "frozen-metrics":
+					a.sample.CPUAt = time.Now().Add(-5 * time.Minute)
+					a.sample.NetworkAt = a.sample.CPUAt
 				case "fresh-traffic":
 					v := uint64(1e6)
 					a.sample.RX = &v

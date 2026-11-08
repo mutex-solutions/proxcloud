@@ -28,7 +28,7 @@ func TestSandboxInstallerSafetyContracts(t *testing.T) {
 		t.Fatal(e)
 	}
 	text := string(stage)
-	if strings.Index(text, "kubectl apply -f node-setup.yaml") > strings.Index(text, "ready=$(kubectl get nodes") || strings.Contains(text, "- name: Wait for every worker to be Ready") {
+	if strings.Index(text, "kubectl apply -f node-setup.yaml") > strings.Index(text, "ready=$(kubectl get nodes") || strings.Contains(text, "- name: Wait for every worker to be Ready") || strings.Index(text, "Cilium customConf mode has not converged") > strings.Index(text, "kubectl apply -f node-setup.yaml") {
 		t.Fatal("Ready wait precedes host CNI bootstrap")
 	}
 	for path, wants := range map[string][]string{

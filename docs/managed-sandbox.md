@@ -1664,11 +1664,19 @@ observations and authorize no action. Missing nodes/stats, invalid serving CA or
 **Evasion:** periodic native exec, padded traffic, CPU below threshold, short-lived sandboxes, missing telemetry or a
 compromised node can evade it. It is not executable classification, malware scanning or a complete mining detector.
 
+Capture/native-exec session locks use a separate lazy PostgreSQL connection pool (MinConns0, MaxConns8 in addition
+to the primary pool). Lock waiters cannot consume the primary connections needed to commit snapshot progress; plan
+for those extra connections. A lock acquisition/read error fails the automatic action closed. The MaxConns1 primary
+integration regression executes Store.Get and independent WithTx while holding a capture lock.
+
 `action: alert` is the default: only durable audit/admin evidence. Mail needs explicit operator `notifyEmails`, a mail
 gateway and enabled `sandbox_abuse_alert` template; no recipient means no email. SMTP failure is logged, audit remains.
 `pause` and `kill` are explicit provider opt-ins for **native-only providers**. On an envd/E2B provider, destructive
 heuristic actions are refused (`refused-active-exec-unprovable`): a silent SDK streaming exec bypasses the portal and
 there is no trustworthy exec-completion marker. Alerts remain enabled, so an operator can investigate and act manually.
+With the shipped templates, native-only pods do not mount the snapshot helper, so **automatic pause is presently
+unavailable in practice** and safely fails without deleting the original. Do not enable action=pause expecting it to
+succeed until a trusted native snapshot-capable runtime is supplied; use alert or explicitly destructive native kill.
 Native exec holds the capture/action lock for its duration. Actions recheck exact policy (including disabled), project
 attachment, provider connection and CR/pod UID under that lock, then re-read node traffic/activity before acting.
 A capture lock refuses an action during snapshot capture; paused/transitional sandboxes are skipped. Kill also refuses
@@ -1708,7 +1716,9 @@ commits an active start fence before any CAPI patch. Create/resume/fork/build/sn
 CAPI v1beta2 patch is `spec.rollout.after` (not beta1 `rolloutAfter`). Partial patch failures retain the start fence
 and retry the same timestamp. Old nodes must disappear and exact MD observedGeneration/ready/available/upToDate/total
 replicas converge, protected replacements must be Ready, secured and network-guarded before the fence opens.
-Changing the rotation scope mid-rollout fails closed; restore it before recovery. A process crash after cordon but
+Changing the rotation scope or management credential mid-rollout fails closed (the durable scope includes a SHA-256
+fingerprint of the kubeconfig, never the secret itself); restore it before recovery. Run only **one sandbox provider per
+sandbox cluster**: the durable start fence is keyed by provider, not a global multi-provider cluster lease. A process crash after cordon but
 before commit may leave a cordoned empty node: inspect and uncordon manually; no tenant data is lost.
 
 Rotation credentials are separate: encrypted `secret.rotationKubeconfig` is services-cluster **get/patch exact named

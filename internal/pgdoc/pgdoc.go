@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,7 +23,9 @@ import (
 
 // DB wraps the PostgreSQL connection pool.
 type DB struct {
-	Pool *pgxpool.Pool
+	Pool     *pgxpool.Pool
+	lockMu   sync.Mutex
+	lockPool *pgxpool.Pool
 }
 
 // Connect dials PostgreSQL using the configured DSN.
@@ -69,6 +72,12 @@ func (d *DB) Ping(ctx context.Context) error {
 }
 
 func (d *DB) Close(ctx context.Context) error {
+	d.lockMu.Lock()
+	lp := d.lockPool
+	d.lockMu.Unlock()
+	if lp != nil {
+		lp.Close()
+	}
 	d.Pool.Close()
 	return nil
 }
@@ -114,7 +123,23 @@ func (d *DB) LockXact(ctx context.Context, key string) error {
 // transaction. Long capture operations must commit their progress independently.
 // A nonblocking loser returns acquired=false and never calls fn.
 func (d *DB) WithAdvisoryLock(ctx context.Context, key string, try bool, fn func() error) (acquired bool, err error) {
-	c, err := d.Pool.Acquire(ctx)
+	// Long exec/capture holders and blocked lock waiters must not consume the
+	// primary pool: callbacks need that pool for independent progress transactions.
+	d.lockMu.Lock()
+	if d.lockPool == nil {
+		cfg := d.Pool.Config()
+		cfg.MinConns = 0
+		cfg.MaxConns = 8
+		lp, e := pgxpool.NewWithConfig(ctx, cfg)
+		if e != nil {
+			d.lockMu.Unlock()
+			return false, e
+		}
+		d.lockPool = lp
+	}
+	lp := d.lockPool
+	d.lockMu.Unlock()
+	c, err := lp.Acquire(ctx)
 	if err != nil {
 		return false, err
 	}

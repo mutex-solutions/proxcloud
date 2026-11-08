@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
@@ -97,4 +98,37 @@ func TestSandboxSafetyDurableConsecutiveWindowAndAudit(t *testing.T) {
 		t.Fatal(e)
 	}
 	_ = pgdoc.M{}
+}
+func TestSandboxAdvisoryLockDoesNotStarvePrimaryPool(t *testing.T) {
+	cfg, e := pgxpool.ParseConfig(pgBase)
+	if e != nil {
+		t.Fatal(e)
+	}
+	cfg.MaxConns = 1
+	cfg.MinConns = 0
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool, e := pgxpool.NewWithConfig(ctx, cfg)
+	if e != nil {
+		t.Fatal(e)
+	}
+	db := &pgdoc.DB{Pool: pool}
+	defer db.Close(context.Background())
+	s := db.C("sandbox_lock_pool_test")
+	if e := s.Ensure(ctx); e != nil {
+		t.Fatal(e)
+	}
+	_, e = db.WithAdvisoryLock(ctx, "pool-starvation", false, func() error {
+		if e := s.Upsert(ctx, "x", map[string]any{"ok": true}); e != nil {
+			return e
+		}
+		var v map[string]any
+		if _, e := s.Get(ctx, "x", &v); e != nil {
+			return e
+		}
+		return db.WithTx(ctx, func(tc context.Context) error { return s.Upsert(tc, "y", map[string]any{"ok": true}) })
+	})
+	if e != nil {
+		t.Fatal("lock callback starved its primary pool", e)
+	}
 }

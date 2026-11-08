@@ -122,6 +122,12 @@ func (o Observation) Next(s Sample, p AbusePolicy, now time.Time) (Observation, 
 // missing/stale/recreated counters invalidate previously collected evidence.
 func StillInactive(old, cur Sample, p AbusePolicy, now time.Time) bool {
 	p = p.WithDefaults()
+	fresh := func(at time.Time) bool {
+		return !at.IsZero() && !at.After(now.Add(5*time.Second)) && now.Sub(at) <= time.Duration(p.MaxGapSeconds)*time.Second
+	}
+	if !fresh(cur.At) || !fresh(cur.CPUAt) || !fresh(cur.NetworkAt) || cur.ProjectID != old.ProjectID || cur.SandboxID != old.SandboxID || cur.Cores != old.Cores || cur.Cores < 1 || old.CPU == nil || cur.CPU == nil || *cur.CPU < *old.CPU {
+		return false
+	}
 	if cur.PodUID != old.PodUID || cur.CRUID != old.CRUID || cur.Node != old.Node || cur.CPU == nil || cur.RX == nil || cur.TX == nil || old.RX == nil || old.TX == nil || now.Sub(cur.At) > time.Duration(p.MaxGapSeconds)*time.Second || cur.At.After(now.Add(5*time.Second)) {
 		return false
 	}

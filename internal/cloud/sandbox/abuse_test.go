@@ -87,6 +87,21 @@ func TestEgressDefaultTrustedTemplateAndNoCallerOverride(t *testing.T) {
 		}
 	}
 }
+func TestActionRejectsFrozenUnderlyingMetrics(t *testing.T) {
+	now := time.Now()
+	old := sampleAt(now, 100)
+	cur := old
+	cur.At = now.Add(time.Minute)
+	cur.CPUAt = now.Add(-time.Hour)
+	if StillInactive(old, cur, AbusePolicy{}, now.Add(time.Minute)) {
+		t.Fatal("fresh envelope masked stale CPU")
+	}
+	cur = old
+	cur.NetworkAt = time.Time{}
+	if StillInactive(old, cur, AbusePolicy{}, now) {
+		t.Fatal("missing network time accepted")
+	}
+}
 func TestAbuseRejectsInvalidPolicy(t *testing.T) {
 	for _, p := range []AbusePolicy{{Action: "delete"}, {WindowSeconds: 1}, {CPUPercent: 101}, {MaxGapSeconds: 200}} {
 		if p.Validate() == nil {

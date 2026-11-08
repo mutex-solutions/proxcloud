@@ -14,6 +14,11 @@ and rules: [README.md](README.md#maintenance-rule).
 - A hostNetwork unprivileged collector reads its own kubelet `stats/summary` using a separate `nodes/stats` GET
   identity and pinned public serving chain. Dedicated namespace ConfigMaps contain only CPU/network counters,
   pod UID and node identity. The portal reads those, never obtains `nodes/proxy`.
+- Review hardening: CNI binds live pod UID/node to kubelet CNI arguments; installation and release gate require deployed
+  Cilium customConf/no writer, and stage55 awaits it then rolls all old writers before installing the chain. Final action
+  freshness validates collector/CPU/network timestamps independently; rotation scope fingerprints its encrypted connection.
+  Capture/exec advisory locks use a separate bounded connection pool, so lock holders/waiters cannot exhaust the primary
+  store pool needed for independent snapshot progress transactions (MaxConns=1 regression).
 - Review safety: envd/E2B providers alert only; automatic pause/kill is refused because a silent SDK streaming exec
   has no trustworthy inactivity marker. Native exec serializes with the capture/action lock. Destructive actions recheck
   exact fresh policy/attachment/connection and node activity under that lock; handler/Postgres regressions cover stale
