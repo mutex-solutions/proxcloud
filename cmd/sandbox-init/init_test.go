@@ -11,11 +11,12 @@ import (
 )
 
 func TestSplitEnv(t *testing.T) {
-	user, list := splitEnv([]string{"A=1", "PROXCLOUD_START_CMD=x=y", "PATH=/bin", "B=a=b", "junk", "HOME=/root"})
-	if !reflect.DeepEqual(user, map[string]string{"A": "1", "PATH": "/bin", "B": "a=b"}) {
+	user, list := splitEnv([]string{"A=1", "PROXCLOUD_START_CMD=x=y", "PATH=/bin", "KUBERNETES_SERVICE_HOST=10.96.0.1",
+		"B=a=b", "junk", "KUBERNETES_PORT_443_TCP=tcp://10.96.0.1:443", "HOME=/root", "MY_KUBERNETES_X=1"})
+	if !reflect.DeepEqual(user, map[string]string{"A": "1", "PATH": "/bin", "B": "a=b", "MY_KUBERNETES_X": "1"}) {
 		t.Fatalf("user=%v", user)
 	}
-	if !reflect.DeepEqual(list, []string{"A=1", "PATH=/bin", "B=a=b", "HOME=/root"}) {
+	if !reflect.DeepEqual(list, []string{"A=1", "PATH=/bin", "B=a=b", "HOME=/root", "MY_KUBERNETES_X=1"}) {
 		t.Fatalf("list=%v", list)
 	}
 }

@@ -24,7 +24,7 @@ const (
 	TypeKubernetesCluster    = "KUBERNETES_CLUSTER"
 	TypeDatabaseCluster      = "DATABASE_CLUSTER"
 	TypeSandbox              = "SANDBOX"          // gVisor sandbox (sandbox provider), billed per minute while running
-	TypeSandboxSnapshot      = "SANDBOX_SNAPSHOT" // a sandbox's stored filesystem (pause, snapshot); billed per GB-hour, nothing writes one before SB7
+	TypeSandboxSnapshot      = "SANDBOX_SNAPSHOT" // a sandbox's stored filesystem (pause, snapshot); billed per GB-hour (pause and snapshot, SB7)
 	TypeLoadBalancer         = "LOAD_BALANCER"
 	TypeFloatingIP           = "FLOATING_IP"
 	TypeNetwork              = "NETWORK"

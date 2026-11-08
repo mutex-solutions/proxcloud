@@ -219,13 +219,14 @@
         dest: /root/sandbox-bundle/
         mode: preserve
     # The wake token is the sandbox provider's secret.proxyWakeToken (generated/sandbox-wake-token in the site directory).
-    # PROXCLOUD_WAKE_URL stays unset until pause and resume exist (SB7): until then the portal can resume nothing, and
-    # with it set every request for an unknown host would make an unauthenticated call to the portal.
+    # PROXCLOUD_WAKE_URL is where the proxy asks the portal to resume a paused autoResume sandbox (SB7); stage 60 opens
+    # the workers' firewall to that address (config.sandbox.portal of the Proxmox provider).
     - name: Apply sandbox-proxy
       ansible.builtin.shell: |
         set -euo pipefail
         ns="-n sandbox-system"
         kubectl $ns create configmap sandbox-proxy-config --from-literal=SANDBOX_DOMAIN="$DOMAIN" \
+          --from-literal=PROXCLOUD_WAKE_URL="$WAKE_URL" \
           --dry-run=client -o yaml | kubectl apply -f -
         kubectl $ns create secret generic sandbox-proxy-wake --from-literal=PROXCLOUD_WAKE_TOKEN="$WAKE" \
           --dry-run=client -o yaml | kubectl apply -f -
@@ -236,10 +237,16 @@
           kubectl $ns patch deploy/sandbox-proxy --type merge -p "{\"spec\":{\"template\":{\"spec\":{\"imagePullSecrets\":[{\"name\":\"$PULL\"}]}}}}"
         fi
         kubectl $ns annotate svc sandbox-proxy metallb.io/loadBalancerIPs="$ADDRESS" --overwrite
+        # The proxy reads its config and wake token at start: roll it when they change (a site upgraded to SB7 gets
+        # the wake URL this way), and leave it alone when they do not.
+        sum=$(printf '%s|%s|%s' "$DOMAIN" "$WAKE_URL" "$WAKE" | sha256sum | cut -c1-16)
+        kubectl $ns patch deploy/sandbox-proxy --type merge \
+          -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"proxcloud.io/config\":\"$sum\"}}}}}"
       args: {executable: /bin/bash, chdir: /root/sandbox-bundle}
       environment:
         KUBECONFIG: "{{ pc_sbx_kubeconfig }}"
         DOMAIN: "{{ pc.sandbox.domain }}"
+        WAKE_URL: "{{ pc.sandbox.proxy.wake_url or (pc_url_api ~ '/api/v1/internal/sandboxes') }}"
         WAKE: "{{ pc_sbx_wake }}"
         IMAGE: "{{ pc_sbx_proxy_image }}"
         PULL: "{{ 'sandbox-registry-nodes' if pc_sbx_registry.proxyImage | default('') else '' }}"

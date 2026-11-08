@@ -98,6 +98,17 @@ func TestSandboxGenerationRegistry(t *testing.T) {
 		!slices.ContainsFunc(g.Rules, func(r FirewallRule) bool { return r.Dest == "10.20.0.41" && r.DPort == "9000" && r.Type == "out" }) {
 		t.Fatalf("build storage rule: %v %+v", err, g.Rules)
 	}
+	// So is the portal's API for wakes, on 443 by default.
+	f.PortalAddress = "10.20.0.10"
+	g, err = f.generation()
+	if err != nil || len(g.Rules) != len(base.Rules)+2 ||
+		!slices.ContainsFunc(g.Rules, func(r FirewallRule) bool { return r.Dest == "10.20.0.10" && r.DPort == "443" && r.Type == "out" }) {
+		t.Fatalf("portal rule: %v %+v", err, g.Rules)
+	}
+	f.PortalAddress = "portal.example.org"
+	if _, err := f.generation(); err == nil {
+		t.Fatal("portal by name: want an error")
+	}
 }
 
 func TestSandboxGeneration(t *testing.T) {
