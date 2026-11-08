@@ -785,11 +785,15 @@ func laterOf(a, b time.Time) time.Time {
 }
 
 // cancelPause ends a pause whose image is not ready yet, so a connect gets the sandbox (which still runs and holds
-// every file) at once. false: there is no such pause (it is gone, or its sandbox is already being deleted).
+// every file) at once. false: there is no such pause (it is gone, or its sandbox is already being deleted), or the
+// sandbox no longer runs: the snapshot is then the only copy of its files, so the pause goes on and the connect waits.
 func (h *Handler) cancelPause(ctx context.Context, c *e2bCaller, id string) bool {
 	var tpl string
 	if err := h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
 		if p.State != pausedPausing {
+			return false, errPauseMoved
+		}
+		if c.ss.Alive(ctx, c.proj.ID, id) != nil {
 			return false, errPauseMoved
 		}
 		tpl = p.TemplateID

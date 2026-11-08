@@ -822,3 +822,31 @@ func TestE2BPauseOnASlowSite(t *testing.T) {
 		t.Fatalf("create from the snapshot once ready: %d %s", code, body)
 	}
 }
+
+// A connect on a pause whose sandbox the cluster already removed (the hold passed while the build was still running)
+// must not cancel the pause: the snapshot is the only copy. It waits and resumes from the image once it is ready.
+func TestE2BConnectWaitsWhenPausedSandboxIsGone(t *testing.T) {
+	f, pc, keyA, _ := newPauseFixture(t)
+	ctx := context.Background()
+	old := project.PauseJoinWait
+	project.PauseJoinWait = 0
+	t.Cleanup(func() { project.PauseJoinWait = old })
+	pc.pmu.Lock()
+	pc.hold = true
+	pc.pmu.Unlock()
+	id := f.e2bCreate(keyA)
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
+		t.Fatalf("pause: %d %s", code, body)
+	}
+	f.pausedState(id, "pausing")
+	if err := pc.DeleteCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), id); err != nil {
+		t.Fatal(err)
+	}
+	go func() { time.Sleep(3 * time.Second); pc.release() }()
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/connect", `{"timeout":60}`); code != http.StatusCreated {
+		t.Fatalf("connect while the build still runs and the sandbox is gone: %d %s", code, body)
+	}
+	if cr, _ := pc.GetCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), id); cr == nil || !strings.Contains(fmtJSON(cr), "192.0.2.226/t/pa/") {
+		t.Fatalf("not resumed from the snapshot image: %v", cr)
+	}
+}
