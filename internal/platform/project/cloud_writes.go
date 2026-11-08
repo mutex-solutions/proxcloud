@@ -562,7 +562,7 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 		// sandbox: delete the CR (its pod goes with it), end the row; billing stops at the delete.
 		if cr.Type == cloud.TypeSandbox {
 			if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsSandbox() {
-				if err := h.sandboxDelete(r.Context(), es, proj, cr); err != nil {
+				if err := h.sandboxKill(r.Context(), u, es, proj, cr); err != nil {
 					h.sandboxFail(w, err)
 					return
 				}

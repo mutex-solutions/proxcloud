@@ -600,7 +600,7 @@ func (h *Handler) e2bKill(w http.ResponseWriter, r *http.Request) {
 // after the kill (and bring it back as paused); errSandboxBusy when a pause recorded it meanwhile (the caller ends it
 // first).
 func (h *Handler) killUnpaused(ctx context.Context, c *e2bCaller, id string) error {
-	kill := func() error {
+	return h.underPauseLock(ctx, c, id, func() error {
 		if cr := h.e2bRow(ctx, c, id); cr != nil {
 			if err := h.sandboxDelete(ctx, c.es, c.proj, cr); err != nil {
 				return err
@@ -609,7 +609,36 @@ func (h *Handler) killUnpaused(ctx context.Context, c *e2bCaller, id string) err
 			return nil
 		}
 		return c.ss.DeleteSandbox(ctx, c.proj.ID, id)
+	})
+}
+
+// sandboxKill is the native delete of a live sandbox row: like the E2B kill it ends a pause under way first, then
+// deletes the sandbox under its pause lock, so the pause can neither record it after the delete nor finish it as
+// paused.
+func (h *Handler) sandboxKill(ctx context.Context, u *user.User, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) error {
+	kill := func() error { return h.sandboxDelete(ctx, es, proj, cr) }
+	if h.sbPaused == nil || h.sandboxFor == nil || cr.Data["status"] == sandbox.StatusDeleted {
+		return kill()
 	}
+	ss, err := h.sandboxFor(es)
+	if err != nil {
+		return err
+	}
+	c := &e2bCaller{user: u, proj: proj, es: es, ss: ss}
+	err = errSandboxBusy
+	for attempt := 0; attempt < 3 && errors.Is(err, errSandboxBusy); attempt++ {
+		if p := h.loadPaused(ctx, proj.ID, cr.ExternalID); p != nil {
+			if err = h.killPaused(ctx, c, p); err != nil {
+				return err
+			}
+		}
+		err = h.underPauseLock(ctx, c, cr.ExternalID, kill)
+	}
+	return err
+}
+
+// underPauseLock runs kill under the sandbox's pause lock; errSandboxBusy when the project has a paused record for it.
+func (h *Handler) underPauseLock(ctx context.Context, c *e2bCaller, id string, kill func() error) error {
 	if h.sbPaused == nil {
 		return kill()
 	}

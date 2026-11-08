@@ -1369,10 +1369,12 @@ newest ready build: the previous one leaves the record, and the registry prune d
 - **Pause** (`POST /sandboxes/{id}/pause`, or autoPause): capture the files into the bucket, save the sandbox's CR
   (tokens, env, metadata, network) in `sandbox_paused` with state `pausing`, and answer 204, in seconds. From then on
   `GET /sandboxes`, `GET /sandboxes/{id}` and `state=paused` show it once, as paused. The sandbox keeps running and
-  billing while its image is assembled in the background (up to 15 minutes; its cluster deadline is held that long if
+  billing while its image is assembled in the background (its cluster deadline is held 25 minutes from the pause if
   it would end sooner, and put back if the pause fails). Once the image is pushed, the record goes to `stopping`, the
-  sandbox is deleted (its row ends as at a delete) and the record is paused. A failed assembly drops the record and
-  the snapshot and the sandbox runs on, so a pause never deletes the files it answered 204 for before their copy is
+  sandbox is deleted (its row ends as at a delete) and the record is paused. The image is followed until it is pushed
+  or its build fails, however long that takes, also by a driver that takes the pause over after a portal restart: past
+  the hold the image is the only copy of the files. Only a failed assembly drops the record and the snapshot, and the
+  sandbox, if it still exists, runs on, so a pause never deletes the files it answered 204 for before their copy is
   usable. Files written after the capture are not kept. A second pause while one is under way answers 409.
 - **Resume** (`POST /sandboxes/{id}/resume`, `connect` of a paused sandbox, or the wake endpoint): gives up a minute
   before its lease ends, so a second caller never takes over a resume still starting the sandbox; recreates the sandbox under the same id and tokens from the snapshot image, with the

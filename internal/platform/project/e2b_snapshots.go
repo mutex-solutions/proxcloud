@@ -73,9 +73,6 @@ var (
 	// SnapshotRequestWait: how long after it arrived a fork or a create from a snapshot waits for the snapshot image;
 	// past it the call answers 503 (retry) and leaves e2bReadyTimeout for the start.
 	SnapshotRequestWait = 60 * time.Second
-	// PauseReadFloor: the least a pause driver follows its image for, also one re-driven past snapshotWait, so it
-	// reads the build at least once before it can give the pause up.
-	PauseReadFloor = 30 * time.Second
 )
 
 // SetSandboxPaused wires the sandbox_paused collection (nil = pause and resume off).
@@ -383,14 +380,16 @@ func (h *Handler) failSnapshot(ctx context.Context, projectID, templateID, build
 
 // awaitSnapshot waits until the snapshot template's latest build is ready (or failed), finishing it from the assembly
 // pod's result if nobody has yet. Idempotent: the background goroutine, a waiting resume or create, and the job
-// sandboxBuildSync (after an API restart) may all finish it; only the one that records the result bills it.
+// sandboxBuildSync (after an API restart) may all finish it; only the one that records the result bills it. A failed
+// read or record (the store, the cluster) is retried until ctx ends (errSnapshotNotReady): only a missing record is
+// errSnapshotGone, and only a failed build is an error of its own.
 func (h *Handler) awaitSnapshot(ctx context.Context, c *e2bCaller, templateID string) (*sandboxTemplateDoc, error) {
 	for {
 		t, err := h.loadTemplate(ctx, c.proj.ID, templateID)
 		if err == nil && (t == nil || len(t.Builds) == 0) {
 			return nil, errSnapshotGone
 		}
-		if err == nil { // a failed read (the store, or ctx) is not a gone snapshot: retry until ctx ends
+		if err == nil {
 			b := &t.Builds[len(t.Builds)-1]
 			switch b.Status {
 			case sandbox.BuildReady:
@@ -398,9 +397,7 @@ func (h *Handler) awaitSnapshot(ctx context.Context, c *e2bCaller, templateID st
 			case sandbox.BuildError:
 				return nil, fmt.Errorf("snapshot failed: %s", b.Reason)
 			}
-			if done, err := h.finishSnapshot(ctx, c, t, b, true); err != nil {
-				return nil, err
-			} else if done {
+			if done, err := h.finishSnapshot(ctx, c, t, b, true); err == nil && done {
 				continue
 			}
 		}
@@ -545,7 +542,7 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 	}
 	ctx = context.WithoutCancel(ctx) // the capture is stored: record it whatever the client does
 	now := time.Now().UTC()
-	d := &pauseDrive{id: id, templateID: t.ID, pausedAt: now, lease: now.Add(pauseLease)}
+	d := &pauseDrive{id: id, templateID: t.ID, lease: now.Add(pauseLease)}
 	// Claim the id: a resume seeing "pausing" waits (or cancels the pause), a kill ends it.
 	err = h.sbPaused.DB().WithTx(ctx, func(tc context.Context) error {
 		if err := h.lockPaused(tc, id); err != nil {
@@ -600,7 +597,6 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 // template and the lease the drive wrote last. Every step renews that lease.
 type pauseDrive struct {
 	id, templateID string
-	pausedAt       time.Time
 	mu             sync.Mutex
 	lease          time.Time
 }
@@ -680,9 +676,6 @@ func (h *Handler) redrivePauses(ctx context.Context, es *externalservice.Externa
 			}
 			d.lease = time.Now().UTC().Add(pauseLease)
 			cur.LeaseUntil = &d.lease
-			if cur.PausedAt != nil {
-				d.pausedAt = *cur.PausedAt
-			}
 			return false, nil
 		}); err != nil {
 			continue
@@ -704,30 +697,22 @@ func savedShutdown(saved map[string]any) (time.Time, bool) {
 var errPauseMoved = errors.New("the pause moved on")
 
 // finishPause completes a pause once its snapshot image is pushed: the record goes to "stopping", the sandbox is
-// deleted, the record to paused. A connect or a kill that ended the pause meanwhile leaves the sandbox alone; a failed
-// or timed-out assembly (snapshotWait from the pause) ends the pause and the sandbox runs on. It renews its lease all
-// along; a portal that stops leaves the lease to lapse, and the autoPause tick runs this again (redrivePauses).
+// deleted, the record to paused. A connect or a kill that ended the pause meanwhile leaves the sandbox alone. The image
+// is followed until it is ready or its build fails, however old the pause (a re-drive after an outage too): past the
+// pause's hold the cluster has removed the sandbox and the image is the only copy of its files. Only a failed build
+// ends the pause, and the sandbox, if it still exists, runs on. It renews its lease all along; a portal that stops
+// leaves the lease to lapse, and the autoPause tick runs this again (redrivePauses).
+// ponytail: no time bound of its own; the build pod's activeDeadlineSeconds (BuildTimeout) ends a slow build, but one
+// never scheduled keeps this drive (and its lease) alive.
 func (h *Handler) finishPause(c *e2bCaller, d *pauseDrive) {
 	id, templateID := d.id, d.templateID
 	ctx := context.Background()
-	// held ends when the pause moves on (renewPause); wctx adds the image wait, which a re-drive past snapshotWait
-	// still gets PauseReadFloor of, so the build is read before anything is given up.
-	held, moved := context.WithCancel(ctx)
+	held, moved := context.WithCancel(ctx) // ends when the pause moves on (renewPause)
 	defer moved()
-	wctx, wcancel := context.WithDeadline(held, laterOf(d.pausedAt.Add(snapshotWait), time.Now().Add(PauseReadFloor)))
-	defer wcancel()
 	rctx, stopRenew := context.WithCancel(ctx)
 	defer stopRenew()
 	go h.renewPause(rctx, c, d, moved)
-	ready, err := h.awaitSnapshot(wctx, c, templateID)
-	// A sandbox already gone (the cluster removed it at the pause's hold while the portal was down) has no copy of its
-	// files but the image: a late build is followed to its end, and only a failed one gives the pause up.
-	// ponytail: no upper bound; a build pod stuck Pending forever keeps this drive (and its lease) alive.
-	if errors.Is(err, errSnapshotNotReady) && held.Err() == nil {
-		if _, gerr := c.ss.GetSandbox(ctx, c.proj.ID, id); errors.Is(gerr, sandbox.ErrNotFound) {
-			ready, err = h.awaitSnapshot(held, c, templateID)
-		}
-	}
+	ready, err := h.awaitSnapshot(held, c, templateID)
 	if err == nil && ready.defaultBuild() == nil {
 		err = errors.New("no ready build")
 	}
@@ -749,9 +734,11 @@ func (h *Handler) finishPause(c *e2bCaller, d *pauseDrive) {
 		} else {
 			err = c.ss.DeleteSandbox(ctx, c.proj.ID, id)
 		}
-		if err != nil {
-			h.abandonPause(ctx, c, d, err)
-			return
+		if err != nil { // the image is ready: the pause is given up only while the original still holds the files
+			if _, gerr := c.ss.GetSandbox(ctx, c.proj.ID, id); !errors.Is(gerr, sandbox.ErrNotFound) {
+				h.abandonPause(ctx, c, d, err)
+				return
+			}
 		}
 		waitGone(ctx, c, id, time.Minute)
 	}

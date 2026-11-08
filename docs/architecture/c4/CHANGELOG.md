@@ -25,6 +25,12 @@ and rules: [README.md](README.md#maintenance-rule).
   one whose lease lapsed (API restart) and finishes it. A resume that drops a stale pause gives the sandbox the
   timeout asked for. A failed pause leaves the sandbox at least 5 minutes. A sandbox endpoint in the tenant pool or a
   blocked range is not opened.
+- Re-drive fix: the pause's driver follows the image until it is pushed or its build fails, with no deadline from the
+  pause's start (a re-drive past 15 minutes read the build with an expired context, took it as gone and dropped a
+  ready snapshot, losing the files of a sandbox the cluster had removed at the hold). A failed store or cluster read
+  is retried, not taken as a gone snapshot; a failed delete of the original gives the pause up only if the original
+  still exists. The native cloud-resource delete of a sandbox ends a pause under way and deletes under the pause lock,
+  like the E2B kill (it could otherwise be finished as paused).
 
 **Why**
 
