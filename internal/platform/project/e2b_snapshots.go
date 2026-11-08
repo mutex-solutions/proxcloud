@@ -17,6 +17,8 @@ package project
 // sandboxAutoPause). A stored snapshot is billed per GB-hour (SANDBOX_SNAPSHOT) until it is resumed or deleted.
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"crypto/subtle"
 	"errors"
@@ -233,9 +235,24 @@ func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name st
 
 	// 1. Stream the filesystem changes into the bucket (the size is not known up front).
 	t0 := time.Now()
+	// The archive is read as it is uploaded: a pause deletes the sandbox before the assembly runs, so a capture that
+	// is not a whole gzip tar must fail here, while the sandbox still exists (seen on the lab: a 191 MB layer crane
+	// could not read, "unexpected EOF", and the paused sandbox could never come back).
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(c.ss.SnapshotFS(ctx, c.proj.ID, id, pw)) }()
-	if err := bs.put(ctx, key, pr); err != nil {
+	vr, vw := io.Pipe()
+	checked := make(chan error, 1)
+	go func() {
+		err := checkLayer(vr)
+		_ = vr.CloseWithError(err) // unblocks the upload if the check stops reading early
+		checked <- err
+	}()
+	err = bs.put(ctx, key, io.TeeReader(pr, vw))
+	vw.CloseWithError(err)
+	if cerr := <-checked; err == nil && cerr != nil {
+		err = fmt.Errorf("the capture is not a complete archive: %w", cerr)
+	}
+	if err != nil {
 		_ = pr.CloseWithError(err)
 		return undo(fmt.Errorf("snapshot upload: %w", err))
 	}
@@ -283,6 +300,27 @@ func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name st
 }
 
 func snapshotHash(buildID string) string { return "snapshot-" + buildID }
+
+// checkLayer reads r to its end as a gzip tar (the gzip CRC and length included) and reports whether it is whole.
+func checkLayer(r io.Reader) error {
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return err
+	}
+	tr := tar.NewReader(gz)
+	for {
+		if _, err := tr.Next(); err == io.EOF {
+			break
+		} else if err != nil {
+			return err
+		}
+		if _, err := io.Copy(io.Discard, tr); err != nil {
+			return err
+		}
+	}
+	_, err = io.Copy(io.Discard, gz) // past tar's end blocks: the gzip trailer is checked at EOF
+	return err
+}
 
 // failSnapshot records a failed snapshot build.
 func (h *Handler) failSnapshot(ctx context.Context, projectID, templateID, buildID string, cause error) {

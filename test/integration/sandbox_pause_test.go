@@ -3,6 +3,9 @@
 package integration
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -14,11 +17,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/billingresource"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
+	"github.com/mutex-solutions/proxcloud/internal/platform/billingjob"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/internal/platform/org"
+	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 )
 
 // pauseCluster is the in-memory cluster with what a snapshot needs: exec streaming the changed files, and assembly
@@ -27,13 +36,27 @@ type pauseCluster struct {
 	*sbxCluster
 	pmu  sync.Mutex
 	pods map[string]map[string]any
+	// cut: the capture stream ends early although the exec reports success.
+	cut bool
 }
 
 func (c *pauseCluster) ExecStream(_ context.Context, _, _, _ string, cmd []string, w io.Writer, _ int) (int, string, error) {
 	if len(cmd) != 2 || cmd[1] != "-snapshot" {
 		return 1, "unexpected command", nil
 	}
-	_, err := w.Write([]byte(strings.Repeat("layer-bytes ", 1000)))
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	body := strings.Repeat("layer-bytes ", 1000)
+	_ = tw.WriteHeader(&tar.Header{Name: "home/user/notes.txt", Mode: 0o644, Size: int64(len(body))})
+	_, _ = tw.Write([]byte(body))
+	_ = tw.Close()
+	_ = gz.Close()
+	b := buf.Bytes()
+	if c.cut {
+		b = b[:len(b)/2]
+	}
+	_, err := w.Write(b)
 	return 0, "", err
 }
 func (c *pauseCluster) ApplyCore(_ context.Context, plural string, obj map[string]any) error {
@@ -163,6 +186,15 @@ func TestE2BPauseResumeForkWake(t *testing.T) {
 	if code, body := f.e2b(keyB, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNotFound {
 		t.Fatalf("another project paused it: %d %s", code, body)
 	}
+	// A capture cut short fails the pause while the sandbox still runs: nothing paused, nothing billed.
+	pc.cut = true
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code < 500 {
+		t.Fatalf("pause on a cut capture: %d %s", code, body)
+	}
+	pc.cut = false
+	if n, _ := f.db.C("sandbox_paused").Count(ctx, pgdoc.M{}); f.cluster.count() != 1 || n != 0 || len(f.snapshotRows("pa")) != 0 {
+		t.Fatalf("a failed capture paused the sandbox: running %d, paused %d", f.cluster.count(), n)
+	}
 	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
 		t.Fatalf("pause: %d %s", code, body)
 	}
@@ -207,6 +239,17 @@ func TestE2BPauseResumeForkWake(t *testing.T) {
 		}
 	}
 	setProfile(billing.StatusSuspended)
+	// The profile suspender's sandbox leg (D9) deletes running sandboxes only: the paused one keeps its snapshot.
+	proj, err := f.projs.FindByID(ctx, "pa")
+	if err != nil || proj == nil {
+		t.Fatalf("project: %v", err)
+	}
+	if _, err := f.h.DeleteProjectSandboxes(ctx, proj); err != nil {
+		t.Fatalf("suspender leg: %v", err)
+	}
+	if n, _ := f.db.C("sandbox_paused").Count(ctx, pgdoc.M{"projectId": "pa"}); n != 1 {
+		t.Fatalf("the suspension dropped the paused sandbox: %d records", n)
+	}
 	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/resume", `{}`); code != http.StatusForbidden {
 		t.Fatalf("resume while suspended: %d %s", code, body)
 	}
@@ -301,3 +344,93 @@ func TestE2BPauseResumeForkWake(t *testing.T) {
 }
 
 func fmtJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+
+// A paused sandbox's snapshot bills per stored GB-hour on the real charge driver, unit by unit across charges, and
+// stops once the resume archives its row.
+func TestSandboxSnapshotBilledPerGBHour(t *testing.T) {
+	f, _, keyA, _ := newPauseFixture(t)
+	ctx := context.Background()
+	code, body := f.e2b(keyA, http.MethodPost, "/sandboxes", `{"templateID":"base","timeout":300}`)
+	var sb struct{ SandboxID string }
+	if code != http.StatusCreated || json.Unmarshal([]byte(body), &sb) != nil {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+sb.SandboxID+"/pause", `{}`); code != http.StatusNoContent {
+		t.Fatalf("pause: %d %s", code, body)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(f.snapshotRows("pa")) == 0 && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+	}
+	rows := f.snapshotRows("pa")
+	if len(rows) != 1 {
+		t.Fatalf("snapshot rows: %+v", rows)
+	}
+	// The test layer is a few KB: price a 2 GB snapshot stored since three whole hours ago.
+	now := time.Now().UTC().Truncate(time.Hour)
+	stored := now.Add(-3 * time.Hour)
+	row := rows[0]
+	row.Data["sizeGB"], row.Data["createdAt"], row.CreatedAt = 2.0, stored.Format(time.RFC3339), &stored
+	if _, err := f.rows.Update(ctx, &row); err != nil {
+		t.Fatal(err)
+	}
+
+	mustInsert(t, f.db, "billingConfiguration", pgdoc.M{"baseCurrency": "USD"})
+	if _, err := f.db.C("billingProfile").SetByID(ctx, "bpa", pgdoc.M{"currency": "USD",
+		"pricePlanConfig": pgdoc.M{"includePublicPricePlans": true}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	mustInsert(t, f.db, "pricePlan", pricing.PricePlan{ID: "pp-public", Enabled: true, AccessMode: pricing.AccessPublic})
+	mustInsert(t, f.db, "pricePlanRule", pricing.PricePlanRule{PricePlanID: "pp-public", TimeUnit: pricing.TimeUnitHour,
+		ResourceType: "sandbox_snapshot", Prices: []pricing.PricePlanRulePrice{{AttributeName: "size_gb",
+			Tiers: []pricing.PriceTier{{From: dptr("0"), Value: dptr("0.05")}}}}})
+	at := now
+	driver := billingjob.New(billingjob.Deps{
+		Billing: billing.NewRepo(f.db), ExternalServices: f.es, Projects: f.projs, Orgs: org.NewRepo(f.db),
+		Pricing: pricing.NewRepo(f.db), Engine: pricing.NewEngine(pricing.SystemClock()), Cloud: f.rows,
+		Registry: map[string]billingresource.Provider{cloud.TypeSandboxSnapshot: billingresource.NewSandboxSnapshotProvider()},
+		Now:      func() time.Time { return at },
+	})
+	billed := func() decimal.Decimal {
+		t.Helper()
+		var bill pricing.Bill
+		if found, err := f.db.C("bill").FindOne(ctx, pgdoc.M{"billingProfileId": "bpa"}, &bill); err != nil || !found {
+			t.Fatalf("no bill: %v %v", found, err)
+		}
+		sum := decimal.Zero
+		for _, it := range bill.Items {
+			if it.ResourceID == row.ID {
+				sum = sum.Add(it.NetAmount)
+			}
+		}
+		return sum
+	}
+	// 2 GB × 3 h × 0.05 = 0.30; one more hour = 0.40 (no hour counted twice).
+	if err := driver.Charge(ctx, pricing.TimeUnitHour, at); err != nil {
+		t.Fatal(err)
+	}
+	if got := billed(); !got.Equal(decimal.RequireFromString("0.3")) {
+		t.Fatalf("after 3 h: %s, want 0.30", got)
+	}
+	at = now.Add(time.Hour)
+	if err := driver.Charge(ctx, pricing.TimeUnitHour, at); err != nil {
+		t.Fatal(err)
+	}
+	if got := billed(); !got.Equal(decimal.RequireFromString("0.4")) {
+		t.Fatalf("after 4 h: %s, want 0.40", got)
+	}
+	// The resume (wall clock, inside the last charged hour) archives the row: the next hour adds nothing.
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+sb.SandboxID+"/resume", `{}`); code != http.StatusCreated {
+		t.Fatalf("resume: %d %s", code, body)
+	}
+	if n := len(f.snapshotRows("pa")); n != 0 {
+		t.Fatalf("the resumed snapshot's row is still open: %d", n)
+	}
+	at = now.Add(2 * time.Hour)
+	if err := driver.Charge(ctx, pricing.TimeUnitHour, at); err != nil {
+		t.Fatal(err)
+	}
+	if got := billed(); !got.Equal(decimal.RequireFromString("0.4")) {
+		t.Fatalf("after the resume: %s, want 0.40", got)
+	}
+}
