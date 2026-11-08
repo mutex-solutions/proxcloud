@@ -197,7 +197,7 @@ func TestResumeFromPublicImageGetsPullSecret(t *testing.T) {
 	img := testRegistry + "/p1/t1@sha256:1"
 	// No template registry configured: the same image is nobody's private image.
 	cr := BuildCR(cfg, "svc", Spec{ID: "sbx-00000001", ProjectID: "p1", Template: "py", CPU: 1, MemoryGiB: 2}, time.Unix(0, 0))
-	if err := NewWithAPI(f, cfg, "svc").ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0)); err != nil {
+	if err := NewWithAPI(f, cfg, "svc").ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0), nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.crs[NamespaceFor("p1")+"/sbx-00000001"]; dig(got, "spec", "podTemplate", "spec", "imagePullSecrets") != nil {
@@ -210,7 +210,7 @@ func TestResumeFromPublicImageGetsPullSecret(t *testing.T) {
 	if dig(cr, "spec", "podTemplate", "spec", "imagePullSecrets") != nil {
 		t.Fatal("a public image needs no pull secret")
 	}
-	if err := s.ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0)); err != nil {
+	if err := s.ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0), nil); err != nil {
 		t.Fatal(err)
 	}
 	got := f.crs[NamespaceFor("p1")+"/sbx-00000001"]

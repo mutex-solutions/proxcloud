@@ -59,17 +59,17 @@ served, answers 404 with E2B's error body (or 400 for a refused field).
 | Endpoint | Status | Notes |
 |---|---|---|
 | `GET /health` | yes | |
-| `POST /sandboxes`, `POST /v2/sandboxes` | partial | `templateID` (a built-in template), `timeout` (1 s up to the provider's maximum, 24 h by default; 300 s when not sent), `metadata`, `envVars`, `network`, `allow_internet_access`. Returns once the sandbox is ready (envd up, the template's ready command passed); a sandbox not ready within 50 s is removed and the call answers 503. `secure` is ignored (envd always requires its token). `autoPause`, `autoResume`, `autoPauseMemory`, `mcp`, `volumeMounts` → 400. `iam` and `Idempotency-Key` are ignored. ProxCloud extensions: `cpuCount`, `memoryMB` (rounded up to whole GiB), `gpu {model, count}` (no GPU nodes before SB9) |
-| `GET /sandboxes`, `GET /v2/sandboxes` | partial | `metadata` and `state` filters; running sandboxes only (nothing is ever paused); one page holds everything, so `nextToken` is never set |
+| `POST /sandboxes`, `POST /v2/sandboxes` | partial | `templateID` (a built-in template), `timeout` (1 s up to the provider's maximum, 24 h by default; 300 s when not sent), `metadata`, `envVars`, `network`, `allow_internet_access`. Returns once the sandbox is ready (envd up, the template's ready command passed); a sandbox not ready within 50 s is removed and the call answers 503. `secure` is ignored (envd always requires its token). `autoPause` pauses the filesystem only (`autoPauseMemory: true` → 400); `autoResume` with `autoPause` cold-boots a paused sandbox on traffic to its ports. `volumeMounts` → 400; `mcp` must be an object (the SDK starts the gateway in an `mcp-gateway` sandbox; the API never stores or logs it). `iam` and `Idempotency-Key` are ignored. ProxCloud extensions: `cpuCount`, `memoryMB` (rounded up to whole GiB), `gpu {model, count}` (no GPU nodes before SB9) |
+| `GET /sandboxes`, `GET /v2/sandboxes` | partial | `metadata` and `state` filters; running and paused sandboxes; one page holds everything, so `nextToken` is never set |
 | `GET /sandboxes/{id}` | yes | `diskSizeMB` is 0 |
 | `DELETE /sandboxes/{id}` | yes | |
 | `POST /sandboxes/{id}/timeout` | yes | |
 | `POST /sandboxes/{id}/refreshes` | yes | |
-| `POST /sandboxes/{id}/connect`, `/v2/…/connect` | partial | Returns the sandbox and extends its timeout; a running sandbox only |
+| `POST /sandboxes/{id}/connect`, `/v2/…/connect` | partial | Returns the sandbox and extends its timeout; a paused sandbox is resumed (201) as a cold boot, whatever `memory` says |
 | `PUT /sandboxes/{id}/network` | partial | `allowOut` / `denyOut` / `dnsServers`. `egressProxy`, `rules`, `maskRequestHost`, `httpsPorts` → 400. `allowPublicTraffic` only at create |
 | `GET /sandboxes/{id}/logs`, `/v2/…/logs` | partial | The sandbox's stdout/stderr (envd and the template's start command), newest 1000 lines; no `start`/`limit` or cursor |
 | `GET /sandboxes/{id}/metrics`, `GET /sandboxes/metrics` | partial | Always empty |
-| `POST /sandboxes/{id}/pause`, `/resume`, `/snapshots`, `/fork`, `GET /snapshots` | no | SB7 |
+| `POST /sandboxes/{id}/pause`, `/resume`, `/snapshots`, `/fork`, `GET /snapshots` | partial | Filesystem only: `memory: true` → 400, a resume or fork is a cold boot. At most 10 forks. Snapshots are templates of the project, billed per GB-hour until deleted |
 
 ### Templates
 
@@ -107,14 +107,15 @@ dashboard APIs. They answer 404 with E2B's error body.
 |---|---|---|
 | `base` (SDK default) | yes | E2B's base image plus user `user` with passwordless sudo, `/code` |
 | `code-interpreter-v1` (`e2b-code-interpreter`) | yes | Python, JavaScript and Bash kernels; R and Java are not installed. Its Jupyter start counts towards the create's 50 s |
-| `desktop`, `codex`, `opencode`, `claude`, `amp`, `gemini`, `mcp-gateway`, other agent templates | no | SB6 (built-in images through the template workflow) and SB8 (MCP gateway) |
+| `mcp-gateway` (`Sandbox.create(mcp={…})`) | yes, when the provider offers it | The base plus `cmd/mcp-gateway` and its preinstalled servers; 47 servers in `cmd/mcp-gateway/catalog.json` (remote ones and package ones baked in, no Docker image servers). Each server's keys come from the tenant's `mcp` config; see [managed-sandbox.md §9](managed-sandbox.md#9-mcp-gateway-sb8) |
+| `desktop`, `codex`, `opencode`, `claude`, `amp`, `gemini`, other agent templates | no | Images in `deploy/templates/`, offered once the template workflow pinned them (SB6a) |
 
 ## What does not work, and why
 
-1. **Pause, resume, snapshots and fork** (`pause`, `resume`, `snapshots`, `fork`, `connect` of a paused sandbox,
-   `state=paused`): not before SB7. A sandbox is deleted at its timeout.
-2. **`autoPause` and `autoResume`**: refused with 400 rather than accepted, because without pause a sandbox that should
-   pause at its timeout would be deleted and its files lost. After SB7: filesystem only.
+1. **Pause, resume, snapshots and fork** keep the filesystem only: files are back after a resume; processes, memory
+   and open connections are not. Files deleted from the template's image come back too.
+2. **`autoPause` and `autoResume`** pause at the timeout (within a minute) and wake on traffic to a port; both answer
+   400 where the location cannot take snapshots or has no wake token.
 3. **Pause with memory** (`memory: true`, `mode: "full"`, `autoPauseMemory`): never. gVisor in a pod has no microVM
    snapshot; a later resume is a cold boot (files kept, processes, memory and open connections not).
 4. **Custom templates**: the v3 build API works (`Template()` builder, `from_dockerfile`, `e2b template build`, tags,
@@ -122,9 +123,13 @@ dashboard APIs. They answer 404 with E2B's error body.
    `type: "registry"` with username `AWS` and the output of `aws ecr get-login-password` as the password. No layer cache
    between builds, so a large base image is pulled again on every build. A template belongs to its project; no public
    templates.
-5. **Templates beyond `base` and `code-interpreter-v1`** (`desktop`, agent CLIs, `mcp-gateway`): no images before the
-   template workflow (SB6a) and the MCP gateway (SB8). Build your own from `base`.
-6. **`Sandbox.create(mcp=…)`**: 400 before SB8 (the gateway runs from the `mcp-gateway` template).
+5. **Templates beyond `base`, `code-interpreter-v1` and `mcp-gateway`** (`desktop`, agent CLIs): no images before the
+   template workflow (SB6a) pinned them. Build your own from `base`.
+6. **`Sandbox.create(mcp=…)`**: only the servers of the catalog (`mcp-gateway list` in the sandbox) plus
+   `github/<owner>/<repo>` servers with a `run_cmd`; any other name fails the create ("not available on ProxCloud").
+   E2B's servers that run from a Docker image and have no remote endpoint are not offered (no Docker inside gVisor).
+   A server's keys come only from the tenant's config; a missing required field fails the create. The gateway restarts
+   with the sandbox (`mcp-gateway boot`), so after a resume (SB7) the same tools come back.
 7. **Volumes** (`volumeMounts`, `/volumes`): 400 / 404. A sandbox has ephemeral storage only, by design: the sandbox cluster has no CSI
    token and no NAS dataset, so an escape from gVisor finds no storage credential.
 8. **Network `egressProxy`, `rules`, `maskRequestHost`, `httpsPorts`**: 400. The egress policy is Cilium (CIDR and
@@ -171,7 +176,7 @@ E2B's shape: `{"code": <http status>, "message": "…"}`.
 
 | HTTP | When |
 |---|---|
-| 400 | invalid input, or a refused field (`autoPause`, `volumeMounts`, `mcp`, `network.rules`, …) |
+| 400 | invalid input, or a refused field (`autoPause`, `volumeMounts`, `mcp` that is not an object, `network.rules`, …) |
 | 401 | missing, bad or revoked key |
 | 403 | the key's creator can no longer manage sandboxes in the project; billing profile suspended; sandboxes not enabled for the project |
 | 404 | unknown sandbox or template, a sandbox of another project, an endpoint that is not served |

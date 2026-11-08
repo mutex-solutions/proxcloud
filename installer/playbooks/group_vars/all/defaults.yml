@@ -149,6 +149,7 @@ pc_defaults:
     pool: proxcloud-sandbox
     token: sandbox               # capmox@pve!<token>, the cluster's CAPMOX credential; secret in generated/token-<token>
     runtime_image: ""            # envd + sandbox-init for node-setup; default <images.registry>/proxcloud-sandbox-runtime:<release>
+    allow_suid: true             # runsc allow-suid: sudo works in sandboxes, as on E2B (docs/managed-sandbox.md §1.4)
     storage: ""                  # boot disks; default: services.storage
     iso_storage: ""              # bootstrap ISOs, node-local only; default: services.iso_storage
     network:
@@ -177,6 +178,11 @@ pc_defaults:
     proxy:
       address: ""                # required: sandbox-proxy's MetalLB address, inside network.metallb
       image: ""                  # default <images.registry>/proxcloud-sandbox-proxy:<release>
+      # E2B autoResume: the proxy wakes a paused sandbox at <wake_url>/<id>/wake (default <API URL>/api/v1/internal/sandboxes;
+      # the proxy must resolve it and trust its certificate). wake_address: the address the workers' firewall opens for
+      # it on the API's port (default the first mgmt host; "none" = no rule, e.g. a public API address).
+      wake_url: ""
+      wake_address: ""
     tls:
       issuer: acme               # acme (DNS-01 through PowerDNS with RFC2136) | secret (yours) | selfsigned (test sites)
       secret: ""                 # issuer secret: a kubernetes.io/tls Secret for *.<domain> in pc-sandbox, services cluster

@@ -14,7 +14,7 @@ DESKTOP_UPSTREAM=https://github.com/e2b-dev/desktop.git#91f23acaab7312e847596acc
 GPU_BASE=docker.io/pytorch/pytorch@sha256:7b324d212a4450795b49edba9949b7cdc72429148a64e974334bfe5774d51385
 
 names=("$@")
-[ ${#names[@]} -gt 0 ] || names=(base code-interpreter code-interpreter-gpu desktop codex opencode claude amp gemini node browser)
+[ ${#names[@]} -gt 0 ] || names=(base code-interpreter code-interpreter-gpu desktop codex opencode claude amp gemini node browser mcp-gateway)
 out=$( [ "$PUSH" = 1 ] && echo "--push" || echo "--load" )
 declare -A built
 
@@ -45,6 +45,8 @@ for n in "${names[@]}"; do
     desktop) build desktop desktop --build-context "upstream=$DESKTOP_UPSTREAM" ;;
     codex|opencode|claude|amp|gemini) need_base; build "$n" "$n" --build-arg "BASE=${built[base]}" ;;
     node|browser) build "$n" "$n" ;;
+    # The gateway is built from the repository (cmd/mcp-gateway): context "src" is the repository root.
+    mcp-gateway) need_base; build mcp-gateway mcp-gateway --build-arg "BASE=${built[base]}" --build-context src=../.. ;;
     *) echo "unknown template $n" >&2; exit 2 ;;
   esac
 done
