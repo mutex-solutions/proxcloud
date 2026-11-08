@@ -507,7 +507,7 @@ func TestSandboxAccessAndWake(t *testing.T) {
 		{"Bearer wrong", sb.ExternalID, http.StatusUnauthorized},
 		{"wake-secret", sb.ExternalID, http.StatusUnauthorized}, // not a bearer
 		{"Bearer wake-secret", "not-an-id", http.StatusNotFound},
-		{"Bearer wake-secret", sb.ExternalID, http.StatusNotFound}, // nothing is paused before SB7
+		{"Bearer wake-secret", sb.ExternalID, http.StatusNotFound}, // running, not paused
 	} {
 		if got := wake(c.auth, c.id); got != c.want {
 			t.Errorf("wake %q %s: %d, want %d", c.auth, c.id, got, c.want)

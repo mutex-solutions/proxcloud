@@ -13,7 +13,7 @@ package project
 // bucket's keys never leave the portal and the bucket need not be reachable from the internet; build pods fetch their
 // contexts with presigned GETs (the nodes reach the bucket, not the portal). Images go to the template registry as
 // <templateRegistry>/<project>/<template>:<build> with the project's own build account, and sandboxes pin them by digest.
-// Ported from the earlier implementation (EE); snapshots (pause, fork) are SB7.
+// Ported from the earlier implementation (EE); snapshots (pause, fork) are records here too (e2b_snapshots.go).
 
 import (
 	"bytes"
@@ -94,13 +94,13 @@ type sandboxTemplateDoc struct {
 	Builds      []templateBuild   `json:"builds"`
 	// Kind "snapshot": a sandbox's filesystem (e2b_snapshots.go), taken from SourceSandbox. Internal: a pause's or a
 	// fork's snapshot, hidden from the template lists and from their limit.
-	Kind          string `json:"kind,omitempty"`
-	Internal      bool   `json:"internal,omitempty"`
-	SourceSandbox string `json:"sourceSandbox,omitempty"`
-	GPU       *sandbox.GPURequest `json:"gpu,omitempty"`
-	SizeBytes int64               `json:"sizeBytes,omitempty"`
-	CreatedAt *time.Time          `json:"createdAt"`
-	UpdatedAt *time.Time          `json:"updatedAt"`
+	Kind          string              `json:"kind,omitempty"`
+	Internal      bool                `json:"internal,omitempty"`
+	SourceSandbox string              `json:"sourceSandbox,omitempty"`
+	GPU           *sandbox.GPURequest `json:"gpu,omitempty"`
+	SizeBytes     int64               `json:"sizeBytes,omitempty"`
+	CreatedAt     *time.Time          `json:"createdAt"`
+	UpdatedAt     *time.Time          `json:"updatedAt"`
 }
 
 func (t *sandboxTemplateDoc) build(id string) *templateBuild {

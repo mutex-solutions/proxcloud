@@ -73,8 +73,8 @@ func TestE2BNetworkMapping(t *testing.T) {
 	}
 }
 
-// What a create asks for that this location cannot honour is refused, never silently dropped: without pause (SB7) an
-// autoPause sandbox would be deleted at its timeout.
+// What a create asks for that this location cannot honour is refused, never silently dropped: a memory pause would
+// drop the processes the caller asked to keep, and autoResume needs autoPause.
 func TestE2BCreateRefusals(t *testing.T) {
 	for body, want := range map[string]string{
 		`{}`:                                     "templateID",
@@ -82,11 +82,11 @@ func TestE2BCreateRefusals(t *testing.T) {
 		`{"templateID":"base","autoPause":true,"autoPauseMemory":true}`:  "memory snapshots",
 		`{"templateID":"base","autoPause":true,"autoPauseMemory":false}`: "",
 		`{"templateID":"base","autoResume":{"enabled":true}}`:            "autoResume needs autoPause",
-		`{"templateID":"base","volumeMounts":[{"name":"v"}]}`:     "volumeMounts",
-		`{"templateID":"base","mcp":{"github":{}}}`:               "mcp",
-		`{"templateID":"base","network":{"httpsPorts":[8443]}}`:   "httpsPorts",
-		`{"templateID":"base","mcp":null,"network":{"rules":{}}}`: "",
-		`{"templateID":"base","autoPause":false}`:                 "",
+		`{"templateID":"base","volumeMounts":[{"name":"v"}]}`:            "volumeMounts",
+		`{"templateID":"base","mcp":{"github":{}}}`:                      "mcp",
+		`{"templateID":"base","network":{"httpsPorts":[8443]}}`:          "httpsPorts",
+		`{"templateID":"base","mcp":null,"network":{"rules":{}}}`:        "",
+		`{"templateID":"base","autoPause":false}`:                        "",
 	} {
 		var b e2bCreateBody
 		if err := json.Unmarshal([]byte(body), &b); err != nil {
