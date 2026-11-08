@@ -27,10 +27,14 @@ const (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "-snapshot" {
+	m, err := runMode(os.Args[1:], os.Getpid())
+	switch {
+	case err != nil:
+		fmt.Fprintln(os.Stderr, "sandbox-init:", err)
+		os.Exit(2)
+	case m == "-snapshot":
 		os.Exit(runSnapshot())
-	}
-	if len(os.Args) > 1 && os.Args[1] == "-ready" {
+	case m == "-ready":
 		os.Exit(readyCheck(readyPath))
 	}
 	log.SetPrefix("sandbox-init: ")
@@ -250,4 +254,21 @@ func markReady() {
 	if err := os.WriteFile(readyPath, nil, 0o644); err != nil {
 		log.Printf("write ready marker: %v", err)
 	}
+}
+
+// runMode is what this run of sandbox-init does: "-snapshot", "-ready", or "" (the init). The portal execs it in a
+// running sandbox, so anything else must stop before the init's side effects: a second init removes the ready marker
+// (the pod drops out of the proxy for good) and fights envd for its port. That happens when a newer portal asks a
+// node whose runtime is older for a mode it does not know, e.g. while node-setup rolls.
+func runMode(args []string, pid int) (string, error) {
+	if len(args) > 0 {
+		if args[0] == "-snapshot" || args[0] == "-ready" {
+			return args[0], nil
+		}
+		return "", fmt.Errorf("unknown argument %q", args[0])
+	}
+	if pid != 1 {
+		return "", fmt.Errorf("the init runs only as PID 1 (this is pid %d)", pid)
+	}
+	return "", nil
 }

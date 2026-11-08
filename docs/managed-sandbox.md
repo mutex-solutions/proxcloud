@@ -1421,6 +1421,11 @@ Teardown archives the project's snapshot rows, deletes its templates and snapsho
   EOF` on every retry until the pod's deadline, so that paused sandbox could not come back. Where the archive was cut
   is not known (the capture's logs went with the stack); the portal now checks the archive while it uploads, and a
   pause deletes the sandbox only once its image is pushed.
+- A second attempt (pc-sb8, main 7736f54) paused a sandbox on nodes whose runtime predated SB7: the old
+  `sandbox-init` ignored `-snapshot` and started a second init in the sandbox, which removed its ready marker; the
+  pause failed with 500 after 126 s and the sandbox was not deleted, but it stayed unready (503) until killed.
+  `sandbox-init` now refuses an unknown argument and runs the init only as PID 1. Roll node-setup (the runtime image)
+  before a portal that uses a new `sandbox-init` mode.
 - Not run on the lab: resume, fork, autoPause, the wake through `sandbox-proxy`, and a pause with the capture check.
   The workers were in use by another drill, and two portals fencing one sandbox pool roll each other's firewall back.
   These paths have integration tests on Postgres with an in-memory cluster and a fake bucket (another project cannot
