@@ -16,7 +16,7 @@ Addresses and names below are documentation examples (`192.0.2.x`, `198.51.100.x
 | Evaluate on one Proxmox node | [B](#b-one-proxmox-node-evaluation) | A management VM on that node (k3s, ArgoCD, the platform), a RustFS VM, OS templates, the provider | One PVE 9.2+ node, three free addresses | `make install` |
 | A small production site, one management host | [C](#c-production-one-management-host-allinone) | k3s on your Linux host, the platform, RustFS, templates, the provider, optional NAS stores | PVE 9.2+ cluster, a Linux host that is not a PVE node, a DNS domain | `make install` |
 | Managed Kubernetes, managed databases, sandboxes | [D](#d-managed-kubernetes-databases-and-sandboxes-split) | All of C, plus a services cluster (Kamaji, Cluster API, MetalLB, database operators), optionally a sandbox cluster | Path C installed, k8s node templates, a services subnet | `make install` with `mode: split` |
-| The portal only, on a Kubernetes cluster you run | [E](#install-on-kubernetes-with-helm) | API, both consoles, PostgreSQL and RabbitMQ through their operators | A cluster with the CloudNativePG and RabbitMQ Cluster operators, an OIDC issuer | `helm install` |
+| The portal only, on a Kubernetes cluster you run | [E](#e-install-on-kubernetes-with-helm) | API, both consoles, PostgreSQL, RabbitMQ and Keycloak (quick start), or PostgreSQL and RabbitMQ through their operators (production) | Any cluster with a default StorageClass (quick start); the CloudNativePG and RabbitMQ Cluster operators and an OIDC issuer (production) | `helm install` |
 
 Then add what you sell, on any installer path:
 
@@ -79,8 +79,9 @@ The installer creates the management VM on the node itself (`mgmt.placement: pve
 - Installer host: Linux with `python3`, `openssl`, `docker`, `helm`, internet access, an SSH key in
   `~/.ssh/id_rsa.pub` or `~/.ssh/id_ed25519.pub`, and SSH reach to the addresses below.
 - PVE 9.2 or newer. Datacenter firewall on, nftables firewall on the node (step 2 of A2).
-- A store with `import` content for the vendor cloud images. Without a NAS the installer uses `local`: add `import`
-  to its content types (Datacenter → Storage → `local` → Content).
+- A store with `import` content for the vendor cloud images. The installer takes the first such store other than
+  `local`, then `local` itself. Without a NAS, add `import` to `local`'s content types (Datacenter → Storage →
+  `local` → Content).
 - A store with `images` content for VM disks (`local-zfs` or `local-lvm` on a default install).
 - Three free addresses on `vmbr0`: the management VM, the RustFS VM, the template build VM.
 
@@ -248,9 +249,14 @@ database operators, and registers the Kubernetes and database providers (stage 6
    ```sh
    PVE_URL=https://192.0.2.11:8006 PVE_TOKEN_ID='images@pve!packer' \
    PVE_TOKEN_SECRET="$(cat installer/inventory/mysite/generated/token-packer)" \
-   PVE_NODES="pve1 pve2 pve3" PVE_TEMPLATE_STORAGE=nas-templates PVE_BRIDGE=vmbr0 \
+   PVE_NODES="pve1 pve2 pve3" PVE_TEMPLATE_STORAGE=local PVE_BRIDGE=vmbr0 \
    K8S_VERSION=1.35.10 images/k8s-node-template.sh
    ```
+
+   `PVE_TEMPLATE_STORAGE` holds the Ubuntu ISO and the template disks, so it needs `iso` and `images` content: add
+   `images` to `local`'s content types, or use `nas-templates` when you have a NAS. The Ubuntu installer needs DHCP
+   on `PVE_BRIDGE`; when the bridge has none, add `DHCP_RANGE=192.0.2.60,192.0.2.69 DHCP_GATEWAY=192.0.2.1` and the
+   script runs a dnsmasq for the build on this machine (needs `dnsmasq` and `sudo`).
 
    Its last line, e.g. `1.35.10=pve1=9210,pve2=9211,pve3=9212`, fills `services.templates` and
    `services.kamaji.version_images` below. See [images/README.md](../images/README.md#kubernetes-node-templates).
@@ -259,7 +265,6 @@ database operators, and registers the Kubernetes and database providers (stage 6
    ```yaml
    proxcloud:
      mode: split
-     object_store: {mode: vm}          # split needs vm or truenas-app: database backups go there
      services:
        templates: {pve1: 9210, pve2: 9211, pve3: 9212}
        control_plane: {node: pve1}
@@ -285,8 +290,10 @@ database operators, and registers the Kubernetes and database providers (stage 6
    | `services.kamaji.version_images` | Kubernetes versions offered to tenants; read once, at the first registration |
    | `services.storage`, `services.iso_storage` | Default `local-zfs` and `local`; the ISO store must be node-local |
 
-4. `make install INVENTORY=inventory/mysite`. The providers `<name> Kubernetes` and `<name> Databases` appear under
-   Cloud providers.
+   Keep `object_store.mode` at `vm` (the default) or `truenas-app`: database backups go there.
+
+4. `make install INVENTORY=inventory/mysite ARGS=--ask-vault-pass`. The providers `<name> Kubernetes` and
+   `<name> Databases` appear under Cloud providers.
 
 **Sandboxes** (gVisor, E2B-compatible API) add `sandbox.*` on top of split. Minimum keys, each explained in
 [install.md § Sandbox cluster](install.md#sandbox-cluster-split-mode):
@@ -300,36 +307,89 @@ proxcloud:
       gateway: 198.51.100.1
       nodes: 198.51.100.10-198.51.100.29
       metallb: 198.51.100.200-198.51.100.209
-      snat: 203.0.113.50                # the sandbox's own egress address; required ("node" shares the exit node's)
+      snat: 203.0.113.250               # the sandbox's own egress address, outside network.public.ranges; required ("node" shares the exit node's)
     registry:
       address: 192.0.2.226              # inside services.network.metallb
-    domain: sbx.example.net             # optional: public ports, stage 56
-    proxy: {address: 198.51.100.205}   # inside sandbox.network.metallb, with a domain
 ```
 
 The exit node of the sandbox's EVPN zone must be in the inventory group `pve` with root SSH. On a first install stage
 55 says SKIPPED until a tenant network exists: create one in the customer console, then run `make install` again.
 Stage 60 registers `<name> Sandboxes` as `DISABLED`; open it, run **Check release gates**, then set it `PUBLIC`.
-Sandbox ports (`sandbox.domain`) also need PowerDNS or your own wildcard certificate:
+Public sandbox ports are optional; leave them out of a first install. They take `sandbox.domain`,
+`sandbox.proxy.address` (inside `sandbox.network.metallb`) and a certificate: PowerDNS for the default `acme` issuer,
+or `sandbox.tls.issuer: secret` with your own wildcard certificate. Without one of those, stage 56 fails:
 [install.md § Sandbox ports](install.md#sandbox-ports-stage-56).
 
-### Install on Kubernetes with Helm
+### E. Install on Kubernetes with Helm
 
 The chart installs the API and both consoles. It does not create OS templates, Proxmox tokens or providers: register
 those in the operator console as in [A2](#a2-connect-an-existing-proxmox-cluster). Chart reference:
 [deploy/charts/proxcloud/README.md](../deploy/charts/proxcloud/README.md).
 
-**Before you start:** Kubernetes 1.25+, Helm 3.8+, the CloudNativePG and RabbitMQ Cluster operators, an ingress
-controller, and an OIDC issuer with the realms and clients in [auth.md](auth.md) (or `keycloakx.enabled` plus
-`keycloakConfigCli.enabled` to bundle Keycloak).
+**Before you start:** Kubernetes 1.25+, Helm 3.8+, `kubectl` and a default StorageClass.
 
-1. Fetch the subcharts:
+**Images.** The chart pulls `ghcr.io/mutex-solutions/proxcloud-{api,web,admin}` at its `appVersion`. Until that
+release is published, build the images from this checkout and load them into the cluster (kind shown):
 
-   ```sh
-   helm repo add codecentric https://codecentric.github.io/helm-charts
-   helm repo add cnpg https://cloudnative-pg.github.io/charts
-   helm dependency build deploy/charts/proxcloud
-   ```
+```sh
+docker build -t proxcloud-api:local -f deploy/Dockerfile .
+docker build -t proxcloud-web:local --build-arg APP=client web
+docker build -t proxcloud-admin:local --build-arg APP=admin web
+kind load docker-image proxcloud-api:local proxcloud-web:local proxcloud-admin:local
+```
+
+and add `--set api.image.repository=proxcloud-api,api.image.tag=local,ui.image.repository=proxcloud-web,ui.image.tag=local,admin.image.repository=proxcloud-admin,admin.image.tag=local`
+to the `helm install` below. Without it the pods stay in `ImagePullBackOff`.
+
+**Quick start, no operators.** One command brings up the API, both consoles, PostgreSQL, RabbitMQ and Keycloak with
+its realms:
+
+```sh
+helm repo add codecentric https://codecentric.github.io/helm-charts
+helm repo add cnpg https://cloudnative-pg.github.io/charts
+helm dependency build deploy/charts/proxcloud
+helm install proxcloud deploy/charts/proxcloud -n proxcloud --create-namespace --wait --timeout 15m \
+  -f deploy/charts/proxcloud/values-quickstart.yaml \
+  --set api.encryptionKey=$(openssl rand -hex 32) \
+  --set postgresql.auth.password=$(openssl rand -hex 16) \
+  --set rabbitmq.auth.password=$(openssl rand -hex 16) \
+  --set keycloakConfigCli.adminPassword=$(openssl rand -hex 12)
+```
+
+The secrets have no defaults; `helm get values proxcloud -n proxcloud` reads them back. The release notes print the
+port-forwards; run them and keep them running:
+
+```sh
+kubectl -n proxcloud port-forward svc/proxcloud-api 8180:8080 &
+kubectl -n proxcloud port-forward svc/proxcloud-ui 8182:80 &
+kubectl -n proxcloud port-forward svc/proxcloud-admin 8183:80 &
+kubectl -n proxcloud port-forward svc/proxcloud-keycloak-http 8190:80 &
+```
+
+| What | URL | Login |
+|---|---|---|
+| Customer console | `http://localhost:8182` | Register an account on the sign-in page (realm `proxcloud`) |
+| Operator console | `http://localhost:8183` | `admin` and `kubectl -n proxcloud get secret proxcloud-keycloak-admin -o jsonpath='{.data.admin-password}' \| base64 -d` |
+| Keycloak | `http://localhost:8190` | The same `admin` |
+
+The URLs are written into the tokens, so keep the ports. A seed Job has already written the platform and billing
+configuration. Then register a Proxmox provider ([A2](#a2-connect-an-existing-proxmox-cluster)) and seed the customer
+basics through the port-forwards:
+
+```sh
+PROXCLOUD_API=http://localhost:8180/api/v1 \
+PROXCLOUD_TOKEN_URL=http://localhost:8190/realms/master/protocol/openid-connect/token \
+PROXCLOUD_ADMIN_PASSWORD="$(kubectl -n proxcloud get secret proxcloud-keycloak-admin -o jsonpath='{.data.admin-password}' | base64 -d)" \
+deploy/seed/seed-operator.py --provider "<provider name>"
+```
+
+The quick start is not for production: one replica of everything, plain HTTP, and Keycloak's own administrator is
+the operator. To expose it with an Ingress, see the chart README.
+
+**Production, with the operators.** Needs the CloudNativePG and RabbitMQ Cluster operators, an ingress controller,
+and an OIDC issuer with the realms and clients in [auth.md](auth.md).
+
+1. Fetch the subcharts (the two `helm repo add` and `helm dependency build` lines above).
 
 2. `my-values.yaml`:
 
@@ -349,6 +409,11 @@ controller, and an OIDC issuer with the realms and clients in [auth.md](auth.md)
      adminApi: {issuer: https://id.example.org/realms/proxcloud-admin}
    ```
 
+   To bundle Keycloak instead of bringing an issuer, copy the `keycloakx` and `keycloakConfigCli` blocks of
+   `values-quickstart.yaml`: Keycloak needs a database (`cnpg.keycloak` adds one to the CloudNativePG cluster), its
+   bootstrap admin password, and `keycloakConfigCli.adminPassword`, which the chart writes to the Secret
+   `<release>-keycloak-admin` that both read.
+
 3. Install. `api.encryptionKey` and `postgresql.auth.password` are required; the chart refuses to render without them.
 
    ```sh
@@ -357,8 +422,7 @@ controller, and an OIDC issuer with the realms and clients in [auth.md](auth.md)
      --set postgresql.auth.password="$(openssl rand -hex 16)"
    ```
 
-   Keep the encryption key: stored provider secrets cannot be read without it. A throwaway cluster without the
-   operators can use `-f deploy/charts/proxcloud/values-dev.yaml` instead (bitnami subcharts, insecure fixed secrets).
+   Keep the encryption key: stored provider secrets cannot be read without it.
 
 4. Register a Proxmox provider, then seed the customer basics from any machine that reaches the API and the issuer:
 

@@ -14,6 +14,9 @@ and rules: [README.md](README.md#maintenance-rule).
   Standard and Full storage tiers, the add-ons (GPU, PowerDNS, load balancers, backups, per-organization SSO,
   payments), what each installer stage installs and which key switches it, and the common first-install failures.
 - The README's Quickstart section now points at it with a short path table.
+- The Helm path (E) uses the chart's `values-quickstart.yaml` (PR #127) for a cluster without operators and keeps
+  the operator install as the production path; it also says how to build and load the images until a release is
+  published.
 
 **Why**
 

@@ -105,7 +105,7 @@ first login and the fixes for common first-install failures.
 | Evaluate on one Proxmox node | `make install`, with `mgmt.placement: pve-vm` and `network.kind: simple` | [B](docs/quickstart.md#b-one-proxmox-node-evaluation) |
 | Run a production site | `make install`, one management host (`allinone`) | [C](docs/quickstart.md#c-production-one-management-host-allinone) |
 | Sell managed Kubernetes, databases, sandboxes | `make install` with `mode: split` | [D](docs/quickstart.md#d-managed-kubernetes-databases-and-sandboxes-split) |
-| Run only the portal on your Kubernetes | `helm install` | [E](docs/quickstart.md#install-on-kubernetes-with-helm) |
+| Run only the portal on your Kubernetes | `helm install` with `values-quickstart.yaml` (no operators) or your values (production) | [E](docs/quickstart.md#e-install-on-kubernetes-with-helm) |
 
 The installer in one go, from a Linux host that reaches the Proxmox API:
 
