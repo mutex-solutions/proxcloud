@@ -83,7 +83,15 @@ customer can create an organization and a project straight away. Next, register
 a Proxmox VE cluster in the operator console (System → Cloud providers, see
 [`docs/proxmox-permissions.md`](../../../docs/proxmox-permissions.md)) and run
 `deploy/seed/seed-operator.py` for flavors, a price plan and the default quota
-([`docs/development.md`](../../../docs/development.md#seed-an-operator-setup)).
+([`docs/development.md`](../../../docs/development.md#seed-an-operator-setup)),
+pointed at the port-forwards:
+
+```sh
+PROXCLOUD_API=http://localhost:8180/api/v1 \
+PROXCLOUD_TOKEN_URL=http://localhost:8190/realms/master/protocol/openid-connect/token \
+PROXCLOUD_ADMIN_PASSWORD="$(kubectl -n proxcloud get secret proxcloud-keycloak-admin -o jsonpath='{.data.admin-password}' | base64 -d)" \
+deploy/seed/seed-operator.py --provider "<provider name>"
+```
 
 Check health on the management port:
 
