@@ -5,9 +5,9 @@ description: >-
   Deploys the Go API, the customer console (ui), the operator console (admin),
   and runs PostgreSQL and RabbitMQ through their operators, with Keycloak optional.
 type: application
-version: 0.3.28
+version: 0.3.29
 # appVersion carries the v prefix — it doubles as the default image tag (see the docker workflow).
-appVersion: "v0.3.28"
+appVersion: "v0.3.29"
 kubeVersion: ">=1.25.0-0"
 keywords:
   - proxcloud
