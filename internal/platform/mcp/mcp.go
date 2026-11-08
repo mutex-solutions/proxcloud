@@ -33,6 +33,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -190,6 +191,9 @@ type param struct {
 	// fixed, when set, is always sent as this param's value and the param is left out of the
 	// input schema: an action tool cannot be talked into another action than its name says.
 	fixed any
+	// enum, when set, lists the only values the param takes (schema "enum", refused at dispatch otherwise): a tool
+	// that takes one of several actions cannot be sent one that has its own destructive tool.
+	enum []string
 }
 
 type toolDef struct {
@@ -209,7 +213,11 @@ func (h *Handler) register(srv *sdk.Server, d toolDef) {
 		if p.fixed != nil {
 			continue
 		}
-		props[p.name] = map[string]any{"type": p.typ, "description": p.desc}
+		prop := map[string]any{"type": p.typ, "description": p.desc}
+		if len(p.enum) > 0 {
+			prop["enum"] = p.enum
+		}
+		props[p.name] = prop
 		if p.required {
 			required = append(required, p.name)
 		}
@@ -297,6 +305,9 @@ func (h *Handler) dispatch(ctx context.Context, d toolDef, args map[string]any) 
 				return 0, nil, fmt.Errorf("missing required argument %q", p.name)
 			}
 			continue
+		}
+		if len(p.enum) > 0 && !slices.Contains(p.enum, fmt.Sprint(v)) {
+			return 0, nil, fmt.Errorf("argument %q must be one of %s", p.name, strings.Join(p.enum, ", "))
 		}
 		switch p.in {
 		case "path":

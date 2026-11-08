@@ -179,13 +179,15 @@ var clientComputeTools = []toolDef{
 	},
 	{
 		name:   "server_action",
-		desc:   "Run a power action on a server. action: one of REBOOT (soft), HARDREBOOT, START, STOP.",
+		desc:   "Run a power action on a server. action: one of REBOOT (soft), HARDREBOOT, START, STOP. Backups, snapshots, restores and protection have their own tools.",
 		method: "POST",
 		path:   "/api/v1/project/{id}/cloud/{resourceId}/action",
 		params: []param{
 			projectID,
 			resourceID("Server resource id (from list_servers)."),
-			{name: "action", typ: "string", desc: "One of REBOOT, HARDREBOOT, START, STOP.", required: true, in: "body"},
+			// Only the power actions: the same route also takes DELETE_BACKUP, ROLLBACK_SNAPSHOT and the like, which
+			// have their own tools with destructiveHint, and this tool is annotated non-destructive.
+			{name: "action", typ: "string", desc: "One of REBOOT, HARDREBOOT, START, STOP.", required: true, in: "body", enum: []string{"REBOOT", "HARDREBOOT", "START", "STOP"}},
 		},
 	},
 	{
@@ -289,7 +291,7 @@ var clientSandboxTools = []toolDef{
 		params: []param{
 			projectID,
 			{name: "type", in: "body", fixed: "SANDBOX"},
-			dataParam("Sandbox spec: {\"template\": string (required), \"name\": string, \"cpu\": integer, \"memoryGiB\": integer, \"gpu\": {\"model\": string, \"count\": integer}, \"timeoutSeconds\": integer (1 to maxTimeoutSeconds, default defaultTimeoutSeconds), \"env\": {string: string}, \"metadata\": {string: string} (not secret), \"network\": {\"allowOut\": [cidr], \"denyOut\": [cidr]}, \"allowPublicTraffic\": boolean, \"autoPause\": boolean (pause instead of delete at the timeout), \"autoResume\": boolean (with autoPause, traffic resumes it)}.", true),
+			dataParam("Sandbox spec: {\"template\": string (required), \"name\": string, \"cpu\": integer, \"memoryGiB\": integer, \"gpu\": {\"model\": string, \"count\": integer}, \"timeoutSeconds\": integer (1 to maxTimeoutSeconds, default defaultTimeoutSeconds), \"env\": {string: string}, \"metadata\": {string: string} (not secret), \"network\": {\"allowOut\": [cidr], \"denyOut\": [cidr]}, \"allowPublicTraffic\": boolean, \"autoPause\": boolean (pause instead of delete at the timeout; 400 where the location cannot pause), \"autoResume\": boolean (needs autoPause, traffic resumes it; 400 where the location has no wake token)}.", true),
 		},
 	},
 	action("exec_in_sandbox", "Run one command in a RUNNING sandbox and wait for it (up to timeoutSeconds, default 60, max 600). Returns {result: {stdout, stderr (each capped at 1 MiB), exitCode, truncated}}. Pass data.cmd for a shell string (run with sh -c) or data.command for an argv array; optional data.stdin.", "EXEC",

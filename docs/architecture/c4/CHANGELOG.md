@@ -19,6 +19,11 @@ and rules: [README.md](README.md#maintenance-rule).
 - A tool row can fix a param's value (`param.fixed`, left out of the input schema) and force `destructiveHint`
   (`toolDef.destructive`); `test_` tools are annotated read-only.
 - `TestMCPToolRoutesExist` (`internal/server`) matches every tool's method and path against the app router.
+- A param can list its allowed values (`param.enum`: schema `enum`, refused at dispatch otherwise); `server_action`
+  takes only REBOOT, HARDREBOOT, START and STOP.
+- The sandbox create's autoPause and autoResume checks (autoResume needs autoPause; autoPause needs snapshot storage;
+  autoResume needs the provider's wake token) moved from the E2B create to `pauseRefusal`, which
+  `createSandboxResource` runs for both creates, so the console and `create_sandbox` get them too.
 
 **Why**
 
@@ -29,6 +34,11 @@ and rules: [README.md](README.md#maintenance-rule).
 - An action tool whose action string the agent typed could be told to run another action than its name and its
   annotation say; a fixed value cannot.
 - No test tied the tool rows to the router, so a renamed route would only have shown when an agent called it.
+- `server_action` is annotated non-destructive but its route also runs DELETE_BACKUP, ROLLBACK_SNAPSHOT and
+  RESTORE_BACKUP, which have their own destructive tools; free text let an agent reach them under the wrong hint.
+- `create_sandbox` advertises autoPause and autoResume through the native create, which skipped the E2B create's
+  checks: an autoPause sandbox where pause is off would be deleted at its timeout with its files, and an autoResume
+  one with no wake token would never wake.
 
 Diagrams: none changed (no new container or component).
 
@@ -57,6 +67,7 @@ Diagrams: none changed (no new container or component).
   those documents and no upgrade rewrites them.
 
 **Diagrams updated:** c2-containers.md (PostgreSQL row)
+
 ## 2026-11-08: Sandbox pause, resume, snapshots and fork of the filesystem; autoPause and autoResume (SB7)
 
 **What changed**
@@ -110,6 +121,7 @@ Diagrams: none changed (no new container or component).
 
 **Diagrams updated:** C3 (pause and snapshots component and its flows, the proxy's wake), C4 (the fence rule for the
 portal).
+
 ## 2026-11-08: MCP gateway template for E2B's `Sandbox.create(mcp=...)` (SB8)
 
 **What changed**

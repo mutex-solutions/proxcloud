@@ -146,3 +146,43 @@ func TestAdminOperatorCheckTools(t *testing.T) {
 		}
 	}
 }
+
+// server_action is annotated non-destructive, so it takes only the power actions: DELETE_BACKUP, ROLLBACK_SNAPSHOT
+// and the like go through their own destructive tools and are refused here before any request is made.
+func TestServerActionEnum(t *testing.T) {
+	runToolCases(t, clientTools, []toolCase{
+		{"server_action", with(pr, "action", "REBOOT"), sent{"POST", actionURI, map[string]any{"action": "REBOOT"}}},
+	})
+	var d toolDef
+	for _, x := range clientTools {
+		if x.name == "server_action" {
+			d = x
+		}
+	}
+	if *toolAnnotations(d).DestructiveHint {
+		t.Fatal("server_action is expected to be annotated non-destructive")
+	}
+	called := false
+	root := chi.NewRouter()
+	root.HandleFunc("/*", func(w http.ResponseWriter, r *http.Request) { called = true })
+	h := testHandler()
+	h.SetRoot(root)
+	ctx := context.WithValue(context.Background(), credKey{}, cred{jwt: "x.y.z"})
+	for _, a := range []string{"DELETE_BACKUP", "ROLLBACK_SNAPSHOT", "RESTORE_BACKUP", "DISABLE_PROTECTION", "reboot", ""} {
+		if _, _, err := h.dispatch(ctx, d, with(pr, "action", a)); err == nil {
+			t.Errorf("server_action %q: dispatched, want refused", a)
+		}
+	}
+	if called {
+		t.Error("a refused action reached the router")
+	}
+	// Every action-route tool whose action the agent picks lists the allowed values, so none can be sent another
+	// tool's action. (search_audit_log's action is a query filter, not a route action.)
+	for _, x := range append(append([]toolDef{}, clientTools...), adminAllTools()...) {
+		for _, p := range x.params {
+			if p.name == "action" && p.in == "body" && p.fixed == nil && len(p.enum) == 0 {
+				t.Errorf("%s: free-text action param; fix it or give it an enum", x.name)
+			}
+		}
+	}
+}
