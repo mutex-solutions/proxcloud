@@ -529,6 +529,13 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 	now := time.Now().UTC()
 	for i := range rows {
 		res := &rows[i]
+		if res.Type == cloud.TypeSandboxSnapshot { // its storage ends here; the snapshot goes with teardownTemplates
+			if err := h.cloud.DeleteAndArchive(ctx, res, now); err != nil {
+				slog.Error("teardown: archive snapshot row", "project", p.ID, "snapshot", res.ExternalID, "err", err)
+				left, failed = append(left, *res), true
+			}
+			continue
+		}
 		if res.Type != cloud.TypeSandbox {
 			left = append(left, *res)
 			continue
@@ -574,7 +581,10 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 			err = ss.DeleteProjectNamespace(ctx, p.ID)
 		}
 		if err == nil {
-			err = h.teardownTemplates(ctx, ss, p.ID)
+			err = h.teardownTemplates(ctx, ss, p.ID) // custom templates and snapshots, paused sandboxes' ones too
+		}
+		if err == nil {
+			err = h.deleteProjectPaused(ctx, p.ID, svcID)
 		}
 		if err != nil {
 			slog.Error("teardown: delete sandbox namespace and templates", "project", p.ID, "serviceId", svcID, "err", err)

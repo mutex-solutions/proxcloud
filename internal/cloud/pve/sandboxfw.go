@@ -69,6 +69,10 @@ type SandboxFirewall struct {
 	// The template build bucket (docs/managed-sandbox.md §7): build pods fetch their contexts from it. Unset: none.
 	BuildStorageAddress string
 	BuildStoragePort    int
+	// The portal's API as sandbox-proxy reaches it for a wake (E2B autoResume, docs/managed-sandbox.md §8), when that
+	// address is one the private ranges drop. Unset: none (a public address needs no rule).
+	PortalAddress string
+	PortalPort    int
 }
 
 // sandboxGen is one generation of the shared rules: the group and its two IP sets.
@@ -299,7 +303,8 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 	for _, ep := range []struct {
 		what, addr string
 		port, def  int
-	}{{"registry", f.RegistryAddress, f.RegistryPort, 443}, {"build storage", f.BuildStorageAddress, f.BuildStoragePort, 443}} {
+	}{{"registry", f.RegistryAddress, f.RegistryPort, 443}, {"build storage", f.BuildStorageAddress, f.BuildStoragePort, 443},
+		{"portal", f.PortalAddress, f.PortalPort, 443}} {
 		if ep.addr == "" {
 			continue
 		}

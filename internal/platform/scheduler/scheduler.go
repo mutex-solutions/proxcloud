@@ -61,6 +61,8 @@ const (
 	SandboxTemplateAdoptSpec = "0 */5 * * * *"
 	// SandboxBuildSyncSpec — every minute at :40: finished template builds nobody polls are recorded.
 	SandboxBuildSyncSpec = "40 * * * * *"
+	// SandboxAutoPauseSpec — every minute at :05: autoPause sandboxes past their end are paused.
+	SandboxAutoPauseSpec = "5 * * * * *"
 	// SandboxRegistryPruneSpec — hourly at :17: unreferenced template images (registryPrune).
 	SandboxRegistryPruneSpec = "0 17 * * * *"
 

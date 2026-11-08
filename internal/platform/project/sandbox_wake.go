@@ -3,6 +3,8 @@ package project
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 
@@ -12,26 +14,33 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
-// sandboxWake: POST /internal/sandboxes/{sandboxID}/wake, called by sandbox-proxy when traffic reaches a sandbox that
-// has no pod (E2B autoResume). pkg/auth lets the path through without a user credential: the bearer must be the proxyWakeToken of a sandbox provider, checked before anything
-// about the sandbox is looked up. The proxy reads 200 as "resumed, look again", 404 as "not resumable" and anything
-// else as a refusal to pass on.
-//
-// Nothing is paused before pause and resume land (SB7), so every sandbox answers 404 after the token check and the
-// proxy answers the client 502 "not found" itself, as it does with wake off.
+// sandboxWake: POST /internal/sandboxes/{sandboxID}/wake {port, envdAccessToken, trafficAccessToken}, called by
+// sandbox-proxy when traffic reaches a sandbox that has no pod (E2B autoResume). pkg/auth lets the path through without
+// a user credential: the bearer must be the proxyWakeToken of a sandbox provider, checked before anything about the
+// sandbox is looked up, and then the token of the paused sandbox's own provider. The proxy reads 200 as "resumed, look
+// once more", 404 as "not resumable", 403 as a refusal to pass on and anything else as "later" (503 + Retry-After).
+// The resume itself is wakePaused (e2b_snapshots.go).
 func (h *Handler) sandboxWake(w http.ResponseWriter, r *http.Request) {
 	bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || bearer == "" || !h.anyWakeToken(r.Context(), bearer) {
 		httpx.Err(w, http.StatusUnauthorized, http.StatusUnauthorized, "invalid wake token")
 		return
 	}
-	if !sandbox.ValidID(chi.URLParam(r, "sandboxID")) {
+	id := chi.URLParam(r, "sandboxID")
+	if !sandbox.ValidID(id) {
 		httpx.Err(w, http.StatusNotFound, http.StatusNotFound, "sandbox not found")
 		return
 	}
-	// ponytail: no paused sandboxes exist yet; SB7 looks the paused one up here, checks the client's tokens against
-	// it, passes the suspension gate and resumes it.
-	httpx.Err(w, http.StatusNotFound, http.StatusNotFound, "sandbox not found")
+	var b struct {
+		Port               int    `json:"port"`
+		EnvdAccessToken    string `json:"envdAccessToken"`
+		TrafficAccessToken string `json:"trafficAccessToken"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&b); err != nil {
+		httpx.Err(w, http.StatusBadRequest, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	h.wakePaused(w, r, bearer, id, b.Port, b.EnvdAccessToken, b.TrafficAccessToken)
 }
 
 // anyWakeToken reports bearer as the proxyWakeToken of some sandbox provider. Every provider is compared, so the time

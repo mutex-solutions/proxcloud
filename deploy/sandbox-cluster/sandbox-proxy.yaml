@@ -4,7 +4,7 @@
 # control-plane routes and enforces the per-sandbox traffic access token (docs/managed-sandbox.md §4).
 #
 # Created outside this file (installer stage 56, or by hand, README):
-#   - ConfigMap sandbox-proxy-config: SANDBOX_DOMAIN; from SB7 PROXCLOUD_WAKE_URL (<portal API>/api/v1/internal/sandboxes)
+#   - ConfigMap sandbox-proxy-config: SANDBOX_DOMAIN and PROXCLOUD_WAKE_URL (<portal API>/api/v1/internal/sandboxes)
 #   - Secret sandbox-proxy-wake: PROXCLOUD_WAKE_TOKEN (the sandbox provider's secret.proxyWakeToken); optional
 #   - Secret sandbox-proxy-tls: tls.crt and tls.key, written by cert-sync on the services cluster
 #   - the Service's address: annotation metallb.io/loadBalancerIPs
