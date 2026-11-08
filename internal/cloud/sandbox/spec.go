@@ -149,8 +149,11 @@ func (s *Spec) Validate(cfg Config) error {
 		if len(v) > maxEnvValueSize {
 			return fmt.Errorf("environment variable %s is longer than %d bytes", k, maxEnvValueSize)
 		}
-		if strings.HasPrefix(k, "PROXCLOUD_") {
-			return fmt.Errorf("environment variable names starting with PROXCLOUD_ are reserved")
+		// sandbox-init drops both from the sandbox's environment (cmd/sandbox-init splitEnv)
+		for _, p := range []string{"PROXCLOUD_", "KUBERNETES_"} {
+			if strings.HasPrefix(k, p) {
+				return fmt.Errorf("environment variable names starting with %s are reserved", p)
+			}
 		}
 	}
 	if len(s.Metadata) > maxMetadataKeys {

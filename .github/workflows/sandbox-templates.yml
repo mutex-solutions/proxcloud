@@ -7,9 +7,9 @@ name: sandbox-templates
 on:
   push:
     branches: [main]
-    paths: ["deploy/templates/**", "!deploy/templates/images.yaml", ".github/workflows/sandbox-templates.yml"]
+    paths: ["deploy/templates/**", "!deploy/templates/images.yaml", "cmd/mcp-gateway/**", ".github/workflows/sandbox-templates.yml"]
   pull_request:
-    paths: ["deploy/templates/**", "!deploy/templates/images.yaml", ".github/workflows/sandbox-templates.yml"]
+    paths: ["deploy/templates/**", "!deploy/templates/images.yaml", "cmd/mcp-gateway/**", ".github/workflows/sandbox-templates.yml"]
   schedule:
     - cron: "0 3 * * 1" # weekly, for OS security updates of the bases
   workflow_dispatch:

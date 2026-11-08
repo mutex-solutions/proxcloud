@@ -57,7 +57,18 @@ data:
       TypeUrl = "io.containerd.runsc.v1.options"
       ConfigPath = "/etc/containerd/runsc.toml"
     T
+    # allow-suid (RUNSC_ALLOW_SUID, default true): gVisor honours the setuid bit, so `sudo` works in a sandbox as on
+    # E2B (the base template gives user "user" passwordless sudo, templates and agents rely on it). Without it every
+    # sudo fails ("effective uid is not 0 ... nosuid"). Effect: every setuid binary in a sandbox's image works again, so
+    # any process in it can become root of that sandbox. No new power for the tenant (envd already runs commands as root
+    # for whoever holds the sandbox's access token) and none on the node: root inside gVisor is root of gVisor's own
+    # kernel, the sentry keeps its seccomp filter and namespaces. It does let code that got in as "user" (a dependency,
+    # a prompt-injected agent) start an escape attempt from root inside the sentry. Docs: managed-sandbox.md §1.4.
+    # New sandboxes pick a change up; running ones keep their config.
     printf '[runsc_config]\n  platform = "%s"\n' "$RUNSC_PLATFORM" > /etc/containerd/runsc.toml
+    if [ "$RUNSC_ALLOW_SUID" = true ]; then
+      printf '  allow-suid = "true"\n' >> /etc/containerd/runsc.toml
+    fi
     # gVisor docs: large workloads exhaust host VMAs at the default.
     echo 'vm.max_map_count = 4194304' > /etc/sysctl.d/90-gvisor.conf
     sysctl -q -w vm.max_map_count=4194304
@@ -66,7 +77,7 @@ data:
       echo "containerd config changed, restarting containerd"
       systemctl restart containerd
     fi
-    echo "node-setup done: runsc $(dpkg-query -W -f='${Version}' runsc), platform $RUNSC_PLATFORM"
+    echo "node-setup done: runsc $(dpkg-query -W -f='${Version}' runsc), platform $RUNSC_PLATFORM, allow-suid $RUNSC_ALLOW_SUID"
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -100,12 +111,13 @@ spec:
         env:
         - {name: RUNSC_VERSION, value: "20261102.0"}
         - {name: RUNSC_PLATFORM, value: systrap}
+        - {name: RUNSC_ALLOW_SUID, value: "true"}   # sudo in sandboxes; see setup.sh. Installer: sandbox.allow_suid
         command: [sh, -c]
         args:
         - |
           set -e
           nsenter -t 1 -m -u -i -n -p -- env RUNSC_VERSION="$RUNSC_VERSION" RUNSC_PLATFORM="$RUNSC_PLATFORM" \
-            bash -c "$(cat /setup/setup.sh)"
+            RUNSC_ALLOW_SUID="$RUNSC_ALLOW_SUID" bash -c "$(cat /setup/setup.sh)"
           touch /tmp/ready
           exec sleep 2147483647
         readinessProbe:

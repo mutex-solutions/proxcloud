@@ -79,14 +79,17 @@ func TestE2BCreateRefusals(t *testing.T) {
 	for body, want := range map[string]string{
 		`{}`:                                     "templateID",
 		`{"templateID":"base","autoPause":true}`: "",
-		`{"templateID":"base","autoPause":true,"autoPauseMemory":true}`:  "memory snapshots",
-		`{"templateID":"base","autoPause":true,"autoPauseMemory":false}`: "",
-		`{"templateID":"base","autoResume":{"enabled":true}}`:            "autoResume needs autoPause",
-		`{"templateID":"base","volumeMounts":[{"name":"v"}]}`:            "volumeMounts",
-		`{"templateID":"base","mcp":{"github":{}}}`:                      "mcp",
-		`{"templateID":"base","network":{"httpsPorts":[8443]}}`:          "httpsPorts",
-		`{"templateID":"base","mcp":null,"network":{"rules":{}}}`:        "",
-		`{"templateID":"base","autoPause":false}`:                        "",
+		`{"templateID":"base","autoPause":true,"autoPauseMemory":true}`:   "memory snapshots",
+		`{"templateID":"base","autoPause":true,"autoPauseMemory":false}`:  "",
+		`{"templateID":"base","autoResume":{"enabled":true}}`:             "autoResume needs autoPause",
+		`{"templateID":"base","volumeMounts":[{"name":"v"}]}`:             "volumeMounts",
+		`{"templateID":"mcp-gateway","mcp":{"time":{}}}`:                  "",
+		`{"templateID":"mcp-gateway","mcp":["time"]}`:                     "mcp must be an object",
+		`{"templateID":"mcp-gateway","mcp":"time"}`:                       "mcp must be an object",
+		`{"templateID":"mcp-gateway","autoPause":true,"mcp":{"time":{}}}`: "",
+		`{"templateID":"base","network":{"httpsPorts":[8443]}}`:           "httpsPorts",
+		`{"templateID":"base","mcp":null,"network":{"rules":{}}}`:         "",
+		`{"templateID":"base","autoPause":false}`:                         "",
 	} {
 		var b e2bCreateBody
 		if err := json.Unmarshal([]byte(body), &b); err != nil {

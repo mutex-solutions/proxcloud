@@ -149,6 +149,7 @@ pc_defaults:
     pool: proxcloud-sandbox
     token: sandbox               # capmox@pve!<token>, the cluster's CAPMOX credential; secret in generated/token-<token>
     runtime_image: ""            # envd + sandbox-init for node-setup; default <images.registry>/proxcloud-sandbox-runtime:<release>
+    allow_suid: true             # runsc allow-suid: sudo works in sandboxes, as on E2B (docs/managed-sandbox.md §1.4)
     storage: ""                  # boot disks; default: services.storage
     iso_storage: ""              # bootstrap ISOs, node-local only; default: services.iso_storage
     network:

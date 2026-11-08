@@ -337,8 +337,10 @@ func (b *e2bCreateBody) e2bRefusal() string {
 		return "autoResume needs autoPause"
 	case len(b.VolumeMounts) > 0:
 		return "volumeMounts are not supported"
-	case len(b.MCP) > 0 && string(b.MCP) != "null":
-		return "mcp is not available at this location yet"
+	case len(b.MCP) > 0 && string(b.MCP) != "null" && b.MCP[0] != '{':
+		// The SDK starts the gateway inside the sandbox itself (template mcp-gateway); the API only checks the shape.
+		// Never log or store it: it holds the tenant's MCP server keys.
+		return "mcp must be an object"
 	}
 	return b.Network.unsupported()
 }
