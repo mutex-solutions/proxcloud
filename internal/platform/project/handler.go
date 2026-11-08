@@ -102,6 +102,8 @@ type Handler struct {
 	sbKeys *pgdoc.Store
 	// sbTemplates holds the projects' custom templates and their builds (SetSandboxTemplates; nil = off).
 	sbTemplates *pgdoc.Store
+	// sbPaused holds the paused sandboxes (SetSandboxPaused; nil = pause and resume off).
+	sbPaused *pgdoc.Store
 }
 
 // SetSandbox wires the sandbox service factory (enables sandbox provisioning and the SANDBOX

@@ -519,8 +519,8 @@ The cache is the `cloudResource` document (`internal/cloud/resource.go`). `type`
 is the discriminator for the free-form `data` sub-document. The types produced
 today are `SERVER`, `VOLUME`, `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`,
 `FLOATING_IP`, `LOAD_BALANCER`, `BUCKET`, `SHARE`, `DNS_ZONE`, `KUBERNETES_CLUSTER`,
-`DATABASE_CLUSTER` and `SANDBOX` (`SANDBOX_SNAPSHOT` is declared and billable, but
-nothing writes one yet). `resource.go` still
+`DATABASE_CLUSTER`, `SANDBOX` and `SANDBOX_SNAPSHOT` (a paused sandbox's or an E2B
+snapshot's stored filesystem). `resource.go` still
 declares the wider type list of the previous backend; nothing produces the
 other types.
 

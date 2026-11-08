@@ -64,6 +64,12 @@ func (h *Handler) SyncSandboxBuilds(ctx context.Context) {
 			// A missing pod means failure only once the build is past its deadline: until then it may be about to be
 			// recorded by a poll.
 			gone := bl.CreatedAt != nil && time.Since(*bl.CreatedAt) > sandbox.BuildTimeout+5*time.Minute
+			if t.Kind == "snapshot" { // its result also starts the storage billing (an API restart lost the follower)
+				if _, err := h.finishSnapshot(ctx, c, t, bl, gone); err != nil {
+					slog.Warn("build sync: snapshot", "template", t.ID, "err", err)
+				}
+				continue
+			}
 			h.syncBuildPod(ctx, c, t, bl, gone)
 		}
 	}
@@ -337,6 +343,17 @@ func (h *Handler) registryLive(ctx context.Context, host string, svcs []*sandbox
 			if b.Status == sandbox.BuildWaiting || b.Status == sandbox.BuildBuilding {
 				add(fmt.Sprintf("%s/t/%s/%s:%s", host, t.ProjectID, t.ID, b.BuildID))
 			}
+		}
+	}
+	// A paused sandbox runs from nothing while paused: the image it ran (a resumed one's snapshot, which no template
+	// record names any more) comes back with it.
+	if h.sbPaused != nil {
+		var paused []pausedSandbox
+		if err := h.sbPaused.Find(ctx, pgdoc.M{}, &paused); err != nil {
+			return nil, err
+		}
+		for _, p := range paused {
+			add(sandbox.ImageOfSaved(p.Saved))
 		}
 	}
 	if err := readClusters(); err != nil {

@@ -841,7 +841,8 @@ inferred from read/write usage.
 | `csiGatewayCredential` | yes | A tenant cluster's CSI gateway credential (`csi@proxcloud!<clusterId>`). |
 | `csiTask` | yes | A PVE task the CSI gateway started for a cluster, so only that cluster may read its UPID. |
 | `sandbox_api_keys` | yes | A project's E2B sandbox API key: `{id: sha256(key), projectId → project, sub (its creator) → users, name, hint, lastUsedAt}` (the key itself is shown once). |
-| `sandbox_templates` | yes | A project's custom sandbox template and its builds (the E2B template API). |
+| `sandbox_templates` | yes | A project's custom sandbox template and its builds (the E2B template API), and its snapshots (`kind: snapshot`). |
+| `sandbox_paused` | yes | A paused sandbox: its saved custom resource and the snapshot it resumes from (E2B pause, autoPause, autoResume). |
 | `shedLock` | (lock pkg) | Cross-fleet job lock so a scheduled job runs once across pods: `{_id: lock name (the id column), lockUntil, lockedAt, lockedBy}`. Claimed in one statement — `INSERT … ON CONFLICT (id) DO UPDATE … WHERE lockUntil ≤ now` (a live lock fails the WHERE guard → 0 rows → not acquired). |
 
 ---

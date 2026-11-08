@@ -269,6 +269,8 @@ func run() error {
 	projectH.SetSandboxKeys(pg.C("sandbox_api_keys"))
 	// Custom templates and their builds (the E2B v3 template API).
 	projectH.SetSandboxTemplates(pg.C("sandbox_templates"))
+	// Paused sandboxes (E2B pause, autoPause, autoResume): the saved CR and the snapshot each one resumes from.
+	projectH.SetSandboxPaused(pg.C("sandbox_paused"))
 	// Proxmox VE — enables proxmox provisioning (project pool) + the VM write surface.
 	holderLocks := lock.New(pg)
 	pveWithHolderLock := func(es *externalservice.ExternalService) (*pve.Service, error) {
@@ -822,6 +824,10 @@ func run() error {
 				projectH.SyncSandboxBuilds(r.Context())
 				jobResult(w, map[string]any{"ran": "sandbox-builds"}, nil)
 			},
+			"run-sandbox-autopause": func(w http.ResponseWriter, r *http.Request) {
+				projectH.AutoPauseSandboxes(r.Context())
+				jobResult(w, map[string]any{"ran": "sandbox-autopause"}, nil)
+			},
 			"run-registry-prune": func(w http.ResponseWriter, r *http.Request) {
 				// ?grace=10m lowers the age floor (default 24h) for a drill; the scheduled run always keeps 24h.
 				grace := project.RegistryPruneGrace
@@ -1210,6 +1216,8 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 		{Name: "sandboxTemplateAdopt", Spec: scheduler.SandboxTemplateAdoptSpec, AtMostFor: 10 * time.Minute, AtLeastFor: time.Minute, Fn: sandboxes.AdoptSandboxImages},
 		// Template builds nobody polls: record their result before the build pod is cleaned up.
 		{Name: "sandboxBuildSync", Spec: scheduler.SandboxBuildSyncSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 20 * time.Second, Fn: sandboxes.SyncSandboxBuilds},
+		// E2B autoPause: sandboxes past their end are paused (filesystem snapshot), not deleted.
+		{Name: "sandboxAutoPause", Spec: scheduler.SandboxAutoPauseSpec, AtMostFor: 30 * time.Minute, AtLeastFor: 20 * time.Second, Fn: sandboxes.AutoPauseSandboxes},
 		// Unreferenced template images (off unless a sandbox provider sets registryPrune).
 		{Name: "sandboxRegistryPrune", Spec: scheduler.SandboxRegistryPruneSpec, AtMostFor: 30 * time.Minute, AtLeastFor: 5 * time.Minute, Fn: sandboxes.PruneSandboxRegistry},
 		{Name: "pveTaskPoll", Spec: scheduler.PVETaskPollSpec, AtMostFor: time.Minute, AtLeastFor: 10 * time.Second, Fn: func(ctx context.Context) {

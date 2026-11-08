@@ -90,8 +90,10 @@ func TestBuildCREnvd(t *testing.T) {
 	if strings.Contains(string(d), "tok") || strings.Contains(string(d), "PROXCLOUD_") {
 		t.Errorf("payload leaks internals: %s", d)
 	}
-	if bad := (Spec{Template: "py", Env: map[string]string{"PROXCLOUD_X": "1"}}); bad.Validate(cfg) == nil {
-		t.Error("PROXCLOUD_ env names must be reserved")
+	for _, k := range []string{"PROXCLOUD_X", "KUBERNETES_SERVICE_HOST"} {
+		if bad := (Spec{Template: "py", Env: map[string]string{k: "1"}}); bad.Validate(cfg) == nil {
+			t.Errorf("%s: PROXCLOUD_ and KUBERNETES_ env names must be reserved", k)
+		}
 	}
 }
 

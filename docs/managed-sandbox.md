@@ -19,8 +19,10 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 > what of E2B does not work is in [e2b-compat.md](e2b-compat.md). SB6a (section 6) adds the sandbox registry: Zot on
 > the services cluster with its blobs in the object store, one pull account per project, the built-in images copied in
 > by digest and pre-pulled on every node. SB6b (section 7) adds custom templates built with the E2B SDKs (a build pod
-> per build, a build account per project, presigned contexts) and the pruning of unreferenced images. Not yet: snapshots
-> and pause (SB7, so the wake endpoint has nothing to resume yet), MCP gateway (SB8), GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
+> per build, a build account per project, presigned contexts) and the pruning of unreferenced images. SB7 (section 8)
+> adds pause, resume, snapshots and fork of a sandbox's filesystem, autoPause and autoResume through the wake endpoint.
+> SB8 (section 9) adds the `mcp-gateway` template for `Sandbox.create(mcp=...)`: the gateway and its 47-server catalog,
+> each server's keys from the tenant only. Not yet: GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
 > and decisions: the sandbox plan (owner document, not in this repository).
 
 ## 0. SB0 lab spike (2026-11-07)
@@ -354,6 +356,30 @@ in `node-setup.yaml` was already there unchanged. Results:
 - IPv6 check: passes on the worker; with a ULA address added on a dummy interface of the worker, node-setup refused the
   node (CrashLoopBackOff, the address in its log) and the check failed; with it removed, both passed again.
 
+### 1.4 sudo in sandboxes: runsc `allow-suid`
+
+`node-setup` writes `allow-suid = "true"` into the nodes' runsc config unless `RUNSC_ALLOW_SUID` is `false`
+(installer: `sandbox.allow_suid`, default `true`). Without it gVisor ignores the setuid bit, and the SB8 lab drill saw
+every `sudo` in the base template fail with "effective uid is not 0 ... nosuid"; the base template gives user `user`
+passwordless sudo, and E2B templates and agents expect it to work. The earlier implementation runs runsc the same way
+(its owner approved it for E2B parity). For ProxCloud it is the default chosen pending the owner's decision.
+
+What it changes:
+
+- Every setuid binary in a sandbox's image works, so any process in the sandbox can become root of that sandbox.
+- The tenant gains nothing: envd already runs commands as root for whoever holds the sandbox's access token, and
+  `startAsRoot` templates start as root.
+- The node gains no exposure from root alone: root inside gVisor is root of gVisor's own kernel; the sentry keeps
+  its seccomp filter and namespaces, and the guardrail, the VM firewall and the isolation rules see the same packets.
+- What it does widen: code that got in as `user` (a compromised dependency, a prompt-injected agent) can start an
+  escape attempt from root inside the sentry instead of from an unprivileged user.
+- It is a node-wide runsc setting, so it also applies to the template build and snapshot pods on the sandbox nodes,
+  not only to sandboxes. That widens nothing there: the build (kaniko) already runs as root.
+
+Setting it off: `sandbox.allow_suid: false` and stage 55, or `RUNSC_ALLOW_SUID=false` in the DaemonSet; node-setup
+rewrites `/etc/containerd/runsc.toml` and restarts containerd. New sandboxes pick the change up; running ones keep
+theirs.
+
 ## 2. Layer 1: the VM firewall on the workers (SB2b)
 
 Layer 0 (§1.2) sees routed traffic only. Layer 1 sees every frame a worker sends or receives, frames switched inside
@@ -631,7 +657,7 @@ Ready: the minutely `sandboxStateSync` (at :10, before the charge at :30), the c
 ended row is `DELETED` with its end and archived; the charge rates archived rows of the cycle to their end. A
 sandbox can start and end between two reads: a row that ends without ever being read Ready is billed from the last
 read that saw it pending (`seenPendingAt`, else its create, marked `runningSinceAssumed`), so a short sandbox is
-never free and one that never started pays at most about a minute. `sandbox_snapshot` is per stored GB-hour (`size_gb`); nothing writes one before SB7. The seed's rules for both
+never free and one that never started pays at most about a minute. `sandbox_snapshot` is per stored GB-hour (`size_gb`), written by pause and snapshot (section 8.4). The seed's rules for both
 are named `PLACEHOLDER ...` until a rate is signed. The worker VMs sit in the platform's pool and bill nobody.
 
 ### 3.3 Quota (D10)
@@ -649,7 +675,8 @@ Create, `EXEC` and `SET_TIMEOUT` pass `refuseNewUsage` (`cloudAction`'s allow-li
 profile's suspension and the walk that disables its projects. List, `GET_LOGS` and delete stay open. On a suspension
 (and an operator's disable through the same walk) `billingCloudSuspender` deletes every running sandbox of the
 project and ends every row (also one whose sandbox was already gone, since a DISABLED project is not synced);
-snapshots are kept (none exist before SB7); a resume brings none back. An operator's disable deletes them once, with
+paused sandboxes and snapshots are kept and keep billing, but none can be resumed, forked or woken (section 8.5); a
+resume of the profile brings none back by itself. An operator's disable deletes them once, with
 no retry pass. A create already past the gate when the profile is suspended can survive until the next dunning pass;
 it is billed. A provider set `DISABLED` stops new usage (create, `EXEC`, `SET_TIMEOUT`) but deletes nothing.
 
@@ -834,10 +861,9 @@ List so browsers treat each host as its own site.
 autoResume) when traffic finds no pod. It is public in `pkg/auth`; the bearer must be some sandbox provider's
 `secret.proxyWakeToken`, compared before anything about the sandbox is read. Stage 56 generates the token
 (`generated/sandbox-wake-token`, put it into the sandbox provider's `secret.proxyWakeToken`) and gives it to the proxy,
-but not the portal's address yet: nothing is paused before SB7, so stage 56 leaves `PROXCLOUD_WAKE_URL` unset and the
-proxy answers 502 "not found" for an unknown host at once, without calling the portal. SB7 sets it. With it set, the
-endpoint answers 404 for a sandbox it cannot resume, and a proxy that cannot reach the portal answers 503 with
-`Retry-After` after five seconds.
+and, from SB7 on, the portal's address as `PROXCLOUD_WAKE_URL` (section 8.3). Without it the proxy answers 502 "not
+found" for an unknown host at once, without calling the portal. With it, the endpoint answers 404 for a sandbox it
+cannot resume, and a proxy that cannot reach the portal answers 503 with `Retry-After` after five seconds.
 
 `GET_ACCESS` (native action, a read) returns the sandbox's host pattern `{port}-<id>.<domain>` and its traffic token
 (and envd's token once envd runs, SB5), read from the live CR: the tokens are never on the cache row or in the
@@ -953,7 +979,15 @@ installer stage 60 sets both when `sandbox.domain` is set), every sandbox mounts
 and runs `/.proxcloud/sandbox-init` as PID 1: it creates the template's user if the image has none, starts envd
 (`-isnotfc`, port 49983), posts envd's `/init` over localhost with the sandbox's env, user, workdir and access token,
 runs the template's start command (as root with `startAsRoot`), marks the pod ready once the ready command exits 0,
-restarts envd if it dies, and relays ports bound to localhost to the pod address. A restarted envd has no access token
+restarts envd if it dies, and relays ports bound to localhost to the pod address. The sandbox's env (envd's own and
+the defaults it gives every process) is the image's ENV plus the tenant's `envVars`, without the `PROXCLOUD_*` control
+variables and without the `KUBERNETES_*` ones the kubelet puts into every container even with service links off (the
+SB8 drill found `KUBERNETES_SERVICE_*` in every process); the API refuses `envVars` with either prefix. sandbox-init's
+own `/proc/1/environ` still holds both sets as the kubelet passed them (a process cannot rewrite its start
+environment); it is readable by root in the sandbox, which with sudo includes `user`, and holds nothing that root there
+does not already have: envd's access token, which root can use anyway, and the API server's cluster address, which the
+guardrail blocks. A restarted
+envd has no access token
 until its `/init`, and envd without a token lets every request through, so sandbox-init first drops the ready marker
 (the readiness probe turns the pod NotReady and sandbox-proxy routes only to Ready pods), waits 5 s (probe period plus
 the proxy's 2 s lookup cache), starts envd, and puts the marker back only once `/init` succeeded. The two binaries come
@@ -1287,3 +1321,232 @@ policy, the registry CA and both Roles, and records the bucket (endpoint, addres
   same objects by hand; nothing of the registry or the build namespace was left on either cluster. These paths have unit
   tests only (build pod shape and accounts, the account sync's rules and Secrets, the OCI client against a fake
   registry, the S3 store against a fake S3, the fence rule, the OpenAPI parity).
+
+## 8. Pause, resume, snapshots and fork (SB7)
+
+Ported from the earlier implementation (`internal/platform/project/e2b_snapshots.go`, `cmd/sandbox-init/snapshot.go`).
+Only the filesystem is kept: gVisor in a pod has no microVM snapshot, so a resume is a cold boot (files back; processes,
+memory and open connections not). A request for memory (`memory: true` on pause or snapshot, `autoPauseMemory: true`
+at create) answers 400; it is never served as a filesystem pause, since the caller asked to keep processes.
+
+### 8.1 A snapshot
+
+A snapshot is a template of the project (as in E2B: `Sandbox.create(snapshotID)`, `DELETE /templates/{id}`), a record in
+`sandbox_templates` with `kind: snapshot`; a pause's or a fork's is `internal` (hidden from the template lists and from
+the 20-template limit). Taking one:
+
+1. `sandbox-init -snapshot` runs in the sandbox over exec and writes a gzip tar of every file, directory and symlink
+   whose ctime is after the boot marker sandbox-init wrote before anything else ran (`/proc`, `/sys`, `/dev`, `/run`
+   and the platform's mount left out). Files deleted from the image are not recorded (no whiteouts): they come back
+   after a resume.
+2. The portal streams it into the provider's build bucket (one PUT up to 16 MiB, else multipart, `UNSIGNED-PAYLOAD`)
+   and reads it as a gzip tar while it uploads. A capture that is not a whole archive fails the call while the sandbox
+   still runs.
+3. A pod in `sbx-build` fetches it with a presigned GET and `crane append`s it as one layer onto the image the sandbox
+   ran, pushing `<templateRegistry>/<project>/<template>:<build>` with the project's build account (section 7.2). No
+   customer code runs in that pod. It requests 2 GiB of disk and may use 30 GiB: a 30 GiB request schedules on no
+   30 GB worker. `crane append` keeps the base image's manifest type, so Zot accepts Docker manifests
+   (`compat: [docker2s2]`).
+
+The capture (exec and upload, seconds) happens in the request; for a named snapshot the assembly finishes in the
+background, and whoever sees its pod finish first records it (the request's follower, a waiting resume or create, the
+build status read, or job `sandboxBuildSync` after an API restart). The layer in the bucket goes with the pod. The size
+billed is the size of the archive as uploaded, counted while it is checked. A named snapshot taken again keeps only its
+newest ready build: the previous one leaves the record, and the registry prune deletes its image (section 7.4).
+
+### 8.2 Pause, resume, fork
+
+- **Pause** (`POST /sandboxes/{id}/pause`, or autoPause): snapshot, wait until its image is pushed (up to 15
+  minutes, also if the client leaves), save the sandbox's CR (tokens, env, metadata, network) in `sandbox_paused`,
+  delete the sandbox (its row ends as at a delete). Until the image is ready the sandbox keeps running and billing; a
+  failed assembly fails the pause with 500 and the sandbox runs on, so a pause never loses files it answered 204 for.
+  Files written after the capture and before the delete are not kept. `GET /sandboxes`, `GET /sandboxes/{id}` and
+  `state=paused` show it as paused.
+- **Resume** (`POST /sandboxes/{id}/resume`, `connect` of a paused sandbox, or the wake endpoint): gives up a minute
+  before its lease ends, so a second caller never takes over a resume still starting the sandbox; recreates the sandbox under the same id and tokens from the snapshot image, with the
+  provider's limits and the project quota counted as for a create, and starts a new `sandbox` row. The paused record,
+  the snapshot record and its storage row go; the image stays while the sandbox runs from it (the registry prune keeps
+  the images of running and paused sandboxes).
+- **Fork** (`POST /sandboxes/{id}/fork`, at most 10): one snapshot of a running sandbox, then that many sandboxes with
+  new ids and tokens, same template, size, env, metadata and network, counted against the quota before anything starts.
+- **Kill** of a paused sandbox deletes its record and its snapshot.
+
+**Lease serialisation.** Every transition of one id takes a Postgres transaction lock on that id (also before the
+record exists) and writes `state` (`pausing`, `resuming`) with `leaseUntil` (10 and 20 minutes). A resume that finds
+another resume under way waits for it and answers with the same sandbox; one that finds a pause under way waits up to
+a minute; a pause or kill that finds either answers 409. An expired lease is a crashed caller's: the next caller looks
+at the cluster (the sandbox runs: the pause is dropped; it does not: the record counts as paused again) and goes on.
+
+### 8.3 autoPause and autoResume
+
+A create with `autoPause` marks the sandbox; job `sandboxAutoPause` (every minute) pauses those past their end, four at
+a time since each waits for its image. Their
+cluster deadline is the end plus 15 minutes, so a pause that fails leaves the sandbox running until then, when the
+cluster removes it. A create with `autoPause` answers 400 where the provider has no template registry and build bucket,
+and `autoResume` (with `autoPause`) where it has no `proxyWakeToken`.
+
+`autoResume` goes through the wake endpoint (section 4.4): when traffic for a paused sandbox reaches `sandbox-proxy`, it
+calls `POST <PROXCLOUD_WAKE_URL>/<id>/wake` with the provider's wake token and the client's envd and traffic tokens.
+The portal accepts the call only if the bearer is the wake token of the paused sandbox's own provider (checked first,
+401) and the client's token is the sandbox's own (403) (envd's for the envd port, the traffic token for other ports when it has one), so only
+someone who could talk to the sandbox can wake it. Stage 56 sets `PROXCLOUD_WAKE_URL` (`sandbox.proxy.wake_url`,
+default `<API URL>/api/v1/internal/sandboxes`) and rolls the proxy when its config or token changes; the proxy must
+resolve that name and trust its certificate. Stage 60 gives the Proxmox provider `config.sandbox.portal`
+(`sandbox.proxy.wake_address`, default the first management host, on the API's port; `none` for a public address), and
+the workers' VM firewall opens that one address and port (`SandboxFirewall.PortalAddress`).
+
+### 8.4 Billing
+
+A stored snapshot is a `SANDBOX_SNAPSHOT` row (`kind` `pause` or `snapshot`, `sizeGB` of the uploaded layer) from the
+moment its image is ready until a resume, a kill of the paused sandbox, `DELETE /templates/{id}` or the project's
+teardown ends it. The charge rates `size_gb` per GB-hour (`sandbox_snapshot`, `hour` rules), each hour once across
+charges. A named snapshot taken again keeps its row and start; its size is that of the one image it keeps. The time a resumed
+or forked sandbox runs bills as `sandbox`, on a new row from the resume.
+
+### 8.5 Suspension and teardown (D9)
+
+Suspension deletes running sandboxes only (section 3.4). Paused sandboxes and snapshots stay and keep billing their
+storage. Resume, `connect` of a paused sandbox, fork and snapshot pass the usage gate (409 for a DISABLED project, 403
+for a suspended profile); the wake answers 403, which the proxy passes on, rather than a retry the client would repeat
+for as long as the suspension lasts. Pause stays open: it lowers usage.
+
+Teardown archives the project's snapshot rows, deletes its templates and snapshots with their images under
+`t/<project>/` (section 7.4) and forgets its paused sandboxes.
+
+### 8.6 Measured on the lab (2026-11-08)
+
+- An earlier attempt of this phase ran on the SB0 sandbox cluster with a Zot and a bucket of its own in a namespace of
+  that cluster (not stage 55): a named snapshot was captured, appended and pushed, and came back ready with a digest.
+  The pause of a sandbox with a 191 MB capture never assembled: `crane append` answered `reading layer: unexpected
+  EOF` on every retry until the pod's deadline, so that paused sandbox could not come back. Where the archive was cut
+  is not known (the capture's logs went with the stack); the portal now checks the archive while it uploads, and a
+  pause deletes the sandbox only once its image is pushed.
+- Not run on the lab: resume, fork, autoPause, the wake through `sandbox-proxy`, and a pause with the capture check.
+  The workers were in use by another drill, and two portals fencing one sandbox pool roll each other's firewall back.
+  These paths have integration tests on Postgres with an in-memory cluster and a fake bucket (another project cannot
+  pause, resume, fork, connect or wake; a suspended profile keeps the snapshot and is refused resume and wake; a cut
+  capture or a failed assembly pauses nothing and leaves the sandbox running; a named snapshot taken again keeps and
+  bills one image; concurrent connects start one sandbox; teardown leaves no record, template or row), a test on
+  the real charge driver (a 2 GB snapshot bills 0.30 for three hours at 0.05 per GB-hour, 0.40 after a fourth, nothing
+  more after the resume), and unit tests (the capture's archive, the quota on resume, the pod's disk request, the
+  portal rule).
+
+## 9. MCP gateway (SB8)
+
+`Sandbox.create(mcp={...})` in the E2B SDKs starts a sandbox from the template `mcp-gateway`, runs
+`mcp-gateway --config '<json>'` in it as root with a token of its own (`GATEWAY_ACCESS_TOKEN`), and then talks MCP
+(streamable HTTP) to `https://50005-<id>.<domain>/mcp` with that bearer (`get_mcp_url()`, `get_mcp_token()`). The
+portal is not on that path: it only accepts `mcp` as an object on create and never stores or logs it, since it holds
+the tenant's server keys. The section number follows the phases (§8 is SB7's).
+
+```
+SDK ──POST /e2b/sandboxes {templateID: mcp-gateway, mcp: {...}}──► portal (shape check only, mcp dropped)
+ ├─envd: mcp-gateway --config '<json>' (root, GATEWAY_ACCESS_TOKEN) ── writes /etc/mcp-gateway/{config.json,.token} 0600
+ │        └─ mcp-gateway serve (own session, log /var/log/mcp-gateway) ── per server: stdio process or remote client
+ └─https://50005-<id>.<domain>/mcp (Bearer token) ──► sandbox-proxy ──► gateway: tools "<server>-<tool>"
+```
+
+### 9.1 What runs in the sandbox
+
+- **`cmd/mcp-gateway`** (ported from EE): resolves the config against the embedded catalog, fills each server's
+  placeholders (`{apiKey}`, `{paths...}`) from the tenant's values, starts package servers as child processes and
+  connects to remote ones (streamable HTTP or SSE, headers filled the same way), and offers every upstream tool as
+  `<catalog name>-<tool>`. `/health` answers 503 while starting, 500 with the cause when a server failed, 200 once all
+  are up; `--config` waits up to 50 s for that (under the SDK's 60 s command limit). `github/<owner>/<repo>` keys clone
+  that repository and run its `run_cmd`, as on E2B.
+- **The catalog** (`cmd/mcp-gateway/catalog.json`, regenerated by `gencatalog.py` from E2B's SDK spec and Docker's MCP
+  catalog): 47 servers. Remote ones need nothing in the image; package ones (`fetch`, `time`, `git`, `filesystem`,
+  `memory`, `sequentialthinking`, `duckduckgo`, `wikipedia`, `markitdown`, `desktopCommander`, `notion`, `brave`,
+  `exa`, `firecrawl`, `tavily`, `mongodb`, `perplexityAsk`) are baked into the template, pinned. E2B servers that only
+  exist as Docker images are not offered; an unknown name fails the create.
+- **The template** (`deploy/templates/mcp-gateway`, built by `build.sh` and the `sandbox-templates` workflow, which
+  now also runs on changes under `cmd/mcp-gateway/`): the base template, the gateway binary, the npm servers under
+  `/opt/mcp/npm` and the Python ones as uv tools under `/opt/mcp/bin`. The servers run on a Node 22 of their own
+  (`/opt/mcp/node`, first on the servers' PATH): the base image's Node 20.9 cannot run `brave`, `firecrawl` or `mongodb`
+  (found on the lab, below); the sandbox user's `node` stays the base's. The build fails unless every package server
+  starts and answers MCP `initialize` and `tools/list` (`mcp-gateway pull`, with placeholder values), not only when a
+  binary is missing.
+- **Restart**: the template's start command is `mcp-gateway boot`, which restarts the gateway from the saved config,
+  so a sandbox that comes back after a resume or fork (SB7: processes are gone, files stay) serves the same tools.
+
+Provider template entry (as stage 60 would write it once `mcp-gateway` is pinned in `deploy/templates/images.yaml` by
+the workflow; until then an operator adds it with the registry's copy):
+
+```json
+"mcp-gateway": {"image": "<registry>/library/sandbox-mcp-gateway:<tag>@sha256:<digest>", "cpu": 2, "memoryGiB": 4,
+                "startCmd": "mcp-gateway boot", "startAsRoot": true, "user": "user", "workdir": "/home/user"}
+```
+
+With the pin in `images.yaml` the registry stage copies it into Zot and the template prepull pulls it on every node,
+like every other built-in image (section 6.3): the image is about 6 GB, which a cold pull cannot fit into the create's
+50 s.
+
+### 9.2 Where a server's secrets come from
+
+Only from the tenant. A server's key is a field of the tenant's `mcp` config (`{"brave": {"apiKey": "..."}}`), filled
+into that server's environment, command or headers by the gateway inside the sandbox; a missing required field fails
+the create (`brave: missing "apiKey"`), and nothing falls back to a platform value:
+
+- the image holds no account or key of any server (the catalog has placeholders only);
+- the portal drops `mcp` after the shape check: it is not in the sandbox row, the Sandbox CR, the database or the log;
+- a pause, snapshot or fork (section 8) captures the files changed since boot, `/etc/mcp-gateway/config.json` and
+  `.token` among them: the keys are then in the snapshot image under the project's own `t/<project>/` in the registry
+  (readable with that project's accounts, besides the registry's `gc` and `admin`; section 6.2) and, until the
+  assembly ends, in the capture under the project's prefix in the build bucket. A snapshot is a template of its project
+  and never public: another project cannot list, resume, fork or start from it. A fork keeps the source's keys and
+  gateway bearer (it gets new envd and traffic tokens);
+- the sandbox gets no platform credential to leak: no service account token, no service links, and `sandbox-init`
+  strips every `PROXCLOUD_` and `KUBERNETES_` variable before envd and its children (section 5.3);
+- each package server's environment holds only what it needs: its own catalog env (or a `github/...` server's `envs`), `PATH` with the
+  servers' directories first, and an allowlist of the gateway's environment (`HOME`, `USER`, `LOGNAME`, `LANG`,
+  `LC_ALL`, `TZ`, `TERM`, `TMPDIR`, the proxy variables, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`).
+  Its environment carries neither the gateway's bearer (`GATEWAY_ACCESS_TOKEN`, which the SDK puts in the gateway's
+  environment) nor another server's key nor the sandbox's other `envVars`. This is environment hygiene, not a
+  boundary between servers: every package server runs as root, as the gateway does, so one that wants to can read
+  `/etc/mcp-gateway/config.json` (all servers' keys), `/etc/mcp-gateway/.token` and `/proc/<gateway pid>/environ`.
+  The servers are the ones the tenant picked, in the tenant's sandbox; running them under a uid of their own is the
+  step that would make it a boundary (not done);
+- a remote server's headers go to that server's own scheme and host only: a redirect to another host (or to plain
+  http) is followed without them;
+- the config and the gateway token are root-only files (0600) in the sandbox, out of reach of `user` code without
+  sudo; the gateway's own process does not carry the keys in its environment.
+
+Vendor telemetry is off by default: every server starts with `DO_NOT_TRACK=1`, `DESKTOP_COMMANDER_DISABLE_TELEMETRY=1`,
+`MDB_MCP_TELEMETRY=disabled` and `ORT_DISABLE_TELEMETRY=1` (desktopCommander sends analytics and mongodb telemetry
+unless told not to; markitdown's onnxruntime writes a device id and a session file). The build check runs the servers
+with a throwaway `HOME` and `TMPDIR`, so the image carries no state from it (desktopCommander's client id, mongodb's log,
+onnxruntime's device id), and the build fails if any of it is left. Not covered by the switches: desktopCommander
+fetches its feature flags from desktopcommander.app every 5 minutes from every sandbox that runs it (no client id is
+sent), and its npm postinstall sends an install event during the image build.
+
+A tenant's keys are as safe as anything else in their sandbox: whoever runs code in it as root can read them, which is
+the tenant's choice. `tests/e2b-compat/mcp.py` checks the keyed path with a dummy key (the server has it, no platform
+variable or gateway bearer is in its environment, no token is mounted, a missing key fails the create).
+
+### 9.3 Measured on the lab (2026-11-08)
+
+A compose stack on this branch (`pc-sb8`, scheduler off), its own Proxmox provider (pool prefix `pc8-`, the SB0
+workers' pool, the registry address in `config.sandbox.registry`, an entry appliance VM of its own) and a sandbox
+provider with envd under a lab domain and the templates `base` and `mcp-gateway`, both pinned by digest on a Zot of
+this drill (namespace `sb8-registry` on the services cluster, own MetalLB address, RustFS bucket with its own service
+user, the account sync limited to this provider's namespaces with `SERVICE_ID`), deployed from stage 55's own template.
+
+- **Registry**: the runtime, proxy, base and mcp-gateway images (the last about 6 GB) copied in with `skopeo` as the
+  stage does, recorded by digest. Attaching the provider to two projects made their namespaces; the account sync wrote
+  each one's `sandbox-template-pull` within 30 s. With project A's account `library/sandbox-mcp-gateway` resolved to the
+  pushed digest, anonymous reads were refused and a write to `library/` was denied. The 6 GB push was reset once by the
+  registry's address mid-blob and went through on skopeo's retry (both pushes).
+- **The gateway image** (the same image, run under Docker on the workstation as the SDK drives it: `--config` as root
+  with a token, then MCP over HTTP; runc, not gVisor): with `deepwiki` (remote), `fetch`, `time` and `brave` (dummy key)
+  it was up in about 1 s, `tools/list` answered 15 tools named `<server>-<tool>`, `time-get_current_time` and
+  `deepwiki-read_wiki_structure` ran, no bearer got 401, the token file is 0600, `brave`'s process had the tenant's key
+  and the gateway's did not, the key was in no file but the 0600 config, `{"brave": {}}` failed with
+  `missing "apiKey"`, an unknown name with "not available on ProxCloud", and after a container restart `mcp-gateway boot`
+  served the same tools. **Found and fixed:** on the base image's Node 20.9 `brave`, `firecrawl` and `mongodb` crashed
+  at start (`SyntaxError: Unexpected token 'with'`, `process.loadEnvFile is not a function`), so a create with any of
+  them failed; EE's image has the same base. EE's build check only looked for the binaries; it now starts each server.
+- **Not run on the lab**: the sandbox path itself (the SDK creating an `mcp-gateway` sandbox on the SB0 workers,
+  `tests/e2b-compat/mcp.py` and `catalog.py base mcp-gateway`). It needs the nodes to trust this Zot's CA, and applying
+  the trust DaemonSet (the hostPath writer of `registry.yaml`, under this drill's own names) on SB0 was refused by the
+  session's permission check; without it no node can pull from the registry. Pause, resume and fork of a gateway
+  sandbox were not run either (SB7 merged after this drill).

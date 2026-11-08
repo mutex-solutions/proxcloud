@@ -196,7 +196,7 @@ A plain `net/http.ServeMux`: `GET /actuator/health` (liveness),
 `GET /actuator/info`, a build probe, the billing-service callbacks (when a shared
 token is configured), and — when jobs are enabled or debug-triggers are on — a family of
 `POST /debug/run-*` triggers to drive crons on demand (sync, the Proxmox state,
-task and traffic samples, the sandbox state, builds and registry prune, SSO
+task and traffic samples, the sandbox state, builds, auto-pause and registry prune, SSO
 reconcile, metrics, charge, collect, dunning, review, savings expiry, project
 deletion, mail send, RabbitMQ self-test). HMAC key minting (`gen-hmac-key`) is
 unauthenticated, so only debug-triggers exposes it, never the scheduler alone.
@@ -437,7 +437,7 @@ flowchart LR
   `cloudResourceHistory` soft-delete. The types produced are `SERVER`, `VOLUME`,
   `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`, `FLOATING_IP` and `LOAD_BALANCER`
   (Proxmox), `BUCKET` (Ceph RGW, RustFS), `SHARE` (TrueNAS), `DNS_ZONE` (PowerDNS),
-  `KUBERNETES_CLUSTER` / `DATABASE_CLUSTER` (ArgoCD) and `SANDBOX` (the sandbox cluster).
+  `KUBERNETES_CLUSTER` / `DATABASE_CLUSTER` (ArgoCD) and `SANDBOX` / `SANDBOX_SNAPSHOT` (the sandbox cluster).
 - **`syncjob`** — every 15 minutes walks every `ENABLED` project and, per attached
   provider and enabled service, reconciles the cache. Write paths update the cache
   directly, and a server GET does a best-effort live refresh.
@@ -495,7 +495,7 @@ across the fleet**, not once per pod. The catalog is registered in
 services sync, the minutely Proxmox state sample (`pveStateSync`), task poll
 (`pveTaskPoll`) and public-NIC traffic sample (`pveTrafficSample`), the sandbox
 jobs (`sandboxStateSync`, `sandboxTemplateAdopt`, `sandboxBuildSync`,
-`sandboxRegistryPrune`), savings expiry + reminders, transaction scan,
+`sandboxRegistryPrune`, `sandboxAutoPause`), savings expiry + reminders, transaction scan,
 auto-suspension (dunning), monthly bill finalization, monthly collect, and project
 deletion. Under the external billing provider the seven billing jobs (savings
 expiry and reminders, reminder dispatch, transaction scan, auto-suspension,

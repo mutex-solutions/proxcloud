@@ -4,6 +4,7 @@
 //
 //	sandbox-init          run as the container command
 //	sandbox-init -ready     startup probe: exit 0 iff the ready marker exists
+//	sandbox-init -snapshot  gzip tar of everything changed since boot, to stdout (pause/snapshot)
 package main
 
 import (
@@ -26,11 +27,15 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "-snapshot" {
+		os.Exit(runSnapshot())
+	}
 	if len(os.Args) > 1 && os.Args[1] == "-ready" {
 		os.Exit(readyCheck(readyPath))
 	}
 	log.SetPrefix("sandbox-init: ")
 	log.SetFlags(0)
+	markBoot() // everything after this point is "changed since boot" for -snapshot
 
 	userEnv, childEnv := splitEnv(os.Environ())
 	token := os.Getenv("PROXCLOUD_ENVD_ACCESS_TOKEN")

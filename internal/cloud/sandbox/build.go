@@ -36,6 +36,9 @@ const (
 	TemplatePullSecret = "sandbox-template-pull"
 	BuildTimeout       = 30 * time.Minute
 	buildDiskLimit     = "30Gi"
+	// buildDiskRequest is what a build or snapshot pod asks the scheduler for: with a limit and no request,
+	// Kubernetes requests the limit, and no 30 GB worker has 30Gi allocatable, so the pod would never schedule.
+	buildDiskRequest = "2Gi"
 
 	kanikoImage = "ghcr.io/osscontainertools/kaniko:v1.29.0@sha256:0c0b6c02991bba44090fad918ae177d193e1bd3fd0ccc643e7cc1f9f1a5a373d"
 	fetchImage  = "curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40"
@@ -366,7 +369,7 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 						"--cache=true", "--cache-dir=/cache", "--cache-repo=oci:/kaniko/cache-repo",
 						"--cache-run-layers=false", "--cache-copy-layers=false", "--credential-helpers=",
 					},
-					"resources": map[string]any{"requests": res, "limits": res},
+					"resources": map[string]any{"requests": withDiskRequest(res), "limits": res},
 					"volumeMounts": []any{mount("workspace", "/workspace"), mount("out", "/out"),
 						ro(mount("base-cache", "/cache")), ro(mount("pinned", "/pinned"))},
 				},
@@ -660,6 +663,17 @@ func hasDotDot(p string) bool {
 	return false
 }
 
+// withDiskRequest is r with the ephemeral-storage request a build container makes (buildDiskRequest).
+func withDiskRequest(r map[string]any) map[string]any {
+	out := map[string]any{"ephemeral-storage": buildDiskRequest}
+	for k, v := range r {
+		if k != "ephemeral-storage" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // SnapshotRequest appends a sandbox's filesystem changes (one gzip tar) as a layer on Base.
 type SnapshotRequest struct {
 	ProjectID, TemplateID, BuildID string
@@ -704,7 +718,7 @@ func SnapshotObjects(cfg Config, req SnapshotRequest) map[string]any {
 					map[string]any{"name": "BASE", "value": req.Base}, map[string]any{"name": "DEST", "value": req.Image},
 					map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}, registryTrustEnv,
 				},
-				"resources":    map[string]any{"requests": small, "limits": work},
+				"resources":    map[string]any{"requests": withDiskRequest(small), "limits": work},
 				"volumeMounts": []any{mount("work", "/work"), mount("push-secret", "/docker"), mount("registry-ca", "/registry-ca")},
 			}},
 			"volumes": []any{
@@ -767,8 +781,10 @@ func (s *Service) SavedSandbox(ctx context.Context, projectID, id string) (map[s
 }
 
 // ResumeSandbox recreates a paused sandbox from its saved CR on image (the snapshot), ending at
-// shutdown, with its egress policy. The sandbox keeps its id, tokens, env and metadata.
-func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map[string]any, image string, shutdown time.Time) error {
+// shutdown, with its egress policy. The sandbox keeps its id, tokens, env and metadata. It counts
+// against the same limits as a create: the provider's concurrency limits and the project quota q
+// (nil = none), checked against the live cluster.
+func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map[string]any, image string, shutdown time.Time, q *ProjectQuota) error {
 	cr := saved
 	if digStr(cr, "metadata", "namespace") != NamespaceFor(projectID) || digStr(cr, "metadata", "labels", LabelProject) != projectID {
 		return ErrNotFound
@@ -778,6 +794,9 @@ func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map
 		return ErrNotFound
 	}
 	if err := s.EnsureProjectNamespace(ctx, projectID, nil); err != nil {
+		return err
+	}
+	if err := s.checkResumeLimits(ctx, projectID, cr, q); err != nil {
 		return err
 	}
 	if n := gpuCount(cr); n > 0 {
@@ -804,6 +823,35 @@ func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map
 		_ = json.Unmarshal([]byte(raw), n)
 	}
 	return s.applyEgress(ctx, projectID, id, n)
+}
+
+// checkResumeLimits is CreateSandbox's limit check for a saved sandbox coming back (resume or fork).
+// ponytail: like the create, checked then created without a lock, so parallel resumes can pass together; the
+// namespace ResourceQuota is the backstop.
+func (s *Service) checkResumeLimits(ctx context.Context, projectID string, saved map[string]any, q *ProjectQuota) error {
+	live, err := s.live(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("sandbox: list: %w", err)
+	}
+	l := s.cfg.WithDefaults().Limits
+	if len(live)+1 > l.MaxConcurrent {
+		return fmt.Errorf("%w: at most %d sandboxes may run at once", ErrQuotaExceeded, l.MaxConcurrent)
+	}
+	t := TemplateOfSaved(saved)
+	spec := &Spec{CPU: t.CPU, MemoryGiB: t.MemoryGiB, GPU: t.GPU}
+	if spec.GPUs() > 0 {
+		held := 0
+		for _, it := range live {
+			held += gpuCount(it)
+		}
+		if held+spec.GPUs() > l.MaxConcurrentGPUs {
+			return fmt.Errorf("%w: at most %d GPUs may be held at once (%d in use)", ErrQuotaExceeded, l.MaxConcurrentGPUs, held)
+		}
+	}
+	if q != nil {
+		return q.check(live, spec)
+	}
+	return nil
 }
 
 // CloneSaved turns a saved sandbox into a new one (fork): new id, new envd and traffic tokens,

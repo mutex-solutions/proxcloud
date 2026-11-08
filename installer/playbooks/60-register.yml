@@ -221,6 +221,10 @@
           registry: "{{ {'address': pc.sandbox.registry.address, 'port': 443} if pc_sandbox_registry_on else {} }}"
           # The build bucket, where build pods fetch their contexts.
           buildStorage: "{{ {'address': pc_sbx_builds.address, 'port': pc_sbx_builds.port} if pc_sbx_builds else {} }}"
+          # The portal's API, where sandbox-proxy wakes paused sandboxes (stage 56's wake URL).
+          portal: >-
+            {{ {'address': pc.sandbox.proxy.wake_address or pc_first_mgmt_ip, 'port': 443 if pc_scheme == 'https' else 80}
+               if pc_sandbox_edge_on and pc.sandbox.proxy.wake_address != 'none' else {} }}
       when:
         - pc_sandbox_on
         - (pc_gen ~ '/sandbox-firewall.kubeconfig') is file
