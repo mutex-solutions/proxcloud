@@ -10,6 +10,8 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Getting started
 
+- [quickstart.md](quickstart.md) — pick a path (laptop, one node, production, split, Helm),
+  the keys to fill, the one command, first login and first-install fixes.
 - [install.md](install.md) — the one-shot installer: `make install`, its stages, options
   and day-2 commands.
 - [development.md](development.md) — prerequisites, build, run the full stack with

@@ -42,6 +42,28 @@ and rules: [README.md](README.md#maintenance-rule).
 
 Diagrams: none changed (no new container or component).
 
+## 2026-11-08: Quick start guide
+
+**What changed**
+
+- New `docs/quickstart.md`: a use-case table (laptop with Docker Compose, one Proxmox node, production `allinone`,
+  `split` with managed Kubernetes, databases and sandboxes, the Helm chart alone), and per path the components it
+  deploys, the inventory keys to fill, the command, the first login and the first steps after install. Also the
+  Standard and Full storage tiers, the add-ons (GPU, PowerDNS, load balancers, backups, per-organization SSO,
+  payments), what each installer stage installs and which key switches it, and the common first-install failures.
+- The README's Quickstart section now points at it with a short path table.
+- The Helm path (E) uses the chart's `values-quickstart.yaml` (PR #127) for a cluster without operators and keeps
+  the operator install as the production path; it also says how to build and load the images until a release is
+  published.
+
+**Why**
+
+- A new operator had to read `docs/install.md` end to end, plus `defaults.yml`, to learn which keys a single node or
+  a split site needs. The Helm instructions also missed the `helm repo add` lines `helm dependency build` needs on a
+  clean machine.
+
+**Diagrams updated:** none; no container or component changed.
+
 ## 2026-11-08: PR #127 Helm quickstart install and first-run seed Job
 
 **What changed**
