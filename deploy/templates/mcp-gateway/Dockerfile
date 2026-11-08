@@ -48,7 +48,15 @@ RUN cd /opt/mcp/npm/lib/node_modules/@wonderwhy-er/desktop-commander \
       const id = await b.resolveBuildId(b.Browser.CHROME, p, 'stable'); \
       await b.install({ browser: b.Browser.CHROME, buildId: id, cacheDir: '/root/.claude-server-commander/puppeteer-cache' }); })"
 COPY --from=gateway /out/mcp-gateway /usr/local/bin/mcp-gateway
-# Fails the build unless every catalog package server starts here and answers MCP initialize and tools/list.
-RUN mcp-gateway pull $(mcp-gateway list) >/dev/null \
+# Fails the build unless every catalog package server starts here and answers MCP initialize and tools/list. The servers
+# write state at start (desktopCommander a client id, mongodb a log, onnxruntime a device id and a session file): run
+# them with a throwaway HOME and TMPDIR so none of it ships in the image and every sandbox starts clean. The Chrome
+# cache above is linked in, or desktopCommander would download Chrome again. The test fails the build if state leaks.
+RUN h=$(mktemp -d) && mkdir -p "$h/home/.claude-server-commander" "$h/tmp" \
+ && ln -s /root/.claude-server-commander/puppeteer-cache "$h/home/.claude-server-commander/puppeteer-cache" \
+ && HOME="$h/home" TMPDIR="$h/tmp" mcp-gateway pull $(mcp-gateway list) >/dev/null \
+ && rm -rf "$h" \
+ && for f in /root/.claude-server-commander/config.json /root/.mongodb /root/.cache/Microsoft /tmp/.ses; do \
+      if [ -e "$f" ]; then echo "server state left in the image: $f" >&2; exit 1; fi; done \
  && mkdir -p /var/log/mcp-gateway && chmod 700 /var/log/mcp-gateway
 WORKDIR /home/user

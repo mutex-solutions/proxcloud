@@ -86,7 +86,7 @@ func TestGatewayPrefixesAndAuth(t *testing.T) {
 	}
 	res.Body.Close()
 
-	hc := &http.Client{Transport: headerRT{map[string]string{"Authorization": "Bearer tok"}, http.DefaultTransport}}
+	hc := &http.Client{Transport: headerRT{gwSrv.URL, map[string]string{"Authorization": "Bearer tok"}, http.DefaultTransport}}
 	cl := mcp.NewClient(&mcp.Implementation{Name: "c"}, nil)
 	cs, err := cl.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: gwSrv.URL + "/mcp", HTTPClient: hc}, nil)
 	if err != nil {
@@ -109,7 +109,66 @@ func TestGatewayPrefixesAndAuth(t *testing.T) {
 	}
 }
 
-// TestPackageServerFromBinPath: a package server is found on the servers' PATH, not only on the
+// TestRemoteKeyStaysOnItsHost: a remote server's key goes to its own origin only; a 307 to another host gets the
+// request without it (the client follows redirects through the header transport).
+func TestRemoteKeyStaysOnItsHost(t *testing.T) {
+	var other http.Header
+	otherSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		other = r.Header.Clone()
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer otherSrv.Close()
+	var own http.Header
+	ownSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		own = r.Header.Clone()
+		// localhost and 127.0.0.1 are different hosts to the client
+		http.Redirect(w, r, strings.Replace(otherSrv.URL, "127.0.0.1", "localhost", 1)+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	defer ownSrv.Close()
+
+	tr, err := transportFor(upstream{prefix: "k", e: entry{URL: ownSrv.URL + "/mcp",
+		Headers: map[string]string{"Authorization": "Bearer key-1", "X-Api-Key": "key-2"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := tr.(*mcp.StreamableClientTransport).HTTPClient.Post(ownSrv.URL+"/mcp", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusTeapot {
+		t.Fatalf("redirect not followed: %d", res.StatusCode)
+	}
+	if own.Get("Authorization") != "Bearer key-1" || own.Get("X-Api-Key") != "key-2" {
+		t.Fatalf("own host lacks the key: %v", own)
+	}
+	if other.Get("Authorization") != "" || other.Get("X-Api-Key") != "" {
+		t.Fatalf("the key followed the redirect to another host: %v", other)
+	}
+}
+
+// TestChildEnv: a server gets the PATH, the pass-through variables, telemetry off and its own env, and nothing else of
+// the gateway's (not its bearer, not the sandbox's envVars).
+func TestChildEnv(t *testing.T) {
+	t.Setenv("GATEWAY_ACCESS_TOKEN", "gw-secret")
+	t.Setenv("TENANT_VAR", "x")
+	t.Setenv("HOME", "/root")
+	t.Setenv("HTTPS_PROXY", "http://proxy:3128")
+	env := strings.Join(childEnv(map[string]string{"BRAVE_API_KEY": "k", "DO_NOT_TRACK": "0"}), "\n") + "\n"
+	for _, want := range []string{"BRAVE_API_KEY=k\n", "HOME=/root\n", "HTTPS_PROXY=http://proxy:3128\n", "PATH=" + binPath + ":",
+		"DESKTOP_COMMANDER_DISABLE_TELEMETRY=1\n", "MDB_MCP_TELEMETRY=disabled\n", "DO_NOT_TRACK=0\n"} {
+		if !strings.Contains(env, want) {
+			t.Errorf("env lacks %q:\n%s", want, env)
+		}
+	}
+	for _, bad := range []string{"GATEWAY_ACCESS_TOKEN", "gw-secret", "TENANT_VAR", "DO_NOT_TRACK=1"} {
+		if strings.Contains(env, bad) {
+			t.Errorf("env has %q:\n%s", bad, env)
+		}
+	}
+}
+
+// TestPackageServerFromBinPath:a package server is found on the servers' PATH, not only on the
 // gateway's own (exec.Command looks the name up when the command is built).
 func TestPackageServerFromBinPath(t *testing.T) {
 	dir := t.TempDir()

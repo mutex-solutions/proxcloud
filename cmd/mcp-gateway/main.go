@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -420,12 +422,19 @@ func connectAll(ctx context.Context, srv *mcp.Server, ups []upstream) error {
 	return errors.Join(errs...)
 }
 
+// headerRT adds a remote server's headers (the tenant's key for it) to requests for that server's own origin only. The
+// HTTP client follows redirects through this transport, so without the check a redirect to another host, or to plain
+// http, would get the key too.
 type headerRT struct {
-	h  map[string]string
-	rt http.RoundTripper
+	origin string // scheme://host of the configured URL
+	h      map[string]string
+	rt     http.RoundTripper
 }
 
 func (t headerRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	if len(t.h) == 0 || r.URL.Scheme+"://"+r.URL.Host != t.origin {
+		return t.rt.RoundTrip(r)
+	}
 	r = r.Clone(r.Context())
 	for k, v := range t.h {
 		r.Header.Set(k, v)
@@ -437,7 +446,9 @@ func transportFor(u upstream) (mcp.Transport, error) {
 	if u.github != nil {
 		dir := filepath.Join(githubRoot, u.repo)
 		if _, err := os.Stat(dir); err != nil {
-			out, err := exec.Command("git", "clone", "--depth=1", "https://github.com/"+u.repo+".git", dir).CombinedOutput()
+			gc := exec.Command("git", "clone", "--depth=1", "https://github.com/"+u.repo+".git", dir)
+			gc.Env = childEnv(nil)
+			out, err := gc.CombinedOutput()
 			if err != nil {
 				return nil, fmt.Errorf("git clone: %v: %s", err, out)
 			}
@@ -454,7 +465,11 @@ func transportFor(u upstream) (mcp.Transport, error) {
 		return &mcp.CommandTransport{Command: c}, nil
 	}
 	if u.e.URL != "" {
-		hc := &http.Client{Transport: headerRT{u.e.Headers, http.DefaultTransport}}
+		pu, err := url.Parse(u.e.URL)
+		if err != nil || pu.Host == "" {
+			return nil, fmt.Errorf("bad server URL %q", u.e.URL)
+		}
+		hc := &http.Client{Transport: headerRT{pu.Scheme + "://" + pu.Host, u.e.Headers, http.DefaultTransport}}
 		if u.e.Transport == "sse" {
 			return &mcp.SSEClientTransport{Endpoint: u.e.URL, HTTPClient: hc}, nil
 		}
@@ -470,11 +485,36 @@ func transportFor(u upstream) (mcp.Transport, error) {
 	return &mcp.CommandTransport{Command: c}, nil
 }
 
+// passEnv is what a server may take from the gateway's environment: where it runs, locale, proxies and CA files. The
+// rest stays with the gateway: GATEWAY_ACCESS_TOKEN (the bearer for every tool), the other servers' keys and the
+// sandbox's envVars. A server gets these, telemetryOff and its own catalog env (or a github server's envs).
+var passEnv = []string{"HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+	"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"}
+
+// telemetryOff turns off the usage reporting some package servers do by default (a server's own env can set it again):
+// desktopCommander's analytics, mongodb's telemetry, markitdown's onnxruntime, and DO_NOT_TRACK for the rest.
+var telemetryOff = map[string]string{
+	"DO_NOT_TRACK":                        "1",
+	"DESKTOP_COMMANDER_DISABLE_TELEMETRY": "1",
+	"MDB_MCP_TELEMETRY":                   "disabled",
+	"ORT_DISABLE_TELEMETRY":               "1",
+}
+
 func childEnv(extra map[string]string) []string {
-	env := append(os.Environ(), "PATH="+binPath+":"+os.Getenv("PATH"))
-	for k, v := range extra {
+	m := map[string]string{"PATH": binPath + ":" + os.Getenv("PATH")}
+	for _, k := range passEnv {
+		if v, ok := os.LookupEnv(k); ok {
+			m[k] = v
+		}
+	}
+	maps.Copy(m, telemetryOff)
+	maps.Copy(m, extra)
+	env := make([]string, 0, len(m))
+	for k, v := range m {
 		env = append(env, k+"="+v)
 	}
+	sort.Strings(env)
 	return env
 }
 
