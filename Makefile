@@ -1,5 +1,6 @@
 REGISTRY ?= ghcr.io/mutex-solutions
-TAG      ?= go-m1-$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+# The tag CI publishes for a main commit (dev-<7-char sha>); `make deploy` without `make image push` needs it published.
+TAG      ?= dev-$(shell git rev-parse --short=7 HEAD 2>/dev/null || echo local)
 CHART    ?= deploy/charts/proxcloud
 NS       ?= proxcloud
 # kube context for `make deploy`; empty = kubectl's current context.

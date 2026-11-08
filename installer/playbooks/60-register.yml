@@ -61,7 +61,8 @@
           zones: "{{ {pc.network.default_zone: zone} }}"
           publicNetworks: "{{ [pc.network.public] if pc.network.public else [] }}"
           cidrPool: "{{ pc.network.cidr_pool }}"
-          isolation: "{{ pc.network.isolation }}"
+          # The portal knows "shared" and "evpn-per-project"; any other value would fall back to shared without a word.
+          isolation: "{{ 'evpn-per-project' if pc.network.isolation in ['evpn', 'evpn-per-project'] else 'shared' }}"
           blockedCidrs: "{{ pc.network.blocked_cidrs }}"
           # Fenced both ways by the isolation rules: tenants off the sandbox workers, the workers off tenants and mgmt.
           sandboxCidrs: "{{ [pc.sandbox.network.subnet] if pc_sandbox_on else [] }}"

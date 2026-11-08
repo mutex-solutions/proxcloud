@@ -15,11 +15,13 @@ claude mcp add --transport http proxcloud https://<api-host>/mcp
 
 The first call comes back with an authentication challenge. Your MCP client discovers the ProxCloud identity provider, opens the same login page you already know, and finishes by redirecting back to the client — standard OAuth with PKCE. Sign in with your usual portal credentials.
 
+A client that cannot sign in through a browser can send a personal access token from your account page instead, as the header `Authorization: Bearer <pk>.<sk>`. It acts as you, like a login; a read-only token is refused on `/mcp`, because tools can write.
+
 ## What the tools can do
 
-**Read:** your profile; projects, organizations, and members; servers, volumes, networks, security groups, images; live flavors; project costs and balance; billing profiles and bills.
+**Read:** your profile; projects, organizations, and members; servers, volumes, networks, floating IPs, load balancers, security groups, images; live flavors; project costs and balance; billing profiles and bills; sandboxes and their logs.
 
-**Act:** server power actions (soft/hard reboot, start, stop); create and delete volumes; invite a teammate to a project. On a Proxmox provider a volume belongs to a server, so a create needs `serverId` in the volume data, and a volume can't be deleted on its own — it goes with its server.
+**Act:** server power actions (soft/hard reboot, start, stop); create and delete volumes (with a `serverId` the volume is a data disk of that server, without one a standalone volume you attach later; a volume must be detached before it can be deleted); invite a teammate to a project; create a sandbox, run a command in it, change its timeout and delete it, where the project has sandboxes.
 
 A couple of prompts to try once you're connected:
 

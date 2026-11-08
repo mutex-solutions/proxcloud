@@ -21,10 +21,10 @@ claude mcp add --transport http proxcloud https://<api-host>/mcp
 
 On first use the server replies `401` with an RFC 9728 resource-metadata document pointing at the ProxCloud identity provider. Your MCP client discovers it, registers itself via dynamic client registration, opens a browser window, and redirects back to a local port with an authorization code (PKCE). No server-side setup required.
 
-- Signing in with a **customer account** (clients realm) grants the **client toolset**.
-- Signing in with an **admin account** (admin realm) grants the **admin toolset**.
+- Signing in with a **customer account** (the customer realm) grants the **client toolset**.
+- Signing in with an **admin account** (the operator realm) grants the **admin toolset**. When both consoles share one realm, every account gets the admin toolset.
 
-If your MCP client can't do dynamic client registration, a pre-registered public client `proxcloud-mcp` exists in both realms (PKCE required).
+No MCP client is pre-registered: if yours can't do dynamic client registration, create a public PKCE client for it in the realm yourself.
 
 ### 2. API key (non-interactive)
 
@@ -44,7 +44,7 @@ Create an HMAC key pair under **System → API keys** in the admin console (the 
 }
 ```
 
-API-key principals always get the **admin toolset**. Treat the pair like any admin credential: it's checked with a constant-time compare, but it rides in the header — use HTTPS only, and rotate it via System → API keys.
+An HMAC key pair gets the **admin toolset**. A customer's personal access token (minted on the account page of the customer console) has the same `Bearer pk….sk…` shape and is tried first: it acts as its user and gets the **client toolset**, unless it is a read-only token, which `/mcp` refuses. Treat the pair like any admin credential: it's checked with a constant-time compare, but it rides in the header — use HTTPS only, and rotate it via System → API keys.
 
 ## The admin toolset
 
@@ -63,7 +63,7 @@ On top of those, the admin toolset exposes the platform's configuration surfaces
 | Cloud providers | `list/get/update_cloud_provider`, `set_provider_default_quota`, `set_provider_features`, `set_metrics_config`, `test_metrics_config`, `get_gpu_capacity`, `list_live_flavors` |
 | Catalog | `list/get/create/update/delete_flavor_category`, `list/get/create/update/delete_image_category`, `list_image_category_groups`, `get/create/update/delete_image_group`, `list_live_images`, `list/get/create/update/delete/reactivate_instance_metadata_option` |
 | Project ops | `set_project_quota`, `set_project_public_networks`, `sync_project`, `get_project_resource_counts`, `list_project_cloud_resources`, `update_project`, `set_project_status`, `list_project_members_admin` |
-| Transactions | `list_account_credit_transactions`, `list_collect_transactions`, `list_billing_profile_transactions`, `refund_transaction`, `approve/reject_bank_transfer` |
+| Transactions | `list_account_credit_transactions`, `list_collect_transactions`, `list_billing_profile_transactions`, `refund_transaction`, `approve/reject_bank_transfer`, `record_bill_payment` |
 | Catalog & campaigns | savings plans, promotion codes, price-adjustment rules, taxes, custom menu, message templates (list/create/update/delete each) |
 | Integrations | `list/create/update/delete_integration` (secrets are write-only, never returned) |
 | Observability | `get_admin_stats`, `search_audit_log` |

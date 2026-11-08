@@ -79,7 +79,7 @@ pc_defaults:
     vrf_vxlan: 10000
     exit_nodes: []               # default: the first node
     cidr_pool: 10.100.0.0/16
-    isolation: shared            # shared | evpn (a zone per project)
+    isolation: shared            # shared | evpn (a zone per project; registered as evpn-per-project)
     blocked_cidrs: []            # networks tenants must not reach, beyond the node management networks
     public: {}                   # {id, name, cidr, gateway, ranges}
 
@@ -143,12 +143,14 @@ pc_defaults:
       worker_mtu: 1450
       rwx_gib: 0                 # NAS dataset per cluster and its RWX class; 0 = none
 
-  # mode=split: the platform's sandbox cluster (gVisor), stage 55. Not reachable by tenants yet: docs/managed-sandbox.md.
+  # mode=split: the platform's sandbox cluster (gVisor), stage 55. Stage 60 registers its provider DISABLED;
+  # the operator sets it live in the console once its release gates hold (docs/install.md).
   sandbox:
     enabled: false
     pool: proxcloud-sandbox
     token: sandbox               # capmox@pve!<token>, the cluster's CAPMOX credential; secret in generated/token-<token>
-    runtime_image: ""            # envd + sandbox-init for node-setup; default <images.registry>/proxcloud-sandbox-runtime:<release>
+    runtime_image: ""            # envd + sandbox-init for node-setup; default <images.registry>/proxcloud-sandbox-runtime:<release>,
+                                 # published from the release after v0.3.28 and not built by stage 35: set it until then
     storage: ""                  # boot disks; default: services.storage
     iso_storage: ""              # bootstrap ISOs, node-local only; default: services.iso_storage
     network:
@@ -176,7 +178,8 @@ pc_defaults:
     domain: ""                   # required, e.g. sbx.example.org: its own DNS zone; the wildcard certificate covers it
     proxy:
       address: ""                # required: sandbox-proxy's MetalLB address, inside network.metallb
-      image: ""                  # default <images.registry>/proxcloud-sandbox-proxy:<release>
+      image: ""                  # default <images.registry>/proxcloud-sandbox-proxy:<release>, published from the
+                                 # release after v0.3.28 and not built by stage 35: set it until then
     tls:
       issuer: acme               # acme (DNS-01 through PowerDNS with RFC2136) | secret (yours) | selfsigned (test sites)
       secret: ""                 # issuer secret: a kubernetes.io/tls Secret for *.<domain> in pc-sandbox, services cluster

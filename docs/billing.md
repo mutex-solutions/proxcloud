@@ -119,6 +119,13 @@ attribute schema (`BillingResourceType`):
 | `floating_ip` | `FloatingIPProvider` (`floatingip.go`) | `existence` (typically a flat per-IP charge), `status`, `floating_network_id`. Rows derive from the public-IP allocations (`pvePublicIp`), one per allocation, billed from the moment of allocation | — |
 | `image` | `ImageProvider` (`image.go`) | `size_gb` (a project template's disk, rounded up to whole GiB), `status`. Catalog templates are the operator's and never bill | — |
 | `server_snapshot` | `ServerProvider` | `size_gb` (the server's provisioned disks, not the blocks the snapshot pins: Proxmox reports no per-snapshot usage). One line per snapshot, billed from the moment it was taken, read at each full sync and after a portal action on the server; replication and backup snapshots do not count | — |
+| `server_protection` | `ServerProvider` | `size_gb` (the replica's space), `state`. The Protected add-on, one line per protection from its first successful replication sync until it is disabled; a server on shared storage has no replica and costs nothing | before the first sync |
+| `kubernetes_cluster` | `KubernetesClusterProvider` (`kubernetescluster.go`) | `version`, `status`, `endpoint`, `cp_replicas`, `node_groups`. The control-plane fee only: the worker VMs are the project's own servers and bill as such | until the control plane has an endpoint |
+| `database_cluster` | `DatabaseClusterProvider` (`databasecluster.go`) | `engine`, `version`, `status`, `replicas`, `vcpus_total`, `ram_gb_total`, `storage_gb_total`, `autoscale_enabled`, `read_endpoint_lb`. The full price (it runs on platform nodes), totals already multiplied by replicas | until it has an endpoint |
+| `bucket` | `BucketProvider` (`bucket.go`) | `size_gb` (used, rounded up), `quota_gb` (the quota, or the used size without one), `object_count` | — |
+| `share` | `ShareProvider` (`share.go`) | `protocol`, `size_gb` (used), `quota_gb` (allocated) | — |
+| `sandbox` | `SandboxProvider` (`sandbox.go`) | `template`, `status`, `vcpus`, `ram_gb`, `gpu_count`, `gpu_model`. Priced with `minute` rules, from the minute the sandbox became RUNNING to its end rounded up to whole minutes (at least one) | while PENDING (no item at all) |
+| `sandbox_snapshot` | `SandboxSnapshotProvider` (`sandboxsnapshot.go`) | `kind` (`pause` or `snapshot`), `size_gb`. From the moment it is stored until it is deleted | — |
 
 Every resource additionally gets `region` and `service_id` stamped in (so plan
 filters on those resolve) and `createdAt` (drives mid-month proration) — see
@@ -923,6 +930,13 @@ consume. Permissions are noted per area.
 | `savingsContractExpiration` | `0 0 0 * * *` | expire ended contracts |
 | `savingsContractExpiryReminders` | `0 0 0 * * *` | schedule expiry reminders |
 | `reminderNotifications` | `0 0 * * * *` | dispatch due reminders |
+
+These are the billing crons; the jobs that feed them (cloud sync, the minutely
+Proxmox and sandbox state reads, metrics) are in
+[jobs-scheduling.md](jobs-scheduling.md#job-catalog). Sandbox minutes ride on
+`minutelyCharge`: `sandboxStateSync` (`10 * * * * *`) reads every sandbox's state
+twenty seconds before it, so each running sandbox has its row when the minute is
+charged.
 
 Jobs run under a distributed lock (`atMostFor` / `atLeastFor`) so only one pod
 runs each tick.

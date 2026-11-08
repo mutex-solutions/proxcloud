@@ -38,8 +38,8 @@ parallel service. The implementation is `internal/platform/mcp`, mounted at
 - **Dual auth, mapped to a curated toolset.** MCP requests carry the same two
   credentials as the rest of the platform:
   - an **OIDC bearer JWT**, already validated by the platform auth middleware —
-    the request's realm selects the toolset (`clients` realm → client tools,
-    admin realm → admin tools);
+    the request's realm selects the toolset (the `auth.main` customer realm →
+    client tools, the `auth.admin` operator realm → admin tools);
   - an **API key**, `Authorization: Bearer <pk>.<sk>`, validated against the
     `hmac_keys` table with a constant-time compare → the admin toolset.
   On dispatch, a JWT principal re-sends its own bearer; an API-key principal has
@@ -54,7 +54,12 @@ parallel service. The implementation is `internal/platform/mcp`, mounted at
   authorization server(s); MCP clients complete the OAuth flow (discovery +
   dynamic client registration + PKCE) from there.
 
-The live tool catalog is browsable at `/docs/api/mcp` in the admin console.
+The admin tool catalog is documented at `/docs/reference/mcp-server` in the admin console
+(hand-written; `tools_*.go` is the authority).
+
+Later addition: a customer's personal access token (`client_api_keys`) has the same
+`pk.sk` shape. `Enforce` resolves it first, as its user in the customer realm, so it
+gets the client toolset; only a key that is not a PAT reaches the `hmac_keys` lookup.
 
 ## Consequences
 

@@ -37,6 +37,7 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 | 35 | `35-local-images.yml` | `images.build`: builds images and chart from this checkout, into a registry on the management cluster. A tag already there is not rebuilt. |
 | 40 | `40-mgmt-platform.yml` | ArgoCD, then Applications with inline values: cert-manager, CloudNativePG, ProxCloud (API, consoles, Keycloak, PostgreSQL, RabbitMQ). The scheduler is on. |
 | 45 | `45-object-store.yml` | The object store, see below. |
+| 50 | `50-services-cluster.yml` | `mode: split`: Cluster API and CAPMOX on the mgmt cluster, then the services cluster and its platform. See "Split mode" below. |
 | 55 | `55-sandbox-cluster.yml` | `mode: split` with `sandbox.enabled`: the sandbox cluster's vnet, the cluster from the kamaji chart, then `deploy/sandbox-cluster` on it. See "Sandbox cluster" below. |
 | 55 | `55-sandbox-registry.yml` | `sandbox.registry.address` set: the sandbox registry (Zot on the services cluster, its bucket on the object store), the images of `deploy/templates/images.yaml` copied in and pre-pulled on every sandbox node. Also run by `make upgrade`. See "Sandbox registry" below. |
 | 56 | `56-sandbox-edge.yml` | `sandbox.enabled`: the public entry of sandbox ports: `sandbox-proxy` and its MetalLB address, the wildcard certificate on the services cluster and its copy, the DNS record and TSIG key on PowerDNS, the HAProxy entry appliance. Also run by `make upgrade`. See "Sandbox ports" below. |
@@ -105,7 +106,7 @@ Not automated yet: the off-site copy, OTLP metrics, and pointing CloudNativePG a
 
 | Command | What it does |
 |---|---|
-| `make upgrade` | After bumping `versions.yml`: Proxmox identity (stage 10), k3s, images, chart, operators. |
+| `make upgrade` | After bumping `versions.yml`: stages 00, 10 (Proxmox identity), 30 (k3s), 35 (images), 40 (chart, operators), 55 (registry: copies the newly pinned sandbox images in), 56 (sandbox edge) and 60. It does not run stage 50 or stage 55 (cluster): run those playbooks yourself when a pin they use changed (CAPI, CAPMOX, kamaji, the sandbox runtime image). |
 | `make identity-check` | What stage 10 would grant, align and take away, writing nothing. Run it before an upgrade that changes grants. |
 | `make templates` | Build new template versions now. Keeps two per OS and node. |
 | `make storage-rebench` | Re-run fio. Never changes the class of a live volume. |
@@ -231,6 +232,10 @@ that reads its own images and the built-in ones only ([managed-sandbox.md §6](m
 
 The sync runs from the release's sandbox-proxy image: it needs a release newer than v0.3.28 (the first with
 `sandbox-proxy registry-users`), or `sandbox.proxy.image` set to one. An older image stops with "unknown subcommand".
+The same holds for the images themselves: `proxcloud-sandbox-proxy` and `proxcloud-sandbox-runtime` are first published
+with the release after v0.3.28, and stage 35 does not build them. Until that release is pinned in `versions.yml`, set
+`sandbox.proxy.image` and `sandbox.runtime_image` to images you built and pushed; the defaults
+(`<images.registry>/…:<release>`) do not exist.
 
 An existing sandbox provider keeps its templates: set `Template registry` (`<address>/t`), `Built-in image updates`
 and the templates' images (the `library/` copies) in the console, and for custom templates "Custom template builds"

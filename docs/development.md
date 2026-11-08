@@ -179,21 +179,33 @@ there when calling cross-origin.
   `/debug/run-*` triggers instead of waiting on cron.
 - SPA: `npm run dev` — Vite HMR reloads on save.
 - Full stack: `docker compose up --build` after a change rebuilds the images.
-- Chart: `make deploy` runs `helm upgrade --install` (see
-  [ADR-0005](adr/0005-self-contained-helm-chart.md)).
+- Chart: `make deploy` runs `helm upgrade --install` with `api.image.tag=$(TAG)` (see
+  [ADR-0005](adr/0005-self-contained-helm-chart.md)). `TAG` defaults to
+  `dev-<7-char sha of HEAD>`, the tag CI publishes for a main commit: for a local
+  commit run `make image push` first, or pass a published `TAG=`.
 
 ## Where things live
 
-- `cmd/api` — the server entrypoint and all wiring.
+- `cmd/api` — the server entrypoint and all wiring. `cmd/sandbox-proxy` (the public
+  entry of sandbox ports, and the registry sync) and `cmd/sandbox-init` (the
+  in-sandbox init) are the sandbox binaries; `cmd/e2edrv`, `cmd/e2egpu` and
+  `cmd/e2eseed` are end-to-end drivers for a lab.
 - `internal/platform/*` — the business domains (org, project, billing, pricing,
-  payment, admin, audit, job, promotion, mcp, …), each as handler/service/repo.
+  payment, admin, audit, job, promotion, mcp, sso, …), each as handler/service/repo,
+  plus the billing provider seam (`billingprovider`, `billingclient`,
+  `billingcallback`), `pveflavor` (the Proxmox flavor catalog) and `paging`.
 - `internal/cloud` — the Proxmox VE client and services (`pve`), resource cache,
-  providers and sync, metrics, the ceph-s3 client, managed K8s/DBaaS.
+  providers and sync, metrics, the ceph-s3 client, managed K8s/DBaaS, `sandbox`
+  (the sandbox cluster client), `csigw` (the CSI gateway), `truenas` and `powerdns`.
+- `internal/sandboxproxy` — sandbox-proxy's routing, wake and certificate sync.
 - `internal/{config,server,health,pgdoc,amqp,oidc}` — wiring and infrastructure.
-- `pkg/{auth,httpx,money,audit,textcrypt}` — cross-cutting: auth middleware, the
-  response envelope + request context, money⇄decimal string, the audit helper,
-  field-level encryption.
-- `deploy/` — `Dockerfile`, the Helm chart (`chart/`), values overlays,
-  and `seed/`.
+- `pkg/{auth,httpx,money,audit,textcrypt,billingapi,certfile,safeurl}` — cross-cutting:
+  auth middleware, the response envelope + request context, money⇄decimal string,
+  the audit helper, field-level encryption, the billing provider contract, a
+  certificate file that reloads, and URL checks for addresses tenants choose.
+- `deploy/` — `Dockerfile`, the Helm charts (`charts/proxcloud`, `charts/database-cluster`,
+  `charts/proxmox-kamaji-cluster`), values overlays, the manifests for the
+  management, DBaaS and sandbox clusters (`mgmt-cluster/`, `dbaas-cluster/`, `sandbox-cluster/`),
+  the sandbox image Dockerfiles, and `seed/`.
 - `web/client`, `web/admin` — the two React SPAs.
 - `test/integration` — the testcontainers suite (`-tags=integration`).
