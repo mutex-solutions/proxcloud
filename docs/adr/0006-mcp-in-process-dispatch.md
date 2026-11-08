@@ -29,8 +29,8 @@ parallel service. The implementation is `internal/platform/mcp`, mounted at
   server (`github.com/modelcontextprotocol/go-sdk`), so it is safe behind
   multiple API replicas and needs no session store. The Helm chart's ingress
   exposes `/mcp` alongside the other public paths.
-- **In-process dispatch.** Each MCP tool is a declarative row (`tools_client.go`,
-  `tools_admin.go`) mapping a tool name to an existing REST endpoint (method +
+- **In-process dispatch.** Each MCP tool is a declarative row (`tools_client.go`
+  and the `tools_admin*.go` files) mapping a tool name to an existing REST endpoint (method +
   path + parameters). Invoking a tool builds an HTTP request and runs it **through
   the full application router in-process** (via an `httptest` recorder), so the
   same authorization, DTO shapes, audit, and error handling apply as for a direct
@@ -38,8 +38,8 @@ parallel service. The implementation is `internal/platform/mcp`, mounted at
 - **Dual auth, mapped to a curated toolset.** MCP requests carry the same two
   credentials as the rest of the platform:
   - an **OIDC bearer JWT**, already validated by the platform auth middleware —
-    the request's realm selects the toolset (the `auth.main` customer realm →
-    client tools, the `auth.admin` operator realm → admin tools);
+    the request's realm selects the toolset (`clients` realm → client tools,
+    admin realm → admin tools);
   - an **API key**, `Authorization: Bearer <pk>.<sk>`, validated against the
     `hmac_keys` table with a constant-time compare → the admin toolset.
   On dispatch, a JWT principal re-sends its own bearer; an API-key principal has
@@ -54,12 +54,7 @@ parallel service. The implementation is `internal/platform/mcp`, mounted at
   authorization server(s); MCP clients complete the OAuth flow (discovery +
   dynamic client registration + PKCE) from there.
 
-The admin tool catalog is documented at `/docs/reference/mcp-server` in the admin console
-(hand-written; `tools_*.go` is the authority).
-
-Later addition: a customer's personal access token (`client_api_keys`) has the same
-`pk.sk` shape. `Enforce` resolves it first, as its user in the customer realm, so it
-gets the client toolset; only a key that is not a PAT reaches the `hmac_keys` lookup.
+The tool catalog is documented at `/docs/reference/mcp-server` in the admin console.
 
 ## Consequences
 

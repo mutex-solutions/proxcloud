@@ -220,9 +220,28 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 	httpx.OK(w, *saved)
 }
 
+// pauseRefusal is what of a create's autoPause and autoResume this location cannot honour (nil = all of it). Without
+// pause here, an autoPause sandbox would be deleted at its timeout, not paused: refuse rather than lose files.
+// autoResume needs autoPause and the wake token sandbox-proxy calls with.
+func (h *Handler) pauseRefusal(cfg sandbox.Config, spec *sandbox.Spec) error {
+	switch {
+	case spec.AutoResume && !spec.AutoPause:
+		return httpx.BadRequest("autoResume needs autoPause")
+	case spec.AutoPause && !h.snapshotsAvailable(cfg):
+		return httpx.BadRequest("autoPause is not available at this location")
+	case spec.AutoResume && cfg.ProxyWakeToken == "":
+		return httpx.BadRequest("autoResume is not available at this location")
+	}
+	return nil
+}
+
 // createSandboxResource creates the sandbox on the cluster and its cache row (shared by the
-// native API and the E2B-compatible one). spec must already be validated.
+// native API, which the console and the MCP create_sandbox tool use, and the E2B-compatible one).
+// spec must already be validated; the pause checks run here so neither create can skip them.
 func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *externalservice.ExternalService, ss *sandbox.Service, spec *sandbox.Spec) (*cloud.CloudResource, error) {
+	if err := h.pauseRefusal(ss.Config(), spec); err != nil {
+		return nil, err
+	}
 	data, err := ss.CreateSandbox(ctx, spec)
 	if err != nil {
 		return nil, err

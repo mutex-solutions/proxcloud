@@ -112,6 +112,23 @@ func TestAzpAllowed(t *testing.T) {
 	}
 }
 
+// TestAzpExempt pins where the azp binding is skipped: /mcp and the tool calls it dispatches in
+// process, never a plain API request (a header cannot set the context mark).
+func TestAzpExempt(t *testing.T) {
+	plain := httptest.NewRequest(http.MethodGet, "/api/v1/project", nil)
+	plain.Header.Set("X-Mcp-Dispatch", "1")
+	if azpExempt(plain) {
+		t.Error("a plain API request must keep the azp binding")
+	}
+	if !azpExempt(httptest.NewRequest(http.MethodPost, "/mcp", nil)) {
+		t.Error("/mcp must skip the azp binding")
+	}
+	dispatched := plain.WithContext(WithMCPDispatch(plain.Context()))
+	if !azpExempt(dispatched) {
+		t.Error("an MCP tool call must skip the azp binding")
+	}
+}
+
 // TestClaimTrue pins email_verified parsing: a JSON bool or the string "true"
 // counts; absent, null, "false" or any other shape fails closed.
 func TestClaimTrue(t *testing.T) {

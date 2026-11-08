@@ -128,22 +128,22 @@ Registered in `Handler.Routes` (`adminapi.go`):
 ## MCP — `/mcp`
 
 A stateless streamable-HTTP Model Context Protocol endpoint
-(`internal/platform/mcp`). The principal's realm (or the kind of key) selects a
+(`internal/platform/mcp`). The principal's realm (or an admin API key) selects a
 toolset:
 
-- **client tools** (an `auth.main` JWT, or a customer's personal access token):
-  read/act on the caller's own projects, organizations and billing (list
-  projects/servers/volumes/networks/floating IPs/load balancers/security
-  groups/images/flavors/organizations and members, get cost/billing, run server
-  power actions, create and delete volumes, invite users, and sandboxes: list,
-  create, exec, logs, set timeout, delete). See `tools_client.go`.
-- **admin tools** (an `auth.admin` JWT, or an admin `hmac_keys` pair): the operator
-  toolset. See `tools_admin*.go`. A `pk.sk` bearer is tried as a personal access
-  token first, so only a key that is not one reaches the hmac lookup.
+- **client tools** (`clients` realm, or a client personal access token) — read/act
+  on the caller's own projects and billing: resources and costs, servers (create,
+  power actions, backups, snapshots, protection), volumes, Kubernetes clusters,
+  databases, DNS records, load balancers (list), floating IPs, sandboxes, invites.
+  See `tools_client.go`.
+- **admin tools** (`master` realm or an Admin API `pk.sk` key) — the operator
+  toolset. See the `tools_admin*.go` files.
 
 Each tool maps to a real REST endpoint and is dispatched in-process through the
 full router, so authorization, DTO shapes, and audit are identical to a direct
-API call. The admin console's docs list the admin tools at `/docs/reference/mcp-server`.
+API call; `TestMCPToolRoutesExist` (`internal/server`) checks every tool's route
+against the router. The tool catalog is documented at `/docs/reference/mcp-server`
+in the admin console.
 
 ## Error model
 

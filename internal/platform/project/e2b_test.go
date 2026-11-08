@@ -74,14 +74,14 @@ func TestE2BNetworkMapping(t *testing.T) {
 }
 
 // What a create asks for that this location cannot honour is refused, never silently dropped: a memory pause would
-// drop the processes the caller asked to keep, and autoResume needs autoPause.
+// drop the processes the caller asked to keep. autoResume without autoPause is refused by pauseRefusal, shared with
+// the native create (TestSandboxPauseRefusal).
 func TestE2BCreateRefusals(t *testing.T) {
 	for body, want := range map[string]string{
 		`{}`:                                     "templateID",
 		`{"templateID":"base","autoPause":true}`: "",
 		`{"templateID":"base","autoPause":true,"autoPauseMemory":true}`:   "memory snapshots",
 		`{"templateID":"base","autoPause":true,"autoPauseMemory":false}`:  "",
-		`{"templateID":"base","autoResume":{"enabled":true}}`:             "autoResume needs autoPause",
 		`{"templateID":"base","volumeMounts":[{"name":"v"}]}`:             "volumeMounts",
 		`{"templateID":"mcp-gateway","mcp":{"time":{}}}`:                  "",
 		`{"templateID":"mcp-gateway","mcp":["time"]}`:                     "mcp must be an object",

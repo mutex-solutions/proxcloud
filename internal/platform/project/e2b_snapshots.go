@@ -95,10 +95,14 @@ func (p *pausedSandbox) leased(now time.Time) bool {
 // snapshotsOn: this location can take snapshots (the stores are wired, and it has a template registry and a build
 // bucket for the assembly).
 func (h *Handler) snapshotsOn(c *e2bCaller) error {
-	if h.sbTemplates == nil || h.sbPaused == nil || !buildsOn(c.ss.Config()) {
+	if !h.snapshotsAvailable(c.ss.Config()) {
 		return errSnapshotsOff
 	}
 	return nil
+}
+
+func (h *Handler) snapshotsAvailable(cfg sandbox.Config) bool {
+	return h.sbTemplates != nil && h.sbPaused != nil && buildsOn(cfg)
 }
 
 // updatePaused changes the paused record under a row lock. fn returns an error to abort (nothing is written); remove

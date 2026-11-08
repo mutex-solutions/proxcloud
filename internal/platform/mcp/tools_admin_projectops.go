@@ -5,17 +5,17 @@ package mcp
 var adminProjectOpsTools = []toolDef{
 	{
 		name:   "set_project_quota",
-		desc:   "Set a project's quota config. Body is the quota document verbatim, e.g. {\"gpu\": {\"nvidia-a6000\": 4, \"*\": 8}} — per-GPU-model device limits (\"*\" = any model), enforced when servers are created/resized through ProxCloud. An empty object {} clears the quota (unlimited).",
+		desc:   "Replace a project's quota document, enforced when resources are created or resized through ProxCloud. Keys (non-negative integers): servers, vcpus, ramMb, diskGb, networks, floatingIps; sandboxes, sandboxVcpus, sandboxRamMb, sandboxGpus; and gpu = {\"<model>\"|\"*\": n} (per-GPU-model device limits, \"*\" = any model). Once the document sets any non-sandbox key, an absent non-sandbox key is unlimited; without one, the provider's default quota applies to them. An absent sandbox key falls back to the sandbox provider's default. An empty object {} clears the project's quota, so the provider's default quota applies again (unlimited only when the provider has none).",
 		method: "PUT",
 		path:   "/api/v1/admin/project/{id}/quota",
 		params: []param{
 			{name: "id", typ: "string", desc: "Project id.", required: true, in: "path"},
-			{name: "quota", typ: "object", desc: "The quota document, e.g. {\"gpu\": {\"nvidia-a6000\": 4}}.", required: true, in: "rawbody"},
+			{name: "quota", typ: "object", desc: "The quota document, e.g. {\"servers\": 10, \"vcpus\": 20, \"gpu\": {\"nvidia-a6000\": 4}}.", required: true, in: "rawbody"},
 		},
 	},
 	{
 		name:   "set_project_public_networks",
-		desc:   "Set a project's external-network allow-list. null = all router:external networks allowed (default); [] = none; [ids] = only those public network ids.",
+		desc:   "Set a project's public-network allow-list. null = all of the provider's public networks allowed (default); [] = none; [ids] = only those public network ids.",
 		method: "PUT",
 		path:   "/api/v1/admin/project/{id}/public-networks",
 		params: []param{

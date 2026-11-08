@@ -333,8 +333,6 @@ func (b *e2bCreateBody) e2bRefusal() string {
 		return "templateID is required"
 	case b.AutoPauseMemory != nil && *b.AutoPauseMemory:
 		return errMemorySnapshot.msg // a filesystem pause instead would drop the processes the caller asked to keep
-	case b.AutoResume != nil && b.AutoResume.Enabled && !b.AutoPause:
-		return "autoResume needs autoPause"
 	case len(b.VolumeMounts) > 0:
 		return "volumeMounts are not supported"
 	case len(b.MCP) > 0 && string(b.MCP) != "null" && b.MCP[0] != '{':
@@ -356,15 +354,10 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		e2bErr(w, http.StatusBadRequest, msg)
 		return
 	}
-	// Without pause here, an autoPause sandbox would be deleted at its timeout, not paused: refuse rather than lose
-	// files. autoResume needs the wake token the proxy calls with.
-	autoResume := b.AutoPause && b.AutoResume != nil && b.AutoResume.Enabled
-	if b.AutoPause && h.snapshotsOn(c) != nil {
-		e2bErr(w, http.StatusBadRequest, "autoPause is not available at this location")
-		return
-	}
-	if autoResume && c.ss.Config().ProxyWakeToken == "" {
-		e2bErr(w, http.StatusBadRequest, "autoResume is not available at this location")
+	// The pause checks (autoResume needs autoPause, both need this location to offer them) are createSandboxResource's,
+	// shared with the native create; checking them here first keeps a refused create from waiting on the gates.
+	if err := h.pauseRefusal(c.ss.Config(), &sandbox.Spec{AutoPause: b.AutoPause, AutoResume: b.AutoResume != nil && b.AutoResume.Enabled}); err != nil {
+		e2bFail(w, err)
 		return
 	}
 	// The native create's checks, in its order: suspension, the provider's state, the release gates, then the quota.
@@ -391,7 +384,7 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		GPU:        b.GPU,
 		Network:    b.Network.policy(b.AllowInternetAccess),
 		AutoPause:  b.AutoPause,
-		AutoResume: autoResume,
+		AutoResume: b.AutoResume != nil && b.AutoResume.Enabled,
 	}
 	if custom != nil {
 		spec.Template = customName
