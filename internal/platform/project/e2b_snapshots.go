@@ -9,7 +9,8 @@ package project
 //  2. a pod in sbx-build fetches it with a presigned GET and `crane append`s it as one layer onto the sandbox's image,
 //     pushing <templateRegistry>/<project>/<template>:<build> with the project's build account.
 //
-// Pause = snapshot + wait for its image + save the sandbox's CR (tokens, env, metadata, network) + delete it. Resume (POST
+// Pause = snapshot + save the sandbox's CR (tokens, env, metadata, network), answered once the capture is stored; the
+// sandbox shows as paused but runs (and bills) until its image is pushed, then it is deleted (finishPause). Resume (POST
 // /sandboxes/{id}/resume, connect to a paused sandbox, or the wake endpoint for autoResume) recreates it under the
 // same id from the snapshot image. Processes, memory and open connections are not kept (E2B's mode "filesystem"); a
 // request for memory (memory: true, autoPauseMemory: true) is refused with 400, never served as a filesystem pause.
@@ -47,10 +48,22 @@ const (
 	// autoPauseParallel: pauses the job runs at once (each holds a capture stream and an assembly pod).
 	autoPauseParallel = 4
 
-	pausedPausing  = "pausing"
+	pausedPausing  = "pausing"  // the capture is stored, its image is being assembled: the sandbox still runs
+	pausedStopping = "stopping" // the image is ready, the sandbox is being deleted
 	pausedResuming = "resuming"
 	pauseLease     = 10 * time.Minute
 	resumeLease    = 20 * time.Minute // covers waiting for a snapshot still being assembled
+)
+
+// The E2B SDK gives up on a request after 120 s (request_timeout 60 s, taken as read + write by its transport), and a
+// request it left is lost work. These bound what a request waits for; vars so the integration tests can shorten them.
+var (
+	// PauseJoinWait: how long a connect, resume or wake waits for a pause whose image is still being assembled before
+	// it cancels that pause and answers with the sandbox, which still runs and holds every file.
+	PauseJoinWait = 45 * time.Second
+	// SnapshotRequestWait: how long after it arrived a fork or a create from a snapshot waits for the snapshot image;
+	// past it the call answers 503 (retry) and leaves e2bReadyTimeout for the start.
+	SnapshotRequestWait = 60 * time.Second
 )
 
 // SetSandboxPaused wires the sandbox_paused collection (nil = pause and resume off).
@@ -64,7 +77,8 @@ type pausedSandbox struct {
 	TemplateID string         `json:"templateId"` // the internal snapshot template
 	Saved      map[string]any `json:"saved"`      // the CR as it was (sandbox.SavedSandbox)
 	PausedAt   *time.Time     `json:"pausedAt"`
-	// State is "" once paused, "pausing" while the sandbox is being removed, "resuming" while a resume brings it back.
+	// State is "" once paused, "pausing" while its image is assembled (the sandbox runs), "stopping" while the sandbox
+	// is deleted, "resuming" while a resume brings it back.
 	// LeaseUntil bounds a transition: an expired one is a crashed caller's, and the record counts as paused again (or,
 	// for a pause, as never paused).
 	State      string     `json:"state,omitempty"`
@@ -85,7 +99,8 @@ var (
 	errAlreadyPaused    = e2bStatusErr{http.StatusConflict, "the sandbox is already paused"}
 	errSnapshotsOff     = e2bStatusErr{http.StatusServiceUnavailable, "pause and snapshots are not available at this location"}
 	errMemorySnapshot   = e2bStatusErr{http.StatusBadRequest, "memory snapshots (mode \"full\") are not supported: pause or snapshot with mode \"filesystem\"; running processes are not kept"}
-	errSnapshotNotReady = e2bStatusErr{http.StatusConflict, "the snapshot is still being assembled; retry in a few seconds"}
+	errSnapshotNotReady = e2bStatusErr{http.StatusServiceUnavailable, "the snapshot is still being assembled; retry in a few seconds"}
+	errSnapshotGone     = errors.New("snapshot not found")
 )
 
 func (p *pausedSandbox) leased(now time.Time) bool {
@@ -301,7 +316,7 @@ func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name st
 	go func() {
 		bctx, cancel := context.WithTimeout(context.Background(), snapshotWait)
 		defer cancel()
-		if _, err := h.awaitSnapshot(bctx, c, t.ID); err != nil {
+		if _, err := h.awaitSnapshot(bctx, c, t.ID); err != nil && !errors.Is(err, errSnapshotGone) { // gone: deleted meanwhile
 			slog.Error("e2b: snapshot assembly", "template", t.ID, "err", err)
 		}
 	}()
@@ -361,7 +376,7 @@ func (h *Handler) awaitSnapshot(ctx context.Context, c *e2bCaller, templateID st
 	for {
 		t, err := h.loadTemplate(ctx, c.proj.ID, templateID)
 		if err != nil || t == nil || len(t.Builds) == 0 {
-			return nil, errors.New("snapshot not found")
+			return nil, errSnapshotGone
 		}
 		b := &t.Builds[len(t.Builds)-1]
 		switch b.Status {
@@ -492,12 +507,19 @@ func (h *Handler) loadPaused(ctx context.Context, projectID, id string) *pausedS
 	return &p
 }
 
-// pauseSandbox snapshots, saves and deletes a running sandbox. The sandbox is deleted only once its snapshot image is
-// assembled and pushed: until then it keeps running (and billing), so a failed assembly (crane, the registry, a full
-// disk) fails the pause and loses nothing.
+// pauseSandbox captures a running sandbox's filesystem, saves its CR as "pausing" and answers: from here on it lists as
+// paused. It keeps running (and billing) while finishPause, in the background, waits for its snapshot image; only an
+// image that is pushed lets the sandbox be deleted, and a failed assembly drops the pause, so the sandbox runs on and
+// a pause never loses files it answered 204 for. Files written after the capture are not kept.
 func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) error {
 	if err := h.snapshotsOn(c); err != nil {
 		return err
+	}
+	if p := h.loadPaused(ctx, c.proj.ID, id); p != nil && (p.State == "" || p.leased(time.Now())) {
+		if p.State == pausedResuming {
+			return errSandboxBusy
+		}
+		return errAlreadyPaused // also while pausing: autoPause runs every minute, it must not capture again
 	}
 	saved, err := c.ss.SavedSandbox(ctx, c.proj.ID, id)
 	if err != nil {
@@ -507,26 +529,10 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 	if err != nil {
 		return err
 	}
-	ctx = context.WithoutCancel(ctx) // past this point a half-done pause would lose the sandbox
-	wctx, cancel := context.WithTimeout(ctx, snapshotWait)
-	ready, err := h.awaitSnapshot(wctx, c, t.ID)
-	cancel()
-	if err == nil && ready.defaultBuild() == nil {
-		err = errors.New("no ready build")
-	}
-	if err != nil {
-		h.dropSnapshot(ctx, c, t.ID)
-		return e2bStatusErr{http.StatusInternalServerError, "the snapshot could not be assembled, the sandbox keeps running: " + err.Error()}
-	}
-	if _, err := c.ss.GetSandbox(ctx, c.proj.ID, id); err != nil {
-		h.dropSnapshot(ctx, c, t.ID) // killed while its snapshot was being made: nothing to pause
-		return err
-	}
+	ctx = context.WithoutCancel(ctx) // the capture is stored: record it whatever the client does
 	now := time.Now().UTC()
-	lease := now.Add(pauseLease)
-	// Claim the id: a resume or kill seeing "pausing" waits or answers 409, instead of starting on the sandbox that is
-	// about to be deleted.
-	claimed := false
+	lease := now.Add(snapshotWait + pauseLease) // finishPause waits snapshotWait, then deletes the sandbox
+	// Claim the id: a resume seeing "pausing" waits (or cancels the pause), a kill ends it.
 	err = h.sbPaused.DB().WithTx(ctx, func(tc context.Context) error {
 		if err := h.lockPaused(tc, id); err != nil {
 			return err
@@ -548,7 +554,6 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 		if found && cur.TemplateID != t.ID {
 			defer h.dropSnapshot(ctx, c, cur.TemplateID)
 		}
-		claimed = true
 		return h.sbPaused.Upsert(tc, id, &pausedSandbox{ID: id, ProjectID: c.proj.ID, ServiceID: c.es.ID, TemplateID: t.ID,
 			Saved: saved, PausedAt: &now, State: pausedPausing, LeaseUntil: &lease})
 	})
@@ -556,26 +561,90 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 		h.dropSnapshot(ctx, c, t.ID)
 		return err
 	}
-	undo := func(cause error) error { // the sandbox keeps running; forget the pause
-		if claimed {
-			_, _ = h.sbPaused.DeleteByID(ctx, id)
-		}
-		h.dropSnapshot(ctx, c, t.ID)
-		return cause
+	go h.finishPause(c, id, t.ID)
+	return nil
+}
+
+// errPauseMoved: the paused record is no longer the pause the caller holds (cancelled, killed, or further along).
+var errPauseMoved = errors.New("the pause moved on")
+
+// finishPause completes a pause once its snapshot image is pushed: the record goes to "stopping", the sandbox is
+// deleted, the record to paused. A connect or a kill that ended the pause meanwhile leaves the sandbox alone; a failed
+// or timed-out assembly ends the pause and the sandbox runs on.
+func (h *Handler) finishPause(c *e2bCaller, id, templateID string) {
+	wctx, cancel := context.WithTimeout(context.Background(), snapshotWait)
+	ready, err := h.awaitSnapshot(wctx, c, templateID)
+	cancel()
+	if err == nil && ready.defaultBuild() == nil {
+		err = errors.New("no ready build")
 	}
-	if cr := h.e2bRow(ctx, c, id); cr != nil {
-		err = h.sandboxDelete(ctx, c.es, c.proj, cr)
-	} else {
-		err = c.ss.DeleteSandbox(ctx, c.proj.ID, id)
-	}
+	ctx := context.Background()
 	if err != nil {
-		return undo(err)
+		h.abandonPause(ctx, c, id, templateID, err)
+		return
 	}
-	waitGone(ctx, c, id, time.Minute)
-	return h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
+	if err := h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
+		if p.TemplateID != templateID || p.State != pausedPausing {
+			return false, errPauseMoved
+		}
+		lease := time.Now().UTC().Add(pauseLease)
+		p.State, p.LeaseUntil = pausedStopping, &lease
+		return false, nil
+	}); err != nil {
+		return // cancelled by a connect, ended by a kill or a teardown: they dropped the snapshot
+	}
+	// A sandbox that is gone already (its end came while the image was assembled) is paused all the same: the image
+	// holds its files.
+	if _, gerr := c.ss.GetSandbox(ctx, c.proj.ID, id); !errors.Is(gerr, sandbox.ErrNotFound) {
+		if cr := h.e2bRow(ctx, c, id); cr != nil {
+			err = h.sandboxDelete(ctx, c.es, c.proj, cr)
+		} else {
+			err = c.ss.DeleteSandbox(ctx, c.proj.ID, id)
+		}
+		if err != nil {
+			h.abandonPause(ctx, c, id, templateID, err)
+			return
+		}
+		waitGone(ctx, c, id, time.Minute)
+	}
+	_ = h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
 		p.State, p.LeaseUntil = "", nil
 		return false, nil
 	})
+	slog.Info("e2b: paused", "sandbox", id, "project", c.proj.ID, "template", templateID)
+}
+
+// abandonPause ends a pause that cannot complete: the record (if still this pause's) and the snapshot go, the sandbox
+// keeps running.
+func (h *Handler) abandonPause(ctx context.Context, c *e2bCaller, id, templateID string, cause error) {
+	err := h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
+		if p.TemplateID != templateID {
+			return false, errPauseMoved
+		}
+		return true, nil
+	})
+	h.dropSnapshot(ctx, c, templateID)
+	if err == nil {
+		slog.Error("e2b: pause failed, the sandbox keeps running", "sandbox", id, "project", c.proj.ID, "err", cause)
+	}
+}
+
+// cancelPause ends a pause whose image is not ready yet, so a connect gets the sandbox (which still runs and holds
+// every file) at once. false: there is no such pause (it is gone, or its sandbox is already being deleted).
+func (h *Handler) cancelPause(ctx context.Context, c *e2bCaller, id string) bool {
+	var tpl string
+	if err := h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
+		if p.State != pausedPausing {
+			return false, errPauseMoved
+		}
+		tpl = p.TemplateID
+		return true, nil
+	}); err != nil {
+		return false
+	}
+	h.dropSnapshot(context.WithoutCancel(ctx), c, tpl)
+	slog.Info("e2b: pause cancelled by a connect", "sandbox", id, "project", c.proj.ID)
+	return true
 }
 
 // POST /sandboxes/{sandboxID}/pause {memory}
@@ -583,10 +652,6 @@ func (h *Handler) e2bPause(w http.ResponseWriter, r *http.Request) {
 	c := e2bFrom(r)
 	id := chi.URLParam(r, "sandboxID")
 	if _, ok := memoryFlag(w, r); !ok {
-		return
-	}
-	if h.loadPaused(r.Context(), c.proj.ID, id) != nil {
-		e2bErr(w, errAlreadyPaused.code, errAlreadyPaused.msg)
 		return
 	}
 	if err := h.pauseSandbox(r.Context(), c, id); err != nil {
@@ -660,7 +725,9 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 		return nil, e2bStatusErr{http.StatusBadRequest, err.Error()}
 	}
 	// Claim the resume: exactly one caller brings the sandbox back; a concurrent one waits for it and answers with the
-	// same sandbox; a pause under way is waited for (up to a minute).
+	// same sandbox; a pause under way is waited for, and one whose image is still not ready after PauseJoinWait is
+	// cancelled: the sandbox still runs, so the caller gets it as it is.
+	joinUntil := time.Now().Add(PauseJoinWait)
 	for attempt := 0; ; attempt++ {
 		out, err := h.claimResume(ctx, c.proj.ID, p)
 		if errors.Is(err, sandbox.ErrNotFound) || out == claimJoined {
@@ -674,6 +741,9 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 		}
 		switch out {
 		case claimPausing:
+			if time.Now().After(joinUntil) && h.cancelPause(ctx, c, p.ID) {
+				return h.awaitResumed(ctx, c, p.ID)
+			}
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -868,7 +938,7 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 		e2bErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	ctx := r.Context()
+	ctx, arrived := r.Context(), time.Now()
 	if err := h.sandboxUsageGate(ctx, c.proj, c.es); err != nil {
 		e2bFail(w, err)
 		return
@@ -897,16 +967,24 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := h.snapshotSandbox(ctx, c, id, "", true)
-	if err == nil {
-		t, err = h.awaitSnapshot(ctx, c, t.ID)
-	}
-	if err == nil && t.defaultBuild() == nil {
-		err = errSnapshotNotReady
-	}
 	if err != nil {
 		h.e2bSnapshotFail(w, err)
 		return
 	}
+	// Answer within the SDK's request timeout: a snapshot not ready by then is dropped (its pod with it) and the call
+	// answers 503, so a retry takes a fresh one. Before, a fork the client left kept its internal snapshot, billed.
+	wctx, cancel := context.WithDeadline(ctx, arrived.Add(SnapshotRequestWait))
+	ready, err := h.awaitSnapshot(wctx, c, t.ID)
+	cancel()
+	if err == nil && ready.defaultBuild() == nil {
+		err = errSnapshotNotReady
+	}
+	if err != nil {
+		h.dropSnapshot(context.WithoutCancel(ctx), c, t.ID)
+		h.e2bSnapshotFail(w, err)
+		return
+	}
+	t = ready
 	image := t.defaultBuild().Image
 	// The forks start in parallel: each waits up to e2bReadyTimeout for envd.
 	results := make([]any, count)
@@ -984,18 +1062,24 @@ func (h *Handler) AutoPauseSandboxes(ctx context.Context) {
 	}
 }
 
-// awaitIfSnapshot lets a create from a snapshot that is still being assembled wait for it (bounded by the request),
-// instead of failing with "no ready build".
-func (h *Handler) awaitIfSnapshot(ctx context.Context, c *e2bCaller, ref string) {
+// awaitIfSnapshot lets a create from a snapshot that is still being assembled wait for it until deadline, instead of
+// failing with "no ready build"; still not ready then: errSnapshotNotReady (503, retry), and the assembly goes on. A
+// failed or deleted snapshot is left to the create's own template check.
+func (h *Handler) awaitIfSnapshot(ctx context.Context, c *e2bCaller, ref string, deadline time.Time) error {
 	if h.sbTemplates == nil {
-		return
+		return nil
 	}
 	name, _ := splitNameTag(ref)
 	t, err := h.loadTemplate(ctx, c.proj.ID, name)
 	if err != nil || t == nil || t.Kind != "snapshot" || t.defaultBuild() != nil {
-		return
+		return nil
 	}
-	_, _ = h.awaitSnapshot(ctx, c, t.ID)
+	wctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	if _, err := h.awaitSnapshot(wctx, c, t.ID); errors.Is(err, errSnapshotNotReady) {
+		return err
+	}
+	return nil
 }
 
 type claimOutcome int
@@ -1016,10 +1100,10 @@ func (h *Handler) claimResume(ctx context.Context, projectID string, p *pausedSa
 		case cur.State == pausedResuming && cur.leased(now):
 			out = claimJoined
 			return false, nil
-		case cur.State == pausedPausing && cur.leased(now):
+		case (cur.State == pausedPausing || cur.State == pausedStopping) && cur.leased(now):
 			out = claimPausing
 			return false, nil
-		case cur.State == pausedPausing:
+		case cur.State == pausedPausing || cur.State == pausedStopping:
 			out = claimStalePause
 			return false, nil
 		case cur.State == pausedResuming:
@@ -1064,11 +1148,12 @@ func (h *Handler) awaitResumed(ctx context.Context, c *e2bCaller, id string) (ma
 	}
 }
 
-// killPaused removes a paused sandbox: its record, then its snapshot (E2B kill of a paused sandbox). busy while a pause
-// or resume holds it.
+// killPaused removes a paused sandbox: its record, then its snapshot (E2B kill of a paused sandbox); the caller then
+// kills a sandbox that still runs (a pause still assembling). busy while a resume, or a pause deleting its sandbox,
+// holds it.
 func (h *Handler) killPaused(ctx context.Context, c *e2bCaller, p *pausedSandbox) error {
 	err := h.updatePaused(ctx, c.proj.ID, p.ID, func(cur *pausedSandbox) (bool, error) {
-		if cur.leased(time.Now()) {
+		if cur.State != pausedPausing && cur.leased(time.Now()) { // a pause still assembling ends here; its sandbox runs
 			return false, errSandboxBusy
 		}
 		return true, nil

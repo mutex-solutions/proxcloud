@@ -344,7 +344,7 @@ func (b *e2bCreateBody) e2bRefusal() string {
 }
 
 func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
-	c := e2bFrom(r)
+	c, arrived := e2bFrom(r), time.Now()
 	var b e2bCreateBody
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&b); err != nil {
 		e2bErr(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -365,7 +365,10 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
-	h.awaitIfSnapshot(r.Context(), c, b.TemplateID)
+	if err := h.awaitIfSnapshot(r.Context(), c, b.TemplateID, arrived.Add(SnapshotRequestWait)); err != nil {
+		e2bFail(w, err)
+		return
+	}
 	custom, customName, err := h.resolveCustomTemplate(r.Context(), c.proj.ID, b.TemplateID)
 	if errors.Is(err, sandbox.ErrBadTemplate) {
 		e2bErr(w, http.StatusBadRequest, err.Error())
@@ -468,6 +471,12 @@ func (h *Handler) e2bList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := []any{}
+	// A pausing sandbox still runs but lists once, as paused.
+	paused := h.projectPaused(r.Context(), c.proj.ID)
+	isPaused := make(map[string]bool, len(paused))
+	for _, p := range paused {
+		isPaused[p.ID] = true
+	}
 	if st == "" || strings.Contains(st, "running") {
 		items, err := c.ss.ListSandboxes(r.Context(), c.proj.ID)
 		if err != nil {
@@ -481,14 +490,13 @@ func (h *Handler) e2bList(w http.ResponseWriter, r *http.Request) {
 		sort.Strings(ids)
 		for _, id := range ids {
 			d := items[id]
-			if d["status"] != sandbox.StatusRunning || !metadataMatches(d["metadata"], want) {
+			if d["status"] != sandbox.StatusRunning || isPaused[id] || !metadataMatches(d["metadata"], want) {
 				continue
 			}
 			out = append(out, e2bListed(id, d))
 		}
 	}
 	if st == "" || strings.Contains(st, "paused") {
-		paused := h.projectPaused(r.Context(), c.proj.ID)
 		for i := range paused {
 			if metadataMatches(sandbox.PayloadOf(paused[i].Saved)["metadata"], want) {
 				out = append(out, pausedListed(&paused[i]))

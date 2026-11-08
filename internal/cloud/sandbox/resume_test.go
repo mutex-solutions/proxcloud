@@ -3,6 +3,8 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -32,6 +34,27 @@ func TestBuildPodsRequestLessDiskThanTheLimit(t *testing.T) {
 		}
 		if checked == 0 {
 			t.Errorf("%s: no container with a disk limit was checked", name)
+		}
+	}
+}
+
+// The fetch steps give up a connect after 10 s: an unreachable bucket (lab: a cluster DROP the VM firewall did not
+// show) cost 127 s per attempt, four attempts per pod start, until the 30-minute deadline.
+func TestFetchStepsBoundTheConnect(t *testing.T) {
+	res, _ := RenderDockerfile("python:3.12", nil)
+	_, build := BuildObjects(Config{}, BuildRequest{ProjectID: "p1", TemplateID: "t1", BuildID: "b1", Image: testRegistry + "/p1/t1:b1",
+		Result: res, CPU: 1, MemoryGiB: 1, FetchURL: func(h string) string { return h }})
+	snap := SnapshotObjects(Config{}, SnapshotRequest{ProjectID: "p1", TemplateID: "t1", BuildID: "b2", Base: "b", Image: "i", LayerURL: "u"})
+	for name, pod := range map[string]map[string]any{"build": build, "snapshot": snap} {
+		ics, _ := dig(pod, "spec", "initContainers").([]any)
+		found := false
+		for _, c := range ics {
+			if c := c.(map[string]any); c["name"] == "fetch" {
+				found = strings.Contains(fmt.Sprint(c["command"]), "curl -fsS --connect-timeout 10 --retry 3")
+			}
+		}
+		if !found {
+			t.Errorf("%s: the fetch step does not bound its connect", name)
 		}
 	}
 }
