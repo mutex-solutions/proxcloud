@@ -14,6 +14,10 @@ and rules: [README.md](README.md#maintenance-rule).
 - A hostNetwork unprivileged collector reads its own kubelet `stats/summary` using a separate `nodes/stats` GET
   identity and pinned public serving chain. Dedicated namespace ConfigMaps contain only CPU/network counters,
   pod UID and node identity. The portal reads those, never obtains `nodes/proxy`.
+- Review safety: envd/E2B providers alert only; automatic pause/kill is refused because a silent SDK streaming exec
+  has no trustworthy inactivity marker. Native exec serializes with the capture/action lock. Destructive actions recheck
+  exact fresh policy/attachment/connection and node activity under that lock; handler/Postgres regressions cover stale
+  disabled policy, reused pod, renewed exec/traffic, alert and opt-in kill, and unsupported pause.
 - Minutely sustained-CPU/inactivity sampling persists consecutive windows in `sandbox_safety`; detections and
   action outcomes are audit events. Default alert, operator mail template and admin filter/project count; provider
   explicit pause/kill opt-in. Actions revalidate CR/pod UID and provider/project ownership and skip busy captures.

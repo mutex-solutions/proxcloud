@@ -17,6 +17,12 @@ const SandboxAbuseResource = "SANDBOX_ABUSE"
 
 type captureLockKey struct{}
 
+func sameAbusePolicy(a, b sandbox.AbusePolicy) bool {
+	aa, _ := json.Marshal(a.WithDefaults())
+	bb, _ := json.Marshal(b.WithDefaults())
+	return string(aa) == string(bb) && !a.Disabled
+}
+
 type sandboxNotifier interface {
 	SendTemplate(context.Context, string, []string, map[string]any) error
 }
@@ -114,14 +120,51 @@ func (h *Handler) RunSandboxAbuse(ctx context.Context) {
 			if p.Action == "alert" {
 				continue
 			}
+			// envd SDK exec bypasses the portal and a silent long-running streaming
+			// exec has no trustworthy end marker. Alerts are safe; destructive actions
+			// must fail closed rather than infer SDK exec inactivity from byte deltas.
+			if ss.Config().Envd {
+				ev := audit.SystemEvent()
+				ev.EventContext = audit.ContextProject
+				ev.OrganizationID = proj.OrganizationID
+				ev.ProjectID = proj.ID
+				ev.ResourceType = SandboxAbuseResource
+				ev.ResourceID = x.SandboxID
+				ev.Action = "ACTION_" + p.Action
+				ev.Outcome = audit.OutcomeFailure
+				ev.ResourceMetadata = map[string]any{"serviceId": es.ID, "status": "refused-active-exec-unprovable"}
+				_ = h.audit.Log(ctx, ev)
+				continue
+			}
 			// Re-resolve attachment and provider settings after notification: no action with stale ownership/config.
 			freshProject, pe := h.svc.repo.FindByID(ctx, proj.ID)
 			freshES, se := h.esSvc.Get(ctx, es.ID)
-			if pe != nil || se != nil || freshProject == nil || freshES == nil || !freshProject.HasService(es.ID) || freshES.SandboxConfig().Abuse.WithDefaults().Action != p.Action {
+			if pe != nil || se != nil || freshProject == nil || freshES == nil || !freshProject.HasService(es.ID) || !sameAbusePolicy(freshES.SandboxConfig().Abuse.WithDefaults(), p) {
 				continue
 			}
 			acquired, actionErr := h.sbSafety.DB().WithAdvisoryLock(ctx, "sandbox-capture:"+es.ID+":"+proj.ID+":"+x.SandboxID, true, func() error {
 				ctx := context.WithValue(ctx, captureLockKey{}, x.SandboxID)
+				fp, pe := h.svc.repo.FindByID(ctx, proj.ID)
+				fe, se := h.esSvc.Get(ctx, es.ID)
+				if pe != nil || se != nil || fp == nil || fe == nil || !fp.HasService(es.ID) || !sameAbusePolicy(fe.SandboxConfig().Abuse.WithDefaults(), p) || fe.SandboxConfig().Kubeconfig != ss.Config().Kubeconfig || fe.SandboxConfig().Envd {
+					return fmt.Errorf("provider policy or project changed")
+				}
+				latest, e := ss.AbuseSamples(ctx)
+				if e != nil {
+					return e
+				}
+				found := false
+				for _, cur := range latest {
+					if cur.ProjectID == x.ProjectID && cur.SandboxID == x.SandboxID {
+						if !sandbox.StillInactive(x, cur, p, time.Now().UTC()) {
+							return fmt.Errorf("activity/identity changed after sample")
+						}
+						found = true
+					}
+				}
+				if !found {
+					return sandbox.ErrNotFound
+				}
 				err := ss.CheckIdentity(ctx, x)
 				if err == nil {
 					c := &e2bCaller{proj: proj, es: es, ss: ss}

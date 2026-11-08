@@ -118,6 +118,22 @@ func (o Observation) Next(s Sample, p AbusePolicy, now time.Time) (Observation, 
 	return n, false
 }
 
+// StillInactive is the final destructive-action check. New traffic/native exec or
+// missing/stale/recreated counters invalidate previously collected evidence.
+func StillInactive(old, cur Sample, p AbusePolicy, now time.Time) bool {
+	p = p.WithDefaults()
+	if cur.PodUID != old.PodUID || cur.CRUID != old.CRUID || cur.Node != old.Node || cur.CPU == nil || cur.RX == nil || cur.TX == nil || old.RX == nil || old.TX == nil || now.Sub(cur.At) > time.Duration(p.MaxGapSeconds)*time.Second || cur.At.After(now.Add(5*time.Second)) {
+		return false
+	}
+	if cur.LastExec.After(old.LastExec) || cur.LastExec.After(now.Add(-time.Duration(p.WindowSeconds)*time.Second)) {
+		return false
+	}
+	if *cur.RX < *old.RX || *cur.TX < *old.TX {
+		return false
+	}
+	return (*cur.RX-*old.RX)+(*cur.TX-*old.TX) <= uint64(p.TrafficBytes)
+}
+
 type telemetryAPI interface {
 	ListConfigMaps(context.Context, string, string) ([]map[string]any, error)
 }

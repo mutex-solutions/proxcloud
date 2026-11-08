@@ -47,8 +47,10 @@ resume/fork uses the current provider/trusted-template cap. Short bursts are pos
 
 A minutely heuristic alerts the operator when a sandbox stays near its CPU limit without observed exec or traffic
 activity for 15 minutes by default. This is **not proof of mining**: a legitimate long unattended job may match.
-Alerts do not stop sandboxes by default. An operator may explicitly opt its provider into filesystem pause or destructive
-kill. Pause is the existing asynchronous filesystem-only path; it keeps the original until a usable snapshot exists.
+Alerts do not stop sandboxes. Automatic pause/kill is conservatively **refused for envd/E2B providers**, even if
+configured: a silent active SDK streaming exec has no trustworthy completion signal, so node bytes alone cannot prove
+exec inactivity. The operator reviews alerts and acts manually. Native-only providers can explicitly opt into automatic
+filesystem pause or destructive kill. Pause is asynchronous and keeps the original until a usable snapshot exists.
 SDK exec/file/proxy traffic counts as node-observed network activity. Periodic traffic or native exec can evade the rule;
 it is a triage signal, not a guarantee. Details: [operator controls](managed-sandbox.md#10-abuse-controls-sb10).
 

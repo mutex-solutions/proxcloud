@@ -302,7 +302,7 @@ export function SandboxProviderForm({ form, setForm, mode = "create" }: {
       <Field id="sb-egress" label="Default egress cap (Mbps)" value={form.egressMbps} onChange={set("egressMbps")} hint="100 Mbps by default. Curated template egressMbps overrides inherit this unless set. Existing pods keep their cap." />
       <Label htmlFor="sb-abuse">Sustained CPU policy (JSON)</Label>
       <Textarea id="sb-abuse" value={form.abuseJSON} onChange={(e) => set("abuseJSON")(e.target.value)} className="font-mono text-xs" />
-      <p className="text-xs text-muted-foreground">Heuristic, not proof of mining. Alert by default; action pause/kill explicitly opts in. Legitimate unattended jobs can match. Configure notifyEmails and the mail gateway.</p>
+      <p className="text-xs text-muted-foreground">Heuristic, not proof of mining. Alert by default; pause/kill opt-in applies only to native-only providers. E2B/envd automatic actions are refused because silent SDK exec activity cannot be proved. Legitimate unattended jobs can match. Configure notifyEmails and the mail gateway.</p>
       <Label htmlFor="sb-rotation">Worker rotation (JSON, default off)</Label>
       <Textarea id="sb-rotation" value={form.rotationJSON} onChange={(e) => set("rotationJSON")(e.target.value)} className="font-mono text-xs" />
       <Label htmlFor="sb-rotation-key">Separate management rotation kubeconfig</Label>

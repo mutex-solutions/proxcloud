@@ -411,7 +411,21 @@ func (h *Handler) sandboxExec(w http.ResponseWriter, r *http.Request, proj *Proj
 		stdin = []byte(in)
 	}
 	timeout := time.Duration(intAny(data["timeoutSeconds"])) * time.Second
-	res, err := ss.Exec(r.Context(), proj.ID, cr.ExternalID, argv, stdin, timeout)
+	var res *kamajik8s.ExecResult
+	var err error
+	execFn := func() error {
+		if h.loadPaused(r.Context(), proj.ID, cr.ExternalID) != nil {
+			return errSandboxBusy
+		}
+		var e error
+		res, e = ss.Exec(r.Context(), proj.ID, cr.ExternalID, argv, stdin, timeout)
+		return e
+	}
+	if h.sbSafety == nil {
+		err = execFn()
+	} else {
+		_, err = h.sbSafety.DB().WithAdvisoryLock(r.Context(), "sandbox-capture:"+es.ID+":"+proj.ID+":"+cr.ExternalID, false, execFn)
+	}
 	switch {
 	case errors.Is(err, sandbox.ErrBadExec):
 		h.fail(w, httpx.BadRequest(err.Error()))

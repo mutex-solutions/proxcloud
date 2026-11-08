@@ -1666,7 +1666,11 @@ compromised node can evade it. It is not executable classification, malware scan
 
 `action: alert` is the default: only durable audit/admin evidence. Mail needs explicit operator `notifyEmails`, a mail
 gateway and enabled `sandbox_abuse_alert` template; no recipient means no email. SMTP failure is logged, audit remains.
-`pause` and `kill` are explicit provider opt-ins. Actions recheck project attachment, provider ownership and CR/pod UID.
+`pause` and `kill` are explicit provider opt-ins for **native-only providers**. On an envd/E2B provider, destructive
+heuristic actions are refused (`refused-active-exec-unprovable`): a silent SDK streaming exec bypasses the portal and
+there is no trustworthy exec-completion marker. Alerts remain enabled, so an operator can investigate and act manually.
+Native exec holds the capture/action lock for its duration. Actions recheck exact policy (including disabled), project
+attachment, provider connection and CR/pod UID under that lock, then re-read node traffic/activity before acting.
 A capture lock refuses an action during snapshot capture; paused/transitional sandboxes are skipped. Kill also refuses
 while project build/snapshot assembly is active. Pause uses the normal filesystem snapshot path and never deletes the
 original before a usable image exists; a failure leaves it running. It is asynchronous: `ACTION_pause SUCCESS` means
