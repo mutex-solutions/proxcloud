@@ -4,6 +4,33 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: sandbox pause answers before its image is ready; isolation lets workers reach their VM firewall endpoints
+
+**What changed**
+
+- E2B pause (`internal/platform/project/e2b_snapshots.go`): answers 204 once the capture is in the bucket, with the
+  paused record in state `pausing`; the sandbox keeps running and billing, held past its own end if needed, until a
+  background step sees the image pushed, then it is deleted (`stopping`, then paused). A failed assembly drops the
+  pause and gives the sandbox its own end back. A connect, resume or wake during `pausing` waits up to 45 s, then
+  cancels the pause and answers with the running sandbox. Fork and create from a snapshot wait at most 60 s from the
+  request for the snapshot, then answer 503. A list shows a pausing sandbox once, as paused.
+- `sandbox.Service.ShutdownAt` sets a sandbox's cluster deadline outside the timeout limits (the pause's hold).
+- Cluster isolation (`internal/cloud/pve/network.go`, C4.1 rule 6): a TCP `ACCEPT` from `sandboxCidrs` to each
+  `address:port` the workers' VM firewall opens (registry, build bucket, portal), above the sandbox `DROP`s; the
+  isolation gate checks them as part of the exact set. Build and snapshot pods give up a connect after 10 s.
+- `tests/e2b-compat/pause.py`: the strict pause, resume, fork and snapshot drill with the stock SDK.
+
+**Why**
+
+- The stock E2B SDK cuts every REST call at 120 s (60 s `request_timeout`, applied by pyqwest as read plus write).
+  Pause, fork and create from a snapshot waited for the image inside the request and were cut at exactly 120 s on the
+  lab, so the client lost a pause that went on, or a fork it could not see.
+- The lab's build bucket sits on a management network. The isolation's sandbox `DROP` (before the exit node's SNAT)
+  dropped the workers' traffic to it although their VM firewall opened it, so no snapshot or template build could
+  fetch its input: each connect took 127 s to time out, four attempts per pod.
+
+**Diagrams updated:** none; no container or component changed (C4.1 rule text in c4-code.md updated).
+
 ## 2026-11-08: sandbox-init runs the init only as PID 1 without arguments
 
 **What changed**

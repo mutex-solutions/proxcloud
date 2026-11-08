@@ -53,7 +53,11 @@ Status legend: [README.md](README.md). Everything on this page is **Implemented*
    workers leave through an exit node that SNATs them to a node address, which the NAS exports and
    the management hosts admit, so their drop must happen here, before the rewrite. An entry that
    overlaps `cidrPool` or a blocked network (the management networks included) is refused (the
-   reconcile fails and writes nothing).
+   reconcile fails and writes nothing). Above these two, `FORWARD ACCEPT` and `IN ACCEPT` over TCP from
+   `<sandboxCidrs>` to each `address:port` the workers' VM firewall opens out (`config.sandbox.registry`,
+   `buildStorage`, `portal`; `ExternalService.PVESandboxEndpoints`), one address and port per rule: such an endpoint
+   may sit on a management network (the lab's build bucket does), and the DROP would otherwise undo the VM
+   firewall's opening. The isolation gate reads these as part of the exact rule set.
 
 **Layer 1, the sandbox workers' VM firewall** (`internal/cloud/pve/sandboxfw.go`, `syncjob/sandboxfw.go`, provider
 `config.sandbox`). The rules above see routed traffic only. Every VM of the sandbox pool also gets `firewall=1` on each
