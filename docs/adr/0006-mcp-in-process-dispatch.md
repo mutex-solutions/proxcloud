@@ -29,8 +29,8 @@ parallel service. The implementation is `internal/platform/mcp`, mounted at
   server (`github.com/modelcontextprotocol/go-sdk`), so it is safe behind
   multiple API replicas and needs no session store. The Helm chart's ingress
   exposes `/mcp` alongside the other public paths.
-- **In-process dispatch.** Each MCP tool is a declarative row (`tools_client.go`,
-  `tools_admin.go`) mapping a tool name to an existing REST endpoint (method +
+- **In-process dispatch.** Each MCP tool is a declarative row (`tools_client.go`
+  and the `tools_admin*.go` files) mapping a tool name to an existing REST endpoint (method +
   path + parameters). Invoking a tool builds an HTTP request and runs it **through
   the full application router in-process** (via an `httptest` recorder), so the
   same authorization, DTO shapes, audit, and error handling apply as for a direct
@@ -54,7 +54,7 @@ parallel service. The implementation is `internal/platform/mcp`, mounted at
   authorization server(s); MCP clients complete the OAuth flow (discovery +
   dynamic client registration + PKCE) from there.
 
-The live tool catalog is browsable at `/docs/api/mcp` in the admin console.
+The tool catalog is documented at `/docs/reference/mcp-server` in the admin console.
 
 ## Consequences
 

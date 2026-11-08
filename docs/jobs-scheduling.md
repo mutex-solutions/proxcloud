@@ -135,9 +135,12 @@ cron specs from `scheduler.go`. All specs are 6-field seconds-first, UTC.
 | `pveStateSync` | `15 * * * * *` | every minute at :15 | 2m / 30s | Proxmox: SERVER, IMAGE and FLOATING_IP rows of every project off one `/cluster/resources` page per provider; heartbeat and staleness alert |
 | `sandboxStateSync` | `10 * * * * *` | every minute at :10 | 2m / 30s | Sandboxes: every enabled project's SANDBOX rows off the sandbox cluster before the minutely charge (pins each start, ends each vanished row) |
 | `sandboxTemplateAdopt` | `0 */5 * * * *` | every 5 minutes | 10m / 1m | Sandboxes: a built-in template moves to the digest the prepull DaemonSet runs once every Ready node has pulled it; only for providers with `imageAdoption` `on` (`dry-run` logs) (docs/managed-sandbox.md §6) |
+| `sandboxBuildSync` | `40 * * * * *` | every minute at :40 | 10m / 20s | Sandboxes: record the result of custom template builds nobody polls, before the build pod is cleaned up |
+| `sandboxAutoPause` | `5 * * * * *` | every minute at :05 | 30m / 20s | Sandboxes: pause the `autoPause` sandboxes past their end (docs/managed-sandbox.md) |
+| `sandboxRegistryPrune` | `0 17 * * * *` | every hour at :17 | 30m / 5m | Sandboxes: delete unreferenced template images older than 24h; only for providers with `registryPrune` on |
 | `pveTaskPoll` | `*/20 * * * * *` | every 20 seconds | 1m / 10s | Proxmox: finished VM tasks past each node's cursor; records them (`LIST_EVENTS`), audits the ones the platform did not run, re-syncs their project |
 | `pveTrafficSample` | `45 * * * * *` | every minute at :45 | 2m / 30s | Proxmox: public-NIC counters of the VMs holding a public IP into `usageMetrics` |
-| `executeProjectDeletion` | `30 * * * * *` | every minute at :30 | 1m / 30s | Delete projects past their deletion grace window (cascade live cloud delete → remove the doc) |
+| `executeProjectDeletion` | `30 * * * * *` | every minute at :30 | 30m / 30s | Delete projects past their deletion grace window (cascade live cloud delete → remove the doc) |
 
 Notes:
 
@@ -219,14 +222,20 @@ controlled first live run, or for driving a job deterministically in a drill.
 ### mgmt debug triggers
 
 Exposed on the **management port** when `PROXCLOUD_JOBS_SCHEDULER_ENABLED=true`
-**or** `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` (`server.MgmtRouter(..., jobsDebug)`).
+**or** `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` (`server.MgmtRouter(..., jobsDebug)`),
+except `gen-hmac-key`, which only `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` exposes
+(it is unauthenticated).
 Each is `POST /debug/<name>` and returns a small JSON result:
 
 | Trigger | Runs |
 |---|---|
+| `run-sso-reconcile` | one per-organization SSO reconcile (404 when SSO is off) |
 | `run-sync` | one cloud resource sync pass |
 | `run-pve-state` | one Proxmox state sample |
 | `run-sandbox-state` | one sandbox state read |
+| `run-sandbox-builds` | record finished custom template builds |
+| `run-sandbox-autopause` | pause the `autoPause` sandboxes past their end |
+| `run-registry-prune` | prune unreferenced template images (`?grace=10m` lowers the 24h age floor for a drill) |
 | `run-pve-tasks` | one Proxmox task poll |
 | `run-pve-traffic` | one Proxmox public-NIC sample |
 | `run-metrics` | one metrics ingestion pass (prometheus per provider config) |
@@ -244,7 +253,7 @@ Each is `POST /debug/<name>` and returns a small JSON result:
 | `rabbit-selftest` | prove Publish+Consume round-trip against the broker |
 | `sse-emit` | push a synthetic SSE event to open streams |
 | `send-test-mail` | render + send a system message template |
-| `gen-hmac-key` | mint an Admin-API SigV4 access key pair |
+| `gen-hmac-key` | mint an Admin-API SigV4 access key pair (debug triggers only) |
 
 ### Operator job API
 

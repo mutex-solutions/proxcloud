@@ -11,7 +11,7 @@ create table "<name>" (id text primary key, doc jsonb not null)
 The table names are the old collection names verbatim (they carry camelCase, so
 SQL always double-quotes them: `"organization_members"`, `"cloudResource"`). The
 whole document lives in the `doc` jsonb column; the primary key lives in the
-separate `id` text column. There are ~48 such document tables spanning
+separate `id` text column. There are about 70 such document tables spanning
 identity/tenancy, billing, payments, pricing, the cloud resource cache, and
 platform configuration. This document is the schema reference: the core
 entity-relationship diagram, per-table field notes for the major tables, and a
@@ -655,7 +655,7 @@ encrypted at rest.
 | `type` | string | `CLOUD` / `CPANEL` / `PAYMENT` |
 | `status` | string | `PUBLIC` / `PRIVATE` / `DISABLED` |
 | `defaultPricePlan` | string | default plan for the service |
-| `config` | object | provider document; `config.provider` ∈ `proxmox` / `ceph-s3` / `kamaji` / `dbaas`. Proxmox: `region`, `regions`, `services{compute,network,volumev3,image}`, `apiUrl`, `tokenId`, `fingerprint`, `insecureTls`, `poolPrefix`, `network{defaultZone, zones, publicNetworks, cidrPool, blockedCidrs, isolation, evpnController}`, `storageProfiles`, `defaultStorageProfile`, `capabilities{detectedAt, storages}`, `storageClasses{<storage>: {class, suggestedClass}}`, `storageHeadroomPct`, `backupStorage`, `importStorage`, `templates`, `gpus`, `overcommit`, `metrics{source}`, `provisioning.quota{…}` (full shape: [cloud-integration.md](cloud-integration.md#the-proxmox-provider-document)) |
+| `config` | object | provider document; `config.provider` ∈ `proxmox` / `ceph-s3` / `rustfs` / `truenas` / `powerdns` / `kamaji` / `dbaas` / `sandbox`. Proxmox: `region`, `regions`, `services{compute,network,volumev3,image}`, `apiUrl`, `tokenId`, `fingerprint`, `insecureTls`, `poolPrefix`, `network{defaultZone, zones, publicNetworks, cidrPool, blockedCidrs, isolation, evpnController}`, `storageProfiles`, `defaultStorageProfile`, `capabilities{detectedAt, storages}`, `storageClasses{<storage>: {class, suggestedClass}}`, `storageHeadroomPct`, `backupStorage`, `importStorage`, `templates`, `gpus`, `overcommit`, `metrics{source}`, `provisioning.quota{…}` (full shape: [cloud-integration.md](cloud-integration.md#the-proxmox-provider-document)) |
 | `secret` | object (encrypted) | Proxmox: `tokenSecret`; ceph-s3: `adminAccessKey`, `adminSecretKey`; Prometheus credentials when configured |
 
 Referenced by `cloudResource.serviceId`, `cloudDownload.serviceId`,
@@ -676,7 +676,7 @@ over this table (not the filter DSL).
 | `serviceId` | string FK → `externalService` | source provider |
 | `externalId` | string | backing resource id: VMID (server, template), `volid` (volume), vnet name (network), firewall group (security group), bucket name |
 | `userId` | string FK → `users` | for user-scoped resources (keypairs) |
-| `type` | string | `SERVER`, `VOLUME`, `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`, `BUCKET`, `KUBERNETES_CLUSTER`, `DATABASE_CLUSTER` |
+| `type` | string | `SERVER`, `VOLUME`, `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`, `FLOATING_IP`, `LOAD_BALANCER`, `BUCKET`, `SHARE`, `DNS_ZONE`, `KUBERNETES_CLUSTER`, `DATABASE_CLUSTER`, `SANDBOX`, `SANDBOX_SNAPSHOT` |
 | `region`, `availabilityZone` | string | placement |
 | `data` | object | type-specific resource detail |
 | `pausedBySuspension` | bool | a suspension walk paused this VM and no resume has read it back yet; a resume touches only these. A sync keeps it |
@@ -825,6 +825,24 @@ inferred from read/write usage.
 | `affiliateEntry` | yes | Affiliate/referral earning row: `{billingProfileId → billingProfile, amount, originAmount}`. |
 | `reminderNotification` | yes | Scheduled reminder (e.g. savings-contract expiry): `{targetResourceId → savingsContract, messageTemplateId → messageTemplate, resourceType, status, notifications:[{daysBefore, sentAt}]}`. |
 | `builtInInvoice` | runtime | A generated built-in invoice record: `{invoiceGatewayId → thirdPartyIntegration, createdAt, …}`. |
+| `client_api_keys` | runtime | A customer's personal access token: `{_id: "pk…", secretHash (SHA-256 of the secret half), sub → users, description, scope (full/read), expiresAt}` (`pkg/auth/clientkey.go`). Separate from `hmac_keys`. |
+| `userCredential` | runtime | Local password credential of a user (bcrypt), from the admin reset-password path; logins themselves go through Keycloak. |
+| `billingProfileValidation` | runtime | A billing profile's validation request that the admin Validations queue approves or rejects. |
+| `counters` | runtime | Per-year sequence docs; one atomic upsert mints the next invoice number. |
+| `pdfTemplate` | runtime | Admin-editable PDF (invoice, statement) templates. |
+| `org_identity_provider` | yes | An organization's SSO identity provider (its Keycloak IdP alias and settings) (`internal/platform/sso`). |
+| `org_sso_domain` | yes | A verified email domain bound to an organization for SSO. |
+| `cephRgwCredential` | yes | A project's RGW user and S3 key on a Ceph object store: `{serviceId → externalService, rgwUid, accessKey, secretKey (encrypted)}` (`internal/cloud/cephcred`). |
+| `pveServerSeed` | yes | A server's cloud-init seed (user-data, metadata, network config; secrets encrypted), served at `/api/v1/nocloud/` (`project/nocloud_pve.go`). |
+| `meterState` | yes | One provider's metering heartbeat (`_id` = serviceId) for the staleness alert (`internal/cloud/meter.go`). |
+| `vmTaskEvent` | yes | One finished Proxmox task on a VM (`_id` = UPID): what `LIST_EVENTS` and the task-poll audit read. |
+| `nicCounter` | yes | One public NIC's byte counters between samples, so a QEMU restart loses little (`internal/cloud/metrics/pve.go`). |
+| `csiVolume` | yes | The CSI gateway's registry: which tenant cluster each disk belongs to (written before the disk) (`internal/cloud/csigw`). |
+| `csiGatewayCredential` | yes | A tenant cluster's CSI gateway credential (`csi@proxcloud!<clusterId>`). |
+| `csiTask` | yes | A PVE task the CSI gateway started for a cluster, so only that cluster may read its UPID. |
+| `sandbox_api_keys` | yes | A project's E2B sandbox API key: `{id: sha256(key), projectId → project, sub (its creator) → users, name, hint, lastUsedAt}` (the key itself is shown once). |
+| `sandbox_templates` | yes | A project's custom sandbox template and its builds (the E2B template API), and its snapshots (`kind: snapshot`). |
+| `sandbox_paused` | yes | A paused sandbox: its saved custom resource and the snapshot it resumes from (E2B pause, autoPause, autoResume). |
 | `shedLock` | (lock pkg) | Cross-fleet job lock so a scheduled job runs once across pods: `{_id: lock name (the id column), lockUntil, lockedAt, lockedBy}`. Claimed in one statement — `INSERT … ON CONFLICT (id) DO UPDATE … WHERE lockUntil ≤ now` (a live lock fails the WHERE guard → 0 rows → not acquired). |
 
 ---
@@ -859,8 +877,7 @@ inferred from read/write usage.
   → organization, billingProfileId → billingProfile, source}` (dedup on
   `promotionCodeId + organizationId`). Redemption mints a `promotionalCredit`
   carrying the code **value**.
-- Every table named in the task brief was located; none required fabrication.
-  `identityValidation` lives in the billing domain (the KYC package holds only
+- `identityValidation` lives in the billing domain (the KYC package holds only
   provider seams). Mail/CRM/KYC/live-chat have no own tables — their runtime
   state is a `thirdPartyIntegration` or (for KYC) `identityValidation`.
 </content>

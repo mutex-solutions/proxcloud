@@ -1383,7 +1383,9 @@ A create with `autoPause` marks the sandbox; job `sandboxAutoPause` (every minut
 a time since each waits for its image. Their
 cluster deadline is the end plus 15 minutes, so a pause that fails leaves the sandbox running until then, when the
 cluster removes it. A create with `autoPause` answers 400 where the provider has no template registry and build bucket,
-and `autoResume` (with `autoPause`) where it has no `proxyWakeToken`.
+`autoResume` without `autoPause` answers 400, and so does `autoResume` where the provider has no `proxyWakeToken`. The
+same checks (`pauseRefusal`, run by `createSandboxResource`) apply to the E2B create and to the native create the
+console and the MCP `create_sandbox` tool use.
 
 `autoResume` goes through the wake endpoint (section 4.4): when traffic for a paused sandbox reaches `sandbox-proxy`, it
 calls `POST <PROXCLOUD_WAKE_URL>/<id>/wake` with the provider's wake token and the client's envd and traffic tokens.

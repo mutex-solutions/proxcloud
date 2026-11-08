@@ -61,8 +61,13 @@ func OpenHmacSecret(enc *textcrypt.Encryptor, stored string) (string, bool) {
 	if hmacPlainSecret.MatchString(stored) { // a row from before sealing, until the next boot converts it
 		return stored, true
 	}
+	// The cipher is AES-CBC with PKCS#7 and no MAC: under a wrong key about 1 in 256 texts still unpad cleanly
+	// into garbage. A real secret always has the plain shape, so anything else is a failed open.
 	secret := enc.Decrypt(stored)
-	return secret, secret != stored
+	if secret == stored || !hmacPlainSecret.MatchString(secret) {
+		return "", false
+	}
+	return secret, true
 }
 
 // SealStoredHmacKeys encrypts the secrets still in plain text, once, at boot. Only a row that still holds

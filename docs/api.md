@@ -1,26 +1,30 @@
 # API Overview & Conventions
 
 This is an orientation and conventions doc for contributors — not an exhaustive
-endpoint reference. For the interactive, always-current endpoint reference, open
-the admin console at `/docs/api` (and the MCP tool reference at `/docs/api/mcp`).
+endpoint reference. The admin console's docs (`/docs/reference/overview`, and the MCP
+tool reference at `/docs/reference/mcp-server`) are hand-written markdown pages
+(`web/admin/src/docs/content`); the route source (`internal/server/server.go` and each
+package's `Routes`) is the authority. `/openapi.json` is a stub with no paths; the E2B
+API publishes its own document at `/e2b/openapi.json`.
 
 ProxCloud exposes three HTTP surfaces, all mounted on the same router
 (`internal/server/server.go`):
 
 | Surface | Base path | Auth | Style | Envelope |
 |---------|-----------|------|-------|----------|
-| Customer API | `/api/v1` | OIDC JWT (`clients` realm) | camelCase | `CustomHttpResponse` (`{data,errors,paging,...}`) |
+| Customer API | `/api/v1` | OIDC JWT (`auth.main` or `auth.admin` realm) **or** a customer's `pk.sk` personal access token | camelCase | `CustomHttpResponse` (`{data,errors,paging,...}`) |
 | Admin API | `/admin-api/v1` | SigV4 **or** admin-api-realm JWT | snake_case | `{data}` / `{data,next_marker}` / `{error}` |
-| MCP | `/mcp` | OIDC JWT **or** `pk.sk` API key | MCP tools | JSON tool results |
+| MCP | `/mcp` | OIDC JWT **or** a `pk.sk` key (personal access token or admin hmac key) | MCP tools | JSON tool results |
 | E2B-compatible sandboxes | `/e2b` | a project's sandbox API key (`X-API-Key`) | E2B's camelCase | E2B's `{code, message}` errors; [e2b-compat.md](e2b-compat.md), document at `/e2b/openapi.json` |
 
-All three are described in `docs/auth.md`. The management port (`:8081`, separate
+All four are described in `docs/auth.md`. The management port (`:8081`, separate
 from the API port `:8080`) additionally serves health probes and operator debug
 triggers — see `docs/configuration.md`.
 
 ## Customer API — `/api/v1`
 
-Authenticated with a `clients`-realm JWT. Responses use the `CustomHttpResponse`
+Authenticated with a customer (`auth.main`) JWT or that customer's personal access
+token; operator-console JWTs reach `/api/v1/admin/**`. Responses use the `CustomHttpResponse`
 envelope (`pkg/httpx/response.go`):
 
 ```json
@@ -127,16 +131,19 @@ A stateless streamable-HTTP Model Context Protocol endpoint
 (`internal/platform/mcp`). The principal's realm (or an admin API key) selects a
 toolset:
 
-- **client tools** (`clients` realm) — read/act on the caller's own projects and
-  billing (list projects/servers/volumes/networks/security groups/images, get
-  cost/billing, run server power actions, create
-  and delete volumes, invite users). See `tools_client.go`.
-- **admin tools** (`master` realm or `pk.sk` API key) — the operator toolset. See
-  `tools_admin.go`.
+- **client tools** (`clients` realm, or a client personal access token) — read/act
+  on the caller's own projects and billing: resources and costs, servers (create,
+  power actions, backups, snapshots, protection), volumes, Kubernetes clusters,
+  databases, DNS records, load balancers (list), floating IPs, sandboxes, invites.
+  See `tools_client.go`.
+- **admin tools** (`master` realm or an Admin API `pk.sk` key) — the operator
+  toolset. See the `tools_admin*.go` files.
 
 Each tool maps to a real REST endpoint and is dispatched in-process through the
 full router, so authorization, DTO shapes, and audit are identical to a direct
-API call. Browse the live tool catalog at `/docs/api/mcp` in the admin console.
+API call; `TestMCPToolRoutesExist` (`internal/server`) checks every tool's route
+against the router. The tool catalog is documented at `/docs/reference/mcp-server`
+in the admin console.
 
 ## Error model
 

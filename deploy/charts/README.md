@@ -1,6 +1,6 @@
 # deploy/charts — every Helm chart this repo ships
 
-Two charts live here:
+Three charts live here:
 
 - **`proxcloud`** — the application chart: the ProxCloud API, the customer and operator
   consoles, a CloudNativePG `Cluster`, a `RabbitmqCluster` and optionally Keycloak. The
@@ -17,24 +17,32 @@ Two charts live here:
   `deploy/dbaas-cluster/`. NOTE: bare defaults deliberately do not render (`engine` is
   required) — template it with one of `examples/values-<engine>.yaml`, which is exactly what
   CI does.
+- **`proxmox-kamaji-cluster`**: one tenant Kubernetes cluster on Proxmox VE (a Kamaji hosted
+  control plane, CAPMOX worker VMs, Cilium, proxmox-csi and MetalLB), applied once per cluster
+  on the services cluster through an ArgoCD `Application` that ProxCloud writes
+  (`internal/cloud/kamaji`). The installer also uses it for the sandbox cluster (stage 55).
+  Block volumes through the CSI gateway need chart 0.1.7 or later
+  ([managed-k8s.md](../../docs/managed-k8s.md)).
 
 ## Publishing
 
 `.github/workflows/helm.yml` gives each chart its own tag-driven release, because their
 lifecycles are independent (a customer database pins a chart version; the app releases on its
-own cadence). Both go to `oci://ghcr.io/mutex-solutions/charts`.
+own cadence). All three go to `oci://ghcr.io/mutex-solutions/charts`.
 
 | chart | release tag | version source |
 |---|---|---|
 | `proxcloud` (app) | `vX.Y.Z` (shared with the image tags) | the tag |
 | `database-cluster` | `database-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
+| `proxmox-kamaji-cluster` | `proxmox-kamaji-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 
-Flow for `database-cluster`: bump `version:` in `Chart.yaml` in the PR that changes the chart,
-merge, then cut the matching tag (`git tag database-cluster-v0.4.0 && git push origin
-database-cluster-v0.4.0`). Publishing is idempotent — an already-published version is skipped.
+Flow for `database-cluster` and `proxmox-kamaji-cluster`: bump `version:` in `Chart.yaml` in
+the PR that changes the chart, merge, then cut the matching tag (`git tag database-cluster-v0.4.0
+&& git push origin database-cluster-v0.4.0`; likewise `proxmox-kamaji-cluster-vX.Y.Z`). Publishing is idempotent — an already-published version is skipped.
 
-ProxCloud pins the version per provider (`config.argocd.chartVersion`) and never resolves
-`latest` — an existing database keeps its pin until something explicitly moves it.
+ProxCloud pins the version per provider (`config.argocd.chartVersion` on the database and the
+Kubernetes provider) and never resolves `latest`: an existing database or cluster keeps its pin
+until something explicitly moves it.
 
 ## Working on it
 

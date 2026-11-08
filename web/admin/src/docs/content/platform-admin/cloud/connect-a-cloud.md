@@ -2,7 +2,7 @@
 
 ProxCloud provisions and meters against one or more Proxmox VE clusters. You register each cluster as a *cloud provider* in the admin portal. One provider is one cluster, and one cluster is one region. ProxCloud drives the cluster through its REST API on port 8006 with a single API token. Tenancy is enforced on the platform side: every project gets its own resource pool, and ProxCloud checks ownership of every VM, network, firewall group and GPU mapping against its own database before it changes anything.
 
-The **Add provider** dialog also offers other provider kinds: `ceph-s3` (S3 object storage on Ceph RGW), `powerdns` (tenant DNS zones), `kamaji` (managed Kubernetes) and `dbaas` (managed databases). This page covers the `proxmox` kind.
+The **Add provider** dialog also offers other provider kinds: `ceph-s3` (S3 object storage on Ceph RGW), `rustfs` (S3 object storage on RustFS), `truenas` (NFS and SMB file shares), `powerdns` (tenant DNS zones), `kamaji` (managed Kubernetes), `dbaas` (managed databases) and `sandbox` (gVisor sandboxes on the platform's sandbox cluster). This page covers the `proxmox` kind.
 
 ## Before you start
 
@@ -61,8 +61,11 @@ The provider's **Connection** tab has a **Proxmox resources** card with one JSON
 |---|---|
 | `network` | `defaultZone` and `zones` (SDN zones by kind: `evpn`, `vlan` or `simple`, with per-zone settings such as peers, exit nodes and, for `evpn` zones, `mtu` (default 1450)). Also `cidrPool` (required), `isolation`, `evpnController` and `publicNetworks`. |
 | `storageProfiles` | Named storage profiles mapping nodes to a Proxmox storage (`"*"` for every node where the storage is active), with an optional `label` shown to clients, capability flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`) and the caps `bootDisk` and `dbaas` (both on unless set to `false`). Flavors and volumes refer to a profile by its slug. The save is checked against the cluster; see *Storage* below. |
-| `templates` | The OS template catalog clients create servers from: `{slug: {vmid, node, name, osDistro, minDiskGb}}`. |
+| `templates` | Optional. OS templates are discovered from their tags in the cluster; an entry here overlays one (`name`, `osDistro`, `minDiskGb`), and `vmid` + `node` pin it: `{slug: {vmid, node, name, osDistro, minDiskGb}}`. |
 | `gpus` | GPU PCI mappings by mapping id, each with the model `alias` used everywhere GPU-related, e.g. `{"<mapping-id>": {"alias": "nvidia-4090"}}`. |
+| `metadata` | Server seeds (cloud-init user-data delivery), all optional: `url` (the API as tenant networks reach it), `isoStorage`, `forceIso`, `vendorData`. |
+
+Two more keys have no editor yet; set them with `PUT /api/v1/admin/service/{id}` (the installer sets both on a site with a NAS): `backupStorage`, the shared store server backups go to, which turns on the client **Backups** tab, and `importStorage`, the store with `import` content, which turns on **Import image** from a URL.
 
 ### Public networks
 

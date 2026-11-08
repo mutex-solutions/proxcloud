@@ -16,10 +16,12 @@ The toggles live in the provider document under `config.services[<slug>][<region
 | `proxmox` | `image` | Images (OS templates and project templates) |
 | `proxmox` | `volumev3` | Volumes and snapshots |
 | `proxmox` | `network` | Private networks and security groups |
-| `ceph-s3` | `object-store` | Object storage buckets and S3 access keys |
+| `ceph-s3`, `rustfs` | `object-store` | Object storage buckets and S3 access keys |
+| `truenas` | `shares` | NFS and SMB file shares |
 | `powerdns` | `dns` | DNS zones |
 | `kamaji` | `kubernetes` | Managed Kubernetes clusters |
 | `dbaas` | `database` | Managed database clusters |
+| `sandbox` | `sandbox` | Sandboxes and their E2B API keys |
 
 A new Proxmox provider starts with `compute`, `network`, `volumev3` and `image` enabled in its region. Each of the other kinds starts with its single service enabled.
 

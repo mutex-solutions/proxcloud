@@ -8,7 +8,8 @@ Prices are stored in the platform base currency — set base currency **USD** be
 
 ## How the engine models this
 
-One PUBLIC plan, rules keyed `(resourceType, timeUnit=hour)`:
+One PUBLIC plan, rules keyed `(resourceType, timeUnit)`: every rule is per `hour` except the sandbox ones, which are per
+`minute`. The seed (`deploy/seed/price-plan-seed.json`) carries these rules:
 
 | Rule | resourceType | Filter | Priced attribute | Rate |
 |---|---|---|---|---|
@@ -20,6 +21,14 @@ One PUBLIC plan, rules keyed `(resourceType, timeUnit=hour)`:
 | Public IP | floating_ip | — | `existence` | $0.005 / hr |
 | Project image | image | — | `size_gb` | $0.000068 / GB / hr (≈$0.05/GB-mo) |
 | Server snapshots | server_snapshot | — | `size_gb` | $0.000034 / provisioned GB / snapshot / hr (≈$0.025/GB-mo). **Placeholder, not benchmarked:** the owner sets it. It rates the server's disk size per snapshot, not the snapshot's real usage, so it sits at half the image rate |
+| Server protection | server_protection | — | `size_gb` | $0.00014 / replicated GB / hr |
+| Managed Kubernetes | kubernetes_cluster | — | `existence` | $0.10 / control plane / hr (workers bill as servers) |
+| File share | share | — | `size_gb` | $0.00007 / GB / hr |
+| Object storage | bucket | — | `size_gb` | $0.00007 / GB / hr |
+| Managed databases | database_cluster | `engine eq <engine>` (8 rules: PostgreSQL, MySQL, MariaDB, Valkey, FerretDB, Kafka, OpenSearch, plus an autoscale surcharge on `autoscale_enabled`) | `vcpus_total`, `ram_gb_total`, `storage_gb_total` | DigitalOcean parity, per engine: see the seed |
+| Sandbox CPU + RAM | sandbox (`minute`) | — | `vcpus`, `ram_gb` | $0.000134 / vCPU / min, $0.000067 / GB / min. **Placeholder** |
+| Sandbox GPU | sandbox (`minute`) | — | `gpu_count` | $0.0083 / GPU / min. **Placeholder** |
+| Sandbox snapshot | sandbox_snapshot | — | `size_gb` | $0.00007 / GB / hr. **Placeholder** |
 
 GPU rules are ADD_TO_TOTAL **on top of** the CPU/RAM component. RunPod/Lambda headline
 prices bundle CPU+RAM into the per-GPU rate, so either (a) accept our small premium

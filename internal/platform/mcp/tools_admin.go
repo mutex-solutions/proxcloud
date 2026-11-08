@@ -279,7 +279,7 @@ var adminTools = []toolDef{
 	},
 	{
 		name:   "get_service_provider",
-		desc:   "Get a single service provider by id (identity URL + domain id only, no secrets).",
+		desc:   "Get a single service provider by id: its provider kind (PROXMOX, CEPH_S3, KAMAJI, DBAAS, ...) and, for Proxmox, the pool prefix. No secrets.",
 		method: "GET",
 		path:   "/admin-api/v1/service_providers/{id}",
 		params: []param{

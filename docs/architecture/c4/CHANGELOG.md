@@ -19,6 +19,66 @@ and rules: [README.md](README.md#maintenance-rule).
   was killed. The same happens to any future mode on a node node-setup has not rolled yet.
 
 **Diagrams updated:** none; no container or component changed.
+## 2026-11-08: C2 caught up with the code: token-authenticated surfaces and the delivery pipeline
+
+**What changed** (documentation only; no code or behaviour change)
+
+- C2 API surfaces: rows for `/e2b/**` (a project's `e2b_` sandbox API key), `/api/v1/internal/sandboxes/**` (the
+  sandbox provider's `proxyWakeToken`), `/api/v1/nocloud/**` (per-VM seed token) and `/api/v1/console/**` (console
+  token). The debug-trigger row says `gen-hmac-key` needs debug triggers, not just the scheduler.
+- C2 trust boundaries: the same three credentials as rows.
+- C2c build and delivery: `docker.yml` also builds sandbox-proxy and sandbox-runtime; `sandbox-templates.yml` and the
+  `proxmox-kamaji-cluster` chart are drawn; the K8s node template pipeline is Implemented (`k8s-node-templates.yml`),
+  as the container table already said. The container table gains the kamaji chart row and the full workflow list.
+- C4 code: the billing registry row lists every provider `cmd/api/main.go` registers (image, share, sandbox, sandbox
+  snapshot were missing).
+
+**Why**
+
+The C4 maintenance rule wants every trust boundary in C2. Four public-prefix surfaces that authenticate with their own
+token were only in `pkg/auth`, and the delivery diagram still showed the K8s node template pipeline as Planned while
+the table and the workflow said otherwise.
+
+**Diagrams updated:** C2 (API surfaces, C2c, container table, trust boundaries), C4 (billing registry row).
+
+## 2026-11-08: MCP tool audit: dispatch skips the azp binding, 30 new tools, route test
+
+**What changed**
+
+- MCP tool calls run on a context marked by `auth.WithMCPDispatch`; `verifyJWT` skips the `azp` binding for it, as it
+  already did on `/mcp`. The admin console's `azp` check (`adminContext`) and the Admin API gate are unchanged.
+- Client toolset: `list_project_services`, `list_public_images`, `create_server`, backups (`list_backups`,
+  `create_backup`, `restore_server_backup`, `delete_server_backup`), snapshots (list, create, rollback, delete),
+  `enable/disable_server_protection`, Kubernetes (list, create, `get_kubeconfig`, `set_kubernetes_node_groups`,
+  `upgrade_kubernetes_cluster`), databases (list, create), DNS (zones, records list/set/delete),
+  `list_sandbox_templates`, `get_sandbox_access`. Admin toolset: `test_proxmox_connection`, `test_object_store`,
+  `get_sandbox_release_gates`, `list_billing_profile_suspensions`.
+- A tool row can fix a param's value (`param.fixed`, left out of the input schema) and force `destructiveHint`
+  (`toolDef.destructive`); `test_` tools are annotated read-only.
+- `TestMCPToolRoutesExist` (`internal/server`) matches every tool's method and path against the app router.
+- A param can list its allowed values (`param.enum`: schema `enum`, refused at dispatch otherwise); `server_action`
+  takes only REBOOT, HARDREBOOT, START and STOP.
+- The sandbox create's autoPause and autoResume checks (autoResume needs autoPause; autoPause needs snapshot storage;
+  autoResume needs the provider's wake token) moved from the E2B create to `pauseRefusal`, which
+  `createSandboxResource` runs for both creates, so the console and `create_sandbox` get them too.
+
+**Why**
+
+- `/mcp` accepts a token from any client of a known issuer (an MCP client registers its own), then every tool re-sent
+  that token to `/api/v1`, where the `azp` binding refused it: OAuth sign-in passed the gate and failed on every call.
+  Skipping the binding only for the token `/mcp` already accepted adds no new way in; operator tokens still need the
+  admin client, so operators use an API key, as the docs now say.
+- An action tool whose action string the agent typed could be told to run another action than its name and its
+  annotation say; a fixed value cannot.
+- No test tied the tool rows to the router, so a renamed route would only have shown when an agent called it.
+- `server_action` is annotated non-destructive but its route also runs DELETE_BACKUP, ROLLBACK_SNAPSHOT and
+  RESTORE_BACKUP, which have their own destructive tools; free text let an agent reach them under the wrong hint.
+- `create_sandbox` advertises autoPause and autoResume through the native create, which skipped the E2B create's
+  checks: an autoPause sandbox where pause is off would be deleted at its timeout with its files, and an autoResume
+  one with no wake token would never wake.
+
+Diagrams: none changed (no new container or component).
+
 ## 2026-11-08: Quick start guide
 
 **What changed**
@@ -40,6 +100,7 @@ and rules: [README.md](README.md#maintenance-rule).
   clean machine.
 
 **Diagrams updated:** none; no container or component changed.
+
 ## 2026-11-08: PR #127 Helm quickstart install and first-run seed Job
 
 **What changed**
@@ -65,6 +126,7 @@ and rules: [README.md](README.md#maintenance-rule).
   those documents and no upgrade rewrites them.
 
 **Diagrams updated:** c2-containers.md (PostgreSQL row)
+
 ## 2026-11-08: Sandbox pause, resume, snapshots and fork of the filesystem; autoPause and autoResume (SB7)
 
 **What changed**
@@ -118,6 +180,7 @@ and rules: [README.md](README.md#maintenance-rule).
 
 **Diagrams updated:** C3 (pause and snapshots component and its flows, the proxy's wake), C4 (the fence rule for the
 portal).
+
 ## 2026-11-08: MCP gateway template for E2B's `Sandbox.create(mcp=...)` (SB8)
 
 **What changed**
