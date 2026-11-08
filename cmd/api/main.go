@@ -271,6 +271,12 @@ func run() error {
 	projectH.SetSandboxTemplates(pg.C("sandbox_templates"))
 	// Paused sandboxes (E2B pause, autoPause, autoResume): the saved CR and the snapshot each one resumes from.
 	projectH.SetSandboxPaused(pg.C("sandbox_paused"))
+	for _, table := range []string{"sandbox_safety", "auditEvent"} {
+		if err := pg.C(table).Ensure(context.Background()); err != nil {
+			return fmt.Errorf("sandbox safety store %s: %w", table, err)
+		}
+	}
+	projectH.SetSandboxSafety(pg.C("sandbox_safety"), mailSvc)
 	// Proxmox VE — enables proxmox provisioning (project pool) + the VM write surface.
 	holderLocks := lock.New(pg)
 	pveWithHolderLock := func(es *externalservice.ExternalService) (*pve.Service, error) {
@@ -824,6 +830,15 @@ func run() error {
 				projectH.SyncSandboxBuilds(r.Context())
 				jobResult(w, map[string]any{"ran": "sandbox-builds"}, nil)
 			},
+			"run-sandbox-abuse": func(w http.ResponseWriter, r *http.Request) {
+				projectH.RunSandboxAbuse(r.Context())
+				jobResult(w, map[string]any{"ran": "sandbox-abuse"}, nil)
+			},
+			"run-sandbox-rotation": func(w http.ResponseWriter, r *http.Request) {
+				// No force/short-interval override: a drill must respect the production safety checks.
+				projectH.RunSandboxRotation(r.Context())
+				jobResult(w, map[string]any{"ran": "sandbox-rotation"}, nil)
+			},
 			"run-sandbox-autopause": func(w http.ResponseWriter, r *http.Request) {
 				projectH.AutoPauseSandboxes(r.Context())
 				jobResult(w, map[string]any{"ran": "sandbox-autopause"}, nil)
@@ -1216,6 +1231,8 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 		{Name: "sandboxTemplateAdopt", Spec: scheduler.SandboxTemplateAdoptSpec, AtMostFor: 10 * time.Minute, AtLeastFor: time.Minute, Fn: sandboxes.AdoptSandboxImages},
 		// Template builds nobody polls: record their result before the build pod is cleaned up.
 		{Name: "sandboxBuildSync", Spec: scheduler.SandboxBuildSyncSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 20 * time.Second, Fn: sandboxes.SyncSandboxBuilds},
+		{Name: "sandboxAbuse", Spec: "0 * * * * *", AtMostFor: 10 * time.Minute, AtLeastFor: 20 * time.Second, Fn: sandboxes.RunSandboxAbuse},
+		{Name: "sandboxRotation", Spec: "0 */5 * * * *", AtMostFor: 4 * time.Minute, AtLeastFor: time.Minute, Fn: sandboxes.RunSandboxRotation},
 		// E2B autoPause: sandboxes past their end are paused (filesystem snapshot), not deleted.
 		{Name: "sandboxAutoPause", Spec: scheduler.SandboxAutoPauseSpec, AtMostFor: 30 * time.Minute, AtLeastFor: 20 * time.Second, Fn: sandboxes.AutoPauseSandboxes},
 		// Unreferenced template images (off unless a sandbox provider sets registryPrune).

@@ -4,6 +4,46 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: sandbox abuse controls and wait-only worker replacement (SB10)
+
+**What changed**
+
+- Provider and curated-template egress caps (100 Mbps default), Cilium bandwidth manager and per-pod annotation,
+  plus a host-owned chained CNI TBF on real pod `eth0` before customer code starts. Cilium uses `customConf`;
+  hostNetwork node-setup owns the chain and atomically installs the static guard from the runtime image.
+- A hostNetwork unprivileged collector reads its own kubelet `stats/summary` using a separate `nodes/stats` GET
+  identity and pinned public serving chain. Dedicated namespace ConfigMaps contain only CPU/network counters,
+  pod UID and node identity. The portal reads those, never obtains `nodes/proxy`.
+- Review hardening: CNI binds live pod UID/node to kubelet CNI arguments; installation and release gate require deployed
+  Cilium customConf/no writer, and stage55 awaits it then rolls all old writers before installing the chain. Final action
+  freshness validates collector/CPU/network timestamps independently; rotation scope fingerprints its encrypted connection.
+  Capture/exec advisory locks use a separate bounded connection pool, so lock holders/waiters cannot exhaust the primary
+  store pool needed for independent snapshot progress transactions (MaxConns=1 regression).
+- Review safety: envd/E2B providers alert only; automatic pause/kill is refused because a silent SDK streaming exec
+  has no trustworthy inactivity marker. Native exec serializes with the capture/action lock. Destructive actions recheck
+  exact fresh policy/attachment/connection and node activity under that lock; handler/Postgres regressions cover stale
+  disabled policy, reused pod, renewed exec/traffic, alert and opt-in kill, and unsupported pause.
+- Minutely sustained-CPU/inactivity sampling persists consecutive windows in `sandbox_safety`; detections and
+  action outcomes are audit events. Default alert, operator mail template and admin filter/project count; provider
+  explicit pause/kill opt-in. Actions revalidate CR/pod UID and provider/project ownership and skip busy captures.
+- Default-off wait-only worker rotation: explicit namespace/cluster/MD allowlist, NodeRestriction-protected worker
+  labels and CAPI nodeRef UID, empty preflight, cordon/recheck, durable provider start fence and beta2 `rollout.after`.
+  Creates, resumes, builds and snapshot assembly serialize with the fence; replacement must converge before reopening.
+  No eviction, drain, force delete or automatic pause. Read-only admin plan and mgmt-only job triggers.
+- Installer upgrade now reapplies stage 55 cluster as well as fresh installs. The worker Ready wait follows
+  hostNetwork node-setup/CNI installation, preventing fresh-install deadlock when Cilium customConf disables its own chain writer. Admin settings, client effective cap,
+  SDK-visible limits and operator runbook updated.
+
+**Why**
+
+- Cilium native-device EDT does not limit same-node traffic: capability spike measured about 130 Mbps despite a
+  1 Mbps annotation. TCX bypasses host-veth classic police. Host-configured real pod netns TBF works independently
+  of TCX; it also avoids a reconciliation startup gap. Node metrics are required because tenant `/proc` is untrusted.
+- A heuristic can match legitimate unattended compute: default alerts preserve data. Missing/stale samples, gaps,
+  activity or identity/counter changes reset evidence. Rotation must never destroy a live sandbox or sole snapshot copy.
+
+**Diagrams updated:** C3 managed-service components and SB10 safety edges.
+
 ## 2026-11-08: a fork retried after 503 reuses the snapshot still being assembled
 
 **What changed**

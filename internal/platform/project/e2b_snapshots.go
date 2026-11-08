@@ -209,7 +209,18 @@ func memoryFlag(w http.ResponseWriter, r *http.Request) (name string, ok bool) {
 // completes) it.
 // internal = a pause's or fork's snapshot (hidden from GET /snapshots and /templates); forkUntil: a fork's, reused by a
 // retry of that fork until then.
-func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name string, internal bool, forkUntil *time.Time) (*sandboxTemplateDoc, error) {
+func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name string, internal bool, forkUntil *time.Time) (out *sandboxTemplateDoc, err error) {
+	if h.sbSafety == nil || ctx.Value(captureLockKey{}) == id {
+		return h.snapshotSandboxWork(ctx, c, id, name, internal, forkUntil)
+	}
+	_, err = h.sbSafety.DB().WithAdvisoryLock(ctx, "sandbox-capture:"+c.es.ID+":"+c.proj.ID+":"+id, false, func() error {
+		var e error
+		out, e = h.snapshotSandboxWork(ctx, c, id, name, internal, forkUntil)
+		return e
+	})
+	return
+}
+func (h *Handler) snapshotSandboxWork(ctx context.Context, c *e2bCaller, id, name string, internal bool, forkUntil *time.Time) (*sandboxTemplateDoc, error) {
 	if err := h.snapshotsOn(c); err != nil {
 		return nil, err
 	}
@@ -316,9 +327,11 @@ func (h *Handler) snapshotSandbox(ctx context.Context, c *e2bCaller, id, name st
 	if err := h.saveTemplate(ctx, t); err != nil {
 		return undo(err)
 	}
-	err = c.ss.StartSnapshot(ctx, sandbox.SnapshotRequest{
-		ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: buildID, Base: bl.From,
-		Image: templateImage(cfg, t, buildID), LayerURL: layerURL,
+	err = h.withSandboxStart(ctx, c.es.ID, func(tc context.Context) error {
+		return c.ss.StartSnapshot(tc, sandbox.SnapshotRequest{
+			ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: buildID, Base: bl.From,
+			Image: templateImage(cfg, t, buildID), LayerURL: layerURL,
+		})
 	})
 	if err != nil {
 		h.failSnapshot(ctx, t.ProjectID, t.ID, buildID, err)
@@ -528,6 +541,10 @@ func (h *Handler) loadPaused(ctx context.Context, projectID, id string) *pausedS
 // image that is pushed lets the sandbox be deleted, and a failed assembly drops the pause, so the sandbox runs on and
 // a pause never loses files it answered 204 for. Files written after the capture are not kept.
 func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) error {
+	if h.sbSafety != nil && ctx.Value(captureLockKey{}) != id {
+		_, err := h.sbSafety.DB().WithAdvisoryLock(ctx, "sandbox-capture:"+c.es.ID+":"+c.proj.ID+":"+id, false, func() error { return h.pauseSandbox(context.WithValue(ctx, captureLockKey{}, id), c, id) })
+		return err
+	}
 	if err := h.snapshotsOn(c); err != nil {
 		return err
 	}
@@ -849,7 +866,7 @@ func (h *Handler) startSaved(ctx context.Context, c *e2bCaller, saved map[string
 		shutdown = shutdown.Add(sandbox.AutoPauseGrace)
 	}
 	q := c.es.SandboxProjectQuota(c.proj.Quota)
-	if err := c.ss.ResumeSandbox(ctx, c.proj.ID, saved, image, shutdown, &q); err != nil {
+	if err := h.withSandboxStart(ctx, c.es.ID, func(tc context.Context) error { return c.ss.ResumeSandbox(tc, c.proj.ID, saved, image, shutdown, &q) }); err != nil {
 		return "", err
 	}
 	now := time.Now().UTC()

@@ -31,6 +31,7 @@ func TestChartRendersMachineLabelsAndSpeakerTolerations(t *testing.T) {
 		return string(out)
 	}
 	out := render(`
+sandboxBandwidth: true
 proxmox:
   metallb:
     speakerTolerations: [{key: proxcloud.io/sandbox-system, operator: Exists, effect: NoSchedule}]
@@ -45,6 +46,9 @@ nodeGroups:
     machineLabels: {node-restriction.kubernetes.io/proxcloud-system: "true"}
     taints: [{key: proxcloud.io/sandbox-system, value: "true", effect: NoSchedule}]
 `)
+	if !strings.Contains(out, `\"bandwidthManager\":{\"enabled\":true}`) || !strings.Contains(out, `\"customConf\":true`) {
+		t.Fatalf("sandbox Cilium lacks bandwidth/chained CNI config: %s", out)
+	}
 	_, md, ok := strings.Cut(out, "kind: MachineDeployment")
 	if !ok {
 		t.Fatalf("no MachineDeployment\n%s", out)

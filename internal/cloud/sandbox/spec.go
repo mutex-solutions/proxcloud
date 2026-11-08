@@ -278,13 +278,19 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 		podSpec["imagePullSecrets"] = []any{map[string]any{"name": TemplatePullSecret}}
 	}
 	podSpec["containers"] = []any{container}
-	podMeta := map[string]any{"labels": podLabels}
+	mbps := cfg.EgressMbps
+	if s.Custom == nil && t.EgressMbps > 0 {
+		mbps = t.EgressMbps
+	}
+	podAnnotations := map[string]any{"kubernetes.io/egress-bandwidth": fmt.Sprintf("%dM", mbps)}
+	podMeta := map[string]any{"labels": podLabels, "annotations": podAnnotations}
 	if s.trafficToken != "" {
-		podMeta["annotations"] = map[string]any{AnnotationTrafficToken: s.trafficToken}
+		podAnnotations[AnnotationTrafficToken] = s.trafficToken
 	}
 	annotations := map[string]any{
-		AnnotationDisplayName: s.Name,
-		AnnotationTemplate:    s.Template,
+		AnnotationDisplayName:           s.Name,
+		AnnotationTemplate:              s.Template,
+		"proxcloud.io/curated-template": strconv.FormatBool(s.Custom == nil),
 	}
 	if len(s.Metadata) > 0 {
 		b, _ := json.Marshal(s.Metadata)

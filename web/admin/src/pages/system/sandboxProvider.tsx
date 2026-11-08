@@ -52,6 +52,10 @@ export type SandboxFormState = {
   buildAccessKey: string
   buildSecretKey: string
   storedSandbox: Record<string, any>
+  egressMbps: string
+  abuseJSON: string
+  rotationJSON: string
+  rotationKubeconfig: string
 }
 
 export const emptySandboxForm: SandboxFormState = {
@@ -85,6 +89,10 @@ export const emptySandboxForm: SandboxFormState = {
   buildAccessKey: "",
   buildSecretKey: "",
   storedSandbox: {},
+  egressMbps: "100",
+  abuseJSON: '{"action":"alert","cpuPercent":90,"windowSeconds":900,"trafficBytes":65536,"notifyEmails":[]}',
+  rotationJSON: '{"enabled":false,"intervalHours":168,"namespace":"pc-sandbox","cluster":"pc-sandbox","machineDeployments":[]}',
+  rotationKubeconfig: "",
 }
 
 type TemplateOffer = { image: string; cpu: number; memoryGiB: number; description?: string }
@@ -100,11 +108,12 @@ export function parseTemplates(raw: string): Record<string, TemplateOffer> | nul
   return Object.keys(out).length ? out : null
 }
 
+const jsonBlock = (s: string) => { try { const v = JSON.parse(s); return v && !Array.isArray(v) && typeof v === "object" ? v : null } catch { return null } }
 const num = (s: string) => (s.trim() === "" ? undefined : Number(s))
 const okNum = (s: string) => s.trim() === "" || (Number.isInteger(Number(s)) && Number(s) >= 0)
 
 export const sandboxFormValid = (f: SandboxFormState, requireKubeconfig = true) =>
-  !!f.name.trim() &&
+  !!f.name.trim() && jsonBlock(f.abuseJSON) !== null && jsonBlock(f.rotationJSON) !== null && okNum(f.egressMbps) &&
   !!f.region.trim() &&
   !!f.proxmoxServiceId.trim() &&
   (!requireKubeconfig || !!f.kubeconfig.trim()) &&
@@ -136,6 +145,9 @@ export function sandboxConfigBlocks(f: SandboxFormState) {
     services: { sandbox: { [region]: true } },
     sandbox: {
       ...f.storedSandbox,
+      egressMbps: num(f.egressMbps),
+      abuse: jsonBlock(f.abuseJSON),
+      rotation: jsonBlock(f.rotationJSON),
       proxmoxServiceId: f.proxmoxServiceId.trim(),
       templates: mergeTemplates(f.storedSandbox.templates, parseTemplates(f.templates) ?? {}),
       envd: f.envd,
@@ -169,6 +181,7 @@ export function sandboxConfigBlocks(f: SandboxFormState) {
 export function sandboxSecret(f: SandboxFormState): Record<string, string> {
   const all: Record<string, string> = {
     kubeconfig: f.kubeconfig.trim(),
+    rotationKubeconfig: f.rotationKubeconfig.trim(),
     registryGcUser: f.registryGcUser.trim(),
     registryGcPassword: f.registryGcPassword,
     buildStorageAccessKey: f.buildAccessKey.trim(),
@@ -223,6 +236,9 @@ export function sandboxFormFromService(svc: { name?: string; status?: string; co
     buildBucket: s(sb.buildStorage?.bucket),
     buildRegion: s(sb.buildStorage?.region),
     storedSandbox: sb,
+    egressMbps: s(sb.egressMbps) || "100",
+    abuseJSON: JSON.stringify(sb.abuse ?? JSON.parse(emptySandboxForm.abuseJSON), null, 2),
+    rotationJSON: JSON.stringify(sb.rotation ?? JSON.parse(emptySandboxForm.rotationJSON), null, 2),
   }
 }
 
@@ -283,6 +299,15 @@ export function SandboxProviderForm({ form, setForm, mode = "create" }: {
         </Select>
         <p className="text-xs text-muted-foreground">Its sync fences the workers; the release gates read them through it.</p>
       </div>
+      <Field id="sb-egress" label="Default egress cap (Mbps)" value={form.egressMbps} onChange={set("egressMbps")} hint="100 Mbps by default. Curated template egressMbps overrides inherit this unless set. Existing pods keep their cap." />
+      <Label htmlFor="sb-abuse">Sustained CPU policy (JSON)</Label>
+      <Textarea id="sb-abuse" value={form.abuseJSON} onChange={(e) => set("abuseJSON")(e.target.value)} className="font-mono text-xs" />
+      <p className="text-xs text-muted-foreground">Heuristic, not proof of mining. Alert by default; pause/kill opt-in applies only to native-only providers. E2B/envd automatic actions are refused because silent SDK exec activity cannot be proved. Native shipped templates lack snapshot helper: automatic pause safely fails; use alerts or explicit native kill. Legitimate unattended jobs can match. Configure notifyEmails and the mail gateway.</p>
+      <Label htmlFor="sb-rotation">Worker rotation (JSON, default off)</Label>
+      <Textarea id="sb-rotation" value={form.rotationJSON} onChange={(e) => set("rotationJSON")(e.target.value)} className="font-mono text-xs" />
+      <Label htmlFor="sb-rotation-key">Separate management rotation kubeconfig</Label>
+      <Textarea id="sb-rotation-key" value={form.rotationKubeconfig} onChange={(e) => set("rotationKubeconfig")(e.target.value)} placeholder="unchanged; exact named MD patch/read + Machine read only" autoComplete="off" />
+      <p className="text-xs text-muted-foreground">Waits for an empty protected worker group; never evicts live sandboxes, snapshots or builds. System nodes excluded. GET /admin/service/:id/sandbox/rotation-plan is read-only.</p>
       <div className="grid gap-2">
         <Label htmlFor="sb-kubeconfig">Kubeconfig</Label>
         <Textarea

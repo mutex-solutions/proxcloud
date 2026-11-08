@@ -1606,3 +1606,144 @@ user, the account sync limited to this provider's namespaces with `SERVICE_ID`),
   the trust DaemonSet (the hostPath writer of `registry.yaml`, under this drill's own names) on SB0 was refused by the
   session's permission check; without it no node can pull from the registry. Pause, resume and fork of a gateway
   sandbox were not run either (SB7 merged after this drill).
+
+## 10. Abuse controls (SB10)
+
+### 10.1 Egress: host-owned cap before code starts
+
+`config.sandbox.egressMbps` defaults to **100 Mbps** (decimal megabits/s; 1–100000). A curated provider template's
+`egressMbps` overrides it; 0 inherits. Tenant-built templates cannot set it. Every new Sandbox pod carries
+`kubernetes.io/egress-bandwidth`. The sandbox chart enables Cilium `bandwidthManager.enabled` for native-device EDT,
+**and** uses `cni.customConf: true`: hostNetwork node-setup owns the Cilium conflist with a final `sandbox-netguard`
+plugin. The static plugin is installed atomically from the runtime image. Before CNI ADD succeeds, it reads the
+exact managed pod (read-only identity), validates namespace/project/provider/sandbox identity and configures a TBF on
+real pod-network-namespace `eth0` using host `nsenter` + `tc`. It touches no Cilium filter, uplink or system pod.
+Any missing annotation, credential, CNI result or failed TBF rejects sandbox networking before customer code starts.
+No periodic reconciliation startup window. CNI CHECK reapplies the same cap; DEL relies on netns teardown.
+
+This limits all sandbox egress, including UDP, same-node destinations and responses through sandbox-proxy.
+Ingress/downloads are not capped. Burst = max(64 KiB, 10 ms at cap), queue latency 50 ms; short transfers can exceed
+the long-run cap. Loops can still spend sandbox CPU. Multiple sandboxes multiply the cap: project concurrency quota,
+not this per-sandbox rule, bounds their aggregate. IPv6 remains unsupported by the existing release guardrail.
+The console shows each pod's effective annotation; old pre-SB10 pods show legacy and must be recreated. Resume/fork
+re-resolves the current cap (never trusts the captured annotation). Network-policy changes do not remove the cap.
+
+The network-guard release gate reads fresh (90 s) installation heartbeats from every schedulable node. It refuses
+new usage on old installations until stage 55 installs the chain. A compromised host can lie about this heartbeat;
+this does not protect against a node-root attacker. Node replacement reduces residence time, not proof of eradication.
+
+### 10.2 Sustained CPU with inactivity: triage, not a verdict
+
+Provider `config.sandbox.abuse`:
+
+```json
+{"disabled":false,"cpuPercent":90,"windowSeconds":900,"maxGapSeconds":90,
+ "trafficBytes":65536,"action":"alert","notifyEmails":["abuse@example.org"]}
+```
+
+The minutely `sandboxAbuse` job computes delta host CPU nanoseconds / CPU sample interval / configured vCPUs.
+Every consecutive interval must be at least the threshold and inactive: no native exec in the rule's window and
+RX+TX delta at most `trafficBytes` per sample interval (normally one minute). CPU includes gVisor sentry overhead.
+`windowSeconds` permits 60–86400, default 900; 60 seconds needs two fresh counters a minute apart, not one reading.
+`maxGapSeconds` 30–180 (default90) resets on scheduler/collector delay. Threshold50–100. Traffic default64 KiB tolerates
+small control/ARP noise; lower thresholds are noisier. Builds in `sbx-build` are excluded from detection.
+
+The hostNetwork non-root collector reads only its own kubelet `stats/summary`, with GET **nodes/stats**, never
+**nodes/proxy** (a proxy GET could reach mutating kubelet APIs). TLS pins only the node's public serving certificate
+chain mounted read-only, with node-name verification; it never mounts kubelet client/private keys. It reloads this
+chain each sample. It publishes only counters/timestamps/pod UID/node/name/namespace to `sandbox-telemetry` ConfigMaps;
+its write Role is confined to that namespace, the portal gets only get/list there. The API joins its live owned CR
+and live pod UID+node; in-sandbox `/proc`, customer env/metadata, commands and HTTP bodies are never evidence.
+
+Consecutive observations persist in `sandbox_safety`, keyed provider/project/sandbox and bound CR UID/pod UID/node.
+Counter rollback, identity change, missing or stale CPU/network data, repeated timestamp, gaps, activity and policy
+change reset the window. A flag is emitted once per continuous incident. Service read failures reset the provider's
+observations and authorize no action. Missing nodes/stats, invalid serving CA or absent network stats means no detection.
+
+**False positives:** legitimate unattended numerical jobs, compression, compilers or long-running inference may match.
+**Evasion:** periodic native exec, padded traffic, CPU below threshold, short-lived sandboxes, missing telemetry or a
+compromised node can evade it. It is not executable classification, malware scanning or a complete mining detector.
+
+Capture/native-exec session locks use a separate lazy PostgreSQL connection pool (MinConns0, MaxConns8 in addition
+to the primary pool). Lock waiters cannot consume the primary connections needed to commit snapshot progress; plan
+for those extra connections. A lock acquisition/read error fails the automatic action closed. The MaxConns1 primary
+integration regression executes Store.Get and independent WithTx while holding a capture lock.
+
+`action: alert` is the default: only durable audit/admin evidence. Mail needs explicit operator `notifyEmails`, a mail
+gateway and enabled `sandbox_abuse_alert` template; no recipient means no email. SMTP failure is logged, audit remains.
+`pause` and `kill` are explicit provider opt-ins for **native-only providers**. On an envd/E2B provider, destructive
+heuristic actions are refused (`refused-active-exec-unprovable`): a silent SDK streaming exec bypasses the portal and
+there is no trustworthy exec-completion marker. Alerts remain enabled, so an operator can investigate and act manually.
+With the shipped templates, native-only pods do not mount the snapshot helper, so **automatic pause is presently
+unavailable in practice** and safely fails without deleting the original. Do not enable action=pause expecting it to
+succeed until a trusted native snapshot-capable runtime is supplied; use alert or explicitly destructive native kill.
+Native exec holds the capture/action lock for its duration. Actions recheck exact policy (including disabled), project
+attachment, provider connection and CR/pod UID under that lock, then re-read node traffic/activity before acting.
+A capture lock refuses an action during snapshot capture; paused/transitional sandboxes are skipped. Kill also refuses
+while project build/snapshot assembly is active. Pause uses the normal filesystem snapshot path and never deletes the
+original before a usable image exists; a failure leaves it running. It is asynchronous: `ACTION_pause SUCCESS` means
+**requested**, not completed. Existing pause/build logs and the paused state show eventual success/failure. Kill is
+explicitly destructive (ephemeral files lost), unlike pause. No action on a foreign project/provider or reused pod UID.
+
+### 10.3 Operator audit and counters
+
+Admin **Audit log → Sandbox abuse events**, optionally filter Project ID. The exact project detection counter derives
+from durable `SANDBOX_ABUSE` / `DETECTED` events, not a client-editable field. `ACTION_pause` / `ACTION_kill` entries
+show requested/refused-or-failed outcomes separately. Events carry identifiers and numeric rule settings only, not env,
+tokens, commands, images, tenant payload or kubeconfigs. Existing org audit remains project/org scoped.
+
+- `GET /api/v1/admin/sandbox/abuse?projectId=<id>&after=<cursor>`: 50 detections, `nextMarker`, exact `projectCount`
+  with explicit project filter. Requires `admin:audit:read`; no tenant access.
+- `GET /api/v1/admin/audit?resourceType=SANDBOX_ABUSE&projectId=<id>`: detections and action outcomes.
+- Mgmt-only `POST /debug/run-sandbox-abuse`: normal sampling, no forged metrics/window override. Only registered
+  when scheduler or debug triggers are enabled. Invoke across the real configured window; a single trigger proves no sustained load.
+
+### 10.4 Default-off CAPI worker replacement: wait, never evict
+
+```json
+{"enabled":false,"intervalHours":168,"namespace":"pc-sandbox","cluster":"pc-sandbox",
+ "machineDeployments":["pc-sandbox-sandbox-worker1","pc-sandbox-sandbox-worker2"]}
+```
+
+`config.sandbox.rotation` runs every5 minutes after `intervalHours`24–8760 (first enable initializes the clock).
+Wait-only: **no forced drain, no eviction, no automatic pause, no delete**. Exact MD allowlist in one namespace/cluster
+and protected `node-restriction.kubernetes.io/proxcloud-sandbox-worker=true` on both Machine template and Nodes are
+required; CAPI Machine `nodeRef` UID must match. Never label `sandbox-system` as worker. Missing scope/credential,
+pre-cordoned/deleting nodes, any Sandbox CR, non-DaemonSet live pod or pending build/snapshot blocks rollout.
+
+The controller takes the provider-wide start lock, checks emptiness, cordons target nodes, checks again and durably
+commits an active start fence before any CAPI patch. Create/resume/fork/build/snapshot-assembly serialize with that lock.
+CAPI v1beta2 patch is `spec.rollout.after` (not beta1 `rolloutAfter`). Partial patch failures retain the start fence
+and retry the same timestamp. Old nodes must disappear and exact MD observedGeneration/ready/available/upToDate/total
+replicas converge, protected replacements must be Ready, secured and network-guarded before the fence opens.
+Changing the rotation scope or management credential mid-rollout fails closed (the durable scope includes a SHA-256
+fingerprint of the kubeconfig, never the secret itself); restore it before recovery. Run only **one sandbox provider per
+sandbox cluster**: the durable start fence is keyed by provider, not a global multi-provider cluster lease. A process crash after cordon but
+before commit may leave a cordoned empty node: inspect and uncordon manually; no tenant data is lost.
+
+Rotation credentials are separate: encrypted `secret.rotationKubeconfig` is services-cluster **get/patch exact named
+MDs + get/list Machines in only the sandbox management namespace**, never full management kubeconfig. See
+`deploy/sandbox-cluster/rotation-rbac.example.yaml`. On the sandbox cluster grant the portal optional nodes patch only
+when enabling rotation (not granted by default); never nodes/proxy, delete or pods/eviction. Services admin and the
+sandbox node/root boundary are trusted. This mitigates residence time, not a malicious management admin.
+
+`GET /api/v1/admin/service/{id}/sandbox/rotation-plan` requires `admin:service:read` and is **read-only**, including
+when disabled: no cordon, SQL state initialization or CAPI patch. It returns ready/nodes/deployments/reasons.
+`POST /debug/run-sandbox-rotation` is mgmt-only and honors the interval/scope; no force override. On a loaded lab run
+**only the admin plan**, never an actual rotation.
+
+### 10.5 Upgrade and verification
+
+Build/publish the new sandbox runtime image first (it now carries `sandbox-netguard` in addition to envd/init).
+`make upgrade` now reapplies `55-sandbox-cluster.yml`: Cilium custom chain/bandwidth values, protected Machine worker
+labels, node-setup runtime and telemetry RBAC. The hostNetwork setup avoids a fresh-node CNI bootstrap deadlock.
+Apply stages55/60 before enabling the upgraded provider. Recreate old sandboxes once they finish; old pods are not
+retroactively policed. Keep rotation disabled. Standalone users follow the same manifest order as stage55.
+
+Capability spikes on a disposable nested lab (2026-11-09, **not yet the full product drill**): Cilium1.18.16 + gVisor,
+kernel6.8, veth VXLAN, IPv4. Native annotation1Mbps limited cross-node TCP to0.944Mbps from89.991Mbps, but same-node
+TCP130.559Mbps and UDP3.387Mbps ignored it. Host-veth classic police was bypassed by TCX. Real pod netns TBF1Mbps
+with TCX enabled: same-node TCP129.716→0.956Mbps, UDP3.355→0.977Mbps (16KiB spike burst; product64KiB).
+Kubelet summary gave cumulative CPU and RX/TX under gVisor; a1CPU busy loop measured about0.99CPU.
+The complete CNI install/fail-closed/SDK transfer and detection action drill is intentionally separate, after independent
+review. No live node rotation was performed.

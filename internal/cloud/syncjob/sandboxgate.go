@@ -83,6 +83,15 @@ func (j *Job) SandboxReleaseGates(ctx context.Context, es *externalservice.Exter
 		}
 	}
 	set(2, ferr, fmt.Sprintf("%d worker(s) open to sandboxes, each with the VM firewall of pool %s pinned to its address", len(open), cfg.Pool))
+	ss, nerr := sandbox.New(es.SandboxConfig(), es.ID)
+	if nerr == nil {
+		nerr = ss.CheckNetworkGuard(ctx)
+	}
+	ng := sandbox.Gate{Name: "network-guard", OK: nerr == nil, Detail: "host CNI guard installed on every schedulable node"}
+	if nerr != nil {
+		ng.Detail = nerr.Error()
+	}
+	gates = append(gates, ng)
 	return gates
 }
 

@@ -734,11 +734,13 @@ func (h *Handler) e2bTemplateBuild(w http.ResponseWriter, r *http.Request) {
 		if active >= maxConcurrentBuilds {
 			return errBusy
 		}
-		return c.ss.StartBuild(tc, sandbox.BuildRequest{
-			ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: bl.BuildID, Image: templateImage(cfg, t, bl.BuildID), Result: res,
-			CPU: t.CPU, MemoryGiB: t.MemoryGiB,
-			Base: base.Ref, BaseAuth: base.Auth, BaseDockerConfig: base.DockerConfig,
-			FetchURL: func(hsh string) string { return fetch[hsh] },
+		return h.withSandboxStart(tc, c.es.ID, func(startCtx context.Context) error {
+			return c.ss.StartBuild(startCtx, sandbox.BuildRequest{
+				ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: bl.BuildID, Image: templateImage(cfg, t, bl.BuildID), Result: res,
+				CPU: t.CPU, MemoryGiB: t.MemoryGiB,
+				Base: base.Ref, BaseAuth: base.Auth, BaseDockerConfig: base.DockerConfig,
+				FetchURL: func(hsh string) string { return fetch[hsh] },
+			})
 		})
 	})
 	if errors.Is(err, errBusy) {

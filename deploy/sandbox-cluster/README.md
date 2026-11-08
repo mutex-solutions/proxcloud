@@ -12,6 +12,8 @@ Design, lab measurements and the threat model: [`docs/managed-sandbox.md`](../..
 |---|---|
 | `cilium-node-config.yaml` | Cilium socket LB limited to the host namespace on this cluster's nodes. A no-op while the chart runs Cilium without kube-proxy replacement; it keeps gVisor DNS working if that ever changes |
 | `node-setup.yaml` | DaemonSet: installs gVisor (`runsc`, platform `systrap`, `allow-suid` unless `RUNSC_ALLOW_SUID=false` so `sudo` works in sandboxes; security effect in docs/managed-sandbox.md §1.4) on every node; refuses a node with IPv6 |
+| `telemetry.yaml` | SB10: narrowly scoped nodes/stats collector identity, hostNetwork non-root collector with only public kubelet serving chain; dedicated ConfigMap samples and portal read role. No nodes/proxy. Apply before node-setup |
+| `rotation-rbac.example.yaml` | Optional separate management credential for exact named worker MachineDeployments; rotation defaults off. Do not bulk-apply this example |
 | `runtimeclass.yaml` | RuntimeClass `gvisor` |
 | `agent-sandbox/` | kubernetes-sigs/agent-sandbox v1.0.9, vendored (Sandbox CRD and controller); see its README |
 | `network-policy.yaml` | Cilium cluster-wide guardrail for every tenant namespace: private ranges and TCP 25 denied, ingress from `sandbox-proxy` only |
@@ -42,7 +44,9 @@ export KUBECONFIG=<sandbox cluster admin kubeconfig>
 kubectl apply -f cilium-node-config.yaml
 kubectl -n kube-system rollout restart ds/cilium && kubectl -n kube-system rollout status ds/cilium
 
-# 1. Node runtime. Every node must report "node-setup done".
+# SB10: render chart with sandboxBandwidth=true (bandwidth manager + cni.customConf).
+# 1. Node runtime and trusted telemetry identity, before the chain can publish its heartbeat.
+kubectl apply -f telemetry.yaml
 kubectl apply -f node-setup.yaml -f runtimeclass.yaml
 kubectl -n sandbox-system rollout status ds/node-setup
 kubectl -n sandbox-system logs -l app=node-setup --prefix | grep -E "done|REFUSED"

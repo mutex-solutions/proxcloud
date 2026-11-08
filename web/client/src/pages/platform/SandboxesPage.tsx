@@ -58,7 +58,7 @@ function useSandboxData(pid: string) {
     loading: locations.isLoading || services.isLoading,
     templates: svc?.sandboxTemplates ?? [],
     gpuModels: svc?.sandboxGpuModels ?? [],
-    limits: svc?.sandboxLimits ?? {},
+    limits: (svc?.sandboxLimits ?? {}) as SandboxLimits,
     e2b: !!svc?.sandboxE2B,
   }
 }
@@ -143,7 +143,7 @@ export default function SandboxesPage() {
           const d = row.original.data ?? {}
           return (
             <span className="text-sm">
-              {String(d.cpu)} vCPU · {String(d.memoryGiB)} GiB
+              {String(d.cpu)} vCPU · {String(d.memoryGiB)} GiB · egress {String(d.egressBandwidth || "legacy: recreate to cap")}
               {Number(d.gpuCount) > 0 && (
                 <Badge className="ml-2" variant="outline">
                   {String(d.gpuCount)}× {String(d.gpuModel)}

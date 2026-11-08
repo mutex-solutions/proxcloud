@@ -5,7 +5,7 @@
 // cursor walk; only the row presentation is design-system (mono timestamps, actor
 // chips, StatusBadge outcomes, mono action verbs).
 import { useState } from "react"
-import { useInfiniteQuery } from "@tanstack/react-query"
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
 import { ScrollText } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { EmptyState } from "@/components/empty-state"
@@ -35,6 +35,7 @@ type AuditRow = {
     resourceType?: string
     resourceId?: string
     resourceDisplayName?: string
+    resourceMetadata?: Record<string, unknown>
     changes?: PropertyChange[]
     actor?: { type?: string; id?: string; displayName?: string }
     outcome?: string
@@ -94,12 +95,16 @@ function fmtValue(v: unknown): string {
 }
 
 export default function AuditPage() {
+  const [abuseOnly, setAbuseOnly] = useState(false)
+  const [projectId, setProjectId] = useState("")
+  const counts = useQuery({ queryKey: ["sandbox-abuse-count", projectId], enabled: abuseOnly && !!projectId,
+    queryFn: () => apiFetchEnvelope<{ projectCount: number }>(`/admin/sandbox/abuse?projectId=${encodeURIComponent(projectId)}`) })
   const { data, isLoading, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
-    queryKey: ["admin-audit"],
+    queryKey: ["admin-audit", abuseOnly, projectId],
     initialPageParam: "",
     queryFn: ({ pageParam }) =>
       apiFetchEnvelope<AuditRow[]>(
-        `/admin/audit?limit=${PAGE_SIZE}${pageParam ? `&after=${encodeURIComponent(pageParam)}` : ""}`,
+        `/admin/audit?limit=${PAGE_SIZE}${abuseOnly ? "&resourceType=SANDBOX_ABUSE" : ""}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ""}${pageParam ? `&after=${encodeURIComponent(pageParam)}` : ""}`,
       ),
     getNextPageParam: (last) => (last.paging as CursorPaging | undefined)?.nextMarker ?? undefined,
   })
@@ -118,6 +123,11 @@ export default function AuditPage() {
         description="Every admin, client and system mutation, newest first."
       />
 
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <Button variant={abuseOnly ? "default" : "outline"} onClick={() => setAbuseOnly(!abuseOnly)}>Sandbox abuse events</Button>
+        <label className="text-sm">Project ID <input className="ml-2 rounded border p-2" value={projectId} onChange={(e) => setProjectId(e.target.value)} /></label>
+        {abuseOnly && projectId && <span className="text-sm">Detections: {counts.data?.data?.projectCount ?? "…"}</span>}
+      </div>
       {isLoading ? (
         <Card className="gap-0 overflow-hidden py-0">
           <div className="space-y-3 p-4">
@@ -180,6 +190,7 @@ export default function AuditPage() {
                       </TableCell>
                       <TableCell>
                         <StatusBadge status={e.outcome} />
+                        {e.resourceType === "SANDBOX_ABUSE" && <p className="text-xs text-muted-foreground">{String(e.resourceMetadata?.status ?? e.resourceMetadata?.action ?? "alert")}</p>}
                       </TableCell>
                       <TableCell>
                         {nChanges > 0 ? (

@@ -18,12 +18,14 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 COPY pkg ./pkg
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/sandbox-init ./cmd/sandbox-init
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/sandbox-init ./cmd/sandbox-init \
+ && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/sandbox-netguard ./cmd/sandbox-netguard
 
 FROM busybox:1.37
 ARG E2B_INFRA_REF=e85b9f5f6de6c92b002f376b4f91b1652d3c942e
 COPY --from=envd /out/envd /proxcloud-sandbox/bin/envd
 COPY --from=init /out/sandbox-init /proxcloud-sandbox/bin/sandbox-init
+COPY --from=init /out/sandbox-netguard /proxcloud-sandbox/bin/sandbox-netguard
 RUN <<EOF
 cat > /proxcloud-sandbox/THIRD_PARTY.md <<NOTICE
 # Third-party software
@@ -42,7 +44,7 @@ COPY --chmod=0755 <<'EOF' /install.sh
 set -eu
 DEST="${DEST:-/host/opt/proxcloud-sandbox/bin}"
 mkdir -p "$DEST"
-for f in envd sandbox-init; do
+for f in envd sandbox-init sandbox-netguard; do
   cp "/proxcloud-sandbox/bin/$f" "$DEST/.$f.tmp"
   chmod 0755 "$DEST/.$f.tmp"
   mv -f "$DEST/.$f.tmp" "$DEST/$f"

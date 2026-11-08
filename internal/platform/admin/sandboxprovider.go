@@ -26,6 +26,8 @@ func (h *Handler) SetSandboxGates(f func(ctx context.Context, es *externalservic
 
 func (h *Handler) routeSandboxProvider(r chi.Router) {
 	r.Post("/service/{id}/sandbox/release-check", h.sandboxReleaseCheck)
+	r.Get("/service/{id}/sandbox/rotation-plan", h.sandboxRotationPlan)
+	r.Get("/sandbox/abuse", h.sandboxAbuseList)
 }
 
 // sandboxOf reads a stored doc as a sandbox provider with its secret decrypted; nil for any other provider.

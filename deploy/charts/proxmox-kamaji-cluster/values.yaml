@@ -99,6 +99,11 @@ nodeGroups:
     # machineLabels: {node-restriction.kubernetes.io/key: value}  # CAPI sets these on the Node; the kubelet cannot
     # taints: [{key: k, value: v, effect: NoSchedule}]
 
+# -- Platform SANDBOX cluster only: bandwidth manager + host-owned CNI chain.
+# Requires SB10 node-setup to install the chain before workload networking works.
+# Leave false for ordinary tenant Kubernetes clusters.
+sandboxBandwidth: false
+
 # -- Chart repos and versions of what CAAPH installs in the tenant cluster. Operator territory.
 addonCharts:
   cilium: {repoURL: "https://helm.cilium.io", chart: cilium, version: "1.18.16"}
