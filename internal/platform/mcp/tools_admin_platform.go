@@ -49,7 +49,7 @@ var adminPlatformTools = []toolDef{
 	},
 	{
 		name:   "update_cloud_provider",
-		desc:   "Update a cloud provider. config/secret are MERGED wholesale into the stored doc (read the provider first). Per-region service toggles live at config.services = {\"<slug>\": {\"<region>\": bool}} (slugs: compute, network, image, volumev3, object-store, kubernetes, database) — the sync job and client menus gate on them. Secret fields left blank are kept.",
+		desc:   "Update a cloud provider. config/secret are MERGED wholesale into the stored doc (read the provider first). Per-region service toggles live at config.services = {\"<slug>\": {\"<region>\": bool}} (slugs: compute, network, image, volumev3, object-store, kubernetes, database, shares, dns, sandbox) — the sync job and client menus gate on them. Secret fields left blank are kept.",
 		method: "PUT",
 		path:   "/api/v1/admin/service/{id}/update",
 		params: []param{
@@ -83,12 +83,12 @@ var adminPlatformTools = []toolDef{
 	},
 	{
 		name:   "set_metrics_config",
-		desc:   "Set the provider's usage-metrics source for traffic billing: prometheus, or none (default — skip metrics entirely). config.metrics is MERGED — a source-only toggle keeps the stored prometheus connection config. prometheus = {url: base up to /api/v1 (e.g. https://mimir.example/prometheus), schema: libvirt-exporter (legacy layout; no Proxmox schema yet), headers: extra request headers (e.g. {\"X-Scope-OrgID\": \"tenant\"} for Mimir), basicUser, insecureTls, caCert, timeoutSeconds}. Credentials go in prometheusAuth = {basicPassword, bearerToken} — encrypted at rest, never returned; blank keeps the stored value, \"-\" clears it. Authorization headers and URL userinfo are rejected (use prometheusAuth).",
+		desc:   "Set the provider's usage-metrics source for traffic billing: pve (the default on a Proxmox provider: the VMs' public-NIC counters, nothing to configure), prometheus, or none (no metrics, so no traffic is billed; the default on other providers). config.metrics is MERGED — a source-only toggle keeps the stored prometheus connection config. prometheus = {url: base up to /api/v1 (e.g. https://mimir.example/prometheus), schema: libvirt-exporter (the only Prometheus schema implemented), headers: extra request headers (e.g. {\"X-Scope-OrgID\": \"tenant\"} for Mimir), basicUser, insecureTls, caCert, timeoutSeconds}. Credentials go in prometheusAuth = {basicPassword, bearerToken} — encrypted at rest, never returned; blank keeps the stored value, \"-\" clears it. Authorization headers and URL userinfo are rejected (use prometheusAuth).",
 		method: "PUT",
 		path:   "/api/v1/admin/service/{id}/metrics-config",
 		params: []param{
 			{name: "id", typ: "string", desc: "Cloud provider id.", required: true, in: "path"},
-			{name: "source", typ: "string", desc: "prometheus | none.", required: true, in: "body"},
+			{name: "source", typ: "string", desc: "pve | prometheus | none.", required: true, in: "body"},
 			{name: "prometheus", typ: "object", desc: "Prometheus connection config (see tool description).", in: "body"},
 			{name: "prometheusAuth", typ: "object", desc: "{basicPassword, bearerToken} — stored encrypted, never returned.", in: "body"},
 		},
@@ -112,6 +112,39 @@ var adminPlatformTools = []toolDef{
 		desc:   "The Proxmox flavor catalog (id, name, vcpus, ram, disk, extraSpecs — GPU flavors carry pci_passthrough:alias).",
 		method: "GET",
 		path:   "/api/v1/admin/flavor-categories/flavors",
+	},
+
+	// ── operator checks (read-only: each one stores nothing) ──
+	{
+		name:   "test_proxmox_connection",
+		desc:   "Check a stored Proxmox provider with its stored token: authentication, datacenter and node firewalls on, public networks off the management bridges. Returns {version, nodes, storages, sdnZones, pciMappings, warnings}; a failed check is HTTP 400 with the reason.",
+		method: "POST",
+		path:   "/api/v1/admin/service/proxmox/auth",
+		params: []param{
+			{name: "externalServiceId", typ: "string", desc: "Proxmox provider id.", required: true, in: "query"},
+			{name: "body", in: "rawbody", fixed: map[string]any{}},
+		},
+	},
+	{
+		name:   "test_object_store",
+		desc:   "Check a stored object-store provider's endpoint and admin key. Returns {ok: true}; a failed check is an HTTP error with the reason.",
+		method: "POST",
+		path:   "/api/v1/admin/service/{id}/object-store/test",
+		params: []param{{name: "id", typ: "string", desc: "Object-store provider id.", required: true, in: "path"}},
+	},
+	{
+		name:   "get_sandbox_release_gates",
+		desc:   "The release gates of a sandbox provider (what must hold before sandboxes may start): [{name, ok, detail}].",
+		method: "POST",
+		path:   "/api/v1/admin/service/{id}/sandbox/release-check",
+		params: []param{{name: "id", typ: "string", desc: "Sandbox provider id.", required: true, in: "path"}},
+	},
+	{
+		name:   "list_billing_profile_suspensions",
+		desc:   "A billing profile's suspension processes (dunning history: state, notifications sent, suspension and resolution times).",
+		method: "GET",
+		path:   "/api/v1/admin/suspensions/{billingProfileId}",
+		params: []param{{name: "billingProfileId", typ: "string", desc: "Billing profile id.", required: true, in: "path"}},
 	},
 
 	// ── flavor categories (the curated Hardware groups in the create-server flow) ──

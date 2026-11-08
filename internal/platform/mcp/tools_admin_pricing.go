@@ -67,7 +67,7 @@ var adminPricingTools = []toolDef{
 		params: []param{
 			{name: "name", typ: "string", desc: "Rule name.", required: true, in: "body"},
 			{name: "timeUnit", typ: "string", desc: "minute | hour | month.", required: true, in: "body"},
-			{name: "resourceType", typ: "string", desc: "instance | instance_traffic | volume | floating_ip | image.", required: true, in: "body"},
+			{name: "resourceType", typ: "string", desc: "A billing resource type (instance, instance_traffic, volume, k8s, database, bucket, sandbox, ...): list_billing_resource_types has them all with their attributes.", required: true, in: "body"},
 			{name: "pricePlanId", typ: "string", desc: "Owning price plan id.", required: true, in: "body"},
 			{name: "applyMethod", typ: "string", desc: "ADD_TO_TOTAL (default) or OVERWRITE_TOTAL. A usage attribute (the instance_traffic ones) must overwrite, on an hour or minute cadence.", in: "body"},
 			{name: "prices", typ: "array", desc: "Priced attributes: [{attributeName, tiers:[{from?,to?,value}]}].", in: "body"},

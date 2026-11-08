@@ -4,6 +4,34 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: MCP tool audit: dispatch skips the azp binding, 30 new tools, route test
+
+**What changed**
+
+- MCP tool calls run on a context marked by `auth.WithMCPDispatch`; `verifyJWT` skips the `azp` binding for it, as it
+  already did on `/mcp`. The admin console's `azp` check (`adminContext`) and the Admin API gate are unchanged.
+- Client toolset: `list_project_services`, `list_public_images`, `create_server`, backups (`list_backups`,
+  `create_backup`, `restore_server_backup`, `delete_server_backup`), snapshots (list, create, rollback, delete),
+  `enable/disable_server_protection`, Kubernetes (list, create, `get_kubeconfig`, `set_kubernetes_node_groups`,
+  `upgrade_kubernetes_cluster`), databases (list, create), DNS (zones, records list/set/delete),
+  `list_sandbox_templates`, `get_sandbox_access`. Admin toolset: `test_proxmox_connection`, `test_object_store`,
+  `get_sandbox_release_gates`, `list_billing_profile_suspensions`.
+- A tool row can fix a param's value (`param.fixed`, left out of the input schema) and force `destructiveHint`
+  (`toolDef.destructive`); `test_` tools are annotated read-only.
+- `TestMCPToolRoutesExist` (`internal/server`) matches every tool's method and path against the app router.
+
+**Why**
+
+- `/mcp` accepts a token from any client of a known issuer (an MCP client registers its own), then every tool re-sent
+  that token to `/api/v1`, where the `azp` binding refused it: OAuth sign-in passed the gate and failed on every call.
+  Skipping the binding only for the token `/mcp` already accepted adds no new way in; operator tokens still need the
+  admin client, so operators use an API key, as the docs now say.
+- An action tool whose action string the agent typed could be told to run another action than its name and its
+  annotation say; a fixed value cannot.
+- No test tied the tool rows to the router, so a renamed route would only have shown when an agent called it.
+
+Diagrams: none changed (no new container or component).
+
 ## 2026-11-08: MCP gateway template for E2B's `Sandbox.create(mcp=...)` (SB8)
 
 **What changed**
