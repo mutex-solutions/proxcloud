@@ -18,6 +18,8 @@ and rules: [README.md](README.md#maintenance-rule).
 - `keycloakConfigCli.adminPassword` is rendered into the Secret `<fullname>-keycloak-admin`; the quickstart's Keycloak
   takes its bootstrap admin password from it.
 - New values `api.defaultRegion`, `api.billing.timeout`, `api.mail.businessName` (env the API already read).
+- The chart README lists the two `helm repo add` lines `helm dependency build` needs, and how to build and load the
+  api/web/admin images when the chart's `appVersion` is not published on ghcr.io yet.
 
 **Why**
 

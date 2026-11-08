@@ -22,7 +22,31 @@ Brings up api, ui, admin, PostgreSQL, RabbitMQ and Keycloak with its realms on a
 fresh cluster (kind, k3d, minikube or a real one) with no operators. Needs
 `helm` 3.8+, `kubectl` and a default StorageClass.
 
+**Images first.** The chart pulls `ghcr.io/mutex-solutions/proxcloud-{api,web,admin}`
+at the chart's `appVersion` (`v0.3.29`). Until that release is published there,
+build the three images from this checkout and load them into the cluster:
+
 ```sh
+docker build -t proxcloud-api:local -f deploy/Dockerfile .
+docker build -t proxcloud-web:local --build-arg APP=client web
+docker build -t proxcloud-admin:local --build-arg APP=admin web
+kind load docker-image proxcloud-api:local proxcloud-web:local proxcloud-admin:local
+# k3d: k3d image import <same three>; minikube: minikube image load <each>;
+# a real cluster: push them to a registry it can pull from and use that name below.
+```
+
+and add this flag to the `helm install` below:
+
+```sh
+--set api.image.repository=proxcloud-api,api.image.tag=local,ui.image.repository=proxcloud-web,ui.image.tag=local,admin.image.repository=proxcloud-admin,admin.image.tag=local
+```
+
+Without it, or a published release, the pods stay in `ImagePullBackOff`.
+Then install:
+
+```sh
+helm repo add codecentric https://codecentric.github.io/helm-charts
+helm repo add cnpg https://cloudnative-pg.github.io/charts
 helm dependency build deploy/charts/proxcloud
 helm install proxcloud deploy/charts/proxcloud -n proxcloud --create-namespace --wait --timeout 15m \
   -f deploy/charts/proxcloud/values-quickstart.yaml \
@@ -110,6 +134,8 @@ The defaults expect the [CloudNativePG](https://cloudnative-pg.io/) and
 operators to run in the cluster already:
 
 ```sh
+helm repo add codecentric https://codecentric.github.io/helm-charts   # once per machine
+helm repo add cnpg https://cloudnative-pg.github.io/charts
 helm dependency build deploy/charts/proxcloud
 helm install proxcloud deploy/charts/proxcloud -n proxcloud --create-namespace -f my-values.yaml \
   --set api.encryptionKey=$(openssl rand -hex 32) \

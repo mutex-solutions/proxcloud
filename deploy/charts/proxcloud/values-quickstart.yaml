@@ -1,5 +1,7 @@
 # Quickstart: ProxCloud on any Kubernetes cluster, no operators needed, in one command.
 #
+#   helm repo add codecentric https://codecentric.github.io/helm-charts
+#   helm repo add cnpg https://cloudnative-pg.github.io/charts
 #   helm dependency build deploy/charts/proxcloud
 #   helm install proxcloud deploy/charts/proxcloud -n proxcloud --create-namespace --wait --timeout 15m \
 #     -f deploy/charts/proxcloud/values-quickstart.yaml \
@@ -7,6 +9,9 @@
 #     --set postgresql.auth.password=$(openssl rand -hex 16) \
 #     --set rabbitmq.auth.password=$(openssl rand -hex 16) \
 #     --set keycloakConfigCli.adminPassword=$(openssl rand -hex 12)
+#
+# Until the chart's appVersion is published on ghcr.io, build and load the api/web/admin images
+# yourself and override api/ui/admin.image (chart README, "Images first").
 #
 # Brings up api, ui (customer console), admin (operator console), PostgreSQL and RabbitMQ (bitnami
 # subcharts), and Keycloak with its realms. Every secret comes from the --set flags above; none has a
@@ -18,7 +23,7 @@
 #   api               http://localhost:8180   Keycloak http://localhost:8190
 # These URLs are baked into the tokens and the consoles, so keep the ports. For one host behind an
 # Ingress instead, set api.selfUrls.*, auth.*.issuer, the --hostname below and the ingress blocks
-# (see the chart README, "Expose with an Ingress").
+# (see the chart README, "Expose the quick start with an Ingress").
 #
 # Not for production: one replica each, Keycloak's own admin doubles as the operator, plain HTTP.
 fullnameOverride: proxcloud
