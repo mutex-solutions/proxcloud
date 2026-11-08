@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net"
 	"net/netip"
@@ -494,6 +495,27 @@ func sandboxEndpoints(allow []string) []netip.AddrPort {
 	return slices.Compact(out)
 }
 
+// managementEndpoints drops the sandbox endpoints inside the tenant pool or an operator-blocked range (tenant): only a
+// management-side endpoint may be opened to the sandbox networks, never a way into a tenant's network.
+func managementEndpoints(allow, tenant []string) []string {
+	var nets []netip.Prefix
+	for _, c := range tenant {
+		if p, err := netip.ParsePrefix(strings.TrimSpace(c)); err == nil {
+			nets = append(nets, p.Masked())
+		}
+	}
+	var out []string
+	for _, a := range allow {
+		ep, err := netip.ParseAddrPort(strings.TrimSpace(a))
+		if err == nil && slices.ContainsFunc(nets, func(p netip.Prefix) bool { return p.Contains(ep.Addr()) }) {
+			slog.Warn("pve isolation: a sandbox endpoint in a tenant range is not opened", "endpoint", a)
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 // projectIsolationRules let a project's subnets reach each other and their own gateways.
 func projectIsolationRules(projectID string, cidrs []string) []FirewallRule {
 	if len(cidrs) == 0 {
@@ -576,6 +598,7 @@ func (s *Service) isolationWant(ctx context.Context, pool string, blocked, sandb
 	if err != nil {
 		return nil, "", nil, false, err
 	}
+	allow = managementEndpoints(allow, append([]string{poolNet.String()}, blocked...))
 	blocked = slices.Compact(slices.Sorted(slices.Values(append(mgmt, blocked...))))
 	if sandbox, err = sandboxNets(poolNet, blocked, sandbox); err != nil {
 		return nil, "", nil, false, err

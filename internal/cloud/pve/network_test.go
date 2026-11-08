@@ -251,6 +251,29 @@ func TestReconcileIsolationSandboxEndpoints(t *testing.T) {
 	}
 }
 
+// Only a management-side endpoint is opened: one in the tenant pool or an operator-blocked range is refused.
+func TestReconcileIsolationRefusesTenantEndpoints(t *testing.T) {
+	opts := map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/firewall/options": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":{"enable":1}}`)
+		},
+	}
+	srv, rules, _ := isolationFakeNodes(t, nil, opts)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", []string{"10.120.0.0/24"}, []string{"10.110.0.0/24"},
+		"10.88.0.41:9000", "10.100.7.9:443", "10.120.0.5:22"); err != nil {
+		t.Fatal(err)
+	}
+	var accepts []string
+	for _, r := range *rules {
+		if r.Action == "ACCEPT" && r.Comment == isolationComment {
+			accepts = append(accepts, r.Dest+":"+r.DPort)
+		}
+	}
+	if want := []string{"10.88.0.41:9000", "10.88.0.41:9000"}; !reflect.DeepEqual(accepts, want) {
+		t.Fatalf("accepts %v, want %v", accepts, want)
+	}
+}
+
 func TestReconcileIsolationSandbox(t *testing.T) {
 	srv, rules, _ := isolationFake(t, nil)
 	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, []string{"10.110.0.5/24", "10.110.0.0/24"}); err != nil {
