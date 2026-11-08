@@ -11,7 +11,7 @@ Design, lab measurements and the threat model: [`docs/managed-sandbox.md`](../..
 | File | What it does |
 |---|---|
 | `cilium-node-config.yaml` | Cilium socket LB limited to the host namespace on this cluster's nodes. A no-op while the chart runs Cilium without kube-proxy replacement; it keeps gVisor DNS working if that ever changes |
-| `node-setup.yaml` | DaemonSet: installs gVisor (`runsc`, platform `systrap`) on every node; refuses a node with IPv6 |
+| `node-setup.yaml` | DaemonSet: installs gVisor (`runsc`, platform `systrap`, `allow-suid` unless `RUNSC_ALLOW_SUID=false` so `sudo` works in sandboxes; security effect in docs/managed-sandbox.md §1.4) on every node; refuses a node with IPv6 |
 | `runtimeclass.yaml` | RuntimeClass `gvisor` |
 | `agent-sandbox/` | kubernetes-sigs/agent-sandbox v1.0.9, vendored (Sandbox CRD and controller); see its README |
 | `network-policy.yaml` | Cilium cluster-wide guardrail for every tenant namespace: private ranges and TCP 25 denied, ingress from `sandbox-proxy` only |

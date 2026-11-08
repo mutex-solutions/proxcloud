@@ -22,6 +22,18 @@ and rules: [README.md](README.md#maintenance-rule).
   `deploy/templates/images.yaml` like the others, from where the registry stage copies and pre-pulls it.
 - `tests/e2b-compat/mcp.py` (gateway, tools, auth, keyed server with a dummy key, unknown server) and `catalog.py`
   (every built-in template, `mcp-gateway` included).
+- Review fixes: a remote server's headers (its key) go only to that server's own scheme and host, so a redirect
+  elsewhere does not carry them; each package server gets a short allowlist of the gateway's environment plus its own
+  config instead of all of it (no `GATEWAY_ACCESS_TOKEN`, no other server's key, no sandbox `envVars`); vendor
+  telemetry off by default (`DO_NOT_TRACK`, desktopCommander's, mongodb's and onnxruntime's switches); the build check
+  runs with a throwaway `HOME` and `TMPDIR`, so the image no longer ships a desktopCommander client id with telemetry
+  on, a mongodb log or an onnxruntime device id and session file, and the build fails if such state is left.
+- From the lab drill: `sandbox-init` drops `KUBERNETES_*` like `PROXCLOUD_*` (the kubelet sets
+  `KUBERNETES_SERVICE_*` and `KUBERNETES_PORT*` in every container even with service links off), and the API refuses
+  `envVars` with either prefix. `node-setup` writes runsc `allow-suid = "true"` by default (`RUNSC_ALLOW_SUID`,
+  installer `sandbox.allow_suid`), so `sudo` works in sandboxes as on E2B; it failed in the base template with
+  "effective uid is not 0 ... nosuid". Security effect in `docs/managed-sandbox.md` §1.4. Default chosen pending the
+  owner's decision (the earlier implementation's owner approved it for E2B parity).
 - Diagrams: C3 sandbox diagram (node `mcp-gateway`, edge from `sandbox-proxy`), C3 component row "MCP gateway".
 
 **Why**
@@ -31,6 +43,10 @@ E2B's MCP support is part of the SDK surface agents use, and the earlier impleme
 platform: they go from the SDK to the sandbox, the portal refuses only a malformed field and keeps nothing of it, and
 the sandbox carries no platform credential the servers could read. The Node and build-check changes come from the lab
 run: three catalog servers were installed but could not start on the base image, which only a start shows.
+The review fixes keep each key with the one server it is for: a third-party server that redirects, or a package server
+that reads its environment, saw the tenant's key or the gateway's bearer before. State written by the build check
+would have given every sandbox the same vendor client id with analytics on. The `KUBERNETES_*` variables pointed
+sandbox code at the cluster's API server for nothing, and sudo is what E2B templates and agents expect to work.
 
 ## 2026-11-08: Custom sandbox templates: build pods, a build account per project, pruning through the OCI API (SB6b)
 

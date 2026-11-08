@@ -356,6 +356,28 @@ in `node-setup.yaml` was already there unchanged. Results:
 - IPv6 check: passes on the worker; with a ULA address added on a dummy interface of the worker, node-setup refused the
   node (CrashLoopBackOff, the address in its log) and the check failed; with it removed, both passed again.
 
+### 1.4 sudo in sandboxes: runsc `allow-suid`
+
+`node-setup` writes `allow-suid = "true"` into the nodes' runsc config unless `RUNSC_ALLOW_SUID` is `false`
+(installer: `sandbox.allow_suid`, default `true`). Without it gVisor ignores the setuid bit, and the SB8 lab drill saw
+every `sudo` in the base template fail with "effective uid is not 0 ... nosuid"; the base template gives user `user`
+passwordless sudo, and E2B templates and agents expect it to work. The earlier implementation runs runsc the same way
+(its owner approved it for E2B parity). For ProxCloud it is the default chosen pending the owner's decision.
+
+What it changes:
+
+- Every setuid binary in a sandbox's image works, so any process in the sandbox can become root of that sandbox.
+- The tenant gains nothing: envd already runs commands as root for whoever holds the sandbox's access token, and
+  `startAsRoot` templates start as root.
+- The node gains no exposure from root alone: root inside gVisor is root of gVisor's own kernel; the sentry keeps
+  its seccomp filter and namespaces, and the guardrail, the VM firewall and the isolation rules see the same packets.
+- What it does widen: code that got in as `user` (a compromised dependency, a prompt-injected agent) can start an
+  escape attempt from root inside the sentry instead of from an unprivileged user.
+
+Setting it off: `sandbox.allow_suid: false` and stage 55, or `RUNSC_ALLOW_SUID=false` in the DaemonSet; node-setup
+rewrites `/etc/containerd/runsc.toml` and restarts containerd. New sandboxes pick the change up; running ones keep
+theirs.
+
 ## 2. Layer 1: the VM firewall on the workers (SB2b)
 
 Layer 0 (§1.2) sees routed traffic only. Layer 1 sees every frame a worker sends or receives, frames switched inside
@@ -955,7 +977,11 @@ installer stage 60 sets both when `sandbox.domain` is set), every sandbox mounts
 and runs `/.proxcloud/sandbox-init` as PID 1: it creates the template's user if the image has none, starts envd
 (`-isnotfc`, port 49983), posts envd's `/init` over localhost with the sandbox's env, user, workdir and access token,
 runs the template's start command (as root with `startAsRoot`), marks the pod ready once the ready command exits 0,
-restarts envd if it dies, and relays ports bound to localhost to the pod address. A restarted envd has no access token
+restarts envd if it dies, and relays ports bound to localhost to the pod address. The sandbox's env (envd's own and
+the defaults it gives every process) is the image's ENV plus the tenant's `envVars`, without the `PROXCLOUD_*` control
+variables and without the `KUBERNETES_*` ones the kubelet puts into every container even with service links off (the
+SB8 drill found `KUBERNETES_SERVICE_*` in every process); the API refuses `envVars` with either prefix. A restarted
+envd has no access token
 until its `/init`, and envd without a token lets every request through, so sandbox-init first drops the ready marker
 (the readiness probe turns the pod NotReady and sandbox-proxy routes only to Ready pods), waits 5 s (probe period plus
 the proxy's 2 s lookup cache), starts envd, and puts the marker back only once `/init` succeeded. The two binaries come
@@ -1349,14 +1375,26 @@ the create (`brave: missing "apiKey"`), and nothing falls back to a platform val
 - the image holds no account or key of any server (the catalog has placeholders only);
 - the portal drops `mcp` after the shape check: it is not in the sandbox row, the Sandbox CR, the database or the log;
 - the sandbox gets no platform credential to leak: no service account token, no service links, and `sandbox-init`
-  strips every `PROXCLOUD_` variable before envd and its children (section 5.3), so the gateway and its servers see
-  the tenant's `envVars` and their own config only;
+  strips every `PROXCLOUD_` and `KUBERNETES_` variable before envd and its children (section 5.3);
+- each package server gets only what it needs: its own catalog env (or a `github/...` server's `envs`), `PATH` with the
+  servers' directories first, and an allowlist of the gateway's environment (`HOME`, `USER`, `LOGNAME`, `LANG`,
+  `LC_ALL`, `TZ`, `TERM`, `TMPDIR`, the proxy variables, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`).
+  Not the gateway's bearer (`GATEWAY_ACCESS_TOKEN`, which the SDK puts in the gateway's environment), not another
+  server's key, not the sandbox's other `envVars`;
+- a remote server's headers go to that server's own scheme and host only: a redirect to another host (or to plain
+  http) is followed without them;
 - the config and the gateway token are root-only files (0600) in the sandbox; the gateway's own process does not carry
-  the keys in its environment, each server gets only its own.
+  the keys in its environment.
+
+Vendor telemetry is off by default: every server starts with `DO_NOT_TRACK=1`, `DESKTOP_COMMANDER_DISABLE_TELEMETRY=1`,
+`MDB_MCP_TELEMETRY=disabled` and `ORT_DISABLE_TELEMETRY=1` (desktopCommander sends analytics and mongodb telemetry
+unless told not to; markitdown's onnxruntime writes a device id and a session file). The build check runs the servers
+with a throwaway `HOME` and `TMPDIR`, so the image carries no state from it (desktopCommander's client id, mongodb's log,
+onnxruntime's device id), and the build fails if any of it is left.
 
 A tenant's keys are as safe as anything else in their sandbox: whoever runs code in it as root can read them, which is
 the tenant's choice. `tests/e2b-compat/mcp.py` checks the keyed path with a dummy key (the server has it, no platform
-variable reaches it, no token is mounted, a missing key fails the create).
+variable or gateway bearer reaches it, no token is mounted, a missing key fails the create).
 
 ### 9.3 Measured on the lab (2026-11-08)
 

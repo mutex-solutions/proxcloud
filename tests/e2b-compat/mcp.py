@@ -74,6 +74,11 @@ try:
     env = "\n".join(root(f"tr '\\0' '\\n' < /proc/{p}/environ 2>/dev/null || true") for p in pids)
     check("a keyed server gets the tenant's key", f"BRAVE_API_KEY={KEY}" in env, str(pids))
     check("no platform variable reaches it", "PROXCLOUD_" not in env and "KUBERNETES_" not in env, env[:300])
+    check("the gateway's bearer does not reach it", "GATEWAY_ACCESS_TOKEN" not in env, env[:300])
+    check("vendor telemetry off", "DO_NOT_TRACK=1" in env, env[:300])
+    check("no KUBERNETES_ variable in a sandbox command", "KUBERNETES_" not in s.commands.run("env").stdout)
+    out = s.commands.run("sudo -n id -u 2>&1 || true", timeout=30).stdout.strip()
+    check("sudo works (runsc allow-suid)", out == "0", out[:300])
     check("no service account token in the sandbox",
           root("test -e /var/run/secrets/kubernetes.io/serviceaccount/token && echo present || echo missing").strip() == "missing")
 finally:
