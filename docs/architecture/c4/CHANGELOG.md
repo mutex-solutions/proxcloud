@@ -4,6 +4,18 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: nginx public asset modes independent of umask
+
+**What changed:** both SPA images normalize only nginx's public document root to
+0755 directories and 0644 files; the entrypoint sets its generated `config.js` to
+0644 before starting nginx. The Docker regression checks both images and HTTP
+responses under umask 077, with an existing 0600 config and a missing config.
+**Why:** Vite preserves public-file modes from a restrictive checkout, and shell
+redirection preserves an existing 0600 mode; nginx workers then return 403 for the
+runtime config and brand SVGs, making the SPA fall back to development auth URLs.
+No secret paths or global umask are changed. **Diagrams updated:** none; C2 build
+and delivery text records the existing SPA containers' public-file contract.
+
 ## 2026-11-09: sandbox abuse controls and wait-only worker replacement (SB10)
 
 **What changed**
