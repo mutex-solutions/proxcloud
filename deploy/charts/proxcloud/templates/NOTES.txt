@@ -1,31 +1,48 @@
+{{- $fn := include "proxcloud.fullname" . -}}
 proxcloud {{ .Chart.Version }} deployed as release "{{ .Release.Name }}".
 
 Components:
-  api    : {{ include "proxcloud.fullname" . }}-api    (app :{{ .Values.api.service.port }}, mgmt :{{ .Values.api.managementPort }})
-  ui     : {{ include "proxcloud.fullname" . }}-ui     (:{{ .Values.ui.service.port }})
-  admin  : {{ include "proxcloud.fullname" . }}-admin  (:{{ .Values.admin.service.port }})
+  api    : {{ $fn }}-api    (app :{{ .Values.api.service.port }}, mgmt :{{ .Values.api.managementPort }})
+  ui     : {{ $fn }}-ui     (:{{ .Values.ui.service.port }})
+  admin  : {{ $fn }}-admin  (:{{ .Values.admin.service.port }})
 {{- if .Values.cnpg.enabled }}
   db     : CloudNativePG cluster ({{ include "proxcloud.cnpgClusterName" . }}-rw, db "{{ .Values.postgresql.auth.database }}"){{ if .Values.cnpg.installOperator }} + bundled operator{{ end }}
 {{- else if .Values.postgresql.enabled }}
-  db     : bundled PostgreSQL ({{ .Release.Name }}-postgresql, db "{{ .Values.postgresql.auth.database }}")
+  db     : bundled PostgreSQL ({{ include "proxcloud.postgresqlName" . }}, db "{{ .Values.postgresql.auth.database }}")
 {{- end }}
-{{- if .Values.rabbitmq.enabled }}
-  broker : bundled RabbitMQ ({{ .Release.Name }}-rabbitmq)
+{{- if or .Values.rabbitmq.enabled .Values.rabbitmqCluster.enabled }}
+  broker : RabbitMQ ({{ include "proxcloud.rabbitHost" . }})
 {{- end }}
 {{- if .Values.keycloakx.enabled }}
-  idp    : bundled Keycloak ({{ .Release.Name }}-keycloakx-http)
+  idp    : bundled Keycloak ({{ include "proxcloud.keycloakName" . }}-http)
+{{- end }}
+{{- if .Values.seed.enabled }}
+  seed   : first-run platform and billing configuration (Job {{ $fn }}-seed, keeps existing documents)
 {{- end }}
 
 Check health (management port, cluster-internal):
 
-  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "proxcloud.fullname" . }}-api {{ .Values.api.managementPort }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fn }}-api {{ .Values.api.managementPort }}
   curl localhost:{{ .Values.api.managementPort }}/actuator/health/readiness
+{{- $ui := .Values.api.selfUrls.ui | default "" }}
+{{- if and (not .Values.api.ingress.enabled) (not .Values.gateway.enabled) (contains "://localhost:" $ui) }}
 
-{{- if and (not .Values.api.ingress.enabled) (not .Values.gateway.enabled) }}
+Reach the consoles through port-forwards (keep this running; the URLs are baked into the tokens):
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fn }}-api {{ (urlParse .Values.api.selfUrls.api).host | splitList ":" | last }}:{{ .Values.api.service.port }} &
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fn }}-ui {{ (urlParse .Values.api.selfUrls.ui).host | splitList ":" | last }}:{{ .Values.ui.service.port }} &
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fn }}-admin {{ (urlParse .Values.api.selfUrls.admin).host | splitList ":" | last }}:{{ .Values.admin.service.port }} &
+{{- if .Values.keycloakx.enabled }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "proxcloud.keycloakName" . }}-http {{ (urlParse .Values.auth.main.issuer).host | splitList ":" | last }}:80 &
+{{- end }}
+
+  Customer console  {{ .Values.api.selfUrls.ui }}   (register an account)
+  Operator console  {{ .Values.api.selfUrls.admin }}{{ if .Values.keycloakConfigCli.enabled }}   (user {{ .Values.keycloakConfigCli.adminUser }}; password: kubectl -n {{ .Release.Namespace }} get secret {{ include "proxcloud.kcAdminSecretName" . }} -o jsonpath='{.data.{{ .Values.keycloakConfigCli.passwordKey }}}' | base64 -d){{ end }}
+{{- else if and (not .Values.api.ingress.enabled) (not .Values.gateway.enabled) }}
 
 No Ingress/HTTPRoute is enabled — reach the API with:
 
-  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "proxcloud.fullname" . }}-api {{ .Values.api.service.port }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fn }}-api {{ .Values.api.service.port }}
 {{- end }}
 {{- if and .Values.postgresql.enabled (eq .Values.postgresql.auth.password "proxcloud") }}
 
@@ -39,10 +56,12 @@ WARNING: api.encryptionKey is the insecure dev default — set a real key.
 Auth realms are unset (auth.*.issuer) — authenticated routes will 401.
 Point them at your IdP (or the bundled Keycloak's public URL).
 {{- end }}
+{{- if not .Values.seed.enabled }}
 
-A fresh database needs the base configuration documents seeded before the
-billing/project endpoints work — see deploy/seed/ in the repo.
+seed.enabled is off: a fresh database needs the platform and billing configuration documents
+before the billing and project endpoints work — see deploy/seed/ in the repo.
+{{- end }}
 
-Adding a kamaji managed-Kubernetes provider additionally requires a prepared
-management cluster (ArgoCD + deploy/mgmt-cluster manifests) — see
-docs/managed-k8s.md in the repo.
+Proxmox VE clusters are registered after install in the operator console (System → Cloud providers).
+Adding a kamaji managed-Kubernetes provider additionally requires a prepared management cluster
+(ArgoCD + deploy/mgmt-cluster manifests) — see docs/managed-k8s.md in the repo.

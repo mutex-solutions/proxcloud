@@ -25,6 +25,31 @@ token were only in `pkg/auth`, and the delivery diagram still showed the K8s nod
 the table and the workflow said otherwise.
 
 **Diagrams updated:** C2 (API surfaces, C2c, container table, trust boundaries), C4 (billing registry row).
+## 2026-11-08: PR #127 Helm quickstart install and first-run seed Job
+
+**What changed**
+
+- Chart `proxcloud` 0.3.29: `values-quickstart.yaml` installs api, ui, admin, PostgreSQL and RabbitMQ (bitnami
+  subcharts) and Keycloak with its realms on a cluster with no operators, reached by port-forward on fixed localhost
+  ports; secrets come from `--set` flags only.
+- New hook Job `seed` (post-install, post-upgrade; PostSync under ArgoCD): the api image runs psql with the api's own
+  DSN and writes `seed.platformConfiguration` and `seed.billingConfiguration` into `platformConfiguration` and
+  `billingConfiguration` only while those tables are empty, under the same advisory lock `internal/pgdoc` takes to
+  create a table.
+- `keycloakConfigCli.adminPassword` is rendered into the Secret `<fullname>-keycloak-admin`; the quickstart's Keycloak
+  takes its bootstrap admin password from it.
+- New values `api.defaultRegion`, `api.billing.timeout`, `api.mail.businessName` (env the API already read).
+- The chart README lists the two `helm repo add` lines `helm dependency build` needs, and how to build and load the
+  api/web/admin images when the chart's `appVersion` is not published on ghcr.io yet.
+
+**Why**
+
+- A Helm install needed both operators in place, a realm made by hand and the seed run by hand before billing worked;
+  the owner asked for a one-command Helm install beside `docker compose up`.
+- The seed writes into empty tables only, so the operator console and `deploy/seed/seed-operator.py` stay the owners of
+  those documents and no upgrade rewrites them.
+
+**Diagrams updated:** c2-containers.md (PostgreSQL row)
 ## 2026-11-08: Sandbox pause, resume, snapshots and fork of the filesystem; autoPause and autoResume (SB7)
 
 **What changed**

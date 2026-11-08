@@ -225,7 +225,7 @@ unset) the service uses a no-op mailer and email side-effects silently do nothin
 | From address | `PROXCLOUD_MAIL_FROM` | — | Envelope-from / sender. |
 | Business name | `PROXCLOUD_MAIL_BUSINESS_NAME` | `ProxCloud` | Sender display / branding in templates. |
 
-Set these in Helm via the first-class `api.mail.smtp.*` block (plus `api.mail.from`),
+Set these in Helm via the first-class `api.mail.smtp.*` block (plus `api.mail.from` and `api.mail.businessName`),
 which the chart injects into the pod as the `PROXCLOUD_MAIL_*` env vars above
 (see `deploy/charts/proxcloud/templates/api/deployment.yaml`). Nothing about mail
 renders into `application.yml`.
