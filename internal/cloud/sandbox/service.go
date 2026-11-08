@@ -413,6 +413,18 @@ func (s *Service) SetTimeout(ctx context.Context, projectID, id string, timeoutS
 	return sandboxData(obj), nil
 }
 
+// ShutdownAt sets the time the cluster removes the sandbox (spec.shutdownTime), outside the timeout limits: a pause
+// holds a sandbox past its end until its image is ready, and puts the old time back if the pause fails. Its end-at
+// (autoPause) stays as it is.
+func (s *Service) ShutdownAt(ctx context.Context, projectID, id string, t time.Time) error {
+	if _, err := s.get(ctx, projectID, id); err != nil {
+		return err
+	}
+	_, err := s.api.MergePatchCR(ctx, CRGroup, CRVersion, CRPlural, NamespaceFor(projectID), id,
+		map[string]any{"spec": map[string]any{"shutdownTime": t.UTC().Format(time.RFC3339)}})
+	return err
+}
+
 // Exec limits. The output cap keeps one call's response bounded; long-running work belongs in
 // a background process the agent polls.
 const (

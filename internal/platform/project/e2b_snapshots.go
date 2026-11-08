@@ -561,8 +561,24 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 		h.dropSnapshot(ctx, c, t.ID)
 		return err
 	}
+	// Hold the sandbox until finishPause is done with it: an end that comes while the image is assembled must not
+	// remove the original before the copy is usable. abandonPause puts its own end back.
+	if end, ok := savedShutdown(saved); ok && end.Before(lease) {
+		if err := c.ss.ShutdownAt(ctx, c.proj.ID, id, lease); err != nil {
+			h.abandonPause(ctx, c, id, t.ID, err)
+			return err
+		}
+	}
 	go h.finishPause(c, id, t.ID)
 	return nil
+}
+
+// savedShutdown is the time the cluster removes the sandbox saved (spec.shutdownTime); false when it has none.
+func savedShutdown(saved map[string]any) (time.Time, bool) {
+	spec, _ := saved["spec"].(map[string]any)
+	s, _ := spec["shutdownTime"].(string)
+	t, err := time.Parse(time.RFC3339, s)
+	return t, err == nil
 }
 
 // errPauseMoved: the paused record is no longer the pause the caller holds (cancelled, killed, or further along).
@@ -615,16 +631,23 @@ func (h *Handler) finishPause(c *e2bCaller, id, templateID string) {
 }
 
 // abandonPause ends a pause that cannot complete: the record (if still this pause's) and the snapshot go, the sandbox
-// keeps running.
+// keeps running, to its own end again.
 func (h *Handler) abandonPause(ctx context.Context, c *e2bCaller, id, templateID string, cause error) {
+	var saved map[string]any
 	err := h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
 		if p.TemplateID != templateID {
 			return false, errPauseMoved
 		}
+		saved = p.Saved
 		return true, nil
 	})
 	h.dropSnapshot(ctx, c, templateID)
 	if err == nil {
+		if end, ok := savedShutdown(saved); ok {
+			if serr := c.ss.ShutdownAt(ctx, c.proj.ID, id, end); serr != nil && !errors.Is(serr, sandbox.ErrNotFound) {
+				slog.Warn("e2b: restoring the end of a sandbox whose pause failed", "sandbox", id, "err", serr)
+			}
+		}
 		slog.Error("e2b: pause failed, the sandbox keeps running", "sandbox", id, "project", c.proj.ID, "err", cause)
 	}
 }
@@ -742,6 +765,10 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 		switch out {
 		case claimPausing:
 			if time.Now().After(joinUntil) && h.cancelPause(ctx, c, p.ID) {
+				// It runs on as a resumed one would: for timeoutSeconds from now, not to the pause's hold.
+				if _, err := c.ss.SetTimeout(ctx, c.proj.ID, p.ID, timeoutSeconds); err != nil && !errors.Is(err, sandbox.ErrNotFound) {
+					return nil, err
+				}
 				return h.awaitResumed(ctx, c, p.ID)
 			}
 			select {
@@ -1038,8 +1065,8 @@ func (h *Handler) AutoPauseSandboxes(ctx context.Context) {
 			slog.Warn("autopause: list", "service", es.ID, "err", err)
 			continue
 		}
-		// A pause waits for its snapshot image (tens of seconds): a few at a time, so one slow assembly does not hold
-		// the others past their grace.
+		// A pause streams its capture before it answers: a few at a time. One still assembling its image is past its end
+		// and listed again: errAlreadyPaused, nothing to do.
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, autoPauseParallel)
 		for _, d := range due {
@@ -1051,11 +1078,13 @@ func (h *Handler) AutoPauseSandboxes(ctx context.Context) {
 			sem <- struct{}{}
 			wg.Go(func() {
 				defer func() { <-sem }()
-				if err := h.pauseSandbox(ctx, c, d.ID); err != nil {
+				if err := h.pauseSandbox(ctx, c, d.ID); errors.Is(err, errAlreadyPaused) {
+					return
+				} else if err != nil {
 					slog.Error("autopause: pause", "sandbox", d.ID, "err", err)
 					return
 				}
-				slog.Info("autopause: paused", "sandbox", d.ID, "project", d.ProjectID)
+				slog.Info("autopause: pausing", "sandbox", d.ID, "project", d.ProjectID)
 			})
 		}
 		wg.Wait()

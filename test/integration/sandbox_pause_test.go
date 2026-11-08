@@ -8,6 +8,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -179,6 +180,21 @@ func (f *sbxFixture) pausedState(id, want string) {
 		}
 	}
 	f.t.Fatalf("paused record of %s: %q, want %q", id, got, want)
+}
+
+// shutdownWithin waits up to 10 s for the sandbox's cluster deadline (spec.shutdownTime) to fall in [lo, hi] from now.
+func (f *sbxFixture) shutdownWithin(pc *pauseCluster, id string, lo, hi time.Duration) {
+	f.t.Helper()
+	left := time.Duration(0)
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		cr, _ := pc.GetCR(context.Background(), "", "", "", sandbox.NamespaceFor("pa"), id)
+		spec, _ := cr["spec"].(map[string]any)
+		end, err := time.Parse(time.RFC3339, fmt.Sprint(spec["shutdownTime"]))
+		if left = time.Until(end); err == nil && left >= lo && left <= hi {
+			return
+		}
+	}
+	f.t.Fatalf("sandbox %s ends in %v, want %v..%v", id, left, lo, hi)
 }
 
 func (f *sbxFixture) snapshotRows(proj string) []cloud.CloudResource {
@@ -507,6 +523,7 @@ func TestE2BPauseFailedAssemblyKeepsSandbox(t *testing.T) {
 		t.Fatalf("pause with a failing assembly: %d %s", code, body)
 	}
 	f.pausedState(sb.SandboxID, "gone")
+	f.shutdownWithin(pc, sb.SandboxID, 0, 300*time.Second) // the pause's hold is gone: its own end again
 	n, _ := f.db.C("sandbox_paused").Count(ctx, pgdoc.M{})
 	tpls, _ := f.db.C("sandbox_templates").Count(ctx, pgdoc.M{})
 	if f.cluster.count() != 1 || n != 0 || tpls != 0 || len(f.snapshotRows("pa")) != 0 {
@@ -589,6 +606,8 @@ func TestE2BPauseOnASlowSite(t *testing.T) {
 	if f.cluster.count() != 1 {
 		t.Fatal("the sandbox was deleted before its image was ready")
 	}
+	// Created for 300 s: held past that while its image is assembled, so its end cannot remove it first.
+	f.shutdownWithin(pc, id, 20*time.Minute, 26*time.Minute)
 	if code, body := f.e2b(keyA, http.MethodGet, "/sandboxes/"+id, ""); code != http.StatusOK || !strings.Contains(body, `"state":"paused"`) {
 		t.Fatalf("get while pausing: %d %s", code, body)
 	}
@@ -603,6 +622,7 @@ func TestE2BPauseOnASlowSite(t *testing.T) {
 		t.Fatalf("connect while pausing: %d %s", code, body)
 	}
 	f.pausedState(id, "gone")
+	f.shutdownWithin(pc, id, 50*time.Second, 61*time.Second) // the connect's timeout, not the pause's hold
 	if f.cluster.count() != 1 || templates() != 0 || len(f.snapshotRows("pa")) != 0 {
 		t.Fatalf("after the cancelled pause: running %d, snapshots %d, rows %d", f.cluster.count(), templates(), len(f.snapshotRows("pa")))
 	}
