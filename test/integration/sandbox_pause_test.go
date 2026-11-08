@@ -101,6 +101,11 @@ func (c *pauseCluster) GetCore(_ context.Context, plural, _, name string) (map[s
 	}
 	return nil, nil
 }
+
+// ListCRsAllNamespaces: no sandbox is due for autoPause (the job's listing).
+func (c *pauseCluster) ListCRsAllNamespaces(context.Context, string, string, string, string) ([]map[string]any, error) {
+	return nil, nil
+}
 func (c *pauseCluster) DeleteCore(_ context.Context, plural, _, name string) error {
 	c.pmu.Lock()
 	defer c.pmu.Unlock()
@@ -531,6 +536,49 @@ func TestE2BPauseFailedAssemblyKeepsSandbox(t *testing.T) {
 	}
 	if code, body := f.e2b(keyA, http.MethodGet, "/sandboxes/"+sb.SandboxID, ""); code != http.StatusOK || !strings.Contains(body, `"state":"running"`) {
 		t.Fatalf("the sandbox after the failed pause: %d %s", code, body)
+	}
+	// One past its end (an autoPause sandbox the job pauses after its end) is not given that end back, which would
+	// remove it at once: it runs a few minutes, for the next tick to pause it again.
+	past := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	if _, err := pc.MergePatchCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), sb.SandboxID, map[string]any{"spec": map[string]any{"shutdownTime": past}}); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+sb.SandboxID+"/pause", `{}`); code != http.StatusNoContent {
+		t.Fatalf("pause past its end: %d %s", code, body)
+	}
+	f.pausedState(sb.SandboxID, "gone")
+	f.shutdownWithin(pc, sb.SandboxID, 4*time.Minute, 5*time.Minute)
+}
+
+// A portal that stops mid-pause leaves its lease to lapse: the autoPause tick takes the pause over and finishes it
+// (the sandbox deleted, the record paused, resumable from its image); the old driver finds the pause taken.
+func TestE2BPauseRedrivenAfterRestart(t *testing.T) {
+	f, pc, keyA, _ := newPauseFixture(t)
+	ctx := context.Background()
+	pc.pmu.Lock()
+	pc.hold = true
+	pc.pmu.Unlock()
+	id := f.e2bCreate(keyA)
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
+		t.Fatalf("pause: %d %s", code, body)
+	}
+	f.pausedState(id, "pausing")
+	past := time.Now().UTC().Add(-time.Second).Format(time.RFC3339)
+	if _, err := f.db.C("sandbox_paused").SetByID(ctx, id, pgdoc.M{"leaseUntil": past}, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.h.AutoPauseSandboxes(ctx)
+	var rec struct{ LeaseUntil time.Time }
+	if _, err := f.db.C("sandbox_paused").Get(ctx, id, &rec); err != nil || time.Until(rec.LeaseUntil) <= 0 {
+		t.Fatalf("not taken over: lease %v, %v", rec.LeaseUntil, err)
+	}
+	pc.release()
+	f.pausedState(id, "")
+	if f.cluster.count() != 0 {
+		t.Fatalf("paused, still running: %d", f.cluster.count())
+	}
+	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/connect", `{"timeout":60}`); code != http.StatusCreated {
+		t.Fatalf("connect of the re-driven pause: %d %s", code, body)
 	}
 }
 

@@ -19,6 +19,12 @@ and rules: [README.md](README.md#maintenance-rule).
   `address:port` the workers' VM firewall opens (registry, build bucket, portal), above the sandbox `DROP`s; the
   isolation gate checks them as part of the exact set. Build and snapshot pods give up a connect after 10 s.
 - `tests/e2b-compat/pause.py`: the strict pause, resume, fork and snapshot drill with the stock SDK.
+- Review fixes: a pause records its sandbox only if it still exists and is not being deleted, and a kill of a running
+  sandbox takes the pause lock (a kill during the capture no longer comes back as paused with a billed snapshot). The
+  `pausing`/`stopping` lease is 2 minutes, renewed by the pause's background step; job `sandboxAutoPause` takes over
+  one whose lease lapsed (API restart) and finishes it. A resume that drops a stale pause gives the sandbox the
+  timeout asked for. A failed pause leaves the sandbox at least 5 minutes. A sandbox endpoint in the tenant pool or a
+  blocked range is not opened.
 
 **Why**
 

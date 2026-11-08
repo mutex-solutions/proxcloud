@@ -410,6 +410,8 @@ The registry, build bucket and portal rules open one address and port each, and 
 management network, which layer 0 (§1.2) drops from the sandbox subnet before the exit node's SNAT. So the cluster
 isolation set also holds a TCP `ACCEPT` from `sandboxCidrs` to exactly each of these `address:port`, above its sandbox
 `DROP`s (`ExternalService.PVESandboxEndpoints`), and the isolation release gate reads them as part of the exact set.
+Only a management-side endpoint is opened: one inside the tenant pool or an operator-blocked range (`blockedCidrs`)
+is left out (and logged), so a misconfigured endpoint can never open a tenant's network to the sandboxes.
 Without it the lab's build bucket (10.88.0.41:9000) answered nothing to build and snapshot pods: every fetch timed out
 on connect (127 s per attempt) while the VM firewall said yes, so no snapshot was ever assembled. The fetch steps now
 give up a connect after 10 s.
@@ -1394,12 +1396,19 @@ pause waited for the image inside the request, as did fork and create from a sna
 lab was cut at exactly 120 s. The waits are now 60 s for a snapshot plus 50 s for envd, and a pause no longer waits.
 
 **Lease serialisation.** Every transition of one id takes a Postgres transaction lock on that id (also before the
-record exists) and writes `state` (`pausing` for 25 minutes, `stopping` for 10, `resuming` for 20) with
-`leaseUntil`. A resume that finds another resume under way waits for it and answers with the same sandbox; one that
-finds a pause waits or cancels it, as above; a pause that finds either answers 409; a kill ends a pause still
-assembling and answers 409 to a resume or a stopping pause. An expired lease is a crashed caller's (an API restart
-loses the background step of a pause): the next caller looks at the cluster (the sandbox runs: the pause is dropped;
-it does not: the record counts as paused again) and goes on.
+record exists) and writes `state` (`pausing` and `stopping` for 2 minutes, renewed every 30 s by the step that
+drives the pause; `resuming` for 20) with `leaseUntil`. A resume that finds another resume under way waits for it and
+answers with the same sandbox; one that finds a pause waits or cancels it, as above; a pause that finds either
+answers 409; a kill ends a pause still assembling and answers 409 to a resume or a stopping pause. A kill of a
+running sandbox takes the same lock, and a pause records its sandbox only if it still exists and is not being
+deleted, so a kill during the capture (204) never comes back as a paused sandbox with a billed snapshot.
+An API restart loses the background step of a pause, and its lease lapses: job `sandboxAutoPause` takes over every
+`pausing` or `stopping` record with an expired lease and finishes it (the image wait is bounded from the pause's
+start), so a pause answered 204 never stays half-done, running and billing. A resume that finds an expired lease
+first looks at the cluster: the sandbox runs (and is not being deleted), so the pause and its snapshot are dropped and
+the sandbox gets the timeout asked for, not the dead pause's hold; it does not, so the record counts as paused again.
+A failed pause gives the sandbox its own end back, or 5 minutes when that has passed (an autoPause sandbox is paused
+after its end), so the next tick pauses it again instead of the cluster removing it at once.
 
 ### 8.3 autoPause and autoResume
 

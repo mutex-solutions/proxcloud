@@ -39,6 +39,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -51,8 +52,16 @@ const (
 	pausedPausing  = "pausing"  // the capture is stored, its image is being assembled: the sandbox still runs
 	pausedStopping = "stopping" // the image is ready, the sandbox is being deleted
 	pausedResuming = "resuming"
-	pauseLease     = 10 * time.Minute
-	resumeLease    = 20 * time.Minute // covers waiting for a snapshot still being assembled
+	// pauseLease: a pause's driver (finishPause) renews its lease every pauseRenew; one left to lapse is a stopped
+	// portal's, and the autoPause tick takes the pause over (redrivePauses).
+	pauseLease = 2 * time.Minute
+	pauseRenew = 30 * time.Second
+	// pauseHold: how long past its start a pause keeps its sandbox from its end: the image wait, then the delete.
+	pauseHold = snapshotWait + 10*time.Minute
+	// pauseRetryEnd: the least a failed pause leaves its sandbox to run, so an autoPause one past its end is not
+	// removed at once but paused again by the next tick.
+	pauseRetryEnd = 5 * time.Minute
+	resumeLease   = 20 * time.Minute // covers waiting for a snapshot still being assembled
 )
 
 // The E2B SDK gives up on a request after 120 s (request_timeout 60 s, taken as read + write by its transport), and a
@@ -531,7 +540,7 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 	}
 	ctx = context.WithoutCancel(ctx) // the capture is stored: record it whatever the client does
 	now := time.Now().UTC()
-	lease := now.Add(snapshotWait + pauseLease) // finishPause waits snapshotWait, then deletes the sandbox
+	d := &pauseDrive{id: id, templateID: t.ID, pausedAt: now, lease: now.Add(pauseLease)}
 	// Claim the id: a resume seeing "pausing" waits (or cancels the pause), a kill ends it.
 	err = h.sbPaused.DB().WithTx(ctx, func(tc context.Context) error {
 		if err := h.lockPaused(tc, id); err != nil {
@@ -550,10 +559,19 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 		case found && cur.State == "":
 			return errAlreadyPaused
 		}
+		// A kill that came during the capture deleted the sandbox: it must not come back as paused. A kill takes this
+		// lock too (e2bKill), so none can land between this check and the record.
+		if err := c.ss.Alive(ctx, c.proj.ID, id); err != nil {
+			return err
+		}
+		if cr := h.e2bRow(ctx, c, id); cr != nil && cr.Data["status"] == sandbox.StatusDeleted {
+			return sandbox.ErrNotFound
+		}
 		// No record, or an expired pause/resume of this (live) sandbox: take it over.
 		if found && cur.TemplateID != t.ID {
 			defer h.dropSnapshot(ctx, c, cur.TemplateID)
 		}
+		lease := d.lease
 		return h.sbPaused.Upsert(tc, id, &pausedSandbox{ID: id, ProjectID: c.proj.ID, ServiceID: c.es.ID, TemplateID: t.ID,
 			Saved: saved, PausedAt: &now, State: pausedPausing, LeaseUntil: &lease})
 	})
@@ -563,14 +581,110 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 	}
 	// Hold the sandbox until finishPause is done with it: an end that comes while the image is assembled must not
 	// remove the original before the copy is usable. abandonPause puts its own end back.
-	if end, ok := savedShutdown(saved); ok && end.Before(lease) {
-		if err := c.ss.ShutdownAt(ctx, c.proj.ID, id, lease); err != nil {
-			h.abandonPause(ctx, c, id, t.ID, err)
+	if end, ok := savedShutdown(saved); ok && end.Before(now.Add(pauseHold)) {
+		if err := c.ss.ShutdownAt(ctx, c.proj.ID, id, now.Add(pauseHold)); err != nil {
+			h.abandonPause(ctx, c, d, err)
 			return err
 		}
 	}
-	go h.finishPause(c, id, t.ID)
+	go h.finishPause(c, d)
 	return nil
+}
+
+// pauseDrive is one driver's hold on a pause (finishPause): the record is its own while it carries the drive's
+// template and the lease the drive wrote last. Every step renews that lease.
+type pauseDrive struct {
+	id, templateID string
+	pausedAt       time.Time
+	mu             sync.Mutex
+	lease          time.Time
+}
+
+// errPauseTaken: another driver holds the pause (it took over a lease this one let lapse).
+var errPauseTaken = errors.New("another driver holds the pause")
+
+// driveStep applies fn to the record if the drive still holds it and renews the lease; fn returns true to delete the
+// record, and a State it sets to "" ends the transition (no lease). errPauseMoved: the pause was cancelled, killed or
+// replaced; errPauseTaken: another driver holds it.
+func (h *Handler) driveStep(ctx context.Context, c *e2bCaller, d *pauseDrive, fn func(p *pausedSandbox) (remove bool)) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	lease := time.Now().UTC().Add(pauseLease)
+	err := h.updatePaused(ctx, c.proj.ID, d.id, func(p *pausedSandbox) (bool, error) {
+		switch {
+		case p.TemplateID != d.templateID || p.State != pausedPausing && p.State != pausedStopping:
+			return false, errPauseMoved
+		case p.LeaseUntil == nil || !p.LeaseUntil.Equal(d.lease):
+			return false, errPauseTaken
+		}
+		p.LeaseUntil = &lease
+		remove := fn(p)
+		if p.State == "" {
+			p.LeaseUntil = nil
+		}
+		return remove, nil
+	})
+	if errors.Is(err, sandbox.ErrNotFound) {
+		return errPauseMoved
+	}
+	if err == nil {
+		d.lease = lease
+	}
+	return err
+}
+
+// renewPause keeps the drive's lease alive until ctx ends; a pause that moved on stops the drive's wait (stop).
+func (h *Handler) renewPause(ctx context.Context, c *e2bCaller, d *pauseDrive, stop context.CancelFunc) {
+	tick := time.NewTicker(pauseRenew)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		err := h.driveStep(ctx, c, d, func(*pausedSandbox) bool { return false })
+		if errors.Is(err, errPauseMoved) || errors.Is(err, errPauseTaken) {
+			stop()
+			return
+		}
+	}
+}
+
+// redrivePauses takes over the pauses whose driver stopped renewing them (the portal restarted mid-pause) and finishes
+// each as its driver would have, so a pause answered 204 never stays half-done, running and billing.
+func (h *Handler) redrivePauses(ctx context.Context, es *externalservice.ExternalService, ss *sandbox.Service) {
+	var ps []pausedSandbox
+	if err := h.sbPaused.Find(ctx, pgdoc.M{"serviceId": es.ID, "state": pgdoc.M{"$in": []any{pausedPausing, pausedStopping}}}, &ps); err != nil {
+		slog.Warn("autopause: list unfinished pauses", "service", es.ID, "err", err)
+		return
+	}
+	for _, p := range ps {
+		if p.leased(time.Now()) {
+			continue
+		}
+		proj, err := h.svc.repo.FindByID(ctx, p.ProjectID)
+		if err != nil || proj == nil {
+			continue
+		}
+		c := &e2bCaller{proj: proj, es: es, ss: ss}
+		d := &pauseDrive{id: p.ID, templateID: p.TemplateID}
+		if err := h.updatePaused(ctx, proj.ID, p.ID, func(cur *pausedSandbox) (bool, error) {
+			if cur.TemplateID != p.TemplateID || cur.State != pausedPausing && cur.State != pausedStopping || cur.leased(time.Now()) {
+				return false, errPauseMoved
+			}
+			d.lease = time.Now().UTC().Add(pauseLease)
+			cur.LeaseUntil = &d.lease
+			if cur.PausedAt != nil {
+				d.pausedAt = *cur.PausedAt
+			}
+			return false, nil
+		}); err != nil {
+			continue
+		}
+		slog.Info("e2b: taking over an unfinished pause", "sandbox", p.ID, "project", p.ProjectID, "state", p.State)
+		go h.finishPause(c, d)
+	}
 }
 
 // savedShutdown is the time the cluster removes the sandbox saved (spec.shutdownTime); false when it has none.
@@ -586,28 +700,29 @@ var errPauseMoved = errors.New("the pause moved on")
 
 // finishPause completes a pause once its snapshot image is pushed: the record goes to "stopping", the sandbox is
 // deleted, the record to paused. A connect or a kill that ended the pause meanwhile leaves the sandbox alone; a failed
-// or timed-out assembly ends the pause and the sandbox runs on.
-func (h *Handler) finishPause(c *e2bCaller, id, templateID string) {
-	wctx, cancel := context.WithTimeout(context.Background(), snapshotWait)
+// or timed-out assembly (snapshotWait from the pause) ends the pause and the sandbox runs on. It renews its lease all
+// along; a portal that stops leaves the lease to lapse, and the autoPause tick runs this again (redrivePauses).
+func (h *Handler) finishPause(c *e2bCaller, d *pauseDrive) {
+	id, templateID := d.id, d.templateID
+	ctx := context.Background()
+	wctx, wcancel := context.WithDeadline(ctx, d.pausedAt.Add(snapshotWait))
+	defer wcancel()
+	rctx, stopRenew := context.WithCancel(ctx)
+	defer stopRenew()
+	go h.renewPause(rctx, c, d, wcancel)
 	ready, err := h.awaitSnapshot(wctx, c, templateID)
-	cancel()
 	if err == nil && ready.defaultBuild() == nil {
 		err = errors.New("no ready build")
 	}
-	ctx := context.Background()
 	if err != nil {
-		h.abandonPause(ctx, c, id, templateID, err)
+		h.abandonPause(ctx, c, d, err)
 		return
 	}
-	if err := h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
-		if p.TemplateID != templateID || p.State != pausedPausing {
-			return false, errPauseMoved
-		}
-		lease := time.Now().UTC().Add(pauseLease)
-		p.State, p.LeaseUntil = pausedStopping, &lease
-		return false, nil
+	if err := h.driveStep(ctx, c, d, func(p *pausedSandbox) bool {
+		p.State = pausedStopping
+		return false
 	}); err != nil {
-		return // cancelled by a connect, ended by a kill or a teardown: they dropped the snapshot
+		return // cancelled by a connect, ended by a kill or a teardown (they dropped the snapshot), or driven elsewhere
 	}
 	// A sandbox that is gone already (its end came while the image was assembled) is paused all the same: the image
 	// holds its files.
@@ -618,38 +733,51 @@ func (h *Handler) finishPause(c *e2bCaller, id, templateID string) {
 			err = c.ss.DeleteSandbox(ctx, c.proj.ID, id)
 		}
 		if err != nil {
-			h.abandonPause(ctx, c, id, templateID, err)
+			h.abandonPause(ctx, c, d, err)
 			return
 		}
 		waitGone(ctx, c, id, time.Minute)
 	}
-	_ = h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
-		p.State, p.LeaseUntil = "", nil
-		return false, nil
-	})
+	if err := h.driveStep(ctx, c, d, func(p *pausedSandbox) bool {
+		p.State = ""
+		return false
+	}); err != nil {
+		slog.Warn("e2b: pause done, its record moved on", "sandbox", id, "err", err)
+		return
+	}
 	slog.Info("e2b: paused", "sandbox", id, "project", c.proj.ID, "template", templateID)
 }
 
-// abandonPause ends a pause that cannot complete: the record (if still this pause's) and the snapshot go, the sandbox
-// keeps running, to its own end again.
-func (h *Handler) abandonPause(ctx context.Context, c *e2bCaller, id, templateID string, cause error) {
+// abandonPause ends a pause that cannot complete: the record (if the drive still holds it) and the snapshot go, the
+// sandbox keeps running, to its own end again, or a few minutes when that has passed (an autoPause one is then paused
+// again by the next tick instead of removed at once).
+func (h *Handler) abandonPause(ctx context.Context, c *e2bCaller, d *pauseDrive, cause error) {
 	var saved map[string]any
-	err := h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
-		if p.TemplateID != templateID {
-			return false, errPauseMoved
-		}
+	err := h.driveStep(ctx, c, d, func(p *pausedSandbox) bool {
 		saved = p.Saved
-		return true, nil
+		return true
 	})
-	h.dropSnapshot(ctx, c, templateID)
-	if err == nil {
-		if end, ok := savedShutdown(saved); ok {
-			if serr := c.ss.ShutdownAt(ctx, c.proj.ID, id, end); serr != nil && !errors.Is(serr, sandbox.ErrNotFound) {
-				slog.Warn("e2b: restoring the end of a sandbox whose pause failed", "sandbox", id, "err", serr)
-			}
-		}
-		slog.Error("e2b: pause failed, the sandbox keeps running", "sandbox", id, "project", c.proj.ID, "err", cause)
+	if errors.Is(err, errPauseTaken) {
+		return // another driver carries the pause on, with this snapshot
 	}
+	h.dropSnapshot(ctx, c, d.templateID)
+	if err != nil {
+		return
+	}
+	if end, ok := savedShutdown(saved); ok {
+		end = laterOf(end, time.Now().Add(pauseRetryEnd))
+		if serr := c.ss.ShutdownAt(ctx, c.proj.ID, d.id, end); serr != nil && !errors.Is(serr, sandbox.ErrNotFound) {
+			slog.Warn("e2b: restoring the end of a sandbox whose pause failed", "sandbox", d.id, "err", serr)
+		}
+	}
+	slog.Error("e2b: pause failed, the sandbox keeps running", "sandbox", d.id, "project", c.proj.ID, "err", cause)
+}
+
+func laterOf(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 // cancelPause ends a pause whose image is not ready yet, so a connect gets the sandbox (which still runs and holds
@@ -778,14 +906,24 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 			}
 			continue
 		case claimStalePause, claimStaleResume:
-			if _, gerr := c.ss.GetSandbox(ctx, c.proj.ID, p.ID); gerr == nil {
+			if c.ss.Alive(ctx, c.proj.ID, p.ID) == nil {
 				// The crashed pause never removed the sandbox, or the crashed resume already started it: it runs.
-				// Finish by dropping the pause.
+				// Finish by dropping the pause (unless a driver took it over meanwhile).
 				dctx := context.WithoutCancel(ctx)
-				_ = h.updatePaused(dctx, c.proj.ID, p.ID, func(*pausedSandbox) (bool, error) { return true, nil })
-				h.dropSnapshot(dctx, c, p.TemplateID)
-				if out == claimStalePause {
-					return nil, errAlreadyRunning
+				var tpl string
+				if err := h.updatePaused(dctx, c.proj.ID, p.ID, func(cur *pausedSandbox) (bool, error) {
+					if cur.State == "" || cur.leased(time.Now()) {
+						return false, errPauseMoved
+					}
+					tpl = cur.TemplateID
+					return true, nil
+				}); err != nil {
+					continue
+				}
+				h.dropSnapshot(dctx, c, tpl)
+				// It runs on as a resumed one would: for timeoutSeconds from now, not to the dead pause's hold.
+				if _, err := c.ss.SetTimeout(ctx, c.proj.ID, p.ID, timeoutSeconds); err != nil && !errors.Is(err, sandbox.ErrNotFound) {
+					return nil, err
 				}
 				return h.awaitResumed(ctx, c, p.ID)
 			}
@@ -1041,8 +1179,9 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 
 // ---- autoPause -------------------------------------------------------------------------------------------------
 
-// AutoPauseSandboxes pauses every auto-pause sandbox past its end (job sandboxAutoPause, every minute). A sandbox
-// whose pause fails runs on to its shutdownTime (end + sandbox.AutoPauseGrace), when the cluster removes it.
+// AutoPauseSandboxes pauses every auto-pause sandbox past its end (job sandboxAutoPause, every minute), after taking
+// over the pauses a stopped portal left unfinished (redrivePauses). A sandbox whose pause fails runs on to its
+// shutdownTime (end + sandbox.AutoPauseGrace), or pauseRetryEnd when that has passed, and a later tick pauses it again.
 func (h *Handler) AutoPauseSandboxes(ctx context.Context) {
 	if h.sandboxFor == nil || h.sbPaused == nil || h.sbTemplates == nil {
 		return
@@ -1057,7 +1196,11 @@ func (h *Handler) AutoPauseSandboxes(ctx context.Context) {
 			continue
 		}
 		ss, err := h.sandboxFor(es)
-		if err != nil || !ss.Config().Envd || !buildsOn(ss.Config()) {
+		if err != nil || !buildsOn(ss.Config()) {
+			continue
+		}
+		h.redrivePauses(ctx, es, ss) // before listing: a pause taken over is not captured again
+		if !ss.Config().Envd {
 			continue
 		}
 		due, err := ss.DueForAutoPause(ctx)

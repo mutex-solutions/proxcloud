@@ -57,7 +57,8 @@ Status legend: [README.md](README.md). Everything on this page is **Implemented*
    `<sandboxCidrs>` to each `address:port` the workers' VM firewall opens out (`config.sandbox.registry`,
    `buildStorage`, `portal`; `ExternalService.PVESandboxEndpoints`), one address and port per rule: such an endpoint
    may sit on a management network (the lab's build bucket does), and the DROP would otherwise undo the VM
-   firewall's opening. The isolation gate reads these as part of the exact rule set.
+   firewall's opening. An endpoint inside `cidrPool` or an operator `blockedCidrs` range is never opened. The isolation
+   gate reads these as part of the exact rule set.
 
 **Layer 1, the sandbox workers' VM firewall** (`internal/cloud/pve/sandboxfw.go`, `syncjob/sandboxfw.go`, provider
 `config.sandbox`). The rules above see routed traffic only. Every VM of the sandbox pool also gets `firewall=1` on each

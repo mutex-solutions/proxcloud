@@ -334,6 +334,16 @@ func (s *Service) get(ctx context.Context, projectID, id string) (map[string]any
 	return obj, nil
 }
 
+// Alive is nil when the sandbox exists and is not being deleted (ErrNotFound otherwise): a sandbox a kill is removing
+// still reads with GetSandbox until its pod is gone.
+func (s *Service) Alive(ctx context.Context, projectID, id string) error {
+	obj, err := s.get(ctx, projectID, id)
+	if err == nil && dig(obj, "metadata", "deletionTimestamp") != nil {
+		return ErrNotFound
+	}
+	return err
+}
+
 // GetSandbox returns the live data payload of one sandbox.
 func (s *Service) GetSandbox(ctx context.Context, projectID, id string) (map[string]any, error) {
 	obj, err := s.get(ctx, projectID, id)
