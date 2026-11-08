@@ -2,24 +2,30 @@
 
     export E2B_API_URL=https://api.example.org/e2b   E2B_API_KEY=e2b_...   E2B_OTHER_API_KEY=e2b_... (another project)
     export E2B_AUTOPAUSE_URL=http://<mgmt>:<mgmt port>/debug/run-sandbox-autopause   # optional: trigger the job
-    python pause.py [steps]      steps: all (default) or a comma list of pause,fork,snapshot,autopause,other
+    python pause.py [steps]      steps: all (default) or a comma list of pause,fork,snapshot,autopause,wake,other
 
 Strict on purpose: a pause must answer within the SDK's request timeout, the sandbox must stop once its image is ready,
 and a connect only counts as a resume if the sandbox was paused right before it; every resumed, forked or snapshot
 sandbox must hold the file written before. Every sandbox made here is killed at the end. Exit code 0 = all passed.
+
+Fork and create from a snapshot answer 503 (ServiceBusyException) while the snapshot image is still assembled (more than
+60 s on a slow site); like a client should, the drill retries them (BUSY_TRIES, with backoff), each try still within
+the SDK's timeout. autopause pauses at the timeout and comes back with connect; wake is autoResume, woken by an HTTP
+hit through the proxy (the SDK refuses auto_resume with mode "filesystem", so it leaves the mode out).
 """
 import os
 import sys
 import time
 
 import httpx
-from e2b import Sandbox
+from e2b import Sandbox, ServiceBusyException
 
 STEPS = set((sys.argv[1] if len(sys.argv) > 1 else "all").split(","))
 on = lambda s: "all" in STEPS or s in STEPS
 OTHER = os.environ.get("E2B_OTHER_API_KEY", "")
 AUTOPAUSE_URL = os.environ.get("E2B_AUTOPAUSE_URL", "")
 SDK_TIMEOUT = 120  # e2b 2.63: request_timeout 60 s, applied by pyqwest as one deadline of read + write
+BUSY_TRIES = 5  # tries of a call answered 503 (snapshot still assembled); waits 5, 10, 20, 40 s between them
 failures, made, snaps = [], [], []
 MARK = "/home/user/sb7-mark.txt"
 
@@ -46,6 +52,17 @@ def timed(label, fn):
     t0 = time.time()
     r = t(label, fn)
     check(f"{label} answers within {SDK_TIMEOUT}s", time.time() - t0 < SDK_TIMEOUT - 5, f"{time.time() - t0:.0f}s")
+    return r
+
+
+def busy_retry(label, fn):
+    """timed(fn), tried again on ServiceBusyException (503: the snapshot is still being assembled; retry)."""
+    for i in range(BUSY_TRIES):
+        r = timed(f"{label} (try {i + 1})" if i else label, fn)
+        if not isinstance(r, ServiceBusyException):
+            return r
+        if i + 1 < BUSY_TRIES:
+            time.sleep(5 * 2**i)
     return r
 
 
@@ -123,7 +140,7 @@ try:
     if on("fork"):
         if on("other"):
             check("other project cannot fork", refused(lambda: Sandbox.fork(sb.sandbox_id, api_key=OTHER)))
-        forks = timed("fork", lambda: sb.fork(count=1, timeout=600))
+        forks = busy_retry("fork", lambda: sb.fork(count=1, timeout=600))
         f = forks[0] if isinstance(forks, list) and forks else forks
         if isinstance(f, Sandbox):
             made.append(f.sandbox_id)
@@ -140,7 +157,7 @@ try:
             snaps.append(sid)
         check("named snapshot", bool(sid), str(s))
         if sid:
-            c = timed("create from snapshot", lambda: Sandbox.create(sid, timeout=600))
+            c = busy_retry("create from snapshot", lambda: Sandbox.create(sid, timeout=600))
             if isinstance(c, Sandbox):
                 made.append(c.sandbox_id)
             check("the snapshot sandbox has the file", isinstance(c, Sandbox) and has_mark(c, want), str(c))
@@ -151,24 +168,42 @@ try:
 
     t("kill first", sb.kill)
 
+    def auto_paused(a):
+        """Write the mark, wait for the job to pause the sandbox at its timeout and for the pause to complete."""
+        made.append(a.sandbox_id)
+        a.files.write(MARK, want)
+        print("     waiting for the auto-pause (job sandboxAutoPause, every minute)", flush=True)
+        deadline, st = time.time() + 900, ""
+        while time.time() < deadline:
+            time.sleep(20)
+            if AUTOPAUSE_URL:
+                httpx.post(AUTOPAUSE_URL, timeout=900)
+            if "paused" in (st := state(a.sandbox_id)):
+                break
+        check("auto-paused", "paused" in st, st)
+        stopped = t("auto-pause completes", lambda: wait_stopped(a))
+        check("the auto-paused sandbox stops once its image is ready", stopped is True, str(stopped))
+        return stopped is True
+
     if on("autopause"):
-        a = t("create autoPause+autoResume 60s", lambda: Sandbox.create(
-            "base", timeout=60, lifecycle={"on_timeout": {"action": "pause", "mode": "filesystem"}, "auto_resume": True}))
+        # mode "filesystem": the SDK refuses auto_resume with it, so this one comes back with connect only.
+        a = t("create autoPause (filesystem) 60s", lambda: Sandbox.create(
+            "base", timeout=60, lifecycle={"on_timeout": {"action": "pause", "mode": "filesystem"}}))
         check("create with autoPause", isinstance(a, Sandbox), str(a))
-        if isinstance(a, Sandbox):
-            made.append(a.sandbox_id)
-            a.files.write(MARK, want)
-            print("     waiting for the auto-pause (job sandboxAutoPause, every minute)", flush=True)
-            deadline, st = time.time() + 900, ""
-            while time.time() < deadline:
-                time.sleep(20)
-                if AUTOPAUSE_URL:
-                    httpx.post(AUTOPAUSE_URL, timeout=900)
-                if "paused" in (st := state(a.sandbox_id)):
-                    break
-            check("auto-paused", "paused" in st, st)
-            stopped = t("auto-pause completes", lambda: wait_stopped(a))
-            check("the auto-paused sandbox stops once its image is ready", stopped is True, str(stopped))
+        if isinstance(a, Sandbox) and auto_paused(a):
+            st = state(a.sandbox_id)
+            check("paused right before connect", "paused" in st, st)
+            a2 = timed("connect (resume)", lambda: Sandbox.connect(a.sandbox_id, timeout=300))
+            check("connect resumes the auto-paused sandbox", isinstance(a2, Sandbox) and a2.sandbox_id == a.sandbox_id, str(a2))
+            check("the auto-paused sandbox has the file", isinstance(a2, Sandbox) and has_mark(a2, want))
+
+    if on("wake"):
+        # autoResume: no mode, so the SDK sends no autoPauseMemory (ProxCloud pauses the filesystem) and accepts
+        # auto_resume. The wake goes through sandbox-proxy (docs/managed-sandbox.md §8.3).
+        a = t("create autoPause+autoResume 60s", lambda: Sandbox.create(
+            "base", timeout=60, lifecycle={"on_timeout": "pause", "auto_resume": True}))
+        check("create with autoResume", isinstance(a, Sandbox), str(a))
+        if isinstance(a, Sandbox) and auto_paused(a):
             url = f"https://{a.get_host(8000)}/"
             r = t("HTTP hit through the proxy", lambda: httpx.get(url, timeout=120,
                   headers={"e2b-traffic-access-token": a.traffic_access_token or ""}))
