@@ -87,6 +87,69 @@ func TestEgressDefaultTrustedTemplateAndNoCallerOverride(t *testing.T) {
 		}
 	}
 }
+func TestAutomaticActionsRequireSupportedProvider(t *testing.T) {
+	for _, tc := range []struct {
+		envd    bool
+		action  string
+		storage bool
+		wantErr bool
+	}{
+		{true, "alert", false, false}, {true, "pause", true, true}, {true, "kill", true, true},
+		{false, "pause", false, true}, {false, "pause", true, false}, {false, "kill", false, false},
+	} {
+		cfg := Config{Envd: tc.envd, Abuse: AbusePolicy{Action: tc.action}}
+		if tc.storage {
+			cfg.TemplateRegistry = "registry/t"
+			cfg.BuildStorage.Bucket = "b"
+			cfg.BuildStorage.Endpoint = "https://bucket.example"
+			cfg.BuildStorage.AccessKey = "a"
+			cfg.BuildStorage.SecretKey = "s"
+		}
+		if err := cfg.ValidateAutomaticActions(); (err != nil) != tc.wantErr {
+			t.Fatalf("%+v: %v", tc, err)
+		}
+	}
+}
+
+func TestAutomaticPauseRejectsEachMissingStoragePrerequisite(t *testing.T) {
+	base := Config{TemplateRegistry: "registry/t", BuildStorage: BuildStorage{Endpoint: "https://bucket.example", Bucket: "b", AccessKey: "a", SecretKey: "s"}, Abuse: AbusePolicy{Action: "pause"}}
+	for _, missing := range []string{"registry", "endpoint", "bucket", "accessKey", "secretKey"} {
+		cfg := base
+		switch missing {
+		case "registry":
+			cfg.TemplateRegistry = ""
+		case "endpoint":
+			cfg.BuildStorage.Endpoint = ""
+		case "bucket":
+			cfg.BuildStorage.Bucket = ""
+		case "accessKey":
+			cfg.BuildStorage.AccessKey = ""
+		case "secretKey":
+			cfg.BuildStorage.SecretKey = ""
+		}
+		if err := cfg.ValidateAutomaticActions(); err == nil {
+			t.Fatalf("accepted pause without %s", missing)
+		}
+	}
+}
+
+func TestNativeActionTargetRejectsOldSDKAndLegacyPods(t *testing.T) {
+	cfg := testConfig()
+	s := Spec{ID: "sbx-1234567890123456", ProjectID: "p", Template: "python", CPU: 1, MemoryGiB: 1}
+	cr := BuildCR(cfg, "svc", s, time.Now())
+	if !NativeActionTarget(cr) {
+		t.Fatal("native runtime rejected")
+	}
+	cfg.Envd = true
+	if NativeActionTarget(BuildCR(cfg, "svc", s, time.Now())) {
+		t.Fatal("SDK pod accepted")
+	}
+	firstContainer(cr)["command"] = []any{"sleep", "infinity"}
+	if NativeActionTarget(cr) {
+		t.Fatal("legacy native pod accepted")
+	}
+}
+
 func TestActionRejectsFrozenUnderlyingMetrics(t *testing.T) {
 	now := time.Now()
 	old := sampleAt(now, 100)

@@ -278,6 +278,9 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Get("/project/{id}/gpu-capacity", h.projectGPUCapacity)
 	r.Get("/project/{id}/resource-types", h.resourceTypes)
 	// Sandbox API keys: the E2B_API_KEY of the E2B-compatible API (e2b_keys.go).
+	r.Get("/project/{id}/sandbox-paused", h.nativePausedList)
+	r.Post("/project/{id}/sandbox-paused/{sandboxID}/resume", h.nativePausedResume)
+	r.Delete("/project/{id}/sandbox-paused/{sandboxID}", h.nativePausedDelete)
 	r.Get("/project/{id}/sandbox-api-keys", h.sandboxKeyList)
 	r.Post("/project/{id}/sandbox-api-keys", h.sandboxKeyCreate)
 	r.Delete("/project/{id}/sandbox-api-keys/{keyId}", h.sandboxKeyDelete)

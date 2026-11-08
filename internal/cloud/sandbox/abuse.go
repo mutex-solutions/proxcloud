@@ -48,6 +48,22 @@ func (p AbusePolicy) Validate() error {
 	return nil
 }
 
+// ValidateAutomaticActions rejects an opt-in that cannot be honored safely. This
+// is also checked on disabled provider edits, before release gates need a cluster.
+func (c Config) ValidateAutomaticActions() error {
+	p := c.Abuse.WithDefaults()
+	if p.Action != "pause" && p.Action != "kill" {
+		return nil
+	}
+	if c.Envd {
+		return fmt.Errorf("sandbox.abuse.action %s requires envd=false: silent SDK exec activity cannot be proved; use alert", p.Action)
+	}
+	if p.Action == "pause" && (c.TemplateRegistry == "" || c.BuildStorage.Bucket == "" || c.BuildStorage.Endpoint == "" || c.BuildStorage.AccessKey == "" || c.BuildStorage.SecretKey == "") {
+		return fmt.Errorf("sandbox.abuse.action pause requires templateRegistry, buildStorage endpoint/bucket and storage credentials for a recoverable snapshot")
+	}
+	return nil
+}
+
 // Sample contains host-owned counters only. Identity joins a live, provider-owned
 // Sandbox CR and its live pod UID. Counter rollback/restart starts a new window.
 type Sample struct {
@@ -210,11 +226,43 @@ func (s *Service) AbuseSamples(ctx context.Context) ([]Sample, error) {
 	return out, nil
 }
 
+// NativeActionTarget inspects the operator-owned CR, never tenant files/processes.
+// Switching a provider from envd to native must not authorize actions on old SDK
+// pods (or legacy native pods without a boot marker/helper).
+func NativeActionTarget(cr map[string]any) bool {
+	cmd, _ := firstContainer(cr)["command"].([]any)
+	if len(cmd) < 3 || cmd[0] != RuntimeMountPath+"/sandbox-init" || cmd[1] != "-native" {
+		return false
+	}
+	volumes, _ := dig(cr, "spec", "podTemplate", "spec", "volumes").([]any)
+	volumeOK := false
+	for _, v := range volumes {
+		m, _ := v.(map[string]any)
+		if m["name"] == "proxcloud-runtime" && digStr(m, "hostPath", "path") == RuntimeHostDir {
+			volumeOK = true
+		}
+	}
+	if !volumeOK {
+		return false
+	}
+	mounts, _ := firstContainer(cr)["volumeMounts"].([]any)
+	for _, v := range mounts {
+		m, _ := v.(map[string]any)
+		if m["name"] == "proxcloud-runtime" && m["mountPath"] == RuntimeMountPath && m["readOnly"] == true {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckIdentity revalidates live ownership immediately before an automatic action.
 func (s *Service) CheckIdentity(ctx context.Context, x Sample) error {
 	cr, err := s.get(ctx, x.ProjectID, x.SandboxID)
 	if err != nil {
 		return err
+	}
+	if !NativeActionTarget(cr) {
+		return fmt.Errorf("automatic action requires a native sandbox started by the snapshot-capable runtime")
 	}
 	if x.CRUID == "" || x.PodUID == "" || digStr(cr, "metadata", "uid") != x.CRUID || dig(cr, "metadata", "deletionTimestamp") != nil || digStr(cr, "metadata", "annotations", AnnotationLastExec) != "" && digStr(cr, "metadata", "annotations", AnnotationLastExec) != x.LastExec.Format(time.RFC3339Nano) {
 		return ErrNotFound
@@ -222,6 +270,12 @@ func (s *Service) CheckIdentity(ctx context.Context, x Sample) error {
 	pod, err := s.api.GetCore(ctx, "pods", NamespaceFor(x.ProjectID), x.SandboxID)
 	if err != nil {
 		return err
+	}
+	// The controller may not yet have replaced a pod after a CR edit. Require
+	// the actual running pod to use the native helper too, not just desired state.
+	podAsCR := map[string]any{"spec": map[string]any{"podTemplate": map[string]any{"spec": pod["spec"]}}}
+	if !NativeActionTarget(podAsCR) {
+		return fmt.Errorf("running pod is not native snapshot-capable")
 	}
 	if digStr(pod, "metadata", "uid") != x.PodUID || !s.owns(pod, x.ProjectID) || digStr(pod, "metadata", "labels", LabelSandboxID) != x.SandboxID || digStr(pod, "spec", "nodeName") != x.Node || digStr(pod, "status", "phase") != "Running" || dig(pod, "metadata", "deletionTimestamp") != nil {
 		return ErrNotFound

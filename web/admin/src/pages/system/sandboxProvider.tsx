@@ -112,7 +112,16 @@ const jsonBlock = (s: string) => { try { const v = JSON.parse(s); return v && !A
 const num = (s: string) => (s.trim() === "" ? undefined : Number(s))
 const okNum = (s: string) => s.trim() === "" || (Number.isInteger(Number(s)) && Number(s) >= 0)
 
+export function automaticActionError(f: SandboxFormState): string | null {
+  const action = jsonBlock(f.abuseJSON)?.action
+  if (action !== "pause" && action !== "kill") return null
+  if (f.envd) return "Pause/kill CPU responses require envd off: silent SDK exec activity cannot be proved. Use alert on E2B providers."
+  if (action === "pause" && (!f.templateRegistry.trim() || !f.buildBucket.trim() || !f.buildEndpoint.trim())) return "Automatic pause needs a template registry and build bucket so the filesystem can be recovered."
+  return null
+}
+
 export const sandboxFormValid = (f: SandboxFormState, requireKubeconfig = true) =>
+  automaticActionError(f) === null &&
   !!f.name.trim() && jsonBlock(f.abuseJSON) !== null && jsonBlock(f.rotationJSON) !== null && okNum(f.egressMbps) &&
   !!f.region.trim() &&
   !!f.proxmoxServiceId.trim() &&
@@ -302,7 +311,8 @@ export function SandboxProviderForm({ form, setForm, mode = "create" }: {
       <Field id="sb-egress" label="Default egress cap (Mbps)" value={form.egressMbps} onChange={set("egressMbps")} hint="100 Mbps by default. Curated template egressMbps overrides inherit this unless set. Existing pods keep their cap." />
       <Label htmlFor="sb-abuse">Sustained CPU policy (JSON)</Label>
       <Textarea id="sb-abuse" value={form.abuseJSON} onChange={(e) => set("abuseJSON")(e.target.value)} className="font-mono text-xs" />
-      <p className="text-xs text-muted-foreground">Heuristic, not proof of mining. Alert by default; pause/kill opt-in applies only to native-only providers. E2B/envd automatic actions are refused because silent SDK exec activity cannot be proved. Native shipped templates lack snapshot helper: automatic pause safely fails; use alerts or explicit native kill. Legitimate unattended jobs can match. Configure notifyEmails and the mail gateway.</p>
+      <p className="text-xs text-muted-foreground">Heuristic, not proof of mining. Alert by default; pause/kill opt-in requires envd off. Silent SDK exec activity cannot be proved, so E2B providers must use alert. Native pause needs the current node runtime, registry and build bucket; it saves files, not processes, and the source stops only after its image is usable and policy/activity is rechecked. Recover via the project sandbox-paused API. Kill loses files. Legitimate unattended jobs can match. Configure notifyEmails and the mail gateway.</p>
+      {automaticActionError(form) && <p role="alert" className="text-xs text-destructive">{automaticActionError(form)}</p>}
       <Label htmlFor="sb-rotation">Worker rotation (JSON, default off)</Label>
       <Textarea id="sb-rotation" value={form.rotationJSON} onChange={(e) => set("rotationJSON")(e.target.value)} className="font-mono text-xs" />
       <Label htmlFor="sb-rotation-key">Separate management rotation kubeconfig</Label>

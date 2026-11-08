@@ -2,7 +2,8 @@
 // starts E2B's envd, pushes the user env to it via POST /init, optionally launches
 // PROXCLOUD_START_CMD, then marks the sandbox ready and supervises envd.
 //
-//	sandbox-init          run as the container command
+//	sandbox-init          run envd as the container command
+//	sandbox-init -native <argv...> mark boot then replace PID 1 with native command
 //	sandbox-init -ready     startup probe: exit 0 iff the ready marker exists
 //	sandbox-init -snapshot  gzip tar of everything changed since boot, to stdout (pause/snapshot)
 package main
@@ -36,6 +37,12 @@ func main() {
 		os.Exit(runSnapshot())
 	case m == "-ready":
 		os.Exit(readyCheck(readyPath))
+	case m == "-native":
+		if err := nativeExec(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "sandbox-init:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	log.SetPrefix("sandbox-init: ")
 	log.SetFlags(0)
@@ -262,10 +269,16 @@ func markReady() {
 // node whose runtime is older for a mode it does not know, e.g. while node-setup rolls.
 func runMode(args []string, pid int) (string, error) {
 	if len(args) > 0 {
-		if args[0] == "-snapshot" || args[0] == "-ready" {
+		if args[0] == "-native" {
+			if pid != 1 || len(args) < 2 {
+				return "", fmt.Errorf("-native requires PID 1 and a command")
+			}
 			return args[0], nil
 		}
-		return "", fmt.Errorf("unknown argument %q", args[0])
+		if len(args) == 1 && (args[0] == "-snapshot" || args[0] == "-ready") {
+			return args[0], nil
+		}
+		return "", fmt.Errorf("unknown arguments %q", args)
 	}
 	if pid != 1 {
 		return "", fmt.Errorf("the init runs only as PID 1 (this is pid %d)", pid)

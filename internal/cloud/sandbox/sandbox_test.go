@@ -256,7 +256,7 @@ func TestBuildCRSecurityPosture(t *testing.T) {
 	if req[ResourceGPU] != "1" || lim["cpu"] != "2" || lim["memory"] != "8Gi" || req["cpu"] != lim["cpu"] {
 		t.Errorf("resources: req=%v lim=%v", req, lim)
 	}
-	if c["command"].([]any)[0] != "sleep" {
+	if !NativeActionTarget(cr) || c["command"].([]any)[2] != "sleep" {
 		t.Errorf("default command: %v", c["command"])
 	}
 	// CPU sandbox: no selector, no toleration, no GPU resource.

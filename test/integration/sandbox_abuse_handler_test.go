@@ -26,7 +26,15 @@ func (a *abuseCluster) ListCRsAllNamespaces(context.Context, string, string, str
 	return a.sbxCluster.ListCRs(context.Background(), "", "", "", "sb-pa", "")
 }
 func (a *abuseCluster) pod() map[string]any {
-	return map[string]any{"metadata": map[string]any{"name": a.sample.Name, "namespace": "sb-pa", "uid": a.podUID, "labels": map[string]any{sandbox.LabelProject: "pa", sandbox.LabelService: "sbx", sandbox.LabelManagedBy: sandbox.ManagedByValue, sandbox.LabelSandboxID: a.sample.Name}}, "spec": map[string]any{"nodeName": "n"}, "status": map[string]any{"phase": "Running"}}
+	cr, _ := a.sbxCluster.GetCR(context.Background(), "", "", "", "sb-pa", a.sample.Name)
+	spec := map[string]any{"nodeName": "n"}
+	if cr != nil {
+		ps := cr["spec"].(map[string]any)["podTemplate"].(map[string]any)["spec"].(map[string]any)
+		for k, v := range ps {
+			spec[k] = v
+		}
+	}
+	return map[string]any{"metadata": map[string]any{"name": a.sample.Name, "namespace": "sb-pa", "uid": a.podUID, "labels": map[string]any{sandbox.LabelProject: "pa", sandbox.LabelService: "sbx", sandbox.LabelManagedBy: sandbox.ManagedByValue, sandbox.LabelSandboxID: a.sample.Name}}, "spec": spec, "status": map[string]any{"phase": "Running"}}
 }
 func (a *abuseCluster) ListPodsAllNamespaces(context.Context, string) ([]map[string]any, error) {
 	return []map[string]any{a.pod()}, nil

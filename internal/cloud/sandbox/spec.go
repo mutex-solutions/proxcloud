@@ -229,6 +229,13 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 	for _, k := range sortedKeys(s.Env) {
 		env = append(env, map[string]any{"name": k, "value": s.Env[k]})
 	}
+	// Native sandboxes need the same read-only helper for filesystem pause/resume,
+	// independently of envd. -native marks boot then execs the original argv unchanged.
+	container["volumeMounts"] = []any{map[string]any{"name": "proxcloud-runtime", "mountPath": RuntimeMountPath, "readOnly": true}}
+	podSpec["volumes"] = []any{map[string]any{
+		"name": "proxcloud-runtime", "hostPath": map[string]any{"path": RuntimeHostDir, "type": "Directory"},
+	}}
+	container["command"] = append([]any{RuntimeMountPath + "/sandbox-init", "-native"}, toAnySlice(cmd)...)
 	if cfg.Envd {
 		// sandbox-init (PID 1) creates the default user, starts envd and POSTs envd's /init over
 		// localhost, so the control-plane routes never have to be reachable from outside the pod.
@@ -251,7 +258,6 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 		if s.envdToken != "" {
 			env = append(env, map[string]any{"name": "PROXCLOUD_ENVD_ACCESS_TOKEN", "value": s.envdToken})
 		}
-		container["volumeMounts"] = []any{map[string]any{"name": "proxcloud-runtime", "mountPath": RuntimeMountPath, "readOnly": true}}
 		// Ready only once envd is initialised: an exec probe, so the kubelet never needs network
 		// access to the sandbox (its ingress admits sandbox-proxy only).
 		container["startupProbe"] = map[string]any{
@@ -266,10 +272,6 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 			"periodSeconds":    int64(1),
 			"failureThreshold": int64(1),
 		}
-		podSpec["volumes"] = []any{map[string]any{
-			"name":     "proxcloud-runtime",
-			"hostPath": map[string]any{"path": RuntimeHostDir, "type": "Directory"},
-		}}
 	}
 	if len(env) > 0 {
 		container["env"] = env

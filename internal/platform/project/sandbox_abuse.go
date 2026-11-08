@@ -17,6 +17,48 @@ import (
 const SandboxAbuseResource = "SANDBOX_ABUSE"
 
 type captureLockKey struct{}
+type abuseGuardKey struct{}
+
+type abusePauseGuard struct {
+	Sample         sandbox.Sample      `json:"sample"`
+	Policy         sandbox.AbusePolicy `json:"policy"`
+	ConnectionHash string              `json:"connectionHash"`
+}
+
+func abuseGuardFrom(ctx context.Context) *abusePauseGuard {
+	g, _ := ctx.Value(abuseGuardKey{}).(*abusePauseGuard)
+	return g
+}
+
+// authorizeAbuseAction is called under the shared capture lock immediately before
+// acting, and again after an automatic pause's image is ready. Host counter freshness
+// and inactivity, not a tenant process list or the helper's writable boot marker,
+// authorize deletion. No continuing high-CPU requirement during snapshot assembly.
+func (h *Handler) authorizeAbuseAction(ctx context.Context, service string, g *abusePauseGuard) error {
+	x, p := g.Sample, g.Policy
+	fp, pe := h.svc.repo.FindByID(ctx, x.ProjectID)
+	fe, se := h.esSvc.Get(ctx, service)
+	if pe != nil || se != nil || fp == nil || fe == nil || !fp.HasService(service) || fe.IsDisabled() || !sameAbusePolicy(fe.SandboxConfig().Abuse, p) || fmt.Sprintf("%x", sha256.Sum256([]byte(fe.SandboxConfig().Kubeconfig))) != g.ConnectionHash || fe.SandboxConfig().Envd {
+		return fmt.Errorf("provider policy or project changed")
+	}
+	ss, err := h.sandboxFor(fe)
+	if err != nil {
+		return err
+	}
+	latest, err := ss.AbuseSamples(ctx)
+	if err != nil {
+		return err
+	}
+	for _, cur := range latest {
+		if cur.ProjectID == x.ProjectID && cur.SandboxID == x.SandboxID {
+			if !sandbox.StillInactive(x, cur, p, time.Now().UTC()) {
+				return fmt.Errorf("activity/identity changed after sample")
+			}
+			return ss.CheckIdentity(ctx, x)
+		}
+	}
+	return sandbox.ErrNotFound
+}
 
 func sameAbusePolicy(a, b sandbox.AbusePolicy) bool {
 	aa, _ := json.Marshal(a.WithDefaults())
@@ -145,28 +187,9 @@ func (h *Handler) RunSandboxAbuse(ctx context.Context) {
 			}
 			acquired, actionErr := h.sbSafety.DB().WithAdvisoryLock(ctx, "sandbox-capture:"+es.ID+":"+proj.ID+":"+x.SandboxID, true, func() error {
 				ctx := context.WithValue(ctx, captureLockKey{}, x.SandboxID)
-				fp, pe := h.svc.repo.FindByID(ctx, proj.ID)
-				fe, se := h.esSvc.Get(ctx, es.ID)
-				if pe != nil || se != nil || fp == nil || fe == nil || !fp.HasService(es.ID) || !sameAbusePolicy(fe.SandboxConfig().Abuse.WithDefaults(), p) || fe.SandboxConfig().Kubeconfig != ss.Config().Kubeconfig || fe.SandboxConfig().Envd {
-					return fmt.Errorf("provider policy or project changed")
-				}
-				latest, e := ss.AbuseSamples(ctx)
-				if e != nil {
-					return e
-				}
-				found := false
-				for _, cur := range latest {
-					if cur.ProjectID == x.ProjectID && cur.SandboxID == x.SandboxID {
-						if !sandbox.StillInactive(x, cur, p, time.Now().UTC()) {
-							return fmt.Errorf("activity/identity changed after sample")
-						}
-						found = true
-					}
-				}
-				if !found {
-					return sandbox.ErrNotFound
-				}
-				err := ss.CheckIdentity(ctx, x)
+				guard := &abusePauseGuard{Sample: x, Policy: p, ConnectionHash: fmt.Sprintf("%x", sha256.Sum256([]byte(ss.Config().Kubeconfig)))}
+				ctx = context.WithValue(ctx, abuseGuardKey{}, guard)
+				err := h.authorizeAbuseAction(ctx, es.ID, guard)
 				if err == nil {
 					c := &e2bCaller{proj: proj, es: es, ss: ss}
 					// A pause/resume/capture in progress is never cancelled by this heuristic.

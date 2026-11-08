@@ -4,6 +4,28 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: functional native automatic pause and recovery
+
+**What changed:** native pods mount the existing read-only node runtime and run a PID1-only `-native` mode that marks
+boot then execs the original argv, retaining image USER/env/workdir/signals/exit behavior. Native automatic pause now
+uses the working filesystem snapshot path; a project-scoped native paused list/resume/delete API recovers it without
+turning envd on. Resume reuses suspension/release/quota/rotation/billing and pause claim locks. Automatic pauses persist
+a credential-free policy/connection-fingerprint/sample guard and reauthorize deletion under the capture lock after
+asynchronous image assembly/redrive. A changed policy, UID, activity or stale telemetry retains the original; an
+unknown/absent source never causes the only usable snapshot to be discarded. Actual pod and desired CR must both use
+the native helper. Unsupported envd + pause/kill (including disabled provider edits) and pause without storage are
+rejected explicitly in API/operator form; SDK remains alert-only.
+
+**Why:** the prior native opt-in could never pause shipped pods (no mounted helper or boot marker), and only exposing
+E2B resume stranded native snapshots. Proxy request counting is insufficient proof for detached/silent SDK processes,
+HA gaps or direct bypass; this bounded native capability adds no credentials/RBAC or tenant process trust. Native
+images require writable `/tmp`; upgrade node runtime before portal and recreate legacy native pods. Handler/Postgres
+regressions hold assembly, prove source remains until image usable, recover files through native resume, and cover late
+policy/activity/UID/stale metrics, failed capture, suspended/foreign access and expired source.
+
+**Diagrams updated:** C3 managed-service runtime node and safety component contract. Live lab verification is a separate
+post-merge gate, not claimed by the simulated cluster/image fixture.
+
 ## 2026-11-09: show the effective egress cap before sandbox creation
 
 **What changed:** the sandbox create dialog's limits include the selected curated

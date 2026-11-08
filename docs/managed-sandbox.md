@@ -1671,19 +1671,49 @@ integration regression executes Store.Get and independent WithTx while holding a
 
 `action: alert` is the default: only durable audit/admin evidence. Mail needs explicit operator `notifyEmails`, a mail
 gateway and enabled `sandbox_abuse_alert` template; no recipient means no email. SMTP failure is logged, audit remains.
-`pause` and `kill` are explicit provider opt-ins for **native-only providers**. On an envd/E2B provider, destructive
-heuristic actions are refused (`refused-active-exec-unprovable`): a silent SDK streaming exec bypasses the portal and
-there is no trustworthy exec-completion marker. Alerts remain enabled, so an operator can investigate and act manually.
-With the shipped templates, native-only pods do not mount the snapshot helper, so **automatic pause is presently
-unavailable in practice** and safely fails without deleting the original. Do not enable action=pause expecting it to
-succeed until a trusted native snapshot-capable runtime is supplied; use alert or explicitly destructive native kill.
+`pause` and `kill` are explicit provider opt-ins for **native-only providers** (`envd:false`). Provider edits, including
+DISABLED ones, reject either action with envd enabled: a silent SDK streaming exec bypasses the portal and there is no
+trustworthy exec-completion marker. Existing incompatible documents still fail closed at runtime
+(`refused-active-exec-unprovable`); use `alert` on E2B locations. Proxy request counting alone cannot cover detached SDK
+processes, replica crashes or bypass paths, so it is not treated as inactivity proof.
+
+Native pods now mount the same read-only node runtime as SDK pods and launch
+`/.proxcloud/sandbox-init -native <original argv...>`. It writes a boot marker, then replaces itself with the original
+command: image USER, workdir, environment, argv, signal handling and exit code remain unchanged; no envd/user creation
+or privilege change. Native images need writable `/tmp`. Upgrade **node runtime before portal**, then recreate native
+pods: old native or SDK pods are refused automatic actions even if the provider is switched to `envd:false`. Both desired
+CR and actual pod must have the native wrapper and exact runtime hostPath/read-only mount. The boot marker is used only
+for filesystem capture, never trusted as activity evidence. `pause` additionally requires templateRegistry, buildStorage
+endpoint/bucket and its access/secret keys (existing stored keys survive blank-secret edits).
 Native exec holds the capture/action lock for its duration. Actions recheck exact policy (including disabled), project
 attachment, provider connection and CR/pod UID under that lock, then re-read node traffic/activity before acting.
 A capture lock refuses an action during snapshot capture; paused/transitional sandboxes are skipped. Kill also refuses
 while project build/snapshot assembly is active. Pause uses the normal filesystem snapshot path and never deletes the
-original before a usable image exists; a failure leaves it running. It is asynchronous: `ACTION_pause SUCCESS` means
+original before a usable image exists. Automatic pauses persist their authorization guard (connection fingerprint,
+policy and sample identity, no credentials); the async finisher/redrive reacquires the capture lock and rechecks current
+policy, attachment, UID, fresh host counters and inactivity immediately before deleting the source. New native exec,
+traffic, policy/identity changes or stale evidence abandon the pause only when the original is positively alive; an
+unknown/expired source keeps the snapshot, and an already-gone source completes as paused without a destructive action.
+It is asynchronous: `ACTION_pause SUCCESS` means
 **requested**, not completed. Existing pause/build logs and the paused state show eventual success/failure. Kill is
 explicitly destructive (ephemeral files lost), unlike pause. No action on a foreign project/provider or reused pod UID.
+
+#### Recover a native automatic pause (no SDK or envd required)
+
+All routes use normal client authentication and `project:cloud_resource:manage`; IDs are sandbox IDs, **not** billing
+cache IDs (the old row may have been archived). List results contain no saved CR, environment or access tokens.
+
+- `GET /api/v1/project/{id}/sandbox-paused` → `{data:[{sandboxId,serviceId,state,pausedAt}]}`. States: `pausing`,
+  `stopping`, `paused`, `resuming`. Only currently attached services in this project are listed.
+- `POST /api/v1/project/{id}/sandbox-paused/{sandboxId}/resume` with `{"timeoutSeconds":300}` →
+  `{data:{sandboxId,resourceId}}`. Reuses the existing pause/resume locks, project/profile suspension, release gates,
+  concurrency/project quota, rotation fence and new billing-row lifecycle. The returned resourceId is the **new** cache ID.
+- `DELETE /api/v1/project/{id}/sandbox-paused/{sandboxId}` → 204, discards the saved files and any still-running source
+  through the existing paused-kill flow. Allowed while suspended, like normal resource deletion.
+
+Filesystem-only: processes/memory are not restored; files deleted from the base image can return (no whiteouts), and files
+written after capture are not saved. Unreadable files/directories or capture I/O errors fail the snapshot instead of
+silently omitting data; the original remains. Use alert for unattended jobs where those semantics are unacceptable.
 
 ### 10.3 Operator audit and counters
 
