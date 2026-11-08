@@ -68,9 +68,13 @@ router in `internal/server/server.go`).
 | `/api/v1/events/{projectId}` | 8080 | OIDC bearer (a short-lived stream token is not built yet) | Server-sent events per project | Implemented |
 | `/openapi.json` | 8080 | public | Stub document | Implemented |
 | `/actuator/health*`, `/__build` | 8081 | none; not routed by the chart's gateway or ingress | Liveness, readiness, build info | Implemented |
-| `POST /debug/<job>` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (when the scheduler is enabled) | Implemented |
+| `POST /debug/<job>` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (with the scheduler or debug triggers on; `gen-hmac-key` with debug triggers only) | Implemented |
 | Billing service callbacks | 8081 | shared token | Suspend/resume and mail callbacks from an external billing service | Implemented |
 | CSI gateway `/api2/json/**` | `PROXCLOUD_CSI_GATEWAY_ADDR` (TLS only; off when empty) | per-cluster credential `csi@proxcloud!<clusterId>`, only its SHA-256 stored | The PVE calls a tenant cluster's proxmox-csi controller may make, each checked for ownership, sent on with one gateway token. Called by the proxmox-csi controllers of new tenant clusters, which run on the services cluster (`PROXCLOUD_CSI_GATEWAY_URL`); only the services nodes reach the port (chart NetworkPolicy) | Implemented |
+| `/e2b/**` | 8080 | a project's `e2b_` sandbox API key (`X-API-Key` or bearer), only its SHA-256 stored | E2B-compatible sandbox API ([e2b-compat.md](../../e2b-compat.md)) | Implemented |
+| `/api/v1/internal/sandboxes/**` | 8080 | the sandbox provider's `proxyWakeToken` | sandbox-proxy's wake call for a paused sandbox | Implemented |
+| `/api/v1/nocloud/**` | 8080 | the per-VM seed token in the path | cloud-init seeds of servers | Implemented |
+| `/api/v1/console/**` | 8080 | the console token in the path | VNC console WebSocket proxy | Implemented |
 | SSO discovery and per-org SSO routes (`/api/v1/auth/sso/discover`, `/api/v1/organizations/{id}/sso`, `/api/v1/admin/sso`) | 8080 | public / OIDC | Email-first login, SSO self-service, operator stop | Implemented |
 
 ## C2b. Proxmox cluster and storage tiers
@@ -212,28 +216,32 @@ flowchart LR
   classDef planned fill:#f2f2f2,stroke:#8a8a8a,stroke-dasharray:5 5,color:#555555
 
   test["test.yml<br/>go test, rebrand gate"]:::impl
-  docker["docker.yml<br/>api, web, admin images"]:::impl
+  docker["docker.yml<br/>api, web, admin,<br/>sandbox-proxy, sandbox-runtime images"]:::impl
+  sbxt["sandbox-templates.yml<br/>built-in template images"]:::impl
   helm["helm.yml<br/>lint, OCI chart publish"]:::impl
   ghcr["ghcr.io<br/>images and OCI charts"]:::impl
   chart["Chart proxcloud<br/>api, SPAs, gateway, Keycloak, CNPG"]:::impl
   dbchart["Chart database-cluster<br/>DBaaS engines"]:::impl
+  k8schart["Chart proxmox-kamaji-cluster<br/>tenant and sandbox clusters"]:::impl
   inst["Installer (Ansible)<br/>make install, day-2 targets"]:::impl
   vmt["VM template pipeline<br/>build.py, Packer, tags"]:::impl
-  k8st["K8s node template pipeline"]:::planned
+  k8st["K8s node template pipeline<br/>k8s-node-templates.yml, image-builder"]:::impl
   mgmt["Management cluster"]:::impl
   pve["Proxmox cluster"]:::impl
 
   docker --> ghcr
+  sbxt --> ghcr
   helm --> ghcr
   chart --> helm
   dbchart --> helm
+  k8schart --> helm
   ghcr -->|"helm install, ArgoCD"| mgmt
   ghcr --> inst
   inst -->|"k3s, ArgoCD Applications, register"| mgmt
   inst -->|"API: roles, tokens, stores, VMs"| pve
   inst --> vmt
   vmt -->|"templates in pc-templates"| pve
-  k8st -.-> pve
+  k8st -->|"node templates"| pve
 ```
 
 ## Container table
@@ -260,7 +268,8 @@ flowchart LR
 | Proxmox Backup Server | vzdump target | Separate machine | Planned |
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
-| CI | GitHub Actions `test.yml`, `docker.yml`, `helm.yml` | GitHub | Implemented |
+| Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`) | ghcr OCI | Implemented |
+| CI | GitHub Actions `test.yml`, `docker.yml` (api, web, admin, sandbox-proxy, sandbox-runtime), `helm.yml`, `sandbox-templates.yml`, and the self-hosted `vm-templates.yml` and `k8s-node-templates.yml` | GitHub | Implemented |
 | Installer | Ansible playbooks and Makefile (`installer/`): one-shot install, `allinone` mode, day-2 targets; `split` mode is Planned | Operator workstation | Implemented |
 | VM template pipeline | `images/build.py` + Packer, `vm-templates.yml`; tag-published, one copy per node on local-disk sites | Self-hosted runner in the Proxmox network, or the installer from the first management host | Implemented |
 | K8s node template pipeline | image-builder | Self-hosted runner in the Proxmox network | Implemented, script run by hand |
@@ -271,6 +280,9 @@ flowchart LR
 |---|---|---|
 | Browser or agent to API | OIDC bearer JWT validated per realm (`azp` bound), or `pk.sk` personal access key | Implemented |
 | Automation to admin API | AWS SigV4 with `hmac_keys`, or the admin-api realm | Implemented |
+| E2B SDK to `/e2b` | A project's `e2b_` sandbox API key (SHA-256 stored); its creator's project rights are checked on every call | Implemented |
+| sandbox-proxy to the wake endpoint | The sandbox provider's `proxyWakeToken` (bearer) | Implemented |
+| A VM or a browser console to `/api/v1/nocloud/`, `/api/v1/console/` | A per-VM seed token or a console token in the path | Implemented |
 | Management port `:8081` | On the cluster Service only, never on the gateway or ingress. Billing callbacks are mounted only when a shared token is configured | Implemented |
 | API to Proxmox | Privilege-separated API token with the `ProxCloudPlatform` role; test connection warns on missing privileges and on `root@pam` | Implemented |
 | Tenant to tenant on the SDN | Cluster firewall rules (forward and input DROP inside the CIDR pool, per-project ACCEPT), reconciled every sync; non-overlapping CIDRs; optional per-project EVPN zone | Implemented |

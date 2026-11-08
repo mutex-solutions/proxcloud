@@ -42,9 +42,13 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 - [managed-k8s.md](managed-k8s.md) and [managed-dbaas.md](managed-dbaas.md) —
   managed Kubernetes and database clusters delivered through ArgoCD.
 - [managed-sandbox.md](managed-sandbox.md) — gVisor sandboxes on a platform-owned
-  Kamaji cluster (planned): the SB0 lab spike and its findings.
+  Kamaji cluster: isolation, release gates, the public entry and wake, the sandbox
+  registry and custom templates, with what ran on the lab.
+- [e2b-compat.md](e2b-compat.md) — the E2B-compatible sandbox API under `/e2b`.
+- [pricing-rate-card.md](pricing-rate-card.md) — the seed price plan's rules and the
+  benchmarks behind them.
 - [proxmox-permissions.md](proxmox-permissions.md) — least-privilege PVE roles
-  (ProxCloudPlatform / ProxCloudCAPI / ProxCloudCSI), ACL paths, privsep tokens
+  (ProxCloudPlatform, ProxCloudCAPI, ProxCloudCSI and the rest), ACL paths, privsep tokens
   and the `pveum` commands to create them.
 - [jobs-scheduling.md](jobs-scheduling.md) — scheduled jobs, the PostgreSQL
   distributed lock, and the optional RabbitMQ charge fan-out.

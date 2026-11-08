@@ -1,6 +1,6 @@
 # Proxmox VE permissions
 
-ProxCloud needs no `root@pam` access on the cluster. The [installer](install.md) creates everything on this page (`installer/playbooks/10-pve-identity.yml`). This page defines five least-privilege roles, the users and API tokens that hold them, and the ACL paths they are granted on. The commands are for **PVE 9**. PVE 9 removed `VM.Monitor`; the guest-agent reads ProxCloud uses need `VM.GuestAgent.Audit` instead.
+ProxCloud needs no `root@pam` access on the cluster. The [installer](install.md) creates everything on this page (`installer/playbooks/10-pve-identity.yml`). This page defines seven least-privilege roles, the users and API tokens that hold them, and the ACL paths they are granted on. The commands are for **PVE 9**. PVE 9 removed `VM.Monitor`; the guest-agent reads ProxCloud uses need `VM.GuestAgent.Audit` instead.
 
 | Role | Held by | Used for |
 |---|---|---|
@@ -9,6 +9,7 @@ ProxCloud needs no `root@pam` access on the cluster. The [installer](install.md)
 | `ProxCloudCSI` | `csi@pve!csi`, `csi@pve!gateway` | `proxmox-csi-plugin` in the services cluster; the CSI gateway of the portal API (split mode) |
 | `ProxCloudImages` | `images@pve!packer` | the image pipeline ([images/README.md](../images/README.md)) |
 | `ProxCloudSandboxGuard` | `proxcloud@pve!platform`, on pool `proxcloud-sandbox` only | the sync job's VM firewall on the sandbox workers (`sandbox.enabled`) |
+| `ProxCloudKubeMint` | `proxcloud@pve!platform` (`mode: split`) | minting and revoking the per-cluster tokens of managed Kubernetes ([below](#managed-kubernetes)) |
 | `ProxCloudSandboxEntry` | `proxcloud@pve!platform`, on pool `proxcloud-sandbox-entry` only | the sync job keeping the sandbox entry appliance: firewall and HAProxy config through the guest agent (stage 56) |
 
 Every token is created with **privilege separation** (`--privsep 1`). A privilege-separated token's rights are the **intersection** of the user's ACLs and the token's ACLs, so each ACL below is granted to both the user and the token.
@@ -23,6 +24,7 @@ The admin **Test connection** button on the Proxmox provider reads the token's e
 | `pc-templates` | OS and k8s node templates |
 | `proxcloud-system` | management VMs, the services cluster and its storage VMs. The platform token gets `NoAccess` here. Its name must **not** start with `poolPrefix`. |
 | `proxcloud-sandbox` | `sandbox.enabled` only: the sandbox cluster's workers ([managed-sandbox.md](managed-sandbox.md)). No project owns it, so nothing in it is synced or billed to a tenant. Its name must **not** start with `poolPrefix`. |
+| `proxcloud-sandbox-entry` | `sandbox.entry.public.bridge` set: the sandbox entry appliance (HAProxy, stage 56). The platform token holds only `ProxCloudSandboxEntry` there. Its name must **not** start with `poolPrefix`. |
 
 ## ProxCloudPlatform
 
@@ -91,6 +93,12 @@ Privileges: `Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM 
 | `/sdn/zones/<zone>/<vnet>` | `ProxCloudCAPI` | 0 |
 | `/storage/<disk storage>` | `ProxCloudCAPI` | 0 |
 | `/storage/<cloud-init ISO storage>` | `PVEDatastoreAdmin` (built-in) | 0 |
+
+This is the minimum for the services cluster alone. What stage 10 grants in split mode (`split_acls`) is wider,
+because the per-cluster tokens minted under `capmox@pve` need it (below): `ProxCloudCAPI` on all of `/pool` and
+`/sdn/zones` (propagated) for the user and the `capi` token, which covers `proxcloud-system` and the vnet rows above,
+and on all of `/storage` for the user only (the token keeps the two `/storage` rows). With `sandbox.enabled` the `capi`
+token gets `NoAccess` on the sandbox pools.
 
 The ISO storage holds each new node's kubeadm join token until it has joined, and CAPMOX uploads to the first
 `iso` store the token sees, in no fixed order: make it node-local (`local`, the installer's default), and give the
@@ -198,6 +206,9 @@ Run these on any node (cluster config is shared). Replace the `<…>` placeholde
 pveum role add ProxCloudPlatform --privs "Sys.Audit Sys.Console Sys.Modify Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Backup VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Console VM.GuestAgent.Audit VM.GuestAgent.Unrestricted VM.Migrate VM.PowerMgmt VM.Replicate VM.Snapshot VM.Snapshot.Rollback SDN.Allocate SDN.Audit SDN.Use Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit Mapping.Audit Mapping.Use"
 pveum role add ProxCloudCAPI --privs "Sys.Audit Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.GuestAgent.Audit VM.Migrate VM.PowerMgmt Datastore.AllocateSpace Datastore.Audit SDN.Use"
 pveum role add ProxCloudCSI --privs "VM.Audit VM.Config.Disk Datastore.Allocate Datastore.AllocateSpace Datastore.Audit"
+pveum role add ProxCloudKubeMint --privs "User.Modify Permissions.Modify"                   # mode: split
+pveum role add ProxCloudSandboxGuard --privs "Pool.Audit VM.Audit VM.Config.Network"          # sandbox.enabled
+pveum role add ProxCloudSandboxEntry --privs "Pool.Audit VM.Audit VM.Config.Network VM.GuestAgent.Audit VM.GuestAgent.Unrestricted"  # entry appliance
 pveum role add ProxCloudImages --privs "Sys.Audit Sys.AccessNetwork Pool.Allocate Pool.Audit VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Console VM.GuestAgent.Audit VM.PowerMgmt Datastore.Allocate Datastore.AllocateSpace Datastore.AllocateTemplate Datastore.Audit SDN.Use"
 
 # pools

@@ -8,7 +8,7 @@ Everything here lives under the **Compute** group in the sidebar.
 
 Create a server from **Compute → Servers**. Each machine is a Proxmox VE virtual machine cloned from an **image** (the operating system to boot), sized by a **flavor** (vCPUs, RAM, optional GPU, and a default root-disk size), attached to one of your project's **networks**, given a **key pair** for SSH login (injected by cloud-init), and protected by one or more **security groups**. Pick a flavor that matches the workload, then set the root-disk size; it can't go below what the image needs. The flavor decides which storage the root disk lives on, and the root disk is deleted with the server. ProxCloud places the server on a host where that storage has room for the root disk; if no host has room, or the image can only be cloned on a host where the flavor's storage isn't available, the create is refused with the reason and nothing is created. Try another flavor or ask your operator. Add data disks after launch from **Storage → Volumes** (see [Block Volumes](/docs/guides/volumes)).
 
-There are no floating IPs on Proxmox. To make a server reachable from the internet, give it a public NIC as described in [Networking](/docs/guides/networks).
+To make a server reachable from the internet, attach a public IP on its **Network** tab (see [Public IP](#public-ip) below and [Networking](/docs/guides/networks)).
 
 ## Power actions
 
@@ -18,9 +18,9 @@ A server's page exposes the lifecycle controls:
 - **Stop / Start** — power the server off and on. A stopped server keeps its disks and network attachments.
 - From **More actions**: **Rename**, **Resize** (move to another flavor), **Console (VNC)** for a browser console, and **Delete**.
 
-Actions the cloud behind your project can't perform are not shown. On Proxmox that means there is no rebuild, rescue or set-password action and no cloud-init user-data field yet; with password login the password is set on the image's default account. The server's **Network** tab lists the addresses the guest reports.
+Actions the cloud behind your project can't perform are not shown; on Proxmox there is no rescue action. With password login the password is set on the image's default account. The server's **Network** tab lists the addresses the guest reports.
 
-When you're done with a machine, **delete** it so it stops consuming compute and accruing charges. Deleting destroys the VM together with all of its disks, including volumes you detached from it, so copy off anything you want to keep first.
+When you're done with a machine, **delete** it so it stops consuming compute and accruing charges. The boot disk goes with the server, and so do all of its backups. Its data volumes are kept, detached and still billed, unless you tick **Also delete this server's volumes** in the delete dialog. Copy off anything you want to keep first.
 
 ## Key pairs
 
@@ -30,11 +30,13 @@ SSH access is by key pair, managed under **Compute → Key pairs**. Either uploa
 
 **Compute → Images** lists the machine images you can boot from — both the templates the operator publishes and any you own. Choose one when launching a server; the image determines the OS and the default login user.
 
-To save a server as your own image, open the server's **Snapshots** tab and create a snapshot. ProxCloud clones the server into a template that belongs to your project; it appears under **Compute → Images** and can be used to launch new servers. Deleting the image removes the template.
+To save a server as your own image, open the server's **Images** tab and create an image. ProxCloud clones the server into a template that belongs to your project; it appears under **Compute → Images** and can be used to launch new servers. Deleting the image removes the template.
+
+When your operator has set up an import store, **Import image** on the Images page brings in a public cloud image by URL (qcow2 or VMDK, with cloud-init). Downloading and importing can take minutes; the image then appears in the list.
 
 ## Keeping the console in sync
 
-The status you see on a server reflects the real state on the Proxmox VE cluster. It is kept current by a background sync every 15 minutes, by every action you take in ProxCloud, and by a live refresh when you open a server. A change made directly in Proxmox appears after the next sync. For the mechanics, see [How Provisioning Works](/docs/concepts/provisioning).
+The status you see on a server reflects the real state on the Proxmox VE cluster. It is kept current by a state sample about every minute, a full background sync every 15 minutes, every action you take in ProxCloud, and a live refresh when you open a server. A power change made directly in Proxmox shows within about a minute; other changes appear after the next full sync. For the mechanics, see [How Provisioning Works](/docs/concepts/provisioning).
 
 ## User data and metadata
 
@@ -57,6 +59,19 @@ If the host of a server goes down, the server shows **Unknown**. It keeps its ad
 the server itself while it lasts, and actions on it are refused until the host is back. It then shows as stopped: start it
 again. Other servers in the project are not affected. To have a server restart on another host by itself, enable
 **Protection**.
+
+## Protection
+
+The **Protection** tab turns on automatic restart on another host when the server's host fails. On local disks this
+keeps a copy of the disks on a second host, with the data as of the last sync (anything written after it is lost),
+and the copy is billed per replicated GB once the first sync is done. On shared storage every host already reaches the
+disks, so nothing is copied.
+
+## Backups
+
+When the operator has set up a backup store, the **Backups** tab creates full backups of the server and restores one,
+which replaces the disks. Backups survive a disk or node failure, but they are deleted with the server: to keep a
+server's state beyond that, create an image.
 
 ## Snapshots
 

@@ -12,7 +12,7 @@ Credentials are never exposed. Only the provider's id, name, type and provider k
 | `name` | string | Display name. |
 | `type` | string | `CLOUD` for cloud providers; omitted for other provider types. |
 | `configuration` | object | Always present. |
-| `configuration.cloud.provider` | string | The provider kind: `PROXMOX`, `CEPH_S3`, `KAMAJI` or `DBAAS`. |
+| `configuration.cloud.provider` | string | The provider kind, the stored kind upper-cased with `-` as `_`: `PROXMOX`, `CEPH_S3`, `RUSTFS`, `TRUENAS`, `POWERDNS`, `KAMAJI`, `DBAAS` or `SANDBOX`. |
 | `configuration.cloud.proxmox` | object | Proxmox VE providers only. `pool_prefix` is the prefix of the per-project PVE pool names (`<pool_prefix><project id>`); it defaults to `pc-`. |
 
 ## GET /admin-api/v1/service_providers

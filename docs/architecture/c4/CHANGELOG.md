@@ -4,6 +4,28 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-08: C2 caught up with the code: token-authenticated surfaces and the delivery pipeline
+
+**What changed** (documentation only; no code or behaviour change)
+
+- C2 API surfaces: rows for `/e2b/**` (a project's `e2b_` sandbox API key), `/api/v1/internal/sandboxes/**` (the
+  sandbox provider's `proxyWakeToken`), `/api/v1/nocloud/**` (per-VM seed token) and `/api/v1/console/**` (console
+  token). The debug-trigger row says `gen-hmac-key` needs debug triggers, not just the scheduler.
+- C2 trust boundaries: the same three credentials as rows.
+- C2c build and delivery: `docker.yml` also builds sandbox-proxy and sandbox-runtime; `sandbox-templates.yml` and the
+  `proxmox-kamaji-cluster` chart are drawn; the K8s node template pipeline is Implemented (`k8s-node-templates.yml`),
+  as the container table already said. The container table gains the kamaji chart row and the full workflow list.
+- C4 code: the billing registry row lists every provider `cmd/api/main.go` registers (image, share, sandbox, sandbox
+  snapshot were missing).
+
+**Why**
+
+The C4 maintenance rule wants every trust boundary in C2. Four public-prefix surfaces that authenticate with their own
+token were only in `pkg/auth`, and the delivery diagram still showed the K8s node template pipeline as Planned while
+the table and the workflow said otherwise.
+
+**Diagrams updated:** C2 (API surfaces, C2c, container table, trust boundaries), C4 (billing registry row).
+
 ## 2026-11-08: MCP tool audit: dispatch skips the azp binding, 30 new tools, route test
 
 **What changed**

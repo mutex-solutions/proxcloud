@@ -27,17 +27,21 @@ need the domain user look it up and fail if it has not been initialized.
 
 ### Realms and clients
 
-Two Keycloak realms back the platform, with three public PKCE clients:
+The service knows three realm configs: `auth.main` (customer), `auth.admin`
+(operator console) and `auth.admin-api` (machine Admin API), each an issuer URI +
+client id (`internal/config/config.go`, `OAuth2Realm`). The realm names come from the
+issuers, so they are whatever the deployment chose:
 
-| Realm | Who | Public client(s) | Toolset / surface |
-|-------|-----|------------------|-------------------|
-| `clients` (display "Cloud console") | Customers | `proxcloud-ui` | Customer API `/api/v1`, MCP client tools |
-| `master` (display "Cloud Admin") | Operators / machines | `proxcloud-admin`, `proxcloud-admin-api` | Admin console, Admin API `/admin-api/v1`, MCP admin tools |
+| Config | Who | Public client | Toolset / surface | Installer realm | Dev compose realm |
+|--------|-----|---------------|-------------------|-----------------|-------------------|
+| `auth.main` | Customers | `proxcloud-ui` | Customer API `/api/v1`, MCP client tools | `proxcloud` | `proxcloud` |
+| `auth.admin` | Operators | `proxcloud-admin` | Admin console, MCP admin tools | `proxcloud-admin` | `proxcloud` |
+| `auth.admin-api` | Machines | `proxcloud-admin-api` | Admin API `/admin-api/v1` | `proxcloud-admin` | `proxcloud` |
 
-The service maps these to three realm configs — `auth.main` (customer), `auth.admin`
-(operator console), `auth.admin-api` (machine Admin API) — each an issuer URI + client
-id (`internal/config/config.go`, `OAuth2Realm`). `auth.admin` and `auth.admin-api`
-both point at the `master` realm issuer, distinguished by their client id.
+The installer (`keycloak.main_realm` / `admin_realm`) points `auth.admin` and
+`auth.admin-api` at the same operator realm, distinguished by their client id. The
+dev compose stack uses one realm for all three; there the MCP gate matches the admin
+issuer first, so every token gets the admin toolset.
 
 ### Accounts made by an operator
 
@@ -124,6 +128,26 @@ never the secret.
 The store keeps only a SHA-256 of the secret half; tokens from before that are converted at boot. A token cannot
 mint another: `POST /user/api-keys` needs a signed-in session, so a token cannot outlive its own expiry.
 
+## Sandbox API keys (E2B)
+
+The E2B-compatible API under `/e2b/` (see [e2b-compat.md](e2b-compat.md)) is outside
+`Enforce` (public prefix) and authenticates with a project's sandbox API key: `e2b_` +
+random, minted in the customer console (Sandboxes → API keys) and sent as `X-API-Key`
+or `Authorization: Bearer <key>` (`internal/platform/project/e2b.go`, `e2bAuth`). The
+`sandbox_api_keys` table keeps only its SHA-256. The key acts in its project only, and
+its creator must still hold cloud-resource rights there on every call: removing the
+member stops their keys.
+
+## Per-organization SSO guard
+
+With SSO on, a guard (`internal/platform/sso/guard.go`, installed with
+`authn.SetGuard`) gets the last word on every authenticated `auth.main` request,
+public paths included. A refused request on a protected path answers `403` with a
+code (`sso_required`, `sso_idp_disabled`, `sso_domain_not_allowed`,
+`sso_idp_mismatch`, `sso_operator_refused`, `sso_scope_missing`, `sso_unavailable`);
+on a public path the caller is treated as anonymous. Operators in their own realm and
+hmac keys are out of its scope.
+
 ## The Admin API gate
 
 `/admin-api/v1` sits behind an extra authorization gate on top of `Enforce`
@@ -134,7 +158,7 @@ mint another: `POST /user/api-keys` needs a signed-in session, so a token cannot
   `auth.admin-api` issuer **and** `azp` equals the `auth.admin-api` client id
   (`proxcloud-admin-api`).
 
-Everything else returns `403`. So a valid customer (`clients` realm) token
+Everything else returns `403`. So a valid customer (`auth.main` realm) token
 authenticates at the platform level but is still refused at the Admin API gate.
 
 ```mermaid
@@ -170,13 +194,16 @@ vary by auth), but no credential is required.
 | `/openapi.json` | OpenAPI document |
 | `/mcp` | MCP endpoint (the MCP handler runs its own dual-scheme gate) |
 | `/api/v1/auth/` | Login / auth callbacks (owned by the IdP flow, not bearer-protected) |
-| `/api/v1/download/` | Signed download links |
+| `/api/v1/download/` | Signed download links (the token in the URL is the auth) |
+| `/api/v1/nocloud/` | Server seeds for cloud-init (the per-VM seed token in the URL is the auth) |
+| `/api/v1/console/` | VNC console WebSocket proxy (the console token is the auth) |
 | `/api/v1/callbacks/` | Third-party callbacks |
-| `/api/v1/payments/` | Payment gateway callbacks |
-| `/api/v1/admin/job/` | Operator job triggers |
 | `/api/v1/admin/onboarding/` | Onboarding **status** read (the setup mutations are not exposed) |
-| `/api/v1/webhooks/` | Generic inbound webhooks |
-| `/api/v1/events/` | SSE real-time streams |
+| `/api/v1/internal/sandboxes/` | sandbox-proxy's wake call (a sandbox provider's `proxyWakeToken` is the auth) |
+| `/e2b/` | E2B-compatible sandbox API (a project's `e2b_` sandbox API key is the auth, see below) |
+
+`/api/v1/admin/job/` is **not** public: it needs an admin credential (a SigV4 hmac
+key or a bearer from the admin / admin-api realm); a client-realm bearer gets `403`.
 
 CORS preflight (`OPTIONS`) is answered `204` **before** enforcement, so it never
 `401`s (`internal/server/server.go`, `corsMiddleware`).
@@ -227,7 +254,7 @@ client should use:
 ```json
 {
   "resource": "<api-base-url>/mcp",
-  "authorization_servers": ["<clients-realm-issuer>", "<master-realm-issuer>"],
+  "authorization_servers": ["<auth.main issuer>", "<auth.admin issuer>"],
   "bearer_methods_supported": ["header"]
 }
 ```
@@ -259,7 +286,7 @@ dispatch with a SigV4 signature minted on the fly from the validated pair
 sequenceDiagram
     participant U as User
     participant SPA as proxcloud-ui (SPA)
-    participant KC as Keycloak (clients realm)
+    participant KC as Keycloak (customer realm)
     participant API as ProxCloud API
 
     U->>SPA: Open app
@@ -283,8 +310,8 @@ Each realm is a pair of issuer URI + client id. They can be set via config file
 
 In Helm, when bringing your own OIDC provider (`keycloakx.enabled: false`), set:
 
-- `auth.main.issuer` → the **customer** (`clients`) realm issuer
-- `auth.admin.issuer` → the **operator** (`master`) realm issuer
+- `auth.main.issuer` → the **customer** realm issuer
+- `auth.admin.issuer` → the **operator** realm issuer
 - `auth.adminApi.issuer` → the machine **Admin API** realm issuer
 - client ids stay on `auth.main.clientId` / `auth.admin.clientId` /
   `auth.adminApi.clientId` (defaults `proxcloud-ui` / `proxcloud-admin` /

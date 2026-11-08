@@ -12,8 +12,10 @@ cluster's API, and Kamaji runs the cluster's control plane as pods there
 > workers in the project's pool on the project's network, under tokens minted per cluster and revoked after the delete.
 > Verified on PVE 9.2 with CAPI v1.14.4, CAPMOX v0.9.2 and Kamaji CP provider v0.22.0: create, scale-out, RWX volumes on a
 > NAS dataset, a tenant LoadBalancer, project suspend and resume, a refused create, delete with everything it held.
-> **Block volumes (proxmox-csi) are off by default**, because their token opens other tenants' disks: see
-> [section 9](#9-how-a-cluster-lands-on-proxmox). Not available: autoscaling node groups, GPU node groups. Not run: the
+> **Block volumes (proxmox-csi) come through the CSI gateway**, which keeps every PVE credential out of the tenant
+> cluster: a new cluster gets them when the portal runs the gateway (on in the installer's split mode), the compute
+> provider holds its token and the Kubernetes provider pins chart 0.1.7 or later. Without the gateway a cluster gets
+> no block volumes: see [section 9](#9-how-a-cluster-lands-on-proxmox). Not available: autoscaling node groups, GPU node groups. Not run: the
 > installer's split mode end to end, and a NAS the workers reach without SNAT (the lab has none).
 
 Code: `internal/cloud/kamaji` (config, values builder, Application builder,
