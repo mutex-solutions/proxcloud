@@ -33,33 +33,65 @@ jobs:
     # A fork's push cannot reach this event set, but the repository check keeps the runner off forks of forks.
     if: github.repository == 'mutex-solutions/proxcloud'
     timeout-minutes: 240
+    # All cluster settings are repository Actions secrets; see .github/pve-actions.env.example.
     env:
-      PVE_URL: ${{ vars.PVE_URL }}
-      PVE_TOKEN_ID: ${{ vars.PVE_TOKEN_ID }}
+      PVE_URL: ${{ secrets.PVE_URL }}
+      PVE_TOKEN_ID: ${{ secrets.PVE_TOKEN_ID }}
       PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
+      PVE_NODES: ${{ secrets.PVE_NODES }}
+      PVE_TEMPLATE_STORAGE: ${{ secrets.PVE_TEMPLATE_STORAGE }}
+      PVE_IMPORT_STORAGE: ${{ secrets.PVE_IMPORT_STORAGE }}
+      PVE_BRIDGE: ${{ secrets.PVE_BRIDGE }}
+      BUILD_IP: ${{ secrets.BUILD_IP }}
+      BUILD_GATEWAY: ${{ secrets.BUILD_GATEWAY }}
+      BUILD_NAMESERVER: ${{ secrets.BUILD_NAMESERVER }}
     steps:
+      - name: Validate required configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for key in PVE_URL PVE_TOKEN_ID PVE_TOKEN_SECRET PVE_NODES PVE_TEMPLATE_STORAGE PVE_IMPORT_STORAGE PVE_BRIDGE BUILD_IP BUILD_GATEWAY; do
+            value="${!key:-}"
+            if [[ -z "${value//[[:space:]]/}" ]]; then
+              echo "::error::Missing required Actions secret: $key"
+              missing=1
+            fi
+          done
+          if (( missing )); then exit 1; fi
+          # GitHub masks a multi-node secret as one value, not necessarily each node.
+          for node in $PVE_NODES; do
+            echo "::add-mask::$node"
+          done
+          echo "::add-mask::${BUILD_IP%%/*}"
       - uses: actions/checkout@v7
       - name: Build
-        # vars: PVE_NODES = space-separated nodes (one on shared VM disks, all of them on local disks),
-        # PVE_TEMPLATE_STORAGE, PVE_IMPORT_STORAGE, PVE_BRIDGE, BUILD_IP (CIDR), BUILD_GATEWAY, BUILD_NAMESERVER.
+        # PVE_NODES is space-separated: one on shared VM disks, all of them on local disks.
+        # BUILD_IP is a dedicated free CIDR; optional BUILD_NAMESERVER falls back to BUILD_GATEWAY.
         env:
           OS_LIST: ${{ inputs.os || 'debian-13 ubuntu-2404' }}
-          NODES: ${{ vars.PVE_NODES }}
-          TEMPLATE_STORAGE: ${{ vars.PVE_TEMPLATE_STORAGE }}
-          IMPORT_STORAGE: ${{ vars.PVE_IMPORT_STORAGE }}
-          BRIDGE: ${{ vars.PVE_BRIDGE }}
-          BUILD_IP: ${{ vars.BUILD_IP }}
-          BUILD_GATEWAY: ${{ vars.BUILD_GATEWAY }}
-          BUILD_NAMESERVER: ${{ vars.BUILD_NAMESERVER }}
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           for os in $OS_LIST; do
-            for node in $NODES; do
-              python3 images/build.py build --os "$os" --node "$node" --storage "$TEMPLATE_STORAGE" \
-                --import-storage "$IMPORT_STORAGE" --bridge "$BRIDGE" --build-ip "$BUILD_IP" \
+            for node in $PVE_NODES; do
+              python3 images/build.py build --os "$os" --node "$node" --storage "$PVE_TEMPLATE_STORAGE" \
+                --import-storage "$PVE_IMPORT_STORAGE" --bridge "$PVE_BRIDGE" --build-ip "$BUILD_IP" \
                 --build-gateway "$BUILD_GATEWAY" --nameserver "$BUILD_NAMESERVER" | tee -a manifest.jsonl
             done
           done
+      - name: Sanitize public manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Artifact contents are not secret-masked. Never publish node/VMID/prune details.
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("manifest.jsonl")
+          rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+          path.write_text("".join(json.dumps({key: row[key] for key in ("os", "built", "version") if key in row}) + "\n" for row in rows))
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: templates-${{ github.run_id }}
