@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
 func TestReadyTemplateCatalogIsolationAndBounds(t *testing.T) {
@@ -55,12 +56,12 @@ func TestEnvironmentOpenAPIParity(t *testing.T) {
 }
 
 func TestUnknownTemplateAndDocsLinks(t *testing.T) {
-	h := &Handler{}
+	h := &Handler{sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate { return nil }}
 	if !strings.Contains(h.e2bDocs(), "console /docs/api/e2b") {
 		t.Fatal("unconfigured console must give console-relative hint, not API-origin URL")
 	}
 	h.SetE2BConsoleURL("https://console.internal.example/")
-	c := &e2bCaller{proj: &Project{ID: "p1"}, ss: sandbox.NewWithAPI(nil, sandbox.Config{Templates: map[string]sandbox.Template{"base": {Image: "base"}}}, "svc")}
+	c := &e2bCaller{es: &externalservice.ExternalService{ID: "svc"}, proj: &Project{ID: "p1"}, ss: sandbox.NewWithAPI(nil, sandbox.Config{Templates: map[string]sandbox.Template{"base": {Image: "base"}}}, "svc")}
 	msg := h.unknownTemplate(context.Background(), c, "not-found")
 	// Verify the actual create error path, not just the message formatter. No cluster
 	// or template store is needed for an unknown name.
