@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -229,13 +230,9 @@ func TestImportPostgresCopyPinSetAndExactTerminalEvidence(t *testing.T) {
 	ctx := context.Background()
 	_, a, b := importPGFixture(t)
 	dest := importTestOtherRepo + ":build1"
-	for _, source := range []string{importTestExternal, importTestSource} {
+	for _, source := range []string{importTestExternal, importTestHost + "/library/base@" + importTestDigest} {
 		op := importPGOperation()
-		refs := []string{dest}
-		if source == importTestSource {
-			refs = append(refs, source)
-		}
-		ps := importPGPins(t, a, op, refs...)
+		ps := importPGPins(t, a, op, dest)
 		proof := importPGAuthorize(t, a, op, source, dest)
 		if _, _, err := proof.Consume(op.ProjectID, source, dest); err != nil {
 			t.Fatal(err)
@@ -262,35 +259,17 @@ func TestImportPostgresCopyPinSetAndExactTerminalEvidence(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, p := range ps {
-			if p.RequestedRef == dest {
-				_, err := b.ReleaseImportTerminal(ctx, p, e)
-				importPGConflict(t, err)
-				be := BindingEvidence{UID: "durable-template-owner", Generation: op.Generation, DigestRef: importTestOtherRepo + "@" + importTestDigest}
-				wrongDigest := be
-				wrongDigest.DigestRef = importTestOtherRepo + "@sha256:" + strings.Repeat("b", 64)
-				_, err = b.ObserveBinding(ctx, p, wrongDigest)
-				importPGConflict(t, err)
-				if _, err = b.BeginPrune(ctx, importPGOperation(), wrongDigest.DigestRef); !errors.Is(err, ErrOperatorHold) {
-					t.Fatal("wrong digest bind dropped pending destination tag HOLD", err)
-				}
-				if _, err = b.ObserveBinding(ctx, p, be); err != nil {
-					t.Fatal(err)
-				}
-				continue
+			_, err := b.ReleaseImportTerminal(ctx, p, e)
+			importPGConflict(t, err)
+			be := BindingEvidence{UID: "durable-template-owner", Generation: op.Generation, DigestRef: importTestOtherRepo + "@" + importTestDigest}
+			wrongDigest := be
+			wrongDigest.DigestRef = importTestOtherRepo + "@sha256:" + strings.Repeat("b", 64)
+			_, err = b.ObserveBinding(ctx, p, wrongDigest)
+			importPGConflict(t, err)
+			if _, err = b.BeginPrune(ctx, importPGOperation(), wrongDigest.DigestRef); !errors.Is(err, ErrOperatorHold) {
+				t.Fatal("wrong digest bind dropped pending destination tag HOLD", err)
 			}
-			wrong := e
-			wrong.Destination = importTestRepo
-			_, err := a.ReleaseImportTerminal(ctx, p, wrong)
-			importPGConflict(t, err)
-			wrong = e
-			wrong.Phase = "Failed"
-			_, err = a.ReleaseImportTerminal(ctx, p, wrong)
-			importPGConflict(t, err)
-			buildEvidence := BuildPodEvidence{UID: e.UID, Operation: e.Operation, Nonce: e.Nonce, BaseRef: source, DestinationRef: dest, Phase: "Succeeded"}
-			_, err = a.ReleaseBuildTerminal(ctx, p, buildEvidence)
-			importPGConflict(t, err) // wrong action cannot substitute weaker evidence
-			_, err = b.ReleaseImportTerminal(ctx, p, e)
-			if err != nil {
+			if _, err = b.ObserveBinding(ctx, p, be); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -298,9 +277,9 @@ func TestImportPostgresCopyPinSetAndExactTerminalEvidence(t *testing.T) {
 	// A failed import releases every exact observed pending pin, never from a
 	// fabricated terminal phase or wrong UID/ref/generation envelope.
 	op := importPGOperation()
-	ps := importPGPins(t, a, op, importTestSource, dest)
-	importPGAuthorize(t, a, op, importTestSource, dest)
-	e := importPGEvidence(op, importTestSource, dest, "Failed")
+	ps := importPGPins(t, a, op, dest)
+	importPGAuthorize(t, a, op, importTestExternal, dest)
+	e := importPGEvidence(op, importTestExternal, dest, "Failed")
 	if err := a.RecordImportPod(ctx, op, e); err != nil {
 		t.Fatal(err)
 	}
@@ -309,6 +288,20 @@ func TestImportPostgresCopyPinSetAndExactTerminalEvidence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		for _, mutate := range []func(*ImportPodEvidence){
+			func(e *ImportPodEvidence) { e.Source = "different.example/base@" + importTestDigest },
+			func(e *ImportPodEvidence) { e.Destination = importTestRepo + ":different" },
+			func(e *ImportPodEvidence) { e.Phase = "Succeeded" },
+			func(e *ImportPodEvidence) { e.UID = "wrong-uid" },
+			func(e *ImportPodEvidence) { e.Nonce = "wrong-generation" },
+		} {
+			wrong := e
+			mutate(&wrong)
+			_, err = a.ReleaseImportTerminal(ctx, p, wrong)
+			importPGConflict(t, err)
+		}
+		_, err = a.ReleaseBuildTerminal(ctx, p, BuildPodEvidence{UID: e.UID, Operation: e.Operation, Nonce: e.Nonce, BaseRef: e.Source, DestinationRef: e.Destination, Phase: e.Phase})
+		importPGConflict(t, err)
 		if _, err = a.ReleaseImportTerminal(ctx, p, e); err != nil {
 			t.Fatal(err)
 		}
@@ -355,23 +348,23 @@ func TestImportPostgresCancelCopiesRacesAndUnknownHold(t *testing.T) {
 		}
 	}
 	op = importPGOperation()
-	ps = importPGPins(t, a, op, importTestSource, importTestOtherRepo+":build1")
-	p = importPGAuthorize(t, a, op, importTestSource, importTestOtherRepo+":build1")
+	ps = importPGPins(t, a, op, importTestSource)
+	p = importPGAuthorize(t, a, op, importTestSource, importTestRepo)
 	if _, err = a.MarkUnknown(ctx, ps[0]); err != nil {
 		t.Fatal(err)
 	}
-	_, err = b.ReleaseKnownNoEffect(ctx, ps[1])
+	_, err = b.ReleaseKnownNoEffect(ctx, ps[0])
 	importPGConflict(t, err)
 	importPGConflict(t, b.CancelUnusedImportDispatch(ctx, p, op))
-	_, _, err = p.Consume(op.ProjectID, importTestSource, importTestOtherRepo+":build1")
+	_, _, err = p.Consume(op.ProjectID, importTestSource, importTestRepo)
 	importPGConflict(t, err) // ambiguous cancellation invalidates opaque proof first
-	_, err = a.AuthorizeImportDispatch(ctx, op, importTestSource, importTestOtherRepo+":build1")
+	_, err = a.AuthorizeImportDispatch(ctx, op, importTestSource, importTestRepo)
 	importPGConflict(t, err)
-	importPGConflict(t, a.RecordImportPod(ctx, op, importPGEvidence(op, importTestSource, importTestOtherRepo+":build1", "Succeeded")))
+	importPGConflict(t, a.RecordImportPod(ctx, op, importPGEvidence(op, importTestSource, importTestRepo, "Succeeded")))
 	if _, err = db.Pool.Exec(ctx, `UPDATE registry_pin SET created_at=clock_timestamp()-interval '100 years',updated_at=clock_timestamp()-interval '100 years' WHERE operation=$1`, op.ID); err != nil {
 		t.Fatal(err)
 	}
-	for _, ref := range []string{importTestSource, importTestOtherRepo + "@" + importTestDigest} {
+	for _, ref := range []string{importTestSource} {
 		if _, err = b.BeginPrune(ctx, importPGOperation(), ref); !errors.Is(err, ErrOperatorHold) {
 			t.Fatal("UNKNOWN/outstanding alias expired", err)
 		}
@@ -509,5 +502,91 @@ func TestImportPostgresCrossStoreConcurrentMintAndCancelFailure(t *testing.T) {
 	var marker string
 	if err = db.Pool.QueryRow(ctx, `SELECT state FROM registry_import_dispatch WHERE operation=$1`, op.ID).Scan(&marker); err != nil || marker != "authorized" {
 		t.Fatal("ambiguous cancel cleared DB hold", marker, err)
+	}
+}
+
+func TestImportPostgresGlobalOperationLockAcrossHostsAndProjects(t *testing.T) {
+	ctx := context.Background()
+	db, a, _ := importPGFixture(t)
+	const otherHost = "registry.other"
+	const otherDest = otherHost + "/t/project2/0123456789abcdef0124:build1"
+	if err := db.C("project").Upsert(ctx, "project2", pgdoc.M{"status": "ENABLED"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(db, otherHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, importFirst := range []bool{true, false} {
+		op := importPGOperation()
+		importPGPins(t, a, op, importTestOtherRepo+":build1")
+		other := op
+		other.ProjectID, other.Owner, other.Generation = "project2", "build:other", uuid.NewString()
+		// Model colliding receipts left by concurrent different-host admissions.
+		// Production BeginPins normally rejects sequential UUID reuse globally.
+		if _, err = db.Pool.Exec(ctx, `INSERT INTO registry_pin(id,operation,project_id,owner,generation,host,repo,requested_ref,ref,state,epoch) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8,'pending',1)`, uuid.NewString(), other.ID, other.ProjectID, other.Owner, other.Generation, otherHost, "t/project2/0123456789abcdef0124", otherDest); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := db.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "registry-dispatch-op:"+op.ID); err != nil {
+			t.Fatal(err)
+		}
+		importResult, buildResult := make(chan error, 1), make(chan error, 1)
+		startImport := func() {
+			go func() {
+				_, err := a.AuthorizeImportDispatch(ctx, op, importTestExternal, importTestOtherRepo+":build1")
+				importResult <- err
+			}()
+		}
+		startBuild := func() {
+			go func() {
+				_, err := b.AuthorizeBuildDispatch(ctx, other, importTestExternal, otherDest)
+				buildResult <- err
+			}()
+		}
+		if importFirst {
+			startImport()
+		} else {
+			startBuild()
+		}
+		waitImportAdvisory(t, db, 1)
+		if importFirst {
+			startBuild()
+		} else {
+			startImport()
+		}
+		waitImportAdvisory(t, db, 2)
+		if err = tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		ie, be := <-importResult, <-buildResult
+		if be != nil || !errors.Is(ie, ErrConflict) {
+			t.Fatal("cross-host operation admitted multiple envelopes or lost exact receipt scope", ie, be)
+		}
+		var count int
+		if err = db.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM registry_import_dispatch WHERE operation=$1)+(SELECT count(*) FROM registry_build_dispatch WHERE operation=$1)`, op.ID).Scan(&count); err != nil || count != 1 {
+			t.Fatal("global operation minted twice", count, err)
+		}
+	}
+}
+
+func waitImportAdvisory(t *testing.T, db *pgdoc.DB, want int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		var n int
+		if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND query LIKE '%pg_advisory_xact_lock%'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n >= want {
+			return
+		}
+		if ctx.Err() != nil {
+			t.Fatal(ctx.Err())
+		}
 	}
 }

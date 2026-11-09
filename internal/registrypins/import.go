@@ -64,7 +64,10 @@ func (s *Store) importReferences(project, source, destination string) (importRef
 		out.source = r
 		out.need[r.String()] = true
 	}
-	if out.source.Host != "" && destination == s.host+"/"+out.source.Repo {
+	if out.source.Host != "" {
+		if destination != s.host+"/"+out.source.Repo {
+			return out, ErrScope // managed sources only support metadata-only verification
+		}
 		out.kind, out.dest = "verify", out.source
 		return out, nil // metadata-only: exactly ONE source digest pin, no tag
 	}
@@ -72,16 +75,20 @@ func (s *Store) importReferences(project, source, destination string) (importRef
 	if err != nil || d.Project != project || d.Tag == "" || d.String() != destination {
 		return out, ErrScope
 	}
-	if out.source.Host != "" && out.source.Repo == d.Repo {
-		return out, ErrScope // a copy must not overwrite the source template repository
-	}
 	out.kind, out.dest = "copy", d
 	out.need[d.String()] = true
 	return out, nil
 }
 
+// lockDispatchOperation follows the host namespace lock and precedes project
+// locks in BOTH factories. A global operation UUID cannot race different action
+// tables on different trusted hosts. No path acquires this lock before a host.
+func (s *Store) lockDispatchOperation(ctx context.Context, operation string) error {
+	return s.db.LockXact(ctx, "registry-dispatch-op:"+operation)
+}
+
 // rejectImportDispatch composes with the existing build authorizer under the
-// namespace lock: one operation UUID cannot mint either action after the other.
+// host and global operation locks: neither action may follow the other.
 func (s *Store) rejectImportDispatch(ctx context.Context, tx pgx.Tx, operation string) error {
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM registry_import_dispatch WHERE operation=$1)`, operation).Scan(&exists); err != nil {
@@ -106,6 +113,9 @@ func (s *Store) AuthorizeImportDispatch(ctx context.Context, op Operation, sourc
 		return nil, err
 	}
 	err = s.transaction(ctx, func(tc context.Context, tx pgx.Tx) error {
+		if e := s.lockDispatchOperation(tc, op.ID); e != nil {
+			return e
+		}
 		if e := s.lockProject(tc, op.ProjectID); e != nil {
 			return e
 		}

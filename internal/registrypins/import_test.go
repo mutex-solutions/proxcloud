@@ -24,7 +24,6 @@ func TestImportReferencesRepresentation(t *testing.T) {
 	}{
 		{"verify", importTestSource, importTestRepo, "verify", []string{importTestSource}},
 		{"external-copy", importTestExternal, importTestOtherRepo + ":build1", "copy", []string{importTestOtherRepo + ":build1"}},
-		{"own-source-copy", importTestSource, importTestOtherRepo + ":build1", "copy", []string{importTestSource, importTestOtherRepo + ":build1"}},
 		{"managed-host-library", importTestHost + "/library/base@" + importTestDigest, importTestOtherRepo + ":build1", "copy", []string{importTestOtherRepo + ":build1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -46,6 +45,7 @@ func TestImportReferencesRepresentation(t *testing.T) {
 		{importTestRepo + ":mutable", importTestRepo},
 		{importTestSource, importTestSource},
 		{importTestSource, importTestRepo + ":overwrite"},
+		{importTestSource, importTestOtherRepo + ":build1"},
 		{importTestExternal, importTestOtherRepo},
 		{importTestExternal, importTestOtherRepo + "@" + importTestDigest},
 		{importTestExternal, strings.Replace(importTestOtherRepo, "project1", "project2", 1) + ":build1"},

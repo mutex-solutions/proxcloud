@@ -20,8 +20,10 @@ or GC safety. Both production manifest-delete paths remain on unconditional
 
 All public DB methods reject inherited transactions through the existing store
 transaction primitive. Isolation is explicitly READ COMMITTED **before** the
-PRIMARY probe; acquisition/recording/cancel locks host namespace → project →
-marker/receipt rows. Updates use the same host transaction and full receipt CAS.
+PRIMARY probe; both authorizers lock host namespace → global operation UUID →
+project → marker/receipt rows. Other DB transitions keep host → project/marker
+ordering; no path acquires a host after the global operation lock. Updates use the
+same host transaction and full receipt CAS.
 No public callback, network action, lease, expiry, retry gate or caller boolean is
 introduced. Build authorization still requires a **tagged** destination; a narrow
 symmetric marker check rejects import/build UUID reuse in both directions.
@@ -35,13 +37,15 @@ managed verify:
   required pins= { source digest }                 (exactly one)
 
 copy:
-  source       = canonical host[:port]/repository@sha256:A
+  source       = canonical host[:port]/repository@sha256:A (outside HOST/t/)
   destination  = HOST/t/CURRENT_PROJECT/NEW_20hex:buildID
-  required pins= { destination tag } + { source, if current-own managed }
+  required pins= { destination tag }
 ```
 
-A source in trusted `HOST/t/` with foreign/malformed project scope fails closed;
-it never falls back to external. Source URLs, userinfo, queries, fragments,
+These are the only two accepted representations: a current-own managed source
+requires the same bare verify repository and cannot request a tagged copy. A source
+in trusted `HOST/t/` with foreign/malformed project scope fails closed; it never
+falls back to external. Source URLs, userinfo, queries, fragments,
 combined tag+digest, mutable tags and non-canonical/oversized references are
 rejected. Fully qualified external/library sources are only syntactic image
 references here: `Service.StartImport` must separately apply operator-configured
