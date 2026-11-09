@@ -4,6 +4,20 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: poll the actual worker of a cross-node seed upload
+
+**What changed:** ISO uploads require a nonempty, structurally valid `imgcopy` UPID, but no longer require its
+worker node to equal the requested storage node. The authenticated UPID selects the node polled by `WaitTask`;
+configuration and content-delete endpoints retain their target-node checks. Null/missing/malformed task identities
+remain unknown mutations behind the existing durable fence.
+
+**Why:** PVE's upload handler runs on the API-entry node and copies to a different target via scp. The live seed
+migration/rebuild drill targeted pve2 through pve1 and received a completed pve1 imgcopy task; treating that valid
+identity as unknown unnecessarily stopped rebuild after replacing its boot disk. The regression asserts upload-to-
+pve2, poll-running/OK-on-pve1, then config-attach-on-pve2 in order, without weakening uncertainty or cleanup guards.
+
+**Diagrams updated:** none; the existing PVE client/seed component boundary is unchanged. No lab writes in this fix.
+
 ## 2026-11-09: usable small static IPv4 subnet pools
 
 **What changed:** `VnetStaticPoolFor` uses a dedicated `staticHostRange`, independent of PVE DHCP sizing.
