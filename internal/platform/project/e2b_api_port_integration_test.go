@@ -85,6 +85,11 @@ func (a *portImportAPI) PodLogs(context.Context, string, string, string, int) (s
 	b, _ := json.Marshal(a.result)
 	return string(b), nil
 }
+func (a *portImportAPI) DeleteCoreUID(ctx context.Context,plural,ns,name,uid string) error {
+	a.mu.Lock(); pod:=a.pods[name]; valid:=pod==nil||pod["metadata"].(map[string]any)["uid"]==uid; a.mu.Unlock()
+	if !valid { return fmt.Errorf("UID precondition failed") }
+	return a.DeleteCore(ctx,plural,ns,name)
+}
 func (a *portImportAPI) DeleteCore(_ context.Context, plural, _, name string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

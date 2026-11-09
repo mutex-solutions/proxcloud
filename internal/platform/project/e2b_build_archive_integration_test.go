@@ -31,6 +31,10 @@ type archiveBuildAPI struct {
 func (f *archiveBuildAPI) GetCore(context.Context, string, string, string) (map[string]any, error) {
 	return f.pod, nil
 }
+func (f *archiveBuildAPI) DeleteCoreUID(ctx context.Context, plural, ns, name, uid string) error {
+	if f.pod != nil && plural == "pods" && f.pod["metadata"].(map[string]any)["uid"] != uid { return errors.New("UID precondition failed") }
+	return f.DeleteCore(ctx,plural,ns,name)
+}
 func (f *archiveBuildAPI) DeleteCore(_ context.Context, plural, _, _ string) error {
 	if plural == "pods" {
 		f.deleted, f.pod = true, nil

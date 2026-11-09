@@ -27,7 +27,8 @@ func importPinActive(b templateBuild) bool {
 
 func (h *Handler) importOperationWrite(ctx context.Context, t *sandboxTemplateDoc, b *templateBuild, expect string, apply func(*sandboxTemplateDoc, *templateBuild) error) error {
 	op := b.Import.Registry.Operation
-	return h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
+	var saved *sandboxTemplateDoc
+	err := h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
 		var cur sandboxTemplateDoc
 		found, err := h.sbTemplates.GetForUpdate(tc, t.ID, &cur)
 		if err != nil {
@@ -45,10 +46,14 @@ func (h *Handler) importOperationWrite(ctx context.Context, t *sandboxTemplateDo
 		}
 		_, err = h.sbTemplates.Replace(tc, cur.ID, &cur)
 		if err == nil {
-			adoptBuild(t, b, &cur)
+			saved = &cur
 		}
 		return err
 	})
+	if err == nil {
+		adoptBuild(t, b, saved)
+	}
+	return err
 }
 
 // acquireImportDispatch runs outside every inherited project/rotation transaction.
