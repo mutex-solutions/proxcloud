@@ -129,7 +129,7 @@ func TestProjectInviteOutboxExistingSavingsUpgradeTwiceConcurrentAndCiphertext(t
 		t.Fatal("upgraded existing table still rejects invite")
 	}
 	// Controlled drift fails atomically, not a name-only trust of a weaker CHECK.
-	if _, err = db.Pool.Exec(ctx, `ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_family_v2; ALTER TABLE mail_outbox ADD CONSTRAINT mail_outbox_family_v2 CHECK(version=1)`); err != nil {
+	if _, err = db.Pool.Exec(ctx, `ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_family_v3; ALTER TABLE mail_outbox ADD CONSTRAINT mail_outbox_family_v3 CHECK(version=1)`); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.Ensure(ctx); err == nil {
@@ -256,7 +256,7 @@ func TestProjectInviteOutboxKindVersionKeyAndCrossSwapDenyBeforeIntent(t *testin
 			id := enqueueInvite(t, db, s, inviteMail(uuid.NewString()))
 			claim := claimMail(t, s)
 			// Explicitly local admin-only corruption fixture; production trigger forbids it.
-			if _, err := db.Pool.Exec(ctx, `DROP TRIGGER mail_outbox_immutable_payload ON mail_outbox; ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_family_v2; ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_version_check`); err != nil {
+			if _, err := db.Pool.Exec(ctx, `DROP TRIGGER mail_outbox_immutable_payload ON mail_outbox; ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_family_v3; ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_version_check`); err != nil {
 				t.Fatal(err)
 			}
 			var sql string

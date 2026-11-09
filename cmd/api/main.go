@@ -189,6 +189,15 @@ func run() error {
 	}
 	mailOutbox := mailoutbox.New(pg, blobKeys)
 	billingRepo.SetReminderCanceler(mailOutbox) // cancellation never needs keys/producer opt-in
+	billingRepo.SetSavingsExpiredCanceler(mailOutbox)
+	if err := billingRepo.EnsureSavingsExpired(ctx); err != nil {
+		return fmt.Errorf("savings expired schema unavailable")
+	}
+	if cfg.Mail.SavingsExpiredOutboxEnabled {
+		if err := prepareSavingsExpiredDependencies(ctx, pg); err != nil {
+			return err
+		}
+	}
 	if err := mailOutbox.Ensure(ctx); err != nil {
 		return fmt.Errorf("mail outbox schema unavailable")
 	}
@@ -638,6 +647,10 @@ func run() error {
 	adminH.SetSandboxGates(syncJob.SandboxReleaseGates)
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
+	if cfg.Mail.SavingsExpiredOutboxEnabled {
+		billingRepo.SetSavingsExpiredOutbox(savingsExpiredOutboxAdapter{store: mailOutbox, snapshot: mailSvc, message: msgRepo, config: mail.DurableConfigFromStore(integrationStore, enc)})
+		log.Info("durable savings expired decisions enabled; SMTP dispatch remains disabled")
+	}
 	if cfg.Mail.ReminderOutboxEnabled {
 		billingRepo.SetReminderOutbox(reminderOutboxAdapter{store: mailOutbox, service: mailSvc, message: msgRepo,
 			config: mail.DurableConfigFromStore(integrationStore, enc)})
