@@ -4,6 +4,31 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: atomic savings reminder decisions (enqueue-only PR B)
+
+**What changed:** an explicit default-false reminder producer flag couples the
+current ACTIVE/expiry-generation/tightest-window decision, one rendered template
+snapshot, strict encrypted outbox enqueue and queued/skipped bookkeeping in one
+PRIMARY transaction. Schedule identity is contract + canonical expiry, not random
+reminder ID; recipient metadata uses per-event ordinals, not email hashes. Local
+client/admin cancel/extend/expiry/delete joins contract -> reminder -> outbox locks
+and cancels only pre-intent work. A keyless cancellation capability stays wired
+when the producer is OFF; any durable history prevents legacy SMTP fallback.
+Admin no-op/render-only edits preserve future windows and immutable selected mail.
+
+**Why:** SMTP-before-SentAt and save-before-notify had crash gaps; ignored errors
+could mark missing messages as sent. A producer rollback, existing admin raw edit
+or competing scheduler must not reopen or strand an old notification generation.
+Queued/suppressed/blocked/no-recipient are not delivery evidence; legacy processed
+SentAt remains no-resend evidence, with conservative migration for ambiguous history.
+
+**Diagrams updated:** C4 decision+enqueue sequence and contract invariants; safety
+limits document the producer flag, mandatory key, migration/OFF behavior and typed
+counts. SMTP dispatcher remains OFF, other notification families best-effort,
+no resend/backfill/real-recipient rollout or timed billing changes. Targeted real
+PostgreSQL tests cover two schedulers/processors, atomic rollback, keyless OFF
+cancellation, admin edits/no-op/delete, legacy evidence and canceled claim fences.
+
 ## 2026-11-09: dormant durable reminder mail infrastructure (PR A)
 
 **What changed:** dedicated primary `mail_outbox`/event fingerprint/append-only attempt tables;

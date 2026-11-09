@@ -54,6 +54,13 @@ func (r *Repo) ExistsInProgressReminder(ctx context.Context, resourceType, targe
 // when an IN_PROGRESS doc already exists; else insert an IN_PROGRESS doc with one detail per day,
 // sorted DESC by daysBefore (the dispatcher's tightest-window pick depends on this order).
 func (r *Repo) ScheduleReminder(ctx context.Context, resourceType, targetID, templateID string, days []int) (bool, error) {
+	if resourceType == ResourceTypeSavingsContract {
+		return r.scheduleLegacyReminder(ctx, targetID, templateID, days)
+	}
+	return r.scheduleLegacyReminderRow(ctx, resourceType, targetID, templateID, days)
+}
+
+func (r *Repo) scheduleLegacyReminderRow(ctx context.Context, resourceType, targetID, templateID string, days []int) (bool, error) {
 	exists, err := r.ExistsInProgressReminder(ctx, resourceType, targetID)
 	if err != nil {
 		return false, err
@@ -98,6 +105,15 @@ func (r *Repo) SaveReminderNotification(ctx context.Context, n *ReminderNotifica
 // (resourceType, targetID) is flipped to DONE so no further reminders fire (called on contract
 // cancel / extend / expire). No-op when absent or already DONE.
 func (r *Repo) CancelReminders(ctx context.Context, resourceType, targetID string) error {
+	if resourceType == ResourceTypeSavingsContract {
+		return r.withReminderContract(ctx, targetID, func(tc context.Context, c *SavingsContract) error {
+			var end *time.Time
+			if c != nil {
+				end = c.EndDate
+			}
+			return r.cancelReminderRowsTx(tc, targetID, end, time.Now().UTC())
+		})
+	}
 	var n ReminderNotification
 	found, err := r.reminders.FindOne(ctx, pgdoc.M{"resourceType": resourceType, "targetResourceId": targetID}, &n)
 	if err != nil || !found {

@@ -695,6 +695,17 @@ a contract-expired email.
   earlier missed windows as sent without emailing), and flips the doc `DONE` when
   all windows are sent.
 
+That remains the default legacy best-effort mode. Opting in with
+`PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED=true` instead commits the ACTIVE contract /
+canonical expiry generation / tightest window, frozen rendered encrypted outbox
+and `deliveryQueuedAt`/`outboxIds`/skipped markers in one primary transaction.
+It requires the strict >=32-byte key and does **not** enable SMTP dispatch: queued,
+blocked, suppressed and no-recipient states are not delivered. Existing `sentAt`
+means legacy processed/no-resend evidence only. Local cancel/extend/expire and
+admin invalidating edits/delete atomically cancel pre-intent outbox work; no-op
+admin edits preserve future windows. Any durable history prevents direct SMTP
+fallback after disabling the producer. [Rollout/migration limits](mail-outbox-safety-limits.md).
+
 ---
 
 ## 9. Promotions & credits
