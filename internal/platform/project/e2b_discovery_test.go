@@ -56,7 +56,9 @@ func TestEnvironmentOpenAPIParity(t *testing.T) {
 }
 
 func TestUnknownTemplateAndDocsLinks(t *testing.T) {
-	h := &Handler{sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate { return nil }}
+	h := &Handler{sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate {
+		return []sandbox.Gate{{Name: "fixture", OK: true}}
+	}}
 	if !strings.Contains(h.e2bDocs(), "console /docs/api/e2b") {
 		t.Fatal("unconfigured console must give console-relative hint, not API-origin URL")
 	}

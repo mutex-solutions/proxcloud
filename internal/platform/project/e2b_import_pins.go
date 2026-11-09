@@ -122,10 +122,30 @@ func (h *Handler) markImportUnknown(ctx context.Context, store *registrypins.Sto
 	if err != nil {
 		return
 	}
-	err = h.importOperationWrite(cleanup, t, b, op.State, func(_ *sandboxTemplateDoc, cb *templateBuild) error {
-		cb.Import.Registry.State, cb.Import.Registry.Pins = buildPinUnknown, pins
-		cb.Status, cb.Reason = sandbox.BuildError, "import outcome unknown; operator recovery required"
-		return nil
+	err = h.sbTemplates.DB().WithTx(cleanup, func(tc context.Context) error {
+		host, _, _ := strings.Cut(b.Import.Source, "/")
+		if len(pins) > 0 {
+			host, _, _ = strings.Cut(pins[0].RequestedRef, "/")
+		}
+		if err := h.sbTemplates.DB().LockXact(tc, "registry-ref:"+host); err != nil {
+			return err
+		}
+		tx, err := h.sbTemplates.DB().Tx(tc)
+		if err != nil {
+			return err
+		}
+		var terminal bool
+		if err := tx.QueryRow(tc, `SELECT EXISTS(SELECT 1 FROM registry_import_dispatch WHERE operation=$1 AND project_id=$2 AND owner=$3 AND generation=$4 AND host=$5 AND state IN ('terminal','known_no_effect'))`, op.Operation.ID, op.Operation.ProjectID, op.Operation.Owner, op.Operation.Generation, host).Scan(&terminal); err != nil {
+			return err
+		}
+		if terminal {
+			return errBuildPinState
+		}
+		return h.importOperationWrite(tc, t, b, op.State, func(_ *sandboxTemplateDoc, cb *templateBuild) error {
+			cb.Import.Registry.State, cb.Import.Registry.Pins = buildPinUnknown, pins
+			cb.Status, cb.Reason = sandbox.BuildError, "import outcome unknown; operator recovery required"
+			return nil
+		})
 	})
 	if err != nil {
 		return

@@ -77,7 +77,7 @@ served, answers 404 with E2B's error body (or 400 for a refused field).
 | Endpoint | Status | Notes |
 |---|---|---|
 | `GET /health` | yes | |
-| `POST /sandboxes`, `POST /v2/sandboxes` | partial | `templateID` (a built-in template), `timeout` (1 s up to the provider's maximum, 24 h by default; 300 s when not sent), `metadata`, `envVars`, `network`, `allow_internet_access`. Returns once the sandbox is ready (envd up, the template's ready command passed); built-ins/snapshots retain the 50 s readiness bound; a normal project-built template gets up to 120 s for its cold first pull, capped by caller cancellation and its original lifetime minus 5 s. Failure removes the sandbox and answers 503. `secure` is ignored (envd always requires its token). `autoPause` pauses the filesystem only (`autoPauseMemory: true` → 400); `autoResume` with `autoPause` cold-boots a paused sandbox on traffic to its ports. `volumeMounts` → 400; `mcp` must be an object (the SDK starts the gateway in an `mcp-gateway` sandbox; the API never stores or logs it). `iam` and `Idempotency-Key` are ignored. ProxCloud extensions: `cpuCount`, `memoryMB` (rounded up to whole GiB), `gpu {model, count}` (no GPU nodes before SB9) |
+| `POST /sandboxes`, `POST /v2/sandboxes` | partial | `templateID` (a built-in template), `timeout` (1 s up to the provider's maximum, 24 h by default; 300 s when not sent), `metadata`, `envVars`, `network`, `allow_internet_access`. Returns once the sandbox is ready (envd up, the template's ready command passed); all templates use phased startup (default total/scheduling/pull/runtime 900/120/720/600 s, hard total 1800 s), bounded by caller cancellation. Runtime TTL starts once at the first committed Ready, not at create. A finite provisional startup+runtime deadline protects a crashed request; late cache/access reads cannot return usable success. Failure removes the sandbox and answers 503. `secure` is ignored (envd always requires its token). `autoPause` pauses the filesystem only (`autoPauseMemory: true` → 400); `autoResume` with `autoPause` cold-boots a paused sandbox on traffic to its ports. `volumeMounts` → 400; `mcp` must be an object (the SDK starts the gateway in an `mcp-gateway` sandbox; the API never stores or logs it). `iam` and `Idempotency-Key` are ignored. ProxCloud extensions: `cpuCount`, `memoryMB` (rounded up to whole GiB), `gpu {model, count}` (no GPU nodes before SB9) |
 | `GET /sandboxes`, `GET /v2/sandboxes` | partial | `metadata` and `state` filters; running and paused sandboxes; one page holds everything, so `nextToken` is never set |
 | `GET /sandboxes/{id}` | yes | `diskSizeMB` is 0 |
 | `DELETE /sandboxes/{id}` | yes | |
@@ -94,11 +94,14 @@ served, answers 404 with E2B's error body (or 400 for a refused field).
 | Endpoint | Status | Notes |
 |---|---|---|
 | `GET /templates`, `GET /templates/{id}`, `GET /templates/aliases/{alias}` | yes | The project's own templates (`public: false`), then the location's built-in ones (`public: true`) |
-| `POST /v3/templates` | yes | `name` (or `alias`, `name:tag`), `tags`, `cpuCount`, `memoryMB` (whole GiB); at most 20 templates per project; a built-in name → 409. 503 where the location has no template registry or build bucket |
+| `POST /v3/templates` | yes | `name` (or `alias`, `name:tag`), `tags`, `cpuCount`, `memoryMB` (whole GiB), independent `buildCpu`, `buildMemoryGiB`, `buildDiskGiB`; at most 20 templates per project; a built-in name → 409. 503 where the location has no template registry or build bucket |
 | `GET /templates/{id}/files/{hash}` | yes | The upload URL points at this API (`PUT …/upload?token=…`), not at a bucket; up to 2 GiB per context, 10 GiB per project (507 above) |
-| `POST /v2/templates/{id}/builds/{buildID}` | partial | Steps `RUN`, `COPY`, `ENV`, `WORKDIR`, `USER`; `fromImage`, `fromTemplate`, `fromImageRegistry` types `registry` and `gcp` (`aws` → 400, see below); `startCmd`, `readyCmd`. No layer cache between builds, 30 minutes per build, 2 at once per project; billed like a sandbox of the template's size while it runs; passes the sandbox create's checks (409, 403, 503) |
-| `GET /templates/{id}/builds/{buildID}/status` | yes | `logsOffset`; build logs are kaniko's, crane's and the context fetch's lines |
-| `DELETE /templates/{id}`, `GET /templates/{id}/tags`, `POST /templates/tags`, `DELETE /templates/tags` | yes | A deleted template's images are pruned later (docs/managed-sandbox.md §7.4) |
+| `POST /v2/templates/{id}/builds/{buildID}` | partial | Steps `RUN`, `COPY`, `ENV`, `WORKDIR`, `USER`; `fromImage`, `fromTemplate`, `fromImageRegistry` types `registry`, `gcp` and `aws` (explicit caller keys exchanged for a region-matching ECR token); `startCmd`, `readyCmd`. No layer cache between builds, 30 minutes per build, provider-configured concurrency (default 2) per project; billed using the independent builder size while it runs; passes the sandbox create's checks (409, 403, 503) |
+| `GET /templates/{id}/builds/{buildID}/status` | yes | `logsOffset`; stable append-only paginated stage-prefix logs, `nextLogsOffset`, phase/exit/OOM/resource diagnostics; explicit bounded truncation and unavailable-output markers survive worker cleanup |
+| `DELETE /templates/{id}`, `GET /templates/{id}/tags`, `POST /templates/tags`, `DELETE /templates/tags` | yes | Alias-path deletion removes only that alias. Canonical/id deletion removes a record only when its operations permit safe teardown. Both physical registry deletion paths remain HOLD; no image pruning is enabled by this port |
+| `POST /templates/import` | extension | Immutable digest verification or trusted remote copy; idempotent source/runtime settings, project aliases, sanitized provenance and independent runtime size. See policy below |
+| `POST/DELETE /templates/{id}/aliases` | extension | Alternate names, not version tags; primary name cannot be removed |
+| `POST/GET /templates/{id}/prepare` | extension | Finite eligible-node N/M image-cache coverage, default-off; not workload readiness |
 | `/v2/templates`, `PATCH /templates/{id}`, v1 builds, `/unstable/builds*` | no | Older build APIs; the SDKs from 2.x use v3 |
 
 ### Not served
@@ -147,11 +150,14 @@ dashboard APIs. They answer 404 with E2B's error body.
    retry budget is spent by then. Retry the call: a create from a named snapshot takes no new snapshot, and a fork
    retried within 5 minutes reuses the snapshot of the fork that answered 503 (its files as of that first call)
    instead of capturing again, so both succeed once the image is ready.
-5. **Custom templates**: the v3 build API works (`Template()` builder, `from_dockerfile`, `e2b template build`, tags,
-   delete). `fromImageRegistry` with `type: "aws"` (AWS keys exchanged for an ECR token) answers 400: use
-   `type: "registry"` with username `AWS` and the output of `aws ecr get-login-password` as the password. No layer cache
-   between builds, so a large base image is pulled again on every build. A template belongs to its project; no public
-   templates.
+5. **Custom templates**: the v3 build API works (`Template()` builder, `from_dockerfile`,
+   `e2b template build`, tags and delete). ECR uses `type: "aws"` with explicit
+   `awsAccessKeyId`, `awsSecretAccessKey`, `awsRegion`; the image must be a matching
+   `<account>.dkr.ecr.<region>.amazonaws.com` host. Only the exchanged token reaches the
+   worker; there is no ambient/default AWS credential fallback. The existing `registry`
+   type with username `AWS` and an already obtained ECR password also works.
+   Successful/tagged build history is retained; moving a tag is not artifact deletion.
+
 5. **Templates beyond `base`, `code-interpreter-v1` and `mcp-gateway`** (`desktop`, agent CLIs): no images before the
    template workflow (SB6a) pinned them. Build your own from `base`.
 6. **`Sandbox.create(mcp=…)`**: only the servers of the catalog (`mcp-gateway list` in the sandbox) plus
@@ -169,13 +175,15 @@ dashboard APIs. They answer 404 with E2B's error body.
     domains that resolve to them (the guardrail protects the platform's and other tenants' networks).
 11. **Metrics**: always empty; no per-sandbox metrics are collected.
 12. **Logs filters** (`start`, `limit`, cursor): not supported; the newest 1000 lines.
-13. **Slow starts**: built-in/snapshot create, resume and fork retain a 50 s readiness wait. Only normal project-built
-    template create may wait up to 120 s, including its final access read, bounded by caller cancellation and the
-    server-generated lifetime minus a 5 s return margin. Missing/malformed lifetime falls back to 50 s. The lifetime
-    still begins at create, not readiness; the image pull does not extend it. For cold custom images use create-only
-    `request_timeout=150`, `retries=0`, and e.g. lifecycle `timeout=300`; the SDK's default 60 s request timeout is not a
-    guarantee for the longer server budget. An uncertain create must not be blindly retried (`Idempotency-Key` is
-    ignored). E2B starts from a VM snapshot; here the start command runs at every boot.
+13. **Slow starts**: all create, native create, resume, fork and wake operations use the
+    provider's phased startup policy, with one cancellation/deadline envelope including cache
+    and final access reads. Set the SDK's request timeout long enough for the configured
+    budget (for the default total, e.g. `request_timeout=930`, `retries=0`). Runtime TTL
+    starts at first committed Ready and never shifts on readiness flaps/restarts. Failed
+    startup cleanup is bounded to 30 s. An uncertain create must not be blindly retried
+    (`Idempotency-Key` remains ignored). An uncertain resume retains its lease/snapshot;
+    lease age or a missing GET is not proof allowing a duplicate new create.
+
 14. **Secrets, events, webhooks, teams, `/api-keys`, admin and dashboard APIs**: not served. Keys are managed in the
     console or the client API; there are no teams (a key belongs to a project).
 15. **`secure: false`**: ignored; envd always requires its access token.
@@ -229,3 +237,62 @@ private CA. `tests/e2b-compat/pause.py` does the same for pause, resume, fork (r
 and the autoResume wake
 ([managed-sandbox.md §8](managed-sandbox.md#8-pause-resume-snapshots-and-fork-sb7)), with `E2B_AUTOPAUSE_URL` to
 trigger the autoPause job where the scheduler is off.
+
+## Immutable digest import and session console
+
+`POST /templates/import` accepts `source`, `name`, optional `aliases`/`tags`, runtime
+`cpuCount`/`memoryMB`, `user`, `workdir`, `startCmd`, `readyCmd`, and optional caller-owned
+`registry {username,password}`. It returns `202 {templateID,buildID,status,aliases,reused}`;
+poll the existing build-status endpoint. Repeating exact source/runtime settings adds
+names to the same project record, without another worker. Aliases are template names;
+tags remain pointers to build versions. Imported ENV is preserved, but sandbox-init
+replaces the image ENTRYPOINT/CMD. No customer image executes during import.
+
+Operator policy is `config.sandbox.import`:
+
+```json
+{
+  "sourceRepositories": {
+    "https://source.example.org:5443": ["approved/app", "projects/{project}/app"]
+  },
+  "allowAnonymous": false
+}
+```
+
+Origins are canonical HTTPS origins with optional port and no userinfo/path/query.
+Repository entries are **exact**, not prefixes or wildcards; only literal `{project}`
+substitution is supported. The empty policy admits only the configured registry's
+`t/<current-project>/<20-lowercase-hex>@sha256:<digest>` namespace, verified using that
+project's pull identity. Foreign managed project paths remain forbidden even if listed.
+A same-host customer repository can be explicitly approved without granting access to
+another managed namespace. External repositories require caller credentials. Only an
+explicit operator `allowAnonymous: true` permits an empty anonymous `auths` document;
+there is never source-credential fallback to a platform robot. The trusted worker
+independently reenforces fixed config-derived policy, repository credential scoping,
+redirect/token-realm restrictions and immutable result identity.
+
+The worker image is read from `sandbox-system/sandbox-import-worker`, key `image`, and
+must be `<configured-host>/library/proxcloud-sandbox-import@sha256:<digest>`. Capabilities
+remain disabled if this trusted worker, valid policy or durable registry protection is
+unavailable. Warming also requires the trusted pull-only runtime capability and eligible
+nodes; completed pull pods alone do not establish current cache coverage.
+
+The session console uses `/api/v1/project/{id}/sandbox-templates`: list, capabilities,
+import, alias add/remove, prepare, build logs/status and delete. `POST /{templateId}/builds`
+is **new-template only** and accepts 1–100 bounded RUN steps on that existing project
+base, runtime size and independent builder budgets. It does not accept COPY uploads,
+ENV, arbitrary base image/registry fields, or caller project/identity overrides. Every
+console route, including reads, intentionally requires session cloud-resource management
+permission. No browser API key or API-key administration prerequisite is added. Cancel
+in the build dialog closes the dialog; no public build-cancel API is provided.
+
+Unknown-template errors list a bounded ready-only current-project catalog and link to
+the configured customer console's `/docs/api/e2b` page, never an untrusted Host header.
+
+**Safety scope:** BUILD and IMPORT retain distinct one-shot durable operation proofs.
+An ambiguous apply/cancellation, timeout or missing pod retains UNKNOWN and cannot be
+cleared by cleanup. Both physical registry manifest-delete paths remain unconditional
+HOLD until all writer/adoption coverage is proven. Snapshot producers and other existing
+writers are not claimed as universally integrated by import support. See the
+[C4 API contract](architecture/c4/sandbox-api-port.md) for the inherited provider-wide
+rotation SQL callback compatibility exception and exact handoff sequence.

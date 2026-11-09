@@ -46,7 +46,7 @@ func buildTerminal(b *templateBuild) bool {
 
 func buildNeedsSync(b *templateBuild) bool {
 	if b.Import != nil {
-		return b.Status == sandbox.BuildWaiting || b.Status == sandbox.BuildBuilding
+		return importPinActive(*b) || b.Status == sandbox.BuildWaiting || b.Status == sandbox.BuildBuilding
 	}
 	return buildPinActive(*b) || b.CancelRequested || b.Status == sandbox.BuildWaiting || b.Status == sandbox.BuildBuilding || buildTerminal(b) && (b.Diagnostics == nil || b.Diagnostics.CleanedAt == nil)
 }

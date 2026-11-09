@@ -119,11 +119,19 @@ func TestImportPortConcurrentAliasesTerminalBindingAndUnknownHold(t *testing.T) 
 	if err := registrypins.EnsureSchema(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	h := &Handler{sbTemplates: db.C("sandbox_templates"), sbBuildPinsDB: db, sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate { return nil }}
+	h := &Handler{sbTemplates: db.C("sandbox_templates"), sbBuildPinsDB: db, sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate {
+		return []sandbox.Gate{{Name: "fixture", OK: true}}
+	}}
 	if err := h.sbTemplates.Ensure(ctx); err != nil {
 		t.Fatal(err)
 	}
 	project := strings.Repeat("b", 24)
+	if err := db.C("project").Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.C("project").Upsert(ctx, project, pgdoc.M{"status": "ENABLED"}); err != nil {
+		t.Fatal(err)
+	}
 	source := "registry.example.org/t/" + project + "/" + strings.Repeat("c", 20) + "@sha256:" + strings.Repeat("d", 64)
 	api := &portImportAPI{pods: map[string]map[string]any{}}
 	caller := &e2bCaller{proj: &Project{ID: project, Status: StatusEnabled}, es: &externalservice.ExternalService{ID: "svc"}, ss: sandbox.NewWithAPI(api, sandbox.Config{TemplateRegistry: "registry.example.org/t"}, "svc")}
