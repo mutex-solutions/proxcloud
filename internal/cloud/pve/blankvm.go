@@ -55,6 +55,16 @@ func configCreated(cfg VMConfig) (time.Time, bool) {
 // RemoveBlankVMs retries what a failed create left in the project's pool, once it is past any create still under way. It
 // holds the holder lock, as only a holder create makes these. A failure is logged and left for the next sync.
 func (s *Service) RemoveBlankVMs(ctx context.Context, projectID string) (int, error) {
+	if s.HolderOperations != nil {
+		// A blank VM + elapsed grace is not evidence that a lost create stopped.
+		// New holders carry a preselected UUID; legacy blanks are operator-only.
+		_, release, err := s.beginHolders(ctx, projectID)
+		if err != nil {
+			return 0, err
+		}
+		defer release()
+		return 0, nil
+	}
 	rows, err := s.C.ClusterResources(ctx, "vm")
 	if err != nil {
 		return 0, err
@@ -72,7 +82,7 @@ func (s *Service) RemoveBlankVMs(ctx context.Context, projectID string) (int, er
 	if len(candidates) == 0 {
 		return 0, nil
 	}
-	release, err := s.lockHolders(ctx, projectID)
+	ctx, release, err := s.beginHolders(ctx, projectID)
 	if err != nil {
 		return 0, err
 	}

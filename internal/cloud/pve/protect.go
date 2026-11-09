@@ -470,19 +470,41 @@ func (s *Service) disableProtectionOn(ctx context.Context, vm *ClusterResource) 
 	}
 	for _, j := range jobs {
 		if j.Guest == vm.VMID {
-			if err := s.C.DeleteReplicationJob(ctx, j.ID, !online[j.Target]); err != nil && !IsNotFound(err) {
+			var err error
+			if holderFrom(ctx) != nil {
+				err = s.holderProtectionDelete(ctx, vm, "replication-delete", j.ID, func(q context.Context) error { return s.C.DeleteReplicationJob(q, j.ID, !online[j.Target]) })
+			} else {
+				err = s.C.DeleteReplicationJob(ctx, j.ID, !online[j.Target])
+			}
+			if err != nil && !IsNotFound(err) {
 				return err
 			}
 		}
 	}
 	if kept := withoutProtectionTags(tags); kept != tags {
-		up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"tags": kept})
-		if err == nil {
-			err = s.C.WaitTask(ctx, up)
+		var err error
+		if holderFrom(ctx) != nil {
+			project, e := s.holderProject(ctx)
+			if e != nil {
+				return e
+			}
+			err = s.holderConfig(ctx, project, vm, map[string]string{"tags": kept})
+		} else {
+			var up UPID
+			up, err = s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{"tags": kept})
+			if err == nil {
+				err = s.C.WaitTask(ctx, up)
+			}
 		}
 		if err != nil {
 			return err
 		}
+	}
+	if holderFrom(ctx) != nil {
+		if err := s.holderProtectionDelete(ctx, vm, "ha-rule-delete", haRuleID(vm.VMID), func(q context.Context) error { return s.C.DeleteHARule(q, vm.VMID) }); err != nil {
+			return err
+		}
+		return s.holderProtectionDelete(ctx, vm, "ha-delete", "vm:"+strconv.Itoa(vm.VMID), func(q context.Context) error { return s.C.RemoveHAResource(q, vm.VMID) })
 	}
 	if err := s.C.DeleteHARule(ctx, vm.VMID); err != nil && !IsNotFound(err) {
 		return err

@@ -468,6 +468,9 @@ func (s *Service) DeleteServerBackup(ctx context.Context, projectID, externalID,
 }
 
 func (s *Service) deleteArchive(ctx context.Context, node, store, volid string) error {
+	if err := s.holderCheck(ctx); err != nil {
+		return err
+	}
 	up, err := s.C.deleteTask(ctx, "/nodes/"+node+"/storage/"+url.PathEscape(store)+"/content/"+url.PathEscape(volid), nil)
 	if err == nil {
 		err = s.C.WaitTask(ctx, up)
@@ -519,6 +522,15 @@ func (s *Service) DeleteServerBackups(ctx context.Context, projectID, externalID
 // leaves the server standing, stopped, with its backups gone, and a retried delete finishes it. A portal-side lock across
 // the server's actions would close it, add one if that ever happens.
 func (s *Service) RetireServer(ctx context.Context, projectID, externalID, backupStore string, keepVolumes bool) error {
+	if s.HolderOperations != nil {
+		var release func()
+		var err error
+		ctx, release, err = s.beginHolders(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	if backupStore != "" {
 		vm, err := s.ResolveVM(ctx, projectID, externalID)
 		if err != nil {
@@ -551,6 +563,9 @@ func (s *Service) RetireServer(ctx context.Context, projectID, externalID, backu
 
 // stopForDelete hard-stops a VM and reports any failure. It reads the VM's own status: /cluster/resources lags a stop.
 func (s *Service) stopForDelete(ctx context.Context, projectID, externalID string) error {
+	if err := s.holderCheck(ctx); err != nil {
+		return err
+	}
 	vm, err := s.ResolveVM(ctx, projectID, externalID)
 	if err != nil || vm == nil {
 		return err
@@ -562,6 +577,9 @@ func (s *Service) stopForDelete(ctx context.Context, projectID, externalID strin
 	if st.Status == "stopped" {
 		return nil
 	}
+	if holderFrom(ctx) != nil {
+		return s.holderStop(ctx, projectID, vm)
+	}
 	up, err := s.C.StopVM(ctx, vm.Node, vm.VMID)
 	if err != nil {
 		return err
@@ -572,6 +590,15 @@ func (s *Service) stopForDelete(ctx context.Context, projectID, externalID strin
 // DeleteProjectBackups removes every archive of the project the token can see, while its VMs still exist. Fail-closed
 // like the rest of teardown: one that lists but cannot go stops it, and the error names it.
 func (s *Service) DeleteProjectBackups(ctx context.Context, projectID, store string) error {
+	if s.HolderOperations != nil {
+		var release func()
+		var err error
+		ctx, release, err = s.beginHolders(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	nodes, err := s.C.Nodes(ctx)
 	if err != nil {
 		return err

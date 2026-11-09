@@ -74,6 +74,9 @@ func (s *Service) holderOn(ctx context.Context, projectID, node string) (*Cluste
 
 // newHolder creates a holder VM with these tags on node, whether or not the project has one there.
 func (s *Service) newHolder(ctx context.Context, projectID, node, tags string) (*ClusterResource, error) {
+	if s.HolderOperations != nil {
+		return s.newFencedHolder(ctx, projectID, node, tags)
+	}
 	pool := s.PoolFor(projectID)
 	vmid, err := s.C.NextID(ctx)
 	if err != nil {
@@ -186,7 +189,7 @@ func (s *Service) PlaceVolume(ctx context.Context, storageFor func(node string) 
 // CreateDetachedVolume allocates a volume with no server: a new disk on the node's holder, detached at once so it
 // is the same unusedN shape as any other detached volume. Returns its volid.
 func (s *Service) CreateDetachedVolume(ctx context.Context, projectID, node, storage string, sizeGiB int, headroomPct float64) (string, error) {
-	release, err := s.lockHolders(ctx, projectID)
+	ctx, release, err := s.beginHolders(ctx, projectID)
 	if err != nil {
 		return "", err
 	}
@@ -209,11 +212,7 @@ func (s *Service) CreateDetachedVolume(ctx context.Context, projectID, node, sto
 			volID = d.VolID
 		}
 	}
-	up, err := s.C.SetVMConfig(ctx, node, holder.VMID, nil, slot)
-	if err != nil {
-		return "", err
-	}
-	return volID, s.C.WaitTask(ctx, up)
+	return volID, s.holderConfig(ctx, projectID, holder, nil, slot)
 }
 
 // KeepServerVolumes moves every data volume of a server to its node's holder, attached and detached alike, so the
@@ -224,6 +223,15 @@ func (s *Service) CreateDetachedVolume(ctx context.Context, projectID, node, sto
 // operation in this project could see the holder empty and destroy it as the disk lands. That blocks the project's volume
 // changes for those minutes, and only a lost answer from PVE gets there.
 func (s *Service) KeepServerVolumes(ctx context.Context, projectID, externalID string) error {
+	if s.HolderOperations != nil {
+		var release func()
+		var err error
+		ctx, release, err = s.beginHolders(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	vm, err := s.ResolveVM(ctx, projectID, externalID)
 	if err != nil || vm == nil {
 		return err
@@ -231,6 +239,9 @@ func (s *Service) KeepServerVolumes(ctx context.Context, projectID, externalID s
 	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
 	if err != nil {
 		return err
+	}
+	if s.HolderOperations != nil && HasTag(cfg.Str("tags"), tagProtected) {
+		return conflictf("Disable protection before keeping this server's volumes")
 	}
 	var data []VMDisk
 	for _, d := range ParseDisks(cfg) {
@@ -241,27 +252,25 @@ func (s *Service) KeepServerVolumes(ctx context.Context, projectID, externalID s
 	if len(data) == 0 {
 		return nil
 	}
-	release, err := s.lockHolders(ctx, projectID)
+	ctx, release, err := s.beginHolders(ctx, projectID)
 	if err != nil {
 		return err
 	}
 	moveInDoubt := false
 	defer func() {
-		if !moveInDoubt {
+		if s.HolderOperations != nil || !moveInDoubt {
 			release()
 		}
 	}()
 	if vm.PoweredOn() {
-		up, err := s.C.StopVM(ctx, vm.Node, vm.VMID)
-		if err != nil {
+		if err := s.holderStop(ctx, projectID, vm); err != nil {
 			return err
 		}
-		if err := s.C.WaitTask(ctx, up); err != nil {
-			return err
-		}
-		if err := s.waitStopped(ctx, vm); err != nil {
-			return err
-		}
+		if holderFrom(ctx) == nil {
+			if err := s.waitStopped(ctx, vm); err != nil {
+				return err
+			}
+		} // fenced holderStop already proved node-scoped stopped, with no restart compensation
 	}
 	holder, err := s.holderOn(ctx, projectID, vm.Node)
 	if err != nil {
@@ -270,11 +279,7 @@ func (s *Service) KeepServerVolumes(ctx context.Context, projectID, externalID s
 	for _, d := range data {
 		slot := d.Slot
 		if !strings.HasPrefix(slot, "unused") {
-			up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, nil, slot)
-			if err != nil {
-				return err
-			}
-			if err := s.C.WaitTask(ctx, up); err != nil {
+			if err := s.holderConfig(ctx, projectID, vm, nil, slot); err != nil {
 				return err
 			}
 			if cfg, err = s.C.GetVMConfig(ctx, vm.Node, vm.VMID); err != nil {
@@ -300,6 +305,12 @@ func (s *Service) KeepServerVolumes(ctx context.Context, projectID, externalID s
 				free = k
 			}
 		}
+		if s.HolderOperations != nil {
+			if err := s.holderMove(ctx, projectID, vm, holder, slot, free); err != nil {
+				return err
+			}
+			continue
+		}
 		up, err := s.C.MoveDisk(ctx, vm.Node, vm.VMID, MoveDiskOpts{Disk: slot, TargetVMID: holder.VMID, TargetDisk: free})
 		if err != nil {
 			moveInDoubt = !taskRefused(err)
@@ -317,6 +328,22 @@ func (s *Service) KeepServerVolumes(ctx context.Context, projectID, externalID s
 // the next delete or the project teardown gets it. The destroy takes every disk on the VM at that moment, so the caller
 // holds the holder lock and knows no task is moving a disk onto this holder.
 func (s *Service) dropEmptyHolder(ctx context.Context, vm *ClusterResource) {
+	if s.HolderOperations != nil {
+		h := holderFrom(ctx)
+		if h == nil || s.holderCheck(ctx) != nil {
+			return
+		}
+		project, err := s.holderProjectForPool(strings.TrimPrefix(h.scope, "pve-holders/"+s.ServiceID+"/"))
+		if err != nil {
+			return
+		}
+		cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+		if err != nil || !isHolder(cfg.Str("tags")) || len(ParseDisks(cfg)) > 0 {
+			return
+		}
+		_ = s.holderDelete(ctx, project, vm)
+		return
+	}
 	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
 	if err != nil || !isHolder(cfg.Str("tags")) || len(ParseDisks(cfg)) > 0 {
 		return
