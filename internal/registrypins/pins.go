@@ -153,6 +153,9 @@ func (s *Store) advancePin(ctx context.Context, p Pin, state, ref, digest, uid, 
 		if err := s.guardBuildPin(tc, tx, p, state, ref, uid); err != nil {
 			return err
 		}
+		if err := s.guardImportPin(tc, tx, p, state, ref, uid); err != nil {
+			return err
+		}
 		return conflict(tx.QueryRow(tc, `UPDATE registry_pin SET state=$1,ref=$2,digest=$3,binding_uid=$4,binding_generation=$18,epoch=epoch+1,updated_at=clock_timestamp()
  WHERE id=$5 AND operation=$6 AND owner=$7 AND generation=$8 AND host=$9 AND repo=$10 AND ref=$11 AND state=$12 AND epoch=$13 AND binding_uid=$14 AND project_id=$15 AND binding_generation=$16 AND requested_ref=$17 RETURNING epoch`, state, ref, digest, uid, p.ID, p.Operation.ID, p.Owner, p.Generation, s.host, r.Repo, p.Ref, p.State, p.Epoch, p.BindingUID, p.ProjectID, p.BindingGeneration, p.RequestedRef, bindingGeneration).Scan(&out.Epoch))
 	})

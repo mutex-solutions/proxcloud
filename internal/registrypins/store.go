@@ -79,7 +79,15 @@ func (s *Store) Ensure(ctx context.Context) error {
  base_ref text NOT NULL,destination_ref text NOT NULL,pins_hash text NOT NULL,
  state text NOT NULL CHECK(state IN ('authorized','observed','terminal','unknown','known_no_effect')),
  pod_uid text NOT NULL DEFAULT '',phase text NOT NULL DEFAULT '',epoch bigint NOT NULL DEFAULT 1,
- created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp());`)
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
+ CREATE TABLE IF NOT EXISTS registry_import_dispatch (
+ operation uuid PRIMARY KEY,project_id text NOT NULL,owner text NOT NULL,generation text NOT NULL,host text NOT NULL,
+ source_ref text NOT NULL,destination_ref text NOT NULL,kind text NOT NULL CHECK(kind IN ('verify','copy')),pins_hash text NOT NULL,
+ state text NOT NULL CHECK(state IN ('authorized','observed','terminal','unknown','known_no_effect')),
+ pod_uid text NOT NULL DEFAULT '',phase text NOT NULL DEFAULT '',epoch bigint NOT NULL DEFAULT 1 CHECK(epoch>0),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ CHECK((state='terminal')=(phase IN ('Succeeded','Failed'))),
+ CHECK(state NOT IN ('observed','terminal') OR pod_uid<>''), CHECK(state<>'known_no_effect' OR pod_uid=''));`)
 		return err
 	})
 }
