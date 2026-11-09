@@ -308,10 +308,10 @@ func TestBuildBaseCredentials(t *testing.T) {
 		for _, c := range dig(pod, "spec", "initContainers").([]any) {
 			order = append(order, str(c.(map[string]any)["name"]))
 		}
-		if strings.Join(order, ",") != "fetch,base,kaniko" {
+		if strings.Join(order, ",") != "fetch,base,kaniko,prepare-output" {
 			t.Fatalf("init order = %v", order)
 		}
-		for _, name := range []string{"fetch", "kaniko"} {
+		for _, name := range []string{"fetch", "kaniko", "prepare-output"} {
 			if m := mounts(cs[name]); strings.Contains(m, "secret") || strings.Contains(m, "/docker") {
 				t.Errorf("auth %d: %s mounts a credential: %s", auth, name, m)
 			}
