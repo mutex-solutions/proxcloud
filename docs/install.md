@@ -82,6 +82,77 @@ the services cluster arrive with split mode.
 | `database.instances`, `database.status_read_replica` | `1`, `false` | Replica opt-in for history/metrics only, requires at least two instances. Queue/finance use `-rw`. |
 | `jobs_migration.*` | unset | Existing-site explicit retain/cutover, old producers/consumers stopped, drain/reconciliation and snapshot evidence; [runbook](postgres-jobs-migration.md). |
 
+### Proxmox endpoints and cluster CA (stage 60)
+
+`pve.api_url` is the installer's endpoint; `pve.portal_api_url` is the portal's
+primary endpoint, falling back to `api_url`. They are not interchangeable when the
+installer uses a bastion/forward. To register failover, explicitly supply **every
+additional portal-reachable** endpoint under `pve.portal_api_urls`. Stage 60 copies
+the list, in order, into the existing provider field `config.apiUrls`; it does not
+discover, probe or replace addresses with the installer-side endpoint.
+
+```yaml
+proxcloud:
+  pve:
+    api_url: https://installer-pve.example.org:8006
+    portal_api_url: https://pve1.example.org:8006
+    portal_api_urls:
+      - https://pve2.example.org:8006
+      - https://pve3.example.org:8006
+    # PUBLIC certificate only, obtained and verified through your trusted operator channel.
+    # Never paste a private key. This maps to config.caCert, NOT an ignored config.clusterCA key.
+    cluster_ca: "{{ lookup('ansible.builtin.file', inventory_dir ~ '/pve-root-ca.pem') }}"
+```
+
+The public PVE cluster CA is normally available to an authorized operator as
+`/etc/pve/pve-root-ca.pem`. Do not copy a node's private key or use an unverified
+network download as your trust source. The installer only validates the supplied
+certificate bundle locally (PEM parsing, certificate-only blocks, at most 64 KiB);
+it does not prove that a particular endpoint presents a chain issued by that CA.
+The existing PVE client verifies the certificate chain against `config.caCert`
+without checking the hostname, for PVE node IPs/VIPs. `caCert` takes precedence over
+`fingerprint`, but `insecureTls: true` bypasses both; explicitly supplying a CA
+therefore also writes `insecureTls: false`. An expired, wrong or non-signing CA
+still fails the real connection rather than falling back to a fingerprint or
+insecure TLS. An empty, malformed, missing-file or private-key input stops payload
+resolution before a provider POST/PUT; it never selects another trust mode.
+
+**Existing-site migration / retry rules:**
+
+1. Back up the site's configuration and generated secrets through the existing
+   private backup process. Inspect the registered provider's public connection
+   fields in the admin console; do not export its encrypted credentials.
+2. With both new inputs omitted or `null`, stage 60 keeps installed `apiUrls`,
+   `caCert`, `fingerprint` and `insecureTls` exactly, including absent keys (system-CA
+   verification). A fresh site with no CA retains stage 00's pinned leaf
+   fingerprint. Existing `pve.fingerprint` and `portal_api_url` inputs still work;
+   one leaf pin generally cannot verify different nodes' certificates.
+3. For CA-backed failover, supply the verified public CA and the additional
+   portal-reachable URLs. `portal_api_urls: []` deliberately clears only the
+   additional list. `cluster_ca: ''` is invalid, **not** a request to erase trust;
+   to leave installed trust unchanged, omit it or use `null`. Trust-mode removal
+   remains an explicit admin-console action, not an installer default.
+4. Plan/run stage 60 only under your normal change authorization: the complete
+   playbook also manages logins, seeds and other providers and performs its existing
+   live connection test. `make upgrade` is **not** a registration-only preview; it
+   runs other stages too. This change has only offline test/render/syntax evidence,
+   not fresh-install, failover, restore or live migration acceptance.
+5. Stage 60 requires a unique matching name identifying a valid `CLOUD`/`proxmox`
+   row before and after creation. A duplicate name or collision with another
+   provider kind stops registration; resolve it in the admin console rather than
+   letting the installer repurpose a row. On retry it uses the same row, sends no
+   `secret` on its configuration PUT and keeps rotated `tokenId`, service toggles,
+   detected capabilities and unrelated config. Only connection and the previously
+   installer-owned network/storage/template fields are reconciled; an unchanged
+   payload skips the PUT. This is sequential rerun safety, not cross-process CAS.
+
+Offline regression commands (no endpoint or private inventory required):
+
+```sh
+installer/.venv/bin/python installer/tests/test_registration.py
+installer/.venv/bin/python installer/tests/test_filters.py
+```
+
 ### Access over plain HTTP
 
 `ingress.tls: none` is for a lab or a management network you trust. A browser has no WebCrypto outside a secure context, so the consoles log in without PKCE and the installer stops requiring it on the Keycloak clients; credentials cross the network in the clear. Use `acme` or a TLS Secret on anything else.
