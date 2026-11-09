@@ -117,13 +117,11 @@ func TestInventoryAtomicMutationRechecksAfterRowLock(t *testing.T) {
 				})
 			}()
 			<-locked
-			started := make(chan struct{})
 			result := make(chan struct {
 				changed bool
 				err     error
 			}, 1)
 			go func() {
-				close(started)
 				var changed bool
 				var err error
 				if operation == "archive" {
@@ -138,7 +136,34 @@ func TestInventoryAtomicMutationRechecksAfterRowLock(t *testing.T) {
 					err     error
 				}{changed, err}
 			}()
-			<-started
+			// Observe PostgreSQL's actual lock waiter, not merely a goroutine's
+			// start. The contender must block BEFORE the holder commits.
+			waitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			for {
+				var blocked bool
+				err := db.Pool.QueryRow(waitCtx, `SELECT EXISTS (
+					SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database()
+					AND a.pid <> pg_backend_pid() AND a.wait_event_type='Lock'
+					AND a.query LIKE '%cloudResource%' AND a.query LIKE '%FOR UPDATE%'
+				)`).Scan(&blocked)
+				if err != nil {
+					close(release)
+					<-committed
+					<-result
+					t.Fatalf("did not observe the row-lock waiter: %v", err)
+				}
+				if blocked {
+					break
+				}
+			}
+			select {
+			case got := <-result:
+				close(release)
+				<-committed
+				t.Fatalf("contender finished while the row was locked: %+v", got)
+			default:
+			}
 			close(release)
 			if err := <-committed; err != nil {
 				t.Fatal(err)
@@ -150,6 +175,10 @@ func TestInventoryAtomicMutationRechecksAfterRowLock(t *testing.T) {
 			row, err := repo.FindByID(ctx, expected.ID)
 			if err != nil || row == nil || row.Data["cidr"] != "concurrent" {
 				t.Fatalf("concurrent update lost: %+v %v", row, err)
+			}
+			archived, err := repo.FindArchivedSince(ctx, "proj1", "svc", past.Add(-time.Minute))
+			if err != nil || len(archived) != 0 {
+				t.Fatalf("concurrent row was incorrectly archived: %+v %v", archived, err)
 			}
 		})
 	}
