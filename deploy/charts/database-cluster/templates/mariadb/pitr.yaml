@@ -1,0 +1,49 @@
+{{- if and (include "database-cluster.backupEnabled" .) (eq .Values.engine "mariadb") (gt (int .Values.instances) 1) }}
+{{/*
+Binlog archiving for TRUE point-in-time recovery, as opposed to
+bootstrapFrom.targetRecoveryTime, which only picks the nearest physical backup.
+
+GATED ON REPLICATION. mariadb-operator 26.6.0 supports binlog archival and PITR
+only on the asynchronous replication topology; a single-instance database has
+no replication and the operator has nothing to archive. mariadb.yaml turns
+replication on for instances > 1, so that is the same gate.
+
+The CR belongs to the SOURCE database: it references that database's own
+PhysicalBackup as the baseline, and archives binlogs alongside it. A restored
+database points bootstrapFrom.pointInTimeRecoveryRef at THIS object by name.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: PointInTimeRecovery
+metadata:
+  name: {{ $name }}-pitr
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  physicalBackupRef:
+    name: {{ $name }}-backup
+  compression: gzip
+  storage:
+    s3:
+      bucket: {{ .Values.backup.s3.bucket | quote }}
+      endpoint: {{ include "database-cluster.backupHostPort" . | quote }}
+      prefix: {{ printf "%s/%s-binlog" (.Values.backup.s3.prefix | default "proxcloud") $name | quote }}
+      {{- with .Values.backup.s3.region }}
+      region: {{ . | quote }}
+      {{- end }}
+      accessKeyIdSecretKeyRef:
+        name: {{ .Values.backup.s3.credsSecret }}
+        key: AWS_ACCESS_KEY_ID
+      secretAccessKeySecretKeyRef:
+        name: {{ .Values.backup.s3.credsSecret }}
+        key: AWS_SECRET_ACCESS_KEY
+      tls:
+        enabled: {{ include "database-cluster.backupTLS" . }}
+        {{- with .Values.backup.s3.caCertSecret }}
+        caSecretKeyRef:
+          name: {{ . }}
+          key: ca.crt
+        {{- end }}
+{{- end }}

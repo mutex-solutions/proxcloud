@@ -1,0 +1,6 @@
+apiVersion: v2
+name: proxmox-kamaji-cluster
+description: One tenant Kubernetes cluster on Proxmox VE. A Kamaji hosted control plane, CAPMOX worker VMs, Cilium, proxmox-csi and MetalLB.
+type: application
+version: 0.1.9
+appVersion: "1.35"

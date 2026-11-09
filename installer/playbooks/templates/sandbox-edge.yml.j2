@@ -1,0 +1,114 @@
+{#- Stage 56, on the services cluster: the wildcard certificate of the sandbox domain and the copy to the sandbox
+    cluster. The issuer and its DNS update key stay here: code that escapes a sandbox must not be able to change the
+    zone (docs/managed-sandbox.md §4). Vars: pc_sbx_edge_ns, pc_sbx_tls_secret, pc_sbx_proxy_image, pc_sbx_tsig. -#}
+{%- set t = pc.sandbox.tls -%}
+{%- if t.issuer == 'acme' %}
+apiVersion: v1
+kind: Secret
+metadata: {name: sandbox-tsig, namespace: "{{ pc_sbx_edge_ns }}"}
+type: Opaque
+stringData: {secret: "{{ pc_sbx_tsig.key }}"}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata: {name: sandbox-acme, namespace: "{{ pc_sbx_edge_ns }}"}
+spec:
+  acme:
+    server: "{{ t.acme.server }}"
+    email: "{{ t.acme.email }}"
+{% if t.acme.ca_bundle | default('') %}
+    caBundle: "{{ t.acme.ca_bundle | b64encode }}"
+{% endif %}
+    privateKeySecretRef: {name: sandbox-acme-account}
+    solvers:
+      - dns01:
+          rfc2136:
+            nameserver: "{{ pc.sandbox.powerdns.nameserver }}"
+            tsigKeyName: "{{ pc_sbx_tsig.name }}"
+            tsigAlgorithm: HMACSHA256
+            tsigSecretSecretRef: {name: sandbox-tsig, key: secret}
+---
+{% elif t.issuer == 'selfsigned' %}
+# Test sites without a public domain: a CA of its own. Clients trust the CA (Secret sandbox-ca, ca.crt) or nothing.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata: {name: sandbox-selfsigned, namespace: "{{ pc_sbx_edge_ns }}"}
+spec: {selfSigned: {}}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: sandbox-ca, namespace: "{{ pc_sbx_edge_ns }}"}
+spec:
+  isCA: true
+  commonName: "sandbox CA {{ pc.sandbox.domain }}"
+  secretName: sandbox-ca
+  duration: 87600h
+  privateKey: {algorithm: ECDSA, size: 256}
+  issuerRef: {name: sandbox-selfsigned, kind: Issuer}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata: {name: sandbox-ca, namespace: "{{ pc_sbx_edge_ns }}"}
+spec: {ca: {secretName: sandbox-ca}}
+---
+{% endif %}
+{% if t.issuer != 'secret' %}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: sandbox-wildcard, namespace: "{{ pc_sbx_edge_ns }}"}
+spec:
+  secretName: "{{ pc_sbx_tls_secret }}"
+  dnsNames: ["*.{{ pc.sandbox.domain }}"]
+  privateKey: {algorithm: ECDSA, size: 256, rotationPolicy: Always}
+  issuerRef: {name: "{{ 'sandbox-acme' if t.issuer == 'acme' else 'sandbox-ca' }}", kind: Issuer}
+---
+{% endif %}
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: sandbox-cert-sync, namespace: "{{ pc_sbx_edge_ns }}"}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: sandbox-cert-sync, namespace: "{{ pc_sbx_edge_ns }}"}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ pc_sbx_tls_secret }}"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: sandbox-cert-sync, namespace: "{{ pc_sbx_edge_ns }}"}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: sandbox-cert-sync}
+subjects: [{kind: ServiceAccount, name: sandbox-cert-sync, namespace: "{{ pc_sbx_edge_ns }}"}]
+---
+# Copies the certificate to sandbox-system/sandbox-proxy-tls every minute with a credential that may get and patch that
+# one Secret there (deploy/sandbox-cluster/sandbox-proxy.yaml). sandbox-proxy reads the mounted files again on renewal.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: sandbox-cert-sync, namespace: "{{ pc_sbx_edge_ns }}"}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: sandbox-cert-sync}}
+  template:
+    metadata: {labels: {app: sandbox-cert-sync}}
+    spec:
+      serviceAccountName: sandbox-cert-sync
+      securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: sync
+          image: "{{ pc_sbx_proxy_image }}"
+          args: [cert-sync]
+          env:
+            - {name: CERT_SOURCE, value: "{{ pc_sbx_edge_ns }}/{{ pc_sbx_tls_secret }}"}
+            - {name: CERT_TARGET, value: sandbox-system/sandbox-proxy-tls}
+            - {name: TARGET_KUBECONFIG, value: /etc/sandbox/kubeconfig}
+            - {name: SANDBOX_DOMAIN, value: "{{ pc.sandbox.domain }}"}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 64Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts: [{name: kubeconfig, mountPath: /etc/sandbox, readOnly: true}]
+      volumes:
+        - name: kubeconfig
+          secret: {secretName: sandbox-cert-sync-kubeconfig}

@@ -10,4 +10,9 @@ proxcloud_vault:
   # Tokens that already exist on the cluster (their secret is shown once, on creation):
   # platform_token_secret: ...
   # images_token_secret: ...
+  # capi_token_secret: ...   (mode=split)
+  # csi_token_secret: ...    (mode=split)
+  # csi_gateway_token_secret: ... (mode=split, the CSI gateway's token)
+  # sandbox_token_secret: ... (mode=split, sandbox.enabled)
   # truenas_api_key: ...     # object_store.mode=truenas-app
+  # pdns_api_key: ...        # sandbox.powerdns.api_url set (stage 56)

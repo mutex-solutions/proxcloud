@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -46,6 +47,7 @@ func (h *Handler) routeSavingsContract(r chi.Router) {
 	r.Post("/savings-contracts/{id}", h.savingsContractCreate)
 	r.Put("/savings-contracts/{id}", h.savingsContractUpdate)
 	r.Delete("/savings-contracts/{id}", h.savingsContractDelete)
+	r.Post("/savings-contracts/{id}/record-payment", h.savingsContractRecordPayment)
 	r.Get("/savings-contracts/billing-profile/{id}", h.savingsContractsByBillingProfile)
 	r.Get("/savings-contracts/savings-plan/{id}", h.savingsContractsBySavingsPlan)
 }
@@ -58,6 +60,7 @@ type createSavingsContractReq struct {
 	MonthlyCommittedAmount *decimal.Decimal `json:"monthlyCommittedAmount"`
 	PaidUpfront            bool             `json:"paidUpfront"`
 	StartDate              string           `json:"startDate"`
+	PaymentReference       string           `json:"paymentReference"`
 }
 
 // savingsContractCreate validates the billing profile + available plan + no-duplicate-active,
@@ -154,6 +157,13 @@ func (h *Handler) savingsContractCreate(w http.ResponseWriter, r *http.Request) 
 	if req.MonthlyCommittedAmount != nil {
 		doc["monthlyCommittedAmount"] = *req.MonthlyCommittedAmount
 	}
+	// ACTIVE at once means the operator took the money outside the portal: the contract records who says so.
+	if req.PaidUpfront {
+		doc["paymentRecordedBy"] = operatorID(r)
+		if req.PaymentReference != "" {
+			doc["paymentReference"] = req.PaymentReference
+		}
+	}
 
 	saved, err := h.repo.InsertDoc(r.Context(), savingsContractCollection, doc)
 	if httpx.WriteError(w, err) {
@@ -199,6 +209,11 @@ func (h *Handler) savingsContractUpdate(w http.ResponseWriter, r *http.Request) 
 	for k, v := range req.setMap() {
 		existing[k] = v
 	}
+	// An edit must not start the discount of an upfront contract nobody has paid for.
+	if existing["status"] == billing.SavingsStatusActive && req.PaidUpfront && existing["paymentTransactionId"] == nil && existing["paymentRecordedBy"] == nil {
+		httpx.WriteError(w, httpx.BadRequest("This upfront contract has no payment on record: use record-payment, or set it PENDING_PAYMENT."))
+		return
+	}
 	if err := h.repo.ReplaceDoc(r.Context(), savingsContractCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
@@ -209,6 +224,70 @@ func (h *Handler) savingsContractUpdate(w http.ResponseWriter, r *http.Request) 
 	after, _ := h.repo.FindDoc(r.Context(), savingsContractCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
+}
+
+// savingsContractRecordPayment confirms an upfront contract's money arrived outside the portal: it activates
+// a PENDING_PAYMENT contract the way a settled deposit would, and records who says so. Refused on a contract
+// not waiting for one. Gated ADMIN_SAVINGS_PLAN_MANAGE; the audit middleware records the event.
+func (h *Handler) savingsContractRecordPayment(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, savingsContractManagePerm) {
+		return
+	}
+	var req struct {
+		Reference string `json:"reference"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
+		return
+	}
+	if req.Reference = strings.TrimSpace(req.Reference); req.Reference == "" {
+		httpx.WriteError(w, httpx.BadRequest("A payment reference is required"))
+		return
+	}
+	id := chi.URLParam(r, "id")
+	c, err := h.billing.SavingsContractByID(r.Context(), id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if c == nil {
+		httpx.WriteError(w, httpx.NotFound("Savings contract not found"))
+		return
+	}
+	if !c.PaidUpfront || c.Status != billing.SavingsStatusPendingPayment {
+		httpx.WriteError(w, httpx.BadRequest("This savings contract is not waiting for a payment."))
+		return
+	}
+	before, err := h.repo.FindDoc(r.Context(), savingsContractCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	won, err := h.billing.RecordUpfrontPayment(r.Context(), c, req.Reference, operatorID(r), time.Now().UTC())
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if !won { // a deposit settled or the customer cancelled while this was on its way
+		httpx.WriteError(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "This savings contract is not waiting for a payment."))
+		return
+	}
+	after, err := h.repo.FindDoc(r.Context(), savingsContractCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	audit.RecordSnapshots(r.Context(), before, after)
+	httpx.OK(w, shapeDoc(after))
+}
+
+// operatorID names who made an admin request, for the record a payment confirmation leaves.
+func operatorID(r *http.Request) string {
+	if rc := httpx.RC(r.Context()); rc != nil {
+		if rc.Sub != "" {
+			return rc.Sub
+		}
+		if rc.SigV4KeyID != "" {
+			return rc.SigV4KeyID
+		}
+	}
+	return "operator"
 }
 
 // savingsContractDelete loads the contract (404 if absent) and deletes it. Responds with HTTP 200

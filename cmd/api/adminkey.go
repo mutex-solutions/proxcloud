@@ -11,6 +11,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/admin"
+	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
 // adminKeyCmd is the non-interactive operator credential (plan AUTO-G5): `proxcloud-api admin-key
@@ -25,6 +26,9 @@ func adminKeyCmd(args []string, out io.Writer) error {
 		return errors.New("usage: proxcloud-api admin-key create [-description text]")
 	}
 	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil // -help printed the flags; asking for help is not a failure
+		}
 		return err
 	}
 	dsn := os.Getenv("PROXCLOUD_DB_URL")
@@ -38,7 +42,8 @@ func adminKeyCmd(args []string, out io.Writer) error {
 	}
 	defer func() { _ = pg.Close(ctx) }()
 	doc := admin.NewAdminAPIKey(*description)
-	if _, err := pg.C("hmac_keys").InsertOne(ctx, doc); err != nil {
+	enc := textcrypt.New(os.Getenv("PROXCLOUD_ENCRYPTION_DEFAULT_KEY"))
+	if _, err := pg.C("hmac_keys").InsertOne(ctx, admin.SealHmacKey(enc, doc)); err != nil {
 		return err
 	}
 	return json.NewEncoder(out).Encode(map[string]any{"id": doc["_id"], "secretKey": doc["secretKey"]})

@@ -478,9 +478,12 @@ func (s *Service) VMSecurityGroups(ctx context.Context, projectID, serverExtID s
 // SecurityGroupInUse names a pool VM whose firewall references the group ("" = none). PVE
 // deletes a referenced group without complaint and leaves a dangling rule on the VM.
 func (s *Service) SecurityGroupInUse(ctx context.Context, projectID, groupID string) (string, error) {
-	vms, templates, err := s.poolVMs(ctx, projectID)
+	vms, templates, unread, err := s.poolVMs(ctx, projectID)
 	if err != nil {
 		return "", err
+	}
+	if len(unread) > 0 {
+		return "", errUnreadVMs()
 	}
 	for _, vm := range append(vms, templates...) {
 		var rules []FirewallRule

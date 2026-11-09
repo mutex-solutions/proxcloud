@@ -1,0 +1,67 @@
+{{- if and (eq .Values.engine "opensearch") .Values.opensearch.indexPolicies }}
+{{/*
+Index retention (ISM), narrowed to the shape customers ask for: keep indices
+matching a pattern for N days, optionally rolling the write index over first.
+
+The full ISM state machine is an operator-grade tool — exposing it would mean
+shipping a state-machine editor. Instead proxcloud carries four numbers and this
+template expands them into the real two-state policy:
+
+  hot    -> (optional rollover on size/age) -> transitions to delete at
+            minIndexAge = deleteAfterDays
+  delete -> delete action
+
+ismTemplate binds the policy to the customer's index patterns, so new indices
+pick it up automatically; applyToExistingIndices sweeps the ones already there.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+{{- range .Values.opensearch.indexPolicies }}
+---
+apiVersion: opensearch.org/v1
+{{/* NOTE the casing: this kind is OpenSearchISMPolicy while its siblings are
+     OpensearchUser/OpensearchRole. Upstream is inconsistent; `kubectl
+     api-resources --api-group=opensearch.org` is the authority. */}}
+kind: OpenSearchISMPolicy
+metadata:
+  {{- /* '_' -> '-': idents allow underscores, k8s names do not (config.go
+       K8sName). policyId mirrors the CR name so the two can never diverge. */}}
+  name: {{ $name }}-p-{{ .name | replace "_" "-" }}
+  labels:
+    {{- include "database-cluster.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  opensearchCluster:
+    name: {{ $name }}
+  policyId: {{ $name }}-p-{{ .name | replace "_" "-" }}
+  description: {{ printf "proxcloud retention policy %s" .name | quote }}
+  defaultState: hot
+  applyToExistingIndices: true
+  ismTemplate:
+    indexPatterns:
+      {{- toYaml .indexPatterns | nindent 6 }}
+    priority: 100
+  states:
+    - name: hot
+      actions:
+        {{- if or .rolloverGiB .rolloverDays }}
+        - rollover:
+            {{- with .rolloverGiB }}
+            minSize: {{ printf "%dgb" (int .) }}
+            {{- end }}
+            {{- with .rolloverDays }}
+            minIndexAge: {{ printf "%dd" (int .) }}
+            {{- end }}
+        {{- else }}
+        - readWrite: {}
+        {{- end }}
+      transitions:
+        - stateName: delete
+          conditions:
+            minIndexAge: {{ printf "%dd" (int .deleteAfterDays) }}
+    - name: delete
+      actions:
+        - delete: {}
+      transitions: []
+{{- end }}
+{{- end }}

@@ -93,6 +93,13 @@ func (s *ActivationService) Activate(ctx context.Context, bp *BillingProfile, so
 	bp.ActivationConstraints = append(bp.ActivationConstraints, ActivationConstraintPassed{Source: source, PassedAt: &now})
 	bp.Status = StatusActive
 	bp.ActivatedAt = &now
+	// The currency comes with the billing details. An operator can activate a profile that has none, and every bill read
+	// then failed on the blank currency: such a profile bills in the base currency, as saving details would have set.
+	if bp.Currency == "" {
+		if base, err := s.repo.BaseCurrency(ctx); err == nil {
+			bp.Currency = base
+		}
+	}
 	if _, err := s.repo.Update(ctx, bp); err != nil {
 		return err
 	}
@@ -109,30 +116,27 @@ func (s *ActivationService) Activate(ctx context.Context, bp *BillingProfile, so
 	return nil
 }
 
-// Suspend suspends the profile: live cloud suspend FIRST (best-effort — an error never
-// blocks the billing flip), then the customer email, then SUSPENDED + save + SYSTEM audit.
+// Suspend suspends the profile: SUSPENDED + save FIRST, so a member opening a project the walk has just disabled cannot lift
+// it, then the cloud leg (suspendClouds says what happens when it fails), the customer email and the SYSTEM audit.
 func (s *ActivationService) Suspend(ctx context.Context, bp *BillingProfile, source string) error {
-	if s.clouds != nil {
-		if err := s.clouds.SuspendBillingProfileClouds(ctx, bp.ID); err != nil {
-			s.log.Error("suspend: cloud leg failed (billing flip proceeds)", "billingProfile", bp.ID, "err", err)
-		}
+	bp.Status = StatusSuspended
+	if _, err := s.repo.Update(ctx, bp); err != nil {
+		return err
 	}
+	// The walk outlives the request: the status is saved, so stopping halfway only leaves work for the next pass.
+	suspendClouds(context.WithoutCancel(ctx), s.repo, s.clouds, bp.ID, s.log)
 	balance := s.currentBalance(ctx, bp.ID)
 	currency, _ := s.repo.BaseCurrency(ctx)
 	notify(ctx, s.notifier, "notify_customer_is_suspended", bp, map[string]any{
 		"fullName": profileFullName(bp), "balance": balance.StringFixed(2), "currency": currency,
 	})
-	bp.Status = StatusSuspended
-	if _, err := s.repo.Update(ctx, bp); err != nil {
-		return err
-	}
 	s.log.Info("suspended billing profile", "id", bp.ID, "source", source)
 	s.systemEvent(audit.ActionSuspend, bp, source)
 	return nil
 }
 
 // Unsuspend resumes the profile: ACTIVE + save + audit first, then the live cloud
-// resume (best-effort) and the customer email.
+// resume (resumeClouds says what happens when it fails) and the customer email.
 func (s *ActivationService) Unsuspend(ctx context.Context, bp *BillingProfile, source string) error {
 	bp.Status = StatusActive
 	if _, err := s.repo.Update(ctx, bp); err != nil {
@@ -140,11 +144,7 @@ func (s *ActivationService) Unsuspend(ctx context.Context, bp *BillingProfile, s
 	}
 	s.log.Info("resumed billing profile", "id", bp.ID, "source", source)
 	s.systemEvent(audit.ActionUnsuspend, bp, source)
-	if s.clouds != nil {
-		if err := s.clouds.ResumeBillingProfileClouds(ctx, bp.ID); err != nil {
-			s.log.Error("resume: cloud leg failed (billing flip already done)", "billingProfile", bp.ID, "err", err)
-		}
-	}
+	resumeClouds(ctx, s.clouds, bp.ID, s.log)
 	balance := s.currentBalance(ctx, bp.ID)
 	currency, _ := s.repo.BaseCurrency(ctx)
 	_ = balance // the resume mail renders balance too

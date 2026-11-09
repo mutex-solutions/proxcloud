@@ -11,6 +11,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
@@ -21,9 +22,17 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/pricing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pveflavor"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
+	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
+	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
+
+// collectChecker is the operator's way out of a charge whose outcome is unknown (payment.TransactionScanner).
+type collectChecker interface {
+	RecheckCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error)
+	CloseCollect(ctx context.Context, id string) (*pricing.CollectTransaction, error)
+}
 
 // txnRefunder is the narrow interface the admin refund + bank-transfer endpoints need
 // (refund + bank-transfer add-funds) — kept as an interface so admin
@@ -49,6 +58,7 @@ type Handler struct {
 	catalog       *catalog.Repo
 	users         *user.Repo
 	refund        txnRefunder
+	collects      collectChecker
 	pricing       *pricing.Repo
 	billing       *billing.Repo
 	cloud         *cloud.Repo
@@ -63,16 +73,27 @@ type Handler struct {
 	projectCloud  *ProjectCloudOps           // live per-project cloud legs (nil → those endpoints stay 501)
 	// inviteToProject invites a user to a project (admin user-create projectIds loop).
 	inviteToProject func(ctx context.Context, u *user.User, email, projectID string) error
+	// keycloak makes and removes logins for operator-created users (SetKeycloak; nil = Create
+	// user refuses, the users of an external IdP appear at their first login).
+	keycloak *sso.KCAdmin
 	// kamajiFor builds the Managed-Kubernetes service for a kamaji provider (nil in tests →
 	// the cluster chart-pin endpoints answer 501).
 	kamajiFor func(es *externalservice.ExternalService) (*kamaji.Service, error)
+	// csiMigrate moves a cluster onto the CSI gateway (nil → 501).
+	csiMigrate CSIMigrator
 	// pveFlavors is the Proxmox flavor catalog (nil in tests → the surface 503s).
 	pveFlavors *pveflavor.Repo
 	pay        *billing.PayService // bill record-payment (nil → 501)
 	// dbaasFor builds the Managed-Database service for a dbaas provider (nil in tests → the
 	// database chart-pin endpoints answer 501).
 	dbaasFor func(es *externalservice.ExternalService) (*dbaas.Service, error)
+	hmacEnc  *textcrypt.Encryptor // seals the secrets of generated hmac keys
+	// sandboxGates checks a sandbox provider's release gates (SetSandboxGates; nil = none can go live).
+	sandboxGates func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
 }
+
+// SetHmacEncryptor wires the data-at-rest key for hmac key secrets.
+func (h *Handler) SetHmacEncryptor(enc *textcrypt.Encryptor) { h.hmacEnc = enc }
 
 // SetKamaji wires the kamaji Managed-Kubernetes service factory (the admin chart-pin surface).
 // SetPayService wires the bill PayService (record-payment; carries the bill_is_paid mail +
@@ -111,13 +132,18 @@ type ProjectCloudOps struct {
 	// CanDelete is the live pre-check gating a project-deletion schedule (project resolves / tenant
 	// reachable). nil → the endpoint stays 501.
 	CanDelete func(ctx context.Context, projectID string) error
-	// Teardown dispatches the async cloud cascade for an immediate project delete (delete the
-	// project's cloud resources + tenant, then mark it DELETED). Returns fast (fire-and-forget). nil → 501.
-	Teardown func(ctx context.Context, projectID string) error
+	// DeleteNow flags a project for immediate deletion; the deletion job's next sweep tears it down. nil → 501.
+	DeleteNow func(ctx context.Context, projectID string) error
+	// HoldForMove answers whether a move of an ENABLED project onto this own profile and organization has to disable it, and refuses
+	// one that would leave what it holds unbilled. nil → no hold.
+	HoldForMove func(ctx context.Context, projectID, ownProfileID, organizationID string) (bool, error)
 }
 
 // SetProjectCloudOps wires the live project-cloud legs (cmd/api only).
 func (h *Handler) SetProjectCloudOps(ops *ProjectCloudOps) { h.projectCloud = ops }
+
+// SetKeycloak wires the login management behind admin user create and delete.
+func (h *Handler) SetKeycloak(k *sso.KCAdmin) { h.keycloak = k }
 
 // SetInviteToProject wires inviteToProject for the admin user-create
 // projectIds loop (invites are best-effort there — each is caught and logged). nil → skipped.
@@ -142,6 +168,8 @@ func (h *Handler) Routes(r chi.Router) {
 		r.Get("/account-credit-transactions/{id}/payment-gateway", h.txnByGateway("accountCreditTransaction"))
 		r.Get("/account-credit-transactions/{id}/sync", h.accountCreditTxnSync)
 		r.Get("/collect-transactions/{id}/payment-gateway", h.txnByGateway("collectTransaction"))
+		r.Get("/collect-transactions/{id}/sync", h.collectTxnSync)
+		r.Post("/collect-transactions/{id}/close", h.collectTxnClose)
 		r.Get("/credit-card-transaction/{id}/payment-gateway", h.txnByGateway("creditCardTransaction"))
 		// The global cursor-paginated audit log (all
 		// request interfaces; the org/account readers are scoped). Gated ADMIN_AUDIT_READ.
@@ -393,6 +421,38 @@ func (h *Handler) accountCreditTxnByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.OK(w, billing.AccountCreditTransactionToDto(txn))
+}
+
+// SetCollectChecker wires the charge re-check and close routes.
+func (h *Handler) SetCollectChecker(c collectChecker) { h.collects = c }
+
+// collectTxnAction runs one operator action on a charge and answers with the row (ADMIN_TRANSACTION_MANAGE).
+func (h *Handler) collectTxnAction(w http.ResponseWriter, r *http.Request, act func(context.Context, string) (*pricing.CollectTransaction, error)) {
+	if !h.require(w, r, "admin:transaction:manage") {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	txn, err := act(r.Context(), id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if txn == nil {
+		httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("Bill transaction with id %s not found ", id)))
+		return
+	}
+	httpx.OK(w, billing.CollectTransactionToDto(txn))
+}
+
+// collectTxnSync asks the gateway about a charge, past the scanner's window too, like a deposit's /sync. It is a GET for
+// the same reason as that one: the re-check only records what the gateway says.
+func (h *Handler) collectTxnSync(w http.ResponseWriter, r *http.Request) {
+	h.collectTxnAction(w, r, h.collects.RecheckCollect)
+}
+
+// collectTxnClose ends a PENDING charge the gateway says did not succeed, or one with no gateway reference once the
+// operator found no charge at the gateway.
+func (h *Handler) collectTxnClose(w http.ResponseWriter, r *http.Request) {
+	h.collectTxnAction(w, r, h.collects.CloseCollect)
 }
 
 // collectTxnByID handles the collect transaction by-id read (ADMIN_TRANSACTION_READ).

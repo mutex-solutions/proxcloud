@@ -1,6 +1,14 @@
 package payment
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"testing"
+
+	stripe "github.com/stripe/stripe-go/v82"
+
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
+)
 
 func TestMapStatusTerminalStates(t *testing.T) {
 	cases := map[string]string{
@@ -14,6 +22,26 @@ func TestMapStatusTerminalStates(t *testing.T) {
 	for in, want := range cases {
 		if got := mapStatus(in); got != want {
 			t.Errorf("mapStatus(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestIntentGone(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{&stripe.Error{HTTPStatusCode: 404}, true},
+		{fmt.Errorf("retrieve: %w", &AirwallexError{HTTPStatus: 404}), true},
+		{&stripe.Error{HTTPStatusCode: 500}, false},
+		{&stripe.Error{HTTPStatusCode: 401}, false},
+		{&stripe.Error{HTTPStatusCode: 429}, false},
+		{&AirwallexError{HTTPStatus: 503}, false},
+		{errors.New("connection reset by peer"), false},
+		{httpx.NotFound("Payment gateway not found"), false},
+	} {
+		if got := intentGone(c.err); got != c.want {
+			t.Errorf("intentGone(%v) = %v, want %v", c.err, got, c.want)
 		}
 	}
 }

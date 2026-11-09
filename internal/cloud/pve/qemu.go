@@ -227,6 +227,15 @@ func (c *Client) ListSnapshots(ctx context.Context, node string, vmid int) ([]Sn
 	return out, nil
 }
 
+// SnapshotConfig reads the VM config a snapshot holds.
+func (c *Client) SnapshotConfig(ctx context.Context, node string, vmid int, name string) (VMConfig, error) {
+	var out VMConfig
+	if err := c.get(ctx, qemuPath(node, vmid)+"/snapshot/"+url.PathEscape(name)+"/config", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CreateSnapshot snapshots the VM (disk-only; vmstate=false keeps it storage-cheap).
 func (c *Client) CreateSnapshot(ctx context.Context, node string, vmid int, name, description string) (UPID, error) {
 	form := formVals{"snapname": name, "description": description}.values()
@@ -278,6 +287,12 @@ func (c *Client) AgentNetworkInterfaces(ctx context.Context, node string, vmid i
 		return nil, err
 	}
 	return out.Result, nil
+}
+
+// AgentSetUserPassword sets a guest user's password through the guest agent.
+func (c *Client) AgentSetUserPassword(ctx context.Context, node string, vmid int, username, password string) error {
+	form := formVals{"username": username, "password": password}.values()
+	return c.post(ctx, qemuPath(node, vmid)+"/agent/set-user-password", form, nil)
 }
 
 // SuspendVM pauses a running VM (billing suspension leg).

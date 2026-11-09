@@ -11,7 +11,7 @@ import (
 // ClusterResource is one row of GET /cluster/resources — the sync workhorse: a
 // single call returns every VM, storage, node and pool in the cluster.
 type ClusterResource struct {
-	ID       string  `json:"id"`   // "qemu/101", "storage/pve1/local-zfs", "node/pve1", "/pool/st-abc"
+	ID       string  `json:"id"`   // "qemu/101", "storage/pve1/local-zfs", "node/pve1", "/pool/tp-abc"
 	Type     string  `json:"type"` // "qemu" | "lxc" | "storage" | "node" | "sdn" | "pool"
 	Node     string  `json:"node"`
 	VMID     int     `json:"vmid"`
@@ -31,6 +31,11 @@ type ClusterResource struct {
 	Storage  string  `json:"storage"` // storage rows: the storage id
 	Shared   int     `json:"shared"`  // storage rows
 	Content  string  `json:"content"` // storage rows: comma-separated content types
+
+	// NodeDown: a qemu row whose node is not online (see markNodeDown). The VM exists, nothing else in the row counts.
+	NodeDown bool `json:"-"`
+	// StatusErr: ResolveVM could not read the node, so Status is the /cluster/resources one, which reads running for a paused VM.
+	StatusErr error `json:"-"`
 }
 
 // ClusterResources lists cluster-wide resources. kind filters server-side:
@@ -44,7 +49,32 @@ func (c *Client) ClusterResources(ctx context.Context, kind string) ([]ClusterRe
 	if err := c.get(ctx, "/cluster/resources", form, &out); err != nil {
 		return nil, err
 	}
+	if kind == "vm" {
+		c.markNodeDown(ctx, out)
+	}
 	return out, nil
+}
+
+// markNodeDown makes VM rows honest about a dead node. Lab, PVE 9.2: for about five minutes after a node dies its VMs
+// still read as last seen, "running" included; after that as status "unknown" with no name, template flag or sizes. So
+// a row of such a node says the VM exists and nothing more. Best effort: without the node list a row just stays as PVE
+// gave it for one more read.
+func (c *Client) markNodeDown(ctx context.Context, rows []ClusterResource) {
+	var nodes []ClusterResource
+	if err := c.get(ctx, "/cluster/resources", formVals{"type": "node"}.values(), &nodes); err != nil {
+		return
+	}
+	down := map[string]bool{}
+	for _, n := range nodes {
+		if n.Type == "node" && n.Status != "online" {
+			down[n.Node] = true
+		}
+	}
+	for i := range rows {
+		if rows[i].Type == "qemu" && down[rows[i].Node] {
+			rows[i].NodeDown, rows[i].Status = true, "unknown"
+		}
+	}
 }
 
 // Node is one row of GET /nodes.
@@ -97,24 +127,85 @@ func (c *Client) ManagementBridges(ctx context.Context, nodes ...string) (map[st
 }
 
 // ManagementCIDRs lists the IPv4 networks of the bridges ManagementBridges finds on every node:
-// what a tenant must not reach through an exit node, storage on that network included.
-func (c *Client) ManagementCIDRs(ctx context.Context) ([]string, error) {
-	mgmt, err := c.managementIfaces(ctx)
+// what a tenant must not reach through an exit node, storage on that network included. A node that
+// cannot answer is left out and complete comes back false: a dead node must not stop the other
+// nodes' tenants from changing their networks.
+func (c *Client) ManagementCIDRs(ctx context.Context) (cidrs []string, complete bool, err error) {
+	nodeIP, err := c.clusterNodeIPs(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	var out []string
-	for _, m := range mgmt {
-		if _, n, err := net.ParseCIDR(m.cidr); err == nil && n.IP.To4() != nil && !slices.Contains(out, n.String()) {
-			out = append(out, n.String())
+	complete = true
+	for node, ip := range nodeIP {
+		mgmt, err := c.nodeManagementIfaces(ctx, node, ip)
+		if err != nil {
+			complete = false
+			continue
+		}
+		for _, m := range mgmt {
+			if _, n, err := net.ParseCIDR(m.cidr); err == nil && n.IP.To4() != nil && !slices.Contains(cidrs, n.String()) {
+				cidrs = append(cidrs, n.String())
+			}
 		}
 	}
-	return out, nil
+	return cidrs, complete, nil
+}
+
+// NodeAddresses lists every IPv4 address the nodes hold, as /32: the /cluster/status address and the address of every
+// interface in /nodes/{node}/network (uplinks, bonds and VLANs too, not only bridges with a gateway). What a node
+// cannot answer for is left out and complete comes back false, as in ManagementCIDRs.
+func (c *Client) NodeAddresses(ctx context.Context) (addrs []string, complete bool, err error) {
+	nodeIP, err := c.clusterNodeIPs(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	complete = true
+	add := func(a string) {
+		if ip := net.ParseIP(a); ip != nil && ip.To4() != nil && !slices.Contains(addrs, ip.String()+"/32") {
+			addrs = append(addrs, ip.String()+"/32")
+		}
+	}
+	for node, ip := range nodeIP {
+		add(ip)
+		var ifaces []struct {
+			Address string `json:"address"`
+		}
+		if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", nil, &ifaces); err != nil {
+			complete = false
+			continue
+		}
+		for _, i := range ifaces {
+			add(i.Address)
+		}
+	}
+	slices.Sort(addrs)
+	return addrs, complete, nil
 }
 
 type mgmtIface struct{ iface, node, cidr string }
 
 func (c *Client) managementIfaces(ctx context.Context, nodes ...string) ([]mgmtIface, error) {
+	nodeIP, err := c.clusterNodeIPs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(nodes) == 0 {
+		for n := range nodeIP {
+			nodes = append(nodes, n)
+		}
+	}
+	var out []mgmtIface
+	for _, node := range nodes {
+		mgmt, err := c.nodeManagementIfaces(ctx, node, nodeIP[node])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, mgmt...)
+	}
+	return out, nil
+}
+
+func (c *Client) clusterNodeIPs(ctx context.Context) (map[string]string, error) {
 	var status []struct {
 		Type string `json:"type"`
 		Name string `json:"name"`
@@ -129,30 +220,26 @@ func (c *Client) managementIfaces(ctx context.Context, nodes ...string) ([]mgmtI
 			nodeIP[s.Name] = s.IP
 		}
 	}
-	if len(nodes) == 0 {
-		for n := range nodeIP {
-			nodes = append(nodes, n)
-		}
+	return nodeIP, nil
+}
+
+func (c *Client) nodeManagementIfaces(ctx context.Context, node, ip string) ([]mgmtIface, error) {
+	var ifaces []struct {
+		Iface    string `json:"iface"`
+		Address  string `json:"address"`
+		Address6 string `json:"address6"`
+		Gateway  string `json:"gateway"`
+		Gateway6 string `json:"gateway6"`
+		CIDR     string `json:"cidr"`
+	}
+	form := formVals{"type": "any_bridge"}.values()
+	if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", form, &ifaces); err != nil {
+		return nil, err
 	}
 	var out []mgmtIface
-	for _, node := range nodes {
-		var ifaces []struct {
-			Iface    string `json:"iface"`
-			Address  string `json:"address"`
-			Address6 string `json:"address6"`
-			Gateway  string `json:"gateway"`
-			Gateway6 string `json:"gateway6"`
-			CIDR     string `json:"cidr"`
-		}
-		form := formVals{"type": "any_bridge"}.values()
-		if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/network", form, &ifaces); err != nil {
-			return nil, err
-		}
-		ip := nodeIP[node]
-		for _, i := range ifaces {
-			if i.Gateway != "" || i.Gateway6 != "" || (ip != "" && (i.Address == ip || i.Address6 == ip)) {
-				out = append(out, mgmtIface{i.Iface, node, i.CIDR})
-			}
+	for _, i := range ifaces {
+		if i.Gateway != "" || i.Gateway6 != "" || (ip != "" && (i.Address == ip || i.Address6 == ip)) {
+			out = append(out, mgmtIface{i.Iface, node, i.CIDR})
 		}
 	}
 	return out, nil

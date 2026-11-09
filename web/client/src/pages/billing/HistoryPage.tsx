@@ -130,6 +130,10 @@ function BillsTab({ pid, bp }: { pid: string; bp: string }) {
         // A settled bill's $0.00 is non-information — mute it so open balances pop.
         cell: ({ row }) => {
           const unpaid = Number(row.original.unpaidGrossAmount ?? 0)
+          // An open bill is not due yet: its $0.00 unpaid would read as "already paid".
+          if (row.original.status === "OPEN") {
+            return <div className="text-right text-xs text-muted-foreground" title="Charges accrue until the bill is issued">not due yet</div>
+          }
           return (
             <div className={cn("text-right font-mono tabular-nums", unpaid === 0 && "text-muted-foreground")}>
               {fmtMoney(row.original.unpaidGrossAmount, row.original.invoiceCurrency)}

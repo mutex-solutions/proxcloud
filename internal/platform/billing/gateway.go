@@ -273,6 +273,13 @@ func (r *Repo) ReleaseAccountCreditTransaction(ctx context.Context, id string) e
 	return err
 }
 
+// UpdatePendingAccountCreditTransaction sets the status and message of a deposit still PENDING. A settle
+// that won meanwhile is left alone, which a replace of the row read earlier would undo.
+func (r *Repo) UpdatePendingAccountCreditTransaction(ctx context.Context, id, status, message string) error {
+	_, err := r.credits.SetFieldsOne(ctx, pgdoc.M{"_id": id, "status": "PENDING"}, pgdoc.M{"status": status, "gatewayMessage": message, "updatedAt": time.Now().UTC()}, nil)
+	return err
+}
+
 // SaveAccountCreditTransaction upserts an account-credit transaction (create on a blank id,
 // else replace by id) and returns the post-image with its id.
 func (r *Repo) SaveAccountCreditTransaction(ctx context.Context, t *AccountCreditTransaction) (*AccountCreditTransaction, error) {

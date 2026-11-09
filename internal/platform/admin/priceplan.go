@@ -373,7 +373,7 @@ func validatePricePlanRule(req *pricePlanRuleReq) *httpx.HTTPError {
 // validateUsageRule: a usage attribute carries a month-to-date total. Rated with ADD_TO_TOTAL, the
 // whole total is added again on every charge; on a month rule the engine prorates it as if it were
 // a price. Such a rule must overwrite (the default when the request names no apply method) on an
-// hour or minute cadence.
+// hour or minute cadence. It also refuses a price on a text attribute.
 func validateUsageRule(req *pricePlanRuleReq) *httpx.HTTPError {
 	var prices []struct {
 		AttributeName string `json:"attributeName"`
@@ -381,7 +381,7 @@ func validateUsageRule(req *pricePlanRuleReq) *httpx.HTTPError {
 	if err := json.Unmarshal(*req.Prices, &prices); err != nil {
 		return nil // malformed prices are left to the decode/store path
 	}
-	usage := map[string]bool{}
+	usage, text := map[string]bool{}, map[string]bool{}
 	for _, t := range billingresource.Catalog() {
 		if !strings.EqualFold(t.ResourceType, req.ResourceType) {
 			continue
@@ -390,9 +390,17 @@ func validateUsageRule(req *pricePlanRuleReq) *httpx.HTTPError {
 			if a.IsUsage != nil && *a.IsUsage {
 				usage[a.Name] = true
 			}
+			if strings.EqualFold(a.Type, "string") {
+				text[a.Name] = true
+			}
 		}
 	}
 	for _, p := range prices {
+		// The engine aborts the whole profile's charge on a value it cannot rate, so a rule priced
+		// on a text attribute would stop billing as soon as a matching resource exists.
+		if text[p.AttributeName] {
+			return httpx.BadRequest(fmt.Sprintf("Attribute %s is text and cannot be priced; use existence for a flat price per resource", p.AttributeName))
+		}
 		if !usage[p.AttributeName] {
 			continue
 		}

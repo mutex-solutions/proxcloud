@@ -18,6 +18,8 @@ type Service struct {
 	C          *Client
 	ServiceID  string
 	PoolPrefix string
+	// HolderLock serialises holder use per project across API replicas (ShedLock.Wait). Nil = no lock: tools and tests.
+	HolderLock func(ctx context.Context, name string, atMostFor, wait time.Duration) (release func(), acquired bool, err error)
 }
 
 // NewService builds the Service for one provider doc.
@@ -59,6 +61,11 @@ func (s *Service) TeardownProjectPool(ctx context.Context, pool string) error {
 		if m.Type != "qemu" {
 			continue
 		}
+		// HA would restart what is stopped below, and a replica needs its job to be removed.
+		if err := s.disableProtectionOn(ctx, &ClusterResource{Node: m.Node, VMID: m.VMID}); err != nil {
+			return fmt.Errorf("pve teardown: unprotect vm %d: %w", m.VMID, err)
+		}
+		s.waitReplicaRemoved(ctx, m.VMID)
 		// Stop hard (a running VM refuses destroy), then delete. Best-effort stop:
 		// a stopped VM's stop task fails harmlessly.
 		if upid, err := s.C.StopVM(ctx, m.Node, m.VMID); err == nil {
@@ -85,6 +92,8 @@ const (
 	tagFlavorPref  = "fl-"
 	tagImagePref   = "img-"
 	tagProfilePref = "sp-" // storage profile slug (Phase 5 billing attr)
+	// tagSpreadPref carries a spread group: PVE's own affinity rules are HA-only and strict.
+	tagSpreadPref  = "grp-"
 	tagCreatedPref = "pc-c-"
 )
 
@@ -99,6 +108,23 @@ func TagValue(tags, pref string) string {
 		}
 	}
 	return ""
+}
+
+// SpreadTag is the VM tag of a spread group.
+func SpreadTag(group string) string { return tagSpreadPref + group }
+
+// SpreadGroupSlug normalizes a spread group name into a tag-safe slug ("" = not usable).
+func SpreadGroupSlug(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	if s == "" || len(s) > 40 {
+		return ""
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return ""
+		}
+	}
+	return s
 }
 
 func FlavorTag(slug string) string  { return tagFlavorPref + slug }
@@ -178,6 +204,7 @@ func ServerData(r ClusterResource, addresses map[string]any, gpuSpecs map[string
 		extraSpecs = map[string]any{}
 	}
 	server := map[string]any{
+		"spreadGroup":      TagValue(r.Tags, tagSpreadPref),
 		"name":             r.Name,
 		"host":             r.Node,
 		"status":           MapVMStatus(r.Status, r.Lock),
@@ -195,6 +222,9 @@ func ServerData(r ClusterResource, addresses map[string]any, gpuSpecs map[string
 	}
 	if imageSlug != "" {
 		server["image"] = map[string]any{"id": imageSlug}
+	}
+	if lb := LBOfTags(r.Tags); lb != "" {
+		server["loadBalancerId"] = lb
 	}
 	data := map[string]any{
 		"flavorName":   flavorSlug,

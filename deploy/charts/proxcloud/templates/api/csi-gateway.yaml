@@ -1,0 +1,110 @@
+{{- /*
+CSI gateway listener (internal/cloud/csigw): its own TLS port on the API pods, its own Service, a certificate from a CA
+made here (the controllers on the services cluster trust that CA only), and a NetworkPolicy that admits the gateway port
+from the services cluster's addresses alone. The API's other ports stay as open as before.
+*/ -}}
+{{- with .Values.api.csiGateway }}{{- if .enabled }}
+{{- $fullname := include "proxcloud.fullname" $ }}
+{{- $u := urlParse (required "api.csiGateway.url is required with api.csiGateway.enabled" .url) }}
+{{- if ne $u.scheme "https" }}{{- fail "api.csiGateway.url must be https://<host>:<port>" }}{{- end }}
+{{- $host := (split ":" $u.host)._0 }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-csi-gateway-root
+  labels:
+    {{- include "proxcloud.labels" $ | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-csi-gateway-ca
+  labels:
+    {{- include "proxcloud.labels" $ | nindent 4 }}
+spec:
+  isCA: true
+  commonName: {{ $fullname }} CSI gateway CA
+  secretName: {{ $fullname }}-csi-gateway-ca
+  duration: 87600h
+  # Every cluster's controller Secret holds this CA as it was at the cluster's create: its key must never change.
+  privateKey: {algorithm: ECDSA, size: 256, rotationPolicy: Never}
+  issuerRef: {name: {{ $fullname }}-csi-gateway-root, kind: Issuer}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-csi-gateway
+  labels:
+    {{- include "proxcloud.labels" $ | nindent 4 }}
+spec:
+  ca: {secretName: {{ $fullname }}-csi-gateway-ca}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-csi-gateway
+  labels:
+    {{- include "proxcloud.labels" $ | nindent 4 }}
+spec:
+  secretName: {{ $fullname }}-csi-gateway-tls
+  privateKey: {algorithm: ECDSA, size: 256}
+  {{- if regexMatch "^[0-9.]+$|:" $host }}
+  ipAddresses: [{{ $host | quote }}]
+  {{- else }}
+  dnsNames: [{{ $host | quote }}]
+  {{- end }}
+  issuerRef: {name: {{ $fullname }}-csi-gateway, kind: Issuer}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-csi-gateway
+  labels:
+    {{- include "proxcloud.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: api
+  {{- with .service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .service.type }}
+  {{- if ne .service.type "ClusterIP" }}
+  externalTrafficPolicy: {{ .service.externalTrafficPolicy }}
+  {{- end }}
+  {{- with .service.loadBalancerIP }}
+  loadBalancerIP: {{ . }}
+  {{- end }}
+  selector:
+    {{- include "proxcloud.selector" (dict "ctx" $ "component" "api") | nindent 4 }}
+  ports:
+    - name: csi-gateway
+      port: {{ .port }}
+      targetPort: csi-gateway
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-api-csi-gateway
+  labels:
+    {{- include "proxcloud.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "proxcloud.selector" (dict "ctx" $ "component" "api") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # The API and management ports as before this policy existed.
+    - ports:
+        - {port: {{ $.Values.api.port }}}
+        - {port: {{ $.Values.api.managementPort }}}
+    {{- if .allowedCIDRs }}
+    - from:
+        {{- range .allowedCIDRs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+      ports:
+        - {port: {{ .port }}}
+    {{- end }}
+{{- end }}{{- end }}

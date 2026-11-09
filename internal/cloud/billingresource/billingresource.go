@@ -76,12 +76,21 @@ func GetArchivedBillingResources(ctx context.Context, repo *cloud.Repo, registry
 		stampResourceValues(brs, cr)
 		for _, b := range brs {
 			if b != nil {
-				b.DeletedAt = h.DeletedAt
+				b.DeletedAt = archivedEnd(b.DeletedAt, h.DeletedAt)
 			}
 		}
 		out = append(out, brs...)
 	}
 	return out, nil
+}
+
+// archivedEnd is where an archived resource's charge stops: its archive time, unless its provider knows an earlier end
+// (an ended sandbox row is archived at the next read after its end, and the time between is not the customer's).
+func archivedEnd(provider, archived *time.Time) *time.Time {
+	if provider != nil && (archived == nil || provider.Before(*archived)) {
+		return provider
+	}
+	return archived
 }
 
 // stampResourceValues runs after each provider builds its BillingResources:
@@ -103,9 +112,12 @@ func stampResourceValues(brs []*billingapi.BillingResource, cr *cloud.CloudResou
 		if b.Values == nil {
 			b.Values = map[string]any{}
 		}
-		if created != nil {
-			b.Values["createdAt"] = *created
+		// A resource younger than its row (a server's snapshot) already says when it began.
+		if b.CreatedAt == nil {
 			b.CreatedAt = created
+		}
+		if b.CreatedAt != nil {
+			b.Values["createdAt"] = *b.CreatedAt
 		}
 		// region/service_id are FILTER attributes: applyFilter looks up AttributeTypeByName on the
 		// resource's type, so the value MUST be matched by a declared attribute or the filter errors

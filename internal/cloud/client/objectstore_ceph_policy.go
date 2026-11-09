@@ -209,17 +209,23 @@ func (b *cephBackend) setPublicRead(ctx context.Context, bucket string, public b
 	if err != nil {
 		return err
 	}
-	changed := false
+	changed, website := false, false
 	if public {
 		doc.upsertStmt(b.anonymousReadStmt(bucket, sidPublicRead))
 		changed = true
 	} else {
 		changed = doc.removeStmt(sidPublicRead)
+		// Private means private: the website statement publishes the same objects and hasAnonymousReadStmt
+		// counts it, so leaving it would report success on a bucket that is still public.
+		website = doc.removeStmt(sidWebsiteRead)
 	}
-	if changed {
+	if changed || website {
 		if err := b.putPolicyDoc(ctx, bucket, doc); err != nil {
 			return err
 		}
+	}
+	if website {
+		return b.dropWebsiteConfig(ctx, bucket)
 	}
 	return nil
 }

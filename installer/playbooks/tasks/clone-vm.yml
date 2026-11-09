@@ -1,6 +1,7 @@
 # Create a platform VM in the system pool by cloning a template; each step checks first, so a run that
 # died halfway resumes. vars: vm = {vmid, name, node, source_vmid, storage, cores, memory, disk, bridge,
-# vlan, user, ip, gateway, nameserver, ssh_key, tags, data_disk, data_storage, data_format}
+# vlan, user, ip, gateway, nameserver, ssh_key, tags, data_disk, data_storage, data_format, extra}; extra is more VM
+# configuration (a second NIC, firewall=1) applied with the rest before the first boot.
 - name: "Look up VM {{ vm.name }}"
   ansible.builtin.uri:
     url: "{{ pc_api }}/nodes/{{ vm.node }}/qemu/{{ vm.vmid }}/status/current"
@@ -20,7 +21,7 @@
           name: "{{ vm.name }}"
           full: 1
           storage: "{{ vm.storage }}"
-          pool: "{{ pc.pve.system_pool }}"
+          pool: "{{ vm.pool | default(pc.pve.system_pool) }}"
       changed_when: true
       register: pc_clone
     - name: Wait for the clone
@@ -39,7 +40,7 @@
         url: "{{ pc_api }}/nodes/{{ vm.node }}/qemu/{{ vm.vmid }}/config"
         method: POST
         body_format: form-urlencoded
-        body: "{{ cfg | combine(data_disk_cfg) }}"
+        body: "{{ cfg | combine(data_disk_cfg) | combine(vm.extra | default({})) }}"
       changed_when: true
       register: pc_vm_set
       vars:

@@ -10,7 +10,7 @@
       ansible.builtin.assert:
         that:
           - pc.pve.api_url | length > 0
-          - pc.mode == 'allinone'
+          - pc.mode in ['allinone', 'split']
           - pc.mgmt.placement in ['ssh', 'pve-vm']
           - pc.object_store.mode in ['vm', 'truenas-app', 'external', 'ceph-rgw']
           - pc.mgmt.placement == 'pve-vm' or groups['mgmt'] | default([]) | length > 0
@@ -18,9 +18,54 @@
           - not pc.pve.system_pool.startswith(pc.pve.pool_prefix)
           - pc.network.default_zone | length <= 8
         fail_msg: >-
-          Fix the inventory: proxcloud.pve.api_url is required, mode=split is not available before P7,
+          Fix the inventory: proxcloud.pve.api_url is required, mode is allinone or split,
           mgmt needs 1 or 3 servers, the system pool must not start with pool_prefix, a zone name has at
           most 8 characters.
+
+    - name: Check the Ceph RGW settings
+      when: pc.object_store.mode == 'ceph-rgw'
+      ansible.builtin.assert:
+        that:
+          - pc.object_store.endpoint is match('https?://[^/]')
+          - pc.object_store.access_key | length > 0
+          - pc.object_store.secret_key | length > 0
+          - pc.object_store.region | length > 0
+        fail_msg: >-
+          object_store.mode=ceph-rgw needs object_store.endpoint (an http or https URL), access_key, secret_key
+          (an RGW admin user with caps users=*;buckets=*;usage=*) and region (the zonegroup's api_name).
+        quiet: true
+
+    - name: Check the split mode settings
+      when: pc.mode == 'split'
+      vars:
+        svc: "{{ pc.services }}"
+      ansible.builtin.assert:
+        that:
+          - svc.templates and svc.control_plane.node in svc.templates
+          - svc.workers and svc.workers | map(attribute='node') | difference(svc.templates) | length == 0
+          - svc.network.bridge and svc.network.gateway and svc.network.endpoint and svc.network.nodes
+          - svc.network.metallb
+          - svc.kamaji.version_images
+          - pc.object_store.mode in ['vm', 'truenas-app']
+        fail_msg: >-
+          mode=split needs proxcloud.services: templates (one per node used), control_plane.node, workers,
+          kamaji.version_images and network.{bridge,gateway,endpoint,nodes,metallb}. Database backups go to
+          the installer's own bucket, so object_store.mode must be vm or truenas-app.
+        quiet: true
+
+    - name: Report settings that no longer do anything
+      when: pc.mode == 'split' and removed | length > 0
+      vars:
+        svc: "{{ pc.services }}"
+        removed: >-
+          {{ (['services.pve_node_ips'] if svc.pve_node_ips is defined else [])
+             + (['services.network.pve_proxy_ip'] if svc.network.pve_proxy_ip is defined else [])
+             + (['services.kamaji.csi_shared_stores'] if svc.kamaji.csi_shared_stores is defined else []) }}
+      ansible.builtin.debug:
+        msg: >-
+          {{ removed | join(', ') }}: removed, and ignored. Tenant clusters get block volumes through the CSI gateway,
+          not a proxmox-csi token and the pve-api forward; stage 60 deletes the forward once no cluster still uses it
+          (docs/managed-k8s.md). Take the keys out of the site's group_vars.
 
     - name: Check the build tools
       when: pc.images.build
@@ -105,6 +150,14 @@
       failed_when: >-
         pc.network.public.id in (pc_net.json.data | selectattr('gateway', 'defined') | map(attribute='iface') | list)
       # The portal refuses the management bridge as a public network; say so before installing.
+
+    - name: Check the bootstrap ISO store
+      when: pc.mode == 'split'
+      vars:
+        problem: "{{ pc_storage_rows | pc_boot_iso_problem(pc.services.iso_storage, pc.services.storage) }}"
+      ansible.builtin.assert:
+        that: problem | length == 0
+        fail_msg: "proxcloud.services.iso_storage: {{ problem }}. Bootstrap ISOs carry the kubeadm join token of a node until it joins (docs/managed-k8s.md)."
 
     - name: Check there is somewhere to put VM disks
       ansible.builtin.assert:

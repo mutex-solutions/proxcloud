@@ -123,7 +123,7 @@ func TestGetSecretDataAndList(t *testing.T) {
 			if r.URL.Query().Get("labelSelector") != "proxcloud.io/project=p1" {
 				t.Errorf("labelSelector = %s", r.URL.Query().Get("labelSelector"))
 			}
-			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"stc-1"}},{"metadata":{"name":"stc-2"}}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"pc-c-1"}},{"metadata":{"name":"pc-c-2"}}]}`))
 		}
 	})
 	ctx := context.Background()
@@ -142,5 +142,57 @@ func TestGetSecretDataAndList(t *testing.T) {
 	}
 	if len(apps) != 2 {
 		t.Errorf("apps = %d", len(apps))
+	}
+}
+
+func TestCustomResourceHelpers(t *testing.T) {
+	type call struct{ method, path, ct string }
+	var calls []call
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, call{r.Method, r.URL.Path, r.Header.Get("Content-Type")})
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"kind":"Status","message":"nope"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"metadata":{"name":"sbx-1"}}`))
+	})
+	ctx := context.Background()
+	const g, v, pl = "agents.x-k8s.io", "v1beta1", "sandboxes"
+	base := "/apis/agents.x-k8s.io/v1beta1/namespaces/sb-p1/sandboxes"
+
+	if err := c.ApplyCR(ctx, g, v, pl, map[string]any{"metadata": map[string]any{"name": "sbx-1"}}); err == nil {
+		t.Error("ApplyCR without namespace: want error")
+	}
+	if err := c.ApplyCR(ctx, g, v, pl, map[string]any{"metadata": map[string]any{"name": "sbx-1", "namespace": "sb-p1"}}); err != nil {
+		t.Fatalf("ApplyCR: %v", err)
+	}
+	if got, err := c.GetCR(ctx, g, v, pl, "sb-p1", "sbx-1"); err != nil || got != nil {
+		t.Errorf("GetCR absent = %v, %v; want nil, nil", got, err)
+	}
+	if _, err := c.MergePatchCR(ctx, g, v, pl, "sb-p1", "sbx-1", map[string]any{"spec": map[string]any{"shutdownTime": "x"}}); err != nil {
+		t.Fatalf("MergePatchCR: %v", err)
+	}
+	if err := c.DeleteCR(ctx, g, v, pl, "sb-p1", "sbx-1"); err != nil {
+		t.Fatalf("DeleteCR: %v", err)
+	}
+	if err := c.ApplyResourceQuota(ctx, map[string]any{"metadata": map[string]any{"name": "q", "namespace": "sb-p1"}}); err != nil {
+		t.Fatalf("ApplyResourceQuota: %v", err)
+	}
+	want := []call{
+		{http.MethodPatch, base + "/sbx-1", "application/apply-patch+yaml"},
+		{http.MethodGet, base + "/sbx-1", ""},
+		{http.MethodPatch, base + "/sbx-1", "application/merge-patch+json"},
+		{http.MethodDelete, base + "/sbx-1", ""},
+		{http.MethodPatch, "/api/v1/namespaces/sb-p1/resourcequotas/q", "application/apply-patch+yaml"},
+	}
+	if len(calls) != len(want) {
+		t.Fatalf("calls = %+v", calls)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Errorf("call %d = %+v, want %+v", i, calls[i], want[i])
+		}
 	}
 }

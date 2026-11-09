@@ -387,7 +387,7 @@ export default function UserDetailPage() {
               <EmptyState
                 icon={KeyRound}
                 title="No credentials"
-                hint="No stored credentials for this user. Reset the password to create one."
+                hint="No credentials stored here. Passwords are held by the identity provider."
               />
             ) : (
               <Card className="overflow-hidden py-0">

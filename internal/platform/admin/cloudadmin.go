@@ -22,6 +22,7 @@ const cloudServiceCollection = "externalService"
 func (h *Handler) routeCloudAdmin(r chi.Router) {
 	r.Post("/service/proxmox/auth", h.proxmoxAuth)
 	r.Post("/service/{id}/storage/detect", h.proxmoxDetectStorage)
+	r.Post("/service/{id}/server/{vmid}/migrate", h.proxmoxMigrateServer)
 	r.Put("/service/{id}/storage-classes", h.proxmoxStorageClasses)
 	r.Get("/service/os-images", h.imagesAll)
 	r.Get("/service/regions", h.serviceRegionsList)
@@ -32,6 +33,7 @@ func (h *Handler) routeCloudAdmin(r chi.Router) {
 	r.Get("/service/{id}/k8s-clusters", h.kamajiClusterPins)
 	r.Post("/service/{id}/k8s-clusters/bump-chart", h.kamajiClusterBumpAll)
 	r.Post("/service/{id}/k8s-clusters/{clusterId}/bump-chart", h.kamajiClusterBump)
+	r.Post("/service/{id}/k8s-clusters/{clusterId}/csi-gateway", h.kamajiClusterCSIGateway)
 	// Dbaas chart-pin surface — same shape for managed databases.
 	r.Get("/service/{id}/db-clusters", h.dbaasClusterPins)
 	r.Post("/service/{id}/db-clusters/bump-chart", h.dbaasClusterBumpAll)

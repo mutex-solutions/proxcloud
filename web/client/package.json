@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "shots": "playwright test e2e/screens.spec.ts",
     "test:a11y": "playwright test e2e/a11y.spec.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:smoke": "playwright test -c playwright.smoke.config.ts"
   },
   "dependencies": {
     "@airwallex/components-sdk": "^1.36.0",

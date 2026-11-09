@@ -100,12 +100,15 @@ func TestOrphanIPs(t *testing.T) {
 		alloc("102", "net1", time.Minute), // not listed yet, inside the grace: keep
 		alloc("103", "net1", time.Hour),   // listed, but the row is younger: the vmid was reused
 		alloc("104", "net0", time.Minute), // allocated before its VM's row: never a reuse
+		// A load balancer's public NIC, plugged during the build: same. Lab: this released a live address.
+		{ServerID: "105", NIC: "net1", BeforeRow: true, CreatedAt: at(-time.Minute)},
 	}
-	listed := map[string]bool{"100": true, "103": true, "104": true}
+	listed := map[string]bool{"100": true, "103": true, "104": true, "105": true}
 	rows := map[string]*cloud.CloudResource{
 		"100": {CreatedAt: at(-2 * time.Hour)},
 		"103": {CreatedAt: at(-10 * time.Minute)},
 		"104": {CreatedAt: at(-time.Second)},
+		"105": {CreatedAt: at(-time.Second)},
 	}
 	var got []string
 	for _, o := range orphanIPs(allocs, listed, rows, now) {

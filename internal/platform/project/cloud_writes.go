@@ -1,10 +1,14 @@
 package project
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -132,6 +136,9 @@ func (h *Handler) cloudResourceList(w http.ResponseWriter, r *http.Request) {
 	case cloud.TypeDatabaseCluster:
 		// Same read-through for provisioning databases (endpoint appears minutes after create).
 		h.refreshDbaasClusters(r.Context(), proj)
+	case cloud.TypeSandbox:
+		// Sandboxes start in seconds and end at their timeout: the cache must follow live.
+		h.refreshSandboxes(r.Context(), proj)
 	case cloud.TypeKeypair:
 		// KEYPAIR is a USER-scoped identity resource (blank projectId — see providers/write.go),
 		// so FindAllByProjectID below never returns it. List by user (same uid the create path
@@ -302,6 +309,57 @@ func (h *Handler) tryTenantClient(ctx context.Context, p *Project, svcID string)
 	return cc, true
 }
 
+// errProjectDeleting refuses creates and actions on a project on its way out: teardown lists what exists once, so anything
+// made after that would stay behind with nothing to remove it. Deletes stay open.
+var errProjectDeleting = httpx.NewError(http.StatusConflict, http.StatusConflict, "This project is being deleted")
+
+// errProjectDisabled refuses what would add usage to a DISABLED project: metering, the sync and rating cover only ENABLED ones,
+// so anything started here would run free. It says who can lift it: billing resumes the project once the balance is paid, an
+// operator's disable only the operator lifts.
+func errProjectDisabled(p *Project) error {
+	const keep = " You can still read, stop and delete its resources."
+	if p.DisabledByOperator {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict,
+			"This project was suspended by your platform operator: nothing can be created or started until they enable it again. Contact your operator."+keep)
+	}
+	return httpx.NewError(http.StatusConflict, http.StatusConflict,
+		"This project is suspended for an unpaid balance: nothing can be created or started until it is paid. Add funds or pay the open bills under Billing and the project resumes, or contact your platform operator."+keep)
+}
+
+// refuseNewUsage is the gate of whatever adds to a project: a create, an upload, a new key.
+func refuseNewUsage(p *Project) error {
+	switch {
+	case p.Deleting():
+		return errProjectDeleting
+	case p.IsDisabled():
+		return errProjectDisabled(p)
+	}
+	return nil
+}
+
+// allowedWhileDisabled is every action a DISABLED project keeps: reads, and what lowers its usage or clears the way for a
+// delete. An allow-list, so an action added later is refused until someone decides otherwise. Reads go by name: every action
+// reading state is called GET_, LIST_, SHOW_ or IS_, and DOWNLOAD reads an object.
+func allowedWhileDisabled(action string, data map[string]any) bool {
+	if action == "INVOKEACTION" {
+		action = strings.ToUpper(strAny(data["action"]))
+	}
+	for _, read := range []string{"GET_", "LIST_", "SHOW_", "IS_"} {
+		if strings.HasPrefix(action, read) {
+			return true
+		}
+	}
+	switch action {
+	case "DOWNLOAD",
+		"STOP", "SHUTOFF", "SHUTDOWN",
+		"DETACH", "DETACH_PUBLIC_NETWORK", "DISABLE_PROTECTION",
+		"DELETE_SNAPSHOT", "DELETE_BACKUP", "DELETE_OBJECT",
+		"DISABLE_WEBSITE", "MAKE_BUCKET_PRIVATE", "REVOKE_KEY":
+		return true
+	}
+	return false
+}
+
 func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	u, ok := h.principal(w, r)
 	if !ok {
@@ -311,9 +369,39 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if err := refuseNewUsage(proj); err != nil {
+		h.fail(w, err)
+		return
+	}
 	svcID := h.resolveServiceID(r, proj)
 	if svcID == "" {
 		h.fail(w, httpx.BadRequest("Project has no cloud service"))
+		return
+	}
+	// A SANDBOX create that names no service goes to the project's sandbox service (the default
+	// resolution prefers Proxmox, which cannot create sandboxes). Peeks the type only; the body is
+	// restored for the legs below.
+	if r.Header.Get("x-service-id") == "" && r.URL.Query().Get("serviceId") == "" {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err == nil {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var peek struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(body, &peek) == nil && peek.Type == cloud.TypeSandbox {
+				if id := h.sandboxServiceOf(r.Context(), proj); id != "" {
+					svcID = id
+				}
+			}
+		}
+	}
+	// sandbox: SANDBOX creates go through the sandbox service (a Sandbox CR on the sandbox cluster).
+	if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsSandbox() {
+		var req providers.CreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			h.fail(w, httpx.BadRequest("invalid request body"))
+			return
+		}
+		h.sandboxCreate(w, r, u, proj, es, req)
 		return
 	}
 	// kamaji managed-k8s: KUBERNETES_CLUSTER creates go through the kamaji service
@@ -348,6 +436,16 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 		h.shareCreate(w, r, u, proj, es, req)
 		return
 	}
+	// powerdns: DNS zones.
+	if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsPowerDNS() {
+		var req providers.CreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			h.fail(w, httpx.BadRequest("invalid request body"))
+			return
+		}
+		h.zoneCreate(w, r, u, proj, es, req)
+		return
+	}
 	// proxmox: SERVER/KEYPAIR/… creates go through the pve service (clone-from-template on
 	// the PVE cluster), not the bucket WriteService.
 	if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsProxmox() {
@@ -370,6 +468,12 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Data == nil {
 		req.Data = map[string]any{}
+	}
+	if req.Type == cloud.TypeBucket {
+		if herr := bucketNameErr(strAny(req.Data["bucketName"])); herr != nil {
+			h.fail(w, herr)
+			return
+		}
 	}
 	uid := u.ID
 	if uid == "" {
@@ -455,6 +559,32 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// sandbox: delete the CR (its pod goes with it), end the row; billing stops at the delete.
+		if cr.Type == cloud.TypeSandbox {
+			if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsSandbox() {
+				if err := h.sandboxKill(r.Context(), u, es, proj, cr); err != nil {
+					h.sandboxFail(w, err)
+					return
+				}
+				h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_DELETE", "", cr)
+				httpx.Accepted(w)
+				return
+			}
+		}
+		// powerdns: the zone, then the row.
+		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsPowerDNS() {
+			if err := h.zoneDelete(r.Context(), es, proj, cr); err != nil {
+				h.fail(w, err)
+				return
+			}
+			if err := h.cloud.DeleteAndArchive(r.Context(), cr, time.Now().UTC()); err != nil {
+				h.fail(w, err)
+				return
+			}
+			h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_DELETE", "", cr)
+			httpx.Accepted(w)
+			return
+		}
 		// truenas: the share, its SMB user and the dataset, then the row.
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsTrueNAS() {
 			if err := h.shareDelete(r.Context(), es, proj, cr); err != nil {
@@ -472,13 +602,21 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 		// proxmox: destroy via the pve service, then archive the cache row here.
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsProxmox() {
 			if cr.Type == cloud.TypeNetwork {
-				if !h.pveDeleteNetwork(r.Context(), w, es, proj, cr) {
-					return
+				// pveDeleteNetwork archives the row itself, inside the share-access lock.
+				if h.pveDeleteNetwork(r.Context(), w, es, proj, cr) {
+					h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_DELETE", "", cr)
+					httpx.Accepted(w)
 				}
-			} else if err := h.pveDeleteResource(r.Context(), es, proj, cr); err != nil {
+				return
+			}
+			if herr := h.pveApplianceGuard(r.Context(), es, proj, cr); herr != nil {
+				h.fail(w, herr)
+				return
+			}
+			if err := h.pveDeleteResource(r.Context(), es, proj, cr, r.URL.Query().Get("deleteVolumes") == "true"); err != nil {
 				var he *httpx.HTTPError
 				if !errors.As(err, &he) {
-					he = httpx.NewError(http.StatusBadGateway, http.StatusBadGateway, err.Error())
+					he = pveVolumeErr(err)
 				}
 				h.fail(w, he)
 				return
@@ -563,6 +701,10 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if proj.Deleting() {
+		h.fail(w, errProjectDeleting)
+		return
+	}
 	svcID := h.resolveServiceID(r, proj)
 	if svcID == "" {
 		h.fail(w, httpx.BadRequest("Project has no cloud service"))
@@ -593,20 +735,40 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, httpx.BadRequest("invalid request body"))
 		return
 	}
+	if proj.IsDisabled() && !allowedWhileDisabled(req.Action, req.Data) {
+		h.fail(w, errProjectDisabled(proj))
+		return
+	}
 
 	// ceph-s3 bucket configuration + per-key grants (GET_SETTINGS, SET_VERSIONING, SET_QUOTA, …).
 	// Handled first: they act on THIS bucket and already run against cr.ServiceID.
-	if h.bucketSettingsAction(w, r, proj, svcID, externalID, req.Action, req.Data) {
+	audited := func(handle func(http.ResponseWriter) bool) bool {
+		return runAudited(w, r.ProtoMajor, req.Action, handle, func() {
+			h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_ACTION", req.Action, cr)
+		})
+	}
+	if audited(func(w http.ResponseWriter) bool {
+		return h.bucketSettingsAction(w, r, proj, svcID, externalID, req.Action, req.Data)
+	}) {
 		return
 	}
 
 	if cr.Type == cloud.TypeShare {
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsTrueNAS() {
-			if h.shareAction(w, r, proj, es, cr, req.Action, req.Data) {
+			if audited(func(w http.ResponseWriter) bool { return h.shareAction(w, r, proj, es, cr, req.Action, req.Data) }) {
 				return
 			}
 		}
 		h.fail(w, httpx.BadRequest("Unknown share action"))
+		return
+	}
+	if cr.Type == cloud.TypeDNSZone {
+		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsPowerDNS() {
+			if h.zoneAction(w, r, u, proj, es, cr, req.Action, req.Data) {
+				return
+			}
+		}
+		h.fail(w, httpx.BadRequest("Unknown zone action"))
 		return
 	}
 
@@ -614,7 +776,7 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	// act-on-THIS-resource rule, against the resource's own (kamaji) service.
 	if cr.Type == cloud.TypeKubernetesCluster {
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil {
-			if h.kamajiAction(w, r, proj, es, cr, req.Action, req.Data) {
+			if audited(func(w http.ResponseWriter) bool { return h.kamajiAction(w, r, proj, es, cr, req.Action, req.Data) }) {
 				return
 			}
 		}
@@ -623,10 +785,21 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 	// dbaas managed database actions (GET_CONNECTION_INFO, RESIZE, SCALE_REPLICAS, …).
 	if cr.Type == cloud.TypeDatabaseCluster {
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil {
-			if h.dbaasAction(w, r, proj, es, cr, req.Action, req.Data) {
+			if audited(func(w http.ResponseWriter) bool { return h.dbaasAction(w, r, proj, es, cr, req.Action, req.Data) }) {
 				return
 			}
 		}
+	}
+
+	// sandbox actions (EXEC, GET_LOGS, SET_TIMEOUT, REFRESH), against the sandbox's own service.
+	if cr.Type == cloud.TypeSandbox {
+		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil {
+			if audited(func(w http.ResponseWriter) bool { return h.sandboxAction(w, r, proj, es, cr, req.Action, req.Data) }) {
+				return
+			}
+		}
+		h.fail(w, httpx.BadRequest("Unknown sandbox action"))
+		return
 	}
 
 	// proxmox: power/resize/rename/console — dispatched off the resource's own service.
@@ -971,7 +1144,43 @@ func (h *Handler) cloudConsoleProxy(w http.ResponseWriter, r *http.Request) {
 			httpx.Err(w, http.StatusBadGateway, http.StatusBadGateway, "console backend unavailable")
 		},
 	}
+	if user := tok.Metadata[consoleTermUser]; user != "" {
+		// A serial session opens with "<user>:<ticket>\n". The proxy sends it before relaying anything of the
+		// browser's, so the platform's PVE user never reaches the tenant.
+		open := wsClientFrame([]byte(user + ":" + backend.Query().Get("vncticket") + "\n"))
+		proxy.ModifyResponse = func(res *http.Response) error {
+			if res.StatusCode != http.StatusSwitchingProtocols {
+				return nil
+			}
+			conn, ok := res.Body.(io.Writer)
+			if !ok {
+				return errors.New("console: backend connection is not writable")
+			}
+			_, err := conn.Write(open)
+			return err
+		}
+	}
 	proxy.ServeHTTP(w, r)
+}
+
+// wsClientFrame is payload as one masked binary WebSocket frame, the way a browser sends it (RFC 6455 §5.2).
+func wsClientFrame(payload []byte) []byte {
+	b := []byte{0x82}
+	switch n := len(payload); {
+	case n < 126:
+		b = append(b, 0x80|byte(n))
+	case n < 1<<16:
+		b = append(b, 0x80|126, byte(n>>8), byte(n))
+	default:
+		b = binary.BigEndian.AppendUint64(append(b, 0x80|127), uint64(n))
+	}
+	var key [4]byte
+	_, _ = rand.Read(key[:])
+	b = append(b, key[:]...)
+	for i, c := range payload {
+		b = append(b, c^key[i%4])
+	}
+	return b
 }
 
 // cloudUploadBucketFile streams the raw request body into a bucket object (?objectName=).
@@ -982,6 +1191,10 @@ func (h *Handler) cloudUploadBucketFile(w http.ResponseWriter, r *http.Request) 
 	}
 	proj, ok := h.project(w, r, u, rbac.ProjectCloudResourceManage)
 	if !ok {
+		return
+	}
+	if err := refuseNewUsage(proj); err != nil {
+		h.fail(w, err)
 		return
 	}
 	cr, _ := h.cloud.FindByID(r.Context(), chi.URLParam(r, "resourceId"))

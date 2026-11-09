@@ -1,14 +1,15 @@
 {{/*
 Chart-owned LoadBalancer Service <id>-lb: the ONE endpoint a customer database
-exposes, a LoadBalancer Service whose ingress IP comes from the DB cluster's
-load-balancer implementation.
+exposes. MetalLB assigns its address from the provider's pool
+(network.addressPool -> metallb.universe.tf/address-pool), a services subnet
+tenants reach over their normal egress. Nothing is placed on a tenant network.
 
-allowedCidrs -> spec.loadBalancerSourceRanges = the LB source filter. That is where
-client filtering is ENFORCED; the NetworkPolicy deliberately does not mirror it
-(see templates/networkpolicy.yaml).
+allowedCidrs -> spec.loadBalancerSourceRanges = the client source filter. That
+is where client filtering is ENFORCED; the NetworkPolicy deliberately does not
+mirror it (see templates/networkpolicy.yaml).
 
 This Service is also the READY signal: ArgoCD's built-in Service health keeps
-the Application Progressing until the LB ingress IP exists, so READY implies a
+the Application Progressing until the LB address exists, so READY implies a
 reachable endpoint (and proxcloud reads status.loadBalancer.ingress[0].ip back
 for connection info).
 
@@ -18,7 +19,7 @@ terminate.
 
 KAFKA IS SKIPPED: Strimzi creates the external listener's LB Services itself
 (the <id>-kafka-external-bootstrap Service + one per broker — the guarded
-block below would be a THIRD, selector-less LB). ProxCloud reads the IP from
+block below would be a THIRD, selector-less LB). ProxCloud reads the address from
 the Strimzi bootstrap Service instead — see LBServiceNameFor in
 internal/cloud/dbaas/engines.go. The validate include stays OUTSIDE the guard
 so the fail-fast contract still covers kafka values documents.
@@ -35,7 +36,7 @@ metadata:
     {{- include "database-cluster.labels" . | nindent 4 }}
   annotations:
     {{- include "database-cluster.annotations" . | nindent 4 }}
-    {{/* TODO(P7): MetalLB address-pool annotation (metallb.universe.tf/address-pool) for the dbaas services subnet */}}
+    {{- include "database-cluster.lbAnnotations" . | nindent 4 }}
     {{- with .Values.network.extraAnnotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
@@ -50,6 +51,16 @@ spec:
       port: {{ $port }}
       targetPort: {{ $port }}
       protocol: TCP
+    {{- if .Values.network.readEndpoint }}
+    {{- with include "database-cluster.readPort" . }}
+    {{/* Reads on the same proxy, so the read endpoint is host:3307 — one LB,
+         two ports. Only rendered when the customer asked for it. */}}
+    - name: {{ $.Values.engine }}-ro
+      port: {{ . }}
+      targetPort: {{ . }}
+      protocol: TCP
+    {{- end }}
+    {{- end }}
   selector:
     {{- include "database-cluster.serviceSelector" . | nindent 4 }}
 {{- end }}

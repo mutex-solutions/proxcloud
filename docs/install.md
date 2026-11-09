@@ -10,7 +10,7 @@ make preflight INVENTORY=inventory/mysite
 make install INVENTORY=inventory/mysite
 ```
 
-Every stage is idempotent: it reads, then writes only the difference, so re-running `make install` changes nothing on a healthy install.
+Every stage is idempotent: it reads, then writes only the difference, so re-running `make install` changes nothing on a healthy install. A re-run keeps what an operator set on the Proxmox provider in the admin console: its storage profiles, default profile and confirmed classes. A value set in the site's group_vars wins over those; network, API URL and templates always follow the site.
 
 **Back up `inventory/mysite/generated/`.** It holds the encryption key, database passwords and Proxmox token secrets. The encryption key cannot be recovered, and without it the stored provider secrets are lost. The directory is gitignored.
 
@@ -37,6 +37,10 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 | 35 | `35-local-images.yml` | `images.build`: builds images and chart from this checkout, into a registry on the management cluster. A tag already there is not rebuilt. |
 | 40 | `40-mgmt-platform.yml` | ArgoCD, then Applications with inline values: cert-manager, CloudNativePG, ProxCloud (API, consoles, Keycloak, PostgreSQL, RabbitMQ). The scheduler is on. |
 | 45 | `45-object-store.yml` | The object store, see below. |
+| 50 | `50-services-cluster.yml` | `mode: split`: Cluster API and CAPMOX on the mgmt cluster, then the services cluster and its platform. See "Split mode" below. |
+| 55 | `55-sandbox-cluster.yml` | `mode: split` with `sandbox.enabled`: the sandbox cluster's vnet, the cluster from the kamaji chart, then `deploy/sandbox-cluster` on it. See "Sandbox cluster" below. |
+| 55 | `55-sandbox-registry.yml` | `sandbox.registry.address` set: the sandbox registry (Zot on the services cluster, its bucket on the object store), the images of `deploy/templates/images.yaml` copied in and pre-pulled on every sandbox node. Also run by `make upgrade`. See "Sandbox registry" below. |
+| 56 | `56-sandbox-edge.yml` | `sandbox.enabled`: the public entry of sandbox ports: `sandbox-proxy` and its MetalLB address, the wildcard certificate on the services cluster and its copy, the DNS record and TSIG key on PowerDNS, the HAProxy entry appliance. Also run by `make upgrade`. See "Sandbox ports" below. |
 | 60 | `60-register.yml` | Logins, an Admin-API key, the Proxmox provider, fio suggestions; on the first run `deploy/seed/seed-operator.py` (platform and billing configuration, flavors, public price plan, quota). Prints the URLs. |
 
 The RabbitMQ Cluster Operator is applied directly from its release manifest, because upstream ships no chart. k3s's bundled Traefik and ServiceLB serve the portal on the management host's ports 80 and 443. MetalLB and the services cluster arrive with split mode.
@@ -92,7 +96,7 @@ This is only a suggestion. It lands as `suggestedClass` on the provider, and the
 |---|---|
 | `vm` | A RustFS VM in `proxcloud-system`, cloned from the Debian template, with an XFS data disk on `nas-capacity` when present (qcow2, so the VM can be snapshotted), else on the default profile's storage. |
 | `truenas-app` | The TrueNAS community catalog app on the NAS pool, driven through the TrueNAS REST API (`vault.truenas_api_key`). |
-| `external`, `ceph-rgw` | Nothing is deployed. `ceph-rgw` registers `object_store.{endpoint,access_key,secret_key}` as the `ceph-s3` provider. |
+| `external`, `ceph-rgw` | Nothing is deployed. `ceph-rgw` registers `object_store.{endpoint,access_key,secret_key,region}` as the `ceph-s3` provider. Its key belongs to an RGW admin user with caps `users=*;buckets=*;usage=*`. Preflight refuses blank values and stage 60 tests the endpoint and key through the API before storing anything. A re-run writes the corrected endpoint or rotated key to the provider. `region` is what tenants see and send, so use the zonegroup's `api_name` or keep `us-east-1`; it is read only when the provider is created. |
 
 For `vm` and `truenas-app`, the public endpoint is `s3.<domain>` through the management ingress with `/rustfs/admin`, `/minio/admin` and the console blocked. The root credentials are generated, FTP, SFTP and WebDAV are off, and the internal buckets `cnpg-backups` and `etcd-snapshots` get versioning, Object Lock GOVERNANCE and a user limited to the bucket.
 
@@ -102,7 +106,8 @@ Not automated yet: the off-site copy, OTLP metrics, and pointing CloudNativePG a
 
 | Command | What it does |
 |---|---|
-| `make upgrade` | After bumping `versions.yml`: k3s, images, chart, operators. |
+| `make upgrade` | After bumping `versions.yml`: stages 00, 10 (Proxmox identity), 30 (k3s), 35 (images), 40 (chart, operators), 55 (registry: copies the newly pinned sandbox images in), 56 (sandbox edge) and 60. It does not run stage 50 or stage 55 (cluster): run those playbooks yourself when a pin they use changed (CAPI, CAPMOX, kamaji, the sandbox runtime image). |
+| `make identity-check` | What stage 10 would grant, align and take away, writing nothing. Run it before an upgrade that changes grants. |
 | `make templates` | Build new template versions now. Keeps two per OS and node. |
 | `make storage-rebench` | Re-run fio. Never changes the class of a live volume. |
 | `make add-node NODE=pve4` | Checks the node (version, empty, chrony, latency), drops the QDevice when the member count turns odd, joins, FRR, SDN apply, its template copies, fio, re-detect. Safe to re-run on a member. |
@@ -113,8 +118,163 @@ Not automated yet: the off-site copy, OTLP metrics, and pointing CloudNativePG a
 
 `add-node` needs SSH from the node to an existing member (`pvecm add --use_ssh`). On a 2-node cluster it does not set up the QDevice for you: it needs a machine outside the cluster.
 
+## Per-organization SSO: restrict Keycloak's egress
+
+If you enable per-organization SSO, Keycloak calls URLs tenants choose, and a DNS name checked when it was saved can
+point at an internal address later. No check in the API can close that. Allow Keycloak egress to DNS, its database and
+the public internet on 443 only, and deny the pod, service, node and management networks, the Proxmox, TrueNAS and
+database addresses, and `169.254.0.0/16`. A `NetworkPolicy` with `ipBlock` `0.0.0.0/0` and an `except` list does it on
+a CNI that enforces policies. The installer does not apply one, since the ranges are specific to the site.
+
 ## Credentials
 
 - **Installer's admin key:** `proxcloud-api admin-key create -description installer`, run in the API pod by stage 60, mints an Admin-API SigV4 key directly in PostgreSQL. It needs database access and no login, which is what makes it usable before the first operator exists. Delete it from the admin console (API keys) if you do not want to keep it, and remove `generated/admin-api-key.json`.
 - **Operator login:** user `keycloak.operator.username` in realm `proxcloud-admin`, password in `generated/operator-password`. That realm has no self-registration, because every login in it is an administrator.
 - **Customers:** realm `proxcloud`, with self-registration on.
+
+## Split mode: managed Kubernetes and databases
+
+`proxcloud.mode: split` adds stage 50: Cluster API and CAPMOX on the mgmt cluster build a kubeadm **services cluster** of PVE VMs, which then runs Kamaji, its own Cluster API, ArgoCD, MetalLB, proxmox-csi and the database operators. Stage 60 registers the Kubernetes and database providers. Tenant clusters get persistent volumes from `services.kamaji.rwx_gib` (a NAS dataset per cluster) and from proxmox-csi through the CSI gateway, which stage 40 turns on in split mode: see [managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox). Stage 60 only registers these two providers when they do not exist yet, so `services.kamaji.*` and the chart version count at the first registration, and a re-run changes nothing on them. To change one later, see "Changing a setting later" in [managed-k8s.md](managed-k8s.md#2-provider-setup-admin--cloud-providers--add-provider--kubernetes). `services.iso_storage` (default `local`) receives each new node's kubeadm join token until the node joins: preflight refuses a shared store there, and on an install from before this rule `make upgrade` re-runs stage 10, which narrows the services token to that store and then checks with PVE that it is the only ISO store the token sees (`make identity-check` shows the changes first), see "Bootstrap ISOs" in [managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox).
+
+1. Build the node templates (`images/k8s-node-template.sh`, see [images/README.md](../images/README.md)).
+2. Set `proxcloud.services` in the site's group_vars ([defaults.yml](../installer/playbooks/group_vars/all/defaults.yml) documents it): the network, `templates`, `control_plane`, one `workers` entry per PVE node a zone should exist on, and `kamaji.version_images`. A database with replicas needs a worker per replica, on different nodes. `object_store.mode` must be `vm` or `truenas-app`, because database backups go to the installer's own bucket. Preflight checks all of this.
+3. `make install`.
+
+The services subnet must be reachable from tenant networks (it holds the API endpoints and database addresses) and must reach the PVE API. Stage 10 grants what per-cluster tokens need, see [proxmox-permissions.md](proxmox-permissions.md#managed-kubernetes): read that first, since it gives the portal token `Permissions.Modify`.
+
+**What ran where:** `50-services-cluster.yml`'s template and `files/services-platform.sh` ran on a lab through hand-written drivers, against a site already installed in `allinone`. Preflight in split mode and stage 60's registration ran on that lab against that cluster, and a project attached to both providers. The playbook itself and stage 10's split grants have not run end to end on a clean site.
+
+Stage 50 cannot change the machines of a running cluster: a `ProxmoxMachineTemplate` is immutable, so a changed size, template or pool in `proxcloud.services` fails the apply. Moving an `allinone` site with a hand-built services cluster onto this stage means rebuilding that cluster.
+
+## Sandbox cluster (split mode)
+
+`proxcloud.sandbox.enabled: true` with `mode: split` builds the platform's sandbox cluster, where tenant code runs
+under gVisor ([managed-sandbox.md](managed-sandbox.md)). Tenants reach it through the sandbox provider stage 60
+registers, once the operator sets it live (step 2).
+
+1. Set `proxcloud.sandbox.network` ([defaults.yml](../installer/playbooks/group_vars/all/defaults.yml)): a subnet outside
+   `network.cidr_pool`, its gateway, the worker range (`nodes`), the cluster's LoadBalancer range (`metallb`) and DNS
+   servers that are not on the management network. Stage 55 refuses a subnet overlapping the tenant pool, the
+   services network, `network.blocked_cidrs` or `network.public`, an address outside the subnet, a VNI
+   (`sandbox.network.tag`) another vnet holds, and a services network outside the private, CGNAT and link-local ranges
+   the sandbox guardrail denies (a sandbox pod would reach the tenants' control planes there). The portal refuses a
+   subnet overlapping a node's management network. With `network.isolation: evpn` set `sandbox.network.zone` to an
+   EVPN zone made for the sandbox: there is no shared zone, and a tenant's zone would put the workers in its VRF.
+   Set `sandbox.network.snat` to the sandbox's own egress address: an IPv4 address on the exit node's uplink network
+   that the uplink routes to that node and nothing else uses, so abuse reports and blocklists name it and not the
+   nodes or the portal. The zone needs one exit node (or `exitnodes-primary`), and that node must be in the inventory
+   group `pve` with root ssh. `snat: node` shares the exit node's own address instead.
+2. `make install`, or stages 10, 55 and 60 on an installed site. Stage 10 creates pool `proxcloud-sandbox` and token
+   `capmox@pve!sandbox` ([proxmox-permissions.md](proxmox-permissions.md#managed-kubernetes)). Stage 55 creates the vnet
+   (`sandbox.network.vnet`, in the EVPN zone `sandbox.network.zone`, default the provider's default zone), applies an
+   ArgoCD Application of the kamaji chart this checkout pushed (NodeRestriction on, checked), waits for the workers,
+   keeps `generated/sandbox.kubeconfig`, and applies `deploy/sandbox-cluster` in its README's order, stopping if the
+   cluster has IPv6. It also puts `sandbox.network.snat` on the exit node (`/etc/network/interfaces.d/proxcloud-sandbox-snat`),
+   turns PVE's own SNAT off for the subnet, and keeps `generated/sandbox-firewall.kubeconfig` (nodes only). Stage 10
+   also gives the portal token the `ProxCloudSandboxGuard` role on the sandbox pool and checks it. Stage 60 writes the
+   subnet to the Proxmox provider's `network.sandboxCidrs` and the workers to `config.sandbox` with that kubeconfig;
+   the next sync adds the isolation drops and the workers' VM firewall, and takes the `proxcloud.io/unsecured` taint
+   off each worker once it is fenced and 20 minutes old (`sandbox.unsecured_min_age_minutes`). Stage 55 also keeps
+   the portal service account's `generated/sandbox-portal.kubeconfig`, and stage 60 registers the sandbox provider
+   `<provider name> Sandboxes` with it, stored `DISABLED` (templates and limits from `sandbox.templates` and
+   `sandbox.limits`; a site's `templates` replace the default `python` one). Once the taint is off, open it under Cloud
+   providers, run "Check release gates" and set the status to `PUBLIC`. A re-run leaves an existing sandbox provider
+   alone, also one renamed in the console.
+3. The portal creates the default EVPN zone with the first tenant network. On a first install stage 55 therefore says
+   SKIPPED; create a network, then run stage 55 again (and stage 60 if the provider was registered before
+   `sandbox.enabled`). Until stage 60 and one sync have run, the workers have no isolation drops and no VM firewall,
+   and they keep the taint, so nothing but platform DaemonSets runs on them (CoreDNS and the agent-sandbox
+   controller wait too).
+
+**What ran where:** stage 55 has not run on a lab (it would add an Application to the lab's shared services cluster).
+Its template was rendered and the chart output read; the manifests and the IPv6 check ran against the hand-built SB0
+cluster; the isolation drops ran through a portal on the lab ([managed-sandbox.md](managed-sandbox.md)). The VM
+firewall pass ran on the lab with the portal token against the SB0 cluster, the guard role was granted by hand with
+stage 10's rows, and the exit node's SNAT file was written by hand with the content stage 55 renders
+([managed-sandbox.md §2.5](managed-sandbox.md#25-measured-on-the-lab-2026-11-07)). Stages 10, 55 and 60 themselves
+have only been syntax-checked.
+
+## Sandbox registry (stage 55)
+
+The sandbox nodes pull templates and `sandbox-proxy` from the platform's own registry (the envd runtime image still from `images.registry`), each project with an account
+that reads its own images and the built-in ones only ([managed-sandbox.md §6](managed-sandbox.md#6-the-sandbox-registry-sb6a)).
+
+1. `sandbox.registry.address`: one address of `services.network.metallb`, unused. The stage refuses an address
+   outside that range.
+2. The bucket `sandbox.registry.bucket` (default `pc-sandbox-registry`) goes on the object store of stage 45:
+   - **Standard** (`object_store.mode: vm` or `truenas-app`): RustFS. The stage creates the bucket and a user
+     `<bucket>-svc` limited to it with the RustFS root key (`generated/rustfs-*`).
+   - **Full** (`object_store.mode: ceph-rgw`): RGW. `object_store.access_key`/`secret_key` must be an RGW user with
+     `users=*` caps (the same key the ceph-s3 provider uses); the stage creates the user `<bucket>-svc` through the
+     admin ops API, and that user creates and owns the bucket. `object_store.region` is the zonegroup's `api_name`.
+   - `external`: the store's own key creates and keeps the bucket.
+   The bucket has no Object Lock (Zot's garbage collection deletes unreferenced blobs); its secret is
+   `generated/sandbox-registry-s3-secret`. A second bucket, `sandbox.registry.builds_bucket` (default
+   `pc-sandbox-builds`), gets the same treatment for custom template builds (secret
+   `generated/sandbox-builds-s3-secret`). Build pods fetch from it, so the store's endpoint must be an IPv4 address with
+   its port; the stage refuses a name.
+3. `make install`, or stages 55 (both), 56 and 60 on an installed site. Stage 55 (registry) runs Zot in
+   `sandbox.registry.namespace` with a CA of its own, writes `generated/sandbox-registry-{admin,gc,pull-nodes,key}`
+   (the accounts and the key project passwords derive from), copies each pinned image and the release's
+   `proxcloud-sandbox-proxy` in (skopeo on the first mgmt host; `images.pull_secret` if ghcr needs a login) and
+   applies `deploy/sandbox-cluster/registry.yaml`, the prepull and the build namespace `sbx-build`
+   (`templates/sandbox-builds.yml.j2`: its egress policy, the registry CA, the portal's and the sync's rights there)
+   on the sandbox cluster. Stage 56 runs sandbox-proxy from the copy. Stage 60 gives the Proxmox provider
+   `config.sandbox.registry` and `config.sandbox.buildStorage` (the workers' firewall then admits those two addresses
+   and ports) and, when it first registers the sandbox provider, the templates with `pin:<name>` resolved to the copies,
+   `templateRegistry`, `imageAdoption` (`sandbox.registry.adoption`), the build bucket, the registry CA,
+   `registryPrune` (`sandbox.registry.prune`, default `on`) and the `gc` account
+   ([managed-sandbox.md §7](managed-sandbox.md#7-custom-templates-sb6b)).
+4. Check: after the next sync, `kubectl -n sandbox-system get pods -l app=template-prepull` on the sandbox cluster
+   shows one Running pod per node; a re-run of stage 55 reports the count.
+5. New template images: merge the `sandbox-templates` workflow's pull request, then `make upgrade`. The portal moves
+   the templates to the new digests once every node pre-pulled them (`imageAdoption: on`).
+
+The sync runs from the release's sandbox-proxy image: it needs a release newer than v0.3.28 (the first with
+`sandbox-proxy registry-users`), or `sandbox.proxy.image` set to one. An older image stops with "unknown subcommand".
+The same holds for the images themselves: `proxcloud-sandbox-proxy` and `proxcloud-sandbox-runtime` are first published
+with the release after v0.3.28, and stage 35 does not build them. Until that release is pinned in `versions.yml`, set
+`sandbox.proxy.image` and `sandbox.runtime_image` to images you built and pushed; the defaults
+(`<images.registry>/…:<release>`) do not exist.
+
+An existing sandbox provider keeps its templates: set `Template registry` (`<address>/t`), `Built-in image updates`
+and the templates' images (the `library/` copies) in the console, and for custom templates "Custom template builds"
+(endpoint, bucket and keys from `generated/`), "Prune unused template images", the gc account
+(`generated/sandbox-registry-gc`) and the registry CA. Upgrading from SB6a replaces the `push` account with per-project
+build accounts; nothing used `push` before SB6b.
+
+**What ran where:** stage 55 (registry) ran on the lab against the SB0 cluster from a scratch site, with RustFS and
+then RGW as the backend; stage 60's new keys and the release proxy copy did not run there
+([managed-sandbox.md §6.6](managed-sandbox.md#66-measured-on-the-lab-2026-11-07)). SB6b's additions to stages 55 and
+60 have not run on the lab: running stage 55 there was refused by the session's permission check
+([§7.6](managed-sandbox.md#76-measured-on-the-lab-2026-11-08)).
+
+## Sandbox ports (stage 56)
+
+Sandbox ports answer at `https://<port>-<sandboxId>.<sandbox.domain>` ([managed-sandbox.md §4](managed-sandbox.md#4-public-entry-tls-and-wake-sb4)).
+
+1. Give the sandbox a domain of its own (`sandbox.domain`, e.g. `example-sandbox.net`): a registrable domain apart
+   from the portal's, on the Public Suffix List if you can, since every tenant's sandbox shares its cookie site
+   (managed-sandbox.md §4.3). A zone on PowerDNS, delegated from its parent, with `dnsupdate=yes` and
+   `allow-dnsupdate-from=` (empty) in `pdns.conf`, `sandbox.powerdns.api_url` and `.nameserver` set and
+   `pdns_api_key` in the vault. Without PowerDNS set `sandbox.tls.issuer: secret` (your `kubernetes.io/tls` Secret
+   for `*.<domain>` in `pc-sandbox` on the services cluster, `sandbox.tls.secret`) and write `*.<domain>` yourself.
+2. `sandbox.proxy.address`: one address of `sandbox.network.metallb`. `sandbox.entry`: the appliance's address on the
+   sandbox vnet (outside the gateway, the workers and the MetalLB range) and its public bridge, address (CIDR) and
+   gateway. No `entry.public.bridge`: no appliance; forward TCP 443 to `sandbox.proxy.address` yourself.
+3. Stages 10, 55, 56 and 60 (or `make install`). Stage 10 creates pool `proxcloud-sandbox-entry` with the
+   `ProxCloudSandboxEntry` role for the portal. Stage 55 adds the node group `sandbox-system`
+   (`sandbox.system_nodes`, its addresses from `sandbox.network.nodes`): sandbox-proxy runs there alone. Stage 56
+   writes the record and, for `acme`, the TSIG key (`generated/sandbox-tsig.json`), builds the appliance (VM
+   `sandbox.entry.vmid`), applies the issuer, the certificate and cert-sync on the services cluster and `sandbox-proxy`
+   on the sandbox cluster. It generates `generated/sandbox-wake-token`: put it into the sandbox provider's
+   `secret.proxyWakeToken` (the proxy calls the wake endpoint at `sandbox.proxy.wake_url` to resume paused sandboxes). Stage 60 gives the Proxmox provider
+   `config.sandbox.proxy`; the next sync fences the system nodes, opens the workers to the appliance and installs
+   HAProxy's config on it. Run stage 56 again after that sync: it then waits until the proxy serves.
+4. Check: `curl https://8000-<id>.<domain>/` with a sandbox serving on 8000 (`GET_ACCESS` gives its host and token).
+
+**What ran where:** stage 56 ran on the lab against the SB0 cluster (a split-mode copy of the lab site, the SB0
+cluster's kubeconfig in place of stage 55's, the services objects in a scratch namespace), with `selfsigned` and then
+`acme` against an ACME test server (DNS-01 through the lab PowerDNS); stage 60's and stage 10's new rows did not run
+there ([managed-sandbox.md §4.6](managed-sandbox.md#46-measured-on-the-lab-2026-11-08)).
+

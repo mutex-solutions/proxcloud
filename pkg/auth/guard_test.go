@@ -16,8 +16,8 @@ func TestGuardRefusesProtectedAndAnonymizesPublic(t *testing.T) {
 	const pat = "pk0123456789abcdef0123456789abcdef.sk0123456789abcdef0123456789abcdef01234567"
 	a := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	a.SetRealms([]Realm{{Name: "main", IssuerURI: "https://id.test/realms/customers"}})
-	a.SetClientKeyLookup(func(*http.Request, string) (string, string, bool) {
-		return "sk0123456789abcdef0123456789abcdef01234567", "u1", true
+	a.SetClientKeyLookup(func(*http.Request, string) (ClientKey, bool) {
+		return ClientKey{SecretHash: HashClientKeySecret("sk0123456789abcdef0123456789abcdef01234567"), Sub: "u1"}, true
 	})
 	var seen *httpx.RequestContext
 	h := a.Enforce(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen = httpx.RC(r.Context()) }))

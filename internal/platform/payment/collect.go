@@ -2,6 +2,7 @@ package payment
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -76,8 +77,8 @@ func (s *CollectService) CollectByCard(ctx context.Context, profile *billing.Bil
 	if req.CardID == "" {
 		return nil, httpx.BadRequest("Card id is required.")
 	}
-	if req.Amount == nil {
-		return nil, httpx.BadRequest("Amount is required.")
+	if req.Amount == nil || !req.Amount.IsPositive() {
+		return nil, httpx.BadRequest("Amount is required and must be positive.")
 	}
 	// Bind the card to the CALLER's billing profile: a card id owned by another
 	// profile must not be chargeable by this caller (deposit-by-card IDOR).
@@ -153,15 +154,20 @@ func (s *CollectService) CollectBill(ctx context.Context, profile *billing.Billi
 	ctx = context.WithValue(ctx, ctxKeyManual{}, true)
 	// An earlier charge still in flight: ask the gateway about it right now instead of charging
 	// again — a settled one answers the customer, a still-pending one is a 409.
-	if pending, err := s.billing.PendingCollectForBill(ctx, billID, now.Add(-24*time.Hour)); err != nil {
+	if pending, err := s.billing.PendingCollectForBill(ctx, billID); err != nil {
 		return nil, err
 	} else if len(pending) > 0 {
 		if pending[0].ExternalID != "" {
-			if done, err := s.processCollect(ctx, &pending[0]); err == nil && done.Status != pricing.CollectTransactionStatusPending {
+			done, err := s.processCollect(ctx, &pending[0])
+			if err == nil && done.Status == pricing.CollectTransactionStatusCancelled {
+				// It took no money and leaves nothing to answer with, and the customer came to pay.
+				return s.collectBill(ctx, profile, bill, card, now)
+			}
+			if err == nil && done.Status != pricing.CollectTransactionStatusPending {
 				return done, nil
 			}
 		}
-		return nil, ErrCollectInFlight
+		return nil, chargeBusy(pending, now)
 	}
 	return s.collectBill(ctx, profile, bill, card, now)
 }
@@ -221,23 +227,30 @@ func (s *CollectService) CollectBillingProfile(ctx context.Context, profile *bil
 }
 
 // ErrCollectInFlight is returned when a charge for the bill is still being processed (a PENDING
-// collect transaction younger than the scanner window) — starting another would charge twice.
+// collect transaction) — starting another would charge twice.
 var ErrCollectInFlight = httpx.NewError(409, 409, "A payment for this bill is still being processed — please wait a few minutes.")
 
-// inFlight reports whether the bill already has a PENDING charge younger than 24h (the
-// stuck-transaction scanner's window; older ones have aged out of reconciliation).
-func (s *CollectService) inFlight(ctx context.Context, billID string, now time.Time) (bool, error) {
-	pending, err := s.billing.PendingCollectForBill(ctx, billID, now.Add(-24*time.Hour))
-	return len(pending) > 0, err
+// ErrCollectStuck is the same refusal past the scanner's window: nothing re-checks the charge by itself any more, so
+// waiting will not help, and until an operator resolves it a new charge could be a second one.
+var ErrCollectStuck = httpx.NewError(409, 409, "An earlier payment for this bill could not be confirmed with the payment gateway, so the bill cannot be charged again yet. Please contact support.")
+
+// chargeBusy is the refusal for a bill with these PENDING charges.
+func chargeBusy(pending []pricing.CollectTransaction, now time.Time) error {
+	for i := range pending {
+		if c := pending[i].CreatedAt; c != nil && now.Sub(*c) > scanMaxAge {
+			return ErrCollectStuck
+		}
+	}
+	return ErrCollectInFlight
 }
 
 // collectBill collects one SENT bill: CollectTransaction(billId, unpaidAmount) → charge → process.
-// Refused (ErrCollectInFlight) while an earlier charge for the bill is still PENDING.
+// Refused (chargeBusy) while an earlier charge for the bill is still PENDING, however old it is.
 func (s *CollectService) collectBill(ctx context.Context, profile *billing.BillingProfile, bill *pricing.Bill, card *billing.CreditCard, now time.Time) (*pricing.CollectTransaction, error) {
-	if busy, err := s.inFlight(ctx, bill.ID, now); err != nil {
+	if pending, err := s.billing.PendingCollectForBill(ctx, bill.ID); err != nil {
 		return nil, err
-	} else if busy {
-		return nil, ErrCollectInFlight
+	} else if len(pending) > 0 {
+		return nil, chargeBusy(pending, now)
 	}
 	baseCcy, _ := s.billing.BaseCurrency(ctx)
 	x := pricing.NewExchanger(nil)
@@ -273,7 +286,7 @@ func (s *CollectService) collectBill(ctx context.Context, profile *billing.Billi
 	// Insert-then-check duplicate guard (no lock needed): if another PENDING charge for the bill
 	// was created before ours, ours yields — two concurrent requests can at worst both yield,
 	// never both charge. Ids are time-ordered, so "older" is a total order.
-	if pending, err := s.billing.PendingCollectForBill(ctx, bill.ID, now.Add(-24*time.Hour)); err != nil {
+	if pending, err := s.billing.PendingCollectForBill(ctx, bill.ID); err != nil {
 		return nil, err
 	} else {
 		for i := range pending {
@@ -360,23 +373,48 @@ func (s *CollectService) failCollect(ctx context.Context, txn *pricing.CollectTr
 // outcome is shown on the page, so a decline does not also send the failure e-mail.
 type ctxKeyManual struct{}
 
-// processCollect retrieves the PaymentIntent, and on
-// SUCCESS settle it — billId → applyPaidCollectOnBill (→ bill PAID + bill_is_paid mail); else
-// (deposit) → create a spendable AccountCredit. FAILED marks it failed (+ the failure mail for a
-// bill charge).
-func (s *CollectService) processCollect(ctx context.Context, txn *pricing.CollectTransaction) (*pricing.CollectTransaction, error) {
+// retrieveCharge asks the charge's gateway about its intent.
+func (s *CollectService) retrieveCharge(ctx context.Context, txn *pricing.CollectTransaction) (PaymentIntentResult, error) {
 	gw, err := s.billing.GetGateway(ctx, txn.PaymentGatewayID)
 	if err != nil {
-		return nil, err
+		return PaymentIntentResult{}, err
 	}
 	if gw == nil {
-		return nil, httpx.NotFound("Payment gateway not found")
+		return PaymentIntentResult{}, httpx.NotFound("Payment gateway not found")
 	}
 	g, err := cardGateway(s.gatewayFor, gw)
 	if err != nil {
-		return nil, err
+		return PaymentIntentResult{}, err
 	}
-	pi, err := g.RetrievePaymentIntent(ctx, txn.ExternalID)
+	return g.RetrievePaymentIntent(ctx, txn.ExternalID)
+}
+
+// chargeDidNotSucceed reports a gateway answer that says no money moved and none will without a new confirm, which only
+// this portal could send: declined or never confirmed. Everything else that is not terminal (processing, requires_action,
+// requires_capture, Airwallex's pending) may still capture.
+func chargeDidNotSucceed(status string) bool {
+	return status == "requires_payment_method" || status == "requires_confirmation"
+}
+
+// chargeNote says what the gateway answered about a charge that stays PENDING.
+func chargeNote(pi PaymentIntentResult) string {
+	if chargeDidNotSucceed(pi.Status) {
+		note := "The gateway reports " + pi.Status + ": the charge did not succeed"
+		if m := gatewayErrorMessage(pi.ErrorMessage, pi.ErrorCode); m != "" {
+			note += " (" + m + ")"
+		}
+		return note + "."
+	}
+	return "The gateway reports " + pi.Status + ": the charge may still complete."
+}
+
+// processCollect retrieves the PaymentIntent, and on
+// SUCCESS settle it — billId → applyPaidCollectOnBill (→ bill PAID + bill_is_paid mail); else
+// (deposit) → create a spendable AccountCredit. FAILED marks it failed (+ the failure mail for a
+// bill charge). CANCELLED ends it: no money moved and none can, and the bill can be charged again. Anything
+// else stays PENDING, with the answer in txn.ErrorMessage for the caller to keep or not.
+func (s *CollectService) processCollect(ctx context.Context, txn *pricing.CollectTransaction) (*pricing.CollectTransaction, error) {
+	pi, err := s.retrieveCharge(ctx, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -387,8 +425,12 @@ func (s *CollectService) processCollect(ctx context.Context, txn *pricing.Collec
 		var paidBill *pricing.Bill
 		switch {
 		case txn.BillID != "":
-			if paidBill, err = s.applyPaidCollectOnBill(ctx, txn); err != nil {
+			var closed bool
+			if paidBill, closed, err = s.applyPaidCollectOnBill(ctx, txn); err != nil {
 				return nil, err
+			}
+			if closed {
+				return s.creditSurplus(ctx, txn)
 			}
 		case txn.OrderID != "":
 			// a collect that paid an order flips it PAID — bound to the paying profile + gross amount.
@@ -402,7 +444,7 @@ func (s *CollectService) processCollect(ctx context.Context, txn *pricing.Collec
 			if err != nil {
 				return nil, err
 			}
-			if err := s.billing.CreateAccountCredit(ctx, ac); err != nil {
+			if err := s.billing.CreateAccountCreditForTxn(ctx, txn.ID, ac); err != nil {
 				return nil, err
 			}
 			if s.notifier != nil {
@@ -432,34 +474,48 @@ func (s *CollectService) processCollect(ctx context.Context, txn *pricing.Collec
 	case "FAILED":
 		markDecline(txn)
 		return s.failCollect(ctx, txn, gatewayErrorMessage(pi.ErrorMessage, pi.ErrorCode), true)
-	default: // still pending (a CANCELLED PI is not terminal here — the collect switch has no CANCELLED case)
+	case "CANCELLED":
+		txn.Status = pricing.CollectTransactionStatusCancelled
+		txn.ErrorMessage = "The gateway reports the charge was cancelled"
+		if pi.CancellationReason != "" {
+			txn.ErrorMessage += " (" + pi.CancellationReason + ")"
+		}
+		return s.billing.SaveCollectTransaction(ctx, txn)
+	default:
+		txn.ErrorMessage = chargeNote(pi)
 		return txn, nil
 	}
 }
 
 // settleSurplus is the scanner's leg for a stuck bill charge whose bill is already PAID: when the
-// gateway reports the charge succeeded, the money becomes a spendable account credit (SUCCESS txn,
-// no bill settlement) so the customer's balance shows it. Returns whether it settled that way; a
-// gateway error or a non-succeeded status leaves the transaction untouched (false).
-func (s *CollectService) settleSurplus(ctx context.Context, txn *pricing.CollectTransaction) bool {
-	gw, err := s.billing.GetGateway(ctx, txn.PaymentGatewayID)
-	if err != nil || gw == nil {
-		return false
-	}
-	g, err := cardGateway(s.gatewayFor, gw)
+// gateway reports the charge succeeded, the money becomes a spendable account credit. Reports whether it
+// settled that way; a charge that did not succeed changes nothing, and an error means the gateway could
+// not say, or says the charge may still complete.
+func (s *CollectService) settleSurplus(ctx context.Context, txn *pricing.CollectTransaction) (bool, error) {
+	pi, err := s.retrieveCharge(ctx, txn)
 	if err != nil {
-		return false
+		return false, err
 	}
-	pi, err := g.RetrievePaymentIntent(ctx, txn.ExternalID)
-	if err != nil || mapStatus(pi.Status) != "SUCCESS" {
-		return false
+	switch st := mapStatus(pi.Status); {
+	case st == "SUCCESS":
+		_, err = s.creditSurplus(ctx, txn)
+		return err == nil, err
+	case st != "PENDING", chargeDidNotSucceed(pi.Status):
+		return false, nil
 	}
+	return false, errors.New(chargeNote(pi))
+}
+
+// creditSurplus closes a succeeded charge whose bill was settled by something else (credits, a bank
+// transfer, another charge): the money the customer paid twice must not vanish from the books, so it
+// becomes a spendable account credit (SUCCESS txn, no bill settlement) the operator can also refund.
+func (s *CollectService) creditSurplus(ctx context.Context, txn *pricing.CollectTransaction) (*pricing.CollectTransaction, error) {
 	ac, err := newAccountCredit(ctx, s.billing, txn.BillingProfileID, txn.Currency, *txn.Amount)
 	if err != nil {
-		return false
+		return nil, err
 	}
-	if err := s.billing.CreateAccountCredit(ctx, ac); err != nil {
-		return false
+	if err := s.billing.CreateAccountCreditForTxn(ctx, txn.ID, ac); err != nil {
+		return nil, err
 	}
 	txn.Status = pricing.CollectTransactionStatusSuccess
 	if txn.Metadata == nil {
@@ -467,8 +523,7 @@ func (s *CollectService) settleSurplus(ctx context.Context, txn *pricing.Collect
 	}
 	txn.Metadata["surplusAccountCreditId"] = ac.ID
 	txn.ErrorMessage = "bill was already paid; the charge was credited to the account balance"
-	_, err = s.billing.SaveCollectTransaction(ctx, txn)
-	return err == nil
+	return s.billing.SaveCollectTransaction(ctx, txn)
 }
 
 // notifyPaymentFailed mails notify_customer_payment_failed for a declined bill charge: who, which
@@ -539,19 +594,43 @@ func (s *CollectService) notifyNoCard(ctx context.Context, profile *billing.Bill
 	_ = s.notifier.SendTemplate(ctx, "notify_customer_has_no_card", to, vars)
 }
 
-// applyPaidCollectOnBill appends the AppliedCollectedCredit + flips the bill PAID when nothing is
-// left unpaid (the golden pricing.ApplyPaidCollectOnBill). Returns the saved bill (nil if gone).
-func (s *CollectService) applyPaidCollectOnBill(ctx context.Context, txn *pricing.CollectTransaction) (*pricing.Bill, error) {
-	bill, err := s.billing.BillByID(ctx, txn.BillID)
-	if err != nil {
-		return nil, err
+// applyPaidCollectOnBill records a succeeded charge on its bill under the profile's credit lock, flipping
+// it PAID when nothing is left unpaid (the golden pricing.ApplyPaidCollectOnBill). It returns the bill when
+// this call changed it. A charge the bill already holds is a race with another pass over the same
+// transaction and changes nothing. closed reports a bill paid some other way meanwhile, which takes no more
+// money.
+func (s *CollectService) applyPaidCollectOnBill(ctx context.Context, txn *pricing.CollectTransaction) (changed *pricing.Bill, closed bool, err error) {
+	baseCcy, _ := s.billing.BaseCurrency(ctx) // tolerated failure: read outside the lock's transaction
+	err = s.billing.WithProfileLock(ctx, txn.BillingProfileID, func(ctx context.Context) error {
+		bill, err := s.billing.BillByID(ctx, txn.BillID)
+		if err != nil || bill == nil { // a vanished bill has nothing to settle
+			return err
+		}
+		if billHolds(bill, txn.ID) {
+			return nil
+		}
+		if bill.Status == pricing.BillStatusPaid {
+			closed = true
+			return nil
+		}
+		pricing.ApplyPaidCollectOnBill(bill, txn, baseCcy)
+		if err := s.billing.SaveBillDoc(ctx, bill); err != nil {
+			return err
+		}
+		changed = bill
+		return nil
+	})
+	return changed, closed, err
+}
+
+// billHolds reports whether the charge is already recorded on the bill.
+func billHolds(bill *pricing.Bill, txnID string) bool {
+	for i := range bill.CollectedAmounts {
+		if bill.CollectedAmounts[i].CollectTransactionID == txnID {
+			return true
+		}
 	}
-	if bill == nil {
-		return nil, nil // bill vanished — nothing to settle
-	}
-	baseCcy, _ := s.billing.BaseCurrency(ctx)
-	pricing.ApplyPaidCollectOnBill(bill, txn, baseCcy)
-	return bill, s.billing.SaveBillDoc(ctx, bill)
+	return false
 }
 
 // fxTax converts a requested amount to the profile currency (rate) + computes the tax-gross.

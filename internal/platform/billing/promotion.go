@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"time"
@@ -28,23 +29,49 @@ func (r *Repo) FindPromotionCodeByCode(ctx context.Context, code string) (pgdoc.
 	return doc, nil
 }
 
-// PromotionRedemptionExists reports whether the org has already redeemed the given promotion code.
-func (r *Repo) PromotionRedemptionExists(ctx context.Context, promotionCodeID, organizationID string) (bool, error) {
-	return r.promoRedeem.Exists(ctx, pgdoc.M{
-		"promotionCodeId": promotionCodeID, "organizationId": organizationID,
-	})
-}
+// ErrPromotionRedeemed: the organization has already redeemed this promotion code.
+var ErrPromotionRedeemed = errors.New("promotion code already redeemed by the organization")
 
-// SavePromotionRedemption records a PromotionCodeRedemption (dedup key promotionCodeId+organizationId).
-func (r *Repo) SavePromotionRedemption(ctx context.Context, promotionCodeID, organizationID, billingProfileID, source string, now time.Time) error {
-	_, err := r.promoRedeem.InsertOne(ctx, pgdoc.M{
-		"promotionCodeId":  promotionCodeID,
-		"organizationId":   organizationID,
-		"billingProfileId": billingProfileID,
-		"source":           source,
-		"createdAt":        now,
+// RedeemPromotion records the organization's redemption of a promotion code (dedup key promotionCodeId+organizationId)
+// and mints its credit, in one transaction under a lock on that key. The record goes first and guards the credit: a
+// failed write leaves neither, so a retry redeems once, and two redeems at once give one credit (the second gets
+// ErrPromotionRedeemed).
+func (r *Repo) RedeemPromotion(ctx context.Context, credit *pricing.PromotionalCredit, promotionCodeID, organizationID, source string, now time.Time) (*pricing.PromotionalCredit, error) {
+	// An undefined table aborts the transaction: a fresh install may not have these yet.
+	for _, t := range []*pgdoc.Store{r.promoRedeem, r.promoCredit} {
+		if err := t.Ensure(ctx); err != nil {
+			return nil, err
+		}
+	}
+	db := r.promoRedeem.DB()
+	var saved *pricing.PromotionalCredit
+	err := db.WithTx(ctx, func(ctx context.Context) error {
+		if err := db.LockXact(ctx, "promotionRedemption:"+promotionCodeID+":"+organizationID); err != nil {
+			return err
+		}
+		key := pgdoc.M{"promotionCodeId": promotionCodeID, "organizationId": organizationID}
+		if exists, err := r.promoRedeem.Exists(ctx, key); err != nil {
+			return err
+		} else if exists {
+			return ErrPromotionRedeemed
+		}
+		if _, err := r.promoRedeem.InsertOne(ctx, pgdoc.M{
+			"promotionCodeId":  promotionCodeID,
+			"organizationId":   organizationID,
+			"billingProfileId": credit.BillingProfileID,
+			"source":           source,
+			"createdAt":        now,
+		}); err != nil {
+			return err
+		}
+		var err error
+		saved, err = r.InsertPromotionalCredit(ctx, credit)
+		return err
 	})
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return saved, nil
 }
 
 // InsertPromotionalCredit inserts a freshly-minted PromotionalCredit (the store assigns _id) and

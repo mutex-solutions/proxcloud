@@ -31,18 +31,22 @@ func (p *ServerProvider) Type() string { return cloud.TypeServer }
 // statuses (the API's status vocabulary, see pve.MapVMStatus) is excluded from billing (DELETED/ERROR/UNKNOWN/BUILD).
 var serverNotEligibleStatuses = map[string]bool{"DELETED": true, "ERROR": true, "UNKNOWN": true, "BUILD": true}
 
-func (p *ServerProvider) GetBillingInformation(ctx context.Context, _ billingapi.BillingContext, cr *cloud.CloudResource) ([]*billingapi.BillingResource, error) {
+func (p *ServerProvider) GetBillingInformation(ctx context.Context, bc billingapi.BillingContext, cr *cloud.CloudResource) ([]*billingapi.BillingResource, error) {
 	out := []*billingapi.BillingResource{}
 	notEligible := false
 	if server, ok := mapAt(cr.Data, "server"); ok {
 		notEligible = serverNotEligibleStatuses[str(server["status"])]
 	}
+	if pr := protectionBR(cr); pr != nil {
+		out = append(out, pr)
+	}
+	out = append(out, snapshotBRs(cr)...)
 	if inst := p.instanceBR(cr, notEligible); inst != nil {
 		out = append(out, inst)
 	}
 	// Only create the traffic resource when the server is eligible.
 	if !notEligible {
-		tr, err := p.trafficBR(ctx, cr)
+		tr, err := p.trafficBR(ctx, bc, cr)
 		if err != nil {
 			return nil, err
 		}
@@ -99,10 +103,96 @@ func (p *ServerProvider) instanceBR(cr *cloud.CloudResource, notEligible bool) *
 	}
 }
 
+// protectionBR bills the Protected add-on: the replica's space, from the first successful sync until it is disabled.
+// A VM still on its first sync has nothing to fail over to yet, so it costs nothing. Neither does one on shared storage:
+// there is no replica to rate. Each protection is its own line starting at its first sync: one line per server would start
+// at the server's creation (a bill item's first watermark) and charge that gap, and again the gap between a disable and the
+// next enable.
+func protectionBR(cr *cloud.CloudResource) *billingapi.BillingResource {
+	server, ok := mapAt(cr.Data, "server")
+	if !ok {
+		return nil
+	}
+	pr, ok := mapAt(server, "protection")
+	if !ok || (str(pr["state"]) != "active" && str(pr["state"]) != "degraded") || str(pr["mode"]) == "shared" {
+		return nil
+	}
+	since, err := time.Parse(time.RFC3339, str(pr["since"]))
+	if err != nil {
+		return nil // no stamp yet: the next read adds it to a server with a synced job
+	}
+	return &billingapi.BillingResource{
+		ResourceID:   fmt.Sprintf("server_protection-%s-%d", cr.ID, since.Unix()),
+		ProjectID:    cr.ProjectID,
+		ResourceType: "server_protection",
+		Values: map[string]any{
+			"display_name": server["name"],
+			"size_gb":      numOf(pr["diskGb"]),
+			"state":        str(pr["state"]),
+		},
+		BillingResourceType: serverProtectionType(),
+		CreatedAt:           &since,
+	}
+}
+
+// snapshotBRs bills each disk snapshot of a server as its own line, from the moment it was taken: one line per
+// server would start at the server's creation (a bill item's first watermark) and charge the gap whenever the last
+// snapshot went and a new one came. size_gb is the VM's provisioned disks, not the blocks the snapshot pins: Proxmox
+// reports no per-snapshot usage (pve.StampSnapshots).
+func snapshotBRs(cr *cloud.CloudResource) []*billingapi.BillingResource {
+	server, ok := mapAt(cr.Data, "server")
+	if !ok {
+		return nil
+	}
+	sn, ok := mapAt(server, "snapshots")
+	if !ok {
+		return nil
+	}
+	items, _ := sn["items"].([]any)
+	out := make([]*billingapi.BillingResource, 0, len(items))
+	for _, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		taken, err := time.Parse(time.RFC3339, str(m["createdAt"]))
+		if err != nil {
+			continue
+		}
+		out = append(out, &billingapi.BillingResource{
+			ResourceID:   fmt.Sprintf("server_snapshot-%s-%s-%d", cr.ID, str(m["name"]), taken.Unix()),
+			ProjectID:    cr.ProjectID,
+			ResourceType: "server_snapshot",
+			Values: map[string]any{
+				"display_name": fmt.Sprintf("%v / %s", server["name"], str(m["name"])),
+				"size_gb":      numOf(sn["diskGb"]),
+			},
+			BillingResourceType: serverSnapshotType(),
+			CreatedAt:           &taken,
+		})
+	}
+	return out
+}
+
+func serverSnapshotType() *billingapi.BillingResourceType {
+	return &billingapi.BillingResourceType{ResourceType: "server_snapshot", Attributes: []billingapi.ResourceAttribute{
+		{Name: "display_name", Type: "string"}, {Name: "size_gb", Type: "number"},
+	}}
+}
+
+func serverProtectionType() *billingapi.BillingResourceType {
+	return &billingapi.BillingResourceType{ResourceType: "server_protection", Attributes: []billingapi.ResourceAttribute{
+		{Name: "display_name", Type: "string"}, {Name: "size_gb", Type: "number"}, {Name: "state", Type: "string"},
+	}}
+}
+
 // trafficBR builds the "instance_traffic" resource from the month's UsageMetrics.
 // nil when no metrics exist for the current cycle.
-func (p *ServerProvider) trafficBR(ctx context.Context, cr *cloud.CloudResource) (*billingapi.BillingResource, error) {
-	cycleStart := firstDayOfCurrentMonth(p.now())
+func (p *ServerProvider) trafficBR(ctx context.Context, bc billingapi.BillingContext, cr *cloud.CloudResource) (*billingapi.BillingResource, error) {
+	cycleStart := bc.CycleStart
+	if cycleStart.IsZero() {
+		cycleStart = firstDayOfCurrentMonth(p.now())
+	}
 	m, err := p.usage.FindForCurrentMonth(ctx, cr.ID, cycleStart)
 	if err != nil {
 		return nil, err

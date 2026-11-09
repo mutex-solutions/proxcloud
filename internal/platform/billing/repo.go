@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -104,6 +105,12 @@ func (r *Repo) ListBankTransfers(ctx context.Context, bpID string) ([]pgdoc.M, e
 }
 
 // UpdateBankTransfer merges set into the transfer doc.
+// ResolveBankTransfer moves a PENDING transfer on, once: of an approve, a reject and a customer cancel
+// racing each other only one wins. unset names fields to drop. Reports whether this caller won.
+func (r *Repo) ResolveBankTransfer(ctx context.Context, id string, set pgdoc.M, unset ...string) (bool, error) {
+	return r.bankXfers.SetFieldsOne(ctx, pgdoc.M{"_id": id, "status": "PENDING"}, set, unset)
+}
+
 func (r *Repo) UpdateBankTransfer(ctx context.Context, id string, set pgdoc.M) error {
 	_, err := r.bankXfers.SetByID(ctx, id, set, nil)
 	return err
@@ -195,7 +202,9 @@ func (r *Repo) AllBills(ctx context.Context) ([]pricing.Bill, error) {
 // AllBillingProfiles — every profile. The collect cron fans out over
 // every profile (NOT only ACTIVE — the collect job skips SUSPENDED).
 func (r *Repo) AllBillingProfiles(ctx context.Context) ([]BillingProfile, error) {
-	return findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{})
+	bps, err := findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{})
+	r.fillCurrency(ctx, bps)
+	return bps, err
 }
 
 // PromotionalCreditsByBillingProfile — all of a profile's promotional credits (the
@@ -322,10 +331,12 @@ func (r *Repo) SavingsContractByID(ctx context.Context, id string) (*SavingsCont
 	return &c, nil
 }
 
-// ExistsActiveSavingsContract reports whether the profile already has an ACTIVE contract for the plan.
+// ExistsActiveSavingsContract reports whether the profile already holds a contract for the plan, ACTIVE
+// or awaiting its payment: paying two of them would stack their discounts.
 func (r *Repo) ExistsActiveSavingsContract(ctx context.Context, planID, bpID string) (bool, error) {
 	return r.savingCtrs.Exists(ctx, pgdoc.M{
-		"savingsPlanId": planID, "billingProfileId": bpID, "status": SavingsStatusActive,
+		"savingsPlanId": planID, "billingProfileId": bpID,
+		"status": pgdoc.M{"$in": []string{SavingsStatusActive, SavingsStatusPendingPayment}},
 	})
 }
 
@@ -528,13 +539,45 @@ func (r *Repo) FindByID(ctx context.Context, id string) (*BillingProfile, error)
 	if err != nil || !found {
 		return nil, err
 	}
-	return &bp, nil
+	one := []BillingProfile{bp}
+	r.fillCurrency(ctx, one)
+	return &one[0], nil
 }
 
 // FindByStatus returns every billing profile in the given status —
 // the charge cron loads the ACTIVE profiles.
 func (r *Repo) FindByStatus(ctx context.Context, status string) ([]BillingProfile, error) {
-	return findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{"status": status})
+	bps, err := findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{"status": status})
+	r.fillCurrency(ctx, bps)
+	return bps, err
+}
+
+// fillCurrency backfills an ACTIVE profile with no currency: an operator could activate a profile
+// before it had billing details (activation now sets it), and every bill read of such a profile
+// failed on the blank currency. It bills in the base currency, as saving its details would have
+// set, filled in memory and written once where the stored currency is still blank. A failed write
+// only leaves the fill to the next read.
+func (r *Repo) fillCurrency(ctx context.Context, bps []BillingProfile) {
+	base := ""
+	for i := range bps {
+		bp := &bps[i]
+		if bp.Status != StatusActive || bp.Currency != "" {
+			continue
+		}
+		if base == "" {
+			b, err := r.BaseCurrency(ctx)
+			if err != nil || b == "" {
+				return
+			}
+			base = b
+		}
+		bp.Currency = base
+		if _, err := r.profiles.SetFieldsOne(ctx, pgdoc.M{"_id": bp.ID, "status": StatusActive,
+			"$or": []pgdoc.M{{"currency": pgdoc.M{"$exists": false}}, {"currency": ""}}},
+			pgdoc.M{"currency": base}, nil); err != nil {
+			slog.Warn("billing profile currency backfill", "billingProfile", bp.ID, "err", err)
+		}
+	}
 }
 
 // Exists reports whether a billing profile with the given _id exists

@@ -33,18 +33,20 @@ Legend: **env** = environment variable, **file** = `application.yml` key, **helm
 |---------|-----|------|------|---------|---------|
 | API port | — | `server.port` | fixed `8080` | `8080` | Public API listener. |
 | Management port | — | `management.server.port` | fixed `8081` | `8081` | Health probes + operator debug triggers. |
-| Log level | — | `logging.level.root` | `api.logLevel` | `INFO` | Root log level. |
+| Log level | — | `logging.level.root` | through `api.applicationYml` | `INFO` | Root log level. |
+| CORS origins | `PROXCLOUD_CORS_ALLOWED_ORIGINS` | — | `api.corsAllowedOrigins` | the origins of the UI and admin self URLs | Extra browser origins allowed to call the API (comma list), on top of the two consoles. |
 
 ### PostgreSQL (required)
 
 | Concern | env | file | helm | Default | Meaning |
 |---------|-----|------|------|---------|---------|
-| Connection DSN | `PROXCLOUD_DB_URL` | `db.url` | derived from `postgresql.*` or `externalPostgresql.*` | — (required) | PostgreSQL connection string (`postgres://user:pass@host:port/proxcloud?sslmode=…`). |
+| Connection DSN | `PROXCLOUD_DB_URL` | `db.url` | derived from `cnpg.*`, `postgresql.*` or `externalPostgresql.*` | — (required) | PostgreSQL connection string (`postgres://user:pass@host:port/proxcloud?sslmode=…`). |
 
 PostgreSQL is the sole primary datastore: every document kind is a
 `(id text primary key, doc jsonb not null)` table (see
-[data-model.md](data-model.md)). The chart builds the DSN from the bundled
-`postgresql` subchart or from `externalPostgresql.*` and injects it as env;
+[data-model.md](data-model.md)). The chart builds the DSN from the CloudNativePG
+cluster (`cnpg.enabled`, the default), the bitnami `postgresql` subchart, or
+`externalPostgresql.*` when both are off, and injects it as env;
 the credentials come from a secret (or `externalPostgresql.existingSecret`).
 Documents are (de)serialized with the standard-library `encoding/json` (no ORM
 or external codec) and stored verbatim in each table's `doc` jsonb column.
@@ -53,7 +55,7 @@ or external codec) and stored verbatim in each table's `doc` jsonb column.
 
 | Concern | env | file | helm | Default | Meaning |
 |---------|-----|------|------|---------|---------|
-| Host | `PROXCLOUD_RABBITMQ_HOST` | `rabbitmq.host` | derived from `rabbitmq.*` / `externalRabbitmq.host` | — (required) | Broker host. |
+| Host | `PROXCLOUD_RABBITMQ_HOST` | `rabbitmq.host` | derived from `rabbitmqCluster.*` (default), `rabbitmq.*` or `externalRabbitmq.host` | — (required) | Broker host. |
 | Port | `PROXCLOUD_RABBITMQ_PORT` | `rabbitmq.port` | derived | `5672` | Broker port. |
 | Username | `PROXCLOUD_RABBITMQ_USERNAME` | `rabbitmq.username` | secret | — | Broker user. |
 | Password | `PROXCLOUD_RABBITMQ_PASSWORD` | `rabbitmq.password` | secret | — | Broker password. |
@@ -65,7 +67,9 @@ or external codec) and stored verbatim in each table's `doc` jsonb column.
 | Default key | `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` | `proxcloud.encryption.default.key` (alias `default-key`) | `api.encryptionKey` (or `api.existingSecret`) | — | Key used to encrypt sensitive fields at rest. |
 
 The chart renders `api.encryptionKey` into a Secret and injects it as
-`PROXCLOUD_ENCRYPTION_DEFAULT_KEY`. Alternatively, point `api.existingSecret` at a
+`PROXCLOUD_ENCRYPTION_DEFAULT_KEY`. It protects provider and integration secrets and the secrets of admin hmac keys, and
+changing it locks all of those out: hmac key rows that no longer decrypt fail authentication until they are minted again.
+Alternatively, point `api.existingSecret` at a
 pre-made Secret carrying `db-url` / `rabbitmq-password` / `encryption-key`.
 
 ### Self URLs
@@ -81,14 +85,30 @@ Used to build absolute links (mail, redirects, MCP resource metadata).
 
 ### OIDC realms
 
-Three realm configs, each an issuer URI + client id. See `docs/auth.md` for the
-identity model. Empty issuer = realm disabled (tokens for it are rejected).
+Three realm configs, each an issuer URI + client id, and an optional discovery URI
+(where the API fetches the OIDC metadata when the public issuer is not reachable from
+the pod; the token `iss` must still equal the issuer). See `docs/auth.md` for the
+identity model. Empty issuer = realm disabled (tokens for it are rejected); with an
+empty issuer the chart renders no env for that realm at all.
 
-| Realm | env (issuer / client) | file | helm |
+| Realm | env (issuer / client / discovery) | file | helm |
 |-------|-----------------------|------|------|
-| Customer (`clients`) | `AUTH_MAIN_OAUTH2_ISSUER_URI` / `AUTH_MAIN_OAUTH2_CLIENT_ID` | `auth.main.oauth2.issuer-uri` / `.client-id` | issuer: `auth.main.issuer` (empty ⇒ bundled Keycloak `clients` realm); client: `auth.main.clientId` (`proxcloud-ui`) |
-| Operator (`master`) | `AUTH_ADMIN_OAUTH2_ISSUER_URI` / `AUTH_ADMIN_OAUTH2_CLIENT_ID` | `auth.admin.oauth2.issuer-uri` / `.client-id` | issuer: `auth.admin.issuer` (empty ⇒ bundled `master` realm); client: `auth.admin.clientId` (`proxcloud-admin`) |
-| Admin API | `AUTH_ADMIN_API_OAUTH2_ISSUER_URI` / `AUTH_ADMIN_API_OAUTH2_CLIENT_ID` | `auth.admin-api.oauth2.issuer-uri` / `.client-id` | issuer: `auth.adminApi.issuer`; client: `auth.adminApi.clientId` (`proxcloud-admin-api`) |
+| Customer (`auth.main`) | `AUTH_MAIN_OAUTH2_ISSUER_URI` / `_CLIENT_ID` / `_DISCOVERY_URI` | `auth.main.oauth2.issuer-uri` / `.client-id` / `.discovery-uri` | `auth.main.issuer`, `.clientId` (`proxcloud-ui`), `.discoveryUri` |
+| Operator (`auth.admin`) | `AUTH_ADMIN_OAUTH2_ISSUER_URI` / `_CLIENT_ID` / `_DISCOVERY_URI` | `auth.admin.oauth2.issuer-uri` / `.client-id` / `.discovery-uri` | `auth.admin.issuer`, `.clientId` (`proxcloud-admin`), `.discoveryUri` |
+| Admin API (`auth.admin-api`) | `AUTH_ADMIN_API_OAUTH2_ISSUER_URI` / `_CLIENT_ID` / `_DISCOVERY_URI` | `auth.admin-api.oauth2.issuer-uri` / `.client-id` / `.discovery-uri` | `auth.adminApi.issuer`, `.clientId` (`proxcloud-admin-api`), `.discoveryUri` |
+
+The installer points `auth.main` at the Keycloak realm `proxcloud` and `auth.admin` and
+`auth.admin-api` at `proxcloud-admin` (`keycloak.main_realm` / `admin_realm`); the dev
+compose stack uses one realm, `proxcloud`, for all three.
+
+### Per-organization SSO
+
+| Concern | env | helm | Default | Meaning |
+|---------|-----|------|---------|---------|
+| Keycloak client | `PROXCLOUD_SSO_KC_CLIENT_ID` | — | `proxcloud-idp-admin` | Service-account client the API uses to manage organizations' identity providers. |
+| Client secret | `PROXCLOUD_SSO_KC_CLIENT_SECRET` | `auth.sso.clientSecret` (or `sso-client-secret` in `api.existingSecret`) | — | Its secret. The chart sets the SSO env only with `auth.sso.enabled`. |
+| Reserved domains | `PROXCLOUD_SSO_RESERVED_DOMAINS` | `auth.sso.reservedDomains` | — | Email domains no organization may claim (comma list); the self URL domains are always reserved. |
+| Internal IdPs | `PROXCLOUD_SSO_ALLOW_INTERNAL_IDP` | `auth.sso.allowInternalIdp` | `false` | Development only: allows a customer IdP on http or a private address. |
 
 ### Cloud providers
 
@@ -101,6 +121,18 @@ read from env:
 | Concern | env | file | Default | Meaning |
 |---------|-----|------|---------|---------|
 | Default region | `PROXCLOUD_DEFAULT_REGION` | `proxcloud.default-region` | `default` | Region stamped on a provider binding when the provider sets none (`project/bootstrap.go`), and the admin handlers' region fallback. |
+| CSI gateway address | `PROXCLOUD_CSI_GATEWAY_ADDR` | `proxcloud.csi-gateway.addr` | — (off) | Listener for tenant clusters' proxmox-csi controllers (e.g. `:8443`), see [managed-k8s.md](managed-k8s.md). Separate from `:8080` and `:8081` on purpose. |
+| CSI gateway certificate | `PROXCLOUD_CSI_GATEWAY_TLS_CERT`, `PROXCLOUD_CSI_GATEWAY_TLS_KEY` | `proxcloud.csi-gateway.tls-cert`, `.tls-key` | — | PEM files. The listener serves TLS only; an address without both fails startup. Read again a minute after the last handshake, so a renewal in place needs no restart. |
+| CSI gateway URL and CA | `PROXCLOUD_CSI_GATEWAY_URL`, `PROXCLOUD_CSI_GATEWAY_CA_FILE` | `proxcloud.csi-gateway.url`, `.ca-file` | — (off) | `https://<host>:<port>` as the services cluster reaches the gateway, and the PEM CA that signs its certificate. Set, new Kubernetes clusters run their proxmox-csi controller on the services cluster against the gateway; empty, they get no proxmox-csi (except on `sharedWorkers`). Required together. Independent of the address: the replica that creates a cluster need not serve the gateway. |
+
+In Helm the gateway rows come from `api.csiGateway.*`: `enabled` sets the address from
+`port` (default `8443`), `url` the URL, and the certificate, key and CA are a cert-manager
+certificate the chart mounts; `service.*` and `allowedCIDRs` expose the port to the
+services cluster's nodes only.
+
+The gateway's PVE token is per compute provider: `config.csiGatewayTokenId` and `secret.csiGatewaySecret` on the Proxmox
+provider ([proxmox-permissions.md](proxmox-permissions.md#the-csi-gateway-token)). Without them the gateway answers its
+clusters with an error.
 
 ### Scheduled jobs (billing / metrics crons)
 
@@ -122,15 +154,22 @@ keys live in the provider's `config` (full shape and behaviour:
 | `storageProfiles.<slug>` | Connection tab, Storage profiles block | — | `storages` (node or `*` → storage id), optional `label`, flags `shared` / `snapshots` / `thin` / `liveMigrate` / `replication`, caps `bootDisk` / `dbaas` (`false` closes the profile). Validated against a live detection on save. |
 | `capabilities` | capability detection (sync cycle, Storage tab Re-detect, profile save) | absent until first detection | `{detectedAt, storages}`. Never hand-edited. |
 | `storageClasses.<storage>` | Storage tab class select / `PUT /api/v1/admin/service/{id}/storage-classes`; installer | — | `class` = admin override (`performance` / `standard` / `capacity`, wins over the detected class); `suggestedClass` = installer fio result, shown only. |
+| `backupStorage` | installer (stage 60, with a NAS `backup` export); `PUT /api/v1/admin/service/{id}` (`{"config":{"backupStorage":"nas-backup"}}`); no UI field yet | none | The shared store server backups go to (NFS, CephFS or PBS, with `backup` content). Absent: the customer console offers no backups. The store is checked when a backup is created (409), not on save. |
+| `importStorage` | installer (stage 60, with a NAS `templates` export); `PUT /api/v1/admin/service/{id}` (`{"config":{"importStorage":"nas-templates"}}`); no UI field yet | none | The store with `import` content the portal streams customer images to. Absent: the customer console offers no image import. Test connection warns when the token cannot delete files there. |
+| `importUnknownSizeMaxGiB` | `PUT /api/v1/admin/service/{id}` (`{"config":{"importUnknownSizeMaxGiB":20}}`); no UI field yet | none | A URL whose server states no size is refused unless this is set. Such an image is spooled to the portal's temporary directory up to this limit, so size that disk for it. |
 | `storageHeadroomPct` | `PUT /api/v1/admin/service/{id}` (`{"config":{"storageHeadroomPct":15}}`); no UI field yet | `10` | Percent of a storage's total size that must stay free after placing a disk (server create, add volume, retype). `0` is allowed; a value that is not a number or outside 0–99 falls back to 10. |
+| `isoStorage` | `PUT /api/v1/admin/service/{id}`; no UI field yet | `local` | Node-local store where a Kubernetes node's bootstrap ISO (its kubeadm join token) lands. Never a shared store; keep it in line with the installer's `services.iso_storage`, see [managed-k8s.md](managed-k8s.md). |
+| `lbImage` | `PUT /api/v1/admin/service/{id}`; no UI field yet | `debian-13` | Template a load balancer VM is cloned from (Debian family, guest agent and cloud-init). |
+| `csiGatewayTokenId` | installer (stage 60, split mode: `csi@pve!gateway`); with `secret.csiGatewaySecret` | none | The CSI gateway's PVE token for this provider, see below. |
 
 Network MTU is set per EVPN zone on the Proxmox provider
 (`config.network.zones.<zone>.mtu`, default 1450; vlan and simple zones take no MTU).
 There is no deployment-wide MTU setting.
 
-When the scheduler or debug triggers are enabled, the management port also exposes
-operator triggers such as `POST :8081/debug/gen-hmac-key` (mint an Admin API key —
-see `docs/auth.md`).
+With debug triggers enabled (`PROXCLOUD_JOBS_DEBUG_TRIGGERS`, not the scheduler), the
+management port also exposes `POST :8081/debug/gen-hmac-key` (mint an Admin API key,
+see `docs/auth.md`). It is unauthenticated, which is why the scheduler alone never
+turns it on.
 
 ### Billing provider
 
@@ -171,9 +210,11 @@ run — the external provider still needs this pod to keep the resource cache fr
 
 ### Mail / SMTP
 
-Mail is configured via `PROXCLOUD_MAIL_*` **environment variables**
-(`internal/platform/mail/mail.go`). If `PROXCLOUD_MAIL_SMTP_HOST` is unset the
-service uses a no-op mailer and gated email side-effects silently do nothing.
+The mail gateway is resolved on every send. An SMTP integration set in the admin
+console (Admin → Integrations, stored in the database) wins; otherwise the
+`PROXCLOUD_MAIL_*` **environment variables** below (`internal/platform/mail/mail.go`)
+are the fallback. With neither (no integration and `PROXCLOUD_MAIL_SMTP_HOST`
+unset) the service uses a no-op mailer and email side-effects silently do nothing.
 
 | Concern | env | Default | Meaning |
 |---------|-----|---------|---------|
@@ -184,9 +225,9 @@ service uses a no-op mailer and gated email side-effects silently do nothing.
 | From address | `PROXCLOUD_MAIL_FROM` | — | Envelope-from / sender. |
 | Business name | `PROXCLOUD_MAIL_BUSINESS_NAME` | `ProxCloud` | Sender display / branding in templates. |
 
-Set these in Helm via the first-class `api.mail.smtp.*` block (plus `api.mail.from`),
+Set these in Helm via the first-class `api.mail.smtp.*` block (plus `api.mail.from` and `api.mail.businessName`),
 which the chart injects into the pod as the `PROXCLOUD_MAIL_*` env vars above
-(see `deploy/charts/proxcloud/templates/api/deployment.yaml`). Mail is env-only — nothing
+(see `deploy/charts/proxcloud/templates/api/deployment.yaml`). Nothing about mail
 renders into `application.yml`.
 
 ### Feature set
@@ -205,8 +246,8 @@ Toggle the bundled component off and fill in the matching `external*` block:
 
 | Dependency | Bundle toggle | Bring-your-own |
 |------------|---------------|----------------|
-| PostgreSQL | `postgresql.enabled` (bitnami subchart) or `cnpg.enabled` (CloudNativePG operator) | `externalPostgresql.*` |
-| RabbitMQ | `rabbitmq.enabled` | `externalRabbitmq.*` |
+| PostgreSQL | `cnpg.enabled` (CloudNativePG cluster, the default; needs the operator) or `postgresql.enabled` (bitnami subchart) | `externalPostgresql.*` (both toggles off) |
+| RabbitMQ | `rabbitmqCluster.enabled` (RabbitMQ Cluster Operator, the default; needs the operator) or `rabbitmq.enabled` (bitnami subchart) | `externalRabbitmq.*` (both toggles off) |
 | Keycloak (OIDC) | `keycloakx.enabled` (codecentric/keycloakx) | set `auth.main.issuer` / `auth.admin.issuer` (+ `auth.adminApi.issuer`) to the external issuer |
 
 For the deployment side — ingress, TLS, Gateway API routes, secrets wiring, and the

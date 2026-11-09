@@ -61,7 +61,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-rw" (include "proxcloud.cnpgClusterName" .) -}}
 {{- else if .Values.postgresql.enabled -}}
 {{- /* honor the subchart's fullnameOverride — that IS its service name */ -}}
-{{- .Values.postgresql.fullnameOverride | default (printf "%s-postgresql" .Release.Name) -}}
+{{- include "proxcloud.postgresqlName" . -}}
 {{- else -}}
 {{- required "externalPostgresql.host is required when postgresql.enabled=false" .Values.externalPostgresql.host -}}
 {{- end -}}
@@ -88,13 +88,42 @@ postgres://{{ $u }}:{{ $p }}@{{ include "proxcloud.pgHost" . }}:{{ .Values.exter
 {{- end -}}
 {{- end }}
 
+{{/* The PROXCLOUD_DB_URL env entry (api and seed Job): the DSN from the external Secret or the api Secret. */}}
+{{- define "proxcloud.dbURLEnv" -}}
+- name: PROXCLOUD_DB_URL
+  valueFrom:
+    secretKeyRef:
+      {{- if .Values.externalPostgresql.existingSecret }}
+      name: {{ .Values.externalPostgresql.existingSecret }}
+      key: {{ .Values.externalPostgresql.secretKey }}
+      {{- else }}
+      name: {{ include "proxcloud.apiSecretName" . }}
+      key: db-url
+      {{- end }}
+{{- end }}
+
+{{/* Bundled Keycloak (keycloakx) base name; its HTTP Service is <this>-http. */}}
+{{- define "proxcloud.keycloakName" -}}
+{{- .Values.keycloakx.fullnameOverride | default (printf "%s-keycloakx" .Release.Name) -}}
+{{- end }}
+
+{{/* Bundled subchart service names (their fullnameOverride wins). */}}
+{{- define "proxcloud.postgresqlName" -}}
+{{- .Values.postgresql.fullnameOverride | default (printf "%s-postgresql" .Release.Name) -}}
+{{- end }}
+
+{{/* Secret holding the Keycloak admin password for keycloak-config-cli (key keycloakConfigCli.passwordKey). */}}
+{{- define "proxcloud.kcAdminSecretName" -}}
+{{- .Values.keycloakConfigCli.existingSecret | default (printf "%s-keycloak-admin" (include "proxcloud.fullname" .)) -}}
+{{- end }}
+
 {{/* Target Keycloak base URL for keycloak-config-cli: explicit url, else the
 bundled keycloakx http service (keycloakx names it <fullname>-http). */}}
 {{- define "proxcloud.kcConfigCliURL" -}}
 {{- if .Values.keycloakConfigCli.url -}}
 {{- .Values.keycloakConfigCli.url -}}
 {{- else -}}
-http://{{ .Values.keycloakx.fullnameOverride | default (printf "%s-keycloakx" .Release.Name) }}-http:80
+http://{{ include "proxcloud.keycloakName" . }}-http:80
 {{- end -}}
 {{- end }}
 
