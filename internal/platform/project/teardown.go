@@ -503,6 +503,9 @@ func teardownOutcome(p *Project, retry bool) {
 // teardownShares deletes everything the NAS holds for the project, cached or not, and archives the provider's rows.
 // It returns the rows still to delete; a failure keeps the rows so a re-run retries.
 func (h *Handler) teardownShares(ctx context.Context, p *Project, es *externalservice.ExternalService, rows []cloud.CloudResource) ([]cloud.CloudResource, error) {
+	if err := h.checkShareOwner(ctx, p, es); err != nil {
+		return rows, err
+	}
 	ts, err := es.TrueNASService()
 	if err != nil {
 		return rows, err

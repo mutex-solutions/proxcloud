@@ -16,6 +16,58 @@ Every token is created with **privilege separation** (`--privsep 1`). A privileg
 
 The admin **Test connection** button on the Proxmox provider reads the token's effective permissions (`GET /access/permissions`) and lists each `ProxCloudPlatform` privilege the token lacks, plus a warning for a `root@pam` token. Missing privileges are only reported as warnings. A cluster without GPUs can, for example, leave out `/mapping/pci`. The list it checks is `pve.PlatformPrivileges` in `internal/cloud/pve/access.go`. Keep it in sync with this page.
 
+## Inventory visibility repair
+
+The NETWORK reconciler does **not** treat PVE's `200 []` as proof of deletion.
+The SDN API silently omits vnets without `SDN.Audit` or `SDN.Allocate` on
+`/sdn/zones/<zone>/<vnet>`. Before changing cached inventory, ProxCloud checks
+self effective privileges with the **configured provider token** and re-reads
+missing vnets/subnets by ID. It checks the namespace, zone and exact vnet paths;
+a narrower ACL can shadow a working parent grant. No new read-wide or root
+permission is granted automatically. It never queries another user's privileges.
+
+PVE9's actual missing-object response is **HTTP400** with
+`errors.vnet = "could not find vnet '<id>'"` (or `errors.subnet`). PVE returns
+that same response for an object moved into a zone hidden from the token. Before
+accepting absence, ProxCloud therefore also proves **complete SDN visibility**:
+self `Sys.Audit` on `/access` makes `GET /access/acl` unfiltered; propagated
+`SDN.Audit` or `SDN.Allocate` must hold on `/sdn/zones` and every SDN ACL shadow
+boundary. ACL snapshots and self privileges are rechecked around by-id reads.
+No role/group translator, root ticket, alternate token or filtered ACL list is
+accepted as evidence. A token lacking this existing audit/read evidence retains
+rows with a warning; portal-requested explicit deletion remains available. An
+operator can repair intended read privileges deliberately, never via auto-grant.
+
+If a sync warns **provider visibility unverified / cached inventory preserved**:
+
+1. Keep the cached NETWORK rows and share exports. Do not manually delete them to
+   silence the warning; they preserve ownership, billing history and NAS access.
+2. In the provider's Test connection, check effective SDN rights. With the portal
+   token (not a root ticket), read `GET /access/permissions?path=/sdn/zones`, then
+   `/sdn/zones/<cached-zone>` and `/sdn/zones/<cached-zone>/<cached-vnet>`. Omit
+   `userid`. Each path must include `SDN.Audit` or `SDN.Allocate`.
+3. Repair the intended user **and** privilege-separated token ACLs using the
+   existing roles. In split mode, the mint-only `/sdn/zones` ACL must include
+   `ProxCloudPlatform` too; inspect more-specific `NoAccess`/non-propagating grants.
+   Do not add root or a broad new privilege just to bypass this check.
+4. Read `GET /cluster/sdn/vnets/<vnet>` with that same token. The alias must name
+   the expected project. A forbidden/unknown answer is not disappearance, even
+   if an empty list or a masked404 accompanies it. Legacy cached rows without a
+   zone fail safely: restore visibility so a complete normal list can fill it;
+   if it never returns, an operator must repair the missing identity metadata.
+5. Run project sync again. Live networks keep their original rows; the next
+   unchanged pass should report zero changes. A truly vanished vnet with proven
+   privileges and by-id absence archives normally, and its CIDRs leave exports.
+
+A **multiple provider owners** error is a separate per-project NAS conflict.
+Keep only one attached provider for a given NAS API backend + parent dataset,
+using a single canonical hostname even when the NAS has aliases/proxies. Different
+`snatSources`, credentials or a disabled duplicate are not separate owners.
+Choose the canonical provider, preserve/reassociate existing share rows as needed,
+then detach the redundant binding (do not delete datasets to repair configuration).
+Alternatively give intentional separate providers disjoint parent datasets. Retry
+sync/refresh afterward. Unrelated projects with a single owner are not blocked.
+
 ## Pools
 
 | Pool | Contents |
