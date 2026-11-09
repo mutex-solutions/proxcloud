@@ -79,6 +79,7 @@ func (c *Client) CreateSDNController(ctx context.Context, id, kind string, param
 
 // SDNVnet is one row of GET /cluster/sdn/vnets.
 type SDNVnet struct {
+	Digest    string `json:"digest"`
 	Vnet      string `json:"vnet"` // ≤8 chars — the "hide L2" constraint: users only ever see the alias
 	Zone      string `json:"zone"`
 	Alias     string `json:"alias"`

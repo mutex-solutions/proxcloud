@@ -64,6 +64,44 @@ func TestMaskedSDNMissingNeedsCompleteStableVisibility(t *testing.T) {
 	}
 }
 
+func TestSubnetAbsenceRechecksVnetAfterRead(t *testing.T) {
+	for _, change := range []string{"zone", "owner", "digest"} {
+		t.Run(change, func(t *testing.T) {
+			readSubnet := false
+			_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+				"GET /api2/json/access/permissions": func(w http.ResponseWriter, r *http.Request) {
+					fmt.Fprintf(w, `{"data":{%q:{"SDN.Audit":1,"Sys.Audit":0}}}`, r.URL.Query().Get("path"))
+				},
+				"GET /api2/json/access/acl": func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"data":[]}`) },
+				"GET /api2/json/cluster/sdn/vnets/v1": func(w http.ResponseWriter, r *http.Request) {
+					v := SDNVnet{Vnet: "v1", Zone: "overlay", Alias: "st:p1:net", Digest: "first"}
+					if readSubnet {
+						switch change {
+						case "zone":
+							v.Zone = "newzone"
+						case "owner":
+							v.Alias = "st:p2:foreign"
+						case "digest":
+							v.Digest = "replacement"
+						}
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"data": v})
+				},
+				"GET /api2/json/cluster/sdn/vnets/v1/subnets/overlay-10.0.0.0-24": func(w http.ResponseWriter, r *http.Request) {
+					readSubnet = true
+					w.WriteHeader(400)
+					fmt.Fprint(w, `{"errors":{"subnet":"could not find subnet 'overlay-10.0.0.0-24'"}}`)
+				},
+			})
+			p := (&Service{C: c}).NetworkSyncProvider("r", "p1")
+			err := p.VerifyInventory(context.Background(), []cloud.CloudResource{inventoryNetwork("v1", "p1", "overlay", "10.0.0.0/24")}, []cloud.CloudResource{inventoryNetwork("v1", "p1", "overlay")})
+			if err == nil {
+				t.Fatal("changed vnet must invalidate old subnet absence proof")
+			}
+		})
+	}
+}
+
 func TestSubnetLossAcrossZoneChangeIsUnknown(t *testing.T) {
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/access/permissions": func(w http.ResponseWriter, r *http.Request) {

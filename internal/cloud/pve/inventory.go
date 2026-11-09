@@ -132,6 +132,13 @@ func (p *NetworkSyncProvider) VerifyInventory(ctx context.Context, cached, liste
 				return networkInventoryError(old.ExternalID, "cannot distinguish missing subnet from hidden reassignment", errors.Join(aclProofErr, proofErr))
 			}
 		}
+		// Rebind the subnet absence proof to the same live vnet after all
+		// subordinate reads. A zone/owner/config replacement can leave the old
+		// zone-CIDR id missing while the tenant still owns it in the new zone.
+		after, err := p.svc.C.GetSDNVnet(ctx, old.ExternalID)
+		if err != nil || after == nil || *after != *live {
+			return networkInventoryError(old.ExternalID, "vnet changed during subnet absence proof", err)
+		}
 		clear(checked)
 		if err := rights(live.Zone, live.Vnet); err != nil {
 			return err
