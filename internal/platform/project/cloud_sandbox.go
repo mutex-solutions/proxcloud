@@ -152,6 +152,8 @@ func sandboxHTTPError(err error) (status int, msg string, ok bool) {
 	switch {
 	case errors.As(err, &forbidden):
 		return http.StatusForbidden, "Cannot start a sandbox: " + err.Error(), true
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return http.StatusServiceUnavailable, "sandbox operation did not finish before its deadline", true
 	case errors.Is(err, sandbox.ErrQuotaExceeded):
 		return http.StatusTooManyRequests, err.Error(), true
 	case errors.Is(err, sandbox.ErrNoGPUCapacity):
@@ -213,8 +215,21 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
 	}
-	saved, err := h.createSandboxResource(r.Context(), proj, es, ss, &spec)
+	ctx, cancel := context.WithTimeout(r.Context(), ss.Config().Startup.Duration()+time.Minute)
+	defer cancel()
+	saved, err := h.createSandboxResource(ctx, proj, es, ss, &spec)
 	if err != nil {
+		h.sandboxFail(w, err)
+		return
+	}
+	c := &e2bCaller{user: u, proj: proj, es: es, ss: ss}
+	if err := h.e2bWaitReady(ctx, c, saved); err != nil {
+		h.cleanupFailedStartup(ctx, c, saved)
+		h.sandboxFail(w, err)
+		return
+	}
+	if err := startupResponseAlive(ctx, saved.Data); err != nil {
+		h.cleanupFailedStartup(ctx, c, saved)
 		h.sandboxFail(w, err)
 		return
 	}
@@ -261,7 +276,9 @@ func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *
 	})
 	if err != nil {
 		// The CR exists but the row does not: delete the CR rather than leave an unbilled sandbox.
-		if derr := ss.DeleteSandbox(context.WithoutCancel(ctx), proj.ID, spec.ID); derr != nil {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if derr := ss.DeleteSandbox(cleanup, proj.ID, spec.ID); derr != nil {
 			slog.Error("sandbox: delete after failed cache insert", "sandbox", spec.ID, "err", derr)
 		}
 		return nil, err

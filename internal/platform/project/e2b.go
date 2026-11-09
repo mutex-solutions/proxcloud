@@ -66,22 +66,27 @@ func (h *Handler) E2BRoutes(r chi.Router) {
 		r.Post("/sandboxes/{sandboxID}/fork", h.e2bFork)
 		r.Get("/snapshots", h.e2bSnapshotList)
 		r.Get("/templates", h.e2bTemplates)
+		r.Post("/templates/import", h.e2bTemplateImport)
+		r.Post("/templates/{templateID}/aliases", h.e2bTemplateAliases)
+		r.Delete("/templates/{templateID}/aliases", h.e2bTemplateAliases)
+		r.Post("/templates/{templateID}/prepare", h.e2bPrepareTemplate)
+		r.Get("/templates/{templateID}/prepare", h.e2bPrepareTemplate)
 		r.Get("/templates/aliases/{alias}", h.e2bTemplateAlias)
 		r.Get("/templates/{templateID}", h.e2bTemplateGet)
-		r.Delete("/templates/{templateID}", h.e2bTemplateDelete)
+		r.Delete("/templates/{templateID}", h.e2bTemplateDeleteLocked)
 		r.Get("/templates/{templateID}/tags", h.e2bTemplateTags)
 		r.Post("/templates/tags", h.e2bTemplateTagsAssign)
 		r.Delete("/templates/tags", h.e2bTemplateTagsRemove)
-		r.Post("/v3/templates", h.e2bTemplateRequest)
+		r.Post("/v3/templates", h.e2bTemplateRequestLocked)
 		r.Get("/templates/{templateID}/files/{hash}", h.e2bTemplateFile)
-		r.Post("/v2/templates/{templateID}/builds/{buildID}", h.e2bTemplateBuild)
+		r.Post("/v2/templates/{templateID}/builds/{buildID}", h.e2bTemplateBuildLocked)
 		r.Get("/templates/{templateID}/builds/{buildID}/status", h.e2bTemplateBuildStatus)
 	})
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
-		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see docs/e2b-compat.md)")
+		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see "+h.e2bDocs()+")")
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
-		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see docs/e2b-compat.md)")
+		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see "+h.e2bDocs()+")")
 	})
 }
 
@@ -106,6 +111,9 @@ func e2bFail(w http.ResponseWriter, err error) {
 
 // e2bError maps err to the status and message shown to the caller (internals are logged only).
 func e2bError(err error) (int, string) {
+	if errors.Is(err, errBuildPinState) {
+		return http.StatusConflict, "template operation is active, held or requires operator recovery"
+	}
 	var se e2bStatusErr
 	if errors.As(err, &se) {
 		return se.code, se.msg
@@ -345,6 +353,9 @@ func (b *e2bCreateBody) e2bRefusal() string {
 
 func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 	c, arrived := e2bFrom(r), time.Now()
+	ctx, cancel := context.WithTimeout(r.Context(), SnapshotRequestWait+c.ss.Config().Startup.Duration()+time.Minute)
+	defer cancel()
+	r = r.WithContext(ctx)
 	var b e2bCreateBody
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&b); err != nil {
 		e2bErr(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -369,7 +380,7 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
-	custom, customName, customKind, err := h.resolveCustomTemplateWithKind(r.Context(), c.proj.ID, b.TemplateID)
+	custom, customName, _, err := h.resolveCustomTemplateWithKind(r.Context(), c.proj.ID, b.TemplateID)
 	if errors.Is(err, sandbox.ErrBadTemplate) {
 		e2bErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -405,6 +416,10 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 	if b.MemoryMB != nil {
 		spec.MemoryGiB = (*b.MemoryMB + 1023) / 1024
 	}
+	if _, builtin := c.ss.Config().Templates[spec.Template]; custom == nil && !builtin {
+		e2bErr(w, http.StatusBadRequest, h.unknownTemplate(r.Context(), c, b.TemplateID))
+		return
+	}
 	q := c.es.SandboxProjectQuota(c.proj.Quota)
 	spec.Quota = &q
 	if err := spec.Validate(c.ss.Config()); err != nil {
@@ -417,39 +432,19 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.cloudResourceAudit(c.user, c.proj, "CLOUD_RESOURCE_CREATE", "E2B_CREATE", saved)
-	if custom == nil || customKind != "" {
-		// Built-ins, snapshots and unknown future kinds retain their complete legacy path.
-		if err := h.e2bWaitReady(r.Context(), c, saved); err != nil {
-			slog.Warn("e2b: sandbox did not become ready; deleting it", "sandbox", spec.ID, "err", err)
-			if derr := h.sandboxDelete(context.WithoutCancel(r.Context()), c.es, c.proj, saved); derr != nil {
-				slog.Error("e2b: delete after failed start", "sandbox", spec.ID, "err", derr)
-			}
-			e2bErr(w, http.StatusServiceUnavailable, "the sandbox did not start in time (no capacity for this size?)")
-			return
-		}
-		a, err := c.ss.AccessFor(r.Context(), c.proj.ID, spec.ID)
-		if err != nil {
-			e2bFail(w, err)
-			return
-		}
-		e2bJSON(w, http.StatusCreated, c.e2bSandbox(spec.ID, spec.Template, a))
-		return
-	}
-	// Capture the server-generated lifetime before the waiter replaces saved.Data with live data.
-	budget, expires := e2bCreateReadyBudget(custom != nil, customKind, saved.Data, time.Now())
-	a, err := e2bColdAccess(r.Context(), budget, expires, time.Now,
-		func(ctx context.Context) error { return h.e2bWaitReadyWithBudget(ctx, c, saved, budget, expires) },
-		func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, spec.ID) })
+	a, err := e2bColdAccess(r.Context(), c.ss.Config().Startup.Duration(), time.Time{}, time.Now,
+		func(ctx context.Context) error { return h.e2bWaitReady(ctx, c, saved) },
+		func(ctx context.Context) (*sandbox.Access, error) {
+			return committedStartupAccess(ctx, saved.Data, time.Now, func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, spec.ID) })
+		})
 	if err != nil {
-		slog.Warn("e2b: sandbox did not become ready; deleting it", "sandbox", spec.ID, "err", err)
-		latestEnd := time.Time{}
-		if custom != nil && customKind == "" {
-			latestEnd = expires
+		h.cleanupFailedStartup(r.Context(), c, saved)
+		msg := "sandbox startup failed; check template preparation and location availability"
+		var startup *sandbox.StartupError
+		if errors.As(err, &startup) {
+			msg = startup.Error()
 		}
-		if derr := h.sandboxDeleteAt(context.WithoutCancel(r.Context()), c.es, c.proj, saved, latestEnd); derr != nil {
-			slog.Error("e2b: delete after failed start", "sandbox", spec.ID, "err", derr)
-		}
-		e2bErr(w, http.StatusServiceUnavailable, "the sandbox did not become ready within its startup or lifetime limit")
+		e2bErr(w, http.StatusServiceUnavailable, msg)
 		return
 	}
 	e2bJSON(w, http.StatusCreated, c.e2bSandbox(spec.ID, spec.Template, a))
@@ -458,27 +453,20 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 // e2bWaitReady polls until the sandbox is RUNNING (envd initialised: the pod's startup probe), then stores the live
 // payload, so billing starts from runningSince even if nothing lists it.
 func (h *Handler) e2bWaitReady(ctx context.Context, c *e2bCaller, cr *cloud.CloudResource) error {
-	ctx, cancel := context.WithTimeout(ctx, e2bReadyTimeout)
-	defer cancel()
-	t := time.NewTicker(250 * time.Millisecond)
-	defer t.Stop()
-	for {
-		live, err := c.ss.GetSandbox(ctx, c.proj.ID, cr.ExternalID)
-		if err == nil && live["status"] == sandbox.StatusRunning {
-			cr.Data = live
-			now := time.Now().UTC()
-			cr.UpdatedAt = &now
-			if _, err := h.cloud.Update(ctx, cr); err != nil {
-				slog.Warn("e2b: cache update after start", "sandbox", cr.ExternalID, "err", err)
-			}
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-t.C:
-		}
+	live, err := c.ss.WaitReady(ctx, c.proj.ID, cr.ExternalID)
+	if err != nil {
+		return err
 	}
+	if err := startupResponseAlive(ctx, live); err != nil {
+		return err
+	}
+	cr.Data = live
+	now := time.Now().UTC()
+	cr.UpdatedAt = &now
+	if _, err := h.cloud.Update(ctx, cr); err != nil {
+		return err
+	}
+	return startupResponseAlive(ctx, live)
 }
 
 const (

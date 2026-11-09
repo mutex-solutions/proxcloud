@@ -72,7 +72,7 @@ func MarkVanished(cr *cloud.CloudResource, now time.Time) {
 	}
 	out := MarkDeleted(d, end)
 	// A build pod records its own start and end; one that failed before it started ran nothing.
-	if str(out["runningSince"]) == "" && str(d["kind"]) != "build" {
+	if str(out["runningSince"]) == "" && str(d["kind"]) != "build" && str(d["runtimeClock"]) != "ready" {
 		since := str(d["seenPendingAt"])
 		if since == "" {
 			since = str(d["startedAt"])

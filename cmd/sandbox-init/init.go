@@ -7,7 +7,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/sandboxenv"
 )
 
 const (
@@ -44,6 +47,18 @@ func splitEnv(environ []string) (map[string]string, []string) {
 		}
 	}
 	return user, list
+}
+
+// validateBootEnv accounts for image ENV too, which admission cannot inspect.
+// Linux caps argv+env to min(stack/4, 6 MiB), with a floor of 32 pages.
+func validateBootEnv(environ []string) error {
+	page := os.Getpagesize()
+	var stack syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_STACK, &stack); err != nil {
+		return fmt.Errorf("read Linux exec budget: %w", err)
+	}
+	limit := max(uint64(32*page), min(stack.Cur/4, uint64(6<<20)))
+	return sandboxenv.ValidateRuntime(environ, page, int(limit))
 }
 
 // initPayload is the JSON body for envd's POST /init (envd/spec/envd.yaml). Empty token omitted.

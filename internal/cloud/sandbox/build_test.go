@@ -142,7 +142,7 @@ func TestBuildState(t *testing.T) {
 		}
 	}
 	ok := pod("Succeeded", map[string]any{"containerStatuses": []any{map[string]any{"name": "push", "state": map[string]any{"terminated": map[string]any{
-		"exitCode": 0, "finishedAt": "2026-11-06T06:02:00Z", "message": testRegistry + "/p1/t1:b1@sha256:abcd\n"}}}}})
+		"exitCode": 0, "startedAt": "2026-11-06T06:00:00Z", "finishedAt": "2026-11-06T06:02:00Z", "message": testRegistry + "/p1/t1:b1@sha256:abcd\n"}}}}})
 	if s := buildStateOf(ok); s.Status != BuildReady || s.Digest != "sha256:abcd" {
 		t.Errorf("ready: %+v", s)
 	}
@@ -159,28 +159,28 @@ func TestBuildState(t *testing.T) {
 	if s := buildStateOf(pod("Running", nil)); s.Status != BuildBuilding {
 		t.Errorf("running: %+v", s)
 	}
-	if d := buildData(pod("Running", nil)); d["status"] != StatusRunning || d["runningSince"] != "2026-11-06T06:00:00Z" {
+	if d := buildData(pod("Running", map[string]any{"containerStatuses": []any{map[string]any{"name": "push", "state": map[string]any{"running": map[string]any{"startedAt": "2026-11-06T06:00:00Z"}}}}})); d["status"] != StatusRunning || d["runningSince"] != "2026-11-06T06:00:00Z" {
 		t.Errorf("running payload: %v", d)
 	}
 }
 
-// A build pod finished long ago is deleted by the listing, but still reported once.
-func TestListBuildsCleansUp(t *testing.T) {
+// Listing never deletes a terminal worker before the platform durably archives its diagnostics.
+func TestListBuildsRetainsForArchive(t *testing.T) {
 	f := newFake()
 	s := NewWithAPI(f, Config{Templates: map[string]Template{"py": {Image: "x"}}}, "svc")
 	s.now = func() time.Time { return time.Date(2026, 11, 6, 8, 0, 0, 0, time.UTC) }
 	pod := map[string]any{
 		"metadata": map[string]any{"name": "build-b1", "namespace": BuildNamespace, "labels": map[string]any{LabelBuild: "b1", LabelProject: "p1", LabelTemplateID: "t1"}},
 		"status": map[string]any{"phase": "Succeeded", "startTime": "2026-11-06T07:00:00Z", "containerStatuses": []any{map[string]any{"name": "push",
-			"state": map[string]any{"terminated": map[string]any{"exitCode": 0, "finishedAt": "2026-11-06T07:05:00Z", "message": "r@sha256:1"}}}}},
+			"state": map[string]any{"terminated": map[string]any{"exitCode": 0, "startedAt": "2026-11-06T07:00:00Z", "finishedAt": "2026-11-06T07:05:00Z", "message": "r@sha256:1"}}}}},
 	}
 	_ = f.ApplyCore(context.Background(), "pods", pod)
 	got, err := s.ListBuilds(context.Background(), "p1")
 	if err != nil || got["build-b1"]["status"] != StatusDeleted {
 		t.Fatalf("finished build must still be reported: %v %v", got, err)
 	}
-	if p, _ := f.GetCore(context.Background(), "pods", BuildNamespace, "build-b1"); p != nil {
-		t.Error("a build pod finished an hour ago must be deleted")
+	if p, _ := f.GetCore(context.Background(), "pods", BuildNamespace, "build-b1"); p == nil {
+		t.Error("a finished build must survive until its durable archive is confirmed")
 	}
 }
 
@@ -215,6 +215,10 @@ func TestAutoPauseLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	cr := f.crs[NamespaceFor("p1")+"/"+sp.ID]
+	cr["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "lastTransitionTime": now.Format(time.RFC3339)}}}
+	if _, err := s.GetSandbox(context.Background(), "p1", sp.ID); err != nil {
+		t.Fatal(err)
+	}
 	if digStr(cr, "metadata", "annotations", AnnotationEndAt) != "2026-11-06T10:10:00Z" || digStr(cr, "spec", "shutdownTime") != "2026-11-06T10:25:00Z" {
 		t.Fatalf("auto-pause end/shutdown: %v / %v", digStr(cr, "metadata", "annotations", AnnotationEndAt), digStr(cr, "spec", "shutdownTime"))
 	}

@@ -51,12 +51,19 @@ const (
 	maxContextBytes        = 2 << 30 // per COPY context upload
 	// maxProjectContextBytes caps all of a project's stored contexts: they share the object store with the registry's
 	// blobs. Over it, contexts older than contextEvictAge go first, oldest first.
-	maxProjectContextBytes = 10 << 30
-	contextEvictAge        = sandbox.BuildTimeout + 10*time.Minute // a presigned fetch URL's lifetime
-	maxStoredLogLines      = 2000
-	keptBuilds             = 10
-	buildPodGrace          = 2 * time.Minute // a finished build pod outlives one charge tick
-	defaultBaseImage       = "e2bdev/base:latest"
+	maxProjectContextBytes   = 10 << 30
+	contextEvictAge          = sandbox.BuildTimeout + 10*time.Minute // a presigned fetch URL's lifetime
+	maxStoredLogLines        = 8000
+	maxStoredLogBytes        = 512 << 10
+	buildCaptureRetry        = 30 * time.Second
+	buildCaptureGrace        = 10 * time.Minute
+	templateMutationTimeout  = 15 * time.Second
+	buildLaunchTimeout       = 30 * time.Second
+	buildLaunchGrace         = buildLaunchTimeout + 15*time.Second
+	buildCompensationTimeout = 15 * time.Second
+	keptBuilds               = 10
+	buildPodGrace            = 2 * time.Minute // a finished build pod outlives one charge tick
+	defaultBaseImage         = "e2bdev/base:latest"
 	// contextPartSize: a context up to this size is one PUT, a larger one a multipart upload in parts of this size.
 	contextPartSize = 16 << 20
 )
@@ -65,14 +72,19 @@ const (
 func (h *Handler) SetSandboxTemplates(s *pgdoc.Store) { h.sbTemplates = s }
 
 type templateBuild struct {
-	BuildID  string `json:"buildID"`
-	Status   string `json:"status"`
-	From     string `json:"from,omitempty"`
-	Image    string `json:"image,omitempty"` // ref@digest once ready
-	StartCmd string `json:"startCmd,omitempty"`
-	ReadyCmd string `json:"readyCmd,omitempty"`
-	User     string `json:"user,omitempty"`
-	Workdir  string `json:"workdir,omitempty"`
+	Import          *templateImport        `json:"import,omitempty"`
+	BuildResources  sandbox.BuildResources `json:"buildResources,omitempty"`
+	Diagnostics     *buildDiagnostics      `json:"diagnostics,omitempty"`
+	LaunchStartedAt *time.Time             `json:"launchStartedAt,omitempty"`
+	CancelRequested bool                   `json:"cancelRequested,omitempty"`
+	BuildID         string                 `json:"buildID"`
+	Status          string                 `json:"status"`
+	From            string                 `json:"from,omitempty"`
+	Image           string                 `json:"image,omitempty"` // ref@digest once ready
+	StartCmd        string                 `json:"startCmd,omitempty"`
+	ReadyCmd        string                 `json:"readyCmd,omitempty"`
+	User            string                 `json:"user,omitempty"`
+	Workdir         string                 `json:"workdir,omitempty"`
 	// StartAsRoot: the start command runs as root (inherited from a parent such as code-interpreter-v1 whose server
 	// needs it).
 	StartAsRoot bool                    `json:"startAsRoot,omitempty"`
@@ -90,6 +102,7 @@ type sandboxTemplateDoc struct {
 	ID            string            `json:"id"`
 	ProjectID     string            `json:"projectId"`
 	Name          string            `json:"name"`
+	Aliases       []string          `json:"aliases,omitempty"`
 	CPU           int               `json:"cpu"`
 	MemoryGiB     int               `json:"memoryGiB"`
 	Tags          map[string]string `json:"tags"` // tag → buildID
@@ -148,7 +161,7 @@ func buildsOn(cfg sandbox.Config) bool {
 
 func (h *Handler) loadTemplate(ctx context.Context, projectID, idOrName string) (*sandboxTemplateDoc, error) {
 	var t sandboxTemplateDoc
-	found, err := h.sbTemplates.FindOne(ctx, pgdoc.M{"projectId": projectID, "$or": []pgdoc.M{{"_id": idOrName}, {"name": idOrName}}}, &t)
+	found, err := h.sbTemplates.FindOne(ctx, pgdoc.M{"projectId": projectID, "$or": []pgdoc.M{{"_id": idOrName}, {"name": idOrName}, {"aliases": pgdoc.M{"$contains": idOrName}}}}, &t)
 	if err != nil || !found {
 		return nil, err
 	}
@@ -167,6 +180,7 @@ func (h *Handler) saveTemplate(ctx context.Context, t *sandboxTemplateDoc) error
 				return errBuildPinState
 			}
 			mergeConcurrent(t, &cur)
+			t.Aliases = cur.Aliases
 		}
 		now := time.Now().UTC()
 		t.UpdatedAt = &now
@@ -176,12 +190,10 @@ func (h *Handler) saveTemplate(ctx context.Context, t *sandboxTemplateDoc) error
 	})
 }
 
-// trimBuilds drops the oldest builds beyond keptBuilds, but never one a tag names (the template would stop resolving
-// and the prune would lose its image) nor one that is building (its pod is running and billed). Waiting builds are
-// trimmed like finished ones: every POST /v3/templates adds one, so keeping them all would let retries grow the record
-// without bound; the newest keptBuilds of them survive.
-// A snapshot keeps no ready build but the tagged one: a named snapshot taken again supersedes the previous image, which
-// the prune then deletes, so the stored size billed is that of the image kept.
+// trimBuilds bounds only cleaned failed history that no tag or active operation
+// references. Successful artifacts, waiting contexts and in-flight operations are
+// durable roots until explicit reference-aware history deletion exists. Retired
+// identities and pin tombstones survive trimming; no physical pruning is enabled.
 func trimBuilds(t *sandboxTemplateDoc) {
 	keep := map[string]bool{}
 	for _, id := range t.Tags {
@@ -190,12 +202,7 @@ func trimBuilds(t *sandboxTemplateDoc) {
 	drop := len(t.Builds) - keptBuilds
 	out := t.Builds[:0]
 	for _, b := range t.Builds { // oldest first (mergeConcurrent sorts by createdAt)
-		if t.Kind == "snapshot" && b.Status == sandbox.BuildReady && !keep[b.BuildID] && !buildPinActive(b) {
-			t.rememberRetiredBuild(b)
-			drop--
-			continue
-		}
-		if drop > 0 && !keep[b.BuildID] && b.Status != sandbox.BuildBuilding && !buildPinActive(b) {
+		if drop > 0 && !keep[b.BuildID] && b.Import == nil && b.Status == sandbox.BuildError && !buildNeedsSync(&b) && !buildPinActive(b) {
 			t.rememberRetiredBuild(b)
 			if b.Registry != nil {
 				t.RetiredBuilds = append(t.RetiredBuilds, b)
@@ -224,6 +231,7 @@ func (t *sandboxTemplateDoc) rememberRetiredBuild(b templateBuild) {
 // Builds are never removed except by trimming.
 func mergeConcurrent(t, cur *sandboxTemplateDoc) {
 	t.Deleting = cur.Deleting
+	t.Aliases = append([]string(nil), cur.Aliases...)
 	t.RetiredBuilds = cur.RetiredBuilds
 	t.RetiredBuildIDs = cur.RetiredBuildIDs
 	for _, b := range cur.RetiredBuilds {
@@ -246,12 +254,27 @@ func mergeConcurrent(t, cur *sandboxTemplateDoc) {
 	finished := func(b *templateBuild) bool { return b.Status == sandbox.BuildReady || b.Status == sandbox.BuildError }
 	for i := range t.Builds {
 		b := &t.Builds[i]
+		if cb := cur.build(b.BuildID); cb != nil && cb.Diagnostics != nil && (b.Diagnostics == nil || cb.Diagnostics.Revision > b.Diagnostics.Revision) {
+			b.Diagnostics, b.Logs = cb.Diagnostics, cb.Logs
+		}
+		if cb := cur.build(b.BuildID); cb != nil && cb.Import != nil && cb.Import.Registry != nil {
+			diagnostics, logs := b.Diagnostics, b.Logs
+			*b = *cb // only the dedicated import CAS writer changes its immutable operation
+			if diagnostics != nil && (b.Diagnostics == nil || diagnostics.Revision > b.Diagnostics.Revision) {
+				b.Diagnostics, b.Logs = diagnostics, logs
+			}
+			continue
+		}
 		if cb := cur.build(b.BuildID); cb != nil && cb.Registry != nil {
 			// Only registry-specific CAS writers may change a frozen operation;
 			// stale generic saves retain a newly completed result/tag, while
 			// deliberate edits to an already READY tag remain authoritative.
 			wasFinished := finished(b)
+			diagnostics, logs := b.Diagnostics, b.Logs
 			*b = *cb
+			if diagnostics != nil && (b.Diagnostics == nil || diagnostics.Revision > b.Diagnostics.Revision) {
+				b.Diagnostics, b.Logs = diagnostics, logs
+			}
 			if !wasFinished && cb.Status == sandbox.BuildReady {
 				for tg, id := range cur.Tags {
 					if id == cb.BuildID {
@@ -303,6 +326,7 @@ func (h *Handler) e2bTemplateRequest(w http.ResponseWriter, r *http.Request) {
 		Tags     []string `json:"tags"`
 		CPUCount int      `json:"cpuCount"`
 		MemoryMB int      `json:"memoryMB"`
+		sandbox.BuildResources
 	}
 	if !decodeE2B(w, r, &b) {
 		return
@@ -331,9 +355,10 @@ func (h *Handler) e2bTemplateRequest(w http.ResponseWriter, r *http.Request) {
 		e2bErr(w, http.StatusBadRequest, fmt.Sprintf("cpuCount must be at most %d and memoryMB at most %d", lim.MaxCPU, lim.MaxMemoryGiB*1024))
 		return
 	}
-	// A new build is new usage (it runs and is billed): the same gate as a sandbox create.
-	if err := h.sandboxUsageGate(r.Context(), c.proj, c.es); err != nil {
-		e2bFail(w, err)
+
+	buildResources, err := c.ss.Config().Build.Resources(b.BuildResources)
+	if err != nil {
+		e2bErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	ctx := r.Context()
@@ -343,6 +368,10 @@ func (h *Handler) e2bTemplateRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
+	if t != nil && (t.Deleting || t.ID == name && t.Name != name || len(t.Builds) > 0 && t.Builds[0].Import != nil) {
+		e2bErr(w, http.StatusConflict, "template identity or immutable import settings cannot be overwritten")
+		return
+	}
 	if t == nil {
 		n, err := h.sbTemplates.Count(ctx, pgdoc.M{"projectId": c.proj.ID, "internal": pgdoc.M{"$ne": true}})
 		if err != nil {
@@ -364,7 +393,7 @@ func (h *Handler) e2bTemplateRequest(w http.ResponseWriter, r *http.Request) {
 	if len(b.Tags) == 0 {
 		b.Tags = []string{"default"}
 	}
-	bl := templateBuild{BuildID: uuid.NewString(), Status: sandbox.BuildWaiting, Tags: b.Tags, CreatedAt: &now}
+	bl := templateBuild{BuildID: uuid.NewString(), Status: sandbox.BuildWaiting, Tags: b.Tags, CreatedAt: &now, BuildResources: buildResources}
 	t.Builds = append(t.Builds, bl)
 	if err := h.saveTemplate(ctx, t); err != nil {
 		e2bFail(w, err)
@@ -372,7 +401,7 @@ func (h *Handler) e2bTemplateRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	e2bJSON(w, http.StatusAccepted, map[string]any{
 		"templateID": t.ID, "buildID": bl.BuildID, "public": false,
-		"names": []string{t.Name}, "aliases": []string{t.Name}, "tags": b.Tags,
+		"names": t.names(), "aliases": t.names(), "tags": b.Tags,
 	})
 }
 
@@ -714,7 +743,7 @@ func (h *Handler) e2bTemplateBuild(w http.ResponseWriter, r *http.Request) {
 		e2bErr(w, http.StatusNotFound, "build not found")
 		return
 	}
-	if bl.Status != sandbox.BuildWaiting || bl.Registry != nil {
+	if bl.Import != nil || bl.Status != sandbox.BuildWaiting || bl.Registry != nil {
 		e2bErr(w, http.StatusConflict, "this build has already been started")
 		return
 	}
@@ -786,6 +815,18 @@ func (h *Handler) e2bTemplateBuild(w http.ResponseWriter, r *http.Request) {
 	bl.From, bl.StartCmd, bl.ReadyCmd = base.Ref, b.StartCmd, b.ReadyCmd
 	bl.User, bl.Workdir = res.User, res.Workdir
 	inheritFromParent(bl, base.Parent, b.StartCmd, b.ReadyCmd)
+	// Observe cluster workers before the SQL admission transaction. The committed
+	// reservation below covers the gap before Kubernetes exposes a new worker.
+	active, err := c.ss.ActiveBuildWorkers(ctx, c.proj.ID)
+	if err != nil {
+		e2bFail(w, err)
+		return
+	}
+	err = h.reserveBuildLaunch(ctx, c, t, bl, active)
+	if err != nil {
+		e2bFail(w, err)
+		return
+	}
 	var buildProof *registrypins.BuildProof
 	if pinStore != nil {
 		buildProof, err = h.authorizeBuildDispatch(ctx, pinStore, t, bl)
@@ -794,48 +835,31 @@ func (h *Handler) e2bTemplateBuild(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The count and the start hold one lock per project, across API replicas: without it parallel requests all pass
-	// the count, and one project could fill the build namespace's quota that every project shares.
-	errBusy := errors.New("busy")
-	err = h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
-		if err := h.sbTemplates.DB().LockXact(tc, "sbx-build:"+c.proj.ID); err != nil {
-			return err
-		}
-		running, err := c.ss.ListBuilds(tc, c.proj.ID)
-		if err != nil {
-			return err
-		}
-		active := 0
-		for _, d := range running {
-			if d["status"] != sandbox.StatusDeleted {
-				active++
-			}
-		}
-		if active >= maxConcurrentBuilds {
-			return errBusy
-		}
-		return h.withSandboxStart(tc, c.es.ID, func(startCtx context.Context) error {
-			return c.ss.StartBuild(startCtx, sandbox.BuildRequest{
-				ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: bl.BuildID, Image: templateImage(cfg, t, bl.BuildID), Result: res,
-				CPU: t.CPU, MemoryGiB: t.MemoryGiB,
-				Base: base.Ref, BaseAuth: base.Auth, BaseDockerConfig: base.DockerConfig, Pins: buildProof,
-				FetchURL: func(hsh string) string { return fetch[hsh] },
-			})
+	launchCtx, cancelLaunch := context.WithTimeout(ctx, buildLaunchTimeout)
+	err = h.withSandboxStart(launchCtx, c.es.ID, func(startCtx context.Context) error {
+		return c.ss.StartBuild(startCtx, sandbox.BuildRequest{
+			ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: bl.BuildID, Image: templateImage(cfg, t, bl.BuildID), Result: res,
+			CPU: bl.BuildResources.CPU, MemoryGiB: bl.BuildResources.MemoryGiB, DiskGiB: bl.BuildResources.DiskGiB,
+			Base: base.Ref, BaseAuth: base.Auth, BaseDockerConfig: base.DockerConfig, Pins: buildProof,
+			FetchURL: func(hash string) string { return fetch[hash] },
 		})
 	})
+	if err == nil {
+		err = launchCtx.Err()
+	}
+	cancelLaunch()
 	if pinStore != nil && err != nil {
-		dctx := context.WithoutCancel(ctx)
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), buildCompensationTimeout)
+		defer cancel()
 		if e := pinStore.CancelUnusedDispatch(dctx, buildProof, bl.Registry.Operation); e == nil {
 			h.failBuildBeforeDispatch(dctx, pinStore, t, bl, bl.Registry, err)
 		} else {
 			h.markBuildPinUnknown(dctx, pinStore, t, bl, bl.Registry)
 		}
 	}
-	if errors.Is(err, errBusy) {
-		e2bErr(w, http.StatusTooManyRequests, fmt.Sprintf("at most %d builds may run at once", maxConcurrentBuilds))
-		return
-	}
+
 	if err != nil {
+		h.recordBuildCancellation(ctx, t, bl)
 		e2bFail(w, err)
 		return
 	}
@@ -866,6 +890,11 @@ func (h *Handler) e2bTemplateBuild(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		slog.Error("e2b: build cache row", "build", bl.BuildID, "err", err)
 	}
+	if err := ctx.Err(); err != nil {
+		h.recordBuildCancellation(ctx, t, bl)
+		e2bFail(w, err)
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -892,29 +921,22 @@ func (h *Handler) e2bTemplateBuildStatus(w http.ResponseWriter, r *http.Request)
 		e2bErr(w, http.StatusNotFound, "build not found")
 		return
 	}
-	logs := bl.Logs
 	if t.Kind == "snapshot" && bl.Status == sandbox.BuildBuilding { // its result starts the storage billing
 		if done, _ := h.finishSnapshot(ctx, c, t, bl, false); done {
 			if ft, _ := h.loadTemplate(ctx, c.proj.ID, t.ID); ft != nil {
 				adoptBuild(t, bl, ft)
 			}
 		}
-		logs = bl.Logs
-	} else if bl.Registry != nil || bl.Status == sandbox.BuildBuilding || bl.Status == sandbox.BuildReady && bl.FinishedAt == nil {
-		logs = h.syncBuildPod(ctx, c, t, bl, true)
-	} else if bl.FinishedAt != nil && time.Since(*bl.FinishedAt) > buildPodGrace {
-		_ = c.ss.DeleteBuild(ctx, bl.BuildID)
+	} else if bl.Registry != nil || buildNeedsSync(bl) {
+		h.syncBuildPod(ctx, c, t, bl, true)
 	}
 	offset, _ := strconv.Atoi(r.URL.Query().Get("logsOffset"))
-	if offset < 0 || offset > len(logs) {
-		offset = len(logs)
-	}
-	page := logs[offset:]
+	page := buildLogPage(bl, offset)
 	entries := make([]any, 0, len(page))
 	for _, l := range page {
 		entries = append(entries, logEntry(l))
 	}
-	out := map[string]any{"templateID": t.ID, "buildID": bl.BuildID, "status": buildPinSDKStatus(bl), "logs": page, "logEntries": entries}
+	out := map[string]any{"templateID": t.ID, "buildID": bl.BuildID, "status": buildPinSDKStatus(bl), "logs": page, "logEntries": entries, "nextLogsOffset": len(bl.Logs), "diagnostics": consoleDiagnosticsView(bl.Diagnostics)}
 	if bl.Status == sandbox.BuildError {
 		out["reason"] = map[string]any{"message": bl.Reason, "step": bl.Step, "logEntries": entries}
 	}
@@ -931,19 +953,41 @@ func logEntry(line string) map[string]any {
 	case strings.Contains(low, "warn"):
 		level = "warn"
 	}
-	return map[string]any{"timestamp": time.Now().UTC().Format(time.RFC3339), "level": level, "message": line}
+	entry := map[string]any{"timestamp": time.Now().UTC().Format(time.RFC3339), "level": level, "message": line}
+	if strings.HasPrefix(line, "[") {
+		if phase, rest, ok := strings.Cut(line[1:], "] "); ok {
+			entry["phase"] = phase
+			if stamp, _, ok := strings.Cut(rest, " "); ok {
+				if _, err := time.Parse(time.RFC3339Nano, stamp); err == nil {
+					entry["timestamp"] = stamp
+				}
+			}
+		}
+	}
+	return entry
 }
 
 // syncBuildPod reads the build pod and records a finished build. markGone: a missing pod means the build failed (the
 // status endpoint); the background job leaves that to the next poll.
 func (h *Handler) syncBuildPod(ctx context.Context, c *e2bCaller, t *sandboxTemplateDoc, bl *templateBuild, markGone bool) []string {
+	if bl.Import != nil {
+		return h.syncImport(ctx, c, t, bl)
+	}
 	if bl.Registry != nil {
+		h.captureBuildArchive(ctx, c, t, bl)
 		h.recoverPinnedBuild(ctx, c, t, bl)
 		if ft, _ := h.loadTemplate(ctx, t.ProjectID, t.ID); ft != nil {
 			adoptBuild(t, bl, ft)
 		}
+		h.cleanupBuildArchive(ctx, c, t, bl, time.Now().UTC())
+		h.warmTemplate(ctx, c, t, bl)
 		return bl.Logs
 	}
+	if bl.CancelRequested {
+		return bl.Logs
+	} // no ambiguous apply can be "canceled" by absence
+	h.captureBuildArchive(ctx, c, t, bl)
+	defer func() { h.cleanupBuildArchive(ctx, c, t, bl, time.Now().UTC()) }()
 	st, err := c.ss.BuildPodState(ctx, t.ProjectID, bl.BuildID)
 	if err != nil {
 		return bl.Logs
@@ -951,13 +995,13 @@ func (h *Handler) syncBuildPod(ctx context.Context, c *e2bCaller, t *sandboxTemp
 	if st == nil {
 		if markGone {
 			ft, _, _ := h.finishBuild(ctx, t.ProjectID, t.ID, bl.BuildID, func(_ *sandboxTemplateDoc, b *templateBuild) {
-				b.Status, b.Reason = sandbox.BuildError, "the build disappeared before it finished"
+				b.Status, b.Reason = sandbox.BuildError, "the build disappeared before its outcome could be confirmed"
 			})
 			adoptBuild(t, bl, ft)
 		}
 		return bl.Logs
 	}
-	logs := c.ss.BuildLogs(ctx, bl.BuildID, maxStoredLogLines)
+	logs := bl.Logs
 	if data, err := c.ss.BuildData(ctx, bl.BuildID); err == nil && data != nil {
 		if cr := h.e2bRow(ctx, c, sandbox.BuildResourceID(bl.BuildID)); cr != nil {
 			cr.Data = data
@@ -1002,7 +1046,6 @@ func adoptBuild(t *sandboxTemplateDoc, bl *templateBuild, saved *sandboxTemplate
 // builds or moved tags since the caller read it, and two finishers (the status endpoint, the background job) may race.
 // changed=false: the build was already finished or is gone. FinishedAt is set here.
 func (h *Handler) finishBuild(ctx context.Context, projectID, templateID, buildID string, apply func(t *sandboxTemplateDoc, b *templateBuild)) (*sandboxTemplateDoc, bool, error) {
-	ctx = context.WithoutCancel(ctx) // a half-recorded result is worse than a late one
 	var out *sandboxTemplateDoc
 	changed := false
 	err := h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
@@ -1082,7 +1125,7 @@ func (t *sandboxTemplateDoc) e2bView() map[string]any {
 	}
 	return map[string]any{
 		"templateID": t.ID, "buildID": buildID, "cpuCount": t.CPU, "memoryMB": t.MemoryGiB * 1024, "diskSizeMB": 0,
-		"public": false, "aliases": []string{t.Name}, "names": []string{t.Name}, "tags": tags,
+		"public": false, "aliases": t.names(), "names": t.names(), "tags": tags,
 		"envdVersion": sandbox.EnvdVersion, "buildStatus": status, "buildCount": len(t.Builds), "spawnCount": 0,
 		"createdAt": ts(t.CreatedAt), "updatedAt": ts(t.UpdatedAt), "createdBy": nil,
 	}
@@ -1141,7 +1184,15 @@ func (h *Handler) e2bTemplateDelete(w http.ResponseWriter, r *http.Request) {
 // deleteTemplate removes a template's build pods, its contexts and its record, and ends a snapshot's storage billing.
 // Its images go with the next registry prune (nothing references them any more).
 func (h *Handler) deleteTemplate(ctx context.Context, ss *sandbox.Service, t *sandboxTemplateDoc) error {
-	ctx = context.WithoutCancel(ctx)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := h.freezeTemplateDeletion(ctx, t); err != nil {
+		return err
+	}
+	if err := h.retireImportPins(ctx, ss, t); err != nil {
+		return err
+	}
+	cleanupBuilds := append([]templateBuild(nil), t.Builds...)
 	if err := h.retireTemplatePins(ctx, ss, t); err != nil {
 		return err
 	}
@@ -1156,7 +1207,11 @@ func (h *Handler) deleteTemplate(ctx context.Context, ss *sandbox.Service, t *sa
 			}
 		}
 	}
-	for _, b := range t.Builds {
+	for _, b := range cleanupBuilds {
+		if b.Import != nil {
+			_ = ss.DeleteImport(ctx, b.BuildID)
+			continue
+		}
 		_ = ss.DeleteBuild(ctx, b.BuildID) // running or finished: no pod outlives its template
 	}
 	if bs, err := buildStorage(ss.Config()); err == nil {
