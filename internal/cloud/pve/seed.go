@@ -554,6 +554,23 @@ func seedTaskID(up UPID, node string) error {
 	return nil
 }
 
+// seedUploadTaskID cannot require the requested storage node: PVE's upload
+// handler runs imgcopy on the API-entry node and scp's to another target node.
+// WaitTask follows the node reported by this authenticated response. Config and
+// content-delete endpoints retain their target-node checks in seedTaskID.
+func seedUploadTaskID(up UPID) error {
+	if up.Node() == "" {
+		return fmt.Errorf("pve seed: missing or invalid upload task identity")
+	}
+	if err := seedTaskID(up, up.Node()); err != nil {
+		return err
+	}
+	if strings.Split(string(up), ":")[5] != "imgcopy" {
+		return fmt.Errorf("pve seed: unexpected upload task type")
+	}
+	return nil
+}
+
 // NodeDNS lists the DNS servers the node resolves through: what PVE's own drive tells a guest.
 func (c *Client) NodeDNS(ctx context.Context, node string) ([]string, error) {
 	var d struct {
@@ -595,7 +612,7 @@ func (c *Client) UploadISO(ctx context.Context, node, storage, filename string, 
 	path := "/nodes/" + node + "/storage/" + url.PathEscape(storage) + "/upload"
 	err = c.doBody(ctx, "POST", path, &body, w.FormDataContentType(), &upid)
 	if err == nil {
-		err = seedTaskID(upid, node)
+		err = seedUploadTaskID(upid)
 	}
 	return upid, err
 }
