@@ -129,6 +129,9 @@ func (s *Store) AuthorizeImportDispatch(ctx context.Context, op Operation, sourc
 		if e := s.rejectRuntimeDispatch(tc, tx, op.ID); e != nil {
 			return e
 		}
+		if e := s.rejectSnapshotDispatch(tc, tx, op.ID); e != nil {
+			return e
+		}
 		// Select ALL operation receipts, not only matching owner/project rows: a
 		// mismatching envelope must never authorize a subset of an operation.
 		rows, e := tx.Query(tc, `SELECT id::text,project_id,owner,generation,host,requested_ref,ref,state,epoch,binding_uid,binding_generation FROM registry_pin WHERE operation=$1 ORDER BY requested_ref FOR UPDATE`, op.ID)

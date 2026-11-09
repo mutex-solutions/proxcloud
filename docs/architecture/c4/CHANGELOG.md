@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: dormant typed snapshot registry dispatch prerequisite
+
+**What changed:** a separate fixed `snapshot/v1` proof and empty dispatch table,
+credential-free frozen source/provider/action correlations, exact full pending pin
+set and role epochs, and reciprocal BUILD/IMPORT/RUNTIME/SNAPSHOT UUID exclusion.
+Typed assembly observation permits managed BASE terminal release and successful
+DEST publication handoff only; failed/published DESTs have no retirement shortcut.
+
+**Why:** snapshot append is not content-preserving import. Reusing producer or
+runtime receipts would skip action/source/publication obligations. Source stamps
+are correlation, not current capture authority; no caller, feature flag, cluster
+or registry I/O, legacy adoption, real DELETE or full-writer coverage is enabled.
+
+**Views updated:** [dedicated C4/safety guide](../../registry-snapshot-core.md)
+(context, owned PRIMARY/RC sequence, source trust boundary, role lifecycle and
+conservative retention), plus C4 index. Owned loopback PostgreSQL and race proofs
+are bounded core evidence, not live snapshot/resume/fork or GC acceptance.
+
 ## 2026-11-10: PR #170 typed savings contract-expired outbox (default OFF)
 
 **What changed:** fixed fourth `savings-contract-expired/v1` family, exact validated

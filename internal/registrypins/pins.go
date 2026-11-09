@@ -142,8 +142,10 @@ func (s *Store) MarkUnknown(ctx context.Context, p Pin) (Pin, error) {
 // pinEvidence is private, typed and constructed only by the corresponding
 // observation methods. It is not a callback or caller-controlled generic grant.
 type pinEvidence struct {
-	importPod  *ImportPodEvidence
-	runtimePod *RuntimePodEvidence
+	importPod       *ImportPodEvidence
+	runtimePod      *RuntimePodEvidence
+	snapshotPod     *SnapshotPodEvidence
+	snapshotBinding *BindingEvidence
 }
 
 func (s *Store) advancePin(ctx context.Context, p Pin, state, ref, digest, uid, bindingGeneration string, evidence ...pinEvidence) (Pin, error) {
@@ -153,7 +155,17 @@ func (s *Store) advancePin(ctx context.Context, p Pin, state, ref, digest, uid, 
 	}
 	if len(evidence) == 1 {
 		observed = evidence[0]
-		if observed.importPod != nil && observed.runtimePod != nil {
+		types := 0
+		if observed.importPod != nil {
+			types++
+		}
+		if observed.runtimePod != nil {
+			types++
+		}
+		if observed.snapshotPod != nil {
+			types++
+		}
+		if types > 1 || observed.snapshotBinding != nil && observed.snapshotPod == nil {
 			return Pin{}, ErrConflict
 		}
 	}
@@ -179,6 +191,9 @@ func (s *Store) advancePin(ctx context.Context, p Pin, state, ref, digest, uid, 
 			return err
 		}
 		if err := s.guardRuntimePin(tc, tx, p, state, ref, uid, bindingGeneration, observed.runtimePod); err != nil {
+			return err
+		}
+		if err := s.guardSnapshotPin(tc, tx, p, state, ref, uid, bindingGeneration, observed.snapshotPod, observed.snapshotBinding); err != nil {
 			return err
 		}
 		return conflict(tx.QueryRow(tc, `UPDATE registry_pin SET state=$1,ref=$2,digest=$3,binding_uid=$4,binding_generation=$18,epoch=epoch+1,updated_at=clock_timestamp()
