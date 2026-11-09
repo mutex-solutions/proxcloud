@@ -33,13 +33,24 @@ func Connect(ctx context.Context, dsn string) (*DB, error) {
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(cctx, dsn)
+	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("pgdoc connect: %w", err)
+		return nil, errors.New("pgdoc: primary database configuration invalid")
+	}
+	// Validate EVERY newly opened connection: a multihost DSN or failover must
+	// not route later repo/auth/worker reads through a physical/read-only replica.
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error { return RequirePrimary(ctx, conn) }
+	pool, err := pgxpool.NewWithConfig(cctx, cfg)
+	if err != nil {
+		return nil, errors.New("pgdoc: primary database connection unavailable")
 	}
 	if err := pool.Ping(cctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("pgdoc ping: %w", err)
+	}
+	if err := RequirePrimary(cctx, pool); err != nil {
+		pool.Close()
+		return nil, err
 	}
 	if err := ensureTimeFn(cctx, pool); err != nil {
 		pool.Close()
@@ -95,6 +106,18 @@ type querier interface {
 }
 
 type txKey struct{}
+type txOwnerKey struct{}
+
+// Tx exposes only this DB's current WithTx transaction. It never starts an
+// independent transaction: transactional outbox writes must join the business
+// commit. Callers must not commit or roll back the returned handle themselves.
+func (d *DB) Tx(ctx context.Context) (pgx.Tx, error) {
+	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
+	if !ok || ctx.Value(txOwnerKey{}) != d {
+		return nil, errors.New("pgdoc: transaction required on this database")
+	}
+	return tx, nil
+}
 
 // WithTx runs fn inside a transaction; every Store call made with the ctx fn
 // receives executes on that transaction (commit on nil, rollback on error).
@@ -105,10 +128,14 @@ type txKey struct{}
 // be a second transaction, deadlocking on rows the outer one locked).
 func (d *DB) WithTx(ctx context.Context, fn func(ctx context.Context) error) error {
 	if _, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
+		if _, err := d.Tx(ctx); err != nil {
+			return err
+		}
 		return fn(ctx)
 	}
 	return pgx.BeginFunc(ctx, d.Pool, func(tx pgx.Tx) error {
-		return fn(context.WithValue(ctx, txKey{}, tx))
+		tctx := context.WithValue(ctx, txKey{}, tx)
+		return fn(context.WithValue(tctx, txOwnerKey{}, d))
 	})
 }
 
@@ -168,11 +195,31 @@ func (d *DB) WithAdvisoryLock(ctx context.Context, key string, try bool, fn func
 }
 
 func (d *DB) q(ctx context.Context) querier {
-	if tx, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
+	if _, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
+		tx, err := d.Tx(ctx)
+		if err != nil {
+			return rejectedQuerier{err: err}
+		}
 		return tx
 	}
 	return d.Pool
 }
+
+// Reject a wrong-DB context at EVERY Store SQL boundary, including reads and
+// LockXact. Falling back to this pool would also break atomic business/outbox.
+type rejectedQuerier struct{ err error }
+
+func (q rejectedQuerier) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, q.err
+}
+func (q rejectedQuerier) Query(context.Context, string, ...any) (pgx.Rows, error) { return nil, q.err }
+func (q rejectedQuerier) QueryRow(context.Context, string, ...any) pgx.Row {
+	return rejectedRow{err: q.err}
+}
+
+type rejectedRow struct{ err error }
+
+func (r rejectedRow) Scan(...any) error { return r.err }
 
 // Per-process id state: a fixed random middle + a monotonic counter tail, so
 // ids minted by one process sort in insertion order even within one second.

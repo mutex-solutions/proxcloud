@@ -136,21 +136,27 @@ func updateBillItems(rc RatingContext, bc BillingContext, res *BillingResource, 
 	item.Metadata = res.Values
 }
 
-// advanceWatermark moves the rated-up-to mark of the charge's cadence to the cycle timestamp, or to the resource's
-// deletion when that is later: such a row was just rated up to its deletion (getTimeUnitsDiff), so a mark at the cycle
-// would rate the unit between the two again on the next charge.
+// advanceWatermark never goes past the original cutoff or rewinds a newer mark.
+// Deleted resources use the earlier deletion, rounded up by getTimeUnitsDiff on
+// their final interval; repeating that ended interval is a no-op.
 func advanceWatermark(rc RatingContext, item *BillItem, res *BillingResource) {
 	ct := rc.CycleTimestamp
-	if res.DeletedAt != nil && res.DeletedAt.After(ct) {
+	if res.DeletedAt != nil && res.DeletedAt.Before(ct) {
 		ct = *res.DeletedAt
 	}
 	switch rc.TimeUnit {
 	case TimeUnitMinute:
-		item.TimeUnits.MinuteLastRateTime = &ct
+		if last := item.TimeUnits.MinuteLastRateTime; last == nil || ct.After(*last) {
+			item.TimeUnits.MinuteLastRateTime = &ct
+		}
 	case TimeUnitHour:
-		item.TimeUnits.HourLastRateTime = &ct
+		if last := item.TimeUnits.HourLastRateTime; last == nil || ct.After(*last) {
+			item.TimeUnits.HourLastRateTime = &ct
+		}
 	case TimeUnitMonth:
-		item.TimeUnits.MonthLastRateTime = &ct
+		if last := item.TimeUnits.MonthLastRateTime; last == nil || ct.After(*last) {
+			item.TimeUnits.MonthLastRateTime = &ct
+		}
 	}
 }
 
@@ -180,7 +186,7 @@ func getTotalCap(bc BillingContext, timeUnit string, results []PricePlanRuleResu
 // of a refund, which is what lets the charge job feed archived rows on every pass.
 func getTimeUnitsDiff(bc BillingContext, rc RatingContext, item *BillItem, res *BillingResource) int64 {
 	chargeTime := rc.CycleTimestamp
-	if res.DeletedAt != nil {
+	if res.DeletedAt != nil && res.DeletedAt.Before(chargeTime) {
 		chargeTime = *res.DeletedAt
 	}
 	limit := int64(bc.timeUnitLimit(rc.TimeUnit))

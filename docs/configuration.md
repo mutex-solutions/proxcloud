@@ -157,9 +157,9 @@ pause, and there is no `QUEUE_ENABLED` setting.
 |---------|-----|------|---------|---------|
 | Scheduler | `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | `proxcloud.jobs.scheduler-enabled` | `false` | Auto-start the charge/metrics crons (charges bills on a timer). |
 | Debug triggers | `PROXCLOUD_JOBS_DEBUG_TRIGGERS` | `proxcloud.jobs.debug-triggers` | `false` | Expose on-demand `POST :8081/debug/run-*` triggers **without** starting the crons — for deterministic, manual runs. |
-| Worker concurrency | `PROXCLOUD_JOBS_WORKER_CONCURRENCY` | `proxcloud.jobs.worker-concurrency` | `2` | `1..16` bounded workers per API pod (`api.jobs.workerConcurrency`). Always active, using the writable primary. |
-| Poll interval | `PROXCLOUD_JOBS_POLL_INTERVAL` | `proxcloud.jobs.poll-interval` | `1s` | Go duration, `100ms..1m` (`api.jobs.pollInterval`). |
-| Lease duration | `PROXCLOUD_JOBS_LEASE_DURATION` | `proxcloud.jobs.lease-duration` | `1m` | Go duration, `10s..10m` (`api.jobs.leaseDuration`); engine uses database-time owner+epoch CAS fencing. |
+| Worker concurrency | `PROXCLOUD_JOBS_WORKER_CONCURRENCY` | — (env only) | `2` | `1..16` bounded workers per API pod (`api.jobs.workerConcurrency`). Always active, using the writable primary. |
+| Poll interval | `PROXCLOUD_JOBS_POLL_INTERVAL` | — (env only) | `1s` | Go duration, `100ms..1m` (`api.jobs.pollInterval`). |
+| Lease duration | `PROXCLOUD_JOBS_LEASE_DURATION` | — (env only) | `1m` | Go duration, `10s..10m` (`api.jobs.leaseDuration`); engine uses database-time owner+epoch CAS fencing. |
 | Legacy Rabbit fanout | `PROXCLOUD_JOBS_RABBIT_FANOUT` | `proxcloud.jobs.rabbit-fanout` | `false` | **true refuses startup**, including a true YAML setting. Stop producers, drain/reconcile and record old queue evidence before clearing. |
 
 Storage placement is configured per Proxmox provider too, not through env. The

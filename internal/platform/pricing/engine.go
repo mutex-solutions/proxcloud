@@ -2,6 +2,7 @@ package pricing
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -11,6 +12,11 @@ import (
 // attribute can return an error — an undeclared attribute yields a not-found error,
 // aborting the whole rating call, so we bubble it up.
 type Engine struct{ clock Clock }
+
+// At returns a per-call immutable clock copy. Durable jobs rate the ORIGINAL
+// producer cycle even after a month boundary; UI previews keep SystemClock.
+// Never mutate the shared engine: multiple profile workers run concurrently.
+func (e *Engine) At(cutoff time.Time) *Engine { return &Engine{clock: fixedClock{t: cutoff.UTC()}} }
 
 // NewEngine builds an Engine with the given Clock (SystemClock in production).
 func NewEngine(c Clock) *Engine {

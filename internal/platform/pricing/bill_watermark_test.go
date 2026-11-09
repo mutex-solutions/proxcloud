@@ -5,6 +5,31 @@ import (
 	"time"
 )
 
+// Older queued cycles may run after a newer one; they must not rewind a watermark
+// and make the next new cycle charge that interval for a second time.
+func TestWatermarksNeverRewind(t *testing.T) {
+	start := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+	for _, unit := range []string{TimeUnitMinute, TimeUnitHour} {
+		d := time.Hour
+		if unit == TimeUnitMinute {
+			d = time.Minute
+		}
+		cycle := start.AddDate(0, 0, -4)
+		bill := &Bill{InvoiceCurrency: "USD", BillingCycle: &BillBillingCycle{StartDate: &cycle}}
+		res := billRes("r", nil)
+		res.CreatedAt = &start
+		rules := []PricePlanRuleResult{result("rule1", ApplyAddToTotal, amt("vcpu", "5"))}
+		for _, n := range []int{2, 1, 3} {
+			ct := start.Add(time.Duration(n) * d)
+			SaveChargingToBill(RatingContext{TimeUnit: unit, CycleTimestamp: ct}, BillingContext{}, bill, res, rules, ct)
+		}
+		it := onlyItem(t, bill)
+		if !it.NetAmount.Equal(mustDec("15")) {
+			t.Fatalf("%s out-of-order net=%s want15", unit, it.NetAmount)
+		}
+	}
+}
+
 // A row archived after a cycle boundary but before that cycle's charge ran (deleted 13:00:10, the 13:00 charge runs at
 // 13:00:30) is rated up to its deletion, so the next charge must not rate the 13:00 hour again: the hours it existed
 // in are 10, 11, 12 and 13.

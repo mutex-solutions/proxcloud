@@ -29,6 +29,14 @@ C3 billing/platform and C4 rating path. [Cutover runbook](../../postgres-jobs-mi
 Validation is local rendering/lint and mocked installer migration gates; no existing lab resource
 or deployment is changed by this PR.
 
+## 2026-11-09: primary durable native billing and transactional enqueue
+
+**What changed:** the API no longer connects to RabbitMQ. Native dispatch enqueues a versioned original profile/cadence/cutoff on PRIMARY; bounded competing workers use SKIP LOCKED, DB-clock UUID-owner/epoch leases and fenced retry/ACK. The DB-only worker joins all service bill mutations, a retained financial receipt and ACK in one pgdoc transaction; `EnqueueTx` joins the same business commit and rejects wrong-database contexts at every Store boundary. Monthly clock and deletion accrual honor original cutoffs; watermarks never rewind. Issued cycles require reconciliation, and invoice issuance defers on known unresolved backlog. Status is bounded/lag-tolerant with an optional separate read-only pool; authorization/replay/claims/finance never use it. Replay preserves immutable payload and commits operator audit. Legacy fanout true is a migration error, not a silently dropped queue.
+
+**Why:** a delayed Rabbit payload had no original cutoff, poison was dropped and business commit versus broker ACK was not atomic. A read replica cannot coordinate leases/receipts or fresh security decisions. Stock compatible River completion/rescue paths did not fence a superseded attempt; a compact fixed-kind primary module avoids a generic framework/fork. At-least-once execution plus financial receipt is not external exactly-once behavior.
+
+**Diagrams updated:** C4 durable job sequence and invariant table. Deployment C2/C3 removal/configuration is a separate PR after legacy drain/reconciliation; mail/invite outbox and cross-pod SSE are explicitly not claimed. Real PostgreSQL tests cover ownership/crash/transaction boundaries and actual bill money/units; operator migration/retention evidence is in `docs/durable-jobs.md`.
+
 ## 2026-11-09: poll the actual worker of a cross-node seed upload
 
 **What changed:** ISO uploads require a nonempty, structurally valid `imgcopy` UPID, but no longer require its

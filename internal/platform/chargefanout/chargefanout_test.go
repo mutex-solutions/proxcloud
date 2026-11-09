@@ -5,78 +5,55 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 )
 
-type fakePub struct {
-	queue string
-	msgs  [][]byte
+type fakeQueue struct{ jobs []*durablejobs.Job }
+
+func (f *fakeQueue) Enqueue(_ context.Context, kind, key string, payload []byte, _ int) (string, error) {
+	f.jobs = append(f.jobs, &durablejobs.Job{Kind: kind, Key: key, Payload: payload})
+	return key, nil
 }
 
-func (f *fakePub) Publish(_ context.Context, queue string, body []byte) error {
-	f.queue = queue
-	f.msgs = append(f.msgs, body)
+type fakeLister []string
+
+func (f fakeLister) ActiveProfileIDs(context.Context) ([]string, error) { return f, nil }
+
+type fakeCharger struct {
+	at       time.Time
+	id, unit string
+}
+
+func (f *fakeCharger) ChargeProfileByID(_ context.Context, id, unit string, at time.Time) error {
+	f.at = at
+	f.id = id
+	f.unit = unit
 	return nil
 }
-
-type fakeLister struct{ ids []string }
-
-func (f fakeLister) ActiveProfileIDs(context.Context) ([]string, error) { return f.ids, nil }
-
-type fakeConsumer struct{ handler func([]byte) error }
-
-func (f *fakeConsumer) Consume(_ string, handler func([]byte) error) (func() error, error) {
-	f.handler = handler
-	return func() error { return nil }, nil
-}
-
-type fakeCharger struct{ calls []Msg }
-
-func (f *fakeCharger) ChargeProfileByID(_ context.Context, id, timeUnit string, _ time.Time) error {
-	f.calls = append(f.calls, Msg{ProfileID: id, TimeUnit: timeUnit})
-	return nil
-}
-
-// TestPublishFansOutOnePerProfile: one message per ACTIVE profile, to the charge queue.
-func TestPublishFansOutOnePerProfile(t *testing.T) {
-	pub := &fakePub{}
-	n, err := Publish(context.Background(), pub, fakeLister{ids: []string{"p1", "p2", "p3"}}, "minute")
-	if err != nil || n != 3 {
-		t.Fatalf("Publish = %d (err %v), want 3", n, err)
+func TestOriginalCutoffSurvivesDelayedWorker(t *testing.T) {
+	q := &fakeQueue{}
+	at := time.Date(2026, 10, 31, 23, 59, 42, 0, time.UTC)
+	n, err := Publish(context.Background(), q, fakeLister{"p1", "p2"}, "minute", at)
+	if err != nil || n != 2 {
+		t.Fatalf("Publish=%d %v", n, err)
 	}
-	if pub.queue != Queue {
-		t.Fatalf("queue = %q, want %q", pub.queue, Queue)
-	}
-	if len(pub.msgs) != 3 {
-		t.Fatalf("published %d msgs, want 3", len(pub.msgs))
-	}
-	var m Msg
-	if err := json.Unmarshal(pub.msgs[0], &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if m.ProfileID != "p1" || m.TimeUnit != "minute" {
-		t.Fatalf("msg[0] = %+v, want {p1 minute}", m)
-	}
-}
-
-// TestConsumerDecodesAndCharges: a message → ChargeProfileByID with the decoded fields.
-func TestConsumerDecodesAndCharges(t *testing.T) {
-	con := &fakeConsumer{}
 	charger := &fakeCharger{}
-	if _, err := StartConsumer(con, charger, nil); err != nil {
-		t.Fatalf("StartConsumer: %v", err)
+	if err = Handler(charger)(context.Background(), q.jobs[0]); err != nil {
+		t.Fatal(err)
 	}
-	body, _ := json.Marshal(Msg{ProfileID: "bp9", TimeUnit: "hour"})
-	if err := con.handler(body); err != nil {
-		t.Fatalf("handler: %v", err)
+	if charger.id != "p1" || charger.unit != "minute" || !charger.at.Equal(at.Truncate(time.Minute)) {
+		t.Fatalf("processing time replaced original: %+v", charger)
 	}
-	if len(charger.calls) != 1 || charger.calls[0].ProfileID != "bp9" || charger.calls[0].TimeUnit != "hour" {
-		t.Fatalf("charger calls = %+v, want one {bp9 hour}", charger.calls)
+	q.jobs[0].Key = "p2|hour|arbitrary"
+	if Handler(charger)(context.Background(), q.jobs[0]) == nil {
+		t.Fatal("identity/payload mismatch accepted")
 	}
-	// a bad message surfaces an error (→ nack) and does not charge.
-	if err := con.handler([]byte("not-json")); err == nil {
-		t.Fatalf("bad message should error")
-	}
-	if len(charger.calls) != 1 {
-		t.Fatalf("bad message must not charge: %+v", charger.calls)
+}
+func TestRejectPoison(t *testing.T) {
+	for _, body := range []string{`not-json`, `{}`, `{"version":1,"profileId":"p1","timeUnit":"hour","cycleAt":"2026-10-15T12:00:00Z","command":"rm"}`} {
+		if _, err := Decode(&durablejobs.Job{Kind: durablejobs.Billing, Payload: json.RawMessage(body)}); err == nil {
+			t.Fatalf("poison accepted: %s", body)
+		}
 	}
 }

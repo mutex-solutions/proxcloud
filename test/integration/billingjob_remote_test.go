@@ -260,7 +260,8 @@ func decodeCharge(r *http.Request, out *billingclient.ChargeRequest) error {
 // double-billing on retry, silently.
 func TestChargeReplaySafety(t *testing.T) {
 	ctx := context.Background()
-	now := time.Now().UTC()
+	// Reproducible mid-month cycle, independent of the suite's calendar day.
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 
 	t.Run("minute cadence is idempotent on replay", func(t *testing.T) {
 		db := freshPG(t)
@@ -285,6 +286,12 @@ func TestChargeReplaySafety(t *testing.T) {
 	t.Run("month cadence is idempotent on replay (via the cap gate)", func(t *testing.T) {
 		db := freshPG(t)
 		profileID, _, driver := chargeFixture(t, db, now)
+		// MONTH is canonically truncated to the original UTC day. The resource
+		// must already exist at that cutoff, not be created later that afternoon.
+		created := now.Truncate(24 * time.Hour).Add(-time.Hour)
+		if _, err := db.C("cloudResource").SetFields(ctx, nil, pgdoc.M{"createdAt": created}, nil); err != nil {
+			t.Fatal(err)
+		}
 
 		// Price the instance per month so the MONTH cadence has something to charge.
 		mustInsert(t, db, "pricePlanRule", pricing.PricePlanRule{

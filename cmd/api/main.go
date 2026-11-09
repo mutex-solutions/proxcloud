@@ -1,5 +1,5 @@
 // Command proxcloud-api is the Go web server entrypoint: boot, read the config
-// contract, connect PostgreSQL + RabbitMQ, attempt OIDC discovery, and serve
+// contract, connect PostgreSQL primary + durable jobs, attempt OIDC discovery, and serve
 // health endpoints — so the Helm chart can deploy this image unchanged.
 package main
 
@@ -14,13 +14,11 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/shopspring/decimal"
 
-	"github.com/mutex-solutions/proxcloud/internal/amqp"
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/billingresource"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/cephcred"
@@ -34,6 +32,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/syncjob"
 	"github.com/mutex-solutions/proxcloud/internal/config"
+	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/health"
 	"github.com/mutex-solutions/proxcloud/internal/oidc"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -102,7 +101,7 @@ func run() error {
 	log := newLogger(cfg.LogLevel)
 	log.Info("starting proxcloud-api (go)",
 		"appPort", cfg.Server.Port, "mgmtPort", cfg.Management.Port,
-		"rabbitHost", cfg.Rabbit.Host)
+		"durableJobs", "postgres-primary")
 
 	ctx := context.Background()
 
@@ -113,16 +112,24 @@ func run() error {
 	}
 	defer func() { _ = pg.Close(context.Background()) }()
 
-	// RabbitMQ: maintain the connection in the background (connect + auto-
-	// reconnect) so liveness is immediate and readiness self-heals if the
-	// broker connection drops — otherwise a flapped pod deadlocks rollouts.
-	var rabbit atomic.Pointer[amqp.Client]
-	go maintainRabbit(ctx, cfg, log, &rabbit)
-	defer func() {
-		if ac := rabbit.Load(); ac != nil {
-			_ = ac.Close()
+	// The queue and business writes share this exact PRIMARY pool. Nothing in
+	// the application connects to RabbitMQ. Removal of deployment resources is
+	// a separate migration after old producers/queues have been reconciled.
+	if cfg.Rabbit.Host != "" || cfg.Rabbit.Username != "" || cfg.Rabbit.Password != "" {
+		log.Warn("legacy RabbitMQ configuration ignored; preserve/drain old queues before removing broker resources")
+	}
+	jobStore := durablejobs.New(pg)
+	if err := jobStore.Ensure(ctx); err != nil {
+		return fmt.Errorf("durable jobs: %w", err)
+	}
+	jobHistory := durablejobs.NewHistory(pg.Pool)
+	if cfg.DB.ReadURL != "" {
+		jobHistory, err = durablejobs.OpenHistory(ctx, cfg.DB.ReadURL)
+		if err != nil {
+			return fmt.Errorf("job history read pool: %w", err)
 		}
-	}()
+		defer jobHistory.Close()
+	}
 
 	// Platform: User repo + the principal resolver (get-or-create by sub).
 	users := user.NewRepo(pg)
@@ -355,7 +362,7 @@ func run() error {
 	inviteH := projectinvite.NewHandler(inviteRepo, users, projectSvc, orgRepo, auditSvc, mailSvc, cfg.Self.UIBaseURL)
 	// adminH is created below, after esSvc (it needs the externalService loader for cloud-admin reads).
 	// SSE real-time stream (StreamingController + SseService). The in-memory pool + handler;
-	// the real event source (os-notification → rabbit topic → Notify) is wired later.
+	// This pool is process-local SSE delivery, not durable queue fan-out.
 	ssePool := sse.NewPool()
 	sseH := sse.NewHandler(ssePool)
 	// Gate stream subscription on real project membership: a user may only subscribe to a project's
@@ -521,6 +528,7 @@ func run() error {
 	mcpH := mcpsrv.New(log, hmacLookup, cfg.Auth.Main.IssuerURI, cfg.Auth.Admin.IssuerURI, cfg.Self.APIBaseURL)
 	metricsRepo := metrics.NewRepo(pg)
 	chargeJob := billingjob.New(billingjob.Deps{
+		DB:               pg,
 		Billing:          billingRepo,
 		ExternalServices: esSvc,
 		Projects:         projectRepo,
@@ -736,6 +744,7 @@ func run() error {
 	// Monthly bill finalization: finalize each profile's previous-month OPEN bill (OPEN→SENT/PAID) so
 	// the collect + dunning crons have SENT bills to act on.
 	billSendSvc := billing.NewBillSendService(billingRepo, pricingRepo)
+	billSendSvc.SetChargeBacklog(jobStore.BillingBacklogTx)
 	billSendSvc.SetNotifier(attachingNotifier{mailSvc})
 	// {{billUrl}} in the bill mails: the bill page of the profile's first ENABLED project; the
 	// console root when nothing resolves so the link still opens.
@@ -782,26 +791,35 @@ func run() error {
 		log.Warn("billing provider EXTERNAL: bills are rated by the billing service, not in-process",
 			"url", cfg.Billing.URL)
 	default:
-		billingProv = billingprovider.NewNative(chargeJob,
-			func() billingprovider.Publisher {
-				if rc := rabbit.Load(); rc != nil {
-					return rc
-				}
-				return nil
-			}, cfg.Jobs.RabbitFanout, log)
-		log.Info("billing provider NATIVE: bills are rated in-process",
-			"rabbitFanout", cfg.Jobs.RabbitFanout)
+		billingProv = billingprovider.NewNative(func(ctx context.Context, unit string, original time.Time) error {
+			n, err := chargefanout.Publish(ctx, jobStore, chargeJob, unit, original)
+			if err == nil {
+				log.Info("billing cycles durably enqueued", "timeUnit", unit, "count", n)
+			}
+			return err
+		})
+		log.Info("billing provider NATIVE: original cycles queued on PostgreSQL primary")
 	}
 	chargeDispatch := func(ctx context.Context, timeUnit string) error {
 		return billingProv.Charge(ctx, timeUnit, time.Now().UTC())
 	}
 	registerJobs(sched, billingProv.Name(), chargeDispatch, metricsJob, syncJob, savingsSvc, suspensionJob, collectSvc, txnScanner, deletionJob, billSendSvc, projectH, log)
-	// The fan-out consumer belongs to the native provider: it drains the queue that provider
-	// publishes to. Under the external provider nothing publishes, so a consumer would idle
-	// forever on a queue that never fills.
-	if cfg.Jobs.RabbitFanout && billingProv.Name() == billingprovider.Native {
-		go startChargeConsumer(&rabbit, chargeJob, log)
+	// Workers process only accepted durable jobs, never create timed billing work.
+	// Keep the scheduler OFF by default. The external provider is not registered as
+	// an automatically retried handler: its HTTP side effects are not our transaction.
+	if err := chargeJob.Prepare(ctx); err != nil {
+		return fmt.Errorf("billing prepare: %w", err)
 	}
+	handlers := map[string]durablejobs.Handler{durablejobs.Selftest: chargefanout.SelftestHandler}
+	if billingProv.Name() == billingprovider.Native {
+		handlers[durablejobs.Billing] = chargefanout.Handler(chargeJob)
+	}
+	worker := &durablejobs.Worker{Store: jobStore, Handlers: handlers, Concurrency: cfg.Jobs.WorkerConcurrency, Poll: cfg.Jobs.PollInterval, Lease: cfg.Jobs.LeaseDuration, Log: log}
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() { defer close(workerDone); _ = worker.Run(workerCtx) }()
+	defer func() { stopWorker(); <-workerDone }()
+	adminH.SetDurableJobs(jobStore, jobHistory, chargefanout.Validate)
 	if cfg.Jobs.SchedulerEnabled {
 		log.Warn("scheduled jobs ENABLED (charge cron + cloud metrics) — bills will be charged on a timer")
 		sched.Start()
@@ -971,40 +989,17 @@ func run() error {
 				})
 				jobResult(w, map[string]any{"ran": "send-test-mail", "to": to, "template": key}, err)
 			},
-			"run-charge-fanout": func(w http.ResponseWriter, r *http.Request) {
-				rc := rabbit.Load()
-				if rc == nil {
-					jobResult(w, nil, errors.New("rabbitmq not connected"))
-					return
-				}
-				n, err := chargefanout.Publish(r.Context(), rc, chargeJob, pricing.TimeUnitMinute)
-				jobResult(w, map[string]any{"ran": "charge-fanout", "published": n}, err)
+			"jobs-selftest": func(w http.ResponseWriter, r *http.Request) {
+				ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+				defer cancel()
+				id, err := chargefanout.Selftest(ctx, jobStore)
+				jobResult(w, map[string]any{"id": id, "roundtrip": "postgres-primary"}, err)
 			},
-			// rabbit-selftest proves Publish+Consume work live against the cluster broker (an
-			// isolated queue round-trip) without needing any billing data seeded.
-			"rabbit-selftest": func(w http.ResponseWriter, r *http.Request) {
-				rc := rabbit.Load()
-				if rc == nil {
-					jobResult(w, nil, errors.New("rabbitmq not connected"))
-					return
-				}
-				got := make(chan string, 1)
-				stop, err := rc.Consume("proxcloud.selftest", func(b []byte) error { got <- string(b); return nil })
-				if err != nil {
-					jobResult(w, nil, err)
-					return
-				}
-				defer func() { _ = stop() }()
-				if err := rc.Publish(r.Context(), "proxcloud.selftest", []byte("ping")); err != nil {
-					jobResult(w, nil, err)
-					return
-				}
-				select {
-				case b := <-got:
-					jobResult(w, map[string]any{"roundtrip": b}, nil)
-				case <-time.After(5 * time.Second):
-					jobResult(w, nil, errors.New("selftest timeout"))
-				}
+			"jobs-status": func(w http.ResponseWriter, r *http.Request) {
+				ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+				defer cancel()
+				stats, err := jobHistory.Stats(ctx)
+				jobResult(w, map[string]any{"history": stats}, err)
 			},
 		}
 		// gen-hmac-key mints an Admin-API SigV4 key pair on the operator mgmt port and is
@@ -1020,15 +1015,8 @@ func run() error {
 		}
 	}
 
-	h := health.New(
-		health.Checker{Name: "postgres", Check: pg.Ping},
-		health.Checker{Name: "rabbit", Check: func(context.Context) error {
-			if ac := rabbit.Load(); ac != nil && ac.Healthy() {
-				return nil
-			}
-			return errors.New("rabbitmq not connected")
-		}},
-	)
+	h := health.New(health.Checker{Name: "postgres", Check: pg.Ping},
+		health.Checker{Name: "durableJobsPrimary", Check: func(ctx context.Context) error { return pgdoc.RequirePrimary(ctx, pg.Pool) }})
 
 	// CORS allowed origins for the browser FE → api cross-origin calls (the UI + admin SPAs run
 	// on different subdomains). Derived from the self UI/admin URLs (origin only — strip path) +
@@ -1113,23 +1101,6 @@ func run() error {
 		_ = csiSrv.Shutdown(sctx)
 	}
 	return nil
-}
-
-// startChargeConsumer waits for the RabbitMQ broker to come up (background-connected) then
-// subscribes a charge consumer on this pod. Bounded wait so a missing broker just logs.
-func startChargeConsumer(rabbit *atomic.Pointer[amqp.Client], charger chargefanout.Charger, log *slog.Logger) {
-	for i := 0; i < 60; i++ {
-		if rc := rabbit.Load(); rc != nil && rc.Healthy() {
-			if _, err := chargefanout.StartConsumer(rc, charger, log); err != nil {
-				log.Error("charge fan-out consumer", "err", err)
-				return
-			}
-			log.Warn("charge fan-out consumer started", "queue", chargefanout.Queue)
-			return
-		}
-		time.Sleep(2 * time.Second)
-	}
-	log.Error("charge fan-out consumer: broker not up after 120s")
 }
 
 // registerJobs wires the charge cron (minutely/hourly/monthly) + the usage metrics job
@@ -1522,36 +1493,6 @@ func serve(s *http.Server, name string, log *slog.Logger, errCh chan<- error) {
 	log.Info("listening", "server", name, "addr", s.Addr)
 	if err := s.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		errCh <- fmt.Errorf("%s server: %w", name, err)
-	}
-}
-
-// maintainRabbit keeps a live broker connection: it (re)connects whenever the
-// current client is missing or unhealthy, so readiness self-heals after a
-// dropped connection instead of staying DOWN (which would deadlock rollouts).
-func maintainRabbit(ctx context.Context, cfg *config.Config, log *slog.Logger, dst *atomic.Pointer[amqp.Client]) {
-	misses := 0
-	for {
-		if c := dst.Load(); c == nil || !c.Healthy() {
-			if c != nil {
-				_ = c.Close()
-			}
-			ac, err := amqp.Connect(cfg.Rabbit.Host, cfg.Rabbit.Port, cfg.Rabbit.Username, cfg.Rabbit.Password)
-			if err == nil {
-				dst.Store(ac)
-				log.Info("rabbitmq connected", "host", cfg.Rabbit.Host, "port", cfg.Rabbit.Port)
-				misses = 0
-			} else {
-				if misses%5 == 0 {
-					log.Warn("rabbitmq not reachable, will retry", "err", err)
-				}
-				misses++
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(5 * time.Second):
-		}
 	}
 }
 

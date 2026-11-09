@@ -12,6 +12,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
@@ -89,8 +90,11 @@ type Handler struct {
 	dbaasFor func(es *externalservice.ExternalService) (*dbaas.Service, error)
 	hmacEnc  *textcrypt.Encryptor // seals the secrets of generated hmac keys
 	// sandboxGates checks a sandbox provider's release gates (SetSandboxGates; nil = none can go live).
-	sandboxGates  func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
-	seedArtifacts *pve.SeedArtifactRepo // secret-free operator cleanup status
+	sandboxGates    func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
+	seedArtifacts   *pve.SeedArtifactRepo // secret-free operator cleanup status
+	durableStore    *durablejobs.Store
+	durableHistory  *durablejobs.History
+	durableValidate func(*durablejobs.Job) error
 }
 
 // SetHmacEncryptor wires the data-at-rest key for hmac key secrets.
@@ -162,6 +166,8 @@ func (h *Handler) Routes(r chi.Router) {
 		// (2xx) POST/PUT/DELETE under /admin (see audit_mw.go).
 		r.Use(h.auditMiddleware)
 		r.Get("/me", h.me)
+		r.Get("/durable-jobs", h.durableStatus)
+		r.Post("/durable-jobs/{id}/replay", h.durableReplay)
 		r.Get("/flavor-categories", h.flavorCategories)
 		r.Get("/flavor-categories/{id}", h.rawByID("admin:flavor_category:manage", "flavorCategory", "id",
 			func(string) *httpx.HTTPError { return httpx.NotFound("Flavor category not found") }))
