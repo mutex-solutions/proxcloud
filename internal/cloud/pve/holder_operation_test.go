@@ -288,7 +288,7 @@ func TestFencedEntrypointsRefusePending(t *testing.T) {
 			return e
 		},
 		"add":             func(s *Service) error { _, e := s.AddVolume(context.Background(), "p1", "101", 1, "nas", 0); return e },
-		"extend":          func(s *Service) error { return s.ExtendVolume(context.Background(), "p1", 101, "disk", 2) },
+		"extend":          func(s *Service) error { return s.ExtendVolume(context.Background(), "p1", 101, "disk", 2, 10) },
 		"detach":          func(s *Service) error { return s.DetachVolume(context.Background(), "p1", 101, "disk") },
 		"attach":          func(s *Service) error { return s.AttachVolume(context.Background(), "p1", 101, "disk", "102") },
 		"delete volume":   func(s *Service) error { return s.DeleteVolume(context.Background(), "p1", 101, "disk") },
