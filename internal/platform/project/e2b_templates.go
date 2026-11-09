@@ -51,19 +51,19 @@ const (
 	maxContextBytes        = 2 << 30 // per COPY context upload
 	// maxProjectContextBytes caps all of a project's stored contexts: they share the object store with the registry's
 	// blobs. Over it, contexts older than contextEvictAge go first, oldest first.
-	maxProjectContextBytes = 10 << 30
-	contextEvictAge        = sandbox.BuildTimeout + 10*time.Minute // a presigned fetch URL's lifetime
-	maxStoredLogLines      = 8000
-	maxStoredLogBytes = 512 << 10
-	buildCaptureRetry = 30 * time.Second
-	buildCaptureGrace = 10 * time.Minute
-	templateMutationTimeout = 15 * time.Second
-	buildLaunchTimeout = 30 * time.Second
-	buildLaunchGrace = buildLaunchTimeout + 15*time.Second
+	maxProjectContextBytes   = 10 << 30
+	contextEvictAge          = sandbox.BuildTimeout + 10*time.Minute // a presigned fetch URL's lifetime
+	maxStoredLogLines        = 8000
+	maxStoredLogBytes        = 512 << 10
+	buildCaptureRetry        = 30 * time.Second
+	buildCaptureGrace        = 10 * time.Minute
+	templateMutationTimeout  = 15 * time.Second
+	buildLaunchTimeout       = 30 * time.Second
+	buildLaunchGrace         = buildLaunchTimeout + 15*time.Second
 	buildCompensationTimeout = 15 * time.Second
-	keptBuilds             = 10
-	buildPodGrace          = 2 * time.Minute // a finished build pod outlives one charge tick
-	defaultBaseImage       = "e2bdev/base:latest"
+	keptBuilds               = 10
+	buildPodGrace            = 2 * time.Minute // a finished build pod outlives one charge tick
+	defaultBaseImage         = "e2bdev/base:latest"
 	// contextPartSize: a context up to this size is one PUT, a larger one a multipart upload in parts of this size.
 	contextPartSize = 16 << 20
 )
@@ -72,19 +72,19 @@ const (
 func (h *Handler) SetSandboxTemplates(s *pgdoc.Store) { h.sbTemplates = s }
 
 type templateBuild struct {
-	Import *templateImport `json:"import,omitempty"`
-	BuildResources sandbox.BuildResources `json:"buildResources,omitempty"`
-	Diagnostics *buildDiagnostics `json:"diagnostics,omitempty"`
-	LaunchStartedAt *time.Time `json:"launchStartedAt,omitempty"`
-	CancelRequested bool `json:"cancelRequested,omitempty"`
-	BuildID  string `json:"buildID"`
-	Status   string `json:"status"`
-	From     string `json:"from,omitempty"`
-	Image    string `json:"image,omitempty"` // ref@digest once ready
-	StartCmd string `json:"startCmd,omitempty"`
-	ReadyCmd string `json:"readyCmd,omitempty"`
-	User     string `json:"user,omitempty"`
-	Workdir  string `json:"workdir,omitempty"`
+	Import          *templateImport        `json:"import,omitempty"`
+	BuildResources  sandbox.BuildResources `json:"buildResources,omitempty"`
+	Diagnostics     *buildDiagnostics      `json:"diagnostics,omitempty"`
+	LaunchStartedAt *time.Time             `json:"launchStartedAt,omitempty"`
+	CancelRequested bool                   `json:"cancelRequested,omitempty"`
+	BuildID         string                 `json:"buildID"`
+	Status          string                 `json:"status"`
+	From            string                 `json:"from,omitempty"`
+	Image           string                 `json:"image,omitempty"` // ref@digest once ready
+	StartCmd        string                 `json:"startCmd,omitempty"`
+	ReadyCmd        string                 `json:"readyCmd,omitempty"`
+	User            string                 `json:"user,omitempty"`
+	Workdir         string                 `json:"workdir,omitempty"`
 	// StartAsRoot: the start command runs as root (inherited from a parent such as code-interpreter-v1 whose server
 	// needs it).
 	StartAsRoot bool                    `json:"startAsRoot,omitempty"`
@@ -102,7 +102,7 @@ type sandboxTemplateDoc struct {
 	ID            string            `json:"id"`
 	ProjectID     string            `json:"projectId"`
 	Name          string            `json:"name"`
-	Aliases []string `json:"aliases,omitempty"`
+	Aliases       []string          `json:"aliases,omitempty"`
 	CPU           int               `json:"cpu"`
 	MemoryGiB     int               `json:"memoryGiB"`
 	Tags          map[string]string `json:"tags"` // tag → buildID
@@ -351,7 +351,10 @@ func (h *Handler) e2bTemplateRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	buildResources, err := c.ss.Config().Build.Resources(b.BuildResources)
-	if err != nil { e2bErr(w, http.StatusBadRequest, err.Error()); return }
+	if err != nil {
+		e2bErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	ctx := r.Context()
 	t, err := h.loadTemplate(ctx, c.proj.ID, name)
 	if err != nil {
@@ -360,7 +363,8 @@ func (h *Handler) e2bTemplateRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	if t != nil && (t.Deleting || t.ID == name && t.Name != name || len(t.Builds) > 0 && t.Builds[0].Import != nil) {
-		e2bErr(w, http.StatusConflict, "template identity or immutable import settings cannot be overwritten"); return
+		e2bErr(w, http.StatusConflict, "template identity or immutable import settings cannot be overwritten")
+		return
 	}
 	if t == nil {
 		n, err := h.sbTemplates.Count(ctx, pgdoc.M{"projectId": c.proj.ID, "internal": pgdoc.M{"$ne": true}})
@@ -805,6 +809,18 @@ func (h *Handler) e2bTemplateBuild(w http.ResponseWriter, r *http.Request) {
 	bl.From, bl.StartCmd, bl.ReadyCmd = base.Ref, b.StartCmd, b.ReadyCmd
 	bl.User, bl.Workdir = res.User, res.Workdir
 	inheritFromParent(bl, base.Parent, b.StartCmd, b.ReadyCmd)
+	// Observe cluster workers before the SQL admission transaction. The committed
+	// reservation below covers the gap before Kubernetes exposes a new worker.
+	active, err := c.ss.ActiveBuildWorkers(ctx, c.proj.ID)
+	if err != nil {
+		e2bFail(w, err)
+		return
+	}
+	err = h.reserveBuildLaunch(ctx, c, t, bl, active)
+	if err != nil {
+		e2bFail(w, err)
+		return
+	}
 	var buildProof *registrypins.BuildProof
 	if pinStore != nil {
 		buildProof, err = h.authorizeBuildDispatch(ctx, pinStore, t, bl)
@@ -813,48 +829,31 @@ func (h *Handler) e2bTemplateBuild(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The count and the start hold one lock per project, across API replicas: without it parallel requests all pass
-	// the count, and one project could fill the build namespace's quota that every project shares.
-	errBusy := errors.New("busy")
-	err = h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
-		if err := h.sbTemplates.DB().LockXact(tc, "sbx-build:"+c.proj.ID); err != nil {
-			return err
-		}
-		running, err := c.ss.ListBuilds(tc, c.proj.ID)
-		if err != nil {
-			return err
-		}
-		active := 0
-		for _, d := range running {
-			if d["status"] != sandbox.StatusDeleted {
-				active++
-			}
-		}
-		if active >= maxConcurrentBuilds {
-			return errBusy
-		}
-		return h.withSandboxStart(tc, c.es.ID, func(startCtx context.Context) error {
-			return c.ss.StartBuild(startCtx, sandbox.BuildRequest{
-				ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: bl.BuildID, Image: templateImage(cfg, t, bl.BuildID), Result: res,
-				CPU: bl.BuildResources.CPU, MemoryGiB: bl.BuildResources.MemoryGiB, DiskGiB: bl.BuildResources.DiskGiB,
-				Base: base.Ref, BaseAuth: base.Auth, BaseDockerConfig: base.DockerConfig, Pins: buildProof,
-				FetchURL: func(hsh string) string { return fetch[hsh] },
-			})
+	launchCtx, cancelLaunch := context.WithTimeout(ctx, buildLaunchTimeout)
+	err = h.withSandboxStart(launchCtx, c.es.ID, func(startCtx context.Context) error {
+		return c.ss.StartBuild(startCtx, sandbox.BuildRequest{
+			ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: bl.BuildID, Image: templateImage(cfg, t, bl.BuildID), Result: res,
+			CPU: bl.BuildResources.CPU, MemoryGiB: bl.BuildResources.MemoryGiB, DiskGiB: bl.BuildResources.DiskGiB,
+			Base: base.Ref, BaseAuth: base.Auth, BaseDockerConfig: base.DockerConfig, Pins: buildProof,
+			FetchURL: func(hash string) string { return fetch[hash] },
 		})
 	})
+	if err == nil {
+		err = launchCtx.Err()
+	}
+	cancelLaunch()
 	if pinStore != nil && err != nil {
-		dctx := context.WithoutCancel(ctx)
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), buildCompensationTimeout)
+		defer cancel()
 		if e := pinStore.CancelUnusedDispatch(dctx, buildProof, bl.Registry.Operation); e == nil {
 			h.failBuildBeforeDispatch(dctx, pinStore, t, bl, bl.Registry, err)
 		} else {
 			h.markBuildPinUnknown(dctx, pinStore, t, bl, bl.Registry)
 		}
 	}
-	if errors.Is(err, errBusy) {
-		e2bErr(w, http.StatusTooManyRequests, fmt.Sprintf("at most %d builds may run at once", maxConcurrentBuilds))
-		return
-	}
+
 	if err != nil {
+		h.recordBuildCancellation(ctx, t, bl)
 		e2bFail(w, err)
 		return
 	}
@@ -885,6 +884,11 @@ func (h *Handler) e2bTemplateBuild(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		slog.Error("e2b: build cache row", "build", bl.BuildID, "err", err)
 	}
+	if err := ctx.Err(); err != nil {
+		h.recordBuildCancellation(ctx, t, bl)
+		e2bFail(w, err)
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -911,29 +915,22 @@ func (h *Handler) e2bTemplateBuildStatus(w http.ResponseWriter, r *http.Request)
 		e2bErr(w, http.StatusNotFound, "build not found")
 		return
 	}
-	logs := bl.Logs
 	if t.Kind == "snapshot" && bl.Status == sandbox.BuildBuilding { // its result starts the storage billing
 		if done, _ := h.finishSnapshot(ctx, c, t, bl, false); done {
 			if ft, _ := h.loadTemplate(ctx, c.proj.ID, t.ID); ft != nil {
 				adoptBuild(t, bl, ft)
 			}
 		}
-		logs = bl.Logs
-	} else if bl.Registry != nil || bl.Status == sandbox.BuildBuilding || bl.Status == sandbox.BuildReady && bl.FinishedAt == nil {
-		logs = h.syncBuildPod(ctx, c, t, bl, true)
-	} else if bl.FinishedAt != nil && time.Since(*bl.FinishedAt) > buildPodGrace {
-		_ = c.ss.DeleteBuild(ctx, bl.BuildID)
+	} else if bl.Registry != nil || buildNeedsSync(bl) {
+		h.syncBuildPod(ctx, c, t, bl, true)
 	}
 	offset, _ := strconv.Atoi(r.URL.Query().Get("logsOffset"))
-	if offset < 0 || offset > len(logs) {
-		offset = len(logs)
-	}
-	page := logs[offset:]
+	page := buildLogPage(bl, offset)
 	entries := make([]any, 0, len(page))
 	for _, l := range page {
 		entries = append(entries, logEntry(l))
 	}
-	out := map[string]any{"templateID": t.ID, "buildID": bl.BuildID, "status": buildPinSDKStatus(bl), "logs": page, "logEntries": entries}
+	out := map[string]any{"templateID": t.ID, "buildID": bl.BuildID, "status": buildPinSDKStatus(bl), "logs": page, "logEntries": entries, "nextLogsOffset": len(bl.Logs), "diagnostics": consoleDiagnosticsView(bl.Diagnostics)}
 	if bl.Status == sandbox.BuildError {
 		out["reason"] = map[string]any{"message": bl.Reason, "step": bl.Step, "logEntries": entries}
 	}
@@ -950,19 +947,40 @@ func logEntry(line string) map[string]any {
 	case strings.Contains(low, "warn"):
 		level = "warn"
 	}
-	return map[string]any{"timestamp": time.Now().UTC().Format(time.RFC3339), "level": level, "message": line}
+	entry := map[string]any{"timestamp": time.Now().UTC().Format(time.RFC3339), "level": level, "message": line}
+	if strings.HasPrefix(line, "[") {
+		if phase, rest, ok := strings.Cut(line[1:], "] "); ok {
+			entry["phase"] = phase
+			if stamp, _, ok := strings.Cut(rest, " "); ok {
+				if _, err := time.Parse(time.RFC3339Nano, stamp); err == nil {
+					entry["timestamp"] = stamp
+				}
+			}
+		}
+	}
+	return entry
 }
 
 // syncBuildPod reads the build pod and records a finished build. markGone: a missing pod means the build failed (the
 // status endpoint); the background job leaves that to the next poll.
 func (h *Handler) syncBuildPod(ctx context.Context, c *e2bCaller, t *sandboxTemplateDoc, bl *templateBuild, markGone bool) []string {
+	if bl.Import != nil {
+		return h.syncImport(ctx, c, t, bl)
+	}
 	if bl.Registry != nil {
+		h.captureBuildArchive(ctx, c, t, bl)
 		h.recoverPinnedBuild(ctx, c, t, bl)
 		if ft, _ := h.loadTemplate(ctx, t.ProjectID, t.ID); ft != nil {
 			adoptBuild(t, bl, ft)
 		}
+		h.cleanupBuildArchive(ctx, c, t, bl, time.Now().UTC())
+		h.warmTemplate(ctx, c, t, bl)
 		return bl.Logs
 	}
+	if bl.CancelRequested {
+		return bl.Logs
+	} // no ambiguous apply can be "canceled" by absence
+	h.captureBuildArchive(ctx, c, t, bl)
 	st, err := c.ss.BuildPodState(ctx, t.ProjectID, bl.BuildID)
 	if err != nil {
 		return bl.Logs
@@ -970,13 +988,13 @@ func (h *Handler) syncBuildPod(ctx context.Context, c *e2bCaller, t *sandboxTemp
 	if st == nil {
 		if markGone {
 			ft, _, _ := h.finishBuild(ctx, t.ProjectID, t.ID, bl.BuildID, func(_ *sandboxTemplateDoc, b *templateBuild) {
-				b.Status, b.Reason = sandbox.BuildError, "the build disappeared before it finished"
+				b.Status, b.Reason = sandbox.BuildError, "the build disappeared before its outcome could be confirmed"
 			})
 			adoptBuild(t, bl, ft)
 		}
 		return bl.Logs
 	}
-	logs := c.ss.BuildLogs(ctx, bl.BuildID, maxStoredLogLines)
+	logs := bl.Logs
 	if data, err := c.ss.BuildData(ctx, bl.BuildID); err == nil && data != nil {
 		if cr := h.e2bRow(ctx, c, sandbox.BuildResourceID(bl.BuildID)); cr != nil {
 			cr.Data = data
@@ -1021,7 +1039,7 @@ func adoptBuild(t *sandboxTemplateDoc, bl *templateBuild, saved *sandboxTemplate
 // builds or moved tags since the caller read it, and two finishers (the status endpoint, the background job) may race.
 // changed=false: the build was already finished or is gone. FinishedAt is set here.
 func (h *Handler) finishBuild(ctx context.Context, projectID, templateID, buildID string, apply func(t *sandboxTemplateDoc, b *templateBuild)) (*sandboxTemplateDoc, bool, error) {
-		var out *sandboxTemplateDoc
+	var out *sandboxTemplateDoc
 	changed := false
 	err := h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
 		var t sandboxTemplateDoc
@@ -1134,7 +1152,7 @@ func (h *Handler) resolveCustomTemplateWithKind(ctx context.Context, projectID, 
 		return nil, "", "", fmt.Errorf("%w: template %q has no ready build", sandbox.ErrBadTemplate, ref)
 	}
 	return &sandbox.Template{
-		Image: bl.Image, CPU: bl.BuildResources.CPU, MemoryGiB: bl.BuildResources.MemoryGiB, DiskGiB: bl.BuildResources.DiskGiB, GPU: t.GPU, StartCmd: bl.StartCmd, ReadyCmd: bl.ReadyCmd,
+		Image: bl.Image, CPU: t.CPU, MemoryGiB: t.MemoryGiB, GPU: t.GPU, StartCmd: bl.StartCmd, ReadyCmd: bl.ReadyCmd,
 		User: bl.User, Workdir: bl.Workdir, StartAsRoot: bl.StartAsRoot, Description: "custom template " + t.Name,
 	}, t.Name, t.Kind, nil
 }

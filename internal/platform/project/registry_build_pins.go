@@ -374,7 +374,9 @@ func (h *Handler) finishPinnedBuild(ctx context.Context, c *e2bCaller, t *sandbo
 	op := b.Registry
 	if op.State == buildDispatching {
 		err = h.buildRegistryWrite(context.WithoutCancel(ctx), t, b.BuildID, op.Operation, buildDispatching, func(ft *sandboxTemplateDoc, fb *templateBuild) error {
-			fb.Logs = logs
+			if fb.Diagnostics == nil {
+				fb.Logs = logs
+			}
 			fb.Status, fb.Reason, fb.Step = st.Status, st.Reason, st.Step
 			if st.Status == sandbox.BuildReady {
 				if !digestRe.MatchString(st.Digest) {
@@ -490,7 +492,7 @@ func (h *Handler) recoverPinnedBuild(ctx context.Context, c *e2bCaller, t *sandb
 		return
 	}
 	if st.Pod.Phase == "Succeeded" || st.Pod.Phase == "Failed" {
-		_ = h.finishPinnedBuild(ctx, c, t, b, st, c.ss.BuildLogs(ctx, b.BuildID, maxStoredLogLines))
+		_ = h.finishPinnedBuild(ctx, c, t, b, st, b.Logs)
 		return
 	}
 	if err = h.observeBuildPins(ctx, store, t, b, st); err != nil {

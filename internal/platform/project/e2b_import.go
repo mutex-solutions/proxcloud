@@ -70,15 +70,19 @@ func importKey(b importTemplateRequest, cpu, mem int) string {
 	return hex.EncodeToString(s[:])
 }
 func validateImportRequest(b *importTemplateRequest, project string, cfg sandbox.Config) error {
-	canonical, err := sandboximport.Source(b.Source, project)
+	policy := sandboximport.Policy{TemplateRegistry: cfg.TemplateRegistry, SourceRepositories: cfg.Import.SourceRepositories, AllowAnonymous: cfg.Import.AllowAnonymous}
+	canonical, err := policy.Source(b.Source, project)
 	if err != nil {
 		return err
 	}
 	if canonical && b.Registry != nil {
 		return errors.New("managed project images use runtime pull verification; do not supply registry credentials")
 	}
+	if !canonical && b.Registry == nil && !cfg.Import.AllowAnonymous {
+		return errors.New("approved external sources require explicit registry credentials")
+	}
 	if b.Registry != nil && (b.Registry.Username == "" || b.Registry.Password == "") {
-		return errors.New("registry.username and registry.password must both be supplied; omit registry for anonymous public source access")
+		return errors.New("registry.username and registry.password must both be supplied; anonymous access requires the operator allowAnonymous policy")
 	}
 	if b.Registry != nil && (len(b.Registry.Username) > 1024 || len(b.Registry.Password) > 32<<10 || strings.ContainsAny(b.Registry.Username, ":\x00\r\n")) {
 		return errors.New("invalid registry credentials")
@@ -131,14 +135,19 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 		e2bErr(w, 503, "digest import is not enabled on this location (trusted worker required)")
 		return
 	}
+	active, err := c.ss.ActiveBuildWorkers(r.Context(), c.proj.ID)
+	if err != nil {
+		e2bFail(w, err)
+		return
+	}
 	var t *sandboxTemplateDoc
 	var bl *templateBuild
 	created := false
-	err := h.sbTemplates.DB().WithTx(r.Context(), func(ctx context.Context) error {
-		if err := h.sbTemplates.DB().AdvisoryXactLock(ctx, projectTemplateLock(c.proj.ID)); err != nil {
+	err = h.sbTemplates.DB().WithTx(r.Context(), func(ctx context.Context) error {
+		if err := h.sbTemplates.DB().LockXact(ctx, projectTemplateLock(c.proj.ID)); err != nil {
 			return err
 		}
-		if err := h.sbTemplates.DB().AdvisoryXactLock(ctx, "sandbox-registry-references"); err != nil {
+		if err := h.sbTemplates.DB().LockXact(ctx, "sandbox-registry-references"); err != nil {
 			return err
 		}
 		var all []sandboxTemplateDoc
@@ -150,7 +159,7 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 		// Dedup strictly within the authorized project and exact source/settings. Never consult another tenant.
 		for i := range all {
 			v := &all[i]
-			if v.Internal {
+			if v.Internal || v.Deleting {
 				continue
 			}
 			for j := range v.Builds {
@@ -200,17 +209,18 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 			if count >= maxTemplatesPerProject {
 				return sandbox.ErrQuotaExceeded
 			}
-			if err := h.workerAdmission(ctx, c, ""); err != nil {
+			if err := h.workerAdmission(ctx, c, "", active); err != nil {
 				return err
 			}
 			id := newTemplateID()
-			canonical, _ := sandboximport.Source(b.Source, c.proj.ID)
-			dest := sandbox.TemplateRegistry + "/" + c.proj.ID + "/" + id
+			canonical, _ := c.ss.ValidateImportSource(b.Source, c.proj.ID, b.Registry != nil || c.ss.Config().Import.AllowAnonymous)
+			buildID := uuid.NewString()
+			dest := strings.TrimRight(c.ss.Config().TemplateRegistry, "/") + "/" + c.proj.ID + "/" + id + ":" + buildID
 			if canonical {
 				dest = strings.Split(b.Source, "@")[0]
 			}
 			t = &sandboxTemplateDoc{ID: id, ProjectID: c.proj.ID, Name: b.Name, CPU: cpu, MemoryGiB: mem, Tags: map[string]string{}, CreatedAt: &now, UpdatedAt: &now}
-			bb := templateBuild{BuildID: uuid.NewString(), Status: sandbox.BuildWaiting, From: b.Source, User: b.User, Workdir: b.Workdir, StartCmd: b.StartCmd, ReadyCmd: b.ReadyCmd, CreatedAt: &now, Import: &templateImport{Source: b.Source, Destination: dest, Key: key}}
+			bb := templateBuild{BuildID: buildID, Status: sandbox.BuildWaiting, From: b.Source, User: b.User, Workdir: b.Workdir, StartCmd: b.StartCmd, ReadyCmd: b.ReadyCmd, CreatedAt: &now, Import: &templateImport{Source: b.Source, Destination: dest, Key: key}}
 			t.Builds = []templateBuild{bb}
 			bl = &t.Builds[0]
 			created = true
@@ -254,7 +264,7 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if created {
-		var dc []byte
+		dc := []byte(`{"auths":{}}`)
 		if b.Registry != nil {
 			host, _, _ := strings.Cut(b.Source, "/")
 			dc, _ = json.Marshal(map[string]any{"auths": map[string]any{host: map[string]string{"auth": base64.StdEncoding.EncodeToString([]byte(b.Registry.Username + ":" + b.Registry.Password))}}})
@@ -282,18 +292,18 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 // reservations with live workers so a reserve-before-pod snapshot/import is visible
 // and a surviving pod after an uncertain write still consumes its slot. Ordinary
 // waiting v3 contexts are not started workers and must not exhaust this quota.
-func (h *Handler) workerAdmission(ctx context.Context, c *e2bCaller, excludeBuildID string) error {
-	active, err := c.ss.ActiveBuildWorkers(ctx, c.proj.ID)
-	if err != nil {
-		return err
+func (h *Handler) workerAdmission(ctx context.Context, c *e2bCaller, excludeBuildID string, observed map[string]bool) error {
+	active := make(map[string]bool, len(observed))
+	for id, live := range observed {
+		active[id] = live
 	}
 	var all []sandboxTemplateDoc
-	if err = h.sbTemplates.Find(ctx, pgdoc.M{"projectId": c.proj.ID}, &all); err != nil {
+	if err := h.sbTemplates.Find(ctx, pgdoc.M{"projectId": c.proj.ID}, &all); err != nil {
 		return err
 	}
 	for _, t := range all {
 		for _, b := range t.Builds {
-			if b.Status == sandbox.BuildBuilding || b.Status == sandbox.BuildWaiting && b.Import != nil {
+			if buildPinActive(b) || b.CancelRequested || b.Status == sandbox.BuildBuilding || b.Status == sandbox.BuildWaiting && b.Import != nil {
 				active[b.BuildID] = true
 			}
 		}
@@ -392,14 +402,14 @@ func (h *Handler) e2bTemplateAliases(w http.ResponseWriter, r *http.Request) {
 	}
 	var out []string
 	err := h.sbTemplates.DB().WithTx(r.Context(), func(ctx context.Context) error {
-		if err := h.sbTemplates.DB().AdvisoryXactLock(ctx, projectTemplateLock(c.proj.ID)); err != nil {
+		if err := h.sbTemplates.DB().LockXact(ctx, projectTemplateLock(c.proj.ID)); err != nil {
 			return err
 		}
 		t, err := h.loadTemplate(ctx, c.proj.ID, chi.URLParam(r, "templateID"))
 		if err != nil {
 			return err
 		}
-		if t == nil || t.Internal {
+		if t == nil || t.Internal || t.Deleting {
 			return sandbox.ErrNotFound
 		}
 		var locked sandboxTemplateDoc
@@ -458,7 +468,20 @@ func (h *Handler) e2bTemplateBuildLocked(w http.ResponseWriter, r *http.Request)
 	h.e2bTemplateBuild(w, r)
 }
 func (h *Handler) e2bTemplateDeleteLocked(w http.ResponseWriter, r *http.Request) {
-	h.withTemplateNameLock(w, r, h.e2bTemplateDelete)
+	c := e2bFrom(r)
+	t, err := h.loadTemplate(r.Context(), c.proj.ID, chi.URLParam(r, "templateID"))
+	if err != nil || t == nil || t.Internal {
+		e2bErr(w, 404, "template not found")
+		return
+	}
+	if name := chi.URLParam(r, "templateID"); name != t.ID && name != t.Name {
+		raw, _ := json.Marshal(map[string]any{"aliases": []string{name}})
+		req := consoleE2BRequest(r, c, t.ID, "", raw)
+		req.Method = http.MethodDelete
+		h.e2bTemplateAliases(w, req)
+		return
+	}
+	h.e2bTemplateDelete(w, r)
 }
 func (h *Handler) withTemplateNameLock(w http.ResponseWriter, r *http.Request, handler http.HandlerFunc) {
 	if !h.templatesOn(w) {
@@ -470,7 +493,7 @@ func (h *Handler) withTemplateNameLock(w http.ResponseWriter, r *http.Request, h
 	// succeeds. In particular, canceled requests must not acknowledge rolled-back work.
 	response := newBufferedResponse()
 	err := h.sbTemplates.DB().WithTx(ctx, func(ctx context.Context) error {
-		if err := h.sbTemplates.DB().AdvisoryXactLock(ctx, projectTemplateLock(e2bFrom(r).proj.ID)); err != nil {
+		if err := h.sbTemplates.DB().LockXact(ctx, projectTemplateLock(e2bFrom(r).proj.ID)); err != nil {
 			return err
 		}
 		handler(response, r.WithContext(ctx))

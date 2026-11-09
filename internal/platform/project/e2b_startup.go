@@ -2,6 +2,7 @@ package project
 
 import (
 	"context"
+	"fmt"
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"log/slog"
@@ -32,10 +33,16 @@ func (h *Handler) savedStartupAccess(ctx context.Context, c *e2bCaller, id strin
 // The runtime TTL was already committed by the first Ready observation; it cannot be
 // extended by a late API response, a probe flap or the caller's retry.
 func startupResponseAlive(ctx context.Context, data map[string]any) error {
-	if err := ctx.Err(); err != nil { return err }
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	end, err := time.Parse(time.RFC3339, fmt.Sprint(data["shutdownTime"]))
-	if err != nil || !time.Now().Before(end) { return context.DeadlineExceeded }
-	if data["ready"] != true || data["status"] != sandbox.StatusRunning { return sandbox.ErrNotRunning }
+	if err != nil || !time.Now().Before(end) {
+		return context.DeadlineExceeded
+	}
+	if data["ready"] != true || data["status"] != sandbox.StatusRunning {
+		return sandbox.ErrNotRunning
+	}
 	return nil
 }
 

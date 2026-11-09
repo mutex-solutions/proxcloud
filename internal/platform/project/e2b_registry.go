@@ -73,11 +73,11 @@ func (h *Handler) SyncSandboxBuilds(ctx context.Context) {
 			bl := &t.Builds[j]
 			if bl.Registry != nil {
 				if c := callerOf(t.ProjectID); c != nil {
-					h.recoverPinnedBuild(ctx, c, t, bl)
+					h.syncBuildPod(ctx, c, t, bl, false)
 				}
 				continue
 			}
-			if bl.Status != sandbox.BuildBuilding {
+			if !buildNeedsSync(bl) {
 				continue
 			}
 			c := callerOf(t.ProjectID)
@@ -87,7 +87,7 @@ func (h *Handler) SyncSandboxBuilds(ctx context.Context) {
 			// A missing pod means failure only once the build is past its deadline: until then it may be about to be
 			// recorded by a poll.
 			gone := bl.CreatedAt != nil && time.Since(*bl.CreatedAt) > sandbox.BuildTimeout+5*time.Minute
-			if t.Kind == "snapshot" { // its result also starts the storage billing (an API restart lost the follower)
+			if t.Kind == "snapshot" && !buildTerminal(bl) { // its result also starts the storage billing (an API restart lost the follower)
 				if _, err := h.finishSnapshot(ctx, c, t, bl, gone); err != nil {
 					slog.Warn("build sync: snapshot", "template", t.ID, "err", err)
 				}
@@ -363,6 +363,10 @@ func (h *Handler) registryLive(ctx context.Context, host string, svcs []*sandbox
 		for _, b := range t.Builds {
 			add(b.Image)
 			add(b.From)
+			if b.Import != nil {
+				add(b.Import.Source)
+				add(b.Import.Destination)
+			}
 			if b.Status == sandbox.BuildWaiting || b.Status == sandbox.BuildBuilding {
 				add(fmt.Sprintf("%s/t/%s/%s:%s", host, t.ProjectID, t.ID, b.BuildID))
 			}

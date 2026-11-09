@@ -83,10 +83,10 @@ func (h *Handler) E2BRoutes(r chi.Router) {
 		r.Get("/templates/{templateID}/builds/{buildID}/status", h.e2bTemplateBuildStatus)
 	})
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
-		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see " + h.e2bDocs() + ")")
+		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see "+h.e2bDocs()+")")
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
-		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see " + h.e2bDocs() + ")")
+		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see "+h.e2bDocs()+")")
 	})
 }
 
@@ -414,7 +414,8 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		spec.MemoryGiB = (*b.MemoryMB + 1023) / 1024
 	}
 	if _, builtin := c.ss.Config().Templates[spec.Template]; custom == nil && !builtin {
-		e2bErr(w, http.StatusBadRequest, h.unknownTemplate(r.Context(), c, b.TemplateID)); return
+		e2bErr(w, http.StatusBadRequest, h.unknownTemplate(r.Context(), c, b.TemplateID))
+		return
 	}
 	q := c.es.SandboxProjectQuota(c.proj.Quota)
 	spec.Quota = &q
@@ -429,30 +430,38 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	h.cloudResourceAudit(c.user, c.proj, "CLOUD_RESOURCE_CREATE", "E2B_CREATE", saved)
 	a, err := e2bColdAccess(r.Context(), c.ss.Config().Startup.Duration(), time.Time{}, time.Now,
-        func(ctx context.Context) error { return h.e2bWaitReady(ctx, c, saved) },
-        func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, spec.ID) })
-    if err != nil {
-        h.cleanupFailedStartup(r.Context(), c, saved)
-        msg := "sandbox startup failed; check template preparation and location availability"
-        var startup *sandbox.StartupError
-        if errors.As(err, &startup) { msg = startup.Error() }
-        e2bErr(w, http.StatusServiceUnavailable, msg)
-        return
-    }
-    e2bJSON(w, http.StatusCreated, c.e2bSandbox(spec.ID, spec.Template, a))
+		func(ctx context.Context) error { return h.e2bWaitReady(ctx, c, saved) },
+		func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, spec.ID) })
+	if err != nil {
+		h.cleanupFailedStartup(r.Context(), c, saved)
+		msg := "sandbox startup failed; check template preparation and location availability"
+		var startup *sandbox.StartupError
+		if errors.As(err, &startup) {
+			msg = startup.Error()
+		}
+		e2bErr(w, http.StatusServiceUnavailable, msg)
+		return
+	}
+	e2bJSON(w, http.StatusCreated, c.e2bSandbox(spec.ID, spec.Template, a))
 }
 
 // e2bWaitReady polls until the sandbox is RUNNING (envd initialised: the pod's startup probe), then stores the live
 // payload, so billing starts from runningSince even if nothing lists it.
 func (h *Handler) e2bWaitReady(ctx context.Context, c *e2bCaller, cr *cloud.CloudResource) error {
-    live, err := c.ss.WaitReady(ctx, c.proj.ID, cr.ExternalID)
-    if err != nil { return err }
-    if err := startupResponseAlive(ctx, live); err != nil { return err }
-    cr.Data = live
-    now := time.Now().UTC()
-    cr.UpdatedAt = &now
-    if _, err := h.cloud.Update(ctx, cr); err != nil { return err }
-    return startupResponseAlive(ctx, live)
+	live, err := c.ss.WaitReady(ctx, c.proj.ID, cr.ExternalID)
+	if err != nil {
+		return err
+	}
+	if err := startupResponseAlive(ctx, live); err != nil {
+		return err
+	}
+	cr.Data = live
+	now := time.Now().UTC()
+	cr.UpdatedAt = &now
+	if _, err := h.cloud.Update(ctx, cr); err != nil {
+		return err
+	}
+	return startupResponseAlive(ctx, live)
 }
 
 const (

@@ -257,6 +257,10 @@ func (h *Handler) consoleTemplateDelete(w http.ResponseWriter, r *http.Request) 
 
 func templateStoredSize(t *sandboxTemplateDoc) int64 {
 	var size int64
-	for _, b := range t.Builds { if b.Status == sandbox.BuildReady { size += b.SizeBytes } }
+	for _, b := range t.Builds {
+		if b.Status == sandbox.BuildReady {
+			size += b.SizeBytes
+		}
+	}
 	return size
 }

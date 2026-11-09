@@ -48,7 +48,7 @@ func buildNeedsSync(b *templateBuild) bool {
 	if b.Import != nil {
 		return b.Status == sandbox.BuildWaiting || b.Status == sandbox.BuildBuilding
 	}
-	return b.CancelRequested || b.Status == sandbox.BuildWaiting || b.Status == sandbox.BuildBuilding || buildTerminal(b) && (b.Diagnostics == nil || b.Diagnostics.CleanedAt == nil)
+	return buildPinActive(*b) || b.CancelRequested || b.Status == sandbox.BuildWaiting || b.Status == sandbox.BuildBuilding || buildTerminal(b) && (b.Diagnostics == nil || b.Diagnostics.CleanedAt == nil)
 }
 
 func appendBuildLog(b *templateBuild, line string) {
@@ -155,7 +155,7 @@ func foldBuildCapture(b *templateBuild, st *sandbox.BuildState, stages []sandbox
 	// A newly available/changed terminal prefix needs a second matching capture.
 	// This prevents kubelet lag or a recovered read from immediately freezing it.
 	signature := logPrefixHash(d.TerminalTail)
-	for _, phase := range []string{"fetch", "base", "kaniko", "push"} {
+	for _, phase := range []string{"fetch", "base", "kaniko", "prepare-output", "push"} {
 		signature += phase + ":" + d.Cursors[phase].Hash + ";"
 	}
 	if !d.LogsUnavailable && signature == d.TerminalSignature {
@@ -204,13 +204,14 @@ func (h *Handler) saveBuildCapture(ctx context.Context, projectID, templateID, b
 			b.FinishedAt = &now
 		} // legacy terminal records
 		foldBuildCapture(b, st, stages, captureErr, now)
-		return h.saveTemplate(tc, &t)
+		_, err = h.sbTemplates.Replace(tc, t.ID, &t)
+		return err
 	})
 	return out, err
 }
 
 func (h *Handler) cleanupBuildArchive(ctx context.Context, c *e2bCaller, t *sandboxTemplateDoc, b *templateBuild, now time.Time) {
-	if !buildCanCleanup(b, now) {
+	if !buildCanCleanup(b, now) || b.Registry != nil && b.Registry.State != buildPinFinished && b.Registry.State != buildPinFailed {
 		return
 	}
 	if err := c.ss.CleanupBuild(ctx, t.ProjectID, b.BuildID); err != nil {
@@ -230,7 +231,8 @@ func (h *Handler) cleanupBuildArchive(ctx context.Context, c *e2bCaller, t *sand
 		cb.Diagnostics.CleanedAt = &now
 		cb.Diagnostics.Revision++
 		saved = &cur
-		return h.saveTemplate(tc, &cur)
+		_, err = h.sbTemplates.Replace(tc, cur.ID, &cur)
+		return err
 	}); err == nil {
 		adoptBuild(t, b, saved)
 	}
@@ -252,4 +254,26 @@ func buildLogPage(b *templateBuild, offset int) []string {
 		return []string{}
 	}
 	return page
+}
+
+// captureBuildArchive records the prefix independently of registry publication. It
+// never finishes a pin operation or makes an UNKNOWN result usable.
+func (h *Handler) captureBuildArchive(ctx context.Context, c *e2bCaller, t *sandboxTemplateDoc, b *templateBuild) {
+	if d := b.Diagnostics; d != nil && (d.ArchivedAt != nil || d.LastCaptureAt != nil && time.Since(*d.LastCaptureAt) < buildCaptureRetry) {
+		return
+	}
+	st, stateErr := c.ss.BuildPodState(ctx, t.ProjectID, b.BuildID)
+	var stages []sandbox.BuildLogStage
+	var captureErr error
+	if st != nil {
+		stages, captureErr = c.ss.CaptureBuildLogs(ctx, t.ProjectID, b.BuildID)
+	}
+	saved, err := h.saveBuildCapture(ctx, t.ProjectID, t.ID, b.BuildID, st, stages, stateErr != nil || st == nil || captureErr != nil)
+	if err == nil {
+		adoptBuild(t, b, saved)
+	}
+}
+
+func (h *Handler) syncBuild(ctx context.Context, c *e2bCaller, t *sandboxTemplateDoc, b *templateBuild) []string {
+	return h.syncBuildPod(ctx, c, t, b, true)
 }
