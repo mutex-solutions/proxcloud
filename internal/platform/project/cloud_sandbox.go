@@ -226,7 +226,7 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 		return
 	}
 	c := &e2bCaller{user: u, proj: proj, es: es, ss: ss}
-	if err := h.waitRuntimeCreateReady(ctx, c, saved); err != nil {
+	if err := h.waitRuntimeCreateReady(ctx, c, saved, &spec); err != nil {
 		h.cleanupFailedStartup(ctx, c, saved)
 		h.sandboxFail(w, err)
 		return
@@ -271,6 +271,9 @@ func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *
 	if err != nil {
 		return nil, err
 	}
+	// Preserve the trusted frozen identity/defaults used by the later CREATE-only
+	// readiness check, not the pre-freeze alias or caller-owned map pointers.
+	*caller = sandbox.CloneCreateSpec(*spec)
 	var data map[string]any
 	err = h.withSandboxStart(ctx, es.ID, func(tc context.Context) error { var e error; data, e = ss.CreateSandbox(tc, spec); return e })
 	caller.ID = spec.ID

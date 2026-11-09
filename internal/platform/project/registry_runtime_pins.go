@@ -35,6 +35,26 @@ func (e *runtimePinHold) Error() string {
 }
 func (e *runtimePinHold) Unwrap() error { return errRuntimePinState }
 
+// Explicit nesting avoids the two promoted ID fields of registrypins.Pin's
+// embedded Operation being lost by encoding/json when stored as a document.
+type runtimePinReceipt struct {
+	ID                                                      string                 `json:"pinId"`
+	Operation                                               registrypins.Operation `json:"operation"`
+	Ref, RequestedRef, State, BindingUID, BindingGeneration string
+	Epoch                                                   int64
+}
+
+func runtimeReceipts(pins []registrypins.Pin) []runtimePinReceipt {
+	out := make([]runtimePinReceipt, len(pins))
+	for i, p := range pins {
+		out[i] = runtimePinReceipt{p.ID, p.Operation, p.Ref, p.RequestedRef, p.State, p.BindingUID, p.BindingGeneration, p.Epoch}
+	}
+	return out
+}
+func (r runtimePinReceipt) pin() registrypins.Pin {
+	return registrypins.Pin{ID: r.ID, Operation: r.Operation, Ref: r.Ref, RequestedRef: r.RequestedRef, State: r.State, BindingUID: r.BindingUID, BindingGeneration: r.BindingGeneration, Epoch: r.Epoch}
+}
+
 type runtimeStartOwner struct {
 	ID           string                      `json:"id"`
 	Operation    registrypins.Operation      `json:"operation"`
@@ -42,10 +62,11 @@ type runtimeStartOwner struct {
 	ServiceID    string                      `json:"serviceId"`
 	SandboxID    string                      `json:"sandboxId"`
 	State        string                      `json:"state"`
+	Epoch        int64                       `json:"epoch"`
 	Spec         registrypins.RuntimeSpec    `json:"spec"`
 	Source       sandbox.RuntimeCreateSource `json:"source"`
 	ProviderHash string                      `json:"providerHash"`
-	Pins         []registrypins.Pin          `json:"pins,omitempty"`
+	Pins         []runtimePinReceipt         `json:"pins,omitempty"`
 	PodUID       string                      `json:"podUID,omitempty"`
 	CRUID        string                      `json:"crUID,omitempty"`
 }
@@ -104,18 +125,20 @@ func (h *Handler) resolveRuntimeCreateTemplate(ctx context.Context, project, ref
 }
 
 func (h *Handler) runtimeWrite(ctx context.Context, o *runtimeStartOwner, expected string, apply func(*runtimeStartOwner) error) error {
-	return h.sbRuntimeDB.WithTx(ctx, func(tc context.Context) error {
+	var updated runtimeStartOwner
+	err := h.sbRuntimeDB.WithTx(ctx, func(tc context.Context) error {
 		var cur runtimeStartOwner
 		found, err := h.runtimeOwners().GetForUpdate(tc, o.ID, &cur)
 		if err != nil {
 			return err
 		}
-		if !found || cur.Operation != o.Operation || cur.Spec != o.Spec || cur.Source != o.Source || cur.ProviderHash != o.ProviderHash || cur.State != expected {
+		if !found || cur.Operation != o.Operation || cur.Spec != o.Spec || cur.Source != o.Source || cur.ProviderHash != o.ProviderHash || cur.State != expected || cur.Epoch != o.Epoch || cur.PodUID != o.PodUID || cur.CRUID != o.CRUID || cur.ProjectID != o.ProjectID || cur.ServiceID != o.ServiceID || cur.SandboxID != o.SandboxID || (expected != buildPreparing && runtimeHash(cur.Pins) != runtimeHash(o.Pins)) {
 			return errRuntimePinState
 		}
 		if err = apply(&cur); err != nil {
 			return err
 		}
+		cur.Epoch++
 		ok, err := h.runtimeOwners().Replace(tc, o.ID, &cur)
 		if err != nil {
 			return err
@@ -123,8 +146,13 @@ func (h *Handler) runtimeWrite(ctx context.Context, o *runtimeStartOwner, expect
 		if !ok {
 			return errRuntimePinState
 		}
+		updated = cur
 		return nil
 	})
+	if err == nil {
+		*o = updated
+	}
+	return err
 }
 
 // prepareRuntimeCreate commits PREPARING, one exact Pending receipt, PINNED and
@@ -172,7 +200,7 @@ func (h *Handler) prepareRuntimeCreate(ctx context.Context, proj *Project, es *e
 	if err != nil {
 		return nil, nil, &runtimePinHold{}
 	}
-	o := &runtimeStartOwner{ID: uuid.NewString(), ProjectID: proj.ID, ServiceID: es.ID, SandboxID: spec.ID, State: buildPreparing,
+	o := &runtimeStartOwner{ID: uuid.NewString(), ProjectID: proj.ID, ServiceID: es.ID, SandboxID: spec.ID, State: buildPreparing, Epoch: 1,
 		Spec: envelope, Source: *spec.RuntimeSource, ProviderHash: runtimeProviderHash(es)}
 	o.Operation = registrypins.Operation{ID: o.ID, ProjectID: proj.ID, Owner: "runtime:create:" + es.ID + ":" + spec.ID, Generation: uuid.NewString()}
 	if _, err = h.runtimeOwners().InsertOne(ctx, o); err != nil {
@@ -184,7 +212,7 @@ func (h *Handler) prepareRuntimeCreate(ctx context.Context, proj *Project, es *e
 		h.runtimeUnknownDetached(ctx, store, o)
 		return o, store, &runtimePinHold{operation: o.ID}
 	}
-	o.Pins = pins
+	o.Pins = runtimeReceipts(pins)
 	if err = h.validateRuntimeCandidate(ctx, o, ss.Config(), spec); err != nil {
 		h.runtimeFailUnused(ctx, store, o)
 		return o, store, &runtimePinHold{operation: o.ID}
@@ -291,7 +319,7 @@ func (h *Handler) runtimeFailUnused(ctx context.Context, store *registrypins.Sto
 	}
 	for _, p := range o.Pins {
 		if p.State == registrypins.Pending && p.BindingUID == "" {
-			_, _ = store.ReleaseKnownNoEffect(cleanup, p)
+			_, _ = store.ReleaseKnownNoEffect(cleanup, p.pin())
 		}
 	}
 	o.State = buildPinFailed
@@ -299,7 +327,7 @@ func (h *Handler) runtimeFailUnused(ctx context.Context, store *registrypins.Sto
 func (h *Handler) runtimeUnknownDetached(ctx context.Context, store *registrypins.Store, o *runtimeStartOwner) {
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
-	if o == nil || store == nil || o.State == buildPinFailed || o.State == "observed" {
+	if o == nil || store == nil || o.State == buildPinFailed || o.State == "observed" || o.State == "observing" {
 		return
 	}
 	known, err := store.RuntimeTerminalKnown(cleanup, o.Operation)
@@ -316,12 +344,26 @@ func (h *Handler) runtimeUnknownDetached(ctx context.Context, store *registrypin
 		if err := h.sbRuntimeDB.LockXact(tc, "registry-ref:"+host); err != nil {
 			return err
 		}
-		return h.runtimeWrite(tc, o, o.State, func(cur *runtimeStartOwner) error { cur.State, cur.Pins = buildPinUnknown, pins; return nil })
+		tx, err := h.sbRuntimeDB.Tx(tc)
+		if err != nil {
+			return err
+		}
+		var terminal bool
+		if err = tx.QueryRow(tc, `SELECT EXISTS(SELECT 1 FROM registry_runtime_dispatch WHERE operation=$1 AND project_id=$2 AND owner=$3 AND generation=$4 AND host=$5 AND state IN ('terminal','known_no_effect'))`, o.ID, o.ProjectID, o.Operation.Owner, o.Operation.Generation, host).Scan(&terminal); err != nil {
+			return err
+		}
+		if terminal {
+			return errRuntimePinState
+		}
+		return h.runtimeWrite(tc, o, o.State, func(cur *runtimeStartOwner) error {
+			cur.State, cur.Pins = buildPinUnknown, runtimeReceipts(pins)
+			return nil
+		})
 	})
 	if err != nil {
 		return
 	} // no successful owner CAS => no pin mutation
-	o.State, o.Pins = buildPinUnknown, pins
+	o.State, o.Pins = buildPinUnknown, runtimeReceipts(pins)
 	for _, p := range pins {
 		if p.State == registrypins.Pending || p.State == registrypins.Bound {
 			_, _ = store.MarkUnknown(cleanup, p)
@@ -332,13 +374,13 @@ func (h *Handler) runtimeUnknownDetached(ctx context.Context, store *registrypin
 // Called only by the TWO CREATE entrypoints. Generic e2bWaitReady is unchanged:
 // a saved CR on resume/fork can carry old CREATE annotations but grants no lookup
 // or observation authority through this explicitly scoped seam.
-func (h *Handler) waitRuntimeCreateReady(ctx context.Context, c *e2bCaller, cr *cloud.CloudResource) error {
+func (h *Handler) waitRuntimeCreateReady(ctx context.Context, c *e2bCaller, cr *cloud.CloudResource, spec *sandbox.Spec) error {
 	live, err := c.ss.WaitReady(ctx, c.proj.ID, cr.ExternalID)
 	if err == nil {
 		err = startupResponseAlive(ctx, live)
 	}
 	if err == nil {
-		err = h.observeRuntimeCreate(ctx, c, cr.ExternalID)
+		err = h.observeRuntimeCreate(ctx, c, spec)
 	}
 	if err != nil {
 		h.runtimeCreateFailure(ctx, c, cr.ExternalID)
@@ -377,16 +419,28 @@ func (h *Handler) runtimeCreateFailure(ctx context.Context, c *e2bCaller, id str
 		h.runtimeUnknownDetached(cleanup, store, o)
 	}
 }
-func (h *Handler) observeRuntimeCreate(ctx context.Context, c *e2bCaller, id string) error {
+func (h *Handler) observeRuntimeCreate(ctx context.Context, c *e2bCaller, spec *sandbox.Spec) error {
+	_, protected, err := sandbox.RuntimeCreateImage(c.ss.Config(), *spec)
+	if err != nil {
+		return &runtimePinHold{}
+	}
+	if !protected {
+		return nil
+	} // explicit curated library/external source, not a request flag
+	expected, err := sandbox.RuntimeCreateSpec(c.ss.Config(), c.es.ID, *spec)
+	if err != nil {
+		return &runtimePinHold{}
+	}
+	id := spec.ID
 	o, err := h.findRuntimeOwner(ctx, c.proj.ID, c.es.ID, id)
 	if err != nil {
 		return &runtimePinHold{}
 	}
-	if o == nil {
-		return nil
+	if o == nil || o.Spec != expected {
+		return &runtimePinHold{}
 	}
 	hold := &runtimePinHold{operation: o.ID}
-	if o.State != buildDispatching && o.State != "observed" {
+	if o.State != buildDispatching && o.State != "observing" && o.State != "observed" {
 		return hold
 	}
 	evidence, err := c.ss.RuntimeCreateEvidence(ctx, c.proj.ID, id)
@@ -398,9 +452,18 @@ func (h *Handler) observeRuntimeCreate(ctx context.Context, c *e2bCaller, id str
 	if err != nil {
 		return hold
 	}
-	// Source guard CAS BEFORE privileged Record; unknown cannot be reopened.
-	if err = h.runtimeWrite(ctx, o, o.State, func(cur *runtimeStartOwner) error { cur.PodUID, cur.CRUID = evidence.UID, evidence.CRUID; return nil }); err != nil {
-		return hold
+	// First-UID attachment is an epoch CAS into OBSERVING before privileged
+	// Record. Stale DISPATCHING failures cannot win across this barrier; a crash
+	// here conservatively retains its Pending/Bound hold rather than reopening.
+	if o.State == buildDispatching {
+		if err = h.runtimeWrite(ctx, o, buildDispatching, func(cur *runtimeStartOwner) error {
+			cur.State, cur.PodUID, cur.CRUID = "observing", evidence.UID, evidence.CRUID
+			return nil
+		}); err != nil {
+			if !h.joinRuntimeObservation(ctx, o, evidence, false) {
+				return hold
+			}
+		}
 	}
 	if err = store.RecordRuntimePod(ctx, o.Operation, evidence); err != nil {
 		return hold
@@ -413,18 +476,48 @@ func (h *Handler) observeRuntimeCreate(ctx context.Context, c *e2bCaller, id str
 	if p.Operation != o.Operation || p.Ref != o.Spec.Image || p.RequestedRef != o.Spec.Image {
 		return hold
 	}
-	if p.State == registrypins.Pending {
-		p, err = store.ObserveRuntimePod(ctx, p, evidence)
-	}
+	p, err = observeRuntimeReceipt(ctx, store, p, evidence)
 	if err != nil || p.State != registrypins.Bound || p.BindingUID != evidence.UID || p.BindingGeneration != evidence.Nonce {
 		return hold
 	}
 	if err = h.runtimeWrite(ctx, o, o.State, func(cur *runtimeStartOwner) error {
-		cur.State, cur.Pins = "observed", []registrypins.Pin{p}
+		cur.State, cur.Pins = "observed", runtimeReceipts([]registrypins.Pin{p})
 		cur.PodUID, cur.CRUID = evidence.UID, evidence.CRUID
 		return nil
 	}); err != nil {
-		return hold
+		if !h.joinRuntimeObservation(ctx, o, evidence, true) {
+			return hold
+		}
 	}
 	return nil
+}
+
+// A copied old Pending receipt may lose to another exact observer. The only
+// recovery is read-only adoption of its precise next-epoch Bound result.
+func observeRuntimeReceipt(ctx context.Context, store *registrypins.Store, p registrypins.Pin, e registrypins.RuntimePodEvidence) (registrypins.Pin, error) {
+	if p.State == registrypins.Bound {
+		return p, nil
+	}
+	if p.State != registrypins.Pending {
+		return registrypins.Pin{}, errRuntimePinState
+	}
+	bound, err := store.ObserveRuntimePod(ctx, p, e)
+	if errors.Is(err, registrypins.ErrConflict) {
+		latest, readErr := store.PinsForOperation(ctx, p.Operation)
+		if readErr == nil && len(latest) == 1 && latest[0].ID == p.ID && latest[0].Operation == p.Operation && latest[0].Ref == p.Ref && latest[0].RequestedRef == p.RequestedRef && latest[0].Epoch == p.Epoch+1 && latest[0].State == registrypins.Bound && latest[0].BindingUID == e.UID && latest[0].BindingGeneration == e.Nonce {
+			return latest[0], nil
+		}
+	}
+	return bound, err
+}
+
+// Join only a positively attached SAME immutable observation. A stale/different
+// UID can neither overwrite the source nor turn a winner's Bound pin Unknown.
+func (h *Handler) joinRuntimeObservation(ctx context.Context, o *runtimeStartOwner, e registrypins.RuntimePodEvidence, requireObserved bool) bool {
+	fresh, err := h.findRuntimeOwner(ctx, o.ProjectID, o.ServiceID, o.SandboxID)
+	if err != nil || fresh == nil || fresh.Operation != o.Operation || fresh.Spec != o.Spec || fresh.Source != o.Source || fresh.ProviderHash != o.ProviderHash || fresh.PodUID != e.UID || fresh.CRUID != e.CRUID || fresh.Epoch < o.Epoch || (fresh.State != "observing" && fresh.State != "observed") || (requireObserved && fresh.State != "observed") {
+		return false
+	}
+	*o = *fresh
+	return true
 }
