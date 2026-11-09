@@ -147,8 +147,8 @@ func TestReconcileIgnoresAJobBeingRemoved(t *testing.T) {
 	}
 }
 
-// Without Datastore.Allocate PVE refuses the delete: the file must still lose its content.
-func TestDeleteSeedVolumeEmptiesWhatItCannotDelete(t *testing.T) {
+// Legacy CDs cannot be adopted by prefix, even when an overwrite would succeed.
+func TestDeleteSeedVolumeRetainsUnjournaledLegacy(t *testing.T) {
 	reply := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
 	var uploaded string
 	mux := http.NewServeMux()
@@ -177,11 +177,11 @@ func TestDeleteSeedVolumeEmptiesWhatItCannotDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.DeleteSeedVolume(context.Background(), "a", "iso:iso/pcseed-7-x.iso"); err != nil {
-		t.Fatal(err)
+	if err := svc.DeleteSeedVolume(context.Background(), "a", "iso:iso/pcseed-7-x.iso"); err == nil {
+		t.Fatal("legacy file without ownership journal must be retained")
 	}
-	if uploaded != "pcseed-7-x.iso" {
-		t.Fatalf("uploaded %q", uploaded)
+	if uploaded != "" {
+		t.Fatalf("unjournaled CD was overwritten: %q", uploaded)
 	}
 }
 
@@ -591,8 +591,8 @@ func TestWaitStoppedFailsAndKeepsTheVMUp(t *testing.T) {
 	}
 }
 
-// seedPVE: a store on two nodes. Node a is dead, node b refuses the delete and takes the overwrite.
-func TestDeleteSeedVolumeReachesSharedStoreFromAnotherNode(t *testing.T) {
+// Multiple reachable nodes do not authorize overwriting an unjournaled CD.
+func TestDeleteSeedVolumeRetainsSharedLegacy(t *testing.T) {
 	reply := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
 	uploads := []string{}
 	mux := http.NewServeMux()
@@ -622,11 +622,11 @@ func TestDeleteSeedVolumeReachesSharedStoreFromAnotherNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.DeleteSeedVolume(context.Background(), "a", "iso:iso/pcseed-7-x.iso"); err != nil {
-		t.Fatal(err)
+	if err := svc.DeleteSeedVolume(context.Background(), "a", "iso:iso/pcseed-7-x.iso"); err == nil {
+		t.Fatal("shared storage does not prove legacy ownership")
 	}
-	if len(uploads) != 1 {
-		t.Fatalf("uploads %v", uploads)
+	if len(uploads) != 0 {
+		t.Fatalf("foreign shared CD overwritten: %v", uploads)
 	}
 }
 

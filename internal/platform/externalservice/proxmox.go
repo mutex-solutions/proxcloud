@@ -123,14 +123,16 @@ func (e *ExternalService) PoolFor(projectID string) string {
 func (e *ExternalService) PVEConfig() pve.Config {
 	insecure, _ := e.Config["insecureTls"].(bool)
 	return pve.Config{
-		APIURL:         str(e.Config["apiUrl"]),
-		APIURLs:        strList(e.Config["apiUrls"]),
-		CACert:         str(e.Config["caCert"]),
-		TokenID:        str(e.Config["tokenId"]),
-		Secret:         str(e.secretMap()["tokenSecret"]),
-		Fingerprint:    str(e.Config["fingerprint"]),
-		InsecureTLS:    insecure,
-		TimeoutSeconds: intOf(e.Config["timeoutSeconds"]),
+		APIURL:               str(e.Config["apiUrl"]),
+		APIURLs:              strList(e.Config["apiUrls"]),
+		CACert:               str(e.Config["caCert"]),
+		TokenID:              str(e.Config["tokenId"]),
+		Secret:               str(e.secretMap()["tokenSecret"]),
+		Fingerprint:          str(e.Config["fingerprint"]),
+		InsecureTLS:          insecure,
+		TimeoutSeconds:       intOf(e.Config["timeoutSeconds"]),
+		SeedInventoryTokenID: e.PVEMetadataSettings().SeedInventoryTokenID,
+		SeedInventorySecret:  str(e.secretMap()["seedInventoryTokenSecret"]),
 	}
 }
 
@@ -302,13 +304,16 @@ type PVEMetadata struct {
 	ForceISO bool
 	// VendorData is the operator's vendor-data for every seeded server.
 	VendorData string
+	// SeedInventoryTokenID is a separately provisioned, global read-only token.
+	// Its secret belongs in secret.seedInventoryTokenSecret, never config.
+	SeedInventoryTokenID string
 }
 
 // PVEMetadataSettings reads config.metadata.
 func (e *ExternalService) PVEMetadataSettings() PVEMetadata {
 	m, _ := e.Config["metadata"].(map[string]any)
 	force, _ := m["forceIso"].(bool)
-	return PVEMetadata{URL: str(m["url"]), ISOStorage: str(m["isoStorage"]), ForceISO: force, VendorData: str(m["vendorData"])}
+	return PVEMetadata{URL: str(m["url"]), ISOStorage: str(m["isoStorage"]), ForceISO: force, VendorData: str(m["vendorData"]), SeedInventoryTokenID: str(m["seedInventoryTokenId"])}
 }
 
 // PVELoadBalancerImage is the image a load balancer's VM is cloned from (config.lbImage): a Debian

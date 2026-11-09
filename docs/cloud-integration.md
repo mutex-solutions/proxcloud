@@ -378,10 +378,16 @@ the same key. `network-config` is rendered from `ipconfigN` and is absent for pl
   nodes' management networks.** Seeds stay on a shared store by default because PVE refuses to migrate a VM
   with a CD on a node-local one (`local cdrom image`, `QemuMigrate.pm`). Bootstrap ISOs of Kubernetes
   workers are different, live only until the node joins, and must be node-local (docs/managed-k8s.md).
-- **Removal.** Deleting the server removes the CD, or without `Datastore.Allocate` overwrites it with an
-  empty one (docs/proxmox-permissions.md). A shared store is tried from the other nodes when the CD's node is
-  down. If nothing works, a row holding only the file name stays and each sync tries again. A CD replaced on a
-  NIC change, or left by a failed attach, has no row: a failure there is only logged.
+- **Removal.** Every new CD has a committed `pveSeedArtifact` journal entry before upload, with a persistent
+  installation identity and an exact 128-bit random filename. Failed/superseded uploads stay accounted for independently
+  of the encrypted active `pveServerSeed` source. All delete/empty paths require journal ownership, unchanged cluster and
+  storage identity, complete current/pending/snapshot references across **all** VMs/templates, and two no-reference
+  observations separated by 24 hours (plus a final fresh scan). Legacy `pcseed-<vmid>-<suffix>` files are never adopted.
+  No inventory reader or incomplete visibility means retained plaintext CD + durable warning, not an empty fallback.
+  A positively deleted server's source is retired (never delivered to a reused VMID), but its ciphertext remains while
+  cleanup is pending. A stale cache candidate alone cannot retire an active source. A denied DELETE may use an empty
+  CD overwrite only after the same checks; an unknown async task outcome requires operator reconciliation instead.
+  See [server-seed-safety.md](server-seed-safety.md) for setup, status, failure handling and remaining confidentiality limits.
 - **Password login.** A create password always goes through a seed: PVE's own drive sets the password but
   cannot turn on `ssh_pwauth`, and a cloud image then refuses it over ssh.
 - **Later changes.** Attaching or detaching a public NIC re-delivers the seed with the same instance id

@@ -60,16 +60,23 @@ type ServerSeed struct {
 	Metadata      map[string]string `json:"metadata,omitempty"`
 	NetworkConfig string            `json:"networkConfig,omitempty"`
 	CreatedAt     *time.Time        `json:"createdAt,omitempty"`
+	// Retired sources stay encrypted for cleanup/recovery, but can never seed a
+	// future VM reusing this vmid. Explicit deletion may retire without global read.
+	Retired bool `json:"retired,omitempty"`
+	// The revision read by this request; not persisted. Rebuild changes iid, so
+	// a NIC reseed holding an older source cannot overwrite the new generation.
+	readInstanceID string
 }
 
 // SeedRepo persists the seeds.
 type SeedRepo struct {
-	col *pgdoc.Store
-	enc *textcrypt.Encryptor
+	col       *pgdoc.Store
+	enc       *textcrypt.Encryptor
+	artifacts *pve.SeedArtifactRepo
 }
 
 func NewSeedRepo(db *pgdoc.DB, enc *textcrypt.Encryptor) *SeedRepo {
-	return &SeedRepo{col: db.C("pveServerSeed"), enc: enc}
+	return &SeedRepo{col: db.C("pveServerSeed"), enc: enc, artifacts: pve.NewSeedArtifactRepo(db)}
 }
 
 // SetSeeds wires the server-seed store (nil = user-data is refused).
@@ -104,10 +111,11 @@ func (r *SeedRepo) byToken(ctx context.Context, token string) (*ServerSeed, erro
 // user-data must never reach this VM.
 func (r *SeedRepo) ForServer(ctx context.Context, serviceID, projectID, serverID string) (*ServerSeed, error) {
 	var s ServerSeed
-	found, err := r.col.FindOne(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID, "serverId": serverID}, &s)
+	found, err := r.col.FindOne(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID, "serverId": serverID, "retired": pgdoc.M{"$ne": true}}, &s)
 	if err != nil || !found {
 		return nil, err
 	}
+	s.readInstanceID = s.InstanceID
 	return r.decrypted(&s), nil
 }
 
@@ -242,6 +250,28 @@ func (h *Handler) pveSeedStep(ps *pve.Service, es *externalservice.ExternalServi
 // pveWriteSeed renders the seed from the VM's current config and delivers it. base is the seed URL's
 // base on a first URL seed ("" on a later write: the VM already holds its token).
 func (h *Handler) pveWriteSeed(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, s *ServerSeed, base string) error {
+	ps.SeedArtifacts = h.seeds.artifacts
+	return h.seeds.artifacts.Locked(ctx, es.ID, func(ctx context.Context) error { return h.pveWriteSeedLocked(ctx, ps, es, s, base) })
+}
+
+func (h *Handler) pveWriteSeedLocked(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService, s *ServerSeed, base string) error {
+	unknown, err := h.seeds.artifacts.ServerMutationUnknown(ctx, es.ID, s.ServerID)
+	if err != nil {
+		return err
+	}
+	if unknown {
+		return fmt.Errorf("seed mutation outcome is unknown; operator reconciliation required")
+	}
+	if s.readInstanceID != "" {
+		var current ServerSeed
+		found, err := h.seeds.col.Get(ctx, s.ID, &current)
+		if err != nil {
+			return err
+		}
+		if !found || current.Retired || current.InstanceID != s.readInstanceID || current.ISO != s.ISO {
+			return fmt.Errorf("seed generation changed during operation; retry")
+		}
+	}
 	vmid, err := strconv.Atoi(s.ServerID)
 	if err != nil {
 		return fmt.Errorf("seed: bad vmid %q", s.ServerID)
@@ -249,6 +279,21 @@ func (h *Handler) pveWriteSeed(ctx context.Context, ps *pve.Service, es *externa
 	cfg, err := ps.C.GetVMConfig(ctx, s.Node, vmid)
 	if err != nil {
 		return err
+	}
+	if s.readInstanceID != "" && s.Mode == seedModeISO {
+		// VMIDs are reusable, including within one project. The existing source
+		// must still be positively bound to this VM, not merely found by vmid.
+		bound := false
+		for key, raw := range cfg {
+			if key != "description" {
+				if value, ok := raw.(string); ok && strings.HasPrefix(value, s.ISO+",") {
+					bound = true
+				}
+			}
+		}
+		if s.ISO == "" || !bound {
+			return fmt.Errorf("server seed attachment identity changed; operator reconciliation required")
+		}
 	}
 	dns, err := ps.C.NodeDNS(ctx, s.Node)
 	if err != nil {
@@ -292,9 +337,16 @@ func (h *Handler) pveWriteSeed(ctx context.Context, ps *pve.Service, es *externa
 		if storage == "" {
 			return httpx.NewError(http.StatusConflict, http.StatusConflict, "No ISO storage is available on node "+s.Node+" for the server's user-data")
 		}
-		if s.ISO, err = ps.AttachSeedISO(ctx, s.Node, vmid, storage, seed); err != nil {
+		// Persist the encrypted rebuild source before upload too. A crash after
+		// attach must not leave a live CD whose source vanished with the request.
+		if err := h.seeds.put(ctx, s); err != nil {
 			return err
 		}
+		volume, err := ps.AttachSeedISO(ctx, s.Node, vmid, storage, seed, pve.SeedArtifact{SeedID: s.ID, ProjectID: s.ProjectID, InstanceID: s.InstanceID})
+		if err != nil {
+			return err
+		}
+		s.ISO = volume
 		return h.seeds.put(ctx, s)
 	}
 }
@@ -364,11 +416,34 @@ func (h *Handler) DropStaleSeeds(ctx context.Context, ps *pve.Service, es *exter
 		if err != nil {
 			return err
 		}
-		if staleSeed(&rows[i], row, now) {
+		if rows[i].Retired || staleSeed(&rows[i], row, now) {
+			// Local cache absence is only a candidate, not authority to revoke a
+			// live seed or erase its source. Reused vmids are retained conservatively.
+			if !rows[i].Retired {
+				if ps.SeedReader == nil {
+					continue
+				}
+				exists, err := ps.SeedReader.SeedVMExists(ctx, rows[i].ServerID)
+				if err != nil || exists {
+					continue
+				}
+			}
 			stale = append(stale, rows[i])
 		}
 	}
-	h.pveDropSeeds(ctx, ps, stale)
+	h.pveDropSeeds(ctx, ps, stale, false)
+	// Includes upload/attach failures and superseded CDs with no active-seed
+	// row; never enumerate/adopt files on shared storage by their prefix.
+	ps.SeedArtifacts = h.seeds.artifacts
+	artifacts, err := h.seeds.artifacts.Pending(ctx, es.ID)
+	if err != nil {
+		return err
+	}
+	for _, a := range artifacts {
+		if err := ps.DeleteSeedVolume(ctx, a.Node, a.Volume); err != nil {
+			slog.Warn("seed artifact cleanup pending", "artifact", a.ID, "reason", err)
+		}
+	}
 	return nil
 }
 
@@ -385,27 +460,67 @@ func (h *Handler) pveReleaseProjectSeeds(ctx context.Context, ps *pve.Service, s
 	return nil
 }
 
-func (h *Handler) pveDropSeeds(ctx context.Context, ps *pve.Service, rows []ServerSeed) {
-	for _, s := range rows {
-		if s.ISO != "" {
-			if err := ps.DeleteSeedVolume(ctx, s.Node, s.ISO); err != nil {
-				slog.Error("seed CD left on storage with its user-data, will retry", "server", s.ServerID, "volume", s.ISO, "err", err)
-				h.keepSeedForRetry(ctx, s)
-				continue
+func (h *Handler) pveDropSeeds(ctx context.Context, ps *pve.Service, rows []ServerSeed, explicit ...bool) {
+	ps.SeedArtifacts = h.seeds.artifacts
+	for _, seed := range rows {
+		err := h.seeds.artifacts.Locked(ctx, ps.ServiceID, func(ctx context.Context) error {
+			// Re-read under the same lock as writers: never retire a seed that a
+			// concurrent rebuild/reseed replaced since this candidate was listed.
+			var s ServerSeed
+			found, err := h.seeds.col.Get(ctx, seed.ID, &s)
+			if err != nil || !found {
+				return err
 			}
+			if s.InstanceID != seed.InstanceID || s.ISO != seed.ISO {
+				return nil
+			}
+			if len(explicit) > 0 && !explicit[0] && !s.Retired {
+				// Candidate selection raced a new create/rebuild: repeat authority
+				// under the writer lock before changing active source state.
+				if ps.SeedReader == nil {
+					return fmt.Errorf("seed cleanup pending: complete reader unavailable")
+				}
+				exists, err := ps.SeedReader.SeedVMExists(ctx, s.ServerID)
+				if err != nil {
+					return err
+				}
+				if exists {
+					return nil
+				}
+			}
+			// Preserve ciphertext verbatim. Calling put here would encrypt an
+			// already encrypted source, making an eventual recovery unreadable.
+			if _, err := h.seeds.col.SetByID(ctx, s.ID, pgdoc.M{"retired": true}, nil); err != nil {
+				return err
+			}
+			artifacts, err := h.seeds.artifacts.ForSeed(ctx, ps.ServiceID, s.ID)
+			if err != nil {
+				return err
+			}
+			seen := map[string]bool{}
+			var pending error
+			for _, a := range artifacts {
+				seen[a.Volume] = true
+				if err := ps.DeleteSeedVolume(ctx, a.Node, a.Volume); err != nil {
+					pending = err
+				}
+			}
+			// Legacy source or an old source.ISO still gets the same gate; it
+			// cannot be adopted into the journal just because the DB names it.
+			if s.ISO != "" && !seen[s.ISO] {
+				if err := ps.DeleteSeedVolume(ctx, s.Node, s.ISO); err != nil {
+					pending = err
+				}
+			}
+			if pending != nil {
+				return pending
+			}
+			_, err = h.seeds.col.DeleteByID(ctx, s.ID)
+			return err
+		})
+		if err != nil {
+			slog.Warn("seed cleanup pending; encrypted source retained", "server", seed.ServerID, "reason", err)
 		}
-		if _, err := h.seeds.col.DeleteByID(ctx, s.ID); err != nil {
-			slog.Error("drop seed", "server", s.ServerID, "err", err)
-		}
-	}
-}
-
-// keepSeedForRetry leaves only what DropStaleSeeds needs to try the CD again. No server id: PVE reuses vmids, and the next
-// server with this one must not get this seed's user-data or password, nor hold up the retry by having a row.
-func (h *Handler) keepSeedForRetry(ctx context.Context, s ServerSeed) {
-	kept := ServerSeed{ID: s.ID, ServiceID: s.ServiceID, ProjectID: s.ProjectID, Node: s.Node, Mode: s.Mode, ISO: s.ISO, CreatedAt: s.CreatedAt}
-	if err := h.seeds.put(ctx, &kept); err != nil {
-		slog.Error("keep seed for retry", "server", s.ServerID, "err", err)
 	}
 }
 
@@ -421,7 +536,7 @@ func (h *Handler) nocloudFile(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	if s == nil || s.Mode != seedModeURL {
+	if s == nil || s.Retired || s.Mode != seedModeURL {
 		h.fail(w, httpx.NotFound("Not found"))
 		return
 	}
@@ -429,9 +544,8 @@ func (h *Handler) nocloudFile(w http.ResponseWriter, r *http.Request) {
 	// covers a first boot racing the create's own insert.
 	if s.CreatedAt != nil && time.Since(*s.CreatedAt) > seedOrphanGrace {
 		if row, err := h.cloud.FindByServiceIDAndExternalID(r.Context(), s.ServiceID, s.ServerID); err == nil && staleSeed(s, row, time.Now().UTC()) {
-			if _, err := h.seeds.col.DeleteByID(r.Context(), s.ID); err != nil {
-				slog.Error("drop orphan seed", "server", s.ServerID, "err", err)
-			}
+			// Refuse delivery on cache mismatch, but do not destroy the encrypted
+			// source: only the complete live-view cleanup can prove it stale.
 			h.fail(w, httpx.NotFound("Not found"))
 			return
 		}

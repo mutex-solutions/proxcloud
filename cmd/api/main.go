@@ -285,6 +285,7 @@ func run() error {
 			return nil, err
 		}
 		s.HolderLock = holderLocks.Wait
+		s.SeedArtifacts = pve.NewSeedArtifactRepo(pg)
 		return s, nil
 	}
 	projectH.SetProxmox(pveWithHolderLock)
@@ -459,6 +460,7 @@ func run() error {
 		return dbaas.New(es.DbaasConfig(), es.ID)
 	})
 	adminH.SetPVEFlavors(pveFlavorRepo)
+	adminH.SetSeedArtifacts(pve.NewSeedArtifactRepo(pg))
 	// Without this the cloud-admin live reads (gpu-info, provider probes) silently
 	// answer empty — live-caught: /admin/service/{id}/gpu-info returned [] with four
 	// mapped cards present.

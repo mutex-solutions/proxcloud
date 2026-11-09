@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SeedISOPrefix names a platform-written seed CD on storage.
@@ -298,59 +299,91 @@ func PickSeedStorage(caps map[string]StorageCapability, node, configured string)
 // AttachSeedISO uploads a seed CD to storage and puts it in the VM's cloud-init slot in place of the
 // drive that was there (two cidata CDs would make the pick arbitrary). The VM must be stopped for the
 // new CD to count at the next start; a CD already there is deleted. Returns the new volid.
-func (s *Service) AttachSeedISO(ctx context.Context, node string, vmid int, storage string, seed Seed) (string, error) {
+func (s *Service) AttachSeedISO(ctx context.Context, node string, vmid int, storage string, seed Seed, artifact ...SeedArtifact) (string, error) {
+	if s.SeedArtifacts == nil || len(artifact) != 1 {
+		return "", fmt.Errorf("server seed artifact journal is not configured")
+	}
+	var volume string
+	err := s.SeedArtifacts.Locked(ctx, s.ServiceID, func(ctx context.Context) error {
+		a := artifact[0]
+		a.ServiceID, a.Node, a.ServerID = s.ServiceID, node, strconv.Itoa(vmid)
+		prepared, err := s.SeedArtifacts.Prepare(ctx, s.C, a, storage)
+		if err != nil {
+			return err
+		}
+		volume = prepared.Volume
+		return s.attachSeedISO(ctx, node, vmid, storage, seed, prepared)
+	})
+	return volume, err
+}
+
+func (s *Service) attachSeedISO(ctx context.Context, node string, vmid int, storage string, seed Seed, artifact *SeedArtifact) error {
 	iso, err := BuildSeedISO(seed.Files())
 	if err != nil {
-		return "", err
+		return err
 	}
 	cfg, err := s.C.GetVMConfig(ctx, node, vmid)
 	if err != nil {
-		return "", err
+		return err
 	}
-	name := fmt.Sprintf("%s%d-%s.iso", SeedISOPrefix, vmid, randBase36(6))
+	_, name, _, _, _ := ownedSeedVolume(artifact.Volume)
+	if err := s.SeedArtifacts.mutation(ctx, artifact, true); err != nil {
+		return err
+	}
 	up, err := s.C.UploadISO(ctx, node, storage, name, iso)
 	if err == nil {
 		err = s.C.WaitTask(ctx, up)
 	}
 	if err != nil {
-		if IsForbidden(err) {
-			return "", conflictf("The provider's API token cannot write server seeds to storage %s (it needs Datastore.AllocateTemplate there)", storage)
-		}
-		return "", fmt.Errorf("pve seed: upload to %s: %w", storage, err)
+		return fmt.Errorf("pve seed: upload: %w", err)
 	}
-	vol := storage + ":iso/" + name
+	if err := s.SeedArtifacts.status(ctx, artifact, "uploaded", "", nil); err != nil {
+		return err
+	}
 	old, slot := seedVolOf(cfg), cloudInitSlot(cfg)
-	var del []string
 	if slot == "" {
 		slot = "ide2"
 	} else if old == "" {
-		// PVE's drive: removed first, or the same-key update would keep it allocated.
-		del = []string{slot}
-		cfgUp, derr := s.C.SetVMConfig(ctx, node, vmid, nil, del...)
-		if derr == nil {
-			derr = s.C.WaitTask(ctx, cfgUp)
+		up, err := s.C.SetVMConfig(ctx, node, vmid, map[string]string{"digest": cfg.Str("digest")}, slot)
+		if err == nil {
+			err = seedTaskID(up, node)
 		}
-		if derr != nil {
-			s.dropUnattachedSeed(ctx, node, vol)
-			return "", fmt.Errorf("pve seed: drop cloud-init drive: %w", derr)
+		if err == nil {
+			err = s.C.WaitTask(ctx, up)
+		}
+		if err != nil {
+			return fmt.Errorf("pve seed: drop cloud-init drive: %w", err)
+		}
+		cfg, err = s.C.GetVMConfig(ctx, node, vmid)
+		if err != nil {
+			return err
 		}
 	}
-	up, err = s.C.SetVMConfig(ctx, node, vmid, map[string]string{slot: vol + ",media=cdrom"})
+	up, err = s.C.SetVMConfig(ctx, node, vmid, map[string]string{slot: artifact.Volume + ",media=cdrom", "digest": cfg.Str("digest")})
+	if err == nil {
+		err = seedTaskID(up, node)
+	}
 	if err == nil {
 		err = s.C.WaitTask(ctx, up)
 	}
 	if err != nil {
-		s.dropUnattachedSeed(ctx, node, vol)
-		return "", fmt.Errorf("pve seed: attach: %w", err)
+		return fmt.Errorf("pve seed: attach outcome needs reconciliation: %w", err)
+	}
+	cfg, err = s.C.GetVMConfig(ctx, node, vmid)
+	if err != nil || !seedMentions(map[string]any(cfg), name) {
+		return fmt.Errorf("pve seed: attached CD could not be verified")
+	}
+	if err := s.SeedArtifacts.Attached(ctx, artifact); err != nil {
+		return err
 	}
 	if old != "" {
 		s.dropUnattachedSeed(ctx, node, old)
 	}
-	return vol, nil
+	return nil
 }
 
-// dropUnattachedSeed is for a CD no seed row points at: nothing can retry it, so a failure is only logged.
-// ponytail: such a CD keeps its user-data until removed by hand; a row per file would let the sync retry it.
+// dropUnattachedSeed requests cleanup of a superseded CD. Its independent
+// artifact journal survives a failed active-seed save and the sync retries it.
 func (s *Service) dropUnattachedSeed(ctx context.Context, node, volid string) {
 	if err := s.DeleteSeedVolume(ctx, node, volid); err != nil {
 		slog.Error("seed CD left on storage with its user-data", "volume", volid, "err", err)
@@ -380,28 +413,103 @@ func (s *Service) SetSeedURL(ctx context.Context, node string, vmid int, seedURL
 	return s.C.WaitTask(ctx, up)
 }
 
-// DeleteSeedVolume removes a seed CD's file, which holds the tenant's user-data in plain text. PVE wants
-// Datastore.Allocate on the storage to delete an ISO, a right that also defines storages, so the platform role leaves it
-// out. Without it, or on any other failure, the file is overwritten with an empty CD: upload replaces a file of the same
-// name. node is where the CD was written, which a failover can leave dead, so a shared store is tried from the other nodes
-// too. An error means the file still holds its content: the caller keeps what it needs to retry.
-// ponytail: emptied files stay on the storage at 50 KiB each; grant Datastore.Allocate on the seed store to remove them.
+// DeleteSeedVolume is the ONLY seed-file destructive entry point. Neither an
+// upload permission nor an empty filtered inventory authorizes erasing a CD.
+// Callers retain active seed/rebuild data on any error, including pending cleanup.
 func (s *Service) DeleteSeedVolume(ctx context.Context, node, volid string) error {
-	storage, vol, ok := strings.Cut(volid, ":")
-	if !ok || !strings.Contains(vol, "iso/"+SeedISOPrefix) {
-		return nil
+	if s.SeedArtifacts == nil {
+		return fmt.Errorf("%w: seed artifact journal is unavailable", ErrSeedCleanupPending)
 	}
-	var err error
-	for _, n := range s.seedNodes(ctx, node, storage) {
-		err = s.C.DeleteStorageVolume(ctx, n, storage, vol)
-		if err == nil || IsNotFound(err) {
+	return s.SeedArtifacts.Locked(ctx, s.ServiceID, func(ctx context.Context) error {
+		a, err := s.SeedArtifacts.artifact(ctx, s.ServiceID, volid)
+		if err != nil {
+			return err
+		}
+		if a.State == "deleted" || a.State == "emptied" {
 			return nil
 		}
-		if err = s.emptySeedVolume(ctx, n, storage, strings.TrimPrefix(vol, "iso/")); err == nil {
-			return nil
+		pending := func(reason string, absent *time.Time) error {
+			if err := s.SeedArtifacts.status(ctx, a, "cleanup-pending", reason, absent); err != nil {
+				return err
+			}
+			return fmt.Errorf("%w: %s", ErrSeedCleanupPending, reason)
 		}
-	}
-	return err
+		unknown, err := s.SeedArtifacts.ServerMutationUnknown(ctx, s.ServiceID, a.ServerID)
+		if err != nil {
+			return err
+		}
+		if unknown {
+			return pending("a seed mutation on this VMID is unknown; operator reconciliation required", nil)
+		}
+		pinned, err := s.SeedArtifacts.recoveryPinned(ctx, s.ServiceID, a.ServerID)
+		if err != nil {
+			return err
+		}
+		if pinned {
+			return pending("provider backup/restore recovery pin retains all seed artifacts; operator archive/task reconciliation required", nil)
+		}
+		if a.MutationPending {
+			return pending("PVE mutation outcome is unknown; operator task reconciliation required", nil)
+		}
+		if a.Cluster == "" || a.Backing == "" {
+			return pending("original cluster/storage identity was not available; operator inspection required", nil)
+		}
+		if s.SeedReader == nil {
+			return pending("configure the separate global seed inventory reader; plaintext CD retained", nil)
+		}
+		if err := s.SeedReader.SeedReferences(ctx, s.C, a); err != nil {
+			// A known attached artifact remains live (not a cleanup backlog).
+			if a.State == "attached" && strings.HasPrefix(err.Error(), "seed remains referenced") {
+				return fmt.Errorf("%w: %s", ErrSeedCleanupPending, err)
+			}
+			return pending(err.Error(), nil)
+		}
+		now := time.Now().UTC()
+		if a.NoRefsAt == nil {
+			return pending("awaiting a second complete reference scan (24-hour orphan grace)", &now)
+		}
+		if now.Sub(*a.NoRefsAt) < 24*time.Hour {
+			return pending("awaiting the 24-hour orphan grace", a.NoRefsAt)
+		}
+		// A second fresh scan immediately before mutation; cooperative product
+		// writes hold this same lock. External privileged writes are trusted ops.
+		if err := s.SeedReader.SeedReferences(ctx, s.C, a); err != nil {
+			return pending(err.Error(), nil)
+		}
+		storage, name, _, _, _ := ownedSeedVolume(volid)
+		for _, n := range s.seedNodes(ctx, a.Node, storage) {
+			// Journal before asynchronous mutations too. An uncertain worker must
+			// not be retried against an ISO it may have begun deleting/uploading.
+			if err := s.SeedArtifacts.mutation(ctx, a, true); err != nil {
+				return err
+			}
+			err := s.C.DeleteStorageVolume(ctx, n, storage, "iso/"+name)
+			if err == nil || IsNotFound(err) {
+				return s.SeedArtifacts.status(ctx, a, "deleted", "", nil)
+			}
+			if !IsForbidden(err) {
+				return pending("PVE delete outcome is unknown; operator task reconciliation required", nil)
+			}
+			// A denied DELETE cannot have started a worker. Only then may the
+			// lower-privilege overwrite fallback run after another reference scan.
+			if err := s.SeedReader.SeedReferences(ctx, s.C, a); err != nil {
+				if e := s.SeedArtifacts.mutation(ctx, a, false); e != nil {
+					return e
+				}
+				return pending(err.Error(), nil)
+			}
+			if err := s.emptySeedVolume(ctx, n, storage, name); err == nil {
+				return s.SeedArtifacts.status(ctx, a, "emptied", "empty stub retained; physical removal needs Datastore.Allocate", nil)
+			} else if IsForbidden(err) {
+				if e := s.SeedArtifacts.mutation(ctx, a, false); e != nil {
+					return e
+				}
+				return pending("PVE denied both removal and overwrite of the owned seed CD", a.NoRefsAt)
+			}
+			return pending("PVE overwrite outcome is unknown; operator task reconciliation required", nil)
+		}
+		return pending("no node can reach the seed storage", a.NoRefsAt)
+	})
 }
 
 // seedNodes lists the nodes to reach a seed store from: the given one first, then for a shared store the others online.
@@ -433,6 +541,17 @@ func (s *Service) emptySeedVolume(ctx context.Context, node, storage, name strin
 		return err
 	}
 	return s.C.WaitTask(ctx, up)
+}
+
+// seedTaskID is narrower than WaitTask: seed upload/config/delete endpoints
+// are asynchronous. A malformed/missing 200 response is an unknown mutation,
+// never a synchronous no-op that can clear the durable in-flight fence.
+func seedTaskID(up UPID, node string) error {
+	parts := strings.Split(string(up), ":")
+	if len(parts) != 9 || parts[0] != "UPID" || parts[1] != node || parts[5] == "" || parts[8] != "" {
+		return fmt.Errorf("pve seed: missing or invalid asynchronous task identity")
+	}
+	return nil
 }
 
 // NodeDNS lists the DNS servers the node resolves through: what PVE's own drive tells a guest.
@@ -475,13 +594,19 @@ func (c *Client) UploadISO(ctx context.Context, node, storage, filename string, 
 	var upid UPID
 	path := "/nodes/" + node + "/storage/" + url.PathEscape(storage) + "/upload"
 	err = c.doBody(ctx, "POST", path, &body, w.FormDataContentType(), &upid)
+	if err == nil {
+		err = seedTaskID(upid, node)
+	}
 	return upid, err
 }
 
 // DeleteStorageVolume removes a volume from a storage (vol is the part after "storage:").
 func (c *Client) DeleteStorageVolume(ctx context.Context, node, storage, vol string) error {
 	up, err := c.deleteTask(ctx, "/nodes/"+node+"/storage/"+url.PathEscape(storage)+"/content/"+url.PathEscape(vol), nil)
-	if err != nil || up == "" {
+	if err != nil {
+		return err
+	}
+	if err := seedTaskID(up, node); err != nil {
 		return err
 	}
 	return c.WaitTask(ctx, up) // the request only starts it: a delete that fails, fails here

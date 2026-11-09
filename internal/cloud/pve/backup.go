@@ -111,6 +111,17 @@ func (s *Service) ListServerBackups(ctx context.Context, projectID, externalID, 
 // CreateServerBackup archives a pool VM to the store and waits for it. A store that is not shared would
 // leave the archives behind when the VM migrates, so it is refused rather than half working.
 func (s *Service) CreateServerBackup(ctx context.Context, projectID, externalID, store string, capability StorageCapability, headroomPct float64) error {
+	if s.SeedArtifacts == nil {
+		return s.createServerBackup(ctx, projectID, externalID, store, capability, headroomPct)
+	}
+	return s.SeedArtifacts.Locked(ctx, s.ServiceID, func(ctx context.Context) error {
+		if err := s.SeedArtifacts.PinRecovery(ctx, s.ServiceID, externalID); err != nil {
+			return err
+		}
+		return s.createServerBackup(ctx, projectID, externalID, store, capability, headroomPct)
+	})
+}
+func (s *Service) createServerBackup(ctx context.Context, projectID, externalID, store string, capability StorageCapability, headroomPct float64) error {
 	ctx, cancel := context.WithTimeout(ctx, backupTimeout)
 	defer cancel()
 	vm, err := s.resolveOwned(ctx, projectID, externalID)
@@ -325,6 +336,21 @@ func nicMACs(cfg VMConfig) map[string]string {
 // and only another restore helps, which restoreConflict lets through. guard runs before the server stops and again once it has, since a stop can take
 // minutes and a disk added meanwhile would go too. It answers with when the archive was taken.
 func (s *Service) RestoreServerBackup(ctx context.Context, projectID, externalID, store, volid string, guard RestoreGuard) (time.Time, error) {
+	if s.SeedArtifacts == nil {
+		return s.restoreServerBackup(ctx, projectID, externalID, store, volid, guard)
+	}
+	var restoredAt time.Time
+	err := s.SeedArtifacts.Locked(ctx, s.ServiceID, func(ctx context.Context) error {
+		if err := s.SeedArtifacts.PinRecovery(ctx, s.ServiceID, externalID); err != nil {
+			return err
+		}
+		var err error
+		restoredAt, err = s.restoreServerBackup(ctx, projectID, externalID, store, volid, guard)
+		return err
+	})
+	return restoredAt, err
+}
+func (s *Service) restoreServerBackup(ctx context.Context, projectID, externalID, store, volid string, guard RestoreGuard) (time.Time, error) {
 	ctx, cancel := context.WithTimeout(ctx, backupTimeout)
 	defer cancel()
 	vm, err := s.resolveOwned(ctx, projectID, externalID)
