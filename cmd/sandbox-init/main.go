@@ -243,19 +243,29 @@ const restartHold = 5 * time.Second
 // restartEnvd brings envd back after it exited on its own: unready first, then hold, start, /init, and ready again
 // only when /init succeeded (a failed re-init leaves the sandbox NotReady, so closed).
 func restartEnvd(start func() *exec.Cmd, reinit func() error, hold time.Duration) *exec.Cmd {
+	c, _ := restartEnvdWithCompletion(start, reinit, hold)
+	return c
+}
+
+// restartEnvdWithCompletion exposes completion of the entire async re-init,
+// including the final marker write. Tests must wait for it before rebinding the
+// process-global readyPath; completion of the reinit callback alone is too early.
+func restartEnvdWithCompletion(start func() *exec.Cmd, reinit func() error, hold time.Duration) (*exec.Cmd, <-chan struct{}) {
 	if err := os.Remove(readyPath); err != nil && !os.IsNotExist(err) {
 		log.Printf("remove ready marker: %v", err)
 	}
 	time.Sleep(hold)
 	c := start()
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if err := reinit(); err != nil {
 			log.Printf("re-init after restart failed, sandbox stays not ready: %v", err)
 			return
 		}
 		markReady()
 	}()
-	return c
+	return c, done
 }
 
 // markReady writes the marker the pod's startup and readiness probes (sandbox-init -ready) check.
