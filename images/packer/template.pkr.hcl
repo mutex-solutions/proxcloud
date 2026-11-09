@@ -56,7 +56,7 @@ source "proxmox-clone" "os" {
   network_adapters {
     model    = "virtio"
     bridge   = var.bridge
-    vlan_tag = var.vlan == 0 ? "" : tostring(var.vlan)
+    vlan_tag = var.vlan == 0 ? "" : format("%d", var.vlan)
   }
 
   ipconfig {
