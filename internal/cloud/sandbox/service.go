@@ -419,6 +419,11 @@ func (s *Service) pinRunningSince(ctx context.Context, obj map[string]any) error
 	}
 	patch := map[string]any{"metadata": patchMeta}
 	if digStr(obj, "metadata", "annotations", AnnotationStartupPending) == "true" {
+		// Do not resurrect a CR whose original provisional lifetime already elapsed.
+		oldEnd, e := time.Parse(time.RFC3339, endOf(obj))
+		if e != nil || !s.now().Before(oldEnd) || readyAt.After(s.now()) {
+			return context.DeadlineExceeded
+		}
 		seconds, err := strconv.Atoi(digStr(obj, "metadata", "annotations", AnnotationRuntimeSeconds))
 		if err != nil || seconds < 1 || seconds > s.cfg.Limits.MaxTimeoutSeconds {
 			return fmt.Errorf("sandbox: runtime timeout missing")

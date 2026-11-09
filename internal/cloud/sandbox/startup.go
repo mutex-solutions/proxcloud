@@ -106,8 +106,8 @@ func (s *Service) WaitReady(ctx context.Context, projectID, id string) (map[stri
 	defer cancel()
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
-	phase := ""
-	phaseAt := time.Now()
+	phase := "scheduling"
+	phaseAt := s.now()
 	spent := map[string]time.Duration{}
 	progress := StartupProgress{Phase: "scheduling", Reason: "waiting for sandbox control plane"}
 	for {
@@ -119,6 +119,9 @@ func (s *Service) WaitReady(ctx context.Context, projectID, id string) (map[stri
 		// Recheck cancellation and the original persisted lifetime before exposing readiness.
 		if ctx.Err() != nil {
 			return nil, &StartupError{progress, ctx.Err()}
+		}
+		if spent[phase]+s.now().Sub(phaseAt) >= cfg.phaseDuration(phase) {
+			return nil, &StartupError{progress, context.DeadlineExceeded}
 		}
 		if err == nil {
 			end, parseErr := time.Parse(time.RFC3339, str(live["shutdownTime"]))
@@ -132,17 +135,10 @@ func (s *Service) WaitReady(ctx context.Context, projectID, id string) (map[stri
 				progress = p
 			}
 			if progress.Phase != phase {
-				spent[phase] += time.Since(phaseAt)
-				phase, phaseAt = progress.Phase, time.Now()
+				spent[phase] += s.now().Sub(phaseAt)
+				phase, phaseAt = progress.Phase, s.now()
 			}
-			seconds := cfg.SchedulingSeconds
-			switch phase {
-			case "image-pull":
-				seconds = cfg.PullSeconds
-			case "runtime":
-				seconds = cfg.RuntimeSeconds
-			}
-			if progress.Terminal || spent[phase]+time.Since(phaseAt) >= time.Duration(seconds)*time.Second {
+			if progress.Terminal || spent[phase]+s.now().Sub(phaseAt) >= cfg.phaseDuration(phase) {
 				return nil, &StartupError{progress, context.DeadlineExceeded}
 			}
 		} else if errors.Is(err, ErrNotFound) {
@@ -156,6 +152,17 @@ func (s *Service) WaitReady(ctx context.Context, projectID, id string) (map[stri
 		case <-tick.C:
 		}
 	}
+}
+
+func (c StartupConfig) phaseDuration(phase string) time.Duration {
+	seconds := c.SchedulingSeconds
+	switch phase {
+	case "image-pull":
+		seconds = c.PullSeconds
+	case "runtime":
+		seconds = c.RuntimeSeconds
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // armStartup gives pending work the full startup budget plus its runtime TTL. On the first
