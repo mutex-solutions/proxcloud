@@ -39,6 +39,14 @@ the organization's billing profile.
   members are many. **User ≠ member ≠ billing-profile owner**: a user is the
   person, a member is that person's role in an org/project, the billing-profile
   owner is the one person financially responsible.
+- **Personal access token (PAT)** (`client_api_keys`) — a `pk…`/`sk…` pair a
+  customer mints on the account page; `Authorization: Bearer <pk>.<sk>` then acts
+  as that user (scope `full` or `read`, optional expiry), on `/api/v1` and on `/mcp`
+  with the client toolset. Not an HMAC key: the two tables never mix.
+- **Per-organization SSO** — an organization brings its own identity provider and
+  verified email domains (`org_identity_provider`, `org_sso_domain`); members whose
+  domain it claims must sign in through it, and a guard refuses other sessions
+  (`403 sso_*`). See [auth.md](auth.md).
 
 ## Cloud
 
@@ -77,6 +85,12 @@ the organization's billing profile.
 - **Template** — a VM that servers are fully cloned from: an admin OS template
   from the provider config, or a project template made from a tenant VM (shown
   as an image).
+- **Sandbox** (`SANDBOX`) — a short-lived gVisor container on the platform's own
+  sandbox cluster, created per project through the sandbox provider, billed per
+  minute while running. See [managed-sandbox.md](managed-sandbox.md).
+- **Sandbox API key** (`sandbox_api_keys`) — an `e2b_…` key of one project for the
+  E2B-compatible API under `/e2b` ([e2b-compat.md](e2b-compat.md)); only its
+  SHA-256 is stored and it acts with its creator's project rights.
 
 ## Pricing and billing
 
@@ -139,6 +153,7 @@ the organization's billing profile.
   [ADR-0006](adr/0006-mcp-in-process-dispatch.md)) that dispatches in-process
   through the same auth and policy as the REST API.
 - **Realm** — an identity partition in the OIDC issuer. ProxCloud uses separate
-  realms/clients per audience: the customer console (`clients`), the operator
+  realms/clients per audience: the customer console (`auth.main`; the installer's
+  realm `proxcloud`), the operator
   admin console, and the public admin API. See
   [ADR-0003](adr/0003-auth-as-oauth2-resource-server.md).

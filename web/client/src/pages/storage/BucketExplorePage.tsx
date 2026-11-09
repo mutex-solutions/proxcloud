@@ -113,6 +113,8 @@ export default function BucketExplorePage() {
   const invalidateObjects = () => {
     void qc.invalidateQueries({ queryKey: ["bucket-objects", pid, resourceId] })
     void qc.invalidateQueries({ queryKey: ["cloud-resource", pid, resourceId] })
+    // The upload refreshed the bucket's row: the list's object count and size must not wait for a sync.
+    void qc.invalidateQueries({ queryKey: ["cloud", pid, "BUCKET"] })
   }
 
   const setPublic = useMutation({

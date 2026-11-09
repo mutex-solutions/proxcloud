@@ -1,7 +1,7 @@
 # Every installer option with its easiest default. Override any of them under `proxcloud:` in the
 # site's group_vars; the two are deep-merged into `pc` (computed.yml).
 pc_defaults:
-  mode: allinone                 # split (services cluster for managed K8s / DBaaS) arrives with P7
+  mode: allinone                 # allinone | split (adds the services cluster for managed K8s and DBaaS)
   namespace: proxcloud
 
   pve:
@@ -64,7 +64,7 @@ pc_defaults:
     operator:                    # first operator login; the password lands in generated/
       username: admin
       email: admin@example.com
-    tenant_users: []             # optional seed logins: [{username, email, password}]
+    tenant_users: []             # optional seed logins: [{username, email, password}]; customers log in with the email
 
   # Tenant networks. Default: one EVPN zone over all nodes, first node as exit node.
   # Needs frr-pythontools on the nodes; on one node use kind: simple.
@@ -79,7 +79,7 @@ pc_defaults:
     vrf_vxlan: 10000
     exit_nodes: []               # default: the first node
     cidr_pool: 10.100.0.0/16
-    isolation: shared            # shared | evpn (a zone per project)
+    isolation: shared            # shared | evpn (a zone per project; registered as evpn-per-project)
     blocked_cidrs: []            # networks tenants must not reach, beyond the node management networks
     public: {}                   # {id, name, cidr, gateway, ranges}
 
@@ -88,7 +88,7 @@ pc_defaults:
     name: Proxmox
     region: pve
     region_name: Default
-    default_profile: ""          # default: std when detected, else the first detected
+    default_profile: ""          # default: on the first run the fastest detected (ceph, std, local-lvm); a re-run keeps the provider's
     # Display names for the discovered templates (config.templates overlay).
     templates:
       debian-13: {name: Debian 13, osDistro: debian}
@@ -111,6 +111,131 @@ pc_defaults:
     # another node only from shared to shared storage, so local VM disks need a copy on each node.
     per_node: auto
     keep: 2                      # versions kept per OS and node
+
+  # mode=split: the services cluster stage 50 builds. Node templates come from images/k8s-node-template.sh.
+  services:
+    k8s_version: 1.35.10
+    templates: {}                # {pve node: template vmid}, what the script prints
+    storage: local-zfs           # boot disks and the databases' StorageClass
+    iso_storage: local           # bootstrap ISOs (kubeadm join tokens): node-local only, never shared (docs/managed-k8s.md)
+    pool: proxcloud-system
+    capi_token_id: capmox@pve!capi
+    capi_token_file: token-capi   # in generated/
+    csi_token_id: csi@pve!csi
+    csi_token_file: token-csi     # in generated/
+    api_extra_sans: []           # more names or addresses on the services API certificate
+    chart_repo: pc-registry.proxcloud-registry.svc.cluster.local:5000/charts
+    # A subnet tenants can reach (over their normal egress) and that reaches the PVE API.
+    network:
+      bridge: ""
+      gateway: ""
+      prefix: 24
+      dns: [1.1.1.1, 8.8.8.8]
+      endpoint: ""               # kube-vip: the services API
+      nodes: []                  # node addresses, e.g. [192.0.2.201-192.0.2.209]
+      metallb: ""                # kamaji-api + DBaaS pool, e.g. 192.0.2.210-192.0.2.229
+    control_plane: {node: "", cores: 2, memory: 4096, disk: 30}
+    workers: []                  # [{node, cores, memory, disk}]: one per PVE node you want a zone on
+    # Kamaji provider defaults: read once, when stage 60 first registers the provider. Later: docs/managed-k8s.md.
+    kamaji:
+      version_images: {}         # {k8s version: "pve1=9210,pve2=9211"}
+      root_volume_gib: 30
+      worker_mtu: 1450
+      rwx_gib: 0                 # NAS dataset per cluster and its RWX class; 0 = none
+
+  # mode=split: the platform's sandbox cluster (gVisor), stage 55. Stage 60 registers its provider DISABLED;
+  # the operator sets it live in the console once its release gates hold (docs/install.md).
+  sandbox:
+    enabled: false
+    pool: proxcloud-sandbox
+    token: sandbox               # capmox@pve!<token>, the cluster's CAPMOX credential; secret in generated/token-<token>
+    runtime_image: ""            # envd + sandbox-init for node-setup; default <images.registry>/proxcloud-sandbox-runtime:<release>,
+                                 # published from the release after v0.3.28 and not built by stage 35: set it until then
+    allow_suid: true             # runsc allow-suid: sudo works in sandboxes, as on E2B (docs/managed-sandbox.md §1.4)
+    storage: ""                  # boot disks; default: services.storage
+    iso_storage: ""              # bootstrap ISOs, node-local only; default: services.iso_storage
+    network:
+      zone: ""                   # an existing EVPN zone; default: network.default_zone
+      vnet: pcsbx
+      tag: 100900                # VNI; tenant vnets take the next free one above the highest
+      subnet: ""                 # required, e.g. 192.0.2.0/24: outside network.cidr_pool, nothing else in it
+      gateway: ""                # required, inside subnet
+      nodes: ""                  # worker addresses, e.g. 192.0.2.10-192.0.2.29
+      metallb: ""                # LoadBalancer addresses inside the cluster, e.g. 192.0.2.200-192.0.2.209
+      dns: [1.1.1.1, 8.8.8.8]    # never on the management network: the isolation rules drop it
+      mtu: 1450
+      # required: the sandbox's own egress address (D14), so abuse reports and blocklists hit it and not the nodes,
+      # the portal or tenants. An IPv4 address on the exit node's uplink network that the uplink routes to that node
+      # and nothing else uses; stage 55 puts it on the exit node (root ssh, inventory group pve). "node" shares the
+      # exit node's own address instead (PVE's SNAT), for a site with one public address that accepts the risk.
+      snat: ""
+    nodes: {count: 2, cores: 4, memory: 8192, disk: 40}
+    # With a domain (stage 56): the node group sandbox-proxy runs on, apart from tenant code. Its workers take addresses
+    # from network.nodes too. 2 keeps the proxy up while one node rolls.
+    system_nodes: {count: 2, cores: 2, memory: 2048, disk: 30}
+    unsecured_min_age_minutes: 20  # a new worker takes tenant pods no earlier: CABPK's bootstrap token TTL (15) + margin
+    # Stage 56, the public entry: https://<port>-<id>.<domain> -> entry appliance (TCP 443) -> sandbox-proxy, where TLS
+    # ends (docs/managed-sandbox.md §4).
+    domain: ""                   # required, e.g. sbx.example.org: its own DNS zone; the wildcard certificate covers it
+    proxy:
+      address: ""                # required: sandbox-proxy's MetalLB address, inside network.metallb
+      image: ""                  # default <images.registry>/proxcloud-sandbox-proxy:<release>, published from the
+                                 # release after v0.3.28 and not built by stage 35: set it until then
+      # E2B autoResume: the proxy wakes a paused sandbox at <wake_url>/<id>/wake (default <API URL>/api/v1/internal/sandboxes;
+      # the proxy must resolve it and trust its certificate). wake_address: the address the workers' firewall opens for
+      # it on the API's port (default the first mgmt host; "none" = no rule, e.g. a public API address).
+      wake_url: ""
+      wake_address: ""
+    tls:
+      issuer: acme               # acme (DNS-01 through PowerDNS with RFC2136) | secret (yours) | selfsigned (test sites)
+      secret: ""                 # issuer secret: a kubernetes.io/tls Secret for *.<domain> in pc-sandbox, services cluster
+      acme: {server: https://acme-v02.api.letsencrypt.org/directory, email: "", ca_bundle: ""}  # ca_bundle: PEM of a private ACME server's CA
+    # The zone <domain> on PowerDNS (it must exist): stage 56 writes the wildcard record and, for acme, a TSIG key that may
+    # update this zone alone. Needs `dnsupdate=yes` in pdns.conf and vault pdns_api_key. Empty api_url: you write the
+    # record (*.<domain> A the entry's public address) and pick issuer secret or selfsigned.
+    powerdns:
+      api_url: ""                # e.g. http://192.0.2.53:8081
+      server: localhost
+      nameserver: ""             # host:port cert-manager on the services cluster sends RFC2136 updates to
+    # The platform HAProxy appliance in front of sandbox-proxy (a VM in the system pool). Empty public.bridge: no
+    # appliance, forward TCP 443 to proxy.address yourself.
+    entry:
+      pool: proxcloud-sandbox-entry  # its own pool: the portal gets firewall and guest-agent rights there alone (stage 10)
+      vmid: 9110
+      node: ""                   # default: first node
+      os: debian-13
+      cores: 1
+      memory: 1024
+      disk: 10
+      address: ""                # its address on the sandbox vnet, outside the gateway, network.nodes and network.metallb
+      public: {bridge: "", vlan: 0, address: "", gateway: ""}  # address as CIDR; the record and the internet side
+    # The sandbox registry (stage 55, docs/managed-sandbox.md §6): Zot on the services cluster, its blobs in a bucket
+    # of the object store (RustFS on Standard, RGW on Full). The sandbox nodes pull the built-in templates and
+    # sandbox-proxy from it, each project with an account of its own (the envd runtime image: runtime_image above). Empty address: no registry, the nodes pull
+    # from the images' own registries.
+    registry:
+      address: ""                # a MetalLB address inside services.network.metallb, e.g. 192.0.2.226
+      namespace: proxcloud-sandbox-registry  # on the services cluster
+      bucket: pc-sandbox-registry
+      adoption: "on"             # on | dry-run | off: built-in templates follow a new pinned digest once every node has it
+      # Custom template builds (docs/managed-sandbox.md §7): the COPY contexts go to this bucket of the same object
+      # store; build pods fetch them with presigned URLs, so the workers' fence and the build namespace's policy open
+      # its endpoint (it must be an IPv4 address with a port, e.g. http://192.0.2.41:9000).
+      builds_bucket: pc-sandbox-builds
+      prune: "on"                # on | dry-run | off: hourly, template images nothing references, older than a day
+    # The sandbox provider stage 60 registers (first run only; the console owns it afterwards). Templates are the only
+    # images offered; a site's templates replace this list instead of merging into it. "pin:<name>" is an image of
+    # deploy/templates/images.yaml (the registry's copy, or the pinned source without a registry). limits empty = the
+    # portal's defaults (internal/cloud/sandbox/config.go). With a domain the provider runs envd and offers the E2B API;
+    # the E2B SDKs start `base` and `code-interpreter-v1` (images from deploy/templates/build.sh, docs/managed-sandbox.md
+    # §5.4).
+    templates:
+      python: {image: "pin:python", cpu: 1, memoryGiB: 2, description: Python 3.12}
+    limits: {}
+    egress_mbps: 100
+    abuse: {disabled: false, cpuPercent: 90, windowSeconds: 900, maxGapSeconds: 90, trafficBytes: 65536, action: alert, notifyEmails: []}
+    # Enable only after configuring a separate management credential + exact MD allowlist in the provider.
+    rotation: {enabled: false, intervalHours: 168, namespace: pc-sandbox, cluster: pc-sandbox, machineDeployments: []}
 
   nas:
     host: ""                     # TrueNAS address; empty = no NAS stage
@@ -143,7 +268,9 @@ pc_defaults:
       train: community
       s3_port: 30900
       console_port: 30901
-    # mode external / ceph-rgw: an existing S3 endpoint. ceph-rgw also registers the ceph-s3 provider.
+    # mode external / ceph-rgw: an existing S3 endpoint. ceph-rgw also registers the ceph-s3 provider
+    # (preflight requires all four) and tenants see region as the store's region: the zonegroup's api_name,
+    # or us-east-1, which AWS clients send no location constraint for.
     endpoint: ""
     access_key: ""
     secret_key: ""

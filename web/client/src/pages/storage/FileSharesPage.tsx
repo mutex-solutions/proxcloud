@@ -178,8 +178,9 @@ export default function FileSharesPage() {
           <DialogHeader>
             <DialogTitle>Create file share</DialogTitle>
             <DialogDescription>
-              The share is open to this project's public IPs and networks. Attached a public IP later? Use the shield
-              button on the share to refresh access.
+              The share is open to this project's public IPs and networks, and follows them at the next sync. To pick up a
+              new public IP right away, use the shield button on the share. Root on a client has no special rights on an
+              NFS share.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3">
@@ -221,14 +222,29 @@ export default function FileSharesPage() {
             <div className="grid gap-3">
               <CopyLine text={String(share(details).mount ?? "")} />
               {password ? (
-                <div className="grid gap-1">
-                  <Label>Password for {String(share(details).username ?? "")} (shown once)</Label>
+                <div className="grid gap-1 rounded-md border border-amber-500/40 bg-amber-500/5 p-3">
+                  <Label>Password for {String(share(details).username ?? "")}</Label>
                   <CopyLine text={password} />
+                  <p className="text-xs text-muted-foreground">
+                    Save it now: it is shown only this once and the platform does not keep it.
+                  </p>
                 </div>
+              ) : share(details).protocol === "SMB" ? (
+                <p className="text-xs text-muted-foreground">
+                  The password of {String(share(details).username ?? "the share's user")} was shown once, when the share
+                  was created. Lost it? Reset password issues a new one and the old one stops working.
+                </p>
               ) : null}
               <p className="text-xs text-muted-foreground">
                 Allowed: {((share(details).networks as string[]) ?? []).join(", ") || "none"}
               </p>
+              {((share(details).sharedNat as string[]) ?? []).length > 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  This site reaches the NAS through a NAT, so {(share(details).sharedNat as string[]).join(", ")} is also
+                  allowed. Other projects behind that NAT share the address, and the address check does not separate this
+                  share from them.
+                </p>
+              ) : null}
               {share(details).protocol === "SMB" ? (
                 <Button variant="outline" size="sm" disabled={reset.isPending} onClick={() => reset.mutate(details)}>
                   <KeyRound className="size-4" /> Reset password

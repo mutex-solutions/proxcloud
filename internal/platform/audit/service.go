@@ -28,6 +28,10 @@ func (s *Service) LogAsync(ev AuditEvent) {
 	}()
 }
 
+// Log persists an event synchronously, joining the caller's transaction. Safety
+// automation must commit its audit and observation atomically before acting.
+func (s *Service) Log(ctx context.Context, ev AuditEvent) error { return s.repo.Insert(ctx, ev) }
+
 // Query exposes the cursor-paginated read for the audit handlers.
 func (s *Service) Query(ctx context.Context, f Filter, after, before string, limit int) ([]AuditEvent, *string, *string, error) {
 	return s.repo.Query(ctx, f, after, before, limit)
@@ -36,6 +40,10 @@ func (s *Service) Query(ctx context.Context, f Filter, after, before string, lim
 // QueryAll exposes the capped non-paginated read (audit export).
 func (s *Service) QueryAll(ctx context.Context, f Filter, limit int) ([]AuditEvent, error) {
 	return s.repo.QueryAll(ctx, f, limit)
+}
+
+func (s *Service) Count(ctx context.Context, f Filter) (int64, error) {
+	return s.repo.col.Count(ctx, f.criteria())
 }
 
 // LogEvent persists an already-built event asynchronously (used by the admin audit middleware).

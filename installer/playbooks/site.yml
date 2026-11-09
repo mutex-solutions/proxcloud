@@ -9,4 +9,8 @@
 - import_playbook: 35-local-images.yml
 - import_playbook: 40-mgmt-platform.yml
 - import_playbook: 45-object-store.yml
+- import_playbook: 50-services-cluster.yml
+- import_playbook: 55-sandbox-cluster.yml
+- import_playbook: 55-sandbox-registry.yml
+- import_playbook: 56-sandbox-edge.yml
 - import_playbook: 60-register.yml

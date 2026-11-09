@@ -27,7 +27,7 @@ func TestPVEPoolPrefixDefault(t *testing.T) {
 	if got := (&ExternalService{}).PoolFor("p1"); got != "pc-p1" {
 		t.Errorf("default pool = %q, want pc-p1", got)
 	}
-	if got := (&ExternalService{Config: map[string]any{"poolPrefix": "st-"}}).PoolFor("p1"); got != "st-p1" {
-		t.Errorf("configured pool = %q, want st-p1", got)
+	if got := (&ExternalService{Config: map[string]any{"poolPrefix": "tp-"}}).PoolFor("p1"); got != "tp-p1" {
+		t.Errorf("configured pool = %q, want tp-p1", got)
 	}
 }

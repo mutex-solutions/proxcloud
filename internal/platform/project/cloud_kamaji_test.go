@@ -17,14 +17,14 @@ func TestKamajiSpecFromData(t *testing.T) {
 		"nodeGroups": []any{
 			map[string]any{"name": "w", "flavorId": "m5.large", "count": 3,
 				"labels": map[string]any{"tier": "app"}, "taints": []any{"a=b:NoSchedule"}},
-			map[string]any{"name": "b", "flavorId": "m5.xl", "autoscale": true, "min": 1, "max": 4},
+			map[string]any{"name": "b", "flavorId": "m5.xl", "count": 1},
 		},
 	})
 	if err != nil {
 		t.Fatalf("kamajiSpecFromData: %v", err)
 	}
-	// Display name is free-form; the k8s identifier is always the generated stc- id (plan §9).
-	if spec.DisplayName != "my cluster ✨" || !strings.HasPrefix(spec.ID, "stc-") || len(spec.ID) != 12 {
+	// Display name is free-form; the k8s identifier is always the generated pc-c- id (plan §9).
+	if spec.DisplayName != "my cluster ✨" || !strings.HasPrefix(spec.ID, "pc-c-") || len(spec.ID) != 13 {
 		t.Errorf("id/display = %q/%q", spec.ID, spec.DisplayName)
 	}
 	if !spec.HA || spec.Version != "1.35.4" || spec.ProjectID != "p1" {
@@ -39,7 +39,7 @@ func TestKamajiSpecFromData(t *testing.T) {
 	if len(spec.AllowedCIDRs) != 1 {
 		t.Errorf("cidrs = %v", spec.AllowedCIDRs)
 	}
-	if len(spec.NodeGroups) != 2 || spec.NodeGroups[0].Labels["tier"] != "app" || spec.NodeGroups[1].Max != 4 {
+	if len(spec.NodeGroups) != 2 || spec.NodeGroups[0].Labels["tier"] != "app" || spec.NodeGroups[1].Count != 1 {
 		t.Errorf("nodeGroups = %+v", spec.NodeGroups)
 	}
 

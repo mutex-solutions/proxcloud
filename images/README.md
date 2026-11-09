@@ -55,3 +55,9 @@ The workflow needs a repo-scoped self-hosted runner labelled `proxcloud-pve` ins
 | Variable | `BUILD_IP`, `BUILD_GATEWAY`, `BUILD_NAMESERVER` | as for `build.py` |
 
 The workflow runs on dispatch, weekly and on pushes to `main` that touch this directory. It must never run on pull request or fork events, because the runner sits inside the Proxmox network and holds the token.
+
+## Kubernetes node templates
+
+`images/k8s-node-template.sh` builds them with [image-builder](https://github.com/kubernetes-sigs/image-builder) at a pinned tag (`.github/workflows/k8s-node-templates.yml` runs it on the same runner, on dispatch), then clones the result to each node in `PVE_NODES`. Its last line is what the kamaji provider takes as the version's image: `1.35.10=pve1=9210,pve2=9211,pve3=9212`.
+
+The Ubuntu installer needs DHCP on the bridge. If the bridge has none, `DHCP_RANGE` and `DHCP_GATEWAY` run a dnsmasq for the build, on the interface of the default route. A build takes about an hour on nested nodes, most of it package pinning. The templates are tagged `pc-k8s`, without `pc-public`, so tenants do not see them.

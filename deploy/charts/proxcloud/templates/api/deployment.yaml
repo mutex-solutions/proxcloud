@@ -38,17 +38,24 @@ spec:
               containerPort: {{ .Values.api.port }}
             - name: mgmt
               containerPort: {{ .Values.api.managementPort }}
+            {{- if .Values.api.csiGateway.enabled }}
+            - name: csi-gateway
+              containerPort: {{ .Values.api.csiGateway.port }}
+            {{- end }}
           env:
-            - name: PROXCLOUD_DB_URL
-              valueFrom:
-                secretKeyRef:
-                  {{- if .Values.externalPostgresql.existingSecret }}
-                  name: {{ .Values.externalPostgresql.existingSecret }}
-                  key: {{ .Values.externalPostgresql.secretKey }}
-                  {{- else }}
-                  name: {{ include "proxcloud.apiSecretName" . }}
-                  key: db-url
-                  {{- end }}
+            {{- if .Values.api.csiGateway.enabled }}
+            - name: PROXCLOUD_CSI_GATEWAY_ADDR
+              value: {{ printf ":%v" .Values.api.csiGateway.port | quote }}
+            - name: PROXCLOUD_CSI_GATEWAY_TLS_CERT
+              value: /etc/proxcloud/csi-gateway/tls.crt
+            - name: PROXCLOUD_CSI_GATEWAY_TLS_KEY
+              value: /etc/proxcloud/csi-gateway/tls.key
+            - name: PROXCLOUD_CSI_GATEWAY_URL
+              value: {{ .Values.api.csiGateway.url | quote }}
+            - name: PROXCLOUD_CSI_GATEWAY_CA_FILE
+              value: /etc/proxcloud/csi-gateway/ca.crt
+            {{- end }}
+            {{- include "proxcloud.dbURLEnv" . | nindent 12 }}
             - name: PROXCLOUD_RABBITMQ_HOST
               value: {{ include "proxcloud.rabbitHost" . | quote }}
             - name: PROXCLOUD_RABBITMQ_PORT
@@ -111,6 +118,10 @@ spec:
             - name: PROXCLOUD_SELF_ADMIN_BASE_URL
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.api.defaultRegion }}
+            - name: PROXCLOUD_DEFAULT_REGION
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.api.corsAllowedOrigins }}
             - name: PROXCLOUD_CORS_ALLOWED_ORIGINS
               value: {{ join "," . | quote }}
@@ -170,6 +181,10 @@ spec:
             - name: PROXCLOUD_BILLING_TOKEN
               value: {{ .Values.api.billing.token | quote }}
             {{- end }}
+            {{- if .Values.api.billing.timeout }}
+            - name: PROXCLOUD_BILLING_TIMEOUT
+              value: {{ .Values.api.billing.timeout | quote }}
+            {{- end }}
             {{- if .Values.api.billing.callbackToken }}
             - name: PROXCLOUD_BILLING_CALLBACK_TOKEN
               value: {{ .Values.api.billing.callbackToken | quote }}
@@ -194,6 +209,10 @@ spec:
                   key: {{ .Values.api.mail.smtp.passwordKey | quote }}
             {{- end }}
             {{- end }}
+            {{- with .Values.api.mail.businessName }}
+            - name: PROXCLOUD_MAIL_BUSINESS_NAME
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.api.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -213,8 +232,13 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if or .Values.api.applicationYml .Values.api.extraVolumeMounts }}
+          {{- if or .Values.api.applicationYml .Values.api.extraVolumeMounts .Values.api.csiGateway.enabled }}
           volumeMounts:
+            {{- if .Values.api.csiGateway.enabled }}
+            - name: csi-gateway-tls
+              mountPath: /etc/proxcloud/csi-gateway
+              readOnly: true
+            {{- end }}
             {{- if .Values.api.applicationYml }}
             - name: app-config
               mountPath: /opt/proxcloud/api/application.yml
@@ -225,8 +249,14 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           {{- end }}
-      {{- if or .Values.api.applicationYml .Values.api.extraVolumes }}
+      {{- if or .Values.api.applicationYml .Values.api.extraVolumes .Values.api.csiGateway.enabled }}
       volumes:
+        {{- if .Values.api.csiGateway.enabled }}
+        # cert-manager renews it in place; the listener reads the files again on a handshake a minute after the last.
+        - name: csi-gateway-tls
+          secret:
+            secretName: {{ include "proxcloud.fullname" . }}-csi-gateway-tls
+        {{- end }}
         {{- if .Values.api.applicationYml }}
         - name: app-config
           configMap:

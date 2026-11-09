@@ -5,9 +5,12 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shopspring/decimal"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
@@ -593,11 +596,14 @@ func TestAddFundsSettleClaim(t *testing.T) {
 	if n, _ := db.C("accountCredit").Count(ctx, pgdoc.M{"billingProfileId": profile.ID}); n != 1 {
 		t.Fatalf("credits = %d, want exactly 1", n)
 	}
-	// a settle error releases the claim back to PENDING (a savings contract that does not exist).
+	// a settle error releases the claim back to PENDING (the order leg fails).
+	svc.SetOrderStatusUpdater(func(context.Context, string, string, decimal.Decimal, string) error {
+		return errors.New("order store down")
+	})
 	bad := mustInsertID(t, db, "accountCreditTransaction", pgdoc.M{"status": "PENDING", "billingProfileId": profile.ID, "paymentGatewayId": "gw-awx",
-		"externalId": "pi_fake", "currency": "USD", "amount": ten, "grossAmount": ten, "metadata": pgdoc.M{"savingsContractId": pgdoc.NewID()}})
+		"externalId": "pi_fake", "currency": "USD", "amount": ten, "grossAmount": ten, "orderId": pgdoc.NewID(), "metadata": pgdoc.M{}})
 	if _, err := svc.ProcessAddFunds(ctx, bad); err == nil {
-		t.Fatal("missing savings contract must fail the settle")
+		t.Fatal("a failing order leg must fail the settle")
 	}
 	cur, _ := repo.AccountCreditTransactionByID(ctx, bad)
 	if cur == nil || cur.Status != "PENDING" {
@@ -632,7 +638,7 @@ func TestRefundPendingReconcile(t *testing.T) {
 	_ = db.C("billingConfiguration").Find(ctx, pgdoc.M{}, &[]pgdoc.M{}) // two config docs: FinanceEmail reads the first found — keep one
 	_, _ = db.C("billingConfiguration").DeleteOne(ctx, pgdoc.M{"company": nil})
 	seed := func(credit string) (string, string) {
-		cid := mustInsertID(t, db, "accountCredit", pgdoc.M{"billingProfileId": profile.ID, "currency": "USD", "initialAmount": decimalOf(t, "40"), "amount": decimalOf(t, credit)})
+		cid := mustInsertID(t, db, "accountCredit", pgdoc.M{"billingProfileId": profile.ID, "currency": "USD", "initialAmount": decimalOf(t, credit), "amount": decimalOf(t, credit)})
 		tid := mustInsertID(t, db, "accountCreditTransaction", pgdoc.M{"billingProfileId": profile.ID, "status": "SUCCESS", "externalId": "pi_done",
 			"paymentGatewayId": "gw-awx", "currency": "USD", "grossAmount": decimalOf(t, "40"), "amount": decimalOf(t, "40"), "accountCredit": pgdoc.M{"id": cid}})
 		return tid, cid

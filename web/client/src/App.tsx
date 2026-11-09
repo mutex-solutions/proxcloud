@@ -68,10 +68,13 @@ export default function App() {
           <Route path="object-storage/:resourceId" element={lazyPage(() => import("@/pages/storage/BucketExplorePage"))} />
           <Route path="s3-keys" element={lazyPage(() => import("@/pages/storage/S3KeysPage"))} />
           <Route path="file-shares" element={lazyPage(() => import("@/pages/storage/FileSharesPage"))} />
+          <Route path="dns" element={lazyPage(() => import("@/pages/network/DnsZonesPage"))} />
 
           {/* Network */}
           <Route path="networks" element={lazyPage(() => import("@/pages/network/NetworksPage"))} />
           <Route path="networks/:resourceId" element={lazyPage(() => import("@/pages/network/NetworkDetailPage"))} />
+          <Route path="load-balancers" element={lazyPage(() => import("@/pages/network/LoadBalancersPage"))} />
+          <Route path="load-balancers/:resourceId" element={lazyPage(() => import("@/pages/network/LoadBalancersPage").then((m) => ({ default: m.LoadBalancerDetailPage })))} />
           <Route path="security-groups" element={lazyPage(() => import("@/pages/network/SecurityGroupsPage"))} />
           <Route path="security-groups/:resourceId" element={lazyPage(() => import("@/pages/network/SecurityGroupDetailPage"))} />
 
@@ -80,6 +83,7 @@ export default function App() {
           <Route path="kubernetes/:resourceId" element={lazyPage(() => import("@/pages/platform/KubernetesClusterDetailPage"))} />
           <Route path="databases" element={lazyPage(() => import("@/pages/platform/DatabasesPage"))} />
           <Route path="databases/:resourceId" element={lazyPage(() => import("@/pages/platform/DatabaseDetailPage"))} />
+          <Route path="sandboxes" element={lazyPage(() => import("@/pages/platform/SandboxesPage"))} />
 
           {/* Billing */}
           <Route path="billing/savings" element={lazyPage(() => import("@/pages/billing/SavingsPage"))} />

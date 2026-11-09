@@ -42,6 +42,15 @@ func TestDatabaseClusterBilling(t *testing.T) {
 			t.Errorf("attribute %q declared but not stamped", attr.Name)
 		}
 	}
+	// The read-only endpoint bills only when it provisioned a second LoadBalancer.
+	if br.Values["read_endpoint_lb"] != 0.0 {
+		t.Fatalf("read_endpoint_lb = %v, want 0 without a read LB", br.Values["read_endpoint_lb"])
+	}
+	cr.Data["database"].(map[string]any)["read_endpoint_lb"] = true
+	brs, _ = p.GetBillingInformation(context.Background(), billingapi.BillingContext{}, cr)
+	if brs[0].Values["read_endpoint_lb"] != 1.0 {
+		t.Fatalf("read_endpoint_lb = %v, want 1", brs[0].Values["read_endpoint_lb"])
+	}
 	// Provisioning (no endpoint) is free.
 	cr.Data["database"].(map[string]any)["endpoint"] = ""
 	brs, _ = p.GetBillingInformation(context.Background(), billingapi.BillingContext{}, cr)

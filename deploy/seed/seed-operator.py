@@ -18,8 +18,10 @@ API = os.environ.get("PROXCLOUD_API", f"http://{HOST}:8080/api/v1")
 TOKEN_URL = os.environ.get(
     "PROXCLOUD_TOKEN_URL", f"http://{HOST}:8090/realms/proxcloud/protocol/openid-connect/token"
 )
-# Resource types a Proxmox provider bills today; the seed file also prices managed services.
-RULE_TYPES = {"instance", "instance_traffic", "volume", "floating_ip", "bucket", "share"}
+# Resource types the platform bills today; the seed file also prices managed services. The sandbox rules are
+# placeholders (their names say so) until a sandbox rate is signed.
+RULE_TYPES = {"instance", "instance_traffic", "volume", "floating_ip", "image", "bucket", "share", "server_protection",
+              "server_snapshot", "sandbox", "sandbox_snapshot"}
 DEFAULT_QUOTA = {"servers": 20, "vcpus": 80, "ramMb": 102400, "diskGb": 2000, "networks": 10, "floatingIps": 5}
 
 

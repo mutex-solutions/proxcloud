@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,8 +9,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
@@ -129,4 +132,96 @@ func TestExternalServiceMutRoutesNoPanic(t *testing.T) {
 		}
 	}()
 	(&Handler{}).routeExternalServiceMut(chi.NewRouter())
+}
+
+// A range in snatSources would open every share of the provider to it, so the save refuses it.
+func TestApplyServiceConnectionBodyRefusesSNATRange(t *testing.T) {
+	h := &Handler{}
+	nas := func() pgdoc.M { return pgdoc.M{"config": pgdoc.M{"provider": "truenas"}} }
+	put := func(doc pgdoc.M, cfg string) *httpx.HTTPError {
+		return h.applyServiceConnectionBody(httptest.NewRequest(http.MethodPut, "/service/n", strings.NewReader(`{"config":{`+cfg+`}}`)), doc)
+	}
+	if put(nas(), `"snatSources":["192.0.2.0/24"]`) == nil {
+		t.Fatal("range accepted")
+	}
+	if herr := put(nas(), `"snatSources":["192.0.2.1"]`); herr != nil {
+		t.Fatalf("host refused: %#v", herr)
+	}
+	if herr := put(nas(), `"snatSources":[]`); herr != nil {
+		t.Fatalf("clearing refused: %#v", herr)
+	}
+	if herr := put(nas(), `"parentDataset":"tank/shares"`); herr != nil {
+		t.Fatalf("save without the key refused: %#v", herr)
+	}
+}
+
+// A sandbox provider goes live only while its release gates hold; DISABLED it may be stored at any time. A nil repo
+// means the refusal comes before any write.
+func TestSandboxProviderGoLive(t *testing.T) {
+	gates := []sandbox.Gate{{Name: "noderestriction", OK: true}, {Name: "isolation", OK: false, Detail: "no DROP"}, {Name: "fence", OK: true}}
+	h := &Handler{sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate { return gates }}
+	ctx := httpx.WithRC(t.Context(), &httpx.RequestContext{SigV4KeyID: "pk-test"})
+	body := `{"name":"sbx","config":{"provider":"sandbox","sandbox":{"templates":{"python":{"image":"python:3.12-slim"}}}},"secret":{"kubeconfig":"x"}}`
+	rec := httptest.NewRecorder()
+	h.externalServiceCreate(rec, httptest.NewRequest(http.MethodPost, "/service", strings.NewReader(body)).WithContext(ctx))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "isolation: no DROP") {
+		t.Fatalf("create with a gate failing: %d %s", rec.Code, rec.Body.String())
+	}
+	doc := func(status string) pgdoc.M {
+		return pgdoc.M{"_id": "s1", "status": status, "secret": map[string]any{"kubeconfig": "x"},
+			"config": map[string]any{"provider": "sandbox", "sandbox": map[string]any{"templates": map[string]any{"python": map[string]any{"image": "python:3.12-slim"}}}}}
+	}
+	if herr := h.checkSandboxGoLive(ctx, doc("DISABLED")); herr != nil {
+		t.Fatalf("DISABLED refused: %#v", herr)
+	}
+	if herr := h.checkSandboxGoLive(ctx, doc("PUBLIC")); herr == nil || herr.Status != http.StatusConflict {
+		t.Fatalf("live with a gate failing: %#v", herr)
+	}
+	if herr := h.checkSandboxGoLive(ctx, pgdoc.M{"status": "PUBLIC", "config": map[string]any{"provider": "dbaas"}}); herr != nil {
+		t.Fatalf("another provider: %#v", herr)
+	}
+	gates[1].OK = true
+	if herr := h.checkSandboxGoLive(ctx, doc("PUBLIC")); herr != nil {
+		t.Fatalf("all gates hold: %#v", herr)
+	}
+	broken := doc("PUBLIC")
+	broken["config"].(map[string]any)["sandbox"] = map[string]any{}
+	if herr := h.checkSandboxGoLive(ctx, broken); herr == nil {
+		t.Fatal("a provider without templates went live")
+	}
+	if herr := (&Handler{}).checkSandboxGoLive(ctx, doc("PUBLIC")); herr == nil {
+		t.Fatal("no gate checker wired: went live")
+	}
+}
+
+// A kamaji config still carrying the tenant-side proxmox-csi keys is refused on create and on an update whose cluster
+// block has them; an update that leaves the cluster block alone passes, so a stored leftover does not lock the row.
+func TestKamajiRemovedKeysRefused(t *testing.T) {
+	h := &Handler{}
+	ctx := httpx.WithRC(t.Context(), &httpx.RequestContext{SigV4KeyID: "pk-test"})
+	rec := httptest.NewRecorder()
+	h.externalServiceCreate(rec, httptest.NewRequest(http.MethodPost, "/service",
+		strings.NewReader(`{"name":"k","config":{"provider":"kamaji","cluster":{"csiSharedStores":false}}}`)).WithContext(ctx))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "config.cluster.csiSharedStores no longer exist") {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	stored := func() pgdoc.M {
+		return pgdoc.M{"config": pgdoc.M{"provider": "kamaji", "cluster": map[string]any{"pveCsiUrl": "https://192.0.2.60:8006"}}}
+	}
+	put := func(doc pgdoc.M, body string) *httpx.HTTPError {
+		return h.applyServiceConnectionBody(httptest.NewRequest(http.MethodPut, "/service/k", strings.NewReader(body)), doc)
+	}
+	if herr := put(stored(), `{"config":{"cluster":{"pveApiUrl":"https://192.0.2.11:8006","pveCsiUrl":"https://192.0.2.60:8006"}}}`); herr == nil ||
+		!strings.Contains(herr.Msg, "config.cluster.pveCsiUrl") {
+		t.Fatalf("update with the key: %#v", herr)
+	}
+	if herr := put(stored(), `{"config":{"cluster":{"pveApiUrl":"https://192.0.2.11:8006"}}}`); herr != nil {
+		t.Fatalf("update dropping the key: %#v", herr)
+	}
+	if herr := put(stored(), `{"config":{"argocd":{"chartVersion":"0.1.7"}}}`); herr != nil {
+		t.Fatalf("update without a cluster block: %#v", herr)
+	}
+	if herr := put(pgdoc.M{"config": pgdoc.M{"provider": "proxmox"}}, `{"config":{"cluster":{"pveCsiUrl":"x"}}}`); herr != nil {
+		t.Fatalf("another provider kind: %#v", herr)
+	}
 }

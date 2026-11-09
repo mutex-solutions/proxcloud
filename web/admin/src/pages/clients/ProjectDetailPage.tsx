@@ -47,11 +47,14 @@ type ProjectDoc = {
   id?: string
   name?: string
   status?: string
+  disabledByOperator?: boolean
   organizationId?: string
   billingProfileId?: string
   memberships?: Array<{ sub?: string; role?: string }>
   // proxmox bindings carry provider/region/pool; ceph-s3 bindings carry provider/region/rgwUid.
   services?: Array<{ serviceId?: string; provider?: string; region?: string; pool?: string; rgwUid?: string }>
+  // Per provider id: a provisioning attempt that failed and is retried when the project is next opened.
+  provisionFailures?: Record<string, { message?: string; at?: string }>
   // absent/null = all public networks allowed; array = allow-list of public network ids.
   publicNetworkIds?: string[] | null
   // false/absent = the client can't choose an external network (server auto-picks); true = client picks.
@@ -132,14 +135,19 @@ function normalizeGPUModel(value: string): string {
   return trimmed === "*" ? "*" : trimmed.toLowerCase().replaceAll("_", "-")
 }
 
-// The resource keys the Proxmox create paths enforce (externalservice.PVEQuotaKeys).
-const RESOURCE_QUOTA_KEYS: Array<{ key: string; label: string }> = [
+// The resource keys the Proxmox create paths enforce (externalservice.PVEQuotaKeys), then the sandbox keys
+// (externalservice.SandboxQuotaKeys): a blank sandbox key falls back to the sandbox provider's default, never unlimited.
+const RESOURCE_QUOTA_KEYS: Array<{ key: string; label: string; blank?: string }> = [
   { key: "servers", label: "Servers" },
   { key: "vcpus", label: "vCPUs" },
   { key: "ramMb", label: "RAM (MiB)" },
   { key: "diskGb", label: "Disk (GiB)" },
   { key: "networks", label: "Networks" },
   { key: "floatingIps", label: "Public IPs" },
+  { key: "sandboxes", label: "Sandboxes at once", blank: "Provider default (5)" },
+  { key: "sandboxVcpus", label: "Sandbox vCPUs", blank: "Provider default (16)" },
+  { key: "sandboxRamMb", label: "Sandbox RAM (MiB)", blank: "Provider default (32768)" },
+  { key: "sandboxGpus", label: "Sandbox GPUs", blank: "Provider default (0)" },
 ]
 
 function parseGPUQuotaLimit(value: string): number | undefined {
@@ -181,6 +189,7 @@ export default function ProjectDetailPage() {
 
   const [statusConfirm, setStatusConfirm] = useState<"ENABLED" | "DISABLED" | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [confirmNow, setConfirmNow] = useState(false)
   const [bpOpen, setBpOpen] = useState(false)
   const [bpChoice, setBpChoice] = useState("")
   const [orgOpen, setOrgOpen] = useState(false)
@@ -396,14 +405,16 @@ export default function ProjectDetailPage() {
 
   // DELETE /admin/project/{id} (projectmut.go projectScheduleDeletion — cloud pre-check is a 501
   // seam on this deployment).
+  // DELETE …/now flags the project for the deletion job's next sweep instead of the grace period.
   const deleteProject = useMutation({
-    mutationFn: () => apiFetch(projectPath, { method: "DELETE" }),
-    onSuccess: () => {
-      toast.success("Project deletion scheduled")
+    mutationFn: (now: boolean) => apiFetch(now ? `${projectPath}/now` : projectPath, { method: "DELETE" }),
+    onSuccess: (_d, now) => {
+      toast.success(now ? "Project deletion started" : "Project deletion scheduled")
       navigate("/clients/projects")
     },
     onError: (e: Error) => {
       setDeleteOpen(false)
+      setConfirmNow(false)
       if (e instanceof ApiError && e.status === 501) {
         toast.info("Not available: project deletion is not supported on this deployment.")
       } else {
@@ -602,12 +613,18 @@ export default function ProjectDetailPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={!project}
+              disabled={!project || !["ENABLED", "DISABLED"].includes((project.status ?? "").toUpperCase())}
               onClick={() => setStatusConfirm(enabled ? "DISABLED" : "ENABLED")}
             >
               {enabled ? <Pause className="size-4" /> : <Play className="size-4" />}
               {enabled ? "Disable" : "Enable"}
             </Button>
+            {/* Held only by billing: a resume would lift it, unless an operator pins it. */}
+            {(project?.status ?? "").toUpperCase() === "DISABLED" && !project?.disabledByOperator && (
+              <Button variant="outline" size="sm" onClick={() => setStatusConfirm("DISABLED")}>
+                <Pause className="size-4" /> Keep disabled
+              </Button>
+            )}
             <Button variant="destructive" size="sm" disabled={!project} onClick={() => setDeleteOpen(true)}>
               <Trash2 className="size-4" /> Delete project
             </Button>
@@ -697,6 +714,11 @@ export default function ProjectDetailPage() {
                 </Button>
               </CardHeader>
               <CardContent>
+                {Object.entries(project?.provisionFailures ?? {}).map(([id, f]) => (
+                  <p key={id} role="alert" className="mb-2 text-sm text-destructive">
+                    Not provisioned on <span className="font-mono text-xs">{id}</span>: {f.message}
+                  </p>
+                ))}
                 {(project?.services ?? []).length === 0 ? (
                   <p className="text-sm text-muted-foreground">No external service attached.</p>
                 ) : (
@@ -938,12 +960,14 @@ export default function ProjectDetailPage() {
                 <h2 className="text-base font-semibold">Resource quota</h2>
                 <p className="mt-1 text-sm text-muted-foreground">
                   Enforced when servers, volumes, networks and public IPs are created or resized on Proxmox. Blank =
-                  unlimited. A project with no quota at all uses its provider&apos;s default quota.
+                  unlimited. A project with no quota at all uses its provider&apos;s default quota. The sandbox keys are
+                  checked on every sandbox create against what is running; blank there means the sandbox
+                  provider&apos;s default.
                 </p>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-                  {RESOURCE_QUOTA_KEYS.map(({ key, label }) => {
+                  {RESOURCE_QUOTA_KEYS.map(({ key, label, blank }) => {
                     const raw = resourceQuota[key] ?? ""
                     const invalid = !!raw.trim() && parseGPUQuotaLimit(raw) === undefined
                     return (
@@ -956,7 +980,7 @@ export default function ProjectDetailPage() {
                           type="number"
                           min={0}
                           step={1}
-                          placeholder="Unlimited"
+                          placeholder={blank ?? "Unlimited"}
                           aria-invalid={invalid}
                           aria-describedby={invalid ? `rq-${key}-error` : undefined}
                           value={raw}
@@ -1236,7 +1260,9 @@ export default function ProjectDetailPage() {
             <DialogTitle>{statusConfirm === "DISABLED" ? "Disable project" : "Enable project"}</DialogTitle>
             <DialogDescription>
               {statusConfirm === "DISABLED"
-                ? "Pauses every server in the project before disabling it."
+                ? enabled
+                  ? "Pauses every server in the project before disabling it."
+                  : "Keeps the project disabled when its billing profile resumes or activates. Only an operator can then enable it."
                 : "Unpauses the project's servers and re-enables it."}{" "}
               Project: <span className="font-medium">{project?.name}</span>
             </DialogDescription>
@@ -1262,16 +1288,41 @@ export default function ProjectDetailPage() {
           <DialogHeader>
             <DialogTitle>Delete project</DialogTitle>
             <DialogDescription>
-              Schedules {project?.name ?? "this project"} for deletion, including its cloud resources. This cannot be
-              undone once the deletion runs.
+              Deletes {project?.name ?? "this project"} with its cloud resources. Schedule keeps it for the grace
+              period, during which the deletion can be cancelled; Delete now hands it to the deletion job at once. This
+              cannot be undone once the deletion runs.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteOpen(false)}>
               Cancel
             </Button>
-            <Button variant="destructive" disabled={deleteProject.isPending} onClick={() => deleteProject.mutate()}>
-              {deleteProject.isPending ? "Deleting…" : "Delete project"}
+            <Button variant="outline" disabled={deleteProject.isPending} onClick={() => deleteProject.mutate(false)}>
+              Schedule deletion
+            </Button>
+            <Button variant="destructive" disabled={deleteProject.isPending} onClick={() => setConfirmNow(true)}>
+              Delete now…
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete now: one more confirm, since nothing can stop it once sent */}
+      <Dialog open={confirmNow} onOpenChange={setConfirmNow}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {project?.name ?? "this project"} now?</DialogTitle>
+            <DialogDescription>
+              The deletion job tears down every server, volume, network and other cloud resource of this project within
+              about a minute. There is no grace period and the deletion cannot be cancelled.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmNow(false)}>
+              Back
+            </Button>
+            <Button variant="destructive" disabled={deleteProject.isPending} onClick={() => deleteProject.mutate(true)}>
+              {deleteProject.isPending ? "Deleting…" : "Delete now"}
             </Button>
           </DialogFooter>
         </DialogContent>

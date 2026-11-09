@@ -52,42 +52,42 @@ func TestAutoscaleTick(t *testing.T) {
 	// VPA recommends above current → bump, clamped to the ceiling.
 	api := newFakeAPI()
 	s := NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkDB(api, s, "std-up", map[string]any{"enabled": true, "maxCpu": 3, "maxMemoryGi": 8, "maxStorageGi": 0})
-	api.vpas[key("pc-p1", AutoscaleVPAName("std-up"))] = vpaRec("3500m", "6Gi") // cpu ceil 4 → clamp 3
+	mkDB(api, s, "pc-d-up", map[string]any{"enabled": true, "maxCpu": 3, "maxMemoryGi": 8, "maxStorageGi": 0})
+	api.vpas[key("pc-db-p1", AutoscaleVPAName("pc-d-up"))] = vpaRec("3500m", "6Gi") // cpu ceil 4 → clamp 3
 	bumped, err := s.AutoscaleTick(ctx, "p1", nil)
 	if err != nil || bumped != 1 {
 		t.Fatalf("bumped=%d err=%v", bumped, err)
 	}
-	if res := resources(api, "std-up"); res["cpu"] != 3 || res["memoryGi"] != 6 {
+	if res := resources(api, "pc-d-up"); res["cpu"] != 3 || res["memoryGi"] != 6 {
 		t.Fatalf("resources = %v (want cpu 3 clamped, mem 6)", res)
 	}
 
 	// Recommendation below current → scale-up-only, untouched.
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkDB(api, s, "std-down", map[string]any{"enabled": true, "maxCpu": 8, "maxMemoryGi": 16, "maxStorageGi": 0})
-	api.vpas[key("pc-p1", AutoscaleVPAName("std-down"))] = vpaRec("500m", "1Gi")
+	mkDB(api, s, "pc-d-down", map[string]any{"enabled": true, "maxCpu": 8, "maxMemoryGi": 16, "maxStorageGi": 0})
+	api.vpas[key("pc-db-p1", AutoscaleVPAName("pc-d-down"))] = vpaRec("500m", "1Gi")
 	if bumped, err = s.AutoscaleTick(ctx, "p1", nil); err != nil || bumped != 0 {
 		t.Fatalf("scale-down must be a no-op: bumped=%d err=%v", bumped, err)
 	}
-	if res := resources(api, "std-down"); res["cpu"] != 2 || res["memoryGi"] != 4 {
+	if res := resources(api, "pc-d-down"); res["cpu"] != 2 || res["memoryGi"] != 4 {
 		t.Fatalf("resources changed on a downward rec: %v", res)
 	}
 
 	// Disk ≥80% full → +20% ceil, clamped to maxStorageGi.
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkDB(api, s, "std-disk", map[string]any{"enabled": true, "maxCpu": 2, "maxMemoryGi": 4, "maxStorageGi": 23})
+	mkDB(api, s, "pc-d-disk", map[string]any{"enabled": true, "maxCpu": 2, "maxMemoryGi": 4, "maxStorageGi": 23})
 	bumped, err = s.AutoscaleTick(ctx, "p1", func(_ context.Context, ns string) (map[string]float64, error) {
-		if ns != "pc-p1" {
+		if ns != "pc-db-p1" {
 			t.Fatalf("ns = %s", ns)
 		}
-		return map[string]float64{"data-std-disk-1": 0.91, "data-std-other-1": 0.99}, nil
+		return map[string]float64{"data-pc-d-disk-1": 0.91, "data-pc-d-other-1": 0.99}, nil
 	})
 	if err != nil || bumped != 1 {
 		t.Fatalf("disk: bumped=%d err=%v", bumped, err)
 	}
-	storage := dig(api.apps[key("argocd", "std-disk")], "spec", "source", "helm", "valuesObject", "storage").(map[string]any)
+	storage := dig(api.apps[key("argocd", "pc-d-disk")], "spec", "source", "helm", "valuesObject", "storage").(map[string]any)
 	if storage["sizeGi"] != 23 { // 20*1.2=24 → clamp 23
 		t.Fatalf("sizeGi = %v, want clamp 23", storage["sizeGi"])
 	}
@@ -95,8 +95,8 @@ func TestAutoscaleTick(t *testing.T) {
 	// Disabled database: VPA present but never consulted for a patch.
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkDB(api, s, "std-off", nil)
-	api.vpas[key("pc-p1", AutoscaleVPAName("std-off"))] = vpaRec("8", "16Gi")
+	mkDB(api, s, "pc-d-off", nil)
+	api.vpas[key("pc-db-p1", AutoscaleVPAName("pc-d-off"))] = vpaRec("8", "16Gi")
 	if bumped, err = s.AutoscaleTick(ctx, "p1", nil); err != nil || bumped != 0 {
 		t.Fatalf("disabled: bumped=%d err=%v", bumped, err)
 	}
@@ -104,7 +104,7 @@ func TestAutoscaleTick(t *testing.T) {
 	// No VPA object at all (CRD absent) → clean no-op, no error.
 	api = newFakeAPI()
 	s = NewWithAPI(api, testConfig(), "svc-dbaas")
-	mkDB(api, s, "std-novpa", map[string]any{"enabled": true, "maxCpu": 8, "maxMemoryGi": 16, "maxStorageGi": 0})
+	mkDB(api, s, "pc-d-novpa", map[string]any{"enabled": true, "maxCpu": 8, "maxMemoryGi": 16, "maxStorageGi": 0})
 	if bumped, err = s.AutoscaleTick(ctx, "p1", nil); err != nil || bumped != 0 {
 		t.Fatalf("no vpa: bumped=%d err=%v", bumped, err)
 	}

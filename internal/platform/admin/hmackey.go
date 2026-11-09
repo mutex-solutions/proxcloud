@@ -1,11 +1,14 @@
 package admin
 
 import (
+	"context"
 	"crypto/md5"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
+	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
 // hmackey.go serves the hmac-keys surface (/api/v1/admin/hmac-keys). The bare GET list
@@ -36,6 +40,65 @@ const hmacKeyCollection = "hmac_keys"
 // The SigV4 verifier only resolves keys carrying this purpose.
 const hmacKeyPurposeAdminAPI = "admin-api"
 
+// hmacPlainSecret is the shape of a generated secret ("sk" + a sha1 in hex). Sealed text never matches it:
+// its length is no valid base64.
+var hmacPlainSecret = regexp.MustCompile(`^sk[0-9a-f]{40}$`)
+
+// SealHmacKey returns the hmac_keys row to store for a generated key doc: SigV4 has to get the secret back
+// so it cannot be hashed, and it is encrypted instead. doc keeps the plain secret for the one response
+// that shows it. With no encryption key configured the row stays in plain text, like every other secret.
+func SealHmacKey(enc *textcrypt.Encryptor, doc pgdoc.M) pgdoc.M {
+	out := maps.Clone(doc)
+	if s, ok := doc["secretKey"].(string); ok && enc != nil {
+		out["secretKey"] = enc.Encrypt(s)
+	}
+	return out
+}
+
+// OpenHmacSecret returns the secret of a stored row. It fails on a row it cannot decrypt, a key changed
+// without re-sealing: the stored text must not start working as the secret itself.
+func OpenHmacSecret(enc *textcrypt.Encryptor, stored string) (string, bool) {
+	if hmacPlainSecret.MatchString(stored) { // a row from before sealing, until the next boot converts it
+		return stored, true
+	}
+	// The cipher is AES-CBC with PKCS#7 and no MAC: under a wrong key about 1 in 256 texts still unpad cleanly
+	// into garbage. A real secret always has the plain shape, so anything else is a failed open.
+	secret := enc.Decrypt(stored)
+	if secret == stored || !hmacPlainSecret.MatchString(secret) {
+		return "", false
+	}
+	return secret, true
+}
+
+// SealStoredHmacKeys encrypts the secrets still in plain text, once, at boot. Only a row that still holds
+// the value it read is converted, so several replicas starting together are harmless.
+func SealStoredHmacKeys(ctx context.Context, keys *pgdoc.Store, enc *textcrypt.Encryptor) (int, error) {
+	if !enc.HasKey() {
+		return 0, nil
+	}
+	var rows []struct {
+		ID        string `json:"id"`
+		SecretKey string `json:"secretKey"`
+	}
+	if err := keys.Find(ctx, pgdoc.M{}, &rows); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, row := range rows {
+		if !hmacPlainSecret.MatchString(row.SecretKey) {
+			continue
+		}
+		won, err := keys.SetFieldsOne(ctx, pgdoc.M{"_id": row.ID, "secretKey": row.SecretKey}, pgdoc.M{"secretKey": enc.Encrypt(row.SecretKey)}, nil)
+		if err != nil {
+			return n, err
+		}
+		if won {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // routeHmacKey registers the HmacKey admin mutation/by-id routes. The bare list (GET /hmac-keys)
 // stays in handler.go.
 func (h *Handler) routeHmacKey(r chi.Router) {
@@ -46,7 +109,7 @@ func (h *Handler) routeHmacKey(r chi.Router) {
 
 // hmacKeyGenerate mints an Admin-API SigV4 key pair (previously
 // only reachable via the operator shell command / mgmt gen-hmac-key). Returns the secret ONCE —
-// it is stored verbatim and never re-served in full by the list/get reads. Body {description?}.
+// it is stored encrypted and never re-served in full by the list/get reads. Body {description?}.
 func (h *Handler) hmacKeyGenerate(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, hmacKeyPerm) {
 		return
@@ -56,7 +119,7 @@ func (h *Handler) hmacKeyGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	doc := NewAdminAPIKey(req.Description)
-	if err := h.repo.InsertDocKeepID(r.Context(), hmacKeyCollection, doc); httpx.WriteError(w, err) {
+	if err := h.repo.InsertDocKeepID(r.Context(), hmacKeyCollection, SealHmacKey(h.hmacEnc, doc)); httpx.WriteError(w, err) {
 		return
 	}
 	// The generate response carries the plaintext secret (shown once, client must save it).

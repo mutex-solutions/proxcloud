@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/powerdns"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/truenas"
+	"net/netip"
 	"net/url"
+	"time"
 )
 
 // ExternalServiceType values. Only CLOUD matters to the cloud slice.
@@ -42,6 +45,16 @@ type ExternalService struct {
 	// wire: this struct is not serialized to any response — admin reads go through a secret-stripped
 	// path and cloud ops use it only in-memory.
 	Secret any `json:"secret,omitempty"`
+	// ProvisionError is the last failed attempt to provision a project on this provider, for the operator; a success
+	// clears it. Set through Service.SetProvisionError only.
+	ProvisionError *ProvisionError `json:"provisionError,omitempty"`
+}
+
+// ProvisionError says which project could not be provisioned on a provider, and why.
+type ProvisionError struct {
+	ProjectID string    `json:"projectId"`
+	Message   string    `json:"message"`
+	At        time.Time `json:"at"`
 }
 
 // IsDisabled / IsNotDisabled are the status helpers.
@@ -67,9 +80,17 @@ func (e *ExternalService) IsCephS3() bool { return e.Provider() == "ceph-s3" }
 func (e *ExternalService) IsRustFS() bool { return e.Provider() == "rustfs" }
 
 // IsTrueNAS reports a TrueNAS file-share provider (config.provider == "truenas"). Config: apiUrl, username,
-// fingerprint/insecureTls, parentDataset, mountHost (default: the host of apiUrl), defaultQuotaGiB, region;
-// secret: apiKey.
+// fingerprint/insecureTls, parentDataset, mountHost (default: the host of apiUrl), defaultQuotaGiB, region,
+// snatSources (default: none, see ParseSNATSources); secret: apiKey.
 func (e *ExternalService) IsTrueNAS() bool { return e.Provider() == "truenas" }
+
+// IsPowerDNS reports a DNS zone provider (config.provider == "powerdns").
+func (e *ExternalService) IsPowerDNS() bool { return e.Provider() == "powerdns" }
+
+// PowerDNSService builds the zone service: config apiUrl, serverId, nameservers; secret apiKey.
+func (e *ExternalService) PowerDNSService() (*powerdns.Service, error) {
+	return powerdns.New(str(e.Config["apiUrl"]), str(e.Config["serverId"]), str(e.secretMap()["apiKey"]), strList(e.Config["nameservers"]))
+}
 
 // TrueNASService builds the share service. The caller closes its client.
 func (e *ExternalService) TrueNASService() (*truenas.Service, error) {
@@ -91,7 +112,40 @@ func (e *ExternalService) TrueNASService() (*truenas.Service, error) {
 			host = u.Hostname()
 		}
 	}
-	return &truenas.Service{C: c, Parent: parent, Host: host}, nil
+	snat, err := ParseSNATSources(e.Config["snatSources"])
+	if err != nil {
+		return nil, err
+	}
+	return &truenas.Service{C: c, Parent: parent, Host: host, SNATSources: snat}, nil
+}
+
+// ParseSNATSources reads config.snatSources in export form. Single hosts only: each entry goes on every export of the
+// provider, so a range here would open every share to whole networks.
+func ParseSNATSources(raw any) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("snatSources must be a list of addresses")
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		s, _ := it.(string)
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			a, aerr := netip.ParseAddr(s)
+			if aerr != nil {
+				return nil, fmt.Errorf("snatSources: %q is not an address", s)
+			}
+			p = netip.PrefixFrom(a, a.BitLen())
+		}
+		if !p.IsSingleIP() || p.Addr().IsUnspecified() {
+			return nil, fmt.Errorf("snatSources: %q is not a single host address", s)
+		}
+		out = append(out, p.String())
+	}
+	return out, nil
 }
 
 // IsObjectStore reports a provider that serves only buckets.

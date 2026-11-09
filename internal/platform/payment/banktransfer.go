@@ -185,8 +185,12 @@ func (s *AddFundsService) CancelBankTransfer(ctx context.Context, profile *billi
 	}
 	now := time.Now().UTC()
 	set := pgdoc.M{"status": "CANCELLED", "cancelledAt": now}
-	if err := s.billing.UpdateBankTransfer(ctx, id, set); err != nil {
+	won, err := s.billing.ResolveBankTransfer(ctx, id, set)
+	if err != nil {
 		return nil, err
+	}
+	if !won { // an operator resolved it since the read above
+		return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "Bank transfer is no longer pending")
 	}
 	if txnID, _ := bt["accountCreditTransactionId"].(string); txnID != "" {
 		txn, err := s.billing.AccountCreditTransactionByID(ctx, txnID)

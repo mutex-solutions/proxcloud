@@ -256,7 +256,8 @@ func (s *Store) SetFields(ctx context.Context, filter M, set M, unset []string) 
 	return tag.RowsAffected(), nil
 }
 
-// SetFieldsOne applies a partial update to (at most) one matching document.
+// SetFieldsOne applies a partial update to (at most) one matching document. FOR UPDATE makes the filter hold at the write: without
+// it, a writer queued behind another on the row rechecks only the id, and a conditional write that should lose wins too.
 func (s *Store) SetFieldsOne(ctx context.Context, filter M, set M, unset []string) (bool, error) {
 	var args []any
 	docExpr, err := s.setUnsetSQL(set, unset, &args)
@@ -268,7 +269,7 @@ func (s *Store) SetFieldsOne(ctx context.Context, filter M, set M, unset []strin
 		return false, err
 	}
 	tag, err := s.exec(ctx, "UPDATE "+s.ident()+" SET doc = "+docExpr+
-		" WHERE id IN (SELECT id FROM "+s.ident()+" WHERE "+where+" LIMIT 1)", args...)
+		" WHERE id IN (SELECT id FROM "+s.ident()+" WHERE "+where+" LIMIT 1 FOR UPDATE)", args...)
 	if err != nil {
 		return false, err
 	}
@@ -322,7 +323,7 @@ func (s *Store) DeleteOne(ctx context.Context, filter M) (bool, error) {
 		return false, err
 	}
 	tag, err := s.exec(ctx, "DELETE FROM "+s.ident()+
-		" WHERE id IN (SELECT id FROM "+s.ident()+" WHERE "+where+" LIMIT 1)", args...)
+		" WHERE id IN (SELECT id FROM "+s.ident()+" WHERE "+where+" LIMIT 1 FOR UPDATE)", args...)
 	if err != nil {
 		return false, err
 	}

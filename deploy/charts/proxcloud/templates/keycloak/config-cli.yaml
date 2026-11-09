@@ -131,14 +131,10 @@ spec:
             - name: KEYCLOAK_USER
               value: {{ $cli.adminUser | quote }}
             - name: KEYCLOAK_PASSWORD
-              {{- if $cli.existingSecret }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ $cli.existingSecret }}
+                  name: {{ include "proxcloud.kcAdminSecretName" . }}
                   key: {{ $cli.passwordKey }}
-              {{- else }}
-              value: {{ $cli.adminPassword | required "keycloakConfigCli.adminPassword (or existingSecret) is required when keycloakConfigCli.enabled" | quote }}
-              {{- end }}
             - name: KEYCLOAK_AVAILABILITYCHECK_ENABLED
               value: "true"
             - name: KEYCLOAK_AVAILABILITYCHECK_TIMEOUT

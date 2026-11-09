@@ -73,6 +73,28 @@ func (r *Repo) PromotionalCreditCandidates(ctx context.Context, billingProfileID
 	return out, nil
 }
 
+// WithProfileLock runs fn in one transaction holding the profile's credit lock. Everything that reads
+// a credit balance or a bill's unpaid amount and then writes it goes through here: two payers otherwise
+// both read the same state, and one spends the same balance twice or overwrites the other's payment.
+// Keep gateway calls out where you can, it blocks that profile's other credit operations.
+//
+// Reads inside fn must hit tables that exist: an undefined table aborts the transaction, so the ones
+// a fresh install may not have yet are created first.
+func (r *Repo) WithProfileLock(ctx context.Context, profileID string, fn func(ctx context.Context) error) error {
+	for _, t := range []*pgdoc.Store{r.acctCredits, r.promoCredit, r.counters, r.bills, r.collects} {
+		if err := t.Ensure(ctx); err != nil {
+			return err
+		}
+	}
+	db := r.acctCredits.DB()
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		if err := db.LockXact(ctx, pricing.ProfileLockKey(profileID)); err != nil {
+			return err
+		}
+		return fn(ctx)
+	})
+}
+
 // SaveAccountCredit / SavePromotionalCredit persist a credit whose balance the settlement
 // consumed (replace by _id).
 func (r *Repo) SaveAccountCredit(ctx context.Context, ac *pricing.AccountCredit) error {
@@ -88,18 +110,23 @@ func (r *Repo) PendingAccountCreditTransactions(ctx context.Context, from, to ti
 	})
 }
 
+// StuckAccountCreditTransactions lists deposits left PROCESSING since before `before`: a settle
+// claims the row for seconds, so these are a pod that died mid-settle. Nothing else picks them up.
+func (r *Repo) StuckAccountCreditTransactions(ctx context.Context, before time.Time) ([]AccountCreditTransaction, error) {
+	return findTyped[AccountCreditTransaction](ctx, r.credits, pgdoc.M{"status": "PROCESSING", "updatedAt": pgdoc.M{"$lt": before}})
+}
+
 func (r *Repo) PendingCollectTransactions(ctx context.Context, from, to time.Time) ([]pricing.CollectTransaction, error) {
 	return findTyped[pricing.CollectTransaction](ctx, r.collects, pgdoc.M{
 		"status": string(pricing.CollectTransactionStatusPending), "createdAt": pgdoc.M{"$gt": from, "$lt": to},
 	})
 }
 
-// PendingCollectForBill returns the bill's PENDING collect transactions created after `since` —
-// an in-flight charge (the browser/cron/scanner has not settled it yet). A new charge for the bill
-// must not start while one exists, or the customer is charged twice.
-func (r *Repo) PendingCollectForBill(ctx context.Context, billID string, since time.Time) ([]pricing.CollectTransaction, error) {
+// PendingCollectForBill returns the bill's PENDING collect transactions, however old: a charge whose outcome is
+// unknown. A new charge for the bill must not start while one exists, or the customer may be charged twice.
+func (r *Repo) PendingCollectForBill(ctx context.Context, billID string) ([]pricing.CollectTransaction, error) {
 	return findTyped[pricing.CollectTransaction](ctx, r.collects, pgdoc.M{
-		"billId": billID, "status": string(pricing.CollectTransactionStatusPending), "createdAt": pgdoc.M{"$gt": since},
+		"billId": billID, "status": string(pricing.CollectTransactionStatusPending),
 	})
 }
 
@@ -112,6 +139,14 @@ func (r *Repo) CreditCardByToken(ctx context.Context, bpID, tokenID string) (*Cr
 		return nil, err
 	}
 	return &c, nil
+}
+
+// UpdatePendingCollectTransaction sets the status and message of a charge still PENDING. A settle that
+// won meanwhile is left alone, which a replace of the row read earlier would undo.
+func (r *Repo) UpdatePendingCollectTransaction(ctx context.Context, id string, status pricing.CollectTransactionStatus, message string) error {
+	_, err := r.collects.SetFieldsOne(ctx, pgdoc.M{"_id": id, "status": string(pricing.CollectTransactionStatusPending)},
+		pgdoc.M{"status": string(status), "errorMessage": message, "updatedAt": time.Now().UTC()}, nil)
+	return err
 }
 
 // SaveCollectTransaction upserts a collect transaction (insert on a blank id, else replace
@@ -179,6 +214,16 @@ func (r *Repo) CreateAccountCredit(ctx context.Context, ac *pricing.AccountCredi
 		return err
 	}
 	ac.ID = id
+	return nil
+}
+
+// CreateAccountCreditForTxn mints the credit of one money movement. Its id is the transaction's, so a
+// settle retried after a failure further on hits the primary key instead of minting a second credit.
+func (r *Repo) CreateAccountCreditForTxn(ctx context.Context, txnID string, ac *pricing.AccountCredit) error {
+	ac.ID = txnID
+	if _, err := r.acctCredits.InsertOne(ctx, ac); err != nil && !pgdoc.IsDup(err) {
+		return err
+	}
 	return nil
 }
 

@@ -14,6 +14,8 @@ func SystemTemplates() []MessageTemplate {
 		return MessageTemplate{Key: key, Category: cat, SystemTemplate: true, MessageTitle: title, MessageBody: body}
 	}
 	return []MessageTemplate{
+		t("sandbox_abuse_alert", "SANDBOX", "Sandbox sustained CPU alert: {{sandboxId}}",
+			`<p>Provider {{serviceId}}, project {{projectId}}, sandbox {{sandboxId}} matched sustained CPU with no observed exec or traffic activity.</p><p>This is a heuristic, not proof of abuse. Configured action: {{action}}. Review the SANDBOX_ABUSE audit events for the durable detection and action result.</p>`),
 		t("send_refunded_invoice", "INVOICE", "Your payment has been refunded",
 			`<p>Dear {{firstName}} {{lastName}},</p>
 <p>We would like to inform you that your payment of {{amount}} {{currency}} has been refunded to your original payment method.</p>

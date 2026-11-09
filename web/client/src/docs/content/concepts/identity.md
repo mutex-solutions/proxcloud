@@ -8,10 +8,10 @@ Customer identity and operator identity are kept deliberately apart:
 
 | Audience | Realm (bundled Keycloak) | SPA | Default client ID | Self-registration |
 |----------|--------------------------|-----|-------------------|-------------------|
-| Customers | `clients` | Customer portal (`proxcloud-web`) | `proxcloud-ui` | Enabled |
-| Operators/admins | `master` | Admin console (`proxcloud-admin`, under `/proxcloud_admin`) | `proxcloud-admin`, plus `proxcloud-admin-api` for API access | Disabled — admins are provisioned by hand |
+| Customers | `proxcloud` (installer; any name you choose) | Customer portal (`proxcloud-web`) | `proxcloud-ui` | Enabled |
+| Operators/admins | `proxcloud-admin` (installer; any name you choose) | Admin console (`proxcloud-admin`, on its own host) | `proxcloud-admin`, plus `proxcloud-admin-api` for API access | Disabled — admins are provisioned by hand |
 
-Both SPAs are public OIDC clients running the authorization-code flow with PKCE. Authenticating against the admin realm marks a user as an administrator; a customer holding a `clients`-realm token can never reach the admin console.
+Both SPAs are public OIDC clients running the authorization-code flow with PKCE. Authenticating against the admin realm marks a user as an administrator; a customer holding a customer-realm token can never reach the admin console.
 
 ## The bundled Keycloak (optional)
 
@@ -19,7 +19,7 @@ Keycloak is off by default. Set `keycloakx.enabled: true` and the chart runs Key
 
 Because Keycloak fronts identity, its features come along at no extra cost: email verification, password recovery, TOTP two-factor auth, and identity brokering — social logins like Google or GitHub, or federation with LDAP, Active Directory, or SAML. You configure these per realm in the Keycloak admin console.
 
-Registration itself is realm-side. The customer SPA simply redirects to the authorize endpoint, and Keycloak shows the "Register" link because the `clients` realm has user registration turned on, with **email as the username**. The first time a user signs in, ProxCloud creates the platform user from the token — get-or-create by email — and runs any sign-up bonus or activation logic.
+Registration itself is realm-side. The customer SPA simply redirects to the authorize endpoint, and Keycloak shows the "Register" link because the customer realm has user registration turned on, with **email as the username**. The first time a user signs in, ProxCloud creates the platform user from the token — get-or-create by email — and runs any sign-up bonus or activation logic.
 
 ## Bringing your own OIDC provider
 

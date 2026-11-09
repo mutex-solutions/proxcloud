@@ -1,0 +1,41 @@
+{{- if and (eq .Values.engine "postgresql") .Values.databases }}
+{{/*
+Customer-declared logical databases, one CNPG Database CR each (the operator
+creates/alters them in the running cluster). Declarative on both sides: proxcloud
+sends the whole desired list on every MANAGE_ACCESS, so an entry disappearing
+from values means the CR disappears and ArgoCD prunes it.
+
+databaseReclaimPolicy: delete is deliberate — pruning the CR must actually drop
+the database, otherwise a customer who removed a database keeps paying for its
+storage and a later re-add fails on "already exists". The engine's own app
+database is untouched; it is not in this list.
+
+owner defaults to `app` (the CNPG-minted role behind the connection panel) so a
+database declared without one is still reachable with the credentials the
+customer already has.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+{{- range .Values.databases }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  {{- /* '_' -> '-' in the CR NAME only (spec.name keeps the real identifier):
+       idents allow underscores, k8s object names do not (config.go K8sName). */}}
+  name: {{ $name }}-db-{{ .name | replace "_" "-" }}
+  labels:
+    {{- include "database-cluster.labels" $ | nindent 4 }}
+  annotations:
+    # Wave 1: these reference the engine CR, and the operators' webhooks reject
+    # a User/Database/Grant whose cluster does not exist yet. ArgoCD would retry
+    # into convergence anyway, but only after surfacing a sync error per object.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  cluster:
+    name: {{ $name }}
+  name: {{ .name }}
+  owner: {{ .owner | default "app" }}
+  ensure: present
+  databaseReclaimPolicy: delete
+{{- end }}
+{{- end }}

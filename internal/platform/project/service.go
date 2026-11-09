@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -140,7 +141,7 @@ func (s *Service) HiddenServices(ctx context.Context) []string {
 	return cfg.HiddenServices
 }
 
-// Save persists a project (status/services updates from cloud bootstrap).
+// Save persists a project's fields other than its status (services from cloud bootstrap).
 func (s *Service) Save(ctx context.Context, p *Project) error { return s.repo.Save(ctx, p) }
 
 // GetProject loads a project the user can access: either an explicit member, or an
@@ -229,33 +230,63 @@ func (s *Service) Rename(ctx context.Context, sub, id, name string) (*Project, e
 	return p, nil
 }
 
-// UpdateOrganization moves the project to a different org. The handler validates
-// target-org membership first.
-func (s *Service) UpdateOrganization(ctx context.Context, sub, id, targetOrgID string) (*Project, error) {
-	p, err := s.GetProject(ctx, sub, id)
-	if err != nil {
-		return nil, err
+// BillingAllowsEnabled reports whether nothing on the billing side holds the project DISABLED: billing is not configured, or the
+// profile that pays for it (its own, else the organization's) is ACTIVE.
+func (s *Service) BillingAllowsEnabled(ctx context.Context, p *Project) (bool, error) {
+	_, _, configured, err := s.billing.Configuration(ctx)
+	if err != nil || !configured {
+		return !configured, err
 	}
-	p.OrganizationID = targetOrgID
-	if err := s.repo.Save(ctx, p); err != nil {
-		return nil, err
+	bpID := p.BillingProfileID
+	if bpID == "" {
+		o, err := s.orgRepo.FindByID(ctx, p.OrganizationID)
+		if err != nil || o == nil {
+			return false, err
+		}
+		bpID = o.BillingProfileID
 	}
-	return p, nil
+	return s.billing.IsActive(ctx, bpID)
 }
 
 // ScheduleDeletion marks the project for deferred deletion. The cloud-side
 // deletability check is deferred.
 func (s *Service) ScheduleDeletion(ctx context.Context, p *Project, _ bool) (*Project, error) {
-	if p.Status == StatusScheduledForDeletion || p.Status == StatusDeleteInProgress {
-		return nil, httpx.BadRequest("Project is already scheduled for deletion")
-	}
-	now := time.Now().UTC()
-	p.Status = StatusScheduledForDeletion
-	p.ScheduledForDeletionAt = &now
-	if err := s.repo.Save(ctx, p); err != nil {
+	if err := CheckTransition(ActionSchedule, p.Status); err != nil {
 		return nil, err
 	}
+	now := time.Now().UTC()
+	held := p.Status
+	p.StatusBeforeDeletion = held
+	p.Status = StatusScheduledForDeletion
+	p.ScheduledForDeletionAt = &now
+	return s.SaveIfStatus(ctx, p, held)
+}
+
+// SaveIfStatus writes a status change decided on a read of status expect; a change that won meanwhile is a 409.
+func (s *Service) SaveIfStatus(ctx context.Context, p *Project, expect string) (*Project, error) {
+	ok, err := s.repo.SaveIfStatus(ctx, p, expect)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errProjectChanged
+	}
 	return p, nil
+}
+
+var errProjectChanged = httpx.NewError(http.StatusConflict, http.StatusConflict, "The project changed meanwhile. Try again")
+
+// EnableIfDisabled enables a DISABLED project; a change that won meanwhile, or an operator's disable when the operator is not
+// the one asking, is a 409.
+func (s *Service) EnableIfDisabled(ctx context.Context, p *Project, byOperator bool) error {
+	ok, err := s.repo.EnableIfDisabled(ctx, p, byOperator)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errProjectChanged
+	}
+	return nil
 }
 
 // DeleteNow flags the project for immediate deletion: the deletion job's next sweep (every
@@ -265,30 +296,34 @@ func (s *Service) DeleteNow(ctx context.Context, id string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
+	// DELETE_IN_PROGRESS with no schedule is a row the admin delete-now flagged before it stamped one (#76): the sweep selects
+	// by the schedule, so nothing else would ever finish it. Delete-now gives it the schedule it lacks. One with a schedule
+	// is the sweep's to retry and stays refused.
+	if !(p.Status == StatusDeleteInProgress && p.ScheduledForDeletionAt == nil) {
+		if err := CheckTransition(ActionDeleteNow, p.Status); err != nil {
+			return nil, err
+		}
+	}
+	expect := p.Status
 	p.Status = StatusDeleteInProgress
 	past := time.Now().UTC().Add(-deletionGrace)
 	p.ScheduledForDeletionAt = &past
-	if err := s.repo.Save(ctx, p); err != nil {
-		return nil, err
-	}
-	return p, nil
+	return s.SaveIfStatus(ctx, p, expect)
 }
 
-// CancelDeletion re-enables a project scheduled for deletion.
+// CancelDeletion returns a project scheduled for deletion to the status it held before.
 func (s *Service) CancelDeletion(ctx context.Context, id string) (*Project, error) {
 	p, err := s.GetProjectByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if p.Status == StatusDeleteInProgress {
-		return nil, httpx.BadRequest("Project is deleting. Cannot cancel deletion")
-	}
-	p.Status = StatusEnabled
-	p.ScheduledForDeletionAt = nil
-	if err := s.repo.Save(ctx, p); err != nil {
+	if err := CheckTransition(ActionCancel, p.Status); err != nil {
 		return nil, err
 	}
-	return p, nil
+	p.Status = StatusAfterCancel(p.StatusBeforeDeletion)
+	p.StatusBeforeDeletion = ""
+	p.ScheduledForDeletionAt = nil
+	return s.SaveIfStatus(ctx, p, StatusScheduledForDeletion)
 }
 
 // AddMember adds a user to the project (with the org-membership and
