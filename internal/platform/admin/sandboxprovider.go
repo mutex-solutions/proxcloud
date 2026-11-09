@@ -60,7 +60,13 @@ func (h *Handler) sandboxGatesFor(ctx context.Context, es *externalservice.Exter
 // one, and any other provider, passes.
 func (h *Handler) checkSandboxGoLive(ctx context.Context, doc pgdoc.M) *httpx.HTTPError {
 	es := h.sandboxOf(doc)
-	if es == nil || doc["status"] == externalservice.StatusDisabled {
+	if es == nil {
+		return nil
+	}
+	if err := es.SandboxConfig().ValidateAutomaticActions(); err != nil {
+		return httpx.BadRequest(err.Error())
+	}
+	if doc["status"] == externalservice.StatusDisabled {
 		return nil
 	}
 	if err := sandbox.GatesErr(h.sandboxGatesFor(ctx, es)); err != nil {

@@ -237,6 +237,9 @@ func (c Config) Validate() error {
 	if err := c.Abuse.Validate(); err != nil {
 		errs = append(errs, err.Error())
 	}
+	if err := c.ValidateAutomaticActions(); err != nil {
+		errs = append(errs, err.Error())
+	}
 	if err := c.Rotation.Validate(); err != nil {
 		errs = append(errs, err.Error())
 	}

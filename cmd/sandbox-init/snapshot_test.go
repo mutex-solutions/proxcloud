@@ -12,6 +12,31 @@ import (
 	"time"
 )
 
+func TestSnapshotUnreadableDataFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "private"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "private", "notes"), []byte("only copy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(root, "private"), 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "private"), 0o700) })
+	if os.Geteuid() == 0 {
+		t.Skip("requires nonroot for real permission denial")
+	}
+	var b bytes.Buffer
+	if err := writeSnapshot(&b, root, time.Time{}, nil); err == nil {
+		t.Fatal("unreadable directory silently omitted")
+	}
+	b.Reset()
+	if err := writeSnapshot(&b, root, time.Time{}, []string{"/private"}); err != nil {
+		t.Fatalf("explicit skip must remain allowed: %v", err)
+	}
+}
+
 func TestWriteSnapshot(t *testing.T) {
 	root := t.TempDir()
 	mk := func(p, body string) {

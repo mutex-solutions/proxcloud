@@ -96,6 +96,9 @@ type pausedSandbox struct {
 	// for a pause, as never paused).
 	State      string     `json:"state,omitempty"`
 	LeaseUntil *time.Time `json:"leaseUntil,omitempty"`
+	// Automatic pauses must reauthorize source deletion after the asynchronous
+	// image assembly, including after a portal restart/redrive.
+	AbuseGuard *abusePauseGuard `json:"abuseGuard,omitempty"`
 }
 
 // e2bStatusErr is an error with the HTTP status the E2B API answers it with (e2bError reads it).
@@ -597,7 +600,7 @@ func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) err
 		}
 		lease := d.lease
 		return h.sbPaused.Upsert(tc, id, &pausedSandbox{ID: id, ProjectID: c.proj.ID, ServiceID: c.es.ID, TemplateID: t.ID,
-			Saved: saved, PausedAt: &now, State: pausedPausing, LeaseUntil: &lease})
+			Saved: saved, PausedAt: &now, State: pausedPausing, LeaseUntil: &lease, AbuseGuard: abuseGuardFrom(ctx)})
 	})
 	if err != nil {
 		h.dropSnapshot(ctx, c, t.ID)
@@ -742,12 +745,48 @@ func (h *Handler) finishPause(c *e2bCaller, d *pauseDrive) {
 		h.abandonPause(ctx, c, d, err)
 		return
 	}
+	// Automatic pauses release their capture lock while assembling the image.
+	// Reacquire it before the final authorization and deletion so a native exec
+	// cannot begin between those two steps. Manual/E2B pauses retain their behavior.
+	finish := func() error { return h.stopPausedSource(ctx, c, d) }
+	var p pausedSandbox
+	found, readErr := h.sbPaused.Get(ctx, id, &p)
+	if readErr != nil {
+		slog.Warn("sandbox pause: state unavailable; retaining source and copy", "sandbox", id)
+		return
+	}
+	if !found || p.ProjectID != c.proj.ID {
+		return
+	}
+	if p.AbuseGuard != nil {
+		_, err = h.sbSafety.DB().WithAdvisoryLock(ctx, "sandbox-capture:"+c.es.ID+":"+c.proj.ID+":"+id, false, func() error {
+			// If the source already expired, the usable image is the only copy;
+			// no destructive action remains to authorize. Never discard that copy.
+			if err := c.ss.Alive(ctx, c.proj.ID, id); errors.Is(err, sandbox.ErrNotFound) {
+				return finish()
+			}
+			if err := h.authorizeAbuseAction(ctx, c.es.ID, p.AbuseGuard); err != nil {
+				return err
+			}
+			return finish()
+		})
+	} else {
+		err = finish()
+	}
+	if err != nil && !errors.Is(err, errPauseMoved) && !errors.Is(err, errPauseTaken) {
+		h.abandonPause(ctx, c, d, err)
+	}
+}
+
+func (h *Handler) stopPausedSource(ctx context.Context, c *e2bCaller, d *pauseDrive) error {
+	id := d.id
 	if err := h.driveStep(ctx, c, d, func(p *pausedSandbox) bool {
 		p.State = pausedStopping
 		return false
 	}); err != nil {
-		return // cancelled by a connect, ended by a kill or a teardown (they dropped the snapshot), or driven elsewhere
+		return err
 	}
+	var err error
 	// A sandbox that is gone already (its end came while the image was assembled) is paused all the same: the image
 	// holds its files.
 	if _, gerr := c.ss.GetSandbox(ctx, c.proj.ID, id); !errors.Is(gerr, sandbox.ErrNotFound) {
@@ -758,8 +797,7 @@ func (h *Handler) finishPause(c *e2bCaller, d *pauseDrive) {
 		}
 		if err != nil { // the image is ready: the pause is given up only while the original still holds the files
 			if _, gerr := c.ss.GetSandbox(ctx, c.proj.ID, id); !errors.Is(gerr, sandbox.ErrNotFound) {
-				h.abandonPause(ctx, c, d, err)
-				return
+				return err
 			}
 		}
 		waitGone(ctx, c, id, time.Minute)
@@ -769,27 +807,52 @@ func (h *Handler) finishPause(c *e2bCaller, d *pauseDrive) {
 		return false
 	}); err != nil {
 		slog.Warn("e2b: pause done, its record moved on", "sandbox", id, "err", err)
-		return
+		return err
 	}
-	slog.Info("e2b: paused", "sandbox", id, "project", c.proj.ID, "template", templateID)
+	slog.Info("e2b: paused", "sandbox", id, "project", c.proj.ID, "template", d.templateID)
+	return nil
 }
 
 // abandonPause ends a pause that cannot complete: the record (if the drive still holds it) and the snapshot go, the
 // sandbox keeps running, to its own end again, or a few minutes when that has passed (an autoPause one is then paused
 // again by the next tick instead of removed at once).
 func (h *Handler) abandonPause(ctx context.Context, c *e2bCaller, d *pauseDrive, cause error) {
+	// A guarded pause may be abandoned only when the original is positively
+	// known alive. An outage/expired source can leave this image as the only
+	// copy; retain its record for redrive instead of treating unknown as alive.
+	var current pausedSandbox
+	found, readErr := h.sbPaused.Get(ctx, d.id, &current)
+	if readErr != nil {
+		return
+	} // unknown ownership/state never authorizes deleting a copy
+	if found && current.AbuseGuard != nil {
+		if err := c.ss.OriginalSourceAlive(ctx, current.AbuseGuard.Sample); err != nil {
+			slog.Warn("sandbox abuse: retaining pause copy; original source not known alive", "sandbox", d.id)
+			return
+		}
+	}
 	var saved map[string]any
+	var identityChanged bool
 	err := h.driveStep(ctx, c, d, func(p *pausedSandbox) bool {
+		// Recheck at the owning-record mutation too: the source may have been
+		// replaced since the outer liveness read.
+		if p.AbuseGuard != nil && c.ss.OriginalSourceAlive(ctx, p.AbuseGuard.Sample) != nil {
+			identityChanged = true
+			return false
+		}
 		saved = p.Saved
 		return true
 	})
+	if identityChanged {
+		return
+	}
 	if errors.Is(err, errPauseTaken) {
 		return // another driver carries the pause on, with this snapshot
 	}
-	h.dropSnapshot(ctx, c, d.templateID)
 	if err != nil {
-		return
+		return // do not delete a snapshot whose owning record could not be removed
 	}
+	h.dropSnapshot(ctx, c, d.templateID)
 	if end, ok := savedShutdown(saved); ok {
 		end = laterOf(end, time.Now().Add(pauseRetryEnd))
 		if serr := c.ss.ShutdownAt(ctx, c.proj.ID, d.id, end); serr != nil && !errors.Is(serr, sandbox.ErrNotFound) {
@@ -817,6 +880,9 @@ func (h *Handler) cancelPause(ctx context.Context, c *e2bCaller, id string) bool
 		}
 		if c.ss.Alive(ctx, c.proj.ID, id) != nil {
 			return false, errPauseMoved
+		}
+		if p.AbuseGuard != nil && c.ss.OriginalSourceAlive(ctx, p.AbuseGuard.Sample) != nil {
+			return false, errSandboxBusy // a same-name replacement does not hold the captured files
 		}
 		tpl = p.TemplateID
 		return true, nil
@@ -945,9 +1011,15 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 					if cur.State == "" || cur.leased(time.Now()) {
 						return false, errPauseMoved
 					}
+					if cur.AbuseGuard != nil && c.ss.OriginalSourceAlive(dctx, cur.AbuseGuard.Sample) != nil {
+						return false, errSandboxBusy // never adopt a replacement and discard the original files
+					}
 					tpl = cur.TemplateID
 					return true, nil
 				}); err != nil {
+					if errors.Is(err, errSandboxBusy) {
+						return nil, err
+					}
 					continue
 				}
 				h.dropSnapshot(dctx, c, tpl)
@@ -1258,9 +1330,6 @@ func (h *Handler) AutoPauseSandboxes(ctx context.Context) {
 			continue
 		}
 		h.redrivePauses(ctx, es, ss) // before listing: a pause taken over is not captured again
-		if !ss.Config().Envd {
-			continue
-		}
 		due, err := ss.DueForAutoPause(ctx)
 		if err != nil {
 			slog.Warn("autopause: list", "service", es.ID, "err", err)

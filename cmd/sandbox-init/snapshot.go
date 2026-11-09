@@ -23,7 +23,7 @@ const bootPath = "/run/proxcloud/boot"
 
 // snapshotSkip are never part of a snapshot: kernel and runtime filesystems, the platform's own mount,
 // and the per-boot run state.
-var snapshotSkip = []string{"/proc", "/sys", "/dev", "/run", "/.proxcloud", "/var/run"}
+var snapshotSkip = []string{"/proc", "/sys", "/dev", "/run", "/.proxcloud", "/var/run", nativeBootPath}
 
 func markBoot() {
 	_ = os.MkdirAll(filepath.Dir(bootPath), 0o755)
@@ -31,12 +31,15 @@ func markBoot() {
 }
 
 func bootTime() time.Time {
-	b, err := os.ReadFile(bootPath)
-	if err != nil {
-		return time.Time{}
+	for _, p := range []string{nativeBootPath, bootPath} {
+		b, err := os.ReadFile(p)
+		if err == nil {
+			if t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(b))); err == nil {
+				return t
+			}
+		}
 	}
-	t, _ := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(b)))
-	return t
+	return time.Time{}
 }
 
 func skipped(p string, skip []string) bool {
@@ -61,21 +64,24 @@ func writeSnapshot(w io.Writer, root string, since time.Time, skip []string) err
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // unreadable entry: leave it out rather than fail the snapshot
-		}
 		abs := "/" + strings.TrimPrefix(strings.TrimPrefix(p, root), "/")
 		if abs != "/" && skipped(abs, skip) {
-			if d.IsDir() {
+			if d != nil && d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
+		if err != nil {
+			return err
+		} // unreadable data must fail capture, never silently lose files
 		if abs == "/" {
 			return nil
 		}
 		fi, err := d.Info()
-		if err != nil || !ctimeOf(fi).After(since) {
+		if err != nil {
+			return err
+		}
+		if !ctimeOf(fi).After(since) {
 			return nil
 		}
 		mode := fi.Mode()
@@ -85,12 +91,12 @@ func writeSnapshot(w io.Writer, root string, since time.Time, skip []string) err
 		link := ""
 		if mode&fs.ModeSymlink != 0 {
 			if link, err = os.Readlink(p); err != nil {
-				return nil
+				return err
 			}
 		}
 		hdr, err := tar.FileInfoHeader(fi, link)
 		if err != nil {
-			return nil
+			return err
 		}
 		hdr.Name = strings.TrimPrefix(abs, "/")
 		if mode.IsDir() {
@@ -106,7 +112,7 @@ func writeSnapshot(w io.Writer, root string, since time.Time, skip []string) err
 		if mode.IsRegular() {
 			f, err := os.Open(p)
 			if err != nil {
-				return nil
+				return err
 			}
 			_, err = io.CopyN(tw, f, hdr.Size)
 			f.Close()

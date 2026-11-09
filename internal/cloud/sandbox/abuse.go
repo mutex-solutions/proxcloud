@@ -48,24 +48,42 @@ func (p AbusePolicy) Validate() error {
 	return nil
 }
 
+// ValidateAutomaticActions rejects an opt-in that cannot be honored safely. This
+// is also checked on disabled provider edits, before release gates need a cluster.
+func (c Config) ValidateAutomaticActions() error {
+	p := c.Abuse.WithDefaults()
+	if p.Action != "pause" && p.Action != "kill" {
+		return nil
+	}
+	if c.Envd {
+		return fmt.Errorf("sandbox.abuse.action %s requires envd=false: silent SDK exec activity cannot be proved; use alert", p.Action)
+	}
+	if p.Action == "pause" && (c.TemplateRegistry == "" || c.BuildStorage.Bucket == "" || c.BuildStorage.Endpoint == "" || c.BuildStorage.AccessKey == "" || c.BuildStorage.SecretKey == "") {
+		return fmt.Errorf("sandbox.abuse.action pause requires templateRegistry, buildStorage endpoint/bucket and storage credentials for a recoverable snapshot")
+	}
+	return nil
+}
+
 // Sample contains host-owned counters only. Identity joins a live, provider-owned
 // Sandbox CR and its live pod UID. Counter rollback/restart starts a new window.
 type Sample struct {
-	ProjectID string    `json:"projectId"`
-	SandboxID string    `json:"sandboxId"`
-	CRUID     string    `json:"crUid"`
-	PodUID    string    `json:"uid"`
-	Namespace string    `json:"namespace"`
-	Name      string    `json:"name"`
-	Node      string    `json:"node"`
-	At        time.Time `json:"at"`
-	CPUAt     time.Time `json:"cpuAt"`
-	NetworkAt time.Time `json:"networkAt"`
-	CPU       *uint64   `json:"cpuNanoseconds"`
-	RX        *uint64   `json:"rxBytes"`
-	TX        *uint64   `json:"txBytes"`
-	Cores     int       `json:"cores"`
-	LastExec  time.Time `json:"lastExec"`
+	ProjectID    string    `json:"projectId"`
+	SandboxID    string    `json:"sandboxId"`
+	CRUID        string    `json:"crUid"`
+	PodUID       string    `json:"uid"`
+	ContainerID  string    `json:"containerId,omitempty"`
+	RestartCount int       `json:"restartCount,omitempty"`
+	Namespace    string    `json:"namespace"`
+	Name         string    `json:"name"`
+	Node         string    `json:"node"`
+	At           time.Time `json:"at"`
+	CPUAt        time.Time `json:"cpuAt"`
+	NetworkAt    time.Time `json:"networkAt"`
+	CPU          *uint64   `json:"cpuNanoseconds"`
+	RX           *uint64   `json:"rxBytes"`
+	TX           *uint64   `json:"txBytes"`
+	Cores        int       `json:"cores"`
+	LastExec     time.Time `json:"lastExec"`
 }
 
 // Observation is persisted, not process-local: restarts and multiple replicas do
@@ -94,7 +112,7 @@ func (o Observation) Next(s Sample, p AbusePolicy, now time.Time) (Observation, 
 	if s.At.Equal(prev.At) && s.PodUID == prev.PodUID && s.CRUID == prev.CRUID && o.Policy == n.Policy {
 		return o, false
 	}
-	if o.Policy != n.Policy || s.CRUID != prev.CRUID || s.PodUID != prev.PodUID || s.ProjectID != prev.ProjectID || s.SandboxID != prev.SandboxID || s.Node != prev.Node || gap < 20*time.Second || gap > time.Duration(p.MaxGapSeconds)*time.Second || prev.CPU == nil || prev.RX == nil || prev.TX == nil || *s.CPU < *prev.CPU || *s.RX < *prev.RX || *s.TX < *prev.TX || !s.CPUAt.After(prev.CPUAt) || !s.NetworkAt.After(prev.NetworkAt) {
+	if o.Policy != n.Policy || s.CRUID != prev.CRUID || s.PodUID != prev.PodUID || s.ContainerID != prev.ContainerID || s.RestartCount != prev.RestartCount || s.ProjectID != prev.ProjectID || s.SandboxID != prev.SandboxID || s.Node != prev.Node || gap < 20*time.Second || gap > time.Duration(p.MaxGapSeconds)*time.Second || prev.CPU == nil || prev.RX == nil || prev.TX == nil || *s.CPU < *prev.CPU || *s.RX < *prev.RX || *s.TX < *prev.TX || !s.CPUAt.After(prev.CPUAt) || !s.NetworkAt.After(prev.NetworkAt) {
 		return n, false
 	}
 	elapsed := s.CPUAt.Sub(prev.CPUAt).Seconds()
@@ -128,7 +146,7 @@ func StillInactive(old, cur Sample, p AbusePolicy, now time.Time) bool {
 	if !fresh(cur.At) || !fresh(cur.CPUAt) || !fresh(cur.NetworkAt) || cur.ProjectID != old.ProjectID || cur.SandboxID != old.SandboxID || cur.Cores != old.Cores || cur.Cores < 1 || old.CPU == nil || cur.CPU == nil || *cur.CPU < *old.CPU {
 		return false
 	}
-	if cur.PodUID != old.PodUID || cur.CRUID != old.CRUID || cur.Node != old.Node || cur.CPU == nil || cur.RX == nil || cur.TX == nil || old.RX == nil || old.TX == nil || now.Sub(cur.At) > time.Duration(p.MaxGapSeconds)*time.Second || cur.At.After(now.Add(5*time.Second)) {
+	if cur.PodUID != old.PodUID || cur.CRUID != old.CRUID || cur.ContainerID == "" || cur.ContainerID != old.ContainerID || cur.RestartCount != old.RestartCount || cur.Node != old.Node || cur.CPU == nil || cur.RX == nil || cur.TX == nil || old.RX == nil || old.TX == nil || now.Sub(cur.At) > time.Duration(p.MaxGapSeconds)*time.Second || cur.At.After(now.Add(5*time.Second)) {
 		return false
 	}
 	if cur.LastExec.After(old.LastExec) || cur.LastExec.After(now.Add(-time.Duration(p.WindowSeconds)*time.Second)) {
@@ -203,11 +221,80 @@ func (s *Service) AbuseSamples(ctx context.Context) ([]Sample, error) {
 		x.SandboxID = id
 		x.PodUID = uid
 		x.CRUID = digStr(cr, "metadata", "uid")
+		// Pod UID survives a container restart, but its writable filesystem does
+		// not. Only host-owned live container status can identify the copy.
+		x.ContainerID, x.RestartCount = mainContainerIdentity(pod)
 		x.Cores = intOf(dig(firstContainer(cr), "resources", "limits", "cpu"))
 		x.LastExec, _ = time.Parse(time.RFC3339Nano, digStr(cr, "metadata", "annotations", AnnotationLastExec))
 		out = append(out, x)
 	}
 	return out, nil
+}
+
+// NativeActionTarget inspects the operator-owned CR, never tenant files/processes.
+// Switching a provider from envd to native must not authorize actions on old SDK
+// pods (or legacy native pods without a boot marker/helper).
+func NativeActionTarget(cr map[string]any) bool {
+	cmd, _ := firstContainer(cr)["command"].([]any)
+	if len(cmd) < 3 || cmd[0] != RuntimeMountPath+"/sandbox-init" || cmd[1] != "-native" {
+		return false
+	}
+	volumes, _ := dig(cr, "spec", "podTemplate", "spec", "volumes").([]any)
+	volumeOK := false
+	for _, v := range volumes {
+		m, _ := v.(map[string]any)
+		if m["name"] == "proxcloud-runtime" && digStr(m, "hostPath", "path") == RuntimeHostDir {
+			volumeOK = true
+		}
+	}
+	if !volumeOK {
+		return false
+	}
+	mounts, _ := firstContainer(cr)["volumeMounts"].([]any)
+	for _, v := range mounts {
+		m, _ := v.(map[string]any)
+		if m["name"] == "proxcloud-runtime" && m["mountPath"] == RuntimeMountPath && m["readOnly"] == true {
+			return true
+		}
+	}
+	return false
+}
+
+func mainContainerIdentity(pod map[string]any) (string, int) {
+	statuses, _ := dig(pod, "status", "containerStatuses").([]any)
+	for _, s := range statuses {
+		m, _ := s.(map[string]any)
+		if m["name"] == "main" && dig(m, "state", "running") != nil {
+			return str(m["containerID"]), intOf(m["restartCount"])
+		}
+	}
+	return "", 0
+}
+
+// OriginalSourceAlive proves the captured filesystem's original owner still
+// exists. A replacement reusing the sandbox name is not a second copy of those
+// files. Unlike action authorization this check intentionally ignores activity:
+// new exec can cancel a pause only while the original still holds its files.
+func (s *Service) OriginalSourceAlive(ctx context.Context, x Sample) error {
+	cr, err := s.get(ctx, x.ProjectID, x.SandboxID)
+	if err != nil {
+		return err
+	}
+	if x.CRUID == "" || x.PodUID == "" || digStr(cr, "metadata", "uid") != x.CRUID || dig(cr, "metadata", "deletionTimestamp") != nil {
+		return ErrNotFound
+	}
+	pod, err := s.api.GetCore(ctx, "pods", NamespaceFor(x.ProjectID), x.SandboxID)
+	if err != nil {
+		return err
+	}
+	containerID, restarts := mainContainerIdentity(pod)
+	if x.ContainerID == "" || containerID != x.ContainerID || restarts != x.RestartCount {
+		return ErrNotFound
+	}
+	if digStr(pod, "metadata", "uid") != x.PodUID || !s.owns(pod, x.ProjectID) || digStr(pod, "metadata", "labels", LabelSandboxID) != x.SandboxID || digStr(pod, "spec", "nodeName") != x.Node || digStr(pod, "status", "phase") != "Running" || dig(pod, "metadata", "deletionTimestamp") != nil {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // CheckIdentity revalidates live ownership immediately before an automatic action.
@@ -216,12 +303,25 @@ func (s *Service) CheckIdentity(ctx context.Context, x Sample) error {
 	if err != nil {
 		return err
 	}
+	if !NativeActionTarget(cr) {
+		return fmt.Errorf("automatic action requires a native sandbox started by the snapshot-capable runtime")
+	}
 	if x.CRUID == "" || x.PodUID == "" || digStr(cr, "metadata", "uid") != x.CRUID || dig(cr, "metadata", "deletionTimestamp") != nil || digStr(cr, "metadata", "annotations", AnnotationLastExec) != "" && digStr(cr, "metadata", "annotations", AnnotationLastExec) != x.LastExec.Format(time.RFC3339Nano) {
 		return ErrNotFound
 	}
 	pod, err := s.api.GetCore(ctx, "pods", NamespaceFor(x.ProjectID), x.SandboxID)
 	if err != nil {
 		return err
+	}
+	// The controller may not yet have replaced a pod after a CR edit. Require
+	// the actual running pod to use the native helper too, not just desired state.
+	podAsCR := map[string]any{"spec": map[string]any{"podTemplate": map[string]any{"spec": pod["spec"]}}}
+	if !NativeActionTarget(podAsCR) {
+		return fmt.Errorf("running pod is not native snapshot-capable")
+	}
+	containerID, restarts := mainContainerIdentity(pod)
+	if x.ContainerID == "" || containerID != x.ContainerID || restarts != x.RestartCount {
+		return ErrNotFound
 	}
 	if digStr(pod, "metadata", "uid") != x.PodUID || !s.owns(pod, x.ProjectID) || digStr(pod, "metadata", "labels", LabelSandboxID) != x.SandboxID || digStr(pod, "spec", "nodeName") != x.Node || digStr(pod, "status", "phase") != "Running" || dig(pod, "metadata", "deletionTimestamp") != nil {
 		return ErrNotFound
