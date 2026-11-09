@@ -579,6 +579,7 @@ func run() error {
 	metricsJob := metricsjob.New(projectRepo, cloudRepo, esSvc, metrics.NewService(metricsRepo), log).WithDB(pg)
 	syncJob := syncjob.New(projectRepo, esSvc, cloudRepo, log).
 		WithPublicIPs(publicIPRepo.ForProject, publicIPRepo.ReleaseNIC).
+		WithPublicIPInventory(publicIPRepo).
 		WithKamajiFactory(kamajiFactory).
 		WithAudit(auditSvc).
 		WithProxmoxFactory(pveWithHolderLock).

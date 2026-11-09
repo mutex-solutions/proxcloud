@@ -143,6 +143,30 @@ exactly once, serialize external administrators or turn a TTL into proof. Unknow
 without UPID is an accepted operator-held availability tradeoff. See the
 [operator contract and test evidence](../../holder-operation-fencing.md).
 
+## VM-family inventory and orphan address proof
+
+**Why:** VM and pool lists are visibility-filtered too. A successful partial page,
+a post-purge403 or an allocation older than two minutes cannot authorize cache
+retirement or address reuse. The read/proof boundary is shared by full and sampled
+SERVER, VOLUME and IMAGE providers; ordinary known refreshes do not need global read.
+
+| Component | Safety boundary |
+|---|---|
+| `readVMInventory`, `VerifyInventory` | Same configured credential; strict positive pool membership, current/merged configuration, UUID, pending state, schema and online node. Verify the whole type/project scope before any update, insert or retirement; one unknown preserves exact rows/timestamps/history. |
+| `completeVMVisibility`, `completeNodes` | Retirement additionally needs existing self `Sys.Audit` on `/access` and `/`, full ACL tree including every restrictive shadow, propagated VM/node visibility, independent cluster membership/quorum and stable bracketed VM/config/pool/permission reads. No alternate seed/root reader or automatic grants. |
+| Pure inventory projections | Config-derived addresses, strict snapshots/protection and detached disk sizes cannot turn null/403/filtered omission into zero. No HA/tag writes during `List`; protection healing runs only after successful project reconciliation and a fresh proof. |
+| `DeleteAndArchiveIfUnchanged` | Existing whole-row lock/CAS plus an optional `History.SourceSnapshotHash` receipt in the same transaction. Native/legacy histories lack the receipt and cannot authorize automatic IP cleanup. |
+| `ProveVMAndAddressUnused`, `ReleaseIfUnchanged` | After SERVER/IMAGE success, fresh complete absence and global current/pending VM/template address reference checks precede a short allocation-lock/row-lock transaction. Match exact allocation ID + whole JSON and archived whole-server receipt; a new cache generation or reallocated IP wins. Never bulk `ReleaseNIC`. |
+
+**Deliberate availability limits:** real out-of-portal absence under a narrow pool
+credential (commonly403 after purge) retains cache and emits repair warnings. An
+empty no-op resource type needs no extra privilege. UUID reuse, `BeforeRow`, no
+original cache receipt, unresolved seed/holder/move intent, LXC or **any other guest
+NIC** retains IPs: declarative configuration cannot prove a static guest is not
+using a copied address. Operators must reconcile those allocations explicitly.
+This is not a distributed PVE CAS; external administrators can race finite read
+proofs. [Repair procedure and focused local evidence](../../vm-inventory-safety.md).
+
 ## Volume growth capacity and snapshot retype preflight
 
 **Why:** a cached quota delta is not live storage capacity, and PVE cannot remove

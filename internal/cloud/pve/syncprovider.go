@@ -6,9 +6,8 @@ package pve
 // no import of the providers package (dbaas precedent — dependency arrow pve→cloud).
 //
 // Tenancy: every List filters by the project's pool. Pool membership is the ONLY
-// scoping PVE gives us, and it is authoritative here — a VM outside the pool never
-// enters the cache, and a cached VM that left the pool is delete-of-vanished'd by
-// Reconcile.
+// scoping PVE gives us. Lists may be filtered: vm_inventory.go verifies positive
+// membership/configuration and proves omissions before Reconcile can write.
 
 import (
 	"context"
@@ -135,6 +134,7 @@ type ServerSyncProvider struct {
 	isSampled bool
 	cached    map[string]*cloud.CloudResource
 	unread    map[int]bool
+	inventory *vmInventory
 }
 
 func (s *Service) ServerSyncProvider(region, projectID string, gpuAlias GPUAliasFunc) *ServerSyncProvider {
@@ -145,8 +145,7 @@ func (s *Service) ServerSyncProvider(region, projectID string, gpuAlias GPUAlias
 // project's SERVER rows by externalId.
 func (s *Service) SampledServerProvider(region, projectID string, page []ClusterResource, cached map[string]*cloud.CloudResource) *ServerSyncProvider {
 	pool := s.PoolFor(projectID)
-	vms, _ := splitVMs(page, pool)
-	return &ServerSyncProvider{svc: s, region: region, projectID: projectID, sampled: vms, isSampled: true, cached: cached, unread: unreadVMs(page, pool)}
+	return &ServerSyncProvider{svc: s, region: region, projectID: projectID, sampled: page, isSampled: true, cached: cached, unread: unreadVMs(page, pool)}
 }
 
 func (p *ServerSyncProvider) Type() string      { return cloud.TypeServer }
@@ -158,36 +157,22 @@ func (p *ServerSyncProvider) CompareKeys() []string { return []string{} }
 func (p *ServerSyncProvider) VanishGrace() time.Duration { return vanishGrace }
 
 func (p *ServerSyncProvider) Superseded(cached, fresh *cloud.CloudResource) bool {
-	return supersededByIdentity(cached, fresh, serverIdentity)
+	return vmUUIDChanged(cached, fresh) || supersededByIdentity(cached, fresh, serverIdentity)
 }
 
 func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, error) {
-	vms := p.sampled
-	if !p.isSampled {
-		var err error
-		if vms, _, p.unread, err = p.svc.poolVMs(ctx, p.projectID); err != nil {
-			return nil, err
-		}
+	var err error
+	p.inventory, err = p.svc.readVMInventory(ctx, p.projectID, p.Type(), p.sampled, p.isSampled)
+	if err != nil {
+		return nil, err
 	}
+	vms, _ := splitVMs(p.inventory.page, p.svc.PoolFor(p.projectID))
+	p.unread = map[int]bool{}
 	now := nowUTC()
 	out := make([]cloud.CloudResource, 0, len(vms))
 	for _, r := range vms {
 		var data map[string]any
-		var cfg VMConfig
-		if !p.isSampled || TagValue(r.Tags, tagCreatedPref) == "" {
-			// ponytail: a VM without a stamp (made outside the portal) costs one config read per
-			// sample, because only its ctime can tell it from a reuse of its vmid. Stamp it on first
-			// sight if pools ever hold many of them; that would also tell apart clones of one
-			// template, which share a ctime.
-			c, err := p.svc.C.GetVMConfig(ctx, r.Node, r.VMID)
-			if err == nil {
-				cfg = c
-			} else if !p.isSampled {
-				// Its node just died, before PVE calls it offline: no addresses from here must not wipe the row's.
-				p.unread[r.VMID] = false
-				continue
-			}
-		}
+		cfg := p.inventory.configs[r.VMID]
 		if blankRow(r) {
 			if cfg != nil && blankConfig(cfg) {
 				continue // a create that never finished: no server, and RemoveBlankVMs retries removing it
@@ -197,16 +182,36 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 				continue
 			}
 		}
-		if p.isSampled {
+		cached := p.cached[itoa0(r.VMID)]
+		if p.isSampled && (cached == nil || vmRowUUID(cached) != "") {
 			data = p.sampledData(r)
 		} else {
-			if st, err := p.svc.C.GetVMStatus(ctx, r.Node, r.VMID); err == nil && st.QMPStatus == "paused" {
+			st, err := p.svc.C.GetVMStatus(ctx, r.Node, r.VMID)
+			if err != nil || st.QMPStatus == "" {
+				return nil, vmInventoryError(p.Type(), itoa0(r.VMID), "VM runtime status unknown", err)
+			}
+			if st.QMPStatus == "paused" {
 				r.Status = "paused"
 			}
-			data = ServerData(r, p.svc.ServerAddresses(ctx, r), GPUSpecsFromConfig(cfg, p.gpuAlias))
-			p.svc.StampProtection(ctx, r, data)
-			p.svc.StampSnapshots(ctx, r, data)
+			addrs, agentOK := p.inventory.addresses(ctx, r)
+			p.inventory.addressUnknown[r.VMID] = !agentOK
+			data = ServerData(r, addrs, GPUSpecsFromConfig(cfg, p.gpuAlias))
+			protection, err := p.svc.inventoryProtection(ctx, r, cfg)
+			if err != nil {
+				return nil, vmInventoryError(p.Type(), itoa0(r.VMID), "protection read unknown", err)
+			}
+			if protection != nil {
+				data["server"].(map[string]any)["protection"] = protection
+			}
+			snaps, err := p.inventory.snapshots(ctx, r)
+			if err != nil {
+				return nil, vmInventoryError(p.Type(), itoa0(r.VMID), "snapshot read unknown", err)
+			}
+			if snaps != nil {
+				data["server"].(map[string]any)["snapshots"] = snaps
+			}
 		}
+		data[vmUUIDKey] = vmConfigUUID(cfg)
 		if _, tagged := data[dataIdentity]; !tagged && cfg != nil {
 			if id := metaIdentity(cfg); id != "" {
 				data[dataIdentity] = id
@@ -227,20 +232,7 @@ func (p *ServerSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, e
 // KeepUnread: a VM on a dead node is still the tenant's. Its row stays, with what it knew; only the status changes,
 // which also stops the server's bill for as long as nobody can use it.
 func (p *ServerSyncProvider) KeepUnread(cached *cloud.CloudResource) (keep, changed bool) {
-	id, err := strconv.Atoi(cached.ExternalID)
-	if err != nil {
-		return false, false
-	}
-	down, unread := p.unread[id]
-	if !unread {
-		return false, false
-	}
-	srv, _ := cached.Data["server"].(map[string]any)
-	if !down || srv == nil || srv["status"] == "UNKNOWN" {
-		return true, false
-	}
-	srv["status"] = "UNKNOWN"
-	return true, true
+	return false, false
 }
 
 // sampledData builds a sampled VM's payload, carrying the agent IPs, GPU specs and paused state of
@@ -249,7 +241,7 @@ func (p *ServerSyncProvider) KeepUnread(cached *cloud.CloudResource) (keep, chan
 func (p *ServerSyncProvider) sampledData(r ClusterResource) map[string]any {
 	var addrs, specs map[string]any
 	carried := map[string]any{} // what only a full pass reads, and billing rates
-	if c := p.cached[itoa0(r.VMID)]; c != nil {
+	if c := p.cached[itoa0(r.VMID)]; c != nil && vmRowUUID(c) != "" && vmRowUUID(c) == vmConfigUUID(p.inventory.configs[r.VMID]) {
 		if srv, ok := c.Data["server"].(map[string]any); ok {
 			addrs, _ = srv["addresses"].(map[string]any)
 			if srv["status"] == "PAUSED" && r.Status == "running" {
@@ -294,6 +286,7 @@ type VolumeSyncProvider struct {
 	projectID string
 	profileOf VolumeProfileFunc
 	unread    map[int]bool
+	inventory *vmInventory
 }
 
 // VolumeSyncProvider lists the project's disks; profileOf (nil = unknown) stamps each disk's
@@ -325,7 +318,7 @@ func (p *VolumeSyncProvider) CompareKeys() []string { return []string{} }
 
 // Superseded: a volid carries the vmid, so a reused vmid reuses the volids of its disks too.
 func (p *VolumeSyncProvider) Superseded(cached, fresh *cloud.CloudResource) bool {
-	return supersededByIdentity(cached, fresh, func(data map[string]any) string {
+	return vmUUIDChanged(cached, fresh) || supersededByIdentity(cached, fresh, func(data map[string]any) string {
 		vol, _ := data["volume"].(map[string]any)
 		id, _ := vol[dataIdentity].(string)
 		return id
@@ -348,44 +341,33 @@ func (p *VolumeSyncProvider) ListReadable(ctx context.Context) ([]cloud.CloudRes
 }
 
 func (p *VolumeSyncProvider) list(ctx context.Context, skip func(ClusterResource, error) bool) ([]cloud.CloudResource, error) {
-	vms, unread, err := p.svc.diskVMs(ctx, p.projectID)
+	var err error
+	p.inventory, err = p.svc.readVMInventory(ctx, p.projectID, p.Type(), nil, false)
 	if err != nil {
 		return nil, err
 	}
-	p.unread = unread
+	pool := p.svc.PoolFor(p.projectID)
+	vms, _ := splitVMs(p.inventory.page, pool)
+	for _, r := range p.inventory.page {
+		if r.Type == "qemu" && r.Pool == pool && isHolder(r.Tags) {
+			vms = append(vms, r)
+		}
+	}
+	p.unread = map[int]bool{}
 	now := nowUTC()
 	var out []cloud.CloudResource
 	for _, r := range vms {
-		cfg, err := p.svc.C.GetVMConfig(ctx, r.Node, r.VMID)
-		if isHolder(r.Tags) && IsNotFound(err) {
-			r.Node, cfg, err = p.svc.holderElsewhere(ctx, r, err)
-		}
-		if err != nil {
-			if !skip(r, err) {
-				p.unread[r.VMID] = false
-			}
-			continue
-		}
-		if cfg.Str("lock") == "create" {
-			p.unread[r.VMID] = false
-			continue
-		}
-		// A restore cuts the config down for as long as it takes, while /cluster/resources still lists the VM (lab, PVE 9.2).
-		// While its task runs the disks are coming back: a row archived now would stop the bill and lose how old the disk is.
-		// Once no task runs the restore has failed and the disks are gone: their rows go, with their bill, and a later restore
-		// makes new ones. If the node cannot say which, the rows wait for the next pass.
-		if restoreCutDown(cfg) {
-			if running, err := p.svc.C.RestoreRunning(ctx, r.Node, r.VMID); err != nil || running {
-				p.unread[r.VMID] = false
-			}
-			continue
-		}
+		cfg := p.inventory.configs[r.VMID]
 		profile := TagValue(cfg.Str("tags"), tagProfilePref)
 		identity := taggedIdentity(cfg.Str("tags"), cfg.Str("lock"))
 		if identity == "" {
 			identity = metaIdentity(cfg)
 		}
-		for _, d := range p.svc.withUnusedSizes(ctx, r.Node, r.VMID, ParseDisks(cfg)) {
+		disks, err := p.inventory.disks(ctx, r)
+		if err != nil {
+			return nil, vmInventoryError(p.Type(), itoa0(r.VMID), "disk inventory incomplete", err)
+		}
+		for _, d := range disks {
 			// A PVC's disk belongs to the tenant cluster, not to this VM: it moves with the pod and
 			// outlives the worker. It is no volume of the project's (plan: hidden everywhere).
 			if isCSIDisk(d.VolID) {
@@ -430,6 +412,7 @@ func (p *VolumeSyncProvider) list(ctx context.Context, skip func(ClusterResource
 						"vmid":              r.VMID,
 						"slot":              d.Slot,
 						dataIdentity:        identity,
+						vmUUIDKey:           vmConfigUUID(cfg),
 					},
 				},
 				Info: &cloud.Info{UpdatedAt: &now},
@@ -521,6 +504,7 @@ type ImageSyncProvider struct {
 	projectID string
 	page      []ClusterResource
 	unread    map[int]bool
+	inventory *vmInventory
 }
 
 func (s *Service) ImageSyncProvider(region, projectID string) *ImageSyncProvider {
@@ -538,7 +522,7 @@ func (p *ImageSyncProvider) CompareKeys() []string      { return []string{} }
 func (p *ImageSyncProvider) VanishGrace() time.Duration { return vanishGrace }
 
 func (p *ImageSyncProvider) Superseded(cached, fresh *cloud.CloudResource) bool {
-	return supersededByIdentity(cached, fresh, nil)
+	return vmUUIDChanged(cached, fresh) || supersededByIdentity(cached, fresh, nil)
 }
 
 // KeepUnread: PVE does not even say a dead node's row is a template; the image is still there.
@@ -552,17 +536,13 @@ func (p *ImageSyncProvider) KeepUnread(cached *cloud.CloudResource) (keep, chang
 }
 
 func (p *ImageSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, error) {
-	var templates []ClusterResource
-	if p.page != nil {
-		pool := p.svc.PoolFor(p.projectID)
-		_, templates = splitVMs(p.page, pool)
-		p.unread = unreadVMs(p.page, pool)
-	} else {
-		var err error
-		if _, templates, p.unread, err = p.svc.poolVMs(ctx, p.projectID); err != nil {
-			return nil, err
-		}
+	var err error
+	p.inventory, err = p.svc.readVMInventory(ctx, p.projectID, p.Type(), p.page, p.page != nil)
+	if err != nil {
+		return nil, err
 	}
+	_, templates := splitVMs(p.inventory.page, p.svc.PoolFor(p.projectID))
+	p.unread = map[int]bool{}
 	now := nowUTC()
 	out := make([]cloud.CloudResource, 0, len(templates))
 	for _, r := range templates {
@@ -572,6 +552,7 @@ func (p *ImageSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, er
 			Region:     p.region,
 			Type:       cloud.TypeImage,
 			Data: map[string]any{
+				vmUUIDKey: vmConfigUUID(p.inventory.configs[r.VMID]),
 				"image": map[string]any{
 					"id":         itoa0(r.VMID),
 					"name":       r.Name,
