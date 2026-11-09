@@ -32,6 +32,10 @@ func (s *Store) Ensure(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// Take a fresh statement snapshot AFTER a competing schema writer commits.
+		if _, err = tx.Exec(tc, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"); err != nil {
+			return err
+		}
 		if err = pgdoc.RequirePrimary(tc, tx); err != nil {
 			return err
 		}

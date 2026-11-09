@@ -35,6 +35,7 @@ type Invite struct {
 }
 
 func (Invite) String() string       { return "[project invite redacted]" }
+func (Invite) GoString() string     { return "[project invite redacted]" }
 func (Invite) LogValue() slog.Value { return slog.StringValue("[project invite redacted]") }
 
 // EnqueueInviteTx joins ONLY this store's already-open primary business TX. It

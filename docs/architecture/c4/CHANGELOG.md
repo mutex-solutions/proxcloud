@@ -4,6 +4,27 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: typed PROJECT_INVITE transactional outbox (enqueue-only)
+
+**What changed:** default-OFF fixed `project-invite/v1` single-recipient family;
+primary invite insert, one template snapshot, sealed enqueue and durable IDs now
+share one owned transaction. All-match accept/decline/expiry deletion atomically
+cancels persisted pre-intent rows even with producer OFF or keys absent. Schema
+Ensure transactionally upgrades the original single-savings CHECK to exactly two
+version-1 families, preserving existing Savings ciphertext/AAD and immutable triggers.
+
+**Why:** a committed invitation token must not depend on a later best-effort mail
+call. Rendered invitation URLs introduce a narrowly reviewed credential-bearing
+AEAD body boundary, not arbitrary event/template/URL jobs. Dispatch remains OFF:
+queueing is not sending, acceptance is not inbox delivery, and already-DISPATCHING
+or UNKNOWN work cannot be unsent/replayed by business deletion or expiry.
+
+**Views updated:** new project-invite-outbox.md (C3/C4 components, transaction,
+credential/storage boundaries, cancellation lifecycle and availability limits),
+README.md navigation and docs/mail-outbox-safety-limits.md compatibility contract.
+All readers/writers must upgrade before separately authorized opt-in. Local Go1.25
+race and owned PG17 evidence is finite; no deployment/SMTP activation/full-suite claim.
+
 ## 2026-11-10: fail fast on authoritative sandbox startup lifetime expiry
 
 **What changed:** the existing Ready-clock lifetime guard distinguishes a positively

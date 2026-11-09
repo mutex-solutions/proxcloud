@@ -42,6 +42,11 @@ DO $$ DECLARE old_check text; BEGIN
   ALTER TABLE mail_outbox ADD CONSTRAINT mail_outbox_family_v1
    CHECK(kind IN ('savings-reminder/v1','project-invite/v1') AND version=1);
  END IF;
+ SELECT pg_get_expr(conbin,conrelid) INTO old_check FROM pg_constraint
+ WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_family_v1' AND contype='c' AND convalidated;
+ IF old_check IS DISTINCT FROM '((kind = ANY (ARRAY[''savings-reminder/v1''::text, ''project-invite/v1''::text])) AND (version = 1))' THEN
+  RAISE EXCEPTION 'mail outbox unexpected family constraint';
+ END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS mail_outbox_claim ON mail_outbox(next_at,id) WHERE state IN ('pending','claimed');
 CREATE INDEX IF NOT EXISTS mail_outbox_intent_expiry ON mail_outbox(lease_until) WHERE state='DISPATCHING';

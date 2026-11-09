@@ -15,6 +15,7 @@ diagrams changed.
 | [c2-containers.md](c2-containers.md) | C2: Containers | What runs where: management cluster, Proxmox cluster, storage tiers, build and delivery? |
 | [c3-components.md](c3-components.md) | C3: Components | Which Go packages make up `proxcloud-api`, and what is each one responsible for? |
 | [c4-code.md](c4-code.md) | C4: Code | How do the critical paths work: tenant network isolation, VM firewall and public IPs, quota, billing? |
+| [project-invite-outbox.md](project-invite-outbox.md) | C3/C4: Invitation mail | How the default-OFF typed invitation producer atomically seals mail and cancels persisted rows without SMTP. |
 | [CHANGELOG.md](CHANGELOG.md) | History | What changed in the architecture, in which PR, and why. |
 
 The prose deep dives in [`docs/`](../../README.md) (auth, billing, jobs, data

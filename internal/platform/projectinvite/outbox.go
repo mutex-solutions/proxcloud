@@ -24,6 +24,7 @@ type InviteRequest struct {
 }
 
 func (InviteRequest) String() string       { return "[invite preparation redacted]" }
+func (InviteRequest) GoString() string     { return "[invite preparation redacted]" }
 func (InviteRequest) LogValue() slog.Value { return slog.StringValue("[invite preparation redacted]") }
 
 type InviteOutbox interface {
@@ -45,6 +46,9 @@ func (h *Handler) createDurableInvite(ctx context.Context, email string, proj *p
 		db := h.repo.invites.DB()
 		tx, err := db.Tx(tc)
 		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec(tc, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"); err != nil {
 			return err
 		}
 		if err = pgdoc.RequirePrimary(tc, tx); err != nil {
@@ -88,10 +92,16 @@ func (h *Handler) createDurableInvite(ctx context.Context, email string, proj *p
 // rows at this decision are removed, not an arbitrary capped first page. Core
 // workers lock outbox only and never call back into invites: invite -> outbox.
 func (r *Repo) deleteInvites(ctx context.Context, email, projectID string, expiredOnly bool) error {
+	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
+		return err
+	}
 	return r.invites.DB().WithTx(ctx, func(tc context.Context) error {
 		db := r.invites.DB()
 		tx, err := db.Tx(tc)
 		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec(tc, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"); err != nil {
 			return err
 		}
 		if err = pgdoc.RequirePrimary(tc, tx); err != nil {

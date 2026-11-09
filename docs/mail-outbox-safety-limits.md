@@ -1,4 +1,4 @@
-# Durable reminder mail outbox: safety and limits
+# Durable mail outbox: safety and limits
 
 ## Status and non-goals
 
@@ -11,8 +11,10 @@ It does not start SMTP, add a delivery enable flag, create new timed jobs or aut
 real recipients. A configured SMTP integration alone cannot activate dispatch.
 Tests explicitly call `StartWithFakeTransport`; its SMTP implementation permits
 only literal loopback IPs and `.invalid` fixture recipients. Production adapter
-instances do not grant that capability. Invoice/payment, activation/dunning,
-contract-expired and invitation mail remain legacy best-effort; there is no backfill.
+instances do not grant that capability. `PROXCLOUD_MAIL_PROJECT_INVITE_OUTBOX_ENABLED`
+also defaults **false** and opts only new project invitations into atomic enqueue,
+with the same strict key requirement. Invoice/payment, activation/dunning and
+contract-expired mail remain legacy best-effort; there is no historical backfill.
 
 ## Atomic savings reminder producer (PR B)
 
@@ -58,7 +60,63 @@ contract-expired and invitation mail remain legacy best-effort; there is no back
   needs separate authorization. Keep the flag false until accepting that contract.
 - Reminder windows must be 0..366 days; outbox age is still capped at 30 days and
   contract expiry. Far-ahead windows may expire before the contract; queueing does
-  not guarantee eventual delivery. No attachments or invite/reset tokens are introduced.
+  not guarantee eventual delivery. Savings drafts/ciphertexts remain unchanged;
+  the separate fixed invitation extension below adds no attachments/reset-token API.
+
+## Atomic PROJECT_INVITE producer
+
+- Fixed `project-invite/v1`, version 1, has **one** typed recipient and fixed
+  `send_invite_to_project` template. There is no caller-selected kind, template,
+  URL renderer, attachment, transport or arbitrary JSON/job function API.
+- The existing shared client/admin `InviteToProject` entry rejects any inherited
+  transaction. ON owns one writable PRIMARY transaction: insert the invite with
+  one persistent document ID and one token, freeze Date from `clock_timestamp()`
+  and ExpiresAt at Date + 24 hours, read exactly one template snapshot, render in
+  memory, seal/enqueue, then persist `deliveryMode` and exact `outboxIds`. Audit
+  stays outside and after commit. Any rendering/key/enqueue/SQL error rolls back
+  the invite, token decision, event and rows. There is **no best-effort fallback**.
+- Prerequisite optional tables are ensured before serving the ON producer, not
+  discovered inside an already-aborted business transaction. Template and SMTP
+  config resolution only read DB/env; no SMTP probe, sender, cloud or other
+  network side effect runs inside this transaction. Disabled templates produce
+  suppressed decisions; unavailable SMTP configuration produces blocked decisions;
+  missing templates/erroring preparation fail the business operation.
+- EventKey hashes fixed kind + persistent invite document ID, never token/email.
+  All immutable inputs (including raw From, recipient, rendered subject/body and
+  exact frozen dates) are inside the sealed/keyed-fingerprinted canonical payload.
+  Same ID with changed input conflicts; a deliberate new manual invitation gets
+  a new document ID and independent event. The outbox expires no later than the
+  frozen invite expiry; worker T2 checks the fresh database clock before intent.
+- **Narrow credential-bearing extension:** every rendered join URL contains an
+  invitation token. That rendered credential is allowed **only within the new
+  authenticated encrypted invitation blob**, not event/row metadata, status,
+  errors, audit, raw template vars or logs. Both preparation DTOs redact String,
+  GoString and structured logging. The pre-existing invite business document
+  still stores its token for lookup, as before; this change does **not** encrypt
+  that old business schema or broaden its token visibility.
+- OFF preserves best-effort sending for **new legacy** invites only; no durable
+  invite is adopted, backfilled, resent or sent via legacy fallback. Persisted
+  durable mode/outbox IDs survive flag OFF and missing keys. Cancellation is
+  always wired and keyless, independent of producer opt-in.
+- Accept/decline cleanup and opportunistic database-clock expiry enumerate and
+  lock **all** exact matching invite records in stable ID order, with 128-row
+  keyset pages and cancellation calls of at most 20 persisted row IDs. Cancel and
+  delete share one transaction; any cancellation failure rolls back deletion and
+  is returned, including decline/expiry. A decision advisory lock serializes all
+  participating new invite creates/deletes; owned transactions explicitly select
+  READ COMMITTED before any snapshot so queued writers see prior commits even
+  when the pool defaults to REPEATABLE READ. Order is invite decision -> invite
+  rows -> outbox; workers never acquire invite locks or call business callbacks.
+- Cancellation fences only pre-intent pending/claimed/blocked/suppressed/no-recipient
+  work. DISPATCHING/UNKNOWN/accepted/dead are not unsent or replayed. Expiry cannot
+  clear UNKNOWN. Late exact-attempt receipts remain possible. **Do not claim mail
+  can never arrive after a token is consumed.** Existing separate membership
+  additions during acceptance are not made one global transaction by this slice;
+  the atomic boundary here is invitation cleanup plus cancellation.
+- Queue-only ON cannot deliver invitations in production yet: the SMTP dispatcher
+  remains disabled. This intentionally trades email availability for atomic
+  durable intent until a separately authorized dispatch rollout. Keep OFF unless
+  that limitation and the storage/credential boundary are explicitly accepted.
 
 ## Storage and transaction contract
 
@@ -69,10 +127,20 @@ contract-expired and invitation mail remain legacy best-effort; there is no back
   means rejection, not an independent enqueue. A wrong-DB context is rejected.
   Worker/status/schema boundaries reject **any** inherited transaction, so an
   intent cannot accidentally remain uncommitted while SMTP runs.
-- The fixed allowlist is `savings-reminder/v1`, version 1. Event identity derives
-  from contract ID, expiry generation and reminder-window days; the recipient
-  key is opaque, not an address or reminder-document ID. There is no arbitrary
-  destination/job/function HTTP API.
+- The fixed allowlist is exactly `savings-reminder/v1` and `project-invite/v1`,
+  both version 1. Savings identity still derives from contract ID, expiry generation
+  and reminder-window days; invitation identity uses its persistent document ID.
+  Recipient keys are opaque. There is no arbitrary destination/job/function HTTP API.
+- Startup Ensure upgrades the original existing-table single-kind CHECK inside
+  one primary transaction with a schema advisory lock; CREATE IF NOT EXISTS alone
+  is insufficient. The migration accepts the original known constraint, replaces
+  it with the exact two-kind/version-1 constraint, validates an existing upgraded
+  constraint's actual type/definition/validated state, and retains immutable
+  triggers/payloads. It is idempotent and serializes concurrent Ensure callers.
+  All API replicas/readers/writers must be upgraded **before** invitation opt-in;
+  older dispatch readers do not understand invitation AAD and older business
+  writers cannot safely cancel persisted invitation IDs. This is not a supported
+  mixed-version feature rollout or a rollback to an older binary once opted in.
 - Maximum **20 recipients per event**, one immutable envelope and one RCPT per
   recipient. Duplicate keys and duplicate normalized addresses are rejected.
   Domain names are lowercased; local-part case is preserved. The initial mailbox
@@ -81,8 +149,9 @@ contract-expired and invitation mail remain legacy best-effort; there is no back
   literals. Display names are MIME encoded; bodies are base64 MIME parts.
 - Frozen From, To, Date, subject, stable Message-ID and rendered text/HTML wire
   bytes are sealed before SQL insertion. There are no attachments or persisted
-  template variables, gateway credentials, authentication tokens or raw SMTP
-  errors. Each wire message is at most **1 MiB**, including headers/MIME encoding;
+  template variables, gateway credentials or raw SMTP errors. The fixed invitation
+  body is the explicit credential-bearing exception described above: its rendered
+  token stays sealed, never in metadata. Each wire message is at most **1 MiB**, including headers/MIME encoding;
   exceeding it is an enqueue error, never silent truncation.
 - A keyed fingerprint of canonical **plaintext** (including the recipient manifest
   and draft digest) rejects immutable changes. Randomized AEAD ciphertext is never
@@ -103,7 +172,11 @@ configured encryption secret is usable when it meets this contract. Legacy
 payloads.
 
 AAD authenticates the outbox ID, fixed kind, payload version, blob format version
-and public key ID. The SQL blob is `bytea`; no plaintext fallback exists. Unknown
+and public key ID. Savings AAD remains exactly `id + NUL + savings-reminder/v1 +
+NUL + 1` bytes and existing Savings ciphertext is never resealed. Invitation AAD
+uses the distinct `project-invite/v1` domain. BeginDispatch reads and validates the
+row's exact kind/version **before** Open, without plaintext fallback. The sealed
+invitation canonical payload also binds row event/recipient/expiry metadata. The SQL blob is `bytea`; no plaintext fallback exists. Unknown
 key ID, removed old key, wrong key/AAD/version or corruption fails closed before
 intent or SMTP, yielding a blocked payload decision. No key/body/address is put
 in status or logs. Startup currently uses public key ID `default-v1`; missing or

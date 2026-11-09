@@ -82,6 +82,9 @@ func (r *Repo) DeleteByEmailAndProjectID(ctx context.Context, email, projectID s
 // Create inserts a new invite doc, returning its generated id.
 // Also purges lapsed invites (the TTL-index replacement).
 func (r *Repo) Create(ctx context.Context, doc pgdoc.M) (string, error) {
+	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
+		return "", err
+	}
 	if err := r.purgeExpired(ctx); err != nil {
 		return "", err
 	}
