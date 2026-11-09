@@ -35,9 +35,7 @@ func (h *Handler) Routes(r chi.Router) {
 }
 
 func fail(w http.ResponseWriter, err error) {
-	if !httpx.WriteError(w, err) {
-		httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, "internal.error")
-	}
+	httpx.WriteError(w, err)
 }
 
 // check reports a fixed affiliate amount when cfy matches a user id OR a billing-profile

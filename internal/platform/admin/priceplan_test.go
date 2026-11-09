@@ -86,19 +86,19 @@ func TestPricePlanRuleReqDocOmitsOptional(t *testing.T) {
 
 func TestValidatePricePlanRule(t *testing.T) {
 	// missing name
-	if e := validatePricePlanRule(pricePlanRuleReq{TimeUnit: "month", ResourceType: "x"}); e == nil || e.Msg != "Name must not be null" {
+	if e := validatePricePlanRule(&pricePlanRuleReq{TimeUnit: "month", ResourceType: "x"}); e == nil || e.Msg != "Name must not be null" {
 		t.Errorf("missing name want 'Name must not be null', got %v", e)
 	}
 	// missing timeUnit
-	if e := validatePricePlanRule(pricePlanRuleReq{Name: "n", ResourceType: "x"}); e == nil || e.Msg != "Time unit must not be null" {
+	if e := validatePricePlanRule(&pricePlanRuleReq{Name: "n", ResourceType: "x"}); e == nil || e.Msg != "Time unit must not be null" {
 		t.Errorf("missing timeUnit want 'Time unit must not be null', got %v", e)
 	}
 	// missing resourceType
-	if e := validatePricePlanRule(pricePlanRuleReq{Name: "n", TimeUnit: "month"}); e == nil || e.Msg != "Resource type must not be null" {
+	if e := validatePricePlanRule(&pricePlanRuleReq{Name: "n", TimeUnit: "month"}); e == nil || e.Msg != "Resource type must not be null" {
 		t.Errorf("missing resourceType want 'Resource type must not be null', got %v", e)
 	}
 	// valid, no prices
-	if e := validatePricePlanRule(pricePlanRuleReq{Name: "n", TimeUnit: "month", ResourceType: "x"}); e != nil {
+	if e := validatePricePlanRule(&pricePlanRuleReq{Name: "n", TimeUnit: "month", ResourceType: "x"}); e != nil {
 		t.Errorf("valid rule want nil, got %v", e)
 	}
 }
@@ -133,8 +133,21 @@ func TestValidateTiers(t *testing.T) {
 func TestValidatePricePlanRuleTierBubbles(t *testing.T) {
 	raw := json.RawMessage(`[{"tiers":[{"from":100,"to":1}]}]`)
 	req := pricePlanRuleReq{Name: "n", TimeUnit: "month", ResourceType: "x", Prices: &raw}
-	if e := validatePricePlanRule(req); e == nil {
+	if e := validatePricePlanRule(&req); e == nil {
 		t.Error("a bad tier in prices must fail validation")
+	}
+}
+
+func TestValidatePricePlanRuleTextAttribute(t *testing.T) {
+	rule := func(attr string) *pricePlanRuleReq {
+		raw := json.RawMessage(`[{"attributeName":"` + attr + `","tiers":[]}]`)
+		return &pricePlanRuleReq{Name: "n", TimeUnit: "hour", ResourceType: "floating_ip", Prices: &raw}
+	}
+	if e := validatePricePlanRule(rule("status")); e == nil {
+		t.Error("a price on a text attribute must fail validation: it would abort the charge")
+	}
+	if e := validatePricePlanRule(rule("existence")); e != nil {
+		t.Errorf("existence is the flat price and must pass: %v", e)
 	}
 }
 
@@ -202,5 +215,35 @@ func TestPricePlanDocID(t *testing.T) {
 	}
 	if _, ok := pricePlanDocID(map[string]any{"name": "n"}); ok {
 		t.Error("no id key must return ok=false")
+	}
+}
+
+func TestValidateUsageRule(t *testing.T) {
+	prices := json.RawMessage(`[{"attributeName":"total_public_traffic_mb","tiers":[{"value":0.001}]}]`)
+	add, overwrite := "ADD_TO_TOTAL", "OVERWRITE_TOTAL"
+	rule := func(unit string, method *string) *pricePlanRuleReq {
+		return &pricePlanRuleReq{Name: "t", TimeUnit: unit, ResourceType: "instance_traffic", ApplyMethod: method, Prices: &prices}
+	}
+	if err := validatePricePlanRule(rule("hour", &add)); err == nil {
+		t.Fatal("ADD_TO_TOTAL on a usage attribute compounds the month-to-date total on every charge")
+	}
+	if err := validatePricePlanRule(rule("month", &overwrite)); err == nil {
+		t.Fatal("a month rule prorates the total as if it were a price")
+	}
+	if err := validatePricePlanRule(rule("hour", &overwrite)); err != nil {
+		t.Fatal(err)
+	}
+	r := rule("hour", nil)
+	if err := validatePricePlanRule(r); err != nil {
+		t.Fatal(err)
+	}
+	if r.ApplyMethod == nil || *r.ApplyMethod != overwrite {
+		t.Fatalf("an unnamed apply method must default to overwrite: %v", r.ApplyMethod)
+	}
+	// Plain attributes are untouched.
+	plain := json.RawMessage(`[{"attributeName":"vcpus","tiers":[{"value":0.01}]}]`)
+	r = &pricePlanRuleReq{Name: "c", TimeUnit: "month", ResourceType: "instance", ApplyMethod: &add, Prices: &plain}
+	if err := validatePricePlanRule(r); err != nil {
+		t.Fatal(err)
 	}
 }

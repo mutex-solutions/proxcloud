@@ -1,23 +1,32 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
+import { Link } from "react-router-dom"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { toast } from "sonner"
 import { Bar, BarChart, Cell, Pie, PieChart, XAxis, YAxis } from "recharts"
-import { BarChart3 } from "lucide-react"
+import { BarChart3, Plus, Trash2 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { EmptyState } from "@/components/empty-state"
 import { StatCard } from "@/components/stat-card"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig,
 } from "@/components/ui/chart"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { apiFetch } from "@/lib/api"
 import { useBillingSummary, useOrgCostInfo, useProjectId, useProjects } from "@/lib/hooks"
-import type { CostInfo } from "@/lib/types"
+import type { BillingContact, BillingSummary, CostInfo, CreditCard, Gateway } from "@/lib/types"
 import { fmtMoney, fmtMoneyTight } from "@/lib/format"
+import { cn } from "@/lib/utils"
+import { gatewayLabel } from "@/pages/billing/NewCardDepositDialog"
 
 const n = (v: unknown) => Number(v ?? 0)
 
@@ -139,6 +148,8 @@ export default function OrgBillingPage() {
           description="Per-project and per-resource spend across the organization."
         />
         <EmptyState icon={BarChart3} title="No billed usage yet" hint="Once projects accrue cost this month, per-project and per-resource breakdowns show here." />
+        {summary ? <PaymentSettingsCard summary={summary} pid={pid} /> : null}
+        {summary ? <InvoiceRecipientsCard summary={summary} /> : null}
       </>
     )
   }
@@ -411,7 +422,205 @@ export default function OrgBillingPage() {
           </TableBody>
         </Table>
       </Card>
+
+      {summary ? <PaymentSettingsCard summary={summary} pid={pid} /> : null}
+      {summary ? <InvoiceRecipientsCard summary={summary} /> : null}
     </>
+  )
+}
+
+// Payment settings — how bills get settled (PREPAID from the credit balance vs POSTPAID: each
+// issued bill is charged to the saved card) and the preferred gateway preselected for deposits /
+// new cards. PUT /billing-profile/{bp} with ONLY these two keys is a partial update (anything
+// else would trigger the full billing-details validation).
+type PaymentMode = "PREPAID" | "POSTPAID"
+const MODES: Array<{ value: PaymentMode; title: string; description: string }> = [
+  {
+    value: "PREPAID",
+    title: "Prepaid",
+    description: "Top up your balance — bills are settled from it. Any remainder is charged to your saved card, if you have one.",
+  },
+  {
+    value: "POSTPAID",
+    title: "Pay as you go",
+    description:
+      "Each monthly invoice is charged to your saved card automatically. If the charge fails we e-mail you and you can retry from the invoice.",
+  },
+]
+const NO_GATEWAY = "__none__"
+
+function PaymentSettingsCard({ summary, pid }: { summary: BillingSummary; pid: string }) {
+  const qc = useQueryClient()
+  const bp = summary.id
+  const savedMode: PaymentMode = summary.paymentMode ?? "PREPAID"
+  const savedGw = summary.paymentGatewayId ?? ""
+  const [mode, setMode] = useState<PaymentMode>(savedMode)
+  const [gwId, setGwId] = useState(savedGw)
+  useEffect(() => {
+    setMode(savedMode)
+    setGwId(savedGw)
+  }, [bp, savedMode, savedGw])
+  const { data: gateways } = useQuery({
+    queryKey: ["payment-gateways", bp],
+    queryFn: () => apiFetch<Gateway[]>(`/payment/${bp}/gateway`),
+    enabled: !!bp,
+  })
+  const { data: cards } = useQuery({
+    queryKey: ["cards", bp],
+    queryFn: () => apiFetch<CreditCard[]>(`/card/${bp}`),
+    enabled: !!bp,
+  })
+  const save = useMutation({
+    mutationFn: () =>
+      apiFetch(`/billing-profile/${bp}`, { method: "PUT", body: { paymentMode: mode, paymentGatewayId: gwId } }),
+    onSuccess: () => {
+      toast.success("Payment settings saved")
+      void qc.invalidateQueries({ queryKey: ["billing-summary", pid] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  const dirty = mode !== savedMode || gwId !== savedGw
+  const noCard = mode === "POSTPAID" && cards !== undefined && cards.length === 0
+
+  return (
+    <Card className="mt-6 gap-4">
+      <CardHeader className="border-b [.border-b]:pb-4">
+        <CardTitle className="text-base">Payment settings</CardTitle>
+        <CardDescription>How your monthly invoices are settled, and which gateway to use by default.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <fieldset className="space-y-2">
+          <legend className="mb-2 text-sm font-medium">Payment mode</legend>
+          {MODES.map((m) => (
+            <label
+              key={m.value}
+              className={cn(
+                "flex cursor-pointer items-start gap-3 rounded-md border p-3",
+                mode === m.value && "border-primary bg-muted/40",
+              )}
+            >
+              <input
+                type="radio"
+                name="payment-mode"
+                className="mt-1 accent-primary"
+                value={m.value}
+                checked={mode === m.value}
+                onChange={() => setMode(m.value)}
+              />
+              <span>
+                <span className="block text-sm font-medium">{m.title}</span>
+                <span className="block text-sm text-muted-foreground">{m.description}</span>
+              </span>
+            </label>
+          ))}
+        </fieldset>
+        {noCard ? (
+          <Alert>
+            <AlertDescription>
+              <span>
+                <Link className="font-medium underline" to={`/p/${pid}/billing/cards`}>
+                  Add a card
+                </Link>{" "}
+                so we can charge your invoices.
+              </span>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        <div>
+          <Label className="mb-1.5 block" htmlFor="ps-gateway">Preferred payment gateway</Label>
+          <Select value={gwId || NO_GATEWAY} onValueChange={(v) => setGwId(v === NO_GATEWAY ? "" : v)}>
+            <SelectTrigger id="ps-gateway" className="w-full sm:w-80" aria-label="Preferred payment gateway">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NO_GATEWAY}>No preference</SelectItem>
+              {(gateways ?? []).map((g) => (
+                <SelectItem key={g.id} value={g.id ?? ""}>
+                  {gatewayLabel(g)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="mt-1.5 text-xs text-muted-foreground">Preselected when you deposit or add a card.</p>
+        </div>
+        <Button onClick={() => save.mutate()} disabled={!dirty || save.isPending}>
+          {save.isPending ? "Saving…" : "Save payment settings"}
+        </Button>
+      </CardContent>
+    </Card>
+  )
+}
+
+// Invoice recipients — the profile's extra billing contacts. PUT /billing-profile/{bp} with a
+// contacts-only body updates just the list (no billing-details validation, nothing else rewritten).
+const MAX_CONTACTS = 10
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+function InvoiceRecipientsCard({ summary }: { summary: BillingSummary }) {
+  const qc = useQueryClient()
+  const [draft, setDraft] = useState({ name: "", email: "" })
+  const contacts = summary.contacts ?? []
+  const ready = true
+  const save = useMutation({
+    mutationFn: (next: BillingContact[]) =>
+      apiFetch(`/billing-profile/${summary.id}`, { method: "PUT", body: { contacts: next } }),
+    onSuccess: () => {
+      toast.success("Invoice recipients saved")
+      setDraft({ name: "", email: "" })
+      void qc.invalidateQueries({ queryKey: ["billing-summary"] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  const email = draft.email.trim()
+  const canAdd = ready && EMAIL_RE.test(email) && contacts.length < MAX_CONTACTS && !save.isPending
+
+  return (
+    <Card className="mt-6 gap-4">
+      <CardHeader className="border-b [.border-b]:pb-4">
+        <CardTitle className="text-base">Invoice recipients</CardTitle>
+        <CardDescription>
+          Every invoice and payment e-mail goes to the account e-mail{summary.email ? ` (${summary.email})` : ""} plus these addresses.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {contacts.length ? (
+          <ul className="divide-y rounded-md border text-sm">
+            {contacts.map((c, i) => (
+              <li key={`${c.email}-${i}`} className="flex items-center justify-between gap-3 px-3 py-1.5">
+                <span className="truncate">
+                  {c.name ? <span className="font-medium">{c.name} </span> : null}
+                  <span className="text-muted-foreground">{c.email}</span>
+                </span>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={`Remove ${c.email}`}
+                  disabled={!ready || save.isPending}
+                  onClick={() => save.mutate(contacts.filter((_, j) => j !== i))}
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-muted-foreground">No extra recipients yet.</p>
+        )}
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="grid gap-1.5">
+            <Label htmlFor="ir-name">Name</Label>
+            <Input id="ir-name" autoComplete="off" value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="ir-email">E-mail</Label>
+            <Input id="ir-email" type="email" autoComplete="off" value={draft.email} onChange={(e) => setDraft((d) => ({ ...d, email: e.target.value }))} />
+          </div>
+          <Button variant="outline" disabled={!canAdd} onClick={() => save.mutate([...contacts, { name: draft.name.trim(), email }])}>
+            <Plus className="size-4" /> Add
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 

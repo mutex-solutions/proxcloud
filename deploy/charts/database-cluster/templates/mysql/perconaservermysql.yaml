@@ -14,7 +14,7 @@ restart-annotation mechanism, so the RESTART capability stays off for this
 engine (internal/cloud/dbaas/engines.go Capabilities) until one is live-verified.
 */}}
 {{- $name := include "database-cluster.name" . }}
-apiVersion: ps.percona.com/v1alpha1
+apiVersion: ps.percona.com/v1
 kind: PerconaServerMySQL
 metadata:
   name: {{ $name }}
@@ -34,10 +34,95 @@ spec:
   unsafeFlags:
     mysqlSize: true
   {{- end }}
+  {{- if include "database-cluster.backupEnabled" . }}
+  {{/*
+  Percona backups: xtrabackup/xbcloud driven by a sidecar in the mysql pod.
+  Unlike CNPG and mariadb there is no separate storage CR — the object store is
+  declared inline on this CR and referenced by NAME from the schedule and from
+  every PerconaServerMySQLBackup.
+
+  *** endpointUrl, NOT endpointURL. *** The CRD field is lower-case `url`;
+  docs.percona.com writes `endpointURL` on its PITR page. A CRD PRUNES unknown
+  fields silently, so the capital-U spelling does not error — the field simply
+  vanishes, no --s3-endpoint is passed, and xbcloud uploads to real AWS S3 with
+  these credentials. Do not "fix" the casing.
+
+  verifyTLS is a SIBLING of s3, not a member of it (the docs example nests it,
+  which would also be pruned).
+  */}}
+  backup:
+    enabled: true
+    # REQUIRED by the operator (CheckNSetDefaults rejects the CR without it).
+    image: {{ include "database-cluster.mysqlBackupImage" . }}
+    {{/* The binlog server streams binlogs to the same object store; without it
+         a restore can only land on a backup boundary, never a chosen second. */}}
+    pitr:
+      enabled: true
+    storages:
+      proxcloud:
+        type: s3
+        verifyTLS: {{ include "database-cluster.backupTLS" . }}
+        s3:
+          bucket: {{ .Values.backup.s3.bucket | quote }}
+          prefix: {{ printf "%s/%s" (.Values.backup.s3.prefix | default "proxcloud") (include "database-cluster.name" .) | quote }}
+          endpointUrl: {{ .Values.backup.s3.endpoint | quote }}
+          {{- with .Values.backup.s3.region }}
+          region: {{ . | quote }}
+          {{- end }}
+          credentialsSecret: {{ .Values.backup.s3.credsSecret }}
+        containerOptions:
+          {{/* Percona exposes no compression enum — it is an xtrabackup flag.
+               zstd is the fast-both-ways choice, and an uncompressed physical
+               backup is the expensive default nobody notices until a restore. */}}
+          args:
+            xtrabackup:
+              - "--compress=zstd"
+          {{- if .Values.backup.s3.pathStyle }}
+          env:
+            # RGW is path-style; xbcloud defaults to bucket-lookup auto, which
+            # tries the virtual-host form first.
+            - name: XBCLOUD_EXTRA_ARGS
+              value: "--s3-bucket-lookup=path"
+          {{- end }}
+    {{- with .Values.backup.schedule }}
+    schedule:
+      - name: proxcloud-scheduled
+        schedule: {{ . | quote }}
+        storageName: proxcloud
+        {{- with $.Values.backup.keepBackups }}
+        {{/* Percona counts BACKUPS, not days — proxcloud converts the customer's
+             retention in days into a count using the schedule's cadence
+             (values.go keepBackups), because the two only coincide at a daily
+             cron. `keep` belongs on the FULL entry alone: retention applies to
+             the whole chain, and Percona does not support a retention policy
+             on increments. */}}
+        keep: {{ int . }}
+        {{- end }}
+        type: full
+      {{- with $.Values.backup.incrementalSchedule }}
+      {{/* Increments on the days the base does not run. They chain onto the
+           latest full — the operator picks the base automatically — so pruning
+           a full takes its increments with it and never orphans one. This is
+           what keeps a weekly full affordable AND the binlog replay short. */}}
+      - name: proxcloud-incremental
+        schedule: {{ . | quote }}
+        storageName: proxcloud
+        type: incremental
+      {{- end }}
+    {{- end }}
+  {{- end }}
   mysql:
     clusterType: group-replication
     size: {{ int .Values.instances }}
     image: {{ include "database-cluster.image" . }}
+    {{- include "database-cluster.podPlacement" . | nindent 4 }}
+    {{- if gt (int .Values.instances) 1 }}
+    # `advanced` carries a plain Kubernetes affinity: the group-replication
+    # members spread across scheduling.zoneKey as a HARD rule.
+    affinity:
+      advanced:
+        {{- include "database-cluster.zoneAntiAffinity" (dict "root" . "labels" (dict "app.kubernetes.io/instance" $name "app.kubernetes.io/component" "database")) | nindent 8 }}
+    {{- end }}
     resources:
       {{- include "database-cluster.resources" . | nindent 6 }}
     {{- with .Values.mysql.parameters }}
@@ -56,11 +141,23 @@ spec:
           requests:
             storage: {{ .Values.storage.sizeGi }}Gi
   proxy:
+    {{/*
+    router MUST be present, even disabled. The operator's CEL validation reads
+    spec.proxy.router unconditionally for group-replication clusters and the
+    admission webhook rejects the whole object with
+      "no such key: router evaluating rule: ... Router size must be 2 or greater"
+    when the key is absent — the cluster is never created. Declaring it disabled
+    satisfies the lookup and keeps HAProxy as the single proxy (the two are
+    mutually exclusive, and the LB selector targets haproxy pods).
+    */}}
+    router:
+      enabled: false
     # The LB Service selects these haproxy pods (write port 3306 routed to the
     # GR primary). 2 proxies when the DB itself is HA, else 1.
     haproxy:
       enabled: true
       size: {{ gt (int .Values.instances) 1 | ternary 2 1 }}
+      {{- include "database-cluster.podPlacement" . | nindent 6 }}
       # TODO-verify(drill): tag from the pinned operator's compatibility list.
       image: docker.io/percona/haproxy:2.8.11
       resources:

@@ -32,23 +32,34 @@ data:
   # Progressing.
   resource.customizations.health.postgresql.cnpg.io_Cluster: |
     hs = {}
+    -- NO string library: ArgoCD's Lua sandbox does not expose it, and calling string.lower here
+    -- crashed the check — every CNPG database then reported health Unknown, which is how a
+    -- database with no pods still looked fine. Match the operator's phase values exactly.
+    local healthy = "Cluster in healthy state"
+    local broken = {
+      ["Cluster in unrecoverable state"] = true,
+      ["Cluster upgrade failed"] = true,
+      ["Failing over"] = false,
+    }
     if obj.status ~= nil then
-      local phase = obj.status.phase or ""
-      local lower = string.lower(phase)
-      if string.find(lower, "failure") or string.find(lower, "failed") or string.find(lower, "unrecoverable") or string.find(lower, "invalid") then
+      local phase = obj.status.phase
+      if phase ~= nil and broken[phase] then
         hs.status = "Degraded"
         hs.message = phase
         return hs
       end
-      local desired = obj.spec ~= nil and obj.spec.instances or nil
+      local desired = nil
+      if obj.spec ~= nil then
+        desired = obj.spec.instances
+      end
       local ready = obj.status.readyInstances or 0
-      if desired ~= nil and ready >= desired and string.find(lower, "healthy") then
+      if desired ~= nil and ready >= desired and phase == healthy then
         hs.status = "Healthy"
-        hs.message = tostring(ready) .. " ready — " .. phase
+        hs.message = tostring(ready) .. " ready"
         return hs
       end
       hs.status = "Progressing"
-      hs.message = tostring(ready) .. "/" .. tostring(desired) .. " ready — " .. phase
+      hs.message = tostring(ready) .. "/" .. tostring(desired) .. " ready — " .. tostring(phase)
       return hs
     end
     hs.status = "Progressing"

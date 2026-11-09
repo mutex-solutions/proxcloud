@@ -1,0 +1,21 @@
+# Cilium socket LB limited to the host network namespace, on the sandbox cluster only.
+#
+# gVisor has its own network stack, so a socket-level ClusterIP translation (Cilium socket LB, done
+# at connect() in the pod's socket layer) never sees a sandbox's connections and every ClusterIP,
+# cluster DNS included, would time out. hostns-only keeps socket LB for the host namespace and
+# leaves pod traffic to the per-packet translation at the pod's veth, which gVisor traffic crosses.
+#
+# The cluster chart runs Cilium without kube-proxy replacement, so socket LB is off and this setting
+# changes nothing today (docs/managed-sandbox.md §0.5: DNS and ClusterIPs worked from gVisor without
+# it). It is here so that turning kube-proxy replacement on later, which brings socket LB back,
+# cannot silently break every sandbox. A CiliumNodeConfig is merged by the agent at start-up, so
+# an upgrade of the chart's Cilium values does not undo it. Applied, then the agents restart once.
+apiVersion: cilium.io/v2
+kind: CiliumNodeConfig
+metadata:
+  name: sandbox-socket-lb
+  namespace: kube-system
+spec:
+  nodeSelector: {} # every node of the sandbox cluster
+  defaults:
+    bpf-lb-sock-hostns-only: "true"

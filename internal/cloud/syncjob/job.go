@@ -21,7 +21,10 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/internal/platform/lock"
 	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 )
 
@@ -42,7 +45,11 @@ type DbaasFactory func(es *externalservice.ExternalService) (*dbaas.Service, err
 // Injectable so the pve sync walk is testable against an httptest fake.
 type ProxmoxFactory func(es *externalservice.ExternalService) (*pve.Service, error)
 
+// SandboxFactory builds the sandbox service for a sandbox provider. Injectable for tests.
+type SandboxFactory func(es *externalservice.ExternalService) (*sandbox.Service, error)
+
 type Job struct {
+	sandboxFor    SandboxFactory
 	projects      *project.Repo
 	services      *externalservice.Service
 	cloud         *cloud.Repo
@@ -50,6 +57,14 @@ type Job struct {
 	kamajiFor     KamajiFactory
 	dbaasFor      DbaasFactory
 	pveFor        ProxmoxFactory
+	publicIPs     PublicIPLister
+	releaseIP     PublicIPReleaser
+	audit         *audit.Service
+	sdnLock       *lock.ShedLock
+	shareAccess   func(ctx context.Context, projectID string) error
+	staleSeeds    func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
+	loadBalancers func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error
+	csiVolumes    func(region, projectID string, es *externalservice.ExternalService) providers.Provider
 	now           func() time.Time
 	log           *slog.Logger
 }
@@ -61,7 +76,7 @@ func New(projects *project.Repo, services *externalservice.Service, cloudRepo *c
 	return &Job{
 		projects: projects, services: services, cloud: cloudRepo,
 		cephClientFor: func(ctx context.Context, es *externalservice.ExternalService, region, projectID string) (*client.Client, error) {
-			return client.NewCephS3(ctx, es.CephConfig(region, "", "", es.RGWUIDFor(projectID)))
+			return es.ObjectClient(ctx, region, "", "", es.RGWUIDFor(projectID))
 		},
 		kamajiFor: func(es *externalservice.ExternalService) (*kamaji.Service, error) {
 			return kamaji.New(es.KamajiConfig(), es.ID)
@@ -72,6 +87,9 @@ func New(projects *project.Repo, services *externalservice.Service, cloudRepo *c
 		pveFor: func(es *externalservice.ExternalService) (*pve.Service, error) {
 			return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
 		},
+		sandboxFor: func(es *externalservice.ExternalService) (*sandbox.Service, error) {
+			return sandbox.New(es.SandboxConfig(), es.ID)
+		},
 		now: func() time.Time { return time.Now().UTC() },
 		log: log,
 	}
@@ -81,7 +99,18 @@ func (j *Job) WithCephClientFactory(f CephClientFactory) *Job { j.cephClientFor 
 func (j *Job) WithKamajiFactory(f KamajiFactory) *Job         { j.kamajiFor = f; return j }
 func (j *Job) WithDbaasFactory(f DbaasFactory) *Job           { j.dbaasFor = f; return j }
 func (j *Job) WithProxmoxFactory(f ProxmoxFactory) *Job       { j.pveFor = f; return j }
+func (j *Job) WithSandboxFactory(f SandboxFactory) *Job       { j.sandboxFor = f; return j }
 func (j *Job) WithNow(now func() time.Time) *Job              { j.now = now; return j }
+
+// WithSDNLock enables the isolation reconcile: it edits the rules a network change also edits, so
+// it takes the same lock (nil = no reconcile).
+func (j *Job) WithSDNLock(l *lock.ShedLock) *Job { j.sdnLock = l; return j }
+
+// WithShareAccess wires the reconcile of a project's file share exports to its addresses (nil = none).
+func (j *Job) WithShareAccess(f func(ctx context.Context, projectID string) error) *Job {
+	j.shareAccess = f
+	return j
+}
 
 // SyncOne runs the sync for a single project — the admin POST /project/{id}/sync leg.
 // serviceID == "" syncs every attached CLOUD service but only
@@ -116,6 +145,25 @@ func (j *Job) SyncOne(ctx context.Context, projectID, serviceID string) error {
 	}
 	j.syncService(ctx, p, es)
 	return nil
+}
+
+// WithStaleSeeds wires the cleanup of seeds whose VM is gone (nil = none).
+func (j *Job) WithStaleSeeds(f func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error) *Job {
+	j.staleSeeds = f
+	return j
+}
+
+// WithCSIVolumes wires the VOLUME rows of a project's tenant cluster disks on a Proxmox provider, from the CSI
+// gateway's registry (nil = none). They reconcile after the PVE volumes, which leave them alone.
+func (j *Job) WithCSIVolumes(f func(region, projectID string, es *externalservice.ExternalService) providers.Provider) *Job {
+	j.csiVolumes = f
+	return j
+}
+
+// WithLoadBalancers wires the pass over a provider's load balancers (nil = none).
+func (j *Job) WithLoadBalancers(f func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error) *Job {
+	j.loadBalancers = f
+	return j
 }
 
 // Run syncs every ENABLED project's CLOUD-service resources. Returns the total SERVER+PORT
@@ -158,6 +206,19 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 		if _, err := j.services.DetectPVECapabilities(ctx, es, ps.C); err != nil {
 			j.log.Warn("syncjob: pve capability detection", "serviceId", es.ID, "err", err)
 		}
+		if j.staleSeeds != nil {
+			if err := j.staleSeeds(ctx, ps, es); err != nil {
+				j.log.Warn("syncjob: drop stale seeds", "serviceId", es.ID, "err", err)
+			}
+		}
+		if j.loadBalancers != nil {
+			if err := j.loadBalancers(ctx, ps, es); err != nil {
+				j.log.Warn("syncjob: load balancers", "serviceId", es.ID, "err", err)
+			}
+		}
+		if err := j.reconcileSandboxWorkers(ctx, ps, es); err != nil {
+			j.log.Error("syncjob: sandbox workers", "serviceId", es.ID, "err", err)
+		}
 	}
 }
 
@@ -184,7 +245,7 @@ func (j *Job) syncProject(ctx context.Context, p *project.Project, esCache map[s
 
 func (j *Job) syncService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
 	// ceph-s3: sync only the object-store (buckets) via an admin-keyed client.
-	if es.IsCephS3() {
+	if es.IsObjectStore() {
 		return j.syncCephService(ctx, p, es)
 	}
 	// kamaji: sync only the managed k8s clusters off the management cluster.
@@ -198,6 +259,15 @@ func (j *Job) syncService(ctx context.Context, p *project.Project, es *externals
 	// proxmox: sync the project pool's VMs, disks, templates, networks and security groups.
 	if es.IsProxmox() {
 		return j.syncProxmoxService(ctx, p, es)
+	}
+	if es.IsTrueNAS() {
+		return j.syncTrueNASService(ctx, p, es)
+	}
+	if es.IsPowerDNS() {
+		return j.syncPowerDNSService(ctx, p, es)
+	}
+	if es.IsSandbox() {
+		return j.syncSandboxService(ctx, p, es)
 	}
 	// No other provider kinds exist.
 	return 0
@@ -226,8 +296,50 @@ func (j *Job) syncCephService(ctx context.Context, p *project.Project, es *exter
 	return st.Created + st.Updated
 }
 
-// syncProxmoxService reconciles the project's SERVER, VOLUME, IMAGE, NETWORK and SECURITY_GROUP
-// resources off the PVE cluster. The project-pool filter is the leak-guard: only this project's pool members are
+// syncTrueNASService reconciles the project's file shares and their usage off the NAS.
+func (j *Job) syncTrueNASService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
+	region := es.CephRegion()
+	if !es.ServiceEnabledInRegion("shares", region) {
+		return 0
+	}
+	ts, err := es.TrueNASService()
+	if err != nil {
+		j.log.Error("syncjob: build truenas client", "project", p.ID, "serviceId", es.ID, "err", err)
+		return 0
+	}
+	defer ts.C.Close()
+	st, err := providers.Reconcile(ctx, ts.ShareSyncProvider(region, p.ID), j.cloud, es.ID, j.now())
+	if err != nil {
+		j.log.Error("syncjob: reconcile shares", "project", p.ID, "serviceId", es.ID, "err", err)
+	}
+	if j.shareAccess != nil {
+		if err := j.shareAccess(ctx, p.ID); err != nil {
+			j.log.Error("syncjob: reconcile share access", "project", p.ID, "serviceId", es.ID, "err", err)
+		}
+	}
+	return st.Created + st.Updated
+}
+
+// syncPowerDNSService reconciles the project's DNS zones, by the account field on the server.
+func (j *Job) syncPowerDNSService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
+	region := es.CephRegion()
+	if !es.ServiceEnabledInRegion("dns", region) {
+		return 0
+	}
+	ds, err := es.PowerDNSService()
+	if err != nil {
+		j.log.Error("syncjob: build powerdns client", "project", p.ID, "serviceId", es.ID, "err", err)
+		return 0
+	}
+	st, err := providers.Reconcile(ctx, ds.ZoneSyncProvider(region, p.ID), j.cloud, es.ID, j.now())
+	if err != nil {
+		j.log.Error("syncjob: reconcile zones", "project", p.ID, "serviceId", es.ID, "err", err)
+	}
+	return st.Created + st.Updated
+}
+
+// syncProxmoxService reconciles the project's SERVER, VOLUME, IMAGE, NETWORK, SECURITY_GROUP and
+// FLOATING_IP resources off the PVE cluster and the public-IP allocations. The project-pool filter is the leak-guard: only this project's pool members are
 // listed, and Reconcile's delete-of-vanished scan is ProjectScoped.
 func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *externalservice.ExternalService) int {
 	region := es.PVERegion()
@@ -242,11 +354,15 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 	count := 0
 	now := j.now()
 	provs := []providers.Provider{
-		ps.ServerSyncProvider(region, p.ID),
+		ps.ServerSyncProvider(region, p.ID, es.PVEGPUAliasOf),
 		ps.VolumeSyncProvider(region, p.ID, es.PVEVolumeProfileFunc()),
 		ps.ImageSyncProvider(region, p.ID),
 		ps.NetworkSyncProvider(region, p.ID),
 		ps.SecurityGroupSyncProvider(region, p.ID),
+		j.floatingIPProvider(region, p.ID, es.ID),
+	}
+	if j.csiVolumes != nil {
+		provs = append(provs, j.csiVolumes(region, p.ID, es))
 	}
 	for _, prov := range provs {
 		st, err := providers.Reconcile(ctx, prov, j.cloud, es.ID, now)
@@ -255,7 +371,32 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 		}
 		count += st.Created + st.Updated
 	}
+	j.reconcileIsolation(ctx, ps, p, es)
+	if _, err := ps.RemoveBlankVMs(ctx, p.ID); err != nil {
+		j.log.Warn("syncjob: remove blank VMs, retrying on the next sync", "project", p.ID, "serviceId", es.ID, "err", err)
+	}
 	return count
+}
+
+// reconcileIsolation brings the project's firewall rules to the current rule set: a project made
+// before a rule change gets it here instead of at its next network change, and a rule deleted by
+// hand comes back. A busy lock skips this project until the next cycle.
+// ponytail: one short lock per project per cycle, so a network create can hit the usual "retry in a
+// moment" 409 during a sync. Take it only on detected drift if that ever shows up on a big cluster.
+func (j *Job) reconcileIsolation(ctx context.Context, ps *pve.Service, p *project.Project, es *externalservice.ExternalService) {
+	netCfg := es.PVENetworkConfig()
+	if j.sdnLock == nil || netCfg.CIDRPool == "" {
+		return
+	}
+	start := j.now()
+	ok, err := j.sdnLock.Lock(ctx, project.SDNApplyLockName, project.SDNApplyMaxFor, start)
+	if err != nil || !ok {
+		return
+	}
+	defer func() { _ = j.sdnLock.Unlock(ctx, project.SDNApplyLockName, 0, start, j.now()) }()
+	if err := ps.ReconcileIsolation(ctx, p.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs, es.PVESandboxEndpoints()...); err != nil {
+		j.log.Error("syncjob: reconcile isolation", "project", p.ID, "serviceId", es.ID, "err", err)
+	}
 }
 
 // syncKamajiService reconciles the project's KUBERNETES_CLUSTER resources off the kamaji

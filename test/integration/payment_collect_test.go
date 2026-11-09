@@ -45,7 +45,7 @@ func TestCollectByCardDispatch(t *testing.T) {
 	}
 
 	fg := &fakeGW{}
-	svc := payment.NewCollectService(repo, pricingRepo, func(string) payment.Gateway { return fg })
+	svc := payment.NewCollectService(repo, pricingRepo, func(*billing.Gateway) payment.Gateway { return fg })
 	profile := &billing.BillingProfile{ID: bpID, Currency: "USD", Country: "US", Email: "a@b.c", FirstName: "Ada"}
 
 	amt := decimal.NewFromInt(15)
@@ -80,7 +80,8 @@ func TestCollectByCardDispatch(t *testing.T) {
 }
 
 // TestRefundFunds exercises payment.AddFundsService.RefundFunds: a SUCCESS deposit (with a linked
-// AccountCredit) → refund SUCCESS → txn REFUNDED + the AccountCredit voided.
+// AccountCredit) → refund SUCCESS → txn REFUNDED + the AccountCredit voided IN PLACE (zero balance,
+// refundedAt stamped, initialAmount kept — never deleted) and excluded from the balance total.
 func TestRefundFunds(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
@@ -92,9 +93,12 @@ func TestRefundFunds(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed gw: %v", err)
 	}
-	// the spendable credit that the deposit created.
+	// the spendable credit that the deposit created, unspent.
 	creditID := pgdoc.NewID()
-	if _, err := db.C("accountCredit").InsertOne(ctx, pgdoc.M{"_id": creditID, "billingProfileId": "bp1", "currency": "USD"}); err != nil {
+	if _, err := db.C("accountCredit").InsertOne(ctx, pgdoc.M{
+		"_id": creditID, "billingProfileId": "bp1", "currency": "USD",
+		"initialAmount": decimalOf(t, "40"), "amount": decimalOf(t, "40"),
+	}); err != nil {
 		t.Fatalf("seed credit: %v", err)
 	}
 	// a SUCCESS deposit transaction linking that credit by id.
@@ -106,7 +110,7 @@ func TestRefundFunds(t *testing.T) {
 		t.Fatalf("seed txn: %v", err)
 	}
 
-	svc := payment.NewAddFundsService(repo, pricingRepo, func(string) payment.Gateway { return &fakeGW{} })
+	svc := payment.NewAddFundsService(repo, pricingRepo, func(*billing.Gateway) payment.Gateway { return &fakeGW{} })
 	done, err := svc.RefundFunds(ctx, txnID)
 	if err != nil {
 		t.Fatalf("refundFunds: %v", err)
@@ -114,7 +118,17 @@ func TestRefundFunds(t *testing.T) {
 	if done.Status != "REFUNDED" {
 		t.Fatalf("status = %s, want REFUNDED", done.Status)
 	}
-	if n, _ := db.C("accountCredit").Count(ctx, pgdoc.M{"_id": creditID}); n != 0 {
-		t.Fatalf("accountCredit not voided: %d", n)
+	ac, err := repo.AccountCreditByID(ctx, creditID)
+	if err != nil || ac == nil {
+		t.Fatalf("accountCredit must survive the refund (audit trail): %v %v", ac, err)
+	}
+	if ac.Amount == nil || !ac.Amount.IsZero() || ac.RefundedAt == nil {
+		t.Fatalf("accountCredit not voided: amount=%v refundedAt=%v", ac.Amount, ac.RefundedAt)
+	}
+	if ac.InitialAmount == nil || !ac.InitialAmount.Equal(decimalOf(t, "40")) {
+		t.Fatalf("initialAmount must be kept: %v", ac.InitialAmount)
+	}
+	if total, _ := repo.AccountCreditTotal(ctx, "bp1"); !total.IsZero() {
+		t.Fatalf("voided credit still counts in the balance: %v", total)
 	}
 }

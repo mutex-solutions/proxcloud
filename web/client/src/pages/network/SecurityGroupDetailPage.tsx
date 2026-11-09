@@ -4,8 +4,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { Plus, Trash2 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
-import { StatusBadge } from "@/components/status-badge"
-import { Badge } from "@/components/ui/badge"
 import {
   Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
@@ -15,9 +13,6 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { apiFetch } from "@/lib/api"
@@ -27,18 +22,14 @@ import { useCloudResource, useCloudScope, useProjectId } from "@/lib/hooks"
 type SgRule = {
   id?: string
   direction?: string
-  ethertype?: string
   protocol?: string | null
-  port_range_min?: number | null
-  port_range_max?: number | null
+  port_range?: string | null // "22" or "8000:8100"
   remote_ip_prefix?: string | null
   remote_group_id?: string | null
 }
 
 function portRange(rule: SgRule): string {
-  if (rule.port_range_min == null && rule.port_range_max == null) return "any"
-  if (rule.port_range_min === rule.port_range_max) return String(rule.port_range_min)
-  return `${rule.port_range_min ?? "*"} – ${rule.port_range_max ?? "*"}`
+  return rule.port_range ? rule.port_range.replace(":", " – ") : "any"
 }
 
 function SgBreadcrumb({ pid, name }: { pid: string; name?: string }) {
@@ -82,8 +73,6 @@ export default function SecurityGroupDetailPage() {
   })
 
   const [addOpen, setAddOpen] = useState(false)
-  const [direction, setDirection] = useState("ingress")
-  const [etherType, setEtherType] = useState("IPv4")
   const [protocol, setProtocol] = useState("tcp")
   const [portMin, setPortMin] = useState("")
   const [portMax, setPortMax] = useState("")
@@ -97,7 +86,7 @@ export default function SecurityGroupDetailPage() {
 
   const addRule = useMutation({
     mutationFn: () => {
-      const data: Record<string, unknown> = { direction, etherType }
+      const data: Record<string, unknown> = { direction: "ingress" }
       if (protocol.trim()) data.protocol = protocol.trim()
       if (portMin.trim()) data.portRangeMin = Number(portMin)
       if (portMax.trim()) data.portRangeMax = Number(portMax)
@@ -164,7 +153,6 @@ export default function SecurityGroupDetailPage() {
       />
 
       <div className="mb-4 flex items-center gap-3">
-        <StatusBadge status={group.status} />
         <span className="font-mono text-xs text-muted-foreground">{group.externalId}</span>
       </div>
 
@@ -184,8 +172,6 @@ export default function SecurityGroupDetailPage() {
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead>Direction</TableHead>
-                <TableHead>Ether type</TableHead>
                 <TableHead>Protocol</TableHead>
                 <TableHead>Port range</TableHead>
                 <TableHead>Remote</TableHead>
@@ -195,12 +181,6 @@ export default function SecurityGroupDetailPage() {
             <TableBody>
               {rules.data.result.map((rule, i) => (
                 <TableRow key={rule.id ?? i}>
-                  <TableCell>
-                    <Badge variant={rule.direction === "ingress" ? "secondary" : "outline"} className="capitalize">
-                      {rule.direction ?? "—"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-sm">{rule.ethertype ?? "—"}</TableCell>
                   <TableCell className="text-sm uppercase">{rule.protocol ?? "any"}</TableCell>
                   <TableCell className="font-mono text-sm">{portRange(rule)}</TableCell>
                   <TableCell className="font-mono text-sm">
@@ -222,35 +202,9 @@ export default function SecurityGroupDetailPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Add rule</DialogTitle>
-            <DialogDescription>Allow traffic matching this rule.</DialogDescription>
+            <DialogDescription>Allow inbound traffic matching this rule. Outbound traffic is always allowed.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-2">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div className="grid gap-2">
-                <Label>Direction</Label>
-                <Select value={direction} onValueChange={setDirection}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="ingress">Ingress</SelectItem>
-                    <SelectItem value="egress">Egress</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid gap-2">
-                <Label>Ether type</Label>
-                <Select value={etherType} onValueChange={setEtherType}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="IPv4">IPv4</SelectItem>
-                    <SelectItem value="IPv6">IPv6</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div className="grid gap-2">
                 <Label htmlFor="rule-proto">Protocol</Label>

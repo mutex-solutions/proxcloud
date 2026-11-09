@@ -21,6 +21,9 @@ func (p *FloatingIPProvider) GetBillingInformation(_ context.Context, _ billinga
 	if fip, ok := mapAt(cr.Data, "floatingIp"); ok {
 		values["status"] = fip["status"]
 		values["floating_network_id"] = fip["floating_network_id"]
+		if addr := str(fip["floating_ip_address"]); addr != "" {
+			values["display_name"] = addr
+		}
 	}
 	return []*billingapi.BillingResource{{
 		ResourceID:          cr.ID,

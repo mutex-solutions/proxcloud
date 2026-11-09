@@ -19,6 +19,9 @@ type Store struct {
 
 func (s *Store) Name() string { return s.table }
 
+// DB is the database the store lives in (for WithTx).
+func (s *Store) DB() *DB { return s.db }
+
 // ident quotes the table name (collection names carry camelCase).
 func (s *Store) ident() string {
 	return `"` + strings.ReplaceAll(s.table, `"`, `""`) + `"`
@@ -27,8 +30,27 @@ func (s *Store) ident() string {
 // Ensure creates the table if missing (documents appear on first write, like
 // the previous datastore's implicit collections).
 func (s *Store) Ensure(ctx context.Context) error {
-	_, err := s.db.q(ctx).Exec(ctx,
-		"CREATE TABLE IF NOT EXISTS "+s.ident()+" (id text PRIMARY KEY, doc jsonb NOT NULL)")
+	create := "CREATE TABLE IF NOT EXISTS " + s.ident() + " (id text PRIMARY KEY, doc jsonb NOT NULL)"
+	var err error
+	if _, inTx := ctx.Value(txKey{}).(pgx.Tx); inTx {
+		_, err = s.db.q(ctx).Exec(ctx, create)
+	} else {
+		// Serialise concurrent first writers on an advisory lock: a loser that merely tolerated
+		// the race error could retry before the winner's CREATE committed and hit 42P01 again.
+		err = pgx.BeginFunc(ctx, s.db.Pool, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", "pgdoc-create:"+s.table); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, create)
+			return err
+		})
+	}
+	// Concurrent first writers race the CREATE: PostgreSQL reports the loser as 23505 (pg_type
+	// unique key) or 42P07 (already exists) even with IF NOT EXISTS — the table exists, so succeed.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && (pgErr.Code == "23505" || pgErr.Code == "42P07") {
+		return nil
+	}
 	return err
 }
 
@@ -234,7 +256,8 @@ func (s *Store) SetFields(ctx context.Context, filter M, set M, unset []string) 
 	return tag.RowsAffected(), nil
 }
 
-// SetFieldsOne applies a partial update to (at most) one matching document.
+// SetFieldsOne applies a partial update to (at most) one matching document. FOR UPDATE makes the filter hold at the write: without
+// it, a writer queued behind another on the row rechecks only the id, and a conditional write that should lose wins too.
 func (s *Store) SetFieldsOne(ctx context.Context, filter M, set M, unset []string) (bool, error) {
 	var args []any
 	docExpr, err := s.setUnsetSQL(set, unset, &args)
@@ -246,11 +269,22 @@ func (s *Store) SetFieldsOne(ctx context.Context, filter M, set M, unset []strin
 		return false, err
 	}
 	tag, err := s.exec(ctx, "UPDATE "+s.ident()+" SET doc = "+docExpr+
-		" WHERE id IN (SELECT id FROM "+s.ident()+" WHERE "+where+" LIMIT 1)", args...)
+		" WHERE id IN (SELECT id FROM "+s.ident()+" WHERE "+where+" LIMIT 1 FOR UPDATE)", args...)
 	if err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// Increment atomically adds 1 to the numeric counter `field` of the document
+// with the given id (creating it at 1 when absent) and returns the new value.
+// One upsert statement with RETURNING → unique, gap-free under concurrency.
+func (s *Store) Increment(ctx context.Context, id, field string) (int64, error) {
+	var n int64
+	err := s.scanRow(ctx, "INSERT INTO "+s.ident()+" AS t (id, doc) VALUES ($1, jsonb_build_object($2::text, 1))"+
+		" ON CONFLICT (id) DO UPDATE SET doc = t.doc || jsonb_build_object($2::text, COALESCE((t.doc->>$2::text)::bigint, 0) + 1)"+
+		" RETURNING (doc->>$2::text)::bigint", []any{id, field}, &n)
+	return n, err
 }
 
 // SetByID applies a partial update to the document with the given id.
@@ -289,7 +323,7 @@ func (s *Store) DeleteOne(ctx context.Context, filter M) (bool, error) {
 		return false, err
 	}
 	tag, err := s.exec(ctx, "DELETE FROM "+s.ident()+
-		" WHERE id IN (SELECT id FROM "+s.ident()+" WHERE "+where+" LIMIT 1)", args...)
+		" WHERE id IN (SELECT id FROM "+s.ident()+" WHERE "+where+" LIMIT 1 FOR UPDATE)", args...)
 	if err != nil {
 		return false, err
 	}

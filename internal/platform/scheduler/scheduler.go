@@ -37,9 +37,10 @@ const (
 	// reconcile stuck PENDING payment transactions.
 	TransactionScanSpec = "0 */20 * * * *"
 
-	// MonthlyBillSpec — daily at 00:00 (send bills): finalize each profile's previous-month
-	// OPEN bill (OPEN→SENT/PAID) so it becomes collectable + dunnable.
-	MonthlyBillSpec = "0 0 0 * * *"
+	// MonthlyBillSpec — daily at 00:30 (send bills): finalize each profile's previous-month
+	// OPEN bill (OPEN→SENT/PAID) so it becomes collectable + dunnable. Not at 00:00: the charges at
+	// 00:00 and 00:00:30 on the 1st still bill the month's last hour and minute onto that bill.
+	MonthlyBillSpec = "0 30 0 * * *"
 
 	// AutoSuspensionSpec — every 30 minutes (auto-suspension job).
 	AutoSuspensionSpec = "0 */30 * * * *"
@@ -50,6 +51,26 @@ const (
 	// ServicesSyncSpec — every 15 minutes (services sync): sync every ENABLED project's cloud
 	// resources.
 	ServicesSyncSpec = "0 */15 * * * *"
+
+	// PVEStateSyncSpec — every minute at :15 (Proxmox state sampler), clear of the charge at :30.
+	PVEStateSyncSpec = "15 * * * * *"
+
+	// SandboxStateSyncSpec — every minute at :10 (sandbox rows off the sandbox cluster), before the charge at :30.
+	SandboxStateSyncSpec = "10 * * * * *"
+	// SandboxTemplateAdoptSpec — every 5 minutes: built-in templates follow the prepull DaemonSet (imageAdoption).
+	SandboxTemplateAdoptSpec = "0 */5 * * * *"
+	// SandboxBuildSyncSpec — every minute at :40: finished template builds nobody polls are recorded.
+	SandboxBuildSyncSpec = "40 * * * * *"
+	// SandboxAutoPauseSpec — every minute at :05: autoPause sandboxes past their end are paused.
+	SandboxAutoPauseSpec = "5 * * * * *"
+	// SandboxRegistryPruneSpec — hourly at :17: unreferenced template images (registryPrune).
+	SandboxRegistryPruneSpec = "0 17 * * * *"
+
+	// PVETaskPollSpec — every 20 seconds (Proxmox task log poller).
+	PVETaskPollSpec = "*/20 * * * * *"
+
+	// PVETrafficSpec — every minute at :45 (Proxmox public-NIC counters).
+	PVETrafficSpec = "45 * * * * *"
 
 	// ProjectDeletionSpec — every minute at :30 (project deletion): delete projects past their
 	// deletion grace window (cascade cloud delete → remove the doc).

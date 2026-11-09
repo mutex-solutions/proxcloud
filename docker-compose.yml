@@ -35,7 +35,7 @@ services:
   # api reaches the SAME realm at keycloak:8080 inside the compose network — hence the
   # *_DISCOVERY_URI vars below.
   keycloak:
-    image: quay.io/keycloak/keycloak:26.0
+    image: quay.io/keycloak/keycloak:26.8.2
     restart: unless-stopped
     command: ["start-dev", "--import-realm", "--http-port=8080"]
     environment:
@@ -48,6 +48,29 @@ services:
       - ./deploy/dev/keycloak-realm.json:/opt/keycloak/data/import/realm.json:ro
     ports:
       - "8090:8080"
+
+  # One-shot: adds what per-organization SSO needs to the realm (the client scope, the service
+  # account the API uses to manage identity providers, the idp_groups attribute). Same file and
+  # same tool as the chart. Organization IdPs themselves are created at runtime by the API.
+  keycloak-config:
+    image: docker.io/adorsys/keycloak-config-cli:6.5.1-26.5.5
+    restart: on-failure
+    depends_on:
+      - keycloak
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_USER: admin
+      KEYCLOAK_PASSWORD: admin
+      KEYCLOAK_AVAILABILITYCHECK_ENABLED: "true"
+      KEYCLOAK_AVAILABILITYCHECK_TIMEOUT: 300s
+      IMPORT_FILES_LOCATIONS: /config/*.json
+      IMPORT_VARSUBSTITUTION_ENABLED: "true"
+      IMPORT_MANAGED_CLIENT: no-delete
+      IMPORT_MANAGED_IDENTITY_PROVIDER: no-delete
+      IMPORT_MANAGED_IDENTITY_PROVIDER_MAPPER: no-delete
+      PROXCLOUD_SSO_KC_CLIENT_SECRET: ${PROXCLOUD_SSO_KC_CLIENT_SECRET:-dev-sso-idp-admin-secret}
+    volumes:
+      - ./deploy/charts/proxcloud/files/keycloak-sso.json:/config/sso.json:ro
 
   api:
     build:
@@ -70,6 +93,7 @@ services:
       PROXCLOUD_SELF_UI_BASE_URL: http://${PROXCLOUD_HOST:-localhost}:8082
       PROXCLOUD_SELF_ADMIN_BASE_URL: http://${PROXCLOUD_HOST:-localhost}:8083
       PROXCLOUD_JOBS_DEBUG_TRIGGERS: "true"
+      PROXCLOUD_JOBS_SCHEDULER_ENABLED: ${PROXCLOUD_JOBS_SCHEDULER_ENABLED:-true}
       # Both entry points stay usable (LAN IP for other machines, localhost on this box).
       PROXCLOUD_CORS_ALLOWED_ORIGINS: "http://${PROXCLOUD_HOST:-localhost}:8082,http://${PROXCLOUD_HOST:-localhost}:8083,http://localhost:8082,http://localhost:8083"
       # OIDC realms the API validates tokens against — same issuer/client vars the
@@ -86,6 +110,10 @@ services:
       AUTH_ADMIN_API_OAUTH2_DISCOVERY_URI: ${PROXCLOUD_ADMIN_API_OAUTH2_DISCOVERY:-http://keycloak:8080/realms/proxcloud}
       AUTH_ADMIN_API_OAUTH2_CLIENT_ID: ${PROXCLOUD_ADMIN_API_OAUTH2_CLIENT_ID:-proxcloud-admin-api}
       PROXCLOUD_DEFAULT_REGION: ${PROXCLOUD_DEFAULT_REGION:-}
+      # Per-organization SSO. ALLOW_INTERNAL lets a dev IdP live on http and a private address.
+      PROXCLOUD_SSO_KC_CLIENT_SECRET: ${PROXCLOUD_SSO_KC_CLIENT_SECRET:-dev-sso-idp-admin-secret}
+      PROXCLOUD_SSO_ALLOW_INTERNAL_IDP: "true"
+      PROXCLOUD_SSO_RESERVED_DOMAINS: proxcloud.local
     ports:
       - "8080:8080"
       - "8081:8081"

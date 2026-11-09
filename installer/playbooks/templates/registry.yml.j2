@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: proxcloud-registry
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pc-registry
+  namespace: proxcloud-registry
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pc-registry
+  namespace: proxcloud-registry
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pc-registry
+  template:
+    metadata:
+      labels:
+        app: pc-registry
+    spec:
+      containers:
+        - name: registry
+          image: docker.io/library/registry:2.8.3
+          ports:
+            - containerPort: 5000
+              # Node loopback only: containerd and the push step use it, nothing else on the network.
+              hostPort: 5000
+              hostIP: 127.0.0.1
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pc-registry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pc-registry
+  namespace: proxcloud-registry
+spec:
+  selector:
+    app: pc-registry
+  ports:
+    - port: 5000
+      targetPort: 5000

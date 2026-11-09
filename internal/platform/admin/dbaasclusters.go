@@ -34,7 +34,7 @@ func (h *Handler) dbaasService(w http.ResponseWriter, r *http.Request) (*externa
 	}
 	ds, err := h.dbaasFor(es)
 	if err != nil {
-		httpx.WriteError(w, err)
+		writeClusterErr(w, err)
 		return nil, nil, false
 	}
 	return es, ds, true
@@ -51,7 +51,7 @@ func (h *Handler) dbaasClusterPins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pins, err := ds.ListDatabasePins(r.Context())
-	if httpx.WriteError(w, err) {
+	if writeClusterErr(w, err) {
 		return
 	}
 	httpx.OK(w, map[string]any{
@@ -75,7 +75,7 @@ func (h *Handler) dbaasClusterBump(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("the provider has no pinned chart version"))
 		return
 	}
-	if err := ds.SetChartVersion(r.Context(), chi.URLParam(r, "clusterId"), pin); httpx.WriteError(w, err) {
+	if err := ds.SetChartVersion(r.Context(), chi.URLParam(r, "clusterId"), pin); writeClusterErr(w, err) {
 		return
 	}
 	httpx.OK(w, map[string]any{"chartVersion": pin})
@@ -98,7 +98,7 @@ func (h *Handler) dbaasClusterBumpAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pins, err := ds.ListDatabasePins(r.Context())
-	if httpx.WriteError(w, err) {
+	if writeClusterErr(w, err) {
 		return
 	}
 	bumped := 0

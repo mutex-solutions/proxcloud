@@ -1,0 +1,82 @@
+# Stage 25, placement=pve-vm only: the mgmt VMs, from a base template straight off the vendor image (the
+# Packer templates are built later, from these very VMs). Ends with add_host, so stage 30 runs as for ssh.
+- name: Create the mgmt VMs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  vars:
+    vm_cfg: "{{ pc.mgmt.vm }}"
+    vm_nodes: "{{ vm_cfg.nodes or pc_nodes }}"
+    server_indexes: "{{ range(vm_cfg.servers) | list }}"
+  tasks:
+    - name: Skip unless the placement is pve-vm
+      ansible.builtin.meta: end_play
+      when: pc.mgmt.placement != 'pve-vm'
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Check the placement
+      ansible.builtin.assert:
+        that:
+          - vm_cfg.ips | length == vm_cfg.servers
+          - vm_cfg.gateway | length > 0
+          - vm_cfg.servers == 1 or vm_nodes | length >= 3
+        fail_msg: mgmt.vm needs one CIDR per server in ips, a gateway, and three Proxmox nodes for three servers (etcd members on different nodes).
+    - name: Ensure a base template per node
+      ansible.builtin.command:
+        argv: >-
+          {{ ['python3', pc_repo_root ~ '/images/build.py', 'base', '--os', vm_cfg.os, '--node', vm_nodes[item],
+              '--storage', vm_cfg.storage or pc_default_storage, '--import-storage', pc_import_storage,
+              '--bridge', vm_cfg.bridge, '--vlan', vm_cfg.vlan | string] }}
+      environment:
+        PVE_URL: "{{ pc.pve.api_url }}"
+        PVE_TOKEN_ID: images@pve!packer
+        PVE_TOKEN_SECRET: "{{ lookup('ansible.builtin.file', pc_gen ~ '/token-packer') }}"
+      changed_when: false
+      register: pc_bases
+      loop: "{{ server_indexes }}"
+    - name: Create the VM
+      ansible.builtin.include_tasks: tasks/clone-vm.yml
+      vars:
+        vm:
+          vmid: "{{ vm_cfg.vmid_base + item }}"
+          name: "pc-mgmt-{{ item + 1 }}"
+          node: "{{ vm_nodes[item] }}"
+          source_vmid: "{{ pc_bases.results[item].stdout | trim }}"
+          storage: "{{ vm_cfg.storage or pc_default_storage }}"
+          cores: "{{ vm_cfg.cores }}"
+          memory: "{{ vm_cfg.memory }}"
+          disk: "{{ vm_cfg.disk }}"
+          bridge: "{{ vm_cfg.bridge }}"
+          vlan: "{{ vm_cfg.vlan }}"
+          user: "{{ vm_cfg.user }}"
+          ip: "{{ vm_cfg.ips[item] }}"
+          gateway: "{{ vm_cfg.gateway }}"
+          nameserver: "{{ vm_cfg.nameserver }}"
+          ssh_key: "{{ pc_ssh_public_key }}"
+          tags: proxcloud;proxcloud-mgmt
+      loop: "{{ server_indexes }}"
+    - name: Add the VM to the mgmt group
+      ansible.builtin.add_host:
+        name: "pc-mgmt-{{ item + 1 }}"
+        groups: mgmt
+        ansible_host: "{{ vm_cfg.ips[item] | split('/') | first }}"
+        ansible_user: "{{ vm_cfg.user }}"
+        ansible_ssh_common_args: "{{ pc.mgmt.ssh_common_args }}"
+      changed_when: false
+      loop: "{{ server_indexes }}"
+
+- name: Wait for the mgmt VMs
+  hosts: mgmt
+  gather_facts: false
+  tasks:
+    - name: Wait for ssh and cloud-init
+      when: pc.mgmt.placement == 'pve-vm'
+      block:
+        - name: Wait for ssh
+          ansible.builtin.wait_for_connection: {timeout: 300}
+        - name: Wait for cloud-init
+          ansible.builtin.command: cloud-init status --wait
+          changed_when: false
+          failed_when: false

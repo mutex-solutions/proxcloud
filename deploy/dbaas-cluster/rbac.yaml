@@ -8,12 +8,15 @@
 #   ---------------------------      -----------------------------------------------
 #   EnsureNamespace (SSA PATCH)      namespaces: create+patch (+get), delete/list for
 #                                    the sync-driven namespace GC (orphan finalization)
-#   ApplySecret (SSA PATCH)          secrets: create+patch (marker + auth Secrets,
+#   ApplySecret (SSA PATCH)          secrets: create+patch (marker, auth, backup-credential,
+#                                    customer-user and BYO-certificate Secrets;
 #                                    RESET_PASSWORD writes onto the engine secret)
 #   GetSecretData / DeleteSecret     secrets: get / delete; list for the orphan sweep
 #                                    (connection-info reads use get)
 #   GetService                       services: get/list (LB IP read-back — the
 #                                    endpoint proxcloud serves to customers)
+#   ListPods / PodLogs               pods: get/list, pods/log: get (GET_LOGS)
+#   ListCRs                          the backup CRs below: list (LIST_BACKUPS)
 #   Apply/Get/List/DeleteApplication applications.argoproj.io (argocd ns only)
 #   engine CR status reads           the operator CRDs below: get/list
 #
@@ -21,7 +24,7 @@
 # therefore needs BOTH `create` and `patch`.
 #
 # ⚠ Why secrets/services/engine-CRs are CLUSTER-wide grants: Kubernetes RBAC cannot
-# wildcard namespaces — a Role binds to exactly one concrete namespace, and the `pc-<projectId>`
+# wildcard namespaces — a Role binds to exactly one concrete namespace, and the `pc-db-<projectId>`
 # namespaces are created dynamically by proxcloud itself, so no pre-created namespaced Role can
 # cover them. The ClusterRole below is the honest trade-off: the proxcloud SA can read/write
 # Secrets in ANY namespace of this cluster. Accepted for v1 because the DBaaS cluster is
@@ -49,7 +52,7 @@ kind: ClusterRole
 metadata:
   name: proxcloud-dbaas
 rules:
-  # pc-<projectId> project namespaces: created via SSA at bootstrap, deleted by the
+  # pc-db-<projectId> project namespaces: created via SSA at bootstrap, deleted by the
   # sync-driven GC once a project's last database is finalized. `list` is label-filtered
   # (app.kubernetes.io/managed-by=proxcloud) by the GC scan.
   - apiGroups: [""]
@@ -61,6 +64,16 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "create", "patch", "delete"]
+  # Database log reading (GET_LOGS): list the engine's pods in a project namespace, then read
+  # their stdout. Every engine here logs to stdout, so this is the whole mechanism — no sidecar
+  # and no log shipper. READ-ONLY and deliberately narrow: `pods` carries get/list only and
+  # there is NO pods/exec, so this grant can read a database's log and nothing else.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
   # LB Service IP read-back (<id>-lb status.loadBalancer.ingress) — read-only; the chart
   # (via ArgoCD) owns the Service itself.
   - apiGroups: [""]
@@ -82,12 +95,21 @@ rules:
   - apiGroups: ["k8s.mariadb.com"]
     resources: ["mariadbs"]
     verbs: ["get", "list"]
-  # TODO-verify(beta): the valkey operator's CRD group/resource is UNPINNED (see the header
-  # of deploy/charts/database-cluster/templates/valkey/valkey.yaml). hyperspike.io/valkeys is
-  # the best-known candidate; correct it here when the operator is pinned, before the valkey
-  # beta gate opens.
-  - apiGroups: ["hyperspike.io"]
-    resources: ["valkeys"]
+  # Backup objects the operators produce (LIST_BACKUPS reads them live, never cached): the
+  # CNPG Backup (barman-cloud plugin runs), the Percona backup and the mariadb PhysicalBackup.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["backups"]
+    verbs: ["get", "list"]
+  - apiGroups: ["ps.percona.com"]
+    resources: ["perconaservermysqlbackups"]
+    verbs: ["get", "list"]
+  - apiGroups: ["k8s.mariadb.com"]
+    resources: ["physicalbackups"]
+    verbs: ["get", "list"]
+  # valkey-operator (valkey.io/ValkeyCluster, beta) — see the header of
+  # deploy/charts/database-cluster/templates/valkey/valkey.yaml.
+  - apiGroups: ["valkey.io"]
+    resources: ["valkeyclusters"]
     verbs: ["get", "list"]
   # Strimzi 1.1.0 (kafka engine). Serves ONLY kafka.strimzi.io/v1 — see the
   # apiVersion note in deploy/charts/database-cluster/templates/kafka/kafka.yaml.

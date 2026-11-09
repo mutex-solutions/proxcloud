@@ -16,6 +16,7 @@ const (
 	StatusDisabled             = "DISABLED"
 	StatusScheduledForDeletion = "SCHEDULED_FOR_DELETION"
 	StatusDeleteInProgress     = "DELETE_IN_PROGRESS"
+	StatusDeleted              = "DELETED"
 )
 
 // MembershipRole values (project memberships only know OWNER/MEMBER — no ADMIN
@@ -57,12 +58,25 @@ type Project struct {
 	// capacity (available/total per model, from the provider gpu-info read). false (the default, incl. absent) =
 	// hidden; the client still sees its own GPU quota/usage regardless.
 	GpuCapacityVisible bool `json:"gpuCapacityVisible"`
+	// ProvisionFailures holds, per provider id, a provisioning attempt that failed and is still to retry. It stays on the
+	// stored doc; MarshalJSON leaves it out of API answers to members.
+	ProvisionFailures map[string]ProvisionFailure `json:"provisionFailures,omitempty"`
 	// Quota is the admin-managed per-project quota config (stored JSON; enforced at the
 	// ProxCloud cloud gate, never pushed to the provider). Shape: {"gpu": {"<model>": n, "*": n}}.
 	Quota                  map[string]any `json:"quota,omitempty"`
 	ScheduledForDeletionAt *time.Time     `json:"scheduledForDeletionAt,omitempty"`
-	CreatedAt              *time.Time     `json:"createdAt,omitempty"`
-	UpdatedAt              *time.Time     `json:"updatedAt,omitempty"`
+	// StatusBeforeDeletion is the status a cancelled deletion restores. DisabledByOperator marks a DISABLED an operator set,
+	// which a billing resume must not lift. Both stay on the stored doc; MarshalJSON leaves them out of API answers.
+	StatusBeforeDeletion string     `json:"statusBeforeDeletion,omitempty"`
+	DisabledByOperator   bool       `json:"disabledByOperator,omitempty"`
+	CreatedAt            *time.Time `json:"createdAt,omitempty"`
+	UpdatedAt            *time.Time `json:"updatedAt,omitempty"`
+}
+
+// ProvisionFailure is one provider's failed attempt to provision the project.
+type ProvisionFailure struct {
+	Message string    `json:"message"`
+	At      time.Time `json:"at"`
 }
 
 // MarshalJSON serializes Project with NULL fields OMITTED (data, billingProfileId,
@@ -140,6 +154,11 @@ func (p *Project) HasServices() bool { return len(p.Services) > 0 }
 // ServiceIDs returns the serviceId of each attached ProjectExternalService (the link to
 // ExternalService.id). Services are embedded free-form (map[string]any, whether built in code or
 // decoded from the store), so the id is read by key.
+// Deleting reports a project scheduled for deletion, being torn down or already torn down.
+func (p *Project) Deleting() bool {
+	return p.Status == StatusScheduledForDeletion || p.Status == StatusDeleteInProgress || p.Status == StatusDeleted
+}
+
 func (p *Project) ServiceIDs() []string {
 	out := make([]string, 0, len(p.Services))
 	for _, svc := range p.Services {

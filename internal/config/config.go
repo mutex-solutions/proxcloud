@@ -66,6 +66,14 @@ type Config struct {
 		Admin    OAuth2Realm
 		AdminAPI OAuth2Realm
 	}
+	// SSO is per-organization single sign-on. An empty ClientSecret leaves the feature off: it needs
+	// a Keycloak service account in the customer realm to create identity providers.
+	SSO struct {
+		ClientID        string
+		ClientSecret    string
+		ReservedDomains []string // never claimable by an organization
+		AllowInternal   bool     // development only: IdPs on http and on private addresses
+	}
 	// DefaultRegion is the region assumed when a provider doc names none
 	// (PROXCLOUD_DEFAULT_REGION / proxcloud.default-region, default "default").
 	DefaultRegion string
@@ -111,6 +119,18 @@ type Config struct {
 		// unauthenticated, network policy notwithstanding.
 		CallbackToken string
 	}
+	// CSIGateway is the listener proxmox-csi controllers of tenant clusters call instead of PVE (internal/cloud/csigw).
+	// Empty Addr: not served. TLS only, so a cert and key are required with an address.
+	CSIGateway struct {
+		Addr    string
+		TLSCert string
+		TLSKey  string
+		// URL is the gateway as the services cluster's controllers reach it (https://host:port), CAFile the PEM they
+		// trust its certificate with. Set, new clusters run their proxmox-csi controller there; empty, they keep the
+		// tenant-side one. Independent of Addr: the replica that creates a cluster need not serve the gateway.
+		URL    string
+		CAFile string
+	}
 	LogLevel string
 }
 
@@ -147,6 +167,12 @@ func Load() (*Config, error) {
 	c.Encryption.DefaultKey = envOr("PROXCLOUD_ENCRYPTION_DEFAULT_KEY",
 		firstNonEmpty(k.String("proxcloud.encryption.default.key"), k.String("proxcloud.encryption.default-key")))
 
+	// Per-organization SSO.
+	c.SSO.ClientID = envOr("PROXCLOUD_SSO_KC_CLIENT_ID", "proxcloud-idp-admin")
+	c.SSO.ClientSecret = os.Getenv("PROXCLOUD_SSO_KC_CLIENT_SECRET")
+	c.SSO.ReservedDomains = strings.Split(os.Getenv("PROXCLOUD_SSO_RESERVED_DOMAINS"), ",")
+	c.SSO.AllowInternal = os.Getenv("PROXCLOUD_SSO_ALLOW_INTERNAL_IDP") == "true"
+
 	// Self URLs.
 	c.Self.BaseURL = envOr("PROXCLOUD_SELF_BASE_URL", k.String("proxcloud.self.base-url"))
 	c.Self.APIBaseURL = envOr("PROXCLOUD_SELF_API_BASE_URL", k.String("proxcloud.self.api-base-url"))
@@ -180,6 +206,12 @@ func Load() (*Config, error) {
 	c.Billing.Token = envOr("PROXCLOUD_BILLING_TOKEN", k.String("proxcloud.billing.token"))
 	c.Billing.CallbackToken = envOr("PROXCLOUD_BILLING_CALLBACK_TOKEN", k.String("proxcloud.billing.callback-token"))
 
+	c.CSIGateway.Addr = envOr("PROXCLOUD_CSI_GATEWAY_ADDR", k.String("proxcloud.csi-gateway.addr"))
+	c.CSIGateway.TLSCert = envOr("PROXCLOUD_CSI_GATEWAY_TLS_CERT", k.String("proxcloud.csi-gateway.tls-cert"))
+	c.CSIGateway.TLSKey = envOr("PROXCLOUD_CSI_GATEWAY_TLS_KEY", k.String("proxcloud.csi-gateway.tls-key"))
+	c.CSIGateway.URL = envOr("PROXCLOUD_CSI_GATEWAY_URL", k.String("proxcloud.csi-gateway.url"))
+	c.CSIGateway.CAFile = envOr("PROXCLOUD_CSI_GATEWAY_CA_FILE", k.String("proxcloud.csi-gateway.ca-file"))
+
 	c.LogLevel = strings.ToUpper(firstNonEmpty(k.String("logging.level.root"), "INFO"))
 
 	return c, nil
@@ -211,6 +243,12 @@ func (c *Config) Validate() error {
 		if c.Billing.Token == "" {
 			missing = append(missing, `PROXCLOUD_BILLING_TOKEN (required when PROXCLOUD_BILLING_PROVIDER=external)`)
 		}
+	}
+	if c.CSIGateway.Addr != "" && (c.CSIGateway.TLSCert == "" || c.CSIGateway.TLSKey == "") {
+		missing = append(missing, "PROXCLOUD_CSI_GATEWAY_TLS_CERT and PROXCLOUD_CSI_GATEWAY_TLS_KEY (required with PROXCLOUD_CSI_GATEWAY_ADDR)")
+	}
+	if c.CSIGateway.URL != "" && (c.CSIGateway.CAFile == "" || !strings.HasPrefix(c.CSIGateway.URL, "https://")) {
+		missing = append(missing, "PROXCLOUD_CSI_GATEWAY_CA_FILE and an https:// PROXCLOUD_CSI_GATEWAY_URL (required together)")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required config: %s", strings.Join(missing, ", "))

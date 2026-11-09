@@ -1,6 +1,9 @@
 package externalservice
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestKamajiConfig(t *testing.T) {
 	es := &ExternalService{
@@ -67,5 +70,46 @@ func TestKamajiConfig(t *testing.T) {
 	unnamed.ChartName = ""
 	if err := unnamed.Validate(); err == nil {
 		t.Error("missing chart name must fail validation")
+	}
+}
+
+// Stage 60 sends "{{ x | int }}", which reaches the API as a string: read as 0, a site's rwx_gib silently meant no
+// StorageClass, its worker_mtu the guest default on a 1450 vnet, and vlan_min/vlan_max no tags at all.
+func TestIntOfTakesTheInstallersStrings(t *testing.T) {
+	for _, c := range []struct {
+		in   any
+		want int
+	}{{float64(100), 100}, {100, 100}, {int64(100), 100}, {"100", 100}, {" 1450 ", 1450}, {"", 0}, {"lots", 0}, {nil, 0}, {true, 0}} {
+		if got := intOf(c.in); got != c.want {
+			t.Errorf("intOf(%#v) = %d, want %d", c.in, got, c.want)
+		}
+	}
+	es := &ExternalService{Config: map[string]any{"cluster": map[string]any{"rootVolumeGiB": "30", "workerMtu": "1450", "rwxGiB": "100"}}}
+	d := es.KamajiConfig().Defaults
+	if d.RootVolumeGiB != 30 || d.NodeGroupMTU != 1450 || d.RWXGiB != 100 {
+		t.Errorf("defaults from strings: %+v", d)
+	}
+}
+
+// The tenant-side controller's keys are named whatever their value, false or empty included: a config that still
+// carries one is refused rather than silently doing nothing.
+func TestKamajiRemovedKeys(t *testing.T) {
+	for _, c := range []struct {
+		cluster map[string]any
+		want    string
+	}{
+		{nil, ""},
+		{map[string]any{"pveApiUrl": "https://192.0.2.11:8006"}, ""},
+		{map[string]any{"csiSharedStores": false}, "csiSharedStores"},
+		{map[string]any{"pveCsiUrl": ""}, "pveCsiUrl"},
+		{map[string]any{"csiSharedStores": true, "pveCsiUrl": "https://192.0.2.60:8006"}, "csiSharedStores,pveCsiUrl"},
+	} {
+		cfg := map[string]any{}
+		if c.cluster != nil {
+			cfg["cluster"] = c.cluster
+		}
+		if got := strings.Join(KamajiRemovedKeys(cfg), ","); got != c.want {
+			t.Errorf("%v: %q, want %q", c.cluster, got, c.want)
+		}
 	}
 }

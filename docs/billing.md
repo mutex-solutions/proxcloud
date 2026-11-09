@@ -17,7 +17,7 @@ arithmetic is exact decimal.
 | `billing` | `internal/platform/billing` | The billing-profile aggregate, the PostgreSQL repos, and the stateful services: balance/due, bill send, pay-by-credit, savings contracts + reminders, suspension **orchestration**, gateways, cards, activation. |
 | `billingjob` | `internal/platform/billingjob` | The charge cron driver — loads active profiles + resources and drives `pricing` to accrue costs onto the current bill. |
 | `chargefanout` | `internal/platform/chargefanout` | Optional RabbitMQ fan-out of the charge job (one message per profile) as a multi-pod alternative to the in-process loop. |
-| `payment` | `internal/platform/payment` | Money-in flows: add funds, deposit/collect by card, register card, the Stripe gateway, and the stuck-transaction scanner. |
+| `payment` | `internal/platform/payment` | Money-in flows: add funds, deposit/collect by card, register card, the Stripe and Airwallex gateways, and the stuck-transaction scanner. |
 | `promotion` | `internal/platform/promotion` | Client promo-code redemption → promotional credit. |
 | `catalog` | `internal/platform/catalog` | Cloud-catalog config reads (flavor categories / image groups). |
 | `billingresource` | `internal/cloud/billingresource` | The cloud → billing bridge: turns a cloud resource (server, volume, bucket, …) into the priced `BillingResource`(s) the rating loop consumes. |
@@ -114,10 +114,18 @@ attribute schema (`BillingResourceType`):
 | Resource type | Provider | Metered attributes (selected) | Not billed when |
 |---|---|---|---|
 | `instance` | `ServerProvider` (`server.go`) | `instance_type`, `ram_mb`, `ram_gb`, `vcpus`, `root_disk_gb`, `gpu_count`, `gpu_model`, `is_bareMetal`, `availability_zone`, `image`, `status` | server status `DELETED`/`ERROR`/`UNKNOWN`/`BUILD` (the Proxmox status is mapped by `pve.MapVMStatus`; a clone/create lock maps to `BUILD`) |
-| `instance_traffic` | `ServerProvider` | `incoming/outgoing × private/public × _traffic_mb`, `total_*_traffic_mb` (usage attrs, read for the month from the provider's Prometheus-compatible metrics source, `config.metrics.source=prometheus`; Proxmox defaults to `none`, so no traffic is metered unless the operator configures it; see `docs/jobs-scheduling.md`) | server ineligible |
+| `instance_traffic` | `ServerProvider` | `incoming/outgoing × private/public × _traffic_mb`, `total_*_traffic_mb` (usage attrs, month to date, from `config.metrics.source`: `pve`, the Proxmox default, reads public-NIC counters every minute; `prometheus` reads a compatible source hourly; `none` meters nothing; see `docs/jobs-scheduling.md`). A rule pricing them must be `OVERWRITE_TOTAL` on an hour or minute cadence (the admin API refuses anything else) | server ineligible |
 | `volume` | `VolumeProvider` (`volume.go`) | `size`, `bootable`, `type`, `status`, `availability_zone` | status `error`/`deleting`/`creating`/`error_deleting` (a legacy set: Proxmox volumes report only `in-use`/`available`) |
-| `floating_ip` | `FloatingIPProvider` (`floatingip.go`) | `status`, `floating_network_id` (typically a flat per-IP charge) | — (no Proxmox resource produces this type yet; public-IP billing is planned) |
-| `load_balancer` | `LoadBalancerProvider` (`loadbalancer.go`) | `flavor_id`, `operating_status` | operating status `ERROR` (no Proxmox resource produces this type yet) |
+| `floating_ip` | `FloatingIPProvider` (`floatingip.go`) | `existence` (typically a flat per-IP charge), `status`, `floating_network_id`. Rows derive from the public-IP allocations (`pvePublicIp`), one per allocation, billed from the moment of allocation | — |
+| `image` | `ImageProvider` (`image.go`) | `size_gb` (a project template's disk, rounded up to whole GiB), `status`. Catalog templates are the operator's and never bill | — |
+| `server_snapshot` | `ServerProvider` | `size_gb` (the server's provisioned disks, not the blocks the snapshot pins: Proxmox reports no per-snapshot usage). One line per snapshot, billed from the moment it was taken, read at each full sync and after a portal action on the server; replication and backup snapshots do not count | — |
+| `server_protection` | `ServerProvider` | `size_gb` (the replica's space), `state`. The Protected add-on, one line per protection from its first successful replication sync until it is disabled; a server on shared storage has no replica and costs nothing | before the first sync |
+| `kubernetes_cluster` | `KubernetesClusterProvider` (`kubernetescluster.go`) | `version`, `status`, `endpoint`, `cp_replicas`, `node_groups`. The control-plane fee only: the worker VMs are the project's own servers and bill as such | until the control plane has an endpoint |
+| `database_cluster` | `DatabaseClusterProvider` (`databasecluster.go`) | `engine`, `version`, `status`, `replicas`, `vcpus_total`, `ram_gb_total`, `storage_gb_total`, `autoscale_enabled`, `read_endpoint_lb`. The full price (it runs on platform nodes), totals already multiplied by replicas | until it has an endpoint |
+| `bucket` | `BucketProvider` (`bucket.go`) | `size_gb` (used, rounded up), `quota_gb` (the quota, or the used size without one), `object_count` | — |
+| `share` | `ShareProvider` (`share.go`) | `protocol`, `size_gb` (used), `quota_gb` (allocated) | — |
+| `sandbox` | `SandboxProvider` (`sandbox.go`) | `template`, `status`, `vcpus`, `ram_gb`, `gpu_count`, `gpu_model`. Priced with `minute` rules, from the minute the sandbox became RUNNING to its end rounded up to whole minutes (at least one) | while PENDING (no item at all) |
+| `sandbox_snapshot` | `SandboxSnapshotProvider` (`sandboxsnapshot.go`) | `kind` (`pause` or `snapshot`), `size_gb`. From the moment it is stored until it is deleted | — |
 
 Every resource additionally gets `region` and `service_id` stamped in (so plan
 filters on those resolve) and `createdAt` (drives mid-month proration) — see
@@ -199,6 +207,10 @@ accrual — by POSTing the resolved resources to a separate billing service inst
 of pricing them here. Resolution stays local because it reads the resource
 cache. Under `external` the billing-only crons in section 14 are not
 scheduled here; the billing service owns them. See `docs/configuration.md`.
+Requests still carry the wall-clock month, because a service without the native
+closing pass would open a second bill for a month that has ended and re-bill it.
+So the last hour of each month stays unbilled under `external` until that service
+has the same charge code and `remote.go` sends the closing cycle.
 
 ### In-process loop vs RabbitMQ fan-out
 
@@ -234,27 +246,46 @@ flowchart TD
 Each cadence tick **accumulates** onto a per-resource `BillItem`:
 
 - Find-or-create the item (keyed by `resourceId` + `resourceType`).
-- Skip if the resource is `NotEligibleForBilling`, or if the item is already at
+- Skip if the resource is `NotEligibleForBilling` (its watermark stays, so a `BUILD`
+  VM is back-billed when it comes up; `SkipInterval` advances it instead, see below), or if the item is already at
   its cap (net ≥ `getTotalCap` = Σ `timeUnitLimit × ruleSum`) — the cap freezes a
   runaway line.
 - Advance the cadence counter by `getTimeUnitsDiff`: `month` is always `+1`;
-  `minute`/`hour` add `min(elapsed units, remaining headroom to the cap)` since the
-  last rate time (or `+1` on the first charge). A deleted resource charges up to
-  its `deletedAt`.
+  `minute`/`hour` add the units **started** since the last rate time (or `+1` on the
+  first charge), clamped to `[0, remaining headroom to the cap]`. A started hour is a
+  billed hour: a resource pays for every clock unit it existed in, so created 10:20 and
+  deleted 12:50 is 3 hours (10, 11, 12).
+- Rows archived during the cycle are fed back in with their `deletedAt` (the charge job,
+  `GetArchivedBillingResources`), which is what bills the last partial interval. Re-rating
+  one is a no-op: its `deletedAt` is behind the watermark and the floor at 0 keeps that
+  from being a refund. A row deleted after the cycle's timestamp but before its charge ran is
+  rated up to its `deletedAt`, and the watermark moves there, not to the cycle: otherwise the
+  next charge rates the unit between the two again. `month` rules skip them, being paid up front when first rated.
 - Update per-rule/per-attribute applied amounts: `round16(perUnit) × diff` (a new
-  amount), accumulated for `ADD_TO_TOTAL` or overwritten for `OVERWRITE_TOTAL`.
+  amount), accumulated for `ADD_TO_TOTAL`. `OVERWRITE_TOTAL` stores the amount as is, on
+  the first charge too: it is a month-to-date total, not a per-unit price.
 - Re-derive `item.NetAmount = round16(min(Σ applied, cap))`.
 
 The result is a bill whose items track a running, capped, cadence-accurate cost.
+
+### Metering staleness
+
+The state sampler stamps `meterState.lastOkAt` per Proxmox provider. While the cluster does
+not answer the cache keeps its last-known state and billing goes on from it. Past 30 minutes
+(`cloud.MeterStaleAfter`) every resource of that provider is rated `NotEligibleForBilling` +
+`SkipInterval`: nothing accrues and the watermark moves, so the blind interval is written off
+instead of being back-billed on recovery. The same moment raises the alert: an `ERROR` log
+line with `alert=pve_metering_stale` and a `METERING_STALE` audit event, once per outage,
+closed by `METERING_RECOVERED`.
 
 ### Charge-time bill adjustments
 
 After rating every resource, `billingjob.billAdjuster` applies (in place):
 
 - **Savings-contract discounts** (`Engine.ApplySavingsContractDiscounts`) — for
-  each active contract whose target item usage ≥ its `monthlyCommittedAmount`, a
-  negative `SAVINGS_CONTRACT` adjustment (upfront → `-min(committed, usage)`; else
-  a discount-rate fraction, MATH_CONTEXT `÷100`).
+  each `ACTIVE` contract whose target item usage ≥ its `monthlyCommittedAmount`, a
+  negative `SAVINGS_CONTRACT` adjustment (a contract paid upfront → `-min(committed, usage)`,
+  at any usage; else a discount-rate fraction, MATH_CONTEXT `÷100`).
 - **Price-adjustment rules** (`Engine.ApplyPriceAdjustmentRules`) — the enabled
   rules of the service's plans add a tiered `PRICE_ADJUSTMENT_RULE` adjustment.
 
@@ -269,7 +300,8 @@ Adjustments are stored on `bill.Adjustments` and move the taxed gross too.
 `pricing.Bill` (table **`bill`**) has a `status` (`OPEN` → `SENT` → `PAID`), a
 `billingCycle` ([first-of-month, first-of-next-month)), `items[]`, the settlement
 collections (`adjustments`, `appliedAccountCredits`, `appliedPromotionalCredits`,
-`collectedAmounts`), and `dueAt` / `sentAt` / `lockedAt`.
+`collectedAmounts`), and `dueAt` / `sentAt`. Rows older than this release may still carry a
+`lockedAt`, which nothing reads.
 
 Each `BillItem` carries the running `netAmount` (scale 16 during accrual), the
 `appliedPricePlanRules` breakdown (per rule, per attribute), and `timeUnits`
@@ -288,17 +320,28 @@ stateDiagram-v2
     PAID --> [*]
 ```
 
-**Current bill lock.** `GetCurrentBill` ensures an `OPEN` bill exists for the
-cycle, then atomically claims it via a `lockedAt` lease (push `lockedAt` to
-now + 1m; only claimable when `lockedAt ≤ now`). This is a wall-clock lease so
-concurrent chargers on different pods serialize on one bill. Bounded retry (5
-attempts) replaces spinning forever.
+**One bill per cycle.** `ChargeBillingResources` runs in one transaction under the profile lock
+(see [Bill writers and the credit lock](#bill-writers-and-the-credit-lock)): find the cycle's
+`OPEN` bill or create it, rate, save. `hourlyCharge` and `monthlyCharge` share a cron spec and
+have different ShedLock names, so they meet in one process every hour; replicas, the fan-out and
+the debug triggers can join them. The section does no cloud or gateway I/O, and the table has no
+unique index, so the lock is the whole guarantee. A second bill costs real money: an item first
+seen on it starts its watermark at the cycle start and charges the month to date again.
+
+**The month's last interval.** A minute or hour pass bills the interval ending at its timestamp,
+so the pass landing on the 1st at 00:00 belongs to the month that just ended
+(`billingjob.chargeCycle`). It tops up that month's `OPEN` bill and rates usage from that month's
+metrics doc; the new month's bill opens on its next pass and starts at 00:00. A month rule is paid
+up front, so its pass at 00:00 opens the new bill. The closing pass never opens a bill: if the
+month's bill is gone (issued by a very late send, or deleted), that interval goes unbilled with a
+warning in the log rather than re-billing the month. A rollover the charge job misses altogether
+loses the same interval.
 
 ### Finalizing bills (send)
 
 `billing.BillSendService.SendAllBills` (the daily `monthlyBill` cron,
-`0 0 0 * * *`) finalizes each profile's **previous-month** `OPEN` bill
-(`sendBill.go`):
+`0 30 0 * * *`, after the passes closing the month) finalizes each profile's **previous-month**
+`OPEN` bill (`sendBill.go`), all of it under the profile lock:
 
 1. **Delete-if-zero** — a bill with zero total and no positive item is deleted.
 2. Skip `SKIP` profiles.
@@ -385,10 +428,20 @@ it settles, persists the consumed credits, flips `PAID`, and re-reviews suspensi
 
 The `payment` package orchestrates money-in. The gateway is an interface
 (`payment.Gateway`) built per integration, so flows are unit-testable with a fake
-and live-testable against a sandbox. **Stripe** is the wired gateway
-(`StripeGateway`, `stripe-go` v82, keyed by an integration's secret). Other
-gateways are configurable integrations added as their factories land; a
-**bank transfer** manual gateway is also supported.
+and live-testable against a sandbox. `payment.NewGateway` picks the card gateway
+for an integration: **Stripe** (`StripeGateway`, `stripe-go` v82, keyed by
+`secret.privateKey`) or **Airwallex** (`AirwallexGateway`, REST, keyed by
+`config.clientId` + `secret.apiKey`; `config.sandbox` selects the demo host). Card
+data never reaches the platform for either: the console confirms the intent in the
+browser (Stripe Elements, Airwallex Elements) and the confirm callback re-reads the
+intent from the gateway. A callback claims the PENDING transaction atomically before
+crediting, so a replayed or concurrent callback credits once. There is no webhook
+endpoint. A **bank transfer** manual gateway is also supported: the customer reports
+the transfer (date, bank reference, optional proof up to 2 MiB), finance is mailed,
+and an operator approves or rejects it; an operator can also record an offline
+payment against a SENT bill (`POST /admin/bill/{id}/record-payment`, MCP tool
+`record_bill_payment`). Issued bills carry a sequential invoice number
+(`INV-<year>-<seq>`); refunds produce a credit note.
 
 Payment gateways are `thirdPartyIntegration` docs (`billing/gateway.go`);
 `ListGateways` maps each enabled one to a `PaymentGatewayDTO`
@@ -444,11 +497,22 @@ sequenceDiagram
   (converted to base currency), linked on the transaction so a refund can void it.
 
 It then marks the txn `SUCCESS` (idempotent — only a `PENDING` txn may be
-processed, guarding against a duplicate credit), sends a thank-you email, and best-
+processed, guarding against a duplicate credit, and the credit's id is the
+transaction's, so a settle retried after a failure cannot mint a second one. The
+scanner re-drives a deposit left `PROCESSING` for 20 minutes), sends a thank-you email, and best-
 effort re-reviews suspension + settles the targeted bill.
 
-`RefundFunds` (admin) full-refunds the `PaymentIntent` and, on success, deletes the
-spendable credit and marks the txn `REFUNDED`.
+`RefundFunds` (admin) full-refunds the `PaymentIntent`, voids the spendable credit and
+marks the txn `REFUNDED`. The gateway refunds a charge in full, so a deposit whose credit is
+partly spent is refused with the amount spent, and so is the deposit of a savings contract
+that still runs: cancel the contract first.
+
+**Credit concurrency.** Every read-check-write of a profile's credit (pay a bill from
+credit, bill issue, refund) runs in one transaction under `Repo.WithProfileLock`, a
+per-profile advisory lock.
+
+**Bank transfers** leave `PENDING` once: approve, reject and the customer's cancel race on
+a conditional update, and the loser gets a 409 naming the state.
 
 ### Deposit / collect by card
 
@@ -487,7 +551,84 @@ comments, else no-op. The admin approve/reject endpoints
 every 20 min) re-drives `PENDING` transactions in the window `(now−24h, now−20min)`
 through the same idempotent `Process` paths the callbacks use — so a deposit whose
 callback never landed, or a collect a pod died mid-processing, eventually resolves.
-An already-`PAID` bill cancels a late duplicate collect (never double-settle).
+A stuck charge on an already-`PAID` bill never settles it again: if the gateway says it
+succeeded it becomes spendable credit, otherwise it is `CANCELLED`.
+
+A failed re-check says nothing about the payment. Only the gateway answering 404 (no such
+intent) closes the transaction as `FAILED`. Any other error (network, 5xx, rate limit,
+rejected credentials, a removed integration) leaves it `PENDING` with the reason in
+`gatewayMessage` or `errorMessage`, and the next pass asks again. The 24 hour window is the bound.
+Past it the scanner stops asking and logs an error on the way out, and the row stays `PENDING`,
+because the money may have moved. A late gateway callback or the operator's
+`GET /admin/account-credit-transactions/{id}/sync` can still settle a deposit, and
+`GET /admin/collect-transactions/{id}/sync` (Re-check in the operator console) asks the gateway about a charge the same
+way a scan does. A bill charge stays in the in-flight guard for as long as it is `PENDING`, however old, so a long gateway
+outage cannot lead to a second charge for the bill; past the window a customer retry is told to contact support. The row's
+`errorMessage` says what the gateway answered. A gateway answer of cancelled ends the charge as `CANCELLED` by itself.
+`POST /admin/collect-transactions/{id}/close` ends a charge by hand: one with a gateway reference only when the gateway,
+asked again at that moment, says it did not succeed (declined or never confirmed). A charge that may still capture
+(processing, waiting for authentication or capture) is refused: cancel it at the gateway, then re-check. A charge with no
+gateway reference (the process stopped between creating the row and the gateway's answer) cannot be asked about: look for
+its id as the reference at the gateway, then close it if nothing was charged.
+
+A bill blocked by such a charge stays `SENT`, so it keeps counting for dunning and auto-suspension (`DueBills`, and the
+balance). That is deliberate: see the C4 changelog entry of 2026-11-07.
+
+### Bill writers and the credit lock
+
+A bill is replaced whole, so everything that reads one and writes it holds the profile lock
+(`pricing.ProfileLockKey`, through `billing.Repo.WithProfileLock` outside pricing): the charge,
+pay with credits, issuing or deleting at send, a recorded manual payment, a card charge settling,
+and the admin bill update and delete. A move between profiles takes both, in sorted order. Gateway
+calls stay outside it, except a deposit refund, which holds it across the gateway call so the
+credit cannot be spent meanwhile; a charge for that profile waits behind it. A charge succeeding on
+a bill that was paid some other way meanwhile becomes spendable credit, and one the bill already
+holds changes nothing.
+
+### Duplicate bills from older releases
+
+Before the charge took the profile lock, a site could get two bills for one profile and cycle.
+Both are invoiced and both count in the balance and the amount due. Look for them on an installed
+site, before the 1st if you can: an `OPEN` pair becomes two invoices at the next send.
+
+<!-- duplicate-bills-list -->
+```sql
+SELECT doc->>'billingProfileId' AS profile, doc#>>'{billingCycle,startDate}' AS cycle, count(*) AS bills,
+       jsonb_agg(jsonb_build_object('id', id, 'status', doc->>'status', 'net',
+         (SELECT coalesce(sum((v #>> '{}')::numeric), 0) FROM jsonb_path_query(doc, '$.items[*].netAmount') v)) ORDER BY id) AS detail
+FROM bill GROUP BY 1, 2 HAVING count(*) > 1;
+```
+
+A bill that holds no money can go. This removes `OPEN` duplicates with no item above zero and no
+adjustment, keeps one bill in every group, and takes the same lock as the charge, so it is safe on a
+running site:
+
+<!-- duplicate-bills-delete -->
+```sql
+BEGIN;
+SELECT pg_advisory_xact_lock(hashtext('billing-profile-credit:' || p))
+FROM (SELECT DISTINCT doc->>'billingProfileId' AS p FROM bill WHERE doc->>'status' = 'OPEN'
+      GROUP BY doc->>'billingProfileId', doc#>>'{billingCycle,startDate}' HAVING count(*) > 1) d;
+DELETE FROM bill WHERE id IN (
+  SELECT id FROM (
+    SELECT id, has_money, row_number() OVER (PARTITION BY profile, cycle ORDER BY has_money DESC, id) AS n
+    FROM (
+      SELECT id, doc->>'billingProfileId' AS profile, doc#>>'{billingCycle,startDate}' AS cycle,
+             jsonb_path_exists(doc, '$.adjustments[*] ? (@ != null)')
+             OR EXISTS (SELECT 1 FROM jsonb_path_query(doc, '$.items[*].netAmount') v WHERE (v #>> '{}')::numeric <> 0) AS has_money
+      FROM bill WHERE doc->>'status' = 'OPEN'
+    ) o
+  ) r WHERE n > 1 AND NOT has_money
+) RETURNING id, doc->>'billingProfileId' AS profile;
+COMMIT;
+```
+
+Run the first query again. What it still lists holds money on both sides, or was already issued, and
+needs a person: a resource on both bills has been charged twice for the time they overlap, so compare
+the lines, keep the correct total, and delete the other bill (`DELETE /api/v1/admin/bill/{id}`) or
+refund it if it has been paid. Until then the charge keeps writing to the oldest `OPEN` bill of the
+pair. An item only on the newer bill is re-billed on the oldest at the next pass, so clear such a pair
+soon: waiting raises the amount to refund.
 
 ---
 
@@ -501,20 +642,42 @@ each with **upfront** and **no-upfront** discount **tiers** (`startAmount` →
 A **savings contract** (`billing.SavingsContract`, table **`savingsContract`**)
 is a profile's accepted commitment. `CreateSavingsContract`:
 
-1. Resolve the available plan; reject a duplicate **`ACTIVE`** contract for the
-   same plan.
+1. Resolve the available plan; reject a duplicate contract for the same plan,
+   **`ACTIVE`** or **`PENDING_PAYMENT`**. The commitment must be positive.
 2. Match the schedule by `durationMonths`.
 3. Pick the discount from the upfront-or-no-upfront tiers: the **max** discount
    among tiers whose `startAmount ≤ monthlyCommittedAmount`.
 4. `startDate` = first of current or next month (`startDate` request =
    `CURRENT_MONTH` / `NEXT_MONTH`); `endDate = startDate + durationMonths`.
-5. Persist an **`ACTIVE`** contract (`monthlyCommittedAmount`, `discountRate`,
-   `paidUpfront`, `targets`).
+5. Persist the contract (`monthlyCommittedAmount`, `discountRate`, `paidUpfront`,
+   `targets`): **`ACTIVE`** without upfront payment, **`PENDING_PAYMENT`** with it, plus
+   `upfrontAmount` = commitment x months, less the discount.
 
-Statuses: `ACTIVE` → `EXPIRED` (or `CANCELLED`). During charging, an active
-contract covering the whole cycle discounts the bill once target usage reaches the
-committed amount (see §4). A deposit tied to a contract activates it
-(`activateSavingsContract`) instead of minting spendable credit.
+Statuses: `PENDING_PAYMENT` → `ACTIVE` → `EXPIRED` (or `CANCELLED`). During charging,
+only an `ACTIVE` contract covering the whole cycle discounts the bill: once target usage
+reaches the committed amount, or from the first unit for one paid upfront, whose usage up to
+the commitment is prepaid (see §4). Cancelling keeps what a bill already holds and stops
+further discounts.
+
+An upfront contract is paid with `POST /payment/deposit/{bp}` carrying
+`savingsContractId`. `AddFunds` requires it to be the caller's own contract and
+`PENDING_PAYMENT`, and takes its `upfrontAmount` as the amount, whatever the client sent.
+When that deposit settles (card callback, or an operator approving the bank transfer)
+`activateSavingsContract` activates the contract instead of minting credit. A term whose start
+has passed restarts at the current month. If the contract no longer wants the money (cancelled
+meanwhile, another amount) the deposit becomes spendable credit. A paid upfront contract cannot be
+cancelled or extended by the customer; one awaiting payment can be cancelled. An operator
+creating a contract in the admin console sets it `ACTIVE` directly and answers for the payment
+(`paymentRecordedBy`, optional `paymentReference`), and
+`POST /admin/savings-contracts/{id}/record-payment {reference}` does the same for a
+`PENDING_PAYMENT` contract paid outside the portal.
+
+An upfront contract with neither a paying deposit nor an operator on record never discounts,
+whatever its status (`SavingsContract.UpfrontUnpaid`). Contracts from before payments were
+enforced are in that state as `ACTIVE`: `HoldUnpaidUpfrontContracts` moves them to
+`PENDING_PAYMENT`, priced, at every API start and logs their ids. It is idempotent, and leaves
+alone what they already discounted and contracts past their `endDate`. An admin edit cannot set
+one back to `ACTIVE`.
 
 **Expiry** — `SavingsService.ExpireContracts` (daily `0 0 0 * * *`) flips every
 `ACTIVE` contract past its `endDate` to `EXPIRED`, cancels its reminders, and sends
@@ -602,6 +765,50 @@ that has crossed its start limit:
 paid bill, a successful deposit/collect) re-evaluates a profile with an
 open/suspended process; when it is no longer eligible it flips the profile back to
 `ACTIVE` (best-effort cloud resume) and marks the process `RESOLVED`.
+
+A suspend, resume or activation applies to the projects the profile pays for: attached to it directly, or in an organization
+that references it with no profile of their own. The project's status moves first, on a fresh read, with a retry when another
+status change wins meanwhile. A loss that survives the retries is logged as an error.
+
+**A suspension saves `SUSPENDED` before its cloud walk.** The walk disables each project and then pauses its VMs, which takes as
+long as the VMs take, and a member opening a project during it must find the profile suspended. A walk that fails or stops halfway
+never undoes the suspension: the profile stays `SUSPENDED`, and every `autoSuspensionJob` pass walks each `SUSPENDED` profile again,
+whatever suspended it and whether or not automatic suspension is on. A project an operator enables under a suspended profile is
+disabled again by that pass; to keep it up, resume the profile. The pass reads each profile again just before its walk, so one
+resumed while an earlier one is being walked is left alone.
+
+**A resume brings back what a suspension paused, and nothing else.** PVE keeps no record of why a VM is paused, so the walk writes
+`pausedBySuspension` on the VM's `cloudResource` row before it pauses the VM, and the resume leg only touches marked rows: a VM
+stopped by a tenant, or paused by someone else, stays as it is, including one a member stopped while the project was held. The
+mark clears once a resume has read the VM as running or stopped on its node. A failed node read leaves the VM to the next pass,
+marked or not, since `/cluster/resources` reads running for a paused VM. The resume walk runs on `context.WithoutCancel`, like the
+suspend, and a resume that fails or stops halfway is retried: every `autoSuspensionJob` pass goes through the marked rows, resumes
+those in an `ENABLED` project, and first enables a project a dead resume left `DISABLED`, if billing allows it and no operator
+disabled it. A VM paused by a build older than the mark has none: its resume is **Start**, which a tenant or operator can press.
+
+**A billing profile cannot be deleted by its owner** while it is `SUSPENDED`, has a negative balance, or still pays for a project
+(409). Deleting it would free the project from the suspension, or leave it `ENABLED` with nothing to rate it. An operator's delete
+keeps its own guards (any bill, any card) and refuses a profile that pays for a project on the same rule, directly or through its
+organization (400).
+
+**What `DISABLED` means** — metering, the sync and rating cover only `ENABLED` projects, so a `DISABLED` project refuses what
+would add usage with a 409: every create, an object upload, new or rotated S3 keys, and every cloud action outside
+`allowedWhileDisabled` (`internal/platform/project/cloud_writes.go`). That list is reads, stop, delete, detach, and removing
+snapshots, backups and objects. S3 keys already issued keep working against the object store itself until the project is
+deleted.
+
+**What lifts `DISABLED`** — an operator's enable, a resume of the profile that paid for it, its activation, or opening the
+project when nothing holds it any more: billing is unconfigured or the paying profile is `ACTIVE`. A project an operator disabled
+(`disabledByOperator`) comes back only through an operator, whatever billing does. Disabling a project billing already holds
+sets that flag, so the operator can keep it down past a resume.
+
+Moving a project to a `NEW` profile, or to an organization with no profile or a deleted one, disables it. The move is refused with
+a 409 while the project holds anything billing rates: a VM, volume, bucket, file share, public IP, image, Kubernetes cluster or
+managed database. Storage counts because S3 keys already issued keep working while the project sits `DISABLED` and unrated. With
+billing unconfigured profiles stay `NEW` for good and nothing is rated, so none of this applies and the project stays as it is.
+A provider that has been removed has nothing left to ask, so only the project's rows count. A provider that is there and cannot
+be read refuses the move with a 503, since what runs there is not known. An operator's move of an `ENABLED` or `DISABLED` project
+(`PUT /admin/project/{id}`) follows the same hold, but not the refusals about leaving a suspended or indebted profile.
 
 ### Billing-profile status lifecycle
 
@@ -716,13 +923,20 @@ consume. Permissions are noted per area.
 | `minutelyCharge` | `30 * * * * *` | accrue `minute`-cadence rules |
 | `hourlyCharge` | `0 0 * * * *` | accrue `hour`-cadence rules |
 | `monthlyCharge` | `0 0 * * * *` | accrue `month`-cadence rules |
-| `monthlyBill` | `0 0 0 * * *` | finalize last-month OPEN bills → SENT/PAID |
+| `monthlyBill` | `0 30 0 * * *` | finalize last-month OPEN bills → SENT/PAID, after the passes closing the month |
 | `monthlyCollect` | `0 0 7 1,5,9,13,16 * *` | collect SENT bills via card |
 | `autoSuspensionJob` | `0 */30 * * * *` | dunning + auto-suspend |
 | `paymentGatewayTransactionScanning` | `0 */20 * * * *` | re-drive stuck PENDING transactions |
 | `savingsContractExpiration` | `0 0 0 * * *` | expire ended contracts |
 | `savingsContractExpiryReminders` | `0 0 0 * * *` | schedule expiry reminders |
 | `reminderNotifications` | `0 0 * * * *` | dispatch due reminders |
+
+These are the billing crons; the jobs that feed them (cloud sync, the minutely
+Proxmox and sandbox state reads, metrics) are in
+[jobs-scheduling.md](jobs-scheduling.md#job-catalog). Sandbox minutes ride on
+`minutelyCharge`: `sandboxStateSync` (`10 * * * * *`) reads every sandbox's state
+twenty seconds before it, so each running sandbox has its row when the minute is
+charged.
 
 Jobs run under a distributed lock (`atMostFor` / `atLeastFor`) so only one pod
 runs each tick.

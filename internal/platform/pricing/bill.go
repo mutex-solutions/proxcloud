@@ -39,6 +39,9 @@ type Bill struct {
 	InvoiceCurrency  string            `json:"invoiceCurrency,omitempty"`
 	BillingProfileID string            `json:"billingProfileId,omitempty"`
 	BillingCycle     *BillBillingCycle `json:"billingCycle,omitempty"`
+	// InvoiceNumber is the sequential document number (INV-<YYYY>-<seq>), stamped exactly once
+	// when the bill leaves OPEN; never renumbered.
+	InvoiceNumber string `json:"invoiceNumber,omitempty"`
 	// Settlement collections (credits/dunning slices): credits + collected payments
 	// applied against the bill net, plus adjustments.
 	Adjustments               []BillAdjustment           `json:"adjustments,omitempty"`
@@ -47,7 +50,6 @@ type Bill struct {
 	CollectedAmounts          []AppliedCollectedCredit   `json:"collectedAmounts,omitempty"`
 	DueAt                     *time.Time                 `json:"dueAt,omitempty"`
 	SentAt                    *time.Time                 `json:"sentAt,omitempty"`
-	LockedAt                  *time.Time                 `json:"lockedAt,omitempty"`
 	CreatedAt                 *time.Time                 `json:"createdAt,omitempty"`
 	UpdatedAt                 *time.Time                 `json:"updatedAt,omitempty"`
 }

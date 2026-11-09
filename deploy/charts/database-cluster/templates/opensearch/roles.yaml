@@ -1,0 +1,40 @@
+{{- if and (eq .Values.engine "opensearch") .Values.opensearch.roles }}
+{{/*
+Customer-defined OpenSearch roles: index permissions over their own patterns.
+
+Like OpensearchUser, THE CR NAME IS THE ROLE NAME the security plugin sees, and
+one namespace holds every database in the project, so it stays prefixed
+(<id>-r-<name>). The user role bindings in users.yaml resolve customer role
+names through the same prefix.
+
+clusterPermissions is deliberately NOT rendered: cluster-level grants are how a
+role reaches beyond its own indices (and the operator's admin surface), so they
+are not a customer knob. allowedActions are OpenSearch ACTION GROUPS from a
+server-side allowlist (internal/cloud/dbaas/config.go osActionGroups), never
+raw action strings.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+{{- range .Values.opensearch.roles }}
+---
+apiVersion: opensearch.org/v1
+kind: OpensearchRole
+metadata:
+  {{- /* '_' -> '-': idents allow underscores, k8s names do not (config.go
+       K8sName); users.yaml resolves customer roles with the same mapping. */}}
+  name: {{ $name }}-r-{{ .name | replace "_" "-" }}
+  labels:
+    {{- include "database-cluster.labels" $ | nindent 4 }}
+  annotations:
+    # Same wave as the other access CRs — the operator rejects a role whose
+    # cluster does not exist yet.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  opensearchCluster:
+    name: {{ $name }}
+  indexPermissions:
+    - indexPatterns:
+        {{- toYaml .indexPatterns | nindent 8 }}
+      allowedActions:
+        {{- toYaml .actions | nindent 8 }}
+{{- end }}
+{{- end }}

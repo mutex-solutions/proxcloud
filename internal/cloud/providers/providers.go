@@ -9,6 +9,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -36,6 +37,33 @@ type ProjectScoped interface {
 // delete-archived even though the cloud still lists it (e.g. a server in status DELETED).
 type Deletable interface {
 	ShouldBeDeleted(cr *cloud.CloudResource) bool
+}
+
+// Replaceable is an optional Provider capability: the live object under a cached row's externalId
+// is a different object (PVE hands out the lowest free vmid again). Reconcile archives the old row
+// and inserts a new one, so the new object gets its own id, createdAt and bill item.
+type Replaceable interface {
+	Superseded(cached, fresh *cloud.CloudResource) bool
+}
+
+// VanishGrace is an optional Provider capability for clouds whose list lags their writes (pmxcfs):
+// a row younger than the grace is not archived for being absent, and a row archived less than the
+// grace ago is not resurrected for being still listed.
+type VanishGrace interface {
+	VanishGrace() time.Duration
+}
+
+// UnreadKeeper is an optional Provider capability for a cloud that can list an object without being able to read it
+// (its node is down): such a cached row is not gone, however absent from List. The provider may change the row's data
+// in place; changed says to store it. A row it does not keep is archived as the provider left it.
+type UnreadKeeper interface {
+	KeepUnread(cached *cloud.CloudResource) (keep, changed bool)
+}
+
+// CacheMerger is an optional Provider capability: before comparing, carry over what the fresh read did not
+// know from the cached row (a RustFS bucket whose usage the scanner could not answer).
+type CacheMerger interface {
+	MergeCached(cached, fresh map[string]any)
 }
 
 // Sync lists a provider's cloud resources and upserts each into the cache (blind upsert, no
@@ -79,9 +107,44 @@ type ReconcileStats struct{ Created, Updated, Deleted int }
 // `now` is the sync snapshot time (stamped on writes + the delete-guard cutoff).
 func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID string, now time.Time) (ReconcileStats, error) {
 	var st ReconcileStats
+	// The rows are read after the list. A row that followed its resource onto another id since (a retype's follow,
+	// ChangeExternalID stamps ExternalIDSince with the wall clock) is newer than the list: the list may still show the
+	// old id, which no row has any more, and not the new one, which the row has.
+	listedAt := time.Now().UTC()
 	list, err := p.List(ctx)
 	if err != nil {
 		return st, err
+	}
+	scopeRows := func() ([]cloud.CloudResource, error) {
+		if ps, ok := p.(ProjectScoped); ok && ps.ProjectID() != "" {
+			return repo.FindByServiceProjectAndType(ctx, serviceID, ps.ProjectID(), p.Type())
+		}
+		return repo.FindByServiceAndType(ctx, serviceID, p.Type())
+	}
+	renamedSinceList := func(cr *cloud.CloudResource) bool {
+		return cr.ExternalIDSince != nil && cr.ExternalIDSince.After(listedAt)
+	}
+	var pending []cloud.CloudResource // new in the list: inserted once the loop is done
+	var grace time.Duration
+	if g, ok := p.(VanishGrace); ok {
+		grace = g.VanishGrace()
+	}
+	var merge func(cached, fresh map[string]any)
+	if m, ok := p.(CacheMerger); ok {
+		merge = m.MergeCached
+	}
+	insert := func(r *cloud.CloudResource) error {
+		t := now
+		r.UpdatedAt = &t
+		if r.CreatedAt == nil {
+			c := now
+			r.CreatedAt = &c
+		}
+		if _, err := repo.Upsert(ctx, r, merge); err != nil {
+			return err
+		}
+		st.Created++
+		return nil
 	}
 	fresh := make(map[string]bool, len(list))
 	for i := range list {
@@ -99,23 +162,25 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		if cached == nil {
 			// Recreate guard: if the user deleted this resource after the sync snapshot, don't
 			// resurrect it from a stale cloud read.
-			guard, err := repo.WasUserDeletedAfter(ctx, serviceID, r.ExternalID, &now)
+			guardAt := now.Add(-grace)
+			guard, err := repo.WasUserDeletedAfter(ctx, serviceID, r.ExternalID, &guardAt)
 			if err != nil {
 				return st, err
 			}
 			if guard {
 				continue
 			}
-			t := now
-			r.UpdatedAt = &t
-			if r.CreatedAt == nil {
-				c := now
-				r.CreatedAt = &c
-			}
-			if _, err := repo.Insert(ctx, &r); err != nil {
+			pending = append(pending, r)
+			continue
+		}
+		if rp, ok := p.(Replaceable); ok && rp.Superseded(cached, &r) {
+			if err := repo.DeleteAndArchive(ctx, cached, now); err != nil {
 				return st, err
 			}
-			st.Created++
+			st.Deleted++
+			if err := insert(&r); err != nil {
+				return st, err
+			}
 			continue
 		}
 		// shouldBeDeleted gate: a cached resource the provider
@@ -145,6 +210,9 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		// gets it stamped so billing accrues from true age, not first-sync time. Bypass the
 		// unchanged-data skip until Info.CreatedAt lands (self-limiting — once set, this is false).
 		infoHeal := r.Info != nil && r.Info.CreatedAt != nil && (cached.Info == nil || cached.Info.CreatedAt == nil)
+		if m, ok := p.(CacheMerger); ok {
+			m.MergeCached(cached.Data, r.Data)
+		}
 		// isNeededToUpdate: skip the write when the cloud object is unchanged (unless healing Info). A
 		// KeyedComparer provider uses the per-key compareMaps (number-width + list-order tolerant);
 		// others fall back to the whole-data JSON compare.
@@ -168,24 +236,56 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		st.Updated++
 	}
 
+	// A new id in the list may be the old id of a row renamed since: inserting it would bill the resource twice until
+	// the next sync. Which one it is cannot be told here, so the new ones wait for the next sync.
+	// ponytail: defers every insert of the scope for one sync; match on the old id if that delay ever matters.
+	if len(pending) > 0 {
+		rows, err := scopeRows()
+		if err != nil {
+			return st, err
+		}
+		if !slices.ContainsFunc(rows, func(cr cloud.CloudResource) bool { return renamedSinceList(&cr) }) {
+			for i := range pending {
+				if err := insert(&pending[i]); err != nil {
+					return st, err
+				}
+			}
+		}
+	}
+
 	// delete-of-vanished: cached resources of this type no longer present in the cloud. Scope the
 	// scan to this project when the provider exposes its projectId (the deletion scan is
 	// projectId+serviceId+type-scoped) — otherwise a shared serviceId would let this project's sync
 	// delete-archive another project's cached resources. Falls back to the serviceId+type scan for
 	// providers that don't declare a project.
-	var cachedAll []cloud.CloudResource
-	if ps, ok := p.(ProjectScoped); ok && ps.ProjectID() != "" {
-		cachedAll, err = repo.FindByServiceProjectAndType(ctx, serviceID, ps.ProjectID(), p.Type())
-	} else {
-		cachedAll, err = repo.FindByServiceAndType(ctx, serviceID, p.Type())
-	}
+	cachedAll, err := scopeRows()
 	if err != nil {
 		return st, err
 	}
 	for i := range cachedAll {
 		cr := cachedAll[i]
-		if fresh[cr.ExternalID] {
+		if fresh[cr.ExternalID] || renamedSinceList(&cr) {
 			continue
+		}
+		if grace > 0 && cr.CreatedAt != nil && now.Sub(*cr.CreatedAt) < grace {
+			continue
+		}
+		// Gone under its old id because the portal is moving it: the move carries the row over to the new one.
+		if cr.Moving(now) {
+			continue
+		}
+		if k, ok := p.(UnreadKeeper); ok {
+			if keep, changed := k.KeepUnread(&cr); keep {
+				if changed {
+					t := now
+					cr.UpdatedAt = &t
+					if _, err := repo.Update(ctx, &cr); err != nil {
+						return st, err
+					}
+					st.Updated++
+				}
+				continue
+			}
 		}
 		if err := repo.DeleteAndArchive(ctx, &cr, now); err != nil {
 			return st, err

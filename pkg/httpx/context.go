@@ -18,6 +18,10 @@ type RequestContext struct {
 	Issuer        string
 	Azp           string // authorized party (token azp claim) — gates the admin realm/client
 	SigV4KeyID    string // set when the request authenticated via AWS SigV4 (hmac_keys) — Admin API
+	PAT           bool   // authenticated with a client API token
+	IdP           string // alias of the org IdP this session came through; "" for a local login
+	IdPGroups     []string
+	SSOScope      bool // the token carries the proxcloud-sso scope, so an empty IdP really means local
 	// Roles/permissions populate in later slices (Org/Project).
 }
 

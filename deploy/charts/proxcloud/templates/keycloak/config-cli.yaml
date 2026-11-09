@@ -9,6 +9,15 @@ bundled keycloakx is enabled.
 {{- $cli := .Values.keycloakConfigCli }}
 {{- /* Group the derived clients by realm name (admin + adminApi usually share master). */}}
 {{- $realms := dict }}
+{{- /* Per-organization SSO: the same fragment docker-compose applies, minus its realm and client list. */}}
+{{- $sso := dict }}
+{{- $ssoScopes := list }}
+{{- if .Values.auth.sso.enabled }}
+{{- $sso = .Files.Get "files/keycloak-sso.json" | fromJson }}
+{{- $ssoScopes = $sso.defaultDefaultClientScopes }}
+{{- end }}
+{{- $mainRealm := "" }}
+{{- with .Values.auth.main.issuer }}{{- $mainRealm = include "proxcloud.realmName" . }}{{- end }}
 {{- if .Values.auth.main.issuer }}
 {{- $name := include "proxcloud.realmName" .Values.auth.main.issuer }}
 {{- $ui := required "api.selfUrls.ui is required to derive the auth.main client's redirect URIs (keycloakConfigCli)" .Values.api.selfUrls.ui }}
@@ -20,7 +29,8 @@ bundled keycloakx is enabled.
       "directAccessGrantsEnabled" true
       "redirectUris" (list (printf "%s/*" $ui))
       "webOrigins" (list $ui)
-      "attributes" (dict "pkce.code.challenge.method" "S256" "post.logout.redirect.uris" (printf "%s/*" $ui)) }}
+      "attributes" (dict "pkce.code.challenge.method" (ternary "S256" "" .Values.keycloakConfigCli.requirePkce) "post.logout.redirect.uris" (printf "%s/*" $ui)) }}
+{{- with $ssoScopes }}{{- $_ := set $client "defaultClientScopes" . }}{{- end }}
 {{- /* The customer realm: registration on, email as the username (ProxCloud keys users by email). */}}
 {{- $_ := set $realms $name (dict
       "realm" $name
@@ -29,7 +39,19 @@ bundled keycloakx is enabled.
       "registrationEmailAsUsername" true
       "loginWithEmailAllowed" true
       "resetPasswordAllowed" true
+      "sslRequired" .Values.keycloakConfigCli.sslRequired
       "clients" (list $client)) }}
+{{- if .Values.auth.sso.enabled }}
+{{- $def := index $realms $name }}
+{{- range $key := list "defaultDefaultClientScopes" "clientScopes" "users" "attributes" "userProfile" }}
+{{- $_ := set $def $key (index $sso $key) }}
+{{- end }}
+{{- range $sso.clients }}
+{{- if eq .clientId "proxcloud-idp-admin" }}
+{{- $_ := set $def "clients" (append (index $def "clients") .) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- if .Values.auth.admin.issuer }}
 {{- $name := include "proxcloud.realmName" .Values.auth.admin.issuer }}
@@ -42,8 +64,9 @@ bundled keycloakx is enabled.
       "directAccessGrantsEnabled" true
       "redirectUris" (list (printf "%s/*" $admin))
       "webOrigins" (list $admin)
-      "attributes" (dict "pkce.code.challenge.method" "S256" "post.logout.redirect.uris" (printf "%s/*" $admin)) }}
-{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "clients" (list)) }}
+      "attributes" (dict "pkce.code.challenge.method" (ternary "S256" "" .Values.keycloakConfigCli.requirePkce) "post.logout.redirect.uris" (printf "%s/*" $admin)) }}
+{{- if and $ssoScopes (eq $name $mainRealm) }}{{- $_ := set $client "defaultClientScopes" $ssoScopes }}{{- end }}
+{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "sslRequired" .Values.keycloakConfigCli.sslRequired "clients" (list)) }}
 {{- $_ := set $def "clients" (append (index $def "clients") $client) }}
 {{- $_ := set $realms $name $def }}
 {{- end }}
@@ -55,7 +78,8 @@ bundled keycloakx is enabled.
       "publicClient" true
       "standardFlowEnabled" false
       "directAccessGrantsEnabled" true }}
-{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "clients" (list)) }}
+{{- if and $ssoScopes (eq $name $mainRealm) }}{{- $_ := set $client "defaultClientScopes" $ssoScopes }}{{- end }}
+{{- $def := index $realms $name | default (dict "realm" $name "enabled" true "sslRequired" .Values.keycloakConfigCli.sslRequired "clients" (list)) }}
 {{- $_ := set $def "clients" (append (index $def "clients") $client) }}
 {{- $_ := set $realms $name $def }}
 {{- end }}
@@ -107,14 +131,10 @@ spec:
             - name: KEYCLOAK_USER
               value: {{ $cli.adminUser | quote }}
             - name: KEYCLOAK_PASSWORD
-              {{- if $cli.existingSecret }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ $cli.existingSecret }}
+                  name: {{ include "proxcloud.kcAdminSecretName" . }}
                   key: {{ $cli.passwordKey }}
-              {{- else }}
-              value: {{ $cli.adminPassword | required "keycloakConfigCli.adminPassword (or existingSecret) is required when keycloakConfigCli.enabled" | quote }}
-              {{- end }}
             - name: KEYCLOAK_AVAILABILITYCHECK_ENABLED
               value: "true"
             - name: KEYCLOAK_AVAILABILITYCHECK_TIMEOUT
@@ -125,6 +145,20 @@ spec:
             # built-in admin-cli / security-admin-console must survive).
             - name: IMPORT_MANAGED_CLIENT
               value: no-delete
+            # Organization IdPs are created at runtime by the API; config-cli must never remove them.
+            - name: IMPORT_MANAGED_IDENTITY_PROVIDER
+              value: no-delete
+            - name: IMPORT_MANAGED_IDENTITY_PROVIDER_MAPPER
+              value: no-delete
+            {{- if .Values.auth.sso.enabled }}
+            - name: IMPORT_VARSUBSTITUTION_ENABLED
+              value: "true"
+            - name: PROXCLOUD_SSO_KC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "proxcloud.apiSecretName" . }}
+                  key: sso-client-secret
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /config

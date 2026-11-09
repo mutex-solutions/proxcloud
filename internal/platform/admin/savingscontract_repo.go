@@ -36,13 +36,13 @@ func (r *Repo) savingsContractAvailablePlan(ctx context.Context, id string) (*bi
 	return &plan, nil
 }
 
-// savingsContractActiveExists reports whether an ACTIVE contract already exists for the given
-// (savingsPlanId, billingProfileId) pair.
+// savingsContractActiveExists reports whether a contract, ACTIVE or awaiting its payment, already exists
+// for the given (savingsPlanId, billingProfileId) pair: both of them would stack their discounts.
 func (r *Repo) savingsContractActiveExists(ctx context.Context, savingsPlanID, billingProfileID string) (bool, error) {
 	return r.c(savingsContractCollection).Exists(ctx, pgdoc.M{
 		"savingsPlanId":    savingsPlanID,
 		"billingProfileId": billingProfileID,
-		"status":           string(billing.SavingsStatusActive),
+		"status":           pgdoc.M{"$in": []string{billing.SavingsStatusActive, billing.SavingsStatusPendingPayment}},
 	})
 }
 

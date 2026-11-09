@@ -106,6 +106,30 @@ func (r *Repo) CountProjects(ctx context.Context, orgID string) (int64, error) {
 	return r.projects.Count(ctx, pgdoc.M{"organizationId": orgID})
 }
 
+// ProjectPaidBy names one live project this billing profile pays for, "" when there is none: its own profile, or with none of its
+// own its organization's. The rule is project.Repo.AllByBillingProfile's, which this package cannot import.
+func (r *Repo) ProjectPaidBy(ctx context.Context, bpID string) (string, error) {
+	orgs, err := r.FindAllByBillingProfileID(ctx, bpID)
+	if err != nil {
+		return "", err
+	}
+	ids := make([]string, 0, len(orgs))
+	for i := range orgs {
+		ids = append(ids, orgs[i].ID)
+	}
+	var p struct {
+		Name string `json:"name"`
+	}
+	found, err := r.projects.FindOne(ctx, pgdoc.M{"status": pgdoc.M{"$ne": "DELETED"}, "$or": []pgdoc.M{
+		{"billingProfileId": bpID},
+		{"organizationId": pgdoc.M{"$in": ids}, "$or": []pgdoc.M{{"billingProfileId": nil}, {"billingProfileId": ""}}},
+	}}, &p)
+	if err != nil || !found {
+		return "", err
+	}
+	return p.Name, nil
+}
+
 // --- members ---
 
 func (r *Repo) AddMember(ctx context.Context, orgID, sub, role string) (*Member, error) {

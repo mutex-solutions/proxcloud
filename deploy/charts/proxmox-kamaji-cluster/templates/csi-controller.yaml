@@ -1,0 +1,92 @@
+{{- /*
+proxmox-csi's controller for this cluster, on the services cluster next to its control plane: the tenant cluster runs the
+node plugin only (addons.yaml, controller at 0 replicas) and holds no PVE credential. Every container talks to the tenant
+API through the Kamaji admin kubeconfig (in-cluster address, so the API allowlist does not apply), and the plugin calls the
+portal's CSI gateway with the cluster's own credential from the Secret the portal writes (never in this document). The
+upstream chart cannot mount a kubeconfig for its sidecars, hence this template. Leases and storage capacity objects live in
+the tenant's csi-proxmox namespace, as with the tenant-side controller.
+*/ -}}
+{{- $gw := .Values.proxmox.csi.gateway | default dict }}
+{{- if and $gw.secretName .Values.proxmox.csi.storageClasses }}
+{{- $img := .Values.csiController.images }}
+{{- $kube := "--kubeconfig=/etc/tenant/kubeconfig" }}
+{{- $sc := dict "allowPrivilegeEscalation" false "readOnlyRootFilesystem" true "capabilities" (dict "drop" (list "ALL")) "seccompProfile" (dict "type" "RuntimeDefault") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-csi-controller
+  labels:
+    app.kubernetes.io/name: proxmox-csi-controller
+    proxcloud.io/cluster-id: {{ .Release.Name }}
+spec:
+  replicas: 1
+  # One controller at a time: the sidecars elect a leader in the tenant anyway, Recreate just skips the overlap.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: proxmox-csi-controller
+      proxcloud.io/cluster-id: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: proxmox-csi-controller
+        proxcloud.io/cluster-id: {{ .Release.Name }}
+    spec:
+      # Nothing here talks to the services cluster's own API.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532}
+      containers:
+        - name: proxmox-csi-controller
+          image: {{ $img.controller | quote }}
+          args: ["-v=4", "--csi-address=unix:///csi/csi.sock", "--cloud-config=/etc/proxmox/config.yaml", {{ $kube | quote }}]
+          securityContext: {{ toJson $sc }}
+          resources: {requests: {cpu: 10m, memory: 32Mi}}
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
+            - {name: cloud-config, mountPath: /etc/proxmox, readOnly: true}
+            - {name: tenant, mountPath: /etc/tenant, readOnly: true}
+        - name: csi-attacher
+          image: {{ $img.attacher | quote }}
+          args: ["-v=2", "--csi-address=unix:///csi/csi.sock", "--timeout=3m", "--default-fstype=ext4",
+                 "--leader-election", "--leader-election-namespace=csi-proxmox", {{ $kube | quote }}]
+          securityContext: {{ toJson $sc }}
+          resources: {requests: {cpu: 10m, memory: 32Mi}}
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
+            - {name: tenant, mountPath: /etc/tenant, readOnly: true}
+        - name: csi-provisioner
+          image: {{ $img.provisioner | quote }}
+          # The CSIDriver says storageCapacity, so the scheduler wants capacity objects: they go to the tenant's
+          # csi-proxmox, owned by nothing there (this pod is not in the tenant).
+          args: ["-v=2", "--csi-address=unix:///csi/csi.sock", "--timeout=3m", "--default-fstype=ext4",
+                 "--enable-capacity", "--capacity-ownerref-level=-1",
+                 "--leader-election", "--leader-election-namespace=csi-proxmox", {{ $kube | quote }}]
+          env:
+            - {name: NAMESPACE, value: csi-proxmox}
+          securityContext: {{ toJson $sc }}
+          resources: {requests: {cpu: 10m, memory: 32Mi}}
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
+            - {name: tenant, mountPath: /etc/tenant, readOnly: true}
+        - name: csi-resizer
+          image: {{ $img.resizer | quote }}
+          args: ["-v=2", "--csi-address=unix:///csi/csi.sock", "--timeout=3m", "--handle-volume-inuse-error=false",
+                 "--leader-election", "--leader-election-namespace=csi-proxmox", {{ $kube | quote }}]
+          securityContext: {{ toJson $sc }}
+          resources: {requests: {cpu: 10m, memory: 32Mi}}
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
+            - {name: tenant, mountPath: /etc/tenant, readOnly: true}
+      volumes:
+        - {name: socket-dir, emptyDir: {}}
+        - name: cloud-config
+          secret:
+            secretName: {{ $gw.secretName }}
+            items: [{key: config.yaml, path: config.yaml}, {key: ca.crt, path: ca.crt}]
+        - name: tenant
+          secret:
+            secretName: {{ required "proxmox.csi.gateway.kubeconfigSecretName is required" $gw.kubeconfigSecretName }}
+            # The control plane's in-cluster address; admin.conf names the LoadBalancer, which the API allowlist guards.
+            items: [{key: admin.svc, path: kubeconfig}]
+{{- end }}

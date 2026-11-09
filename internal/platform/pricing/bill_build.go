@@ -97,6 +97,11 @@ func getBillItemName(res *BillingResource) string {
 // applied price-plan-rule amounts; re-derive item.NetAmount = round16(min(Σ, cap)).
 func updateBillItems(rc RatingContext, bc BillingContext, res *BillingResource, results []PricePlanRuleResult, item *BillItem) {
 	if res.NotEligibleForBilling {
+		// A blind interval (stale cloud state) is written off instead of back-billed on recovery;
+		// every other ineligible state (BUILD, …) keeps its watermark and is back-billed.
+		if res.SkipInterval {
+			advanceWatermark(rc, item, res)
+		}
 		return
 	}
 	totalCap := getTotalCap(bc, rc.TimeUnit, results)
@@ -104,18 +109,15 @@ func updateBillItems(rc RatingContext, bc BillingContext, res *BillingResource, 
 		return
 	}
 	diff := getTimeUnitsDiff(bc, rc, item, res)
-	ct := rc.CycleTimestamp
 	switch rc.TimeUnit {
 	case TimeUnitMinute:
 		*item.TimeUnits.Minute = diff + *item.TimeUnits.Minute
-		item.TimeUnits.MinuteLastRateTime = &ct
 	case TimeUnitHour:
 		*item.TimeUnits.Hour = diff + *item.TimeUnits.Hour
-		item.TimeUnits.HourLastRateTime = &ct
 	case TimeUnitMonth:
 		*item.TimeUnits.Month = diff + *item.TimeUnits.Month
-		item.TimeUnits.MonthLastRateTime = &ct
 	}
+	advanceWatermark(rc, item, res)
 	for i := range results {
 		ppid := results[i].PricePlanRule.ID
 		if applied := findAppliedRule(item, ppid); applied != nil {
@@ -134,6 +136,24 @@ func updateBillItems(rc RatingContext, bc BillingContext, res *BillingResource, 
 	item.Metadata = res.Values
 }
 
+// advanceWatermark moves the rated-up-to mark of the charge's cadence to the cycle timestamp, or to the resource's
+// deletion when that is later: such a row was just rated up to its deletion (getTimeUnitsDiff), so a mark at the cycle
+// would rate the unit between the two again on the next charge.
+func advanceWatermark(rc RatingContext, item *BillItem, res *BillingResource) {
+	ct := rc.CycleTimestamp
+	if res.DeletedAt != nil && res.DeletedAt.After(ct) {
+		ct = *res.DeletedAt
+	}
+	switch rc.TimeUnit {
+	case TimeUnitMinute:
+		item.TimeUnits.MinuteLastRateTime = &ct
+	case TimeUnitHour:
+		item.TimeUnits.HourLastRateTime = &ct
+	case TimeUnitMonth:
+		item.TimeUnits.MonthLastRateTime = &ct
+	}
+}
+
 // getTotalCap: Σ over results of
 // (timeUnitLimit × Σ amounts). No rounding.
 func getTotalCap(bc BillingContext, timeUnit string, results []PricePlanRuleResult) decimal.Decimal {
@@ -149,32 +169,43 @@ func getTotalCap(bc BillingContext, timeUnit string, results []PricePlanRuleResu
 	return total
 }
 
-// getTimeUnitsDiff: MONTH always 1; MINUTE/HOUR
-// = 1 on a nil watermark, else min(elapsed-units, remaining-headroom) — NOT floored
-// at zero. chargeTime = deletedAt if set, else the cycle timestamp.
+// getTimeUnitsDiff: MONTH always 1; MINUTE/HOUR = 1 on a nil watermark, else the units started
+// since the watermark, clamped to [0, remaining headroom]. chargeTime = deletedAt if set, else the
+// cycle timestamp.
+//
+// Units are counted up (a started hour is a billed hour), so a resource pays for every clock unit
+// it existed in: created 10:20, deleted 12:50 = 3 hours (10, 11, 12). The watermark sits on a unit
+// boundary after the first charge, so this only changes the first partial interval and the last
+// one. The floor makes re-rating an archived row (deletedAt behind the watermark) a no-op instead
+// of a refund, which is what lets the charge job feed archived rows on every pass.
 func getTimeUnitsDiff(bc BillingContext, rc RatingContext, item *BillItem, res *BillingResource) int64 {
 	chargeTime := rc.CycleTimestamp
 	if res.DeletedAt != nil {
 		chargeTime = *res.DeletedAt
 	}
 	limit := int64(bc.timeUnitLimit(rc.TimeUnit))
+	var last *time.Time
+	var used int64
+	var unit time.Duration
 	switch rc.TimeUnit {
 	case TimeUnitMinute:
-		if item.TimeUnits.MinuteLastRateTime == nil {
-			return 1
-		}
-		elapsed := int64(chargeTime.Sub(*item.TimeUnits.MinuteLastRateTime) / time.Minute)
-		return min64(elapsed, limit-*item.TimeUnits.Minute)
+		last, used, unit = item.TimeUnits.MinuteLastRateTime, *item.TimeUnits.Minute, time.Minute
 	case TimeUnitHour:
-		if item.TimeUnits.HourLastRateTime == nil {
-			return 1
-		}
-		elapsed := int64(chargeTime.Sub(*item.TimeUnits.HourLastRateTime) / time.Hour)
-		return min64(elapsed, limit-*item.TimeUnits.Hour)
+		last, used, unit = item.TimeUnits.HourLastRateTime, *item.TimeUnits.Hour, time.Hour
 	case TimeUnitMonth:
 		return 1
+	default:
+		return 0
 	}
-	return 0
+	if last == nil {
+		return 1
+	}
+	elapsed := chargeTime.Sub(*last)
+	units := int64(elapsed / unit)
+	if elapsed%unit > 0 {
+		units++
+	}
+	return max(0, min64(units, limit-used))
 }
 
 func calculateBillItemAppliedAmounts(item *BillItem) decimal.Decimal {
@@ -187,11 +218,16 @@ func calculateBillItemAppliedAmounts(item *BillItem) decimal.Decimal {
 	return total
 }
 
-// createAppliedPricePlanRule: per amount
-// round16(perUnit) × diff (round FIRST, then × diff).
+// createAppliedPricePlanRule: per amount round16(perUnit) × diff (round FIRST, then × diff).
+// OVERWRITE_TOTAL stores the amount bare, like updateAppliedPricePlanRule: a usage value is already
+// a month-to-date total, and multiplying it by the hours since the resource was created would bill
+// it hundreds of times over the first time it is rated.
 func createAppliedPricePlanRule(item *BillItem, result PricePlanRuleResult, ppid string, diff int64) {
 	applied := BillItemAppliedPricePlanRule{PricePlanRuleID: ppid, AppliedAmounts: []BillItemAppliedPricePlanRuleAmount{}}
 	d := decimal.NewFromInt(diff)
+	if applyOverwriteTotal(result.PricePlanRule) {
+		d = decimal.NewFromInt(1)
+	}
 	for _, amt := range result.Amounts {
 		net := round16(amt.NetAmount).Mul(d)
 		applied.AppliedAmounts = append(applied.AppliedAmounts, BillItemAppliedPricePlanRuleAmount{
