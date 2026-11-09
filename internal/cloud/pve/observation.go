@@ -191,6 +191,78 @@ func (s *Service) ObserveNodes(ctx context.Context) NodeObservation {
 	return out
 }
 
+// observationSharedDisks never infers shared mode from a missing replication job.
+// Every current disk/CD dependency must positively name enabled shared storage
+// visible on the current cluster nodes, and definitions must stay unchanged.
+func (s *Service) observationSharedDisks(ctx context.Context, current string, cfg VMConfig, nodes []string) bool {
+	var defs []StorageDef
+	if err := s.C.inventoryRead(ctx, "/storage", nil, &defs); err != nil || len(defs) == 0 {
+		return false
+	}
+	byID := map[string]StorageDef{}
+	for _, d := range defs {
+		if d.Storage == "" || byID[d.Storage].Storage != "" {
+			return false
+		}
+		byID[d.Storage] = d
+	}
+	required := map[string]bool{}
+	for _, d := range ParseDisks(cfg) {
+		if strings.Contains(d.VolID, "cloudinit") {
+			continue
+		}
+		required[d.Storage] = true
+	}
+	for k, value := range cfg {
+		text, ok := value.(string)
+		_, slot := diskSlotPrefix(k)
+		if ok && (slot || k == "efidisk0" || k == "tpmstate0") && !strings.HasPrefix(text, "none") {
+			if storage, _, ok := strings.Cut(strings.Split(text, ",")[0], ":"); ok {
+				required[storage] = true
+			}
+		}
+	}
+	if len(required) == 0 || !slices.Contains(nodes, current) {
+		return false
+	}
+	for storage := range required {
+		d, ok := byID[storage]
+		if !ok || d.Type == "" || d.Shared != 1 || d.Disable != 0 || d.Type == "zfspool" || d.Type == "zfs" || d.Type == "lvmthin" {
+			return false
+		}
+		for _, node := range nodes {
+			if d.Nodes != "" && !slices.Contains(strings.Split(d.Nodes, ","), node) {
+				return false
+			}
+		}
+	}
+	for _, node := range nodes {
+		var rows []NodeStorage
+		if err := s.C.inventoryRead(ctx, "/nodes/"+node+"/storage", nil, &rows); err != nil || rows == nil {
+			return false
+		}
+		seen := map[string]bool{}
+		for _, r := range rows {
+			if required[r.Storage] {
+				if seen[r.Storage] || r.Active != 1 || r.Enabled != 1 || r.Shared != 1 || r.Type != byID[r.Storage].Type {
+					return false
+				}
+				seen[r.Storage] = true
+			}
+		}
+		if len(seen) != len(required) {
+			return false
+		}
+	}
+	var after []StorageDef
+	if err := s.C.inventoryRead(ctx, "/storage", nil, &after); err != nil {
+		return false
+	}
+	sort.Slice(defs, func(i, j int) bool { return defs[i].Storage < defs[j].Storage })
+	sort.Slice(after, func(i, j int) bool { return after[i].Storage < after[j].Storage })
+	return slices.Equal(defs, after)
+}
+
 // ObserveVerified exports ONLY platform refs that match a previously verified
 // current pool/config UUID, then re-proves the same snapshot after fresh GET-only
 // protection reads. An unknown source exports no guessed affected identities.
@@ -235,6 +307,9 @@ func (p *ServerSyncProvider) ObserveVerified(ctx context.Context, refs []cloud.C
 			}
 			fact.LastSync = int64(intOf(pr["lastSync"]))
 			fact.FailCount = intOf(pr["failCount"])
+			if fact.Mode == ProtectionModeShared && !p.svc.observationSharedDisks(ctx, r.Node, cfg, v.nodes) {
+				return ServerObservation{VMTrust: ObservationUntrusted, ProtectionTrust: ObservationUntrusted}
+			}
 		}
 		out.Servers = append(out.Servers, fact)
 	}

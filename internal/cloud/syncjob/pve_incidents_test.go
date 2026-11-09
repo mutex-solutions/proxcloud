@@ -34,18 +34,20 @@ func TestIncidentSamplerRecordsBuildFailureOncePerProvider(t *testing.T) {
 		return nil, errors.New("private raw error")
 	}}
 	es := &externalservice.ExternalService{ID: "provider", Config: map[string]any{"provider": "proxmox", "region": "region", "tokenId": "operator@pve!portal"}, Secret: map[string]any{"tokenSecret": "DO-NOT-PERSIST"}}
+	es.ObservationGeneration = externalservice.RawPVEObservationGeneration(es)
 	j.samplePVE(context.Background(), es, []project.Project{{ID: "project1"}, {ID: "project2"}})
 	if r.begin != 1 || r.observe != 1 || r.result.Trust.VMs != pveincident.Untrusted || r.result.Trust.Protection != pveincident.Untrusted || len(r.result.Nodes) != 0 || len(r.result.Links) != 0 {
 		t.Fatal(r)
 	}
 	first := incidentGeneration(es)
-	es.Secret = map[string]any{"tokenSecret": "rotated"}
-	if incidentGeneration(es) != first {
-		t.Fatal("secret entered generation hash")
-	}
-	es.Config["tokenId"] = "changed@pve!portal"
+	es.Secret = map[string]any{"tokenSecret": "rotated-stored-ciphertext"}
+	es.ObservationGeneration = externalservice.RawPVEObservationGeneration(es)
 	if incidentGeneration(es) == first {
-		t.Fatal("public token identity not fenced")
+		t.Fatal("same-token-ID credential rotation not fenced")
+	}
+	es.ObservationGeneration = ""
+	if incidentGeneration(es) != "" {
+		t.Fatal("generation fell back to decrypted credential")
 	}
 }
 func TestIncidentAggregationNeverPromotesUnknownScopes(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
 // Repo is DB-only; it has no cloud client, notifier or cache/billing repository.
@@ -60,6 +61,21 @@ func stateID(c Capture, kind, subject string) string {
 	return key(c.ProviderID, c.Generation, c.Region, kind, subject)
 }
 
+// currentGeneration row-locks the raw provider document through admission/commit.
+// Credential rotation is serialized with observation commits; old captured work
+// cannot commit after the stored encrypted credential changes under the same token ID.
+func (r *Repo) currentGeneration(ctx context.Context, provider, generation, region string) error {
+	var es externalservice.ExternalService
+	found, err := r.db.C("externalService").GetForUpdate(ctx, provider, &es)
+	if err != nil {
+		return err
+	}
+	if !found || es.Type != externalservice.TypeCloud || es.IsDisabled() || !es.IsProxmox() || es.PVERegion() != region || externalservice.RawPVEObservationGeneration(&es) != generation {
+		return ErrInvalid
+	}
+	return nil
+}
+
 // BeginCapture issues a monotonic provider epoch before any external GET. The global
 // provider lock/throttle covers all pods, regions and credential generations.
 func (r *Repo) BeginCapture(ctx context.Context, provider, generation, region string) (Capture, error) {
@@ -69,6 +85,9 @@ func (r *Repo) BeginCapture(ctx context.Context, provider, generation, region st
 	var result Capture
 	err := r.db.WithTx(ctx, func(tc context.Context) error {
 		if err := r.db.LockXact(tc, "pve-incident:"+provider); err != nil {
+			return err
+		}
+		if err := r.currentGeneration(tc, provider, generation, region); err != nil {
 			return err
 		}
 		now, err := r.clock(tc)
@@ -104,6 +123,9 @@ func (r *Repo) Observe(ctx context.Context, x SnapshotResult) (ObserveResult, er
 	}
 	err := r.db.WithTx(ctx, func(tc context.Context) error {
 		if err := r.db.LockXact(tc, "pve-incident:"+c.ProviderID); err != nil {
+			return err
+		}
+		if err := r.currentGeneration(tc, c.ProviderID, c.Generation, c.Region); err != nil {
 			return err
 		}
 		now, err := r.clock(tc)

@@ -23,7 +23,14 @@ cloud remediation, cache mutation or billing-policy change is part of the observ
 | Incident repository | Version-CAS state + append-only episode/event + synchronous `audit.Log` commit together; duplicate/stale epochs and parallel pods emit no duplicate transitions. Event records freeze evidence quality/completeness at transition time. Audit app timestamp is not the observation clock. |
 | Admin incident reads | Existing `admin:service:read` AND `admin:cloud_resource:read` before existence lookup; provider-bound cursor, cap100, project filter before pagination. Affected DTO contains only platform server/project IDs, no tenant endpoint or foreign-resource details. |
 
-Public provider connection identity fences generations without retaining token secrets.
+An opaque digest of the stored encrypted PVE credential plus public connection identity
+fences generations; the read service stamps it before decryption, and admission locks
+and revalidates the current raw provider row in the same transaction. Same-token-ID
+credential rotation rejects outstanding old captures; re-encryption conservatively
+starts a new evidence window. Neither plaintext nor ciphertext is retained in incident
+records or read DTOs. Shared protection health additionally requires positive current
+shared-storage definitions and node availability for every attached disk/CD dependency;
+a missing replication job on local ZFS is unknown, never shared healthy.
 The sampler only covers enabled project scopes, so affected IDs are last positively
 verified references and completeness is conservatively false. Historical unknown
 subjects are retained, not silently retired by omission. Existing METERING_STALE

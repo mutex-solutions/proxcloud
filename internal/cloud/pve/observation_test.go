@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -80,6 +81,68 @@ func TestObserveVerifiedPositivePlatformLinkAndUUIDReuse(t *testing.T) {
 		t.Fatal("VMID reuse exported stale row", o)
 	}
 }
+
+func TestObserveVerifiedMissingReplicationCannotBecomeSharedOnLocalDisks(t *testing.T) {
+	for _, storageType := range []string{"zfspool", "rbd"} {
+		t.Run(storageType, func(t *testing.T) {
+			ctx := context.Background()
+			s, _ := fakeVMInventoryService(t, []ClusterResource{{Type: "qemu", VMID: 101, Node: "n1", Name: "vm", Pool: "pc-p1", Tags: "pc-protected"}}, map[int]VMConfig{101: {}})
+			base := s.C.http.Transport
+			jobs := true
+			s.C.http.Transport = observationRoundTrip(func(r *http.Request) (*http.Response, error) {
+				payload := ""
+				switch r.URL.Path {
+				case "/api2/json/cluster/replication":
+					if jobs {
+						payload = `{"data":[{"id":"101-0","guest":101,"target":"n2"}]}`
+					} else {
+						payload = `{"data":[]}`
+					}
+				case "/api2/json/cluster/ha/resources":
+					payload = `{"data":[{"sid":"vm:101","state":"started"}]}`
+				case "/api2/json/nodes/n1/replication/101-0/status":
+					payload = `{"data":{"last_sync":1700000000,"fail_count":1}}`
+				case "/api2/json/storage":
+					payload = `{"data":[{"storage":"z","type":"` + storageType + `","shared":1,"content":"images"}]}`
+				case "/api2/json/nodes/n1/storage":
+					payload = `{"data":[{"storage":"z","type":"` + storageType + `","shared":1,"active":1,"enabled":1}]}`
+				}
+				if payload != "" {
+					return &http.Response{StatusCode: 200, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(payload)), Request: r}, nil
+				}
+				return base.RoundTrip(r)
+			})
+			p := s.ServerSyncProvider("region", "p1", nil)
+			rows, err := p.List(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = p.VerifyInventory(ctx, nil, rows); err != nil {
+				t.Fatal(err)
+			}
+			rows[0].ID, rows[0].ServiceID = "row", "svc"
+			before := p.ObserveVerified(ctx, rows)
+			if before.ProtectionTrust != ObservationVerified || len(before.Servers) != 1 || before.Servers[0].Mode != "replicated" || before.Servers[0].FailCount != 1 {
+				t.Fatal("degraded fixture", before)
+			}
+			jobs = false
+			for range 2 {
+				o := p.ObserveVerified(ctx, rows)
+				if storageType == "zfspool" {
+					if o.ProtectionTrust == ObservationVerified || len(o.Servers) != 0 {
+						t.Fatal("lost local-ZFS replica falsely became shared healthy", o)
+					}
+				} else if o.ProtectionTrust != ObservationVerified || len(o.Servers) != 1 || o.Servers[0].Mode != "shared" || !o.Servers[0].HA {
+					t.Fatal("positive current shared storage not accepted", o)
+				}
+			}
+		})
+	}
+}
+
+type observationRoundTrip func(*http.Request) (*http.Response, error)
+
+func (f observationRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestObserveVerifiedRequiresProofAndNeverLeaksGuessedRefs(t *testing.T) {
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){

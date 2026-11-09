@@ -2,9 +2,6 @@ package syncjob
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -23,11 +20,9 @@ type PVEIncidentRecorder interface {
 
 func (j *Job) WithPVEIncidents(r PVEIncidentRecorder) *Job { j.incidents = r; return j }
 func incidentGeneration(es *externalservice.ExternalService) string {
-	c := es.PVEConfig()
-	// Public connection identity only. Never include tokenSecret/seed secret.
-	b, _ := json.Marshal([]any{es.ID, es.PVERegion(), c.APIURL, c.APIURLs, c.TokenID, es.PVEPoolPrefix(), c.Fingerprint, c.CACert, c.InsecureTLS})
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:])
+	// Stamped BEFORE decrypt from the stored encrypted credential revision.
+	// No fallback from decrypted secret/public identity: absence fails admission.
+	return es.ObservationGeneration
 }
 func (j *Job) beginIncidents(ctx context.Context, es *externalservice.ExternalService) *pveincident.SnapshotResult {
 	if j.incidents == nil {

@@ -15,6 +15,8 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
@@ -50,7 +52,23 @@ func newFixture(t *testing.T) *fixture {
 	if err = f.repo.Ensure(ctx); err != nil {
 		t.Fatal(err)
 	}
+	f.seedProvider(t, "provider1")
 	return f
+}
+func (f *fixture) seedProvider(t *testing.T, provider string) {
+	t.Helper()
+	es := externalservice.ExternalService{ID: provider, Type: externalservice.TypeCloud, Status: "PUBLIC", Config: map[string]any{"provider": "proxmox", "region": "region1", "tokenId": "operator@pve!portal"}, Secret: map[string]any{"tokenSecret": textcrypt.New("fixture-key").Encrypt("credential-A-canary")}}
+	if err := f.db.C("externalService").Upsert(context.Background(), provider, es); err != nil {
+		t.Fatal(err)
+	}
+}
+func (f *fixture) generation(t *testing.T, provider string) string {
+	t.Helper()
+	var es externalservice.ExternalService
+	if found, err := f.db.C("externalService").Get(context.Background(), provider, &es); err != nil || !found {
+		t.Fatal("fixture provider", err)
+	}
+	return externalservice.RawPVEObservationGeneration(&es)
 }
 func (f *fixture) restart() *Repo {
 	r := New(f.db, f.audit)
@@ -66,7 +84,7 @@ func (f *fixture) restart() *Repo {
 }
 func (f *fixture) snapshot(t *testing.T, status NodeStatus) SnapshotResult {
 	t.Helper()
-	c, err := f.repo.BeginCapture(context.Background(), "provider1", "generation1", "region1")
+	c, err := f.repo.BeginCapture(context.Background(), "provider1", f.generation(t, "provider1"), "region1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +147,7 @@ func TestIncidentPGReplicasRestartThrottleRecoveryAndSelectors(t *testing.T) {
 		if accepted.Load() != 1 || (events.Load() == 1) != (i == 2) {
 			t.Fatal("pod dedup failed", accepted.Load(), events.Load())
 		}
-		if _, err := other.BeginCapture(ctx, "provider1", "another-generation", "another-region"); err != ErrThrottled {
+		if _, err := other.BeginCapture(ctx, "provider1", x.Capture.Generation, "region1"); err != ErrThrottled {
 			t.Fatal("provider throttle bypass", err)
 		}
 		previous = x
@@ -311,13 +329,68 @@ func TestIncidentPGMissingKnownSubjectFreezesVisibilityRecovery(t *testing.T) {
 	}
 }
 
+func TestIncidentPGCredentialRotationSeparatesEvidenceAndRejectsInflight(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	for _, tick := range []int64{0, 60} {
+		f.tick.Store(tick)
+		observe(t, f.repo, f.snapshot(t, Offline))
+	}
+	oldGeneration := f.generation(t, "provider1")
+	f.tick.Store(120)
+	outstanding := f.snapshot(t, Offline)
+	canary := "credential-B-canary-DO-NOT-PERSIST"
+	cipher := textcrypt.New("fixture-key").Encrypt(canary)
+	if _, err := f.db.C("externalService").SetByID(ctx, "provider1", pgdoc.M{"secret.tokenSecret": cipher}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.repo.Observe(ctx, outstanding); err != ErrInvalid {
+		t.Fatal("old capture committed after same-ID credential rotation", err)
+	}
+	if _, err := f.repo.BeginCapture(ctx, "provider1", oldGeneration, "region1"); err != ErrInvalid {
+		t.Fatal("stale owner admitted", err)
+	}
+	f.tick.Store(180)
+	b := f.snapshot(t, Offline)
+	if b.Capture.Generation == oldGeneration {
+		t.Fatal("rotation did not change opaque generation")
+	}
+	if got := observe(t, f.repo, b); got.Events != 0 {
+		t.Fatal("A2bad+Bthird opened incident", got)
+	}
+	p, err := f.repo.List(ctx, "provider1", Filter{Kind: KindNode})
+	if err != nil || len(p.Data) != 2 {
+		t.Fatal(p, err)
+	}
+	for _, s := range p.Data {
+		if s.State == StateOpen {
+			t.Fatal("mixed credentials confirmed incident", s)
+		}
+	}
+	f.tick.Store(240)
+	pending := f.snapshot(t, Offline)
+	if _, err = f.db.C("externalService").SetByID(ctx, "provider1", pgdoc.M{"status": "DISABLED"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.repo.Observe(ctx, pending); err != ErrInvalid {
+		t.Fatal("disabled provider admitted stale work", err)
+	}
+	for _, table := range []string{"pveIncidentState", "pveIncidentCapture", "pveIncidentEvent", "auditEvent"} {
+		var leak bool
+		if err = f.db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM "`+table+`" WHERE doc::text LIKE '%' || $1 || '%' OR doc::text LIKE '%' || $2 || '%')`, canary, cipher).Scan(&leak); err != nil || leak {
+			t.Fatal("credential leaked into incident records", table, leak, err)
+		}
+	}
+}
+
 func TestIncidentPGRealClockAndNoExternalOrBillingWrites(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	r := New(f.db, f.audit)
 	var before, after time.Time
 	_ = f.db.Pool.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&before)
-	c, err := r.BeginCapture(ctx, "provider-real", "generation", "region")
+	f.seedProvider(t, "provider-real")
+	c, err := r.BeginCapture(ctx, "provider-real", f.generation(t, "provider-real"), "region1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +408,7 @@ func TestIncidentPGRealClockAndNoExternalOrBillingWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rows.Close()
-	allowed := map[string]bool{"auditEvent": true, "pveIncidentCapture": true, "pveIncidentState": true, "pveIncidentEvent": true}
+	allowed := map[string]bool{"externalService": true, "auditEvent": true, "pveIncidentCapture": true, "pveIncidentState": true, "pveIncidentEvent": true}
 	for rows.Next() {
 		var name string
 		_ = rows.Scan(&name)

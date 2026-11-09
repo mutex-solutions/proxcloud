@@ -45,6 +45,9 @@ type ExternalService struct {
 	// wire: this struct is not serialized to any response — admin reads go through a secret-stripped
 	// path and cloud ops use it only in-memory.
 	Secret any `json:"secret,omitempty"`
+	// ObservationGeneration is derived from the stored encrypted credential before decrypt.
+	// It is transient, never persisted or returned by provider APIs.
+	ObservationGeneration string `json:"-"`
 	// ProvisionError is the last failed attempt to provision a project on this provider, for the operator; a success
 	// clears it. Set through Service.SetProvisionError only.
 	ProvisionError *ProvisionError `json:"provisionError,omitempty"`
