@@ -47,6 +47,8 @@ def jobs_config_problem(config, release=""):
         return "database.status_read_replica must be a YAML boolean"
     if database["status_read_replica"] and int(database["instances"]) < 2:
         return "database.status_read_replica requires database.instances >= 2 before creating a reader Secret"
+    if not isinstance(config.get("images", {}).get("build", True), bool):
+        return "images.build must be a YAML boolean"
     if not config.get("images", {}).get("build", True):
         version = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:\+[^\s]+)?", str(release))
         if not version or tuple(map(int, version.groups())) < (0, 4, 0):
@@ -54,9 +56,14 @@ def jobs_config_problem(config, release=""):
     return ""
 
 
-def legacy_broker_problem(application, statefulsets, brokers):
+def legacy_broker_problem(application, statefulsets, brokers, namespace):
     """Refuse ambiguous Argo sources or a legacy broker not protected by the CR retention gate."""
     spec = (application or {}).get("spec", {})
+    if application:
+        destination = spec.get("destination", {})
+        if (destination.get("namespace") != namespace or destination.get("server") != "https://kubernetes.default.svc"
+                or destination.get("name")):
+            return "existing Application destination differs or is ambiguous; namespace/cluster moves require a separate manual broker retention review"
     if spec.get("sources"):
         return "existing multi-source Argo Application requires a separate manual broker retention review"
     helm = spec.get("source", {}).get("helm", {})

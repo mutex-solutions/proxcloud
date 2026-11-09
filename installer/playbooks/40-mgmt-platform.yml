@@ -46,7 +46,7 @@
       vars:
         legacy_broker_problem: >-
           {{ (pc_migration_app.stdout | default('{}', true) | from_json)
-          | pc_legacy_broker_problem((pc_migration_statefulsets.stdout | from_json)['items'], pc_legacy_brokers) }}
+          | pc_legacy_broker_problem((pc_migration_statefulsets.stdout | from_json)['items'], pc_legacy_brokers, ns) }}
       ansible.builtin.assert:
         that: legacy_broker_problem == ''
         fail_msg: "{{ legacy_broker_problem }}"

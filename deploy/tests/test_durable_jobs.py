@@ -223,6 +223,9 @@ class InstallerTests(unittest.TestCase):
         config = copy.deepcopy(DEFAULTS)
         if decision:
             config["jobs_migration"].update(decision)
+        if app is not None:
+            app = copy.deepcopy(app)
+            app.setdefault("spec", {}).setdefault("destination", {"namespace": "proxcloud", "server": "https://kubernetes.default.svc"})
         for key, value in (settings or {}).items():
             config[key].update(value)
         with tempfile.TemporaryDirectory(prefix="pc-jobs-installer-") as directory:
@@ -263,6 +266,7 @@ else:
     def test_invalid_config_refused_before_discovery_or_any_apply(self):
         cases = [
             ({"database": {"status_read_replica": True, "instances": 1}}, "instances >= 2"),
+            ({"images": {"build": "false"}}, "images.build"),
             ({"jobs": {"worker_concurrency": 0}}, "worker_concurrency"),
             ({"jobs": {"worker_concurrency": 17}}, "worker_concurrency"),
             ({"jobs": {"worker_concurrency": True}}, "worker_concurrency"),
@@ -335,6 +339,17 @@ else:
                 self.assertIn("separate manual broker retention review", " ".join(result.stdout.split()))
                 self.assertNotIn("Require an explicit and evidenced", result.stdout)
                 self.assertNotIn("UNEXPECTED MUTATION", result.stdout)
+        destinations = [
+            {"namespace": "old-namespace", "server": "https://kubernetes.default.svc"},
+            {"namespace": "proxcloud", "server": "https://remote.example.org"},
+            {"namespace": "proxcloud", "name": "old-cluster"},
+        ]
+        for destination in destinations:
+            result = self.gate(app={"spec": {"destination": destination}}, rabbit_crd=False)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("destination differs or is ambiguous", result.stdout)
+            self.assertNotIn("Require an explicit and evidenced", result.stdout)
+            self.assertNotIn("UNEXPECTED MUTATION", result.stdout)
         result = self.gate(statefulsets=[{"metadata": {"name": "old-broker", "labels": {"app.kubernetes.io/name": "rabbitmq"}}}], rabbit_crd=False)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("not owned by a discovered retained", result.stdout)

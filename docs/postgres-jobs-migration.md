@@ -153,7 +153,9 @@ Services/Secrets/ConfigMaps in **both live objects and a stored transition relea
 manifest** (a reviewed Helm post-renderer is one option); verify before omission.
 Stage 40 refuses to automatically remove an existing enabled Bitnami broker.
 It also refuses old Argo `helm.values`, `valueFiles`, `parameters`, `fileParameters`
-and multi-source Application layouts until a separate manual retention review:
+and multi-source Application layouts, or an existing destination other than the
+same namespace on `https://kubernetes.default.svc` (including named remote
+clusters), until a separate manual retention review:
 these can hide effective broker settings that a false `valuesObject` field does
 not override. Independent StatefulSet inventory rejects a Rabbit-named/labeled
 broker without a positively identified owning live RabbitmqCluster, even if the
