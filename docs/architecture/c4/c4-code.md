@@ -167,6 +167,48 @@ using a copied address. Operators must reconcile those allocations explicitly.
 This is not a distributed PVE CAS; external administrators can race finite read
 proofs. [Repair procedure and focused local evidence](../../vm-inventory-safety.md).
 
+## Volume growth capacity and snapshot retype preflight
+
+**Why:** a cached quota delta is not live storage capacity, and PVE cannot remove
+an old retyped disk while VM snapshots reference it. Refuse before starting work,
+not after leaving a moving mark or stopping a server.
+
+| Symbol | Invariant |
+|---|---|
+| `ExtendVolume`, `diskSizeBytes`, `volumeTargetBytes` | Required provider headroom; bounded positive integer GiB target and exact live byte size. Current=1 config agrees with current=0 and has no pending edits/lock. Missing, malformed or overflowing sizes refuse409, never zero/full-target guesses. |
+| `checkVolumeGrowth` | Same provider token reads the disk's storage definition and node capacity. Active images storage, present bounded total/used metrics and only `target-current` bytes through `StorageHasRoom`; shared/thin storage keeps the existing conservative headroom policy. No cached size, read replica, root fallback or tenant headroom override. |
+| `ResizeServer` | Root growth joins the project holder session and uses `ExtendVolume` before power/flavor writes. A smaller/equal flavor retains the live disk; growth failure propagates instead of silently changing the flavor. |
+| `CheckRetypeVolumeSnapshots`, `checkRetypeSnapshots` | API checks before `MarkMoving`; service repeats under `beginHolders` before the move intent/POST. Ignore only the `current` pseudo-entry, reject ANY real VM snapshot. Null/malformed/permission-failed inventory is unknown409, not snapshot-free evidence. |
+
+```mermaid
+sequenceDiagram
+  participant A as Volume / resize API
+  participant D as PostgreSQL PRIMARY
+  participant P as Same-token PVE client
+  A->>P: RETYPE snapshot preflight, before MarkMoving
+  Note over A,P: Real snapshot or unknown inventory =>409, no moving mark
+  A->>D: Existing renewable project holder lease
+  A->>P: EXTEND current/pending disk + exact storage/node capacity
+  A->>P: RETYPE authoritative snapshot recheck
+  Note over A,P: Refusal =>409 before mutation intent/backend write
+  A->>D: Existing R1 durable mutation intent, commit
+  A->>P: Resize PUT or delete=1 MoveDisk POST
+  A->>P: Existing UPID observation + identity/effect verification
+  A->>D: Existing fenced settlement
+```
+
+Operators: restore the configured token's VM/config/pending/snapshot and storage
+inventory visibility when a verification fails; never bypass it with an operator
+credential. For retype, explicitly decide whether to retain/delete snapshots in
+the server snapshot UI first; the portal never deletes snapshots or forces a move.
+An immediate snapshot refusal returns409 without a moving state. External trusted
+PVE administrators and changing cluster capacity are not serialized by this lease:
+these are conservative admission checks, **not** reserved storage or atomic
+external snapshot/mutation transactions. Create/rebuild/full-copy paths and heavy
+move budgets are unchanged. Focused fake-wire tests cover refusal-before-intent,
+exact byte deltas and root power/config ordering; PostgreSQL retype row-follow tests
+retain the existing cancellation/mark-clear behavior.
+
 ## C4.0 Permission-filtered network inventory and file-share ownership
 
 **Why:** PVE's SDN list is permission-filtered: `200 []` can mean that the configured

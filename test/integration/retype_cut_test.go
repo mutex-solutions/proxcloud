@@ -56,6 +56,9 @@ func cutPVE(t *testing.T, done *atomic.Bool, lost bool, polled chan<- struct{}, 
 		}
 		fmt.Fprintf(w, `{"data":{"name":"a","scsi0":"local-zfs:vm-101-disk-0,size=10G","scsi1":"%s,size=20G"}}`, vol)
 	})
+	mux.HandleFunc("GET /api2/json/nodes/pve1/qemu/101/snapshot", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":[{"name":"current","description":"You are here!"}]}`)
+	})
 	mux.HandleFunc("POST /api2/json/nodes/pve1/qemu/101/move_disk", func(w http.ResponseWriter, _ *http.Request) {
 		started.Store(true)
 		fmt.Fprintf(w, `{"data":%q}`, cutUPID)

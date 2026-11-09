@@ -4,6 +4,28 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: bounded volume headroom and snapshot retype guards
+
+**What changed:** EXTEND takes required provider headroom and verifies current
+nonpending live disk size and same-token node/storage capacity before its existing
+R1 intent. Reserve the exact growth bytes, not the full target. Missing/null,
+negative, over-total or overflowing metrics and unknown disk sizes refuse409.
+SERVER RESIZE root growth joins that guarded path before shutdown/flavor writes;
+growth/backend failures are no longer swallowed. RETYPE checks an authoritative
+snapshot list before `MarkMoving` and repeats inside the service holder session:
+ignore `current`, conservatively refuse any real VM snapshot or unknown inventory.
+
+**Why:** cache quota size is not capacity evidence, thin/shared storage still
+needs the configured safety margin, and a PVE snapshot prevents delete=1 moves.
+A predictable refusal must not leave a moving mark, stop a VM or create a mutation
+intent. No automatic snapshot deletion, root credential fallback, tenant headroom
+override, lease-engine changes or claim of atomicity against external operators.
+
+**Diagrams updated:** C4 guarded volume sequence/invariant table and operator UX
+repair guidance. Existing create/rebuild/full-copy placement and heavy move
+budgets are unchanged. Focused local fake-wire and real PostgreSQL row-follow
+regressions; deployment and owned-fixture acceptance are separate normal gates.
+
 ## 2026-11-09: atomic savings reminder decisions (enqueue-only PR B)
 
 **What changed:** an explicit default-false reminder producer flag couples the

@@ -176,7 +176,7 @@ func main() {
 
 	// --- 5. resize ---
 	step(5, "Resize: e2e-small → e2e-large (2c/2g/6g)")
-	if err := svc.ResizeServer(ctx, pid, vmExtID, pve.ServerSpec{Slug: "e2e-large", VCPUs: 2, RAMMb: 2048, DiskGb: 6}); err != nil {
+	if err := svc.ResizeServer(ctx, pid, vmExtID, pve.ServerSpec{Slug: "e2e-large", VCPUs: 2, RAMMb: 2048, DiskGb: 6}, 10); err != nil {
 		fatal(err, "resize")
 	}
 	vm, _ := svc.ResolveVM(ctx, pid, vmExtID)
