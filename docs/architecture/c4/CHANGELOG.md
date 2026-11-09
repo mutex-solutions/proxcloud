@@ -12,7 +12,10 @@ uses the working filesystem snapshot path; a project-scoped native paused list/r
 turning envd on. Resume reuses suspension/release/quota/rotation/billing and pause claim locks. Automatic pauses persist
 a credential-free policy/connection-fingerprint/sample guard and reauthorize deletion under the capture lock after
 asynchronous image assembly/redrive. A changed policy, UID, activity or stale telemetry retains the original; an
-unknown/absent source never causes the only usable snapshot to be discarded. Actual pod and desired CR must both use
+unknown/absent/replaced source never causes the only usable snapshot to be discarded. Guards bind the host-owned main
+container ID/restart count as well as CR/pod UID: a same-pod restart can lose the writable filesystem. Cancellation,
+abandonment and stale-pause/resume adoption require positive original-filesystem identity; replacement conflicts return
+409 with the copy retained for recovery after operator removal of the replacement. Actual pod and desired CR must both use
 the native helper. Unsupported envd + pause/kill (including disabled provider edits) and pause without storage are
 rejected explicitly in API/operator form; SDK remains alert-only.
 

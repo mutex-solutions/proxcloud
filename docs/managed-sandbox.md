@@ -1655,7 +1655,9 @@ chain each sample. It publishes only counters/timestamps/pod UID/node/name/names
 its write Role is confined to that namespace, the portal gets only get/list there. The API joins its live owned CR
 and live pod UID+node; in-sandbox `/proc`, customer env/metadata, commands and HTTP bodies are never evidence.
 
-Consecutive observations persist in `sandbox_safety`, keyed provider/project/sandbox and bound CR UID/pod UID/node.
+Consecutive observations persist in `sandbox_safety`, keyed provider/project/sandbox and bound CR UID/pod UID/node plus
+host-owned main-container ID/restart count. A container restart can discard the writable filesystem without changing pod
+UID; automatic actions require a nonempty live container ID. Missing container identity still permits alert-only detection.
 Counter rollback, identity change, missing or stale CPU/network data, repeated timestamp, gaps, activity and policy
 change reset the window. A flag is emitted once per continuous incident. Service read failures reset the provider's
 observations and authorize no action. Missing nodes/stats, invalid serving CA or absent network stats means no detection.
@@ -1693,7 +1695,9 @@ original before a usable image exists. Automatic pauses persist their authorizat
 policy and sample identity, no credentials); the async finisher/redrive reacquires the capture lock and rechecks current
 policy, attachment, UID, fresh host counters and inactivity immediately before deleting the source. New native exec,
 traffic, policy/identity changes or stale evidence abandon the pause only when the original is positively alive; an
-unknown/expired source keeps the snapshot, and an already-gone source completes as paused without a destructive action.
+unknown/expired/replaced source keeps the snapshot, and an already-gone source completes as paused without a destructive
+action. Cancellation/abandonment can drop that copy only after proving the same CR, pod and main-container instance
+still holds the original filesystem, never merely a live replacement under the same name.
 It is asynchronous: `ACTION_pause SUCCESS` means
 **requested**, not completed. Existing pause/build logs and the paused state show eventual success/failure. Kill is
 explicitly destructive (ephemeral files lost), unlike pause. No action on a foreign project/provider or reused pod UID.
@@ -1710,6 +1714,12 @@ cache IDs (the old row may have been archived). List results contain no saved CR
   concurrency/project quota, rotation fence and new billing-row lifecycle. The returned resourceId is the **new** cache ID.
 - `DELETE /api/v1/project/{id}/sandbox-paused/{sandboxId}` → 204, discards the saved files and any still-running source
   through the existing paused-kill flow. Allowed while suspended, like normal resource deletion.
+
+A replaced pod/container under the same sandbox ID is **not** adopted as recovered files: resume returns 409 and retains
+the snapshot. An operator must inspect/remove the replacement without discarding the paused record, then retry resume.
+This also conservatively applies if the portal crashed after starting a guarded resume but before recording completion:
+the running resumed instance has a new identity, so the old snapshot stays until the conflict is explicitly resolved.
+Do **not** use the paused DELETE endpoint to resolve that conflict: it intentionally discards the saved files.
 
 Filesystem-only: processes/memory are not restored; files deleted from the base image can return (no whiteouts), and files
 written after capture are not saved. Unreadable files/directories or capture I/O errors fail the snapshot instead of

@@ -14,8 +14,10 @@ import (
 
 type abuseCluster struct {
 	*sbxCluster
-	sample sandbox.Sample
-	podUID string
+	sample       sandbox.Sample
+	podUID       string
+	containerID  string
+	restartCount int
 }
 
 func (a *abuseCluster) ListConfigMaps(context.Context, string, string) ([]map[string]any, error) {
@@ -34,7 +36,7 @@ func (a *abuseCluster) pod() map[string]any {
 			spec[k] = v
 		}
 	}
-	return map[string]any{"metadata": map[string]any{"name": a.sample.Name, "namespace": "sb-pa", "uid": a.podUID, "labels": map[string]any{sandbox.LabelProject: "pa", sandbox.LabelService: "sbx", sandbox.LabelManagedBy: sandbox.ManagedByValue, sandbox.LabelSandboxID: a.sample.Name}}, "spec": spec, "status": map[string]any{"phase": "Running"}}
+	return map[string]any{"metadata": map[string]any{"name": a.sample.Name, "namespace": "sb-pa", "uid": a.podUID, "labels": map[string]any{sandbox.LabelProject: "pa", sandbox.LabelService: "sbx", sandbox.LabelManagedBy: sandbox.ManagedByValue, sandbox.LabelSandboxID: a.sample.Name}}, "spec": spec, "status": map[string]any{"phase": "Running", "containerStatuses": []any{map[string]any{"name": "main", "containerID": a.containerID, "restartCount": a.restartCount, "state": map[string]any{"running": map[string]any{"startedAt": "2026-11-09T00:00:00Z"}}}}}}
 }
 func (a *abuseCluster) ListPodsAllNamespaces(context.Context, string) ([]map[string]any, error) {
 	return []map[string]any{a.pod()}, nil
@@ -61,7 +63,7 @@ func TestSandboxAbuseHandlerSafeActions(t *testing.T) {
 			f.cluster.crs["sb-pa/"+id]["metadata"].(map[string]any)["uid"] = "cr"
 			now := time.Now().UTC()
 			cpu, rx, tx := uint64(60e9), uint64(10), uint64(10)
-			a := &abuseCluster{sbxCluster: f.cluster, podUID: "pod", sample: sandbox.Sample{Name: id, Namespace: "sb-pa", Node: "n", PodUID: "pod", At: now, CPUAt: now, NetworkAt: now, CPU: &cpu, RX: &rx, TX: &tx}}
+			a := &abuseCluster{sbxCluster: f.cluster, podUID: "pod", containerID: "containerd://original", sample: sandbox.Sample{Name: id, Namespace: "sb-pa", Node: "n", PodUID: "pod", At: now, CPUAt: now, NetworkAt: now, CPU: &cpu, RX: &rx, TX: &tx}}
 			action := "kill"
 			if scenario == "alert" {
 				action = "alert"
@@ -98,6 +100,7 @@ func TestSandboxAbuseHandlerSafeActions(t *testing.T) {
 			prev.ProjectID = "pa"
 			prev.SandboxID = id
 			prev.CRUID = "cr"
+			prev.ContainerID = "containerd://original"
 			prev.Cores = 1
 			obs, _ := sandbox.Observation{}.Next(prev, policy, past)
 			if e := safety.Upsert(ctx, "abuse:sbx:pa:"+id, obs); e != nil {

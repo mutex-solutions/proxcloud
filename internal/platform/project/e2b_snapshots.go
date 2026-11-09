@@ -826,16 +826,26 @@ func (h *Handler) abandonPause(ctx context.Context, c *e2bCaller, d *pauseDrive,
 		return
 	} // unknown ownership/state never authorizes deleting a copy
 	if found && current.AbuseGuard != nil {
-		if err := c.ss.Alive(ctx, c.proj.ID, d.id); err != nil {
-			slog.Warn("sandbox abuse: retaining pause copy; source not known alive", "sandbox", d.id)
+		if err := c.ss.OriginalSourceAlive(ctx, current.AbuseGuard.Sample); err != nil {
+			slog.Warn("sandbox abuse: retaining pause copy; original source not known alive", "sandbox", d.id)
 			return
 		}
 	}
 	var saved map[string]any
+	var identityChanged bool
 	err := h.driveStep(ctx, c, d, func(p *pausedSandbox) bool {
+		// Recheck at the owning-record mutation too: the source may have been
+		// replaced since the outer liveness read.
+		if p.AbuseGuard != nil && c.ss.OriginalSourceAlive(ctx, p.AbuseGuard.Sample) != nil {
+			identityChanged = true
+			return false
+		}
 		saved = p.Saved
 		return true
 	})
+	if identityChanged {
+		return
+	}
 	if errors.Is(err, errPauseTaken) {
 		return // another driver carries the pause on, with this snapshot
 	}
@@ -870,6 +880,9 @@ func (h *Handler) cancelPause(ctx context.Context, c *e2bCaller, id string) bool
 		}
 		if c.ss.Alive(ctx, c.proj.ID, id) != nil {
 			return false, errPauseMoved
+		}
+		if p.AbuseGuard != nil && c.ss.OriginalSourceAlive(ctx, p.AbuseGuard.Sample) != nil {
+			return false, errSandboxBusy // a same-name replacement does not hold the captured files
 		}
 		tpl = p.TemplateID
 		return true, nil
@@ -998,9 +1011,15 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 					if cur.State == "" || cur.leased(time.Now()) {
 						return false, errPauseMoved
 					}
+					if cur.AbuseGuard != nil && c.ss.OriginalSourceAlive(dctx, cur.AbuseGuard.Sample) != nil {
+						return false, errSandboxBusy // never adopt a replacement and discard the original files
+					}
 					tpl = cur.TemplateID
 					return true, nil
 				}); err != nil {
+					if errors.Is(err, errSandboxBusy) {
+						return nil, err
+					}
 					continue
 				}
 				h.dropSnapshot(dctx, c, tpl)

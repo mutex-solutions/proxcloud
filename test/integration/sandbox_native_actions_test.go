@@ -34,6 +34,7 @@ type nativeActionCluster struct {
 	stoppedBeforeUsable bool
 	outage              atomic.Bool
 	outageReads         atomic.Int32
+	identityReads       atomic.Int32
 }
 
 func (c *nativeActionCluster) GetCR(ctx context.Context, g, v, p, ns, id string) (map[string]any, error) {
@@ -57,6 +58,7 @@ func (c *nativeActionCluster) GetCore(ctx context.Context, p, ns, id string) (ma
 	if ns == sandbox.BuildNamespace {
 		return c.pauseCluster.GetCore(ctx, p, ns, id)
 	}
+	c.identityReads.Add(1)
 	return c.telemetry.GetCore(ctx, p, ns, id)
 }
 func (c *nativeActionCluster) ExecStream(ctx context.Context, ns, id, container string, cmd []string, w io.Writer, limit int) (int, string, error) {
@@ -118,7 +120,7 @@ func (c *nativeActionCluster) ApplyCR(ctx context.Context, g, v, p string, obj m
 }
 
 func TestNativeAbusePauseRecovery(t *testing.T) {
-	for _, scenario := range []string{"pause-resume", "policy-changed-during-assembly", "activity-during-assembly", "uid-during-assembly", "stale-during-assembly", "bad-capture", "delete-paused", "source-gone-during-assembly", "source-gone-with-outage"} {
+	for _, scenario := range []string{"pause-resume", "policy-changed-during-assembly", "activity-during-assembly", "uid-during-assembly", "stale-during-assembly", "bad-capture", "delete-paused", "source-gone-during-assembly", "source-gone-with-outage", "cr-uid-during-assembly", "container-restart-during-assembly", "missing-container-identity"} {
 		t.Run(scenario, func(t *testing.T) {
 			f, pc, _, _ := newPauseFixture(t)
 			ctx := context.Background()
@@ -140,7 +142,7 @@ func TestNativeAbusePauseRecovery(t *testing.T) {
 			pc.crs["sb-pa/"+id]["metadata"].(map[string]any)["uid"] = "cr"
 			now := time.Now().UTC()
 			cpu, rx, tx := uint64(60e9), uint64(10), uint64(10)
-			a := &abuseCluster{sbxCluster: f.cluster, podUID: "pod", sample: sandbox.Sample{Name: id, Namespace: "sb-pa", Node: "n", PodUID: "pod", At: now, CPUAt: now, NetworkAt: now, CPU: &cpu, RX: &rx, TX: &tx}}
+			a := &abuseCluster{sbxCluster: f.cluster, podUID: "pod", containerID: "containerd://original", sample: sandbox.Sample{Name: id, Namespace: "sb-pa", Node: "n", PodUID: "pod", At: now, CPUAt: now, NetworkAt: now, CPU: &cpu, RX: &rx, TX: &tx}}
 			nc := &nativeActionCluster{pauseCluster: pc, telemetry: a, files: map[string]string{"home/user/notes.txt": "native files survive automatic pause"}}
 			f.h.SetSandbox(func(es *externalservice.ExternalService) (*sandbox.Service, error) {
 				return sandbox.NewWithAPI(nc, es.SandboxConfig(), es.ID), nil
@@ -163,6 +165,7 @@ func TestNativeAbusePauseRecovery(t *testing.T) {
 			prev.ProjectID = "pa"
 			prev.SandboxID = id
 			prev.CRUID = "cr"
+			prev.ContainerID = "containerd://original"
 			prev.Cores = 1
 			obs, _ := sandbox.Observation{}.Next(prev, sandbox.AbusePolicy{Action: "pause", WindowSeconds: 60}, past)
 			if err := safety.Upsert(ctx, "abuse:sbx:pa:"+id, obs); err != nil {
@@ -170,7 +173,17 @@ func TestNativeAbusePauseRecovery(t *testing.T) {
 			}
 			pc.hold = true
 			nc.cut = scenario == "bad-capture"
+			if scenario == "missing-container-identity" {
+				a.containerID = ""
+			}
 			f.h.RunSandboxAbuse(ctx)
+			if scenario == "missing-container-identity" {
+				f.pausedState(id, "gone")
+				if nc.count() != 1 || nc.files["home/user/notes.txt"] == "" {
+					t.Fatal("missing filesystem identity authorized pause")
+				}
+				return
+			}
 			if scenario == "bad-capture" {
 				f.pausedState(id, "gone")
 				if nc.files["home/user/notes.txt"] == "" || nc.count() != 1 {
@@ -196,6 +209,7 @@ func TestNativeAbusePauseRecovery(t *testing.T) {
 					t.Fatalf("foreign %s %d %s", method, code, body)
 				}
 			}
+			identityReadsBefore := nc.identityReads.Load()
 			switch scenario {
 			case "policy-changed-during-assembly":
 				_, err = f.db.C("externalService").SetByID(ctx, "sbx", pgdoc.M{"config.sandbox.abuse.disabled": true}, nil)
@@ -203,6 +217,14 @@ func TestNativeAbusePauseRecovery(t *testing.T) {
 				_, err = nc.MergePatchCR(ctx, "", "", "", "sb-pa", id, map[string]any{"metadata": map[string]any{"annotations": map[string]any{sandbox.AnnotationLastExec: time.Now().UTC().Format(time.RFC3339Nano)}}})
 			case "uid-during-assembly":
 				a.podUID = "reused"
+				nc.files = map[string]string{} // replacement pod has none of the original's files
+			case "cr-uid-during-assembly":
+				pc.crs["sb-pa/"+id]["metadata"].(map[string]any)["uid"] = "replacement-cr"
+				nc.files = map[string]string{}
+			case "container-restart-during-assembly":
+				a.containerID = "containerd://restarted"
+				a.restartCount = 1
+				nc.files = map[string]string{}
 			case "stale-during-assembly":
 				a.sample.CPUAt = now.Add(-5 * time.Minute)
 			case "source-gone-during-assembly", "source-gone-with-outage":
@@ -238,6 +260,50 @@ func TestNativeAbusePauseRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 				f.h.AutoPauseSandboxes(ctx)
+			}
+			if scenario == "uid-during-assembly" || scenario == "cr-uid-during-assembly" || scenario == "container-restart-during-assembly" {
+				// Wait for final authorization and abandonment to see replacement.
+				// Unlike the old fake, the replacement does NOT have the notes file.
+				wantReads := identityReadsBefore + 1
+				if scenario == "cr-uid-during-assembly" {
+					wantReads = identityReadsBefore
+				} // CR mismatch short-circuits pod read
+				for deadline := time.Now().Add(10 * time.Second); nc.identityReads.Load() < wantReads && time.Now().Before(deadline); {
+					time.Sleep(10 * time.Millisecond)
+				}
+				// A ready storage row synchronizes image assembly even for a CR mismatch.
+				for deadline := time.Now().Add(10 * time.Second); len(f.snapshotRows("pa")) != 1 && time.Now().Before(deadline); {
+					time.Sleep(10 * time.Millisecond)
+				}
+				if len(f.snapshotRows("pa")) != 1 {
+					t.Fatal("replacement lost original snapshot")
+				}
+				f.pausedState(id, "pausing")
+				_, err = f.db.C("sandbox_paused").SetByID(ctx, id, pgdoc.M{"leaseUntil": time.Now().Add(-time.Minute)}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := "/project/pa/sandbox-paused/" + id + "/resume"
+				code, body = f.do(sbxA, http.MethodPost, path, `{"timeoutSeconds":300}`)
+				if code != 409 {
+					t.Fatalf("replacement silently adopted: %d %s", code, body)
+				}
+				if len(f.snapshotRows("pa")) != 1 || nc.files["home/user/notes.txt"] != "" {
+					t.Fatal("replacement discarded original files")
+				}
+				// Explicitly remove the replacement; recovery can now boot original image.
+				if err = nc.sbxCluster.DeleteCR(ctx, "", "", "", "sb-pa", id); err != nil {
+					t.Fatal(err)
+				}
+				code, body = f.do(sbxA, http.MethodPost, path, `{"timeoutSeconds":300}`)
+				if code != 200 {
+					t.Fatalf("original restore after replacement removal: %d %s", code, body)
+				}
+				f.pausedState(id, "gone")
+				if nc.files["home/user/notes.txt"] != "native files survive automatic pause" {
+					t.Fatal("original file not recovered")
+				}
+				return
 			}
 			if strings.Contains(scenario, "during-assembly") && scenario != "source-gone-during-assembly" {
 				f.pausedState(id, "gone")
