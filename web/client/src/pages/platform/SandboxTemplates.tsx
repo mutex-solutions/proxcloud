@@ -58,6 +58,7 @@ function ProjectTemplates({ pid }: { pid: string }) {
     retry: (attempt, error) => !templateAccessDenied(error) && attempt < 1,
   })
   const opener = useRef<HTMLButtonElement | null>(null)
+  const actionOpenerId = useRef<string | null>(null)
   const rememberOpener = useCallback((event: React.FocusEvent<HTMLButtonElement>) => { opener.current = event.currentTarget }, [])
   const restoreFocus = useCallback((event: Event) => {
     // Run at Radix's unmount-autofocus boundary, not before the modal focus
@@ -66,7 +67,9 @@ function ProjectTemplates({ pid }: { pid: string }) {
     event.preventDefault()
     if (!mounted.current) return
     const previous = opener.current
-    const target = previous?.isConnected ? previous : previous?.id ? document.getElementById(previous.id) : null
+    // Pointer-opened menus need not focus their trigger. The selected row's ID
+    // is authoritative, not whichever unrelated button last received focus.
+    const target = actionOpenerId.current ? document.getElementById(actionOpenerId.current) : previous?.isConnected ? previous : null
     if (target instanceof HTMLButtonElement && !target.disabled) target.focus({ preventScroll: true })
   }, [])
   const closeAction = () => setAction(null)
@@ -128,22 +131,24 @@ function ProjectTemplates({ pid }: { pid: string }) {
       cell: ({ row }) => {
         const template = row.original
         const busy = templateBusy(template)
+        const triggerId = `sandbox-template-actions-${encodeURIComponent(pid)}-${encodeURIComponent(template.id)}`
+        const selectAction = (type: TemplateAction["type"]) => { actionOpenerId.current = triggerId; setAction({ type, template }) }
         return <div className="flex justify-end"><DropdownMenu>
-          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" id={`sandbox-template-actions-${encodeURIComponent(pid)}-${encodeURIComponent(template.id)}`} onFocus={rememberOpener} aria-label={`Actions for ${template.name}`}><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger>
+          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" id={triggerId} onFocus={rememberOpener} aria-label={`Actions for ${template.name}`}><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={() => setAction({ type: "builds", template })}><ScrollText aria-hidden="true" /> Builds and logs</DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setAction({ type: "aliases", template })} disabled={busy}><Tags aria-hidden="true" /> Manage aliases</DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setAction({ type: "prepare", template })}><Zap aria-hidden="true" /> Prepare</DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setAction({ type: "build", template })} disabled={!caps || !template.ready || busy}><Hammer aria-hidden="true" /> New build</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => selectAction("builds")}><ScrollText aria-hidden="true" /> Builds and logs</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => selectAction("aliases")} disabled={busy}><Tags aria-hidden="true" /> Manage aliases</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => selectAction("prepare")}><Zap aria-hidden="true" /> Prepare</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => selectAction("build")} disabled={!caps || !template.ready || busy}><Hammer aria-hidden="true" /> New build</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void copy(template.name)}><Copy aria-hidden="true" /> Copy name</DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" disabled={deleting} onSelect={() => { resetDelete(); setToDelete(template) }}><Trash2 aria-hidden="true" /> Delete</DropdownMenuItem>
+            <DropdownMenuItem variant="destructive" disabled={deleting} onSelect={() => { actionOpenerId.current = triggerId; resetDelete(); setToDelete(template) }}><Trash2 aria-hidden="true" /> Delete</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu></div>
       },
     },
   ], [caps, deleting, resetDelete, rememberOpener, setAction, setToDelete, pid])
-  const importButton = <Button className="text-black" onFocus={rememberOpener} onClick={() => setImportOpen(true)} disabled={!canImport}><Import aria-hidden="true" /> Import image digest</Button>
+  const importButton = <Button className="text-black" onFocus={rememberOpener} onClick={(event) => { actionOpenerId.current = null; opener.current = event.currentTarget; setImportOpen(true) }} disabled={!canImport}><Import aria-hidden="true" /> Import image digest</Button>
 
   if (permissionDenied) return <p className="text-sm text-red-700 dark:text-red-400" role="alert">Project cloud resource management permission required. Template details and controls are no longer available. Reload after your access has been restored.</p>
 

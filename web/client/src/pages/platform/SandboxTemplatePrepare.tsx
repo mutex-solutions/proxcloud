@@ -75,7 +75,7 @@ export function SandboxTemplatePrepare({ pid, template, capabilities, onClose, o
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Close</Button>
-          <Button variant="outline" disabled={!enabled || coverage.isFetching || prepare.isPending} onClick={() => void coverage.refetch()}><RefreshCw aria-hidden="true" /> Refresh coverage</Button>
+          <Button variant="outline" className="transition-colors dark:bg-background dark:text-foreground dark:hover:bg-background dark:hover:text-foreground" disabled={!enabled || coverage.isFetching || prepare.isPending} onClick={() => void coverage.refetch()}><RefreshCw aria-hidden="true" /> Refresh coverage</Button>
           <Button className="text-black" disabled={!enabled || prepare.isPending || data?.enabled === false} onClick={() => prepare.mutate()}>{prepare.isPending ? "Preparing…" : "Prepare image"}</Button>
         </DialogFooter>
       </DialogContent>
