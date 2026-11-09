@@ -11,7 +11,8 @@ import (
 // (settle.go) are pure; repos/creation/redemption are deferred.
 
 // AccountCredit is the "accountCredit" collection. `Amount` is the live spendable balance
-// in the credit's base currency (there is no separate "balance" field).
+// in the credit's base currency (there is no separate "balance" field). A refunded deposit's
+// credit is never deleted: its Amount is zeroed and RefundedAt stamped (InitialAmount stays).
 type AccountCredit struct {
 	ID                  string           `json:"id,omitempty"`
 	BillingProfileID    string           `json:"billingProfileId,omitempty"`
@@ -24,6 +25,7 @@ type AccountCredit struct {
 	Currency            string           `json:"currency,omitempty"`
 	CreatedAt           *time.Time       `json:"createdAt,omitempty"`
 	UpdatedAt           *time.Time       `json:"updatedAt,omitempty"`
+	RefundedAt          *time.Time       `json:"refundedAt,omitempty"`
 }
 
 // PromotionalCredit is the "promotionalCredit" collection. `RemainingAmount` is the live

@@ -51,6 +51,35 @@ data:
     hs.message = "Waiting for TenantControlPlane status"
     return hs
 
+  # Tenant add-ons: ArgoCD's built-in reading of a False condition is Degraded, but these two report False
+  # while the tenant cluster is still coming up (no CNI, no CRDs yet) and then retry on their own.
+  resource.customizations.health.addons.cluster.x-k8s.io_ClusterResourceSet: |
+    hs = {}
+    hs.status = "Progressing"
+    hs.message = "Waiting for ResourcesApplied"
+    if obj.status ~= nil and obj.status.conditions ~= nil then
+      for _, c in ipairs(obj.status.conditions) do
+        if c.type == "ResourcesApplied" and c.status == "True" then
+          hs.status = "Healthy"
+          hs.message = "ResourcesApplied"
+        end
+      end
+    end
+    return hs
+  resource.customizations.health.addons.cluster.x-k8s.io_HelmChartProxy: |
+    hs = {}
+    hs.status = "Progressing"
+    hs.message = "Waiting for Ready"
+    if obj.status ~= nil and obj.status.conditions ~= nil then
+      for _, c in ipairs(obj.status.conditions) do
+        if c.type == "Ready" and c.status == "True" then
+          hs.status = "Healthy"
+          hs.message = "Ready"
+        end
+      end
+    end
+    return hs
+
   # CAPI Cluster: terminal failure fields first, then phase (Pending/Provisioning →
   # Progressing, Provisioned → Healthy, Failed → Degraded, Deleting → Progressing so a
   # cascading delete shows as in-flight rather than broken).

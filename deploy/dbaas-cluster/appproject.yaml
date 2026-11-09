@@ -26,7 +26,7 @@ spec:
   sourceRepos:
     - ghcr.io/mutex-solutions/charts
 
-  # In-cluster pc-<projectId> namespaces only.
+  # In-cluster pc-db-<projectId> namespaces only.
   destinations:
     - server: https://kubernetes.default.svc
       namespace: "pc-*"

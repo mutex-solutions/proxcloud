@@ -1,8 +1,8 @@
 package client
 
-// objectstore_ceph.go = the Ceph RGW (S3) object-store backend (provider:"ceph-s3"). It implements the
-// bucket + object surface objectstore.go exposes, so the higher layers (Writer dispatch, BucketProvider
-// sync, the client object-explore handlers) call the Client methods and objectstore.go routes here.
+// objectstore_ceph.go = the Ceph RGW (S3) object-store backend (provider:"ceph-s3"). It implements
+// objectBackend, so the higher layers (Writer dispatch, BucketProvider sync, the client object-explore
+// handlers) call the Client and never see which backend answers.
 //
 // Two credential planes (see the plan §4.2/§4.4):
 //   - admin keys (Admin Ops REST, SigV4-signed): provision the per-project RGW user + quota, and list/stat
@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // emptyPayloadHash is the SHA-256 of an empty body — the x-amz-content-sha256 for a bodyless admin call.
@@ -45,12 +47,12 @@ const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 // adminDo rejects any value outside it so attacker-influenced input cannot shape the request URL.
 var adminValueRe = regexp.MustCompile(`^[A-Za-z0-9._-]*$`)
 
-// adminParamRe is the allow-list for the query PARAMETER NAMES ("bucket", "purge-objects", …). Every name
+// adminParamRe is the allow-list for the query PARAMETER NAMES ("bucket", "purge-objects", "accessKey", …). Every name
 // we send is a fixed lowercase literal; checking them anyway keeps the whole query — keys and values —
 // behind the same barrier.
-var adminParamRe = regexp.MustCompile(`^[a-z-]*$`)
+var adminParamRe = regexp.MustCompile(`^[A-Za-z-]*$`)
 
-// CephConfig carries the connection parameters for one ceph-s3 provider scope. Admin keys are always
+// ObjectStoreConfig carries the connection parameters for one ceph-s3 provider scope. Admin keys are always
 // present; project keys are empty on an admin-only client (sync/provision).
 //
 // RGWUID is the per-project anchor: one RGW user per ProxCloud project, in RGW's DEFAULT tenant. We do NOT
@@ -58,7 +60,7 @@ var adminParamRe = regexp.MustCompile(`^[a-z-]*$`)
 // cannot encode a tenant), which would kill static website hosting. Isolation instead comes from bucket
 // OWNERSHIP: buckets belong to the project's user, S3 default-denies everyone else, and the admin-ops
 // bucket list is scoped by `uid`. The trade-off is a GLOBAL bucket namespace, exactly like AWS S3.
-type CephConfig struct {
+type ObjectStoreConfig struct {
 	S3Endpoint        string // S3 data endpoint, e.g. https://s3.rgw.example
 	S3WebsiteEndpoint string // s3website endpoint (rgw_dns_s3website_name), e.g. https://s3-website.rgw.example
 	AdminURL          string // Admin Ops endpoint, e.g. https://s3.rgw.example/admin
@@ -83,11 +85,25 @@ type cephBackend struct {
 	http            *http.Client
 	uid             string // the project's RGW user id (default tenant)
 	quotaBytes      int64
+	bareUserGrants  bool // bucket-policy principals name users bare (RustFS) rather than by ARN (RGW)
 }
 
 // NewCephS3 builds a *client.Client backed by a Ceph RGW object store. When ProjectAccessKey is set, the S3 data client is built; otherwise it is an admin-only client
 // (list/stat/provision, no data I/O).
-func NewCephS3(_ context.Context, cfg CephConfig) (*Client, error) {
+func NewCephS3(_ context.Context, cfg ObjectStoreConfig) (*Client, error) {
+	b, err := newCephBackend(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{objectBackend: b}, nil
+}
+
+// Caps: RGW offers everything the settings panel shows; websites only where the operator set s3WebsiteEndpoint.
+func (b *cephBackend) Caps() ObjectCaps {
+	return ObjectCaps{Backend: BackendCephS3, Website: b.websiteEndpoint != "", QuotaObjects: true}
+}
+
+func newCephBackend(cfg ObjectStoreConfig) (*cephBackend, error) {
 	if cfg.S3Endpoint == "" && cfg.AdminURL == "" {
 		return nil, fmt.Errorf("cloud: ceph-s3 requires s3Endpoint or adminApiUrl")
 	}
@@ -118,11 +134,11 @@ func NewCephS3(_ context.Context, cfg CephConfig) (*Client, error) {
 			ResponseChecksumValidation: awsv2.ResponseChecksumValidationWhenRequired,
 		})
 	}
-	return &Client{ceph: b}, nil
+	return b, nil
 }
 
 // ErrBucketNameTaken is returned when a bucket name is already in use. RGW's bucket namespace is GLOBAL
-// (we deliberately do not use RGW tenants — see CephConfig), so a name can be taken by another project.
+// (we deliberately do not use RGW tenants — see ObjectStoreConfig), so a name can be taken by another project.
 var ErrBucketNameTaken = errors.New("cloud: bucket name is already taken")
 
 // ErrBucketNotOwned is returned when an admin-by-name Ceph operation targets a bucket this project's RGW
@@ -187,7 +203,7 @@ func urlValues(kv ...string) url.Values {
 // bucket this project's user does not own. The admin key can address ANY bucket by name (the RGW namespace
 // is global), so a stale cache row whose name was recreated by another project must never expose or mutate
 // the foreign bucket. Every admin-by-name path funnels through here (getBucket, SetBucketQuota,
-// ForceDeleteCephBucket), so ownership is verified in exactly one place.
+// ForceDeleteBucket), so ownership is verified in exactly one place.
 func (b *cephBackend) adminBucketInfo(ctx context.Context, bucket string) (adminBucketStat, error) {
 	var st adminBucketStat
 	if err := b.adminDo(ctx, "GET", "/bucket", urlValues("bucket", bucket, "stats", "true"), nil, &st); err != nil {
@@ -227,6 +243,16 @@ func (s adminBucketStat) totals() (bytes, objects int64) {
 	return
 }
 
+// bucketData is the DataBucket map for this stat; quotaBytes is present only when a size quota is on.
+func (s adminBucketStat) bucketData() map[string]any {
+	bytes, objects := s.totals()
+	d := bucketData(BackendCephS3, s.Bucket, objects, bytes)
+	if s.BucketQuota.Enabled && s.BucketQuota.MaxSize > 0 {
+		d["quotaBytes"] = s.BucketQuota.MaxSize
+	}
+	return d
+}
+
 // adminError is a non-2xx Admin Ops response. It carries the status so callers can distinguish a genuine
 // "absent" (404) from an auth/permission failure instead of silently treating both as "not there".
 type adminError struct {
@@ -237,7 +263,7 @@ type adminError struct {
 }
 
 func (e *adminError) Error() string {
-	return fmt.Sprintf("ceph admin %s %s: %d %s", e.Method, e.Path, e.Status, e.Body)
+	return fmt.Sprintf("object store admin %s %s: %d %s", e.Method, e.Path, e.Status, e.Body)
 }
 
 // isAdminNotFound reports whether err is an Admin Ops 404 (the resource genuinely does not exist).
@@ -367,7 +393,7 @@ func (b *cephBackend) purgeUser(ctx context.Context) error {
 // createBucket creates the bucket as the project user, which OWNS it (the isolation boundary). The RGW
 // bucket namespace is global, so a name already used by ANY project — or by this one — surfaces as
 // ErrBucketNameTaken rather than a raw S3 error. Returns DataBucket 0/0.
-func (b *cephBackend) createBucket(ctx context.Context, o CreateBucketOpts) (map[string]any, error) {
+func (b *cephBackend) CreateBucket(ctx context.Context, o CreateBucketOpts) (map[string]any, error) {
 	if err := b.needS3(); err != nil {
 		return nil, err
 	}
@@ -384,23 +410,22 @@ func (b *cephBackend) createBucket(ctx context.Context, o CreateBucketOpts) (map
 		}
 		return nil, err
 	}
-	return bucketData(o.Name, 0, 0), nil
+	return bucketData(BackendCephS3, o.Name, 0, 0), nil
 }
 
 // getBucket reads one bucket's stats via Admin Ops (admin keys) → DataBucket. It goes through
 // adminBucketInfo, which REFUSES a bucket this project does not own — otherwise a stale cache row whose
 // name was recreated by another project would leak that project's object count / size (finding F4).
-func (b *cephBackend) getBucket(ctx context.Context, name string) (map[string]any, error) {
+func (b *cephBackend) GetBucket(ctx context.Context, name string) (map[string]any, error) {
 	st, err := b.adminBucketInfo(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	bytes, objects := st.totals()
-	return bucketData(name, objects, bytes), nil
+	return st.bucketData(), nil
 }
 
 // listBuckets lists the project user's buckets WITH stats (Admin Ops, admin keys) — the sync/billing meter.
-func (b *cephBackend) listBuckets(ctx context.Context) ([]map[string]any, error) {
+func (b *cephBackend) ListBuckets(ctx context.Context) ([]map[string]any, error) {
 	var stats []adminBucketStat
 	if err := b.adminDo(ctx, "GET", "/bucket", url.Values{"uid": {b.uid}, "stats": {"true"}}, nil, &stats); err != nil {
 		return nil, err
@@ -410,24 +435,26 @@ func (b *cephBackend) listBuckets(ctx context.Context) ([]map[string]any, error)
 		if st.Bucket == "" {
 			continue
 		}
-		bytes, objects := st.totals()
-		out = append(out, bucketData(st.Bucket, objects, bytes))
+		out = append(out, st.bucketData())
 	}
 	return out, nil
 }
 
 // deleteBucket removes the (empty) bucket as the project user. RGW rejects a non-empty delete.
-func (b *cephBackend) deleteBucket(ctx context.Context, name string) error {
+func (b *cephBackend) DeleteBucket(ctx context.Context, name string) error {
 	if err := b.needS3(); err != nil {
 		return err
 	}
 	_, err := b.s3.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: &name})
+	if notFound(err, "BucketNotEmpty") {
+		return ErrBucketNotEmpty
+	}
 	return err
 }
 
 // listBucketObjects lists a bucket's objects/folders in the FE display shape (S3 ListObjectsV2 with a "/"
 // delimiter → CommonPrefixes become directory rows).
-func (b *cephBackend) listBucketObjects(ctx context.Context, bucket, prefix string) ([]map[string]any, error) {
+func (b *cephBackend) ListBucketObjects(ctx context.Context, bucket, prefix string) ([]map[string]any, error) {
 	if err := b.needS3(); err != nil {
 		return nil, err
 	}
@@ -482,7 +509,7 @@ func (b *cephBackend) listBucketObjects(ctx context.Context, bucket, prefix stri
 }
 
 // createFolder writes a 0-byte pseudo-folder marker "<folderName>/".
-func (b *cephBackend) createFolder(ctx context.Context, bucket, folderName string) error {
+func (b *cephBackend) CreateFolder(ctx context.Context, bucket, folderName string) error {
 	if err := b.needS3(); err != nil {
 		return err
 	}
@@ -495,7 +522,7 @@ func (b *cephBackend) createFolder(ctx context.Context, bucket, folderName strin
 }
 
 // uploadBucketObject streams an object into the bucket (S3 PutObject with an explicit Content-Length).
-func (b *cephBackend) uploadBucketObject(ctx context.Context, bucket, objectName, contentType string, contentLength int64, payload io.Reader) error {
+func (b *cephBackend) UploadBucketObject(ctx context.Context, bucket, objectName, contentType string, contentLength int64, payload io.Reader) error {
 	if err := b.needS3(); err != nil {
 		return err
 	}
@@ -510,7 +537,7 @@ func (b *cephBackend) uploadBucketObject(ctx context.Context, bucket, objectName
 }
 
 // deleteBucketObject deletes an object — or a folder + everything under it — by prefix.
-func (b *cephBackend) deleteBucketObject(ctx context.Context, bucket, objectName string) error {
+func (b *cephBackend) DeleteBucketObject(ctx context.Context, bucket, objectName string) error {
 	if err := b.needS3(); err != nil {
 		return err
 	}
@@ -536,7 +563,7 @@ func (b *cephBackend) deleteBucketObject(ctx context.Context, bucket, objectName
 
 // updateBucketObject replaces an object's custom metadata (S3 has no in-place metadata edit → copy-self
 // with MetadataDirective=REPLACE).
-func (b *cephBackend) updateBucketObject(ctx context.Context, bucket, objectName string, metadata map[string]string) error {
+func (b *cephBackend) UpdateBucketObject(ctx context.Context, bucket, objectName string, metadata map[string]string) error {
 	if err := b.needS3(); err != nil {
 		return err
 	}
@@ -549,7 +576,7 @@ func (b *cephBackend) updateBucketObject(ctx context.Context, bucket, objectName
 }
 
 // downloadObject reads an object's bytes + content-type (whole object into memory).
-func (b *cephBackend) downloadObject(ctx context.Context, bucket, objectName string) ([]byte, string, error) {
+func (b *cephBackend) DownloadObject(ctx context.Context, bucket, objectName string) ([]byte, string, error) {
 	if err := b.needS3(); err != nil {
 		return nil, "", err
 	}
@@ -572,7 +599,7 @@ func (b *cephBackend) downloadObject(ctx context.Context, bucket, objectName str
 // isBucketPublic reports whether the bucket's OBJECTS are anonymously readable. On S3 that is decided by
 // the bucket POLICY, not the ACL: a public-read ACL only allows listing the bucket. Checking the ACL alone
 // would report "public" for a bucket whose objects all 403.
-func (b *cephBackend) isBucketPublic(ctx context.Context, bucket string) (bool, error) {
+func (b *cephBackend) IsBucketPublic(ctx context.Context, bucket string) (bool, error) {
 	if err := b.needS3(); err != nil {
 		return false, err
 	}
@@ -581,7 +608,7 @@ func (b *cephBackend) isBucketPublic(ctx context.Context, bucket string) (bool, 
 
 // setBucketRead flips public read on the bucket: the canned ACL (bucket listing) AND the anonymous
 // s3:GetObject policy statement (object reads). Empty acl = private, which removes both.
-func (b *cephBackend) setBucketRead(ctx context.Context, bucket, acl string) error {
+func (b *cephBackend) SetBucketRead(ctx context.Context, bucket, acl string) error {
 	if err := b.needS3(); err != nil {
 		return err
 	}
@@ -596,7 +623,7 @@ func (b *cephBackend) setBucketRead(ctx context.Context, bucket, acl string) err
 }
 
 // bucketAPIs returns the bucket's S3 access URL (path-style).
-func (b *cephBackend) bucketAPIs(bucket string) []string {
+func (b *cephBackend) bucketURLs(bucket string) []string {
 	if b.s3Endpoint == "" {
 		return []string{}
 	}
@@ -630,6 +657,9 @@ func (b *cephBackend) enableWebsite(ctx context.Context, bucket, indexDoc, error
 	if err := b.needS3(); err != nil {
 		return err
 	}
+	if b.websiteEndpoint == "" {
+		return ErrWebsiteUnsupported
+	}
 	if indexDoc == "" {
 		indexDoc = "index.html"
 	}
@@ -641,7 +671,7 @@ func (b *cephBackend) enableWebsite(ctx context.Context, bucket, indexDoc, error
 		cfg.ErrorDocument = &s3types.ErrorDocument{Key: &errorDoc}
 	}
 	if _, err := b.s3.PutBucketWebsite(ctx, &s3.PutBucketWebsiteInput{Bucket: &bucket, WebsiteConfiguration: cfg}); err != nil {
-		return err
+		return websiteErr(err)
 	}
 	// Merge the public-read statement INTO the existing policy (by Sid) — a blind replace would delete the
 	// customer's own statements and every per-key grant on this bucket.
@@ -661,25 +691,44 @@ func (b *cephBackend) enableWebsite(ctx context.Context, bucket, indexDoc, error
 	return nil
 }
 
-// disableWebsite removes the website config AND the public-read statement enableWebsite installed, so
+// websiteErr names a gateway without rgw_enable_static_website: it answers 405 to every website call.
+func websiteErr(err error) error {
+	var re *smithyhttp.ResponseError
+	if errors.As(err, &re) && re.HTTPStatusCode() == http.StatusMethodNotAllowed {
+		return ErrWebsiteUnsupported
+	}
+	return err
+}
+
+// disableWebsite removes the public-read statement enableWebsite installed AND the website config, so
 // turning the website off closes anonymous access again — while LEAVING every other statement (customer
-// policy, per-key grants) untouched.
+// policy, per-key grants) untouched. CLOSE FIRST, the mirror of enableWebsite's publish last: the statement
+// is what exposes the objects, and it serves on the S3 endpoint whether or not the gateway still answers
+// website calls, so nothing about the config may stand in the way of removing it.
 func (b *cephBackend) disableWebsite(ctx context.Context, bucket string) error {
 	if err := b.needS3(); err != nil {
-		return err
-	}
-	if _, err := b.s3.DeleteBucketWebsite(ctx, &s3.DeleteBucketWebsiteInput{Bucket: &bucket}); err != nil &&
-		!strings.Contains(err.Error(), "NoSuchWebsiteConfiguration") {
 		return err
 	}
 	doc, err := b.getPolicyDoc(ctx, bucket)
 	if err != nil {
 		return err
 	}
-	if !doc.removeStmt(sidWebsiteRead) {
-		return nil // nothing of ours to remove; never touch a policy we did not write
+	if doc.removeStmt(sidWebsiteRead) { // no statement of ours: never touch a policy we did not write
+		if err := b.putPolicyDoc(ctx, bucket, doc); err != nil {
+			return err
+		}
 	}
-	return b.putPolicyDoc(ctx, bucket, doc)
+	return b.dropWebsiteConfig(ctx, bucket)
+}
+
+// dropWebsiteConfig deletes the bucket's website config. No config, or a gateway without the website API
+// (405: the config is not in effect there), is already the wanted end state.
+func (b *cephBackend) dropWebsiteConfig(ctx context.Context, bucket string) error {
+	_, err := b.s3.DeleteBucketWebsite(ctx, &s3.DeleteBucketWebsiteInput{Bucket: &bucket})
+	if err == nil || strings.Contains(err.Error(), "NoSuchWebsiteConfiguration") || errors.Is(websiteErr(err), ErrWebsiteUnsupported) {
+		return nil
+	}
+	return err
 }
 
 // getWebsite reports the bucket's website config. A bucket with no config is NOT an error (enabled=false).
@@ -703,55 +752,150 @@ func (b *cephBackend) getWebsite(ctx context.Context, bucket string) (enabled bo
 	return true, indexDoc, errorDoc, nil
 }
 
-// --- provisioning delegators on *Client (used by the ceph bootstrap) ---
+// BucketAPIs returns the bucket's S3 access URLs.
+func (b *cephBackend) BucketAPIs(_ context.Context, bucket string) ([]string, error) {
+	return b.bucketURLs(bucket), nil
+}
 
-// EnsureCephUser idempotently provisions the project's RGW tenant-user and returns its S3 keys, then sets
-// the configured storage quota. displayName MUST be space-free (SigV4-signed query).
-func (c *Client) EnsureCephUser(ctx context.Context, displayName string) (access, secret string, err error) {
-	if c.ceph == nil {
-		return "", "", fmt.Errorf("cloud: not a ceph-s3 client")
+// UpdateBucketMetadata would update a bucket's custom metadata. S3 has no per-bucket custom
+// metadata, so this is a no-op success.
+// ponytail: map to S3 bucket tagging if the FE ever needs to read it back.
+func (b *cephBackend) UpdateBucketMetadata(_ context.Context, _ string, _ map[string]string) error {
+	return nil
+}
+
+// GetBucketWebsite reports the bucket's static-website state. The statement, not the config, is what
+// publishes the objects, and it outlives the config on a gateway that lost the website API (405) or after a
+// client deleted the config directly. Either counts as enabled, so the panel still offers the way to close it.
+func (b *cephBackend) GetBucketWebsite(ctx context.Context, bucket string) (*BucketWebsite, error) {
+	enabled, index, errDoc, err := b.getWebsite(ctx, bucket)
+	if err != nil && !errors.Is(websiteErr(err), ErrWebsiteUnsupported) {
+		return nil, err
 	}
-	access, secret, err = c.ceph.ensureUser(ctx, displayName)
+	doc, err := b.getPolicyDoc(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	public := slices.ContainsFunc(doc.Statement, func(s json.RawMessage) bool { return sidOf(s) == sidWebsiteRead })
+	w := &BucketWebsite{Enabled: enabled || public, IndexDocument: index, ErrorDocument: errDoc, PublicObjects: public}
+	if enabled {
+		w.URL = b.websiteURL(bucket)
+	}
+	return w, nil
+}
+
+// EnableBucketWebsite serves the bucket as a static website. ⚠ This also installs a bucket policy that
+// makes EVERY object in the bucket anonymously readable — the returned BucketWebsite says so
+// (PublicObjects), and callers must show that to the user.
+func (b *cephBackend) EnableBucketWebsite(ctx context.Context, bucket, indexDoc, errorDoc string) (*BucketWebsite, error) {
+	if err := b.enableWebsite(ctx, bucket, indexDoc, errorDoc); err != nil {
+		return nil, err
+	}
+	return b.GetBucketWebsite(ctx, bucket)
+}
+
+// DisableBucketWebsite stops serving the bucket as a website and removes the public-read policy.
+func (b *cephBackend) DisableBucketWebsite(ctx context.Context, bucket string) error {
+	return b.disableWebsite(ctx, bucket)
+}
+
+// --- registration check ---
+
+// adminCap is one entry of an RGW user's caps.
+type adminCap struct {
+	Type string `json:"type"`
+	Perm string `json:"perm"`
+}
+
+// CheckCephS3 proves a ceph-s3 connection before it is stored: a stored row that cannot reach RGW fails the
+// bootstrap of every new project. It reads the admin key's own user, so an endpoint that is not RGW or a key
+// that does not exist fails instead of reading as "user absent".
+func CheckCephS3(ctx context.Context, cfg ObjectStoreConfig) error {
+	if err := checkObjectStoreFields(cfg, cfg.S3Endpoint, cfg.AdminURL); err != nil {
+		return err
+	}
+	cfg.ProjectAccessKey, cfg.ProjectSecretKey = cfg.AdminAccessKey, cfg.AdminSecretKey // the S3 leg signs with the same key
+	b, err := newCephBackend(cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := b.s3.ListBuckets(ctx, &s3.ListBucketsInput{}); err != nil {
+		return fmt.Errorf("S3 endpoint %s: %w", cfg.S3Endpoint, err)
+	}
+	var self struct {
+		Caps []adminCap `json:"caps"`
+	}
+	if err := b.adminDo(ctx, "GET", "/user", url.Values{"access-key": {cfg.AdminAccessKey}}, nil, &self); err != nil {
+		return fmt.Errorf("Admin Ops %s: %w", cfg.AdminURL, err)
+	}
+	for _, want := range []string{"users", "buckets", "usage"} {
+		if !slices.Contains(self.Caps, adminCap{Type: want, Perm: "*"}) {
+			return fmt.Errorf("the admin key lacks the RGW cap %s=* (it needs users=*;buckets=*;usage=*)", want)
+		}
+	}
+	return nil
+}
+
+// CheckObjectStore proves an object-store connection for this provider ("ceph-s3" or "rustfs").
+func CheckObjectStore(ctx context.Context, provider string, cfg ObjectStoreConfig) error {
+	if provider == "rustfs" {
+		return CheckRustFS(ctx, cfg)
+	}
+	return CheckCephS3(ctx, cfg)
+}
+
+func checkObjectStoreFields(cfg ObjectStoreConfig, urls ...string) error {
+	for _, u := range urls {
+		if p, err := url.Parse(u); err != nil || p.Host == "" || (p.Scheme != "http" && p.Scheme != "https") {
+			return fmt.Errorf("%q is not an http(s) URL", u)
+		}
+	}
+	if cfg.AdminAccessKey == "" || cfg.AdminSecretKey == "" {
+		return errors.New("the admin access key and secret key are required")
+	}
+	return nil
+}
+
+// --- provisioning (used by the bootstrap) ---
+
+// EnsureProjectUser idempotently provisions the project's RGW tenant-user and returns its S3 keys, then sets
+// the configured storage quota. displayName MUST be space-free (SigV4-signed query).
+func (b *cephBackend) EnsureProjectUser(ctx context.Context, displayName string) (access, secret string, err error) {
+	access, secret, err = b.ensureUser(ctx, displayName)
 	if err != nil {
 		return "", "", err
 	}
 	// Quota is a soft limit — a failure to set it must NOT fail provisioning (the user + keys are what
 	// make the project usable). Best-effort. ponytail: surface a warning if quota enforcement matters.
-	_ = c.ceph.setUserQuota(ctx, c.ceph.quotaBytes)
+	_ = b.setUserQuota(ctx, b.quotaBytes)
 	return access, secret, nil
 }
 
-// PurgeCephUser removes the project's RGW user and its data (deprovision).
-func (c *Client) PurgeCephUser(ctx context.Context) error {
-	if c.ceph == nil {
-		return fmt.Errorf("cloud: not a ceph-s3 client")
-	}
-	return c.ceph.purgeUser(ctx)
+// PurgeProjectUser removes the project's RGW user and its data (deprovision).
+func (b *cephBackend) PurgeProjectUser(ctx context.Context) error {
+	return b.purgeUser(ctx)
 }
 
-// ForceDeleteCephBucket removes a bucket AND its objects via Admin Ops. TEARDOWN path only — the
+// ForceDeleteBucket removes a bucket AND its objects via Admin Ops. TEARDOWN path only — the
 // customer-facing DeleteBucket keeps S3 semantics and refuses a non-empty bucket.
 //
 // It first verifies the live bucket is still OWNED by this project's user. Because the namespace is global
 // and teardown deletes by cached name, a stale row whose name was recreated by another project must NOT
 // purge the foreign bucket (finding F3): if the bucket is gone, or now owned by someone else, this is a
 // no-op success so the caller archives the stale cache row without destroying another tenant's data. The
-// final PurgeCephUser(purge-data) still removes every bucket this project genuinely owns.
-func (c *Client) ForceDeleteCephBucket(ctx context.Context, bucket string) error {
-	if c.ceph == nil {
-		return fmt.Errorf("cloud: not a ceph-s3 client")
-	}
-	owner, err := c.ceph.bucketOwner(ctx, bucket)
+// final PurgeProjectUser(purge-data) still removes every bucket this project genuinely owns.
+func (b *cephBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	owner, err := b.bucketOwner(ctx, bucket)
 	if isAdminNotFound(err) {
 		return nil // already gone — nothing to delete, archive the stale row
 	}
 	if err != nil {
 		return err
 	}
-	if owner != c.ceph.uid {
+	if owner != b.uid {
 		return nil // recycled name now owned by another project — must not delete it
 	}
-	return c.ceph.adminDeleteBucket(ctx, bucket, true)
+	return b.adminDeleteBucket(ctx, bucket, true)
 }
 
 // bucketOwner returns a bucket's live owner uid (Admin Ops). isAdminNotFound(err) → the bucket is absent.
@@ -765,7 +909,7 @@ func (b *cephBackend) bucketOwner(ctx context.Context, bucket string) (string, e
 
 // ChildUID is the RGW uid of an extra S3 key belonging to this project: "<projectUid>-<name>". Deriving it
 // in ONE place is what makes the ownership guard below meaningful.
-func (c *Client) ChildUID(name string) string { return c.ceph.uid + "-" + name }
+func (b *cephBackend) ChildUID(name string) string { return b.uid + "-" + name }
 
 // assertOwnedUID refuses to touch any RGW user that is not this project's own child key. Without it a bad
 // id from a request body could create — or PURGE — another project's user.
@@ -776,7 +920,7 @@ func (b *cephBackend) assertOwnedUID(uid string) error {
 	return nil
 }
 
-// CreateCephChildUser provisions an extra RGW user (an additional S3 access key for this project) and
+// CreateChildKey provisions an extra RGW user (an additional S3 access key for this project) and
 // returns its keys. The uid MUST be under this project's prefix.
 //
 // max-buckets=-1 FORBIDS this user from creating its own buckets (live-measured: -1 → 403 AccessDenied on
@@ -784,16 +928,13 @@ func (b *cephBackend) assertOwnedUID(uid string) error {
 // This matters: a child user's own buckets would sit outside the parent's per-bucket grants AND outside
 // syncCephService (which lists only the parent uid), so they would never be metered or billed. An extra
 // key gets access ONLY through explicit bucket grants.
-func (c *Client) CreateCephChildUser(ctx context.Context, uid, displayName string) (access, secret string, err error) {
-	if c.ceph == nil {
-		return "", "", ErrBucketFeatureUnsupported
-	}
-	if err := c.ceph.assertOwnedUID(uid); err != nil {
+func (b *cephBackend) CreateChildKey(ctx context.Context, uid, displayName string) (access, secret string, err error) {
+	if err := b.assertOwnedUID(uid); err != nil {
 		return "", "", err
 	}
 	var created adminUser
 	q := urlValues("uid", uid, "display-name", displayName, "max-buckets", "-1")
-	if err := c.ceph.adminDo(ctx, "PUT", "/user", q, nil, &created); err != nil {
+	if err := b.adminDo(ctx, "PUT", "/user", q, nil, &created); err != nil {
 		return "", "", err
 	}
 	if len(created.Keys) == 0 {
@@ -802,22 +943,19 @@ func (c *Client) CreateCephChildUser(ctx context.Context, uid, displayName strin
 	return created.Keys[0].AccessKey, created.Keys[0].SecretKey, nil
 }
 
-// DeleteCephChildUser removes one of this project's extra S3 keys (and any data it owns).
-func (c *Client) DeleteCephChildUser(ctx context.Context, uid string) error {
-	if c.ceph == nil {
-		return ErrBucketFeatureUnsupported
-	}
-	if err := c.ceph.assertOwnedUID(uid); err != nil {
+// DeleteChildKey removes one of this project's extra S3 keys (and any data it owns).
+func (b *cephBackend) DeleteChildKey(ctx context.Context, uid string) error {
+	if err := b.assertOwnedUID(uid); err != nil {
 		return err
 	}
-	err := c.ceph.adminDo(ctx, "DELETE", "/user", urlValues("uid", uid, "purge-data", "true"), nil, nil)
+	err := b.adminDo(ctx, "DELETE", "/user", urlValues("uid", uid, "purge-data", "true"), nil, nil)
 	if isAdminNotFound(err) {
 		return nil
 	}
 	return err
 }
 
-// RotateCephUserKey issues a FRESH access/secret pair for an RGW user and removes the old one, returning
+// RotateKey issues a FRESH access/secret pair for an RGW user and removes the old one, returning
 // the new pair. Admin Ops `PUT /admin/user?key` (generate-key) then `DELETE /admin/user?key&access-key=…`.
 //
 // The old key stops working the moment it is removed — that IS the point of a rotation — so callers must
@@ -825,12 +963,9 @@ func (c *Client) DeleteCephChildUser(ctx context.Context, uid string) error {
 // failure mid-way leaves the user with a WORKING key rather than none.
 //
 // uid must be this project's own user or one of its child keys.
-func (c *Client) RotateCephUserKey(ctx context.Context, uid, oldAccessKey string) (access, secret string, err error) {
-	if c.ceph == nil {
-		return "", "", ErrBucketFeatureUnsupported
-	}
-	if uid != c.ceph.uid {
-		if err := c.ceph.assertOwnedUID(uid); err != nil {
+func (b *cephBackend) RotateKey(ctx context.Context, uid, oldAccessKey string) (access, secret string, err error) {
+	if uid != b.uid {
+		if err := b.assertOwnedUID(uid); err != nil {
 			return "", "", err
 		}
 	}
@@ -838,7 +973,7 @@ func (c *Client) RotateCephUserKey(ctx context.Context, uid, oldAccessKey string
 	// user's s3 keys. Live-verified — decoding it as an object fails.
 	var keys []adminKey
 	q := urlValues("key", "", "uid", uid, "key-type", "s3", "generate-key", "true")
-	if err := c.ceph.adminDo(ctx, "PUT", "/user", q, nil, &keys); err != nil {
+	if err := b.adminDo(ctx, "PUT", "/user", q, nil, &keys); err != nil {
 		return "", "", fmt.Errorf("ceph-s3: generate key for %s: %w", uid, err)
 	}
 	// The response lists ALL of the user's s3 keys; the new one is whichever is not the old one.
@@ -851,7 +986,7 @@ func (c *Client) RotateCephUserKey(ctx context.Context, uid, oldAccessKey string
 		return "", "", fmt.Errorf("ceph-s3: rotation for %s produced no new key", uid)
 	}
 	if oldAccessKey != "" {
-		if err := c.ceph.adminDo(ctx, "DELETE", "/user",
+		if err := b.adminDo(ctx, "DELETE", "/user",
 			urlValues("key", "", "uid", uid, "key-type", "s3", "access-key", oldAccessKey), nil, nil); err != nil && !isAdminNotFound(err) {
 			// The new key already works; surface the failure so the operator can retire the old one.
 			return access, secret, fmt.Errorf("ceph-s3: new key issued but the OLD key %s could not be removed: %w", oldAccessKey, err)
@@ -860,10 +995,7 @@ func (c *Client) RotateCephUserKey(ctx context.Context, uid, oldAccessKey string
 	return access, secret, nil
 }
 
-// CephEndpoints exposes the provider's S3 + website endpoints so the customer can point aws-cli at them.
-func (c *Client) CephEndpoints() (s3Endpoint, websiteEndpoint, region string) {
-	if c.ceph == nil {
-		return "", "", ""
-	}
-	return c.ceph.s3Endpoint, c.ceph.websiteEndpoint, c.ceph.region
+// Endpoints exposes the provider's S3 + website endpoints so the customer can point aws-cli at them.
+func (b *cephBackend) Endpoints() (s3Endpoint, websiteEndpoint, region string) {
+	return b.s3Endpoint, b.websiteEndpoint, b.region
 }

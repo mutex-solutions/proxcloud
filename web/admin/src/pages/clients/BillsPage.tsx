@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react"
 import { Link } from "react-router-dom"
 import type { ColumnDef } from "@tanstack/react-table"
-import { Download, Receipt, RefreshCw } from "lucide-react"
+import { Banknote, Download, Receipt, RefreshCw } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader, sortableRightHeader } from "@/components/data-table"
@@ -9,8 +9,10 @@ import { EmptyState } from "@/components/empty-state"
 import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { apiFetch } from "@/lib/api"
+import { hasPermission, useAdminMe } from "@/lib/auth"
 import { useAdminList } from "@/lib/hooks"
 import { fmtMoney, timeAgo } from "@/lib/format"
+import { RecordPaymentDialog, type RecordPaymentBill } from "./RecordPaymentDialog"
 
 // GET /admin/bill — every bill doc (shaped, money as numbers) + the joined `billingProfile`.
 // The raw doc carries items[].netAmount (scale-16 running nets); the list net = their sum.
@@ -46,6 +48,10 @@ export default function BillsPage() {
   const rows = data?.data ?? []
   const total = data?.paging?.total ?? 0
   const [downloading, setDownloading] = useState<string | null>(null)
+  // Record payment (POST /admin/bill/{id}/record-payment) — SENT bills only, admin:bill:manage.
+  const { data: me } = useAdminMe()
+  const canRecord = hasPermission(me?.permissions, "admin:bill:manage")
+  const [paying, setPaying] = useState<RecordPaymentBill | null>(null)
 
   // GET /admin/bill/download/{billId} → statement PDF (streamed) → blob download.
   const download = async (billId: string) => {
@@ -71,9 +77,14 @@ export default function BillsPage() {
     () => [
       {
         id: "bill",
-        accessorFn: (b) => (b.id as string) ?? "",
+        accessorFn: (b) => (b.invoiceNumber as string) || (b.id as string) || "",
         header: "Bill",
-        cell: ({ getValue }) => <span className="font-mono text-xs">{getValue()}</span>,
+        cell: ({ row }) => (
+          <div className="flex flex-col">
+            {row.original.invoiceNumber ? <span className="text-sm font-medium">{row.original.invoiceNumber}</span> : null}
+            <span className="font-mono text-xs text-muted-foreground">{row.original.id}</span>
+          </div>
+        ),
       },
       {
         id: "client",
@@ -123,7 +134,17 @@ export default function BillsPage() {
         cell: ({ row }) => {
           const b = row.original
           return (
-            <div className="text-right" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+              {canRecord && b.status === "SENT" ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  aria-label={`Record payment for bill ${b.id}`}
+                  onClick={() => setPaying({ id: b.id, currency: b.invoiceCurrency })}
+                >
+                  <Banknote className="size-4" /> Record payment
+                </Button>
+              ) : null}
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -141,7 +162,7 @@ export default function BillsPage() {
     // download closes over setDownloading (stable) but reads `downloading` for the
     // disabled state — keep it fresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [downloading],
+    [downloading, canRecord],
   )
 
   return (
@@ -171,6 +192,8 @@ export default function BillsPage() {
           server={{ pageIndex, pageSize: PAGE_SIZE, total, onPageChange: setPageIndex }}
         />
       )}
+
+      <RecordPaymentDialog bill={paying} onClose={() => setPaying(null)} />
     </>
   )
 }

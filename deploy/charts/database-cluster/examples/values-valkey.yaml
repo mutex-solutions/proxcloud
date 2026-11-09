@@ -6,23 +6,29 @@
 #   helm template test deploy/charts/database-cluster -f examples/values-valkey.yaml
 # =============================================================================
 engine: valkey
-engineVersion: "8.1"
+engineVersion: "9.0"
 instances: 3
 resources:
   cpu: "1"
   memoryGi: 2
 storage:
   sizeGi: 10
-  storageClassName: proxmox-csi
+  storageClassName: fast
 network:
+  addressPool: dbaas-services
   allowedCidrs:
-    - 10.30.0.0/16
+    - 192.0.2.0/24
 proxcloud:
   projectId: 665f1a2b3c4d5e6f77889900
-  resourceId: std-4d5e6f70
+  resourceId: pc-d-4d5e6f70
   displayName: session-cache
 monitoring:
   enabled: false
 valkey:
   parameters: {}
 restartedAt: ""
+# Customer-declared ACL users (MANAGE_ACCESS) — rendered onto the
+# ValkeyCluster's spec.users next to `default`; the underscore name pins the
+# '_' -> '-' Secret-name mapping.
+users:
+  - name: cache_writer

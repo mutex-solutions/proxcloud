@@ -1,0 +1,40 @@
+name: k8s-node-templates
+
+# Builds the Kubernetes node templates on a self-hosted runner inside the Proxmox network:
+# images/k8s-node-template.sh = kubernetes-sigs/image-builder, then one copy per PVE node.
+#
+# NEVER add pull_request, pull_request_target or any fork-reachable trigger here: a PR would run its code
+# on a machine inside the Proxmox network, holding the image token.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Kubernetes version, e.g. 1.35.10"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vm-templates
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: [self-hosted, proxcloud-pve]
+    if: github.repository == 'mutex-solutions/proxcloud'
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build
+        env:
+          K8S_VERSION: ${{ inputs.version }}
+          PVE_URL: ${{ vars.PVE_URL }}
+          PVE_TOKEN_ID: ${{ vars.PVE_TOKEN_ID }}
+          PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
+          PVE_NODES: ${{ vars.PVE_NODES }}
+          PVE_TEMPLATE_STORAGE: ${{ vars.PVE_TEMPLATE_STORAGE }}
+          PVE_BRIDGE: ${{ vars.PVE_BRIDGE }}
+          DHCP_RANGE: ${{ vars.BUILD_DHCP_RANGE }}
+          DHCP_GATEWAY: ${{ vars.BUILD_GATEWAY }}
+        run: images/k8s-node-template.sh

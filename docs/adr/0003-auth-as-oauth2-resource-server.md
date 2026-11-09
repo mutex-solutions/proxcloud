@@ -35,8 +35,8 @@ them.
   background, so startup never blocks on an unreachable issuer; until a verifier
   is available, protected requests fail closed with `401` + `WWW-Authenticate:
   Bearer`.
-- Identity is split into **realms** by audience (see `config.Auth`): a `clients`
-  realm for the customer console, a separate realm/client for the operator admin
+- Identity is split into **realms** by audience (see `config.Auth`): a customer
+  realm (`auth.main`) for the customer console, a separate realm/client for the operator admin
   console, and a realm/client for the public admin API. The SPAs are **public
   PKCE clients** (`pkce.enabled: true` in the chart values), so no client secret
   ships in browser code.

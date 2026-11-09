@@ -2,12 +2,13 @@ package pve
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"net/url"
 	"strings"
 )
 
-// Access management — used by Phase K to mint narrow per-cluster tokens
-// (proxcloud-capi@pve!<clusterID>) and by teardown to revoke them.
+// Access management: the narrow per-cluster tokens of managed Kubernetes, and their revocation.
 
 // CreateUser creates a PVE-realm user (idempotent: "already exists" is not an error).
 func (c *Client) CreateUser(ctx context.Context, userid, comment string) error {
@@ -41,14 +42,26 @@ func (c *Client) CreateAPIToken(ctx context.Context, userid, tokenName string) (
 func (c *Client) DeleteAPIToken(ctx context.Context, userid, tokenName string) error {
 	path := "/access/users/" + url.PathEscape(userid) + "/token/" + url.PathEscape(tokenName)
 	err := c.delete(ctx, path, nil, nil)
-	if err != nil && IsNotFound(err) {
+	if err != nil && (IsNotFound(err) || isTokenAbsent(err)) {
 		return nil
 	}
 	return err
 }
 
+// isTokenAbsent: PVE answers a missing token or user with a 500 naming it, not a 404. Only that answer: "no such host" from
+// the dialer or a 401 for our own token means the token may still be live, and a release that takes it for revoked
+// never comes back to it.
+func isTokenAbsent(err error) bool {
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Status != http.StatusInternalServerError {
+		return false
+	}
+	msg := ae.Error()
+	return strings.Contains(msg, "no such token") || strings.Contains(msg, "no such user")
+}
+
 // SetACL grants (or with del revokes) a role on a path for users/tokens.
-// path e.g. "/pool/st-abc123", roles e.g. "PVEVMAdmin".
+// path e.g. "/pool/tp-abc123", roles e.g. "PVEVMAdmin".
 func (c *Client) SetACL(ctx context.Context, path, roles string, tokens []string, del bool) error {
 	form := formVals{
 		"path":   path,
@@ -57,6 +70,72 @@ func (c *Client) SetACL(ctx context.Context, path, roles string, tokens []string
 		"delete": pbool(del),
 	}.values()
 	return c.put(ctx, "/access/acl", form, nil)
+}
+
+// Users and roles the per-cluster tokens hang off (docs/proxmox-permissions.md).
+const (
+	capiUser       = "capmox@pve"
+	csiUser        = "csi@pve"
+	roleCAPI       = "ProxCloudCAPI"
+	roleCSI        = "ProxCloudCSI"
+	roleTemplate   = "PVETemplateUser"
+	roleISOStorage = "PVEDatastoreAdmin"
+)
+
+// ClusterTokenScope is what one tenant cluster's tokens may touch.
+type ClusterTokenScope struct {
+	Pool, TemplatePool string
+	BootStorage        string // where CAPMOX clones the workers' boot disks
+	ISOStorage         string // where CAPMOX uploads the bootstrap ISO
+	Zone, Vnet         string
+}
+
+// ClusterTokens are the tokens of one cluster. CAPMOX stays on the management side. No CSI token is minted: tenant
+// block volumes go through the CSI gateway's own token. Clusters from before it may still hold csi@pve!<id>, which
+// RevokeClusterTokens deletes too.
+type ClusterTokens struct{ CAPIID, CAPISecret string }
+
+// MintClusterTokens creates the tokens and their ACLs. Revoking is RevokeClusterTokens; a failure
+// half way revokes what was made, so a refused create leaves nothing behind.
+func (c *Client) MintClusterTokens(ctx context.Context, clusterID string, sc ClusterTokenScope) (t ClusterTokens, err error) {
+	defer func() {
+		if err != nil {
+			_ = c.RevokeClusterTokens(context.WithoutCancel(ctx), clusterID)
+		}
+	}()
+	if t.CAPIID, t.CAPISecret, err = c.CreateAPIToken(ctx, capiUser, clusterID); err != nil {
+		return t, err
+	}
+	grants := []struct{ path, role, token string }{
+		{"/pool/" + sc.Pool, roleCAPI, t.CAPIID},
+		{"/storage/" + sc.BootStorage, roleCAPI, t.CAPIID},
+		{"/pool/" + sc.TemplatePool, roleTemplate, t.CAPIID},
+		{"/nodes", roleCAPI, t.CAPIID},
+		// A clone is checked against the NICs of the template, and a node template sits on a node bridge.
+		{"/sdn/zones/localnetwork", roleCAPI, t.CAPIID},
+		{"/storage/" + sc.ISOStorage, roleISOStorage, t.CAPIID},
+	}
+	if sc.Zone != "" {
+		grants = append(grants, struct{ path, role, token string }{"/sdn/zones/" + sc.Zone + "/" + sc.Vnet, roleCAPI, t.CAPIID})
+	}
+	for _, g := range grants {
+		if err = c.SetACL(ctx, g.path, g.role, []string{g.token}, false); err != nil {
+			return t, err
+		}
+	}
+	return t, nil
+}
+
+// RevokeClusterTokens deletes the tokens. PVE stops honouring a deleted token's ACL entries at once and drops
+// them from user.cfg at the next write of that file; until then `pveum` warns "ignore invalid acl token".
+func (c *Client) RevokeClusterTokens(ctx context.Context, clusterID string) error {
+	return errors.Join(c.DeleteAPIToken(ctx, capiUser, clusterID), c.RevokeClusterCSIToken(ctx, clusterID))
+}
+
+// RevokeClusterCSIToken deletes the cluster's csi@pve!<id> token alone: a cluster moved onto the CSI gateway keeps its
+// CAPI token. A token already gone counts as revoked.
+func (c *Client) RevokeClusterCSIToken(ctx context.Context, clusterID string) error {
+	return c.DeleteAPIToken(ctx, csiUser, clusterID)
 }
 
 // PrivCheck is one ACL path and the privileges the token must hold there.
@@ -74,7 +153,7 @@ type PrivCheck struct {
 var PlatformPrivileges = []PrivCheck{
 	// cluster status, PCI scan, datacenter firewall options and the cluster
 	// security groups all check "/" itself (granted with propagate=0).
-	{Path: "/", Privs: []string{"Sys.Audit", "Sys.Modify"}},
+	{Path: "/", Privs: []string{"Sys.Audit", "Sys.Console", "Sys.Modify"}},
 	// node firewall options (nftables preflight) and node network list
 	// (management-bridge guard) check /nodes/{node}: PVEAuditor on /nodes.
 	{Path: "/nodes", Privs: []string{"Sys.Audit"}},
@@ -83,11 +162,13 @@ var PlatformPrivileges = []PrivCheck{
 		"VM.Allocate", "VM.Audit", "VM.Clone",
 		"VM.Config.CDROM", "VM.Config.CPU", "VM.Config.Cloudinit", "VM.Config.Disk",
 		"VM.Config.HWType", "VM.Config.Memory", "VM.Config.Network", "VM.Config.Options",
-		"VM.Console", "VM.GuestAgent.Audit", "VM.Migrate", "VM.PowerMgmt",
-		"VM.Snapshot", "VM.Snapshot.Rollback",
+		"VM.Backup", "VM.Console", "VM.GuestAgent.Audit", "VM.GuestAgent.Unrestricted", "VM.Migrate", "VM.PowerMgmt",
+		"VM.Replicate", "VM.Snapshot", "VM.Snapshot.Rollback",
 	}},
 	{Path: "/sdn", Privs: []string{"SDN.Allocate", "SDN.Audit", "SDN.Use"}},
-	{Path: "/storage", Privs: []string{"Datastore.AllocateSpace", "Datastore.Audit"}},
+	// Read apart from /sdn: an ACL on /sdn/zones replaces what /sdn passes down, and zones and NICs check here.
+	{Path: "/sdn/zones", Privs: []string{"SDN.Allocate", "SDN.Audit", "SDN.Use"}},
+	{Path: "/storage", Privs: []string{"Datastore.AllocateSpace", "Datastore.AllocateTemplate", "Datastore.Audit"}},
 	{Path: "/mapping/pci", Privs: []string{"Mapping.Audit", "Mapping.Use"}},
 }
 

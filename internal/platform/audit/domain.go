@@ -12,6 +12,7 @@ const (
 	InterfaceUserAccount = "USER_ACCOUNT"
 	InterfaceAdminArea   = "ADMIN_AREA"
 	InterfaceSystemJob   = "SYSTEM_JOB"
+	InterfaceCSIGateway  = "CSI_GATEWAY"
 
 	ContextOrganization = "ORGANIZATION"
 	ContextProject      = "PROJECT"
@@ -29,6 +30,7 @@ const (
 	ActionUnsuspend    = "UNSUSPEND"
 	ActionInvite       = "INVITE"
 	ActionAcceptInvite = "ACCEPT_INVITE"
+	ActionDeny         = "DENY"
 
 	ResourceUser             = "USER"
 	ResourceOrganization     = "ORGANIZATION"
@@ -36,6 +38,7 @@ const (
 	ResourceOrganizationRole = "ORGANIZATION_ROLE"
 	ResourceSuspension       = "SUSPENSION"
 	ResourceProjectInvite    = "PROJECT_INVITE"
+	ResourceCSIVolume        = "CSI_VOLUME"
 
 	OutcomeSuccess = "SUCCESS"
 	OutcomeFailure = "FAILURE"

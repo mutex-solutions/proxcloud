@@ -12,6 +12,8 @@ package externalservice
 //	    "services": {"compute": {"pve": true}, "network": {"pve": true},
 //	                 "volumev3": {"pve": true}, "image": {"pve": true}},
 //	    "apiUrl":      "https://pve1.lab:8006",
+//	    "apiUrls":     ["https://pve2.lab:8006"], // failover: other nodes or a VIP
+//	    "caCert":      "-----BEGIN CERTIFICATE-----…", // cluster CA pin; takes precedence over fingerprint
 //	    "tokenId":     "proxcloud@pve!platform", // full API token identity (secret half below)
 //	    "fingerprint": "AA:BB:…",              // SHA-256 cert pin; empty → system CA
 //	    "insecureTls": false,
@@ -33,6 +35,14 @@ package externalservice
 //	      "isolation": "shared",               // "shared" (default zone + vnet DROP rules) | "evpn-per-project"
 //	      "evpnController": "proxcloud"        // evpn-per-project: the controller every project zone uses
 //	    },
+//	    "sandbox": {                           // the platform's sandbox workers, fenced by the sync (PVESandbox)
+//	      "pool": "proxcloud-sandbox", "nodes": ["192.0.2.10-192.0.2.29"], "loadBalancers": ["192.0.2.200-192.0.2.209"],
+//	      "dns": ["1.1.1.1"], "kubeletSources": ["198.51.100.0/24"], "snat": "203.0.113.50", "unsecuredMinAgeMinutes": 20,
+//	      "proxy": {"address": "192.0.2.200", "port": 443,  // sandbox-proxy's MetalLB address, and the entry appliance
+//	                "entry": {"vmid": 9110, "pool": "proxcloud-sandbox-entry", "address": "192.0.2.5"}}  // (its pool,
+//	                                                                         // its address on the sandbox vnet)
+//	      "registry": {"address": "198.51.100.226", "port": 443}  // the sandbox registry the workers pull from
+//	    },                                     // + secret.sandboxKubeconfig (nodes get/list/patch)
 //	    "storageProfiles": {                   // Phase 5 — honest capability flags
 //	      "std": {"storages": {"*": "local-zfs"}, "shared": false, "snapshots": true,
 //	              "thin": true, "liveMigrate": false, "replication": false}
@@ -49,6 +59,9 @@ package externalservice
 //	                                           // shared storage clones to any node, a local one
 //	                                           // only to its own node
 //	    "storageHeadroomPct": 10,              // % of a storage kept free when placing disks
+//	    "backupStorage": "nas-backup",         // shared store of server backups (NFS, CephFS, PBS); absent = none
+//	    "importStorage": "nas-templates",      // store with import content for customer images; absent = no import
+//	    "importUnknownSizeMaxGiB": 20,         // spool limit for a URL that states no size; absent = refuse such a URL
 //	    "gpus": {},                            // Phase 6 — {mappingId: {"alias": "nvidia-4090"}}
 //	    "overcommit": {"cpu": 4},              // scheduler capacity multiplier
 //	    "metrics": {"source": "none"},         // until prometheus-pve-exporter is wired
@@ -68,7 +81,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
@@ -108,12 +124,47 @@ func (e *ExternalService) PVEConfig() pve.Config {
 	insecure, _ := e.Config["insecureTls"].(bool)
 	return pve.Config{
 		APIURL:         str(e.Config["apiUrl"]),
+		APIURLs:        strList(e.Config["apiUrls"]),
+		CACert:         str(e.Config["caCert"]),
 		TokenID:        str(e.Config["tokenId"]),
 		Secret:         str(e.secretMap()["tokenSecret"]),
 		Fingerprint:    str(e.Config["fingerprint"]),
 		InsecureTLS:    insecure,
 		TimeoutSeconds: intOf(e.Config["timeoutSeconds"]),
 	}
+}
+
+// PVECSIGatewayConfig is PVEConfig with the CSI gateway's token (config.csiGatewayTokenId, secret.csiGatewaySecret)
+// in place of the portal's. ok is false when the provider has none: the gateway then refuses its clusters.
+func (e *ExternalService) PVECSIGatewayConfig() (cfg pve.Config, ok bool) {
+	cfg = e.PVEConfig()
+	cfg.TokenID, cfg.Secret = str(e.Config["csiGatewayTokenId"]), str(e.secretMap()["csiGatewaySecret"])
+	return cfg, cfg.TokenID != "" && cfg.Secret != ""
+}
+
+// PVEBackupStorage is config.backupStorage: the shared store server backups go to ("" = no backups offered).
+func (e *ExternalService) PVEBackupStorage() string { return str(e.Config["backupStorage"]) }
+
+// PVEImportStorage is config.importStorage: the store with import content the portal streams customer images to
+// ("" = no image import offered).
+func (e *ExternalService) PVEImportStorage() string { return str(e.Config["importStorage"]) }
+
+// PVEBootISOStorage is config.isoStorage: the one iso store a Kubernetes cluster's CAPMOX token sees, where its workers'
+// bootstrap ISOs (kubeadm join tokens) land. Default `local`.
+func (e *ExternalService) PVEBootISOStorage() string {
+	if s := str(e.Config["isoStorage"]); s != "" {
+		return s
+	}
+	return pve.DefaultBootISOStorage
+}
+
+// PVEImportUnknownSizeMaxGiB is config.importUnknownSizeMaxGiB: how large an image whose server states no size may get,
+// spooled to the portal's temporary directory on the way. 0 (the default) refuses such a URL.
+func (e *ExternalService) PVEImportUnknownSizeMaxGiB() int {
+	if n, ok := e.Config["importUnknownSizeMaxGiB"].(float64); ok && n > 0 {
+		return int(n)
+	}
+	return 0
 }
 
 // PVEOvercommitCPU is the scheduler's CPU overcommit factor (default 4).
@@ -142,6 +193,58 @@ type PVETemplate struct {
 	VMID      int    `json:"vmid"`
 	Node      string `json:"node"`
 	MinDiskGb int    `json:"minDiskGb,omitempty"`
+	// Copies is a discovered template's per-node copy (node -> vmid). VMID/Node stay the primary.
+	Copies map[string]int `json:"-"`
+}
+
+// OnNode returns the vmid to clone on node: the node's own copy, or 0 when it has none.
+func (t PVETemplate) OnNode(node string) int {
+	if id, ok := t.Copies[node]; ok {
+		return id
+	}
+	if t.Node == node {
+		return t.VMID
+	}
+	return 0
+}
+
+// PVEImageCatalog merges the templates discovered in the cluster with config.templates: an entry
+// with vmid+node is an operator pin and wins; any other entry only overlays name, osDistro and
+// minDiskGb on the discovered template of that slug. Sorted by slug.
+func (e *ExternalService) PVEImageCatalog(found []pve.DiscoveredTemplate) []PVETemplate {
+	pinned := map[string]bool{}
+	out := e.PVETemplates()
+	for _, t := range out {
+		pinned[t.Slug] = true
+	}
+	overlay, _ := e.Config["templates"].(map[string]any)
+	for _, d := range found {
+		if pinned[d.Slug] {
+			continue
+		}
+		distro, _, _ := strings.Cut(d.Slug, "-")
+		t := PVETemplate{Slug: d.Slug, Name: d.Slug, OSDistro: distro, VMID: d.VMID, Node: d.Node, Copies: map[string]int{}}
+		for node, c := range d.Copies {
+			t.Copies[node] = c.VMID
+			if node == d.Node {
+				t.MinDiskGb = c.DiskGb
+			}
+		}
+		if o, ok := overlay[d.Slug].(map[string]any); ok {
+			if v := str(o["name"]); v != "" {
+				t.Name = v
+			}
+			if v := str(o["osDistro"]); v != "" {
+				t.OSDistro = v
+			}
+			if v := intOf(o["minDiskGb"]); v > 0 {
+				t.MinDiskGb = v
+			}
+		}
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Slug < out[j].Slug })
+	return out
 }
 
 // PVETemplates reads the admin template catalog: config.templates =
@@ -174,16 +277,47 @@ func (e *ExternalService) PVETemplates() []PVETemplate {
 
 // PVENetwork is the admin network config (config.network).
 type PVENetwork struct {
-	DefaultZone    string
-	Zones          map[string]pve.ZoneConfig
-	CIDRPool       string
-	BlockedCIDRs   []string // networks tenants must not reach, on top of the nodes' management networks
+	DefaultZone  string
+	Zones        map[string]pve.ZoneConfig
+	CIDRPool     string
+	BlockedCIDRs []string // networks tenants must not reach, on top of the nodes' management networks
+	// SandboxCIDRs are the sandbox cluster's worker networks (config.network.sandboxCidrs): tenants may
+	// not reach them, and they may reach neither tenants nor the blocked networks.
+	SandboxCIDRs   []string
 	PublicNetworks []PVEPublicNetwork
 	// Isolation is pve.IsolationShared (default; anything unknown falls back to
 	// it — still isolated) or pve.IsolationEVPN (a zone per project, templated
 	// from DefaultZone, controller EVPNController).
 	Isolation      string
 	EVPNController string
+}
+
+// PVEMetadata is config.metadata: how servers get their NoCloud seed (pve/seed.go).
+type PVEMetadata struct {
+	// URL is the API's base URL as tenant vnets reach it ("" = the API's own base URL).
+	URL string
+	// ISOStorage holds seed CDs ("" = the first active iso storage on the VM's node, shared first).
+	ISOStorage string
+	// ForceISO seeds by CD even where a URL would work: tenants cannot reach the API at all.
+	ForceISO bool
+	// VendorData is the operator's vendor-data for every seeded server.
+	VendorData string
+}
+
+// PVEMetadataSettings reads config.metadata.
+func (e *ExternalService) PVEMetadataSettings() PVEMetadata {
+	m, _ := e.Config["metadata"].(map[string]any)
+	force, _ := m["forceIso"].(bool)
+	return PVEMetadata{URL: str(m["url"]), ISOStorage: str(m["isoStorage"]), ForceISO: force, VendorData: str(m["vendorData"])}
+}
+
+// PVELoadBalancerImage is the image a load balancer's VM is cloned from (config.lbImage): a Debian
+// family image with the guest agent and cloud-init.
+func (e *ExternalService) PVELoadBalancerImage() string {
+	if s := str(e.Config["lbImage"]); s != "" {
+		return s
+	}
+	return "debian-13"
 }
 
 // PVEPublicNetwork is one admin-designated inbound bridge/vnet plus its IP pool:
@@ -205,6 +339,7 @@ func (e *ExternalService) PVENetworkConfig() PVENetwork {
 		DefaultZone:    str(n["defaultZone"]),
 		CIDRPool:       str(n["cidrPool"]),
 		BlockedCIDRs:   strList(n["blockedCidrs"]),
+		SandboxCIDRs:   strList(n["sandboxCidrs"]),
 		Zones:          map[string]pve.ZoneConfig{},
 		Isolation:      pve.IsolationShared,
 		EVPNController: str(n["evpnController"]),
@@ -255,6 +390,100 @@ func (e *ExternalService) PVENetworkConfig() PVENetwork {
 		for k := range out.Zones {
 			out.DefaultZone = k
 		}
+	}
+	return out
+}
+
+// PVESandbox is config.sandbox: the platform's sandbox workers, whose VM firewall the sync job applies and keeps
+// (docs/managed-sandbox.md §2). The subnet is network.sandboxCidrs.
+type PVESandbox struct {
+	Pool           string
+	Nodes          []string // worker addresses (ranges allowed)
+	LoadBalancers  []string // the sandbox cluster's MetalLB addresses
+	DNS            []string // resolvers the workers may ask (port 53 only)
+	KubeletSources []string // who may reach a worker's kubelet
+	SNAT           string   // the sandbox's own egress address (D14) on the exit node, or "node"; never reachable from a worker
+	// UnsecuredMinAge: a new worker keeps the unsecured taint at least this long after it registers, past the
+	// lifetime of the join token its own disk still holds (CABPK's default bootstrap token TTL is 15 minutes; the
+	// default 20 leaves room for a token CABPK refreshed just before the Node registered).
+	UnsecuredMinAge time.Duration
+	Kubeconfig      string // secret.sandboxKubeconfig: the sandbox cluster, nodes get/list/patch
+	Proxy           PVESandboxProxy
+	Registry        PVESandboxRegistry
+	// BuildStorage is config.sandbox.buildStorage: the template build bucket's endpoint as the workers reach it
+	// (docs/managed-sandbox.md §7), the one more place outside the subnet build pods fetch from. Empty: no rule.
+	BuildStorage PVESandboxRegistry
+	// Portal is config.sandbox.portal: the portal API's address and port as sandbox-proxy reaches it to wake a paused
+	// sandbox (docs/managed-sandbox.md §8), when it is a private address. Empty: no rule.
+	Portal PVESandboxRegistry
+}
+
+// PVESandboxRegistry is config.sandbox.registry: the sandbox registry's address and port (docs/managed-sandbox.md §6),
+// the one place outside the sandbox subnet the workers pull images from. Empty Address: no registry rule.
+type PVESandboxRegistry struct {
+	Address string
+	Port    int
+}
+
+// PVESandboxProxy is config.sandbox.proxy: sandbox-proxy's MetalLB address and port, and the platform HAProxy
+// appliance in front of it (docs/managed-sandbox.md §4). The workers let only EntryAddress reach Address:Port; the sync
+// keeps the appliance EntryVMID passing Port through to it. Empty Address: no public entry.
+type PVESandboxProxy struct {
+	Address      string
+	Port         int
+	EntryVMID    int
+	EntryPool    string // the appliance's own pool: the sync touches the VM only there
+	EntryAddress string // the appliance's address on the sandbox vnet
+}
+
+// PVESandboxConfig reads config.sandbox; ok is false when the provider has no sandbox pool.
+func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
+	s, _ := e.Config["sandbox"].(map[string]any)
+	cfg = PVESandbox{
+		Pool: str(s["pool"]), Nodes: strList(s["nodes"]), LoadBalancers: strList(s["loadBalancers"]),
+		DNS: strList(s["dns"]), KubeletSources: strList(s["kubeletSources"]), SNAT: str(s["snat"]),
+		UnsecuredMinAge: 20 * time.Minute, Kubeconfig: str(e.secretMap()["sandboxKubeconfig"]),
+	}
+	if m := intOf(s["unsecuredMinAgeMinutes"]); m > 0 {
+		cfg.UnsecuredMinAge = time.Duration(m) * time.Minute
+	}
+	if p, _ := s["proxy"].(map[string]any); p != nil {
+		e, _ := p["entry"].(map[string]any)
+		cfg.Proxy = PVESandboxProxy{Address: str(p["address"]), Port: intOf(p["port"]), EntryVMID: intOf(e["vmid"]), EntryPool: str(e["pool"]), EntryAddress: str(e["address"])}
+		if cfg.Proxy.Port == 0 {
+			cfg.Proxy.Port = 443
+		}
+	}
+	if r, _ := s["registry"].(map[string]any); r != nil {
+		cfg.Registry = PVESandboxRegistry{Address: str(r["address"]), Port: intOf(r["port"])}
+	}
+	if b, _ := s["buildStorage"].(map[string]any); b != nil {
+		cfg.BuildStorage = PVESandboxRegistry{Address: str(b["address"]), Port: intOf(b["port"])}
+	}
+	if p, _ := s["portal"].(map[string]any); p != nil {
+		cfg.Portal = PVESandboxRegistry{Address: str(p["address"]), Port: intOf(p["port"])}
+	}
+	return cfg, cfg.Pool != ""
+}
+
+// PVESandboxEndpoints are the "address:port" places outside the sandbox subnet the workers' VM firewall opens
+// (registry, build storage, portal; port 443 when unset). The cluster isolation lets the sandbox networks reach exactly
+// these, above its DROPs, or one on a management network would stay unreachable (docs/managed-sandbox.md §2).
+func (e *ExternalService) PVESandboxEndpoints() []string {
+	cfg, ok := e.PVESandboxConfig()
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, ep := range []PVESandboxRegistry{cfg.Registry, cfg.BuildStorage, cfg.Portal} {
+		if ep.Address == "" {
+			continue
+		}
+		port := ep.Port
+		if port == 0 {
+			port = 443
+		}
+		out = append(out, net.JoinHostPort(ep.Address, strconv.Itoa(port)))
 	}
 	return out
 }
@@ -590,6 +819,13 @@ func (e *ExternalService) PVEGPUMappingsFor(alias string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// PVEGPUAliasOf names the GPU model of a PCI mapping ("" = the mapping is not a GPU).
+func (e *ExternalService) PVEGPUAliasOf(mappingID string) string {
+	m, _ := e.Config["gpus"].(map[string]any)
+	g, _ := m[mappingID].(map[string]any)
+	return str(g["alias"])
 }
 
 // PVEGPUAliases lists the distinct GPU aliases the provider offers, each with its

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"reflect"
@@ -140,19 +141,168 @@ func TestZoneIDFor(t *testing.T) {
 
 func TestIsolationRules(t *testing.T) {
 	const pool, comment = "10.100.0.0/16", isolationComment
-	if got, want := isolationRules(pool, nil), []FirewallRule{
-		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
+	if got, want := isolationRules(pool, nil, nil, comment), []FirewallRule{
+		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("no blocked: got %+v", got)
 	}
-	got := isolationRules(pool, []string{"192.0.2.0/24", "198.51.100.0/24"})
+	got := isolationRules(pool, []string{"192.0.2.0/24", "198.51.100.0/24"}, nil, comment)
 	want := []FirewallRule{
-		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Comment: comment},
-		{Type: "forward", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Comment: comment},
-		{Type: "in", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Comment: comment},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,198.51.100.0/24", Enable: 1, Comment: comment},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+}
+
+// The sandbox networks are dropped both ways: tenants to the workers (kubelet, VXLAN), and the
+// workers to the tenants and the management networks they would otherwise reach through an exit
+// node's SNAT.
+func TestIsolationRulesSandbox(t *testing.T) {
+	const pool, comment = "10.100.0.0/16", isolationComment
+	got := isolationRules(pool, []string{"192.0.2.0/24"}, []string{"10.110.0.0/24", "10.111.0.0/24"}, comment)
+	want := []FirewallRule{
+		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,10.110.0.0/24,10.111.0.0/24", Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: "192.0.2.0/24,10.110.0.0/24,10.111.0.0/24", Enable: 1, Comment: comment},
+		{Type: "forward", Action: "DROP", Source: "10.110.0.0/24,10.111.0.0/24", Dest: pool + ",192.0.2.0/24", Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: "10.110.0.0/24,10.111.0.0/24", Dest: pool + ",192.0.2.0/24", Enable: 1, Comment: comment},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+	// Nothing blocked but a sandbox: still both directions.
+	got = isolationRules(pool, nil, []string{"10.110.0.0/24"}, comment)
+	if len(got) != 6 || got[2].Dest != "10.110.0.0/24" || got[4].Source != "10.110.0.0/24" || got[4].Dest != pool {
+		t.Fatalf("sandbox without blocked: %+v", got)
+	}
+}
+
+// The endpoints the workers' VM firewall opens (here the build bucket on a management network, as on the lab) are
+// accepted over TCP above the sandbox DROP, so the DROP no longer undoes the VM firewall; bad entries are skipped.
+func TestIsolationRulesSandboxEndpoints(t *testing.T) {
+	const pool, comment = "10.100.0.0/16", isolationComment
+	got := isolationRules(pool, []string{"10.88.0.0/24"}, []string{"10.110.0.0/24"}, comment,
+		"10.88.0.41:9000", "10.89.0.227:443", "10.88.0.41:9000", "bucket:9000", "[::1]:443", "10.88.0.10")
+	acc := func(typ, dest, port string) FirewallRule {
+		return FirewallRule{Type: typ, Action: "ACCEPT", Proto: "tcp", Source: "10.110.0.0/24", Dest: dest, DPort: port, Enable: 1, Comment: comment}
+	}
+	want := []FirewallRule{
+		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: comment},
+		{Type: "forward", Action: "DROP", Source: pool, Dest: "10.88.0.0/24,10.110.0.0/24", Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: pool, Dest: "10.88.0.0/24,10.110.0.0/24", Enable: 1, Comment: comment},
+		acc("forward", "10.88.0.41", "9000"), acc("in", "10.88.0.41", "9000"),
+		acc("forward", "10.89.0.227", "443"), acc("in", "10.89.0.227", "443"),
+		{Type: "forward", Action: "DROP", Source: "10.110.0.0/24", Dest: pool + ",10.88.0.0/24", Enable: 1, Comment: comment},
+		{Type: "in", Action: "DROP", Source: "10.110.0.0/24", Dest: pool + ",10.88.0.0/24", Enable: 1, Comment: comment},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+	// No sandbox network: nothing to accept.
+	if got := isolationRules(pool, nil, nil, comment, "10.88.0.41:9000"); len(got) != 2 {
+		t.Fatalf("endpoints without a sandbox network: %+v", got)
+	}
+}
+
+// The reconcile writes the endpoint ACCEPTs with their port, the gate reads them back, and a changed endpoint is a
+// different rule set (sameRule compares proto and port), so the next reconcile rewrites it.
+func TestReconcileIsolationSandboxEndpoints(t *testing.T) {
+	ctx := context.Background()
+	opts := map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/firewall/options": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":{"enable":1}}`)
+		},
+	}
+	sbx := []string{"10.110.0.0/24"}
+	srv, rules, _ := isolationFakeNodes(t, nil, opts)
+	if err := srv.ReconcileIsolation(ctx, "p1", "10.100.0.0/16", nil, sbx, "10.88.0.41:9000"); err != nil {
+		t.Fatal(err)
+	}
+	var accepts []string
+	for _, r := range *rules {
+		if r.Action == "ACCEPT" && r.Comment == isolationComment {
+			accepts = append(accepts, r.Type+" "+r.Proto+" "+r.Source+" "+r.Dest+":"+r.DPort)
+		}
+	}
+	if want := []string{"forward tcp 10.110.0.0/24 10.88.0.41:9000", "in tcp 10.110.0.0/24 10.88.0.41:9000"}; !reflect.DeepEqual(accepts, want) {
+		t.Fatalf("accepts %v, want %v", accepts, want)
+	}
+	if err := srv.CheckSandboxIsolation(ctx, "10.100.0.0/16", nil, sbx, "10.88.0.41:9000"); err != nil {
+		t.Fatalf("gate on the rules in place: %v", err)
+	}
+	if err := srv.CheckSandboxIsolation(ctx, "10.100.0.0/16", nil, sbx, "10.88.0.41:9001"); err == nil {
+		t.Fatal("another port: the gate passed")
+	}
+	if err := srv.CheckSandboxIsolation(ctx, "10.100.0.0/16", nil, sbx); err == nil {
+		t.Fatal("an ACCEPT nobody asked for: the gate passed")
+	}
+	if err := srv.ReconcileIsolation(ctx, "p1", "10.100.0.0/16", nil, sbx, "10.88.0.41:9001"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.CheckSandboxIsolation(ctx, "10.100.0.0/16", nil, sbx, "10.88.0.41:9001"); err != nil {
+		t.Fatalf("after the endpoint moved: %v", err)
+	}
+}
+
+// Only a management-side endpoint is opened: one in the tenant pool or an operator-blocked range is refused.
+func TestReconcileIsolationRefusesTenantEndpoints(t *testing.T) {
+	opts := map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/cluster/firewall/options": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":{"enable":1}}`)
+		},
+	}
+	srv, rules, _ := isolationFakeNodes(t, nil, opts)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", []string{"10.120.0.0/24"}, []string{"10.110.0.0/24"},
+		"10.88.0.41:9000", "10.100.7.9:443", "10.120.0.5:22"); err != nil {
+		t.Fatal(err)
+	}
+	var accepts []string
+	for _, r := range *rules {
+		if r.Action == "ACCEPT" && r.Comment == isolationComment {
+			accepts = append(accepts, r.Dest+":"+r.DPort)
+		}
+	}
+	if want := []string{"10.88.0.41:9000", "10.88.0.41:9000"}; !reflect.DeepEqual(accepts, want) {
+		t.Fatalf("accepts %v, want %v", accepts, want)
+	}
+}
+
+func TestReconcileIsolationSandbox(t *testing.T) {
+	srv, rules, _ := isolationFake(t, nil)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, []string{"10.110.0.5/24", "10.110.0.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	var drops []string
+	for _, r := range *rules {
+		if r.Action == "DROP" {
+			drops = append(drops, r.Type+" "+r.Source+" "+r.Dest)
+		}
+	}
+	want := []string{
+		"forward 10.100.0.0/16 10.100.0.0/16", "in 10.100.0.0/16 10.100.0.0/16",
+		"forward 10.100.0.0/16 192.0.2.0/24,10.110.0.0/24", "in 10.100.0.0/16 192.0.2.0/24,10.110.0.0/24",
+		"forward 10.110.0.0/24 10.100.0.0/16,192.0.2.0/24", "in 10.110.0.0/24 10.100.0.0/16,192.0.2.0/24",
+	}
+	if !reflect.DeepEqual(drops, want) {
+		t.Fatalf("drops:\n%s\nwant:\n%s", strings.Join(drops, "\n"), strings.Join(want, "\n"))
+	}
+	// The fake's management network is 192.0.2.0/24; 198.51.100.0/24 is an operator-blocked one.
+	for _, bad := range [][]string{{"10.100.7.0/24"}, {"10.0.0.0/8"}, {"not-a-cidr"}, {"fd00::/64"},
+		{"192.0.0.0/16"}, {"192.0.2.128/25"}, {"198.51.100.0/24"}} {
+		srv, rules, writes := isolationFake(t, nil)
+		if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", []string{"198.51.100.0/24"}, bad); err == nil {
+			t.Fatalf("sandboxCidrs %v accepted", bad)
+		}
+		if *writes != 0 || len(*rules) != 0 {
+			t.Fatalf("sandboxCidrs %v: %d writes before the refusal", bad, *writes)
+		}
 	}
 }
 
@@ -160,6 +310,11 @@ func TestIsolationRules(t *testing.T) {
 // behaving like PVE's (a new rule lands on top, positions renumber); the management
 // network comes from the node's bridge.
 func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRule, *int) {
+	return isolationFakeNodes(t, rules, nil)
+}
+
+// isolationFakeNodes adds cluster members and overrides routes.
+func isolationFakeNodes(t *testing.T, rules []FirewallRule, extra map[string]func(http.ResponseWriter, *http.Request), members ...string) (*Service, *[]FirewallRule, *int) {
 	writes := 0
 	renumber := func() {
 		for i := range rules {
@@ -169,7 +324,7 @@ func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRul
 	renumber()
 	routes := map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/cluster/status": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":[{"type":"node","name":"pve1","ip":"192.0.2.11"}]}`)
+			fmt.Fprint(w, `{"data":[`+strings.Join(append([]string{`{"type":"node","name":"pve1","ip":"192.0.2.11"}`}, members...), ",")+`]}`)
 		},
 		"GET /api2/json/nodes/pve1/network": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[{"iface":"vmbr0","address":"192.0.2.11","gateway":"192.0.2.1","cidr":"192.0.2.11/24"},
@@ -196,13 +351,14 @@ func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRul
 			writes++
 			rules = append([]FirewallRule{{
 				Type: r.PostFormValue("type"), Action: r.PostFormValue("action"), Source: r.PostFormValue("source"),
-				Dest: r.PostFormValue("dest"), Comment: r.PostFormValue("comment"),
+				Dest: r.PostFormValue("dest"), Comment: r.PostFormValue("comment"), Enable: map[string]int{"1": 1}[r.PostFormValue("enable")],
+				Proto: r.PostFormValue("proto"), DPort: r.PostFormValue("dport"),
 			}}, rules...)
 			renumber()
 			fmt.Fprint(w, `{"data":null}`)
 		},
 	}
-	for pos := 0; pos < 12; pos++ {
+	for pos := 0; pos < 32; pos++ {
 		routes["DELETE /api2/json/cluster/firewall/rules/"+strconv.Itoa(pos)] = func(w http.ResponseWriter, r *http.Request) {
 			writes++
 			rules = slices.Delete(rules, pos, pos+1)
@@ -210,15 +366,16 @@ func isolationFake(t *testing.T, rules []FirewallRule) (*Service, *[]FirewallRul
 			fmt.Fprint(w, `{"data":null}`)
 		}
 	}
+	maps.Copy(routes, extra)
 	_, c := fakePVE(t, routes)
 	return &Service{C: c, ServiceID: "svc", PoolPrefix: "pc-"}, &rules, &writes
 }
 
 func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
 	ops := FirewallRule{Type: "in", Action: "ACCEPT", Dest: "10.9.9.9", Comment: "ops"}
-	other := projectIsolationRule("p2", []string{"10.100.5.0/24"})
+	other := projectIsolationRules("p2", []string{"10.100.5.0/24"})[0]
 	srv, rules, _ := isolationFake(t, []FirewallRule{ops, other})
-	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", []string{"198.51.100.0/24"}); err != nil {
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", []string{"198.51.100.0/24"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	const blocked = "192.0.2.0/24,198.51.100.0/24"
@@ -228,9 +385,11 @@ func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
 	}
 	own := "10.100.0.0/24,10.100.1.0/24"
 	want := []string{
+		"in ACCEPT " + own + " " + own + " proxcloud:isolation:p1",
 		"forward ACCEPT " + own + " " + own + " proxcloud:isolation:p1",
 		"forward ACCEPT 10.100.5.0/24 10.100.5.0/24 proxcloud:isolation:p2",
 		"forward DROP 10.100.0.0/16 10.100.0.0/16 proxcloud:isolation",
+		"in DROP 10.100.0.0/16 10.100.0.0/16 proxcloud:isolation",
 		"forward DROP 10.100.0.0/16 " + blocked + " proxcloud:isolation",
 		"in DROP 10.100.0.0/16 " + blocked + " proxcloud:isolation",
 		"in ACCEPT  10.9.9.9 ops",
@@ -242,14 +401,143 @@ func TestReconcileIsolationBuildsAndKeepsOrder(t *testing.T) {
 
 func TestReconcileIsolationIdempotent(t *testing.T) {
 	own := "10.100.0.0/24,10.100.1.0/24"
-	current := append([]FirewallRule{projectIsolationRule("p1", strings.Split(own, ","))},
-		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"})...)
+	current := append(projectIsolationRules("p1", strings.Split(own, ",")),
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"}, nil, isolationComment)...)
 	srv, _, writes := isolationFake(t, current)
-	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil); err != nil {
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if *writes != 0 {
 		t.Fatalf("%d writes on an up-to-date rule set", *writes)
+	}
+}
+
+// A rule disabled by hand (enable 0) counts as missing: the next reconcile puts every rule back enabled, in order.
+func TestReconcileIsolationRepairsDisabledRules(t *testing.T) {
+	own := "10.100.0.0/24,10.100.1.0/24"
+	want := append(projectIsolationRules("p1", strings.Split(own, ",")),
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"}, nil, isolationComment)...)
+	for _, off := range []int{0, 3} { // a project ACCEPT, a provider DROP
+		current := slices.Clone(want)
+		current[off].Enable = 0
+		srv, rules, writes := isolationFake(t, current)
+		if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if *writes == 0 {
+			t.Fatalf("rule %d disabled: no write", off)
+		}
+		if !slices.EqualFunc(*rules, want, sameLiveRule) {
+			t.Fatalf("rule %d disabled: rules after the reconcile:\n%+v\nwant:\n%+v", off, *rules, want)
+		}
+	}
+}
+
+// A disabled copy of a project ACCEPT above its enabled twin: the reconcile deletes the disabled copy, not the twin.
+func TestReconcileIsolationDisabledAcceptAboveEnabledTwin(t *testing.T) {
+	own := "10.100.0.0/24,10.100.1.0/24"
+	want := append(projectIsolationRules("p1", strings.Split(own, ",")),
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24"}, nil, isolationComment)...)
+	off := want[0]
+	off.Enable = 0
+	srv, rules, _ := isolationFake(t, append([]FirewallRule{off}, want...))
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.EqualFunc(*rules, want, sameLiveRule) {
+		t.Fatalf("rules after the reconcile:\n%+v\nwant:\n%+v", *rules, want)
+	}
+}
+
+// One portal: a changed pool replaces its own DROPs and leaves no stale ones behind.
+func TestReconcileIsolationReplacesOwnRules(t *testing.T) {
+	own := "10.100.0.0/24,10.100.1.0/24"
+	current := append(projectIsolationRules("p1", strings.Split(own, ",")),
+		isolationRules("10.100.0.0/16", []string{"192.0.2.0/24", "198.51.100.0/24"}, nil, isolationComment)...)
+	srv, rules, _ := isolationFake(t, current)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var drops []string
+	for _, r := range *rules {
+		if r.Action == "DROP" {
+			drops = append(drops, r.Type+" "+r.Dest)
+		}
+	}
+	want := []string{"forward 10.100.0.0/16", "in 10.100.0.0/16", "forward 192.0.2.0/24", "in 192.0.2.0/24"}
+	if !reflect.DeepEqual(drops, want) {
+		t.Fatalf("drops = %v, want %v", drops, want)
+	}
+	if (*rules)[0].Action != "ACCEPT" || (*rules)[1].Action != "ACCEPT" {
+		t.Fatalf("ACCEPTs fell below the DROPs: %+v", *rules)
+	}
+}
+
+// Two portals: neither may remove the other's DROPs, whatever their pools.
+func TestReconcileIsolationLeavesOtherPortals(t *testing.T) {
+	theirs := isolationRules("10.200.0.0/16", []string{"192.0.2.0/24"}, nil, isolationComment+"/other-")
+	theirAccept := projectIsolationRules("p9", []string{"10.200.7.0/24"})[0]
+	srv, rules, _ := isolationFake(t, append([]FirewallRule{theirAccept}, theirs...))
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range append(theirs, theirAccept) {
+		if !slices.ContainsFunc(*rules, func(g FirewallRule) bool { return sameRule(g, r) }) {
+			t.Fatalf("rule of another portal is gone: %+v", r)
+		}
+	}
+	if (*rules)[len(*rules)-1].Comment != isolationComment+"/other-" {
+		t.Fatalf("rules of the other portal were moved: %+v", *rules)
+	}
+	srv.PoolPrefix = "pcx-"
+	if got := srv.isolationOwner(); got != isolationComment+"/pcx-" {
+		t.Fatalf("owner = %q", got)
+	}
+}
+
+// A dead node must not block a network change, and what only it knew must not lose its DROP.
+func TestReconcileIsolationWithNodeDown(t *testing.T) {
+	nodeDown := func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "595 No route to host", 595)
+	}
+	stale := isolationRules("10.100.0.0/16", []string{"192.0.2.0/24", "198.51.100.0/24"}, nil, isolationComment)
+	srv, rules, _ := isolationFakeNodes(t, stale, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/nodes/pve2/network": nodeDown,
+	}, `{"type":"node","name":"pve2","ip":"192.0.2.12"}`)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range stale {
+		if !slices.ContainsFunc(*rules, func(g FirewallRule) bool { return sameRule(g, r) }) {
+			t.Fatalf("DROP went while a node was down: %+v", r)
+		}
+	}
+	if (*rules)[0].Comment != isolationComment+":p1" {
+		t.Fatalf("the project's ACCEPTs must still be set: %+v", *rules)
+	}
+
+	// No DROPs at all: a partial list beats none.
+	srv, rules, _ = isolationFakeNodes(t, nil, map[string]func(http.ResponseWriter, *http.Request){
+		"GET /api2/json/nodes/pve2/network": nodeDown,
+	}, `{"type":"node","name":"pve2","ip":"192.0.2.12"}`)
+	if err := srv.ReconcileIsolation(context.Background(), "p1", "10.100.0.0/16", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(*rules, func(g FirewallRule) bool { return g.Action == "DROP" && g.Dest == "192.0.2.0/24" }) {
+		t.Fatalf("no DROP for the networks the live nodes know: %+v", *rules)
+	}
+}
+
+// A rule list that shifts between the read and the delete must not cost another rule.
+func TestDeleteClusterRuleByIdentity(t *testing.T) {
+	ops := FirewallRule{Type: "in", Action: "ACCEPT", Dest: "10.9.9.9", Comment: "ops"}
+	stale := projectIsolationRules("p1", []string{"10.100.1.0/24"})
+	srv, rules, _ := isolationFake(t, append([]FirewallRule{ops}, stale...))
+	if err := srv.setProjectIsolation(context.Background(), "p1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*rules) != 1 || (*rules)[0].Comment != "ops" {
+		t.Fatalf("rules = %+v", *rules)
 	}
 }
 

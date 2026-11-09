@@ -39,8 +39,8 @@ func TestExecuteProjectDeletion(t *testing.T) {
 		}
 		if sched != nil {
 			p.ScheduledForDeletionAt = sched
-			if err := repo.Save(ctx, p); err != nil {
-				t.Fatalf("save %s: %v", name, err)
+			if ok, err := repo.SaveIfStatus(ctx, p, status); err != nil || !ok {
+				t.Fatalf("save %s: %v %v", name, ok, err)
 			}
 		}
 		return p

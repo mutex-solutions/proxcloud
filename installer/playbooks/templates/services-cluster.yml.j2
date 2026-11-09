@@ -1,0 +1,192 @@
+{# The services cluster: kubeadm through CAPMOX, one pinned machine pool per PVE node, because a clone to local
+   storage stays on its template's node. #}
+{% set svc = pc.services %}
+{% set version = 'v' ~ svc.k8s_version %}
+{% macro machine(name, node, m) %}
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxMachineTemplate
+metadata:
+  name: {{ name }}
+  namespace: pc-services
+spec:
+  template:
+    spec:
+      sourceNode: {{ node }}
+      templateID: {{ svc.templates[node] }}
+      allowedNodes: [{{ node }}]
+      storage: {{ svc.storage }}
+      format: raw
+      full: true
+      pool: {{ svc.pool }}
+      checks: {skipCloudInitStatus: true}  # agent exec needs VM.GuestAgent.Unrestricted on PVE 9: root in every guest
+      tags: [proxcloud, pc-services]
+      numSockets: 1
+      numCores: {{ m.cores }}
+      memoryMiB: {{ m.memory }}
+      disks:
+        bootVolume: {disk: scsi0, sizeGb: {{ m.disk }}}
+      network:
+        networkDevices:
+          - {name: net0, bridge: {{ svc.network.bridge }}, model: virtio}
+{% endmacro %}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pc-services
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pc-services-pve
+  namespace: pc-services
+stringData:
+  url: {{ pc_portal_pve_url }}
+  token: {{ pc_services_capi_token_id }}
+  secret: {{ pc_services_capi_token_secret }}
+---
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: pc-services
+  namespace: pc-services
+spec:
+  clusterNetwork:
+    pods: {cidrBlocks: [10.244.0.0/16]}
+    services: {cidrBlocks: [10.96.0.0/16]}
+  infrastructureRef: {apiGroup: infrastructure.cluster.x-k8s.io, kind: ProxmoxCluster, name: pc-services}
+  controlPlaneRef: {apiGroup: controlplane.cluster.x-k8s.io, kind: KubeadmControlPlane, name: pc-services-cp}
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxCluster
+metadata:
+  name: pc-services
+  namespace: pc-services
+spec:
+  credentialsRef: {name: pc-services-pve, namespace: pc-services}
+  controlPlaneEndpoint: {host: {{ svc.network.endpoint }}, port: 6443}
+  ipv4Config:
+    addresses: {{ svc.network.nodes | to_json }}
+    prefix: {{ svc.network.prefix }}
+    gateway: {{ svc.network.gateway }}
+  dnsServers: {{ svc.network.dns | to_json }}
+---
+{{ machine('pc-services-cp', svc.control_plane.node, svc.control_plane) }}
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: KubeadmControlPlane
+metadata:
+  name: pc-services-cp
+  namespace: pc-services
+spec:
+  replicas: 1
+  version: {{ version }}
+  machineTemplate:
+    spec:
+      infrastructureRef: {apiGroup: infrastructure.cluster.x-k8s.io, kind: ProxmoxMachineTemplate, name: pc-services-cp}
+  kubeadmConfigSpec:
+    users:
+      - name: root
+        sshAuthorizedKeys: [{{ pc_ssh_public_key | to_json }}]
+    clusterConfiguration:
+      apiServer:
+        certSANs: {{ ([svc.network.endpoint] + svc.api_extra_sans) | to_json }}
+    files:
+      - path: /etc/kubernetes/manifests/kube-vip.yaml
+        owner: root:root
+        content: |
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: kube-vip
+            namespace: kube-system
+          spec:
+            containers:
+            - args: ["manager"]
+              env:
+              - {name: cp_enable, value: "true"}
+              - {name: vip_interface, value: ""}
+              - {name: address, value: "{{ svc.network.endpoint }}"}
+              - {name: port, value: "6443"}
+              - {name: vip_arp, value: "true"}
+              - {name: vip_leaderelection, value: "true"}
+              - {name: vip_leaseduration, value: "15"}
+              - {name: vip_renewdeadline, value: "10"}
+              - {name: vip_retryperiod, value: "2"}
+              image: ghcr.io/kube-vip/kube-vip:{{ pc_ver.kube_vip }}
+              imagePullPolicy: IfNotPresent
+              name: kube-vip
+              securityContext:
+                capabilities:
+                  add: [NET_ADMIN, NET_RAW]
+              volumeMounts:
+              - {mountPath: /etc/kubernetes/admin.conf, name: kubeconfig}
+            hostAliases:
+            - {hostnames: [localhost, kubernetes], ip: 127.0.0.1}
+            hostNetwork: true
+            volumes:
+            - name: kubeconfig
+              hostPath: {path: /etc/kubernetes/admin.conf, type: FileOrCreate}
+      - path: /etc/kube-vip-prepare.sh
+        owner: root:root
+        permissions: "0700"
+        content: |
+          #!/bin/bash
+          set -e
+          # kubeadm init has no admin.conf with rights yet: kube-vip uses super-admin.conf until then.
+          if [[ -f /run/kubeadm/kubeadm.yaml ]]; then
+            sed -i 's#path: /etc/kubernetes/admin.conf#path: /etc/kubernetes/super-admin.conf#' /etc/kubernetes/manifests/kube-vip.yaml
+          fi
+    preKubeadmCommands: [/etc/kube-vip-prepare.sh]
+    initConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs:
+          - {name: provider-id, value: "proxmox://'{{ '{{' }} ds.meta_data.instance_id {{ '}}' }}'"}
+          - {name: node-labels, value: "topology.kubernetes.io/region={{ pc.provider.region }},topology.kubernetes.io/zone={{ svc.control_plane.node }}"}
+    joinConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs:
+          - {name: provider-id, value: "proxmox://'{{ '{{' }} ds.meta_data.instance_id {{ '}}' }}'"}
+          - {name: node-labels, value: "topology.kubernetes.io/region={{ pc.provider.region }},topology.kubernetes.io/zone={{ svc.control_plane.node }}"}
+{% for w in svc.workers %}
+---
+{{ machine('pc-services-w-' ~ w.node, w.node, w) }}
+---
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KubeadmConfigTemplate
+metadata:
+  name: pc-services-w-{{ w.node }}
+  namespace: pc-services
+spec:
+  template:
+    spec:
+      users:
+        - name: root
+          sshAuthorizedKeys: [{{ pc_ssh_public_key | to_json }}]
+      joinConfiguration:
+        nodeRegistration:
+          kubeletExtraArgs:
+            - {name: provider-id, value: "proxmox://'{{ '{{' }} ds.meta_data.instance_id {{ '}}' }}'"}
+            - {name: node-labels, value: "topology.kubernetes.io/region={{ pc.provider.region }},topology.kubernetes.io/zone={{ w.node }}"}
+---
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  name: pc-services-w-{{ w.node }}
+  namespace: pc-services
+spec:
+  clusterName: pc-services
+  replicas: 1
+  selector:
+    matchLabels:
+      proxcloud.io/machine-deployment: pc-services-w-{{ w.node }}
+  template:
+    metadata:
+      labels:
+        proxcloud.io/machine-deployment: pc-services-w-{{ w.node }}
+    spec:
+      clusterName: pc-services
+      version: {{ version }}
+      bootstrap:
+        configRef: {apiGroup: bootstrap.cluster.x-k8s.io, kind: KubeadmConfigTemplate, name: pc-services-w-{{ w.node }}}
+      infrastructureRef: {apiGroup: infrastructure.cluster.x-k8s.io, kind: ProxmoxMachineTemplate, name: pc-services-w-{{ w.node }}}
+{% endfor %}

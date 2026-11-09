@@ -30,13 +30,19 @@ Go to **Compute → Servers** and click **Create server**. The launch form is a 
 5. Still under **Access**, tick a **security group** that opens the ports you'll use. Every project has a default group.
 6. Give it a **name** and click **Create server**. ProxCloud clones the image into a new VM in your project, turns on its firewall before the first boot, and starts it. It moves through **BUILD** and settles on **ACTIVE** once it's up. (For what's happening behind that, see [How Provisioning Works](/docs/concepts/provisioning).)
 
+![The Create server page with an image and a flavor selected](/docs-img/create-server.png)
+
 The new server appears in the list right away, first in a **build** state:
+
+![The Servers list with a running server and its addresses](/docs-img/servers-list.png)
 
 ## Step 4 — Reach it from the internet
 
 A new server can already reach the internet: its private network gives it outbound access through SNAT. To reach it *from* the internet, it needs a **public NIC** — a second network interface on one of the public networks your operator has enabled for your project, carrying one public address. The address is pinned to the server by its firewall, so it can't be used by anything else.
 
-There are no floating IPs on Proxmox, and the portal does not attach a public NIC for you yet. Attach one through the API with the server action `ATTACH_PUBLIC_NETWORK` (`POST /api/v1/project/{id}/cloud/{serverId}/action`, data `networkId` = one of the public networks listed by `GET /api/v1/project/{id}/public-networks`). `DETACH_PUBLIC_NETWORK` removes it again and returns the address to the pool. The NIC plugs in at once, but the guest configures it at its next boot, so **reboot the server** after attaching or detaching. While a server has a public NIC, its outbound traffic leaves through the public address.
+Open the server's **Network** tab and, in the **Public IP** card, pick a public network and click **Attach public IP**; **Detach** returns the address to the pool. The NIC plugs in at once, but the guest configures it at its next boot, so **reboot the server** after attaching or detaching. While a server has a public NIC, its outbound traffic leaves through the public address. The card shows only when your operator has given the project a public network.
+
+The same is available through the API: the server action `ATTACH_PUBLIC_NETWORK` (`POST /api/v1/project/{id}/cloud/{serverId}/action`, data `networkId` = one of the networks listed by `GET /api/v1/project/{id}/public-networks`) and `DETACH_PUBLIC_NETWORK`.
 
 Once the server has a public address:
 
@@ -45,7 +51,9 @@ Once the server has a public address:
 
 ## Step 5 — Operate and tidy up
 
-From the server's page you can run power actions — **Start**, **Stop**, **Reboot** — and, from **More actions**, delete it. Deleting destroys the VM together with its disks, so it stops accruing charges, and returns any public address to the pool.
+From the server's page you can run power actions — **Start**, **Stop**, **Reboot** — and, from **More actions**, delete it. Deleting destroys the VM and its boot disk, so it stops accruing charges, and returns any public address to the pool. Data volumes are kept, detached and still billed, unless you tick **Also delete this server's volumes**; the server's backups are deleted with it.
+
+![A server detail page with its power actions and addresses](/docs-img/server-detail.png)
 
 Deleting asks you to confirm, since it can't be undone:
 

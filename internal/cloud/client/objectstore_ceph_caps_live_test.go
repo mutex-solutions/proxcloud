@@ -45,20 +45,20 @@ func TestLiveCephCCapabilities(t *testing.T) {
 
 	// ---------- 0. Is this Ceph Squid (RGW Accounts / real IAM users)? ----------
 	var acct any
-	err := admin.ceph.adminDo(ctx, "GET", "/account", url.Values{}, nil, &acct)
+	err := cephOf(admin).adminDo(ctx, "GET", "/account", url.Values{}, nil, &acct)
 	t.Log("RGW Accounts (Squid IAM):")
 	report(t, "GET /admin/account", err)
 
 	// ---------- 1. Bucket created WITH object lock (implies versioning; create-time only) ----------
 	t.Log("Bucket create-time options:")
-	_, err = proj.ceph.s3.CreateBucket(ctx, &s3.CreateBucketInput{
+	_, err = cephOf(proj).s3.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: &capsBucket, ObjectLockEnabledForBucket: awsv2.Bool(true),
 	})
 	lockBucketOK := report(t, "CreateBucket+ObjectLock", err)
 	if lockBucketOK {
 		t.Cleanup(func() {
 			bg := context.Background()
-			if _, err := proj.ceph.s3.DeleteBucket(bg, &s3.DeleteBucketInput{Bucket: &capsBucket}); err != nil {
+			if _, err := cephOf(proj).s3.DeleteBucket(bg, &s3.DeleteBucketInput{Bucket: &capsBucket}); err != nil {
 				t.Logf("cleanup: DeleteBucket %s: %v", capsBucket, err)
 			}
 		})
@@ -67,18 +67,18 @@ func TestLiveCephCCapabilities(t *testing.T) {
 	if lockBucketOK {
 		// ---------- 2. Versioning ----------
 		t.Log("Versioning:")
-		vout, err := proj.ceph.s3.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: &capsBucket})
+		vout, err := cephOf(proj).s3.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: &capsBucket})
 		if report(t, "GetBucketVersioning", err) {
 			t.Logf("      status=%q (object-lock buckets are versioned automatically)", vout.Status)
 		}
-		_, err = proj.ceph.s3.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+		_, err = cephOf(proj).s3.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
 			Bucket: &capsBucket, VersioningConfiguration: &s3types.VersioningConfiguration{Status: s3types.BucketVersioningStatusEnabled},
 		})
 		report(t, "PutBucketVersioning", err)
 
 		// ---------- 3. Object lock configuration ----------
 		t.Log("Object lock:")
-		_, err = proj.ceph.s3.PutObjectLockConfiguration(ctx, &s3.PutObjectLockConfigurationInput{
+		_, err = cephOf(proj).s3.PutObjectLockConfiguration(ctx, &s3.PutObjectLockConfigurationInput{
 			Bucket: &capsBucket,
 			ObjectLockConfiguration: &s3types.ObjectLockConfiguration{
 				ObjectLockEnabled: s3types.ObjectLockEnabledEnabled,
@@ -88,12 +88,12 @@ func TestLiveCephCCapabilities(t *testing.T) {
 			},
 		})
 		report(t, "PutObjectLockConfiguration", err)
-		_, err = proj.ceph.s3.GetObjectLockConfiguration(ctx, &s3.GetObjectLockConfigurationInput{Bucket: &capsBucket})
+		_, err = cephOf(proj).s3.GetObjectLockConfiguration(ctx, &s3.GetObjectLockConfigurationInput{Bucket: &capsBucket})
 		report(t, "GetObjectLockConfiguration", err)
 
 		// ---------- 4. Encryption (SSE-S3 default) — needs a KMS/vault backend ----------
 		t.Log("Encryption:")
-		_, err = proj.ceph.s3.PutBucketEncryption(ctx, &s3.PutBucketEncryptionInput{
+		_, err = cephOf(proj).s3.PutBucketEncryption(ctx, &s3.PutBucketEncryptionInput{
 			Bucket: &capsBucket,
 			ServerSideEncryptionConfiguration: &s3types.ServerSideEncryptionConfiguration{
 				Rules: []s3types.ServerSideEncryptionRule{{
@@ -106,12 +106,12 @@ func TestLiveCephCCapabilities(t *testing.T) {
 		// SSE-S3 needs a KMS backend (rgw_crypt_sse_s3_backend), and without one it silently stores
 		// PLAINTEXT while still accepting PutBucketEncryption. Never expose an "encrypted" toggle that lies.
 		probeKey := "sse-probe.txt"
-		if _, err := proj.ceph.s3.PutObject(ctx, &s3.PutObjectInput{
+		if _, err := cephOf(proj).s3.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: &capsBucket, Key: &probeKey, Body: strings.NewReader("probe"), ContentLength: awsv2.Int64(5),
 		}); err != nil {
 			t.Logf("      sse probe: PutObject failed: %v", err)
 		} else {
-			head, herr := proj.ceph.s3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &capsBucket, Key: &probeKey})
+			head, herr := cephOf(proj).s3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &capsBucket, Key: &probeKey})
 			if herr != nil {
 				t.Logf("      sse probe: HeadObject failed: %v", herr)
 			} else if head.ServerSideEncryption == "" {
@@ -119,12 +119,12 @@ func TestLiveCephCCapabilities(t *testing.T) {
 			} else {
 				t.Logf("      ✓ object actually encrypted: ServerSideEncryption=%q", head.ServerSideEncryption)
 			}
-			_, _ = proj.ceph.s3.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &capsBucket, Key: &probeKey})
+			_, _ = cephOf(proj).s3.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &capsBucket, Key: &probeKey})
 		}
 
 		// ---------- 5. Lifecycle ----------
 		t.Log("Lifecycle:")
-		_, err = proj.ceph.s3.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+		_, err = cephOf(proj).s3.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
 			Bucket: &capsBucket,
 			LifecycleConfiguration: &s3types.BucketLifecycleConfiguration{Rules: []s3types.LifecycleRule{{
 				ID: awsv2.String("expire-tmp"), Status: s3types.ExpirationStatusEnabled,
@@ -136,14 +136,14 @@ func TestLiveCephCCapabilities(t *testing.T) {
 
 		// ---------- 6. CORS + tagging ----------
 		t.Log("CORS / tagging:")
-		_, err = proj.ceph.s3.PutBucketCors(ctx, &s3.PutBucketCorsInput{
+		_, err = cephOf(proj).s3.PutBucketCors(ctx, &s3.PutBucketCorsInput{
 			Bucket: &capsBucket,
 			CORSConfiguration: &s3types.CORSConfiguration{CORSRules: []s3types.CORSRule{{
 				AllowedMethods: []string{"GET"}, AllowedOrigins: []string{"*"},
 			}}},
 		})
 		report(t, "PutBucketCors", err)
-		_, err = proj.ceph.s3.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
+		_, err = cephOf(proj).s3.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
 			Bucket: &capsBucket,
 			Tagging: &s3types.Tagging{TagSet: []s3types.Tag{{
 				Key: awsv2.String("proxcloud"), Value: awsv2.String("drill"),
@@ -153,7 +153,7 @@ func TestLiveCephCCapabilities(t *testing.T) {
 
 		// ---------- 7. Replication (single-zone cluster → expected to fail) ----------
 		t.Log("Replication:")
-		rep, err := proj.ceph.s3.GetBucketReplication(ctx, &s3.GetBucketReplicationInput{Bucket: &capsBucket})
+		rep, err := cephOf(proj).s3.GetBucketReplication(ctx, &s3.GetBucketReplicationInput{Bucket: &capsBucket})
 		if report(t, "GetBucketReplication", err) {
 			n := 0
 			if rep.ReplicationConfiguration != nil {
@@ -165,10 +165,10 @@ func TestLiveCephCCapabilities(t *testing.T) {
 		// ---------- 8. Per-bucket quota (RGW Admin Ops, NOT S3) ----------
 		t.Log("Bucket quota (admin ops):")
 		q := url.Values{
-			"quota": {""}, "bucket": {capsBucket}, "uid": {admin.ceph.uid},
+			"quota": {""}, "bucket": {capsBucket}, "uid": {cephOf(admin).uid},
 			"max-size": {"1073741824"}, "max-objects": {"100"}, "enabled": {"true"},
 		}
-		report(t, "PUT /admin/bucket?quota", admin.ceph.adminDo(ctx, "PUT", "/bucket", q, nil, nil))
+		report(t, "PUT /admin/bucket?quota", cephOf(admin).adminDo(ctx, "PUT", "/bucket", q, nil, nil))
 		var st struct {
 			BucketQuota struct {
 				Enabled    bool  `json:"enabled"`
@@ -176,7 +176,7 @@ func TestLiveCephCCapabilities(t *testing.T) {
 				MaxObjects int64 `json:"max_objects"`
 			} `json:"bucket_quota"`
 		}
-		if err := admin.ceph.adminDo(ctx, "GET", "/bucket", url.Values{"bucket": {capsBucket}, "stats": {"true"}}, nil, &st); err == nil {
+		if err := cephOf(admin).adminDo(ctx, "GET", "/bucket", url.Values{"bucket": {capsBucket}, "stats": {"true"}}, nil, &st); err == nil {
 			t.Logf("      readback: enabled=%v max_size=%d max_objects=%d",
 				st.BucketQuota.Enabled, st.BucketQuota.MaxSize, st.BucketQuota.MaxObjects)
 		}
@@ -186,20 +186,20 @@ func TestLiveCephCCapabilities(t *testing.T) {
 	t.Log("Per-bucket access for a separate S3 key (IAM-style):")
 	readerUID := "dev_proxcloud_reader"
 	var created adminUser
-	err = admin.ceph.adminDo(ctx, "PUT", "/user",
+	err = cephOf(admin).adminDo(ctx, "PUT", "/user",
 		url.Values{"uid": {readerUID}, "display-name": {"proxcloud-drill-reader"}}, nil, &created)
 	if !report(t, "create reader RGW user", err) || len(created.Keys) == 0 {
 		return
 	}
 	t.Cleanup(func() {
-		_ = admin.ceph.adminDo(context.Background(), "DELETE", "/user",
+		_ = cephOf(admin).adminDo(context.Background(), "DELETE", "/user",
 			url.Values{"uid": {readerUID}, "purge-data": {"true"}}, nil, nil)
 		t.Logf("cleanup: purged %s", readerUID)
 	})
 	readerS3 := s3.New(s3.Options{
-		Region:       admin.ceph.region,
+		Region:       cephOf(admin).region,
 		Credentials:  credentials.NewStaticCredentialsProvider(created.Keys[0].AccessKey, created.Keys[0].SecretKey, ""),
-		BaseEndpoint: awsv2.String(admin.ceph.s3Endpoint), UsePathStyle: true,
+		BaseEndpoint: awsv2.String(cephOf(admin).s3Endpoint), UsePathStyle: true,
 		RequestChecksumCalculation: awsv2.RequestChecksumCalculationWhenRequired,
 		ResponseChecksumValidation: awsv2.ResponseChecksumValidationWhenRequired,
 	})
@@ -218,12 +218,12 @@ func TestLiveCephCCapabilities(t *testing.T) {
 	  "Action":["s3:GetObject"],"Resource":["arn:aws:s3:::` + bucket + `/*"]},
 	 {"Effect":"Allow","Principal":{"AWS":["arn:aws:iam:::user/` + readerUID + `"]},
 	  "Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::` + bucket + `"]}]}`
-	_, err = proj.ceph.s3.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{Bucket: &bucket, Policy: &policy})
+	_, err = cephOf(proj).s3.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{Bucket: &bucket, Policy: &policy})
 	if !report(t, "PutBucketPolicy(principal)", err) {
 		return
 	}
 	t.Cleanup(func() {
-		if _, err := proj.ceph.s3.DeleteBucketPolicy(context.Background(), &s3.DeleteBucketPolicyInput{Bucket: &bucket}); err != nil {
+		if _, err := cephOf(proj).s3.DeleteBucketPolicy(context.Background(), &s3.DeleteBucketPolicyInput{Bucket: &bucket}); err != nil {
 			t.Errorf("cleanup: DeleteBucketPolicy: %v", err)
 		}
 		t.Logf("cleanup: bucket policy removed from %s", bucket)

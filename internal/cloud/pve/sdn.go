@@ -152,6 +152,17 @@ func (c *Client) CreateSDNSubnet(ctx context.Context, vnet string, o SubnetOpts)
 	return c.post(ctx, "/cluster/sdn/vnets/"+url.PathEscape(vnet)+"/subnets", form, nil)
 }
 
+// UpdateSDNSubnetSNAT switches a subnet's SNAT flag.
+func (c *Client) UpdateSDNSubnetSNAT(ctx context.Context, vnet, subnetID string, snat bool) error {
+	form := url.Values{}
+	if snat {
+		form.Set("snat", "1")
+	} else {
+		form.Set("delete", "snat")
+	}
+	return c.put(ctx, "/cluster/sdn/vnets/"+url.PathEscape(vnet)+"/subnets/"+url.PathEscape(subnetID), form, nil)
+}
+
 // DeleteSDNSubnet deletes by the PVE-generated subnet id (SDNSubnet.Subnet).
 func (c *Client) DeleteSDNSubnet(ctx context.Context, vnet, subnetID string) error {
 	err := c.delete(ctx, "/cluster/sdn/vnets/"+url.PathEscape(vnet)+"/subnets/"+url.PathEscape(subnetID), nil, nil)

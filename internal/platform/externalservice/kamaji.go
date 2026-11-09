@@ -19,8 +19,10 @@ package externalservice
 //	    "cluster": {                      // chart-value defaults every cluster inherits
 //	      "dataStoreName":     "default",
 //	      "dnsZone":           "k8s.example.com",
-//	      "versions":          {"1.35.4": "<node-image-id>"},  // curated version→DEFAULT-image matrix
-//	      "imageVariants":     {"nvidia": {"1.35.4": "<node-image-id>"}}  // optional per-version variants
+//	      "versions":          {"1.35.10": "pve1=9210,pve2=9211"},  // version→template per PVE node
+//	      "imageVariants":     {"nvidia": {"1.35.4": "<node-image-id>"}},  // optional per-version variants
+//	      "pveApiUrl":         "https://192.0.2.11:8006",  // the PVE API as CAPMOX reaches it
+//	      "workerMtu":         1450                        // EVPN vnets
 //	    }
 //	  },
 //	  "secret": {"kubeconfig": "<management-cluster kubeconfig>"}  // encrypted at rest
@@ -29,7 +31,12 @@ package externalservice
 // Cluster CONTROL PLANES live on the management cluster; worker VMs land in the project's own
 // compute service (plan D4) — so a project must be attached to both.
 
-import "github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
+import (
+	"strconv"
+	"strings"
+
+	"github.com/mutex-solutions/proxcloud/internal/cloud/kamaji"
+)
 
 // IsKamaji reports whether this is a Kamaji Managed-Kubernetes provider (config.provider == "kamaji").
 func (e *ExternalService) IsKamaji() bool { return e.Provider() == "kamaji" }
@@ -103,8 +110,23 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 			ImageVariants: variants,
 			Flavors:       flavors,
 			RootVolumeGiB: intOf(cl["rootVolumeGiB"]),
+			RWXGiB:        intOf(cl["rwxGiB"]),
 			AllowedCIDRs:  strList(cl["allowedCidrs"]),
+			PVEAPIURL:     str(cl["pveApiUrl"]),
+			DNSServers:    strList(cl["dnsServers"]),
+			NodeGroupMTU:  intOf(cl["workerMtu"]),
+
+			ProxmoxServiceID: str(cl["proxmoxServiceId"]),
 		},
+	}
+	if sw, ok := cl["sharedWorkers"].(map[string]any); ok && str(sw["bridge"]) != "" {
+		sec := e.secretMap()
+		cfg.Defaults.Shared = &kamaji.SharedWorkers{
+			Pool: str(sw["pool"]), Bridge: str(sw["bridge"]), Gateway: str(sw["gateway"]), Prefix: intOf(sw["prefix"]),
+			First: str(sw["first"]), Last: str(sw["last"]),
+			CAPITokenID: str(sw["capiTokenId"]), CAPISecret: str(sec["sharedCapiSecret"]),
+			CSITokenID: str(sw["csiTokenId"]), CSISecret: str(sec["sharedCsiSecret"]),
+		}
 	}
 	if cfg.ArgoNamespace == "" {
 		cfg.ArgoNamespace = "argocd"
@@ -112,9 +134,13 @@ func (e *ExternalService) KamajiConfig() kamaji.Config {
 	return cfg
 }
 
-// intOf reads a config number, which round-trips through JSON as float64.
+// intOf reads a config number, which round-trips through JSON as float64. Ansible's "{{ x | int }}" sends a string, so the
+// installer's numbers arrive as "100".
 func intOf(v any) int {
 	switch n := v.(type) {
+	case string:
+		i, _ := strconv.Atoi(strings.TrimSpace(n))
+		return i
 	case float64:
 		return int(n)
 	case int:
@@ -134,6 +160,22 @@ func strList(v any) []string {
 	for _, it := range items {
 		if s := str(it); s != "" {
 			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// RemovedKamajiClusterKeys are config.cluster keys of the tenant-side proxmox-csi controller, gone since block volumes
+// go through the CSI gateway: a provider that still sends one is refused (KamajiRemovedKeys), not silently ignored.
+var RemovedKamajiClusterKeys = []string{"csiSharedStores", "pveCsiUrl"}
+
+// KamajiRemovedKeys names the removed keys a kamaji provider config sets in its cluster block.
+func KamajiRemovedKeys(cfg map[string]any) []string {
+	cl, _ := cfg["cluster"].(map[string]any)
+	var out []string
+	for _, k := range RemovedKamajiClusterKeys {
+		if _, ok := cl[k]; ok {
+			out = append(out, k)
 		}
 	}
 	return out

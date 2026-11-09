@@ -59,12 +59,13 @@ Errors: `404 NOT_FOUND` when the id doesn't exist.
 
 ## POST /admin-api/v1/users
 
-Pre-creates a user ahead of their first login.
+Creates a user. Without `sub` the login account is made in Keycloak and the response carries a `temporary_password`, once; a platform with no identity service account answers `400`. With `sub`, for an integrator who manages the identity provider, it pre-creates the row their first login under that subject lands on.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `email` | string | yes | The user's email. Must not already exist. |
-| `sub` | string | no | Subject identifier. Defaults to a generated `user-<32 hex>` value. |
+| `sub` | string | no | Subject identifier at your identity provider. |
+| `first_name`, `last_name` | string | no | Name on the account. |
 
 Response `200`:
 

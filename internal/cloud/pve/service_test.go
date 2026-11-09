@@ -156,9 +156,9 @@ func fakeService(t *testing.T) *Service {
 	routes := map[string]func(w http.ResponseWriter, r *http.Request){
 		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":[
-				{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve1","name":"vm-a","status":"running","pool":"st-p1","tags":"proxcloud;fl-std2;img-u24","maxcpu":2,"maxmem":4294967296,"maxdisk":34359738368},
-				{"id":"qemu/102","type":"qemu","vmid":102,"node":"pve1","name":"other","status":"running","pool":"st-OTHER","maxcpu":1,"maxmem":1073741824},
-				{"id":"qemu/9000","type":"qemu","vmid":9000,"node":"pve1","name":"tmpl-u24","status":"stopped","pool":"st-p1","template":1,"maxdisk":10737418240},
+				{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve1","name":"vm-a","status":"running","pool":"tp-p1","tags":"proxcloud;fl-std2;img-u24","maxcpu":2,"maxmem":4294967296,"maxdisk":34359738368},
+				{"id":"qemu/102","type":"qemu","vmid":102,"node":"pve1","name":"other","status":"running","pool":"tp-OTHER","maxcpu":1,"maxmem":1073741824},
+				{"id":"qemu/9000","type":"qemu","vmid":9000,"node":"pve1","name":"tmpl-u24","status":"stopped","pool":"tp-p1","template":1,"maxdisk":10737418240},
 				{"id":"node/pve1","type":"node","node":"pve1","status":"online"}
 			]}`)
 		},
@@ -171,12 +171,12 @@ func fakeService(t *testing.T) *Service {
 		},
 	}
 	_, c := fakePVE(t, routes)
-	return &Service{C: c, ServiceID: "svc-pve", PoolPrefix: "st-"}
+	return &Service{C: c, ServiceID: "svc-pve", PoolPrefix: "tp-"}
 }
 
 func TestServerSyncProviderPoolFilter(t *testing.T) {
 	s := fakeService(t)
-	p := s.ServerSyncProvider("pve", "p1")
+	p := s.ServerSyncProvider("pve", "p1", nil)
 	if p.Type() != cloud.TypeServer || p.ProjectID() != "p1" {
 		t.Fatal("provider identity")
 	}

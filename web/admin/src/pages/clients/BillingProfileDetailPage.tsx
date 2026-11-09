@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import {
-  CheckCircle2, Download, FolderKanban, Gauge, Gift, Layers, PauseCircle, PlayCircle, Plus, Receipt,
+  Banknote, CheckCircle2, Download, FolderKanban, Gauge, Gift, Layers, PauseCircle, PlayCircle, Plus, Receipt,
   RefreshCw, ShieldCheck, Trash2, Undo2, Wallet, XCircle,
 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
@@ -32,9 +32,11 @@ import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiFetch } from "@/lib/api"
+import { hasPermission, useAdminMe } from "@/lib/auth"
 import { useAdminList, useTabParam } from "@/lib/hooks"
 import { fmtDate, fmtDateTime, fmtMoney, timeAgo } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import { RecordPaymentDialog, type RecordPaymentBill } from "./RecordPaymentDialog"
 
 // GET /admin/billing-profile/{id} → BillingSummary (profile + computed financials).
 // The summary DROPS a few raw-doc fields (taxConfiguration / projectProvisioningQuota / bank / iban /
@@ -529,11 +531,190 @@ function AddressTab({ bpId, bp, raw }: { bpId: string; bp: Summary; raw: Doc | n
         </Button>
       </div>
 
+      <PaymentSettingsCard
+        key={`${bp.paymentMode ?? ""}|${bp.paymentGatewayId ?? ""}`}
+        bpId={bpId}
+        paymentMode={bp.paymentMode ?? "PREPAID"}
+        paymentGatewayId={bp.paymentGatewayId ?? ""}
+      />
+
+      <BillingContactsCard bpId={bpId} contacts={bp.contacts ?? []} />
+
       <dl className="grid gap-x-8 text-sm sm:grid-cols-2">
         <Row k="Created" v={fmtDateTime(bp.createdAt)} />
         <Row k="Activated" v={fmtDateTime(bp.activatedAt)} />
       </dl>
     </div>
+  )
+}
+
+// ─── Payment settings — paymentMode (PREPAID | POSTPAID) + preferred gateway integration.
+//     PUT /admin/billing-profile/{id} with ONLY these two keys is a partial update; any other key
+//     switches the API to the full billing-details validation, so nothing else goes in the body. ──
+
+const MODE_LABEL: Record<string, string> = { PREPAID: "Prepaid (top-up)", POSTPAID: "Pay as you go" }
+const GATEWAY_KINDS = ["Stripe", "Airwallex", "BankTransfer"]
+const GW_NONE = "__none__"
+
+function PaymentSettingsCard({
+  bpId, paymentMode, paymentGatewayId,
+}: { bpId: string; paymentMode: string; paymentGatewayId: string }) {
+  const qc = useQueryClient()
+  const { data: me } = useAdminMe()
+  // same permission the address editor's PUT requires server-side (ADMIN_BILLING_PROFILE_UPDATE)
+  const canEdit = hasPermission(me?.permissions, "admin:billing_profile:update")
+  const gateways = (useAdminList<Doc>("/admin/integrations").data?.data ?? []).filter((g) =>
+    GATEWAY_KINDS.includes(g.thirdParty),
+  )
+  const gwLabel = (id: string) => {
+    const g = gateways.find((x) => x.id === id)
+    if (!g) return id
+    return g.name && g.name !== g.thirdParty ? `${g.name} (${g.thirdParty})` : g.name || g.thirdParty
+  }
+  const [mode, setMode] = useState(paymentMode)
+  const [gateway, setGateway] = useState(paymentGatewayId || GW_NONE)
+  const dirty = mode !== paymentMode || gateway !== (paymentGatewayId || GW_NONE)
+
+  const save = useMutation({
+    mutationFn: () =>
+      apiFetch(`/admin/billing-profile/${bpId}`, {
+        method: "PUT",
+        body: { paymentMode: mode, paymentGatewayId: gateway === GW_NONE ? "" : gateway },
+      }),
+    onSuccess: () => {
+      toast.success("Payment settings saved")
+      void qc.invalidateQueries({ queryKey: ["admin-bp", bpId] })
+      void qc.invalidateQueries({ queryKey: ["admin-bp-raw", bpId] })
+      void qc.invalidateQueries({ queryKey: ["admin-list", "/admin/billing-profile"] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  return (
+    <Card>
+      <CardContent className="p-5">
+        <h3 className="mb-1 font-medium">Payment settings</h3>
+        <p className="mb-4 text-sm text-muted-foreground">
+          Prepaid profiles top up and settle bills from credit; pay-as-you-go profiles are charged to their
+          saved card when a bill is issued. The preferred gateway is the default for deposits and new cards.
+        </p>
+        {canEdit ? (
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="grid gap-1.5">
+              <Label>Payment mode</Label>
+              <Select value={mode} onValueChange={setMode}>
+                <SelectTrigger className="w-56" aria-label="Payment mode">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(MODE_LABEL).map(([k, v]) => (
+                    <SelectItem key={k} value={k}>{v}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <Label>Preferred gateway</Label>
+              <Select value={gateway} onValueChange={setGateway}>
+                <SelectTrigger className="w-64" aria-label="Preferred gateway">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={GW_NONE}>None</SelectItem>
+                  {gateways.map((g) => (
+                    <SelectItem key={g.id} value={g.id}>{gwLabel(g.id)}</SelectItem>
+                  ))}
+                  {/* gateway id that is no longer installed — keep it selectable/visible as the raw id */}
+                  {gateway !== GW_NONE && !gateways.some((g) => g.id === gateway) && (
+                    <SelectItem value={gateway}>{gateway}</SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+              {save.isPending ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        ) : (
+          <dl className="grid gap-x-8 text-sm sm:grid-cols-2">
+            <Row k="Payment mode" v={MODE_LABEL[paymentMode] ?? paymentMode} />
+            <Row k="Preferred gateway" v={paymentGatewayId ? gwLabel(paymentGatewayId) : "—"} />
+          </dl>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ─── Billing contacts — extra invoice/billing e-mail recipients; PUT /admin/billing-profile/{id}
+//     {contacts} saves the whole list (the PUT applies only the fields present in the body) ───────
+
+type BillingContact = { name?: string; email?: string }
+const MAX_CONTACTS = 10
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+function BillingContactsCard({ bpId, contacts }: { bpId: string; contacts: BillingContact[] }) {
+  const qc = useQueryClient()
+  const [draft, setDraft] = useState({ name: "", email: "" })
+  const save = useMutation({
+    mutationFn: (next: BillingContact[]) =>
+      apiFetch(`/admin/billing-profile/${bpId}`, { method: "PUT", body: { contacts: next } }),
+    onSuccess: () => {
+      toast.success("Billing contacts saved")
+      setDraft({ name: "", email: "" })
+      void qc.invalidateQueries({ queryKey: ["admin-bp", bpId] })
+      void qc.invalidateQueries({ queryKey: ["admin-bp-raw", bpId] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+  const email = draft.email.trim()
+  const canAdd = EMAIL_RE.test(email) && contacts.length < MAX_CONTACTS && !save.isPending
+
+  return (
+    <Card>
+      <CardContent className="p-5">
+        <h3 className="mb-1 font-medium">Billing contacts</h3>
+        <p className="mb-4 text-sm text-muted-foreground">
+          Every invoice and payment e-mail goes to the profile e-mail plus these addresses.
+        </p>
+        {contacts.length ? (
+          <ul className="mb-4 divide-y rounded-md border text-sm">
+            {contacts.map((c, i) => (
+              <li key={`${c.email}-${i}`} className="flex items-center justify-between gap-3 px-3 py-1.5">
+                <span className="truncate">
+                  {c.name ? <span className="font-medium">{c.name} </span> : null}
+                  <span className="text-muted-foreground">{c.email}</span>
+                </span>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={`Remove ${c.email}`}
+                  disabled={save.isPending}
+                  onClick={() => save.mutate(contacts.filter((_, j) => j !== i))}
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mb-4 text-sm text-muted-foreground">No extra recipients.</p>
+        )}
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="grid gap-1.5">
+            <Label htmlFor="bc-name">Name</Label>
+            <Input id="bc-name" autoComplete="off" value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="bc-email">E-mail</Label>
+            <Input id="bc-email" type="email" autoComplete="off" value={draft.email} onChange={(e) => setDraft((d) => ({ ...d, email: e.target.value }))} />
+          </div>
+          <Button variant="outline" disabled={!canAdd} onClick={() => save.mutate([...contacts, { name: draft.name.trim(), email }])}>
+            <Plus className="size-4" /> Add
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -1003,54 +1184,81 @@ function AutoSuspensionOverrideCard({ bpId, raw }: { bpId: string; raw: Doc | nu
 
 // ─── Bills tab — GET /admin/bill/{billingProfileId}/billing-profile → BillFinancialOverview list ─
 
+//     record payment: POST /admin/bill/{id}/record-payment (SENT bills, admin:bill:manage) ────────
+
 function BillsTab({ bpId }: { bpId: string }) {
   const { data, isLoading, isError, error } = useAdminList<Doc>(`/admin/bill/${bpId}/billing-profile`)
   const rows = data?.data ?? []
+  const { data: me } = useAdminMe()
+  const canRecord = hasPermission(me?.permissions, "admin:bill:manage")
+  const [paying, setPaying] = useState<RecordPaymentBill | null>(null)
 
   if (isLoading) return <Skeleton className="h-48" />
   if (isError) return <ErrorPanel error={error} />
   if (!rows.length) return <EmptyState icon={Receipt} title="No bills" hint="Bills accrue as usage is charged." />
 
   return (
-    <Card className="overflow-hidden py-0">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Bill</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead className="text-right">Net</TableHead>
-            <TableHead className="text-right">Gross</TableHead>
-            <TableHead className="text-right">Unpaid</TableHead>
-            <TableHead>Due</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((b) => (
-            <TableRow key={b.id}>
-              <TableCell className="font-mono text-xs">{b.id}</TableCell>
-              <TableCell>
-                <StatusBadge status={b.status} />
-              </TableCell>
-              <TableCell className="text-right font-mono text-sm tabular-nums">
-                {fmtMoney(b.totalAmount, b.currency)}
-              </TableCell>
-              <TableCell className="text-right font-mono text-sm tabular-nums">
-                {fmtMoney(b.totalInvoiceAmount, b.invoiceCurrency ?? b.currency)}
-              </TableCell>
-              <TableCell
-                className={cn(
-                  "text-right font-mono text-sm tabular-nums",
-                  Number(b.unpaidAmount ?? 0) > 0 ? "text-destructive-text" : "text-muted-foreground",
-                )}
-              >
-                {fmtMoney(b.unpaidAmount, b.invoiceCurrency ?? b.currency)}
-              </TableCell>
-              <TableCell className="text-sm text-muted-foreground">{fmtDate(b.dueAt)}</TableCell>
+    <>
+      <Card className="overflow-hidden py-0">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Bill</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead className="text-right">Net</TableHead>
+              <TableHead className="text-right">Gross</TableHead>
+              <TableHead className="text-right">Unpaid</TableHead>
+              <TableHead>Due</TableHead>
+              {canRecord ? <TableHead /> : null}
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </Card>
+          </TableHeader>
+          <TableBody>
+            {rows.map((b) => (
+              <TableRow key={b.id}>
+                <TableCell>
+                  {b.invoiceNumber ? <div className="text-sm font-medium">{b.invoiceNumber}</div> : null}
+                  <div className="font-mono text-xs text-muted-foreground">{b.id}</div>
+                </TableCell>
+                <TableCell>
+                  <StatusBadge status={b.status} />
+                </TableCell>
+                <TableCell className="text-right font-mono text-sm tabular-nums">
+                  {fmtMoney(b.totalAmount, b.currency)}
+                </TableCell>
+                <TableCell className="text-right font-mono text-sm tabular-nums">
+                  {fmtMoney(b.totalInvoiceAmount, b.invoiceCurrency ?? b.currency)}
+                </TableCell>
+                <TableCell
+                  className={cn(
+                    "text-right font-mono text-sm tabular-nums",
+                    Number(b.unpaidAmount ?? 0) > 0 ? "text-destructive-text" : "text-muted-foreground",
+                  )}
+                >
+                  {fmtMoney(b.unpaidAmount, b.invoiceCurrency ?? b.currency)}
+                </TableCell>
+                <TableCell className="text-sm text-muted-foreground">{fmtDate(b.dueAt)}</TableCell>
+                {canRecord ? (
+                  <TableCell className="text-right">
+                    {b.status === "SENT" ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          setPaying({ id: b.id, unpaidAmount: b.unpaidAmount, currency: b.invoiceCurrency ?? b.currency })
+                        }
+                      >
+                        <Banknote className="size-4" /> Record payment
+                      </Button>
+                    ) : null}
+                  </TableCell>
+                ) : null}
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </Card>
+      <RecordPaymentDialog bill={paying} onClose={() => setPaying(null)} />
+    </>
   )
 }
 
@@ -1461,6 +1669,8 @@ function TaxTab({ bpId, raw }: { bpId: string; raw: Doc | null }) {
 //   GET /admin/collect-transactions/{bp}/billing-profile
 //   POST /admin/account-credit-transactions/refund/{txnId}
 //   GET /admin/account-credit-transactions/{txnId}/sync (re-drives the gateway status)
+//   GET /admin/collect-transactions/{txnId}/sync (asks the gateway about a PENDING charge)
+//   POST /admin/collect-transactions/{txnId}/close (ends a PENDING charge the gateway says did not succeed, or one with no reference)
 
 function TransactionsTab({ bpId }: { bpId: string }) {
   const qc = useQueryClient()
@@ -1490,6 +1700,31 @@ function TransactionsTab({ bpId }: { bpId: string }) {
     onSuccess: () => {
       toast.success("Transaction synced with the gateway")
       invalidate()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const invalidateCollects = () =>
+    void qc.invalidateQueries({ queryKey: ["admin-list", `/admin/collect-transactions/${bpId}/billing-profile`] })
+
+  const recheck = useMutation({
+    mutationFn: (txnId: string) => apiFetch<Doc>(`/admin/collect-transactions/${txnId}/sync`),
+    onSuccess: (txn) => {
+      const note = txn?.errorMessage ? `: ${txn.errorMessage}` : ""
+      if (txn?.status === "PENDING") toast.warning(txn.errorMessage || "The gateway gave no final answer. The charge is still pending.")
+      else if (txn?.status === "SUCCESS") toast.success(`The gateway reports the charge succeeded${note}`)
+      else toast.info(`Charge is now ${txn?.status}${note}`)
+      invalidateCollects()
+      void qc.invalidateQueries({ queryKey: ["admin-bp", bpId] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const closeCharge = useMutation({
+    mutationFn: (txnId: string) => apiFetch(`/admin/collect-transactions/${txnId}/close`, { method: "POST" }),
+    onSuccess: () => {
+      toast.success("Charge closed")
+      invalidateCollects()
     },
     onError: (e: Error) => toast.error(e.message),
   })
@@ -1605,14 +1840,41 @@ function TransactionsTab({ bpId }: { bpId: string }) {
                       {fmtMoney(t.grossAmount, t.currency)}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={download.isPending}
-                        onClick={() => download.mutate(t.id)}
-                      >
-                        <Download className="size-4" /> Download
-                      </Button>
+                      <div className="flex justify-end gap-2">
+                        {t.status === "PENDING" && t.externalId && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={recheck.isPending}
+                            onClick={() => recheck.mutate(t.id)}
+                          >
+                            <RefreshCw className="size-4" /> Re-check
+                          </Button>
+                        )}
+                        {t.status === "PENDING" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            title={t.externalId ? "The gateway is asked first: closes only if it says the charge did not succeed." : `No gateway reference. Look for ${t.id} at the gateway first: close it only if nothing was charged.`}
+                            disabled={closeCharge.isPending}
+                            onClick={() => {
+                              if (window.confirm(t.externalId ? `Close charge ${t.id}? The gateway is asked first, and a charge that may still complete stays open.` : `Close charge ${t.id}? Look for this reference at the gateway first: close it only if nothing was charged.`)) {
+                                closeCharge.mutate(t.id)
+                              }
+                            }}
+                          >
+                            Close
+                          </Button>
+                        )}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={download.isPending}
+                          onClick={() => download.mutate(t.id)}
+                        >
+                          <Download className="size-4" /> Download
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}

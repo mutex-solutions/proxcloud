@@ -19,8 +19,9 @@ Find them under **Billing → Savings plans**.
 3. Select a **duration** (in months) from the dropdown.
 4. Enter your **Monthly committed amount** in your billing currency.
 5. Set the start: **This month** or **Next month**.
-6. Optionally tick **Pay upfront** for the upfront tiers — bear in mind upfront contracts can't be cancelled.
-7. Click **Purchase**. The contract shows up in your contracts table as **ACTIVE**.
+6. Optionally tick **Pay upfront** for the upfront tiers — bear in mind a paid upfront contract can't be cancelled.
+7. Click **Purchase**. The contract shows up in your contracts table: **ACTIVE** without upfront payment, **PENDING_PAYMENT** with it.
+8. For an upfront contract, open its menu and pay by card or bank transfer. It costs the whole term's commitment less its discount, and it starts discounting once the money has arrived. If its start month has gone by then, the term starts in the current month, so you get every month you paid for. Until you pay you can still cancel it. An upfront contract bought before payments were enforced shows as **PENDING_PAYMENT** too, and gives no discount until it is paid. If you already paid your provider, ask them to record the payment.
 
 <!-- screenshot: /docs-img/savings-plans-purchase.png — Purchase form with duration selected, monthly committed amount filled in, start-month selector and the "Pay upfront" checkbox -->
 
@@ -28,8 +29,8 @@ Find them under **Billing → Savings plans**.
 
 The same page lists your contracts with their plan name, duration, monthly commitment, discount rate, and end date.
 
-- **Extend contract** — pushes the end date out by the contract's own duration (a 12-month contract gains another 12 months).
-- **Cancel contract** — offered for **non-upfront** active contracts only. Cancelling stops the discount from applying going forward; upfront contracts always run to their end date.
+- **Extend contract** — pushes the end date out by the contract's own duration (a 12-month contract gains another 12 months). Upfront contracts can't be extended, since the extra months would not be paid for: buy a new one when the term ends.
+- **Cancel contract** — offered for **non-upfront** active contracts, and for an upfront contract not paid yet. Cancelling stops the discount from applying going forward; a paid upfront contract always runs to its end date.
 
 <!-- screenshot: /docs-img/savings-contracts-table.png — Active savings contracts table showing committed/month, discount %, end date, and the Extend/Cancel actions -->
 

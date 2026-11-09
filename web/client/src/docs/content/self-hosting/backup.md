@@ -64,10 +64,14 @@ Pods, ConfigMaps, Secrets and Ingress come up together with the data, so the pla
 If you prefer classic database backups — or your PostgreSQL is external and already has its own backup regime:
 
 ```sh
-# Platform data — the primary state (bundled PostgreSQL)
-kubectl -n proxcloud exec proxcloud-postgresql-0 -- \
-  env PGPASSWORD=$PG_PASS pg_dump -U proxcloud -d proxcloud --format=custom \
+# Platform data — the primary state. Default CloudNativePG cluster <release>-pg:
+# run it on the current primary (status.currentPrimary of the Cluster).
+PRIMARY=$(kubectl -n proxcloud get cluster proxcloud-pg -o jsonpath='{.status.currentPrimary}')
+kubectl -n proxcloud exec "$PRIMARY" -c postgres -- \
+  pg_dump -d proxcloud --format=custom \
   > proxcloud-$(date +%F-%H%M).dump
+# (bitnami subchart instead: kubectl -n proxcloud exec proxcloud-postgresql-0 -- \
+#   env PGPASSWORD=$PG_PASS pg_dump -U proxcloud -d proxcloud --format=custom)
 
 # Keycloak database — identity (adjust to your Keycloak's DB pod/name)
 kubectl -n proxcloud exec <keycloak-db-pod> -- \

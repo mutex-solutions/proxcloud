@@ -3,11 +3,11 @@ name: proxcloud
 description: >-
   ProxCloud — self-service cloud platform on Proxmox VE.
   Deploys the Go API, the customer console (ui), the operator console (admin),
-  and optionally bundles PostgreSQL, RabbitMQ and Keycloak.
+  and runs PostgreSQL and RabbitMQ through their operators, with Keycloak optional.
 type: application
-version: 0.3.28
+version: 0.3.29
 # appVersion carries the v prefix — it doubles as the default image tag (see the docker workflow).
-appVersion: "v0.3.28"
+appVersion: "v0.3.29"
 kubeVersion: ">=1.25.0-0"
 keywords:
   - proxcloud
@@ -17,6 +17,7 @@ keywords:
 sources:
   - https://github.com/mutex-solutions/proxcloud
 dependencies:
+  # Opt-in alternatives to the operator-managed defaults (see values-dev.yaml).
   - name: postgresql
     version: 18.7.11
     repository: oci://registry-1.docker.io/bitnamicharts

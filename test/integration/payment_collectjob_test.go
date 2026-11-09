@@ -57,7 +57,7 @@ func TestCollectJobPaysSentBill(t *testing.T) {
 	}
 
 	fg := &fakeGW{}
-	svc := payment.NewCollectService(repo, pricingRepo, func(string) payment.Gateway { return fg })
+	svc := payment.NewCollectService(repo, pricingRepo, func(*billing.Gateway) payment.Gateway { return fg })
 	profile := &billing.BillingProfile{ID: bpID, Currency: "USD", Country: "US", Status: "ACTIVE"}
 
 	paid, err := svc.CollectBillingProfile(ctx, profile)

@@ -28,6 +28,17 @@ func TestProjectGPUUsageRoute(t *testing.T) {
 	}
 }
 
+func TestKamajiCSIGatewayRoute(t *testing.T) {
+	router := chi.NewRouter()
+	(&Handler{}).Routes(router)
+	if !router.Match(chi.NewRouteContext(), http.MethodPost, "/admin/service/svc-1/k8s-clusters/pc-c-1/csi-gateway") {
+		t.Fatal("POST /admin/service/{id}/k8s-clusters/{clusterId}/csi-gateway route is not registered")
+	}
+	if router.Match(chi.NewRouteContext(), http.MethodPost, "/admin/service/svc-1/k8s-clusters/pc-c-1/csi-gatewayx") {
+		t.Fatal("negative control matched")
+	}
+}
+
 // A handler method that is never routed still compiles, so assert the GPU-capacity-visible toggle
 // route is actually wired (the class of bug where a handler ships completely unreachable).
 func TestProjectGPUCapacityVisibleRoute(t *testing.T) {

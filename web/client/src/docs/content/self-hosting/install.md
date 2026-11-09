@@ -1,12 +1,13 @@
 # Installing on Kubernetes
 
-ProxCloud is delivered as one Helm chart that installs the three application workloads and, by default, every stateful dependency they rely on. A single `helm upgrade --install` yields a complete platform: API, customer portal, admin console, PostgreSQL, and RabbitMQ — plus, optionally, a bundled Keycloak for identity.
+ProxCloud is delivered as one Helm chart that installs the three application workloads and, by default, every stateful dependency they rely on. A single `helm upgrade --install` yields a complete platform: API, customer portal, admin console, a PostgreSQL cluster and a RabbitMQ cluster (through their operators), plus, optionally, a bundled Keycloak for identity.
 
 ## Prerequisites
 
 - A working Kubernetes cluster with a default StorageClass.
+- The [CloudNativePG](https://cloudnative-pg.io) operator and the [RabbitMQ Cluster Operator](https://github.com/rabbitmq/cluster-operator), which run the default PostgreSQL and RabbitMQ. Without them, set `cnpg.installOperator: true` (bundles the CloudNativePG operator), use the bitnami subcharts (`-f deploy/charts/proxcloud/values-dev.yaml`), or point at external services (below).
 - For classic ingress: an ingress controller (such as ingress-nginx) and, for TLS, cert-manager with a ClusterIssuer. Gateway API exposure is supported as an alternative.
-- A DNS name for the platform (e.g. `cloud.example.com`) pointed at your ingress.
+- DNS names for the portal, the API and the admin console (e.g. `cloud.example.com`, `api.cloud.example.com`, `admin.cloud.example.com`) pointed at your ingress.
 - Helm 3.8+.
 
 ## The chart and its images
@@ -16,17 +17,17 @@ ProxCloud is delivered as one Helm chart that installs the three application wor
 | Chart | `oci://ghcr.io/mutex-solutions/charts/proxcloud` |
 | API image | `ghcr.io/mutex-solutions/proxcloud-api` (Go backend: REST + admin API + jobs) |
 | Portal image | `ghcr.io/mutex-solutions/proxcloud-web` (customer SPA, served at `/`) |
-| Admin image | `ghcr.io/mutex-solutions/proxcloud-admin` (admin SPA, served at `/proxcloud_admin`) |
+| Admin image | `ghcr.io/mutex-solutions/proxcloud-admin` (admin SPA, served at `/` on its own host) |
 
 Bundled dependencies, each swappable for an external instance:
 
 | Dependency | Toggle | External counterpart |
 |------------|--------|----------------------|
-| PostgreSQL | `postgresql.enabled` | `externalPostgresql.*` |
-| RabbitMQ | `rabbitmq.enabled` | `externalRabbitmq.*` |
+| PostgreSQL | `cnpg.enabled` (default: a CloudNativePG `Cluster`), or `postgresql.enabled` (bitnami subchart) | `externalPostgresql.*`, with both off |
+| RabbitMQ | `rabbitmqCluster.enabled` (default: a `RabbitmqCluster`), or `rabbitmq.enabled` (bitnami subchart) | `externalRabbitmq.*`, with both off |
 | Keycloak | `keycloakx.enabled` (off by default) | any external IdP via `auth.*.issuer` (see [How Identity Works](/docs/concepts/identity)) |
 
-The application state lives in one PostgreSQL database (`proxcloud`), one document-per-aggregate in a `jsonb` column. The bundled PostgreSQL subchart creates the `proxcloud` role and database on first boot.
+The application state lives in one PostgreSQL database (`proxcloud`), one document-per-aggregate in a `jsonb` column. The bundled PostgreSQL (the CloudNativePG cluster, or the subchart) creates the `proxcloud` role and database on first boot, named by `postgresql.auth.*`; set `postgresql.auth.password` (the chart ships no default).
 
 ## A minimal values file
 
@@ -35,9 +36,6 @@ The application state lives in one PostgreSQL database (`proxcloud`), one docume
 api:
   # Data-at-rest encryption key — CHANGE THIS and keep it safe (see Backup).
   encryptionKey: "<a long random string>"
-  # Public base URL the API embeds in mail links, redirects and MCP metadata.
-  selfUrls:
-    base: "https://cloud.example.com"
   # Mail gateway (optional here — you can also configure SMTP later under
   # Admin → Integrations → Mail, which is stored in the database and wins).
   mail:
@@ -48,17 +46,24 @@ api:
       username: mailer@example.com
       existingSecret: my-smtp-secret        # holds the SMTP password / API key
       passwordKey: PROXCLOUD_MAIL_SMTP_PASSWORD
-  # Ingress is per-component; the three share one host, split by path.
+  # Every component gets its own host: the consoles are built for /, and the
+  # API serves more than /api (/admin-api/v1, /mcp, /e2b, /.well-known).
+  # selfUrls are what the API puts in mail links, redirects and MCP metadata.
+  selfUrls:
+    base: "https://cloud.example.com"
+    api: "https://api.cloud.example.com"
+    ui: "https://cloud.example.com"
+    admin: "https://admin.cloud.example.com"
   ingress:
     enabled: true
     className: "nginx"
-    host: "cloud.example.com"
-    path: /api
+    host: "api.cloud.example.com"
+    path: /
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt
     tls:
-      - hosts: ["cloud.example.com"]
-        secretName: proxcloud-tls
+      - hosts: ["api.cloud.example.com"]
+        secretName: proxcloud-api-tls
 
 ui:
   ingress:
@@ -76,16 +81,21 @@ admin:
   ingress:
     enabled: true
     className: "nginx"
-    host: "cloud.example.com"
-    path: /proxcloud_admin
+    host: "admin.cloud.example.com"
+    path: /
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt
     tls:
-      - hosts: ["cloud.example.com"]
-        secretName: proxcloud-tls
+      - hosts: ["admin.cloud.example.com"]
+        secretName: proxcloud-admin-tls
+
+# The PostgreSQL owner's password (CloudNativePG reads it from here too).
+postgresql:
+  auth:
+    password: "<a strong password>"
 ```
 
-With ingress on, the API answers under `/api/v1`, `/admin-api/v1`, `/openapi.json` and `/.well-known`; the portal takes `/`, the admin console `/proxcloud_admin`, and a bundled Keycloak (if enabled) is exposed on its own host via `keycloakx.ingress.*`.
+With ingress on, the API answers on `api.cloud.example.com` (`/api/v1`, `/admin-api/v1`, `/mcp`, `/e2b`, `/.well-known`), the portal on `cloud.example.com` and the admin console on `admin.cloud.example.com`; the consoles call the API at `api.selfUrls.api` + `/api/v1`. A bundled Keycloak (if enabled) is exposed on its own host via `keycloakx.ingress.*`.
 
 ## Running the install
 
@@ -102,7 +112,7 @@ kubectl -n proxcloud get pods
 kubectl -n proxcloud get ingress
 ```
 
-The API pod carries a `wait-for-db` init container, so it stays in `Init` until PostgreSQL is reachable — expect that on first boot.
+The API connects to PostgreSQL before it listens and exits if it cannot, so expect a few restarts on first boot while the database comes up.
 
 To pin application versions explicitly (otherwise the chart's `appVersion` is used):
 
@@ -148,6 +158,8 @@ Lose this value and encrypted data cannot be recovered — see [Backup and Recov
 For example, using an existing PostgreSQL rather than the bundled one:
 
 ```yaml
+cnpg:
+  enabled: false
 postgresql:
   enabled: false
 externalPostgresql:
@@ -163,7 +175,7 @@ externalPostgresql:
   # secretKey: db-url
 ```
 
-`externalRabbitmq` follows the same shape (`rabbitmq.enabled: false` plus the `externalRabbitmq` block). For identity, point `auth.*.issuer` at your IdP — see [How Identity Works](/docs/concepts/identity).
+`externalRabbitmq` follows the same shape (`rabbitmqCluster.enabled: false` plus the `externalRabbitmq` block). For identity, point `auth.*.issuer` at your IdP — see [How Identity Works](/docs/concepts/identity).
 
 ## Scaling for production
 
@@ -176,16 +188,17 @@ admin:
   replicas: 3
 ```
 
-For the datastore, either run the bundled PostgreSQL in a replicated architecture (`postgresql.architecture: replication`) or, better for production, point `externalPostgresql.*` at a managed/HA PostgreSQL that has its own backup and failover.
+For the datastore, either give the CloudNativePG cluster replicas (`cnpg.instances: 3`) or point `externalPostgresql.*` at a managed/HA PostgreSQL that has its own backup and failover.
 
 Scale each workload manually with `api.replicas` / `ui.replicas` / `admin.replicas`; the chart ships no HorizontalPodAutoscaler.
 
 ## Once it's installed
 
 1. Save the `<release>-api` encryption key offline (as above).
-2. Open `https://cloud.example.com/proxcloud_admin` and sign in with an admin-realm account.
+2. Open `https://admin.cloud.example.com/` and sign in with an admin-realm account.
 
 3. Add your Proxmox VE cluster(s) and API token in the admin console. ProxCloud syncs resource state by polling the PVE API, so there is no event feed to set up.
+4. If you enable per-organization SSO, restrict Keycloak's egress first: tenants choose URLs Keycloak will call. See [Required: Keycloak egress policy](/docs/self-hosting/sso#required-keycloak-egress-policy).
 
 ## Upgrading
 

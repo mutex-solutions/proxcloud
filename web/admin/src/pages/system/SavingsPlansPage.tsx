@@ -327,10 +327,47 @@ function TierList({ label, tiers }: { label: string; tiers?: Tier[] }) {
   )
 }
 
+// POST /admin/savings-contracts/{id}/record-payment: the money arrived outside the portal.
+function RecordPaymentDialog({ contract, onClose, onDone }: { contract: SavingsContract; onClose: () => void; onDone: () => void }) {
+  const [reference, setReference] = useState("")
+  const record = useMutation({
+    mutationFn: () => apiFetch(`${CONTRACTS_PATH}/${contract.id}/record-payment`, { method: "POST", body: { reference } }),
+    onSuccess: () => {
+      toast.success("Payment recorded, the contract is active")
+      onDone()
+      onClose()
+    },
+    onError: (e) => toast.error((e as Error).message),
+  })
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Record upfront payment</DialogTitle>
+          <DialogDescription>
+            Use this only for money you received outside the portal. The contract goes active and starts discounting.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-1.5">
+          <Label htmlFor="sc-reference">Payment reference</Label>
+          <Input id="sc-reference" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Bank reference or receipt number" />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button disabled={!reference.trim() || record.isPending} onClick={() => record.mutate()}>Record payment</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function PlanDetailSheet({ plan, onClose }: { plan: SavingsPlan; onClose: () => void }) {
   // GET /admin/savings-contracts/savings-plan/{id} — contracts enriched with billingProfile.
-  const contractsQ = useAdminList<SavingsContract>(`${CONTRACTS_PATH}/savings-plan/${plan.id}`)
+  const contractsPath = `${CONTRACTS_PATH}/savings-plan/${plan.id}`
+  const contractsQ = useAdminList<SavingsContract>(contractsPath)
   const contracts = contractsQ.data?.data ?? []
+  const qc = useQueryClient()
+  const [recording, setRecording] = useState<SavingsContract | null>(null)
 
   return (
     <Sheet open onOpenChange={(o) => !o && onClose()}>
@@ -387,6 +424,7 @@ function PlanDetailSheet({ plan, onClose }: { plan: SavingsPlan; onClose: () => 
                       <TableHead className="text-right">Committed</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead>End</TableHead>
+                      <TableHead />
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -402,6 +440,11 @@ function PlanDetailSheet({ plan, onClose }: { plan: SavingsPlan; onClose: () => 
                           <StatusBadge status={c.status} />
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">{fmtDate(c.endDate)}</TableCell>
+                        <TableCell className="text-right">
+                          {c.status === "PENDING_PAYMENT" ? (
+                            <Button size="sm" variant="outline" onClick={() => setRecording(c)}>Record payment</Button>
+                          ) : null}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -410,6 +453,13 @@ function PlanDetailSheet({ plan, onClose }: { plan: SavingsPlan; onClose: () => 
             )}
           </div>
         </div>
+        {recording ? (
+          <RecordPaymentDialog
+            contract={recording}
+            onClose={() => setRecording(null)}
+            onDone={() => qc.invalidateQueries({ queryKey: ["admin-list", contractsPath] })}
+          />
+        ) : null}
       </SheetContent>
     </Sheet>
   )

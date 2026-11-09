@@ -4,7 +4,10 @@ package adminapi
 // returns 501 when not wired; a create WITHOUT provision persists as DISABLED with no members.
 
 import (
+	"maps"
 	"net/http"
+	"slices"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -31,7 +34,16 @@ type apiProject struct {
 	OrganizationID      string                  `json:"organization_id,omitempty"`
 	BillingProfileID    string                  `json:"billing_profile_id,omitempty"`
 	ProvisionedServices []apiProvisionedService `json:"provisioned_services"`
-	Members             []apiProjectMember      `json:"members"`
+	// ProvisionFailures is what provision could not attach and a later open retries: the answer is still 200 when the project
+	// got onto another provider.
+	ProvisionFailures []apiProvisionFailure `json:"provision_failures,omitempty"`
+	Members           []apiProjectMember    `json:"members"`
+}
+
+type apiProvisionFailure struct {
+	ServiceID string    `json:"service_id"`
+	Message   string    `json:"message"`
+	At        time.Time `json:"at"`
 }
 
 func (h *Handler) routeProjects(r chi.Router) {
@@ -55,8 +67,18 @@ func (h *Handler) mapProject(r *http.Request, p *project.Project) apiProject {
 	}
 	return apiProject{
 		ID: p.ID, Name: p.Name, Status: p.Status, OrganizationID: p.OrganizationID,
-		BillingProfileID: bpID, ProvisionedServices: provisionedServices(p), Members: members,
+		BillingProfileID: bpID, ProvisionedServices: provisionedServices(p), ProvisionFailures: provisionFailures(p), Members: members,
 	}
+}
+
+// provisionFailures maps the project's recorded failures to the wire shape, by provider id so the order holds.
+func provisionFailures(p *project.Project) []apiProvisionFailure {
+	var out []apiProvisionFailure
+	for _, id := range slices.Sorted(maps.Keys(p.ProvisionFailures)) {
+		f := p.ProvisionFailures[id]
+		out = append(out, apiProvisionFailure{ServiceID: id, Message: f.Message, At: f.At})
+	}
+	return out
 }
 
 // provisionedServices maps the project's service bindings to the wire shape.

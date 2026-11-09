@@ -2,7 +2,7 @@ import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
-import { CalendarPlus, MoreHorizontal, PiggyBank, XCircle } from "lucide-react"
+import { CalendarPlus, CreditCard, Landmark, MoreHorizontal, PiggyBank, XCircle } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader, sortableRightHeader } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
@@ -26,6 +26,8 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { apiFetch } from "@/lib/api"
 import { fmtDate, fmtMoney, fmtMoneyTight } from "@/lib/format"
 import { useBillingSummary, useProjectId } from "@/lib/hooks"
+import type { Gateway } from "@/lib/types"
+import { NewCardDepositDialog, cardGateways } from "./NewCardDepositDialog"
 import { cn } from "@/lib/utils"
 
 type Tier = { startAmount?: number | string; discount?: number | string }
@@ -52,6 +54,7 @@ type SavingsContract = {
   monthlyCommittedAmount?: number | string
   discountRate?: number | string
   paidUpfront?: boolean
+  upfrontAmount?: number | string
   startDate?: string
   endDate?: string
 }
@@ -232,7 +235,7 @@ function PurchaseDialog({
         },
       }),
     onSuccess: () => {
-      toast.success(`Savings contract created for ${plan.name ?? "plan"}`)
+      toast.success(upfront ? `Contract created: pay for it under Your contracts to activate it` : `Savings contract created for ${plan.name ?? "plan"}`)
       void qc.invalidateQueries({ queryKey: ["savings-contracts", bp] })
       onOpenChange(false)
     },
@@ -320,7 +323,7 @@ function PurchaseDialog({
           </div>
           <div className="flex items-center gap-2">
             <Checkbox id="upfront" checked={upfront} onCheckedChange={(v) => setUpfront(v === true)} />
-            <Label htmlFor="upfront">Pay upfront (upfront tier discounts; cannot be cancelled)</Label>
+            <Label htmlFor="upfront">Pay upfront (upfront tier discounts; starts once paid, then cannot be cancelled)</Label>
           </div>
         </div>
 
@@ -342,16 +345,35 @@ function ContractsSection({ bp, currency }: { bp: string; currency: string }) {
   const qc = useQueryClient()
   const [cancelling, setCancelling] = useState<SavingsContract | null>(null)
   const [extending, setExtending] = useState<SavingsContract | null>(null)
+  const [paying, setPaying] = useState<SavingsContract | null>(null)
 
   const { data: contracts, isLoading, error } = useQuery({
     queryKey: ["savings-contracts", bp],
     queryFn: () => apiFetch<SavingsContract[]>(`/savings-contracts/${bp}`),
   })
+  const awaitingPayment = contracts?.some((c) => c.status === "PENDING_PAYMENT") ?? false
+  const { data: gateways } = useQuery({
+    queryKey: ["payment-gateways", bp],
+    queryFn: () => apiFetch<Gateway[]>(`/payment/${bp}/gateway`),
+    enabled: awaitingPayment,
+  })
+  const cardGws = cardGateways(gateways, "addFunds")
+  const bankGw = gateways?.find((g) => g.addFunds && g.thirdParty === "BankTransfer")
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["savings-contracts", bp] })
 
+  const payByBank = useMutation({
+    mutationFn: (c: SavingsContract) =>
+      apiFetch(`/payment/deposit/${bp}`, {
+        method: "POST",
+        body: { amount: Number(c.upfrontAmount), paymentGatewayId: bankGw?.id, savingsContractId: c.id },
+      }),
+    onSuccess: () => toast.success("Transfer instructions sent by email. The contract starts when we receive the money."),
+    onError: (e: Error) => toast.error(e.message),
+  })
+
   const cancel = useMutation({
-    // DELETE /savings-contracts/{bp}/{contractId} — non-upfront ACTIVE contracts only.
+    // DELETE /savings-contracts/{bp}/{contractId} — non-upfront ACTIVE contracts, or one still unpaid.
     mutationFn: (id: string) => apiFetch(`/savings-contracts/${bp}/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       toast.success("Contract cancelled")
@@ -429,8 +451,9 @@ function ContractsSection({ bp, currency }: { bp: string; currency: string }) {
         cell: ({ row }) => {
           const c = row.original
           const active = c.status === "ACTIVE"
+          const unpaid = c.status === "PENDING_PAYMENT"
           // Ended contracts have no actions — no point rendering an empty menu.
-          if (!active) return null
+          if (!active && !unpaid) return null
           return (
             <div className="text-right" onClick={(e) => e.stopPropagation()}>
               <DropdownMenu>
@@ -444,13 +467,25 @@ function ContractsSection({ bp, currency }: { bp: string; currency: string }) {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => setExtending(c)}>
-                    <CalendarPlus className="size-4" /> Extend
-                  </DropdownMenuItem>
+                  {unpaid && cardGws.length ? (
+                    <DropdownMenuItem onClick={() => setPaying(c)}>
+                      <CreditCard className="size-4" /> Pay {fmtMoney(c.upfrontAmount, currency)} by card
+                    </DropdownMenuItem>
+                  ) : null}
+                  {unpaid && bankGw ? (
+                    <DropdownMenuItem onClick={() => payByBank.mutate(c)} disabled={payByBank.isPending}>
+                      <Landmark className="size-4" /> Pay {fmtMoney(c.upfrontAmount, currency)} by bank transfer
+                    </DropdownMenuItem>
+                  ) : null}
+                  {active && c.paidUpfront !== true ? (
+                    <DropdownMenuItem onClick={() => setExtending(c)}>
+                      <CalendarPlus className="size-4" /> Extend
+                    </DropdownMenuItem>
+                  ) : null}
                   <DropdownMenuItem
                     variant="destructive"
                     onClick={() => setCancelling(c)}
-                    disabled={c.paidUpfront === true}
+                    disabled={active && c.paidUpfront === true}
                   >
                     <XCircle className="size-4" /> Cancel contract
                   </DropdownMenuItem>
@@ -461,11 +496,23 @@ function ContractsSection({ bp, currency }: { bp: string; currency: string }) {
         },
       },
     ],
-    [currency],
+    [currency, cardGws, bankGw, payByBank],
   )
 
   return (
     <div className="mt-8">
+      {paying ? (
+        <NewCardDepositDialog
+          open
+          onOpenChange={(o) => !o && setPaying(null)}
+          bp={bp}
+          amount={Number(paying.upfrontAmount)}
+          currency={currency}
+          gateways={cardGws}
+          savingsContractId={paying.id}
+          onDone={invalidate}
+        />
+      ) : null}
       <h2 className="mb-3 font-display text-lg font-semibold">Your contracts</h2>
       {!isLoading && !error && !contracts?.length ? (
         <EmptyState icon={PiggyBank} title="No savings contracts" hint="Purchase a plan above to start saving." />

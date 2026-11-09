@@ -2,7 +2,7 @@
 
 ProxCloud provisions and meters against one or more Proxmox VE clusters. You register each cluster as a *cloud provider* in the admin portal. One provider is one cluster, and one cluster is one region. ProxCloud drives the cluster through its REST API on port 8006 with a single API token. Tenancy is enforced on the platform side: every project gets its own resource pool, and ProxCloud checks ownership of every VM, network, firewall group and GPU mapping against its own database before it changes anything.
 
-The **Add provider** dialog also offers three other provider kinds: `ceph-s3` (S3 object storage on Ceph RGW), `kamaji` (managed Kubernetes) and `dbaas` (managed databases). This page covers the `proxmox` kind.
+The **Add provider** dialog also offers other provider kinds: `ceph-s3` (S3 object storage on Ceph RGW), `rustfs` (S3 object storage on RustFS), `truenas` (NFS and SMB file shares), `powerdns` (tenant DNS zones), `kamaji` (managed Kubernetes), `dbaas` (managed databases) and `sandbox` (gVisor sandboxes on the platform's sandbox cluster). This page covers the `proxmox` kind.
 
 ## Before you start
 
@@ -30,8 +30,8 @@ Open **System → Cloud providers**, choose **Add provider**, and pick the **Pro
 | Token secret | The token's secret. It is encrypted at rest and never returned by the API. When you edit the provider later, leaving it blank keeps the stored secret. |
 | TLS certificate fingerprint | Optional SHA-256 pin for a self-signed cluster certificate (`pvenode cert info` prints it). Empty means the system CA pool is used. |
 | Skip TLS verification | Last resort. Prefer the fingerprint pin. |
-| Pool prefix | Default `pc-`. Each project gets the pool `<prefix><projectId>`, which is its tenancy boundary. Don't give your management pool a name that starts with this prefix. |
-| Tenant network isolation | `Shared zone` (default) or `EVPN zone per project`. Both drop cross-tenant traffic with cluster firewall rules inside the CIDR pool, and keep tenants off the nodes' management networks plus any **Networks tenants must not reach** you list; the EVPN mode also gives every project its own EVPN zone (VRF). |
+| Pool prefix | Default `pc-`. Each project gets the pool `<prefix><projectId>`, which is its tenancy boundary. Don't give your management pool a name that starts with this prefix. A second portal on the same cluster needs its own prefix. |
+| Tenant network isolation | `Shared zone` (default) or `EVPN zone per project`. Both drop cross-tenant traffic with cluster firewall rules inside the CIDR pool, including other tenants' gateway addresses, and keep tenants off the nodes' management networks plus any **Networks tenants must not reach** you list; the EVPN mode also gives every project its own EVPN zone (VRF). The sync job puts these rules back within 15 minutes if they change, and a changed setting reaches existing projects the same way. Switching mode applies to new networks: existing ones stay in their zone until they are deleted. Widen the CIDR pool rather than move it: subnets left outside the pool lose the rule that separates them. |
 | EVPN controller | Only for `EVPN zone per project`: the controller every project zone uses. Blank means the default zone's controller. |
 
 Saving creates the provider as `PUBLIC` and enables the four services a Proxmox cluster serves in its region: `compute`, `network`, `volumev3` and `image`. There is no discovery round-trip. Traffic metrics start as `none` (see *Usage metrics* below).
@@ -51,7 +51,7 @@ It **warns** without failing when:
 
 On success it reports the Proxmox VE version and how many nodes, storages and PCI mappings the token can see.
 
-<!-- screenshot: /docs-img/add-proxmox-provider.png — ProxCloud admin: the Add provider dialog with the Proxmox VE form and a Test connection result -->
+![The Add cloud provider dialog with the Proxmox VE form](/docs-img/add-proxmox-provider.png)
 
 ## Proxmox resources
 
@@ -61,8 +61,11 @@ The provider's **Connection** tab has a **Proxmox resources** card with one JSON
 |---|---|
 | `network` | `defaultZone` and `zones` (SDN zones by kind: `evpn`, `vlan` or `simple`, with per-zone settings such as peers, exit nodes and, for `evpn` zones, `mtu` (default 1450)). Also `cidrPool` (required), `isolation`, `evpnController` and `publicNetworks`. |
 | `storageProfiles` | Named storage profiles mapping nodes to a Proxmox storage (`"*"` for every node where the storage is active), with an optional `label` shown to clients, capability flags (`shared`, `snapshots`, `thin`, `liveMigrate`, `replication`) and the caps `bootDisk` and `dbaas` (both on unless set to `false`). Flavors and volumes refer to a profile by its slug. The save is checked against the cluster; see *Storage* below. |
-| `templates` | The OS template catalog clients create servers from: `{slug: {vmid, node, name, osDistro, minDiskGb}}`. |
+| `templates` | Optional. OS templates are discovered from their tags in the cluster; an entry here overlays one (`name`, `osDistro`, `minDiskGb`), and `vmid` + `node` pin it: `{slug: {vmid, node, name, osDistro, minDiskGb}}`. |
 | `gpus` | GPU PCI mappings by mapping id, each with the model `alias` used everywhere GPU-related, e.g. `{"<mapping-id>": {"alias": "nvidia-4090"}}`. |
+| `metadata` | Server seeds (cloud-init user-data delivery), all optional: `url` (the API as tenant networks reach it), `isoStorage`, `forceIso`, `vendorData`. |
+
+Two more keys have no editor yet; set them with `PUT /api/v1/admin/service/{id}` (the installer sets both on a site with a NAS): `backupStorage`, the shared store server backups go to, which turns on the client **Backups** tab, and `importStorage`, the store with `import` content, which turns on **Import image** from a URL.
 
 ### Public networks
 
@@ -83,7 +86,11 @@ Projects have no floating IPs. A server becomes reachable from outside when it g
 
 `ranges` and `exclude` are optional; without `ranges` the whole CIDR is the pool. Never use the management bridge. **Test connection** rejects a public network on a node's management bridge. The traffic-metrics job also uses these bridge ids to tell public traffic from private traffic. Which public networks a given project may use is set on the project's detail page (see [Running the Platform](/docs/platform-admin/overview)).
 
+A public NIC is bridged straight to the uplink, so the isolation rules do not apply to it: the server reaches whatever the uplink routes. Filter management and internal networks on the uplink's router.
+
 ## Storage
+
+![The provider Storage tab with detected storage capabilities](/docs-img/provider-storage.png)
 
 ProxCloud reads what each Proxmox storage can do from the cluster instead of trusting the profile flags. The provider's **Storage** tab lists every storage with its type, content, tier (*full* for Ceph RBD/CephFS, otherwise *standard*), capability badges (shared, snapshots, thin, live migrate, replication), the nodes where it is active, and its class. Detection runs on every sync cycle, on every save of the storage profiles, and when you press **Re-detect capabilities**.
 
@@ -109,7 +116,7 @@ When a client creates a server, ProxCloud picks a node where the flavor's storag
 
 Where an OS template's disks live matters too. Proxmox clones to another node only from shared storage to shared storage. A template on shared storage (NFS, Ceph) can be cloned to any node when the flavor's profile is shared too (Ceph RBD, a shared LUN). A template on local storage, or any template with a local profile such as local ZFS, can only be cloned on the template's own node, so servers from it always land there, and the create is refused with a clear message when the flavor's profile is not active on that node. To spread local-ZFS servers across nodes, keep one template per node.
 
-A detached volume can only be attached to a server on the same node as its current server: Proxmox refuses to move a disk between VMs on different nodes, even on shared storage. Clients see the servers they can pick.
+A detached volume on local storage can only be attached to a server on the same node as its current server. On shared storage (Ceph RBD, NFS) it can go to any server: Proxmox moves a disk between VMs on one node only, so ProxCloud carries it across on a short-lived holder VM, which migrates offline without copying data. Clients see the servers they can pick.
 
 ## Default quota
 
@@ -117,10 +124,11 @@ The provider's **Quota** tab sets the default quota seeded into each new project
 
 ## Usage metrics
 
-The **Metrics** tab chooses where the hourly traffic-billing job reads per-VM network usage:
+The **Metrics** tab chooses where the traffic-billing job reads per-VM network usage:
 
-- `none` is the default for a Proxmox provider. The job skips the provider, so no traffic is metered.
-- `prometheus` reads a Prometheus-compatible endpoint (Prometheus, Mimir, VictoriaMetrics or Thanos). Set the endpoint URL and the metric schema, plus headers, credentials or a custom CA if needed. The only schema today is `libvirt-exporter`, a legacy layout that doesn't match Proxmox VMs yet, so a Proxmox provider meters no traffic until a Proxmox schema is added.
+- `pve` is the default for a Proxmox provider. It reads the byte counters of each VM's public NIC from Proxmox every minute. SDN traffic is not metered. Traffic in the last minute before a VM stops or migrates is lost, because Proxmox restarts the counter there.
+- `none` turns traffic metering off.
+- `prometheus` reads a Prometheus-compatible endpoint (Prometheus, Mimir, VictoriaMetrics or Thanos). Set the endpoint URL and the metric schema, plus headers, credentials or a custom CA if needed. The only schema today is `libvirt-exporter`, a legacy layout that doesn't match Proxmox VMs yet.
 
 Always run **Test** after you change the source. A misconfigured source doesn't fail loudly; ingestion stops and traffic goes unbilled. The same settings are available through `PUT /api/v1/admin/service/{id}/metrics-config`, `POST /api/v1/admin/service/{id}/metrics-test`, and the admin MCP tools `set_metrics_config` and `test_metrics_config`.
 

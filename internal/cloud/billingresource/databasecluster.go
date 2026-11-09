@@ -36,6 +36,15 @@ func (p *DatabaseClusterProvider) GetBillingInformation(_ context.Context, _ bil
 		// Autoscale surcharge flag (1/0): a flat per-database fee while enabled. The scaled-up
 		// capacity itself bills through the totals above — the tick raises the declared size.
 		values["autoscale_enabled"] = num(d["autoscale_enabled"])
+		// The read-only endpoint bills only where it actually costs something: postgresql
+		// needs a SECOND LoadBalancer for it (its readers are different pods), while mysql and
+		// mariadb answer reads on another port of the proxy they already run. The sync decides
+		// which case a database is in; charging for a free port would not be defensible.
+		readLB := float64(0)
+		if b, _ := d["read_endpoint_lb"].(bool); b {
+			readLB = 1
+		}
+		values["read_endpoint_lb"] = readLB
 		// Gate on the tenant-side endpoint (the LB ingress IP): while it is absent the charge is
 		// DEFERRED, not waived — the pricing engine freezes the bill-item watermark at
 		// createdAt and, once the endpoint appears, back-bills the elapsed hours of the current
@@ -66,6 +75,7 @@ func databaseClusterType() *billingapi.BillingResourceType {
 	return &billingapi.BillingResourceType{ResourceType: "database_cluster", Attributes: []billingapi.ResourceAttribute{
 		s("display_name"), s("engine"), s("version"), s("status"), s("endpoint"),
 		n("replicas"), n("vcpus_total"), n("ram_gb_total"), n("storage_gb_total"), n("autoscale_enabled"),
+		n("read_endpoint_lb"),
 	}}
 }
 

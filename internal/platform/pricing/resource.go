@@ -17,7 +17,10 @@ type BillingResource struct {
 	DisplayPrice          bool
 	Values                map[string]any
 	NotEligibleForBilling bool
-	BillingResourceType   *BillingResourceType
+	// SkipInterval, with NotEligibleForBilling, advances the watermark so the interval is never
+	// back-billed (the cloud state behind it could not be observed).
+	SkipInterval        bool
+	BillingResourceType *BillingResourceType
 }
 
 // BillingResourceType declares the attributes (name→type) of a resource type.

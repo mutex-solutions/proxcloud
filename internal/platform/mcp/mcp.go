@@ -8,14 +8,16 @@
 //     tools, admin realm → admin tools. MCP clients obtain the token via the
 //     standard MCP OAuth flow: 401 → RFC 9728 resource metadata → Keycloak
 //     (discovery + dynamic client registration + PKCE localhost redirect).
-//   - API key — `Authorization: Bearer <pk>.<sk>` (an hmac_keys pair). Grants
-//     the admin toolset. The pair is validated against hmac_keys with a
-//     constant-time compare.
+//   - Key — `Authorization: Bearer <pk>.<sk>`. A client personal access token
+//     (client_api_keys) is resolved by Enforce like a JWT of its user and gets the
+//     client toolset; otherwise the pair is checked against hmac_keys with a
+//     constant-time compare and grants the admin toolset.
 //
-// Tools are declarative rows (see tools_client.go / tools_admin.go): each maps
+// Tools are declarative rows (tools_client.go, tools_admin*.go): each maps
 // to an existing REST endpoint and is executed by in-process dispatch through
 // the full router, so org/project policy, DTO shapes and audit behave exactly
-// like the public API. JWT principals dispatch with their own bearer; api-key
+// like the public API. JWT and PAT principals dispatch with their own bearer
+// (marked so the azp binding lets the /mcp client's token through); api-key
 // principals dispatch with a SigV4 signature we mint from the validated pair.
 package mcp
 
@@ -31,6 +33,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -80,9 +83,17 @@ func New(log *slog.Logger, lookup auth.HmacKeyLookup, mainIssuer, adminIssuer, b
 // adminAllTools is the full admin toolset: the Admin-API rows plus the internal-admin
 // config surfaces (pricing, platform/provider config, project ops, billing ops).
 func adminAllTools() []toolDef {
-	out := []toolDef{}
-	for _, set := range [][]toolDef{adminTools, adminPricingTools, adminPlatformTools, adminCatalogTools, adminProjectOpsTools, adminBillingOpsTools} {
-		out = append(out, set...)
+	return concatTools(adminTools, adminPricingTools, adminPlatformTools, adminCatalogTools, adminProjectOpsTools, adminBillingOpsTools)
+}
+
+// ToolRoute is one tool's REST call: the route test in internal/server checks each against the router.
+type ToolRoute struct{ Name, Method, Path string }
+
+// ToolRoutes lists the REST call of every tool in both toolsets (path with {param} placeholders).
+func ToolRoutes() []ToolRoute {
+	out := []ToolRoute{}
+	for _, d := range append(adminAllTools(), clientTools...) {
+		out = append(out, ToolRoute{Name: d.name, Method: d.method, Path: d.path})
 	}
 	return out
 }
@@ -177,6 +188,12 @@ type param struct {
 	// body (for endpoints that decode a bare array or a passthrough document). A tool uses
 	// either named body params or a single rawbody param, never both.
 	in string
+	// fixed, when set, is always sent as this param's value and the param is left out of the
+	// input schema: an action tool cannot be talked into another action than its name says.
+	fixed any
+	// enum, when set, lists the only values the param takes (schema "enum", refused at dispatch otherwise): a tool
+	// that takes one of several actions cannot be sent one that has its own destructive tool.
+	enum []string
 }
 
 type toolDef struct {
@@ -185,13 +202,22 @@ type toolDef struct {
 	method string
 	path   string // REST path with {param} placeholders
 	params []param
+	// destructive forces destructiveHint for a write whose name does not say it (a restore, a replace).
+	destructive bool
 }
 
 func (h *Handler) register(srv *sdk.Server, d toolDef) {
 	props := map[string]any{}
 	var required []string
 	for _, p := range d.params {
-		props[p.name] = map[string]any{"type": p.typ, "description": p.desc}
+		if p.fixed != nil {
+			continue
+		}
+		prop := map[string]any{"type": p.typ, "description": p.desc}
+		if len(p.enum) > 0 {
+			prop["enum"] = p.enum
+		}
+		props[p.name] = prop
 		if p.required {
 			required = append(required, p.name)
 		}
@@ -227,16 +253,17 @@ func (h *Handler) register(srv *sdk.Server, d toolDef) {
 
 // toolAnnotations derives the MCP behavioural hints (readOnly / destructive / idempotent) from the
 // tool's verb + HTTP method, so an agent can tell a read from a write without calling it. Reads are
-// a GET or a list_/get_/search_ tool — note the resource-list tools are POST (/resource?type=…) yet
-// pure reads, so the name is the reliable signal, not the method. For writes the MCP spec defaults
-// destructiveHint to true, so we state it explicitly: a DELETE or delete_/remove_/reject_ tool is
+// a GET or a list_/get_/search_/test_ tool — note the resource-list tools are POST (/resource?type=…)
+// yet pure reads, so the name is the reliable signal, not the method (a test_ tool probes a
+// connection and stores nothing). For writes the MCP spec defaults destructiveHint to true, so we
+// state it explicitly: a DELETE, a delete_/remove_/reject_ tool or a row marked destructive is
 // destructive; a create/update is additive (destructive=false); a PUT or set_/update_ tool is
 // idempotent. (Verified in tools_registry_test.go: no read-named tool mutates, no write-named GET.)
 func toolAnnotations(d toolDef) *sdk.ToolAnnotations {
-	if d.method == "GET" || hasAnyPrefix(d.name, "list_", "get_", "search_") {
+	if d.method == "GET" || hasAnyPrefix(d.name, "list_", "get_", "search_", "test_") {
 		return &sdk.ToolAnnotations{ReadOnlyHint: true}
 	}
-	destructive := d.method == "DELETE" || hasAnyPrefix(d.name, "delete_", "remove_", "reject_")
+	destructive := d.destructive || d.method == "DELETE" || hasAnyPrefix(d.name, "delete_", "remove_", "reject_")
 	return &sdk.ToolAnnotations{
 		DestructiveHint: &destructive,
 		IdempotentHint:  d.method == "PUT" || hasAnyPrefix(d.name, "set_", "update_"),
@@ -270,11 +297,17 @@ func (h *Handler) dispatch(ctx context.Context, d toolDef, args map[string]any) 
 	hasRaw := false
 	for _, p := range d.params {
 		v, ok := args[p.name]
+		if p.fixed != nil {
+			v, ok = p.fixed, true
+		}
 		if !ok || v == nil {
 			if p.required {
 				return 0, nil, fmt.Errorf("missing required argument %q", p.name)
 			}
 			continue
+		}
+		if len(p.enum) > 0 && !slices.Contains(p.enum, fmt.Sprint(v)) {
+			return 0, nil, fmt.Errorf("argument %q must be one of %s", p.name, strings.Join(p.enum, ", "))
 		}
 		switch p.in {
 		case "path":
@@ -312,6 +345,9 @@ func (h *Handler) dispatch(ctx context.Context, d toolDef, args map[string]any) 
 	// without stripping it every dispatched GET/PUT/DELETE would be routed as
 	// POST (live-caught: GET list tools 400/405'd). Shadow the key with nil.
 	ctx = context.WithValue(ctx, chi.RouteCtxKey, nil)
+	// The bearer passed the /mcp gate, which accepts any client's token of a known issuer; mark the
+	// call so the API's azp binding does not refuse that same token on every tool.
+	ctx = auth.WithMCPDispatch(ctx)
 	req, err := http.NewRequestWithContext(ctx, d.method, u, rd)
 	if err != nil {
 		return 0, nil, err
