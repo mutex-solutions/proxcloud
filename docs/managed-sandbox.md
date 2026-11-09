@@ -1243,6 +1243,10 @@ Sandbox.create("<name>[:tag]") → <registry>/t/<project>/<template>@<digest>, p
   and started under a Postgres advisory lock per project, so parallel requests cannot pass the count together and
   fill the namespace quota all projects share), 30 minutes each; a build is billed like a sandbox of the template's size while it runs (row `build-<id>`, template
   `build:<template>`).
+- **Image handoff:** Kaniko uses `--image-format=oci --oci-layout-path=/out/image`; the separate credentialed
+  container runs `crane push /out/image … --image-refs /dev/termination-log`. Both the OCI image format and the
+  directory handoff are required: an OCI layout can contain a Docker manifest, and crane v0.20.3 reconstructs Docker
+  schema 2 when loading a Docker-save tarball. No registry acceptance, credential boundary or tool-image pin changes.
 - **The template record** (`sandbox_templates`): name, size, tags, the last 10 builds with their logs once the pod is
   gone (kept 10 minutes after it finished), the image digest of each ready build. Trimming to 10 never drops a build
   a tag names or one that is building, however many builds were requested since: the template keeps resolving and
@@ -1331,6 +1335,21 @@ policy, the registry CA and both Roles, and records the bucket (endpoint, addres
   same objects by hand; nothing of the registry or the build namespace was left on either cluster. These paths have unit
   tests only (build pod shape and accounts, the account sync's rules and Secrets, the OCI client against a fake
   registry, the S3 store against a fake S3, the fence rule, the OpenAPI parity).
+
+### 7.7 SDK custom-build format diagnosis (2026-11-09)
+
+A controlled E2B SDK 2.63 `fromTemplate("base")` + sentinel COPY/RUN reached terminal ERROR: fetch, base and Kaniko
+all exited 0; push exited 1 after uploading its blobs. Its retained push log reported `MANIFEST_INVALID` for
+`application/vnd.docker.distribution.manifest.v2+json`; Zot's matching manifest PUT returned 415. This proves the
+manifest-format failure for that diagnostic attempt, not the original attempt whose terminal evidence was deleted.
+The `--image-refs` flag was supported; digest reporting was not the failure. Native template deletion cleaned both
+attempts; no sandbox was created. Capture sanitized status reason/logs and pod termination states **before** cleanup.
+
+The unchanged, digest-pinned Kaniko v1.29.0 was then tested locally with `--network=none`, no credentials and a tiny
+`FROM scratch`/COPY context. `--oci-layout-path` alone produced Docker manifest/config/layer types; adding
+`--image-format=oci` produced OCI manifest/config/gzip-layer types with a verified manifest digest. Crane v0.20.3's
+directory loader preserves that manifest, unlike its tar loader. This is local format evidence, not a successful
+post-fix SDK acceptance run; the latter remains a separate reviewed rollout check. No registry policy was relaxed.
 
 ## 8. Pause, resume, snapshots and fork (SB7)
 

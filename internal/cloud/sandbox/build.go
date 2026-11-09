@@ -363,7 +363,8 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 					"name": "kaniko", "image": kanikoImage,
 					"args": []any{
 						"--context=dir:///workspace", "--dockerfile=/pinned/Dockerfile",
-						"--no-push", "--tar-path=/out/image.tar", "--destination=" + req.Image,
+						// Zot requires OCI manifests; crane's tar loader reconstructs Docker schema 2.
+						"--no-push", "--image-format=oci", "--oci-layout-path=/out/image", "--destination=" + req.Image,
 						"--snapshot-mode=redo", "--single-snapshot=false", "--cleanup",
 						// Offline: the base comes from /cache (filled by `base`); no credential helpers.
 						"--cache=true", "--cache-dir=/cache", "--cache-repo=oci:/kaniko/cache-repo",
@@ -376,7 +377,7 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 			},
 			"containers": []any{map[string]any{
 				"name": "push", "image": craneImage,
-				"args":         []any{"push", "/out/image.tar", req.Image, "--image-refs", "/dev/termination-log"},
+				"args":         []any{"push", "/out/image", req.Image, "--image-refs", "/dev/termination-log"},
 				"env":          []any{map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}, registryTrustEnv},
 				"resources":    map[string]any{"requests": small, "limits": map[string]any{"cpu": "1", "memory": "512Mi"}},
 				"volumeMounts": []any{mount("out", "/out"), mount("push-secret", "/docker"), mount("registry-ca", "/registry-ca")},
