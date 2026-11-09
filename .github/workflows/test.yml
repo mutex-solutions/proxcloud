@@ -58,6 +58,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3
+        with:
+          version: "1.16.2"
+      - name: Validate Packer expressions and plugin configuration (offline)
+        run: bash images/packer/validate.sh
       - name: Check the installer
         working-directory: installer
         run: |
