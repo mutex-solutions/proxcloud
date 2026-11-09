@@ -270,6 +270,73 @@ func TestRegistryBuildHandlerTerminalCrashStepRecoveryWithoutPod(t *testing.T) {
 	}
 }
 
+func TestRegistryBuildHandlerRetainedFromHoldsParentBinding(t *testing.T) {
+	f, _, key, store := newPinnedBuildFixture(t)
+	ctx := context.Background()
+	pid, pbid := requestBuild(t, f, key, "provenance-parent")
+	var parent map[string]any
+	if _, err := f.db.C("sandbox_templates").Get(ctx, pid, &parent); err != nil {
+		t.Fatal(err)
+	}
+	op := pinOp()
+	op.ProjectID = "pa"
+	op.Owner = "build:" + pid + ":" + pbid
+	dest := "192.0.2.226/t/pa/" + pid + ":" + pbid
+	image := "192.0.2.226/t/pa/" + pid + "@sha256:" + strings.Repeat("a", 64)
+	ps, err := store.BeginPins(ctx, op, []string{dest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := store.ObserveBinding(ctx, ps[0], registrypins.BindingEvidence{UID: "template:" + pid + ":" + pbid, Generation: op.Generation, DigestRef: image})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb := parent["builds"].([]any)[0].(map[string]any)
+	pb["status"] = sandbox.BuildReady
+	pb["image"] = image
+	pb["registryOperation"] = map[string]any{"operation": op, "state": "finished", "Destination": dest, "pins": []registrypins.Pin{bound}}
+	parent["tags"] = map[string]any{"default": pbid}
+	if _, err = f.db.C("sandbox_templates").Replace(ctx, pid, parent); err != nil {
+		t.Fatal(err)
+	}
+	cid, _ := requestBuild(t, f, key, "provenance-child")
+	var child map[string]any
+	if _, err = f.db.C("sandbox_templates").Get(ctx, cid, &child); err != nil {
+		t.Fatal(err)
+	}
+	cb := child["builds"].([]any)[0].(map[string]any)
+	cb["status"] = sandbox.BuildReady
+	cb["from"] = image
+	if _, err = f.db.C("sandbox_templates").Replace(ctx, cid, child); err != nil {
+		t.Fatal(err)
+	}
+	code, _ := f.e2b(key, http.MethodDelete, "/templates/"+pid, "")
+	if code == http.StatusOK || code == http.StatusNoContent {
+		t.Fatal("known child From did not hold parent")
+	}
+	ps, err = store.PinsForOperation(ctx, op)
+	if err != nil || ps[0].State != registrypins.Bound {
+		t.Fatalf("parent binding lost %+v %v", ps, err)
+	}
+	var held map[string]any
+	found, err := f.db.C("sandbox_templates").Get(ctx, pid, &held)
+	if err != nil || !found || len(held["retiredBuilds"].([]any)) != 1 {
+		t.Fatal("held owner tombstone lost")
+	}
+	code, body := f.e2b(key, http.MethodDelete, "/templates/"+cid, "")
+	if code != http.StatusOK && code != http.StatusNoContent {
+		t.Fatalf("child removal %d %s", code, body)
+	}
+	code, body = f.e2b(key, http.MethodDelete, "/templates/"+pid, "")
+	if code != http.StatusOK && code != http.StatusNoContent {
+		t.Fatalf("parent later cleanup %d %s", code, body)
+	}
+	ps, _ = store.PinsForOperation(ctx, op)
+	if ps[0].State != registrypins.Released {
+		t.Fatal("parent binding not released after known child removal")
+	}
+}
+
 func TestRegistryBuildHandlerConcurrentSingleApplyAndKnownReady(t *testing.T) {
 	f, c, key, store := newPinnedBuildFixture(t)
 	tid, bid := requestBuild(t, f, key, "pinned")

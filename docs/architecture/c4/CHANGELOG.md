@@ -13,7 +13,11 @@ proof, copied proofs share use/cancel state, and positively unused cancellation
 keeps its no-remint marker. Exact pod annotations/UID evidence retain BASE aliases
 until terminal; durable terminal owner checkpoints resume per-pin handoff after
 pod removal. READY DEST bindings survive retained historical builds/tag edits;
-trim/delete tombstones retain exact cleanup generations.
+trim/delete tombstones retain exact cleanup generations. Compact retired build-ID
+identities survive full receipt cleanup and refuse stale pre-prepare resurrection.
+All public readiness projections/usable selections wait for completed handoff;
+current retained From/Image refs conservatively HOLD parent cleanup, without
+claiming complete durable provenance pin coverage.
 
 **Why:** retrying an ambiguous apply or independently minting in-memory proofs
 could dispatch twice; stale saves/error handlers could lose completed tags or
