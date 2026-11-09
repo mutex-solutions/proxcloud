@@ -518,6 +518,18 @@ func run() error {
 	adminH := admin.NewHandler(admin.NewRepo(pg), catalog.NewRepo(pg), users, addFundsSvc, pricingRepo, billingRepo, cloudRepo, platformconfig.NewRepo(pg), auditSvc, esSvc, cfg.DefaultRegion, cfg.Auth.Admin.IssuerURI, cfg.Auth.Admin.ClientID)
 	adminH.SetHmacEncryptor(enc)
 	adminH.SetMailOutbox(mailOutbox)
+	adminH.SetValidationCanceler(mailOutbox) // keyless, even producer OFF
+	if cfg.Mail.ValidationApprovedOutboxEnabled {
+		if blobErr != nil {
+			return fmt.Errorf("validation approval payload key unavailable")
+		}
+		if err := prepareValidationDependencies(ctx, pg); err != nil {
+			return err
+		}
+		adminH.SetValidationOutbox(validationOutboxAdapter{store: mailOutbox, service: mailSvc, message: msgRepo,
+			config: mail.DurableConfigFromStore(integrationStore, enc), loginURL: cfg.Self.UIBaseURL})
+		log.Info("durable validation approval enqueue enabled; SMTP dispatch remains disabled")
+	}
 	adminH.SetPVEIncidents(incidentRepo)
 	adminH.SetCollectChecker(txnScanner)
 	adminH.SetKamaji(kamajiFactory)

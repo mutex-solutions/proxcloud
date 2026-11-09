@@ -90,13 +90,16 @@ type Handler struct {
 	dbaasFor func(es *externalservice.ExternalService) (*dbaas.Service, error)
 	hmacEnc  *textcrypt.Encryptor // seals the secrets of generated hmac keys
 	// sandboxGates checks a sandbox provider's release gates (SetSandboxGates; nil = none can go live).
-	sandboxGates    func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
-	seedArtifacts   *pve.SeedArtifactRepo // secret-free operator cleanup status
-	pveIncidents    chi.Router            // operator-only DB observation reads; nil until explicitly wired
-	mailOutbox      mailOutboxReader
-	durableStore    *durablejobs.Store
-	durableHistory  *durablejobs.History
-	durableValidate func(*durablejobs.Job) error
+	sandboxGates         func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
+	seedArtifacts        *pve.SeedArtifactRepo // secret-free operator cleanup status
+	pveIncidents         chi.Router            // operator-only DB observation reads; nil until explicitly wired
+	mailOutbox           mailOutboxReader
+	validationOutbox     ValidationApprovalOutbox
+	validationCanceler   validationCanceler
+	validationActivation validationActivationTail
+	durableStore         *durablejobs.Store
+	durableHistory       *durablejobs.History
+	durableValidate      func(*durablejobs.Job) error
 }
 
 // SetHmacEncryptor wires the data-at-rest key for hmac key secrets.
@@ -123,7 +126,14 @@ func (h *Handler) SetDbaas(f func(es *externalservice.ExternalService) (*dbaas.S
 
 // SetActivation wires the billing ActivationService (built in cmd/api with the cloud
 // suspender + notifier + project-bootstrap legs).
-func (h *Handler) SetActivation(a *billing.ActivationService) { h.activation = a }
+func (h *Handler) SetActivation(a *billing.ActivationService) {
+	h.activation = a
+	if a == nil {
+		h.validationActivation = nil
+	} else {
+		h.validationActivation = a
+	}
+}
 
 // ProjectCloudOps are the live per-project cloud legs wired from cmd/api for the ProjectAdmin /
 // CloudResourceAdmin mutations (the per-project cloud legs). Nil ops (or a nil struct) leave the

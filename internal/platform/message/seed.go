@@ -5,7 +5,7 @@ import (
 	"log/slog"
 )
 
-// seed.go defines the 22 built-in email templates, created if-absent (by key) at startup.
+// seed.go defines the built-in email templates, created if-absent (by key) at startup.
 // Placeholders are Mustache {{var}}.
 
 // SystemTemplates returns the built-in templates.
@@ -152,6 +152,12 @@ func SystemTemplates() []MessageTemplate {
 <p><a href="{{projectInviteUrl}}">Accept Invitation</a></p>
 <p>Please note that this link will expire in {{expiryHours}} hours. If you have any questions or need assistance, feel free to reach out to us.</p>
 <p>Best regards,</p>
+<p>{{businessName}}</p>`),
+		t("billing_profile_validation_approved", "BILLING", "Your Billing Profile Validation Has Been Approved",
+			`<p>Dear {{fullName}},</p>
+<p>Your billing profile validation has been approved.</p>
+<p>This approval does not confirm account activation, service readiness, or completion of any credits. You can review your account's current status by signing in at <a href="{{loginUrl}}">{{loginUrl}}</a>.</p>
+<p>If you have questions, please contact us.</p>
 <p>{{businessName}}</p>`),
 		t("billing_profile_validated", "BILLING", "Your Billing Profile Has Been Validated",
 			`<p>Dear {{fullName}},</p>

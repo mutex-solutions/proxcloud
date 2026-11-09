@@ -4,6 +4,30 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: typed validation approval outbox (enqueue-only)
+
+**What changed:** new default-OFF `validation-approved/v1` family and fixed
+`billing_profile_validation_approved` system template attest only the approval of
+`billingProfileValidation`, not account activation. An owned PRIMARY RC transaction
+locks validation then current profile, snapshots one fixed template/config and
+recipients, and atomically commits status, fresh generation/history and sealed
+mail. Same-generation repeats and historical APPROVED rows never re-render or
+backfill. Existing pending/rejected decisions cancel unsent IDs even OFF/keyless;
+sticky history prevents legacy fallback. The exact v1-to-v2 CHECK migration admits
+only three version-1 families and leaves prior ciphertext/AAD/wire unchanged.
+
+**Why:** status commit must not rely on later best-effort mail, and the old
+fully-activated wording is untrue before external activation completes. Activate
+stays postcommit; financial/provisioning/cloud effects are outside mail atomicity.
+No production dispatcher, activation retry, delivery or inbox guarantee is added.
+All readers/writers must upgrade before opt-in; older-family binary rollback onto
+the v2 schema is unsupported. Producer OFF is not a schema downgrade.
+
+**Views updated:** [dedicated C4 view](../../c4-validation-approved-outbox.md),
+[safety/default-OFF guide](../../validation-approved-outbox.md), C4 index and docs
+index. Local offline Go1.25 unit/race and owned PG17 proofs are bounded, not a
+whole-suite, deployment, real activation or external SMTP claim.
+
 ## 2026-11-10: typed PROJECT_INVITE transactional outbox (enqueue-only)
 
 **What changed:** default-OFF fixed `project-invite/v1` single-recipient family;

@@ -30,21 +30,31 @@ CREATE TABLE IF NOT EXISTS mail_outbox (
 -- Controlled upgrade of the original, automatically named single-kind CHECK.
 -- Ensure holds the schema advisory lock and commits this together with all DDL.
 DO $$ DECLARE old_check text; BEGIN
- SELECT pg_get_expr(conbin,conrelid) INTO old_check FROM pg_constraint
- WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_kind_check';
- IF old_check IS NOT NULL THEN
-  IF old_check <> '(kind = ''savings-reminder/v1''::text)' THEN
+ IF EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_kind_check') THEN
+  SELECT pg_get_expr(conbin,conrelid) INTO old_check FROM pg_constraint
+   WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_kind_check' AND contype='c' AND convalidated;
+  IF old_check IS DISTINCT FROM '(kind = ''savings-reminder/v1''::text)'
+   OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='mail_outbox'::regclass AND conname IN ('mail_outbox_family_v1','mail_outbox_family_v2')) THEN
    RAISE EXCEPTION 'mail outbox unexpected family constraint';
   END IF;
   ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_kind_check;
- END IF;
- IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_family_v1') THEN
   ALTER TABLE mail_outbox ADD CONSTRAINT mail_outbox_family_v1
    CHECK(kind IN ('savings-reminder/v1','project-invite/v1') AND version=1);
  END IF;
+ IF EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_family_v1') THEN
+  SELECT pg_get_expr(conbin,conrelid) INTO old_check FROM pg_constraint
+   WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_family_v1' AND contype='c' AND convalidated;
+  IF old_check IS DISTINCT FROM '((kind = ANY (ARRAY[''savings-reminder/v1''::text, ''project-invite/v1''::text])) AND (version = 1))'
+   OR EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_family_v2') THEN
+   RAISE EXCEPTION 'mail outbox unexpected family constraint';
+  END IF;
+  ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_family_v1;
+  ALTER TABLE mail_outbox ADD CONSTRAINT mail_outbox_family_v2
+   CHECK(kind IN ('savings-reminder/v1','project-invite/v1','validation-approved/v1') AND version=1);
+ END IF;
  SELECT pg_get_expr(conbin,conrelid) INTO old_check FROM pg_constraint
- WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_family_v1' AND contype='c' AND convalidated;
- IF old_check IS DISTINCT FROM '((kind = ANY (ARRAY[''savings-reminder/v1''::text, ''project-invite/v1''::text])) AND (version = 1))' THEN
+  WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_family_v2' AND contype='c' AND convalidated;
+ IF old_check IS DISTINCT FROM '((kind = ANY (ARRAY[''savings-reminder/v1''::text, ''project-invite/v1''::text, ''validation-approved/v1''::text])) AND (version = 1))' THEN
   RAISE EXCEPTION 'mail outbox unexpected family constraint';
  END IF;
 END $$;

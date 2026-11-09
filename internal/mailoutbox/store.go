@@ -62,7 +62,7 @@ func (s *Store) EnqueueTx(ctx context.Context, r Reminder) (QueueResult, error) 
 	return s.persistPrepared(ctx, ps)
 }
 
-// persistPrepared is private: only the two typed fixed constructors can reach it.
+// persistPrepared is private: only the three typed fixed constructors can reach it.
 func (s *Store) persistPrepared(ctx context.Context, ps []prepared) (QueueResult, error) {
 	tx, err := s.db.Tx(ctx)
 	if err != nil {
@@ -277,8 +277,15 @@ func (s *Store) BeginDispatch(ctx context.Context, c *Claim) (Envelope, error) {
 		if err != nil || !hmac.Equal(actual, fp) {
 			return ErrPayload
 		}
-		if kind == InviteKind && !validInvitePayload(pt, event, recipient, expiry) {
-			return ErrPayload
+		switch kind {
+		case InviteKind:
+			if !validInvitePayload(pt, event, recipient, expiry) {
+				return ErrPayload
+			}
+		case ValidationApprovedKind:
+			if !validValidationPayload(pt, event, recipient, expiry) {
+				return ErrPayload
+			}
 		}
 		var f struct {
 			Payload frozen `json:"payload"`
