@@ -215,6 +215,10 @@ func TestAutoPauseLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	cr := f.crs[NamespaceFor("p1")+"/"+sp.ID]
+	cr["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "lastTransitionTime": now.Format(time.RFC3339)}}}
+	if _, err := s.GetSandbox(context.Background(), "p1", sp.ID); err != nil {
+		t.Fatal(err)
+	}
 	if digStr(cr, "metadata", "annotations", AnnotationEndAt) != "2026-11-06T10:10:00Z" || digStr(cr, "spec", "shutdownTime") != "2026-11-06T10:25:00Z" {
 		t.Fatalf("auto-pause end/shutdown: %v / %v", digStr(cr, "metadata", "annotations", AnnotationEndAt), digStr(cr, "spec", "shutdownTime"))
 	}

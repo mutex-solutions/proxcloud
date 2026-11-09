@@ -108,6 +108,13 @@ func (f *fakeAPI) ApplyResourceQuota(_ context.Context, rq map[string]any) error
 	return nil
 }
 func (f *fakeAPI) ApplyCR(_ context.Context, _, _, _ string, obj map[string]any) error {
+	meta := obj["metadata"].(map[string]any)
+	if meta["uid"] == nil {
+		meta["uid"] = "uid-" + str(meta["name"])
+	}
+	if meta["resourceVersion"] == nil {
+		meta["resourceVersion"] = "1"
+	}
 	f.crs[digStr(obj, "metadata", "namespace")+"/"+digStr(obj, "metadata", "name")] = obj
 	return nil
 }
@@ -134,7 +141,11 @@ func (f *fakeAPI) MergePatchCR(_ context.Context, _, _, _, ns, name string, patc
 		}
 		if pa, ok := md["annotations"].(map[string]any); ok {
 			for k, v := range pa {
-				ann[k] = v
+				if v == nil {
+					delete(ann, k)
+				} else {
+					ann[k] = v
+				}
 			}
 		}
 	}
@@ -362,6 +373,11 @@ func TestOwnershipTimeoutDeleteAndSecrets(t *testing.T) {
 		t.Errorf("list must only show owned sandboxes: %v", list)
 	}
 
+	// Timeout: pending startup cannot extend runtime; once Ready the same bounds apply.
+	if _, err := s.SetTimeout(ctx, "p1", sp.ID, 7200); !errors.Is(err, ErrNotRunning) {
+		t.Fatal(err)
+	}
+	f.crs["sb-p1/"+sp.ID]["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "lastTransitionTime": s.now().Format(time.RFC3339)}}}
 	// Timeout: bounded, and rewrites shutdownTime from now.
 	if _, err := s.SetTimeout(ctx, "p1", sp.ID, 0); !errors.Is(err, ErrBadTimeout) {
 		t.Errorf("short timeout: %v", err)
@@ -390,7 +406,7 @@ func TestSyncProviderList(t *testing.T) {
 	if _, err := s.CreateSandbox(ctx, &sp); err != nil {
 		t.Fatal(err)
 	}
-	f.crs["sb-p1/"+sp.ID]["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}
+	f.crs["sb-p1/"+sp.ID]["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "lastTransitionTime": s.now().Format(time.RFC3339)}}}
 	terminating := Spec{ProjectID: "p1", Template: "python"}
 	if _, err := s.CreateSandbox(ctx, &terminating); err != nil {
 		t.Fatal(err)
@@ -417,7 +433,7 @@ func TestExecGuards(t *testing.T) {
 	if _, err := s.Exec(ctx, "p1", sp.ID, []string{"true"}, nil, 0); !errors.Is(err, ErrNotRunning) {
 		t.Errorf("exec before Ready: %v", err)
 	}
-	f.crs["sb-p1/"+sp.ID]["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}
+	f.crs["sb-p1/"+sp.ID]["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "lastTransitionTime": s.now().Format(time.RFC3339)}}}
 	if _, err := s.Exec(ctx, "p1", sp.ID, nil, nil, 0); !errors.Is(err, ErrBadExec) {
 		t.Errorf("empty command: %v", err)
 	}
