@@ -137,14 +137,31 @@ http://{{ include "proxcloud.keycloakName" . }}-http:80
 {{- .Values.rabbitmqCluster.name | default (printf "%s-rabbitmq" (include "proxcloud.fullname" .)) -}}
 {{- end }}
 
-{{/* RabbitMQ host: RabbitmqCluster, else bundled subchart service, else the external host. */}}
-{{- define "proxcloud.rabbitHost" -}}
-{{- if .Values.rabbitmqCluster.enabled -}}
-{{- include "proxcloud.rabbitClusterName" . -}}
-{{- else if .Values.rabbitmq.enabled -}}
-{{- /* honor the subchart's fullnameOverride — that IS its service name */ -}}
-{{- .Values.rabbitmq.fullnameOverride | default (printf "%s-rabbitmq" .Release.Name) -}}
-{{- else -}}
-{{- required "externalRabbitmq.host is required when rabbitmq.enabled=false" .Values.externalRabbitmq.host -}}
+{{/* Optional CNPG reader DSN: only the status/history/metrics path, never workers/finance. */}}
+{{- define "proxcloud.dbReadURL" -}}
+{{- include "proxcloud.dbURL" . | replace (printf "@%s-rw:" (include "proxcloud.cnpgClusterName" .)) (printf "@%s-ro:" (include "proxcloud.cnpgClusterName" .)) -}}
+{{- end }}
+
+{{/* Optional reader env is API-only: seed and workers always use primary dbURLEnv. */}}
+{{- define "proxcloud.dbReadURLEnv" -}}
+{{- if .Values.externalPostgresql.readExistingSecret }}
+- name: PROXCLOUD_DB_READ_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.externalPostgresql.readExistingSecret }}
+      key: {{ .Values.externalPostgresql.readSecretKey }}
+{{- else if .Values.api.existingSecret }}
+- name: PROXCLOUD_DB_READ_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "proxcloud.apiSecretName" . }}
+      key: db-read-url
+      optional: true
+{{- else if .Values.cnpg.statusReadReplica }}
+- name: PROXCLOUD_DB_READ_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "proxcloud.apiSecretName" . }}
+      key: db-read-url
 {{- end -}}
 {{- end }}

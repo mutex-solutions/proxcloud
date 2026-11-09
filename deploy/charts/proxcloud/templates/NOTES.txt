@@ -10,8 +10,9 @@ Components:
 {{- else if .Values.postgresql.enabled }}
   db     : bundled PostgreSQL ({{ include "proxcloud.postgresqlName" . }}, db "{{ .Values.postgresql.auth.database }}")
 {{- end }}
+  jobs   : PostgreSQL durable workers (always running; {{ .Values.api.jobs.workerConcurrency }} per pod)
 {{- if or .Values.rabbitmq.enabled .Values.rabbitmqCluster.enabled }}
-  broker : RabbitMQ ({{ include "proxcloud.rabbitHost" . }})
+  legacy : retained RabbitMQ for migration ONLY; the API does not connect to it. Do not delete broker/PVC.
 {{- end }}
 {{- if .Values.keycloakx.enabled }}
   idp    : bundled Keycloak ({{ include "proxcloud.keycloakName" . }}-http)

@@ -27,7 +27,7 @@ go test ./...       # fast unit tests, no Docker (see testing.md)
 ## Run the whole stack with Docker Compose
 
 The repo ships a `docker-compose.yml` at the root that builds and runs the three
-ProxCloud images plus PostgreSQL, RabbitMQ and a dev Keycloak:
+ProxCloud images plus PostgreSQL (including durable jobs) and a dev Keycloak:
 
 ```sh
 docker compose up --build
@@ -42,9 +42,12 @@ That gives you:
 | Customer console  | http://localhost:8082   |
 | Operator admin    | http://localhost:8083   |
 
-PostgreSQL (`:5432`) and RabbitMQ (`:5672`, management UI `:15672`) come up as
-dependencies. The API starts with `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true`, so you can
-drive jobs on demand (see below) without the crons running.
+PostgreSQL (`:5432`) is the data/job dependency; no broker starts by default.
+Scheduler and debug triggers both default **false**. To drive jobs deliberately
+on this isolated dev stack, set `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` in `.env` and
+replace the API. Workers always finish already-enqueued work even with both flags
+off. Existing broker users must follow the [migration runbook](postgres-jobs-migration.md)
+and preserve the old container's anonymous volume, not run `down -v`.
 
 Keycloak (`:8090`) imports the dev realm `proxcloud` from
 `deploy/dev/keycloak-realm.json`, with two users, `demo`/`demo` and
@@ -64,25 +67,28 @@ Check the API is up:
 
 ```sh
 curl :8081/actuator/health              # liveness
-curl :8081/actuator/health/readiness    # UP once Postgres + Rabbit are reachable
+curl :8081/actuator/health/readiness    # PostgreSQL readiness; no broker dependency
 ```
 
 ### Run just the backend from source
 
 For a faster backend edit loop, run the API with `go run` against the
-compose-provided (or standalone) PostgreSQL and Rabbit:
+compose-provided (or standalone) **writable-primary** PostgreSQL:
 
 ```sh
 PROXCLOUD_CONFIG_FILE=/nonexistent \
-PROXCLOUD_DB_URL=postgres://proxcloud:proxcloud@localhost:5432/proxcloud?sslmode=disable \
-PROXCLOUD_RABBITMQ_HOST=localhost \
-PROXCLOUD_RABBITMQ_USERNAME=guest PROXCLOUD_RABBITMQ_PASSWORD=guest \
+PROXCLOUD_DB_URL="$PROXCLOUD_LOCAL_PRIMARY_DSN" \
 PROXCLOUD_ENCRYPTION_DEFAULT_KEY=dev-only-key \
 PROXCLOUD_JOBS_DEBUG_TRIGGERS=true \
 go run ./cmd/api
 ```
 
-Useful env toggles (all default off; full table in
+Load `PROXCLOUD_LOCAL_PRIMARY_DSN` from your local secret store; do not commit
+credentials. `PROXCLOUD_DB_READ_URL` is optional history/metrics only and empty
+means primary fallback, never a worker/finance replica. Worker defaults are 2
+(`1..16`), poll `1s` (`100ms..1m`), lease `1m` (`10s..10m`).
+
+Useful env toggles (both default off; full table in
 [configuration.md](configuration.md)):
 
 - `PROXCLOUD_JOBS_SCHEDULER_ENABLED=true` — start the cron jobs (off by default so a

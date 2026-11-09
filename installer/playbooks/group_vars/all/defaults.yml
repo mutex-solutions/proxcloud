@@ -4,6 +4,27 @@ pc_defaults:
   mode: allinone                 # allinone | split (adds the services cluster for managed K8s and DBaaS)
   namespace: proxcloud
 
+  # API durable workers always run. These gates control NEW scheduled work and debug routes only.
+  jobs:
+    scheduler_enabled: false
+    debug_triggers: false
+    worker_concurrency: 2         # 1..16 per API pod
+    poll_interval: 1s            # 100ms..1m
+    lease_duration: 1m           # 10s..10m
+  database:
+    instances: 1
+    status_read_replica: false   # history/metrics ONLY; >=2 instances; workers/billing stay on -rw
+  # Existing sites MUST complete docs/postgres-jobs-migration.md BEFORE stage 40 applies anything.
+  # Stop producers, drain/reconcile ready AND unacked work, stop old consumers, save snapshot/evidence.
+  jobs_migration:
+    mode: ""                    # fresh: empty; existing: retain | cutover (does NOT delete the broker)
+    evidence: ""                # non-secret ticket/path, including zero queue counts or reconciliation
+    producers_stopped: false
+    consumers_stopped: false
+    drained_or_reconciled: false
+    retention_prepared: false    # cutover: live annotations + prior retained Helm manifest if Helm-managed
+    legacy_cluster_name: proxcloud-rabbitmq  # retain only: MUST already exist, never created fresh
+
   pve:
     api_url: ""                  # as the installer reaches it
     portal_api_url: ""           # as the portal (mgmt cluster) reaches it; default: api_url

@@ -1,0 +1,50 @@
+{{- /* Fail before an upgrade can silently orphan old work or remove a broker. */ -}}
+{{- if .Values.api.jobs.rabbitFanout -}}
+{{- fail "api.jobs.rabbitFanout=true is a migration error: stop old producers, drain/reconcile RabbitMQ, record evidence, then clear the flag; see docs/postgres-jobs-migration.md" -}}
+{{- end -}}
+{{- if .Values.api.applicationYml -}}
+{{- $config := fromYaml .Values.api.applicationYml -}}
+{{- if dig "proxcloud" "jobs" "rabbit-fanout" false $config -}}
+{{- fail "applicationYml proxcloud.jobs.rabbit-fanout=true is a migration error; drain/reconcile the old queue before clearing it" -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.api.extraEnv -}}
+{{- if and (eq .name "PROXCLOUD_JOBS_RABBIT_FANOUT") (ne (lower (toString (.value | default "false"))) "false") -}}
+{{- fail "legacy PROXCLOUD_JOBS_RABBIT_FANOUT in api.extraEnv must be cleared after drain/reconciliation, not forwarded to the new workers" -}}
+{{- end -}}
+{{- end -}}
+{{- $m := .Values.jobsMigration -}}
+{{- if not (has $m.mode (list "" "retain" "cutover")) -}}
+{{- fail "jobsMigration.mode must be empty (fresh install only), retain, or cutover" -}}
+{{- end -}}
+{{- if and .Release.IsUpgrade (not $m.mode) -}}
+{{- fail "existing releases require an explicit jobsMigration.mode=retain or cutover and recorded drain/reconciliation evidence; see docs/postgres-jobs-migration.md" -}}
+{{- end -}}
+{{- if and (or .Values.rabbitmqCluster.enabled .Values.rabbitmq.enabled) (ne $m.mode "retain") -}}
+{{- fail "RabbitMQ is legacy retention-only: enabling rabbitmqCluster or rabbitmq requires jobsMigration.mode=retain, not a new broker deployment" -}}
+{{- end -}}
+{{- if and (eq $m.mode "retain") (not (or .Values.rabbitmqCluster.enabled .Values.rabbitmq.enabled)) -}}
+{{- fail "jobsMigration.mode=retain must keep the existing rabbitmqCluster or rabbitmq resource enabled; use cutover only after the retained-manifest transition" -}}
+{{- end -}}
+{{- if and .Values.rabbitmqCluster.enabled .Values.rabbitmq.enabled -}}
+{{- fail "rabbitmq.enabled and rabbitmqCluster.enabled are mutually exclusive" -}}
+{{- end -}}
+{{- if $m.mode -}}
+{{- if or (not $m.producersStopped) (not $m.consumersStopped) (not $m.drainedOrReconciled) (not (trim $m.evidence)) -}}
+{{- fail "jobsMigration requires producersStopped=true, consumersStopped=true, drainedOrReconciled=true and nonempty evidence: false fanout alone is NOT a drain proof" -}}
+{{- end -}}
+{{- if and (eq $m.mode "cutover") (not $m.retentionPrepared) -}}
+{{- fail "cutover requires jobsMigration.retentionPrepared=true: protect the LIVE broker AND stage the old Helm release manifest with resource-policy keep before omission; no broker/PVC is deleted by this migration" -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.cnpg.statusReadReplica -}}
+{{- if and .Values.externalPostgresql.existingSecret (not .Values.api.existingSecret) (not .Values.externalPostgresql.readExistingSecret) -}}
+{{- fail "an external primary DSN cannot derive CNPG read credentials: provide externalPostgresql.readExistingSecret or api.existingSecret db-read-url, or leave statusReadReplica=false" -}}
+{{- end -}}
+{{- if or (not .Values.cnpg.enabled) (lt (int .Values.cnpg.instances) 2) -}}
+{{- fail "cnpg.statusReadReplica requires cnpg.enabled=true and cnpg.instances>=2; leave false for primary fallback" -}}
+{{- end -}}
+{{- end -}}
+{{- if or (lt (int .Values.api.jobs.workerConcurrency) 1) (gt (int .Values.api.jobs.workerConcurrency) 16) -}}
+{{- fail "api.jobs.workerConcurrency must be 1..16" -}}
+{{- end -}}

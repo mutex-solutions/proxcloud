@@ -438,7 +438,7 @@ flowchart TB
 | Symbol | Location | Role |
 |---|---|---|
 | `MinutelyChargeSpec` and siblings | `internal/platform/scheduler/scheduler.go:20` | Charge crons (minute, hour, month) |
-| `nativeProvider.Charge` | `internal/platform/billingprovider/billingprovider.go:72` | In-process loop, or RabbitMQ fan-out when enabled |
+| `nativeProvider.Charge` | `internal/platform/billingprovider/billingprovider.go` | Persist fixed-cutoff per-profile native billing work on the writable PostgreSQL primary; no broker dispatch |
 | `chargeCycle` | `internal/platform/billingjob/billingjob.go:326` | The cycle of a pass: a minute or hour pass on the 1st at 00:00 closes the month before |
 | `Service.Charge`, `ChargeProfileByID` | `internal/platform/billingjob/billingjob.go:56`, `:104` | Per active billing profile |
 | `Service.chargeBillingResource` | `billingjob.go:128` | Per provider: resolve resources, select plans and rules, rate |
@@ -464,7 +464,8 @@ flowchart LR
   eng["pricing.Engine"]:::impl
   bill["current bill<br/>items and adjustments"]:::impl
 
-  cron --> bj
+  queue["PostgreSQL durable jobs<br/>fixed cutoff, bounded workers<br/>owner + epoch, DB-time CAS"]:::impl
+  cron --> queue --> bj
   bj --> brp
   brp --> cache
   bj --> plans

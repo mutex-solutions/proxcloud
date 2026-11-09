@@ -9,8 +9,82 @@
     secrets_manifest: "{{ lookup('ansible.builtin.template', 'templates/secrets.yml.j2') }}"
     apps_operators: "{{ lookup('ansible.builtin.template', 'templates/apps-operators.yml.j2') }}"
     app_proxcloud: "{{ lookup('ansible.builtin.template', 'templates/app-proxcloud.yml.j2') }}"
-    rabbit_operator_url: https://github.com/rabbitmq/cluster-operator/releases/download/{{ pc_ver.rabbitmq_operator }}/cluster-operator.yml
   tasks:
+    - name: Validate worker and replica settings before changing any resource
+      vars:
+        jobs_config_problem: "{{ pc | pc_jobs_config_problem(pc_ver.proxcloud) }}"
+      ansible.builtin.assert:
+        that: jobs_config_problem == ''
+        fail_msg: "{{ jobs_config_problem }}"
+    # Read-only cutover gate BEFORE applying any Application or Secret. RBAC/API errors fail closed.
+    - name: Discover existing platform and broker resource types
+      ansible.builtin.command: k3s kubectl get crds -o json
+      register: pc_migration_crds
+      changed_when: false
+      check_mode: false
+    - name: Read the existing platform Application
+      when: "'applications.argoproj.io' in (pc_migration_crds.stdout | from_json)['items'] | map(attribute='metadata.name') | list"
+      ansible.builtin.command: k3s kubectl -n argocd get application proxcloud --ignore-not-found -o json
+      register: pc_migration_app
+      changed_when: false
+      check_mode: false
+    - name: Read existing RabbitMQ clusters without changing them
+      when: "'rabbitmqclusters.rabbitmq.com' in (pc_migration_crds.stdout | from_json)['items'] | map(attribute='metadata.name') | list"
+      ansible.builtin.command: k3s kubectl -n {{ ns }} get rabbitmqclusters -o json
+      register: pc_migration_brokers
+      changed_when: false
+      check_mode: false
+    - name: Read broker workloads independently of chart values and RabbitMQ CRDs
+      ansible.builtin.command: k3s kubectl -n {{ ns }} get statefulsets -o json
+      register: pc_migration_statefulsets
+      changed_when: false
+      check_mode: false
+    - name: Record existing brokers for the migration gate
+      ansible.builtin.set_fact:
+        pc_legacy_brokers: "{{ (pc_migration_brokers.stdout | default('{\"items\": []}', true) | from_json)['items'] }}"
+    - name: Refuse ambiguous old sources and unprotected legacy broker workloads
+      vars:
+        legacy_broker_problem: >-
+          {{ (pc_migration_app.stdout | default('{}', true) | from_json)
+          | pc_legacy_broker_problem((pc_migration_statefulsets.stdout | from_json)['items'], pc_legacy_brokers, ns) }}
+      ansible.builtin.assert:
+        that: legacy_broker_problem == ''
+        fail_msg: "{{ legacy_broker_problem }}"
+    - name: Require an explicit and evidenced existing-site cutover decision
+      when: (pc_migration_app.stdout | default('') | length > 0) or (pc_legacy_brokers | length > 0) or pc.jobs_migration.mode != ''
+      ansible.builtin.assert:
+        that:
+          - pc.jobs_migration.mode in ['retain', 'cutover']
+          - pc.jobs_migration.producers_stopped | bool
+          - pc.jobs_migration.consumers_stopped | bool
+          - pc.jobs_migration.drained_or_reconciled | bool
+          - pc.jobs_migration.evidence | trim | length > 0
+          - pc.jobs_migration.mode != 'cutover' or pc.jobs_migration.retention_prepared | bool
+        fail_msg: >-
+          Stop old producers, drain/reconcile all ready AND unacked work, stop old consumers and save queue/snapshot
+          evidence before upgrading. Set proxcloud.jobs_migration explicitly; false fanout is NOT proof.
+          Follow docs/postgres-jobs-migration.md. Stage 40 never deletes/patches a broker or its PVCs.
+    - name: Require live broker retention before ArgoCD can omit it
+      loop: "{{ pc_legacy_brokers }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      vars:
+        broker_annotations: "{{ item.metadata.annotations | default({}) }}"
+      ansible.builtin.assert:
+        that:
+          - broker_annotations.get('helm.sh/resource-policy', '') == 'keep'
+          - "'Prune=false' in broker_annotations.get('argocd.argoproj.io/sync-options', '').split(',')"
+          - "'Delete=false' in broker_annotations.get('argocd.argoproj.io/sync-options', '').split(',')"
+        fail_msg: >-
+          Annotate the LIVE RabbitmqCluster with helm.sh/resource-policy=keep and
+          argocd.argoproj.io/sync-options=Prune=false,Delete=false BEFORE this upgrade. Helm releases also need a
+          retained-manifest transition first. This is a manual safety step, not installer cleanup.
+    - name: Refuse creating a new legacy broker
+      ansible.builtin.assert:
+        that:
+          - pc.jobs_migration.mode != 'retain' or pc.jobs_migration.legacy_cluster_name in (pc_legacy_brokers | map(attribute='metadata.name') | list)
+        fail_msg: Retain must name the existing RabbitmqCluster, never create one.
+
     - name: Install ArgoCD through the k3s helm controller
       ansible.builtin.template: {src: templates/argocd-helmchart.yml.j2, dest: /var/lib/rancher/k3s/server/manifests/proxcloud-argocd.yaml, mode: "0600"}
     - name: Wait for ArgoCD
@@ -31,7 +105,8 @@
     - name: Wait for cert-manager and CloudNativePG
       ansible.builtin.shell: |
         set -e
-        k3s kubectl wait --for=condition=established --timeout=20s crd/certificates.cert-manager.io crd/clusters.postgresql.cnpg.io crd/databases.postgresql.cnpg.io
+        k3s kubectl wait --for=condition=established --timeout=20s \
+          crd/certificates.cert-manager.io crd/clusters.postgresql.cnpg.io crd/databases.postgresql.cnpg.io
         k3s kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=30s
         k3s kubectl -n cnpg-system rollout status deploy/cnpg-cloudnative-pg --timeout=30s
       changed_when: false
@@ -39,28 +114,7 @@
       retries: 40
       delay: 15
       until: pc_ops is succeeded
-    - name: Read the RabbitMQ operator version
-      ansible.builtin.command: k3s kubectl -n rabbitmq-system get deploy rabbitmq-cluster-operator -o jsonpath={.metadata.labels.app\.kubernetes\.io/version}{.spec.template.metadata.annotations.pc-version}
-      changed_when: false
-      failed_when: false
-      register: pc_rabbit_have
-    - name: Install the RabbitMQ Cluster Operator
-      # The upstream ships a release manifest and no chart, so this one is not an Application.
-      when: pc_ver.rabbitmq_operator not in pc_rabbit_have.stdout
-      ansible.builtin.shell: |
-        set -eu
-        k3s kubectl apply --server-side -f {{ rabbit_operator_url | quote }}
-        k3s kubectl -n rabbitmq-system patch deploy rabbitmq-cluster-operator --type merge \
-          -p '{"spec":{"template":{"metadata":{"annotations":{"pc-version":"{{ pc_ver.rabbitmq_operator }}"}}}}}'
-      changed_when: true
-
-    - name: Wait for the RabbitMQ operator
-      ansible.builtin.command: k3s kubectl -n rabbitmq-system rollout status deploy/rabbitmq-cluster-operator --timeout=30s
-      changed_when: false
-      register: pc_rabbit_op
-      retries: 30
-      delay: 10
-      until: pc_rabbit_op is succeeded
+    # No RabbitMQ operator install, mutation, wait or cleanup. Historical operators/brokers/PVCs stay put.
     - name: Apply the Let's Encrypt issuer
       when: pc.ingress.tls == 'acme'
       ansible.builtin.include_tasks: tasks/kube-apply.yml

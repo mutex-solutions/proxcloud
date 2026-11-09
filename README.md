@@ -80,7 +80,8 @@ flowchart LR
   M -->|"/admin-api/v1"| API
   API["ProxCloud API<br/>Go, chi router"]
   API --> DB[("PostgreSQL")]
-  API --> MQ[("RabbitMQ")]
+  API --> JOBS["Bounded durable workers<br/>PostgreSQL primary"]
+  JOBS --> DB
   API --> KC["Keycloak / OIDC"]
   API -->|"REST :8006, API token"| PVE["Proxmox VE cluster(s)<br/>API, SDN, firewall, storage"]
   API -->|"RGW Admin Ops and S3"| RGW["Ceph S3 (RGW)<br/>object storage"]
@@ -89,11 +90,20 @@ flowchart LR
 Full context and container views: [C1 context](docs/architecture/c4/c1-context.md)
 and [C2 containers](docs/architecture/c4/c2-containers.md).
 
-One Go process serves all three HTTP surfaces on port `8080` and runs scheduled
-jobs (billing, sync, metrics) internally; a separate management port (`8081`)
-exposes health and operational triggers.
+One Go process serves all three HTTP surfaces on port `8080`, runs bounded
+PostgreSQL durable workers, and optionally schedules jobs (billing, sync, metrics).
+Scheduler/debug gates default off; workers still finish already-enqueued work.
+A separate management port (`8081`) exposes health and operational triggers.
+No RabbitMQ is required. Existing deployments must follow the
+[drain/reconcile and retain cutover runbook](docs/postgres-jobs-migration.md)
+before upgrading; mail durability is a separate follow-up.
 
 ## 🚀 Quickstart
+
+Broker-free defaults target the planned **v0.4.0** API/chart. Until a separately
+approved release is published, build from a checkout containing the PostgreSQL
+job engine (installer `images.build: true`) or pin known compatible new images;
+do not use the older Rabbit-dependent API with these defaults.
 
 **[`docs/quickstart.md`](docs/quickstart.md)** takes you from "what do I want" to a running
 install: the components each path deploys, the inventory keys to fill, the one command, the
@@ -129,7 +139,7 @@ Every stage and option: [`docs/install.md`](docs/install.md). Chart values:
 | `cmd/api` | Service entrypoint — HTTP servers + background jobs |
 | `internal/platform` | Business domains: `account`, `org`, `project`, `billing`, `payment`, `pricing`, `catalog`, `order`, `promotion`, `rbac`, `admin`, `adminapi`, `mcp`, `scheduler`, … |
 | `internal/cloud` | Proxmox VE client and services (`pve`), resource cache and sync, Ceph RGW object store, usage metrics, managed K8s/DBaaS, cloud→billing bridge |
-| `internal/{config,server,amqp,oidc,pgdoc,health}` | Wiring: config, HTTP server, messaging, auth, Postgres store, health |
+| `internal/{config,server,oidc,pgdoc,health}` | Wiring: config, HTTP server, auth, Postgres store, health |
 | `pkg` | Reusable libraries: `auth`, `httpx`, `money`, `textcrypt`, `audit` |
 | `deploy` | `Dockerfile`, Helm chart (`chart`), seed data |
 | `installer` | One-shot installer (Ansible): `make install` and the day-2 targets |
@@ -142,7 +152,7 @@ Every stage and option: [`docs/install.md`](docs/install.md). Chart values:
 
 ## 🧰 Tech stack
 
-- **Backend** — Go 1.25, [chi](https://github.com/go-chi/chi) router, PostgreSQL (jsonb document store via [pgx](https://github.com/jackc/pgx)), RabbitMQ, a Proxmox VE REST client (`internal/cloud/pve`), aws-sdk-go-v2 for S3, Stripe, the [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk), and [koanf](https://github.com/knadh/koanf) config (env + `application.yml`).
+- **Backend** — Go 1.25, [chi](https://github.com/go-chi/chi) router, PostgreSQL (jsonb document store and durable jobs via [pgx](https://github.com/jackc/pgx)), a Proxmox VE REST client (`internal/cloud/pve`), aws-sdk-go-v2 for S3, Stripe, the [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk), and [koanf](https://github.com/knadh/koanf) config (env + `application.yml`).
 - **Frontends** — React 19 + Vite + TypeScript, Tailwind CSS v4, shadcn/ui + Radix, TanStack Query, and `react-oidc-context` (authorization-code + PKCE).
 - **Identity** — Keycloak or any OIDC provider.
 
@@ -156,7 +166,7 @@ Every stage and option: [`docs/install.md`](docs/install.md). Chart values:
 - [API overview](docs/api.md) — the `/api/v1`, `/admin-api/v1`, and `/mcp` surfaces + conventions.
 - [Billing](docs/billing.md) — pricing, accrual, bills, transactions, savings, suspension.
 - [Cloud integration](docs/cloud-integration.md) — Proxmox VE providers, resource cache and sync, metrics, Ceph S3.
-- [Jobs & scheduling](docs/jobs-scheduling.md) — the scheduler, distributed locking, charge fan-out.
+- [Jobs & scheduling](docs/jobs-scheduling.md) — the scheduler, distributed locking, durable charge jobs; [existing-site cutover](docs/postgres-jobs-migration.md).
 - [Configuration](docs/configuration.md) — env / `application.yml` / Helm values reference.
 - [Development](docs/development.md) · [Testing](docs/testing.md) · [Glossary](docs/glossary.md) · [Decision records](docs/adr/).
 
