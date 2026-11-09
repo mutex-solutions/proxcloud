@@ -87,7 +87,18 @@ func (s *Store) Ensure(ctx context.Context) error {
  pod_uid text NOT NULL DEFAULT '',phase text NOT NULL DEFAULT '',epoch bigint NOT NULL DEFAULT 1 CHECK(epoch>0),
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  CHECK((state='terminal')=(phase IN ('Succeeded','Failed'))),
- CHECK(state NOT IN ('observed','terminal') OR pod_uid<>''), CHECK(state<>'known_no_effect' OR pod_uid=''));`)
+ CHECK(state NOT IN ('observed','terminal') OR pod_uid<>''), CHECK(state<>'known_no_effect' OR pod_uid=''));
+ CREATE TABLE IF NOT EXISTS registry_runtime_dispatch (
+ operation uuid PRIMARY KEY,project_id text NOT NULL,owner text NOT NULL,generation text NOT NULL,host text NOT NULL,
+ service_id text NOT NULL,sandbox_id text NOT NULL,mode text NOT NULL CHECK(mode IN ('create','resume','fork')),
+ image_ref text NOT NULL,spec_fingerprint text NOT NULL CHECK(spec_fingerprint ~ '^[0-9a-f]{64}$'),
+ pin_id uuid NOT NULL,pin_epoch bigint NOT NULL CHECK(pin_epoch>0),
+ state text NOT NULL CHECK(state IN ('authorized','observed','terminal','unknown','known_no_effect')),
+ pod_uid text NOT NULL DEFAULT '',cr_uid text NOT NULL DEFAULT '',phase text NOT NULL DEFAULT '',epoch bigint NOT NULL DEFAULT 1 CHECK(epoch>0),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ CHECK((state='terminal')=(phase IN ('Succeeded','Failed'))),
+ CHECK(state<>'observed' OR phase='Running'), CHECK((pod_uid='')=(cr_uid='')),
+ CHECK(state NOT IN ('observed','terminal') OR pod_uid<>''), CHECK(state NOT IN ('authorized','known_no_effect') OR (pod_uid='' AND phase='')));`)
 		return err
 	})
 }
