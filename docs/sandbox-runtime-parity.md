@@ -23,6 +23,14 @@ A replacement UID, expired original provisional lifetime or expired candidate
 runtime never extends the lifetime. A Ready condition by itself is not usable and
 cannot bill while startup-pending remains set.
 
+A positively expired authoritative provisional end or UID-scoped persisted candidate
+runtime end is a **terminal runtime startup failure**, not control-plane unavailability:
+`WaitReady` returns `sandbox lifetime expired during startup` on that read without
+waiting for another poll. The private expiry error still matches
+`context.DeadlineExceeded`. A transport deadline alone, or malformed/future Ready
+timestamps, does not grant this terminal-expiry classification; bounded retries and
+all caller, read, phase and total deadline guards remain unchanged.
+
 “First Ready” means the first **durably recorded trusted Ready observation**.
 When every candidate write fails, no system can prove an unrecorded historical
 observation after a crash; this implementation returns unavailable rather than
