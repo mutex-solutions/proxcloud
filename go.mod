@@ -10,7 +10,7 @@ require (
 	github.com/cbroglie/mustache v1.4.0
 	github.com/cockroachdb/apd/v3 v3.2.3
 	github.com/coder/websocket v1.8.14
-	github.com/coreos/go-oidc/v3 v3.20.0
+	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/go-pdf/fpdf v0.9.0
 	github.com/google/uuid v1.6.0
