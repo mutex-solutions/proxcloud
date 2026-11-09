@@ -99,7 +99,10 @@ func (c *pauseCluster) ApplyCore(_ context.Context, plural string, obj map[strin
 	c.pods[md["name"].(string)] = obj
 	return nil
 }
-func (c *pauseCluster) GetCore(_ context.Context, plural, _, name string) (map[string]any, error) {
+func (c *pauseCluster) GetCore(ctx context.Context, plural, ns, name string) (map[string]any, error) {
+	if plural == "pods" && strings.HasPrefix(ns, "sb-") {
+		return c.sbxCluster.GetCore(ctx, plural, ns, name)
+	}
 	c.pmu.Lock()
 	defer c.pmu.Unlock()
 	if plural == "pods" {
@@ -170,6 +173,7 @@ func newPauseFixture(t *testing.T) (*sbxFixture, *pauseCluster, string, string) 
 	}
 	f.h.SetSandboxTemplates(f.db.C("sandbox_templates"))
 	f.h.SetSandboxPaused(f.db.C("sandbox_paused"))
+	wireRuntimeCreateFixture(t, f)
 	return f, pc, keyA, keyB
 }
 

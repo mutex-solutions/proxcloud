@@ -150,6 +150,8 @@ func sandboxHTTPError(err error) (status int, msg string, ok bool) {
 	var forbidden sandboxForbidden
 	var kerr *kamajik8s.APIError
 	switch {
+	case errors.Is(err, errRuntimePinState):
+		return http.StatusServiceUnavailable, err.Error(), true
 	case errors.As(err, &forbidden):
 		return http.StatusForbidden, "Cannot start a sandbox: " + err.Error(), true
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -197,7 +199,7 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 		return
 	}
 	// A project's own template (E2B-built) by name, name:tag or id; anything else is a built-in.
-	custom, customName, err := h.resolveCustomTemplate(r.Context(), proj.ID, spec.Template)
+	custom, customName, source, err := h.resolveRuntimeCreateTemplate(r.Context(), proj.ID, spec.Template)
 	if errors.Is(err, sandbox.ErrBadTemplate) {
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
@@ -206,6 +208,7 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 		h.fail(w, err)
 		return
 	}
+	spec.RuntimeSource = source
 	if custom != nil {
 		spec.Custom, spec.Template = custom, customName
 	}
@@ -223,7 +226,7 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 		return
 	}
 	c := &e2bCaller{user: u, proj: proj, es: es, ss: ss}
-	if err := h.e2bWaitReady(ctx, c, saved); err != nil {
+	if err := h.waitRuntimeCreateReady(ctx, c, saved, &spec); err != nil {
 		h.cleanupFailedStartup(ctx, c, saved)
 		h.sandboxFail(w, err)
 		return
@@ -259,9 +262,32 @@ func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *
 	if err := h.pauseRefusal(ss.Config(), spec); err != nil {
 		return nil, err
 	}
-	var data map[string]any
-	err := h.withSandboxStart(ctx, es.ID, func(tc context.Context) error { var e error; data, e = ss.CreateSandbox(tc, spec); return e })
+	// This copy owns all mutable maps/pointers from here through low-level Consume.
+	caller := spec
+	frozen := sandbox.CloneCreateSpec(*spec)
+	spec = &frozen
+	owner, pinStore, err := h.prepareRuntimeCreate(ctx, proj, es, ss, spec)
+	caller.ID = spec.ID
 	if err != nil {
+		return nil, err
+	}
+	// Preserve the trusted frozen identity/defaults used by the later CREATE-only
+	// readiness check, not the pre-freeze alias or caller-owned map pointers.
+	*caller = sandbox.CloneCreateSpec(*spec)
+	var data map[string]any
+	err = h.withSandboxStart(ctx, es.ID, func(tc context.Context) error { var e error; data, e = ss.CreateSandbox(tc, spec); return e })
+	caller.ID = spec.ID
+	if err != nil {
+		if owner != nil {
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			defer cancel()
+			if pinStore.CancelUnusedRuntimeDispatch(cleanup, spec.RuntimePins) == nil {
+				h.runtimeFailUnused(cleanup, pinStore, owner)
+			} else {
+				h.runtimeUnknownDetached(cleanup, pinStore, owner)
+			}
+			return nil, &runtimePinHold{operation: owner.ID}
+		}
 		return nil, err
 	}
 	now := time.Now().UTC()
@@ -280,6 +306,10 @@ func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *
 		defer cancel()
 		if derr := ss.DeleteSandbox(cleanup, proj.ID, spec.ID); derr != nil {
 			slog.Error("sandbox: delete after failed cache insert", "sandbox", spec.ID, "err", derr)
+		}
+		if owner != nil {
+			h.runtimeUnknownDetached(cleanup, pinStore, owner)
+			return nil, &runtimePinHold{operation: owner.ID}
 		}
 		return nil, err
 	}
