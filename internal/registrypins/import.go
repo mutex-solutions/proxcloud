@@ -64,7 +64,10 @@ func (s *Store) importReferences(project, source, destination string) (importRef
 		out.source = r
 		out.need[r.String()] = true
 	}
-	if out.source.Host != "" && destination == s.host+"/"+out.source.Repo {
+	if out.source.Host != "" {
+		if destination != s.host+"/"+out.source.Repo {
+			return out, ErrScope // managed sources only support metadata-only verification
+		}
 		out.kind, out.dest = "verify", out.source
 		return out, nil // metadata-only: exactly ONE source digest pin, no tag
 	}
@@ -72,16 +75,20 @@ func (s *Store) importReferences(project, source, destination string) (importRef
 	if err != nil || d.Project != project || d.Tag == "" || d.String() != destination {
 		return out, ErrScope
 	}
-	if out.source.Host != "" && out.source.Repo == d.Repo {
-		return out, ErrScope // a copy must not overwrite the source template repository
-	}
 	out.kind, out.dest = "copy", d
 	out.need[d.String()] = true
 	return out, nil
 }
 
+// lockDispatchOperation follows the host namespace lock and precedes project
+// locks in BOTH factories. A global operation UUID cannot race different action
+// tables on different trusted hosts. No path acquires this lock before a host.
+func (s *Store) lockDispatchOperation(ctx context.Context, operation string) error {
+	return s.db.LockXact(ctx, "registry-dispatch-op:"+operation)
+}
+
 // rejectImportDispatch composes with the existing build authorizer under the
-// namespace lock: one operation UUID cannot mint either action after the other.
+// host and global operation locks: neither action may follow the other.
 func (s *Store) rejectImportDispatch(ctx context.Context, tx pgx.Tx, operation string) error {
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM registry_import_dispatch WHERE operation=$1)`, operation).Scan(&exists); err != nil {
@@ -106,6 +113,9 @@ func (s *Store) AuthorizeImportDispatch(ctx context.Context, op Operation, sourc
 		return nil, err
 	}
 	err = s.transaction(ctx, func(tc context.Context, tx pgx.Tx) error {
+		if e := s.lockDispatchOperation(tc, op.ID); e != nil {
+			return e
+		}
 		if e := s.lockProject(tc, op.ProjectID); e != nil {
 			return e
 		}
@@ -198,10 +208,25 @@ func (s *Store) importDispatch(ctx context.Context, tx pgx.Tx, op Operation) (*i
 // guardImportPin is always composed with guardBuildPin inside advancePin's SAME
 // namespace transaction, including when no build marker exists. It retains aliases
 // while authorized/running/UNKNOWN and never infers a result digest from a phase.
-func (s *Store) guardImportPin(ctx context.Context, tx pgx.Tx, p Pin, state, ref, uid string) error {
+func (s *Store) guardImportPin(ctx context.Context, tx pgx.Tx, p Pin, state, ref, uid string, evidence ...ImportPodEvidence) error {
 	d, err := s.importDispatch(ctx, tx, p.Operation)
-	if err != nil || d == nil {
+	if err != nil {
 		return err
+	}
+	if d == nil {
+		if len(evidence) != 0 {
+			return ErrConflict // import-specific methods cannot mutate non-import pins
+		}
+		return nil
+	}
+	if len(evidence) > 1 {
+		return ErrConflict
+	}
+	if len(evidence) == 1 {
+		e := evidence[0]
+		if !validImportPod(p.Operation, e) || e.Source != d.Source || e.Destination != d.Destination || e.UID != d.UID || (state == Released && (d.State != "terminal" || e.Phase != d.Phase)) {
+			return ErrConflict
+		}
 	}
 	if state == Unknown {
 		if d.State == "terminal" || d.State == "known_no_effect" {
@@ -221,7 +246,7 @@ func (s *Store) guardImportPin(ctx context.Context, tx pgx.Tx, p Pin, state, ref
 			return ErrConflict
 		}
 		if p.State == Pending {
-			if p.BindingUID != d.UID || p.BindingGeneration != p.Generation {
+			if len(evidence) != 1 || p.BindingUID != d.UID || p.BindingGeneration != p.Generation {
 				return ErrConflict
 			}
 			if d.Phase == "Succeeded" && (d.Kind == "verify" || p.RequestedRef == d.Destination) {
@@ -233,8 +258,16 @@ func (s *Store) guardImportPin(ctx context.Context, tx pgx.Tx, p Pin, state, ref
 		if d.State != "terminal" || d.Phase != "Succeeded" || p.BindingUID != d.UID || p.BindingGeneration != p.Generation || (d.Kind == "verify" && p.RequestedRef != d.Source) || (d.Kind == "copy" && p.RequestedRef != d.Destination) {
 			return ErrConflict
 		}
+		// Import is content-preserving. A terminal phase cannot manufacture a
+		// different digest at the tagged copy destination (or verify source).
+		frozen, err := s.importReferences(p.ProjectID, d.Source, d.Destination)
+		result, parseErr := s.reference(ref)
+		_, sourceDigest, ok := strings.Cut(d.Source, "@")
+		if err != nil || parseErr != nil || !ok || frozen.kind != d.Kind || result.Repo != frozen.dest.Repo || result.Digest != sourceDigest {
+			return ErrConflict
+		}
 	}
-	if state == Pending && (p.Ref != ref || uid == "" || uid != d.UID || (d.State != "observed" && d.State != "terminal")) {
+	if state == Pending && (len(evidence) != 1 || p.Ref != ref || uid == "" || uid != d.UID || (d.State != "observed" && d.State != "terminal")) {
 		return ErrConflict
 	}
 	return nil
@@ -308,7 +341,7 @@ func (s *Store) ObserveImportPod(ctx context.Context, p Pin, e ImportPodEvidence
 	if err != nil {
 		return Pin{}, err
 	}
-	return s.advancePin(ctx, p, Pending, p.Ref, r.Digest, e.UID, e.Nonce)
+	return s.advancePin(ctx, p, Pending, p.Ref, r.Digest, e.UID, e.Nonce, e)
 }
 
 // ReleaseImportTerminal releases only exact observed pending pod receipts after
@@ -325,7 +358,7 @@ func (s *Store) ReleaseImportTerminal(ctx context.Context, p Pin, e ImportPodEvi
 	if err != nil {
 		return Pin{}, err
 	}
-	return s.advancePin(ctx, p, Released, p.Ref, r.Digest, p.BindingUID, p.BindingGeneration)
+	return s.advancePin(ctx, p, Released, p.Ref, r.Digest, p.BindingUID, p.BindingGeneration, e)
 }
 
 // ImportTerminalKnown only prevents stale error handlers from poisoning terminal
