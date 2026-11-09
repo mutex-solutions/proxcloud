@@ -66,6 +66,9 @@ type Config struct {
 		// ProjectInviteOutboxEnabled opts only NEW project invites into atomic
 		// enqueue. Cancellation of persisted durable invites is always wired.
 		ProjectInviteOutboxEnabled bool
+		// ValidationApprovedOutboxEnabled opts only new approval transitions into
+		// atomic mail decisions; never starts delivery or activation retries.
+		ValidationApprovedOutboxEnabled bool
 	}
 	Self struct {
 		BaseURL      string
@@ -198,6 +201,14 @@ func Load() (*Config, error) {
 		c.Mail.ProjectInviteOutboxEnabled = value
 	}
 
+	if raw := os.Getenv("PROXCLOUD_MAIL_VALIDATION_APPROVED_OUTBOX_ENABLED"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PROXCLOUD_MAIL_VALIDATION_APPROVED_OUTBOX_ENABLED boolean")
+		}
+		c.Mail.ValidationApprovedOutboxEnabled = value
+	}
+
 	// Per-organization SSO.
 	c.SSO.ClientID = envOr("PROXCLOUD_SSO_KC_CLIENT_ID", "proxcloud-idp-admin")
 	c.SSO.ClientSecret = os.Getenv("PROXCLOUD_SSO_KC_CLIENT_SECRET")
@@ -285,6 +296,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Mail.ProjectInviteOutboxEnabled && len(c.Encryption.DefaultKey) < 32 {
 		return fmt.Errorf("durable project invites require a >=32-byte PROXCLOUD_ENCRYPTION_DEFAULT_KEY; enqueue only, dispatch remains disabled")
+	}
+	if c.Mail.ValidationApprovedOutboxEnabled && len(c.Encryption.DefaultKey) < 32 {
+		return fmt.Errorf("durable validation approvals require a >=32-byte PROXCLOUD_ENCRYPTION_DEFAULT_KEY; enqueue only, dispatch remains disabled")
 	}
 	// Remote charging without a billing URL would silently stop charging bills altogether — the
 	// cron would fire, find nowhere to send the work, and log. Fail closed instead.

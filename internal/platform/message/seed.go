@@ -153,6 +153,12 @@ func SystemTemplates() []MessageTemplate {
 <p>Please note that this link will expire in {{expiryHours}} hours. If you have any questions or need assistance, feel free to reach out to us.</p>
 <p>Best regards,</p>
 <p>{{businessName}}</p>`),
+		t("billing_profile_validation_approved", "BILLING", "Your Billing Profile Validation Has Been Approved",
+			`<p>Dear {{fullName}},</p>
+<p>Your billing profile validation has been approved.</p>
+<p>This approval does not confirm account activation, service readiness, or completion of any credits. You can review your account's current status by signing in at <a href="{{loginUrl}}">{{loginUrl}}</a>.</p>
+<p>If you have questions, please contact us.</p>
+<p>{{businessName}}</p>`),
 		t("billing_profile_validated", "BILLING", "Your Billing Profile Has Been Validated",
 			`<p>Dear {{fullName}},</p>
 <p>We are pleased to inform you that your billing profile has been successfully validated. Your account is now fully activated, and you can access all services by logging into your account at <a href="{{loginUrl}}">{{loginUrl}}</a></p>
