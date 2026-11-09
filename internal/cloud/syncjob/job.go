@@ -61,6 +61,7 @@ type Job struct {
 	publicIPs     PublicIPLister
 	ipInventory   *project.PublicIPRepo
 	audit         *audit.Service
+	incidents     PVEIncidentRecorder
 	sdnLock       *lock.ShedLock
 	shareAccess   func(ctx context.Context, projectID string) error
 	staleSeeds    func(ctx context.Context, ps *pve.Service, es *externalservice.ExternalService) error

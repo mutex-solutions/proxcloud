@@ -92,6 +92,7 @@ type Handler struct {
 	// sandboxGates checks a sandbox provider's release gates (SetSandboxGates; nil = none can go live).
 	sandboxGates    func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
 	seedArtifacts   *pve.SeedArtifactRepo // secret-free operator cleanup status
+	pveIncidents    chi.Router            // operator-only DB observation reads; nil until explicitly wired
 	mailOutbox      mailOutboxReader
 	durableStore    *durablejobs.Store
 	durableHistory  *durablejobs.History
@@ -167,6 +168,9 @@ func (h *Handler) Routes(r chi.Router) {
 		// (2xx) POST/PUT/DELETE under /admin (see audit_mw.go).
 		r.Use(h.auditMiddleware)
 		r.Get("/me", h.me)
+		if h.pveIncidents != nil {
+			r.Mount("/service/{id}/incidents", h.pveIncidents)
+		}
 		r.Get("/mail-outbox", h.mailOutboxOverview)
 		r.Get("/mail-outbox/{id}", h.mailOutboxStatus)
 		r.Get("/durable-jobs", h.durableStatus)

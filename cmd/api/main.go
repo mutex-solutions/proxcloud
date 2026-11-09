@@ -65,6 +65,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/projectinvite"
 	"github.com/mutex-solutions/proxcloud/internal/platform/promotion"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pveflavor"
+	"github.com/mutex-solutions/proxcloud/internal/platform/pveincident"
 	"github.com/mutex-solutions/proxcloud/internal/platform/scheduler"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sse"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
@@ -263,6 +264,10 @@ func run() error {
 	// project — set via a setter).
 	orgH.SetProjectMemberAdder(projectSvc)
 	cloudRepo := cloud.NewRepo(pg)
+	incidentRepo := pveincident.New(pg, auditSvc) // operator DB records only; no notification dispatcher
+	if err := incidentRepo.Ensure(ctx); err != nil {
+		return fmt.Errorf("ensure PVE incident records: %w", err)
+	}
 	// esSvc is created here (ahead of the admin handler) so the project handler's client cloud read
 	// endpoints (init menu / project services) can resolve external services too. It shares `enc`
 	// (declared above, near the mail gateway) so write-encrypt and read-decrypt use the same key.
@@ -491,6 +496,7 @@ func run() error {
 	adminH := admin.NewHandler(admin.NewRepo(pg), catalog.NewRepo(pg), users, addFundsSvc, pricingRepo, billingRepo, cloudRepo, platformconfig.NewRepo(pg), auditSvc, esSvc, cfg.DefaultRegion, cfg.Auth.Admin.IssuerURI, cfg.Auth.Admin.ClientID)
 	adminH.SetHmacEncryptor(enc)
 	adminH.SetMailOutbox(mailOutbox)
+	adminH.SetPVEIncidents(incidentRepo)
 	adminH.SetCollectChecker(txnScanner)
 	adminH.SetKamaji(kamajiFactory)
 	adminH.SetCSIMigrator(func(ctx context.Context, es *externalservice.ExternalService, ks *kamaji.Service, clusterID string, dryRun, force bool, adoptDetached []string) (any, error) {
@@ -582,6 +588,7 @@ func run() error {
 		WithPublicIPInventory(publicIPRepo).
 		WithKamajiFactory(kamajiFactory).
 		WithAudit(auditSvc).
+		WithPVEIncidents(incidentRepo).
 		WithProxmoxFactory(pveWithHolderLock).
 		WithSDNLock(lock.New(pg)).
 		WithShareAccess(projectH.ReconcileShareAccess).
