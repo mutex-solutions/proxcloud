@@ -73,7 +73,13 @@ func (s *Store) Ensure(ctx context.Context) error {
  epoch bigint NOT NULL CHECK(epoch>0), outcome text NOT NULL DEFAULT '',
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(), updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  CHECK((state='settled')=(outcome IN ('deleted','already_absent','not_deleted'))));
- CREATE UNIQUE INDEX IF NOT EXISTS registry_prune_exclusive ON registry_prune_intent(host,repo) WHERE state<>'settled';`)
+ CREATE UNIQUE INDEX IF NOT EXISTS registry_prune_exclusive ON registry_prune_intent(host,repo) WHERE state<>'settled';
+ CREATE TABLE IF NOT EXISTS registry_build_dispatch (
+ operation uuid PRIMARY KEY,project_id text NOT NULL,owner text NOT NULL,generation text NOT NULL,host text NOT NULL,
+ base_ref text NOT NULL,destination_ref text NOT NULL,pins_hash text NOT NULL,
+ state text NOT NULL CHECK(state IN ('authorized','observed','terminal','unknown','known_no_effect')),
+ pod_uid text NOT NULL DEFAULT '',phase text NOT NULL DEFAULT '',epoch bigint NOT NULL DEFAULT 1,
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp());`)
 		return err
 	})
 }

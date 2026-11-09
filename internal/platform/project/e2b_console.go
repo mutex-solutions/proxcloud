@@ -51,7 +51,7 @@ func consoleView(t *sandboxTemplateDoc) consoleTemplate {
 		if tags == nil {
 			tags = []string{}
 		}
-		v.Builds = append(v.Builds, consoleBuild{BuildID: b.BuildID, Status: b.Status, Reason: b.Reason, Tags: tags, From: b.From,
+		v.Builds = append(v.Builds, consoleBuild{BuildID: b.BuildID, Status: buildPinSDKStatus(&b), Reason: b.Reason, Tags: tags, From: b.From,
 			StartCmd: b.StartCmd, ReadyCmd: b.ReadyCmd, CreatedAt: b.CreatedAt, FinishedAt: b.FinishedAt})
 	}
 	if len(v.Builds) > 0 {
@@ -113,13 +113,13 @@ func (h *Handler) consoleTemplateLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logs := bl.Logs
-	if bl.Status == sandbox.BuildBuilding {
+	if bl.Registry != nil || bl.Status == sandbox.BuildBuilding {
 		logs = h.syncBuildPod(ctx, c, t, bl, true)
 	}
 	if logs == nil {
 		logs = []string{}
 	}
-	httpx.OK(w, map[string]any{"status": bl.Status, "reason": bl.Reason, "logs": logs})
+	httpx.OK(w, map[string]any{"status": buildPinSDKStatus(bl), "reason": bl.Reason, "logs": logs})
 }
 
 // DELETE /project/{id}/sandbox-templates/{templateId}

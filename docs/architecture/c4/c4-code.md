@@ -8,6 +8,27 @@ invariants the code holds. Four sequence diagrams follow.
 
 Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
+## Registry BUILD/template participation (P2-A)
+
+**What / why:** custom builds now commit owned BASE+DEST pins before use/project
+transactions, freeze one owner/spec nonce, and require a durable one-shot dispatch
+proof. This closes BUILD admission races without claiming other writer coverage
+or enabling either physical registry-delete path.
+
+| Symbol | Boundary and invariant |
+|---|---|
+| `prepareBuild`, `acquireBuildPins` | PREPARING owner CAS; standalone PRIMARY pins before rendering/use, namespace→parent/current row revalidation of exact candidate/inherited settings. |
+| `AuthorizeBuildDispatch`, `CancelUnusedDispatch`, `StartBuild` | Retained operation-PK dispatch authorization; opaque shared single-use/cancel bit; canceled unused proof permits exact known-no-effect cleanup, consumed/ambiguous proof never remints. Production constructors require proof before Apply. |
+| `RecordBuildPod`, `ObserveBuildPod`, `ReleaseBuildTerminal` | Exact UID/operation/nonce/BASE/DEST; pending alias retained while pod can resolve it; monotonic terminal observations, no timeout/absence release. |
+| `finishPinnedBuild`, `recoverPinnedBuild` | Persist TERMINAL_OBSERVED result before per-pin handoff; exact completed steps resume after old pod removal; SDK READY only after BASE cleanup/DEST durable owner binding. Failed owner CAS cannot poison current finished pins. |
+| `mergeConcurrent`, trim/delete tombstones | Retain frozen operations/newly completed tags without undoing intentional READY tag edits; compact ID/generation tombstones survive receipt cleanup and reject even stale pre-prepare resurrection. Current retained From/Image refs conservatively HOLD parent binding cleanup; not durable provenance pin transfer. |
+| `buildPinSDKStatus`, usable selection | SDK/console projections, default/explicit create and build-parent selection stay building/unusable until handoff finishes; legacy readiness remains unchanged. |
+
+API startup ensures PRIMARY schema and wires BUILD participation only. Other
+sandbox writers/catalog edits and legacy adoption remain separate prerequisites;
+BOTH real manifest-delete entrypoints remain unconditional HOLD. No lease retry,
+clear-UNKNOWN API, registry HTTP or live rollout claim. [Operator contract](../../registry-build-pins.md).
+
 ## Dormant registry reference pins and real-delete HOLD (PR1)
 
 **What / why:** add a PRIMARY-only DB fencing core because finite registry scans

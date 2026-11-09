@@ -54,6 +54,13 @@ func (h *Handler) SyncSandboxBuilds(ctx context.Context) {
 	}
 	for i := range all {
 		t := &all[i]
+		if len(t.RetiredBuilds) > 0 {
+			if c := callerOf(t.ProjectID); c != nil {
+				if err := h.cleanupRetiredPins(ctx, c.ss, t); err != nil {
+					slog.Warn("build sync: retired reference hold", "template", t.ID)
+				}
+			}
+		}
 		if t.ForkUntil != nil && time.Now().After(*t.ForkUntil) { // a fork's snapshot no retry took
 			if c := callerOf(t.ProjectID); c != nil {
 				if err := h.deleteTemplate(ctx, c.ss, t); err != nil {
@@ -64,6 +71,12 @@ func (h *Handler) SyncSandboxBuilds(ctx context.Context) {
 		}
 		for j := range t.Builds {
 			bl := &t.Builds[j]
+			if bl.Registry != nil {
+				if c := callerOf(t.ProjectID); c != nil {
+					h.recoverPinnedBuild(ctx, c, t, bl)
+				}
+				continue
+			}
 			if bl.Status != sandbox.BuildBuilding {
 				continue
 			}

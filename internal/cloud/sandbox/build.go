@@ -25,12 +25,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 )
 
 const (
-	BuildNamespace  = "sbx-build"
-	LabelBuild      = "proxcloud.io/sandbox-build"
-	LabelTemplateID = "proxcloud.io/sandbox-template"
+	BuildNamespace           = "sbx-build"
+	LabelBuild               = "proxcloud.io/sandbox-build"
+	LabelTemplateID          = "proxcloud.io/sandbox-template"
+	AnnotationBuildOperation = "proxcloud.io/build-operation"
+	AnnotationBuildNonce     = "proxcloud.io/build-spec-nonce"
+	AnnotationBuildBase      = "proxcloud.io/build-base"
+	AnnotationBuildDest      = "proxcloud.io/build-destination"
 	// TemplatePullSecret is the project's own registry account in sb-<project> (pull-<project>: library/** and
 	// t/<project>/**), written by the registry's account sync (sandbox-proxy registry-users, docs/managed-sandbox.md §6).
 	TemplatePullSecret = "sandbox-template-pull"
@@ -238,6 +244,10 @@ type BuildRequest struct {
 	// dockerconfigjson for BaseAuthUser (put in a Secret owned by the pod, never stored).
 	BaseAuth         BaseAuth
 	BaseDockerConfig []byte
+	// Required for production internal-template destinations. Minted only from
+	// committed pins after the owner won its durable single-dispatch CAS.
+	Pins             *registrypins.BuildProof
+	operation, nonce string
 }
 
 // BaseAuth is the credential the `base` init container pulls the base image with.
@@ -407,6 +417,11 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 			"volumes": volumes,
 		},
 	}
+	if req.operation != "" {
+		for _, obj := range []map[string]any{cm, pod} {
+			obj["metadata"].(map[string]any)["annotations"] = map[string]any{AnnotationBuildOperation: req.operation, AnnotationBuildNonce: req.nonce, AnnotationBuildBase: req.Base, AnnotationBuildDest: req.Image}
+		}
+	}
 	return cm, pod
 }
 
@@ -416,6 +431,13 @@ func mount(name, at string) map[string]any { return map[string]any{"name": name,
 // registry's account sync derives the project's accounts from it and writes the build Secret the pod mounts, so a
 // project's first build waits up to one sync pass (30 s) for that volume.
 func (s *Service) StartBuild(ctx context.Context, req BuildRequest) error {
+	if s.requireBuildPins || req.Pins != nil {
+		op, nonce, err := req.Pins.Consume(req.ProjectID, req.Base, req.Image)
+		if err != nil {
+			return fmt.Errorf("sandbox: committed build pins required: %w", err)
+		}
+		req.operation, req.nonce = op, nonce
+	}
 	if err := s.ensureTenantNamespace(ctx, req.ProjectID); err != nil {
 		return fmt.Errorf("sandbox: build namespace: %w", err)
 	}
@@ -477,6 +499,7 @@ type BuildState struct {
 	Step       string // container that failed
 	StartedAt  string
 	FinishedAt string
+	Pod        registrypins.BuildPodEvidence
 }
 
 // BuildPodState reads the build pod. A missing pod is reported as (nil, nil).
@@ -492,7 +515,9 @@ func (s *Service) BuildPodState(ctx context.Context, projectID, buildID string) 
 }
 
 func buildStateOf(pod map[string]any) *BuildState {
-	st := &BuildState{StartedAt: digStr(pod, "status", "startTime")}
+	st := &BuildState{StartedAt: digStr(pod, "status", "startTime"), Pod: registrypins.BuildPodEvidence{
+		UID: digStr(pod, "metadata", "uid"), Operation: digStr(pod, "metadata", "annotations", AnnotationBuildOperation), Nonce: digStr(pod, "metadata", "annotations", AnnotationBuildNonce), BaseRef: digStr(pod, "metadata", "annotations", AnnotationBuildBase), DestinationRef: digStr(pod, "metadata", "annotations", AnnotationBuildDest), Phase: digStr(pod, "status", "phase"),
+	}}
 	switch digStr(pod, "status", "phase") {
 	case "Pending":
 		st.Status = BuildWaiting
