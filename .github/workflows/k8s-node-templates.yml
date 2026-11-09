@@ -24,17 +24,44 @@ jobs:
     runs-on: [self-hosted, proxcloud-pve]
     if: github.repository == 'mutex-solutions/proxcloud'
     timeout-minutes: 240
+    # All cluster settings are repository Actions secrets; see .github/pve-actions.env.example.
+    env:
+      K8S_VERSION: ${{ inputs.version }}
+      PVE_URL: ${{ secrets.PVE_URL }}
+      PVE_TOKEN_ID: ${{ secrets.PVE_TOKEN_ID }}
+      PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
+      PVE_NODES: ${{ secrets.PVE_NODES }}
+      PVE_TEMPLATE_STORAGE: ${{ secrets.PVE_TEMPLATE_STORAGE }}
+      PVE_BRIDGE: ${{ secrets.PVE_BRIDGE }}
+      # Leave BUILD_DHCP_RANGE unset when the build bridge already has DHCP.
+      DHCP_RANGE: ${{ secrets.BUILD_DHCP_RANGE }}
+      DHCP_GATEWAY: ${{ secrets.BUILD_GATEWAY }}
     steps:
+      - name: Validate required configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for key in PVE_URL PVE_TOKEN_ID PVE_TOKEN_SECRET PVE_NODES PVE_TEMPLATE_STORAGE PVE_BRIDGE; do
+            value="${!key:-}"
+            if [[ -z "${value//[[:space:]]/}" ]]; then
+              echo "::error::Missing required Actions secret: $key"
+              missing=1
+            fi
+          done
+          if [[ -n "$DHCP_RANGE" && -z "${DHCP_GATEWAY//[[:space:]]/}" ]]; then
+            echo "::error::Missing required Actions secret: BUILD_GATEWAY"
+            missing=1
+          fi
+          if [[ -z "${K8S_VERSION//[[:space:]]/}" ]]; then
+            echo "::error::Missing required workflow input: version"
+            missing=1
+          fi
+          if (( missing )); then exit 1; fi
+          # Mask each node separately: the full space-separated secret may not match logs.
+          for node in $PVE_NODES; do
+            echo "::add-mask::$node"
+          done
       - uses: actions/checkout@v7
       - name: Build
-        env:
-          K8S_VERSION: ${{ inputs.version }}
-          PVE_URL: ${{ vars.PVE_URL }}
-          PVE_TOKEN_ID: ${{ vars.PVE_TOKEN_ID }}
-          PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
-          PVE_NODES: ${{ vars.PVE_NODES }}
-          PVE_TEMPLATE_STORAGE: ${{ vars.PVE_TEMPLATE_STORAGE }}
-          PVE_BRIDGE: ${{ vars.PVE_BRIDGE }}
-          DHCP_RANGE: ${{ vars.BUILD_DHCP_RANGE }}
-          DHCP_GATEWAY: ${{ vars.BUILD_GATEWAY }}
         run: images/k8s-node-template.sh
