@@ -99,6 +99,7 @@ export function BucketSettingsDialog({ pid, resourceId, bucketName, open, onOpen
     setSeededFor(resourceId)
   }, [open, s, seededFor, resourceId])
 
+  const websiteTab = s?.caps?.website !== false || !!s?.website?.enabled
   const keyByUid = new Map((keys ?? []).map((k) => [k.rgwUid, k]))
   const ungranted = (keys ?? []).filter((k) => !s?.grants?.some((g) => g.uid === k.rgwUid))
 
@@ -115,10 +116,12 @@ export function BucketSettingsDialog({ pid, resourceId, bucketName, open, onOpen
         ) : isError ? (
           <p className="rounded-md bg-muted p-4 text-sm text-muted-foreground">{(error as Error).message}</p>
         ) : !s ? null : (
-          <Tabs defaultValue="general">
+          // A live website stays closable where the provider no longer offers websites; the key returns to
+          // General when closing it removes the tab.
+          <Tabs key={websiteTab ? "site" : "no-site"} defaultValue="general">
             <TabsList>
               <TabsTrigger value="general">General</TabsTrigger>
-              <TabsTrigger value="website">Website</TabsTrigger>
+              {websiteTab ? <TabsTrigger value="website">Website</TabsTrigger> : null}
               <TabsTrigger value="access">Access</TabsTrigger>
               <TabsTrigger value="lifecycle">Lifecycle</TabsTrigger>
               <TabsTrigger value="cors">CORS</TabsTrigger>
@@ -201,15 +204,17 @@ export function BucketSettingsDialog({ pid, resourceId, bucketName, open, onOpen
                       onChange={(e) => setQuotaGb(e.target.value)}
                     />
                   </div>
-                  <div className="grid gap-1">
-                    <Label className="text-xs text-muted-foreground">Max objects</Label>
-                    <Input
-                      className="w-32"
-                      placeholder={s.quota.enabled && s.quota.maxObjects > 0 ? String(s.quota.maxObjects) : "unlimited"}
-                      value={quotaObjects}
-                      onChange={(e) => setQuotaObjects(e.target.value)}
-                    />
-                  </div>
+                  {s.caps?.quotaObjects !== false ? (
+                    <div className="grid gap-1">
+                      <Label className="text-xs text-muted-foreground">Max objects</Label>
+                      <Input
+                        className="w-32"
+                        placeholder={s.quota.enabled && s.quota.maxObjects > 0 ? String(s.quota.maxObjects) : "unlimited"}
+                        value={quotaObjects}
+                        onChange={(e) => setQuotaObjects(e.target.value)}
+                      />
+                    </div>
+                  ) : null}
                   <Button
                     variant="outline"
                     size="sm"

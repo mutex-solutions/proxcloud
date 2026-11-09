@@ -1,0 +1,129 @@
+# FULL values contract, mirrored by internal/cloud/kamaji/values.go (BuildValues). The portal renders
+# every key per cluster; the defaults below only make `helm template` and lint work. No secrets here:
+# this document sits in an ArgoCD Application. Credentials live in the two Secrets named below.
+
+# -- Kubernetes version of the control plane and the workers, without the leading v.
+kubernetesVersion: "1.35.10"
+
+# -- Secret with url, token and secret: the per-cluster PVE token CAPMOX runs under. Management side only.
+cloudCredentialsSecretName: example-cloud-config
+
+kamajiControlPlane:
+  replicas: 1
+  dataStoreName: default
+  # -- kube-apiserver admission plugins: Kamaji's default list plus NodeRestriction, which Kamaji leaves out. Without it
+  # a worker's kubelet credential can label and taint any Node and read any Secret through a pod it binds to itself.
+  admissionControllers:
+    - CertificateApproval
+    - CertificateSigning
+    - CertificateSubjectRestriction
+    - DefaultIngressClass
+    - DefaultStorageClass
+    - DefaultTolerationSeconds
+    - LimitRanger
+    - MutatingAdmissionWebhook
+    - NamespaceLifecycle
+    - NodeRestriction
+    - PersistentVolumeClaimResize
+    - Priority
+    - ResourceQuota
+    - RuntimeClass
+    - ServiceAccount
+    - StorageObjectInUseProtection
+    - TaintNodesByCondition
+    - ValidatingAdmissionWebhook
+  network:
+    serviceType: LoadBalancer
+    # loadBalancerSourceRanges: [192.0.2.0/24]
+    # certSANs: [cluster.example.com]
+    # serviceAnnotations: {}
+
+clusterNetwork:
+  pods: 10.244.0.0/16
+  services: 10.96.0.0/12
+
+proxmox:
+  # -- Region label on the nodes; proxmox-csi matches it against its cluster config.
+  region: example
+  # -- PVE pool the worker VMs land in: the project's own, so they sync and bill as servers.
+  pool: pc-example
+  # -- Storage the boot disks clone to.
+  storage: local-zfs
+  network:
+    # -- Vnet or bridge of the workers.
+    bridge: vexample
+    gateway: 192.0.2.1
+    prefix: 24
+    # -- Worker addresses (IPAM), carved from the subnet by the portal.
+    addresses: ["192.0.2.200-192.0.2.215"]
+    dnsServers: ["192.0.2.53"]
+    # -- 0 = the guest default. EVPN vnets need the vnet MTU here.
+    mtu: 0
+  csi:
+    # -- Secret with the manifest of the tenant-side proxmox-csi config (type addons.cluster.x-k8s.io/resource-set).
+    configSecretName: example-csi-config
+    # -- One tenant StorageClass per storage. The first is the default class. Empty = no proxmox-csi and no token in the
+    # tenant cluster. The portal renders classes with the gateway below (or on sharedWorkers); see docs/managed-k8s.md.
+    storageClasses:
+      - {name: std, storage: local-zfs}
+    # -- Set by the portal when the CSI gateway is on: the controller runs on this (services) cluster against the
+    # gateway (templates/csi-controller.yaml), the tenant's controller stays at 0 replicas, and the tenant holds no PVE
+    # credential. secretName: the controller's config Secret the portal writes. kubeconfigSecretName: the Kamaji admin
+    # kubeconfig of this cluster.
+    gateway:
+      secretName: ""
+      kubeconfigSecretName: ""
+  # -- The cluster's NAS dataset. Server set: csi-driver-nfs and an RWX StorageClass on it; PVCs are subdirectories.
+  rwx:
+    server: ""
+    share: ""
+    storageClassName: shared-file
+  metallb:
+    # -- LoadBalancer addresses inside the tenant cluster, carved from the same subnet.
+    addresses: ["192.0.2.216-192.0.2.231"]
+    # -- Taints MetalLB's speaker tolerates on top of its defaults: a node group whose taint keeps other pods off but
+    # that runs a LoadBalancer's endpoints (externalTrafficPolicy Local) needs its speaker there. Empty for tenants.
+    speakerTolerations: []
+
+nodeGroups:
+  - name: workers
+    machineFlavor: example-small
+    # -- <pve node>=<template vmid>,... One MachineDeployment per entry: a clone stays on its template's node.
+    machineImageId: "pve1=9210"
+    machineCores: 2
+    machineMemoryMiB: 2048
+    machineRootVolume: {diskSize: 30}
+    machineTags: [proxcloud]
+    machineCount: 1
+    # nodeLabels: {key: value}            # the kubelet sets these itself: a node can claim any of them
+    # machineLabels: {node-restriction.kubernetes.io/key: value}  # CAPI sets these on the Node; the kubelet cannot
+    # taints: [{key: k, value: v, effect: NoSchedule}]
+
+# -- Platform SANDBOX cluster only: bandwidth manager + host-owned CNI chain.
+# Requires SB10 node-setup to install the chain before workload networking works.
+# Leave false for ordinary tenant Kubernetes clusters.
+sandboxBandwidth: false
+
+# -- Chart repos and versions of what CAAPH installs in the tenant cluster. Operator territory.
+addonCharts:
+  cilium: {repoURL: "https://helm.cilium.io", chart: cilium, version: "1.18.16"}
+  proxmoxCsi: {repoURL: "oci://ghcr.io/sergelogvinov/charts", chart: proxmox-csi-plugin, version: "0.5.15"}
+  metallb: {repoURL: "https://metallb.github.io/metallb", chart: metallb, version: "0.16.2"}
+  metricsServer: {repoURL: "https://kubernetes-sigs.github.io/metrics-server", chart: metrics-server, version: "3.13.0"}
+  certManager: {repoURL: "https://charts.jetstack.io", chart: cert-manager, version: "v1.20.2"}
+  ingress: {repoURL: "https://kubernetes.github.io/ingress-nginx", chart: ingress-nginx, version: "4.13.3"}
+  nfsCsi: {repoURL: "https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts", chart: csi-driver-nfs, version: "4.13.6"}
+
+# -- Images of the services-side proxmox-csi controller (proxmox.csi.gateway), the versions of chart proxmoxCsi above.
+csiController:
+  images:
+    controller: ghcr.io/sergelogvinov/proxmox-csi-controller:v0.22.0
+    attacher: registry.k8s.io/sig-storage/csi-attacher:v4.13.0
+    provisioner: registry.k8s.io/sig-storage/csi-provisioner:v6.4.0
+    resizer: registry.k8s.io/sig-storage/csi-resizer:v2.3.0
+
+# -- The tenant's add-on picks, addons.<name>.enabled. metricsServer defaults on.
+addons:
+  metricsServer: {enabled: true}
+  certManager: {enabled: false}
+  ingress: {enabled: false}

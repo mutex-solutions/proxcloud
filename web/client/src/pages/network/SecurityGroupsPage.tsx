@@ -25,9 +25,6 @@ import type { CloudResource } from "@/lib/types"
 function sgName(r: CloudResource): string {
   return (r.data?.securityGroup?.name as string) ?? r.name ?? r.id
 }
-function sgDescription(r: CloudResource): string {
-  return (r.data?.securityGroup?.description as string) ?? ""
-}
 function sgRuleCount(r: CloudResource): number | undefined {
   const rules = r.data?.securityGroup?.security_group_rules as unknown[] | undefined
   return rules?.length
@@ -44,7 +41,6 @@ export default function SecurityGroupsPage() {
 
   const [createOpen, setCreateOpen] = useState(false)
   const [name, setName] = useState("")
-  const [description, setDescription] = useState("")
   const [toDelete, setToDelete] = useState<CloudResource | null>(null)
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["cloud", pid, "SECURITY_GROUP"] })
@@ -53,14 +49,13 @@ export default function SecurityGroupsPage() {
     mutationFn: () =>
       apiFetch(`/project/${pid}/cloud`, {
         method: "POST",
-        body: { type: "SECURITY_GROUP", data: { name, description } },
+        body: { type: "SECURITY_GROUP", data: { name } },
         cloud: scope,
       }),
     onSuccess: () => {
       toast.success(`Security group "${name}" created`)
       setCreateOpen(false)
       setName("")
-      setDescription("")
       invalidate()
     },
     onError: (e: Error) => toast.error(e.message),
@@ -91,14 +86,6 @@ export default function SecurityGroupsPage() {
           >
             {getValue()}
           </Link>
-        ),
-      },
-      {
-        id: "description",
-        accessorFn: (r) => sgDescription(r),
-        header: "Description",
-        cell: ({ getValue }) => (
-          <span className="text-sm text-muted-foreground">{getValue() || "—"}</span>
         ),
       },
       {
@@ -154,7 +141,7 @@ export default function SecurityGroupsPage() {
       <PageHeader
         title="Security groups"
         eyebrow="Network"
-        description="Firewall rule sets applied to servers and ports."
+        description="Firewall rule sets applied to servers."
         actions={
           <>
             <Button variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching} aria-label="Refresh">
@@ -208,15 +195,6 @@ export default function SecurityGroupsPage() {
             <div className="grid gap-2">
               <Label htmlFor="sg-name">Name</Label>
               <Input id="sg-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="web-servers" />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="sg-desc">Description</Label>
-              <Input
-                id="sg-desc"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Allow HTTP/HTTPS traffic"
-              />
             </div>
           </div>
           <DialogFooter>

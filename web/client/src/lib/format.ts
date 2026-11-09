@@ -2,7 +2,26 @@ export function fmtMoney(v: number | string | undefined, currency = "USD"): stri
   if (v === undefined || v === null) return "—"
   const n = typeof v === "string" ? parseFloat(v) : v
   if (Number.isNaN(n)) return "—"
-  return new Intl.NumberFormat("en-US", { style: "currency", currency, maximumFractionDigits: 2 }).format(n)
+  // A charge under half a cent keeps two significant digits ($0.0034), not a $0.00 that reads as
+  // free. Float noise from a subtraction (and -0) is zero, never "-$0.00".
+  const v0 = Math.abs(n) < 1e-6 ? 0 : n
+  const tiny = v0 !== 0 && Math.abs(v0) < 0.005
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
+    ...(tiny ? { maximumSignificantDigits: 2 } : { maximumFractionDigits: 2 }),
+  }).format(v0)
+}
+
+// Bytes in the largest 1024-step unit that keeps a whole digit: 512 B, 3.4 KB, 1.2 GB.
+export function fmtBytes(n: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  let i = 0
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024
+    i++
+  }
+  return `${i === 0 ? n : n.toFixed(1).replace(/\.0$/, "")} ${units[i]}`
 }
 
 // Money without noise: drops the ".00" tail on whole amounts (tier chips,
@@ -54,7 +73,7 @@ export function statusKind(status?: string): "ok" | "warn" | "error" | "muted" {
   const s = (status ?? "").toUpperCase()
   if (["ACTIVE", "ENABLED", "SUCCESS", "PAID", "RUNNING", "ONLINE", "AVAILABLE", "IN-USE", "UP"].includes(s)) return "ok"
   if (["ERROR", "FAILED", "SUSPENDED", "DISABLED", "DOWN", "DELETED", "REJECTED"].includes(s)) return "error"
-  if (["BUILD", "PENDING", "CREATING", "PAUSED", "SHUTOFF", "PENDING_CREATE", "OPEN", "SENT", "NEW"].includes(s)) return "warn"
+  if (["BUILD", "PENDING", "CREATING", "DELETING", "PAUSED", "SHUTOFF", "PENDING_CREATE", "OPEN", "SENT", "NEW"].includes(s)) return "warn"
   // Compound VERB_PHASE states (CREATE_COMPLETE, UPDATE_FAILED, PENDING_UPDATE, DEGRADED, …).
   if (s.endsWith("_FAILED")) return "error"
   if (s === "SUSPEND_COMPLETE") return "warn" // settled, but paused — not healthy-green

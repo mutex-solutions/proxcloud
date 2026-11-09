@@ -22,7 +22,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { apiFetch } from "@/lib/api"
-import { timeAgo } from "@/lib/format"
+import { fmtBytes, timeAgo } from "@/lib/format"
 import { useCloudCursorList, useProjectId } from "@/lib/hooks"
 import { isS3Location, useBucketLocations } from "@/lib/objectstore"
 import type { CloudResource, Location } from "@/lib/types"
@@ -32,8 +32,11 @@ export function bucketName(r: CloudResource): string {
   return (r.data?.bucketName as string) || r.externalId || r.name || r.id
 }
 
-// sizeInGb may arrive as a number or a decimal string — tolerate both (and a legacy {$numberDecimal} wrapper).
+// The exact byte count when the row has it (a few KB must not read "0 GB"), else sizeInGb, which may
+// arrive as a number or a decimal string — tolerate both (and a legacy {$numberDecimal} wrapper).
 export function bucketGb(r: CloudResource): string {
+  const bytes = Number(r.data?.sizeInBytes)
+  if (r.data?.sizeInBytes != null && Number.isFinite(bytes)) return fmtBytes(bytes)
   const v = r.data?.sizeInGb
   if (v == null) return "—"
   if (typeof v === "object") {
@@ -252,7 +255,7 @@ export default function BucketsPage() {
                   <SelectContent>
                     {locations.map((l) => (
                       <SelectItem key={locKeyOf(l)} value={locKeyOf(l)}>
-                        S3 (Ceph){l.serviceName ? ` — ${l.serviceName}` : ""} ({l.region})
+                        S3{l.serviceName ? ` — ${l.serviceName}` : ""} ({l.region})
                       </SelectItem>
                     ))}
                   </SelectContent>

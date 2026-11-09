@@ -34,7 +34,7 @@ type Project = {
   name?: string
   status?: string
   organizationId?: string
-  organization?: { name?: string }
+  organization?: { name?: string; billingProfileId?: string }
   billingProfileId?: string
   createdAt?: string
 }
@@ -142,17 +142,21 @@ export default function ProjectsPage() {
       },
       {
         id: "billingProfile",
-        accessorFn: (p) => p.billingProfileId ?? "",
+        accessorFn: (p) => p.billingProfileId || p.organization?.billingProfileId || "",
         header: "Billing profile",
         cell: ({ row }) => {
-          const bp = row.original.billingProfileId
+          // A project without its own profile bills to its organization's.
+          const own = row.original.billingProfileId
+          const bp = own || row.original.organization?.billingProfileId
           return bp ? (
             <Link
               to={`/clients/billing-profiles/${bp}`}
               className="inline-block py-1 font-mono text-xs text-muted-foreground hover:underline"
               onClick={(e) => e.stopPropagation()}
+              title={own ? undefined : "Inherited from the organization"}
             >
               {bp}
+              {own ? null : <span className="ml-1 font-sans">(org)</span>}
             </Link>
           ) : (
             <span className="font-mono text-xs text-muted-foreground">—</span>
@@ -193,7 +197,7 @@ export default function ProjectsPage() {
                     <DropdownMenuItem onClick={() => setPending({ project: p, kind: "DISABLED" })}>
                       <Pause className="size-4" /> Disable
                     </DropdownMenuItem>
-                  ) : (
+                  ) : (p.status ?? "").toUpperCase() === "DISABLED" && (
                     <DropdownMenuItem onClick={() => setPending({ project: p, kind: "ENABLED" })}>
                       <Play className="size-4" /> Enable
                     </DropdownMenuItem>

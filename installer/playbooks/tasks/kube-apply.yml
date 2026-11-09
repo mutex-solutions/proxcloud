@@ -1,0 +1,14 @@
+# kubectl apply a rendered manifest on the first mgmt server; `changed` only when something changed.
+# vars: manifest (YAML text), [apply_no_log]
+- name: "kubectl apply: {{ apply_name | default('manifest') }}"
+  ansible.builtin.command:
+    cmd: k3s kubectl apply -f -
+    stdin: "{{ manifest }}"
+  become: true
+  delegate_to: "{{ groups['mgmt'][0] }}"
+  register: pc_applied
+  changed_when: pc_applied.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+  no_log: "{{ apply_no_log | default(false) }}"
+  retries: 30
+  delay: 10
+  until: pc_applied is succeeded

@@ -30,6 +30,11 @@ spec:
         kubectl.kubernetes.io/restartedAt: {{ . | quote }}
       {{- end }}
     spec:
+      {{- include "database-cluster.podPlacement" . | nindent 6 }}
+      {{- if gt (int .Values.ferretdb.replicas) 1 }}
+      affinity:
+        {{- include "database-cluster.zoneAntiAffinity" (dict "root" . "labels" (dict "app.kubernetes.io/name" "ferretdb" "app.kubernetes.io/instance" $name)) | nindent 8 }}
+      {{- end }}
       containers:
         - name: ferretdb
           image: {{ include "database-cluster.ferretdbImage" . }}

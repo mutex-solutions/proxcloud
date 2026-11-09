@@ -37,7 +37,7 @@ type DiskUsageFunc func(ctx context.Context, ns string) (map[string]float64, err
 // many databases were bumped. Best-effort per database — one failure must not starve the rest.
 func (s *Service) AutoscaleTick(ctx context.Context, projectID string, diskUsage DiskUsageFunc) (int, error) {
 	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace,
-		LabelProject+"="+projectID+","+LabelManagedBy+"="+ManagedByValue)
+		LabelProject+"="+projectID+","+LabelService+"="+s.serviceID+","+LabelManagedBy+"="+ManagedByValue)
 	if err != nil {
 		return 0, err
 	}

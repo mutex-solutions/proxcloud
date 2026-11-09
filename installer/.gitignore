@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+# Sites live next to the example; only the example is tracked. A site directory holds generated
+# secrets (the encryption key cannot be recovered): back it up, do not commit it to a public repo.
+inventory/*
+!inventory/example/
+generated/

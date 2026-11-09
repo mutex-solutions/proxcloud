@@ -1,0 +1,111 @@
+{{- if and (include "database-cluster.backupEnabled" .) (has .Values.engine (list "postgresql" "ferretdb")) }}
+{{/*
+CloudNativePG backups through the barman-cloud PLUGIN, not the in-core
+spec.backup.barmanObjectStore.
+
+WHY THE PLUGIN: in-core object-store backup is deprecated as of CNPG 1.26 and
+REMOVED in 1.31. Building on it would buy one minor version and then force a
+rewrite of every Cluster spec, ScheduledBackup and stored restore recipe.
+PREREQUISITE: the plugin must be installed on the DB cluster (chart
+plugin-barman-cloud, namespace cnpg-system) — without it the ObjectStore CRD
+below does not exist and the Application fails to sync. Documented in
+deploy/dbaas-cluster/README.md.
+
+The Cluster CR references this ObjectStore by name and sets isWALArchiver,
+which is what makes point-in-time recovery possible at all (see cluster.yaml /
+ferretdb/cnpg-cluster.yaml).
+
+Credentials are SecretKeySelectors into the proxcloud-written Secret; no key
+material passes through values.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: {{ $name }}-store
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+spec:
+  configuration:
+    destinationPath: {{ include "database-cluster.backupPath" . | quote }}
+    endpointURL: {{ .Values.backup.s3.endpoint | quote }}
+    {{- with .Values.backup.s3.caCertSecret }}
+    endpointCA:
+      name: {{ . }}
+      key: ca.crt
+    {{- end }}
+    s3Credentials:
+      accessKeyId:
+        name: {{ .Values.backup.s3.credsSecret }}
+        key: ACCESS_KEY_ID
+      secretAccessKey:
+        name: {{ .Values.backup.s3.credsSecret }}
+        key: ACCESS_SECRET_KEY
+    {{/*
+    Compression: snappy for the base backup and the WAL stream. The enum offers
+    bzip2|gzip|lz4|snappy and the default is NONE — an uncompressed base backup
+    is the slow, expensive default nobody notices until the object-store bill
+    or a restore window shows up. snappy/lz4 decompress fast, which matters
+    more here than ratio: this data is read while something is on fire.
+    */}}
+    data:
+      compression: snappy
+      {{- if .Values.backup.s3.pathStyle }}
+      additionalCommandArgs:
+        - "--addressing-style=path"
+      {{- end }}
+    wal:
+      compression: snappy
+      {{- if .Values.backup.s3.pathStyle }}
+      archiveAdditionalCommandArgs:
+        - "--addressing-style=path"
+      restoreAdditionalCommandArgs:
+        - "--addressing-style=path"
+      {{- end }}
+    {{/*
+    The --addressing-style=path args above are cheap insurance against the RGW
+    virtual-host trap, where an unlisted Host makes the gateway parse the
+    bucket out of the hostname. boto3 already picks path-style for a custom
+    endpoint_url; pinning it costs nothing.
+    */}}
+  {{- with include "database-cluster.backupRetention" . }}
+  retentionPolicy: {{ . | quote }}
+  {{- end }}
+{{- with .Values.backup.schedule }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: {{ $name }}-schedule
+  labels:
+    {{- include "database-cluster.labels" $ | nindent 4 }}
+spec:
+  {{/* SIX fields — see database-cluster.backupCron6. A 5-field string here does
+       not fail, it runs at the wrong time. */}}
+  schedule: {{ include "database-cluster.backupCron6" $ | quote }}
+  cluster:
+    name: {{ if eq $.Values.engine "ferretdb" }}{{ printf "%s-pg" $name }}{{ else }}{{ $name }}{{ end }}
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+  immediate: true
+  backupOwnerReference: self
+{{- end }}
+{{- with .Values.backup.runAt }}
+---
+{{/* On-demand run: the stamp is part of the NAME, so a new value produces a new
+     Backup object and an unchanged one is a no-op re-apply. */}}
+apiVersion: postgresql.cnpg.io/v1
+kind: Backup
+metadata:
+  name: {{ printf "%s-ondemand-%s" $name . | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "database-cluster.labels" $ | nindent 4 }}
+spec:
+  cluster:
+    name: {{ if eq $.Values.engine "ferretdb" }}{{ printf "%s-pg" $name }}{{ else }}{{ $name }}{{ end }}
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+{{- end }}
+{{- end }}

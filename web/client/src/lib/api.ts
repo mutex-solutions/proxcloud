@@ -26,6 +26,13 @@ export function setTokenProvider(fn: () => string | undefined) {
   tokenProvider = fn
 }
 
+// The API refuses a session that breaks an organization's SSO rules with a 403 whose message is an
+// sso_* code. One place hears it, so no page has to.
+let ssoRefusalHandler: (code: string) => void = () => undefined
+export function setSsoRefusalHandler(fn: (code: string) => void) {
+  ssoRefusalHandler = fn
+}
+
 export type CloudScope = { serviceId: string; region: string }
 
 export type ReqOpts = {
@@ -90,7 +97,10 @@ export async function apiFetchEnvelope<T = unknown>(path: string, opts: ReqOpts 
     if (!resp.ok) throw new ApiError(resp.status, resp.status, text || resp.statusText)
     return { data: undefined }
   }
-  if (env.errors) throw new ApiError(resp.status, env.errors.code, env.errors.message)
+  if (env.errors) {
+    if (resp.status === 403 && env.errors.message?.startsWith("sso_")) ssoRefusalHandler(env.errors.message)
+    throw new ApiError(resp.status, env.errors.code, env.errors.message)
+  }
   if (!resp.ok) throw new ApiError(resp.status, resp.status, resp.statusText)
   // raw (non-enveloped) JSON endpoints: treat the whole payload as data
   if (env.data === undefined && !("paging" in env)) return { data: env as unknown as T }

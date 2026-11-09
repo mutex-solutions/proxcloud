@@ -23,6 +23,8 @@ const (
 	TypeDNSZone              = "DNS_ZONE"
 	TypeKubernetesCluster    = "KUBERNETES_CLUSTER"
 	TypeDatabaseCluster      = "DATABASE_CLUSTER"
+	TypeSandbox              = "SANDBOX"          // gVisor sandbox (sandbox provider), billed per minute while running
+	TypeSandboxSnapshot      = "SANDBOX_SNAPSHOT" // a sandbox's stored filesystem (pause, snapshot); billed per GB-hour (pause and snapshot, SB7)
 	TypeLoadBalancer         = "LOAD_BALANCER"
 	TypeFloatingIP           = "FLOATING_IP"
 	TypeNetwork              = "NETWORK"
@@ -83,6 +85,28 @@ type CloudResource struct {
 	CreatedAt     *time.Time     `json:"createdAt,omitempty"`
 	UpdatedAt     *time.Time     `json:"updatedAt,omitempty"`
 	Info          *Info          `json:"info,omitempty"`
+	// PausedBySuspension: a suspension walk paused this VM, or is about to, and no resume has seen it back since. It is what tells
+	// that pause from any other. Only MarkPausedBySuspension writes it: toDbRecord leaves it out, so a sync keeps it.
+	PausedBySuspension bool `json:"pausedBySuspension,omitempty"`
+	// DataSince is how old a resource's data is when that is older than its row: a disk a restore brought back dates
+	// from the backup. Only SetDataSince writes it, so a sync's update leaves it alone.
+	DataSince *time.Time `json:"dataSince,omitempty"`
+	// ExternalIDSince is when the resource took its current external id, on a row that followed a rename (a retyped disk).
+	// Only ChangeExternalID writes it, so a sync's update leaves it alone.
+	ExternalIDSince *time.Time `json:"externalIdSince,omitempty"`
+	// MovingSince is set while the portal moves the resource to a new external id (a retype). A sync that meanwhile
+	// finds the old id gone keeps the row, so the move can carry it over (ChangeExternalID). Only MarkMoving and
+	// ChangeExternalID write it; past MoveKeepFor a sync treats the row as usual.
+	MovingSince *time.Time `json:"movingSince,omitempty"`
+}
+
+// MoveKeepFor bounds MovingSince: a portal that died mid-move must not keep a gone resource's row for good.
+// ponytail: fixed bound; a disk copy longer than this splits its row as before the marker existed.
+const MoveKeepFor = 3 * time.Hour
+
+// Moving reports whether the portal is moving the resource to a new external id (see MovingSince).
+func (r *CloudResource) Moving(now time.Time) bool {
+	return r.MovingSince != nil && now.Sub(*r.MovingSince) < MoveKeepFor
 }
 
 // ServerIsVolumeBacked recognizes both the platform marker and the legacy

@@ -5,7 +5,7 @@ import (
 	"log/slog"
 )
 
-// seed.go defines the 18 built-in email templates, created if-absent (by key) at startup.
+// seed.go defines the 22 built-in email templates, created if-absent (by key) at startup.
 // Placeholders are Mustache {{var}}.
 
 // SystemTemplates returns the built-in templates.
@@ -14,31 +14,72 @@ func SystemTemplates() []MessageTemplate {
 		return MessageTemplate{Key: key, Category: cat, SystemTemplate: true, MessageTitle: title, MessageBody: body}
 	}
 	return []MessageTemplate{
-		t("send_refunded_invoice", "INVOICE", "Refunded invoice",
+		t("sandbox_abuse_alert", "SANDBOX", "Sandbox sustained CPU alert: {{sandboxId}}",
+			`<p>Provider {{serviceId}}, project {{projectId}}, sandbox {{sandboxId}} matched sustained CPU with no observed exec or traffic activity.</p><p>This is a heuristic, not proof of abuse. Configured action: {{action}}. Review the SANDBOX_ABUSE audit events for the durable detection and action result.</p>`),
+		t("send_refunded_invoice", "INVOICE", "Your payment has been refunded",
 			`<p>Dear {{firstName}} {{lastName}},</p>
-<p>We would like to inform you that the invoice with number {{invoiceNumber}} has been successfully refunded.</p>
+<p>We would like to inform you that your payment of {{amount}} {{currency}} has been refunded to your original payment method.</p>
+<p>Credit note {{invoiceNumber}} has been issued for this refund. You can download it from the Billing history page of your account.</p>
 <p>If you have any questions or need further assistance, please don't hesitate to reach out to us.</p>
 <p>Thank you for your attention.</p>
 <p>Best regards,</p>
 <p>{{businessName}}</p>`),
 		t("bill_is_generated", "BILL", "Your bill has been generated",
 			`<p>Dear {{fullName}},</p>
-<p>We would like to inform you that your bill for the period {{startDate}} - {{endDate}} has been generated. Please find the attached document, which includes a detailed summary of your usage during this time.</p>
+<p>Your invoice <strong>{{invoiceNumber}}</strong> for the period {{startDate}} - {{endDate}} was issued on {{issueDate}}. Here is a summary of your charges:</p>
+{{{itemsSummaryHtml}}}
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;margin:16px 0;">
+<tr><td style="padding:12px;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;font-size:16px;"><strong>Amount due: {{amountDue}} {{currency}}</strong> &mdash; due {{dueDate}}</td></tr>
+</table>
+<p><strong>Pay by bank transfer</strong></p>
+<p>Please transfer {{amountDue}} {{currency}} to the account below. The payment description must quote the invoice number <strong>{{invoiceNumber}}</strong> so we can match your payment.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;">
+<tr><td style="padding:12px;border:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:14px;">{{{bankInstructionsHtml}}}</td></tr>
+</table>
+<p>Once the transfer is made, open the invoice, click <strong>Pay by bank transfer</strong> and then <strong>I have transferred</strong> to send us the transfer date, your bank reference and, optionally, the proof of payment:</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0;">
+<tr><td style="background:#111827;border-radius:4px;"><a href="{{billUrl}}" style="display:inline-block;padding:10px 18px;color:#ffffff;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;">Open the invoice and confirm your transfer</a></td></tr>
+</table>
+<p>Or copy this link into your browser: {{billUrl}}</p>
 <p>If you have any questions or require further assistance, feel free to contact us.</p>
-<p>Thank you for choosing us.</p>
+<p>The invoice (PDF) is attached to this e-mail.</p>
 <p>Best regards,</p>
 <p>{{businessName}}</p>`),
 		t("bill_is_paid", "BILL", "Your bill has been paid",
 			`<p>Dear {{fullName}},</p>
-<p>We are pleased to inform you that the bill for the period {{startDate}} - {{endDate}} has been successfully paid. Please find the attached document, which includes a detailed summary of your usage during this period.</p>
+<p>Your invoice <strong>{{invoiceNumber}}</strong> for the period {{startDate}} - {{endDate}} has been paid in full. Nothing is due for this invoice.</p>
+{{{itemsSummaryHtml}}}
+<p>You can view and download the invoice from your account: <a href="{{billUrl}}">{{billUrl}}</a></p>
 <p>If you have any questions or need further information, feel free to reach out to us.</p>
 <p>Thank you for your continued trust in us.</p>
+<p>The invoice (PDF) is attached to this e-mail.</p>
 <p>Best regards,</p>
 <p>{{businessName}}</p>`),
 		t("send_thank_you_to_customer", "PAYMENT", "Thank you for your payment",
 			`<p>Dear {{fullName}},</p>
 <p>We are pleased to inform you that your payment of {{grossAmount}} {{currency}} has been successfully processed.</p>
 <p>Thank you for your prompt payment. If you have any questions or need further assistance, feel free to contact us.</p>
+<p>Best regards,</p>
+<p>{{businessName}}</p>`),
+		t("refund_failed", "INVOICE", "Your refund could not be completed",
+			`<p>Dear {{fullName}},</p>
+<p>The payment provider could not complete the refund of {{amount}} {{currency}} we requested for you ({{reason}}).</p>
+<p>The corresponding credit of {{restoredCredit}} {{currency}} has been put back on your account balance, so nothing is lost. Our finance team has been notified and will contact you to arrange the refund another way if you still need it.</p>
+<p>Best regards,</p>
+<p>{{businessName}}</p>`),
+		t("refund_failed_operator", "INVOICE", "Refund FAILED at the payment provider: {{amount}} {{currency}} for {{fullName}}",
+			`<p>The payment provider reported the refund of {{amount}} {{currency}} for {{fullName}} {{companyName}} as FAILED: {{reason}}.</p>
+<p>ProxCloud restored the customer's account credit ({{restoredCredit}} {{currency}}) and the deposit transaction {{transactionId}} (gateway reference {{externalId}}) is back to SUCCESS. Arrange the refund manually or retry it from the admin console:</p>
+<p><a href="{{adminUrl}}">{{adminUrl}}</a></p>`),
+		t("notify_customer_payment_failed", "BILL", "Action required: the payment for invoice {{invoiceNumber}} failed",
+			`<p>Dear {{fullName}},</p>
+<p>We tried to charge your saved card <strong>{{panMasked}}</strong> for invoice <strong>{{invoiceNumber}}</strong> ({{amountDue}} {{currency}}), but the payment was not accepted.</p>
+<p>Reason given by the payment provider: <em>{{errorMessage}}</em></p>
+<p>Please check the card (funds, limit, expiry) and retry the payment, pay with another card, or pay by bank transfer from the invoice page:</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0;">
+<tr><td style="background:#111827;border-radius:4px;"><a href="{{billUrl}}" style="display:inline-block;padding:10px 18px;color:#ffffff;text-decoration:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;">Open the invoice and retry the payment</a></td></tr>
+</table>
+<p>We will also retry the charge automatically over the next days. An invoice left unpaid after its due date ({{dueDate}}) may lead to the suspension of your services.</p>
 <p>Best regards,</p>
 <p>{{businessName}}</p>`),
 		t("notify_customer_has_no_card", "SUSPENSION", "Action Required: Payment Method Not Found for Your Bill",
@@ -71,9 +112,9 @@ func SystemTemplates() []MessageTemplate {
 			`<p>Dear {{fullName}},</p>
 <p>To complete your bank transfer, please send the specified amount to the bank account listed below:</p>
 <p>Bank Details:</p>
-<p>{{instructions}}</p>
+<p style="white-space: pre-line">{{instructions}}</p>
 <p>Amount to Transfer:</p>
-<p>{{amount}} {{currency}}</p>
+<p>{{amount}} {{currency}}{{billReference}}</p>
 <p>For quicker processing of your payment, kindly include the following reference number in the payment description:</p>
 <p>Reference Number:</p>
 <p>{{referenceNumber}}</p>
@@ -81,6 +122,15 @@ func SystemTemplates() []MessageTemplate {
 <p>Thank you for your prompt attention.</p>
 <p>Best regards,</p>
 <p>{{businessName}}</p>`),
+		t("bank_transfer_submitted", "BANK_TRANSFER", "Bank transfer submitted by {{fullName}} — {{amount}} {{currency}}",
+			`<p>A customer reports having completed a bank transfer. Please check the incoming payment and approve or reject the transfer in the admin console.</p>
+<p>Customer: {{fullName}} {{companyName}}</p>
+<p>Amount: {{amount}} {{currency}}</p>
+<p>Reference number: {{referenceNumber}}</p>
+<p>Bank reference: {{bankReference}}</p>
+<p>Transferred on: {{transferredAt}}</p>
+<p>Invoice: {{invoiceNumber}} {{billId}}</p>
+<p><a href="{{adminUrl}}">Review bank transfers</a></p>`),
 		t("notify_customer_is_suspended", "SUSPENSION", "Service Suspension Due to Low Balance",
 			`<p>Dear {{fullName}},</p>
 <p>We would like to inform you that your services have been temporarily suspended due to an insufficient balance in your account.</p>

@@ -1,0 +1,42 @@
+# make remove-node NODE=pve3: refuses while guests remain on the node. Removes the member from the cluster;
+# the node itself must then stay off (Proxmox: a removed node must never come back with its old identity).
+- name: Remove a node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  tasks:
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Read the guests
+      ansible.builtin.uri: {url: "{{ pc_api }}/cluster/resources?type=vm"}
+      register: pc_vms
+    - name: Refuse a node with guests
+      vars:
+        guests: "{{ pc_vms.json.data | selectattr('node', 'eq', pc_node) | rejectattr('template', 'eq', 1) | map(attribute='vmid') | list }}"
+      ansible.builtin.assert:
+        that: guests | length == 0
+        fail_msg: "Node {{ pc_node }} still runs {{ guests }}. Migrate them first; a Protected VM needs a replica elsewhere."
+    - name: Destroy the node's template copies
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/nodes/{{ pc_node }}/qemu/{{ item.vmid }}?purge=1"
+        method: DELETE
+      changed_when: true
+      loop: "{{ pc_vms.json.data | selectattr('node', 'eq', pc_node) | selectattr('template', 'eq', 1) | list }}"
+      loop_control: {label: "{{ item.vmid }}"}
+    - name: Stop here unless told the node is powered off
+      ansible.builtin.assert:
+        that: pc_node_is_off | default(false) | bool
+        fail_msg: "Power {{ pc_node }} off, then run: make remove-node NODE={{ pc_node }} ARGS='-e pc_node_is_off=true'"
+
+- name: Delete the member
+  hosts: "{{ groups['pve'] | default([]) | difference([pc_node]) | first | default('localhost') }}"
+  gather_facts: false
+  tasks:
+    - name: Delete the node from the cluster
+      ansible.builtin.command: pvecm delnode {{ pc_node }}
+      changed_when: true
+    - name: Say what is left
+      ansible.builtin.debug:
+        msg: A 3-to-2 shrink needs a QDevice for quorum (pvecm qdevice setup <host>). Then edit any HA or replication rule naming the node.

@@ -47,6 +47,9 @@ on("GET /admin/service/os-images", () => ({ data: db.osImages }))
 // Proxmox connection test (stored token, or the form's unsaved one).
 on("POST /admin/service/proxmox/auth", () => ({ data: db.proxmoxAuthResult }))
 
+// ceph-s3 connection check on the Add dialog's unsaved values.
+on("POST /admin/service/object-store/test", () => ({ data: { ok: true } }))
+
 on("GET /admin/service/:id", ({ params }) => ({
   data: db.services.find((s) => s.id === params.id) ?? notFound("Cloud provider"),
 }))

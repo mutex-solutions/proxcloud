@@ -17,22 +17,41 @@ package externalservice
 //	      "chartVersion": "0.1.0"          // pinned — never latest
 //	    },
 //	    "database": {
-//	      "storageClasses": ["nvme"],        // optional customer-facing allowlist
+//	      "lbAddressPool":  "dbaas-services", // MetalLB pool every tenant-facing LB draws from
+//	      "storageClasses": ["nvme"],        // optional customer-facing allowlist; `capacity` and
+//	                                         // `capacity-*` (HDD tier) are never offered
 //	      "limits":         {"maxCpu": 32, "maxMemoryGiB": 128, "maxStorageGiB": 2048},
+//	      "scheduling": {                    // optional
+//	        "zoneKey":      "topology.kubernetes.io/zone", // replica spread key (hard anti-affinity)
+//	        "nodeSelector": {"node-role": "database"},     // dedicated database node pool
+//	        "tolerations":  [{"key": "dedicated", "operator": "Equal", "value": "database", "effect": "NoSchedule"}]
+//	      },
+//	      "backup": {                        // optional S3 object store; absent = backups off.
+//	        "endpoint":     "http://s3.example.com:9000",  // WITH scheme; plain http works
+//	        "bucket":       "dbaas-backups",
+//	        "prefix":       "backups",
+//	        "region":       "us-east-1",
+//	        "pathStyle":    true,            // default true
+//	        "caCertSecret": ""               // optional Secret (key ca.crt) on the DB cluster
+//	      },                                 // credentials: secret.backupAccessKey / backupSecretKey
 //	      "engines": {                       // curated engine catalog (the ONLY engines offered).
 //	        "postgresql": {"versions": ["16","17","18"], "default": "17", "replicas": [1,2,3]},
-//	        "valkey":     {"versions": ["8.1"], "default": "8.1", "replicas": [1,3], "beta": true}
+//	        "valkey":     {"versions": ["9.0"], "default": "9.0", "replicas": [1,3], "beta": true}
 //	      }                                  // ⚠ every version MUST have a key in the chart's
 //	                                         // engineVersion→image map (_helpers.tpl) — an
 //	                                         // unmapped version passes Validate and then hard-
 //	                                         // fails the ArgoCD render
 //	    }
 //	  },
-//	  "secret": {"kubeconfig": "<db-cluster kubeconfig>"}  // encrypted at rest
+//	  "secret": {                          // encrypted at rest
+//	    "kubeconfig":      "<db-cluster kubeconfig>",
+//	    "backupAccessKey": "<s3 access key>",   // only with config.database.backup
+//	    "backupSecretKey": "<s3 secret key>"
+//	  }
 //	}
 //
-// The databases run on OPS-owned nodes; the only tenant-facing artifact is the LB ingress IP,
-// restricted by loadBalancerSourceRanges.
+// The databases run on OPS-owned nodes; the only tenant-facing artifact is the LB ingress IP
+// (MetalLB, from the lbAddressPool services subnet), restricted by loadBalancerSourceRanges.
 
 import "github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 
@@ -48,6 +67,71 @@ func (e *ExternalService) DbaasRegion() string {
 		return rs[0]
 	}
 	return ""
+}
+
+// dbaasBackupConfig assembles the operator-configured object store. The credentials come from
+// the provider SECRET, never from config: they are as sensitive as the kubeconfig and must be
+// stripped from admin reads by the same machinery.
+func dbaasBackupConfig(db map[string]any, secret map[string]any) dbaas.BackupConfig {
+	b, _ := db["backup"].(map[string]any)
+	if b == nil {
+		return dbaas.BackupConfig{}
+	}
+	// Path-style defaults ON (RustFS, Ceph RGW); only an explicit false turns it off.
+	pathStyle := true
+	if v, ok := b["pathStyle"].(bool); ok {
+		pathStyle = v
+	}
+	return dbaas.BackupConfig{
+		Endpoint:     str(b["endpoint"]),
+		Bucket:       str(b["bucket"]),
+		Region:       str(b["region"]),
+		Prefix:       str(b["prefix"]),
+		PathStyle:    pathStyle,
+		CACertSecret: str(b["caCertSecret"]),
+		AccessKey:    str(secret["backupAccessKey"]),
+		SecretKey:    str(secret["backupSecretKey"]),
+	}
+}
+
+// dbaasScheduling reads config.database.scheduling: the replica spread key plus the optional
+// dedicated-node-pool selector and tolerations (opaque toleration objects, passed to the chart
+// unchanged — the API server's admission rejects a bad one).
+func dbaasScheduling(db map[string]any) (zoneKey string, nodeSelector map[string]string, tolerations []map[string]any) {
+	block, _ := db["scheduling"].(map[string]any)
+	if block == nil {
+		return "", nil, nil
+	}
+	if ns, ok := block["nodeSelector"].(map[string]any); ok {
+		for k, v := range ns {
+			if s := str(v); k != "" && s != "" {
+				if nodeSelector == nil {
+					nodeSelector = map[string]string{}
+				}
+				nodeSelector[k] = s
+			}
+		}
+	}
+	if ts, ok := block["tolerations"].([]any); ok {
+		for _, t := range ts {
+			if m, ok := t.(map[string]any); ok && len(m) > 0 {
+				tolerations = append(tolerations, m)
+			}
+		}
+	}
+	return str(block["zoneKey"]), nodeSelector, tolerations
+}
+
+// dbaasStorageClasses reads the customer-facing storage-class allowlist, dropping the capacity
+// tier: a class named `capacity` / `capacity-*` is HDD-backed NFS and never offered to databases.
+func dbaasStorageClasses(db map[string]any) []string {
+	out := []string{}
+	for _, c := range strList(db["storageClasses"]) {
+		if !dbaas.CapacityClass(c) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // DbaasConfig assembles the dbaas.Config for dbaas.New: the decrypted DB-cluster kubeconfig
@@ -83,6 +167,7 @@ func (e *ExternalService) DbaasConfig() dbaas.Config {
 		}
 	}
 	limits, _ := db["limits"].(map[string]any)
+	zoneKey, nodeSelector, tolerations := dbaasScheduling(db)
 	cfg := dbaas.Config{
 		Kubeconfig:     str(e.secretMap()["kubeconfig"]),
 		Region:         e.DbaasRegion(),
@@ -91,13 +176,18 @@ func (e *ExternalService) DbaasConfig() dbaas.Config {
 		ChartRepo:      str(argo["chartRepo"]),
 		ChartName:      str(argo["chartName"]),
 		ChartVersion:   str(argo["chartVersion"]),
-		StorageClasses: strList(db["storageClasses"]),
+		LBAddressPool:  str(db["lbAddressPool"]),
+		ZoneKey:        zoneKey,
+		Backup:         dbaasBackupConfig(db, e.secretMap()),
+		StorageClasses: dbaasStorageClasses(db),
 		Limits: dbaas.Limits{
 			MaxCPU:        intOf(limits["maxCpu"]),
 			MaxMemoryGiB:  intOf(limits["maxMemoryGiB"]),
 			MaxStorageGiB: intOf(limits["maxStorageGiB"]),
 		},
-		Engines: engines,
+		Engines:      engines,
+		NodeSelector: nodeSelector,
+		Tolerations:  tolerations,
 	}
 	if cfg.ArgoNamespace == "" {
 		cfg.ArgoNamespace = "argocd"

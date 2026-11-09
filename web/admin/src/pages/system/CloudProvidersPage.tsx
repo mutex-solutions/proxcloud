@@ -37,6 +37,13 @@ import {
   type DbaasFormState,
 } from "./dbaasProvider"
 import {
+  SandboxProviderForm,
+  emptySandboxForm,
+  sandboxFormToBody,
+  sandboxFormValid,
+  type SandboxFormState,
+} from "./sandboxProvider"
+import {
   ProxmoxProviderForm,
   emptyProxmoxForm,
   proxmoxFormToBody,
@@ -51,6 +58,8 @@ export type CloudProvider = {
   name?: string
   type?: string
   status?: string
+  // The last project that could not be provisioned on this provider; a success clears it.
+  provisionError?: { projectId?: string; message?: string; at?: string }
   config?: {
     apiUrl?: string
     provider?: string
@@ -74,6 +83,124 @@ function providerRegions(p: CloudProvider): string[] {
   return p.config?.region ? [p.config.region] : []
 }
 
+
+// ── truenas create form ──────────────────────────────────────────────────────
+type TrueNASFormState = {
+  name: string; apiUrl: string; username: string; apiKey: string; fingerprint: string
+  parentDataset: string; mountHost: string; snatSources: string; region: string; defaultQuotaGiB: string
+}
+
+const emptyTrueNASForm: TrueNASFormState = {
+  name: "", apiUrl: "", username: "proxcloud", apiKey: "", fingerprint: "",
+  parentDataset: "", mountHost: "", snatSources: "", region: "pve", defaultQuotaGiB: "",
+}
+
+const trueNASFormValid = (f: TrueNASFormState) =>
+  [f.name, f.apiUrl, f.username, f.apiKey, f.parentDataset, f.region].every((v) => v.trim() !== "") &&
+  f.apiUrl.trim().startsWith("https://") &&
+  cephQuotaValid(f.defaultQuotaGiB)
+
+export const parseSNATSources = (v: string) => v.split(",").map((a) => a.trim()).filter(Boolean)
+
+export const SNAT_SOURCES_HELP =
+  "Leave empty unless a NAT sits between tenants and this NAS, so that the NAS sees the NAT's address instead of the " +
+  "tenant's. Each address listed here goes on every export of this provider, Kubernetes RWX datasets included, and " +
+  "stays there through sync. The cost: the NAS can no longer tell tenants apart. Every tenant behind that NAT can " +
+  "mount every NFS share of every project on this provider, and only the SMB password still protects an SMB share. " +
+  "Single addresses only, no ranges."
+
+// File shares only, so the shares service is enabled directly. The API key goes to the secret and never comes back.
+function trueNASFormToBody(f: TrueNASFormState) {
+  const region = f.region.trim()
+  return {
+    name: f.name.trim(),
+    type: "CLOUD",
+    status: "PUBLIC",
+    config: {
+      provider: "truenas",
+      apiUrl: f.apiUrl.trim().replace(/\/+$/, ""),
+      username: f.username.trim(),
+      parentDataset: f.parentDataset.trim(),
+      region,
+      regions: { [region]: { displayName: region } },
+      ...(f.fingerprint.trim() ? { fingerprint: f.fingerprint.trim() } : {}),
+      ...(f.mountHost.trim() ? { mountHost: f.mountHost.trim() } : {}),
+      ...(parseSNATSources(f.snatSources).length ? { snatSources: parseSNATSources(f.snatSources) } : {}),
+      ...(f.defaultQuotaGiB.trim() ? { defaultQuotaGiB: Number(f.defaultQuotaGiB) } : {}),
+      services: { shares: { [region]: true } },
+    },
+    secret: { apiKey: f.apiKey.trim() },
+  }
+}
+
+// ── powerdns create form ─────────────────────────────────────────────────────
+type PowerDNSFormState = { name: string; apiUrl: string; apiKey: string; nameservers: string; region: string }
+const emptyPowerDNSForm: PowerDNSFormState = { name: "", apiUrl: "", apiKey: "", nameservers: "", region: "pve" }
+const powerDNSFormValid = (f: PowerDNSFormState) =>
+  [f.name, f.apiUrl, f.apiKey, f.nameservers, f.region].every((v) => v.trim() !== "")
+
+// DNS zones only, so the dns service is enabled directly. The API key goes to the secret and never comes back.
+function powerDNSFormToBody(f: PowerDNSFormState) {
+  const region = f.region.trim()
+  return {
+    name: f.name.trim(),
+    type: "CLOUD",
+    status: "PUBLIC",
+    config: {
+      provider: "powerdns",
+      apiUrl: f.apiUrl.trim().replace(/\/+$/, ""),
+      nameservers: f.nameservers.split(",").map((n) => n.trim()).filter(Boolean),
+      region,
+      regions: { [region]: { displayName: region } },
+      services: { dns: { [region]: true } },
+    },
+    secret: { apiKey: f.apiKey.trim() },
+  }
+}
+
+function PowerDNSProviderForm({ form, setForm }: { form: PowerDNSFormState; setForm: (f: PowerDNSFormState) => void }) {
+  const field = (key: keyof PowerDNSFormState, label: string, placeholder = "", type = "text") => (
+    <div className="grid gap-2">
+      <Label htmlFor={`pd-${key}`}>{label}</Label>
+      <Input id={`pd-${key}`} type={type} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} placeholder={placeholder} />
+    </div>
+  )
+  return (
+    <div className="grid gap-4">
+      {field("name", "Display name", "DNS")}
+      {field("apiUrl", "API URL", "https://dns.example.com:8081")}
+      {field("apiKey", "API key", "", "password")}
+      {field("nameservers", "Name servers of new zones, comma separated", "ns1.example.com, ns2.example.com")}
+      {field("region", "Region", "pve")}
+    </div>
+  )
+}
+
+function TrueNASProviderForm({ form, setForm }: { form: TrueNASFormState; setForm: (f: TrueNASFormState) => void }) {
+  const field = (key: keyof TrueNASFormState, label: string, placeholder = "", type = "text") => (
+    <div className="grid gap-2">
+      <Label htmlFor={`tn-${key}`}>{label}</Label>
+      <Input id={`tn-${key}`} type={type} value={form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} placeholder={placeholder} />
+    </div>
+  )
+  return (
+    <div className="grid gap-4">
+      {field("name", "Display name", "TrueNAS")}
+      {field("apiUrl", "URL (HTTPS only)", "https://nas.example.com")}
+      {field("username", "API key owner", "proxcloud")}
+      {field("apiKey", "API key", "", "password")}
+      {field("fingerprint", "Certificate fingerprint (self-signed)", "AA:BB:…")}
+      {field("parentDataset", "Parent dataset", "tank/shares")}
+      {field("mountHost", "Address clients mount from (optional)", "defaults to the URL's host")}
+      <div className="grid gap-2">
+        {field("snatSources", "NAT source addresses, comma separated (optional, weakens isolation)", "none")}
+        <p className="text-sm text-muted-foreground">{SNAT_SOURCES_HELP}</p>
+      </div>
+      {field("region", "Region", "pve")}
+      {field("defaultQuotaGiB", "Quota per project, GiB (optional)")}
+    </div>
+  )
+}
 
 // ── ceph-s3 create form ──────────────────────────────────────────────────────
 type CephFormState = {
@@ -111,7 +238,7 @@ const cephFormValid = (f: CephFormState) =>
 // "Provider config"): the S3 + Admin Ops endpoints drive everything, and the
 // secret carries the RGW admin keys (caps users=*;buckets=*;usage=*). object-store is the ONLY
 // service a ceph-s3 provider serves, so it is enabled here directly — no discover round-trip exists.
-function cephFormToBody(f: CephFormState) {
+function cephFormToBody(f: CephFormState, provider: "ceph-s3" | "rustfs" = "ceph-s3") {
   const region = f.region.trim()
   const trimURL = (s: string) => s.trim().replace(/\/+$/, "")
   return {
@@ -119,7 +246,7 @@ function cephFormToBody(f: CephFormState) {
     type: "CLOUD",
     status: "PUBLIC",
     config: {
-      provider: "ceph-s3",
+      provider,
       s3Endpoint: trimURL(f.s3Endpoint),
       adminApiUrl: trimURL(f.adminApiUrl),
       ...(f.s3WebsiteEndpoint.trim() ? { s3WebsiteEndpoint: trimURL(f.s3WebsiteEndpoint) } : {}),
@@ -133,7 +260,26 @@ function cephFormToBody(f: CephFormState) {
   }
 }
 
-function CephProviderForm({ form, setForm }: { form: CephFormState; setForm: (f: CephFormState) => void }) {
+function CephProviderForm({ form, setForm, provider }: { form: CephFormState; setForm: (f: CephFormState) => void; provider: "ceph-s3" | "rustfs" }) {
+  // The answer belongs to the values it tested, so it goes when they change.
+  const [tested, setTested] = useState<{ form: CephFormState; error?: string } | null>(null)
+  const [testing, setTesting] = useState(false)
+  const result = tested?.form === form ? tested : null
+  const test = async () => {
+    setTesting(true)
+    const { config, secret } = cephFormToBody(form, provider)
+    try {
+      await apiFetch("/admin/service/object-store/test", {
+        method: "POST",
+        body: { provider, s3Endpoint: config.s3Endpoint, adminApiUrl: config.adminApiUrl, region: config.region, ...secret },
+      })
+      setTested({ form })
+    } catch (e) {
+      setTested({ form, error: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setTesting(false)
+    }
+  }
   return (
     <div className="grid gap-4">
       <div className="grid gap-2">
@@ -185,6 +331,13 @@ function CephProviderForm({ form, setForm }: { form: CephFormState; setForm: (f:
       <p className="text-xs text-muted-foreground">
         The admin keys belong to an RGW admin user with caps <code>users=*;buckets=*;usage=*</code>.
       </p>
+      <div className="flex items-center gap-3">
+        <Button type="button" variant="outline" onClick={() => void test()} disabled={testing || !cephFormValid({ ...form, name: form.name || "-" })}>
+          {testing ? "Testing…" : "Test connection"}
+        </Button>
+        {result && !result.error ? <span className="text-xs text-emerald-600">Connection OK</span> : null}
+        {result?.error ? <span className="text-xs text-destructive">{result.error}</span> : null}
+      </div>
     </div>
   )
 }
@@ -196,10 +349,13 @@ export default function CloudProvidersPage() {
   const items = data?.data ?? []
 
   const [createOpen, setCreateOpen] = useState(false)
-  const [kind, setKind] = useState<"ceph-s3" | "kamaji" | "dbaas" | "proxmox">("proxmox")
+  const [kind, setKind] = useState<"ceph-s3" | "rustfs" | "truenas" | "powerdns" | "kamaji" | "dbaas" | "sandbox" | "proxmox">("proxmox")
+  const [powerDNSForm, setPowerDNSForm] = useState<PowerDNSFormState>(emptyPowerDNSForm)
+  const [trueNASForm, setTrueNASForm] = useState<TrueNASFormState>(emptyTrueNASForm)
   const [cephForm, setCephForm] = useState<CephFormState>(emptyCephForm)
   const [kamajiForm, setKamajiForm] = useState<KamajiFormState>(emptyKamajiForm)
   const [dbaasForm, setDbaasForm] = useState<DbaasFormState>(emptyDbaasForm)
+  const [sandboxForm, setSandboxForm] = useState<SandboxFormState>(emptySandboxForm)
   const [proxmoxForm, setProxmoxForm] = useState<ProxmoxFormState>(emptyProxmoxForm)
 
   const create = useMutation({
@@ -209,13 +365,19 @@ export default function CloudProvidersPage() {
       apiFetch<CloudProvider>(LIST_PATH, {
         method: "POST",
         body:
-          kind === "ceph-s3"
-            ? cephFormToBody(cephForm)
+          kind === "ceph-s3" || kind === "rustfs"
+            ? cephFormToBody(cephForm, kind)
+            : kind === "truenas"
+              ? trueNASFormToBody(trueNASForm)
+            : kind === "powerdns"
+              ? powerDNSFormToBody(powerDNSForm)
             : kind === "kamaji"
               ? kamajiFormToBody(kamajiForm)
               : kind === "dbaas"
                 ? dbaasFormToBody(dbaasForm)
-                : proxmoxFormToBody(proxmoxForm),
+                : kind === "sandbox"
+                  ? sandboxFormToBody(sandboxForm)
+                  : proxmoxFormToBody(proxmoxForm),
       }),
     onSuccess: (created) => {
       toast.success("Cloud provider created")
@@ -223,6 +385,7 @@ export default function CloudProvidersPage() {
       setCephForm(emptyCephForm)
       setKamajiForm(emptyKamajiForm)
       setDbaasForm(emptyDbaasForm)
+      setSandboxForm(emptySandboxForm)
       setProxmoxForm(emptyProxmoxForm)
       void qc.invalidateQueries({ queryKey: ["admin-list", LIST_PATH] })
       if (created?.id) navigate(`/system/cloud-providers/${created.id}`)
@@ -324,7 +487,9 @@ export default function CloudProvidersPage() {
                   setCephForm(emptyCephForm)
             setKamajiForm(emptyKamajiForm)
             setDbaasForm(emptyDbaasForm)
+            setSandboxForm(emptySandboxForm)
             setProxmoxForm(emptyProxmoxForm)
+            setPowerDNSForm(emptyPowerDNSForm)
             setKind("proxmox")
           }
         }}
@@ -335,19 +500,36 @@ export default function CloudProvidersPage() {
             <DialogDescription>
               {kind === "ceph-s3"
                 ? "Connect a Ceph RGW object store over its S3 and Admin Ops endpoints. Projects get a dedicated RGW user."
+                : kind === "powerdns"
+                  ? "Connect a PowerDNS Authoritative server for tenant DNS zones, over its HTTP API."
+                : kind === "truenas"
+                  ? "Connect a TrueNAS for NFS and SMB file shares, over its WebSocket API. The key's account needs the Sharing Administrator group; Deleting shares also needs DATASET_DELETE, SMB shares ACCOUNT_WRITE."
+                : kind === "rustfs"
+                  ? "Connect a RustFS object store. The admin URL is its private endpoint: the public one must block /rustfs/admin. Projects get a dedicated IAM user; the keys are the RustFS root keys."
                 : kind === "kamaji"
                   ? "Connect a Kamaji management cluster for Managed Kubernetes. Clusters are delivered as ArgoCD Applications of the pinned chart; worker nodes run in each customer's project."
                   : kind === "dbaas"
                     ? "Connect a pre-built database Kubernetes cluster for Managed Databases. Databases are delivered as ArgoCD Applications of the pinned chart, reachable over an internal LB in each customer's tenant network."
+                    : kind === "sandbox"
+                      ? "Connect the platform's sandbox cluster: customer sandboxes run there as gVisor pods. Store it DISABLED first; it goes live only once its release gates hold."
                     : "Connect a Proxmox VE cluster with one admin API token. Projects get a dedicated pool; networking, storage profiles and GPU mappings are configured on the provider page after creation."}
             </DialogDescription>
           </DialogHeader>
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             <Button variant={kind === "proxmox" ? "default" : "outline"} onClick={() => setKind("proxmox")}>
               Proxmox VE
             </Button>
             <Button variant={kind === "ceph-s3" ? "default" : "outline"} onClick={() => setKind("ceph-s3")}>
               Ceph S3
+            </Button>
+            <Button variant={kind === "rustfs" ? "default" : "outline"} onClick={() => setKind("rustfs")}>
+              RustFS
+            </Button>
+            <Button variant={kind === "truenas" ? "default" : "outline"} onClick={() => setKind("truenas")}>
+              TrueNAS
+            </Button>
+            <Button variant={kind === "powerdns" ? "default" : "outline"} onClick={() => setKind("powerdns")}>
+              PowerDNS
             </Button>
             <Button variant={kind === "kamaji" ? "default" : "outline"} onClick={() => setKind("kamaji")}>
               Kubernetes
@@ -355,13 +537,22 @@ export default function CloudProvidersPage() {
             <Button variant={kind === "dbaas" ? "default" : "outline"} onClick={() => setKind("dbaas")}>
               Database (DBaaS)
             </Button>
+            <Button variant={kind === "sandbox" ? "default" : "outline"} onClick={() => setKind("sandbox")}>
+              Sandboxes
+            </Button>
           </div>
-          {kind === "ceph-s3" ? (
-            <CephProviderForm form={cephForm} setForm={setCephForm} />
+          {kind === "powerdns" ? (
+            <PowerDNSProviderForm form={powerDNSForm} setForm={setPowerDNSForm} />
+          ) : kind === "truenas" ? (
+            <TrueNASProviderForm form={trueNASForm} setForm={setTrueNASForm} />
+          ) : kind === "ceph-s3" || kind === "rustfs" ? (
+            <CephProviderForm form={cephForm} setForm={setCephForm} provider={kind} />
           ) : kind === "kamaji" ? (
             <KamajiProviderForm form={kamajiForm} setForm={setKamajiForm} />
           ) : kind === "dbaas" ? (
             <DbaasProviderForm form={dbaasForm} setForm={setDbaasForm} />
+          ) : kind === "sandbox" ? (
+            <SandboxProviderForm form={sandboxForm} setForm={setSandboxForm} />
           ) : (
             <ProxmoxProviderForm form={proxmoxForm} setForm={setProxmoxForm} />
           )}
@@ -372,13 +563,19 @@ export default function CloudProvidersPage() {
             <Button
               onClick={() => create.mutate()}
               disabled={
-                (kind === "ceph-s3"
+                (kind === "powerdns"
+                  ? !powerDNSFormValid(powerDNSForm)
+                  : kind === "truenas"
+                  ? !trueNASFormValid(trueNASForm)
+                  : kind === "ceph-s3" || kind === "rustfs"
                   ? !cephFormValid(cephForm)
                   : kind === "kamaji"
                     ? !kamajiFormValid(kamajiForm)
                     : kind === "dbaas"
                       ? !dbaasFormValid(dbaasForm)
-                      : !proxmoxFormValid(proxmoxForm)) ||
+                      : kind === "sandbox"
+                        ? !sandboxFormValid(sandboxForm)
+                        : !proxmoxFormValid(proxmoxForm)) ||
                 create.isPending
               }
             >

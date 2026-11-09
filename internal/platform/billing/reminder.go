@@ -223,5 +223,5 @@ func (s *SavingsService) sendReminderEmail(ctx context.Context, c *SavingsContra
 	if c.DiscountRate != nil {
 		vars["discountRate"] = c.DiscountRate.String()
 	}
-	notify(ctx, s.notifier, savingsExpiryReminderTemplate, profile.Email, vars)
+	notify(ctx, s.notifier, savingsExpiryReminderTemplate, profile, vars)
 }

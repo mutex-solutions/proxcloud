@@ -1,0 +1,139 @@
+# make rustfs-upgrade VERSION=x.y.z (plan S20): read the release notes and the GHSA feed first, add the
+# release digest to versions.yml, then: stop -> VM snapshot -> install -> verify. `make rustfs-rollback`
+# restores the snapshot, binary and data together. Mode vm only; on truenas-app the catalog moves the
+# version. The data disk snapshots on any store: qcow2 on NFS, native on ZFS and Ceph.
+- name: Prepare
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  vars:
+    v: "{{ pc.object_store.vm }}"
+  tasks:
+    - name: Check the mode
+      ansible.builtin.assert:
+        that: pc.object_store.mode == 'vm'
+        fail_msg: rustfs-upgrade drives the RustFS VM (object_store.mode=vm).
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Add the VM to the inventory
+      ansible.builtin.add_host:
+        name: pc-rustfs
+        groups: rustfs
+        ansible_host: "{{ v.ip | split('/') | first }}"
+        ansible_user: "{{ v.user }}"
+        ansible_ssh_common_args: "{{ pc.mgmt.ssh_common_args }}"
+      changed_when: false
+
+- name: Stop RustFS for a consistent snapshot
+  hosts: rustfs
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Stop RustFS
+      when: not pc_rustfs_rollback | default(false) | bool
+      ansible.builtin.systemd_service: {name: rustfs, state: stopped}
+
+- name: Snapshot or roll back
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  vars:
+    node: "{{ pc.object_store.vm.node or pc_nodes[0] }}"
+    vm_api: "{{ pc_api }}/nodes/{{ node }}/qemu/{{ pc.object_store.vm.vmid }}"
+    snapname: pc-rustfs-upgrade
+    rollback: "{{ pc_rustfs_rollback | default(false) | bool }}"
+  tasks:
+    - name: Read the snapshots
+      ansible.builtin.uri: {url: "{{ vm_api }}/snapshot"}
+      register: pc_snaps
+    - name: Set the snapshot state
+      ansible.builtin.set_fact:
+        pc_has_snap: "{{ snapname in (pc_snaps.json.data | map(attribute='name') | list) }}"
+
+    - name: Roll back
+      when: rollback
+      block:
+        - name: Check there is a snapshot
+          ansible.builtin.assert:
+            that: pc_has_snap | bool
+            fail_msg: "VM {{ pc.object_store.vm.vmid }} has no snapshot {{ snapname }}: nothing to roll back to."
+        - name: Roll the VM back
+          ansible.builtin.uri: {url: "{{ vm_api }}/snapshot/{{ snapname }}/rollback", method: POST, body_format: form-urlencoded, body: {start: 1}}
+          changed_when: true
+          register: pc_rb
+        - name: Wait for the rollback
+          ansible.builtin.include_tasks: tasks/pve-wait.yml
+          vars: {wait_upid: "{{ pc_rb.json.data }}", wait_node: "{{ node }}"}
+
+    - name: Snapshot
+      when: not rollback
+      block:
+        - name: Drop the previous snapshot
+          when: pc_has_snap | bool
+          ansible.builtin.uri: {url: "{{ vm_api }}/snapshot/{{ snapname }}", method: DELETE}
+          changed_when: true
+          register: pc_snapdel
+        - name: Wait for the removal
+          when: pc_has_snap | bool
+          ansible.builtin.include_tasks: tasks/pve-wait.yml
+          vars: {wait_upid: "{{ pc_snapdel.json.data }}", wait_node: "{{ node }}"}
+        - name: Take the snapshot
+          ansible.builtin.uri:
+            url: "{{ vm_api }}/snapshot"
+            method: POST
+            body_format: form-urlencoded
+            body: {snapname: "{{ snapname }}", description: Before a RustFS upgrade}
+          changed_when: true
+          register: pc_snap
+        - name: Wait for the snapshot
+          ansible.builtin.include_tasks: tasks/pve-wait.yml
+          vars: {wait_upid: "{{ pc_snap.json.data }}", wait_node: "{{ node }}"}
+
+- name: Install and verify
+  hosts: rustfs
+  become: true
+  gather_facts: false
+  vars:
+    version: "{{ pc_rustfs_version | default(pc_ver.rustfs) }}"
+    rollback: "{{ pc_rustfs_rollback | default(false) | bool }}"
+  tasks:
+    - name: Wait for the VM
+      ansible.builtin.wait_for_connection: {timeout: 300}
+    - name: Read the installed version
+      ansible.builtin.command: /usr/local/bin/rustfs --version
+      changed_when: false
+      register: pc_have
+    - name: Install the binary
+      when: not rollback and ('rustfs ' ~ version) not in pc_have.stdout
+      ansible.builtin.shell: |
+        set -eu
+        curl -fsSLo /tmp/rustfs.zip https://github.com/rustfs/rustfs/releases/download/{{ version }}/rustfs-linux-x86_64-musl-v{{ version }}.zip
+        echo '{{ pc_ver.rustfs_sha256[version] }}  /tmp/rustfs.zip' | sha256sum -c -
+        unzip -o -q /tmp/rustfs.zip rustfs -d /usr/local/bin
+        chmod 0755 /usr/local/bin/rustfs
+        rm -f /tmp/rustfs.zip
+      changed_when: true
+    - name: Start RustFS
+      ansible.builtin.systemd_service: {name: rustfs, state: started}
+    - name: Wait for the S3 port
+      ansible.builtin.wait_for: {port: 9000, timeout: 120}
+    - name: Verify the internal buckets and the admin API
+      ansible.builtin.script: files/rustfs-bootstrap.py
+      environment:
+        S3_URL: http://127.0.0.1:9000
+        ROOT_ACCESS: "{{ pc_rustfs_access_key }}"
+        ROOT_SECRET: "{{ pc_rustfs_secret_key }}"
+        BUCKETS: "{{ {'cnpg-backups': lookup('ansible.builtin.password', pc_gen ~ '/rustfs-cnpg-secret ' ~ pc_alnum), 'etcd-snapshots': lookup('ansible.builtin.password', pc_gen ~ '/rustfs-etcd-secret ' ~ pc_alnum)} | to_json }}"
+      args: {executable: python3}
+      changed_when: false
+      no_log: true
+    - name: Report the version
+      ansible.builtin.command: /usr/local/bin/rustfs --version
+      changed_when: false
+      register: pc_now
+    - name: Show the version
+      ansible.builtin.debug: {msg: "{{ pc_now.stdout_lines[0] }}"}

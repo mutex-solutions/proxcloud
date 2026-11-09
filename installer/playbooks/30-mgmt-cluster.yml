@@ -1,0 +1,59 @@
+# Stage 30: k3s. Always --cluster-init, so one server grows to three by joining, with no datastore move.
+- name: Install k3s
+  hosts: mgmt
+  become: true
+  gather_facts: false
+  serial: 1
+  vars:
+    first: "{{ groups['mgmt'][0] }}"
+    args_base: "--cluster-init --write-kubeconfig-mode 600 --tls-san {{ ansible_host }} {{ pc.mgmt.k3s_extra_args }}"
+    args_join: "--server https://{{ hostvars[first].ansible_host }}:6443 --token {{ hostvars[first].pc_k3s_token | default('') }} --write-kubeconfig-mode 600 --tls-san {{ ansible_host }} {{ pc.mgmt.k3s_extra_args }}"
+  tasks:
+    - name: Read the installed version
+      ansible.builtin.command: k3s --version
+      register: pc_k3s_have
+      changed_when: false
+      failed_when: false
+    - name: Configure the local registry
+      when: pc.images.build
+      block:
+        - name: Create the k3s config directory
+          ansible.builtin.file: {path: /etc/rancher/k3s, state: directory, mode: "0755"}
+        - name: Mirror the local registry over plain HTTP
+          ansible.builtin.copy:
+            dest: /etc/rancher/k3s/registries.yaml
+            mode: "0600"
+            content: |
+              mirrors:
+                "{{ pc_local_registry }}":
+                  endpoint: ["http://{{ pc_local_registry }}"]
+    - name: Install or upgrade k3s
+      when: pc_ver.k3s not in pc_k3s_have.stdout | default('')
+      ansible.builtin.shell: |
+        set -eu
+        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION={{ pc_ver.k3s | quote }} sh -s - server {{ args_base if inventory_hostname == first else args_join }}
+      changed_when: true
+    - name: Read the join token
+      when: inventory_hostname == first and groups['mgmt'] | length > 1
+      ansible.builtin.slurp: {src: /var/lib/rancher/k3s/server/node-token}
+      register: pc_k3s_token_raw
+      no_log: true
+    - name: Keep the join token
+      when: inventory_hostname == first and groups['mgmt'] | length > 1
+      ansible.builtin.set_fact: {pc_k3s_token: "{{ pc_k3s_token_raw.content | b64decode | trim }}"}
+      no_log: true
+    - name: Wait for the node
+      ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+      changed_when: false
+      register: pc_ready
+      retries: 12
+      delay: 10
+      until: pc_ready is succeeded
+    - name: Wait for the bundled ingress
+      ansible.builtin.command: k3s kubectl -n kube-system rollout status deploy/traefik --timeout=60s
+      changed_when: false
+      register: pc_traefik
+      retries: 20
+      delay: 15
+      until: pc_traefik is succeeded
+      when: inventory_hostname == first

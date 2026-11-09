@@ -87,6 +87,7 @@ type BucketSettings struct {
 	Grants        []BucketGrant       `json:"grants"`
 	PolicyJSON    string              `json:"policyJson,omitempty"`
 	Website       *BucketWebsite      `json:"website,omitempty"`
+	Caps          ObjectCaps          `json:"caps"`
 	IndexType     string              `json:"indexType,omitempty"`     // read-only
 	PlacementRule string              `json:"placementRule,omitempty"` // read-only
 }
@@ -109,18 +110,15 @@ func notFound(err error, codes ...string) bool {
 
 // SetBucketVersioning enables or suspends versioning. S3 has no "off" once enabled — suspending stops new
 // versions but keeps the existing ones (which continue to consume billable space).
-func (c *Client) SetBucketVersioning(ctx context.Context, bucket string, enabled bool) error {
-	if c.ceph == nil {
-		return ErrBucketFeatureUnsupported
-	}
-	if err := c.ceph.needS3(); err != nil {
+func (b *cephBackend) SetBucketVersioning(ctx context.Context, bucket string, enabled bool) error {
+	if err := b.needS3(); err != nil {
 		return err
 	}
 	status := s3types.BucketVersioningStatusSuspended
 	if enabled {
 		status = s3types.BucketVersioningStatusEnabled
 	}
-	_, err := c.ceph.s3.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+	_, err := b.s3.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
 		Bucket: &bucket, VersioningConfiguration: &s3types.VersioningConfiguration{Status: status},
 	})
 	return err
@@ -132,11 +130,8 @@ func (c *Client) SetBucketVersioning(ctx context.Context, bucket string, enabled
 // COMPLIANCE objects cannot be deleted by ANYONE until retention expires, which would make the project's
 // RGW user un-purgeable and therefore block project deletion entirely. Requires a bucket that was CREATED
 // with object lock enabled.
-func (c *Client) SetObjectLockDefaults(ctx context.Context, bucket, mode string, days int32) error {
-	if c.ceph == nil {
-		return ErrBucketFeatureUnsupported
-	}
-	if err := c.ceph.needS3(); err != nil {
+func (b *cephBackend) SetObjectLockDefaults(ctx context.Context, bucket, mode string, days int32) error {
+	if err := b.needS3(); err != nil {
 		return err
 	}
 	if strings.EqualFold(mode, ObjectLockCompliance) {
@@ -148,7 +143,7 @@ func (c *Client) SetObjectLockDefaults(ctx context.Context, bucket, mode string,
 	if days <= 0 {
 		return fmt.Errorf("ceph-s3: object lock retention days must be > 0")
 	}
-	_, err := c.ceph.s3.PutObjectLockConfiguration(ctx, &s3.PutObjectLockConfigurationInput{
+	_, err := b.s3.PutObjectLockConfiguration(ctx, &s3.PutObjectLockConfigurationInput{
 		Bucket: &bucket,
 		ObjectLockConfiguration: &s3types.ObjectLockConfiguration{
 			ObjectLockEnabled: s3types.ObjectLockEnabledEnabled,
@@ -164,13 +159,10 @@ func (c *Client) SetObjectLockDefaults(ctx context.Context, bucket, mode string,
 
 // SetBucketQuota caps a single bucket's size and/or object count. maxSize/maxObjects <= 0 mean unlimited.
 // Uses the ADMIN keys (this is not an S3 call), so it works even on a client without project data keys.
-func (c *Client) SetBucketQuota(ctx context.Context, bucket string, maxSizeBytes, maxObjects int64, enabled bool) error {
-	if c.ceph == nil {
-		return ErrBucketFeatureUnsupported
-	}
+func (b *cephBackend) SetBucketQuota(ctx context.Context, bucket string, maxSizeBytes, maxObjects int64, enabled bool) error {
 	// Admin-by-name mutation → prove ownership first (finding F3): a stale/recycled name must not let this
 	// project set a quota on another project's bucket.
-	if _, err := c.ceph.adminBucketInfo(ctx, bucket); err != nil {
+	if _, err := b.adminBucketInfo(ctx, bucket); err != nil {
 		return err
 	}
 	size, objs := "-1", "-1"
@@ -183,26 +175,23 @@ func (c *Client) SetBucketQuota(ctx context.Context, bucket string, maxSizeBytes
 	q := urlValues(
 		"quota", "",
 		"bucket", bucket,
-		"uid", c.ceph.uid,
+		"uid", b.uid,
 		"max-size", size,
 		"max-objects", objs,
 		"enabled", fmt.Sprint(enabled),
 	)
-	return c.ceph.adminDo(ctx, "PUT", "/bucket", q, nil, nil)
+	return b.adminDo(ctx, "PUT", "/bucket", q, nil, nil)
 }
 
 // --- lifecycle ---
 
 // SetBucketLifecycle replaces the bucket's lifecycle rules; an empty list removes the configuration.
-func (c *Client) SetBucketLifecycle(ctx context.Context, bucket string, rules []LifecycleRule) error {
-	if c.ceph == nil {
-		return ErrBucketFeatureUnsupported
-	}
-	if err := c.ceph.needS3(); err != nil {
+func (b *cephBackend) SetBucketLifecycle(ctx context.Context, bucket string, rules []LifecycleRule) error {
+	if err := b.needS3(); err != nil {
 		return err
 	}
 	if len(rules) == 0 {
-		_, err := c.ceph.s3.DeleteBucketLifecycle(ctx, &s3.DeleteBucketLifecycleInput{Bucket: &bucket})
+		_, err := b.s3.DeleteBucketLifecycle(ctx, &s3.DeleteBucketLifecycleInput{Bucket: &bucket})
 		return err
 	}
 	out := make([]s3types.LifecycleRule, 0, len(rules))
@@ -232,7 +221,7 @@ func (c *Client) SetBucketLifecycle(ctx context.Context, bucket string, rules []
 		}
 		out = append(out, lr)
 	}
-	_, err := c.ceph.s3.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+	_, err := b.s3.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
 		Bucket: &bucket, LifecycleConfiguration: &s3types.BucketLifecycleConfiguration{Rules: out},
 	})
 	return err
@@ -241,15 +230,12 @@ func (c *Client) SetBucketLifecycle(ctx context.Context, bucket string, rules []
 // --- CORS ---
 
 // SetBucketCORS replaces the bucket's CORS rules; an empty list removes the configuration.
-func (c *Client) SetBucketCORS(ctx context.Context, bucket string, rules []CORSRule) error {
-	if c.ceph == nil {
-		return ErrBucketFeatureUnsupported
-	}
-	if err := c.ceph.needS3(); err != nil {
+func (b *cephBackend) SetBucketCORS(ctx context.Context, bucket string, rules []CORSRule) error {
+	if err := b.needS3(); err != nil {
 		return err
 	}
 	if len(rules) == 0 {
-		_, err := c.ceph.s3.DeleteBucketCors(ctx, &s3.DeleteBucketCorsInput{Bucket: &bucket})
+		_, err := b.s3.DeleteBucketCors(ctx, &s3.DeleteBucketCorsInput{Bucket: &bucket})
 		return err
 	}
 	out := make([]s3types.CORSRule, 0, len(rules))
@@ -263,7 +249,7 @@ func (c *Client) SetBucketCORS(ctx context.Context, bucket string, rules []CORSR
 		}
 		out = append(out, cr)
 	}
-	_, err := c.ceph.s3.PutBucketCors(ctx, &s3.PutBucketCorsInput{
+	_, err := b.s3.PutBucketCors(ctx, &s3.PutBucketCorsInput{
 		Bucket: &bucket, CORSConfiguration: &s3types.CORSConfiguration{CORSRules: out},
 	})
 	return err
@@ -272,22 +258,19 @@ func (c *Client) SetBucketCORS(ctx context.Context, bucket string, rules []CORSR
 // --- tagging ---
 
 // SetBucketTags replaces the bucket's tag set; an empty map removes it.
-func (c *Client) SetBucketTags(ctx context.Context, bucket string, tags map[string]string) error {
-	if c.ceph == nil {
-		return ErrBucketFeatureUnsupported
-	}
-	if err := c.ceph.needS3(); err != nil {
+func (b *cephBackend) SetBucketTags(ctx context.Context, bucket string, tags map[string]string) error {
+	if err := b.needS3(); err != nil {
 		return err
 	}
 	if len(tags) == 0 {
-		_, err := c.ceph.s3.DeleteBucketTagging(ctx, &s3.DeleteBucketTaggingInput{Bucket: &bucket})
+		_, err := b.s3.DeleteBucketTagging(ctx, &s3.DeleteBucketTaggingInput{Bucket: &bucket})
 		return err
 	}
 	set := make([]s3types.Tag, 0, len(tags))
 	for k, v := range tags {
 		set = append(set, s3types.Tag{Key: awsv2.String(k), Value: awsv2.String(v)})
 	}
-	_, err := c.ceph.s3.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
+	_, err := b.s3.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
 		Bucket: &bucket, Tagging: &s3types.Tagging{TagSet: set},
 	})
 	return err
@@ -297,19 +280,34 @@ func (c *Client) SetBucketTags(ctx context.Context, bucket string, tags map[stri
 
 // GetBucketSettings reads the whole configuration panel in one shot. Every leg is best-effort: an absent
 // configuration (no lifecycle, no CORS, …) is a normal state, not an error.
-func (c *Client) GetBucketSettings(ctx context.Context, bucket string) (*BucketSettings, error) {
-	if c.ceph == nil {
-		return nil, ErrBucketFeatureUnsupported
+func (b *cephBackend) GetBucketSettings(ctx context.Context, bucket string) (*BucketSettings, error) {
+	s, err := b.s3Settings(ctx, bucket)
+	if err != nil {
+		return nil, err
 	}
-	if err := c.ceph.needS3(); err != nil {
+	s.Caps = b.Caps()
+	if site, err := b.GetBucketWebsite(ctx, bucket); err == nil {
+		s.Website = site
+	}
+	// Quota + the read-only placement fields come from Admin Ops (admin keys).
+	if st, err := b.adminBucketInfo(ctx, bucket); err == nil {
+		s.Quota = BucketQuota{Enabled: st.BucketQuota.Enabled, MaxSize: st.BucketQuota.MaxSize, MaxObjects: st.BucketQuota.MaxObjects}
+		s.IndexType, s.PlacementRule = st.IndexType, st.PlacementRule
+	}
+	return s, nil
+}
+
+// s3Settings reads the part of the panel plain S3 answers, shared by every backend.
+func (b *cephBackend) s3Settings(ctx context.Context, bucket string) (*BucketSettings, error) {
+	if err := b.needS3(); err != nil {
 		return nil, err
 	}
 	s := &BucketSettings{Versioning: VersioningDisabled, Lifecycle: []LifecycleRule{}, CORS: []CORSRule{}, Tags: map[string]string{}, Grants: []BucketGrant{}}
 
-	if v, err := c.ceph.s3.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: &bucket}); err == nil && v.Status != "" {
+	if v, err := b.s3.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: &bucket}); err == nil && v.Status != "" {
 		s.Versioning = string(v.Status)
 	}
-	if ol, err := c.ceph.s3.GetObjectLockConfiguration(ctx, &s3.GetObjectLockConfigurationInput{Bucket: &bucket}); err == nil && ol.ObjectLockConfiguration != nil {
+	if ol, err := b.s3.GetObjectLockConfiguration(ctx, &s3.GetObjectLockConfigurationInput{Bucket: &bucket}); err == nil && ol.ObjectLockConfiguration != nil {
 		l := &ObjectLockSettings{Enabled: ol.ObjectLockConfiguration.ObjectLockEnabled == s3types.ObjectLockEnabledEnabled}
 		if r := ol.ObjectLockConfiguration.Rule; r != nil && r.DefaultRetention != nil {
 			l.Mode = string(r.DefaultRetention.Mode)
@@ -319,7 +317,7 @@ func (c *Client) GetBucketSettings(ctx context.Context, bucket string) (*BucketS
 	} else if err != nil && !notFound(err, "ObjectLockConfigurationNotFound", "NoSuchObjectLockConfiguration", "InvalidRequest") {
 		return nil, err
 	}
-	if lc, err := c.ceph.s3.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{Bucket: &bucket}); err == nil {
+	if lc, err := b.s3.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{Bucket: &bucket}); err == nil {
 		for _, r := range lc.Rules {
 			lr := LifecycleRule{ID: awsv2.ToString(r.ID), Enabled: r.Status == s3types.ExpirationStatusEnabled}
 			if r.Filter != nil {
@@ -337,7 +335,7 @@ func (c *Client) GetBucketSettings(ctx context.Context, bucket string) (*BucketS
 			s.Lifecycle = append(s.Lifecycle, lr)
 		}
 	}
-	if cs, err := c.ceph.s3.GetBucketCors(ctx, &s3.GetBucketCorsInput{Bucket: &bucket}); err == nil {
+	if cs, err := b.s3.GetBucketCors(ctx, &s3.GetBucketCorsInput{Bucket: &bucket}); err == nil {
 		for _, r := range cs.CORSRules {
 			s.CORS = append(s.CORS, CORSRule{
 				AllowedMethods: r.AllowedMethods, AllowedOrigins: r.AllowedOrigins,
@@ -346,24 +344,16 @@ func (c *Client) GetBucketSettings(ctx context.Context, bucket string) (*BucketS
 			})
 		}
 	}
-	if tg, err := c.ceph.s3.GetBucketTagging(ctx, &s3.GetBucketTaggingInput{Bucket: &bucket}); err == nil {
+	if tg, err := b.s3.GetBucketTagging(ctx, &s3.GetBucketTaggingInput{Bucket: &bucket}); err == nil {
 		for _, t := range tg.TagSet {
 			s.Tags[awsv2.ToString(t.Key)] = awsv2.ToString(t.Value)
 		}
 	}
-	if grants, err := c.ListBucketGrants(ctx, bucket); err == nil {
+	if grants, err := b.ListBucketGrants(ctx, bucket); err == nil {
 		s.Grants = grants
 	}
-	if pol, err := c.GetBucketPolicyJSON(ctx, bucket); err == nil {
+	if pol, err := b.GetBucketPolicyJSON(ctx, bucket); err == nil {
 		s.PolicyJSON = pol
-	}
-	if site, err := c.GetBucketWebsite(ctx, bucket); err == nil {
-		s.Website = site
-	}
-	// Quota + the read-only placement fields come from Admin Ops (admin keys).
-	if st, err := c.ceph.adminBucketInfo(ctx, bucket); err == nil {
-		s.Quota = BucketQuota{Enabled: st.BucketQuota.Enabled, MaxSize: st.BucketQuota.MaxSize, MaxObjects: st.BucketQuota.MaxObjects}
-		s.IndexType, s.PlacementRule = st.IndexType, st.PlacementRule
 	}
 	return s, nil
 }

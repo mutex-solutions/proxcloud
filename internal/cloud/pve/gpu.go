@@ -27,6 +27,7 @@ package pve
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -63,6 +64,43 @@ func GPUSpecsFromTags(tags string) map[string]any {
 		return nil
 	}
 	return map[string]any{"pci_passthrough:alias": fmt.Sprintf("%s:%d", alias, count)}
+}
+
+// GPUSpecsFromConfig counts a VM's GPUs from its hostpciN mapping= entries, which is what the VM
+// actually holds (the tag says what it was created with). aliasOf names a mapping's GPU model; a
+// hostpci entry on a mapping it does not know (a NIC, an HBA) is not a GPU. nil when there are none.
+func GPUSpecsFromConfig(cfg VMConfig, aliasOf func(mappingID string) string) map[string]any {
+	if aliasOf == nil {
+		return nil
+	}
+	counts := GPUCounts(cfg, aliasOf)
+	if len(counts) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(counts))
+	for alias, n := range counts {
+		parts = append(parts, fmt.Sprintf("%s:%d", alias, n))
+	}
+	sort.Strings(parts) // the cached payload is compared whole: keep the order stable
+	return map[string]any{"pci_passthrough:alias": strings.Join(parts, ",")}
+}
+
+// GPUCounts counts a VM's GPUs per model from its hostpciN mapping= entries.
+func GPUCounts(cfg VMConfig, aliasOf func(mappingID string) string) map[string]int {
+	counts := map[string]int{}
+	for key := range cfg {
+		if !strings.HasPrefix(key, "hostpci") {
+			continue
+		}
+		for _, kv := range splitCommaKV(cfg.Str(key)) {
+			if kv[0] == "mapping" {
+				if alias := aliasOf(kv[1]); alias != "" {
+					counts[alias]++
+				}
+			}
+		}
+	}
+	return counts
 }
 
 // GPUSlot is one assignable passthrough device: a mapping id plus the node its

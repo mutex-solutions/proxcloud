@@ -31,6 +31,9 @@ type K8sAPI interface {
 	DeleteApplication(ctx context.Context, ns, name string) error
 	GetService(ctx context.Context, ns, name string) (map[string]any, error)
 	GetVPA(ctx context.Context, ns, name string) (map[string]any, error)
+	ListCRs(ctx context.Context, group, version, plural, ns, labelSelector string) ([]map[string]any, error)
+	ListPods(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
+	PodLogs(ctx context.Context, ns, pod, container string, tailLines int) (string, error)
 }
 
 // defaultFinalizeGrace: a marker secret younger than this is never treated as an orphan. Closes
@@ -135,6 +138,16 @@ func (s *Service) CreateDatabase(ctx context.Context, spec DatabaseSpec) (map[st
 			map[string]string{LabelProject: spec.ProjectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue},
 			nil); err != nil {
 			return nil, fmt.Errorf("dbaas: apply auth secret: %w", err)
+		}
+	}
+	// Object-store credentials. The condition MUST mirror BuildValues' backup block: whenever
+	// the values wire an object store, the Secret those CRs name has to exist — otherwise CNPG
+	// fails every backup AND continuous WAL archiving with `secrets "<id>-backup-s3" not found`,
+	// silently, from the moment the database comes up. A restoring database also reads the
+	// object store during BOOTSTRAP, so this has to land before the Application does.
+	if s.cfg.Backup.Enabled() && Capabilities[spec.Engine]["BACKUP"] {
+		if err := s.applyBackupSecret(ctx, spec.ProjectID, spec.ID); err != nil {
+			return nil, err
 		}
 	}
 	values := BuildValues(s.cfg, spec)
@@ -261,6 +274,15 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 			pending++
 			continue
 		}
+		// The rest of the database's own secrets (backup credentials, customer-user passwords,
+		// the BYO certificate): all `<id>-…`, all proxcloud-labelled, so they are in this very
+		// listing. Without this they would outlive the database whenever the project still
+		// holds a sibling and the namespace is not collected.
+		if err := s.deleteSiblingSecrets(ctx, ns, dbID, name, secrets); err != nil {
+			errs = append(errs, fmt.Errorf("database %s: %w", dbID, err))
+			pending++
+			continue
+		}
 		if err := s.api.DeleteSecret(ctx, ns, name); err != nil {
 			errs = append(errs, fmt.Errorf("database %s: delete marker: %w", dbID, err))
 			pending++
@@ -282,6 +304,31 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		}
 	}
 	return pending, errors.Join(errs...)
+}
+
+// deleteSiblingSecrets removes every listed secret named `<dbID>-…` except the marker itself.
+func (s *Service) deleteSiblingSecrets(ctx context.Context, ns, dbID, markerName string, secrets []map[string]any) error {
+	for _, sec := range secrets {
+		n := digStr(sec, "metadata", "name")
+		if n == markerName || !strings.HasPrefix(n, dbID+"-") {
+			continue
+		}
+		if err := s.api.DeleteSecret(ctx, ns, n); err != nil {
+			return fmt.Errorf("delete secret %s: %w", n, err)
+		}
+	}
+	return nil
+}
+
+// RemoveProjectNamespace deletes the namespace of a project being torn down, which its bootstrap made whether or not it
+// ever held any databases. finalizeNamespace leaves that one alone on purpose, since a live project keeps it. The caller has
+// seen FinalizeOrphans report nothing pending. An Application still there keeps the namespace.
+func (s *Service) RemoveProjectNamespace(ctx context.Context, projectID string) error {
+	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelProject+"="+projectID+","+LabelManagedBy+"="+ManagedByValue)
+	if err != nil || len(apps) > 0 {
+		return err
+	}
+	return s.gcNamespace(ctx, NamespaceFor(projectID))
 }
 
 // gcNamespace deletes the project namespace once it demonstrably holds no database remnants —
@@ -330,6 +377,16 @@ func (s *Service) ConnectionInfo(ctx context.Context, projectID, dbID string) (C
 	if err != nil {
 		return ConnInfo{}, err
 	}
+	// A postgresql database provisioned with superuserAccess off has no `<id>-superuser`
+	// Secret; serve the account it was built with rather than telling a running database its
+	// credentials are not ready.
+	if data == nil {
+		if pn, pu, pp, pd := PriorConnectionSecret(engine, dbID); pn != "" {
+			if prior, perr := s.api.GetSecretData(ctx, ns, pn); perr == nil && prior != nil {
+				data, userKey, passKey, dbKey = prior, pu, pp, pd
+			}
+		}
+	}
 	if data == nil {
 		return ConnInfo{}, fmt.Errorf("dbaas: database %s: credentials not ready yet", dbID)
 	}
@@ -356,6 +413,9 @@ func (s *Service) ConnectionInfo(ctx context.Context, projectID, dbID string) (C
 	if info.Host == "" {
 		return ConnInfo{}, fmt.Errorf("dbaas: database %s: endpoint not ready yet (load balancer still provisioning)", dbID)
 	}
+	// Same spelling the cached row uses (PublicHost) — one helper, so the databases list and
+	// this panel can never disagree about a database's endpoint.
+	info.Host = PublicHost(digStr(app, "spec", "source", "helm", "valuesObject", "opensearch", "customDomain"), info.Host)
 	info.URI = URI(engine, info.Username, info.Password, info.Host, info.Port, info.DBName)
 	return info, nil
 }
@@ -379,12 +439,403 @@ func (s *Service) ResetPassword(ctx context.Context, projectID, dbID, engine str
 	}
 	if err := s.api.PatchSecretData(ctx, NamespaceFor(projectID), secretName,
 		map[string]string{passKey: password}); err != nil {
-		if kamajik8s.NotFound(err) {
+		if !kamajik8s.NotFound(err) {
+			return "", fmt.Errorf("dbaas: rotate password: %w", err)
+		}
+		// Same fallback as ConnectionInfo: rotate the account the database actually has.
+		pn, _, pp, _ := PriorConnectionSecret(engine, dbID)
+		if pn == "" {
 			return "", fmt.Errorf("dbaas: database %s: credentials not ready yet", dbID)
 		}
-		return "", fmt.Errorf("dbaas: rotate password: %w", err)
+		if err := s.api.PatchSecretData(ctx, NamespaceFor(projectID), pn,
+			map[string]string{pp: password}); err != nil {
+			if kamajik8s.NotFound(err) {
+				return "", fmt.Errorf("dbaas: database %s: credentials not ready yet", dbID)
+			}
+			return "", fmt.Errorf("dbaas: rotate password: %w", err)
+		}
 	}
 	return password, nil
+}
+
+// SetAccess reconciles a database's customer-managed logical databases and users to the given
+// desired state. Declarative on purpose: the caller sends the whole list, so a dropped entry is
+// a removal and the values document is always the truth — the same posture as every other dbaas
+// mutation.
+//
+// Order is load-bearing. Secrets are written BEFORE the values patch (a User CR pointing at a
+// Secret that does not exist yet wedges the operator) and deleted AFTER it (an operator still
+// reconciling a removed user must not find its Secret gone mid-flight). Passwords for NEW users
+// are generated here and returned ONCE, exactly like ResetPassword — nothing stores them.
+func (s *Service) SetAccess(ctx context.Context, projectID, dbID, engine string, dbs []DBDatabase, users []DBUser, roles []OSRole) (map[string]string, error) {
+	if err := ValidateAccess(engine, dbs, users, roles); err != nil {
+		return nil, err
+	}
+	existing, err := s.accessUsernames(ctx, dbID)
+	if err != nil {
+		return nil, err
+	}
+	ns := NamespaceFor(projectID)
+	created := map[string]string{}
+	wanted := map[string]bool{}
+	for _, u := range users {
+		wanted[u.Name] = true
+		if existing[u.Name] {
+			continue
+		}
+		password, err := generatePassword()
+		if err != nil {
+			return nil, err
+		}
+		if err := s.api.ApplySecret(ctx, ns, UserSecretName(dbID, u.Name),
+			map[string]string{"username": u.Name, "password": password},
+			map[string]string{LabelProject: projectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue},
+			nil); err != nil {
+			return nil, fmt.Errorf("dbaas: apply user secret: %w", err)
+		}
+		created[u.Name] = password
+	}
+	if err := s.PatchDatabaseValues(ctx, dbID, func(values map[string]any) error {
+		values["databases"] = databasesValues(dbs, users)
+		values["users"] = usersValues(dbs, users)
+		if engine == EngineOpenSearch {
+			block, _ := values["opensearch"].(map[string]any)
+			if block == nil {
+				block = map[string]any{}
+			}
+			block["roles"] = osRolesValues(roles)
+			values["opensearch"] = block
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	// Best-effort: a leftover Secret is inert (nothing references it) and the namespace GC
+	// reaps it with the database, so a failure here must not fail an applied change.
+	for name := range existing {
+		if !wanted[name] {
+			_ = s.api.DeleteSecret(ctx, ns, UserSecretName(dbID, name))
+		}
+	}
+	return created, nil
+}
+
+// SetIndexPolicies reconciles a database's OpenSearch retention policies (ISM). Declarative
+// like SetAccess: the caller sends the whole list. No secrets involved, so this is a plain
+// values patch — the chart expands each entry into an OpensearchISMPolicy state machine.
+func (s *Service) SetIndexPolicies(ctx context.Context, dbID string, policies []OSIndexPolicy) error {
+	if err := ValidateOSIndexPolicies(policies); err != nil {
+		return err
+	}
+	return s.PatchDatabaseValues(ctx, dbID, func(values map[string]any) error {
+		block, _ := values["opensearch"].(map[string]any)
+		if block == nil {
+			block = map[string]any{}
+		}
+		block["indexPolicies"] = osIndexPoliciesValues(policies)
+		values["opensearch"] = block
+		return nil
+	})
+}
+
+// ResetUserPassword rotates a customer-created user's password. ProxCloud owns that Secret, so
+// this is a plain re-apply — unlike the engine's own account (ResetPassword), whose Secret the
+// operator mints and must be merge-patched.
+func (s *Service) ResetUserPassword(ctx context.Context, projectID, dbID, username string) (string, error) {
+	existing, err := s.accessUsernames(ctx, dbID)
+	if err != nil {
+		return "", err
+	}
+	if !existing[username] {
+		return "", fmt.Errorf("user %q does not exist on this database", username)
+	}
+	password, err := generatePassword()
+	if err != nil {
+		return "", err
+	}
+	if err := s.api.ApplySecret(ctx, NamespaceFor(projectID), UserSecretName(dbID, username),
+		map[string]string{"username": username, "password": password},
+		map[string]string{LabelProject: projectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue},
+		nil); err != nil {
+		return "", fmt.Errorf("dbaas: rotate user password: %w", err)
+	}
+	return password, nil
+}
+
+// accessUsernames reads the users currently declared in the LIVE values — the same source the
+// operator reconciles from, so "does this user exist" can never disagree with what is deployed.
+func (s *Service) accessUsernames(ctx context.Context, dbID string) (map[string]bool, error) {
+	app, err := s.api.GetApplication(ctx, s.cfg.ArgoNamespace, dbID)
+	if err != nil {
+		return nil, err
+	}
+	if app == nil {
+		return nil, fmt.Errorf("dbaas: database %s not found", dbID)
+	}
+	out := map[string]bool{}
+	list, _ := dig(app, "spec", "source", "helm", "valuesObject", "users").([]any)
+	for _, raw := range list {
+		if u, ok := raw.(map[string]any); ok {
+			if name, _ := u["name"].(string); name != "" {
+				out[name] = true
+			}
+		}
+	}
+	return out, nil
+}
+
+// Logs returns the tail of the database's own log, newest pod last. Every pinned engine writes
+// its log to stdout, so this is a plain pods/log read — no sidecar, no shipper, and nothing
+// proxcloud stores.
+//
+// The pod filter is the ownership boundary: one namespace holds every database in a project, so
+// a selector that leaked would hand one customer another's log. PodSelectorFor knows which label
+// each operator actually stamps cluster-wide — app.kubernetes.io/instance was assumed here and
+// matched NOTHING for valkey (per-node values), opensearch and kafka (own cluster labels), so a
+// healthy database's Logs tab returned an internal error.
+func (s *Service) Logs(ctx context.Context, projectID, dbID, engine string, tailLines int) ([]map[string]any, error) {
+	container := LogContainerFor(engine)
+	if container == "" {
+		return nil, fmt.Errorf("dbaas: engine %q has no readable log", engine)
+	}
+	ns := NamespaceFor(projectID)
+	pods, err := s.api.ListPods(ctx, ns, PodSelectorFor(engine, dbID))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(pods))
+	namePrefix := PodNamePrefixFor(engine, dbID)
+	for _, pod := range pods {
+		name := digStr(pod, "metadata", "name")
+		if name == "" || !strings.HasPrefix(name, namePrefix) {
+			continue
+		}
+		// A pod that has not started yet has no log; report it rather than failing the batch,
+		// because during a rolling change that is the normal state of one of them.
+		text, err := s.api.PodLogs(ctx, ns, name, container, tailLines)
+		entry := map[string]any{"pod": name, "container": container}
+		if err != nil {
+			entry["error"] = err.Error()
+		} else {
+			entry["log"] = text
+		}
+		out = append(out, entry)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("dbaas: database %s has no running pods yet", dbID)
+	}
+	return out, nil
+}
+
+// SetParameters writes a database's runtime configuration. Declarative like every other
+// mutation: the caller sends the WHOLE desired set, so a parameter dropped from the map returns
+// to the engine default rather than lingering.
+//
+// ProxCloud does not restart anything here. Each operator decides for itself whether a change is
+// a reload or a roll (CNPG reloads a sighup GUC and rolls a postmaster one; Percona and mariadb
+// hash the config and roll the StatefulSet; Strimzi applies dynamically-updatable broker keys
+// through the Admin API with no restart at all). ParametersNeedRestart only exists so the UI can
+// warn first.
+func (s *Service) SetParameters(ctx context.Context, dbID, engine string, params map[string]string) error {
+	if err := ValidateParameters(engine, params); err != nil {
+		return err
+	}
+	block := ParamBlockFor(engine)
+	if block == "" {
+		return fmt.Errorf("dbaas: engine %q has no tunable settings", engine)
+	}
+	return s.PatchDatabaseValues(ctx, dbID, func(values map[string]any) error {
+		cur, _ := values[block].(map[string]any)
+		if cur == nil {
+			cur = map[string]any{}
+		}
+		next := map[string]any{}
+		for k, v := range params {
+			next[k] = v
+		}
+		cur["parameters"] = next
+		values[block] = cur
+		return nil
+	})
+}
+
+// SetBackup turns object-store backups on or off for one database and sets its schedule and
+// retention. The credential Secret is written BEFORE the values flip and removed AFTER it — the
+// same ordering discipline as the BYO certificate, and for the same reason: an operator that
+// reconciles a backup CR pointing at a Secret which does not exist yet wedges, and one still
+// draining a disabled schedule must not lose its credential mid-run.
+func (s *Service) SetBackup(ctx context.Context, projectID, dbID string, spec BackupSpec) error {
+	if err := spec.Validate(); err != nil {
+		return err
+	}
+	if !s.cfg.Backup.Enabled() {
+		return fmt.Errorf("dbaas: this location has no backup object store configured")
+	}
+	// The object store stays wired either way. Unwiring it would remove the barman sidecar and
+	// ROLL the whole cluster, and it would end continuous archiving — so "no schedule" means
+	// exactly that: on-demand backups still work and point-in-time recovery still reaches back
+	// as far as the archive goes.
+	spec.Enabled = true
+	if err := s.applyBackupSecret(ctx, projectID, dbID); err != nil {
+		return err
+	}
+	return s.PatchDatabaseValues(ctx, dbID, func(values map[string]any) error {
+		// Preserve any pending on-demand stamp: a schedule change must not cancel a backup the
+		// customer started seconds earlier.
+		prev, _ := values["backup"].(map[string]any)
+		engine, _ := values["engine"].(string)
+		next := backupValues(s.cfg, engine, dbID, spec)
+		if runAt, _ := prev["runAt"].(string); runAt != "" {
+			next["runAt"] = runAt
+		}
+		values["backup"] = next
+		return nil
+	})
+}
+
+// StampBackupRun adds an out-of-schedule backup to a values document a caller is ALREADY
+// mutating, so a risky change and its safety backup land in ONE patch instead of racing two.
+// No-op when backups are off — a change must never fail because the customer has no object
+// store; the caller decides whether to say so.
+//
+// This does NOT hold the change until the backup finishes, and pretending otherwise would be
+// the dangerous version: gating on completion would mean a stuck backup silently blocks every
+// later change to the database. The real guarantee is continuous archiving — with WAL/binlog
+// shipping on, recovery can land on the second BEFORE the change regardless of when the base
+// backup completed. The extra base backup just shortens the replay.
+func StampBackupRun(values map[string]any, stamp string) bool {
+	block, _ := values["backup"].(map[string]any)
+	if block == nil || block["enabled"] != true {
+		return false
+	}
+	block["runAt"] = stamp
+	values["backup"] = block
+	return true
+}
+
+// TriggerBackup runs an out-of-schedule backup by stamping values.backup.runAt. Every engine
+// template turns a CHANGED value into one extra backup (a new CNPG Backup CR named after the
+// stamp, mariadb's schedule.onDemand identifier, a Percona backup CR), so "back up now" needs
+// no imperative API against the DB cluster — it is the same declarative path as everything else
+// and it survives a proxcloud restart mid-flight.
+func (s *Service) TriggerBackup(ctx context.Context, dbID, stamp string) error {
+	return s.PatchDatabaseValues(ctx, dbID, func(values map[string]any) error {
+		block, _ := values["backup"].(map[string]any)
+		if block == nil || block["enabled"] != true {
+			return fmt.Errorf("dbaas: backups are not enabled for this database")
+		}
+		block["runAt"] = stamp
+		values["backup"] = block
+		return nil
+	})
+}
+
+// ListBackups reports the backup objects the engine's operator has produced, newest first. Read
+// straight off the DB cluster rather than cached: a backup list is small, read rarely, and a
+// stale one is the kind of thing someone plans a restore around.
+//
+// Deliberately NOT filtered on the proxcloud managed-by label. Only the ON-DEMAND backups are ours
+// to label — the chart renders those. The SCHEDULED ones are created by the engine's operator from
+// the ScheduledBackup we render, and every operator stamps its own labels on that child instead of
+// inheriting ours (CNPG: cnpg.io/cluster + cnpg.io/scheduled-backup, no passthrough). Requiring the
+// label therefore hid every unattended backup a database has ever taken, which made the whole
+// schedule decorative: the backups ran, retention consumed them, and the console could never offer
+// one as a restore source.
+//
+// Ownership is the NAMESPACE plus the `<dbID>-` name prefix, which is the real test either way:
+// the namespace is per project, ids are proxcloud-generated, and nothing outside proxcloud and the
+// operators can write there.
+func (s *Service) ListBackups(ctx context.Context, projectID, dbID, engine string) ([]map[string]any, error) {
+	plural, group, version := BackupCRFor(engine)
+	if plural == "" {
+		return nil, fmt.Errorf("dbaas: engine %q does not support backups", engine)
+	}
+	items, err := s.api.ListCRs(ctx, group, version, plural, NamespaceFor(projectID), "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, it := range items {
+		// One namespace holds every database in the project, so a backup belonging to a sibling
+		// must never appear here.
+		name := digStr(it, "metadata", "name")
+		if !strings.HasPrefix(name, dbID+"-") {
+			continue
+		}
+		out = append(out, map[string]any{
+			"name":       name,
+			"phase":      backupPhase(it),
+			"createdAt":  digStr(it, "metadata", "creationTimestamp"),
+			"startedAt":  digStr(it, "status", "startedAt"),
+			"finishedAt": digStr(it, "status", "stoppedAt"),
+			"error":      digStr(it, "status", "error"),
+		})
+	}
+	return out, nil
+}
+
+// backupPhase normalises the per-operator status field into one word for the UI.
+func backupPhase(obj map[string]any) string {
+	for _, path := range [][]string{{"status", "phase"}, {"status", "state"}} {
+		if v := digStr(obj, path...); v != "" {
+			return v
+		}
+	}
+	return "UNKNOWN"
+}
+
+// SetCustomDomainTLS writes the proxcloud-owned BYO-certificate secret <id>-custom-tls (keys
+// tls.crt/tls.key, plus ca.crt when a chain is supplied) that the chart mounts on opensearch's
+// http layer and Dashboards. PEM material goes straight to the cluster — never into proxcloud
+// storage, values, or logs. ProxCloud-owned like the auth secret, so a same-manager re-apply on
+// rotation is safe.
+func (s *Service) SetCustomDomainTLS(ctx context.Context, projectID, dbID, certPEM, keyPEM, caPEM string) error {
+	data := map[string]string{"tls.crt": certPEM, "tls.key": keyPEM}
+	if caPEM != "" {
+		data["ca.crt"] = caPEM
+	}
+	return s.api.ApplySecret(ctx, NamespaceFor(projectID), CustomTLSSecretName(dbID), data,
+		map[string]string{LabelProject: projectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue}, nil)
+}
+
+// DeleteCustomDomainTLS removes the BYO-certificate secret (custom domain turned off).
+func (s *Service) DeleteCustomDomainTLS(ctx context.Context, projectID, dbID string) error {
+	err := s.api.DeleteSecret(ctx, NamespaceFor(projectID), CustomTLSSecretName(dbID))
+	if kamajik8s.NotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// applyBackupSecret writes the per-database object-store credential Secret with every key alias
+// the engines expect (CNPG, Percona, mariadb — see BackupCredKeys). ProxCloud-owned and outside
+// the Application, so values never carry the credentials.
+func (s *Service) applyBackupSecret(ctx context.Context, projectID, dbID string) error {
+	if err := s.api.ApplySecret(ctx, NamespaceFor(projectID), BackupSecretName(dbID), map[string]string{
+		BackupCredKeys.CNPGAccess: s.cfg.Backup.AccessKey,
+		BackupCredKeys.CNPGSecret: s.cfg.Backup.SecretKey,
+		BackupCredKeys.AWSAccess:  s.cfg.Backup.AccessKey,
+		BackupCredKeys.AWSSecret:  s.cfg.Backup.SecretKey,
+	}, map[string]string{LabelProject: projectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue},
+		nil); err != nil {
+		return fmt.Errorf("dbaas: apply backup credentials: %w", err)
+	}
+	return nil
+}
+
+// PublicHost is how a database's endpoint is SPELLED for the customer: their own domain beats
+// the raw LB address. Empty address in = empty out — the LB address stays the readiness signal
+// AND the billing eligibility gate (internal/cloud/billingresource/databasecluster.go keys on a
+// non-empty endpoint), so a name must never appear before the load balancer has an address. Both
+// the cache (syncprovider) and the live read (ConnectionInfo) go through here.
+func PublicHost(customDomain, ip string) string {
+	if ip == "" {
+		return ""
+	}
+	if customDomain != "" {
+		return customDomain
+	}
+	return ip
 }
 
 // lbHost reads the ingress IP off the named LB Service ("" while still provisioning).
@@ -487,7 +938,7 @@ type DatabasePin struct {
 // ListDatabasePins lists every proxcloud-managed database on this provider with its chart pin
 // (ownership-labelled Applications only).
 func (s *Service) ListDatabasePins(ctx context.Context) ([]DatabasePin, error) {
-	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelManagedBy+"="+ManagedByValue)
+	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelService+"="+s.serviceID+","+LabelManagedBy+"="+ManagedByValue)
 	if err != nil {
 		return nil, err
 	}

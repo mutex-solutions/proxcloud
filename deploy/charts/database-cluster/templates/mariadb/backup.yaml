@@ -1,0 +1,78 @@
+{{- if and (include "database-cluster.backupEnabled" .) (eq .Values.engine "mariadb") }}
+{{/*
+mariadb-operator backups.
+
+PhysicalBackup, not the logical Backup CR: a physical backup (mariadb-backup of
+the whole datadir) is what can seed a restore into a new instance AND what a
+point-in-time recovery rolls forward from. The logical Backup is a mariadb-dump
+of chosen databases — useful, but not a platform-grade restore path.
+
+Two things this CR gives us for free:
+  * spec.schedule.onDemand — changing the string triggers an extra backup, so
+    "back up now" needs no second CR and no imperative call.
+  * spec.schedule.immediate — take one right after creation, so a PITR baseline
+    exists before the first cron tick rather than a day later.
+
+S3 SHAPE IS DIFFERENT HERE: spec.storage.s3.endpoint is HOST:PORT with NO
+scheme, and TLS is decided by spec.storage.s3.tls.enabled — passing an
+https:// URL makes the operator build https://https://…. Hence the
+backupHostPort / backupTLS helpers.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: PhysicalBackup
+metadata:
+  name: {{ $name }}-backup
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  mariaDbRef:
+    name: {{ $name }}
+  {{/*
+  target defaults to "Replica" — "physical backups will only be taken in ready
+  replicas". A single-instance database HAS no replica, so the default would
+  quietly never produce a backup. PreferReplica keeps the load off the primary
+  when a replica exists and falls back to it when one does not.
+  */}}
+  target: PreferReplica
+  {{/* gzip, not bzip2: the enum offers none|bzip2|gzip and bzip2 costs several
+       times the CPU for a few percent of size — the wrong trade for something
+       that runs unattended and is read under pressure. */}}
+  compression: gzip
+  {{- with include "database-cluster.backupRetentionHours" . }}
+  {{/* Go duration — days are not a unit here, see the helper. */}}
+  maxRetention: {{ . }}
+  {{- end }}
+  schedule:
+    {{- with .Values.backup.schedule }}
+    cron: {{ . | quote }}
+    {{- end }}
+    immediate: true
+    {{- with .Values.backup.runAt }}
+    onDemand: {{ . | quote }}
+    {{- end }}
+    suspend: false
+  storage:
+    s3:
+      bucket: {{ .Values.backup.s3.bucket | quote }}
+      endpoint: {{ include "database-cluster.backupHostPort" . | quote }}
+      prefix: {{ printf "%s/%s" (.Values.backup.s3.prefix | default "proxcloud") $name | quote }}
+      {{- with .Values.backup.s3.region }}
+      region: {{ . | quote }}
+      {{- end }}
+      accessKeyIdSecretKeyRef:
+        name: {{ .Values.backup.s3.credsSecret }}
+        key: AWS_ACCESS_KEY_ID
+      secretAccessKeySecretKeyRef:
+        name: {{ .Values.backup.s3.credsSecret }}
+        key: AWS_SECRET_ACCESS_KEY
+      tls:
+        enabled: {{ include "database-cluster.backupTLS" . }}
+        {{- with .Values.backup.s3.caCertSecret }}
+        caSecretKeyRef:
+          name: {{ . }}
+          key: ca.crt
+        {{- end }}
+{{- end }}

@@ -36,6 +36,13 @@ func (r *Repo) FindByType(ctx context.Context, t string) ([]ExternalService, err
 	return r.find(ctx, pgdoc.M{"type": t})
 }
 
+// SetTemplateImage moves a sandbox template to another image only while it still holds from (an operator's edit in
+// the meantime wins). false: nothing written.
+func (r *Repo) SetTemplateImage(ctx context.Context, id, tmpl, from, to string) (bool, error) {
+	f := "config.sandbox.templates." + tmpl + ".image"
+	return r.col.SetFieldsOne(ctx, pgdoc.M{"_id": id, f: from}, pgdoc.M{f: to}, nil)
+}
+
 func (r *Repo) find(ctx context.Context, filter pgdoc.M) ([]ExternalService, error) {
 	out := []ExternalService{}
 	if err := r.col.Find(ctx, filter, &out); err != nil {

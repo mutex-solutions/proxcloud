@@ -1,4 +1,4 @@
-// Object storage: Ceph S3 (RGW) buckets. A project may be attached to more than one S3 service/region,
+// Object storage: buckets on Ceph RGW or RustFS. A project may be attached to more than one S3 service/region,
 // so the create form lets the user pick which one a bucket lives on.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { apiFetch } from "./api"
@@ -6,7 +6,7 @@ import { useLocations } from "./hooks"
 import type { Location } from "./types"
 
 export function isS3Location(loc: Location | undefined): boolean {
-  return loc?.provider === "ceph-s3"
+  return loc?.provider === "ceph-s3" || loc?.provider === "rustfs"
 }
 
 /** Locations that can hold a bucket, i.e. the object-store services this project is attached to. */
@@ -16,7 +16,7 @@ export function useBucketLocations(pid: string) {
   return { locations, ...rest }
 }
 
-// --- per-bucket settings (ceph-s3 only) ---
+// --- per-bucket settings ---
 
 export type BucketWebsite = {
   enabled: boolean
@@ -56,6 +56,8 @@ export type BucketSettings = {
   grants: BucketGrant[]
   policyJson?: string
   website?: BucketWebsite
+  /** What this backend offers; the panel hides the rest. */
+  caps?: { backend: string; website: boolean; quotaObjects: boolean }
   indexType?: string
   placementRule?: string
 }
