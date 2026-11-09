@@ -1178,6 +1178,9 @@ func (h *Handler) e2bTemplateDelete(w http.ResponseWriter, r *http.Request) {
 // Its images go with the next registry prune (nothing references them any more).
 func (h *Handler) deleteTemplate(ctx context.Context, ss *sandbox.Service, t *sandboxTemplateDoc) error {
 	ctx = context.WithoutCancel(ctx)
+	if err := h.retireImportPins(ctx, ss, t); err != nil {
+		return err
+	}
 	if err := h.retireTemplatePins(ctx, ss, t); err != nil {
 		return err
 	}

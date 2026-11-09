@@ -16,14 +16,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 	"github.com/mutex-solutions/proxcloud/internal/sandboximport"
 )
 
 type templateImport struct {
-	Source      string                `json:"source"`
-	Destination string                `json:"destination"`
-	Key         string                `json:"key"`
-	Result      *sandboximport.Result `json:"result,omitempty"`
+	Source      string                   `json:"source"`
+	Destination string                   `json:"destination"`
+	Key         string                   `json:"key"`
+	Result      *sandboximport.Result    `json:"result,omitempty"`
+	Registry    *importRegistryOperation `json:"registryOperation,omitempty"`
 }
 
 type importTemplateRequest struct {
@@ -50,17 +52,7 @@ func projectTemplateLock(project string) string { return "sandbox-template-names
 // reference-aware history deletion API exists, keep ALL successes, tagged builds and active
 // work; bound only unreferenced failed history. This deliberately prefers storage over data loss.
 func retainTemplateBuilds(t *sandboxTemplateDoc) {
-	refs := map[string]bool{}
-	for _, id := range t.Tags {
-		refs[id] = true
-	}
-	var keep []templateBuild
-	for i, b := range t.Builds {
-		if i >= len(t.Builds)-keptBuilds || refs[b.BuildID] || b.Status != sandbox.BuildError || buildNeedsSync(&b) {
-			keep = append(keep, b)
-		}
-	}
-	t.Builds = keep
+	trimBuilds(t)
 }
 
 func importKey(b importTemplateRequest, cpu, mem int) string {
@@ -129,6 +121,14 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateImportRequest(&b, c.proj.ID, c.ss.Config()); err != nil {
 		e2bErr(w, 400, err.Error())
+		return
+	}
+	if h.sbBuildPinsDB == nil {
+		e2bErr(w, 503, "digest import requires durable registry protection")
+		return
+	}
+	if err := h.sandboxUsageGate(r.Context(), c.proj, c.es); err != nil {
+		e2bFail(w, err)
 		return
 	}
 	if _, err := c.ss.ImportWorker(r.Context()); err != nil {
@@ -220,7 +220,7 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 				dest = strings.Split(b.Source, "@")[0]
 			}
 			t = &sandboxTemplateDoc{ID: id, ProjectID: c.proj.ID, Name: b.Name, CPU: cpu, MemoryGiB: mem, Tags: map[string]string{}, CreatedAt: &now, UpdatedAt: &now}
-			bb := templateBuild{BuildID: buildID, Status: sandbox.BuildWaiting, From: b.Source, User: b.User, Workdir: b.Workdir, StartCmd: b.StartCmd, ReadyCmd: b.ReadyCmd, CreatedAt: &now, Import: &templateImport{Source: b.Source, Destination: dest, Key: key}}
+			bb := templateBuild{BuildID: buildID, Status: sandbox.BuildWaiting, From: b.Source, User: b.User, Workdir: b.Workdir, StartCmd: b.StartCmd, ReadyCmd: b.ReadyCmd, CreatedAt: &now, Import: &templateImport{Source: b.Source, Destination: dest, Key: key, Registry: &importRegistryOperation{Operation: registrypins.Operation{ID: uuid.NewString(), ProjectID: c.proj.ID, Owner: "import:" + id + ":" + buildID, Generation: uuid.NewString()}, State: buildPreparing}}}
 			t.Builds = []templateBuild{bb}
 			bl = &t.Builds[0]
 			created = true
@@ -269,23 +269,26 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 			host, _, _ := strings.Cut(b.Source, "/")
 			dc, _ = json.Marshal(map[string]any{"auths": map[string]any{host: map[string]string{"auth": base64.StdEncoding.EncodeToString([]byte(b.Registry.Username + ":" + b.Registry.Password))}}})
 		}
-		err = c.ss.StartImport(r.Context(), sandbox.ImportRequest{ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: bl.BuildID, Source: b.Source, Destination: bl.Import.Destination, DockerConfig: dc})
+		store, proof, err := h.acquireImportDispatch(r.Context(), c, t, bl)
 		if err != nil {
-			_, _, _ = h.finishBuild(r.Context(), t.ProjectID, t.ID, bl.BuildID, func(_ *sandboxTemplateDoc, b *templateBuild) {
-				b.Status = sandbox.BuildError
-				b.Reason = "could not start the trusted import worker"
-			})
-			e2bErr(w, 503, "could not start the trusted import worker")
-			return
-		}
-		// Persist a building state without writing a billable CloudResource row.
-		bl.Status = sandbox.BuildBuilding
-		if err = h.saveTemplate(context.WithoutCancel(r.Context()), t); err != nil {
 			e2bFail(w, err)
 			return
 		}
+		launch, cancel := context.WithTimeout(r.Context(), buildLaunchTimeout)
+		err = h.withSandboxStart(launch, c.es.ID, func(ctx context.Context) error {
+			return c.ss.StartImport(ctx, sandbox.ImportRequest{ProjectID: t.ProjectID, TemplateID: t.ID, BuildID: bl.BuildID, Source: b.Source, Destination: bl.Import.Destination, DockerConfig: dc, Pins: proof})
+		})
+		if err == nil {
+			err = launch.Err()
+		}
+		cancel()
+		if err != nil {
+			h.compensateImportLaunch(r.Context(), store, proof, t, bl)
+			e2bErr(w, 503, "trusted import worker outcome could not be confirmed")
+			return
+		}
 	}
-	e2bJSON(w, http.StatusAccepted, map[string]any{"templateID": t.ID, "buildID": bl.BuildID, "status": bl.Status, "aliases": t.names(), "reused": !created})
+	e2bJSON(w, http.StatusAccepted, map[string]any{"templateID": t.ID, "buildID": bl.BuildID, "status": buildPinSDKStatus(bl), "aliases": t.names(), "reused": !created})
 }
 
 // workerAdmission must run under projectTemplateLock. Union durable in-flight
@@ -303,7 +306,7 @@ func (h *Handler) workerAdmission(ctx context.Context, c *e2bCaller, excludeBuil
 	}
 	for _, t := range all {
 		for _, b := range t.Builds {
-			if buildPinActive(b) || b.CancelRequested || b.Status == sandbox.BuildBuilding || b.Status == sandbox.BuildWaiting && b.Import != nil {
+			if buildPinActive(b) || importPinActive(b) || b.CancelRequested || b.Status == sandbox.BuildBuilding || b.Status == sandbox.BuildWaiting && b.Import != nil {
 				active[b.BuildID] = true
 			}
 		}
@@ -318,62 +321,33 @@ func (h *Handler) workerAdmission(ctx context.Context, c *e2bCaller, excludeBuil
 var errImportConflict = errors.New("import alias conflict")
 
 func (h *Handler) syncImport(ctx context.Context, c *e2bCaller, t *sandboxTemplateDoc, b *templateBuild) []string {
-	if buildTerminal(b) {
-		_ = c.ss.DeleteImport(context.WithoutCancel(ctx), b.BuildID)
+	op := b.Import.Registry
+	if op == nil || op.State == buildPinUnknown || op.State == buildPreparing || op.State == buildPinned {
 		return b.Logs
 	}
-	status, result, reason, err := c.ss.ImportState(ctx, t.ProjectID, b.BuildID)
-	expired := b.CreatedAt != nil && time.Since(*b.CreatedAt) > sandbox.BuildTimeout+5*time.Minute
-	if err != nil {
-		if !expired {
-			return b.Logs
+	if op.State != buildPinFinished {
+		status, result, reason, err := c.ss.ImportState(ctx, t.ProjectID, b.BuildID)
+		if op.State == buildTerminalObserved {
+			status, result, reason = b.Status, b.Import.Result, b.Reason
+			err = nil
 		}
-		status, reason = sandbox.BuildError, "import verification output could not be read before the deadline"
-	}
-	if status != sandbox.BuildReady && status != sandbox.BuildError {
-		if !expired {
-			return b.Logs
-		}
-		status = sandbox.BuildError
-		if reason == "" {
-			reason = "import verification did not finish"
-		}
-		reason = "import deadline exceeded: " + reason
-	}
-	if status == sandbox.BuildReady {
-		if result == nil {
-			status, reason = sandbox.BuildError, "missing import verification result"
-		} else if err = sandboximport.ValidateResult(*result, b.Import.Source, b.Import.Destination); err != nil {
-			status, reason = sandbox.BuildError, "invalid import verification result"
-		}
-	}
-	saved, _, err := h.finishBuild(ctx, t.ProjectID, t.ID, b.BuildID, func(t *sandboxTemplateDoc, bl *templateBuild) {
-		bl.Status, bl.Reason = status, reason
-		if status == sandbox.BuildReady {
-			bl.Import.Result = result
-			bl.Image = result.Image
-			if bl.User == "" {
-				bl.User = result.User
-				if bl.User == "" {
-					bl.User = "root"
+		if err != nil || status != sandbox.BuildReady && status != sandbox.BuildError {
+			// A timeout or absent worker is ambiguous, never known no-effect.
+			if b.CreatedAt != nil && time.Since(*b.CreatedAt) > sandbox.BuildTimeout+5*time.Minute {
+				if store, err := h.buildPinStore(c.ss.Config()); err == nil && store != nil {
+					h.markImportUnknown(ctx, store, t, b)
 				}
 			}
-			if bl.Workdir == "" {
-				bl.Workdir = result.Workdir
-				if bl.Workdir == "" {
-					bl.Workdir = "/"
-				}
-			}
-			for _, tg := range bl.Tags {
-				t.Tags[tg] = bl.BuildID
-			}
+			return b.Logs
 		}
-	})
-	if err == nil {
-		adoptBuild(t, b, saved)
-		// Only delete after the terminal state is durable. Failure reverses worker
-		// admission, and credentials must not linger for a pending kubelet forever.
-		_ = c.ss.DeleteImport(context.WithoutCancel(ctx), b.BuildID)
+		if err := h.finishImportPins(ctx, c, t, b, status, result, reason); err != nil {
+			return b.Logs
+		}
+	}
+	if b.Import.Registry.State == buildPinFinished {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = c.ss.DeleteImport(cleanup, b.BuildID)
+		cancel()
 		h.warmTemplate(ctx, c, t, b)
 	}
 	return b.Logs
