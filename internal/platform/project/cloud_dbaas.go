@@ -3,17 +3,22 @@ package project
 // cloud_dbaas.go — the client write surface for Managed Databases. A dbaas provider has no
 // compute tenant of its own, so DATABASE_CLUSTER writes bypass the generic WriteService entirely
 // (kamaji precedent) and go through dbaas.Service: Application CR on the DB cluster in, status
-// via the sync. The databases run on OPS-owned nodes; the only tenant-facing artifact is the LB
-// ingress IP (cloud_dbaas_create.go).
+// via the sync. The databases run on OPS-owned nodes; the only tenant-facing artifact is the
+// MetalLB-assigned LB address, restricted by loadBalancerSourceRanges (no tenant network is
+// involved, so there is no placement leg in the create path).
 
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -25,12 +30,12 @@ import (
 )
 
 // newDatabaseID mints the platform identifier every k8s-side object is named by (Application,
-// helm release, engine CR, LB Service). Customer names are display-only — the std- prefix keeps
-// billing rows, audit logs and Argo app names unambiguous next to kamaji's stc-.
+// helm release, engine CR, LB Service). Customer names are display-only. The prefix is for a person reading a listing, next
+// to kamaji's clusters. Databases made earlier keep another one; the only reader of the prefix is RestoreSource.Validate.
 func newDatabaseID() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
-	return "std-" + hex.EncodeToString(b)
+	return "pc-d-" + hex.EncodeToString(b)
 }
 
 // dbaasCreate handles the DATABASE_CLUSTER leg of cloudCreate for a dbaas provider.
@@ -62,9 +67,23 @@ func (h *Handler) dbaasCreate(w http.ResponseWriter, r *http.Request, u *user.Us
 		h.fail(w, httpx.NewError(http.StatusConflict, http.StatusConflict, msg))
 		return
 	}
-	if err := h.dbaasProvisionDatabase(r.Context(), proj, cfg, spec); err != nil {
-		h.fail(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, err.Error()))
-		return
+	// Restore reads another database's backups, so PROVE the source is one of this project's
+	// databases and shares the engine. Without this check a customer could name any database id
+	// on the platform and recover someone else's data into their own instance.
+	if spec.RestoreFrom != nil {
+		src, err := h.dbaasSourceForRestore(r.Context(), proj, spec)
+		if err != nil {
+			h.fail(w, httpx.BadRequest(err.Error()))
+			return
+		}
+		// True binlog PITR is decided here, not by the customer: mariadb-operator archives
+		// binlogs only on the replication topology, which this platform runs only when the
+		// SOURCE had more than one instance. Without it the restore still honours the
+		// timestamp, just to the nearest physical backup — coarser, never wrong.
+		if spec.Engine == dbaas.EngineMariaDB && spec.RestoreFrom.TargetTime != "" {
+			d, _ := src.Data["database"].(map[string]any)
+			spec.RestoreFrom.PITR = intAny(d["replicas"]) > 1
+		}
 	}
 	data, err := ds.CreateDatabase(r.Context(), spec)
 	if err != nil {
@@ -81,12 +100,15 @@ func (h *Handler) dbaasCreate(w http.ResponseWriter, r *http.Request, u *user.Us
 		Type: cloud.TypeDatabaseCluster, ExternalID: spec.ID,
 		Data: data, CreatedAt: &now, UpdatedAt: &now,
 	}
-	if _, err := h.cloud.Insert(r.Context(), cr); err != nil {
+	// Respond with the STORED resource, not the struct we built: the id is generated on insert,
+	// and callers navigate to it.
+	saved, err := h.cloud.Insert(r.Context(), cr)
+	if err != nil {
 		h.fail(w, err)
 		return
 	}
-	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", cr)
-	httpx.OK(w, *cr)
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", saved)
+	httpx.OK(w, *saved)
 }
 
 // dbaasStorageRefusal refuses a database on a storage class that is a Proxmox storage profile
@@ -155,6 +177,16 @@ func (h *Handler) dbaasDelete(ctx context.Context, es *externalservice.ExternalS
 //   - RESTART {}               → stamps values.restartedAt; the chart maps it per engine
 //   - RESET_PASSWORD {}        → server-generated, applied to the engine secret, returned once
 //   - SET_ALLOWED_CIDRS {allowedCidrs} → LB source ranges (loadBalancerSourceRanges)
+//   - MANAGE_ACCESS {databases,users,roles?} → declarative logical databases / users (new
+//     passwords returned once)
+//   - RESET_USER_PASSWORD {username} → rotates a customer-created user's password, returned once
+//   - GET_LOGS {lines?}        → tail of every pod's engine log
+//   - SET_PARAMETERS {parameters} → whole desired runtime-settings set (allowlisted)
+//   - SET_READ_ENDPOINT {enabled} → second, read-only endpoint
+//   - SET_BACKUP {enabled?,schedule,retentionDays} / CREATE_BACKUP / LIST_BACKUPS → object-store
+//     backups (create-with-restore: see dbaasSpecFromData restoreFrom)
+//   - SET_INDEX_POLICIES {policies} → OpenSearch retention (ISM)
+//   - SET_CUSTOM_DOMAIN {domain,certPem,keyPem,caPem?} → opensearch BYO domain + certificate
 func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Project, es *externalservice.ExternalService, cr *cloud.CloudResource, action string, data map[string]any) bool {
 	if !es.IsDbaas() || cr.Type != cloud.TypeDatabaseCluster {
 		return false
@@ -193,8 +225,26 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 	}
 
 	switch action {
-	case "RESIZE", "RESIZE_STORAGE", "SCALE_REPLICAS", "RESTART", "RESET_PASSWORD", "UPGRADE", "SET_SSO", "SET_AUTOSCALE":
+	case "RESIZE", "RESIZE_STORAGE", "SCALE_REPLICAS", "RESTART", "RESET_PASSWORD", "UPGRADE", "SET_SSO", "SET_CUSTOM_DOMAIN", "SET_AUTOSCALE", "MANAGE_ACCESS", "SET_INDEX_POLICIES", "SET_READ_ENDPOINT", "SET_PARAMETERS":
 		if !known[action] {
+			h.fail(w, httpx.BadRequest(fmt.Sprintf("engine %s does not support %s", engine, action)))
+			return true
+		}
+	case "SET_BACKUP", "CREATE_BACKUP", "LIST_BACKUPS":
+		// Two gates, not one: the engine must have a backup mechanism AND the provider must
+		// actually have an object store. A toggle that writes nowhere is worse than no toggle.
+		if !known["BACKUP"] {
+			h.fail(w, httpx.BadRequest(fmt.Sprintf("engine %s does not support backups", engine)))
+			return true
+		}
+		if !ds.Config().Backup.Enabled() {
+			h.fail(w, httpx.BadRequest("this location has no backup object store configured"))
+			return true
+		}
+	case "RESET_USER_PASSWORD":
+		// Rotating a customer-created user's password is part of the same mechanism as
+		// declaring that user, so it rides MANAGE_ACCESS rather than owning a capability key.
+		if !known["MANAGE_ACCESS"] {
 			h.fail(w, httpx.BadRequest(fmt.Sprintf("engine %s does not support %s", engine, action)))
 			return true
 		}
@@ -290,6 +340,7 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 			h.fail(w, httpx.BadRequest(fmt.Sprintf("version %q is not offered for engine %s", version, engine)))
 			return true
 		}
+		backedUp := false
 		err := ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
 			// Upward-only, validated against the LIVE values, not the cache — a stale sync must
 			// not let a downgrade through (the kamaji UPGRADE rule). The chart resolves the new
@@ -300,13 +351,17 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 				return httpx.BadRequest(err.Error())
 			}
 			values["engineVersion"] = version
+			// One patch, so the safety backup cannot be lost to a failed second call.
+			if dbaasWantsBackupFirst(data) {
+				backedUp = dbaas.StampBackupRun(values, dbaasBackupStamp())
+			}
 			return nil
 		})
 		if err != nil {
 			h.fail(w, err)
 			return true
 		}
-		httpx.OK(w, map[string]any{"result": "UPGRADING"})
+		httpx.OK(w, map[string]any{"result": "UPGRADING", "backupStarted": backedUp})
 		return true
 
 	case "RESTART":
@@ -409,17 +464,12 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 		// OpenSearch Dashboards OIDC against a PUBLIC IdP client — no client secret anywhere
 		// (the Application CR is argocd-readable, values must never carry secrets; register a
 		// public client with PKCE in the IdP). Empty connectUrl disables SSO.
-		sso := map[string]any{}
-		for _, k := range []string{"connectUrl", "clientId", "scope", "baseRedirectUrl", "logoutUrl"} {
-			if v := strAny(data[k]); v != "" {
-				sso[k] = v
-			}
-		}
-		if len(sso) > 0 && (sso["connectUrl"] == nil || sso["clientId"] == nil) {
-			h.fail(w, httpx.BadRequest("sso needs at least connectUrl and clientId (or send nothing to disable)"))
+		sso, err := dbaasSSOFields(data)
+		if err != nil {
+			h.fail(w, httpx.BadRequest(err.Error()))
 			return true
 		}
-		err := ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
+		err = ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
 			block, _ := values["opensearch"].(map[string]any)
 			if block == nil {
 				block = map[string]any{}
@@ -429,7 +479,251 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 			} else {
 				sso["enabled"] = true
 				block["sso"] = sso
+				// SSO rides Dashboards: the chart reads the sso block only when dashboards are
+				// enabled, so setting SSO on a dashboards-less database deploys them too.
+				// Disabling SSO deliberately does NOT tear the Dashboards down.
+				block["dashboards"] = map[string]any{"enabled": true}
 			}
+			values["opensearch"] = block
+			return nil
+		})
+		if err != nil {
+			h.fail(w, err)
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": "UPDATING"})
+		return true
+
+	case "MANAGE_ACCESS":
+		// Declarative: the client sends the FULL desired list of logical databases and users,
+		// so a dropped entry is a removal. Passwords for newly declared users come back once,
+		// in this response only — nothing stores them.
+		dbs, users, roles, err := dbaasAccessFromData(data)
+		if err != nil {
+			h.fail(w, httpx.BadRequest(err.Error()))
+			return true
+		}
+		// Validate before anything is written so a rejected list cannot leave half-created
+		// Secrets behind (SetAccess re-checks; this is what turns a bad list into a 400).
+		if err := dbaas.ValidateAccess(engine, dbs, users, roles); err != nil {
+			h.fail(w, httpx.BadRequest(err.Error()))
+			return true
+		}
+		// Removing a database DROPS it (the reclaim policy is delete), so the same safety
+		// backup applies here — this is the other action that can lose data outright.
+		backedUp := false
+		if dbaasWantsBackupFirst(data) {
+			if err := ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
+				backedUp = dbaas.StampBackupRun(values, dbaasBackupStamp())
+				return nil
+			}); err != nil {
+				h.fail(w, err)
+				return true
+			}
+		}
+		created, err := ds.SetAccess(r.Context(), proj.ID, cr.ExternalID, engine, dbs, users, roles)
+		if err != nil {
+			h.fail(w, err)
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": "UPDATING", "credentials": created, "backupStarted": backedUp})
+		return true
+
+	case "GET_LOGS":
+		// Read-only and bounded; nothing is stored. Not capability-gated: every engine logs to
+		// stdout, and a database whose values are unreadable is exactly the one someone needs
+		// the log for.
+		logs, err := ds.Logs(r.Context(), proj.ID, cr.ExternalID, engine, intAny(data["lines"]))
+		if err != nil {
+			h.fail(w, err)
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": logs})
+		return true
+
+	case "SET_PARAMETERS":
+		// The WHOLE desired set: a parameter dropped here returns to the engine default.
+		raw, _ := data["parameters"].(map[string]any)
+		params := make(map[string]string, len(raw))
+		for k, v := range raw {
+			s, ok := v.(string)
+			if !ok {
+				h.fail(w, httpx.BadRequest(fmt.Sprintf("parameter %q must be a string", k)))
+				return true
+			}
+			params[k] = strings.TrimSpace(s)
+		}
+		if err := dbaas.ValidateParameters(engine, params); err != nil {
+			h.fail(w, httpx.BadRequest(err.Error()))
+			return true
+		}
+		if err := ds.SetParameters(r.Context(), cr.ExternalID, engine, params); err != nil {
+			h.fail(w, err)
+			return true
+		}
+		httpx.OK(w, map[string]any{
+			"result": "UPDATING",
+			// The operators decide this, not proxcloud — the flag is so the UI can say what will
+			// happen rather than the customer discovering it when connections drop.
+			"restarts": dbaas.ParametersNeedRestart(engine, params),
+		})
+		return true
+
+	case "SET_READ_ENDPOINT":
+		// Toggling after create: same rules as the create path, checked against the LIVE values
+		// so a stale cache cannot let a single-instance database claim a reader.
+		on, ok := data["enabled"].(bool)
+		if !ok {
+			h.fail(w, httpx.BadRequest("enabled must be true or false"))
+			return true
+		}
+		if on && !dbaas.ReadEndpointEngines[engine] {
+			h.fail(w, httpx.BadRequest(fmt.Sprintf("engine %s has no separate read endpoint", engine)))
+			return true
+		}
+		err := ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
+			if on && intAny(values["instances"]) < 2 {
+				return httpx.BadRequest("a read-only endpoint needs more than one instance")
+			}
+			net, _ := values["network"].(map[string]any)
+			if net == nil {
+				return fmt.Errorf("dbaas: database %s: values carry no network block", cr.ExternalID)
+			}
+			if on {
+				net["readEndpoint"] = true
+			} else {
+				delete(net, "readEndpoint")
+			}
+			values["network"] = net
+			return nil
+		})
+		if err != nil {
+			h.fail(w, err)
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": "UPDATING"})
+		return true
+
+	case "SET_BACKUP":
+		// Enabled/schedule/retention only — the object store itself is operator config, never a
+		// customer choice, so nothing here names a bucket.
+		spec := dbaas.BackupSpec{
+			Schedule:      strings.TrimSpace(strAny(data["schedule"])),
+			RetentionDays: intAny(data["retentionDays"]),
+		}
+		if raw, has := data["enabled"]; has && raw != nil {
+			b, ok := raw.(bool)
+			if !ok {
+				h.fail(w, httpx.BadRequest("enabled must be true or false"))
+				return true
+			}
+			spec.Enabled = b
+		}
+		if err := spec.Validate(); err != nil {
+			h.fail(w, httpx.BadRequest(err.Error()))
+			return true
+		}
+		if err := ds.SetBackup(r.Context(), proj.ID, cr.ExternalID, spec); err != nil {
+			h.fail(w, err)
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": "UPDATING"})
+		return true
+
+	case "CREATE_BACKUP":
+		// Declarative "back up now": stamp a timestamp the chart turns into one extra run. Same
+		// path as every other change, so it survives a restart mid-flight.
+		if err := ds.TriggerBackup(r.Context(), cr.ExternalID, dbaasBackupStamp()); err != nil {
+			h.fail(w, err)
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": "BACKING_UP"})
+		return true
+
+	case "LIST_BACKUPS":
+		backups, err := ds.ListBackups(r.Context(), proj.ID, cr.ExternalID, engine)
+		if err != nil {
+			h.fail(w, err)
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": backups})
+		return true
+
+	case "SET_INDEX_POLICIES":
+		// OpenSearch ISM, narrowed to what customers actually ask for: retention, with optional
+		// rollover. Declarative like MANAGE_ACCESS — the whole list, every time.
+		policies, err := dbaasIndexPoliciesFromData(data)
+		if err != nil {
+			h.fail(w, httpx.BadRequest(err.Error()))
+			return true
+		}
+		if err := dbaas.ValidateOSIndexPolicies(policies); err != nil {
+			h.fail(w, httpx.BadRequest(err.Error()))
+			return true
+		}
+		if err := ds.SetIndexPolicies(r.Context(), cr.ExternalID, policies); err != nil {
+			h.fail(w, err)
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": "UPDATING"})
+		return true
+
+	case "RESET_USER_PASSWORD":
+		username := strAny(data["username"])
+		if !dbaas.ValidIdent(username) {
+			h.fail(w, httpx.BadRequest("username is required"))
+			return true
+		}
+		password, err := ds.ResetUserPassword(r.Context(), proj.ID, cr.ExternalID, username)
+		if err != nil {
+			h.fail(w, err)
+			return true
+		}
+		httpx.OK(w, map[string]any{"result": "UPDATING", "username": username, "password": password})
+		return true
+
+	case "SET_CUSTOM_DOMAIN":
+		// BYO domain + certificate (opensearch): the customer certifies their own name — no
+		// ACME anywhere. Their DNS points at the endpoint (CNAME to the platform name, or an A
+		// record to the VIP); we mount their cert on the http layer + Dashboards. PEM material
+		// goes straight into the cluster secret — never into proxcloud storage, values, or logs.
+		// Empty domain = remove (values key + secret; the operator falls back per the chart's
+		// tls precedence).
+		domain := strings.ToLower(strings.TrimSpace(strAny(data["domain"])))
+		if domain == "" {
+			if err := ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
+				if block, _ := values["opensearch"].(map[string]any); block != nil {
+					delete(block, "customDomain")
+				}
+				return nil
+			}); err != nil {
+				h.fail(w, err)
+				return true
+			}
+			if err := ds.DeleteCustomDomainTLS(r.Context(), proj.ID, cr.ExternalID); err != nil {
+				h.fail(w, err)
+				return true
+			}
+			httpx.OK(w, map[string]any{"result": "UPDATING"})
+			return true
+		}
+		certPEM, keyPEM := strAny(data["certPem"]), strAny(data["keyPem"])
+		if err := validateCustomDomainTLS(domain, certPEM, keyPEM); err != nil {
+			h.fail(w, httpx.BadRequest(err.Error()))
+			return true
+		}
+		// Secret BEFORE the values flip — the wrong order points the operator at a secret that
+		// does not exist yet and wedges the rollout.
+		if err := ds.SetCustomDomainTLS(r.Context(), proj.ID, cr.ExternalID, certPEM, keyPEM, strAny(data["caPem"])); err != nil {
+			h.fail(w, err)
+			return true
+		}
+		err := ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
+			block, _ := values["opensearch"].(map[string]any)
+			if block == nil {
+				block = map[string]any{}
+			}
+			block["customDomain"] = domain
 			values["opensearch"] = block
 			return nil
 		})
@@ -486,7 +780,8 @@ var errDbaasReadOnly = fmt.Errorf("dbaas: read-only")
 // dbaasSpecFromData maps the client create body → DatabaseSpec. Body shape:
 //
 //	{name, engine, version, replicas, cpu, memoryGiB, storageGiB, storageClass?,
-//	 allowedCidrs:[...], beta?}
+//	 allowedCidrs:[...], beta?, readEndpoint?, dashboards?, sso?,
+//	 restoreFrom?: {sourceDatabaseId, targetTime?, backupName?}}
 //
 // Strict on what it reads (numbers must be numbers — intAny's zero would otherwise turn a typo
 // into "replicas 0" and a confusing catalog error); unknown keys are ignored like every other
@@ -535,7 +830,241 @@ func dbaasSpecFromData(projectID string, d map[string]any) (dbaas.DatabaseSpec, 
 		}
 		spec.BetaAck = b
 	}
+	if raw, has := d["readEndpoint"]; has && raw != nil {
+		b, ok := raw.(bool)
+		if !ok {
+			return spec, fmt.Errorf("readEndpoint must be true or false")
+		}
+		spec.ReadEndpoint = b
+	}
+	if raw, has := d["dashboards"]; has && raw != nil {
+		b, ok := raw.(bool)
+		if !ok {
+			return spec, fmt.Errorf("dashboards must be true or false")
+		}
+		spec.DashboardsEnabled = b
+	}
+	if raw, has := d["restoreFrom"]; has && raw != nil {
+		obj, ok := raw.(map[string]any)
+		if !ok {
+			return spec, fmt.Errorf("restoreFrom must be an object")
+		}
+		spec.RestoreFrom = &dbaas.RestoreSource{
+			SourceID:   strings.TrimSpace(strAny(obj["sourceDatabaseId"])),
+			TargetTime: strings.TrimSpace(strAny(obj["targetTime"])),
+			BackupName: strings.TrimSpace(strAny(obj["backupName"])),
+		}
+	}
+	if raw, has := d["sso"]; has && raw != nil {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			return spec, fmt.Errorf("sso must be an object")
+		}
+		sso, err := dbaasSSOFields(block)
+		if err != nil {
+			return spec, err
+		}
+		spec.SSO = sso
+	}
 	return spec, nil
+}
+
+// dbaasWantsBackupFirst reads the opt-in safety-backup flag. Absent = no backup: a caller that
+// did not ask must never have one taken behind its back, since backups cost storage.
+func dbaasWantsBackupFirst(d map[string]any) bool {
+	b, _ := d["backupFirst"].(bool)
+	return b
+}
+
+// dbaasBackupStamp is the value CREATE_BACKUP and the safety backups share — a changed stamp is
+// what produces exactly one extra backup.
+func dbaasBackupStamp() string { return time.Now().UTC().Format("20060102-150405") }
+
+// dbaasAccessFromData decodes a MANAGE_ACCESS body:
+//
+//	{databases: [{name, owner?}], users: [{name, databases?: [...], roles?: [...]}]}
+//
+// Shape only — dbaas.ValidateAccess owns the rules (identifier charset, reserved names,
+// cross-references, the OpenSearch role allowlist).
+func dbaasAccessFromData(d map[string]any) ([]dbaas.DBDatabase, []dbaas.DBUser, []dbaas.OSRole, error) {
+	strList := func(v any, what string) ([]string, error) {
+		if v == nil {
+			return nil, nil
+		}
+		items, ok := v.([]any)
+		if !ok {
+			return nil, fmt.Errorf("%s must be an array of names", what)
+		}
+		out := make([]string, 0, len(items))
+		for _, raw := range items {
+			s, ok := raw.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s must be an array of names", what)
+			}
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out, nil
+	}
+	objList := func(v any, what string) ([]map[string]any, error) {
+		if v == nil {
+			return nil, nil
+		}
+		items, ok := v.([]any)
+		if !ok {
+			return nil, fmt.Errorf("%s must be an array of objects", what)
+		}
+		out := make([]map[string]any, 0, len(items))
+		for _, raw := range items {
+			obj, ok := raw.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("%s must be an array of objects", what)
+			}
+			out = append(out, obj)
+		}
+		return out, nil
+	}
+
+	rawDBs, err := objList(d["databases"], "databases")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dbs := make([]dbaas.DBDatabase, 0, len(rawDBs))
+	for _, obj := range rawDBs {
+		dbs = append(dbs, dbaas.DBDatabase{
+			Name:  strings.TrimSpace(strAny(obj["name"])),
+			Owner: strings.TrimSpace(strAny(obj["owner"])),
+		})
+	}
+	rawUsers, err := objList(d["users"], "users")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	users := make([]dbaas.DBUser, 0, len(rawUsers))
+	for _, obj := range rawUsers {
+		grants, err := strList(obj["databases"], "user databases")
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		userRoles, err := strList(obj["roles"], "user roles")
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		users = append(users, dbaas.DBUser{
+			Name:      strings.TrimSpace(strAny(obj["name"])),
+			Databases: grants,
+			Roles:     userRoles,
+		})
+	}
+	rawRoles, err := objList(d["roles"], "roles")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	roles := make([]dbaas.OSRole, 0, len(rawRoles))
+	for _, obj := range rawRoles {
+		patterns, err := strList(obj["indexPatterns"], "role index patterns")
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		actions, err := strList(obj["actions"], "role permissions")
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		roles = append(roles, dbaas.OSRole{
+			Name:          strings.TrimSpace(strAny(obj["name"])),
+			IndexPatterns: patterns,
+			Actions:       actions,
+		})
+	}
+	return dbs, users, roles, nil
+}
+
+// dbaasIndexPoliciesFromData decodes a SET_INDEX_POLICIES body:
+//
+//	{policies: [{name, indexPatterns: [...], deleteAfterDays, rolloverGiB?, rolloverDays?}]}
+func dbaasIndexPoliciesFromData(d map[string]any) ([]dbaas.OSIndexPolicy, error) {
+	items, ok := d["policies"].([]any)
+	if d["policies"] != nil && !ok {
+		return nil, fmt.Errorf("policies must be an array of objects")
+	}
+	out := make([]dbaas.OSIndexPolicy, 0, len(items))
+	for _, raw := range items {
+		obj, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("policies must be an array of objects")
+		}
+		patternsRaw, ok := obj["indexPatterns"].([]any)
+		if obj["indexPatterns"] != nil && !ok {
+			return nil, fmt.Errorf("indexPatterns must be an array of patterns")
+		}
+		patterns := make([]string, 0, len(patternsRaw))
+		for _, p := range patternsRaw {
+			s, ok := p.(string)
+			if !ok {
+				return nil, fmt.Errorf("indexPatterns must be an array of patterns")
+			}
+			if s = strings.TrimSpace(s); s != "" {
+				patterns = append(patterns, s)
+			}
+		}
+		out = append(out, dbaas.OSIndexPolicy{
+			Name:            strings.TrimSpace(strAny(obj["name"])),
+			IndexPatterns:   patterns,
+			DeleteAfterDays: intAny(obj["deleteAfterDays"]),
+			RolloverGiB:     intAny(obj["rolloverGiB"]),
+			RolloverDays:    intAny(obj["rolloverDays"]),
+		})
+	}
+	return out, nil
+}
+
+// dbaasSSOFields pulls the Dashboards OIDC block out of a request body. Shared by create and
+// SET_SSO so the two can never drift on the "connectUrl + clientId, or nothing at all" rule.
+// Empty map = SSO off. No client secret is ever accepted: the block rides the argocd-readable
+// Application, so the IdP client must be a public (PKCE) one.
+func dbaasSSOFields(d map[string]any) (map[string]any, error) {
+	sso := map[string]any{}
+	for _, k := range []string{"connectUrl", "clientId", "scope", "baseRedirectUrl", "logoutUrl"} {
+		if v := strAny(d[k]); v != "" {
+			sso[k] = v
+		}
+	}
+	if len(sso) > 0 && (sso["connectUrl"] == nil || sso["clientId"] == nil) {
+		return nil, fmt.Errorf("sso needs at least connectUrl and clientId (or send nothing to disable)")
+	}
+	return sso, nil
+}
+
+// dbaasDomainRE: lowercase DNS name, at least two labels — the shape a public certificate can
+// actually be issued for.
+var dbaasDomainRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
+
+// validateCustomDomainTLS rejects a BYO cert bundle that could not serve the domain: key must
+// match the cert, the leaf must cover the name and must not be expired. Chain/CA trust is NOT
+// verified — the customer chose their issuer; browsers judge the chain, not us.
+func validateCustomDomainTLS(domain, certPEM, keyPEM string) error {
+	if !dbaasDomainRE.MatchString(domain) || len(domain) > 253 {
+		return fmt.Errorf("domain %q is not a valid DNS name", domain)
+	}
+	if certPEM == "" || keyPEM == "" {
+		return fmt.Errorf("certPem and keyPem are required")
+	}
+	pair, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		return fmt.Errorf("certificate/key pair rejected: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("certificate rejected: %v", err)
+	}
+	if err := leaf.VerifyHostname(domain); err != nil {
+		return fmt.Errorf("certificate does not cover %s: %v", domain, err)
+	}
+	if time.Now().After(leaf.NotAfter) {
+		return fmt.Errorf("certificate expired %s", leaf.NotAfter.Format(time.RFC3339))
+	}
+	return nil
 }
 
 // dbaasCIDRsStrings decodes an allowedCidrs array; blanks are skipped, non-strings rejected.

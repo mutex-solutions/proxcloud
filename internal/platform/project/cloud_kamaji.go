@@ -28,11 +28,12 @@ import (
 
 // newClusterID mints the platform identifier every k8s-side object is named by (Application,
 // helm release, CAPI Cluster, TCP, DNS). Customer names are display-only (plan §9) — this id is
-// what keeps duplicate names, unicode input and the RFC1123/63-char limit out of the system.
+// what keeps duplicate names, unicode input and the RFC1123/63-char limit out of the system. The prefix is for a person
+// reading a listing: clusters made earlier keep another one, so nothing may read a cluster from its id's shape.
 func newClusterID() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
-	return "stc-" + hex.EncodeToString(b)
+	return "pc-c-" + hex.EncodeToString(b)
 }
 
 // kamajiCreate handles the KUBERNETES_CLUSTER leg of cloudCreate for a kamaji provider.
@@ -65,12 +66,18 @@ func (h *Handler) kamajiCreate(w http.ResponseWriter, r *http.Request, u *user.U
 		h.fail(w, err)
 		return
 	}
-	if err := h.kamajiProvisionCluster(r.Context(), proj, ks.Config().Defaults, &spec); err != nil {
-		h.fail(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, err.Error()))
+	// Detached like the other PVE write paths: a browser leaving mid-create must not strand tokens.
+	ctx := context.WithoutCancel(r.Context())
+	sec, err := h.kamajiProvisionCluster(ctx, proj, ks, &spec)
+	if err != nil {
+		h.fail(w, err)
 		return
 	}
-	data, err := ks.CreateCluster(r.Context(), spec, nil)
+	data, err := ks.CreateCluster(ctx, spec, sec)
 	if err != nil {
+		if rerr := ks.AbandonCluster(ctx, proj.ID, spec.ID, sec.ComputeServiceID); rerr != nil {
+			slog.Warn("kamaji: release after a failed create, the sweep retries", "cluster", spec.ID, "err", rerr)
+		}
 		h.fail(w, err)
 		return
 	}
@@ -84,12 +91,13 @@ func (h *Handler) kamajiCreate(w http.ResponseWriter, r *http.Request, u *user.U
 		Type: cloud.TypeKubernetesCluster, ExternalID: spec.ID,
 		Data: data, CreatedAt: &now, UpdatedAt: &now,
 	}
-	if _, err := h.cloud.Insert(r.Context(), cr); err != nil {
+	saved, err := h.cloud.Insert(r.Context(), cr)
+	if err != nil {
 		h.fail(w, err)
 		return
 	}
-	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", cr)
-	httpx.OK(w, *cr)
+	h.cloudResourceAudit(u, proj, "CLOUD_RESOURCE_CREATE", "", saved)
+	httpx.OK(w, *saved)
 }
 
 // kamajiDelete handles the KUBERNETES_CLUSTER leg of cloudDelete: Application delete (ArgoCD's
@@ -168,12 +176,6 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 			if err := rotateNodeGroupImages(values, d, version); err != nil {
 				return err
 			}
-			// Keep the autoscaler on the new minor (chart constraint: tag minor == cluster minor).
-			if maj, min, _, verr := kamaji.ParseVersion(version); verr == nil {
-				values["autoscaler"] = map[string]any{
-					"image": map[string]any{"tag": fmt.Sprintf("v%d.%d.0", maj, min)},
-				}
-			}
 			return nil
 		})
 		if err != nil {
@@ -192,6 +194,15 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 		d := ks.Config().Defaults
 		if err := validateNodeGroupShapes(groups); err != nil {
 			h.fail(w, httpx.BadRequest(err.Error()))
+			return true
+		}
+		compute, err := h.kamajiCompute(r.Context(), proj, d)
+		if err != nil {
+			h.fail(w, err)
+			return true
+		}
+		if err := h.KamajiCheckNodeGroups(r.Context(), proj, compute, d, cr, groups); err != nil {
+			h.fail(w, err)
 			return true
 		}
 		// GPU gate on the DELTA vs the cluster's current groups (their workers are already in
@@ -431,7 +442,7 @@ func nodeGroupsFromCache(cr *cloud.CloudResource) []kamaji.NodeGroup {
 		if !ok {
 			continue
 		}
-		ng := kamaji.NodeGroup{FlavorID: strAny(g["flavor_id"])}
+		ng := kamaji.NodeGroup{Name: strAny(g["name"]), FlavorID: strAny(g["flavor_id"]), RootVolumeGiB: intAny(g["root_volume_gib"])}
 		autoscale, _ := g["autoscale"].(bool)
 		switch {
 		case g["replicas"] != nil:
@@ -487,10 +498,8 @@ func kamajiSpecFromData(projectID string, d map[string]any) (kamaji.ClusterSpec,
 	if ha, ok := d["ha"].(bool); ok {
 		spec.HA = ha
 	}
-	// BYO network (EKS-style): both ids or neither — Validate enforces the pairing, and the create
-	// path verifies ownership against the live tenant before anything is built.
+	// The create path verifies the network belongs to this project before anything is built.
 	spec.NetworkID = strAny(d["networkId"])
-	spec.SubnetID = strAny(d["subnetId"])
 	if oidc, ok := d["oidc"].(map[string]any); ok {
 		spec.OIDC = map[string]string{}
 		for k, v := range oidc {

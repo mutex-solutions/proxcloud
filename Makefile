@@ -1,5 +1,8 @@
 REGISTRY ?= ghcr.io/mutex-solutions
-TAG      ?= go-m1-$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+# Default: dev-<7-char sha of HEAD>, the tag CI gives a main commit. CI publishes it only when that commit changed an
+# image's sources (a docs/chart-only commit gets no image), and no release tag exists yet to fall back to. So for any
+# other commit run `make image push` first, or pass a published tag: make deploy TAG=dev-<sha> (see ghcr.io packages).
+TAG      ?= dev-$(shell git rev-parse --short=7 HEAD 2>/dev/null || echo local)
 CHART    ?= deploy/charts/proxcloud
 NS       ?= proxcloud
 # kube context for `make deploy`; empty = kubectl's current context.
@@ -9,7 +12,7 @@ VALUES   ?=
 IMAGE    := $(REGISTRY)/proxcloud-api:$(TAG)
 
 # One-line recipes (`target: ; cmd`) avoid Makefile tab pitfalls.
-.PHONY: build vet test test-integration binary image push deploy print-image
+.PHONY: build vet test test-integration binary image push deploy print-image install
 
 build:   ; go build ./...
 vet:     ; go vet ./...
@@ -21,3 +24,5 @@ image:   ; docker build -f deploy/Dockerfile -t $(IMAGE) .
 push:    ; docker push $(IMAGE)
 deploy:  ; helm upgrade --install proxcloud $(CHART) -n $(NS) --create-namespace $(if $(KUBECTX),--kube-context $(KUBECTX)) $(if $(VALUES),-f $(VALUES)) --set api.image.tag=$(TAG)
 print-image: ; @echo $(IMAGE)
+# The one-shot installer: make install INVENTORY=inventory/mysite (relative to installer/).
+install: ; $(MAKE) -C installer install

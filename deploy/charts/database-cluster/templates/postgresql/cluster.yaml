@@ -27,10 +27,90 @@ spec:
   instances: {{ int .Values.instances }}
   imageName: {{ include "database-cluster.image" . }}
   enableSuperuserAccess: {{ .Values.postgresql.superuserAccess | default false }}
+  {{- if or (gt (int .Values.instances) 1) .Values.scheduling.nodeSelector .Values.scheduling.tolerations }}
+  # CNPG keeps pod placement under spec.affinity, not on a pod template. With
+  # more than one instance the replicas must spread across scheduling.zoneKey
+  # as a HARD rule (podAntiAffinityType: required).
+  affinity:
+    {{- if gt (int .Values.instances) 1 }}
+    enablePodAntiAffinity: true
+    topologyKey: {{ .Values.scheduling.zoneKey | quote }}
+    podAntiAffinityType: required
+    {{- end }}
+    {{- with (include "database-cluster.podPlacement" .) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+  {{- end }}
   {{- with .Values.postgresql.parameters }}
   postgresql:
     parameters:
       {{- toYaml . | nindent 6 }}
+  {{- end }}
+  {{- if .Values.users }}
+  {{/*
+  Customer-declared logins as CNPG managed roles. The password NEVER appears
+  here: passwordSecret names the Secret proxcloud wrote (<id>-u-<user>), which is
+  the whole reason values can stay argocd-readable.
+
+  inRoles is how a user reaches a database it does not own — postgres has no
+  "grant on database" CR, so proxcloud turns "user u may use database d" into
+  membership of d's owner role (internal/cloud/dbaas/values.go usersValues).
+  ensure: present + a role dropped from the list simply stops being managed;
+  CNPG does not DROP roles, which is the safe default for objects that may own
+  data.
+  */}}
+  managed:
+    roles:
+      {{- range .Values.users }}
+      - name: {{ .name }}
+        ensure: present
+        login: true
+        passwordSecret:
+          {{- /* '_' -> '-': idents allow underscores, Secret names do not
+               (internal/cloud/dbaas/config.go K8sName — change both together). */}}
+          name: {{ include "database-cluster.name" $ }}-u-{{ .name | replace "_" "-" }}
+        {{- with .inRoles }}
+        inRoles:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- end }}
+  {{- end }}
+  {{- if include "database-cluster.backupEnabled" . }}
+  {{/* barman-cloud plugin: isWALArchiver is what turns on continuous WAL
+       archiving, i.e. what makes point-in-time recovery possible at all.
+       The ObjectStore it names is rendered by templates/postgresql/backup.yaml. */}}
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: {{ include "database-cluster.name" . }}-store
+  {{- end }}
+  {{- if .Values.restore.sourceId }}
+  {{/*
+  RECOVERY, not an empty datadir. CNPG never restores in place: a recovered
+  database is always a NEW Cluster reading the SOURCE's object-store folder,
+  which is exactly why restore lives on the create path.
+
+  serverName on the external cluster MUST be the SOURCE's id — barman looks for
+  base backups under that name, and getting it wrong finds nothing rather than
+  failing loudly. The recovery store is a SEPARATE ObjectStore CR from the one
+  this database backs up to (restore.yaml), so recovering never writes into the
+  folder it is reading.
+  */}}
+  bootstrap:
+    recovery:
+      source: restore-origin
+      {{- with .Values.restore.targetTime }}
+      recoveryTarget:
+        targetTime: {{ . | quote }}
+      {{- end }}
+  externalClusters:
+    - name: restore-origin
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: {{ include "database-cluster.name" . }}-restore-store
+          serverName: {{ .Values.restore.sourceId }}
   {{- end }}
   storage:
     size: {{ .Values.storage.sizeGi }}Gi

@@ -1,0 +1,10 @@
+# ProxCloud sandbox ICMP anti-spoof guard (installer stage 55, docs/managed-sandbox.md §2.6).
+[Unit]
+Description=ProxCloud sandbox ICMP anti-spoof guard
+After=pve-firewall.service network.target
+Wants=pve-firewall.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/proxcloud/sandbox-icmp-guard.env
+ExecStart=/usr/local/sbin/sandbox-icmp-guard.py

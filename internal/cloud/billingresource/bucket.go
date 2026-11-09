@@ -8,11 +8,14 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/billingapi"
 )
 
-// BucketProvider maps a BUCKET (ceph-s3 object storage) → a "bucket" BillingResource.
+// BucketProvider maps a BUCKET (RGW or RustFS) → a "bucket" BillingResource.
 // The sync caches each bucket FLAT (bucketName/sizeInBytes/objectCount — providers.BucketProvider),
 // so the billable quantity is the stored size: `size_gb` is ceil'd to a whole GB so a rule priced
 // per-GB (like the volume rule) charges at least one unit for any non-empty bucket, and
 // `existence` pricing keeps working for a flat per-bucket fee.
+//
+// BILL-BASIS: a rule picks what it bills through its attribute: `size_gb` = used (the default in the seed),
+// `quota_gb` = the allocated quota, or the used size for a bucket that has no quota.
 type BucketProvider struct{}
 
 func NewBucketProvider() *BucketProvider { return &BucketProvider{} }
@@ -27,6 +30,7 @@ func (p *BucketProvider) GetBillingInformation(_ context.Context, _ billingapi.B
 	values := map[string]any{
 		"display_name": name,
 		"size_gb":      sizeGB(cr.Data["sizeInBytes"]),
+		"quota_gb":     quotaGB(cr.Data["quotaBytes"], cr.Data["sizeInBytes"]),
 		"object_count": numOf(cr.Data["objectCount"]),
 	}
 	return []*billingapi.BillingResource{{
@@ -43,7 +47,7 @@ func bucketType() *billingapi.BillingResourceType {
 		return billingapi.ResourceAttribute{Name: nm, Type: "number"}
 	}
 	return &billingapi.BillingResourceType{ResourceType: "bucket", Attributes: []billingapi.ResourceAttribute{
-		{Name: "display_name", Type: "string"}, n("size_gb"), n("object_count"),
+		{Name: "display_name", Type: "string"}, n("size_gb"), n("quota_gb"), n("object_count"),
 	}}
 }
 
@@ -54,6 +58,14 @@ func sizeGB(v any) float64 {
 		return 0
 	}
 	return math.Ceil(b / (1024 * 1024 * 1024))
+}
+
+// quotaGB is the allocated size in whole GB, falling back to the used size when no quota is set.
+func quotaGB(quota, used any) float64 {
+	if g := sizeGB(quota); g > 0 {
+		return g
+	}
+	return sizeGB(used)
 }
 
 // numOf reads a numeric doc value (JSON round-trips numbers as float64; bson may keep ints).

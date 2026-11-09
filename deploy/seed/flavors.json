@@ -1,0 +1,5 @@
+[
+  {"slug": "s1-small",  "name": "Small (1 vCPU, 1 GB)",   "vcpus": 1, "ramMb": 1024, "diskGb": 10, "active": true, "orderNumber": 10},
+  {"slug": "s2-medium", "name": "Medium (2 vCPU, 2 GB)",  "vcpus": 2, "ramMb": 2048, "diskGb": 20, "active": true, "orderNumber": 20},
+  {"slug": "s4-large",  "name": "Large (4 vCPU, 8 GB)",   "vcpus": 4, "ramMb": 8192, "diskGb": 40, "active": true, "orderNumber": 30}
+]

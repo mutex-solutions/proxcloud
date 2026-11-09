@@ -1,0 +1,20 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: argocd
+  namespace: kube-system
+spec:
+  chart: oci://ghcr.io/argoproj/argo-helm/argo-cd
+  version: {{ pc_ver.argocd_chart }}
+  targetNamespace: argocd
+  createNamespace: true
+  valuesContent: |-
+    dex:
+      enabled: false
+    notifications:
+      enabled: false
+    applicationSet:
+      enabled: false
+    configs:
+      params:
+        server.insecure: true

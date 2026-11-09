@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
+	"github.com/mutex-solutions/proxcloud/internal/platform/project"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -33,8 +35,8 @@ import (
 //   - GET    /project/{id}/resources/counts            (cache aggregation — already live)
 //
 //   - DELETE /project/{id}      (schedule deletion → CanDelete pre-check → flip SCHEDULED_FOR_DELETION)
-//   - DELETE /project/{id}/now  (delete now → flip DELETE_IN_PROGRESS → async Teardown cascade
-//                                = project.Handler.TeardownProject: cloud resources + provider tenant → DELETED)
+//   - DELETE /project/{id}/now  (delete now → flag DELETE_IN_PROGRESS with a past schedule → the deletion job's
+//                                next sweep runs project.Handler.TeardownProject and retries it until it is clean)
 //
 // IN SCOPE (no cloud, pure datastore): GET /project/{id}/members, PUT /project/{id} (field-set),
 // DELETE /project/{id}/cancel (status flip to ENABLED), and the no-cloud branches of
@@ -439,27 +441,36 @@ func (h *Handler) projectUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(existing)
-	// Overwrite name / billingProfileId / organizationId — drop old values first so an
-	// omitted (null) field is cleared. A blank value persists as cleared (omitted on read).
-	for _, k := range []string{"name", "billingProfileId", "organizationId"} {
-		delete(existing, k)
+	if h.projectCloud != nil && h.projectCloud.HoldForMove != nil {
+		disable, err := h.projectCloud.HoldForMove(r.Context(), id, req.BillingProfileId, req.OrganizationId)
+		if httpx.WriteError(w, err) {
+			return
+		}
+		// Not pinned: the project comes up on the next open once it is on a profile that pays.
+		if disable && !h.setProjectStatus(w, r, id, "ENABLED", pgdoc.M{"status": "DISABLED"}) {
+			return
+		}
 	}
-	if req.Name != "" {
-		existing["name"] = req.Name
+	// Only these three fields: a replace of the whole doc from this read would put back a status changed since. An omitted
+	// (null) or blank field is cleared.
+	set, unset := pgdoc.M{}, pgdoc.M{}
+	for k, v := range map[string]string{"name": req.Name, "billingProfileId": req.BillingProfileId, "organizationId": req.OrganizationId} {
+		if v != "" {
+			set[k] = v
+		} else {
+			unset[k] = nil
+		}
 	}
-	if req.BillingProfileId != "" {
-		existing["billingProfileId"] = req.BillingProfileId
-	}
-	if req.OrganizationId != "" {
-		existing["organizationId"] = req.OrganizationId
-	}
-	if err := h.repo.ReplaceDoc(r.Context(), projectCollection, id, existing); httpx.WriteError(w, err) {
+	if _, err := h.repo.SetAndUnsetFields(r.Context(), projectCollection, id, set, unset); httpx.WriteError(w, err) {
 		return
 	}
 	// UPDATE PROJECT: field-level diff (the middleware diffs before vs after).
-	after, _ := h.repo.FindDoc(r.Context(), projectCollection, id)
+	after, err := h.repo.FindDoc(r.Context(), projectCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
 	audit.RecordSnapshots(r.Context(), before, after)
-	httpx.OK(w, shapeDoc(existing))
+	httpx.OK(w, shapeDoc(after))
 }
 
 // projectUpdateReq is the project-update request body. `data` + `customInfo` are accepted on the
@@ -550,13 +561,22 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current, _ := existing["status"].(string)
-	if current == status {
+	pinned, _ := existing["disabledByOperator"].(bool)
+	// A DISABLED only billing holds can still be pinned, so a resume leaves it.
+	if current == status && (status != "DISABLED" || pinned) {
 		// "Project is already in desired status " (trailing space).
 		httpx.WriteError(w, httpx.BadRequest("Project is already in desired status "))
 		return
 	}
 	switch status {
 	case "ENABLED", "DISABLED":
+		action := project.ActionEnable
+		if status == "DISABLED" {
+			action = project.ActionDisable
+		}
+		if httpx.WriteError(w, project.CheckTransition(action, current)) {
+			return
+		}
 		if h.projectCloud == nil || h.projectCloud.PauseServers == nil {
 			// Cloud leg unwired (tests / degraded boot) → 501; the status is set only after the
 			// cloud call, so nothing persists.
@@ -571,14 +591,14 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 			if err := h.projectCloud.PauseServers(r.Context(), id, true); httpx.WriteError(w, err) {
 				return
 			}
-			if _, err := h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"status": status}); httpx.WriteError(w, err) {
+			if !h.setProjectStatus(w, r, id, current, pgdoc.M{"status": status, "disabledByOperator": true}) {
 				return
 			}
 		} else {
 			// Resume runs asynchronously: the datastore flip persists immediately; PVE resume + the
 			// follow-up project sync happen on a worker thread. Flip first so the async whole-project
 			// sync sees ENABLED.
-			if _, err := h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"status": status}); httpx.WriteError(w, err) {
+			if !h.setProjectStatus(w, r, id, current, pgdoc.M{"status": status, "disabledByOperator": false}) {
 				return
 			}
 			ops := h.projectCloud
@@ -600,15 +620,23 @@ func (h *Handler) projectUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		httpx.OK(w, shapeDoc(after))
 		return
 	default:
-		// SCHEDULED_FOR_DELETION / DELETE_IN_PROGRESS: no cloud branch; saves with the status
-		// unchanged (the if/else never matches, so the status is never changed). Faithful: save the
-		// doc as-is and return it. (No status field change persists.)
-		if err := h.repo.ReplaceDoc(r.Context(), projectCollection, id, existing); httpx.WriteError(w, err) {
-			return
-		}
-		// TODO(audit): write an UPDATE PROJECT {status} admin audit event.
-		httpx.OK(w, shapeDoc(existing))
+		httpx.WriteError(w, httpx.BadRequest("Use the project's delete and cancel endpoints for its deletion"))
 	}
+}
+
+// setProjectStatus writes a status change decided on a read of status expect. False = the answer went out.
+func (h *Handler) setProjectStatus(w http.ResponseWriter, r *http.Request, id, expect string, set pgdoc.M) bool {
+	ok, err := h.repo.SetFieldsIfStatus(r.Context(), projectCollection, id, expect, set)
+	if err != nil {
+		slog.Error("admin project status write", "project", id, "err", err)
+		httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, "internal.error")
+		return false
+	}
+	if !ok {
+		httpx.WriteError(w, httpx.NewError(http.StatusConflict, http.StatusConflict, "The project changed meanwhile. Try again"))
+		return false
+	}
+	return true
 }
 
 func suspendResumeOp(status string) string {
@@ -632,9 +660,8 @@ func isValidProjectStatus(s string) bool {
 // projectScheduleDeletion schedules a project for deletion (DELETE /{id}?cascade): load-or-404 then
 // run a CLOUD pre-check (canDelete) BEFORE flipping the status to
 // SCHEDULED_FOR_DELETION. Because the cloud pre-check gates the persisted flip, when unwired we do
-// NOT flip the status (it wouldn't if the pre-check failed). The already-scheduled fast path
-// (status already SCHEDULED_FOR_DELETION / DELETE_IN_PROGRESS) returns the project WITHOUT touching
-// the cloud — that branch is persisted-safe (no-op) and returns the project.
+// NOT flip the status (it wouldn't if the pre-check failed). The already-scheduled fast path returns
+// the project WITHOUT touching the cloud. DELETE_IN_PROGRESS and DELETED are refused.
 func (h *Handler) projectScheduleDeletion(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectDeletePerm) {
 		return
@@ -645,11 +672,14 @@ func (h *Handler) projectScheduleDeletion(w http.ResponseWriter, r *http.Request
 		return
 	}
 	current, _ := existing["status"].(string)
-	if current == "SCHEDULED_FOR_DELETION" || current == "DELETE_IN_PROGRESS" {
+	if current == project.StatusScheduledForDeletion {
 		// Already scheduled → no-op (skip the cloud check + the save) and return the project
 		// unchanged. Pure read-back, no cloud.
 		// TODO(audit): write a DELETE PROJECT scheduled=true admin audit event.
 		httpx.OK(w, shapeDoc(existing))
+		return
+	}
+	if httpx.WriteError(w, project.CheckTransition(project.ActionSchedule, current)) {
 		return
 	}
 	// A live cloud pre-check gating the flip. Unwired (tests / degraded boot) → the original 501,
@@ -664,49 +694,48 @@ func (h *Handler) projectScheduleDeletion(w http.ResponseWriter, r *http.Request
 	}
 	// Pre-check passed → flip SCHEDULED_FOR_DELETION + stamp scheduledForDeletionAt.
 	now := time.Now().UTC()
-	if _, err := h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"status": "SCHEDULED_FOR_DELETION", "scheduledForDeletionAt": now}); httpx.WriteError(w, err) {
+	if !h.setProjectStatus(w, r, id, current, pgdoc.M{"status": project.StatusScheduledForDeletion, "statusBeforeDeletion": current, "scheduledForDeletionAt": now}) {
 		return
 	}
-	existing["status"] = "SCHEDULED_FOR_DELETION"
+	existing["status"] = project.StatusScheduledForDeletion
 	existing["scheduledForDeletionAt"] = now
 	// TODO(audit): write a DELETE PROJECT scheduled=true admin audit event.
 	httpx.OK(w, shapeDoc(existing))
 }
 
-// projectDeleteNow deletes a project immediately (DELETE /{id}/now): load-or-404, status→DELETE_IN_PROGRESS
-// (persisted), then dispatches the async cloud teardown (unwired → 501 before the flip).
+// projectDeleteNow flags a project for immediate deletion (DELETE /{id}/now): load-or-404, then the same flag a client's
+// delete-now sets, so the deletion job does the teardown on its next sweep. A restart or a failed pass cannot strand the
+// project: what the job selects is the persisted flag, not a worker in this process. Unwired → 501 before any write.
 func (h *Handler) projectDeleteNow(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectDeletePerm) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	existing, ok := h.findProjectOr404(w, r, id)
+	before, ok := h.findProjectOr404(w, r, id)
 	if !ok {
 		return
 	}
-	// The async cloud teardown is unwired (tests) → the original 501 BEFORE
-	// the status flip (so a degraded boot never orphans a project in DELETE_IN_PROGRESS with no job).
-	if h.projectCloud == nil || h.projectCloud.Teardown == nil {
+	if h.projectCloud == nil || h.projectCloud.DeleteNow == nil {
 		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 			"project deletion (cloud teardown) not implemented"))
 		return
 	}
-	// status=DELETE_IN_PROGRESS, persisted (the faithful effect before dispatching the teardown).
-	if _, err := h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"status": "DELETE_IN_PROGRESS"}); httpx.WriteError(w, err) {
+	if err := h.projectCloud.DeleteNow(r.Context(), id); httpx.WriteError(w, err) {
 		return
 	}
-	existing["status"] = "DELETE_IN_PROGRESS"
-	// Dispatch the async cloud cascade (fire-and-forget; deletes resources + tenant → marks DELETED).
-	if err := h.projectCloud.Teardown(r.Context(), id); httpx.WriteError(w, err) {
+	updated, err := h.repo.FindDoc(r.Context(), projectCollection, id)
+	if httpx.WriteError(w, err) {
 		return
 	}
-	// TODO(audit): write a DELETE PROJECT scheduled=false admin audit event.
-	httpx.OK(w, shapeDoc(existing))
+	// The middleware's DELETE PROJECT event carries the status flip to DELETE_IN_PROGRESS, which is
+	// what tells an immediate delete from a scheduled one in the audit log.
+	audit.RecordSnapshots(r.Context(), maps.Clone(before), updated)
+	httpx.OK(w, shapeDoc(updated))
 }
 
 // projectCancelDeletion cancels a scheduled deletion (DELETE /{id}/cancel): load-or-404,
-// 400 if DELETE_IN_PROGRESS ("Project is deleting. Cannot cancel deletion"), else status→ENABLED +
-// clear scheduledForDeletionAt, save, return the project. Pure datastore (no cloud). The 404 here uses
+// 400 unless SCHEDULED_FOR_DELETION, else back to the status it held before + clear
+// scheduledForDeletionAt, save, return the project. Pure datastore (no cloud). The 404 here uses
 // the "The project with id %s was not found. " message.
 func (h *Handler) projectCancelDeletion(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, projectDeletePerm) {
@@ -722,13 +751,12 @@ func (h *Handler) projectCancelDeletion(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	current, _ := existing["status"].(string)
-	if current == "DELETE_IN_PROGRESS" {
-		httpx.WriteError(w, httpx.BadRequest("Project is deleting. Cannot cancel deletion"))
+	if httpx.WriteError(w, project.CheckTransition(project.ActionCancel, current)) {
 		return
 	}
-	// status=ENABLED, scheduledForDeletionAt cleared. SetFields sets status; clear the watermark by
-	// setting it to nil (omitted on read).
-	if _, err := h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"status": "ENABLED", "scheduledForDeletionAt": nil}); httpx.WriteError(w, err) {
+	// Clear the watermark by setting it to nil (omitted on read).
+	held, _ := existing["statusBeforeDeletion"].(string)
+	if !h.setProjectStatus(w, r, id, current, pgdoc.M{"status": project.StatusAfterCancel(held), "statusBeforeDeletion": "", "scheduledForDeletionAt": nil}) {
 		return
 	}
 	// Re-read so the response reflects the persisted flip (returns the saved project).

@@ -1,0 +1,29 @@
+# OPTIONAL: default rotation is OFF. Customize all resourceNames before applying.
+# On the services (management) cluster: credential saved ONLY in encrypted
+# provider secret.rotationKubeconfig. Never deliver it to sandbox workers.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: sandbox-rotation, namespace: pc-sandbox}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: sandbox-rotation, namespace: pc-sandbox}
+rules:
+  - apiGroups: [cluster.x-k8s.io]
+    resources: [machinedeployments]
+    resourceNames: [pc-sandbox-sandbox-worker1, pc-sandbox-sandbox-worker2]
+    verbs: [get, patch]
+  - apiGroups: [cluster.x-k8s.io]
+    resources: [machines]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: sandbox-rotation, namespace: pc-sandbox}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: sandbox-rotation}
+subjects: [{kind: ServiceAccount, name: sandbox-rotation, namespace: pc-sandbox}]
+# Separately on the SANDBOX cluster, grant its portal SA get/list/patch nodes
+# only when rotation is enabled. This is intentionally NOT in default rbac.yaml.
+# The application verifies protected worker labels and CAPI nodeRef UID before
+# cordoning; an operator should additionally restrict nodes via resourceNames if
+# static node names are available. No nodes/proxy, pods/eviction or nodes delete.

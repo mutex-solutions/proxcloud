@@ -2,6 +2,7 @@
 // Body: name / imageId (project template) / flavorId / networkInterfaces:[{uuid, fixedIp?}] /
 // keyName / adminPass / userData / securityGroupNames / rootVolume:{sizeGiB,type} / dataVolumes:[{sizeGiB,type}].
 import { useMemo, useState } from "react"
+import { isValidServerName, SERVER_NAME_RULE } from "@/lib/server-name"
 import { Link, useNavigate } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
@@ -21,12 +22,13 @@ import { StatusBadge } from "@/components/status-badge"
 import { Textarea } from "@/components/ui/textarea"
 import { apiFetch, type CloudScope } from "@/lib/api"
 import {
-  useFlavorCategories, useImageGroups, useLocations, useProject, useProjectGpuCapacity, useProjectId,
+  useCloudList, useFlavorCategories, useImageGroups, useLocations, useProject, useProjectGpuCapacity, useProjectId,
   useProjectQuota, useUIMenu,
 } from "@/lib/hooks"
 import type { FlavorCategory, ImageGrouping } from "@/lib/hooks"
 import { gpuCapacityViolations, gpuFromFlavor, serverQuotaViolations, volumeBatchQuotaViolations } from "@/lib/quota"
 import type { CloudResource, Location } from "@/lib/types"
+import { isObjectProvider } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { isPrivateNetwork } from "../network/NetworksPage"
 
@@ -98,7 +100,7 @@ type Flavor = {
   }
 }
 
-type VolumeType = { id?: string; name: string; displayName?: string }
+type VolumeType = { id?: string; name: string; displayName?: string; default?: boolean; extra_specs?: { bootDisk?: boolean } }
 type DataVolumeDraft = { id: number; sizeGiB: number; type: string }
 
 const gb = (bytes?: number) => (bytes ? (bytes / 1073741824).toFixed(2) : "0.00")
@@ -114,23 +116,6 @@ function imageMinimumDisk(image?: TemplateImage): number {
 function rootDefaultDisk(flavor?: Flavor, image?: TemplateImage): number {
   const flavorDisk = Number(flavor?.data?.disk ?? 0)
   return Math.max(imageMinimumDisk(image), Number.isFinite(flavorDisk) ? flavorDisk : 0)
-}
-
-// cloudInitUser builds a #cloud-config that creates a sudo login user with a password and enables
-// password SSH — the reliable way to do username+password login across images. JSON.stringify quotes
-// each value as a YAML double-quoted scalar so special characters can't break the document.
-function cloudInitUser(username: string, password: string): string {
-  return [
-    "#cloud-config",
-    "ssh_pwauth: true",
-    "users:",
-    "  - default",
-    `  - name: ${JSON.stringify(username)}`,
-    "    lock_passwd: false",
-    "    shell: /bin/bash",
-    "    sudo: 'ALL=(ALL) NOPASSWD:ALL'",
-    `    plain_text_passwd: ${JSON.stringify(password)}`,
-  ].join("\n")
 }
 
 // Collection-level cloud action (POST /project/{pid}/cloud/action → {result}).
@@ -159,7 +144,7 @@ export default function CreateServerPage() {
     (location) =>
       location.serviceId &&
       location.region &&
-      location.provider !== "ceph-s3" &&
+      !isObjectProvider(location.provider) &&
       (!location.resourceTypes || location.resourceTypes.includes("SERVER")),
   )
   const locOf = (l: Location) => `${l.serviceId}/${l.region}`
@@ -195,7 +180,21 @@ export default function CreateServerPage() {
     [flavors.data],
   )
   const flavorSections = useMemo(() => buildFlavorSections(bootableFlavors, flavorCats.data ?? []), [bootableFlavors, flavorCats.data])
-  const imageSections = useMemo(() => buildImageSections(images.data ?? [], imageGroups.data), [images.data, imageGroups.data])
+  // The project's own images (made from a server) are cloned by their template id.
+  const { data: ownImages } = useCloudList(pid, "IMAGE")
+  const projectImages = useMemo<TemplateImage[]>(
+    () =>
+      (ownImages ?? [])
+        .filter((r) => r.externalId)
+        .map((r) => ({ ...(r.data?.image as Record<string, unknown>), id: r.externalId }) as TemplateImage),
+    [ownImages],
+  )
+  const allImages = useMemo<TemplateImage[]>(() => [...(images.data ?? []), ...projectImages], [images.data, projectImages])
+  // Curated groups only hold the catalog, so the project's images get a section of their own.
+  const imageSections = useMemo(() => {
+    const catalog = images.data?.length ? buildImageSections(images.data, imageGroups.data) : []
+    return projectImages.length ? [...catalog, { label: "Your images", items: projectImages }] : catalog
+  }, [images.data, imageGroups.data, projectImages])
   const networks = useQuery({
     queryKey: ["cloud", pid, "NETWORK", scope?.serviceId, scope?.region],
     queryFn: () =>
@@ -225,7 +224,10 @@ export default function CreateServerPage() {
   const [rootVolumeType, setRootVolumeType] = useState("")
   const [dataVolumes, setDataVolumes] = useState<DataVolumeDraft[]>([])
   const [netIds, setNetIds] = useState<string[]>([])
-  const [fixedIps, setFixedIps] = useState<Record<string, string>>({}) // networkExtId → requested fixed IP
+  const [subnet, setSubnet] = useState("")
+  const [spreadGroup, setSpreadGroup] = useState("")
+  const [spreadStrict, setSpreadStrict] = useState(false)
+  const [metadata, setMetadata] = useState<Record<string, string>>({})
   const [keyName, setKeyName] = useState("") // "" = no key pair
   const [loginMethod, setLoginMethod] = useState<"key" | "password">("key")
   const [username, setUsername] = useState("")
@@ -234,10 +236,25 @@ export default function CreateServerPage() {
   const [sgNames, setSgNames] = useState<string[]>([])
   const [name, setName] = useState("")
 
-  const selectedImage = images.data?.find((image) => String(image.id) === imageId)
+  // Admin-defined instance metadata options a tenant can fill in (reach the guest through the seed).
+  const metadataOptions = useQuery({
+    queryKey: ["instance-metadata-options", pid, scope?.serviceId, scope?.region],
+    queryFn: () =>
+      apiFetch<Array<{ key: string; displayName?: string; description?: string; userEditable?: boolean; options?: Array<{ value?: string; displayName?: string }> }>>(
+        `/project/${pid}/instance-metadata-options`,
+        { cloud: scope },
+      ),
+    enabled: !!pid && !!scope && features.has("userData"),
+  })
+  const editableMetadata = (metadataOptions.data ?? []).filter((o) => o.userEditable)
+  const selectedImage = allImages.find((image) => String(image.id) === imageId)
   const selectedFlavor = bootableFlavors.find((flavor) => flavor.externalId === flavorId)
   const minimumRootSizeGiB = imageMinimumDisk(selectedImage)
-  const availableVolumeTypes = useMemo(() => volumeTypes.data ?? [], [volumeTypes.data])
+  // A profile that refuses boot disks (HDD capacity storage) is not offered for the boot volume.
+  const availableVolumeTypes = useMemo(
+    () => (volumeTypes.data ?? []).filter((type) => type.extra_specs?.bootDisk !== false),
+    [volumeTypes.data],
+  )
   const soleVolumeType = availableVolumeTypes.length === 1 ? availableVolumeTypes[0] : undefined
   const availableVolumeTypeNames = useMemo(
     () => new Set(availableVolumeTypes.map((type) => type.name)),
@@ -245,7 +262,9 @@ export default function CreateServerPage() {
   )
   const resolveVolumeType = (type: string) =>
     soleVolumeType?.name || (availableVolumeTypeNames.has(type) ? type : "")
-  const selectedRootVolumeType = resolveVolumeType(rootVolumeType)
+  // Nothing picked yet: the provider's default profile, when it takes boot disks.
+  const defaultVolumeType = availableVolumeTypes.find((type) => type.default)?.name ?? ""
+  const selectedRootVolumeType = resolveVolumeType(rootVolumeType || defaultVolumeType)
   // A provider without boot-time data volumes never receives (or quota-checks) stale drafts.
   const resolvedDataVolumes = (features.has("createDataVolumes") ? dataVolumes : []).map((volume) => ({
     ...volume,
@@ -307,14 +326,9 @@ export default function CreateServerPage() {
       if (latestViolations.length > 0) {
         throw new Error(latestViolations.map((violation) => violation.message).join(" "))
       }
-      // Password login with a username creates that user via cloud-init (reliable on any cloud-init
-      // image); the generated user-data wins over a manually-typed one. Without a username, fall back
-      // to adminPass on the image's default account.
-      const genUserData =
-        userDataSupported && loginMethod === "password" && username.trim() && password
-          ? cloudInitUser(username.trim(), password)
-          : ""
-      const finalUserData = userDataSupported ? genUserData || userData : ""
+      // Password login with a username creates that user next to the image's default account. The API
+      // hashes it, so the password itself never sits on the server's seed.
+      const finalUserData = userDataSupported ? userData : ""
       return apiFetch<CloudResource>(`/project/${pid}/cloud`, {
         method: "POST",
         cloud: scope,
@@ -329,11 +343,17 @@ export default function CreateServerPage() {
               sizeGiB: volume.sizeGiB,
               type: volume.type,
             })),
-            networkInterfaces: netIds.map((uuid) =>
-              fixedIps[uuid]?.trim() ? { uuid, fixedIp: fixedIps[uuid].trim() } : { uuid },
-            ),
+            networkInterfaces: netIds.map((uuid) => ({ uuid, ...(subnet ? { subnet } : {}) })),
+            ...(features.has("spreadGroups") && spreadGroup.trim()
+              ? { spreadGroup: spreadGroup.trim(), spreadStrict }
+              : {}),
+            ...(Object.values(metadata).some(Boolean)
+              ? { metadata: Object.fromEntries(Object.entries(metadata).filter(([, v]) => v)) }
+              : {}),
             ...(loginMethod === "key" && keyName ? { keyName } : {}),
-            ...(loginMethod === "password" && !genUserData && password ? { adminPass: password } : {}),
+            ...(loginMethod === "password" && password
+              ? { adminPass: password, ...(username.trim() ? { adminUser: username.trim() } : {}) }
+              : {}),
             ...(finalUserData.trim() ? { userData: finalUserData } : {}),
             ...(sgNames.length ? { securityGroupNames: sgNames } : {}),
           },
@@ -353,7 +373,7 @@ export default function CreateServerPage() {
   const ready =
     !!scope && !!imageId && !!selectedFlavor && availableVolumeTypes.length > 0 &&
     !!selectedRootVolumeType && rootSizeValid && dataVolumesValid &&
-    netIds.length > 0 && !!name.trim()
+    netIds.length > 0 && isValidServerName(name.trim())
 
   // What still blocks Create — shown next to the disabled button so nobody
   // has to scroll back up hunting for the unfinished step.
@@ -366,6 +386,7 @@ export default function CreateServerPage() {
     !dataVolumesValid && "valid data volume settings",
     netIds.length === 0 && "a network",
     !name.trim() && "a name",
+    !!name.trim() && !isValidServerName(name.trim()) && "a valid name",
   ].filter((x): x is string => !!x)
 
   if (locations.isLoading) {
@@ -422,7 +443,6 @@ export default function CreateServerPage() {
                       setRootVolumeType("")
                       setDataVolumes([])
                       setNetIds([])
-                      setFixedIps({})
                       setKeyName("")
                       setSgNames([])
                     }}
@@ -438,8 +458,8 @@ export default function CreateServerPage() {
           <Step n={2} title="Image">
             {images.isLoading || imageGroups.isLoading ? (
               <Skeleton className="h-40" />
-            ) : !images.data?.length ? (
-              <p className="text-sm text-muted-foreground">No public images available.</p>
+            ) : !allImages.length ? (
+              <p className="text-sm text-muted-foreground">No images available.</p>
             ) : (
               <div className="grid max-h-96 gap-4 overflow-y-auto pr-1">
                 {imageSections.map((sec) => (
@@ -664,7 +684,7 @@ export default function CreateServerPage() {
                             {
                               id: Date.now() + volumes.length,
                               sizeGiB: 10,
-                              type: soleVolumeType?.name || "",
+                              type: soleVolumeType?.name || defaultVolumeType,
                             },
                           ])
                         }
@@ -788,21 +808,28 @@ export default function CreateServerPage() {
                         <Checkbox
                           checked={checked}
                           disabled={!ext}
-                          onCheckedChange={(v) =>
-                            setNetIds((ids) => (v === true ? [...ids, ext] : ids.filter((x) => x !== ext)))
-                          }
+                          onCheckedChange={(v) => {
+                            setNetIds(v === true ? [ext] : [])
+                            setSubnet("")
+                          }}
                         />
                         <span className="font-medium">{(n.data?.network?.name as string) ?? n.name ?? n.id}</span>
                         <span className="truncate font-mono text-xs text-muted-foreground">{ext}</span>
                       </label>
-                      {checked ? (
-                        <Input
-                          className="h-8 w-44 font-mono text-xs"
-                          value={fixedIps[ext] ?? ""}
-                          onChange={(e) => setFixedIps((m) => ({ ...m, [ext]: e.target.value }))}
-                          placeholder="Fixed IP (optional)"
-                        />
-                      ) : null}
+                      {checked && ((n.data?.network?.subnets as string[] | undefined)?.length ?? 0) > 1 && (
+                        <Select value={subnet} onValueChange={setSubnet}>
+                          <SelectTrigger className="w-56" aria-label="Subnet">
+                            <SelectValue placeholder="First subnet" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {((n.data?.network?.subnets ?? []) as string[]).map((c) => (
+                              <SelectItem key={c} value={c}>
+                                {c}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      )}
                     </div>
                   )
                 })}
@@ -906,6 +933,66 @@ export default function CreateServerPage() {
                 </div>
               )}
 
+              {features.has("spreadGroups") && (
+                <div className="grid max-w-md gap-2">
+                  <Label htmlFor="spread-group">Spread group (optional)</Label>
+                  <Input
+                    id="spread-group"
+                    value={spreadGroup}
+                    onChange={(e) => setSpreadGroup(e.target.value)}
+                    placeholder="web"
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Servers of one group are placed on different nodes where possible, at create time only.
+                  </p>
+                  <label className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      checked={spreadStrict}
+                      disabled={!spreadGroup.trim()}
+                      onCheckedChange={(v) => setSpreadStrict(v === true)}
+                    />
+                    Refuse to create rather than share a node
+                  </label>
+                </div>
+              )}
+
+              {editableMetadata.length > 0 && (
+                <div className="grid max-w-md gap-2">
+                  <Label>Instance metadata (optional)</Label>
+                  {editableMetadata.map((o) => (
+                    <div key={o.key} className="grid gap-1">
+                      <Label htmlFor={`md-${o.key}`} className="text-xs text-muted-foreground">
+                        {o.displayName ?? o.key}
+                      </Label>
+                      {o.options?.length ? (
+                        <Select
+                          value={metadata[o.key] ?? ""}
+                          onValueChange={(v) => setMetadata((m) => ({ ...m, [o.key]: v }))}
+                        >
+                          <SelectTrigger id={`md-${o.key}`}>
+                            <SelectValue placeholder="Not set" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {o.options.map((v) => (
+                              <SelectItem key={v.value} value={v.value ?? ""}>
+                                {v.displayName ?? v.value}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <Input
+                          id={`md-${o.key}`}
+                          value={metadata[o.key] ?? ""}
+                          onChange={(e) => setMetadata((m) => ({ ...m, [o.key]: e.target.value }))}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <div className="grid gap-2">
                 <Label>Security groups</Label>
                 {secgroups.isLoading ? (
@@ -956,7 +1043,9 @@ export default function CreateServerPage() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="my-server"
+                aria-invalid={!!name.trim() && !isValidServerName(name.trim())}
               />
+              {name.trim() && !isValidServerName(name.trim()) ? <p className="text-xs text-destructive">{SERVER_NAME_RULE}</p> : null}
             </div>
           </Step>
 

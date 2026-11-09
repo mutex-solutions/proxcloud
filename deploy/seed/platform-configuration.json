@@ -4,9 +4,7 @@
   "defaultConfiguration": true,
   "branding": {
     "name": "ProxCloud",
-    "logo": "https://proxcloud.example/logo.png",
-    "color": "#0066cc",
-    "faviconUrl": "https://proxcloud.example/favicon.ico"
+    "color": "#0066cc"
   },
   "dateConfiguration": { "dateFormat": "DD/MM/YYYY" },
   "regions": []

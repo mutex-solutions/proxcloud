@@ -21,6 +21,9 @@ func TestToolRegistryIntegrity(t *testing.T) {
 			seen[d.name] = true
 			raw, body := 0, 0
 			for _, p := range d.params {
+				if p.fixed == nil && (p.typ == "" || p.desc == "") {
+					t.Fatalf("%s/%s: param %q needs a type and a description", set.name, d.name, p.name)
+				}
 				switch p.in {
 				case "path", "query":
 				case "body":
@@ -54,6 +57,9 @@ func TestToolAnnotations(t *testing.T) {
 		{toolDef{name: "create_project", method: "POST"}, false, false, false}, // additive
 		{toolDef{name: "update_project", method: "PUT"}, false, false, true},   // idempotent
 		{toolDef{name: "set_project_quota", method: "POST"}, false, false, true},
+		{toolDef{name: "test_object_store", method: "POST"}, true, false, false},
+		{toolDef{name: "restore_server_backup", method: "POST", destructive: true}, false, true, false},
+		{toolDef{name: "set_dns_record", method: "POST", destructive: true}, false, true, true},
 	}
 	for _, c := range cases {
 		a := toolAnnotations(c.d)

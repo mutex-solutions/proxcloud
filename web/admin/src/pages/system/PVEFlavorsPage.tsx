@@ -170,7 +170,7 @@ export default function PVEFlavorsPage() {
             </div>
             <div className="grid grid-cols-3 gap-4">
               <div className="grid gap-2">
-                <Label htmlFor="fl-profile">Storage profile</Label>
+                <Label htmlFor="fl-profile">Default storage profile</Label>
                 <Input id="fl-profile" className="font-mono" value={form.storageProfile ?? ""} onChange={(e) => setForm({ ...form, storageProfile: e.target.value })} placeholder="std" />
               </div>
               <div className="grid gap-2">

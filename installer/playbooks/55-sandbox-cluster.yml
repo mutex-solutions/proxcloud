@@ -1,0 +1,447 @@
+# Stage 55, mode=split with sandbox.enabled: the platform's sandbox cluster (docs/managed-sandbox.md). Its vnet, its own
+# egress address on the exit node, the cluster from the kamaji chart (NodeRestriction on, workers tainted unsecured),
+# then deploy/sandbox-cluster on it. Every step is idempotent. The workers' VM firewall is the portal's sync job's
+# (stage 60 hands it the pool and a nodes-only kubeconfig). Not done here yet: sandbox-proxy, TLS and the public entry
+# (SB4), the `sandbox` provider (SB3). Tenants cannot reach the cluster: the provider kind is refused, no route is mounted.
+- name: Create the sandbox network
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  vars:
+    net: "{{ pc.sandbox.network }}"
+    svc_net: "{{ (pc.services.network.gateway ~ '/' ~ pc.services.network.prefix) if pc.services.network.gateway else '' }}"
+  tasks:
+    - name: Skip unless the sandbox is on
+      ansible.builtin.meta: end_play
+      when: not pc_sandbox_on
+    # The management networks come from PVE at run time; the portal refuses a sandbox subnet overlapping them.
+    - name: Check the sandbox network settings
+      vars:
+        avoid: {services.network: "{{ svc_net }}", network.blocked_cidrs: "{{ pc.network.blocked_cidrs }}", network.public.cidr: "{{ pc.network.public.cidr | default('') }}"}
+        problem: "{{ net | pc_sandbox_net_problem(pc.network.cidr_pool, avoid) }}"
+      ansible.builtin.assert: {that: problem == '', fail_msg: "{{ problem }}", quiet: true}
+    # Tenants reach the services network, so the PVE isolation rules leave it open to the workers too; only the
+    # guardrail keeps a sandbox pod off the control-plane APIs and the database load balancers.
+    - name: Check the guardrail covers the services network
+      vars:
+        problem: "{{ {'services.network': svc_net} | pc_sandbox_guardrail_problem }}"
+      ansible.builtin.assert: {that: problem == '', fail_msg: "{{ problem }}", quiet: true}
+    - name: Check a zone is named on a site with a zone per project
+      ansible.builtin.assert:
+        that: pc.network.isolation != 'evpn' or pc.sandbox.network.zone
+        fail_msg: >-
+          network.isolation is evpn, so there is no shared zone: set sandbox.network.zone to an EVPN zone made for the
+          sandbox alone. A tenant's zone would put the workers in that tenant's VRF.
+        quiet: true
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Check the bootstrap ISO store
+      vars:
+        problem: "{{ pc_storage_rows | pc_boot_iso_problem(pc_sandbox_iso_storage, pc_sandbox_storage) }}"
+      ansible.builtin.assert: {that: problem == '', fail_msg: "sandbox: {{ problem }}", quiet: true}
+    - name: Read the zones and vnets
+      check_mode: false
+      ansible.builtin.uri: {url: "{{ pc_api }}/cluster/sdn/{{ item }}"}
+      loop: [zones, vnets]
+      register: pc_sdn
+    # The portal creates the default zone with the first tenant network, after stage 60: a first install skips the
+    # cluster and says so, and a re-run of this stage (or of make install) builds it.
+    - name: Find the zone
+      ansible.builtin.set_fact:
+        pc_sbx_zone: "{{ pc_sdn.results[0].json.data | selectattr('zone', 'eq', pc_sandbox_zone) | list }}"
+    - name: Skip the sandbox cluster until the zone exists
+      when: pc_sbx_zone | length == 0
+      block:
+        - name: Say why
+          ansible.builtin.debug:
+            msg: >-
+              SKIPPED: EVPN zone {{ pc_sandbox_zone }} does not exist yet. Create a tenant network once (the portal
+              creates the zone), or set sandbox.network.zone to an existing EVPN zone no tenant uses, then run stage
+              55 again.
+        - name: Remember the skip
+          ansible.builtin.set_fact: {pc_sbx_skip: true}
+        - name: Stop here
+          ansible.builtin.meta: end_play
+    - name: Check the zone is EVPN
+      ansible.builtin.assert:
+        that: pc_sbx_zone[0].type == 'evpn'
+        fail_msg: "zone {{ pc_sandbox_zone }} is {{ pc_sbx_zone[0].type }}; the sandbox vnet needs EVPN (routed, SNAT on the exit node)"
+        quiet: true
+    # D14: the sandbox's egress leaves through one exit node with its own address. With several exit nodes and no
+    # primary, PVE spreads the default route over all of them and the address would have to be on each (ARP conflict).
+    - name: Find the exit node that carries the sandbox's SNAT address
+      when: pc_sandbox_own_snat
+      vars:
+        exits: "{{ (pc_sbx_zone[0].exitnodes | default('')).split(',') | map('trim') | select | list }}"
+      ansible.builtin.set_fact:
+        pc_sbx_exit: "{{ pc_sbx_zone[0]['exitnodes-primary'] | default(exits[0] if exits | length == 1 else '') }}"
+    - name: Check the SNAT address can live on one exit node reached over ssh
+      when: pc_sandbox_own_snat
+      ansible.builtin.assert:
+        that:
+          - pc_sbx_exit != ''
+          - pc_sbx_exit in groups['pve'] | default([])
+        fail_msg: >-
+          sandbox.network.snat needs one exit node (or exitnodes-primary) on zone {{ pc_sandbox_zone }}, here
+          '{{ pc_sbx_zone[0].exitnodes | default('') }}', and that node in the inventory group pve with root ssh.
+        quiet: true
+    - name: Check the vnet is ours or free
+      vars:
+        have: "{{ pc_sdn.results[1].json.data | selectattr('vnet', 'eq', net.vnet) | list }}"
+      ansible.builtin.assert:
+        that: have | length == 0 or have[0].zone == pc_sandbox_zone
+        fail_msg: "vnet {{ net.vnet }} exists in zone {{ have[0].zone | default('') }}, not {{ pc_sandbox_zone }}"
+        quiet: true
+    - name: Check no other vnet holds the VNI
+      vars:
+        taken: "{{ pc_sdn.results[1].json.data | rejectattr('vnet', 'eq', net.vnet) | selectattr('tag', 'defined') | map(attribute='tag') | map('string') | select('eq', net.tag | string) | list }}"
+      ansible.builtin.assert:
+        that: taken | length == 0
+        fail_msg: "VNI {{ net.tag }} is taken by another vnet: set sandbox.network.tag to a free one"
+        quiet: true
+    - name: Create the vnet
+      when: pc_sdn.results[1].json.data | selectattr('vnet', 'eq', net.vnet) | list | length == 0
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/cluster/sdn/vnets"
+        method: POST
+        body_format: form-urlencoded
+        # Not an "st:" alias: no project owns it, so the portal's network sync and isolation code leave it alone.
+        body: {vnet: "{{ net.vnet }}", zone: "{{ pc_sandbox_zone }}", tag: "{{ net.tag }}", alias: proxcloud-sandbox}
+      changed_when: true
+      register: pc_vnet_made
+    - name: Read its subnets
+      check_mode: false
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/cluster/sdn/vnets/{{ net.vnet }}/subnets?pending=1"
+        status_code: [200, 500]
+      register: pc_subnets
+    - name: Create the subnet
+      when: pc_subnets.status != 200 or pc_subnets.json.data | selectattr('cidr', 'eq', net.subnet) | list | length == 0
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/cluster/sdn/vnets/{{ net.vnet }}/subnets"
+        method: POST
+        body_format: form-urlencoded
+        # No DHCP: CAPMOX assigns the worker addresses. PVE's SNAT (to the exit node's own address) only with snat:
+        # node; otherwise the next play's rule on the exit node rewrites to sandbox.network.snat.
+        body: {subnet: "{{ net.subnet }}", type: subnet, gateway: "{{ net.gateway }}", snat: "{{ 0 if pc_sandbox_own_snat else 1 }}"}
+      changed_when: true
+      register: pc_subnet_made
+    - name: Note whether PVE's own SNAT has to go off once the sandbox's is in place
+      ansible.builtin.set_fact:
+        pc_sbx_snat_off: >-
+          {{ pc_sandbox_own_snat and pc_subnets.status == 200 and
+             (pc_subnets.json.data | selectattr('cidr', 'eq', net.subnet) | map(attribute='snat') | first | default(0) | int) == 1 }}
+    - name: Apply the SDN change
+      when: pc_vnet_made is changed or pc_subnet_made is changed
+      ansible.builtin.uri: {url: "{{ pc_api }}/cluster/sdn", method: PUT}
+      register: pc_sdn_apply
+      changed_when: true
+    - name: Wait for it
+      when: pc_sdn_apply is changed
+      ansible.builtin.include_tasks: tasks/pve-wait.yml
+      vars: {wait_upid: "{{ pc_sdn_apply.json.data }}", wait_node: "{{ pc_nodes[0] }}"}
+
+# D14: the sandbox's own SNAT address on the exit node, as an ifupdown2 dummy interface whose post-up rule comes before
+# PVE's own SNAT rules (SDN apply reloads the interfaces, this file included). The rule is the only thing that gives
+# the subnet a public source: with it missing the subnet's traffic leaves unrewritten, which an uplink drops.
+- name: Give the sandbox its own egress address
+  hosts: pve
+  gather_facts: false
+  vars:
+    lh: "{{ hostvars.localhost }}"
+    net: "{{ pc.sandbox.network }}"
+  tasks:
+    - name: Skip unless this node carries it
+      ansible.builtin.meta: end_host
+      when: not pc_sandbox_own_snat or lh.pc_sbx_skip | default(false) or inventory_hostname != lh.pc_sbx_exit | default('')
+    - name: Find the uplink
+      ansible.builtin.command: ip -4 -o route get 1.1.1.1
+      register: pc_uplink
+      changed_when: false
+    - name: Check the address is not the node's own
+      vars:
+        own: "{{ pc_uplink.stdout | regex_search('src (\\S+)', '\\1') | first }}"
+      ansible.builtin.assert:
+        that: own != net.snat
+        fail_msg: "sandbox.network.snat {{ net.snat }} is {{ inventory_hostname }}'s own address: the sandbox needs one of its own"
+        quiet: true
+    - name: Write the interface
+      vars:
+        dev: "{{ pc_uplink.stdout | regex_search('dev (\\S+)', '\\1') | first }}"
+        rule: "POSTROUTING -s {{ net.subnet }} -o {{ dev }} -j SNAT --to-source {{ net.snat }}"
+        # Nothing may open a connection to the address: it would put this node's PVE API and ssh on a new (often
+        # public) address, reachable from the internet and from the sandbox. Replies to the SNAT are not NEW.
+        guard: "INPUT -d {{ net.snat }}/32 -m conntrack --ctstate NEW -j DROP"
+      ansible.builtin.copy:
+        dest: /etc/network/interfaces.d/proxcloud-sandbox-snat
+        mode: "0644"
+        content: |
+          # ProxCloud sandbox egress (installer stage 55, docs/managed-sandbox.md): the sandbox subnet leaves with its own address.
+          auto pcsbxsnat
+          iface pcsbxsnat inet static
+              address {{ net.snat }}/32
+              link-type dummy
+              pre-up iptables -C {{ guard }} 2>/dev/null || iptables -I {{ guard }}
+              post-up iptables -t nat -C {{ rule }} 2>/dev/null || iptables -t nat -I {{ rule }}
+              post-down iptables -t nat -D {{ rule }}; iptables -D {{ guard }}
+      # -C first: every SDN apply runs ifreload, which runs post-up again without post-down (lab, PVE 9.2). The guard
+      # goes in pre-up, so the address is never up without it.
+      register: pc_snat_file
+    - name: Bring it up
+      when: pc_snat_file is changed
+      ansible.builtin.shell: ifdown pcsbxsnat 2>/dev/null; ifup pcsbxsnat
+      changed_when: true
+    - name: Check the rule is in
+      ansible.builtin.shell: iptables -t nat -S POSTROUTING | grep -F -- '--to-source {{ net.snat }}' | grep -F -- '-s {{ net.subnet }}'
+      changed_when: false
+    - name: Check nothing can connect to the address
+      ansible.builtin.shell: iptables -S INPUT | grep -F -- '-d {{ net.snat }}/32' | grep -F -- '--ctstate NEW -j DROP'
+      changed_when: false
+
+- name: Turn PVE's own SNAT off for the sandbox subnet
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  tasks:
+    - name: Skip unless it is still on
+      ansible.builtin.meta: end_play
+      when: not pc_sbx_snat_off | default(false) | bool
+    - name: Drop snat from the subnet
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/cluster/sdn/vnets/{{ pc.sandbox.network.vnet }}/subnets/{{ pc_sandbox_zone }}-{{ pc.sandbox.network.subnet | replace('/', '-') }}"
+        method: PUT
+        body_format: form-urlencoded
+        body: {delete: snat}
+      changed_when: true
+    - name: Apply the SDN change
+      ansible.builtin.uri: {url: "{{ pc_api }}/cluster/sdn", method: PUT}
+      register: pc_sdn_apply2
+      changed_when: true
+    - name: Wait for it
+      ansible.builtin.include_tasks: tasks/pve-wait.yml
+      vars: {wait_upid: "{{ pc_sdn_apply2.json.data }}", wait_node: "{{ pc_nodes[0] }}"}
+
+# PVE does not take its own rules out when snat goes off (post-down does not run on a reload), and each SDN apply had
+# added another copy. Left below ours they do nothing; without ours they would hand the subnet the node's address.
+- name: Drop PVE's leftover SNAT rules for the sandbox subnet
+  hosts: pve
+  gather_facts: false
+  vars:
+    lh: "{{ hostvars.localhost }}"
+    net: "{{ pc.sandbox.network }}"
+  tasks:
+    - name: Skip unless this node carries the sandbox's address
+      ansible.builtin.meta: end_host
+      when: not pc_sandbox_own_snat or lh.pc_sbx_skip | default(false) or inventory_hostname != lh.pc_sbx_exit | default('')
+    - name: Delete every SNAT rule of the subnet that is not the sandbox's
+      ansible.builtin.shell: |
+        set -o pipefail
+        iptables -t nat -S POSTROUTING | grep -F -- '-s {{ net.subnet }} ' | grep -- '-j SNAT' | grep -vF -- '--to-source {{ net.snat }}' |
+          sed 's/^-A /-D /' | while read -r r; do iptables -t nat $r; echo "deleted: $r"; done
+      args: {executable: /bin/bash}
+      register: pc_snat_stale
+      changed_when: pc_snat_stale.stdout != ''
+
+# The anti-spoof guard on every node that can host a worker (the whole pool spans the cluster, so every
+# `pve` node). PVE's bridge firewall accepts ICMP error types, and conntrack established/related, before the
+# per-NIC ipfilter and the DROP policy, so a worker can forge their source (docs/managed-sandbox.md §2.6).
+# The guard reads every pool worker's ipfilter from PVE's cluster config and drops any IPv4 frame from a
+# worker's tap whose source is outside it, ahead of PVE's chain; a timer re-runs it so a joined, moved or
+# rebuilt worker is pinned within a minute (well inside its 20-minute unsecured taint). Installed whenever
+# the sandbox is on, before the cluster exists, so the chain is empty until workers do.
+- name: Install the sandbox ICMP anti-spoof guard
+  hosts: pve
+  become: true
+  gather_facts: false
+  vars:
+    lh: "{{ hostvars.localhost }}"
+  tasks:
+    - name: Skip unless the sandbox is on
+      ansible.builtin.meta: end_host
+      when: not pc_sandbox_on
+    - name: Install the guard script
+      ansible.builtin.copy:
+        src: files/sandbox-icmp-guard.py
+        dest: /usr/local/sbin/sandbox-icmp-guard.py
+        mode: "0755"
+      register: pc_icmp_script
+    - name: Make its config directory
+      ansible.builtin.file: {path: /etc/proxcloud, state: directory, mode: "0755"}
+    - name: Write its pool and vnet
+      ansible.builtin.copy:
+        dest: /etc/proxcloud/sandbox-icmp-guard.env
+        mode: "0644"
+        content: |
+          POOL={{ pc.sandbox.pool }}
+          VNET={{ pc.sandbox.network.vnet }}
+      register: pc_icmp_env
+    - name: Install its service and timer
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: "0644"
+      loop:
+        - proxcloud-sandbox-icmp-guard.service
+        - proxcloud-sandbox-icmp-guard.timer
+      register: pc_icmp_units
+    - name: Enable the timer
+      ansible.builtin.systemd_service:
+        name: proxcloud-sandbox-icmp-guard.timer
+        enabled: true
+        state: started
+        daemon_reload: "{{ pc_icmp_units is changed }}"
+    - name: Apply the guard now
+      when: pc_icmp_script is changed or pc_icmp_env is changed or pc_icmp_units is changed
+      ansible.builtin.systemd_service: {name: proxcloud-sandbox-icmp-guard.service, state: started}
+    # The chain may be empty here (no workers yet), so check what keeps it current: the timer, and that the
+    # last run of the guard succeeded.
+    - name: Check the guard chain is installed and its timer runs
+      ansible.builtin.shell: |
+        set -e
+        nft list chain bridge proxcloud-sandbox antispoof >/dev/null
+        systemctl is-active --quiet proxcloud-sandbox-icmp-guard.timer
+        test "$(systemctl show -P Result proxcloud-sandbox-icmp-guard.service)" = success
+      changed_when: false
+
+- name: Build the sandbox cluster
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  vars:
+    kc: k3s kubectl --kubeconfig /root/services.kubeconfig
+    pc_sandbox_token_secret: "{{ lookup('ansible.builtin.file', pc_gen ~ '/token-' ~ pc.sandbox.token) | trim }}"
+  tasks:
+    - name: Skip unless the sandbox is on and its network is there
+      ansible.builtin.meta: end_play
+      when: not pc_sandbox_on or hostvars.localhost.pc_sbx_skip | default(false)
+    - name: Apply the cluster on the services cluster
+      ansible.builtin.command:
+        cmd: "{{ kc }} apply -f -"
+        stdin: "{{ lookup('ansible.builtin.template', 'templates/sandbox-cluster.yml.j2') }}"
+      register: pc_sbx_applied
+      changed_when: pc_sbx_applied.stdout_lines | reject('search', ' unchanged$') | list | length > 0
+      no_log: true
+    # The release gate: a worker's kubelet credential must not reach every Secret of a cluster that runs tenant code.
+    - name: Check NodeRestriction on its control plane
+      ansible.builtin.command: "{{ kc }} -n pc-sandbox get kamajicontrolplane pc-sandbox-kamaji-cp -o jsonpath={.spec.admissionControllers}"
+      register: pc_sbx_adm
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: pc_sbx_adm.rc == 0 and 'NodeRestriction' in pc_sbx_adm.stdout
+    - name: Wait for its admin kubeconfig
+      ansible.builtin.command: "{{ kc }} -n pc-sandbox get secret pc-sandbox-kamaji-cp-admin-kubeconfig -o 'jsonpath={.data.admin\\.conf}'"
+      register: pc_sbx_kc
+      changed_when: false
+      no_log: true
+      retries: 60
+      delay: 10
+      until: pc_sbx_kc.rc == 0 and pc_sbx_kc.stdout != ''
+    - name: Keep the kubeconfig on the mgmt host
+      ansible.builtin.copy:
+        dest: /root/sandbox.kubeconfig
+        content: "{{ pc_sbx_kc.stdout | b64decode }}"
+        mode: "0600"
+      no_log: true
+    - name: Keep the kubeconfig in the site directory
+      ansible.builtin.copy:
+        dest: "{{ pc_gen }}/sandbox.kubeconfig"
+        content: "{{ pc_sbx_kc.stdout | b64decode }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+    # Nodes can register before CNI exists. With customConf, node-setup must
+    # install the chain BEFORE waiting for Ready; its own pods use hostNetwork.
+    - name: Copy the cluster manifests
+      ansible.builtin.copy:
+        src: "{{ pc_repo_root }}/deploy/sandbox-cluster/"
+        dest: /root/sandbox-bundle/
+        mode: preserve
+    # The README's apply order. check-ipv4-only.sh stops the stage before agent-sandbox and the guardrail if IPv6 is on.
+    # The workers join with the proxcloud.io/unsecured taint, which only the portal's sync takes off (after stage 60),
+    # so nothing here waits for a Deployment: the agent-sandbox controller and CoreDNS schedule once a worker is fenced.
+    - name: Apply the runtime, the guardrail and the portal's identity
+      ansible.builtin.shell: |
+        set -euo pipefail
+        out=$(kubectl apply -f cilium-node-config.yaml)
+        case "$out" in *unchanged*) ;; *) kubectl -n kube-system rollout restart ds/cilium ;; esac
+        # Wait for Argo/CAAPH to deliver the desired custom chain mode, not merely
+        # for the OLD Cilium DaemonSet to be healthy. Then restart all old writers.
+        for attempt in $(seq 1 90); do
+          custom=$(kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.custom-cni-conf}' || true)
+          writer=$(kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.write-cni-conf-when-ready}' || true)
+          if [ "$custom" = true ] && [ -z "$writer" ]; then break; fi
+          if [ "$attempt" -eq 90 ]; then echo 'Cilium customConf mode has not converged' >&2; exit 1; fi
+          sleep 10
+        done
+        kubectl -n kube-system rollout restart ds/cilium
+        kubectl -n kube-system rollout status ds/cilium --timeout=10m
+        # SB10 always needs the static host CNI guard, including sites without envd.
+        sed -i "s#ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:latest#$RUNTIME#" node-setup.yaml
+        kubectl apply -f telemetry.yaml
+        sed -i "s#{name: RUNSC_ALLOW_SUID, value: \"true\"}#{name: RUNSC_ALLOW_SUID, value: \"$ALLOW_SUID\"}#" node-setup.yaml
+        grep -q "{name: RUNSC_ALLOW_SUID, value: \"$ALLOW_SUID\"}" node-setup.yaml
+        kubectl apply -f node-setup.yaml -f runtimeclass.yaml
+        kubectl -n sandbox-system rollout status ds/node-setup --timeout=15m
+        # Only after the host-owned CNI chain is installed may every worker become Ready.
+        for attempt in $(seq 1 90); do
+          ready=$(kubectl get nodes --no-headers | awk '$2 == "Ready"' | wc -l)
+          if [ "$ready" -ge "$WORKER_COUNT" ]; then break; fi
+          if [ "$attempt" -eq 90 ]; then echo 'sandbox workers not Ready after CNI install' >&2; exit 1; fi
+          sleep 20
+        done
+        ./check-ipv4-only.sh
+        kubectl apply --server-side -f agent-sandbox/sandbox-with-extensions.yaml
+        kubectl apply -f network-policy.yaml -f rbac.yaml
+      args: {executable: /bin/bash, chdir: /root/sandbox-bundle}
+      environment:
+        KUBECONFIG: /root/sandbox.kubeconfig
+        # envd + sandbox-init, which node-setup's init container installs on every node (SB5); only where stage 60 turns
+        # envd on (a sandbox domain). The image is published from the release after v0.3.28; set sandbox.runtime_image
+        # to run this stage from main before that release.
+        WORKER_COUNT: "{{ pc.sandbox.nodes.count | int }}"
+        ALLOW_SUID: "{{ 'true' if (pc.sandbox.allow_suid | default(true) | bool) else 'false' }}"
+        RUNTIME: "{{ pc.sandbox.runtime_image or (pc.images.registry ~ '/proxcloud-sandbox-runtime:' ~ pc_ver.proxcloud) }}"
+      changed_when: false
+    # Two service-account kubeconfigs, both stored by stage 60: the proxmox provider's sync reads Nodes and takes the
+    # unsecured taint off with the firewall one (nodes only); the sandbox provider runs sandboxes with the portal one
+    # (namespaces, quotas and Sandbox CRs of sb-* projects).
+    - name: Build the service-account kubeconfigs
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for i in $(seq 30); do
+          t=$(kubectl -n proxcloud-system get secret "$SECRET" -o jsonpath='{.data.token}' | base64 -d)
+          [ -n "$t" ] && break; sleep 2
+        done
+        [ -n "$t" ]
+        kubectl config view --raw --minify -o json | T="$t" python3 -c '
+        import json, os, sys
+        c = json.load(sys.stdin)["clusters"][0]
+        print(json.dumps({"apiVersion": "v1", "kind": "Config", "current-context": "sa",
+          "clusters": [{"name": "sandbox", "cluster": c["cluster"]}],
+          "users": [{"name": "sa", "user": {"token": os.environ["T"]}}],
+          "contexts": [{"name": "sa", "context": {"cluster": "sandbox", "user": "sa"}}]}))'
+      args: {executable: /bin/bash}
+      environment: {KUBECONFIG: /root/sandbox.kubeconfig, SECRET: "{{ item.secret }}"}
+      loop:
+        - {secret: proxcloud-firewall-token, file: sandbox-firewall.kubeconfig}
+        - {secret: proxcloud-token, file: sandbox-portal.kubeconfig}
+      loop_control: {label: "{{ item.file }}"}
+      register: pc_sbx_sa
+      changed_when: false
+      no_log: true
+    - name: Keep them in the site directory
+      ansible.builtin.copy:
+        dest: "{{ pc_gen }}/{{ item.item.file }}"
+        content: "{{ item.stdout }}\n"
+        mode: "0600"
+      loop: "{{ pc_sbx_sa.results }}"
+      loop_control: {label: "{{ item.item.file }}"}
+      delegate_to: localhost
+      become: false
+      no_log: true

@@ -209,7 +209,7 @@ func main() {
 
 	// --- 8. console ---
 	step(8, "Console: mint a VNC websocket ticket (proxy target)")
-	backend, ticket, err := svc.Console(ctx, pid, vmExtID, false)
+	backend, _, ticket, err := svc.Console(ctx, pid, vmExtID, false)
 	if err != nil {
 		fatal(err, "console")
 	}

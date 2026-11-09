@@ -12,9 +12,14 @@ func Catalog() []*billingapi.BillingResourceType {
 		instanceTrafficType(),
 		volumeType(),
 		floatingIPType(),
-		loadBalancerType(),
+		imageType(),
 		kubernetesClusterType(),
 		databaseClusterType(),
 		bucketType(),
+		shareType(),
+		serverProtectionType(),
+		serverSnapshotType(),
+		sandboxType(),
+		sandboxSnapshotType(),
 	}
 }

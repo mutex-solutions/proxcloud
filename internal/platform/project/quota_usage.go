@@ -2,8 +2,8 @@ package project
 
 // quota_usage.go — GET /project/{id}/quota-usage. Every quota is
 // platform-managed (Project.Quota), so the endpoint reports the ProxCloud limits +
-// cached-row usage. The response keeps the old shape (compute/storage stay
-// absent — the FE already treats them as optional legs).
+// cached-row usage. A provider without compute (ceph-s3, kamaji, dbaas) leaves the
+// compute and storage legs absent.
 
 import (
 	"net/http"
@@ -23,7 +23,44 @@ type projectQuotaUsage struct {
 	Region    string         `json:"region"`
 	GPU       gpuQuotaUsage  `json:"gpu"`
 	Limits    map[string]any `json:"limits,omitempty"` // platform quota keys (vcpus/ramMb/servers/networks/diskGb/floatingIps)
+	Compute   *computeQuota  `json:"compute,omitempty"`
+	Storage   *storageQuota  `json:"storage,omitempty"`
 	Warnings  []string       `json:"warnings"`
+}
+
+// quotaMetric is one limit with its usage; a negative limit means unlimited.
+type quotaMetric struct {
+	Used     int `json:"used"`
+	Reserved int `json:"reserved"`
+	Limit    int `json:"limit"`
+}
+
+type computeQuota struct {
+	Instances quotaMetric `json:"instances"`
+	Cores     quotaMetric `json:"cores"`
+	RAMMb     quotaMetric `json:"ramMb"`
+}
+
+type storageQuota struct {
+	Gigabytes quotaMetric `json:"gigabytes"`
+}
+
+// pveQuotaMetrics lays Proxmox limits and usage out in the console's quota shape.
+func pveQuotaMetrics(limits map[string]any, u pveQuotaDemand) (*computeQuota, *storageQuota) {
+	metric := func(key string, used int) quotaMetric {
+		limit := -1
+		if raw, ok := limits[key]; ok {
+			limit = intAny(raw)
+		}
+		return quotaMetric{Used: used, Limit: limit}
+	}
+	return &computeQuota{
+			Instances: metric("servers", u.Servers),
+			Cores:     metric("vcpus", u.VCPUs),
+			RAMMb:     metric("ramMb", u.RAMMb),
+		}, &storageQuota{
+			Gigabytes: metric("diskGb", u.DiskGb),
+		}
 }
 
 // quotaUsage reports the ProxCloud-managed quota (GPU + resource keys) with usage
@@ -37,9 +74,13 @@ func (h *Handler) quotaUsage(w http.ResponseWriter, r *http.Request) {
 	// The limits the gate enforces: a Proxmox project without its own quota falls
 	// back to the provider default (pveQuotaLimits).
 	limits := proj.Quota
-	if len(limits) == 0 && svcID != "" && h.esSvc != nil {
+	isProxmox := false
+	if svcID != "" && h.esSvc != nil {
 		if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es.IsProxmox() {
-			limits = pveQuotaLimits(proj, es)
+			isProxmox = true
+			if len(limits) == 0 {
+				limits = pveQuotaLimits(proj, es)
+			}
 		}
 	}
 	out := projectQuotaUsage{
@@ -53,6 +94,13 @@ func (h *Handler) quotaUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(limits) > 0 {
 		out.Limits = limits
+	}
+	if isProxmox {
+		if u, err := h.pveQuotaUsage(r.Context(), proj.ID, svcID); err == nil {
+			out.Compute, out.Storage = pveQuotaMetrics(limits, u)
+		} else {
+			out.Warnings = append(out.Warnings, "Quota usage is temporarily unavailable")
+		}
 	}
 	if usage, err := h.cloud.GPUUsageByProject(r.Context(), proj.ID); err == nil {
 		out.GPU.Usage = usage
