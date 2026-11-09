@@ -227,7 +227,7 @@ func (h *Handler) consoleTemplateLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if buildNeedsSync(bl) && (t.Kind != "snapshot" || buildTerminal(bl)) {
+	if (bl.Registry != nil || buildNeedsSync(bl)) && (t.Kind != "snapshot" || buildTerminal(bl)) {
 		h.syncBuild(r.Context(), c, t, bl)
 	}
 	logs := []string{}

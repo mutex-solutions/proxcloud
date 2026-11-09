@@ -134,7 +134,7 @@ func (h *Handler) resolveBase(ctx context.Context, c *e2bCaller, fromImage, from
 			bl = t.build(id)
 		}
 		own := strings.TrimRight(cfg.TemplateRegistry, "/") + "/" + c.proj.ID + "/"
-		if bl == nil || bl.Status != sandbox.BuildReady || !strings.HasPrefix(bl.Image, own) {
+		if bl == nil || buildPinSDKStatus(bl) != sandbox.BuildReady || !strings.HasPrefix(bl.Image, own) {
 			return nil, errBase("template '%s' has no ready build", fromTemplate)
 		}
 		return &buildBase{Ref: bl.Image, Auth: sandbox.BaseAuthRegistry, Parent: bl, ParentTemplateID: t.ID}, nil
