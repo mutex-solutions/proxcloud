@@ -78,6 +78,26 @@ func TestInviteFiniteContractPrivacyAndFrozenWire(t *testing.T) {
 	}
 }
 
+func TestInviteEnvelopeValueAndPointerFormattingRedacted(t *testing.T) {
+	es, err := PrepareInvite(inviteFixture())
+	if err != nil || len(es) != 1 {
+		t.Fatal("invite envelope fixture unavailable")
+	}
+	for _, v := range []any{es[0], &es[0]} {
+		for _, format := range []string{"%v", "%+v", "%#v"} {
+			public := fmt.Sprintf(format, v)
+			if public != "[mail envelope redacted]" {
+				t.Fatal("envelope formatting must return only the redaction marker")
+			}
+			for _, private := range []string{"from", "to", "wire", "[]uint8", "0x", "PRIVATE_TOKEN", "one@example", "sender@", "invite-token"} {
+				if strings.Contains(public, private) {
+					t.Fatal("envelope formatting exposed a private field or byte representation")
+				}
+			}
+		}
+	}
+}
+
 func TestInviteIdentityAllInputsAndKindAAD(t *testing.T) {
 	in := inviteFixture()
 	ps, _ := prepareInvite(in)
