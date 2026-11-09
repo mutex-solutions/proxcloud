@@ -172,6 +172,7 @@ function PowerDNSProviderForm({ form, setForm }: { form: PowerDNSFormState; setF
       {field("apiKey", "API key", "", "password")}
       {field("nameservers", "Name servers of new zones, comma separated", "ns1.example.com, ns2.example.com")}
       {field("region", "Region", "pve")}
+      <p className="text-sm text-muted-foreground">New zones require TXT ownership proof through fixed public resolvers (TCP 1.1.1.1:53 and 8.8.8.8:53). Keep egress open to them. Existing zones are not removed; private lab resolver overrides belong in operator Advanced config, never tenant input.</p>
     </div>
   )
 }

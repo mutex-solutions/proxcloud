@@ -106,6 +106,8 @@ type Handler struct {
 	sbPaused   *pgdoc.Store
 	sbSafety   *pgdoc.Store
 	sbNotifier sandboxNotifier
+	// dnsOwnership holds short-lived, nonexclusive TXT proofs for new zones only.
+	dnsOwnership *pgdoc.Store
 }
 
 // SetSandbox wires the sandbox service factory (enables sandbox provisioning and the SANDBOX
@@ -311,6 +313,11 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Get("/project/{id}/cloud/{resourceId}", h.cloudGet)
 	// cloud writes (project:cloud_resource:manage gated; INTERNAL network only).
 	r.Post("/project/{id}/cloud", h.cloudCreate)
+	// New DNS zones need project/provider/domain-scoped proof BEFORE creation.
+	r.Post("/project/{id}/dns-ownership", h.dnsOwnershipChallenge)
+	r.Get("/project/{id}/dns-ownership/{ownershipId}", h.dnsOwnershipStatus)
+	r.Post("/project/{id}/dns-ownership/{ownershipId}/verify", h.dnsOwnershipVerify)
+	r.Delete("/project/{id}/dns-ownership/{ownershipId}", h.dnsOwnershipCancel)
 	r.Delete("/project/{id}/cloud/{resourceId}", h.cloudDelete)
 	r.Post("/project/{id}/cloud/{resourceId}/action", h.cloudAction)
 	// POST /{id}/cloud/{resourceId}/upload-bucket-file

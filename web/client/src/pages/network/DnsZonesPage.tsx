@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
@@ -22,6 +22,10 @@ import type { CloudResource } from "@/lib/types"
 
 const zone = (r: CloudResource) => (r.data?.zone as Record<string, any>) ?? {}
 type RRSet = { name: string; type: string; ttl?: number; records: Array<{ content: string }> }
+type Ownership = {
+  id: string; serviceId: string; name: string; state: string; recordName: string;
+  recordValue?: string; expiresAt: string; verifiedUntil?: string; nextVerifyAt?: string;
+}
 const TYPES = ["A", "AAAA", "CAA", "CNAME", "MX", "NS", "PTR", "SRV", "TXT"]
 const emptyRecord = { name: "", type: "A", ttl: "3600", content: "" }
 
@@ -36,6 +40,45 @@ export default function DnsZonesPage() {
 
   const [createOpen, setCreateOpen] = useState(false)
   const [name, setName] = useState("")
+  const [ownership, setOwnership] = useState<Ownership | null>(null)
+  const [proofError, setProofError] = useState("")
+  const [clock, setClock] = useState(Date.now())
+  useEffect(() => {
+    if (!createOpen) return
+    const timer = window.setInterval(() => setClock(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [createOpen])
+  // A project/provider switch cannot reuse an in-memory proof or its token.
+  useEffect(() => { setOwnership(null); setProofError(""); setName("") }, [pid, scope.serviceId])
+  const expired = !!ownership && clock >= Date.parse(ownership.state === "VERIFIED" ? ownership.verifiedUntil ?? "" : ownership.expiresAt)
+  const canVerify = ownership?.state === "PENDING" && !expired && (!ownership.nextVerifyAt || clock >= Date.parse(ownership.nextVerifyAt))
+  const canCreate = ownership?.state === "VERIFIED" && !expired
+  const proofPath = `/project/${pid}/dns-ownership`
+  const challenge = useMutation({
+    mutationFn: () => apiFetch<Ownership>(proofPath, { method: "POST", body: { serviceId: scope.serviceId, name: name.trim() } }),
+    onSuccess: (proof) => { setOwnership(proof); setProofError(""); setClock(Date.now()) },
+    onError: (e: Error) => setProofError(e.message),
+  })
+  const verify = useMutation({
+    mutationFn: () => apiFetch<Ownership>(`${proofPath}/${ownership!.id}/verify`, { method: "POST", body: { serviceId: ownership!.serviceId } }),
+    onSuccess: (proof) => { setOwnership((old) => ({ ...proof, recordValue: old?.recordValue })); setProofError(""); setClock(Date.now()) },
+    onError: async (e: Error) => {
+      setProofError(e.message)
+      if (ownership) {
+        // Fetch durable backoff even after resolver/not-visible errors; never
+        // infer permission from a stale successful mutation result.
+        try {
+          const proof = await apiFetch<Ownership>(`${proofPath}/${ownership.id}?serviceId=${encodeURIComponent(ownership.serviceId)}`)
+          setOwnership((old) => ({ ...proof, recordValue: old?.recordValue }))
+        } catch { /* the original actionable verification error remains visible */ }
+      }
+    },
+  })
+  const cancelProof = useMutation({
+    mutationFn: () => apiFetch(`${proofPath}/${ownership!.id}?serviceId=${encodeURIComponent(ownership!.serviceId)}`, { method: "DELETE" }),
+    onSuccess: () => { setOwnership(null); setProofError("") },
+    onError: (e: Error) => setProofError(e.message),
+  })
   const [open, setOpen] = useState<CloudResource | null>(null)
   const [record, setRecord] = useState(emptyRecord)
   const [deleting, setDeleting] = useState<CloudResource | null>(null)
@@ -58,15 +101,26 @@ export default function DnsZonesPage() {
       apiFetch<CloudResource>(`/project/${pid}/cloud`, {
         method: "POST",
         cloud: scope,
-        body: { type: "DNS_ZONE", serviceId: scope.serviceId, data: { name: name.trim() } },
+        body: { type: "DNS_ZONE", data: { name: ownership!.name, ownershipId: ownership!.id } },
       }),
     onSuccess: () => {
       toast.success("Zone created")
       setCreateOpen(false)
       setName("")
+      setOwnership(null)
+      setProofError("")
       void refresh()
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: async (e: Error) => {
+      setProofError(`${e.message} No retry reuses a consumed proof. Refresh the zone list; if the zone is absent, start a new challenge.`)
+      void refresh()
+      if (ownership) {
+        try {
+          const proof = await apiFetch<Ownership>(`${proofPath}/${ownership.id}?serviceId=${encodeURIComponent(ownership.serviceId)}`)
+          setOwnership((old) => ({ ...proof, recordValue: old?.recordValue }))
+        } catch { /* leave the original create failure visible */ }
+      }
+    },
   })
   const save = useMutation({
     mutationFn: () =>
@@ -153,17 +207,35 @@ export default function DnsZonesPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Create zone</DialogTitle>
-            <DialogDescription>A zone name can be held by one project only, and it cannot sit above or below another project's zone.</DialogDescription>
+            <DialogDescription>Prove control at your current DNS host before any zone is created here. Do not move your name servers yet. A challenge reserves no domain.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-1">
             <Label htmlFor="dns-zone">Domain</Label>
-            <Input id="dns-zone" value={name} onChange={(e) => setName(e.target.value)} placeholder="example.org" />
+            <Input id="dns-zone" value={name} disabled={!!ownership || challenge.isPending} onChange={(e) => setName(e.target.value)} placeholder="example.org" />
           </div>
+          {ownership ? (
+            <div className="grid gap-3 text-sm">
+              <p><strong>1. Publish this TXT record</strong> at your current DNS provider. Use TTL 60 if offered; do not use a CNAME. Some providers append the domain automatically.</p>
+              <div className="grid gap-1">
+                <Label htmlFor="dns-proof-name">Full record name</Label>
+                <Input id="dns-proof-name" readOnly value={ownership.recordName} className="font-mono text-xs" />
+                <Label htmlFor="dns-proof-value">Exact TXT value (shown only for this challenge)</Label>
+                <textarea id="dns-proof-value" readOnly value={ownership.recordValue ?? "Token is no longer available. Start a new challenge."} className="min-h-20 w-full break-all rounded-md border bg-transparent p-2 font-mono text-xs" />
+              </div>
+              <p><strong>2. Verify</strong> after publishing. DNS caches, including negative caches, may delay visibility. The challenge expires at {new Date(ownership.expiresAt).toLocaleString()}.</p>
+              <p role="status">Status: <strong>{expired ? "EXPIRED" : ownership.state}</strong>{ownership.verifiedUntil && ` · Create before ${new Date(ownership.verifiedUntil).toLocaleString()}`}</p>
+              {canCreate ? <p><strong>3. Create the zone</strong> now. This proof works once, for this exact project, provider and domain. Afterwards copy your records, then delegate to the name servers in the list.</p> : null}
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" disabled={!canVerify || verify.isPending || cancelProof.isPending} onClick={() => verify.mutate()}>{verify.isPending ? "Checking DNS…" : "Verify TXT record"}</Button>
+                <Button variant="ghost" disabled={verify.isPending || create.isPending || cancelProof.isPending} onClick={() => cancelProof.mutate()}>Cancel challenge / start over</Button>
+              </div>
+            </div>
+          ) : null}
+          {proofError ? <p role="alert" className="text-sm text-destructive">{proofError}</p> : null}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
-            <Button disabled={create.isPending || !name.trim()} onClick={() => create.mutate()}>
-              {create.isPending ? "Creating…" : "Create"}
-            </Button>
+            <Button variant="outline" disabled={create.isPending || verify.isPending} onClick={() => setCreateOpen(false)}>Close</Button>
+            {ownership ? <Button disabled={create.isPending || !canCreate || verify.isPending || cancelProof.isPending} onClick={() => create.mutate()}>{create.isPending ? "Creating…" : "Create verified zone"}</Button>
+              : <Button disabled={challenge.isPending || !name.trim() || !location} onClick={() => challenge.mutate()}>{challenge.isPending ? "Starting…" : "Get ownership TXT record"}</Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>
