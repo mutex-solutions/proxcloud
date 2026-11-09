@@ -4,6 +4,23 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: PR #170 typed savings contract-expired outbox (default OFF)
+
+**What changed:** fixed fourth `savings-contract-expired/v1` family, exact validated
+family_v3 CHECK, and private immutable canonical-term history. Owned PRIMARY READ
+COMMITTED expiration commits status, reminder cancellation and frozen mail selection
+together; all four contract mutation paths cancel pre-intent IDs even OFF/keyless.
+
+**Why:** expiration notices must survive the decision boundary without duplicate
+same-EndDate reactivation/reapproval or historical adoption. One notice per canonical
+term is deliberately conservative; no lifecycle UUID, replay endpoint, financial
+posting or SMTP dispatcher activation is introduced.
+
+**Views updated:** [dedicated C4/safety/default-OFF view](../../savings-expired-outbox.md)
+(context, components, transaction sequence, history and cancellation lifecycle),
+and [C4 index](README.md). Original three-family payloads remain unchanged; local
+bounded unit/race and owned PG17 proofs do not authorize deployment or delivery.
+
 ## 2026-11-10: typed validation approval outbox (enqueue-only)
 
 **What changed:** new default-OFF `validation-approved/v1` family and fixed
