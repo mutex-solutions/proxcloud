@@ -42,10 +42,36 @@ sequenceDiagram
 
 This is at-least-once execution with atomic native financial effects, NOT exactly-once SMTP/HTTP/cloud execution. External billing HTTP behavior remains separate with no native fallback. Mail/invite delivery remains best-effort; SSE stays pod-local. Schema/resource deployment and legacy queue drain/removal are separate rollout work. [Operator contract](../../durable-jobs.md).
 
-## Dormant durable reminder mail infrastructure (PR A)
+## Durable savings reminder decisions (PR A + enqueue-only PR B)
 
-**Implemented but inactive:** no business producer or production dispatcher registration.
-Existing notifications remain best-effort; PR B's atomic reminder decision is not claimed here.
+**Implemented, producer opt-in only:** `PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED=false`
+by default. True requires the strict >=32-byte key and atomically queues savings-expiry
+reminder decisions; it does **not** register production SMTP dispatch or enable other
+notification families. Invoice/Collect, activation/dunning and invitations remain best-effort.
+
+| Business symbol | Atomic boundary / why |
+|---|---|
+| `scheduleDurableReminder`, `queueReminder` | PRIMARY contract -> reminder locks; reread ACTIVE/current UTC expiry generation; deterministic schedule ID and selected window. Render one template snapshot, seal/enqueue and store queued/skipped markers in ONE owned transaction. Failure rolls all back. |
+| `ReminderOutbox`, composition adapter | Narrow billing-owned DTO, no billing->mail dependency; sorted per-event recipient ordinals, no public email hashes. `PrepareTemplateSnapshot` does no SMTP and no second template read. |
+| `MutateSavingsContract`, `WithSavingsContractMutation`, expiration | Client/admin local edits/delete join the same boundary. Expiry/status/profile changes cancel persisted non-dispatching IDs; admin no-op/render-only edits preserve future windows and frozen selections. |
+| `CancelPendingTx` | Keyless capability always wired, even producer OFF. Same primary TX cancels pending/claimed/blocked, fences claim ownership; never cancels DISPATCHING/UNKNOWN/accepted/dead or mutates encrypted payload/attempt journal. |
+| Legacy / OFF behavior | `sentAt` remains processed/no-resend evidence; `deliveryQueuedAt`/outbox IDs never mean delivered. Any durable history prevents OFF-mode random legacy rescheduling or direct SMTP fallback. No historical backfill. |
+
+```mermaid
+sequenceDiagram
+  participant B as Opt-in savings reminder decision
+  participant D as PostgreSQL PRIMARY
+  participant M as Pure template preparation
+  B->>D: WithTx contract lock, reread ACTIVE/endDate/generation
+  B->>D: Lock deterministic reminder; choose tightest due window
+  B->>M: Render one loaded template snapshot, no SMTP
+  M-->>B: Sanitized draft or explicit suppression/error
+  B->>D: EnqueueTx seals single-recipient envelopes
+  B->>D: Save queued IDs/at + skipped markers; COMMIT together
+  Note over B,D: Render/key/enqueue failure rolls back; queued is NOT sent
+  B->>D: Cancel/extend/expire/admin change joins same locks + CancelPendingTx
+  Note over B,D: Producer OFF retains cancellation; no durable-to-legacy SMTP fallback
+```
 
 | Symbol / component | Primary invariant |
 |---|---|
@@ -58,7 +84,7 @@ Existing notifications remain best-effort; PR B's atomic reminder decision is no
 
 ```mermaid
 sequenceDiagram
-  participant B as Future business decision (not wired)
+  participant B as Opt-in savings reminder producer
   participant D as PostgreSQL PRIMARY
   participant W as Explicit local test dispatcher
   participant S as Loopback SMTP fake

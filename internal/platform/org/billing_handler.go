@@ -1177,23 +1177,11 @@ func (h *BillingHandler) cancelSavingsContract(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	if c.Status != billing.SavingsStatusPendingPayment {
-		if c.PaidUpfront {
-			fail(w, httpx.BadRequest("Cannot cancel upfront contracts"))
-			return
-		}
-		if c.Status != billing.SavingsStatusActive {
-			fail(w, httpx.BadRequest("Only active contracts can be cancelled"))
-			return
-		}
-	}
-	c.Status = billing.SavingsStatusCancelled
-	if err := h.billing.SaveSavingsContract(r.Context(), c); err != nil {
+	c, err := h.billing.MutateSavingsContract(r.Context(), c.BillingProfileID, c.ID, false)
+	if err != nil {
 		fail(w, err)
 		return
 	}
-	// cancel → cancelReminders (drop pending expiry reminders). Best-effort.
-	_ = h.billing.CancelReminders(r.Context(), billing.ResourceTypeSavingsContract, c.ID)
 	httpx.OK(w, billing.SavingsContractToDto(c))
 }
 
@@ -1203,26 +1191,11 @@ func (h *BillingHandler) extendSavingsContract(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	if c.Status != billing.SavingsStatusActive {
-		fail(w, httpx.BadRequest("Only active contracts can be extended"))
-		return
-	}
-	// Its discount is prepaid usage, and the extra months were not paid for.
-	if c.PaidUpfront {
-		fail(w, httpx.BadRequest("An upfront contract cannot be extended: buy a new one when it ends"))
-		return
-	}
-	if c.EndDate != nil {
-		ne := c.EndDate.AddDate(0, c.DurationMonths, 0)
-		c.EndDate = &ne
-	}
-	if err := h.billing.SaveSavingsContract(r.Context(), c); err != nil {
+	c, err := h.billing.MutateSavingsContract(r.Context(), c.BillingProfileID, c.ID, true)
+	if err != nil {
 		fail(w, err)
 		return
 	}
-	// extend → cancelReminders: the old window is dropped so the next daily run schedules a
-	// fresh reminder against the new endDate. Best-effort.
-	_ = h.billing.CancelReminders(r.Context(), billing.ResourceTypeSavingsContract, c.ID)
 	httpx.OK(w, billing.SavingsContractToDto(c))
 }
 

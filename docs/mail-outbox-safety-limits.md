@@ -2,19 +2,63 @@
 
 ## Status and non-goals
 
-**PR A is dormant infrastructure, not a reminder rollout.** Startup creates the
-primary tables and exposes read-only admin metadata. There is no production
-worker registration, environment switch, business producer, cron, resend API or
-backfill. Existing best-effort notification families and legacy SMTP/text
-cryptography behavior are unchanged. A configured SMTP integration alone cannot
-activate this dispatcher. Tests explicitly call `StartWithFakeTransport`; its
-SMTP implementation permits only literal loopback IPs and `.invalid` fixture
-recipients. Production adapter instances do not grant that test capability.
+**Production dispatch remains disabled.** PR A supplies the primary tables,
+read-only admin metadata and explicit local-test dispatcher; PR B adds an **opt-in,
+enqueue-only savings-expiry reminder producer**. `PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED`
+defaults **false**. When true it requires a >=32-byte `PROXCLOUD_ENCRYPTION_DEFAULT_KEY`
+and changes only the savings reminder decision to an atomic database outbox write.
+It does not start SMTP, add a delivery enable flag, create new timed jobs or authorize
+real recipients. A configured SMTP integration alone cannot activate dispatch.
+Tests explicitly call `StartWithFakeTransport`; its SMTP implementation permits
+only literal loopback IPs and `.invalid` fixture recipients. Production adapter
+instances do not grant that capability. Invoice/payment, activation/dunning,
+contract-expired and invitation mail remain legacy best-effort; there is no backfill.
 
-PR B must separately couple the savings reminder decision, generation, selected
-window, enqueue and reminder bookkeeping in the same business transaction. It
-must also handle cancellation/extension and legacy processed reminders. Invoice,
-payment, activation, dunning and invitation notification rewiring is out of scope.
+## Atomic savings reminder producer (PR B)
+
+- A canonical UTC microsecond EndDate hash is the expiry generation; scheduling
+  uses one deterministic document ID per contract/generation under a shared primary
+  contract lock. Multiple schedulers cannot create new random identities for the
+  same window. Recipient keys are **sorted per-event ordinals**, never public
+  address hashes; the authenticated encrypted manifest detects recipient drift.
+- `ReminderOutbox.EnqueueReminderTx` is a billing-owned interface, mapped in
+  `cmd/api`. One primary transaction rereads ACTIVE/current EndDate, selects the
+  tightest due window, reads/renders **one template snapshot**, seals/enqueues and
+  writes `deliveryQueuedAt`, `outboxIds`, `queueState` plus explicit skipped windows.
+  Rendering/sealing/enqueue errors roll back every decision marker and row.
+  **Queued is not sent:** legacy `sentAt` is preserved as processed/no-resend
+  evidence, never converted into a relay acknowledgement. Untagged legacy history
+  cannot prove its old expiry generation: adoption conservatively treats any DONE
+  legacy record as processed for the adopted schedule, potentially skipping an
+  ambiguous current reminder rather than risking historical duplicate mail. This
+  availability limit requires operator review before opt-in; no date heuristics or
+  automatic historical replay are attempted. Disabled templates are
+  suppressed; missing templates error; missing SMTP is blocked configuration; empty
+  recipient sets are explicit no-recipient decisions. These all remain non-delivery.
+- Lock order is contract -> reminder -> outbox. Client cancel/extend, expiration
+  and admin expiry/status/profile edits/deletion commit their local contract changes
+  together with `CancelPendingTx` on persisted outbox IDs. That capability stays
+  wired **even with enqueue OFF or keys unavailable**. Pending/claimed and blocked
+  non-delivery rows become expired/cancelled and claimed ownership is invalidated;
+  DISPATCHING/UNKNOWN/accepted/dead remain untouched. The attempt journal is unchanged;
+  cancellation is represented by the row's fixed `cancelled` reason, not a fake SMTP receipt.
+- Admin no-op/rendering-only edits keep frozen selected messages and unselected
+  future windows; changing expiry schedules a new generation. Profile/status edits
+  conservatively close the old schedule. Already-DISPATCHING work cannot be unsent.
+- Turning the flag OFF is **not** a migration back to immediate SMTP for contracts
+  with any durable history (including DONE/older generations). No new untagged legacy
+  schedule is created for them and tagged pending decisions never fall back to Send.
+  Existing purely legacy contracts retain their best-effort path. Mixed-version
+  rollout writers are unsupported: upgrade all API replicas before enabling enqueue.
+- Existing savings cron/debug triggers determine when decisions run; this flag
+  starts no scheduler. `/debug/run-reminders` reports `queuedDecisions` and
+  `dispatchEnabled:false` in durable mode; legacy mode retains `sent` best-effort counts.
+  There is **no automatic release of blocked rows or production dispatcher** in this
+  slice. Queue-only opt-in cannot yet deliver mail; delivery rollout/reconciliation
+  needs separate authorization. Keep the flag false until accepting that contract.
+- Reminder windows must be 0..366 days; outbox age is still capped at 30 days and
+  contract expiry. Far-ahead windows may expire before the contract; queueing does
+  not guarantee eventual delivery. No attachments or invite/reset tokens are introduced.
 
 ## Storage and transaction contract
 

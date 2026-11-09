@@ -59,6 +59,11 @@ type Config struct {
 	Encryption struct {
 		DefaultKey string
 	}
+	Mail struct {
+		// ReminderOutboxEnabled opts into atomic savings-reminder ENQUEUE only.
+		// It never starts a dispatcher or sends SMTP. Default false keeps legacy behavior.
+		ReminderOutboxEnabled bool
+	}
 	Self struct {
 		BaseURL      string
 		APIBaseURL   string
@@ -174,6 +179,14 @@ func Load() (*Config, error) {
 	c.Encryption.DefaultKey = envOr("PROXCLOUD_ENCRYPTION_DEFAULT_KEY",
 		firstNonEmpty(k.String("proxcloud.encryption.default.key"), k.String("proxcloud.encryption.default-key")))
 
+	if raw := os.Getenv("PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED boolean")
+		}
+		c.Mail.ReminderOutboxEnabled = value
+	}
+
 	// Per-organization SSO.
 	c.SSO.ClientID = envOr("PROXCLOUD_SSO_KC_CLIENT_ID", "proxcloud-idp-admin")
 	c.SSO.ClientSecret = os.Getenv("PROXCLOUD_SSO_KC_CLIENT_SECRET")
@@ -255,6 +268,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Jobs.WorkerConcurrency < 1 || c.Jobs.WorkerConcurrency > 16 || c.Jobs.PollInterval < 100*time.Millisecond || c.Jobs.PollInterval > time.Minute || c.Jobs.LeaseDuration < 10*time.Second || c.Jobs.LeaseDuration > 10*time.Minute {
 		return fmt.Errorf("invalid durable job settings: concurrency must be 1..16, poll 100ms..1m, lease 10s..10m")
+	}
+	if c.Mail.ReminderOutboxEnabled && len(c.Encryption.DefaultKey) < 32 {
+		return fmt.Errorf("durable reminders require a >=32-byte PROXCLOUD_ENCRYPTION_DEFAULT_KEY; enqueue only, dispatch remains disabled")
 	}
 	// Remote charging without a billing URL would silently stop charging bills altogether — the
 	// cron would fire, find nowhere to send the work, and log. Fail closed instead.

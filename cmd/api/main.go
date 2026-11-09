@@ -177,20 +177,29 @@ func run() error {
 	// the billing payment-gateway reads decrypt with the SAME key. Declared here (ahead of esSvc at
 	// its original site) so the mail resolver closure below can capture it.
 	enc := textcrypt.New(cfg.Encryption.DefaultKey)
-	// PR A: provision the dedicated outbox, expose opaque read-only metadata,
-	// but register NO dispatcher/background worker and NO business caller.
-	// Missing/short legacy keys do not break the existing disabled deployment;
-	// any future EnqueueTx fails closed until a >=32-byte key is configured.
+	// Provision the dedicated outbox and opaque read-only metadata. PR B's
+	// default-false producer opts only savings reminders into atomic enqueue;
+	// NO dispatcher/background worker is registered. Missing/short legacy keys
+	// keep default-OFF deployments compatible; opt-in validation fails closed.
 	blobKeys, blobErr := textcrypt.NewBlobKeys("default-v1", map[string]string{"default-v1": cfg.Encryption.DefaultKey})
 	if blobErr != nil {
 		log.Warn("mail outbox payload key unavailable; dispatch remains disabled")
 	}
 	mailOutbox := mailoutbox.New(pg, blobKeys)
+	billingRepo.SetReminderCanceler(mailOutbox) // cancellation never needs keys/producer opt-in
 	if err := mailOutbox.Ensure(ctx); err != nil {
 		return fmt.Errorf("mail outbox schema unavailable")
 	}
 	billingRepo.SetEncryptor(enc) // decrypt payment-gateway (Stripe) secrets on GetGateway
 	integrationStore := pg.C("thirdPartyIntegration")
+	if cfg.Mail.ReminderOutboxEnabled {
+		// The strict DB-over-env resolver runs INSIDE the decision transaction.
+		// A missing optional table would abort that transaction before it could
+		// record blocked_config, so ensure it once before serving producers.
+		if err := prepareReminderDependencies(ctx, pg); err != nil {
+			return err
+		}
+	}
 	envMailer := mail.FromEnv()
 	envFrom := os.Getenv("PROXCLOUD_MAIL_FROM")
 	mailSvc := mail.NewService(
@@ -587,6 +596,11 @@ func run() error {
 	adminH.SetSandboxGates(syncJob.SandboxReleaseGates)
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
+	if cfg.Mail.ReminderOutboxEnabled {
+		billingRepo.SetReminderOutbox(reminderOutboxAdapter{store: mailOutbox, service: mailSvc, message: msgRepo,
+			config: mail.DurableConfigFromStore(integrationStore, enc)})
+		log.Info("durable savings reminder enqueue enabled; SMTP dispatch remains disabled")
+	}
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)
 	suspensionJob.SetNotifier(mailSvc)
 	suspensionJob.SetAudit(auditSvc) // writes a system audit trail for CREATE/NOTIFY/SUSPEND/UNSUSPEND
@@ -934,7 +948,7 @@ func run() error {
 			},
 			"run-reminders": func(w http.ResponseWriter, r *http.Request) {
 				n, err := savingsSvc.ProcessReminderNotifications(r.Context())
-				jobResult(w, map[string]any{"ran": "reminders", "sent": n}, err)
+				jobResult(w, reminderResult(savingsSvc.DurableRemindersEnabled(), n), err)
 			},
 			"run-txn-scan": func(w http.ResponseWriter, r *http.Request) {
 				n, err := txnScanner.Scan(r.Context())
@@ -1178,7 +1192,11 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 			if n, err := savings.ProcessReminderNotifications(ctx); err != nil {
 				log.Error("reminder notifications dispatch job", "err", err)
 			} else if n > 0 {
-				log.Info("reminder notifications sent", "count", n)
+				if savings.DurableRemindersEnabled() {
+					log.Info("reminder outbox decisions queued; dispatch disabled", "count", n)
+				} else {
+					log.Info("reminder notifications sent", "count", n)
+				}
 			}
 		}},
 		{Name: "paymentGatewayTransactionScanning", Spec: scheduler.TransactionScanSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
