@@ -46,6 +46,25 @@ func TestStartupOuterBudgetIncludesFinalAccessAndDisconnect(t *testing.T) {
 	}
 }
 
+func TestCommittedReadyTTLBoundsFinalAccess(t *testing.T) {
+	now := time.Now()
+	live := map[string]any{"status": sandbox.StatusRunning, "ready": true, "shutdownTime": now.Add(time.Second).UTC().Format(time.RFC3339)}
+	_, err := committedStartupAccess(context.Background(), live, func() time.Time { return now }, func(ctx context.Context) (*sandbox.Access, error) {
+		if deadline, ok := ctx.Deadline(); !ok || deadline.After(now.Add(time.Second)) {
+			t.Fatal("access not bounded by committed end")
+		}
+		now = now.Add(2 * time.Second)
+		return &sandbox.Access{}, nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("expired committed TTL returned usable access", err)
+	}
+	live["shutdownTime"] = now.Add(time.Minute).UTC().Format(time.RFC3339)
+	if _, err := committedStartupAccess(context.Background(), live, func() time.Time { return now }, func(context.Context) (*sandbox.Access, error) { return &sandbox.Access{}, nil }); err != nil {
+		t.Fatal("live access refused", err)
+	}
+}
+
 func TestResumeLeaseCoversHardStartupAndSnapshotWithoutTakeover(t *testing.T) {
 	minimum := snapshotWait + time.Duration(sandbox.MaxStartupSeconds)*time.Second + time.Minute
 	if resumeLease <= minimum {

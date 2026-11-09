@@ -431,7 +431,9 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 	h.cloudResourceAudit(c.user, c.proj, "CLOUD_RESOURCE_CREATE", "E2B_CREATE", saved)
 	a, err := e2bColdAccess(r.Context(), c.ss.Config().Startup.Duration(), time.Time{}, time.Now,
 		func(ctx context.Context) error { return h.e2bWaitReady(ctx, c, saved) },
-		func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, spec.ID) })
+		func(ctx context.Context) (*sandbox.Access, error) {
+			return committedStartupAccess(ctx, saved.Data, time.Now, func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, spec.ID) })
+		})
 	if err != nil {
 		h.cleanupFailedStartup(r.Context(), c, saved)
 		msg := "sandbox startup failed; check template preparation and location availability"

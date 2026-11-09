@@ -937,8 +937,12 @@ func (h *Handler) e2bSnapshotFail(w http.ResponseWriter, err error) {
 
 // startSaved creates a sandbox from a saved CR on image (resume or fork), under the project quota, and waits for it.
 func (h *Handler) startSaved(ctx context.Context, c *e2bCaller, saved map[string]any, image string, timeoutSeconds int) (string, error) {
+	id, _, err := h.startSavedReady(ctx, c, saved, image, timeoutSeconds)
+	return id, err
+}
+func (h *Handler) startSavedReady(ctx context.Context, c *e2bCaller, saved map[string]any, image string, timeoutSeconds int) (string, *cloud.CloudResource, error) {
 	if _, err := sandbox.ShutdownTimeFor(c.ss.Config(), time.Now(), timeoutSeconds); err != nil {
-		return "", e2bStatusErr{http.StatusBadRequest, err.Error()}
+		return "", nil, e2bStatusErr{http.StatusBadRequest, err.Error()}
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.ss.Config().Startup.Duration()+time.Minute)
 	defer cancel()
@@ -948,12 +952,12 @@ func (h *Handler) startSaved(ctx context.Context, c *e2bCaller, saved map[string
 	spec, _ := saved["spec"].(map[string]any)
 	shutdown, err := time.Parse(time.RFC3339, fmt.Sprint(spec["shutdownTime"]))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	q := c.es.SandboxProjectQuota(c.proj.Quota)
 	if err := h.withSandboxStart(ctx, c.es.ID, func(tc context.Context) error { return c.ss.ResumeSandbox(tc, c.proj.ID, saved, image, shutdown, &q) }); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	now := time.Now().UTC()
 	// A new billing row: the old one (DELETED at the pause) is archived, and the charge rates archived rows to their end.
@@ -975,17 +979,17 @@ func (h *Handler) startSaved(ctx context.Context, c *e2bCaller, saved map[string
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		_ = c.ss.DeleteSandbox(cleanup, c.proj.ID, id)
 		cancel()
-		return "", err
+		return "", nil, err
 	}
 	if err := h.e2bWaitReady(ctx, c, row); err != nil {
 		h.cleanupFailedStartup(ctx, c, row)
-		return "", e2bStatusErr{http.StatusServiceUnavailable, "the sandbox did not start in time"}
+		return "", nil, e2bStatusErr{http.StatusServiceUnavailable, "the sandbox did not start in time"}
 	}
 	if err := startupResponseAlive(ctx, row.Data); err != nil {
 		h.cleanupFailedStartup(ctx, c, row)
-		return "", err
+		return "", nil, err
 	}
-	return id, nil
+	return id, row, nil
 }
 
 // resumePaused brings a paused sandbox back under its id and returns its E2B Sandbox. It passes the usage gate first:
@@ -1105,17 +1109,23 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 	}); err != nil {
 		return release(err)
 	}
-	id, err := h.startSaved(ctx, c, p.Saved, t.defaultBuild().Image, timeoutSeconds)
+	id, readyRow, err := h.startSavedReady(ctx, c, p.Saved, t.defaultBuild().Image, timeoutSeconds)
 	if err != nil {
 		return release(err)
 	}
 	// Access is part of usable success. Do not drop the retryable snapshot or
 	// lease while a late/failed access read could leave the caller with no sandbox.
-	a, err := h.savedStartupAccess(ctx, c, id)
+	a, err := h.savedStartupAccessRow(ctx, c, id, readyRow)
 	if err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if row := h.e2bRow(ctx, c, id); row == nil {
+		return nil, sandbox.ErrNotFound
+	} else if err := startupResponseAlive(ctx, row.Data); err != nil {
+		h.cleanupFailedStartup(ctx, c, row)
 		return nil, err
 	}
 	dctx, cancelDone := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -1316,10 +1326,10 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 	for i := range count {
 		wg.Go(func() {
 			clone, _ := sandbox.CloneSaved(saved)
-			newID, err := h.startSaved(ctx, c, clone, image, timeout)
+			newID, readyRow, err := h.startSavedReady(ctx, c, clone, image, timeout)
 			var a *sandbox.Access
 			if err == nil {
-				a, err = h.savedStartupAccess(ctx, c, newID)
+				a, err = h.savedStartupAccessRow(ctx, c, newID, readyRow)
 			}
 			if err != nil {
 				code, msg := e2bError(err)
@@ -1480,7 +1490,7 @@ func (h *Handler) awaitResumed(ctx context.Context, c *e2bCaller, id string) (ma
 			if err != nil {
 				return nil, err
 			}
-			a, err := c.ss.AccessFor(ctx, c.proj.ID, id)
+			a, err := committedStartupAccess(ctx, d, time.Now, func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, id) })
 			if err != nil {
 				return nil, err
 			}

@@ -989,6 +989,7 @@ func (h *Handler) syncBuildPod(ctx context.Context, c *e2bCaller, t *sandboxTemp
 		return bl.Logs
 	} // no ambiguous apply can be "canceled" by absence
 	h.captureBuildArchive(ctx, c, t, bl)
+	defer func() { h.cleanupBuildArchive(ctx, c, t, bl, time.Now().UTC()) }()
 	st, err := c.ss.BuildPodState(ctx, t.ProjectID, bl.BuildID)
 	if err != nil {
 		return bl.Logs

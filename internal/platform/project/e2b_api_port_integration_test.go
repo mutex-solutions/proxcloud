@@ -171,7 +171,50 @@ func TestImportPortConcurrentAliasesTerminalBindingAndUnknownHold(t *testing.T) 
 	}
 	digest := "sha256:" + strings.Repeat("d", 64)
 	api.result = &sandboximport.Result{Source: source, Image: source, SourceDigest: digest, DestinationDigest: digest, ConfigDigest: digest, Platform: "linux/amd64", User: "app", Workdir: "/srv"}
+	// Crash after terminal owner persistence: binding fails once, leaving raw
+	// READY but effective BUILDING. A fresh handler must finish without the pod.
+	if _, err := db.Pool.Exec(ctx, `CREATE FUNCTION fail_import_binding() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='bound' THEN RAISE EXCEPTION 'binding failpoint'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_import_binding BEFORE UPDATE ON registry_pin FOR EACH ROW EXECUTE FUNCTION fail_import_binding()`); err != nil {
+		t.Fatal(err)
+	}
 	h.syncImport(ctx, caller, doc, build)
+	if build.Import.Registry.State != buildTerminalObserved || build.Status != sandbox.BuildReady || !buildNeedsSync(build) || buildPinSDKStatus(build) != sandbox.BuildBuilding {
+		t.Fatalf("terminal handoff did not retain recovery intent: %+v", build)
+	}
+	api.mu.Lock()
+	heldPod := api.pods[sandbox.BuildResourceID(build.BuildID)]
+	delete(api.pods, sandbox.BuildResourceID(build.BuildID))
+	api.mu.Unlock()
+	if _, err := db.Pool.Exec(ctx, `DROP TRIGGER fail_import_binding ON registry_pin`); err != nil {
+		t.Fatal(err)
+	}
+	// Crash after BOUND but before final owner-finished publication.
+	if _, err := db.Pool.Exec(ctx, `CREATE FUNCTION fail_import_finish() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.doc->'builds'->0->'import'->'registryOperation'->>'state'='finished' THEN RAISE EXCEPTION 'owner finish failpoint'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_import_finish BEFORE UPDATE ON sandbox_templates FOR EACH ROW EXECUTE FUNCTION fail_import_finish()`); err != nil {
+		t.Fatal(err)
+	}
+	restarted := &Handler{sbTemplates: db.C("sandbox_templates"), sbBuildPinsDB: db}
+	fresh, err := restarted.loadTemplate(ctx, project, doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc = fresh
+	build = &doc.Builds[0]
+	restarted.syncImport(ctx, caller, doc, build)
+	if build.Import.Registry.State != buildTerminalObserved || !buildNeedsSync(build) {
+		t.Fatal("bound owner lost recovery intent")
+	}
+	if _, err := db.Pool.Exec(ctx, `DROP TRIGGER fail_import_finish ON sandbox_templates`); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err = restarted.loadTemplate(ctx, project, doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc = fresh
+	build = &doc.Builds[0]
+	restarted.syncImport(ctx, caller, doc, build)
+	api.mu.Lock()
+	api.pods[sandbox.BuildResourceID(build.BuildID)] = heldPod
+	api.mu.Unlock()
 	if buildPinSDKStatus(build) != sandbox.BuildReady || build.Import.Registry.State != buildPinFinished {
 		t.Fatalf("terminal result did not bind: %+v", build)
 	}
@@ -192,7 +235,7 @@ func TestImportPortConcurrentAliasesTerminalBindingAndUnknownHold(t *testing.T) 
 	// Alias deletion cannot delete the shared artifact; it only removes the name.
 	r := httptest.NewRequest("DELETE", "/templates/alias5", nil)
 	rc := chi.NewRouteContext()
-	rc.URLParams.Add("templateID", "alias5")
+	rc.URLParams.Add("templateID", doc.Aliases[0])
 	r = r.WithContext(context.WithValue(context.WithValue(ctx, e2bCtxKey{}, caller), chi.RouteCtxKey, rc))
 	w := httptest.NewRecorder()
 	h.e2bTemplateDeleteLocked(w, r)

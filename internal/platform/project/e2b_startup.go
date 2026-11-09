@@ -12,7 +12,16 @@ import (
 // savedStartupAccess makes token retrieval part of resume/fork startup success. A failed
 // response must not leave an unknown new fork or destroy a retryable paused snapshot.
 func (h *Handler) savedStartupAccess(ctx context.Context, c *e2bCaller, id string) (*sandbox.Access, error) {
-	a, err := c.ss.AccessFor(ctx, c.proj.ID, id)
+	return h.savedStartupAccessRow(ctx, c, id, h.e2bRow(ctx, c, id))
+}
+func (h *Handler) savedStartupAccessRow(ctx context.Context, c *e2bCaller, id string, row *cloud.CloudResource) (*sandbox.Access, error) {
+	var a *sandbox.Access
+	var err error
+	if row != nil {
+		a, err = committedStartupAccess(ctx, row.Data, time.Now, func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, id) })
+	} else {
+		a, err = c.ss.AccessFor(ctx, c.proj.ID, id)
+	}
 	if err == nil {
 		err = ctx.Err()
 	}
@@ -55,4 +64,29 @@ func (h *Handler) cleanupFailedStartup(ctx context.Context, c *e2bCaller, row *c
 	if err := h.sandboxDelete(cleanup, c.es, c.proj, row); err != nil {
 		slog.Error("e2b: cleanup after failed startup", "sandbox", row.ExternalID, "err", err)
 	}
+}
+
+// The first Ready TTL is committed before this helper. Its actual end (never
+// the provisional create end) also bounds cache/access and final usable success.
+func committedStartupAccess(ctx context.Context, live map[string]any, now func() time.Time, access func(context.Context) (*sandbox.Access, error)) (*sandbox.Access, error) {
+	end, err := time.Parse(time.RFC3339, fmt.Sprint(live["shutdownTime"]))
+	if err != nil {
+		return nil, context.DeadlineExceeded
+	}
+	if err := e2bReadyAlive(ctx, end, now()); err != nil {
+		return nil, err
+	}
+	if live["ready"] != true || live["status"] != sandbox.StatusRunning {
+		return nil, sandbox.ErrNotRunning
+	}
+	ctx, cancel := context.WithDeadline(ctx, end)
+	defer cancel()
+	a, err := access(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := e2bReadyAlive(ctx, end, now()); err != nil {
+		return nil, err
+	}
+	return a, nil
 }

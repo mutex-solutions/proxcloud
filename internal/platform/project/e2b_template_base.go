@@ -109,9 +109,7 @@ func registryDockerConfigContext(ctx context.Context, cfg sandbox.Config, image 
 		return nil, err
 	}
 	host := registryHost(image)
-	if own := registryHost(strings.TrimRight(cfg.TemplateRegistry, "/") + "/x"); own != "" && host == own {
-		return nil, errBase("fromImageRegistry cannot be used with the sandbox registry: use fromTemplate")
-	}
+
 	var auth string
 	switch r.Type {
 	case "registry":
@@ -206,17 +204,12 @@ func (h *Handler) resolveBase(ctx context.Context, c *e2bCaller, fromImage, from
 		fromImage = defaultBaseImage
 	}
 	// Repository names are lowercase (OCI distribution spec): reject now, not in the build pod.
-	if repo, _, _ := strings.Cut(fromImage, "@"); strings.ToLower(imageRepoName(repo)) != imageRepoName(repo) {
-		return nil, errBase("fromImage %q: the repository name must be lowercase", fromImage)
-	}
+
 	if _, err := parseCallerImage(fromImage); err != nil {
 		return nil, err
 	}
 	if noRegistry {
-		if onRegistry(fromImage) == sandbox.BaseAuthRegistry {
-			// The registry's own images by name: a built-in through fromTemplate, a project template likewise.
-			return nil, errBase("fromImage %q is on the sandbox registry: use fromTemplate", fromImage)
-		}
+
 		return &buildBase{Ref: fromImage}, nil
 	}
 	var r fromRegistry
