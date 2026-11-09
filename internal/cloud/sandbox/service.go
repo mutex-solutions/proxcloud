@@ -731,6 +731,11 @@ func (s *Service) RegistryRefsInUse(ctx context.Context) ([]string, error) {
 			}
 		}
 	}
+	warmRefs, err := s.WarmRegistryRefs(ctx)
+	if err != nil {
+		return nil, err
+	} // unknown intent must block registry pruning
+	refs = append(refs, warmRefs...)
 	return refs, nil
 }
 
