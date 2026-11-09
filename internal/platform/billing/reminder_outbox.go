@@ -127,6 +127,9 @@ func (r *Repo) scheduleReminderTx(ctx context.Context, c *SavingsContract, days 
 			days = append(days, d.DaysBefore)
 		}
 	}
+	if len(days) == 0 {
+		return nil, false, errors.New("reminder schedule has no windows")
+	}
 	unique := map[int]bool{}
 	for _, day := range days {
 		if day < 0 || day > 366 {
@@ -206,17 +209,19 @@ func (s *SavingsService) queueReminder(ctx context.Context, candidate *ReminderN
 		if c == nil || c.Status != SavingsStatusActive || c.EndDate == nil {
 			return nil
 		}
-		var n *ReminderNotification
-		if candidate.ExpiryGeneration == "" {
-			var e error
+		// The batch candidate is only an identity hint. Extension/admin edits may
+		// have completed or adopted it before this contract lock was acquired.
+		n := new(ReminderNotification)
+		found, e := s.repo.reminders.GetForUpdate(tc, candidate.ID, n)
+		if e != nil || !found {
+			return e
+		}
+		if n.Status != ReminderStatusInProgress || n.ResourceType != ResourceTypeSavingsContract || n.TargetResourceID != c.ID {
+			return nil
+		}
+		if n.ExpiryGeneration == "" {
 			n, _, e = s.repo.scheduleReminderTx(tc, c, nil, now)
 			if e != nil {
-				return e
-			}
-		} else {
-			n = new(ReminderNotification)
-			found, e := s.repo.reminders.GetForUpdate(tc, candidate.ID, n)
-			if e != nil || !found {
 				return e
 			}
 		}

@@ -15,6 +15,11 @@ client/admin cancel/extend/expiry/delete joins contract -> reminder -> outbox lo
 and cancels only pre-intent work. A keyless cancellation capability stays wired
 when the producer is OFF; any durable history prevents legacy SMTP fallback.
 Admin no-op/render-only edits preserve future windows and immutable selected mail.
+Batch candidates are identity hints only: the candidate row is reread under the
+contract/reminder locks before legacy adoption, so an expiry mutation cannot turn
+a stale snapshot into an empty DONE schedule that poisons the next generation.
+Creation rejects empty window sets; a deterministic PG regression proves both
+client/admin expiry changes still permit the new generation's later due enqueue.
 
 **Why:** SMTP-before-SentAt and save-before-notify had crash gaps; ignored errors
 could mark missing messages as sent. A producer rollback, existing admin raw edit
