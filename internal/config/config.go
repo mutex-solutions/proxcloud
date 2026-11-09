@@ -44,7 +44,10 @@ type Config struct {
 		Port int
 	}
 	DB struct {
-		URL string // PostgreSQL DSN (primary datastore)
+		URL string // PostgreSQL DSN (writable PRIMARY; all correctness paths)
+		// ReadURL is optional, read-only, lag-tolerant job HISTORY/metrics only.
+		// Empty means primary fallback; it is never passed to repos or workers.
+		ReadURL string
 	}
 	Rabbit struct {
 		Host     string
@@ -86,9 +89,11 @@ type Config struct {
 		// WITHOUT auto-starting the crons — so a deploy can be driven deterministically for the
 		// golden run while staying dormant (no timed bill charging).
 		DebugTriggers bool
-		// RabbitFanout routes the charge cron through RabbitMQ (one message per ACTIVE
-		// profile → a consumer per pod) instead of the in-process loop. Default off.
-		RabbitFanout bool
+		// RabbitFanout is a rejected legacy migration flag, not a live code path.
+		RabbitFanout      bool
+		WorkerConcurrency int
+		PollInterval      time.Duration
+		LeaseDuration     time.Duration
 	}
 	// Billing selects which engine charges bills, and — when that is an external service — how to
 	// reach it.
@@ -154,6 +159,7 @@ func Load() (*Config, error) {
 
 	// PostgreSQL — the primary datastore; injected purely via env by the chart.
 	c.DB.URL = envOr("PROXCLOUD_DB_URL", k.String("db.url"))
+	c.DB.ReadURL = envOr("PROXCLOUD_DB_READ_URL", k.String("db.read-url"))
 
 	// RabbitMQ — host/port from yaml, creds from env.
 	c.Rabbit.Host = envOr("PROXCLOUD_RABBITMQ_HOST", k.String("rabbitmq.host"))
@@ -192,6 +198,18 @@ func Load() (*Config, error) {
 	c.Jobs.SchedulerEnabled = boolEnv("PROXCLOUD_JOBS_SCHEDULER_ENABLED") || k.Bool("proxcloud.jobs.scheduler-enabled")
 	c.Jobs.DebugTriggers = boolEnv("PROXCLOUD_JOBS_DEBUG_TRIGGERS") || k.Bool("proxcloud.jobs.debug-triggers")
 	c.Jobs.RabbitFanout = boolEnv("PROXCLOUD_JOBS_RABBIT_FANOUT") || k.Bool("proxcloud.jobs.rabbit-fanout")
+	c.Jobs.WorkerConcurrency = intOr(envInt("PROXCLOUD_JOBS_WORKER_CONCURRENCY"), 2)
+	c.Jobs.PollInterval = time.Second
+	c.Jobs.LeaseDuration = time.Minute
+	for key, target := range map[string]*time.Duration{"PROXCLOUD_JOBS_POLL_INTERVAL": &c.Jobs.PollInterval, "PROXCLOUD_JOBS_LEASE_DURATION": &c.Jobs.LeaseDuration} {
+		if raw := os.Getenv(key); raw != "" {
+			value, err := time.ParseDuration(raw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid %s duration", key)
+			}
+			*target = value
+		}
+	}
 	// Billing provider. Unset → native, so an existing deployment keeps charging exactly as before.
 	c.Billing.Provider = billingprovider.Normalize(
 		envOr("PROXCLOUD_BILLING_PROVIDER", k.String("proxcloud.billing.provider")))
@@ -224,8 +242,11 @@ func (c *Config) Validate() error {
 	if c.DB.URL == "" {
 		missing = append(missing, "PROXCLOUD_DB_URL")
 	}
-	if c.Rabbit.Host == "" {
-		missing = append(missing, "rabbitmq.host / PROXCLOUD_RABBITMQ_HOST")
+	if c.Jobs.RabbitFanout {
+		return fmt.Errorf("PROXCLOUD_JOBS_RABBIT_FANOUT / proxcloud.jobs.rabbit-fanout was removed: stop old producers, drain/reconcile proxcloud.charge, then clear the flag; see docs/durable-jobs.md")
+	}
+	if c.Jobs.WorkerConcurrency < 1 || c.Jobs.WorkerConcurrency > 16 || c.Jobs.PollInterval < 100*time.Millisecond || c.Jobs.PollInterval > time.Minute || c.Jobs.LeaseDuration < 10*time.Second || c.Jobs.LeaseDuration > 10*time.Minute {
+		return fmt.Errorf("invalid durable job settings: concurrency must be 1..16, poll 100ms..1m, lease 10s..10m")
 	}
 	// Remote charging without a billing URL would silently stop charging bills altogether — the
 	// cron would fire, find nowhere to send the work, and log. Fail closed instead.

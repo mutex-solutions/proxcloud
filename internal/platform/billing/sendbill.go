@@ -18,11 +18,12 @@ import (
 // NOTE: the savings-contract bill adjustment applied in sendBill (savingsContractAdjustmentsService
 // .addBillAdjustments) is the separate Theme-B charge-adjustment item, not yet wired here.
 type BillSendService struct {
-	repo        *Repo
-	pricing     *pricing.Repo // tax rates for the settle legs (nil-safe → no tax)
-	notifier    Notifier
-	billLink    BillLinkFunc  // {{billUrl}} in the bill mails (nil → "")
-	autoCollect AutoCollector // charge the card right after the bill is issued (chargesAtIssue; nil → cron only)
+	repo          *Repo
+	pricing       *pricing.Repo // tax rates for the settle legs (nil-safe → no tax)
+	notifier      Notifier
+	billLink      BillLinkFunc                                                      // {{billUrl}} in the bill mails (nil → "")
+	autoCollect   AutoCollector                                                     // charge the card right after the bill is issued (chargesAtIssue; nil → cron only)
+	chargeBacklog func(context.Context, string, time.Time, time.Time) (bool, error) // PRIMARY, caller holds profile money lock
 }
 
 // AutoCollector charges a profile's SENT bills on its current card — wired from cmd/api
@@ -30,6 +31,12 @@ type BillSendService struct {
 // a failure is e-mailed and retried the same way). Best-effort: the bill is already issued; the bill
 // mail waits for the charge's outcome.
 type AutoCollector func(ctx context.Context, profile *BillingProfile) error
+
+// SetChargeBacklog defers invoice issuance until known durable work for the
+// original cycle (including unresolved dead letters) is reconciled. DB-only.
+func (s *BillSendService) SetChargeBacklog(fn func(context.Context, string, time.Time, time.Time) (bool, error)) {
+	s.chargeBacklog = fn
+}
 
 // SetAutoCollector wires the pay-as-you-go charge hook. Nil → bills wait for the collect cron.
 func (s *BillSendService) SetAutoCollector(fn AutoCollector) { s.autoCollect = fn }
@@ -91,6 +98,15 @@ func (s *BillSendService) sendBill(ctx context.Context, profile *BillingProfile,
 		var err error
 		if bill, err = s.repo.BillByID(ctx, billID); err != nil || bill == nil || bill.Status != pricing.BillStatusOpen {
 			return err
+		}
+		if s.chargeBacklog != nil && bill.BillingCycle != nil && bill.BillingCycle.StartDate != nil && bill.BillingCycle.EndDate != nil {
+			pending, err := s.chargeBacklog(ctx, profile.ID, *bill.BillingCycle.StartDate, *bill.BillingCycle.EndDate)
+			if err != nil {
+				return err
+			}
+			if pending {
+				return nil
+			}
 		}
 		// delete-if-zero: total amount 0 AND no positive item (an empty/zero accrual bill).
 		positive := false
