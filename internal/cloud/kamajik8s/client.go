@@ -569,6 +569,19 @@ func (c *Client) DeleteCore(ctx context.Context, plural, ns, name string) error 
 	return c.delete(ctx, corePath(plural, ns), name)
 }
 
+// DeleteCoreUID deletes only the independently observed object instance.
+func (c *Client) DeleteCoreUID(ctx context.Context, plural, ns, name, uid string) error {
+	if uid == "" {
+		return errors.New("delete core requires UID")
+	}
+	_, err := c.do(ctx, http.MethodDelete, corePath(plural, ns)+"/"+url.PathEscape(name), nil, map[string]any{"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": map[string]any{"uid": uid}}, "")
+	var ae *APIError
+	if errors.As(err, &ae) && ae.Status == 404 {
+		return nil
+	}
+	return err
+}
+
 // ListPodsAllNamespaces lists pods in every namespace filtered by labelSelector.
 func (c *Client) ListPodsAllNamespaces(ctx context.Context, labelSelector string) ([]map[string]any, error) {
 	return c.list(ctx, "/api/v1/pods", labelSelector)

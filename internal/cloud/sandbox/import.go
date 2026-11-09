@@ -210,7 +210,15 @@ func (s *Service) DeleteImport(ctx context.Context, build string) error {
 	if phase != "Succeeded" && phase != "Failed" {
 		return fmt.Errorf("sandbox: import is active or unknown; retain operation pins")
 	}
-	if err = s.api.DeleteCore(ctx, "pods", BuildNamespace, buildName(build)); err != nil {
+	api, ok := s.api.(coreUIDDeleter)
+	if !ok {
+		return fmt.Errorf("sandbox: import cleanup requires conditional UID deletion")
+	}
+	uid := digStr(pod, "metadata", "uid")
+	if uid == "" {
+		return fmt.Errorf("sandbox: import cleanup UID missing")
+	}
+	if err = api.DeleteCoreUID(ctx, "pods", BuildNamespace, buildName(build), uid); err != nil {
 		return err
 	}
 	// Caller credentials are pod-owned. Avoid broad secret deletion: GC follows the

@@ -17,6 +17,13 @@
 # every sandbox pod of a provider with `envd` mounts read-only at /.proxcloud (SB5, docs/managed-sandbox.md §5). Its
 # image is CI's proxcloud-sandbox-runtime (deploy/sandbox-runtime.Dockerfile); pin a release tag or digest here.
 # Installer stage 55 pins it, and drops the init container on a site without a sandbox domain (no envd there).
+# Optional image warming stays disabled until an operator verifies the installed
+# sandbox-init supports -prepull under gVisor with no user code/ready marker/envd.
+# The bundle carries /opt/proxcloud-sandbox/bin/prepull-runtime=v1 as evidence,
+# but this DaemonSet deliberately DOES NOT label nodes automatically. After canary
+# verification the operator may grant the protected NodeRestriction capability label
+# node-restriction.kubernetes.io/proxcloud-prepull-runtime=v1 to eligible nodes.
+# Remove that label before downgrading the runtime. No rollout is performed by this file edit.
 # Not here yet: the NVIDIA toolkit + nvproxy branch for GPU nodes (SB9).
 # ponytail: setup runs once per pod start; bumping RUNSC_VERSION = edit + rollout restart.
 apiVersion: v1

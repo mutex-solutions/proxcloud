@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: sandbox runtime parity core from pinned EE source
+
+**What changed:** phased bounded startup and a finite Ready-clock runtime TTL,
+UID/RV durable Ready candidate/final lifetime commit, authoritative environment/ID
+budgets and PID1 mode guards; independent builder resources and stable diagnostics;
+operator-scoped no-build digest import worker and optional finite pull-only warming.
+
+**Why:** slow image pulls must not consume runtime TTL or fabricate billing/usable
+Ready, retry/flap must not refresh a durable lifetime origin, and source credentials
+must not cross exact repository/project boundaries. Warming is current-policy,
+context-bounded and runtime-capability gated, never customer-code execution/cache GC.
+
+**Views updated:** sandbox core code invariant table and runtime adaptation contract.
+Focused Go1.25 unit/race and loopback OCI tests cover the new contracts; preserve
+ProxCloud's native/egress/readiness/abuse, force-OCI directory handoff, credential-free
+prepare-output and durable BUILD dispatch guards. No live publication, rollout,
+RBAC/labels, arbitrary registry source fallback or real-delete activation is claimed.
+
 ## 2026-11-09: registry BUILD/template participation (P2-A)
 
 **What changed:** startup schema + BUILD-only wiring; stable owner/nonce PREPARING,
