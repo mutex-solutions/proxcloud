@@ -127,6 +127,7 @@ type Config struct {
 	GPUModels    []string // offered GPU model aliases; each must exist as a LabelGPU node label
 	Limits       Limits
 	Startup      StartupConfig
+	Build        BuildConfig
 	// Envd runs E2B's envd in every sandbox (via sandbox-init from the node runtime dir), which is
 	// what the E2B-compatible API and SDKs talk to. Requires the node runtime installed by
 	// deploy/sandbox-cluster (proxcloud-sandbox-runtime, SB2a) and sandbox-proxy serving Domain.
@@ -202,6 +203,7 @@ const (
 // WithDefaults fills unset fields.
 func (c Config) WithDefaults() Config {
 	c.Startup = c.Startup.withDefaults()
+	c.Build = c.Build.withDefaults()
 	if c.EgressMbps == 0 {
 		c.EgressMbps = 100
 	}
