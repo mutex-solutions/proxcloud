@@ -4,6 +4,37 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: poll the actual worker of a cross-node seed upload
+
+**What changed:** ISO uploads require a nonempty, structurally valid `imgcopy` UPID, but no longer require its
+worker node to equal the requested storage node. The authenticated UPID selects the node polled by `WaitTask`;
+configuration and content-delete endpoints retain their target-node checks. Null/missing/malformed task identities
+remain unknown mutations behind the existing durable fence.
+
+**Why:** PVE's upload handler runs on the API-entry node and copies to a different target via scp. The live seed
+migration/rebuild drill targeted pve2 through pve1 and received a completed pve1 imgcopy task; treating that valid
+identity as unknown unnecessarily stopped rebuild after replacing its boot disk. The regression asserts upload-to-
+pve2, poll-running/OK-on-pve1, then config-attach-on-pve2 in order, without weakening uncertainty or cleanup guards.
+
+**Diagrams updated:** none; the existing PVE client/seed component boundary is unchanged. No lab writes in this fix.
+
+## 2026-11-09: usable small static IPv4 subnet pools
+
+**What changed:** `VnetStaticPoolFor` uses a dedicated `staticHostRange`, independent of PVE DHCP sizing.
+Static `/29` and `/30` subnets use usable host addresses; `/28` and larger keep the network+10 reservation.
+Whole-address IPv4 arithmetic bounds the span to its subnet, with network/broadcast and gateway endpoints
+removed. The allocator continues skipping an interior gateway, exclusions and allocated addresses. Unsupported
+or malformed static subnets return an error, not empty range endpoints. DHCP keeps its existing `/28` minimum;
+the network-create API still accepts `/29` or larger.
+
+**Why:** a valid network-created `/29` reused the DHCP helper's minimum-size guard and returned an empty span,
+so the subsequent server allocation received `Ranges:["-"]` and failed with an invalid-pool 503. Small static
+subnets need usable hosts, not relaxed DHCP constraints or a new API rejection of existing valid networks.
+
+**Diagrams updated:** none; C4.1 symbol table and address-allocation contract describe this internal fix.
+PVE helper tests and fake-PVE/project allocator regressions cover `/29` exhaustion, `/30`, an upper `/25`,
+gateway placement, DHCP sizing and malformed/IPv6/out-of-subnet pools. No lab resources were changed.
+
 ## 2026-11-09: ordinary server seed artifact ownership and guarded cleanup
 
 **What changed:** every new ordinary server ISO receives a write-ahead artifact row with immutable installation identity

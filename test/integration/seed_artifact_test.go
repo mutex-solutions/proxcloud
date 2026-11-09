@@ -327,6 +327,81 @@ func TestSeedAttachWriteAheadCrashBoundaries(t *testing.T) {
 	}
 }
 
+// PVE upload is not proxyto=node: an API on pve1 runs imgcopy and copies the
+// seed to pve2. Only after that pve1 task completes may pve2's config attach it.
+func TestSeedAttachCrossNodeUploadWorker(t *testing.T) {
+	ctx := context.Background()
+	db := freshPG(t)
+	cfg := pve.VMConfig{"name": "fixture", "digest": "d"}
+	var events []string
+	polls := 0
+	reply := func(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api2/json/nodes/pve2/qemu/7/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			reply(w, cfg)
+			return
+		}
+		if polls < 2 {
+			t.Error("attach before upload task completed")
+		}
+		_ = r.ParseForm()
+		cfg["ide2"] = r.Form.Get("ide2")
+		events = append(events, "attach-pve2")
+		reply(w, "UPID:pve2:0:0:0:qmconfig:7:t:")
+	})
+	mux.HandleFunc("/api2/json/nodes/pve2/storage/iso/upload", func(w http.ResponseWriter, r *http.Request) {
+		f, h, err := r.FormFile("filename")
+		if err != nil {
+			t.Error(err)
+			http.Error(w, "bad multipart", 400)
+			return
+		}
+		defer f.Close()
+		var rows []pve.SeedArtifact
+		if err := db.C("pveSeedArtifact").Find(ctx, pgdoc.M{"volume": "iso:iso/" + h.Filename}, &rows); err != nil || len(rows) != 1 || !rows[0].MutationPending {
+			t.Error("upload before durable journal")
+		}
+		events = append(events, "upload-target-pve2")
+		reply(w, "UPID:pve1:0020BF34:01544F11:6AF17B5C:imgcopy::proxcloud@pve!platform:")
+	})
+	mux.HandleFunc("/api2/json/nodes/pve1/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		polls++
+		if polls == 1 {
+			events = append(events, "poll-pve1-running")
+			reply(w, map[string]any{"status": "running"})
+			return
+		}
+		events = append(events, "poll-pve1-OK")
+		reply(w, map[string]any{"status": "stopped", "exitstatus": "OK"})
+	})
+	mux.HandleFunc("/api2/json/nodes/pve2/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "imgcopy") {
+			t.Error("upload task polled on target instead of worker")
+		}
+		events = append(events, "config-pve2-OK")
+		reply(w, map[string]any{"status": "stopped", "exitstatus": "OK"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	svc, err := pve.NewService(pve.Config{APIURL: srv.URL, TokenID: "t", Secret: "s"}, "svc", "pc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SeedArtifacts = pve.NewSeedArtifactRepo(db)
+	volume, err := svc.AttachSeedISO(ctx, "pve2", 7, "iso", pve.Seed{MetaData: `{"instance-id":"iid-a"}`, UserData: "#cloud-config\n{}\n"}, pve.SeedArtifact{SeedID: "source", ProjectID: "p", InstanceID: "iid-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(events, ",") != "upload-target-pve2,poll-pve1-running,poll-pve1-OK,attach-pve2,config-pve2-OK" {
+		t.Fatalf("unexpected ordering: %v", events)
+	}
+	rows, err := svc.SeedArtifacts.ForSeed(ctx, "svc", "source")
+	if err != nil || len(rows) != 1 || rows[0].Volume != volume || rows[0].State != "attached" || rows[0].MutationPending {
+		t.Fatal("cross-node attachment not committed")
+	}
+}
+
 func TestSeedArtifactLocksCommitIndependentlyAcrossReplicas(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)

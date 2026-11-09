@@ -850,7 +850,10 @@ func (s *Service) VnetStaticPoolFor(ctx context.Context, vnet, within string) (c
 	if err != nil {
 		return "", "", "", "", false, fmt.Errorf("pve: vnet %s subnet %q: %w", vnet, sub.CIDR, err)
 	}
-	first, last = dhcpRange(ipnet, sub.Gateway)
+	first, last = staticHostRange(ipnet, sub.Gateway)
+	if first == "" {
+		return "", "", "", "", false, fmt.Errorf("pve: vnet %s subnet %q has no usable static IPv4 host range", vnet, sub.CIDR)
+	}
 	return sub.CIDR, sub.Gateway, first, last, true, nil
 }
 
@@ -1068,7 +1071,51 @@ func firstHost(ipnet *net.IPNet) string {
 	return out.String()
 }
 
-// dhcpRange returns [.10 .. last host] of a v4 subnet, clear of the gateway.
+// staticHostRange is the platform-assigned IPv4 span, not a PVE DHCP range.
+// Keep the first ten addresses reserved on /28 and larger subnets; smaller
+// subnets use all hosts. Trim a gateway at either end; pickPublicIP skips one
+// inside the span, along with addresses already allocated there.
+func staticHostRange(ipnet *net.IPNet, gateway string) (string, string) {
+	if ipnet == nil {
+		return "", ""
+	}
+	ones, bits := ipnet.Mask.Size()
+	if bits != 32 || ones > 30 {
+		return "", "" // IPv4 network + broadcast must leave usable hosts
+	}
+	ip := ipnet.IP.Mask(ipnet.Mask).To4()
+	if ip == nil {
+		return "", ""
+	}
+	u32 := func(ip net.IP) uint32 {
+		return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
+	}
+	base := u32(ip)
+	first := base + 1
+	if ones <= 28 {
+		first = base + 10
+	}
+	last := (base | (^uint32(0) >> ones)) - 1
+	if gw := net.ParseIP(gateway).To4(); gw != nil {
+		n := u32(gw)
+		if n == first {
+			first++
+		}
+		if n == last {
+			last--
+		}
+	}
+	if first > last {
+		return "", ""
+	}
+	addr := func(n uint32) string {
+		return net.IPv4(byte(n>>24), byte(n>>16), byte(n>>8), byte(n)).String()
+	}
+	return addr(first), addr(last)
+}
+
+// dhcpRange keeps PVE's DHCP sizing policy: network+10 through the last host,
+// only on /28 or larger IPv4 subnets. Static allocation has no such minimum.
 func dhcpRange(ipnet *net.IPNet, gateway string) (string, string) {
 	ip := ipnet.IP.To4()
 	if ip == nil {
