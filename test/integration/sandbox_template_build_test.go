@@ -44,7 +44,10 @@ func (c *buildCluster) ApplyCore(_ context.Context, plural string, obj map[strin
 	}
 	return nil
 }
-func (c *buildCluster) GetCore(_ context.Context, plural, _, name string) (map[string]any, error) {
+func (c *buildCluster) GetCore(ctx context.Context, plural, ns, name string) (map[string]any, error) {
+	if plural == "pods" && strings.HasPrefix(ns, "sb-") {
+		return c.sbxCluster.GetCore(ctx, plural, ns, name)
+	}
 	c.pmu.Lock()
 	defer c.pmu.Unlock()
 	if plural == "pods" {
@@ -68,6 +71,7 @@ func newTemplateFixture(t *testing.T) (*sbxFixture, *buildCluster, string) {
 		t.Fatal(err)
 	}
 	f.h.SetSandboxTemplates(f.db.C("sandbox_templates"))
+	wireRuntimeCreateFixture(t, f)
 	return f, bc, keyA
 }
 

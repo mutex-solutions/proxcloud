@@ -78,6 +78,11 @@ func TestE2BCustomColdReadyCleanup(t *testing.T) {
 	for _, mode := range []string{"cancel-ready", "cancel-access", "expired-ready"} {
 		t.Run(mode, func(t *testing.T) {
 			f, _, key := newTemplateFixture(t)
+			// Runtime fingerprints must see the same provider startup budget as
+			// the low-level service, not an out-of-band fake-only override.
+			if _, err := f.db.C("externalService").SetByID(context.Background(), "sbx", pgdoc.M{"config.sandbox.startup": pgdoc.M{"totalSeconds": 1, "schedulingSeconds": 1, "pullSeconds": 1, "runtimeSeconds": 1}}, nil); err != nil {
+				t.Fatal(err)
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			cluster := &coldReadyCluster{sbxCluster: f.cluster, mode: mode, cancel: cancel}
@@ -88,7 +93,7 @@ func TestE2BCustomColdReadyCleanup(t *testing.T) {
 			})
 			mustInsert(t, f.db, "sandbox_templates", pgdoc.M{
 				"_id": "cold-build", "projectId": "pa", "name": "cold-build", "cpu": 1, "memoryGiB": 1,
-				"builds": []any{pgdoc.M{"buildID": "b", "status": "ready", "image": "192.0.2.226/t/pa/cold@sha256:" + strings.Repeat("a", 64)}},
+				"builds": []any{pgdoc.M{"buildID": "b", "status": "ready", "image": "192.0.2.226/t/pa/0123456789abcdef0123@sha256:" + strings.Repeat("a", 64)}},
 			})
 			req := httptest.NewRequest(http.MethodPost, "/e2b/sandboxes", strings.NewReader(`{"templateID":"cold-build","timeout":300}`)).WithContext(ctx)
 			req.Header.Set("X-API-Key", key)
@@ -122,7 +127,7 @@ func TestE2BLegacyShortLifetimeUnchanged(t *testing.T) {
 				name = kind
 				mustInsert(t, f.db, "sandbox_templates", pgdoc.M{
 					"_id": name, "projectId": "pa", "name": name, "kind": kind, "cpu": 1, "memoryGiB": 1,
-					"builds": []any{pgdoc.M{"buildID": "b", "status": "ready", "image": "192.0.2.226/t/pa/cold@sha256:" + strings.Repeat("a", 64)}},
+					"builds": []any{pgdoc.M{"buildID": "b", "status": "ready", "image": "192.0.2.226/t/pa/0123456789abcdef0123@sha256:" + strings.Repeat("a", 64)}},
 				})
 			}
 			code, body := f.e2b(key, http.MethodPost, "/sandboxes", `{"templateID":"`+name+`","timeout":1}`)

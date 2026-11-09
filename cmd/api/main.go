@@ -320,6 +320,10 @@ func run() error {
 		return fmt.Errorf("sandbox build registry pin schema: %w", err)
 	}
 	projectH.SetSandboxBuildPins(pg)
+	if err := project.EnsureSandboxRuntimePins(context.Background(), pg); err != nil {
+		return fmt.Errorf("sandbox runtime CREATE owner schema: %w", err)
+	}
+	projectH.SetSandboxRuntimePins(pg)
 	// Paused sandboxes (E2B pause, autoPause, autoResume): the saved CR and the snapshot each one resumes from.
 	projectH.SetSandboxPaused(pg.C("sandbox_paused"))
 	for _, table := range []string{"sandbox_safety", "auditEvent"} {

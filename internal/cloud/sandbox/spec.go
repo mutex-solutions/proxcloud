@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 	"github.com/mutex-solutions/proxcloud/internal/sandboxenv"
 )
 
@@ -44,6 +45,10 @@ type Spec struct {
 	Custom *Template `json:"-"`
 	// Quota is the project's sandbox quota, set by the caller (nil = the provider limits only).
 	Quota *ProjectQuota `json:"-"`
+
+	// Server-only CREATE metadata and opaque one-shot proof; never API decoded.
+	RuntimeSource *RuntimeCreateSource       `json:"-"`
+	RuntimePins   *registrypins.RuntimeProof `json:"-"`
 
 	// Minted by CreateSandbox, rendered into the CR by BuildCR; never decoded from callers.
 	envdToken    string

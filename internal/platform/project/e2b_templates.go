@@ -1141,13 +1141,19 @@ func (h *Handler) resolveCustomTemplate(ctx context.Context, projectID, ref stri
 
 // Resolve the kind from the same owned record as the ready image, never a second lookup or caller flag.
 func (h *Handler) resolveCustomTemplateWithKind(ctx context.Context, projectID, ref string) (*sandbox.Template, string, string, error) {
+	t, name, kind, _, err := h.resolveCustomTemplateCandidate(ctx, projectID, ref)
+	return t, name, kind, err
+}
+
+// Same read supplies both the early CREATE candidate and all inherited settings.
+func (h *Handler) resolveCustomTemplateCandidate(ctx context.Context, projectID, ref string) (*sandbox.Template, string, string, *sandbox.RuntimeCreateSource, error) {
 	if h.sbTemplates == nil {
-		return nil, "", "", nil
+		return nil, "", "", nil, nil
 	}
 	name, tag := splitNameTag(ref)
 	t, err := h.loadTemplate(ctx, projectID, name)
 	if err != nil || t == nil {
-		return nil, "", "", err
+		return nil, "", "", nil, err
 	}
 	var bl *templateBuild
 	if tag == "" {
@@ -1155,13 +1161,14 @@ func (h *Handler) resolveCustomTemplateWithKind(ctx context.Context, projectID, 
 	} else if id, ok := t.Tags[tag]; ok {
 		bl = t.build(id)
 	}
-	if bl == nil || buildPinSDKStatus(bl) != sandbox.BuildReady || bl.Image == "" {
-		return nil, "", "", fmt.Errorf("%w: template %q has no ready build", sandbox.ErrBadTemplate, ref)
+	if t.Deleting || bl == nil || buildPinSDKStatus(bl) != sandbox.BuildReady || bl.Image == "" {
+		return nil, "", "", nil, fmt.Errorf("%w: template %q has no ready build", sandbox.ErrBadTemplate, ref)
 	}
-	return &sandbox.Template{
+	effective := &sandbox.Template{
 		Image: bl.Image, CPU: t.CPU, MemoryGiB: t.MemoryGiB, GPU: t.GPU, StartCmd: bl.StartCmd, ReadyCmd: bl.ReadyCmd,
 		User: bl.User, Workdir: bl.Workdir, StartAsRoot: bl.StartAsRoot, Description: "custom template " + t.Name,
-	}, t.Name, t.Kind, nil
+	}
+	return effective, t.Name, t.Kind, runtimeSource(t, bl, ref, effective), nil
 }
 
 func (h *Handler) e2bTemplateDelete(w http.ResponseWriter, r *http.Request) {

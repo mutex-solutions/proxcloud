@@ -104,6 +104,7 @@ type Handler struct {
 	// sbTemplates holds the projects' custom templates and their builds (SetSandboxTemplates; nil = off).
 	sbTemplates   *pgdoc.Store
 	sbBuildPinsDB *pgdoc.DB
+	sbRuntimeDB   *pgdoc.DB // standalone CREATE owner and runtime pins on PRIMARY
 	// sbPaused holds the paused sandboxes (SetSandboxPaused; nil = pause and resume off).
 	sbPaused   *pgdoc.Store
 	sbSafety   *pgdoc.Store

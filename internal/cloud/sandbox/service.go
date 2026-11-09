@@ -57,11 +57,12 @@ var (
 
 // Service drives one sandbox provider (one sandbox cluster).
 type Service struct {
-	api              K8sAPI
-	cfg              Config
-	serviceID        string
-	now              func() time.Time
-	requireBuildPins bool
+	api                      K8sAPI
+	cfg                      Config
+	serviceID                string
+	now                      func() time.Time
+	requireBuildPins         bool
+	requireRuntimeCreatePins bool
 }
 
 // New builds a live Service from the provider config.
@@ -75,6 +76,7 @@ func New(cfg Config, serviceID string) (*Service, error) {
 	}
 	s := NewWithAPI(kc, cfg, serviceID)
 	s.requireBuildPins = true
+	s.requireRuntimeCreatePins = true
 	return s, nil
 }
 
@@ -174,11 +176,21 @@ func (s *Service) live(ctx context.Context, projectID string) ([]map[string]any,
 
 // CreateSandbox validates the spec, enforces the per-project concurrency limits against the
 // LIVE cluster (not the cache, which lags), and applies the Sandbox CR. Returns the cache row's
-// data payload. spec.ID is minted here.
+// data payload. A preallocated spec.ID requires its exact opaque CREATE proof;
+// otherwise the service mints a fresh server identity here.
 func (s *Service) CreateSandbox(ctx context.Context, spec *Spec) (map[string]any, error) {
+	// Freeze maps/pointers before validation; the caller only receives server ID.
+	caller := spec
+	frozen := CloneCreateSpec(*spec)
+	spec = &frozen
 	if err := spec.Validate(s.cfg); err != nil {
 		return nil, err
 	}
+	runtimeAnnotations, err := s.consumeRuntimeCreate(spec)
+	if err != nil {
+		return nil, err
+	}
+	caller.ID = spec.ID
 	if err := s.EnsureProjectNamespace(ctx, spec.ProjectID, spec.Quota); err != nil {
 		return nil, fmt.Errorf("sandbox: ensure namespace: %w", err)
 	}
@@ -211,7 +223,6 @@ func (s *Service) CreateSandbox(ctx context.Context, spec *Spec) (map[string]any
 	if err != nil {
 		return nil, err
 	}
-	spec.ID = newSandboxID()
 	if s.cfg.Envd {
 		// envd always requires its access token (E2B's `secure` is always on).
 		spec.envdToken = newToken()
@@ -220,6 +231,7 @@ func (s *Service) CreateSandbox(ctx context.Context, spec *Spec) (map[string]any
 		spec.trafficToken = newToken()
 	}
 	cr := BuildCR(s.cfg, s.serviceID, *spec, shutdown)
+	stampRuntimeCreate(cr, runtimeAnnotations)
 	armStartup(cr, s.cfg, spec.TimeoutSeconds, s.now())
 	if err := s.api.ApplyCR(ctx, CRGroup, CRVersion, CRPlural, cr); err != nil {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
