@@ -136,6 +136,59 @@ func TestWaitReadyLiveCandidateKeepsFirstRuntimeOrigin(t *testing.T) {
 	}
 }
 
+// The one-second product lifetime is tested under the existing private clock,
+// independently from an HTTP/SQL request's unpredictable wall-clock duration.
+func TestOneSecondRuntimeCommitsFirstReadyAndExpiresWithoutRenewal(t *testing.T) {
+	for _, late := range []time.Duration{0, time.Nanosecond} {
+		t.Run(late.String(), func(t *testing.T) {
+			s, f, cr, now := newStartupExpiryFixture(t, 1)
+			id := digStr(cr, "metadata", "name")
+			ann := cr["metadata"].(map[string]any)["annotations"].(map[string]any)
+			if requested, err := ShutdownTimeFor(s.Config(), *now, 1); err != nil || !requested.Equal(now.Add(time.Second)) || str(ann[AnnotationRuntimeSeconds]) != "1" || str(ann[AnnotationStartupPending]) != "true" {
+				t.Fatal("original one-second request was not validated and persisted", err)
+			}
+			provisional := endOf(cr)
+			provisionalEnd, err := time.Parse(time.RFC3339, provisional)
+			if err != nil || !provisionalEnd.Equal(now.Add(901*time.Second)) || s.Config().Startup.SchedulingSeconds != 120 || s.Config().Startup.TotalSeconds != 900 {
+				t.Fatal("one-second runtime must not shorten or expand startup defaults", err)
+			}
+			// A real Ready transition occurs after pending time, but the runtime
+			// remains exactly one second from that first transition.
+			*now = now.Add(5 * time.Second)
+			first := *now
+			setReadyAt(cr, first)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			live, err := s.WaitReady(ctx, "p1", id)
+			end := first.Add(time.Second)
+			if err != nil || live["ready"] != true || live["status"] != StatusRunning || live["runningSince"] != first.Format(time.RFC3339) || live["shutdownTime"] != end.Format(time.RFC3339) || endOf(cr) == provisional || str(ann[AnnotationRuntimeSeconds]) != "1" {
+				t.Fatal("first Ready did not replace provisional end with original one-second runtime", err)
+			}
+			if f.gets != 1 || f.patches != 2 {
+				t.Fatal("first Ready must persist exactly its candidate and lifetime", f.gets, f.patches)
+			}
+			f.maxGets = 3
+			*now = first.Add(500 * time.Millisecond)
+			// Fractional Ready flap exercises an actually different transition,
+			// without a future-time hack or rebasing the first Ready origin.
+			cr["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "lastTransitionTime": now.UTC().Format(time.RFC3339Nano)}}}
+			live, err = s.WaitReady(ctx, "p1", id)
+			if err != nil || live["runningSince"] != first.Format(time.RFC3339) || live["shutdownTime"] != end.Format(time.RFC3339) || f.patches != 2 {
+				t.Fatal("Ready flap renewed the one-second interval", err, f.patches)
+			}
+			*now = end.Add(late)
+			live, err = s.WaitReady(ctx, "p1", id)
+			var startup *StartupError
+			if live != nil || !errors.As(err, &startup) || !startup.Progress.Terminal || startup.Progress.Phase != "runtime" || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal("at/past one-second end must be terminal and never usable", err)
+			}
+			if f.gets != 3 || f.patches != 2 || endOf(cr) != end.Format(time.RFC3339) || digStr(cr, "metadata", "annotations", AnnotationRunningSince) != first.Format(time.RFC3339) || digStr(cr, "metadata", "annotations", AnnotationRuntimeSeconds) != "1" {
+				t.Fatal("expiry patched or renewed the original one-second lifetime", f.gets, f.patches)
+			}
+		})
+	}
+}
+
 func TestWaitReadyTransientNetworkErrorsRemainRetryable(t *testing.T) {
 	for _, getErr := range []error{context.DeadlineExceeded, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("temporary transport failure")}} {
 		t.Run(getErr.Error(), func(t *testing.T) {
