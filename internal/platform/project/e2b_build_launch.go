@@ -42,7 +42,11 @@ func (h *Handler) reserveBuildLaunch(ctx context.Context, c *e2bCaller, t *sandb
 		cb.LaunchStartedAt = &now
 		_, err = h.sbTemplates.Replace(tc, cur.ID, &cur)
 		if err == nil {
+			// Keep the live ledger receipts (embedded operation identity is not a
+			// JSON capability). The row CAS above verified this exact generation.
+			registry := b.Registry
 			*b = *cb
+			b.Registry = registry
 		}
 		return err
 	})

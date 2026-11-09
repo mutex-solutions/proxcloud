@@ -18,7 +18,7 @@ UPSTREAM = "e2b-dev/runtime@e85b9f5 spec/openapi.yml"
 # (method, path) -> ProxCloud difference, appended to the description. None = same as E2B.
 OPS = {
     ("get", "/health"): None,
-    ("post", "/sandboxes"): "ProxCloud: `secure` is ignored (envd always needs its token); `volumeMounts` → 400; `mcp` must be an object (the SDK starts the gateway). `autoPause` pauses the filesystem only: `autoPauseMemory: true` → 400, absent or false is a filesystem pause; 400 where the location cannot take snapshots. `autoResume` (with `autoPause`) works on that filesystem pause: traffic to the paused sandbox's ports cold-boots it; 400 where the location has no wake token. Waits until the sandbox is ready, at most about 50 s, else 503. Passes the same checks as the native create: suspended project 409, suspended billing profile 403, provider DISABLED or a release gate not holding 503, project quota 429. Extensions: `gpu`, `cpuCount`, `memoryMB`.",
+    ("post", "/sandboxes"): "ProxCloud: `secure` is ignored (envd always needs its token); `volumeMounts` → 400; `mcp` must be an object (the SDK starts the gateway). `autoPause` pauses the filesystem only: `autoPauseMemory: true` → 400, absent or false is a filesystem pause; 400 where the location cannot take snapshots. `autoResume` (with `autoPause`) works on that filesystem pause: traffic to the paused sandbox's ports cold-boots it; 400 where the location has no wake token. Waits for phased startup (default total/scheduling/pull/runtime 900/120/720/600 s, hard total 1800), with a first-Ready runtime TTL and one outer cancellation/deadline envelope including final access. Failure cleanup is bounded to 30 s; no expired usable success. Passes the same checks as the native create: suspended project 409, suspended billing profile 403, provider DISABLED or a release gate not holding 503, project quota 429. Extensions: `gpu`, `cpuCount`, `memoryMB`.",
     ("post", "/v2/sandboxes"): "Same as POST /sandboxes.",
     ("get", "/sandboxes"): "ProxCloud: running and paused sandboxes; everything in one page.",
     ("get", "/v2/sandboxes"): "ProxCloud: everything in one page.",
@@ -47,7 +47,7 @@ OPS = {
     ("delete", "/templates/tags"): None,
     ("post", "/v3/templates"): "ProxCloud: 503 where the location has no template registry or build bucket.",
     ("get", "/templates/{templateID}/files/{hash}"): "ProxCloud: the upload URL points at this API (PUT …/upload, authenticated by the token in it), up to 2 GiB.",
-    ("post", "/v2/templates/{templateID}/builds/{buildID}"): "ProxCloud: steps RUN, COPY, ENV, WORKDIR, USER; `fromImageRegistry` types registry and gcp (aws → 400: use type registry with an ECR token); no layer cache between builds; 30 min per build, 2 at once per project; passes the usage checks of the sandbox create.",
+    ("post", "/v2/templates/{templateID}/builds/{buildID}"): "ProxCloud: steps RUN, COPY, ENV, WORKDIR, USER; `fromImageRegistry` types registry, gcp and aws (explicit caller keys exchanged for a region-matching ECR token); independent buildCpu/buildMemoryGiB/buildDiskGiB, not runtime size; stable stage-prefix paged diagnostics; no layer cache between builds; 30 min per build, provider-configured concurrency (default 2) per project; passes the usage checks of the sandbox create.",
     ("get", "/templates/{templateID}/builds/{buildID}/status"): None,
 }
 

@@ -403,11 +403,12 @@ func TestSandboxUsageGatesFailClosed(t *testing.T) {
 func TestSandboxRunsAreBilled(t *testing.T) {
 	f := newSbxFixture(t, gatesHold)
 	ns := sandbox.NamespaceFor("pa")
-	started := time.Now().Add(-2 * time.Minute).UTC().Truncate(time.Second)
-
 	execd := f.create()
-	if rs := execd.Data["runningSince"]; rs != nil {
-		t.Fatalf("a new sandbox has not run yet: %v", rs)
+	// Native create is now synchronously usable: first Ready is already committed
+	// and exec must preserve that immutable clock despite a later probe timestamp.
+	started, err := time.Parse(time.RFC3339, fmt.Sprint(execd.Data["runningSince"]))
+	if err != nil {
+		t.Fatalf("usable native create must carry first Ready: %v", err)
 	}
 	f.cluster.ready(ns, execd.ExternalID, started)
 	if code, body := f.do(sbxA, http.MethodPost, "/project/pa/cloud/"+execd.ID+"/action", `{"action":"EXEC","data":{"cmd":"echo hi"}}`); code != http.StatusOK {

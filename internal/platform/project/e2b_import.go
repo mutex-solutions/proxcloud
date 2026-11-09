@@ -111,6 +111,9 @@ func validateImportRequest(b *importTemplateRequest, project string, cfg sandbox
 
 // POST /templates/import: ProxCloud extension under the SAME project API-key middleware.
 func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
+	r = r.WithContext(ctx)
 	c := e2bFrom(r)
 	if !h.templatesOn(w) {
 		return
@@ -383,7 +386,9 @@ func (h *Handler) e2bTemplateAliases(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var out []string
-	err := h.sbTemplates.DB().WithTx(r.Context(), func(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(r.Context(), templateMutationTimeout)
+	defer cancel()
+	err := h.sbTemplates.DB().WithTx(ctx, func(ctx context.Context) error {
 		if err := h.sbTemplates.DB().LockXact(ctx, projectTemplateLock(c.proj.ID)); err != nil {
 			return err
 		}
@@ -476,6 +481,10 @@ func (h *Handler) withTemplateNameLock(w http.ResponseWriter, r *http.Request, h
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), templateMutationTimeout)
 	defer cancel()
+	if err := h.sbTemplates.Ensure(ctx); err != nil {
+		e2bFail(w, err)
+		return
+	}
 	// Never publish a successful response until the transaction (including COMMIT)
 	// succeeds. In particular, canceled requests must not acknowledge rolled-back work.
 	response := newBufferedResponse()

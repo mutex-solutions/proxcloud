@@ -89,6 +89,10 @@ func newPinnedBuildFixture(t *testing.T) (*sbxFixture, *pinnedBuildCluster, stri
 		t.Fatal(err)
 	}
 	f.h.SetSandboxBuildPins(f.db)
+	f.h.SetSandboxSafety(f.db.C("sandbox_safety"), nil)
+	if err := f.db.C("sandbox_safety").Ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
 	c := &pinnedBuildCluster{sbxCluster: f.cluster, db: f.db, pods: map[string]map[string]any{}}
 	f.h.SetSandbox(func(es *externalservice.ExternalService) (*sandbox.Service, error) {
 		return sandbox.NewWithAPI(c, es.SandboxConfig(), es.ID), nil
@@ -129,7 +133,7 @@ func TestRegistryBuildHandlerBusyRotationAndUnknownNoResend(t *testing.T) {
 			if mode == "busy" {
 				c.mu.Lock()
 				for i := 0; i < 2; i++ {
-					c.pods[fmt.Sprint(i)] = map[string]any{"metadata": map[string]any{"name": fmt.Sprint(i), "labels": map[string]any{sandbox.LabelProject: "pa"}}, "status": map[string]any{"phase": "Running"}}
+					c.pods[fmt.Sprint(i)] = map[string]any{"metadata": map[string]any{"name": fmt.Sprint(i), "labels": map[string]any{sandbox.LabelProject: "pa", sandbox.LabelManagedBy: sandbox.ManagedByValue, sandbox.LabelService: "sbx", sandbox.LabelBuild: fmt.Sprint(i)}}, "status": map[string]any{"phase": "Running"}}
 				}
 				c.mu.Unlock()
 			}

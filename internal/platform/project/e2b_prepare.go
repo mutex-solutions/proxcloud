@@ -49,7 +49,7 @@ func (h *Handler) e2bPrepareTemplate(w http.ResponseWriter, r *http.Request) {
 // warmTemplate is safe to repeat after build/import completion. Errors must not turn a durable
 // artifact into a failed build: warming and workload readiness are deliberately independent.
 func (h *Handler) warmTemplate(ctx context.Context, c *e2bCaller, t *sandboxTemplateDoc, bl *templateBuild) {
-	if bl == nil || bl.Status != sandbox.BuildReady || !c.ss.Config().Warming.Enabled {
+	if bl == nil || buildPinSDKStatus(bl) != sandbox.BuildReady || !c.ss.Config().Warming.Enabled {
 		return
 	}
 	tpl := sandbox.Template{Image: bl.Image, CPU: t.CPU, MemoryGiB: t.MemoryGiB, GPU: t.GPU}
