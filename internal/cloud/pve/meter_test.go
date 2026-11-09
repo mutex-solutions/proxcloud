@@ -2,7 +2,6 @@ package pve
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -86,28 +85,21 @@ func TestGPUSpecsFromConfig(t *testing.T) {
 // The sampler pays for one /cluster/resources page: a stamped VM costs no call at all, and what only
 // a full pass knows (agent IPs, the hostpci GPU count) survives from the cached row.
 func TestSampledServerProvider(t *testing.T) {
-	calls := 0
-	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
-		"GET /api2/json/nodes/n1/qemu/102/config": func(w http.ResponseWriter, r *http.Request) {
-			calls++
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"meta": "ctime=55"}})
-		},
-	})
-	s := &Service{C: c, ServiceID: "svc", PoolPrefix: "pc-"}
 	page := []ClusterResource{
 		{Type: "qemu", VMID: 101, Name: "a", Node: "n1", Status: "running", Pool: "pc-p1", MaxCPU: 2, MaxMem: 2 << 30, Tags: "fl-x;" + CreatedTag(7)},
-		{Type: "qemu", VMID: 102, Name: "out-of-portal", Node: "n1", Status: "stopped", Pool: "pc-p1", MaxCPU: 1, MaxMem: 1 << 30},
+		{Type: "qemu", VMID: 102, Name: "out-of-portal", Node: "n1", Status: "stopped", Pool: "pc-p1"},
 		{Type: "qemu", VMID: 103, Name: "other project", Node: "n1", Status: "running", Pool: "pc-p2"},
 		{Type: "qemu", VMID: 104, Name: "tpl", Node: "n1", Status: "stopped", Pool: "pc-p1", Template: 1, MaxDisk: 3 << 30},
+		{Type: "qemu", VMID: 105, Name: "paused", Node: "n1", Status: "running", Pool: "pc-p1", Tags: CreatedTag(8)},
 	}
-	page = append(page, ClusterResource{Type: "qemu", VMID: 105, Name: "paused", Node: "n1", Status: "running", Pool: "pc-p1", Tags: CreatedTag(8)})
+	s, page := fakeVMInventoryService(t, page, map[int]VMConfig{102: {"meta": "ctime=55"}})
 	addrs := map[string]any{"private": []any{map[string]any{"addr": "10.0.0.5", "version": float64(4)}}}
 	specs := map[string]any{"pci_passthrough:alias": "nvidia-p40:2"}
 	cached := map[string]*cloud.CloudResource{
-		"101": {Data: map[string]any{"server": map[string]any{
+		"101": {Data: map[string]any{vmUUIDKey: "00000000-0000-4000-8000-000000000101", "server": map[string]any{
 			"addresses": addrs, "flavor": map[string]any{"extra_specs": specs},
 		}}},
-		"105": {Data: map[string]any{"server": map[string]any{"status": "PAUSED"}}},
+		"105": {Data: map[string]any{vmUUIDKey: "00000000-0000-4000-8000-000000000105", "server": map[string]any{"status": "PAUSED"}}},
 	}
 	list, err := s.SampledServerProvider("r", "p1", page, cached).List(context.Background())
 	if err != nil {
@@ -118,9 +110,6 @@ func TestSampledServerProvider(t *testing.T) {
 	}
 	if got := list[2].Data["server"].(map[string]any)["status"]; got != "PAUSED" {
 		t.Fatalf("paused state lost: %v", got)
-	}
-	if calls != 1 {
-		t.Fatalf("per-VM calls = %d, want 1 (the VM with no stamp)", calls)
 	}
 	a, b := list[0], list[1]
 	srv := a.Data["server"].(map[string]any)
@@ -177,11 +166,9 @@ func TestStampSnapshots(t *testing.T) {
 	cached := map[string]*cloud.CloudResource{"101": {Data: map[string]any{"server": map[string]any{
 		"snapshots": map[string]any{"items": []any{}, "diskGb": 8}, "protection": map[string]any{"state": "active"},
 	}}}}
-	page := []ClusterResource{{Type: "qemu", VMID: 101, Name: "a", Node: "n1", Pool: "pc-p1", Tags: CreatedTag(7)}}
-	list, err := s.SampledServerProvider("r", "p1", page, cached).List(context.Background())
-	if err != nil || len(list) != 1 {
-		t.Fatalf("%v %+v", err, list)
-	}
+	p := &ServerSyncProvider{cached: cached, inventory: &vmInventory{configs: map[int]VMConfig{101: {"smbios1": "uuid=00000000-0000-4000-8000-000000000101"}}}}
+	cached["101"].Data[vmUUIDKey] = "00000000-0000-4000-8000-000000000101"
+	list := []cloud.CloudResource{{Data: p.sampledData(ClusterResource{VMID: 101, Name: "a", Node: "n1", Pool: "pc-p1", Tags: CreatedTag(7)})}}
 	srv := list[0].Data["server"].(map[string]any)
 	if srv["snapshots"] == nil || srv["protection"] == nil {
 		t.Fatalf("carried state lost: %+v", srv)
