@@ -1,197 +1,179 @@
-// Templates tab: the project's custom templates (built with the E2B SDK or CLI), their builds and logs, and delete
-// (backend: e2b_console.go).
-import { useMemo, useState } from "react"
+// Session-authenticated project templates and their immutable image artifacts.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
-import { Copy, Layers, MoreHorizontal, ScrollText, Trash2 } from "lucide-react"
+import { Copy, Hammer, Import, Layers, MoreHorizontal, RefreshCw, ScrollText, Tags, Trash2, Zap } from "lucide-react"
 import { DataTable, sortableHeader } from "@/components/data-table"
 import { EmptyState } from "@/components/empty-state"
 import { StatusBadge } from "@/components/status-badge"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
-} from "@/components/ui/dialog"
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { apiFetch } from "@/lib/api"
-import { fmtDateTime, timeAgo } from "@/lib/format"
-import type { ProjectSandboxTemplate, SandboxTemplateBuild } from "@/lib/types"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { ApiError, apiFetch } from "@/lib/api"
+import { timeAgo } from "@/lib/format"
+import type { ProjectSandboxTemplate, SandboxTemplateCapabilities } from "@/lib/types"
+import { SandboxTemplateImport } from "./SandboxTemplateImport"
+import { SandboxTemplateAliases } from "./SandboxTemplateAliases"
+import { SandboxTemplatePrepare } from "./SandboxTemplatePrepare"
+import { SandboxTemplateBuildDialog } from "./SandboxTemplateBuildDialog"
+import { SandboxTemplateBuildsDialog } from "./SandboxTemplateBuildsDialog"
+import { activeBuild, sandboxTemplatePath, templateAccessDenied } from "./sandbox-template-utils"
 
-async function copy(label: string, value: string) {
-  try {
-    await navigator.clipboard.writeText(value)
-    toast.success(`${label} copied`)
-  } catch {
-    toast.error(`Couldn't copy ${label}. Select and copy it manually.`)
-  }
+function fmtSize(bytes?: number) {
+  if (!bytes) return "—"
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`
 }
-
-function BuildLogs({ pid, t, b }: { pid: string; t: ProjectSandboxTemplate; b: SandboxTemplateBuild }) {
-  const logs = useQuery({
-    queryKey: ["sandbox-template-logs", pid, t.id, b.buildID],
-    queryFn: () => apiFetch<{ status: string; reason?: string; logs: string[] }>(
-      `/project/${pid}/sandbox-templates/${t.id}/builds/${b.buildID}/logs`),
-    refetchInterval: (q) => (q.state.data?.status === "building" ? 3000 : false),
-  })
-  if (logs.isLoading) return <p className="text-sm text-muted-foreground">Loading logs…</p>
-  if (logs.error) return <p className="text-sm text-destructive">{(logs.error as Error).message}</p>
-  const lines = logs.data?.logs ?? []
-  return (
-    <pre className="max-h-80 overflow-auto rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap" aria-label="Build logs">
-      {lines.length ? lines.join("\n") : "No logs kept for this build."}
-    </pre>
-  )
+async function copy(value: string) {
+  try { await navigator.clipboard.writeText(value); toast.success("Template name copied") }
+  catch { toast.error("Couldn't copy template name — select and copy it manually") }
 }
+type TemplateAction = { type: "builds" | "aliases" | "prepare" | "build"; template: ProjectSandboxTemplate }
+const templateBusy = (template: ProjectSandboxTemplate) => activeBuild(template.status) || template.builds.some((build) => activeBuild(build.status))
 
-function BuildsDialog({ pid, t, onClose }: { pid: string; t: ProjectSandboxTemplate | null; onClose: () => void }) {
-  const [open, setOpen] = useState<string | null>(null)
-  return (
-    <Dialog open={!!t} onOpenChange={(o) => { if (!o) { setOpen(null); onClose() } }}>
-      <DialogContent className="sm:max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>Builds: {t?.name}</DialogTitle>
-          <DialogDescription>
-            Newest first. Tags point at the build a sandbox starts from (default when no tag is given).
-          </DialogDescription>
-        </DialogHeader>
-        <ul className="grid max-h-[60vh] gap-3 overflow-auto">
-          {t?.builds.map((b) => (
-            <li key={b.buildID} className="grid gap-2 rounded-md border p-3">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <StatusBadge status={b.status} />
-                {b.tags.map((tg) => <Badge key={tg} variant="secondary">{tg}</Badge>)}
-                <span className="font-mono text-xs text-muted-foreground">{b.buildID}</span>
-                <span className="ml-auto text-xs text-muted-foreground">
-                  {fmtDateTime(b.createdAt)}
-                  {b.finishedAt && b.createdAt
-                    ? ` · ${Math.max(1, Math.round((Date.parse(b.finishedAt) - Date.parse(b.createdAt)) / 1000))} s`
-                    : ""}
-                </span>
-              </div>
-              {b.reason && <p className="text-sm text-destructive">{b.reason}</p>}
-              {b.from && <p className="font-mono text-xs text-muted-foreground">from: {b.from}</p>}
-              {b.startCmd && <p className="font-mono text-xs text-muted-foreground">start: {b.startCmd}</p>}
-              <div>
-                <Button variant="outline" size="sm" aria-expanded={open === b.buildID}
-                  onClick={() => setOpen(open === b.buildID ? null : b.buildID)}>
-                  <ScrollText aria-hidden="true" /> {open === b.buildID ? "Hide logs" : "Logs"}
-                </Button>
-              </div>
-              {t && open === b.buildID && <BuildLogs pid={pid} t={t} b={b} />}
-            </li>
-          ))}
-        </ul>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => { setOpen(null); onClose() }}>Close</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
+// Key all local state by project too: no open dialogs, pending form state or credentials
+// may carry across a project switch, even when this tab is used outside SandboxesPage.
+export function TemplatesTab({ pid }: { pid: string }) { return <ProjectTemplates key={pid} pid={pid} /> }
 
-export function TemplatesTab({ pid }: { pid: string }) {
+function ProjectTemplates({ pid }: { pid: string }) {
   const qc = useQueryClient()
+  const mounted = useRef(true)
+  const deniedRef = useRef(false)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  const [accessRevoked, setAccessRevoked] = useState(false)
   const list = useQuery({
     queryKey: ["sandbox-templates", pid],
-    queryFn: () => apiFetch<ProjectSandboxTemplate[]>(`/project/${pid}/sandbox-templates`),
-    enabled: !!pid,
-    refetchInterval: (q) => (q.state.data?.some((t) => t.status === "building" || t.status === "waiting") ? 5000 : false),
+    queryFn: () => apiFetch<ProjectSandboxTemplate[]>(sandboxTemplatePath(pid)),
+    enabled: !!pid && !accessRevoked,
+    retry: (attempt, error) => !templateAccessDenied(error) && attempt < 1,
+    refetchInterval: (query) => !templateAccessDenied(query.state.error) && query.state.data?.some((template) => templateBusy(template)) ? 5000 : false,
   })
-  const [shown, setShown] = useState<ProjectSandboxTemplate | null>(null)
+  const capabilities = useQuery({
+    queryKey: ["sandbox-template-capabilities", pid],
+    queryFn: () => apiFetch<SandboxTemplateCapabilities>(sandboxTemplatePath(pid, "capabilities")),
+    enabled: !!pid && !accessRevoked,
+    retry: (attempt, error) => !templateAccessDenied(error) && attempt < 1,
+  })
+  const opener = useRef<HTMLButtonElement | null>(null)
+  const actionOpenerId = useRef<string | null>(null)
+  const rememberOpener = useCallback((event: React.FocusEvent<HTMLButtonElement>) => { opener.current = event.currentTarget }, [])
+  const restoreFocus = useCallback((event: Event) => {
+    // Run at Radix's unmount-autofocus boundary, not before the modal focus
+    // scope is released. A query refresh can replace the table trigger, so
+    // resolve its stable ID when the original element is no longer connected.
+    event.preventDefault()
+    if (!mounted.current) return
+    const previous = opener.current
+    // Pointer-opened menus need not focus their trigger. The selected row's ID
+    // is authoritative, not whichever unrelated button last received focus.
+    const target = actionOpenerId.current ? document.getElementById(actionOpenerId.current) : previous?.isConnected ? previous : null
+    if (target instanceof HTMLButtonElement && !target.disabled) target.focus({ preventScroll: true })
+  }, [])
+  const closeAction = () => setAction(null)
+  const closeImport = () => setImportOpen(false)
+  const [importOpen, setImportOpen] = useState(false)
+  const [action, setAction] = useState<TemplateAction | null>(null)
   const [toDelete, setToDelete] = useState<ProjectSandboxTemplate | null>(null)
+  const revokeAccess = useCallback(() => {
+    if (!mounted.current) return
+    deniedRef.current = true
+    setAccessRevoked(true)
+    setImportOpen(false); setAction(null); setToDelete(null)
+    // A refetch error retains prior React Query data. Only a permission denial
+    // clears these protected caches; transient capability failures keep history.
+    for (const prefix of ["sandbox-templates", "sandbox-template-capabilities", "sandbox-template-coverage", "sandbox-template-logs"]) {
+      // Removal cancels prior query observers before clearing their retained data.
+      qc.removeQueries({ queryKey: [prefix, pid] })
+    }
+  }, [qc, pid, setAccessRevoked, setImportOpen, setAction, setToDelete])
+  const permissionDenied = accessRevoked || templateAccessDenied(list.error) || templateAccessDenied(capabilities.error)
+  useEffect(() => { if (permissionDenied && !accessRevoked) revokeAccess() }, [permissionDenied, accessRevoked, revokeAccess])
+  const invalidate = () => { void qc.invalidateQueries({ queryKey: ["sandbox-templates", pid] }) }
   const del = useMutation({
-    mutationFn: (t: ProjectSandboxTemplate) => apiFetch(`/project/${pid}/sandbox-templates/${t.id}`, { method: "DELETE" }),
-    onSuccess: () => {
-      toast.success("Template deleted")
-      setToDelete(null)
-      void qc.invalidateQueries({ queryKey: ["sandbox-templates", pid] })
+    mutationFn: (template: ProjectSandboxTemplate) => apiFetch(sandboxTemplatePath(pid, template.id), { method: "DELETE" }),
+    onSuccess: (_, template) => {
+      invalidate()
+      if (!mounted.current || deniedRef.current) return
+      toast.success(`${template.kind === "snapshot" ? "Snapshot" : "Template"} deleted`)
+      setToDelete((current) => current?.id === template.id ? null : current)
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (error: Error) => {
+      if (templateAccessDenied(error)) { revokeAccess(); return }
+      if (mounted.current && !deniedRef.current) toast.error(error.message)
+    },
   })
+  const { isPending: deleting, reset: resetDelete } = del
+  const caps = capabilities.isError || permissionDenied ? undefined : capabilities.data
+  const canImport = !!caps?.importEnabled && caps.trustedWorkerAvailable !== false
+  const selected = !permissionDenied && action && (list.data?.find((template) => template.id === action.template.id) ?? action.template)
+  const columns = useMemo<ColumnDef<ProjectSandboxTemplate, any>[]>(() => [
+    {
+      id: "name", accessorFn: (template) => template.name, header: sortableHeader("Name"),
+      cell: ({ row, getValue }) => <div className="grid gap-1"><span className="font-medium">{getValue()}</span><span className="font-mono text-xs text-muted-foreground">{row.original.id}</span>{!!row.original.aliases?.length && <div className="flex flex-wrap gap-1" aria-label="Aliases">{row.original.aliases.filter((alias) => alias !== row.original.name).map((alias) => <Badge key={alias} variant="outline">Alias: {alias}</Badge>)}</div>}</div>,
+    },
+    { id: "kind", accessorFn: (template) => template.mode === "import" ? "Imported" : template.kind === "snapshot" ? "Snapshot" : "Template", header: sortableHeader("Type"), cell: ({ getValue }) => <Badge variant="secondary">{getValue()}</Badge> },
+    {
+      id: "status", accessorFn: (template) => template.ready ? "ready" : template.status, header: sortableHeader("Status"),
+      cell: ({ row, getValue }) => <div className="grid"><StatusBadge status={getValue()} />{row.original.ready && row.original.status !== "ready" && <span className="text-xs text-muted-foreground">Latest build: {row.original.status}</span>}</div>,
+    },
+    {
+      id: "size", accessorFn: (template) => template.cpu, header: sortableHeader("Runtime size"),
+      cell: ({ row }) => <span className="text-sm">{row.original.cpu} vCPU · {row.original.memoryGiB} GiB{row.original.gpu && <Badge className="ml-2" variant="outline">{row.original.gpu.count}× {row.original.gpu.model.replace(/^nvidia-/, "").toUpperCase()}</Badge>}</span>,
+    },
+    { id: "stored", accessorFn: (template) => template.sizeBytes ?? 0, header: sortableHeader("Stored"), cell: ({ row }) => <span className="text-sm text-muted-foreground">{row.original.kind === "snapshot" ? fmtSize(row.original.sizeBytes) : "—"}</span> },
+    { id: "builds", accessorFn: (template) => template.builds.length, header: sortableHeader("Builds"), cell: ({ getValue }) => <span className="text-sm">{getValue()}</span> },
+    { id: "updated", accessorFn: (template) => template.updatedAt ?? template.createdAt ?? "", header: sortableHeader("Updated"), cell: ({ getValue }) => <span className="text-sm text-muted-foreground">{getValue() ? timeAgo(getValue()) : "—"}</span> },
+    {
+      id: "actions", header: () => null, enableSorting: false,
+      cell: ({ row }) => {
+        const template = row.original
+        const busy = templateBusy(template)
+        const triggerId = `sandbox-template-actions-${encodeURIComponent(pid)}-${encodeURIComponent(template.id)}`
+        const selectAction = (type: TemplateAction["type"]) => { actionOpenerId.current = triggerId; setAction({ type, template }) }
+        return <div className="flex justify-end"><DropdownMenu>
+          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" id={triggerId} onFocus={rememberOpener} aria-label={`Actions for ${template.name}`}><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => selectAction("builds")}><ScrollText aria-hidden="true" /> Builds and logs</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => selectAction("aliases")} disabled={busy}><Tags aria-hidden="true" /> Manage aliases</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => selectAction("prepare")}><Zap aria-hidden="true" /> Prepare</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => selectAction("build")} disabled={!caps || !template.ready || busy}><Hammer aria-hidden="true" /> New build</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void copy(template.name)}><Copy aria-hidden="true" /> Copy name</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" disabled={deleting} onSelect={() => { actionOpenerId.current = triggerId; resetDelete(); setToDelete(template) }}><Trash2 aria-hidden="true" /> Delete</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu></div>
+      },
+    },
+  ], [caps, deleting, resetDelete, rememberOpener, setAction, setToDelete, pid])
+  const importButton = <Button className="text-black" onFocus={rememberOpener} onClick={(event) => { actionOpenerId.current = null; opener.current = event.currentTarget; setImportOpen(true) }} disabled={!canImport}><Import aria-hidden="true" /> Import image digest</Button>
 
-  const columns = useMemo<ColumnDef<ProjectSandboxTemplate, any>[]>(
-    () => [
-      {
-        id: "name", accessorFn: (t) => t.name, header: sortableHeader("Name"),
-        cell: ({ row, getValue }) => (
-          <div className="grid">
-            <span className="font-medium">{getValue()}</span>
-            <span className="font-mono text-xs text-muted-foreground">{row.original.id}</span>
-          </div>
-        ),
-      },
-      {
-        id: "status", accessorFn: (t) => (t.ready ? "ready" : t.status), header: sortableHeader("Status"),
-        cell: ({ row, getValue }) => (
-          <div className="grid">
-            <StatusBadge status={getValue()} />
-            {row.original.ready && row.original.status !== "ready" && (
-              <span className="text-xs text-muted-foreground">Latest build: {row.original.status}</span>
-            )}
-          </div>
-        ),
-      },
-      {
-        id: "size", accessorFn: (t) => t.cpu, header: sortableHeader("Size"),
-        cell: ({ row }) => <span className="text-sm">{row.original.cpu} vCPU · {row.original.memoryGiB} GiB</span>,
-      },
-      { id: "builds", accessorFn: (t) => t.builds.length, header: sortableHeader("Builds"), cell: ({ getValue }) => <span className="text-sm">{getValue()}</span> },
-      { id: "updated", accessorFn: (t) => t.updatedAt ?? t.createdAt ?? "", header: sortableHeader("Updated"), cell: ({ getValue }) => <span className="text-sm text-muted-foreground">{getValue() ? timeAgo(getValue()) : "—"}</span> },
-      {
-        id: "actions", header: () => null, enableSorting: false,
-        cell: ({ row }) => (
-          <div className="flex justify-end">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${row.original.name}`}>
-                  <MoreHorizontal aria-hidden="true" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onSelect={() => setShown(row.original)}><ScrollText aria-hidden="true" /> Builds and logs</DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => void copy("Template name", row.original.name)}><Copy aria-hidden="true" /> Copy name</DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem variant="destructive" onSelect={() => setToDelete(row.original)}><Trash2 aria-hidden="true" /> Delete</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        ),
-      },
-    ],
-    [],
-  )
+  if (permissionDenied) return <p className="text-sm text-red-700 dark:text-red-400" role="alert">Project cloud resource management permission required. Template details and controls are no longer available. Reload after your access has been restored.</p>
 
   return (
     <div className="grid gap-4">
-      <p className="text-sm text-muted-foreground">
-        Templates you build with the E2B SDK or CLI (<code className="font-mono text-xs">Template.build</code>). Only this
-        project sees them. Start a sandbox from one by its name.
-      </p>
-      {list.data && list.data.length === 0 ? (
-        <EmptyState icon={Layers} title="No templates yet" hint="Build one with the E2B SDK: Template().from_image(…) or from_dockerfile(…), then Template.build(template, alias). See the API keys tab for setup." />
-      ) : (
-        <DataTable columns={columns} data={list.data ?? []} isLoading={list.isLoading} error={list.error as Error | null} />
-      )}
-
-      <BuildsDialog pid={pid} t={shown && (list.data?.find((t) => t.id === shown.id) ?? shown)} onClose={() => setShown(null)} />
-
-      <Dialog open={!!toDelete} onOpenChange={(o) => !o && setToDelete(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Delete template?</DialogTitle>
-            <DialogDescription>
-              {toDelete ? `"${toDelete.name}" and all its builds are removed. New sandboxes can no longer start from it; running ones keep running.` : ""}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setToDelete(null)}>Cancel</Button>
-            <Button variant="destructive" disabled={del.isPending} onClick={() => toDelete && del.mutate(toDelete)}>
-              {del.isPending ? "Deleting…" : "Delete"}
-            </Button>
-          </DialogFooter>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <p className="max-w-2xl text-sm text-muted-foreground">Project templates, imported image digests and named snapshots. Start a sandbox by primary name or alias. Build tags select an artifact; aliases are separate names for the template.</p>
+        <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={list.isFetching || capabilities.isFetching} onClick={() => { void list.refetch(); void capabilities.refetch() }} aria-label="Refresh templates"><RefreshCw aria-hidden="true" /></Button>{importButton}</div>
+      </div>
+      {capabilities.isLoading ? <p className="text-xs text-muted-foreground" role="status">Loading location capabilities…</p>
+        : capabilities.error ? <p className="text-sm text-red-700 dark:text-red-400" role="alert">Location capabilities are unavailable. Import and new builds are disabled; existing details remain accessible. <Button variant="outline" size="sm" onClick={() => void capabilities.refetch()}>Retry capabilities</Button></p>
+          : !canImport ? <p className="text-xs text-muted-foreground" role="status">Digest import is disabled or its trusted worker is unavailable at this location.</p> : null}
+      {list.data?.some((template) => templateBusy(template)) && <p className="text-xs text-muted-foreground">Templates with active builds are busy. Alias changes and new builds are disabled until the active operation finishes.</p>}
+      {list.data && list.data.length === 0 ? <EmptyState icon={Layers} title="No templates yet" hint="Import an immutable image digest here, or build a template with the E2B SDK or CLI." action={importButton} />
+        : <DataTable columns={columns} data={list.data ?? []} isLoading={list.isLoading} error={list.error as Error | null} />}
+      {importOpen && caps && <SandboxTemplateImport pid={pid} capabilities={caps} onClose={closeImport} onCloseAutoFocus={restoreFocus} onImported={invalidate} />}
+      {selected && action?.type === "builds" && <SandboxTemplateBuildsDialog key={selected.id} pid={pid} template={selected} onClose={closeAction} onCloseAutoFocus={restoreFocus} onAccessDenied={revokeAccess} />}
+      {selected && action?.type === "aliases" && <SandboxTemplateAliases key={selected.id} pid={pid} template={selected} onClose={closeAction} onCloseAutoFocus={restoreFocus} onAccessDenied={revokeAccess} />}
+      {selected && action?.type === "prepare" && <SandboxTemplatePrepare key={selected.id} pid={pid} template={selected} capabilities={caps} onClose={closeAction} onCloseAutoFocus={restoreFocus} onAccessDenied={revokeAccess} />}
+      {selected && action?.type === "build" && caps && <SandboxTemplateBuildDialog key={selected.id} pid={pid} template={selected} capabilities={caps} onClose={closeAction} onCloseAutoFocus={restoreFocus} onAccessDenied={revokeAccess} onBuilt={() => { closeAction(); invalidate() }} />}
+      <Dialog open={!!toDelete} onOpenChange={(open) => { if (!open) { setToDelete(null); del.reset() } }}>
+        <DialogContent onCloseAutoFocus={restoreFocus}>
+          <DialogHeader><DialogTitle>Delete {toDelete?.kind === "snapshot" ? "snapshot" : "template"}?</DialogTitle><DialogDescription>{toDelete ? `"${toDelete.name}" and all its aliases and builds are removed. New sandboxes can no longer start from it; running ones keep running.` : ""}</DialogDescription></DialogHeader>
+          {del.error && <p className="text-sm text-red-700 dark:text-red-400" role="alert">{del.error instanceof ApiError && del.error.status === 409 ? "An active worker still uses this template. Nothing was deleted. Retry after the worker finishes." : del.error.message}</p>}
+          <DialogFooter><Button variant="outline" onClick={() => { setToDelete(null); del.reset() }}>Cancel</Button><Button variant="outline" className="text-red-700 dark:text-red-400" disabled={del.isPending} onClick={() => toDelete && del.mutate(toDelete)}>{del.isPending ? "Deleting…" : "Delete"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

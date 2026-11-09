@@ -53,6 +53,12 @@ on("GET /project/:pid/service", () => ({
     { id: "svc-proxmox-1", name: "ProxCloud Compute", type: "CLOUD", status: "ACTIVE" },
     { id: "svc-ceph-1", name: "ProxCloud S3", type: "CLOUD", status: "ACTIVE" },
     {
+      id: "svc-sandbox-1", name: "ProxCloud Sandboxes", type: "CLOUD", status: "ACTIVE", sandboxE2B: true,
+      sandboxTemplates: [{ name: "base", image: "registry.example.com/approved/base@sha256:" + "a".repeat(64), cpu: 2, memoryGiB: 2 }],
+      sandboxLimits: { maxCpu: 8, maxMemoryGiB: 28, egressMbps: 100, maxTimeoutSeconds: 86400 },
+      sandboxGpuModels: ["nvidia-a10"],
+    },
+    {
       id: "svc-dbaas-1",
       name: "ProxCloud DBaaS",
       type: "CLOUD",
