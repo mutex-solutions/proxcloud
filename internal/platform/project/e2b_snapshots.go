@@ -137,6 +137,34 @@ func (h *Handler) snapshotsAvailable(cfg sandbox.Config) bool {
 	return h.sbTemplates != nil && h.sbPaused != nil && buildsOn(cfg)
 }
 
+// savedLifecycleAdmission is intentionally independent of snapshot capture/export.
+// Current snapshots always produce managed images; no legacy marker enables restore.
+func savedLifecycleAdmission(cfg sandbox.Config) error {
+	if !sandbox.SavedLifecycleAvailable(cfg) {
+		return sandbox.ErrManagedSavedStartHeld
+	}
+	return nil
+}
+
+// savedLifecycleSourceScope preserves own-resource 404 before capability refusal.
+// It is a read-only scoped DB lookup, never a cluster probe, claim or capture.
+func (h *Handler) savedLifecycleSourceScope(ctx context.Context, c *e2bCaller, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !sandbox.ValidID(id) {
+		return sandbox.ErrNotFound
+	}
+	if p := h.loadPaused(ctx, c.proj.ID, id); p != nil && p.ServiceID == c.es.ID {
+		return nil
+	}
+	row := h.e2bRow(ctx, c, id)
+	if row == nil || row.Data["status"] == sandbox.StatusDeleted {
+		return sandbox.ErrNotFound
+	}
+	return nil
+}
+
 // updatePaused changes the paused record under a row lock. fn returns an error to abort (nothing is written); remove
 // asks for the record to be deleted.
 func (h *Handler) updatePaused(ctx context.Context, projectID, id string, fn func(p *pausedSandbox) (remove bool, err error)) error {
@@ -604,6 +632,15 @@ func (h *Handler) loadPaused(ctx context.Context, projectID, id string) *pausedS
 // image that is pushed lets the sandbox be deleted, and a failed assembly drops the pause, so the sandbox runs on and
 // a pause never loses files it answered 204 for. Files written after the capture are not kept.
 func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) error {
+	if err := h.savedLifecycleSourceScope(ctx, c, id); err != nil {
+		return err
+	}
+	if err := h.snapshotsOn(c); err != nil {
+		return err
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
+		return err
+	}
 	if h.sbSafety != nil && ctx.Value(captureLockKey{}) != id {
 		_, err := h.sbSafety.DB().WithAdvisoryLock(ctx, "sandbox-capture:"+c.es.ID+":"+c.proj.ID+":"+id, false, func() error { return h.pauseSandbox(context.WithValue(ctx, captureLockKey{}, id), c, id) })
 		return err
@@ -693,6 +730,13 @@ var errPauseTaken = errors.New("another driver holds the pause")
 // record, and a State it sets to "" ends the transition (no lease). errPauseMoved: the pause was cancelled, killed or
 // replaced; errPauseTaken: another driver holds it.
 func (h *Handler) driveStep(ctx context.Context, c *e2bCaller, d *pauseDrive, fn func(p *pausedSandbox) (remove bool)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
+		return err
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	lease := time.Now().UTC().Add(pauseLease)
@@ -721,6 +765,11 @@ func (h *Handler) driveStep(ctx context.Context, c *e2bCaller, d *pauseDrive, fn
 
 // renewPause keeps the drive's lease alive until ctx ends; a pause that moved on stops the drive's wait (stop).
 func (h *Handler) renewPause(ctx context.Context, c *e2bCaller, d *pauseDrive, stop context.CancelFunc) {
+	if savedLifecycleAdmission(c.ss.Config()) != nil {
+		stop()
+		return
+	}
+
 	tick := time.NewTicker(pauseRenew)
 	defer tick.Stop()
 	for {
@@ -740,6 +789,10 @@ func (h *Handler) renewPause(ctx context.Context, c *e2bCaller, d *pauseDrive, s
 // redrivePauses takes over the pauses whose driver stopped renewing them (the portal restarted mid-pause) and finishes
 // each as its driver would have, so a pause answered 204 never stays half-done, running and billing.
 func (h *Handler) redrivePauses(ctx context.Context, es *externalservice.ExternalService, ss *sandbox.Service) {
+	if ctx.Err() != nil || savedLifecycleAdmission(ss.Config()) != nil {
+		return
+	}
+
 	var ps []pausedSandbox
 	if err := h.sbPaused.Find(ctx, pgdoc.M{"serviceId": es.ID, "state": pgdoc.M{"$in": []any{pausedPausing, pausedStopping}}}, &ps); err != nil {
 		slog.Warn("autopause: list unfinished pauses", "service", es.ID, "err", err)
@@ -790,6 +843,10 @@ var errPauseMoved = errors.New("the pause moved on")
 // ponytail: no time bound of its own; the build pod's activeDeadlineSeconds (BuildTimeout) ends a slow build, but one
 // never scheduled keeps this drive (and its lease) alive.
 func (h *Handler) finishPause(c *e2bCaller, d *pauseDrive) {
+	if savedLifecycleAdmission(c.ss.Config()) != nil {
+		return
+	}
+
 	id, templateID := d.id, d.templateID
 	ctx := context.Background()
 	held, moved := context.WithCancel(ctx) // ends when the pause moves on (renewPause)
@@ -839,6 +896,13 @@ func (h *Handler) finishPause(c *e2bCaller, d *pauseDrive) {
 }
 
 func (h *Handler) stopPausedSource(ctx context.Context, c *e2bCaller, d *pauseDrive) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
+		return err
+	}
+
 	id := d.id
 	if err := h.driveStep(ctx, c, d, func(p *pausedSandbox) bool {
 		p.State = pausedStopping
@@ -877,6 +941,10 @@ func (h *Handler) stopPausedSource(ctx context.Context, c *e2bCaller, d *pauseDr
 // sandbox keeps running, to its own end again, or a few minutes when that has passed (an autoPause one is then paused
 // again by the next tick instead of removed at once).
 func (h *Handler) abandonPause(ctx context.Context, c *e2bCaller, d *pauseDrive, cause error) {
+	if ctx.Err() != nil || savedLifecycleAdmission(c.ss.Config()) != nil {
+		return
+	}
+
 	// A guarded pause may be abandoned only when the original is positively
 	// known alive. An outage/expired source can leave this image as the only
 	// copy; retain its record for redrive instead of treating unknown as alive.
@@ -933,6 +1001,10 @@ func laterOf(a, b time.Time) time.Time {
 // every file) at once. false: there is no such pause (it is gone, or its sandbox is already being deleted), or the
 // sandbox no longer runs: the snapshot is then the only copy of its files, so the pause goes on and the connect waits.
 func (h *Handler) cancelPause(ctx context.Context, c *e2bCaller, id string) bool {
+	if ctx.Err() != nil || savedLifecycleAdmission(c.ss.Config()) != nil {
+		return false
+	}
+
 	var tpl string
 	if err := h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
 		if p.State != pausedPausing {
@@ -984,9 +1056,31 @@ func (h *Handler) startSaved(ctx context.Context, c *e2bCaller, saved map[string
 	id, _, err := h.startSavedReady(ctx, c, saved, image, timeoutSeconds)
 	return id, err
 }
+func digSavedScope(saved map[string]any, projectID string) error {
+	md, _ := saved["metadata"].(map[string]any)
+	labels, _ := md["labels"].(map[string]any)
+	id, _ := md["name"].(string)
+	if md["namespace"] != sandbox.NamespaceFor(projectID) || labels[sandbox.LabelProject] != projectID || !sandbox.ValidID(id) {
+		return sandbox.ErrNotFound
+	}
+	return nil
+}
+
 func (h *Handler) startSavedReady(ctx context.Context, c *e2bCaller, saved map[string]any, image string, timeoutSeconds int) (string, *cloud.CloudResource, error) {
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
+	if digSavedScope(saved, c.proj.ID) != nil {
+		return "", nil, sandbox.ErrNotFound
+	}
 	if _, err := sandbox.ShutdownTimeFor(c.ss.Config(), time.Now(), timeoutSeconds); err != nil {
 		return "", nil, e2bStatusErr{http.StatusBadRequest, err.Error()}
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
+		return "", nil, err
+	}
+	if err := sandbox.CheckSavedRuntimeImage(c.ss.Config(), c.proj.ID, image); err != nil {
+		return "", nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.ss.Config().Startup.Duration()+time.Minute)
 	defer cancel()
@@ -1039,11 +1133,20 @@ func (h *Handler) startSavedReady(ctx context.Context, c *e2bCaller, saved map[s
 // resumePaused brings a paused sandbox back under its id and returns its E2B Sandbox. It passes the usage gate first:
 // a suspended project or profile keeps its snapshot but cannot bring it back (D9).
 func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandbox, timeoutSeconds int) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p == nil || p.ProjectID != c.proj.ID || p.ServiceID != c.es.ID || !sandbox.ValidID(p.ID) {
+		return nil, sandbox.ErrNotFound
+	}
 	if err := h.sandboxUsageGate(ctx, c.proj, c.es); err != nil {
 		return nil, err
 	}
 	if _, err := sandbox.ShutdownTimeFor(c.ss.Config(), time.Now(), timeoutSeconds); err != nil {
 		return nil, e2bStatusErr{http.StatusBadRequest, err.Error()}
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
+		return nil, err
 	}
 	// Claim the resume: exactly one caller brings the sandbox back; a concurrent one waits for it and answers with the
 	// same sandbox; a pause under way is waited for, and one whose image is still not ready after PauseJoinWait is
@@ -1317,7 +1420,19 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
+	if err := ctx.Err(); err != nil {
+		e2bFail(w, err)
+		return
+	}
+	if err := h.savedLifecycleSourceScope(ctx, c, chi.URLParam(r, "sandboxID")); err != nil {
+		e2bFail(w, err)
+		return
+	}
 	if err := h.snapshotsOn(c); err != nil {
+		e2bFail(w, err)
+		return
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
 		e2bFail(w, err)
 		return
 	}
@@ -1457,7 +1572,7 @@ func (h *Handler) AutoPauseSandboxes(ctx context.Context) {
 			continue
 		}
 		ss, err := h.sandboxFor(es)
-		if err != nil || !buildsOn(ss.Config()) {
+		if err != nil || !buildsOn(ss.Config()) || !sandbox.SavedLifecycleAvailable(ss.Config()) {
 			continue
 		}
 		h.redrivePauses(ctx, es, ss) // before listing: a pause taken over is not captured again

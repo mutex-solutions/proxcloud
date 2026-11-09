@@ -150,6 +150,8 @@ func sandboxHTTPError(err error) (status int, msg string, ok bool) {
 	var forbidden sandboxForbidden
 	var kerr *kamajik8s.APIError
 	switch {
+	case errors.Is(err, sandbox.ErrManagedSavedStartHeld):
+		return http.StatusForbidden, sandbox.ErrManagedSavedStartHeld.Error(), true
 	case errors.Is(err, errRuntimePinState):
 		return http.StatusServiceUnavailable, err.Error(), true
 	case errors.As(err, &forbidden):
@@ -251,6 +253,8 @@ func (h *Handler) pauseRefusal(cfg sandbox.Config, spec *sandbox.Spec) error {
 		return httpx.BadRequest("autoPause is not available at this location")
 	case spec.AutoResume && cfg.ProxyWakeToken == "":
 		return httpx.BadRequest("autoResume is not available at this location")
+	case (spec.AutoPause || spec.AutoResume) && !sandbox.SavedLifecycleAvailable(cfg):
+		return sandbox.ErrManagedSavedStartHeld
 	}
 	return nil
 }

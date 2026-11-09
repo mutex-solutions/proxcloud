@@ -33,6 +33,9 @@ type consoleTemplateCapabilities struct {
 	ImportEnabled          bool                       `json:"importEnabled"`
 	TrustedWorkerAvailable bool                       `json:"trustedWorkerAvailable"`
 	WarmingEnabled         bool                       `json:"warmingEnabled"`
+	SnapshotCaptureEnabled bool                       `json:"snapshotCaptureEnabled"`
+	SavedLifecycleEnabled  bool                       `json:"savedLifecycleEnabled"`
+	SavedLifecycleReason   string                     `json:"savedLifecycleReason"`
 }
 
 func (h *Handler) consoleTemplateCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +52,7 @@ func (h *Handler) consoleTemplateCapabilities(w http.ResponseWriter, r *http.Req
 		Build: consoleBuildCapabilities{CPU: cfg.Build.CPU, MemoryGiB: cfg.Build.MemoryGiB, DiskGiB: cfg.Build.DiskGiB,
 			MaxCPU: cfg.Build.MaxCPU, MaxMemoryGiB: cfg.Build.MaxMemoryGiB, MaxDiskGiB: cfg.Build.MaxDiskGiB, MaxConcurrent: cfg.Build.MaxConcurrent},
 		ImportEnabled: workerErr == nil && h.sbBuildPinsDB != nil, TrustedWorkerAvailable: workerErr == nil, WarmingEnabled: warmingErr == nil && warming,
+		SnapshotCaptureEnabled: h.snapshotsAvailable(cfg), SavedLifecycleEnabled: sandbox.SavedLifecycleAvailable(cfg), SavedLifecycleReason: sandbox.ErrManagedSavedStartHeld.Error(),
 	})
 }
 
