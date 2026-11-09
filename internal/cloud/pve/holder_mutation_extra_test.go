@@ -17,7 +17,7 @@ func TestFencedAttachCleanupDefersNeverDestroyUnknown(t *testing.T) {
 			cfg := VMConfig{"smbios1": "uuid=carrier", "tags": "pc-holder;proxcloud", "unused0": "nas:900/vm-900-disk-0.raw"}
 			node := "pve1"
 			routes := fakeRoutes{
-				"GET /api2/json/pools/tp-p1":                 say(`{"data":{"members":[{"type":"qemu","node":"pve1","vmid":900},{"type":"qemu","node":"pve1","vmid":102},{"type":"qemu","node":"pve2","vmid":103}]}}`),
+				"GET /api2/json/pools/tp-p1":                 say(`{"data":{"poolid":"tp-p1","members":[{"id":"qemu/900","type":"qemu","node":"pve1","vmid":900},{"id":"qemu/102","type":"qemu","node":"pve1","vmid":102},{"id":"qemu/103","type":"qemu","node":"pve2","vmid":103}]}}`),
 				"GET " + carrierPath + "/config":             func(w http.ResponseWriter, r *http.Request) { json.NewEncoder(w).Encode(map[string]any{"data": cfg}) },
 				"GET " + carrierPath + "/pending":            say(`{"data":[]}`),
 				"GET /api2/json/nodes/pve1/qemu/102/config":  say(`{"data":{"smbios1":"uuid=target","scsi0":"nas:vm-102-disk-0,size=8G"}}`),

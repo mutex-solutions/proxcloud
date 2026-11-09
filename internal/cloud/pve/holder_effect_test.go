@@ -17,7 +17,7 @@ func TestFencedConfigNormalEffectAndRecoveryDoesNotReplay(t *testing.T) {
 	posts := 0
 	statusForbidden := false
 	_, c := fakePVE(t, fakeRoutes{
-		"GET /api2/json/pools/tp-p1":                 say(`{"data":{"members":[{"type":"qemu","node":"pve1","vmid":101}]}}`),
+		"GET /api2/json/pools/tp-p1":                 say(`{"data":{"poolid":"tp-p1","members":[{"id":"qemu/101","type":"qemu","node":"pve1","vmid":101}]}}`),
 		"GET /api2/json/nodes/pve1/qemu/101/pending": say(`{"data":[]}`),
 		"GET /api2/json/nodes/pve1/qemu/101/config":  func(w http.ResponseWriter, r *http.Request) { json.NewEncoder(w).Encode(map[string]any{"data": cfg}) },
 		"POST /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +144,7 @@ func TestNewHolderUnknownDoesNotRunDestroyDefer(t *testing.T) {
 			const createUP = "UPID:pve1:0:0:0:qmcreate:900:u:"
 			routes := fakeRoutes{
 				"GET /api2/json/cluster/nextid":   say(`{"data":"900"}`),
-				"GET /api2/json/pools/tp-p1":      say(`{"data":{"members":[{"type":"qemu","node":"pve1","vmid":900}]}}`),
+				"GET /api2/json/pools/tp-p1":      say(`{"data":{"poolid":"tp-p1","members":[{"id":"qemu/900","type":"qemu","node":"pve1","vmid":900}]}}`),
 				"GET " + carrierPath + "/pending": say(`{"data":[]}`),
 				"GET " + carrierPath + "/config": func(w http.ResponseWriter, r *http.Request) {
 					json.NewEncoder(w).Encode(map[string]any{"data": VMConfig{"smbios1": uuid}})

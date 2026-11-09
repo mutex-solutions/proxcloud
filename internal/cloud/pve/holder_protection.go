@@ -82,7 +82,7 @@ func (s *Service) holderDeleteEffect(ctx context.Context, op *HolderOperation) (
 	if !validHolderUPID(op.UPID, p.Source) || parts[5] != "qmdestroy" || parts[6] != strconv.Itoa(p.Source.VMID) || p.Source.UUID == "" {
 		return false, nil
 	}
-	pool, err := s.C.GetPool(ctx, p.Pool)
+	pool, err := s.holderPool(ctx, p.Pool)
 	if err != nil {
 		return false, err
 	}
@@ -109,33 +109,42 @@ func (s *Service) holderProtectionEffect(ctx context.Context, p holderProof) (bo
 	}
 	switch p.Kind {
 	case "replication-delete":
-		jobs, e := s.C.ListReplicationJobs(ctx)
+		jobs, e := holderList[ReplicationJob](ctx, s.C, "/cluster/replication")
 		if e != nil {
 			return false, e
 		}
 		for _, j := range jobs {
+			if j.ID == "" || j.Guest <= 0 {
+				return false, fmt.Errorf("holder inventory: malformed replication job")
+			}
 			if j.ID == p.Params["id"] && j.RemoveJob == "" {
 				return false, nil
 			}
 		}
 		return true, nil
 	case "ha-rule-delete":
-		rules, e := s.C.ListHARules(ctx)
+		rules, e := holderList[HARule](ctx, s.C, "/cluster/ha/rules")
 		if e != nil {
 			return false, e
 		}
 		for _, r := range rules {
+			if r.Rule == "" {
+				return false, fmt.Errorf("holder inventory: malformed HA rule")
+			}
 			if r.Rule == p.Params["id"] {
 				return false, nil
 			}
 		}
 		return true, nil
 	case "ha-delete":
-		rows, e := s.C.ListHAResources(ctx)
+		rows, e := holderList[HAResource](ctx, s.C, "/cluster/ha/resources")
 		if e != nil {
 			return false, e
 		}
 		for _, r := range rows {
+			if r.SID == "" {
+				return false, fmt.Errorf("holder inventory: malformed HA resource")
+			}
 			if r.SID == "vm:"+strconv.Itoa(p.Source.VMID) {
 				return false, nil
 			}

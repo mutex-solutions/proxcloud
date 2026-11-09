@@ -192,7 +192,7 @@ func (s *Service) holderCheck(ctx context.Context) error {
 	return err
 }
 func (s *Service) holderIdentity(ctx context.Context, pool string, vm holderVMIdentity) (VMConfig, error) {
-	info, err := s.C.GetPool(ctx, pool)
+	info, err := s.holderPool(ctx, pool)
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +238,9 @@ func (s *Service) holderCurrentConfig(ctx context.Context, node string, id int) 
 	}
 	if err := s.C.get(ctx, path+"/pending", nil, &pending); err != nil {
 		return nil, err
+	}
+	if pending == nil {
+		return nil, errors.New("VM pending configuration is unknown")
 	}
 	for _, p := range pending {
 		if p.Delete != 0 || len(p.Pending) > 0 && string(p.Pending) != "null" {

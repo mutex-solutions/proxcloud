@@ -155,7 +155,7 @@ func TestHolderUnknownNeverCompensates(t *testing.T) {
 			store.loseSave = kind == "upid-save-lost"
 			calls := 0
 			routes := fakeRoutes{
-				"GET /api2/json/pools/tp-p1":                 say(`{"data":{"members":[{"type":"qemu","node":"pve1","vmid":101},{"type":"qemu","node":"pve1","vmid":900}]}}`),
+				"GET /api2/json/pools/tp-p1":                 say(`{"data":{"poolid":"tp-p1","members":[{"id":"qemu/101","type":"qemu","node":"pve1","vmid":101},{"id":"qemu/900","type":"qemu","node":"pve1","vmid":900}]}}`),
 				"GET " + carrierPath + "/config":             say(`{"data":{"smbios1":"uuid=carrier","tags":"pc-holder;proxcloud"}}`),
 				"GET " + carrierPath + "/pending":            say(`{"data":[]}`),
 				"GET /api2/json/nodes/pve1/qemu/101/pending": say(`{"data":[]}`),
@@ -268,7 +268,7 @@ func TestKnownHolderRecoveryPollOnly(t *testing.T) {
 			polls++
 			fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
 		},
-		"GET /api2/json/pools/tp-p1":      say(`{"data":{"members":[{"type":"qemu","node":"pve1","vmid":900}]}}`),
+		"GET /api2/json/pools/tp-p1":      say(`{"data":{"poolid":"tp-p1","members":[{"id":"qemu/900","type":"qemu","node":"pve1","vmid":900}]}}`),
 		"GET " + carrierPath + "/config":  say(`{"data":{"smbios1":"uuid=owned","name":"pc-holder-pve1"}}`),
 		"GET " + carrierPath + "/pending": say(`{"data":[]}`),
 	})

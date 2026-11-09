@@ -46,6 +46,11 @@ Known UPID recovery polls only. Even a retry that successfully settles previous
 work returns409 requesting a refresh; it never falls through to allocate/move a
 second disk. Settling requires a stopped task and fresh node-scoped SMBIOS UUID,
 positive pool membership, and operation-specific disk/config/power readback.
+Holder-only proof readers require an actual pool object with the exact `poolid`
+and an explicit nonnull `members` array with valid member identities. Missing/null
+payloads, wrong pools, malformed members and missing/null protection/pending
+inventories are unknown, never evidence of absence. Generic client convenience
+readers keep their existing normalization semantics; they are not proof readers.
 New holders send an unguessable SMBIOS UUID in their first CREATE. VMID reuse and
 blankness are not identity. The normal pool-scoped Config.Options authorization
 must admit that parameter; a refusal stays safe, not an automatic permission grant.

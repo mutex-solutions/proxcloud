@@ -61,7 +61,7 @@ func TestProtectionConfigUnknownStopsRetirementBeforeHAAndDelete(t *testing.T) {
 	m := newMemHolder()
 	destructive := 0
 	routes := fakeRoutes{
-		"GET /api2/json/pools/tp-p1":                 say(`{"data":{"members":[{"type":"qemu","node":"pve1","vmid":101}]}}`),
+		"GET /api2/json/pools/tp-p1":                 say(`{"data":{"poolid":"tp-p1","members":[{"id":"qemu/101","type":"qemu","node":"pve1","vmid":101}]}}`),
 		"GET /api2/json/nodes/pve1/qemu/101/config":  say(`{"data":{"smbios1":"uuid=owned","tags":"pc-protected;proxcloud","scsi0":"nas:vm-101-disk-0,size=8G"}}`),
 		"GET /api2/json/nodes/pve1/qemu/101/pending": say(`{"data":[]}`),
 		"GET /api2/json/cluster/replication":         say(`{"data":[]}`),
@@ -89,9 +89,9 @@ func TestFencedRetirementWithAlreadyAbsentHA(t *testing.T) {
 	routes := fakeRoutes{
 		"GET /api2/json/pools/tp-p1": func(w http.ResponseWriter, r *http.Request) {
 			if deleted {
-				fmt.Fprint(w, `{"data":{"members":[]}}`)
+				fmt.Fprint(w, `{"data":{"poolid":"tp-p1","members":[]}}`)
 			} else {
-				fmt.Fprint(w, `{"data":{"members":[{"type":"qemu","node":"pve1","vmid":101}]}}`)
+				fmt.Fprint(w, `{"data":{"poolid":"tp-p1","members":[{"id":"qemu/101","type":"qemu","node":"pve1","vmid":101}]}}`)
 			}
 		},
 		"GET /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, r *http.Request) {
@@ -136,9 +136,9 @@ func TestDeleteSettlementWithPoolOnlyAudit(t *testing.T) {
 						return
 					}
 					if mode == "still-member" {
-						fmt.Fprint(w, `{"data":{"members":[{"type":"qemu","vmid":101,"node":"pve1"}]}}`)
+						fmt.Fprint(w, `{"data":{"poolid":"tp-p1","members":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve1"}]}}`)
 					} else {
-						fmt.Fprint(w, `{"data":{"members":[]}}`)
+						fmt.Fprint(w, `{"data":{"poolid":"tp-p1","members":[]}}`)
 					}
 				},
 				"GET /api2/json/access/permissions": func(w http.ResponseWriter, r *http.Request) {
