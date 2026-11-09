@@ -8,6 +8,27 @@ invariants the code holds. Four sequence diagrams follow.
 
 Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
+## Dormant registry reference pins and real-delete HOLD (PR1)
+
+**What / why:** add a PRIMARY-only DB fencing core because finite registry scans
+cannot exclude concurrent image acquisition, and DB epochs cannot fence a stale
+HTTP DELETE. This is infrastructure only: no current writer integration, startup
+DDL, registry effects or real-GC authorization is enabled.
+
+| Component / symbol | Boundary and invariant |
+|---|---|
+| `registrypins.New`, `ParseRef`, `BeginPins` | Trusted Config canonical host only; exact project-template tag/digest, explicit project equality and current ENABLED/DISABLED project row. Short READ COMMITTED transaction locks host namespace → project → receipt rows. |
+| `pgdoc.RejectInheritedTransaction` | Reject both owned and cross-DB inherited transactions before a durable fence; no context stripping, hidden nested commit or SQL transaction around network I/O. |
+| `ObserveBinding`, `ReleaseBinding` | Full UUID/operation/project/owner/generation/ref/state/epoch CAS; independently observed binding UID + generation + digest. Immutable requested aliases can converge to one digest without losing separate owners. |
+| `BeginPrune`, `MarkSending`, `PruneUnknown`, `SettleKnown` | Any unreleased repo pin blocks prune; active intent blocks all acquisitions. One durable send authorization, no TTL/replay/takeover/clear-UNKNOWN API; definitive outcome must exclude stale outstanding effects. Core performs no HTTP. |
+| `PruneSandboxRegistryOlderThan`, `deleteProjectImages`, `deleteRepoImages` | Configured real deletion returns typed operator HOLD before registry I/O, including incomplete ON config; teardown remains incomplete. Off/dry-run previews and isolated low-level OCI client tests are preserved. |
+
+Two independent real-PG pools, a both-waiters advisory-lock barrier and RR-default
+pool regression verify admission, generation cleanup, UNKNOWN retention and CAS.
+This is not complete race-free GC: all writer participation and legacy adoption
+(PR2), then separately approved exact current-own scoped GC (PR3), remain required.
+[Operator and next-PR contract](../../durable-registry-pins.md).
+
 ## Installer PVE registration connection boundary
 
 **What / why:** stage 60 previously rendered only the primary `apiUrl` and a

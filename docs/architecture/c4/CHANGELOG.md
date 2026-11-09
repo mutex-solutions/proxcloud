@@ -4,6 +4,28 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: dormant durable registry pins and real-delete HOLD (PR1)
+
+**What changed:** add an explicit PRIMARY DB-only pin/prune-intent core, canonical
+trusted-host/current-project scope checks, independent-commit inherited-TX refusal,
+READ COMMITTED namespace-first admission, full owner/generation/epoch receipts,
+observed binding generation cleanup and nonexpiring UNKNOWN/SENDING holds. Both
+scheduled/debug and project-teardown real manifest deletion return typed operator
+HOLD; off/dry-run remain unchanged. No startup schema call, writer integration,
+worker, lease, coverage flag, HTTP effect or new dependency is introduced.
+
+**Why:** finite scans cannot fence a new reference after their last observation;
+lease/epoch changes cannot stop an old registry HTTP DELETE. Missing receipts must
+not auto-expire, resend or silently report completed project cleanup. Preserve
+requested alias identities so different aliases may bind the same digest safely.
+
+**Diagrams updated:** C4 code component/invariant table plus the bounded operator
+contract. Focused race/unit and six local real-PG tests cover both admission orders,
+RR snapshot defaults, same-UID stale-generation cleanup, alias convergence,
+UNKNOWN age/no-replay, project scope/inherited transactions and ON/HTTP0 holds.
+Writer participation + full legacy adoption (PR2), then separately approved exact
+scoped GC (PR3), remain prerequisites; no real-delete acceptance is claimed.
+
 ## 2026-11-09: bounded volume headroom and snapshot retype guards
 
 **What changed:** EXTEND takes required provider headroom and verifies current
