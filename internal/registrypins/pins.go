@@ -138,7 +138,7 @@ func (s *Store) MarkUnknown(ctx context.Context, p Pin) (Pin, error) {
 	}
 	return s.advancePin(ctx, p, Unknown, p.Ref, r.Digest, p.BindingUID, p.BindingGeneration)
 }
-func (s *Store) advancePin(ctx context.Context, p Pin, state, ref, digest, uid, bindingGeneration string) (Pin, error) {
+func (s *Store) advancePin(ctx context.Context, p Pin, state, ref, digest, uid, bindingGeneration string, importEvidence ...ImportPodEvidence) (Pin, error) {
 	r, err := s.reference(p.Ref)
 	id, e := uuid.Parse(p.ID)
 	if err != nil || e != nil || id == uuid.Nil || id.String() != p.ID || !p.Operation.valid() || p.Epoch < 1 || r.Project != p.ProjectID {
@@ -153,7 +153,7 @@ func (s *Store) advancePin(ctx context.Context, p Pin, state, ref, digest, uid, 
 		if err := s.guardBuildPin(tc, tx, p, state, ref, uid); err != nil {
 			return err
 		}
-		if err := s.guardImportPin(tc, tx, p, state, ref, uid); err != nil {
+		if err := s.guardImportPin(tc, tx, p, state, ref, uid, importEvidence...); err != nil {
 			return err
 		}
 		return conflict(tx.QueryRow(tc, `UPDATE registry_pin SET state=$1,ref=$2,digest=$3,binding_uid=$4,binding_generation=$18,epoch=epoch+1,updated_at=clock_timestamp()
