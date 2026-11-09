@@ -108,6 +108,19 @@ type querier interface {
 type txKey struct{}
 type txOwnerKey struct{}
 
+// ErrInheritedTransaction identifies operations that must commit their durable
+// fence before a caller starts its business transaction or external effects.
+var ErrInheritedTransaction = errors.New("pgdoc: inherited transaction is not allowed")
+
+// RejectInheritedTransaction rejects BOTH this DB's and another DB's transaction.
+// It never strips context values or silently opens an independent nested commit.
+func RejectInheritedTransaction(ctx context.Context) error {
+	if ctx.Value(txKey{}) != nil || ctx.Value(txOwnerKey{}) != nil {
+		return ErrInheritedTransaction
+	}
+	return nil
+}
+
 // Tx exposes only this DB's current WithTx transaction. It never starts an
 // independent transaction: transactional outbox writes must join the business
 // commit. Callers must not commit or roll back the returned handle themselves.

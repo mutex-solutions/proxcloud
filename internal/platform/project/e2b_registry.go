@@ -4,9 +4,9 @@ package project
 //   - SyncSandboxBuilds records finished template builds nobody is polling (the SDK polls while it waits; a client that
 //     leaves would otherwise find its build "disappeared" once the build pod is cleaned up, although the image was
 //     pushed).
-//   - PruneSandboxRegistry deletes template images nothing references any more (deleted templates, old builds) through
-//     the OCI distribution API of the sandbox registry (Zot), as the registry's gc account (read and delete on t/**
-//     only). Zot's own garbage collection then frees the blobs. Ported from the earlier implementation (EE), which pruned through Harbor's API.
+//   - PruneSandboxRegistry retains the read-only dry-run preview. Real manifest deletion
+//     is on operator HOLD until durable pins cover every writer and legacy binding;
+//     a finite scan/recheck alone cannot prevent concurrent reference acquisition.
 
 import (
 	"context"
@@ -26,6 +26,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 )
 
 // SyncSandboxBuilds folds finished build pods into their templates and drops fork snapshots past their reuse window
@@ -399,21 +400,36 @@ func pruneTarget(cfgs []sandbox.Config) (host, ca, mode string, cred sandbox.Reg
 	return host, ca, mode, cred, nil
 }
 
-// PruneSandboxRegistry deletes unreferenced template images (scheduled hourly). It runs only when a sandbox provider
-// sets registryPrune ("dry-run" logs, "on" deletes) and holds the gc account; every sandbox provider's cluster
-// (disabled ones too) counts as a user.
+// PruneSandboxRegistry previews unreferenced images (scheduled hourly). Configured
+// "on" returns operator HOLD, never DELETE; dry-run still uses every provider's
+// cluster (disabled ones too) as a reference source.
 func (h *Handler) PruneSandboxRegistry(ctx context.Context) {
-	h.PruneSandboxRegistryOlderThan(ctx, RegistryPruneGrace)
+	if err := h.PruneSandboxRegistryOlderThan(ctx, RegistryPruneGrace); err != nil {
+		slog.Warn("registry prune: no real deletion", "reason", err)
+	}
 }
 
 // PruneSandboxRegistryOlderThan is the prune with another age floor (the mgmt port's run-registry-prune?grace=).
-func (h *Handler) PruneSandboxRegistryOlderThan(ctx context.Context, grace time.Duration) {
+func (h *Handler) PruneSandboxRegistryOlderThan(ctx context.Context, grace time.Duration) error {
 	if h.sbTemplates == nil || h.sandboxFor == nil {
-		return
+		return nil
 	}
 	es, err := h.esSvc.List(ctx)
 	if err != nil {
-		return
+		return err
+	}
+	// Check configured intent before missing credentials/host can look like a
+	// successful no-op. Disabled providers count too; any dry-run keeps preview.
+	configuredOn, configuredDryRun := false, false
+	for i := range es {
+		if es[i].IsSandbox() {
+			cfg := es[i].SandboxConfig()
+			configuredOn = configuredOn || cfg.RegistryPrune == "on"
+			configuredDryRun = configuredDryRun || cfg.RegistryPrune == "dry-run"
+		}
+	}
+	if configuredOn && !configuredDryRun {
+		return registrypins.RealDeleteHold()
 	}
 	var svcs []*sandbox.Service
 	var cfgs []sandbox.Config
@@ -425,26 +441,29 @@ func (h *Handler) PruneSandboxRegistryOlderThan(ctx context.Context, grace time.
 		ss, err := h.sandboxFor(e)
 		if err != nil {
 			slog.Error("registry prune: sandbox service", "service", e.ID, "err", err)
-			return // a cluster we cannot read might use any image
+			return err // a cluster we cannot read might use any image
 		}
 		svcs = append(svcs, ss)
 		cfgs = append(cfgs, ss.Config())
 	}
 	host, ca, mode, cred, err := pruneTarget(cfgs)
 	if err != nil {
-		slog.Error("registry prune", "err", err)
-		return
+		return err
 	}
 	if host == "" || mode == "" || cred.User == "" {
-		return
+		return nil
 	}
-	h.pruneRegistry(ctx, host, svcs, newOCIRegistry(host, ca, cred), mode == "dry-run", grace, time.Sleep)
+	_, err = h.pruneRegistry(ctx, host, svcs, newOCIRegistry(host, ca, cred), mode == "dry-run", grace, time.Sleep)
+	return err
 }
 
-// deleteProjectImages removes every image of a deleted project's template repositories (its teardown; nothing else
-// may reference them: a build's base is chosen by the server from the project's own templates). It follows the
-// provider's registryPrune: off keeps them (as before), dry-run only logs. An error fails the teardown, which retries.
+// deleteProjectImages preserves off/dry-run behavior but configured "on" returns
+// operator HOLD. Project teardown alone cannot prove absence of cross-references;
+// the error intentionally keeps teardown incomplete rather than claiming cleanup.
 func deleteProjectImages(ctx context.Context, cfg sandbox.Config, projectID string) error {
+	if cfg.RegistryPrune == "on" {
+		return registrypins.RealDeleteHold()
+	}
 	host, ca, mode, cred, err := pruneTarget([]sandbox.Config{cfg})
 	if err != nil || host == "" || mode == "" || cred.User == "" {
 		return err
@@ -453,6 +472,11 @@ func deleteProjectImages(ctx context.Context, cfg sandbox.Config, projectID stri
 }
 
 func deleteRepoImages(ctx context.Context, reg *ociRegistry, projectID string, dryRun bool) error {
+	// Teardown is not evidence that no workload or catalog still references an
+	// image. Do not mark cleanup complete until the cooperative protocol is wired.
+	if !dryRun {
+		return registrypins.RealDeleteHold()
+	}
 	arts, err := reg.artifacts(ctx, "t/"+projectID+"/")
 	if err != nil {
 		return err
@@ -468,34 +492,36 @@ func deleteRepoImages(ctx context.Context, reg *ociRegistry, projectID string, d
 	return errors.Join(errs...)
 }
 
-// pruneRegistry returns how many images it deleted (or would have, in a dry run).
-func (h *Handler) pruneRegistry(ctx context.Context, host string, svcs []*sandbox.Service, reg *ociRegistry, dryRun bool, grace time.Duration, sleep func(time.Duration)) int {
+// pruneRegistry returns a dry-run preview count, or zero with a typed real-delete
+// HOLD. Preview counts are not actual deletion evidence.
+func (h *Handler) pruneRegistry(ctx context.Context, host string, svcs []*sandbox.Service, reg *ociRegistry, dryRun bool, grace time.Duration, sleep func(time.Duration)) (int, error) {
+	// Finite scans/rechecks cannot fence acquisition by another API replica.
+	// No runtime flag enables real deletion before writer coverage and adoption.
+	if !dryRun {
+		return 0, registrypins.RealDeleteHold()
+	}
 	live, err := h.registryLive(ctx, host, svcs)
 	if err != nil {
-		slog.Error("registry prune: live set", "err", err)
-		return 0
+		return 0, err
 	}
 	arts, err := reg.artifacts(ctx, "t/")
 	if err != nil {
-		slog.Error("registry prune: list images", "err", err)
-		return 0
+		return 0, err
 	}
 	cands, err := h.ownedOnly(ctx, pruneCandidates(arts, live, time.Now(), grace))
 	if err != nil {
-		slog.Error("registry prune: project lookup", "err", err)
-		return 0
+		return 0, err
 	}
 	if len(cands) == 0 {
 		slog.Info("registry prune: nothing to delete", "images", len(arts))
-		return 0
+		return 0, nil
 	}
 	sleep(registryPruneRecheck)
 	if ctx.Err() != nil {
-		return 0
+		return 0, ctx.Err()
 	}
 	if live, err = h.registryLive(ctx, host, svcs); err != nil {
-		slog.Error("registry prune: live set (recheck)", "err", err)
-		return 0
+		return 0, err
 	}
 	cands = pruneCandidates(cands, live, time.Now(), grace)
 	if len(cands) > registryPruneMax {
@@ -521,5 +547,5 @@ func (h *Handler) pruneRegistry(ctx context.Context, host string, svcs []*sandbo
 		slog.Error("registry prune: delete", "err", err)
 	}
 	slog.Info("registry prune: done", "dryRun", dryRun, "images", len(arts), "candidates", len(cands), "deleted", deleted)
-	return deleted
+	return deleted, errors.Join(errs...)
 }
