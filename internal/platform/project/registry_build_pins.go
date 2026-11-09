@@ -507,73 +507,82 @@ func (h *Handler) cleanupRetiredPins(ctx context.Context, ss *sandbox.Service, t
 	if err != nil || store == nil {
 		return err
 	}
+	var holds []error
 	for _, old := range t.RetiredBuilds {
-		var current sandboxTemplateDoc
-		found, e := h.sbTemplates.Get(ctx, t.ID, &current)
-		if e != nil {
-			return e
-		}
-		if !found || current.ProjectID != t.ProjectID || current.build(old.BuildID) != nil {
-			return errBuildPinState
-		}
-		if old.Registry == nil {
-			continue
-		}
-		op := old.Registry
-		if op.State != buildPinFinished && op.State != buildPinFailed {
-			return errBuildPinState
-		}
-		ps, e := store.PinsForOperation(ctx, op.Operation)
-		if e != nil {
-			return e
-		}
-		for _, p := range ps {
-			if p.State == registrypins.Released {
-				continue
+		// One parent held by a later retired child must not starve independent
+		// cleanup. Preserve its tombstone, but attempt every other generation.
+		e := func() error {
+			var current sandboxTemplateDoc
+			found, e := h.sbTemplates.Get(ctx, t.ID, &current)
+			if e != nil {
+				return e
 			}
-			if p.State == registrypins.Bound && p.RequestedRef == op.Destination && p.Ref == old.Image && p.BindingUID == "template:"+t.ID+":"+old.BuildID && p.BindingGeneration == op.Operation.Generation {
-				if held, e := h.retainedBuildReference(ctx, ss.Config(), t.ID, old.BuildID, p.Ref); e != nil {
-					return e
-				} else if held {
+			if !found || current.ProjectID != t.ProjectID || current.build(old.BuildID) != nil {
+				return errBuildPinState
+			}
+			if old.Registry == nil {
+				return nil
+			}
+			op := old.Registry
+			if op.State != buildPinFinished && op.State != buildPinFailed {
+				return errBuildPinState
+			}
+			ps, e := store.PinsForOperation(ctx, op.Operation)
+			if e != nil {
+				return e
+			}
+			for _, p := range ps {
+				if p.State == registrypins.Released {
+					continue
+				}
+				if p.State == registrypins.Bound && p.RequestedRef == op.Destination && p.Ref == old.Image && p.BindingUID == "template:"+t.ID+":"+old.BuildID && p.BindingGeneration == op.Operation.Generation {
+					if held, e := h.retainedBuildReference(ctx, ss.Config(), t.ID, old.BuildID, p.Ref); e != nil {
+						return e
+					} else if held {
+						return errBuildPinState
+					}
+					_, e = store.ReleaseBinding(ctx, p, registrypins.BindingEvidence{UID: p.BindingUID, Generation: op.Operation.Generation, DigestRef: old.Image})
+				} else if p.State == registrypins.Pending && op.State == buildPinFailed {
+					_, e = store.ReleaseKnownNoEffect(ctx, p)
+				} else {
 					return errBuildPinState
 				}
-				_, e = store.ReleaseBinding(ctx, p, registrypins.BindingEvidence{UID: p.BindingUID, Generation: op.Operation.Generation, DigestRef: old.Image})
-			} else if p.State == registrypins.Pending && op.State == buildPinFailed {
-				_, e = store.ReleaseKnownNoEffect(ctx, p)
-			} else {
-				return errBuildPinState
-			}
-			if e != nil {
-				return e
-			}
-		}
-		if e = h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
-			var current sandboxTemplateDoc
-			found, e := h.sbTemplates.GetForUpdate(tc, t.ID, &current)
-			if e != nil {
-				return e
-			}
-			if !found || current.ProjectID != t.ProjectID {
-				return errBuildPinState
-			}
-			// A generation present in live Builds must never be released by a stale tombstone.
-			if current.build(old.BuildID) != nil {
-				return errBuildPinState
-			}
-			out := current.RetiredBuilds[:0]
-			for _, rb := range current.RetiredBuilds {
-				if rb.Registry == nil || rb.Registry.Operation != op.Operation {
-					out = append(out, rb)
+				if e != nil {
+					return e
 				}
 			}
-			current.RetiredBuilds = out
-			_, e = h.sbTemplates.Replace(tc, t.ID, &current)
-			return e
-		}); e != nil {
-			return e
+			if e = h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
+				var current sandboxTemplateDoc
+				found, e := h.sbTemplates.GetForUpdate(tc, t.ID, &current)
+				if e != nil {
+					return e
+				}
+				if !found || current.ProjectID != t.ProjectID {
+					return errBuildPinState
+				}
+				// A generation present in live Builds must never be released by a stale tombstone.
+				if current.build(old.BuildID) != nil {
+					return errBuildPinState
+				}
+				out := current.RetiredBuilds[:0]
+				for _, rb := range current.RetiredBuilds {
+					if rb.Registry == nil || rb.Registry.Operation != op.Operation {
+						out = append(out, rb)
+					}
+				}
+				current.RetiredBuilds = out
+				_, e = h.sbTemplates.Replace(tc, t.ID, &current)
+				return e
+			}); e != nil {
+				return e
+			}
+			return nil
+		}()
+		if e != nil {
+			holds = append(holds, e)
 		}
 	}
-	return nil
+	return errors.Join(holds...)
 }
 
 // retainedBuildReference is a conservative CURRENT-DB cleanup HOLD, not a
