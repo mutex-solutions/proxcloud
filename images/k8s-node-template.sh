@@ -13,6 +13,13 @@
 set -euo pipefail
 
 : "${PVE_URL:?}" "${PVE_TOKEN_ID:?}" "${PVE_TOKEN_SECRET:?}" "${PVE_NODES:?}" "${PVE_TEMPLATE_STORAGE:?}" "${PVE_BRIDGE:?}" "${K8S_VERSION:?}"
+# Validate before any API request; never echo a private VLAN value on failure.
+PVE_BUILD_VLAN="${PVE_BUILD_VLAN:-0}"
+if [[ ! "$PVE_BUILD_VLAN" =~ ^(0|[1-9][0-9]{0,3})$ ]] || (( PVE_BUILD_VLAN > 4094 )); then
+  echo 'PVE_BUILD_VLAN must be 0 (untagged) or an integer from 1 to 4094' >&2
+  exit 1
+fi
+PVE_ISO_STORAGE="${PVE_ISO_STORAGE:-$PVE_TEMPLATE_STORAGE}"
 IMAGE_BUILDER_REF="${IMAGE_BUILDER_REF:-v0.1.55}"
 ISO_NAME="${ISO_NAME:-ubuntu-24.04.4-live-server-amd64.iso}"
 ISO_URL="${ISO_URL:-https://releases.ubuntu.com/noble/$ISO_NAME}"
@@ -44,8 +51,22 @@ vmid_of() { # template name on node -> vmid, empty when absent
     jq -r --arg n "$1" --arg node "$2" '.data[] | select(.name==$n and .node==$node and .template==1) | .vmid' | head -1
 }
 
+clean_build_network() { # node vmid: CAPMOX creates net0 from the tenant's NetworkDevices spec.
+  local cfg
+  cfg="$(pve "$api/nodes/$1/qemu/$2/config")"
+  jq -e '.data | type == "object"' <<<"$cfg" >/dev/null
+  if jq -e '.data | has("net0")' <<<"$cfg" >/dev/null; then
+    # Remove rather than untag: an untagged NIC could attach to an unauthorized
+    # native network, and would require broader SDN.Use than the build VLAN.
+    pve -X PUT "$api/nodes/$1/qemu/$2/config" -d delete=net0 \
+      --data-urlencode "digest=$(jq -er '.data.digest' <<<"$cfg")" >/dev/null
+    cfg="$(pve "$api/nodes/$1/qemu/$2/config")"
+    jq -e '.data | type == "object" and (has("net0") | not)' <<<"$cfg" >/dev/null
+  fi
+}
+
 if [ -z "$(vmid_of "$name" "$first")" ]; then
-  pve -X POST "$api/nodes/$first/storage/$PVE_TEMPLATE_STORAGE/download-url" \
+  pve -X POST "$api/nodes/$first/storage/$PVE_ISO_STORAGE/download-url" \
     --data-urlencode "url=$ISO_URL" -d content=iso -d "filename=$ISO_NAME" -d checksum-algorithm=sha256 -d "checksum=$ISO_SHA256" \
     >/dev/null 2>&1 || true # already there, or the build will say so
 
@@ -63,6 +84,11 @@ import json, os
 path = 'packer/proxmox/packer.json.tmpl'
 doc = json.load(open(path))
 b = doc['builders'][0]
+# v0.1.55 exposes vlan_tag via PROXMOX_VLAN. Refuse an incompatible override
+# rather than silently building on an untagged network.
+if (b['network_adapters'][0].get('vlan_tag') != '{{user `vlan_tag`}}'
+        or doc['variables'].get('vlan_tag') != '{{env `PROXMOX_VLAN`}}'):
+    raise SystemExit('image-builder Proxmox template does not expose the expected VLAN input')
 b['pool'] = os.environ['TEMPLATE_POOL']
 if 'boot_iso' not in b:
     b['boot_iso'] = {'iso_file': b.pop('iso_file'), 'unmount': True}
@@ -88,13 +114,18 @@ PY
 {"kubernetes_semver":"v$K8S_VERSION","kubernetes_series":"$series","kubernetes_deb_version":"$K8S_VERSION-1.1","kubernetes_rpm_version":"$K8S_VERSION",
  "disk_format":"raw","cores":"2","sockets":"2","memory":"4096","disk_size":"20G","cpu_type":"host"}
 EOF
+  # Proxmox plugin represents an untagged adapter with an empty string, not tag=0.
+  vlan_tag=""; if (( PVE_BUILD_VLAN )); then vlan_tag="$PVE_BUILD_VLAN"; fi
   PROXMOX_URL="$api" PROXMOX_USERNAME="$PVE_TOKEN_ID" PROXMOX_TOKEN="$PVE_TOKEN_SECRET" PROXMOX_NODE="$first" \
-    PROXMOX_ISO_POOL="$PVE_TEMPLATE_STORAGE" PROXMOX_BRIDGE="$PVE_BRIDGE" PROXMOX_STORAGE_POOL="$PVE_TEMPLATE_STORAGE" \
-    ISO_FILE="$PVE_TEMPLATE_STORAGE:iso/$ISO_NAME" PACKER_VAR_FILES="$vars" make build-proxmox-ubuntu-2404
+    PROXMOX_ISO_POOL="$PVE_ISO_STORAGE" PROXMOX_BRIDGE="$PVE_BRIDGE" PROXMOX_VLAN="$vlan_tag" PROXMOX_STORAGE_POOL="$PVE_TEMPLATE_STORAGE" \
+    ISO_FILE="$PVE_ISO_STORAGE:iso/$ISO_NAME" PACKER_VAR_FILES="$vars" make build-proxmox-ubuntu-2404
 fi
 
 src="$(vmid_of "$name" "$first")"
 [ -n "$src" ] || { echo "no template $name on $first" >&2; exit 1; }
+# image-builder has finished its in-guest tests on the tagged build network. Clean
+# the source BEFORE cloning/publication, and also heal older per-node copies.
+clean_build_network "$first" "$src"
 images=""
 for node in $PVE_NODES; do
   id="$(vmid_of "$name" "$node")"
@@ -105,6 +136,7 @@ for node in $PVE_NODES; do
     wait_task "$first" "$upid"
     pve -X POST "$api/nodes/$node/qemu/$id/template" >/dev/null
   fi
+  clean_build_network "$node" "$id"
   pve -X PUT "$api/nodes/$node/qemu/$id/config" --data-urlencode "tags=proxcloud;pc-k8s;$tag" >/dev/null
   images="$images${images:+,}$node=$id"
 done

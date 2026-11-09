@@ -11,8 +11,8 @@ build.py build --os debian-13 --node pve1 --storage nas-templates --import-stora
 |---|---|
 | Base | The vendor image is downloaded to the store with `import` content, once per upstream checksum. A temporary base template is created from it with a cloud-init drive, a serial console and the agent flag. |
 | Packer | `packer/template.pkr.hcl` clones the base, runs `scripts/base.sh` and `scripts/cleanup.sh`, and converts the clone to a template. |
-| Smoke test | A clone boots, and the guest agent must report the address cloud-init configured. The clone is then destroyed. |
-| Publish | The template gets its public tags. Until then the portal cannot see it. |
+| Smoke test | A clone boots on the same bridge/access VLAN as the build, and the guest agent must report the address cloud-init configured. The clone is then destroyed. |
+| Publish | Only after smoke success is the build NIC (`net0`) removed, then public tags applied. Failed cleanup cannot publish; tenant/server create supplies its own NIC. |
 | Prune | Versions past `--keep` (default 2) on that node are destroyed. Customer VMs are full clones, so nothing references them. A template without a `pc-v-*` tag is never pruned. |
 
 ## Template contract
@@ -21,6 +21,7 @@ build.py build --os debian-13 --node pve1 --storage nas-templates --import-stora
 - a cloud-init drive, and an image that logs in with `sshkeys` or `cipassword` alone
 - a scsi boot disk that can be resized
 - clean state: cloud-init, machine-id, SSH host keys, logs and SSH keys all cleared
+- no build NIC on published OS/Kubernetes templates: server creation and CAPMOX's `NetworkDevices` configuration create the tenant's `net0` before first boot
 
 ## Tags
 
@@ -42,6 +43,8 @@ Proxmox clones to another node only from shared to shared storage. A site whose 
 
 Vendor images ship no guest agent, so the build cannot discover a DHCP address. `--build-ip` is a free address on the bridge, used by one build at a time. The machine running `build.py` must reach it over SSH, and Packer needs internet access for its plugin and the VM for `apt`.
 
+`PVE_BUILD_VLAN` is an optional Actions secret for the **build guest's** access VLAN: omitted/empty means `0` (untagged); decimal `1..4094` tags the build NIC. It does not reconfigure the runner's network. The bridge/uplink must carry the chosen VLAN, and the build VM's address/gateway/DNS (or Kubernetes DHCP) must work on it. Direct OS builds use the matching `--vlan` flag. Both provisioning and the OS smoke clone retain the build VLAN; only after successful tests is `net0` deleted before public tags or Kubernetes per-node cloning. No untagged replacement NIC is attached, so the build token need not be granted access to unrelated native networks.
+
 ## Runner
 
 The workflow needs a repo-scoped self-hosted runner labelled `proxcloud-pve` inside the Proxmox network, with `python3` and `packer` installed. Store **all cluster configuration in repository Actions secrets**, not Variables (Settings → Secrets and variables → Actions → Secrets):
@@ -51,7 +54,9 @@ The workflow needs a repo-scoped self-hosted runner labelled `proxcloud-pve` ins
 | Secret | `PVE_TOKEN_SECRET` | Both workflows: secret of `images@pve!packer` |
 | Secret | `PVE_URL`, `PVE_TOKEN_ID` | Both: HTTPS origin + port **without `/api2/json`**; `images@pve!packer` |
 | Secret | `PVE_NODES` | Both: nodes that get a copy, space-separated |
-| Secret | `PVE_TEMPLATE_STORAGE`, `PVE_BRIDGE` | Both: template storage and build bridge; Kubernetes also needs `iso` content on that storage |
+| Secret | `PVE_TEMPLATE_STORAGE`, `PVE_BRIDGE` | Both: template disk/cloud-init storage (`images` content) and build bridge |
+| Secret | `PVE_BUILD_VLAN` | Both, optional: build-guest access VLAN; default `0` untagged, or decimal `1..4094` |
+| Secret | `PVE_ISO_STORAGE` | Kubernetes, optional: `iso`-capable installer storage; defaults to `PVE_TEMPLATE_STORAGE` |
 | Secret | `PVE_IMPORT_STORAGE` | OS: storage allowing `import` content for the vendor cloud image |
 | Secret | `BUILD_IP`, `BUILD_GATEWAY` | OS: dedicated unused build-VM CIDR (not the runner IP) and gateway |
 | Secret | `BUILD_NAMESERVER` | OS, optional: DNS server; empty/unset falls back to `BUILD_GATEWAY` |
@@ -66,5 +71,7 @@ The OS workflow runs on dispatch, weekly and on pushes to `main` that touch its 
 ## Kubernetes node templates
 
 `images/k8s-node-template.sh` builds them with [image-builder](https://github.com/kubernetes-sigs/image-builder) at a pinned tag (`.github/workflows/k8s-node-templates.yml` runs it on the same runner, on dispatch), then clones the result to each node in `PVE_NODES`. Its last line is what the kamaji provider takes as the version's image: `1.35.10=pve1=9210,pve2=9211,pve3=9212`.
+
+The pinned image-builder `v0.1.55` already exposes its adapter's `vlan_tag` through `PROXMOX_VLAN`; the wrapper passes the validated build VLAN there (empty for untagged) and refuses incompatible upstream template overrides rather than silently ignoring it. In-guest provisioning/reboot/goss checks run on the real build network. After they succeed, the source template's `net0` is deleted and read back before cloning; each existing or new per-node copy is likewise checked before `pc-k8s` publication. CAPMOX adds the tenant's NIC from the chart's explicit `networkDevices` spec before worker bootstrap. Optional `PVE_ISO_STORAGE` separates installer ISO content from template disk storage; the default preserves sites using one image/ISO-capable store.
 
 The Ubuntu installer needs DHCP on the bridge. If the bridge has none, the Actions secrets `BUILD_DHCP_RANGE` and `BUILD_GATEWAY` map to script environment `DHCP_RANGE` and `DHCP_GATEWAY` and run a dnsmasq on the runner's default-route interface. **Only enable this when that interface is on the same L2 network/VLAN as the build bridge, with no competing DHCP server or overlapping pool.** Routed API/SSH reachability alone is not enough; every eligible runner must meet the L2 requirement. This mode also needs sudo/systemd-run/dnsmasq privileges; runners without sudo must use existing DHCP and leave `BUILD_DHCP_RANGE` unset. A build takes about an hour on nested nodes, most of it package pinning. The templates are tagged `pc-k8s`, without `pc-public`, so tenants do not see them.
