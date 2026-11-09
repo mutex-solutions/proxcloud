@@ -21,6 +21,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
@@ -157,6 +158,8 @@ func sandboxHTTPError(err error) (status int, msg string, ok bool) {
 		return http.StatusConflict, err.Error(), true
 	case errors.Is(err, sandbox.ErrNotFound):
 		return http.StatusNotFound, "sandbox not found", true
+	case errors.Is(err, errSandboxBusy):
+		return http.StatusConflict, err.Error(), true
 	case errors.Is(err, kamajik8s.ErrUnreachable):
 		return http.StatusServiceUnavailable, "sandboxes are not available", true
 	case errors.As(err, &kerr):
@@ -191,6 +194,19 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
 	}
+	// A project's own template (E2B-built) by name, name:tag or id; anything else is a built-in.
+	custom, customName, err := h.resolveCustomTemplate(r.Context(), proj.ID, spec.Template)
+	if errors.Is(err, sandbox.ErrBadTemplate) {
+		h.fail(w, httpx.BadRequest(err.Error()))
+		return
+	}
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if custom != nil {
+		spec.Custom, spec.Template = custom, customName
+	}
 	q := es.SandboxProjectQuota(proj.Quota)
 	spec.Quota = &q
 	if err := spec.Validate(ss.Config()); err != nil {
@@ -206,10 +222,30 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 	httpx.OK(w, *saved)
 }
 
+// pauseRefusal is what of a create's autoPause and autoResume this location cannot honour (nil = all of it). Without
+// pause here, an autoPause sandbox would be deleted at its timeout, not paused: refuse rather than lose files.
+// autoResume needs autoPause and the wake token sandbox-proxy calls with.
+func (h *Handler) pauseRefusal(cfg sandbox.Config, spec *sandbox.Spec) error {
+	switch {
+	case spec.AutoResume && !spec.AutoPause:
+		return httpx.BadRequest("autoResume needs autoPause")
+	case spec.AutoPause && !h.snapshotsAvailable(cfg):
+		return httpx.BadRequest("autoPause is not available at this location")
+	case spec.AutoResume && cfg.ProxyWakeToken == "":
+		return httpx.BadRequest("autoResume is not available at this location")
+	}
+	return nil
+}
+
 // createSandboxResource creates the sandbox on the cluster and its cache row (shared by the
-// native API and the E2B-compatible one). spec must already be validated.
+// native API, which the console and the MCP create_sandbox tool use, and the E2B-compatible one).
+// spec must already be validated; the pause checks run here so neither create can skip them.
 func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *externalservice.ExternalService, ss *sandbox.Service, spec *sandbox.Spec) (*cloud.CloudResource, error) {
-	data, err := ss.CreateSandbox(ctx, spec)
+	if err := h.pauseRefusal(ss.Config(), spec); err != nil {
+		return nil, err
+	}
+	var data map[string]any
+	err := h.withSandboxStart(ctx, es.ID, func(tc context.Context) error { var e error; data, e = ss.CreateSandbox(tc, spec); return e })
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +411,21 @@ func (h *Handler) sandboxExec(w http.ResponseWriter, r *http.Request, proj *Proj
 		stdin = []byte(in)
 	}
 	timeout := time.Duration(intAny(data["timeoutSeconds"])) * time.Second
-	res, err := ss.Exec(r.Context(), proj.ID, cr.ExternalID, argv, stdin, timeout)
+	var res *kamajik8s.ExecResult
+	var err error
+	execFn := func() error {
+		if h.loadPaused(r.Context(), proj.ID, cr.ExternalID) != nil {
+			return errSandboxBusy
+		}
+		var e error
+		res, e = ss.Exec(r.Context(), proj.ID, cr.ExternalID, argv, stdin, timeout)
+		return e
+	}
+	if h.sbSafety == nil {
+		err = execFn()
+	} else {
+		_, err = h.sbSafety.DB().WithAdvisoryLock(r.Context(), "sandbox-capture:"+es.ID+":"+proj.ID+":"+cr.ExternalID, false, execFn)
+	}
 	switch {
 	case errors.Is(err, sandbox.ErrBadExec):
 		h.fail(w, httpx.BadRequest(err.Error()))
@@ -515,6 +565,13 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 	now := time.Now().UTC()
 	for i := range rows {
 		res := &rows[i]
+		if res.Type == cloud.TypeSandboxSnapshot { // its storage ends here; the snapshot goes with teardownTemplates
+			if err := h.cloud.DeleteAndArchive(ctx, res, now); err != nil {
+				slog.Error("teardown: archive snapshot row", "project", p.ID, "snapshot", res.ExternalID, "err", err)
+				left, failed = append(left, *res), true
+			}
+			continue
+		}
 		if res.Type != cloud.TypeSandbox {
 			left = append(left, *res)
 			continue
@@ -527,7 +584,11 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 		ss, err := h.sandboxFor(es)
 		if err == nil && res.Data["status"] != sandbox.StatusDeleted {
 			refreshSandboxRow(ctx, ss, p.ID, res, now)
-			err = ss.DeleteSandbox(ctx, p.ID, res.ExternalID)
+			if res.Data["kind"] == "build" { // a template build's pod, in sbx-build
+				err = ss.DeleteBuild(ctx, strings.TrimPrefix(res.ExternalID, "build-"))
+			} else {
+				err = ss.DeleteSandbox(ctx, p.ID, res.ExternalID)
+			}
 		}
 		if err != nil {
 			slog.Error("teardown: delete sandbox", "project", p.ID, "sandbox", res.ExternalID, "err", err)
@@ -555,12 +616,37 @@ func (h *Handler) teardownSandboxes(ctx context.Context, p *Project, rows []clou
 		if err == nil {
 			err = ss.DeleteProjectNamespace(ctx, p.ID)
 		}
+		if err == nil {
+			err = h.teardownTemplates(ctx, ss, p.ID) // custom templates and snapshots, paused sandboxes' ones too
+		}
+		if err == nil {
+			err = h.deleteProjectPaused(ctx, p.ID, svcID)
+		}
 		if err != nil {
-			slog.Error("teardown: delete sandbox namespace", "project", p.ID, "serviceId", svcID, "err", err)
+			slog.Error("teardown: delete sandbox namespace and templates", "project", p.ID, "serviceId", svcID, "err", err)
 			failed = true
 		}
 	}
 	return left, failed
+}
+
+// teardownTemplates removes the project's custom templates: their build pods, contexts and records, then the
+// project's images in the template registry (the prune never touches them: it treats a repo of an unknown project as
+// another portal's).
+func (h *Handler) teardownTemplates(ctx context.Context, ss *sandbox.Service, projectID string) error {
+	if h.sbTemplates == nil {
+		return nil
+	}
+	var ts []sandboxTemplateDoc
+	if err := h.sbTemplates.Find(ctx, pgdoc.M{"projectId": projectID}, &ts); err != nil {
+		return err
+	}
+	var errs []error
+	for i := range ts {
+		errs = append(errs, h.deleteTemplate(ctx, ss, &ts[i]))
+	}
+	errs = append(errs, deleteProjectImages(ctx, ss.Config(), projectID))
+	return errors.Join(errs...)
 }
 
 // sandboxServiceOf returns the id of the project's first sandbox service ("" if none), a live one before a DISABLED

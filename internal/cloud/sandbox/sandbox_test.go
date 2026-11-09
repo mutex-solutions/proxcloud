@@ -121,8 +121,22 @@ func (f *fakeAPI) DeleteCR(_ context.Context, _, _, _, ns, name string) error {
 func (f *fakeAPI) MergePatchCR(_ context.Context, _, _, _, ns, name string, patch map[string]any) (map[string]any, error) {
 	obj := f.crs[ns+"/"+name]
 	spec, _ := obj["spec"].(map[string]any)
-	for k, v := range patch["spec"].(map[string]any) {
+	ps, _ := patch["spec"].(map[string]any)
+	for k, v := range ps {
 		spec[k] = v
+	}
+	if md, ok := patch["metadata"].(map[string]any); ok {
+		meta, _ := obj["metadata"].(map[string]any)
+		ann, _ := meta["annotations"].(map[string]any)
+		if ann == nil {
+			ann = map[string]any{}
+			meta["annotations"] = ann
+		}
+		if pa, ok := md["annotations"].(map[string]any); ok {
+			for k, v := range pa {
+				ann[k] = v
+			}
+		}
 	}
 	return obj, nil
 }
@@ -242,7 +256,7 @@ func TestBuildCRSecurityPosture(t *testing.T) {
 	if req[ResourceGPU] != "1" || lim["cpu"] != "2" || lim["memory"] != "8Gi" || req["cpu"] != lim["cpu"] {
 		t.Errorf("resources: req=%v lim=%v", req, lim)
 	}
-	if c["command"].([]any)[0] != "sleep" {
+	if !NativeActionTarget(cr) || c["command"].([]any)[2] != "sleep" {
 		t.Errorf("default command: %v", c["command"])
 	}
 	// CPU sandbox: no selector, no toleration, no GPU resource.

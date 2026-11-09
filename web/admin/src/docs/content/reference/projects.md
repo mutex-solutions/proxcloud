@@ -11,7 +11,7 @@ Manage cloud projects. Base path: `/admin-api/v1/projects`.
 | `status` | string | Project status. Newly created projects are `DISABLED`; provisioning sets `ENABLED`, and so does a member opening one under an `ACTIVE` billing profile or with billing unconfigured. |
 | `organization_id` | string | Owning organization. |
 | `billing_profile_id` | string | The **effective** billing profile: the project's own, or the owning organization's when the project has none. |
-| `provisioned_services` | array | Always present. One entry per provider binding: `service_id`, `provider` (`PROXMOX`, `CEPH_S3`, `KAMAJI` or `DBAAS`), `region`, and `pool` (the project's PVE pool; Proxmox bindings only). Empty fields are omitted. |
+| `provisioned_services` | array | Always present. One entry per provider binding: `service_id`, `provider` (`PROXMOX`, `CEPH_S3`, `RUSTFS`, `TRUENAS`, `POWERDNS`, `KAMAJI`, `DBAAS` or `SANDBOX`), `region`, and `pool` (the project's PVE pool; Proxmox bindings only). Empty fields are omitted. |
 | `members` | array | Always present. Each entry has `sub`. |
 
 ## GET /admin-api/v1/projects

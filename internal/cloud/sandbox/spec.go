@@ -149,8 +149,11 @@ func (s *Spec) Validate(cfg Config) error {
 		if len(v) > maxEnvValueSize {
 			return fmt.Errorf("environment variable %s is longer than %d bytes", k, maxEnvValueSize)
 		}
-		if strings.HasPrefix(k, "PROXCLOUD_") {
-			return fmt.Errorf("environment variable names starting with PROXCLOUD_ are reserved")
+		// sandbox-init drops both from the sandbox's environment (cmd/sandbox-init splitEnv)
+		for _, p := range []string{"PROXCLOUD_", "KUBERNETES_"} {
+			if strings.HasPrefix(k, p) {
+				return fmt.Errorf("environment variable names starting with %s are reserved", p)
+			}
 		}
 	}
 	if len(s.Metadata) > maxMetadataKeys {
@@ -226,6 +229,13 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 	for _, k := range sortedKeys(s.Env) {
 		env = append(env, map[string]any{"name": k, "value": s.Env[k]})
 	}
+	// Native sandboxes need the same read-only helper for filesystem pause/resume,
+	// independently of envd. -native marks boot then execs the original argv unchanged.
+	container["volumeMounts"] = []any{map[string]any{"name": "proxcloud-runtime", "mountPath": RuntimeMountPath, "readOnly": true}}
+	podSpec["volumes"] = []any{map[string]any{
+		"name": "proxcloud-runtime", "hostPath": map[string]any{"path": RuntimeHostDir, "type": "Directory"},
+	}}
+	container["command"] = append([]any{RuntimeMountPath + "/sandbox-init", "-native"}, toAnySlice(cmd)...)
 	if cfg.Envd {
 		// sandbox-init (PID 1) creates the default user, starts envd and POSTs envd's /init over
 		// localhost, so the control-plane routes never have to be reachable from outside the pod.
@@ -248,7 +258,6 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 		if s.envdToken != "" {
 			env = append(env, map[string]any{"name": "PROXCLOUD_ENVD_ACCESS_TOKEN", "value": s.envdToken})
 		}
-		container["volumeMounts"] = []any{map[string]any{"name": "proxcloud-runtime", "mountPath": RuntimeMountPath, "readOnly": true}}
 		// Ready only once envd is initialised: an exec probe, so the kubelet never needs network
 		// access to the sandbox (its ingress admits sandbox-proxy only).
 		container["startupProbe"] = map[string]any{
@@ -256,25 +265,34 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 			"periodSeconds":    int64(1),
 			"failureThreshold": int64(startupBudget(t)),
 		}
-		podSpec["volumes"] = []any{map[string]any{
-			"name":     "proxcloud-runtime",
-			"hostPath": map[string]any{"path": RuntimeHostDir, "type": "Directory"},
-		}}
+		// The same marker afterwards: sandbox-init drops it when envd dies and puts it back only once the restarted
+		// envd has its access token, so sandbox-proxy (Ready pods only) never routes to an envd without one.
+		container["readinessProbe"] = map[string]any{
+			"exec":             map[string]any{"command": []any{RuntimeMountPath + "/sandbox-init", "-ready"}},
+			"periodSeconds":    int64(1),
+			"failureThreshold": int64(1),
+		}
 	}
 	if len(env) > 0 {
 		container["env"] = env
 	}
-	if cfg.fromTemplateRegistry(t.Image) {
+	if cfg.pullsFromRegistry(t.Image) {
 		podSpec["imagePullSecrets"] = []any{map[string]any{"name": TemplatePullSecret}}
 	}
 	podSpec["containers"] = []any{container}
-	podMeta := map[string]any{"labels": podLabels}
+	mbps := cfg.EgressMbps
+	if s.Custom == nil && t.EgressMbps > 0 {
+		mbps = t.EgressMbps
+	}
+	podAnnotations := map[string]any{"kubernetes.io/egress-bandwidth": fmt.Sprintf("%dM", mbps)}
+	podMeta := map[string]any{"labels": podLabels, "annotations": podAnnotations}
 	if s.trafficToken != "" {
-		podMeta["annotations"] = map[string]any{AnnotationTrafficToken: s.trafficToken}
+		podAnnotations[AnnotationTrafficToken] = s.trafficToken
 	}
 	annotations := map[string]any{
-		AnnotationDisplayName: s.Name,
-		AnnotationTemplate:    s.Template,
+		AnnotationDisplayName:           s.Name,
+		AnnotationTemplate:              s.Template,
+		"proxcloud.io/curated-template": strconv.FormatBool(s.Custom == nil),
 	}
 	if len(s.Metadata) > 0 {
 		b, _ := json.Marshal(s.Metadata)

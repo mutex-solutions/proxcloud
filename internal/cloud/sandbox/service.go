@@ -3,13 +3,11 @@ package sandbox
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,8 +83,21 @@ func NewWithAPI(api K8sAPI, cfg Config, serviceID string) *Service {
 // Config exposes the defaulted provider config (catalog, limits).
 func (s *Service) Config() Config { return s.cfg }
 
+// ServiceID is the sandbox provider this service belongs to.
+func (s *Service) ServiceID() string { return s.serviceID }
+
 func (s *Service) ownerSelector(projectID string) string {
 	return LabelProject + "=" + projectID + "," + LabelManagedBy + "=" + ManagedByValue + "," + LabelService + "=" + s.serviceID
+}
+
+// ensureTenantNamespace creates/labels sb-<projectId> and leaves its quota alone.
+func (s *Service) ensureTenantNamespace(ctx context.Context, projectID string) error {
+	return s.api.EnsureNamespace(ctx, NamespaceFor(projectID), map[string]string{
+		LabelProject:   projectID,
+		LabelService:   s.serviceID,
+		LabelManagedBy: ManagedByValue,
+		LabelTenant:    "true",
+	})
 }
 
 // EnsureProjectNamespace creates/labels sb-<projectId> and its ResourceQuota (the bootstrap
@@ -96,16 +107,7 @@ func (s *Service) ownerSelector(projectID string) string {
 // quota when q is set.
 func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string, q *ProjectQuota) error {
 	ns := NamespaceFor(projectID)
-	labels := map[string]string{
-		LabelProject:   projectID,
-		LabelService:   s.serviceID,
-		LabelManagedBy: ManagedByValue,
-		LabelTenant:    "true",
-	}
-	if err := s.api.EnsureNamespace(ctx, ns, labels); err != nil {
-		return err
-	}
-	if err := s.ensurePullSecret(ctx, ns, projectID); err != nil {
+	if err := s.ensureTenantNamespace(ctx, projectID); err != nil {
 		return err
 	}
 	l := s.cfg.Limits
@@ -133,40 +135,10 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string, 
 	})
 }
 
-// ensurePullSecret copies the template registry's pull-only credentials (sandbox-system source,
-// created by the operator) into the project namespace, so sandboxes can start from custom
-// templates. Pods never mount it and have no API access, so customer code cannot read it. No
-// source = custom templates are not set up on this cluster: nothing to copy. A source that
-// cannot be read (RBAC, cluster error) is logged and skipped: sandboxes from the public
-// templates do not need it, and custom ones would otherwise fail at image pull with no cause.
-func (s *Service) ensurePullSecret(ctx context.Context, ns, projectID string) error {
-	_, err := s.copyPullSecret(ctx, ns, TemplatePullSecret, map[string]any{LabelProject: projectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue})
-	if errors.Is(err, errPullSourceUnreadable) {
-		slog.Warn("sandbox: template pull secret not copied, custom templates will not pull", "namespace", ns, "err", err)
-		return nil
-	}
-	return err
-}
-
-var errPullSourceUnreadable = errors.New("cannot read the template registry pull secret")
-
-// copyPullSecret writes the template registry pull credentials into ns/name. false = no source
-// (custom templates are not set up on this cluster); an unreadable source is an error
-// (errPullSourceUnreadable), not "no source".
-func (s *Service) copyPullSecret(ctx context.Context, ns, name string, labels map[string]any) (bool, error) {
-	src, err := s.api.GetSecretData(ctx, pullSecretSourceNS, TemplatePullSecret)
-	if err != nil {
-		return false, fmt.Errorf("%w %s/%s: %w", errPullSourceUnreadable, pullSecretSourceNS, TemplatePullSecret, err)
-	}
-	if len(src[".dockerconfigjson"]) == 0 {
-		return false, nil
-	}
-	return true, s.api.ApplyCore(ctx, "secrets", map[string]any{
-		"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/dockerconfigjson",
-		"metadata": map[string]any{"name": name, "namespace": ns, "labels": labels},
-		"data":     map[string]any{".dockerconfigjson": base64.StdEncoding.EncodeToString(src[".dockerconfigjson"])},
-	})
-}
+// The project's pull Secret (TemplatePullSecret in sb-<project>) and build Secret (BuildSecretFor in sbx-build) are
+// not written here: the registry's account sync writes them with that project's own accounts
+// (docs/managed-sandbox.md §6). Copying one shared account into every namespace, as before, let a node escape read
+// every tenant's templates.
 
 // DeleteProjectNamespace removes sb-<projectId> and everything left in it (project teardown).
 // Refuses a namespace proxcloud does not own for this service.
@@ -362,6 +334,16 @@ func (s *Service) get(ctx context.Context, projectID, id string) (map[string]any
 	return obj, nil
 }
 
+// Alive is nil when the sandbox exists and is not being deleted (ErrNotFound otherwise): a sandbox a kill is removing
+// still reads with GetSandbox until its pod is gone.
+func (s *Service) Alive(ctx context.Context, projectID, id string) error {
+	obj, err := s.get(ctx, projectID, id)
+	if err == nil && dig(obj, "metadata", "deletionTimestamp") != nil {
+		return ErrNotFound
+	}
+	return err
+}
+
 // GetSandbox returns the live data payload of one sandbox.
 func (s *Service) GetSandbox(ctx context.Context, projectID, id string) (map[string]any, error) {
 	obj, err := s.get(ctx, projectID, id)
@@ -441,6 +423,18 @@ func (s *Service) SetTimeout(ctx context.Context, projectID, id string, timeoutS
 	return sandboxData(obj), nil
 }
 
+// ShutdownAt sets the time the cluster removes the sandbox (spec.shutdownTime), outside the timeout limits: a pause
+// holds a sandbox past its end until its image is ready, and puts the old time back if the pause fails. Its end-at
+// (autoPause) stays as it is.
+func (s *Service) ShutdownAt(ctx context.Context, projectID, id string, t time.Time) error {
+	if _, err := s.get(ctx, projectID, id); err != nil {
+		return err
+	}
+	_, err := s.api.MergePatchCR(ctx, CRGroup, CRVersion, CRPlural, NamespaceFor(projectID), id,
+		map[string]any{"spec": map[string]any{"shutdownTime": t.UTC().Format(time.RFC3339)}})
+	return err
+}
+
 // Exec limits. The output cap keeps one call's response bounded; long-running work belongs in
 // a background process the agent polls.
 const (
@@ -477,6 +471,15 @@ func (s *Service) Exec(ctx context.Context, projectID, id string, cmd []string, 
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	// Record trusted native exec activity before and after the call (never its command/output).
+	mark := func(at time.Time) error {
+		_, err := s.api.MergePatchCR(context.WithoutCancel(ctx), CRGroup, CRVersion, CRPlural, NamespaceFor(projectID), id, map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationLastExec: at.UTC().Format(time.RFC3339Nano)}}})
+		return err
+	}
+	if err := mark(s.now().Add(timeout)); err != nil {
+		return nil, err
+	}
+	defer func() { _ = mark(s.now()) }()
 	// agent-sandbox names the pod after the Sandbox; "main" is the container BuildCR renders.
 	return s.api.Exec(ctx, NamespaceFor(projectID), id, "main", cmd, stdin, MaxExecOutput)
 }
@@ -539,15 +542,16 @@ func sandboxData(obj map[string]any) map[string]any {
 		runningSince = conditionTransition(obj, "Ready")
 	}
 	d := map[string]any{
-		"name":         digStr(obj, "metadata", "annotations", AnnotationDisplayName),
-		"template":     digStr(obj, "metadata", "annotations", AnnotationTemplate),
-		"image":        str(c["image"]),
-		"cpu":          intOf(dig(c, "resources", "limits", "cpu")),
-		"memoryGiB":    memGiB(dig(c, "resources", "limits", "memory")),
-		"gpuCount":     intOf(dig(c, "resources", "limits", ResourceGPU)),
-		"gpuModel":     digStr(obj, "spec", "podTemplate", "spec", "nodeSelector", LabelGPU),
-		"status":       status,
-		"shutdownTime": endOf(obj),
+		"name":            digStr(obj, "metadata", "annotations", AnnotationDisplayName),
+		"template":        digStr(obj, "metadata", "annotations", AnnotationTemplate),
+		"image":           str(c["image"]),
+		"cpu":             intOf(dig(c, "resources", "limits", "cpu")),
+		"memoryGiB":       memGiB(dig(c, "resources", "limits", "memory")),
+		"gpuCount":        intOf(dig(c, "resources", "limits", ResourceGPU)),
+		"gpuModel":        digStr(obj, "spec", "podTemplate", "spec", "nodeSelector", LabelGPU),
+		"status":          status,
+		"shutdownTime":    endOf(obj),
+		"egressBandwidth": digStr(obj, "spec", "podTemplate", "metadata", "annotations", "kubernetes.io/egress-bandwidth"),
 	}
 	if created := digStr(obj, "metadata", "creationTimestamp"); created != "" {
 		d["startedAt"] = created

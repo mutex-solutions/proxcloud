@@ -57,6 +57,14 @@ const (
 
 	// SandboxStateSyncSpec — every minute at :10 (sandbox rows off the sandbox cluster), before the charge at :30.
 	SandboxStateSyncSpec = "10 * * * * *"
+	// SandboxTemplateAdoptSpec — every 5 minutes: built-in templates follow the prepull DaemonSet (imageAdoption).
+	SandboxTemplateAdoptSpec = "0 */5 * * * *"
+	// SandboxBuildSyncSpec — every minute at :40: finished template builds nobody polls are recorded.
+	SandboxBuildSyncSpec = "40 * * * * *"
+	// SandboxAutoPauseSpec — every minute at :05: autoPause sandboxes past their end are paused.
+	SandboxAutoPauseSpec = "5 * * * * *"
+	// SandboxRegistryPruneSpec — hourly at :17: unreferenced template images (registryPrune).
+	SandboxRegistryPruneSpec = "0 17 * * * *"
 
 	// PVETaskPollSpec — every 20 seconds (Proxmox task log poller).
 	PVETaskPollSpec = "*/20 * * * * *"

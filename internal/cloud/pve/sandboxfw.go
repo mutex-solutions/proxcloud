@@ -62,6 +62,17 @@ type SandboxFirewall struct {
 	ProxyAddress string
 	ProxyPort    int
 	EntryFrom    string
+	// The sandbox registry (docs/managed-sandbox.md §6): the one address and port outside the subnet the workers'
+	// containerd pulls templates and runtime images from (a MetalLB address on the services cluster). Unset: none.
+	RegistryAddress string
+	RegistryPort    int
+	// The template build bucket (docs/managed-sandbox.md §7): build pods fetch their contexts from it. Unset: none.
+	BuildStorageAddress string
+	BuildStoragePort    int
+	// The portal's API as sandbox-proxy reaches it for a wake (E2B autoResume, docs/managed-sandbox.md §8), when that
+	// address is one the private ranges drop. Unset: none (a public address needs no rule).
+	PortalAddress string
+	PortalPort    int
 }
 
 // sandboxGen is one generation of the shared rules: the group and its two IP sets.
@@ -288,6 +299,24 @@ func (f SandboxFirewall) generation() (sandboxGen, error) {
 			return g, err
 		}
 		rules = append(rules, r)
+	}
+	for _, ep := range []struct {
+		what, addr string
+		port, def  int
+	}{{"registry", f.RegistryAddress, f.RegistryPort, 443}, {"build storage", f.BuildStorageAddress, f.BuildStoragePort, 443},
+		{"portal", f.PortalAddress, f.PortalPort, 443}} {
+		if ep.addr == "" {
+			continue
+		}
+		a, err := netip.ParseAddr(strings.TrimSpace(ep.addr))
+		port := ep.port
+		if port == 0 {
+			port = ep.def
+		}
+		if err != nil || !a.Is4() || subnet.Contains(a) || a == cp || port < 1 || port > 65535 {
+			return g, fmt.Errorf("pve sandbox: invalid %s %s:%d (IPv4 outside the sandbox subnet, not the control plane)", ep.what, ep.addr, port)
+		}
+		rules = append(rules, rule("out", "tcp", "", a.String(), strconv.Itoa(port)))
 	}
 	rules = append(rules, rule("out", "", "", outRef, "")) // the internet, through the sandbox SNAT address
 

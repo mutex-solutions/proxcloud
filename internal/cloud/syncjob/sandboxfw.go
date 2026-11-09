@@ -112,6 +112,9 @@ func sandboxFirewall(ctx context.Context, ps *pve.Service, netCfg externalservic
 		Pool: cfg.Pool, Subnet: netCfg.SandboxCIDRs[0], Nodes: cfg.Nodes, LoadBalancers: cfg.LoadBalancers,
 		ControlPlane: host, APIPort: port, DNS: cfg.DNS, KubeletFrom: cfg.KubeletSources, Deny: deny,
 		ProxyAddress: cfg.Proxy.Address, ProxyPort: cfg.Proxy.Port, EntryFrom: cfg.Proxy.EntryAddress,
+		RegistryAddress: cfg.Registry.Address, RegistryPort: cfg.Registry.Port,
+		BuildStorageAddress: cfg.BuildStorage.Address, BuildStoragePort: cfg.BuildStorage.Port,
+		PortalAddress: cfg.Portal.Address, PortalPort: cfg.Portal.Port,
 	}, nil
 }
 

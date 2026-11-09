@@ -53,7 +53,12 @@ Status legend: [README.md](README.md). Everything on this page is **Implemented*
    workers leave through an exit node that SNATs them to a node address, which the NAS exports and
    the management hosts admit, so their drop must happen here, before the rewrite. An entry that
    overlaps `cidrPool` or a blocked network (the management networks included) is refused (the
-   reconcile fails and writes nothing).
+   reconcile fails and writes nothing). Above these two, `FORWARD ACCEPT` and `IN ACCEPT` over TCP from
+   `<sandboxCidrs>` to each `address:port` the workers' VM firewall opens out (`config.sandbox.registry`,
+   `buildStorage`, `portal`; `ExternalService.PVESandboxEndpoints`), one address and port per rule: such an endpoint
+   may sit on a management network (the lab's build bucket does), and the DROP would otherwise undo the VM
+   firewall's opening. An endpoint inside `cidrPool` or an operator `blockedCidrs` range is never opened. The isolation
+   gate reads these as part of the exact rule set.
 
 **Layer 1, the sandbox workers' VM firewall** (`internal/cloud/pve/sandboxfw.go`, `syncjob/sandboxfw.go`, provider
 `config.sandbox`). The rules above see routed traffic only. Every VM of the sandbox pool also gets `firewall=1` on each
@@ -61,7 +66,10 @@ NIC, VM options `policy_in`/`policy_out` `DROP` with `ipfilter` and `macfilter`,
 cluster security group `sbx<pool hash><content hash>` whose rules all ACCEPT: its control plane's API and konnectivity
 ports, DNS to the configured resolvers, VXLAN, Cilium health, MetalLB memberlist and the kubelet between workers (IP set
 `<group>-n`), the kubelet from `kubeletSources`, with `config.sandbox.proxy` TCP 443 from the entry appliance's vnet
-address to `sandbox-proxy`'s MetalLB address alone (SB4), and the internet (IP set `<group>-o`: everything minus the private
+address to `sandbox-proxy`'s MetalLB address alone (SB4), with `config.sandbox.registry` TCP out to the sandbox
+registry's address and port alone (SB6a), with `config.sandbox.buildStorage` TCP out to the template build bucket's
+address and port alone (SB6b), with `config.sandbox.portal` TCP out to the portal API for wakes (SB7), and the
+internet (IP set `<group>-o`: everything minus the private
 ranges, the management networks, every node address, the sandbox's SNAT address, `blockedCidrs`, `cidrPool`, the
 sandbox subnet and the control plane). With every
 rule an ACCEPT under DROP policies, no order or partial write opens anything; a changed set is a new generation that
@@ -267,7 +275,7 @@ flowchart TB
 | `Service.chargeBillingResource` | `billingjob.go:128` | Per provider: resolve resources, select plans and rules, rate |
 | `Service.billingResources` | `billingjob.go:252` | Every active project of the profile bound to the provider |
 | `GetBillingResources`, `stampResourceValues` | `internal/cloud/billingresource/billingresource.go:26`, `:55` | Cache rows to billing resources via the type registry; stamps region, service id, createdAt |
-| Registry | `cmd/api/main.go:407` | Server, volume, floating IP, K8s cluster, DB cluster, bucket. A load balancer bills as the VM, disk and address it is made of |
+| Registry | `cmd/api/main.go:511` | Server (with its snapshots and protection), volume, floating IP, image, K8s cluster, DB cluster, bucket, share, sandbox, sandbox snapshot. A load balancer bills as the VM, disk and address it is made of |
 | `ServerProvider.GetBillingInformation` | `internal/cloud/billingresource/server.go:34` | `instance` unit (flavor, GPU) plus `instance_traffic` unit; not billed in DELETED, ERROR, UNKNOWN, BUILD |
 | `SelectPricePlansForService`, `ApplicableRules` | `internal/platform/pricing/planselect.go:46`, `:60` | Profile plans plus public plans for the provider, filtered by time unit |
 | `ChargeBillingResources` | `internal/platform/pricing/charge.go:26` | Under the profile lock: current bill, created on demand, rate each resource, adjustments, save |

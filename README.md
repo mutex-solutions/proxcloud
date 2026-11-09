@@ -95,43 +95,29 @@ exposes health and operational triggers.
 
 ## 🚀 Quickstart
 
-### Local (Docker Compose)
+**[`docs/quickstart.md`](docs/quickstart.md)** takes you from "what do I want" to a running
+install: the components each path deploys, the inventory keys to fill, the one command, the
+first login and the fixes for common first-install failures.
 
-Brings up the API + both SPAs + PostgreSQL + RabbitMQ + a dev Keycloak:
+| You want to | Run | Guide |
+|---|---|---|
+| Try it on a laptop, no Proxmox | `docker compose up --build`, then `http://localhost:8082` (`demo`/`demo`) and `:8083` (`admin`/`admin`) | [A](docs/quickstart.md#a-laptop-docker-compose) |
+| Evaluate on one Proxmox node | `make install`, with `mgmt.placement: pve-vm` and `network.kind: simple` | [B](docs/quickstart.md#b-one-proxmox-node-evaluation) |
+| Run a production site | `make install`, one management host (`allinone`) | [C](docs/quickstart.md#c-production-one-management-host-allinone) |
+| Sell managed Kubernetes, databases, sandboxes | `make install` with `mode: split` | [D](docs/quickstart.md#d-managed-kubernetes-databases-and-sandboxes-split) |
+| Run only the portal on your Kubernetes | `helm install` with `values-quickstart.yaml` (no operators) or your values (production) | [E](docs/quickstart.md#e-install-on-kubernetes-with-helm) |
 
-```sh
-docker compose up --build
-```
-
-| Service | URL |
-|---------|-----|
-| API | `http://localhost:8080` (management `http://localhost:8081`) |
-| Customer console | `http://localhost:8082` |
-| Operator console | `http://localhost:8083` |
-
-Auth-gated routes need an OIDC issuer (Compose bundles Keycloak on `:8090`); cloud
-routes need a Proxmox provider registered in the operator console (System → Cloud
-providers). Without them the app runs but those routes stay dark.
-
-### On a Proxmox VE cluster (installer)
-
-One command, from any Linux host that can reach the Proxmox API and a management host:
+The installer in one go, from a Linux host that reaches the Proxmox API:
 
 ```sh
 cd installer
-cp -r inventory/example inventory/mysite   # then edit it: only Proxmox API access is mandatory
+cp -r inventory/example inventory/mysite   # fill pve.api_url and the keys your path needs
+make preflight INVENTORY=inventory/mysite
 make install INVENTORY=inventory/mysite
 ```
 
-It sets up Proxmox roles and tokens, OS templates, a k3s management cluster, the platform
-through ArgoCD, an object store and the provider registration. See
-[`docs/install.md`](docs/install.md).
-
-### Kubernetes (Helm)
-
-To deploy just the chart on an existing cluster, with the CloudNativePG and RabbitMQ
-operators in place, see [`deploy/charts/proxcloud/README.md`](deploy/charts/proxcloud/README.md)
-for values, external PostgreSQL/OIDC wiring, and ingress / Gateway API exposure.
+Every stage and option: [`docs/install.md`](docs/install.md). Chart values:
+[`deploy/charts/proxcloud/README.md`](deploy/charts/proxcloud/README.md).
 
 ## 📂 Repository layout
 

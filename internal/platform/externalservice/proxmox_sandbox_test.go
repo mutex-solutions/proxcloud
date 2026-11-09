@@ -1,9 +1,24 @@
 package externalservice
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
+
+// The isolation's sandbox endpoints are the VM firewall's: registry, build storage, portal, port 443 when unset.
+func TestPVESandboxEndpoints(t *testing.T) {
+	if got := (&ExternalService{Config: map[string]any{}}).PVESandboxEndpoints(); got != nil {
+		t.Fatalf("no sandbox pool: %v", got)
+	}
+	es := &ExternalService{Config: map[string]any{"sandbox": map[string]any{"pool": "proxcloud-sandbox",
+		"registry":     map[string]any{"address": "10.89.0.227"},
+		"buildStorage": map[string]any{"address": "10.88.0.41", "port": float64(9000)},
+		"portal":       map[string]any{"address": "10.88.0.10", "port": float64(19459)}}}}
+	if got, want := es.PVESandboxEndpoints(), []string{"10.89.0.227:443", "10.88.0.41:9000", "10.88.0.10:19459"}; !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
 
 func TestPVESandboxConfig(t *testing.T) {
 	if _, ok := (&ExternalService{Config: map[string]any{}}).PVESandboxConfig(); ok {
@@ -30,5 +45,9 @@ func TestPVESandboxConfig(t *testing.T) {
 	if p := func() PVESandboxProxy { c, _ := es.PVESandboxConfig(); return c.Proxy }(); p != (PVESandboxProxy{Address: "192.0.2.200",
 		Port: 443, EntryVMID: 9110, EntryPool: "proxcloud-sandbox-entry", EntryAddress: "192.0.2.5"}) {
 		t.Fatalf("proxy: %+v", p)
+	}
+	es.Config["sandbox"].(map[string]any)["registry"] = map[string]any{"address": "198.51.100.226", "port": float64(443)}
+	if c, _ := es.PVESandboxConfig(); c.Registry != (PVESandboxRegistry{Address: "198.51.100.226", Port: 443}) {
+		t.Fatalf("registry: %+v", c.Registry)
 	}
 }

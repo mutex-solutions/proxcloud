@@ -71,6 +71,9 @@ api:
   # (PROXCLOUD_CORS_ALLOWED_ORIGINS, joined with commas).
   corsAllowedOrigins: []
 
+  # Region assumed when a provider names none (PROXCLOUD_DEFAULT_REGION). Empty: the binary's "default".
+  defaultRegion: ""
+
   # Scheduled-job gates. All OFF by default on purpose: a plain deploy
   # stays dormant and never charges bills on a timer.
   jobs:
@@ -100,6 +103,8 @@ api:
     url: ""
     # External provider only. Bearer token for that service's internal API.
     token: ""
+    # External provider only. Bound on one charge call as a Go duration (PROXCLOUD_BILLING_TIMEOUT). Empty: 60s.
+    timeout: ""
     # Shared secret the billing service presents when calling BACK into proxcloud to suspend/resume
     # clouds, activate projects or send mail. Empty -> those callbacks are not mounted at all.
     callbackToken: ""
@@ -117,6 +122,8 @@ api:
   # precedence over this env gateway. Leave smtp.host empty to disable the env gateway (a NoopMailer
   # then drops email until a gateway is configured). from + smtp.host are both required to enable.
   mail:
+    # Sender name in mail templates (PROXCLOUD_MAIL_BUSINESS_NAME). Empty: "ProxCloud".
+    businessName: ""
     from: "" # PROXCLOUD_MAIL_FROM, e.g. no-reply@example.com
     smtp:
       host: "" # PROXCLOUD_MAIL_SMTP_HOST, e.g. smtp.sendgrid.net
@@ -454,7 +461,9 @@ keycloakConfigCli:
   url: ""
   # Keycloak admin credentials (the keycloakx bootstrap admin, or any admin of
   # the target). Password inline OR from a pre-created Secret — REQUIRED when
-  # enabled.
+  # enabled. An inline password goes into the Secret <fullname>-keycloak-admin
+  # (key passwordKey), which the bundled Keycloak can read its bootstrap admin
+  # password from too (values-quickstart.yaml).
   adminUser: admin
   adminPassword: ""
   existingSecret: ""
@@ -466,6 +475,29 @@ keycloakConfigCli:
   # Additional raw keycloak-config-cli import files (filename -> JSON string),
   # applied alongside the derived ones.
   extraRealms: {}
+
+# ----------------------------------------------------------------------------
+# seed — first-run configuration documents (the same as deploy/seed/). A post-install/post-upgrade
+# Job writes each document only while its table is empty, so later edits in the operator console
+# (or deploy/seed/seed-operator.py) are never overwritten. Without them the billing and project
+# endpoints answer "billing not configured".
+# ----------------------------------------------------------------------------
+seed:
+  enabled: true
+  platformConfiguration:
+    name: ProxCloud
+    language: en
+    defaultConfiguration: true
+    branding:
+      name: ProxCloud
+      color: "#0066cc"
+    dateConfiguration:
+      dateFormat: DD/MM/YYYY
+    regions: []
+  billingConfiguration:
+    baseCurrency: USD
+    promotionCodesEnabled: true
+    defaultConfiguration: true
 
 # ----------------------------------------------------------------------------
 # Gateway API — HTTPRoutes as an alternative to Ingress (OFF by default).

@@ -41,6 +41,7 @@ package externalservice
 //	      "proxy": {"address": "192.0.2.200", "port": 443,  // sandbox-proxy's MetalLB address, and the entry appliance
 //	                "entry": {"vmid": 9110, "pool": "proxcloud-sandbox-entry", "address": "192.0.2.5"}}  // (its pool,
 //	                                                                         // its address on the sandbox vnet)
+//	      "registry": {"address": "198.51.100.226", "port": 443}  // the sandbox registry the workers pull from
 //	    },                                     // + secret.sandboxKubeconfig (nodes get/list/patch)
 //	    "storageProfiles": {                   // Phase 5 — honest capability flags
 //	      "std": {"storages": {"*": "local-zfs"}, "shared": false, "snapshots": true,
@@ -80,7 +81,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -406,6 +409,20 @@ type PVESandbox struct {
 	UnsecuredMinAge time.Duration
 	Kubeconfig      string // secret.sandboxKubeconfig: the sandbox cluster, nodes get/list/patch
 	Proxy           PVESandboxProxy
+	Registry        PVESandboxRegistry
+	// BuildStorage is config.sandbox.buildStorage: the template build bucket's endpoint as the workers reach it
+	// (docs/managed-sandbox.md §7), the one more place outside the subnet build pods fetch from. Empty: no rule.
+	BuildStorage PVESandboxRegistry
+	// Portal is config.sandbox.portal: the portal API's address and port as sandbox-proxy reaches it to wake a paused
+	// sandbox (docs/managed-sandbox.md §8), when it is a private address. Empty: no rule.
+	Portal PVESandboxRegistry
+}
+
+// PVESandboxRegistry is config.sandbox.registry: the sandbox registry's address and port (docs/managed-sandbox.md §6),
+// the one place outside the sandbox subnet the workers pull images from. Empty Address: no registry rule.
+type PVESandboxRegistry struct {
+	Address string
+	Port    int
 }
 
 // PVESandboxProxy is config.sandbox.proxy: sandbox-proxy's MetalLB address and port, and the platform HAProxy
@@ -437,7 +454,38 @@ func (e *ExternalService) PVESandboxConfig() (cfg PVESandbox, ok bool) {
 			cfg.Proxy.Port = 443
 		}
 	}
+	if r, _ := s["registry"].(map[string]any); r != nil {
+		cfg.Registry = PVESandboxRegistry{Address: str(r["address"]), Port: intOf(r["port"])}
+	}
+	if b, _ := s["buildStorage"].(map[string]any); b != nil {
+		cfg.BuildStorage = PVESandboxRegistry{Address: str(b["address"]), Port: intOf(b["port"])}
+	}
+	if p, _ := s["portal"].(map[string]any); p != nil {
+		cfg.Portal = PVESandboxRegistry{Address: str(p["address"]), Port: intOf(p["port"])}
+	}
 	return cfg, cfg.Pool != ""
+}
+
+// PVESandboxEndpoints are the "address:port" places outside the sandbox subnet the workers' VM firewall opens
+// (registry, build storage, portal; port 443 when unset). The cluster isolation lets the sandbox networks reach exactly
+// these, above its DROPs, or one on a management network would stay unreachable (docs/managed-sandbox.md §2).
+func (e *ExternalService) PVESandboxEndpoints() []string {
+	cfg, ok := e.PVESandboxConfig()
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, ep := range []PVESandboxRegistry{cfg.Registry, cfg.BuildStorage, cfg.Portal} {
+		if ep.Address == "" {
+			continue
+		}
+		port := ep.Port
+		if port == 0 {
+			port = 443
+		}
+		out = append(out, net.JoinHostPort(ep.Address, strconv.Itoa(port)))
+	}
+	return out
 }
 
 // PVEStorageProfile is one admin-curated storage class (config.storageProfiles.<slug>):

@@ -11,12 +11,15 @@ Design, lab measurements and the threat model: [`docs/managed-sandbox.md`](../..
 | File | What it does |
 |---|---|
 | `cilium-node-config.yaml` | Cilium socket LB limited to the host namespace on this cluster's nodes. A no-op while the chart runs Cilium without kube-proxy replacement; it keeps gVisor DNS working if that ever changes |
-| `node-setup.yaml` | DaemonSet: installs gVisor (`runsc`, platform `systrap`) on every node; refuses a node with IPv6 |
+| `node-setup.yaml` | DaemonSet: installs gVisor (`runsc`, platform `systrap`, `allow-suid` unless `RUNSC_ALLOW_SUID=false` so `sudo` works in sandboxes; security effect in docs/managed-sandbox.md §1.4) on every node; refuses a node with IPv6 |
+| `telemetry.yaml` | SB10: narrowly scoped nodes/stats collector identity, hostNetwork non-root collector with only public kubelet serving chain; dedicated ConfigMap samples and portal read role. No nodes/proxy. Apply before node-setup |
+| `rotation-rbac.example.yaml` | Optional separate management credential for exact named worker MachineDeployments; rotation defaults off. Do not bulk-apply this example |
 | `runtimeclass.yaml` | RuntimeClass `gvisor` |
 | `agent-sandbox/` | kubernetes-sigs/agent-sandbox v1.0.9, vendored (Sandbox CRD and controller); see its README |
 | `network-policy.yaml` | Cilium cluster-wide guardrail for every tenant namespace: private ranges and TCP 25 denied, ingress from `sandbox-proxy` only |
 | `rbac.yaml` | `proxcloud-system/proxcloud` ServiceAccount, its ClusterRole and a token Secret; `proxcloud-system/proxcloud-firewall` (nodes get, list, patch; impersonating only the node `proxcloud-noderestriction-probe` for the NodeRestriction release gate) for the Proxmox provider's sync, which fences the workers and takes their `unsecured` taint off |
 | `check-ipv4-only.sh` | The IPv6 precondition: Cilium IPv6 off, no IPv6 on any node |
+| `registry.yaml` | The sandbox registry's side (docs/managed-sandbox.md §6): `registry-trust` puts the registry CA under `/etc/containerd/certs.d/<address>/` on every node, from the ConfigMap `sandbox-registry` stage 55 writes; `sandbox-registry-users`, the identity of the account sync on the services cluster (namespaces `list`, and only the pull and build Secrets it writes). The template prepull DaemonSet is rendered by stage 55 from `deploy/templates/images.yaml`, and the template build namespace `sbx-build` (its policy, the registry CA, the portal's and the sync's Roles there) from `installer/playbooks/templates/sandbox-builds.yml.j2` (docs/managed-sandbox.md §7) |
 | `sandbox-proxy.yaml` | `sandbox-proxy` (two replicas on the `sandbox-system` nodes only, TLS ends there), its LoadBalancer Service on one MetalLB address, and `sandbox-cert-sync`: the identity that may get and patch `sandbox-proxy-tls` alone, for the copy from the services cluster (docs/managed-sandbox.md §4) |
 
 ## Preconditions
@@ -41,7 +44,9 @@ export KUBECONFIG=<sandbox cluster admin kubeconfig>
 kubectl apply -f cilium-node-config.yaml
 kubectl -n kube-system rollout restart ds/cilium && kubectl -n kube-system rollout status ds/cilium
 
-# 1. Node runtime. Every node must report "node-setup done".
+# SB10: render chart with sandboxBandwidth=true (bandwidth manager + cni.customConf).
+# 1. Node runtime and trusted telemetry identity, before the chain can publish its heartbeat.
+kubectl apply -f telemetry.yaml
 kubectl apply -f node-setup.yaml -f runtimeclass.yaml
 kubectl -n sandbox-system rollout status ds/node-setup
 kubectl -n sandbox-system logs -l app=node-setup --prefix | grep -E "done|REFUSED"
@@ -59,9 +64,10 @@ kubectl apply -f network-policy.yaml -f rbac.yaml
 # 5. sandbox-proxy (installer stage 56 does this, plus the certificate and the entry appliance). It runs only on nodes
 #    labelled node-restriction.kubernetes.io/proxcloud-system by CAPI (stage 55's sandbox-system node group, chart
 #    value machineLabels), never on a sandbox worker. Its config, wake token and an empty certificate Secret first;
-#    cert-sync on the services cluster fills the certificate. PROXCLOUD_WAKE_URL
-#    (https://api.example.org/api/v1/internal/sandboxes) only from SB7 on, when there is something to resume.
-kubectl -n sandbox-system create configmap sandbox-proxy-config --from-literal=SANDBOX_DOMAIN=example-sandbox.net
+#    cert-sync on the services cluster fills the certificate. PROXCLOUD_WAKE_URL is where the proxy wakes paused
+#    autoResume sandboxes; the workers' firewall must let it reach that address (Proxmox provider config.sandbox.portal).
+kubectl -n sandbox-system create configmap sandbox-proxy-config --from-literal=SANDBOX_DOMAIN=example-sandbox.net \
+  --from-literal=PROXCLOUD_WAKE_URL=https://api.example.org/api/v1/internal/sandboxes
 kubectl -n sandbox-system create secret generic sandbox-proxy-wake --from-literal=PROXCLOUD_WAKE_TOKEN=<proxyWakeToken>
 kubectl -n sandbox-system create secret generic sandbox-proxy-tls
 kubectl apply -f sandbox-proxy.yaml
@@ -74,9 +80,11 @@ kubectl -n sandbox-system annotate svc sandbox-proxy metallb.io/loadBalancerIPs=
 Kept by `internal/cloud/sandbox` (`RuntimeHostDir`, `RuntimeMountPath`, `LabelTenant`):
 
 - Tenant namespaces carry `proxcloud.io/tenant=true`; the guardrail selects on it.
-- With envd on (SB5), sandbox pods mount `/opt/proxcloud-sandbox/bin` read-only at `/.proxcloud` and run
-  `/.proxcloud/sandbox-init` as PID 1. The init container that installs envd and `sandbox-init` there comes with the
-  runtime image in SB5; until then the provider runs sandboxes as plain gVisor pods.
+- With envd on (`config.sandbox.envd` and a `domain`, SB5), sandbox pods mount `/opt/proxcloud-sandbox/bin` read-only at
+  `/.proxcloud` and run `/.proxcloud/sandbox-init` as PID 1. `node-setup.yaml`'s init container installs envd and
+  `sandbox-init` there from the `proxcloud-sandbox-runtime` image (stage 55 pins its tag; by hand, `kubectl -n
+  sandbox-system set image ds/node-setup sandbox-runtime=ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:<release>`).
+  Without envd the provider runs sandboxes as plain gVisor pods.
 - GPU placement uses `node-restriction.kubernetes.io/proxcloud-gpu` (SB9), the one label prefix a kubelet cannot set on
   its own Node once NodeRestriction is on.
 

@@ -4,6 +4,550 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: functional native automatic pause and recovery
+
+**What changed:** native pods mount the existing read-only node runtime and run a PID1-only `-native` mode that marks
+boot then execs the original argv, retaining image USER/env/workdir/signals/exit behavior. Native automatic pause now
+uses the working filesystem snapshot path; a project-scoped native paused list/resume/delete API recovers it without
+turning envd on. Resume reuses suspension/release/quota/rotation/billing and pause claim locks. Automatic pauses persist
+a credential-free policy/connection-fingerprint/sample guard and reauthorize deletion under the capture lock after
+asynchronous image assembly/redrive. A changed policy, UID, activity or stale telemetry retains the original; an
+unknown/absent/replaced source never causes the only usable snapshot to be discarded. Guards bind the host-owned main
+container ID/restart count as well as CR/pod UID: a same-pod restart can lose the writable filesystem. Cancellation,
+abandonment and stale-pause/resume adoption require positive original-filesystem identity; replacement conflicts return
+409 with the copy retained for recovery after operator removal of the replacement. Actual pod and desired CR must both use
+the native helper. Unsupported envd + pause/kill (including disabled provider edits) and pause without storage are
+rejected explicitly in API/operator form; SDK remains alert-only.
+
+**Why:** the prior native opt-in could never pause shipped pods (no mounted helper or boot marker), and only exposing
+E2B resume stranded native snapshots. Proxy request counting is insufficient proof for detached/silent SDK processes,
+HA gaps or direct bypass; this bounded native capability adds no credentials/RBAC or tenant process trust. Native
+images require writable `/tmp`; upgrade node runtime before portal and recreate legacy native pods. Handler/Postgres
+regressions hold assembly, prove source remains until image usable, recover files through native resume, and cover late
+policy/activity/UID/stale metrics, failed capture, suspended/foreign access and expired source.
+
+**Diagrams updated:** C3 managed-service runtime node and safety component contract. Live lab verification is a separate
+post-merge gate, not claimed by the simulated cluster/image fixture.
+
+## 2026-11-09: show the effective egress cap before sandbox creation
+
+**What changed:** the sandbox create dialog's limits include the selected curated
+template's egress cap, falling back to the provider's default before selection.
+**Why:** the API and running rows already exposed the cap, but a customer could not
+see that constraint before starting a sandbox. This is display-only; the host CNI
+remains the enforcement boundary. **Diagrams updated:** none; C3 sandbox component
+text records the client-facing limits contract and the measured SB10 status.
+
+## 2026-11-09: nginx public asset modes independent of umask
+
+**What changed:** both SPA images normalize only nginx's public document root to
+0755 directories and 0644 files; the entrypoint sets its generated `config.js` to
+0644 before starting nginx. The Docker regression checks both images and HTTP
+responses under umask 077, with an existing 0600 config and a missing config.
+**Why:** Vite preserves public-file modes from a restrictive checkout, and shell
+redirection preserves an existing 0600 mode; nginx workers then return 403 for the
+runtime config and brand SVGs, making the SPA fall back to development auth URLs.
+No secret paths or global umask are changed. **Diagrams updated:** none; C2 build
+and delivery text records the existing SPA containers' public-file contract.
+
+## 2026-11-09: sandbox abuse controls and wait-only worker replacement (SB10)
+
+**What changed**
+
+- Provider and curated-template egress caps (100 Mbps default), Cilium bandwidth manager and per-pod annotation,
+  plus a host-owned chained CNI TBF on real pod `eth0` before customer code starts. Cilium uses `customConf`;
+  hostNetwork node-setup owns the chain and atomically installs the static guard from the runtime image.
+- A hostNetwork unprivileged collector reads its own kubelet `stats/summary` using a separate `nodes/stats` GET
+  identity and pinned public serving chain. Dedicated namespace ConfigMaps contain only CPU/network counters,
+  pod UID and node identity. The portal reads those, never obtains `nodes/proxy`.
+- Review hardening: CNI binds live pod UID/node to kubelet CNI arguments; installation and release gate require deployed
+  Cilium customConf/no writer, and stage55 awaits it then rolls all old writers before installing the chain. Final action
+  freshness validates collector/CPU/network timestamps independently; rotation scope fingerprints its encrypted connection.
+  Capture/exec advisory locks use a separate bounded connection pool, so lock holders/waiters cannot exhaust the primary
+  store pool needed for independent snapshot progress transactions (MaxConns=1 regression).
+- Review safety: envd/E2B providers alert only; automatic pause/kill is refused because a silent SDK streaming exec
+  has no trustworthy inactivity marker. Native exec serializes with the capture/action lock. Destructive actions recheck
+  exact fresh policy/attachment/connection and node activity under that lock; handler/Postgres regressions cover stale
+  disabled policy, reused pod, renewed exec/traffic, alert and opt-in kill, and unsupported pause.
+- Minutely sustained-CPU/inactivity sampling persists consecutive windows in `sandbox_safety`; detections and
+  action outcomes are audit events. Default alert, operator mail template and admin filter/project count; provider
+  explicit pause/kill opt-in. Actions revalidate CR/pod UID and provider/project ownership and skip busy captures.
+- Default-off wait-only worker rotation: explicit namespace/cluster/MD allowlist, NodeRestriction-protected worker
+  labels and CAPI nodeRef UID, empty preflight, cordon/recheck, durable provider start fence and beta2 `rollout.after`.
+  Creates, resumes, builds and snapshot assembly serialize with the fence; replacement must converge before reopening.
+  No eviction, drain, force delete or automatic pause. Read-only admin plan and mgmt-only job triggers.
+- Installer upgrade now reapplies stage 55 cluster as well as fresh installs. The worker Ready wait follows
+  hostNetwork node-setup/CNI installation, preventing fresh-install deadlock when Cilium customConf disables its own chain writer. Admin settings, client effective cap,
+  SDK-visible limits and operator runbook updated.
+
+**Why**
+
+- Cilium native-device EDT does not limit same-node traffic: capability spike measured about 130 Mbps despite a
+  1 Mbps annotation. TCX bypasses host-veth classic police. Host-configured real pod netns TBF works independently
+  of TCX; it also avoids a reconciliation startup gap. Node metrics are required because tenant `/proc` is untrusted.
+- A heuristic can match legitimate unattended compute: default alerts preserve data. Missing/stale samples, gaps,
+  activity or identity/counter changes reset evidence. Rotation must never destroy a live sandbox or sole snapshot copy.
+
+**Diagrams updated:** C3 managed-service components and SB10 safety edges.
+
+## 2026-11-08: a fork retried after 503 reuses the snapshot still being assembled
+
+**What changed**
+
+- E2B fork (`internal/platform/project/e2b_snapshots.go`): a fork whose snapshot is not ready within 60 s keeps it
+  (template field `forkUntil`, 5 minutes from the request) and answers 503. A fork of the same sandbox in the same
+  project before then takes that snapshot instead of capturing again, waits up to 60 s for it, and forks from it once
+  the image is ready; the snapshot then goes. A failed assembly still drops it. Job `sandboxBuildSync` drops a fork
+  snapshot past its window that no retry took (also after an API restart).
+- `tests/e2b-compat/pause.py`: fork and create from a snapshot are retried on `ServiceBusyException` (5 tries with
+  backoff); autoPause is drilled without autoResume (the SDK refuses it with `mode: "filesystem"`), and the
+  autoResume wake separately, with `on_timeout: "pause"` and no mode.
+
+**Why**
+
+- The strict lab drill (stock SDK 2.63, main 5df7f4e) on a site where a snapshot image takes about 66 s to assemble:
+  fork answered 503 after 60 s, as designed, but every retry took a new snapshot that again needed 66 s, so a fork
+  could never succeed there. A create from a named snapshot already converged (a retry takes no new snapshot).
+
+**Diagrams updated:** none; no container or component changed.
+
+## 2026-11-08: sandbox pause answers before its image is ready; isolation lets workers reach their VM firewall endpoints
+
+**What changed**
+
+- E2B pause (`internal/platform/project/e2b_snapshots.go`): answers 204 once the capture is in the bucket, with the
+  paused record in state `pausing`; the sandbox keeps running and billing, held past its own end if needed, until a
+  background step sees the image pushed, then it is deleted (`stopping`, then paused). A failed assembly drops the
+  pause and gives the sandbox its own end back. A connect, resume or wake during `pausing` waits up to 45 s, then
+  cancels the pause and answers with the running sandbox. Fork and create from a snapshot wait at most 60 s from the
+  request for the snapshot, then answer 503. A list shows a pausing sandbox once, as paused.
+- `sandbox.Service.ShutdownAt` sets a sandbox's cluster deadline outside the timeout limits (the pause's hold).
+- Cluster isolation (`internal/cloud/pve/network.go`, C4.1 rule 6): a TCP `ACCEPT` from `sandboxCidrs` to each
+  `address:port` the workers' VM firewall opens (registry, build bucket, portal), above the sandbox `DROP`s; the
+  isolation gate checks them as part of the exact set. Build and snapshot pods give up a connect after 10 s.
+- `tests/e2b-compat/pause.py`: the strict pause, resume, fork and snapshot drill with the stock SDK.
+- Review fixes: a pause records its sandbox only if it still exists and is not being deleted, and a kill of a running
+  sandbox takes the pause lock (a kill during the capture no longer comes back as paused with a billed snapshot). The
+  `pausing`/`stopping` lease is 2 minutes, renewed by the pause's background step; job `sandboxAutoPause` takes over
+  one whose lease lapsed (API restart) and finishes it. A resume that drops a stale pause gives the sandbox the
+  timeout asked for. A failed pause leaves the sandbox at least 5 minutes. A sandbox endpoint in the tenant pool or a
+  blocked range is not opened.
+- Re-drive fix: the pause's driver follows the image until it is pushed or its build fails, with no deadline from the
+  pause's start (a re-drive past 15 minutes read the build with an expired context, took it as gone and dropped a
+  ready snapshot, losing the files of a sandbox the cluster had removed at the hold). A failed store or cluster read
+  is retried, not taken as a gone snapshot; a failed delete of the original gives the pause up only if the original
+  still exists. The native cloud-resource delete of a sandbox ends a pause under way and deletes under the pause lock,
+  like the E2B kill (it could otherwise be finished as paused).
+
+**Why**
+
+- The stock E2B SDK cuts every REST call at 120 s (60 s `request_timeout`, applied by pyqwest as read plus write).
+  Pause, fork and create from a snapshot waited for the image inside the request and were cut at exactly 120 s on the
+  lab, so the client lost a pause that went on, or a fork it could not see.
+- The lab's build bucket sits on a management network. The isolation's sandbox `DROP` (before the exit node's SNAT)
+  dropped the workers' traffic to it although their VM firewall opened it, so no snapshot or template build could
+  fetch its input: each connect took 127 s to time out, four attempts per pod.
+
+**Diagrams updated:** none; no container or component changed (C4.1 rule text in c4-code.md updated).
+
+## 2026-11-08: sandbox-init runs the init only as PID 1 without arguments
+
+**What changed**
+
+- `cmd/sandbox-init`: an exec with an argument it does not know, or with no argument from a process that is not
+  PID 1, now exits 2 with the reason. Before, both ran a second init inside the running sandbox.
+
+**Why**
+
+- Found in the SB7 lab drill: the portal asked a node with an older runtime for `sandbox-init -snapshot` (pause).
+  The old binary did not know the flag and started a second init, which removed the ready marker and looped on
+  envd's port; the pause failed after 126 s as it should, but the sandbox stayed unready (503 from the proxy) until it
+  was killed. The same happens to any future mode on a node node-setup has not rolled yet.
+
+**Diagrams updated:** none; no container or component changed.
+## 2026-11-08: C2 caught up with the code: token-authenticated surfaces and the delivery pipeline
+
+**What changed** (documentation only; no code or behaviour change)
+
+- C2 API surfaces: rows for `/e2b/**` (a project's `e2b_` sandbox API key), `/api/v1/internal/sandboxes/**` (the
+  sandbox provider's `proxyWakeToken`), `/api/v1/nocloud/**` (per-VM seed token) and `/api/v1/console/**` (console
+  token). The debug-trigger row says `gen-hmac-key` needs debug triggers, not just the scheduler.
+- C2 trust boundaries: the same three credentials as rows.
+- C2c build and delivery: `docker.yml` also builds sandbox-proxy and sandbox-runtime; `sandbox-templates.yml` and the
+  `proxmox-kamaji-cluster` chart are drawn; the K8s node template pipeline is Implemented (`k8s-node-templates.yml`),
+  as the container table already said. The container table gains the kamaji chart row and the full workflow list.
+- C4 code: the billing registry row lists every provider `cmd/api/main.go` registers (image, share, sandbox, sandbox
+  snapshot were missing).
+
+**Why**
+
+The C4 maintenance rule wants every trust boundary in C2. Four public-prefix surfaces that authenticate with their own
+token were only in `pkg/auth`, and the delivery diagram still showed the K8s node template pipeline as Planned while
+the table and the workflow said otherwise.
+
+**Diagrams updated:** C2 (API surfaces, C2c, container table, trust boundaries), C4 (billing registry row).
+
+## 2026-11-08: MCP tool audit: dispatch skips the azp binding, 30 new tools, route test
+
+**What changed**
+
+- MCP tool calls run on a context marked by `auth.WithMCPDispatch`; `verifyJWT` skips the `azp` binding for it, as it
+  already did on `/mcp`. The admin console's `azp` check (`adminContext`) and the Admin API gate are unchanged.
+- Client toolset: `list_project_services`, `list_public_images`, `create_server`, backups (`list_backups`,
+  `create_backup`, `restore_server_backup`, `delete_server_backup`), snapshots (list, create, rollback, delete),
+  `enable/disable_server_protection`, Kubernetes (list, create, `get_kubeconfig`, `set_kubernetes_node_groups`,
+  `upgrade_kubernetes_cluster`), databases (list, create), DNS (zones, records list/set/delete),
+  `list_sandbox_templates`, `get_sandbox_access`. Admin toolset: `test_proxmox_connection`, `test_object_store`,
+  `get_sandbox_release_gates`, `list_billing_profile_suspensions`.
+- A tool row can fix a param's value (`param.fixed`, left out of the input schema) and force `destructiveHint`
+  (`toolDef.destructive`); `test_` tools are annotated read-only.
+- `TestMCPToolRoutesExist` (`internal/server`) matches every tool's method and path against the app router.
+- A param can list its allowed values (`param.enum`: schema `enum`, refused at dispatch otherwise); `server_action`
+  takes only REBOOT, HARDREBOOT, START and STOP.
+- The sandbox create's autoPause and autoResume checks (autoResume needs autoPause; autoPause needs snapshot storage;
+  autoResume needs the provider's wake token) moved from the E2B create to `pauseRefusal`, which
+  `createSandboxResource` runs for both creates, so the console and `create_sandbox` get them too.
+
+**Why**
+
+- `/mcp` accepts a token from any client of a known issuer (an MCP client registers its own), then every tool re-sent
+  that token to `/api/v1`, where the `azp` binding refused it: OAuth sign-in passed the gate and failed on every call.
+  Skipping the binding only for the token `/mcp` already accepted adds no new way in; operator tokens still need the
+  admin client, so operators use an API key, as the docs now say.
+- An action tool whose action string the agent typed could be told to run another action than its name and its
+  annotation say; a fixed value cannot.
+- No test tied the tool rows to the router, so a renamed route would only have shown when an agent called it.
+- `server_action` is annotated non-destructive but its route also runs DELETE_BACKUP, ROLLBACK_SNAPSHOT and
+  RESTORE_BACKUP, which have their own destructive tools; free text let an agent reach them under the wrong hint.
+- `create_sandbox` advertises autoPause and autoResume through the native create, which skipped the E2B create's
+  checks: an autoPause sandbox where pause is off would be deleted at its timeout with its files, and an autoResume
+  one with no wake token would never wake.
+
+Diagrams: none changed (no new container or component).
+
+## 2026-11-08: Quick start guide
+
+**What changed**
+
+- New `docs/quickstart.md`: a use-case table (laptop with Docker Compose, one Proxmox node, production `allinone`,
+  `split` with managed Kubernetes, databases and sandboxes, the Helm chart alone), and per path the components it
+  deploys, the inventory keys to fill, the command, the first login and the first steps after install. Also the
+  Standard and Full storage tiers, the add-ons (GPU, PowerDNS, load balancers, backups, per-organization SSO,
+  payments), what each installer stage installs and which key switches it, and the common first-install failures.
+- The README's Quickstart section now points at it with a short path table.
+- The Helm path (E) uses the chart's `values-quickstart.yaml` (PR #127) for a cluster without operators and keeps
+  the operator install as the production path; it also says how to build and load the images until a release is
+  published.
+
+**Why**
+
+- A new operator had to read `docs/install.md` end to end, plus `defaults.yml`, to learn which keys a single node or
+  a split site needs. The Helm instructions also missed the `helm repo add` lines `helm dependency build` needs on a
+  clean machine.
+
+**Diagrams updated:** none; no container or component changed.
+
+## 2026-11-08: PR #127 Helm quickstart install and first-run seed Job
+
+**What changed**
+
+- Chart `proxcloud` 0.3.29: `values-quickstart.yaml` installs api, ui, admin, PostgreSQL and RabbitMQ (bitnami
+  subcharts) and Keycloak with its realms on a cluster with no operators, reached by port-forward on fixed localhost
+  ports; secrets come from `--set` flags only.
+- New hook Job `seed` (post-install, post-upgrade; PostSync under ArgoCD): the api image runs psql with the api's own
+  DSN and writes `seed.platformConfiguration` and `seed.billingConfiguration` into `platformConfiguration` and
+  `billingConfiguration` only while those tables are empty, under the same advisory lock `internal/pgdoc` takes to
+  create a table.
+- `keycloakConfigCli.adminPassword` is rendered into the Secret `<fullname>-keycloak-admin`; the quickstart's Keycloak
+  takes its bootstrap admin password from it.
+- New values `api.defaultRegion`, `api.billing.timeout`, `api.mail.businessName` (env the API already read).
+- The chart README lists the two `helm repo add` lines `helm dependency build` needs, and how to build and load the
+  api/web/admin images when the chart's `appVersion` is not published on ghcr.io yet.
+
+**Why**
+
+- A Helm install needed both operators in place, a realm made by hand and the seed run by hand before billing worked;
+  the owner asked for a one-command Helm install beside `docker compose up`.
+- The seed writes into empty tables only, so the operator console and `deploy/seed/seed-operator.py` stay the owners of
+  those documents and no upgrade rewrites them.
+
+**Diagrams updated:** c2-containers.md (PostgreSQL row)
+
+## 2026-11-08: Sandbox pause, resume, snapshots and fork of the filesystem; autoPause and autoResume (SB7)
+
+**What changed**
+
+- E2B `pause`, `resume`, `snapshots` (create, list), `fork`, `connect` of a paused sandbox, `state=paused`, and the
+  create's `autoPause` and `autoResume`, ported from the earlier implementation
+  (`internal/platform/project/e2b_snapshots.go`). Filesystem only: `memory: true` and `autoPauseMemory: true` answer
+  400.
+- New component, pause and snapshots: `sandbox-init -snapshot` (`cmd/sandbox-init/snapshot.go`) writes a gzip tar of
+  what changed since boot; the portal uploads it to the template build bucket and reads it as a whole archive while it
+  uploads; a pod in `sbx-build` `crane append`s it onto the sandbox's image and pushes it with the project's build
+  account. A snapshot is a `kind: snapshot` record in `sandbox_templates`; a paused sandbox is its saved CR in the new
+  table `sandbox_paused`, every transition under a per-id transaction lock and a lease.
+- Resume and fork count against the provider's limits and the project quota like a create
+  (`Service.ResumeSandbox(..., quota)`).
+- Job `sandboxAutoPause` (every minute) and debug trigger `run-sandbox-autopause`.
+- The wake endpoint resumes autoResume sandboxes: the bearer must be the paused sandbox's own provider's wake token, and
+  the client's envd or traffic token the sandbox's own; a suspended project or profile answers 403. Stage 56 sets
+  `PROXCLOUD_WAKE_URL` (`sandbox.proxy.wake_url`) and rolls the proxy on a change; stage 60 writes
+  `config.sandbox.portal` (`sandbox.proxy.wake_address`), and the workers' VM firewall admits that address and port
+  (`SandboxFirewall.PortalAddress`).
+- Billing: a stored snapshot is a `SANDBOX_SNAPSHOT` row per GB-hour from ready to resume, kill, template delete or
+  teardown. Teardown archives those rows and forgets paused sandboxes; the registry prune keeps the images paused
+  sandboxes ran.
+- Build and snapshot pods request 2 GiB of ephemeral storage under the 30 GiB limit; Zot accepts Docker manifests
+  (`compat: [docker2s2]`).
+
+**Why**
+
+- E2B users pause sandboxes to stop paying for compute and come back to their files; until SB7 an autoPause sandbox
+  had to be refused, since it would have been deleted at its timeout.
+- gVisor in a pod has no memory snapshot. Serving a memory pause as a filesystem pause would drop processes the caller
+  asked to keep, so it is refused.
+- The earlier attempt's lab drill had a 191 MB capture that crane could not read; that pause had already deleted the
+  sandbox, which was lost. The archive is now checked while it uploads, and a pause deletes the sandbox only once its
+  image is pushed: a failed assembly (crane, the registry, the 30 GiB disk limit) then fails the pause and the
+  sandbox runs on, instead of a 204 followed by lost files. autoPause runs four pauses at a time, since each now waits
+  for its image.
+- A named snapshot taken again keeps only its newest ready build, so the stored size billed is that of the one image
+  kept (keeping older builds kept their images unbilled). The size is the bytes counted while the archive is checked,
+  not a HEAD that could fail and bill 0.
+- The wake checks the location's token before the sandbox's own, and a resume gives up before its lease lapses, so a
+  second caller cannot take over a resume still starting the sandbox.
+- Concurrent connects of one paused sandbox (an SDK retry, autoResume traffic) must start it once.
+- A resume or fork that skipped the quota would let a project exceed its sandbox caps by pausing and resuming.
+- D9: suspension keeps the tenant's files but must not let them run; the wake answers 403 so the proxy does not keep
+  retrying for the length of the suspension.
+- A build pod with a limit and no request requests the limit; no 30 GB worker has 30 GiB allocatable (seen on the lab:
+  Pending, "Insufficient ephemeral-storage"). `crane append` keeps a Docker base image's manifest type, which Zot
+  refuses without the compat setting.
+
+**Diagrams updated:** C3 (pause and snapshots component and its flows, the proxy's wake), C4 (the fence rule for the
+portal).
+
+## 2026-11-08: MCP gateway template for E2B's `Sandbox.create(mcp=...)` (SB8)
+
+**What changed**
+
+- New component inside sandboxes: `cmd/mcp-gateway`, ported from the earlier implementation with its catalog
+  (`catalog.json`, 47 servers, regenerated by `gencatalog.py`). The E2B SDK starts it in a sandbox of the new built-in
+  template `mcp-gateway` (`deploy/templates/mcp-gateway`: the base, the gateway, the package servers pinned), and talks
+  MCP to `:50005/mcp` through `sandbox-proxy` with a bearer only it and the sandbox hold.
+- The E2B create accepts `mcp` when it is an object (was refused with 400) and drops it after that check: not stored,
+  not logged. The OpenAPI document says so.
+- The package servers run on a Node 22 of their own in the image; the base image's Node 20.9 could not start `brave`,
+  `firecrawl` or `mongodb`. `mcp-gateway pull`, the template's build check, now starts every package server and asks
+  for its tools instead of only looking for the binary.
+- `build.sh` builds `mcp-gateway` with the other templates (repository root as the `src` context); the
+  `sandbox-templates` workflow also runs on changes under `cmd/mcp-gateway/`, and pins the image in
+  `deploy/templates/images.yaml` like the others, from where the registry stage copies and pre-pulls it.
+- `tests/e2b-compat/mcp.py` (gateway, tools, auth, keyed server with a dummy key, unknown server) and `catalog.py`
+  (every built-in template, `mcp-gateway` included).
+- Review fixes: a remote server's headers (its key) go only to that server's own scheme and host, so a redirect
+  elsewhere does not carry them; each package server gets a short allowlist of the gateway's environment plus its own
+  config instead of all of it (no `GATEWAY_ACCESS_TOKEN`, no other server's key, no sandbox `envVars`); vendor
+  telemetry off by default (`DO_NOT_TRACK`, desktopCommander's, mongodb's and onnxruntime's switches); the build check
+  runs with a throwaway `HOME` and `TMPDIR`, so the image no longer ships a desktopCommander client id with telemetry
+  on, a mongodb log or an onnxruntime device id and session file, and the build fails if such state is left.
+- From the lab drill: `sandbox-init` drops `KUBERNETES_*` like `PROXCLOUD_*` (the kubelet sets
+  `KUBERNETES_SERVICE_*` and `KUBERNETES_PORT*` in every container even with service links off), and the API refuses
+  `envVars` with either prefix. `node-setup` writes runsc `allow-suid = "true"` by default (`RUNSC_ALLOW_SUID`,
+  installer `sandbox.allow_suid`), so `sudo` works in sandboxes as on E2B; it failed in the base template with
+  "effective uid is not 0 ... nosuid". Security effect in `docs/managed-sandbox.md` §1.4. Default chosen pending the
+  owner's decision (the earlier implementation's owner approved it for E2B parity).
+- Second review, docs only: `docs/managed-sandbox.md` §9.2 now says the per-server allowlist is environment hygiene,
+  not a boundary (every package server runs as root like the gateway and can read the config, the token file and the
+  gateway's `/proc/<pid>/environ`); §1.4 says `allow-suid` is node-wide, so it also covers the gVisor build and
+  snapshot pods; §5.3 says sandbox-init's own `/proc/1/environ` keeps the variables it strips for its children;
+  §9.2 lists desktopCommander's feature-flag fetch and build-time install event, which no switch turns off.
+- Diagrams: C3 sandbox diagram (node `mcp-gateway`, edge from `sandbox-proxy`), C3 component row "MCP gateway".
+
+**Why**
+
+E2B's MCP support is part of the SDK surface agents use, and the earlier implementation had it; without it every
+`mcp=` create failed. The gateway runs inside the tenant's own sandbox, so the servers' keys never pass through the
+platform: they go from the SDK to the sandbox, the portal refuses only a malformed field and keeps nothing of it, and
+the sandbox carries no platform credential the servers could read. The Node and build-check changes come from the lab
+run: three catalog servers were installed but could not start on the base image, which only a start shows.
+The review fixes keep each key with the one server it is for: a third-party server that redirects, or a package server
+that reads its environment, saw the tenant's key or the gateway's bearer before. State written by the build check
+would have given every sandbox the same vendor client id with analytics on. The `KUBERNETES_*` variables pointed
+sandbox code at the cluster's API server for nothing, and sudo is what E2B templates and agents expect to work.
+The second review's doc changes stop §9.2 promising more than the code does: a reader planning around "a server never
+sees another server's key" would be wrong, since any server can read the root-only files as root.
+
+## 2026-11-08: Custom sandbox templates: build pods, a build account per project, pruning through the OCI API (SB6b)
+
+**What changed**
+
+- The E2B v3 template API (`POST /e2b/v3/templates`, files, builds, build status, tags, delete) and the template list,
+  alias and get with the project's own templates, ported from the earlier implementation
+  (`internal/platform/project/e2b_templates.go`, `e2b_template_base.go`); records in the new table `sandbox_templates`.
+  A ready build is a template for the project's sandboxes on the E2B and the native create.
+- New container: the template build bucket (`sandbox.registry.builds_bucket`, RustFS or RGW, its own service user),
+  set on the sandbox provider as `config.sandbox.buildStorage` with its keys in the secret. The portal streams contexts
+  into it (one PUT up to 16 MiB, else a multipart upload, `UNSIGNED-PAYLOAD` for both) and deletes a template's contexts
+  with it.
+- Build pods in namespace `sbx-build` on the sandbox cluster (`installer/playbooks/templates/sandbox-builds.yml.j2`,
+  stage 55 (registry)): fetch with presigned GETs for the endpoint the nodes reach, base pulls, kaniko offline with no
+  credential, crane push. Its own egress policy (internet minus private ranges, port 25 closed, the registry and the
+  bucket alone), the registry CA for crane, the portal's Role (pods, ConfigMaps, `create`/`patch` on Secrets) and a
+  `patch`-only Role for the account sync. The workers' VM firewall gets one rule more for the bucket
+  (`SandboxFirewall.BuildStorageAddress`, Proxmox `config.sandbox.buildStorage`, stage 60).
+- Registry accounts: the shared `push` account is gone; the account sync writes `build-<project>` (reads `library/**`
+  and `t/<project>/**`, writes `t/<project>/**` only) into `sbx-build` as `registry-build-<project>`, and a static `gc`
+  account reads and deletes `t/**`. The sync's admission policy allows that one Secret name pattern in `sbx-build`.
+- `fromImageRegistry` types `registry` and `gcp`; `aws` is refused, so the AWS SDK's ECR client is not a dependency.
+- Jobs `sandboxBuildSync` (every minute) and `sandboxRegistryPrune` (hourly, `config.sandbox.registryPrune`, the `gc`
+  account, `config.sandbox.registryCa`); debug triggers `run-sandbox-builds` and `run-registry-prune?grace=`.
+- Console: a Templates tab on the Sandboxes page (`/project/{id}/sandbox-templates`: list, build logs, delete); the admin
+  sandbox provider form edits the build bucket, the prune mode, the gc account and the registry CA.
+- Project teardown deletes the project's templates, their build pods and contexts, and its images under
+  `t/<project>/` with the `gc` account (following `registryPrune`).
+- The build limit (2 per project) is counted and the pod started under a Postgres advisory lock per project; a
+  template keeps its last 10 builds plus any a tag names or that is building; a project's contexts are capped at
+  10 GiB (oldest past the presigned URL's lifetime evicted first, else 507), and the upload URL and the upload pass the
+  usage gate. The build namespace's Cilium policy has an explicit empty ingress rule (default deny).
+
+**Why**
+
+- Tenants of the E2B SDKs build their own templates (`Template.build`); without it only the operator's built-in
+  templates existed.
+- EE pushed every tenant's builds with one robot that could overwrite any tenant's template; a build pod is customer
+  code on a shared node, so its push credential is now its own project's, and no account but `admin` writes
+  `library/**`.
+- EE's build pods downloaded their contexts from the portal. The workers reach the object store (layer 1 can open one
+  address) but not the portal, which the plan keeps off the CPU workers (only the system node reaches it, for wake);
+  presigned GETs need no portal route and no bucket key on the cluster.
+- EE pruned through Harbor's API; Zot speaks the OCI distribution API, with which the same live-set rules apply.
+- ProxCloud runs on Proxmox only, so an AWS SDK client for one `fromImageRegistry` flavour was not worth carrying; an ECR
+  token used as a registry password covers the same images.
+- Review of the first cut: 10 failed build requests trimmed away the build `default` named (the template stopped
+  resolving and the prune lost its image); parallel build requests all passed the count and started 3 pods for a
+  limit of 2, so one project could fill the quota every project's builds share; contexts had no cap and no usage gate
+  on the object store that also holds the registry's blobs; and the prune treats a repo of an unknown project as
+  foreign, so a deleted project's images would have stayed forever. `ingress: []` is no ingress section to Cilium,
+  and `sbx-build` carries no tenant label for the cluster-wide rule.
+
+**Diagrams updated:** C2 (template build bucket, build pod flows), C3 (custom templates component, the account sync's
+accounts), C4 (the fence rule for the bucket).
+
+## 2026-11-08: The sandbox registry: Zot on the services cluster, a pull account per project, pinned built-in images (SB6a)
+
+**What changed**
+
+- New container: the sandbox registry, Zot (minimal build, digest-pinned) on the services cluster behind one MetalLB
+  address, TLS from a CA of its own, its blobs in a bucket of the object store: RustFS on Standard, RGW on Full,
+  through a service user limited to that bucket (`files/rustfs-bootstrap.py` learned plain buckets, RGW and external
+  stores). Installer stage `55-sandbox-registry.yml` (also in `make upgrade`), on when `sandbox.registry.address` is set.
+- `sandbox-proxy registry-users` (`internal/sandboxproxy/registryusers.go`), a native sidecar of Zot: from the sandbox
+  cluster's tenant namespaces it writes Zot's users and access rules (`pull-<project>` reads `library/**` and
+  `t/<project>/**`, `pull-nodes` reads `library/**`, `push` writes `t/**` only, `admin`) and one pull Secret per project;
+  project passwords are an HMAC of the account name, so nothing is stored per project. Its identity on the sandbox
+  cluster (`deploy/sandbox-cluster/registry.yaml`) lists namespaces and touches only the two Secret names it writes.
+- Sandbox pods name their project's Secret for every image on the registry's host; the portal no longer copies one
+  shared pull Secret into every project namespace.
+- Built-in images: `deploy/templates/` (from the earlier implementation, minus `mcp-gateway`; the desktop image without
+  Chrome and VS Code), the `sandbox-templates` workflow (ghcr, then a pull request that pins the digests) and the pin
+  file `deploy/templates/images.yaml`. Stage 55 copies every pin and the release's sandbox-proxy in by digest, pre-pulls
+  them on every node (`template-prepull`) and makes containerd trust the registry CA for that address alone
+  (`registry-trust`). Stage 56 runs sandbox-proxy from the copy; stage 60 resolves `pin:<name>` templates and sets
+  `templateRegistry` and `imageAdoption`.
+- Image adoption ported: job `sandboxTemplateAdopt` (`project.AdoptSandboxImages`) moves a built-in template to the
+  digest the prepull runs once every node has it, with a compare-and-set write (`externalservice.SetTemplateImage`) and an
+  audit event. The admin form edits `templateRegistry` and `imageAdoption`.
+- Layer 1: `config.sandbox.registry` adds one rule to the workers' generation, TCP out to the registry's address and
+  port (`SandboxFirewall.RegistryAddress`).
+
+**Why**
+
+The nodes pulled templates straight from public registries (plan §6: until SB6a), and the earlier implementation gave
+every tenant namespace the same pull account, so a node escape read every tenant's templates and a compromised build
+could overwrite another tenant's. A registry of the platform's own, with one account per project and a push account
+that cannot touch `library/**`, closes both; digest pins plus prepull plus adoption mean a new image reaches a sandbox
+only after every node has it. Zot over distribution: garbage collection while serving, access rules reloaded without a
+restart (measured), one binary. The account sync derives the accounts from the cluster instead of the portal writing
+registry config, so the portal gains no credential for the services cluster.
+
+**Review fixes (same PR)**
+
+- `registry.yaml` gained the ValidatingAdmissionPolicy `sandbox-registry-users-pull-secrets-only`: the sync's identity
+  may create and update only `kubernetes.io/dockerconfigjson` Secrets named `sandbox-template-pull` in `sb-*` and
+  `sandbox-registry-nodes` in `sandbox-system`. Why: RBAC cannot limit `create` by name, so the role alone could create
+  a service-account-token Secret named `sandbox-template-pull` in `kube-system` for a controller's account and read the
+  token the controller filled in, a cluster-admin token held on the services cluster.
+- After a sidecar restart with a failing namespace list the sync keeps Zot's config on disk instead of writing the
+  static users only. Why: every project's pulls failed until the next successful list.
+- `sandbox-proxy` refuses an unknown subcommand. Why: an image older than `registry-users` served instead, and Zot
+  waited for a readiness that never came with no cause in the log.
+- `registry-trust` runs busybox pinned by digest (D11); the workflow builds pull requests in a job with a read-only
+  token and pushes only from the other events.
+
+**Merged with SB5 (main after #120)**
+
+- The registry design is section 6 of `docs/managed-sandbox.md` now, after SB5's E2B section 5; every reference moved.
+  Why: SB5 landed first and its own section and references kept the number.
+- One sandbox provider from stage 60 carries both sides' keys: `envd` and `domain` (SB5) and the `pin:` templates,
+  `templateRegistry` and `imageAdoption` (SB6a). The admin form edits all four, and a save keeps the template fields
+  the one-line list cannot show (SB5's `mergeTemplates`). Why: either branch alone wrote a provider without the other's
+  keys, and a form missing a field would have saved it empty.
+- `deploy/templates/build.sh` builds every built-in template (SB6a) with SB5's pinned ijavascript commit in the
+  code-interpreter image.
+- C1 and C2 say which images the sandbox nodes take from the registry (templates, `sandbox-proxy`) and that SB5's
+  runtime image still comes from `images.registry`. Why: stage 55 (cluster) applies `node-setup` before the registry
+  stage exists, so "every runtime image from the registry" was not true once both were merged.
+
+**Diagrams:** C1 (ghcr row), C2 (the registry container, its edges to the workers and the object stores, table row),
+C3 (registry component and edges), C4 (layer-1 rule list). Measured on the lab: docs/managed-sandbox.md §6.6. The
+review fixes change no diagram.
+## 2026-11-08: E2B-compatible API, sandbox API keys, envd in sandboxes, MCP sandbox tools (SB5)
+
+**What changed**
+
+- Portal: `/e2b/*` (`internal/platform/project/e2b.go`), mounted next to `/api/v1` and public in `pkg/auth`; its own gate
+  reads `X-API-Key` (or a bearer) and resolves it to the key's creator in the key's project. Sandbox create (v1 and v2),
+  list, get, kill, timeout, refreshes, connect, network, logs, metrics and the built-in templates, in E2B's shapes and
+  `{code, message}` errors; anything else answers 404 "not supported". `GET /e2b/openapi.json` is E2B's own document
+  cut to those routes (`e2b_openapi_gen.py`), guarded by `TestE2BOpenAPIParity`.
+- Sandbox API keys (D8, `e2b_keys.go`, table `sandbox_api_keys`): `e2b_` + 40 hex, one project each, acting as the member
+  who made it, stored as SHA-256 only; `GET/POST/DELETE /api/v1/project/{id}/sandbox-api-keys` and the client console's
+  Sandboxes > API keys tab (key shown once, then a hint). The project service view says whether the location offers the
+  E2B API (`sandboxE2B`); the admin sandbox provider form edits the sandbox domain and an envd switch separately
+  (`config.sandbox.domain`, `envd`) and keeps a template's start and ready commands when the template list is edited.
+  Teardown deletes a DELETED project's keys.
+- In the sandbox: `cmd/sandbox-init` (PID 1: user, envd, `/init`, start and ready commands, localhost relay) and
+  `deploy/sandbox-runtime.Dockerfile` (envd built unmodified from e2b-dev/infra e85b9f5 plus sandbox-init), installed on
+  every node by a new init container of `node-setup`; stage 55 pins its image and leaves the init container out where
+  there is no sandbox domain, CI builds `proxcloud-sandbox-runtime`. Sandbox pods get a readiness probe on the ready
+  marker, which sandbox-init drops while a crashed envd restarts.
+  Built-in templates `base` and `code-interpreter-v1`: `deploy/templates/` and `build.sh` (pushed by hand until SB6a's
+  workflow); stage 60 registers a provider with a domain with envd on.
+- MCP client toolset: `list_sandboxes`, `create_sandbox`, `exec_in_sandbox`, `get_sandbox_logs`, `set_sandbox_timeout`,
+  `delete_sandbox` over the native routes.
+- `tests/e2b-compat/compat.py`: the stock SDKs end to end (commands, streaming, files, preview URL, metadata, egress,
+  cross-project key, code interpreter). `docs/e2b-compat.md`: what works, what differs and what does not, and why.
+- C2: the sandbox cluster row had two sentences starting "Built by installer stage 55"; merged into one.
+
+**Why**
+
+- The plan's SB5 (§11, D8): the E2B SDKs are how agents use sandboxes, and a key must not reach every project of its
+  user the way a PAT does, so keys are project-scoped and stored as hashes.
+- `/e2b` is a second door to the same sandboxes. If it had its own create, a suspended project or a provider whose
+  release gates fail would run sandboxes through it, so it calls the native gate, quota and create (proved by
+  `test/integration/sandbox_e2b_test.go`, which fails with the gate calls removed).
+- autoPause, autoResume, templates builds, snapshots and MCP are refused with 400 or 404 instead of being accepted and
+  ignored: without pause (SB7) an autoPause sandbox would be deleted at its timeout and its files lost.
+- `PUT /e2b/sandboxes/{id}/network` is a mutation the native allow-list of a DISABLED project does not hold, so it is
+  refused there too (409).
+- envd with no access token serves every request, and a restarted envd has none until its `/init`; sandbox IDs are in
+  every shared preview URL, so that window must not be reachable. Readiness, not just startup, now follows the marker.
+- One domain field that also switched envd made every edit of an SB4 provider (domain, no envd) save an empty domain,
+  which breaks its published ports; a site without envd would also pull a runtime image no release had yet.
+
+**Diagrams updated:** `c1-context.md` (registry images), `c2-containers.md` (API box, sandbox cluster row), `c3-components.md` (sandbox diagram: E2B API and envd; E2B component row).
+
 ## 2026-11-08: Sandbox ports in public: sandbox-proxy with TLS, entry appliance, wildcard certificate, wake (SB4)
 
 **What changed**

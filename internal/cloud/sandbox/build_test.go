@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/mutex-solutions/proxcloud/internal/cloud/kamajik8s"
 )
 
 func TestRenderDockerfile(t *testing.T) {
@@ -199,7 +197,7 @@ func TestResumeFromPublicImageGetsPullSecret(t *testing.T) {
 	img := testRegistry + "/p1/t1@sha256:1"
 	// No template registry configured: the same image is nobody's private image.
 	cr := BuildCR(cfg, "svc", Spec{ID: "sbx-00000001", ProjectID: "p1", Template: "py", CPU: 1, MemoryGiB: 2}, time.Unix(0, 0))
-	if err := NewWithAPI(f, cfg, "svc").ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0)); err != nil {
+	if err := NewWithAPI(f, cfg, "svc").ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0), nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.crs[NamespaceFor("p1")+"/sbx-00000001"]; dig(got, "spec", "podTemplate", "spec", "imagePullSecrets") != nil {
@@ -212,12 +210,38 @@ func TestResumeFromPublicImageGetsPullSecret(t *testing.T) {
 	if dig(cr, "spec", "podTemplate", "spec", "imagePullSecrets") != nil {
 		t.Fatal("a public image needs no pull secret")
 	}
-	if err := s.ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0)); err != nil {
+	if err := s.ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0), nil); err != nil {
 		t.Fatal(err)
 	}
 	got := f.crs[NamespaceFor("p1")+"/sbx-00000001"]
 	if firstContainer(got)["image"] != img || dig(got, "spec", "podTemplate", "spec", "imagePullSecrets") == nil {
 		t.Errorf("resumed onto the private snapshot image without a pull secret: %v", dig(got, "spec", "podTemplate", "spec"))
+	}
+}
+
+// A built-in image mirrored to the registry (library/**) needs the project's pull Secret too: the kubelet checks it
+// even for an image the prepull pod already pulled. The portal never writes that Secret itself any more (the
+// registry's account sync does, one account per project), so a shared source in sandbox-system is not copied.
+func TestRegistryImagesGetTheProjectPullSecret(t *testing.T) {
+	cfg := Config{TemplateRegistry: "192.0.2.10/t", Templates: map[string]Template{
+		"base": {Image: "192.0.2.10/library/sandbox-base:1@sha256:" + strings.Repeat("b", 64), CPU: 1, MemoryGiB: 1},
+		"py":   {Image: "docker.io/library/python:3.12", CPU: 1, MemoryGiB: 1},
+		"evil": {Image: "192.0.2.100/library/x:1", CPU: 1, MemoryGiB: 1},
+	}}
+	for tpl, want := range map[string]bool{"base": true, "py": false, "evil": false} {
+		cr := BuildCR(cfg, "svc", Spec{ID: "sbx-00000001", ProjectID: "p1", Template: tpl, CPU: 1, MemoryGiB: 1}, time.Unix(0, 0))
+		got := dig(cr, "spec", "podTemplate", "spec", "imagePullSecrets")
+		if (got != nil) != want {
+			t.Errorf("%s: imagePullSecrets %v, want present=%v", tpl, got, want)
+		}
+	}
+	f := newFake()
+	f.secrets["sandbox-system/"+TemplatePullSecret] = map[string][]byte{".dockerconfigjson": []byte(`{"auths":{}}`)}
+	if err := NewWithAPI(f, cfg, "svc").EnsureProjectNamespace(context.Background(), "p1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if sec, _ := f.GetCore(context.Background(), "secrets", NamespaceFor("p1"), TemplatePullSecret); sec != nil {
+		t.Error("the shared sandbox-system pull secret was copied into the project namespace")
 	}
 }
 
@@ -237,7 +261,7 @@ func TestBuildBaseCredentials(t *testing.T) {
 		return out
 	}
 	mounts := func(c map[string]any) string { b, _ := json.Marshal(c["volumeMounts"]); return string(b) }
-	for auth, secret := range map[BaseAuth]string{BaseAuthNone: "", BaseAuthTemplate: BuildTemplatePullSecret, BaseAuthUser: "build-b1-base"} {
+	for auth, secret := range map[BaseAuth]string{BaseAuthNone: "", BaseAuthRegistry: "registry-build-p1", BaseAuthUser: "build-b1-base"} {
 		_, pod := BuildObjects(Config{}, BuildRequest{ProjectID: "p1", TemplateID: "t1", BuildID: "b1", Image: testRegistry + "/p1/t1:b1",
 			Result: res, Base: "python:3.12", BaseAuth: auth, FetchURL: func(string) string { return "" }})
 		cs := containers(pod)
@@ -289,43 +313,48 @@ func TestStartBuildUserSecretOwnedByPod(t *testing.T) {
 	}
 }
 
-func TestStartBuildFromProjectTemplateCopiesPullSecret(t *testing.T) {
+// A build mounts the project's own build account (written by the registry's account sync), never a shared one: the
+// push container always, the base container for an image on the sandbox registry. StartBuild makes the project's
+// namespace first (the sync derives the accounts from it), leaves its quota alone and writes no Secret itself.
+func TestStartBuildUsesTheProjectBuildAccount(t *testing.T) {
 	f := newFake()
+	f.secrets["sandbox-system/"+TemplatePullSecret] = map[string][]byte{".dockerconfigjson": []byte(`{"auths":{}}`)}
 	s := NewWithAPI(f, Config{}, "svc")
-	res, _ := RenderDockerfile(testRegistry+"/p1/t0@sha256:"+strings.Repeat("a", 64), nil)
-	req := BuildRequest{ProjectID: "p1", TemplateID: "t1", BuildID: "b1", Image: testRegistry + "/p1/t1:b1",
-		Result: res, Base: testRegistry + "/p1/t0@sha256:" + strings.Repeat("a", 64), BaseAuth: BaseAuthTemplate, FetchURL: func(string) string { return "" }}
-	if err := s.StartBuild(context.Background(), req); !errors.Is(err, ErrBadBuild) {
-		t.Fatalf("no pull secret source: want ErrBadBuild, got %v", err)
-	}
-	f.secrets[pullSecretSourceNS+"/"+TemplatePullSecret] = map[string][]byte{".dockerconfigjson": []byte(`{"auths":{}}`)}
-	if err := s.StartBuild(context.Background(), req); err != nil {
+	base := testRegistry + "/p1/t0@sha256:" + strings.Repeat("a", 64)
+	res, _ := RenderDockerfile(base, nil)
+	if err := s.StartBuild(context.Background(), BuildRequest{ProjectID: "p1", TemplateID: "t1", BuildID: "b1", Image: testRegistry + "/p1/t1:b1",
+		Result: res, Base: base, BaseAuth: BaseAuthRegistry, FetchURL: func(string) string { return "" }}); err != nil {
 		t.Fatal(err)
 	}
-	if sec, _ := f.GetCore(context.Background(), "secrets", BuildNamespace, BuildTemplatePullSecret); sec == nil {
-		t.Error("the pull robot copy was not written to sbx-build")
+	if l := f.namespaces[NamespaceFor("p1")]; l[LabelTenant] != "true" || l[LabelService] != "svc" {
+		t.Errorf("the project namespace was not made: %v", l)
 	}
-}
-
-// An unreadable pull secret source (RBAC 403) is not "no source": a build from a project template
-// reports the read error, and a namespace ensure goes on without the copy instead of failing create.
-func TestPullSecretReadErrorIsNotNoSource(t *testing.T) {
-	f := newFake()
-	f.secretErr = &kamajik8s.APIError{Status: 403, Message: "secrets is forbidden"}
-	s := NewWithAPI(f, Config{}, "svc")
-	res, _ := RenderDockerfile(testRegistry+"/p1/t0@sha256:"+strings.Repeat("a", 64), nil)
-	req := BuildRequest{ProjectID: "p1", TemplateID: "t1", BuildID: "b1", Image: testRegistry + "/p1/t1:b1",
-		Result: res, Base: testRegistry + "/p1/t0@sha256:" + strings.Repeat("a", 64), BaseAuth: BaseAuthTemplate, FetchURL: func(string) string { return "" }}
-	err := s.StartBuild(context.Background(), req)
-	var ae *kamajik8s.APIError
-	if errors.Is(err, ErrBadBuild) || !errors.As(err, &ae) || ae.Status != 403 {
-		t.Fatalf("unreadable source: want the 403, got %v", err)
+	if len(f.quotas) != 0 {
+		t.Errorf("a build must not touch the project's quota: %v", f.quotas)
 	}
-	if err := s.EnsureProjectNamespace(context.Background(), "p1", nil); err != nil {
-		t.Fatalf("namespace ensure must not fail on an unreadable pull secret: %v", err)
+	pod, _ := f.GetCore(context.Background(), "pods", BuildNamespace, "build-b1")
+	if vols, _ := json.Marshal(dig(pod, "spec", "volumes")); strings.Count(string(vols), `"secretName":"registry-build-p1"`) != 2 ||
+		!strings.Contains(string(vols), `"configMap":{"name":"registry-ca","optional":true}`) {
+		t.Errorf("push and base must mount the project's build account and the registry CA: %s", vols)
 	}
-	if sec, _ := f.GetCore(context.Background(), "secrets", NamespaceFor("p1"), TemplatePullSecret); sec != nil {
-		t.Error("no secret may be written when the source was not read")
+	// crane in base and push trusts the registry's own CA (Zot's certificate is not from a public CA).
+	for _, k := range []string{"initContainers", "containers"} {
+		for _, c := range dig(pod, "spec", k).([]any) {
+			m := c.(map[string]any)
+			env, _ := json.Marshal(m["env"])
+			if n := str(m["name"]); (n == "base" || n == "push") != strings.Contains(string(env), `"SSL_CERT_DIR"`) {
+				t.Errorf("%s: SSL_CERT_DIR %s", n, env)
+			}
+		}
+	}
+	for k := range f.core {
+		if strings.HasPrefix(k, "secrets/") {
+			t.Errorf("StartBuild wrote a Secret %s", k)
+		}
+	}
+	snap := SnapshotObjects(Config{}, SnapshotRequest{ProjectID: "p2", TemplateID: "t", BuildID: "b2", Base: "x", Image: "y", LayerURL: "z"})
+	if v, _ := json.Marshal(dig(snap, "spec", "volumes")); !strings.Contains(string(v), `"secretName":"registry-build-p2"`) {
+		t.Errorf("a snapshot pushes with its project's build account: %s", v)
 	}
 }
 

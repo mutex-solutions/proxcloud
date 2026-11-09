@@ -49,6 +49,68 @@ func TestRangeCIDRs(t *testing.T) {
 	}
 }
 
+// The registry is one address and one port, nothing wider: its address stays out of the internet set, so no other
+// port of it opens, and a registry inside the subnet or on the control plane is refused.
+func TestSandboxGenerationRegistry(t *testing.T) {
+	f := testSandbox()
+	base, _ := f.generation()
+	f.RegistryAddress = "10.20.0.226"
+	g, err := f.generation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg []FirewallRule
+	for _, r := range g.Rules {
+		if r.Dest == "10.20.0.226" {
+			reg = append(reg, r)
+		}
+	}
+	if len(reg) != 1 || reg[0].Type != "out" || reg[0].Proto != "tcp" || reg[0].DPort != "443" {
+		t.Fatalf("registry rules %+v", reg)
+	}
+	if len(g.Rules) != len(base.Rules)+1 || g.Group == base.Group {
+		t.Fatalf("the registry adds exactly one rule and a new generation: %d -> %d", len(base.Rules), len(g.Rules))
+	}
+	f.RegistryPort = 5000
+	if g, _ := f.generation(); !slices.ContainsFunc(g.Rules, func(r FirewallRule) bool { return r.Dest == "10.20.0.226" && r.DPort == "5000" }) {
+		t.Fatal("the registry port is taken from the config")
+	}
+	for name, mod := range map[string]func(*SandboxFirewall){
+		"inside subnet":     func(f *SandboxFirewall) { f.RegistryAddress = "10.110.0.250" },
+		"control plane":     func(f *SandboxFirewall) { f.RegistryAddress = "10.20.0.214" },
+		"a name":            func(f *SandboxFirewall) { f.RegistryAddress = "registry.example.org" },
+		"a network":         func(f *SandboxFirewall) { f.RegistryAddress = "10.20.0.0/24" },
+		"port out of range": func(f *SandboxFirewall) { f.RegistryAddress, f.RegistryPort = "10.20.0.226", 70000 },
+		"bucket in subnet":  func(f *SandboxFirewall) { f.BuildStorageAddress = "10.110.0.250" },
+		"bucket by name":    func(f *SandboxFirewall) { f.BuildStorageAddress = "s3.example.org" },
+	} {
+		f := testSandbox()
+		mod(&f)
+		if _, err := f.generation(); err == nil {
+			t.Errorf("%s: want an error", name)
+		}
+	}
+	// The build bucket is one more address and port, the same way.
+	f = testSandbox()
+	f.BuildStorageAddress, f.BuildStoragePort = "10.20.0.41", 9000
+	g, err = f.generation()
+	if err != nil || len(g.Rules) != len(base.Rules)+1 ||
+		!slices.ContainsFunc(g.Rules, func(r FirewallRule) bool { return r.Dest == "10.20.0.41" && r.DPort == "9000" && r.Type == "out" }) {
+		t.Fatalf("build storage rule: %v %+v", err, g.Rules)
+	}
+	// So is the portal's API for wakes, on 443 by default.
+	f.PortalAddress = "10.20.0.10"
+	g, err = f.generation()
+	if err != nil || len(g.Rules) != len(base.Rules)+2 ||
+		!slices.ContainsFunc(g.Rules, func(r FirewallRule) bool { return r.Dest == "10.20.0.10" && r.DPort == "443" && r.Type == "out" }) {
+		t.Fatalf("portal rule: %v %+v", err, g.Rules)
+	}
+	f.PortalAddress = "portal.example.org"
+	if _, err := f.generation(); err == nil {
+		t.Fatal("portal by name: want an error")
+	}
+}
+
 func TestSandboxGeneration(t *testing.T) {
 	g, err := testSandbox().generation()
 	if err != nil {

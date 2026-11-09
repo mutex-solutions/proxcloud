@@ -113,13 +113,16 @@ in `web/`.
 1. Branch off `main` (e.g. `feat/savings-plan-rollover`, `fix/invoice-rounding`).
 2. Keep commits focused. Commit subjects follow a
    [Conventional Commits](https://www.conventionalcommits.org/) style
-   (`feat:`, `fix:`, `chore:`, `docs:`, …) — the same prefixes CI uses for
-   automated chart releases.
+   (`feat:`, `fix:`, `chore:`, `docs:`, …).
 3. Ensure `gofmt`, `go vet`, `go test`, and (for UI changes) `npm run lint` and
    `npm run build` all pass.
 4. Open a pull request against `main` and fill in the
-   [PR template](.github/pull_request_template.md). CI builds the images and, if
-   you touched `deploy/charts/proxcloud/**`, requires a `Chart.yaml` version bump.
+   [PR template](.github/pull_request_template.md). CI lints and templates every
+   chart you touched. Releases are cut by tags, not by commit prefixes: a `v*` tag
+   publishes the images and the app chart at the tag's version, and
+   `database-cluster-v*` / `proxmox-kamaji-cluster-v*` publish those charts, whose
+   tag must match their `Chart.yaml` version (bump it in the PR that changes the
+   chart). See [deploy/charts/README.md](deploy/charts/README.md).
 5. Address review feedback; a maintainer merges once CI is green.
 
 ## Reporting bugs & requesting features

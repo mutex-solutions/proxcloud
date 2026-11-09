@@ -3,12 +3,15 @@ package sandbox
 // build.go — custom templates (E2B template builds). A build turns E2B's step list into a
 // Dockerfile and runs it as one gVisor pod in BuildNamespace on the sandbox cluster:
 //
-//	init fetch  (trusted)    downloads the COPY contexts from proxcloud into /workspace/files/<hash>
+//	init fetch  (trusted)    downloads the COPY contexts from the build bucket (presigned URLs) into /workspace/files/<hash>
+//	init base   (trusted)    pulls the base image into kaniko's cache (the only container that may hold a pull credential)
 //	init kaniko (user code)  builds the Dockerfile, --no-push, image tarball to /out; holds NO credentials
 //	push        (trusted)    crane pushes the tarball to the template registry; only it mounts the push secret
 //
 // The customer's RUN steps execute inside the kaniko container, which has finished before the
-// push container starts and never sees the registry secret.
+// push container starts and never sees the registry secret. That secret is the project's own build account
+// (BuildSecretFor: reads library/** and t/<project>/**, writes t/<project>/** only), written into sbx-build by the
+// registry's account sync, so a build cannot write another project's templates or the built-in library/ images.
 
 import (
 	"context"
@@ -28,16 +31,14 @@ const (
 	BuildNamespace  = "sbx-build"
 	LabelBuild      = "proxcloud.io/sandbox-build"
 	LabelTemplateID = "proxcloud.io/sandbox-template"
-	buildPushSecret = "registry-push"
-	// BuildTemplatePullSecret is a copy of the template registry's pull robot in sbx-build (made
-	// by StartBuild), mounted only into the `base` init container and only for refs the server
-	// chose (a project's own template). It can read every tenant's templates, so user code must
-	// never see it.
-	BuildTemplatePullSecret = "template-pull"
-	TemplatePullSecret      = "sandbox-template-pull" // source: sandbox-system/<name>; copied into every sb-* namespace
-	pullSecretSourceNS      = "sandbox-system"
-	BuildTimeout            = 30 * time.Minute
-	buildDiskLimit          = "30Gi"
+	// TemplatePullSecret is the project's own registry account in sb-<project> (pull-<project>: library/** and
+	// t/<project>/**), written by the registry's account sync (sandbox-proxy registry-users, docs/managed-sandbox.md §6).
+	TemplatePullSecret = "sandbox-template-pull"
+	BuildTimeout       = 30 * time.Minute
+	buildDiskLimit     = "30Gi"
+	// buildDiskRequest is what a build or snapshot pod asks the scheduler for: with a limit and no request,
+	// Kubernetes requests the limit, and no 30 GB worker has 30Gi allocatable, so the pod would never schedule.
+	buildDiskRequest = "2Gi"
 
 	kanikoImage = "ghcr.io/osscontainertools/kaniko:v1.29.0@sha256:0c0b6c02991bba44090fad918ae177d193e1bd3fd0ccc643e7cc1f9f1a5a373d"
 	fetchImage  = "curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40"
@@ -244,8 +245,23 @@ type BaseAuth int
 
 const (
 	BaseAuthNone     BaseAuth = iota // public image
-	BaseAuthTemplate                 // a project's own template in the template registry (server-chosen ref)
+	BaseAuthRegistry                 // an image on the sandbox registry (built-in or the project's own): its build account
 	BaseAuthUser                     // fromImageRegistry: the user's registry credentials
+)
+
+// BuildSecretFor is the project's build account in sbx-build (user build-<project>), written by the registry's
+// account sync: the push container mounts it, and the base container for an image on the sandbox registry.
+func BuildSecretFor(projectID string) string { return "registry-build-" + projectID }
+
+// BuildRegistryCA is the ConfigMap in sbx-build holding the sandbox registry's CA (ca.crt), written by installer stage
+// 55: crane in the base and push containers trusts it on top of the system roots (SSL_CERT_DIR). Optional, so a
+// registry with a public certificate needs none.
+const BuildRegistryCA = "registry-ca"
+
+// registryTrust is the CA volume and the env that makes crane read it.
+var (
+	registryTrustVolume = map[string]any{"name": "registry-ca", "configMap": map[string]any{"name": BuildRegistryCA, "optional": true}}
+	registryTrustEnv    = map[string]any{"name": "SSL_CERT_DIR", "value": "/registry-ca"}
 )
 
 // baseSecretName is the per-build Secret holding the user's registry credentials.
@@ -278,7 +294,7 @@ while read -r hash url; do
   [ -n "$hash" ] || continue
   mkdir -p "/workspace/files/$hash"
   echo "fetching context $hash"
-  curl -fsS --retry 3 -o /tmp/ctx.tar "$url"
+  curl -fsS --connect-timeout 10 --retry 3 -o /tmp/ctx.tar "$url"
   tar -xf /tmp/ctx.tar -C "/workspace/files/$hash"
   rm -f /tmp/ctx.tar
 done < /config/fetch.list
@@ -296,19 +312,20 @@ echo "pulling base image $R@$D"
 crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 { echo "FROM $R@$D"; tail -n +2 /config/Dockerfile; } > /pinned/Dockerfile
 `
-	baseMounts := []any{mount("config", "/config"), mount("base-cache", "/cache"), mount("pinned", "/pinned")}
+	baseMounts := []any{mount("config", "/config"), mount("base-cache", "/cache"), mount("pinned", "/pinned"), mount("registry-ca", "/registry-ca")}
 	volumes := []any{
+		registryTrustVolume,
 		map[string]any{"name": "config", "configMap": map[string]any{"name": name}},
 		map[string]any{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
 		map[string]any{"name": "out", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
 		map[string]any{"name": "base-cache", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
 		map[string]any{"name": "pinned", "emptyDir": map[string]any{"sizeLimit": "1Mi"}},
 		map[string]any{"name": "push-secret", "secret": map[string]any{
-			"secretName": buildPushSecret,
+			"secretName": BuildSecretFor(req.ProjectID),
 			"items":      []any{map[string]any{"key": ".dockerconfigjson", "path": "config.json"}},
 		}},
 	}
-	if secret := map[BaseAuth]string{BaseAuthTemplate: BuildTemplatePullSecret, BaseAuthUser: baseSecretName(req.BuildID)}[req.BaseAuth]; secret != "" {
+	if secret := map[BaseAuth]string{BaseAuthRegistry: BuildSecretFor(req.ProjectID), BaseAuthUser: baseSecretName(req.BuildID)}[req.BaseAuth]; secret != "" {
 		baseMounts = append(baseMounts, mount("base-secret", "/docker"))
 		volumes = append(volumes, map[string]any{"name": "base-secret", "secret": map[string]any{
 			"secretName": secret,
@@ -337,6 +354,7 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 					"env": []any{
 						map[string]any{"name": "SRC", "value": req.Base},
 						map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"},
+						registryTrustEnv,
 					},
 					"resources":    map[string]any{"requests": small, "limits": map[string]any{"cpu": "1", "memory": "512Mi"}},
 					"volumeMounts": baseMounts,
@@ -351,7 +369,7 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 						"--cache=true", "--cache-dir=/cache", "--cache-repo=oci:/kaniko/cache-repo",
 						"--cache-run-layers=false", "--cache-copy-layers=false", "--credential-helpers=",
 					},
-					"resources": map[string]any{"requests": res, "limits": res},
+					"resources": map[string]any{"requests": withDiskRequest(res), "limits": res},
 					"volumeMounts": []any{mount("workspace", "/workspace"), mount("out", "/out"),
 						ro(mount("base-cache", "/cache")), ro(mount("pinned", "/pinned"))},
 				},
@@ -359,9 +377,9 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 			"containers": []any{map[string]any{
 				"name": "push", "image": craneImage,
 				"args":         []any{"push", "/out/image.tar", req.Image, "--image-refs", "/dev/termination-log"},
-				"env":          []any{map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}},
+				"env":          []any{map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}, registryTrustEnv},
 				"resources":    map[string]any{"requests": small, "limits": map[string]any{"cpu": "1", "memory": "512Mi"}},
-				"volumeMounts": []any{mount("out", "/out"), mount("push-secret", "/docker")},
+				"volumeMounts": []any{mount("out", "/out"), mount("push-secret", "/docker"), mount("registry-ca", "/registry-ca")},
 			}},
 			"volumes": volumes,
 		},
@@ -371,17 +389,12 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 
 func mount(name, at string) map[string]any { return map[string]any{"name": name, "mountPath": at} }
 
-// StartBuild creates the build's ConfigMap and Pod.
+// StartBuild creates the build's ConfigMap and Pod. The project's namespace comes first (its quota untouched): the
+// registry's account sync derives the project's accounts from it and writes the build Secret the pod mounts, so a
+// project's first build waits up to one sync pass (30 s) for that volume.
 func (s *Service) StartBuild(ctx context.Context, req BuildRequest) error {
-	if req.BaseAuth == BaseAuthTemplate {
-		// The pull robot copy that only `base` mounts (refreshed on every such build).
-		ok, err := s.copyPullSecret(ctx, BuildNamespace, BuildTemplatePullSecret, map[string]any{LabelManagedBy: ManagedByValue})
-		if err != nil {
-			return fmt.Errorf("sandbox: build pull credentials: %w", err)
-		}
-		if !ok {
-			return fmt.Errorf("%w: building from a project template needs the template registry pull secret (%s/%s)", ErrBadBuild, pullSecretSourceNS, TemplatePullSecret)
-		}
+	if err := s.ensureTenantNamespace(ctx, req.ProjectID); err != nil {
+		return fmt.Errorf("sandbox: build namespace: %w", err)
 	}
 	cm, pod := BuildObjects(s.cfg, req)
 	if err := s.api.ApplyCore(ctx, "configmaps", cm); err != nil {
@@ -650,14 +663,15 @@ func hasDotDot(p string) bool {
 	return false
 }
 
-// BuildStorageSecret is the context bucket's settings (endpoint, bucket, region, accessKey,
-// secretKey), kept as sandbox-system/sandbox-build-s3 on the sandbox cluster.
-func (s *Service) BuildStorageSecret(ctx context.Context) (map[string][]byte, error) {
-	sec, err := s.api.GetSecretData(ctx, pullSecretSourceNS, "sandbox-build-s3")
-	if err == nil && sec == nil {
-		err = errors.New("sandbox-system/sandbox-build-s3 is missing")
+// withDiskRequest is r with the ephemeral-storage request a build container makes (buildDiskRequest).
+func withDiskRequest(r map[string]any) map[string]any {
+	out := map[string]any{"ephemeral-storage": buildDiskRequest}
+	for k, v := range r {
+		if k != "ephemeral-storage" {
+			out[k] = v
+		}
 	}
-	return sec, err
+	return out
 }
 
 // SnapshotRequest appends a sandbox's filesystem changes (one gzip tar) as a layer on Base.
@@ -692,7 +706,7 @@ func SnapshotObjects(cfg Config, req SnapshotRequest) map[string]any {
 			"terminationGracePeriodSeconds": int64(5),
 			"initContainers": []any{map[string]any{
 				"name": "fetch", "image": fetchImage,
-				"command":      []any{"sh", "-c", `set -eu; echo "fetching snapshot layer"; curl -fsS --retry 3 -o /work/layer.tar.gz "$LAYER_URL"; ls -l /work/layer.tar.gz`},
+				"command":      []any{"sh", "-c", `set -eu; echo "fetching snapshot layer"; curl -fsS --connect-timeout 10 --retry 3 -o /work/layer.tar.gz "$LAYER_URL"; ls -l /work/layer.tar.gz`},
 				"env":          []any{map[string]any{"name": "LAYER_URL", "value": req.LayerURL}},
 				"resources":    map[string]any{"requests": small, "limits": small},
 				"volumeMounts": []any{mount("work", "/work")},
@@ -702,15 +716,16 @@ func SnapshotObjects(cfg Config, req SnapshotRequest) map[string]any {
 				"command": []any{"sh", "-c", `set -eu; crane append --platform linux/amd64 -b "$BASE" -f /work/layer.tar.gz -t "$DEST" > /dev/termination-log; cat /dev/termination-log`},
 				"env": []any{
 					map[string]any{"name": "BASE", "value": req.Base}, map[string]any{"name": "DEST", "value": req.Image},
-					map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"},
+					map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}, registryTrustEnv,
 				},
-				"resources":    map[string]any{"requests": small, "limits": work},
-				"volumeMounts": []any{mount("work", "/work"), mount("push-secret", "/docker")},
+				"resources":    map[string]any{"requests": withDiskRequest(small), "limits": work},
+				"volumeMounts": []any{mount("work", "/work"), mount("push-secret", "/docker"), mount("registry-ca", "/registry-ca")},
 			}},
 			"volumes": []any{
+				registryTrustVolume,
 				map[string]any{"name": "work", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
 				map[string]any{"name": "push-secret", "secret": map[string]any{
-					"secretName": buildPushSecret,
+					"secretName": BuildSecretFor(req.ProjectID),
 					"items":      []any{map[string]any{"key": ".dockerconfigjson", "path": "config.json"}},
 				}},
 			},
@@ -766,9 +781,24 @@ func (s *Service) SavedSandbox(ctx context.Context, projectID, id string) (map[s
 }
 
 // ResumeSandbox recreates a paused sandbox from its saved CR on image (the snapshot), ending at
-// shutdown, with its egress policy. The sandbox keeps its id, tokens, env and metadata.
-func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map[string]any, image string, shutdown time.Time) error {
+// shutdown, with its egress policy. The sandbox keeps its id, tokens, env and metadata. It counts
+// against the same limits as a create: the provider's concurrency limits and the project quota q
+// (nil = none), checked against the live cluster.
+func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map[string]any, image string, shutdown time.Time, q *ProjectQuota) error {
 	cr := saved
+	// Saved annotations are historical, never an authority for the current cap.
+	mbps := s.cfg.WithDefaults().EgressMbps
+	if t, ok := s.cfg.Templates[digStr(cr, "metadata", "annotations", AnnotationTemplate)]; ok && digStr(cr, "metadata", "annotations", "proxcloud.io/curated-template") == "true" && t.EgressMbps > 0 {
+		mbps = t.EgressMbps
+	}
+	if pm, ok := dig(cr, "spec", "podTemplate", "metadata").(map[string]any); ok {
+		ann, _ := pm["annotations"].(map[string]any)
+		if ann == nil {
+			ann = map[string]any{}
+			pm["annotations"] = ann
+		}
+		ann["kubernetes.io/egress-bandwidth"] = fmt.Sprintf("%dM", mbps)
+	}
 	if digStr(cr, "metadata", "namespace") != NamespaceFor(projectID) || digStr(cr, "metadata", "labels", LabelProject) != projectID {
 		return ErrNotFound
 	}
@@ -777,6 +807,9 @@ func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map
 		return ErrNotFound
 	}
 	if err := s.EnsureProjectNamespace(ctx, projectID, nil); err != nil {
+		return err
+	}
+	if err := s.checkResumeLimits(ctx, projectID, cr, q); err != nil {
 		return err
 	}
 	if n := gpuCount(cr); n > 0 {
@@ -788,7 +821,7 @@ func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map
 		c["image"] = image
 	}
 	// The snapshot image is private even when the sandbox started from a public one.
-	if ps, ok := dig(cr, "spec", "podTemplate", "spec").(map[string]any); ok && s.cfg.fromTemplateRegistry(image) {
+	if ps, ok := dig(cr, "spec", "podTemplate", "spec").(map[string]any); ok && s.cfg.pullsFromRegistry(image) {
 		ps["imagePullSecrets"] = []any{map[string]any{"name": TemplatePullSecret}}
 	}
 	if spec, ok := cr["spec"].(map[string]any); ok {
@@ -803,6 +836,35 @@ func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map
 		_ = json.Unmarshal([]byte(raw), n)
 	}
 	return s.applyEgress(ctx, projectID, id, n)
+}
+
+// checkResumeLimits is CreateSandbox's limit check for a saved sandbox coming back (resume or fork).
+// ponytail: like the create, checked then created without a lock, so parallel resumes can pass together; the
+// namespace ResourceQuota is the backstop.
+func (s *Service) checkResumeLimits(ctx context.Context, projectID string, saved map[string]any, q *ProjectQuota) error {
+	live, err := s.live(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("sandbox: list: %w", err)
+	}
+	l := s.cfg.WithDefaults().Limits
+	if len(live)+1 > l.MaxConcurrent {
+		return fmt.Errorf("%w: at most %d sandboxes may run at once", ErrQuotaExceeded, l.MaxConcurrent)
+	}
+	t := TemplateOfSaved(saved)
+	spec := &Spec{CPU: t.CPU, MemoryGiB: t.MemoryGiB, GPU: t.GPU}
+	if spec.GPUs() > 0 {
+		held := 0
+		for _, it := range live {
+			held += gpuCount(it)
+		}
+		if held+spec.GPUs() > l.MaxConcurrentGPUs {
+			return fmt.Errorf("%w: at most %d GPUs may be held at once (%d in use)", ErrQuotaExceeded, l.MaxConcurrentGPUs, held)
+		}
+	}
+	if q != nil {
+		return q.check(live, spec)
+	}
+	return nil
 }
 
 // CloneSaved turns a saved sandbox into a new one (fork): new id, new envd and traffic tokens,

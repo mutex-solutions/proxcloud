@@ -2,14 +2,17 @@
 // TLS ends here: the wildcard certificate is a mounted Secret, read again when it is renewed. The public entry in
 // front only passes TCP through.
 //
-//	sandbox-proxy             serve (in the sandbox cluster)
+//	sandbox-proxy [serve]     serve (in the sandbox cluster)
 //	sandbox-proxy cert-sync   copy the wildcard certificate from the services cluster to the sandbox cluster
+//	sandbox-proxy registry-users  keep the sandbox registry's accounts in step with the sandbox cluster's projects
 package main
 
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -30,8 +33,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	run := serve
-	if len(os.Args) > 1 && os.Args[1] == "cert-sync" {
-		run = certSync
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "serve":
+		case "cert-sync":
+			run = certSync
+		case "registry-users":
+			run = registryUsers
+		default:
+			// An image older than the subcommand would otherwise serve, and its pod would wait for a readiness that
+			// never comes with no cause in the log.
+			log.Error("sandbox-proxy: unknown subcommand", "arg", os.Args[1])
+			os.Exit(2)
+		}
 	}
 	if err := run(ctx, log); err != nil {
 		log.Error("sandbox-proxy", "err", err)
@@ -150,6 +164,84 @@ func certSync(ctx context.Context, log *slog.Logger) error {
 			log.Error("cert-sync", "err", err)
 		case changed:
 			log.Info("cert-sync: certificate copied", "to", to)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+		}
+	}
+}
+
+// registryUsers runs next to the sandbox registry (Zot) on the services cluster (docs/managed-sandbox.md §6):
+// ZOT_BASE (Zot's config without auth and access rules), ZOT_DIR (where it writes config.json and htpasswd for Zot),
+// REGISTRY_HOST (the registry as the nodes pull from it), REGISTRY_USERS_DIR (files admin, push, pull-nodes and key),
+// TARGET_KUBECONFIG (the sandbox cluster: list namespaces, read and write the pull Secrets), SYSTEM_NAMESPACE (default
+// sandbox-system), SERVICE_ID (optional: only that sandbox provider's projects) and SYNC_INTERVAL (default 30s). Ready on :8081 once Zot's files are written, so a native sidecar
+// holds Zot back until then.
+func registryUsers(ctx context.Context, log *slog.Logger) error {
+	base := map[string]any{}
+	b, err := os.ReadFile(os.Getenv("ZOT_BASE"))
+	if err == nil {
+		err = json.Unmarshal(b, &base)
+	}
+	if err != nil {
+		return fmt.Errorf("ZOT_BASE: %w", err)
+	}
+	static, key, err := sandboxproxy.ReadRegistryUsersDir(os.Getenv("REGISTRY_USERS_DIR"))
+	if err != nil {
+		return fmt.Errorf("REGISTRY_USERS_DIR: %w", err)
+	}
+	host, dir := os.Getenv("REGISTRY_HOST"), os.Getenv("ZOT_DIR")
+	if host == "" || dir == "" {
+		return errors.New("REGISTRY_HOST and ZOT_DIR are required")
+	}
+	kc, err := os.ReadFile(os.Getenv("TARGET_KUBECONFIG"))
+	if err != nil {
+		return err
+	}
+	dst, err := kamajik8s.New(string(kc))
+	if err != nil {
+		return err
+	}
+	sysNS := os.Getenv("SYSTEM_NAMESPACE")
+	if sysNS == "" {
+		sysNS = "sandbox-system"
+	}
+	every := 30 * time.Second
+	if d, err := time.ParseDuration(os.Getenv("SYNC_INTERVAL")); err == nil && d > 0 {
+		every = d
+	}
+	u := &sandboxproxy.RegistryUsers{Base: base, Host: host, Key: key, Static: static, Dir: dir, SystemNS: sysNS,
+		ServiceID: os.Getenv("SERVICE_ID"), API: dst}
+	var ready atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !ready.Load() {
+			http.Error(w, "registry config not written yet", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	})
+	health := &http.Server{Addr: ":8081", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := health.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			log.Error("listen", "addr", health.Addr, "err", err)
+		}
+	}()
+	defer func() { _ = health.Close() }()
+	log.Info("registry-users started", "host", host, "every", every.String())
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		changed, err := u.Pass(ctx)
+		if changed {
+			log.Info("registry-users: registry config written")
+		}
+		ready.Store(u.Ready())
+		if err != nil {
+			log.Error("registry-users", "err", err)
 		}
 		select {
 		case <-ctx.Done():

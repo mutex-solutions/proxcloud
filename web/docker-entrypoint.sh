@@ -15,4 +15,6 @@ window.__PROXCLOUD__ = {
   authScope: "${PROXCLOUD_OAUTH2_SCOPE:-openid profile email}"
 };
 CFG
+# Redirection keeps an existing mode or inherits umask; nginx workers must read it.
+chmod 0644 /usr/share/nginx/html/config.js
 exec nginx -g 'daemon off;'

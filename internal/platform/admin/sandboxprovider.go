@@ -26,6 +26,8 @@ func (h *Handler) SetSandboxGates(f func(ctx context.Context, es *externalservic
 
 func (h *Handler) routeSandboxProvider(r chi.Router) {
 	r.Post("/service/{id}/sandbox/release-check", h.sandboxReleaseCheck)
+	r.Get("/service/{id}/sandbox/rotation-plan", h.sandboxRotationPlan)
+	r.Get("/sandbox/abuse", h.sandboxAbuseList)
 }
 
 // sandboxOf reads a stored doc as a sandbox provider with its secret decrypted; nil for any other provider.
@@ -58,7 +60,13 @@ func (h *Handler) sandboxGatesFor(ctx context.Context, es *externalservice.Exter
 // one, and any other provider, passes.
 func (h *Handler) checkSandboxGoLive(ctx context.Context, doc pgdoc.M) *httpx.HTTPError {
 	es := h.sandboxOf(doc)
-	if es == nil || doc["status"] == externalservice.StatusDisabled {
+	if es == nil {
+		return nil
+	}
+	if err := es.SandboxConfig().ValidateAutomaticActions(); err != nil {
+		return httpx.BadRequest(err.Error())
+	}
+	if doc["status"] == externalservice.StatusDisabled {
 		return nil
 	}
 	if err := sandbox.GatesErr(h.sandboxGatesFor(ctx, es)); err != nil {

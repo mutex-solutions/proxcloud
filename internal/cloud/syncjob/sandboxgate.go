@@ -73,7 +73,7 @@ func (j *Job) SandboxReleaseGates(ctx context.Context, es *externalservice.Exter
 	}
 	set(0, probeNodeRestriction(ctx, kc), "a node identity is refused a node-restriction.kubernetes.io/ label on its own Node")
 	netCfg := pes.PVENetworkConfig()
-	set(1, ps.CheckSandboxIsolation(ctx, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs),
+	set(1, ps.CheckSandboxIsolation(ctx, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs, pes.PVESandboxEndpoints()...),
 		"the cluster firewall drops "+strings.Join(netCfg.SandboxCIDRs, ",")+" to and from the tenant pool and the blocked networks")
 	open, ferr := openWorkers(ctx, kc)
 	if ferr == nil {
@@ -83,6 +83,15 @@ func (j *Job) SandboxReleaseGates(ctx context.Context, es *externalservice.Exter
 		}
 	}
 	set(2, ferr, fmt.Sprintf("%d worker(s) open to sandboxes, each with the VM firewall of pool %s pinned to its address", len(open), cfg.Pool))
+	ss, nerr := sandbox.New(es.SandboxConfig(), es.ID)
+	if nerr == nil {
+		nerr = ss.CheckNetworkGuard(ctx)
+	}
+	ng := sandbox.Gate{Name: "network-guard", OK: nerr == nil, Detail: "host CNI guard installed on every schedulable node"}
+	if nerr != nil {
+		ng.Detail = nerr.Error()
+	}
+	gates = append(gates, ng)
 	return gates
 }
 

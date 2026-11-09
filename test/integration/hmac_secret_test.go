@@ -128,3 +128,14 @@ func TestAdminGeneratedHmacKeyIsSealed(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenHmacSecretWrongKeyNeverOpens: CBC without a MAC unpads about 1 in 256 wrong-key texts; none may open.
+func TestOpenHmacSecretWrongKeyNeverOpens(t *testing.T) {
+	plain := "sk" + strings.Repeat("ab", 20)
+	wrong := textcrypt.New("new-key")
+	for i := 0; i < 2000; i++ {
+		if got, ok := admin.OpenHmacSecret(wrong, textcrypt.New("old-key").Encrypt(plain)); ok {
+			t.Fatalf("round %d opened under the wrong key: %q", i, got)
+		}
+	}
+}

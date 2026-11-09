@@ -265,6 +265,18 @@ func run() error {
 	// Sandboxes — enables sandbox provisioning and the SANDBOX surface (Sandbox CRs on the provider's sandbox cluster).
 	// The release gates are wired once the sync job exists, below.
 	projectH.SetSandbox(sandboxServiceFor)
+	// Sandbox API keys (SHA-256 only) for the E2B-compatible API at /e2b.
+	projectH.SetSandboxKeys(pg.C("sandbox_api_keys"))
+	// Custom templates and their builds (the E2B v3 template API).
+	projectH.SetSandboxTemplates(pg.C("sandbox_templates"))
+	// Paused sandboxes (E2B pause, autoPause, autoResume): the saved CR and the snapshot each one resumes from.
+	projectH.SetSandboxPaused(pg.C("sandbox_paused"))
+	for _, table := range []string{"sandbox_safety", "auditEvent"} {
+		if err := pg.C(table).Ensure(context.Background()); err != nil {
+			return fmt.Errorf("sandbox safety store %s: %w", table, err)
+		}
+	}
+	projectH.SetSandboxSafety(pg.C("sandbox_safety"), mailSvc)
 	// Proxmox VE — enables proxmox provisioning (project pool) + the VM write surface.
 	holderLocks := lock.New(pg)
 	pveWithHolderLock := func(es *externalservice.ExternalService) (*pve.Service, error) {
@@ -769,7 +781,7 @@ func run() error {
 	chargeDispatch := func(ctx context.Context, timeUnit string) error {
 		return billingProv.Charge(ctx, timeUnit, time.Now().UTC())
 	}
-	registerJobs(sched, billingProv.Name(), chargeDispatch, metricsJob, syncJob, savingsSvc, suspensionJob, collectSvc, txnScanner, deletionJob, billSendSvc, log)
+	registerJobs(sched, billingProv.Name(), chargeDispatch, metricsJob, syncJob, savingsSvc, suspensionJob, collectSvc, txnScanner, deletionJob, billSendSvc, projectH, log)
 	// The fan-out consumer belongs to the native provider: it drains the queue that provider
 	// publishes to. Under the external provider nothing publishes, so a consumer would idle
 	// forever on a queue that never fills.
@@ -813,6 +825,32 @@ func run() error {
 			"run-sandbox-state": func(w http.ResponseWriter, r *http.Request) {
 				n, err := syncJob.RunSandboxState(r.Context())
 				jobResult(w, map[string]any{"changed": n}, err)
+			},
+			"run-sandbox-builds": func(w http.ResponseWriter, r *http.Request) {
+				projectH.SyncSandboxBuilds(r.Context())
+				jobResult(w, map[string]any{"ran": "sandbox-builds"}, nil)
+			},
+			"run-sandbox-abuse": func(w http.ResponseWriter, r *http.Request) {
+				projectH.RunSandboxAbuse(r.Context())
+				jobResult(w, map[string]any{"ran": "sandbox-abuse"}, nil)
+			},
+			"run-sandbox-rotation": func(w http.ResponseWriter, r *http.Request) {
+				// No force/short-interval override: a drill must respect the production safety checks.
+				projectH.RunSandboxRotation(r.Context())
+				jobResult(w, map[string]any{"ran": "sandbox-rotation"}, nil)
+			},
+			"run-sandbox-autopause": func(w http.ResponseWriter, r *http.Request) {
+				projectH.AutoPauseSandboxes(r.Context())
+				jobResult(w, map[string]any{"ran": "sandbox-autopause"}, nil)
+			},
+			"run-registry-prune": func(w http.ResponseWriter, r *http.Request) {
+				// ?grace=10m lowers the age floor (default 24h) for a drill; the scheduled run always keeps 24h.
+				grace := project.RegistryPruneGrace
+				if g, err := time.ParseDuration(r.URL.Query().Get("grace")); err == nil && g >= 0 {
+					grace = g
+				}
+				projectH.PruneSandboxRegistryOlderThan(r.Context(), grace)
+				jobResult(w, map[string]any{"ran": "registry-prune", "grace": grace.String()}, nil)
 			},
 			"run-pve-tasks": func(w http.ResponseWriter, r *http.Request) {
 				n, err := syncJob.RunPVETasks(r.Context())
@@ -1094,7 +1132,7 @@ func startChargeConsumer(rabbit *atomic.Pointer[amqp.Client], charger chargefano
 //
 // Jobs that are not about billing at all (metrics ingestion, cloud sync, project deletion) always
 // run — the external provider still depends on this pod keeping the resource cache fresh.
-func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDispatch func(context.Context, string) error, metrics *metricsjob.Job, sync *syncjob.Job, savings *billing.SavingsService, suspension *billing.SuspensionJob, collect *payment.CollectService, txnScan *payment.TransactionScanner, deletion *project.DeletionJob, billSend *billing.BillSendService, log *slog.Logger) {
+func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDispatch func(context.Context, string) error, metrics *metricsjob.Job, sync *syncjob.Job, savings *billing.SavingsService, suspension *billing.SuspensionJob, collect *payment.CollectService, txnScan *payment.TransactionScanner, deletion *project.DeletionJob, billSend *billing.BillSendService, sandboxes *project.Handler, log *slog.Logger) {
 	chargeFn := func(timeUnit string) func(context.Context) {
 		return func(ctx context.Context) {
 			if err := chargeDispatch(ctx, timeUnit); err != nil {
@@ -1189,6 +1227,16 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 				log.Error("sandbox state sync job", "err", err)
 			}
 		}},
+		// Built-in sandbox templates follow the prepull DaemonSet (off unless a provider sets imageAdoption).
+		{Name: "sandboxTemplateAdopt", Spec: scheduler.SandboxTemplateAdoptSpec, AtMostFor: 10 * time.Minute, AtLeastFor: time.Minute, Fn: sandboxes.AdoptSandboxImages},
+		// Template builds nobody polls: record their result before the build pod is cleaned up.
+		{Name: "sandboxBuildSync", Spec: scheduler.SandboxBuildSyncSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 20 * time.Second, Fn: sandboxes.SyncSandboxBuilds},
+		{Name: "sandboxAbuse", Spec: "0 * * * * *", AtMostFor: 10 * time.Minute, AtLeastFor: 20 * time.Second, Fn: sandboxes.RunSandboxAbuse},
+		{Name: "sandboxRotation", Spec: "0 */5 * * * *", AtMostFor: 4 * time.Minute, AtLeastFor: time.Minute, Fn: sandboxes.RunSandboxRotation},
+		// E2B autoPause: sandboxes past their end are paused (filesystem snapshot), not deleted.
+		{Name: "sandboxAutoPause", Spec: scheduler.SandboxAutoPauseSpec, AtMostFor: 30 * time.Minute, AtLeastFor: 20 * time.Second, Fn: sandboxes.AutoPauseSandboxes},
+		// Unreferenced template images (off unless a sandbox provider sets registryPrune).
+		{Name: "sandboxRegistryPrune", Spec: scheduler.SandboxRegistryPruneSpec, AtMostFor: 30 * time.Minute, AtLeastFor: 5 * time.Minute, Fn: sandboxes.PruneSandboxRegistry},
 		{Name: "pveTaskPoll", Spec: scheduler.PVETaskPollSpec, AtMostFor: time.Minute, AtLeastFor: 10 * time.Second, Fn: func(ctx context.Context) {
 			if _, err := sync.RunPVETasks(ctx); err != nil {
 				log.Error("pve task poll job", "err", err)

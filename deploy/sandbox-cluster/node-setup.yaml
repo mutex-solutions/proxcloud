@@ -13,8 +13,11 @@
 # a global IPv6 address or an IPv6 default route before it installs anything: such a node never gets
 # runsc, its node-setup pod never turns Ready, and check-ipv4-only.sh fails.
 #
-# Not here yet: the init container that copies envd + sandbox-init into /opt/proxcloud-sandbox/bin
-# (the runtime image is built in SB5), and the NVIDIA toolkit + nvproxy branch for GPU nodes (SB9).
+# The init container installs envd (E2B's in-sandbox agent) and sandbox-init into /opt/proxcloud-sandbox/bin, which
+# every sandbox pod of a provider with `envd` mounts read-only at /.proxcloud (SB5, docs/managed-sandbox.md §5). Its
+# image is CI's proxcloud-sandbox-runtime (deploy/sandbox-runtime.Dockerfile); pin a release tag or digest here.
+# Installer stage 55 pins it, and drops the init container on a site without a sandbox domain (no envd there).
+# Not here yet: the NVIDIA toolkit + nvproxy branch for GPU nodes (SB9).
 # ponytail: setup runs once per pod start; bumping RUNSC_VERSION = edit + rollout restart.
 apiVersion: v1
 kind: Namespace
@@ -54,7 +57,18 @@ data:
       TypeUrl = "io.containerd.runsc.v1.options"
       ConfigPath = "/etc/containerd/runsc.toml"
     T
+    # allow-suid (RUNSC_ALLOW_SUID, default true): gVisor honours the setuid bit, so `sudo` works in a sandbox as on
+    # E2B (the base template gives user "user" passwordless sudo, templates and agents rely on it). Without it every
+    # sudo fails ("effective uid is not 0 ... nosuid"). Effect: every setuid binary in a sandbox's image works again, so
+    # any process in it can become root of that sandbox. No new power for the tenant (envd already runs commands as root
+    # for whoever holds the sandbox's access token) and none on the node: root inside gVisor is root of gVisor's own
+    # kernel, the sentry keeps its seccomp filter and namespaces. It does let code that got in as "user" (a dependency,
+    # a prompt-injected agent) start an escape attempt from root inside the sentry. Docs: managed-sandbox.md §1.4.
+    # New sandboxes pick a change up; running ones keep their config.
     printf '[runsc_config]\n  platform = "%s"\n' "$RUNSC_PLATFORM" > /etc/containerd/runsc.toml
+    if [ "$RUNSC_ALLOW_SUID" = true ]; then
+      printf '  allow-suid = "true"\n' >> /etc/containerd/runsc.toml
+    fi
     # gVisor docs: large workloads exhaust host VMAs at the default.
     echo 'vm.max_map_count = 4194304' > /etc/sysctl.d/90-gvisor.conf
     sysctl -q -w vm.max_map_count=4194304
@@ -63,7 +77,7 @@ data:
       echo "containerd config changed, restarting containerd"
       systemctl restart containerd
     fi
-    echo "node-setup done: runsc $(dpkg-query -W -f='${Version}' runsc), platform $RUNSC_PLATFORM"
+    echo "node-setup done: runsc $(dpkg-query -W -f='${Version}' runsc), platform $RUNSC_PLATFORM, allow-suid $RUNSC_ALLOW_SUID"
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -80,29 +94,60 @@ spec:
       labels: {app: node-setup}
     spec:
       hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: sandbox-netguard
       priorityClassName: system-node-critical
       tolerations: [{operator: Exists}]
+      initContainers:
+      # The copy is atomic (tmp + mv), so a rollout never hands a starting sandbox a half-written binary; running ones
+      # keep theirs.
+      - name: sandbox-runtime
+        image: ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:latest
+        env: [{name: DEST, value: /host/opt/proxcloud-sandbox/bin}]
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+        volumeMounts: [{name: sandbox-runtime, mountPath: /host/opt/proxcloud-sandbox}]
       containers:
       - name: setup
         image: busybox:1.37
         env:
+        - name: NODE_NAME
+          valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
         - {name: RUNSC_VERSION, value: "20261102.0"}
         - {name: RUNSC_PLATFORM, value: systrap}
+        - {name: RUNSC_ALLOW_SUID, value: "true"}   # sudo in sandboxes; see setup.sh. Installer: sandbox.allow_suid
         command: [sh, -c]
         args:
         - |
           set -e
           nsenter -t 1 -m -u -i -n -p -- env RUNSC_VERSION="$RUNSC_VERSION" RUNSC_PLATFORM="$RUNSC_PLATFORM" \
-            bash -c "$(cat /setup/setup.sh)"
-          touch /tmp/ready
-          exec sleep 2147483647
+            RUNSC_ALLOW_SUID="$RUNSC_ALLOW_SUID" bash -c "$(cat /setup/setup.sh)"
+          # Static CNI guard runs on the host, before any customer container starts.
+          # tc is host iproute2; update the token/config without letting Cilium own/rewrite the chain.
+          nsenter -t 1 -m -u -i -n -p -- bash -c 'command -v tc >/dev/null || (apt-get update -qq && apt-get install -y -qq iproute2)'
+          while true; do
+            API_SERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" /runtime/sandbox-netguard -install
+            touch /tmp/ready
+            sleep 30
+          done
         readinessProbe:
           exec: {command: [test, -f, /tmp/ready]}
           periodSeconds: 5
         securityContext: {privileged: true}
         resources:
           requests: {cpu: 10m, memory: 16Mi}
-        volumeMounts: [{name: setup, mountPath: /setup}]
+        volumeMounts:
+        - {name: setup, mountPath: /setup}
+        - {name: sandbox-runtime, mountPath: /runtime, subPath: bin, readOnly: true}
+        - {name: cni-config, mountPath: /host/etc/cni/net.d}
+        - {name: cni-bin, mountPath: /host/opt/cni/bin}
       volumes:
+      - name: cni-config
+        hostPath: {path: /etc/cni/net.d, type: DirectoryOrCreate}
+      - name: cni-bin
+        hostPath: {path: /opt/cni/bin, type: Directory}
       - name: setup
         configMap: {name: node-setup}
+      - name: sandbox-runtime
+        hostPath: {path: /opt/proxcloud-sandbox, type: DirectoryOrCreate}

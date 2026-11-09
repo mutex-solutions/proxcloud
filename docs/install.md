@@ -37,7 +37,9 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 | 35 | `35-local-images.yml` | `images.build`: builds images and chart from this checkout, into a registry on the management cluster. A tag already there is not rebuilt. |
 | 40 | `40-mgmt-platform.yml` | ArgoCD, then Applications with inline values: cert-manager, CloudNativePG, ProxCloud (API, consoles, Keycloak, PostgreSQL, RabbitMQ). The scheduler is on. |
 | 45 | `45-object-store.yml` | The object store, see below. |
+| 50 | `50-services-cluster.yml` | `mode: split`: Cluster API and CAPMOX on the mgmt cluster, then the services cluster and its platform. See "Split mode" below. |
 | 55 | `55-sandbox-cluster.yml` | `mode: split` with `sandbox.enabled`: the sandbox cluster's vnet, the cluster from the kamaji chart, then `deploy/sandbox-cluster` on it. See "Sandbox cluster" below. |
+| 55 | `55-sandbox-registry.yml` | `sandbox.registry.address` set: the sandbox registry (Zot on the services cluster, its bucket on the object store), the images of `deploy/templates/images.yaml` copied in and pre-pulled on every sandbox node. Also run by `make upgrade`. See "Sandbox registry" below. |
 | 56 | `56-sandbox-edge.yml` | `sandbox.enabled`: the public entry of sandbox ports: `sandbox-proxy` and its MetalLB address, the wildcard certificate on the services cluster and its copy, the DNS record and TSIG key on PowerDNS, the HAProxy entry appliance. Also run by `make upgrade`. See "Sandbox ports" below. |
 | 60 | `60-register.yml` | Logins, an Admin-API key, the Proxmox provider, fio suggestions; on the first run `deploy/seed/seed-operator.py` (platform and billing configuration, flavors, public price plan, quota). Prints the URLs. |
 
@@ -104,7 +106,7 @@ Not automated yet: the off-site copy, OTLP metrics, and pointing CloudNativePG a
 
 | Command | What it does |
 |---|---|
-| `make upgrade` | After bumping `versions.yml`: Proxmox identity (stage 10), k3s, images, chart, operators. |
+| `make upgrade` | After bumping `versions.yml`: stages 00, 10 (Proxmox identity), 30 (k3s), 35 (images), 40 (chart, operators), 55 (registry: copies the newly pinned sandbox images in), 56 (sandbox edge) and 60. It does not run stage 50 or stage 55 (cluster): run those playbooks yourself when a pin they use changed (CAPI, CAPMOX, kamaji, the sandbox runtime image). |
 | `make identity-check` | What stage 10 would grant, align and take away, writing nothing. Run it before an upgrade that changes grants. |
 | `make templates` | Build new template versions now. Keeps two per OS and node. |
 | `make storage-rebench` | Re-run fio. Never changes the class of a live volume. |
@@ -192,6 +194,61 @@ stage 10's rows, and the exit node's SNAT file was written by hand with the cont
 ([managed-sandbox.md §2.5](managed-sandbox.md#25-measured-on-the-lab-2026-11-07)). Stages 10, 55 and 60 themselves
 have only been syntax-checked.
 
+## Sandbox registry (stage 55)
+
+The sandbox nodes pull templates and `sandbox-proxy` from the platform's own registry (the envd runtime image still from `images.registry`), each project with an account
+that reads its own images and the built-in ones only ([managed-sandbox.md §6](managed-sandbox.md#6-the-sandbox-registry-sb6a)).
+
+1. `sandbox.registry.address`: one address of `services.network.metallb`, unused. The stage refuses an address
+   outside that range.
+2. The bucket `sandbox.registry.bucket` (default `pc-sandbox-registry`) goes on the object store of stage 45:
+   - **Standard** (`object_store.mode: vm` or `truenas-app`): RustFS. The stage creates the bucket and a user
+     `<bucket>-svc` limited to it with the RustFS root key (`generated/rustfs-*`).
+   - **Full** (`object_store.mode: ceph-rgw`): RGW. `object_store.access_key`/`secret_key` must be an RGW user with
+     `users=*` caps (the same key the ceph-s3 provider uses); the stage creates the user `<bucket>-svc` through the
+     admin ops API, and that user creates and owns the bucket. `object_store.region` is the zonegroup's `api_name`.
+   - `external`: the store's own key creates and keeps the bucket.
+   The bucket has no Object Lock (Zot's garbage collection deletes unreferenced blobs); its secret is
+   `generated/sandbox-registry-s3-secret`. A second bucket, `sandbox.registry.builds_bucket` (default
+   `pc-sandbox-builds`), gets the same treatment for custom template builds (secret
+   `generated/sandbox-builds-s3-secret`). Build pods fetch from it, so the store's endpoint must be an IPv4 address with
+   its port; the stage refuses a name.
+3. `make install`, or stages 55 (both), 56 and 60 on an installed site. Stage 55 (registry) runs Zot in
+   `sandbox.registry.namespace` with a CA of its own, writes `generated/sandbox-registry-{admin,gc,pull-nodes,key}`
+   (the accounts and the key project passwords derive from), copies each pinned image and the release's
+   `proxcloud-sandbox-proxy` in (skopeo on the first mgmt host; `images.pull_secret` if ghcr needs a login) and
+   applies `deploy/sandbox-cluster/registry.yaml`, the prepull and the build namespace `sbx-build`
+   (`templates/sandbox-builds.yml.j2`: its egress policy, the registry CA, the portal's and the sync's rights there)
+   on the sandbox cluster. Stage 56 runs sandbox-proxy from the copy. Stage 60 gives the Proxmox provider
+   `config.sandbox.registry` and `config.sandbox.buildStorage` (the workers' firewall then admits those two addresses
+   and ports) and, when it first registers the sandbox provider, the templates with `pin:<name>` resolved to the copies,
+   `templateRegistry`, `imageAdoption` (`sandbox.registry.adoption`), the build bucket, the registry CA,
+   `registryPrune` (`sandbox.registry.prune`, default `on`) and the `gc` account
+   ([managed-sandbox.md §7](managed-sandbox.md#7-custom-templates-sb6b)).
+4. Check: after the next sync, `kubectl -n sandbox-system get pods -l app=template-prepull` on the sandbox cluster
+   shows one Running pod per node; a re-run of stage 55 reports the count.
+5. New template images: merge the `sandbox-templates` workflow's pull request, then `make upgrade`. The portal moves
+   the templates to the new digests once every node pre-pulled them (`imageAdoption: on`).
+
+The sync runs from the release's sandbox-proxy image: it needs a release newer than v0.3.28 (the first with
+`sandbox-proxy registry-users`), or `sandbox.proxy.image` set to one. An older image stops with "unknown subcommand".
+The same holds for the images themselves: `proxcloud-sandbox-proxy` and `proxcloud-sandbox-runtime` are first published
+with the release after v0.3.28, and stage 35 does not build them. Until that release is pinned in `versions.yml`, set
+`sandbox.proxy.image` and `sandbox.runtime_image` to images you built and pushed; the defaults
+(`<images.registry>/…:<release>`) do not exist.
+
+An existing sandbox provider keeps its templates: set `Template registry` (`<address>/t`), `Built-in image updates`
+and the templates' images (the `library/` copies) in the console, and for custom templates "Custom template builds"
+(endpoint, bucket and keys from `generated/`), "Prune unused template images", the gc account
+(`generated/sandbox-registry-gc`) and the registry CA. Upgrading from SB6a replaces the `push` account with per-project
+build accounts; nothing used `push` before SB6b.
+
+**What ran where:** stage 55 (registry) ran on the lab against the SB0 cluster from a scratch site, with RustFS and
+then RGW as the backend; stage 60's new keys and the release proxy copy did not run there
+([managed-sandbox.md §6.6](managed-sandbox.md#66-measured-on-the-lab-2026-11-07)). SB6b's additions to stages 55 and
+60 have not run on the lab: running stage 55 there was refused by the session's permission check
+([§7.6](managed-sandbox.md#76-measured-on-the-lab-2026-11-08)).
+
 ## Sandbox ports (stage 56)
 
 Sandbox ports answer at `https://<port>-<sandboxId>.<sandbox.domain>` ([managed-sandbox.md §4](managed-sandbox.md#4-public-entry-tls-and-wake-sb4)).
@@ -211,7 +268,7 @@ Sandbox ports answer at `https://<port>-<sandboxId>.<sandbox.domain>` ([managed-
    writes the record and, for `acme`, the TSIG key (`generated/sandbox-tsig.json`), builds the appliance (VM
    `sandbox.entry.vmid`), applies the issuer, the certificate and cert-sync on the services cluster and `sandbox-proxy`
    on the sandbox cluster. It generates `generated/sandbox-wake-token`: put it into the sandbox provider's
-   `secret.proxyWakeToken` (the proxy calls the wake endpoint from SB7 on). Stage 60 gives the Proxmox provider
+   `secret.proxyWakeToken` (the proxy calls the wake endpoint at `sandbox.proxy.wake_url` to resume paused sandboxes). Stage 60 gives the Proxmox provider
    `config.sandbox.proxy`; the next sync fences the system nodes, opens the workers to the appliance and installs
    HAProxy's config on it. Run stage 56 again after that sync: it then waits until the proxy serves.
 4. Check: `curl https://8000-<id>.<domain>/` with a sandbox serving on 8000 (`GET_ACCESS` gives its host and token).

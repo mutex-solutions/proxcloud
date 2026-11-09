@@ -21,8 +21,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -445,9 +447,12 @@ func (s *Service) DeleteProjectZoneIfEmpty(ctx context.Context, projectID string
 // The sandbox networks (the platform's sandbox cluster workers, docs/managed-sandbox.md) are fenced
 // both ways: the pool may not reach them, and they may reach neither the pool nor a blocked
 // network. Their traffic to the management networks leaves through an exit node that SNATs it to a
-// node address, so it has to drop here, before the rewrite.
+// node address, so it has to drop here, before the rewrite. The one exception is allow: the "address:port"
+// endpoints the workers' own VM firewall opens (registry, build bucket, portal wake), which may well sit on a
+// management network (lab: the build bucket on 10.88.0.41:9000), accepted over TCP above the sandbox DROPs.
+// Without it a build pod's fetch timed out on every connect while the VM firewall said yes.
 // There is deliberately no blanket DROP source=pool: it would also drop internet egress (SNAT).
-func isolationRules(pool string, blocked, sandbox []string, owner string) []FirewallRule {
+func isolationRules(pool string, blocked, sandbox []string, owner string, allow ...string) []FirewallRule {
 	out := []FirewallRule{
 		{Type: "forward", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: owner},
 		{Type: "in", Action: "DROP", Source: pool, Dest: pool, Enable: 1, Comment: owner},
@@ -463,7 +468,50 @@ func isolationRules(pool string, blocked, sandbox []string, owner string) []Fire
 		drop(pool, dst)
 	}
 	if len(sandbox) > 0 {
-		drop(strings.Join(sandbox, ","), append([]string{pool}, blocked...))
+		src := strings.Join(sandbox, ",")
+		for _, ep := range sandboxEndpoints(allow) {
+			for _, typ := range []string{"forward", "in"} {
+				out = append(out, FirewallRule{Type: typ, Action: "ACCEPT", Proto: "tcp", Source: src, Dest: ep.Addr().String(),
+					DPort: strconv.Itoa(int(ep.Port())), Enable: 1, Comment: owner})
+			}
+		}
+		drop(src, append([]string{pool}, blocked...))
+	}
+	return out
+}
+
+// sandboxEndpoints parses "address:port" entries, sorted and without duplicates; an entry that is not an IPv4 address
+// with a port is skipped (the VM firewall refuses it too, and the fence gate reports it), so a bad endpoint never
+// stops the isolation of tenant networks.
+func sandboxEndpoints(allow []string) []netip.AddrPort {
+	var out []netip.AddrPort
+	for _, a := range allow {
+		ep, err := netip.ParseAddrPort(strings.TrimSpace(a))
+		if err == nil && ep.Addr().Is4() && ep.Port() != 0 {
+			out = append(out, ep)
+		}
+	}
+	slices.SortFunc(out, func(a, b netip.AddrPort) int { return a.Compare(b) })
+	return slices.Compact(out)
+}
+
+// managementEndpoints drops the sandbox endpoints inside the tenant pool or an operator-blocked range (tenant): only a
+// management-side endpoint may be opened to the sandbox networks, never a way into a tenant's network.
+func managementEndpoints(allow, tenant []string) []string {
+	var nets []netip.Prefix
+	for _, c := range tenant {
+		if p, err := netip.ParsePrefix(strings.TrimSpace(c)); err == nil {
+			nets = append(nets, p.Masked())
+		}
+	}
+	var out []string
+	for _, a := range allow {
+		ep, err := netip.ParseAddrPort(strings.TrimSpace(a))
+		if err == nil && slices.ContainsFunc(nets, func(p netip.Prefix) bool { return p.Contains(ep.Addr()) }) {
+			slog.Warn("pve isolation: a sandbox endpoint in a tenant range is not opened", "endpoint", a)
+			continue
+		}
+		out = append(out, a)
 	}
 	return out
 }
@@ -482,7 +530,8 @@ func projectIsolationRules(projectID string, cidrs []string) []FirewallRule {
 }
 
 func sameRule(a, b FirewallRule) bool {
-	return a.Type == b.Type && a.Action == b.Action && a.Source == b.Source && a.Dest == b.Dest && a.Comment == b.Comment
+	return a.Type == b.Type && a.Action == b.Action && a.Proto == b.Proto && a.Source == b.Source && a.Dest == b.Dest &&
+		a.DPort == b.DPort && a.Comment == b.Comment
 }
 
 // sameLiveRule is sameRule plus the enable flag: a rule disabled by hand reads as missing, so the reconcile puts it back.
@@ -491,12 +540,12 @@ func sameLiveRule(a, b FirewallRule) bool { return sameRule(a, b) && a.Enable ==
 // ReconcileIsolation brings the cluster firewall to the isolation rule set: this portal's
 // provider-wide DROPs (blocked = the management networks plus the operator's extra ones; sandbox =
 // the sandbox cluster's networks, fenced in both directions) and this project's ACCEPTs over its
-// subnets. Idempotent; call after a vnet of the project is created or
+// subnets; allow are the sandbox endpoints (isolationRules). Idempotent; call after a vnet of the project is created or
 // deleted, and from the sync job, which repairs drift and rolls a changed rule set out to projects
 // made before it. PVE adds a rule on top, and every step fails closed: DROPs go in before anything
 // is removed, and an ACCEPT is only ever replaced by adding it after the old one is gone.
-func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string, blocked, sandbox []string) error {
-	want, owner, poolNet, complete, err := s.isolationWant(ctx, pool, blocked, sandbox)
+func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string, blocked, sandbox []string, allow ...string) error {
+	want, owner, poolNet, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
 	if err != nil {
 		return err
 	}
@@ -541,7 +590,7 @@ func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string
 
 // isolationWant is this portal's provider-wide isolation rule set (isolationRules over the management networks plus
 // blocked). complete is false when a node did not report its networks.
-func (s *Service) isolationWant(ctx context.Context, pool string, blocked, sandbox []string) (want []FirewallRule, owner string, poolNet *net.IPNet, complete bool, err error) {
+func (s *Service) isolationWant(ctx context.Context, pool string, blocked, sandbox, allow []string) (want []FirewallRule, owner string, poolNet *net.IPNet, complete bool, err error) {
 	if _, poolNet, err = net.ParseCIDR(pool); err != nil {
 		return nil, "", nil, false, fmt.Errorf("pve isolation: invalid cidrPool %q", pool)
 	}
@@ -549,23 +598,24 @@ func (s *Service) isolationWant(ctx context.Context, pool string, blocked, sandb
 	if err != nil {
 		return nil, "", nil, false, err
 	}
+	allow = managementEndpoints(allow, append([]string{poolNet.String()}, blocked...))
 	blocked = slices.Compact(slices.Sorted(slices.Values(append(mgmt, blocked...))))
 	if sandbox, err = sandboxNets(poolNet, blocked, sandbox); err != nil {
 		return nil, "", nil, false, err
 	}
 	owner = s.isolationOwner()
-	return isolationRules(poolNet.String(), blocked, sandbox, owner), owner, poolNet, complete, nil
+	return isolationRules(poolNet.String(), blocked, sandbox, owner, allow...), owner, poolNet, complete, nil
 }
 
 // CheckSandboxIsolation is the isolation release gate of a sandbox provider (docs/managed-sandbox.md §3): read-only,
 // with the portal's token, it checks that the datacenter firewall is on and that this portal's isolation DROPs are in
 // the cluster firewall, enabled, exactly as ReconcileIsolation writes them for these sandbox networks: the tenant pool
 // may not reach them, and they reach neither the pool nor a blocked network.
-func (s *Service) CheckSandboxIsolation(ctx context.Context, pool string, blocked, sandbox []string) error {
+func (s *Service) CheckSandboxIsolation(ctx context.Context, pool string, blocked, sandbox []string, allow ...string) error {
 	if len(sandbox) == 0 {
 		return errors.New("pve isolation: network.sandboxCidrs is empty, so no rule fences the sandbox network")
 	}
-	want, owner, _, complete, err := s.isolationWant(ctx, pool, blocked, sandbox)
+	want, owner, _, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
 	if err != nil {
 		return err
 	}

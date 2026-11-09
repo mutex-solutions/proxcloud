@@ -79,7 +79,7 @@ pc_defaults:
     vrf_vxlan: 10000
     exit_nodes: []               # default: the first node
     cidr_pool: 10.100.0.0/16
-    isolation: shared            # shared | evpn (a zone per project)
+    isolation: shared            # shared | evpn (a zone per project; registered as evpn-per-project)
     blocked_cidrs: []            # networks tenants must not reach, beyond the node management networks
     public: {}                   # {id, name, cidr, gateway, ranges}
 
@@ -143,11 +143,15 @@ pc_defaults:
       worker_mtu: 1450
       rwx_gib: 0                 # NAS dataset per cluster and its RWX class; 0 = none
 
-  # mode=split: the platform's sandbox cluster (gVisor), stage 55. Not reachable by tenants yet: docs/managed-sandbox.md.
+  # mode=split: the platform's sandbox cluster (gVisor), stage 55. Stage 60 registers its provider DISABLED;
+  # the operator sets it live in the console once its release gates hold (docs/install.md).
   sandbox:
     enabled: false
     pool: proxcloud-sandbox
     token: sandbox               # capmox@pve!<token>, the cluster's CAPMOX credential; secret in generated/token-<token>
+    runtime_image: ""            # envd + sandbox-init for node-setup; default <images.registry>/proxcloud-sandbox-runtime:<release>,
+                                 # published from the release after v0.3.28 and not built by stage 35: set it until then
+    allow_suid: true             # runsc allow-suid: sudo works in sandboxes, as on E2B (docs/managed-sandbox.md §1.4)
     storage: ""                  # boot disks; default: services.storage
     iso_storage: ""              # bootstrap ISOs, node-local only; default: services.iso_storage
     network:
@@ -175,7 +179,13 @@ pc_defaults:
     domain: ""                   # required, e.g. sbx.example.org: its own DNS zone; the wildcard certificate covers it
     proxy:
       address: ""                # required: sandbox-proxy's MetalLB address, inside network.metallb
-      image: ""                  # default <images.registry>/proxcloud-sandbox-proxy:<release>
+      image: ""                  # default <images.registry>/proxcloud-sandbox-proxy:<release>, published from the
+                                 # release after v0.3.28 and not built by stage 35: set it until then
+      # E2B autoResume: the proxy wakes a paused sandbox at <wake_url>/<id>/wake (default <API URL>/api/v1/internal/sandboxes;
+      # the proxy must resolve it and trust its certificate). wake_address: the address the workers' firewall opens for
+      # it on the API's port (default the first mgmt host; "none" = no rule, e.g. a public API address).
+      wake_url: ""
+      wake_address: ""
     tls:
       issuer: acme               # acme (DNS-01 through PowerDNS with RFC2136) | secret (yours) | selfsigned (test sites)
       secret: ""                 # issuer secret: a kubernetes.io/tls Secret for *.<domain> in pc-sandbox, services cluster
@@ -199,12 +209,33 @@ pc_defaults:
       disk: 10
       address: ""                # its address on the sandbox vnet, outside the gateway, network.nodes and network.metallb
       public: {bridge: "", vlan: 0, address: "", gateway: ""}  # address as CIDR; the record and the internet side
+    # The sandbox registry (stage 55, docs/managed-sandbox.md §6): Zot on the services cluster, its blobs in a bucket
+    # of the object store (RustFS on Standard, RGW on Full). The sandbox nodes pull the built-in templates and
+    # sandbox-proxy from it, each project with an account of its own (the envd runtime image: runtime_image above). Empty address: no registry, the nodes pull
+    # from the images' own registries.
+    registry:
+      address: ""                # a MetalLB address inside services.network.metallb, e.g. 192.0.2.226
+      namespace: proxcloud-sandbox-registry  # on the services cluster
+      bucket: pc-sandbox-registry
+      adoption: "on"             # on | dry-run | off: built-in templates follow a new pinned digest once every node has it
+      # Custom template builds (docs/managed-sandbox.md §7): the COPY contexts go to this bucket of the same object
+      # store; build pods fetch them with presigned URLs, so the workers' fence and the build namespace's policy open
+      # its endpoint (it must be an IPv4 address with a port, e.g. http://192.0.2.41:9000).
+      builds_bucket: pc-sandbox-builds
+      prune: "on"                # on | dry-run | off: hourly, template images nothing references, older than a day
     # The sandbox provider stage 60 registers (first run only; the console owns it afterwards). Templates are the only
-    # images offered; a site's templates replace this list instead of merging into it. limits empty = the portal's
-    # defaults (internal/cloud/sandbox/config.go).
+    # images offered; a site's templates replace this list instead of merging into it. "pin:<name>" is an image of
+    # deploy/templates/images.yaml (the registry's copy, or the pinned source without a registry). limits empty = the
+    # portal's defaults (internal/cloud/sandbox/config.go). With a domain the provider runs envd and offers the E2B API;
+    # the E2B SDKs start `base` and `code-interpreter-v1` (images from deploy/templates/build.sh, docs/managed-sandbox.md
+    # §5.4).
     templates:
-      python: {image: "python:3.12-slim", cpu: 1, memoryGiB: 2, description: Python 3.12}
+      python: {image: "pin:python", cpu: 1, memoryGiB: 2, description: Python 3.12}
     limits: {}
+    egress_mbps: 100
+    abuse: {disabled: false, cpuPercent: 90, windowSeconds: 900, maxGapSeconds: 90, trafficBytes: 65536, action: alert, notifyEmails: []}
+    # Enable only after configuring a separate management credential + exact MD allowlist in the provider.
+    rotation: {enabled: false, intervalHours: 168, namespace: pc-sandbox, cluster: pc-sandbox, machineDeployments: []}
 
   nas:
     host: ""                     # TrueNAS address; empty = no NAS stage

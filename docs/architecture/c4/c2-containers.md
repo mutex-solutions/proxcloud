@@ -20,7 +20,7 @@ flowchart TB
     gw["Gateway / Ingress<br/>HTTPRoute or Ingress per host"]:::impl
     webc["web/client SPA<br/>React, nginx"]:::impl
     weba["web/admin SPA<br/>React, nginx"]:::impl
-    api["proxcloud-api (Go)<br/>:8080 /api/v1, /admin-api/v1, /mcp, SSE<br/>:8081 health, job triggers, callbacks<br/>CSI gateway listener (off by default)"]:::impl
+    api["proxcloud-api (Go)<br/>:8080 /api/v1, /admin-api/v1, /e2b, /mcp, SSE<br/>:8081 health, job triggers, callbacks<br/>CSI gateway listener (off by default)"]:::impl
     sched["Scheduler and jobs<br/>in the API process, PostgreSQL lock"]:::impl
     pg["PostgreSQL<br/>pgdoc JSONB document store"]:::impl
     mq["RabbitMQ<br/>charge fan-out"]:::impl
@@ -68,9 +68,13 @@ router in `internal/server/server.go`).
 | `/api/v1/events/{projectId}` | 8080 | OIDC bearer (a short-lived stream token is not built yet) | Server-sent events per project | Implemented |
 | `/openapi.json` | 8080 | public | Stub document | Implemented |
 | `/actuator/health*`, `/__build` | 8081 | none; not routed by the chart's gateway or ingress | Liveness, readiness, build info | Implemented |
-| `POST /debug/<job>` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (when the scheduler is enabled) | Implemented |
+| `POST /debug/<job>` | 8081 | none; not routed by the chart's gateway or ingress | Manual job triggers (with the scheduler or debug triggers on; `gen-hmac-key` with debug triggers only) | Implemented |
 | Billing service callbacks | 8081 | shared token | Suspend/resume and mail callbacks from an external billing service | Implemented |
 | CSI gateway `/api2/json/**` | `PROXCLOUD_CSI_GATEWAY_ADDR` (TLS only; off when empty) | per-cluster credential `csi@proxcloud!<clusterId>`, only its SHA-256 stored | The PVE calls a tenant cluster's proxmox-csi controller may make, each checked for ownership, sent on with one gateway token. Called by the proxmox-csi controllers of new tenant clusters, which run on the services cluster (`PROXCLOUD_CSI_GATEWAY_URL`); only the services nodes reach the port (chart NetworkPolicy) | Implemented |
+| `/e2b/**` | 8080 | a project's `e2b_` sandbox API key (`X-API-Key` or bearer), only its SHA-256 stored | E2B-compatible sandbox API ([e2b-compat.md](../../e2b-compat.md)) | Implemented |
+| `/api/v1/internal/sandboxes/**` | 8080 | the sandbox provider's `proxyWakeToken` | sandbox-proxy's wake call for a paused sandbox | Implemented |
+| `/api/v1/nocloud/**` | 8080 | the per-VM seed token in the path | cloud-init seeds of servers | Implemented |
+| `/api/v1/console/**` | 8080 | the console token in the path | VNC console WebSocket proxy | Implemented |
 | SSO discovery and per-org SSO routes (`/api/v1/auth/sso/discover`, `/api/v1/organizations/{id}/sso`, `/api/v1/admin/sso`) | 8080 | public / OIDC | Email-first login, SSO self-service, operator stop | Implemented |
 
 ## C2b. Proxmox cluster and storage tiers
@@ -102,6 +106,8 @@ flowchart TB
     rfsvm["RustFS VM"]:::planned
     sbx["Sandbox cluster workers<br/>pool proxcloud-sandbox, vnet pcsbx<br/>gVisor, no CSI, no NAS"]:::impl
     sbxe["Sandbox entry appliance<br/>pool proxcloud-sandbox-entry<br/>HAProxy, TCP 443 passthrough"]:::impl
+    sbxr["Sandbox registry (Zot)<br/>on the services cluster, MetalLB 443<br/>blobs in RustFS / RGW"]:::impl
+    sbxb["Template build bucket<br/>RustFS / RGW"]:::impl
   end
 
   subgraph tiers["Storage backends"]
@@ -130,6 +136,11 @@ flowchart TB
   sbxe -->|"443 to sandbox-proxy, TLS ends there"| sbx
   svc -.->|"wildcard certificate, cert-sync"| sbx
   api -->|"entry firewall, HAProxy config (guest agent)"| sbxe
+  sbx -->|"image pulls, project account, 443 only"| sbxr
+  sbxr -->|"blobs, S3 multipart (Full: RGW)"| ceph
+  sbx -->|"build pods: contexts by presigned GET"| sbxb
+  sbx -->|"build pods: push, project build account"| sbxr
+  sbxr -.->|"Standard: RustFS"| rfsvm
   papi -.-> pbs
 ```
 
@@ -145,8 +156,10 @@ flowchart TB
 | HA rules and replication | Protected VMs with replication and node-affinity rules. | Implemented |
 | Platform-owned VMs | Management cluster VMs and the RustFS VM in a dedicated system pool, the platform token has `NoAccess` there. | Implemented |
 | Services cluster VMs | The services cluster, in the same system pool. | Implemented |
-| Sandbox cluster | A platform-owned Kamaji cluster from the cluster chart: control plane on the services cluster, workers in pool `proxcloud-sandbox` on their own vnet, gVisor (`runsc`, systrap) for tenant code, a Cilium egress guardrail, no CSI token and no NAS dataset. Its CAPMOX token `capmox@pve!sandbox` sees only a node-local ISO store. Built by installer stage 55 from `deploy/sandbox-cluster/`; with a sandbox domain it adds a `sandbox-system` node group (CAPI-set label, tainted) where `sandbox-proxy` runs apart from tenant code. Tenants reach it only through the portal's native API (SB3): the portal creates, execs into, reads the logs of and deletes Sandbox CRs with its service account, bills them per minute and refuses all new usage while a release gate does not hold. Release gates: isolation drops for the sandbox CIDR in both directions (in place, `sandboxCidrs`), NodeRestriction on its control plane (checked by stage 55), single-stack IPv4 (checked by stage 55), per-NIC VM firewall with address pinning and the `unsecured` taint until it is in place (in place, kept by the portal's sync with a narrow `ProxCloudSandboxGuard` role on the pool). Egress leaves through its own SNAT address on the exit node (`sandbox.network.snat`). The portal checks NodeRestriction, the isolation drops and the fence itself before a sandbox provider goes live and again before each create ([managed-sandbox.md §3](../../managed-sandbox.md#3-tenant-api-billing-quota-suspension-and-release-gates-sb3)). Built by installer stage 55 from `deploy/sandbox-cluster/`; stage 60 registers its sandbox provider `DISABLED` for the operator to set live once the gates hold. | Implemented |
+| Sandbox cluster | A platform-owned Kamaji cluster from the cluster chart: control plane on the services cluster, workers in pool `proxcloud-sandbox` on their own vnet, gVisor (`runsc`, systrap, `allow-suid` on by default so `sudo` works as on E2B) for tenant code, a Cilium egress guardrail, no CSI token and no NAS dataset. Its CAPMOX token `capmox@pve!sandbox` sees only a node-local ISO store. Its `node-setup` DaemonSet installs E2B's envd and `sandbox-init` on every node (runtime image `proxcloud-sandbox-runtime`), so a provider with envd on and a sandbox domain runs envd as each sandbox's agent (SB5). Tenants reach it only through the portal: the native API (SB3) and the E2B-compatible API at `/e2b` with a project's sandbox API key (SB5); the portal creates, execs into, reads the logs of and deletes Sandbox CRs with its service account, bills them per minute and refuses all new usage while a release gate does not hold, on both APIs alike. Release gates: isolation drops for the sandbox CIDR in both directions (in place, `sandboxCidrs`), NodeRestriction on its control plane (checked by stage 55), single-stack IPv4 (checked by stage 55), per-NIC VM firewall with address pinning and the `unsecured` taint until it is in place (in place, kept by the portal's sync with a narrow `ProxCloudSandboxGuard` role on the pool). Egress leaves through its own SNAT address on the exit node (`sandbox.network.snat`). The portal checks NodeRestriction, the isolation drops and the fence itself before a sandbox provider goes live and again before each create ([managed-sandbox.md §3](../../managed-sandbox.md#3-tenant-api-billing-quota-suspension-and-release-gates-sb3)). Built by installer stage 55 from `deploy/sandbox-cluster/`, with a `sandbox-system` node group (CAPI-set label, tainted) where `sandbox-proxy` runs apart from tenant code when a sandbox domain is set; stage 60 registers its sandbox provider `DISABLED` for the operator to set live once the gates hold. | Implemented |
 | Sandbox entry | Sandbox ports at `https://<port>-<id>.<domain>` (SB4): a platform HAProxy appliance (the P8-1 appliance with one TCP listener) in its own pool, one NIC public and one on the sandbox vnet, passes 443 to `sandbox-proxy`'s MetalLB address; TLS ends in `sandbox-proxy` with a wildcard certificate cert-manager issues on the services cluster (DNS-01 through PowerDNS with a TSIG key limited to the sandbox zone, or the operator's Secret) and `cert-sync` copies across. The workers' VM firewall admits the appliance alone to that address. Installer stage 56 builds it; the portal's sync keeps the appliance's firewall and HAProxy config ([managed-sandbox.md §4](../../managed-sandbox.md#4-public-entry-tls-and-wake-sb4)). | Implemented |
+| Sandbox registry | Zot on the services cluster behind one MetalLB address, TLS from a CA of its own, its blobs in a bucket of the object store (RustFS on Standard, RGW on Full) with a service user limited to that bucket (SB6a). The sandbox nodes pull the built-in templates and `sandbox-proxy` from it (the envd runtime image of SB5 still comes from `images.registry`), each project with an account of its own that reads `library/**` and its own `t/<project>/**` only; template builds push with a per-project build account that writes only its own `t/<project>/**` (SB6b), and the portal prunes unreferenced template images with a read-and-delete `gc` account. An account sync next to Zot (`sandbox-proxy registry-users`) derives the accounts from the sandbox cluster's tenant namespaces. Installer stage 55 (registry) copies the digest-pinned images of `deploy/templates/images.yaml` in and pre-pulls them on every node; the workers' VM firewall admits that one address and port ([managed-sandbox.md §6](../../managed-sandbox.md#6-the-sandbox-registry-sb6a)). | Implemented |
+| Template build bucket | A bucket of the same object store as the registry's blobs, its own service user (SB6b). The portal streams E2B build contexts into it (multipart, `UNSIGNED-PAYLOAD`); build pods on the sandbox workers fetch them with presigned GETs, so the workers' VM firewall and the build namespace's policy admit its one endpoint ([managed-sandbox.md §7](../../managed-sandbox.md#7-custom-templates-sb6b)). | Implemented |
 | Proxmox Backup Server | Operator nightly backups, then tenant backup schedules and restore. | Planned |
 
 ### Storage tiers
@@ -203,29 +216,37 @@ flowchart LR
   classDef planned fill:#f2f2f2,stroke:#8a8a8a,stroke-dasharray:5 5,color:#555555
 
   test["test.yml<br/>go test, rebrand gate"]:::impl
-  docker["docker.yml<br/>api, web, admin images"]:::impl
+  docker["docker.yml<br/>api, web, admin,<br/>sandbox-proxy, sandbox-runtime images"]:::impl
+  sbxt["sandbox-templates.yml<br/>built-in template images"]:::impl
   helm["helm.yml<br/>lint, OCI chart publish"]:::impl
   ghcr["ghcr.io<br/>images and OCI charts"]:::impl
   chart["Chart proxcloud<br/>api, SPAs, gateway, Keycloak, CNPG"]:::impl
   dbchart["Chart database-cluster<br/>DBaaS engines"]:::impl
+  k8schart["Chart proxmox-kamaji-cluster<br/>tenant and sandbox clusters"]:::impl
   inst["Installer (Ansible)<br/>make install, day-2 targets"]:::impl
   vmt["VM template pipeline<br/>build.py, Packer, tags"]:::impl
-  k8st["K8s node template pipeline"]:::planned
+  k8st["K8s node template pipeline<br/>k8s-node-templates.yml, image-builder"]:::impl
   mgmt["Management cluster"]:::impl
   pve["Proxmox cluster"]:::impl
 
   docker --> ghcr
+  sbxt --> ghcr
   helm --> ghcr
   chart --> helm
   dbchart --> helm
+  k8schart --> helm
   ghcr -->|"helm install, ArgoCD"| mgmt
   ghcr --> inst
   inst -->|"k3s, ArgoCD Applications, register"| mgmt
   inst -->|"API: roles, tokens, stores, VMs"| pve
   inst --> vmt
   vmt -->|"templates in pc-templates"| pve
-  k8st -.-> pve
+  k8st -->|"node templates"| pve
 ```
+
+Both SPA images normalize only nginx's public document root to 0755 directories
+and 0644 files; the entrypoint also sets generated `config.js` to 0644 so nginx
+workers can serve public assets regardless of checkout or runtime umask.
 
 ## Container table
 
@@ -235,7 +256,7 @@ flowchart LR
 | `web/admin` | React, Vite, TypeScript; served by nginx | Management cluster | Implemented |
 | `proxcloud-api` | Go, chi router, one binary (`cmd/api`) | Management cluster | Implemented |
 | Scheduler and jobs | robfig/cron with a PostgreSQL distributed lock (`internal/platform/scheduler`, `lock`); disabled unless `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | Inside the API pod | Implemented |
-| PostgreSQL | JSONB document store via `internal/pgdoc`; CloudNativePG cluster (default), bundled subchart, or external | Management cluster | Implemented |
+| PostgreSQL | JSONB document store via `internal/pgdoc`; CloudNativePG cluster (default), bundled subchart, or external. A chart hook Job (`seed`) writes the platform and billing configuration into empty tables on install and upgrade | Management cluster | Implemented |
 | RabbitMQ | AMQP (`internal/amqp`), optional per-profile charge fan-out; RabbitMQ Cluster Operator (default), bundled subchart, or external | Management cluster | Implemented |
 | Keycloak | codecentric keycloakx subchart + keycloak-config-cli realm import, or an external issuer. The API manages per-org identity providers through the Admin API with the `proxcloud-idp-admin` service account | Management cluster | Implemented |
 | Gateway / Ingress | Gateway API `HTTPRoute` or `Ingress` per host (`deploy/charts/proxcloud/templates/gateway`, `api`, `web`) | Management cluster | Implemented |
@@ -251,7 +272,8 @@ flowchart LR
 | Proxmox Backup Server | vzdump target | Separate machine | Planned |
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
-| CI | GitHub Actions `test.yml`, `docker.yml`, `helm.yml` | GitHub | Implemented |
+| Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`) | ghcr OCI | Implemented |
+| CI | GitHub Actions `test.yml`, `docker.yml` (api, web, admin, sandbox-proxy, sandbox-runtime), `helm.yml`, `sandbox-templates.yml`, and the self-hosted `vm-templates.yml` and `k8s-node-templates.yml` | GitHub | Implemented |
 | Installer | Ansible playbooks and Makefile (`installer/`): one-shot install, `allinone` mode, day-2 targets; `split` mode is Planned | Operator workstation | Implemented |
 | VM template pipeline | `images/build.py` + Packer, `vm-templates.yml`; tag-published, one copy per node on local-disk sites | Self-hosted runner in the Proxmox network, or the installer from the first management host | Implemented |
 | K8s node template pipeline | image-builder | Self-hosted runner in the Proxmox network | Implemented, script run by hand |
@@ -262,6 +284,9 @@ flowchart LR
 |---|---|---|
 | Browser or agent to API | OIDC bearer JWT validated per realm (`azp` bound), or `pk.sk` personal access key | Implemented |
 | Automation to admin API | AWS SigV4 with `hmac_keys`, or the admin-api realm | Implemented |
+| E2B SDK to `/e2b` | A project's `e2b_` sandbox API key (SHA-256 stored); its creator's project rights are checked on every call | Implemented |
+| sandbox-proxy to the wake endpoint | The sandbox provider's `proxyWakeToken` (bearer) | Implemented |
+| A VM or a browser console to `/api/v1/nocloud/`, `/api/v1/console/` | A per-VM seed token or a console token in the path | Implemented |
 | Management port `:8081` | On the cluster Service only, never on the gateway or ingress. Billing callbacks are mounted only when a shared token is configured | Implemented |
 | API to Proxmox | Privilege-separated API token with the `ProxCloudPlatform` role; test connection warns on missing privileges and on `root@pam` | Implemented |
 | Tenant to tenant on the SDN | Cluster firewall rules (forward and input DROP inside the CIDR pool, per-project ACCEPT), reconciled every sync; non-overlapping CIDRs; optional per-project EVPN zone | Implemented |

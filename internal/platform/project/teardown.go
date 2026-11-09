@@ -13,6 +13,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
@@ -458,6 +459,12 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 	teardownOutcome(p, cephRevokeFailed || pveTeardownFailed || zonesLeft || sandboxesLeft || kamajiPending > 0 || dbaasPending > 0)
 	if _, err := h.svc.SaveIfStatus(ctx, p, expect); err != nil {
 		return err
+	}
+	if p.Status == StatusDeleted && h.sbKeys != nil {
+		// The project's E2B keys already answer nothing; a DELETED project keeps no rows of them either.
+		if _, err := h.sbKeys.DeleteMany(ctx, pgdoc.M{"projectId": p.ID}); err != nil {
+			slog.Warn("teardown: delete sandbox API keys", "project", p.ID, "err", err)
+		}
 	}
 	if sandboxesLeft {
 		return fmt.Errorf("teardown could not remove the project's sandboxes or their namespace; the deletion job retries")

@@ -355,16 +355,8 @@
       delegate_to: localhost
       become: false
       no_log: true
-    - name: Wait for every worker to be Ready
-      ansible.builtin.shell: |
-        set -o pipefail
-        k3s kubectl --kubeconfig /root/sandbox.kubeconfig get nodes --no-headers | awk '$2 == "Ready"' | wc -l
-      args: {executable: /bin/bash}
-      register: pc_sbx_ready
-      changed_when: false
-      retries: 90
-      delay: 20
-      until: pc_sbx_ready.rc == 0 and pc_sbx_ready.stdout | int >= pc.sandbox.nodes.count | int
+    # Nodes can register before CNI exists. With customConf, node-setup must
+    # install the chain BEFORE waiting for Ready; its own pods use hostNetwork.
     - name: Copy the cluster manifests
       ansible.builtin.copy:
         src: "{{ pc_repo_root }}/deploy/sandbox-cluster/"
@@ -378,14 +370,43 @@
         set -euo pipefail
         out=$(kubectl apply -f cilium-node-config.yaml)
         case "$out" in *unchanged*) ;; *) kubectl -n kube-system rollout restart ds/cilium ;; esac
+        # Wait for Argo/CAAPH to deliver the desired custom chain mode, not merely
+        # for the OLD Cilium DaemonSet to be healthy. Then restart all old writers.
+        for attempt in $(seq 1 90); do
+          custom=$(kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.custom-cni-conf}' || true)
+          writer=$(kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.write-cni-conf-when-ready}' || true)
+          if [ "$custom" = true ] && [ -z "$writer" ]; then break; fi
+          if [ "$attempt" -eq 90 ]; then echo 'Cilium customConf mode has not converged' >&2; exit 1; fi
+          sleep 10
+        done
+        kubectl -n kube-system rollout restart ds/cilium
         kubectl -n kube-system rollout status ds/cilium --timeout=10m
+        # SB10 always needs the static host CNI guard, including sites without envd.
+        sed -i "s#ghcr.io/mutex-solutions/proxcloud-sandbox-runtime:latest#$RUNTIME#" node-setup.yaml
+        kubectl apply -f telemetry.yaml
+        sed -i "s#{name: RUNSC_ALLOW_SUID, value: \"true\"}#{name: RUNSC_ALLOW_SUID, value: \"$ALLOW_SUID\"}#" node-setup.yaml
+        grep -q "{name: RUNSC_ALLOW_SUID, value: \"$ALLOW_SUID\"}" node-setup.yaml
         kubectl apply -f node-setup.yaml -f runtimeclass.yaml
         kubectl -n sandbox-system rollout status ds/node-setup --timeout=15m
+        # Only after the host-owned CNI chain is installed may every worker become Ready.
+        for attempt in $(seq 1 90); do
+          ready=$(kubectl get nodes --no-headers | awk '$2 == "Ready"' | wc -l)
+          if [ "$ready" -ge "$WORKER_COUNT" ]; then break; fi
+          if [ "$attempt" -eq 90 ]; then echo 'sandbox workers not Ready after CNI install' >&2; exit 1; fi
+          sleep 20
+        done
         ./check-ipv4-only.sh
         kubectl apply --server-side -f agent-sandbox/sandbox-with-extensions.yaml
         kubectl apply -f network-policy.yaml -f rbac.yaml
       args: {executable: /bin/bash, chdir: /root/sandbox-bundle}
-      environment: {KUBECONFIG: /root/sandbox.kubeconfig}
+      environment:
+        KUBECONFIG: /root/sandbox.kubeconfig
+        # envd + sandbox-init, which node-setup's init container installs on every node (SB5); only where stage 60 turns
+        # envd on (a sandbox domain). The image is published from the release after v0.3.28; set sandbox.runtime_image
+        # to run this stage from main before that release.
+        WORKER_COUNT: "{{ pc.sandbox.nodes.count | int }}"
+        ALLOW_SUID: "{{ 'true' if (pc.sandbox.allow_suid | default(true) | bool) else 'false' }}"
+        RUNTIME: "{{ pc.sandbox.runtime_image or (pc.images.registry ~ '/proxcloud-sandbox-runtime:' ~ pc_ver.proxcloud) }}"
       changed_when: false
     # Two service-account kubeconfigs, both stored by stage 60: the proxmox provider's sync reads Nodes and takes the
     # unsecured taint off with the firewall one (nodes only); the sandbox provider runs sandboxes with the portal one

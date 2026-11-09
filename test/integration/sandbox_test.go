@@ -40,6 +40,8 @@ type sbxCluster struct {
 	mu  sync.Mutex
 	ns  map[string]map[string]any
 	crs map[string]map[string]any // "ns/name"
+	// autoReady makes every new sandbox's pod Ready at once (the E2B create waits for it).
+	autoReady bool
 }
 
 func newSbxCluster() *sbxCluster {
@@ -88,6 +90,9 @@ func (c *sbxCluster) ApplyCR(_ context.Context, _, _, plural string, obj map[str
 	m := obj["metadata"].(map[string]any)
 	m["creationTimestamp"] = time.Now().UTC().Format(time.RFC3339)
 	c.crs[m["namespace"].(string)+"/"+m["name"].(string)] = obj
+	if c.autoReady {
+		obj["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "lastTransitionTime": m["creationTimestamp"]}}}
+	}
 	return nil
 }
 func (c *sbxCluster) GetCR(_ context.Context, _, _, _, ns, name string) (map[string]any, error) {
@@ -502,7 +507,7 @@ func TestSandboxAccessAndWake(t *testing.T) {
 		{"Bearer wrong", sb.ExternalID, http.StatusUnauthorized},
 		{"wake-secret", sb.ExternalID, http.StatusUnauthorized}, // not a bearer
 		{"Bearer wake-secret", "not-an-id", http.StatusNotFound},
-		{"Bearer wake-secret", sb.ExternalID, http.StatusNotFound}, // nothing is paused before SB7
+		{"Bearer wake-secret", sb.ExternalID, http.StatusNotFound}, // running, not paused
 	} {
 		if got := wake(c.auth, c.id); got != c.want {
 			t.Errorf("wake %q %s: %d, want %d", c.auth, c.id, got, c.want)

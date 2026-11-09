@@ -96,6 +96,7 @@ var publicPrefix = []string{
 	"/api/v1/callbacks/",
 	"/api/v1/admin/onboarding/",
 	"/api/v1/internal/sandboxes/", // sandbox-proxy's wake call — a sandbox provider's proxyWakeToken is the auth
+	"/e2b/",                       // E2B-compatible sandbox API — a project's sandbox API key (X-API-Key) is the auth
 }
 
 // adminJobPrefix drives operator billing/collect/sync jobs — it is NOT public (anon must not be
@@ -201,7 +202,7 @@ func (a *Authenticator) verifyJWT(r *http.Request, raw string) (*httpx.RequestCo
 	// clientId. Skip the azp binding there — the token is still fully validated (signature,
 	// issuer, expiry) and the MCP handler's issuer→toolset mapping is the real gate. Every
 	// other path keeps the SPA/API azp binding.
-	skipAzp := strings.HasPrefix(r.URL.Path, "/mcp")
+	skipAzp := azpExempt(r)
 	for _, realm := range realms {
 		if realm.Verifier == nil {
 			continue
@@ -282,6 +283,24 @@ func claimTrue(v any) bool {
 		return strings.EqualFold(b, "true")
 	}
 	return false
+}
+
+// mcpDispatchKey marks a request the MCP handler builds in-process to run a tool. Only code in this
+// process can set it; an HTTP caller cannot.
+type mcpDispatchKey struct{}
+
+// WithMCPDispatch marks ctx as an MCP tool call re-sent through the router with the bearer /mcp
+// already accepted. Without it the azp binding would refuse, on every tool, the MCP client token
+// that /mcp let in.
+func WithMCPDispatch(ctx context.Context) context.Context {
+	return context.WithValue(ctx, mcpDispatchKey{}, true)
+}
+
+// azpExempt reports whether the azp binding is skipped for r: the /mcp endpoint itself and the tool
+// calls it dispatches. Everything downstream still applies, including the admin console's own
+// check that an admin token comes from the admin client.
+func azpExempt(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/mcp") || r.Context().Value(mcpDispatchKey{}) != nil
 }
 
 // azpAllowed reports whether a token's azp claim is acceptable for a realm: no configured client

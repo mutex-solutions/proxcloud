@@ -614,16 +614,22 @@ func externalServiceDto(es *externalservice.ExternalService) map[string]any {
 			t := scfg.Templates[name]
 			templates = append(templates, map[string]any{
 				"name": name, "image": t.Image, "description": t.Description, "cpu": t.CPU, "memoryGiB": t.MemoryGiB,
-				"gpu": t.GPU,
+				"gpu": t.GPU, "egressMbps": func() int {
+					if t.EgressMbps > 0 {
+						return t.EgressMbps
+					}
+					return scfg.EgressMbps
+				}(),
 			})
 		}
 		dto["sandboxTemplates"] = templates
 		dto["sandboxGpuModels"] = scfg.GPUModels
+		dto["sandboxE2B"] = scfg.Envd && scfg.Domain != ""
 		l := scfg.Limits
 		dto["sandboxLimits"] = map[string]any{
 			"maxCpu": l.MaxCPU, "maxMemoryGiB": l.MaxMemoryGiB, "maxGpus": l.MaxGPUs,
 			"maxTimeoutSeconds": l.MaxTimeoutSeconds, "defaultTimeoutSeconds": l.DefaultTimeoutSeconds,
-			"maxConcurrent": l.MaxConcurrent, "maxConcurrentGpus": l.MaxConcurrentGPUs,
+			"maxConcurrent": l.MaxConcurrent, "maxConcurrentGpus": l.MaxConcurrentGPUs, "egressMbps": scfg.EgressMbps,
 		}
 	}
 	// dbaas: the curated engine catalog feeds the client create pickers (versions/replica choices

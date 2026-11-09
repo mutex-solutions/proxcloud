@@ -108,6 +108,8 @@ provider kind:
 | `ceph-s3` | A Ceph RGW reached over S3 and Admin Ops | `externalservice.go` (`IsCephS3`, `ObjectClient`, …) |
 | `rustfs` | A RustFS reached over S3 and its admin API | `externalservice.go` (`IsRustFS`, `ObjectClient`) |
 | `truenas` | A TrueNAS reached over its WebSocket API | `externalservice.go` (`IsTrueNAS`, `TrueNASService`) |
+| `powerdns` | A PowerDNS authoritative server for tenant zones | `externalservice.go` (`IsPowerDNS`, `PowerDNSService`) |
+| `sandbox` | The platform's sandbox cluster (gVisor) | `sandbox.go` (`IsSandbox`, `SandboxConfig`) |
 | `kamaji` | A management cluster for managed Kubernetes | `kamaji.go` |
 | `dbaas` | A management cluster for managed databases | `dbaas.go` |
 
@@ -146,7 +148,11 @@ The shape is documented in the header of `proxmox.go`:
     "sandbox": {                                         // the sandbox workers' VM firewall, applied by the sync; secret.sandboxKubeconfig
       "pool": "proxcloud-sandbox", "nodes": ["198.51.100.10-198.51.100.29"],
       "loadBalancers": ["198.51.100.200-198.51.100.209"], "dns": ["1.1.1.1"],
-      "kubeletSources": ["192.0.2.201-192.0.2.209"], "snat": "203.0.113.50", "unsecuredMinAgeMinutes": 20
+      "kubeletSources": ["192.0.2.201-192.0.2.209"], "snat": "203.0.113.50", "unsecuredMinAgeMinutes": 20,
+      "registry": {"address": "192.0.2.226", "port": 443},  // the sandbox registry, the one image source (SB6a)
+      "buildStorage": {"address": "192.0.2.41", "port": 9000}, // the template build bucket, build pods fetch contexts (SB6b)
+      "proxy": {"address": "198.51.100.201", "port": 443,  // sandbox-proxy (stage 56): only the entry appliance reaches it
+                "entry": {"vmid": 9110, "pool": "proxcloud-sandbox-entry", "address": "198.51.100.5"}}
     },
     "storageProfiles": {"std": {"label": "Local NVMe (ZFS)", "storages": {"*": "local-zfs"},
                                 "shared": false, "snapshots": true, "thin": true,
@@ -239,6 +245,8 @@ everything enabled):
 | `proxmox` | `network` | Networks, Security groups |
 | `ceph-s3`, `rustfs` | `object-store` | Object storage, S3 access keys |
 | `truenas` | `shares` | NFS and SMB file shares |
+| `powerdns` | `dns` | DNS zones and records |
+| `sandbox` | `sandbox` | Sandboxes and their E2B API keys |
 | `kamaji` | `kubernetes` | Kubernetes |
 | `dbaas` | `database` | Databases |
 
@@ -510,7 +518,9 @@ archives the cache rows.
 The cache is the `cloudResource` document (`internal/cloud/resource.go`). `type`
 is the discriminator for the free-form `data` sub-document. The types produced
 today are `SERVER`, `VOLUME`, `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`,
-`BUCKET`, `KUBERNETES_CLUSTER` and `DATABASE_CLUSTER`. `resource.go` still
+`FLOATING_IP`, `LOAD_BALANCER`, `BUCKET`, `SHARE`, `DNS_ZONE`, `KUBERNETES_CLUSTER`,
+`DATABASE_CLUSTER`, `SANDBOX` and `SANDBOX_SNAPSHOT` (a paused sandbox's or an E2B
+snapshot's stored filesystem). `resource.go` still
 declares the wider type list of the previous backend; nothing produces the
 other types.
 

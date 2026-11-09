@@ -394,7 +394,7 @@ func (j *Job) reconcileIsolation(ctx context.Context, ps *pve.Service, p *projec
 		return
 	}
 	defer func() { _ = j.sdnLock.Unlock(ctx, project.SDNApplyLockName, 0, start, j.now()) }()
-	if err := ps.ReconcileIsolation(ctx, p.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs); err != nil {
+	if err := ps.ReconcileIsolation(ctx, p.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs, es.PVESandboxEndpoints()...); err != nil {
 		j.log.Error("syncjob: reconcile isolation", "project", p.ID, "serviceId", es.ID, "err", err)
 	}
 }

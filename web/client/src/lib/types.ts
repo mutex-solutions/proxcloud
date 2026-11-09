@@ -103,6 +103,8 @@ export type ProjectService = {
   sandboxTemplates?: SandboxTemplate[]
   sandboxGpuModels?: string[]
   sandboxLimits?: SandboxLimits
+  // true when the location offers the E2B-compatible API (envd and a sandbox domain).
+  sandboxE2B?: boolean
   name?: string
   type?: string
   status?: string
@@ -247,9 +249,10 @@ export type CreditCard = {
 /** Providers that serve only storage products (no compute). */
 export const isObjectProvider = (provider?: string) => provider === "ceph-s3" || provider === "rustfs" || provider === "truenas"
 
-export type SandboxTemplate = { name: string; image: string; description?: string; cpu?: number; memoryGiB?: number; gpu?: { model: string; count: number } }
+export type SandboxTemplate = { egressMbps?: number; name: string; image: string; description?: string; cpu?: number; memoryGiB?: number; gpu?: { model: string; count: number } }
 
 export type SandboxLimits = {
+  egressMbps?: number
   maxCpu?: number
   maxMemoryGiB?: number
   maxGpus?: number
@@ -257,6 +260,35 @@ export type SandboxLimits = {
   defaultTimeoutSeconds?: number
   maxConcurrent?: number
   maxConcurrentGpus?: number
+}
+
+// A sandbox API key as listed: the key itself is shown once, at create.
+export type SandboxApiKey = { id: string; name: string; hint: string; createdAt: string; lastUsedAt?: string }
+
+// One build of a project's custom sandbox template (built with the E2B SDK or CLI).
+export type SandboxTemplateBuild = {
+  buildID: string
+  status: string
+  reason?: string
+  tags: string[]
+  from?: string
+  startCmd?: string
+  readyCmd?: string
+  createdAt?: string
+  finishedAt?: string
+}
+
+// A project's custom sandbox template (the E2B API's records), as the console lists them.
+export type ProjectSandboxTemplate = {
+  id: string
+  name: string
+  cpu: number
+  memoryGiB: number
+  status: string
+  ready: boolean
+  builds: SandboxTemplateBuild[]
+  createdAt?: string
+  updatedAt?: string
 }
 
 export type SandboxExecResult = { stdout: string; stderr: string; exitCode: number; truncated?: boolean }
