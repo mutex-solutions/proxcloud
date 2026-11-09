@@ -19,29 +19,31 @@ import (
 // base currency, bill for the restricted check, identityValidation for /validation,
 // and the billing-domain list collections for the client list endpoints).
 type Repo struct {
-	profiles         *pgdoc.Store
-	configs          *pgdoc.Store
-	bills            *pgdoc.Store
-	validations      *pgdoc.Store
-	credits          *pgdoc.Store         // accountCreditTransaction (the txn log)
-	acctCredits      *pgdoc.Store         // accountCredit (the spendable balance docs)
-	promoCredit      *pgdoc.Store         // promotionalCredit
-	collects         *pgdoc.Store         // collectTransaction
-	savingPlans      *pgdoc.Store         // savingsPlan
-	savingCtrs       *pgdoc.Store         // savingsContract
-	priceAdjust      *pgdoc.Store         // priceAdjustmentRule
-	suspensions      *pgdoc.Store         // suspension (SuspensionProcess)
-	gateways         *pgdoc.Store         // thirdPartyIntegration (payment gateways live here too)
-	bankXfers        *pgdoc.Store         // bankTransfer (manual bank-transfer deposits)
-	cards            *pgdoc.Store         // creditCard (saved cards)
-	cardTxns         *pgdoc.Store         // creditCardTransaction
-	promoCodes       *pgdoc.Store         // promotionCode (admin-created codes)
-	promoRedeem      *pgdoc.Store         // promotionCodeRedemption (per-org redemption record)
-	reminders        *pgdoc.Store         // reminderNotification (savings-contract expiry reminders)
-	counters         *pgdoc.Store         // counters (invoice-number sequences, one doc per year)
-	enc              *textcrypt.Encryptor // OPTIONAL, nil-safe: decrypts payment-gateway secrets on read
-	reminderOutbox   ReminderOutbox       // opt-in atomic savings reminder producer, never SMTP
-	reminderCanceler ReminderCanceler     // remains available even when producer is OFF
+	profiles               *pgdoc.Store
+	configs                *pgdoc.Store
+	bills                  *pgdoc.Store
+	validations            *pgdoc.Store
+	credits                *pgdoc.Store         // accountCreditTransaction (the txn log)
+	acctCredits            *pgdoc.Store         // accountCredit (the spendable balance docs)
+	promoCredit            *pgdoc.Store         // promotionalCredit
+	collects               *pgdoc.Store         // collectTransaction
+	savingPlans            *pgdoc.Store         // savingsPlan
+	savingCtrs             *pgdoc.Store         // savingsContract
+	priceAdjust            *pgdoc.Store         // priceAdjustmentRule
+	suspensions            *pgdoc.Store         // suspension (SuspensionProcess)
+	gateways               *pgdoc.Store         // thirdPartyIntegration (payment gateways live here too)
+	bankXfers              *pgdoc.Store         // bankTransfer (manual bank-transfer deposits)
+	cards                  *pgdoc.Store         // creditCard (saved cards)
+	cardTxns               *pgdoc.Store         // creditCardTransaction
+	promoCodes             *pgdoc.Store         // promotionCode (admin-created codes)
+	promoRedeem            *pgdoc.Store         // promotionCodeRedemption (per-org redemption record)
+	reminders              *pgdoc.Store         // reminderNotification (savings-contract expiry reminders)
+	counters               *pgdoc.Store         // counters (invoice-number sequences, one doc per year)
+	enc                    *textcrypt.Encryptor // OPTIONAL, nil-safe: decrypts payment-gateway secrets on read
+	reminderOutbox         ReminderOutbox       // opt-in atomic savings reminder producer, never SMTP
+	reminderCanceler       ReminderCanceler     // remains available even when producer is OFF
+	savingsExpiredOutbox   SavingsExpiredOutbox // fixed expired-notice selection, default OFF
+	savingsExpiredCanceler ReminderCanceler     // keyless, independent of producer
 }
 
 // SetEncryptor wires the at-rest secret encryptor used to DECRYPT payment-gateway secrets

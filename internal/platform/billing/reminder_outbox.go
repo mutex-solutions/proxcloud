@@ -62,6 +62,12 @@ func reminderID(contract, generation string) string {
 // All local mutations use contract -> reminder -> outbox locking order. The
 // advisory key also serializes a missing row; no second pool/transaction bridge.
 func (r *Repo) withReminderContract(ctx context.Context, id string, fn func(context.Context, *SavingsContract) error) error {
+	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
+		return err
+	}
+	if err := r.EnsureSavingsExpired(ctx); err != nil {
+		return err
+	}
 	for _, col := range []*pgdoc.Store{r.savingCtrs, r.reminders, r.profiles} {
 		if err := col.Ensure(ctx); err != nil {
 			return err
@@ -69,6 +75,17 @@ func (r *Repo) withReminderContract(ctx context.Context, id string, fn func(cont
 	}
 	db := r.savingCtrs.DB()
 	return db.WithTx(ctx, func(tc context.Context) error {
+		tx, err := db.Tx(tc)
+		if err != nil {
+			return err
+		}
+		// FIRST SQL, before any probe/advisory snapshot. No external TX joins.
+		if _, err = tx.Exec(tc, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"); err != nil {
+			return err
+		}
+		if err = pgdoc.RequirePrimary(tc, tx); err != nil {
+			return err
+		}
 		if err := db.LockXact(tc, "savings-reminder:"+id); err != nil {
 			return err
 		}
@@ -331,6 +348,9 @@ func (r *Repo) MutateSavingsContract(ctx context.Context, profileID, id string, 
 			return err
 		}
 		if err := r.cancelReminderRowsTx(tc, id, oldEnd, time.Now().UTC()); err != nil {
+			return err
+		}
+		if err := r.cancelSavingsExpiredTx(tc, id); err != nil {
 			return err
 		}
 		result = c

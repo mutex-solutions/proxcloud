@@ -69,6 +69,9 @@ type Config struct {
 		// ValidationApprovedOutboxEnabled opts only new approval transitions into
 		// atomic mail decisions; never starts delivery or activation retries.
 		ValidationApprovedOutboxEnabled bool
+		// SavingsExpiredOutboxEnabled selects one fixed notice per canonical
+		// expired term, never delivery. Default OFF; cancellation stays wired.
+		SavingsExpiredOutboxEnabled bool
 	}
 	Self struct {
 		BaseURL      string
@@ -209,6 +212,14 @@ func Load() (*Config, error) {
 		c.Mail.ValidationApprovedOutboxEnabled = value
 	}
 
+	if raw := os.Getenv("PROXCLOUD_MAIL_SAVINGS_EXPIRED_OUTBOX_ENABLED"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PROXCLOUD_MAIL_SAVINGS_EXPIRED_OUTBOX_ENABLED boolean")
+		}
+		c.Mail.SavingsExpiredOutboxEnabled = value
+	}
+
 	// Per-organization SSO.
 	c.SSO.ClientID = envOr("PROXCLOUD_SSO_KC_CLIENT_ID", "proxcloud-idp-admin")
 	c.SSO.ClientSecret = os.Getenv("PROXCLOUD_SSO_KC_CLIENT_SECRET")
@@ -299,6 +310,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Mail.ValidationApprovedOutboxEnabled && len(c.Encryption.DefaultKey) < 32 {
 		return fmt.Errorf("durable validation approvals require a >=32-byte PROXCLOUD_ENCRYPTION_DEFAULT_KEY; enqueue only, dispatch remains disabled")
+	}
+	if c.Mail.SavingsExpiredOutboxEnabled && len(c.Encryption.DefaultKey) < 32 {
+		return fmt.Errorf("durable savings expired notices require a >=32-byte PROXCLOUD_ENCRYPTION_DEFAULT_KEY; enqueue only, dispatch remains disabled")
 	}
 	// Remote charging without a billing URL would silently stop charging bills altogether — the
 	// cron would fire, find nowhere to send the work, and log. Fail closed instead.

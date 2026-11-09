@@ -62,7 +62,7 @@ func (s *Store) EnqueueTx(ctx context.Context, r Reminder) (QueueResult, error) 
 	return s.persistPrepared(ctx, ps)
 }
 
-// persistPrepared is private: only the three typed fixed constructors can reach it.
+// persistPrepared is private: only the four typed fixed constructors can reach it.
 func (s *Store) persistPrepared(ctx context.Context, ps []prepared) (QueueResult, error) {
 	tx, err := s.db.Tx(ctx)
 	if err != nil {
@@ -284,6 +284,10 @@ func (s *Store) BeginDispatch(ctx context.Context, c *Claim) (Envelope, error) {
 			}
 		case ValidationApprovedKind:
 			if !validValidationPayload(pt, event, recipient, expiry) {
+				return ErrPayload
+			}
+		case SavingsExpiredKind:
+			if !validSavingsExpiredPayload(pt, event, recipient, expiry) {
 				return ErrPayload
 			}
 		}

@@ -29,7 +29,10 @@ func (r *Repo) WithSavingsContractMutation(ctx context.Context, id string, fn fu
 			endChanged = reminderGeneration(*c.EndDate) != reminderGeneration(*after.EndDate)
 		}
 		if after == nil || endChanged || after.Status != c.Status || after.BillingProfileID != c.BillingProfileID {
-			return r.cancelReminderRowsTx(tc, id, c.EndDate, time.Now().UTC())
+			if err := r.cancelReminderRowsTx(tc, id, c.EndDate, time.Now().UTC()); err != nil {
+				return err
+			}
+			return r.cancelSavingsExpiredTx(tc, id)
 		}
 		// Rendering-only/no-op edits keep existing frozen messages and leave
 		// unselected windows eligible; only their future snapshots see new fields.
