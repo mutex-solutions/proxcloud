@@ -73,6 +73,7 @@ func (e Envelope) To() string         { return e.to }
 func (e Envelope) Wire() []byte       { return append([]byte(nil), e.wire...) }
 func (Envelope) LogValue() slog.Value { return slog.StringValue("[mail envelope redacted]") }
 func (Envelope) String() string       { return "[mail envelope redacted]" }
+func (Envelope) GoString() string     { return "[mail envelope redacted]" }
 
 type Delivery string
 

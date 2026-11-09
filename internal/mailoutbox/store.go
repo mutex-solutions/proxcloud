@@ -27,11 +27,24 @@ func (s *Store) Ensure(ctx context.Context) error {
 	if err := pgdoc.RequireNoTransaction(ctx); err != nil {
 		return err
 	}
-	if err := pgdoc.RequirePrimary(ctx, s.db.Pool); err != nil {
+	return s.db.WithTx(ctx, func(tc context.Context) error {
+		tx, err := s.db.Tx(tc)
+		if err != nil {
+			return err
+		}
+		// Take a fresh statement snapshot AFTER a competing schema writer commits.
+		if _, err = tx.Exec(tc, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"); err != nil {
+			return err
+		}
+		if err = pgdoc.RequirePrimary(tc, tx); err != nil {
+			return err
+		}
+		if err = s.db.LockXact(tc, "mail-outbox-schema-v1"); err != nil {
+			return err
+		}
+		_, err = tx.Exec(tc, schema)
 		return err
-	}
-	_, err := s.db.Pool.Exec(ctx, schema)
-	return err
+	})
 }
 
 // EnqueueTx never creates a hidden transaction. The event, all single-recipient
@@ -39,13 +52,24 @@ func (s *Store) Ensure(ctx context.Context) error {
 // keyed plaintext fingerprints detect ALL immutable changes, including additions
 // or removals from the recipient set, even across key rotation/random nonces.
 func (s *Store) EnqueueTx(ctx context.Context, r Reminder) (QueueResult, error) {
-	tx, err := s.db.Tx(ctx)
-	if err != nil {
+	if _, err := s.db.Tx(ctx); err != nil {
 		return QueueResult{}, err
 	}
 	ps, err := prepare(r)
 	if err != nil {
 		return QueueResult{}, err
+	}
+	return s.persistPrepared(ctx, ps)
+}
+
+// persistPrepared is private: only the two typed fixed constructors can reach it.
+func (s *Store) persistPrepared(ctx context.Context, ps []prepared) (QueueResult, error) {
+	tx, err := s.db.Tx(ctx)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if len(ps) == 0 {
+		return QueueResult{}, ErrInvalid
 	}
 	if s.keys == nil {
 		return QueueResult{}, textcrypt.ErrBlobKey
@@ -97,7 +121,11 @@ func (s *Store) EnqueueTx(ctx context.Context, r Reminder) (QueueResult, error) 
 			return QueueResult{}, err
 		}
 		id = uuid.NewString()
-		sealKey, sealed, err := s.keys.Seal(p.plaintext, aad(id))
+		aad, err := payloadAAD(id, p.kind, p.version)
+		if err != nil {
+			return QueueResult{}, err
+		}
+		sealKey, sealed, err := s.keys.Seal(p.plaintext, aad)
 		if err != nil {
 			return QueueResult{}, err
 		}
@@ -107,7 +135,7 @@ func (s *Store) EnqueueTx(ctx context.Context, r Reminder) (QueueResult, error) 
 		}
 		// Expiry is decided by the database clock, not worker wall clock.
 		err = tx.QueryRow(ctx, `INSERT INTO mail_outbox(id,event_key,recipient_key,kind,version,key_id,sealed,fingerprint,state,expires_at,reason)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $10<=clock_timestamp() THEN 'expired' ELSE $9 END,$10,CASE WHEN $10<=clock_timestamp() THEN 'expired' WHEN $9='pending' THEN '' ELSE $9 END) RETURNING state`, id, p.event, p.recipient, Kind, Version, sealKey, sealed, fingerprint, p.state, p.expiry).Scan(&state)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $10<=clock_timestamp() THEN 'expired' ELSE $9 END,$10,CASE WHEN $10<=clock_timestamp() THEN 'expired' WHEN $9='pending' THEN '' ELSE $9 END) RETURNING state`, id, p.event, p.recipient, p.kind, p.version, sealKey, sealed, fingerprint, p.state, p.expiry).Scan(&state)
 		if err != nil {
 			return QueueResult{}, err
 		}
@@ -229,17 +257,27 @@ func (s *Store) BeginDispatch(ctx context.Context, c *Claim) (Envelope, error) {
 		if err := locked(ctx, tx, c, Claimed); err != nil {
 			return err
 		}
-		var key string
+		var key, kind, event, recipient string
+		var version int
+		var expiry time.Time
 		var sealed, fp []byte
-		if err := tx.QueryRow(ctx, `SELECT key_id,sealed,fingerprint FROM mail_outbox WHERE id=$1`, c.ID).Scan(&key, &sealed, &fp); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT kind,version,event_key,recipient_key,expires_at,key_id,sealed,fingerprint FROM mail_outbox WHERE id=$1`, c.ID).Scan(&kind, &version, &event, &recipient, &expiry, &key, &sealed, &fp); err != nil {
 			return err
 		}
-		pt, err := s.keys.Open(key, sealed, aad(c.ID))
+		// Validate the persisted pair BEFORE Open; never guess/fallback to savings.
+		aad, err := payloadAAD(c.ID, kind, version)
+		if err != nil || s.keys == nil {
+			return ErrPayload
+		}
+		pt, err := s.keys.Open(key, sealed, aad)
 		if err != nil {
 			return ErrPayload
 		}
 		actual, err := s.keys.Fingerprint(key, pt)
 		if err != nil || !hmac.Equal(actual, fp) {
+			return ErrPayload
+		}
+		if kind == InviteKind && !validInvitePayload(pt, event, recipient, expiry) {
 			return ErrPayload
 		}
 		var f struct {

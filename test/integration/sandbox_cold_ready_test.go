@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -118,7 +119,11 @@ func TestE2BCustomColdReadyCleanup(t *testing.T) {
 	}
 }
 
-func TestE2BLegacyShortLifetimeUnchanged(t *testing.T) {
+// This HTTP test covers template-kind resolution and usable readiness, not a
+// one-second wall-clock response SLA. Exact one-second runtime preservation and
+// expiry are covered by fake-clock sandbox/project unit tests without SQL latency
+// or RFC3339 fixture timestamp truncation consuming that runtime interval.
+func TestE2BTemplateKindsResolveAndBecomeReady(t *testing.T) {
 	for _, kind := range []string{"builtin", "snapshot", "future"} {
 		t.Run(kind, func(t *testing.T) {
 			f, _, key := newTemplateFixture(t)
@@ -130,9 +135,30 @@ func TestE2BLegacyShortLifetimeUnchanged(t *testing.T) {
 					"builds": []any{pgdoc.M{"buildID": "b", "status": "ready", "image": "192.0.2.226/t/pa/0123456789abcdef0123@sha256:" + strings.Repeat("a", 64)}},
 				})
 			}
-			code, body := f.e2b(key, http.MethodPost, "/sandboxes", `{"templateID":"`+name+`","timeout":1}`)
+			code, body := f.e2b(key, http.MethodPost, "/sandboxes", `{"templateID":"`+name+`","timeout":60}`)
 			if code != http.StatusCreated {
-				t.Fatalf("legacy auto-ready short lifetime must still succeed: %d %s", code, body)
+				t.Fatalf("template kind must resolve and become ready: %d %s", code, body)
+			}
+			var created struct {
+				ID       string `json:"sandboxID"`
+				Template string `json:"templateID"`
+			}
+			if err := json.Unmarshal([]byte(body), &created); err != nil || created.ID == "" || created.Template != name {
+				t.Fatal("HTTP create must return the resolved usable sandbox identity", err)
+			}
+			// Create returns access/identity; the existing detail endpoint exposes
+			// the committed runtime timestamps without changing the wire schema.
+			code, body = f.e2b(key, http.MethodGet, "/sandboxes/"+created.ID, "")
+			if code != http.StatusOK {
+				t.Fatalf("created template kind must remain ready: %d %s", code, body)
+			}
+			var result struct {
+				StartedAt time.Time `json:"startedAt"`
+				EndAt     time.Time `json:"endAt"`
+				State     string    `json:"state"`
+			}
+			if err := json.Unmarshal([]byte(body), &result); err != nil || result.State != "running" || result.StartedAt.IsZero() || result.EndAt.Sub(result.StartedAt) != time.Minute {
+				t.Fatal("HTTP readiness must preserve the requested finite runtime interval", err)
 			}
 		})
 	}

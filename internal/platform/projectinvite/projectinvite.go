@@ -23,14 +23,20 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
-type Repo struct{ invites *pgdoc.Store }
+type Repo struct {
+	invites  *pgdoc.Store
+	canceler inviteCanceler
+}
 
 func NewRepo(db *pgdoc.DB) *Repo { return &Repo{invites: db.C("projectInvite")} }
 
 // purgeExpired deletes lapsed invites (PG has no TTL index; this reproduces the
 // an opportunistic TTL self-cleanup opportunistically before reads and on insert).
-func (r *Repo) purgeExpired(ctx context.Context) {
-	_, _ = r.invites.DeleteMany(ctx, pgdoc.M{"expiresAt": pgdoc.M{"$lt": time.Now().UTC()}})
+func (r *Repo) purgeExpired(ctx context.Context) error {
+	if err := r.invites.Ensure(ctx); err != nil {
+		return err
+	}
+	return r.deleteInvites(ctx, "", "", true)
 }
 
 // ByEmailAndToken finds an invite by email + token. nil when none, and for a blank
@@ -39,7 +45,9 @@ func (r *Repo) ByEmailAndToken(ctx context.Context, email, token string) (pgdoc.
 	if email == "" {
 		return nil, nil
 	}
-	r.purgeExpired(ctx)
+	if err := r.purgeExpired(ctx); err != nil {
+		return nil, err
+	}
 	var doc pgdoc.M
 	found, err := r.invites.FindOne(ctx, pgdoc.M{"email": email, "token": token}, &doc)
 	if err != nil || !found {
@@ -53,7 +61,9 @@ func (r *Repo) ByEmail(ctx context.Context, email string) ([]pgdoc.M, error) {
 	if email == "" {
 		return nil, nil
 	}
-	r.purgeExpired(ctx)
+	if err := r.purgeExpired(ctx); err != nil {
+		return nil, err
+	}
 	var docs []pgdoc.M
 	if err := r.invites.Find(ctx, pgdoc.M{"email": email}, &docs); err != nil {
 		return nil, err
@@ -63,15 +73,31 @@ func (r *Repo) ByEmail(ctx context.Context, email string) ([]pgdoc.M, error) {
 
 // DeleteByEmailAndProjectID removes all invites for an email+project (accept-invite cleanup).
 func (r *Repo) DeleteByEmailAndProjectID(ctx context.Context, email, projectID string) error {
-	_, err := r.invites.DeleteMany(ctx, pgdoc.M{"email": email, "projectId": projectID})
-	return err
+	if err := r.invites.Ensure(ctx); err != nil {
+		return err
+	}
+	return r.deleteInvites(ctx, email, projectID, false)
 }
 
 // Create inserts a new invite doc, returning its generated id.
 // Also purges lapsed invites (the TTL-index replacement).
 func (r *Repo) Create(ctx context.Context, doc pgdoc.M) (string, error) {
-	r.purgeExpired(ctx)
-	return r.invites.InsertOne(ctx, doc)
+	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
+		return "", err
+	}
+	if err := r.purgeExpired(ctx); err != nil {
+		return "", err
+	}
+	var id string
+	err := r.invites.DB().WithTx(ctx, func(tc context.Context) error {
+		if err := r.invites.DB().LockXact(tc, inviteDecisionLock); err != nil {
+			return err
+		}
+		var err error
+		id, err = r.invites.InsertOne(tc, doc)
+		return err
+	})
+	return id, err
 }
 
 // EnsureIndexes creates the table + the expiresAt index (a document-store TTL index would have
@@ -95,6 +121,7 @@ type Handler struct {
 	orgRepo    *org.Repo
 	audit      *audit.Service
 	notifier   Notifier
+	outbox     InviteOutbox
 	uiBaseURL  string
 	// authorizer gates the HTTP invite() on project:manage_members. Nil (production default) → the
 	// real project policy is built from orgRepo in authz(); tests inject a fake.
@@ -199,6 +226,9 @@ func (h *Handler) invite(w http.ResponseWriter, r *http.Request) {
 // by the HTTP handler above and the admin user-create projectIds loop.
 // Returns *httpx.HTTPError on project-404 / already-a-member-400.
 func (h *Handler) InviteToProject(ctx context.Context, u *user.User, email, projectID string) error {
+	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
+		return err
+	}
 	proj, err := h.projectSvc.GetProjectByID(ctx, projectID)
 	if err != nil {
 		return err
@@ -207,12 +237,21 @@ func (h *Handler) InviteToProject(ctx context.Context, u *user.User, email, proj
 	if invited, _ := h.users.FindVerifiedByEmail(ctx, email); invited != nil && proj.IsMember(invited.Sub) {
 		return httpx.BadRequest("User is already added to project")
 	}
+	if h.outbox != nil {
+		id, err := h.createDurableInvite(ctx, email, proj)
+		if err != nil {
+			return err // never fall back to the best-effort notifier
+		}
+		h.auditInvite(u, audit.ActionInvite, id, proj.ID, proj.Name, map[string]any{"invitedEmail": email})
+		return nil
+	}
 	token := uuid.NewString()
 	inviteID, err := h.repo.Create(ctx, pgdoc.M{
-		"email":     email,
-		"projectId": proj.ID,
-		"token":     token,
-		"expiresAt": time.Now().UTC().Add(24 * time.Hour),
+		"email":        email,
+		"projectId":    proj.ID,
+		"token":        token,
+		"expiresAt":    time.Now().UTC().Add(24 * time.Hour),
+		"deliveryMode": "legacy",
 	})
 	if err != nil {
 		return err
@@ -304,7 +343,10 @@ func (h *Handler) decline(w http.ResponseWriter, r *http.Request) {
 	}
 	if inv != nil {
 		projectID, _ := inv["projectId"].(string)
-		_ = h.repo.DeleteByEmailAndProjectID(r.Context(), u.Email, projectID)
+		if err := h.repo.DeleteByEmailAndProjectID(r.Context(), u.Email, projectID); err != nil {
+			httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
+			return
+		}
 		// Audit DELETE on PROJECT_INVITE for a declined invite.
 		projName := ""
 		if p, _ := h.projectSvc.GetProjectByID(r.Context(), projectID); p != nil {
