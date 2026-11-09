@@ -46,8 +46,8 @@ func TestSeedOfAReusedVMIDStaysWithItsProject(t *testing.T) {
 	}
 }
 
-// A CD that cannot be emptied keeps a row so the sync can retry, but no user-data, and no claim on the vmid.
-func TestFailedSeedRemovalIsRetried(t *testing.T) {
+// Empty filtered inventory is not absence: preserve the active source unchanged.
+func TestIncompleteSeedRemovalPreservesSource(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
 	seeds := project.NewSeedRepo(db, textcrypt.New("k"))
@@ -88,12 +88,11 @@ func TestFailedSeedRemovalIsRetried(t *testing.T) {
 	if err := db.C("pveServerSeed").Find(ctx, pgdoc.M{"serviceId": "svc"}, &kept); err != nil {
 		t.Fatal(err)
 	}
-	if len(kept) != 1 || kept[0].ISO != "iso:iso/pcseed-106-x.iso" || kept[0].UserData != "" || kept[0].PasswordHash != "" {
-		t.Fatalf("kept %+v", kept)
+	if len(kept) != 1 || kept[0].ISO != "iso:iso/pcseed-106-x.iso" || kept[0].UserData == "" || kept[0].PasswordHash != "h" || kept[0].Retired {
+		t.Fatal("incomplete visibility changed the active encrypted source")
 	}
-	// The next server with this vmid must not read it.
-	if got, err := seeds.ForServer(ctx, "svc", "p", "106"); err != nil || got != nil {
-		t.Fatalf("reused vmid got %+v, %v", got, err)
+	if got, err := seeds.ForServer(ctx, "svc", "p", "106"); err != nil || got == nil || got.UserData != "secret" {
+		t.Fatal("active rebuild source was lost")
 	}
 
 	down = false
@@ -101,8 +100,8 @@ func TestFailedSeedRemovalIsRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	kept = nil
-	if err := db.C("pveServerSeed").Find(ctx, pgdoc.M{"serviceId": "svc"}, &kept); err != nil || len(kept) != 0 {
-		t.Fatalf("after the retry: %+v, %v", kept, err)
+	if err := db.C("pveServerSeed").Find(ctx, pgdoc.M{"serviceId": "svc"}, &kept); err != nil || len(kept) != 1 {
+		t.Fatal("a second filtered empty inventory must still preserve the seed")
 	}
 }
 

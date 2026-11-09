@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: ordinary server seed artifact ownership and guarded cleanup
+
+**What changed:** every new ordinary server ISO receives a write-ahead artifact row with immutable installation identity
+and a 128-bit random exact filename. Superseded/failed files survive independently of encrypted active seed rows.
+All erase/empty paths share one fail-closed gate, cooperative replica lock and non-expiring durable operation claim
+that survives session-lock connection loss. Product backup/restore pins all provider artifacts before dispatch until
+operator archive/task reconciliation; this intentionally favors retention over unsafe archive-reference inference. Optional operator-provisioned global
+GET-only credentials prove full ACL visibility (including exact NoAccess shadows), then scan every current/pending/
+snapshot/template config. Same random basename on any storage vetoes alias references; identity drift and unknown async
+mutations retain files. Two no-reference observations and 24-hour grace precede cleanup. Admin secret-free status and
+Test connection warning expose pending risk. Legacy files are report/operator-owned, never prefix-adopted.
+
+**Why:** local cache absence is not proof of global non-use, and PVE upload/delete do not check references. Upload before
+active-row persistence and log-only replacement cleanup lost recovery authority. Preservation takes priority over eager
+erase: no reader means pending warning, not blanking a live static-network CD or dropping its encrypted rebuild source.
+No new portal grant, boot scrub, guest agent execution, URL/static-network change or lab mutation. Independent privileged
+external writes still need coordination; this is not an atomic PVE compare-and-delete guarantee.
+
+**Diagrams updated:** C3 IaaS seed journal/read-only reference gate components and edges. Operator details and deferred
+live confidentiality acceptance: [server-seed-safety.md](../../server-seed-safety.md).
 ## 2026-11-09: DNS ownership before tenant zone creation
 
 **What changed:** new project/provider/canonical-zone challenges return a256-bit TXT value once and retain only a scoped

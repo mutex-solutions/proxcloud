@@ -106,6 +106,8 @@ flowchart TB
   sch["pve.PickNode scheduler"]:::impl
   cli["pve.Client REST"]:::impl
   seed["server seeds<br/>pve seed, seediso, project nocloud_pve"]:::impl
+  seedjournal["seed artifact journal<br/>installation + exact random file ownership"]:::impl
+  seedreader["optional global GET-only reader<br/>ACL completeness + all config references"]:::impl
   sync["syncjob + pve sync providers"]:::impl
   recon["providers.Reconcile"]:::impl
   repo["cloud.Repo<br/>resource cache"]:::impl
@@ -117,7 +119,10 @@ flowchart TB
   ph --> quota
   ph --> pip
   ph --> seed
-  seed --> cli
+  seed -->|"commit before upload"| seedjournal
+  seed -->|"no complete proof: retain CD"| seedreader
+  seedreader -->|"GET only, separate credential"| cli
+  seed -->|"guarded delete/empty only"| cli
   ph --> es
   ph --> svc
   ph --> net
@@ -167,6 +172,7 @@ flowchart TB
 | Replication and HA | `internal/cloud/pve/protect.go`, `internal/platform/project/cloud_protect_pve.go` | `pvesr` jobs and strict HA node-affinity rules for protected VMs on ZFS, HA alone on shared storage, gating, RPO state, memory reservation. | Implemented |
 | Metering reads | `internal/cloud/pve/syncprovider.go` (`SampledServerProvider`, `SampledImageProvider`, `Superseded`), `task.go` (`NodeTasks`), `qemu.go` (`VMStatus.NICs`), `gpu.go` (`GPUSpecsFromConfig`), `service.go` (`CreatedTag`) | The Proxmox side of metering: rows built from one `/cluster/resources` page, the VM identity stamp `pc-c-<unix>`, node task logs, per-tap counters, GPU count from `hostpciN mapping=`. See C3c. | Implemented |
 | Server seeds | `internal/cloud/pve/seed.go` (`RenderSeed`, `RenderNetworkConfig`, `AttachSeedISO`, `SetSeedURL`), `seediso.go` (`BuildSeedISO`), `internal/platform/project/nocloud_pve.go` (`pveSeedStep`, `pveWriteSeed`, `nocloudFile`, `SeedRepo`) | NoCloud seed of a server with user-data, vendor-data or metadata: a token URL served by `GET /api/v1/nocloud/{token}/{file}`, or a `cidata` CD where the vnet has no DHCP. | Implemented |
+| Seed artifact safety | `internal/cloud/pve/seed_artifact.go`, `seed_inventory.go`, `internal/platform/admin/seed_cleanup.go` | Write-ahead exact installation/random artifact ownership, independent encrypted active source, cooperative PostgreSQL seed lock, opt-in separate global read credential. Full ACL tree + exact rights (NoAccess shadows included), all current/pending/snapshot/template references; same basename on any storage vetoes aliases. Two no-reference scans with 24-hour grace before central guarded deletion/empty fallback. Non-expiring durable operation claim survives session-lock loss; product backup/restore pins all provider artifacts before dispatch. Unknown task outcomes and recovery pins require operator reconciliation. Admin secret-free status; legacy files are never adopted. Does not sanitize live CDs; external privileged races are trusted operations. | Implemented |
 | Server snapshots | `internal/cloud/pve/snapshot.go`, `internal/platform/project/snapshot_pve.go` | VM snapshots, refused on storage without them, newest-only rollback on ZFS. | Implemented |
 | Image import | `internal/cloud/pve/imageimport.go`, `internal/platform/project/imageimport_pve.go`, `pkg/safeurl` | A customer image from a URL: the portal fetches it under an address check at connect time and streams it to PVE's upload API, `import-from` on the profile's boot storage, a template in the project pool. A node never sees the URL. One import at a time per project; the disk counts against `diskGb`. | Implemented |
 | Server backups | `internal/cloud/pve/backup.go`, `internal/platform/project/backup_pve.go` | vzdump to `config.backupStorage` (NFS, CephFS, PBS), ownership by a project stamp in the archive notes, in-place restore that refuses what it would lose, archives removed with the server and on project teardown. | Implemented |

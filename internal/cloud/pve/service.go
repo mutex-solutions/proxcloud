@@ -20,6 +20,10 @@ type Service struct {
 	PoolPrefix string
 	// HolderLock serialises holder use per project across API replicas (ShedLock.Wait). Nil = no lock: tools and tests.
 	HolderLock func(ctx context.Context, name string, atMostFor, wait time.Duration) (release func(), acquired bool, err error)
+	// SeedArtifacts authorizes exact files created by this installation. SeedReader
+	// is a separately provisioned, globally readable credential (never auto-granted).
+	SeedArtifacts *SeedArtifactRepo
+	SeedReader    *Client
 }
 
 // NewService builds the Service for one provider doc.
@@ -31,7 +35,15 @@ func NewService(cfg Config, serviceID, poolPrefix string) (*Service, error) {
 	if poolPrefix == "" {
 		poolPrefix = "pc-"
 	}
-	return &Service{C: c, ServiceID: serviceID, PoolPrefix: poolPrefix}, nil
+	s := &Service{C: c, ServiceID: serviceID, PoolPrefix: poolPrefix}
+	if cfg.SeedInventoryTokenID != "" && cfg.SeedInventorySecret != "" {
+		cfg.TokenID, cfg.Secret = cfg.SeedInventoryTokenID, cfg.SeedInventorySecret
+		s.SeedReader, err = New(cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
 }
 
 // PoolFor mirrors externalservice.PoolFor — same prefix, same derivation.

@@ -676,7 +676,19 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 		if err != nil {
 			return err
 		}
-		if err := ps.RetireServer(ctx, proj.ID, cr.ExternalID, es.PVEBackupStorage(), !deleteVolumes); err != nil {
+		retire := func(ctx context.Context) error {
+			if err := ps.RetireServer(ctx, proj.ID, cr.ExternalID, es.PVEBackupStorage(), !deleteVolumes); err != nil {
+				return err
+			}
+			h.pveReleaseSeed(ctx, ps, es.ID, cr.ExternalID)
+			return nil
+		}
+		if h.seeds != nil {
+			err = h.seeds.artifacts.Locked(ctx, es.ID, retire)
+		} else {
+			err = retire(ctx)
+		}
+		if err != nil {
 			return err
 		}
 		// The VM and its public NIC are gone: its addresses go back to the pool. A
@@ -687,7 +699,6 @@ func (h *Handler) pveDeleteResource(ctx context.Context, es *externalservice.Ext
 				slog.Error("pve delete: release public IPs", "project", proj.ID, "server", cr.ExternalID, "err", err)
 			}
 		}
-		h.pveReleaseSeed(ctx, ps, es.ID, cr.ExternalID)
 		h.pveArchiveServerVolumes(ctx, es, proj, cr.ExternalID)
 		h.pveSyncVolumes(ctx, es, proj) // kept volumes have new ids on the holder
 		return nil

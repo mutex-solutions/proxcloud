@@ -21,6 +21,7 @@ const cloudServiceCollection = "externalService"
 // routeCloudAdmin registers the cloud-admin live reads.
 func (h *Handler) routeCloudAdmin(r chi.Router) {
 	r.Post("/service/proxmox/auth", h.proxmoxAuth)
+	r.Get("/service/{id}/seed-cleanup", h.seedCleanupStatus)
 	r.Post("/service/{id}/storage/detect", h.proxmoxDetectStorage)
 	r.Post("/service/{id}/server/{vmid}/migrate", h.proxmoxMigrateServer)
 	r.Put("/service/{id}/storage-classes", h.proxmoxStorageClasses)

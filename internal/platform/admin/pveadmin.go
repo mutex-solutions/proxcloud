@@ -117,6 +117,7 @@ func (h *Handler) proxmoxAuth(w http.ResponseWriter, r *http.Request) {
 			}
 			out.Warnings = append(out.Warnings, storeReachWarnings(ctx, cc, es.PVENetworkConfig().BlockedCIDRs)...)
 			out.Warnings = append(out.Warnings, bootISOWarnings(ctx, cc, es.PVEBootISOStorage())...)
+			out.Warnings = append(out.Warnings, "Ordinary server seed CDs retain plaintext user-data. Check GET /admin/service/"+es.ID+"/seed-cleanup for pending cleanup; a separate complete global read-only inventory credential is required (docs/server-seed-safety.md).")
 		}
 	}
 	if v, ok := ver["version"].(string); ok {

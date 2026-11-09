@@ -38,6 +38,9 @@ func (h *Handler) pveBackupAction(w http.ResponseWriter, r *http.Request, u *use
 	if !ok {
 		return true
 	}
+	if h.seeds != nil {
+		ps.SeedArtifacts = h.seeds.artifacts
+	}
 	if action == "LIST_BACKUPS" {
 		backups, err := ps.ListServerBackups(ctx, proj.ID, cr.ExternalID, store)
 		if err != nil {

@@ -55,6 +55,10 @@ type Config struct {
 	InsecureTLS bool
 	// TimeoutSeconds bounds each HTTP call (not task waits). Default 30.
 	TimeoutSeconds int
+	// Optional explicit global READ-ONLY inventory credential for server seed cleanup.
+	// Same endpoints/TLS policy; never auto-minted or used for writes.
+	SeedInventoryTokenID string
+	SeedInventorySecret  string
 }
 
 // Client is a thin transport over one PVE cluster's API.
