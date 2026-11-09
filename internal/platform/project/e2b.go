@@ -380,7 +380,7 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
-	custom, customName, _, err := h.resolveCustomTemplateWithKind(r.Context(), c.proj.ID, b.TemplateID)
+	custom, customName, source, err := h.resolveRuntimeCreateTemplate(r.Context(), c.proj.ID, b.TemplateID)
 	if errors.Is(err, sandbox.ErrBadTemplate) {
 		e2bErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -390,15 +390,16 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec := sandbox.Spec{
-		ProjectID:  c.proj.ID,
-		Template:   b.TemplateID,
-		Custom:     custom,
-		Env:        b.EnvVars,
-		Metadata:   b.Metadata,
-		GPU:        b.GPU,
-		Network:    b.Network.policy(b.AllowInternetAccess),
-		AutoPause:  b.AutoPause,
-		AutoResume: b.AutoResume != nil && b.AutoResume.Enabled,
+		ProjectID:     c.proj.ID,
+		Template:      b.TemplateID,
+		Custom:        custom,
+		RuntimeSource: source,
+		Env:           b.EnvVars,
+		Metadata:      b.Metadata,
+		GPU:           b.GPU,
+		Network:       b.Network.policy(b.AllowInternetAccess),
+		AutoPause:     b.AutoPause,
+		AutoResume:    b.AutoResume != nil && b.AutoResume.Enabled,
 	}
 	if custom != nil {
 		spec.Template = customName
@@ -433,12 +434,17 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	h.cloudResourceAudit(c.user, c.proj, "CLOUD_RESOURCE_CREATE", "E2B_CREATE", saved)
 	a, err := e2bColdAccess(r.Context(), c.ss.Config().Startup.Duration(), time.Time{}, time.Now,
-		func(ctx context.Context) error { return h.e2bWaitReady(ctx, c, saved) },
+		func(ctx context.Context) error { return h.waitRuntimeCreateReady(ctx, c, saved) },
 		func(ctx context.Context) (*sandbox.Access, error) {
 			return committedStartupAccess(ctx, saved.Data, time.Now, func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, spec.ID) })
 		})
 	if err != nil {
+		h.runtimeCreateFailure(r.Context(), c, saved.ExternalID)
 		h.cleanupFailedStartup(r.Context(), c, saved)
+		if errors.Is(err, errRuntimePinState) {
+			e2bFail(w, err)
+			return
+		}
 		msg := "sandbox startup failed; check template preparation and location availability"
 		var startup *sandbox.StartupError
 		if errors.As(err, &startup) {
