@@ -276,6 +276,8 @@ func (h *Handler) Routes(r chi.Router) {
 		// /service/proxmox/auth, /service[/{id}]/os-images, /service/{id}/{os-flavors,volume/types,
 		// gpu-info}, /service/regions, /cloud-resource/public-networks/{id}.
 		h.routeCloudAdmin(r)
+		r.Get("/service/{id}/holder-operations/{project}", h.holderOperationStatus)
+		r.Post("/service/{id}/holder-operations/{project}/poll", h.holderOperationPoll)
 		h.routePVEFlavors(r)
 		// Admin init — gated (any admin, no specific permission); branding from the
 		// seeded platformConfiguration + REMOTE_OIDC strategies.

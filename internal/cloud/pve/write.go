@@ -444,6 +444,18 @@ func ipconfigAddr(val string) string {
 
 // DeleteServer stops (hard) and destroys a VM.
 func (s *Service) DeleteServer(ctx context.Context, projectID, externalID string) error {
+	if s.HolderOperations != nil {
+		ctx, release, err := s.beginHolders(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		defer release()
+		vm, err := s.ResolveVM(ctx, projectID, externalID)
+		if err != nil || vm == nil {
+			return err
+		}
+		return s.deleteFencedServer(ctx, projectID, vm, false)
+	}
 	ctx, cancel := context.WithTimeout(ctx, opTimeout)
 	defer cancel()
 	vm, err := s.ResolveVM(ctx, projectID, externalID)

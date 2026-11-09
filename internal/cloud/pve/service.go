@@ -20,6 +20,9 @@ type Service struct {
 	PoolPrefix string
 	// HolderLock serialises holder use per project across API replicas (ShedLock.Wait). Nil = no lock: tools and tests.
 	HolderLock func(ctx context.Context, name string, atMostFor, wait time.Duration) (release func(), acquired bool, err error)
+	// HolderOperations is mandatory in cmd/api; nil retains standalone tool compatibility.
+	HolderOperations HolderOperationStore
+	HolderBudgets    HolderBudgets
 	// SeedArtifacts authorizes exact files created by this installation. SeedReader
 	// is a separately provisioned, globally readable credential (never auto-granted).
 	SeedArtifacts *SeedArtifactRepo
@@ -62,6 +65,36 @@ func (s *Service) EnsureProjectPool(ctx context.Context, projectID string) (stri
 // Fail-closed: the first VM that refuses to die aborts the teardown so the caller
 // reports incomplete deprovisioning (ceph teardown discipline).
 func (s *Service) TeardownProjectPool(ctx context.Context, pool string) error {
+	if s.HolderOperations != nil {
+		project, err := s.holderProjectForPool(pool)
+		if err != nil {
+			return err
+		}
+		ctx, release, err := s.beginHolders(ctx, project)
+		if err != nil {
+			return err
+		}
+		defer release()
+		info, err := s.C.GetPool(ctx, pool)
+		if err != nil {
+			return err
+		}
+		if info == nil {
+			return nil
+		}
+		for _, m := range info.Members {
+			if m.Type != "qemu" {
+				continue
+			}
+			if err := s.deleteFencedServer(ctx, project, &ClusterResource{Type: "qemu", Node: m.Node, VMID: m.VMID, Pool: pool}, true); err != nil {
+				return err
+			}
+		}
+		if err := s.holderCheck(ctx); err != nil {
+			return err
+		}
+		return s.C.DeletePool(ctx, pool)
+	}
 	info, err := s.C.GetPool(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("pve teardown: read pool %s: %w", pool, err)

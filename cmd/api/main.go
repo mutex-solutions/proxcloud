@@ -289,13 +289,16 @@ func run() error {
 	}
 	projectH.SetSandboxSafety(pg.C("sandbox_safety"), mailSvc)
 	// Proxmox VE — enables proxmox provisioning (project pool) + the VM write surface.
-	holderLocks := lock.New(pg)
+	holderOps := pve.NewHolderOperationRepo(pg)
+	if err := holderOps.Ensure(context.Background()); err != nil {
+		return fmt.Errorf("holder operation store: %w", err)
+	}
 	pveWithHolderLock := func(es *externalservice.ExternalService) (*pve.Service, error) {
 		s, err := pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
 		if err != nil {
 			return nil, err
 		}
-		s.HolderLock = holderLocks.Wait
+		s.HolderOperations = holderOps
 		s.SeedArtifacts = pve.NewSeedArtifactRepo(pg)
 		return s, nil
 	}
@@ -475,9 +478,7 @@ func run() error {
 	// Without this the cloud-admin live reads (gpu-info, provider probes) silently
 	// answer empty — live-caught: /admin/service/{id}/gpu-info returned [] with four
 	// mapped cards present.
-	adminH.SetProxmox(func(es *externalservice.ExternalService) (*pve.Service, error) {
-		return pve.NewService(es.PVEConfig(), es.ID, es.PVEPoolPrefix())
-	})
+	adminH.SetProxmox(pveWithHolderLock)
 	// Public Admin API (/admin-api/v1 — SigV4 hmac_keys or the admin-api OIDC realm).
 	// Per-organization SSO: on when a Keycloak service account for the customer realm is configured.
 	var ssoH *sso.Handler

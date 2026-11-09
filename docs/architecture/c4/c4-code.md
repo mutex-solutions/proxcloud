@@ -8,6 +8,46 @@ invariants the code holds. Four sequence diagrams follow.
 
 Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
+## Holder operation fencing (R1)
+
+**Why:** PVE tasks outlive HTTP cancellation and PostgreSQL session loss does not
+stop a callback. Timeout-only changes made new-holder/carrier cleanup unsafe.
+
+| Component / symbol | Responsibility and invariant |
+|---|---|
+| `lock.Leases` | Separate from scheduler ShedLock: UUID owner, retained monotonic epoch, DB clock; renew/check/release CAS only the unexpired acquisition. Row-lock wait is followed by a fresh clock check. |
+| `HolderOperationRepo.Begin` | Short transaction commits one unique, nonexpiring `DISPATCHING` intent per provider/project **before** POST. Lease expiry never admits a writer past pending work. No PVE I/O inside SQL transactions. |
+| `beginHolders`, `holderTask`, `holderSync` | Renewable local session, cancel on lease loss; journal first, real UPID after response, no unknown cleanup/release. Known recovery observes only and returns refresh-required409, not another mutation. |
+| `holderIdentity`, `holderEffect` | Exact node/pool/SMBIOS UUID and disk/config effect readback after stopped task; create UUID is sent in first POST. Delete binds stopped qmdestroy to the original VMID and positively authorized pool absence;403 alone is not absence. |
+| `WaitTaskBounded` | Additive typed observation:5minute holder config/power,15minute carrier migration,60second settlement. Timeout/403/404 means uncertain, never task termination or destructive compensation. Generic heavy-operation WaitTask unchanged. |
+| `RetireServer`, `DeleteServer`, `DeleteProjectBackups`, `TeardownProjectPool` | Same fence before delete precursors; nested helpers retain the session. Protection tag/HA/replication mutations in this path use dispatch intent adapters. Legacy blank VM auto-destruction disabled when durability is wired. |
+| Admin holder status / poll | Admin-only evidence read, exact operation ID for poll-only recovery. No force-clear/no-UPID automatic recovery API. |
+
+```mermaid
+sequenceDiagram
+  participant W as API worker
+  participant D as PostgreSQL
+  participant P as PVE
+  W->>D: acquire UUID owner + epoch lease (DB clock)
+  W->>P: positive node UUID / pool / disk read
+  W->>D: short transaction: lease check + DISPATCHING intent, commit
+  W->>P: mutation POST (PVE accepts no fencing token)
+  P-->>W: real UPID or lost response
+  W->>D: append actual UPID, if known
+  loop bounded observation; independent renewable lease
+    W->>P: poll known UPID only
+    W->>D: CAS renew same unexpired acquisition
+  end
+  W->>P: stopped + fresh owned node identity/effect readback
+  W->>D: CAS settle exactly once; release lease
+  Note over W,D: Lost response/save/status/lease => pending survives TTL; no cleanup
+```
+
+The nonexpiring intent closes the check/POST successor gap. It does not make PVE
+exactly once, serialize external administrators or turn a TTL into proof. Unknown
+without UPID is an accepted operator-held availability tradeoff. See the
+[operator contract and test evidence](../../holder-operation-fencing.md).
+
 ## C4.0 Permission-filtered network inventory and file-share ownership
 
 **Why:** PVE's SDN list is permission-filtered: `200 []` can mean that the configured

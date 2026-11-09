@@ -29,6 +29,15 @@ func conflictf(format string, a ...any) error { return &ConflictError{Msg: fmt.S
 // keeping headroomPct % free (ErrStorageFull otherwise). Returns the new slot; the volid
 // lands in the next sync (PVE names it server-side).
 func (s *Service) AddVolume(ctx context.Context, projectID, serverExtID string, sizeGiB int, storage string, headroomPct float64) (string, error) {
+	if s.HolderOperations != nil {
+		var release func()
+		var err error
+		ctx, release, err = s.beginHolders(ctx, projectID)
+		if err != nil {
+			return "", err
+		}
+		defer release()
+	}
 	vm, err := s.ResolveVM(ctx, projectID, serverExtID)
 	if err != nil {
 		return "", err
@@ -70,13 +79,7 @@ func (s *Service) AddVolume(ctx context.Context, projectID, serverExtID string, 
 	if slot == "" {
 		return "", conflictf("Server %s has no free disk slot", serverExtID)
 	}
-	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{
-		slot: fmt.Sprintf("%s:%d", storage, sizeGiB),
-	})
-	if err != nil {
-		return "", err
-	}
-	return slot, s.C.WaitTask(ctx, up)
+	return slot, s.holderConfig(ctx, projectID, vm, map[string]string{slot: fmt.Sprintf("%s:%d", storage, sizeGiB)})
 }
 
 // volumeSlot re-resolves a cached volume row's (vmid, slot) against the live VM
@@ -130,6 +133,15 @@ func (s *Service) withUnusedSizes(ctx context.Context, node string, vmid int, di
 
 // ExtendVolume grows a disk to sizeGiB (grow-only — PVE cannot shrink).
 func (s *Service) ExtendVolume(ctx context.Context, projectID string, vmid int, volID string, sizeGiB int) error {
+	if s.HolderOperations != nil {
+		var release func()
+		var err error
+		ctx, release, err = s.beginHolders(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	vm, slot, err := s.volumeSlot(ctx, projectID, vmid, volID)
 	if err != nil {
 		return err
@@ -137,15 +149,27 @@ func (s *Service) ExtendVolume(ctx context.Context, projectID string, vmid int, 
 	if strings.HasPrefix(slot, "unused") {
 		return conflictf("Attach the disk before extending it")
 	}
-	up, err := s.C.ResizeDisk(ctx, vm.Node, vm.VMID, slot, fmt.Sprintf("%dG", sizeGiB))
+	p, err := s.holderProofFor(ctx, projectID, "resize", vm)
 	if err != nil {
 		return err
 	}
-	return s.C.WaitTask(ctx, up)
+	p.Slot, p.Disk, p.Params = slot, volID, map[string]string{"size": strconv.Itoa(sizeGiB)}
+	return s.holderTask(ctx, p, s.HolderBudgets.defaults().Config, func(q context.Context) (UPID, error) {
+		return s.C.ResizeDisk(q, vm.Node, vm.VMID, slot, fmt.Sprintf("%dG", sizeGiB))
+	})
 }
 
 // DetachVolume unlinks a disk from its slot — PVE moves it to unusedN (kept + still billed).
 func (s *Service) DetachVolume(ctx context.Context, projectID string, vmid int, volID string) error {
+	if s.HolderOperations != nil {
+		var release func()
+		var err error
+		ctx, release, err = s.beginHolders(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	vm, slot, err := s.volumeSlot(ctx, projectID, vmid, volID)
 	if err != nil {
 		return err
@@ -160,11 +184,7 @@ func (s *Service) DetachVolume(ctx context.Context, projectID string, vmid int, 
 		// A hot-unplug waits on the guest, which cannot answer: the task fails and leaves the change pending.
 		return conflictf("Server %s is suspended. Stop it first to detach this volume", vm.Name)
 	}
-	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, nil, slot)
-	if err != nil {
-		return err
-	}
-	return s.C.WaitTask(ctx, up)
+	return s.holderConfig(ctx, projectID, vm, nil, slot)
 }
 
 // AttachVolume re-links an unused disk into the next free scsi slot of the SAME
@@ -174,7 +194,7 @@ func (s *Service) DetachVolume(ctx context.Context, projectID string, vmid int, 
 // to be on the same node"), so a disk on shared storage first rides a holder to the target's node
 // (carryToNode) and a target on another node is refused for any other disk (ConflictError).
 func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, volID string, targetServerExtID string) error {
-	release, err := s.lockHolders(ctx, projectID)
+	ctx, release, err := s.beginHolders(ctx, projectID)
 	if err != nil {
 		return err
 	}
@@ -209,11 +229,7 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 		if free == "" {
 			return conflictf("This server has no free disk slot")
 		}
-		up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, map[string]string{free: volID})
-		if err != nil {
-			return err
-		}
-		return s.C.WaitTask(ctx, up)
+		return s.holderConfig(ctx, projectID, vm, map[string]string{free: volID})
 	}
 	// Another VM: disk reassign. Ownership of the target is re-verified too.
 	target, err := s.ResolveVM(ctx, projectID, targetServerExtID)
@@ -263,13 +279,7 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 		}
 		defer s.dropEmptyHolder(context.WithoutCancel(ctx), vm)
 	}
-	up, err := s.C.MoveDisk(ctx, vm.Node, vm.VMID, MoveDiskOpts{
-		Disk: slot, TargetVMID: target.VMID, TargetDisk: free,
-	})
-	if err != nil {
-		return err
-	}
-	return s.C.WaitTask(ctx, up)
+	return s.holderMove(ctx, projectID, vm, target, slot, free)
 }
 
 // carryToNode brings a detached disk on shared storage to another node: onto a new holder on the disk's node, then the
@@ -278,6 +288,9 @@ func (s *Service) AttachVolume(ctx context.Context, projectID string, vmid int, 
 // the carrier too, even if it looks empty: the task could add the disk just after the check, and the destroy would take
 // it, with the source VM no longer naming it. An empty carrier costs only a vmid, until the project teardown.
 func (s *Service) carryToNode(ctx context.Context, projectID string, vm *ClusterResource, slot, node string) (*ClusterResource, string, error) {
+	if s.HolderOperations != nil {
+		return s.fencedCarry(ctx, projectID, vm, slot, node)
+	}
 	carrier, err := s.newHolder(ctx, projectID, vm.Node, JoinTags(tagHolder, tagCarrier, TagManaged))
 	if err != nil {
 		return nil, "", err
@@ -344,7 +357,7 @@ func (s *Service) AttachTargets(ctx context.Context, projectID string, vmid int,
 // Lab-verified (PVE 9.2): delete=unusedN removes the volume physically. While a VM snapshot
 // references it, the task still succeeds with a warning and the entry stays, hence the re-read.
 func (s *Service) DeleteVolume(ctx context.Context, projectID string, vmid int, volID string) error {
-	release, err := s.lockHolders(ctx, projectID)
+	ctx, release, err := s.beginHolders(ctx, projectID)
 	if err != nil {
 		return err
 	}
@@ -356,11 +369,7 @@ func (s *Service) DeleteVolume(ctx context.Context, projectID string, vmid int, 
 	if !strings.HasPrefix(slot, "unused") {
 		return conflictf("Detach the volume before deleting it")
 	}
-	up, err := s.C.SetVMConfig(ctx, vm.Node, vm.VMID, nil, slot)
-	if err != nil {
-		return err
-	}
-	if err := s.C.WaitTask(ctx, up); err != nil {
+	if err := s.holderConfig(ctx, projectID, vm, nil, slot); err != nil {
 		return err
 	}
 	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
@@ -383,6 +392,15 @@ func (s *Service) DeleteVolume(ctx context.Context, projectID string, vmid int, 
 // references the disk; that error surfaces as is.
 // ponytail: waits for the copy inside the request; a large disk needs async task tracking.
 func (s *Service) RetypeVolume(ctx context.Context, projectID string, vmid int, volID, storage string, headroomPct float64) error {
+	if s.HolderOperations != nil {
+		var release func()
+		var err error
+		ctx, release, err = s.beginHolders(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	vm, d, err := s.volumeDisk(ctx, projectID, vmid, volID)
 	if err != nil {
 		return err
@@ -404,6 +422,16 @@ func (s *Service) RetypeVolume(ctx context.Context, projectID string, vmid int, 
 	}
 	if !StorageHasRoom(st, int64(d.SizeGiB)<<30, headroomPct) {
 		return conflictf("Not enough free space for a %d GB volume on storage %s", d.SizeGiB, storage)
+	}
+	if s.HolderOperations != nil {
+		p, err := s.holderProofFor(ctx, projectID, "retype", vm)
+		if err != nil {
+			return err
+		}
+		p.Slot, p.Disk, p.Params = d.Slot, volID, map[string]string{"storage": storage}
+		return s.holderTask(ctx, p, 0, func(q context.Context) (UPID, error) {
+			return s.C.MoveDisk(q, vm.Node, vm.VMID, MoveDiskOpts{Disk: d.Slot, Storage: storage, Delete: true})
+		})
 	}
 	up, err := s.C.MoveDisk(ctx, vm.Node, vm.VMID, MoveDiskOpts{Disk: d.Slot, Storage: storage, Delete: true})
 	if err != nil {
