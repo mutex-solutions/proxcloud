@@ -548,7 +548,9 @@ function ConnectionTab({ id, provider }: TabProps) {
         <CardContent>
           <Row label="API URL" value={str(c.apiUrl)} />
           <Row label="Name servers of new zones" value={Array.isArray(c.nameservers) ? c.nameservers.join(", ") : ""} />
+          <Row label="Ownership verification resolvers (TCP)" value={Array.isArray(c.ownershipResolvers) ? c.ownershipResolvers.join(", ") : "1.1.1.1:53, 8.8.8.8:53 (public defaults)"} />
           <Row label="Region" value={str(c.region)} />
+          <p className="mt-4 text-sm text-muted-foreground">New tenant zones require a short-lived TXT ownership proof before creation. Existing zones remain manageable. Verification never uses the tenant's server or the API host's system DNS. Advanced config ownershipResolvers is an operator trust override: only use independent trusted recursive resolvers in production; a private authoritative lab resolver proves controlled drill data, not public ownership.</p>
         </CardContent>
       </Card>
     )

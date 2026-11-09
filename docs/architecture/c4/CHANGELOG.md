@@ -4,6 +4,29 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: DNS ownership before tenant zone creation
+
+**What changed:** new project/provider/canonical-zone challenges return a256-bit TXT value once and retain only a scoped
+SHA-256 hash. Pending30min and verified10min lifetimes, single-use durable consumption, project-wide10live/20hour
+challenge quota and10s verification backoff bound the lifecycle without reserving domains. Native cloud and MCP create
+share the mandatory gate. Strict IDNA+PSL validation and actual exact-owner TXT queries over bounded TCP to fixed public
+recursors (or explicit operator-only literal-IP overrides) happen before creation; CNAME/DNAME indirection and resolver
+failures refuse. Project/provider/permission/config-binding checks and live PowerDNS overlap checks remain at creation.
+A global DB advisory lock serializes actual creates across provider aliases; verification is per-project/nonblocking and
+row-lock transitions cannot overwrite a consumed/cancelled proof. Consumption commits before upstream I/O, so uncertain
+failure cannot replay. Tokens/hashes stay out of lifecycle audit; proof TXT mutations redact values. UI guides publish →
+verify → create → delegate, with clear cache/expiry/retry instructions. MCP exposes the same lifecycle, never a shortcut.
+
+**Why:** suffix/overlap checks alone allowed any tenant to squat an unowned domain and exclude its ancestors/descendants.
+A pending challenge must not become a new domain-lock denial of service, and creating a zone first would let the platform
+vouch for its own unproved tenant data. Fixed resolver trust avoids the host's split authoritative view and tenant SSRF;
+this is conventional TXT control proof, not DNSSEC/legal ownership. Private lab overrides explicitly prove only controlled
+drill data. Existing legacy zones are not removed or retroactively gated; upgrade every API replica before reopening creates.
+
+**Diagrams updated:** C1 external resolver trust, C3 DNS ownership components and C4 sequence/invariants. Operator API,
+upgrade, cache and lab-override details are in cloud-integration.md; customer/MCP docs describe the required flow. HTTP/
+Postgres tests use real TCP DNS and fake PowerDNS, with no public DNS grant or claim of a production-delegation drill.
+
 ## 2026-11-09: functional native automatic pause and recovery
 
 **What changed:** native pods mount the existing read-only node runtime and run a PID1-only `-native` mode that marks
