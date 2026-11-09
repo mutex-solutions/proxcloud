@@ -85,10 +85,15 @@ func (a *portImportAPI) PodLogs(context.Context, string, string, string, int) (s
 	b, _ := json.Marshal(a.result)
 	return string(b), nil
 }
-func (a *portImportAPI) DeleteCoreUID(ctx context.Context,plural,ns,name,uid string) error {
-	a.mu.Lock(); pod:=a.pods[name]; valid:=pod==nil||pod["metadata"].(map[string]any)["uid"]==uid; a.mu.Unlock()
-	if !valid { return fmt.Errorf("UID precondition failed") }
-	return a.DeleteCore(ctx,plural,ns,name)
+func (a *portImportAPI) DeleteCoreUID(ctx context.Context, plural, ns, name, uid string) error {
+	a.mu.Lock()
+	pod := a.pods[name]
+	valid := pod == nil || pod["metadata"].(map[string]any)["uid"] == uid
+	a.mu.Unlock()
+	if !valid {
+		return fmt.Errorf("UID precondition failed")
+	}
+	return a.DeleteCore(ctx, plural, ns, name)
 }
 func (a *portImportAPI) DeleteCore(_ context.Context, plural, _, name string) error {
 	a.mu.Lock()
@@ -127,9 +132,8 @@ func TestImportPortConcurrentAliasesTerminalBindingAndUnknownHold(t *testing.T) 
 	h := &Handler{sbTemplates: db.C("sandbox_templates"), sbBuildPinsDB: db, sandboxGates: func(context.Context, *externalservice.ExternalService) []sandbox.Gate {
 		return []sandbox.Gate{{Name: "fixture", OK: true}}
 	}}
-	if err := h.sbTemplates.Ensure(ctx); err != nil {
-		t.Fatal(err)
-	}
+	// Do not pre-create sandbox_templates: a direct import is the first template
+	// action on this fresh install and must establish its table outside SQL TX.
 	project := strings.Repeat("b", 24)
 	if err := db.C("project").Ensure(ctx); err != nil {
 		t.Fatal(err)
@@ -250,6 +254,51 @@ func TestImportPortConcurrentAliasesTerminalBindingAndUnknownHold(t *testing.T) 
 	if got, _ := h.loadTemplate(ctx, project, doc.ID); got == nil {
 		t.Fatal("alias cleanup removed artifact")
 	}
+	// Barrier race on a previously absent name: alias attachment and snapshot
+	// reservation must have one winner, with no external filesystem/worker effect.
+	locked, release, lockDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		lockDone <- db.WithTx(ctx, func(tc context.Context) error {
+			if err := db.LockXact(tc, projectTemplateLock(project)); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+	snapshotDone := make(chan error, 1)
+	aliasDone := make(chan int, 1)
+	go func() {
+		_, _, _, err := h.reserveSnapshot(ctx, caller, "sbx-source", "name-race", false, nil, sandbox.Template{}, source, map[string]bool{})
+		snapshotDone <- err
+	}()
+	go func() {
+		r := httptest.NewRequest("POST", "/templates/aliases", strings.NewReader(`{"aliases":["name-race"]}`))
+		rc := chi.NewRouteContext()
+		rc.URLParams.Add("templateID", doc.ID)
+		r = r.WithContext(context.WithValue(context.WithValue(ctx, e2bCtxKey{}, caller), chi.RouteCtxKey, rc))
+		w := httptest.NewRecorder()
+		h.e2bTemplateAliases(w, r)
+		aliasDone <- w.Code
+	}()
+	close(release)
+	if err := <-lockDone; err != nil {
+		t.Fatal(err)
+	}
+	snapshotErr, aliasCode := <-snapshotDone, <-aliasDone
+	if (snapshotErr == nil) == (aliasCode == 200) {
+		t.Fatalf("absent-name race needs one winner: snapshot=%v alias=%d", snapshotErr, aliasCode)
+	}
+	if snapshotErr == nil {
+		if reserved, _ := h.loadTemplate(ctx, project, "name-race"); reserved != nil {
+			_, _ = h.sbTemplates.DeleteByID(ctx, reserved.ID)
+		}
+	}
+	if api.starts != 1 {
+		t.Fatal("name reservation performed external I/O")
+	}
 	api.mu.Lock()
 	api.result = nil
 	api.ambiguous = true
@@ -264,6 +313,14 @@ func TestImportPortConcurrentAliasesTerminalBindingAndUnknownHold(t *testing.T) 
 		t.Fatal("ambiguous operation was not held")
 	}
 	starts := api.starts
+	// All producer reservations use the same absent-name lock. The loser must
+	// refuse before its caller could start filesystem capture/upload.
+	if _, _, _, err := h.reserveSnapshot(ctx, caller, "sbx-source", doc.Name, false, nil, sandbox.Template{}, source, map[string]bool{}); err == nil {
+		t.Fatal("snapshot overwrote imported canonical name")
+	}
+	if _, _, _, err := h.reserveSnapshot(ctx, caller, "sbx-source", doc.Aliases[len(doc.Aliases)-1], false, nil, sandbox.Template{}, source, map[string]bool{}); err == nil {
+		t.Fatal("snapshot overwrote imported alias")
+	}
 	w = request("uncertain-alias", other)
 	if w.Code != 202 || api.starts != starts {
 		t.Fatal("uncertain retry redispatched")

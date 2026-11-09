@@ -111,7 +111,9 @@ func e2bFail(w http.ResponseWriter, err error) {
 
 // e2bError maps err to the status and message shown to the caller (internals are logged only).
 func e2bError(err error) (int, string) {
-	if errors.Is(err, errBuildPinState) { return http.StatusConflict, "template operation is active, held or requires operator recovery" }
+	if errors.Is(err, errBuildPinState) {
+		return http.StatusConflict, "template operation is active, held or requires operator recovery"
+	}
 	var se e2bStatusErr
 	if errors.As(err, &se) {
 		return se.code, se.msg

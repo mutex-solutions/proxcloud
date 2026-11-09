@@ -65,6 +65,22 @@ func TestCommittedReadyTTLBoundsFinalAccess(t *testing.T) {
 	}
 }
 
+func TestFinalLifetimeCheckAfterCleanupAndSiblingWait(t *testing.T) {
+	live := map[string]any{"status": sandbox.StatusRunning, "ready": true, "shutdownTime": time.Now().Add(-time.Second).UTC().Format(time.RFC3339)}
+	// Both resume's final response boundary and fork's post-join array boundary
+	// use the captured committed row, never a rebased TTL or a fresh clock origin.
+	if err := startupResponseAlive(context.Background(), live); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("cleanup/sibling wait exposed expired sandbox", err)
+	}
+}
+
+func TestRetainedSnapshotStorageCountsUniqueImmutableImages(t *testing.T) {
+	tdoc := &sandboxTemplateDoc{Builds: []templateBuild{{Status: sandbox.BuildReady, Image: "registry.example.org/t/p/a@sha256:a", SizeBytes: 160}, {Status: sandbox.BuildReady, Image: "registry.example.org/t/p/a@sha256:a", SizeBytes: 160}, {Status: sandbox.BuildReady, Image: "registry.example.org/t/p/a@sha256:b", SizeBytes: 240}, {Status: sandbox.BuildError, Image: "registry.example.org/t/p/a@sha256:c", SizeBytes: 400}}}
+	if got := templateStoredSize(tdoc); got != 400 {
+		t.Fatalf("distinct digests additive, repeated digest once: got %d", got)
+	}
+}
+
 func TestResumeLeaseCoversHardStartupAndSnapshotWithoutTakeover(t *testing.T) {
 	minimum := snapshotWait + time.Duration(sandbox.MaxStartupSeconds)*time.Second + time.Minute
 	if resumeLease <= minimum {

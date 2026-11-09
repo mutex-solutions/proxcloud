@@ -266,10 +266,14 @@ func (h *Handler) consoleTemplateDelete(w http.ResponseWriter, r *http.Request) 
 
 func templateStoredSize(t *sandboxTemplateDoc) int64 {
 	var size int64
+	images := map[string]int64{}
 	for _, b := range t.Builds {
-		if b.Status == sandbox.BuildReady {
-			size += b.SizeBytes
+		if buildPinSDKStatus(&b) == sandbox.BuildReady && b.Image != "" && b.SizeBytes > images[b.Image] {
+			images[b.Image] = b.SizeBytes
 		}
+	}
+	for _, n := range images {
+		size += n
 	}
 	return size
 }

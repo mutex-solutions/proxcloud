@@ -84,7 +84,9 @@ Build cancellation is durable compensation intent, **not** a public cancel endpo
 The console's Cancel button only closes its recipe dialog. UNKNOWN operations cannot
 be cleared by cleanup, a missing pod, a deadline or a new claim. Successful/tagged
 artifact history is retained until an explicit reference-aware history deletion
-contract exists; only unreferenced cleaned failed history is bounded.
+contract exists; only unreferenced cleaned failed history is bounded. Repeated snapshot
+generations naming one exact immutable image count once within that template's stored
+usage (maximum known captured layer bytes); distinct retained digests add separately.
 
 ## Deliberate limits and compatibility exceptions
 

@@ -190,12 +190,10 @@ func (h *Handler) saveTemplate(ctx context.Context, t *sandboxTemplateDoc) error
 	})
 }
 
-// trimBuilds drops the oldest builds beyond keptBuilds, but never one a tag names (the template would stop resolving
-// and the prune would lose its image) nor one that is building (its pod is running and billed). Waiting builds are
-// trimmed like finished ones: every POST /v3/templates adds one, so keeping them all would let retries grow the record
-// without bound; the newest keptBuilds of them survive.
-// A snapshot keeps no ready build but the tagged one: a named snapshot taken again supersedes the previous image, which
-// the prune then deletes, so the stored size billed is that of the image kept.
+// trimBuilds bounds only cleaned failed history that no tag or active operation
+// references. Successful artifacts, waiting contexts and in-flight operations are
+// durable roots until explicit reference-aware history deletion exists. Retired
+// identities and pin tombstones survive trimming; no physical pruning is enabled.
 func trimBuilds(t *sandboxTemplateDoc) {
 	keep := map[string]bool{}
 	for _, id := range t.Tags {

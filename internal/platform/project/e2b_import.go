@@ -143,6 +143,10 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
+	if err := h.sbTemplates.Ensure(r.Context()); err != nil {
+		e2bFail(w, err)
+		return
+	}
 	var t *sandboxTemplateDoc
 	var bl *templateBuild
 	created := false

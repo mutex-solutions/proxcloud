@@ -236,49 +236,24 @@ func (h *Handler) snapshotSandboxWork(ctx context.Context, c *e2bCaller, id, nam
 	}
 	cfg := c.ss.Config()
 	tm := sandbox.TemplateOfSaved(saved)
-	now := time.Now().UTC()
-	var t *sandboxTemplateDoc
-	if name != "" {
-		if !templateTagRe.MatchString(name) {
-			return nil, e2bStatusErr{http.StatusBadRequest, fmt.Sprintf("invalid snapshot name %q", name)}
-		}
-		if _, builtin := cfg.Templates[name]; builtin {
-			return nil, e2bStatusErr{http.StatusConflict, fmt.Sprintf("%q is a built-in template name", name)}
-		}
-		if t, err = h.loadTemplate(ctx, c.proj.ID, name); err != nil {
-			return nil, err
-		}
-		if t != nil && (t.Kind != "snapshot" || t.Internal) {
-			return nil, e2bStatusErr{http.StatusConflict, fmt.Sprintf("a template named %q exists", name)}
-		}
+	active, err := c.ss.ActiveBuildWorkers(ctx, c.proj.ID)
+	if err != nil {
+		return nil, err
 	}
-	created := false
-	if t == nil {
-		if name == "" {
-			name = "snapshot-" + strings.TrimPrefix(id, "sbx-") + "-" + newToken(3)
-		} else if n, err := h.sbTemplates.Count(ctx, pgdoc.M{"projectId": c.proj.ID, "internal": pgdoc.M{"$ne": true}}); err != nil {
-			return nil, err
-		} else if n >= maxTemplatesPerProject {
-			return nil, e2bStatusErr{http.StatusTooManyRequests, fmt.Sprintf("at most %d templates per project", maxTemplatesPerProject)}
-		}
-		t = &sandboxTemplateDoc{ID: newTemplateID(), ProjectID: c.proj.ID, Name: name, Tags: map[string]string{},
-			UploadToken: newToken(24), CreatedAt: &now, Kind: "snapshot", Internal: internal, SourceSandbox: id, ForkUntil: forkUntil}
-		if _, err := h.sbTemplates.InsertOne(ctx, pgdoc.M{"_id": t.ID, "projectId": t.ProjectID, "name": name}); err != nil {
-			return nil, err
-		}
-		created = true
-		if err := h.saveTemplate(ctx, t); err != nil {
-			return nil, err
-		}
+	t, bl, created, err := h.reserveSnapshot(ctx, c, id, name, internal, forkUntil, tm, sandbox.ImageOfSaved(saved), active)
+	if err != nil {
+		return nil, err
 	}
+
 	bs, err := buildStorage(cfg)
 	if err != nil {
 		return nil, err
 	}
-	buildID := uuid.NewString()
+	buildID := bl.BuildID
 	key := contextKey(t.ProjectID, t.ID, snapshotHash(buildID))
 	undo := func(cause error) (*sandboxTemplateDoc, error) {
 		_, _ = bs.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &bs.bucket, Key: &key})
+		h.failSnapshot(ctx, t.ProjectID, t.ID, buildID, cause)
 		if created {
 			_, _ = h.sbTemplates.DeleteOne(ctx, pgdoc.M{"_id": t.ID, "projectId": t.ProjectID})
 		}
@@ -324,11 +299,11 @@ func (h *Handler) snapshotSandboxWork(ctx context.Context, c *e2bCaller, id, nam
 	if t, err = h.loadTemplate(ctx, c.proj.ID, t.ID); err != nil || t == nil {
 		return undo(fmt.Errorf("snapshot record: %v", err))
 	}
-	t.CPU, t.MemoryGiB, t.GPU = tm.CPU, tm.MemoryGiB, tm.GPU
-	bl := templateBuild{BuildID: buildID, Status: sandbox.BuildBuilding, StartCmd: tm.StartCmd, ReadyCmd: tm.ReadyCmd,
-		StartAsRoot: tm.StartAsRoot, User: tm.User, Workdir: tm.Workdir, From: sandbox.ImageOfSaved(saved),
-		Tags: []string{"default"}, CreatedAt: &now, SizeBytes: size}
-	t.Builds = append(t.Builds, bl)
+	reserved := t.build(buildID)
+	if reserved == nil {
+		return undo(errBuildPinState)
+	}
+	reserved.SizeBytes = size
 	if err := h.saveTemplate(ctx, t); err != nil {
 		return undo(err)
 	}
@@ -353,6 +328,79 @@ func (h *Handler) snapshotSandboxWork(ctx context.Context, c *e2bCaller, id, nam
 		}
 	}()
 	return t, nil
+}
+
+// reserveSnapshot serializes absent names with imports, aliases and v3 reservations.
+// Admission/identity are durable before capture starts; this transaction never
+// performs filesystem, object-store or cluster I/O.
+func (h *Handler) reserveSnapshot(ctx context.Context, c *e2bCaller, id, name string, internal bool, forkUntil *time.Time, tm sandbox.Template, image string, active map[string]bool) (*sandboxTemplateDoc, templateBuild, bool, error) {
+	if err := h.sbTemplates.Ensure(ctx); err != nil {
+		return nil, templateBuild{}, false, err
+	}
+	var out *sandboxTemplateDoc
+	var build templateBuild
+	created := false
+	err := h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
+		if err := h.sbTemplates.DB().LockXact(tc, projectTemplateLock(c.proj.ID)); err != nil {
+			return err
+		}
+		if name == "" {
+			name = "snapshot-" + strings.TrimPrefix(id, "sbx-") + "-" + newToken(3)
+		}
+		if !templateTagRe.MatchString(name) {
+			return e2bStatusErr{http.StatusBadRequest, "invalid snapshot name"}
+		}
+		if _, ok := c.ss.Config().Templates[name]; ok {
+			return e2bStatusErr{http.StatusConflict, "snapshot name identifies a built-in template"}
+		}
+		current, err := h.loadTemplate(tc, c.proj.ID, name)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		if current != nil {
+			var locked sandboxTemplateDoc
+			found, err := h.sbTemplates.GetForUpdate(tc, current.ID, &locked)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return sandbox.ErrNotFound
+			}
+			current = &locked
+			if current.Deleting || current.Kind != "snapshot" || current.Internal != internal || current.Name != name {
+				return e2bStatusErr{http.StatusConflict, "snapshot name identifies a different template"}
+			}
+			for _, b := range current.Builds {
+				if b.Import != nil || !buildTerminal(&b) || buildPinActive(b) {
+					return errBuildPinState
+				}
+			}
+		} else {
+			count, err := h.sbTemplates.Count(tc, pgdoc.M{"projectId": c.proj.ID, "internal": pgdoc.M{"$ne": true}})
+			if err != nil {
+				return err
+			}
+			if !internal && count >= maxTemplatesPerProject {
+				return sandbox.ErrQuotaExceeded
+			}
+			current = &sandboxTemplateDoc{ID: newTemplateID(), ProjectID: c.proj.ID, Name: name, Tags: map[string]string{}, UploadToken: newToken(24), CreatedAt: &now, Kind: "snapshot", Internal: internal, SourceSandbox: id, ForkUntil: forkUntil}
+			created = true
+		}
+		if err := h.workerAdmission(tc, c, "", active); err != nil {
+			return err
+		}
+		current.CPU, current.MemoryGiB, current.GPU = tm.CPU, tm.MemoryGiB, tm.GPU
+		build = templateBuild{BuildID: uuid.NewString(), Status: sandbox.BuildBuilding, StartCmd: tm.StartCmd, ReadyCmd: tm.ReadyCmd, StartAsRoot: tm.StartAsRoot, User: tm.User, Workdir: tm.Workdir, From: image, Tags: []string{"default"}, CreatedAt: &now}
+		current.Builds = append(current.Builds, build)
+		current.UpdatedAt = &now
+		if err := h.sbTemplates.Upsert(tc, current.ID, current); err != nil {
+			return err
+		}
+		out = current
+		return nil
+	})
+	return out, build, created, err
 }
 
 func snapshotHash(buildID string) string { return "snapshot-" + buildID }
@@ -480,20 +528,16 @@ func (h *Handler) finishSnapshot(ctx context.Context, c *e2bCaller, t *sandboxTe
 }
 
 // snapshotStorageRow bills the stored snapshot by size (SANDBOX_SNAPSHOT, hourly per GB) from the moment it is ready.
-// A named snapshot taken again keeps its row and its start; the size is that of every ready build the record keeps
-// (trimBuilds drops a superseded one, and the registry prune then deletes its image).
+// A retaken named snapshot keeps successful history and its original storage-row
+// start. Exact duplicate immutable images count once (max captured layer bytes);
+// distinct retained digests remain additive. Physical registry pruning stays HOLD.
 func (h *Handler) snapshotStorageRow(ctx context.Context, c *e2bCaller, t *sandboxTemplateDoc) {
 	kind := "snapshot"
 	if t.Internal {
 		kind = "pause"
 	}
 	now := time.Now().UTC()
-	var size int64
-	for _, b := range t.Builds {
-		if b.Status == sandbox.BuildReady {
-			size += b.SizeBytes
-		}
-	}
+	size := templateStoredSize(t) // retained build history may name one physical digest repeatedly
 	data := map[string]any{"name": t.Name, "kind": kind, "sizeGB": float64(size) / (1 << 30), "createdAt": now.Format(time.RFC3339)}
 	if cr, _ := h.cloud.FindByServiceIDAndExternalID(ctx, c.es.ID, t.ID); cr != nil && cr.ProjectID == c.proj.ID {
 		if prev, _ := cr.Data["createdAt"].(string); prev != "" {
@@ -1122,18 +1166,25 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if row := h.e2bRow(ctx, c, id); row == nil {
-		return nil, sandbox.ErrNotFound
-	} else if err := startupResponseAlive(ctx, row.Data); err != nil {
-		h.cleanupFailedStartup(ctx, c, row)
+	if err := startupResponseAlive(ctx, readyRow.Data); err != nil {
+		h.cleanupFailedStartup(ctx, c, readyRow)
 		return nil, err
 	}
-	dctx, cancelDone := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	end, _ := time.Parse(time.RFC3339, fmt.Sprint(readyRow.Data["shutdownTime"]))
+	cleanupEnd := time.Now().Add(30 * time.Second)
+	if end.Before(cleanupEnd) {
+		cleanupEnd = end
+	}
+	dctx, cancelDone := context.WithDeadline(ctx, cleanupEnd)
 	defer cancelDone()
 	if _, err := h.sbPaused.DeleteByID(dctx, p.ID); err != nil {
 		return nil, err
 	}
 	h.dropSnapshot(dctx, c, p.TemplateID)
+	if err := startupResponseAlive(ctx, readyRow.Data); err != nil {
+		h.cleanupFailedStartup(ctx, c, readyRow)
+		return nil, err
+	}
 	tpl, _ := sandbox.PayloadOf(p.Saved)["template"].(string)
 	return c.e2bSandbox(id, tpl, a), nil
 }
@@ -1321,6 +1372,7 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 	image := t.defaultBuild().Image
 	// The forks start in parallel: each waits up to e2bReadyTimeout for envd.
 	results := make([]any, count)
+	readyRows := make([]*cloud.CloudResource, count)
 	tpl, _ := sandbox.PayloadOf(saved)["template"].(string)
 	var wg sync.WaitGroup
 	for i := range count {
@@ -1336,12 +1388,23 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 				results[i] = map[string]any{"error": map[string]any{"code": code, "message": msg}}
 				return
 			}
+			readyRows[i] = readyRow
 			results[i] = map[string]any{"sandbox": c.e2bSandbox(newID, tpl, a)}
 		})
 	}
 	wg.Wait()
 	// The forks run from the snapshot image; its template record is not needed any more.
 	h.dropSnapshot(context.WithoutCancel(ctx), c, t.ID)
+	for i, row := range readyRows {
+		if row == nil {
+			continue
+		}
+		if err := startupResponseAlive(ctx, row.Data); err != nil {
+			h.cleanupFailedStartup(ctx, c, row)
+			code, msg := e2bError(err)
+			results[i] = map[string]any{"error": map[string]any{"code": code, "message": msg}}
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		e2bFail(w, err)
 		return

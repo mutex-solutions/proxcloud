@@ -79,7 +79,10 @@ effect. Only invalidating an unused proof, or positive terminal evidence for the
 owned worker, can settle receipts. UNKNOWN is not automatically reopened or released.
 
 All successful/tagged artifact history is retained until an explicit reference-aware
-history deletion feature exists. Physical registry deletion remains HOLD globally and
+history deletion feature exists. Within one snapshot template, repeated generations
+naming the same exact immutable image count once for stored snapshot usage (the maximum
+known captured layer-byte size); distinct retained image digests remain additive. This
+does not introduce cross-template/project deduplication or claim full image-byte metering. Physical registry deletion remains HOLD globally and
 on teardown; this port does not complete legacy/provider/catalog writer coverage.
 
 ## Preparation and console contract

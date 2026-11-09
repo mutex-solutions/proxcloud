@@ -684,8 +684,8 @@ func TestSandboxNativeDeleteDuringPause(t *testing.T) {
 	}
 }
 
-// A named snapshot taken again keeps one image (the previous build leaves the record, so the prune takes its image),
-// and its row bills that image's size.
+// Repeated successful snapshots retain their history, but two build records naming
+// the same physical immutable image must charge that stored digest only once.
 func TestE2BSnapshotRetakenBillsKeptImage(t *testing.T) {
 	f, _, keyA, _ := newPauseFixture(t)
 	ctx := context.Background()
@@ -712,13 +712,13 @@ func TestE2BSnapshotRetakenBillsKeptImage(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("template: %v %v", found, err)
 			}
-			if len(tpl.Builds) == 1 && tpl.Builds[0].Image != "" || time.Now().After(deadline) {
+			if len(tpl.Builds) == i+1 && tpl.Builds[len(tpl.Builds)-1].Image != "" || time.Now().After(deadline) {
 				break
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
-	if len(tpl.Builds) != 1 || tpl.Builds[0].Image == "" || tpl.Builds[0].SizeBytes <= 0 {
+	if len(tpl.Builds) != 2 || tpl.Builds[0].Image == "" || tpl.Builds[0].Image != tpl.Builds[1].Image || tpl.Builds[0].SizeBytes <= 0 {
 		t.Fatalf("builds kept: %+v", tpl.Builds)
 	}
 	rows := f.snapshotRows("pa")
