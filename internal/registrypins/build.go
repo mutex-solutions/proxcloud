@@ -73,6 +73,9 @@ func (s *Store) AuthorizeBuildDispatch(ctx context.Context, op Operation, base, 
 		if e := s.rejectRuntimeDispatch(tc, tx, op.ID); e != nil {
 			return e
 		}
+		if e := s.rejectSnapshotDispatch(tc, tx, op.ID); e != nil {
+			return e
+		}
 		rows, e := tx.Query(tc, `SELECT id::text,requested_ref,ref,state,epoch,binding_uid FROM registry_pin WHERE operation=$1 AND project_id=$2 AND owner=$3 AND generation=$4 AND host=$5 ORDER BY requested_ref FOR UPDATE`, op.ID, op.ProjectID, op.Owner, op.Generation, s.host)
 		if e != nil {
 			return e

@@ -99,6 +99,10 @@ func (s *Store) Ensure(ctx context.Context) error {
  CHECK((state='terminal')=(phase IN ('Succeeded','Failed'))),
  CHECK(state<>'observed' OR phase='Running'), CHECK((pod_uid='')=(cr_uid='')),
  CHECK(state NOT IN ('observed','terminal') OR pod_uid<>''), CHECK(state NOT IN ('authorized','known_no_effect') OR (pod_uid='' AND phase='')));`)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(tc, snapshotSchema)
 		return err
 	})
 }
