@@ -269,6 +269,17 @@ func baseSecretName(buildID string) string { return buildName(buildID) + "-base"
 
 func buildName(buildID string) string { return "build-" + buildID }
 
+// buildOutputScript hands root-produced OCI blobs (which may be 0600) to nonroot crane.
+// No writer remains. Validate the entire physical tree before changing any modes;
+// reject hard links too so chmod cannot change an alias outside the output tree.
+const buildOutputScript = `set -eu
+[ -d /out/image ] && [ ! -L /out/image ] || { echo 'invalid build output directory' >&2; exit 1; }
+bad=$(find /out/image \( ! -type d ! -type f -o -type f -links +1 \) -print -quit)
+[ -z "$bad" ] || { echo 'invalid build output entry' >&2; exit 1; }
+find /out/image -type f -exec chmod 0444 {} +
+find /out/image -type d -exec chmod 0555 {} +
+`
+
 // BuildObjects renders the ConfigMap (Dockerfile + fetch list) and the Pod of a build.
 func BuildObjects(cfg Config, req BuildRequest) (cm, pod map[string]any) {
 	cfg = cfg.WithDefaults()
@@ -374,13 +385,24 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 					"volumeMounts": []any{mount("workspace", "/workspace"), mount("out", "/out"),
 						ro(mount("base-cache", "/cache")), ro(mount("pinned", "/pinned"))},
 				},
+				map[string]any{
+					"name": "prepare-output", "image": craneDebugImage,
+					"command": []any{"/busybox/sh", "-c", buildOutputScript},
+					"securityContext": map[string]any{
+						"runAsUser": int64(0), "runAsGroup": int64(0),
+						"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
+						"capabilities": map[string]any{"drop": []any{"ALL"}},
+					},
+					"resources":    map[string]any{"requests": small, "limits": small},
+					"volumeMounts": []any{mount("out", "/out")},
+				},
 			},
 			"containers": []any{map[string]any{
 				"name": "push", "image": craneImage,
 				"args":         []any{"push", "/out/image", req.Image, "--image-refs", "/dev/termination-log"},
 				"env":          []any{map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}, registryTrustEnv},
 				"resources":    map[string]any{"requests": small, "limits": map[string]any{"cpu": "1", "memory": "512Mi"}},
-				"volumeMounts": []any{mount("out", "/out"), mount("push-secret", "/docker"), mount("registry-ca", "/registry-ca")},
+				"volumeMounts": []any{ro(mount("out", "/out")), mount("push-secret", "/docker"), mount("registry-ca", "/registry-ca")},
 			}},
 			"volumes": volumes,
 		},
@@ -522,6 +544,8 @@ func stepLabel(container string) string {
 		return "pulling the base image"
 	case "kaniko":
 		return "a build step"
+	case "prepare-output":
+		return "preparing the built image"
 	case "push":
 		return "pushing the image"
 	}
@@ -552,10 +576,10 @@ func containerStatuses(pod map[string]any, key string) []map[string]any {
 	return out
 }
 
-// BuildLogs returns the build's output, fetch → kaniko → push, newest maxLines.
+// BuildLogs returns the build's output in container order, newest maxLines.
 func (s *Service) BuildLogs(ctx context.Context, buildID string, maxLines int) []string {
 	var lines []string
-	for _, c := range []string{"fetch", "base", "kaniko", "push"} {
+	for _, c := range []string{"fetch", "base", "kaniko", "prepare-output", "push"} {
 		text, err := s.api.PodLogs(ctx, BuildNamespace, buildName(buildID), c, maxLines)
 		if err != nil {
 			continue

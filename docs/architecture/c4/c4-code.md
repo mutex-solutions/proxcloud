@@ -672,10 +672,19 @@ reconstructs Docker schema 2. Exact pinned Kaniko was checked locally without ne
 format yields OCI manifest, config and layer types, unlike layout-only output. SDK post-fix acceptance is a separate
 rollout check, not implied by this local test.
 
-`fetch -> base -> kaniko -> push` ordering, project quotas/deadline and gVisor are unchanged. User-code Kaniko still
-has no registry credentials and reads the pinned base cache read-only; only base/push have their existing scoped
-credentials. No tool-image version, snapshot path or registry acceptance policy changes. Build status and digest
-parsing remain unchanged. [Diagnosis and evidence boundary](../../managed-sandbox.md#77-sdk-custom-build-format-diagnosis-2026-11-09).
+**Readable output boundary:** the first actual OCI-directory rollout exposed a second issue: root-written OCI layer
+blobs may be `0600`, while the pinned push container runs as UID 65532. A credential-free `prepare-output` init now
+runs after Kaniko exits and before push, reusing the pinned debug image with only `/out` mounted. Its fixed script
+validates the whole physical image tree first, rejecting symlinks, special files and multiply linked files, then makes
+files `0444` and directories `0555`. Traversal/chmod errors fail closed. It runs UID/GID 0 with all capabilities
+dropped, no privilege escalation and a read-only root filesystem; nonroot push mounts `/out` read-only. The helper
+never sees base cache, config, registry CA or any credentials. Local exact-image checks cover untouched root-produced
+blobs, identical before/after hashes, nonroot read failure/success, and adversarial rejection before mode changes.
+
+`fetch -> base -> kaniko -> prepare-output -> push` is enforced by normal init sequencing. Project quotas/deadline and
+gVisor are unchanged. User-code Kaniko still has no registry credentials and reads the pinned base cache read-only;
+only base/push have their existing scoped credentials. No tool-image version, snapshot path or registry acceptance
+policy changes. Build status and digest parsing remain unchanged. [Diagnosis and evidence boundary](../../managed-sandbox.md#77-sdk-custom-build-format-diagnosis-2026-11-09).
 
 ### Usage and release gates
 

@@ -1218,6 +1218,7 @@ SDK ──POST /e2b/v3/templates──► portal (template + build ids, table sa
           fetch  (curl, presigned GETs from the bucket)            no credential
           base   (crane: base image → kaniko's cache, pinned)      the project's build account, or the caller's
           kaniko (the caller's RUN steps, --no-push, offline)      no credential
+          prepare-output (validate + make OCI blobs readable)     no credential; only output mounted
           push   (crane push → <registry>/t/<project>/<template>:<build>)  the project's build account
  GET …/builds/{build}/status (polled by the SDK; job sandboxBuildSync records builds nobody polls) → ready, digest
 Sandbox.create("<name>[:tag]") → <registry>/t/<project>/<template>@<digest>, pulled with the project's pull account
@@ -1246,7 +1247,12 @@ Sandbox.create("<name>[:tag]") → <registry>/t/<project>/<template>@<digest>, p
 - **Image handoff:** Kaniko uses `--image-format=oci --oci-layout-path=/out/image`; the separate credentialed
   container runs `crane push /out/image … --image-refs /dev/termination-log`. Both the OCI image format and the
   directory handoff are required: an OCI layout can contain a Docker manifest, and crane v0.20.3 reconstructs Docker
-  schema 2 when loading a Docker-save tarball. No registry acceptance, credential boundary or tool-image pin changes.
+  schema 2 when loading a Docker-save tarball. Between Kaniko and push, the credential-free `prepare-output` init
+  mounts only `/out`, rejects symlinks/special files/multiply linked files in the entire image tree before chmod, and
+  makes files `0444` and directories `0555`. This permits the unchanged nonroot push image to read root-produced
+  `0600` blobs; push mounts the output read-only. The helper uses the existing pinned debug image, UID/GID 0, all
+  capabilities dropped, no privilege escalation and read-only root filesystem. No registry acceptance or credential
+  boundary is widened, and no tool-image pin changes.
 - **The template record** (`sandbox_templates`): name, size, tags, the last 10 builds with their logs once the pod is
   gone (kept 10 minutes after it finished), the image digest of each ready build. Trimming to 10 never drops a build
   a tag names or one that is building, however many builds were requested since: the template keeps resolving and
@@ -1350,6 +1356,15 @@ The unchanged, digest-pinned Kaniko v1.29.0 was then tested locally with `--netw
 `--image-format=oci` produced OCI manifest/config/gzip-layer types with a verified manifest digest. Crane v0.20.3's
 directory loader preserves that manifest, unlike its tar loader. This is local format evidence, not a successful
 post-fix SDK acceptance run; the latter remains a separate reviewed rollout check. No registry policy was relaxed.
+
+The first actual OCI-directory attempt exposed a separate handoff failure: Kaniko exited 0, but nonroot crane exited
+1 opening a layer blob with `permission denied`, before any manifest PUT. The initial local format inspection had
+made its fixture readable and therefore did not prove the root-writer/nonroot-reader boundary. The follow-up local
+check preserves untouched root-produced OCI output: UID 65532 cannot read it until the credential-free helper runs;
+afterward all index/manifest/config/layer hashes match and nonroot reads succeed. With the exact pinned shell,
+top/nested symlinks, an outside-canary hardlink and a FIFO are rejected without changing any fixture modes/bytes;
+traversal and batched-chmod failures propagate nonzero. Live SDK acceptance after this handoff change is still a
+separate rollout check. No push-root shortcut, extra capabilities or credential mounts were added.
 
 ## 8. Pause, resume, snapshots and fork (SB7)
 
