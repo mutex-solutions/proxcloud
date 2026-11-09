@@ -82,6 +82,60 @@ test("a late accepted import invalidates its captured project without affecting 
   await expect(page.getByText("slow-import", { exact: true })).toBeVisible()
 })
 
+test("warm-cache capabilities denial closes aliases and prepare denial never leaves writable controls", async ({ page }) => {
+  await templates(page)
+  await expect(page.getByText("tpl-web-app", { exact: true })).toBeVisible()
+  await page.evaluate(async () => {
+    const apiPath = "/src/lib/api.ts", routerPath = "/src/mocks/router.ts"
+    const { setMockHandler, ApiError } = await import(/* @vite-ignore */ apiPath)
+    const { dispatch } = await import(/* @vite-ignore */ routerPath)
+    const control = { pending: false, writes: 0, release: () => {} }
+    ;(window as unknown as { revokeTest: typeof control }).revokeTest = control
+    setMockHandler((path: string, opts: { method?: string }) => {
+      if (opts.method && opts.method !== "GET") control.writes++
+      if (path.endsWith("/sandbox-templates/capabilities")) return new Promise((_resolve, reject) => {
+        control.pending = true
+        control.release = () => reject(new ApiError(403, 403, "Project management permission revoked"))
+      })
+      return dispatch(path, opts)
+    })
+  })
+  await page.getByRole("button", { name: "Refresh templates", exact: true }).click()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { revokeTest: { pending: boolean } }).revokeTest.pending)).toBe(true)
+  await page.getByRole("button", { name: "Actions for web-app", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Manage aliases", exact: true }).click()
+  await page.getByRole("dialog").getByLabel("New alias", { exact: true }).fill("must-not-post")
+  await page.evaluate(() => (window as unknown as { revokeTest: { release: () => void } }).revokeTest.release())
+  await expect(page.getByRole("alert")).toContainText("permission required")
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+  await expect(page.getByText("tpl-web-app", { exact: true })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Actions for web-app", exact: true })).toHaveCount(0)
+  expect(await page.evaluate(() => (window as unknown as { revokeTest: { writes: number } }).revokeTest.writes)).toBe(0)
+
+  // A successful list/capabilities fetch does not authorize preparation after
+  // its own coverage endpoint denies the session.
+  await templates(page)
+  await page.evaluate(async () => {
+    const apiPath = "/src/lib/api.ts", routerPath = "/src/mocks/router.ts"
+    const { setMockHandler, ApiError } = await import(/* @vite-ignore */ apiPath)
+    const { dispatch } = await import(/* @vite-ignore */ routerPath)
+    ;(window as unknown as { prepareWrites: number }).prepareWrites = 0
+    setMockHandler((path: string, opts: { method?: string }) => {
+      if (path.endsWith("/prepare")) {
+        if (opts.method === "POST") (window as unknown as { prepareWrites: number }).prepareWrites++
+        throw new ApiError(403, 403, "Project management permission revoked")
+      }
+      return dispatch(path, opts)
+    })
+  })
+  await page.getByRole("button", { name: "Actions for web-app", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Prepare", exact: true }).click()
+  await expect(page.getByRole("alert")).toContainText("permission required")
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Prepare image", exact: true })).toHaveCount(0)
+  expect(await page.evaluate(() => (window as unknown as { prepareWrites: number }).prepareWrites)).toBe(0)
+})
+
 test("all mock template routes bind to URL project despite spoofed body and headers", async ({ page }) => {
   await templates(page)
   const statuses = await page.evaluate(async () => {

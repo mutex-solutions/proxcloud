@@ -22,7 +22,11 @@ for (const theme of ["light", "dark"]) {
         expect(await dialog.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1)
       }
       const importer = page.getByRole("button", { name: "Import image digest", exact: true }).first()
+      // Native disabled buttons cannot receive focus. Wait for the asynchronous
+      // capabilities query before exercising real keyboard activation.
+      await expect(importer).toBeEnabled()
       await importer.focus()
+      await expect(importer).toBeFocused()
       await page.keyboard.press("Enter")
       await check()
       await page.getByRole("dialog").getByRole("switch", { name: "Private registry", exact: true }).click()
@@ -32,7 +36,9 @@ for (const theme of ["light", "dark"]) {
       await expect(importer).toBeFocused()
       for (const action of ["Manage aliases", "Prepare", "New build", "Builds and logs"]) {
         const opener = page.getByRole("button", { name: "Actions for web-app", exact: true })
+        await expect(opener).toBeEnabled()
         await opener.focus()
+        await expect(opener).toBeFocused()
         await page.keyboard.press("Enter")
         await page.getByRole("menuitem", { name: action, exact: true }).click()
         await check()

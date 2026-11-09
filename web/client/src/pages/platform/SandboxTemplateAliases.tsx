@@ -9,9 +9,9 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { apiFetch } from "@/lib/api"
 import type { ProjectSandboxTemplate } from "@/lib/types"
-import { sandboxTemplatePath, templateNamePattern } from "./sandbox-template-utils"
+import { sandboxTemplatePath, templateAccessDenied, templateNamePattern } from "./sandbox-template-utils"
 
-export function SandboxTemplateAliases({ pid, template, onClose }: { pid: string; template: ProjectSandboxTemplate; onClose: () => void }) {
+export function SandboxTemplateAliases({ pid, template, onClose, onCloseAutoFocus, onAccessDenied }: { pid: string; template: ProjectSandboxTemplate; onClose: () => void; onCloseAutoFocus?: (event: Event) => void; onAccessDenied?: () => void }) {
   const qc = useQueryClient()
   const mounted = useRef(true)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
@@ -26,11 +26,12 @@ export function SandboxTemplateAliases({ pid, template, onClose }: { pid: string
       setAliases(result.aliases.filter((a) => a !== template.name)); setName(""); setConfirm(null)
       toast.success("Template aliases updated")
     },
+    onError: (error) => { if (templateAccessDenied(error)) onAccessDenied?.() },
   })
   const valid = templateNamePattern.test(name.trim()) && name.trim() !== template.name && !aliases.includes(name.trim()) && aliases.length < 19
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[90dvh] overflow-y-auto">
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus} className="max-h-[90dvh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Manage aliases</DialogTitle>
           <DialogDescription>Aliases are extra names for this project's template. They are not build tags: tags select a build; aliases select a template.</DialogDescription>

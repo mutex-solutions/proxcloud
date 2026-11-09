@@ -9,8 +9,8 @@ import { ApiError, apiFetch } from "@/lib/api"
 import type { SandboxTemplateActionResult, SandboxTemplateCapabilities } from "@/lib/types"
 import { sandboxTemplatePath, templateNamePattern, validCommand, validImageSource, validRegistryCredentials, validRuntimeUser, validSize, validWorkdir } from "./sandbox-template-utils"
 
-export function SandboxTemplateImport({ pid, capabilities, onClose, onImported }: {
-  pid: string; capabilities: SandboxTemplateCapabilities; onClose: () => void; onImported: () => void
+export function SandboxTemplateImport({ pid, capabilities, onClose, onCloseAutoFocus, onImported }: {
+  pid: string; capabilities: SandboxTemplateCapabilities; onClose: () => void; onCloseAutoFocus?: (event: Event) => void; onImported: () => void
 }) {
   const [source, setSource] = useState("")
   const [name, setName] = useState("")
@@ -67,7 +67,7 @@ export function SandboxTemplateImport({ pid, capabilities, onClose, onImported }
 
   return (
     <Dialog open onOpenChange={(open) => !open && close()}>
-      <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus} className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Import image digest</DialogTitle>
           <DialogDescription>Import an immutable linux/amd64 image into this project. Image tags and other architectures are not supported. Closing this dialog clears credentials but does not stop an accepted import.</DialogDescription>

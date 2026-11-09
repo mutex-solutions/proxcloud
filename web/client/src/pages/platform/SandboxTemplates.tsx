@@ -19,7 +19,7 @@ import { SandboxTemplateAliases } from "./SandboxTemplateAliases"
 import { SandboxTemplatePrepare } from "./SandboxTemplatePrepare"
 import { SandboxTemplateBuildDialog } from "./SandboxTemplateBuildDialog"
 import { SandboxTemplateBuildsDialog } from "./SandboxTemplateBuildsDialog"
-import { activeBuild, sandboxTemplatePath } from "./sandbox-template-utils"
+import { activeBuild, sandboxTemplatePath, templateAccessDenied } from "./sandbox-template-utils"
 
 function fmtSize(bytes?: number) {
   if (!bytes) return "—"
@@ -41,42 +41,71 @@ export function TemplatesTab({ pid }: { pid: string }) { return <ProjectTemplate
 function ProjectTemplates({ pid }: { pid: string }) {
   const qc = useQueryClient()
   const mounted = useRef(true)
+  const deniedRef = useRef(false)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  const [accessRevoked, setAccessRevoked] = useState(false)
   const list = useQuery({
     queryKey: ["sandbox-templates", pid],
     queryFn: () => apiFetch<ProjectSandboxTemplate[]>(sandboxTemplatePath(pid)),
-    enabled: !!pid,
-    refetchInterval: (query) => query.state.data?.some((template) => templateBusy(template)) ? 5000 : false,
+    enabled: !!pid && !accessRevoked,
+    retry: (attempt, error) => !templateAccessDenied(error) && attempt < 1,
+    refetchInterval: (query) => !templateAccessDenied(query.state.error) && query.state.data?.some((template) => templateBusy(template)) ? 5000 : false,
   })
   const capabilities = useQuery({
     queryKey: ["sandbox-template-capabilities", pid],
     queryFn: () => apiFetch<SandboxTemplateCapabilities>(sandboxTemplatePath(pid, "capabilities")),
-    enabled: !!pid,
+    enabled: !!pid && !accessRevoked,
+    retry: (attempt, error) => !templateAccessDenied(error) && attempt < 1,
   })
   const opener = useRef<HTMLButtonElement | null>(null)
   const rememberOpener = useCallback((event: React.FocusEvent<HTMLButtonElement>) => { opener.current = event.currentTarget }, [])
-  const restoreFocus = () => requestAnimationFrame(() => { if (opener.current?.isConnected) opener.current.focus() })
-  const closeAction = () => { setAction(null); restoreFocus() }
-  const closeImport = () => { setImportOpen(false); restoreFocus() }
+  const restoreFocus = useCallback((event: Event) => {
+    // Run at Radix's unmount-autofocus boundary, not before the modal focus
+    // scope is released. A query refresh can replace the table trigger, so
+    // resolve its stable ID when the original element is no longer connected.
+    event.preventDefault()
+    if (!mounted.current) return
+    const previous = opener.current
+    const target = previous?.isConnected ? previous : previous?.id ? document.getElementById(previous.id) : null
+    if (target instanceof HTMLButtonElement && !target.disabled) target.focus({ preventScroll: true })
+  }, [])
+  const closeAction = () => setAction(null)
+  const closeImport = () => setImportOpen(false)
   const [importOpen, setImportOpen] = useState(false)
   const [action, setAction] = useState<TemplateAction | null>(null)
   const [toDelete, setToDelete] = useState<ProjectSandboxTemplate | null>(null)
+  const revokeAccess = useCallback(() => {
+    if (!mounted.current) return
+    deniedRef.current = true
+    setAccessRevoked(true)
+    setImportOpen(false); setAction(null); setToDelete(null)
+    // A refetch error retains prior React Query data. Only a permission denial
+    // clears these protected caches; transient capability failures keep history.
+    for (const prefix of ["sandbox-templates", "sandbox-template-capabilities", "sandbox-template-coverage", "sandbox-template-logs"]) {
+      // Removal cancels prior query observers before clearing their retained data.
+      qc.removeQueries({ queryKey: [prefix, pid] })
+    }
+  }, [qc, pid, setAccessRevoked, setImportOpen, setAction, setToDelete])
+  const permissionDenied = accessRevoked || templateAccessDenied(list.error) || templateAccessDenied(capabilities.error)
+  useEffect(() => { if (permissionDenied && !accessRevoked) revokeAccess() }, [permissionDenied, accessRevoked, revokeAccess])
   const invalidate = () => { void qc.invalidateQueries({ queryKey: ["sandbox-templates", pid] }) }
   const del = useMutation({
     mutationFn: (template: ProjectSandboxTemplate) => apiFetch(sandboxTemplatePath(pid, template.id), { method: "DELETE" }),
     onSuccess: (_, template) => {
       invalidate()
-      if (!mounted.current) return
+      if (!mounted.current || deniedRef.current) return
       toast.success(`${template.kind === "snapshot" ? "Snapshot" : "Template"} deleted`)
       setToDelete((current) => current?.id === template.id ? null : current)
-      restoreFocus()
     },
-    onError: (error: Error) => { if (mounted.current) toast.error(error.message) },
+    onError: (error: Error) => {
+      if (templateAccessDenied(error)) { revokeAccess(); return }
+      if (mounted.current && !deniedRef.current) toast.error(error.message)
+    },
   })
   const { isPending: deleting, reset: resetDelete } = del
-  const caps = capabilities.isError ? undefined : capabilities.data
+  const caps = capabilities.isError || permissionDenied ? undefined : capabilities.data
   const canImport = !!caps?.importEnabled && caps.trustedWorkerAvailable !== false
-  const selected = action && (list.data?.find((template) => template.id === action.template.id) ?? action.template)
+  const selected = !permissionDenied && action && (list.data?.find((template) => template.id === action.template.id) ?? action.template)
   const columns = useMemo<ColumnDef<ProjectSandboxTemplate, any>[]>(() => [
     {
       id: "name", accessorFn: (template) => template.name, header: sortableHeader("Name"),
@@ -100,7 +129,7 @@ function ProjectTemplates({ pid }: { pid: string }) {
         const template = row.original
         const busy = templateBusy(template)
         return <div className="flex justify-end"><DropdownMenu>
-          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" onFocus={rememberOpener} aria-label={`Actions for ${template.name}`}><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger>
+          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" id={`sandbox-template-actions-${encodeURIComponent(pid)}-${encodeURIComponent(template.id)}`} onFocus={rememberOpener} aria-label={`Actions for ${template.name}`}><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem onSelect={() => setAction({ type: "builds", template })}><ScrollText aria-hidden="true" /> Builds and logs</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setAction({ type: "aliases", template })} disabled={busy}><Tags aria-hidden="true" /> Manage aliases</DropdownMenuItem>
@@ -113,8 +142,10 @@ function ProjectTemplates({ pid }: { pid: string }) {
         </DropdownMenu></div>
       },
     },
-  ], [caps, deleting, resetDelete, rememberOpener, setAction, setToDelete])
+  ], [caps, deleting, resetDelete, rememberOpener, setAction, setToDelete, pid])
   const importButton = <Button className="text-black" onFocus={rememberOpener} onClick={() => setImportOpen(true)} disabled={!canImport}><Import aria-hidden="true" /> Import image digest</Button>
+
+  if (permissionDenied) return <p className="text-sm text-red-700 dark:text-red-400" role="alert">Project cloud resource management permission required. Template details and controls are no longer available. Reload after your access has been restored.</p>
 
   return (
     <div className="grid gap-4">
@@ -128,16 +159,16 @@ function ProjectTemplates({ pid }: { pid: string }) {
       {list.data?.some((template) => templateBusy(template)) && <p className="text-xs text-muted-foreground">Templates with active builds are busy. Alias changes and new builds are disabled until the active operation finishes.</p>}
       {list.data && list.data.length === 0 ? <EmptyState icon={Layers} title="No templates yet" hint="Import an immutable image digest here, or build a template with the E2B SDK or CLI." action={importButton} />
         : <DataTable columns={columns} data={list.data ?? []} isLoading={list.isLoading} error={list.error as Error | null} />}
-      {importOpen && caps && <SandboxTemplateImport pid={pid} capabilities={caps} onClose={closeImport} onImported={invalidate} />}
-      {selected && action?.type === "builds" && <SandboxTemplateBuildsDialog key={selected.id} pid={pid} template={selected} onClose={closeAction} />}
-      {selected && action?.type === "aliases" && <SandboxTemplateAliases key={selected.id} pid={pid} template={selected} onClose={closeAction} />}
-      {selected && action?.type === "prepare" && <SandboxTemplatePrepare key={selected.id} pid={pid} template={selected} capabilities={caps} onClose={closeAction} />}
-      {selected && action?.type === "build" && caps && <SandboxTemplateBuildDialog key={selected.id} pid={pid} template={selected} capabilities={caps} onClose={closeAction} onBuilt={() => { closeAction(); invalidate() }} />}
-      <Dialog open={!!toDelete} onOpenChange={(open) => { if (!open) { setToDelete(null); del.reset(); restoreFocus() } }}>
-        <DialogContent>
+      {importOpen && caps && <SandboxTemplateImport pid={pid} capabilities={caps} onClose={closeImport} onCloseAutoFocus={restoreFocus} onImported={invalidate} />}
+      {selected && action?.type === "builds" && <SandboxTemplateBuildsDialog key={selected.id} pid={pid} template={selected} onClose={closeAction} onCloseAutoFocus={restoreFocus} onAccessDenied={revokeAccess} />}
+      {selected && action?.type === "aliases" && <SandboxTemplateAliases key={selected.id} pid={pid} template={selected} onClose={closeAction} onCloseAutoFocus={restoreFocus} onAccessDenied={revokeAccess} />}
+      {selected && action?.type === "prepare" && <SandboxTemplatePrepare key={selected.id} pid={pid} template={selected} capabilities={caps} onClose={closeAction} onCloseAutoFocus={restoreFocus} onAccessDenied={revokeAccess} />}
+      {selected && action?.type === "build" && caps && <SandboxTemplateBuildDialog key={selected.id} pid={pid} template={selected} capabilities={caps} onClose={closeAction} onCloseAutoFocus={restoreFocus} onAccessDenied={revokeAccess} onBuilt={() => { closeAction(); invalidate() }} />}
+      <Dialog open={!!toDelete} onOpenChange={(open) => { if (!open) { setToDelete(null); del.reset() } }}>
+        <DialogContent onCloseAutoFocus={restoreFocus}>
           <DialogHeader><DialogTitle>Delete {toDelete?.kind === "snapshot" ? "snapshot" : "template"}?</DialogTitle><DialogDescription>{toDelete ? `"${toDelete.name}" and all its aliases and builds are removed. New sandboxes can no longer start from it; running ones keep running.` : ""}</DialogDescription></DialogHeader>
           {del.error && <p className="text-sm text-red-700 dark:text-red-400" role="alert">{del.error instanceof ApiError && del.error.status === 409 ? "An active worker still uses this template. Nothing was deleted. Retry after the worker finishes." : del.error.message}</p>}
-          <DialogFooter><Button variant="outline" onClick={() => { setToDelete(null); del.reset(); restoreFocus() }}>Cancel</Button><Button variant="outline" className="text-red-700 dark:text-red-400" disabled={del.isPending} onClick={() => toDelete && del.mutate(toDelete)}>{del.isPending ? "Deleting…" : "Delete"}</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" onClick={() => { setToDelete(null); del.reset() }}>Cancel</Button><Button variant="outline" className="text-red-700 dark:text-red-400" disabled={del.isPending} onClick={() => toDelete && del.mutate(toDelete)}>{del.isPending ? "Deleting…" : "Delete"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

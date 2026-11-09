@@ -25,7 +25,8 @@ The ProxCloud client gains the recent sandbox template console capabilities with
 3. Import uses `apiFetch` directly rather than React Query mutation variables. Username/password never enter query/mutation caches. Only an allowlisted success DTO or a generic status-derived failure reaches UI state. Form teardown clears credentials.
 4. An accepted import invalidates the originally captured project's list even if its dialog closes or navigation changes project. Mounted checks prevent old completions from closing or notifying over a newer dialog. Builds also invalidate their captured project without changing a new dialog after teardown.
 5. An expanded diagnostics component polls active work and unfinished archive capture. Unmount on collapse/project switch stops that observer. Logs are plain React text with ANSI/OSC/control sequences stripped; no HTML execution surface exists.
-6. Prepare reports N/M image coverage with intent expiry. It is observational, not a reservation, readiness for 0/0 nodes, or a startup SLA.
+6. Prepare reports N/M image coverage with intent expiry. It is observational, not a reservation, readiness for 0/0 nodes, or a startup SLA. Before POST admits new intent, the mutation awaits exact-key query cancellation so a late pre-prepare GET cannot overwrite the accepted expiry and stop polling.
+7. A current permission-denied response is distinct from a transient capability failure. List/capability/coverage/diagnostic 403s close protected dialogs, clear form credentials by unmount, remove project-protected caches and disable further reads/writes until access is restored and the page is reloaded. Ordinary 500/503 failures keep permitted history readable.
 
 ## Security and lifecycle decisions
 
@@ -34,6 +35,7 @@ The ProxCloud client gains the recent sandbox template console capabilities with
 - Any active build makes alias/new-build controls busy, including an older worker when the latest build failed. Backend 409 on deletion leaves a retryable confirmation; an older successful artifact can remain usable.
 - Cancel/close is local dialog teardown. There is no worker-cancellation route or Delete-as-cancel behavior.
 - New builds require a distinct primary name. The form accepts at most 64 RUN steps, no COPY/ENV or raw base editor. Runtime CPU/memory and builder CPU/memory/disk remain separate.
+- Modal close focus is restored at Radix's `onCloseAutoFocus` boundary to a captured trigger or its stable project/template ID, not an animation-frame callback racing focus-scope teardown.
 - Owned primary controls use high-contrast black text on brand orange or outline treatments. The scoped accessibility specs retain contrast checks, keyboard/Escape focus checks, and both 390px and desktop layouts in light/dark themes.
 
 ## Verification boundary

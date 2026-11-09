@@ -89,6 +89,37 @@ test("prepares image and observes fresh N/M coverage", async ({ page }) => {
   await expect(dialog).not.toBeVisible()
 })
 
+test("accepted prepare fences an older GET and keeps polling active intent", async ({ page }) => {
+  await templates(page)
+  await page.evaluate(async () => {
+    const apiPath = "/src/lib/api.ts", routerPath = "/src/mocks/router.ts"
+    const { setMockHandler } = await import(/* @vite-ignore */ apiPath)
+    const { dispatch } = await import(/* @vite-ignore */ routerPath)
+    const control = { reads: 0, posted: false, released: false, release: () => {} }
+    ;(window as unknown as { coverageRace: typeof control }).coverageRace = control
+    setMockHandler((path: string, opts: { method?: string }) => {
+      if (!path.endsWith("/prepare")) return dispatch(path, opts)
+      if (opts.method === "POST") { control.posted = true; return dispatch(path, opts) }
+      control.reads++
+      if (control.reads === 1) return new Promise((resolve) => {
+        control.release = () => { control.released = true; resolve({ data: { enabled: true, image: "old-image", pool: "cpu", pulled: 0, total: 3, ready: false } }) }
+      })
+      return dispatch(path, opts)
+    })
+  })
+  await actions(page)
+  await page.getByRole("menuitem", { name: "Prepare", exact: true }).click()
+  const dialog = page.getByRole("dialog", { name: "Prepare: web-app", exact: true })
+  await expect.poll(() => page.evaluate(() => (window as unknown as { coverageRace: { reads: number } }).coverageRace.reads)).toBe(1)
+  await dialog.getByRole("button", { name: "Prepare image", exact: true }).click()
+  await expect(dialog.getByText("Coverage: 0/3 nodes", { exact: true })).toBeVisible()
+  await expect(dialog.getByText("Waiting for image pulls on eligible nodes.", { exact: false })).toBeVisible()
+  await page.evaluate(() => (window as unknown as { coverageRace: { release: () => void } }).coverageRace.release())
+  await expect.poll(() => page.evaluate(() => (window as unknown as { coverageRace: { reads: number } }).coverageRace.reads), { timeout: 10000 }).toBeGreaterThan(1)
+  await expect(dialog.getByText("Coverage: 3/3 nodes", { exact: true })).toBeVisible({ timeout: 20000 })
+  await expect(dialog.getByText(/No active preparation, or the preparation has expired/)).toHaveCount(0)
+})
+
 test("shows disabled location capabilities without fake success", async ({ page }) => {
   await templates(page, "/p/prj-staging")
   await expect(page.getByRole("button", { name: "Import image digest", exact: true }).first()).toBeDisabled()

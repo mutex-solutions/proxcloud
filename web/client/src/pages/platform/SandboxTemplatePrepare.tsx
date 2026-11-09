@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -5,32 +6,49 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { apiFetch } from "@/lib/api"
 import { fmtDateTime } from "@/lib/format"
 import type { ProjectSandboxTemplate, SandboxTemplateCapabilities, SandboxTemplateCoverage } from "@/lib/types"
-import { sandboxTemplatePath } from "./sandbox-template-utils"
+import { sandboxTemplatePath, templateAccessDenied } from "./sandbox-template-utils"
 
 const activeCoverage = (coverage?: SandboxTemplateCoverage) => !!coverage?.enabled && !!coverage.expiresAt && Date.parse(coverage.expiresAt) > Date.now()
 
-export function SandboxTemplatePrepare({ pid, template, capabilities, onClose }: {
-  pid: string; template: ProjectSandboxTemplate; capabilities?: SandboxTemplateCapabilities; onClose: () => void
+export function SandboxTemplatePrepare({ pid, template, capabilities, onClose, onCloseAutoFocus, onAccessDenied }: {
+  pid: string; template: ProjectSandboxTemplate; capabilities?: SandboxTemplateCapabilities; onClose: () => void; onCloseAutoFocus?: (event: Event) => void; onAccessDenied?: () => void
 }) {
   const qc = useQueryClient()
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
   const key = ["sandbox-template-coverage", pid, template.id]
   const enabled = !!capabilities?.warmingEnabled && template.ready
   const coverage = useQuery({
     queryKey: key,
-    queryFn: () => apiFetch<SandboxTemplateCoverage>(sandboxTemplatePath(pid, template.id, "prepare")),
+    queryFn: async () => {
+      try { return await apiFetch<SandboxTemplateCoverage>(sandboxTemplatePath(pid, template.id, "prepare")) }
+      catch (error) { if (templateAccessDenied(error)) onAccessDenied?.(); throw error }
+    },
     enabled,
+    retry: (attempt, error) => !templateAccessDenied(error) && attempt < 1,
     refetchOnMount: "always",
-    refetchInterval: (q) => enabled && activeCoverage(q.state.data) ? 5000 : false,
+    refetchInterval: (q) => enabled && !templateAccessDenied(q.state.error) && activeCoverage(q.state.data) ? 5000 : false,
   })
   const prepare = useMutation({
-    mutationFn: () => apiFetch<SandboxTemplateCoverage>(sandboxTemplatePath(pid, template.id, "prepare"), { method: "POST" }),
-    onSuccess: (result) => qc.setQueryData(key, result),
+    // Cancel the older observer before admitting new intent. React Query's
+    // cancellation fence prevents an ignored/slow transport response from
+    // overwriting the POST result with a pre-prepare coverage snapshot.
+    onMutate: () => qc.cancelQueries({ queryKey: key, exact: true }),
+    mutationFn: () => {
+      if (!mounted.current || templateAccessDenied(coverage.error)) throw new Error("Preparation is no longer authorized")
+      return apiFetch<SandboxTemplateCoverage>(sandboxTemplatePath(pid, template.id, "prepare"), { method: "POST" })
+    },
+    onSuccess: (result) => { if (mounted.current) qc.setQueryData(key, result) },
+    onError: (error) => { if (templateAccessDenied(error)) onAccessDenied?.() },
   })
+  const denied = templateAccessDenied(coverage.error) || templateAccessDenied(prepare.error)
+  useEffect(() => { if (denied) onAccessDenied?.() }, [denied, onAccessDenied])
+  if (denied) return <p role="alert">Project cloud resource management permission required.</p>
   const data = coverage.data
   const stale = !!data && !activeCoverage(data)
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-xl">
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus} className="max-h-[90dvh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Prepare: {template.name}</DialogTitle>
           <DialogDescription>Request a temporary image pre-pull on the eligible runtime pool. Coverage is a point-in-time observation, not a startup-time guarantee or SLA.</DialogDescription>

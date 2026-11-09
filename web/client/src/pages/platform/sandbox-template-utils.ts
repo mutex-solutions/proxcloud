@@ -32,3 +32,5 @@ export function plainBuildText(value: string) {
     .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "")
 }
 export const activeBuild = (status?: string) => status === "waiting" || status === "building"
+export const templateAccessDenied = (error: unknown) =>
+  !!error && typeof error === "object" && "status" in error && error.status === 403

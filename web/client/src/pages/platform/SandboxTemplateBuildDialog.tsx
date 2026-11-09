@@ -9,10 +9,10 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { apiFetch } from "@/lib/api"
 import type { ProjectSandboxTemplate, SandboxTemplateActionResult, SandboxTemplateCapabilities } from "@/lib/types"
-import { sandboxTemplatePath, templateNamePattern, validCommand, validSize } from "./sandbox-template-utils"
+import { sandboxTemplatePath, templateAccessDenied, templateNamePattern, validCommand, validSize } from "./sandbox-template-utils"
 
-export function SandboxTemplateBuildDialog({ pid, template, capabilities, onClose, onBuilt }: {
-  pid: string; template: ProjectSandboxTemplate; capabilities: SandboxTemplateCapabilities; onClose: () => void; onBuilt: (id: string) => void
+export function SandboxTemplateBuildDialog({ pid, template, capabilities, onClose, onCloseAutoFocus, onAccessDenied, onBuilt }: {
+  pid: string; template: ProjectSandboxTemplate; capabilities: SandboxTemplateCapabilities; onClose: () => void; onCloseAutoFocus?: (event: Event) => void; onAccessDenied?: () => void; onBuilt: (id: string) => void
 }) {
   const qc = useQueryClient()
   const mounted = useRef(true)
@@ -43,10 +43,11 @@ export function SandboxTemplateBuildDialog({ pid, template, capabilities, onClos
       void qc.invalidateQueries({ queryKey: ["sandbox-templates", pid] })
       if (mounted.current) { toast.success("Template build requested"); onBuilt(result.templateID) }
     },
+    onError: (error) => { if (templateAccessDenied(error)) onAccessDenied?.() },
   })
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus} className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>New build</DialogTitle>
           <DialogDescription>Create a new template from a ready project template. Imports stay immutable: a build always needs a different name. The server selects the ready base artifact. Closing this dialog does not stop an accepted build.</DialogDescription>

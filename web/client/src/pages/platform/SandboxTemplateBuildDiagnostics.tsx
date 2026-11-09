@@ -7,14 +7,18 @@ import { StatusBadge } from "@/components/status-badge"
 import { apiFetch } from "@/lib/api"
 import { fmtDateTime } from "@/lib/format"
 import type { SandboxBuildLogs, SandboxTemplateBuild } from "@/lib/types"
-import { activeBuild, plainBuildText, sandboxTemplatePath } from "./sandbox-template-utils"
+import { activeBuild, plainBuildText, sandboxTemplatePath, templateAccessDenied } from "./sandbox-template-utils"
 
-export function SandboxTemplateBuildDiagnostics({ pid, templateId, build }: { pid: string; templateId: string; build: SandboxTemplateBuild }) {
+export function SandboxTemplateBuildDiagnostics({ pid, templateId, build, onAccessDenied }: { pid: string; templateId: string; build: SandboxTemplateBuild; onAccessDenied?: () => void }) {
   const qc = useQueryClient()
   const logs = useQuery({
     queryKey: ["sandbox-template-logs", pid, templateId, build.buildID],
-    queryFn: () => apiFetch<SandboxBuildLogs>(`${sandboxTemplatePath(pid, templateId, "builds", build.buildID, "logs")}?logsOffset=0`),
+    queryFn: async () => {
+      try { return await apiFetch<SandboxBuildLogs>(`${sandboxTemplatePath(pid, templateId, "builds", build.buildID, "logs")}?logsOffset=0`) }
+      catch (error) { if (templateAccessDenied(error)) onAccessDenied?.(); throw error }
+    },
     refetchOnMount: "always",
+    retry: (attempt, error) => !templateAccessDenied(error) && attempt < 1,
     refetchInterval: (query) => {
       const data = query.state.data
       if (query.state.error) return false
@@ -27,6 +31,9 @@ export function SandboxTemplateBuildDiagnostics({ pid, templateId, build }: { pi
   useEffect(() => {
     if (logs.data?.status && logs.data.status !== build.status) void qc.invalidateQueries({ queryKey: ["sandbox-templates", pid] })
   }, [logs.data?.status, build.status, qc, pid])
+  const denied = templateAccessDenied(logs.error)
+  useEffect(() => { if (denied) onAccessDenied?.() }, [denied, onAccessDenied])
+  if (denied) return <p role="alert">Project cloud resource management permission required.</p>
   const data = logs.data
   const diagnostics = data?.diagnostics ?? build.diagnostics
   const status = data?.status ?? build.status

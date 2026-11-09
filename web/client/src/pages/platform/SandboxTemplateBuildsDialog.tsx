@@ -9,11 +9,11 @@ import type { ProjectSandboxTemplate } from "@/lib/types"
 import { SandboxTemplateBuildDiagnostics } from "./SandboxTemplateBuildDiagnostics"
 import { plainBuildText } from "./sandbox-template-utils"
 
-export function SandboxTemplateBuildsDialog({ pid, template, onClose }: { pid: string; template: ProjectSandboxTemplate; onClose: () => void }) {
+export function SandboxTemplateBuildsDialog({ pid, template, onClose, onCloseAutoFocus, onAccessDenied }: { pid: string; template: ProjectSandboxTemplate; onClose: () => void; onCloseAutoFocus?: (event: Event) => void; onAccessDenied?: () => void }) {
   const [expanded, setExpanded] = useState<string | null>(null)
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl">
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus} className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>{template.kind === "snapshot" ? "Snapshot" : "Builds"}: {template.name}</DialogTitle>
           <DialogDescription>{template.kind === "snapshot" ? `Taken from ${template.sourceSandbox || "a sandbox"}. Start a sandbox from it by name.` : "Newest first. Build tags select an artifact; template aliases are managed separately."}</DialogDescription>
@@ -35,7 +35,7 @@ export function SandboxTemplateBuildsDialog({ pid, template, onClose }: { pid: s
             {build.startCmd && <p className="break-words font-mono text-xs text-muted-foreground">start: {plainBuildText(build.startCmd)}</p>}
             {build.readyCmd && <p className="break-words font-mono text-xs text-muted-foreground">ready: {plainBuildText(build.readyCmd)}</p>}
             <div><Button variant="outline" size="sm" aria-expanded={expanded === build.buildID} onClick={() => setExpanded(expanded === build.buildID ? null : build.buildID)}><ScrollText aria-hidden="true" />{expanded === build.buildID ? "Hide diagnostics and logs" : "Diagnostics and logs"}</Button></div>
-            {expanded === build.buildID && <SandboxTemplateBuildDiagnostics pid={pid} templateId={template.id} build={build} />}
+            {expanded === build.buildID && <SandboxTemplateBuildDiagnostics pid={pid} templateId={template.id} build={build} onAccessDenied={onAccessDenied} />}
           </li>)}
         </ul>
         {!template.builds.length && <p className="text-sm text-muted-foreground">No builds recorded.</p>}
