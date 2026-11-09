@@ -22,6 +22,21 @@ sbx.kill()
 differently and what does not, with the reason. Reference: E2B's `spec/openapi.yml` and envd at e2b-dev/infra
 `e85b9f5` (envd 0.10.2). Design and lab measurements: [managed-sandbox.md §5](managed-sandbox.md#5-the-e2b-compatible-api-sb5).
 
+## Current saved-lifecycle availability
+
+Managed manual/automatic pause, resume, paused CONNECT/wake, fork and new
+AutoPause/AutoResume promises are **held with a fixed 403 before lifecycle effects**.
+The provider-wide capability is false without an override; copied CREATE annotations
+and dormant SnapshotProof correlations are not restore authority. Historical copies
+are retained on refusal, but the original source can still expire at its existing
+shutdownTime. No hidden lease renewal, TTL extension or retry clears this hold.
+
+Named filesystem snapshot capture/export, pinned CREATE from a ready named snapshot,
+ordinary CREATE and existing running CONNECT/GET/exec/timeout remain supported where
+offered. Explicit authorized discard keeps its uncertainty/active-lease fences.
+See [saved-runtime admission](saved-runtime-admission.md). Earlier SB7 lifecycle
+algorithm details below are historical and do not promise reachable managed restore.
+
 ## How it fits together
 
 | E2B piece | ProxCloud |
@@ -77,17 +92,17 @@ served, answers 404 with E2B's error body (or 400 for a refused field).
 | Endpoint | Status | Notes |
 |---|---|---|
 | `GET /health` | yes | |
-| `POST /sandboxes`, `POST /v2/sandboxes` | partial | `templateID` (a built-in template), `timeout` (1 s up to the provider's maximum, 24 h by default; 300 s when not sent), `metadata`, `envVars`, `network`, `allow_internet_access`. Returns once the sandbox is ready (envd up, the template's ready command passed); all templates use phased startup (default total/scheduling/pull/runtime 900/120/720/600 s, hard total 1800 s), bounded by caller cancellation. Runtime TTL starts once at the first committed Ready, not at create. A finite provisional startup+runtime deadline protects a crashed request; late cache/access reads cannot return usable success. Failure removes the sandbox and answers 503. `secure` is ignored (envd always requires its token). `autoPause` pauses the filesystem only (`autoPauseMemory: true` → 400); `autoResume` with `autoPause` cold-boots a paused sandbox on traffic to its ports. `volumeMounts` → 400; `mcp` must be an object (the SDK starts the gateway in an `mcp-gateway` sandbox; the API never stores or logs it). `iam` and `Idempotency-Key` are ignored. ProxCloud extensions: `cpuCount`, `memoryMB` (rounded up to whole GiB), `gpu {model, count}` (no GPU nodes before SB9) |
+| `POST /sandboxes`, `POST /v2/sandboxes` | partial | `templateID` (a built-in template), `timeout` (1 s up to the provider's maximum, 24 h by default; 300 s when not sent), `metadata`, `envVars`, `network`, `allow_internet_access`. Returns once the sandbox is ready (envd up, the template's ready command passed); all templates use phased startup (default total/scheduling/pull/runtime 900/120/720/600 s, hard total 1800 s), bounded by caller cancellation. Runtime TTL starts once at the first committed Ready, not at create. A finite provisional startup+runtime deadline protects a crashed request; late cache/access reads cannot return usable success. Failure removes the sandbox and answers 503. `secure` is ignored (envd always requires its token). `autoPause`/`autoResume` promises are currently held with 403; invalid memory/configuration requests retain 400 precedence. `volumeMounts` → 400; `mcp` must be an object (the SDK starts the gateway in an `mcp-gateway` sandbox; the API never stores or logs it). `iam` and `Idempotency-Key` are ignored. ProxCloud extensions: `cpuCount`, `memoryMB` (rounded up to whole GiB), `gpu {model, count}` (no GPU nodes before SB9) |
 | `GET /sandboxes`, `GET /v2/sandboxes` | partial | `metadata` and `state` filters; running and paused sandboxes; one page holds everything, so `nextToken` is never set |
 | `GET /sandboxes/{id}` | yes | `diskSizeMB` is 0 |
 | `DELETE /sandboxes/{id}` | yes | |
 | `POST /sandboxes/{id}/timeout` | yes | |
 | `POST /sandboxes/{id}/refreshes` | yes | |
-| `POST /sandboxes/{id}/connect`, `/v2/…/connect` | partial | Returns the sandbox and extends its timeout; a paused sandbox is resumed (201) as a cold boot, whatever `memory` says |
+| `POST /sandboxes/{id}/connect`, `/v2/…/connect` | partial | Returns the sandbox and extends its timeout; paused CONNECT is currently held with 403; running CONNECT remains supported |
 | `PUT /sandboxes/{id}/network` | partial | `allowOut` / `denyOut` / `dnsServers`. `egressProxy`, `rules`, `maskRequestHost`, `httpsPorts` → 400. `allowPublicTraffic` only at create |
 | `GET /sandboxes/{id}/logs`, `/v2/…/logs` | partial | The sandbox's stdout/stderr (envd and the template's start command), newest 1000 lines; no `start`/`limit` or cursor |
 | `GET /sandboxes/{id}/metrics`, `GET /sandboxes/metrics` | partial | Always empty |
-| `POST /sandboxes/{id}/pause`, `/resume`, `/snapshots`, `/fork`, `GET /snapshots` | partial | Filesystem only: `memory: true` → 400, a resume or fork is a cold boot. At most 10 forks. Snapshots are templates of the project, billed per GB-hour until deleted. Fork and create from a snapshot whose image is still being assembled answer 503 after 60 s; retry (see below) |
+| `POST /sandboxes/{id}/pause`, `/resume`, `/snapshots`, `/fork`, `GET /snapshots` | partial | Named filesystem snapshots remain templates of the project, billed per GB-hour until deleted; named-snapshot CREATE may answer 503 while assembly is pending. Managed pause/resume/fork are currently held with 403; invalid memory/count/timeout checks still precede admission |
 
 ### Templates
 
@@ -133,23 +148,19 @@ dashboard APIs. They answer 404 with E2B's error body.
 
 ## What does not work, and why
 
-1. **Pause, resume, snapshots and fork** keep the filesystem only: files are back after a resume; processes, memory
-   and open connections are not. Files deleted from the template's image come back too.
-2. **`autoPause` and `autoResume`** pause at the timeout (within a minute) and wake on traffic to a port; both answer
-   400 where the location cannot take snapshots or has no wake token. The stock Python SDK (2.63) refuses
-   `auto_resume=True` together with `on_timeout={"action": "pause", "mode": "filesystem"}` before it sends anything
-   ("a filesystem-only snapshot cannot be auto-resumed by traffic"). Leave `mode` out
-   (`lifecycle={"on_timeout": "pause", "auto_resume": True}`): the SDK then sends no `autoPauseMemory`, and ProxCloud
-   pauses the filesystem, as it always does. With `mode: "filesystem"` and no `auto_resume`, a paused sandbox comes
-   back with `connect`.
-3. **Pause with memory** (`memory: true`, `mode: "full"`, `autoPauseMemory`): never. gVisor in a pod has no microVM
-   snapshot; a later resume is a cold boot (files kept, processes, memory and open connections not).
-4. **Fork and create from a snapshot on a slow site.** A snapshot image takes tens of seconds to assemble (66 s on the
-   lab). Both calls wait for it at most 60 s, so that they answer within the SDK's 120 s cut, then answer 503 "the
-   snapshot is still being assembled; retry" (`ServiceBusyException`); the SDK does not retry it itself, since its
-   retry budget is spent by then. Retry the call: a create from a named snapshot takes no new snapshot, and a fork
-   retried within 5 minutes reuses the snapshot of the fork that answered 503 (its files as of that first call)
-   instead of capturing again, so both succeed once the image is ready.
+1. **Managed pause/resume/fork** are currently unavailable, not an automatically
+   retryable operation. New AutoPause/AutoResume create requests are refused before
+   CREATE owner/pin/cluster effects. An existing historical paused record is retained
+   on refusal; its source deadline is not rearmed. Memory snapshots remain unsupported.
+2. **Named filesystem snapshots** remain supported separately. They do not preserve
+   processes, RAM, connections or whiteouts. A ready named image is started through
+   the already-pinned ordinary CREATE protocol, not the held saved-runtime path.
+3. **Slow named-snapshot CREATE** waits at most SnapshotRequestWait and can answer
+   503 while assembly continues. Retrying that named CREATE does not recapture; fork
+   itself is held403 and creates no retry snapshot or children.
+4. **Recovery prerequisites** are still incomplete: trusted source/capture/provider
+   lineage and enforceable exclusion of old issued Apply/controller recreation. A
+   missing CR, lease age or new operation/head CAS does not supply either proof.
 5. **Custom templates**: the v3 build API works (`Template()` builder, `from_dockerfile`,
    `e2b template build`, tags and delete). ECR uses `type: "aws"` with explicit
    `awsAccessKeyId`, `awsSecretAccessKey`, `awsRegion`; the image must be a matching
@@ -164,7 +175,7 @@ dashboard APIs. They answer 404 with E2B's error body.
    `github/<owner>/<repo>` servers with a `run_cmd`; any other name fails the create ("not available on ProxCloud").
    E2B's servers that run from a Docker image and have no remote endpoint are not offered (no Docker inside gVisor).
    A server's keys come only from the tenant's config; a missing required field fails the create. The gateway restarts
-   with the sandbox (`mcp-gateway boot`), so after a resume (SB7) the same tools come back.
+   with the sandbox (`mcp-gateway boot`), ordinary fresh CREATE initializes the same offered gateway tools; managed resume is currently held.
 7. **Volumes** (`volumeMounts`, `/volumes`): 400 / 404. A sandbox has ephemeral storage only, by design: the sandbox cluster has no CSI
    token and no NAS dataset, so an escape from gVisor finds no storage credential.
 8. **Network `egressProxy`, `rules`, `maskRequestHost`, `httpsPorts`**: 400. The egress policy is Cilium (CIDR and
@@ -175,7 +186,7 @@ dashboard APIs. They answer 404 with E2B's error body.
     domains that resolve to them (the guardrail protects the platform's and other tenants' networks).
 11. **Metrics**: always empty; no per-sandbox metrics are collected.
 12. **Logs filters** (`start`, `limit`, cursor): not supported; the newest 1000 lines.
-13. **Slow starts**: all create, native create, resume, fork and wake operations use the
+13. **Slow starts**: ordinary create and native create operations use the
     provider's phased startup policy, with one cancellation/deadline envelope including cache
     and final access reads. Set the SDK's request timeout long enough for the configured
     budget (for the default total, e.g. `request_timeout=930`, `retries=0`). Runtime TTL

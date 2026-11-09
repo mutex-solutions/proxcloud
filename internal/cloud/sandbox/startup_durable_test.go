@@ -175,13 +175,18 @@ func TestReadyClockPendingVanishNeverCreatesBillingResource(t *testing.T) {
 
 func TestArmedSavedResumePreservesProvisionalShutdown(t *testing.T) {
 	f := newFake()
-	s := NewWithAPI(f, testConfig(), "svc")
+	cfg := testConfig()
+	cfg.TemplateRegistry = "registry.example/t"
+	python := cfg.Templates["python"]
+	python.Image = "external.example/library/python:3.12"
+	cfg.Templates["python"] = python
+	s := NewWithAPI(f, cfg, "svc")
 	now := time.Now().UTC()
 	s.now = func() time.Time { return now }
 	saved := BuildCR(s.Config(), "svc", Spec{ID: "sbx-00000001", ProjectID: "p1", Template: "python", CPU: 1, MemoryGiB: 2}, now)
 	ArmSavedStartup(saved, s.Config(), 60, now)
 	armed := digStr(saved, "spec", "shutdownTime")
-	if err := s.ResumeSandbox(context.Background(), "p1", saved, "python:3.12", now.Add(time.Minute), nil); err != nil {
+	if err := s.ResumeSandbox(context.Background(), "p1", saved, python.Image, now.Add(time.Minute), nil); err != nil {
 		t.Fatal(err)
 	}
 	if digStr(f.crs["sb-p1/sbx-00000001"], "spec", "shutdownTime") != armed {

@@ -30,6 +30,10 @@ func assertSandboxID(t *testing.T, cr map[string]any, want string) {
 func TestEnvironmentCreateAndSavedIDs(t *testing.T) {
 	f := newFake()
 	cfg := testConfig()
+	cfg.TemplateRegistry = "registry.example/t"
+	python := cfg.Templates["python"]
+	python.Image = "external.example/library/python:3.12"
+	cfg.Templates["python"] = python
 	cfg.Envd = true
 	s := NewWithAPI(f, cfg, "svc-sbx")
 	sp := Spec{ProjectID: "p1", Template: "python", Env: map[string]string{"LARGE": strings.Repeat("secret", 3000)}}
@@ -55,11 +59,11 @@ func TestEnvironmentCreateAndSavedIDs(t *testing.T) {
 		firstContainer(cr)["env"] = old
 		clone, id := CloneSaved(cr)
 		assertSandboxID(t, clone, id)
-		if err := s.ResumeSandbox(context.Background(), "p1", cr, "python:3.12", time.Now(), nil); err != nil {
+		if err := s.ResumeSandbox(context.Background(), "p1", cr, python.Image, time.Now().Add(time.Hour), nil); err != nil {
 			t.Fatal(err)
 		}
 		assertSandboxID(t, cr, sp.ID)
-		if err := s.ResumeSandbox(context.Background(), "p2", cr, "python:3.12", time.Now(), nil); err != ErrNotFound {
+		if err := s.ResumeSandbox(context.Background(), "p2", cr, python.Image, time.Now().Add(time.Hour), nil); err != ErrNotFound {
 			t.Fatalf("cross-project resume: %v", err)
 		}
 	}

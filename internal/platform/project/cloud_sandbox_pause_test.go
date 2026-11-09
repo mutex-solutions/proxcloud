@@ -29,16 +29,26 @@ func TestSandboxPauseRefusal(t *testing.T) {
 		{"plain", &Handler{}, sandbox.Config{}, false, false, ""},
 		{"pause, no stores", &Handler{}, builds, true, false, "autoPause is not available at this location"},
 		{"pause, no build bucket", on, sandbox.Config{}, true, false, "autoPause is not available at this location"},
-		{"pause", on, builds, true, false, ""},
+		{"pause", on, builds, true, false, sandbox.ErrManagedSavedStartHeld.Error()},
 		{"resume without pause", on, wake, false, true, "autoResume needs autoPause"},
 		{"resume, no wake token", on, builds, true, true, "autoResume is not available at this location"},
-		{"pause and resume", on, wake, true, true, ""},
+		{"pause and resume", on, wake, true, true, sandbox.ErrManagedSavedStartHeld.Error()},
 	} {
 		spec := &sandbox.Spec{ProjectID: "p", AutoPause: c.pause, AutoResume: c.resume}
 		err := c.h.pauseRefusal(c.cfg, spec)
 		if c.wantMsg == "" {
 			if err != nil {
 				t.Errorf("%s: refused: %v", c.name, err)
+			}
+			continue
+		}
+		if c.wantMsg == sandbox.ErrManagedSavedStartHeld.Error() {
+			if !errors.Is(err, sandbox.ErrManagedSavedStartHeld) {
+				t.Errorf("%s: %v", c.name, err)
+			}
+			ss := sandbox.NewWithAPI(nil, c.cfg, "svc")
+			if _, e := c.h.createSandboxResource(context.Background(), &Project{ID: "p"}, nil, ss, spec); !errors.Is(e, sandbox.ErrManagedSavedStartHeld) {
+				t.Errorf("%s create: %v", c.name, e)
 			}
 			continue
 		}

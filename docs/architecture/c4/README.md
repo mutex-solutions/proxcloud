@@ -19,6 +19,7 @@ diagrams changed.
 | [Validation approval outbox](../../c4-validation-approved-outbox.md) | C1–C4: Approval-only mail | How the actual validation decision, immutable generation and keyless revocation share a commit, while activation remains outside SQL and delivery remains OFF. |
 | [Savings contract-expired outbox](../../savings-expired-outbox.md) | C1–C4: Expired-term mail | How one canonical-term decision, immutable history and all four keyless cancellation paths share owned SQL boundaries while producer and delivery remain default OFF. |
 | [Dormant snapshot registry core](../../registry-snapshot-core.md) | C1–C4: Snapshot prerequisite | How fixed snapshot envelopes, exact pin-role epochs and typed publication handoff stay dormant without capture callers, DEST retirement or GC authorization. |
+| [Saved-runtime admission](../../saved-runtime-admission.md) | C1–C4: Fail-closed lifecycle | Why managed pause/resume/fork is held before effects while capture/pinned CREATE and explicit discard remain separate. |
 | [CHANGELOG.md](CHANGELOG.md) | History | What changed in the architecture, in which PR, and why. |
 
 The prose deep dives in [`docs/`](../../README.md) (auth, billing, jobs, data

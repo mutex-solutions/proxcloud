@@ -116,7 +116,7 @@ export function automaticActionError(f: SandboxFormState): string | null {
   const action = jsonBlock(f.abuseJSON)?.action
   if (action !== "pause" && action !== "kill") return null
   if (f.envd) return "Pause/kill CPU responses require envd off: silent SDK exec activity cannot be proved. Use alert on E2B providers."
-  if (action === "pause" && (!f.templateRegistry.trim() || !f.buildBucket.trim() || !f.buildEndpoint.trim())) return "Automatic pause needs a template registry and build bucket so the filesystem can be recovered."
+  if (action === "pause" && (!f.templateRegistry.trim() || !f.buildBucket.trim() || !f.buildEndpoint.trim())) return "Automatic pause needs a template registry and build bucket, but managed saved lifecycle is currently held; configure alert instead."
   return null
 }
 
@@ -311,7 +311,7 @@ export function SandboxProviderForm({ form, setForm, mode = "create" }: {
       <Field id="sb-egress" label="Default egress cap (Mbps)" value={form.egressMbps} onChange={set("egressMbps")} hint="100 Mbps by default. Curated template egressMbps overrides inherit this unless set. Existing pods keep their cap." />
       <Label htmlFor="sb-abuse">Sustained CPU policy (JSON)</Label>
       <Textarea id="sb-abuse" value={form.abuseJSON} onChange={(e) => set("abuseJSON")(e.target.value)} className="font-mono text-xs" />
-      <p className="text-xs text-muted-foreground">Heuristic, not proof of mining. Alert by default; pause/kill opt-in requires envd off. Silent SDK exec activity cannot be proved, so E2B providers must use alert. Native pause needs the current node runtime, registry and build bucket; it saves files, not processes, and the source stops only after its image is usable and policy/activity is rechecked. Recover via the project sandbox-paused API. Kill loses files. Legitimate unattended jobs can match. Configure notifyEmails and the mail gateway.</p>
+      <p className="text-xs text-muted-foreground">Heuristic, not proof of mining. Alert by default; pause/kill opt-in requires envd off. Silent SDK exec activity cannot be proved, so E2B providers must use alert. Managed pause, resume, fork and auto-pause promises are currently held by backend admission, including native automatic pause. Use alert; existing retained copies are listed safely but cannot be resumed under this hold. Their source may still expire at its existing deadline. Named snapshot capture/export and ordinary create remain separate capabilities. Kill loses files. Legitimate unattended jobs can match. Configure notifyEmails and the mail gateway.</p>
       {automaticActionError(form) && <p role="alert" className="text-xs text-destructive">{automaticActionError(form)}</p>}
       <Label htmlFor="sb-rotation">Worker rotation (JSON, default off)</Label>
       <Textarea id="sb-rotation" value={form.rotationJSON} onChange={(e) => set("rotationJSON")(e.target.value)} className="font-mono text-xs" />

@@ -2,7 +2,7 @@
 
 **Platform → Sandboxes** provides short-lived, isolated environments for running code. Your operator chooses the available templates, GPU models, runtime limits and network policy. If sandboxes are not enabled for the project, ask the operator to attach a sandbox location.
 
-A sandbox is not a persistent server: deleting it or reaching its time limit removes its files unless you have separately saved them through a supported snapshot or pause operation.
+A sandbox is not a persistent server: deleting it or reaching its time limit removes its files unless you separately saved them through an offered named filesystem snapshot/export. Managed pause/resume/fork and AutoPause/AutoResume are currently held before lifecycle effects; do not rely on them for persistence. Existing retained copies stay visible, but their original source can expire at its unchanged deadline.
 
 ## Start and use a sandbox
 
