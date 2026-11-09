@@ -315,3 +315,32 @@ func (h *Handler) retireImportPins(ctx context.Context, ss *sandbox.Service, t *
 	}
 	return nil
 }
+
+// Freeze deletion under the same project/name lock as aliases and new imports.
+// Physical I/O and pin release occur only after this tombstone is committed.
+func (h *Handler) freezeTemplateDeletion(ctx context.Context, t *sandboxTemplateDoc) error {
+	return h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
+		if err := h.sbTemplates.DB().LockXact(tc, projectTemplateLock(t.ProjectID)); err != nil {
+			return err
+		}
+		var cur sandboxTemplateDoc
+		found, err := h.sbTemplates.GetForUpdate(tc, t.ID, &cur)
+		if err != nil {
+			return err
+		}
+		if !found || cur.ProjectID != t.ProjectID {
+			return sandbox.ErrNotFound
+		}
+		for _, b := range cur.Builds {
+			if buildPinActive(b) || b.Status == sandbox.BuildBuilding && t.Kind != "snapshot" || b.CancelRequested {
+				return errBuildPinState
+			}
+		}
+		cur.Deleting = true
+		_, err = h.sbTemplates.Replace(tc, cur.ID, &cur)
+		if err == nil {
+			*t = cur
+		}
+		return err
+	})
+}

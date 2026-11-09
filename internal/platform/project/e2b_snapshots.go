@@ -465,7 +465,8 @@ func (h *Handler) finishSnapshot(ctx context.Context, c *e2bCaller, t *sandboxTe
 		return false, err
 	}
 	if changed {
-		dctx := context.WithoutCancel(ctx)
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
 		if st.Status == sandbox.BuildReady {
 			h.snapshotStorageRow(dctx, c, ft)
 		}
@@ -524,7 +525,19 @@ func (h *Handler) dropSnapshot(ctx context.Context, c *e2bCaller, templateID str
 	if err != nil || t == nil {
 		return
 	}
-	if err := h.deleteTemplate(ctx, c.ss, t); err != nil {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	// Internal snapshot teardown owns the terminal assembly worker even if its
+	// output archive was awaiting recapture. Remove it before its last DB owner.
+	for _, b := range t.Builds {
+		if buildPinActive(b) {
+			return
+		}
+		if err := c.ss.DeleteBuild(cleanup, b.BuildID); err != nil {
+			return
+		}
+	}
+	if err := h.deleteTemplate(cleanup, c.ss, t); err != nil {
 		slog.Error("e2b: drop snapshot", "template", templateID, "err", err)
 	}
 }

@@ -4,17 +4,19 @@ package project
 // credentials (fromImageRegistry), a built-in template, or one of the project's own templates (fromTemplate). The build
 // pod's `base` init container pulls it; a credential is only ever mounted there (never into kaniko, where the caller's
 // RUN steps execute).
-//
-// fromImageRegistry type "aws" is not offered: E2B exchanges the caller's AWS keys for an ECR token server side, which
-// needs the AWS SDK's ECR client for a cloud ProxCloud does not run on. An ECR image still builds with type "registry",
-// username "AWS" and the output of `aws ecr get-login-password` (valid 12 h) as the password (docs/e2b-compat.md).
 
 import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/ecr"
+	"github.com/distribution/reference"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 )
@@ -24,6 +26,9 @@ type fromRegistry struct {
 	Type               string `json:"type"`
 	Username           string `json:"username"`
 	Password           string `json:"password"`
+	AwsAccessKeyID     string `json:"awsAccessKeyId"`
+	AwsSecretAccessKey string `json:"awsSecretAccessKey"`
+	AwsRegion          string `json:"awsRegion"`
 	ServiceAccountJSON string `json:"serviceAccountJson"`
 }
 
@@ -37,6 +42,11 @@ type buildBase struct {
 }
 
 const dockerHubAuthKey = "https://index.docker.io/v1/"
+
+var (
+	awsRegionRe = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`)
+	ecrHostRe   = regexp.MustCompile(`^\d{12}\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com$`)
+)
 
 // errBase is a 400 for the build request.
 func errBase(format string, a ...any) error {
@@ -64,8 +74,40 @@ func registryHost(ref string) string {
 	return first
 }
 
+// ecrToken exchanges static AWS keys for an ECR registry token (base64 "AWS:<password>", valid
+// 12 h): only the token reaches the cluster, never the keys. A variable for tests.
+var ecrToken = func(ctx context.Context, keyID, secret, region string) (string, error) {
+	cl := ecr.New(ecr.Options{Region: region, Credentials: credentials.NewStaticCredentialsProvider(keyID, secret, "")})
+	out, err := cl.GetAuthorizationToken(ctx, &ecr.GetAuthorizationTokenInput{})
+	if err != nil {
+		return "", err
+	}
+	if len(out.AuthorizationData) == 0 || out.AuthorizationData[0].AuthorizationToken == nil {
+		return "", errors.New("ECR returned no authorization token")
+	}
+	return *out.AuthorizationData[0].AuthorizationToken, nil
+}
+
+func parseCallerImage(image string) (reference.Named, error) {
+	ref, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		return nil, errBase("fromImage must be a valid OCI image reference with a lowercase repository name (no URL scheme or credentials)")
+	}
+	namespace, _, _ := strings.Cut(reference.Path(ref), "/")
+	if namespace == "t" {
+		return nil, errBase("the managed template registry namespace is reserved: use fromTemplate for an owned template")
+	}
+	return ref, nil
+}
+
 // registryDockerConfig turns fromImageRegistry into a dockerconfigjson for image's registry.
 func registryDockerConfig(cfg sandbox.Config, image string, r *fromRegistry) ([]byte, error) {
+	return registryDockerConfigContext(context.Background(), cfg, image, r)
+}
+func registryDockerConfigContext(ctx context.Context, cfg sandbox.Config, image string, r *fromRegistry) ([]byte, error) {
+	if _, err := parseCallerImage(image); err != nil {
+		return nil, err
+	}
 	host := registryHost(image)
 	if own := registryHost(strings.TrimRight(cfg.TemplateRegistry, "/") + "/x"); own != "" && host == own {
 		return nil, errBase("fromImageRegistry cannot be used with the sandbox registry: use fromTemplate")
@@ -83,9 +125,22 @@ func registryDockerConfig(cfg sandbox.Config, image string, r *fromRegistry) ([]
 		}
 		auth = base64.StdEncoding.EncodeToString([]byte("_json_key:" + r.ServiceAccountJSON))
 	case "aws":
-		return nil, errBase(`fromImageRegistry: type aws is not supported here; use type registry with username "AWS" and the output of "aws ecr get-login-password" as the password`)
+		if r.AwsAccessKeyID == "" || r.AwsSecretAccessKey == "" || !awsRegionRe.MatchString(r.AwsRegion) {
+			return nil, errBase("fromImageRegistry: awsAccessKeyId, awsSecretAccessKey and a valid awsRegion are required")
+		}
+		match := ecrHostRe.FindStringSubmatch(host)
+		if match == nil || match[1] != r.AwsRegion {
+			return nil, errBase("fromImageRegistry: AWS registry host must match awsRegion")
+		}
+		tokenCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		token, err := ecrToken(tokenCtx, r.AwsAccessKeyID, r.AwsSecretAccessKey, r.AwsRegion)
+		cancel()
+		if err != nil {
+			return nil, errBase("fromImageRegistry: could not get an ECR token with these credentials")
+		}
+		auth = token
 	default:
-		return nil, errBase("fromImageRegistry: type must be registry or gcp")
+		return nil, errBase("fromImageRegistry: type must be registry, aws or gcp")
 	}
 	key := host
 	switch key {
@@ -125,7 +180,7 @@ func (h *Handler) resolveBase(ctx context.Context, c *e2bCaller, fromImage, from
 			return nil, err
 		}
 		if t == nil || t.Internal {
-			return nil, errBase("template '%s' not found", fromTemplate)
+			return nil, errBase("%s", h.unknownTemplate(ctx, c, fromTemplate))
 		}
 		var bl *templateBuild
 		if tag == "" || tag == "default" {
@@ -154,6 +209,9 @@ func (h *Handler) resolveBase(ctx context.Context, c *e2bCaller, fromImage, from
 	if repo, _, _ := strings.Cut(fromImage, "@"); strings.ToLower(imageRepoName(repo)) != imageRepoName(repo) {
 		return nil, errBase("fromImage %q: the repository name must be lowercase", fromImage)
 	}
+	if _, err := parseCallerImage(fromImage); err != nil {
+		return nil, err
+	}
 	if noRegistry {
 		if onRegistry(fromImage) == sandbox.BaseAuthRegistry {
 			// The registry's own images by name: a built-in through fromTemplate, a project template likewise.
@@ -165,7 +223,7 @@ func (h *Handler) resolveBase(ctx context.Context, c *e2bCaller, fromImage, from
 	if err := json.Unmarshal(rawRegistry, &r); err != nil {
 		return nil, errBase("fromImageRegistry is not valid: %v", err)
 	}
-	dc, err := registryDockerConfig(cfg, fromImage, &r)
+	dc, err := registryDockerConfigContext(ctx, cfg, fromImage, &r)
 	if err != nil {
 		return nil, err
 	}

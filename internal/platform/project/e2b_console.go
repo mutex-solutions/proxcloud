@@ -127,6 +127,9 @@ func consoleBuildView(t *sandboxTemplateDoc, b *templateBuild, tags []string) co
 	if t.Kind == "snapshot" {
 		v.Mode = "snapshot"
 	}
+	if buildPinSDKStatus(b) != sandbox.BuildReady {
+		v.Image = ""
+	}
 	_, v.Digest, _ = strings.Cut(v.Image, "@")
 	return v
 }
@@ -148,6 +151,12 @@ func consoleView(t *sandboxTemplateDoc) consoleTemplate {
 	if len(v.Builds) > 0 {
 		b := v.Builds[0]
 		v.Status, v.Mode, v.Source, v.Image, v.Digest = b.Status, b.Mode, b.Source, b.Image, b.Digest
+		if v.Image == "" {
+			if ready := t.defaultBuild(); ready != nil {
+				usable := consoleBuildView(t, ready, nil)
+				v.Image, v.Digest = usable.Image, usable.Digest
+			}
+		}
 	}
 	return v
 }

@@ -42,12 +42,13 @@ func (h *Handler) consoleTemplateCapabilities(w http.ResponseWriter, r *http.Req
 	}
 	cfg := c.ss.Config().WithDefaults()
 	_, workerErr := c.ss.ImportWorker(r.Context())
+	warming, warmingErr := c.ss.WarmingAvailable(r.Context())
 	cpu, memory := templateSize(0, 0)
 	httpx.OK(w, consoleTemplateCapabilities{
 		Runtime: consoleRuntimeCapabilities{CPU: cpu, MemoryGiB: memory, MaxCPU: cfg.Limits.MaxCPU, MaxMemoryGiB: cfg.Limits.MaxMemoryGiB},
 		Build: consoleBuildCapabilities{CPU: cfg.Build.CPU, MemoryGiB: cfg.Build.MemoryGiB, DiskGiB: cfg.Build.DiskGiB,
 			MaxCPU: cfg.Build.MaxCPU, MaxMemoryGiB: cfg.Build.MaxMemoryGiB, MaxDiskGiB: cfg.Build.MaxDiskGiB, MaxConcurrent: cfg.Build.MaxConcurrent},
-		ImportEnabled: workerErr == nil, TrustedWorkerAvailable: workerErr == nil, WarmingEnabled: cfg.Warming.Enabled,
+		ImportEnabled: workerErr == nil && h.sbBuildPinsDB != nil, TrustedWorkerAvailable: workerErr == nil, WarmingEnabled: warmingErr == nil && warming,
 	})
 }
 
@@ -219,7 +220,8 @@ func (h *Handler) consoleTemplateBuild(w http.ResponseWriter, r *http.Request) {
 				build.Status, build.Reason = sandbox.BuildError, "build could not be started; retry with a new template name"
 				now := time.Now().UTC()
 				build.FinishedAt = &now
-				return h.saveTemplate(ctx, &current)
+				_, err = h.sbTemplates.Replace(ctx, current.ID, &current)
+				return err
 			}
 			return nil
 		})

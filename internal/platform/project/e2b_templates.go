@@ -204,7 +204,7 @@ func trimBuilds(t *sandboxTemplateDoc) {
 	drop := len(t.Builds) - keptBuilds
 	out := t.Builds[:0]
 	for _, b := range t.Builds { // oldest first (mergeConcurrent sorts by createdAt)
-		if drop > 0 && !keep[b.BuildID] && b.Status == sandbox.BuildError && !buildNeedsSync(&b) && !buildPinActive(b) {
+		if drop > 0 && !keep[b.BuildID] && b.Import == nil && b.Status == sandbox.BuildError && !buildNeedsSync(&b) && !buildPinActive(b) {
 			t.rememberRetiredBuild(b)
 			if b.Registry != nil {
 				t.RetiredBuilds = append(t.RetiredBuilds, b)
@@ -259,12 +259,24 @@ func mergeConcurrent(t, cur *sandboxTemplateDoc) {
 		if cb := cur.build(b.BuildID); cb != nil && cb.Diagnostics != nil && (b.Diagnostics == nil || cb.Diagnostics.Revision > b.Diagnostics.Revision) {
 			b.Diagnostics, b.Logs = cb.Diagnostics, cb.Logs
 		}
+		if cb := cur.build(b.BuildID); cb != nil && cb.Import != nil && cb.Import.Registry != nil {
+			diagnostics, logs := b.Diagnostics, b.Logs
+			*b = *cb // only the dedicated import CAS writer changes its immutable operation
+			if diagnostics != nil && (b.Diagnostics == nil || diagnostics.Revision > b.Diagnostics.Revision) {
+				b.Diagnostics, b.Logs = diagnostics, logs
+			}
+			continue
+		}
 		if cb := cur.build(b.BuildID); cb != nil && cb.Registry != nil {
 			// Only registry-specific CAS writers may change a frozen operation;
 			// stale generic saves retain a newly completed result/tag, while
 			// deliberate edits to an already READY tag remain authoritative.
 			wasFinished := finished(b)
+			diagnostics, logs := b.Diagnostics, b.Logs
 			*b = *cb
+			if diagnostics != nil && (b.Diagnostics == nil || diagnostics.Revision > b.Diagnostics.Revision) {
+				b.Diagnostics, b.Logs = diagnostics, logs
+			}
 			if !wasFinished && cb.Status == sandbox.BuildReady {
 				for tg, id := range cur.Tags {
 					if id == cb.BuildID {
@@ -1177,10 +1189,15 @@ func (h *Handler) e2bTemplateDelete(w http.ResponseWriter, r *http.Request) {
 // deleteTemplate removes a template's build pods, its contexts and its record, and ends a snapshot's storage billing.
 // Its images go with the next registry prune (nothing references them any more).
 func (h *Handler) deleteTemplate(ctx context.Context, ss *sandbox.Service, t *sandboxTemplateDoc) error {
-	ctx = context.WithoutCancel(ctx)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := h.freezeTemplateDeletion(ctx, t); err != nil {
+		return err
+	}
 	if err := h.retireImportPins(ctx, ss, t); err != nil {
 		return err
 	}
+	cleanupBuilds := append([]templateBuild(nil), t.Builds...)
 	if err := h.retireTemplatePins(ctx, ss, t); err != nil {
 		return err
 	}
@@ -1195,7 +1212,11 @@ func (h *Handler) deleteTemplate(ctx context.Context, ss *sandbox.Service, t *sa
 			}
 		}
 	}
-	for _, b := range t.Builds {
+	for _, b := range cleanupBuilds {
+		if b.Import != nil {
+			_ = ss.DeleteImport(ctx, b.BuildID)
+			continue
+		}
 		_ = ss.DeleteBuild(ctx, b.BuildID) // running or finished: no pod outlives its template
 	}
 	if bs, err := buildStorage(ss.Config()); err == nil {

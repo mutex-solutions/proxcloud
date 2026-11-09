@@ -180,7 +180,7 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return err
 			}
-			if !found {
+			if !found || locked.Deleting {
 				return sandbox.ErrNotFound
 			}
 			id := bl.BuildID
@@ -213,7 +213,11 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			id := newTemplateID()
-			canonical, _ := c.ss.ValidateImportSource(b.Source, c.proj.ID, b.Registry != nil || c.ss.Config().Import.AllowAnonymous)
+			policy := sandboximport.Policy{TemplateRegistry: c.ss.Config().TemplateRegistry, SourceRepositories: c.ss.Config().Import.SourceRepositories, AllowAnonymous: c.ss.Config().Import.AllowAnonymous}
+			canonical, err := policy.Source(b.Source, c.proj.ID)
+			if err != nil {
+				return err
+			}
 			buildID := uuid.NewString()
 			dest := strings.TrimRight(c.ss.Config().TemplateRegistry, "/") + "/" + c.proj.ID + "/" + id + ":" + buildID
 			if canonical {
@@ -241,7 +245,7 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 			if !slices.Contains(bl.Tags, tg) {
 				bl.Tags = append(bl.Tags, tg)
 			}
-			if bl.Status == sandbox.BuildReady {
+			if buildPinSDKStatus(bl) == sandbox.BuildReady {
 				t.Tags[tg] = bl.BuildID
 			}
 		}

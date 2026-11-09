@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
-	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 )
 
 // reserveBuildLaunch serializes capacity using durable reservations. The caller
