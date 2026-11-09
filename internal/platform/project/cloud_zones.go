@@ -66,7 +66,7 @@ func (h *Handler) zoneCreate(w http.ResponseWriter, r *http.Request, u *user.Use
 		h.fail(w, dnsConflict("Verify domain ownership first. Start a DNS ownership challenge, publish its TXT record at your current DNS host, then verify it before creating the zone."))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	// Reject absent/pending/foreign proofs before a tenant can occupy the global
 	// create lock or cause any PowerDNS I/O. Revalidate atomically when consumed.
@@ -113,6 +113,12 @@ func (h *Handler) zoneCreate(w http.ResponseWriter, r *http.Request, u *user.Use
 		}
 		if freshProof.Name != name || freshProof.Binding != binding || freshProof.state(time.Now().UTC()) != "VERIFIED" {
 			return dnsConflict("Ownership proof expired or DNS provider settings changed. Start a new challenge.")
+		}
+		// One project's valid proofs must not repeatedly monopolize the global
+		// namespace lock on a slow backend. Commit cooldown before upstream I/O;
+		// a busy lock or invalidated proof above never burns this attempt budget.
+		if err := h.dnsCreateCooldown(ctx, proj.ID); err != nil {
+			return err
 		}
 		z, err := ds.CreateWithGate(ctx, proj.ID, name, func() error {
 			return h.consumeDNSProof(ctx, u, proj, current, name, id, binding)

@@ -12,7 +12,9 @@ challenge quota and10s verification backoff bound the lifecycle without reservin
 share the mandatory gate. Strict IDNA+PSL validation and actual exact-owner TXT queries over bounded TCP to fixed public
 recursors (or explicit operator-only literal-IP overrides) happen before creation; CNAME/DNAME indirection and resolver
 failures refuse. Project/provider/permission/config-binding checks and live PowerDNS overlap checks remain at creation.
-A global DB advisory lock serializes actual creates across provider aliases; verification is per-project/nonblocking and
+A global DB advisory lock serializes actual creates across provider aliases; creates have a10s total deadline and a
+durable60s per-project attempt cooldown across proofs/providers, so a slow-backend retry cannot continuously monopolize
+the shared namespace. Verification is per-project/nonblocking and
 row-lock transitions cannot overwrite a consumed/cancelled proof. Consumption commits before upstream I/O, so uncertain
 failure cannot replay. Tokens/hashes stay out of lifecycle audit; proof TXT mutations redact values. UI guides publish →
 verify → create → delegate, with clear cache/expiry/retry instructions. MCP exposes the same lifecycle, never a shortcut.

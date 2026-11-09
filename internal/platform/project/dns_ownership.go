@@ -30,6 +30,7 @@ const (
 	dnsVerifiedTTL  = 10 * time.Minute
 	dnsVerifyDelay  = 10 * time.Second
 	dnsProofPrefix  = "_proxcloud-ownership."
+	dnsCreateDelay  = 60 * time.Second
 	dnsCreateLock   = "dns-ownership:create" // all replicas/providers/aliases in this database
 )
 
@@ -445,6 +446,27 @@ func (h *Handler) consumeDNSProof(ctx context.Context, u *user.User, p *Project,
 	})
 }
 
+// dnsCreateCooldown persists an attempt budget independently of the proof. It
+// spans ALL providers/claims of one project, including failed preflight attempts.
+// Called only under the global create lock; no nested session lock/extra store.
+func (h *Handler) dnsCreateCooldown(ctx context.Context, projectID string) error {
+	key := "create-budget:" + projectID
+	return h.dnsOwnership.DB().WithTx(ctx, func(tc context.Context) error {
+		var budget struct {
+			NextCreateAt time.Time `json:"nextCreateAt"`
+		}
+		found, err := h.dnsOwnership.GetForUpdate(tc, key, &budget)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		if found && now.Before(budget.NextCreateAt) {
+			return httpx.NewError(429, 429, "Wait 60 seconds between DNS zone creation attempts for this project, even after a failed attempt. Your proof remains usable until its expiry.")
+		}
+		return h.dnsOwnership.Upsert(tc, key, pgdoc.M{"projectId": projectID, "kind": "CREATE_BUDGET", "nextCreateAt": now.Add(dnsCreateDelay)})
+	})
+}
+
 // dnsReauthorize is DB-only and runs after ALL external preflight I/O inside
 // the final state transition. Administrative changes after committed CONSUMED
 // are beyond the point of no return of an already authorized external request.
@@ -498,5 +520,5 @@ func (h *Handler) dnsUpdate(ctx context.Context, p *Project, serviceID, id strin
 // published token into the general audit stream (including legacy SSO proofs).
 func proofRecord(name, typ string) bool {
 	n := strings.ToLower(name)
-	return strings.EqualFold(typ, "TXT") && (strings.Contains(n, "_proxcloud") || strings.Contains(n, "_stratos"))
+	return strings.EqualFold(typ, "TXT") && strings.Contains(n, "_proxcloud")
 }

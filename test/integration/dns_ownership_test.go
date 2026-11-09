@@ -389,6 +389,11 @@ func TestDNSPendingIsNonexclusiveAndCreatesSerialize(t *testing.T) {
 	if code, body := f.create("p2", "dns2", "child.example.org", d["id"].(string)); code != 200 {
 		t.Fatalf("%d %s", code, body)
 	}
+	// Reset this fixture's previous successful-create budget so the independent
+	// overlap race below tests serialization rather than the new 60s cooldown.
+	if _, err := f.db.C("dns_ownership").DeleteByID(context.Background(), "create-budget:p2"); err != nil {
+		t.Fatal(err)
+	}
 	// Two valid simultaneous overlapping proofs, obtained before either zone exists.
 	a := f.challenge(t, "p1", "dns", "race.other.org")
 	b := f.challenge(t, "p2", "dns2", "sub.race.other.org")
@@ -528,5 +533,46 @@ func TestDNSOwnershipProjectBusyDoesNotQueuePoolWaiters(t *testing.T) {
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDNSOwnershipCreateBudgetAndDeadline(t *testing.T) {
+	f := newDNSFixture(t)
+	f.addProject(t, "p2")
+	a := f.challenge(t, "p1", "dns", "slow.example.org")
+	b := f.challenge(t, "p1", "dns2", "second.example.org")
+	healthy := f.challenge(t, "p2", "dns2", "healthy.example.org")
+	for _, d := range []map[string]any{a, b, healthy} {
+		f.publish(d)
+	}
+	f.verify(t, "p1", "dns", a)
+	f.verify(t, "p1", "dns2", b)
+	f.verify(t, "p2", "dns2", healthy)
+	original := f.server.Config.Handler
+	var once atomic.Bool
+	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && once.CompareAndSwap(false, true) {
+			<-r.Context().Done()
+			return
+		}
+		original.ServeHTTP(w, r)
+	})
+	start := time.Now()
+	if code, body := f.create("p1", "dns", "slow.example.org", a["id"].(string)); code != 502 {
+		t.Fatalf("%d %s", code, body)
+	}
+	elapsed := time.Since(start)
+	if elapsed > 12*time.Second || elapsed < 9*time.Second {
+		t.Fatalf("create deadline %s", elapsed)
+	}
+	calls := f.apiCalls.Load()
+	if code, body := f.create("p1", "dns2", "second.example.org", b["id"].(string)); code != 429 {
+		t.Fatalf("%d %s", code, body)
+	}
+	if f.apiCalls.Load() != calls {
+		t.Fatal("project cooldown across providers triggered upstream")
+	}
+	if code, body := f.create("p2", "dns2", "healthy.example.org", healthy["id"].(string)); code != 200 {
+		t.Fatalf("healthy project blocked: %d %s", code, body)
 	}
 }

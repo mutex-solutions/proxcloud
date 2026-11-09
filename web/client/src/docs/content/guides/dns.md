@@ -15,6 +15,8 @@ A zone name can be held by one project at a time, so an existing domain is refus
 
 A parent you already manage in the same project may publish the TXT for its child. That is explicit child-control proof, not an automatic permanent grant. Existing legacy zones remain manageable without retroactive proof; deleting and recreating one needs a new proof. There is no automatic destructive cleanup if a TXT record later disappears.
 
+Wait60seconds between zone-creation attempts across all this project's providers, including after a failed attempt; a busy-global-create response does not spend that attempt. Creation is bounded to10seconds; an uncertain timeout can still mean the upstream accepted it, so refresh the list first.
+
 At most10live challenges and20new challenges/hour are allowed per project. Cancel unused challenges to free live capacity (the hourly budget still applies). A **Close** only hides the dialog, preserving your in-memory value until you leave/reload; **Cancel challenge / start over** invalidates that proof, not an existing zone.
 
 ## Records

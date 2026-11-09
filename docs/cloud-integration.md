@@ -893,7 +893,11 @@ reserve a name or block another project's challenge. Expired rows cannot grant a
 is opportunistically pruned for that project on its next challenge, retaining no permanent reservation.
 
 A PostgreSQL session advisory lock serializes actual creates across every provider/alias in this database; busy returns409
-without consuming the proof. No DNS proof lookup holds that global lock. Short row-lock transactions protect backoff,
+without consuming the proof. The complete create request has a10second deadline. A durable60second create-attempt
+cooldown spans **all proofs/providers of one project**, even when live preflight fails; invalid/foreign/config-invalidated
+proofs and global-busy responses spend no attempt. This bounds one valid owner's slow-backend occupancy of the shared
+namespace lock; it is a low-volume global safety bottleneck, not a high-throughput multi-writer DNS engine.
+No DNS proof lookup holds that global lock. Short row-lock transactions protect backoff,
 verify/cancel and consumption. Consumption commits **before** PowerDNS POST, and is not rolled back by a failed/uncertain
 HTTP response. On failure, refresh the zone list (sync also finds owned zones); if absent, start a new challenge. The
 live PowerDNS overlap guard runs before verify, after lookup and under the create lock. Only actual existing zones

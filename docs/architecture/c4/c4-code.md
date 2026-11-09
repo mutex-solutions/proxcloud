@@ -46,6 +46,8 @@ sequenceDiagram
   consumed proof. No external DNS or PowerDNS work occurs inside a row transaction. No nested session lock is needed.
 - `dnsProjectLock` uses try-lock429 to prevent one tenant's queued requests occupying the shared lock pool. Global
   create try-lock409 is held only for fresh, scoped, still-valid verified proofs and actual bounded upstream create.
+  A10s total create deadline plus durable60s per-project attempt cooldown across every proof/provider bounds one valid
+  owner's slow-backend retries. Busy/invalidated proofs spend no attempt; failed live preflight does.
 - `CreateWithGate` calls `consumeDNSProof` **after** live preflight and **immediately before** upstream POST. Its short
   row transaction rereads current project/permission/provider/config and state, then commits single-use consumption.
   Revocation after that point is not rollback of an already authorized external request. A timeout requires checking the
