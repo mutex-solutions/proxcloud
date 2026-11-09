@@ -265,9 +265,60 @@ export type SandboxLimits = {
 // A sandbox API key as listed: the key itself is shown once, at create.
 export type SandboxApiKey = { id: string; name: string; hint: string; createdAt: string; lastUsedAt?: string }
 
-// One build of a project's custom sandbox template (built with the E2B SDK or CLI).
+// Session-authenticated console defaults and limits, selected by the project location.
+export type SandboxTemplateCapabilities = {
+  importEnabled: boolean
+  trustedWorkerAvailable?: boolean
+  warmingEnabled: boolean
+  runtime: { cpu: number; memoryGiB: number; maxCpu: number; maxMemoryGiB: number }
+  build: { cpu: number; memoryGiB: number; diskGiB: number; maxCpu: number; maxMemoryGiB: number; maxDiskGiB: number; maxConcurrent: number }
+}
+export type SandboxBuildResources = { buildCpu: number; buildMemoryGiB: number; buildDiskGiB: number }
+export type SandboxBuildDiagnostics = {
+  revision?: number
+  stages?: Array<{ phase: string; state: string; reason?: string; message?: string; exitCode?: number; signal?: number; cpu?: string; memory?: string; disk?: string }>
+  podReason?: string
+  podMessage?: string
+  warnings?: string[]
+  logsUnavailable?: boolean
+  truncated?: boolean
+  archivedAt?: string
+  cleanedAt?: string
+  lastCaptureAt?: string
+  terminalCaptureAt?: string
+  lossReason?: string
+  terminalTail?: string[]
+}
+export type SandboxBuildLogs = {
+  status: string
+  reason?: string
+  step?: string
+  logs: string[]
+  diagnostics?: SandboxBuildDiagnostics
+  buildResources?: SandboxBuildResources
+  nextLogsOffset?: number
+}
+export type SandboxTemplateCoverage = {
+  enabled: boolean
+  image: string
+  pool: string
+  pulled: number
+  total: number
+  ready: boolean
+  expiresAt?: string
+}
+export type SandboxTemplateActionResult = { templateID: string; buildID: string; status: string; aliases?: string[]; reused?: boolean }
+
+// Safe console build metadata only; no upload/fetch credentials or internal worker IDs.
 export type SandboxTemplateBuild = {
   buildID: string
+  mode?: "build" | "import" | "snapshot"
+  source?: string
+  image?: string
+  digest?: string
+  step?: string
+  buildResources?: SandboxBuildResources
+  diagnostics?: SandboxBuildDiagnostics
   status: string
   reason?: string
   tags: string[]
@@ -282,8 +333,14 @@ export type SandboxTemplateBuild = {
 export type ProjectSandboxTemplate = {
   id: string
   name: string
+  kind?: "template" | "snapshot"
+  mode?: "build" | "import" | "snapshot"
+  aliases?: string[]
   cpu: number
   memoryGiB: number
+  gpu?: { model: string; count: number }
+  sizeBytes?: number
+  sourceSandbox?: string
   status: string
   ready: boolean
   builds: SandboxTemplateBuild[]
