@@ -56,32 +56,7 @@ spec:
               value: /etc/proxcloud/csi-gateway/ca.crt
             {{- end }}
             {{- include "proxcloud.dbURLEnv" . | nindent 12 }}
-            - name: PROXCLOUD_RABBITMQ_HOST
-              value: {{ include "proxcloud.rabbitHost" . | quote }}
-            - name: PROXCLOUD_RABBITMQ_PORT
-              value: {{ ternary "5672" (toString .Values.externalRabbitmq.port) (or .Values.rabbitmq.enabled .Values.rabbitmqCluster.enabled) | quote }}
-            - name: PROXCLOUD_RABBITMQ_USERNAME
-              {{- if .Values.rabbitmqCluster.enabled }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "proxcloud.rabbitClusterName" . }}-default-user
-                  key: username
-              {{- else }}
-              value: {{ ternary .Values.rabbitmq.auth.username .Values.externalRabbitmq.username .Values.rabbitmq.enabled | quote }}
-              {{- end }}
-            - name: PROXCLOUD_RABBITMQ_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  {{- if .Values.rabbitmqCluster.enabled }}
-                  name: {{ include "proxcloud.rabbitClusterName" . }}-default-user
-                  key: password
-                  {{- else if .Values.externalRabbitmq.existingSecret }}
-                  name: {{ .Values.externalRabbitmq.existingSecret }}
-                  key: {{ .Values.externalRabbitmq.secretKey }}
-                  {{- else }}
-                  name: {{ include "proxcloud.apiSecretName" . }}
-                  key: rabbitmq-password
-                  {{- end }}
+            {{- include "proxcloud.dbReadURLEnv" . | nindent 12 }}
             - name: PROXCLOUD_ENCRYPTION_DEFAULT_KEY
               valueFrom:
                 secretKeyRef:
@@ -164,10 +139,13 @@ spec:
             - name: PROXCLOUD_JOBS_DEBUG_TRIGGERS
               value: "true"
             {{- end }}
-            {{- if .Values.api.jobs.rabbitFanout }}
-            - name: PROXCLOUD_JOBS_RABBIT_FANOUT
-              value: "true"
-            {{- end }}
+            # Workers always run; scheduler/debug gates do not pause the existing queue.
+            - name: PROXCLOUD_JOBS_WORKER_CONCURRENCY
+              value: {{ .Values.api.jobs.workerConcurrency | quote }}
+            - name: PROXCLOUD_JOBS_POLL_INTERVAL
+              value: {{ .Values.api.jobs.pollInterval | quote }}
+            - name: PROXCLOUD_JOBS_LEASE_DURATION
+              value: {{ .Values.api.jobs.leaseDuration | quote }}
             {{- if .Values.api.billing }}
             {{- if .Values.api.billing.provider }}
             - name: PROXCLOUD_BILLING_PROVIDER

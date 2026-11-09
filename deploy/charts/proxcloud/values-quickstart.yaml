@@ -7,14 +7,13 @@
 #     -f deploy/charts/proxcloud/values-quickstart.yaml \
 #     --set api.encryptionKey=$(openssl rand -hex 32) \
 #     --set postgresql.auth.password=$(openssl rand -hex 16) \
-#     --set rabbitmq.auth.password=$(openssl rand -hex 16) \
 #     --set keycloakConfigCli.adminPassword=$(openssl rand -hex 12)
 #
 # Until the chart's appVersion is published on ghcr.io, build and load the api/web/admin images
 # yourself and override api/ui/admin.image (chart README, "Images first").
 #
-# Brings up api, ui (customer console), admin (operator console), PostgreSQL and RabbitMQ (bitnami
-# subcharts), and Keycloak with its realms. Every secret comes from the --set flags above; none has a
+# Brings up api, ui (customer console), admin (operator console), PostgreSQL (bitnami
+# subchart, also durable jobs), and Keycloak with its realms. No broker. Every secret comes from the --set flags above; none has a
 # default. Read them back later with `helm get values proxcloud -n proxcloud`.
 #
 # Reach it through port-forwards on this machine (the commands are printed after the install):
@@ -62,10 +61,6 @@ postgresql:
       scripts:
         # Keycloak's own database, owned by the same role (its password is in this Secret).
         keycloak.sql: CREATE DATABASE keycloak OWNER proxcloud;
-
-rabbitmq:
-  enabled: true
-  fullnameOverride: proxcloud-rabbitmq
 
 keycloakx:
   enabled: true

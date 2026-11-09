@@ -1,6 +1,7 @@
 {{- /*
-RabbitmqCluster CR, the default broker. Requires the RabbitMQ Cluster Operator in the cluster. The
-operator creates the <name> Service and the <name>-default-user Secret the API reads.
+Migration-only retained RabbitmqCluster. Requires an already-installed operator.
+The new API does not connect to it. Protect Helm removal AND ArgoCD pruning/deletion.
+An old LIVE CR and old Helm release manifest need protection BEFORE omission; see the runbook.
 */ -}}
 {{- if .Values.rabbitmqCluster.enabled }}
 {{- if .Values.rabbitmq.enabled }}
@@ -10,10 +11,16 @@ apiVersion: rabbitmq.com/v1beta1
 kind: RabbitmqCluster
 metadata:
   name: {{ include "proxcloud.rabbitClusterName" . }}
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
   labels:
     {{- include "proxcloud.labels" . | nindent 4 }}
     app.kubernetes.io/component: rabbitmq
 spec:
+  {{- if .Values.rabbitmqCluster.retainedSpec }}
+  {{- toYaml .Values.rabbitmqCluster.retainedSpec | nindent 2 }}
+  {{- else }}
   replicas: {{ .Values.rabbitmqCluster.replicas }}
   {{- with .Values.rabbitmqCluster.image }}
   image: {{ . | quote }}
@@ -26,5 +33,6 @@ spec:
   {{- with .Values.rabbitmqCluster.resources }}
   resources:
     {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- end }}
 {{- end }}

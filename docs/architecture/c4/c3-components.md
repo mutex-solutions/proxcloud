@@ -193,7 +193,7 @@ flowchart LR
   repo["cloud.Repo"]:::impl
   mrepo["metrics.Repo"]:::impl
   bp["billingprovider<br/>native or external"]:::impl
-  fan["chargefanout"]:::impl
+  fan["Durable native billing jobs<br/>bounded primary-DB workers"]:::impl
   bj["billingjob"]:::impl
   br["billingresource providers"]:::impl
   price["pricing engine"]:::impl
@@ -244,7 +244,7 @@ flowchart LR
 | Billing resources | `internal/cloud/billingresource/` (`billingresource.go` `GetBillingResources`, `server.go`, `volume.go`, `floatingip.go`, `image.go`, `bucket.go`, `kubernetescluster.go`, `databasecluster.go`, `sandbox.go`, `sandboxsnapshot.go`, `catalog.go`) | Turn cache rows into billable units with typed attributes; servers yield an instance unit plus a traffic unit; volumes carry `profile` and `storage_class` for per-profile price rules; public IPs (one row per allocation) and project templates bill too; a sandbox bills per minute from the minute it became Ready in (or, never read Ready, its last pending read) for its runtime rounded up to whole minutes, a sandbox snapshot per stored GB-hour (pause and snapshot, SB7). `GetArchivedBillingResources` feeds rows archived this cycle back in with `DeletedAt` for their last partial interval; a `DeletedAt` past the charge's cycle moves the item's watermark there, so the next charge does not rate that unit again. | Implemented |
 | Billing provider | `internal/platform/billingprovider/billingprovider.go` | Native (rate in process) or external (resolve here, rate in a separate billing service). | Implemented |
 | Billing job | `internal/platform/billingjob/billingjob.go` (`Charge`, `ChargeProfileByID`), `remote.go` | Per active billing profile and provider: resolve billing resources, pick price plans, rate onto the current bill. | Implemented |
-| Charge fan-out | `internal/platform/chargefanout/chargefanout.go` | One RabbitMQ message per profile, off by default. | Implemented |
+| Durable native billing work | Custom bounded job engine and native billing dispatch | Persist fixed-cutoff per-profile work in PostgreSQL primary; retry with DB-time owner+epoch CAS fencing. Workers always run, scheduler/debug default off. No old broker consumer. | Implemented |
 | Billing client and callbacks | `internal/platform/billingclient/`, `internal/platform/billingcallback/`, `pkg/billingapi/` | Wire contract and callbacks for an external billing service. | Implemented |
 | Pricing | `internal/platform/pricing/` (`engine.go`, `charge.go`, `planselect.go`, `bill_build.go`, `adjustments.go`, `tax.go`, `fx.go`, `settle.go`) | Rating engine, bill items, savings and price adjustments, tax, currency, settlement. | Implemented |
 | Billing | `internal/platform/billing/` (`balance.go`, `sendbill.go`, `suspension_job.go`, `activationservice.go`, `reminder.go`, `savings.go`, `billpdf.go`, `paybill.go`) | Billing profiles, balance, bill finalization, PDF, dunning and suspension, reminders, savings contracts. PREPAID or POSTPAID payment mode per profile; an operator can record an offline payment on a SENT bill (`PayService.RecordManualPayment`, `POST /admin/bill/{id}/record-payment`, MCP `record_bill_payment`). | Implemented |
@@ -272,7 +272,7 @@ flowchart LR
   sse["sse"]:::impl
   promo["promotion"]:::impl
   pg["internal/pgdoc"]:::impl
-  amqp["internal/amqp"]:::impl
+  jobs["Durable jobs on primary<br/>mail outbox not wired yet"]:::impl
 
   router --> admin
   router --> pcfg
@@ -285,7 +285,8 @@ flowchart LR
   msg --> mail
   admin --> pg
   es --> pg
-  router --> amqp
+  router --> jobs
+  jobs --> pg
 ```
 
 | Component | Path | Responsibility | Status |
@@ -303,7 +304,7 @@ flowchart LR
 | CRM | `internal/platform/crm/crm.go` | CRM sync interface with a no-op provider. | Implemented |
 | Paging | `internal/platform/paging/` | Cursor paging. | Implemented |
 | Data store | `internal/pgdoc/` | PostgreSQL JSONB document API used by every repository. | Implemented |
-| Broker | `internal/amqp/amqp.go` | RabbitMQ connection and reconnect. | Implemented |
+| Durable jobs | Primary PostgreSQL job engine | Bounded workers; no RabbitMQ connection/readiness dependency. History/metrics replica is optional and never used for queue/finance. Mail outbox remains a separate follow-up. | Implemented (engine/billing) |
 | Health | `internal/health/` | Liveness and readiness. | Implemented |
 
 ## C3e. Managed services and object storage

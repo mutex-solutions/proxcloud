@@ -23,7 +23,8 @@ flowchart TB
     api["proxcloud-api (Go)<br/>:8080 /api/v1, /admin-api/v1, /e2b, /mcp, SSE<br/>:8081 health, job triggers, callbacks<br/>CSI gateway listener (off by default)"]:::impl
     sched["Scheduler and jobs<br/>in the API process, PostgreSQL lock"]:::impl
     pg["PostgreSQL<br/>pgdoc JSONB document store"]:::impl
-    mq["RabbitMQ<br/>charge fan-out"]:::impl
+    workers["Bounded durable workers<br/>PostgreSQL primary, always running"]:::impl
+    reader["Optional history/metrics replica<br/>explicit opt-in only"]:::impl
     kc["Keycloak<br/>realms + config-cli import"]:::impl
     argo["ArgoCD<br/>managed K8s and DBaaS apps"]:::impl
     capi["Cluster API + CAPMOX"]:::impl
@@ -40,7 +41,9 @@ flowchart TB
   gw --> kc
   api --- sched
   api --> pg
-  api --> mq
+  api --- workers
+  workers -->|"enqueue, lease, retry, finance on primary"| pg
+  api -.->|"history/metrics only; configured failure = 503"| reader
   api -->|"JWKS"| kc
   api -->|"Applications"| argo
   api -->|"API token"| pve
@@ -54,6 +57,14 @@ providers expect an ArgoCD instance on a management cluster and write
 `Application` objects to it (see [managed-k8s.md](../../managed-k8s.md) and
 [managed-dbaas.md](../../managed-dbaas.md)). In split mode the installer builds that
 management cluster, the services cluster, as VMs through Cluster API.
+
+The API and durable workers always use the **writable primary** (`-rw` for CNPG).
+The optional reader is for history/metrics only; empty means primary fallback,
+configured failure means 503 for those reads. It is never a queue/finance endpoint.
+Mail keeps its existing SMTP path until the separate durable outbox is wired.
+Existing deployments follow the [drain/reconcile and retain runbook](../../postgres-jobs-migration.md):
+Helm needs a prior stored retained manifest, Argo needs live `Prune=false,Delete=false`;
+new defaults alone do not protect a historical broker/PVC.
 
 ### API surfaces
 
@@ -255,9 +266,9 @@ workers can serve public assets regardless of checkout or runtime umask.
 | `web/client` | React, Vite, TypeScript, OIDC PKCE; served by nginx (`web/Dockerfile`) | Management cluster | Implemented |
 | `web/admin` | React, Vite, TypeScript; served by nginx | Management cluster | Implemented |
 | `proxcloud-api` | Go, chi router, one binary (`cmd/api`) | Management cluster | Implemented |
-| Scheduler and jobs | robfig/cron with a PostgreSQL distributed lock (`internal/platform/scheduler`, `lock`); disabled unless `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | Inside the API pod | Implemented |
+| Scheduler and durable workers | Cron producers require `PROXCLOUD_JOBS_SCHEDULER_ENABLED`; bounded durable workers always start, including with scheduler/debug off. Owner+epoch and DB-time CAS fence native per-profile billing attempts | Inside every API pod | Implemented (engine/billing; mail outbox follow-up) |
 | PostgreSQL | JSONB document store via `internal/pgdoc`; CloudNativePG cluster (default), bundled subchart, or external. A chart hook Job (`seed`) writes the platform and billing configuration into empty tables on install and upgrade | Management cluster | Implemented |
-| RabbitMQ | AMQP (`internal/amqp`), optional per-profile charge fan-out; RabbitMQ Cluster Operator (default), bundled subchart, or external | Management cluster | Implemented |
+| Legacy RabbitMQ | Not connected to the API or readiness. Default absent; explicit migration-only retain with Helm keep + Argo prune/delete protection. Drain/reconcile and snapshots required **before** omission; no PVC cleanup | Historical management-cluster resource only | Deprecated, retained for recovery |
 | Keycloak | codecentric keycloakx subchart + keycloak-config-cli realm import, or an external issuer. The API manages per-org identity providers through the Admin API with the `proxcloud-idp-admin` service account | Management cluster | Implemented |
 | Gateway / Ingress | Gateway API `HTTPRoute` or `Ingress` per host (`deploy/charts/proxcloud/templates/gateway`, `api`, `web`) | Management cluster | Implemented |
 | ArgoCD | Reconciles the platform (installer `Application` objects with inline values); receives `Application` objects for managed K8s and DBaaS | Management cluster (deployed by the installer, not the chart) | Implemented |

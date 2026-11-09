@@ -14,6 +14,13 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 
 **Back up `inventory/mysite/generated/`.** It holds the encryption key, database passwords and Proxmox token secrets. The encryption key cannot be recovered, and without it the stored provider secrets are lost. The directory is gitignored.
 
+The broker-free chart/API are planned as **v0.4.0, unpublished until separately
+approved**. Use `images.build: true` (default) from a checkout containing the new
+core, or pin a published compatible release once available. `images.build: false`
+with an older Rabbit-dependent release is refused before stage 40 writes secrets;
+the planned pin is not a claim that images/packages already exist. No Git tag or
+release publication is performed by the installer.
+
 ## What you need
 
 | | |
@@ -35,7 +42,7 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 | 20 | `20-templates.yml` | OS templates through [images/build.py](../images/README.md), from the first management host. |
 | 30 | `30-mgmt-cluster.yml` | k3s, always with `--cluster-init`. |
 | 35 | `35-local-images.yml` | `images.build`: builds images and chart from this checkout, into a registry on the management cluster. A tag already there is not rebuilt. |
-| 40 | `40-mgmt-platform.yml` | ArgoCD, then Applications with inline values: cert-manager, CloudNativePG, ProxCloud (API, consoles, Keycloak, PostgreSQL, RabbitMQ). The scheduler is on. |
+| 40 | `40-mgmt-platform.yml` | Read-only existing-site migration gate, then ArgoCD and Applications: cert-manager, CloudNativePG, ProxCloud (API, consoles, Keycloak, PostgreSQL durable jobs). No new RabbitMQ. Scheduler/debug off unless explicitly enabled; workers always finish queued work. |
 | 45 | `45-object-store.yml` | The object store, see below. |
 | 50 | `50-services-cluster.yml` | `mode: split`: Cluster API and CAPMOX on the mgmt cluster, then the services cluster and its platform. See "Split mode" below. |
 | 55 | `55-sandbox-cluster.yml` | `mode: split` with `sandbox.enabled`: the sandbox cluster's vnet, the cluster from the kamaji chart, then `deploy/sandbox-cluster` on it. See "Sandbox cluster" below. |
@@ -43,7 +50,17 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 | 56 | `56-sandbox-edge.yml` | `sandbox.enabled`: the public entry of sandbox ports: `sandbox-proxy` and its MetalLB address, the wildcard certificate on the services cluster and its copy, the DNS record and TSIG key on PowerDNS, the HAProxy entry appliance. Also run by `make upgrade`. See "Sandbox ports" below. |
 | 60 | `60-register.yml` | Logins, an Admin-API key, the Proxmox provider, fio suggestions; on the first run `deploy/seed/seed-operator.py` (platform and billing configuration, flavors, public price plan, quota). Prints the URLs. |
 
-The RabbitMQ Cluster Operator is applied directly from its release manifest, because upstream ships no chart. k3s's bundled Traefik and ServiceLB serve the portal on the management host's ports 80 and 443. MetalLB and the services cluster arrive with split mode.
+Stage 40 no longer installs, waits for, upgrades or removes the RabbitMQ operator.
+Existing brokers/operators/PVCs remain for recovery; new sites need none.
+**Before upgrading an existing site**, complete the
+[stop-producers, drain/reconcile, snapshot and retain runbook](postgres-jobs-migration.md),
+including live Argo `Prune=false,Delete=false` protection. Set
+`proxcloud.jobs_migration` with your explicit retain/cutover decision and evidence;
+stage 40 fails before applying anything if the required proof/protection is missing,
+or cluster discovery is forbidden/unavailable. It never deletes or patches the broker.
+cert-manager stays for TLS/ingress and the CSI gateway. k3s's bundled Traefik and
+ServiceLB serve the portal on the management host's ports 80 and 443. MetalLB and
+the services cluster arrive with split mode.
 
 ## Options
 
@@ -60,6 +77,10 @@ The RabbitMQ Cluster Operator is applied directly from its release manifest, bec
 | `object_store.mode` | `vm` | `vm`, `truenas-app`, `external`, `ceph-rgw` |
 | `templates.per_node` | `auto` | `auto`: a copy per node unless the default profile is on shared storage |
 | `storage_profiles`, `storage_classes` | detected | Override detection; confirm a fio suggestion |
+| `jobs.scheduler_enabled`, `jobs.debug_triggers` | `false`, `false` | Gates for new scheduled work/debug routes, **not** a pause of existing durable jobs. Enable scheduling deliberately after cutover. |
+| `jobs.worker_concurrency`, `jobs.poll_interval`, `jobs.lease_duration` | `2`, `1s`, `1m` | Per-pod worker bounds: `1..16`, `100ms..1m`, `10s..10m`. |
+| `database.instances`, `database.status_read_replica` | `1`, `false` | Replica opt-in for history/metrics only, requires at least two instances. Queue/finance use `-rw`. |
+| `jobs_migration.*` | unset | Existing-site explicit retain/cutover, old producers/consumers stopped, drain/reconciliation and snapshot evidence; [runbook](postgres-jobs-migration.md). |
 
 ### Access over plain HTTP
 

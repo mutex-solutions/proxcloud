@@ -1,5 +1,10 @@
 # Quick start
 
+**Release prerequisite:** broker-free deployment targets planned **v0.4.0**, not
+the older Rabbit-dependent API. Until it is explicitly published, use the source
+installer's default `images.build: true` or build/load known compatible images for
+Helm; the planned image/chart pin is not a published-release claim.
+
 Pick the row that matches what you want, then follow its section. Each section has the
 inventory keys to fill, the one command, what success looks like and the first steps after.
 The long form of the installer (every stage, every option, day 2) is [install.md](install.md).
@@ -11,12 +16,12 @@ Addresses and names below are documentation examples (`192.0.2.x`, `198.51.100.x
 
 | You want to | Path | What gets deployed | You need first | Command |
 |---|---|---|---|---|
-| Try the consoles on a laptop, no Proxmox | [A](#a-laptop-docker-compose) | API, customer and operator consoles, PostgreSQL, RabbitMQ, a dev Keycloak | Docker with Compose | `docker compose up --build` |
+| Try the consoles on a laptop, no Proxmox | [A](#a-laptop-docker-compose) | API, customer and operator consoles, PostgreSQL (also durable jobs), a dev Keycloak | Docker with Compose | `docker compose up --build` |
 | Point that laptop stack at a Proxmox cluster you already have | [A](#a-laptop-docker-compose) + [A2](#a2-connect-an-existing-proxmox-cluster) | The same, plus one Proxmox provider you register by hand | PVE 9.2+, a token made with `pveum`, OS templates | operator console |
 | Evaluate on one Proxmox node | [B](#b-one-proxmox-node-evaluation) | A management VM on that node (k3s, ArgoCD, the platform), a RustFS VM, OS templates, the provider | One PVE 9.2+ node, three free addresses | `make install` |
 | A small production site, one management host | [C](#c-production-one-management-host-allinone) | k3s on your Linux host, the platform, RustFS, templates, the provider, optional NAS stores | PVE 9.2+ cluster, a Linux host that is not a PVE node, a DNS domain | `make install` |
 | Managed Kubernetes, managed databases, sandboxes | [D](#d-managed-kubernetes-databases-and-sandboxes-split) | All of C, plus a services cluster (Kamaji, Cluster API, MetalLB, database operators), optionally a sandbox cluster | Path C installed, k8s node templates, a services subnet | `make install` with `mode: split` |
-| The portal only, on a Kubernetes cluster you run | [E](#e-install-on-kubernetes-with-helm) | API, both consoles, PostgreSQL, RabbitMQ and Keycloak (quick start), or PostgreSQL and RabbitMQ through their operators (production) | Any cluster with a default StorageClass (quick start); the CloudNativePG and RabbitMQ Cluster operators and an OIDC issuer (production) | `helm install` |
+| The portal only, on a Kubernetes cluster you run | [E](#e-install-on-kubernetes-with-helm) | API, both consoles, PostgreSQL durable jobs and Keycloak (quick start), or CloudNativePG and your OIDC issuer (production), no broker | Any cluster with a default StorageClass (quick start); the CloudNativePG operator and an OIDC issuer (production) | `helm install` |
 
 Then add what you sell, on any installer path:
 
@@ -50,6 +55,11 @@ No Proxmox needed. Cloud pages stay empty until a provider is registered.
    These are fixed development credentials (`deploy/dev/keycloak-realm.json`, `docker-compose.yml`). Never expose
    this stack. To reach it from another machine, put `PROXCLOUD_HOST=<this machine's address>` in a `.env` file next
    to `docker-compose.yml`.
+
+Scheduler/debug gates default **off**; PostgreSQL workers always finish any
+already-enqueued work. No RabbitMQ container runs by default. Existing Compose
+users must follow the [cutover runbook](postgres-jobs-migration.md) and preserve
+the old broker's anonymous volume; replace only the API, never `down -v`.
 
 More: [development.md](development.md).
 
@@ -341,7 +351,7 @@ kind load docker-image proxcloud-api:local proxcloud-web:local proxcloud-admin:l
 and add `--set api.image.repository=proxcloud-api,api.image.tag=local,ui.image.repository=proxcloud-web,ui.image.tag=local,admin.image.repository=proxcloud-admin,admin.image.tag=local`
 to the `helm install` below. Without it the pods stay in `ImagePullBackOff`.
 
-**Quick start, no operators.** One command brings up the API, both consoles, PostgreSQL, RabbitMQ and Keycloak with
+**Quick start, no operators.** One command brings up the API, both consoles, PostgreSQL-backed jobs and Keycloak with
 its realms:
 
 ```sh
@@ -352,7 +362,6 @@ helm install proxcloud deploy/charts/proxcloud -n proxcloud --create-namespace -
   -f deploy/charts/proxcloud/values-quickstart.yaml \
   --set api.encryptionKey=$(openssl rand -hex 32) \
   --set postgresql.auth.password=$(openssl rand -hex 16) \
-  --set rabbitmq.auth.password=$(openssl rand -hex 16) \
   --set keycloakConfigCli.adminPassword=$(openssl rand -hex 12)
 ```
 
@@ -386,8 +395,10 @@ deploy/seed/seed-operator.py --provider "<provider name>"
 The quick start is not for production: one replica of everything, plain HTTP, and Keycloak's own administrator is
 the operator. To expose it with an Ingress, see the chart README.
 
-**Production, with the operators.** Needs the CloudNativePG and RabbitMQ Cluster operators, an ingress controller,
-and an OIDC issuer with the realms and clients in [auth.md](auth.md).
+**Production, with CloudNativePG.** Needs the CloudNativePG operator, an ingress controller,
+and an OIDC issuer with the realms and clients in [auth.md](auth.md). No broker/operator
+is needed. Before upgrading an existing release, follow the [drain/reconcile and
+retain runbook](postgres-jobs-migration.md); do not let Helm/Argo prune the old broker.
 
 1. Fetch the subcharts (the two `helm repo add` and `helm dependency build` lines above).
 
@@ -520,7 +531,7 @@ switch is off.
 | 20 templates | OS templates (`templates.os`, default Debian 13, Ubuntu 24.04) | always; needs `templates.build_ip` | on |
 | 30 mgmt cluster | k3s | always | on |
 | 35 local images | API, web and admin images and the chart, built from this checkout into a registry on k3s | `images.build: true` | on |
-| 40 platform | ArgoCD, cert-manager, CloudNativePG, RabbitMQ operator, the ProxCloud chart with Keycloak, scheduler on | always | on |
+| 40 platform | Migration gate, ArgoCD, cert-manager, CloudNativePG, broker-free ProxCloud with Keycloak; scheduler/debug off unless opted in | always | on |
 | 45 object store | RustFS VM, or RustFS as a TrueNAS app, plus the internal buckets | `object_store.mode` `vm` / `truenas-app` | `vm` |
 | 50 services cluster | Kamaji, Cluster API, MetalLB, proxmox-csi, database operators | `mode: split` | off |
 | 55 sandbox cluster | The sandbox vnet, SNAT, cluster and `deploy/sandbox-cluster` | `mode: split` + `sandbox.enabled` | off |

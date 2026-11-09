@@ -3,11 +3,13 @@ pc_versions:
   k3s: v1.35.10+k3s1
   argocd_chart: 10.14.0        # oci://ghcr.io/argoproj/argo-helm/argo-cd
   cnpg_chart: 0.29.1           # https://cloudnative-pg.github.io/charts
-  rabbitmq_operator: v2.23.2   # github.com/rabbitmq/cluster-operator release manifest
-  cert_manager_chart: v1.20.2  # the RabbitMQ operator's webhook needs it, as does ingress.tls=acme
+  rabbitmq_operator: v2.23.2   # historical pin only; stage 40 never installs/upgrades/removes it
+  cert_manager_chart: v1.20.2  # ingress TLS and CSI gateway certificates; retained without RabbitMQ
   keycloak: "26.8.2"
   # Chart + image tag of ProxCloud itself, with images.build=false. It must be a published release.
-  proxcloud: v0.3.28
+  # Planned, UNPUBLISHED until separately approved: use images.build=true until v0.4.0 is published.
+  # Do not override to an older Rabbit-dependent release with this broker-free installer.
+  proxcloud: v0.4.0
   rustfs: 1.0.4
   # The sandbox registry (stage 55, docs/managed-sandbox.md §6): Zot, minimal build (no extensions), and the pause
   # image the template prepull DaemonSet idles in.

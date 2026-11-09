@@ -4,6 +4,31 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: broker-free deployment of PostgreSQL durable jobs
+
+**What changed:** fresh Compose, Helm quickstart/defaults and installer stage 40 need no RabbitMQ
+container, CR, operator, API credential or readiness dependency. The API always runs bounded
+primary-DB workers; scheduler/debug default false controls new timed work/routes, not an existing
+queue pause. Concurrency/poll/lease are wired explicitly. Optional reader DSNs live in Secrets;
+CNPG `-ro` is generated only with explicit status-reader opt-in and replicas, while queue/finance
+remain on writable `-rw`. Old API Secrets may omit the optional reader key. External billing HTTP
+behavior is unchanged; this first slice is engine/native billing, **not durable mail**.
+
+**Why:** PostgreSQL is already authoritative for billing; durable, fenced work should not depend
+on another broker/operator or disappear with an API process. Removing desired resources must not
+remove historical data: existing upgrades require explicit stopped-producer/consumer and
+queue-drain/reconciliation/snapshot evidence. Helm removal needs a prior stored keep-manifest
+transition, Argo pruning needs live Prune/Delete=false protection before applying new state;
+stage 40 only reads and asserts, never patches/deletes a broker/PVC/operator. Compose preserves
+the old service/image and anonymous volume identity behind an explicit legacy profile; operators
+replace only the API, not down/remove/recreate data. A legacy profile/timeUnit message has no
+original cutoff, so automatic current-cycle replay is forbidden by the operator runbook.
+
+**Diagrams updated:** README overview, architecture boot/container views, C2 management workers/reader,
+C3 billing/platform and C4 rating path. [Cutover runbook](../../postgres-jobs-migration.md).
+Validation is local rendering/lint and mocked installer migration gates; no existing lab resource
+or deployment is changed by this PR.
+
 ## 2026-11-09: poll the actual worker of a cross-node seed upload
 
 **What changed:** ISO uploads require a nonempty, structurally valid `imgcopy` UPID, but no longer require its
