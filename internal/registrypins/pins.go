@@ -138,7 +138,25 @@ func (s *Store) MarkUnknown(ctx context.Context, p Pin) (Pin, error) {
 	}
 	return s.advancePin(ctx, p, Unknown, p.Ref, r.Digest, p.BindingUID, p.BindingGeneration)
 }
-func (s *Store) advancePin(ctx context.Context, p Pin, state, ref, digest, uid, bindingGeneration string, importEvidence ...ImportPodEvidence) (Pin, error) {
+
+// pinEvidence is private, typed and constructed only by the corresponding
+// observation methods. It is not a callback or caller-controlled generic grant.
+type pinEvidence struct {
+	importPod  *ImportPodEvidence
+	runtimePod *RuntimePodEvidence
+}
+
+func (s *Store) advancePin(ctx context.Context, p Pin, state, ref, digest, uid, bindingGeneration string, evidence ...pinEvidence) (Pin, error) {
+	var observed pinEvidence
+	if len(evidence) > 1 {
+		return Pin{}, ErrConflict
+	}
+	if len(evidence) == 1 {
+		observed = evidence[0]
+		if observed.importPod != nil && observed.runtimePod != nil {
+			return Pin{}, ErrConflict
+		}
+	}
 	r, err := s.reference(p.Ref)
 	id, e := uuid.Parse(p.ID)
 	if err != nil || e != nil || id == uuid.Nil || id.String() != p.ID || !p.Operation.valid() || p.Epoch < 1 || r.Project != p.ProjectID {
@@ -153,7 +171,14 @@ func (s *Store) advancePin(ctx context.Context, p Pin, state, ref, digest, uid, 
 		if err := s.guardBuildPin(tc, tx, p, state, ref, uid); err != nil {
 			return err
 		}
+		var importEvidence []ImportPodEvidence
+		if observed.importPod != nil {
+			importEvidence = append(importEvidence, *observed.importPod)
+		}
 		if err := s.guardImportPin(tc, tx, p, state, ref, uid, importEvidence...); err != nil {
+			return err
+		}
+		if err := s.guardRuntimePin(tc, tx, p, state, ref, uid, bindingGeneration, observed.runtimePod); err != nil {
 			return err
 		}
 		return conflict(tx.QueryRow(tc, `UPDATE registry_pin SET state=$1,ref=$2,digest=$3,binding_uid=$4,binding_generation=$18,epoch=epoch+1,updated_at=clock_timestamp()

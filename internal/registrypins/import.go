@@ -126,6 +126,9 @@ func (s *Store) AuthorizeImportDispatch(ctx context.Context, op Operation, sourc
 		if exists {
 			return ErrConflict
 		}
+		if e := s.rejectRuntimeDispatch(tc, tx, op.ID); e != nil {
+			return e
+		}
 		// Select ALL operation receipts, not only matching owner/project rows: a
 		// mismatching envelope must never authorize a subset of an operation.
 		rows, e := tx.Query(tc, `SELECT id::text,project_id,owner,generation,host,requested_ref,ref,state,epoch,binding_uid,binding_generation FROM registry_pin WHERE operation=$1 ORDER BY requested_ref FOR UPDATE`, op.ID)
@@ -341,7 +344,7 @@ func (s *Store) ObserveImportPod(ctx context.Context, p Pin, e ImportPodEvidence
 	if err != nil {
 		return Pin{}, err
 	}
-	return s.advancePin(ctx, p, Pending, p.Ref, r.Digest, e.UID, e.Nonce, e)
+	return s.advancePin(ctx, p, Pending, p.Ref, r.Digest, e.UID, e.Nonce, pinEvidence{importPod: &e})
 }
 
 // ReleaseImportTerminal releases only exact observed pending pod receipts after
@@ -358,7 +361,7 @@ func (s *Store) ReleaseImportTerminal(ctx context.Context, p Pin, e ImportPodEvi
 	if err != nil {
 		return Pin{}, err
 	}
-	return s.advancePin(ctx, p, Released, p.Ref, r.Digest, p.BindingUID, p.BindingGeneration, e)
+	return s.advancePin(ctx, p, Released, p.Ref, r.Digest, p.BindingUID, p.BindingGeneration, pinEvidence{importPod: &e})
 }
 
 // ImportTerminalKnown only prevents stale error handlers from poisoning terminal
