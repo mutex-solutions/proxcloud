@@ -18,6 +18,7 @@ diagrams changed.
 | [project-invite-outbox.md](project-invite-outbox.md) | C3/C4: Invitation mail | How the default-OFF typed invitation producer atomically seals mail and cancels persisted rows without SMTP. |
 | [Validation approval outbox](../../c4-validation-approved-outbox.md) | C1–C4: Approval-only mail | How the actual validation decision, immutable generation and keyless revocation share a commit, while activation remains outside SQL and delivery remains OFF. |
 | [Savings contract-expired outbox](../../savings-expired-outbox.md) | C1–C4: Expired-term mail | How one canonical-term decision, immutable history and all four keyless cancellation paths share owned SQL boundaries while producer and delivery remain default OFF. |
+| [Dormant snapshot registry core](../../registry-snapshot-core.md) | C1–C4: Snapshot prerequisite | How fixed snapshot envelopes, exact pin-role epochs and typed publication handoff stay dormant without capture callers, DEST retirement or GC authorization. |
 | [CHANGELOG.md](CHANGELOG.md) | History | What changed in the architecture, in which PR, and why. |
 
 The prose deep dives in [`docs/`](../../README.md) (auth, billing, jobs, data
