@@ -1366,6 +1366,17 @@ top/nested symlinks, an outside-canary hardlink and a FIFO are rejected without 
 traversal and batched-chmod failures propagate nonzero. Live SDK acceptance after this handoff change is still a
 separate rollout check. No push-root shortcut, extra capabilities or credential mounts were added.
 
+The next controlled rollout reached **build READY**: fetch/base/Kaniko/prepare-output/push all exited 0 and Zot
+accepted the OCI digest. Runtime acceptance was still not complete: its cold image pull took 57.813 s (about 494 MB),
+longer than the fixed 50 s create-readiness wait, so the server deleted it and answered 503. The normal project-build
+create path now has a 120 s readiness/access ceiling, bounded by caller cancellation and the immutable saved
+`shutdownTime` minus a 5 s return margin. Built-ins, snapshots, future template kinds, resume and fork remain at 50 s.
+The lifecycle still begins at create, not readiness; cleanup does not bill beyond the captured original end, and the
+existing minimum-minute policy is unchanged. A missing/malformed end only gets the legacy bound. Use create-only
+`request_timeout=150, retries=0` and e.g. `timeout=300` for cold custom images: SDK HTTP timeout and sandbox lifetime
+are separate, and stock defaults do not guarantee the longer wait. No image precache/curated-alias bypass or blind
+create retry is part of this change. Full post-change sandbox command acceptance remains a separate rollout check.
+
 ## 8. Pause, resume, snapshots and fork (SB7)
 
 Ported from the earlier implementation (`internal/platform/project/e2b_snapshots.go`, `cmd/sandbox-init/snapshot.go`).
@@ -1431,11 +1442,14 @@ newest ready build: the previous one leaves the record, and the registry prune d
   image is ready.
 - **Kill** of a paused sandbox deletes its record and its snapshot; of one still pausing, also the running sandbox.
 
-**Why every call answers within 120 s.** The stock E2B SDK (2.63) sends REST calls through pyqwest with
+**Why snapshot operations retain their short waits (not a universal create deadline).** The stock E2B SDK (2.63) sends REST calls through pyqwest with
 `request_timeout` 60 s, which pyqwest applies as one deadline of read plus write timeouts: 120 s for the whole call.
 A call still waiting then is cut (`operation timed out after 120.0s`) and its work is lost to the client. The first
 pause waited for the image inside the request, as did fork and create from a snapshot, and every one of them on the
-lab was cut at exactly 120 s. The waits are now 60 s for a snapshot plus 50 s for envd, and a pause no longer waits.
+lab was cut at exactly 120 s. Snapshot waits remain 60 s for assembly plus 50 s for envd, and a pause no longer waits.
+Normal project-built template create is a separate cold-image exception (section 7.7): its readiness/access phase may
+wait up to 120 s, bounded by the caller and original lifetime. This is not a claim that every API call or default SDK
+transport finishes within 120 s; configure the create HTTP timeout explicitly for cold custom images.
 
 **Lease serialisation.** Every transition of one id takes a Postgres transaction lock on that id (also before the
 record exists) and writes `state` (`pausing` and `stopping` for 2 minutes, renewed every 30 s by the step that

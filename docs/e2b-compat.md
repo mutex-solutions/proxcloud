@@ -77,7 +77,7 @@ served, answers 404 with E2B's error body (or 400 for a refused field).
 | Endpoint | Status | Notes |
 |---|---|---|
 | `GET /health` | yes | |
-| `POST /sandboxes`, `POST /v2/sandboxes` | partial | `templateID` (a built-in template), `timeout` (1 s up to the provider's maximum, 24 h by default; 300 s when not sent), `metadata`, `envVars`, `network`, `allow_internet_access`. Returns once the sandbox is ready (envd up, the template's ready command passed); a sandbox not ready within 50 s is removed and the call answers 503. `secure` is ignored (envd always requires its token). `autoPause` pauses the filesystem only (`autoPauseMemory: true` → 400); `autoResume` with `autoPause` cold-boots a paused sandbox on traffic to its ports. `volumeMounts` → 400; `mcp` must be an object (the SDK starts the gateway in an `mcp-gateway` sandbox; the API never stores or logs it). `iam` and `Idempotency-Key` are ignored. ProxCloud extensions: `cpuCount`, `memoryMB` (rounded up to whole GiB), `gpu {model, count}` (no GPU nodes before SB9) |
+| `POST /sandboxes`, `POST /v2/sandboxes` | partial | `templateID` (a built-in template), `timeout` (1 s up to the provider's maximum, 24 h by default; 300 s when not sent), `metadata`, `envVars`, `network`, `allow_internet_access`. Returns once the sandbox is ready (envd up, the template's ready command passed); built-ins/snapshots retain the 50 s readiness bound; a normal project-built template gets up to 120 s for its cold first pull, capped by caller cancellation and its original lifetime minus 5 s. Failure removes the sandbox and answers 503. `secure` is ignored (envd always requires its token). `autoPause` pauses the filesystem only (`autoPauseMemory: true` → 400); `autoResume` with `autoPause` cold-boots a paused sandbox on traffic to its ports. `volumeMounts` → 400; `mcp` must be an object (the SDK starts the gateway in an `mcp-gateway` sandbox; the API never stores or logs it). `iam` and `Idempotency-Key` are ignored. ProxCloud extensions: `cpuCount`, `memoryMB` (rounded up to whole GiB), `gpu {model, count}` (no GPU nodes before SB9) |
 | `GET /sandboxes`, `GET /v2/sandboxes` | partial | `metadata` and `state` filters; running and paused sandboxes; one page holds everything, so `nextToken` is never set |
 | `GET /sandboxes/{id}` | yes | `diskSizeMB` is 0 |
 | `DELETE /sandboxes/{id}` | yes | |
@@ -169,9 +169,13 @@ dashboard APIs. They answer 404 with E2B's error body.
     domains that resolve to them (the guardrail protects the platform's and other tenants' networks).
 11. **Metrics**: always empty; no per-sandbox metrics are collected.
 12. **Logs filters** (`start`, `limit`, cursor): not supported; the newest 1000 lines.
-13. **Slow starts**: create waits at most 50 s for the sandbox to be ready (the SDK's own request timeout is 60 s), so a
-    template whose ready command takes longer always fails. E2B starts from a VM snapshot taken after the start command;
-    here the start command runs at every boot.
+13. **Slow starts**: built-in/snapshot create, resume and fork retain a 50 s readiness wait. Only normal project-built
+    template create may wait up to 120 s, including its final access read, bounded by caller cancellation and the
+    server-generated lifetime minus a 5 s return margin. Missing/malformed lifetime falls back to 50 s. The lifetime
+    still begins at create, not readiness; the image pull does not extend it. For cold custom images use create-only
+    `request_timeout=150`, `retries=0`, and e.g. lifecycle `timeout=300`; the SDK's default 60 s request timeout is not a
+    guarantee for the longer server budget. An uncertain create must not be blindly retried (`Idempotency-Key` is
+    ignored). E2B starts from a VM snapshot; here the start command runs at every boot.
 14. **Secrets, events, webhooks, teams, `/api-keys`, admin and dashboard APIs**: not served. Keys are managed in the
     console or the client API; there are no teams (a key belongs to a project).
 15. **`secure: false`**: ignored; envd always requires its access token.
