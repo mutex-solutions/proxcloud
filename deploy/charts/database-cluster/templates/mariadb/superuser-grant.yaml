@@ -1,0 +1,44 @@
+{{- if eq .Values.engine "mariadb" }}
+{{/*
+The exposed account's global privileges.
+
+The MariaDB CR (mariadb.yaml) creates user `app` and grants it ALL PRIVILEGES on the `app`
+database only — a scoped account. That is not what a managed database sells: the customer
+cannot create another database, add a user, or grant anything, which is most of what they
+open a ticket about.
+
+This Grant lifts the same account to root-equivalent: ALL PRIVILEGES on *.* WITH GRANT
+OPTION is exactly the privilege set root@localhost holds in MariaDB.
+
+Why not hand over the operator's root Secret (<id>-root) instead: mariadb-operator sets that
+password at bootstrap and uses root for its own reconciliation, so rotating it through
+RESET_PASSWORD (a merge-patch onto the Secret) would either be ignored by the running server
+or lock the operator out of the database it manages. The declarative User this Grant targets
+is reconciled from `<id>-auth` continuously, so password rotation keeps working.
+
+host "%" matches the User CR — a client arriving through the LB has a node
+source address, never a stable one.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: Grant
+metadata:
+  name: {{ $name }}-g-app-global
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    # Wave 1, like every other access CR: the operator's webhook rejects a Grant whose MariaDB
+    # does not exist yet.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  mariaDbRef:
+    name: {{ $name }}
+  username: app
+  host: "%"
+  database: "*"
+  table: "*"
+  grantOption: true
+  privileges:
+    - "ALL PRIVILEGES"
+  cleanupPolicy: Delete
+{{- end }}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 )
 
 // reconcileProv returns a settable list — stands in for a live cloud provider so Reconcile's
@@ -199,5 +200,172 @@ func TestCloudReconcileShouldBeDeleted(t *testing.T) {
 	}
 	if got, _ := repo.FindByServiceIDAndExternalID(ctx, "svc1", "D1"); got != nil {
 		t.Fatal("terminal resource must be delete-archived despite being live-listed")
+	}
+}
+
+// identityProv adds the optional capabilities the Proxmox providers implement.
+type identityProv struct {
+	reconcileProv
+	grace time.Duration
+}
+
+func (p *identityProv) VanishGrace() time.Duration { return p.grace }
+func (p *identityProv) Superseded(cached, fresh *cloud.CloudResource) bool {
+	return cached.Data["id"] != fresh.Data["id"]
+}
+
+// TestReconcileIdentityAndGrace: a reused external id replaces the row (new id, the old one in the
+// archive), a just-created row survives being absent, and a just-archived one is not resurrected.
+func TestReconcileIdentityAndGrace(t *testing.T) {
+	ctx := context.Background()
+	repo := cloud.NewRepo(freshPG(t))
+	p := &identityProv{reconcileProv: reconcileProv{typ: cloud.TypeServer}, grace: 2 * time.Minute}
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	at := func(d time.Duration) time.Time { return base.Add(d) }
+
+	p.list = []cloud.CloudResource{rcRes("105", map[string]any{"id": "c-1"})}
+	if _, err := providers.Reconcile(ctx, p, repo, "svc1", at(0)); err != nil {
+		t.Fatal(err)
+	}
+	first, err := repo.FindByServiceIDAndExternalID(ctx, "svc1", "105")
+	if err != nil || first == nil {
+		t.Fatalf("first row: %v %+v", err, first)
+	}
+
+	// Absent inside the grace: kept.
+	p.list = nil
+	if st, err := providers.Reconcile(ctx, p, repo, "svc1", at(time.Minute)); err != nil || st.Deleted != 0 {
+		t.Fatalf("inside grace: %v %+v", err, st)
+	}
+
+	// Same vmid, another VM: the row is replaced in one pass, keeping the old one in the archive.
+	p.list = []cloud.CloudResource{rcRes("105", map[string]any{"id": "c-2"})}
+	st, err := providers.Reconcile(ctx, p, repo, "svc1", at(3*time.Minute))
+	if err != nil || st.Deleted != 1 || st.Created != 1 {
+		t.Fatalf("replace: %v %+v", err, st)
+	}
+	second, _ := repo.FindByServiceIDAndExternalID(ctx, "svc1", "105")
+	if second == nil || second.ID == first.ID || second.Data["id"] != "c-2" {
+		t.Fatalf("second row: %+v", second)
+	}
+	archived, err := repo.FindArchivedSince(ctx, "proj1", "svc1", base)
+	if err != nil || len(archived) != 1 || archived[0].CloudResourceID != first.ID {
+		t.Fatalf("archive: %v %+v", err, archived)
+	}
+
+	// Absent past the grace: archived. Still listed right after (pmxcfs lag): not resurrected.
+	p.list = nil
+	if st, err := providers.Reconcile(ctx, p, repo, "svc1", at(6*time.Minute)); err != nil || st.Deleted != 1 {
+		t.Fatalf("vanish: %v %+v", err, st)
+	}
+	p.list = []cloud.CloudResource{rcRes("105", map[string]any{"id": "c-2"})}
+	if st, err := providers.Reconcile(ctx, p, repo, "svc1", at(6*time.Minute+10*time.Second)); err != nil || st.Created != 0 {
+		t.Fatalf("resurrected: %v %+v", err, st)
+	}
+	// Past the grace a listed VM is real again.
+	if st, err := providers.Reconcile(ctx, p, repo, "svc1", at(9*time.Minute)); err != nil || st.Created != 1 {
+		t.Fatalf("after grace: %v %+v", err, st)
+	}
+}
+
+// unreadProv keeps the rows of what it cannot read, like a Proxmox provider with a node down.
+type unreadProv struct {
+	reconcileProv
+	unread map[string]string // externalId -> new status ("" = no change)
+}
+
+func (p *unreadProv) KeepUnread(cr *cloud.CloudResource) (keep, changed bool) {
+	st, ok := p.unread[cr.ExternalID]
+	if !ok {
+		return false, false
+	}
+	if st != "" {
+		cr.Data["status"] = st
+	}
+	return true, st != ""
+}
+
+// A row the provider cannot read survives being absent, and only what it changed changes. Once the object is really
+// gone it goes.
+func TestReconcileKeepsUnreadRows(t *testing.T) {
+	ctx := context.Background()
+	repo := cloud.NewRepo(freshPG(t))
+	p := &unreadProv{reconcileProv: reconcileProv{typ: cloud.TypeServer}}
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	p.list = []cloud.CloudResource{rcRes("A", map[string]any{"name": "a", "status": "ACTIVE"})}
+	if _, err := providers.Reconcile(ctx, p, repo, "svc1", base); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := repo.FindByServiceIDAndExternalID(ctx, "svc1", "A")
+
+	p.list, p.unread = nil, map[string]string{"A": "UNKNOWN"}
+	st, err := providers.Reconcile(ctx, p, repo, "svc1", base.Add(time.Minute))
+	if err != nil || st.Deleted != 0 || st.Updated != 1 {
+		t.Fatalf("stats %+v, %v", st, err)
+	}
+	row, _ := repo.FindByServiceIDAndExternalID(ctx, "svc1", "A")
+	if row == nil || row.ID != before.ID || row.Data["name"] != "a" || row.Data["status"] != "UNKNOWN" {
+		t.Fatalf("row = %+v", row)
+	}
+
+	p.unread = map[string]string{"A": ""}
+	if st, err = providers.Reconcile(ctx, p, repo, "svc1", base.Add(2*time.Minute)); err != nil || st != (providers.ReconcileStats{}) {
+		t.Fatalf("no change expected: %+v, %v", st, err)
+	}
+
+	p.unread = nil
+	if st, err = providers.Reconcile(ctx, p, repo, "svc1", base.Add(3*time.Minute)); err != nil || st.Deleted != 1 {
+		t.Fatalf("gone for real: %+v, %v", st, err)
+	}
+}
+
+// TestMeterState covers the heartbeat doc and the task event store on real Postgres.
+func TestMeterState(t *testing.T) {
+	ctx := context.Background()
+	repo := cloud.NewRepo(freshPG(t))
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if st, err := repo.MeterState(ctx, "svc1"); err != nil || st != nil || st.Stale(now) {
+		t.Fatalf("absent: %v %+v", err, st)
+	}
+	if err := repo.SetMeterFields(ctx, "svc1", pgdoc.M{"lastOkAt": now.Add(-31 * time.Minute), "alertedAt": now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetMeterFields(ctx, "svc1", pgdoc.M{"taskCursors": map[string]int64{"pve1": 42}}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := repo.MeterState(ctx, "svc1")
+	if err != nil || !st.Stale(now) || st.TaskCursors["pve1"] != 42 || st.AlertedAt == nil {
+		t.Fatalf("state: %v %+v", err, st)
+	}
+	if err := repo.SetMeterFields(ctx, "svc1", pgdoc.M{"lastOkAt": now}, "alertedAt"); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ = repo.MeterState(ctx, "svc1"); st.Stale(now) || st.AlertedAt != nil || st.TaskCursors["pve1"] != 42 {
+		t.Fatalf("recovered: %+v", st)
+	}
+
+	started := now.Add(-time.Minute)
+	ev := &cloud.TaskEvent{ID: "UPID:1", ServiceID: "svc1", ProjectID: "p1", VMID: "105", Type: "qmstart", StartedAt: &started}
+	if fresh, err := repo.InsertTaskEvent(ctx, ev); err != nil || !fresh {
+		t.Fatalf("insert: %v %v", err, fresh)
+	}
+	if fresh, err := repo.InsertTaskEvent(ctx, ev); err != nil || fresh {
+		t.Fatalf("dedupe: %v %v", err, fresh)
+	}
+	if got, err := repo.TaskEventsForVM(ctx, "svc1", "p1", "105", started.Add(-time.Second), 10); err != nil || len(got) != 1 {
+		t.Fatalf("read: %v %+v", err, got)
+	}
+	// The vmid's next owner must not see it.
+	if got, _ := repo.TaskEventsForVM(ctx, "svc1", "p1", "105", started.Add(time.Second), 10); len(got) != 0 {
+		t.Fatalf("older VM's task leaked: %+v", got)
+	}
+	if got, _ := repo.TaskEventsForVM(ctx, "svc1", "p2", "105", started.Add(-time.Second), 10); len(got) != 0 {
+		t.Fatalf("other project: %+v", got)
+	}
+	if err := repo.PruneTaskEvents(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := repo.TaskEventsForVM(ctx, "svc1", "p1", "105", started.Add(-time.Second), 10); len(got) != 0 {
+		t.Fatalf("pruned: %+v", got)
 	}
 }

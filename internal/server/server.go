@@ -6,6 +6,7 @@ package server
 import (
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -30,9 +31,17 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/projectinvite"
 	"github.com/mutex-solutions/proxcloud/internal/platform/promotion"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sse"
+	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/pkg/auth"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
+
+// tokenPaths are the routes with a bearer credential in the path: a seed, an object download, a
+// console session, an invite. Whoever reads the logs must not be able to use them.
+var tokenPaths = regexp.MustCompile(`(/(?:nocloud|download|console|project-invites(?:/accept|/decline)?)/)[^/]+`)
+
+// redactPath is the path as the access log may show it.
+func redactPath(p string) string { return tokenPaths.ReplaceAllString(p, "${1}REDACTED") }
 
 // requestLogger emits one structured access-log line per request (method, path, status, latency,
 // response bytes, request id) so the app's own traffic is visible in the logs — otherwise only
@@ -45,7 +54,7 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 			defer func() {
 				log.Info("request",
 					"method", r.Method,
-					"path", r.URL.Path,
+					"path", redactPath(r.URL.Path),
 					"status", ww.Status(),
 					"bytes", ww.BytesWritten(),
 					"ms", time.Since(start).Milliseconds(),
@@ -55,6 +64,15 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 			next.ServeHTTP(ww, r)
 		})
 	}
+}
+
+// exposeRequestID returns the request id as a response header, so httpx.WriteError can log an
+// internal error against it and a user can quote it.
+func exposeRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(httpx.RequestIDHeader, middleware.GetReqID(r.Context()))
+		next.ServeHTTP(w, r)
+	})
 }
 
 // corsMiddleware allows the browser FE origins (the UI + admin SPAs, which are served from
@@ -95,9 +113,10 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 }
 
 // AppRouter is the public API on :8080.
-func AppRouter(log *slog.Logger, corsOrigins []string, authn *auth.Authenticator, acct *account.Handler, orgH *org.Handler, roleH *org.RoleHandler, orgAuditH *org.AuditHandler, billingH *org.BillingHandler, billingCfgH *billing.ConfigHandler, projectH *project.Handler, pcfgH *platformconfig.Handler, featureH *feature.Handler, promotionH *promotion.Handler, affiliateH *affiliate.Handler, catalogH *catalog.Handler, orderH *order.Handler, inviteH *projectinvite.Handler, adminH *admin.Handler, adminAPIH *adminapi.Handler, sseH *sse.Handler, jobH *job.Handler, mcpH *mcp.Handler) http.Handler {
+func AppRouter(log *slog.Logger, corsOrigins []string, authn *auth.Authenticator, acct *account.Handler, orgH *org.Handler, roleH *org.RoleHandler, orgAuditH *org.AuditHandler, billingH *org.BillingHandler, billingCfgH *billing.ConfigHandler, projectH *project.Handler, pcfgH *platformconfig.Handler, featureH *feature.Handler, promotionH *promotion.Handler, affiliateH *affiliate.Handler, catalogH *catalog.Handler, orderH *order.Handler, inviteH *projectinvite.Handler, adminH *admin.Handler, adminAPIH *adminapi.Handler, sseH *sse.Handler, jobH *job.Handler, mcpH *mcp.Handler, ssoH *sso.Handler) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	r.Use(exposeRequestID)
 	r.Use(requestLogger(log)) // access log: method/path/status/latency per request (JSON, one line each)
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware(corsOrigins)) // CORS + preflight, BEFORE auth (preflight must not 401)
@@ -127,9 +146,14 @@ func AppRouter(log *slog.Logger, corsOrigins []string, authn *auth.Authenticator
 		adminH.Routes(r)      // /admin/** surface (admin-permission gated)
 		sseH.Routes(r)        // SSE real-time stream (/events/{projectId}); source connected later
 		jobH.Routes(r)        // operator job triggers (/admin/job/*; whitelisted)
+		if ssoH != nil {
+			ssoH.Routes(r) // per-organization SSO
+		}
 	})
 	// Public Admin API: SigV4 (hmac_keys) or the admin-api OIDC realm.
 	r.Route("/admin-api/v1", adminAPIH.Routes)
+	// E2B-compatible sandbox API (X-API-Key = a project sandbox API key; public in pkg/auth).
+	r.Route("/e2b", projectH.E2BRoutes)
 
 	// OpenAPI stub (public) so the /openapi.json ingress path resolves.
 	r.Get("/openapi.json", func(w http.ResponseWriter, req *http.Request) {

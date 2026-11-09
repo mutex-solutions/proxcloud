@@ -24,8 +24,19 @@ type Resolver func(ctx context.Context) (mailer Mailer, from string)
 type Service struct {
 	render   RenderFunc
 	resolve  Resolver
-	business string // branding name injected as {{businessName}} when absent
-	log      *slog.Logger
+	business string // fallback branding name injected as {{businessName}} when absent
+	// businessFn, when set, resolves the branding name at send time (the operator's legal name from
+	// the billing configuration); a blank result falls back to `business`.
+	businessFn func(ctx context.Context) string
+	log        *slog.Logger
+}
+
+// SetBusinessName wires a runtime resolver for {{businessName}} (billing configuration business
+// name). Nil → the static fallback only.
+func (s *Service) SetBusinessName(fn func(ctx context.Context) string) {
+	if s != nil {
+		s.businessFn = fn
+	}
 }
 
 func NewService(render RenderFunc, resolve Resolver, business string, log *slog.Logger) *Service {
@@ -36,6 +47,12 @@ func NewService(render RenderFunc, resolve Resolver, business string, log *slog.
 // recipients. No-op when the service/resolver is nil, no gateway is configured, or the template is
 // missing/disabled.
 func (s *Service) SendTemplate(ctx context.Context, key string, to []string, vars map[string]any) error {
+	return s.SendTemplateWithAttachments(ctx, key, to, vars, nil)
+}
+
+// SendTemplateWithAttachments is SendTemplate with files attached (the invoice PDF on the bill
+// mails). Same no-op rules.
+func (s *Service) SendTemplateWithAttachments(ctx context.Context, key string, to []string, vars map[string]any, atts []Attachment) error {
 	if s == nil || s.render == nil || s.resolve == nil || len(to) == 0 {
 		return nil
 	}
@@ -46,8 +63,17 @@ func (s *Service) SendTemplate(ctx context.Context, key string, to []string, var
 	if vars == nil {
 		vars = map[string]any{}
 	}
-	if _, ok := vars["businessName"]; !ok && s.business != "" {
-		vars["businessName"] = s.business
+	if _, ok := vars["businessName"]; !ok {
+		name := ""
+		if s.businessFn != nil {
+			name = s.businessFn(ctx)
+		}
+		if name == "" {
+			name = s.business
+		}
+		if name != "" {
+			vars["businessName"] = name
+		}
 	}
 	title, body, ok, err := s.render(ctx, key, vars)
 	if err != nil {
@@ -56,7 +82,7 @@ func (s *Service) SendTemplate(ctx context.Context, key string, to []string, var
 	if !ok {
 		return nil // template missing/disabled → skip
 	}
-	if err := mailer.Send(ctx, Message{From: from, To: to, Subject: title, HTMLBody: wrapShell(body)}); err != nil {
+	if err := mailer.Send(ctx, Message{From: from, To: to, Subject: title, HTMLBody: wrapShell(body), Attachments: atts}); err != nil {
 		// Callers dispatch mail best-effort (most discard this error); log here so a broken gateway
 		// is visible in the logs instead of silently swallowed.
 		if s.log != nil {

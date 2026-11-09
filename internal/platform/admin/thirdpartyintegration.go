@@ -10,6 +10,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
+	"github.com/mutex-solutions/proxcloud/internal/platform/payment"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -197,6 +198,21 @@ func (h *Handler) integrationHealthCheckByID(w http.ResponseWriter, r *http.Requ
 	if existing == nil {
 		httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("ThirdParty Integration with id %s not found", id)))
 		return
+	}
+	// Card gateways: an authenticated no-op call with the stored (decrypted) credentials.
+	if h.billing != nil {
+		gw, err := h.billing.GetGateway(r.Context(), id)
+		if httpx.WriteError(w, err) {
+			return
+		}
+		if g := payment.NewGateway(gw); g != nil {
+			if err := g.Ping(r.Context()); err != nil {
+				httpx.WriteError(w, httpx.BadRequest("Health check failed: "+err.Error()))
+				return
+			}
+			httpx.OK(w, "Successful operation")
+			return
+		}
 	}
 	httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "integration health check not implemented"))
 }

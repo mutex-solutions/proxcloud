@@ -52,10 +52,13 @@ func (j *SuspensionJob) SetAudit(a *audit.Service) { j.audit = a }
 // EXTRACTION SEAM: the implementation is cloud-specific and stays in proxcloud when billing moves
 // out; this becomes a billing→proxcloud HTTP callback
 // (POST /internal/v1/billing-profiles/{id}/{suspend,resume}-clouds). The signature is already
-// wire-ready — context-first, and a profile id is the only argument. Keep it that way.
+// wire-ready — context-first, and at most a profile id as argument. Keep it that way.
+//
+// FinishResumes is the retry of the resume leg, across profiles: only the cloud side knows which VMs a suspension paused.
 type CloudSuspender interface {
 	SuspendBillingProfileClouds(ctx context.Context, billingProfileID string) error
 	ResumeBillingProfileClouds(ctx context.Context, billingProfileID string) error
+	FinishResumes(ctx context.Context) error
 }
 
 func (j *SuspensionJob) SetCloudSuspender(cs CloudSuspender) { j.clouds = cs }
@@ -95,8 +98,15 @@ func suspensionConfigFor(global *pricing.BillingAutomaticSuspensionConfig, profi
 // ExecuteDunning is the autoSuspensionJob fan-out: gated on the global config being
 // enabled (isSuspensionEnabled), it evaluates every ACTIVE profile for suspension. Per-profile
 // errors are logged-and-skipped (per-profile failures are isolated). Returns the
-// number of profiles newly suspended.
+// number of profiles newly suspended. Before that gate it finishes what earlier suspensions and resumes left, an operator's
+// included.
 func (j *SuspensionJob) ExecuteDunning(ctx context.Context) (int, error) {
+	j.finishSuspensions(ctx)
+	if j.clouds != nil {
+		if err := j.clouds.FinishResumes(ctx); err != nil {
+			j.log.Error("finishing resumes", "err", err)
+		}
+	}
 	now := j.now()
 	global, err := j.repo.SuspensionConfiguration(ctx)
 	if err != nil {
@@ -131,6 +141,65 @@ func (j *SuspensionJob) ExecuteDunning(ctx context.Context) (int, error) {
 	return suspended, nil
 }
 
+// finishSuspensions walks every SUSPENDED profile again. This is what catches a walk that failed or stopped halfway: the profile
+// stays SUSPENDED, so a project left ENABLED or a VM left running gets another try every pass, whatever the failure was and
+// whether or not anyone saw it. The walk only touches what is not yet down, so a clean re-walk costs reads.
+//
+// ponytail: it cannot tell a missed project from one an operator enabled under a suspended profile, so that enable lasts until
+// the next pass. A per-project override is the upgrade if operators need one.
+func (j *SuspensionJob) finishSuspensions(ctx context.Context) {
+	if j.clouds == nil {
+		return
+	}
+	profiles, err := j.repo.FindByStatus(ctx, StatusSuspended)
+	if err != nil {
+		j.log.Error("finishing suspensions: list profiles", "err", err)
+		return
+	}
+	for i := range profiles {
+		// A walk can take minutes, and a profile resumed since the list must not go down again, even for a moment.
+		fresh, err := j.repo.FindByID(ctx, profiles[i].ID)
+		if err != nil {
+			j.log.Error("finishing suspensions: read profile", "billingProfile", profiles[i].ID, "err", err)
+			continue
+		}
+		if fresh != nil && fresh.Status == StatusSuspended {
+			suspendClouds(ctx, j.repo, j.clouds, fresh.ID, j.log)
+		}
+	}
+}
+
+// suspendClouds is the cloud leg of a suspension, run once the profile is saved SUSPENDED. A failure is logged and the
+// suspension stands: the customer is suspended, and finishSuspensions walks again next pass. A resume landing during the walk
+// could end with what the walk passed down again, so when the profile is ACTIVE afterwards the resume leg runs once more.
+func suspendClouds(ctx context.Context, repo *Repo, clouds CloudSuspender, id string, log *slog.Logger) {
+	if clouds == nil {
+		return
+	}
+	if err := clouds.SuspendBillingProfileClouds(ctx, id); err != nil {
+		log.Error("cloud suspend incomplete, the next suspension pass walks again", "billingProfile", id, "err", err)
+	}
+	bp, err := repo.FindByID(ctx, id)
+	if err != nil || bp == nil || bp.Status != StatusActive {
+		return
+	}
+	if err := clouds.ResumeBillingProfileClouds(ctx, id); err != nil {
+		log.Error("cloud resume after a suspend walk", "billingProfile", id, "err", err)
+	}
+}
+
+// resumeClouds is the cloud leg of a resume, run once the profile is saved ACTIVE. Like the suspend, the walk outlives the request:
+// stopping halfway would leave VMs paused on a profile that has paid. A failure is logged, and the next pass picks up what it left
+// (CloudSuspender.FinishResumes).
+func resumeClouds(ctx context.Context, clouds CloudSuspender, id string, log *slog.Logger) {
+	if clouds == nil {
+		return
+	}
+	if err := clouds.ResumeBillingProfileClouds(context.WithoutCancel(ctx), id); err != nil {
+		log.Error("cloud resume incomplete, the next suspension pass picks it up", "billingProfile", id, "err", err)
+	}
+}
+
 // executeBillingProfile runs the suspension evaluation for one profile.
 func (j *SuspensionJob) executeBillingProfile(ctx context.Context, global *pricing.BillingAutomaticSuspensionConfig, profile *BillingProfile, baseCurrency string, now time.Time) (bool, error) {
 	cfg := suspensionConfigFor(global, profile)
@@ -152,15 +221,8 @@ func (j *SuspensionJob) executeBillingProfile(ctx context.Context, global *prici
 	if profile.Status != StatusActive || !pricing.IsEligibleForSuspension(cfg, *limit, balance, dueAts, now) {
 		return false, nil
 	}
-	// already suspended → nothing to do
-	already, err := j.repo.FindFirstSuspensionByStatus(ctx, profile.ID, SuspensionSuspended)
-	if err != nil {
-		return false, err
-	}
-	if already != nil {
-		return false, nil
-	}
-	proc, err := j.repo.FindFirstSuspensionByStatus(ctx, profile.ID, SuspensionInProgress)
+	// A process already SUSPENDED on this ACTIVE profile is a suspend whose profile save failed: it carries on from here.
+	proc, err := j.repo.FindFirstSuspensionByStatusIn(ctx, profile.ID, SuspensionInProgress, SuspensionSuspended)
 	if err != nil {
 		return false, err
 	}
@@ -182,7 +244,7 @@ func (j *SuspensionJob) executeBillingProfile(ctx context.Context, global *prici
 		if cfg.Type == pricing.SuspensionTypeBalance {
 			template = "notify_customer_before_suspension_balance"
 		}
-		notify(ctx, j.notifier, template, profile.Email, map[string]any{
+		notify(ctx, j.notifier, template, profile, map[string]any{
 			"fullName": profileFullName(profile), "balance": balance.StringFixed(2),
 			"currency": baseCurrency, "unpaidInvoices": len(dueAts),
 		})
@@ -271,16 +333,11 @@ func (j *SuspensionJob) createProcess(cfg *pricing.BillingAutomaticSuspensionCon
 }
 
 // suspend flips the process → SUSPENDED and the profile → SUSPENDED status
-// (the billing-level part of suspendBillingProfile).
-// The live cloud suspend runs through CloudSuspender (nil-safe).
+// (the billing-level part of suspendBillingProfile), then runs the live cloud suspend through CloudSuspender (nil-safe). The
+// saves come first: a member opening a project the walk has just disabled must find the profile SUSPENDED, and a save failing
+// with projects already down would leave them down with nothing to retry. Failing here leaves nothing touched, and the next pass
+// carries on from whichever process status was saved.
 func (j *SuspensionJob) suspend(ctx context.Context, proc *SuspensionProcess, profile *BillingProfile, balance decimal.Decimal, currency string) error {
-	// suspendBillingProfile: the LIVE cloud suspend (PVE suspend each project
-	// server + project DISABLED) runs FIRST, best-effort — an error never blocks the billing flip.
-	if j.clouds != nil {
-		if err := j.clouds.SuspendBillingProfileClouds(ctx, profile.ID); err != nil {
-			j.log.Error("cloud suspend failed (billing flip proceeds)", "billingProfile", profile.ID, "err", err)
-		}
-	}
 	proc.Status = SuspensionSuspended
 	if err := j.repo.SaveSuspensionProcess(ctx, proc); err != nil {
 		return err
@@ -289,8 +346,9 @@ func (j *SuspensionJob) suspend(ctx context.Context, proc *SuspensionProcess, pr
 	if _, err := j.repo.Update(ctx, profile); err != nil {
 		return err
 	}
+	suspendClouds(ctx, j.repo, j.clouds, profile.ID, j.log)
 	j.log.Info("suspended billing profile (auto)", "id", profile.ID)
-	notify(ctx, j.notifier, "notify_customer_is_suspended", profile.Email, map[string]any{
+	notify(ctx, j.notifier, "notify_customer_is_suspended", profile, map[string]any{
 		"fullName": profileFullName(profile), "balance": balance.StringFixed(2), "currency": currency,
 	})
 	// suspend → auditSystem(SUSPEND, ORGANIZATION, {billingProfile, balance}).
@@ -307,13 +365,9 @@ func (j *SuspensionJob) resume(ctx context.Context, profile *BillingProfile) err
 	}
 	// unsuspendBillingProfile: status flip first, then the live cloud resume (UNPAUSE +
 	// project ENABLED), best-effort.
-	if j.clouds != nil {
-		if err := j.clouds.ResumeBillingProfileClouds(ctx, profile.ID); err != nil {
-			j.log.Error("cloud resume failed (billing flip already done)", "billingProfile", profile.ID, "err", err)
-		}
-	}
+	resumeClouds(ctx, j.clouds, profile.ID, j.log)
 	j.log.Info("resumed billing profile (auto)", "id", profile.ID)
-	notify(ctx, j.notifier, "notify_customer_is_resumed", profile.Email, map[string]any{
+	notify(ctx, j.notifier, "notify_customer_is_resumed", profile, map[string]any{
 		"fullName": profileFullName(profile),
 	})
 	return nil

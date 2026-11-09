@@ -27,11 +27,11 @@ engine: ""
 # a version with no mapping fails the render. EXCEPTION: opensearch/kafka
 # have NO image map — both operators resolve images from the version field
 # natively (spec.general.version / spec.kafka.version).
-#   postgresql: "16" | "17" | "18"
+#   postgresql: "14" | "15" | "16" | "17" | "18"
 #   mysql:      "8.0" | "8.4"
-#   mariadb:    "10.11" | "11.4"
-#   valkey:     "8.0" | "8.1"
-#   ferretdb:   "2.5" (frontend; the CNPG backend image is ferretdb.postgresImage)
+#   mariadb:    "10.6" | "10.11" | "11.4" | "11.8"
+#   valkey:     "9.0" | "9.1"
+#   ferretdb:   "2.5" | "2.7" (frontend + the matched CNPG backend image)
 #   opensearch: "3.3.0"
 #   kafka:      "4.2.0" | "4.2.1" | "4.3.0" (Strimzi 1.1.0 support matrix)
 engineVersion: ""
@@ -42,7 +42,7 @@ engineVersion: ""
 # this is the CNPG BACKEND instance count; the stateless frontend scales via
 # ferretdb.replicas. opensearch: node-pool replicas (combined
 # cluster_manager+data+ingest roles). kafka: KafkaNodePool replicas
-# (dual-role controller+broker) — ALSO the per-broker LB count, see
+# (dual-role controller+broker) — ALSO the per-broker LoadBalancer count, see
 # templates/kafka/kafka.yaml.
 instances: 1
 
@@ -54,6 +54,32 @@ resources:
   # -- Memory per instance in Gi (number; rendered as "<n>Gi").
   memoryGi: ""
 
+# -- Pod placement for everything this chart runs: the engine pods, their
+# proxies (haproxy for mysql/mariadb) and the FerretDB frontend. Optional —
+# empty means "schedule anywhere", which is the DBaaS cluster's default.
+#
+# The point is a dedicated node pool for databases: label + taint those nodes
+# and set both keys here, and the pool can then scale on database demand alone
+# without platform workloads landing on it (or database pods drifting off it).
+# Set BOTH — a nodeSelector alone still lets other pods onto the pool, and a
+# toleration alone does not keep database pods on it.
+#
+# Kafka is the exception in shape only: Strimzi's pod template has no
+# nodeSelector, so the selector is rendered as an equivalent required
+# nodeAffinity. Same effect, different field.
+scheduling:
+  # -- Failure-domain key the replicas of ONE database must spread across, as a
+  # HARD anti-affinity (required, not preferred) whenever instances > 1. With
+  # fewer failure domains than instances the surplus pod stays Pending — a site
+  # with a single node or zone overrides this, e.g. kubernetes.io/hostname.
+  # Provider config database.scheduling.zoneKey.
+  zoneKey: topology.kubernetes.io/zone
+  # -- Node labels a database pod must match, e.g. {node-role: database}.
+  nodeSelector: {}
+  # -- Tolerations for the taints on those nodes, in the standard k8s shape:
+  # [{key: dedicated, operator: Equal, value: database, effect: NoSchedule}].
+  tolerations: []
+
 # -- Persistent storage per instance.
 storage:
   # -- Volume size in Gi. REQUIRED for every engine (for ferretdb it sizes the
@@ -63,24 +89,48 @@ storage:
   # -- StorageClass for the data volumes. Empty = cluster default.
   storageClassName: ""
 
-# -- LoadBalancer Service wiring.
+# -- Tenant-facing LoadBalancer wiring. The Service address comes from MetalLB in
+# a services subnet tenants reach over their normal egress; nothing here places
+# anything on a tenant network.
 network:
-  # -- Client source CIDRs allowed through the LB (via
-  # spec.loadBalancerSourceRanges). Empty = no restriction. These are
-  # deliberately NOT mirrored into the NetworkPolicy — see
-  # templates/networkpolicy.yaml.
+  # -- MetalLB address pool for EVERY tenant-facing LoadBalancer Service this
+  # chart renders (<id>-lb, <id>-ro-lb, <id>-dash-lb and, for kafka, the Strimzi
+  # bootstrap + per-broker Services): annotation
+  # metallb.universe.tf/address-pool. Provider config database.lbAddressPool.
+  # Empty = no annotation (MetalLB picks from any auto-assign pool).
+  addressPool: ""
+  # -- Client source CIDRs allowed through the LB (spec.loadBalancerSourceRanges).
+  # Empty = no restriction. These are deliberately NOT mirrored into the
+  # NetworkPolicy — see templates/networkpolicy.yaml.
   allowedCidrs: []
   # -- Extra annotations merged onto the LB Service (escape hatch for
   # provider-specific load-balancer knobs).
   extraAnnotations: {}
 
+# -- Customer-managed logical databases inside this instance (MANAGE_ACCESS).
+# postgresql -> one CNPG Database CR each; mariadb -> one mariadb Database CR
+# each. Ignored by every other engine. `owner` must be one of `users` below;
+# omitted = the engine's built-in app user.
+# [{name: orders, owner: alice}]
+databases: []
+
+# -- Customer-managed logins (MANAGE_ACCESS). NEVER carries a password: the
+# engine CR references Secret <resourceId>-u-<name>, which proxcloud writes
+# directly (values ride an argocd-readable Application).
+#   databases  postgresql/mariadb: the logical databases this user may use.
+#   inRoles    postgresql only, derived by proxcloud: membership of each listed
+#              database's owner role, which is how postgres grants access.
+#   roles      opensearch only: built-in role names, allowlisted server-side.
+# [{name: alice, databases: [orders], inRoles: [], roles: []}]
+users: []
+
 # -- ProxCloud identity of this database. projectId + resourceId REQUIRED.
-# resourceId (std-xxxxxxxx) is the base name of EVERY object this chart
+# resourceId (pc-d-xxxxxxxx) is the base name of EVERY object this chart
 # renders — not the release name, which is an ArgoCD implementation detail.
 proxcloud:
   # -- Owning proxcloud project id (also the pc-<projectId> namespace suffix).
   projectId: ""
-  # -- The DATABASE_CLUSTER resource id, e.g. std-1a2b3c4d.
+  # -- The DATABASE_CLUSTER resource id, e.g. pc-d-1a2b3c4d.
   resourceId: ""
   # -- Human display name (annotation only; free-form).
   displayName: ""
@@ -92,16 +142,91 @@ proxcloud:
 monitoring:
   enabled: false
 
-# -- Backup contract. SCHEMA ONLY for now: reserved keys, read by nothing,
-# so BuildValues can stamp them without a chart release when backups land.
+# -- Object-store backup. The STORE is operator config (provider-level); the
+# POSTURE below is the customer's. postgresql/ferretdb use the barman-cloud
+# CNPG plugin (which must be installed on the cluster), mariadb a
+# PhysicalBackup, mysql the Percona in-CR storages. valkey/opensearch/kafka
+# ignore this block entirely.
 backup:
   enabled: false
+  # -- 5-FIELD cron (minute hour dom month dow). ONE canonical arity across the
+  # platform: CNPG's ScheduledBackup wants six fields and misreads a five-field
+  # string as seconds-first — it runs at the wrong time instead of failing — so
+  # _backup.tpl converts, and nothing else may. Empty = on-demand only.
+  schedule: ""
+  # -- mysql ONLY: cron for INCREMENTAL runs, on the days `schedule` leaves free.
+  # Percona is the one operator here that can take an incremental base backup;
+  # proxcloud derives this from `schedule` (values.go IncrementalSchedule) and
+  # leaves it empty when the base already runs daily or oftener. Increments
+  # chain onto the latest full and are pruned with it.
+  incrementalSchedule: ""
+  # -- Keep backups this many days. 0 = keep forever. Used as-is by the operators
+  # whose retention IS a duration (barman "30d", mariadb hours).
+  retentionDays: 0
+  # -- The same retention expressed as a COUNT, which is what Percona's `keep`
+  # means. Derived from retentionDays and the schedule's cadence by proxcloud
+  # (values.go keepBackups) — the two only coincide at a daily cron, and passing
+  # days straight through would keep 30 WEEKS of full copies on a weekly one.
+  keepBackups: 0
+  # -- Stamp written by the CREATE_BACKUP action. A CHANGED value produces one
+  # extra backup (new CR name, or mariadb's schedule.onDemand); unchanged is a
+  # no-op re-apply, so "back up now" stays declarative.
+  runAt: ""
+  s3:
+    # -- Endpoint WITH scheme (https://s3.example.com, or plain http://). mariadb
+    # wants host:port and a separate TLS flag — _backup.tpl strips and derives,
+    # do not pre-strip.
+    endpoint: ""
+    bucket: ""
+    # -- Folder inside the bucket; the chart always appends /<resourceId> so one
+    # database's retention can never reach a sibling's data.
+    prefix: ""
+    region: ""
+    # -- Path-style addressing. ON by default: Ceph RGW and RustFS are
+    # addressed path-style, and a virtual-host request makes the gateway parse
+    # the bucket out of the Host header.
+    pathStyle: true
+    # -- Optional Secret (key ca.crt) holding the endpoint's CA.
+    caCertSecret: ""
+    # -- Name of a pre-existing Secret holding the S3 credentials (never the
+    # credentials themselves — no secrets in values). ProxCloud writes it with all
+    # four key aliases the operators expect: ACCESS_KEY_ID/ACCESS_SECRET_KEY
+    # (CNPG) and AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (Percona, mariadb).
+    credsSecret: ""
+
+# -- Recovery source, stamped by the create path when a database is restored
+# from another one's backups (internal/cloud/dbaas/values.go restoreValues).
+# Empty sourceId = a normal, empty database. Restore is create-time by nature:
+# these engines take PHYSICAL backups, which can only be laid on a fresh data
+# directory, so recovery produces a NEW database and leaves the damaged one
+# untouched. postgresql/ferretdb recover via CNPG bootstrap.recovery, mariadb
+# via bootstrapFrom; mysql brings the new cluster up empty and then applies a
+# PerconaServerMySQLRestore naming `backupName` (its restore CR targets a
+# running cluster).
+restore:
+  # -- The database id whose object-store folder is read.
+  sourceId: ""
+  # -- RFC3339 instant to recover to. Empty = replay everything available.
+  targetTime: ""
+  # -- mariadb only, decided server-side: replay the source's archived binlogs
+  # to targetTime instead of landing on the nearest physical backup. Requires
+  # the SOURCE to have run replication, the only topology 26.6.0 archives
+  # binlogs on.
+  pitr: false
+  # -- The specific backup object to restore from. Required for mysql, whose
+  # restore CR names a backup rather than searching the object store; the other
+  # engines find their own base backup.
+  backupName: ""
+  # -- Secret holding the object-store credentials (written before the
+  # Application, because the bootstrap reads S3 immediately).
+  credsSecret: ""
   s3:
     endpoint: ""
     bucket: ""
-    # -- Name of a pre-existing Secret holding the S3 credentials (never the
-    # credentials themselves — no secrets in values).
-    credsSecret: ""
+    prefix: ""
+    region: ""
+    pathStyle: true
+    caCertSecret: ""
 
 # -- RESTART lever: an RFC3339 timestamp stamped by proxcloud on the RESTART
 # action. A changed value rolls the database pods via each engine's documented
@@ -138,8 +263,19 @@ postgresql:
   # spec.postgresql.parameters verbatim.
   parameters: {}
   # -- CNPG enableSuperuserAccess: when true the operator maintains the
-  # <id>-superuser Secret. Off by default — the app user is the product.
-  superuserAccess: false
+  # <id>-superuser Secret (the real `postgres` role).
+  #
+  # ON by default: the product hands the customer their database, not a sandbox
+  # inside it. The `app` role CNPG creates cannot install most extensions, create
+  # roles or read another role's objects, which is exactly the set of things a
+  # customer opens a ticket about. ProxCloud serves this Secret as the connection
+  # credential (internal/cloud/dbaas/engines.go ConnectionSecret).
+  #
+  # The trade is real and accepted: a superuser can ALTER SYSTEM, drop the
+  # replication role, or otherwise break what CNPG manages, and the platform still
+  # owns the resulting page. Set this to false per-database to hand out the scoped
+  # `app` role instead.
+  superuserAccess: true
 
 mysql:
   # -- my.cnf [mysqld] parameters (string map), rendered into the Percona CR's
@@ -164,8 +300,9 @@ mariadb:
     memoryGi: 1
 
 valkey:
-  # -- SCHEMA ONLY until the valkey operator CRD is pinned (beta gate) — read
-  # by nothing yet. See templates/valkey/valkey.yaml.
+  # -- Customer-tunable valkey.conf settings, rendered into ValkeyCluster
+  # spec.config (a free-form string map on the CR). maxmemory-policy, timeout,
+  # and friends; proxcloud allowlists which keys may land here.
   parameters: {}
 
 ferretdb:
@@ -174,10 +311,12 @@ ferretdb:
   # -- FerretDB frontend image. Empty = resolved from engineVersion via the
   # map in _helpers.tpl.
   image: ""
-  # -- CNPG backend image: PostgreSQL with the DocumentDB extension baked in.
-  # TODO-verify(drill): tag must match the frontend version — FerretDB
-  # publishes matched pairs (ghcr.io/ferretdb/postgres-documentdb).
-  postgresImage: ghcr.io/ferretdb/postgres-documentdb:17-0.106.0-ferretdb-2.5.0
+  # -- CNPG backend image (PostgreSQL + the DocumentDB extension). EMPTY BY
+  # DEFAULT: FerretDB publishes matched frontend/backend pairs, so the tag is
+  # derived from engineVersion in _helpers.tpl and both halves move together
+  # on UPGRADE. Set this only to pin a specific backend during an incident —
+  # a mismatched pair is unsupported.
+  postgresImage: ""
 
 opensearch:
   # -- opensearch.yml settings (string map), passed to the OpenSearchCluster's
@@ -188,6 +327,26 @@ opensearch:
   # (templates/opensearch/dashboards-lb.yaml).
   dashboards:
     enabled: false
+  # -- Customer BYO domain (SET_CUSTOM_DOMAIN action). Set together with the
+  # proxcloud-written secret <id>-custom-tls (their certificate + key), which
+  # Dashboards then serves instead of the operator's self-signed pair. DNS stays
+  # customer-side (an A record to the LB address).
+  customDomain: ""
+  # -- Customer-defined roles (MANAGE_ACCESS, opensearch only). Each renders an
+  # OpensearchRole CR named <resourceId>-r-<name> — that prefixed name IS the
+  # role name in OpenSearch, and users.yaml resolves it. `actions` are built-in
+  # ACTION GROUPS from a server-side allowlist; cluster-level permissions are
+  # deliberately not a customer knob.
+  # [{name: logs_reader, indexPatterns: ["logs-*"], actions: [read, search]}]
+  roles: []
+
+  # -- Index retention (SET_INDEX_POLICIES, opensearch only). Four numbers, not
+  # the full ISM state machine: templates/opensearch/ismpolicy.yaml expands each
+  # entry into a hot->delete policy bound to the patterns. rolloverGiB /
+  # rolloverDays are optional; deleteAfterDays is required.
+  # [{name: logs30, indexPatterns: ["logs-*"], deleteAfterDays: 30, rolloverGiB: 50}]
+  indexPolicies: []
+
   # -- Dashboards OIDC SSO, written by the SET_SSO action
   # (internal/cloud/dbaas/engines.go). PUBLIC IdP client ONLY — there is
   # deliberately no clientSecret key here and never will be (no secrets in

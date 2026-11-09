@@ -6,7 +6,9 @@ The **Network** group in the sidebar holds what connects your servers to each ot
 
 Start under **Network → Networks**, where you create the private networks your servers attach to. A project with no network yet needs one before its first server can be launched, and a server can only be launched onto a network your project owns.
 
-Each network is a virtual network on the Proxmox VE cluster with one IPv4 subnet. Leave the range empty and ProxCloud picks a free one from the range your operator reserved for tenant networks, or ask for a specific CIDR inside that range. DHCP and outbound NAT (SNAT) are on by default, so servers get an address and can reach the internet without further setup.
+Each network is a virtual network on the Proxmox VE cluster with an IPv4 subnet (more can be added, see below). Leave the range empty and ProxCloud picks a free one from the range your operator reserved for tenant networks, or ask for a specific CIDR inside that range. DHCP and outbound NAT (SNAT) are on by default, so servers get an address and can reach the internet without further setup.
+
+![The Create network dialog](/docs-img/create-network.png)
 
 Your networks can talk to each other. They are isolated from every other project's networks: traffic towards another tenant's range is dropped.
 
@@ -16,12 +18,22 @@ A network can only be deleted once no server has an interface on it.
 
 **Outbound** traffic needs nothing extra: SNAT on the private network lets every server reach the internet.
 
-**Inbound** traffic needs a **public NIC**. There are no floating IPs on Proxmox. Instead, a server gets a second network interface on one of the public networks your operator has set up, with one public address from that network's pool. The address is pinned to the server by its firewall, so the server can't use any other address on that network. Your operator decides which public networks your project may use.
+**Inbound** traffic needs a **public IP**: a server gets a second network interface on one of the public networks your operator has set up, with one public address from that network's pool. The address is pinned to the server by its firewall, so the server can't use any other address on that network. Your operator decides which public networks your project may use.
 
-The portal has no button for this yet. Attach a public NIC through the API with the server action `ATTACH_PUBLIC_NETWORK` (`POST /api/v1/project/{id}/cloud/{serverId}/action`, data `networkId` = one of the networks listed by `GET /api/v1/project/{id}/public-networks`). `DETACH_PUBLIC_NETWORK` removes the NIC and returns the address to the pool. Deleting the server returns it too. The guest configures the change at its next boot, so **reboot the server** after attaching or detaching. While a server has a public NIC, its default route and outbound traffic go through the public address.
+Attach one on the server's **Network** tab (**Public IP** card → pick a public network → **Attach public IP**); **Detach** removes the NIC and returns the address to the pool. Through the API this is the server action `ATTACH_PUBLIC_NETWORK` (`POST /api/v1/project/{id}/cloud/{serverId}/action`, data `networkId` = one of the networks listed by `GET /api/v1/project/{id}/public-networks`) and `DETACH_PUBLIC_NETWORK`. Deleting the server returns it too. The guest configures the change at its next boot, so **reboot the server** after attaching or detaching. While a server has a public NIC, its default route and outbound traffic go through the public address.
+
+To spread inbound traffic across several servers behind one address, use a [load balancer](/docs/guides/load-balancers).
 
 ## Firewalling with security groups
 
 **Network → Security groups** are the firewalls around your servers. Each group is a set of allow rules for inbound and outbound traffic; attach one or more to a server to control which ports and sources can reach it. Every project starts with a default group. A common first rule is allowing SSH (port 22) from your own address.
 
+![A security group with an SSH rule](/docs-img/security-group-rules.png)
+
 Security groups are enforced by the Proxmox VE cluster firewall, which is switched on for a server before its first boot.
+
+## Subnets and routing
+
+A network can hold several subnets (**Subnets** tab), and a server picks one at create. All networks and
+subnets of a project route to each other without a router to set up; other projects cannot reach them. Each
+subnet has its own outbound internet switch.

@@ -88,16 +88,25 @@
         "project": "proxcloud-dbaas",
         "chartRepo": "ghcr.io/mutex-solutions/charts",
         "chartName": "database-cluster",
-        "chartVersion": "0.1.0"
+        "chartVersion": "0.5.0"
       },
       "database": {
+        "lbAddressPool": "dbaas-services",
         "storageClasses": [],
+        "scheduling": { "zoneKey": "kubernetes.io/hostname" },
+        "backup": {
+          "endpoint": "http://s3.example.com:9000",
+          "bucket": "dbaas-backups",
+          "prefix": "backups",
+          "region": "us-east-1",
+          "pathStyle": true
+        },
         "limits": { "maxCpu": 32, "maxMemoryGiB": 128, "maxStorageGiB": 2048 },
         "engines": {
           "postgresql": { "versions": ["16", "17", "18"], "default": "17", "replicas": [1, 2, 3] },
           "mysql":      { "versions": ["8.4"], "default": "8.4", "replicas": [1, 3] },
           "mariadb":    { "versions": ["10.11", "11.4"], "default": "11.4", "replicas": [1, 3] },
-          "valkey":     { "versions": ["8.1"], "default": "8.1", "replicas": [1, 3], "beta": true },
+          "valkey":     { "versions": ["9.0", "9.1"], "default": "9.0", "replicas": [1, 3], "beta": true },
           "ferretdb":   { "versions": ["2.5"], "default": "2.5", "replicas": [1, 2, 3] },
           "opensearch": { "versions": ["3.3.0"], "default": "3.3.0", "replicas": [1, 3] },
           "kafka":      { "versions": ["4.2.0", "4.2.1", "4.3.0"], "default": "4.3.0", "replicas": [3] }
@@ -105,7 +114,9 @@
       }
     },
     "secret": {
-      "kubeconfig": "__DBAAS_CLUSTER_KUBECONFIG__"
+      "kubeconfig": "__DBAAS_CLUSTER_KUBECONFIG__",
+      "backupAccessKey": "__DBAAS_BACKUP_ACCESS_KEY__",
+      "backupSecretKey": "__DBAAS_BACKUP_SECRET_KEY__"
     }
   }
 ]

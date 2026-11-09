@@ -1,0 +1,58 @@
+# Derived values. `pc` is the merged configuration every stage reads.
+pc: "{{ pc_defaults | combine(proxcloud | default({}), recursive=True) }}"
+pc_vault: "{{ proxcloud_vault | default({}) }}"
+pc_ver: "{{ pc_versions }}"
+pc_repo_root: "{{ playbook_dir }}/../.."
+pc_gen: "{{ pc_site_dir }}/generated"
+
+pc_api: "{{ pc.pve.api_url | regex_replace('/+$', '') }}/api2/json"
+pc_portal_pve_url: "{{ pc.pve.portal_api_url or pc.pve.api_url }}"
+
+# Generated once, kept in generated/, never regenerated (the password lookup persists the file).
+pc_alnum: chars=ascii_letters,digits length=32
+pc_encryption_key: "{{ lookup('ansible.builtin.password', pc_gen ~ '/encryption-key chars=hexdigits length=64') }}"
+pc_db_password: "{{ lookup('ansible.builtin.password', pc_gen ~ '/db-password ' ~ pc_alnum) }}"
+pc_keycloak_db_password: "{{ lookup('ansible.builtin.password', pc_gen ~ '/keycloak-db-password ' ~ pc_alnum) }}"
+pc_keycloak_admin_password: "{{ lookup('ansible.builtin.password', pc_gen ~ '/keycloak-admin-password ' ~ pc_alnum) }}"
+pc_operator_password: "{{ lookup('ansible.builtin.password', pc_gen ~ '/operator-password ' ~ pc_alnum) }}"
+pc_sso_client_secret: "{{ lookup('ansible.builtin.password', pc_gen ~ '/sso-client-secret ' ~ pc_alnum) }}"
+pc_rustfs_access_key: "{{ lookup('ansible.builtin.password', pc_gen ~ '/rustfs-access-key chars=ascii_lowercase,digits length=20') }}"
+pc_rustfs_secret_key: "{{ lookup('ansible.builtin.password', pc_gen ~ '/rustfs-secret-key ' ~ pc_alnum) }}"
+
+# The key new platform VMs accept (mgmt VMs, RustFS VM).
+pc_key_candidates: ["{{ lookup('env', 'HOME') }}/.ssh/id_rsa.pub", "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519.pub"]
+pc_ssh_public_key: "{{ pc.mgmt.ssh_public_key or lookup('ansible.builtin.file', pc_key_candidates | select('file') | first) }}"
+
+# Portal URLs.
+pc_first_mgmt_ip: "{{ hostvars[groups['mgmt'][0]].ansible_host | default(groups['mgmt'][0]) if groups['mgmt'] | default([]) else '' }}"
+pc_domain: "{{ pc.ingress.domain or (pc_first_mgmt_ip ~ '.sslip.io') }}"
+pc_scheme: "{{ 'http' if pc.ingress.tls == 'none' else 'https' }}"
+pc_url_app: "{{ pc_scheme }}://app.{{ pc_domain }}"
+pc_url_admin: "{{ pc_scheme }}://admin.{{ pc_domain }}"
+pc_url_api: "{{ pc_scheme }}://api.{{ pc_domain }}"
+pc_url_id: "{{ pc_scheme }}://id.{{ pc_domain }}"
+
+# mode=split: stage 50 pushes the charts of this checkout, so their versions are what stage 60 registers.
+pc_chart_kamaji: "{{ (lookup('ansible.builtin.file', pc_repo_root ~ '/deploy/charts/proxmox-kamaji-cluster/Chart.yaml') | from_yaml).version }}"
+pc_chart_database: "{{ (lookup('ansible.builtin.file', pc_repo_root ~ '/deploy/charts/database-cluster/Chart.yaml') | from_yaml).version }}"
+
+# mode=split + sandbox.enabled: the sandbox cluster (stages 10, 55, 60).
+pc_sandbox_on: "{{ pc.mode == 'split' and pc.sandbox.enabled | bool }}"
+pc_sandbox_token_id: "capmox@pve!{{ pc.sandbox.token }}"
+pc_sandbox_storage: "{{ pc.sandbox.storage or pc.services.storage }}"
+pc_sandbox_iso_storage: "{{ pc.sandbox.iso_storage or pc.services.iso_storage }}"
+pc_sandbox_zone: "{{ pc.sandbox.network.zone or pc.network.default_zone }}"
+pc_sandbox_edge_on: "{{ pc_sandbox_on and pc.sandbox.domain | length > 0 }}"  # stage 56: sandbox ports published
+pc_sandbox_registry_on: "{{ pc_sandbox_on and pc.sandbox.registry.address | length > 0 }}"  # stage 55: Zot
+pc_sandbox_registry_host: "{{ pc.sandbox.registry.address if pc_sandbox_registry_on else '' }}"  # as nodes pull (port 443)
+pc_sandbox_pins: "{{ (lookup('ansible.builtin.file', pc_repo_root ~ '/deploy/templates/images.yaml') | from_yaml).images | default({}) }}"
+pc_sandbox_own_snat: "{{ pc.sandbox.network.snat | string not in ['', 'node'] }}"
+
+# The k3s-bundled local registry (images.build).
+pc_local_registry: 127.0.0.1:5000
+pc_cluster_registry: pc-registry.proxcloud-registry.svc.cluster.local:5000
+pc_build_tag: "{{ lookup('ansible.builtin.pipe', 'cd ' ~ (pc_repo_root | quote) ~ ' && echo dev-$(git rev-parse --short HEAD)-$( (git diff HEAD -- cmd internal pkg web deploy go.mod go.sum; git ls-files -o --exclude-standard -- cmd internal pkg web deploy | xargs -r sha1sum) | sha1sum | cut -c1-8)') }}"
+pc_image_prefix: "{{ pc_local_registry if pc.images.build else pc.images.registry }}/proxcloud"
+pc_image_tag: "{{ pc_build_tag if pc.images.build else pc_ver.proxcloud }}"
+pc_chart_repo: "{{ (pc_cluster_registry ~ '/charts') if pc.images.build else pc.images.chart_repo }}"
+pc_chart_version: "{{ ('0.0.0-' ~ pc_build_tag) if pc.images.build else (pc_ver.proxcloud | regex_replace('^v', '')) }}"

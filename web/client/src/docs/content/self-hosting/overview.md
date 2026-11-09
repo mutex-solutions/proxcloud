@@ -8,7 +8,7 @@ ProxCloud is a cloud billing and self-service private-cloud portal sitting in fr
 
 - **proxcloud-api** — the Go backend that serves the REST API, the admin API, and the background jobs (billing, resource sync, usage metrics).
 - **proxcloud-web** — the customer portal SPA.
-- **proxcloud-admin** — the operator/admin SPA, served under `/proxcloud_admin`.
+- **proxcloud-admin** — the operator/admin SPA, on its own host.
 - **Dependencies** — **PostgreSQL** (the primary datastore, one JSONB document per aggregate), **RabbitMQ** (messaging), and, optionally, **Keycloak** (OpenID Connect identity — off by default; enable it or point at your own IdP).
 
 The whole thing is one Helm chart, and every dependency can be bundled with the chart or pointed at an external instance you already run.

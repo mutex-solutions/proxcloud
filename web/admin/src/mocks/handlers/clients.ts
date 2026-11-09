@@ -36,7 +36,7 @@ on("POST /admin/user", ({ opts }) => {
   db.credentialsBySub[user.sub] = [
     { id: db.nextId("cred"), sub: user.sub, type: "password", password: { configured: true }, createdAt: user.createdAt },
   ]
-  return { data: user }
+  return { data: { ...user, temporaryPassword: "mock-temporary-password" } }
 })
 
 on("GET /admin/user/:id", ({ params }) => ({
@@ -417,6 +417,18 @@ on("GET /admin/collect-transactions", () => ({ data: db.collectTransactions }))
 on("GET /admin/collect-transactions/:bpId/billing-profile", ({ params }) => ({
   data: db.collectTransactions.filter((t) => t.billingProfileId === params.bpId),
 }))
+
+on("GET /admin/collect-transactions/:id/sync", ({ params }) => {
+  const t = db.collectTransactions.find((x) => x.id === params.id) ?? notFound("Transaction")
+  if (t.status === "PENDING" && t.externalId) t.status = "SUCCESS"
+  return { data: t }
+})
+
+on("POST /admin/collect-transactions/:id/close", ({ params }) => {
+  const t = db.collectTransactions.find((x) => x.id === params.id) ?? notFound("Transaction")
+  if (t.status === "PENDING") t.status = "CANCELLED"
+  return { data: t }
+})
 
 on("GET /admin/collect-transactions/download/:id", ({ params }) => ({
   data: pdfResponse(`receipt-${params.id}.pdf`),

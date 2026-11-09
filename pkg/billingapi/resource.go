@@ -38,6 +38,7 @@ type BillingResource struct {
 	DisplayPrice          bool                 `json:"displayPrice"`
 	Values                map[string]any       `json:"values,omitempty"`
 	NotEligibleForBilling bool                 `json:"notEligibleForBilling"`
+	SkipInterval          bool                 `json:"skipInterval,omitempty"`
 	BillingResourceType   *BillingResourceType `json:"billingResourceType,omitempty"`
 }
 
@@ -61,6 +62,9 @@ type ResourceAttribute struct {
 // billingConfiguration.settings.timeUnitLimits); nil/absent → the rating side's defaults.
 type BillingContext struct {
 	TimeUnitLimits map[string]int `json:"timeUnitLimits,omitempty"`
+	// CycleStart is the billing cycle the resolution is for, which is the month before the clock's on
+	// the pass closing a month. Zero means the clock's month. Local to the resolution side.
+	CycleStart time.Time `json:"-"`
 }
 
 // NewDecoder returns a JSON decoder configured for this contract (UseNumber). Prefer it over

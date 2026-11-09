@@ -3,12 +3,10 @@ package adminapi
 // users.go serves /admin-api/v1/users.
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/audit"
@@ -79,34 +77,61 @@ func (h *Handler) userGet(w http.ResponseWriter, r *http.Request) {
 	writeEntity(w, mapUser(&u))
 }
 
-// userCreate pre-creates a user before first login. sub defaults to "user-<md5(uuid)>"; the
-// identity is issuer "api". An existing email → 409.
+// userCreate makes a user. With a sub it is a pre-create for an integrator who manages the IdP: the
+// first login under that sub lands on this row. Without one the account is made in Keycloak with a
+// temporary password returned once, as in the operator console, since a row whose sub no login can
+// ever match would be a user who cannot sign in. No service account and no sub → 400. An existing
+// email → 409.
 func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Email string `json:"email"`
-		Sub   string `json:"sub"`
+		Email     string `json:"email"`
+		Sub       string `json:"sub"`
+		FirstName string `json:"first_name"`
+		LastName  string `json:"last_name"`
 	}
 	if !decodeBody(w, r, &req) {
+		return
+	}
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	if req.Email == "" {
+		badRequest(w, "email is required")
 		return
 	}
 	if existing, _ := h.users.FindByEmail(r.Context(), req.Email); existing != nil {
 		conflict(w, "A user with this email already exists.")
 		return
 	}
-	sub := req.Sub
+	sub, tempPassword := req.Sub, ""
 	if sub == "" {
-		s := md5.Sum([]byte(uuid.NewString()))
-		sub = "user-" + hex.EncodeToString(s[:])
+		if h.keycloak == nil {
+			badRequest(w, "sub is required: this platform has no identity service account to create the login with")
+			return
+		}
+		var err error
+		if sub, tempPassword, err = h.keycloak.CreateUser(r.Context(), req.Email, req.FirstName, req.LastName); err != nil {
+			writeErr(w, http.StatusBadGateway, "BAD_GATEWAY", err.Error())
+			return
+		}
 	}
-	u := user.User{
-		ID: newID(), Sub: sub, Email: req.Email,
-		Identities: []user.Identity{{Issuer: "api", Sub: sub}},
+	u := user.User{ID: newID(), Sub: sub, Email: req.Email, FirstName: req.FirstName, LastName: req.LastName}
+	if req.Sub != "" { // Keycloak's own login fills in its identity, as for a user the operator console makes
+		u.Identities = []user.Identity{{Issuer: "api", Sub: sub}}
 	}
 	if _, err := h.db.C("users").InsertOne(r.Context(), &u); err != nil {
+		if tempPassword != "" { // a login without a row is the reverse of what this path fixes
+			_ = h.keycloak.DeleteUser(r.Context(), sub)
+		}
 		badRequest(w, err.Error())
 		return
 	}
 	h.logAdmin(r, audit.ActionCreate, "USER", u.ID, u.Email)
+	if tempPassword != "" {
+		writeEntity(w, struct {
+			apiUser
+			TemporaryPassword string `json:"temporary_password"`
+		}{mapUser(&u), tempPassword})
+		return
+	}
 	writeEntity(w, mapUser(&u))
 }
 
@@ -116,6 +141,14 @@ func (h *Handler) userDelete(w http.ResponseWriter, r *http.Request) {
 	if found, err := h.db.C("users").Get(r.Context(), id, &u); err != nil || !found {
 		apiNotFound(w)
 		return
+	}
+	// The login goes too, or the user signs back in and comes back as a new row. A sub Keycloak does
+	// not know (an integrator's IdP) is a no-op there.
+	if h.keycloak != nil {
+		if err := h.keycloak.DeleteUser(r.Context(), u.Sub); err != nil {
+			writeErr(w, http.StatusBadGateway, "BAD_GATEWAY", err.Error())
+			return
+		}
 	}
 	if _, err := h.db.C("users").DeleteByID(r.Context(), id); err != nil {
 		badRequest(w, err.Error())

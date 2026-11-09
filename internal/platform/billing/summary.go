@@ -113,6 +113,8 @@ func (s Summary) MarshalJSON() ([]byte, error) {
 		ZipCode               string                       `json:"zipCode,omitempty"`
 		Phone                 string                       `json:"phone,omitempty"`
 		DefaultCardID         string                       `json:"defaultCardId,omitempty"`
+		PaymentMode           string                       `json:"paymentMode"`
+		PaymentGatewayID      string                       `json:"paymentGatewayId,omitempty"`
 		OverwriteSuspension   bool                         `json:"overwriteSuspension"`
 		Contacts              []Contact                    `json:"contacts,omitempty"`
 		PricePlanConfig       *PricePlanConfiguration      `json:"pricePlanConfig,omitempty"`
@@ -135,6 +137,8 @@ func (s Summary) MarshalJSON() ([]byte, error) {
 		Company: bp.Company, CompanyName: bp.CompanyName, VatCode: bp.VatCode, TaxPayer: bp.TaxPayer,
 		Address: bp.Address, City: bp.City, County: bp.County, Country: bp.Country, ZipCode: bp.ZipCode, Phone: bp.Phone,
 		DefaultCardID:       bp.DefaultCardID,
+		PaymentMode:         bp.EffectivePaymentMode(),
+		PaymentGatewayID:    bp.PaymentGatewayID,
 		OverwriteSuspension: bp.OverwriteSuspension,
 		Contacts:            bp.Contacts, PricePlanConfig: bp.PricePlanConfig, CustomInfo: ci, Verifications: vf,
 		ActivationConstraints: bp.ActivationConstraints,

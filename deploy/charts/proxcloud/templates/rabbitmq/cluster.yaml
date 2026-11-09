@@ -1,0 +1,30 @@
+{{- /*
+RabbitmqCluster CR, the default broker. Requires the RabbitMQ Cluster Operator in the cluster. The
+operator creates the <name> Service and the <name>-default-user Secret the API reads.
+*/ -}}
+{{- if .Values.rabbitmqCluster.enabled }}
+{{- if .Values.rabbitmq.enabled }}
+{{- fail "rabbitmq.enabled and rabbitmqCluster.enabled are mutually exclusive" }}
+{{- end }}
+apiVersion: rabbitmq.com/v1beta1
+kind: RabbitmqCluster
+metadata:
+  name: {{ include "proxcloud.rabbitClusterName" . }}
+  labels:
+    {{- include "proxcloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rabbitmq
+spec:
+  replicas: {{ .Values.rabbitmqCluster.replicas }}
+  {{- with .Values.rabbitmqCluster.image }}
+  image: {{ . | quote }}
+  {{- end }}
+  persistence:
+    storage: {{ .Values.rabbitmqCluster.storage.size | quote }}
+    {{- with .Values.rabbitmqCluster.storage.storageClass }}
+    storageClassName: {{ . | quote }}
+    {{- end }}
+  {{- with .Values.rabbitmqCluster.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

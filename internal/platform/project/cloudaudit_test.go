@@ -1,6 +1,8 @@
 package project
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -66,5 +68,39 @@ func TestNewCloudResourceEvent(t *testing.T) {
 	ev3 := newCloudResourceEvent(u, p, "CLOUD_RESOURCE_CREATE", "CLOUD_RESOURCE_CREATE", cr)
 	if _, ok := ev3.ResourceMetadata["verb"]; ok {
 		t.Errorf("verb should be omitted when equal to action: %#v", ev3.ResourceMetadata)
+	}
+}
+
+// A provider's action is logged once it handled the action and succeeded, whichever handler it was.
+func TestRunAudited(t *testing.T) {
+	answer := func(status int) func(http.ResponseWriter) bool {
+		return func(w http.ResponseWriter) bool {
+			w.WriteHeader(status)
+			return true
+		}
+	}
+	notMine := func(http.ResponseWriter) bool { return false }
+	tests := []struct {
+		name, action string
+		handle       func(http.ResponseWriter) bool
+		wantHandled  bool
+		wantLogged   bool
+	}{
+		{"success", "SET_QUOTA", answer(http.StatusOK), true, true},
+		{"accepted", "RESIZE", answer(http.StatusAccepted), true, true},
+		{"refused", "SET_QUOTA", answer(http.StatusBadRequest), true, false},
+		{"backend failed", "EXTEND", answer(http.StatusBadGateway), true, false},
+		{"another handler's action", "SET_QUOTA", notMine, false, false},
+		{"a plain read", "GET_SETTINGS", answer(http.StatusOK), true, false},
+		{"taking a credential", "GET_KUBECONFIG", answer(http.StatusOK), true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logged := false
+			handled := runAudited(httptest.NewRecorder(), 1, tt.action, tt.handle, func() { logged = true })
+			if handled != tt.wantHandled || logged != tt.wantLogged {
+				t.Fatalf("handled %v logged %v, want %v %v", handled, logged, tt.wantHandled, tt.wantLogged)
+			}
+		})
 	}
 }

@@ -1,10 +1,11 @@
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useParams } from "react-router-dom"
 import { apiFetch, apiFetchEnvelope, type CloudScope } from "./api"
 import type {
   BillingSummary, CloudResource, CostInfo, GpuCapacityUsage, Location, Project, ProjectQuotaUsage,
   ProjectService,
 } from "./types"
+import { isObjectProvider } from "./types"
 
 export function useProjects() {
   return useQuery({
@@ -37,11 +38,11 @@ export function useLocations(pid: string) {
 export function useCloudScope(pid: string): CloudScope | undefined {
   const { data } = useLocations(pid)
   // Generic compute/network/storage pages need a compute (Proxmox) scope. A project can
-  // also attach Ceph S3 (buckets only), Kamaji (managed Kubernetes control planes) or
+  // also attach an object store (buckets only), Kamaji (managed Kubernetes control planes) or
   // DBaaS (managed databases), and any may appear first — skip them all, mirroring the
   // backend's resolveServiceID.
   const loc =
-    data?.find((candidate) => candidate.provider !== "ceph-s3" && candidate.provider !== "kamaji" && candidate.provider !== "dbaas") ?? data?.[0]
+    data?.find((candidate) => !isObjectProvider(candidate.provider) && candidate.provider !== "kamaji" && candidate.provider !== "dbaas" && candidate.provider !== "sandbox") ?? data?.[0]
   if (!loc?.serviceId || !loc?.region) return undefined
   return { serviceId: loc.serviceId, region: loc.region }
 }
@@ -202,6 +203,11 @@ export type CloudFeature =
   | "serverEvents"
   | "consoleLog"
   | "volumeSnapshots"
+  | "serverDiskSnapshots"
+  | "serverBackups"
+  | "imageImport"
+  | "spreadGroups"
+  | "publicIp"
 
 export function useUIMenu(pid: string) {
   return useQuery({
@@ -256,12 +262,17 @@ export function useCursorList<T = unknown>(
   return { ...q, rows }
 }
 
-// Ensures the project is bootstrapped (project pool) — fire-and-forget on entry.
+// Ensures the project is bootstrapped (project pool) — fire-and-forget on entry. A new project
+// gets its services attached by this very call, and the pages asked for its locations in
+// parallel and got none ("No region" until a reload): ask again once it is done.
 export function useProjectInit(pid: string) {
+  const qc = useQueryClient()
   return useQuery({
     queryKey: ["project-init", pid],
     queryFn: async () => {
       await apiFetchEnvelope(`/project/${pid}/init`, { method: "POST" })
+      void qc.invalidateQueries({ queryKey: ["locations", pid] })
+      void qc.invalidateQueries({ queryKey: ["ui-menu", pid] })
       return true
     },
     enabled: !!pid,

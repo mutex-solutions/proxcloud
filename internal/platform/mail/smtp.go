@@ -3,9 +3,11 @@ package mail
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"mime"
+	netmail "net/mail"
 	"net/smtp"
 	"strings"
 	"time"
@@ -60,7 +62,14 @@ func (s *SMTPMailer) Send(_ context.Context, m Message) error {
 			return fmt.Errorf("mail auth: %w", err)
 		}
 	}
-	if err := c.Mail(from); err != nil {
+	// The envelope sender must be the bare address: `from` may carry a display name
+	// ("Billing <billing@example.com>", the admin SMTP integration's fromName), which relays
+	// reject with "501 invalid FROM parameter". The header keeps the display name.
+	envelope := from
+	if a, err := netmail.ParseAddress(from); err == nil {
+		envelope = a.Address
+	}
+	if err := c.Mail(envelope); err != nil {
 		return err
 	}
 	for _, to := range m.To {
@@ -117,8 +126,9 @@ func headerSafe(s string) string {
 	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
 }
 
-// buildMessage renders the RFC 5322 message bytes (headers + text/plain or text/html or
-// multipart/alternative when both bodies are present).
+// buildMessage renders the RFC 5322 message bytes: headers + the body (text/plain, text/html or
+// multipart/alternative when both bodies are present), wrapped in multipart/mixed when the
+// message carries attachments.
 func buildMessage(from string, m Message) []byte {
 	var b strings.Builder
 	b.WriteString("From: " + headerSafe(from) + "\r\n")
@@ -126,6 +136,33 @@ func buildMessage(from string, m Message) []byte {
 	b.WriteString("Subject: " + mime.QEncoding.Encode("UTF-8", m.Subject) + "\r\n")
 	b.WriteString("Date: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
+	if len(m.Attachments) == 0 {
+		writeBody(&b, m)
+		return []byte(b.String())
+	}
+	const mixed = "proxcloud_mixed_boundary_k2d8"
+	b.WriteString("Content-Type: multipart/mixed; boundary=\"" + mixed + "\"\r\n\r\n")
+	b.WriteString("--" + mixed + "\r\n")
+	writeBody(&b, m)
+	for _, a := range m.Attachments {
+		ct := a.ContentType
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		name := headerSafe(strings.ReplaceAll(a.Filename, "\"", ""))
+		b.WriteString("--" + mixed + "\r\n")
+		b.WriteString("Content-Type: " + ct + "; name=\"" + name + "\"\r\n")
+		b.WriteString("Content-Disposition: attachment; filename=\"" + name + "\"\r\n")
+		b.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
+		b.WriteString(wrapBase64(a.Data))
+		b.WriteString("\r\n")
+	}
+	b.WriteString("--" + mixed + "--\r\n")
+	return []byte(b.String())
+}
+
+// writeBody writes the Content-Type header + body of the message's text/html parts.
+func writeBody(b *strings.Builder, m Message) {
 	switch {
 	case m.HTMLBody != "" && m.TextBody != "":
 		boundary := "proxcloud_alt_boundary_x9f3"
@@ -138,7 +175,18 @@ func buildMessage(from string, m Message) []byte {
 	default:
 		b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n" + m.TextBody + "\r\n")
 	}
-	return []byte(b.String())
+}
+
+// wrapBase64 encodes data as RFC 2045 base64: 76-character lines, CRLF terminated.
+func wrapBase64(data []byte) string {
+	enc := base64.StdEncoding.EncodeToString(data)
+	var b strings.Builder
+	for len(enc) > 76 {
+		b.WriteString(enc[:76] + "\r\n")
+		enc = enc[76:]
+	}
+	b.WriteString(enc)
+	return b.String()
 }
 
 // loginAuth implements SMTP AUTH LOGIN (Azure Communication Services rejects AUTH PLAIN).

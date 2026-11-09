@@ -67,7 +67,7 @@ export default function VolumesPage() {
 
   const [createOpen, setCreateOpen] = useState(false)
   // serverId = the server externalId: a Proxmox disk is created on (and belongs to) a server.
-  const [form, setForm] = useState({ size: "10", type: "", serverId: "" })
+  const [form, setForm] = useState({ name: "", size: "10", type: "", serverId: "" })
   const [extendTarget, setExtendTarget] = useState<CloudResource | null>(null)
   const [extendSize, setExtendSize] = useState("")
   const [deleteTarget, setDeleteTarget] = useState<CloudResource | null>(null)
@@ -102,8 +102,8 @@ export default function VolumesPage() {
     },
     enabled: !!scope && (createOpen || !!retypeTarget),
   })
-  // The servers this detached volume can attach to: its own and every server on its node
-  // (Proxmox moves a disk between servers on the same node only).
+  // The servers this detached volume can attach to: its own and every server on its node, or
+  // every server of the project when the volume is on shared storage.
   const attachTargets = useQuery({
     queryKey: ["volume-attach-targets", pid, attachTarget?.id],
     queryFn: async () => {
@@ -205,7 +205,8 @@ export default function VolumesPage() {
           data: {
             size: Number(form.size),
             type: selectedVolumeType,
-            serverId: form.serverId,
+            ...(form.name.trim() ? { name: form.name.trim() } : {}),
+            ...(form.serverId ? { serverId: form.serverId } : {}),
           },
         },
       })
@@ -213,7 +214,7 @@ export default function VolumesPage() {
     onSuccess: () => {
       toast.success("Volume created")
       setCreateOpen(false)
-      setForm({ size: "10", type: "", serverId: "" })
+      setForm({ name: "", size: "10", type: "", serverId: "" })
       invalidate()
       void qc.invalidateQueries({ queryKey: ["project-quota", pid] })
     },
@@ -415,11 +416,21 @@ export default function VolumesPage() {
           <DialogHeader>
             <DialogTitle>Create volume</DialogTitle>
             <DialogDescription>
-              A new disk on one of your servers. It belongs to that server: deleting the server deletes the volume,
-              even after you detach it.
+              A new disk, on one of your servers or standalone. It stays when its server is deleted, and can then be
+              attached to another server (on local storage, only one on the same host).
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
+            <div className="grid gap-2">
+              <Label htmlFor="vol-name">Name</Label>
+              <Input
+                id="vol-name"
+                maxLength={64}
+                placeholder="Optional, e.g. data"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+              />
+            </div>
             <div className="grid gap-2">
               <Label htmlFor="vol-size">Size (GB)</Label>
               <Input
@@ -475,16 +486,15 @@ export default function VolumesPage() {
             </div>
             <div className="grid gap-2">
               <Label>Server</Label>
-              {!(servers ?? []).some((s) => !!s.externalId) ? (
-                <p className="text-sm text-muted-foreground">Create a server first — a volume is created on a server.</p>
-              ) : (
-                <Select value={form.serverId} onValueChange={(serverId) => setForm({ ...form, serverId })}>
+              {
+                <Select value={form.serverId || "none"} onValueChange={(v) => setForm({ ...form, serverId: v === "none" ? "" : v })}>
                   <SelectTrigger className="w-full" aria-label="Server">
                     <SelectValue placeholder="Select a server" />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="none">No server (standalone)</SelectItem>
                     {(servers ?? [])
-                      .filter((s) => !!s.externalId)
+                      .filter((s) => !!s.externalId && !s.data?.server?.loadBalancerId)
                       .map((s) => (
                         <SelectItem key={s.id} value={s.externalId as string}>
                           {(s.data?.server?.name as string) || s.name || s.externalId}
@@ -492,7 +502,7 @@ export default function VolumesPage() {
                       ))}
                   </SelectContent>
                 </Select>
-              )}
+              }
             </div>
             {quotaCheckPending ? (
               <p className="text-sm text-muted-foreground">Checking the current storage quota…</p>
@@ -527,7 +537,6 @@ export default function VolumesPage() {
             <Button
               onClick={() => create.mutate()}
               disabled={
-                !form.serverId ||
                 !scope ||
                 volumeTypes.isLoading ||
                 volumeTypes.isError ||
@@ -595,7 +604,7 @@ export default function VolumesPage() {
               <p className="text-sm text-destructive">{(attachTargets.error as Error).message}</p>
             ) : !attachTargets.data?.length ? (
               <p className="text-sm text-muted-foreground">
-                No server can use this volume: a volume only moves between servers on the same node.
+                No server can use this volume: a volume on local storage only moves between servers on the same node.
               </p>
             ) : (
               <Select value={attachServer} onValueChange={setAttachServer}>

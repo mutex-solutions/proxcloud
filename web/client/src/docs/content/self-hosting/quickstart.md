@@ -5,7 +5,7 @@ The quickest way to try ProxCloud is a single-node MicroK8s cluster on one VM. I
 ## What you'll need
 
 - An Ubuntu LTS VM with at least 4 vCPU / 8 GB RAM and disk headroom for the bundled databases.
-- A public IP and a DNS record (e.g. `cloud.example.com`) pointing at it — Let's Encrypt has to reach the VM to issue certificates.
+- A public IP and DNS records for `cloud.example.com`, `api.cloud.example.com` and `admin.cloud.example.com` pointing at it — Let's Encrypt has to reach the VM to issue certificates.
 
 ## 1. Install MicroK8s
 
@@ -61,19 +61,23 @@ Write a minimal `values.yaml` — note MicroK8s's ingress class is `public`. The
 ```yaml
 api:
   encryptionKey: "insecure-dev-key-change-me"
+  # One host per component: the consoles are built for /, and the API serves
+  # more than /api (/admin-api/v1, /mcp, /e2b, /.well-known).
   selfUrls:
     base: "https://cloud.example.com"
-  # Ingress is per-component; the three share one host, split by path.
+    api: "https://api.cloud.example.com"
+    ui: "https://cloud.example.com"
+    admin: "https://admin.cloud.example.com"
   ingress:
     enabled: true
     className: "public"
-    host: "cloud.example.com"
-    path: /api
+    host: "api.cloud.example.com"
+    path: /
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt
     tls:
-      - hosts: ["cloud.example.com"]
-        secretName: proxcloud-tls
+      - hosts: ["api.cloud.example.com"]
+        secretName: proxcloud-api-tls
 ui:
   ingress:
     enabled: true
@@ -89,22 +93,28 @@ admin:
   ingress:
     enabled: true
     className: "public"
-    host: "cloud.example.com"
-    path: /proxcloud_admin
+    host: "admin.cloud.example.com"
+    path: /
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt
     tls:
-      - hosts: ["cloud.example.com"]
-        secretName: proxcloud-tls
+      - hosts: ["admin.cloud.example.com"]
+        secretName: proxcloud-admin-tls
 postgresql:
-  auth:
-    password: "proxcloud"
-rabbitmq:
   auth:
     password: "proxcloud"
 ```
 
-(Equivalently, add `-f deploy/charts/proxcloud/values-dev.yaml` to the install for these dev secrets.)
+The chart's default PostgreSQL and RabbitMQ are run by their operators, so install those first (the versions the installer pins):
+
+```sh
+microk8s helm repo add cnpg https://cloudnative-pg.github.io/charts
+microk8s helm upgrade --install cnpg cnpg/cloudnative-pg --version 0.29.1 \
+  --namespace cnpg-system --create-namespace --wait
+microk8s kubectl apply -f https://github.com/rabbitmq/cluster-operator/releases/download/v2.23.2/cluster-operator.yml
+```
+
+(Without the operators, add `-f deploy/charts/proxcloud/values-dev.yaml` from a checkout of the repository instead: it switches to the bitnami subcharts with insecure dev secrets.)
 
 Then install straight from the OCI registry:
 
@@ -114,7 +124,7 @@ microk8s helm upgrade --install proxcloud oci://ghcr.io/mutex-solutions/charts/p
   -f values.yaml
 ```
 
-First boot takes a few minutes: PostgreSQL and RabbitMQ start, and the API waits — via its `wait-for-db` init container — until PostgreSQL answers.
+First boot takes a few minutes: PostgreSQL and RabbitMQ start, and the API restarts until PostgreSQL answers.
 
 ```sh
 microk8s kubectl -n proxcloud get pods
@@ -123,7 +133,7 @@ microk8s kubectl -n proxcloud get pods
 ## 4. First login
 
 - Customer portal: `https://cloud.example.com/`
-- Admin console: `https://cloud.example.com/proxcloud_admin`
+- Admin console: `https://admin.cloud.example.com/`
 
 You need an OIDC provider before you can sign in — enable the bundled Keycloak (`keycloakx.enabled: true` plus realm provisioning) or point `auth.*.issuer` at your own IdP; see [How Identity Works](/docs/concepts/identity).
 

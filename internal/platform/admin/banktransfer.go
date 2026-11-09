@@ -7,6 +7,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
+	"github.com/mutex-solutions/proxcloud/internal/platform/payment"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -40,6 +42,24 @@ const bankTransferManagePerm = "admin:transaction:manage"
 func (h *Handler) routeBankTransfer(r chi.Router) {
 	r.Post("/bank-transfer/{id}/approve", h.bankTransferApprove)
 	r.Post("/bank-transfer/{id}/reject", h.bankTransferReject)
+	r.Get("/bank-transfer/{id}/proof", h.bankTransferProof)
+}
+
+// bankTransferProof streams the customer's proof-of-payment file (admin:transaction:read).
+func (h *Handler) bankTransferProof(w http.ResponseWriter, r *http.Request) {
+	if !h.require(w, r, "admin:transaction:read") {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	bt, err := h.repo.FindDoc(r.Context(), bankTransferCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	if bt == nil {
+		httpx.WriteError(w, bankTransferNotFound(id))
+		return
+	}
+	payment.WriteBankTransferProof(w, bt)
 }
 
 // bankTransferNotFound is the exact 404
@@ -63,11 +83,33 @@ func (h *Handler) bankTransferApprove(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, bankTransferNotFound(id))
 		return
 	}
-	// status=APPROVED, persisted (the datastore effect of approveBankTransfer).
-	if _, err := h.repo.SetFields(r.Context(), bankTransferCollection, id, pgdoc.M{"status": "APPROVED"}); httpx.WriteError(w, err) {
+	// PENDING→APPROVED, once: a transfer already rejected or cancelled must not mint a credit.
+	if !h.bankTransferResolve(w, r, id, pgdoc.M{"status": "APPROVED"}) {
 		return
 	}
 	h.bankTransferSettle(w, r, id, "APPROVED")
+}
+
+// bankTransferResolve is the only way out of PENDING for an operator. A transfer already resolved
+// is a 409 naming its state.
+func (h *Handler) bankTransferResolve(w http.ResponseWriter, r *http.Request, id string, set pgdoc.M, unset ...string) bool {
+	if h.billing == nil {
+		httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented, "billing repo not wired"))
+		return false
+	}
+	won, err := h.billing.ResolveBankTransfer(r.Context(), id, set, unset...)
+	if httpx.WriteError(w, err) {
+		return false
+	}
+	if !won {
+		cur, err := h.repo.FindDoc(r.Context(), bankTransferCollection, id)
+		if httpx.WriteError(w, err) {
+			return false
+		}
+		httpx.WriteError(w, httpx.NewError(http.StatusConflict, http.StatusConflict, fmt.Sprintf("Bank transfer is already %v", cur["status"])))
+		return false
+	}
+	return true
 }
 
 // bankTransferSettle runs the processAddFunds tail after an approve/reject flip and writes
@@ -88,7 +130,7 @@ func (h *Handler) bankTransferSettle(w http.ResponseWriter, r *http.Request, id,
 		return
 	}
 	// UPDATE BANK_TRANSFER audit — the middleware emits the admin event.
-	httpx.OK(w, shapeDoc(updated))
+	httpx.OK(w, billing.BankTransferPublic(updated))
 }
 
 // bankTransferReject rejects a transfer (comments=null from the
@@ -109,8 +151,7 @@ func (h *Handler) bankTransferReject(w http.ResponseWriter, r *http.Request) {
 	// status=REJECTED + comments CLEARED (the caller passes comments=null; an entity-save
 	// DROPS null fields from the stored doc — $unset, not a stored null, else the raw read emits
 	// "comments":null and breaks null-omission — live-caught on the dev230 drill).
-	if _, err := h.repo.SetAndUnsetFields(r.Context(), bankTransferCollection, id,
-		pgdoc.M{"status": "REJECTED"}, pgdoc.M{"comments": ""}); httpx.WriteError(w, err) {
+	if !h.bankTransferResolve(w, r, id, pgdoc.M{"status": "REJECTED"}, "comments") {
 		return
 	}
 	h.bankTransferSettle(w, r, id, "REJECTED")
