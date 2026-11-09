@@ -772,7 +772,11 @@ func hasDotDot(p string) bool {
 
 // withDiskRequest is r with the ephemeral-storage request a build container makes (buildDiskRequest).
 func withDiskRequest(r map[string]any) map[string]any {
-	out := map[string]any{"ephemeral-storage": buildDiskRequest}
+	disk := buildDiskRequest
+	if n := memGiB(r["ephemeral-storage"]); n > 0 && n < 2 {
+		disk = fmt.Sprintf("%dGi", n)
+	}
+	out := map[string]any{"ephemeral-storage": disk}
 	for k, v := range r {
 		if k != "ephemeral-storage" {
 			out[k] = v
@@ -938,7 +942,14 @@ func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map
 		ps["imagePullSecrets"] = []any{map[string]any{"name": TemplatePullSecret}}
 	}
 	if spec, ok := cr["spec"].(map[string]any); ok {
-		spec["shutdownTime"] = shutdown.UTC().Format(time.RFC3339)
+		if digStr(cr, "metadata", "annotations", AnnotationStartupPending) == "true" {
+			armed, err := time.Parse(time.RFC3339, str(spec["shutdownTime"]))
+			if err != nil || !s.now().Before(armed) {
+				return context.DeadlineExceeded
+			}
+		} else {
+			spec["shutdownTime"] = shutdown.UTC().Format(time.RFC3339)
+		}
 	}
 	if err := s.api.ApplyCR(ctx, CRGroup, CRVersion, CRPlural, cr); err != nil {
 		return fmt.Errorf("sandbox: resume: %w", err)

@@ -172,24 +172,8 @@ func (t GuardTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if !approvedOrigin {
 		return nil, errors.New("registry credential cannot cross registry origins")
 	}
-	allowed := r.URL.Path == "/v2/"
-	for repo := range t.Repositories {
-		h, p, _ := strings.Cut(repo, "/")
-		if h == host && strings.HasPrefix(r.URL.Path, "/v2/"+p+"/") {
-			allowed = true
-		}
-	}
-	if r.URL.Path == "/service/token" {
-		allowed = true
-		for _, sc := range r.URL.Query()["scope"] {
-			parts := strings.Split(sc, ":")
-			if len(parts) != 3 || parts[0] != "repository" || !t.Repositories[host+"/"+parts[1]] {
-				allowed = false
-			}
-		}
-	}
-	if !allowed {
-		return nil, errors.New("registry request left the authorized repositories")
+	if !t.authorizedRegistryPath(r) {
+		return nil, errors.New("registry request left the authorized exact repositories")
 	}
 	resp, err := t.Base.RoundTrip(r)
 	if err != nil {

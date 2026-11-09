@@ -11,9 +11,11 @@ import (
 )
 
 const (
-	MaxStartupSeconds        = 1800
-	AnnotationStartupPending = "proxcloud.io/startup-pending"
-	AnnotationRuntimeSeconds = "proxcloud.io/runtime-seconds"
+	MaxStartupSeconds           = 1800
+	AnnotationStartupPending    = "proxcloud.io/startup-pending"
+	AnnotationRuntimeSeconds    = "proxcloud.io/runtime-seconds"
+	AnnotationReadyCandidate    = "proxcloud.io/ready-candidate"
+	AnnotationReadyCandidateUID = "proxcloud.io/ready-candidate-uid"
 )
 
 type StartupConfig struct {
@@ -114,7 +116,17 @@ func (s *Service) WaitReady(ctx context.Context, projectID, id string) (map[stri
 		if ctx.Err() != nil {
 			return nil, &StartupError{progress, ctx.Err()}
 		}
-		live, err := s.GetSandbox(ctx, projectID, id)
+		remaining := cfg.phaseDuration(phase) - spent[phase] - s.now().Sub(phaseAt)
+		if remaining <= 0 {
+			return nil, &StartupError{progress, context.DeadlineExceeded}
+		}
+		readCtx, readCancel := context.WithTimeout(ctx, remaining)
+		live, err := s.GetSandbox(readCtx, projectID, id)
+		readErr := readCtx.Err()
+		readCancel()
+		if readErr != nil {
+			return nil, &StartupError{progress, readErr}
+		}
 		// A transport can return an otherwise successful GET after its deadline.
 		// Recheck cancellation and the original persisted lifetime before exposing readiness.
 		if ctx.Err() != nil {
@@ -176,6 +188,8 @@ func armStartup(cr map[string]any, cfg Config, runtimeSeconds int, now time.Time
 		meta["annotations"] = ann
 	}
 	delete(ann, AnnotationRunningSince)
+	delete(ann, AnnotationReadyCandidate)
+	delete(ann, AnnotationReadyCandidateUID)
 	ann[AnnotationStartupPending] = "true"
 	ann[AnnotationRuntimeSeconds] = strconv.Itoa(runtimeSeconds)
 	end := now.Add(cfg.Startup.Duration() + time.Duration(runtimeSeconds)*time.Second).UTC().Truncate(time.Second)

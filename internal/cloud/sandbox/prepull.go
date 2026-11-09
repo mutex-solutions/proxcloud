@@ -360,9 +360,16 @@ func (s *Service) reconcileWarming(ctx context.Context, es []warmEntry) error {
 				continue
 			}
 			node := digStr(n, "metadata", "name")
-			name := "warm-" + warmKey(e.Image + "/" + e.GPU + "/" + node)[:40]
+			name := "warm-" + warmKey(s.serviceID + "/" + e.Image + "/" + e.GPU + "/" + node)[:40]
 			if existing[name] {
 				continue
+			}
+			prior, err := s.api.GetCore(ctx, "pods", PrepullNamespace, name)
+			if err != nil {
+				return err
+			}
+			if prior != nil && (digStr(prior, "metadata", "labels", LabelService) != s.serviceID || digStr(prior, "metadata", "labels", LabelManagedBy) != ManagedByValue || digStr(prior, "metadata", "labels", warmLabel) != "true" || digStr(prior, "metadata", "labels", LabelProject) != e.ProjectID) {
+				return fmt.Errorf("warming pod ownership mismatch")
 			}
 			if _, err = s.copyProjectPullSecret(ctx, e.ProjectID, PrepullNamespace, warmPullSecret(e.ProjectID)); err != nil {
 				return err
