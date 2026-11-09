@@ -1395,18 +1395,26 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 	// The forks run from the snapshot image; its template record is not needed any more.
 	h.dropSnapshot(context.WithoutCancel(ctx), c, t.ID)
-	for i, row := range readyRows {
-		if row == nil {
-			continue
-		}
-		if err := startupResponseAlive(ctx, row.Data); err != nil {
-			h.cleanupFailedStartup(ctx, c, row)
-			code, msg := e2bError(err)
-			results[i] = map[string]any{"error": map[string]any{"code": code, "message": msg}}
+	cleanupFork := func(cleanup context.Context, row *cloud.CloudResource) {
+		if err := h.sandboxDelete(cleanup, c.es, c.proj, row); err != nil {
+			slog.Error("e2b: cleanup after expired fork", "sandbox", row.ExternalID, "err", err)
 		}
 	}
-	if err := ctx.Err(); err != nil {
-		e2bFail(w, err)
+	deferredCleanup := finalizeForkResults(ctx, readyRows, results, time.Now, cleanupFork)
+	// No blocking I/O may run after the final pure lifetime sweep and before
+	// writing the selected response. Deferred cleanup is finite and owner-scoped.
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		for _, row := range deferredCleanup {
+			if cleanup.Err() != nil {
+				return
+			}
+			cleanupFork(cleanup, row)
+		}
+	}()
+	if ctx.Err() != nil {
+		e2bErr(w, http.StatusServiceUnavailable, "fork request canceled before response")
 		return
 	}
 	e2bJSON(w, http.StatusCreated, results)

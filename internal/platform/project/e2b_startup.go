@@ -42,11 +42,15 @@ func (h *Handler) savedStartupAccessRow(ctx context.Context, c *e2bCaller, id st
 // The runtime TTL was already committed by the first Ready observation; it cannot be
 // extended by a late API response, a probe flap or the caller's retry.
 func startupResponseAlive(ctx context.Context, data map[string]any) error {
+	return startupResponseAliveAt(ctx, data, time.Now())
+}
+
+func startupResponseAliveAt(ctx context.Context, data map[string]any, now time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	end, err := time.Parse(time.RFC3339, fmt.Sprint(data["shutdownTime"]))
-	if err != nil || !time.Now().Before(end) {
+	if err != nil || !now.Before(end) {
 		return context.DeadlineExceeded
 	}
 	if data["ready"] != true || data["status"] != sandbox.StatusRunning {
@@ -64,6 +68,41 @@ func (h *Handler) cleanupFailedStartup(ctx context.Context, c *e2bCaller, row *c
 	if err := h.sandboxDelete(cleanup, c.es, c.proj, row); err != nil {
 		slog.Error("e2b: cleanup after failed startup", "sandbox", row.ExternalID, "err", err)
 	}
+}
+
+// finalizeForkResults first performs blocking cleanup for already unusable rows,
+// then makes one pure response-selection sweep. A sibling's cleanup cannot expire
+// a success that was checked earlier in the same blocking loop. Rows expiring in
+// the final sweep are cleaned only after the response has been written.
+func finalizeForkResults(ctx context.Context, rows []*cloud.CloudResource, results []any, now func() time.Time, cleanup func(context.Context, *cloud.CloudResource)) []*cloud.CloudResource {
+	failure := func(i int) {
+		// Keep final selection pure: even general error mapping can log to I/O.
+		results[i] = map[string]any{"error": map[string]any{"code": 503, "message": "sandbox lifetime expired or startup canceled before response"}}
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	for i, row := range rows {
+		if row == nil {
+			continue
+		}
+		if err := startupResponseAliveAt(ctx, row.Data, now()); err != nil {
+			failure(i)
+			cleanup(cleanupCtx, row)
+			rows[i] = nil
+		}
+	}
+	var deferred []*cloud.CloudResource
+	for i, row := range rows {
+		if row == nil {
+			continue
+		}
+		if err := startupResponseAliveAt(ctx, row.Data, now()); err != nil {
+			failure(i)
+			deferred = append(deferred, row)
+			rows[i] = nil
+		}
+	}
+	return deferred
 }
 
 // The first Ready TTL is committed before this helper. Its actual end (never

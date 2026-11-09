@@ -738,6 +738,16 @@ func TestE2BSnapshotRetakenBillsKeptImage(t *testing.T) {
 func TestE2BPauseOnASlowSite(t *testing.T) {
 	f, pc, keyA, _ := newPauseFixture(t)
 	ctx := context.Background()
+	// This scenario deliberately retains three concurrent assembly reservations:
+	// a retryable fork, a named snapshot and a pause. The new shared worker cap
+	// applies to snapshots too; model an operator location allowing that workload.
+	if _, err := f.db.C("externalService").SetByID(ctx, "sbx", pgdoc.M{"config.sandbox.build": pgdoc.M{"maxConcurrent": 3}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := f.es.Get(ctx, "sbx")
+	if err != nil || configured.SandboxConfig().WithDefaults().Build.MaxConcurrent != 3 {
+		t.Fatalf("slow-site fixture concurrency policy not applied: %+v %v", configured, err)
+	}
 	defer func(j, w time.Duration) { project.PauseJoinWait, project.SnapshotRequestWait = j, w }(project.PauseJoinWait, project.SnapshotRequestWait)
 	project.PauseJoinWait, project.SnapshotRequestWait = time.Second, time.Second
 	pc.pmu.Lock()

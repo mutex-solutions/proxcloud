@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 )
 
@@ -71,6 +72,38 @@ func TestFinalLifetimeCheckAfterCleanupAndSiblingWait(t *testing.T) {
 	// use the captured committed row, never a rebased TTL or a fresh clock origin.
 	if err := startupResponseAlive(context.Background(), live); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal("cleanup/sibling wait exposed expired sandbox", err)
+	}
+}
+
+func TestForkFinalSweepRejectsEarlierSuccessExpiredBySiblingCleanup(t *testing.T) {
+	start := time.Now().UTC().Truncate(time.Second)
+	now := start
+	row := func(id string, end time.Time) *cloud.CloudResource {
+		return &cloud.CloudResource{ExternalID: id, Data: map[string]any{"status": sandbox.StatusRunning, "ready": true, "shutdownTime": end.Format(time.RFC3339)}}
+	}
+	rows := []*cloud.CloudResource{row("first", start.Add(time.Second)), row("second", start.Add(-time.Second)), row("still-live", start.Add(time.Minute))}
+	results := []any{map[string]any{"sandbox": "first"}, map[string]any{"sandbox": "second"}, map[string]any{"sandbox": "still-live"}}
+	var cleaned []string
+	deferred := finalizeForkResults(context.Background(), rows, results, func() time.Time { return now }, func(ctx context.Context, row *cloud.CloudResource) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("fork cleanup must have finite deadline")
+		}
+		cleaned = append(cleaned, row.ExternalID)
+		now = now.Add(2 * time.Second)
+	})
+	if len(cleaned) != 1 || cleaned[0] != "second" {
+		t.Fatalf("blocking cleanup must precede final sweep: %v", cleaned)
+	}
+	if len(deferred) != 1 || deferred[0].ExternalID != "first" {
+		t.Fatalf("newly expired earlier result must defer cleanup: %+v", deferred)
+	}
+	for _, i := range []int{0, 1} {
+		if _, ok := results[i].(map[string]any)["error"]; !ok {
+			t.Fatalf("expired fork %d remained successful: %v", i, results)
+		}
+	}
+	if _, ok := results[2].(map[string]any)["sandbox"]; !ok {
+		t.Fatal("still-live fork was lost")
 	}
 }
 
