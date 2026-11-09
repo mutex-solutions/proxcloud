@@ -188,6 +188,17 @@ management port also exposes `POST :8081/debug/gen-hmac-key` (mint an Admin API 
 see `docs/auth.md`). It is unauthenticated, which is why the scheduler alone never
 turns it on.
 
+### Durable savings reminder enqueue (not delivery)
+
+`PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED` defaults **false** (environment only).
+True requires a >=32-byte `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` and opts savings-expiry
+reminders into atomic rendered/encrypted outbox decisions on PRIMARY. It starts
+neither a scheduler nor an SMTP dispatcher; configured gateways do not enable
+sending. Queue-only rollout cannot yet deliver these reminders. Other mail remains
+best-effort. Existing durable decisions never fall back to direct SMTP when the
+flag is switched OFF, and keyless cancellation remains active. No production
+recipient rollout or backfill is implicit. See [safety and rollback limits](mail-outbox-safety-limits.md).
+
 ### Billing provider
 
 ProxCloud ships a **complete billing system** — profiles, a rating engine, bills,

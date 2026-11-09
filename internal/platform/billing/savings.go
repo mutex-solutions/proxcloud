@@ -207,18 +207,28 @@ func (s *SavingsService) ExpireContracts(ctx context.Context) (int, error) {
 	}
 	expired := 0
 	for i := range contracts {
-		c := &contracts[i]
-		if c.Status != SavingsStatusActive || c.EndDate == nil || !c.EndDate.Before(now) {
-			continue
-		}
-		c.Status = SavingsStatusExpired
-		if err := s.repo.SaveSavingsContract(ctx, c); err != nil {
+		var changed *SavingsContract
+		err := s.repo.withReminderContract(ctx, contracts[i].ID, func(tc context.Context, c *SavingsContract) error {
+			if c == nil || c.Status != SavingsStatusActive || c.EndDate == nil || !c.EndDate.Before(now) {
+				return nil
+			}
+			c.Status = SavingsStatusExpired
+			if err := s.repo.SaveSavingsContract(tc, c); err != nil {
+				return err
+			}
+			if err := s.repo.cancelReminderRowsTx(tc, c.ID, c.EndDate, now); err != nil {
+				return err
+			}
+			changed = c
+			return nil
+		})
+		if err != nil {
 			return expired, err
 		}
-		// Cancel any pending expiry reminders. Best-effort.
-		_ = s.repo.CancelReminders(ctx, ResourceTypeSavingsContract, c.ID)
-		expired++
-		s.notifyExpired(ctx, c)
+		if changed != nil {
+			expired++
+			s.notifyExpired(ctx, changed) // deliberately legacy best-effort, OUTSIDE SQL
+		}
 	}
 	return expired, nil
 }

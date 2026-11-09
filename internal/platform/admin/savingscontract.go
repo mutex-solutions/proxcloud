@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -187,41 +188,47 @@ func (h *Handler) savingsContractUpdate(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, httpx.BadRequest("Invalid request body"))
 		return
 	}
-	existing, err := h.repo.FindDoc(r.Context(), savingsContractCollection, id)
+	var existing, before, after pgdoc.M
+	err := h.billing.WithSavingsContractMutation(r.Context(), id, func(tc context.Context) error {
+		var err error
+		existing, err = h.repo.FindDoc(tc, savingsContractCollection, id)
+		if err != nil {
+			return err
+		}
+		if existing == nil {
+			return httpx.NotFound("Savings contract not found")
+		}
+		before = maps.Clone(existing)
+		// Overwrite the mutable fields (drop-first so an omitted/null body field ends up absent).
+		// durationMonths/createdAt are NOT overwritten by update; paidUpfront is a plain bool → always
+		// set from the body (defaults false when omitted).
+		for _, k := range []string{
+			"billingProfileId", "savingsPlanId", "savingsPlanName", "targets", "startDate",
+			"endDate", "discountRate", "monthlyCommittedAmount", "orderId", "status", "paidUpfront",
+		} {
+			delete(existing, k)
+		}
+		existing["paidUpfront"] = req.PaidUpfront
+		for k, v := range req.setMap() {
+			existing[k] = v
+		}
+		// An edit must not start the discount of an upfront contract nobody has paid for.
+		if existing["status"] == billing.SavingsStatusActive && req.PaidUpfront && existing["paymentTransactionId"] == nil && existing["paymentRecordedBy"] == nil {
+			return httpx.BadRequest("This upfront contract has no payment on record: use record-payment, or set it PENDING_PAYMENT.")
+		}
+		if err := h.repo.ReplaceDoc(tc, savingsContractCollection, id, existing); err != nil {
+			return err
+		}
+		after, err = h.repo.FindDoc(tc, savingsContractCollection, id)
+		return err
+	})
 	if httpx.WriteError(w, err) {
-		return
-	}
-	if existing == nil {
-		httpx.WriteError(w, httpx.NotFound("Savings contract not found"))
-		return
-	}
-	before := maps.Clone(existing) // snapshot the pre-mutation state for the audit field-diff
-	// Overwrite the mutable fields (drop-first so an omitted/null body field ends up absent).
-	// durationMonths/createdAt are NOT overwritten by update; paidUpfront is a plain bool → always
-	// set from the body (defaults false when omitted).
-	for _, k := range []string{
-		"billingProfileId", "savingsPlanId", "savingsPlanName", "targets", "startDate",
-		"endDate", "discountRate", "monthlyCommittedAmount", "orderId", "status", "paidUpfront",
-	} {
-		delete(existing, k)
-	}
-	existing["paidUpfront"] = req.PaidUpfront
-	for k, v := range req.setMap() {
-		existing[k] = v
-	}
-	// An edit must not start the discount of an upfront contract nobody has paid for.
-	if existing["status"] == billing.SavingsStatusActive && req.PaidUpfront && existing["paymentTransactionId"] == nil && existing["paymentRecordedBy"] == nil {
-		httpx.WriteError(w, httpx.BadRequest("This upfront contract has no payment on record: use record-payment, or set it PENDING_PAYMENT."))
-		return
-	}
-	if err := h.repo.ReplaceDoc(r.Context(), savingsContractCollection, id, existing); httpx.WriteError(w, err) {
 		return
 	}
 	// UPDATE audit: the audit middleware records the field-level before/after diff on the audit
 	// event. Re-read the AFTER from the datastore so both snapshots are store-decoded (same store
 	// types/shape) — avoids spurious diffs from comparing the Go-rebuilt map against the
 	// datastore-decoded `before`.
-	after, _ := h.repo.FindDoc(r.Context(), savingsContractCollection, id)
 	audit.RecordSnapshots(r.Context(), before, after)
 	httpx.OK(w, shapeDoc(existing))
 }
@@ -297,15 +304,11 @@ func (h *Handler) savingsContractDelete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := chi.URLParam(r, "id")
-	existing, err := h.repo.FindDoc(r.Context(), savingsContractCollection, id)
+	err := h.billing.WithSavingsContractMutation(r.Context(), id, func(tc context.Context) error {
+		_, err := h.repo.DeleteDoc(tc, savingsContractCollection, id)
+		return err
+	})
 	if httpx.WriteError(w, err) {
-		return
-	}
-	if existing == nil {
-		httpx.WriteError(w, httpx.NotFound("Savings contract not found"))
-		return
-	}
-	if _, err := h.repo.DeleteDoc(r.Context(), savingsContractCollection, id); httpx.WriteError(w, err) {
 		return
 	}
 	// TODO(audit): write an organization-scoped admin audit event when a contract is deleted.
