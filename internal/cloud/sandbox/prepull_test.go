@@ -33,6 +33,12 @@ func (f *warmFake) GetCore(ctx context.Context, p, ns, name string) (map[string]
 	_ = json.Unmarshal(b, &copy)
 	return copy, nil
 }
+func (f *warmFake) DeleteCoreUID(ctx context.Context, p, ns, name, uid string) error {
+	if got := f.core[p+"/"+ns+"/"+name]; got == nil || digStr(got, "metadata", "uid") != uid {
+		return errors.New("UID conflict")
+	}
+	return f.DeleteCore(ctx, p, ns, name)
+}
 func (f *warmFake) ReplaceCore(ctx context.Context, p string, obj map[string]any) error {
 	key := p + "/" + digStr(obj, "metadata", "namespace") + "/" + digStr(obj, "metadata", "name")
 	if old := f.core[key]; old == nil || digStr(old, "metadata", "resourceVersion") != digStr(obj, "metadata", "resourceVersion") {

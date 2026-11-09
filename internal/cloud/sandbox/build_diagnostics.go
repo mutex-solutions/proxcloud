@@ -106,26 +106,45 @@ func (s *Service) CaptureBuildLogs(ctx context.Context, projectID, buildID strin
 
 // CleanupBuild checks tenant ownership again before archive-authorized deletion.
 func (s *Service) CleanupBuild(ctx context.Context, projectID, buildID string) error {
-	st, err := s.BuildPodState(ctx, projectID, buildID)
+	api, ok := s.api.(coreUIDDeleter)
+	if !ok {
+		return fmt.Errorf("sandbox: cleanup requires conditional UID deletion")
+	}
+	pod, err := s.api.GetCore(ctx, "pods", BuildNamespace, buildName(buildID))
 	if err != nil {
 		return err
 	}
-	if st == nil {
-		// The pod may have been removed externally. Only delete an orphaned
-		// ConfigMap if it independently proves the same project ownership.
-		cm, err := s.api.GetCore(ctx, "configmaps", BuildNamespace, buildName(buildID))
-		if err != nil || cm == nil {
-			return err
-		}
-		if !s.ownsBuild(cm, projectID, buildID) {
+	if pod != nil {
+		if !s.ownsBuild(pod, projectID, buildID) {
 			return nil
 		}
-		return s.api.DeleteCore(ctx, "configmaps", BuildNamespace, buildName(buildID))
+		phase := digStr(pod, "status", "phase")
+		if phase != "Succeeded" && phase != "Failed" {
+			return nil
+		}
+		uid := digStr(pod, "metadata", "uid")
+		if uid == "" {
+			return fmt.Errorf("sandbox: cleanup pod UID missing")
+		}
+		if err = api.DeleteCoreUID(ctx, "pods", BuildNamespace, buildName(buildID), uid); err != nil {
+			return err
+		}
 	}
-	if st.Pod.Phase != "Succeeded" && st.Pod.Phase != "Failed" {
+	cm, err := s.api.GetCore(ctx, "configmaps", BuildNamespace, buildName(buildID))
+	if err != nil || cm == nil {
+		return err
+	}
+	if !s.ownsBuild(cm, projectID, buildID) {
 		return nil
 	}
-	return s.DeleteBuild(ctx, buildID)
+	if pod != nil && (digStr(cm, "metadata", "annotations", AnnotationBuildOperation) != digStr(pod, "metadata", "annotations", AnnotationBuildOperation) || digStr(cm, "metadata", "annotations", AnnotationBuildNonce) != digStr(pod, "metadata", "annotations", AnnotationBuildNonce)) {
+		return fmt.Errorf("sandbox: cleanup config generation changed")
+	}
+	uid := digStr(cm, "metadata", "uid")
+	if uid == "" {
+		return fmt.Errorf("sandbox: cleanup config UID missing")
+	}
+	return api.DeleteCoreUID(ctx, "configmaps", BuildNamespace, buildName(buildID), uid)
 }
 
 var buildRedactions = []*regexp.Regexp{

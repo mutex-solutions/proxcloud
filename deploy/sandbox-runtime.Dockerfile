@@ -26,6 +26,8 @@ ARG E2B_INFRA_REF=e85b9f5f6de6c92b002f376b4f91b1652d3c942e
 COPY --from=envd /out/envd /proxcloud-sandbox/bin/envd
 COPY --from=init /out/sandbox-init /proxcloud-sandbox/bin/sandbox-init
 COPY --from=init /out/sandbox-netguard /proxcloud-sandbox/bin/sandbox-netguard
+# Operator capability evidence; node labels are granted only after canary verification.
+RUN printf 'v1\n' > /proxcloud-sandbox/bin/prepull-runtime
 RUN <<EOF
 cat > /proxcloud-sandbox/THIRD_PARTY.md <<NOTICE
 # Third-party software
@@ -44,7 +46,7 @@ COPY --chmod=0755 <<'EOF' /install.sh
 set -eu
 DEST="${DEST:-/host/opt/proxcloud-sandbox/bin}"
 mkdir -p "$DEST"
-for f in envd sandbox-init sandbox-netguard; do
+for f in envd sandbox-init sandbox-netguard prepull-runtime; do
   cp "/proxcloud-sandbox/bin/$f" "$DEST/.$f.tmp"
   chmod 0755 "$DEST/.$f.tmp"
   mv -f "$DEST/.$f.tmp" "$DEST/$f"

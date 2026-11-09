@@ -45,6 +45,14 @@ func (f *fakeAPI) DeleteCore(_ context.Context, plural, ns, name string) error {
 	delete(f.core, plural+"/"+ns+"/"+name)
 	return nil
 }
+func (f *fakeAPI) DeleteCoreUID(ctx context.Context, p, ns, name, uid string) error {
+	if got := f.core[p+"/"+ns+"/"+name]; got == nil {
+		return nil
+	} else if digStr(got, "metadata", "uid") != uid {
+		return errors.New("UID conflict")
+	}
+	return f.DeleteCore(ctx, p, ns, name)
+}
 func (f *fakeAPI) ListPods(_ context.Context, ns, _ string) ([]map[string]any, error) {
 	var out []map[string]any
 	for k, v := range f.core {

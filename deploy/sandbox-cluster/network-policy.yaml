@@ -66,3 +66,17 @@ spec:
     - matchLabels:
         k8s:io.kubernetes.pod.namespace: sandbox-system
         k8s:app: sandbox-proxy
+---
+# Optional pull-only warming workers need no pod-network egress at all: kubelet
+# pulls the image outside its network namespace. Never widen tenant egress for warming.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sandbox-warming-deny-all
+  namespace: sandbox-system
+spec:
+  endpointSelector:
+    matchLabels:
+      proxcloud.io/sandbox-warm: "true"
+  ingress: []
+  egress: []

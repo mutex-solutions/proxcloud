@@ -55,10 +55,12 @@ type WarmCoverage struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 type warmEntry struct {
-	ProjectID string
-	Image     string
-	GPU       string
-	ExpiresAt time.Time
+	ProjectID   string
+	Image       string
+	GPU         string
+	ExpiresAt   time.Time
+	SizeBytes   int64
+	ReservedGiB int
 }
 
 // Local serialization avoids a thundering herd; the resourceVersion lease below is the
@@ -82,12 +84,15 @@ func (s *Service) claimWarmLease(ctx context.Context) (func(), error) {
 	}
 	token := newToken()
 	if obj != nil {
+		if digStr(obj, "metadata", "labels", LabelService) != s.serviceID || digStr(obj, "metadata", "labels", LabelManagedBy) != ManagedByValue {
+			return nil, fmt.Errorf("warming lease ownership mismatch")
+		}
 		exp, _ := time.Parse(time.RFC3339Nano, digStr(obj, "data", "until"))
 		if exp.After(time.Now()) {
 			return nil, fmt.Errorf("image warming is busy; retry preparation shortly")
 		}
 	} else {
-		obj = map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": name, "namespace": PrepullNamespace}}
+		obj = map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": name, "namespace": PrepullNamespace, "labels": map[string]any{LabelService: s.serviceID, LabelManagedBy: ManagedByValue}}}
 	}
 	obj["data"] = map[string]any{"owner": token, "until": time.Now().Add(40 * time.Second).UTC().Format(time.RFC3339Nano)}
 	if digStr(obj, "metadata", "resourceVersion") == "" {
@@ -109,9 +114,15 @@ func (s *Service) claimWarmLease(ctx context.Context) (func(), error) {
 		_ = api.ReplaceCore(cleanup, "configmaps", cur)
 	}, nil
 }
-func (s *Service) warmLock() *sync.Mutex {
-	m, _ := warmLocks.LoadOrStore(s.serviceID, &sync.Mutex{})
-	return m.(*sync.Mutex)
+func (s *Service) acquireWarm(ctx context.Context) (func(), error) {
+	chAny, _ := warmLocks.LoadOrStore(s.serviceID, make(chan struct{}, 1))
+	ch := chAny.(chan struct{})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case ch <- struct{}{}:
+		return func() { <-ch }, nil
+	}
 }
 func (s *Service) warmName() string { return warmIndex + "-" + warmKey(s.serviceID)[:12] }
 func warmKey(s string) string       { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
@@ -158,11 +169,13 @@ func (s *Service) PrepareImage(ctx context.Context, projectID string, t Template
 	if sizeBytes < 0 || sizeBytes > int64(c.MaxImageGiB)<<30 {
 		return nil, badBuild("image exceeds warming size budget")
 	}
-	mu := s.warmLock()
-	mu.Lock()
-	defer mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	unlock, err := s.acquireWarm(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	release, err := s.claimWarmLease(ctx)
 	if err != nil {
 		return nil, err
@@ -192,8 +205,9 @@ func (s *Service) PrepareImage(ctx context.Context, projectID string, t Template
 	for len(kept) >= capEntries {
 		kept = kept[1:]
 	}
-	e := warmEntry{projectID, t.Image, gpu, now.Add(time.Duration(c.TTLSeconds) * time.Second)}
+	e := warmEntry{ProjectID: projectID, Image: t.Image, GPU: gpu, ExpiresAt: now.Add(time.Duration(c.TTLSeconds) * time.Second), SizeBytes: sizeBytes, ReservedGiB: c.MaxImageGiB}
 	kept = append(kept, e)
+	kept = s.validWarmEntries(kept)
 	if err = s.saveWarmEntries(ctx, kept); err != nil {
 		return nil, err
 	}
@@ -293,13 +307,20 @@ func (s *Service) coverage(ctx context.Context, e warmEntry) (*WarmCoverage, err
 // cache GC remains kubelet-owned (no host socket, no dangerous image deletion by the API).
 func (s *Service) ReconcileWarming(ctx context.Context) error {
 	if !s.cfg.Warming.Enabled {
-		return nil
+		// Default-off installs require no extra writes/RBAC. A previously enabled
+		// catalog is still retired so disabling stops its owned pull-only workers.
+		obj, err := s.api.GetCore(ctx, "configmaps", PrepullNamespace, s.warmName())
+		if err != nil || obj == nil {
+			return err
+		}
 	}
-	mu := s.warmLock()
-	mu.Lock()
-	defer mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	unlock, err := s.acquireWarm(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	release, err := s.claimWarmLease(ctx)
 	if err != nil {
 		return err
@@ -309,12 +330,7 @@ func (s *Service) ReconcileWarming(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	kept := es[:0]
-	for _, e := range es {
-		if e.ExpiresAt.After(s.now()) {
-			kept = append(kept, e)
-		}
-	}
+	kept := s.validWarmEntries(es)
 	if err = s.saveWarmEntries(ctx, kept); err != nil {
 		return err
 	}
@@ -329,9 +345,11 @@ func (s *Service) reconcileWarming(ctx context.Context, es []warmEntry) error {
 	if err != nil {
 		return err
 	}
-	valid := map[string]bool{}
+	valid := map[string]warmEntry{}
 	for _, e := range es {
-		valid[warmKey(e.Image+"/"+e.GPU)] = true
+		for _, n := range s.warmNodes(ns, e) {
+			valid[s.warmPodName(e, n)] = e
+		}
 	}
 	active := 0
 	existing := map[string]bool{}
@@ -340,10 +358,11 @@ func (s *Service) reconcileWarming(ctx context.Context, es []warmEntry) error {
 			continue
 		}
 		name := digStr(p, "metadata", "name")
-		key := digStr(p, "metadata", "annotations", "proxcloud.io/warm-key")
+		e, validNode := valid[name]
+		validNode = validNode && digStr(p, "metadata", "labels", LabelProject) == e.ProjectID && digStr(p, "metadata", "annotations", "proxcloud.io/warm-image") == e.Image
 		phase := digStr(p, "status", "phase")
-		if !valid[key] || phase == "Succeeded" || phase == "Failed" {
-			if err = s.api.DeleteCore(ctx, "pods", PrepullNamespace, name); err != nil {
+		if !validNode || phase == "Succeeded" || phase == "Failed" || active >= s.cfg.Warming.MaxParallel {
+			if err = s.deleteOwnedWarmPod(ctx, p); err != nil {
 				return err
 			}
 			continue
@@ -360,7 +379,7 @@ func (s *Service) reconcileWarming(ctx context.Context, es []warmEntry) error {
 				continue
 			}
 			node := digStr(n, "metadata", "name")
-			name := "warm-" + warmKey(s.serviceID + "/" + e.Image + "/" + e.GPU + "/" + node)[:40]
+			name := s.warmPodName(e, n)
 			if existing[name] {
 				continue
 			}
@@ -371,10 +390,14 @@ func (s *Service) reconcileWarming(ctx context.Context, es []warmEntry) error {
 			if prior != nil && (digStr(prior, "metadata", "labels", LabelService) != s.serviceID || digStr(prior, "metadata", "labels", LabelManagedBy) != ManagedByValue || digStr(prior, "metadata", "labels", warmLabel) != "true" || digStr(prior, "metadata", "labels", LabelProject) != e.ProjectID) {
 				return fmt.Errorf("warming pod ownership mismatch")
 			}
+			if prior != nil {
+				return fmt.Errorf("warming worker changed; retry reconciliation")
+			}
 			if _, err = s.copyProjectPullSecret(ctx, e.ProjectID, PrepullNamespace, warmPullSecret(e.ProjectID)); err != nil {
 				return err
 			}
-			if err = s.api.ApplyCore(ctx, "pods", s.warmPod(name, node, e)); err != nil {
+			api := s.api.(warmCASAPI)
+			if err = api.CreateCore(ctx, "pods", s.warmPod(name, node, e)); err != nil {
 				return err
 			}
 			active++
@@ -457,4 +480,60 @@ func (s *Service) WarmingAvailable(ctx context.Context) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// Every reconciliation applies today's limits, not the limits at original admission.
+func (s *Service) validWarmEntries(es []warmEntry) []warmEntry {
+	if !s.cfg.Warming.Enabled {
+		return nil
+	}
+	now := s.now().UTC()
+	c := s.cfg.Warming
+	out := make([]warmEntry, 0, len(es))
+	seen := map[string]bool{}
+	sort.Slice(es, func(i, j int) bool {
+		if es[i].ExpiresAt.Equal(es[j].ExpiresAt) {
+			return es[i].Image < es[j].Image
+		}
+		return es[i].ExpiresAt.After(es[j].ExpiresAt)
+	})
+	capEntries := min(c.MaxImages, c.MaxTotalGiB/c.MaxImageGiB)
+	for _, e := range es {
+		managed, err := s.importPolicy().Source(e.Image, e.ProjectID)
+		if err != nil || !managed || !e.ExpiresAt.After(now) || e.SizeBytes < 0 || e.SizeBytes > int64(c.MaxImageGiB)<<30 || e.ReservedGiB > c.MaxImageGiB || e.ReservedGiB < 1 || (e.GPU != "" && !s.cfg.hasGPUModel(e.GPU)) {
+			continue
+		}
+		key := e.Image + "/" + e.GPU
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		maxEnd := now.Add(time.Duration(c.TTLSeconds) * time.Second)
+		if e.ExpiresAt.After(maxEnd) {
+			e.ExpiresAt = maxEnd
+		}
+		if len(out) < capEntries {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+func (s *Service) warmPodName(e warmEntry, node map[string]any) string {
+	return "warm-" + warmKey(s.serviceID + "/" + e.Image + "/" + e.GPU + "/" + digStr(node, "metadata", "name") + "/" + digStr(node, "metadata", "uid"))[:40]
+}
+
+type coreUIDDeleter interface {
+	DeleteCoreUID(context.Context, string, string, string, string) error
+}
+
+func (s *Service) deleteOwnedWarmPod(ctx context.Context, p map[string]any) error {
+	uid := digStr(p, "metadata", "uid")
+	if uid == "" {
+		return fmt.Errorf("warming worker UID missing")
+	}
+	api, ok := s.api.(coreUIDDeleter)
+	if !ok {
+		return fmt.Errorf("warming cleanup requires UID preconditions")
+	}
+	return api.DeleteCoreUID(ctx, "pods", PrepullNamespace, digStr(p, "metadata", "name"), uid)
 }

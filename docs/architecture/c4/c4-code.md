@@ -8,6 +8,25 @@ invariants the code holds. Four sequence diagrams follow.
 
 Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
+## Sandbox runtime parity core (EE port)
+
+**What / why:** add bounded phased startup, Ready-clock lifetime, shared environment
+budgets, independent builder resources/diagnostic capture, trusted immutable imports
+and optional pull-only warming without replacing ProxCloud's isolation/OCI/pin guards.
+
+| Component / symbol | Boundary and invariant |
+|---|---|
+| `WaitReady`, `armStartup`, `pinRunningSince` | Per-phase read contexts + total/caller cap; finite provisional end; UID/RV durable Ready candidate then atomic billing-origin/runtime-TTL commit. Retry/flap cannot move the persisted origin; expired originals/replaced UIDs refuse. Billable RUNNING is not usable Ready. |
+| `sandboxenv.Validate`, `ValidateRuntime`, `setSandboxIDEnv`, PID1 `runMode` | Caller256/32KiB/128KiB and merged Linux exec budget; reserved PROXCLOUD_/KUBERNETES_/authoritative sandbox ID; explicit serve args prevent image CMD selecting utility modes. |
+| `BuildConfig.Resources`, `CaptureBuildLogs`, `CleanupBuild` | Independent builder pool/CPU/RAM/disk bounds, stable bounded stage prefixes + terminal tails/loss evidence including prepare-output; terminal cleanup uses UID preconditions, never deadlines/Unknown. OCI directory handoff and P2-A single-use proofs are preserved. |
+| `Policy.Source`, `Destination`, `GuardTransport`, `StartImport` | Operator-only exact HTTPS origin/repository policy; current-project digest default, separate source/push/pull identities, exact registry endpoint grammar, no redirects/foreign layers/cross-repo mounts. Fixed digest-pinned trusted worker and distinct durable import proof before writes; no code execution/unpacking or build billing. |
+| `PrepareImage`, `ReconcileWarming`, `WarmingAvailable` | OFF default; finite current-config intent/node/size/TTL/parallel caps, cancellation-aware local admission + CAS lease; protected operator runtime capability, read-only static pull-only process, observed node cache coverage, owned UID-fenced cleanup only. No CRI/image deletion or cold-start guarantee. |
+
+Optional manifests and bundle markers are source artifacts only: no worker publication,
+RBAC apply, node-label grant or runtime rollout is implied. Snapshot assembly/other
+legacy writers remain separate registry-participation prerequisites; both physical
+registry-delete paths remain HOLD. [Core adaptation and verification contract](../../sandbox-runtime-parity.md).
+
 ## Registry BUILD/template participation (P2-A)
 
 **What / why:** custom builds now commit owned BASE+DEST pins before use/project
