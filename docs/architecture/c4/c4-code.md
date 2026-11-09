@@ -8,6 +8,40 @@ invariants the code holds. Four sequence diagrams follow.
 
 Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
+## Primary durable native billing
+
+**Why:** original billing cutoff, money mutation, retry ownership and accepted work must survive process crashes without relying on a broker ACK or lagging replica.
+
+| Symbol | Primary invariant |
+|---|---|
+| `pgdoc.Connect`, `Tx`, `q` | Every new primary connection rejects recovery/read-only; raw transaction bridge and all Store SQL reject a different DB's context. |
+| `durablejobs.EnqueueTx` | Same `pgdoc.WithTx` business transaction, fixed kinds, bounded immutable payload and unique kind/key; rollback has no accepted work. |
+| `ClaimKinds`, `Renew`, `Retry`, `Complete` | DB-clock due/expiry, SKIP LOCKED; UUID owner + increasing epoch + unexpired CAS; post-row-lock fresh time check. Unsupported provider-mode jobs remain untouched. |
+| `Worker.Run` | Bounded concurrency/poll, SQL-only handler deadline and cancellation; final expiry rolls back all effects, retry jitter/attempt bounds/dead letters. |
+| `Cycle`, `WithChargeReceipt`, `ChargeBillingResources` | Frozen original cadence/cutoff, one existing profile money lock and joined whole-profile transaction across all services. Retained receipt prevents business-commit-before-ACK duplicate money/units; issued cycles never reopen. |
+| `Engine.At`, `advanceWatermark`, `getTimeUnitsDiff` | Per-call original clock (no shared engine mutation), no accrual past cutoff/deletion or watermark rewind. Current cache/pricing are not historical snapshots. |
+| `BillSendService.SetChargeBacklog` | Under primary profile money lock defer on original-cycle pending/running/dead jobs; a post-issuance late publish requires reconciliation instead of invoice mutation. |
+| Admin durable status/replay | Existing primary RBAC first; history only may use read pool, always marked lag-tolerant. Replay validates fixed original payload and atomically writes operator audit; no arbitrary code/payload editing. |
+
+```mermaid
+sequenceDiagram
+  participant P as Cron / operator producer
+  participant D as PostgreSQL PRIMARY
+  participant W as Bounded API worker
+  participant H as Optional read-only history pool
+  P->>D: EnqueueTx same business commit (original profile/unit/cutoff)
+  W->>D: SKIP LOCKED claim UUID owner + epoch + DB lease
+  W->>D: begin WithTx; lock job, verify owner/epoch/unexpired
+  W->>D: profile money lock; retained receipt check
+  W->>D: DB cache resolve; all service bill mutations + receipt
+  W->>D: final unexpired owner/epoch ACK CAS; COMMIT
+  Note over W,D: Error/expiry/cancel rolls back money + receipt + ACK
+  W->>D: fenced bounded retry or visible dead letter
+  P->>H: lag-tolerant status only, never claims/auth/finance
+```
+
+This is at-least-once execution with atomic native financial effects, NOT exactly-once SMTP/HTTP/cloud execution. External billing HTTP behavior remains separate with no native fallback. Mail/invite delivery remains best-effort; SSE stays pod-local. Schema/resource deployment and legacy queue drain/removal are separate rollout work. [Operator contract](../../durable-jobs.md).
+
 ## Holder operation fencing (R1)
 
 **Why:** PVE tasks outlive HTTP cancellation and PostgreSQL session loss does not

@@ -1,8 +1,8 @@
 # Jobs & Scheduling
 
 How ProxCloud runs its background work — cron-scheduled jobs, the distributed lock
-that keeps them single-run across replicas, the optional RabbitMQ charge
-fan-out, and the on-demand debug triggers.
+that limits duplicate cron dispatch, primary PostgreSQL durable native billing,
+and the on-demand debug triggers.
 
 This document is for contributors working in `internal/platform/scheduler`,
 `internal/platform/lock`, `internal/platform/chargefanout`,
@@ -19,9 +19,10 @@ scaling safe:
 
 - **ShedLock** — a PostgreSQL-backed distributed lock. Every scheduled job runs
   under a named lock, so a given fire executes on exactly one pod fleet-wide.
-- **Competing consumers** — the optional charge fan-out publishes one message
-  per profile to a shared queue; any pod drains it, and each message is
-  delivered once.
+- **Durable competing workers** — native billing publishes a frozen original-cycle
+  job per profile on the primary. Delivery is at least once; UUID owner + epoch +
+  unexpired database-clock CAS fences completion/retry. The whole-profile financial
+  receipt and queue acknowledgment commit with all service bill mutations.
 
 ```mermaid
 flowchart TB
@@ -172,45 +173,40 @@ and metrics jobs are what keep that cache truthful (see
 
 ---
 
-## Charge fan-out (the RabbitMQ alternative)
+## Primary durable native charge dispatch
 
-By default the charge cron runs **in-process**: one pod acquires the
-`minutelyCharge`/`hourlyCharge`/`monthlyCharge` lock and loops over every ACTIVE
-profile itself. That's simple and correct, but a slow or failing profile is
-processed on the same goroutine as the rest, and all the work lands on one pod.
+Native billing always publishes through `chargefanout.Publish` to `durable_job`.
+The message is a validated versioned `{version, profileId, timeUnit, cycleAt}`;
+`cycleAt` is the canonical ORIGINAL producer cutoff, not processing time. One
+unique key includes profile, cadence and that UTC cutoff. Re-publishing cannot
+replace a frozen payload. Partial publishing can be retried for the same cycle.
 
-`internal/platform/chargefanout/chargefanout.go` is the opt-in alternative. When
-`PROXCLOUD_JOBS_RABBIT_FANOUT=true`, the cron **publishes** instead of looping:
+Every API replica starts a bounded worker pool. `SELECT FOR UPDATE SKIP LOCKED`
+selects due/expired work on the primary. Every acquisition gets a fresh UUID owner
+and increasing epoch; renew/retry/complete require that acquisition and an unexpired
+DB-clock lease, checked again after row-lock waits. A DB-only worker transaction
+commits all provider charges, a profile-cycle receipt, optional transactional
+outbox writes, and queue ACK together. A crash before commit rolls everything back;
+a business commit without ACK is safe on retry because the independent financial
+receipt survives completed queue-payload pruning. This is not exactly-once SMTP,
+HTTP or gateway execution.
 
-- `Publish` fans out one message per ACTIVE profile to the shared queue
-  `proxcloud.charge`. Each message is `{ profileId, timeUnit }`.
-- Every pod runs a `StartConsumer` that drains the queue, calling
-  `billingjob.ChargeProfileByID` — the **same** per-profile work as the
-  in-process loop — for one profile per message.
+Original cutoff also pins monthly proration's per-call engine clock. Deleted
+resources cannot rate after that cutoff or the original month's end; older cycles
+cannot rewind newer watermarks. Resolution still reads CURRENT primary cache and
+pricing configuration, not historical snapshots. Unknown/missing history cannot be
+reconstructed by this queue. Issued SENT/PAID months never reopen: a late/missing
+closing cycle requires explicit reconciliation and does not record success.
+Invoice issuance defers while known pending/running/dead jobs cover its original
+cycle; a publish arriving after issuance fails the issued-month guard instead.
 
-```mermaid
-flowchart LR
-  CRON["charge cron fires<br/>ShedLock picks one pod to publish"] --> Q[["proxcloud.charge queue"]]
-  Q --> C1[pod A consumer]
-  Q --> C2[pod B consumer]
-  Q --> C3[pod C consumer]
-  C1 --> W1[ChargeProfileByID p1]
-  C2 --> W2[ChargeProfileByID p2]
-  C3 --> W3[ChargeProfileByID p3]
-```
+External billing keeps its existing explicit HTTP provider: no native fallback and
+no new automatic HTTP retries. Its worker only claims selftests; native backlog
+stays untouched until the operator restores/drains the native mode. Do not mix
+native/external producers or change providers with unreconciled work.
 
-Why you'd turn it on:
-
-- **Failure isolation** — a slow/failing profile is one message; it cannot stall
-  the others.
-- **Spread** — work distributes across all pods, not one.
-- **Idempotent unit** — `ChargeProfileByID` no-ops if the profile vanished or is
-  no longer ACTIVE since the message was published.
-
-The charge math is identical either way — only the dispatch differs. `main.go`
-wraps this in `chargeDispatch`: if fan-out is on and the broker is connected it
-publishes, otherwise it falls back to charging in-process for that tick (so a
-missing broker never silently drops a billing run).
+See [durable job operations](durable-jobs.md) for transactions, status/replay,
+retention, migration, primary/read-pool boundaries, and exact regression commands.
 
 ---
 
@@ -249,8 +245,8 @@ Each is `POST /debug/<name>` and returns a small JSON result:
 | `run-send-bills` | finalize previous-month OPEN bills |
 | `run-collect` | collect SENT bills via card |
 | `run-project-deletion` | delete scheduled projects (⚠ live cloud deletes) |
-| `run-charge-fanout` | publish the charge work-list to RabbitMQ |
-| `rabbit-selftest` | prove Publish+Consume round-trip against the broker |
+| `jobs-selftest` | isolated durable enqueue/claim/commit round-trip, no billing data |
+| `jobs-status` | bounded lag-tolerant queue history and WAL replay metadata |
 | `sse-emit` | push a synthetic SSE event to open streams |
 | `send-test-mail` | render + send a system message template |
 | `gen-hmac-key` | mint an Admin-API SigV4 access key pair (debug triggers only) |
@@ -266,8 +262,9 @@ the authenticated operator surface for the same runners.
 
 ## Wiring and startup gates (`cmd/api/main.go`)
 
-Jobs are **always wired** but **started only when enabled**, so a plain deploy
-never charges bills unexpectedly:
+Cron producers are **started only when enabled**. Workers always process already
+accepted durable jobs, even with the scheduler off; a new empty deployment produces
+no timed billing work:
 
 ```go
 if cfg.Jobs.SchedulerEnabled {   // PROXCLOUD_JOBS_SCHEDULER_ENABLED
@@ -278,54 +275,36 @@ if cfg.Jobs.SchedulerEnabled {   // PROXCLOUD_JOBS_SCHEDULER_ENABLED
 }
 ```
 
-The three env gates (`internal/config/config.go`):
+The runtime settings (`internal/config/config.go`):
 
-| Env var | Effect |
+| Env var | Default / effect |
 |---|---|
-| `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | Start the cron scheduler (jobs begin firing on their specs). |
-| `PROXCLOUD_JOBS_DEBUG_TRIGGERS` | Expose the mgmt `/debug/run-*` triggers even when the scheduler is off. |
-| `PROXCLOUD_JOBS_RABBIT_FANOUT` | Route the charge cron through the RabbitMQ fan-out; also starts a charge consumer on this pod. |
+| `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | false; starts timed cron producers |
+| `PROXCLOUD_JOBS_DEBUG_TRIGGERS` | false; expose management debug triggers |
+| `PROXCLOUD_JOBS_WORKER_CONCURRENCY` | 2 per API replica; 1..16 |
+| `PROXCLOUD_JOBS_POLL_INTERVAL` | 1s; 100ms..1m, jittered empty/error polling |
+| `PROXCLOUD_JOBS_LEASE_DURATION` | 1m; 10s..10m; DB-only transaction deadline is 3/4 of lease |
+| `PROXCLOUD_DB_URL` | writable PRIMARY only; every new connection rejects recovery/read-only |
+| `PROXCLOUD_DB_READ_URL` | optional read-only HISTORY/metrics; empty uses primary for history |
+| `PROXCLOUD_JOBS_RABBIT_FANOUT=true` | startup migration error: drain/reconcile old queue and clear flag |
 
-When fan-out is on, `startChargeConsumer` waits (bounded) for the
-background-maintained broker connection, then subscribes this pod's consumer —
-so startup never blocks on the broker.
+An explicitly configured unavailable history pool returns a stats error; it does
+not redirect claims, auth, business reads or writes there. History is always
+marked lag-tolerant and never drives replay or financial decisions. No physical
+replication is provisioned by the runtime setting.
 
----
+## Scaling and boundaries
 
-## Scaling implications
+Cron ShedLock is a dispatch throttle, not a promise that a timed-out process stops.
+Durable original-cycle identity and the financial receipt make duplicate native
+dispatch safe. Workers are bounded per process and claim one job at a time; cancellation
+rolls back SQL and leaves claims to DB-clock expiry recovery. Retrying poison is
+bounded with exponential backoff/jitter and visible dead letters.
 
-Run N replicas freely:
-
-- **Scheduled jobs** are safe because every fire goes through ShedLock —
-  fleet-wide, exactly one pod runs a given job per fire. `atMostFor` bounds a
-  crashed holder; `atLeastFor` debounces fast jobs.
-- **Charge fan-out** is safe because RabbitMQ delivers each per-profile message
-  to exactly one consumer (competing consumers), and `ChargeProfileByID` is
-  idempotent against a stale message.
-
-```mermaid
-flowchart TB
-  subgraph N["N API replicas"]
-    P1[pod 1]
-    P2[pod 2]
-    P3[pod 3]
-  end
-  P1 & P2 & P3 -->|scheduled work| SL[("ShedLock: single-run guard")]
-  P1 & P2 & P3 -->|charge work| MQ[["RabbitMQ: competing consumers"]]
-  SL --> OK1[each job runs once fleet-wide]
-  MQ --> OK2[each profile charged once]
-```
-
-**Known multi-replica consideration — SSE is per-pod.** The real-time event
-stream (`internal/platform/sse`) is an **in-memory pool per pod**
-(`sse.NewPool()` in `main.go`). A browser is connected to whichever pod
-terminated its stream; an event pushed on another pod (today the only
-producer is the `sse-emit` debug trigger) reaches only the
-subscribers on **that** pod. This is fine when a load balancer pins the SSE
-connection to one pod, but a contributor adding cross-pod real-time delivery
-would need a shared broadcast (e.g. a RabbitMQ fan-out topic) rather than the
-current in-process pool. The scheduled jobs and charge fan-out are unaffected —
-only live SSE delivery is pod-local.
+SSE remains an in-memory pool **per API pod**. Competing queue workers are NOT a
+broadcast mechanism and this phase adds no event-stream fan-out. Mail, invitations,
+bill emails, cloud/gateway mutations and the other cron jobs are not made durable
+by this native billing queue; mail outbox integration is a separate next phase.
 
 ---
 
@@ -333,11 +312,14 @@ only live SSE delivery is pod-local.
 
 - `internal/platform/scheduler/scheduler.go` — cron specs, `Job`, `Register`, `RunLocked`
 - `internal/platform/lock/shedlock.go` — the PostgreSQL distributed lock (acquire/release)
-- `internal/platform/chargefanout/chargefanout.go` — RabbitMQ charge fan-out (Publish / StartConsumer)
+- `internal/platform/chargefanout/chargefanout.go` — frozen original-cycle enqueue + finite billing/selftest handlers
 - `internal/platform/billingjob/billingjob.go` — the charge/rating driver (`Charge`, `ChargeProfileByID`, `ActiveProfileIDs`)
 - `internal/cloud/syncjob/job.go` — the `servicesSync` job
 - `internal/cloud/syncjob/pve_meter.go` — the Proxmox sampler and task poller
 - `internal/cloud/metricsjob/job.go` — the `usageMetricsFetch` job
 - `internal/platform/job/*` — the `/api/v1/admin/job/*` operator API
 - `internal/config/config.go` — the `PROXCLOUD_JOBS_*` env gates
-- `cmd/api/main.go` — `registerJobs`, `chargeDispatch`, `startChargeConsumer`, the mgmt debug triggers, and the enable/start gating
+- `cmd/api/main.go` — `registerJobs`, `chargeDispatch`, primary worker pool, the mgmt debug triggers, and the enable/start gating
+
+- `internal/durablejobs/` — primary SQL job/outbox store, fenced transitions, bounded workers, lag-tolerant history
+- `internal/platform/pricing/receipt.go` — whole-profile atomic receipt; independent of queue payload retention

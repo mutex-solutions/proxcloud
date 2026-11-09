@@ -2,9 +2,16 @@ package pricing
 
 import (
 	"context"
-	"log/slog"
+	"errors"
+
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"time"
 )
+
+// ErrChargeReconciliation prevents an async backlog from reopening an issued
+// month or acknowledging a missing closing interval. Operators must reconcile;
+// silently changing an issued/paid bill is never a queue retry side effect.
+var ErrChargeReconciliation = errors.New("billing cycle requires reconciliation (issued bill or missing closing bill)")
 
 // ChargeBillingResources performs the per-(profile, service) charge step: under the profile lock,
 // get or create the cycle's OPEN bill, rate each billing resource through the Engine, accumulate it
@@ -20,9 +27,9 @@ import (
 // rating loop, before save — it applies the
 // savings-contract discount + price-adjustment rules to the bill. cycleStart/End bound the
 // billing month; `now` is the charge instant (rc.CycleTimestamp). A `now` at cycleEnd is the pass
-// closing that cycle's last interval: it tops up the OPEN bill and never opens one, because the
-// bill is gone only if it was already issued or deleted, and a fresh bill would start every item's
-// watermark at the cycle start and re-bill the month. It then returns a nil bill.
+// closing that cycle's last interval: it tops up the OPEN bill and never opens one.
+// An issued cycle or a missing nonempty closing bill requires reconciliation,
+// not a success receipt or a fresh bill with reset month-long watermarks.
 func ChargeBillingResources(
 	ctx context.Context,
 	repo *Repo,
@@ -44,6 +51,14 @@ func ChargeBillingResources(
 		if err := repo.db.LockXact(ctx, ProfileLockKey(billingProfileID)); err != nil {
 			return err
 		}
+		var issued Bill
+		found, err := repo.bills.FindOne(ctx, pgdoc.M{"billingProfileId": billingProfileID, "status": pgdoc.M{"$in": []string{string(BillStatusSent), string(BillStatusPaid)}}, "billingCycle.startDate": pgdoc.M{"$gte": cycleStart, "$lt": cycleEnd}}, &issued)
+		if err != nil {
+			return err
+		}
+		if found {
+			return ErrChargeReconciliation
+		}
 		bill, err := repo.openBill(ctx, billingProfileID, cycleStart, cycleEnd)
 		if err != nil {
 			return err
@@ -51,8 +66,7 @@ func ChargeBillingResources(
 		if bill == nil {
 			if !now.Before(cycleEnd) {
 				if len(resources) > 0 {
-					slog.Warn("closing charge found no open bill, last interval of the cycle not billed",
-						"billingProfileId", billingProfileID, "cycleStart", cycleStart, "timeUnit", rc.TimeUnit)
+					return ErrChargeReconciliation
 				}
 				return nil
 			}
@@ -61,7 +75,10 @@ func ChargeBillingResources(
 			}
 		}
 		for _, res := range resources {
-			results, err := eng.ApplyPricePlanRules(rules, res, rc.TimeUnit)
+			if res.CreatedAt != nil && res.CreatedAt.After(rc.CycleTimestamp) {
+				continue
+			}
+			results, err := eng.At(rc.CycleTimestamp).ApplyPricePlanRules(rules, res, rc.TimeUnit)
 			if err != nil {
 				return err
 			}

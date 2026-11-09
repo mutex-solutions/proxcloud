@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Replace application RabbitMQ dispatch with primary PostgreSQL durable native
+  billing jobs: frozen original cycles, fenced at-least-once workers, atomic
+  all-provider financial receipt/ACK, transactional enqueue, bounded retry/dead
+  letters and audited operator replay. Reject old fanout flags until legacy queues
+  are drained/reconciled; scheduler stays off by default. Optional read-only pool
+  serves lag-tolerant history only. Mail/invite durability and broker deployment
+  removal remain separate follow-ups.
+
 ### Fixed
 
 - Fail closed on permission-filtered PVE NETWORK inventories: prove effective

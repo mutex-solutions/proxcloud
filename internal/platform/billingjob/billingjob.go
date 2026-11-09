@@ -12,7 +12,10 @@ package billingjob
 
 import (
 	"context"
+	"sync"
 	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 
 	"github.com/shopspring/decimal"
 
@@ -37,10 +40,17 @@ type Deps struct {
 	Engine           *pricing.Engine
 	Cloud            *cloud.Repo
 	Registry         map[string]billingresource.Provider
-	Now              func() time.Time
+	// DB is the primary store. The durable worker requires it for preflight DDL;
+	// tests/legacy direct callers may omit it and retain lazy table creation.
+	DB  *pgdoc.DB
+	Now func() time.Time
 }
 
-type Service struct{ d Deps }
+type Service struct {
+	d        Deps
+	prepare  sync.Mutex
+	prepared bool
+}
 
 func New(d Deps) *Service {
 	if d.Now == nil {
@@ -102,6 +112,46 @@ func (s *Service) ActiveProfileIDs(ctx context.Context) ([]string, error) {
 // the in-process Charge loop body (the per-profile consumer). A non-ACTIVE
 // or vanished profile is a no-op (it may have changed since the message was published).
 func (s *Service) ChargeProfileByID(ctx context.Context, profileID, timeUnit string, now time.Time) error {
+	cycle, err := NewCycle(profileID, timeUnit, now)
+	if err != nil {
+		return err
+	}
+	if s.d.DB == nil {
+		return s.chargeProfile(ctx, profileID, timeUnit, cycle.CycleAt)
+	}
+	if err := s.Prepare(ctx); err != nil {
+		return err
+	}
+	return s.d.Pricing.WithChargeReceipt(ctx, profileID, timeUnit, cycle.CycleAt, func(ctx context.Context) error {
+		return s.chargeProfile(ctx, profileID, timeUnit, cycle.CycleAt)
+	})
+}
+
+// Prepare creates the finite set of native cache/config tables BEFORE the worker
+// enters its billing transaction. Missing-table auto-create cannot run in an
+// aborted PostgreSQL transaction. There are no cloud or payment calls here.
+func (s *Service) Prepare(ctx context.Context) error {
+	if s.d.DB == nil {
+		return nil
+	}
+	s.prepare.Lock()
+	defer s.prepare.Unlock()
+	if s.prepared {
+		return nil
+	}
+	for _, table := range []string{"billingConfiguration", "billingProfile", "externalService", "organization", "project", "pricePlan", "pricePlanRule", "priceAdjustmentRule", "savingsContract", "cloudResource", "cloudResourceHistory", "usageMetrics", "meterState"} {
+		if err := s.d.DB.C(table).Ensure(ctx); err != nil {
+			return err
+		}
+	}
+	if err := s.d.Pricing.PrepareCharges(ctx); err != nil {
+		return err
+	}
+	s.prepared = true
+	return nil
+}
+
+func (s *Service) chargeProfile(ctx context.Context, profileID, timeUnit string, now time.Time) error {
 	enabled, err := s.billingEnabled(ctx)
 	if err != nil || !enabled {
 		return err
@@ -141,13 +191,18 @@ func (s *Service) chargeBillingResource(
 	for i := range externalServices {
 		es := &externalServices[i]
 		rc := pricing.RatingContext{TimeUnit: timeUnit, CycleTimestamp: cycleTimestamp}
-		resources, err := s.billingResources(ctx, bc, projects, es, timeUnit, cycleStart)
+		resources, err := s.billingResources(ctx, bc, projects, es, timeUnit, cycleStart, cycleTimestamp)
 		if err != nil {
 			return err
 		}
-		plans := pricing.SelectPricePlansForService(s.d.Pricing.PlanSource(ctx), planIDs, includePublic, es.ID)
-		rules := pricing.ApplicableRules(plans, s.d.Pricing.RuleSource(ctx), timeUnit)
-		adjust := s.billAdjuster(ctx, profile, plans, cycleStart, cycleEnd)
+		plans, rules, err := s.d.Pricing.ChargeRules(ctx, planIDs, includePublic, es.ID, timeUnit)
+		if err != nil {
+			return err
+		}
+		adjust, err := s.billAdjuster(ctx, profile, plans, cycleStart, cycleEnd)
+		if err != nil {
+			return err
+		}
 		// THE CHARGE SEAM: everything above is resolution (cloud cache → billable units, in the
 		// billingapi wire contract); everything below is rating (price them onto the bill). When
 		// billing moves out, resolution stays here and the wire resources are POSTed to the billing
@@ -162,15 +217,22 @@ func (s *Service) chargeBillingResource(
 // billAdjuster builds the after-rating bill adjustment closure (the applyPricePlans tail):
 // savings-contract discounts for contracts covering the billing cycle + the price-adjustment rules
 // of the service's price plans. Returns nil if neither applies (cheap no-op for the common case).
-func (s *Service) billAdjuster(ctx context.Context, profile *billing.BillingProfile, plans []pricing.PricePlan, cycleStart, cycleEnd time.Time) func(*pricing.Bill) {
-	savings := s.availableSavingsAdj(ctx, profile.ID, cycleStart, cycleEnd)
+func (s *Service) billAdjuster(ctx context.Context, profile *billing.BillingProfile, plans []pricing.PricePlan, cycleStart, cycleEnd time.Time) (func(*pricing.Bill), error) {
+	contracts, err := s.d.Billing.SavingsContractsByBillingProfile(ctx, profile.ID)
+	if err != nil {
+		return nil, err
+	}
+	savings := savingsAdjOf(contracts, cycleStart, cycleEnd)
 	planIDs := make([]string, 0, len(plans))
 	for i := range plans {
 		planIDs = append(planIDs, plans[i].ID)
 	}
-	rules, _ := s.d.Billing.PriceAdjustmentRulesByPricePlanIDs(ctx, planIDs)
+	rules, err := s.d.Billing.PriceAdjustmentRulesByPricePlanIDs(ctx, planIDs)
+	if err != nil {
+		return nil, err
+	}
 	if len(savings) == 0 && len(rules) == 0 {
-		return nil
+		return nil, nil
 	}
 	// The catalog is produced by the resolution side in the billingapi wire contract; the engine
 	// (rating side) takes its own types.
@@ -178,7 +240,7 @@ func (s *Service) billAdjuster(ctx context.Context, profile *billing.BillingProf
 	return func(bill *pricing.Bill) {
 		s.d.Engine.ApplySavingsContractDiscounts(bill, savings, catalog)
 		s.d.Engine.ApplyPriceAdjustmentRules(bill, rules, catalog)
-	}
+	}, nil
 }
 
 // availableSavingsAdj adapts the profile's ACTIVE savings contracts that cover the whole billing cycle
@@ -249,7 +311,7 @@ func (s *Service) activeProjectsWithServices(ctx context.Context, billingProfile
 //
 // While the provider's state is stale nothing it reports is billed and the elapsed time is written
 // off: the resources behind that time could not be observed (plan decision 12).
-func (s *Service) billingResources(ctx context.Context, bc pricing.BillingContext, projects []project.Project, es *externalservice.ExternalService, timeUnit string, cycleStart time.Time) ([]*billingapi.BillingResource, error) {
+func (s *Service) billingResources(ctx context.Context, bc pricing.BillingContext, projects []project.Project, es *externalservice.ExternalService, timeUnit string, cycleStart, cycleTimestamp time.Time) ([]*billingapi.BillingResource, error) {
 	out := []*billingapi.BillingResource{}
 	pbc := pricing.ToAPIBillingContext(bc)
 	pbc.CycleStart = cycleStart
@@ -278,7 +340,7 @@ func (s *Service) billingResources(ctx context.Context, bc pricing.BillingContex
 		if err != nil {
 			return nil, err
 		}
-		if state.Stale(s.d.Now()) {
+		if state.Stale(cycleTimestamp) {
 			for _, b := range out {
 				b.NotEligibleForBilling, b.SkipInterval = true, true
 			}
