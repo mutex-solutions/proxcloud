@@ -802,7 +802,7 @@ func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.
 	}
 	existing := decision.doc
 	if status == "APPROVED" {
-		if h.activation == nil {
+		if h.validationActivation == nil {
 			// Activation unwired (tests) → the original not-implemented posture.
 			httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 				"validation APPROVED activation/notify not implemented"))
@@ -820,11 +820,11 @@ func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.
 			httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("Billing profile with id %s not found. ", bpID)))
 			return
 		}
-		if err := h.activation.Activate(r.Context(), bp, billing.SourceValidation); httpx.WriteError(w, err) {
+		if err := h.validationActivation.Activate(r.Context(), bp, billing.SourceValidation); httpx.WriteError(w, err) {
 			return
 		}
-		if !decision.durableHistory {
-			h.activation.NotifyValidation(r.Context(), bp)
+		if !decision.suppressLegacy {
+			h.validationActivation.NotifyValidation(r.Context(), bp)
 		}
 	}
 	httpx.OK(w, shapeDoc(existing))

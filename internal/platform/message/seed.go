@@ -5,7 +5,7 @@ import (
 	"log/slog"
 )
 
-// seed.go defines the 22 built-in email templates, created if-absent (by key) at startup.
+// seed.go defines the built-in email templates, created if-absent (by key) at startup.
 // Placeholders are Mustache {{var}}.
 
 // SystemTemplates returns the built-in templates.

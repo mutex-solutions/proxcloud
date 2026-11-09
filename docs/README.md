@@ -32,6 +32,11 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Validation approval outbox](validation-approved-outbox.md) — default-OFF approval-only
+  mail decisions for the actual billing-profile validation document; atomic generation,
+  keyless revocation/history, and explicitly separate postcommit activation effects.
+  [Dedicated C4 view](c4-validation-approved-outbox.md).
+
 - [mail-outbox-safety-limits.md](mail-outbox-safety-limits.md) — dormant primary mail
   infrastructure, frozen encrypted envelopes, typed SMTP receipts and UNKNOWN holds;
   no business activation or resend API.

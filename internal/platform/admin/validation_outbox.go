@@ -34,6 +34,13 @@ func (ValidationApprovalRequest) LogValue() slog.Value {
 	return slog.StringValue("[validation preparation redacted]")
 }
 
+// Narrow private test seam; SetActivation wires the existing production service.
+// The decision helper never receives this capability.
+type validationActivationTail interface {
+	Activate(context.Context, *billing.BillingProfile, string) error
+	NotifyValidation(context.Context, *billing.BillingProfile)
+}
+
 type ValidationApprovalOutbox interface {
 	EnqueueValidationTx(context.Context, ValidationApprovalRequest) (mailoutbox.QueueResult, error)
 }
@@ -85,7 +92,7 @@ func readValidationDelivery(doc pgdoc.M) (*validationDelivery, error) {
 type validationStatusDecision struct {
 	doc            pgdoc.M
 	profileID      string
-	durableHistory bool
+	suppressLegacy bool
 }
 
 // decideValidationStatus owns the one short PRIMARY RC transaction. Lock order:
@@ -201,7 +208,7 @@ func (h *Handler) decideValidationStatus(ctx context.Context, id, status string)
 		if tag.RowsAffected() != 1 {
 			return errors.New("validation decision disappeared")
 		}
-		result = validationStatusDecision{doc: doc, profileID: bpID, durableHistory: d != nil}
+		result = validationStatusDecision{doc: doc, profileID: bpID, suppressLegacy: d != nil || h.validationOutbox != nil}
 		return nil
 	})
 	if err != nil {
