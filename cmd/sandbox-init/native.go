@@ -19,6 +19,9 @@ func nativeExecAt(argv []string, marker string) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("native command required")
 	}
+	if err := validateBootEnv(os.Environ()); err != nil {
+		return fmt.Errorf("environment: %w", err)
+	}
 	bin, err := exec.LookPath(argv[0])
 	if err != nil {
 		return err

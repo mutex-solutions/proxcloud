@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/sandboxenv"
 )
 
 // GPURequest asks for Count whole GPUs of one model (GPUs are never shared between sandboxes).
@@ -63,11 +64,7 @@ func SpecFromData(projectID string, data map[string]any) (Spec, error) {
 	return s, nil
 }
 
-var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
-
 const (
-	maxEnvVars      = 64
-	maxEnvValueSize = 4096
 	maxNameLen      = 63
 	maxMetadataKeys = 32
 	maxMetadataKey  = 128
@@ -139,22 +136,8 @@ func (s *Spec) Validate(cfg Config) error {
 	if s.TimeoutSeconds < MinTimeoutSeconds || s.TimeoutSeconds > l.MaxTimeoutSeconds {
 		return fmt.Errorf("timeoutSeconds must be between %d and %d", MinTimeoutSeconds, l.MaxTimeoutSeconds)
 	}
-	if len(s.Env) > maxEnvVars {
-		return fmt.Errorf("at most %d environment variables", maxEnvVars)
-	}
-	for k, v := range s.Env {
-		if !envKeyRe.MatchString(k) {
-			return fmt.Errorf("invalid environment variable name %q", k)
-		}
-		if len(v) > maxEnvValueSize {
-			return fmt.Errorf("environment variable %s is longer than %d bytes", k, maxEnvValueSize)
-		}
-		// sandbox-init drops both from the sandbox's environment (cmd/sandbox-init splitEnv)
-		for _, p := range []string{"PROXCLOUD_", "KUBERNETES_"} {
-			if strings.HasPrefix(k, p) {
-				return fmt.Errorf("environment variable names starting with %s are reserved", p)
-			}
-		}
+	if err := sandboxenv.Validate(s.Env); err != nil {
+		return err
 	}
 	if len(s.Metadata) > maxMetadataKeys {
 		return fmt.Errorf("at most %d metadata keys", maxMetadataKeys)
@@ -236,11 +219,15 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 		"name": "proxcloud-runtime", "hostPath": map[string]any{"path": RuntimeHostDir, "type": "Directory"},
 	}}
 	container["command"] = append([]any{RuntimeMountPath + "/sandbox-init", "-native"}, toAnySlice(cmd)...)
+	// Explicit args also suppress the image CMD in native mode.
+	container["args"] = []any{}
 	if cfg.Envd {
 		// sandbox-init (PID 1) creates the default user, starts envd and POSTs envd's /init over
 		// localhost, so the control-plane routes never have to be reachable from outside the pod.
 		// The template command, if any, becomes envd's start command.
 		container["command"] = []any{RuntimeMountPath + "/sandbox-init"}
+		// Override image CMD: it must never select a PID1 utility such as -snapshot/-ready.
+		container["args"] = []any{"--serve"}
 		start := t.Start()
 		for _, kv := range [][2]string{
 			{"PROXCLOUD_START_CMD", start}, {"PROXCLOUD_READY_CMD", t.ReadyCmd},
@@ -263,7 +250,7 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 		container["startupProbe"] = map[string]any{
 			"exec":             map[string]any{"command": []any{RuntimeMountPath + "/sandbox-init", "-ready"}},
 			"periodSeconds":    int64(1),
-			"failureThreshold": int64(startupBudget(t)),
+			"failureThreshold": int64(cfg.Startup.RuntimeSeconds),
 		}
 		// The same marker afterwards: sandbox-init drops it when envd dies and puts it back only once the restarted
 		// envd has its access token, so sandbox-proxy (Ready pods only) never routes to an envd without one.
@@ -276,6 +263,7 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 	if len(env) > 0 {
 		container["env"] = env
 	}
+	setSandboxIDEnv(container, s.ID)
 	if cfg.pullsFromRegistry(t.Image) {
 		podSpec["imagePullSecrets"] = []any{map[string]any{"name": TemplatePullSecret}}
 	}

@@ -220,13 +220,19 @@ func (s *Service) CreateSandbox(ctx context.Context, spec *Spec) (map[string]any
 		spec.trafficToken = newToken()
 	}
 	cr := BuildCR(s.cfg, s.serviceID, *spec, shutdown)
+	armStartup(cr, s.cfg, spec.TimeoutSeconds, s.now())
 	if err := s.api.ApplyCR(ctx, CRGroup, CRVersion, CRPlural, cr); err != nil {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_ = s.DeleteSandbox(cleanup, spec.ProjectID, spec.ID)
 		return nil, fmt.Errorf("sandbox: create: %w", err)
 	}
 	// The egress policy is owned by the CR, so it needs the CR's uid. Without it the sandbox has
 	// no internet (fail closed); roll the sandbox back rather than hand out a crippled one.
 	if err := s.applyEgress(ctx, spec.ProjectID, spec.ID, spec.Network); err != nil {
-		_ = s.api.DeleteCR(context.WithoutCancel(ctx), CRGroup, CRVersion, CRPlural, NamespaceFor(spec.ProjectID), spec.ID)
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_ = s.api.DeleteCR(cleanup, CRGroup, CRVersion, CRPlural, NamespaceFor(spec.ProjectID), spec.ID)
 		return nil, fmt.Errorf("sandbox: egress policy: %w", err)
 	}
 	return sandboxData(cr), nil
@@ -353,8 +359,27 @@ func (s *Service) GetSandbox(ctx context.Context, projectID, id string) (map[str
 	if err != nil {
 		return nil, err
 	}
-	s.pinRunningSince(ctx, obj)
-	return s.observed(sandboxData(obj)), nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if dig(obj, "metadata", "deletionTimestamp") != nil {
+		return nil, ErrNotFound
+	}
+	if err := s.pinRunningSince(ctx, obj); err != nil {
+		return nil, err
+	}
+	data := s.observed(sandboxData(obj))
+	if data["ready"] != true {
+		pod, err := s.api.GetCore(ctx, "pods", NamespaceFor(projectID), id)
+		if err != nil {
+			return nil, err
+		}
+		data["startup"] = startupProgress(pod)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 // observed stamps a PENDING payload with when it was read (seenPendingAt): the latest moment the sandbox is known not to
@@ -368,28 +393,65 @@ func (s *Service) observed(d map[string]any) map[string]any {
 
 // pinRunningSince records, once, when the sandbox first became Ready (AnnotationRunningSince).
 // The Ready condition's lastTransitionTime moves on every container restart, which customer code
-// can trigger; billing must keep counting from the first start. Best-effort: on a failed patch the
-// next read retries, and sandboxData falls back to the condition.
-func (s *Service) pinRunningSince(ctx context.Context, obj map[string]any) {
+// can trigger; billing must keep counting from the first start. A failed patch is retried by
+// callers: create must not hand out a sandbox whose Ready-based TTL failed to persist.
+func (s *Service) pinRunningSince(ctx context.Context, obj map[string]any) error {
 	if digStr(obj, "metadata", "annotations", AnnotationRunningSince) != "" || !conditionTrue(obj, "Ready") {
-		return
+		return nil
 	}
 	at := conditionTransition(obj, "Ready")
-	if at == "" {
-		return
+	readyAt, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		return fmt.Errorf("sandbox: ready timestamp missing or invalid")
+	}
+	annPatch := map[string]any{AnnotationRunningSince: at}
+	patchMeta := map[string]any{"annotations": annPatch}
+	rv, uid := digStr(obj, "metadata", "resourceVersion"), digStr(obj, "metadata", "uid")
+	if rv == "" || uid == "" {
+		return fmt.Errorf("sandbox: ready identity/version missing")
+	}
+	patchMeta["resourceVersion"], patchMeta["uid"] = rv, uid // CAS on the exact observed CR
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if dig(obj, "metadata", "deletionTimestamp") != nil {
+		return ErrNotFound
+	}
+	patch := map[string]any{"metadata": patchMeta}
+	if digStr(obj, "metadata", "annotations", AnnotationStartupPending) == "true" {
+		seconds, err := strconv.Atoi(digStr(obj, "metadata", "annotations", AnnotationRuntimeSeconds))
+		if err != nil || seconds < 1 || seconds > s.cfg.Limits.MaxTimeoutSeconds {
+			return fmt.Errorf("sandbox: runtime timeout missing")
+		}
+		end := readyAt.Add(time.Duration(seconds) * time.Second)
+		annPatch[AnnotationStartupPending] = nil
+		if digStr(obj, "metadata", "annotations", AnnotationAutoPause) == "true" {
+			annPatch[AnnotationEndAt] = end.UTC().Format(time.RFC3339)
+			end = end.Add(AutoPauseGrace)
+		}
+		patch["spec"] = map[string]any{"shutdownTime": end.UTC().Format(time.RFC3339)}
 	}
 	ns, name := digStr(obj, "metadata", "namespace"), digStr(obj, "metadata", "name")
-	if _, err := s.api.MergePatchCR(ctx, CRGroup, CRVersion, CRPlural, ns, name,
-		map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationRunningSince: at}}}); err != nil {
-		return
+	if _, err := s.api.MergePatchCR(ctx, CRGroup, CRVersion, CRPlural, ns, name, patch); err != nil {
+		return err
 	}
-	meta, _ := obj["metadata"].(map[string]any)
+	meta := obj["metadata"].(map[string]any)
 	ann, _ := meta["annotations"].(map[string]any)
 	if ann == nil {
 		ann = map[string]any{}
 		meta["annotations"] = ann
 	}
-	ann[AnnotationRunningSince] = at
+	for k, v := range annPatch {
+		if v == nil {
+			delete(ann, k)
+		} else {
+			ann[k] = v
+		}
+	}
+	if sp, ok := patch["spec"].(map[string]any); ok {
+		obj["spec"].(map[string]any)["shutdownTime"] = sp["shutdownTime"]
+	}
+	return nil
 }
 
 // DeleteSandbox deletes one sandbox. Already gone = success.
@@ -408,6 +470,12 @@ func (s *Service) DeleteSandbox(ctx context.Context, projectID, id string) error
 func (s *Service) SetTimeout(ctx context.Context, projectID, id string, timeoutSeconds int) (map[string]any, error) {
 	cur, err := s.get(ctx, projectID, id)
 	if err != nil {
+		return nil, err
+	}
+	if !conditionTrue(cur, "Ready") && digStr(cur, "metadata", "annotations", AnnotationStartupPending) == "true" {
+		return nil, ErrNotRunning
+	}
+	if err := s.pinRunningSince(ctx, cur); err != nil {
 		return nil, err
 	}
 	shutdown, err := ShutdownTimeFor(s.cfg, s.now(), timeoutSeconds)
@@ -499,7 +567,9 @@ func (s *Service) ListSandboxes(ctx context.Context, projectID string) (map[stri
 	out := make(map[string]map[string]any, len(items))
 	for _, it := range items {
 		if id := digStr(it, "metadata", "name"); id != "" {
-			s.pinRunningSince(ctx, it)
+			if err := s.pinRunningSince(ctx, it); err != nil {
+				return nil, err
+			}
 			out[id] = s.observed(sandboxData(it))
 		}
 	}
@@ -553,8 +623,12 @@ func sandboxData(obj map[string]any) map[string]any {
 		"gpuCount":        intOf(dig(c, "resources", "limits", ResourceGPU)),
 		"gpuModel":        digStr(obj, "spec", "podTemplate", "spec", "nodeSelector", LabelGPU),
 		"status":          status,
+		"ready":           conditionTrue(obj, "Ready") && digStr(obj, "metadata", "annotations", AnnotationStartupPending) != "true",
 		"shutdownTime":    endOf(obj),
 		"egressBandwidth": digStr(obj, "spec", "podTemplate", "metadata", "annotations", "kubernetes.io/egress-bandwidth"),
+	}
+	if digStr(obj, "metadata", "annotations", AnnotationRuntimeSeconds) != "" {
+		d["runtimeClock"] = "ready"
 	}
 	if created := digStr(obj, "metadata", "creationTimestamp"); created != "" {
 		d["startedAt"] = created
@@ -566,7 +640,7 @@ func sandboxData(obj map[string]any) map[string]any {
 	var envNames []any
 	if env, ok := c["env"].([]any); ok {
 		for _, e := range env {
-			if m, ok := e.(map[string]any); ok && !strings.HasPrefix(str(m["name"]), "PROXCLOUD_") {
+			if m, ok := e.(map[string]any); ok && !strings.HasPrefix(str(m["name"]), "PROXCLOUD_") && str(m["name"]) != "E2B_SANDBOX_ID" {
 				envNames = append(envNames, str(m["name"]))
 			}
 		}
@@ -601,7 +675,7 @@ func (s *Service) DueForAutoPause(ctx context.Context) ([]Due, error) {
 	}
 	var out []Due
 	for _, it := range items {
-		if digStr(it, "metadata", "annotations", AnnotationAutoPause) != "true" || dig(it, "metadata", "deletionTimestamp") != nil {
+		if digStr(it, "metadata", "annotations", AnnotationAutoPause) != "true" || digStr(it, "metadata", "annotations", AnnotationStartupPending) == "true" || dig(it, "metadata", "deletionTimestamp") != nil {
 			continue
 		}
 		end, err := time.Parse(time.RFC3339, digStr(it, "metadata", "annotations", AnnotationEndAt))

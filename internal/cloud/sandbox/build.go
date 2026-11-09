@@ -77,6 +77,7 @@ var (
 	hashRe         = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
 	userRe         = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,31}(:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,31})?$`)
 	modeRe         = regexp.MustCompile(`^[0-7]{3,4}$`)
+	envKeyRe       = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 )
 
 const maxBuildSteps = 200
@@ -869,6 +870,12 @@ func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map
 	}
 	if c := firstContainer(cr); len(c) > 0 {
 		c["image"] = image
+		setSandboxIDEnv(c, id)
+		// Saved CRs predate the explicit PID1 args guard.
+		cmd, _ := c["command"].([]any)
+		if len(cmd) == 1 && str(cmd[0]) == RuntimeMountPath+"/sandbox-init" {
+			c["args"] = []any{"--serve"}
+		}
 	}
 	// The snapshot image is private even when the sandbox started from a public one.
 	if ps, ok := dig(cr, "spec", "podTemplate", "spec").(map[string]any); ok && s.cfg.pullsFromRegistry(image) {
@@ -941,6 +948,7 @@ func CloneSaved(saved map[string]any) (clone map[string]any, id string) {
 			}
 		}
 	}
+	setSandboxIDEnv(firstContainer(clone), id)
 	return clone, id
 }
 

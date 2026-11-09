@@ -33,6 +33,9 @@ func main() {
 	case err != nil:
 		fmt.Fprintln(os.Stderr, "sandbox-init:", err)
 		os.Exit(2)
+	case m == "-prepull":
+		// Pull-only worker: no envd, image ENV interpretation or customer command.
+		return
 	case m == "-snapshot":
 		os.Exit(runSnapshot())
 	case m == "-ready":
@@ -46,6 +49,9 @@ func main() {
 	}
 	log.SetPrefix("sandbox-init: ")
 	log.SetFlags(0)
+	if err := validateBootEnv(os.Environ()); err != nil {
+		log.Fatalf("environment: %v", err)
+	}
 	markBoot() // everything after this point is "changed since boot" for -snapshot
 
 	userEnv, childEnv := splitEnv(os.Environ())
@@ -268,7 +274,16 @@ func markReady() {
 // (the pod drops out of the proxy for good) and fights envd for its port. That happens when a newer portal asks a
 // node whose runtime is older for a mode it does not know, e.g. while node-setup rolls.
 func runMode(args []string, pid int) (string, error) {
+	if len(args) == 1 && args[0] == "--serve" {
+		args = nil
+	}
 	if len(args) > 0 {
+		if len(args) == 1 && args[0] == "-prepull" {
+			if pid != 1 {
+				return "", fmt.Errorf("-prepull requires PID 1")
+			}
+			return "-prepull", nil
+		}
 		if args[0] == "-native" {
 			if pid != 1 || len(args) < 2 {
 				return "", fmt.Errorf("-native requires PID 1 and a command")
@@ -276,6 +291,9 @@ func runMode(args []string, pid int) (string, error) {
 			return args[0], nil
 		}
 		if len(args) == 1 && (args[0] == "-snapshot" || args[0] == "-ready") {
+			if pid == 1 {
+				return "", fmt.Errorf("utility modes cannot run as PID 1")
+			}
 			return args[0], nil
 		}
 		return "", fmt.Errorf("unknown arguments %q", args)
