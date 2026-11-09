@@ -53,6 +53,8 @@ type frozen struct {
 	Disposition string    `json:"disposition"`
 }
 type prepared struct {
+	kind                    string
+	version                 int
 	event, recipient, state string
 	expiry                  time.Time
 	plaintext               []byte
@@ -206,7 +208,7 @@ func prepare(r Reminder) ([]prepared, error) {
 			Manifest    json.RawMessage `json:"manifest"`
 			DraftDigest string          `json:"draftDigest"`
 		}{f, manifest, draftDigest})
-		out = append(out, prepared{event: event, recipient: hash(to.Key), state: state, expiry: expiry, plaintext: canonical})
+		out = append(out, prepared{kind: Kind, version: Version, event: event, recipient: hash(to.Key), state: state, expiry: expiry, plaintext: canonical})
 	}
 	return out, nil
 }

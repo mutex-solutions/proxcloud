@@ -27,6 +27,22 @@ CREATE TABLE IF NOT EXISTS mail_outbox (
  reason text NOT NULL DEFAULT '' CHECK(reason IN ('','expired','blocked_config','suppressed','no_recipient','relay_accepted','network','smtp_temporary','smtp_permanent','configuration','tls_required','cancelled','receipt_lost','sealed_payload','dispatch_lease_expired','legacy_untyped')),
  UNIQUE(event_key,recipient_key)
 );
+-- Controlled upgrade of the original, automatically named single-kind CHECK.
+-- Ensure holds the schema advisory lock and commits this together with all DDL.
+DO $$ DECLARE old_check text; BEGIN
+ SELECT pg_get_expr(conbin,conrelid) INTO old_check FROM pg_constraint
+ WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_kind_check';
+ IF old_check IS NOT NULL THEN
+  IF old_check <> '(kind = ''savings-reminder/v1''::text)' THEN
+   RAISE EXCEPTION 'mail outbox unexpected family constraint';
+  END IF;
+  ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_kind_check;
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='mail_outbox'::regclass AND conname='mail_outbox_family_v1') THEN
+  ALTER TABLE mail_outbox ADD CONSTRAINT mail_outbox_family_v1
+   CHECK(kind IN ('savings-reminder/v1','project-invite/v1') AND version=1);
+ END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS mail_outbox_claim ON mail_outbox(next_at,id) WHERE state IN ('pending','claimed');
 CREATE INDEX IF NOT EXISTS mail_outbox_intent_expiry ON mail_outbox(lease_until) WHERE state='DISPATCHING';
 CREATE TABLE IF NOT EXISTS mail_outbox_attempt (

@@ -396,7 +396,19 @@ func run() error {
 	if err := inviteRepo.EnsureIndexes(ctx); err != nil {
 		log.Error("projectInvite TTL index", "err", err)
 	}
+	inviteRepo.SetInviteCanceler(mailOutbox) // keyless and producer-independent
 	inviteH := projectinvite.NewHandler(inviteRepo, users, projectSvc, orgRepo, auditSvc, mailSvc, cfg.Self.UIBaseURL)
+	if cfg.Mail.ProjectInviteOutboxEnabled {
+		if blobErr != nil {
+			return fmt.Errorf("project invite payload key unavailable")
+		}
+		if err := prepareProjectInviteDependencies(ctx, pg); err != nil {
+			return err
+		}
+		inviteH.SetInviteOutbox(projectInviteOutboxAdapter{store: mailOutbox, service: mailSvc, message: msgRepo,
+			config: mail.DurableConfigFromStore(integrationStore, enc)})
+		log.Info("durable project invite enqueue enabled; SMTP dispatch remains disabled")
+	}
 	// adminH is created below, after esSvc (it needs the externalService loader for cloud-admin reads).
 	// SSE real-time stream (StreamingController + SseService). The in-memory pool + handler;
 	// This pool is process-local SSE delivery, not durable queue fan-out.
