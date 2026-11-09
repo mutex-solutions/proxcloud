@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,44 @@ func TestBuildObjects(t *testing.T) {
 		if strings.Contains(string(cb), "push-secret") {
 			t.Errorf("init container %s mounts the push secret", digStr(c.(map[string]any), "name"))
 		}
+	}
+}
+
+// Both flags matter: an OCI layout can contain a Docker manifest, and crane's tar
+// loader reconstructs Docker schema 2 even when kaniko built an OCI image.
+func TestBuildObjectsOCIOutput(t *testing.T) {
+	for _, base := range []string{"scratch", "python:3.12", "registry.example.org/base@sha256:" + strings.Repeat("a", 64)} {
+		t.Run(base, func(t *testing.T) {
+			res, err := RenderDockerfile(base, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			image := testRegistry + "/p1/t1:b1"
+			_, pod := BuildObjects(Config{}, BuildRequest{
+				ProjectID: "p1", TemplateID: "t1", BuildID: "b1", Base: base, Image: image,
+				Result: res, CPU: 1, MemoryGiB: 1, FetchURL: func(string) string { return "" },
+			})
+			kaniko := firstInitContainer(pod, "kaniko")
+			args := kaniko["args"].([]any)
+			for _, want := range []any{"--no-push", "--image-format=oci", "--oci-layout-path=/out/image", "--destination=" + image} {
+				if !slices.Contains(args, want) {
+					t.Errorf("kaniko args lack %s: %v", want, args)
+				}
+			}
+			for _, arg := range args {
+				if strings.HasPrefix(str(arg), "--tar-path") || strings.HasPrefix(str(arg), "--tarPath") {
+					t.Errorf("tar output would lose OCI manifest types on crane load: %v", args)
+				}
+			}
+			push := dig(pod, "spec", "containers").([]any)[0].(map[string]any)
+			wantPush := []any{"push", "/out/image", image, "--image-refs", "/dev/termination-log"}
+			if !slices.Equal(push["args"].([]any), wantPush) {
+				t.Errorf("push must load the OCI directory and report its digest: %v", push["args"])
+			}
+			if kaniko["image"] != kanikoImage || push["image"] != craneImage {
+				t.Error("the output format fix must keep the pinned build tools")
+			}
+		})
 	}
 }
 

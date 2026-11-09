@@ -662,6 +662,23 @@ Public IPs from the Proxmox pool and project templates are not billing units yet
 
 ## C4.5 Sandboxes: the usage path and the release gates
 
+### Custom template build image handoff
+
+**Why:** the controlled SDK COPY/RUN diagnostic finished Kaniko successfully but its separate push failed on the
+final Docker-schema-2 manifest PUT (Zot 415 / `MANIFEST_INVALID`). `BuildObjects` now forces `--image-format=oci`
+and writes `--oci-layout-path=/out/image`; the unchanged pinned crane pushes that directory and reports its digest
+through `/dev/termination-log`. Both choices matter: a layout can contain Docker manifests, while crane's tar loader
+reconstructs Docker schema 2. Exact pinned Kaniko was checked locally without network/credentials: the explicit
+format yields OCI manifest, config and layer types, unlike layout-only output. SDK post-fix acceptance is a separate
+rollout check, not implied by this local test.
+
+`fetch -> base -> kaniko -> push` ordering, project quotas/deadline and gVisor are unchanged. User-code Kaniko still
+has no registry credentials and reads the pinned base cache read-only; only base/push have their existing scoped
+credentials. No tool-image version, snapshot path or registry acceptance policy changes. Build status and digest
+parsing remain unchanged. [Diagnosis and evidence boundary](../../managed-sandbox.md#77-sdk-custom-build-format-diagnosis-2026-11-09).
+
+### Usage and release gates
+
 | Symbol | Location | Role |
 |---|---|---|
 | `Handler.sandboxBillingGate` | `internal/platform/project/cloud_sandbox.go` | `refuseNewUsage` (deleting or DISABLED, so an operator's disable and a billing suspension alike), then the billing profile not SUSPENDED |
