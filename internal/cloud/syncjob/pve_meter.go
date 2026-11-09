@@ -93,16 +93,21 @@ func (j *Job) RunPVEState(ctx context.Context) (int, error) {
 }
 
 func (j *Job) samplePVE(ctx context.Context, es *externalservice.ExternalService, projects []project.Project) int {
+	observation := j.beginIncidents(ctx, es)  // DB epoch BEFORE any external GET
+	defer j.finishIncidents(ctx, observation) // unknown/error paths are observations too
 	// Read the clock first: Reconcile treats it as the snapshot time, so a portal write that lands
 	// while the page is in flight wins over the older page.
 	now := j.now()
 	ps, err := j.pveFor(es)
 	if err != nil {
 		j.log.Error("syncjob: build pve client for state sample", "serviceId", es.ID, "err", err)
+		incidentUnknown(observation)
 		return 0
 	}
+	incidentNodes(observation, ps, ctx)
 	page, err := ps.C.ClusterResources(ctx, "vm")
 	if err != nil {
+		incidentUnknown(observation)
 		j.meterFailed(ctx, es, now, err)
 		return 0
 	}
@@ -117,6 +122,7 @@ func (j *Job) samplePVE(ctx context.Context, es *externalservice.ExternalService
 		cached, err := j.cloud.FindByServiceProjectAndType(ctx, es.ID, p.ID, cloud.TypeServer)
 		if err != nil {
 			j.log.Error("syncjob: read cached servers", "project", p.ID, "serviceId", es.ID, "err", err)
+			incidentUnknown(observation)
 			continue
 		}
 		byExt := make(map[string]*cloud.CloudResource, len(cached))
@@ -124,8 +130,9 @@ func (j *Job) samplePVE(ctx context.Context, es *externalservice.ExternalService
 			byExt[cached[k].ExternalID] = &cached[k]
 		}
 		proved := true
+		serverProvider := ps.SampledServerProvider(region, p.ID, page, byExt)
 		for _, prov := range []providers.Provider{
-			ps.SampledServerProvider(region, p.ID, page, byExt),
+			serverProvider,
 			ps.SampledImageProvider(region, p.ID, page),
 		} {
 			st, err := providers.Reconcile(ctx, prov, j.cloud, es.ID, now)
@@ -137,7 +144,16 @@ func (j *Job) samplePVE(ctx context.Context, es *externalservice.ExternalService
 			count += st.Created + st.Updated + st.Deleted
 		}
 		if !proved {
+			incidentUnknown(observation)
 			continue
+		}
+		if observation != nil {
+			refs, err := j.cloud.FindByServiceProjectAndType(ctx, es.ID, p.ID, cloud.TypeServer)
+			if err != nil {
+				incidentUnknown(observation)
+			} else {
+				incidentServers(observation, serverProvider, ctx, refs)
+			}
 		}
 		if err := j.releaseOrphanIPs(ctx, ps, es.ID, p.ID, page, byExt, now); err != nil {
 			// A conservative IP hold is not a stale VM state sample. Keep its

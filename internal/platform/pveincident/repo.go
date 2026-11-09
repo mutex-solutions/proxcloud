@@ -144,9 +144,21 @@ func (r *Repo) Observe(ctx context.Context, x SnapshotResult) (ObserveResult, er
 			seen[stateID(c, o.kind, o.subject)] = true
 		}
 		// Absence is unknown, never an implicit healthy observation or deletion.
+		missingSubject := false
 		for _, s := range existing {
 			if !seen[s.ID] {
 				observations = append(observations, observation{s.Kind, s.Subject, "subject_unobserved", 0, Untrusted})
+				if s.Kind == KindNode || s.Kind == KindProtection {
+					missingSubject = true
+				}
+			}
+		}
+		if missingSubject {
+			for i := range observations {
+				o := &observations[i]
+				if o.kind == KindVisibility && o.health > 0 {
+					o.health, o.quality, o.reason = 0, Untrusted, "subject_unobserved"
+				}
 			}
 		}
 		for _, o := range observations {
@@ -227,13 +239,13 @@ func updateAffected(s *state, x SnapshotResult) {
 	sort.Slice(s.Affected, func(i, j int) bool { return s.Affected[i].ServerID < s.Affected[j].ServerID })
 }
 func (r *Repo) record(ctx context.Context, s state, action string, now time.Time) error {
-	e := Event{ID: fmt.Sprintf("%s.%d.%d", s.ID, s.Episode, s.Version), IncidentID: s.ID, ProviderID: s.ProviderID, Episode: s.Episode, Version: s.Version, Action: action, ObservedAt: now, Reason: s.Reason, Affected: s.Affected}
+	e := Event{ID: fmt.Sprintf("%s.%d.%d", s.ID, s.Episode, s.Version), IncidentID: s.ID, ProviderID: s.ProviderID, Episode: s.Episode, Version: s.Version, Action: action, ObservedAt: now, Reason: s.Reason, Affected: s.Affected, EvidenceQuality: s.EvidenceQuality, AffectedComplete: s.AffectedComplete}
 	if _, err := r.events.InsertOne(ctx, e); err != nil {
 		return err
 	}
 	ev := audit.SystemEvent()
 	ev.Action, ev.ResourceType, ev.ResourceID, ev.Outcome = action, "PVE_INCIDENT", s.ID, audit.OutcomeSuccess
-	ev.ResourceMetadata = map[string]any{"providerId": s.ProviderID, "region": s.Region, "kind": s.Kind, "subject": s.Subject, "episode": s.Episode, "eventVersion": s.Version, "observedAt": now, "reason": s.Reason, "affectedSelector": s.ID}
+	ev.ResourceMetadata = map[string]any{"providerId": s.ProviderID, "region": s.Region, "kind": s.Kind, "subject": s.Subject, "episode": s.Episode, "eventVersion": s.Version, "observedAt": now, "reason": s.Reason, "affectedSelector": s.ID, "evidenceQuality": s.EvidenceQuality, "affectedComplete": s.AffectedComplete}
 	return r.audit.Log(ctx, ev) // synchronous: any failure rolls back state + event + capture consumption
 }
 

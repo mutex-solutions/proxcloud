@@ -8,6 +8,28 @@ invariants the code holds. Four sequence diagrams follow.
 
 Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
+## Operator PVE incident observations
+
+**Implemented, DB/audit only:** the state sampler issues one provider capture before
+GETs and records even untrusted results. No SMTP dispatcher, recipient integration,
+cloud remediation, cache mutation or billing-policy change is part of the observer.
+
+| Symbol | Observation invariant |
+|---|---|
+| `pveincident.BeginCapture`, `Observe` | PRIMARY DB clock, provider-wide monotonic epoch and 60s admission; 2min TTL, three bad observations spanning 2min to open, two healthy spanning 60s to recover. Unknown/gaps reset streaks, never imply recovery. |
+| `pve.ObserveNodes` | Same product token, root/node Sys.Audit plus full ACL bracket and equal `/nodes`/cluster membership census. Explicit offline is permitted evidence; absence/403/partial/malformed/unreachable is not proof of DOWN. Independent of VM visibility. |
+| `ServerSyncProvider.ObserveVerified` | Only an already verified current pool/config UUID may export exact platform server/project identities. Fresh GET-only protection reads are bracketed by unchanged inventory proof; no StampProtection/ReconcileProtection or guessed cached ownership. |
+| `pveincident.classify`, transition | Fixed safe reason codes, honest unknown/malformed facts, initial replication syncing distinct from degraded. Missing previously known subjects also freeze aggregate visibility recovery. |
+| Incident repository | Version-CAS state + append-only episode/event + synchronous `audit.Log` commit together; duplicate/stale epochs and parallel pods emit no duplicate transitions. Event records freeze evidence quality/completeness at transition time. Audit app timestamp is not the observation clock. |
+| Admin incident reads | Existing `admin:service:read` AND `admin:cloud_resource:read` before existence lookup; provider-bound cursor, cap100, project filter before pagination. Affected DTO contains only platform server/project IDs, no tenant endpoint or foreign-resource details. |
+
+Public provider connection identity fences generations without retaining token secrets.
+The sampler only covers enabled project scopes, so affected IDs are last positively
+verified references and completeness is conservatively false. Historical unknown
+subjects are retained, not silently retired by omission. Existing METERING_STALE
+and 30min billing pause semantics are untouched. Shared-HA reserve/affinity remains
+separate; fixture tests never power off a real node or call external mail.
+
 ## Primary durable native billing
 
 **Why:** original billing cutoff, money mutation, retry ownership and accepted work must survive process crashes without relying on a broker ACK or lagging replica.

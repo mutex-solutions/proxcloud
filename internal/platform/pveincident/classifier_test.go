@@ -119,6 +119,50 @@ func TestReducerConsecutiveDebounceUnknownRecovery(t *testing.T) {
 		t.Fatal(s, action)
 	}
 }
+func TestVisibilityCannotRecoverFromMalformedVerifiedFacts(t *testing.T) {
+	now := time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*SnapshotResult)
+	}{
+		{"node malformed", func(x *SnapshotResult) { x.Nodes = []NodeFact{{"node1", "invalid"}} }},
+		{"node unknown", func(x *SnapshotResult) { x.Nodes = []NodeFact{{"node1", NodeUnknown}} }},
+		{"future sync", func(x *SnapshotResult) {
+			x.Protection = []ProtectionFact{{ServerID: "row", InstanceID: "uuid", Enabled: true, Mode: "replicated", LastSync: now.Add(time.Hour)}}
+		}},
+		{"negative failures", func(x *SnapshotResult) {
+			x.Protection = []ProtectionFact{{ServerID: "row", InstanceID: "uuid", Enabled: true, Mode: "replicated", FailCount: -1}}
+		}},
+		{"bad mode", func(x *SnapshotResult) {
+			x.Protection = []ProtectionFact{{ServerID: "row", InstanceID: "uuid", Enabled: true, Mode: "invalid"}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := state{Incident: Incident{State: StateOpen, Episode: 1}}
+			for epoch := int64(1); epoch <= 2; epoch++ {
+				x := trusted()
+				tc.mutate(&x)
+				o := findObservation(t, x, KindVisibility, now)
+				if o.health == 1 {
+					t.Fatal("malformed fact became healthy visibility", o)
+				}
+				var action string
+				s, action = advance(s, o, epoch, now.Add(time.Duration(epoch)*time.Minute))
+				if action != "" || s.State != StateOpen {
+					t.Fatal("warning falsely recovered", s, action)
+				}
+			}
+			for epoch := int64(3); epoch <= 4; epoch++ {
+				var action string
+				s, action = advance(s, findObservation(t, trusted(), KindVisibility, now), epoch, now.Add(time.Duration(epoch)*time.Minute))
+				if (action == "RECOVERED") != (epoch == 4) {
+					t.Fatal(s, action)
+				}
+			}
+		})
+	}
+}
+
 func TestReducerGapAndMalformedIdentity(t *testing.T) {
 	now := time.Now()
 	s := state{Incident: Incident{State: StatePending}}

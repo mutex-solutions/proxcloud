@@ -44,17 +44,7 @@ func classify(x SnapshotResult, now time.Time) ([]observation, error) {
 	} else if tr.Provider != Verified {
 		provider.health, provider.reason = 0, "provider_visibility_unknown"
 	}
-	visibility := observation{KindVisibility, "provider", "visibility_verified", 1, Verified}
-	for _, t := range []Trust{tr.Provider, tr.Nodes, tr.VMs, tr.Protection} {
-		if t == Untrusted || t == Malformed {
-			visibility.health, visibility.reason, visibility.quality = -1, "visibility_untrusted", t
-			break
-		}
-		if t == Unreachable {
-			visibility.health, visibility.reason, visibility.quality = 0, "visibility_unreachable", t
-		}
-	}
-	out := []observation{provider, visibility}
+	out := []observation{provider}
 	seen := map[string]bool{}
 	for _, n := range x.Nodes {
 		if !validID(n.NodeID) || seen["node:"+n.NodeID] {
@@ -119,6 +109,23 @@ func classify(x SnapshotResult, now time.Time) ([]observation, error) {
 		}
 		seen[l.ServerID] = true
 	}
+	// Aggregate after validating facts: a VERIFIED source label cannot recover a
+	// visibility warning while its actual node/protection facts are malformed/unknown.
+	visibility := observation{KindVisibility, "provider", "visibility_verified", 1, Verified}
+	qualities := []Trust{tr.Provider, tr.Nodes, tr.VMs, tr.Protection}
+	for _, o := range out {
+		qualities = append(qualities, o.quality)
+	}
+	for _, quality := range qualities {
+		if quality == Untrusted || quality == Malformed {
+			visibility.health, visibility.reason, visibility.quality = -1, "visibility_untrusted", quality
+			break
+		}
+		if quality == Unreachable {
+			visibility.health, visibility.reason, visibility.quality = 0, "visibility_unreachable", quality
+		}
+	}
+	out = append(out, visibility)
 	sort.Slice(out, func(i, j int) bool { return out[i].kind+out[i].subject < out[j].kind+out[j].subject })
 	return out, nil
 }

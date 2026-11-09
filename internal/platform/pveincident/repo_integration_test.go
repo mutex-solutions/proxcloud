@@ -265,6 +265,52 @@ func TestIncidentPGAuditFailureRollsBackAndEpochFreshness(t *testing.T) {
 	}
 }
 
+func TestIncidentPGMissingKnownSubjectFreezesVisibilityRecovery(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	for _, tick := range []int64{0, 60, 120} {
+		f.tick.Store(tick)
+		x := f.snapshot(t, Offline)
+		x.Trust.VMs = Untrusted
+		observe(t, f.repo, x)
+	}
+	if incident(t, f, KindNode).State != StateOpen || incident(t, f, KindVisibility).State != StateOpen {
+		t.Fatal("fixtures did not open")
+	}
+	for _, tick := range []int64{180, 240} {
+		f.tick.Store(tick)
+		x := f.snapshot(t, Online)
+		x.Nodes = nil
+		observe(t, f.repo, x)
+	}
+	if incident(t, f, KindNode).State != StateOpen || incident(t, f, KindVisibility).State != StateOpen {
+		t.Fatal("missing known node falsely recovered aggregate visibility")
+	}
+	for _, tick := range []int64{300, 360} {
+		f.tick.Store(tick)
+		observe(t, f.repo, f.snapshot(t, Online))
+	}
+	if incident(t, f, KindNode).State != StateRecovered || incident(t, f, KindVisibility).State != StateRecovered {
+		t.Fatal("proper healthy facts did not recover once")
+	}
+	var events []Event
+	_ = f.db.C("pveIncidentEvent").Find(ctx, nil, &events)
+	if len(events) != 4 {
+		t.Fatal("duplicate/missing transitions", events)
+	}
+	for _, ev := range events {
+		if ev.Action == "OPEN" && ev.AffectedComplete {
+			t.Fatal("old transition lost incomplete evidence", ev)
+		}
+		if ev.Action == "RECOVERED" && !ev.AffectedComplete {
+			t.Fatal("fresh complete recovery not recorded", ev)
+		}
+		if ev.EvidenceQuality == "" {
+			t.Fatal("transition evidence quality missing", ev)
+		}
+	}
+}
+
 func TestIncidentPGRealClockAndNoExternalOrBillingWrites(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

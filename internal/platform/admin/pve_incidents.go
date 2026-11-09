@@ -12,9 +12,11 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
-// PVEIncidentRoutes is intentionally NOT mounted yet. The inventory adapter and
-// startup Ensure must be explicitly wired after its verified snapshot contract lands.
-// Mount under /service/{id}/incidents; nil reader fails closed. No mutation routes.
+// SetPVEIncidents enables only the operator DB read view after startup Ensure.
+func (h *Handler) SetPVEIncidents(repo *pveincident.Repo) { h.pveIncidents = h.PVEIncidentRoutes(repo) }
+
+// PVEIncidentRoutes mounts under /service/{id}/incidents; nil reader fails closed.
+// There are no mutation routes, notifier, cloud reads or client-facing route.
 func (h *Handler) PVEIncidentRoutes(repo *pveincident.Repo) chi.Router {
 	router := chi.NewRouter()
 	serve := func(affected bool) http.HandlerFunc {

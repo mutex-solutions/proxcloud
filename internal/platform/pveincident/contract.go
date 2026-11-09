@@ -88,15 +88,17 @@ type Incident struct {
 	RecoveredAt      *time.Time `json:"recoveredAt,omitempty"`
 }
 type Event struct {
-	ID         string    `json:"id"`
-	IncidentID string    `json:"incidentId"`
-	ProviderID string    `json:"providerId"`
-	Episode    int64     `json:"episode"`
-	Version    int64     `json:"version"`
-	Action     string    `json:"action"`
-	ObservedAt time.Time `json:"observedAt"`
-	Reason     string    `json:"reason"`
-	Affected   []Link    `json:"affected"`
+	ID               string    `json:"id"`
+	IncidentID       string    `json:"incidentId"`
+	ProviderID       string    `json:"providerId"`
+	Episode          int64     `json:"episode"`
+	Version          int64     `json:"version"`
+	Action           string    `json:"action"`
+	ObservedAt       time.Time `json:"observedAt"`
+	Reason           string    `json:"reason"`
+	Affected         []Link    `json:"affected"`
+	EvidenceQuality  Trust     `json:"evidenceQuality"`
+	AffectedComplete bool      `json:"affectedComplete"`
 }
 type Affected struct {
 	ServerID  string `json:"serverId"`
