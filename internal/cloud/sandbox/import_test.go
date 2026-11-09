@@ -27,7 +27,7 @@ func importFixture() (Config, *fakeAPI, ImportRequest) {
 func TestImportWorkerRequiresOperatorDigestAndHost(t *testing.T) {
 	cfg, f, _ := importFixture()
 	s := NewWithAPI(f, cfg, "svc")
-	for _, image := range []string{"", "registry.example.test/library/proxcloud-sandbox-import:latest", "evil.test/library/proxcloud-sandbox-import@" + importDigest, "registry.example.test.evil/library/proxcloud-sandbox-import@" + importDigest, "registry.example.test/library/stratos-sandbox-import@" + importDigest, "registry.example.test/x/../library/proxcloud-sandbox-import@" + importDigest} {
+	for _, image := range []string{"", "registry.example.test/library/proxcloud-sandbox-import:latest", "evil.test/library/proxcloud-sandbox-import@" + importDigest, "registry.example.test.evil/library/proxcloud-sandbox-import@" + importDigest, "registry.example.test/library/legacy-sandbox-import@" + importDigest, "registry.example.test/x/../library/proxcloud-sandbox-import@" + importDigest} {
 		f.secrets[PrepullNamespace+"/sandbox-import-worker"] = map[string][]byte{"image": []byte(image)}
 		if _, err := s.ImportWorker(context.Background()); err == nil {
 			t.Errorf("accepted worker %q", image)
