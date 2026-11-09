@@ -8,6 +8,31 @@ invariants the code holds. Four sequence diagrams follow.
 
 Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
+## Installer PVE registration connection boundary
+
+**What / why:** stage 60 previously rendered only the primary `apiUrl` and a
+single node's leaf fingerprint. The provider already supports HA `apiUrls` and
+cluster-CA `caCert`; discarding or failing to reconcile these settings can strand
+an installed site on one node or bypass the intended trust policy. This is a
+bounded registration fix, not a new PVE transport or a site/management-HA rewrite.
+
+| Component / symbol | Boundary and invariant |
+|---|---|
+| [Stage 60](../../../installer/playbooks/60-register.yml), `registered_pve_provider` | Read providers before rendering; require at most one matching name and a valid `CLOUD`/`proxmox` row. Revalidate the post-create read. A duplicate/colliding name cannot repurpose another provider's config. |
+| [Filter `pve_connection`](../../../installer/filter_plugins/proxcloud.py) | Site `portal_api_urls` maps to `config.apiUrls`, public `cluster_ca` PEM to canonical `config.caCert`. Null/omitted preserves stored endpoints/trust; explicit `[]` clears only the URL list. No endpoint discovery or network validation. |
+| Optional CA / legacy pin | Explicit CA is bounded certificate-only PEM, parsed offline before provider writes and sets `insecureTls: false` because the existing transport checks that bypass first. Fresh legacy registration still requires its pinned fingerprint; installed system-CA/leaf/CA settings are not silently changed. Never defaults to insecure true. |
+| Stage-60 PUT / `applyServiceConnectionBody` | Compare the effective installer-owned overlay, send only its top-level config keys; the API merges them. No secret in PUT, no token rotation, no replay of the entire provider document. Other operator fields remain untouched; equal sequential retries skip the write. |
+| Secret/log boundary | Connection selection, validation and config writes use `no_log`; validation errors do not include supplied URLs or PEM. Only the fresh creation reads the existing generated platform-token file. Tests use synthetic inputs and a public disposable CA, never a site's generated directory. |
+| Existing `ExternalService.PVEConfig` → `pve.TLSConfigFor` | `apiUrl` + `apiUrls` feed failover; `caCert` feeds `CACert`. CA chain verification intentionally skips hostname checking for PVE IPs/VIPs; insecure mode still has priority. These runtime semantics are unchanged. |
+
+The new inputs default to null; no existing site must adopt the new CA input to
+keep working. Sequential no-op/create-retry/connection-only updates, foreign-name
+refusal and log redaction are checked by the offline Ansible payload matrix in
+[test_registration.py](../../../installer/tests/test_registration.py), also run by
+the normal filter test entry point. This is not evidence of live TLS/failover,
+clean install, disaster restore, concurrent installer CAS or management HA.
+[Operator migration contract](../../install.md#proxmox-endpoints-and-cluster-ca-stage-60).
+
 ## Operator PVE incident observations
 
 **Implemented, DB/audit only:** the state sampler issues one provider capture before

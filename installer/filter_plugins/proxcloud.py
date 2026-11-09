@@ -67,6 +67,84 @@ def storage_classes(fio, site, existing):
     return out
 
 
+def registered_pve_provider(providers, name, required=False):
+    """Choose only one well-formed CLOUD/proxmox row. A name collision must not reconfigure another provider."""
+    if not isinstance(providers, list) or any(not isinstance(row, dict) for row in providers):
+        raise ValueError("invalid provider list; registration stopped")
+    matches = [row for row in providers if row.get("name") == name]
+    if not matches and not required:
+        return {}
+    if len(matches) != 1:
+        raise ValueError("expected one uniquely named Proxmox provider; registration stopped")
+    row = matches[0]
+    provider_id, config = row.get("id"), row.get("config")
+    if (row.get("type") != "CLOUD" or not isinstance(config, dict) or config.get("provider") != "proxmox"
+            or not isinstance(provider_id, str) or not provider_id
+            or any(c.isspace() or c in "/?#" for c in provider_id)):
+        raise ValueError("existing provider name is not a valid CLOUD/proxmox row; registration stopped")
+    return row
+
+
+def pve_connection(site, api_url, existing=None, fingerprint=""):
+    """Stage 60's connection overlay, not a replacement provider document. Null optional site values keep
+    the console's endpoints/trust. A new CA explicitly selects verification, never the insecure bypass.
+    Validation is local only; it neither discovers endpoints nor reads credentials/certificates from disk."""
+    import copy
+    import re
+    import ssl
+    from urllib.parse import urlsplit
+
+    fresh = existing is None
+    existing = existing or {}
+    out = {"apiUrl": api_url}
+    for key in ("apiUrls", "caCert", "fingerprint", "insecureTls"):
+        if key in existing:
+            out[key] = copy.deepcopy(existing[key])
+
+    urls = site.get("portal_api_urls")
+    if urls is not None:
+        if not isinstance(urls, list):
+            raise ValueError("pve.portal_api_urls must be a list of portal-reachable HTTP(S) URLs")
+        for u in urls:
+            try:
+                parsed = urlsplit(u) if isinstance(u, str) else None
+                valid = (parsed is not None and parsed.scheme in ("http", "https") and parsed.hostname
+                         and parsed.port != 0 and parsed.username is None and parsed.password is None
+                         and "?" not in u and "#" not in u
+                         and parsed.path.rstrip("/") in ("", "/api2/json") and not any(c.isspace() for c in u))
+            except ValueError:
+                valid = False
+            if not valid:
+                # Do not echo a URL: a mistaken userinfo/query could contain a credential.
+                raise ValueError("pve.portal_api_urls entries must be HTTP(S) origins (optional /api2/json), without credentials, query or fragment")
+        out["apiUrls"] = list(urls)  # order and every endpoint stay; [] deliberately clears only this list
+
+    ca = site.get("cluster_ca")
+    if ca is not None:
+        if not isinstance(ca, str) or not ca.strip() or len(ca.encode()) > 65536:
+            raise ValueError("pve.cluster_ca must be a non-empty PEM certificate bundle of at most 64 KiB; omit it to keep installed trust")
+        # Accept certificates only, never private keys or ignored text around a valid certificate.
+        if not re.fullmatch(r"(?:\s*-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----\s*)+", ca):
+            raise ValueError("pve.cluster_ca must contain only PEM CERTIFICATE blocks")
+        try:
+            ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=ca)
+        except (ssl.SSLError, ValueError):
+            raise ValueError("pve.cluster_ca contains an invalid PEM certificate") from None
+        out["caCert"] = ca  # canonical provider field, consumed by ExternalService.PVEConfig().CACert
+        out["insecureTls"] = False  # the transport checks this BEFORE caCert; an old true must not bypass it
+
+    pin = site.get("fingerprint")
+    if not pin and ca is None and fresh:
+        pin = fingerprint  # fresh legacy site: stage 00's pinned leaf, not an invented trust mode
+    if pin:
+        if not isinstance(pin, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", pin.strip().replace(":", "")):
+            raise ValueError("pve.fingerprint must be a SHA-256 certificate fingerprint")
+        out["fingerprint"] = pin.strip()
+    elif ca is None and fresh:
+        raise ValueError("no pinned PVE fingerprint: run preflight, or supply pve.cluster_ca")
+    return out
+
+
 def fio_class(p99_ms, iops, performance_ms=1, standard_ms=5, capacity_iops=2000):
     """Suggested class from a benchmark (plan S19). NFS randread can be flattered by the NAS ARC, so
     latency decides first and IOPS can only downgrade."""
@@ -366,6 +444,8 @@ class FilterModule:
             "pc_kept_profiles": kept_profiles,
             "pc_kept_default_profile": kept_default_profile,
             "pc_storage_classes": storage_classes,
+            "pc_pve_connection": pve_connection,
+            "pc_registered_pve_provider": registered_pve_provider,
             "pc_fio_class": fio_class,
             "pc_template_nodes": template_nodes,
             "pc_acl_missing": pve_acl_missing,

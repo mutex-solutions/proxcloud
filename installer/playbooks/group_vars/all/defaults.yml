@@ -28,6 +28,8 @@ pc_defaults:
   pve:
     api_url: ""                  # as the installer reaches it
     portal_api_url: ""           # as the portal (mgmt cluster) reaches it; default: api_url
+    portal_api_urls: null        # config.apiUrls: portal-reachable failover URLs; null keeps installed, [] clears
+    cluster_ca: null             # config.caCert: public PEM bundle; null keeps installed trust, never a private key
     min_version: "9.2"
     fingerprint: ""              # default: pinned on first contact (generated/pve-fingerprint)
     pool_prefix: pc-             # one pool per project; must not match the system pool
