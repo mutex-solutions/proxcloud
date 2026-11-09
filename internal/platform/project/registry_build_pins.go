@@ -374,7 +374,9 @@ func (h *Handler) finishPinnedBuild(ctx context.Context, c *e2bCaller, t *sandbo
 	op := b.Registry
 	if op.State == buildDispatching {
 		err = h.buildRegistryWrite(context.WithoutCancel(ctx), t, b.BuildID, op.Operation, buildDispatching, func(ft *sandboxTemplateDoc, fb *templateBuild) error {
-			fb.Logs = logs
+			if fb.Diagnostics == nil {
+				fb.Logs = logs
+			}
 			fb.Status, fb.Reason, fb.Step = st.Status, st.Reason, st.Step
 			if st.Status == sandbox.BuildReady {
 				if !digestRe.MatchString(st.Digest) {
@@ -490,7 +492,7 @@ func (h *Handler) recoverPinnedBuild(ctx context.Context, c *e2bCaller, t *sandb
 		return
 	}
 	if st.Pod.Phase == "Succeeded" || st.Pod.Phase == "Failed" {
-		_ = h.finishPinnedBuild(ctx, c, t, b, st, c.ss.BuildLogs(ctx, b.BuildID, maxStoredLogLines))
+		_ = h.finishPinnedBuild(ctx, c, t, b, st, b.Logs)
 		return
 	}
 	if err = h.observeBuildPins(ctx, store, t, b, st); err != nil {
@@ -660,9 +662,19 @@ func (h *Handler) retireTemplatePins(ctx context.Context, ss *sandbox.Service, t
 // Runtime-ready and template lifecycle use only these identities, never a pin
 // receipt's mere existence as proof that an external operation completed.
 func buildPinActive(b templateBuild) bool {
-	return b.Registry != nil && b.Registry.State != buildPinFinished && b.Registry.State != buildPinFailed
+	return importPinActive(b) || b.Registry != nil && b.Registry.State != buildPinFinished && b.Registry.State != buildPinFailed
 }
 func buildPinSDKStatus(b *templateBuild) string {
+	if b.Import != nil && b.Import.Registry != nil {
+		switch b.Import.Registry.State {
+		case buildPreparing, buildPinned:
+			return sandbox.BuildWaiting
+		case buildDispatching, buildTerminalObserved:
+			return sandbox.BuildBuilding
+		case buildPinUnknown, buildPinFailed:
+			return sandbox.BuildError
+		}
+	}
 	if b.Registry != nil {
 		switch b.Registry.State {
 		case buildPreparing, buildPinned:

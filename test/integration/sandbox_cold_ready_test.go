@@ -47,6 +47,9 @@ func (c *coldReadyCluster) GetCR(ctx context.Context, g, v, p, ns, name string) 
 		if c.mode == "expired-ready" {
 			c.end = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
 			spec["shutdownTime"] = c.end
+			c.sbxCluster.mu.Lock()
+			c.sbxCluster.crs[ns+"/"+name]["spec"].(map[string]any)["shutdownTime"] = c.end
+			c.sbxCluster.mu.Unlock()
 		}
 		if c.mode == "expired-ready" {
 			obj["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "lastTransitionTime": time.Now().UTC().Format(time.RFC3339)}}}
@@ -79,7 +82,9 @@ func TestE2BCustomColdReadyCleanup(t *testing.T) {
 			defer cancel()
 			cluster := &coldReadyCluster{sbxCluster: f.cluster, mode: mode, cancel: cancel}
 			f.h.SetSandbox(func(es *externalservice.ExternalService) (*sandbox.Service, error) {
-				return sandbox.NewWithAPI(cluster, es.SandboxConfig(), es.ID), nil
+				cfg := es.SandboxConfig()
+				cfg.Startup = sandbox.StartupConfig{TotalSeconds: 1, SchedulingSeconds: 1, PullSeconds: 1, RuntimeSeconds: 1}
+				return sandbox.NewWithAPI(cluster, cfg, es.ID), nil
 			})
 			mustInsert(t, f.db, "sandbox_templates", pgdoc.M{
 				"_id": "cold-build", "projectId": "pa", "name": "cold-build", "cpu": 1, "memoryGiB": 1,
@@ -97,8 +102,8 @@ func TestE2BCustomColdReadyCleanup(t *testing.T) {
 				t.Fatal(err)
 			}
 			if mode == "expired-ready" {
-				if row == nil || row.Data["status"] != sandbox.StatusDeleted || row.Data["endedAt"] != cluster.end {
-					t.Fatalf("expired running row must end at original lifetime, not cleanup wall time: %+v", row)
+				if row != nil && row.Data["runningSince"] != nil && row.Data["runningSince"] != "" {
+					t.Fatalf("expired provisional startup must not become billable: %+v", row)
 				}
 			}
 			if ctx.Err() != nil && !errors.Is(ctx.Err(), context.Canceled) {

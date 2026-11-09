@@ -684,8 +684,8 @@ func TestSandboxNativeDeleteDuringPause(t *testing.T) {
 	}
 }
 
-// A named snapshot taken again keeps one image (the previous build leaves the record, so the prune takes its image),
-// and its row bills that image's size.
+// Repeated successful snapshots retain their history, but two build records naming
+// the same physical immutable image must charge that stored digest only once.
 func TestE2BSnapshotRetakenBillsKeptImage(t *testing.T) {
 	f, _, keyA, _ := newPauseFixture(t)
 	ctx := context.Background()
@@ -712,13 +712,13 @@ func TestE2BSnapshotRetakenBillsKeptImage(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("template: %v %v", found, err)
 			}
-			if len(tpl.Builds) == 1 && tpl.Builds[0].Image != "" || time.Now().After(deadline) {
+			if len(tpl.Builds) == i+1 && tpl.Builds[len(tpl.Builds)-1].Image != "" || time.Now().After(deadline) {
 				break
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
-	if len(tpl.Builds) != 1 || tpl.Builds[0].Image == "" || tpl.Builds[0].SizeBytes <= 0 {
+	if len(tpl.Builds) != 2 || tpl.Builds[0].Image == "" || tpl.Builds[0].Image != tpl.Builds[1].Image || tpl.Builds[0].SizeBytes <= 0 {
 		t.Fatalf("builds kept: %+v", tpl.Builds)
 	}
 	rows := f.snapshotRows("pa")
@@ -738,6 +738,16 @@ func TestE2BSnapshotRetakenBillsKeptImage(t *testing.T) {
 func TestE2BPauseOnASlowSite(t *testing.T) {
 	f, pc, keyA, _ := newPauseFixture(t)
 	ctx := context.Background()
+	// This scenario deliberately retains three concurrent assembly reservations:
+	// a retryable fork, a named snapshot and a pause. The new shared worker cap
+	// applies to snapshots too; model an operator location allowing that workload.
+	if _, err := f.db.C("externalService").SetByID(ctx, "sbx", pgdoc.M{"config.sandbox.build": pgdoc.M{"maxConcurrent": 3}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := f.es.Get(ctx, "sbx")
+	if err != nil || configured.SandboxConfig().WithDefaults().Build.MaxConcurrent != 3 {
+		t.Fatalf("slow-site fixture concurrency policy not applied: %+v %v", configured, err)
+	}
 	defer func(j, w time.Duration) { project.PauseJoinWait, project.SnapshotRequestWait = j, w }(project.PauseJoinWait, project.SnapshotRequestWait)
 	project.PauseJoinWait, project.SnapshotRequestWait = time.Second, time.Second
 	pc.pmu.Lock()

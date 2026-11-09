@@ -77,6 +77,7 @@ var (
 	hashRe         = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
 	userRe         = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,31}(:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,31})?$`)
 	modeRe         = regexp.MustCompile(`^[0-7]{3,4}$`)
+	envKeyRe       = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 )
 
 const maxBuildSteps = 200
@@ -233,6 +234,7 @@ type BuildRequest struct {
 	Result     *BuildResult
 	CPU        int
 	MemoryGiB  int
+	DiskGiB    int // total pod ephemeral-storage budget, independent of runtime size
 	// FetchURL returns where the fetch init container downloads a COPY context (a proxcloud URL
 	// carrying a per-build token).
 	FetchURL func(hash string) string
@@ -307,8 +309,10 @@ func BuildObjects(cfg Config, req BuildRequest) (cm, pod map[string]any) {
 		"metadata": map[string]any{"name": name, "namespace": BuildNamespace, "labels": labels},
 		"data":     map[string]any{"Dockerfile": req.Result.Dockerfile, "fetch.list": fetch.String()},
 	}
-	res := map[string]any{"cpu": strconv.Itoa(max(req.CPU, 1)), "memory": fmt.Sprintf("%dGi", max(req.MemoryGiB, 1)), "ephemeral-storage": buildDiskLimit}
-	small := map[string]any{"cpu": "100m", "memory": "128Mi"}
+	r, _ := cfg.Build.Resources(BuildResources{CPU: req.CPU, MemoryGiB: req.MemoryGiB, DiskGiB: req.DiskGiB})
+	disk := fmt.Sprintf("%dGi", r.DiskGiB)
+	res := map[string]any{"cpu": strconv.Itoa(r.CPU), "memory": fmt.Sprintf("%dGi", r.MemoryGiB), "ephemeral-storage": disk}
+	small := map[string]any{"cpu": "100m", "memory": "128Mi", "ephemeral-storage": disk}
 	fetchScript := `set -eu
 cp /config/Dockerfile /workspace/Dockerfile
 while read -r hash url; do
@@ -337,9 +341,9 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 	volumes := []any{
 		registryTrustVolume,
 		map[string]any{"name": "config", "configMap": map[string]any{"name": name}},
-		map[string]any{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
-		map[string]any{"name": "out", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
-		map[string]any{"name": "base-cache", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
+		map[string]any{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": disk}},
+		map[string]any{"name": "out", "emptyDir": map[string]any{"sizeLimit": disk}},
+		map[string]any{"name": "base-cache", "emptyDir": map[string]any{"sizeLimit": disk}},
 		map[string]any{"name": "pinned", "emptyDir": map[string]any{"sizeLimit": "1Mi"}},
 		map[string]any{"name": "push-secret", "secret": map[string]any{
 			"secretName": BuildSecretFor(req.ProjectID),
@@ -359,6 +363,7 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 		"metadata": map[string]any{"name": name, "namespace": BuildNamespace, "labels": labels},
 		"spec": map[string]any{
 			"runtimeClassName":              cfg.RuntimeClass,
+			"nodeSelector":                  cfg.Build.NodeSelector,
 			"restartPolicy":                 "Never",
 			"automountServiceAccountToken":  false,
 			"enableServiceLinks":            false,
@@ -367,7 +372,7 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 			"initContainers": []any{
 				map[string]any{
 					"name": "fetch", "image": fetchImage, "command": []any{"sh", "-c", fetchScript},
-					"resources":    map[string]any{"requests": small, "limits": small},
+					"resources":    map[string]any{"requests": withDiskRequest(small), "limits": small},
 					"volumeMounts": []any{mount("config", "/config"), mount("workspace", "/workspace")},
 				},
 				map[string]any{
@@ -377,7 +382,7 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 						map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"},
 						registryTrustEnv,
 					},
-					"resources":    map[string]any{"requests": small, "limits": map[string]any{"cpu": "1", "memory": "512Mi"}},
+					"resources":    map[string]any{"requests": withDiskRequest(small), "limits": map[string]any{"cpu": "1", "memory": "512Mi", "ephemeral-storage": disk}},
 					"volumeMounts": baseMounts,
 				},
 				map[string]any{
@@ -403,7 +408,7 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 						"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
 						"capabilities": map[string]any{"drop": []any{"ALL"}},
 					},
-					"resources":    map[string]any{"requests": small, "limits": small},
+					"resources":    map[string]any{"requests": withDiskRequest(small), "limits": small},
 					"volumeMounts": []any{mount("out", "/out")},
 				},
 			},
@@ -411,7 +416,7 @@ crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
 				"name": "push", "image": craneImage,
 				"args":         []any{"push", "/out/image", req.Image, "--image-refs", "/dev/termination-log"},
 				"env":          []any{map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}, registryTrustEnv},
-				"resources":    map[string]any{"requests": small, "limits": map[string]any{"cpu": "1", "memory": "512Mi"}},
+				"resources":    map[string]any{"requests": withDiskRequest(small), "limits": map[string]any{"cpu": "1", "memory": "512Mi", "ephemeral-storage": disk}},
 				"volumeMounts": []any{ro(mount("out", "/out")), mount("push-secret", "/docker"), mount("registry-ca", "/registry-ca")},
 			}},
 			"volumes": volumes,
@@ -431,6 +436,11 @@ func mount(name, at string) map[string]any { return map[string]any{"name": name,
 // registry's account sync derives the project's accounts from it and writes the build Secret the pod mounts, so a
 // project's first build waits up to one sync pass (30 s) for that volume.
 func (s *Service) StartBuild(ctx context.Context, req BuildRequest) error {
+	r, err := s.cfg.Build.Resources(BuildResources{CPU: req.CPU, MemoryGiB: req.MemoryGiB, DiskGiB: req.DiskGiB})
+	if err != nil {
+		return err
+	}
+	req.CPU, req.MemoryGiB, req.DiskGiB = r.CPU, r.MemoryGiB, r.DiskGiB
 	if s.requireBuildPins || req.Pins != nil {
 		op, nonce, err := req.Pins.Consume(req.ProjectID, req.Base, req.Image)
 		if err != nil {
@@ -455,7 +465,6 @@ func (s *Service) StartBuild(ctx context.Context, req BuildRequest) error {
 	// for the volume, and the Secret goes with the pod (proxcloud cannot delete or read secrets).
 	// If anything fails here, the pod is removed and nothing is left behind.
 	fail := func(err error) error {
-		_ = s.DeleteBuild(context.WithoutCancel(ctx), req.BuildID)
 		return fmt.Errorf("sandbox: build credentials: %w", err)
 	}
 	live, err := s.api.GetCore(ctx, "pods", BuildNamespace, buildName(req.BuildID))
@@ -500,6 +509,9 @@ type BuildState struct {
 	StartedAt  string
 	FinishedAt string
 	Pod        registrypins.BuildPodEvidence
+	PodReason  string
+	PodMessage string
+	Stages     []BuildStage
 }
 
 // BuildPodState reads the build pod. A missing pod is reported as (nil, nil).
@@ -515,9 +527,12 @@ func (s *Service) BuildPodState(ctx context.Context, projectID, buildID string) 
 }
 
 func buildStateOf(pod map[string]any) *BuildState {
-	st := &BuildState{StartedAt: digStr(pod, "status", "startTime"), Pod: registrypins.BuildPodEvidence{
-		UID: digStr(pod, "metadata", "uid"), Operation: digStr(pod, "metadata", "annotations", AnnotationBuildOperation), Nonce: digStr(pod, "metadata", "annotations", AnnotationBuildNonce), BaseRef: digStr(pod, "metadata", "annotations", AnnotationBuildBase), DestinationRef: digStr(pod, "metadata", "annotations", AnnotationBuildDest), Phase: digStr(pod, "status", "phase"),
-	}}
+	st := &BuildState{Pod: registrypins.BuildPodEvidence{UID: digStr(pod, "metadata", "uid"), Operation: digStr(pod, "metadata", "annotations", AnnotationBuildOperation), Nonce: digStr(pod, "metadata", "annotations", AnnotationBuildNonce), BaseRef: digStr(pod, "metadata", "annotations", AnnotationBuildBase), DestinationRef: digStr(pod, "metadata", "annotations", AnnotationBuildDest), Phase: digStr(pod, "status", "phase")}, StartedAt: digStr(pod, "status", "startTime"), PodReason: digStr(pod, "status", "reason"), PodMessage: buildPodMessage(pod), Stages: buildStages(pod)}
+	for _, key := range []string{"initContainerStatuses", "containerStatuses"} {
+		for _, cs := range containerStatuses(pod, key) {
+			st.FinishedAt = max(st.FinishedAt, digStr(cs, "state", "terminated", "finishedAt"))
+		}
+	}
 	switch digStr(pod, "status", "phase") {
 	case "Pending":
 		st.Status = BuildWaiting
@@ -539,20 +554,20 @@ func buildStateOf(pod map[string]any) *BuildState {
 		}
 	default: // Failed, Unknown
 		st.Status = BuildError
-		st.Reason = digStr(pod, "status", "message")
-		for _, key := range []string{"initContainerStatuses", "containerStatuses"} {
-			for _, cs := range containerStatuses(pod, key) {
-				if t, ok := dig(cs, "state", "terminated").(map[string]any); ok {
-					st.FinishedAt = max(st.FinishedAt, str(t["finishedAt"]))
-					if intOf(t["exitCode"]) != 0 && st.Step == "" {
-						st.Step = str(cs["name"])
-						st.Reason = fmt.Sprintf("%s failed (exit %d)", stepLabel(st.Step), intOf(t["exitCode"]))
-					}
-				}
+		for _, stage := range st.Stages {
+			if stage.ExitCode != nil && *stage.ExitCode != 0 && st.Step == "" {
+				st.Step, st.Reason = stage.Phase, stageFailure(stage)
 			}
 		}
-		if digStr(pod, "status", "reason") == "DeadlineExceeded" {
-			st.Reason = fmt.Sprintf("the build did not finish within %s", BuildTimeout)
+		switch st.PodReason {
+		case "DeadlineExceeded":
+			st.Reason = fmt.Sprintf("the build did not finish within %s (DeadlineExceeded)", BuildTimeout)
+		case "Evicted":
+			st.Reason = "the build was evicted (Evicted): " + st.PodMessage
+		default:
+			if st.PodReason != "" {
+				st.Reason = strings.TrimSpace(st.Reason + " (" + st.PodReason + ")")
+			}
 		}
 		if st.Reason == "" {
 			st.Reason = "the build failed"
@@ -611,7 +626,7 @@ func (s *Service) BuildLogs(ctx context.Context, buildID string, maxLines int) [
 		}
 		for _, l := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
 			if l != "" {
-				lines = append(lines, l)
+				lines = append(lines, "["+c+"] "+RedactBuildText(l))
 			}
 		}
 	}
@@ -640,10 +655,14 @@ func buildData(pod map[string]any) map[string]any {
 		"template":  "build:" + digStr(pod, "metadata", "labels", LabelTemplateID),
 		"cpu":       intOf(dig(k, "resources", "limits", "cpu")),
 		"memoryGiB": memGiB(dig(k, "resources", "limits", "memory")),
+		"diskGiB":   memGiB(dig(k, "resources", "limits", "ephemeral-storage")),
 		"status":    StatusPending,
 	}
-	if st.StartedAt != "" {
-		d["runningSince"] = st.StartedAt
+	// Pod startTime is set before image pull; pending pulls are not billable. The earliest
+	// actual container start covers fetch/base/kaniko/push under the reserved build size.
+	started := buildRunningSince(pod)
+	if started != "" {
+		d["runningSince"] = started
 		d["status"] = StatusRunning
 	}
 	if st.Status == BuildReady || st.Status == BuildError {
@@ -651,12 +670,29 @@ func buildData(pod map[string]any) map[string]any {
 		if end == "" {
 			end = time.Now().UTC().Format(time.RFC3339)
 		}
-		if st.StartedAt != "" {
+		if started != "" {
 			d["status"] = StatusDeleted
 			d["endedAt"] = end
 		}
 	}
 	return d
+}
+
+func buildRunningSince(pod map[string]any) string {
+	first := ""
+	for _, key := range []string{"initContainerStatuses", "containerStatuses"} {
+		for _, cs := range containerStatuses(pod, key) {
+			for _, state := range []string{"state", "lastState"} {
+				for _, phase := range []string{"running", "terminated"} {
+					at := digStr(cs, state, phase, "startedAt")
+					if at != "" && (first == "" || at < first) {
+						first = at
+					}
+				}
+			}
+		}
+	}
+	return first
 }
 
 func firstInitContainer(pod map[string]any, name string) map[string]any {
@@ -669,13 +705,9 @@ func firstInitContainer(pod map[string]any, name string) map[string]any {
 	return map[string]any{}
 }
 
-// finishedBuildTTL is how long a finished build pod is kept (its logs; the status endpoint copies
-// them into the template earlier when it is polled).
-const finishedBuildTTL = 10 * time.Minute
-
-// ListBuilds returns the project's build pods as cache payloads keyed by pod name. Pods finished
-// more than finishedBuildTTL ago are deleted here; they are still returned this time, so the cache
-// row is written as DELETED with its end before the pod vanishes (then it lingers and archives).
+// ListBuilds returns build pods as cache payloads, including finished builds for billing.
+// It must not delete them: only the platform, after a durable diagnostics archive (or
+// explicit capture-loss record), can safely clean up a build pod.
 func (s *Service) ListBuilds(ctx context.Context, projectID string) (map[string]map[string]any, error) {
 	pods, err := s.api.ListPods(ctx, BuildNamespace, LabelManagedBy+"="+ManagedByValue+","+LabelProject+"="+projectID)
 	if err != nil {
@@ -683,10 +715,32 @@ func (s *Service) ListBuilds(ctx context.Context, projectID string) (map[string]
 	}
 	out := map[string]map[string]any{}
 	for _, p := range pods {
+		if digStr(p, "metadata", "labels", "proxcloud.io/sandbox-import") == "true" {
+			continue // imports have no Kaniko compute usage; finalized by the template job
+		}
 		d := buildData(p)
 		out[digStr(p, "metadata", "name")] = d
-		if end, err := time.Parse(time.RFC3339, str(d["endedAt"])); err == nil && s.now().Sub(end) > finishedBuildTTL {
-			_ = s.DeleteBuild(ctx, digStr(p, "metadata", "labels", LabelBuild))
+	}
+	return out, nil
+}
+
+// ActiveBuildWorkers is admission-only, not billing. Imports and snapshot assembly
+// count alongside Kaniko workers, including pods not yet assigned a phase.
+func (s *Service) ActiveBuildWorkers(ctx context.Context, projectID string) (map[string]bool, error) {
+	pods, err := s.api.ListPods(ctx, BuildNamespace, LabelManagedBy+"="+ManagedByValue+","+LabelProject+"="+projectID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, pod := range pods {
+		if digStr(pod, "metadata", "labels", LabelManagedBy) != ManagedByValue || digStr(pod, "metadata", "labels", LabelProject) != projectID {
+			continue
+		}
+		phase := digStr(pod, "status", "phase")
+		if phase != "Succeeded" && phase != "Failed" {
+			if id := digStr(pod, "metadata", "labels", LabelBuild); id != "" {
+				out[id] = true
+			}
 		}
 	}
 	return out, nil
@@ -697,6 +751,9 @@ func (s *Service) BuildData(ctx context.Context, buildID string) (map[string]any
 	pod, err := s.api.GetCore(ctx, "pods", BuildNamespace, buildName(buildID))
 	if err != nil || pod == nil {
 		return nil, err
+	}
+	if digStr(pod, "metadata", "labels", "proxcloud.io/sandbox-import") == "true" {
+		return nil, nil
 	}
 	return buildData(pod), nil
 }
@@ -715,7 +772,11 @@ func hasDotDot(p string) bool {
 
 // withDiskRequest is r with the ephemeral-storage request a build container makes (buildDiskRequest).
 func withDiskRequest(r map[string]any) map[string]any {
-	out := map[string]any{"ephemeral-storage": buildDiskRequest}
+	disk := buildDiskRequest
+	if n := memGiB(r["ephemeral-storage"]); n > 0 && n < 2 {
+		disk = fmt.Sprintf("%dGi", n)
+	}
+	out := map[string]any{"ephemeral-storage": disk}
 	for k, v := range r {
 		if k != "ephemeral-storage" {
 			out[k] = v
@@ -869,13 +930,26 @@ func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map
 	}
 	if c := firstContainer(cr); len(c) > 0 {
 		c["image"] = image
+		setSandboxIDEnv(c, id)
+		// Saved CRs predate the explicit PID1 args guard.
+		cmd, _ := c["command"].([]any)
+		if len(cmd) == 1 && str(cmd[0]) == RuntimeMountPath+"/sandbox-init" {
+			c["args"] = []any{"--serve"}
+		}
 	}
 	// The snapshot image is private even when the sandbox started from a public one.
 	if ps, ok := dig(cr, "spec", "podTemplate", "spec").(map[string]any); ok && s.cfg.pullsFromRegistry(image) {
 		ps["imagePullSecrets"] = []any{map[string]any{"name": TemplatePullSecret}}
 	}
 	if spec, ok := cr["spec"].(map[string]any); ok {
-		spec["shutdownTime"] = shutdown.UTC().Format(time.RFC3339)
+		if digStr(cr, "metadata", "annotations", AnnotationStartupPending) == "true" {
+			armed, err := time.Parse(time.RFC3339, str(spec["shutdownTime"]))
+			if err != nil || !s.now().Before(armed) {
+				return context.DeadlineExceeded
+			}
+		} else {
+			spec["shutdownTime"] = shutdown.UTC().Format(time.RFC3339)
+		}
 	}
 	if err := s.api.ApplyCR(ctx, CRGroup, CRVersion, CRPlural, cr); err != nil {
 		return fmt.Errorf("sandbox: resume: %w", err)
@@ -941,6 +1015,7 @@ func CloneSaved(saved map[string]any) (clone map[string]any, id string) {
 			}
 		}
 	}
+	setSandboxIDEnv(firstContainer(clone), id)
 	return clone, id
 }
 
@@ -977,3 +1052,24 @@ func ImageOfSaved(saved map[string]any) string { return str(firstContainer(saved
 
 // PayloadOf is the cache payload of a saved (or any) Sandbox CR.
 func PayloadOf(cr map[string]any) map[string]any { return sandboxData(cr) }
+
+// ownsBuild independently fences each object before cleanup/diagnostics.
+func (s *Service) ownsBuild(obj map[string]any, projectID, buildID string) bool {
+	return digStr(obj, "metadata", "labels", LabelManagedBy) == ManagedByValue && digStr(obj, "metadata", "labels", LabelProject) == projectID && digStr(obj, "metadata", "labels", LabelBuild) == buildID
+}
+
+// CancelBuild intentionally refuses nonterminal/unknown workers. Only confirmed terminal
+// evidence plus independent object ownership permits deletion; deadline expiry is not evidence.
+func (s *Service) CancelBuild(ctx context.Context, projectID, buildID string) error {
+	st, err := s.BuildPodState(ctx, projectID, buildID)
+	if err != nil {
+		return err
+	}
+	if st == nil {
+		return fmt.Errorf("sandbox: build state is unknown; retain operation pins")
+	}
+	if st.Pod.Phase != "Succeeded" && st.Pod.Phase != "Failed" {
+		return fmt.Errorf("sandbox: build worker is still active; retain operation pins")
+	}
+	return s.CleanupBuild(ctx, projectID, buildID)
+}
