@@ -311,6 +311,7 @@ func run() error {
 	// Sandboxes — enables sandbox provisioning and the SANDBOX surface (Sandbox CRs on the provider's sandbox cluster).
 	// The release gates are wired once the sync job exists, below.
 	projectH.SetSandbox(sandboxServiceFor)
+	projectH.SetE2BConsoleURL(cfg.Self.UIBaseURL)
 	// Sandbox API keys (SHA-256 only) for the E2B-compatible API at /e2b.
 	projectH.SetSandboxKeys(pg.C("sandbox_api_keys"))
 	// Custom templates and their builds (the E2B v3 template API).

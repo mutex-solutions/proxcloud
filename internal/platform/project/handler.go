@@ -55,6 +55,7 @@ type Handler struct {
 	// GET /download/{token}); apiBaseURL builds the token URL. Set via SetDownloads (nil-safe).
 	downloads  *cloud.DownloadRepo
 	apiBaseURL string
+	consoleURL string
 	// customMenu feeds admin Custom Menu items into the /init menu (nil-safe;
 	// merged into the menu build). Set via SetCustomMenu.
 	customMenu *CustomMenuReader
@@ -288,6 +289,13 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/project/{id}/sandbox-api-keys", h.sandboxKeyCreate)
 	r.Delete("/project/{id}/sandbox-api-keys/{keyId}", h.sandboxKeyDelete)
 	r.Get("/project/{id}/sandbox-templates", h.consoleTemplateList)
+	r.Get("/project/{id}/sandbox-templates/capabilities", h.consoleTemplateCapabilities)
+	r.Post("/project/{id}/sandbox-templates/import", h.consoleTemplateImport)
+	r.Post("/project/{id}/sandbox-templates/{templateId}/aliases", h.consoleTemplateAliases)
+	r.Delete("/project/{id}/sandbox-templates/{templateId}/aliases", h.consoleTemplateAliases)
+	r.Get("/project/{id}/sandbox-templates/{templateId}/prepare", h.consoleTemplatePrepare)
+	r.Post("/project/{id}/sandbox-templates/{templateId}/prepare", h.consoleTemplatePrepare)
+	r.Post("/project/{id}/sandbox-templates/{templateId}/builds", h.consoleTemplateBuild)
 	r.Get("/project/{id}/sandbox-templates/{templateId}/builds/{buildId}/logs", h.consoleTemplateLogs)
 	r.Delete("/project/{id}/sandbox-templates/{templateId}", h.consoleTemplateDelete)
 	// GET /{id}/public-networks → the provider's router:external networks filtered by the
