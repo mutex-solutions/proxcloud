@@ -273,6 +273,12 @@ func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *
 // sandbox that ran keeps its row as DELETED with its end, which the charge bills up to and the next read archives;
 // one that never ran is archived at once.
 func (h *Handler) sandboxDelete(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) error {
+	return h.sandboxDeleteAt(ctx, es, proj, cr, time.Time{})
+}
+
+// latestEnd is only the original server-generated lifetime of a failed cold create.
+// Cleanup still happens now; only its financial end is capped, never its physical delete.
+func (h *Handler) sandboxDeleteAt(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, latestEnd time.Time) error {
 	if h.sandboxFor == nil {
 		return fmt.Errorf("sandboxes are not configured")
 	}
@@ -288,13 +294,17 @@ func (h *Handler) sandboxDelete(ctx context.Context, es *externalservice.Externa
 	if err := ss.DeleteSandbox(ctx, proj.ID, cr.ExternalID); err != nil {
 		return err
 	}
+	end := now
+	if !latestEnd.IsZero() && latestEnd.Before(end) {
+		end = latestEnd
+	}
 	if rs, _ := cr.Data["runningSince"].(string); rs != "" {
-		cr.Data = sandbox.MarkDeleted(cr.Data, now)
+		cr.Data = sandbox.MarkDeleted(cr.Data, end)
 		cr.UpdatedAt = &now
 		_, err := h.cloud.Update(ctx, cr)
 		return err
 	}
-	return h.cloud.DeleteAndArchive(ctx, cr, now)
+	return h.cloud.DeleteAndArchive(ctx, cr, end)
 }
 
 // refreshSandboxRow reads the sandbox before its row ends, so billing sees RUNNING + runningSince and not the PENDING
