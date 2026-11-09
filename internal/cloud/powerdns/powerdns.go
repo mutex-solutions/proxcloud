@@ -17,8 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/net/publicsuffix"
-
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 )
 
@@ -180,19 +178,35 @@ func (s *Service) checkOverlap(ctx context.Context, projectID, name string) erro
 // one that overlaps what the project does not own. A public suffix is refused because holding co.uk would lock everyone
 // else out of every name below it.
 func (s *Service) Create(ctx context.Context, projectID, name string) (*Zone, error) {
-	name = NormalizeZone(name)
-	if !zoneNameRe.MatchString(name) {
-		return nil, zonef("%s is not a valid zone name", name)
+	return s.create(ctx, projectID, name, nil)
+}
+
+// CreateWithGate runs the platform's durable authorization AFTER all live
+// preflight I/O and immediately BEFORE POST. The low-level client knows account
+// isolation, not user permissions; tenant HTTP/MCP creation must use this gate.
+func (s *Service) CreateWithGate(ctx context.Context, projectID, name string, authorize func() error) (*Zone, error) {
+	if authorize == nil {
+		return nil, fmt.Errorf("powerdns: create authorization gate required")
 	}
-	bare := strings.TrimSuffix(name, ".")
-	if suffix, _ := publicsuffix.PublicSuffix(bare); suffix == bare {
-		return nil, zonef("%s is a public suffix: use a domain below it", name)
-	}
-	if err := s.checkOverlap(ctx, projectID, name); err != nil {
+	return s.create(ctx, projectID, name, authorize)
+}
+
+func (s *Service) create(ctx context.Context, projectID, name string, authorize func() error) (*Zone, error) {
+	var err error
+	name, err = CanonicalZone(name)
+	if err != nil {
 		return nil, err
 	}
+	if err := s.CheckAvailable(ctx, projectID, name); err != nil {
+		return nil, err
+	}
+	if authorize != nil {
+		if err := authorize(); err != nil {
+			return nil, err
+		}
+	}
 	var z Zone
-	err := s.do(ctx, http.MethodPost, "/zones", map[string]any{
+	err = s.do(ctx, http.MethodPost, "/zones", map[string]any{
 		"name": name, "kind": "Native", "account": accountPrefix + projectID, "nameservers": s.Nameservers,
 	}, &z)
 	var ae *apiError

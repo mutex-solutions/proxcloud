@@ -545,6 +545,16 @@ func sameLiveRule(a, b FirewallRule) bool { return sameRule(a, b) && a.Enable ==
 // made before it. PVE adds a rule on top, and every step fails closed: DROPs go in before anything
 // is removed, and an ACCEPT is only ever replaced by adding it after the old one is gone.
 func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string, blocked, sandbox []string, allow ...string) error {
+	return s.reconcileIsolation(ctx, projectID, pool, blocked, sandbox, nil, allow...)
+}
+
+// ReconcileIsolationInventory is the sync path: use the verified cached network
+// payload, not a second permission-filtered SDN list that could erase ACCEPTs.
+func (s *Service) ReconcileIsolationInventory(ctx context.Context, projectID, pool string, blocked, sandbox, cidrs []string, allow ...string) error {
+	return s.reconcileIsolation(ctx, projectID, pool, blocked, sandbox, &cidrs, allow...)
+}
+
+func (s *Service) reconcileIsolation(ctx context.Context, projectID, pool string, blocked, sandbox []string, verifiedCIDRs *[]string, allow ...string) error {
 	want, owner, poolNet, complete, err := s.isolationWant(ctx, pool, blocked, sandbox, allow)
 	if err != nil {
 		return err
@@ -567,6 +577,11 @@ func (s *Service) ReconcileIsolation(ctx context.Context, projectID, pool string
 		}
 	}
 
+	if verifiedCIDRs != nil {
+		cidrs := slices.Clone(*verifiedCIDRs)
+		slices.Sort(cidrs)
+		return s.setProjectIsolation(ctx, projectID, cidrs)
+	}
 	vnets, err := s.C.ListSDNVnets(ctx)
 	if err != nil {
 		return err
@@ -883,7 +898,7 @@ func (p *NetworkSyncProvider) CompareKeys() []string { return []string{} }
 func (p *NetworkSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, error) {
 	vnets, err := p.svc.C.ListSDNVnets(ctx)
 	if err != nil {
-		return nil, err
+		return nil, networkInventoryError("", "cannot list vnets", err)
 	}
 	now := nowUTC()
 	var out []cloud.CloudResource
@@ -892,12 +907,16 @@ func (p *NetworkSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 		if !ok || pid != p.projectID {
 			continue
 		}
+		detail, err := p.subnetDetail(ctx, v.Vnet)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, cloud.CloudResource{
 			ExternalID: v.Vnet,
 			ProjectID:  p.projectID,
 			Region:     p.region,
 			Type:       cloud.TypeNetwork,
-			Data:       NetworkData(v.Vnet, name, v.Zone, p.subnetDetail(ctx, v.Vnet)),
+			Data:       NetworkData(v.Vnet, name, v.Zone, detail),
 			Info:       &cloud.Info{UpdatedAt: &now},
 		})
 	}
@@ -906,12 +925,12 @@ func (p *NetworkSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 
 // subnetDetail reads a vnet's subnets into the data.network sub-shape. The top-level
 // cidr/gateway/snat describe the first subnet, subnetDetails all of them.
-func (p *NetworkSyncProvider) subnetDetail(ctx context.Context, vnet string) map[string]any {
-	det := map[string]any{}
-	if subs, err := p.svc.C.ListSDNSubnets(ctx, vnet); err == nil {
-		det = SubnetDetail(subs)
+func (p *NetworkSyncProvider) subnetDetail(ctx context.Context, vnet string) (map[string]any, error) {
+	subs, err := p.svc.C.ListSDNSubnets(ctx, vnet)
+	if err != nil {
+		return nil, networkInventoryError(vnet, "cannot read subnets", err)
 	}
-	return det
+	return SubnetDetail(subs), nil
 }
 
 // SubnetDetail renders a vnet's subnets for data.network.

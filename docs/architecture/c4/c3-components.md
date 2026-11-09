@@ -64,6 +64,30 @@ flowchart LR
 The Keycloak Admin API client also backs the operator console's Create user and Delete user
 (`internal/platform/admin/user.go`): same service account, which already holds `manage-users`.
 
+### DNS ownership boundary (new-zone path)
+
+```mermaid
+flowchart LR
+  client["Console / client MCP"] --> lifecycle["project.dns_ownership<br/>challenge / status / verify / cancel"]
+  lifecycle --> pg["PostgreSQL dns_ownership<br/>scoped hashes, TTL, quota, atomic state"]
+  lifecycle --> resolver["Fixed trusted TCP DNS resolvers<br/>exact-owner TXT, 4s total"]
+  lifecycle --> live["powerdns.CheckAvailable<br/>live account + overlap guard"]
+  client --> create["project.zoneCreate<br/>fresh proof + global CREATE lock"]
+  create --> pg
+  create --> gate["powerdns.CreateWithGate<br/>live preflight → reauthorize / consume"]
+  gate --> pdns["PowerDNS POST<br/>only AFTER committed consumption"]
+```
+
+`project/dns_ownership.go` owns short-lived, nonexclusive project/provider/IDNA-zone proofs. Pending rows are not ownership
+or reservations. Fixed public resolvers are the default trust source, independent of the managed authoritative API;
+operator-only `ownershipResolvers` overrides are explicit trust changes (private lab overrides prove controlled data only).
+`cloud_zones.go` requires fresh verified proof in the native/MCP create path; a project lock bounds quota/lookup but uses
+try-lock refusal rather than queued shared-pool holders. Global create lock covers provider aliases without holding DNS
+proof lookup. Short row transitions recheck state and DB authorization after external reads; consumption commits before
+POST. Existing zone record/manage/delete paths remain legacy-compatible. Token-free lifecycle audit plus redacted proof TXT
+record audit, guided UI and MCP wrappers expose the contract rather than raw backend failures. See
+[PowerDNS operator contract](../../cloud-integration.md#ownership-proof-before-creating-a-zone).
+
 ## C3b. Cloud / IaaS on Proxmox
 
 ```mermaid

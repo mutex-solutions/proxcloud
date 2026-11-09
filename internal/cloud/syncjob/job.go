@@ -10,6 +10,7 @@ package syncjob
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -119,6 +120,7 @@ func (j *Job) WithShareAccess(f func(ctx context.Context, projectID string) erro
 // ponytail: no distributed lock — the cron sync is idempotent-upsert so a concurrent run is
 // harmless. Add a datastore lock (servicesSync-{p}-{es}, ~2min) if syncs ever fight.
 func (j *Job) SyncOne(ctx context.Context, projectID, serviceID string) error {
+	ctx = withInventoryFailures(ctx)
 	p, err := j.projects.FindByID(ctx, projectID)
 	if err != nil {
 		return err
@@ -169,6 +171,7 @@ func (j *Job) WithLoadBalancers(f func(ctx context.Context, ps *pve.Service, es 
 // Run syncs every ENABLED project's CLOUD-service resources. Returns the total SERVER+PORT
 // resources synced. Per-project / per-service failures are logged and skipped.
 func (j *Job) Run(ctx context.Context) (int, error) {
+	ctx = withInventoryFailures(ctx)
 	projects, err := j.projects.AllEnabled(ctx)
 	if err != nil {
 		return 0, err
@@ -206,7 +209,7 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 		if _, err := j.services.DetectPVECapabilities(ctx, es, ps.C); err != nil {
 			j.log.Warn("syncjob: pve capability detection", "serviceId", es.ID, "err", err)
 		}
-		if j.staleSeeds != nil {
+		if j.staleSeeds != nil && !inventoryFailed(ctx, es.ID, "") {
 			if err := j.staleSeeds(ctx, ps, es); err != nil {
 				j.log.Warn("syncjob: drop stale seeds", "serviceId", es.ID, "err", err)
 			}
@@ -302,6 +305,26 @@ func (j *Job) syncTrueNASService(ctx context.Context, p *project.Project, es *ex
 	if !es.ServiceEnabledInRegion("shares", region) {
 		return 0
 	}
+	// A project bound to duplicate NAS parents has no single export owner.
+	// Refuse before even caching duplicate SHARE rows (which would double bill).
+	var nas []*externalservice.ExternalService
+	for _, id := range p.ServiceIDs() {
+		other, err := j.services.Get(ctx, id)
+		if errors.Is(err, externalservice.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			j.log.Error("syncjob: resolve share owner", "project", p.ID, "serviceId", id, "err", err)
+			return 0
+		}
+		if other.IsTrueNAS() {
+			nas = append(nas, other)
+		}
+	}
+	if err := externalservice.ValidateTrueNASOwner(es, nas); err != nil {
+		j.log.Error("syncjob: conflicting share owners; exports unchanged", "project", p.ID, "serviceId", es.ID, "err", err)
+		return 0
+	}
 	ts, err := es.TrueNASService()
 	if err != nil {
 		j.log.Error("syncjob: build truenas client", "project", p.ID, "serviceId", es.ID, "err", err)
@@ -312,7 +335,7 @@ func (j *Job) syncTrueNASService(ctx context.Context, p *project.Project, es *ex
 	if err != nil {
 		j.log.Error("syncjob: reconcile shares", "project", p.ID, "serviceId", es.ID, "err", err)
 	}
-	if j.shareAccess != nil {
+	if j.shareAccess != nil && !inventoryFailed(ctx, "", p.ID) {
 		if err := j.shareAccess(ctx, p.ID); err != nil {
 			j.log.Error("syncjob: reconcile share access", "project", p.ID, "serviceId", es.ID, "err", err)
 		}
@@ -367,9 +390,18 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 	for _, prov := range provs {
 		st, err := providers.Reconcile(ctx, prov, j.cloud, es.ID, now)
 		if err != nil {
-			j.log.Error("syncjob: reconcile pve", "project", p.ID, "serviceId", es.ID, "region", region, "type", prov.Type(), "err", err)
+			var untrusted *cloud.InventoryUntrustedError
+			if errors.As(err, &untrusted) {
+				markInventoryFailure(ctx, es.ID, p.ID)
+				j.log.Warn("syncjob: provider visibility unverified; cached inventory preserved, repair token permissions", "project", p.ID, "serviceId", es.ID, "region", region, "type", prov.Type(), "err", err)
+			} else {
+				j.log.Error("syncjob: reconcile pve", "project", p.ID, "serviceId", es.ID, "region", region, "type", prov.Type(), "err", err)
+			}
 		}
 		count += st.Created + st.Updated
+	}
+	if inventoryFailed(ctx, es.ID, p.ID) {
+		return count // do not rewrite isolation or run cleanup from an untrusted read
 	}
 	j.reconcileIsolation(ctx, ps, p, es)
 	if _, err := ps.RemoveBlankVMs(ctx, p.ID); err != nil {
@@ -394,7 +426,16 @@ func (j *Job) reconcileIsolation(ctx context.Context, ps *pve.Service, p *projec
 		return
 	}
 	defer func() { _ = j.sdnLock.Unlock(ctx, project.SDNApplyLockName, 0, start, j.now()) }()
-	if err := ps.ReconcileIsolation(ctx, p.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs, es.PVESandboxEndpoints()...); err != nil {
+	rows, err := j.cloud.FindByServiceProjectAndType(ctx, es.ID, p.ID, cloud.TypeNetwork)
+	if err != nil {
+		j.log.Error("syncjob: read verified isolation inventory", "project", p.ID, "serviceId", es.ID, "err", err)
+		return
+	}
+	var cidrs []string
+	for i := range rows {
+		cidrs = append(cidrs, pve.NetworkCIDRs(&rows[i])...)
+	}
+	if err := ps.ReconcileIsolationInventory(ctx, p.ID, netCfg.CIDRPool, netCfg.BlockedCIDRs, netCfg.SandboxCIDRs, cidrs, es.PVESandboxEndpoints()...); err != nil {
 		j.log.Error("syncjob: reconcile isolation", "project", p.ID, "serviceId", es.ID, "err", err)
 	}
 }

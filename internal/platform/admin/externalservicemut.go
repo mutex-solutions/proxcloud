@@ -40,6 +40,7 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/powerdns"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 
@@ -125,6 +126,12 @@ func (h *Handler) externalServiceCreate(w http.ResponseWriter, r *http.Request) 
 	}
 	if cfg, ok := doc["config"].(map[string]any); ok && cfg["provider"] == "truenas" {
 		if _, err := externalservice.ParseSNATSources(cfg["snatSources"]); err != nil {
+			httpx.WriteError(w, httpx.BadRequest(err.Error()))
+			return
+		}
+	}
+	if cfg, _ := doc["config"].(map[string]any); cfg["provider"] == "powerdns" {
+		if _, err := powerdns.OwnershipResolvers(cfg["ownershipResolvers"]); err != nil {
 			httpx.WriteError(w, httpx.BadRequest(err.Error()))
 			return
 		}
@@ -288,6 +295,11 @@ func (h *Handler) applyServiceConnectionBody(req *http.Request, doc pgdoc.M) *ht
 		if raw, ok := c["storageProfiles"]; ok && cfg["provider"] == "proxmox" {
 			if herr := h.validatePVEStorageProfiles(req, cfg, raw); herr != nil {
 				return herr
+			}
+		}
+		if cfg["provider"] == "powerdns" {
+			if _, err := powerdns.OwnershipResolvers(cfg["ownershipResolvers"]); err != nil {
+				return httpx.BadRequest(err.Error())
 			}
 		}
 		if cfg["provider"] == "truenas" {

@@ -9,6 +9,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"slices"
 	"time"
 
@@ -58,6 +59,17 @@ type VanishGrace interface {
 // in place; changed says to store it. A row it does not keep is archived as the provider left it.
 type UnreadKeeper interface {
 	KeepUnread(cached *cloud.CloudResource) (keep, changed bool)
+}
+
+// InventoryVerifier is for permission-filtered upstream lists. It proves that missing
+// rows or fields really disappeared before ANY write in this scope. An error keeps
+// the whole scope, so a partial list cannot revoke downstream access. Providers
+// without this capability keep their existing KeepUnread/grace/moving semantics.
+// Implementations must not modify either slice. If combined with UnreadKeeper,
+// archived data is the proved snapshot, not an in-place terminal-data rewrite;
+// such providers must supply that terminal data as part of their verified list.
+type InventoryVerifier interface {
+	VerifyInventory(ctx context.Context, cached, listed []cloud.CloudResource) error
 }
 
 // CacheMerger is an optional Provider capability: before comparing, carry over what the fresh read did not
@@ -121,6 +133,44 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		}
 		return repo.FindByServiceAndType(ctx, serviceID, p.Type())
 	}
+	var verified map[string]cloud.CloudResource
+	if v, ok := p.(InventoryVerifier); ok {
+		cached, err := scopeRows()
+		if err != nil {
+			return st, err
+		}
+		if err := v.VerifyInventory(ctx, cached, list); err != nil {
+			return st, err
+		}
+		verified = make(map[string]cloud.CloudResource, len(cached))
+		for _, cr := range cached {
+			verified[cr.ID] = cr
+		}
+	}
+	archive := func(cr *cloud.CloudResource) (bool, error) {
+		if verified != nil {
+			proof, ok := verified[cr.ID]
+			if !ok {
+				return false, nil
+			}
+			return repo.DeleteAndArchiveIfUnchanged(ctx, &proof, now)
+		}
+		if err := repo.DeleteAndArchive(ctx, cr, now); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	update := func(cached, next *cloud.CloudResource) (bool, error) {
+		if verified != nil {
+			proof, ok := verified[cached.ID]
+			if !ok {
+				return false, nil
+			}
+			return repo.UpdateIfUnchanged(ctx, &proof, next)
+		}
+		saved, err := repo.Update(ctx, next)
+		return saved != nil, err
+	}
 	renamedSinceList := func(cr *cloud.CloudResource) bool {
 		return cr.ExternalIDSince != nil && cr.ExternalIDSince.After(listedAt)
 	}
@@ -139,6 +189,16 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		if r.CreatedAt == nil {
 			c := now
 			r.CreatedAt = &c
+		}
+		if verified != nil {
+			inserted, err := repo.InsertIfAbsent(ctx, r)
+			if err != nil {
+				return err
+			}
+			if inserted {
+				st.Created++
+			}
+			return nil
 		}
 		if _, err := repo.Upsert(ctx, r, merge); err != nil {
 			return err
@@ -160,6 +220,9 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 			return st, err
 		}
 		if cached == nil {
+			if verified != nil && slices.ContainsFunc(slices.Collect(maps.Values(verified)), func(cr cloud.CloudResource) bool { return cr.ExternalID == r.ExternalID }) {
+				continue // a proved row moved or was removed after validation; do not resurrect its old id
+			}
 			// Recreate guard: if the user deleted this resource after the sync snapshot, don't
 			// resurrect it from a stale cloud read.
 			guardAt := now.Add(-grace)
@@ -174,8 +237,12 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 			continue
 		}
 		if rp, ok := p.(Replaceable); ok && rp.Superseded(cached, &r) {
-			if err := repo.DeleteAndArchive(ctx, cached, now); err != nil {
+			deleted, err := archive(cached)
+			if err != nil {
 				return st, err
+			}
+			if !deleted {
+				continue
 			}
 			st.Deleted++
 			if err := insert(&r); err != nil {
@@ -186,10 +253,13 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		// shouldBeDeleted gate: a cached resource the provider
 		// declares terminal/inconsistent is deleted even though the cloud listed it.
 		if del, ok := p.(Deletable); ok && del.ShouldBeDeleted(cached) {
-			if err := repo.DeleteAndArchive(ctx, cached, now); err != nil {
+			deleted, err := archive(cached)
+			if err != nil {
 				return st, err
 			}
-			st.Deleted++
+			if deleted {
+				st.Deleted++
+			}
 			continue
 		}
 		// ts-guard: a DB doc at/after the snapshot is newer than this read → leave it.
@@ -199,7 +269,7 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		// Heal docs whose createdAt was nulled by pre-$setOnInsert writers (best-effort — the UI
 		// Created-At column + createdAt billing accrual read it). updatedAt is the closest
 		// surviving evidence of age; absent that, now.
-		if cached.CreatedAt == nil {
+		if cached.CreatedAt == nil && verified == nil {
 			heal := now
 			if cached.UpdatedAt != nil {
 				heal = *cached.UpdatedAt
@@ -230,10 +300,13 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 		if r.CreatedAt == nil {
 			r.CreatedAt = cached.CreatedAt
 		}
-		if _, err := repo.Update(ctx, &r); err != nil { // OCC ts-guard; nil result = DB newer (skipped)
+		changed, err := update(cached, &r)
+		if err != nil {
 			return st, err
 		}
-		st.Updated++
+		if changed {
+			st.Updated++
+		}
 	}
 
 	// A new id in the list may be the old id of a row renamed since: inserting it would bill the resource twice until
@@ -279,18 +352,24 @@ func Reconcile(ctx context.Context, p Provider, repo *cloud.Repo, serviceID stri
 				if changed {
 					t := now
 					cr.UpdatedAt = &t
-					if _, err := repo.Update(ctx, &cr); err != nil {
+					changed, err := update(&cr, &cr)
+					if err != nil {
 						return st, err
 					}
-					st.Updated++
+					if changed {
+						st.Updated++
+					}
 				}
 				continue
 			}
 		}
-		if err := repo.DeleteAndArchive(ctx, &cr, now); err != nil {
+		deleted, err := archive(&cr)
+		if err != nil {
 			return st, err
 		}
-		st.Deleted++
+		if deleted {
+			st.Deleted++
+		}
 	}
 	return st, nil
 }

@@ -421,6 +421,13 @@ func kamajiDeleteDataset(ctx context.Context, services serviceGetter, shares sha
 		if err != nil {
 			return err
 		}
+		if guard, ok := services.(interface {
+			ValidateTrueNASProjectOwner(context.Context, string, *externalservice.ExternalService) error
+		}); ok {
+			if err := guard.ValidateTrueNASProjectOwner(ctx, projectID, nas); err != nil {
+				return err
+			}
+		}
 		ts, err := nas.TrueNASService()
 		if err != nil {
 			return err

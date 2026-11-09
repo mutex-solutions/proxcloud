@@ -24,6 +24,10 @@ import (
 )
 
 func shareErr(err error) error {
+	var conflict *externalservice.TrueNASOwnerConflictError
+	if errors.As(err, &conflict) {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, "File share backend has multiple provider owners; ask the operator to attach only one provider for this NAS parent")
+	}
 	if errors.Is(err, truenas.ErrShare) {
 		return httpx.NewError(http.StatusConflict, http.StatusConflict, strings.TrimPrefix(err.Error(), truenas.ErrShare.Error()+": "))
 	}
@@ -134,8 +138,8 @@ func (h *Handler) lockShareAccess(ctx context.Context, projectID string) (func()
 	return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "Another change to this project's file share access is in progress — retry in a moment")
 }
 
-// trueNASServices lists the project's file share providers.
-func (h *Handler) trueNASServices(ctx context.Context, p *Project) ([]*externalservice.ExternalService, error) {
+// trueNASBindings lists attached NAS providers without imposing a global failure.
+func (h *Handler) trueNASBindings(ctx context.Context, p *Project) ([]*externalservice.ExternalService, error) {
 	var out []*externalservice.ExternalService
 	for _, svcID := range p.ServiceIDs() {
 		es, err := h.esSvc.Get(ctx, svcID)
@@ -150,6 +154,29 @@ func (h *Handler) trueNASServices(ctx context.Context, p *Project) ([]*externals
 		}
 	}
 	return out, nil
+}
+
+// trueNASServices is for whole-project export passes: validate all owners before
+// the first export write. A direct share operation validates its own parent only.
+func (h *Handler) trueNASServices(ctx context.Context, p *Project) ([]*externalservice.ExternalService, error) {
+	out, err := h.trueNASBindings(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	if err := externalservice.ValidateTrueNASOwners(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// checkShareOwner also covers direct create/action/delete paths, which select a
+// provider without going through the automatic export reconciler.
+func (h *Handler) checkShareOwner(ctx context.Context, p *Project, target *externalservice.ExternalService) error {
+	services, err := h.trueNASBindings(ctx, p)
+	if err != nil {
+		return err
+	}
+	return externalservice.ValidateTrueNASOwner(target, services)
 }
 
 // reconcileShareExports brings every export of the project to its current addresses minus drop. Any failure is an
@@ -296,6 +323,10 @@ func (h *Handler) shareCreate(w http.ResponseWriter, r *http.Request, u *user.Us
 		h.fail(w, httpx.BadRequest("This provider serves file shares only"))
 		return
 	}
+	if err := h.checkShareOwner(ctx, proj, es); err != nil {
+		h.fail(w, shareErr(err))
+		return
+	}
 	name, _ := req.Data["name"].(string)
 	protocol, _ := req.Data["protocol"].(string)
 	sizeGiB := intAny(req.Data["sizeGb"])
@@ -353,6 +384,9 @@ func (h *Handler) shareCreate(w http.ResponseWriter, r *http.Request, u *user.Us
 }
 
 func (h *Handler) shareDelete(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) error {
+	if err := h.checkShareOwner(ctx, proj, es); err != nil {
+		return shareErr(err)
+	}
 	ts, err := es.TrueNASService()
 	if err != nil {
 		return err
@@ -370,6 +404,10 @@ func (h *Handler) shareAction(w http.ResponseWriter, r *http.Request, proj *Proj
 	ctx := r.Context()
 	if action != "EXTEND" && action != "REFRESH_ACCESS" && action != "RESET_PASSWORD" {
 		return false
+	}
+	if err := h.checkShareOwner(ctx, proj, es); err != nil {
+		h.fail(w, shareErr(err))
+		return true
 	}
 	ts, err := es.TrueNASService()
 	if err != nil {

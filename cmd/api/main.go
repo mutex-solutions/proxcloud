@@ -253,6 +253,17 @@ func run() error {
 	)
 	// Cloud-object download tokens (object-store DOWNLOAD action → GET /download/{token}).
 	projectH.SetDownloads(cloud.NewDownloadRepo(pg), cfg.Self.APIBaseURL)
+	// New-zone ownership is mandatory; fail startup rather than serving creates
+	// without the durable one-use proof store after an incomplete upgrade.
+	dnsOwnership := pg.C("dns_ownership")
+	if err := dnsOwnership.Ensure(context.Background()); err != nil {
+		return fmt.Errorf("DNS ownership store: %w", err)
+	}
+	if err := dnsOwnership.EnsureIndex(context.Background(), "project_created", false,
+		pgdoc.F("projectId"), pgdoc.IndexField{Field: "createdAt", Kind: pgdoc.KTime}); err != nil {
+		return fmt.Errorf("DNS ownership index: %w", err)
+	}
+	projectH.SetDNSOwnership(dnsOwnership)
 	projectH.SetCustomMenu(project.NewCustomMenuReader(pg))
 	// Ceph RGW (S3) per-project credentials — enables ceph-s3 provisioning + bucket writes.
 	cephCredRepo := cephcred.New(pg, enc)

@@ -30,6 +30,7 @@ flowchart LR
     smtp["SMTP relay"]:::impl
     rgw["S3 store: Ceph RGW"]:::impl
     pdns["PowerDNS"]:::impl
+    proof["Trusted fixed DNS recursors<br/>TXT ownership before new zone"]:::impl
     rustfs["S3 store: RustFS"]:::impl
     nas["TrueNAS NAS"]:::impl
     prom["Prometheus-compatible metrics"]:::impl
@@ -51,7 +52,8 @@ flowchart LR
   pc -->|"deposits, cards, collect"| airwallex
   pc -->|"transactional mail"| smtp
   pc -->|"RGW admin ops and S3"| rgw
-  pc -->|"zones and records"| pdns
+  pc -->|"exact-owner TXT over TCP, BEFORE create"| proof
+  pc -->|"zones and records (new zone requires one-use proof)"| pdns
   pc -->|"sandbox wildcard record, RFC2136 DNS-01 (installer, cert-manager)"| pdns
   pc -->|"wildcard certificate for the sandbox domain (cert-manager)"| dns
   pc -->|"admin API and S3"| rustfs
@@ -92,6 +94,6 @@ flowchart LR
 | Prometheus-compatible metrics | Optional per-provider source for per-VM network traffic counters, used to bill traffic. Proxmox providers default to their own public-NIC counters instead. | Implemented |
 | DNS and ACME | Hostnames and TLS certificates for the portal, the API and Keycloak, provided by the hosting cluster (the chart renders the routes, not the certificates). The sandbox domain's wildcard certificate comes from an ACME CA through cert-manager on the services cluster (or a Secret the operator provides). | Implemented |
 | PowerDNS Authoritative | Tenant DNS zones and records over its HTTP API, owned through the zone's account field. The sandbox domain's zone: installer stage 56 writes its wildcard record and a TSIG key that may update that zone alone, which cert-manager on the services cluster uses for the DNS-01 challenge (RFC2136). | Implemented |
-| DNS TXT verification | Domain ownership checks for per-org SSO (`_proxcloud-challenge.<domain>`). | Implemented |
+| DNS TXT verification | Per-org SSO uses `_proxcloud-challenge.<domain>`. New tenant zones independently require scoped `_proxcloud-ownership.<zone>` proof through fixed public TCP recursors (operator-only literal-IP trust overrides for controlled labs). No tenant-selected resolver or create-first self-vouch; conventional DNS trust, not DNSSEC. | Implemented |
 | Container registry (ghcr.io) | CI publishes the `proxcloud-api`, `proxcloud-web`, `proxcloud-admin`, `proxcloud-sandbox-proxy` and `proxcloud-sandbox-runtime` images, the built-in sandbox template images (`sandbox-*`, digests pinned in `deploy/templates/images.yaml`) and the Helm charts; deployments pull from it. With a sandbox registry (SB6a) the sandbox nodes pull their templates and `sandbox-proxy` from it, which the installer copies them into; only the runtime image (envd, SB5) still comes from here. | Implemented |
 | VM template pipelines | Image builds that publish OS and Kubernetes node templates into Proxmox. | Planned |

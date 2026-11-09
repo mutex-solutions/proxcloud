@@ -8,6 +8,95 @@ invariants the code holds. Four sequence diagrams follow.
 
 Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
+## C4.0 Permission-filtered network inventory and file-share ownership
+
+**Why:** PVE's SDN list is permission-filtered: `200 []` can mean that the configured
+portal token lost visibility, not that all tenant networks were deleted. Archiving
+those rows also removes their CIDRs from the next NAS export reconcile. Partial
+lists and omitted subnet details have the same failure mode.
+
+| Symbol | Location | Safety boundary |
+|---|---|---|
+| `InventoryVerifier`, `Reconcile` | `internal/cloud/providers/providers.go` | Optional scoped proof after listing and before **any** cache write. Failed proof leaves all rows unchanged. The vanished scan only archives row versions included in the proof. |
+| `NetworkSyncProvider.VerifyInventory` | `internal/cloud/pve/inventory.go` | Same configured token, effective permissions (no `userid`), namespace + zone + exact cached/listed vnet paths. Requires `SDN.Audit` **or** `SDN.Allocate`; a broad grant alone cannot override a narrower `NoAccess`. |
+| `GetSDNVnet`, `GetSDNSubnet`, `verifyGlobalSDNVisibility` | `internal/cloud/pve/sdn.go`, `inventory.go` | Revalidate omitted vnets/subnets even in a nonempty list. Actual PVE9 returns the same exact target-specific400 for missing and hidden objects, so absence also requires complete stable ACL visibility: self `Sys.Audit` on `/access`, full ACL snapshots and propagated SDN rights at every SDN shadow boundary. Exact old-path rights alone cannot exclude a move into a hidden zone. A live same-owner omission fails; a positive foreign alias retires only the old project's row. No broad500 substring matching. |
+| `NetworkSyncProvider.List` | `internal/cloud/pve/network.go` | Ownership-alias tenant filter remains mandatory. A failed subnet read is an error, never an empty replacement for cached CIDRs. |
+| `InventoryUntrustedError` | `internal/cloud/inventory.go` | Typed failure; sync logs a repair-token warning. No root credential, automatic permission widening, timestamp heuristic or blanket empty-list exemption. Tokens unable to prove completeness retain rows and require operator repair. |
+| `UpdateIfUnchanged`, `DeleteAndArchiveIfUnchanged`, `InsertIfAbsent` | `internal/cloud/inventory_repo.go` | Under a transaction row lock compare the complete proved row, then mutate; archive+delete commit together. Concurrent CIDR/owner/externalID changes invalidate proof even with an unchanged timestamp. New inserts never overwrite a concurrent row. |
+| `inventoryFailures`, `ReconcileIsolationInventory` | `internal/cloud/syncjob/inventory.go`, `internal/cloud/pve/network.go` | Invocation-local failure suppresses later export callback, isolation/blank-VM passes and provider seed sweep. Scheduled isolation uses cached verified CIDRs, not a second filtered SDN census. A NAS processed earlier still reads unchanged preserved cache rows. |
+| `ValidateTrueNASOwners` | `internal/platform/externalservice/truenas_ownership.go` | One provider per project for one canonical API backend + parent dataset. Reject duplicates regardless of credentials, `snatSources` or disabled state; those providers can still own existing exports. |
+| `trueNASServices`, `checkShareOwner` | `internal/platform/project/cloud_shares.go` | Refuse automatic export changes, direct share mutations and export-bearing address release on a conflicting project before NAS writes. Sync also refuses duplicate SHARE caching. Other projects and other NAS backends/parents remain usable. |
+
+A genuine empty inventory **does** archive when by-id missing responses and
+complete effective visibility prove absence; the normal next share reconcile
+removes those CIDRs. Underprivileged legacy tokens retain safely with a warning
+rather than guessing whether an object moved into a hidden zone. This keeps delete-of-vanished and billing termination functional. Recovering
+permissions preserves the original row IDs/ages and an unchanged second pass
+settles at zero. This opt-in capability does not change other providers' existing
+`KeepUnread`, node-offline status handling, vanish grace, moving rows, holder/build/
+restore exclusions or CSI registry-owned VOLUME rows. Partial VM inventory, orphan-IP
+release and independent seed cleanup need their own visibility proofs; this NETWORK
+phase does not claim those paths are closed.
+
+The NAS configuration comparison normalizes `https`/`wss`, host case, default port,
+trailing API path and parent slashes. It cannot discover that two different hostnames
+or proxy addresses lead to the same physical NAS: use one canonical endpoint per NAS
+and disjoint parent datasets when separate providers are intentional. Do not resolve
+DNS or compare API keys to guess backend ownership.
+
+Regression evidence: fake PVE HTTP200-empty/partial + explicit403/masked404 + exact
+ACL shadow + foreign-owner cases; actual PostgreSQL reconciliation and TrueNAS RPC
+export updates across two failed rounds, restored visibility/settles0, and legitimate
+delete/archive/export revocation. Generic reconciliation, grace and `KeepUnread`
+regressions run alongside them. Operator repair: [PVE permissions](../../proxmox-permissions.md#inventory-visibility-repair).
+
+## DNS creation authorization
+
+```mermaid
+sequenceDiagram
+  participant U as Console / MCP / HTTP
+  participant P as project handler
+  participant DB as PostgreSQL
+  participant R as Fixed trusted resolver
+  participant D as PowerDNS authoritative API
+  U->>P: challenge(project, provider, canonical zone)
+  P->>DB: project try-lock, quota, scoped hash + PENDING(30min)
+  P-->>U: TXT name + random256bit value ONCE
+  Note over U,R: User publishes at existing DNS host, not a zone created first here
+  U->>P: verify(challenge id, provider)
+  P->>DB: project try-lock + atomic backoff/PENDING check
+  P->>D: live available/foreign overlap check
+  P->>R: exact-owner TXT over fixed TCP (total4s)
+  P->>D: live available check again
+  P->>DB: atomic re-read current auth/config/state → VERIFIED(10min)
+  U->>P: create DNS_ZONE(name, ownershipId)
+  P->>DB: global CREATE try-lock (all provider aliases)
+  P->>D: live preflight
+  P->>DB: final DB-only current authorization + row lock, commit CONSUMED
+  P->>D: POST zone (no intervening preflight)
+  D-->>P: created or uncertain failure
+  P->>DB: cache created zone (proof stays CONSUMED even on failure)
+  P-->>U: zone or safe actionable failure
+```
+
+- `powerdns.CanonicalZone` is the sole identity for new names: IDNA A-label, strict labels, recognized PSL suffix below
+  its registry/private boundary. `_proxcloud-ownership.` is a constant record prefix, not a tenant query fragment.
+- `LookupProofTXT` connects only to literal endpoints from operator policy, never tenant input or host system DNS. Exact
+  question/ID/owner/TXT and no CNAME/DNAME/truncation; multiple RR chunks concatenate within one RR only. Conventional DNS
+  trust, not DNSSEC. Any configured trusted endpoint can prove control; stale/missing answers only delay success.
+- `dnsUpdate` uses `GetForUpdate` for **every** state mutation: stale verification/backoff/cancel cannot resurrect a
+  consumed proof. No external DNS or PowerDNS work occurs inside a row transaction. No nested session lock is needed.
+- `dnsProjectLock` uses try-lock429 to prevent one tenant's queued requests occupying the shared lock pool. Global
+  create try-lock409 is held only for fresh, scoped, still-valid verified proofs and actual bounded upstream create.
+  A10s total create deadline plus durable60s per-project attempt cooldown across every proof/provider bounds one valid
+  owner's slow-backend retries. Busy/invalidated proofs spend no attempt; failed live preflight does.
+- `CreateWithGate` calls `consumeDNSProof` **after** live preflight and **immediately before** upstream POST. Its short
+  row transaction rereads current project/permission/provider/config and state, then commits single-use consumption.
+  Revocation after that point is not rollback of an already authorized external request. A timeout requires checking the
+  zone list; it never restores the proof. The post-create live overlap guard remains for operator/out-of-band races.
+- Existing zones are not retroactively gated/deleted. Same-project parent TXT can prove a child; a foreign/operator
+  overlap never can. Pending/verified records exclude no other project from challenge or proof.
+
 ## C4.1 Tenant network isolation
 
 | Symbol | Location | Role |
