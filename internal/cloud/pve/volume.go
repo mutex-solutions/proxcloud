@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -131,8 +133,119 @@ func (s *Service) withUnusedSizes(ctx context.Context, node string, vmid int, di
 	return disks
 }
 
-// ExtendVolume grows a disk to sizeGiB (grow-only — PVE cannot shrink).
-func (s *Service) ExtendVolume(ctx context.Context, projectID string, vmid int, volID string, sizeGiB int) error {
+// diskSizeBytes deliberately does not use the billing parser's rounded GiB or
+// unchecked multiplication: capacity must reserve every byte of actual growth.
+func diskSizeBytes(raw string) (int64, bool) {
+	var size string
+	seen := false
+	for _, part := range strings.Split(raw, ",")[1:] {
+		if strings.HasPrefix(part, "size=") {
+			if seen {
+				return 0, false
+			}
+			seen = true
+			size = strings.TrimPrefix(part, "size=")
+		}
+	}
+	if size == "" {
+		return 0, false
+	}
+	mult := int64(1)
+	switch size[len(size)-1] {
+	case 'K':
+		mult = 1 << 10
+	case 'M':
+		mult = 1 << 20
+	case 'G':
+		mult = 1 << 30
+	case 'T':
+		mult = 1 << 40
+	}
+	if mult != 1 {
+		size = size[:len(size)-1]
+	}
+	n, err := strconv.ParseInt(size, 10, 64)
+	if err != nil || n <= 0 || n > math.MaxInt64/mult {
+		return 0, false
+	}
+	return n * mult, true
+}
+
+func volumeTargetBytes(sizeGiB int) (int64, error) {
+	if sizeGiB <= 0 || int64(sizeGiB) > math.MaxInt64>>30 {
+		return 0, conflictf("The requested disk size is invalid or too large")
+	}
+	return int64(sizeGiB) << 30, nil
+}
+
+// volumeGrowthConfig requires a positively readable current config, not PVE's
+// default pending merge. Reuse R1's current/pending proof without changing it.
+func (s *Service) volumeGrowthConfig(ctx context.Context, vm *ClusterResource) (VMConfig, error) {
+	cfg, err := s.holderCurrentConfig(ctx, vm.Node, vm.VMID)
+	if err != nil || cfg == nil {
+		return nil, conflictf("Cannot verify the server's current disk configuration. Try again when it is readable and has no pending changes")
+	}
+	return cfg, nil
+}
+
+// checkVolumeGrowth uses the SAME configured credential for definitions and
+// capacity. Pointer metrics distinguish a genuine zero used count from missing
+// inventory; no operator credential, cached quota size or full-pool fallback.
+func (s *Service) checkVolumeGrowth(ctx context.Context, vm *ClusterResource, d VMDisk, current, target int64, headroomPct float64) error {
+	if current <= 0 || target <= current {
+		return conflictf("New size must be larger than the live disk size (Proxmox cannot shrink a disk)")
+	}
+	if math.IsNaN(headroomPct) || math.IsInf(headroomPct, 0) || headroomPct < 0 || headroomPct > 100 {
+		return conflictf("The configured storage headroom is invalid")
+	}
+	defs, err := s.C.ListStorage(ctx)
+	if err != nil {
+		return conflictf("Cannot verify the disk storage configuration")
+	}
+	usable := false
+	for _, def := range defs {
+		if def.Storage != d.Storage {
+			continue
+		}
+		nodes := splitList(def.Nodes)
+		onNode := len(nodes) == 0
+		for _, n := range nodes {
+			onNode = onNode || n == vm.Node
+		}
+		usable = def.Disable == 0 && onNode && classify(def).HasContent("images")
+	}
+	if !usable {
+		return conflictf("The disk storage is not available for disks on this node")
+	}
+	var rows []struct {
+		Type, Storage, Node, Status string
+		MaxDisk                     *int64 `json:"maxdisk"`
+		Disk                        *int64 `json:"disk"`
+	}
+	if err := s.C.get(ctx, "/cluster/resources", url.Values{"type": {"storage"}}, &rows); err != nil || rows == nil {
+		return conflictf("Cannot verify free space on the disk storage")
+	}
+	var st StorageNodeState
+	matches := 0
+	for _, r := range rows {
+		if r.Type != "storage" || r.Storage != d.Storage || r.Node != vm.Node {
+			continue
+		}
+		matches++
+		if r.MaxDisk == nil || r.Disk == nil || *r.MaxDisk <= 0 || *r.Disk < 0 || *r.Disk > *r.MaxDisk {
+			return conflictf("The disk storage capacity is unknown or invalid")
+		}
+		st = StorageNodeState{Active: r.Status == "available", Total: *r.MaxDisk, Avail: *r.MaxDisk - *r.Disk}
+	}
+	if matches != 1 || !StorageHasRoom(st, target-current, headroomPct) {
+		return conflictf("Not enough verified free space to grow this disk while keeping storage headroom")
+	}
+	return nil
+}
+
+// ExtendVolume grows a disk to sizeGiB, reserving only its live byte delta plus
+// provider headroom. All reads/checks precede holderTask's durable intent/PUT.
+func (s *Service) ExtendVolume(ctx context.Context, projectID string, vmid int, volID string, sizeGiB int, headroomPct float64) error {
 	if s.HolderOperations != nil {
 		var release func()
 		var err error
@@ -142,13 +255,41 @@ func (s *Service) ExtendVolume(ctx context.Context, projectID string, vmid int, 
 		}
 		defer release()
 	}
-	vm, slot, err := s.volumeSlot(ctx, projectID, vmid, volID)
+	target, err := volumeTargetBytes(sizeGiB)
 	if err != nil {
 		return err
 	}
-	if strings.HasPrefix(slot, "unused") {
+	vm, err := s.ResolveVM(ctx, projectID, strconv.Itoa(vmid))
+	if err != nil || vm == nil || vm.NodeDown {
+		return conflictf("Cannot verify the volume's live server on its node")
+	}
+	cfg, err := s.volumeGrowthConfig(ctx, vm)
+	if err != nil {
+		return err
+	}
+	var disk VMDisk
+	for _, d := range ParseDisks(cfg) {
+		if d.VolID == volID {
+			if disk.Slot != "" {
+				return conflictf("The disk has ambiguous server configuration")
+			}
+			disk = d
+		}
+	}
+	if disk.Slot == "" {
+		return conflictf("The disk is not present in the server's current configuration")
+	}
+	if strings.HasPrefix(disk.Slot, "unused") {
 		return conflictf("Attach the disk before extending it")
 	}
+	current, known := diskSizeBytes(cfg.Str(disk.Slot))
+	if !known {
+		return conflictf("The live disk size is unknown or invalid")
+	}
+	if err := s.checkVolumeGrowth(ctx, vm, disk, current, target, headroomPct); err != nil {
+		return err
+	}
+	slot := disk.Slot
 	p, err := s.holderProofFor(ctx, projectID, "resize", vm)
 	if err != nil {
 		return err
@@ -383,13 +524,42 @@ func (s *Service) DeleteVolume(ctx context.Context, projectID string, vmid int, 
 	return nil
 }
 
+// CheckRetypeVolumeSnapshots is the API's read-only preflight before MarkMoving.
+// RetypeVolume repeats the authoritative check under the project holder session.
+// ANY real VM snapshot conservatively blocks delete=1; never delete/force it.
+func (s *Service) CheckRetypeVolumeSnapshots(ctx context.Context, projectID string, vmid int) error {
+	vm, err := s.ResolveVM(ctx, projectID, strconv.Itoa(vmid))
+	if err != nil || vm == nil || vm.NodeDown {
+		return conflictf("Cannot verify the volume's live server before changing its type")
+	}
+	return s.checkRetypeSnapshots(ctx, vm)
+}
+
+func (s *Service) checkRetypeSnapshots(ctx context.Context, vm *ClusterResource) error {
+	snaps, err := s.C.ListSnapshots(ctx, vm.Node, vm.VMID)
+	if err != nil || snaps == nil {
+		return conflictf("Cannot verify server snapshots. Changing the volume type requires a readable snapshot inventory")
+	}
+	current := false
+	for _, sn := range snaps {
+		if sn.Name == "" || sn.Name == "current" && current {
+			return conflictf("Cannot verify server snapshots: the snapshot inventory is invalid")
+		}
+		if sn.Name != "current" {
+			return conflictf("Delete the server's snapshots before changing the volume type")
+		}
+		current = true
+	}
+	return nil
+}
+
 // RetypeVolume moves a disk to another storage of its VM's node (move_disk storage=,
 // delete=1, so the source copy is removed once the copy succeeds). The target must hold VM
 // disks and be active on that node with room for the disk plus headroomPct (ConflictError
 // otherwise). The volid changes; the next volume sync picks up the new one.
 // A detached unusedN disk is copied offline even while the VM runs (qemu-server clone_disk
-// skips drive-mirror for unused drives). PVE refuses delete=1 while a VM snapshot still
-// references the disk; that error surfaces as is.
+// skips drive-mirror for unused drives). Any real VM snapshot is refused up front:
+// PVE cannot delete the source while a snapshot references it.
 // ponytail: waits for the copy inside the request; a large disk needs async task tracking.
 func (s *Service) RetypeVolume(ctx context.Context, projectID string, vmid int, volID, storage string, headroomPct float64) error {
 	if s.HolderOperations != nil {
@@ -407,6 +577,9 @@ func (s *Service) RetypeVolume(ctx context.Context, projectID string, vmid int, 
 	}
 	if d.Storage == storage {
 		return conflictf("The volume is already on storage %s", storage)
+	}
+	if err := s.checkRetypeSnapshots(ctx, vm); err != nil {
+		return err
 	}
 	if err := s.refuseUnreplicable(ctx, vm, storage); err != nil {
 		return err

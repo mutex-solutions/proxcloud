@@ -108,7 +108,7 @@ func TestPausedVMNeedsStoppingBeforeItsConfigChanges(t *testing.T) {
 	})
 	t.Run("resize stays off", func(t *testing.T) {
 		got := run(t, func(s *Service) error {
-			return s.ResizeServer(context.Background(), "p1", "101", ServerSpec{Slug: "s", VCPUs: 1, RAMMb: 512})
+			return s.ResizeServer(context.Background(), "p1", "101", ServerSpec{Slug: "s", VCPUs: 1, RAMMb: 512}, 10)
 		})
 		if got != "[shutdown config]" {
 			t.Fatalf("calls %s", got)

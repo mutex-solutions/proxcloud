@@ -135,6 +135,7 @@ func volCluster(t *testing.T, cfg101 string, writes map[string][]url.Values, ove
 		"GET /api2/json/nodes/pve2/qemu/900/config": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"data":{"tags":"pc-holder;proxcloud"}}`)
 		},
+		"GET /api2/json/nodes/pve1/qemu/101/snapshot":   say(`{"data":[{"name":"current","description":"You are here!","digest":"config-digest"}]}`),
 		"POST /api2/json/nodes/pve1/qemu":               rec("create"),
 		"POST /api2/json/nodes/pve1/qemu/900/config":    rec("holderconfig"),
 		"POST /api2/json/nodes/pve1/qemu/900/migrate":   rec("migrate"),
