@@ -65,9 +65,9 @@ func (v *vmInventory) addresses(ctx context.Context, r ClusterResource) (map[str
 		}
 	}
 	var entries []any
-	agentOK := r.Status != "running"
+	agentOK := false
 	if r.Status == "running" {
-		if ifaces, err := v.svc.C.AgentNetworkInterfaces(ctx, r.Node, r.VMID); err == nil {
+		if ifaces, err := v.svc.C.inventoryAgentInterfaces(ctx, r.Node, r.VMID); err == nil {
 			agentOK = true
 			entries, _ = AgentAddresses(ifaces)["private"].([]any)
 		}
@@ -230,4 +230,62 @@ func numberedConfigKey(key, prefix string) bool {
 	}
 	_, err := strconv.ParseUint(suffix, 10, 16)
 	return err == nil
+}
+
+// The legacy agent convenience method accepts absent/null result as nil,nil.
+// Here only an explicit array with valid interface/address identities can prove
+// that an old dynamic address disappeared. No guest write/exec is performed.
+func (c *Client) inventoryAgentInterfaces(ctx context.Context, node string, id int) ([]AgentInterface, error) {
+	var envelope map[string]json.RawMessage
+	if err := c.inventoryRead(ctx, qemuPath(node, id)+"/agent/network-get-interfaces", nil, &envelope); err != nil {
+		return nil, err
+	}
+	raw, ok := envelope["result"]
+	if !ok || string(raw) == "null" {
+		return nil, errors.New("guest-agent result is unknown")
+	}
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil || entries == nil {
+		return nil, errors.Join(err, errors.New("guest-agent result is not an array"))
+	}
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		var name, mac string
+		if json.Unmarshal(entry["name"], &name) != nil || name == "" || seen[name] {
+			return nil, errors.New("guest interface identity unknown")
+		}
+		seen[name] = true
+		if json.Unmarshal(entry["hardware-address"], &mac) != nil {
+			return nil, errors.New("guest interface MAC unknown")
+		}
+		if _, err := net.ParseMAC(mac); err != nil {
+			return nil, errors.New("guest interface MAC malformed")
+		}
+		var addresses []map[string]json.RawMessage
+		raw, ok := entry["ip-addresses"]
+		if !ok || string(raw) == "null" || json.Unmarshal(raw, &addresses) != nil || addresses == nil {
+			return nil, errors.New("guest interface addresses unknown")
+		}
+		for _, address := range addresses {
+			for _, key := range []string{"ip-address-type", "ip-address", "prefix"} {
+				if raw, ok := address[key]; !ok || string(raw) == "null" {
+					return nil, errors.New("guest IP address field unknown")
+				}
+			}
+			var kind, text string
+			var prefix int
+			if json.Unmarshal(address["ip-address-type"], &kind) != nil || json.Unmarshal(address["ip-address"], &text) != nil || json.Unmarshal(address["prefix"], &prefix) != nil {
+				return nil, errors.New("guest IP address malformed")
+			}
+			ip := net.ParseIP(text)
+			if ip == nil || prefix < 0 || kind == "ipv4" && (ip.To4() == nil || prefix > 32) || kind == "ipv6" && (ip.To4() != nil || prefix > 128) || kind != "ipv4" && kind != "ipv6" {
+				return nil, errors.New("guest IP family/prefix unknown")
+			}
+		}
+	}
+	var out []AgentInterface
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

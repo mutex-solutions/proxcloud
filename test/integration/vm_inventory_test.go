@@ -26,12 +26,13 @@ import (
 )
 
 type vmInventoryWire struct {
-	mode      string
-	full      bool
-	reads     int
-	mutate    func()
-	mutations int
-	aclReads  int
+	mode            string
+	full            bool
+	reads           int
+	mutate          func()
+	mutations       int
+	aclReads        int
+	protectionReads int
 }
 
 func vmWireRow(id int, template bool) map[string]any {
@@ -54,7 +55,35 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	gone := f.mode == "empty" || f.mode == "denied" || f.mode == "masked" || f.mode == "hidden" || f.mode == "partial-nodes"
 	template := f.mode == "template"
 	switch {
+	case strings.HasSuffix(path, "/agent/network-get-interfaces"):
+		switch f.mode {
+		case "agent-null":
+			write(nil)
+		case "agent-missing":
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case "agent-object":
+			write(map[string]any{})
+		case "agent-result-null":
+			write(map[string]any{"result": nil})
+		case "agent-empty-interface":
+			write(map[string]any{"result": []any{map[string]any{}}})
+		case "agent-null-addresses":
+			write(map[string]any{"result": []any{map[string]any{"name": "eth0", "hardware-address": "AA:BB:CC:DD:EE:01", "ip-addresses": nil}}})
+		case "agent-403":
+			w.WriteHeader(403)
+		default:
+			write(map[string]any{"result": []any{}})
+		}
+		return
+	case strings.Contains(path, "/replication/") && strings.HasSuffix(path, "/status"):
+		f.protectionReads++
+		write(map[string]any{"last_sync": 1, "fail_count": 0})
+		return
 	case path == "/cluster/replication":
+		if f.mode == "partial-protected" {
+			write([]any{map[string]any{"id": "102-0", "guest": 102, "target": "n2", "schedule": "*/15"}})
+			return
+		}
 		if f.mode == "protection-null" {
 			write(nil)
 		} else {
@@ -88,7 +117,7 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			write(nil)
 			return
 		}
-		if f.mode == "partial" {
+		if f.mode == "partial" || f.mode == "partial-protected" {
 			write([]any{vmWireRow(102, false)})
 			return
 		}
@@ -103,6 +132,15 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		row := vmWireRow(101, template)
+		if f.mode == "page-template-null" {
+			row["template"] = nil
+		}
+		if f.mode == "page-template-two" {
+			row["template"] = 2
+		}
+		if f.mode == "page-template-string" {
+			row["template"] = "1"
+		}
 		if f.mode == "page-null-cpu" {
 			row["maxcpu"] = nil
 		}
@@ -136,7 +174,7 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		members := []any{}
 		if !gone && f.mode != "foreign-ip" {
 			id := 101
-			if f.mode == "partial" {
+			if f.mode == "partial" || f.mode == "partial-protected" {
 				id = 102
 			}
 			members = append(members, map[string]any{"type": "qemu", "id": fmt.Sprintf("qemu/%d", id), "vmid": id, "node": "n1"})
@@ -196,6 +234,15 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			t = 1
 		}
 		cfg := map[string]any{"name": fmt.Sprintf("vm-%d", id), "smbios1": "uuid=" + uuid, "tags": "proxcloud;pc-c-1", "template": t, "scsi0": fmt.Sprintf("z:vm-%d-disk-0,size=8G", id), "net0": "virtio=AA:BB:CC:DD:EE:01,bridge=v1"}
+		if f.mode == "cfg-template-null" {
+			cfg["template"] = nil
+		}
+		if f.mode == "cfg-template-two" {
+			cfg["template"] = 2
+		}
+		if f.mode == "cfg-template-string" {
+			cfg["template"] = "1"
+		}
 		if f.mode == "holder" {
 			cfg["tags"] = "proxcloud;pc-holder"
 		}
@@ -211,6 +258,12 @@ func (f *vmInventoryWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if f.mode == "ip-object" {
 			cfg["ipconfig0"] = map[string]any{"ip": "192.0.2.1"}
+		}
+		if f.mode == "restore-cut-down" {
+			delete(cfg, "scsi0")
+			delete(cfg, "net0")
+			delete(cfg, "smbios1")
+			cfg["memory"] = "128"
 		}
 		if f.mode == "disk-null" {
 			cfg["scsi0"] = nil
@@ -291,7 +344,7 @@ func exactVMRow(t *testing.T, repo *cloud.Repo, old *cloud.CloudResource) {
 }
 
 func TestVMInventoryUnknownTwoRoundsAtomicScope(t *testing.T) {
-	for _, mode := range []string{"empty", "partial", "denied", "masked", "hidden", "null-page", "bad-pool", "offline", "migration", "reuse", "template", "holder", "disk-null", "disk-number", "disk-object", "page-null-cpu", "page-no-status", "partial-nodes", "pending-empty-object", "pending-null-key", "net-null", "ip-object"} {
+	for _, mode := range []string{"empty", "partial", "denied", "masked", "hidden", "null-page", "bad-pool", "offline", "migration", "reuse", "template", "holder", "disk-null", "disk-number", "disk-object", "page-null-cpu", "page-no-status", "partial-nodes", "pending-empty-object", "pending-null-key", "net-null", "ip-object", "page-template-null", "page-template-two", "page-template-string", "cfg-template-null", "cfg-template-two", "cfg-template-string"} {
 		for _, typ := range []string{cloud.TypeServer, cloud.TypeVolume, cloud.TypeImage} {
 			t.Run(mode+"/"+typ, func(t *testing.T) {
 				if mode == "template" && typ == cloud.TypeImage || mode == "holder" && typ == cloud.TypeVolume {
@@ -523,9 +576,17 @@ func TestVMInventoryProjectionFailuresDoNotEraseRowsOrHeal(t *testing.T) {
 		db := freshPG(t)
 		repo := cloud.NewRepo(db)
 		old := vmCached(t, db, cloud.TypeServer)
-		f := &vmInventoryWire{mode: "partial"}
+		f := &vmInventoryWire{mode: "partial-protected"}
 		s := vmTestService(t, f)
-		_, err := providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC())
+		list, err := vmProvider(s, cloud.TypeServer).List(ctx)
+		if err != nil || len(list) != 1 || f.protectionReads == 0 {
+			t.Fatalf("fixture did not reach protected VM mapping: %v %+v reads%d", err, list, f.protectionReads)
+		}
+		protection, _ := list[0].Data["server"].(map[string]any)["protection"].(map[string]any)
+		if protection["ha"] != false || protection["state"] != "syncing" {
+			t.Fatalf("fixture does not require protection heal: %+v", protection)
+		}
+		_, err = providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC())
 		if err == nil || f.mutations != 0 {
 			t.Fatalf("unknown scope healed: %v %d", err, f.mutations)
 		}
@@ -560,5 +621,79 @@ func TestVMInventoryForeignNICPreventsIPReuseAndLegacySampleLearnsUUID(t *testin
 	row, _ := repo.FindByID(ctx, old.ID)
 	if row == nil || row.Data["pveUUID"] == "" {
 		t.Fatal("legacy row failed to learn UUID from full mapping")
+	}
+}
+
+func TestVMInventoryUnknownAgentPreservesDynamicAddressesAndLegacy(t *testing.T) {
+	for _, mode := range []string{"agent-null", "agent-missing", "agent-object", "agent-result-null", "agent-empty-interface", "agent-null-addresses", "agent-403"} {
+		for _, legacy := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/legacy=%v", mode, legacy), func(t *testing.T) {
+				ctx := context.Background()
+				db := freshPG(t)
+				repo := cloud.NewRepo(db)
+				old := vmCached(t, db, cloud.TypeServer)
+				old.Data["server"].(map[string]any)["addresses"] = map[string]any{"private": []any{map[string]any{"addr": "192.0.2.42", "version": 4}}}
+				if legacy {
+					delete(old.Data, "pveUUID")
+				}
+				_, err := db.C("cloudResource").SetByID(ctx, old.ID, pgdoc.M{"data": old.Data}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f := &vmInventoryWire{mode: mode}
+				s := vmTestService(t, f)
+				for round := 0; round < 2; round++ {
+					st, err := providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC())
+					var unknown *cloud.InventoryUntrustedError
+					if !errors.As(err, &unknown) || st != (providers.ReconcileStats{}) {
+						t.Fatalf("round%d: %+v %v", round, st, err)
+					}
+					exactVMRow(t, repo, old)
+				}
+				f.mode = "" // explicit result[] is positive readable agent evidence
+				st, err := providers.Reconcile(ctx, vmProvider(s, cloud.TypeServer), repo, "s", time.Now().UTC())
+				if err != nil || st.Created != 0 || st.Deleted != 0 {
+					t.Fatalf("recovery: %+v %v", st, err)
+				}
+			})
+		}
+	}
+}
+
+func TestVMInventoryDurableUnknownAndRestoreVetoes(t *testing.T) {
+	for _, mode := range []string{"seed", "holder", "restore-cut-down"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			db := freshPG(t)
+			repo := cloud.NewRepo(db)
+			old := vmCached(t, db, cloud.TypeVolume)
+			f := &vmInventoryWire{}
+			s := vmTestService(t, f)
+			switch mode {
+			case "seed":
+				mustInsert(t, db, "pveSeedArtifact", pgdoc.M{"_id": "fixture-seed", "serviceId": "s", "serverId": "101", "mutationPending": true, "state": "prepared"})
+				s.SeedArtifacts = pve.NewSeedArtifactRepo(db)
+			case "holder":
+				ops := pve.NewHolderOperationRepo(db)
+				if err := ops.Ensure(ctx); err != nil {
+					t.Fatal(err)
+				}
+				_, err := db.Pool.Exec(ctx, `INSERT INTO "pveHolderOperation" (id,scope,owner,epoch,state,proof) VALUES ('11111111-1111-4111-8111-111111111111','pve-holders/s/pc-p','22222222-2222-4222-8222-222222222222',1,'DISPATCHING','{}')`)
+				if err != nil {
+					t.Fatal(err)
+				}
+				s.HolderOperations = ops
+			default:
+				f.mode = mode
+			}
+			for round := 0; round < 2; round++ {
+				st, err := providers.Reconcile(ctx, vmProvider(s, cloud.TypeVolume), repo, "s", time.Now().UTC())
+				var unknown *cloud.InventoryUntrustedError
+				if !errors.As(err, &unknown) || st != (providers.ReconcileStats{}) || f.mutations != 0 {
+					t.Fatalf("round%d: %+v %v writes%d", round, st, err, f.mutations)
+				}
+				exactVMRow(t, repo, old)
+			}
+		})
 	}
 }

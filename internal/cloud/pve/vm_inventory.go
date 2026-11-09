@@ -71,6 +71,12 @@ func (c *Client) inventoryVMPage(ctx context.Context, pool string) ([]ClusterRes
 			if err := json.Unmarshal(entry, &fields); err != nil {
 				return nil, err
 			}
+			if raw, present := fields["template"]; present {
+				var flag int
+				if string(raw) == "null" || json.Unmarshal(raw, &flag) != nil || (flag != 0 && flag != 1) {
+					return nil, errors.New("template classification is malformed")
+				}
+			}
 			if r.Status != "running" && r.Status != "stopped" {
 				return nil, errors.New("project VM status unknown")
 			}
@@ -322,7 +328,7 @@ func (v *vmInventory) verify(ctx context.Context, typ string, cached, listed []c
 			}
 		}
 		if cur := fresh[cr.ExternalID]; cur != nil {
-			if typ == cloud.TypeServer && v.addressUnknown[id] && vmRowUUID(cr) != "" && vmRowUUID(cr) == vmRowUUID(cur) {
+			if typ == cloud.TypeServer && v.addressUnknown[id] && (vmRowUUID(cr) == "" || vmRowUUID(cr) == vmRowUUID(cur)) {
 				oldSrv, _ := cr.Data["server"].(map[string]any)
 				newSrv, _ := cur.Data["server"].(map[string]any)
 				if addressesMissing(oldSrv["addresses"], newSrv["addresses"]) {
@@ -467,6 +473,13 @@ func (p *ImageSyncProvider) VerifyInventory(ctx context.Context, cached, listed 
 // Config payloads are open-ended, but destructive disk omission must never be
 // inferred from a null/object/number that VMConfig.Str silently turns into "".
 func validVMInventoryConfig(cfg VMConfig) error {
+	if value, present := cfg["template"]; present {
+		raw, err := json.Marshal(value)
+		var flag int
+		if err != nil || string(raw) == "null" || json.Unmarshal(raw, &flag) != nil || (flag != 0 && flag != 1) {
+			return errors.New("VM template classification is malformed")
+		}
+	}
 	for _, key := range []string{"name", "smbios1", "tags", "lock"} {
 		if val, present := cfg[key]; present {
 			if _, ok := val.(string); !ok {

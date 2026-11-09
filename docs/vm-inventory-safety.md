@@ -15,7 +15,10 @@ cache rows, IDs, timestamps and history. One failure stops that scope before any
 cache mutation and suppresses dependent destructive work. Protection projection
 is read-only; automatic healing is deferred until project proof succeeds.
 CSI-owned volume rows remain gateway-owned; moving/carrier and unresolved durable
-holder/seed intent never become deletion authority. Legacy SERVER rows learn UUID
+holder/seed intent never become deletion authority. A malformed or missing guest-agent
+result is unknown, not an empty address set: cached dynamic addresses remain exact,
+including legacy rows that have not learned UUID yet. Template flags, when present,
+must be numeric0 or1 before any SERVER/IMAGE classification decision. Legacy SERVER rows learn UUID
 from a full strict mapping before sampled enrichment can be carried forward.
 
 ## Proving real retirement
