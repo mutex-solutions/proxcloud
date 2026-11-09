@@ -42,6 +42,7 @@ jobs:
       PVE_TEMPLATE_STORAGE: ${{ secrets.PVE_TEMPLATE_STORAGE }}
       PVE_IMPORT_STORAGE: ${{ secrets.PVE_IMPORT_STORAGE }}
       PVE_BRIDGE: ${{ secrets.PVE_BRIDGE }}
+      PVE_BUILD_VLAN: ${{ secrets.PVE_BUILD_VLAN || '0' }}
       BUILD_IP: ${{ secrets.BUILD_IP }}
       BUILD_GATEWAY: ${{ secrets.BUILD_GATEWAY }}
       BUILD_NAMESERVER: ${{ secrets.BUILD_NAMESERVER }}
@@ -58,6 +59,10 @@ jobs:
               missing=1
             fi
           done
+          if [[ ! "$PVE_BUILD_VLAN" =~ ^(0|[1-9][0-9]{0,3})$ ]] || (( PVE_BUILD_VLAN > 4094 )); then
+            echo "::error::PVE_BUILD_VLAN must be 0 (untagged) or an integer from 1 to 4094"
+            missing=1
+          fi
           if (( missing )); then exit 1; fi
           # GitHub masks a multi-node secret as one value, not necessarily each node.
           for node in $PVE_NODES; do
@@ -76,7 +81,7 @@ jobs:
           for os in $OS_LIST; do
             for node in $PVE_NODES; do
               python3 images/build.py build --os "$os" --node "$node" --storage "$PVE_TEMPLATE_STORAGE" \
-                --import-storage "$PVE_IMPORT_STORAGE" --bridge "$PVE_BRIDGE" --build-ip "$BUILD_IP" \
+                --import-storage "$PVE_IMPORT_STORAGE" --bridge "$PVE_BRIDGE" --vlan "$PVE_BUILD_VLAN" --build-ip "$BUILD_IP" \
                 --build-gateway "$BUILD_GATEWAY" --nameserver "$BUILD_NAMESERVER" | tee -a manifest.jsonl
             done
           done

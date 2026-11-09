@@ -11,6 +11,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -234,6 +235,14 @@ def cmd_build(pve, a, img):
         delete="ipconfig0,sshkeys,ciuser,cipassword,nameserver",
     ))
     smoke_test(pve, a, vmid, name)
+    # The smoke clone must use the real build network first. Only then remove its NIC
+    # from the template: tenant/server creation supplies its own net0 and must never
+    # inherit the build bridge, MAC or access VLAN. Failed cleanup cannot publish.
+    pve.wait(a.node, pve.call(
+        "POST", "/nodes/%s/qemu/%s/config" % (a.node, vmid), delete="net0",
+    ))
+    if "net0" in pve.call("GET", "/nodes/%s/qemu/%s/config" % (a.node, vmid)):
+        raise SystemExit("template cleanup: build NIC remains; refusing publication")
     # Published only now: the portal never sees an untested template.
     pve.wait(a.node, pve.call(
         "POST", "/nodes/%s/qemu/%s/config" % (a.node, vmid),
@@ -246,6 +255,13 @@ def cmd_build(pve, a, img):
     print(json.dumps({"os": a.os, "node": a.node, "built": True, "vmid": vmid, "version": version, "pruned": pruned}))
 
 
+def vlan_arg(value):
+    """A build-only access VLAN: 0 is untagged; 1..4094 are IEEE 802.1Q IDs."""
+    if not re.fullmatch(r"0|[1-9][0-9]{0,3}", value) or int(value) > 4094:
+        raise argparse.ArgumentTypeError("VLAN must be 0 (untagged) or an integer from 1 to 4094")
+    return int(value)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("command", choices=["build", "base"])
@@ -254,7 +270,7 @@ def main():
     p.add_argument("--storage", required=True, help="where the template disk lives")
     p.add_argument("--import-storage", required=True, help="a store with `import` content for the vendor image")
     p.add_argument("--bridge", default="vmbr0")
-    p.add_argument("--vlan", type=int, default=0)
+    p.add_argument("--vlan", type=vlan_arg, default=0, help="build-guest VLAN: 0 untagged (default), 1..4094 tagged")
     p.add_argument("--build-ip", help="free CIDR on the bridge for the build and smoke VMs")
     p.add_argument("--build-gateway")
     p.add_argument("--nameserver")

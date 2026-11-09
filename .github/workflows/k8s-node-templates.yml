@@ -32,7 +32,9 @@ jobs:
       PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
       PVE_NODES: ${{ secrets.PVE_NODES }}
       PVE_TEMPLATE_STORAGE: ${{ secrets.PVE_TEMPLATE_STORAGE }}
+      PVE_ISO_STORAGE: ${{ secrets.PVE_ISO_STORAGE }}
       PVE_BRIDGE: ${{ secrets.PVE_BRIDGE }}
+      PVE_BUILD_VLAN: ${{ secrets.PVE_BUILD_VLAN || '0' }}
       # Leave BUILD_DHCP_RANGE unset when the build bridge already has DHCP.
       DHCP_RANGE: ${{ secrets.BUILD_DHCP_RANGE }}
       DHCP_GATEWAY: ${{ secrets.BUILD_GATEWAY }}
@@ -55,6 +57,10 @@ jobs:
           fi
           if [[ -z "${K8S_VERSION//[[:space:]]/}" ]]; then
             echo "::error::Missing required workflow input: version"
+            missing=1
+          fi
+          if [[ ! "$PVE_BUILD_VLAN" =~ ^(0|[1-9][0-9]{0,3})$ ]] || (( PVE_BUILD_VLAN > 4094 )); then
+            echo "::error::PVE_BUILD_VLAN must be 0 (untagged) or an integer from 1 to 4094"
             missing=1
           fi
           if (( missing )); then exit 1; fi
