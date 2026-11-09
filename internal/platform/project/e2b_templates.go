@@ -982,13 +982,19 @@ func (t *sandboxTemplateDoc) e2bView() map[string]any {
 // ready build. nil = not a project template (the caller tries built-ins). Only the project's own records are read, so
 // another project's template is "not found".
 func (h *Handler) resolveCustomTemplate(ctx context.Context, projectID, ref string) (*sandbox.Template, string, error) {
+	t, name, _, err := h.resolveCustomTemplateWithKind(ctx, projectID, ref)
+	return t, name, err
+}
+
+// Resolve the kind from the same owned record as the ready image, never a second lookup or caller flag.
+func (h *Handler) resolveCustomTemplateWithKind(ctx context.Context, projectID, ref string) (*sandbox.Template, string, string, error) {
 	if h.sbTemplates == nil {
-		return nil, "", nil
+		return nil, "", "", nil
 	}
 	name, tag := splitNameTag(ref)
 	t, err := h.loadTemplate(ctx, projectID, name)
 	if err != nil || t == nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	var bl *templateBuild
 	if tag == "" {
@@ -997,12 +1003,12 @@ func (h *Handler) resolveCustomTemplate(ctx context.Context, projectID, ref stri
 		bl = t.build(id)
 	}
 	if bl == nil || bl.Status != sandbox.BuildReady || bl.Image == "" {
-		return nil, "", fmt.Errorf("%w: template %q has no ready build", sandbox.ErrBadTemplate, ref)
+		return nil, "", "", fmt.Errorf("%w: template %q has no ready build", sandbox.ErrBadTemplate, ref)
 	}
 	return &sandbox.Template{
 		Image: bl.Image, CPU: t.CPU, MemoryGiB: t.MemoryGiB, GPU: t.GPU, StartCmd: bl.StartCmd, ReadyCmd: bl.ReadyCmd,
 		User: bl.User, Workdir: bl.Workdir, StartAsRoot: bl.StartAsRoot, Description: "custom template " + t.Name,
-	}, t.Name, nil
+	}, t.Name, t.Kind, nil
 }
 
 func (h *Handler) e2bTemplateDelete(w http.ResponseWriter, r *http.Request) {

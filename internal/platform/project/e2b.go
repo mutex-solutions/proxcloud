@@ -369,7 +369,7 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
-	custom, customName, err := h.resolveCustomTemplate(r.Context(), c.proj.ID, b.TemplateID)
+	custom, customName, customKind, err := h.resolveCustomTemplateWithKind(r.Context(), c.proj.ID, b.TemplateID)
 	if errors.Is(err, sandbox.ErrBadTemplate) {
 		e2bErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -417,17 +417,39 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.cloudResourceAudit(c.user, c.proj, "CLOUD_RESOURCE_CREATE", "E2B_CREATE", saved)
-	if err := h.e2bWaitReady(r.Context(), c, saved); err != nil {
-		slog.Warn("e2b: sandbox did not become ready; deleting it", "sandbox", spec.ID, "err", err)
-		if derr := h.sandboxDelete(context.WithoutCancel(r.Context()), c.es, c.proj, saved); derr != nil {
-			slog.Error("e2b: delete after failed start", "sandbox", spec.ID, "err", derr)
+	if custom == nil || customKind != "" {
+		// Built-ins, snapshots and unknown future kinds retain their complete legacy path.
+		if err := h.e2bWaitReady(r.Context(), c, saved); err != nil {
+			slog.Warn("e2b: sandbox did not become ready; deleting it", "sandbox", spec.ID, "err", err)
+			if derr := h.sandboxDelete(context.WithoutCancel(r.Context()), c.es, c.proj, saved); derr != nil {
+				slog.Error("e2b: delete after failed start", "sandbox", spec.ID, "err", derr)
+			}
+			e2bErr(w, http.StatusServiceUnavailable, "the sandbox did not start in time (no capacity for this size?)")
+			return
 		}
-		e2bErr(w, http.StatusServiceUnavailable, "the sandbox did not start in time (no capacity for this size?)")
+		a, err := c.ss.AccessFor(r.Context(), c.proj.ID, spec.ID)
+		if err != nil {
+			e2bFail(w, err)
+			return
+		}
+		e2bJSON(w, http.StatusCreated, c.e2bSandbox(spec.ID, spec.Template, a))
 		return
 	}
-	a, err := c.ss.AccessFor(r.Context(), c.proj.ID, spec.ID)
+	// Capture the server-generated lifetime before the waiter replaces saved.Data with live data.
+	budget, expires := e2bCreateReadyBudget(custom != nil, customKind, saved.Data, time.Now())
+	a, err := e2bColdAccess(r.Context(), budget, expires, time.Now,
+		func(ctx context.Context) error { return h.e2bWaitReadyWithBudget(ctx, c, saved, budget, expires) },
+		func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, spec.ID) })
 	if err != nil {
-		e2bFail(w, err)
+		slog.Warn("e2b: sandbox did not become ready; deleting it", "sandbox", spec.ID, "err", err)
+		latestEnd := time.Time{}
+		if custom != nil && customKind == "" {
+			latestEnd = expires
+		}
+		if derr := h.sandboxDeleteAt(context.WithoutCancel(r.Context()), c.es, c.proj, saved, latestEnd); derr != nil {
+			slog.Error("e2b: delete after failed start", "sandbox", spec.ID, "err", derr)
+		}
+		e2bErr(w, http.StatusServiceUnavailable, "the sandbox did not become ready within its startup or lifetime limit")
 		return
 	}
 	e2bJSON(w, http.StatusCreated, c.e2bSandbox(spec.ID, spec.Template, a))
@@ -450,6 +472,114 @@ func (h *Handler) e2bWaitReady(ctx context.Context, c *e2bCaller, cr *cloud.Clou
 				slog.Warn("e2b: cache update after start", "sandbox", cr.ExternalID, "err", err)
 			}
 			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
+const (
+	e2bCustomReadyTimeout = 120 * time.Second
+	e2bReadyReturnGrace   = 5 * time.Second
+)
+
+// Only normal project builds get a cold-pull allowance. Snapshot/future kinds and
+// unknown lifetimes keep the legacy bound; no caller field may select this budget.
+func e2bCreateReadyBudget(custom bool, kind string, data map[string]any, now time.Time) (time.Duration, time.Time) {
+	if !custom || kind != "" {
+		return e2bReadyTimeout, time.Time{}
+	}
+	end, _ := time.Parse(time.RFC3339, fmt.Sprint(data["shutdownTime"]))
+	if end.IsZero() {
+		return e2bReadyTimeout, time.Time{}
+	}
+	return min(e2bCustomReadyTimeout, end.Sub(now)-e2bReadyReturnGrace), end
+}
+
+func e2bReadyAlive(ctx context.Context, expires, now time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !expires.IsZero() && !now.Before(expires) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// One derived deadline covers readiness, cache work and the final live access read.
+func e2bColdAccess(ctx context.Context, budget time.Duration, expires time.Time, now func() time.Time,
+	wait func(context.Context) error, access func(context.Context) (*sandbox.Access, error),
+) (*sandbox.Access, error) {
+	readyBy := now().Add(budget)
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	if err := wait(ctx); err != nil {
+		return nil, err
+	}
+	if err := e2bReadyAlive(ctx, expires, now()); err != nil {
+		return nil, err
+	}
+	a, err := access(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := e2bReadyAlive(ctx, expires, now()); err != nil {
+		return nil, err
+	}
+	if !now().Before(readyBy) {
+		return nil, context.DeadlineExceeded
+	}
+	return a, nil
+}
+
+func (h *Handler) e2bWaitReadyWithBudget(ctx context.Context, c *e2bCaller, cr *cloud.CloudResource, budget time.Duration, expires time.Time) error {
+	return e2bPollReady(ctx, budget, expires, time.Now,
+		func(ctx context.Context) (map[string]any, error) {
+			return c.ss.GetSandbox(ctx, c.proj.ID, cr.ExternalID)
+		},
+		func(ctx context.Context, live map[string]any) {
+			cr.Data = live
+			now := time.Now().UTC()
+			cr.UpdatedAt = &now
+			if _, err := h.cloud.Update(ctx, cr); err != nil {
+				slog.Warn("e2b: cache update after start", "sandbox", cr.ExternalID, "err", err)
+			}
+		})
+}
+
+// The per-call clock/read/store seam keeps deadline tests fast without mutable globals.
+func e2bPollReady(ctx context.Context, budget time.Duration, expires time.Time, now func() time.Time,
+	read func(context.Context) (map[string]any, error), store func(context.Context, map[string]any),
+) error {
+	readyBy := now().Add(budget)
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	alive := func() error {
+		at := now()
+		if err := e2bReadyAlive(ctx, expires, at); err != nil {
+			return err
+		}
+		if !at.Before(readyBy) {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	t := time.NewTicker(250 * time.Millisecond)
+	defer t.Stop()
+	for {
+		if err := alive(); err != nil {
+			return err
+		}
+		live, err := read(ctx)
+		if err := alive(); err != nil {
+			return err
+		}
+		if err == nil && live["status"] == sandbox.StatusRunning {
+			store(ctx, live)
+			return alive()
 		}
 		select {
 		case <-ctx.Done():

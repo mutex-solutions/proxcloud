@@ -686,6 +686,23 @@ gVisor are unchanged. User-code Kaniko still has no registry credentials and rea
 only base/push have their existing scoped credentials. No tool-image version, snapshot path or registry acceptance
 policy changes. Build status and digest parsing remain unchanged. [Diagnosis and evidence boundary](../../managed-sandbox.md#77-sdk-custom-build-format-diagnosis-2026-11-09).
 
+### Cold project-built template create readiness
+
+**Why:** after both image-format/handoff fixes, the actual SDK build reached READY with all five build containers
+exiting 0, but its first runtime image pull took 57.813 s, exceeding create's 50 s wait. This was a readiness-budget
+failure, not another failed build or proof of no capacity. `resolveCustomTemplateWithKind` takes the ready image and
+kind from the same owned record; only a normal build (`kind == ""`) enters the cold-create path. Built-ins, snapshots,
+unknown future kinds, fork and resume retain their original 50 s behavior, including short-lifetime creates.
+
+The cold path permits at most 120 s across readiness/cache work/final access read, bounded by the original request
+context and the server-generated saved `shutdownTime` minus 5 s. The original expiry is captured before live data can
+replace the cache payload. Checks after slow reads/cache/access prevent a late RUNNING response or shifted live end
+from yielding 201. Missing/malformed expiry never grants the extended budget. Failure uses the same uncancelled
+native cleanup once; `sandboxDeleteAt` physically deletes now but caps financial endedAt/archive time at the original
+expiry. No lifetime extension, quota change or minute-minimum billing-policy change is introduced. SDK HTTP timeout
+is separate: cold custom clients should explicitly allow 150 s, disable retries and request a useful lifecycle such
+as 300 s; stock defaults do not guarantee the longer wait. [Compatibility limits](../../e2b-compat.md#differences-from-e2b).
+
 ### Usage and release gates
 
 | Symbol | Location | Role |
