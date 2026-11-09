@@ -64,10 +64,12 @@ Both kinds of key are a pair joined with a dot, sent as a static bearer header:
 | Protection | `enable_server_protection`, `disable_server_protection` |
 | Kubernetes | `list_kubernetes_clusters`, `create_kubernetes_cluster`, `get_kubeconfig`, `set_kubernetes_node_groups`, `upgrade_kubernetes_cluster` |
 | Databases | `list_databases`, `create_database` (backups through `list_backups` / `create_backup`) |
-| DNS | `list_dns_zones`, `list_dns_records`, `set_dns_record`, `delete_dns_record` |
+| DNS | `list_dns_zones`, `create_dns_ownership_challenge`, `get_dns_ownership`, `verify_dns_ownership`, `cancel_dns_ownership`, `create_dns_zone`, `list_dns_records`, `set_dns_record`, `delete_dns_record` |
 | Sandboxes | `list_sandboxes`, `list_sandbox_templates`, `create_sandbox`, `exec_in_sandbox`, `get_sandbox_logs`, `get_sandbox_access`, `set_sandbox_timeout`, `delete_sandbox` |
 
 `list_project_services` is where the create tools get their inputs: the service id that `create_kubernetes_cluster` and `create_database` must name, and each service's catalog (Kubernetes versions and flavors, database engines, sandbox templates and limits).
+
+For a new DNS zone, run `create_dns_ownership_challenge` with its attached provider and domain, publish the returned exact TXT value at the **current DNS host**, then `verify_dns_ownership` and `create_dns_zone` with that challenge id within10minutes. The value is shown once, with only a scoped hash stored. Pending challenges expire in30minutes and reserve nothing. No tenant DNS server, CNAME shortcut, raw token or `verified:true` bypasses the gate; native HTTP and MCP share it. Wait10seconds between checks and60seconds between zone-create attempts per project, allowing DNS caches to propagate. On an uncertain create, check `list_dns_zones` before starting another challenge. Operator `ownershipResolvers` overrides are trust configuration, not tool inputs or production proof from a private lab resolver.
 
 Two tools return credentials into the agent's conversation: `get_kubeconfig` (a cluster-admin kubeconfig) and `get_sandbox_access` (the sandbox's access tokens). Sandbox API keys, deleting a project and the Kubernetes maintenance actions stay in the portal.
 

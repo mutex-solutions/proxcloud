@@ -8,6 +8,53 @@ invariants the code holds. Four sequence diagrams follow.
 
 Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
+## DNS creation authorization
+
+```mermaid
+sequenceDiagram
+  participant U as Console / MCP / HTTP
+  participant P as project handler
+  participant DB as PostgreSQL
+  participant R as Fixed trusted resolver
+  participant D as PowerDNS authoritative API
+  U->>P: challenge(project, provider, canonical zone)
+  P->>DB: project try-lock, quota, scoped hash + PENDING(30min)
+  P-->>U: TXT name + random256bit value ONCE
+  Note over U,R: User publishes at existing DNS host, not a zone created first here
+  U->>P: verify(challenge id, provider)
+  P->>DB: project try-lock + atomic backoff/PENDING check
+  P->>D: live available/foreign overlap check
+  P->>R: exact-owner TXT over fixed TCP (total4s)
+  P->>D: live available check again
+  P->>DB: atomic re-read current auth/config/state → VERIFIED(10min)
+  U->>P: create DNS_ZONE(name, ownershipId)
+  P->>DB: global CREATE try-lock (all provider aliases)
+  P->>D: live preflight
+  P->>DB: final DB-only current authorization + row lock, commit CONSUMED
+  P->>D: POST zone (no intervening preflight)
+  D-->>P: created or uncertain failure
+  P->>DB: cache created zone (proof stays CONSUMED even on failure)
+  P-->>U: zone or safe actionable failure
+```
+
+- `powerdns.CanonicalZone` is the sole identity for new names: IDNA A-label, strict labels, recognized PSL suffix below
+  its registry/private boundary. `_proxcloud-ownership.` is a constant record prefix, not a tenant query fragment.
+- `LookupProofTXT` connects only to literal endpoints from operator policy, never tenant input or host system DNS. Exact
+  question/ID/owner/TXT and no CNAME/DNAME/truncation; multiple RR chunks concatenate within one RR only. Conventional DNS
+  trust, not DNSSEC. Any configured trusted endpoint can prove control; stale/missing answers only delay success.
+- `dnsUpdate` uses `GetForUpdate` for **every** state mutation: stale verification/backoff/cancel cannot resurrect a
+  consumed proof. No external DNS or PowerDNS work occurs inside a row transaction. No nested session lock is needed.
+- `dnsProjectLock` uses try-lock429 to prevent one tenant's queued requests occupying the shared lock pool. Global
+  create try-lock409 is held only for fresh, scoped, still-valid verified proofs and actual bounded upstream create.
+  A10s total create deadline plus durable60s per-project attempt cooldown across every proof/provider bounds one valid
+  owner's slow-backend retries. Busy/invalidated proofs spend no attempt; failed live preflight does.
+- `CreateWithGate` calls `consumeDNSProof` **after** live preflight and **immediately before** upstream POST. Its short
+  row transaction rereads current project/permission/provider/config and state, then commits single-use consumption.
+  Revocation after that point is not rollback of an already authorized external request. A timeout requires checking the
+  zone list; it never restores the proof. The post-create live overlap guard remains for operator/out-of-band races.
+- Existing zones are not retroactively gated/deleted. Same-project parent TXT can prove a child; a foreign/operator
+  overlap never can. Pending/verified records exclude no other project from challenge or proof.
+
 ## C4.1 Tenant network isolation
 
 | Symbol | Location | Role |

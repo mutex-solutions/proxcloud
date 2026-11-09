@@ -863,11 +863,84 @@ from ProxCloud only. Zones are `Native`, so the operator replicates them (databa
 A zone belongs to the project in its `account` field (`proxcloud:<projectId>`). Every read and write checks it first,
 and another project's zone looks absent. Names are global on the server: a taken name answers `409`. So does a name above
 or below a zone the project does not own, including zones the operator made by hand (empty `account`) and the name server
-hosts, because the server answers from the longest matching zone with no delegation step. A public suffix (`co.uk`) is
-refused too. ProxCloud does not prove a tenant owns a domain, so a tenant can hold a name it does not own until the owner
-complains, and that hold also blocks the names above and below it; a zone only reaches the internet once the domain is
-delegated to these name servers. Zones that overlapped before this rule are not touched. Tenants may not write the SOA or
-the apex NS. Zones are not billed and have no quota yet.
+hosts, because the server answers from the longest matching zone with no delegation step. New names use strict IDNA
+A-label canonicalization (lowercase, one final dot); public suffixes, private suffixes (`github.io`), unknown/internal
+suffixes, wildcards and malformed labels are refused. Tenants may not write the SOA or apex NS. Zones are not billed and
+have no zone-count quota yet; ownership challenges have their own bounded quota below.
+
+### Ownership proof before creating a zone
+
+Every **new** zone requires a fresh TXT proof before any authoritative zone is created. The console guides the flow;
+MCP has `create_dns_ownership_challenge`, `get_dns_ownership`, `verify_dns_ownership`, `cancel_dns_ownership` and
+`create_dns_zone`. Native HTTP and MCP share the same backend gate; `verified:true`, a raw token or a zone in the cache
+cannot bypass it. All lifecycle routes require project membership plus `project:cloud_resource:manage` and an exact
+attached, enabled PowerDNS provider. Paths below have the `/api/v1` prefix:
+
+| Method / path | Contract |
+|---|---|
+| `POST /project/{id}/dns-ownership` | `{serviceId,name}` → `{id,name,serviceId,state:"PENDING",recordName,recordType:"TXT",recordValue,expiresAt}`. Publish the **exact** value at `_proxcloud-ownership.<canonical-zone>.` on your current DNS host. Token is returned only here, with `Cache-Control: no-store`. |
+| `GET /project/{id}/dns-ownership/{ownershipId}?serviceId=…` | State, record name and deadlines; never the token or hash. Lost token: cancel and start again. |
+| `POST /project/{id}/dns-ownership/{ownershipId}/verify` | `{serviceId}` only. Trusted TXT lookup, not tenant-supplied token/server. Correct exact-owner TXT → `VERIFIED` and `verifiedUntil`. Wrong/not visible →409; resolver failure →502; backoff/busy →429. |
+| `DELETE /project/{id}/dns-ownership/{ownershipId}?serviceId=…` | Cancel a challenge (idempotent); does not delete an existing zone. |
+| `POST /project/{id}/cloud?serviceId=…` | `{type:"DNS_ZONE",data:{name,ownershipId}}`; matching `VERIFIED` proof required. Consume then create, once only. |
+
+The random value has **256 bits** of entropy. Only a SHA-256 hash bound to project/provider/canonical-zone is stored.
+Pending lifetime is30minutes; a successful proof authorizes one create for10minutes. Verification cannot extend an already
+verified proof. Maximum10live challenges and20new challenges/hour **per project across all providers**; cancellation and
+consumption do not reset the hourly budget. Attempts are at least10seconds apart; simultaneous project requests get429
+rather than holding shared lock-pool connections. Pending and even verified challenges are **nonexclusive**: they never
+reserve a name or block another project's challenge. Expired rows cannot grant access; challenge history older than24h
+is opportunistically pruned for that project on its next challenge, retaining no permanent reservation.
+
+A PostgreSQL session advisory lock serializes actual creates across every provider/alias in this database; busy returns409
+without consuming the proof. The complete create request has a10second deadline. A durable60second create-attempt
+cooldown spans **all proofs/providers of one project**, even when live preflight fails; invalid/foreign/config-invalidated
+proofs and global-busy responses spend no attempt. This bounds one valid owner's slow-backend occupancy of the shared
+namespace lock; it is a low-volume global safety bottleneck, not a high-throughput multi-writer DNS engine.
+No DNS proof lookup holds that global lock. Short row-lock transactions protect backoff,
+verify/cancel and consumption. Consumption commits **before** PowerDNS POST, and is not rolled back by a failed/uncertain
+HTTP response. On failure, refresh the zone list (sync also finds owned zones); if absent, start a new challenge. The
+live PowerDNS overlap guard runs before verify, after lookup and under the create lock. Only actual existing zones
+exclude overlap, never pending claims. Operator writes outside ProxCloud are not covered by its DB lock, so the existing
+post-create overlap check remains too. Fresh project/provider/permission checks run at finalize/create. Changing API URL,
+server ID, name servers or verification resolvers invalidates earlier proofs.
+
+### Resolver trust, caches and controlled lab overrides
+
+Default verification queries **TCP** `1.1.1.1:53` and `8.8.8.8:53`, not the API host's system resolver, a tenant server or
+the PowerDNS HTTP API. Permit API egress to those endpoints. At most two TCP queries,2seconds each, total4seconds; any
+configured trusted resolver's exact answer can prove control. Other resolver failure/disagreement can delay visibility,
+but does not add a new trust source. Only the queried owner's TXT records count (chunks within one RR concatenate;
+separate RRs never concatenate). CNAME/DNAME indirection, truncated/mismatched/malformed responses and failed resolvers
+fail closed. DNS negative and positive cache TTLs still apply: wait and retry, do not create a zone to make proof visible.
+
+This is conventional DNS TXT control proof, **not DNSSEC validation** or legal domain ownership. It trusts the configured
+resolver operators and the network path; use trusted, independently operated recursors with a public DNS view in
+production. Do not point verification at the tenant-managed authoritative backend, a recursor forwarding undelegated
+zones to it, or a resolver tenants can reconfigure. Otherwise a split/private view can vouch for data not publicly owned.
+The record need not remain after creation; this is a short-lived creation authorization, not continuous domain monitoring.
+
+An operator with `admin:service:manage` may set `config.ownershipResolvers` to **one or two literal unicast `IP:port`**
+endpoints, e.g. `["10.88.0.10:5301"]`, using the provider's Advanced config or admin provider PUT. Hostnames, URLs,
+zero ports, unspecified/multicast addresses and tenant resolver input are rejected. Omit/null restores public defaults;
+an empty list is invalid. This is a trust override, never a per-tenant choice. Private authoritative endpoints are useful
+only for a **controlled drill**, with an isolated proof publisher separate from the actual zone-creation backend and no
+production domain/delegation. Such a drill proves the gate and packet flow, not public domain ownership. The operator
+connection page shows the effective policy. Do not ship a lab override into production.
+
+A same-project, already-managed parent can legitimately publish the TXT for its child; control of that parent delegates
+child control. A foreign-project/operator parent on the same PowerDNS server is still refused by the live overlap rule,
+even with an external proof. No automatic legacy-parent ownership grant or domain-wide permanent ownership is inferred.
+
+### Upgrade and existing zones
+
+Upgrade **all API replicas** before reopening DNS creates: an old replica still runs the former ungated create path.
+Startup ensures the `dns_ownership` table/index and wires mandatory proof storage; an unwired handler refuses new creates.
+No new tenant or cloud permission, secret, workflow, DNS grant or destructive migration is required. Existing zones,
+including unproved/overlapping legacy zones, remain readable, editable and deletable: no retroactive cleanup or outage.
+Operator reconciliation of legacy ownership is a separate explicit process. New recreate-after-delete needs a fresh proof.
+Audits record challenge/verify/cancel identity/outcome but no token/hash; proof-looking TXT values are redacted in record
+mutation audit. Avoid logging challenge response bodies at reverse proxies or in automation transcripts.
 
 A project's deletion removes its zones by `account`, with or without rows. If the server is down the project stays
 `DELETE_IN_PROGRESS` and the deletion job retries every sweep. The same holds for shares, Proxmox, ceph-s3 credentials and
