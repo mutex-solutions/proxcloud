@@ -40,6 +40,69 @@ func TestFirstHostAndDHCPRange(t *testing.T) {
 	}
 }
 
+func TestStaticHostRange(t *testing.T) {
+	tests := []struct {
+		cidr, gateway, first, last string
+	}{
+		{"10.113.0.0/29", "10.113.0.1", "10.113.0.2", "10.113.0.6"},
+		{"10.113.0.0/29", "", "10.113.0.1", "10.113.0.6"},
+		{"10.113.0.0/29", "10.113.0.4", "10.113.0.1", "10.113.0.6"},
+		{"10.113.0.0/29", "10.113.0.6", "10.113.0.1", "10.113.0.5"},
+		{"10.113.0.248/29", "10.113.0.249", "10.113.0.250", "10.113.0.254"},
+		{"10.113.0.0/30", "10.113.0.1", "10.113.0.2", "10.113.0.2"},
+		{"10.113.0.252/30", "10.113.0.254", "10.113.0.253", "10.113.0.253"},
+		{"10.113.0.0/28", "10.113.0.1", "10.113.0.10", "10.113.0.14"},
+		{"10.113.0.240/28", "10.113.0.241", "10.113.0.250", "10.113.0.254"},
+		{"10.113.0.128/25", "10.113.0.129", "10.113.0.138", "10.113.0.254"},
+		{"10.113.0.0/24", "10.113.0.10", "10.113.0.11", "10.113.0.254"},
+		{"10.113.0.0/16", "10.113.0.1", "10.113.0.10", "10.113.255.254"},
+		{"255.255.255.248/29", "255.255.255.249", "255.255.255.250", "255.255.255.254"},
+		{"0.0.0.0/0", "0.0.0.1", "0.0.0.10", "255.255.255.254"},
+		{"10.113.0.0/31", "", "", ""},
+		{"10.113.0.1/32", "", "", ""},
+		{"2001:db8::/64", "", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.cidr+"/gateway="+tt.gateway, func(t *testing.T) {
+			_, ipnet, err := net.ParseCIDR(tt.cidr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, last := staticHostRange(ipnet, tt.gateway)
+			if first != tt.first || last != tt.last {
+				t.Fatalf("range = %q..%q, want %q..%q", first, last, tt.first, tt.last)
+			}
+			if first != "" && (!ipnet.Contains(net.ParseIP(first)) || !ipnet.Contains(net.ParseIP(last))) {
+				t.Fatal("range escapes its subnet")
+			}
+		})
+	}
+	for _, ipnet := range []*net.IPNet{nil, {IP: net.IPv4(10, 0, 0, 1), Mask: net.IPMask{255, 0, 255, 0}}} {
+		if first, last := staticHostRange(ipnet, ""); first != "" || last != "" {
+			t.Errorf("invalid subnet: %q..%q", first, last)
+		}
+	}
+}
+
+func TestDHCPRangeKeepsMinimum(t *testing.T) {
+	for _, cidr := range []string{"10.113.0.0/29", "10.113.0.0/30", "10.113.0.0/31", "10.113.0.1/32", "2001:db8::/64"} {
+		_, ipnet, _ := net.ParseCIDR(cidr)
+		if first, last := dhcpRange(ipnet, ""); first != "" || last != "" {
+			t.Errorf("%s: unexpected DHCP range %q..%q", cidr, first, last)
+		}
+	}
+	for _, tt := range []struct{ cidr, first, last string }{
+		{"10.113.0.240/28", "10.113.0.250", "10.113.0.254"},
+		{"10.113.0.128/25", "10.113.0.138", "10.113.0.254"},
+		{"10.113.0.0/16", "10.113.0.10", "10.113.255.254"},
+	} {
+		_, ipnet, _ := net.ParseCIDR(tt.cidr)
+		if first, last := dhcpRange(ipnet, firstHost(ipnet)); first != tt.first || last != tt.last {
+			t.Errorf("%s: DHCP range %q..%q, want %s..%s", tt.cidr, first, last, tt.first, tt.last)
+		}
+	}
+}
+
 func TestCreateNetworkStagesVnetAndSubnet(t *testing.T) {
 	var gotVnet map[string]string
 	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){

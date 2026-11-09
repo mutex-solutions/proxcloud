@@ -105,7 +105,8 @@ sequenceDiagram
 | `lockSDN`, `withSDNLock` | `cloud_network_pve.go:38`, `:54` | Platform-wide `sdn-apply` lock (PostgreSQL); busy returns 409, a crashed holder expires after 3 minutes |
 | `pvePickCIDR` | `cloud_network_pve.go:255` | Requested CIDR must sit inside `cidrPool`, be `/29` or larger and overlap nothing; blank picks the first free `/24` |
 | `Service.SubnetCIDRs` | `internal/cloud/pve/network.go:298` | Every subnet on the cluster (all zones, all projects, foreign vnets), read under the lock |
-| `Service.CreateNetwork` | `network.go:157` | Stages vnet `v<5 base36>` with alias `st:<projectId>:<name>`, then its subnet (gateway, DHCP range, SNAT) |
+| `Service.CreateNetwork` | `network.go:161` | Stages vnet `v<5 base36>` with alias `st:<projectId>:<name>`, then its subnet (gateway, DHCP range, SNAT) |
+| `Service.VnetStaticPoolFor`, `staticHostRange`, `dhcpRange` | `internal/cloud/pve/network.go` | Platform-assigned IPv4 hosts are independent of PVE DHCP sizing. `/29` and `/30` static pools use usable hosts; `/28` and larger retain network+10. Network/broadcast and gateway endpoints are excluded; `pickPublicIP` skips a gateway inside the span and allocated addresses. Malformed, IPv6 and `/31`–`/32` static subnets fail without returning empty range endpoints. DHCP keeps its `/28` minimum. |
 | `ZoneIDFor` | `network.go:341` | Per-project EVPN zone id: `p` + 7 base36 chars of `sha256(projectId)` (8 chars, the PVE limit) |
 | `Service.EnsureProjectZone` | `network.go:353` | Stages the project zone from the default EVPN zone template; next free VRF VNI (from 10000); refuses an id collision with another owner |
 | `isolationRules`, `projectIsolationRules`, `Service.isolationOwner` | `network.go` | This portal's provider-wide DROPs, one project's ACCEPTs, and the comment that marks the DROPs as this portal's (below) |
@@ -192,8 +193,13 @@ one vnet is switched and needs no rule. There is deliberately no blanket
 
 Addresses: PVE offers DHCP on simple zones only (`dhcp` on an EVPN zone is refused). On a
 zone without DHCP the platform allocates the server's `net0` address when it clones the VM
-(`VnetStaticPool`, `PublicIPRepo.Allocate`, a row on NIC `net0`), writes it to `ipconfig0`,
-and pins `ipfilter-net0` to that `/32`. On a DHCP zone the set is the subnet plus `0.0.0.0`,
+(`VnetStaticPoolFor`, `staticHostRange`, `PublicIPRepo.Allocate`, a row on NIC `net0`), writes it to `ipconfig0`,
+and pins `ipfilter-net0` to that `/32`. A valid `192.0.2.0/29` with gateway `.1` allocates `.2`–`.6`;
+large subnets retain the network+10 reservation (an upper `/25` starts at `.138`, not `.10`).
+The range uses whole IPv4 addresses and never crosses its subnet or includes network/broadcast.
+An interior gateway remains inside the span but is never allocated. The network-create API still
+accepts `/29` or larger; accepting backend `/30` static hosts does not widen that API. DHCP ranges
+are separate and retain their minimum 16-address subnet. On a DHCP zone the set is the subnet plus `0.0.0.0`,
 because `proxmox-firewall` checks ipfilter before `dhcp=1` and would drop DISCOVER.
 
 ```mermaid
