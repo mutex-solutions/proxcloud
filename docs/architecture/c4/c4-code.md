@@ -42,6 +42,41 @@ sequenceDiagram
 
 This is at-least-once execution with atomic native financial effects, NOT exactly-once SMTP/HTTP/cloud execution. External billing HTTP behavior remains separate with no native fallback. Mail/invite delivery remains best-effort; SSE stays pod-local. Schema/resource deployment and legacy queue drain/removal are separate rollout work. [Operator contract](../../durable-jobs.md).
 
+## Dormant durable reminder mail infrastructure (PR A)
+
+**Implemented but inactive:** no business producer or production dispatcher registration.
+Existing notifications remain best-effort; PR B's atomic reminder decision is not claimed here.
+
+| Symbol / component | Primary invariant |
+|---|---|
+| `mailoutbox.EnqueueTx` | Exact owning pgdoc transaction; fixed savings-reminder/v1 DTO, event/generation/window/opaque recipient identity, at most 20 single-recipient immutable envelopes; no hidden transaction. |
+| `PrepareReminder`, `textcrypt.BlobKeys` | Stable MIME-safe From/To/subject/Date/Message-ID; max 1 MiB wire, no attachments; strict AEAD bytea with ID/kind/version/key-ID AAD, keyed plaintext fingerprint, retained key IDs and fail-closed missing/corrupt keys. |
+| `Claim`, `Renew`, `BeginDispatch` | Primary DB-clock UUID/epoch leases; post-row-wait fresh clock plus final TTL after journal insert. Expired CLAIMED rescues, but intent commits before connect and expired DISPATCHING becomes UNKNOWN, never a retry candidate. |
+| `DurableSMTP.Deliver` | Context dial + real socket deadlines/cancellation; mandatory TLS outside explicit literal-loopback test adapter; one RCPT; pre-EOD known-unsent vs possible-EOD UNKNOWN; DATA250 accepted even if QUIT fails. |
+| `RecordOutcome`, attempt journal | Append-only attempt-specific receipts. Same UNKNOWN attempt may accept late definitive evidence; older attempt cannot update newer ownership. At most 8 intents, jitter, expiry=min(contract end, frozen decision+30 days). |
+| Read-only admin status | Primary RBAC `admin:bill:read` before opaque IDs/state/reasons/counts/times; no recipient, body, subject, credential or raw SMTP error. No resend/edit/replay API or extra read pool. |
+
+```mermaid
+sequenceDiagram
+  participant B as Future business decision (not wired)
+  participant D as PostgreSQL PRIMARY
+  participant W as Explicit local test dispatcher
+  participant S as Loopback SMTP fake
+  B->>D: EnqueueTx joins business commit, sealed immutable envelopes
+  W->>D: T1 claim UUID owner + epoch + DB lease
+  W->>D: T2 row lock, fresh TTL, authenticate payload, append intent
+  W->>D: Final TTL CAS after journal write, COMMIT DISPATCHING
+  Note over W,S: Network runs with NO SQL transaction
+  W->>S: Frozen single-recipient MAIL / RCPT / DATA body
+  W->>S: Separate end-of-DATA terminator
+  S-->>W: DATA250 or definitive refusal or lost reply
+  W->>D: T3 append typed receipt for SAME attempt
+  Note over W,D: Lease/crash/ACK loss after intent becomes UNKNOWN, never redispatch
+```
+
+Relay acceptance is not inbox delivery and stable Message-ID does not provide exactly-once SMTP.
+[Safety limits and local test evidence](../../mail-outbox-safety-limits.md).
+
 ## Holder operation fencing (R1)
 
 **Why:** PVE tasks outlive HTTP cancellation and PostgreSQL session loss does not

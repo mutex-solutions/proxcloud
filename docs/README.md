@@ -32,6 +32,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [mail-outbox-safety-limits.md](mail-outbox-safety-limits.md) — dormant primary mail
+  infrastructure, frozen encrypted envelopes, typed SMTP receipts and UNKNOWN holds;
+  no business activation or resend API.
+
 - [auth.md](auth.md) — the OAuth2/OIDC resource server, realms per audience, and
   SigV4 keys for the public admin API.
 - [billing.md](billing.md) — price plans and rules, rating and bills,

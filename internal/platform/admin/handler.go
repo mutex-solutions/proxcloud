@@ -92,6 +92,7 @@ type Handler struct {
 	// sandboxGates checks a sandbox provider's release gates (SetSandboxGates; nil = none can go live).
 	sandboxGates    func(ctx context.Context, es *externalservice.ExternalService) []sandbox.Gate
 	seedArtifacts   *pve.SeedArtifactRepo // secret-free operator cleanup status
+	mailOutbox      mailOutboxReader
 	durableStore    *durablejobs.Store
 	durableHistory  *durablejobs.History
 	durableValidate func(*durablejobs.Job) error
@@ -166,6 +167,8 @@ func (h *Handler) Routes(r chi.Router) {
 		// (2xx) POST/PUT/DELETE under /admin (see audit_mw.go).
 		r.Use(h.auditMiddleware)
 		r.Get("/me", h.me)
+		r.Get("/mail-outbox", h.mailOutboxOverview)
+		r.Get("/mail-outbox/{id}", h.mailOutboxStatus)
 		r.Get("/durable-jobs", h.durableStatus)
 		r.Post("/durable-jobs/{id}/replay", h.durableReplay)
 		r.Get("/flavor-categories", h.flavorCategories)

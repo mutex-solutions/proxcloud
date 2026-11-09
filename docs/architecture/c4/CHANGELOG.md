@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: dormant durable reminder mail infrastructure (PR A)
+
+**What changed:** dedicated primary `mail_outbox`/event fingerprint/append-only attempt tables;
+owned-business-transaction enqueue of one frozen recipient envelope per row, additive strict
+key-ID AEAD blobs, typed bounded SMTP and opaque RBAC read-only status. T2 intent commits before
+connect, no SQL transaction surrounds SMTP, expired intents remain UNKNOWN, and late definitive
+receipts bind only to the same immutable attempt. Dispatch is OFF: no worker registration,
+business producer, cron, backfill, production enable flag or resend API. Legacy mail/textcrypt
+behavior, broker/Compose/chart configuration and all notification callers are unchanged.
+
+**Why:** a database-only durable-job completion cannot atomically ACK SMTP, and a lease cannot
+kill an old SMTP socket. Lost EOD receipts must not silently resend; random ciphertext cannot
+serve immutable deduplication. Per-recipient sealed snapshots, keyed plaintext fingerprints and
+explicit UNKNOWN holds make the uncertainty and privacy boundaries reviewable before PR B's
+atomic savings-reminder decision is added.
+
+**Diagrams updated:** C4 mail-intent sequence/invariant table. [Safety and limits](../../mail-outbox-safety-limits.md)
+document the dormant scope, 20-recipient/1-MiB/8-attempt/30-day bounds, mandatory TLS/key behavior
+and local PostgreSQL + loopback transcript evidence. No actual SMTP recipients or lab changes.
+
 ## 2026-11-09: broker-free deployment of PostgreSQL durable jobs
 
 **What changed:** fresh Compose, Helm quickstart/defaults and installer stage 40 need no RabbitMQ

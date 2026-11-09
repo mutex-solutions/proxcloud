@@ -34,6 +34,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/config"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/health"
+	"github.com/mutex-solutions/proxcloud/internal/mailoutbox"
 	"github.com/mutex-solutions/proxcloud/internal/oidc"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/account"
@@ -176,6 +177,18 @@ func run() error {
 	// the billing payment-gateway reads decrypt with the SAME key. Declared here (ahead of esSvc at
 	// its original site) so the mail resolver closure below can capture it.
 	enc := textcrypt.New(cfg.Encryption.DefaultKey)
+	// PR A: provision the dedicated outbox, expose opaque read-only metadata,
+	// but register NO dispatcher/background worker and NO business caller.
+	// Missing/short legacy keys do not break the existing disabled deployment;
+	// any future EnqueueTx fails closed until a >=32-byte key is configured.
+	blobKeys, blobErr := textcrypt.NewBlobKeys("default-v1", map[string]string{"default-v1": cfg.Encryption.DefaultKey})
+	if blobErr != nil {
+		log.Warn("mail outbox payload key unavailable; dispatch remains disabled")
+	}
+	mailOutbox := mailoutbox.New(pg, blobKeys)
+	if err := mailOutbox.Ensure(ctx); err != nil {
+		return fmt.Errorf("mail outbox schema unavailable")
+	}
 	billingRepo.SetEncryptor(enc) // decrypt payment-gateway (Stripe) secrets on GetGateway
 	integrationStore := pg.C("thirdPartyIntegration")
 	envMailer := mail.FromEnv()
@@ -468,6 +481,7 @@ func run() error {
 	// Admin handler (needs esSvc + region + the cloud-client factory for cloud-admin live reads).
 	adminH := admin.NewHandler(admin.NewRepo(pg), catalog.NewRepo(pg), users, addFundsSvc, pricingRepo, billingRepo, cloudRepo, platformconfig.NewRepo(pg), auditSvc, esSvc, cfg.DefaultRegion, cfg.Auth.Admin.IssuerURI, cfg.Auth.Admin.ClientID)
 	adminH.SetHmacEncryptor(enc)
+	adminH.SetMailOutbox(mailOutbox)
 	adminH.SetCollectChecker(txnScanner)
 	adminH.SetKamaji(kamajiFactory)
 	adminH.SetCSIMigrator(func(ctx context.Context, es *externalservice.ExternalService, ks *kamaji.Service, clusterID string, dryRun, force bool, adoptDetached []string) (any, error) {
