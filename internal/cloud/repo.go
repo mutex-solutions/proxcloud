@@ -348,7 +348,7 @@ func (r *Repo) DeleteAndArchive(ctx context.Context, res *CloudResource, now tim
 // archive writes a one-time history copy:
 // no-op if a record already exists for this cloudResourceId; copies only
 // cloudResourceId/region/serviceId/type/data/createdAt/externalId/projectId + deletedAt.
-func (r *Repo) archive(ctx context.Context, res *CloudResource, now time.Time) error {
+func (r *Repo) archive(ctx context.Context, res *CloudResource, now time.Time, sourceHash ...string) error {
 	exists, err := r.history.Exists(ctx, pgdoc.M{"cloudResourceId": res.ID})
 	if err != nil {
 		return err
@@ -356,16 +356,21 @@ func (r *Repo) archive(ctx context.Context, res *CloudResource, now time.Time) e
 	if exists {
 		return nil // idempotent per cloudResourceId
 	}
+	hash := ""
+	if len(sourceHash) == 1 {
+		hash = sourceHash[0]
+	}
 	_, err = r.history.InsertOne(ctx, History{
-		CloudResourceID: res.ID,
-		Region:          res.Region,
-		ServiceID:       res.ServiceID,
-		Type:            res.Type,
-		Data:            res.Data,
-		CreatedAt:       res.CreatedAt,
-		ExternalID:      res.ExternalID,
-		ProjectID:       res.ProjectID,
-		DeletedAt:       &now,
+		SourceSnapshotHash: hash,
+		CloudResourceID:    res.ID,
+		Region:             res.Region,
+		ServiceID:          res.ServiceID,
+		Type:               res.Type,
+		Data:               res.Data,
+		CreatedAt:          res.CreatedAt,
+		ExternalID:         res.ExternalID,
+		ProjectID:          res.ProjectID,
+		DeletedAt:          &now,
 	})
 	return err
 }

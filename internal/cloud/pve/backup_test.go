@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/mutex-solutions/proxcloud/internal/cloud"
 )
 
 // heldVolumes is a guard over the fake VM's volumes: on the server since before any archive.
@@ -545,33 +543,12 @@ func TestRetireServer(t *testing.T) {
 // While a restore runs the VM has no disks in its config. Their rows must wait, or the bill stops and the row's age is lost.
 // Once it has failed the disks are gone: the rows must go, with their bill.
 func TestVolumeRowsAcrossARestore(t *testing.T) {
-	row := &cloud.CloudResource{Data: map[string]any{"volume": map[string]any{"vmid": 101}}}
-	keeps := func(t *testing.T, cfg, active string) bool {
+	for _, cfg := range []string{`{"lock":"create","name":"web"}`, `{"memory":"128"}`} {
 		b := newBackupCluster(t)
-		b.cfg, b.active = cfg, active
-		p := b.s.VolumeSyncProvider("r", "p1", nil)
-		rows, err := p.List(context.Background())
-		if err != nil || len(rows) != 0 {
-			t.Fatalf("%v %v", rows, err)
+		b.cfg = cfg
+		if _, err := b.s.VolumeSyncProvider("r", "p1", nil).List(context.Background()); err == nil {
+			t.Fatal("cut-down restore cannot prove inventory, even after a task timeout")
 		}
-		keep, _ := p.KeepUnread(row)
-		return keep
-	}
-	const running = `[{"upid":"u","type":"qmrestore","id":"101","status":"running"}]`
-	if !keeps(t, `{"lock":"create","name":"web"}`, "[]") {
-		t.Fatal("the lock of a restore keeps the rows")
-	}
-	if !keeps(t, `{"memory":"128"}`, running) {
-		t.Fatal("a running restore keeps the rows")
-	}
-	if keeps(t, `{"memory":"128"}`, "[]") {
-		t.Fatal("a failed restore must let the rows go")
-	}
-	if keeps(t, `{"memory":"128"}`, `[{"upid":"u","type":"qmrestore","id":"101","endtime":5,"status":"job errors"}]`) {
-		t.Fatal("a task that has ended is not running")
-	}
-	if !keeps(t, `{"memory":"128"}`, `not json`) {
-		t.Fatal("not knowing keeps the rows")
 	}
 }
 

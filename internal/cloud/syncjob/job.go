@@ -59,7 +59,7 @@ type Job struct {
 	dbaasFor      DbaasFactory
 	pveFor        ProxmoxFactory
 	publicIPs     PublicIPLister
-	releaseIP     PublicIPReleaser
+	ipInventory   *project.PublicIPRepo
 	audit         *audit.Service
 	sdnLock       *lock.ShedLock
 	shareAccess   func(ctx context.Context, projectID string) error
@@ -214,10 +214,13 @@ func (j *Job) detectProxmoxCapabilities(ctx context.Context) {
 				j.log.Warn("syncjob: drop stale seeds", "serviceId", es.ID, "err", err)
 			}
 		}
-		if j.loadBalancers != nil {
+		if j.loadBalancers != nil && !inventoryFailed(ctx, es.ID, "") {
 			if err := j.loadBalancers(ctx, ps, es); err != nil {
 				j.log.Warn("syncjob: load balancers", "serviceId", es.ID, "err", err)
 			}
+		}
+		if inventoryFailed(ctx, es.ID, "") {
+			continue
 		}
 		if err := j.reconcileSandboxWorkers(ctx, ps, es); err != nil {
 			j.log.Error("syncjob: sandbox workers", "serviceId", es.ID, "err", err)
@@ -376,8 +379,9 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 	}
 	count := 0
 	now := j.now()
+	serverProvider := ps.ServerSyncProvider(region, p.ID, es.PVEGPUAliasOf)
 	provs := []providers.Provider{
-		ps.ServerSyncProvider(region, p.ID, es.PVEGPUAliasOf),
+		serverProvider,
 		ps.VolumeSyncProvider(region, p.ID, es.PVEVolumeProfileFunc()),
 		ps.ImageSyncProvider(region, p.ID),
 		ps.NetworkSyncProvider(region, p.ID),
@@ -388,6 +392,9 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 		provs = append(provs, j.csiVolumes(region, p.ID, es))
 	}
 	for _, prov := range provs {
+		if inventoryFailed(ctx, es.ID, p.ID) {
+			break
+		}
 		st, err := providers.Reconcile(ctx, prov, j.cloud, es.ID, now)
 		if err != nil {
 			var untrusted *cloud.InventoryUntrustedError
@@ -402,6 +409,14 @@ func (j *Job) syncProxmoxService(ctx context.Context, p *project.Project, es *ex
 	}
 	if inventoryFailed(ctx, es.ID, p.ID) {
 		return count // do not rewrite isolation or run cleanup from an untrusted read
+	}
+	if err := serverProvider.ReconcileVerifiedProtection(ctx); err != nil {
+		j.log.Warn("syncjob: verified protection reconcile", "project", p.ID, "serviceId", es.ID, "err", err)
+		var untrusted *cloud.InventoryUntrustedError
+		if errors.As(err, &untrusted) {
+			markInventoryFailure(ctx, es.ID, p.ID)
+			return count
+		}
 	}
 	j.reconcileIsolation(ctx, ps, p, es)
 	if _, err := ps.RemoveBlankVMs(ctx, p.ID); err != nil {

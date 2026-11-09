@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Protect full and sampled Proxmox SERVER/VOLUME/IMAGE reconciliation from
+  filtered, malformed or unreadable VM inventories. Same-credential scoped proof
+  and whole-row CAS preserve cache/history on unknown reads; identity retirement
+  requires complete existing ACL/node authority. Delay protection healing until
+  proof succeeds. Orphan IP cleanup now requires authoritative VM/address non-use
+  and exact allocation/archive receipts instead of age or bulk NIC release;
+  ambiguous reuse, other guest NICs and legacy/BeforeRow allocations stay held.
 - Fail closed on permission-filtered PVE NETWORK inventories: prove effective
   same-token visibility and revalidate omitted networks/subnets before cache
   writes, preserving tenant rows and NAS exports on unknown results while genuine

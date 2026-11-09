@@ -44,7 +44,16 @@ type PublicIPReleaser func(ctx context.Context, serviceID, serverID, nic string)
 
 // WithPublicIPs wires the allocations behind the FLOATING_IP billing rows (nil = no such rows).
 func (j *Job) WithPublicIPs(list PublicIPLister, release PublicIPReleaser) *Job {
-	j.publicIPs, j.releaseIP = list, release
+	j.publicIPs = list
+	// Legacy bulk ReleaseNIC callback is intentionally NOT a cleanup authority.
+	_ = release
+	return j
+}
+
+// WithPublicIPInventory enables exact-generation orphan cleanup. Without this
+// optional seam the sampler retains allocations (never falls back to ReleaseNIC).
+func (j *Job) WithPublicIPInventory(r *project.PublicIPRepo) *Job {
+	j.ipInventory = r
 	return j
 }
 
@@ -71,6 +80,7 @@ func (j *Job) proxmoxTargets(ctx context.Context) ([]externalservice.ExternalSer
 // RunPVEState is the fleet-wide sampler: SERVER, IMAGE and FLOATING_IP rows of every project, off
 // one /cluster/resources page per provider. Returns the rows changed.
 func (j *Job) RunPVEState(ctx context.Context) (int, error) {
+	ctx = withInventoryFailures(ctx)
 	services, projects, err := j.proxmoxTargets(ctx)
 	if err != nil {
 		return 0, err
@@ -92,16 +102,11 @@ func (j *Job) samplePVE(ctx context.Context, es *externalservice.ExternalService
 		return 0
 	}
 	page, err := ps.C.ClusterResources(ctx, "vm")
-	if err == nil && len(page) == 0 {
-		// Never trust an empty page: it would archive every VM of every project. The full sync still
-		// archives them if the cluster really is empty.
-		err = errors.New("cluster reported no VMs")
-	}
 	if err != nil {
 		j.meterFailed(ctx, es, now, err)
 		return 0
 	}
-	j.meterOK(ctx, es, now)
+	allOK := true
 	region := es.PVERegion()
 	count := 0
 	for i := range projects {
@@ -118,43 +123,73 @@ func (j *Job) samplePVE(ctx context.Context, es *externalservice.ExternalService
 		for k := range cached {
 			byExt[cached[k].ExternalID] = &cached[k]
 		}
-		j.releaseOrphanIPs(ctx, es.ID, p.ID, page, byExt, now)
+		proved := true
 		for _, prov := range []providers.Provider{
 			ps.SampledServerProvider(region, p.ID, page, byExt),
 			ps.SampledImageProvider(region, p.ID, page),
-			j.floatingIPProvider(region, p.ID, es.ID),
 		} {
 			st, err := providers.Reconcile(ctx, prov, j.cloud, es.ID, now)
 			if err != nil {
-				j.log.Error("syncjob: state sample", "project", p.ID, "serviceId", es.ID, "type", prov.Type(), "err", err)
+				proved, allOK = false, false
+				markInventoryFailure(ctx, es.ID, p.ID)
+				j.log.Warn("syncjob: VM inventory unverified; retaining rows and allocations, repair provider visibility", "project", p.ID, "serviceId", es.ID, "type", prov.Type(), "err", err)
 			}
 			count += st.Created + st.Updated + st.Deleted
 		}
+		if !proved {
+			continue
+		}
+		if err := j.releaseOrphanIPs(ctx, ps, es.ID, p.ID, page, byExt, now); err != nil {
+			// A conservative IP hold is not a stale VM state sample. Keep its
+			// derived rows, but do not stop unrelated healthy VM billing.
+			j.log.Warn("syncjob: allocation absence unverified; retained exact allocation", "project", p.ID, "serviceId", es.ID, "err", err)
+			continue
+		}
+		st, err := providers.Reconcile(ctx, j.floatingIPProvider(region, p.ID, es.ID), j.cloud, es.ID, now)
+		if err != nil {
+			allOK = false
+			j.log.Error("syncjob: floating IP inventory", "err", err)
+		}
+		count += st.Created + st.Updated + st.Deleted
+	}
+	if allOK {
+		j.meterOK(ctx, es, now)
+	} else {
+		j.meterFailed(ctx, es, now, errors.New("VM inventory or allocation proof incomplete"))
 	}
 	return count
 }
 
 // releaseOrphanIPs frees the addresses of VMs destroyed outside the portal, which would otherwise
 // stay allocated and billed forever.
-func (j *Job) releaseOrphanIPs(ctx context.Context, serviceID, projectID string, page []pve.ClusterResource, rows map[string]*cloud.CloudResource, now time.Time) {
-	if j.publicIPs == nil || j.releaseIP == nil {
-		return
+func (j *Job) releaseOrphanIPs(ctx context.Context, ps *pve.Service, serviceID, projectID string, page []pve.ClusterResource, rows map[string]*cloud.CloudResource, now time.Time) error {
+	if j.publicIPs == nil || j.ipInventory == nil {
+		return nil
 	}
 	allocs, err := j.publicIPs(ctx, serviceID, projectID)
 	if err != nil {
-		j.log.Error("syncjob: list public IPs", "project", projectID, "serviceId", serviceID, "err", err)
-		return
+		return err
 	}
-	listed := make(map[string]bool, len(page))
-	for i := range page {
-		listed[strconv.Itoa(page[i].VMID)] = true
+	listed := map[string]bool{}
+	for _, r := range page {
+		listed[strconv.Itoa(r.VMID)] = true
 	}
+	var problems []error
 	for _, o := range orphanIPs(allocs, listed, rows, now) {
-		j.log.Info("syncjob: releasing the address of a vanished VM", "project", projectID, "serviceId", serviceID, "server", o.ServerID, "nic", o.NIC)
-		if err := j.releaseIP(ctx, serviceID, o.ServerID, o.NIC); err != nil {
-			j.log.Error("syncjob: release address", "project", projectID, "server", o.ServerID, "err", err)
+		old := rows[o.ServerID]
+		if listed[o.ServerID] || old == nil || o.BeforeRow {
+			problems = append(problems, &cloud.InventoryUntrustedError{Type: cloud.TypeServer, ExternalID: o.ServerID, Reason: "allocation generation unknown or VMID reused; manual repair required"})
+			continue
+		}
+		if err := ps.ProveVMAndAddressUnused(ctx, projectID, old, o.IP); err != nil {
+			problems = append(problems, err)
+			continue
+		}
+		if _, err := j.ipInventory.ReleaseIfUnchanged(ctx, o, old); err != nil {
+			problems = append(problems, err)
 		}
 	}
+	return errors.Join(problems...)
 }
 
 // orphanIPs picks the allocations that outlived their VM: the vmid is not listed anymore (past the
