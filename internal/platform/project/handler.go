@@ -101,7 +101,8 @@ type Handler struct {
 	// sbKeys holds the sandbox API keys, SHA-256 only (SetSandboxKeys; nil = the E2B API refuses every key).
 	sbKeys *pgdoc.Store
 	// sbTemplates holds the projects' custom templates and their builds (SetSandboxTemplates; nil = off).
-	sbTemplates *pgdoc.Store
+	sbTemplates   *pgdoc.Store
+	sbBuildPinsDB *pgdoc.DB
 	// sbPaused holds the paused sandboxes (SetSandboxPaused; nil = pause and resume off).
 	sbPaused   *pgdoc.Store
 	sbSafety   *pgdoc.Store

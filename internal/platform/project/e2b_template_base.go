@@ -29,10 +29,11 @@ type fromRegistry struct {
 
 // buildBase is the resolved base of a build.
 type buildBase struct {
-	Ref          string
-	Auth         sandbox.BaseAuth
-	DockerConfig []byte         // for BaseAuthUser
-	Parent       *templateBuild // what the child inherits (a built-in or a project template)
+	Ref              string
+	Auth             sandbox.BaseAuth
+	DockerConfig     []byte         // for BaseAuthUser
+	Parent           *templateBuild // what the child inherits (a built-in or a project template)
+	ParentTemplateID string
 }
 
 const dockerHubAuthKey = "https://index.docker.io/v1/"
@@ -133,10 +134,10 @@ func (h *Handler) resolveBase(ctx context.Context, c *e2bCaller, fromImage, from
 			bl = t.build(id)
 		}
 		own := strings.TrimRight(cfg.TemplateRegistry, "/") + "/" + c.proj.ID + "/"
-		if bl == nil || bl.Status != sandbox.BuildReady || !strings.HasPrefix(bl.Image, own) {
+		if bl == nil || buildPinSDKStatus(bl) != sandbox.BuildReady || !strings.HasPrefix(bl.Image, own) {
 			return nil, errBase("template '%s' has no ready build", fromTemplate)
 		}
-		return &buildBase{Ref: bl.Image, Auth: sandbox.BaseAuthRegistry, Parent: bl}, nil
+		return &buildBase{Ref: bl.Image, Auth: sandbox.BaseAuthRegistry, Parent: bl, ParentTemplateID: t.ID}, nil
 	}
 	// No base given, or E2B's own base image (what the SDK's Template() / from_base_image() sends): the location's
 	// "base" template, which is that image plus the ProxCloud conventions.

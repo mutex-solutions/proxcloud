@@ -57,10 +57,11 @@ var (
 
 // Service drives one sandbox provider (one sandbox cluster).
 type Service struct {
-	api       K8sAPI
-	cfg       Config
-	serviceID string
-	now       func() time.Time
+	api              K8sAPI
+	cfg              Config
+	serviceID        string
+	now              func() time.Time
+	requireBuildPins bool
 }
 
 // New builds a live Service from the provider config.
@@ -72,7 +73,9 @@ func New(cfg Config, serviceID string) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: cluster kubeconfig: %w", err)
 	}
-	return NewWithAPI(kc, cfg, serviceID), nil
+	s := NewWithAPI(kc, cfg, serviceID)
+	s.requireBuildPins = true
+	return s, nil
 }
 
 // NewWithAPI builds a Service over any K8sAPI (tests).

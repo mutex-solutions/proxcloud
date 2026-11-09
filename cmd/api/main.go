@@ -70,6 +70,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/sse"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
+	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 	"github.com/mutex-solutions/proxcloud/internal/server"
 	"github.com/mutex-solutions/proxcloud/pkg/auth"
 	"github.com/mutex-solutions/proxcloud/pkg/certfile"
@@ -314,6 +315,10 @@ func run() error {
 	projectH.SetSandboxKeys(pg.C("sandbox_api_keys"))
 	// Custom templates and their builds (the E2B v3 template API).
 	projectH.SetSandboxTemplates(pg.C("sandbox_templates"))
+	if err := registrypins.EnsureSchema(context.Background(), pg); err != nil {
+		return fmt.Errorf("sandbox build registry pin schema: %w", err)
+	}
+	projectH.SetSandboxBuildPins(pg)
 	// Paused sandboxes (E2B pause, autoPause, autoResume): the saved CR and the snapshot each one resumes from.
 	projectH.SetSandboxPaused(pg.C("sandbox_paused"))
 	for _, table := range []string{"sandbox_safety", "auditEvent"} {

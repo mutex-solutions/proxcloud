@@ -4,6 +4,36 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-09: registry BUILD/template participation (P2-A)
+
+**What changed:** startup schema + BUILD-only wiring; stable owner/nonce PREPARING,
+BASE+DEST pins committed before use/project TX, locked candidate revalidation and
+one durable dispatch marker. Production StartBuild requires the unique opaque
+proof, copied proofs share use/cancel state, and positively unused cancellation
+keeps its no-remint marker. Exact pod annotations/UID evidence retain BASE aliases
+until terminal; durable terminal owner checkpoints resume per-pin handoff after
+pod removal. READY DEST bindings survive retained historical builds/tag edits;
+trim/delete tombstones retain exact cleanup generations. Compact retired build-ID
+identities survive full receipt cleanup and refuse stale pre-prepare resurrection.
+All public readiness projections/usable selections wait for completed handoff;
+current retained From/Image refs conservatively HOLD parent cleanup, without
+claiming complete durable provenance pin coverage. Independent retired generations
+continue cleanup before aggregated HOLDs return, so an eligible retired child
+cannot starve its held parent forever; same-digest ambiguity remains conservative.
+
+**Why:** retrying an ambiguous apply or independently minting in-memory proofs
+could dispatch twice; stale saves/error handlers could lose completed tags or
+poison a known owner. Full owner CAS and resumable exact terminal transitions keep
+uncertainty visible without a lease, guessed success or SQL transaction around
+new network effects. Other writers/adoption are not covered; BOTH real-delete
+paths stay unconditional HOLD.
+
+**Diagrams updated:** BUILD participation code invariant table and tracked operator
+contract. Focused unit/race + real-PG/fake-K8s/loopback-S3 cover admission/one apply,
+known refusal vs UNKNOWN, proof copy/cancel/no remint, generation cleanup and owned
+BASE+DEST crash checkpoints before/after each handoff with no old pod. No live
+registry/Kubernetes actions or real-GC acceptance are claimed.
+
 ## 2026-11-09: dormant durable registry pins and real-delete HOLD (PR1)
 
 **What changed:** add an explicit PRIMARY DB-only pin/prune-intent core, canonical
