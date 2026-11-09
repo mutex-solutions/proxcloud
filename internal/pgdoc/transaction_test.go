@@ -2,6 +2,7 @@ package pgdoc
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,19 @@ func TestTxRequiresOwnedTransaction(t *testing.T) {
 	called := false
 	if err := b.WithTx(ctx, func(context.Context) error { called = true; return nil }); err == nil || called {
 		t.Fatal("nested transaction silently crossed databases")
+	}
+}
+
+func TestRejectInheritedTransactionWithoutContextStripping(t *testing.T) {
+	if err := RejectInheritedTransaction(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range []*DB{{}, {}} {
+		ctx := context.WithValue(context.Background(), txKey{}, &pgxTxStub{})
+		ctx = context.WithValue(ctx, txOwnerKey{}, owner)
+		if err := RejectInheritedTransaction(ctx); !errors.Is(err, ErrInheritedTransaction) {
+			t.Fatalf("inherited transaction accepted: %v", err)
+		}
 	}
 }
 

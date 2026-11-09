@@ -917,8 +917,8 @@ func run() error {
 				if g, err := time.ParseDuration(r.URL.Query().Get("grace")); err == nil && g >= 0 {
 					grace = g
 				}
-				projectH.PruneSandboxRegistryOlderThan(r.Context(), grace)
-				jobResult(w, map[string]any{"ran": "registry-prune", "grace": grace.String()}, nil)
+				err := projectH.PruneSandboxRegistryOlderThan(r.Context(), grace)
+				jobResult(w, map[string]any{"ran": "registry-prune", "grace": grace.String()}, err)
 			},
 			"run-pve-tasks": func(w http.ResponseWriter, r *http.Request) {
 				n, err := syncJob.RunPVETasks(r.Context())
