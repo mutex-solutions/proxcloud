@@ -151,7 +151,7 @@ func TestValidationMigrationTwoFamilyPopulatedCipherAADWireAndConcurrentRR(t *te
 		t.Fatal("second ensure", e)
 	}
 	var name string
-	if e = db.Pool.QueryRow(ctx, `SELECT conname FROM pg_constraint WHERE conrelid='mail_outbox'::regclass AND conname IN ('mail_outbox_family_v1','mail_outbox_family_v2')`).Scan(&name); e != nil || name != "mail_outbox_family_v2" {
+	if e = db.Pool.QueryRow(ctx, `SELECT conname FROM pg_constraint WHERE conrelid='mail_outbox'::regclass AND conname IN ('mail_outbox_family_v1','mail_outbox_family_v2','mail_outbox_family_v3')`).Scan(&name); e != nil || name != "mail_outbox_family_v3" {
 		t.Fatal("family replacement", e, name)
 	}
 	for _, v := range snaps {
@@ -240,7 +240,7 @@ func TestValidationPayloadTamperAndImmutableEventConflicts(t *testing.T) {
 			if e != nil || cl == nil {
 				t.Fatal(e)
 			}
-			if _, e = db.Pool.Exec(t.Context(), `DROP TRIGGER mail_outbox_immutable_payload ON mail_outbox; ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_family_v2; ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_version_check`); e != nil {
+			if _, e = db.Pool.Exec(t.Context(), `DROP TRIGGER mail_outbox_immutable_payload ON mail_outbox; ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_family_v3; ALTER TABLE mail_outbox DROP CONSTRAINT mail_outbox_version_check`); e != nil {
 				t.Fatal(e)
 			}
 			sql := ""

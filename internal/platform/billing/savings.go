@@ -184,6 +184,9 @@ func sameSavingsAmount(a, b *decimal.Decimal) bool {
 // otherwise discount every bill for nothing. What they already discounted stays on those bills. Runs at
 // boot: a held contract no longer matches, so a second run changes nothing. Returns the ids it moved.
 func (r *Repo) HoldUnpaidUpfrontContracts(ctx context.Context, now time.Time) ([]string, error) {
+	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
+		return nil, err
+	}
 	contracts, err := findTyped[SavingsContract](ctx, r.savingCtrs, map[string]any{"status": SavingsStatusActive, "paidUpfront": true})
 	if err != nil {
 		return nil, err
@@ -225,12 +228,10 @@ func firstOfMonth(now time.Time, addMonths int) time.Time {
 	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, addMonths, 0)
 }
 
-// SavingsService handles the cron-driven parts of the savings-contract service. It covers the
-// pure state transition (expiring contracts); the notification downstream it also fires —
-// cancelling pending reminders + sending the contract-expired email — belongs to the
-// reminder / email subsystems, which are NOT wired (gated like the other notification jobs),
-// so it is intentionally skipped here. The contract status flip is the persisted,
-// billing-relevant effect (only ACTIVE contracts count toward a profile's available contracts).
+// SavingsService owns DB-only expiration decisions. Status affects future discount
+// eligibility, never payment/credit/provision callbacks. A winning decision selects
+// the fixed expired-notice outbox atomically when opted in, otherwise persists a
+// legacy/no-mail tombstone before any postcommit best-effort notifier.
 type SavingsService struct {
 	repo     *Repo
 	now      func() time.Time

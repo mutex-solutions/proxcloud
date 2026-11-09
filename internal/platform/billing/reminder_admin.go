@@ -17,6 +17,9 @@ func (r *Repo) WithSavingsContractMutation(ctx context.Context, id string, fn fu
 		if c == nil {
 			return httpx.NotFound("Savings contract not found")
 		}
+		if err := r.retainHistoricalExpiredTx(tc, c); err != nil {
+			return err
+		}
 		if err := fn(tc); err != nil {
 			return err
 		}

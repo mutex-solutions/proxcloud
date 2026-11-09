@@ -89,6 +89,23 @@ func (r *Repo) EnsureSavingsExpired(ctx context.Context) error {
 	})
 }
 
+// Observing a pre-upgrade EXPIRED term is not permission to adopt/backfill it.
+// Before a cooperative admin writer can reactivate/delete/replace that term,
+// retain a no-mail tombstone. Failed callbacks roll this observation back too.
+func (r *Repo) retainHistoricalExpiredTx(ctx context.Context, c *SavingsContract) error {
+	if c.Status != SavingsStatusExpired || c.EndDate == nil || c.EndDate.IsZero() || c.EndDate.Year() < 1 || c.EndDate.Year() > 9999 {
+		return nil
+	}
+	tx, err := r.savingCtrs.DB().Tx(ctx)
+	if err != nil {
+		return err
+	}
+	end := c.EndDate.UTC().Truncate(time.Microsecond)
+	_, err = tx.Exec(ctx, `INSERT INTO savings_expired_term(contract_id,term_generation,source_end,profile_id,selection,decision_date,expires_at,outbox_ids,queue_state)
+	 SELECT $1,$2,$3,$4,'no_mail',d,d+interval '24 hours',ARRAY[]::text[],'' FROM (SELECT clock_timestamp() AS d) stamp ON CONFLICT DO NOTHING`, c.ID, reminderGeneration(end), end, c.BillingProfileID)
+	return err
+}
+
 type savingsExpiredTerm struct {
 	generation string
 	ids        []string

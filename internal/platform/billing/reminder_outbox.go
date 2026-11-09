@@ -94,6 +94,14 @@ func (r *Repo) withReminderContract(ctx context.Context, id string, fn func(cont
 		if err != nil {
 			return err
 		}
+		// Acquire ALL business row locks before any callback touches outbox rows:
+		// advisory -> current contract -> reminder rows -> term history -> outbox.
+		if _, err := r.reminderRowsTx(tc, id); err != nil {
+			return err
+		}
+		if _, err := r.expiredTermsTx(tc, id); err != nil {
+			return err
+		}
 		if !found {
 			return fn(tc, nil)
 		}
