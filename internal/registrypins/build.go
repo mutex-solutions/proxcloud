@@ -61,6 +61,9 @@ func (s *Store) AuthorizeBuildDispatch(ctx context.Context, op Operation, base, 
 		return nil, ErrScope
 	}
 	err = s.transaction(ctx, func(tc context.Context, tx pgx.Tx) error {
+		if e := s.lockDispatchOperation(tc, op.ID); e != nil {
+			return e
+		}
 		if e := s.lockProject(tc, op.ProjectID); e != nil {
 			return e
 		}
