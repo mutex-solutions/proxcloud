@@ -42,13 +42,13 @@ export function SandboxTemplateBuildDiagnostics({ pid, templateId, build }: { pi
       </div>
       {data?.buildResources && <p className="text-xs text-muted-foreground">Builder: {data.buildResources.buildCpu} vCPU · {data.buildResources.buildMemoryGiB} GiB memory · {data.buildResources.buildDiskGiB} GiB disk</p>}
       {logs.isLoading && <p className="text-sm text-muted-foreground">Loading diagnostics…</p>}
-      {logs.error && <p className="text-sm text-destructive" role="alert">Diagnostics could not be refreshed: {plainBuildText(logs.error.message)}{data ? " Last known details remain visible." : " Build metadata remains available above."}</p>}
-      {(data?.reason ?? build.reason) && <p className="break-words text-sm text-destructive">{plainBuildText(data?.reason ?? build.reason ?? "")}</p>}
+      {logs.error && <p className="text-sm text-red-700 dark:text-red-400" role="alert">Diagnostics could not be refreshed: {plainBuildText(logs.error.message)}{data ? " Last known details remain visible." : " Build metadata remains available above."}</p>}
+      {(data?.reason ?? build.reason) && <p className="break-words text-sm text-red-700 dark:text-red-400">{plainBuildText(data?.reason ?? build.reason ?? "")}</p>}
       {diagnostics ? <>
         {(diagnostics.podReason || diagnostics.podMessage) && <p className="break-words text-sm">{plainBuildText([diagnostics.podReason, diagnostics.podMessage].filter(Boolean).join(": "))}</p>}
         {!!diagnostics.stages?.length && <ul className="grid gap-2" aria-label="Build phases">
           {diagnostics.stages.map((stage, index) => <li key={`${stage.phase}-${index}`} className="grid gap-1 rounded-md border p-3 text-sm">
-            <div className="flex flex-wrap gap-2"><span className="font-medium">{plainBuildText(stage.phase)}</span><StatusBadge status={stage.state} />{stage.exitCode !== undefined && <Badge variant={stage.exitCode === 0 ? "secondary" : "destructive"}>Exit code: {stage.exitCode}</Badge>}{stage.signal !== undefined && stage.signal !== 0 && <Badge variant="outline">Signal: {stage.signal}</Badge>}</div>
+            <div className="flex flex-wrap gap-2"><span className="font-medium">{plainBuildText(stage.phase)}</span><StatusBadge status={stage.state} />{stage.exitCode !== undefined && <Badge variant="outline" className={stage.exitCode === 0 ? undefined : "text-red-700 dark:text-red-400"}>Exit code: {stage.exitCode}</Badge>}{stage.signal !== undefined && stage.signal !== 0 && <Badge variant="outline">Signal: {stage.signal}</Badge>}</div>
             {(stage.reason || stage.message) && <p className="break-words text-muted-foreground">{plainBuildText([stage.reason, stage.message].filter(Boolean).join(": "))}</p>}
             {(stage.cpu || stage.memory || stage.disk) && <p className="text-xs text-muted-foreground">Resources: {plainBuildText([stage.cpu && `CPU ${stage.cpu}`, stage.memory && `memory ${stage.memory}`, stage.disk && `disk ${stage.disk}`].filter(Boolean).join(" · "))}</p>}
           </li>)}

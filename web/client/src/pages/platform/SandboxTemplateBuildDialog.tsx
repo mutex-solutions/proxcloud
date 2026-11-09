@@ -76,7 +76,7 @@ export function SandboxTemplateBuildDialog({ pid, template, capabilities, onClos
               <legend className="px-1 text-sm font-medium">RUN steps</legend>
               {steps.map((command, index) => <div key={index} className="grid gap-2">
                 <Label htmlFor={`build-run-${index}`}>RUN command {index + 1}</Label>
-                <div className="flex items-start gap-2"><Textarea id={`build-run-${index}`} className="min-h-20 font-mono text-xs" value={command} onChange={(e) => setSteps(steps.map((step, i) => i === index ? e.target.value : step))} placeholder="python -m pip install numpy" maxLength={32768} required /><Button type="button" size="icon-sm" variant="ghost" aria-label={`Remove RUN step ${index + 1}`} disabled={steps.length === 1} onClick={() => setSteps(steps.filter((_, i) => i !== index))}><Trash2 aria-hidden="true" /></Button></div>
+                <div className="flex items-start gap-2"><Textarea id={`build-run-${index}`} className="min-h-20 min-w-0 font-mono text-xs" value={command} onChange={(e) => setSteps(steps.map((step, i) => i === index ? e.target.value : step))} placeholder="python -m pip install numpy" maxLength={32768} required /><Button type="button" size="icon-sm" variant="ghost" aria-label={`Remove RUN step ${index + 1}`} disabled={steps.length === 1} onClick={() => setSteps(steps.filter((_, i) => i !== index))}><Trash2 aria-hidden="true" /></Button></div>
               </div>)}
               <Button type="button" variant="outline" className="justify-self-start" disabled={steps.length >= 64} onClick={() => setSteps([...steps, ""])}><Plus aria-hidden="true" /> Add RUN step</Button>
               <p className="text-xs text-muted-foreground">Commands execute in order during the build, not at sandbox startup. Do not put passwords, tokens or registry credentials in commands; command text and output can be retained in build history.</p>
@@ -88,8 +88,8 @@ export function SandboxTemplateBuildDialog({ pid, template, capabilities, onClos
             </div></details>
           </fieldset>
           {!template.ready && <p className="text-sm text-muted-foreground" role="status">The base template has no ready artifact.</p>}
-          {build.error && <p className="text-sm text-destructive" role="alert">{build.error.message}</p>}
-          <DialogFooter><Button type="button" variant="outline" onClick={onClose}>Cancel</Button><Button type="submit" disabled={!valid || build.isPending}>{build.isPending ? "Building…" : "Start build"}</Button></DialogFooter>
+          {build.error && <p className="text-sm text-red-700 dark:text-red-400" role="alert">{build.error.message}</p>}
+          <DialogFooter><Button type="button" variant="outline" onClick={onClose}>Cancel</Button><Button type="submit" className="text-black" disabled={!valid || build.isPending}>{build.isPending ? "Building…" : "Start build"}</Button></DialogFooter>
         </form>
       </DialogContent>
     </Dialog>

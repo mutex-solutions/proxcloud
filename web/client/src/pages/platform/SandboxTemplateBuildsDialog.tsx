@@ -28,7 +28,7 @@ export function SandboxTemplateBuildsDialog({ pid, template, onClose }: { pid: s
               <span className="break-all font-mono text-xs text-muted-foreground">{build.buildID}</span>
               <span className="ml-auto text-xs text-muted-foreground">{fmtDateTime(build.createdAt)}{build.finishedAt && build.createdAt ? ` · ${Math.max(1, Math.round((Date.parse(build.finishedAt) - Date.parse(build.createdAt)) / 1000))} s` : ""}</span>
             </div>
-            {build.reason && <p className="break-words text-sm text-destructive">{plainBuildText(build.reason)}</p>}
+            {build.reason && <p className="break-words text-sm text-red-700 dark:text-red-400">{plainBuildText(build.reason)}</p>}
             {build.buildResources && build.buildResources.buildCpu > 0 && <p className="text-xs text-muted-foreground">Builder: {build.buildResources.buildCpu} vCPU · {build.buildResources.buildMemoryGiB} GiB memory · {build.buildResources.buildDiskGiB} GiB disk</p>}
             {build.source && <p className="break-all font-mono text-xs text-muted-foreground">Source: {plainBuildText(build.source)}</p>}
             {build.image && <p className="break-all font-mono text-xs text-muted-foreground">Image: {plainBuildText(build.image)}</p>}

@@ -52,13 +52,13 @@ export function SandboxTemplatePrepare({ pid, template, capabilities, onClose }:
               <div><dt className="text-muted-foreground">Preparation expires</dt><dd>{data.expiresAt && Date.parse(data.expiresAt) > 0 ? fmtDateTime(data.expiresAt) : "No active preparation"}</dd></div>
             </dl>
           </div>}
-          {coverage.error && <p className="text-sm text-destructive" role="alert">Coverage is unavailable: {coverage.error.message}{data ? " Last known coverage is shown above and may be stale." : ""}</p>}
-          {prepare.error && <p className="text-sm text-destructive" role="alert">{prepare.error.message}</p>}
+          {coverage.error && <p className="text-sm text-red-700 dark:text-red-400" role="alert">Coverage is unavailable: {coverage.error.message}{data ? " Last known coverage is shown above and may be stale." : ""}</p>}
+          {prepare.error && <p className="text-sm text-red-700 dark:text-red-400" role="alert">{prepare.error.message}</p>}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Close</Button>
           <Button variant="outline" disabled={!enabled || coverage.isFetching || prepare.isPending} onClick={() => void coverage.refetch()}><RefreshCw aria-hidden="true" /> Refresh coverage</Button>
-          <Button disabled={!enabled || prepare.isPending || data?.enabled === false} onClick={() => prepare.mutate()}>{prepare.isPending ? "Preparing…" : "Prepare image"}</Button>
+          <Button className="text-black" disabled={!enabled || prepare.isPending || data?.enabled === false} onClick={() => prepare.mutate()}>{prepare.isPending ? "Preparing…" : "Prepare image"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

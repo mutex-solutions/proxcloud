@@ -2,7 +2,7 @@
 // repositories (including project substitution), access, architecture and limits.
 export const templateNamePattern = /^[a-z0-9][a-z0-9._-]{0,62}$/
 export function validImageSource(source: string) {
-  if (source.length > 512) return false
+  if (source.length > 512 || /\s/.test(source)) return false
   // Immutable OCI reference syntax, not a registry allow-list. No scheme,
   // credentials, tag, query or fragment. Registry ports are syntactically valid.
   return /^(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::[0-9]{1,5})?\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*@sha256:[a-f0-9]{64}$/.test(source)
@@ -15,8 +15,13 @@ export const validRegistryCredentials = (username: string, password: string) =>
   !!username && !!password && new TextEncoder().encode(username).length <= 1024 && new TextEncoder().encode(password).length <= 32768 &&
   ![":", "\0", "\r", "\n"].some((character) => username.includes(character)) && !["\0", "\r", "\n"].some((character) => password.includes(character))
 
-export const sandboxTemplatePath = (pid: string, ...segments: string[]) =>
-  `/project/${encodeURIComponent(pid)}/sandbox-templates${segments.map((part) => `/${encodeURIComponent(part)}`).join("")}`
+export function sandboxTemplatePath(pid: string, ...segments: string[]) {
+  const segment = (part: string) => {
+    if (!part || part === "." || part === "..") throw new Error("Invalid project or template identifier")
+    return encodeURIComponent(part)
+  }
+  return `/project/${segment(pid)}/sandbox-templates${segments.map((part) => `/${segment(part)}`).join("")}`
+}
 
 // Untrusted terminal output stays plain React text, never HTML. Strip OSC
 // (including hyperlinks), CSI and controls; also discard unterminated OSC tails.

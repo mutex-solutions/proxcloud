@@ -78,7 +78,7 @@ export function SandboxTemplateImport({ pid, capabilities, onClose, onImported }
               <Label htmlFor="import-source">Image digest</Label>
               <Input id="import-source" value={source} onChange={(e) => setSource(e.target.value)} placeholder="registry.example.com/approved/image@sha256:…" autoComplete="off" spellCheck={false} required aria-describedby="import-digest-help" />
               <p id="import-digest-help" className="text-xs text-muted-foreground">Use repository@sha256 followed by 64 lowercase hexadecimal characters from an operator-approved registry. The server enforces approved origins and exact repositories for this project, platform and access; valid syntax does not grant permission. No URL schemes or tags.</p>
-              {source && !validImageSource(source.trim()) && <p className="text-xs text-destructive" role="status">Enter a repository and immutable sha256 digest, not a URL or image tag.</p>}
+              {source && !validImageSource(source.trim()) && <p className="text-xs text-red-700 dark:text-red-400" role="status">Enter a repository and immutable sha256 digest, not a URL or image tag.</p>}
             </div>
             <div className="grid gap-2">
               <Label htmlFor="import-name">Template name</Label>
@@ -96,7 +96,7 @@ export function SandboxTemplateImport({ pid, capabilities, onClose, onImported }
             <details className="rounded-md border p-3">
               <summary className="cursor-pointer text-sm font-medium">Runtime settings (optional)</summary>
               <div className="mt-3 grid gap-3">
-                <div className="grid gap-2"><Label htmlFor="import-user">User</Label><Input id="import-user" value={user} onChange={(e) => setUser(e.target.value)} maxLength={32} placeholder="app" aria-describedby="import-user-help" /><p id="import-user-help" className="text-xs text-muted-foreground">Named users only (for example root or app); numeric UID and USER:GROUP are unsupported. Blank inherits the image user.</p>{!validRuntimeUser(user) && <p className="text-xs text-destructive" role="status">Use a named user starting with a letter or underscore.</p>}</div>
+                <div className="grid gap-2"><Label htmlFor="import-user">User</Label><Input id="import-user" value={user} onChange={(e) => setUser(e.target.value)} maxLength={32} placeholder="app" aria-describedby="import-user-help" /><p id="import-user-help" className="text-xs text-muted-foreground">Named users only (for example root or app); numeric UID and USER:GROUP are unsupported. Blank inherits the image user.</p>{!validRuntimeUser(user) && <p className="text-xs text-red-700 dark:text-red-400" role="status">Use a named user starting with a letter or underscore.</p>}</div>
                 <div className="grid gap-2"><Label htmlFor="import-workdir">Working directory</Label><Input id="import-workdir" value={workdir} onChange={(e) => setWorkdir(e.target.value)} maxLength={4096} placeholder="/workspace" /></div>
                 <div className="grid gap-2"><Label htmlFor="import-start">Start command</Label><Input id="import-start" value={start} onChange={(e) => setStart(e.target.value)} maxLength={32768} /></div>
                 <div className="grid gap-2"><Label htmlFor="import-ready">Ready command</Label><Input id="import-ready" value={ready} onChange={(e) => setReady(e.target.value)} maxLength={32768} /></div>
@@ -110,10 +110,10 @@ export function SandboxTemplateImport({ pid, capabilities, onClose, onImported }
             </div>}
           </fieldset>
           {!enabled && <p className="text-sm text-muted-foreground" role="status">Digest import is disabled or its trusted worker is unavailable at this location.</p>}
-          {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+          {error && <p className="text-sm text-red-700 dark:text-red-400" role="alert">{error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={close}>Cancel</Button>
-            <Button type="submit" disabled={!valid || pending}>{pending ? "Importing…" : "Import image"}</Button>
+            <Button type="submit" className="text-black" disabled={!valid || pending}>{pending ? "Importing…" : "Import image"}</Button>
           </DialogFooter>
         </form>
       </DialogContent>

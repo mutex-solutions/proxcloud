@@ -1,5 +1,5 @@
 // Session-authenticated project templates and their immutable image artifacts.
-import { useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
@@ -40,6 +40,8 @@ export function TemplatesTab({ pid }: { pid: string }) { return <ProjectTemplate
 
 function ProjectTemplates({ pid }: { pid: string }) {
   const qc = useQueryClient()
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
   const list = useQuery({
     queryKey: ["sandbox-templates", pid],
     queryFn: () => apiFetch<ProjectSandboxTemplate[]>(sandboxTemplatePath(pid)),
@@ -51,15 +53,27 @@ function ProjectTemplates({ pid }: { pid: string }) {
     queryFn: () => apiFetch<SandboxTemplateCapabilities>(sandboxTemplatePath(pid, "capabilities")),
     enabled: !!pid,
   })
+  const opener = useRef<HTMLButtonElement | null>(null)
+  const rememberOpener = useCallback((event: React.FocusEvent<HTMLButtonElement>) => { opener.current = event.currentTarget }, [])
+  const restoreFocus = () => requestAnimationFrame(() => { if (opener.current?.isConnected) opener.current.focus() })
+  const closeAction = () => { setAction(null); restoreFocus() }
+  const closeImport = () => { setImportOpen(false); restoreFocus() }
   const [importOpen, setImportOpen] = useState(false)
   const [action, setAction] = useState<TemplateAction | null>(null)
   const [toDelete, setToDelete] = useState<ProjectSandboxTemplate | null>(null)
   const invalidate = () => { void qc.invalidateQueries({ queryKey: ["sandbox-templates", pid] }) }
   const del = useMutation({
     mutationFn: (template: ProjectSandboxTemplate) => apiFetch(sandboxTemplatePath(pid, template.id), { method: "DELETE" }),
-    onSuccess: (_, template) => { toast.success(`${template.kind === "snapshot" ? "Snapshot" : "Template"} deleted`); setToDelete(null); invalidate() },
-    onError: (error: Error) => toast.error(error.message),
+    onSuccess: (_, template) => {
+      invalidate()
+      if (!mounted.current) return
+      toast.success(`${template.kind === "snapshot" ? "Snapshot" : "Template"} deleted`)
+      setToDelete((current) => current?.id === template.id ? null : current)
+      restoreFocus()
+    },
+    onError: (error: Error) => { if (mounted.current) toast.error(error.message) },
   })
+  const { isPending: deleting, reset: resetDelete } = del
   const caps = capabilities.isError ? undefined : capabilities.data
   const canImport = !!caps?.importEnabled && caps.trustedWorkerAvailable !== false
   const selected = action && (list.data?.find((template) => template.id === action.template.id) ?? action.template)
@@ -86,7 +100,7 @@ function ProjectTemplates({ pid }: { pid: string }) {
         const template = row.original
         const busy = templateBusy(template)
         return <div className="flex justify-end"><DropdownMenu>
-          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={`Actions for ${template.name}`}><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger>
+          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" onFocus={rememberOpener} aria-label={`Actions for ${template.name}`}><MoreHorizontal aria-hidden="true" /></Button></DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem onSelect={() => setAction({ type: "builds", template })}><ScrollText aria-hidden="true" /> Builds and logs</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setAction({ type: "aliases", template })} disabled={busy}><Tags aria-hidden="true" /> Manage aliases</DropdownMenuItem>
@@ -94,13 +108,13 @@ function ProjectTemplates({ pid }: { pid: string }) {
             <DropdownMenuItem onSelect={() => setAction({ type: "build", template })} disabled={!caps || !template.ready || busy}><Hammer aria-hidden="true" /> New build</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void copy(template.name)}><Copy aria-hidden="true" /> Copy name</DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" disabled={del.isPending} onSelect={() => { del.reset(); setToDelete(template) }}><Trash2 aria-hidden="true" /> Delete</DropdownMenuItem>
+            <DropdownMenuItem variant="destructive" disabled={deleting} onSelect={() => { resetDelete(); setToDelete(template) }}><Trash2 aria-hidden="true" /> Delete</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu></div>
       },
     },
-  ], [caps, del.isPending])
-  const importButton = <Button onClick={() => setImportOpen(true)} disabled={!canImport}><Import aria-hidden="true" /> Import image digest</Button>
+  ], [caps, deleting, resetDelete, rememberOpener, setAction, setToDelete])
+  const importButton = <Button className="text-black" onFocus={rememberOpener} onClick={() => setImportOpen(true)} disabled={!canImport}><Import aria-hidden="true" /> Import image digest</Button>
 
   return (
     <div className="grid gap-4">
@@ -109,21 +123,21 @@ function ProjectTemplates({ pid }: { pid: string }) {
         <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={list.isFetching || capabilities.isFetching} onClick={() => { void list.refetch(); void capabilities.refetch() }} aria-label="Refresh templates"><RefreshCw aria-hidden="true" /></Button>{importButton}</div>
       </div>
       {capabilities.isLoading ? <p className="text-xs text-muted-foreground" role="status">Loading location capabilities…</p>
-        : capabilities.error ? <p className="text-sm text-destructive" role="alert">Location capabilities are unavailable. Import and new builds are disabled; existing details remain accessible. <Button variant="link" size="sm" onClick={() => void capabilities.refetch()}>Retry capabilities</Button></p>
+        : capabilities.error ? <p className="text-sm text-red-700 dark:text-red-400" role="alert">Location capabilities are unavailable. Import and new builds are disabled; existing details remain accessible. <Button variant="outline" size="sm" onClick={() => void capabilities.refetch()}>Retry capabilities</Button></p>
           : !canImport ? <p className="text-xs text-muted-foreground" role="status">Digest import is disabled or its trusted worker is unavailable at this location.</p> : null}
       {list.data?.some((template) => templateBusy(template)) && <p className="text-xs text-muted-foreground">Templates with active builds are busy. Alias changes and new builds are disabled until the active operation finishes.</p>}
       {list.data && list.data.length === 0 ? <EmptyState icon={Layers} title="No templates yet" hint="Import an immutable image digest here, or build a template with the E2B SDK or CLI." action={importButton} />
         : <DataTable columns={columns} data={list.data ?? []} isLoading={list.isLoading} error={list.error as Error | null} />}
-      {importOpen && caps && <SandboxTemplateImport pid={pid} capabilities={caps} onClose={() => setImportOpen(false)} onImported={invalidate} />}
-      {selected && action?.type === "builds" && <SandboxTemplateBuildsDialog key={selected.id} pid={pid} template={selected} onClose={() => setAction(null)} />}
-      {selected && action?.type === "aliases" && <SandboxTemplateAliases key={selected.id} pid={pid} template={selected} onClose={() => setAction(null)} />}
-      {selected && action?.type === "prepare" && <SandboxTemplatePrepare key={selected.id} pid={pid} template={selected} capabilities={caps} onClose={() => setAction(null)} />}
-      {selected && action?.type === "build" && caps && <SandboxTemplateBuildDialog key={selected.id} pid={pid} template={selected} capabilities={caps} onClose={() => setAction(null)} onBuilt={() => { setAction(null); invalidate() }} />}
-      <Dialog open={!!toDelete} onOpenChange={(open) => { if (!open) { setToDelete(null); del.reset() } }}>
+      {importOpen && caps && <SandboxTemplateImport pid={pid} capabilities={caps} onClose={closeImport} onImported={invalidate} />}
+      {selected && action?.type === "builds" && <SandboxTemplateBuildsDialog key={selected.id} pid={pid} template={selected} onClose={closeAction} />}
+      {selected && action?.type === "aliases" && <SandboxTemplateAliases key={selected.id} pid={pid} template={selected} onClose={closeAction} />}
+      {selected && action?.type === "prepare" && <SandboxTemplatePrepare key={selected.id} pid={pid} template={selected} capabilities={caps} onClose={closeAction} />}
+      {selected && action?.type === "build" && caps && <SandboxTemplateBuildDialog key={selected.id} pid={pid} template={selected} capabilities={caps} onClose={closeAction} onBuilt={() => { closeAction(); invalidate() }} />}
+      <Dialog open={!!toDelete} onOpenChange={(open) => { if (!open) { setToDelete(null); del.reset(); restoreFocus() } }}>
         <DialogContent>
           <DialogHeader><DialogTitle>Delete {toDelete?.kind === "snapshot" ? "snapshot" : "template"}?</DialogTitle><DialogDescription>{toDelete ? `"${toDelete.name}" and all its aliases and builds are removed. New sandboxes can no longer start from it; running ones keep running.` : ""}</DialogDescription></DialogHeader>
-          {del.error && <p className="text-sm text-destructive" role="alert">{del.error instanceof ApiError && del.error.status === 409 ? "An active worker still uses this template. Nothing was deleted. Retry after the worker finishes." : del.error.message}</p>}
-          <DialogFooter><Button variant="outline" onClick={() => { setToDelete(null); del.reset() }}>Cancel</Button><Button variant="destructive" disabled={del.isPending} onClick={() => toDelete && del.mutate(toDelete)}>{del.isPending ? "Deleting…" : "Delete"}</Button></DialogFooter>
+          {del.error && <p className="text-sm text-red-700 dark:text-red-400" role="alert">{del.error instanceof ApiError && del.error.status === 409 ? "An active worker still uses this template. Nothing was deleted. Retry after the worker finishes." : del.error.message}</p>}
+          <DialogFooter><Button variant="outline" onClick={() => { setToDelete(null); del.reset(); restoreFocus() }}>Cancel</Button><Button variant="outline" className="text-red-700 dark:text-red-400" disabled={del.isPending} onClick={() => toDelete && del.mutate(toDelete)}>{del.isPending ? "Deleting…" : "Delete"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

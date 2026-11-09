@@ -26,6 +26,7 @@ export const sections: DocSection[] = [
       { slug: "guides/team-members", title: "Teammates & invitations" },
       { slug: "guides/savings-plans", title: "Savings plans" },
       { slug: "guides/ai-agents", title: "AI agent access (MCP)" },
+      { slug: "guides/sandboxes", title: "Sandboxes" },
     ],
   },
   {
@@ -34,6 +35,13 @@ export const sections: DocSection[] = [
       { slug: "concepts/billing-and-metering", title: "How metering & billing work" },
       { slug: "concepts/provisioning", title: "How provisioning works" },
       { slug: "concepts/identity", title: "How identity works" },
+    ],
+  },
+  {
+    title: "API",
+    pages: [
+      { slug: "api/sandboxes", title: "Sandbox API" },
+      { slug: "api/e2b", title: "E2B API" },
     ],
   },
   {
