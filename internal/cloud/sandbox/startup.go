@@ -63,6 +63,10 @@ func (e *StartupError) Error() string {
 }
 func (e *StartupError) Unwrap() error { return e.Cause }
 
+// Only a positively expired current CR lifetime grants this terminal startup result.
+// Transport deadlines and malformed/future Ready timestamps are not expiry evidence.
+var errStartupLifetimeExpired = fmt.Errorf("sandbox lifetime expired during startup: %w", context.DeadlineExceeded)
+
 func startupProgress(pod map[string]any) StartupProgress {
 	p := StartupProgress{Phase: "scheduling", Reason: "waiting for a schedulable node; check size, GPU and pool capacity"}
 	if pod == nil {
@@ -153,6 +157,8 @@ func (s *Service) WaitReady(ctx context.Context, projectID, id string) (map[stri
 			if progress.Terminal || spent[phase]+s.now().Sub(phaseAt) >= cfg.phaseDuration(phase) {
 				return nil, &StartupError{progress, context.DeadlineExceeded}
 			}
+		} else if errors.Is(err, errStartupLifetimeExpired) {
+			return nil, &StartupError{StartupProgress{"runtime", "sandbox lifetime expired during startup", true}, err}
 		} else if errors.Is(err, ErrNotFound) {
 			return nil, &StartupError{StartupProgress{"control-plane", "sandbox disappeared during startup", true}, err}
 		} else {

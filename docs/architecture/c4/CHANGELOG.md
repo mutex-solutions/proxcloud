@@ -4,6 +4,25 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: fail fast on authoritative sandbox startup lifetime expiry
+
+**What changed:** the existing Ready-clock lifetime guard distinguishes a positively
+expired current provisional end or persisted UID-scoped Ready-candidate runtime end
+from transient control-plane deadlines. `WaitReady` immediately returns a terminal
+runtime startup error with a fixed public reason; the private expiry marker still
+unwraps to `context.DeadlineExceeded` for existing callers.
+
+**Why:** a Ready CR whose authoritative lifetime has already ended cannot become
+usable. Treating its expiry as an unavailable control plane needlessly retried until
+the default 120-second scheduling budget. Transport deadlines remain retryable within
+the original caller/phase/total budgets; malformed/future timestamps and UID/RV CAS
+checks retain their existing behavior. No TTL renewal or pending billing is granted.
+
+**Views updated:** the startup exception in sandbox-runtime-parity.md. Local finite
+Go1.25 unit/race regressions cover one-read/no-patch expiry, unchanged first-candidate
+TTL, no Ready-clock pending billing, and recovery after transient network errors.
+No scheduler wall-time, deployment, registry release or live-runtime claim is made.
+
 ## 2026-11-10: dormant typed runtime reference fence (bounded P2-B engine)
 
 **What changed:** distinct RuntimeSpec/RuntimeProof/RuntimePodEvidence, one immutable

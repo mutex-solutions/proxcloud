@@ -424,8 +424,11 @@ func (s *Service) pinRunningSince(ctx context.Context, obj map[string]any) error
 		}
 		readyAt, err := time.Parse(time.RFC3339, at)
 		oldEnd, e := time.Parse(time.RFC3339, endOf(obj))
-		if err != nil || e != nil || readyAt.After(s.now()) || !s.now().Before(oldEnd) {
+		if err != nil || e != nil || readyAt.After(s.now()) {
 			return context.DeadlineExceeded
+		}
+		if !s.now().Before(oldEnd) {
+			return errStartupLifetimeExpired
 		}
 		if candidate == "" {
 			patch := map[string]any{"metadata": map[string]any{"uid": uid, "resourceVersion": rv, "annotations": map[string]any{AnnotationReadyCandidate: at, AnnotationReadyCandidateUID: uid}}}
@@ -457,7 +460,7 @@ func (s *Service) pinRunningSince(ctx context.Context, obj map[string]any) error
 		end := readyAt.Add(time.Duration(seconds) * time.Second)
 		// Even a persisted candidate does not grant access after its real runtime end.
 		if !s.now().Before(end) {
-			return context.DeadlineExceeded
+			return errStartupLifetimeExpired
 		}
 		annPatch[AnnotationStartupPending] = nil
 		if digStr(obj, "metadata", "annotations", AnnotationAutoPause) == "true" {
