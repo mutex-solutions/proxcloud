@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	distref "github.com/distribution/reference"
 	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 )
 
@@ -82,6 +83,11 @@ func RuntimeCreateImage(cfg Config, spec Spec) (string, bool, error) {
 		return "", false, registrypins.ErrScope
 	}
 	image := t.Image
+	// Even an operator-curated skip must be a real image reference: URL/path
+	// tricks cannot turn a managed spelling into an unprotected external source.
+	if _, err := distref.ParseNormalizedNamed(image); err != nil {
+		return "", false, registrypins.ErrScope
+	}
 	reg := strings.TrimRight(cfg.TemplateRegistry, "/")
 	if reg == "" {
 		if spec.Custom != nil {

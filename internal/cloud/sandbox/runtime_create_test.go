@@ -95,6 +95,9 @@ func TestRuntimeCreateSourcePolicyAndGuardBeforeAnyK8s(t *testing.T) {
 		"registry.test/t/foreign/0123456789abcdef0123@sha256:" + strings.Repeat("a", 64),
 		"REGISTRY.TEST/t/project1/0123456789abcdef0123@sha256:" + strings.Repeat("a", 64),
 		"https://registry.test/t/project1/0123456789abcdef0123@sha256:" + strings.Repeat("a", 64),
+		"https://REGISTRY.TEST/t/project1/0123456789abcdef0123@sha256:" + strings.Repeat("a", 64),
+		"https://external.test/base:latest",
+		"external.test/../t/project1/0123456789abcdef0123:tag",
 		"registry.test/t/project1/invalid@sha256:" + strings.Repeat("a", 64),
 	} {
 		c := cfg

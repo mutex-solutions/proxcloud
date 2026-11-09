@@ -633,6 +633,50 @@ func TestRuntimeCreatePostgresExplicitCuratedSkipsAndPruneBothOrders(t *testing.
 	}
 }
 
+func TestRuntimeCreatePostgresCacheReadinessAndAccessFailuresRetainPins(t *testing.T) {
+	for _, mode := range []string{"cache", "readiness", "access"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newRuntimePGFixture(t)
+			ctx := context.Background()
+			s := f.spec(t, "requested:stable")
+			row, err := f.h.createSandboxResource(ctx, f.c.proj, f.c.es, f.c.ss, &s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			o := f.owner(t, s.ID)
+			if mode == "cache" {
+				if _, err = f.a.Pool.Exec(ctx, `ALTER TABLE "cloudResource" RENAME TO runtime_cloud_cache_unavailable`); err != nil {
+					t.Fatal(err)
+				}
+				err = f.h.waitRuntimeCreateReady(ctx, f.c, row, &s)
+				if _, restoreErr := f.a.Pool.Exec(ctx, `ALTER TABLE runtime_cloud_cache_unavailable RENAME TO "cloudResource"`); restoreErr != nil {
+					t.Fatal(restoreErr)
+				}
+			} else if mode == "readiness" {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				err = f.h.waitRuntimeCreateReady(cancelled, f.c, row, &s)
+			} else {
+				_, err = e2bColdAccess(ctx, time.Second, time.Time{}, time.Now, func(ctx context.Context) error { return f.h.waitRuntimeCreateReady(ctx, f.c, row, &s) }, func(context.Context) (*sandbox.Access, error) { return nil, errors.New("fake private access failure") })
+			}
+			if err == nil {
+				t.Fatal("failure unexpectedly returned usable success")
+			}
+			f.h.runtimeCreateFailure(ctx, f.c, s.ID)
+			if err = f.c.ss.DeleteSandbox(ctx, f.c.proj.ID, s.ID); err != nil {
+				t.Fatal(err)
+			}
+			p := f.pins(t, o)[0]
+			if p.State != registrypins.Pending && p.State != registrypins.Bound && p.State != registrypins.Unknown {
+				t.Fatalf("%s failure released image: %+v", mode, p)
+			}
+			if f.owner(t, s.ID).ID != o.ID {
+				t.Fatal("cleanup removed durable owner")
+			}
+		})
+	}
+}
+
 func TestRuntimeCreatePostgresFreshEvidenceAdversarialAndUnknownObservationFence(t *testing.T) {
 	f := newRuntimePGFixture(t)
 	ctx := context.Background()
@@ -683,6 +727,29 @@ func TestRuntimeCreatePostgresFreshEvidenceAdversarialAndUnknownObservationFence
 	}
 	if err = f.h.observeRuntimeCreate(ctx, f.c, &s); err != nil {
 		t.Fatal("same evidence not idempotent", err)
+	}
+	// Terminal pod/NotFound observations are not retirement authority. Even
+	// ordinary physical cleanup later must retain the already Bound reference.
+	f.api.mu.Lock()
+	f.api.pod["status"].(map[string]any)["phase"] = "Succeeded"
+	f.api.mu.Unlock()
+	if err = f.h.observeRuntimeCreate(ctx, f.c, &s); !errors.Is(err, errRuntimePinState) {
+		t.Fatal("terminal pod treated as fresh running binding")
+	}
+	f.h.runtimeCreateFailure(ctx, f.c, s.ID)
+	if f.pins(t, o)[0].State != registrypins.Bound {
+		t.Fatal("terminal pod released/downgraded binding")
+	}
+	// Generic uncovered resume/fork readiness never consults CREATE owners,
+	// even when the saved CR still carries annotations of this earlier create.
+	if _, err = f.a.Pool.Exec(ctx, `ALTER TABLE sandbox_runtime_start RENAME TO runtime_owner_temporarily_unavailable`); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.h.e2bWaitReady(ctx, f.c, row); err != nil {
+		t.Fatal("uncovered generic waiter unexpectedly queried runtime owner", err)
+	}
+	if _, err = f.a.Pool.Exec(ctx, `ALTER TABLE runtime_owner_temporarily_unavailable RENAME TO sandbox_runtime_start`); err != nil {
+		t.Fatal(err)
 	}
 	// A protected create whose durable owner vanished is NOT a legacy skip.
 	if _, err = f.h.runtimeOwners().DeleteOne(ctx, pgdoc.M{"_id": o.ID}); err != nil {

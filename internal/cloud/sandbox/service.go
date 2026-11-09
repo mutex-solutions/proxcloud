@@ -176,7 +176,8 @@ func (s *Service) live(ctx context.Context, projectID string) ([]map[string]any,
 
 // CreateSandbox validates the spec, enforces the per-project concurrency limits against the
 // LIVE cluster (not the cache, which lags), and applies the Sandbox CR. Returns the cache row's
-// data payload. spec.ID is minted here.
+// data payload. A preallocated spec.ID requires its exact opaque CREATE proof;
+// otherwise the service mints a fresh server identity here.
 func (s *Service) CreateSandbox(ctx context.Context, spec *Spec) (map[string]any, error) {
 	// Freeze maps/pointers before validation; the caller only receives server ID.
 	caller := spec
