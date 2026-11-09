@@ -391,44 +391,74 @@ func (s *Service) observed(d map[string]any) map[string]any {
 	return d
 }
 
-// pinRunningSince records, once, when the sandbox first became Ready (AnnotationRunningSince).
-// The Ready condition's lastTransitionTime moves on every container restart, which customer code
-// can trigger; billing must keep counting from the first start. A failed patch is retried by
-// callers: create must not hand out a sandbox whose Ready-based TTL failed to persist.
+// pinRunningSince commits Ready+TTL only after a UID-scoped candidate is durable.
+// A retry after an ambiguous/failed final patch must retain that candidate across
+// Ready flaps or replicas. Initial candidate writes that never persist cannot prove
+// a historical observation; they return unavailable rather than claim readiness.
 func (s *Service) pinRunningSince(ctx context.Context, obj map[string]any) error {
-	if digStr(obj, "metadata", "annotations", AnnotationRunningSince) != "" || !conditionTrue(obj, "Ready") {
+	if digStr(obj, "metadata", "annotations", AnnotationRunningSince) != "" {
 		return nil
 	}
-	at := conditionTransition(obj, "Ready")
-	readyAt, err := time.Parse(time.RFC3339, at)
-	if err != nil {
-		return fmt.Errorf("sandbox: ready timestamp missing or invalid")
+	pending := digStr(obj, "metadata", "annotations", AnnotationStartupPending) == "true"
+	candidate := digStr(obj, "metadata", "annotations", AnnotationReadyCandidate)
+	if !conditionTrue(obj, "Ready") && (!pending || candidate == "") {
+		return nil
 	}
-	annPatch := map[string]any{AnnotationRunningSince: at}
-	patchMeta := map[string]any{"annotations": annPatch}
 	rv, uid := digStr(obj, "metadata", "resourceVersion"), digStr(obj, "metadata", "uid")
 	if rv == "" || uid == "" {
 		return fmt.Errorf("sandbox: ready identity/version missing")
 	}
-	patchMeta["resourceVersion"], patchMeta["uid"] = rv, uid // CAS on the exact observed CR
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if dig(obj, "metadata", "deletionTimestamp") != nil {
 		return ErrNotFound
 	}
-	patch := map[string]any{"metadata": patchMeta}
-	if digStr(obj, "metadata", "annotations", AnnotationStartupPending) == "true" {
-		// Do not resurrect a CR whose original provisional lifetime already elapsed.
+	at := conditionTransition(obj, "Ready")
+	if pending {
+		if candidate != "" {
+			if digStr(obj, "metadata", "annotations", AnnotationReadyCandidateUID) != uid {
+				return fmt.Errorf("sandbox: ready candidate identity changed")
+			}
+			at = candidate
+		}
+		readyAt, err := time.Parse(time.RFC3339, at)
 		oldEnd, e := time.Parse(time.RFC3339, endOf(obj))
-		if e != nil || !s.now().Before(oldEnd) || readyAt.After(s.now()) {
+		if err != nil || e != nil || readyAt.After(s.now()) || !s.now().Before(oldEnd) {
 			return context.DeadlineExceeded
 		}
+		if candidate == "" {
+			patch := map[string]any{"metadata": map[string]any{"uid": uid, "resourceVersion": rv, "annotations": map[string]any{AnnotationReadyCandidate: at, AnnotationReadyCandidateUID: uid}}}
+			observed, err := s.api.MergePatchCR(ctx, CRGroup, CRVersion, CRPlural, digStr(obj, "metadata", "namespace"), digStr(obj, "metadata", "name"), patch)
+			if err != nil {
+				return err
+			}
+			if digStr(observed, "metadata", "uid") != uid || digStr(observed, "metadata", "annotations", AnnotationReadyCandidateUID) != uid || digStr(observed, "metadata", "annotations", AnnotationReadyCandidate) == "" {
+				return fmt.Errorf("sandbox: durable ready candidate was not observed")
+			}
+			// Read the authoritative post-CAS state, including its new resourceVersion.
+			for k, v := range observed {
+				obj[k] = v
+			}
+			return s.pinRunningSince(ctx, obj)
+		}
+	}
+	readyAt, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		return fmt.Errorf("sandbox: ready timestamp missing or invalid")
+	}
+	annPatch := map[string]any{AnnotationRunningSince: at}
+	patch := map[string]any{"metadata": map[string]any{"uid": uid, "resourceVersion": rv, "annotations": annPatch}}
+	if pending {
 		seconds, err := strconv.Atoi(digStr(obj, "metadata", "annotations", AnnotationRuntimeSeconds))
 		if err != nil || seconds < 1 || seconds > s.cfg.Limits.MaxTimeoutSeconds {
 			return fmt.Errorf("sandbox: runtime timeout missing")
 		}
 		end := readyAt.Add(time.Duration(seconds) * time.Second)
+		// Even a persisted candidate does not grant access after its real runtime end.
+		if !s.now().Before(end) {
+			return context.DeadlineExceeded
+		}
 		annPatch[AnnotationStartupPending] = nil
 		if digStr(obj, "metadata", "annotations", AnnotationAutoPause) == "true" {
 			annPatch[AnnotationEndAt] = end.UTC().Format(time.RFC3339)
@@ -436,27 +466,21 @@ func (s *Service) pinRunningSince(ctx context.Context, obj map[string]any) error
 		}
 		patch["spec"] = map[string]any{"shutdownTime": end.UTC().Format(time.RFC3339)}
 	}
-	ns, name := digStr(obj, "metadata", "namespace"), digStr(obj, "metadata", "name")
-	if _, err := s.api.MergePatchCR(ctx, CRGroup, CRVersion, CRPlural, ns, name, patch); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	meta := obj["metadata"].(map[string]any)
-	ann, _ := meta["annotations"].(map[string]any)
-	if ann == nil {
-		ann = map[string]any{}
-		meta["annotations"] = ann
+	observed, err := s.api.MergePatchCR(ctx, CRGroup, CRVersion, CRPlural, digStr(obj, "metadata", "namespace"), digStr(obj, "metadata", "name"), patch)
+	if err != nil {
+		return err
 	}
-	for k, v := range annPatch {
-		if v == nil {
-			delete(ann, k)
-		} else {
-			ann[k] = v
-		}
+	if digStr(observed, "metadata", "uid") != uid || digStr(observed, "metadata", "annotations", AnnotationRunningSince) != at || digStr(observed, "metadata", "annotations", AnnotationStartupPending) == "true" {
+		return fmt.Errorf("sandbox: ready lifetime commit was not observed")
 	}
-	if sp, ok := patch["spec"].(map[string]any); ok {
-		obj["spec"].(map[string]any)["shutdownTime"] = sp["shutdownTime"]
+	// Update only after the server confirms the exact identity and lifetime commit.
+	for k, v := range observed {
+		obj[k] = v
 	}
-	return nil
+	return ctx.Err()
 }
 
 // DeleteSandbox deletes one sandbox. Already gone = success.
@@ -615,7 +639,7 @@ func sandboxData(obj map[string]any) map[string]any {
 	if runningSince != "" {
 		// Started once: it stays billable while its pod exists, even through a container restart.
 		status = StatusRunning
-	} else if conditionTrue(obj, "Ready") {
+	} else if conditionTrue(obj, "Ready") && digStr(obj, "metadata", "annotations", AnnotationStartupPending) != "true" {
 		status = StatusRunning
 		runningSince = conditionTransition(obj, "Ready")
 	}
