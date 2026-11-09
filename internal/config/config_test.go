@@ -31,7 +31,7 @@ func TestDurableJobBounds(t *testing.T) {
 	t.Setenv("PROXCLOUD_CONFIG_FILE", t.TempDir()+"/absent")
 	t.Setenv("PROXCLOUD_DB_URL", "postgres://primary/db")
 	t.Setenv("PROXCLOUD_JOBS_RABBIT_FANOUT", "")
-	for _, value := range []string{"-1", "17"} {
+	for _, value := range []string{"0", "-1", "17"} {
 		t.Setenv("PROXCLOUD_JOBS_WORKER_CONCURRENCY", value)
 		c, err := Load()
 		if err != nil {
@@ -41,6 +41,11 @@ func TestDurableJobBounds(t *testing.T) {
 			t.Fatalf("unbounded worker concurrency %s", value)
 		}
 	}
+	t.Setenv("PROXCLOUD_JOBS_WORKER_CONCURRENCY", "garbage-canary-do-not-echo")
+	if _, err := Load(); err == nil || strings.Contains(err.Error(), "garbage-canary") {
+		t.Fatalf("malformed concurrency not safely rejected: %v", err)
+	}
+	t.Setenv("PROXCLOUD_JOBS_WORKER_CONCURRENCY", "2")
 	t.Setenv("PROXCLOUD_JOBS_POLL_INTERVAL", "nonsense")
 	if _, err := Load(); err == nil {
 		t.Fatal("invalid duration ignored")

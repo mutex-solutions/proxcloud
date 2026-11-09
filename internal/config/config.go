@@ -12,6 +12,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -198,7 +199,14 @@ func Load() (*Config, error) {
 	c.Jobs.SchedulerEnabled = boolEnv("PROXCLOUD_JOBS_SCHEDULER_ENABLED") || k.Bool("proxcloud.jobs.scheduler-enabled")
 	c.Jobs.DebugTriggers = boolEnv("PROXCLOUD_JOBS_DEBUG_TRIGGERS") || k.Bool("proxcloud.jobs.debug-triggers")
 	c.Jobs.RabbitFanout = boolEnv("PROXCLOUD_JOBS_RABBIT_FANOUT") || k.Bool("proxcloud.jobs.rabbit-fanout")
-	c.Jobs.WorkerConcurrency = intOr(envInt("PROXCLOUD_JOBS_WORKER_CONCURRENCY"), 2)
+	c.Jobs.WorkerConcurrency = 2
+	if raw := os.Getenv("PROXCLOUD_JOBS_WORKER_CONCURRENCY"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PROXCLOUD_JOBS_WORKER_CONCURRENCY integer")
+		}
+		c.Jobs.WorkerConcurrency = value
+	}
 	c.Jobs.PollInterval = time.Second
 	c.Jobs.LeaseDuration = time.Minute
 	for key, target := range map[string]*time.Duration{"PROXCLOUD_JOBS_POLL_INTERVAL": &c.Jobs.PollInterval, "PROXCLOUD_JOBS_LEASE_DURATION": &c.Jobs.LeaseDuration} {
