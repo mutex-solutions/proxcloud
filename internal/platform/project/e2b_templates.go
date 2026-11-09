@@ -357,11 +357,7 @@ func (h *Handler) e2bTemplateRequest(w http.ResponseWriter, r *http.Request) {
 		e2bErr(w, http.StatusBadRequest, fmt.Sprintf("cpuCount must be at most %d and memoryMB at most %d", lim.MaxCPU, lim.MaxMemoryGiB*1024))
 		return
 	}
-	// A new build is new usage (it runs and is billed): the same gate as a sandbox create.
-	if err := h.sandboxUsageGate(r.Context(), c.proj, c.es); err != nil {
-		e2bFail(w, err)
-		return
-	}
+
 	buildResources, err := c.ss.Config().Build.Resources(b.BuildResources)
 	if err != nil {
 		e2bErr(w, http.StatusBadRequest, err.Error())

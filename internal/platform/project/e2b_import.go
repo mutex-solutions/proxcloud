@@ -268,7 +268,11 @@ func (h *Handler) e2bTemplateImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if created {
-		dc := []byte(`{"auths":{}}`)
+		var dc []byte
+		managed, _ := (sandboximport.Policy{TemplateRegistry: c.ss.Config().TemplateRegistry, SourceRepositories: c.ss.Config().Import.SourceRepositories, AllowAnonymous: c.ss.Config().Import.AllowAnonymous}).Source(b.Source, c.proj.ID)
+		if !managed {
+			dc = []byte(`{"auths":{}}`)
+		}
 		if b.Registry != nil {
 			host, _, _ := strings.Cut(b.Source, "/")
 			dc, _ = json.Marshal(map[string]any{"auths": map[string]any{host: map[string]string{"auth": base64.StdEncoding.EncodeToString([]byte(b.Registry.Username + ":" + b.Registry.Password))}}})
@@ -438,6 +442,11 @@ func (h *Handler) e2bTemplateAliases(w http.ResponseWriter, r *http.Request) {
 // Serialize ordinary create/build/delete with alias/import reservations too, including absent
 // rows. The build handler's active-worker check and pod creation must not race template deletion.
 func (h *Handler) e2bTemplateRequestLocked(w http.ResponseWriter, r *http.Request) {
+	c := e2bFrom(r)
+	if err := h.sandboxUsageGate(r.Context(), c.proj, c.es); err != nil {
+		e2bFail(w, err)
+		return
+	}
 	h.withTemplateNameLock(w, r, h.e2bTemplateRequest)
 }
 func (h *Handler) e2bTemplateBuildLocked(w http.ResponseWriter, r *http.Request) {

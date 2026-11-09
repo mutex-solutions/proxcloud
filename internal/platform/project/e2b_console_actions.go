@@ -152,6 +152,11 @@ func (h *Handler) consoleTemplateBuild(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if err := h.sandboxUsageGate(r.Context(), c.proj, c.es); err != nil {
+		status, msg := e2bError(err)
+		httpx.Err(w, status, status, msg)
+		return
+	}
 	// Preflight the core base/render validators before creating a reservation.
 	// The launch handler re-resolves the base to preserve its scope/admission rules.
 	base, err := h.resolveBase(r.Context(), c, "", t.ID, nil)
