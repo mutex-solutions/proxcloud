@@ -530,6 +530,11 @@ func (h *Handler) cleanupRetiredPins(ctx context.Context, ss *sandbox.Service, t
 				continue
 			}
 			if p.State == registrypins.Bound && p.RequestedRef == op.Destination && p.Ref == old.Image && p.BindingUID == "template:"+t.ID+":"+old.BuildID && p.BindingGeneration == op.Operation.Generation {
+				if held, e := h.retainedBuildReference(ctx, ss.Config(), t.ID, old.BuildID, p.Ref); e != nil {
+					return e
+				} else if held {
+					return errBuildPinState
+				}
 				_, e = store.ReleaseBinding(ctx, p, registrypins.BindingEvidence{UID: p.BindingUID, Generation: op.Operation.Generation, DigestRef: old.Image})
 			} else if p.State == registrypins.Pending && op.State == buildPinFailed {
 				_, e = store.ReleaseKnownNoEffect(ctx, p)
@@ -569,6 +574,43 @@ func (h *Handler) cleanupRetiredPins(ctx context.Context, ss *sandbox.Service, t
 	return nil
 }
 
+// retainedBuildReference is a conservative CURRENT-DB cleanup HOLD, not a
+// race-free provenance pin transfer. Other writers/adoption remain incomplete
+// and both physical manifest-delete gates stay unconditional HOLD.
+func (h *Handler) retainedBuildReference(ctx context.Context, cfg sandbox.Config, templateID, buildID, digestRef string) (bool, error) {
+	host, _, _ := strings.Cut(cfg.TemplateRegistry, "/")
+	target, err := registrypins.ParseRef(host, digestRef)
+	if err != nil {
+		return true, err
+	}
+	var all []sandboxTemplateDoc
+	if err = h.sbTemplates.Find(ctx, pgdoc.M{}, &all); err != nil {
+		return true, err
+	}
+	for _, t := range all {
+		for _, list := range [][]templateBuild{t.Builds, t.RetiredBuilds} {
+			for _, b := range list {
+				if t.ID == templateID && b.BuildID == buildID {
+					continue
+				}
+				for _, ref := range []string{b.From, b.Image} {
+					if ref == "" {
+						continue
+					}
+					r, e := registrypins.ParseRef(host, ref)
+					if e == nil && r.Repo == target.Repo && (r.Tag != "" || r.Digest == target.Digest) {
+						return true, nil
+					}
+					if e != nil && strings.HasPrefix(ref, target.Host+"/"+target.Repo) {
+						return true, nil
+					}
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
 func (h *Handler) retireTemplatePins(ctx context.Context, ss *sandbox.Service, t *sandboxTemplateDoc) error {
 	if h.sbBuildPinsDB == nil {
 		return nil
@@ -589,6 +631,7 @@ func (h *Handler) retireTemplatePins(ctx context.Context, ss *sandbox.Service, t
 		}
 		cur.Deleting = true
 		for _, b := range cur.Builds {
+			cur.rememberRetiredBuild(b)
 			if b.Registry != nil {
 				cur.RetiredBuilds = append(cur.RetiredBuilds, b)
 			}

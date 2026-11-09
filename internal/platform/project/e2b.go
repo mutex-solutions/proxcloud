@@ -1031,7 +1031,7 @@ func (h *Handler) e2bTemplateGet(w http.ResponseWriter, r *http.Request) {
 		v := pt.e2bView()
 		builds := []any{}
 		for _, b := range pt.Builds {
-			builds = append(builds, map[string]any{"buildID": b.BuildID, "status": b.Status, "cpuCount": pt.CPU, "memoryMB": pt.MemoryGiB * 1024,
+			builds = append(builds, map[string]any{"buildID": b.BuildID, "status": buildPinSDKStatus(&b), "cpuCount": pt.CPU, "memoryMB": pt.MemoryGiB * 1024,
 				"createdAt": b.CreatedAt, "finishedAt": b.FinishedAt})
 		}
 		v["builds"] = builds

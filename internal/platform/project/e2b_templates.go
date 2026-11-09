@@ -96,7 +96,10 @@ type sandboxTemplateDoc struct {
 	UploadToken   string            `json:"uploadToken"`
 	Builds        []templateBuild   `json:"builds"`
 	RetiredBuilds []templateBuild   `json:"retiredBuilds,omitempty"`
-	Deleting      bool              `json:"deleting,omitempty"`
+	// Compact durable identities survive receipt cleanup: a stale pre-prepare
+	// snapshot must never recreate a retired build ID with a fresh operation.
+	RetiredBuildIDs map[string]string `json:"retiredBuildIDs,omitempty"`
+	Deleting        bool              `json:"deleting,omitempty"`
 	// Kind "snapshot": a sandbox's filesystem (e2b_snapshots.go), taken from SourceSandbox. Internal: a pause's or a
 	// fork's snapshot, hidden from the template lists and from their limit.
 	Kind          string              `json:"kind,omitempty"`
@@ -188,10 +191,12 @@ func trimBuilds(t *sandboxTemplateDoc) {
 	out := t.Builds[:0]
 	for _, b := range t.Builds { // oldest first (mergeConcurrent sorts by createdAt)
 		if t.Kind == "snapshot" && b.Status == sandbox.BuildReady && !keep[b.BuildID] && !buildPinActive(b) {
+			t.rememberRetiredBuild(b)
 			drop--
 			continue
 		}
 		if drop > 0 && !keep[b.BuildID] && b.Status != sandbox.BuildBuilding && !buildPinActive(b) {
+			t.rememberRetiredBuild(b)
 			if b.Registry != nil {
 				t.RetiredBuilds = append(t.RetiredBuilds, b)
 			}
@@ -203,17 +208,33 @@ func trimBuilds(t *sandboxTemplateDoc) {
 	t.Builds = out
 }
 
+func (t *sandboxTemplateDoc) rememberRetiredBuild(b templateBuild) {
+	if t.RetiredBuildIDs == nil {
+		t.RetiredBuildIDs = map[string]string{}
+	}
+	generation := ""
+	if b.Registry != nil {
+		generation = b.Registry.Operation.Generation
+	}
+	t.RetiredBuildIDs[b.BuildID] = generation
+}
+
 // mergeConcurrent folds what others saved since t was read into t, so a request writing back its copy cannot undo
 // them: a build finished meanwhile stays finished (with the tags its result set), and a build added meanwhile stays.
 // Builds are never removed except by trimming.
 func mergeConcurrent(t, cur *sandboxTemplateDoc) {
 	t.Deleting = cur.Deleting
 	t.RetiredBuilds = cur.RetiredBuilds
+	t.RetiredBuildIDs = cur.RetiredBuildIDs
+	for _, b := range cur.RetiredBuilds {
+		t.rememberRetiredBuild(b)
+	}
 	// A stale request cannot resurrect a generation already trimmed or retired;
 	// only fresh waiting builds without a registry operation may be appended.
 	live := t.Builds[:0]
 	for _, b := range t.Builds {
-		if b.Registry != nil && cur.build(b.BuildID) == nil {
+		_, retired := t.RetiredBuildIDs[b.BuildID]
+		if retired || b.Registry != nil && cur.build(b.BuildID) == nil {
 			continue
 		}
 		live = append(live, b)
@@ -1031,12 +1052,12 @@ func (h *Handler) projectTemplates(ctx context.Context, projectID string) []sand
 
 func (t *sandboxTemplateDoc) defaultBuild() *templateBuild {
 	if id, ok := t.Tags["default"]; ok {
-		if b := t.build(id); b != nil && b.Status == sandbox.BuildReady {
+		if b := t.build(id); b != nil && buildPinSDKStatus(b) == sandbox.BuildReady {
 			return b
 		}
 	}
 	for i := len(t.Builds) - 1; i >= 0; i-- {
-		if t.Builds[i].Status == sandbox.BuildReady {
+		if buildPinSDKStatus(&t.Builds[i]) == sandbox.BuildReady {
 			return &t.Builds[i]
 		}
 	}
@@ -1051,7 +1072,7 @@ func (t *sandboxTemplateDoc) e2bView() map[string]any {
 	sort.Strings(tags)
 	status, buildID := "waiting", ""
 	if n := len(t.Builds); n > 0 {
-		status, buildID = t.Builds[n-1].Status, t.Builds[n-1].BuildID
+		status, buildID = buildPinSDKStatus(&t.Builds[n-1]), t.Builds[n-1].BuildID
 	}
 	ts := func(p *time.Time) string {
 		if p == nil {
@@ -1091,7 +1112,7 @@ func (h *Handler) resolveCustomTemplateWithKind(ctx context.Context, projectID, 
 	} else if id, ok := t.Tags[tag]; ok {
 		bl = t.build(id)
 	}
-	if bl == nil || bl.Status != sandbox.BuildReady || bl.Image == "" {
+	if bl == nil || buildPinSDKStatus(bl) != sandbox.BuildReady || bl.Image == "" {
 		return nil, "", "", fmt.Errorf("%w: template %q has no ready build", sandbox.ErrBadTemplate, ref)
 	}
 	return &sandbox.Template{
