@@ -3,10 +3,10 @@ module github.com/mutex-solutions/proxcloud
 go 1.25.0
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.47.5
+	github.com/aws/aws-sdk-go-v2 v1.47.7
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.13
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.0
-	github.com/aws/smithy-go v1.28.7
+	github.com/aws/smithy-go v1.28.8
 	github.com/cbroglie/mustache v1.4.0
 	github.com/cockroachdb/apd/v3 v3.2.3
 	github.com/coder/websocket v1.8.14
