@@ -95,6 +95,16 @@ func (c *Client) ListSDNVnets(ctx context.Context) ([]SDNVnet, error) {
 	return out, nil
 }
 
+// GetSDNVnet reads one vnet with the same credential as ListSDNVnets. A 404
+// alone is not proof of disappearance: callers must first verify effective SDN rights.
+func (c *Client) GetSDNVnet(ctx context.Context, vnet string) (*SDNVnet, error) {
+	var out SDNVnet
+	if err := c.get(ctx, "/cluster/sdn/vnets/"+url.PathEscape(vnet), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // CreateSDNVnet stages a vnet. tag: VLAN id (vlan zone) / VNI (vxlan+evpn); 0 = auto/none.
 func (c *Client) CreateSDNVnet(ctx context.Context, vnet, zone, alias string, tag int) error {
 	form := formVals{"vnet": vnet, "zone": zone, "alias": alias, "tag": itoa(tag)}.values()
@@ -128,6 +138,16 @@ func (c *Client) ListSDNSubnets(ctx context.Context, vnet string) ([]SDNSubnet, 
 		return nil, err
 	}
 	return out, nil
+}
+
+// GetSDNSubnet revalidates one omitted subnet. The id is PVE's zone-CIDR id,
+// not the CIDR itself; its read checks the enclosing vnet's effective rights.
+func (c *Client) GetSDNSubnet(ctx context.Context, vnet, id string) (*SDNSubnet, error) {
+	var out SDNSubnet
+	if err := c.get(ctx, "/cluster/sdn/vnets/"+url.PathEscape(vnet)+"/subnets/"+url.PathEscape(id), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // SubnetOpts drives CreateSDNSubnet.
