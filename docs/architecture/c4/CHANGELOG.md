@@ -4,6 +4,28 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: dormant typed runtime reference fence (bounded P2-B engine)
+
+**What changed:** distinct RuntimeSpec/RuntimeProof/RuntimePodEvidence, one immutable
+managed consumer pin, durable PRIMARY one-shot runtime marker, shared-copy local
+consume/cancel and global Build/Import/Runtime UUID exclusion. Private typed guards
+compose after both producer guards; only exact independently recorded pod/CR/spec
+provenance binds a running consumer or releases its known terminal incarnation.
+Full marker/receipt epoch CAS, monotone terminal state and nonexpiring UNKNOWN
+retain uncertainty without replay, TTL cleanup or a generic release grant.
+
+**Why:** a runtime is a long-lived image consumer, not a completed image producer.
+Startup Ready must retain the image; copied receipts and CR UID reuse on resume
+cannot grant dispatch or release. Desired owner retirement and exclusion of old
+Apply/controller recreation remain trusted future-caller prerequisites, not a
+claim that pod phase alone proves whole-product release safety.
+
+**Views updated:** dedicated runtime reference context/container/lifecycle contract
+and remaining-writer ledger in runtime-reference-fence.md. This engine is dormant:
+no native/E2B caller wiring or all-writer/adoption claim, and BOTH real-delete HOLD
+paths remain unchanged. Focused Go1.25 unit/race plus opt-in disposable loopback
+PostgreSQL tests cover strict specs, lifecycle, kind/epoch fencing and lock ordering.
+
 ## 2026-11-09: sandbox runtime parity core from pinned EE source
 
 **What changed:** phased bounded startup and a finite Ready-clock runtime TTL,
