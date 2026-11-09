@@ -53,7 +53,7 @@ func (f *outputLogsAPI) PodLogs(_ context.Context, _, _, container string, _ int
 
 func TestBuildOutputDiagnostics(t *testing.T) {
 	s := NewWithAPI(&outputLogsAPI{newFake()}, Config{}, "svc")
-	if logs := s.BuildLogs(context.Background(), "b1", 10); !reflect.DeepEqual(logs, []string{"invalid build output entry"}) {
+	if logs := s.BuildLogs(context.Background(), "b1", 10); !reflect.DeepEqual(logs, []string{"[prepare-output] invalid build output entry"}) {
 		t.Errorf("handoff failure logs missing: %v", logs)
 	}
 	pod := map[string]any{"status": map[string]any{
