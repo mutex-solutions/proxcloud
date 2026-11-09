@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -334,8 +335,9 @@ func TestRolloverBillsLastHourOnce(t *testing.T) {
 }
 
 // TestLateClosingChargeOpensNoBill: a closing pass behind the bill send must not open a second October
-// bill, whose new items would start at the cycle start and charge the month again. That interval goes
-// unbilled and is logged, and November is unaffected.
+// bill, whose new items would start at the cycle start and charge the month again.
+// The missing closing interval requires visible reconciliation, not a silent
+// success; the issued October money and November are unaffected.
 func TestLateClosingChargeOpensNoBill(t *testing.T) {
 	ctx := context.Background()
 	db := freshPG(t)
@@ -352,8 +354,14 @@ func TestLateClosingChargeOpensNoBill(t *testing.T) {
 	if ok, err := send.SendBillForProfile(ctx, profile, lockCycleEnd.Add(30*time.Minute)); err != nil || !ok {
 		t.Fatalf("send: ok=%v err=%v", ok, err)
 	}
-	if err := driver.Charge(ctx, pricing.TimeUnitHour, lockCycleEnd); err != nil {
-		t.Fatal(err)
+	if err := driver.Charge(ctx, pricing.TimeUnitHour, lockCycleEnd); !errors.Is(err, pricing.ErrChargeReconciliation) {
+		t.Fatalf("late issued closing interval must require reconciliation: %v", err)
+	}
+	if n, err := db.C("bill").Count(ctx, pgdoc.M{"billingProfileId": profileID}); err != nil || n != 1 {
+		t.Fatalf("issued month reopened: count=%d err=%v", n, err)
+	}
+	if n, err := db.C("billingChargeReceipt").Count(ctx, nil); err != nil || n != 0 {
+		t.Fatalf("failed closing acquired receipt: count=%d err=%v", n, err)
 	}
 	october, november := cycleBills(t, db, profileID)
 	if october.Status != pricing.BillStatusSent {
@@ -402,15 +410,18 @@ func TestSendBillKeepsRacingClosingCharge(t *testing.T) {
 			t.Fatal(err)
 		}
 		var closing *pricing.Bill
+		var closingErr error
+		var issued bool
 		together(
 			func() {
-				var err error
-				if closing, err = charge(lockCycleEnd); err != nil {
-					t.Errorf("closing charge: %v", err)
+				closing, closingErr = charge(lockCycleEnd)
+				if closingErr != nil && !errors.Is(closingErr, pricing.ErrChargeReconciliation) {
+					t.Errorf("closing charge: %v", closingErr)
 				}
 			},
 			func() {
-				if _, err := send.SendBillForProfile(ctx, profile, lockCycleEnd.Add(time.Second)); err != nil {
+				var err error
+				if issued, err = send.SendBillForProfile(ctx, profile, lockCycleEnd.Add(time.Second)); err != nil {
 					t.Errorf("send: %v", err)
 				}
 			},
@@ -418,6 +429,9 @@ func TestSendBillKeepsRacingClosingCharge(t *testing.T) {
 		bills := billsOf(t, db, bp)
 		if len(bills) != 1 {
 			t.Fatalf("round %d: %d bills", i, len(bills))
+		}
+		if errors.Is(closingErr, pricing.ErrChargeReconciliation) && (!issued || bills[0].Status != pricing.BillStatusSent || closing != nil) {
+			t.Fatalf("round %d: reconciliation without sender winning: issued=%v bill=%s closing=%+v", i, issued, bills[0].Status, closing)
 		}
 		want := bills[0].Items[0].NetAmount
 		if closing != nil && !want.Equal(decimal.NewFromInt(2)) {
