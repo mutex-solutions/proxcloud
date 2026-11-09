@@ -25,6 +25,14 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 > each server's keys from the tenant only. Not yet: GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
 > and decisions: the sandbox plan (owner document, not in this repository).
 
+## Current saved-lifecycle admission boundary
+
+**Managed pause/resume/fork is currently unavailable.** A fixed provider-wide saved-lifecycle capability is false: manual/native-abuse/automatic pause, paused CONNECT/wake, fork, and new AutoPause/AutoResume create promises fail closed before their lifecycle effects. There is no enable flag or test exception. The historical SB7 descriptions below document the earlier algorithm, not currently reachable restore-success behavior.
+
+Named snapshot capture/export and ordinary sandbox CREATE—including a pinned CREATE from a ready named snapshot—remain separate capabilities. Running CONNECT/GET/exec/timeout and explicitly authorized discard/teardown retain their existing authorization and uncertainty fences. Retained historical pause and expired internal-fork copies are not automatically discarded by a capability refusal. Existing source shutdownTime may still expire independently; retention does not extend TTL or guarantee that a source runs forever.
+
+See [saved-runtime admission and C4 safety guide](saved-runtime-admission.md) for exact ordering, truthful capability fields, compatibility limits, test transitions and the still-unimplemented source-lineage/old-Apply exclusion prerequisites. Dormant SnapshotProof correlations do not enable a restore or authorize registry GC.
+
 ## 0. SB0 lab spike (2026-11-07)
 
 Built by hand on a nested PVE lab, outside any portal: one Kamaji cluster from `deploy/charts/proxmox-kamaji-cluster`

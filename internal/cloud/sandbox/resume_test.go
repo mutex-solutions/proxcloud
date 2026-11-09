@@ -63,7 +63,7 @@ func TestFetchStepsBoundTheConnect(t *testing.T) {
 // bringing a third back is refused, and with room it is not.
 func TestResumeChecksProjectQuota(t *testing.T) {
 	f := newFake()
-	cfg := Config{Templates: map[string]Template{"py": {Image: "python:3.12", CPU: 1, MemoryGiB: 1}}}
+	cfg := Config{TemplateRegistry: "registry.example/t", Templates: map[string]Template{"py": {Image: "external.example/library/python:3.12", CPU: 1, MemoryGiB: 1}}}
 	s := NewWithAPI(f, cfg, "svc")
 	for range 2 {
 		if _, err := s.CreateSandbox(context.Background(), &Spec{ProjectID: "p1", Template: "py", TimeoutSeconds: 600}); err != nil {
@@ -72,13 +72,13 @@ func TestResumeChecksProjectQuota(t *testing.T) {
 	}
 	saved := BuildCR(cfg, "svc", Spec{ID: "sbx-00000009", ProjectID: "p1", Template: "py", CPU: 1, MemoryGiB: 1}, time.Unix(0, 0))
 	q := &ProjectQuota{Sandboxes: 5, VCPUs: 2, RAMMb: 8192}
-	if err := s.ResumeSandbox(context.Background(), "p1", saved, "python:3.12", time.Unix(3600, 0), q); !errors.Is(err, ErrQuotaExceeded) {
+	if err := s.ResumeSandbox(context.Background(), "p1", saved, cfg.Templates["py"].Image, time.Now().Add(time.Hour), q); !errors.Is(err, ErrQuotaExceeded) {
 		t.Fatalf("resume over the vCPU quota: %v", err)
 	}
 	if _, ok := f.crs[NamespaceFor("p1")+"/sbx-00000009"]; ok {
 		t.Fatal("a refused resume still created the sandbox")
 	}
-	if err := s.ResumeSandbox(context.Background(), "p1", saved, "python:3.12", time.Unix(3600, 0), &ProjectQuota{Sandboxes: 5, VCPUs: 3, RAMMb: 8192}); err != nil {
+	if err := s.ResumeSandbox(context.Background(), "p1", saved, cfg.Templates["py"].Image, time.Now().Add(time.Hour), &ProjectQuota{Sandboxes: 5, VCPUs: 3, RAMMb: 8192}); err != nil {
 		t.Fatalf("resume within quota: %v", err)
 	}
 }

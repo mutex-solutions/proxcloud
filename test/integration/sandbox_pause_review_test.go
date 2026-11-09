@@ -4,8 +4,6 @@ package integration
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"testing"
@@ -35,64 +33,56 @@ func (c killDuringCapture) ApplyCore(ctx context.Context, plural string, obj map
 
 // A kill that lands while the pause streams its capture (no paused record yet) answers 204 and deletes the sandbox;
 // the pause must not then bring it back as paused (a snapshot of a killed sandbox, billed as storage).
-func TestReviewKillDuringCaptureNotResurrected(t *testing.T) {
-	f, pc, keyA, _ := newPauseFixture(t)
+func TestReviewHeldPauseDoesNotCaptureAndExplicitKillDoesNotResurrect(t *testing.T) {
+	f, pc, key, _ := newPauseFixture(t)
 	ctx := context.Background()
-	// A long timeout (past the pause's hold), so the pause never patches the sandbox's end.
-	code, body := f.e2b(keyA, http.MethodPost, "/sandboxes", `{"templateID":"base","timeout":3600}`)
-	var sb struct{ SandboxID string }
-	if code != http.StatusCreated || json.Unmarshal([]byte(body), &sb) != nil {
-		t.Fatalf("create: %d %s", code, body)
-	}
-	id := sb.SandboxID
+	id := f.e2bCreate(key)
 	killed := 0
 	f.h.SetSandbox(func(es *externalservice.ExternalService) (*sandbox.Service, error) {
-		return sandbox.NewWithAPI(killDuringCapture{pc, func() {
-			if killed == 0 {
-				killed, _ = f.e2b(keyA, http.MethodDelete, "/sandboxes/"+id, "")
-			}
-		}}, es.SandboxConfig(), es.ID), nil
+		return sandbox.NewWithAPI(killDuringCapture{pc, func() { killed, _ = f.e2b(key, http.MethodDelete, "/sandboxes/"+id, "") }}, es.SandboxConfig(), es.ID), nil
 	})
-	code, body = f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`)
-	if killed != http.StatusNoContent || f.cluster.count() != 0 {
-		t.Fatalf("kill during capture: %d, running %d", killed, f.cluster.count())
+	code, body := f.e2b(key, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`)
+	requireHeld(t, code, body)
+	if killed != 0 || captureCount(pc) != 0 || f.cluster.count() != 1 {
+		t.Fatal("held pause invoked capture callback")
 	}
-	t.Logf("pause answered %d %s", code, body)
-	time.Sleep(3 * time.Second)
+	if code, body = f.e2b(key, http.MethodDelete, "/sandboxes/"+id, ""); code != 204 {
+		t.Fatal(code, body)
+	}
+	f.h.AutoPauseSandboxes(ctx)
 	n, _ := f.db.C("sandbox_paused").Count(ctx, pgdoc.M{})
-	tpls, _ := f.db.C("sandbox_templates").Count(ctx, pgdoc.M{"projectId": "pa"})
-	if n != 0 || tpls != 0 {
-		t.Fatalf("killed sandbox came back: pause answered %d %s; paused records %d, snapshots %d", code, body, n, tpls)
+	tpls, _ := f.db.C("sandbox_templates").Count(ctx, pgdoc.M{})
+	if n != 0 || tpls != 0 || f.cluster.count() != 0 {
+		t.Fatal("explicit kill resurrected state")
 	}
 }
 
-// A pause left behind by a crashed portal (lease expired) whose sandbox still runs on the pause's hold: a connect
-// drops the pause and its snapshot, and must give the sandbox a live end, or the cluster removes it at the dead hold.
-func TestReviewStalePauseKeepsSandboxOrSnapshot(t *testing.T) {
-	f, pc, keyA, _ := newPauseFixture(t)
+// Retaining state does not extend an already-expired source or promise it lives
+// indefinitely. Capability refusal must keep the copy and leave its TTL untouched.
+func TestReviewHeldStalePauseKeepsOnlyCopyWithoutRearmingTTL(t *testing.T) {
+	f, pc, key, _ := newPauseFixture(t)
 	ctx := context.Background()
-	pc.pmu.Lock()
-	pc.hold = true
-	pc.pmu.Unlock()
-	id := f.e2bCreate(keyA)
-	if code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/pause", `{}`); code != http.StatusNoContent {
-		t.Fatalf("pause: %d %s", code, body)
+	id := f.e2bCreate(key)
+	seedHeldPause(t, f, pc, id, "pausing", time.Now().Add(-time.Hour), false)
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	if _, e := pc.MergePatchCR(ctx, "", "", "", "sb-pa", id, map[string]any{"spec": map[string]any{"shutdownTime": past}}); e != nil {
+		t.Fatal(e)
 	}
-	f.pausedState(id, "pausing")
-	past := time.Now().UTC().Add(-time.Second).Format(time.RFC3339)
-	if _, err := f.db.C("sandbox_paused").SetByID(ctx, id, pgdoc.M{"leaseUntil": past}, nil); err != nil {
-		t.Fatal(err)
+	before := heldStateDigest(t, f)
+	cr, _ := pc.GetCR(ctx, "", "", "", "sb-pa", id)
+	wire := fmtJSON(cr)
+	code, body := f.e2b(key, http.MethodPost, "/sandboxes/"+id+"/connect", `{"timeout":60}`)
+	requireHeld(t, code, body)
+	after, _ := pc.GetCR(ctx, "", "", "", "sb-pa", id)
+	if heldStateDigest(t, f) != before || fmtJSON(after) != wire {
+		t.Fatal("held stale pause removed copy or rearmedTTL")
 	}
-	// the crashed pause's hold, which equals its lease
-	if _, err := pc.MergePatchCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), id, map[string]any{"spec": map[string]any{"shutdownTime": past}}); err != nil {
-		t.Fatal(err)
+	if e := pc.DeleteCR(ctx, "", "", "", "sb-pa", id); e != nil {
+		t.Fatal(e)
 	}
-	code, body := f.e2b(keyA, http.MethodPost, "/sandboxes/"+id+"/connect", `{"timeout":60}`)
-	tpls, _ := f.db.C("sandbox_templates").Count(ctx, pgdoc.M{"projectId": "pa"})
-	cr, _ := pc.GetCR(ctx, "", "", "", sandbox.NamespaceFor("pa"), id)
-	spec, _ := cr["spec"].(map[string]any)
-	end, _ := time.Parse(time.RFC3339, fmt.Sprint(spec["shutdownTime"]))
-	if tpls == 0 && time.Until(end) <= 0 {
-		t.Fatalf("connect %d %s: snapshot dropped and the sandbox still ends at the dead hold (%v)", code, body, end)
+	code, body = f.e2b(key, http.MethodPost, "/sandboxes/"+id+"/connect", `{"timeout":60}`)
+	requireHeld(t, code, body)
+	if heldStateDigest(t, f) != before || f.cluster.count() != 0 {
+		t.Fatal("absent source adopted or copy lost")
 	}
 }

@@ -20,6 +20,9 @@ Responses use the normal ProxCloud data envelope. References below describe its 
   "importEnabled": true,
   "trustedWorkerAvailable": true,
   "warmingEnabled": true,
+  "snapshotCaptureEnabled": true,
+  "savedLifecycleEnabled": false,
+  "savedLifecycleReason": "Managed snapshot resume/fork is held at this location; retained state is unchanged. Contact the platform operator.",
   "runtime": { "cpu": 2, "memoryGiB": 2, "maxCpu": 8, "maxMemoryGiB": 28 },
   "build": { "cpu": 4, "memoryGiB": 16, "diskGiB": 80,
     "maxCpu": 12, "maxMemoryGiB": 48, "maxDiskGiB": 160, "maxConcurrent": 2 }
@@ -96,5 +99,7 @@ The expanded panel polls active work and unfinished final-log capture; collapsin
 There is **no build-cancel endpoint**. The Cancel buttons close dialogs only, and deletion is not a substitute cancellation operation.
 
 ## Existing runtime cloud API
+
+Managed saved lifecycle is currently held: pause/resume/paused CONNECT/wake/fork and AutoPause/AutoResume promises return a fixed 403 before lifecycle effects. The native paused list exposes `resumeAvailable:false` and a fixed `resumeUnavailableReason`, never raw saved CRs or tokens. Explicit discard retains its existing active-lease/uncertainty fences; refusal does not rearm the original source deadline. Capture/export remains separate (`snapshotCaptureEnabled`).
 
 Runtime sandboxes remain ordinary `SANDBOX` cloud resources under `/project/{pid}`. Existing resource listing, creation, cloud deletion and action requests (`EXEC`, `GET_LOGS`, `SET_TIMEOUT`) retain their own location, E2B, GPU and egress guards. Template controls do not replace or relax those gates. Use your deployment's API reference for the wider cloud-resource API and the [E2B API](/docs/api/e2b) for SDK access tokens and lifecycle operations.

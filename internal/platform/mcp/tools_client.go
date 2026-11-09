@@ -315,13 +315,13 @@ var clientSandboxTools = []toolDef{
 	},
 	{
 		name:   "create_sandbox",
-		desc:   "Start an isolated sandbox (gVisor) to run code in. It is RUNNING within seconds; poll list_sandboxes until it is. At its timeout it is deleted, or paused when autoPause is set. Billed per minute while running. The templates (sandboxTemplates) and limits (sandboxLimits) are on the sandbox service in list_project_services; the project's own templates are in list_sandbox_templates.",
+		desc:   "Start an isolated sandbox (gVisor) to run code in. It is RUNNING within seconds; poll list_sandboxes until it is. At its timeout it is deleted. Managed pause/resume/fork and autoPause/autoResume are currently held with a fixed 403; named snapshot capture and ordinary CREATE are separate capabilities. Billed per minute while running. The templates (sandboxTemplates) and limits (sandboxLimits) are on the sandbox service in list_project_services; the project's own templates are in list_sandbox_templates.",
 		method: "POST",
 		path:   "/api/v1/project/{id}/cloud",
 		params: []param{
 			projectID,
 			{name: "type", in: "body", fixed: "SANDBOX"},
-			dataParam("Sandbox spec: {\"template\": string (required), \"name\": string, \"cpu\": integer, \"memoryGiB\": integer, \"gpu\": {\"model\": string, \"count\": integer}, \"timeoutSeconds\": integer (1 to maxTimeoutSeconds, default defaultTimeoutSeconds), \"env\": {string: string}, \"metadata\": {string: string} (not secret), \"network\": {\"allowOut\": [cidr], \"denyOut\": [cidr]}, \"allowPublicTraffic\": boolean, \"autoPause\": boolean (pause instead of delete at the timeout; 400 where the location cannot pause), \"autoResume\": boolean (needs autoPause, traffic resumes it; 400 where the location has no wake token)}.", true),
+			dataParam("Sandbox spec: {\"template\": string (required), \"name\": string, \"cpu\": integer, \"memoryGiB\": integer, \"gpu\": {\"model\": string, \"count\": integer}, \"timeoutSeconds\": integer (1 to maxTimeoutSeconds, default defaultTimeoutSeconds), \"env\": {string: string}, \"metadata\": {string: string} (not secret), \"network\": {\"allowOut\": [cidr], \"denyOut\": [cidr]}, \"allowPublicTraffic\": boolean, \"autoPause\": boolean (currently held with 403; do not request), \"autoResume\": boolean (currently held with 403; existing invalid combination/configuration checks still return 400)}.", true),
 		},
 	},
 	action("exec_in_sandbox", "Run one command in a RUNNING sandbox and wait for it (up to timeoutSeconds, default 60, max 600). Returns {result: {stdout, stderr (each capped at 1 MiB), exitCode, truncated}}. Pass data.cmd for a shell string (run with sh -c) or data.command for an argv array; optional data.stdin.", "EXEC",

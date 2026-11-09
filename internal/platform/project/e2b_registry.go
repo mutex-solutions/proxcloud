@@ -54,6 +54,11 @@ func (h *Handler) SyncSandboxBuilds(ctx context.Context) {
 	}
 	for i := range all {
 		t := &all[i]
+		// Retain an expired internal fork copy before any retirement/cleanup
+		// can change its metadata or references while saved starts are held.
+		if t.Internal && t.Kind == "snapshot" && t.ForkUntil != nil && time.Now().After(*t.ForkUntil) && !sandbox.SavedLifecycleAvailable(sandbox.Config{}) {
+			continue
+		}
 		if len(t.RetiredBuilds) > 0 {
 			if c := callerOf(t.ProjectID); c != nil {
 				if err := h.cleanupRetiredPins(ctx, c.ss, t); err != nil {
@@ -62,6 +67,12 @@ func (h *Handler) SyncSandboxBuilds(ctx context.Context) {
 			}
 		}
 		if t.ForkUntil != nil && time.Now().After(*t.ForkUntil) { // a fork's snapshot no retry took
+			if t.Internal && t.Kind == "snapshot" {
+				c := callerOf(t.ProjectID)
+				if c == nil || !sandbox.SavedLifecycleAvailable(c.ss.Config()) {
+					continue
+				}
+			}
 			if c := callerOf(t.ProjectID); c != nil {
 				if err := h.deleteTemplate(ctx, c.ss, t); err != nil {
 					slog.Warn("build sync: drop fork snapshot", "template", t.ID, "err", err)

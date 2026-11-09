@@ -54,6 +54,9 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
   Kamaji cluster: isolation, release gates, the public entry and wake, the sandbox
   registry and custom templates, with what ran on the lab.
 - [e2b-compat.md](e2b-compat.md) — the E2B-compatible sandbox API under `/e2b`.
+- [saved-runtime-admission.md](saved-runtime-admission.md) — deliberate managed lifecycle
+  admission hold, retained-copy/TTL boundaries, separate capture/pinned CREATE, truthful
+  capabilities and the still-unimplemented full restore protocol.
 - [pricing-rate-card.md](pricing-rate-card.md) — the seed price plan's rules and the
   benchmarks behind them.
 - [proxmox-permissions.md](proxmox-permissions.md) — least-privilege PVE roles

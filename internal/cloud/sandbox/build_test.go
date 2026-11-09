@@ -234,31 +234,20 @@ func TestAutoPauseLifecycle(t *testing.T) {
 	}
 }
 
-func TestResumeFromPublicImageGetsPullSecret(t *testing.T) {
+func TestSavedResumeOnlyCurrentCuratedLibraryGetsPullSecret(t *testing.T) {
 	f := newFake()
-	cfg := Config{Templates: map[string]Template{"py": {Image: "python:3.12", CPU: 1, MemoryGiB: 2}}}
-	img := testRegistry + "/p1/t1@sha256:1"
-	// No template registry configured: the same image is nobody's private image.
-	cr := BuildCR(cfg, "svc", Spec{ID: "sbx-00000001", ProjectID: "p1", Template: "py", CPU: 1, MemoryGiB: 2}, time.Unix(0, 0))
-	if err := NewWithAPI(f, cfg, "svc").ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0), nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.crs[NamespaceFor("p1")+"/sbx-00000001"]; dig(got, "spec", "podTemplate", "spec", "imagePullSecrets") != nil {
-		t.Fatal("no templateRegistry configured, yet the image got the template pull secret")
-	}
-
-	cfg.TemplateRegistry = testRegistry
-	s := NewWithAPI(f, cfg, "svc")
-	cr = BuildCR(cfg, "svc", Spec{ID: "sbx-00000001", ProjectID: "p1", Template: "py", CPU: 1, MemoryGiB: 2}, time.Unix(0, 0))
-	if dig(cr, "spec", "podTemplate", "spec", "imagePullSecrets") != nil {
-		t.Fatal("a public image needs no pull secret")
-	}
-	if err := s.ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0), nil); err != nil {
-		t.Fatal(err)
-	}
-	got := f.crs[NamespaceFor("p1")+"/sbx-00000001"]
-	if firstContainer(got)["image"] != img || dig(got, "spec", "podTemplate", "spec", "imagePullSecrets") == nil {
-		t.Errorf("resumed onto the private snapshot image without a pull secret: %v", dig(got, "spec", "podTemplate", "spec"))
+	cfg := Config{TemplateRegistry: "registry.example/t", Templates: map[string]Template{"py": {Image: "external.example/library/python:3.12", CPU: 1, MemoryGiB: 2}, "library": {Image: "registry.example/library/python:3.12", CPU: 1, MemoryGiB: 2}}}
+	for _, name := range []string{"py", "library"} {
+		s := NewWithAPI(f, cfg, "svc")
+		cr := BuildCR(cfg, "svc", Spec{ID: "sbx-00000001", ProjectID: "p1", Template: name, CPU: 1, MemoryGiB: 2}, time.Now().Add(time.Hour))
+		if e := s.ResumeSandbox(context.Background(), "p1", cr, cfg.Templates[name].Image, time.Now().Add(time.Hour), nil); e != nil {
+			t.Fatal(e)
+		}
+		got := f.crs[NamespaceFor("p1")+"/sbx-00000001"]
+		private := dig(got, "spec", "podTemplate", "spec", "imagePullSecrets") != nil
+		if private != (name == "library") || firstContainer(got)["image"] != cfg.Templates[name].Image {
+			t.Fatal("curated pull-secret/source mismatch")
+		}
 	}
 }
 

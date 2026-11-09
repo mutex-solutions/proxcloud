@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: managed saved-runtime admission-only safety boundary
+
+**What changed:** a static-false saved-lifecycle capability and strict low-level
+current-curated-image compatibility check now refuse managed resume, paused CONNECT/
+wake, fork, new pause and AutoPause/AutoResume promises before lifecycle effects.
+Unfinished pause drivers and expired internal-fork automatic cleanup retain state;
+capabilities/list metadata, MCP and operator/client guidance report the hold.
+
+**Why:** old issued Apply/controller recreation and complete snapshot source/provider/
+publication lineage are not excluded by CR NotFound, new head CAS, copied CREATE
+annotations or dormant proof correlations. This deliberately reduces availability;
+it is not full B2. No flag/test exception, lease/head protocol, schema or GC is added.
+Capture/export and pinned ordinary CREATE, live access and fenced explicit discard
+remain separate. Source TTL can independently expire and is never secretly rearmed.
+
+**Views updated:** [dedicated C4/safety/compatibility guide](../../saved-runtime-admission.md),
+C4 index, managed-sandbox/E2B references and client help. Tests intentionally replace
+historical managed-success cases with actual admission/retention evidence, not an
+unchanged restore-success claim. Local owned PG/race is not live restore acceptance.
+
 ## 2026-11-10: dormant typed snapshot registry dispatch prerequisite
 
 **What changed:** a separate fixed `snapshot/v1` proof and empty dispatch table,

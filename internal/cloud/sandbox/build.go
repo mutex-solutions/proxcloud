@@ -896,6 +896,25 @@ func (s *Service) SavedSandbox(ctx context.Context, projectID, id string) (map[s
 // against the same limits as a create: the provider's concurrency limits and the project quota q
 // (nil = none), checked against the live cluster.
 func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map[string]any, image string, shutdown time.Time, q *ProjectQuota) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Scope and deadline validation precede the capability result, with no saved
+	// map mutation or cluster access. Copied annotations do not grant admission.
+	if !savedProjectRE.MatchString(projectID) || digStr(saved, "metadata", "namespace") != NamespaceFor(projectID) || digStr(saved, "metadata", "labels", LabelProject) != projectID || !ValidID(digStr(saved, "metadata", "name")) {
+		return ErrNotFound
+	}
+	if digStr(saved, "metadata", "annotations", AnnotationStartupPending) == "true" {
+		armed, err := time.Parse(time.RFC3339, digStr(saved, "spec", "shutdownTime"))
+		if err != nil || !s.now().Before(armed) {
+			return context.DeadlineExceeded
+		}
+	} else if shutdown.IsZero() || !s.now().Before(shutdown) {
+		return context.DeadlineExceeded
+	}
+	if err := CheckSavedRuntimeImage(s.cfg, projectID, image); err != nil {
+		return err
+	}
 	cr := saved
 	// Saved annotations are historical, never an authority for the current cap.
 	mbps := s.cfg.WithDefaults().EgressMbps
