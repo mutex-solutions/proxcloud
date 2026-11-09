@@ -14,8 +14,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -37,11 +39,23 @@ func errQuotaUsageUnavailable() *httpx.HTTPError {
 }
 
 // pveQuotaLimits is the quota that applies to proj on es (see the file comment).
+// The sandbox keys (externalservice.SandboxQuotaKeys) share the document but are not a Proxmox quota: a project that
+// holds only those still gets the provider default.
 func pveQuotaLimits(proj *Project, es *externalservice.ExternalService) map[string]any {
-	if len(proj.Quota) > 0 {
+	if hasPVEQuota(proj.Quota) {
 		return proj.Quota
 	}
 	return es.PVEDefaultQuota()
+}
+
+// hasPVEQuota reports whether q holds any key other than the sandbox ones.
+func hasPVEQuota(q map[string]any) bool {
+	for k := range q {
+		if !slices.Contains(externalservice.SandboxQuotaKeys, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // enforcePVEQuota gates a demand against the project's limits using the cached rows
@@ -105,6 +119,10 @@ func (h *Handler) pveQuotaUsage(ctx context.Context, projectID, svcID string) (p
 	if err != nil {
 		return pveQuotaDemand{}, err
 	}
+	return pveUsageOf(rows, svcID), nil
+}
+
+func pveUsageOf(rows []cloud.CloudResource, svcID string) pveQuotaDemand {
 	var u pveQuotaDemand
 	for i := range rows {
 		if rows[i].ServiceID != svcID {
@@ -125,7 +143,50 @@ func (h *Handler) pveQuotaUsage(ctx context.Context, projectID, svcID string) (p
 			if vol, ok := rows[i].Data["volume"].(map[string]any); ok {
 				u.DiskGb += intAny(vol["size"])
 			}
+		case cloud.TypeImage:
+			// A project template is a disk on the provider's storage. Its size is in bytes.
+			if img, ok := rows[i].Data["image"].(map[string]any); ok {
+				u.DiskGb += gibUp(int64(intAny(img["size"])))
+			}
 		}
 	}
-	return u, nil
+	return u
+}
+
+// CSIDiskQuota gates disk the CSI gateway is about to create or grow for a tenant cluster's volume, against the
+// project's diskGb. The gateway's registry is not in the cache, so csiUsed adds its volumes to the cached usage.
+func (h *Handler) CSIDiskQuota(ctx context.Context, projectID, serviceID string, addGiB int, csiUsed func() (int, error)) error {
+	proj, err := h.svc.GetProjectByID(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	es, err := h.esSvc.Get(ctx, serviceID)
+	if err != nil {
+		return err
+	}
+	usage := func() (pveQuotaDemand, error) {
+		rows, err := h.cloud.FindAllByProjectID(ctx, proj.ID)
+		if err != nil {
+			return pveQuotaDemand{}, err
+		}
+		// The registry counts the cluster disks itself, creating and just-grown ones too: not their cached rows again.
+		rows = slices.DeleteFunc(rows, func(r cloud.CloudResource) bool { return pve.CSIClusterOf(r.Data) != "" })
+		u := pveUsageOf(rows, es.ID)
+		n, err := csiUsed()
+		u.DiskGb += n
+		return u, err
+	}
+	if herr := checkPVEQuota(pveQuotaLimits(proj, es), pveQuotaDemand{DiskGb: addGiB}, usage, func() (int, error) { return 0, nil }); herr != nil {
+		return herr
+	}
+	return nil
+}
+
+// csiVolumeGuard refuses a portal write on a tenant cluster's disk: the cluster owns it, through its PersistentVolume.
+func csiVolumeGuard(cr *cloud.CloudResource) *httpx.HTTPError {
+	if id := pve.CSIClusterOf(cr.Data); id != "" {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict,
+			"This volume belongs to Kubernetes cluster "+id+". Manage it through its PersistentVolumeClaim")
+	}
+	return nil
 }

@@ -30,4 +30,26 @@ spec:
     {{- with .Values.cnpg.storage.storageClass }}
     storageClass: {{ . | quote }}
     {{- end }}
+  {{- if .Values.cnpg.keycloak.enabled }}
+  managed:
+    roles:
+      - name: keycloak
+        ensure: present
+        login: true
+        passwordSecret:
+          name: {{ required "cnpg.keycloak.existingSecret is required when cnpg.keycloak.enabled" .Values.cnpg.keycloak.existingSecret }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: {{ include "proxcloud.cnpgClusterName" . }}-keycloak
+  labels:
+    {{- include "proxcloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  name: keycloak
+  owner: keycloak
+  cluster:
+    name: {{ include "proxcloud.cnpgClusterName" . }}
+  {{- end }}
 {{- end }}

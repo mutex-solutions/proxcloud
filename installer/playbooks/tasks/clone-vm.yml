@@ -1,0 +1,91 @@
+# Create a platform VM in the system pool by cloning a template; each step checks first, so a run that
+# died halfway resumes. vars: vm = {vmid, name, node, source_vmid, storage, cores, memory, disk, bridge,
+# vlan, user, ip, gateway, nameserver, ssh_key, tags, data_disk, data_storage, data_format, extra}; extra is more VM
+# configuration (a second NIC, firewall=1) applied with the rest before the first boot.
+- name: "Look up VM {{ vm.name }}"
+  ansible.builtin.uri:
+    url: "{{ pc_api }}/nodes/{{ vm.node }}/qemu/{{ vm.vmid }}/status/current"
+    status_code: [200, 404, 500]
+  register: pc_vm_state
+
+- name: Clone the template
+  when: pc_vm_state.status != 200
+  block:
+    - name: Clone
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/nodes/{{ vm.node }}/qemu/{{ vm.source_vmid }}/clone"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          newid: "{{ vm.vmid }}"
+          name: "{{ vm.name }}"
+          full: 1
+          storage: "{{ vm.storage }}"
+          pool: "{{ vm.pool | default(pc.pve.system_pool) }}"
+      changed_when: true
+      register: pc_clone
+    - name: Wait for the clone
+      ansible.builtin.include_tasks: pve-wait.yml
+      vars: {wait_upid: "{{ pc_clone.json.data }}", wait_node: "{{ vm.node }}"}
+
+- name: Read the VM configuration
+  ansible.builtin.uri: {url: "{{ pc_api }}/nodes/{{ vm.node }}/qemu/{{ vm.vmid }}/config"}
+  register: pc_vm_config
+
+- name: Configure the VM
+  when: pc_vm_config.json.data.ciuser is not defined
+  block:
+    - name: Set the configuration
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/nodes/{{ vm.node }}/qemu/{{ vm.vmid }}/config"
+        method: POST
+        body_format: form-urlencoded
+        body: "{{ cfg | combine(data_disk_cfg) | combine(vm.extra | default({})) }}"
+      changed_when: true
+      register: pc_vm_set
+      vars:
+        cfg:
+          cores: "{{ vm.cores }}"
+          memory: "{{ vm.memory }}"
+          cpu: host
+          agent: 1
+          onboot: 1
+          protection: 1
+          tags: "{{ vm.tags }}"
+          net0: "virtio,bridge={{ vm.bridge }}{{ (',tag=' ~ vm.vlan) if vm.vlan | int else '' }}"
+          ciuser: "{{ vm.user }}"
+          sshkeys: "{{ vm.ssh_key | trim | urlencode | replace('/', '%2F') }}"
+          ipconfig0: "ip={{ vm.ip }},gw={{ vm.gateway }}"
+          nameserver: "{{ vm.nameserver or vm.gateway }}"
+        data_disk_cfg: "{{ {'scsi1': vm.data_storage ~ ':' ~ vm.data_disk ~ ',discard=on' ~ vm.data_format | default('')} if vm.data_disk | default(0) | int else {} }}"
+    - name: Wait for the configuration
+      ansible.builtin.include_tasks: pve-wait.yml
+      vars: {wait_upid: "{{ pc_vm_set.json.data }}", wait_node: "{{ vm.node }}"}
+    - name: Resize the boot disk
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/nodes/{{ vm.node }}/qemu/{{ vm.vmid }}/resize"
+        method: PUT
+        body_format: form-urlencoded
+        body: {disk: scsi0, size: "{{ vm.disk }}G"}
+      changed_when: true
+      register: pc_resize
+    - name: Wait for the resize
+      ansible.builtin.include_tasks: pve-wait.yml
+      vars: {wait_upid: "{{ pc_resize.json.data }}", wait_node: "{{ vm.node }}"}
+
+- name: Read the VM status
+  ansible.builtin.uri: {url: "{{ pc_api }}/nodes/{{ vm.node }}/qemu/{{ vm.vmid }}/status/current"}
+  register: pc_vm_status
+
+- name: Start the VM
+  when: pc_vm_status.json.data.status != 'running'
+  block:
+    - name: Start
+      ansible.builtin.uri:
+        url: "{{ pc_api }}/nodes/{{ vm.node }}/qemu/{{ vm.vmid }}/status/start"
+        method: POST
+      changed_when: true
+      register: pc_start
+    - name: Wait for the start
+      ansible.builtin.include_tasks: pve-wait.yml
+      vars: {wait_upid: "{{ pc_start.json.data }}", wait_node: "{{ vm.node }}"}

@@ -74,6 +74,7 @@ export default function App() {
           <Route path="system/menu" element={lazyPage(() => import("@/pages/system/MenuPage"))} />
           <Route path="system/roles" element={lazyPage(() => import("@/pages/system/RolesPage"))} />
           <Route path="system/hmac-keys" element={lazyPage(() => import("@/pages/system/HmacKeysPage"))} />
+          <Route path="system/sso" element={lazyPage(() => import("@/pages/system/SsoPage"))} />
           <Route path="audit" element={lazyPage(() => import("@/pages/AuditPage"))} />
         </Route>
         {/* Public documentation (no auth) — markdown-driven, see src/docs/. */}

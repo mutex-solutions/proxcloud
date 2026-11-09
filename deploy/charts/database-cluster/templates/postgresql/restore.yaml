@@ -1,0 +1,44 @@
+{{- if and .Values.restore.sourceId (has .Values.engine (list "postgresql" "ferretdb")) }}
+{{/*
+The ObjectStore the recovery READS from — deliberately separate from the one
+this database backs up TO (backup.yaml). Same bucket, different folder: the
+recovery store points at the SOURCE's path, so a restored database can never
+write into the folder it is reading, and the source's backups stay intact even
+if the restore is thrown away.
+
+Credentials come from this database's own backup Secret, which CreateDatabase
+writes BEFORE the Application when restoring — the operator starts recovering
+the moment the CR lands.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: {{ $name }}-restore-store
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+spec:
+  configuration:
+    destinationPath: {{ include "database-cluster.restorePath" . | quote }}
+    endpointURL: {{ .Values.restore.s3.endpoint | quote }}
+    {{- with .Values.restore.s3.caCertSecret }}
+    endpointCA:
+      name: {{ . }}
+      key: ca.crt
+    {{- end }}
+    s3Credentials:
+      accessKeyId:
+        name: {{ .Values.restore.credsSecret }}
+        key: ACCESS_KEY_ID
+      secretAccessKey:
+        name: {{ .Values.restore.credsSecret }}
+        key: ACCESS_SECRET_KEY
+    {{- if .Values.restore.s3.pathStyle }}
+    wal:
+      restoreAdditionalCommandArgs:
+        - "--addressing-style=path"
+    data:
+      additionalCommandArgs:
+        - "--addressing-style=path"
+    {{- end }}
+{{- end }}

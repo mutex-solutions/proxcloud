@@ -67,6 +67,7 @@ export const routes: RouteEntry[] = [
   { path: `${P}/org/projects`, name: "org-projects", hasTable: true, hasDialogs: true },
   { path: `${P}/org/audit`, name: "org-audit", hasTable: true },
   { path: `${P}/org/roles`, name: "org-roles", hasTable: true, hasDialogs: true },
+  { path: `${P}/org/sso`, name: "org-sso" },
   { path: `${P}/org/settings`, name: "org-settings", hasDialogs: true },
   { path: `${P}/account`, name: "account", hasTable: true },
 

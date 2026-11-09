@@ -2,9 +2,12 @@ package externalservice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
+	"time"
 
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/pkg/textcrypt"
 )
 
@@ -21,6 +24,9 @@ var serviceIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // primitive.D / pgdoc.A for free-form sub-documents, so config + secret are normalized to
 // plain map[string]any / []any first — otherwise the typed accessors and the textcrypt walk
 // (which match map[string]any) would skip nested objects.
+// ErrNotFound is a service id that names nothing: a project may still carry a binding to a removed provider.
+var ErrNotFound = errors.New("externalservice: service not found")
+
 type Service struct {
 	repo *Repo
 	enc  *textcrypt.Encryptor
@@ -40,9 +46,26 @@ func (s *Service) Get(ctx context.Context, id string) (*ExternalService, error) 
 		return nil, err
 	}
 	if es == nil {
-		return nil, fmt.Errorf("externalservice: service not found: %s", id)
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
 	return s.decrypt(es), nil
+}
+
+// SetTemplateImage is Repo.SetTemplateImage (image adoption of a sandbox provider's built-in template).
+func (s *Service) SetTemplateImage(ctx context.Context, id, tmpl, from, to string) (bool, error) {
+	return s.repo.SetTemplateImage(ctx, id, tmpl, from, to)
+}
+
+// SetProvisionError records a failed provisioning on the row, or with a nil err clears the record.
+func (s *Service) SetProvisionError(ctx context.Context, id, projectID string, cause error) error {
+	if cause == nil {
+		_, err := s.repo.col.SetByID(ctx, id, nil, []string{"provisionError"})
+		return err
+	}
+	_, err := s.repo.col.SetByID(ctx, id, pgdoc.M{"provisionError": ProvisionError{
+		ProjectID: projectID, Message: cause.Error(), At: time.Now().UTC(),
+	}}, nil)
+	return err
 }
 
 // List returns all services, decrypted.
@@ -87,6 +110,9 @@ func (s *Service) EncryptSecret(v any) any {
 }
 
 // decrypt normalizes config + secret and decrypts the secret's textual leaves in place.
+// Decrypt turns a row built from a stored doc into one with a readable secret.
+func (s *Service) Decrypt(es *ExternalService) *ExternalService { return s.decrypt(es) }
+
 func (s *Service) decrypt(es *ExternalService) *ExternalService {
 	if m, ok := normalize(es.Config).(map[string]any); ok {
 		es.Config = m

@@ -1,0 +1,68 @@
+# Cluster-wide network guardrail for every tenant sandbox. It selects every pod in a namespace
+# labelled proxcloud.io/tenant=true (the portal labels each sb-<projectId> namespace it creates,
+# internal/cloud/sandbox LabelTenant), so a sandbox is fenced even if its own policy is missing.
+#
+# Egress, in layers:
+#   1. sandbox-tenant-egress (here, every sandbox): DNS to kube-dns, and an egressDeny on the private,
+#      CGNAT and link-local ranges and on TCP 25 anywhere. Deny wins over any allow in Cilium, so no
+#      per-sandbox rule (allowOut, a toFQDNs answer that resolves to 10.x, ...) can reopen them.
+#   2. <sandboxID>-egress (CiliumNetworkPolicy the portal writes per sandbox, owned by its Sandbox
+#      CR): the internet, open by default, or the E2B-style allow-list / deny-list. No policy means
+#      no internet (fail closed).
+# Every other in-cluster endpoint (other sandboxes, pods, nodes, the API server) stays denied: Cilium
+# default-denies once an egress rule selects the pod, and CIDR rules match only traffic leaving the
+# cluster ("world"), which is why the egressDeny does not hit kube-dns.
+#
+# IPv4 only. Every range below is IPv4, so an IPv6 path out of a sandbox would match none of them.
+# The cluster must run without IPv6 (check-ipv4-only.sh, and stage 55 refuses to go on otherwise);
+# adding IPv6 means writing the IPv6 half of this policy first.
+#
+# Ingress: only sandbox-proxy may connect to a sandbox (envd and the tenant's ports). Exec and the
+# startup probe go through the API server and the container runtime, not the pod network.
+#
+# None of this fences the node itself: code that escapes gVisor is outside every pod policy. The
+# node-level fence is the PVE cluster firewall (isolation rules with sandboxCidrs) and, in SB2b,
+# the per-NIC VM firewall.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: sandbox-tenant-egress
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s:io.cilium.k8s.namespace.labels.proxcloud.io/tenant: "true"
+  egress:
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: kube-system
+        k8s:k8s-app: kube-dns
+    toPorts:
+    - ports:
+      - {port: "53", protocol: ANY}
+  egressDeny:
+  - toCIDRSet:
+    - cidr: 10.0.0.0/8
+    - cidr: 172.16.0.0/12
+    - cidr: 192.168.0.0/16
+    - cidr: 100.64.0.0/10
+    - cidr: 169.254.0.0/16
+  # Mail abuse: no SMTP from a sandbox, on any address. 587 and 465 stay open (authenticated relays).
+  - toCIDRSet:
+    - cidr: 0.0.0.0/0
+    toPorts:
+    - ports:
+      - {port: "25", protocol: TCP}
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: sandbox-tenant-ingress
+spec:
+  endpointSelector:
+    matchLabels:
+      k8s:io.cilium.k8s.namespace.labels.proxcloud.io/tenant: "true"
+  ingress:
+  - fromEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: sandbox-system
+        k8s:app: sandbox-proxy

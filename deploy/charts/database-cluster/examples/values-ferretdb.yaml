@@ -13,13 +13,14 @@ resources:
   memoryGi: 4
 storage:
   sizeGi: 20
-  storageClassName: proxmox-csi
+  storageClassName: fast
 network:
+  addressPool: dbaas-services
   allowedCidrs:
-    - 10.40.0.0/24
+    - 192.0.2.0/24
 proxcloud:
   projectId: 665f1a2b3c4d5e6f77889900
-  resourceId: std-5e6f7081
+  resourceId: pc-d-5e6f7081
   displayName: docs-store
 monitoring:
   enabled: true
@@ -28,3 +29,16 @@ ferretdb:
   image: ""
   postgresImage: ghcr.io/ferretdb/postgres-documentdb:17-0.106.0-ferretdb-2.5.0
 restartedAt: ""
+# Object-store backup (BuildValues emits this at CREATE whenever the provider has an
+# object store). Plain http endpoint on purpose: a lab RustFS needs no TLS.
+backup:
+  enabled: true
+  schedule: "0 2 * * 0"
+  retentionDays: 30
+  s3:
+    endpoint: http://s3.example.com:9000
+    bucket: dbaas-backups
+    prefix: backups
+    region: us-east-1
+    pathStyle: true
+    credsSecret: pc-d-5e6f7081-backup-s3

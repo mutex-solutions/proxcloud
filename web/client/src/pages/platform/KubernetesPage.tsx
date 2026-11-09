@@ -5,8 +5,6 @@
 // quota + region GPU capacity + no ephemeral/swap flavors + the admin's kubernetesFlavorIds
 // allowlist. Actions map to Go cloud_kamaji.go: create/delete + GET_KUBECONFIG / UPGRADE /
 // SET_NODE_GROUPS / SET_OIDC.
-// TODO(P7): cluster create is not available on Proxmox yet — CAPMOX worker provisioning,
-// proxmox-csi storage and MetalLB load balancers replace the old cloud-specific pieces.
 import { useCallback, useMemo, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -78,12 +76,10 @@ type FlavorOption = {
   spec?: string // "4 vCPU · 8 GB RAM"
   blocked?: boolean // exceeds project quota or region GPU capacity — must not be picked
 }
-// A pickable cluster network: one of the project's own VPCs plus its subnets. The default —
-// no pick — is a dedicated network created for the cluster.
+// A pickable cluster network: one of the project's own networks.
 type NetworkOption = {
   id: string
   name: string
-  subnets: { id: string; label: string }[]
 }
 
 type OidcDraft = {
@@ -110,10 +106,10 @@ function oidcToBody(o: OidcDraft): Record<string, string> {
 // Node images are bigger than most flavors' local disk, so a node group's root disk size is
 // explicit. The backend applies the provider's own default when this is left empty;
 // this is only the number the form starts on.
-const DEFAULT_ROOT_DISK_GIB = "120"
+const DEFAULT_ROOT_DISK_GIB = "30"
 
 const emptyGroup: NodeGroupRow = {
-  name: "workers", flavorId: "", variant: "", count: "3", autoscale: false, min: "1", max: "5",
+  name: "workers", flavorId: "", variant: "", count: "1", autoscale: false, min: "1", max: "5",
   rootDisk: DEFAULT_ROOT_DISK_GIB, labels: "", taints: "",
 }
 
@@ -121,12 +117,8 @@ const emptyGroup: NodeGroupRow = {
 // `on` is the default state, kept in line with the chart's own defaults.
 const ADDONS = [
   { key: "metricsServer", label: "Metrics Server", hint: "kubectl top and autoscaling (HPA) metrics", on: true },
-  { key: "nodeProblemDetector", label: "Node Problem Detector", hint: "Surfaces node faults (kernel hangs, bad disks, NTP drift) as Kubernetes Events", on: true },
   { key: "certManager", label: "cert-manager", hint: "TLS certificates from Let's Encrypt or private CAs", on: false },
   { key: "ingress", label: "NGINX Ingress", hint: "HTTP(S) ingress controller for your Services", on: false },
-  { key: "monitoring", label: "Monitoring stack", hint: "Prometheus, Grafana dashboards and Loki logs (~2 GB RAM; metrics/logs kept in memory, 24h retention)", on: false },
-  { key: "nvidiaGPUOperator", label: "NVIDIA GPU Operator", hint: "Drivers and container toolkit for GPU node groups", on: false },
-  { key: "reloader", label: "Reloader", hint: "Automatically rolls Deployments when a watched ConfigMap or Secret changes", on: false },
 ] as const
 const defaultAddons = () => Object.fromEntries(ADDONS.map((a) => [a.key, a.on])) as Record<string, boolean>
 
@@ -442,29 +434,18 @@ export default function KubernetesPage() {
     [flavorOptionsFor, createLoc?.serviceId],
   )
 
-  // The project's own networks + subnets (cached NETWORK/SUBNET resources, default cloud scope =
-  // the compute service) feed the optional bring-your-own-network picker. Only private VPCs:
-  // shared/external infra networks are not a place for worker nodes.
+  // The project's own networks (cached NETWORK resources, default cloud scope = the compute service)
+  // feed the network picker. Only private ones: shared networks are no place for worker nodes.
   const networksQ = useCloudList(pid, "NETWORK")
-  const subnetsQ = useCloudList(pid, "SUBNET")
   const networkOptions = useMemo<NetworkOption[]>(() => {
-    const subsByNet = new Map<string, { id: string; label: string }[]>()
-    for (const r of subnetsQ.data ?? []) {
-      const s = (r.data?.subnet ?? {}) as Record<string, unknown>
-      const netId = (s.network_id as string) ?? ""
-      const id = (s.id as string) || r.externalId
-      if (!netId || !id) continue
-      const label = [s.name as string, s.cidr as string].filter(Boolean).join(" · ") || id
-      subsByNet.set(netId, [...(subsByNet.get(netId) ?? []), { id, label }])
-    }
     return (networksQ.data ?? [])
       .filter(isPrivateNetwork)
       .map((r): NetworkOption => {
         const id = ((r.data?.network as Record<string, unknown> | undefined)?.id as string) || r.externalId || ""
-        return { id, name: networkName(r), subnets: subsByNet.get(id) ?? [] }
+        return { id, name: networkName(r) }
       })
-      .filter((n) => !!n.id && n.subnets.length > 0) // a network with no subnet cannot host nodes
-  }, [networksQ.data, subnetsQ.data])
+      .filter((n) => !!n.id)
+  }, [networksQ.data])
 
   const [createOpen, setCreateOpen] = useState(false)
   const [toDelete, setToDelete] = useState<CloudResource | null>(null)
@@ -788,17 +769,11 @@ function ClusterFormDialog({
   const [oidcOpen, setOidcOpen] = useState(false)
   const [oidc, setOidc] = useState<OidcDraft>({ ...emptyOidc })
   const [allowedCidrs, setAllowedCidrs] = useState("")
-  // "" = a dedicated network the platform creates for the cluster; otherwise the picked network id.
   const [networkId, setNetworkId] = useState("")
-  const [subnetId, setSubnetId] = useState("")
-  const selectedNetwork = networks.find((n) => n.id === networkId)
   const [pending, setPending] = useState(false)
 
-  // BYO requires BOTH; the subnet select only appears once a network is chosen, and picking a
-  // network clears a stale subnet from a previous one.
-  const networkValid = !networkId || (!!subnetId && !!selectedNetwork?.subnets.some((s) => s.id === subnetId))
   const valid =
-    !!name.trim() && !!version && networkValid && groups.length > 0 && groups.every(groupValid)
+    !!name.trim() && !!version && groups.length > 0 && groups.every(groupValid)
 
   const submit = async () => {
     setPending(true)
@@ -809,7 +784,7 @@ function ClusterFormDialog({
         ha,
         addons,
         nodeGroups: groupsToData(groups),
-        ...(networkId && subnetId ? { networkId, subnetId } : {}),
+        ...(networkId ? { networkId } : {}),
         ...(oidc.issuerUrl.trim() ? { oidc: oidcToBody(oidc) } : {}),
         ...(allowedCidrs.trim()
           ? { allowedCidrs: allowedCidrs.split(",").map((c) => c.trim()).filter(Boolean) }
@@ -934,50 +909,22 @@ function ClusterFormDialog({
             ))}
           </div>
 
-          {networks.length > 0 && (
-            <div className="grid gap-3 rounded-lg border p-3">
-              <div className="grid gap-2">
-                <Label htmlFor="k8s-network">Network</Label>
-                <Select
-                  value={networkId || "__dedicated__"}
-                  onValueChange={(v) => {
-                    const id = v === "__dedicated__" ? "" : v
-                    setNetworkId(id)
-                    setSubnetId("") // a subnet from the previous network is meaningless here
-                  }}
-                >
-                  <SelectTrigger id="k8s-network">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__dedicated__">Dedicated network (created for this cluster)</SelectItem>
-                    {networks.map((n) => (
-                      <SelectItem key={n.id} value={n.id}>{n.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  Leave as “Dedicated” to let the platform create an isolated network. Pick one of your
-                  own networks to place worker nodes on it — it must reach the internet through a router.
-                </p>
-              </div>
-              {selectedNetwork && (
-                <div className="grid gap-2">
-                  <Label htmlFor="k8s-subnet">Subnet</Label>
-                  <Select value={subnetId} onValueChange={setSubnetId}>
-                    <SelectTrigger id="k8s-subnet">
-                      <SelectValue placeholder="Pick a subnet" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {selectedNetwork.subnets.map((s) => (
-                        <SelectItem key={s.id} value={s.id}>{s.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
-            </div>
-          )}
+          <div className="grid gap-2">
+            <Label htmlFor="k8s-network">Network</Label>
+            <Select value={networkId} onValueChange={setNetworkId}>
+              <SelectTrigger id="k8s-network">
+                <SelectValue placeholder="Pick a network" />
+              </SelectTrigger>
+              <SelectContent>
+                {networks.map((n) => (
+                  <SelectItem key={n.id} value={n.id}>{n.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Worker nodes run on this network and reserve 24 of its addresses. It needs a way to the internet.
+            </p>
+          </div>
 
           <div className="grid gap-2">
             <Label htmlFor="k8s-cidrs">Allowed API CIDRs (optional, comma-separated)</Label>
@@ -1133,30 +1080,11 @@ function NodeGroupsEditor({
               </p>
             </div>
           )}
-          {/* First column sizes to the switch+label so "Autoscale" never collides with the
-              number inputs; the count/disk fields share the rest. */}
-          <div className="grid grid-cols-2 items-end gap-3 sm:grid-cols-[auto_1fr_1fr_1fr_auto]">
-            <div className="flex items-center gap-2 pb-2">
-              <Switch id={`ng-as-${i}`} className="shrink-0" checked={g.autoscale} onCheckedChange={(on) => set(i, { autoscale: on })} />
-              <Label htmlFor={`ng-as-${i}`} className="text-sm whitespace-nowrap">Autoscale</Label>
+          <div className="grid grid-cols-2 items-end gap-3 sm:grid-cols-[1fr_1fr_auto]">
+            <div className="grid gap-2">
+              <Label htmlFor={`ng-count-${i}`}>Nodes</Label>
+              <Input id={`ng-count-${i}`} type="number" min={1} value={g.count} onChange={(e) => set(i, { count: e.target.value })} />
             </div>
-            {g.autoscale ? (
-              <>
-                <div className="grid gap-2">
-                  <Label htmlFor={`ng-min-${i}`}>Min</Label>
-                  <Input id={`ng-min-${i}`} type="number" min={1} value={g.min} onChange={(e) => set(i, { min: e.target.value })} />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor={`ng-max-${i}`}>Max</Label>
-                  <Input id={`ng-max-${i}`} type="number" min={1} value={g.max} onChange={(e) => set(i, { max: e.target.value })} />
-                </div>
-              </>
-            ) : (
-              <div className="grid gap-2">
-                <Label htmlFor={`ng-count-${i}`}>Nodes</Label>
-                <Input id={`ng-count-${i}`} type="number" min={1} value={g.count} onChange={(e) => set(i, { count: e.target.value })} />
-              </div>
-            )}
             <div className="grid gap-2">
               <Label htmlFor={`ng-disk-${i}`}>Disk (GiB)</Label>
               <Input id={`ng-disk-${i}`} type="number" min={1} value={g.rootDisk} onChange={(e) => set(i, { rootDisk: e.target.value })} />
@@ -1383,7 +1311,6 @@ function ClusterDetail({
             {(c.network_id as string) ? (
               <>
                 {resource.region ? " · " : ""}Network: <span className="font-mono">{c.network_id as string}</span>
-                {(c.subnet_id as string) ? <> · subnet <span className="font-mono">{c.subnet_id as string}</span></> : null}
               </>
             ) : null}
           </p>
@@ -1471,6 +1398,26 @@ function ClusterDetail({
               ))}
               {ADDONS.every((a) => !addonStates[a.key]) ? <span>none</span> : null}
             </div>
+          )}
+
+          {/* Why a PersistentVolumeClaim can sit Pending: what storage this cluster was given. */}
+          {Array.isArray(c.storage_classes) && (
+            (c.storage_classes as string[]).length === 0 && !c.rwx ? (
+              <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4 text-sm">
+                <div className="font-medium">No storage in this cluster</div>
+                <p className="text-muted-foreground">
+                  The cluster has no StorageClass, so a PersistentVolumeClaim stays Pending. Your platform operator
+                  decides whether Kubernetes clusters get storage.
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Storage: {(c.storage_classes as string[]).length > 0
+                  ? <>StorageClass <span className="font-mono">{(c.storage_classes as string[]).join(", ")}</span> (ReadWriteOnce)</>
+                  : "no block StorageClass"}
+                {c.rwx ? " · ReadWriteMany from a NAS share" : " · no ReadWriteMany: a RWX claim stays Pending"}
+              </p>
+            )
           )}
 
           <div className="overflow-hidden rounded-xl border bg-card">

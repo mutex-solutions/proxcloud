@@ -30,15 +30,15 @@ INSERT INTO "pricePlanRule" (id, doc) VALUES
 ('6a4e63e8aa5e5eed10000009', '{"name":"GPU:intel-a60 (placeholder)","timeUnit":"hour","resourceType":"instance","pricePlanId":"6a4e63e8aa5e5eed10000001","applyMethod":"ADD_TO_TOTAL","prices":[{"attributeName":"gpu_count","tiers":[{"value":"0.15"}]}],"filters":[{"attributeName":"gpu_model","operator":"eq","value":"intel-a60"}],"modifiers":[]}'),
 ('6a4e63e8aa5e5eed10000010', '{"name":"Public egress:1 TiB free, then $0.01/GB","timeUnit":"hour","resourceType":"instance_traffic","pricePlanId":"6a4e63e8aa5e5eed10000001","applyMethod":"OVERWRITE_TOTAL","prices":[{"attributeName":"outgoing_public_traffic_mb","tiers":[{"from":"0","to":"1048576","value":"0"},{"from":"1048576","value":"0.00001"}]}],"filters":[],"modifiers":[]}'),
 ('6a4e63e8aa5e5eed10000011', '{"name":"Block storage","timeUnit":"hour","resourceType":"volume","pricePlanId":"6a4e63e8aa5e5eed10000001","applyMethod":"ADD_TO_TOTAL","prices":[{"attributeName":"size","tiers":[{"value":"0.000137"}]}],"filters":[],"modifiers":[]}'),
-('6a4e63e8aa5e5eed10000012', '{"name":"Floating IP","timeUnit":"hour","resourceType":"floating_ip","pricePlanId":"6a4e63e8aa5e5eed10000001","applyMethod":"ADD_TO_TOTAL","prices":[{"attributeName":"existence","tiers":[{"value":"0.005"}]}],"filters":[],"modifiers":[]}'),
-('6a4e63e8aa5e5eed10000013', '{"name":"Load balancer","timeUnit":"hour","resourceType":"load_balancer","pricePlanId":"6a4e63e8aa5e5eed10000001","applyMethod":"ADD_TO_TOTAL","prices":[{"attributeName":"existence","tiers":[{"value":"0.0165"}]}],"filters":[],"modifiers":[]}')
+('6a4e63e8aa5e5eed10000012', '{"name":"Public IP","timeUnit":"hour","resourceType":"floating_ip","pricePlanId":"6a4e63e8aa5e5eed10000001","applyMethod":"ADD_TO_TOTAL","prices":[{"attributeName":"existence","tiers":[{"value":"0.005"}]}],"filters":[],"modifiers":[]}'),
+('6a4e63e8aa5e5eed10000013', '{"name":"Project image storage","timeUnit":"hour","resourceType":"image","pricePlanId":"6a4e63e8aa5e5eed10000001","applyMethod":"ADD_TO_TOTAL","prices":[{"attributeName":"size_gb","tiers":[{"value":"0.000068"}]}],"filters":[],"modifiers":[]}')
 ON CONFLICT (id) DO NOTHING;
 
 -- Managed Kubernetes CONTROL-PLANE fee (kubernetes_cluster, priced per cp_replicas).
 -- Deliberately commented: the CP-pricing decision is still open (design plan §6 —
 -- free CP + paid HA vs flat fee). Uncomment after that decision; keep in sync with the
--- kubernetes_cluster entry in price-plan-seed.json. Worker VMs/volumes/LBs already bill via
--- the instance/volume/load_balancer rules above — never add k8s worker rules here.
+-- kubernetes_cluster entry in price-plan-seed.json. Worker VMs/volumes already bill via
+-- the instance/volume rules above — never add k8s worker rules here.
 -- INSERT INTO "pricePlanRule" (id, doc) VALUES
 -- ('6a4e63e8aa5e5eed10000014', '{"name":"Kubernetes control plane (per CP replica)","timeUnit":"hour","resourceType":"kubernetes_cluster","pricePlanId":"6a4e63e8aa5e5eed10000001","applyMethod":"ADD_TO_TOTAL","prices":[{"attributeName":"cp_replicas","tiers":[{"value":"0.015"}]}],"filters":[],"modifiers":[]}')
 -- ON CONFLICT (id) DO NOTHING;

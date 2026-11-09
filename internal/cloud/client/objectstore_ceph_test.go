@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // mockRGW emulates the RGW Admin Ops JSON API (/admin/*) + a minimal S3 endpoint on one server, so the
@@ -112,7 +114,7 @@ func (m *mockRGW) s3(t *testing.T, w http.ResponseWriter, r *http.Request) {
 }
 
 func newTestCeph(t *testing.T, url string, withProjectKeys bool) *Client {
-	cfg := CephConfig{
+	cfg := ObjectStoreConfig{
 		S3Endpoint: url, AdminURL: url + "/admin", Region: "us-east-1",
 		AdminAccessKey: "ADMINAK", AdminSecretKey: "ADMINSK",
 		RGWUID: "proj1", DefaultQuotaBytes: 100 << 30,
@@ -148,9 +150,9 @@ func TestCephEnsureUserAndQuota(t *testing.T) {
 	defer srv.Close()
 	cc := newTestCeph(t, srv.URL, false) // admin-only client
 
-	access, secret, err := cc.EnsureCephUser(context.Background(), "proxcloud-proj1")
+	access, secret, err := cc.EnsureProjectUser(context.Background(), "proxcloud-proj1")
 	if err != nil {
-		t.Fatalf("EnsureCephUser: %v", err)
+		t.Fatalf("EnsureProjectUser: %v", err)
 	}
 	if access != "AKPROJ" || secret != "SKPROJ" {
 		t.Fatalf("keys = %q/%q; want AKPROJ/SKPROJ", access, secret)
@@ -168,9 +170,9 @@ func TestCephEnsureUserAuthErrorSurfaces(t *testing.T) {
 	defer srv.Close()
 	cc := newTestCeph(t, srv.URL, false)
 
-	_, _, err := cc.EnsureCephUser(context.Background(), "proxcloud-proj1")
+	_, _, err := cc.EnsureProjectUser(context.Background(), "proxcloud-proj1")
 	if err == nil {
-		t.Fatal("EnsureCephUser should fail when the user probe is denied")
+		t.Fatal("EnsureProjectUser should fail when the user probe is denied")
 	}
 	if !strings.Contains(err.Error(), "lookup user") {
 		t.Fatalf("want lookup-user error, got %v", err)
@@ -238,8 +240,8 @@ func TestCephForceDeleteRefusesForeignOwner(t *testing.T) {
 	defer srv.Close()
 	cc := newTestCeph(t, srv.URL, false)
 
-	if err := cc.ForceDeleteCephBucket(context.Background(), "b1"); err != nil {
-		t.Fatalf("ForceDeleteCephBucket on a foreign bucket should be a no-op, got %v", err)
+	if err := cc.ForceDeleteBucket(context.Background(), "b1"); err != nil {
+		t.Fatalf("ForceDeleteBucket on a foreign bucket should be a no-op, got %v", err)
 	}
 	if m.sawBucketDelete {
 		t.Fatal("a DELETE /admin/bucket was issued for a bucket owned by another project")
@@ -253,8 +255,8 @@ func TestCephForceDeleteOwnBucket(t *testing.T) {
 	defer srv.Close()
 	cc := newTestCeph(t, srv.URL, false)
 
-	if err := cc.ForceDeleteCephBucket(context.Background(), "b1"); err != nil {
-		t.Fatalf("ForceDeleteCephBucket on our own bucket: %v", err)
+	if err := cc.ForceDeleteBucket(context.Background(), "b1"); err != nil {
+		t.Fatalf("ForceDeleteBucket on our own bucket: %v", err)
 	}
 	if !m.sawBucketDelete {
 		t.Fatal("expected a DELETE /admin/bucket for our own bucket")
@@ -345,21 +347,43 @@ func TestCephCreateBucket(t *testing.T) {
 
 // The website URL is virtual-hosted (<bucket>.<websiteHost>), which is why the wildcard cert/DNS exists —
 // it is NOT the path-style S3 data endpoint. And the public-read policy must name the TENANTED bucket ARN.
+func TestCephWebsiteNeedsAnEndpoint(t *testing.T) {
+	cfg := ObjectStoreConfig{S3Endpoint: "https://s3.example", ProjectAccessKey: "a", ProjectSecretKey: "b"}
+	b, err := newCephBackend(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Caps().Website {
+		t.Fatal("no s3WebsiteEndpoint: website must not be offered")
+	}
+	if _, err := b.EnableBucketWebsite(context.Background(), "b", "", ""); !errors.Is(err, ErrWebsiteUnsupported) {
+		t.Fatalf("enable err = %v", err)
+	}
+	cfg.S3WebsiteEndpoint = "https://s3-website.example"
+	if b, err = newCephBackend(cfg); err != nil || !b.Caps().Website {
+		t.Fatalf("with an endpoint: caps %+v err %v", b.Caps(), err)
+	}
+	notAllowed := &smithyhttp.ResponseError{Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusMethodNotAllowed}}}
+	if !errors.Is(websiteErr(notAllowed), ErrWebsiteUnsupported) {
+		t.Fatal("a 405 means the gateway has no website API")
+	}
+}
+
 func TestCephWebsiteURLAndPolicy(t *testing.T) {
-	cc, err := NewCephS3(context.Background(), CephConfig{
+	cc, err := NewCephS3(context.Background(), ObjectStoreConfig{
 		S3Endpoint: "https://s3.example", S3WebsiteEndpoint: "https://s3-website.example/",
 		AdminURL: "https://s3.example/admin", Region: "us-east-1", RGWUID: "proj1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cc.ceph.websiteURL("my-site"); got != "https://my-site.s3-website.example" {
+	if got := cephOf(cc).websiteURL("my-site"); got != "https://my-site.s3-website.example" {
 		t.Errorf("websiteURL = %q", got)
 	}
-	if got := cc.ceph.bucketARN("my-site"); got != "arn:aws:s3:::my-site/*" {
+	if got := cephOf(cc).bucketARN("my-site"); got != "arn:aws:s3:::my-site/*" {
 		t.Errorf("bucketARN = %q; want untenanted form", got)
 	}
-	stmt := cc.ceph.websiteStmt("my-site")
+	stmt := cephOf(cc).websiteStmt("my-site")
 	if stmt.Sid != sidWebsiteRead || stmt.Effect != "Allow" {
 		t.Errorf("website stmt = %+v", stmt)
 	}
@@ -367,8 +391,8 @@ func TestCephWebsiteURLAndPolicy(t *testing.T) {
 		t.Errorf("website stmt action/resource = %s / %s", stmt.Action, stmt.Resource)
 	}
 	// No website endpoint configured → no URL (the provider does not offer website hosting).
-	bare, _ := NewCephS3(context.Background(), CephConfig{S3Endpoint: "https://s3.example", Region: "us-east-1"})
-	if got := bare.ceph.websiteURL("b"); got != "" {
+	bare, _ := NewCephS3(context.Background(), ObjectStoreConfig{S3Endpoint: "https://s3.example", Region: "us-east-1"})
+	if got := cephOf(bare).websiteURL("b"); got != "" {
 		t.Errorf("websiteURL without endpoint = %q; want empty", got)
 	}
 }

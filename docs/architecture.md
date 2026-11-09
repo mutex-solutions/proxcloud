@@ -30,10 +30,11 @@ flowchart TB
         ADMIN["Admin SPA<br/>(operator console)"]
         MCPC["MCP clients<br/>(agents / tools)"]
         M2M["Machine-to-machine<br/>(SigV4 API keys)"]
+        E2BC["E2B SDK clients<br/>(sandbox API keys)"]
     end
 
     subgraph ProxCloud["proxcloud-api (Go process)"]
-        APP["App router :8080<br/>/api/v1, /admin-api/v1, /mcp"]
+        APP["App router :8080<br/>/api/v1, /admin-api/v1, /mcp, /e2b"]
         MGMT["Mgmt router :8081<br/>/actuator/*, /debug/*"]
         JOBS["Scheduler + jobs<br/>(in-process crons)"]
     end
@@ -44,11 +45,13 @@ flowchart TB
     PVE["Proxmox VE cluster(s)<br/>REST :8006: VMs, SDN, firewall, storage"]
     RGW["Ceph RGW<br/>S3 + Admin Ops"]
     SMTP["SMTP relay<br/>(transactional mail)"]
+    SBX["Sandbox cluster<br/>(gVisor, Kubernetes API)"]
 
     UI -->|bearer JWT| APP
     ADMIN -->|bearer JWT| APP
     MCPC -->|JWT or pk.sk key| APP
     M2M -->|AWS SigV4| APP
+    E2BC -->|e2b_ key| APP
 
     APP -->|validate tokens / JWKS| KC
     APP <-->|read / write| PG
@@ -59,7 +62,13 @@ flowchart TB
     JOBS -->|per-profile charge msgs| RABBIT
     JOBS -->|"sync"| PVE
     APP -->|send templated mail| SMTP
+    APP -->|"sandboxes, templates"| SBX
+    JOBS -->|"sandbox state"| SBX
 ```
+
+Not drawn: the other provider kinds the app router reaches the same way, per
+provider on demand (RustFS, TrueNAS, PowerDNS, and the Kamaji and DBaaS management
+clusters through ArgoCD); see [cloud-integration.md](cloud-integration.md).
 
 The process listens on **two ports**. `:8080` is the public API surface behind
 the ingress; `:8081` is the management/operations port (health probes, on-demand
@@ -160,22 +169,25 @@ flowchart LR
   needs a valid credential or gets a `401` with an empty body and
   `WWW-Authenticate: Bearer`. See [auth.md](auth.md).
 
-**Three route surfaces** share the port:
+**Four route surfaces** share the port:
 
 | Surface | Prefix | Auth scheme | Purpose |
 |---|---|---|---|
-| Client + operator API | `/api/v1/*` | OIDC bearer (client & admin realms) | The whole product: account, org, project, billing, cloud, admin. Admin endpoints live under `/api/v1/admin/**` and are gated by an `adminPermission` record, not a separate realm. |
+| Client + operator API | `/api/v1/*` | OIDC bearer (client & admin realms), or a customer's `pk.sk` personal access token | The whole product: account, org, project, billing, cloud, admin. Admin endpoints live under `/api/v1/admin/**` and are gated by an `adminPermission` record, not a separate realm. |
 | Public Admin API | `/admin-api/v1/*` | AWS SigV4 (hmac keys) **or** dedicated admin-api OIDC realm | Machine-to-machine integration surface with snake_case envelopes and keyset pagination. |
-| MCP | `/mcp` | Dual scheme: realm JWT **or** `Bearer pk.sk` key | Model Context Protocol endpoint; tool calls dispatch back through the app router in-process. |
+| MCP | `/mcp` | Dual scheme: realm JWT **or** `Bearer pk.sk` key (a customer's personal access token → client tools, an admin hmac key → admin tools) | Model Context Protocol endpoint; tool calls dispatch back through the app router in-process. |
+| E2B-compatible sandboxes | `/e2b/*` | A project's `e2b_` sandbox API key (`X-API-Key` or bearer) | The E2B SDK's API over the platform's sandboxes ([e2b-compat.md](e2b-compat.md)). |
 
 **Public-path whitelist** (`pkg/auth`, `IsPublic`): exact paths (`/error`,
 `/api/v1/platform-configuration/default`, the billing config country/currency
 lists, the RFC 9728 resource-metadata doc) and prefixes (`/openapi.json`, `/mcp`,
-`/api/v1/auth/`, `/api/v1/download/`, `/api/v1/callbacks/`, `/api/v1/payments/`, `/api/v1/admin/job/`,
-`/api/v1/admin/onboarding/`, `/api/v1/webhooks/`,
-`/api/v1/events/`). These are the webhook, download-token, SSE, and operator
-callback paths that authenticate by their own scheme (token in the URL, SigV4,
-signed webhook) rather than a bearer header.
+`/api/v1/auth/`, `/api/v1/download/`, `/api/v1/nocloud/`, `/api/v1/console/`,
+`/api/v1/callbacks/`, `/api/v1/admin/onboarding/`, `/api/v1/internal/sandboxes/`,
+`/e2b/`). These authenticate by their own scheme rather than a bearer the gate
+checks: a token in the URL (download, VM seed, console), the MCP handler's own
+gate, a sandbox provider's `proxyWakeToken` (the wake call), or a project's `e2b_`
+sandbox API key. `/api/v1/admin/job/` is not public: the gate requires an admin
+credential there.
 
 ### Management router (`:8081`)
 
@@ -183,9 +195,11 @@ A plain `net/http.ServeMux`: `GET /actuator/health` (liveness),
 `GET /actuator/health/readiness` (PostgreSQL ping + RabbitMQ health),
 `GET /actuator/info`, a build probe, the billing-service callbacks (when a shared
 token is configured), and — when jobs are enabled or debug-triggers are on — a family of
-`POST /debug/run-*` triggers to drive crons on demand (sync, metrics, charge,
-collect, dunning, savings expiry, project deletion, HMAC key minting, mail send,
-RabbitMQ self-test).
+`POST /debug/run-*` triggers to drive crons on demand (sync, the Proxmox state,
+task and traffic samples, the sandbox state, builds, auto-pause and registry prune, SSO
+reconcile, metrics, charge, collect, dunning, review, savings expiry, project
+deletion, mail send, RabbitMQ self-test). HMAC key minting (`gen-hmac-key`) is
+unauthenticated, so only debug-triggers exposes it, never the scheduler alone.
 
 ---
 
@@ -282,7 +296,7 @@ initialized" if absent.
 The code is organized as one Go module (`github.com/mutex-solutions/proxcloud`) with
 `internal/platform/*` domain packages, an `internal/cloud/*` Proxmox / object-store subsystem,
 and a handful of infrastructure packages (`internal/{config,server,oidc,pgdoc,
-amqp,health}`, `pkg/{auth,httpx,textcrypt,money,audit}`).
+amqp,health,sandboxproxy}`, `pkg/{auth,httpx,textcrypt,money,audit,billingapi,certfile,safeurl}`).
 
 ```mermaid
 flowchart TB
@@ -293,6 +307,7 @@ flowchart TB
         project["project"]
         rbac["rbac"]
         projectinvite["projectinvite"]
+        sso["sso"]
     end
     subgraph BILL["Billing & payments"]
         billing["billing"]
@@ -302,10 +317,12 @@ flowchart TB
         catalog["catalog"]
         billingjob["billingjob"]
         chargefanout["chargefanout"]
+        billingprovider["billingprovider<br/>billingclient, billingcallback"]
     end
     subgraph CLOUD["Cloud"]
         externalservice["externalservice"]
-        cloudpkg["internal/cloud/*<br/>(pve, providers, syncjob,<br/>metrics, metricsjob,<br/>billingresource, client, kamaji, dbaas)"]
+        pveflavor["pveflavor"]
+        cloudpkg["internal/cloud/*<br/>(pve, providers, syncjob,<br/>metrics, metricsjob,<br/>billingresource, client, kamaji, dbaas,<br/>sandbox, csigw, truenas, powerdns)"]
     end
     subgraph PLAT["Platform & operations"]
         platformconfig["platformconfig"]
@@ -323,6 +340,7 @@ flowchart TB
         scheduler["scheduler"]
         lock["lock"]
         job["job"]
+        paging["paging"]
     end
 ```
 
@@ -336,6 +354,7 @@ flowchart TB
 | `project` | Project slice: project CRUD, embedded memberships, project-level RBAC, and the client cloud read/write endpoints. |
 | `rbac` | Pure authorization kernel: permission keys, the wildcard permission matcher, and the built-in role→permission tables (no DB). |
 | `projectinvite` | Create/lookup/accept/decline project invitations (TTL-indexed), with the invite email and audit trail. |
+| `sso` | Per-organization SSO: organization identity providers and verified domains in Keycloak, and the guard that refuses a session that must come through its organization's IdP. |
 
 ### Billing & payments
 
@@ -348,13 +367,15 @@ flowchart TB
 | `catalog` | Cloud-catalog config reads: flavor categories, image groups/categories, instance-metadata options (admin-configured document tables). |
 | `billingjob` | The charge-cron driver: load active profiles + services, and rate each billable cloud resource per time unit. |
 | `chargefanout` | The multi-pod alternative to the in-process charge loop: publish one RabbitMQ message per active profile; any pod's consumer drains the queue. |
+| `billingprovider`, `billingclient`, `billingcallback` | The charge seam: `native` (in-process engine) or `external` (a separate billing service over `pkg/billingapi`), the client for that service, and its callbacks into ProxCloud (suspend/resume, activate projects, mail). |
 
 ### Cloud
 
 | Module | Responsibility |
 |---|---|
 | `externalservice` | The `externalService` table: one record per provider (Proxmox API token, Ceph RGW keys, Kamaji/DBaaS kubeconfigs) with an encrypted-at-rest `secret` decrypted on read. |
-| `internal/cloud/*` | The cloud subsystem (see §6): `pve` (client, services, networks, firewall, scheduler, sync providers), `providers` (Reconcile), the resource cache + history, `syncjob`, `metrics`/`metricsjob` (Prometheus), `billingresource`, `client` (ceph-s3), `cephcred`, `kamaji`, `dbaas`. Package map: [C3 components](architecture/c4/c3-components.md). |
+| `pveflavor` | The Proxmox flavor catalog (sizes, GPU model and count) servers are created from. |
+| `internal/cloud/*` | The cloud subsystem (see §6): `pve` (client, services, networks, firewall, scheduler, sync providers), `providers` (Reconcile), the resource cache + history, `syncjob`, `metrics`/`metricsjob` (Prometheus), `billingresource`, `client` (ceph-s3), `cephcred`, `kamaji`, `dbaas`, `sandbox` (the sandbox cluster), `csigw` (the CSI gateway), `truenas` (file shares), `powerdns` (DNS zones). Package map: [C3 components](architecture/c4/c3-components.md). |
 
 ### Platform & operations
 
@@ -374,7 +395,9 @@ flowchart TB
 | `crm` | CRM-sync integration point (contacts/segments/user sync) with a stub provider until a CRM is connected. |
 | `scheduler` | The cron engine (seconds-enabled cron) wrapping each job in a cross-fleet lock. |
 | `lock` | The `shedLock`-backed distributed lock so a scheduled job runs once across the pod fleet. |
-| `job` | The operator job-trigger endpoints under `/api/v1/admin/job/*` (whitelisted; runs the in-process job, else returns 202). |
+| `job` | The operator job-trigger endpoints under `/api/v1/admin/job/*` (admin credential required: an hmac key or an admin-realm bearer; runs the in-process job, else returns 202). |
+| `paging` | Keyset pagination helpers shared by the list endpoints. |
+| `internal/sandboxproxy` | sandbox-proxy's routing of `https://<port>-<sandboxId>.<domain>`, the wake call and the certificate sync (`cmd/sandbox-proxy`). |
 
 ---
 
@@ -403,7 +426,7 @@ flowchart LR
   resources, QEMU, storage, SDN, firewall, pools, tasks, PCI mappings) and the
   project-scoped `pve.Service` (create/delete/resize/power servers, project
   templates, volumes, GPU slots, console). Networks (`network.go`) are SDN vnets
-  with per-vnet isolation; security groups are cluster firewall groups
+  with cluster firewall isolation; security groups are cluster firewall groups
   (`firewallsvc.go`); `PickNode` places VMs by capacity, the nodes where the
   storage profile is active, free space on that storage and free GPU slots;
   `capability.go` detects what each storage supports.
@@ -412,27 +435,29 @@ flowchart LR
   pool VMs, disks, templates, owned vnets and groups to cache rows; `Reconcile`
   creates, updates and archives rows against the live list, with a
   `cloudResourceHistory` soft-delete. The types produced are `SERVER`, `VOLUME`,
-  `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`, plus `BUCKET` (Ceph RGW) and
-  `KUBERNETES_CLUSTER` / `DATABASE_CLUSTER` (ArgoCD).
+  `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`, `FLOATING_IP` and `LOAD_BALANCER`
+  (Proxmox), `BUCKET` (Ceph RGW, RustFS), `SHARE` (TrueNAS), `DNS_ZONE` (PowerDNS),
+  `KUBERNETES_CLUSTER` / `DATABASE_CLUSTER` (ArgoCD) and `SANDBOX` / `SANDBOX_SNAPSHOT` (the sandbox cluster).
 - **`syncjob`** — every 15 minutes walks every `ENABLED` project and, per attached
   provider and enabled service, reconciles the cache. Write paths update the cache
   directly, and a server GET does a best-effort live refresh.
 - **`client`** — the Ceph RGW (S3 and Admin Ops) client, built with
   `client.NewCephS3`; with `cephcred` it holds the per-project RGW user and keys.
 - **`metrics` / `metricsjob`** — opt-in traffic ingestion from a
-  Prometheus-compatible source per provider (`config.metrics.source`; Proxmox
-  defaults to `none`). Results land in the `usageMetrics` table.
+  source per provider (`config.metrics.source`; Proxmox defaults to `pve`, its
+  public-NIC counters, sampled every minute). Results land in the `usageMetrics` table.
 - **`billingresource`** — the cloud→billing bridge: turns cached resources (plus
   traffic usage) into the priced `BillingResource`s the rating loop consumes:
-  instance (+ instance traffic), volume, bucket, kubernetes cluster, database
-  cluster. The floating-IP and load-balancer providers remain but no Proxmox
-  resource produces those types yet.
+  instance (+ instance traffic, server snapshots, server protection), volume,
+  floating IP, image, bucket, share, kubernetes cluster, database cluster, sandbox
+  and sandbox snapshot. A load balancer bills as the VM, disk and address it is
+  made of.
 - **`kamaji` / `kamajik8s` / `dbaas`** — managed Kubernetes and databases. A
   provider is a management cluster reached over a stored kubeconfig; each
   customer cluster is one ArgoCD `Application` written to that cluster's API.
-  Read, sync and delete work today; creating a cluster or database on a Proxmox
-  provider is planned (stubs `cloud_kamaji_create.go` and
-  `cloud_dbaas_create.go` return an explicit error). Guides:
+  A database's endpoint is a MetalLB address, with no tenant network involved; a
+  cluster's workers land in the project's pool and vnet through CAPMOX
+  (`cloud_kamaji_create.go`). Guides:
   **[managed-k8s.md](managed-k8s.md)**, **[managed-dbaas.md](managed-dbaas.md)**.
 
 ---
@@ -467,8 +492,14 @@ Scheduled work is driven by a seconds-enabled cron; every job is wrapped in a
 `shedLock`-backed distributed lock (`atMostFor` / `atLeastFor`) so it runs **once
 across the fleet**, not once per pod. The catalog is registered in
 `main.registerJobs` — the minutely/hourly/monthly charge crons, Prometheus traffic metrics (`usageMetricsFetch`),
-services sync, savings expiry + reminders, transaction scan, auto-suspension
-(dunning), monthly bill finalization, monthly collect, and project deletion.
+services sync, the minutely Proxmox state sample (`pveStateSync`), task poll
+(`pveTaskPoll`) and public-NIC traffic sample (`pveTrafficSample`), the sandbox
+jobs (`sandboxStateSync`, `sandboxTemplateAdopt`, `sandboxBuildSync`,
+`sandboxRegistryPrune`, `sandboxAutoPause`), savings expiry + reminders, transaction scan,
+auto-suspension (dunning), monthly bill finalization, monthly collect, and project
+deletion. Under the external billing provider the seven billing jobs (savings
+expiry and reminders, reminder dispatch, transaction scan, auto-suspension,
+monthly bill, monthly collect) are not scheduled: the billing service runs its own.
 
 The charge cron has two execution modes: an **in-process loop** by default, or a
 **RabbitMQ fan-out** (`PROXCLOUD_JOBS_RABBIT_FANOUT=true`) that publishes one

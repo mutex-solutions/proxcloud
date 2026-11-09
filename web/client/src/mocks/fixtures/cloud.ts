@@ -231,13 +231,13 @@ export function seedCloudResources(): CloudResource[] {
 
     res("DATABASE_CLUSTER", "orders-db", {
       database: {
-        id: "std-1a2b3c4d", name: "orders-db", engine: "postgresql", version: "17", replicas: 3,
+        id: "pc-d-1a2b3c4d", name: "orders-db", engine: "postgresql", version: "17", replicas: 3,
         cpu: 2, memory_gib: 8, storage_gib: 50, storage_class: "proxmox-csi",
         allowed_cidrs: ["10.0.0.0/24"],
         status: "READY", sync_status: "Synced", chart_version: "0.1.0",
         created_at: "2026-07-20T09:00:00Z", endpoint: "10.0.0.50", port: 5432,
       },
-    }, { status: "READY", externalId: "std-1a2b3c4d", serviceId: "svc-dbaas-1", region: "RegionOne" }),
+    }, { status: "READY", externalId: "pc-d-1a2b3c4d", serviceId: "svc-dbaas-1", region: "RegionOne" }),
   ]
 }
 

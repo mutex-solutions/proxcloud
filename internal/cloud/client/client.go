@@ -1,14 +1,11 @@
-// Package client is the ceph-s3 (RGW) object-store client. Proxmox VE is driven through
-// internal/cloud/pve; buckets are backend-agnostic, so a homelab with a Ceph RGW attaches a
-// ceph-s3 provider and gets the bucket surface from here.
+// Package client is the tenant object-store client: Ceph RGW on Full-tier sites, RustFS on Standard-tier
+// sites. Proxmox VE is driven through internal/cloud/pve; buckets are a separate provider a project attaches.
 //
-// The *Client facade keeps the bucket write/sync/billing plumbing (providers.WriteService,
-// BucketProvider, the platform bucket-settings surface) on one type; NewCephS3 is the only
-// constructor.
+// *Client keeps one type for the bucket write/sync/billing plumbing (providers.WriteService, BucketProvider,
+// the platform bucket-settings surface); NewCephS3 and NewRustFS pick the backend behind it.
 package client
 
-// Client is the facade over one ceph-s3 project scope.
+// Client is the facade over one project's scope on one object store.
 type Client struct {
-	// ceph is the Ceph RGW (S3) backend. Always non-nil on a built client.
-	ceph *cephBackend
+	objectBackend
 }

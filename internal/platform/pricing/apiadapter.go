@@ -25,6 +25,7 @@ func FromAPIResource(in *billingapi.BillingResource) *BillingResource {
 		DisplayPrice:          in.DisplayPrice,
 		Values:                in.Values,
 		NotEligibleForBilling: in.NotEligibleForBilling,
+		SkipInterval:          in.SkipInterval,
 		BillingResourceType:   FromAPIResourceType(in.BillingResourceType),
 	}
 }

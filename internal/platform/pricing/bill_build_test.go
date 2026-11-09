@@ -142,12 +142,20 @@ func TestGetTimeUnitsDiff(t *testing.T) {
 			t.Errorf("hour = %d, want 720", *it.TimeUnits.Hour)
 		}
 	})
-	t.Run("negative_not_floored", func(t *testing.T) {
-		w := billNow.Add(2 * time.Hour) // watermark AFTER charge → elapsed -2
+	t.Run("negative_floored_at_zero", func(t *testing.T) {
+		w := billNow.Add(2 * time.Hour) // watermark AFTER charge → no units, never a refund
 		it := run(&BillItemTimeUnits{Minute: ptr64(0), Hour: ptr64(719), HourLastRateTime: &w, Month: ptr64(0)},
 			RatingContext{TimeUnit: TimeUnitHour, CycleTimestamp: billNow}, billRes("r", nil))
-		if *it.TimeUnits.Hour != 717 || !it.AppliedPricePlanRules[0].AppliedAmounts[0].NetAmount.Equal(mustDec("-10")) {
-			t.Errorf("hour=%d applied=%s, want 717 / -10", *it.TimeUnits.Hour, it.AppliedPricePlanRules[0].AppliedAmounts[0].NetAmount)
+		if *it.TimeUnits.Hour != 719 || !it.AppliedPricePlanRules[0].AppliedAmounts[0].NetAmount.IsZero() {
+			t.Errorf("hour=%d applied=%s, want 719 / 0", *it.TimeUnits.Hour, it.AppliedPricePlanRules[0].AppliedAmounts[0].NetAmount)
+		}
+	})
+	t.Run("started_hour_counts", func(t *testing.T) {
+		w := billNow.Add(-40 * time.Minute) // created 40 min ago: the first partial hour bills
+		it := run(&BillItemTimeUnits{Minute: ptr64(0), Hour: ptr64(0), HourLastRateTime: &w, Month: ptr64(0)},
+			RatingContext{TimeUnit: TimeUnitHour, CycleTimestamp: billNow}, billRes("r", nil))
+		if *it.TimeUnits.Hour != 1 {
+			t.Errorf("hour = %d, want 1", *it.TimeUnits.Hour)
 		}
 	})
 	t.Run("month_always_one", func(t *testing.T) {
@@ -169,6 +177,66 @@ func TestGetTimeUnitsDiff(t *testing.T) {
 			t.Errorf("hour = %d, want 2 (deletedAt charge time)", *it.TimeUnits.Hour)
 		}
 	})
+}
+
+// A resource's whole life on an hourly rule: created 10:20, archived 12:50 → the clock hours
+// 10, 11 and 12. Re-feeding the archived row afterwards changes nothing.
+func TestPartialHoursLifecycle(t *testing.T) {
+	day := time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)
+	at := func(h, m int) time.Time { return day.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute) }
+	cycle := day.AddDate(0, 0, -4)
+	bill := &Bill{InvoiceCurrency: "USD", BillingCycle: &BillBillingCycle{StartDate: &cycle}}
+	rule := []PricePlanRuleResult{result("rule1", ApplyAddToTotal, amt("vcpu", "5"))}
+	res := billRes("r", nil)
+	created := at(10, 20)
+	res.CreatedAt = &created
+	charge := func(ct time.Time, r *BillingResource) {
+		SaveChargingToBill(RatingContext{TimeUnit: TimeUnitHour, CycleTimestamp: ct}, BillingContext{}, bill, r, rule, ct)
+	}
+	charge(at(11, 0), res)
+	charge(at(12, 0), res)
+	archived := *res
+	deleted := at(12, 50)
+	archived.DeletedAt = &deleted
+	charge(at(13, 0), &archived)
+	charge(at(14, 0), &archived)
+	charge(at(15, 0), &archived)
+	it := onlyItem(t, bill)
+	if *it.TimeUnits.Hour != 3 || !it.NetAmount.Equal(mustDec("15")) {
+		t.Errorf("hour=%d net=%s, want 3 / 15", *it.TimeUnits.Hour, it.NetAmount)
+	}
+}
+
+// A usage total first rated long after the resource was created is stored bare: not multiplied by
+// the hours elapsed. Later charges replace it.
+func TestOverwriteTotalFirstChargeNotMultiplied(t *testing.T) {
+	cycle := billNow.Add(-200 * time.Hour)
+	bill := &Bill{InvoiceCurrency: "USD", BillingCycle: &BillBillingCycle{StartDate: &cycle}}
+	res := billRes("r", nil)
+	res.CreatedAt = &cycle
+	rc := RatingContext{TimeUnit: TimeUnitHour, CycleTimestamp: billNow}
+	SaveChargingToBill(rc, BillingContext{}, bill, res, []PricePlanRuleResult{result("t", ApplyOverwriteTotal, amt("mb", "2"))}, billNow)
+	rc.CycleTimestamp = billNow.Add(time.Hour)
+	SaveChargingToBill(rc, BillingContext{}, bill, res, []PricePlanRuleResult{result("t", ApplyOverwriteTotal, amt("mb", "3"))}, billNow)
+	if it := onlyItem(t, bill); !it.NetAmount.Equal(mustDec("3")) {
+		t.Errorf("net = %s, want 3", it.NetAmount)
+	}
+}
+
+// A stale interval is written off: the watermark moves, nothing accrues, and the next eligible
+// charge bills only what came after it. A plain ineligible resource keeps its watermark.
+func TestSkipIntervalAdvancesWatermark(t *testing.T) {
+	w := billNow.Add(-5 * time.Hour)
+	item := itemWith(&BillItemTimeUnits{Minute: ptr64(0), Hour: ptr64(0), HourLastRateTime: &w, Month: ptr64(0)})
+	bill := &Bill{InvoiceCurrency: "USD", Items: []BillItem{item}}
+	rule := []PricePlanRuleResult{result("rule1", ApplyAddToTotal, amt("vcpu", "5"))}
+	stale := billRes("r", nil)
+	stale.NotEligibleForBilling, stale.SkipInterval = true, true
+	SaveChargingToBill(RatingContext{TimeUnit: TimeUnitHour, CycleTimestamp: billNow}, BillingContext{}, bill, stale, rule, billNow)
+	SaveChargingToBill(RatingContext{TimeUnit: TimeUnitHour, CycleTimestamp: billNow.Add(time.Hour)}, BillingContext{}, bill, billRes("r", nil), rule, billNow)
+	if it := onlyItem(t, bill); *it.TimeUnits.Hour != 1 || !it.NetAmount.Equal(mustDec("5")) {
+		t.Errorf("hour=%d net=%s, want 1 / 5 (the 5 stale hours written off)", *it.TimeUnits.Hour, it.NetAmount)
+	}
 }
 
 func TestAccumulateAddToTotal(t *testing.T) {

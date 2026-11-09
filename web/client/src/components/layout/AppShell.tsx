@@ -1,9 +1,8 @@
 import { NavLink, Outlet, useLocation, useNavigate, useParams } from "react-router-dom"
 import {
   Boxes, BarChart3, BookOpen, Camera, Check, ChevronsUpDown, CreditCard, Database, DatabaseZap, FileClock, FolderKanban, HardDrive,
-  Image, KeyRound, LayoutDashboard, LogOut, Monitor, Moon, Network, Receipt,
-  ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, Sun, UserCircle, Users, Wallet,
-} from "lucide-react"
+  Image, KeyRound, LayoutDashboard, LogOut, Monitor, Moon, Network, Receipt, Scale,
+  ExternalLink, Gift, PiggyBank, Search as SearchIcon, Server, Settings, Shield, SquareTerminal, Sun, UserCircle, Users, Wallet, FolderTree, Globe } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useAuth } from "@/lib/auth"
 import { useCloudFeatures, useFeatures, useProjects, useProjectInit, useUIMenu, type CloudFeature } from "@/lib/hooks"
@@ -57,12 +56,15 @@ function navGroups(pid: string): Group[] {
         { to: `${p}/snapshots`, label: "Snapshots", icon: Camera, service: "volumev3", cloudFeature: "volumeSnapshots" },
         { to: `${p}/object-storage`, label: "Object storage", icon: Database, service: "object-store" },
         { to: `${p}/s3-keys`, label: "S3 access keys", icon: KeyRound, service: "object-store" },
+        { to: `${p}/file-shares`, label: "File shares", icon: FolderTree, service: "shares" },
+        { to: `${p}/dns`, label: "DNS", icon: Globe, service: "dns" },
       ],
     },
     {
       label: "Network",
       items: [
         { to: `${p}/networks`, label: "Networks", icon: Network, service: "network" },
+        { to: `${p}/load-balancers`, label: "Load balancers", icon: Scale, service: "network" },
         { to: `${p}/security-groups`, label: "Security groups", icon: Shield, service: "network" },
       ],
     },
@@ -72,6 +74,7 @@ function navGroups(pid: string): Group[] {
         { to: `${p}/kubernetes`, label: "Kubernetes", icon: Boxes, service: "kubernetes" },
         // DatabaseZap: plain Database is taken by object storage above.
         { to: `${p}/databases`, label: "Databases", icon: DatabaseZap, service: "database" },
+        { to: `${p}/sandboxes`, label: "Sandboxes", icon: SquareTerminal, service: "sandbox" },
       ],
     },
     {
@@ -92,6 +95,7 @@ function navGroups(pid: string): Group[] {
         { to: `${p}/org/projects`, label: "Projects", icon: Boxes },
         { to: `${p}/org/audit`, label: "Audit log", icon: FileClock },
         { to: `${p}/org/roles`, label: "Roles", icon: Shield },
+        { to: `${p}/org/sso`, label: "Single sign-on", icon: KeyRound },
         { to: `${p}/org/settings`, label: "Settings", icon: Settings },
       ],
     },

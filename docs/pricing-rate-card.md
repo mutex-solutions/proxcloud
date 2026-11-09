@@ -8,17 +8,27 @@ Prices are stored in the platform base currency — set base currency **USD** be
 
 ## How the engine models this
 
-One PUBLIC plan, rules keyed `(resourceType, timeUnit=hour)`:
+One PUBLIC plan, rules keyed `(resourceType, timeUnit)`: every rule is per `hour` except the sandbox ones, which are per
+`minute`. The seed (`deploy/seed/price-plan-seed.json`) carries these rules:
 
 | Rule | resourceType | Filter | Priced attribute | Rate |
 |---|---|---|---|---|
 | CPU component | instance | — | `vcpus` | $0.008 / vCPU / hr |
 | RAM component | instance | — | `ram_gb` | $0.004 / GB / hr |
 | GPU per model | instance | `gpu_model eq <model>` | `gpu_count` | table below |
-| Public egress | instance_traffic | — | `outgoing_public_traffic_mb` | tier 1: 0 → 1,048,576 MB (1 TiB) = $0; tier 2: beyond = $0.00001/MB ($0.01/GB) |
+| Public egress (`OVERWRITE_TOTAL`) | instance_traffic | — | `outgoing_public_traffic_mb` | tier 1: 0 → 1,048,576 MB (1 TiB) = $0; tier 2: beyond = $0.00001/MB ($0.01/GB) |
 | Volume | volume | — | `size` | $0.000137 / GB / hr (≈$0.10/GB-mo) |
-| Public IP (planned) | floating_ip | — | `existence` | $0.005 / hr |
-| Load balancer (no Proxmox resource yet) | load_balancer | — | `existence` | $0.0165 / hr (≈$12/mo) |
+| Public IP | floating_ip | — | `existence` | $0.005 / hr |
+| Project image | image | — | `size_gb` | $0.000068 / GB / hr (≈$0.05/GB-mo) |
+| Server snapshots | server_snapshot | — | `size_gb` | $0.000034 / provisioned GB / snapshot / hr (≈$0.025/GB-mo). **Placeholder, not benchmarked:** the owner sets it. It rates the server's disk size per snapshot, not the snapshot's real usage, so it sits at half the image rate |
+| Server protection | server_protection | — | `size_gb` | $0.00014 / replicated GB / hr |
+| Managed Kubernetes | kubernetes_cluster | — | `existence` | $0.10 / control plane / hr (workers bill as servers) |
+| File share | share | — | `size_gb` | $0.00007 / GB / hr |
+| Object storage | bucket | — | `size_gb` | $0.00007 / GB / hr |
+| Managed databases | database_cluster | `engine eq <engine>` (8 rules: PostgreSQL, MySQL, MariaDB, Valkey, FerretDB, Kafka, OpenSearch, plus an autoscale surcharge on `autoscale_enabled`) | `vcpus_total`, `ram_gb_total`, `storage_gb_total` | DigitalOcean parity, per engine: see the seed |
+| Sandbox CPU + RAM | sandbox (`minute`) | — | `vcpus`, `ram_gb` | $0.000134 / vCPU / min, $0.000067 / GB / min. **Placeholder** |
+| Sandbox GPU | sandbox (`minute`) | — | `gpu_count` | $0.0083 / GPU / min. **Placeholder** |
+| Sandbox snapshot | sandbox_snapshot | — | `size_gb` | $0.00007 / GB / hr. **Placeholder** |
 
 GPU rules are ADD_TO_TOTAL **on top of** the CPU/RAM component. RunPod/Lambda headline
 prices bundle CPU+RAM into the per-GPU rate, so either (a) accept our small premium
@@ -71,9 +81,8 @@ the aliases above.
 
 - Volume $0.10/GiB-mo (DO volumes); AWS EBS gp3 $0.08/GB-mo; OVH Classic ≈$0.048/GB-mo.
 - Public IP: AWS public IPv4 $0.005/hr; DO reserved-unattached $5/mo. Ours $0.005/hr flat.
-  The rule keeps the `floating_ip` resource-type name, but no Proxmox resource produces that
-  type yet: public-IP billing is planned, so this rule rates nothing today.
-- LB: DO from $12/mo; AWS ALB $0.0225/hr + LCU. Ours $0.0165/hr flat.
+- Project image: DO snapshots $0.06/GB-mo. Ours half the volume price (a template is a full
+  clone at rest, on the capacity it was cloned to). Placeholder pending the operator's sign-off.
 - Egress: AWS 100 GB free then $0.09/GB; DO pooled 4–8 TiB then $0.01/GiB; OVH free;
   RunPod/Lambda free. Ours: 1 TiB free per server / month, then $0.01/GB (DO-style,
   undercuts AWS hard, still monetizes heavy egress).

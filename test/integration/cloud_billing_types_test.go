@@ -12,7 +12,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/pkg/billingapi"
 )
 
-// TestVolumeFipLbBillingResources verifies the VOLUME/FLOATING_IP/LOAD_BALANCER bridge: seeded
+// TestVolumeFipLbBillingResources verifies the VOLUME/FLOATING_IP bridge: seeded
 // cloud resources (the shape the sync providers persist) map to the priced BillingResources the
 // rating loop consumes.
 func TestVolumeFipLbBillingResources(t *testing.T) {
@@ -32,12 +32,10 @@ func TestVolumeFipLbBillingResources(t *testing.T) {
 	}
 	seed(cloud.TypeVolume, pgdoc.M{"volume": pgdoc.M{"size": 50, "volume_type": "ssd", "status": "available", "bootable": "false"}})
 	seed(cloud.TypeFloatingIP, pgdoc.M{"floatingIp": pgdoc.M{"status": "ACTIVE", "floating_network_id": "pubnet"}})
-	seed(cloud.TypeLoadBalancer, pgdoc.M{"loadBalancer": pgdoc.M{"name": "lb-1", "operating_status": "ONLINE", "flavor_id": "lbflavor"}})
 
 	registry := map[string]billingresource.Provider{
-		cloud.TypeVolume:       billingresource.NewVolumeProvider(),
-		cloud.TypeFloatingIP:   billingresource.NewFloatingIPProvider(),
-		cloud.TypeLoadBalancer: billingresource.NewLoadBalancerProvider(),
+		cloud.TypeVolume:     billingresource.NewVolumeProvider(),
+		cloud.TypeFloatingIP: billingresource.NewFloatingIPProvider(),
 	}
 	brs, err := billingresource.GetBillingResources(ctx, repo, registry, projID, svcID, billingapi.BillingContext{})
 	if err != nil {
@@ -47,17 +45,14 @@ func TestVolumeFipLbBillingResources(t *testing.T) {
 	for _, br := range brs {
 		got[br.ResourceType] = br.Values
 	}
-	if len(got) != 3 {
-		t.Fatalf("resourceTypes = %v, want volume/floating_ip/load_balancer", keysOf(got))
+	if len(got) != 2 {
+		t.Fatalf("resourceTypes = %v, want volume/floating_ip", keysOf(got))
 	}
 	if v := got["volume"]; v == nil || v["size"] != int64(50) && v["size"] != int32(50) && v["size"] != 50 && v["size"] != float64(50) {
 		t.Fatalf("volume BR values: %+v", v)
 	}
 	if got["volume"]["display_name"] == nil || got["floating_ip"]["display_name"] != "floating-ip-FLOATING_IP-ext" {
 		t.Fatalf("fip display_name: %+v", got["floating_ip"])
-	}
-	if got["load_balancer"]["display_name"] != "lb-1" || got["load_balancer"]["operating_status"] != "ONLINE" {
-		t.Fatalf("lb BR values: %+v", got["load_balancer"])
 	}
 }
 

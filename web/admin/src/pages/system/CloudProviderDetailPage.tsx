@@ -26,7 +26,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiFetch } from "@/lib/api"
 import { useAdminGet } from "@/lib/hooks"
-import type { CloudProvider } from "./CloudProvidersPage"
+import { parseSNATSources, SNAT_SOURCES_HELP, type CloudProvider } from "./CloudProvidersPage"
 import {
   KamajiProviderForm,
   kamajiConfigBlocks,
@@ -48,18 +48,23 @@ import {
   dbaasFormValid,
   type DbaasFormState,
 } from "./dbaasProvider"
+import {
+  SandboxProviderForm,
+  SandboxReleaseGates,
+  sandboxConfigBlocks,
+  sandboxSecret,
+  sandboxFormFromService,
+  sandboxFormValid,
+  type SandboxFormState,
+} from "./sandboxProvider"
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 type Obj = Record<string, any>
 const asObj = (v: unknown): Obj => (v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : {})
-const asArr = (v: unknown): any[] => (Array.isArray(v) ? v : [])
 const str = (v: unknown) => (typeof v === "string" ? v : "")
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
-// The named feature components the Features tab toggles.
-const FEATURE_COMPONENTS = ["volume-backup", "volume-snapshot", "image-download"]
 // The console types the PVE console endpoint serves (VNC ticket + serial terminal).
-const CONSOLE_TYPES = ["NOVNC", "SERIAL"]
 // Proxmox providers: the keys the PVE create paths enforce (externalservice.PVEQuotaKeys), seeded onto
 // each new project; "gpu" edits quota.gpu["*"] (any model).
 const PVE_QUOTA_KEYS = ["servers", "vcpus", "ramMb", "diskGb", "networks", "floatingIps", "gpu"]
@@ -95,6 +100,29 @@ function Row({ label, value }: { label: string; value?: string }) {
 
 type TabProps = { id: string; provider: CloudProvider }
 
+// TrueNASSNATSources edits config.snatSources: an empty list turns the setting off, and the next sync takes the
+// addresses off the exports.
+function TrueNASSNATSources({ id, provider }: TabProps) {
+  const stored = asObj(provider.config).snatSources
+  const [value, setValue] = useState(Array.isArray(stored) ? stored.join(", ") : "")
+  const save = useEsSave(id)
+  return (
+    <div className="mt-4 grid gap-2 border-t pt-4">
+      <Label htmlFor="tn-snat-sources">NAT source addresses, comma separated (weakens isolation)</Label>
+      <Input id="tn-snat-sources" value={value} onChange={(e) => setValue(e.target.value)} placeholder="none" />
+      <p className="text-sm text-muted-foreground">{SNAT_SOURCES_HELP}</p>
+      <div className="flex justify-end">
+        <Button
+          disabled={save.isPending}
+          onClick={() => save.mutate({ path: `/admin/service/${id}`, body: { config: { snatSources: parseSNATSources(value) } } })}
+        >
+          {save.isPending ? "Saving…" : "Save"}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 // ── 1. Connection (per-provider connection form) ─────────────────────────────
 // KamajiConnectionTab edits a Managed Kubernetes provider in place. PUT /admin/service/{id}
 // replaces top-level config keys wholesale and leaves the stored secret alone when the body omits
@@ -127,7 +155,8 @@ function KamajiConnectionTab({ id, provider }: TabProps) {
           cluster keeps the version it was pinned to until it is explicitly moved. Removing a
           Kubernetes version stops it being offered; clusters already on it keep running.
         </Note>
-        <div className="flex justify-end">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <ManagementClusterTest id={id} path="k8s-clusters" noun="cluster" />
           <Button onClick={submit} disabled={!kamajiFormValid(form, false) || save.isPending}>
             {save.isPending ? "Saving…" : "Save"}
           </Button>
@@ -166,13 +195,57 @@ function DbaasConnectionTab({ id, provider }: TabProps) {
           database keeps the version it was pinned to. Removing an engine or version stops it being
           offered; databases already on it keep running.
         </Note>
-        <div className="flex justify-end">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <ManagementClusterTest id={id} path="db-clusters" noun="database" />
           <Button onClick={submit} disabled={!dbaasFormValid(form, false) || save.isPending}>
             {save.isPending ? "Saving…" : "Save"}
           </Button>
         </div>
       </CardContent>
     </Card>
+  )
+}
+
+// SandboxConnectionTab edits a sandbox provider in place and runs its release check. A save that leaves it live is
+// refused while a gate does not hold (the API answers 409 with the gates' reasons).
+function SandboxConnectionTab({ id, provider }: TabProps) {
+  const [form, setForm] = useState<SandboxFormState>(() => sandboxFormFromService(provider))
+  const save = useEsSave(id)
+  const submit = () => {
+    save.mutate({
+      path: `/admin/service/${id}`,
+      body: {
+        name: form.name.trim(),
+        status: form.status,
+        config: sandboxConfigBlocks(form),
+        ...(Object.keys(sandboxSecret(form)).length ? { secret: sandboxSecret(form) } : {}),
+      },
+    })
+  }
+  return (
+    <div className="grid gap-6">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-eyebrow">Release gates</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <SandboxReleaseGates id={id} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-eyebrow">Sandbox cluster connection</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          <SandboxProviderForm form={form} setForm={setForm} mode="edit" />
+          <div className="flex justify-end">
+            <Button onClick={submit} disabled={!sandboxFormValid(form, false) || save.isPending}>
+              {save.isPending ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   )
 }
 
@@ -185,8 +258,9 @@ function ProxmoxConfigCard({ id, provider }: TabProps) {
   const blocks: { key: string; label: string; hint: string }[] = [
     { key: "network", label: "Network", hint: '{"defaultZone":"overlay","zones":{"overlay":{"kind":"evpn","peers":["10.0.0.1"],"exitNodes":["pve1"]}},"cidrPool":"10.100.0.0/16","isolation":"shared","publicNetworks":[{"id":"vmbr1","name":"Internet","cidr":"203.0.113.0/24","gateway":"203.0.113.1","ranges":["203.0.113.10-203.0.113.200"]}]}' },
     { key: "storageProfiles", label: "Storage profiles", hint: '{"std":{"label":"Local NVMe (ZFS)","storages":{"*":"local-zfs"},"snapshots":true,"thin":true,"replication":true},"capacity":{"label":"Capacity HDD (NFS)","storages":{"*":"nas-capacity"},"shared":true,"liveMigrate":true}}' },
-    { key: "templates", label: "OS templates", hint: '{"ubuntu-24":{"vmid":9000,"node":"pve1","name":"Ubuntu 24.04","osDistro":"ubuntu","minDiskGb":10}}' },
+    { key: "templates", label: "OS templates (optional: tagged templates are discovered; vmid + node pins one, the rest overlays)", hint: '{"ubuntu-24.04":{"name":"Ubuntu 24.04","minDiskGb":10}}' },
     { key: "gpus", label: "GPU mappings", hint: '{"<pci-mapping-id>":{"alias":"nvidia-4090"}}' },
+    { key: "metadata", label: "Server seeds (user-data delivery)", hint: '{"url":"https://api.example.com","isoStorage":"nas-templates","forceIso":false,"vendorData":"#cloud-config\\n..."}' },
   ]
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
     const out: Record<string, string> = {}
@@ -403,6 +477,9 @@ function ConnectionTab({ id, provider }: TabProps) {
   if (provider.config?.provider === "dbaas") {
     return <DbaasConnectionTab id={id} provider={provider} />
   }
+  if (provider.config?.provider === "sandbox") {
+    return <SandboxConnectionTab id={id} provider={provider} />
+  }
   // proxmox: the editable connection form with its own Test button, plus the
   // resource-config blocks (zones/storage/templates/GPUs).
   if (provider.config?.provider === "proxmox") {
@@ -413,31 +490,107 @@ function ConnectionTab({ id, provider }: TabProps) {
       </div>
     )
   }
-  // ceph-s3: show the S3/Admin Ops config. There is no backend test endpoint for RGW (the
-  // connection is exercised by bootstrap/sync), so no Test button.
-  if (provider.config?.provider === "ceph-s3") {
+  // Object stores: show the S3/Admin Ops config. The API proves a row when it is stored or its connection changes;
+  // the Test button proves it now, with the stored key.
+  if (provider.config?.provider === "ceph-s3" || provider.config?.provider === "rustfs") {
     const c = asObj(provider.config)
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-eyebrow">Ceph RGW (S3) connection</CardTitle>
+          <CardTitle className="text-eyebrow">{provider.config?.provider === "rustfs" ? "RustFS (S3) connection" : "Ceph RGW (S3) connection"}</CardTitle>
         </CardHeader>
         <CardContent>
           <Row label="S3 endpoint" value={str(c.s3Endpoint)} />
-          <Row label="Admin Ops URL" value={str(c.adminApiUrl)} />
+          <Row label="Admin URL" value={str(c.adminApiUrl)} />
           <Row label="Website endpoint" value={str(c.s3WebsiteEndpoint)} />
           <Row label="Region (zonegroup)" value={str(c.region)} />
           <Row label="RGW uid prefix" value={str(c.uidPrefix)} />
           <Row label="Default quota (GiB)" value={c.defaultQuotaGiB != null ? String(c.defaultQuotaGiB) : ""} />
           <p className="mt-4 text-sm text-muted-foreground">
-            Projects are provisioned as dedicated RGW users on entry (or via the project's "attach external
+            Projects are provisioned as dedicated object-store users on entry (or via the project's "attach external
             service" action). The admin keys are stored encrypted and never returned by the API.
           </p>
+          <ObjectStoreTest id={id} />
+        </CardContent>
+      </Card>
+    )
+  }
+  if (provider.config?.provider === "truenas") {
+    const c = asObj(provider.config)
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-eyebrow">TrueNAS connection</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Row label="URL" value={str(c.apiUrl)} />
+          <Row label="API key owner" value={str(c.username)} />
+          <Row label="Parent dataset" value={str(c.parentDataset)} />
+          <Row label="Mount address" value={str(c.mountHost)} />
+          <Row label="Region" value={str(c.region)} />
+          <Row label="Quota per project (GiB)" value={c.defaultQuotaGiB != null ? String(c.defaultQuotaGiB) : ""} />
+          <p className="mt-4 text-sm text-muted-foreground">
+            The connection is exercised by the first share and by sync. The API key is stored encrypted and never
+            returned by the API.
+          </p>
+          <TrueNASSNATSources id={id} provider={provider} />
+        </CardContent>
+      </Card>
+    )
+  }
+  if (provider.config?.provider === "powerdns") {
+    const c = asObj(provider.config)
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-eyebrow">PowerDNS connection</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Row label="API URL" value={str(c.apiUrl)} />
+          <Row label="Name servers of new zones" value={Array.isArray(c.nameservers) ? c.nameservers.join(", ") : ""} />
+          <Row label="Region" value={str(c.region)} />
         </CardContent>
       </Card>
     )
   }
   return <Note>Unknown provider type "{str(provider.config?.provider)}" — no connection settings to show.</Note>
+}
+
+// Test connection for a stored Kubernetes or database provider: the cluster list reads the provider's
+// Applications on the management cluster with the stored kubeconfig, a real round trip. It tests what is
+// saved, not unsaved edits.
+function ManagementClusterTest({ id, path, noun }: { id: string; path: "k8s-clusters" | "db-clusters"; noun: string }) {
+  const test = useMutation({
+    mutationFn: () => apiFetch<{ clusters?: unknown[]; databases?: unknown[] }>(`/admin/service/${id}/${path}`),
+  })
+  const n = (test.data?.clusters ?? test.data?.databases)?.length ?? 0
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <Button variant="outline" onClick={() => test.mutate()} disabled={test.isPending}>
+        {test.isPending ? "Testing…" : "Test connection"}
+      </Button>
+      {test.isSuccess ? (
+        <span className="text-xs text-emerald-600">
+          Connected: the management cluster answered, {n} {noun}{n === 1 ? "" : "s"}
+        </span>
+      ) : null}
+      {test.isError ? <span className="text-xs text-destructive">{test.error.message}</span> : null}
+    </div>
+  )
+}
+
+// Test connection for a stored object-store row.
+function ObjectStoreTest({ id }: { id: string }) {
+  const test = useMutation({ mutationFn: () => apiFetch(`/admin/service/${id}/object-store/test`, { method: "POST" }) })
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-3">
+      <Button variant="outline" size="sm" onClick={() => test.mutate()} disabled={test.isPending}>
+        {test.isPending ? "Testing…" : "Test connection"}
+      </Button>
+      {test.isSuccess ? <span className="text-xs text-emerald-600">Connection OK</span> : null}
+      {test.isError ? <span className="text-xs text-destructive">{test.error.message}</span> : null}
+    </div>
+  )
 }
 
 // ── 2. Services (per-region service toggle grid; Save sends the FULL map) ─────
@@ -541,65 +694,6 @@ function ConfigurationTab({ id, provider }: TabProps) {
           disabled={save.isPending}
         >
           {save.isPending ? "Saving…" : "Save configuration"}
-        </Button>
-      </CardContent>
-    </Card>
-  )
-}
-
-// ── 5. Features (component toggles + console type)  ──────────────────────────
-function FeaturesTab({ id, provider }: TabProps) {
-  const features = asObj((provider.config as Obj)?.features)
-  const compMap: Record<string, boolean> = {}
-  for (const c of asArr(features.components)) if (asObj(c).name) compMap[str(asObj(c).name)] = asObj(c).enabled === true
-  const [comps, setComps] = useState<Record<string, boolean>>(() => {
-    const seed: Record<string, boolean> = {}
-    for (const n of FEATURE_COMPONENTS) seed[n] = compMap[n] === true
-    return seed
-  })
-  const storedConsole = asArr(features.enabledConsoleTypes).map(String)[0] || asArr((provider.config as Obj)?.enabledConsoleTypes).map(String)[0] || "NOVNC"
-  const [consoleType, setConsoleType] = useState(storedConsole)
-  const save = useEsSave(id)
-
-  const submit = () => {
-    // Merge over the stored features (keep any other stored keys, e.g. publicNetworks),
-    // then overwrite the known component set (preserving any unknown stored components).
-    const merged: Record<string, boolean> = { ...compMap }
-    for (const n of FEATURE_COMPONENTS) merged[n] = comps[n]
-    const components = Object.entries(merged).map(([name, enabled]) => ({ name, enabled }))
-    save.mutate({ path: `/admin/service/${id}/features`, body: { ...features, components, enabledConsoleTypes: [consoleType] } })
-  }
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-eyebrow">Feature components</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="divide-y">
-          {FEATURE_COMPONENTS.map((n) => (
-            <div key={n} className="flex items-center justify-between py-2">
-              <span className="font-mono text-xs">{n}</span>
-              <Switch checked={comps[n]} onCheckedChange={(on) => setComps((c) => ({ ...c, [n]: on }))} aria-label={n} />
-            </div>
-          ))}
-        </div>
-        <div className="grid max-w-md gap-2">
-          <Label htmlFor="es-console">Console type</Label>
-          <Select value={consoleType} onValueChange={setConsoleType}>
-            <SelectTrigger id="es-console" className="w-full sm:w-56">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {CONSOLE_TYPES.map((c) => (
-                <SelectItem key={c} value={c}>
-                  {c}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <Button onClick={submit} disabled={save.isPending}>
-          {save.isPending ? "Saving…" : "Save features"}
         </Button>
       </CardContent>
     </Card>
@@ -949,12 +1043,12 @@ function AdvancedTab({ id }: { id: string }) {
   )
 }
 
-// ── 8b. Metrics (usage source for traffic billing: prometheus | none) ──────────
+// ── 8b. Metrics (usage source for traffic billing: pve | prometheus | none) ──────────
 type MetricsTestResp = { ok: boolean; error?: string; trafficSeries?: number; monthStartSeries?: number; warnings?: string[] }
 function MetricsTab({ id, provider }: TabProps) {
   const stored = asObj(asObj((provider.config as Obj)?.metrics))
   const prom = asObj(stored.prometheus)
-  const [source, setSource] = useState(String(stored.source ?? "none"))
+  const [source, setSource] = useState(String(stored.source ?? (asObj(provider.config as Obj).provider === "proxmox" ? "pve" : "none")))
   const [url, setUrl] = useState(String(prom.url ?? ""))
   const [schema, setSchema] = useState(String(prom.schema ?? "libvirt-exporter"))
   const [headersText, setHeadersText] = useState(JSON.stringify(asObj(prom.headers), null, 2))
@@ -1041,7 +1135,8 @@ function MetricsTab({ id, provider }: TabProps) {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="none">None (disable usage metrics, default)</SelectItem>
+                <SelectItem value="pve">Proxmox NIC counters (public NICs, Proxmox default)</SelectItem>
+                <SelectItem value="none">None (disable usage metrics)</SelectItem>
                 <SelectItem value="prometheus">Prometheus-compatible</SelectItem>
               </SelectContent>
             </Select>
@@ -1178,7 +1273,6 @@ const TAB_DEFS = [
   { v: "storage", label: "Storage" },
   { v: "services", label: "Services" },
   { v: "configuration", label: "Configuration" },
-  { v: "features", label: "Features" },
   { v: "quota", label: "Quota" },
   { v: "gpu", label: "GPU" },
   { v: "metrics", label: "Metrics" },
@@ -1243,6 +1337,13 @@ export default function CloudProviderDetailPage() {
         description={`${p.type ?? "CLOUD"} provider ${id}`}
         actions={<StatusBadge status={p.status} />}
       />
+      {p.provisionError ? (
+        <p role="alert" className="mb-4 rounded-md border border-destructive/40 p-3 text-sm text-destructive">
+          Project <span className="font-mono">{p.provisionError.projectId}</span> could not be provisioned on this
+          provider: {p.provisionError.message}. It tries again when it is next opened, and this clears when one
+          succeeds.
+        </p>
+      ) : null}
       <Tabs defaultValue="connection">
         <div className="-mx-1 overflow-x-auto px-1 pb-1">
           <TabsList className="w-max">
@@ -1265,9 +1366,6 @@ export default function CloudProviderDetailPage() {
         </TabsContent>
         <TabsContent value="configuration" className="mt-4">
           <ConfigurationTab id={id} provider={p} />
-        </TabsContent>
-        <TabsContent value="features" className="mt-4">
-          <FeaturesTab id={id} provider={p} />
         </TabsContent>
         <TabsContent value="quota" className="mt-4">
           <QuotaTab id={id} provider={p} />

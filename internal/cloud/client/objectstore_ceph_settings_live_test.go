@@ -33,8 +33,8 @@ func TestLiveCephDBucketSettings(t *testing.T) {
 		t.Fatalf("CreateBucket(objectLock): %v", err)
 	}
 	t.Cleanup(func() {
-		if err := admin.ForceDeleteCephBucket(context.Background(), lockBucket); err != nil {
-			t.Logf("cleanup: ForceDeleteCephBucket %s: %v", lockBucket, err)
+		if err := admin.ForceDeleteBucket(context.Background(), lockBucket); err != nil {
+			t.Logf("cleanup: ForceDeleteBucket %s: %v", lockBucket, err)
 		}
 	})
 
@@ -131,20 +131,20 @@ func TestLiveCephDGrantSurvivesWebsiteToggle(t *testing.T) {
 
 	// --- create an extra S3 key (its own RGW user) ---
 	uid := proj.ChildUID("drillkey")
-	ak, sk, err := proj.CreateCephChildUser(ctx, uid, "proxcloud-drill-key")
+	ak, sk, err := proj.CreateChildKey(ctx, uid, "proxcloud-drill-key")
 	if err != nil {
-		t.Fatalf("CreateCephChildUser: %v", err)
+		t.Fatalf("CreateChildKey: %v", err)
 	}
 	t.Cleanup(func() {
 		bg := context.Background()
 		_ = proj.RevokeBucketAccess(bg, bucket, uid)
-		if err := proj.DeleteCephChildUser(bg, uid); err != nil {
-			t.Errorf("cleanup: DeleteCephChildUser: %v", err)
+		if err := proj.DeleteChildKey(bg, uid); err != nil {
+			t.Errorf("cleanup: DeleteChildKey: %v", err)
 		}
 	})
 	keyS3 := s3.New(s3.Options{
-		Region: admin.ceph.region, Credentials: credentials.NewStaticCredentialsProvider(ak, sk, ""),
-		BaseEndpoint: awsv2.String(admin.ceph.s3Endpoint), UsePathStyle: true,
+		Region: cephOf(admin).region, Credentials: credentials.NewStaticCredentialsProvider(ak, sk, ""),
+		BaseEndpoint: awsv2.String(cephOf(admin).s3Endpoint), UsePathStyle: true,
 		RequestChecksumCalculation: awsv2.RequestChecksumCalculationWhenRequired,
 		ResponseChecksumValidation: awsv2.ResponseChecksumValidationWhenRequired,
 	})
@@ -222,7 +222,7 @@ func TestLiveCephDObjectLockPurge(t *testing.T) {
 	}
 	retain := time.Now().UTC().Add(90 * time.Second)
 	key := "locked.txt"
-	if _, err := proj.ceph.s3.PutObject(ctx, &s3.PutObjectInput{
+	if _, err := cephOf(proj).s3.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: &lockBucket, Key: &key, Body: strings.NewReader("locked"), ContentLength: awsv2.Int64(6),
 		ObjectLockMode: s3types.ObjectLockModeGovernance, ObjectLockRetainUntilDate: &retain,
 	}); err != nil {
@@ -230,16 +230,16 @@ func TestLiveCephDObjectLockPurge(t *testing.T) {
 	}
 
 	// The customer-facing delete must be refused while the object is retained.
-	if _, err := proj.ceph.s3.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &lockBucket, Key: &key, VersionId: nil}); err != nil {
+	if _, err := cephOf(proj).s3.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &lockBucket, Key: &key, VersionId: nil}); err != nil {
 		t.Logf("DeleteObject (delete marker) → %v", err)
 	}
 
-	err := admin.ForceDeleteCephBucket(ctx, lockBucket)
+	err := admin.ForceDeleteBucket(ctx, lockBucket)
 	if err != nil {
 		t.Logf("⚠ teardown CANNOT purge a GOVERNANCE-retained bucket: %v", err)
 		t.Logf("⚠ project deletion would fail until retention expires (%s)", retain.Format(time.RFC3339))
 	} else {
 		t.Log("✓ admin purge removed the GOVERNANCE-retained bucket → teardown is safe")
 	}
-	t.Cleanup(func() { _ = admin.ForceDeleteCephBucket(context.Background(), lockBucket) })
+	t.Cleanup(func() { _ = admin.ForceDeleteBucket(context.Background(), lockBucket) })
 }

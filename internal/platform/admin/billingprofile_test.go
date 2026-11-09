@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 )
 
 // TestBillingProfileIDNotFound pins the exact 404:
@@ -27,7 +29,10 @@ func TestBillingProfileUpdateSetMap(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &req); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	m := req.setMap()
+	m, err := req.setMap()
+	if err != nil {
+		t.Fatalf("setMap: %v", err)
+	}
 	if m["firstName"] != "Ada" {
 		t.Errorf("firstName=%v want Ada", m["firstName"])
 	}
@@ -47,10 +52,26 @@ func TestBillingProfileUpdateSetMap(t *testing.T) {
 	}
 	// absent fields are omitted.
 	for _, k := range []string{"lastName", "companyName", "bank", "iban", "phone", "zipCode",
-		"address", "city", "county", "country", "currency", "pricePlanConfig"} {
+		"address", "city", "county", "country", "currency", "pricePlanConfig", "contacts"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("absent field %q should be omitted, got %v", k, m[k])
 		}
+	}
+
+	// contacts: normalized (trimmed, de-duplicated case-insensitively), a bad address is a 400.
+	var withContacts billingProfileUpdateReq
+	_ = json.Unmarshal([]byte(`{"contacts":[{"name":" AP ","email":"ap@acme.sg"},{"email":"AP@acme.sg"},{"email":""}]}`), &withContacts)
+	m2, err := withContacts.setMap()
+	if err != nil {
+		t.Fatalf("setMap contacts: %v", err)
+	}
+	if cs, ok := m2["contacts"].([]billing.Contact); !ok || len(cs) != 1 || cs[0].Name != "AP" || cs[0].Email != "ap@acme.sg" {
+		t.Errorf("contacts = %#v", m2["contacts"])
+	}
+	var bad billingProfileUpdateReq
+	_ = json.Unmarshal([]byte(`{"contacts":[{"email":"nope"}]}`), &bad)
+	if _, err := bad.setMap(); err == nil {
+		t.Error("bad contact e-mail accepted")
 	}
 }
 

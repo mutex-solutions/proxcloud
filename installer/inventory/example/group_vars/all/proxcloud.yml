@@ -1,0 +1,30 @@
+# Everything here overrides installer/playbooks/group_vars/all/defaults.yml, which documents every
+# option and its default. Only Proxmox API access is mandatory.
+proxcloud:
+  pve:
+    api_url: https://192.0.2.11:8006
+  ingress:
+    # Portal hosts: app., admin., api., id., s3. under this domain. Default: <mgmt ip>.sslip.io
+    domain: cloud.example.com
+  network:
+    # Tenant public IPs, on a bridge that is not the Proxmox management bridge.
+    public:
+      id: vmbr1
+      name: Internet
+      cidr: 203.0.113.0/24
+      gateway: 203.0.113.1
+      ranges: [203.0.113.10-203.0.113.200]
+  templates:
+    # A free address on the template bridge; the image build VM uses it (vendor images ship no
+    # guest agent, so the build cannot discover a DHCP address).
+    build_ip: 192.0.2.40/24
+    build_gateway: 192.0.2.1
+  object_store:
+    mode: vm
+    vm:
+      ip: 192.0.2.41/24
+      gateway: 192.0.2.1
+  # Optional TrueNAS: creates nas-templates / nas-capacity / nas-backup over NFS.
+  # nas:
+  #   host: 192.0.2.20
+  #   exports: {templates: /mnt/tank/templates, capacity: /mnt/tank/capacity, backup: /mnt/tank/backup}

@@ -16,6 +16,7 @@ import { fmtDate, fmtDateTime, fmtMoney } from "@/lib/format"
 import { useBillingSummary, useCursorList, useProjectId } from "@/lib/hooks"
 import type { Bill, Transaction } from "@/lib/types"
 import { cn } from "@/lib/utils"
+import { useBankTransfers } from "./BankTransferPanel"
 
 // Fetch an authed endpoint as a blob and trigger a browser download.
 export async function downloadPdf(path: string, filename: string) {
@@ -72,6 +73,14 @@ function BillsTab({ pid, bp }: { pid: string; bp: string }) {
   const {
     rows: bills, isLoading, error, hasNextPage, fetchNextPage, isFetchingNextPage,
   } = useCursorList<Bill>(["bills", bp], `/bill/${bp}`)
+  // PENDING bank transfers keyed by the bill they pay — surfaced as a column so an unpaid bill with
+  // a transfer in flight reads as "awaiting transfer" / "submitted", not just "unpaid".
+  const { data: transfers } = useBankTransfers(bp)
+  const transferByBill = useMemo(() => {
+    const m = new Map<string, { submittedAt?: string }>()
+    for (const t of transfers ?? []) if (t.status === "PENDING" && t.billId) m.set(t.billId, t)
+    return m
+  }, [transfers])
 
   const columns = useMemo<ColumnDef<Bill, any>[]>(
     () => [
@@ -80,6 +89,13 @@ function BillsTab({ pid, bp }: { pid: string; bp: string }) {
         accessorFn: (b) => b.createdAt ?? "",
         header: sortableHeader("Created"),
         cell: ({ getValue }) => <span className="text-sm">{fmtDate(getValue())}</span>,
+      },
+      {
+        id: "invoice",
+        accessorFn: (b) => b.invoiceNumber ?? "",
+        header: sortableHeader("Invoice"),
+        // OPEN bills are provisional statements: numbered only once issued.
+        cell: ({ getValue }) => <span className="text-sm">{getValue() || "—"}</span>,
       },
       {
         id: "status",
@@ -114,6 +130,10 @@ function BillsTab({ pid, bp }: { pid: string; bp: string }) {
         // A settled bill's $0.00 is non-information — mute it so open balances pop.
         cell: ({ row }) => {
           const unpaid = Number(row.original.unpaidGrossAmount ?? 0)
+          // An open bill is not due yet: its $0.00 unpaid would read as "already paid".
+          if (row.original.status === "OPEN") {
+            return <div className="text-right text-xs text-muted-foreground" title="Charges accrue until the bill is issued">not due yet</div>
+          }
           return (
             <div className={cn("text-right font-mono tabular-nums", unpaid === 0 && "text-muted-foreground")}>
               {fmtMoney(row.original.unpaidGrossAmount, row.original.invoiceCurrency)}
@@ -121,8 +141,22 @@ function BillsTab({ pid, bp }: { pid: string; bp: string }) {
           )
         },
       },
+      {
+        id: "transfer",
+        accessorFn: (b) => transferByBill.get(b.id)?.submittedAt ?? (transferByBill.has(b.id) ? "pending" : ""),
+        header: "Bank transfer",
+        cell: ({ row }) => {
+          const t = transferByBill.get(row.original.id)
+          if (!t) return <span className="text-sm text-muted-foreground">—</span>
+          return (
+            <span className="text-sm">
+              {t.submittedAt ? `Submitted ${fmtDate(t.submittedAt)}` : "Awaiting transfer"}
+            </span>
+          )
+        },
+      },
     ],
-    [],
+    [transferByBill],
   )
 
   if (!isLoading && !error && !bills.length) {
@@ -244,8 +278,7 @@ function TransactionsTab({ bp }: { bp: string }) {
 }
 
 // Account-credit transactions (deposits / refunds) — GET /account-credit-transactions?billingProfileId=.
-// ponytail: no per-row receipt download — the Go download route is a deliberate 501 seam
-// (external invoice provider not implemented); add the button when the seam goes live.
+// SUCCESS rows download the deposit receipt, REFUNDED rows the credit note (ProxCloud-generated PDFs).
 function AccountCreditsTab({ bp }: { bp: string }) {
   const {
     rows: txns, isLoading, error, hasNextPage, fetchNextPage, isFetchingNextPage,
@@ -302,8 +335,35 @@ function AccountCreditsTab({ bp }: { bp: string }) {
           <span className="font-mono text-xs text-muted-foreground">{getValue() || "—"}</span>
         ),
       },
+      {
+        id: "document",
+        header: () => <div className="text-right">Document</div>,
+        enableSorting: false,
+        cell: ({ row }) => {
+          const t = row.original
+          if (t.status !== "SUCCESS" && t.status !== "REFUNDED") return null
+          const creditNote = t.status === "REFUNDED"
+          return (
+            <div className="text-right" onClick={(e) => e.stopPropagation()}>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={creditNote ? "Download credit note" : "Download receipt"}
+                onClick={() =>
+                  downloadPdf(
+                    `/account-credit-transactions/${bp}/download/${t.id}`,
+                    `${creditNote ? "credit-note" : "receipt"}-${t.id}.pdf`,
+                  ).catch((e: Error) => toast.error(e.message))
+                }
+              >
+                <Download className="size-4" />
+              </Button>
+            </div>
+          )
+        },
+      },
     ],
-    [],
+    [bp],
   )
 
   if (!isLoading && !error && !txns.length) {

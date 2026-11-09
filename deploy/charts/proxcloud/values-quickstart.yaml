@@ -1,0 +1,102 @@
+# Quickstart: ProxCloud on any Kubernetes cluster, no operators needed, in one command.
+#
+#   helm repo add codecentric https://codecentric.github.io/helm-charts
+#   helm repo add cnpg https://cloudnative-pg.github.io/charts
+#   helm dependency build deploy/charts/proxcloud
+#   helm install proxcloud deploy/charts/proxcloud -n proxcloud --create-namespace --wait --timeout 15m \
+#     -f deploy/charts/proxcloud/values-quickstart.yaml \
+#     --set api.encryptionKey=$(openssl rand -hex 32) \
+#     --set postgresql.auth.password=$(openssl rand -hex 16) \
+#     --set rabbitmq.auth.password=$(openssl rand -hex 16) \
+#     --set keycloakConfigCli.adminPassword=$(openssl rand -hex 12)
+#
+# Until the chart's appVersion is published on ghcr.io, build and load the api/web/admin images
+# yourself and override api/ui/admin.image (chart README, "Images first").
+#
+# Brings up api, ui (customer console), admin (operator console), PostgreSQL and RabbitMQ (bitnami
+# subcharts), and Keycloak with its realms. Every secret comes from the --set flags above; none has a
+# default. Read them back later with `helm get values proxcloud -n proxcloud`.
+#
+# Reach it through port-forwards on this machine (the commands are printed after the install):
+#   customer console  http://localhost:8182   self-registration in realm "proxcloud"
+#   operator console  http://localhost:8183   user admin, the keycloakConfigCli.adminPassword above
+#   api               http://localhost:8180   Keycloak http://localhost:8190
+# These URLs are baked into the tokens and the consoles, so keep the ports. For one host behind an
+# Ingress instead, set api.selfUrls.*, auth.*.issuer, the --hostname below and the ingress blocks
+# (see the chart README, "Expose the quick start with an Ingress").
+#
+# Not for production: one replica each, Keycloak's own admin doubles as the operator, plain HTTP.
+fullnameOverride: proxcloud
+
+api:
+  selfUrls:
+    base: http://localhost:8182
+    api: http://localhost:8180
+    ui: http://localhost:8182
+    admin: http://localhost:8183
+
+# Browser-facing issuers (the token `iss`); the api fetches the metadata in-cluster instead.
+# Customers sign up in realm "proxcloud"; operators use Keycloak's master realm.
+auth:
+  main:
+    issuer: http://localhost:8190/realms/proxcloud
+    discoveryUri: http://proxcloud-keycloak-http/realms/proxcloud
+  admin:
+    issuer: http://localhost:8190/realms/master
+    discoveryUri: http://proxcloud-keycloak-http/realms/master
+  adminApi:
+    issuer: http://localhost:8190/realms/master
+    discoveryUri: http://proxcloud-keycloak-http/realms/master
+
+# Datastores from the bitnami subcharts instead of the operators.
+cnpg:
+  enabled: false
+rabbitmqCluster:
+  enabled: false
+
+postgresql:
+  enabled: true
+  fullnameOverride: proxcloud-postgresql
+  primary:
+    initdb:
+      scripts:
+        # Keycloak's own database, owned by the same role (its password is in this Secret).
+        keycloak.sql: CREATE DATABASE keycloak OWNER proxcloud;
+
+rabbitmq:
+  enabled: true
+  fullnameOverride: proxcloud-rabbitmq
+
+keycloakx:
+  enabled: true
+  fullnameOverride: proxcloud-keycloak
+  image:
+    tag: "26.8.2"
+  command:
+    - /opt/keycloak/bin/kc.sh
+    - start
+    - --http-enabled=true
+    - --http-port=8080
+    # The browser's URL is the issuer; pods reach the same realms through the Service.
+    - --hostname=http://localhost:8190
+    - --hostname-backchannel-dynamic=true
+  extraEnv: |
+    - name: KC_BOOTSTRAP_ADMIN_USERNAME
+      value: admin
+    - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: proxcloud-keycloak-admin
+          key: admin-password
+  database:
+    vendor: postgres
+    hostname: proxcloud-postgresql
+    port: 5432
+    database: keycloak
+    username: proxcloud
+    existingSecret: proxcloud-postgresql
+    existingSecretKey: password
+
+# Creates realm "proxcloud" and the console clients, and adds the operator client to master.
+keycloakConfigCli:
+  enabled: true

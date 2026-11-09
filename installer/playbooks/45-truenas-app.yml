@@ -1,0 +1,86 @@
+# object_store.mode=truenas-app: the community catalog app (its image tag is pinned by the catalog
+# version), on the NAS pool. Driven from the first mgmt host, which reaches the NAS.
+# ponytail: the REST API is deprecated from TrueNAS 25.04 and removed in 26; move this to the WebSocket
+# JSON-RPC client when the NAS is on 26.
+- name: Install RustFS on TrueNAS
+  hosts: mgmt[0]
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri:
+      validate_certs: false
+      headers: {Authorization: "Bearer {{ pc_vault.truenas_api_key | default('') }}"}
+      return_content: true
+      timeout: 120
+  vars:
+    app: "{{ pc.object_store.truenas_app }}"
+    nas_api: "{{ pc.nas.api_url or ('https://' ~ pc.nas.host) }}/api/v2.0"
+  tasks:
+    - name: Skip unless the mode is truenas-app
+      ansible.builtin.meta: end_play
+      when: pc.object_store.mode != 'truenas-app'
+    - name: Read the Docker service and the apps
+      ansible.builtin.uri: {url: "{{ nas_api }}/{{ item }}"}
+      loop: [docker, app]
+      register: pc_nas
+    - name: Give Docker a pool
+      when: not pc_nas.results[0].json.pool
+      ansible.builtin.uri:
+        url: "{{ nas_api }}/docker"
+        method: PUT
+        body_format: json
+        body: {pool: "{{ pc.nas.pool }}"}
+      changed_when: true
+      register: pc_docker
+    - name: Wait for Docker
+      when: pc_docker is changed
+      ansible.builtin.uri: {url: "{{ nas_api }}/core/get_jobs?id={{ pc_docker.json }}"}
+      register: pc_job
+      until: pc_job.json[0].state in ['SUCCESS', 'FAILED']
+      retries: 60
+      delay: 10
+      failed_when: pc_job.json[0].state == 'FAILED'
+    - name: Create the app
+      when: app.name not in (pc_nas.results[1].json | map(attribute='name') | list)
+      ansible.builtin.uri:
+        url: "{{ nas_api }}/app"
+        method: POST
+        body_format: json
+        body:
+          app_name: "{{ app.name }}"
+          catalog_app: rustfs
+          train: "{{ app.train }}"
+          values:
+            rustfs:
+              deployment_mode: snsd
+              access_key: "{{ pc_rustfs_access_key }}"
+              secret_key: "{{ pc_rustfs_secret_key }}"
+            network:
+              api_port: {bind_mode: published, port_number: "{{ app.s3_port | int }}"}
+              web_port: {bind_mode: published, port_number: "{{ app.console_port | int }}"}
+            storage:
+              data_disks:
+                - {type: ix_volume, ix_volume_config: {dataset_name: data1, acl_enable: false}}
+      changed_when: true
+      no_log: true
+      register: pc_app
+    - name: Wait for the app
+      when: pc_app is changed
+      ansible.builtin.uri: {url: "{{ nas_api }}/core/get_jobs?id={{ pc_app.json }}"}
+      register: pc_job
+      until: pc_job.json[0].state in ['SUCCESS', 'FAILED']
+      retries: 60
+      delay: 10
+      failed_when: pc_job.json[0].state == 'FAILED'
+    - name: Wait for the S3 port
+      ansible.builtin.wait_for: {host: "{{ pc.nas.host }}", port: "{{ app.s3_port }}", timeout: 300}
+    - name: Create the internal buckets
+      ansible.builtin.script: files/rustfs-bootstrap.py
+      environment:
+        S3_URL: "http://{{ pc.nas.host }}:{{ app.s3_port }}"
+        ROOT_ACCESS: "{{ pc_rustfs_access_key }}"
+        ROOT_SECRET: "{{ pc_rustfs_secret_key }}"
+        BUCKETS: "{{ {'cnpg-backups': lookup('ansible.builtin.password', pc_gen ~ '/rustfs-cnpg-secret ' ~ pc_alnum), 'etcd-snapshots': lookup('ansible.builtin.password', pc_gen ~ '/rustfs-etcd-secret ' ~ pc_alnum)} | to_json }}"
+      args: {executable: python3}
+      register: pc_buckets
+      changed_when: (pc_buckets.stdout | from_json).changed
+      no_log: true

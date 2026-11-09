@@ -67,3 +67,57 @@ func TestDbaasConfig(t *testing.T) {
 		t.Fatal("kamaji doc must not be dbaas")
 	}
 }
+
+// TestDbaasConfigNetworkBackupScheduling pins the provider document shape for the MetalLB pool,
+// the S3 backup store (credentials ride the provider SECRET), the zone spread key and the
+// storage-class allowlist — which never offers the capacity tier.
+func TestDbaasConfigNetworkBackupScheduling(t *testing.T) {
+	es := &ExternalService{
+		ID: "svc-dbaas", Type: TypeCloud,
+		Config: map[string]any{
+			"provider": "dbaas",
+			"argocd":   map[string]any{"chartRepo": "registry.example.com/charts", "chartVersion": "0.5.0"},
+			"database": map[string]any{
+				"lbAddressPool":  "dbaas-services",
+				"storageClasses": []any{"nvme", "capacity", "capacity-nfs", "ssd"},
+				"scheduling": map[string]any{
+					"zoneKey":      "kubernetes.io/hostname",
+					"nodeSelector": map[string]any{"node-role": "database"},
+					"tolerations":  []any{map[string]any{"key": "dedicated", "operator": "Exists"}},
+				},
+				"backup": map[string]any{
+					"endpoint": "http://s3.example.com:9000", "bucket": "dbaas-backups", "prefix": "backups",
+					"region": "us-east-1", "caCertSecret": "s3-ca",
+				},
+				"engines": map[string]any{"postgresql": map[string]any{"versions": []any{"17"}}},
+			},
+		},
+		Secret: map[string]any{"kubeconfig": "kc", "backupAccessKey": "AK", "backupSecretKey": "SK"},
+	}
+	cfg := es.DbaasConfig()
+	if cfg.LBAddressPool != "dbaas-services" {
+		t.Errorf("LBAddressPool = %q", cfg.LBAddressPool)
+	}
+	if got := cfg.StorageClasses; len(got) != 2 || got[0] != "nvme" || got[1] != "ssd" {
+		t.Errorf("StorageClasses = %v, want the capacity tier filtered out", got)
+	}
+	if cfg.ZoneKey != "kubernetes.io/hostname" || cfg.NodeSelector["node-role"] != "database" || len(cfg.Tolerations) != 1 {
+		t.Errorf("scheduling = %q %v %v", cfg.ZoneKey, cfg.NodeSelector, cfg.Tolerations)
+	}
+	want := dbaas.BackupConfig{
+		Endpoint: "http://s3.example.com:9000", Bucket: "dbaas-backups", Prefix: "backups", Region: "us-east-1",
+		PathStyle: true, CACertSecret: "s3-ca", AccessKey: "AK", SecretKey: "SK",
+	}
+	if cfg.Backup != want || !cfg.Backup.Enabled() {
+		t.Errorf("Backup = %+v", cfg.Backup)
+	}
+	// pathStyle:false is honoured; no backup block = backups off.
+	es.Config["database"].(map[string]any)["backup"].(map[string]any)["pathStyle"] = false
+	if es.DbaasConfig().Backup.PathStyle {
+		t.Error("explicit pathStyle:false lost")
+	}
+	delete(es.Config["database"].(map[string]any), "backup")
+	if es.DbaasConfig().Backup.Enabled() {
+		t.Error("no backup block must leave backups off")
+	}
+}

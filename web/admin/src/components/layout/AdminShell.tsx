@@ -72,6 +72,7 @@ const groups: Group[] = [
       { to: "/system/integrations", label: "Integrations", icon: Settings2, permission: "admin:integration:read" },
       { to: "/system/roles", label: "Admin permissions", icon: Shield, permission: "admin:permission:read" },
       { to: "/system/hmac-keys", label: "API keys", icon: KeyRound, permission: "admin:hmac_key:manage" },
+      { to: "/system/sso", label: "Organization SSO", icon: Shield, permission: "admin:sso:manage" },
       { to: "/audit", label: "Audit log", icon: FileClock, permission: "admin:audit:read" },
     ],
   },

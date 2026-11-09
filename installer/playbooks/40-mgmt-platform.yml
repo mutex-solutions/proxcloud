@@ -1,0 +1,117 @@
+# Stage 40: ArgoCD (k3s helm-controller), then Applications with inline values: no git server needed and
+# ArgoCD keeps reconciling. Secrets are plain Secrets applied here, so the Applications hold none.
+- name: Deploy the platform
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  vars:
+    ns: "{{ pc.namespace }}"
+    secrets_manifest: "{{ lookup('ansible.builtin.template', 'templates/secrets.yml.j2') }}"
+    apps_operators: "{{ lookup('ansible.builtin.template', 'templates/apps-operators.yml.j2') }}"
+    app_proxcloud: "{{ lookup('ansible.builtin.template', 'templates/app-proxcloud.yml.j2') }}"
+    rabbit_operator_url: https://github.com/rabbitmq/cluster-operator/releases/download/{{ pc_ver.rabbitmq_operator }}/cluster-operator.yml
+  tasks:
+    - name: Install ArgoCD through the k3s helm controller
+      ansible.builtin.template: {src: templates/argocd-helmchart.yml.j2, dest: /var/lib/rancher/k3s/server/manifests/proxcloud-argocd.yaml, mode: "0600"}
+    - name: Wait for ArgoCD
+      ansible.builtin.command: k3s kubectl -n argocd rollout status deploy/argocd-repo-server --timeout=60s
+      changed_when: false
+      register: pc_argocd
+      retries: 40
+      delay: 15
+      until: pc_argocd is succeeded
+
+    - name: Apply the namespace and secrets
+      ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {manifest: "{{ secrets_manifest }}", apply_name: secrets, apply_no_log: true}
+
+    - name: Apply the operator Applications
+      ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {manifest: "{{ apps_operators }}", apply_name: operators}
+    - name: Wait for cert-manager and CloudNativePG
+      ansible.builtin.shell: |
+        set -e
+        k3s kubectl wait --for=condition=established --timeout=20s crd/certificates.cert-manager.io crd/clusters.postgresql.cnpg.io crd/databases.postgresql.cnpg.io
+        k3s kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=30s
+        k3s kubectl -n cnpg-system rollout status deploy/cnpg-cloudnative-pg --timeout=30s
+      changed_when: false
+      register: pc_ops
+      retries: 40
+      delay: 15
+      until: pc_ops is succeeded
+    - name: Read the RabbitMQ operator version
+      ansible.builtin.command: k3s kubectl -n rabbitmq-system get deploy rabbitmq-cluster-operator -o jsonpath={.metadata.labels.app\.kubernetes\.io/version}{.spec.template.metadata.annotations.pc-version}
+      changed_when: false
+      failed_when: false
+      register: pc_rabbit_have
+    - name: Install the RabbitMQ Cluster Operator
+      # The upstream ships a release manifest and no chart, so this one is not an Application.
+      when: pc_ver.rabbitmq_operator not in pc_rabbit_have.stdout
+      ansible.builtin.shell: |
+        set -eu
+        k3s kubectl apply --server-side -f {{ rabbit_operator_url | quote }}
+        k3s kubectl -n rabbitmq-system patch deploy rabbitmq-cluster-operator --type merge \
+          -p '{"spec":{"template":{"metadata":{"annotations":{"pc-version":"{{ pc_ver.rabbitmq_operator }}"}}}}}'
+      changed_when: true
+
+    - name: Wait for the RabbitMQ operator
+      ansible.builtin.command: k3s kubectl -n rabbitmq-system rollout status deploy/rabbitmq-cluster-operator --timeout=30s
+      changed_when: false
+      register: pc_rabbit_op
+      retries: 30
+      delay: 10
+      until: pc_rabbit_op is succeeded
+    - name: Apply the Let's Encrypt issuer
+      when: pc.ingress.tls == 'acme'
+      ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        apply_name: issuer
+        manifest: |
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: letsencrypt
+          spec:
+            acme:
+              server: https://acme-v02.api.letsencrypt.org/directory
+              email: {{ pc.ingress.acme_email | to_json }}
+              privateKeySecretRef: {name: letsencrypt-account}
+              solvers:
+                - http01: {ingress: {ingressClassName: traefik}}
+
+    # The CSI gateway's Service keeps the caller's address (externalTrafficPolicy: Local), so only a node running an API
+    # pod answers on it, and its URL names the first mgmt node: with three, the API is pinned there.
+    - name: Read the k3s nodes for the CSI gateway
+      when: pc.mode == 'split' and groups['mgmt'] | length > 1
+      ansible.builtin.command: k3s kubectl get nodes -o json
+      register: pc_mgmt_nodes
+      changed_when: false
+      check_mode: false
+    - name: Name the first mgmt node
+      when: pc_mgmt_nodes.stdout is defined
+      ansible.builtin.set_fact:
+        pc_gateway_node: "{{ pc_mgmt_nodes.stdout | from_json | pc_node_with_address(pc_first_mgmt_ip) }}"
+
+    - name: Apply the ProxCloud Application
+      ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {manifest: "{{ app_proxcloud }}", apply_name: proxcloud}
+    - name: Wait for the API on this version
+      ansible.builtin.shell: |
+        set -eu
+        k3s kubectl -n {{ ns }} get deploy proxcloud-api -o jsonpath='{.spec.template.spec.containers[0].image}' | grep -qF {{ pc_image_tag | quote }}
+        k3s kubectl -n {{ ns }} rollout status deploy/proxcloud-api --timeout=30s
+      changed_when: false
+      register: pc_api_up
+      retries: 60
+      delay: 15
+      until: pc_api_up is succeeded
+    - name: Wait for the consoles and Keycloak
+      ansible.builtin.shell: |
+        k3s kubectl -n {{ ns }} rollout status deploy/proxcloud-ui --timeout=30s
+        k3s kubectl -n {{ ns }} rollout status deploy/proxcloud-admin --timeout=30s
+        k3s kubectl -n {{ ns }} rollout status statefulset/proxcloud-keycloak --timeout=30s
+      changed_when: false
+      register: pc_rest
+      retries: 40
+      delay: 15
+      until: pc_rest is succeeded

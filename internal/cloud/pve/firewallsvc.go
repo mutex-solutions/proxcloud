@@ -207,7 +207,7 @@ func nicFirewallParams(cfg VMConfig) map[string]string {
 // template made from a VM with a public NIC would hand every new server that
 // VM's bridge plus an ipfilter allowing its public address — still usable after
 // the address is released and reallocated to another tenant.
-// TODO(verify-lab): qm clone copies the source VM's firewall config (ipsets).
+// Lab-verified (PVE 9.2): qm clone copies the source's firewall config, options, rules and ipsets.
 func extraNICKeys(cfg VMConfig) []string {
 	var out []string
 	for _, key := range nicKeys(cfg) {
@@ -237,9 +237,8 @@ func nicBridge(val string) string {
 // macfilter); ingress closed except what a security group opens (default-deny
 // ingress); egress open (open egress) — so
 // group "out" rules stay informational; DHCP allowed so the SDN dnsmasq lease
-// survives the DROP policy and ipfilter (DISCOVER leaves from 0.0.0.0).
-// TODO(verify-lab): confirm dhcp=1 lets DISCOVER/OFFER through ipfilter on the
-// nftables proxmox-firewall.
+// survives the DROP policy. dhcp=1 alone is not enough: proxmox-firewall checks the
+// ipfilter set first, so SecureVM adds 0.0.0.0 to it for DISCOVER (lab-verified).
 var vmFirewallOptions = map[string]string{
 	"enable": "1", "ipfilter": "1", "macfilter": "1", "dhcp": "1",
 	"policy_in": "DROP", "policy_out": "ACCEPT",
@@ -248,12 +247,11 @@ var vmFirewallOptions = map[string]string{
 // SecureVM switches the VM firewall on with anti-spoofing. Every NIC on an SDN
 // vnet gets ipfilter-netN = that vnet's subnets. A NIC anywhere else (a template
 // or public bridge) gets no set, and PVE treats ipfilter=1 as an EMPTY set per
-// NIC, so its IPv4 egress is dropped: fail-closed until the public-IP IPAM
-// (P2-4) feeds SetIPFilter the allocated address.
-// ponytail: the set is the vnet subnet, not the exact DHCP lease (PVE's IPAM
-// assigns it, not us), so a VM can still spoof a sibling inside its own project
-// subnet; pin per-VM leases via POST /cluster/sdn/vnets/{vnet}/ips if that matters.
-// TODO(verify-lab): ipfilter=1 with no ipfilter-netN set really drops that NIC.
+// NIC, so its IPv4 egress is dropped (lab-verified): fail-closed until the public-IP
+// IPAM feeds SetIPFilter the allocated address.
+// ponytail: on a DHCP zone the set is the vnet subnet, not the exact lease (PVE's IPAM
+// assigns it, not us), so a VM can still spoof a sibling inside its own project subnet;
+// a zone without DHCP pins the allocated /32 instead (CreateServer).
 func (s *Service) SecureVM(ctx context.Context, node string, vmid int) error {
 	cfg, err := s.C.GetVMConfig(ctx, node, vmid)
 	if err != nil {
@@ -263,13 +261,22 @@ func (s *Service) SecureVM(ctx context.Context, node string, vmid int) error {
 	if err != nil {
 		return err
 	}
-	isVnet := map[string]bool{}
+	zones, err := s.C.ListSDNZones(ctx)
+	if err != nil {
+		return err
+	}
+	dhcpZone := map[string]bool{}
+	for _, z := range zones {
+		dhcpZone[z.Zone] = z.DHCP != ""
+	}
+	vnetZone := map[string]string{}
 	for _, v := range vnets {
-		isVnet[v.Vnet] = true
+		vnetZone[v.Vnet] = v.Zone
 	}
 	for _, key := range nicKeys(cfg) {
 		br := nicBridge(cfg.Str(key))
-		if !isVnet[br] {
+		zone, isVnet := vnetZone[br]
+		if !isVnet {
 			continue
 		}
 		subs, err := s.C.ListSDNSubnets(ctx, br)
@@ -281,6 +288,9 @@ func (s *Service) SecureVM(ctx context.Context, node string, vmid int) error {
 			if sub.CIDR != "" {
 				cidrs = append(cidrs, sub.CIDR)
 			}
+		}
+		if dhcpZone[zone] {
+			cidrs = append(cidrs, "0.0.0.0")
 		}
 		if err := s.SetIPFilter(ctx, node, vmid, key, cidrs); err != nil {
 			return err
@@ -310,7 +320,10 @@ func (s *Service) SetIPFilter(ctx context.Context, node string, vmid int, nic st
 		for _, e := range entries {
 			have = append(have, e.CIDR)
 		}
-		want := slices.Clone(cidrs)
+		want := make([]string, 0, len(cidrs))
+		for _, c := range cidrs {
+			want = append(want, strings.TrimSuffix(c, "/32")) // PVE stores a host without /32
+		}
 		slices.Sort(have)
 		slices.Sort(want)
 		if slices.Equal(have, want) {
@@ -342,7 +355,7 @@ type SecurityGroupNotFoundError struct{ Ref string }
 func (e *SecurityGroupNotFoundError) Error() string { return "security group not found: " + e.Ref }
 
 // defaultGroupRules is the default group (default-deny ingress, open egress):
-// ingress from the provider CIDR pool. The vnet isolation rules already drop
+// ingress from the provider CIDR pool. The cluster isolation rules already drop
 // every other tenant's pool traffic, so what is left is the project's own
 // networks. No SSH/ICMP from outside.
 // ponytail: a pool-sourced packet spoofed onto a PUBLIC bridge also matches;
@@ -352,7 +365,7 @@ func defaultGroupRules(cidrPool string) []FirewallRule {
 	if cidrPool == "" {
 		return nil // no pool → ingress stays fully closed
 	}
-	return []FirewallRule{{Type: "in", Action: "ACCEPT", Source: cidrPool, Comment: "intra-project (other tenants dropped by vnet isolation)"}}
+	return []FirewallRule{{Type: "in", Action: "ACCEPT", Source: cidrPool, Comment: "intra-project (other tenants dropped by the isolation rules)"}}
 }
 
 // EnsureDefaultSecurityGroup returns the project's default group, creating it
@@ -435,6 +448,67 @@ func (s *Service) DetachSecurityGroup(ctx context.Context, projectID, serverExtI
 			if err := s.C.delete(ctx, base+"/rules/"+strconv.Itoa(rules[i].Pos), nil, nil); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// VMSecurityGroups lists the group ids a pool VM's firewall references.
+func (s *Service) VMSecurityGroups(ctx context.Context, projectID, serverExtID string) ([]string, error) {
+	vm, err := s.ResolveVM(ctx, projectID, serverExtID)
+	if err != nil {
+		return nil, err
+	}
+	if vm == nil {
+		return nil, fmt.Errorf("pve: server %s not found", serverExtID)
+	}
+	var rules []FirewallRule
+	if err := s.C.get(ctx, vmFirewallPath(vm.Node, vm.VMID)+"/rules", nil, &rules); err != nil {
+		return nil, err
+	}
+	out := []string{}
+	for _, r := range rules {
+		if r.Type == "group" {
+			out = append(out, r.Action)
+		}
+	}
+	return out, nil
+}
+
+// SecurityGroupInUse names a pool VM whose firewall references the group ("" = none). PVE
+// deletes a referenced group without complaint and leaves a dangling rule on the VM.
+func (s *Service) SecurityGroupInUse(ctx context.Context, projectID, groupID string) (string, error) {
+	vms, templates, unread, err := s.poolVMs(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	if len(unread) > 0 {
+		return "", errUnreadVMs()
+	}
+	for _, vm := range append(vms, templates...) {
+		var rules []FirewallRule
+		if err := s.C.get(ctx, vmFirewallPath(vm.Node, vm.VMID)+"/rules", nil, &rules); err != nil {
+			return "", err
+		}
+		for _, r := range rules {
+			if r.Type == "group" && r.Action == groupID {
+				return vm.Name, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// clearVMRules removes every rule of a VM's firewall (bottom-up: positions stay valid).
+func (s *Service) clearVMRules(ctx context.Context, node string, vmid int) error {
+	base := vmFirewallPath(node, vmid) + "/rules"
+	var rules []FirewallRule
+	if err := s.C.get(ctx, base, nil, &rules); err != nil {
+		return err
+	}
+	for i := len(rules) - 1; i >= 0; i-- {
+		if err := s.C.delete(ctx, base+"/"+strconv.Itoa(rules[i].Pos), nil, nil); err != nil {
+			return err
 		}
 	}
 	return nil

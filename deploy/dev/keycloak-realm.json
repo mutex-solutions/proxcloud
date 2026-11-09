@@ -13,16 +13,15 @@
       "publicClient": true,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": true,
-      "rootUrl": "http://localhost:8082",
       "baseUrl": "/",
       "redirectUris": [
-        "http://localhost:8082/*"
+        "*"
       ],
       "webOrigins": [
-        "http://localhost:8082"
+        "*"
       ],
       "attributes": {
-        "post.logout.redirect.uris": "http://localhost:8082/*"
+        "post.logout.redirect.uris": "*"
       },
       "protocol": "openid-connect",
       "protocolMappers": [
@@ -45,16 +44,15 @@
       "publicClient": true,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": true,
-      "rootUrl": "http://localhost:8083",
       "baseUrl": "/",
       "redirectUris": [
-        "http://localhost:8083/*"
+        "*"
       ],
       "webOrigins": [
-        "http://localhost:8083"
+        "*"
       ],
       "attributes": {
-        "post.logout.redirect.uris": "http://localhost:8083/*"
+        "post.logout.redirect.uris": "*"
       },
       "protocol": "openid-connect",
       "protocolMappers": [
@@ -86,7 +84,8 @@
           "value": "demo",
           "temporary": false
         }
-      ]
+      ],
+      "id": "a9c95406-454a-4027-9a44-fed5ad70cd74"
     },
     {
       "username": "admin",
@@ -101,7 +100,8 @@
           "value": "admin",
           "temporary": false
         }
-      ]
+      ],
+      "id": "3f1b7c52-8e0d-4a6b-9c21-5d7e4f0a1b63"
     }
   ]
 }
