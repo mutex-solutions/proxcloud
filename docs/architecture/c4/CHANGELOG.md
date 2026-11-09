@@ -17,7 +17,9 @@ trim/delete tombstones retain exact cleanup generations. Compact retired build-I
 identities survive full receipt cleanup and refuse stale pre-prepare resurrection.
 All public readiness projections/usable selections wait for completed handoff;
 current retained From/Image refs conservatively HOLD parent cleanup, without
-claiming complete durable provenance pin coverage.
+claiming complete durable provenance pin coverage. Independent retired generations
+continue cleanup before aggregated HOLDs return, so an eligible retired child
+cannot starve its held parent forever; same-digest ambiguity remains conservative.
 
 **Why:** retrying an ambiguous apply or independently minting in-memory proofs
 could dispatch twice; stale saves/error handlers could lose completed tags or

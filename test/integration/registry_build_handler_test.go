@@ -337,6 +337,63 @@ func TestRegistryBuildHandlerRetainedFromHoldsParentBinding(t *testing.T) {
 	}
 }
 
+func TestRegistryBuildHandlerRetiredChainMakesProgress(t *testing.T) {
+	f, _, key, store := newPinnedBuildFixture(t)
+	ctx := context.Background()
+	tid, bid := requestBuild(t, f, key, "retired-chain")
+	var raw map[string]any
+	if _, err := f.db.C("sandbox_templates").Get(ctx, tid, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var builds []any
+	var ops []registrypins.Operation
+	previous := ""
+	for i, id := range []string{bid, "second-build"} {
+		op := pinOp()
+		op.ProjectID = "pa"
+		op.Owner = "build:" + tid + ":" + id
+		dest := "192.0.2.226/t/pa/" + tid + ":" + id
+		image := "192.0.2.226/t/pa/" + tid + "@sha256:" + strings.Repeat(fmt.Sprint(i+1), 64)
+		ps, err := store.BeginPins(ctx, op, []string{dest})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bound, err := store.ObserveBinding(ctx, ps[0], registrypins.BindingEvidence{UID: "template:" + tid + ":" + id, Generation: op.Generation, DigestRef: image})
+		if err != nil {
+			t.Fatal(err)
+		}
+		builds = append(builds, map[string]any{"buildID": id, "status": sandbox.BuildReady, "image": image, "from": previous, "registryOperation": map[string]any{"operation": op, "state": "finished", "Destination": dest, "pins": []registrypins.Pin{bound}}})
+		ops = append(ops, op)
+		previous = image
+	}
+	raw["builds"] = builds
+	raw["tags"] = map[string]any{"default": "second-build"}
+	if _, err := f.db.C("sandbox_templates").Replace(ctx, tid, raw); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.e2b(key, http.MethodDelete, "/templates/"+tid, "")
+	f.h.SyncSandboxBuilds(ctx)
+	f.h.SyncSandboxBuilds(ctx)
+	for _, op := range ops {
+		ps, err := store.PinsForOperation(ctx, op)
+		if err != nil || len(ps) != 1 || ps[0].State != registrypins.Released {
+			t.Fatalf("chain stalled %+v %v", ps, err)
+		}
+	}
+	var cur map[string]any
+	found, err := f.db.C("sandbox_templates").Get(ctx, tid, &cur)
+	if err != nil || !found {
+		t.Fatal("compact owner identity missing", err)
+	}
+	if retired, ok := cur["retiredBuilds"].([]any); ok && len(retired) != 0 {
+		t.Fatal("eligible retired payloads retained")
+	}
+	ids, ok := cur["retiredBuildIDs"].(map[string]any)
+	if !ok || len(ids) != 2 {
+		t.Fatalf("compact retired identities lost %+v", cur["retiredBuildIDs"])
+	}
+}
+
 func TestRegistryBuildHandlerConcurrentSingleApplyAndKnownReady(t *testing.T) {
 	f, c, key, store := newPinnedBuildFixture(t)
 	tid, bid := requestBuild(t, f, key, "pinned")
