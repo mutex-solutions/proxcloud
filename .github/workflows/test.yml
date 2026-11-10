@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
-          node-version: "24"
+          node-version: "24.22.2"
           cache: npm
           cache-dependency-path: web/${{ matrix.app }}/package-lock.json
       - run: npm ci
@@ -70,6 +70,7 @@ jobs:
         working-directory: installer
         run: |
           make test
+          .venv/bin/python ../web/tests/test_runtime_baseline.py
           ANSIBLE_CONFIG=ansible.cfg .venv/bin/ansible-playbook -i inventory/example/hosts.yml -e pc_site_dir=/tmp/site -e pc_node=x --syntax-check \
             playbooks/site.yml playbooks/46-rustfs-upgrade.yml playbooks/70-add-node.yml playbooks/71-remove-node.yml
       - name: Check the image pipeline never runs on PR or fork events

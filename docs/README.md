@@ -41,6 +41,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Frontend runtime baseline](frontend-runtime-baseline.md) — supported Node and
+  stable NGINX selection, unchanged app contracts and explicit actual-musl/static
+  server versus complete-image/deployment verification boundaries.
+
 - [Supported Go build baseline](supported-go-build-baseline.md) — exact compiler
   pins, separate module minimum, six builder stages/seven outputs and explicit
   native-test, external-envd, image-provenance and runtime acceptance limits.

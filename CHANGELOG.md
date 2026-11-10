@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Select Node 24.22.2 and stable NGINX 1.30.6 for both frontend image recipes,
+  align the hosted Node patch, and guard the declarations in data-only CI tests.
+  Preserve app locks, static serving and runtime public-config behavior; distinguish
+  actual musl/runtime checks from source pins, image builds and live acceptance.
+
 - Select supported Go 1.26.11 explicitly for all six Go builder stages and the
   test workflow, keeping the module language minimum and dependency graph separate.
   Add source-declaration regression coverage and document the seven output artifacts,
