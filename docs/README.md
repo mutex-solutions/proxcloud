@@ -41,6 +41,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Dependency patch baseline](dependency-patch-baseline.md) — narrow verified Vite
+  and Ansible security-floor pins, actual-new-byte test requirements and explicit
+  remaining dependency/support/advisory coverage limits.
+
 - [SSO alias retirement](sso-alias-retirement.md) — durable primary-backed retirement
   before broker deletion, retained-session refusal, legitimate social login compatibility
   and explicit cache/rollout/recovery limits, with C1–C4 flow.

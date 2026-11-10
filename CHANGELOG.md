@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pin both frontend Vite builds to security-floor patch 8.1.6 and installer
+  ansible-core to 2.18.18 without unrelated lock graph churn or live installer
+  execution. These narrow fixes do not certify other dependencies or runtime images.
+
 - Persist exact organization SSO alias retirement on the primary before broker
   deletion, and refuse retained sessions even when no configured providers remain.
   Keep legitimate realm-level social/local sign-ins compatible, make cleanup retries
