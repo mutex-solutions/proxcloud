@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Offer NGINX Gateway Fabric 2.8.1 with Gateway API Standard 1.6.3 for new managed
+  Kubernetes clusters (tenant chart 0.1.10). Keep the controller opt-in, users owning
+  application Gateway/Routes/TLS, and existing ingress-nginx traffic unchanged.
+  Validate actual chart/Kubernetes capability before effects, preserve sparse-client
+  addon choices and refuse implicit legacy controller migration or downgrade.
+
 - Refresh installation, developer, product-help, CI/release and support documentation
   against current configuration. Distinguish preview/source-build state from
   versioned publication and live acceptance, and document static template networking,

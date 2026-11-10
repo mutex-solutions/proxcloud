@@ -41,6 +41,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Managed Kubernetes Gateway API](managed-k8s-gateway-api.md) — opt-in NGINX Gateway
+  Fabric, pinned tenant Standard CRDs, C1–C4 delivery flow and explicit legacy
+  ingress preservation/migration boundaries.
+
 - [Tenant authorization boundaries](tenant-authorization-boundaries.md) — stored-profile
   order reads, custom-role assignment authority and runtime-aware private traffic
   token checks, with C1–C4 flows and explicit regression/acceptance limits.
