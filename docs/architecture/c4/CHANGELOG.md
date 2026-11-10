@@ -4,7 +4,7 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
-## 2026-11-10: Kubernetes template static build seed delivery (PR pending)
+## 2026-11-10: Kubernetes template static build seed delivery (PR #175)
 
 **What changed:** the existing node-template workflow gains an explicit static
 network mode. A private local NoCloud `cidata` ISO supplies the live Ubuntu
