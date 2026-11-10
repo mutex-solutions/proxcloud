@@ -41,6 +41,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Managed PostgreSQL version baseline](managed-postgresql-version-baseline.md) —
+  same-major patch image targets, new-provider PG18 default, unchanged existing pins
+  and explicit registry/runtime/backup/major-migration acceptance limits.
+
 - [Dependency patch baseline](dependency-patch-baseline.md) — narrow verified Vite
   and Ansible security-floor pins, actual-new-byte test requirements and explicit
   remaining dependency/support/advisory coverage limits.

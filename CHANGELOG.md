@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Update managed PostgreSQL 15–18 image-map patch targets to 15.19, 16.15, 17.11
+  and 18.6 in unpublished database chart 0.5.1. New installer DBaaS providers
+  offer 17/18 with 18 as default; existing name-matched providers and database
+  chart pins/data remain untouched. Require actual offline Helm/catalog regression
+  checks in CI; no existing PostgreSQL major upgrade is performed.
+
 - Pin both frontend Vite builds to security-floor patch 8.1.6 and installer
   ansible-core to 2.18.18 without unrelated lock graph churn or live installer
   execution. These narrow fixes do not certify other dependencies or runtime images.

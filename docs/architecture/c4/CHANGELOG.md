@@ -4,6 +4,20 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-11: Managed PostgreSQL patch and fresh catalog baseline
+
+**What changed:** database chart 0.5.1 maps PG majors 15/16/17/18 to patch images
+15.19/16.15/17.11/18.6. A newly registered DBaaS provider offers 17 and 18, defaulting
+to 18. Installer name-absence/POST-only behavior and existing database chart pins
+remain unchanged. Native chart renders and data-only catalog checks are required.
+
+**Why:** security patch freshness and a PG18 offer are separate from existing
+PG17 data migration. Updating a source map must not masquerade as safe major
+upgrade, operator compatibility, backup/restore or deployed digest evidence.
+
+**Views updated:** [version/catalog boundary view](../../managed-postgresql-version-baseline.md),
+chart index and C4 index. No data operation, provider re-pin or publication occurs.
+
 ## 2026-11-11: Managed Kubernetes Gateway API addon
 
 **What changed:** tenant chart 0.1.10 adds NGINX Gateway Fabric 2.8.1 and vendored
