@@ -41,6 +41,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Supported Go build baseline](supported-go-build-baseline.md) — exact compiler
+  pins, separate module minimum, six builder stages/seven outputs and explicit
+  native-test, external-envd, image-provenance and runtime acceptance limits.
+
 - [Managed PostgreSQL version baseline](managed-postgresql-version-baseline.md) —
   same-major patch image targets, new-provider PG18 default, unchanged existing pins
   and explicit registry/runtime/backup/major-migration acceptance limits.
