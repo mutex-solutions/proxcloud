@@ -39,6 +39,8 @@ type backupCluster struct {
 	storeDown bool   // the backup store answers its listing with an error
 	replica   int    // how many more listings still show job 101-0 being removed
 	afterCfg  string // the config a restore leaves, when it differs
+	// requestHook optionally observes/answers one fake HTTP request; nil preserves every existing route.
+	requestHook func(http.ResponseWriter, *http.Request) bool
 	// destroyedAfter is how many archives were gone when the VM was destroyed, -1 while it stands.
 	destroyedAfter int
 }
@@ -62,7 +64,7 @@ func newBackupCluster(t *testing.T) *backupCluster {
 			next(w, r)
 		}
 	}
-	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+	routes := map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("type") == "storage" {
 				fmt.Fprint(w, `{"data":[{"type":"storage","storage":"z","node":"pve1","status":"available","maxdisk":100,"disk":1}]}`)
@@ -161,7 +163,16 @@ func newBackupCluster(t *testing.T) *backupCluster {
 			}
 			fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
 		},
-	})
+	}
+	for path, route := range routes {
+		routes[path] = func(w http.ResponseWriter, r *http.Request) {
+			if b.requestHook != nil && b.requestHook(w, r) {
+				return
+			}
+			route(w, r)
+		}
+	}
+	_, c := fakePVE(t, routes)
 	b.s = &Service{C: c, ServiceID: "svc", PoolPrefix: "tp-"}
 	return b
 }
