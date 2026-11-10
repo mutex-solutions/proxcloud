@@ -371,7 +371,7 @@ flowchart TB
 | `promotion` | Promotion/deposit config reads and promo-code redemption into promotional credit. |
 | `catalog` | Cloud-catalog config reads: flavor categories, image groups/categories, instance-metadata options (admin-configured document tables). |
 | `billingjob` | The charge-cron driver: load active profiles + services, and rate each billable cloud resource per time unit. |
-| Durable job engine | Persist native per-profile billing work in PostgreSQL with a fixed cutoff, bounded workers, retries and owner+epoch fencing. No broker consumer and no durable mail outbox in this first slice. |
+| Durable job engine | Persist native per-profile billing work in PostgreSQL with a fixed cutoff, bounded workers, retries and owner+epoch fencing. No broker consumer. Separate bounded mail-outbox/invitation machinery exists, but is not blanket production SMTP delivery or rollout. |
 | `billingprovider`, `billingclient`, `billingcallback` | The charge seam: `native` (in-process engine) or `external` (a separate billing service over `pkg/billingapi`), the client for that service, and its callbacks into ProxCloud (suspend/resume, activate projects, mail). |
 
 ### Cloud
@@ -497,8 +497,10 @@ is a migration error, not a supported dispatch mode.
 ### Async & scheduling (PostgreSQL durable jobs, `scheduler`, `lock`)
 
 Scheduled work is driven by a seconds-enabled cron; every job is wrapped in a
-`shedLock`-backed distributed lock (`atMostFor` / `atLeastFor`) so it runs **once
-across the fleet**, not once per pod. The catalog is registered in
+`shedLock`-backed distributed lock (`atMostFor` / `atLeastFor`) to throttle duplicate
+dispatch across the fleet, rather than dispatching independently per pod. Lease
+expiry does not prove an old process stopped; durable identities/receipts supply
+separate mutation safety. The catalog is registered in
 `main.registerJobs` — the minutely/hourly/monthly charge crons, Prometheus traffic metrics (`usageMetricsFetch`),
 services sync, the minutely Proxmox state sample (`pveStateSync`), task poll
 (`pveTaskPoll`) and public-NIC traffic sample (`pveTrafficSample`), the sandbox
@@ -508,6 +510,10 @@ auto-suspension (dunning), monthly bill finalization, monthly collect, and proje
 deletion. Under the external billing provider the seven billing jobs (savings
 expiry and reminders, reminder dispatch, transaction scan, auto-suspension,
 monthly bill, monthly collect) are not scheduled: the billing service runs its own.
+Registration is not availability: managed sandbox pause/resume/fork and AutoPause
+are currently held by a fixed capability check, and physical registry deletion is
+held even when `registryPrune` is configured `on`. Named capture/export and dry-run
+registry candidate reporting remain distinct. See [saved-runtime admission](saved-runtime-admission.md).
 
 Native billing dispatch persists per-profile work in the **same writable PostgreSQL
 primary**, retaining the original cutoff across attempts. A custom bounded engine
@@ -523,8 +529,11 @@ work alongside its authoritative finance state removes a separate broker/operato
 its credentials and readiness coupling without discarding failed work at process
 exit. This is not a promise of exactly-once external side effects: retries, fence
 loss and external HTTP/SMTP results still need their domain's safety rules. External
-billing HTTP behavior is unchanged, and **mail is not durable until the later outbox
-is wired**. Old RabbitMQ work is not imported or consumed; a documented
+billing HTTP behavior is unchanged. Separate bounded mail-outbox/invitation
+composition, status and SMTP receipt machinery exists, but production delivery and
+recipient rollout are not universally enabled; the savings reminder flag is queue-only,
+not a dispatcher. Legacy mail callers remain best-effort unless explicitly adapted.
+See [mail outbox safety limits](mail-outbox-safety-limits.md). Old RabbitMQ work is not imported or consumed; a documented
 [operator drain/reconcile and retain cutover](postgres-jobs-migration.md) is required.
 Full catalog + cron expressions in **[jobs-scheduling.md](jobs-scheduling.md)**.
 

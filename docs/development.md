@@ -8,8 +8,9 @@ Getting a ProxCloud backend and its SPAs running on your machine.
   required for the integration suite (testcontainers).
 - **Go 1.25+** — the backend (`go.mod` pins `go 1.25`; module
   `github.com/mutex-solutions/proxcloud`).
-- **Node 20+ / npm** — the two SPAs (`web/client`, `web/admin`) are Vite + React
-  19, for running them with hot reload.
+- **Node 24 / npm** — use the frontend CI toolchain for the two Vite + React 19
+  SPAs (`web/client`, `web/admin`), with `npm ci` and each committed lockfile.
+  Do not assume an arbitrary Node 20 installation satisfies the current Vite engines.
 - An **OIDC issuer** for authenticated endpoints (Compose bundles Keycloak on
   `:8090`) and, for cloud-backed endpoints, a reachable **Proxmox VE** cluster
   with an API token. A lot of local work needs neither — public endpoints and the

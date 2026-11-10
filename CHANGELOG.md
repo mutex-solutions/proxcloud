@@ -9,13 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh installation, developer, product-help, CI/release and support documentation
+  against current configuration. Distinguish preview/source-build state from
+  versioned publication and live acceptance, and document static template networking,
+  scheduler defaults and intentional sandbox safety holds. No release is created by
+  this documentation update.
 - Replace application RabbitMQ dispatch with primary PostgreSQL durable native
   billing jobs: frozen original cycles, fenced at-least-once workers, atomic
   all-provider financial receipt/ACK, transactional enqueue, bounded retry/dead
   letters and audited operator replay. Reject old fanout flags until legacy queues
   are drained/reconciled; scheduler stays off by default. Optional read-only pool
-  serves lag-tolerant history only. Mail/invite durability and broker deployment
-  removal remain separate follow-ups.
+  serves lag-tolerant history only. Fresh Compose/chart/installer defaults are
+  broker-free; existing broker state still requires explicit drain/reconcile and
+  retention. Bounded mail outbox machinery and opt-in enqueue producers are
+  separate from production delivery, which remains disabled.
 
 ### Fixed
 
@@ -34,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parent dataset before share/export mutations or duplicate share caching, rather
   than letting different provider settings repeatedly rewrite the same exports.
 
-Initial ProxCloud release: a self-service private-cloud and billing portal for
-Proxmox VE. History from the product this codebase was forked from is not
-carried over.
+Initial ProxCloud development line: a self-service private-cloud and billing portal
+for Proxmox VE. No versioned release has been published yet; the first preview needs
+coherent artifact/BOM pins and published-artifact installation acceptance. History
+from the product this codebase was forked from is not carried over.

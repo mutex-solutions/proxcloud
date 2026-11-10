@@ -58,14 +58,15 @@ built-in template may override it; tenants cannot disable or raise it through `e
 custom templates. It covers TCP, UDP, same-node traffic and responses through sandbox-proxy (not ingress downloads).
 The host configures the real pod network namespace before any customer code starts; gVisor root cannot remove it.
 The native console/service limits show the configured effective cap. Existing pods keep their old cap until recreated;
-resume/fork uses the current provider/trusted-template cap. Short bursts are possible (at least 64 KiB token bucket).
+new ordinary starts use the current provider/trusted-template cap. Managed resume/fork are currently held, not another
+way to recreate a pod. Short bursts are possible (at least 64 KiB token bucket).
 
 A minutely heuristic alerts the operator when a sandbox stays near its CPU limit without observed exec or traffic
 activity for 15 minutes by default. This is **not proof of mining**: a legitimate long unattended job may match.
 Alerts do not stop sandboxes. Automatic pause/kill configuration is **rejected for envd/E2B providers** (legacy
 incompatible documents still refuse actions safely): a silent active SDK streaming exec has no trustworthy completion signal, so node bytes alone cannot prove
-exec inactivity. The operator reviews alerts and acts manually. Native-only providers can explicitly opt into automatic
-filesystem pause or destructive kill. Pause is asynchronous and keeps the original until a usable snapshot exists.
+exec inactivity. The operator reviews alerts and acts manually. Native-only providers can explicitly opt into destructive kill under the native evidence checks. Automatic filesystem
+pause remains blocked by the provider-wide saved-lifecycle hold, even when the stored policy requests it.
 SDK exec/file/proxy traffic counts as node-observed network activity. Periodic traffic or native exec can evade the rule;
 it is a triage signal, not a guarantee. Details: [operator controls](managed-sandbox.md#10-abuse-controls-sb10).
 
@@ -142,7 +143,7 @@ dashboard APIs. They answer 404 with E2B's error body.
 | E2B template | ProxCloud | Notes |
 |---|---|---|
 | `base` (SDK default) | yes | E2B's base image plus user `user` with passwordless sudo, `/code` |
-| `code-interpreter-v1` (`e2b-code-interpreter`) | yes | Python, JavaScript and Bash kernels; R and Java are not installed. Its Jupyter start counts towards the create's 50 s |
+| `code-interpreter-v1` (`e2b-code-interpreter`) | yes | Python, JavaScript and Bash kernels; R and Java are not installed. Its Jupyter readiness uses the configured phased startup budget |
 | `mcp-gateway` (`Sandbox.create(mcp={…})`) | yes, when the provider offers it | The base plus `cmd/mcp-gateway` and its preinstalled servers; 47 servers in `cmd/mcp-gateway/catalog.json` (remote ones and package ones baked in, no Docker image servers). Each server's keys come from the tenant's `mcp` config; see [managed-sandbox.md §9](managed-sandbox.md#9-mcp-gateway-sb8) |
 | `desktop`, `codex`, `opencode`, `claude`, `amp`, `gemini`, other agent templates | no | Images in `deploy/templates/`, offered once the template workflow pinned them (SB6a) |
 
@@ -169,24 +170,24 @@ dashboard APIs. They answer 404 with E2B's error body.
    type with username `AWS` and an already obtained ECR password also works.
    Successful/tagged build history is retained; moving a tag is not artifact deletion.
 
-5. **Templates beyond `base`, `code-interpreter-v1` and `mcp-gateway`** (`desktop`, agent CLIs): no images before the
+6. **Templates beyond `base`, `code-interpreter-v1` and `mcp-gateway`** (`desktop`, agent CLIs): no images before the
    template workflow (SB6a) pinned them. Build your own from `base`.
-6. **`Sandbox.create(mcp=…)`**: only the servers of the catalog (`mcp-gateway list` in the sandbox) plus
+7. **`Sandbox.create(mcp=…)`**: only the servers of the catalog (`mcp-gateway list` in the sandbox) plus
    `github/<owner>/<repo>` servers with a `run_cmd`; any other name fails the create ("not available on ProxCloud").
    E2B's servers that run from a Docker image and have no remote endpoint are not offered (no Docker inside gVisor).
    A server's keys come only from the tenant's config; a missing required field fails the create. The gateway restarts
    with the sandbox (`mcp-gateway boot`), ordinary fresh CREATE initializes the same offered gateway tools; managed resume is currently held.
-7. **Volumes** (`volumeMounts`, `/volumes`): 400 / 404. A sandbox has ephemeral storage only, by design: the sandbox cluster has no CSI
+8. **Volumes** (`volumeMounts`, `/volumes`): 400 / 404. A sandbox has ephemeral storage only, by design: the sandbox cluster has no CSI
    token and no NAS dataset, so an escape from gVisor finds no storage credential.
-8. **Network `egressProxy`, `rules`, `maskRequestHost`, `httpsPorts`**: 400. The egress policy is Cilium (CIDR and
+9. **Network `egressProxy`, `rules`, `maskRequestHost`, `httpsPorts`**: 400. The egress policy is Cilium (CIDR and
    domain allow and deny lists); there is no egress proxy or request rewriting, and the proxy forwards plain HTTP to
    the pod.
-9. **`allowPublicTraffic` after create**: 400. The traffic token is written into the pod at create.
-10. **Private ranges**: RFC1918, CGNAT and link-local destinations are unreachable whatever `allowOut` says, including
+10. **`allowPublicTraffic` after create**: 400. The traffic token is written into the pod at create.
+11. **Private ranges**: RFC1918, CGNAT and link-local destinations are unreachable whatever `allowOut` says, including
     domains that resolve to them (the guardrail protects the platform's and other tenants' networks).
-11. **Metrics**: always empty; no per-sandbox metrics are collected.
-12. **Logs filters** (`start`, `limit`, cursor): not supported; the newest 1000 lines.
-13. **Slow starts**: ordinary create and native create operations use the
+12. **Metrics**: always empty; no per-sandbox metrics are collected.
+13. **Logs filters** (`start`, `limit`, cursor): not supported; the newest 1000 lines.
+14. **Slow starts**: ordinary create and native create operations use the
     provider's phased startup policy, with one cancellation/deadline envelope including cache
     and final access reads. Set the SDK's request timeout long enough for the configured
     budget (for the default total, e.g. `request_timeout=930`, `retries=0`). Runtime TTL
@@ -195,12 +196,12 @@ dashboard APIs. They answer 404 with E2B's error body.
     (`Idempotency-Key` remains ignored). An uncertain resume retains its lease/snapshot;
     lease age or a missing GET is not proof allowing a duplicate new create.
 
-14. **Secrets, events, webhooks, teams, `/api-keys`, admin and dashboard APIs**: not served. Keys are managed in the
+15. **Secrets, events, webhooks, teams, `/api-keys`, admin and dashboard APIs**: not served. Keys are managed in the
     console or the client API; there are no teams (a key belongs to a project).
-15. **`secure: false`**: ignored; envd always requires its access token.
-16. **`iam`, `Idempotency-Key`**: ignored. A retried create can start a second sandbox.
-17. **GPUs**: none before SB9 (no GPU nodes on the sandbox cluster).
-18. **Kernel**: gVisor implements Linux in user space. Almost everything runs; some syscalls, `/proc` entries and kernel
+16. **`secure: false`**: ignored; envd always requires its access token.
+17. **`iam`, `Idempotency-Key`**: ignored. A retried create can start a second sandbox.
+18. **GPUs**: none before SB9 (no GPU nodes on the sandbox cluster).
+19. **Kernel**: gVisor implements Linux in user space. Almost everything runs; some syscalls, `/proc` entries and kernel
     features (io_uring, for example) are missing or partial. `uname -r` reports `4.19.0-gvisor`. Docker in a sandbox does
     not work.
 
@@ -228,9 +229,9 @@ E2B's shape: `{"code": <http status>, "message": "…"}`.
 
 | HTTP | When |
 |---|---|
-| 400 | invalid input, or a refused field (`autoPause`, `volumeMounts`, `mcp` that is not an object, `network.rules`, …) |
+| 400 | invalid input or a refused field (`volumeMounts`, invalid memory/configuration, `mcp` that is not an object, `network.rules`, …); those checks may precede capability admission |
 | 401 | missing, bad or revoked key |
-| 403 | the key's creator can no longer manage sandboxes in the project; billing profile suspended; sandboxes not enabled for the project |
+| 403 | the key's creator can no longer manage sandboxes in the project; billing profile suspended; sandboxes not enabled for the project; managed saved-lifecycle/AutoPause/AutoResume capability hold |
 | 404 | unknown sandbox or template, a sandbox of another project, an endpoint that is not served |
 | 409 | the project is DISABLED or being deleted |
 | 429 | the project's sandbox quota |
@@ -244,10 +245,12 @@ token is missing or wrong.
 `tests/e2b-compat/compat.py` runs the stock SDKs end to end against a location (commands, streaming, exit codes, files,
 preview URL, metadata, connect, egress rules, the metadata address, a second project's key, the code interpreter):
 `E2B_API_URL`, `E2B_API_KEY`, optionally `E2B_OTHER_API_KEY` (a key of another project) and `SSL_CERT_FILE` for a
-private CA. `tests/e2b-compat/pause.py` does the same for pause, resume, fork (retried on 503), snapshots, autoPause
-and the autoResume wake
-([managed-sandbox.md §8](managed-sandbox.md#8-pause-resume-snapshots-and-fork-sb7)), with `E2B_AUTOPAUSE_URL` to
-trigger the autoPause job where the scheduler is off.
+private CA. `tests/e2b-compat/pause.py` records the older lifecycle acceptance drill; its historical restore-success
+expectations are **not** evidence that current managed pause/resume/fork or AutoPause/AutoResume can be enabled.
+Current admission tests must expect the fixed 403 and unchanged retained state, while testing named snapshot
+capture/export and ordinary CREATE separately. Do not use the debug auto-pause trigger or retries to bypass the hold;
+see [saved-runtime admission](saved-runtime-admission.md) and
+[historical SB7 notes](managed-sandbox.md#8-pause-resume-snapshots-and-fork-sb7).
 
 ## Immutable digest import and session console
 

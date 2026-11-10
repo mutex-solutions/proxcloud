@@ -3,7 +3,9 @@
 Three charts live here:
 
 - **`proxcloud`** — the application chart: the ProxCloud API, the customer and operator
-  consoles, a CloudNativePG `Cluster`, a `RabbitmqCluster` and optionally Keycloak. The
+  consoles, a CloudNativePG `Cluster` and optionally Keycloak. No RabbitMQ is
+  required or deployed by default; legacy broker resources are explicit migration
+  retention only. The
   [installer](../../docs/install.md) deploys it through ArgoCD with the operators in place;
   `make deploy` installs it directly, and CI publishes it to
   `oci://ghcr.io/mutex-solutions/charts` at the release tag (see its own README).
@@ -36,9 +38,19 @@ own cadence). All three go to `oci://ghcr.io/mutex-solutions/charts`.
 | `database-cluster` | `database-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 | `proxmox-kamaji-cluster` | `proxmox-kamaji-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 
-Flow for `database-cluster` and `proxmox-kamaji-cluster`: bump `version:` in `Chart.yaml` in
-the PR that changes the chart, merge, then cut the matching tag (`git tag database-cluster-v0.4.0
-&& git push origin database-cluster-v0.4.0`; likewise `proxmox-kamaji-cluster-vX.Y.Z`). Publishing is idempotent — an already-published version is skipped.
+As of 2026-11-10, no ProxCloud tag/release or OCI chart has been published. Local
+chart rendering is not proof that these pull URLs exist. App chart/BOM `v0.4.0`
+is a planned pin, not a released artifact. Use the source-build path until a
+separately approved release is published and tested; see
+[release readiness](../../docs/release-readiness.md).
+
+For `database-cluster` and `proxmox-kamaji-cluster`, bump `version:` in `Chart.yaml`
+in the PR that changes the chart, merge, then have a maintainer deliberately cut
+the matching tag. The current source versions are database `0.5.0` and Kubernetes
+`0.1.9`; they are independent of the app's `0.4.0`. Publishing is idempotent — an
+already-published version is skipped, so a reused version does not update an old
+artifact. These are release operations, not commands to run during normal setup.
+See [CI/release operations](../../docs/ci-release.md) for full verification.
 
 ProxCloud pins the version per provider (`config.argocd.chartVersion` on the database and the
 Kubernetes provider) and never resolves `latest`: an existing database or cluster keeps its pin

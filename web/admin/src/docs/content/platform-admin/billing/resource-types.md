@@ -31,11 +31,11 @@ Which types produce charges depends on the services enabled on your cloud provid
 | `server_snapshot` | Disk snapshots of Proxmox VE servers, one line per snapshot | `size_gb` (the server's provisioned disks) |
 | `server_protection` | The Protection add-on of a server: the replica of its local disks | `size_gb`, `state` |
 | `sandbox` | Sandboxes, per minute while running (price it with `minute` rules) | `vcpus`, `ram_gb`, `gpu_count` (filter on `gpu_model`, `template`) |
-| `sandbox_snapshot` | A sandbox's stored filesystem (pause or snapshot) | `size_gb`, `kind` |
+| `sandbox_snapshot` | Offered named filesystem snapshots and retained historical pause storage; managed pause/resume/fork are currently held | `size_gb`, `kind` |
 
 A Proxmox provider meters the traffic of public NICs out of the box; see [Connecting a Proxmox VE Cluster](/docs/platform-admin/cloud/connect-a-cloud). Networks, subnets, security groups, key pairs and catalog templates have no billing type: they are free plumbing.
 
-Charges follow the cluster within a minute, including changes made outside the portal. An hourly rule bills every clock hour a resource existed in: created at 10:20 and deleted at 12:50 is three hours. If a cluster stops answering, billing carries on from the last known state for 30 minutes, then stops for that provider's resources until it answers again, and that gap is never back-billed. Look for the `METERING_STALE` event in the audit log.
+With scheduled sync/metering enabled and healthy authoritative reads, the minutely sampling path normally follows cluster changes, including changes made outside the portal; this is not an exact freshness guarantee. An hourly rule bills every clock hour a resource existed in: created at 10:20 and deleted at 12:50 is three hours. If a cluster stops answering, billing carries on from the last known state for 30 minutes, then stops for that provider's resources until it answers again, and that gap is never back-billed. Look for the `METERING_STALE` event in the audit log.
 
 ## Deciding what to charge for
 

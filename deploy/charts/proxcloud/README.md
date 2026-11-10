@@ -16,6 +16,12 @@ Three ways to install it:
 Docker Compose (`docker compose up` at the repo root) is the fourth option, for a
 single development machine.
 
+**Release state (2026-11-10):** the chart/BOM's `v0.4.0` is planned and unpublished;
+there is no public ProxCloud chart release yet. Public development container tags
+are not a versioned release or evidence of a clean install from published
+artifacts. Use the source-build path below or explicitly pin a compatible verified
+set of images; do not treat a successful render/CI run as production acceptance.
+
 ## Quick start (one command)
 
 Brings up api, ui, admin, PostgreSQL durable jobs and Keycloak with its realms on a
@@ -60,9 +66,11 @@ helm install proxcloud deploy/charts/proxcloud -n proxcloud --create-namespace -
 ```
 
 No secret has a default: the three `--set` flags generate them, and
-`helm get values proxcloud -n proxcloud` reads them back. On a laptop the install
-takes about three minutes. The API restarts a few times while PostgreSQL starts;
-that is expected.
+`helm get values proxcloud -n proxcloud` reads them back. Treat that output and Helm
+release metadata as sensitive; for a long-lived site use pre-created Secrets as
+below. Install time depends on image downloads, storage and database/Keycloak
+startup; the API can restart while dependencies become ready. Do not use a fixed
+startup time as an acceptance check.
 
 When it finishes, the release notes print the port-forwards. Run them and keep
 them running:
@@ -140,6 +148,10 @@ a browser has no WebCrypto outside a secure context, so PKCE cannot work there.
 
 ## Production install
 
+This section describes production-oriented configuration, not a certification of
+the unpublished release or a clean public-artifact install. Plan TLS, backups and
+restore validation, OIDC access boundaries, resource capacity and observability
+for your site; the HTTP/one-replica quickstart is not production configuration.
 The defaults expect the [CloudNativePG](https://cloudnative-pg.io/) operator
 to run in the cluster already. No RabbitMQ cluster/operator is required:
 
@@ -167,7 +179,7 @@ complete production set: `installer/playbooks/templates/app-proxcloud.yml.j2`.
 | `api.selfUrls.{base,api,ui,admin}` | `""` | Public URLs (`PROXCLOUD_SELF_*`): mail links, redirects, MCP metadata; ui and admin also form the CORS list. |
 | `api.corsAllowedOrigins` | `[]` | Extra CORS origins. |
 | `api.defaultRegion` | `""` (`default`) | Region assumed when a provider names none. |
-| `api.jobs.schedulerEnabled` | `false` | Start the cron jobs (charges bills on a timer). Turn on for production. |
+| `api.jobs.schedulerEnabled` | `false` | Admit new scheduled billing/sync work. Opt in deliberately after fresh-install verification or the migration/cutover checklist; false does not stop existing durable workers. |
 | `api.jobs.debugTriggers` | `false` | On-demand `POST :8081/debug/run-*` triggers. Keep off in production. |
 | `api.jobs.workerConcurrency` | `2` | Bounded workers per API pod, `1..16`; always run even with scheduler/debug off. |
 | `api.jobs.pollInterval`, `api.jobs.leaseDuration` | `1s`, `1m` | Go durations, `100ms..1m` / `10s..10m`. |
@@ -233,9 +245,13 @@ moving `bitnami/postgresql:latest`. Pin your own image or use CloudNativePG for
 anything that lasts. The old RabbitMQ subchart remains for explicit legacy
 retention compatibility, not as a fresh-install dependency.
 
-Scheduler and debug gates default false; durable workers always process existing
-jobs. This release does **not** wire a durable mail outbox yet; SMTP behavior and
-the external billing HTTP contract are unchanged.
+Scheduler and debug gates default false; durable workers still process existing
+jobs. Current source provisions a dedicated mail outbox and offers separate opt-in
+enqueue paths for savings reminders/expiry, project invites and approved
+validations. These producer flags default off and **do not enable SMTP dispatch**;
+the application does not start the durable SMTP dispatcher. Do not interpret
+billing-worker readiness or an outbox row as proof of delivered mail. Existing
+non-outbox mail paths and the external billing HTTP contract remain separate.
 
 ## Identity
 

@@ -20,7 +20,7 @@
 
 <p>
   <a href="#-quickstart"><b>Getting Started</b></a>
-  · <a href="https://github.com/mutex-solutions/proxcloud/discussions">Community</a>
+  · <a href="https://github.com/mutex-solutions/proxcloud/issues">Community / support</a>
   · <a href="CHANGELOG.md">Changelog</a>
   · <a href="https://github.com/mutex-solutions/proxcloud/issues">Bug reports</a>
 </p>
@@ -38,8 +38,12 @@ capabilities to AI agents.
 - **API** (Go) — one backend serving three surfaces: the customer API, the SigV4-signed operator API, and an MCP endpoint.
 
 > [!WARNING]
-> **Proxmox VE backend.** ProxCloud provisions against a Proxmox VE cluster through
-> the PVE API. Supported PVE releases are not pinned yet.
+> **Development / preview status.** No versioned ProxCloud release is published yet.
+> The installer targets **Proxmox VE 9.2 or newer** and requires its documented
+> firewall/storage prerequisites; this is a minimum, not a tested compatibility
+> promise for every later PVE version. Debian and Ubuntu OS template pipelines have
+> passed controlled build/smoke runs; the Kubernetes static ISO path still needs a
+> real installer/reboot canary. See [current support and release readiness](docs/release-readiness.md).
 
 ## Contents
 
@@ -63,6 +67,14 @@ capabilities to AI agents.
 - **Proxmox VE integration** — resource sync by polling the PVE API, usage metrics collection, with per-service enable/disable.
 - **MCP server** — a Model Context Protocol endpoint so AI agents can drive the platform with the same auth and permissions as a user or operator.
 - **Identity via OIDC** — Keycloak or any OpenID Connect provider, browser sign-in over authorization-code + PKCE.
+
+Features depend on the configured provider and its release gates. Managed sandbox
+pause/resume, paused wake/connect, fork and AutoPause/AutoResume are currently
+**held**, with no configuration override; named capture/export and ordinary pinned
+CREATE are separate capabilities. See the [saved-runtime safety boundary](docs/saved-runtime-admission.md).
+Billing/cloud cron producers are off by default; bounded PostgreSQL workers still
+finish accepted work. This is not a promise that every listed workflow has passed
+fresh-install, upgrade or production acceptance.
 
 ## 🧭 Architecture overview
 
@@ -195,16 +207,23 @@ make image             # build the api container image
 Frontends:
 
 ```sh
-cd web/client   # or web/admin
-npm install
+cd web/client   # or web/admin; use Node.js 24 as in hosted CI
+npm ci
 npm run dev     # Vite dev server
 npm run build   # type-check + production build
 npm run lint    # oxlint
 ```
 
-Container images (`proxcloud-api`, `proxcloud-web`, `proxcloud-admin`) and the Helm chart
-are published to `ghcr.io/mutex-solutions` by CI on pushes to `main` and tagged
-releases.
+CI builds five container images: `proxcloud-api`, `proxcloud-web`,
+`proxcloud-admin`, `proxcloud-sandbox-proxy`, and `proxcloud-sandbox-runtime`.
+Image-relevant pushes to `main` publish `dev-<short-sha>` tags; pull requests build
+without pushing. A `v*` tag publishes exact image tags and the app Helm chart in
+separate workflows. The managed Kubernetes and database charts have independent
+release tags; merging to `main` does **not** publish an OCI chart or deploy a site.
+
+No versioned release/chart has been published yet. See [build and release
+operations](docs/ci-release.md) for current triggers, prerelease limitations,
+required permissions and release verification.
 
 </details>
 
