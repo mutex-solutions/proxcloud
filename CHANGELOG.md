@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Persist exact organization SSO alias retirement on the primary before broker
+  deletion, and refuse retained sessions even when no configured providers remain.
+  Keep legitimate realm-level social/local sign-ins compatible, make cleanup retries
+  idempotent and document mixed-version, cached-rule outage and recovery limits.
+
 - Bind client order reads to the stored billing profile's current organization
   read permission, return an opaque 404 when denied and serialize a typed order.
   Require role-management permission for all custom organization role assignments

@@ -15,6 +15,7 @@ package sso
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
@@ -66,20 +67,22 @@ type Domain struct {
 	CreatedAt      *time.Time `json:"createdAt,omitempty"`
 }
 
-// Repo persists providers and domains.
+// Repo persists providers, domains and permanently retired platform-issued aliases.
 type Repo struct {
 	providers *pgdoc.Store
 	domains   *pgdoc.Store
+	retired   *pgdoc.Store
 }
 
-// NewRepo binds the collections.
+// NewRepo binds the collections. pgdoc uses the primary-only pool for reads and writes.
 func NewRepo(db *pgdoc.DB) *Repo {
-	return &Repo{providers: db.C("org_identity_provider"), domains: db.C("org_sso_domain")}
+	return &Repo{providers: db.C("org_identity_provider"), domains: db.C("org_sso_domain"), retired: db.C("org_sso_retired_alias")}
 }
 
 // EnsureIndexes creates the tables and the unique indexes the invariants rest on.
 func (r *Repo) EnsureIndexes(ctx context.Context) error {
-	for _, s := range []*pgdoc.Store{r.providers, r.domains} {
+	// Retired aliases use the alias itself as the table's unique primary key.
+	for _, s := range []*pgdoc.Store{r.providers, r.domains, r.retired} {
 		if err := s.Ensure(ctx); err != nil {
 			return err
 		}
@@ -138,10 +141,45 @@ func (r *Repo) SaveProvider(ctx context.Context, p *Provider) error {
 	return err
 }
 
-// DeleteProvider removes a provider document.
+// DeleteProvider removes a provider document. Its retired alias must remain separately.
 func (r *Repo) DeleteProvider(ctx context.Context, id string) error {
 	_, err := r.providers.DeleteByID(ctx, id)
 	return err
+}
+
+// retireAlias durably fences a stored provider's alias before any external delete. Callers must
+// supply only platform-issued aliases from provider documents, never a token's arbitrary IdP claim.
+// The alias is the unique row id; the payload is empty and retries are idempotent. No expiry or
+// automatic pruning: a Keycloak session may outlive its access tokens, and aliases are never reused.
+func (r *Repo) retireAlias(ctx context.Context, alias string) error {
+	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
+		return err // the fence must commit before the caller contacts Keycloak
+	}
+	if alias == "" {
+		return errors.New("sso: cannot retire an empty provider alias")
+	}
+	return r.retired.Upsert(ctx, alias, pgdoc.M{})
+}
+
+func (r *Repo) aliasRetired(ctx context.Context, alias string) (bool, error) {
+	var row struct{}
+	return r.retired.Get(ctx, alias, &row)
+}
+
+// retiredAliases is loaded only on the existing lazy snapshot refresh. Permanent retention means
+// the small id-only rows and the snapshot map grow with provider deletions, not with login traffic.
+func (r *Repo) retiredAliases(ctx context.Context) (map[string]struct{}, error) {
+	var rows []struct {
+		Alias string `json:"id"`
+	}
+	if err := r.retired.Find(ctx, pgdoc.M{}, &rows); err != nil {
+		return nil, err
+	}
+	out := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		out[row.Alias] = struct{}{}
+	}
+	return out, nil
 }
 
 // DomainsForOrg lists an org's claims, pending and verified.
