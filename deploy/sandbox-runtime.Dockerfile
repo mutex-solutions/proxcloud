@@ -3,7 +3,7 @@
 # (E2B's envd and our sandbox-init). Run as an init container on each sandbox-cluster node
 # to install them into /opt/proxcloud-sandbox/bin (pods mount that dir read-only at /.proxcloud).
 
-FROM golang:1.26 AS envd
+FROM golang:1.26.11-bookworm AS envd
 ARG E2B_INFRA_REF=e85b9f5f6de6c92b002f376b4f91b1652d3c942e
 RUN git clone https://github.com/e2b-dev/infra /infra \
  && git -C /infra checkout "${E2B_INFRA_REF}"
@@ -11,7 +11,7 @@ RUN git clone https://github.com/e2b-dev/infra /infra \
 WORKDIR /infra/packages/envd
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/envd .
 
-FROM golang:1.25-bookworm AS init
+FROM golang:1.26.11-bookworm AS init
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Select supported Go 1.26.11 explicitly for all six Go builder stages and the
+  test workflow, keeping the module language minimum and dependency graph separate.
+  Add source-declaration regression coverage and document the seven output artifacts,
+  external envd inputs, image-build gaps and remaining runtime acceptance limits.
+
 - Update managed PostgreSQL 15–18 image-map patch targets to 15.19, 16.15, 17.11
   and 18.6 in unpublished database chart 0.5.1. New installer DBaaS providers
   offer 17/18 with 18 as default; existing name-matched providers and database
