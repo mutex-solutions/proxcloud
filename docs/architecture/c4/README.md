@@ -20,6 +20,7 @@ diagrams changed.
 | [Savings contract-expired outbox](../../savings-expired-outbox.md) | C1–C4: Expired-term mail | How one canonical-term decision, immutable history and all four keyless cancellation paths share owned SQL boundaries while producer and delivery remain default OFF. |
 | [Dormant snapshot registry core](../../registry-snapshot-core.md) | C1–C4: Snapshot prerequisite | How fixed snapshot envelopes, exact pin-role epochs and typed publication handoff stay dormant without capture callers, DEST retirement or GC authorization. |
 | [Saved-runtime admission](../../saved-runtime-admission.md) | C1–C4: Fail-closed lifecycle | Why managed pause/resume/fork is held before effects while capture/pinned CREATE and explicit discard remain separate. |
+| [DBaaS reader invariant](../../dbaas-read-endpoint-invariant.md) | C3/C4: Reader admission and projection | How current replica/reader policy is checked before scaling while invalid legacy reader flags are excluded without desired-state or financial-history repair. |
 | [PVE backup deletion interlock](../../pve-backup-delete-interlock.md) | C3/C4: Known-active refusal | Why single-archive deletion refuses current VM locks, visible active restores and unreadable state without claiming an atomic task fence. |
 | [CHANGELOG.md](CHANGELOG.md) | History | What changed in the architecture, in which PR, and why. |
 

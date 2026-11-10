@@ -301,24 +301,29 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 
 	case "SCALE_REPLICAS":
 		replicas := intAny(data["replicas"])
-		offer, ok := cfg.Engines[engine]
-		if !ok {
-			h.fail(w, httpx.BadRequest(fmt.Sprintf("engine %s is no longer offered by this provider", engine)))
-			return true
-		}
-		allowed := offer.ReplicaChoices()
-		valid := false
-		for _, n := range allowed {
-			if n == replicas {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			h.fail(w, httpx.BadRequest(fmt.Sprintf("engine %s offers %v replicas, not %d", engine, allowed, replicas)))
-			return true
-		}
 		err := ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
+			// The initial engine read and cache may already be stale. Recheck the
+			// CURRENT callback's engine, offer and reader policy before any mutation.
+			current, _ := values["engine"].(string)
+			if !dbaas.Capabilities[current]["SCALE_REPLICAS"] {
+				return httpx.BadRequest(fmt.Sprintf("engine %s does not support SCALE_REPLICAS", current))
+			}
+			offer, ok := cfg.Engines[current]
+			if !ok {
+				return httpx.BadRequest(fmt.Sprintf("engine %s is no longer offered by this provider", current))
+			}
+			allowed := offer.ReplicaChoices()
+			if !slices.Contains(allowed, replicas) {
+				return httpx.BadRequest(fmt.Sprintf("engine %s offers %v replicas, not %d", current, allowed, replicas))
+			}
+			network, _ := values["network"].(map[string]any)
+			on, _ := network["readEndpoint"].(bool)
+			if err := dbaas.ValidateReadEndpoint(current, replicas, on); err != nil {
+				if replicas < 2 && on && dbaas.ReadEndpointEngines[current] {
+					return httpx.NewError(http.StatusConflict, http.StatusConflict, "Disable the read-only endpoint before scaling below two instances")
+				}
+				return httpx.BadRequest(err.Error())
+			}
 			values["instances"] = replicas
 			return nil
 		})
@@ -582,8 +587,12 @@ func (h *Handler) dbaasAction(w http.ResponseWriter, r *http.Request, proj *Proj
 			return true
 		}
 		err := ds.PatchDatabaseValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
-			if on && intAny(values["instances"]) < 2 {
-				return httpx.BadRequest("a read-only endpoint needs more than one instance")
+			current, _ := values["engine"].(string)
+			if !dbaas.Capabilities[current]["SET_READ_ENDPOINT"] {
+				return httpx.BadRequest(fmt.Sprintf("engine %s does not support SET_READ_ENDPOINT", current))
+			}
+			if err := dbaas.ValidateReadEndpoint(current, values["instances"], on); err != nil {
+				return httpx.BadRequest(err.Error())
 			}
 			net, _ := values["network"].(map[string]any)
 			if net == nil {

@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: DBaaS read endpoint / replica invariant
+
+**What changed:** replica scaling revalidates the current Application callback's
+engine, offered count and explicit reader policy before mutation. An enabled
+reader downscale below two returns 409 with an explicit-disable-first instruction.
+The shared CREATE/SET rule retains existing 400 messages; sync projects reader
+flags/host only for supported engines, exact true and a valid declared count >=2.
+
+**Why:** a legacy one-instance reader can have no PostgreSQL RO Service or MariaDB
+reader backend yet remain advertised and marked as a chargeable PostgreSQL reader
+LB. Exclude that structurally impossible projection without rewriting desired
+policy, chart pin or historical money. Configured feature flags are not physical
+LB/readiness proof; full-spec SSA is not backend atomicity or lost-update fencing.
+
+**Views updated:** [bounded C4/safety guide](../../dbaas-read-endpoint-invariant.md)
+(component/validation/sync sequence and acceptance limits), plus C4 index. Local
+fake-action/race and cached Helm rendering are not live DB engine acceptance.
+
 ## 2026-11-10: PVE single-backup deletion known-active interlock
 
 **What changed:** the existing single `DELETE_BACKUP` path now reads current VM

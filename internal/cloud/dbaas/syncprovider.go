@@ -52,12 +52,17 @@ func (p *DatabaseSyncProvider) List(ctx context.Context) ([]cloud.CloudResource,
 		if err != nil {
 			return nil, err
 		}
+		values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
+		readerHost := ""
+		if EffectiveReadEndpoint(engine, values["instances"], dig(values, "network", "readEndpoint")) {
+			readerHost = s.readHost(ctx, ns, id, engine, host)
+		}
 		out = append(out, cloud.CloudResource{
 			Type:       cloud.TypeDatabaseCluster,
 			ExternalID: id,
 			Region:     p.region,
 			ProjectID:  p.projectID,
-			Data:       databaseDataWithHost(app, host, s.readHost(ctx, ns, id, engine, host)),
+			Data:       databaseDataWithHost(app, host, readerHost),
 		})
 	}
 	return out, nil
@@ -103,6 +108,10 @@ func databaseDataWithHost(app map[string]any, host, readHost string) map[string]
 	}
 
 	engine := digStr(values, "engine")
+	reader := EffectiveReadEndpoint(engine, values["instances"], dig(values, "network", "readEndpoint"))
+	if !reader {
+		readHost = "" // never advertise a stray host for an impossible/disabled reader
+	}
 	d := map[string]any{
 		"id":            digStr(app, "metadata", "name"),
 		"name":          digStr(app, "metadata", "annotations", AnnotationDisplayName),
@@ -117,16 +126,16 @@ func databaseDataWithHost(app map[string]any, host, readHost string) map[string]
 		// Both are "" until the LB ingress IP is assigned — billing keys on endpoint being non-empty.
 		"endpoint":    PublicHost(digStr(values, "opensearch", "customDomain"), host),
 		"endpoint_ip": host,
-		// Read-only endpoint. read_endpoint_lb records whether offering it provisioned a
-		// SECOND LoadBalancer (postgresql only) — billing charges that, not the feature, because
-		// mysql and mariadb serve reads on another port of the proxy they already have.
+		// Reader flags describe structurally valid configured policy, not observed LB
+		// readiness. PostgreSQL's valid reader configuration requires a second LB;
+		// mysql/mariadb reuse the writer proxy on another port.
 		"parameters":    paramValues(values, engine),
-		"read_endpoint": dig(values, "network", "readEndpoint") == true,
+		"read_endpoint": reader,
 		// The address customers point readers at. Read from the live Service rather than
 		// derived client-side: postgresql's is a different LB with its own address, while mysql
 		// and mariadb reuse this one on another port.
 		"read_endpoint_host": readHost,
-		"read_endpoint_lb":   dig(values, "network", "readEndpoint") == true && ReadEndpointCostsLB(engine),
+		"read_endpoint_lb":   reader && ReadEndpointCostsLB(engine),
 		// Customer-managed access, echoed from the values so the UI can list it without a
 		// second read. Names only — passwords live in per-user Secrets on the DB cluster.
 		"databases": accessNames(values, "databases"),

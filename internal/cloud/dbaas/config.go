@@ -9,7 +9,9 @@
 package dbaas
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"regexp"
 	"slices"
@@ -232,13 +234,8 @@ func (s DatabaseSpec) Validate(c Config) error {
 	if s.DashboardsEnabled && s.Engine != EngineOpenSearch {
 		return fmt.Errorf("database: dashboards are an opensearch feature")
 	}
-	if s.ReadEndpoint {
-		if !ReadEndpointEngines[s.Engine] {
-			return fmt.Errorf("database: engine %s has no separate read endpoint", s.Engine)
-		}
-		if s.Replicas < 2 {
-			return fmt.Errorf("database: a read-only endpoint needs more than one instance")
-		}
+	if err := ValidateReadEndpoint(s.Engine, s.Replicas, s.ReadEndpoint); err != nil {
+		return fmt.Errorf("database: %w", err)
 	}
 	if len(s.SSO) > 0 && s.Engine != EngineOpenSearch {
 		return fmt.Errorf("database: sso is an opensearch feature")
@@ -420,6 +417,54 @@ var ReadEndpointEngines = map[string]bool{
 	EnginePostgreSQL: true,
 	EngineMySQL:      true,
 	EngineMariaDB:    true,
+}
+
+// ValidateReadEndpoint validates declared reader policy, not backend readiness.
+// Keeping the messages shared preserves CREATE and SET_READ_ENDPOINT's 400 contract.
+// A disabled reader does not block repair of a legacy or unsupported configuration.
+func ValidateReadEndpoint(engine string, instances any, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	if !ReadEndpointEngines[engine] {
+		return fmt.Errorf("engine %s has no separate read endpoint", engine)
+	}
+	if n, ok := readEndpointInstances(instances); !ok || n < 2 {
+		return fmt.Errorf("a read-only endpoint needs more than one instance")
+	}
+	return nil
+}
+
+// EffectiveReadEndpoint projects only a structurally possible, explicitly enabled
+// reader. It never rewrites desired values or proves a Service/LB is ready.
+func EffectiveReadEndpoint(engine string, instances, enabled any) bool {
+	on, ok := enabled.(bool)
+	return ok && on && ValidateReadEndpoint(engine, instances, true) == nil
+}
+
+// JSON Application values use float64; generated values use int. Do not truncate
+// fractional counts or coerce strings, booleans, non-finite values or overflows.
+func readEndpointInstances(value any) (int, bool) {
+	maxInt := int(^uint(0) >> 1)
+	switch n := value.(type) {
+	case int:
+		return n, n > 0
+	case int64:
+		if n > 0 && uint64(n) <= uint64(maxInt) {
+			return int(n), true
+		}
+	case json.Number:
+		if v, err := n.Int64(); err == nil && v > 0 && uint64(v) <= uint64(maxInt) {
+			return int(v), true
+		}
+	case float64:
+		// float64(maxInt) rounds up on 64-bit platforms; use a strict bound
+		// before converting so an out-of-range float cannot become a valid int.
+		if !math.IsNaN(n) && !math.IsInf(n, 0) && n > 0 && n < float64(maxInt) && math.Trunc(n) == n {
+			return int(n), true
+		}
+	}
+	return 0, false
 }
 
 // ReadEndpointCostsLB reports whether offering the read endpoint provisions a SECOND
