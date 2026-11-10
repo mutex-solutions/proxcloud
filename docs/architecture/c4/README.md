@@ -22,6 +22,7 @@ diagrams changed.
 | [Saved-runtime admission](../../saved-runtime-admission.md) | C1–C4: Fail-closed lifecycle | Why managed pause/resume/fork is held before effects while capture/pinned CREATE and explicit discard remain separate. |
 | [DBaaS reader invariant](../../dbaas-read-endpoint-invariant.md) | C3/C4: Reader admission and projection | How current replica/reader policy is checked before scaling while invalid legacy reader flags are excluded without desired-state or financial-history repair. |
 | [PVE backup deletion interlock](../../pve-backup-delete-interlock.md) | C3/C4: Known-active refusal | Why single-archive deletion refuses current VM locks, visible active restores and unreadable state without claiming an atomic task fence. |
+| [Legacy SMTP credential TLS boundary](../../smtp-credential-tls-safety.md) | C1–C4: SMTP authentication | Why legacy credentials require verified configured-host TLS before AUTH, while explicit NoAuth compatibility and dormant outbox boundaries remain unchanged. |
 | [CHANGELOG.md](CHANGELOG.md) | History | What changed in the architecture, in which PR, and why. |
 
 The prose deep dives in [`docs/`](../../README.md) (auth, billing, jobs, data

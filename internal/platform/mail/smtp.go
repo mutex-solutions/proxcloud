@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"mime"
 	netmail "net/mail"
 	"net/smtp"
@@ -52,14 +51,14 @@ func (s *SMTPMailer) Send(_ context.Context, m Message) error {
 	}
 	if ok, _ := c.Extension("STARTTLS"); ok {
 		if err := c.StartTLS(&tls.Config{ServerName: s.cfg.Host}); err != nil {
-			return err
+			return errors.New("mail: SMTP TLS negotiation failed")
 		}
 	}
 	if auth, aerr := authFor(c, s.cfg.Host, s.cfg.Username, s.cfg.Password); aerr != nil {
 		return aerr
 	} else if auth != nil {
 		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("mail auth: %w", err)
+			return errors.New("mail: SMTP authentication failed")
 		}
 	}
 	// The envelope sender must be the bare address: `from` may carry a display name
@@ -96,26 +95,38 @@ func (s *SMTPMailer) dial() (*smtp.Client, error) {
 	if s.cfg.Port == "465" {
 		conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: s.cfg.Host})
 		if err != nil {
-			return nil, err
+			return nil, errors.New("mail: SMTP TLS connection failed")
 		}
 		return smtp.NewClient(conn, s.cfg.Host)
 	}
 	return smtp.Dial(addr)
 }
 
-// authFor picks the auth mechanism the server advertises (PLAIN preferred, else LOGIN).
+// authFor requires verified TLS before considering credential-bearing AUTH, even
+// when the peer omits AUTH entirely. An empty username preserves NoAuth relays.
 func authFor(c *smtp.Client, host, user, pass string) (smtp.Auth, error) {
+	if user == "" {
+		return nil, nil
+	}
+	state, secure := c.TLSConnectionState()
+	if !secure || !state.HandshakeComplete || len(state.VerifiedChains) == 0 || len(state.PeerCertificates) == 0 {
+		return nil, errors.New("mail: SMTP credentials require verified TLS")
+	}
+	// Verify the configured identity, not SNI: IP literals do not send SNI.
+	if err := state.PeerCertificates[0].VerifyHostname(host); err != nil {
+		return nil, errors.New("mail: SMTP credentials require verified TLS")
+	}
 	ok, mechs := c.Extension("AUTH")
-	if !ok || user == "" {
+	if !ok {
 		return nil, nil
 	}
 	switch {
 	case strings.Contains(mechs, "PLAIN"):
 		return smtp.PlainAuth("", user, pass, host), nil
 	case strings.Contains(mechs, "LOGIN"):
-		return &loginAuth{user: user, pass: pass}, nil
+		return &loginAuth{host: host, user: user, pass: pass}, nil
 	default:
-		return nil, fmt.Errorf("mail: no supported AUTH mechanism (server offers %q)", mechs)
+		return nil, errors.New("mail: no supported AUTH mechanism")
 	}
 }
 
@@ -191,13 +202,27 @@ func wrapBase64(data []byte) string {
 
 // loginAuth implements SMTP AUTH LOGIN (Azure Communication Services rejects AUTH PLAIN).
 type loginAuth struct {
-	user, pass string
-	step       int
+	host, user, pass string
+	step             int
+	authorized       bool
 }
 
-func (a *loginAuth) Start(_ *smtp.ServerInfo) (string, []byte, error) { return "LOGIN", nil, nil }
+func (a *loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	a.authorized = false
+	a.step = 0
+	if server == nil || !server.TLS || server.Name != a.host {
+		return "", nil, errors.New("mail: LOGIN requires TLS and the configured SMTP host")
+	}
+	a.authorized = true
+	return "LOGIN", nil, nil
+}
+
 func (a *loginAuth) Next(_ []byte, more bool) ([]byte, error) {
+	if !a.authorized {
+		return nil, errors.New("mail: LOGIN has not been authorized")
+	}
 	if !more {
+		a.authorized = false
 		return nil, nil
 	}
 	a.step++

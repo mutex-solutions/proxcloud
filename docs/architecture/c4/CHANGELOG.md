@@ -4,6 +4,23 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: Legacy SMTP credential TLS enforcement
+
+**What changed:** legacy SMTP credential AUTH now requires an actual completed,
+verified TLS connection and certificate validity for the configured host before
+AUTH capability selection. LOGIN independently checks TLS and the expected host,
+and releases challenge responses only after an accepted Start. NoAuth retains
+its existing unauthenticated-relay behavior; PLAIN preference is unchanged.
+
+**Why:** a stripped STARTTLS advertisement must not select unguarded plaintext
+LOGIN or silently proceed to an unauthenticated message envelope. Certificate
+identity, rather than SNI text, preserves valid DNS and IP-SAN TLS connections.
+No new transport, outbox enablement, schema, dependency or live effect is added.
+
+**Views updated:** [dedicated C1–C4 safety view](../../smtp-credential-tls-safety.md)
+and the C4 index. Production changes are confined to the existing SMTP component;
+new bounded fake-peer tests do not establish live relay or release acceptance.
+
 ## 2026-11-10: Documentation reconciliation against current code (PR #176)
 
 **What changed:** corrected current C1/C2 labels for implemented template pipelines,
