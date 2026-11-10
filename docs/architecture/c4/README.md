@@ -25,6 +25,7 @@ diagrams changed.
 | [Legacy SMTP credential TLS boundary](../../smtp-credential-tls-safety.md) | C1–C4: SMTP authentication | Why legacy credentials require verified configured-host TLS before AUTH, while explicit NoAuth compatibility and dormant outbox boundaries remain unchanged. |
 | [Tenant authorization boundaries](../../tenant-authorization-boundaries.md) | C1–C4: Tenant authorization | Stored-profile order reads, custom-role assignment authority and runtime-aware private traffic checks inside existing components. |
 | [Managed Kubernetes Gateway API](../../managed-k8s-gateway-api.md) | C1–C4: Tenant ingress replacement | Opt-in Gateway Fabric, tenant-scoped Standard schema delivery and explicit preservation of existing ingress traffic. |
+| [SSO alias retirement](../../sso-alias-retirement.md) | C1–C4: Identity lifecycle | Primary retirement fence before broker deletion, exact retained-session refusal and explicit replica/cache recovery limits. |
 | [CHANGELOG.md](CHANGELOG.md) | History | What changed in the architecture, in which PR, and why. |
 
 The prose deep dives in [`docs/`](../../README.md) (auth, billing, jobs, data

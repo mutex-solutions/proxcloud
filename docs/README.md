@@ -41,6 +41,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [SSO alias retirement](sso-alias-retirement.md) — durable primary-backed retirement
+  before broker deletion, retained-session refusal, legitimate social login compatibility
+  and explicit cache/rollout/recovery limits, with C1–C4 flow.
+
 - [Managed Kubernetes Gateway API](managed-k8s-gateway-api.md) — opt-in NGINX Gateway
   Fabric, pinned tenant Standard CRDs, C1–C4 delivery flow and explicit legacy
   ingress preservation/migration boundaries.

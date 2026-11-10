@@ -21,6 +21,24 @@ converge independently; Helm wait is not cross-controller dependency ordering.
 managed Kubernetes runbook and C4 index. No new PVE credential, shared-cluster action,
 automatic Gateway/TLS/DNS object or existing-cluster migration is introduced.
 
+## 2026-11-11: Durable organization SSO alias retirement
+
+**What changed:** an additive primary-only id-keyed retirement table records the
+stored provider alias before Keycloak deletion. The rule snapshot checks exact
+retirement before its zero-provider shortcut and excludes retired providers from
+discovery/enforcement/reconciliation; fresh JIT checks the primary fence too.
+Deletion retries preserve retirement through external and database cleanup errors.
+
+**Why:** removing a broker does not revoke its already issued tokens, and an empty
+provider set cannot turn a retired identity into a legitimate local/social broker.
+Unknown realm-level brokers remain compatible; no token-controlled alias prefix
+is treated as revocation authority. No guessed session-lifetime TTL is used.
+
+**Views updated:** [dedicated C1–C4 lifecycle view](../../sso-alias-retirement.md),
+SSO operator guidance and C4 index. All API readers must upgrade; prior deleted
+aliases are not backfilled and warm-cache behavior during primary outage is not
+promoted to a hard revocation SLA. No real realm, token or identity mutation.
+
 ## 2026-11-10: Tenant read, role-assignment and private-traffic boundaries
 
 **What changed:** order reads now resolve the stored billing profile's owning
