@@ -6,6 +6,10 @@ ProxCloud runs on a single currency. Whatever you choose is used everywhere mone
 
 Open **System → Billing configuration**, remain on the **Business details** tab, and pick the **Base currency** from the list (ISO codes with their names, such as `EUR — Euro`). The configuration won't save until a base currency is set.
 
+![Current Base currency selector open over synthetic billing configuration](/docs-img/billing-configuration-base-currency.png)
+
+*Current UI, synthetic local mock configuration; no currency change was saved.*
+
 ## Decide once, before launch
 
 Set the currency during initial setup and then treat it as fixed. Changing it after customers already have bills, credits, and price plans denominated in the old currency is a bad idea — ProxCloud does no conversion, so every historical amount would silently be reread in the new unit.

@@ -8,6 +8,8 @@ A **volume** (under **Storage → Volumes**) is a disk you can attach to your se
 
 ![The Create volume dialog with a capacity type and its warning](/docs-img/create-volume.png)
 
+*Illustration: current console UI with synthetic demo data; no live cloud operation was performed.*
+
 A type labelled **HDD, not for databases** (for example *Capacity HDD (NFS)*) is bulk storage on a shared HDD NAS. It suits large data that is read and written in big chunks. It never holds a server's boot disk or a managed database, and you cannot snapshot a server into an image while such a volume is attached (detach it first, and protect the data with backups instead). The volume moves with its server and survives a host failure, but the NAS itself is a single point of failure. Your operator may price it differently from the other types.
 
 Once it exists, a volume's actions menu lets you:
@@ -18,6 +20,8 @@ Once it exists, a volume's actions menu lets you:
 - **Change type** (retype) it, which moves the disk to another storage type on its server's node. The disk keeps its data and the old copy is removed once the move succeeds. The action shows only when your operator publishes more than one storage type.
 
 ![The Volumes list with a boot disk and a data disk](/docs-img/volumes-list.png)
+
+*Illustration: current console UI with synthetic demo data; no live cloud operation was performed.*
 - **Delete** it once it is detached. An attached volume must be detached first.
 
 Deleting a server deletes its boot disk. Its data volumes are kept, detached and still billed, unless you tick **Also delete this server's volumes** in the delete dialog.

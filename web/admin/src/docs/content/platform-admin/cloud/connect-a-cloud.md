@@ -51,7 +51,9 @@ It **warns** without failing when:
 
 On success it reports the Proxmox VE version and how many nodes, storages and PCI mappings the token can see.
 
-![The Add cloud provider dialog with the Proxmox VE form](/docs-img/add-proxmox-provider.png)
+![Current Add cloud provider dialog showing Proxmox connection fields with an example.invalid endpoint and empty secret](/docs-img/add-proxmox-provider.png)
+
+*Local mock illustration of the connection fields; the dialog has additional options below the visible scroll area. No token was entered and no cloud connection was attempted.*
 
 ## Proxmox resources
 
@@ -90,7 +92,9 @@ A public NIC is bridged straight to the uplink, so the isolation rules do not ap
 
 ## Storage
 
-![The provider Storage tab with detected storage capabilities](/docs-img/provider-storage.png)
+![Current Storage tab showing synthetic storage capabilities and class selectors](/docs-img/provider-storage.png)
+
+*Local mock data illustrates the layout; it is not live storage detection or PVE acceptance evidence.*
 
 ProxCloud reads what each Proxmox storage can do from the cluster instead of trusting the profile flags. The provider's **Storage** tab lists every storage with its type, content, tier (*full* for Ceph RBD/CephFS, otherwise *standard*), capability badges (shared, snapshots, thin, live migrate, replication), the nodes where it is active, and its class. Detection runs on every sync cycle, on every save of the storage profiles, and when you press **Re-detect capabilities**.
 

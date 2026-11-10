@@ -32,9 +32,13 @@ Go to **Compute → Servers** and click **Create server**. The launch form is a 
 
 ![The Create server page with an image and a flavor selected](/docs-img/create-server.png)
 
+*Illustration: current console UI with synthetic demo data; no live cloud operation was performed.*
+
 The new server appears in the list right away, first in a **build** state:
 
 ![The Servers list with a running server and its addresses](/docs-img/servers-list.png)
+
+*Illustration: current console UI with synthetic demo data; no live cloud operation was performed.*
 
 ## Step 4 — Reach it from the internet
 
@@ -54,6 +58,8 @@ Once the server has a public address:
 From the server's page you can run power actions — **Start**, **Stop**, **Reboot** — and, from **More actions**, delete it. Deleting destroys the VM and its boot disk, so it stops accruing charges, and returns any public address to the pool. Data volumes are kept, detached and still billed, unless you tick **Also delete this server's volumes**; the server's backups are deleted with it.
 
 ![A server detail page with its power actions and addresses](/docs-img/server-detail.png)
+
+*Illustration: current console UI with synthetic demo data; no live cloud operation was performed.*
 
 Deleting asks you to confirm, since it can't be undone:
 
