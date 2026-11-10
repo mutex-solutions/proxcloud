@@ -178,7 +178,16 @@ func legacyPeer(conn net.Conn, implicit, startTLS bool, cfg *tls.Config, mechani
 			if result.err != nil { return }
 			result.err = write("250 accepted by fixture only")
 		case line == "QUIT":
-			result.err = write("221 bye")
+			if result.err = write("221 bye"); result.err != nil { return }
+			if _, secure := wire.(*tls.Conn); secure {
+				// smtp.Client.Quit closes TLS after receiving 221. Keep reading
+				// until its close_notify arrives rather than closing net.Pipe early.
+				var extra [1]byte
+				n, err := r.Read(extra[:])
+				if n != 0 || err != io.EOF {
+					result.err = fmt.Errorf("fixture expected TLS close notification")
+				}
+			}
 			return
 		default:
 			result.err = fmt.Errorf("unexpected fixture SMTP command")
