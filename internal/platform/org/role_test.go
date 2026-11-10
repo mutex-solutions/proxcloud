@@ -22,18 +22,16 @@ func TestRoleInOrg_crossOrgRejected(t *testing.T) {
 	}
 }
 
-// Only OWNER/ADMIN require the extra manage_roles gate on addMember (privilege-escalation guard,
-// finding [31]).
-func TestIsPrivilegedRole(t *testing.T) {
-	for _, r := range []string{rbac.RoleOwner, rbac.RoleAdmin} {
-		if !isPrivilegedRole(r) {
-			t.Errorf("isPrivilegedRole(%q) = false, want true", r)
+// Custom roles can carry any current or future permission: assigning one requires role
+// management, just like the sibling role-update route. MEMBER invitations remain supported.
+func TestRoleRequiresManagement(t *testing.T) {
+	for _, r := range []string{rbac.RoleOwner, rbac.RoleAdmin, "FINANCE", "POWER", "", "owner"} {
+		if !roleRequiresManagement(r) {
+			t.Errorf("roleRequiresManagement(%q) = false, want true", r)
 		}
 	}
-	for _, r := range []string{rbac.RoleMember, "FINANCE", "", "owner"} {
-		if isPrivilegedRole(r) {
-			t.Errorf("isPrivilegedRole(%q) = true, want false", r)
-		}
+	if roleRequiresManagement(rbac.RoleMember) {
+		t.Error("MEMBER invitation must not require role-management permission")
 	}
 }
 

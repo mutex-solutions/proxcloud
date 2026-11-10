@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bind client order reads to the stored billing profile's current organization
+  read permission, return an opaque 404 when denied and serialize a typed order.
+  Require role-management permission for all custom organization role assignments
+  while preserving ordinary MEMBER invitations; reject unknown roles and malformed
+  role requests. Private native sandbox services on port 49983 now require their
+  traffic token; only actual envd-serving pods retain envd's own-auth exemption.
+  Add native repository and proxy regression coverage; no held feature is enabled.
+
 - Require verified configured-host TLS before legacy SMTP credential authentication,
   including LOGIN-only and AUTH-stripped relays. Guard LOGIN independently against
   plaintext and host mismatch; preserve explicit NoAuth relay compatibility and

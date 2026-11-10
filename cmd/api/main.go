@@ -400,7 +400,7 @@ func run() error {
 	})
 	affiliateH := affiliate.NewHandler(affiliate.NewRepo(pg), projectSvc, orgSvc, billingRepo, users)
 	catalogH := catalog.NewHandler(catalog.NewRepo(pg))
-	orderH := order.NewHandler(orderRepo, users)
+	orderH := order.NewHandler(orderRepo, users, billingH.CanReadBillingProfile)
 	inviteRepo := projectinvite.NewRepo(pg)
 	if err := inviteRepo.EnsureIndexes(ctx); err != nil {
 		log.Error("projectInvite TTL index", "err", err)

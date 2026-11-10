@@ -41,6 +41,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Tenant authorization boundaries](tenant-authorization-boundaries.md) — stored-profile
+  order reads, custom-role assignment authority and runtime-aware private traffic
+  token checks, with C1–C4 flows and explicit regression/acceptance limits.
+
 - [Legacy SMTP credential TLS boundary](smtp-credential-tls-safety.md) — verified
   configured-host TLS before credential AUTH; explicit NoAuth relay compatibility,
   bounded synthetic tests and unchanged dormant mail-outbox safety holds.
