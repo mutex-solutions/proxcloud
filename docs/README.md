@@ -41,6 +41,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [SSO alias retirement](sso-alias-retirement.md) — durable primary-backed retirement
+  before broker deletion, retained-session refusal, legitimate social login compatibility
+  and explicit cache/rollout/recovery limits, with C1–C4 flow.
+
 - [Tenant authorization boundaries](tenant-authorization-boundaries.md) — stored-profile
   order reads, custom-role assignment authority and runtime-aware private traffic
   token checks, with C1–C4 flows and explicit regression/acceptance limits.
