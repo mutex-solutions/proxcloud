@@ -38,5 +38,31 @@ separate Playwright tasks and may need their configured environment. See
 Embedded operator/API help lives under `src/docs/content/`. Update it against the
 actual route, configuration and capability checks, not historical feature plans.
 
+## Published documentation screenshots
+
+```sh
+npx playwright test --config playwright.docs.config.ts
+```
+
+This **opt-in** capture suite is separate from the generic all-route `shots` gallery
+and normal `test:e2e` task. It writes selected UI states directly to
+`public/docs-img/` using the current components and synthetic in-memory fixtures.
+The capture-only Vite config disables HMR/refresh instrumentation, binds loopback
+on strict port 5274, and refuses to reuse another server. Playwright closes that
+server after the run.
+
+Captures use light theme, 1440 × 1000 CSS pixels, DPR 1, UTC, a fixed displayed
+clock, local fonts and reduced motion. Readiness assertions replace arbitrary
+sleep delays. External and real API requests are blocked, mock mutations are
+refused, and console/page errors or missing mock handlers fail the run. The suite
+opens/fills real controls without submitting provider, approval or financial
+changes. Mock illustrations are not live PVE/API/billing acceptance evidence.
+
+After recapture, visually review every changed image, check the rendered `/docs`
+consumers, and update captions to describe the visible state. The add-provider
+image shows the upper connection fields of a scrollable dialog, not all options.
+Private keys, real customer data, internal endpoints and saved authentication
+state must never be introduced into this fixture or public output.
+
 > **Owner review:** `public/brand/logo.svg` and `public/brand/favicon.svg` are neutral
 > placeholders. Final brand assets remain a release decision.

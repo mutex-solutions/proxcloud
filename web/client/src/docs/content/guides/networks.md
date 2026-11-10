@@ -10,6 +10,8 @@ Each network is a virtual network on the Proxmox VE cluster with an IPv4 subnet 
 
 ![The Create network dialog](/docs-img/create-network.png)
 
+*Illustration: current console UI with synthetic demo data; no live cloud operation was performed.*
+
 Your networks can talk to each other. They are isolated from every other project's networks: traffic towards another tenant's range is dropped.
 
 A network can only be deleted once no server has an interface on it.
@@ -29,6 +31,8 @@ To spread inbound traffic across several servers behind one address, use a [load
 **Network → Security groups** are the firewalls around your servers. Each group is a set of allow rules for inbound and outbound traffic; attach one or more to a server to control which ports and sources can reach it. Every project starts with a default group. A common first rule is allowing SSH (port 22) from your own address.
 
 ![A security group with an SSH rule](/docs-img/security-group-rules.png)
+
+*Illustration: current console UI with synthetic demo data; no live cloud operation was performed.*
 
 Security groups are enforced by the Proxmox VE cluster firewall, which is switched on for a server before its first boot.
 
