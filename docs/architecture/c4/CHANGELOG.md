@@ -22,6 +22,24 @@ LB/readiness proof; full-spec SSA is not backend atomicity or lost-update fencin
 (component/validation/sync sequence and acceptance limits), plus C4 index. Local
 fake-action/race and cached Helm rendering are not live DB engine acceptance.
 
+## 2026-11-10: PVE single-backup deletion known-active interlock
+
+**What changed:** the existing single `DELETE_BACKUP` path now reads current VM
+config and the token-visible active restore list after its original VM/archive
+ownership checks, refusing any config lock, active restore or read failure before
+content DELETE. Missing/null config is refused locally; `RestoreRunning` now treats
+missing/null task data as unavailable, while an explicit empty list remains idle.
+
+**Why:** bulk deletion already refused known backup/restore activity, but the single
+archive path could delete a restore's input. This is not an atomic task fence:
+post-check task starts, VMID replacement, external/root writers and timeout/crash
+uncertainty remain outside scope. No new lock, wrapper, schema or operation engine.
+Backup/restore/retire ordering and existing task query/authorization stay intact.
+
+**Views updated:** [bounded C4/safety guide](../../pve-backup-delete-interlock.md)
+(request sequence, token visibility, shared-helper hardening and explicit limits),
+plus C4 index. Hermetic wire/unit/race evidence is not real PVE/PBS acceptance.
+
 ## 2026-11-10: managed saved-runtime admission-only safety boundary
 
 **What changed:** a static-false saved-lifecycle capability and strict low-level

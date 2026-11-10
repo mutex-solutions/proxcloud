@@ -146,5 +146,8 @@ func (c *Client) RestoreRunning(ctx context.Context, node string, vmid int) (boo
 	if err := c.get(ctx, "/nodes/"+url.PathEscape(node)+"/tasks", form, &out); err != nil {
 		return false, err
 	}
+	if out == nil {
+		return false, fmt.Errorf("pve: active restore task list is unavailable")
+	}
 	return slices.ContainsFunc(out, func(t NodeTask) bool { return t.EndTime == 0 }), nil
 }

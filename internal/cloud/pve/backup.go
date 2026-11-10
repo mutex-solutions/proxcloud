@@ -464,6 +464,24 @@ func (s *Service) DeleteServerBackup(ctx context.Context, projectID, externalID,
 	if _, err := s.ownBackup(ctx, projectID, externalID, store, volid); err != nil {
 		return err
 	}
+	cfg, err := s.C.GetVMConfig(ctx, vm.Node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return conflictf("The current configuration of server %s could not be read. Try again later", vm.Name)
+	}
+	if cfg.Str("lock") != "" {
+		return conflictf("Server %s is busy with another operation. Try again in a moment", vm.Name)
+	}
+	// A token-visible restore may still read this archive without a config lock.
+	// These current checks do not fence a task that starts after they finish.
+	if running, err := s.C.RestoreRunning(ctx, vm.Node, vm.VMID); err != nil || running {
+		if err != nil {
+			return err
+		}
+		return conflictf("Server %s is being restored right now. Try again when it has finished", vm.Name)
+	}
 	return s.deleteArchive(ctx, vm.Node, store, volid)
 }
 
