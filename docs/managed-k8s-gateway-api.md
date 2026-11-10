@@ -19,6 +19,8 @@ These pins were verified against official upstream metadata on 2026-11-10 UTC.
 Latest is a dated observation, not a floating value. The actual NGF OCI chart and
 images remain version-tag pinned rather than digest-certified by this change.
 No public ProxCloud `0.1.10` publication or live tenant installation is implied.
+The platform explicitly sets `nginxGateway.productTelemetry.enable=false`; this
+privacy override differs from the upstream default and creates no telemetry opt-in.
 
 Official evidence: [NGF release](https://github.com/nginx/nginx-gateway-fabric/releases/tag/v2.8.1),
 [chart contract](https://github.com/nginx/nginx-gateway-fabric/tree/v2.8.1/charts/nginx-gateway-fabric),

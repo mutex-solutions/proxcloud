@@ -61,6 +61,9 @@ func TestGatewayChartEnabledRendersPinnedTenantProxyAndSchemaCarriers(t *testing
 		dig(values, "nginxGateway", "gatewayControllerName") != "gateway.nginx.org/nginx-gateway-controller" {
 		t.Errorf("GatewayClass/controller identity drifted: %#v", values["nginxGateway"])
 	}
+	if dig(values, "nginxGateway", "productTelemetry", "enable") != false {
+		t.Error("platform addon must explicitly disable optional upstream product telemetry")
+	}
 	if dig(values, "nginx", "service", "type") != "LoadBalancer" || dig(values, "nginx", "service", "externalTrafficPolicy") != "Local" {
 		t.Errorf("tenant data-plane exposure drifted: %#v", values["nginx"])
 	}
