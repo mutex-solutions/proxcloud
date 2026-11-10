@@ -4,6 +4,23 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: Tenant read, role-assignment and private-traffic boundaries
+
+**What changed:** order reads now resolve the stored billing profile's owning
+organization and require current billing-read permission before a typed response.
+Organization invitations require role management for every custom role, retaining
+ordinary MEMBER invitations and rejecting unknown role names. Sandbox pod lookup
+now identifies actual envd serving mode from the main command and arguments, so
+private native port 49983 cannot receive envd's traffic-token exemption.
+
+**Why:** identifiers and port numbers cannot replace authority. A custom role's
+permissions can change after it is assigned. Existing envd pods need compatible
+classification without a new annotation, credential or workload recreation.
+
+**Views updated:** [dedicated C1–C4 boundary view](../../tenant-authorization-boundaries.md),
+this index, and the managed-sandbox/E2B traffic descriptions. No new container,
+schema or external service; all held mail/lifecycle/registry features remain held.
+
 ## 2026-11-10: Legacy SMTP credential TLS enforcement
 
 **What changed:** legacy SMTP credential AUTH now requires an actual completed,

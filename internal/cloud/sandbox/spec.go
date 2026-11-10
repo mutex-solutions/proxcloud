@@ -324,6 +324,34 @@ func BuildCR(cfg Config, serviceID string, s Spec, shutdown time.Time) map[strin
 	}
 }
 
+// PodRunsEnvd reports whether a sandbox pod runs envd, read from the command BuildCR gave its main
+// container: sandbox-init alone serves envd, `sandbox-init -native <argv>` runs the tenant's own
+// process as PID 1. sandbox-proxy uses it to decide who answers on EnvdPort, so it reads what the
+// pod actually runs and holds for sandboxes created before it existed. A tenant cannot change the
+// answer: a template command only ever lands after -native or in envd's start command.
+func PodRunsEnvd(pod map[string]any) bool {
+	spec, _ := pod["spec"].(map[string]any)
+	cs, _ := spec["containers"].([]any)
+	for _, c := range cs {
+		m, _ := c.(map[string]any)
+		if m["name"] != "main" {
+			continue
+		}
+		cmd, ok := m["command"].([]any)
+		if !ok || len(cmd) != 1 || cmd[0] != RuntimeMountPath+"/sandbox-init" {
+			return false
+		}
+		// Legacy envd pods had no args; current pods explicitly suppress image CMD with --serve.
+		// Utility modes (-ready/-snapshot/-native) must never receive the envd token exemption.
+		if m["args"] == nil {
+			return true
+		}
+		args, ok := m["args"].([]any)
+		return ok && (len(args) == 0 || (len(args) == 1 && args[0] == "--serve"))
+	}
+	return false
+}
+
 // startupBudget is how many 1-second startup probes a sandbox gets: 2 minutes, or 10 when the
 // template has a ready command (it may wait for a server to come up).
 func startupBudget(t Template) int {
