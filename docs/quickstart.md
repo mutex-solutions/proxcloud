@@ -3,7 +3,15 @@
 **Release prerequisite:** broker-free deployment targets planned **v0.4.0**, not
 the older Rabbit-dependent API. Until it is explicitly published, use the source
 installer's default `images.build: true` or build/load known compatible images for
-Helm; the planned image/chart pin is not a published-release claim.
+Helm; the planned image/chart pin is not a published-release claim. Public `dev-<sha>`
+container images are development artifacts, not a versioned chart or an accepted
+clean install from a release.
+
+**Validation boundary (2026-11-10):** Debian 13 and Ubuntu 24.04 OS template build,
+smoke and build-network cleanup passed on a PVE 9.2 development host using static
+addresses. The Kubernetes static installer-seed path has automated tests and full
+Packer configuration validation, but no real ISO boot/reboot/Goss acceptance yet.
+Neither result establishes a clean split-mode install or production readiness.
 
 Pick the row that matches what you want, then follow its section. Each section has the
 inventory keys to fill, the one command, what success looks like and the first steps after.
@@ -254,22 +262,45 @@ database operators, and registers the Kubernetes and database providers (stage 6
 [managed-dbaas.md](managed-dbaas.md).
 
 1. Install path C first. It creates the `images@pve!packer` token the next step uses.
-2. Build the Kubernetes node templates, one copy per node:
+2. Build the Kubernetes node templates separately, before stage 50 uses them. Stage 50 consumes template IDs;
+   it does **not** invoke the template builder. Choose an offered Kubernetes version deliberately (`1.35.10` below
+   is the current BOM example, not a claim that its new static ISO build passed).
+
+   For a direct invocation from the repository root, source your protected local environment or export the
+   `PVE_*` credential/configuration first; never commit a populated file or print its contents:
 
    ```sh
-   PVE_URL=https://192.0.2.11:8006 PVE_TOKEN_ID='images@pve!packer' \
-   PVE_TOKEN_SECRET="$(cat installer/inventory/mysite/generated/token-packer)" \
-   PVE_NODES="pve1 pve2 pve3" PVE_TEMPLATE_STORAGE=local PVE_BRIDGE=vmbr0 \
-   K8S_VERSION=1.35.10 images/k8s-node-template.sh
+   # Set PVE_URL, PVE_TOKEN_ID, PVE_TOKEN_SECRET and PVE_NODES privately first.
+   PVE_BUILD_NETWORK_MODE=static \
+   PVE_TEMPLATE_STORAGE=template-disks PVE_ISO_STORAGE=installer-isos PVE_BRIDGE=vmbr0 \
+   PVE_BUILD_VLAN=0 BUILD_IP=192.0.2.40/24 BUILD_GATEWAY=192.0.2.1 \
+   BUILD_NAMESERVER="192.0.2.53 192.0.2.54" \
+   K8S_VERSION=1.35.10 bash images/k8s-node-template.sh
    ```
 
-   `PVE_TEMPLATE_STORAGE` holds the Ubuntu ISO and the template disks, so it needs `iso` and `images` content: add
-   `images` to `local`'s content types, or use `nas-templates` when you have a NAS. The Ubuntu installer needs DHCP
-   on `PVE_BRIDGE`; when the bridge has none, add `DHCP_RANGE=192.0.2.60,192.0.2.69 DHCP_GATEWAY=192.0.2.1` and the
-   script runs a dnsmasq for the build on this machine (needs `dnsmasq` and `sudo`).
+   `PVE_TEMPLATE_STORAGE` needs `images` content for disks/cloud-init; `PVE_ISO_STORAGE` needs `iso` content for
+   the Ubuntu installer and temporary private seed. It defaults to the template store only when that store supports
+   both. Set `PVE_BUILD_VLAN` to the guest access VLAN, or `0` for untagged; tagging does not change the runner's NIC.
+   Reserve/exclude `BUILD_IP` from DHCP and other allocations, and verify gateway/DNS and runner-to-guest SSH reachability.
 
-   Its last line, e.g. `1.35.10=pve1=9210,pve2=9211,pve3=9212`, fills `services.templates` and
-   `services.kamaji.version_images` below. See [images/README.md](../images/README.md#kubernetes-node-templates).
+   Static mode attaches a local NoCloud `cidata` ISO, sets the network for the live installer and installed build
+   system, and passes a fixed SSH host to Packer. It needs **xorriso and OpenSSL** on the build host, scoped ISO
+   upload/delete rights and internet access from the guest; it does **not** require DHCP or a guest-to-runner HTTP
+   seed route. The manual GitHub workflow defaults `network_mode` to `static`, while a direct shell invocation
+   defaults to legacy `dhcp` unless `PVE_BUILD_NETWORK_MODE=static` is explicit. For Actions, put all cluster
+   values in **Repository Secrets** using [.github/pve-actions.env.example](../.github/pve-actions.env.example),
+   not workflow YAML/Variables. Do not route public-PR jobs to the privileged runner.
+
+   Before publication the builder sanitizes the guest, verifies the exact temporary seed is detached/deleted and
+   removes the build NIC. Detailed logs/seed files are private (directory `0700`, files `0600`); cancellation or
+   host loss can bypass cleanup and requires owner-checked recovery. Static mode refuses old same-name templates
+   without in-guest cleanup proof. Do not enable a competing DHCP server to work around a failed build. If you
+   intentionally choose `dhcp`, see its distinct network/HTTP requirements in
+   [images/README.md](../images/README.md#dhcp-mode-explicit-legacy-option).
+
+   The successful builder's last line, e.g. `1.35.10=pve1=9210,pve2=9211,pve3=9212`, fills `services.templates` and
+   `services.kamaji.version_images` below. Real static-mode ISO boot/reboot/Goss acceptance is still pending;
+   validate it on your chosen version before offering the resulting image to tenants.
 3. Add to `proxcloud.yml`:
 
    ```yaml
@@ -395,9 +426,10 @@ deploy/seed/seed-operator.py --provider "<provider name>"
 The quick start is not for production: one replica of everything, plain HTTP, and Keycloak's own administrator is
 the operator. To expose it with an Ingress, see the chart README.
 
-**Production, with CloudNativePG.** Needs the CloudNativePG operator, an ingress controller,
-and an OIDC issuer with the realms and clients in [auth.md](auth.md). No broker/operator
-is needed. Before upgrading an existing release, follow the [drain/reconcile and
+**Production-oriented configuration, with CloudNativePG.** This is a deployment recipe,
+not a stable-release or clean public-artifact install acceptance claim. It needs the
+CloudNativePG operator, an ingress controller with TLS, and an OIDC issuer with the
+realms and clients in [auth.md](auth.md). No RabbitMQ broker/operator is needed. Before upgrading an existing release, follow the [drain/reconcile and
 retain runbook](postgres-jobs-migration.md); do not let Helm/Argo prune the old broker.
 
 1. Fetch the subcharts (the two `helm repo add` and `helm dependency build` lines above).
@@ -552,8 +584,8 @@ Versions are pinned in `installer/playbooks/group_vars/all/versions.yml`; every 
 | Network create answers 403, or Test connection lists missing `SDN.*` privileges, after an ACL was added by hand | A role on a child path (for example `/sdn/zones`) replaces what the parent grants that user or token | Grant `ProxCloudPlatform` on that same path too, then read the effective rights: `pveum user token permissions proxcloud@pve platform --path /sdn/zones` |
 | Stage 05 fails adding `nas-*`, or a node cannot mount it | The TrueNAS NFS share does not allow the PVE nodes, or squashes root | Allow the nodes' management subnet on each export in `nas.exports` and map root to root (PVE writes as root). Tenant shares are separate: [NAT and exports](cloud-integration.md#truenas-file-shares) |
 | Stage 55 stops on `sandbox.network.snat is required` or on the exit node | The sandbox needs its own egress address, placed on exactly one exit node over root SSH | Set `sandbox.network.snat` (or `node`), give the zone one exit node, put it in the inventory group `pve` |
-| Sandbox stages cannot pull `proxcloud-sandbox-proxy` or `proxcloud-sandbox-runtime` on an `images.build` site | Stage 35 builds only the API and console images; the sandbox stages pull `<images.registry>/proxcloud-sandbox-*:<release>`, which needs a release after v0.3.28 | Set `sandbox.proxy.image` and `sandbox.runtime_image` to images your nodes can pull |
+| Sandbox stages cannot pull `proxcloud-sandbox-proxy` or `proxcloud-sandbox-runtime` on an `images.build` site | Stage 35 builds only API/web/admin; sandbox stages default to the BOM release tag, which is still unpublished. Public development images exist, but that does not create the planned release tags | Pin `sandbox.proxy.image` and `sandbox.runtime_image` to exact compatible images/digests your nodes can pull; do not assume the unpublished BOM tag exists |
 | Template build fails downloading the vendor image | No store with `import` content | Add `import` to a store's content, or set `templates.import_storage` |
 
-Still stuck: re-run with more output, `make install INVENTORY=inventory/mysite ARGS=-v` (every stage is idempotent),
+Still stuck: review the failed stage and migration gates before a verbose re-run, `make install INVENTORY=inventory/mysite ARGS=-v` (this can reconcile resources, not just read them),
 and read [install.md](install.md).

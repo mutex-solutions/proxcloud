@@ -6,7 +6,7 @@ The **Network** group in the sidebar holds what connects your servers to each ot
 
 Start under **Network → Networks**, where you create the private networks your servers attach to. A project with no network yet needs one before its first server can be launched, and a server can only be launched onto a network your project owns.
 
-Each network is a virtual network on the Proxmox VE cluster with an IPv4 subnet (more can be added, see below). Leave the range empty and ProxCloud picks a free one from the range your operator reserved for tenant networks, or ask for a specific CIDR inside that range. DHCP and outbound NAT (SNAT) are on by default, so servers get an address and can reach the internet without further setup.
+Each network is a virtual network on the Proxmox VE cluster with an IPv4 subnet (more can be added, see below). Leave the range empty and ProxCloud picks a free one from the range your operator reserved for tenant networks, or ask for a specific CIDR inside that range. Address delivery depends on the zone: PVE DHCP is available on simple zones; VLAN/EVPN networks use platform-allocated static addresses passed through cloud-init instead. You do not need to add a competing DHCP server. Outbound NAT (SNAT) is a separate subnet setting and depends on the operator's routing and egress configuration.
 
 ![The Create network dialog](/docs-img/create-network.png)
 
@@ -16,7 +16,7 @@ A network can only be deleted once no server has an interface on it.
 
 ## Reaching the internet
 
-**Outbound** traffic needs nothing extra: SNAT on the private network lets every server reach the internet.
+**Outbound** traffic uses the subnet's internet/SNAT setting where the operator offers it. A static address alone does not prove working gateway, DNS or firewall egress; contact the operator if the subnet has no working outbound route.
 
 **Inbound** traffic needs a **public IP**: a server gets a second network interface on one of the public networks your operator has set up, with one public address from that network's pool. The address is pinned to the server by its firewall, so the server can't use any other address on that network. Your operator decides which public networks your project may use.
 

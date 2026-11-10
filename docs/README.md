@@ -8,6 +8,15 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 > operator product help ships inside the SPAs themselves at `/docs` — a different
 > audience and a separate source.
 
+## Current status and operations
+
+- [release-readiness.md](release-readiness.md) — current preview/support boundaries,
+  evidence versus unverified paths, and the checklist before first publication.
+- [ci-release.md](ci-release.md) — exact workflow triggers, runner/security model,
+  public GHCR permissions, image/chart versions, and known release-gate limits.
+- [images pipeline](../images/README.md) — static Debian/Ubuntu builds and the
+  Kubernetes static NoCloud seed mode (real ISO acceptance still pending).
+
 ## Getting started
 
 - [quickstart.md](quickstart.md) — pick a path (laptop, one node, production, split, Helm),
@@ -62,8 +71,12 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 - [proxmox-permissions.md](proxmox-permissions.md) — least-privilege PVE roles
   (ProxCloudPlatform, ProxCloudCAPI, ProxCloudCSI and the rest), ACL paths, privsep tokens
   and the `pveum` commands to create them.
-- [jobs-scheduling.md](jobs-scheduling.md) — scheduled jobs, the PostgreSQL
-  distributed lock, and the optional RabbitMQ charge fan-out.
+- [jobs-scheduling.md](jobs-scheduling.md) — gated cron producers, PostgreSQL
+  distributed locking and native durable charge dispatch (no broker).
+- [durable-jobs.md](durable-jobs.md) — primary-only claims/financial receipts,
+  bounded workers, original-cycle payloads and audited replay.
+- [postgres-jobs-migration.md](postgres-jobs-migration.md) — drain/reconcile and
+  retain existing broker state before any upgrade; no automatic queue import.
 
 ## Reference
 
@@ -85,11 +98,13 @@ rationale, in Nygard format:
   handler→service→repository layering over the document store.
 - [ADR-0003](adr/0003-auth-as-oauth2-resource-server.md) — Authenticate as an
   OAuth2/OIDC resource server (plus SigV4 for machines).
-- [ADR-0005](adr/0005-self-contained-helm-chart.md) — A self-contained Helm chart
-  with optional bundled backing services, released to ghcr.
+- [ADR-0005](adr/0005-self-contained-helm-chart.md) — the original self-contained
+  chart decision, with a current-status note for operator defaults and tag-based
+  distribution; publication is not yet established.
 - [ADR-0006](adr/0006-mcp-in-process-dispatch.md) — Expose an MCP server that
   dispatches in-process through the existing API.
-- [ADR-0007](adr/0007-distributed-job-locking.md) — Run scheduled jobs under a
-  distributed lock, with optional broker fan-out.
+- [ADR-0007](adr/0007-distributed-job-locking.md) — the original scheduler lock and
+  broker decision; its broker/exactly-once claims are superseded by the documented
+  PostgreSQL durable-worker contract.
 - [ADR-0008](adr/0008-postgres-jsonb-document-store.md) — PostgreSQL + JSONB as
   the document store (supersedes ADR-0004's engine choice).

@@ -8,7 +8,13 @@ cluster's API, and Kamaji runs the cluster's control plane as pods there
 
 > ## Status on Proxmox
 >
-> Creating a cluster works: a tenant control plane on Kamaji, worker VMs through CAPMOX, Cilium and MetalLB, with
+> **Evidence boundary:** the operations below describe historical development-lab
+> acceptance of the managed-provider flow, not a blanket production certification
+> or a clean install from published release artifacts. The new static ISO template
+> builder is a separate path: configuration/tests pass, but live ISO boot, installed
+> reboot and Goss acceptance have not yet run.
+>
+> Creating a cluster was verified on that lab: a tenant control plane on Kamaji, worker VMs through CAPMOX, Cilium and MetalLB, with
 > workers in the project's pool on the project's network, under tokens minted per cluster and revoked after the delete.
 > Verified on PVE 9.2 with CAPI v1.14.4, CAPMOX v0.9.2 and Kamaji CP provider v0.22.0: create, scale-out, RWX volumes on a
 > NAS dataset, a tenant LoadBalancer, project suspend and resume, a refused create, delete with everything it held.
@@ -38,12 +44,41 @@ One-time, per management cluster (apply order:
    least-privilege RBAC, token), `appproject.yaml` (AppProject `proxcloud-k8s`,
    the source/destination guardrail), `argocd-health.yaml` (custom health checks
    for `TenantControlPlane` / `Cluster` / `MachineDeployment`).
-4. **Chart pinning.** The cluster chart is published to an OCI registry at
-   pinned versions. Never `latest`: the provider config and every existing
-   cluster pin an exact version, and the registry must keep every pinned version.
+4. **Chart pinning.** Publish/copy the cluster chart to the registry your ArgoCD
+   can reach and verify the exact version exists before registering it. A chart
+   directory/version in this checkout is **not** proof of a public OCI artifact;
+   no public ProxCloud chart release has been published yet. Installer stage 50
+   packages the checkout's charts into its services-cluster registry, a separate
+   path from the GitHub tag-based chart workflow. Never `latest`: the provider and
+   every existing cluster pin an exact version, and the registry must keep it.
    The values contract lives in `internal/cloud/kamaji/values.go` and is pinned by
    `TestBuildValues`. The chart is `deploy/charts/proxmox-kamaji-cluster`, and
    `config.argocd.chartName` has no default: the provider config must name it.
+
+### Node-template build network
+
+Building a Kubernetes node image does **not** require DHCP as a Kubernetes
+prerequisite. The manual `k8s-node-templates` Actions workflow defaults to
+`network_mode=static`: existing `BUILD_IP` (host CIDR), `BUILD_GATEWAY`,
+`BUILD_NAMESERVER` and optional build VLAN Repository Secrets generate a private
+local NoCloud `cidata` ISO. The live installer and installed build OS receive the
+same fixed-MAC Netplan configuration; Packer has an explicit SSH address, with no
+guest-to-runner HTTP seed route. Direct script use still defaults to legacy DHCP,
+so set `PVE_BUILD_NETWORK_MODE=static` explicitly.
+
+The runner needs xorriso/OpenSSL and access to template disks plus an ISO-capable
+store (`PVE_ISO_STORAGE`, optionally different from `PVE_TEMPLATE_STORAGE`). Keep
+the reserved build address outside all allocators. Static guest provisioning,
+reboot and Goss precede final guest sanitization, exact seed detachment/deletion
+and build-NIC removal; private logs/seed files must never become public artifacts.
+A killed runner is not cleanup proof. Do not adopt an old same-name template as
+clean just because its NIC was removed, or start a competing DHCP server as a
+workaround. See the [template pipeline](../images/README.md#static-mode-workflow-default-no-dhcp)
+and [quickstart command](quickstart.md#d-managed-kubernetes-databases-and-sandboxes-split).
+The installer consumes the output node→VMID map; stage 50 does not call this build
+or import Actions Secrets. Runtime acceptance of the new static ISO path remains
+pending for the chosen Kubernetes version; successful Debian/Ubuntu OS cloud-image
+canaries do not prove it.
 
 ## 2. Provider setup (admin → Cloud providers → Add provider → Kubernetes)
 

@@ -6,12 +6,14 @@ ProxCloud holds your billing truth — customers, balances, invoices, resource u
 
 | State | Where it lives | Criticality |
 |-------|----------------|-------------|
-| Platform data (customers, projects, resources, bills, transactions) | PostgreSQL (the `proxcloud` database) | Primary state — back up continuously |
+| Platform data (customers, projects, resources, bills, transactions), durable jobs/receipts and configured outbox decisions | PostgreSQL (the writable primary `proxcloud` database) | Primary state — back up continuously; preserve finance and work state consistently |
 | Identity (user accounts, credentials, realm config) | Keycloak's own database | Required for users to keep signing in |
 | **Encryption key** | Kubernetes secret `<release>-api`, key `encryption-key` | **CRITICAL — unrecoverable if lost** |
-| Helm values | your `values.yaml` (keep it in git) | Needed to rebuild the deployment |
+| Helm configuration | Version-controlled **secret-free** values plus separately vaulted secret values/Secret references | Needed to rebuild; never commit encryption keys, passwords or populated secret overlays |
 
-Not worth backing up: RabbitMQ contents (transient messaging that repopulates) and the application pods themselves (Helm recreates them).
+Current ProxCloud does not require RabbitMQ: native billing work and its financial receipts live on PostgreSQL primary. **A legacy broker is not disposable transient state.** Before a broker-free upgrade, stop producers/consumers, drain or reconcile ready and unacknowledged work, and preserve the broker volumes and evidence until the migration is accepted. Do not use `down -v`, delete its PVCs, or assume lost messages can be reconstructed.
+
+Application pods can be recreated by Helm, but their configuration, credentials, PostgreSQL state and any retained legacy broker state must be protected. Do not restore a live writable-primary database by merely copying its mounted files; use PostgreSQL-consistent backups/dumps or the database operator's supported backup procedure.
 
 ## The encryption key
 
@@ -29,13 +31,14 @@ On a rebuilt cluster, feed it back through values before installing — either i
 ```yaml
 api:
   encryptionKey: "<the exported value>"
-  # or supply your own secret carrying db-url, rabbitmq-password, encryption-key:
+  # or supply your own secret carrying db-url and encryption-key:
+  # optional db-read-url is history-only; add sso-client-secret when SSO is enabled.
   # existingSecret: my-restored-api-secret
 ```
 
-## Approach 1 — Velero (whole-namespace)
+## Approach 1 — Kubernetes recovery with Velero, plus a database backup
 
-Velero snapshots the entire `proxcloud` namespace — Deployments, StatefulSets, Secrets (including `<release>-api`), ConfigMaps, Ingresses — and copies persistent-volume contents via its file-system backup (node agent) to an S3-compatible bucket. Keep that bucket **outside** the cluster's failure domain for genuine disaster recovery.
+Velero can preserve namespace objects — Deployments, StatefulSets, Secrets (including `<release>-api`), ConfigMaps and Ingresses — and filesystem volume data via its node agent. **The example below does not quiesce PostgreSQL or Keycloak databases and is not a standalone consistent database backup.** Pair it with operator-supported continuous/WAL backups or a consistent dump and a tested restore plan; do not treat a live primary filesystem copy as recoverable financial truth. Keep the backup bucket outside the cluster's failure domain and protect its secret-bearing contents.
 
 An example schedule — hourly, 10-day retention:
 
@@ -51,13 +54,13 @@ velero schedule create proxcloud-hourly \
   --include-namespaces proxcloud
 ```
 
-Restore brings back the volumes and every Kubernetes object in a single move:
+The following restores the backed-up Kubernetes objects/volume copies. Before running it, prevent application replicas from starting against an unverified restored database: restoring Deployments can immediately start durable workers. Select/exclude resources or use an isolated recovery cluster and the database operator's restore procedure as your tested plan requires:
 
 ```sh
 velero restore create --from-backup proxcloud-hourly-<timestamp>
 ```
 
-Pods, ConfigMaps, Secrets and Ingress come up together with the data, so the platform is usable as soon as the restore completes.
+Restoring Kubernetes objects is not proof of a usable or financially consistent recovery. Restore the matching database backup and encryption key first, keep new producers off, and verify database health, existing durable work, identity and ingress before admitting customers. Bounded durable workers start even when the scheduler is off; restoring queued work can resume processing.
 
 ## Approach 2 — targeted database dumps
 

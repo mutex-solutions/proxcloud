@@ -192,7 +192,9 @@ turns it on.
 
 `PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED` defaults **false** (environment only).
 True requires a >=32-byte `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` and opts savings-expiry
-reminders into atomic rendered/encrypted outbox decisions on PRIMARY. It starts
+reminders into atomic rendered/encrypted outbox decisions on PRIMARY. Separate
+bounded outbox/invitation composition and safe status machinery is implemented;
+that infrastructure is not a blanket email-delivery enablement. It starts
 neither a scheduler nor an SMTP dispatcher; configured gateways do not enable
 sending. Queue-only rollout cannot yet deliver these reminders. Other mail remains
 best-effort. Existing durable decisions never fall back to direct SMTP when the

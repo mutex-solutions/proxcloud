@@ -2,20 +2,22 @@
 
 ## Reporting a vulnerability
 
-**Please do not open a public issue for security vulnerabilities.**
+Use [GitHub Issues](https://github.com/mutex-solutions/proxcloud/issues/new/choose)
+for ordinary bugs and support requests.
 
-Report privately using GitHub's
-[private vulnerability reporting](https://github.com/mutex-solutions/proxcloud/security/advisories/new)
-("Report a vulnerability" under the repository's **Security** tab), or email
-**security@proxcloud.example**.
-<!-- TODO(owner): replace security@proxcloud.example with the real ProxCloud security contact before publishing. -->
+**For a suspected security vulnerability, open only a minimal contact-request
+issue**, for example "Security report: requesting a private contact channel".
+Mention the affected component and version/commit only if safe to disclose, and
+ask a maintainer how to share the full report privately. A verified security email
+and GitHub private vulnerability reporting are not configured yet; do not use a
+placeholder address or assume a public issue is confidential.
 
-Please include:
-
-- a description of the issue and its impact,
-- steps to reproduce (a proof of concept if you have one),
-- affected version(s) or commit, and
-- any suggested remediation.
+**Do not post exploit steps, a proof of concept, credentials/tokens, private
+endpoints, customer data, database dumps or unredacted logs in that public issue.**
+Once the maintainer supplies a private channel, send the impact, reproduction
+steps, affected versions and suggested remediation there. If you already exposed
+a credential, revoke/rotate it immediately; deleting an issue does not revoke a
+secret or erase copies.
 
 We will acknowledge your report, keep you updated on our assessment, and
 coordinate a disclosure timeline with you. Please give us a reasonable window to
@@ -23,14 +25,19 @@ release a fix before any public disclosure.
 
 ## Supported versions
 
-ProxCloud is pre-1.0 and under active development. Security fixes land on `main`
-and in the latest `0.x` release. We recommend running the most recent tagged
-release / image.
+ProxCloud is pre-release and under active development. There is currently no
+published tagged release or supported historical release line. Fixes land on
+`main`; evaluate a reviewed commit with successful checks, not an assumed
+`latest` image tag. The planned `v0.4.0` chart/BOM entry is not evidence that an
+artifact has been published.
 
-| Version | Supported |
-|---------|-----------|
-| `0.1.x` | ✅ |
-| `< 0.1` | ❌ |
+| Version / source | Status |
+|------------------|--------|
+| Current `main` | Development fixes; no stable support/SLA promise |
+| Planned `v0.4.0` | Unpublished; release preparation and artifact-install acceptance pending |
+| Older / untagged downstream builds | No stated backport support; report the exact commit |
+
+See [release readiness](docs/release-readiness.md) for validation limits.
 
 ## Handling secrets and configuration
 
@@ -44,8 +51,18 @@ release / image.
 - Sensitive config values can be encrypted at rest using the built-in
   `pkg/textcrypt` support and decrypted with a key injected at runtime
   (`PROXCLOUD_ENCRYPTION_DEFAULT_KEY`); the key itself must never be committed.
-- The operator API (`/admin-api/v1`) is SigV4-signed; treat its HMAC key pairs
-  like any other credential and rotate leaked keys immediately.
+- The operator API (`/admin-api/v1`) accepts configured OIDC credentials or
+  SigV4-signed requests; treat HMAC key pairs and bearer credentials as secrets and
+  rotate/revoke leaked credentials immediately.
+- Actions variables are not secret-masked. The privileged template workflows read
+  cluster settings from repository Actions **Secrets**; see the placeholder-only
+  [.github/pve-actions.env.example](.github/pve-actions.env.example). Secrets masking
+  is best-effort and does not sanitize artifact contents or transformed output.
+- Public-PR code must not run on a persistent runner with PVE credentials or
+  production network access. Runner labels and two users/containers on one host are
+  not a security boundary. Restrict privileged workflows to reviewed trusted code;
+  prefer a separate private operations repository for that trust domain.
 
-If you find a committed secret, treat it as compromised: rotate it and report it
-through the private channel above.
+If you find a committed secret, treat it as compromised: revoke/rotate it first,
+then request a private maintainer channel as described above without reposting
+the secret in an issue.

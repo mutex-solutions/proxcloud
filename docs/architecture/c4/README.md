@@ -25,8 +25,11 @@ diagrams changed.
 | [CHANGELOG.md](CHANGELOG.md) | History | What changed in the architecture, in which PR, and why. |
 
 The prose deep dives in [`docs/`](../../README.md) (auth, billing, jobs, data
-model) go further on single subsystems. The C4 files are the map; where the two
-disagree, the C4 status column describes the code on the default branch.
+model) go further on single subsystems. The C4 files are a map of code structure,
+not a stronger authority than the current source/configuration. Report
+contradictions rather than treating an old status row as proof of runtime support.
+See [release readiness](../../release-readiness.md) for availability and validation
+limits; the architecture changelog records historical states.
 
 ## Status legend
 
@@ -36,6 +39,11 @@ Every diagram element and every table row carries one of two statuses.
 |---|---|---|
 | **Implemented** | Exists in the code on the default branch today. | Solid border, green fill, solid arrows. |
 | **Planned** | On the roadmap, not in the code yet. Shown so readers see where the design is heading. | Dashed border, grey fill, dotted arrows. |
+
+`Implemented` means the code exists, **not** that it is enabled, released,
+production-certified or covered by a current live canary. Safety-held/dormant
+subsystems need their explicit qualifiers even when their components are present.
+Historical successful drills do not override later admission holds.
 
 Removed elements are not drawn. Notable removals are recorded in
 [CHANGELOG.md](CHANGELOG.md).

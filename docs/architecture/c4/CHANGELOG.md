@@ -4,6 +4,24 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: Documentation reconciliation against current code (PR #176)
+
+**What changed:** corrected current C1/C2 labels for implemented template pipelines,
+split installer stages and configured shared backup integration; qualified GHCR
+publication, runtime acceptance, held sandbox saved lifecycle and registry deletion.
+The C4 legend now distinguishes existing code from enabled/released/accepted
+behavior. Added current support/release and CI operation guides and refreshed
+installer/product/developer documentation. Original ADR decisions and old C4
+entries remain historical with explicit supersession notes where needed.
+
+**Why:** old labels and runbooks still described mandatory RabbitMQ, absent
+pipelines, automatic pruning or publication, and all-feature readiness that the
+current code/configuration does not promise. Documentation changes do not create
+a release, run a cluster operation or certify untested paths.
+
+**Views updated:** C1 external systems, C2 current container/integration status and
+C4 README semantics. No runtime architecture or capability was changed.
+
 ## 2026-11-10: Kubernetes template static build seed delivery (PR #175)
 
 **What changed:** the existing node-template workflow gains an explicit static

@@ -5,6 +5,16 @@ This core port follows the read-only source pin `2f443b5d4720bc6571f39c128028590
 It does not deploy a runtime, publish an image, enable warming/imports, or authorize
 physical registry deletion. Both real registry-delete entrypoints remain on HOLD.
 
+## Current availability boundary
+
+This document describes low-level ported machinery, not a capability enablement
+promise. `SavedLifecycleAvailable(Config)` is fixed false: managed pause/resume,
+paused CONNECT/wake, fork and new AutoPause/AutoResume promises are refused before
+lifecycle effects, with no override flag. References below to saved startup arming
+or resume/fork describe dormant internals/compatibility, not reachable platform
+restore success. Named filesystem capture/export and ordinary pinned CREATE from a
+ready named image remain separate. See [saved-runtime admission](saved-runtime-admission.md).
+
 ## Intentional startup/TTL migration
 
 Startup is **not runtime TTL**. `Config.Startup` defaults to 900 seconds total,
