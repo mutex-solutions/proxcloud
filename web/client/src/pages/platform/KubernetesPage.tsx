@@ -429,7 +429,7 @@ export default function KubernetesPage() {
   const pid = useProjectId()
   const navigate = useNavigate()
   const {
-    kLocs, kScope, clusters, versionsFor, variantsFor, rowServiceId, rowScope, flavorOptionsFor, invalidate,
+    kLocs, kScope, clusters, versionsFor, variantsFor, platformVersionFor, rowServiceId, rowScope, flavorOptionsFor, invalidate,
   } = useKubernetesData(pid)
   const { data, isLoading, isError, error, refetch, isFetching } = clusters
 
