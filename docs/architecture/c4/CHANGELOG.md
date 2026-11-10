@@ -4,6 +4,23 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-11: Managed Kubernetes Gateway API addon
+
+**What changed:** tenant chart 0.1.10 adds NGINX Gateway Fabric 2.8.1 and vendored
+Gateway API Standard 1.6.3 carrier Secrets/ClusterResourceSet. The API/UI offer a
+new explicit opt-in, not an alias for ingress-nginx. The actual cluster chart and
+Kubernetes version are checked before effects. Sparse edits preserve newer picks
+and raw legacy ingress values; platform bumps preserve legacy release identity.
+
+**Why:** new clusters should use maintained Gateway API routing, while an unrelated
+edit must not prune an old traffic-bearing release or silently convert its routes.
+Standard CRDs are tenant prerequisites, not management-cluster CRD grants. CAAPH/CRS
+converge independently; Helm wait is not cross-controller dependency ordering.
+
+**Views updated:** [dedicated C1–C4 Gateway API view](../../managed-k8s-gateway-api.md),
+managed Kubernetes runbook and C4 index. No new PVE credential, shared-cluster action,
+automatic Gateway/TLS/DNS object or existing-cluster migration is introduced.
+
 ## 2026-11-10: Tenant read, role-assignment and private-traffic boundaries
 
 **What changed:** order reads now resolve the stored billing profile's owning

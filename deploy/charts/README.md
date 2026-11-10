@@ -47,7 +47,7 @@ separately approved release is published and tested; see
 For `database-cluster` and `proxmox-kamaji-cluster`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
 the matching tag. The current source versions are database `0.5.0` and Kubernetes
-`0.1.9`; they are independent of the app's `0.4.0`. Publishing is idempotent — an
+`0.1.10`; they are independent of the app's `0.4.0`. Publishing is idempotent — an
 already-published version is skipped, so a reused version does not update an old
 artifact. These are release operations, not commands to run during normal setup.
 See [CI/release operations](../../docs/ci-release.md) for full verification.

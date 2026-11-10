@@ -30,6 +30,16 @@ API client), `internal/platform/project/cloud_kamaji.go` (the
 `KUBERNETES_CLUSTER` surface), `internal/platform/externalservice/kamaji.go`
 (provider accessors).
 
+## Gateway API for new clusters
+
+Cluster chart `0.1.10` offers **NGINX Gateway Fabric** (`nginxGatewayFabric`) instead
+of a new ingress-nginx installation. The addon is opt-in and includes pinned tenant
+Gateway API Standard prerequisites, but creates no application Gateway, route, TLS
+issuer or DNS entry. Existing legacy ingress releases and their traffic are preserved,
+not automatically migrated by an addon edit or platform bump. See the
+[Gateway API contract, CRD lifecycle and migration runbook](managed-k8s-gateway-api.md).
+Source implementation and offline rendering are not a live Gateway API canary.
+
 ## 1. Management-cluster prerequisites
 
 One-time, per management cluster (apply order:

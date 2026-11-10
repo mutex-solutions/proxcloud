@@ -24,6 +24,7 @@ diagrams changed.
 | [PVE backup deletion interlock](../../pve-backup-delete-interlock.md) | C3/C4: Known-active refusal | Why single-archive deletion refuses current VM locks, visible active restores and unreadable state without claiming an atomic task fence. |
 | [Legacy SMTP credential TLS boundary](../../smtp-credential-tls-safety.md) | C1–C4: SMTP authentication | Why legacy credentials require verified configured-host TLS before AUTH, while explicit NoAuth compatibility and dormant outbox boundaries remain unchanged. |
 | [Tenant authorization boundaries](../../tenant-authorization-boundaries.md) | C1–C4: Tenant authorization | Stored-profile order reads, custom-role assignment authority and runtime-aware private traffic checks inside existing components. |
+| [Managed Kubernetes Gateway API](../../managed-k8s-gateway-api.md) | C1–C4: Tenant ingress replacement | Opt-in Gateway Fabric, tenant-scoped Standard schema delivery and explicit preservation of existing ingress traffic. |
 | [CHANGELOG.md](CHANGELOG.md) | History | What changed in the architecture, in which PR, and why. |
 
 The prose deep dives in [`docs/`](../../README.md) (auth, billing, jobs, data
