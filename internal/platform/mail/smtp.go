@@ -109,7 +109,11 @@ func authFor(c *smtp.Client, host, user, pass string) (smtp.Auth, error) {
 		return nil, nil
 	}
 	state, secure := c.TLSConnectionState()
-	if !secure || !state.HandshakeComplete || len(state.VerifiedChains) == 0 || state.ServerName != host {
+	if !secure || !state.HandshakeComplete || len(state.VerifiedChains) == 0 || len(state.PeerCertificates) == 0 {
+		return nil, errors.New("mail: SMTP credentials require verified TLS")
+	}
+	// Verify the configured identity, not SNI: IP literals do not send SNI.
+	if err := state.PeerCertificates[0].VerifyHostname(host); err != nil {
 		return nil, errors.New("mail: SMTP credentials require verified TLS")
 	}
 	ok, mechs := c.Extension("AUTH")
