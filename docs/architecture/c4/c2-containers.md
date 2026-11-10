@@ -237,6 +237,7 @@ flowchart LR
   inst["Installer (Ansible)<br/>make install, day-2 targets"]:::impl
   vmt["VM template pipeline<br/>build.py, Packer, tags"]:::impl
   k8st["K8s node template pipeline<br/>k8s-node-templates.yml, image-builder"]:::impl
+  k8sseed["Private build seed<br/>local NoCloud cidata ISO"]:::impl
   mgmt["Management cluster"]:::impl
   pve["Proxmox cluster"]:::impl
 
@@ -252,12 +253,29 @@ flowchart LR
   inst -->|"API: roles, tokens, stores, VMs"| pve
   inst --> vmt
   vmt -->|"templates in pc-templates"| pve
-  k8st -->|"node templates"| pve
+  k8st -->|"static mode: private seed generation"| k8sseed
+  k8sseed -->|"exact owned ISO upload; attach for install only"| pve
+  k8st -->|"verify seed detachment/deletion, then tag node templates"| pve
 ```
 
 Both SPA images normalize only nginx's public document root to 0755 directories
 and 0644 files; the entrypoint also sets generated `config.js` to 0644 so nginx
 workers can serve public assets regardless of checkout or runtime umask.
+
+The Kubernetes template workflow's static build mode delivers a private local
+NoCloud `cidata` ISO, not an HTTP seed that depends on a first DHCP lease. Its
+network configuration applies to both the live installer and installed build
+system, with an explicit Packer SSH address. This seed crosses the runner-to-PVE
+storage boundary with temporary build credentials and topology: never publish it
+as an artifact or serve it from a public listener. Final guest sanitization and
+seed media detachment/deletion precede template publication. Failure or forced
+termination is not evidence of cleanup; private per-run state records the exact
+owned seed volume for reviewed recovery without indiscriminate deletion. Static
+mode refuses same-name existing templates rather than treating NIC removal as
+proof of in-guest sanitization. The existing DHCP mode remains an explicit
+alternative, not a reason to enable a competing host DHCP server. This delivery
+path is covered by synthetic tests; full ISO boot/reboot acceptance remains a
+separate controlled canary.
 
 ## Container table
 
@@ -287,7 +305,7 @@ workers can serve public assets regardless of checkout or runtime umask.
 | CI | GitHub Actions `test.yml`, `docker.yml` (api, web, admin, sandbox-proxy, sandbox-runtime), `helm.yml`, `sandbox-templates.yml`, and the self-hosted `vm-templates.yml` and `k8s-node-templates.yml` | GitHub | Implemented |
 | Installer | Ansible playbooks and Makefile (`installer/`): one-shot install, `allinone` mode, day-2 targets; `split` mode is Planned | Operator workstation | Implemented |
 | VM template pipeline | `images/build.py` + Packer, `vm-templates.yml`; tag-published, one copy per node on local-disk sites | Self-hosted runner in the Proxmox network, or the installer from the first management host | Implemented |
-| K8s node template pipeline | image-builder | Self-hosted runner in the Proxmox network | Implemented, script run by hand |
+| K8s node template pipeline | image-builder; static NoCloud seed ISO or explicit DHCP mode | Self-hosted runner with PVE API and build-guest SSH access; no guest-to-runner HTTP needed in static mode | Implemented; static ISO runtime acceptance pending |
 
 ## Trust boundaries
 

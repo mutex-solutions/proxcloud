@@ -154,7 +154,7 @@ class BuildTests(unittest.TestCase):
 
 class WorkflowTests(unittest.TestCase):
     def env(self, vlan="0"):
-        return dict(os.environ, PVE_URL="https://pve.invalid", PVE_TOKEN_ID="fake", PVE_TOKEN_SECRET="fake", PVE_NODES="test-node",
+        return dict(os.environ, PVE_BUILD_NETWORK_MODE="dhcp", PVE_URL="https://pve.invalid", PVE_TOKEN_ID="fake", PVE_TOKEN_SECRET="fake", PVE_NODES="test-node",
                     PVE_TEMPLATE_STORAGE="disk", PVE_IMPORT_STORAGE="import", PVE_BRIDGE="bridge", BUILD_IP="192.0.2.40/24",
                     BUILD_GATEWAY="192.0.2.1", BUILD_NAMESERVER="", PVE_BUILD_VLAN=vlan, DHCP_RANGE="", DHCP_GATEWAY="", K8S_VERSION="1.35.10")
 
@@ -185,7 +185,7 @@ class WorkflowTests(unittest.TestCase):
 
 
 class KubernetesTests(unittest.TestCase):
-    def run_pipeline(self, vlan="29", iso=None, fail="", existing=False):
+    def run_pipeline(self, vlan="29", iso=None, fail="", existing=False, extra_env=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bindir = root / "bin"
@@ -196,9 +196,12 @@ class KubernetesTests(unittest.TestCase):
             upstream.parent.mkdir(parents=True)
             upstream.write_text(json.dumps({
                 "builders": [{"network_adapters": [{"vlan_tag": "{{user `vlan_tag`}}"}], "iso_file": "{{user `iso_file`}}"}],
-                "variables": {"vlan_tag": "{{env `PROXMOX_VLAN`}}"},
-                "provisioners": [{"pause_before": "10s"}],
+                "variables": {"vlan_tag": "{{env `PROXMOX_VLAN`}}", "ssh_password": "$SSH_PASSWORD"},
+                "provisioners": [{"pause_before": "10s"}, {"type": "goss"}, {"type": "shell", "expect_disconnect": True, "inline": ["sudo shutdown"]}],
             }))
+            seed = capi / 'packer/proxmox/linux/ubuntu/http/24.04/user-data.tmpl'
+            seed.parent.mkdir(parents=True)
+            seed.write_text('#cloud-config\\nautoinstall:\\n  version: 1\\n  user-data:\\n    users: []\\n')
             activate = work / "venv/bin/activate"
             activate.parent.mkdir(parents=True)
             activate.write_text("# Stub virtualenv; tests use host Python only.\n")
@@ -264,7 +267,7 @@ path = Path(os.environ['STATE']); s = json.loads(path.read_text())
 s['events'].append({'make': {key: os.environ.get(key) for key in ('PROXMOX_VLAN','PROXMOX_ISO_POOL','PROXMOX_STORAGE_POOL','ISO_FILE')}})
 path.write_text(json.dumps(s))
 if os.environ.get('FAIL') == 'make': sys.exit(37)
-template = json.loads(Path('packer/proxmox/packer.json.tmpl').read_text())
+template = json.loads(Path('packer/proxmox/packer.json').read_text())
 assert template['variables']['vlan_tag'] == '{{env `PROXMOX_VLAN`}}'
 assert template['builders'][0]['network_adapters'][0]['vlan_tag'] == '{{user `vlan_tag`}}'
 vlan = os.environ['PROXMOX_VLAN']
@@ -282,6 +285,8 @@ path.write_text(json.dumps(s))
             env.pop("PVE_ISO_STORAGE", None)
             if iso is not None:
                 env["PVE_ISO_STORAGE"] = iso
+            if extra_env:
+                env.update(extra_env)
             result = subprocess.run(["bash", str(ROOT / "images/k8s-node-template.sh")], env=env,
                                     capture_output=True, text=True, timeout=15)
             return result, json.loads(state.read_text())
@@ -327,8 +332,17 @@ path.write_text(json.dumps(s))
 
     def test_failed_build_prevents_cleanup_and_publish(self):
         result, state = self.run_pipeline(fail='make')
-        self.assertEqual(result.returncode, 37)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Image-builder failed', result.stderr)
         self.assertFalse(any(e.get('params',{}).get('delete') == 'net0' or 'tags' in e.get('params',{}) for e in state['events']))
+
+    def test_static_missing_fields_fail_before_api_and_existing_name_is_not_adopted(self):
+        for key in ('BUILD_IP', 'BUILD_GATEWAY', 'BUILD_NAMESERVER'):
+            extra = {'PVE_BUILD_NETWORK_MODE': 'static', 'BUILD_NAMESERVER': '192.0.2.53', key: ''}
+            result, state = self.run_pipeline(extra_env=extra)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(state['events'], [])
+            self.assertIn('Missing required static build setting', result.stderr)
 
     def test_invalid_vlan_fails_before_any_api_or_build(self):
         for vlan in ('-1','4095','01','bad',' 2','2.0'):

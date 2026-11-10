@@ -4,6 +4,26 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-10: Kubernetes template static build seed delivery (PR #175)
+
+**What changed:** the existing node-template workflow gains an explicit static
+network mode. A private local NoCloud `cidata` ISO supplies the live Ubuntu
+installer and installed build VM network, with an explicit Packer SSH host rather
+than DHCP address discovery or an inbound HTTP seed. Temporary build identity,
+static configuration and seed media are sanitized before node-template tagging.
+Existing DHCP mode is preserved as an explicit alternative.
+
+**Why:** an external DHCP server is not a Kubernetes requirement, and an HTTP
+seed cannot supply initial connectivity when the guest has no lease. The seed
+contains temporary credentials/topology; exact object ownership, private file
+permissions and verified detachment/deletion are part of the delivery boundary.
+A cancelled job or failed build does not prove cleanup; no broad storage deletion
+or host DHCP changes are implied.
+
+**Views updated:** C2c build/delivery diagram, container table and trust-boundary
+notes in [C2](c2-containers.md#c2c-build-and-delivery). Synthetic tests and Packer
+configuration validation are not live installer/reboot/tenant-node acceptance.
+
 ## 2026-11-10: DBaaS read endpoint / replica invariant
 
 **What changed:** replica scaling revalidates the current Application callback's

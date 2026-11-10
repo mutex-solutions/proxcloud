@@ -11,6 +11,11 @@ on:
       version:
         description: "Kubernetes version, e.g. 1.35.10"
         required: true
+      network_mode:
+        description: "Build network: static needs no DHCP/seed HTTP; dhcp preserves legacy behavior"
+        type: choice
+        options: [static, dhcp]
+        default: static
 
 permissions:
   contents: read
@@ -35,7 +40,11 @@ jobs:
       PVE_ISO_STORAGE: ${{ secrets.PVE_ISO_STORAGE }}
       PVE_BRIDGE: ${{ secrets.PVE_BRIDGE }}
       PVE_BUILD_VLAN: ${{ secrets.PVE_BUILD_VLAN || '0' }}
-      # Leave BUILD_DHCP_RANGE unset when the build bridge already has DHCP.
+      PVE_BUILD_NETWORK_MODE: ${{ inputs.network_mode || 'static' }}
+      BUILD_IP: ${{ secrets.BUILD_IP }}
+      BUILD_GATEWAY: ${{ secrets.BUILD_GATEWAY }}
+      BUILD_NAMESERVER: ${{ secrets.BUILD_NAMESERVER }}
+      # Leave BUILD_DHCP_RANGE unset for static mode or when trusted DHCP already exists.
       DHCP_RANGE: ${{ secrets.BUILD_DHCP_RANGE }}
       DHCP_GATEWAY: ${{ secrets.BUILD_GATEWAY }}
     steps:
@@ -51,6 +60,23 @@ jobs:
               missing=1
             fi
           done
+          if [[ "$PVE_BUILD_NETWORK_MODE" != static && "$PVE_BUILD_NETWORK_MODE" != dhcp ]]; then
+            echo "::error::Build network mode must be static or dhcp"
+            missing=1
+          fi
+          if [[ "$PVE_BUILD_NETWORK_MODE" = static ]]; then
+            for key in BUILD_IP BUILD_GATEWAY BUILD_NAMESERVER; do
+              value="${!key:-}"
+              if [[ -z "${value//[[:space:]]/}" ]]; then
+                echo "::error::Missing required static Actions secret: $key"
+                missing=1
+              fi
+            done
+            if [[ -n "$DHCP_RANGE" ]]; then
+              echo "::error::Static mode refuses BUILD_DHCP_RANGE"
+              missing=1
+            fi
+          fi
           if [[ -n "$DHCP_RANGE" && -z "${DHCP_GATEWAY//[[:space:]]/}" ]]; then
             echo "::error::Missing required Actions secret: BUILD_GATEWAY"
             missing=1
@@ -68,6 +94,9 @@ jobs:
           for node in $PVE_NODES; do
             echo "::add-mask::$node"
           done
+          if [[ "$PVE_BUILD_NETWORK_MODE" = static ]]; then
+            echo "::add-mask::${BUILD_IP%%/*}"
+          fi
       - uses: actions/checkout@v7
       - name: Build
         run: images/k8s-node-template.sh

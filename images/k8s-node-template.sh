@@ -6,11 +6,15 @@
 #   PVE_NODES="pve1 pve2 pve3" PVE_TEMPLATE_STORAGE=nas-templates PVE_BRIDGE=vmbr0 \
 #   K8S_VERSION=1.35.10 images/k8s-node-template.sh
 #
-# The image builder boots the Ubuntu installer, which needs DHCP on PVE_BRIDGE and a route back to the
-# machine running this script. DHCP_RANGE=192.0.2.60,192.0.2.69 runs a dnsmasq for the build, on the
-# interface of the default route, when the bridge has none. Needs: git make jq curl python3-venv, and
-# dnsmasq with DHCP_RANGE.
+# PVE_BUILD_NETWORK_MODE=static attaches a private local NoCloud seed ISO; no DHCP or
+# inbound seed HTTP server is required. The script default remains dhcp for compatibility.
+# Static needs BUILD_IP (host CIDR), BUILD_GATEWAY, BUILD_NAMESERVER and xorriso.
+# DHCP_RANGE starts optional host dnsmasq only in explicit dhcp mode; see images/README.md.
 set -euo pipefail
+umask 077
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+PVE_BUILD_NETWORK_MODE="${PVE_BUILD_NETWORK_MODE:-dhcp}"
+export PVE_BUILD_NETWORK_MODE
 
 : "${PVE_URL:?}" "${PVE_TOKEN_ID:?}" "${PVE_TOKEN_SECRET:?}" "${PVE_NODES:?}" "${PVE_TEMPLATE_STORAGE:?}" "${PVE_BRIDGE:?}" "${K8S_VERSION:?}"
 # Validate before any API request; never echo a private VLAN value on failure.
@@ -26,6 +30,11 @@ ISO_URL="${ISO_URL:-https://releases.ubuntu.com/noble/$ISO_NAME}"
 ISO_SHA256="${ISO_SHA256:-e907d92eeec9df64163a7e454cbc8d7755e8ddc7ed42f99dbc80c40f1a138433}"
 TEMPLATE_POOL="${TEMPLATE_POOL:-pc-templates}"
 WORK="${WORK:-$HOME/.cache/proxcloud-image-builder}"
+# Validate all static inputs before any PVE API operation, including URL downloads.
+python3 "$SCRIPT_DIR/k8s-build-config.py" check
+if [ "$PVE_BUILD_NETWORK_MODE" = static ]; then
+  command -v xorriso >/dev/null || { echo 'Static build mode requires xorriso' >&2; exit 1; }
+fi
 
 series="v${K8S_VERSION%.*}"
 name="ubuntu-2404-kube-v$K8S_VERSION"
@@ -35,20 +44,27 @@ api="${PVE_URL%/}/api2/json"
 
 pve() { curl -fsSk -H "Authorization: PVEAPIToken=$PVE_TOKEN_ID=$PVE_TOKEN_SECRET" "$@"; }
 
-wait_task() { # node upid
-  local up
-  up="$(printf %s "$2" | jq -sRr @uri)"
-  while :; do
-    st="$(pve "$api/nodes/$1/tasks/$up/status")"
-    [ "$(jq -r .data.status <<<"$st")" = stopped ] && break
+wait_task() { # node upid; explicit checks also apply when caller handles failure.
+  local up st status deadline=$((SECONDS + 600))
+  up="$(printf %s "$2" | jq -sRr @uri)" || return 1
+  while (( SECONDS < deadline )); do
+    st="$(pve "$api/nodes/$1/tasks/$up/status")" || return 1
+    status="$(jq -er '.data.status | select(.=="running" or .=="stopped")' <<<"$st")" || return 1
+    if [ "$status" = stopped ]; then
+      jq -e '.data.exitstatus=="OK"' <<<"$st" >/dev/null || { echo 'PVE build task failed (details retained in private PVE task log)' >&2; return 1; }
+      return 0
+    fi
     sleep 3
   done
-  [ "$(jq -r .data.exitstatus <<<"$st")" = OK ] || { echo "task failed: $st" >&2; return 1; }
+  echo 'PVE build task did not finish within the wait budget' >&2
+  return 1
 }
 
-vmid_of() { # template name on node -> vmid, empty when absent
-  pve "$api/cluster/resources?type=vm" |
-    jq -r --arg n "$1" --arg node "$2" '.data[] | select(.name==$n and .node==$node and .template==1) | .vmid' | head -1
+vmid_of() { # template name on node -> one vmid, empty when absent; reads fail closed
+  local rows
+  rows="$(pve "$api/cluster/resources?type=vm")" || return 1
+  jq -er '.data | type=="array"' <<<"$rows" >/dev/null || return 1
+  jq -r --arg n "$1" --arg node "$2" '[.data[] | select(.name==$n and .node==$node and .template==1) | .vmid] | if length>1 then error("ambiguous template name") elif length==0 then "" else .[0] end' <<<"$rows"
 }
 
 clean_build_network() { # node vmid: CAPMOX creates net0 from the tenant's NetworkDevices spec.
@@ -65,60 +81,130 @@ clean_build_network() { # node vmid: CAPMOX creates net0 from the tenant's Netwo
   fi
 }
 
-if [ -z "$(vmid_of "$name" "$first")" ]; then
+RUN_DIR=""
+SEED_VOLUME=""
+SEED_UPLOADED=0
+DHCP_STARTED=0
+KEEP_PRIVATE_RUN=0
+
+seed_detached() {
+  local rows ids id cfg
+  rows="$(pve "$api/cluster/resources?type=vm")" || return 1
+  jq -e '.data | type=="array" and all(.[]; type=="object" and (.type=="qemu" or .type=="lxc") and (.node|type=="string") and (.vmid|type=="number"))' <<<"$rows" >/dev/null || return 1
+  ids="$(jq -r --arg node "$first" '.data[] | select(.node==$node and .type=="qemu") | .vmid' <<<"$rows")" || return 1
+  # Read errors are not proof of detachment, including an empty/malformed resources response.
+  for id in $ids; do
+    [[ "$id" =~ ^[0-9]+$ ]] || return 1
+    cfg="$(pve "$api/nodes/$first/qemu/$id/config")" || return 1
+    jq -e --arg vol "$SEED_VOLUME" '.data | type=="object" and ([to_entries[] | select(.key|test("^(ide|sata|scsi)[0-9]+$")) | .value | startswith($vol+",")] | any | not)' <<<"$cfg" >/dev/null || return 1
+  done
+}
+
+remove_seed() {
+  local response task content
+  [ "$SEED_UPLOADED" = 1 ] || return 0
+  seed_detached || return 1
+  [[ "$SEED_VOLUME" = "$PVE_ISO_STORAGE:iso/pc-build-seed-"*.iso ]] || return 1
+  response="$(pve -X DELETE "$api/nodes/$first/storage/$PVE_ISO_STORAGE/content/$(printf %s "$SEED_VOLUME" | jq -sRr @uri)")" || return 1
+  task="$(jq -er '.data | if .==null then "" elif type=="string" then . else error("bad delete response") end' <<<"$response")" || return 1
+  if [ -n "$task" ]; then wait_task "$first" "$task" || return 1; fi
+  content="$(pve "$api/nodes/$first/storage/$PVE_ISO_STORAGE/content?content=iso")" || return 1
+  jq -e --arg vol "$SEED_VOLUME" '.data | type=="array" and ([.[] | select(.volid==$vol)] | length==0)' <<<"$content" >/dev/null || return 1
+  SEED_UPLOADED=0
+}
+
+finish_run() {
+  local status=$?
+  trap - EXIT
+  if [ "$DHCP_STARTED" = 1 ]; then sudo systemctl stop pc-image-dhcp || status=1; fi
+  if ! remove_seed; then
+    # Keep the private exact-volume note for manual owner-checked recovery; it is
+    # not safe to delete seed media still attached to a surviving build VM.
+    echo 'Sensitive build seed cleanup incomplete; publication refused. Review private run state.' >&2
+    status=1
+  elif [ -n "$RUN_DIR" ] && [ "$KEEP_PRIVATE_RUN" = 0 ]; then
+    case "$RUN_DIR" in
+      "$WORK"/run.*) [ "$(realpath -- "$RUN_DIR")" = "$RUN_DIR" ] && rm -rf -- "$RUN_DIR" ;;
+      *) echo 'Refusing unexpected run cleanup path' >&2; status=1 ;;
+    esac
+  fi
+  exit "$status"
+}
+trap finish_run EXIT
+
+if [ "$PVE_BUILD_NETWORK_MODE" = static ]; then
+  for node in $PVE_NODES; do
+    existing="$(vmid_of "$name" "$node")"
+    if [ -n "$existing" ]; then
+      echo 'Static build refuses existing same-name templates without guest cleanup proof; use an explicitly reviewed new version/rebuild' >&2
+      exit 1
+    fi
+  done
+fi
+
+existing="$(vmid_of "$name" "$first")"
+if [ -z "$existing" ]; then
   pve -X POST "$api/nodes/$first/storage/$PVE_ISO_STORAGE/download-url" \
     --data-urlencode "url=$ISO_URL" -d content=iso -d "filename=$ISO_NAME" -d checksum-algorithm=sha256 -d "checksum=$ISO_SHA256" \
     >/dev/null 2>&1 || true # already there, or the build will say so
 
   [ -d "$WORK/image-builder" ] || git clone -q --depth 1 -b "$IMAGE_BUILDER_REF" https://github.com/kubernetes-sigs/image-builder "$WORK/image-builder"
-  cd "$WORK/image-builder/images/capi"
+  WORK="$(realpath -- "$WORK")"
+  RUN_DIR="$(mktemp -d "$WORK/run.XXXXXXXX")"
+  chmod 0700 "$RUN_DIR"
+  cp -a -- "$WORK/image-builder" "$RUN_DIR/image-builder"
+  cd "$RUN_DIR/image-builder/images/capi"
   [ -d "$WORK/venv" ] || python3 -m venv "$WORK/venv"
   # shellcheck disable=SC1091
   source "$WORK/venv/bin/activate"
   export PATH="$PWD/.local/bin:$PATH"
 
-  # Upstream's template predates the plugin's boot_iso block and has no pool field. The pool is what the
-  # build token's ACL covers.
-  TEMPLATE_POOL="$TEMPLATE_POOL" python3 - <<'PY'
-import json, os
-path = 'packer/proxmox/packer.json.tmpl'
-doc = json.load(open(path))
-b = doc['builders'][0]
-# v0.1.55 exposes vlan_tag via PROXMOX_VLAN. Refuse an incompatible override
-# rather than silently building on an untagged network.
-if (b['network_adapters'][0].get('vlan_tag') != '{{user `vlan_tag`}}'
-        or doc['variables'].get('vlan_tag') != '{{env `PROXMOX_VLAN`}}'):
-    raise SystemExit('image-builder Proxmox template does not expose the expected VLAN input')
-b['pool'] = os.environ['TEMPLATE_POOL']
-if 'boot_iso' not in b:
-    b['boot_iso'] = {'iso_file': b.pop('iso_file'), 'unmount': True}
-    for k in ('iso_url', 'iso_checksum', 'iso_storage_pool', 'unmount_iso'):
-        b.pop(k, None)
-# Nested or slow nodes need more than upstream's 10s to come back from the reboot: Ansible then hangs on
-# a dead proxy connection instead of retrying.
-for p in doc['provisioners']:
-    if p.get('pause_before') == '10s':
-        p['pause_before'] = '90s'
-json.dump(doc, open(path, 'w'), indent=2)
-PY
+  # Render password-bearing files privately rather than upstream's tee-to-log helper.
+  TEMPLATE_POOL="$TEMPLATE_POOL" PVE_ISO_STORAGE="$PVE_ISO_STORAGE" \
+    python3 "$SCRIPT_DIR/k8s-build-config.py" prepare --capi "$PWD" --run "$RUN_DIR"
+
+  if [ "$PVE_BUILD_NETWORK_MODE" = static ]; then
+    SEED_VOLUME="$(<"$RUN_DIR/seed-volume")"
+    seed_name="$(<"$RUN_DIR/seed-name")"
+    command -v xorriso >/dev/null || { echo 'Static build mode requires xorriso' >&2; exit 1; }
+    xorriso -as mkisofs -quiet -volid cidata -joliet -rock -output "$RUN_DIR/$seed_name" \
+      "$RUN_DIR/seed/user-data" "$RUN_DIR/seed/meta-data" "$RUN_DIR/seed/network-config" >/dev/null 2>&1
+    # Prove absence before claiming exact-name ownership. An interrupted upload may
+    # still create the file, so track it before the transfer, but never an old object.
+    content="$(pve "$api/nodes/$first/storage/$PVE_ISO_STORAGE/content?content=iso")"
+    jq -e --arg vol "$SEED_VOLUME" '.data | type=="array" and ([.[] | select(.volid==$vol)] | length==0)' <<<"$content" >/dev/null
+    SEED_UPLOADED=1
+    upid="$(pve -X POST "$api/nodes/$first/storage/$PVE_ISO_STORAGE/upload" \
+      -F content=iso -F "filename=@$RUN_DIR/$seed_name" | jq -er .data)"
+    wait_task "$first" "$upid"
+    pve "$api/nodes/$first/storage/$PVE_ISO_STORAGE/content?content=iso" |
+      jq -e --arg vol "$SEED_VOLUME" '[.data[] | select(.volid==$vol)] | length==1' >/dev/null
+  fi
 
   if [ -n "${DHCP_RANGE:-}" ]; then
     iface="$(ip -o -4 route show default | awk '{print $5}')"
     sudo systemd-run --unit=pc-image-dhcp --collect /usr/sbin/dnsmasq --no-daemon --port=0 --bind-interfaces --interface="$iface" \
       "--dhcp-range=$DHCP_RANGE,2h" "--dhcp-option=3,${DHCP_GATEWAY:?with DHCP_RANGE}" --dhcp-option=6,1.1.1.1 --no-resolv
-    trap 'sudo systemctl stop pc-image-dhcp' EXIT
+    DHCP_STARTED=1
   fi
 
-  vars="$(mktemp)"
-  cat >"$vars" <<EOF
-{"kubernetes_semver":"v$K8S_VERSION","kubernetes_series":"$series","kubernetes_deb_version":"$K8S_VERSION-1.1","kubernetes_rpm_version":"$K8S_VERSION",
- "disk_format":"raw","cores":"2","sockets":"2","memory":"4096","disk_size":"20G","cpu_type":"host"}
-EOF
+  vars="$RUN_DIR/vars.json"
   # Proxmox plugin represents an untagged adapter with an empty string, not tag=0.
   vlan_tag=""; if (( PVE_BUILD_VLAN )); then vlan_tag="$PVE_BUILD_VLAN"; fi
-  PROXMOX_URL="$api" PROXMOX_USERNAME="$PVE_TOKEN_ID" PROXMOX_TOKEN="$PVE_TOKEN_SECRET" PROXMOX_NODE="$first" \
+  echo 'Starting image-builder; detailed output is retained only in private per-run state'
+  if ! PROXMOX_URL="$api" PROXMOX_USERNAME="$PVE_TOKEN_ID" PROXMOX_TOKEN="$PVE_TOKEN_SECRET" PROXMOX_NODE="$first" \
     PROXMOX_ISO_POOL="$PVE_ISO_STORAGE" PROXMOX_BRIDGE="$PVE_BRIDGE" PROXMOX_VLAN="$vlan_tag" PROXMOX_STORAGE_POOL="$PVE_TEMPLATE_STORAGE" \
-    ISO_FILE="$PVE_ISO_STORAGE:iso/$ISO_NAME" PACKER_VAR_FILES="$vars" make build-proxmox-ubuntu-2404
+    ISO_FILE="$PVE_ISO_STORAGE:iso/$ISO_NAME" PACKER_VAR_FILES="$vars" \
+    PACKER_LOG=0 PACKER_LOG_PATH= PACKER_DEBUG=0 DEBUG= \
+    PACKER_BIN="$(command -v packer)" \
+    make --silent -o set-ssh-password build-proxmox-ubuntu-2404 >"$RUN_DIR/build.log" 2>&1; then
+    echo 'Image-builder failed; detailed output remains in private run state (not public logs)' >&2
+    KEEP_PRIVATE_RUN=1
+    exit 1
+  fi
+  # Sensitive local media must be detached and the exact uploaded seed deleted
+  # before *any* clone or pc-k8s publication. Packer success alone is insufficient.
+  remove_seed || { echo 'Sensitive build seed cleanup incomplete; publication refused' >&2; exit 1; }
 fi
 
 src="$(vmid_of "$name" "$first")"
