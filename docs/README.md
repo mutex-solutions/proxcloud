@@ -41,6 +41,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Legacy SMTP credential TLS boundary](smtp-credential-tls-safety.md) — verified
+  configured-host TLS before credential AUTH; explicit NoAuth relay compatibility,
+  bounded synthetic tests and unchanged dormant mail-outbox safety holds.
+
 - [Validation approval outbox](validation-approved-outbox.md) — default-OFF approval-only
   mail decisions for the actual billing-profile validation document; atomic generation,
   keyless revocation/history, and explicitly separate postcommit activation effects.

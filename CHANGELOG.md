@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require verified configured-host TLS before legacy SMTP credential authentication,
+  including LOGIN-only and AUTH-stripped relays. Guard LOGIN independently against
+  plaintext and host mismatch; preserve explicit NoAuth relay compatibility and
+  PLAIN preference. No outbox delivery, relay configuration or live send is enabled.
+
 - Protect full and sampled Proxmox SERVER/VOLUME/IMAGE reconciliation from
   filtered, malformed or unreadable VM inventories. Same-credential scoped proof
   and whole-row CAS preserve cache/history on unknown reads; identity retirement
