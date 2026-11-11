@@ -122,6 +122,12 @@ func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, sec Clust
 	if err := spec.Validate(s.cfg.Defaults); err != nil {
 		return nil, err
 	}
+	if err := ValidateCreateAddons(s.cfg.ChartVersion, spec.Addons); err != nil {
+		return nil, err
+	}
+	if err := ValidateGatewayFabricKubernetes(spec.Version, spec.Addons); err != nil {
+		return nil, err
+	}
 	ns := NamespaceFor(spec.ProjectID)
 	if err := s.EnsureProjectNamespace(ctx, spec.ProjectID); err != nil {
 		return nil, fmt.Errorf("kamaji: ensure namespace: %w", err)
@@ -561,6 +567,9 @@ func (s *Service) SetChartVersion(ctx context.Context, clusterID, version string
 		src, _ := dig(app, "spec", "source").(map[string]any)
 		if src == nil {
 			return fmt.Errorf("kamaji: cluster %s: application carries no source", clusterID)
+		}
+		if err := validateAddonChartTransition(app, version); err != nil {
+			return err
 		}
 		src["targetRevision"] = version
 		return nil

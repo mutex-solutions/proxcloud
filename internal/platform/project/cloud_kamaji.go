@@ -60,6 +60,14 @@ func (h *Handler) kamajiCreate(w http.ResponseWriter, r *http.Request, u *user.U
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
 	}
+	if err := kamaji.ValidateCreateAddons(ks.Config().ChartVersion, spec.Addons); err != nil {
+		h.fail(w, httpx.BadRequest(err.Error()))
+		return
+	}
+	if err := kamaji.ValidateGatewayFabricKubernetes(spec.Version, spec.Addons); err != nil {
+		h.fail(w, httpx.BadRequest(err.Error()))
+		return
+	}
 	// GPU worker quota rides the same platform gate as servers (Phase K re-checks
 	// against PVE mapping capacity too).
 	if err := h.enforceGPUQuotaForNodeGroups(r.Context(), proj, es.ID, spec.NodeGroups, nil); err != nil {
@@ -283,30 +291,16 @@ func (h *Handler) kamajiAction(w http.ResponseWriter, r *http.Request, proj *Pro
 		return true
 
 	case "SET_ADDONS":
-		// Post-create add-on (re)configuration — the same curated menu the create wizard offers,
-		// replacing the customer-toggle block wholesale (the UI always sends the full set).
+		// Post-create curated picks merge with current values, preserving choices omitted by older
+		// clients and the separately retained legacy ingress release.
 		addons, err := kamajiAddons(data["addons"])
 		if err != nil {
 			h.fail(w, httpx.BadRequest(err.Error()))
 			return true
 		}
-		for name := range addons {
-			if _, ok := kamaji.ClusterAddons[name]; !ok {
-				h.fail(w, httpx.BadRequest(fmt.Sprintf("unknown add-on %q", name)))
-				return true
-			}
-		}
-		// Rebuilt wholesale from the picks. A legacy credential-push addon entry is deliberately
-		// DROPPED here: the pushed credential must not survive an addon edit.
-		err = ks.PatchClusterValues(r.Context(), cr.ExternalID, func(values map[string]any) error {
-			block := kamaji.AddonValues(addons)
-			if len(block) == 0 {
-				delete(values, "addons") // back to the chart's defaults
-				return nil
-			}
-			values["addons"] = block
-			return nil
-		})
+		// Merge against the live pin and values: older clients must not erase a newer controller,
+		// and legacy ingress traffic cannot be removed by an unrelated metrics/certificate edit.
+		err = ks.PatchAddons(r.Context(), cr.ExternalID, addons)
 		if err != nil {
 			h.fail(w, err)
 			return true

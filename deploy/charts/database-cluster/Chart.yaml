@@ -27,6 +27,10 @@ type: application
 # engineVersion→image maps live in templates/_helpers.tpl and are ops-updatable
 # per chart release (bump images -> bump version -> re-pin).
 #
+# 0.5.1 updates PostgreSQL 15–18 to same-major patch targets only. Source
+# metadata bump, not publication or provider re-pinning; see
+# docs/managed-postgresql-version-baseline.md for evidence and release gates.
+#
 # 0.5.0 adds, on top of 0.4.0:
 #   * network.addressPool: the MetalLB pool annotation on EVERY tenant-facing LB
 #     Service (<id>-lb, <id>-ro-lb, <id>-dash-lb, the Strimzi bootstrap + brokers).
@@ -48,4 +52,4 @@ type: application
 #     actually stamp (valkey.io/cluster, opensearch.org/*); the valkey ACL users get
 #     explicit permissions; the mysql CR carries a backup image; every object name
 #     derived from a customer identifier maps '_' to '-'.
-version: 0.5.0
+version: 0.5.1

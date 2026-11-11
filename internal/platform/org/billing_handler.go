@@ -167,6 +167,25 @@ func (h *BillingHandler) requireBillingProfileRead(w http.ResponseWriter, r *htt
 	return bp, true
 }
 
+// CanReadBillingProfile reports whether sub holds BILLING_PROFILE_READ on the organization that
+// owns the profile: the same rule as requireBillingProfileRead, as a yes/no for callers that
+// answer in their own words (the order read answers 404 either way). A missing profile or
+// organization is false, not an error.
+func (h *BillingHandler) CanReadBillingProfile(ctx context.Context, sub, bpID string) (bool, error) {
+	if sub == "" || bpID == "" {
+		return false, nil
+	}
+	bp, err := h.billing.FindByID(ctx, bpID)
+	if err != nil || bp == nil {
+		return false, err
+	}
+	o, err := h.svc.FindOrganization(ctx, bp.OrganizationID)
+	if err != nil || o == nil {
+		return false, err
+	}
+	return h.policy.HasPermission(ctx, sub, o.ID, rbac.BillingProfileRead), nil
+}
+
 // orgCostInfo handles GET /bill/{billingProfileId}/cost-info: the org-wide billing overview for the
 // org billing dashboard — the profile aggregate plus a per-project breakdown ({projectId: CostInfo},
 // only projects that have billed items). Reuses the same cost breakdown as the project dashboard,

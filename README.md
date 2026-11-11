@@ -112,9 +112,9 @@ before upgrading; mail durability is a separate follow-up.
 
 ## 🚀 Quickstart
 
-Broker-free defaults target the planned **v0.4.0** API/chart. Until a separately
-approved release is published, build from a checkout containing the PostgreSQL
-job engine (installer `images.build: true`) or pin known compatible new images;
+Broker-free defaults target the **v0.4.0-rc.1** API/chart preview. Publication is
+authorized, but until its image and chart artifacts are verified pullable, build
+from a checkout containing the PostgreSQL job engine (installer `images.build: true`) or pin known compatible new images;
 do not use the older Rabbit-dependent API with these defaults.
 
 **[`docs/quickstart.md`](docs/quickstart.md)** takes you from "what do I want" to a running
