@@ -1,15 +1,18 @@
 # Current support boundaries and first-release readiness
 
-Status snapshot: **2026-11-10**, after the static node-template changes in PR #175.
-This is an evidence summary, not a release announcement or a production SLA. Check
-GitHub's Releases/Actions pages again before choosing a deployment commit.
+Status snapshot: **2026-11-11**, preparing the first `v0.4.0-rc.1` preview.
+This is an evidence summary, not a release announcement or a production SLA. The
+owner has authorized first app/chart release CI, released-artifact installation
+and later controlled PVE template canaries; this source change does not publish
+artifacts or perform live acceptance. Check GitHub's Releases/Actions pages again
+before choosing a deployment commit.
 
 ## What is available now
 
 - Source on `main` and public development container images on GHCR. There are
-  **no published ProxCloud tags, GitHub Releases or OCI charts yet**. The app chart
-  and installer BOM contain planned `0.4.0` / `v0.4.0` values; those values do not
-  make a registry artifact exist.
+  **no published ProxCloud tags, GitHub Releases or OCI charts yet**. The prepared
+  app chart `0.4.0-rc.1`, appVersion and installer BOM `v0.4.0-rc.1` describe the
+  first preview, not stable or an already-existing registry artifact.
 - The installer defaults to `images.build: true`, building the API and two
   consoles plus app chart from the checkout. A source/local-registry installation
   is a different path from pulling a released chart with `images.build: false`.
@@ -65,30 +68,38 @@ registration belongs in public documentation or release artifacts.
 
 ## Minimum gate before a first preview/RC
 
-A narrowly scoped core preview is reasonable; it need not claim every managed
-service. The following still require a separately approved release operation:
+The owner has authorized this narrowly scoped core preview and evaluation; it
+need not claim every managed service. Authorization is not evidence of publication
+or installation. Before reporting the first RC as usable:
 
-1. Choose the release commit and version, and document the supported core surface
-   and explicit experimental/held features. `v0.4.0-rc.1` is a proposal, not a tag
-   that already exists.
-2. Align app/chart/installer BOM and user-facing examples with that exact version.
-   Keep independent managed-service chart versions independent; do not assume an
-   app tag publishes them.
-3. Fix the current release workflow's prerelease/non-latest policy before cutting
-   an RC. The current Docker release job uses `--latest`; it does not derive
-   prerelease status from the tag suffix.
+1. Review the exact release commit for `v0.4.0-rc.1` and its supported core surface
+   and explicit experimental/held features. This prepared version is not an
+   already-published tag.
+2. Verify app/chart/installer BOM alignment with that exact version. Keep managed
+   charts independent: `database-cluster` `0.5.1` and `proxmox-kamaji-cluster`
+   `0.1.10` need their own tag/publication checks. Do not move existing provider
+   pins or managed data as a consequence of the app release.
+3. Verify the release-policy tests on the selected commit. The Release job accepts
+   strict stable/RC tags from the environment: RCs use
+   `--prerelease --latest=false`, stable releases use `--latest`. Notes and release
+   creation use only the validated tag/version and fixed policy flags.
 4. Require successful tests for the exact release commit and verify **all** image
    and chart publication jobs, package visibility and anonymous pulls. The current
    image and Helm workflows are independent; image completion alone is not chart
-   completion or a deployment.
-5. Install from the intended published chart/images with `images.build: false` on
-   a clean evaluation site. Check login/client/admin, provider connection, one
-   basic server create/delete, configuration/secrets and the explicit scheduler
-   choice. A source-build installation is not this acceptance.
-6. Record rollback/backup/migration limits. Mark the release as a prerelease with
-   truthful known issues; do not call a core preview an all-features stable release.
+   completion or a deployment. Keep the default `images.build: true` meanwhile.
+5. After publication, install the exact released chart/images with
+   `images.build: false` on a clean evaluation site. The installer accepts valid
+   SemVer with **base version >= 0.4.0**, including prereleases; this local guard
+   does not prove publication or a stable release. Check login/client/admin,
+   provider connection, one basic server create/delete, configuration/secrets and
+   the explicit scheduler choice. A source-build installation is not this acceptance.
+6. Record rollback/backup/migration limits. Keep the release a truthful prerelease;
+   neither this preparation nor a green build clears full live installer (P6) or
+   split/managed-service (P7) acceptance. Intentional safety holds stay in place.
 
-Do not create a tag simply to test a docs change: `v*` is a publication trigger.
+A `v*` tag is an app publication trigger, not a PVE template trigger. Later
+owner-authorized template canaries remain separate reviewed branch/run operations;
+this change neither triggers them nor changes their credentials or runner routing.
 
 ## How to read older documentation
 

@@ -16,8 +16,9 @@ Three ways to install it:
 Docker Compose (`docker compose up` at the repo root) is the fourth option, for a
 single development machine.
 
-**Release state (2026-11-10):** the chart/BOM's `v0.4.0` is planned and unpublished;
-there is no public ProxCloud chart release yet. Public development container tags
+**First-release preparation (2026-11-11):** the chart/BOM selects `v0.4.0-rc.1`,
+an authorized preview candidate. It is not published merely by this source change;
+verify the actual public chart and image artifacts before installation. Public development container tags
 are not a versioned release or evidence of a clean install from published
 artifacts. Use the source-build path below or explicitly pin a compatible verified
 set of images; do not treat a successful render/CI run as production acceptance.
@@ -29,8 +30,8 @@ fresh cluster (kind, k3d, minikube or a real one) with no operators. Needs
 `helm` 3.8+, `kubectl` and a default StorageClass.
 
 **Images first.** The chart pulls `ghcr.io/mutex-solutions/proxcloud-{api,web,admin}`
-at the chart's planned `appVersion` (`v0.4.0`). **This broker-free release is
-UNPUBLISHED until a separately approved release publishes it.** Use images built
+at the chart's candidate `appVersion` (`v0.4.0-rc.1`). **The preview must be
+published and every required artifact verified before using these pull defaults.** Use images built
 from the checkout containing the PostgreSQL job engine, or explicitly pin a known
 compatible new image/tag/digest. Do not point the new chart at a v0.3.x API: it
 requires RabbitMQ and cannot use these defaults. Until publication, build the
