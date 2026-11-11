@@ -279,9 +279,10 @@ class KubernetesTests(unittest.TestCase):
             activate.write_text("# Stub virtualenv; tests use host Python only.\n")
             state = root / "state.json"
             initial = {"events": [], "vms": {}, "nextid": 9201}
-            if existing:
+            if existing or (extra_env or {}).get("PREEXISTING_BUILD_ID"):
                 os_slug = (extra_env or {}).get("K8S_OS", "ubuntu-2604")
-                initial["vms"]["9200"] = {"name": os_slug + "-kube-v1.35.10", "node": "test-node", "template": 1,
+                initial["vms"]["9200"] = {"name": os_slug + "-kube-v1.35.10" if existing else "packer-old",
+                                          "node": "test-node", "template": 1 if existing else 0,
                                           "net0": "virtio=02:00:00:00:00:01,bridge=test-bridge,tag=29,firewall=1,mtu=1450"}
             state.write_text(json.dumps(initial))
             curl_stub = r'''#!/usr/bin/env python3
@@ -302,6 +303,21 @@ data = None
 match = re.search(r'/nodes/([^/]+)/qemu/(\d+)', url)
 if '/cluster/resources?' in url:
     data = [dict(v, vmid=int(k)) for k, v in s['vms'].items()]
+    if s.get('made'):
+        n = s.get('discovery_reads', 0); s['discovery_reads'] = n + 1
+        mode = os.environ.get('DISCOVERY', '')
+        if mode == 'read-error':
+            path.write_text(json.dumps(s)); sys.exit(22)
+        if mode == 'malformed': data = None
+        if mode == 'absent' or (mode == 'lag' and n == 0): data = []
+        if mode == 'lag' and n == 1:
+            data = [dict(data[0], name='packer-current-run', template=0)]
+        if mode == 'ambiguous': data.append(dict(data[0], vmid=9299))
+elif '/pools/' in url:
+    data = {'members': [dict(v, vmid=int(k), type='qemu') for k, v in s['vms'].items() if v.get('pool') == url.rsplit('/', 1)[1]]}
+    if os.environ.get('DISCOVERY') == 'wrong-pool': data['members'] = []
+elif url.endswith('/status/current'):
+    data = {'status': 'running' if os.environ.get('DISCOVERY') == 'running' else 'stopped'}
 elif url.endswith('/cluster/nextid'):
     data = s['nextid']; s['nextid'] += 1
 elif '/tasks/' in url:
@@ -318,6 +334,8 @@ elif url.endswith('/config'):
     vm = s['vms'][match[2]]
     if method == 'GET':
         data = dict(vm, digest='fake-digest')
+        if os.environ.get('DISCOVERY') == 'wrong-name': data['name'] = 'packer-not-final'
+        if os.environ.get('DISCOVERY') == 'not-template': data['template'] = 0
     else:
         if params.get('delete') == 'net0':
             assert params['digest'] == 'fake-digest'
@@ -347,7 +365,8 @@ assert template['variables']['vlan_tag'] == '{{env `PROXMOX_VLAN`}}'
 assert template['builders'][0]['network_adapters'][0]['vlan_tag'] == '{{user `vlan_tag`}}'
 vlan = os.environ['PROXMOX_VLAN']
 net = 'virtio=02:00:00:00:00:01,bridge=test-bridge,firewall=1,mtu=1450' + (',tag='+vlan if vlan else '')
-s['vms']['9200'] = {'name': os.environ['K8S_OS']+'-kube-v'+os.environ['K8S_VERSION'], 'node': 'test-node','template': 1, 'net0':net}
+s['vms']['9200'] = {'name': os.environ['K8S_OS']+'-kube-v'+os.environ['K8S_VERSION'], 'node': 'test-node','template': 1, 'net0':net, 'pool': os.environ.get('TEMPLATE_POOL', 'pc-templates')}
+s['made'] = True
 path.write_text(json.dumps(s))
 '''
             git_stub = r'''#!/usr/bin/env python3
@@ -379,10 +398,13 @@ else:
             data = blobs[oid.decode()]
             sys.stdout.buffer.write(oid + b' blob ' + str(len(data)).encode() + b'\n' + data + b'\n')
 '''
-            for tool, script in (("curl", curl_stub), ("make", make_stub), ("git", git_stub)):
+            for tool, script in (("curl", curl_stub), ("make", make_stub), ("git", git_stub),
+                                 ("xorriso", "#!/bin/bash\nexit 0\n")):
                 target = bindir / tool
                 target.write_text(script)
                 target.chmod(0o755)
+            # Source the production wrapper with only sleep replaced: advance its
+            # SECONDS deadline without wall-clock waits in timeout cases.
             env = WorkflowTests().env(vlan)
             env.update(PATH=str(bindir) + ":" + env["PATH"], WORK=str(work), STATE=str(state), OBJECTS=str(objects), FAIL=fail,
                        PVE_NODES="test-node other-node", PVE_TEMPLATE_STORAGE="disk-store", PVE_BRIDGE="test-bridge", HOME=str(root))
@@ -391,7 +413,8 @@ else:
                 env["PVE_ISO_STORAGE"] = iso
             if extra_env:
                 env.update(extra_env)
-            result = subprocess.run(["bash", str(ROOT / "images/k8s-node-template.sh")], env=env,
+            result = subprocess.run(["bash", "-c", 'sleep() { SECONDS=$((SECONDS + $1)); }; source "$1"',
+                                     "test-wrapper", str(ROOT / "images/k8s-node-template.sh")], env=env,
                                     capture_output=True, text=True, timeout=15)
             return result, json.loads(state.read_text())
 
@@ -464,6 +487,59 @@ else:
         self.assertFalse(any('make' in e for e in state['events']))
         self.assertNotIn('net0', state['vms']['9200'])
 
+    def test_post_build_discovery_waits_for_empty_and_old_packer_cache(self):
+        result, state = self.run_pipeline(extra_env={'DISCOVERY': 'lag'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = state['events']
+        made = next(i for i, e in enumerate(events) if 'make' in e)
+        cleaned = next(i for i, e in enumerate(events) if e.get('params', {}).get('delete') == 'net0')
+        polls = [e for e in events[made + 1:cleaned] if '/cluster/resources?' in e.get('url', '')]
+        self.assertEqual(len(polls), 3)
+        checks = [e['url'] for e in events[made + 1:cleaned] if e.get('method') == 'GET']
+        self.assertTrue(any('/pools/pc-templates' in url for url in checks))
+        self.assertTrue(any('/qemu/9200/config' in url for url in checks))
+        self.assertTrue(any('/qemu/9200/status/current' in url for url in checks))
+        self.assertNotIn('net0', state['vms']['9200'])
+
+    def test_persistent_discovery_absence_is_bounded_before_mutation(self):
+        result, state = self.run_pipeline(extra_env={'DISCOVERY': 'absent'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('discovery timed out after 120s', result.stderr)
+        # Fake sleep advances 3 seconds per empty lookup; wall time may reduce this.
+        self.assertGreater(state['discovery_reads'], 1)
+        self.assertLessEqual(state['discovery_reads'], 40)
+        self.assertFalse(any(e.get('url', '').endswith('/clone') or
+                             e.get('params', {}).get('delete') == 'net0' or
+                             'tags' in e.get('params', {}) for e in state['events']))
+
+    def test_discovery_read_ambiguity_and_identity_errors_are_not_retried(self):
+        for mode in ('read-error', 'malformed', 'ambiguous', 'wrong-pool', 'wrong-name', 'not-template', 'running'):
+            with self.subTest(mode=mode):
+                result, state = self.run_pipeline(extra_env={'DISCOVERY': mode})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(state['discovery_reads'], 1)
+                self.assertNotIn('timed out', result.stderr)
+                self.assertFalse(any(e.get('url', '').endswith('/clone') or
+                                     e.get('params', {}).get('delete') == 'net0' or
+                                     'tags' in e.get('params', {}) for e in state['events']))
+
+    def test_build_discovery_refuses_any_baseline_vmid(self):
+        result, state = self.run_pipeline(extra_env={'PREEXISTING_BUILD_ID': 'yes'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('refuses a preexisting VMID', result.stderr)
+        self.assertEqual(state['discovery_reads'], 1)
+        self.assertFalse(any(e.get('url', '').endswith('/clone') or
+                             e.get('params', {}).get('delete') == 'net0' or
+                             'tags' in e.get('params', {}) for e in state['events']))
+
+    def test_static_existing_name_refused_without_build_or_wait(self):
+        result, state = self.run_pipeline(existing=True, extra_env={
+            'PVE_BUILD_NETWORK_MODE': 'static', 'BUILD_NAMESERVER': '192.0.2.53'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Static build refuses existing same-name templates', result.stderr)
+        self.assertEqual(len(state['events']), 1)
+        self.assertFalse(any('make' in e for e in state['events']))
+
     def test_failed_cleanup_or_readback_prevents_clone_and_publish(self):
         for fail in ('cleanup','readback'):
             with self.subTest(fail=fail):
@@ -475,6 +551,7 @@ else:
         result, state = self.run_pipeline(fail='make')
         self.assertEqual(result.returncode, 1)
         self.assertIn('Image-builder failed', result.stderr)
+        self.assertNotIn('discovery_reads', state)
         self.assertFalse(any(e.get('params',{}).get('delete') == 'net0' or 'tags' in e.get('params',{}) for e in state['events']))
 
     def test_static_missing_fields_fail_before_api_and_existing_name_is_not_adopted(self):
