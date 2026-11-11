@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs as root only after upstream provisioning, reboot and goss have succeeded.
-# Do not apply/restart networking here: the current SSH session must finish safely.
+# Do not apply/restart networking or power off here: Packer must remove its SSH script.
+# The Proxmox builder owns the later VM stop and template conversion phase.
 set -euo pipefail
 [ "$(id -u)" = 0 ]
 
@@ -52,4 +53,3 @@ done
 [ ! -d /var/lib/cloud/seed ]
 [ "$(getent shadow builder | cut -d: -f2)" = '!' ]
 sync
-shutdown -h now

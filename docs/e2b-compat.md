@@ -133,7 +133,7 @@ dashboard APIs. They answer 404 with E2B's error body.
 | Commands (`process.Process`: start, connect, list, send input, signal, PTY) | yes | envd itself; output streams through the proxy |
 | Files (`filesystem.Filesystem`, `/files` upload and download, watch) | yes | envd itself |
 | `get_host(port)` / preview URLs | yes | Any port the sandbox listens on, HTTP and WebSocket; ports bound to localhost too (sandbox-init relays them) |
-| `trafficAccessToken` (`network.allowPublicTraffic: false`) | yes | Header `e2b-traffic-access-token` on every port but envd's |
+| `trafficAccessToken` (`network.allowPublicTraffic: false`) | yes | Header `e2b-traffic-access-token` on every application port; port 49983 is exempt only when the pod actually runs envd (which checks its own token). Native private services require the traffic token there too. |
 | envd control routes (`/init`, `/freeze`, …) | blocked | Refused by the proxy, as in E2B |
 | Default user | yes | `user` with home `/home/user`; created at boot if the image has none |
 | Environment | partial | Image `ENV` + `envVars` reach every command; `HOME`/`USER` are per user |
