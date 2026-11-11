@@ -24,7 +24,7 @@ build.py build --os debian-13 --node pve1 --storage nas-templates --import-stora
 
 | Step | What happens |
 |---|---|
-| Base | The vendor image is downloaded to the store with `import` content, once per upstream checksum. A temporary base template is created from it with a cloud-init drive, a serial console and the agent flag. |
+| Base | The vendor image is downloaded to the store with `import` content, once per upstream checksum. A fresh, stopped base VM is created with a cloud-init drive, a serial console and the agent flag. Its imported `scsi0` is grown to at least **20 GiB** and read back before template conversion or first boot; larger vendor disks are not shrunk. |
 | Packer | `packer/template.pkr.hcl` clones the base, runs `scripts/base.sh` and `scripts/cleanup.sh`, and converts the clone to a template. |
 | Smoke test | A clone boots on the same bridge/access VLAN as the build, and the guest agent must report the address cloud-init configured. The clone is then destroyed. |
 | Publish | Only after smoke success is the build NIC (`net0`) removed, then public tags applied. Failed cleanup cannot publish; tenant/server create supplies its own NIC. |
@@ -34,9 +34,15 @@ build.py build --os debian-13 --node pve1 --storage nas-templates --import-stora
 
 - `qemu-guest-agent` installed and enabled (the sync reads VM addresses from it)
 - a cloud-init drive, and an image that logs in with `sshkeys` or `cipassword` alone
-- a scsi boot disk that can be resized
+- a scsi boot disk that can be resized; **new native OS bases/artifacts have a 20 GiB minimum virtual disk** across all four OS slugs (not 20 GiB of guaranteed guest free space)
 - clean state: cloud-init, machine-id, SSH host keys, logs and SSH keys all cleared
 - no build NIC on published OS/Kubernetes templates: server creation and CAPMOX's `NetworkDevices` configuration create the tenant's `net0` before first boot
+
+### Native OS build disk and admission
+
+`DEFAULT_BUILD_DISK_GIB = 20` in the [native builder](<build.py>) is an artifact floor, not an IaaS flavor default or an existing-VM resize. The grow-only absolute `PUT /resize` runs only for the exact newly created, stopped, non-template base in `pc-templates`, after import and before conversion/Packer. A null synchronous resize result is read back without waiting on a nonexistent task; a valid asynchronous task must finish first. Missing/malformed size, failed resize/task, changed identity, or inadequate readback prevents Packer and publication. Existing `base` command reuse returns its VMID unchanged; existing templates, provider pins and tenant disks are not migrated by this change. Do not attach this floor to a name-prefix repair loop.
+
+Vendor cloud-init must grow the guest partition/filesystem on first boot; the PVE virtual-disk readback alone does not prove that happened. Before admitting a new artifact, prove guest root capacity, normal APT dist-upgrade and all unchanged provisioning/smoke/cleanup gates. The Ubuntu 26.04 canary that booted/reached SSH but ran out of space in APT is **not accepted**. The floor and FakePVE regressions are source changes only, not an executed test/build result. See [disk sizing, scope and operator acceptance](<../docs/template-build-disk.md>) for the failure boundary and review gates.
 
 ## Tags
 

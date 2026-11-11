@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Grow only a freshly created native OS-template base to a verified minimum 20 GiB
+  before template conversion or first-boot package provisioning. Preserve larger
+  upstream disks, validate exact ownership/digest/readback and bound failure cleanup
+  to the confirmed new VM; do not resize existing templates or tenant disks.
+
 ### Added
 
 - Add native OS-template choices for Ubuntu 26.04 and Debian 12 while retaining

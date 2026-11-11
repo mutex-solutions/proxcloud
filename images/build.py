@@ -22,6 +22,8 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 POOL = "pc-templates"
+# Artifact floor for every newly imported native OS base, before its first boot.
+DEFAULT_BUILD_DISK_GIB = 20
 
 # The vendor images. The sums file is fetched at build time and hands Proxmox the checksum to verify.
 IMAGES = {
@@ -119,21 +121,91 @@ def next_vmid(pve, vms, start=9200):
     return start
 
 
+def disk_size_bytes(disk):
+    """Read one PVE disk's size= in bytes, not rounded GiB (bare bytes or K/M/G/T)."""
+    sizes = [part[5:] for part in str(disk).split(",")[1:] if part.startswith("size=")]
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([KMGT]?)", sizes[0]) if len(sizes) == 1 else None
+    if not match:
+        raise SystemExit("base disk: missing or invalid scsi0 size")
+    whole, _, fraction = match[1].partition(".")
+    # Exact decimal-to-byte conversion; never round an under-sized disk up to the floor.
+    multiplier = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}[match[2]]
+    size, remainder = divmod(int(whole + fraction) * multiplier, 10 ** len(fraction))
+    if remainder or size <= 0:
+        raise SystemExit("base disk: invalid scsi0 byte size")
+    return size
+
+
+def new_base_config(pve, a, vmid, name, configured=True):
+    """Only for the exact VM whose create task this call completed, never an adopted base.
+
+    Pool membership is read directly: cluster/resources can lag or omit the pool on PVE 9.
+    The remaining checks also protect failure cleanup from deleting a changed/converted VM.
+    """
+    members = pve.call("GET", "/pools/" + POOL).get("members", [])
+    if not any(v.get("vmid") == vmid and v.get("node") == a.node and v.get("type") == "qemu" for v in members):
+        raise SystemExit("base disk: new VM is not in the expected node/pool; refusing mutation")
+    path = "/nodes/%s/qemu/%s" % (a.node, vmid)
+    cfg = pve.call("GET", path + "/config")
+    tags = set(filter(None, str(cfg.get("tags", "")).split(";")))
+    allowed_names = (name,) if configured else ("", name)
+    allowed_tags = ({"proxcloud", "pc-base"},) if configured else (set(), {"proxcloud", "pc-base"})
+    if (cfg.get("template", 0) not in (0, "0") or cfg.get("lock")
+            or cfg.get("name", "") not in allowed_names or tags not in allowed_tags):
+        raise SystemExit("base disk: new VM identity/template/lock changed; refusing mutation")
+    if pve.call("GET", path + "/status/current").get("status") != "stopped":
+        raise SystemExit("base disk: new VM is not stopped; refusing mutation")
+    return cfg
+
+
+def ensure_build_disk(pve, a, vmid, name):
+    """Enlarge only a confirmed fresh base, before template conversion or any guest boot."""
+    path = "/nodes/%s/qemu/%s" % (a.node, vmid)
+    cfg = new_base_config(pve, a, vmid, name)
+    disk = cfg.get("scsi0", "")
+    before = disk_size_bytes(disk)
+    floor = DEFAULT_BUILD_DISK_GIB * 1024 ** 3
+    if before < floor:
+        if not cfg.get("digest"):
+            raise SystemExit("base disk: missing config digest; refusing resize")
+        result = pve.call("PUT", path + "/resize", disk="scsi0", size="%sG" % DEFAULT_BUILD_DISK_GIB, digest=cfg["digest"])
+        # PVE can return null for synchronous completion. Never pass null/garbage to wait().
+        if result not in (None, ""):
+            pattern = r"UPID:%s:[0-9A-Fa-f]+:[0-9A-Fa-f]+:[0-9A-Fa-f]+:[^:]+:%s:[^:]+:" % (re.escape(a.node), vmid)
+            if not isinstance(result, str) or not re.fullmatch(pattern, result):
+                raise SystemExit("base disk: resize returned an invalid task ID")
+            pve.wait(a.node, result)
+    after = new_base_config(pve, a, vmid, name).get("scsi0", "")
+    if after.split(",", 1)[0] != disk.split(",", 1)[0] or disk_size_bytes(after) < max(floor, before):
+        raise SystemExit("base disk: scsi0 readback below floor or disk changed; refusing template conversion")
+
+
 def create_base(pve, a, img, name):
-    """A template straight from the vendor image: cloud-init drive, serial console, agent flag."""
+    """A fresh vendor-image template with a verified build disk, cloud-init, console and agent flag."""
     volume = ensure_cloud_image(pve, a, img)
     vmid = next_vmid(pve, pve.vms())
     net = "virtio,bridge=%s%s" % (a.bridge, ",tag=%s" % a.vlan if a.vlan else "")
     # Empty first: the scoped token holds VM.Config.* only through the pool, so only a VM already in the
-    # pool can be configured.
+    # pool can be configured. Do not claim/clean up this ID unless its create task succeeds.
     pve.wait(a.node, pve.call("POST", "/nodes/%s/qemu" % a.node, vmid=vmid, pool=POOL))
-    pve.wait(a.node, pve.call(
-        "POST", "/nodes/%s/qemu/%s/config" % (a.node, vmid), name=name, ostype="l26", cores=2, memory=2048,
-        cpu="host", agent=1, scsihw="virtio-scsi-single", serial0="socket", vga="serial0", net0=net, tags="proxcloud;pc-base",
-        scsi0="%s:0,discard=on,import-from=%s" % (a.storage, volume), ide2="%s:cloudinit" % a.storage, boot="order=scsi0",
-    ))
-    pve.wait(a.node, pve.call("POST", "/nodes/%s/qemu/%s/template" % (a.node, vmid)))
-    return vmid
+    try:
+        pve.wait(a.node, pve.call(
+            "POST", "/nodes/%s/qemu/%s/config" % (a.node, vmid), name=name, ostype="l26", cores=2, memory=2048,
+            cpu="host", agent=1, scsihw="virtio-scsi-single", serial0="socket", vga="serial0", net0=net, tags="proxcloud;pc-base",
+            scsi0="%s:0,discard=on,import-from=%s" % (a.storage, volume), ide2="%s:cloudinit" % a.storage, boot="order=scsi0",
+        ))
+        ensure_build_disk(pve, a, vmid, name)
+        pve.wait(a.node, pve.call("POST", "/nodes/%s/qemu/%s/template" % (a.node, vmid)))
+        return vmid
+    except (Exception, SystemExit):
+        # cmd_build cannot clean a base that never returned. Limit this recovery to the
+        # exact successfully created ID; no prefix search, old template, unlock or forced stop.
+        try:
+            new_base_config(pve, a, vmid, name, configured=False)
+            pve.destroy(a.node, vmid)
+        except (Exception, SystemExit) as cleanup_error:
+            print("base cleanup refused/failed for newly created VM %s: %s" % (vmid, cleanup_error), file=sys.stderr)
+        raise
 
 
 def cmd_base(pve, a, img):
