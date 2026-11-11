@@ -4,7 +4,7 @@
 #
 #   PVE_URL=https://192.0.2.11:8006 PVE_TOKEN_ID='images@pve!packer' PVE_TOKEN_SECRET=... \
 #   PVE_NODES="pve1 pve2 pve3" PVE_TEMPLATE_STORAGE=nas-templates PVE_BRIDGE=vmbr0 \
-#   K8S_VERSION=1.35.10 images/k8s-node-template.sh
+#   K8S_VERSION=1.35.10 K8S_OS=ubuntu-2604 images/k8s-node-template.sh
 #
 # PVE_BUILD_NETWORK_MODE=static attaches a private local NoCloud seed ISO; no DHCP or
 # inbound seed HTTP server is required. The script default remains dhcp for compatibility.
@@ -24,21 +24,32 @@ if [[ ! "$PVE_BUILD_VLAN" =~ ^(0|[1-9][0-9]{0,3})$ ]] || (( PVE_BUILD_VLAN > 409
   exit 1
 fi
 PVE_ISO_STORAGE="${PVE_ISO_STORAGE:-$PVE_TEMPLATE_STORAGE}"
-IMAGE_BUILDER_REF="${IMAGE_BUILDER_REF:-v0.1.55}"
-ISO_NAME="${ISO_NAME:-ubuntu-24.04.4-live-server-amd64.iso}"
-ISO_URL="${ISO_URL:-https://releases.ubuntu.com/noble/$ISO_NAME}"
-ISO_SHA256="${ISO_SHA256:-e907d92eeec9df64163a7e454cbc8d7755e8ddc7ed42f99dbc80c40f1a138433}"
+# The helper owns one allowlist for OS/seed/ISO selection and the immutable pin.
+# Capture normally (not process substitution): validation failure must stop the shell.
+selection="$(python3 "$SCRIPT_DIR/k8s-build-config.py" select)"
+mapfile -t selected <<<"$selection"
+[ "${#selected[@]}" = 6 ] || { echo 'Invalid reviewed image selection' >&2; exit 1; }
+K8S_OS="${selected[0]}"
+ISO_NAME="${selected[1]}"
+ISO_URL="${selected[2]}"
+ISO_SHA256="${selected[3]}"
+readonly IMAGE_BUILDER_REF="${selected[4]}"
+readonly IMAGE_BUILDER_COMMIT="${selected[5]}"
+export K8S_OS
 TEMPLATE_POOL="${TEMPLATE_POOL:-pc-templates}"
 WORK="${WORK:-$HOME/.cache/proxcloud-image-builder}"
-# Validate all static inputs before any PVE API operation, including URL downloads.
-python3 "$SCRIPT_DIR/k8s-build-config.py" check
+# Selection validated static inputs before any PVE operation, including downloads.
+# Never fetch/reset/clean a shared existing checkout, or trust a SHA from the env.
+if [ -e "$WORK/image-builder" ] || [ -L "$WORK/image-builder" ]; then
+  python3 "$SCRIPT_DIR/k8s-build-config.py" verify-checkout --checkout "$WORK/image-builder"
+fi
 if [ "$PVE_BUILD_NETWORK_MODE" = static ]; then
   command -v xorriso >/dev/null || { echo 'Static build mode requires xorriso' >&2; exit 1; }
 fi
 
-series="v${K8S_VERSION%.*}"
-name="ubuntu-2404-kube-v$K8S_VERSION"
-tag="pc-k8s-$(echo "$K8S_VERSION" | tr . -)"
+name="$K8S_OS-kube-v$K8S_VERSION"
+tag="pc-k8s-${K8S_VERSION//./-}"
+os_tag="pc-k8s-os-$K8S_OS"
 first="${PVE_NODES%% *}"
 api="${PVE_URL%/}/api2/json"
 
@@ -144,15 +155,24 @@ fi
 
 existing="$(vmid_of "$name" "$first")"
 if [ -z "$existing" ]; then
+  mkdir -p -- "$WORK"
+  WORK="$(realpath -- "$WORK")"
+  RUN_DIR="$(mktemp -d "$WORK/run.XXXXXXXX")"
+  chmod 0700 "$RUN_DIR"
+  if [ -e "$WORK/image-builder" ] || [ -L "$WORK/image-builder" ]; then
+    checkout="$WORK/image-builder"
+  else
+    # Clone only into the private run; never replace/update a shared cached tree.
+    checkout="$RUN_DIR/checkout"
+    git clone -q --depth 1 --single-branch -b "$IMAGE_BUILDER_REF" https://github.com/kubernetes-sigs/image-builder "$checkout" >"$RUN_DIR/checkout.log" 2>&1
+  fi
+  # Reverify origin/pin/cache, then export only pinned object bytes. Do not copy
+  # hidden working-tree changes or the cached .git config/hooks into the build.
+  python3 "$SCRIPT_DIR/k8s-build-config.py" export-checkout --checkout "$checkout" --run "$RUN_DIR"
   pve -X POST "$api/nodes/$first/storage/$PVE_ISO_STORAGE/download-url" \
     --data-urlencode "url=$ISO_URL" -d content=iso -d "filename=$ISO_NAME" -d checksum-algorithm=sha256 -d "checksum=$ISO_SHA256" \
     >/dev/null 2>&1 || true # already there, or the build will say so
 
-  [ -d "$WORK/image-builder" ] || git clone -q --depth 1 -b "$IMAGE_BUILDER_REF" https://github.com/kubernetes-sigs/image-builder "$WORK/image-builder"
-  WORK="$(realpath -- "$WORK")"
-  RUN_DIR="$(mktemp -d "$WORK/run.XXXXXXXX")"
-  chmod 0700 "$RUN_DIR"
-  cp -a -- "$WORK/image-builder" "$RUN_DIR/image-builder"
   cd "$RUN_DIR/image-builder/images/capi"
   [ -d "$WORK/venv" ] || python3 -m venv "$WORK/venv"
   # shellcheck disable=SC1091
@@ -161,6 +181,7 @@ if [ -z "$existing" ]; then
 
   # Render password-bearing files privately rather than upstream's tee-to-log helper.
   TEMPLATE_POOL="$TEMPLATE_POOL" PVE_ISO_STORAGE="$PVE_ISO_STORAGE" \
+    ISO_NAME="$ISO_NAME" ISO_URL="$ISO_URL" ISO_SHA256="$ISO_SHA256" \
     python3 "$SCRIPT_DIR/k8s-build-config.py" prepare --capi "$PWD" --run "$RUN_DIR"
 
   if [ "$PVE_BUILD_NETWORK_MODE" = static ]; then
@@ -196,8 +217,9 @@ if [ -z "$existing" ]; then
     PROXMOX_ISO_POOL="$PVE_ISO_STORAGE" PROXMOX_BRIDGE="$PVE_BRIDGE" PROXMOX_VLAN="$vlan_tag" PROXMOX_STORAGE_POOL="$PVE_TEMPLATE_STORAGE" \
     ISO_FILE="$PVE_ISO_STORAGE:iso/$ISO_NAME" PACKER_VAR_FILES="$vars" \
     PACKER_LOG=0 PACKER_LOG_PATH= PACKER_DEBUG=0 DEBUG= \
+    IB_VERSION="$IMAGE_BUILDER_REF-$IMAGE_BUILDER_COMMIT" \
     PACKER_BIN="$(command -v packer)" \
-    make --silent -o set-ssh-password build-proxmox-ubuntu-2404 >"$RUN_DIR/build.log" 2>&1; then
+    make --silent -o set-ssh-password "build-proxmox-$K8S_OS" >"$RUN_DIR/build.log" 2>&1; then
     echo 'Image-builder failed; detailed output remains in private run state (not public logs)' >&2
     KEEP_PRIVATE_RUN=1
     exit 1
@@ -223,7 +245,7 @@ for node in $PVE_NODES; do
     pve -X POST "$api/nodes/$node/qemu/$id/template" >/dev/null
   fi
   clean_build_network "$node" "$id"
-  pve -X PUT "$api/nodes/$node/qemu/$id/config" --data-urlencode "tags=proxcloud;pc-k8s;$tag" >/dev/null
+  pve -X PUT "$api/nodes/$node/qemu/$id/config" --data-urlencode "tags=proxcloud;pc-k8s;$tag;$os_tag" >/dev/null
   images="$images${images:+,}$node=$id"
 done
 # What the kamaji provider takes as this version's image (config.cluster.versions).

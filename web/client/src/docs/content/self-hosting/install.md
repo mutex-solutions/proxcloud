@@ -8,7 +8,7 @@ Source checkout defaults target a planned broker-free app/chart version. Before 
 
 - A working Kubernetes cluster with a default StorageClass.
 - The [CloudNativePG](https://cloudnative-pg.io) operator for the default PostgreSQL mode. Alternatively, set `cnpg.installOperator: true`, use the development PostgreSQL subchart (`-f deploy/charts/proxcloud/values-dev.yaml` with its insecure secrets replaced), or point at an external writable primary (below). No RabbitMQ operator is needed for a fresh current install.
-- For classic ingress: an ingress controller (such as ingress-nginx) and, for TLS, cert-manager with a ClusterIssuer. Gateway API exposure is supported as an alternative.
+- Prefer a maintained Gateway API controller such as NGINX Gateway Fabric, with application Gateway/HTTPRoute resources and listener TLS certificates. Do not install retired ingress-nginx for a new cluster. Existing classic Ingress deployments need an explicit, separately tested migration; installing a Gateway API controller does not convert them.
 - DNS names for the portal, the API and the admin console (e.g. `cloud.example.com`, `api.cloud.example.com`, `admin.cloud.example.com`) pointed at your ingress.
 - Helm 3.8+.
 

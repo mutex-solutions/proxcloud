@@ -1,7 +1,6 @@
-// Package order serves the order read (GET one order by id). The happy path (a real
-// provisioning order + its billing-profile access check + typed DTO) is
-// deferred; under the greenfield seed the `order` collection is empty, so the observable
-// behaviour is the by-id 404 "Order not found".
+// Package order serves the order read (GET one order by id). An order belongs to a billing
+// profile: the read answers only a caller who may read that profile, and answers the same 404
+// "Order not found" for an absent order and for one the caller may not see.
 package order
 
 import (
@@ -116,40 +115,49 @@ func (r *Repo) Get(ctx context.Context, id string) (*Order, error) {
 	return &o, nil
 }
 
-// ByID looks up an order by id as a raw document. nil when missing.
-func (r *Repo) ByID(ctx context.Context, id string) (pgdoc.M, error) {
-	var doc pgdoc.M
-	found, err := r.orders.Get(ctx, id, &doc)
-	if err != nil || !found {
-		return nil, err
-	}
-	return doc, nil
-}
+// ProfileReader reports whether a user may read a billing profile. The order package cannot
+// import org (org imports order), so the API wires the organization policy in through this.
+type ProfileReader func(ctx context.Context, sub, billingProfileID string) (bool, error)
 
 type Handler struct {
-	repo  *Repo
-	users *user.Repo
+	repo    *Repo
+	users   *user.Repo
+	canRead ProfileReader
 }
 
-func NewHandler(repo *Repo, users *user.Repo) *Handler { return &Handler{repo: repo, users: users} }
+// NewHandler serves the order read. canRead decides who may see an order through its billing
+// profile; without one every read answers 404.
+func NewHandler(repo *Repo, users *user.Repo, canRead ProfileReader) *Handler {
+	return &Handler{repo: repo, users: users, canRead: canRead}
+}
 
 func (h *Handler) Routes(r chi.Router) {
 	r.Get("/orders/{id}", h.get)
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
-	if _, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub); err != nil {
+	u, err := h.users.Require(r.Context(), httpx.RC(r.Context()).Sub)
+	if err != nil {
 		httpx.WriteError(w, err)
 		return
 	}
-	doc, err := h.repo.ByID(r.Context(), chi.URLParam(r, "id"))
+	o, err := h.repo.Get(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		httpx.Err(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
+		httpx.WriteError(w, err)
 		return
 	}
-	if doc == nil {
+	// One answer for "no such order" and "not yours": an order id must not be confirmable by
+	// someone who cannot read its billing profile.
+	allowed := false
+	if o != nil && o.BillingProfileID != "" && h.canRead != nil {
+		if allowed, err = h.canRead(r.Context(), u.Sub, o.BillingProfileID); err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
+	}
+	if !allowed {
 		httpx.Err(w, http.StatusNotFound, http.StatusNotFound, "Order not found")
 		return
 	}
-	httpx.OK(w, doc) // deferred: billing-profile access check + typed DTO
+	httpx.OK(w, o)
 }

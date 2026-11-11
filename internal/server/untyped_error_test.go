@@ -61,7 +61,7 @@ func TestUntypedErrorAnswers500(t *testing.T) {
 		{"admin", "POST", "/admin/tax", `{"level":"COUNTRY"}`, adminH.Routes, httpx.RequestContext{SigV4KeyID: "k1"}},
 		{"affiliate", "GET", "/affiliate/project/p1/config", "", affiliate.NewHandler(affiliate.NewRepo(db), nil, nil, billingRepo, users).Routes, httpx.RequestContext{Sub: "u1"}},
 		{"catalog", "GET", "/flavor-categories", "", catalog.NewHandler(catalog.NewRepo(db)).Routes, httpx.RequestContext{Sub: "u1"}},
-		{"order", "GET", "/orders/o1", "", order.NewHandler(order.NewRepo(db), users).Routes, httpx.RequestContext{Sub: "u1"}},
+		{"order", "GET", "/orders/o1", "", order.NewHandler(order.NewRepo(db), users, nil).Routes, httpx.RequestContext{Sub: "u1"}},
 		{"org", "GET", "/organizations", "", org.NewHandler(nil, org.NewPolicy(orgRepo), orgRepo, users, auditSvc).Routes, httpx.RequestContext{Sub: "u1"}},
 		{"project", "GET", "/project", "", project.NewHandler(nil, nil, nil, users, auditSvc, billingRepo, nil, nil, nil, nil, "").Routes, httpx.RequestContext{Sub: "u1"}},
 		{"projectinvite", "GET", "/project-invites/mine", "", projectinvite.NewHandler(projectinvite.NewRepo(db), users, nil, orgRepo, auditSvc, nil, "").Routes, httpx.RequestContext{Sub: "u1"}},
