@@ -64,19 +64,29 @@ class FakePVE:
         self.events.append((method, path, params.copy()))
         vm = re.search(r"/qemu/(\d+)", path)
         vmid = int(vm[1]) if vm else params.get("vmid")
+        if path == "/pools/" + build.POOL:
+            return {"members": [dict(value, vmid=key, type="qemu") for key, value in self.rows.items() if value.get("pool") == build.POOL]}
         if path.endswith("/qemu"):
             self.rows[vmid] = {"node": "test-node", "pool": build.POOL}
+        elif path.endswith("/status/current"):
+            return {"status": "stopped"}
+        elif path.endswith("/resize"):
+            assert method == "PUT" and params == {"disk": "scsi0", "size": "20G", "digest": "fake-digest"}
+            self.rows[vmid]["scsi0"] = "disk-store:vm-%s-disk-0,discard=on,size=20G" % vmid
+            return None  # synchronous PVE response; wait(None) is invalid
         elif path.endswith("/clone"):
             self.rows[params["newid"]] = dict(self.rows[vmid])
         elif path.endswith("/config"):
             if method == "GET":
-                return dict(self.rows[vmid])
+                return dict(self.rows[vmid], digest="fake-digest")
             if params.get("delete") == "net0":
                 if not self.fail_cleanup and not self.stale_cleanup:
                     self.rows[vmid].pop("net0", None)
                 return "cleanup"
             row = self.rows[vmid]
             row.update({key: value for key, value in params.items() if key != "delete"})
+            if "import-from=" in params.get("scsi0", ""):
+                row["scsi0"] = "disk-store:vm-%s-disk-0,discard=on,size=3G" % vmid
             for key in params.get("delete", "").split(","):
                 row.pop(key, None)
             if "pc-public" in params.get("tags", ""):

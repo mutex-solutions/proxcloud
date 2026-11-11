@@ -41,6 +41,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Native template build disk](template-build-disk.md) — fresh-base-only 20 GiB
+  disk floor, exact readback and bounded cleanup after the Ubuntu 26.04 APT-space
+  canary failure; guest filesystem and full build acceptance remain separate gates.
+
 - [Template OS baseline](template-os-baseline.md) — four native OS choices,
   Ubuntu-only pinned upstream Kubernetes targets, immutable cache export and
   explicit build/boot/Goss/seed-cleanup versus supported-product acceptance gates.
