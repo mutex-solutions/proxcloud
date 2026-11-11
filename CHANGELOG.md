@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Define portable native VM-disk QCOW2 artifacts for public GHCR distribution,
+  with strict versioned manifests, checksums, unsigned exporter facts and explicit
+  sanitization/pull/import/boot gates. Add a copy-only offline sanitizer and a
+  manual sealed three-file staging → hosted ORAS publisher bridge, without giving
+  the image runner PVE-root or package-write access. Publication plumbing does not
+  imply a public artifact exists; package visibility and anonymous retrieval remain
+  separately verified, and Kubernetes disk export is not yet enabled.
+
 - Add native OS-template choices for Ubuntu 26.04 and Debian 12 while retaining
   Ubuntu 24.04 and Debian 13. New Kubernetes node builds select Ubuntu 26.04 by
   default, retain explicit 24.04 and verify the exact image-builder v0.1.55 commit.
