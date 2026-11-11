@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pc-s3
+  namespace: {{ pc.namespace }}
+spec:
+  ports:
+    - port: 9000
+      targetPort: {{ upstream_port }}
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: pc-s3
+  namespace: {{ pc.namespace }}
+  labels:
+    kubernetes.io/service-name: pc-s3
+addressType: IPv4
+ports:
+  - name: ""
+    protocol: TCP
+    port: {{ upstream_port }}
+endpoints:
+  - addresses: [{{ upstream_ip | to_json }}]
+    conditions: {}
+---
+# The admin API must never be reachable from the public endpoint (plan S20).
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: pc-s3
+  namespace: {{ pc.namespace }}
+spec:
+  entryPoints: [{{ 'web' if pc.ingress.tls == 'none' else 'websecure' }}]
+  routes:
+    - kind: Rule
+      match: Host(`s3.{{ pc_domain }}`) && !PathPrefix(`/rustfs/admin`) && !PathPrefix(`/minio/admin`) && !PathPrefix(`/rustfs/console`)
+      services:
+        - name: pc-s3
+          port: 9000
+{% if pc.ingress.tls == 'acme' %}
+  tls:
+    secretName: s3-tls
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: s3-tls
+  namespace: {{ pc.namespace }}
+spec:
+  secretName: s3-tls
+  dnsNames: [s3.{{ pc_domain }}]
+  issuerRef: {name: letsencrypt, kind: ClusterIssuer}
+{% elif pc.ingress.tls != 'none' %}
+  tls:
+    secretName: {{ pc.ingress.tls }}
+{% endif %}

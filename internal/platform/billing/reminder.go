@@ -35,8 +35,13 @@ const (
 // ReminderNotificationDetail is one scheduled reminder window:
 // daysBefore = how many days before expiry to remind; sentAt nil = not yet fired.
 type ReminderNotificationDetail struct {
-	DaysBefore int        `json:"daysBefore"`
-	SentAt     *time.Time `json:"sentAt,omitempty"`
+	DaysBefore       int        `json:"daysBefore"`
+	SentAt           *time.Time `json:"sentAt,omitempty"` // legacy processed evidence, NOT delivery
+	DeliveryQueuedAt *time.Time `json:"deliveryQueuedAt,omitempty"`
+	OutboxIDs        []string   `json:"outboxIds,omitempty"`
+	QueueState       string     `json:"queueState,omitempty"` // frozen selection disposition, not live delivery status
+	SkippedAt        *time.Time `json:"skippedAt,omitempty"`
+	SkipReason       string     `json:"skipReason,omitempty"`
 }
 
 // ReminderNotification is the per-target reminder doc (collection "reminderNotification").
@@ -49,6 +54,7 @@ type ReminderNotification struct {
 	Notifications     []ReminderNotificationDetail `json:"notifications,omitempty"`
 	CreatedAt         *time.Time                   `json:"createdAt,omitempty"`
 	UpdatedAt         *time.Time                   `json:"updatedAt,omitempty"`
+	ExpiryGeneration  string                       `json:"expiryGeneration,omitempty"`
 }
 
 // reminderDecision determines which reminders to process: iterate the
@@ -60,7 +66,7 @@ func reminderDecision(details []ReminderNotificationDetail, daysUntilExpiry int6
 	sendIdx = -1
 	for i := range details {
 		d := details[i]
-		if d.SentAt == nil && daysUntilExpiry <= int64(d.DaysBefore) {
+		if !reminderProcessed(d) && daysUntilExpiry <= int64(d.DaysBefore) {
 			if sendIdx != -1 {
 				skipIdxs = append(skipIdxs, sendIdx)
 			}
@@ -76,9 +82,13 @@ func daysUntil(now, endDate time.Time) int64 {
 	return int64(endDate.Sub(now).Hours() / 24)
 }
 
+func reminderProcessed(d ReminderNotificationDetail) bool {
+	return d.SentAt != nil || d.DeliveryQueuedAt != nil || d.SkippedAt != nil
+}
+
 func allDetailsSent(details []ReminderNotificationDetail) bool {
 	for i := range details {
-		if details[i].SentAt == nil {
+		if !reminderProcessed(details[i]) {
 			return false
 		}
 	}
@@ -105,14 +115,20 @@ func (s *SavingsService) SendExpiryReminders(ctx context.Context) (int, error) {
 	}
 	// threshold = now + (maxDays + 1) days — the +1 buffers a contract entering the window between
 	// daily runs (now + (maxReminderDays + 1) days).
-	threshold := s.now().Add(time.Duration(maxDays+1) * 24 * time.Hour)
+	now := s.now()
+	threshold := now.Add(time.Duration(maxDays+1) * 24 * time.Hour)
 	contracts, err := s.repo.ActiveSavingsContractsEndingBefore(ctx, threshold)
 	if err != nil {
 		return 0, err
 	}
 	scheduled := 0
 	for i := range contracts {
-		created, err := s.repo.ScheduleReminder(ctx, ResourceTypeSavingsContract, contracts[i].ID, savingsExpiryReminderTemplate, days)
+		var created bool
+		if s.repo.reminderOutbox != nil {
+			created, err = s.repo.scheduleDurableReminder(ctx, contracts[i].ID, days, now, threshold)
+		} else {
+			created, err = s.repo.ScheduleReminder(ctx, ResourceTypeSavingsContract, contracts[i].ID, savingsExpiryReminderTemplate, days)
+		}
 		if err != nil {
 			return scheduled, err
 		}
@@ -126,7 +142,8 @@ func (s *SavingsService) SendExpiryReminders(ctx context.Context) (int, error) {
 // ProcessReminderNotifications is the HOURLY dispatcher half:
 // walk IN_PROGRESS docs, send each one's due
 // reminder. Best-effort + resilient — a per-doc error is logged and skipped (never aborts the
-// batch). Returns the number of reminders emailed.
+// batch in legacy mode). Durable mode propagates errors and returns queued
+// decisions (including explicit non-delivery), NEVER an emailed/delivery count.
 func (s *SavingsService) ProcessReminderNotifications(ctx context.Context) (int, error) {
 	docs, err := s.repo.FindInProgressReminders(ctx)
 	if err != nil {
@@ -137,7 +154,10 @@ func (s *SavingsService) ProcessReminderNotifications(ctx context.Context) (int,
 	for i := range docs {
 		emailed, err := s.processReminder(ctx, &docs[i], now)
 		if err != nil {
-			// catch per-doc + log + continue.
+			if s.repo.reminderOutbox != nil {
+				return sent, err // never hide enqueue failure/rollback behind a sent marker
+			}
+			// Legacy notifier remains best-effort.
 			continue
 		}
 		if emailed {
@@ -152,6 +172,12 @@ func (s *SavingsService) processReminder(ctx context.Context, n *ReminderNotific
 	// Only SAVINGS_CONTRACT exists; a doc of another type has no handler → skip (warn+skip).
 	if n.ResourceType != ResourceTypeSavingsContract {
 		return false, nil
+	}
+	if s.repo.reminderOutbox != nil {
+		return s.queueReminder(ctx, n, now)
+	}
+	if n.ExpiryGeneration != "" {
+		return false, nil // turning opt-in off must NEVER fall back to sending durable work
 	}
 	contract, err := s.repo.SavingsContractByID(ctx, n.TargetResourceID)
 	if err != nil {
@@ -202,6 +228,10 @@ func (s *SavingsService) processReminder(ctx context.Context, n *ReminderNotific
 // sendReminderEmail builds the mail context + sends. displayDays =
 // max(1, daysUntilExpiry) so the customer never sees 0/negative; endDate is "dd MMM yyyy".
 func (s *SavingsService) sendReminderEmail(ctx context.Context, c *SavingsContract, profile *BillingProfile, du int64) {
+	notify(ctx, s.notifier, savingsExpiryReminderTemplate, profile, reminderVars(c, profile, du))
+}
+
+func reminderVars(c *SavingsContract, profile *BillingProfile, du int64) map[string]any {
 	displayDays := du
 	if displayDays < 1 {
 		displayDays = 1
@@ -223,5 +253,5 @@ func (s *SavingsService) sendReminderEmail(ctx context.Context, c *SavingsContra
 	if c.DiscountRate != nil {
 		vars["discountRate"] = c.DiscountRate.String()
 	}
-	notify(ctx, s.notifier, savingsExpiryReminderTemplate, profile.Email, vars)
+	return vars
 }

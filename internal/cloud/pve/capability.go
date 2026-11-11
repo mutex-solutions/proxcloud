@@ -110,7 +110,8 @@ func classify(d StorageDef) StorageCapability {
 }
 
 // rowState is one GET /cluster/resources?type=storage row as a node state (avail clamped at 0).
-// TODO(verify-lab): a disabled or unmounted storage reports a status other than "available".
+// Lab-verified (PVE 9.2): an unmounted storage reports status "unknown"; a disabled one has no
+// row at all, so it never reaches this.
 func rowState(r ClusterResource) StorageNodeState {
 	avail := r.MaxDisk - r.Disk
 	if avail < 0 {

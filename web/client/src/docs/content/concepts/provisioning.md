@@ -10,10 +10,10 @@ Each ProxCloud project is backed by its own resource pool on the Proxmox VE clus
 
 The state you see on a resource — a server starting, a volume attaching — reflects the real cluster:
 
-- **Periodic sync.** A background job regularly polls the Proxmox VE API and reconciles ProxCloud's cached view against it, catching anything that drifted and reconstructing state after any gap. This is the source of truth.
+- **Periodic sync.** When the operator enables scheduled jobs, a background job polls the Proxmox VE API and reconciles ProxCloud's cached view against it. Reads must prove their visibility/ownership; an unavailable or permission-filtered inventory is not proof that a resource vanished. The scheduler defaults off on a fresh deployment, so the operator must enable it deliberately.
 - **No event feed.** ProxCloud syncs by polling the Proxmox VE API; there is no notification listener to set up, so a change made directly in Proxmox shows up after the next sync pass.
 
-If a sync pass is missed, the next one reconciles the difference. You lose freshness in that window, never correctness. This is also why a change made directly in Proxmox — stopping or deleting a VM from the PVE web UI — still shows up in the portal.
+A later successful, authoritative sync can reconcile a missed pass. During an outage or permission problem the console may be stale, and the platform deliberately retains ambiguous records instead of treating missing inventory as deletion. A direct change in Proxmox appears after the relevant successful sync; polling is not an instantaneous or lossless event stream.
 
 ## Activation and lifecycle
 

@@ -2,7 +2,7 @@ import { useState } from "react"
 import { Link, useParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { Download, Wallet } from "lucide-react"
+import { CreditCard as CreditCardIcon, Download, Landmark, Wallet } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { StatusBadge } from "@/components/status-badge"
 import {
@@ -21,9 +21,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { apiFetch } from "@/lib/api"
 import { fmtDate, fmtDateTime, fmtMoney } from "@/lib/format"
 import { useBillingSummary, useProjectId, useProjects } from "@/lib/hooks"
-import type { Bill, Transaction } from "@/lib/types"
+import type { Bill, CreditCard, Gateway, Transaction } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { downloadPdf } from "./HistoryPage"
+import {
+  BankTransferPanel, PendingBankTransfers, transferFromDeposit, type DepositResponse,
+} from "./BankTransferPanel"
+import { NewCardDepositDialog, cardGateways } from "./NewCardDepositDialog"
+
+// POST /payment/{bp}/bill/{billId}/collect result (CollectTransaction DTO).
+type CollectResult = { id?: string; status?: string; errorMessage?: string; grossAmount?: number; currency?: string }
 
 export default function BillDetailPage() {
   const pid = useProjectId()
@@ -36,7 +43,9 @@ export default function BillDetailPage() {
   // so an org admin can read per-project spend on the same bill.
   const { data: projects } = useProjects()
   const [projFilter, setProjFilter] = useState("__all__")
-  const projName = (id?: string) => projects?.find((p) => p.id === id)?.name || id || "—"
+  // An id not in the caller's project list is a deleted project, or a live one this member cannot
+  // see (the org bill is wider than their projects): the bill carries no name, so neither is claimed.
+  const projName = (id?: string) => (!id ? "—" : projects?.find((p) => p.id === id)?.name || `Project …${id.slice(-6)}`)
 
   const { data: bill, isLoading, error } = useQuery({
     queryKey: ["bill", bp, billId],
@@ -49,6 +58,13 @@ export default function BillDetailPage() {
     enabled: !!bp && !!billId,
   })
 
+  const invalidateBill = () => {
+    void qc.invalidateQueries({ queryKey: ["bill", bp, billId] })
+    void qc.invalidateQueries({ queryKey: ["bills", bp] })
+    void qc.invalidateQueries({ queryKey: ["bill-transactions", bp, billId] })
+    void qc.invalidateQueries({ queryKey: ["billing-summary", pid] })
+  }
+
   // Pay a SENT bill from the profile's credit balance (POST /payment/{bp}/bill/{billId}/pay,
   // no body; 400s: already-paid / open-bill / not-enough-credit).
   const payBill = useMutation({
@@ -56,10 +72,64 @@ export default function BillDetailPage() {
     onSuccess: () => {
       toast.success("Bill paid from balance")
       setPayOpen(false)
-      void qc.invalidateQueries({ queryKey: ["bill", bp, billId] })
-      void qc.invalidateQueries({ queryKey: ["bills", bp] })
-      void qc.invalidateQueries({ queryKey: ["bill-transactions", bp, billId] })
+      invalidateBill()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  // Charge a SENT bill to a saved card (POST /payment/{bp}/bill/{billId}/collect {cardId?}) — a
+  // declined charge comes back as a FAILED transaction with errorMessage, not as an HTTP error.
+  const { data: cards } = useQuery({
+    queryKey: ["cards", bp],
+    queryFn: () => apiFetch<CreditCard[]>(`/card/${bp}`),
+    enabled: !!bp,
+  })
+  const [cardOpen, setCardOpen] = useState(false)
+  const [cardChoice, setCardChoice] = useState("")
+  const [cardError, setCardError] = useState<string | null>(null)
+  const cardId = cardChoice || (cards?.some((c) => c.id === summary?.defaultCardId) ? summary?.defaultCardId ?? "" : "")
+  const collect = useMutation({
+    mutationFn: () =>
+      apiFetch<CollectResult>(`/payment/${bp}/bill/${billId}/collect`, { method: "POST", body: cardId ? { cardId } : {} }),
+    onSuccess: (txn) => {
+      invalidateBill()
+      if (txn?.status === "FAILED") {
+        setCardError(txn.errorMessage || "The card was declined.")
+        return
+      }
+      if (txn?.status === "SUCCESS") {
+        toast.success(`Bill paid — charged ${fmtMoney(txn.grossAmount, txn.currency ?? bill?.invoiceCurrency)}`)
+      } else {
+        toast.info(`Payment ${String(txn?.status ?? "submitted").toLowerCase()}`)
+      }
+      setCardOpen(false)
+    },
+    onError: (e: Error) => setCardError(e.message),
+  })
+  const [newCardOpen, setNewCardOpen] = useState(false)
+
+  // Pay a SENT bill by bank transfer: a deposit through the BankTransfer gateway with billId —
+  // once an operator approves the transfer the minted credit settles this bill (server leg).
+  const { data: gateways } = useQuery({
+    queryKey: ["payment-gateways", bp],
+    queryFn: () => apiFetch<Gateway[]>(`/payment/${bp}/gateway`),
+    enabled: !!bp,
+  })
+  const bankGw = gateways?.find((g) => g.addFunds && g.thirdParty === "BankTransfer")
+  // "Pay with new card": a card deposit with billId — the minted credit settles this bill.
+  const newCardGws = cardGateways(gateways, "addFunds")
+  const [bankOpen, setBankOpen] = useState(false)
+  const [bankResult, setBankResult] = useState<DepositResponse | null>(null)
+  const bankPay = useMutation({
+    mutationFn: () =>
+      apiFetch<DepositResponse>(`/payment/deposit/${bp}`, {
+        method: "POST",
+        body: { amount: Number(bill?.unpaidGrossAmount ?? 0), paymentGatewayId: bankGw?.id, billId },
+      }),
+    onSuccess: (resp) => {
+      setBankResult(resp)
       void qc.invalidateQueries({ queryKey: ["billing-summary", pid] })
+      void qc.invalidateQueries({ queryKey: ["bank-transfers", bp] })
     },
     onError: (e: Error) => toast.error(e.message),
   })
@@ -115,11 +185,25 @@ export default function BillDetailPage() {
   const filtered = projFilter !== "__all__"
   const itemsSubtotal = items.reduce((s, it) => s + Number(it.netAmount ?? 0), 0)
 
-  // Invoice math: net (subtotal) + tax = gross; credits reduce what was collected.
+  // Invoice lines that add up to the total: the bill's net already holds the adjustments, and the
+  // gross is net plus tax rounded half-up to cents. Tax keeps its sign (a credit-note bill is
+  // negative); the sub-cent part that rounding dropped gets its own line instead of reading as tax.
+  // Credits reduce what was collected.
+  const cents = (n: number) => (Math.sign(n) * Math.round(Math.abs(n) * 100)) / 100
   const net = Number(bill.netAmount ?? 0)
   const gross = Number(bill.grossAmount ?? 0)
-  const tax = gross - net
+  const adjTotal = adjustments.reduce((s, a) => s + Number(a.amount ?? 0), 0)
+  const rounding = cents(net) - net
+  const tax = cents(gross - cents(net))
+  // The lines that carry a sub-cent part (subtotal, adjustments, rounding) show it, so the block adds up as printed.
+  // Every amount of the DTO is in the profile's currency (ToBillDto converts items and adjustments with the net).
+  const fine = (v: number) =>
+    new Intl.NumberFormat("en-US", { style: "currency", currency: ccy || "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(
+      Math.abs(v) < 1e-6 ? 0 : v,
+    )
   const unpaid = Number(bill.unpaidGrossAmount ?? 0)
+  // An OPEN bill is still accruing: nothing is due on it yet, though the balance already counts it.
+  const open = bill.status === "OPEN"
 
   return (
     <>
@@ -133,6 +217,35 @@ export default function BillDetailPage() {
             {payable ? (
               <Button size="sm" onClick={() => setPayOpen(true)}>
                 <Wallet className="size-4" /> Pay with balance
+              </Button>
+            ) : null}
+            {payable && cards?.length ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setCardError(null)
+                  setCardOpen(true)
+                }}
+              >
+                <CreditCardIcon className="size-4" /> Pay with saved card
+              </Button>
+            ) : null}
+            {payable && newCardGws.length ? (
+              <Button size="sm" variant="outline" onClick={() => setNewCardOpen(true)}>
+                <CreditCardIcon className="size-4" /> Pay with new card
+              </Button>
+            ) : null}
+            {payable && bankGw ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setBankResult(null)
+                  setBankOpen(true)
+                }}
+              >
+                <Landmark className="size-4" /> Pay by bank transfer
               </Button>
             ) : null}
             <Button
@@ -149,6 +262,83 @@ export default function BillDetailPage() {
           </>
         }
       />
+
+      <Dialog open={bankOpen} onOpenChange={setBankOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Pay bill by bank transfer</DialogTitle>
+            <DialogDescription>
+              {bankResult
+                ? "This bill is settled automatically once an operator confirms your transfer."
+                : `Register a bank transfer for the unpaid ${fmtMoney(bill.unpaidGrossAmount, ccy)} on this bill. You will get a reference number and the bank details.`}
+            </DialogDescription>
+          </DialogHeader>
+          {bankResult && bankGw ? (
+            <BankTransferPanel transfer={transferFromDeposit(bankResult)} gateway={bankGw} bp={bp} currency={ccy} onCancelled={() => setBankResult(null)} />
+          ) : null}
+          <DialogFooter>
+            {bankResult ? (
+              <Button onClick={() => setBankOpen(false)}>Done</Button>
+            ) : (
+              <>
+                <Button variant="outline" onClick={() => setBankOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={() => bankPay.mutate()} disabled={bankPay.isPending}>
+                  {bankPay.isPending ? "Registering…" : "Get transfer details"}
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={cardOpen} onOpenChange={setCardOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Pay bill with a saved card</DialogTitle>
+            <DialogDescription>
+              Charge the unpaid {fmtMoney(bill.unpaidGrossAmount, ccy)} on this bill to one of your saved cards.
+            </DialogDescription>
+          </DialogHeader>
+          <Select value={cardId} onValueChange={setCardChoice}>
+            <SelectTrigger className="w-full font-mono" aria-label="Card">
+              <SelectValue placeholder="Select a saved card" />
+            </SelectTrigger>
+            <SelectContent>
+              {(cards ?? []).map((c) => (
+                <SelectItem key={c.id} value={c.id} className="font-mono">
+                  {c.panMasked ?? c.id}
+                  {c.id === summary?.defaultCardId ? " · default" : ""}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {cardError ? <p className="text-sm text-destructive">{cardError}</p> : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCardOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={() => collect.mutate()} disabled={!cardId || collect.isPending}>
+              {collect.isPending ? "Charging…" : cardError ? "Retry" : "Pay bill"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {newCardGws.length ? (
+        <NewCardDepositDialog
+          open={newCardOpen}
+          onOpenChange={setNewCardOpen}
+          bp={bp}
+          billId={billId}
+          amount={unpaid}
+          currency={ccy ?? summary?.currency ?? "USD"}
+          gateways={newCardGws}
+          preferredGatewayId={summary?.paymentGatewayId}
+          onDone={invalidateBill}
+        />
+      ) : null}
 
       <Dialog open={payOpen} onOpenChange={setPayOpen}>
         <DialogContent>
@@ -169,11 +359,15 @@ export default function BillDetailPage() {
         </DialogContent>
       </Dialog>
 
+      {/* A bank transfer registered for this bill and not yet confirmed: reference, instructions,
+          and the customer's "I have transferred" step. */}
+      {payable ? <PendingBankTransfers bp={bp} billId={billId} gateway={bankGw} currency={ccy} className="mb-4" /> : null}
+
       {/* The invoice: meta strip, line items, then the totals block — one printable surface. */}
       <Card className="gap-0 overflow-hidden py-0">
         <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-b bg-muted/30 px-6 py-4 sm:grid-cols-4 lg:grid-cols-5">
-          <Meta label="Bill ID">
-            <span className="font-mono text-sm">{bill.id}</span>
+          <Meta label={bill.invoiceNumber ? "Invoice no." : "Bill ID"}>
+            <span className={bill.invoiceNumber ? "text-sm font-medium" : "font-mono text-sm"}>{bill.invoiceNumber ?? bill.id}</span>
           </Meta>
           <Meta label="Status">
             <StatusBadge status={bill.status} />
@@ -250,16 +444,17 @@ export default function BillDetailPage() {
                 <div className="my-2 border-t border-dashed" />
               </>
             ) : null}
-            <TotalRow label="Subtotal" value={fmtMoney(net, ccy)} />
-            <TotalRow label="Tax" value={fmtMoney(tax, ccy)} muted />
+            <TotalRow label="Subtotal" value={fine(net - adjTotal)} />
             {adjustments.map((a, i) => (
               <TotalRow
                 key={`adj-${i}`}
                 label={(a.description as string) ?? (a.type as string) ?? "Adjustment"}
-                value={fmtMoney(a.amount as number, ccy)}
+                value={fine(Number(a.amount ?? 0))}
                 muted
               />
             ))}
+            {Math.abs(rounding) >= 1e-6 ? <TotalRow label="Rounding" value={fine(rounding)} muted /> : null}
+            <TotalRow label="Tax" value={fmtMoney(tax, ccy)} muted />
             <div className="my-2 border-t" />
             <TotalRow label="Total" value={fmtMoney(gross, ccy)} strong />
             {appliedCredits.length > 0 ? (
@@ -276,10 +471,23 @@ export default function BillDetailPage() {
               </div>
             ) : null}
             <div className="my-2 border-t" />
-            <div className="flex items-baseline justify-between gap-4">
-              <span className="text-sm font-medium">Amount due</span>
-              <span className="font-mono text-lg font-semibold tabular-nums">{fmtMoney(unpaid, ccy)}</span>
-            </div>
+            {open ? (
+              <div className="space-y-1">
+                <div className="flex items-baseline justify-between gap-4">
+                  <span className="text-sm font-medium">Accrued so far</span>
+                  <span className="font-mono text-lg font-semibold tabular-nums">{fmtMoney(gross, ccy)}</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  This bill is still open: charges add up until it is issued at the end of the billing cycle, and
+                  nothing is due on it before then. Your balance already counts them.
+                </p>
+              </div>
+            ) : (
+              <div className="flex items-baseline justify-between gap-4">
+                <span className="text-sm font-medium">Amount due</span>
+                <span className="font-mono text-lg font-semibold tabular-nums">{fmtMoney(unpaid, ccy)}</span>
+              </div>
+            )}
           </div>
         </div>
       </Card>

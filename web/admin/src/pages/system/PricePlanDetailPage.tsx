@@ -843,11 +843,14 @@ export default function PricePlanDetailPage() {
                   <SelectValue placeholder={selectedType ? "Select an attribute" : "Pick a resource type first"} />
                 </SelectTrigger>
                 <SelectContent>
-                  {(selectedType?.attributes ?? []).map((a) => (
-                    <SelectItem key={a.name} value={a.name}>
-                      {a.name} ({a.type})
-                    </SelectItem>
-                  ))}
+                  <SelectItem value="existence">existence (flat price per resource)</SelectItem>
+                  {(selectedType?.attributes ?? [])
+                    .filter((a) => a.type !== "string")
+                    .map((a) => (
+                      <SelectItem key={a.name} value={a.name}>
+                        {a.name} ({a.type})
+                      </SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
             </div>

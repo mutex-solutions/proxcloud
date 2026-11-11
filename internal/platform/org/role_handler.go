@@ -50,9 +50,7 @@ func (h *RoleHandler) Routes(r chi.Router) {
 }
 
 func (h *RoleHandler) fail(w http.ResponseWriter, err error) {
-	if !httpx.WriteError(w, err) {
-		httpx.Err(w, http.StatusInternalServerError, 500, "internal.error")
-	}
+	httpx.WriteError(w, err)
 }
 
 // org loads the initialized user + the org (member-gated) + enforces a permission,

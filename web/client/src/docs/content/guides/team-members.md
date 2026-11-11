@@ -18,7 +18,9 @@ The invitation email carries a deep link into the portal (`/join-project?invite-
 2. The portal presents the invitation with the project's name and two buttons: **Accept invite** or **Decline**.
 3. Accepting makes them a member and drops them straight into the project. Declining throws the invitation away.
 
-<!-- screenshot: /docs-img/join-project-accept.png — The /join-project screen showing the pending invitation with Accept invite and Decline buttons -->
+![Current invitation screen with a synthetic project invitation and Accept invite / Decline controls](/docs-img/join-project-accept.png)
+
+*Illustration: current console UI with a synthetic invitation; no real invitation was accepted or declined.*
 
 ## Roles and permissions
 

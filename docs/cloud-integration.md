@@ -105,7 +105,11 @@ provider kind:
 | `config.provider` | What it is | Accessors |
 |---|---|---|
 | `proxmox` | One Proxmox VE cluster (one cluster = one region) | `internal/platform/externalservice/proxmox.go` |
-| `ceph-s3` | A Ceph RGW reached over S3 and Admin Ops | `externalservice.go` (`IsCephS3`, `CephConfig`, …) |
+| `ceph-s3` | A Ceph RGW reached over S3 and Admin Ops | `externalservice.go` (`IsCephS3`, `ObjectClient`, …) |
+| `rustfs` | A RustFS reached over S3 and its admin API | `externalservice.go` (`IsRustFS`, `ObjectClient`) |
+| `truenas` | A TrueNAS reached over its WebSocket API | `externalservice.go` (`IsTrueNAS`, `TrueNASService`) |
+| `powerdns` | A PowerDNS authoritative server for tenant zones | `externalservice.go` (`IsPowerDNS`, `PowerDNSService`) |
+| `sandbox` | The platform's sandbox cluster (gVisor) | `sandbox.go` (`IsSandbox`, `SandboxConfig`) |
 | `kamaji` | A management cluster for managed Kubernetes | `kamaji.go` |
 | `dbaas` | A management cluster for managed databases | `dbaas.go` |
 
@@ -136,8 +140,19 @@ The shape is documented in the header of `proxmox.go`:
       "publicNetworks": [{"id": "vmbr1", "name": "Internet", "cidr": "203.0.113.0/24",
                           "gateway": "203.0.113.1", "ranges": ["…"], "exclude": ["…"]}],
       "cidrPool": "10.100.0.0/16",                       // required; tenant CIDRs never overlap
+      "blockedCidrs": ["192.0.2.0/24"],                  // tenants cannot reach these; node management networks are always added
+      "sandboxCidrs": ["198.51.100.0/24"],               // sandbox cluster workers: fenced off tenants and the blocked networks, both ways
       "isolation": "shared",                             // or "evpn-per-project"
       "evpnController": "proxcloud"
+    },
+    "sandbox": {                                         // the sandbox workers' VM firewall, applied by the sync; secret.sandboxKubeconfig
+      "pool": "proxcloud-sandbox", "nodes": ["198.51.100.10-198.51.100.29"],
+      "loadBalancers": ["198.51.100.200-198.51.100.209"], "dns": ["1.1.1.1"],
+      "kubeletSources": ["192.0.2.201-192.0.2.209"], "snat": "203.0.113.50", "unsecuredMinAgeMinutes": 20,
+      "registry": {"address": "192.0.2.226", "port": 443},  // the sandbox registry, the one image source (SB6a)
+      "buildStorage": {"address": "192.0.2.41", "port": 9000}, // the template build bucket, build pods fetch contexts (SB6b)
+      "proxy": {"address": "198.51.100.201", "port": 443,  // sandbox-proxy (stage 56): only the entry appliance reaches it
+                "entry": {"vmid": 9110, "pool": "proxcloud-sandbox-entry", "address": "198.51.100.5"}}
     },
     "storageProfiles": {"std": {"label": "Local NVMe (ZFS)", "storages": {"*": "local-zfs"},
                                 "shared": false, "snapshots": true, "thin": true,
@@ -149,10 +164,19 @@ The shape is documented in the header of `proxmox.go`:
     "storageClasses": {"nas-capacity": {"class": "capacity",            // admin override (wins)
                                         "suggestedClass": "standard"}}, // installer fio result, display only
     "storageHeadroomPct": 10,                            // % of a storage kept free when placing disks
-    "templates": {},                                     // admin OS templates
+    "backupStorage": "nas-backup",                       // shared store of server backups; absent = none
+    "importStorage": "nas-templates",                    // store with import content for customer images; absent = none
+    "isoStorage": "local",                               // Kubernetes workers' bootstrap ISOs: node-local only (managed-k8s.md)
+    "templates": {},                                     // optional pins or overlays on the discovered OS templates
     "gpus": {},                                          // {mappingId: {"alias": "nvidia-4090"}}
     "overcommit": {"cpu": 4},
     "metrics": {"source": "none"},
+    "metadata": {                                        // server seeds, all optional (see "Server seeds")
+      "url": "https://api.example.com",                  // the API as tenant vnets reach it; default its own base URL
+      "isoStorage": "nas-templates",                     // default: first active iso storage on the node, shared first
+      "forceIso": false,                                 // never use a URL: tenants cannot reach the API
+      "vendorData": "#cloud-config\n…"                   // operator's vendor-data for every seeded server
+    },
     "provisioning": {"quota": {"servers": 10, "vcpus": 20, "ramMb": 51200, "diskGb": 500,
                                "networks": 5, "floatingIps": 2, "gpu": {"*": 0}}}
   },
@@ -169,16 +193,20 @@ Typed accessors used by the rest of the code:
 | `PVEConfig()` | `apiUrl`, `tokenId`, `fingerprint`, `insecureTls`, `secret.tokenSecret` | the `pve.Config` for `pve.NewService` |
 | `PVEPoolPrefix()` / `PoolFor(projectID)` | `poolPrefix` (default `pc-`) | the project's pool id |
 | `PVENetworkConfig()` | `network.*` | zones, public networks, `cidrPool`, isolation mode |
+| `PVEMetadataSettings()` | `metadata.*` | where server seeds come from and live |
 | `PVEStorageProfiles()` / `PVEDefaultStorageProfile()` | `storageProfiles`, `defaultStorageProfile` | storage per node, label, capability flags (validated against detection), derived `tier` / `class`, `bootDisk` / `dbaas` caps |
 | `PVECapabilities()` | `capabilities` | the last storage capability detection (below) |
 | `PVEStorageClasses()` / `PVEEffectiveStorageClass(id)` | `storageClasses` | per-storage class override and installer suggestion; effective class = valid override, else detected |
 | `PVEStorageHeadroomPct()` | `storageHeadroomPct` (default 10, valid 0–99) | free space kept on a storage when placing a disk |
+| `PVEBackupStorage()` | `backupStorage` | shared store of server backups (NFS, CephFS, PBS); absent = no backups offered |
+| `PVEImportStorage()` | `importStorage` | store with `import` content customer images are streamed to; absent = no image import offered |
+| `PVEImportUnknownSizeMaxGiB()` | `importUnknownSizeMaxGiB` | how large an image whose server states no size may get, spooled on the portal; absent = such a URL is refused |
 | `PVEVolumeProfileFunc()` | `storageProfiles`, `capabilities`, `storageClasses` | resolves each synced disk's own profile and storage class |
-| `PVETemplates()` | `templates` | admin OS templates servers are cloned from |
+| `PVETemplates()`, `PVEImageCatalog()` | `templates` | OS templates servers are cloned from: discovered from cluster tags ([images/README.md](../images/README.md)); an entry with `vmid` + `node` pins one, any other entry overlays `name`, `osDistro`, `minDiskGb` |
 | `PVEGPUAliases()` / `PVEGPUMappingsFor(alias)` | `gpus` | PCI mapping ids per GPU alias |
 | `PVEOvercommitCPU()` | `overcommit.cpu` (default 4) | scheduler CPU overcommit |
 | `PVEDefaultQuota()` | `provisioning.quota` | quota seeded onto a new project |
-| `MetricsSource()` | `metrics.source` | `prometheus` or `none` (the Proxmox default) |
+| `MetricsSource()` | `metrics.source` | `pve` (the Proxmox default), `prometheus` or `none` |
 | `ServiceEnabledInRegion(slug, region)` | `services[slug][region]` | per-service toggle (below) |
 
 ### Credentials
@@ -215,7 +243,10 @@ everything enabled):
 | `proxmox` | `image` | Images (admin templates and project templates) |
 | `proxmox` | `volumev3` | Volumes, Snapshots pages |
 | `proxmox` | `network` | Networks, Security groups |
-| `ceph-s3` | `object-store` | Object storage, S3 access keys |
+| `ceph-s3`, `rustfs` | `object-store` | Object storage, S3 access keys |
+| `truenas` | `shares` | NFS and SMB file shares |
+| `powerdns` | `dns` | DNS zones and records |
+| `sandbox` | `sandbox` | Sandboxes and their E2B API keys |
 | `kamaji` | `kubernetes` | Kubernetes |
 | `dbaas` | `database` | Databases |
 
@@ -241,8 +272,8 @@ by sync and the charge loop.
   resize, power and rename servers, project templates, volumes (add, extend,
   detach, attach, retype, delete detached), GPU slot picking, VNC/serial console.
 - **Networks** (`network.go`, `sdn.go`) — tenant vnets and subnets carved from
-  `cidrPool`, the ownership alias, per-vnet isolation rules, per-project EVPN
-  zones, staged SDN changes plus apply (serialized platform-wide by the SDN apply
+  `cidrPool`, the ownership alias, cluster firewall isolation rules, per-project
+  EVPN zones, staged SDN changes plus apply (serialized platform-wide by the SDN apply
   lock).
 - **Firewall** (`firewallsvc.go`) — security groups as cluster firewall groups,
   the project default group, VM firewall options and per-NIC ipfilter sets
@@ -294,7 +325,8 @@ active / total / avail. A node outside the storage's `nodes` list is ignored and
   shared to shared storage, so a template whose volumes all sit on shared storage
   (`pve.TemplateShared`) is full-cloned to a picked node whose profile storage is
   shared too (or with no profile, onto the template's own storages); a local
-  template or a local profile pins the clone to the template's node, and a profile
+  template or a local profile pins the clone to the nodes holding a copy of the template
+  (a discovered template clones the target node's own copy), and a profile
   not active on that node is 409.
 - **Volumes.** Add-volume checks free space on the server's node (409, nothing
   written). A detached disk attaches only to a server on its VM's node: PVE's disk
@@ -311,8 +343,128 @@ active / total / avail. A node outside the storage's `nodes` list is ignored and
   (and `volume_type` follows the disk's profile, not the server's). The volume
   billing resource exposes both as string attributes for price-rule filters.
 
-PVE behaviour that was not verified on a lab cluster is marked `TODO(verify-lab)`
-in `capability.go` and `volume.go`.
+### Server seeds
+
+A server with user-data, instance metadata or a provider `vendorData` gets a NoCloud seed from the
+platform (`pve/seed.go`, `project/nocloud_pve.go`). Any other server stays on PVE's own cloud-init
+drive. PVE's drive cannot carry them: its only input is cicustom snippets, and the API cannot upload a
+snippet.
+
+| Vnet | Seed | Why |
+|---|---|---|
+| With DHCP (simple zone), and an API URL | `smbios1` serial `ds=nocloud;s=<api>/api/v1/nocloud/<token>/` | cloud-init fetches it in its network stage, with DHCP on the first NIC |
+| Without DHCP (EVPN, VLAN), or `forceIso`, or no URL | a `cidata` ISO in the VM's cloud-init slot, uploaded to `isoStorage` | a URL seed means no network until it is fetched: the local stage gives up on any CD, so a static address has nowhere to come from |
+
+Both carry the same files. `meta-data` holds the instance id, hostname and tenant metadata under `meta`
+(`cloud-init query ds.meta_data.meta`), so a tenant key can never set `instance-id`, `dsmode` or
+`seedfrom`. `user-data` is the tenant's, passed through. `vendor-data` is the platform's cloud-config
+(a bcrypt hash of the create password, SSH keys) joined with the operator's: a tenant's user-data wins on
+the same key. `network-config` is rendered from `ipconfigN` and is absent for plain DHCP.
+
+- **Token.** Per VM, 256 bits, only its hash is stored (`pveServerSeed`). It is the only credential of
+  `GET /api/v1/nocloud/{token}/{meta-data,user-data,vendor-data,network-config}`. Deleting the server or
+  tearing down the project revokes it and removes the CD.
+- **Secrets.** User-data is encrypted at rest in the database. On an ISO seed it is a plain file on the
+  ISO storage and in the guest's CD drive for the server's lifetime, as any cloud-init seed is. A create
+  password is only ever there as a bcrypt hash, also for a login user (`adminUser`). The portal offers no
+  tenant a path to the file, so what protects it is who can read the store: **export a NAS store to the node
+  addresses, not to a subnet.** With a subnet, any VM whose traffic reaches the NAS from inside it can mount
+  the store and read every seed on it, along with every disk. Private vnets cannot get there
+  (`blockedCidrs` plus the node networks); a public NIC is bridged to the uplink and only the site's routing
+  stops it. CephFS asks for a key, so reaching a monitor is not enough. A vnet leaves through its exit node's
+  NAT under the node's address, which a node-only export admits, so the isolation rules are what keeps it
+  out: **Test connection warns about every network store (NFS, CIFS, GlusterFS, iSCSI portal, monitors of an
+  external Ceph) whose server is outside `blockedCidrs` and the
+  nodes' management networks.** Seeds stay on a shared store by default because PVE refuses to migrate a VM
+  with a CD on a node-local one (`local cdrom image`, `QemuMigrate.pm`). Bootstrap ISOs of Kubernetes
+  workers are different, live only until the node joins, and must be node-local (docs/managed-k8s.md).
+- **Removal.** Every new CD has a committed `pveSeedArtifact` journal entry before upload, with a persistent
+  installation identity and an exact 128-bit random filename. Failed/superseded uploads stay accounted for independently
+  of the encrypted active `pveServerSeed` source. All delete/empty paths require journal ownership, unchanged cluster and
+  storage identity, complete current/pending/snapshot references across **all** VMs/templates, and two no-reference
+  observations separated by 24 hours (plus a final fresh scan). Legacy `pcseed-<vmid>-<suffix>` files are never adopted.
+  No inventory reader or incomplete visibility means retained plaintext CD + durable warning, not an empty fallback.
+  A positively deleted server's source is retired (never delivered to a reused VMID), but its ciphertext remains while
+  cleanup is pending. A stale cache candidate alone cannot retire an active source. A denied DELETE may use an empty
+  CD overwrite only after the same checks; an unknown async task outcome requires operator reconciliation instead.
+  See [server-seed-safety.md](server-seed-safety.md) for setup, status, failure handling and remaining confidentiality limits.
+- **Password login.** A create password always goes through a seed: PVE's own drive sets the password but
+  cannot turn on `ssh_pwauth`, and a cloud image then refuses it over ssh.
+- **Later changes.** Attaching or detaching a public NIC re-delivers the seed with the same instance id
+  and the seed asks cloud-init to re-read the network at each boot (`updates.network.when: [boot]`), so
+  user-data does not run again. Rebuild delivers it with a new instance id: the new disk runs it once.
+- **Reachability.** A URL seed needs a route from tenant vnets to `metadata.url` that `blockedCidrs` does
+  not cover.
+
+### Server actions beyond power
+
+- **Set password** (`SET_PASSWORD {password, username?}`): the guest agent's `set-user-password`, for
+  `username` or the image's default user. The server must be running. 409 when the agent answers with an
+  error (no agent yet, no such user) or the token lacks the privilege.
+- **Rebuild** (`REBUILD {imageId}`): swaps the boot disk for a fresh copy of the image and keeps the vmid,
+  NICs, addresses, firewall and data disks. The copy goes on the old disk's storage, because PVE only moves
+  a disk between VMs on one node and storage; the old disk is parked as `unusedN` until the new one is in,
+  and put back on any failure. The disk donor VM is named like an image build for the seconds it exists:
+  sync and billing skip it. 409 with snapshots on the server, or when the image needs a bigger disk.
+- **Snapshots** (`LIST_/CREATE_/ROLLBACK_/DELETE_SNAPSHOT {name}`): PVE VM snapshots, disk only. 409 when an
+  attached disk is on storage without snapshots (capacity class by design). ZFS rolls back to the newest
+  snapshot only, so an older one is 409 rather than a failed task. A running server restarts after a rollback.
+  Replication's `__*` snapshots are hidden and refused.
+- **Backups** (`LIST_/CREATE_/RESTORE_/DELETE_BACKUP {id}`, offered when `config.backupStorage` names a shared store
+  with `backup` content: NFS, CephFS or PBS): vzdump in snapshot mode, zstd, with the store's retention left out so it
+  cannot remove a tenant's archive. `notes-template` stamps each archive with the project, and every action lists the
+  store and goes on only with an archive carrying this project's stamp, so a volid from elsewhere is 409. At most 7
+  per server; 409 when the store lacks room for the server's provisioned disks plus `storageHeadroomPct`. Restore runs
+  in place: PVE destroys the VM's disks and rebuilds them and the config from the archive, and a running server comes
+  back running. 409 up front, with nothing stopped, on a protected server, when the token lacks the privilege, when a
+  volume (a detached one too) is not in the archive, when what the restore would produce breaks the project's quota
+  (vCPUs, RAM, disk, GPUs), or when the NICs changed since the backup. A volume counts as in the archive when the archive
+  names its volid and its VOLUME row is older than the backup: PVE reuses disk names, so a disk added after another left
+  can carry that one's name. The boot disk always counts, so a restore can roll back a rebuild. A disk with no row before
+  a restore dates from that backup (`dataSince` on the row), so the same archive can restore it again. A retype keeps the
+  row but dates its name from the move (`externalIdSince`), since the move can land on the name of a disk that left: a backup
+  older than that does not hold it. A disk that left and came back, or was retyped and back, is refused too, though the
+  archive has an older copy: move it away or take a new backup. The checks run again once the server has stopped. VOLUME rows
+  wait out a restore (PVE cuts the config to `{memory: 128}` while its task runs), so the bill and the row's age carry on. A
+  failed restore task after that point leaves the VM with that cut-down config and its disks destroyed: their rows are
+  archived and the bill for them stops, the task's answer says so (409), and another restore brings the server back (it
+  stays stopped). What a killed task had already written is freed right after, and by that retry or the server's delete if
+  that fails. Such a retry skips the volume and NIC checks, and its quota check counts the server by its rows. Backups go with their
+  server, on delete and on project teardown, and a failure stops either: PVE lets the token delete an archive only through
+  `VM.Backup` on its VM, so on a server delete they go after protection is off, the volumes have moved and a hard stop has
+  worked, just before the destroy. A running restore refuses the delete, and so does a store that cannot list them, before anything changes. Keeping a server's state past its life is what an image is for. An archive of a VM destroyed outside the portal
+  disappears from the token's listing (PVE filters by the same check), so it stays on the store until an operator
+  removes it; its notes name the project. Backups are not billed yet.
+- **Image import** (`POST /project/{id}/cloud` `IMAGE {name, url, format?, checksum?, checksumAlgorithm?, profile?}`, offered
+  when `config.importStorage` names a store with `import` content): the portal fetches the URL and streams it to PVE's
+  upload API, a VM takes it with `import-from` on the profile's boot storage, and it becomes the project's template. **A
+  node never sees the URL.** PVE's `download-url` follows redirects with no way to turn that off, so a server answering the
+  portal with an image and the node with a 302 would reach the node's network, and no check in the portal could see it.
+  The fetch (`pkg/safeurl`) allows http and https without credentials, and refuses, at connect time, any address that is
+  not globally routable or is in `network.blockedCidrs`, so list public management ranges there; the portal needs
+  internet access for it, and carries the bytes. `format` is `qcow2` or `vmdk`, not raw: PVE checks those two as untrusted
+  and refuses a backing file on upload, and no check can tell a raw disk from any other bytes. Limits: one import at a
+  time per project; a disk over 200 GiB is 409; the disk counts against `diskGb` (project images count there now, from a
+  snapshot too), checked on the file's size before the upload and on the disk's virtual size after it; room on the
+  import store and, for the disk, on the profile's storage, both with `storageHeadroomPct`. pveproxy spools an upload to
+  `/var/tmp` on the API node, on any node's behalf, so an image also needs room on that node's root disk or it is 409, and
+  only one upload runs at a time per provider (409 for the others), since each passing the room check on its own could fill
+  that disk together. Because that holds up other projects, a source that sends nothing for a minute, or averages under
+  2 MiB/s past a two-minute grace, ends the import with a 409 and lets go at once. A
+  URL whose server states no size is refused unless `config.importUnknownSizeMaxGiB` allows it: then it is spooled to the
+  portal's temporary directory up to that limit, first. The client waits; if it gives up the import finishes and the
+  sampler adds the image, and whatever ends an import, the portal waits for the upload's task on the node before it lets go of
+  the project's lock and removes the file. Nothing is left on a failure except, with no `Datastore.Allocate` on the store, the uploaded
+  file (Test connection warns, see `docs/proxmox-permissions.md`). A template on local storage clones on its own node
+  only, like any project image. Billed as `image`.
+- **Spread groups** (`spreadGroup`, `spreadStrict` on create): a `grp-<name>` tag on the VM. The scheduler
+  prefers the node with the fewest members of the group in the project; strict refuses a node that has one.
+  At create time only: nothing moves a member later. PVE 9's own affinity rules are HA-only, and strict.
+- **Subnets** (`ADD_SUBNET {cidr?, snat?}`, `REMOVE_SUBNET {cidr}`, `SET_SNAT {cidr, snat}` on a NETWORK): a vnet
+  holds several subnets, from the same `cidrPool` with the same overlap check, and the project's isolation
+  ACCEPT covers them all. A server picks one with `networkInterfaces[0].subnet`. A subnet with an allocated
+  address cannot be removed, and a network keeps one. There is no router resource: the zone's VRF routes
+  between all of a project's vnets, and the isolation rules are what keeps other projects out.
 
 ### Tenancy: the pool is the boundary, the platform DB decides the rest
 
@@ -326,9 +478,18 @@ point (`proxmox.go` header):
 - Vnets, firewall groups and PCI mappings have **no pool scoping** in Proxmox.
   For them the platform database is the only tenancy boundary: vnets carry an
   ownership alias, and ownership is checked before any change.
-- Tenant-to-tenant isolation on the SDN is enforced by vnet DROP rules
-  (`shared` mode) or one EVPN zone per project (`evpn-per-project`). Details:
+- Tenant-to-tenant isolation on the SDN is enforced by cluster firewall rules,
+  in `shared` mode and with one EVPN zone per project (`evpn-per-project`) alike.
+  They also keep tenants off the nodes' management networks and `blockedCidrs`, and fence the
+  sandbox cluster's workers (`sandboxCidrs`) off tenants and those networks in both directions. Details:
   [C4.1 tenant network isolation](architecture/c4/c4-code.md#c41-tenant-network-isolation).
+- With `config.sandbox`, the sync puts every VM of that pool behind its own VM firewall (both policies DROP, address
+  pinned, only its control plane, DNS, the other workers and the internet allowed) and takes the
+  `proxcloud.io/unsecured` taint off a worker once that is in place:
+  [managed-sandbox.md §2](managed-sandbox.md#2-layer-1-the-vm-firewall-on-the-workers-sb2b).
+- PVE offers DHCP on simple zones only, and a simple zone stays on one node. On EVPN and
+  VLAN zones the platform allocates each server's `net0` address and sets it through
+  cloud-init, so an image without cloud-init gets no address there.
 
 Getting tenancy wrong over-bills a customer for resources that are not theirs,
 or worse, exposes them.
@@ -363,7 +524,9 @@ archives the cache rows.
 The cache is the `cloudResource` document (`internal/cloud/resource.go`). `type`
 is the discriminator for the free-form `data` sub-document. The types produced
 today are `SERVER`, `VOLUME`, `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`,
-`BUCKET`, `KUBERNETES_CLUSTER` and `DATABASE_CLUSTER`. `resource.go` still
+`FLOATING_IP`, `LOAD_BALANCER`, `BUCKET`, `SHARE`, `DNS_ZONE`, `KUBERNETES_CLUSTER`,
+`DATABASE_CLUSTER`, `SANDBOX` and `SANDBOX_SNAPSHOT` (a paused sandbox's or an E2B
+snapshot's stored filesystem). `resource.go` still
 declares the wider type list of the previous backend; nothing produces the
 other types.
 
@@ -481,11 +644,13 @@ on a server GET.
 drives the ingestion. The scope is **network traffic** per server, for the
 `instance_traffic` billing unit.
 
-- The only live source is a **Prometheus-compatible** endpoint
-  (`metrics/prometheus.go`; vanilla Prometheus, Mimir, VictoriaMetrics, Thanos).
-  `liveFetcherFactory` (`metricsjob/job.go`) builds it when
-  `config.metrics.source == "prometheus"`; with `none` (the Proxmox default) the
-  job skips the provider's servers silently. Month usage is `max − min` of the
+- A Proxmox provider defaults to `pve` (`metrics/pve.go`): public-NIC byte counters off
+  `status/current` every minute, folded into month-to-date totals with reset-aware deltas
+  (`cur >= prev ? cur - prev : cur`), SDN traffic excluded. The other live source is a
+  **Prometheus-compatible** endpoint (`metrics/prometheus.go`; vanilla Prometheus, Mimir,
+  VictoriaMetrics, Thanos). `liveFetcher` (`metricsjob/job.go`) picks by
+  `config.metrics.source`; with `none` the job skips the provider's servers silently.
+  Prometheus month usage is `max − min` of the
   raw cumulative-counter samples inside the month window (not PromQL
   `increase()`), using the same decimal arithmetic as the rating engine.
 - The only query schema implemented today, `libvirt-exporter`, is a layout
@@ -514,9 +679,9 @@ client console.
 and flat-maps each through its type's **Provider** (`GetBillingInformation`) into
 priced `BillingResource`s. Types with no registered provider are skipped. The
 providers are instance (plus `instance_traffic`), volume, bucket,
-kubernetes_cluster, database_cluster, and the floating_ip / load_balancer
-providers that no Proxmox resource feeds yet. Networks and security groups are
-not billed. Public-IP and template billing are planned (C3c).
+kubernetes_cluster, database_cluster and floating_ip. A load balancer has no
+provider of its own: its VM, disk and address bill as those types. Networks and
+security groups are not billed. Public-IP and template billing are planned (C3c).
 
 `stampResourceValues` injects `region` and `service_id` into each billing
 resource's values (so a price-plan rule filtered by region/service can match)
@@ -567,10 +732,335 @@ branch, is in
 
 ---
 
+## Several API endpoints
+
+`config.apiUrl` is the first endpoint; `config.apiUrls` lists other nodes or a VIP. The client tries them in order and
+remembers the last one that answered, so one dead node costs one 5 s dial, not one per request. It moves on when a
+connection never opened, for a read that lost its connection, and when a node answers without quorum. A mutation
+whose connection broke after sending is not retried, because it may have run.
+
+Nodes have different certificates, so several endpoints need `config.caCert`: the cluster CA (`/etc/pve/pve-root-ca.pem`).
+It accepts any certificate that CA signed, whatever the host name, because nodes are addressed by IP. It takes
+precedence over `fingerprint`, which only ever matches one node.
+
+## Protected servers (replication + HA)
+
+An opt-in per server. On local ZFS: replication every 15 minutes to a second node, plus an HA resource with a strict
+node-affinity rule over the two. On shared storage: the HA resource alone. Code: `internal/cloud/pve/protect.go`, `internal/platform/project/cloud_protect_pve.go`.
+Actions on a server: `GET_PROTECTION`, `ENABLE_PROTECTION`, `DISABLE_PROTECTION`.
+
+- **Availability.** The cluster needs quorum and three nodes, or two with a QDevice. Every disk must be on `zfspool`
+  storage, or every disk on shared storage (RBD, NFS, shared LVM), not a mix. The VM must have no passthrough device, and
+  another node must have room for its memory, and for its disks on ZFS.
+- **Shared storage.** No job, no replica, `mode: shared` on the state, so it takes `Sys.Console` and not `VM.Replicate`. HA is
+  added at enable and the state is `active` from there. Measured on RBD: back up on another node about 2.5 minutes after a
+  hard power-off. A failover loses what the guest had not flushed, as a power cut does. Not billed: `server_protection` rates a
+  replica's space and there is none. No memory is held back for these VMs and there is no node-affinity rule, so a nearly full
+  cluster, or shared storage restricted to some nodes, can fail a restart.
+- **Lifecycle.** Enable creates the job and syncs at once. HA is added only after the first sync has landed, on read or at
+  the next sync (`ReconcileProtection`), because HA recovery before that has nothing to start from. State:
+  `syncing` → `active`, or `degraded` when the last sync failed or is older than twice the schedule. Remove protection flags
+  the job, drops the tag, then removes the rule and HA, so a read in between cannot add HA back.
+- **Rollback and restore.** PVE puts a VM's tags back with its config, and the job and HA carry on regardless. The portal
+  keeps the protection tags as they were before the rollback or restore, so an older snapshot neither loses protection nor
+  brings back an earlier one. A rollback run outside the portal is healed on ZFS at the next sync, where a live job brings the
+  tag back. On shared storage it is not, but Remove protection and a delete still find the HA resource.
+- **Failover on ZFS.** The dead node's watchdog fences it and the VM starts on the replica with its data as of the last sync.
+  RPO = schedule + sync time. What was written after the last sync is lost.
+- **Node returns.** The VM stays where it is: equal priority in the rule, so no second interruption.
+- **Capacity.** The scheduler keeps each node's replicated VMs' memory free for them (`SchedReq.ReserveMem`).
+- **Billing.** `server_protection` with `size_gb` (replicated disks), from the first successful sync until disabled. The
+  start is when a read first saw that sync done (tag `pc-p-<unix>`), not PVE's `last_sync`, which is when that sync began.
+  A row with no stamp has no line. Any live replication job on a tenant VM counts, including one an operator made by hand.
+- **Operator migrate.** `POST /admin/service/{id}/server/{vmid}/migrate {target}`. Sends only the delta when a replica
+  exists; PVE turns it into an HA request for a managed VM, and the route waits until the VM is on the target.
+- **After a failover**, the node the VM left keeps its cloud-init volume, because PVE regenerates that volume on start
+  and does not replicate it. A later migrate back would abort on "volume already exists", so the route refuses with the
+  `pvesm free` to run. Removing it from the API takes `Datastore.Allocate` on the storage, more than the platform token
+  should hold.
+- **Power actions** on a managed VM return once the VM has reached the state, not when the HA request was accepted.
+
+Limits: a volume on another storage cannot be attached to a protected server without breaking its job; rollback of a
+VM snapshot older than the last sync can force a full resync (unverified). There is no alert on `degraded` yet; the state
+shows in the console and on the row.
+
+## A node goes down
+
+What Proxmox VE reports for a dead node, measured on PVE 9.2: for about five minutes its VMs read as last seen, `running`
+included; after that as `unknown`, with no name, sizes or template flag. Its storages keep reading as `available`.
+`Client.ClusterResources` therefore marks VM rows of a node that is not online (`NodeDown`, status `unknown`), and the sync
+treats a listed vmid it cannot read as still there.
+
+- **Rows.** Servers, volumes and images on that node keep their ids and everything the row knew. Only the server's status
+  changes, to `UNKNOWN`. A row is archived only when PVE no longer lists the vmid. The same goes for a VM whose config
+  read fails on a node PVE still calls online: that is the first minute of the same outage.
+- **Billing.** An `UNKNOWN` server is not billed for its flavor. Its volumes, addresses and snapshots still are: the data is
+  there and the address stays reserved.
+- **Actions.** Power actions and anything else that needs the node answer 409 with a message the customer can read. A delete
+  fails the same way and the row stays. Deleting a network or a security group is refused while any server of the project
+  cannot be read, since it may be using it.
+- **The rest of the project** keeps working: sync, volumes and new servers on the other nodes. The scheduler skips the node,
+  and a template copy on it is not offered.
+- **Node returns.** The rows refresh at the next sample. VMs that were running come back stopped, unless HA manages them
+  (see Protected servers): the customer starts them, and their data on shared storage is intact.
+
+On Ceph with pools of size 3 and `min_size` 2, one lost node leaves the cluster degraded and writable: RBD, CephFS and RGW all
+kept taking writes on the lab and recovered by themselves when the node returned. A pool of size 2 and `min_size` 1 stays
+writable too, on one copy.
+
+## Standalone volumes (holder VM)
+
+A Proxmox disk must belong to a VM. A volume with no server sits as `unusedN` on a **holder VM**: one per (project,
+node), never started, tagged `pc-holder`, in the project pool, created on demand and removed with its last disk. Code:
+`internal/cloud/pve/holder.go`.
+
+- `POST /project/{id}/cloud` with type `VOLUME` and no `serverId` creates one, placed on the node with most free space
+  on the profile's storage (or `availabilityZone`).
+- Deleting a server moves its data volumes to the holder, attached and detached alike; `?deleteVolumes=true` destroys
+  them with the server. If a move fails the server is not deleted.
+- Holders have no SERVER row, so no compute bill, no quota and no attach target. Their disks are normal `VOLUME` rows,
+  billed and counted against `diskGb`. The scheduler ignores holders.
+- PVE reassigns a disk only within a node. A local disk therefore only attaches to a server on its node. A disk on
+  shared storage (`Shared` in the detected capabilities: RBD, NFS) attaches anywhere: `carryToNode` moves it onto a new
+  holder, migrates that holder offline (nothing to copy) and reassigns on the target's node. If a step fails the disk
+  stays on that holder as an ordinary detached volume. A node where the storage is disabled, restricted away or down is
+  no target: it is left out of `LIST_ATTACH_TARGETS` and an attach answers 409.
+- That holder is a carrier, tagged `pc-carrier` as well as `pc-holder`. No other operation may put a disk on it. It goes
+  once its disk has left, and it stays behind empty when a move may still be running: its delete would take a disk that
+  arrives after the check. An empty carrier costs a vmid and no money. Project teardown removes it.
+- Create detached, keep on server delete, attach and delete volume run under a per-project lock (PostgreSQL, so it holds
+  across API replicas). A caller that waits a minute gets 409.
+
+## Shared block on a TrueNAS LUN
+
+A LUN with shared LVM on it gives a boot-capable profile on any node without Ceph: live migration and cross-node attach
+work, there are no snapshots and no thin provisioning. No ProxCloud code is specific to it: detection classifies shared
+`lvm` as tier standard, class standard. Checked on TrueNAS 25.10 and PVE 9.2 with one portal and no multipath:
+
+```sh
+# On TrueNAS: a sparse zvol, an iSCSI portal, initiator group, target, extent and target-extent, then start iSCSI.
+# On one node:
+pvesm add iscsi nas-iscsi --portal <nas> --target <iqn> --content none
+pvcreate /dev/disk/by-id/<wwn>; vgcreate shared-vg /dev/disk/by-id/<wwn>
+pvesm add lvm shared-block --vgname shared-vg --base nas-iscsi:0.0.0.<wwn> --shared 1 --content images
+# On every other node, or the storage stays inactive there:
+iscsiadm -m session --rescan; pvscan --cache
+```
+
+Then add a profile: `"block": {"storages": {"*": "shared-block"}, "shared": true, "liveMigrate": true}`. Claiming
+`snapshots` is refused. Restrict the target's initiators to the nodes on a real site. A NAS on HDD RAIDZ is capacity
+class in practice: use this on SSD or mirrors, and set the storage's class by hand if it is not. A portal the nodes
+cannot reach (TrueNAS also advertises its Docker bridges) makes `iscsiadm` log an error on every scan; it is harmless.
+
+## PowerDNS zones
+
+`config.provider == "powerdns"` serves tenant zones (`DNS_ZONE` resources, service slug `dns`). Code:
+`internal/cloud/powerdns/`, `internal/platform/project/cloud_zones.go`.
+
+```json
+{"provider": "powerdns", "apiUrl": "https://dns.example:8081", "serverId": "localhost",
+ "nameservers": ["ns1.example.net", "ns2.example.net"], "region": "pve",
+ "regions": {"pve": {"displayName": "Lab"}}, "services": {"dns": {"pve": true}}}
+```
+
+The API key goes in `secret.apiKey`. The server needs `api=yes`, a backend that stores zones, and its API reachable
+from ProxCloud only. Zones are `Native`, so the operator replicates them (database replication or a second backend).
+
+A zone belongs to the project in its `account` field (`proxcloud:<projectId>`). Every read and write checks it first,
+and another project's zone looks absent. Names are global on the server: a taken name answers `409`. So does a name above
+or below a zone the project does not own, including zones the operator made by hand (empty `account`) and the name server
+hosts, because the server answers from the longest matching zone with no delegation step. New names use strict IDNA
+A-label canonicalization (lowercase, one final dot); public suffixes, private suffixes (`github.io`), unknown/internal
+suffixes, wildcards and malformed labels are refused. Tenants may not write the SOA or apex NS. Zones are not billed and
+have no zone-count quota yet; ownership challenges have their own bounded quota below.
+
+### Ownership proof before creating a zone
+
+Every **new** zone requires a fresh TXT proof before any authoritative zone is created. The console guides the flow;
+MCP has `create_dns_ownership_challenge`, `get_dns_ownership`, `verify_dns_ownership`, `cancel_dns_ownership` and
+`create_dns_zone`. Native HTTP and MCP share the same backend gate; `verified:true`, a raw token or a zone in the cache
+cannot bypass it. All lifecycle routes require project membership plus `project:cloud_resource:manage` and an exact
+attached, enabled PowerDNS provider. Paths below have the `/api/v1` prefix:
+
+| Method / path | Contract |
+|---|---|
+| `POST /project/{id}/dns-ownership` | `{serviceId,name}` → `{id,name,serviceId,state:"PENDING",recordName,recordType:"TXT",recordValue,expiresAt}`. Publish the **exact** value at `_proxcloud-ownership.<canonical-zone>.` on your current DNS host. Token is returned only here, with `Cache-Control: no-store`. |
+| `GET /project/{id}/dns-ownership/{ownershipId}?serviceId=…` | State, record name and deadlines; never the token or hash. Lost token: cancel and start again. |
+| `POST /project/{id}/dns-ownership/{ownershipId}/verify` | `{serviceId}` only. Trusted TXT lookup, not tenant-supplied token/server. Correct exact-owner TXT → `VERIFIED` and `verifiedUntil`. Wrong/not visible →409; resolver failure →502; backoff/busy →429. |
+| `DELETE /project/{id}/dns-ownership/{ownershipId}?serviceId=…` | Cancel a challenge (idempotent); does not delete an existing zone. |
+| `POST /project/{id}/cloud?serviceId=…` | `{type:"DNS_ZONE",data:{name,ownershipId}}`; matching `VERIFIED` proof required. Consume then create, once only. |
+
+The random value has **256 bits** of entropy. Only a SHA-256 hash bound to project/provider/canonical-zone is stored.
+Pending lifetime is30minutes; a successful proof authorizes one create for10minutes. Verification cannot extend an already
+verified proof. Maximum10live challenges and20new challenges/hour **per project across all providers**; cancellation and
+consumption do not reset the hourly budget. Attempts are at least10seconds apart; simultaneous project requests get429
+rather than holding shared lock-pool connections. Pending and even verified challenges are **nonexclusive**: they never
+reserve a name or block another project's challenge. Expired rows cannot grant access; challenge history older than24h
+is opportunistically pruned for that project on its next challenge, retaining no permanent reservation.
+
+A PostgreSQL session advisory lock serializes actual creates across every provider/alias in this database; busy returns409
+without consuming the proof. The complete create request has a10second deadline. A durable60second create-attempt
+cooldown spans **all proofs/providers of one project**, even when live preflight fails; invalid/foreign/config-invalidated
+proofs and global-busy responses spend no attempt. This bounds one valid owner's slow-backend occupancy of the shared
+namespace lock; it is a low-volume global safety bottleneck, not a high-throughput multi-writer DNS engine.
+No DNS proof lookup holds that global lock. Short row-lock transactions protect backoff,
+verify/cancel and consumption. Consumption commits **before** PowerDNS POST, and is not rolled back by a failed/uncertain
+HTTP response. On failure, refresh the zone list (sync also finds owned zones); if absent, start a new challenge. The
+live PowerDNS overlap guard runs before verify, after lookup and under the create lock. Only actual existing zones
+exclude overlap, never pending claims. Operator writes outside ProxCloud are not covered by its DB lock, so the existing
+post-create overlap check remains too. Fresh project/provider/permission checks run at finalize/create. Changing API URL,
+server ID, name servers or verification resolvers invalidates earlier proofs.
+
+### Resolver trust, caches and controlled lab overrides
+
+Default verification queries **TCP** `1.1.1.1:53` and `8.8.8.8:53`, not the API host's system resolver, a tenant server or
+the PowerDNS HTTP API. Permit API egress to those endpoints. At most two TCP queries,2seconds each, total4seconds; any
+configured trusted resolver's exact answer can prove control. Other resolver failure/disagreement can delay visibility,
+but does not add a new trust source. Only the queried owner's TXT records count (chunks within one RR concatenate;
+separate RRs never concatenate). CNAME/DNAME indirection, truncated/mismatched/malformed responses and failed resolvers
+fail closed. DNS negative and positive cache TTLs still apply: wait and retry, do not create a zone to make proof visible.
+
+This is conventional DNS TXT control proof, **not DNSSEC validation** or legal domain ownership. It trusts the configured
+resolver operators and the network path; use trusted, independently operated recursors with a public DNS view in
+production. Do not point verification at the tenant-managed authoritative backend, a recursor forwarding undelegated
+zones to it, or a resolver tenants can reconfigure. Otherwise a split/private view can vouch for data not publicly owned.
+The record need not remain after creation; this is a short-lived creation authorization, not continuous domain monitoring.
+
+An operator with `admin:service:manage` may set `config.ownershipResolvers` to **one or two literal unicast `IP:port`**
+endpoints, e.g. `["10.88.0.10:5301"]`, using the provider's Advanced config or admin provider PUT. Hostnames, URLs,
+zero ports, unspecified/multicast addresses and tenant resolver input are rejected. Omit/null restores public defaults;
+an empty list is invalid. This is a trust override, never a per-tenant choice. Private authoritative endpoints are useful
+only for a **controlled drill**, with an isolated proof publisher separate from the actual zone-creation backend and no
+production domain/delegation. Such a drill proves the gate and packet flow, not public domain ownership. The operator
+connection page shows the effective policy. Do not ship a lab override into production.
+
+A same-project, already-managed parent can legitimately publish the TXT for its child; control of that parent delegates
+child control. A foreign-project/operator parent on the same PowerDNS server is still refused by the live overlap rule,
+even with an external proof. No automatic legacy-parent ownership grant or domain-wide permanent ownership is inferred.
+
+### Upgrade and existing zones
+
+Upgrade **all API replicas** before reopening DNS creates: an old replica still runs the former ungated create path.
+Startup ensures the `dns_ownership` table/index and wires mandatory proof storage; an unwired handler refuses new creates.
+No new tenant or cloud permission, secret, workflow, DNS grant or destructive migration is required. Existing zones,
+including unproved/overlapping legacy zones, remain readable, editable and deletable: no retroactive cleanup or outage.
+Operator reconciliation of legacy ownership is a separate explicit process. New recreate-after-delete needs a fresh proof.
+Audits record challenge/verify/cancel identity/outcome but no token/hash; proof-looking TXT values are redacted in record
+mutation audit. Avoid logging challenge response bodies at reverse proxies or in automation transcripts.
+
+A project's deletion removes its zones by `account`, with or without rows. If the server is down the project stays
+`DELETE_IN_PROGRESS` and the deletion job retries every sweep. The same holds for shares, Proxmox, ceph-s3 credentials and
+managed-service remnants. Tenants see a generic message when the server fails; the cause is in the API log.
+
+The PVE SDN DNS plugin, which would register VM names from SDN IPAM, is not wired and stays Planned: it needs DNS
+options on the shared EVPN zone, and ProxCloud does not create IPAM records for it to use.
+
+## TrueNAS file shares
+
+`config.provider == "truenas"` serves NFS and SMB shares (`SHARE` resources, service slug `shares`). Code:
+`internal/cloud/truenas/`, `internal/platform/project/cloud_shares.go`,
+`internal/cloud/billingresource/share.go`.
+
+The client speaks JSON-RPC 2.0 over one WebSocket (`wss://<nas>/api/current`, `auth.login_ex` with
+`API_KEY_PLAIN`), and refuses a plain-HTTP URL because TrueNAS revokes a key sent over it. Minimum TrueNAS 25.10.
+
+```json
+{"provider": "truenas", "apiUrl": "https://nas.example", "username": "proxcloud", "fingerprint": "AA:BB:...",
+ "parentDataset": "tank/shares", "mountHost": "192.0.2.10", "region": "pve", "defaultQuotaGiB": 500,
+ "regions": {"pve": {"displayName": "Lab"}}, "services": {"shares": {"pve": true}}}
+```
+
+The API key goes in `secret.apiKey`. Its account needs the built-in `truenas_sharing_administrators` group
+(`SHARING_ADMIN` also covers `pool.dataset.create`, checked on 25.10.8). Deleting a share needs `DATASET_DELETE`, and SMB shares create a user per share, which
+takes `ACCOUNT_WRITE`: a privilege with both roles on the account's group.
+
+Each share is a dataset `<parent>/<projectId>-<name>` with a `refquota`, the `proxcloud:project` property proving
+ownership, plus one NFS or SMB share. SMB gets a generated user and password: the password appears once, in the
+create or reset response, and is never stored.
+
+**Access.** An export lists the project's public NIC addresses, the addresses of its clusters on a shared worker pool,
+and its subnets, computed at create, by the `REFRESH_ACCESS` action and by every sync. A cluster on a project network is
+covered by the subnet and is not listed on its own (TrueNAS also refuses a /32 inside a listed subnet). An address leaving
+the project (detach, server delete, public IP delete, subnet or network delete, cluster release, teardown) comes off the
+project's exports first, and if the NAS refuses, the release fails and the address stays held, so it can never reach
+another tenant while an export lists it. Network delete is refused while a live cluster holds addresses on the network,
+and drops the addresses a deleted cluster left there. NFS squashes root: a client's root is `nobody` on the
+NAS, and a new dataset is mode `777` so that unprivileged clients can write. An export from before this rule is brought
+in line by the next sync or `REFRESH_ACCESS`: `maproot` goes and its top directory opens to `777`, not recursively. Files
+a client's root wrote before that stay owned by root with their modes, so clients can read them as those modes allow but
+no longer change them. An operator who wants them writable changes their owner on the NAS. The NAS tells tenants apart by source address, so a client needs a path to the NAS that keeps
+its address. A public NIC has one when the NAS is routable from the public network. A private subnet that leaves
+through SNAT arrives with a node's address, and the tenant isolation rules drop traffic from the pool to the nodes'
+management network: on a NAS placed there, private subnets cannot mount.
+
+**A NAT between tenants and the NAS.** When a NAT rewrites tenant traffic on its way to the NAS, the NAS sees the NAT's
+address, which no export lists, so the mount fails. `config.snatSources` (default: none, off) lists those addresses,
+single hosts only:
+
+```json
+{"provider": "truenas", "snatSources": ["192.0.2.1"]}
+```
+
+Each address is added to every export of the provider, Kubernetes RWX datasets included, at create, by
+`REFRESH_ACCESS` and by every sync, and no release of a tenant's address takes it off. Removing it (an empty list)
+takes it off at the next sync; clients that rely on it then get `Stale file handle` or a refused mount.
+
+**This gives up tenant isolation on that NAS.** A NAT address is shared by every tenant behind it, and the address is
+all an NFS export checks. Every tenant behind the NAT can mount every NFS share of every project on this provider, read
+and write its files (a new dataset is mode `777`), and the export path is no secret. On SMB only the share's password
+is left. Use it only for tenants who trust each other, or give the NAS a path that keeps each tenant's address and leave
+the setting off. The customer console tells a share's owner when the setting applies to it.
+
+**Actions:** `EXTEND {sizeGb}` (either direction, not below usage), `REFRESH_ACCESS`, `RESET_PASSWORD`. Delete removes
+the export, the SMB user and the dataset with its data. Project teardown does the same.
+
+**Quota and billing.** `defaultQuotaGiB` caps the sum of a project's allocated sizes, and one share is at most 1 PiB. The `share` billing resource has
+`size_gb` (used), `quota_gb` (allocated) and `protocol`; the seed bills `size_gb`.
+
+## RustFS S3 object storage
+
+Standard-tier sites serve buckets from **RustFS** (`config.provider == "rustfs"`, same config keys
+as `ceph-s3`). `adminApiUrl` is the private base URL the API reaches `/rustfs/admin/v3` on (the public
+endpoint blocks it); the secret holds the RustFS root keys. Buckets carry
+`data.storageBackend = "RUSTFS"`. Code: `internal/cloud/client/objectstore_rustfs.go`.
+
+`rustfsBackend` embeds the Ceph backend's plain-S3 data plane and replaces what RGW does through Admin
+Ops or bucket ownership. `client.ObjectCaps` (returned by `GET_SETTINGS` as `caps`) tells the UI what is
+off; the API enforces it too.
+
+| Concern | Ceph RGW | RustFS |
+|---|---|---|
+| Project identity | RGW user with generated keys | IAM user `uidPrefix + projectId`; ProxCloud generates the secret; access key = the user name |
+| Bucket ownership | RGW owner | ARN in the project's canned policy, named like the user. Created and deleted with the root key; the project policy denies `s3:CreateBucket` and `s3:DeleteBucket` |
+| Project quota | RGW user quota | Sum of bucket quotas, enforced by the API. With `defaultQuotaGiB` set, a new bucket gets what is left as its HARD quota, and quotas must keep fitting (`409` otherwise) |
+| Bucket quota | bytes and objects | bytes only (`caps.quotaObjects = false`); HARD but fail-open, so never a billing guarantee |
+| Usage | Admin Ops counters | Scanner (`datausageinfo`): delayed. Unknown usage keeps the last value, never 0 (`client.KeepLastUsage`) |
+| Extra keys | child RGW user | IAM user with no identity policy, reaching only what a bucket policy grants |
+| Key rotation | new access + secret | new secret, access key unchanged |
+| Website | yes | gated off (`caps.website = false`) until per-bucket DNS serving is verified |
+
+**Lab check RUSTFS-POLICY-1 (RustFS 1.0.4):** a bucket-policy principal matches the **bare user name**,
+`{"AWS":["<user>"]}`. The ARN forms RGW uses (`arn:aws:iam:::user/<user>`) are accepted and silently match
+nothing. So grants are bucket-policy statements, as on RGW, with the principal in RustFS's form
+(`cephBackend.bareUserGrants`).
+
+Known limit: a bucket with a quota refuses writes with `503` for a few seconds after creation, until the
+scanner has seen it (measured 5 s on an idle 1.0.4). The root key owns every bucket, so `CreateBucket` on an
+existing name answers 200: the API checks with `HeadBucket` first.
+
+Quirks handled: `GET /quota/<bucket>` answers `503 "authoritative bucket usage is not available yet"` until
+the scanner has seen a new bucket (waited out for decisions, flagged unknown in sync, `503` to the user if it
+lasts); `list-canned-policies` needs `bucket=` next to `format=json`. Any bucket's ARN is removed from other
+project policies when that name is created, so an owner who deleted a bucket directly through a key granted
+by a custom policy cannot reach the next owner's bucket.
+
+Bucket billing rules choose their basis through the priced attribute: `size_gb` (used, the default in the
+seed) or `quota_gb` (allocated; the used size for a bucket without a quota). Both backends fill it.
+
 ## Ceph RGW S3 object storage
 
-Buckets are served by a separate provider kind, **Ceph RGW over the S3 API**
-(`config.provider == "ceph-s3"`). It is the only bucket backend. Every bucket
+Full-tier sites serve buckets from **Ceph RGW over the S3 API**
+(`config.provider == "ceph-s3"`). Every bucket
 carries `data.storageBackend = "CEPH_S3"`. Code:
 `internal/cloud/client/objectstore_ceph*.go`, `internal/cloud/cephcred/`,
 `internal/platform/project/cloud_bucket_settings.go`.
@@ -613,6 +1103,32 @@ posts to. Shape:
   "secret": { "adminAccessKey": "…", "adminSecretKey": "…" }  // an RGW admin user, caps users=*;buckets=*;usage=*
 }
 ```
+
+Static websites are offered only when `s3WebsiteEndpoint` is set, and the gateway must run with
+`rgw_enable_static_website = true` and `rgw_dns_s3website_name` = the endpoint's host. Without the option RGW answers
+`405` to the website calls; ProxCloud reports that as "does not offer static website hosting". Sites live at
+`<bucket>.<endpoint host>`, so that name needs a wildcard DNS record.
+
+The public-read statement a website installs serves on the S3 endpoint whatever the gateway answers to website calls.
+Turning the option off or clearing `s3WebsiteEndpoint` therefore does not close a live website. The tenant still sees
+the Website tab with **Disable website** on such a bucket, and making the bucket private also removes the website.
+
+`POST /api/v1/admin/service/object-store/test` with `{provider, s3Endpoint, adminApiUrl, region, adminAccessKey, adminSecretKey}`
+tests a connection without storing it: an S3 call, then an admin read (on `ceph-s3` the key's own Admin Ops user and caps,
+on `rustfs` the canned policy list). A blank `provider` means `ceph-s3`. The answer is `200`, or `400` with the reason. The
+installer calls it before registering the provider, and the Add dialog's **Test connection** button calls it.
+`POST /api/v1/admin/service/{id}/object-store/test` runs it on a stored row with its stored key: **Test connection** on
+the provider's Connection tab.
+
+The same check runs on `POST /admin/service` for an object-store row of any status, and on an update that changes a row's
+endpoints, region or keys or turns it to anything but `DISABLED`. A write that changes none of those still works while the
+store is down, turning a service off included.
+
+A row can still go bad after it is stored, so bootstrap does not depend on the check. Each provider gets its own attempt,
+bounded to 45 seconds. A failed one leaves the others provisioned, and it is recorded twice: in `provisionFailures` on the
+project, retried when the project is next opened and no more than once in 5 minutes, and in `provisionError` on the
+provider's row, which the provider's page shows. A project on no provider at all gets an error on every open until one attaches, also inside
+the 5 minutes when nothing is tried. An operator can also attach the provider by hand.
 
 Accessors: `IsCephS3`, `S3Endpoint`, `AdminAPIURL`, `S3WebsiteEndpoint`,
 `CephRegion`, `UIDPrefix`, `RGWUIDFor(projectID)`, `DefaultQuotaGiB`, and
@@ -709,6 +1225,22 @@ without one), cross-zone replication (single-zone cluster), MFA delete.
 
 ---
 
+## Load balancers (HAProxy appliance)
+
+A `LOAD_BALANCER` row (`internal/platform/project/cloud_lb_pve.go`) is what a tenant configured: listeners, pools, members. Everything that runs and bills is an ordinary object in the project's pool: a VM tagged `pc-lb-<id>` with a SERVER row, its disk with a VOLUME row, its public address with a FLOATING_IP row. So the charge job, quota, sync, project suspension and teardown need nothing new. A tenant's direct action on those rows answers 409 (`pveApplianceGuard`), and **Servers** hides the VM. So do requests that name the VM as a target: a new volume on it, moving a disk onto it (`refuseAppliance` in `pve/lb.go`), and an image of it. It is not offered as an attach target, or as a member of another balancer.
+
+- **Create.** `POST /project/{id}/cloud`, `type: LOAD_BALANCER`, data `name`, `networkId`, `publicNetworkId`, `flavorId`. The row goes in first, so a crash during the build leaves something to find the VM by. The build is a server create with no security group and no seed: before first boot `net1` is plugged on the public network, pinned by ipfilter, with the default route on it, and `net0` gives up its gateway, so no reboot is needed. A network with DHCP is refused, because a DHCP `net0` keeps its gateway and replies would leave through the overlay. A build that fails destroys the VM and gives the addresses back only once PVE says the VM is gone, which holds for an ordinary server too (`pve.VMLeftError`). If it cannot say, the addresses stay held and the row stays in `ERROR`, so the tenant can delete it.
+- **Image.** `config.lbImage` (`PUT /admin/service/{id}/update`), default `debian-13`: a Debian-family image with the guest agent and cloud-init. A stock image gets `haproxy` and `socat` through apt over the public NIC; a site with no egress bakes both into the image.
+- **Config.** `pveLBApply` renders the row with `pve.RenderHAProxy` and compares the hash with the last one applied. On a difference it opens the listener ports on the VM's firewall, writes the file through the guest agent, and runs `haproxy -c` before moving it in, so a refused config leaves the old one running. A reload that fails anyway, as on a port something else holds, puts the old file back for the next boot and sets `ERROR` with HAProxy's message while the last config keeps running. `systemctl reload` reports that case as done, so the reload goes through HAProxy's master socket, which needs HAProxy 2.7 or newer in the image. A config over `pve.LBMaxConfig` (45 KiB) answers 400, since the guest agent could not write it. HAProxy binds as root and drops to user `haproxy` in a chroot. It runs after each change, every 10 seconds until a new balancer is active, and on every sync, which also starts a stopped appliance. All of it holds the lock `lb-<externalId>`.
+- **Tenant input.** Names never reach the config: it uses generated ids, numbers, parsed addresses and values from fixed lists, and the renderer enforces that again on stored rows.
+- **Members.** `UPDATE_CONFIG` takes servers, never addresses. `lbMemberAddress` wants a VM in this project's pool, not a template, with a platform allocation on the balancer's network and inside its subnet, and answers the same 400 for a vmid of another project and one that does not exist. The identity stamp is kept, so a reused vmid stays out: the member is marked `missing` and leaves the config at the next sync.
+- **Health.** `GET_HEALTH` reads `show stat` through the guest agent, on demand.
+- **Delete.** Destroys only a VM carrying this balancer's tag, never a template, then its rows and address. It answers 409 while the create is still running (no server saved yet), for at most `lbBuildTimeout` if that create died. Project teardown takes it with the pool.
+
+Privileges: `VM.GuestAgent.Unrestricted` (exec and file-write), which is root in that guest. The token already holds it for Set password, and the platform runs nothing on a VM without this tag.
+
+Suspension: the VM is paused with the project's other VMs and the sync leaves it alone. Create and `UPDATE_CONFIG` answer 409; `GET_HEALTH`, delete and a stop of the VM stay open, as for any server. A resume unpauses it, and the sync starts it if it was stopped. Traffic on its public NIC is metered and bills as `instance_traffic`, like a server's. Not there: TLS termination, HTTP health checks, a second appliance for failover, security updates of a running appliance (see the guide to replace one). If its node dies the address is down until the node returns, as for any server on local storage.
+
 ## Managed Kubernetes and databases (Kamaji and DBaaS providers)
 
 `config.provider == "kamaji"` registers a management cluster for managed
@@ -723,10 +1255,10 @@ from the Application and the objects it owns. Billing:
 `billingresource/kubernetescluster.go` (control-plane fee) and
 `databasecluster.go`.
 
-Read, sync and delete work today. **Creating** a cluster or a database on a
-Proxmox provider is planned: the create legs
-(`project/cloud_kamaji_create.go`, `cloud_dbaas_create.go`) return an
-explicit "not available yet" error. See
+Read, sync and delete work today, and so does **creating a database**: its
+endpoint is a MetalLB address from `config.database.lbAddressPool`, no tenant
+network is involved. **Creating a cluster** resolves the workers' pool, vnet,
+addresses and per-cluster PVE tokens in `project/cloud_kamaji_create.go`. See
 [C3e](architecture/c4/c3-components.md#c3e-managed-services-and-object-storage).
 
 Operator guides: [managed-k8s.md](managed-k8s.md),
@@ -765,7 +1297,7 @@ AppProject guardrail, ArgoCD health checks): `deploy/mgmt-cluster/`.
 
 **Billing bridge:**
 
-- `internal/cloud/billingresource/{billingresource,catalog,server,volume,bucket,floatingip,loadbalancer,kubernetescluster,databasecluster}.go`
+- `internal/cloud/billingresource/{billingresource,catalog,server,volume,bucket,image,floatingip,kubernetescluster,databasecluster}.go`
 
 **Object storage:**
 

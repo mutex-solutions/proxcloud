@@ -6,9 +6,12 @@
 #   ui     the customer console SPA (static nginx image)
 #   admin  the operator console SPA (static nginx image)
 #
-# Datastores: PostgreSQL (primary, required) and RabbitMQ (required).
-# Both can be bundled (bitnami subcharts, on by default) or brought
-# externally via the matching external* block. Keycloak is optional.
+# Datastore: PostgreSQL (writable primary, required; also owns durable jobs).
+# Default: operator-managed CloudNativePG Cluster; its operator must already run
+# in the cluster (the installer does that, see installer/). No broker is required.
+# Alternatives: the PostgreSQL subchart (values-dev.yaml) or externalPostgresql.
+# Existing broker upgrades MUST follow docs/postgres-jobs-migration.md first.
+# Keycloak is optional.
 # ============================================================================
 
 nameOverride: ""
@@ -53,7 +56,9 @@ api:
   encryptionKey: ""
 
   # Name of a pre-created Secret that replaces the chart-managed one.
-  # It must carry the keys: db-url, rabbitmq-password, encryption-key.
+  # Required keys: db-url (WRITABLE PRIMARY), encryption-key; sso-client-secret when SSO is on.
+  # Optional db-read-url is ONLY for history/metrics reads; absent/empty falls back to primary.
+  # Old Secrets need no rabbitmq-password and no new read key to keep working.
   existingSecret: ""
 
   # Public base URLs the API embeds in mail links, redirects and MCP
@@ -69,18 +74,25 @@ api:
   # (PROXCLOUD_CORS_ALLOWED_ORIGINS, joined with commas).
   corsAllowedOrigins: []
 
-  # Scheduled-job gates. All OFF by default on purpose: a plain deploy
-  # stays dormant and never charges bills on a timer.
+  # Region assumed when a provider names none (PROXCLOUD_DEFAULT_REGION). Empty: the binary's "default".
+  defaultRegion: ""
+
+  # New-work gates are OFF by default: no timed billing or debug routes.
+  # Durable workers ALWAYS run, including when both gates are false, to finish queued work.
   jobs:
     # Auto-start the charge/metrics crons (charges bills on a timer!).
     schedulerEnabled: false
     # Expose the on-demand POST :<managementPort>/debug/run-* triggers
     # without starting the crons.
     debugTriggers: false
-    # Fan the NATIVE charge cron out across pods via RabbitMQ (one message per active profile)
-    # instead of charging every profile in a single pod. Ignored by the external provider, which
-    # gets its parallelism from the billing service instead.
+    # Deprecated. true FAILS rendering/startup: drain/reconcile the legacy queue before clearing.
+    # false is not proof of a drained broker; existing upgrades need jobsMigration below.
     rabbitFanout: false
+    # Per API pod; 1..16. Workers and all job writes use DB_URL, never DB_READ_URL.
+    workerConcurrency: 2
+    # Go durations: 100ms..1m and 10s..10m respectively.
+    pollInterval: 1s
+    leaseDuration: 1m
 
   # Which engine charges bills.
   #
@@ -98,6 +110,8 @@ api:
     url: ""
     # External provider only. Bearer token for that service's internal API.
     token: ""
+    # External provider only. Bound on one charge call as a Go duration (PROXCLOUD_BILLING_TIMEOUT). Empty: 60s.
+    timeout: ""
     # Shared secret the billing service presents when calling BACK into proxcloud to suspend/resume
     # clouds, activate projects or send mail. Empty -> those callbacks are not mounted at all.
     callbackToken: ""
@@ -115,6 +129,8 @@ api:
   # precedence over this env gateway. Leave smtp.host empty to disable the env gateway (a NoopMailer
   # then drops email until a gateway is configured). from + smtp.host are both required to enable.
   mail:
+    # Sender name in mail templates (PROXCLOUD_MAIL_BUSINESS_NAME). Empty: "ProxCloud".
+    businessName: ""
     from: "" # PROXCLOUD_MAIL_FROM, e.g. no-reply@example.com
     smtp:
       host: "" # PROXCLOUD_MAIL_SMTP_HOST, e.g. smtp.sendgrid.net
@@ -148,6 +164,26 @@ api:
   service:
     type: ClusterIP
     port: 8080
+
+  # CSI gateway: the listener tenant clusters' proxmox-csi controllers on the services cluster call instead of PVE
+  # (docs/managed-k8s.md). Off by default; needs cert-manager. When on, new Kubernetes clusters get block volumes with
+  # no PVE credential in the tenant, provided the compute provider holds the gateway token (csiGatewayTokenId).
+  csiGateway:
+    enabled: false
+    port: 8443
+    # The address the services cluster reaches the gateway at, https://<host>:<port>. Its host goes in the
+    # certificate, which a CA made here signs; the controllers get that CA, not the system roots.
+    url: ""
+    service:
+      # Its own Service, never the Ingress: the port is not for the Internet. Local keeps the caller's address,
+      # which the NetworkPolicy below checks.
+      type: LoadBalancer
+      externalTrafficPolicy: Local
+      loadBalancerIP: ""
+      annotations: {}
+    # Sources allowed on the gateway port: the services cluster's node addresses (its pods leave with them). Empty
+    # refuses everyone. Never a tenant network.
+    allowedCIDRs: []
 
   ingress:
     enabled: false
@@ -224,23 +260,40 @@ admin:
 # match) — e.g. https://id.example.com/realms/<realm>.
 # ----------------------------------------------------------------------------
 auth:
+  # discoveryUri (optional, per realm): where the API itself fetches the OIDC metadata when the
+  # public issuer URL is not reachable from the pod, e.g. the in-cluster Keycloak service. The token
+  # `iss` must still equal issuer.
   main:
     issuer: ""
     clientId: proxcloud-ui
+    discoveryUri: ""
   admin:
     issuer: ""
     clientId: proxcloud-admin
+    discoveryUri: ""
   adminApi:
     issuer: ""
     clientId: proxcloud-admin-api
+    discoveryUri: ""
+  # Per-organization SSO. Needs Keycloak in auth.main, a separate realm for operators, and
+  # keycloakConfigCli (or the same realm settings applied by hand: files/keycloak-sso.json).
+  sso:
+    enabled: false
+    # Service account secret of the proxcloud-idp-admin client. Inline, or the key
+    # sso-client-secret in api.existingSecret. The operator console's Create user needs it too.
+    clientSecret: ""
+    # Domains no organization may claim: your operators' email domain, for example.
+    # The domains of api.selfUrls are always reserved.
+    reservedDomains: []
+    # Development only: lets a customer IdP live on http and on a private address.
+    allowInternalIdp: false
 
 # ----------------------------------------------------------------------------
-# PostgreSQL — the primary datastore.
-# Bundled bitnami subchart by default; auth.* below makes the subchart
-# create the `proxcloud` role and database on first boot.
+# PostgreSQL — the primary datastore. postgresql.auth.* also names the CloudNativePG database
+# and owner. enabled=true swaps in the bitnami subchart (see values-dev.yaml).
 # ----------------------------------------------------------------------------
 postgresql:
-  enabled: true
+  enabled: false
   # ⚠ Bitnami catalog risk (unresolved for PostgreSQL): the subchart pulls PostgreSQL 18.4, but the
   # frozen `bitnamilegacy` mirror predates PG 18 (frozen ~Aug 2025) — so it has NO PG 18 image, and
   # repointing there would 404 or downgrade to a PG that can't start on PG-18 data. The subchart
@@ -268,12 +321,15 @@ externalPostgresql:
   # consumed directly and host/port/database/username/password are ignored.
   existingSecret: ""
   secretKey: db-url
+  # Optional status/history/metrics reader: a Secret holding a COMPLETE DSN. No inline read password.
+  # Leave empty for primary fallback; a configured but unreachable reader makes those reads fail 503.
+  # Required key when readExistingSecret is set (a typo must not silently select the primary).
+  readExistingSecret: ""
+  readSecretKey: db-read-url
 
 # ----------------------------------------------------------------------------
-# CloudNativePG — run PostgreSQL via the CloudNativePG operator (official
-# ghcr.io/cloudnative-pg/postgresql images, NO Bitnami) instead of the bundled
-# bitnami subchart. Set postgresql.enabled=false when cnpg.enabled=true.
-# Two modes:
+# CloudNativePG — the default PostgreSQL: the CloudNativePG operator with the official
+# ghcr.io/cloudnative-pg/postgresql images. Two modes:
 #   • Operator ALREADY in the cluster → cnpg.enabled=true, installOperator=false.
 #     The chart renders only the Cluster CR + its owner-credentials Secret.
 #   • Operator NOT installed → also set installOperator=true to bundle the
@@ -285,10 +341,14 @@ externalPostgresql:
 # db name / owner / password are taken from postgresql.auth.* (uniform DSN wiring).
 # ----------------------------------------------------------------------------
 cnpg:
-  enabled: false
+  enabled: true
   installOperator: false
   clusterName: ""   # defaults to <fullname>-pg; the app connects to <name>-rw:5432
   instances: 1
+  # Explicit opt-in ONLY for status/history/metrics reads; requires instances >= 2.
+  # Derives a db-read-url at <cluster>-ro with the same credentials. Jobs/billing stay on -rw.
+  # With api.existingSecret, put the optional db-read-url in that Secret yourself instead.
+  statusReadReplica: false
   imageName: ghcr.io/cloudnative-pg/postgresql:18
   storage:
     size: 10Gi
@@ -296,24 +356,59 @@ cnpg:
   # A pre-created kubernetes.io/basic-auth Secret (username+password for the owner).
   # When empty the chart renders one from postgresql.auth.username/password.
   existingSecret: ""
+  # A `keycloak` role + database in this same Cluster for the bundled Keycloak (keycloakx).
+  # existingSecret is a kubernetes.io/basic-auth Secret holding that role's username + password.
+  keycloak:
+    enabled: false
+    existingSecret: ""
 
 # ----------------------------------------------------------------------------
-# RabbitMQ — the message broker (charge fan-out).
+# Legacy RabbitMQ — RETENTION/MIGRATION ONLY. Not connected to the new API.
+# Never delete a historical broker/PVC as part of this upgrade. Before first upgrade,
+# patch the LIVE resource and stage a retained manifest (see docs/postgres-jobs-migration.md).
+# These opt-ins require an already-installed operator; this chart does not install it.
 # ----------------------------------------------------------------------------
+jobsMigration:
+  # Existing Helm upgrades must explicitly select retain or cutover; fresh installs may leave empty.
+  # ArgoCD renders as install: installer stage 40 enforces the equivalent live-resource gate.
+  mode: ""                         # "" | retain | cutover
+  # A non-secret ticket/path identifying saved queue counts, broker/PVC snapshot and reconciliation.
+  evidence: ""
+  producersStopped: false           # every old scheduler/manual producer stopped
+  consumersStopped: false           # every old consumer stopped after drain/reconciliation
+  drainedOrReconciled: false        # ready=0 AND unacked=0, or operator reconciled every pending unit
+  # cutover only: previous release manifest AND live broker already protected against deletion.
+  retentionPrepared: false
+
+rabbitmqCluster:
+  enabled: false
+  name: ""   # defaults to <fullname>-rabbitmq
+  replicas: 1
+  image: ""  # "" = the operator's default image
+  storage:
+    size: 5Gi
+    storageClass: ""
+  resources: {}
+  # Installer retention only: exact spec read from the existing LIVE CR, never a fresh-cluster recipe.
+  retainedSpec: {}
+
+# Deprecated bitnami subchart: ONLY retain an existing subchart release while reconciling.
+# Requires jobsMigration.mode=retain. Never use it for a fresh deployment.
 rabbitmq:
-  enabled: true
-  # STOPGAP (see postgresql above): pin to the frozen bitnamilegacy mirror so pulls survive the
-  # docker.io/bitnami catalog deletion. Planned exit: the official RabbitMQ Cluster Operator.
+  enabled: false
+  # Historical image fallback only. On an existing release preserve its image/digest and data;
+  # this migration does not upgrade the old broker or move it to another operator.
   image:
     registry: docker.io
     repository: bitnamilegacy/rabbitmq
   auth:
     username: proxcloud
-    # REQUIRED — no default. Set a strong password or use externalRabbitmq.existingSecret.
-    # A bundled install with this empty FAILS by design (see values-dev.yaml for a dev value).
+    # Historical subchart credential only; keep its current value/existingSecret unchanged.
+    # The new API does not use it.
     password: ""
 
-# Bring-your-own RabbitMQ (used when rabbitmq.enabled=false).
+# Deprecated connection settings: ignored by the new API. Kept only for old values compatibility.
+# Do NOT put old broker credentials into the API Secret.
 externalRabbitmq:
   host: ""
   port: 5672
@@ -400,14 +495,43 @@ keycloakConfigCli:
   url: ""
   # Keycloak admin credentials (the keycloakx bootstrap admin, or any admin of
   # the target). Password inline OR from a pre-created Secret — REQUIRED when
-  # enabled.
+  # enabled. An inline password goes into the Secret <fullname>-keycloak-admin
+  # (key passwordKey), which the bundled Keycloak can read its bootstrap admin
+  # password from too (values-quickstart.yaml).
   adminUser: admin
   adminPassword: ""
   existingSecret: ""
   passwordKey: admin-password
+  # For a portal on plain HTTP only: keep "external" and true otherwise. A browser has no WebCrypto
+  # outside a secure context, so the consoles cannot do PKCE there; requiring it breaks every login.
+  sslRequired: external
+  requirePkce: true
   # Additional raw keycloak-config-cli import files (filename -> JSON string),
   # applied alongside the derived ones.
   extraRealms: {}
+
+# ----------------------------------------------------------------------------
+# seed — first-run configuration documents (the same as deploy/seed/). A post-install/post-upgrade
+# Job writes each document only while its table is empty, so later edits in the operator console
+# (or deploy/seed/seed-operator.py) are never overwritten. Without them the billing and project
+# endpoints answer "billing not configured".
+# ----------------------------------------------------------------------------
+seed:
+  enabled: true
+  platformConfiguration:
+    name: ProxCloud
+    language: en
+    defaultConfiguration: true
+    branding:
+      name: ProxCloud
+      color: "#0066cc"
+    dateConfiguration:
+      dateFormat: DD/MM/YYYY
+    regions: []
+  billingConfiguration:
+    baseCurrency: USD
+    promotionCodesEnabled: true
+    defaultConfiguration: true
 
 # ----------------------------------------------------------------------------
 # Gateway API — HTTPRoutes as an alternative to Ingress (OFF by default).

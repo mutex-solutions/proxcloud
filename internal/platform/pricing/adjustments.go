@@ -141,12 +141,13 @@ func upsertAdjustment(bill *Bill, match func(*BillAdjustment) bool, neu BillAdju
 
 // ApplySavingsContractDiscounts applies the savings-contract discount:
 // for each contract whose target usage ≥ monthlyCommittedAmount, upsert a SAVINGS_CONTRACT
-// adjustment (keyed by contract id). Mutates bill.Adjustments in place.
+// adjustment (keyed by contract id). A contract paid upfront applies below that too: the usage is
+// already paid for. Mutates bill.Adjustments in place.
 func (e *Engine) ApplySavingsContractDiscounts(bill *Bill, contracts []SavingsContractAdj, catalog []*BillingResourceType) {
 	for i := range contracts {
 		c := &contracts[i]
 		usage := e.targetItemsAmount(bill, c.Targets, catalog)
-		if usage.Cmp(c.MonthlyCommittedAmount) < 0 {
+		if usage.Cmp(c.MonthlyCommittedAmount) < 0 && !(c.PaidUpfront && usage.IsPositive()) {
 			continue
 		}
 		amt := savingsAdjustmentAmount(c, usage)

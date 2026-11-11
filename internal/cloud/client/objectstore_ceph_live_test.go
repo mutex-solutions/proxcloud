@@ -31,7 +31,7 @@ import (
 	"time"
 )
 
-func liveEnv(t *testing.T) (adminCfg CephConfig, bucket string) {
+func liveEnv(t *testing.T) (adminCfg ObjectStoreConfig, bucket string) {
 	t.Helper()
 	need := func(k string) string {
 		v := os.Getenv(k)
@@ -46,7 +46,7 @@ func liveEnv(t *testing.T) (adminCfg CephConfig, bucket string) {
 	}
 	// S3 bucket names must be DNS-safe (no underscores); the RGW uid has no such restriction.
 	bucket = strings.ReplaceAll(strings.ToLower(uid), "_", "-") + "-b1"
-	return CephConfig{
+	return ObjectStoreConfig{
 		S3Endpoint: need("CEPH_S3_ENDPOINT"),
 		// optional: only the website drill needs it
 		S3WebsiteEndpoint: os.Getenv("CEPH_S3_WEBSITE_ENDPOINT"),
@@ -60,7 +60,7 @@ func liveEnv(t *testing.T) (adminCfg CephConfig, bucket string) {
 	}, bucket
 }
 
-// projectClient runs EnsureCephUser (idempotent) and returns an admin client + a project-keyed client.
+// projectClient runs EnsureProjectUser (idempotent) and returns an admin client + a project-keyed client.
 func liveClients(t *testing.T, ctx context.Context) (admin, proj *Client, bucket string) {
 	t.Helper()
 	cfg, bucket := liveEnv(t)
@@ -68,12 +68,12 @@ func liveClients(t *testing.T, ctx context.Context) (admin, proj *Client, bucket
 	if err != nil {
 		t.Fatalf("NewCephS3(admin): %v", err)
 	}
-	ak, sk, err := admin.EnsureCephUser(ctx, "proxcloud-"+cfg.RGWUID)
+	ak, sk, err := admin.EnsureProjectUser(ctx, "proxcloud-"+cfg.RGWUID)
 	if err != nil {
-		t.Fatalf("EnsureCephUser: %v", err)
+		t.Fatalf("EnsureProjectUser: %v", err)
 	}
 	if ak == "" || sk == "" {
-		t.Fatal("EnsureCephUser returned empty keys")
+		t.Fatal("EnsureProjectUser returned empty keys")
 	}
 	t.Logf("rgw user %s ready (access key %s…)", cfg.RGWUID, ak[:4])
 	pcfg := cfg
@@ -321,8 +321,8 @@ func TestLiveCephZZCleanup(t *testing.T) {
 	}
 	t.Logf("bucket %s deleted", bucket)
 
-	if err := admin.PurgeCephUser(ctx); err != nil {
-		t.Fatalf("PurgeCephUser: %v", err)
+	if err := admin.PurgeProjectUser(ctx); err != nil {
+		t.Fatalf("PurgeProjectUser: %v", err)
 	}
 	t.Log("rgw user purged")
 }

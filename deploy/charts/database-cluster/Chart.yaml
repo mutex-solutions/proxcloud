@@ -7,9 +7,12 @@ description: >-
   PerconaServerMySQL, mariadb-operator MariaDB + a chart-owned HAProxy,
   valkey-operator Valkey, FerretDB = CNPG backend + frontend Deployment,
   opensearch-k8s-operator OpenSearchCluster, or Strimzi Kafka + KafkaNodePool
-  + KafkaUser). Every engine additionally gets a LoadBalancer Service
-  (EXCEPT kafka, where Strimzi
-  creates the bootstrap + per-broker LBs itself) and a NetworkPolicy.
+  + KafkaUser). Every engine additionally gets a LoadBalancer Service whose
+  address MetalLB assigns from the provider's address pool (EXCEPT kafka,
+  where Strimzi creates the bootstrap + per-broker LBs itself) and a
+  NetworkPolicy. Object-store backups, restore into a new database,
+  customer-managed databases/users and runtime parameters are all rendered
+  from the same values document.
 name: database-cluster
 type: application
 # THE VALUES CONTRACT IS OWNED JOINTLY WITH internal/cloud/dbaas/values.go.
@@ -23,4 +26,30 @@ type: application
 #
 # engineVersion→image maps live in templates/_helpers.tpl and are ops-updatable
 # per chart release (bump images -> bump version -> re-pin).
-version: 0.4.0
+#
+# 0.5.1 updates PostgreSQL 15–18 to same-major patch targets only. Source
+# metadata bump, not publication or provider re-pinning; see
+# docs/managed-postgresql-version-baseline.md for evidence and release gates.
+#
+# 0.5.0 adds, on top of 0.4.0:
+#   * network.addressPool: the MetalLB pool annotation on EVERY tenant-facing LB
+#     Service (<id>-lb, <id>-ro-lb, <id>-dash-lb, the Strimzi bootstrap + brokers).
+#     The tenant-network wiring (networkId / subnetId / memberSubnetId) is gone.
+#   * scheduling.zoneKey (default topology.kubernetes.io/zone): with instances > 1
+#     the replicas of every engine spread across it as a HARD anti-affinity.
+#   * object-store backup (CNPG barman-cloud plugin ObjectStore, Percona storages,
+#     mariadb PhysicalBackup + PITR) and restore into a NEW database (CNPG recovery,
+#     mariadb bootstrapFrom, mysql PerconaServerMySQLRestore).
+#   * customer-managed databases/users (postgresql, mariadb, opensearch, valkey),
+#     opensearch roles + ISM retention policies and a BYO Dashboards certificate.
+#   * the postgresql read-only LB (<id>-ro-lb) and the shared-proxy read port (3307)
+#     for mysql / mariadb.
+#   * postgresql runs with enableSuperuserAccess (the connection panel serves
+#     <id>-superuser) and mariadb's `app` user is granted ALL PRIVILEGES.
+#   * scheduling.nodeSelector / tolerations for a dedicated database node pool.
+#   * valkey is 9.x only (valkey-operator v0.4 writes a 9.0+ directive into every
+#     config); valkey and opensearch pod selectors use the labels the operators
+#     actually stamp (valkey.io/cluster, opensearch.org/*); the valkey ACL users get
+#     explicit permissions; the mysql CR carries a backup image; every object name
+#     derived from a customer identifier maps '_' to '-'.
+version: 0.5.1

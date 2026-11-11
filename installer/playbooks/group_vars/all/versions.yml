@@ -1,0 +1,38 @@
+# Release BOM: `make upgrade` moves the platform to whatever is pinned here.
+pc_versions:
+  k3s: v1.35.10+k3s1
+  argocd_chart: 10.14.0        # oci://ghcr.io/argoproj/argo-helm/argo-cd
+  cnpg_chart: 0.29.1           # https://cloudnative-pg.github.io/charts
+  rabbitmq_operator: v2.23.2   # historical pin only; stage 40 never installs/upgrades/removes it
+  cert_manager_chart: v1.20.2  # ingress TLS and CSI gateway certificates; retained without RabbitMQ
+  keycloak: "26.8.2"
+  # Chart + image tag of ProxCloud itself, with images.build=false. It must be a published release.
+  # Owner-approved first preview, NOT YET PUBLISHED: keep images.build=true until
+  # the v0.4.0-rc.1 chart and images are published and verified. This is not stable.
+  # Do not override to an older Rabbit-dependent release with this broker-free installer.
+  proxcloud: v0.4.0-rc.1
+  rustfs: 1.0.4
+  # The sandbox registry (stage 55, docs/managed-sandbox.md §6): Zot, minimal build (no extensions), and the pause
+  # image the template prepull DaemonSet idles in.
+  zot_image: ghcr.io/project-zot/zot-minimal-linux-amd64:v2.1.22@sha256:27729292c45f1dc0a323b69292d15cc13a5ca4b8bf05f81106e7f89a2b1abd08
+  pause_image: registry.k8s.io/pause:3.10@sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a
+  # mode=split: Cluster API on the mgmt cluster, and the services cluster's platform.
+  capi: v1.14.4
+  capmox: v0.9.2
+  capi_ipam: v1.1.1
+  capi_kamaji: v0.22.0
+  caaph: v0.6.4
+  kube_vip: v0.8.9
+  cilium_chart: 1.18.16
+  metallb_chart: 0.16.2        # https://metallb.github.io/metallb
+  proxmox_csi_chart: 0.5.15    # oci://ghcr.io/sergelogvinov/charts/proxmox-csi-plugin
+  kamaji_etcd_chart: 0.18.1    # https://clastix.github.io/charts
+  kamaji_image: 26.11.2-edge   # clastix/kamaji; the chart is 0.0.0+latest, so the image is the pin
+  barman_plugin: v0.15.1       # github.com/cloudnative-pg/plugin-barman-cloud
+  packer: 1.16.2
+  packer_plugin_proxmox: 1.2.4
+  helm: v3.20.2                # mgmt host, only with images.build
+  # Digests of rustfs-linux-x86_64-musl-v<version>.zip from the GitHub release.
+  rustfs_sha256:
+    "1.0.4": 4924ad4b699b9f59943051efedae2d1eb6d4cac503a1b0384c4b25f7c2c31b5c
+    "1.0.3": 29a083f156fe1a246f0336afe16ff77fffe587628e97339448d8f4fba38dba54

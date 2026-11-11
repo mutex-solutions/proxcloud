@@ -5,11 +5,13 @@ package admin
 // public networks, regions).
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -19,7 +21,9 @@ const cloudServiceCollection = "externalService"
 // routeCloudAdmin registers the cloud-admin live reads.
 func (h *Handler) routeCloudAdmin(r chi.Router) {
 	r.Post("/service/proxmox/auth", h.proxmoxAuth)
+	r.Get("/service/{id}/seed-cleanup", h.seedCleanupStatus)
 	r.Post("/service/{id}/storage/detect", h.proxmoxDetectStorage)
+	r.Post("/service/{id}/server/{vmid}/migrate", h.proxmoxMigrateServer)
 	r.Put("/service/{id}/storage-classes", h.proxmoxStorageClasses)
 	r.Get("/service/os-images", h.imagesAll)
 	r.Get("/service/regions", h.serviceRegionsList)
@@ -30,6 +34,7 @@ func (h *Handler) routeCloudAdmin(r chi.Router) {
 	r.Get("/service/{id}/k8s-clusters", h.kamajiClusterPins)
 	r.Post("/service/{id}/k8s-clusters/bump-chart", h.kamajiClusterBumpAll)
 	r.Post("/service/{id}/k8s-clusters/{clusterId}/bump-chart", h.kamajiClusterBump)
+	r.Post("/service/{id}/k8s-clusters/{clusterId}/csi-gateway", h.kamajiClusterCSIGateway)
 	// Dbaas chart-pin surface — same shape for managed databases.
 	r.Get("/service/{id}/db-clusters", h.dbaasClusterPins)
 	r.Post("/service/{id}/db-clusters/bump-chart", h.dbaasClusterBumpAll)
@@ -132,9 +137,15 @@ type GPURegionCapacity struct {
 // ── handlers ───────────────────────────────────────────────────────────────
 
 // pveTemplateImages renders a proxmox provider's template catalog image-like.
-func pveTemplateImages(es *externalservice.ExternalService) []map[string]any {
+func (h *Handler) pveTemplateImages(ctx context.Context, es *externalservice.ExternalService) []map[string]any {
 	out := []map[string]any{}
-	for _, t := range es.PVETemplates() {
+	var found []pve.DiscoveredTemplate
+	if h.pveFor != nil {
+		if ps, err := h.pveFor(es); err == nil {
+			found, _ = ps.C.Templates(ctx) // an unreachable cluster leaves the configured pins
+		}
+	}
+	for _, t := range es.PVEImageCatalog(found) {
 		out = append(out, map[string]any{
 			"id": t.Slug, "name": t.Name, "status": "active", "visibility": "public",
 			"os_distro": t.OSDistro, "min_disk": t.MinDiskGb,
@@ -158,7 +169,7 @@ func (h *Handler) imagesByService(w http.ResponseWriter, r *http.Request) {
 			display, _ := regionMeta(es, region)
 			out = append(out, ImagesByLocationDto{
 				ServiceID: es.ID, ServiceName: es.Name, Region: region,
-				RegionDisplayName: display, Images: pveTemplateImages(es),
+				RegionDisplayName: display, Images: h.pveTemplateImages(r.Context(), es),
 			})
 		}
 	}
@@ -182,7 +193,7 @@ func (h *Handler) imagesAll(w http.ResponseWriter, r *http.Request) {
 				display, _ := regionMeta(es, region)
 				out = append(out, ImagesByLocationDto{
 					ServiceID: es.ID, ServiceName: es.Name, Region: region,
-					RegionDisplayName: display, Images: pveTemplateImages(es),
+					RegionDisplayName: display, Images: h.pveTemplateImages(r.Context(), es),
 				})
 			}
 		}

@@ -1,0 +1,43 @@
+{{- if and .Values.restore.sourceId (eq .Values.engine "mysql") }}
+{{/*
+mysql cannot BOOTSTRAP from a backup the way CNPG and mariadb do — the Percona
+restore CR targets a RUNNING cluster. So the chart brings this database up
+empty (perconaservermysql.yaml, wave 0) and then applies a Restore against it
+in wave 1; the operator stops the cluster, lays the backup down and brings it
+back. Same outcome for the customer, two phases underneath.
+
+backupName points at a PerconaServerMySQLBackup object belonging to the SOURCE
+database. Both live in the same project namespace, so the reference resolves —
+and proxcloud proves the source is in this project before ever rendering this.
+
+spec.pitr.type is REQUIRED whenever pitr is present; "date" rolls binlogs
+forward to spec.pitr.date. That only has anything to roll forward if the SOURCE
+had spec.backup.pitr.enabled, which perconaservermysql.yaml turns on for every
+backed-up cluster.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLRestore
+metadata:
+  name: {{ $name }}-restore
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  clusterName: {{ $name }}
+  backupName: {{ .Values.restore.backupName }}
+  {{- with .Values.restore.targetTime }}
+  pitr:
+    type: date
+    {{/* Percona wants "YYYY-MM-DD hh:mm:ss", not RFC3339: strip the T and the
+         zone. ProxCloud validates the RFC3339 shape, so the offsets are fixed. */}}
+    date: {{ . | replace "T" " " | replace "Z" "" | quote }}
+  {{- end }}
+  {{- if $.Values.restore.s3.pathStyle }}
+  containerOptions:
+    env:
+      - name: XBCLOUD_EXTRA_ARGS
+        value: "--s3-bucket-lookup=path"
+  {{- end }}
+{{- end }}

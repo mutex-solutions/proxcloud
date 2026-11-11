@@ -79,6 +79,7 @@ func (c *Client) CreateSDNController(ctx context.Context, id, kind string, param
 
 // SDNVnet is one row of GET /cluster/sdn/vnets.
 type SDNVnet struct {
+	Digest    string `json:"digest"`
 	Vnet      string `json:"vnet"` // ≤8 chars — the "hide L2" constraint: users only ever see the alias
 	Zone      string `json:"zone"`
 	Alias     string `json:"alias"`
@@ -93,6 +94,16 @@ func (c *Client) ListSDNVnets(ctx context.Context) ([]SDNVnet, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// GetSDNVnet reads one vnet with the same credential as ListSDNVnets. A 404
+// alone is not proof of disappearance: callers must first verify effective SDN rights.
+func (c *Client) GetSDNVnet(ctx context.Context, vnet string) (*SDNVnet, error) {
+	var out SDNVnet
+	if err := c.get(ctx, "/cluster/sdn/vnets/"+url.PathEscape(vnet), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // CreateSDNVnet stages a vnet. tag: VLAN id (vlan zone) / VNI (vxlan+evpn); 0 = auto/none.
@@ -130,6 +141,16 @@ func (c *Client) ListSDNSubnets(ctx context.Context, vnet string) ([]SDNSubnet, 
 	return out, nil
 }
 
+// GetSDNSubnet revalidates one omitted subnet. The id is PVE's zone-CIDR id,
+// not the CIDR itself; its read checks the enclosing vnet's effective rights.
+func (c *Client) GetSDNSubnet(ctx context.Context, vnet, id string) (*SDNSubnet, error) {
+	var out SDNSubnet
+	if err := c.get(ctx, "/cluster/sdn/vnets/"+url.PathEscape(vnet)+"/subnets/"+url.PathEscape(id), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // SubnetOpts drives CreateSDNSubnet.
 type SubnetOpts struct {
 	CIDR      string
@@ -150,6 +171,17 @@ func (c *Client) CreateSDNSubnet(ctx context.Context, vnet string, o SubnetOpts)
 		form.Set("dhcp-range", "start-address="+o.DHCPStart+",end-address="+o.DHCPEnd)
 	}
 	return c.post(ctx, "/cluster/sdn/vnets/"+url.PathEscape(vnet)+"/subnets", form, nil)
+}
+
+// UpdateSDNSubnetSNAT switches a subnet's SNAT flag.
+func (c *Client) UpdateSDNSubnetSNAT(ctx context.Context, vnet, subnetID string, snat bool) error {
+	form := url.Values{}
+	if snat {
+		form.Set("snat", "1")
+	} else {
+		form.Set("delete", "snat")
+	}
+	return c.put(ctx, "/cluster/sdn/vnets/"+url.PathEscape(vnet)+"/subnets/"+url.PathEscape(subnetID), form, nil)
 }
 
 // DeleteSDNSubnet deletes by the PVE-generated subnet id (SDNSubnet.Subnet).

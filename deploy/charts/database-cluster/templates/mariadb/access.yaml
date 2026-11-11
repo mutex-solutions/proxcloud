@@ -1,0 +1,94 @@
+{{- if and (eq .Values.engine "mariadb") (or .Values.databases .Values.users) }}
+{{/*
+Customer-declared databases, users and grants as mariadb-operator CRs.
+
+SECURITY NOTE — the operator interpolates these names straight into SQL with no
+escaping (upstream issue k8s.mariadb.com#1722, closed as not planned), so the
+ONLY thing standing between a customer-typed string and the SQL parser is
+proxcloud's identifier allowlist (dbaas.ValidIdent: ^[a-z][a-z0-9_]{0,30}$,
+enforced in ValidateAccess before anything is written). Never relax that regex
+without replacing this mechanism.
+
+host: "%" matches the operator default and is what a client coming through the
+LB needs — the source address is a node IP, never stable.
+
+cleanupPolicy: Delete makes a pruned CR actually drop the object, so removing a
+user or database from the list revokes access instead of leaving it behind.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+{{- range .Values.databases }}
+---
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: Database
+metadata:
+  {{- /* '_' -> '-' in every OBJECT name below (spec fields keep the real
+       identifier): idents allow underscores, k8s names do not (config.go
+       K8sName — the User Secret reference must match what proxcloud wrote). */}}
+  name: {{ $name }}-db-{{ .name | replace "_" "-" }}
+  labels:
+    {{- include "database-cluster.labels" $ | nindent 4 }}
+  annotations:
+    # Wave 1: these reference the engine CR, and the operators' webhooks reject
+    # a User/Database/Grant whose cluster does not exist yet. ArgoCD would retry
+    # into convergence anyway, but only after surfacing a sync error per object.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  mariaDbRef:
+    name: {{ $name }}
+  name: {{ .name }}
+  characterSet: utf8mb4
+  collate: utf8mb4_unicode_ci
+  cleanupPolicy: Delete
+{{- end }}
+{{- range $user := .Values.users }}
+---
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: User
+metadata:
+  name: {{ $name }}-u-{{ $user.name | replace "_" "-" }}
+  labels:
+    {{- include "database-cluster.labels" $ | nindent 4 }}
+  annotations:
+    # Wave 1: these reference the engine CR, and the operators' webhooks reject
+    # a User/Database/Grant whose cluster does not exist yet. ArgoCD would retry
+    # into convergence anyway, but only after surfacing a sync error per object.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  mariaDbRef:
+    name: {{ $name }}
+  name: {{ $user.name }}
+  host: "%"
+  passwordSecretKeyRef:
+    name: {{ $name }}-u-{{ $user.name | replace "_" "-" }}
+    key: password
+  cleanupPolicy: Delete
+{{- range $db := $user.databases }}
+---
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: Grant
+metadata:
+  name: {{ $name }}-g-{{ $user.name | replace "_" "-" }}-{{ $db | replace "_" "-" }}
+  labels:
+    {{- include "database-cluster.labels" $ | nindent 4 }}
+  annotations:
+    # Wave 1: these reference the engine CR, and the operators' webhooks reject
+    # a User/Database/Grant whose cluster does not exist yet. ArgoCD would retry
+    # into convergence anyway, but only after surfacing a sync error per object.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  mariaDbRef:
+    name: {{ $name }}
+  username: {{ $user.name }}
+  host: "%"
+  database: {{ $db }}
+  table: "*"
+  {{/* Full rights on their OWN database, nothing global: no GRANT OPTION and
+       no server-wide privileges, so one customer user cannot reach another's
+       database or the engine's internal accounts. */}}
+  privileges:
+    - "ALL PRIVILEGES"
+  grantOption: false
+  cleanupPolicy: Delete
+{{- end }}
+{{- end }}
+{{- end }}

@@ -8,8 +8,9 @@ Getting a ProxCloud backend and its SPAs running on your machine.
   required for the integration suite (testcontainers).
 - **Go 1.25+** — the backend (`go.mod` pins `go 1.25`; module
   `github.com/mutex-solutions/proxcloud`).
-- **Node 20+ / npm** — the two SPAs (`web/client`, `web/admin`) are Vite + React
-  19, for running them with hot reload.
+- **Node 24 / npm** — use the frontend CI toolchain for the two Vite + React 19
+  SPAs (`web/client`, `web/admin`), with `npm ci` and each committed lockfile.
+  Do not assume an arbitrary Node 20 installation satisfies the current Vite engines.
 - An **OIDC issuer** for authenticated endpoints (Compose bundles Keycloak on
   `:8090`) and, for cloud-backed endpoints, a reachable **Proxmox VE** cluster
   with an API token. A lot of local work needs neither — public endpoints and the
@@ -27,7 +28,7 @@ go test ./...       # fast unit tests, no Docker (see testing.md)
 ## Run the whole stack with Docker Compose
 
 The repo ships a `docker-compose.yml` at the root that builds and runs the three
-ProxCloud images plus PostgreSQL, RabbitMQ and a dev Keycloak:
+ProxCloud images plus PostgreSQL (including durable jobs) and a dev Keycloak:
 
 ```sh
 docker compose up --build
@@ -42,9 +43,12 @@ That gives you:
 | Customer console  | http://localhost:8082   |
 | Operator admin    | http://localhost:8083   |
 
-PostgreSQL (`:5432`) and RabbitMQ (`:5672`, management UI `:15672`) come up as
-dependencies. The API starts with `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true`, so you can
-drive jobs on demand (see below) without the crons running.
+PostgreSQL (`:5432`) is the data/job dependency; no broker starts by default.
+Scheduler and debug triggers both default **false**. To drive jobs deliberately
+on this isolated dev stack, set `PROXCLOUD_JOBS_DEBUG_TRIGGERS=true` in `.env` and
+replace the API. Workers always finish already-enqueued work even with both flags
+off. Existing broker users must follow the [migration runbook](postgres-jobs-migration.md)
+and preserve the old container's anonymous volume, not run `down -v`.
 
 Keycloak (`:8090`) imports the dev realm `proxcloud` from
 `deploy/dev/keycloak-realm.json`, with two users, `demo`/`demo` and
@@ -64,25 +68,28 @@ Check the API is up:
 
 ```sh
 curl :8081/actuator/health              # liveness
-curl :8081/actuator/health/readiness    # UP once Postgres + Rabbit are reachable
+curl :8081/actuator/health/readiness    # PostgreSQL readiness; no broker dependency
 ```
 
 ### Run just the backend from source
 
 For a faster backend edit loop, run the API with `go run` against the
-compose-provided (or standalone) PostgreSQL and Rabbit:
+compose-provided (or standalone) **writable-primary** PostgreSQL:
 
 ```sh
 PROXCLOUD_CONFIG_FILE=/nonexistent \
-PROXCLOUD_DB_URL=postgres://proxcloud:proxcloud@localhost:5432/proxcloud?sslmode=disable \
-PROXCLOUD_RABBITMQ_HOST=localhost \
-PROXCLOUD_RABBITMQ_USERNAME=guest PROXCLOUD_RABBITMQ_PASSWORD=guest \
+PROXCLOUD_DB_URL="$PROXCLOUD_LOCAL_PRIMARY_DSN" \
 PROXCLOUD_ENCRYPTION_DEFAULT_KEY=dev-only-key \
 PROXCLOUD_JOBS_DEBUG_TRIGGERS=true \
 go run ./cmd/api
 ```
 
-Useful env toggles (all default off; full table in
+Load `PROXCLOUD_LOCAL_PRIMARY_DSN` from your local secret store; do not commit
+credentials. `PROXCLOUD_DB_READ_URL` is optional history/metrics only and empty
+means primary fallback, never a worker/finance replica. Worker defaults are 2
+(`1..16`), poll `1s` (`100ms..1m`), lease `1m` (`10s..10m`).
+
+Useful env toggles (both default off; full table in
 [configuration.md](configuration.md)):
 
 - `PROXCLOUD_JOBS_SCHEDULER_ENABLED=true` — start the cron jobs (off by default so a
@@ -131,6 +138,21 @@ records.
    (pool, default security group, default quota). Drive a sync with
    `POST :8081/debug/run-sync`.
 
+### Seed an operator setup
+
+After registering a Proxmox provider (admin console, **Cloud providers**), one command
+gives it what customers need: platform configuration and region, flavor catalog, billing
+configuration, the public price plan with its compute, volume and public IP rules, and the
+provider default quota. It goes through the admin API and can be re-run.
+
+```sh
+PROXCLOUD_HOST=<host> deploy/seed/seed-operator.py --provider "<provider name>"
+```
+
+The documents come from `deploy/seed/` (`platform-configuration.json`, `flavors.json`,
+`billing-configuration.json`, `price-plan-seed.json`). Change them there or in the admin
+console afterwards. `--help` lists the environment variables.
+
 `deploy/seed/external-service-dev.json` holds example documents for the
 `kamaji` and `dbaas` provider kinds (insert each element as its own row,
 replacing the `__…__` placeholders); they need a prepared management cluster, see
@@ -164,21 +186,35 @@ there when calling cross-origin.
   `/debug/run-*` triggers instead of waiting on cron.
 - SPA: `npm run dev` — Vite HMR reloads on save.
 - Full stack: `docker compose up --build` after a change rebuilds the images.
-- Chart: `make deploy` runs `helm upgrade --install` (see
-  [ADR-0005](adr/0005-self-contained-helm-chart.md)).
+- Chart: `make deploy` runs `helm upgrade --install` with `api.image.tag=$(TAG)` (see
+  [ADR-0005](adr/0005-self-contained-helm-chart.md)). `TAG` defaults to
+  `dev-<7-char sha of HEAD>`, the tag CI gives a main commit, but CI publishes it only
+  when that commit changed an image's sources (a docs- or chart-only commit has none),
+  and there is no release tag yet to default to. Otherwise run `make image push` first,
+  or pass a published `TAG=`.
 
 ## Where things live
 
-- `cmd/api` — the server entrypoint and all wiring.
+- `cmd/api` — the server entrypoint and all wiring. `cmd/sandbox-proxy` (the public
+  entry of sandbox ports, and the registry sync) and `cmd/sandbox-init` (the
+  in-sandbox init) are the sandbox binaries; `cmd/e2edrv`, `cmd/e2egpu` and
+  `cmd/e2eseed` are end-to-end drivers for a lab.
 - `internal/platform/*` — the business domains (org, project, billing, pricing,
-  payment, admin, audit, job, promotion, mcp, …), each as handler/service/repo.
+  payment, admin, audit, job, promotion, mcp, sso, …), each as handler/service/repo,
+  plus the billing provider seam (`billingprovider`, `billingclient`,
+  `billingcallback`), `pveflavor` (the Proxmox flavor catalog) and `paging`.
 - `internal/cloud` — the Proxmox VE client and services (`pve`), resource cache,
-  providers and sync, metrics, the ceph-s3 client, managed K8s/DBaaS.
+  providers and sync, metrics, the ceph-s3 client, managed K8s/DBaaS, `sandbox`
+  (the sandbox cluster client), `csigw` (the CSI gateway), `truenas` and `powerdns`.
+- `internal/sandboxproxy` — sandbox-proxy's routing, wake and certificate sync.
 - `internal/{config,server,health,pgdoc,amqp,oidc}` — wiring and infrastructure.
-- `pkg/{auth,httpx,money,audit,textcrypt}` — cross-cutting: auth middleware, the
-  response envelope + request context, money⇄decimal string, the audit helper,
-  field-level encryption.
-- `deploy/` — `Dockerfile`, the Helm chart (`chart/`), values overlays,
-  and `seed/`.
+- `pkg/{auth,httpx,money,audit,textcrypt,billingapi,certfile,safeurl}` — cross-cutting:
+  auth middleware, the response envelope + request context, money⇄decimal string,
+  the audit helper, field-level encryption, the billing provider contract, a
+  certificate file that reloads, and URL checks for addresses tenants choose.
+- `deploy/` — `Dockerfile`, the Helm charts (`charts/proxcloud`, `charts/database-cluster`,
+  `charts/proxmox-kamaji-cluster`), values overlays, the manifests for the
+  management, DBaaS and sandbox clusters (`mgmt-cluster/`, `dbaas-cluster/`, `sandbox-cluster/`),
+  the sandbox image Dockerfiles, and `seed/`.
 - `web/client`, `web/admin` — the two React SPAs.
 - `test/integration` — the testcontainers suite (`-tags=integration`).

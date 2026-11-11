@@ -2,7 +2,23 @@
 
 ## Status
 
-Accepted
+Scheduler locking retained; broker fan-out and exactly-once claims below are
+superseded. The original decision remains historical context, not current setup.
+
+## Current implementation note (2026-11-10)
+
+Native charge dispatch now uses primary PostgreSQL durable jobs. The historical
+`chargefanout` package name is an adapter to that queue, not a RabbitMQ consumer;
+`PROXCLOUD_JOBS_RABBIT_FANOUT=true` fails startup. Bounded workers process accepted
+jobs even with scheduler/debug producers off. See [durable jobs](../durable-jobs.md)
+and the [migration runbook](../postgres-jobs-migration.md).
+
+A cron lock limits concurrent tick admission while its lease is held; it does not
+prove exactly-once completion after lease expiry, a crash or external I/O. The
+native DB-only financial path joins mutations, receipt and ACK in one fenced
+transaction. SMTP, card and cloud effects have separate uncertainty boundaries.
+Do not infer that an old broker backlog can be discarded because the new API no
+longer connects to it.
 
 ## Context
 

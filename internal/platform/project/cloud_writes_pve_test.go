@@ -2,14 +2,37 @@ package project
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
-	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/pve"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
+
+func TestPVEPlacementPerNodeCopies(t *testing.T) {
+	caps := map[string]pve.StorageCapability{"local-zfs": {Storage: "local-zfs", Nodes: map[string]pve.StorageNodeState{
+		"pve1": {Active: true, Total: 100 << 30, Avail: 90 << 30},
+		"pve2": {Active: true, Total: 100 << 30, Avail: 90 << 30},
+		"pve3": {Active: true, Total: 100 << 30, Avail: 90 << 30},
+	}}}
+	profiles := map[string]externalservice.PVEStorageProfile{"std": {Slug: "std", Storages: map[string]string{"*": "local-zfs"}}}
+	tpl := &externalservice.PVETemplate{Slug: "debian-13", VMID: 9001, Node: "pve1", Copies: map[string]int{"pve1": 9001, "pve2": 9002}}
+	pl, herr := pvePlacement(tpl, false, "std", profiles, caps)
+	if herr != nil {
+		t.Fatal(herr)
+	}
+	if !pl.allowed["pve1"] || !pl.allowed["pve2"] || pl.allowed["pve3"] {
+		t.Fatalf("allowed = %v, want the two nodes with a copy", pl.allowed)
+	}
+	if tpl.OnNode("pve2") != 9002 || tpl.OnNode("pve3") != 0 {
+		t.Fatalf("OnNode: pve2=%d pve3=%d", tpl.OnNode("pve2"), tpl.OnNode("pve3"))
+	}
+}
 
 func TestPVEPlacement(t *testing.T) {
 	const g = int64(1) << 30
@@ -90,6 +113,17 @@ func TestPVEPlacement(t *testing.T) {
 	}
 }
 
+func TestVMNameErr(t *testing.T) {
+	if herr := vmNameErr("web-1.example.org"); herr != nil {
+		t.Fatal(herr)
+	}
+	for _, name := range []string{"", "my server", "my_server", "-web"} {
+		if herr := vmNameErr(name); herr == nil || herr.Status != http.StatusBadRequest {
+			t.Errorf("%q: %v", name, herr)
+		}
+	}
+}
+
 func TestPVEVolumeErr(t *testing.T) {
 	if he := pveVolumeErr(&pve.ConflictError{Msg: "Detach the volume before deleting it"}); he.Status != http.StatusConflict || he.Msg != "Detach the volume before deleting it" {
 		t.Fatalf("conflict mapped to %d %q", he.Status, he.Msg)
@@ -97,27 +131,9 @@ func TestPVEVolumeErr(t *testing.T) {
 	if he := pveVolumeErr(errors.New("pve: task failed")); he.Status != http.StatusBadGateway {
 		t.Fatalf("PVE failure mapped to %d", he.Status)
 	}
-}
-
-// A Proxmox volume is always a disk of a server: create without serverId is a clean 400
-// before any PVE or quota work.
-func TestPVECreateVolumeNeedsServer(t *testing.T) {
-	tests := []struct {
-		name string
-		data map[string]any
-		want string
-	}{
-		{"no size", map[string]any{"serverId": "101"}, "sizeGiB is required"},
-		{"no server", map[string]any{"sizeGiB": 20}, "serverId is required"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			(&Handler{}).pveCreateVolume(w, httptest.NewRequest(http.MethodPost, "/", nil), nil, nil, nil, tt.data)
-			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tt.want) {
-				t.Fatalf("got %d %s, want 400 %q", w.Code, w.Body.String(), tt.want)
-			}
-		})
+	// Attaching to another project's server: a refusal, not a failing backend.
+	if he := pveVolumeErr(fmt.Errorf("%w: vm 100 is not in project pool pc-x", pve.ErrNotInProject)); he.Status != http.StatusNotFound {
+		t.Fatalf("foreign server mapped to %d %q", he.Status, he.Msg)
 	}
 }
 
@@ -164,6 +180,62 @@ func TestDbaasProfileRefusal(t *testing.T) {
 		got := dbaasProfileRefusal(profiles, tt.class)
 		if (tt.want == "") != (got == "") || !strings.Contains(got, tt.want) {
 			t.Errorf("%s: got %q, want %q", tt.class, got, tt.want)
+		}
+	}
+}
+
+func TestPveVolumeErrDeadNode(t *testing.T) {
+	he := pveVolumeErr(fmt.Errorf("disable protection: %w", &pve.APIError{Status: 595, Message: "No route to host"}))
+	if he.Status != http.StatusConflict || strings.Contains(he.Msg, "595") {
+		t.Fatalf("got %d %q", he.Status, he.Msg)
+	}
+}
+
+// A tenant must not learn the backend's address from a failure: transport errors name the API, proxied ones a node.
+func TestPVEErrorsHideTheBackend(t *testing.T) {
+	const addr = "10.0.0.5"
+	raw := []error{
+		errors.New(`Get "https://` + addr + `:8006/api2/json/cluster/resources": dial tcp ` + addr + `:8006: connect: refused`),
+		&pve.APIError{Status: http.StatusInternalServerError, Message: "proxy handler failed: ssh: connect to host " + addr + " port 22: No route to host"},
+		&pve.APIError{Status: http.StatusBadRequest, Message: "bad", Errors: map[string]string{"x": addr}}, // only the rule path reads a 400
+	}
+	for _, err := range raw {
+		if he := pveVolumeErr(err); he.Status != http.StatusBadGateway || strings.Contains(he.Msg, addr) {
+			t.Errorf("%v: %d %q", err, he.Status, he.Msg)
+		}
+	}
+	// A refusal the tenant can act on keeps its text.
+	if he := pveVolumeErr(fmt.Errorf("keep the server's volumes: %w", &pve.ConflictError{Msg: "Another volume change is running"})); he.Status != http.StatusConflict || he.Msg != "Another volume change is running" {
+		t.Errorf("conflict: %d %q", he.Status, he.Msg)
+	}
+	if he := pveVolumeErr(fmt.Errorf("%w: nas on node pve1", pve.ErrStorageFull)); he.Status != http.StatusConflict || strings.Contains(he.Msg, "pve1") {
+		t.Errorf("storage full: %d %q", he.Status, he.Msg)
+	}
+	if he := sgRuleErr(&pve.APIError{Status: http.StatusBadRequest, Message: "Parameter verification failed.", Errors: map[string]string{"dport": "invalid format\n"}}); he.Status != http.StatusBadRequest || !strings.Contains(he.Msg, "dport: invalid format") {
+		t.Errorf("bad rule: %d %q", he.Status, he.Msg)
+	}
+	if he := sgRuleErr(raw[0]); he.Status != http.StatusBadGateway || strings.Contains(he.Msg, addr) {
+		t.Errorf("rule, backend down: %d %q", he.Status, he.Msg)
+	}
+}
+
+// Every 502 of this package goes through upstreamErr. A new site that hands err.Error() to a tenant fails here.
+func TestNoRawUpstreamErrorOn502(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := regexp.MustCompile(`StatusBadGateway, http\.StatusBadGateway, [^\n]*\.Error\(\)`)
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := raw.Find(b); m != nil {
+			t.Errorf("%s: %s", f, m)
 		}
 	}
 }

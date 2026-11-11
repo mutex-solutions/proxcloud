@@ -1,0 +1,80 @@
+{{- $net := .Values.proxmox.network }}
+{{- /* The kamaji package derives the same names (kamaji/config.go): TCP, kubeconfig secret and sync read them. */ -}}
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    proxcloud.io/cluster-id: {{ .Release.Name }}
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks: [{{ .Values.clusterNetwork.pods | quote }}]
+    services:
+      cidrBlocks: [{{ .Values.clusterNetwork.services | quote }}]
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: KamajiControlPlane
+    name: {{ .Release.Name }}-kamaji-cp
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: ProxmoxCluster
+    name: {{ .Release.Name }}
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: ProxmoxCluster
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  # The control plane is Kamaji's: CAPMOX must not wait for or check an endpoint of its own.
+  externalManagedControlPlane: true
+  credentialsRef:
+    name: {{ required "cloudCredentialsSecretName is required" .Values.cloudCredentialsSecretName }}
+    namespace: {{ .Release.Namespace }}
+  ipv4Config:
+    addresses: {{ toJson $net.addresses }}
+    gateway: {{ $net.gateway }}
+    prefix: {{ $net.prefix }}
+  dnsServers: {{ toJson $net.dnsServers }}
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1alpha2
+kind: KamajiControlPlane
+metadata:
+  name: {{ .Release.Name }}-kamaji-cp
+spec:
+  dataStoreName: {{ .Values.kamajiControlPlane.dataStoreName | default "default" }}
+  replicas: {{ .Values.kamajiControlPlane.replicas }}
+  version: {{ printf "v%s" (.Values.kubernetesVersion | trimPrefix "v") | quote }}
+  {{- with .Values.kamajiControlPlane.admissionControllers }}
+  admissionControllers: {{ toJson . }}
+  {{- end }}
+  addons:
+    coreDNS: {}
+    kubeProxy: {}
+    konnectivity: {}
+  kubelet:
+    cgroupfs: systemd
+    preferredAddressTypes: [InternalIP, Hostname]
+  network:
+    serviceType: {{ .Values.kamajiControlPlane.network.serviceType | default "LoadBalancer" }}
+    {{- with .Values.kamajiControlPlane.network.serviceAnnotations }}
+    serviceAnnotations: {{ toJson . }}
+    {{- end }}
+    {{- with .Values.kamajiControlPlane.network.loadBalancerSourceRanges }}
+    loadBalancerConfig:
+      loadBalancerSourceRanges: {{ toJson . }}
+    {{- end }}
+    {{- with .Values.kamajiControlPlane.network.certSANs }}
+    certSANs: {{ toJson . }}
+    {{- end }}
+  {{- with .Values.oidc }}
+  apiServer:
+    extraArgs:
+      - --oidc-issuer-url={{ .issuerUrl }}
+      - --oidc-client-id={{ required "oidc.clientId is required with oidc.issuerUrl" .clientId }}
+      - --oidc-username-claim={{ .usernameClaim | default "sub" }}
+      - --oidc-username-prefix={{ .usernamePrefix | default "oidc:" }}
+      - --oidc-groups-claim={{ .groupsClaim | default "groups" }}
+      - --oidc-groups-prefix={{ .groupsPrefix | default "oidc:" }}
+      - --oidc-signing-algs={{ .signingAlgs | default "RS256" }}
+  {{- end }}

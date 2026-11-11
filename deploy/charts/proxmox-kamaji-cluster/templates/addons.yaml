@@ -1,0 +1,112 @@
+{{- /*
+What every tenant cluster runs, installed by CAAPH from the management side: the CNI and MetalLB always, proxmox-csi when
+a StorageClass is offered, csi-driver-nfs when the cluster has a NAS dataset, the rest from the tenant's picks. The ClusterResourceSet carries what a chart value must not: the
+CSI token (a Secret the portal writes, never in this document) and the MetalLB custom resources, which need
+the chart's CRDs first (ClusterResourceSet retries until they exist).
+*/ -}}
+{{- $root := . }}
+{{- $fabric := (.Values.addons.nginxGatewayFabric | default dict).enabled | default false }}
+{{- if and $fabric ((.Values.addons.ingress | default dict).enabled | default false) }}
+{{- fail "legacy ingress-nginx must be explicitly migrated before enabling NGINX Gateway Fabric" }}
+{{- end }}
+{{- if and $fabric (not (semverCompare ">=1.32.0-0 <2.0.0-0" (.Values.kubernetesVersion | trimPrefix "v"))) }}
+{{- fail "NGINX Gateway Fabric requires Kubernetes >=1.32 in the supported 1.x series" }}
+{{- end }}
+{{- $proxies := list }}
+{{- $proxies = append $proxies (dict "key" "cilium" "ns" "kube-system" "values" (dict "kubeProxyReplacement" false "bandwidthManager" (dict "enabled" (.Values.sandboxBandwidth | default false)) "cni" (dict "customConf" (.Values.sandboxBandwidth | default false)) "ipam" (dict "mode" "kubernetes") "routingMode" "tunnel" "tunnelProtocol" "vxlan" "operator" (dict "replicas" 1) "hubble" (dict "enabled" false))) }}
+{{- $classes := list }}
+{{- range $i, $c := .Values.proxmox.csi.storageClasses }}
+{{- $class := dict "name" $c.name "storage" $c.storage "fstype" "ext4" "reclaimPolicy" "Delete" }}
+{{- if eq $i 0 }}{{- $_ := set $class "annotations" (dict "storageclass.kubernetes.io/is-default-class" "true") }}{{- end }}
+{{- $classes = append $classes $class }}
+{{- end }}
+{{- if $classes }}
+{{- /* With the gateway the controller runs on the services cluster (csi-controller.yaml): the tenant's stays at 0
+replicas (the chart's top-level replicaCount; it has no controller.replicaCount) and its config Secret never exists. */ -}}
+{{- $tenantController := ternary 0 1 (not (empty (.Values.proxmox.csi.gateway | default dict).secretName)) }}
+{{- $proxies = append $proxies (dict "key" "proxmoxCsi" "ns" "csi-proxmox" "values" (dict "existingConfigSecret" "proxmox-csi-plugin" "storageClass" $classes "node" (dict "tolerations" (list (dict "operator" "Exists"))) "replicaCount" $tenantController)) }}
+{{- end }}
+{{- $speaker := dict "frr" (dict "enabled" false) }}
+{{- with .Values.proxmox.metallb.speakerTolerations }}{{- $_ := set $speaker "tolerations" . }}{{- end }}
+{{- $proxies = append $proxies (dict "key" "metallb" "ns" "metallb-system" "values" (dict "speaker" $speaker "frrk8s" (dict "enabled" false))) }}
+{{- with .Values.proxmox.rwx }}{{- if .server }}
+{{- $nfsClass := dict "create" true "name" .storageClassName "reclaimPolicy" "Delete" "volumeBindingMode" "Immediate" "parameters" (dict "server" .server "share" .share "mountPermissions" "0777") "mountOptions" (list "nfsvers=4.1") }}
+{{- if not $classes }}{{- $_ := set $nfsClass "annotations" (dict "storageclass.kubernetes.io/is-default-class" "true") }}{{- end }}
+{{- $proxies = append $proxies (dict "key" "nfsCsi" "ns" "kube-system" "values" (dict "storageClass" $nfsClass)) }}
+{{- end }}{{- end }}
+{{- range $key := list "metricsServer" "certManager" "ingress" }}
+{{- $picked := dict "enabled" false }}
+{{- if hasKey $root.Values.addons $key }}{{- $picked = get $root.Values.addons $key }}{{- end }}
+{{- if $picked.enabled }}
+{{- $v := dict }}
+{{- if eq $key "metricsServer" }}{{- $v = dict "args" (list "--kubelet-insecure-tls") }}{{- end }}
+{{- if eq $key "certManager" }}{{- $v = dict "crds" (dict "enabled" true) }}{{- end }}
+{{- $ns := dict "metricsServer" "kube-system" "certManager" "cert-manager" "ingress" "ingress-nginx" }}
+{{- $proxies = append $proxies (dict "key" $key "ns" (get $ns $key) "values" $v) }}
+{{- end }}
+{{- end }}
+{{- if $fabric }}
+{{- $fabricValues := dict "nginxGateway" (dict "gatewayClassName" "nginx" "gatewayControllerName" "gateway.nginx.org/nginx-gateway-controller" "productTelemetry" (dict "enable" false)) "nginx" (dict "service" (dict "type" "LoadBalancer" "externalTrafficPolicy" "Local")) "gateways" (list) }}
+{{- $proxies = append $proxies (dict "key" "nginxGatewayFabric" "ns" "nginx-gateway" "values" $fabricValues) }}
+{{- end }}
+{{- range $p := $proxies }}
+{{- $chart := get $root.Values.addonCharts $p.key }}
+---
+apiVersion: addons.cluster.x-k8s.io/v1alpha1
+kind: HelmChartProxy
+metadata:
+  name: {{ $root.Release.Name }}-{{ $p.key | lower }}
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: {{ $root.Release.Name }}
+  repoURL: {{ $chart.repoURL }}
+  chartName: {{ $chart.chart }}
+  version: {{ $chart.version | quote }}
+  namespace: {{ $p.ns }}
+  releaseName: {{ $p.key | lower }}
+  options:
+    wait: {{ eq $p.key "nginxGatewayFabric" }}
+    timeout: 10m
+    install:
+      createNamespace: true
+  valuesTemplate: {{ toJson $p.values | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-metallb-config
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  metallb.yaml: |
+    apiVersion: metallb.io/v1beta1
+    kind: IPAddressPool
+    metadata:
+      name: tenant
+      namespace: metallb-system
+    spec:
+      addresses: {{ toJson .Values.proxmox.metallb.addresses }}
+    ---
+    apiVersion: metallb.io/v1beta1
+    kind: L2Advertisement
+    metadata:
+      name: tenant
+      namespace: metallb-system
+    spec:
+      ipAddressPools: [tenant]
+---
+apiVersion: addons.cluster.x-k8s.io/v1beta2
+kind: ClusterResourceSet
+metadata:
+  name: {{ .Release.Name }}-tenant-config
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: {{ .Release.Name }}
+  strategy: Reconcile
+  resources:
+    - {kind: Secret, name: {{ .Release.Name }}-metallb-config}
+    {{- if $classes }}
+    - {kind: Secret, name: {{ required "proxmox.csi.configSecretName is required" .Values.proxmox.csi.configSecretName }}}
+    {{- end }}

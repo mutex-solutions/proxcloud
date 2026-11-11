@@ -1,5 +1,4 @@
-// niche_sync.go — the ceph-s3 BUCKET sync provider (buckets are backend-agnostic:
-// a homelab with an RGW uses the ceph-s3 provider unchanged).
+// niche_sync.go — the BUCKET sync provider (RGW and RustFS answer through the same client).
 package providers
 
 import (
@@ -26,6 +25,11 @@ func (p *BucketProvider) ProjectID() string { return p.projectID }
 // bucket data is FLAT (no wrapping key); whole-map compare with number tolerance stops the numeric
 // objectCount/sizeInBytes from churning on a JSON round-trip.
 func (p *BucketProvider) CompareKeys() []string { return []string{} }
+
+// MergeCached keeps the last known usage when RustFS's scanner could not answer.
+func (p *BucketProvider) MergeCached(cached, fresh map[string]any) {
+	client.KeepLastUsage(cached, fresh)
+}
 
 func (p *BucketProvider) List(ctx context.Context) ([]cloud.CloudResource, error) {
 	bs, err := p.cc.ListBuckets(ctx)

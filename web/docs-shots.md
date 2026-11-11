@@ -1,37 +1,133 @@
-# Docs screenshot backlog
+# Documentation image audit and capture guide
 
-> All screenshots were removed for the ProxCloud rebrand (they showed the previous product). Recapture every item below on the ProxCloud lab, save under `web/{client,admin}/public/docs-img/`, and re-add the `![...](/docs-img/...)` line to the listed page.
+Audit date: **2026-11-10**. Screenshots are illustrations of the current frontend
+with synthetic documentation fixtures, **not** live PVE, billing, storage or
+release-acceptance evidence. No production API or real account is used to capture
+them. A screenshot cannot establish that a cloud operation succeeds.
 
-## admin-billing
+## Scope
 
-- [ ] `/docs-img/billing-configuration-activation.png` — Billing configuration page, Activation tab, showing the auto-activation switch and the constraint selectors (KYC, payment method, deposit, validation) — page: `administrators-manual/account-activation.md`
-- [ ] `/docs-img/validations-queue.png` — Validations page listing pending billing profile validations with Approve and Reject buttons — page: `administrators-manual/account-activation.md`
-- [ ] `/docs-img/billing-profile-activate.png` — Billing profile detail page showing the Activate action on a non-active profile — page: `administrators-manual/account-activation.md`
-- [ ] `/docs-img/price-plans-create.png` — Price plans page with the create dialog open, showing name, access mode and enabled fields — page: `administrators-manual/billing/price-plans.md`
-- [ ] `/docs-img/price-plan-rules.png` — Price plan detail page listing pricing rules with resource type, priced attribute and time unit columns — page: `platform-admin/billing/price-plans.md` (captured on the live "Public rate card" plan, 2026-07-09)
-- [ ] `/docs-img/price-plan-rule-create.png` — Rule creation dialog with a resource type selected and its attribute list expanded — page: `platform-admin/billing/price-plans.md` (Add-rule dialog, resource type `instance`, attributes expanded; dialog cancelled, no write)
-- [ ] `/docs-img/billing-configuration-base-currency.png` — Billing configuration page, Business details tab, with the Base currency dropdown open — page: `administrators-manual/billing/currencies.md`
-- [ ] `/docs-img/taxes-add-tax.png` — Taxes page with the add-tax dialog open, showing name, rate and country fields — page: `administrators-manual/billing/tax-rules.md`
-- [ ] `/docs-img/billing-configuration-invoice-gateway.png` — Billing configuration page, Business details tab, showing the Invoice gateway selector — page: `administrators-manual/billing/configure-invoicing.md`
-- [ ] `/docs-img/suspension-balance.png` — Billing configuration Settings tab with Automatic suspension enabled, type BALANCE, showing notification limits and the suspend-at balance — page: `administrators-manual/billing/automated-suspension.md`
-- [ ] `/docs-img/suspension-due-date.png` — Billing configuration Settings tab with Automatic suspension type DUE_DATE, showing day-based notification limits and the suspend-at days — page: `administrators-manual/billing/automated-suspension.md`
-- [ ] `/docs-img/provisioning-promotional-credits.png` — Billing configuration Activation tab, Provisioning promotional credits section with a credit row (amount and days valid) filled in — page: `administrators-manual/billing/promotional-credits.md`
-- [ ] `/docs-img/savings-plan-targets.png` — Savings plan creation form showing the target resource selection and duration — page: `administrators-manual/billing/savings-plans.md`
-- [ ] `/docs-img/savings-plan-discount-tiers.png` — Discount tier rows (start amount and discount percent) for a savings plan schedule — page: `administrators-manual/billing/savings-plans.md`
+The public repository originally contained **11 documentation PNGs**, referenced
+by five product-help pages, plus four branding SVGs and eight dynamic README
+badges. The audit also covers commented screenshot placeholders and the old
+backlog below; an unchecked idea is not an image that exists or a capability claim.
 
-## admin-cloud-provider-settings
+- Client images: `web/client/public/docs-img/`.
+- Admin images: `web/admin/public/docs-img/`.
+- Product-help references: `web/{client,admin}/src/docs/content/`.
+- Four `public/brand/{logo,favicon}.svg` assets were inspected for embedded scripts
+  and external references. They are current ProxCloud placeholder artwork, not an
+  outdated product screenshot; no brand redesign is part of this refresh.
+- Eight README badges were checked as SVG responses from GitHub/Shields. They are
+  dynamic service-generated badges, not screenshots to recapture. Their status can
+  change independently of this audit.
+- Mermaid architecture diagrams are source in Markdown, not raster image files.
+  Their current-content review belongs to the preceding documentation refresh.
 
-- [ ] `/docs-img/add-cloud-provider-form.png` — ProxCloud admin: System > Cloud providers > Add provider dialog with the General and Configuration sections filled in
-- [ ] `/docs-img/enable-disable-services-tab.png` — ProxCloud admin: cloud provider detail, Services tab with per-region toggles for compute, network, images and volumes
+## Reproducible capture requirements
 
-## client-storage
+Capture the actual current UI, using only the dedicated test fixtures and local
+mock frontend. Do not paint an imitation UI, alter production DOM for a picture,
+use a signed-in live console, or blur a real secret after it has already entered a
+capture artifact. Synthetic data should be safe **before** the screenshot exists.
 
-Storage-guide shots, captured 2026-07-13 against throwaway demo resources (a volume, its snapshot, and a bucket) that were deleted right after.
+The curated capture suites use a consistent **1440 × 1000 CSS-pixel viewport**,
+DPR 1, light theme, a fixed documentation clock/timezone and reduced motion. A tall
+wizard may use a full-page image. Font readiness and meaningful UI assertions gate
+the capture; the absence of an auth wall is not enough. Tests must reject unexpected
+backend/external network calls and record page/console failures. Screenshots use
+reserved documentation addresses/domains and demo people, not private lab details.
 
-- [ ] `/docs-img/create-volume.png` — The Create volume dialog (name, size in GB, optional type/AZ) — page: `guides/volumes.md`
-- [ ] `/docs-img/volume-attach.png` — Volume `docs-demo-vol` (ceph-ssd1) attached to the `docs-demo` server, shown on the server detail Volumes tab (VM IP blurred) — page: `guides/volumes.md`
-- [ ] `/docs-img/volume-snapshot.png` — The Snapshots list showing `docs-demo-snap` (a snapshot of `docs-demo-vol`) — page: `guides/volumes.md`
-- [ ] `/docs-img/create-bucket.png` — Create bucket dialog showing the globally-unique-name note and object-lock option — page: `guides/object-storage.md`
-- [ ] `/docs-img/bucket-objects.png` — Bucket object explorer with a folder and two uploaded files, and the Private toggle — page: `guides/object-storage.md`
-- [ ] `/docs-img/s3-access-keys.png` — S3 access keys page: project credentials + additional scoped keys. **Access key IDs replaced with AWS example values, the secret left masked, and the S3 endpoint hostname blurred (both the Endpoint field and the CLI example) — never publish real keys/endpoints** — page: `guides/object-storage.md`
-- [ ] `/docs-img/bucket-settings.png` — Bucket settings dialog (General tab: versioning/object-lock/quota) with the General/Website/Access/Lifecycle/Policy tab bar — page: `guides/object-storage.md`
+Run capture commands only against the dedicated localhost mock servers. Install
+locked frontend dependencies with `npm ci` first; do not change package/lockfiles
+merely to generate screenshots. The capture configuration and app-specific test
+fixtures live next to each app's E2E tests; exact commands and outputs are listed
+in the final inventory below.
+
+## Review and maintenance
+
+For every public image, verify:
+
+1. It is generated by the intended route/form on the source revision being reviewed.
+2. Its alt text and adjacent prose match the visible controls, units and state.
+3. No old-brand label, private endpoint, credential, real person/customer record or
+   live-resource identifier is visible. Masked synthetic examples are still not
+   real credential material.
+4. Dialog titles/footers and selected fields are legible, not clipped by a stale
+   viewport, loading state, tooltip or cursor/focus artifact.
+5. Every `/docs-img/` reference resolves in the correct app and loads in the real
+   documentation renderer. Do not add a picture just because an old backlog asked
+   for a control the current UI does not have.
+6. The captions clearly identify synthetic UI illustrations and do not suggest a
+   held feature or an untested deployment is enabled.
+
+Keep intentional placeholders and externally owned UI (for example Keycloak's
+admin console) explicit. Do not fabricate those screenshots from ProxCloud mock
+pages. A future refresh should regenerate only through the documented capture
+suites and repeat the visual/privacy review, then land in a separate PR.
+
+## Capture inventory
+
+**23 screenshots** are recorded in [docs-image-audit.json](docs-image-audit.json):
+all **11 previously published PNGs recaptured**, plus **12 new illustrations** of
+current controls. Each record contains the app, route, UI state, consuming docs,
+dimensions and SHA-256 hash. The original July lab backlog is not provenance for
+these new synthetic captures.
+
+### Capture and check commands
+
+```sh
+# Fresh locked dependencies, including Playwright even when NODE_ENV=production:
+npm --prefix web/client ci --include=dev
+npm --prefix web/admin ci --include=dev
+
+# Run from each app so its dedicated localhost server/paths are correct:
+(cd web/client && NODE_ENV=development npx playwright test -c playwright.docs.config.ts)
+(cd web/admin && NODE_ENV=development npx playwright test -c playwright.docs.config.ts)
+
+# No browser/network needed for the checked-in file/reference audit:
+python3 web/check-docs-images.py
+
+# After a future recapture passes tests AND visual/privacy review, acknowledge new
+# bytes explicitly (not a pixel-diff suite; do not blindly bless failed outputs):
+python3 web/check-docs-images.py --refresh-reviewed-hashes
+```
+
+The dedicated capture suites live outside the normal `e2e` test directories, so
+ordinary tests do not overwrite published screenshots. A fresh strict-port mock
+server is managed by Playwright and never reuses another signed-in app. Local
+capture-only Vite configuration, where present, does not change production UI
+behavior. Browsers must be installed for the locked Playwright version before
+capture (for example `npx playwright install --only-shell chromium` in each app).
+
+### Current illustration groups
+
+| App | Captures | Guide topics |
+|---|---:|---|
+| Client | 8 | Server wizard/list/detail, volume list/create, network creation, SSH rule and project invitation |
+| Admin | 15 | PVE connection/storage/services, price plans/rules, activation/validation/currency/invoice/suspension, tax and savings-plan controls |
+
+The create-server wizard uses a taller actual viewport for a full-page capture;
+this keeps fixed navigation at the top rather than in the middle of a stitched
+image. Dialog shots may show the relevant connection/control excerpt, not every
+scrollable option at once. All sample prices, people, resource IDs and capabilities
+are illustrative, not a live offer or proof that a cloud operation succeeded.
+
+### Deliberately not fabricated
+
+- **Billing-details form and client savings purchase/contracts:** the current
+  routes import external payment SDKs. The isolated capture suite refuses those
+  network requests; it does not stub in an imitation SDK/payment widget. Their
+  old commented image placeholders are replaced with explicit text rather than
+  broken references or pictures from a failed test.
+- **Keycloak theme selection:** this is an external product's UI, dependent on its
+  version/theme. The ProxCloud-only capture suite cannot produce that screen;
+  the guide retains text instructions with this limitation.
+- **Other old unreferenced backlog ideas** (activate-profile detail, attach/snapshot
+  volume, bucket/object/key/settings screens) were not existing published images.
+  They require a verified current fixture and guide state before adding. This
+  refresh does not claim every potential UI screen has an illustration.
+
+All existing published screenshots are replaced; those deferred ideas are not
+silently marked complete. The four brand SVGs remain unchanged placeholder artwork
+and all eight badges remain dynamic external SVGs.

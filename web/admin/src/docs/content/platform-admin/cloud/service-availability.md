@@ -6,6 +6,10 @@ Not everything a cluster can run is something you want to sell. ProxCloud lets y
 
 Open **System > Cloud providers**, select the provider, and go to the **Services** tab. Every service shows a toggle for each region. Toggles don't take effect until you press **Save**.
 
+![Current provider Services tab with synthetic enabled and disabled service toggles](/docs-img/enable-disable-services-tab.png)
+
+*Current UI with synthetic local provider state; no provider setting was saved or live service toggled.*
+
 The toggles live in the provider document under `config.services[<slug>][<region>]`. A provider with no `services` map at all counts as having every service on.
 
 ## The services you can toggle
@@ -16,9 +20,12 @@ The toggles live in the provider document under `config.services[<slug>][<region
 | `proxmox` | `image` | Images (OS templates and project templates) |
 | `proxmox` | `volumev3` | Volumes and snapshots |
 | `proxmox` | `network` | Private networks and security groups |
-| `ceph-s3` | `object-store` | Object storage buckets and S3 access keys |
+| `ceph-s3`, `rustfs` | `object-store` | Object storage buckets and S3 access keys |
+| `truenas` | `shares` | NFS and SMB file shares |
+| `powerdns` | `dns` | DNS zones |
 | `kamaji` | `kubernetes` | Managed Kubernetes clusters |
 | `dbaas` | `database` | Managed database clusters |
+| `sandbox` | `sandbox` | Sandboxes and their E2B API keys |
 
 A new Proxmox provider starts with `compute`, `network`, `volumev3` and `image` enabled in its region. Each of the other kinds starts with its single service enabled.
 

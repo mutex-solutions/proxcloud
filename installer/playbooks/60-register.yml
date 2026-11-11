@@ -1,0 +1,637 @@
+# Stage 60: operator login, admin key, provider, first-run seed, fio suggestions. Runs on the mgmt host against
+# the Keycloak and API services, so it does not depend on DNS or the ingress. All GET, then write.
+- name: Prepare the registration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  tasks:
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Read the node addresses
+      ansible.builtin.uri: {url: "{{ pc_api }}/cluster/status"}
+      register: pc_status
+
+- name: Register with the portal
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  vars:
+    lh: "{{ hostvars.localhost }}"
+    ns: "{{ pc.namespace }}"
+    key_file: "{{ pc_gen }}/admin-api-key.json"
+    api_key: "{{ lookup('ansible.builtin.file', key_file) | from_json }}"
+    # What stage 55 (registry) recorded: its CA and the template build bucket (docs/managed-sandbox.md §7).
+    pc_sbx_reg: >-
+      {{ (lookup('ansible.builtin.file', pc_gen ~ '/sandbox-registry.json') | from_json)
+         if pc_sandbox_registry_on and (pc_gen ~ '/sandbox-registry.json') is file else {} }}
+    pc_sbx_builds: "{{ pc_sbx_reg.buildStorage | default({}) }}"
+    node_ips: "{{ lh.pc_status.json.data | selectattr('type', 'eq', 'node') | map(attribute='ip') | sort | list }}"
+    zone:
+      kind: "{{ pc.network.kind }}"
+      controller: "{{ pc.network.controller }}"
+      asn: "{{ pc.network.asn | int }}"
+      peers: "{{ node_ips }}"
+      exitNodes: "{{ pc.network.exit_nodes or lh.pc_nodes[:1] }}"
+      vrfVxlan: "{{ pc.network.vrf_vxlan | int }}"
+      mtu: 1450
+      bridge: "{{ pc.network.bridge }}"
+      vlanMin: "{{ pc.network.vlan_min | int }}"
+      vlanMax: "{{ pc.network.vlan_max | int }}"
+    # Connection is resolved after GET /admin/service, before either POST or PUT. Keep non-installer trust
+    # settings unless the site explicitly supplies them; the transport consumes caCert, not "clusterCA".
+    provider: "{{ provider_base | combine({'config': provider_base.config | combine(pc_provider_connection)}) }}"
+    # Only the already installer-owned fields plus connection settings participate in PUT. The API merges
+    # top-level config keys, so services, capabilities, rotated tokenId and unrelated operator settings stay.
+    provider_update: >-
+      {{ (provider_base.config | dict2items | selectattr('key', 'in',
+           ['network', 'storageProfiles', 'defaultStorageProfile', 'storageClasses', 'templates', 'backupStorage', 'importStorage'])
+          | items2dict) | combine(pc_provider_connection) }}
+    provider_base:
+      name: "{{ pc.provider.name }}"
+      type: CLOUD
+      status: PUBLIC
+      config:
+        provider: proxmox
+        region: "{{ pc.provider.region }}"
+        regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
+        services:
+          compute: "{{ {pc.provider.region: true} }}"
+          network: "{{ {pc.provider.region: true} }}"
+          volumev3: "{{ {pc.provider.region: true} }}"
+          image: "{{ {pc.provider.region: true} }}"
+        tokenId: proxcloud@pve!platform
+        poolPrefix: "{{ pc.pve.pool_prefix }}"
+        network:
+          defaultZone: "{{ pc.network.default_zone }}"
+          zones: "{{ {pc.network.default_zone: zone} }}"
+          publicNetworks: "{{ [pc.network.public] if pc.network.public else [] }}"
+          cidrPool: "{{ pc.network.cidr_pool }}"
+          # The portal knows "shared" and "evpn-per-project"; any other value would fall back to shared without a word.
+          isolation: "{{ 'evpn-per-project' if pc.network.isolation in ['evpn', 'evpn-per-project'] else 'shared' }}"
+          blockedCidrs: "{{ pc.network.blocked_cidrs }}"
+          # Fenced both ways by the isolation rules: tenants off the sandbox workers, the workers off tenants and mgmt.
+          sandboxCidrs: "{{ [pc.sandbox.network.subnet] if pc_sandbox_on else [] }}"
+          evpnController: "{{ pc.network.controller }}"
+        storageProfiles: "{{ profiles }}"
+        defaultStorageProfile: "{{ default_profile }}"
+        templates: "{{ pc.provider.templates }}"
+        backupStorage: "{{ pc.nas.names.backup if pc.nas.host | length > 0 and 'backup' in pc.nas.exports else '' }}"
+        importStorage: "{{ pc.nas.names.templates if pc.nas.host | length > 0 and 'templates' in pc.nas.exports else '' }}"
+        storageClasses: "{{ storage_classes }}"
+    fio_file: "{{ pc_gen }}/storage-classes.json"
+    fio: "{{ lookup('ansible.builtin.file', fio_file) | from_json if fio_file is file else {} }}"
+    # What the provider holds now, empty on the first run: an operator's console edits survive a re-run.
+    stored: "{{ (pc_service | default({})).config | default({}) }}"
+    profiles: "{{ lh.pc_profiles | pc_kept_profiles(pc.storage_profiles, stored.storageProfiles | default({})) }}"
+    default_profile: "{{ profiles | pc_kept_default_profile(lh.pc_default_profile, pc.provider.default_profile, stored.defaultStorageProfile | default('')) }}"
+    storage_classes: "{{ fio | pc_storage_classes(pc.storage_classes, stored.storageClasses | default({})) }}"
+  tasks:
+    - name: Find the services
+      ansible.builtin.command: k3s kubectl -n {{ ns }} get svc proxcloud-api proxcloud-keycloak-http -o jsonpath={.items[*].spec.clusterIP}
+      changed_when: false
+      register: pc_ips
+    - name: Note the service URLs
+      ansible.builtin.set_fact:
+        pc_svc_api: "http://{{ pc_ips.stdout.split()[0] }}:8080/api/v1"
+        pc_svc_kc: "http://{{ pc_ips.stdout.split()[1] }}"
+
+    # Keycloak: the realms came from keycloak-config-cli; the logins are added here so the Application
+    # values carry no password. Existing users keep the password they changed it to.
+    - name: Get a Keycloak admin token
+      ansible.builtin.uri:
+        url: "{{ pc_svc_kc }}/realms/master/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body: {grant_type: password, client_id: admin-cli, username: admin, password: "{{ pc_keycloak_admin_password }}"}
+      no_log: true
+      register: pc_kc
+      retries: 30
+      delay: 10
+      until: pc_kc is succeeded
+    - name: Wait for the realms
+      ansible.builtin.uri:
+        url: "{{ pc_svc_kc }}/admin/realms/{{ item }}"
+        headers: {Authorization: "Bearer {{ pc_kc.json.access_token }}"}
+      register: pc_realm
+      retries: 30
+      delay: 10
+      until: pc_realm is succeeded
+      loop: ["{{ pc.keycloak.main_realm }}", "{{ pc.keycloak.admin_realm }}"]
+    - name: Create the logins
+      vars:
+        users: >-
+          {{ [{'realm': pc.keycloak.admin_realm, 'username': pc.keycloak.operator.username, 'email': pc.keycloak.operator.email, 'password': pc_operator_password}] +
+             pc.keycloak.tenant_users | map('combine', {'realm': pc.keycloak.main_realm}) | list }}
+      ansible.builtin.uri:
+        url: "{{ pc_svc_kc }}/admin/realms/{{ item.realm }}/users"
+        method: POST
+        headers: {Authorization: "Bearer {{ pc_kc.json.access_token }}"}
+        body_format: json
+        body:
+          username: "{{ item.username }}"
+          email: "{{ item.email }}"
+          firstName: "{{ item.username }}"
+          lastName: "ProxCloud"
+          enabled: true
+          emailVerified: true
+          credentials: [{type: password, value: "{{ item.password }}", temporary: false}]
+        status_code: [201, 409]
+      register: pc_user
+      changed_when: pc_user.status == 201
+      loop: "{{ users }}"
+      loop_control: {label: "{{ item.realm }}/{{ item.username }}"}
+      no_log: true
+
+    - name: Is there an admin key
+      ansible.builtin.stat: {path: "{{ key_file }}"}
+      delegate_to: localhost
+      become: false
+      register: pc_key
+    - name: Mint the installer's admin key
+      when: not pc_key.stat.exists
+      ansible.builtin.command: k3s kubectl -n {{ ns }} exec deploy/proxcloud-api -c api -- proxcloud-api admin-key create -description installer
+      register: pc_minted
+      no_log: true
+    - name: Keep the admin key
+      when: not pc_key.stat.exists
+      ansible.builtin.copy: {dest: "{{ key_file }}", content: "{{ pc_minted.stdout }}\n", mode: "0600"}
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Read the registered providers
+      proxcloud_api: &api
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service"
+      register: pc_services
+      retries: 20
+      delay: 10
+      until: pc_services is succeeded
+    - name: Note the existing provider before rendering its configuration
+      ansible.builtin.set_fact:
+        pc_service: "{{ pc_services.json.data | pc_registered_pve_provider(pc.provider.name) }}"
+      no_log: true
+    - name: Resolve the provider endpoints and certificate trust locally
+      ansible.builtin.set_fact:
+        pc_provider_connection: >-
+          {{ pc.pve | pc_pve_connection(pc_portal_pve_url, pc_service.config if pc_service else none,
+               lookup('ansible.builtin.file', pc_gen ~ '/pve-fingerprint', errors='ignore') | default('', true) | trim
+               if not pc_service and pc.pve.cluster_ca is none else '') }}
+      # A pasted key/credential in these public settings must never be echoed, including on validation failure.
+      no_log: true
+    - name: Register the Proxmox provider
+      when: not pc_service
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service"
+        method: POST
+        body: "{{ provider | combine({'secret': {'tokenSecret': lookup('ansible.builtin.file', pc_gen ~ '/token-platform') | trim}}) }}"
+      no_log: true
+    - name: Read the providers again
+      proxcloud_api: *api
+      register: pc_services
+    - name: Note the provider
+      ansible.builtin.set_fact:
+        pc_service: "{{ pc_services.json.data | pc_registered_pve_provider(pc.provider.name, true) }}"
+      no_log: true
+    - name: Keep the configuration of an existing provider in line
+      when: (pc_service.config | combine(provider_update)) != pc_service.config
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service/{{ pc_service.id }}"
+        method: PUT
+        body: {name: "{{ pc.provider.name }}", config: "{{ provider_update }}"}
+      no_log: true
+    # The CSI gateway calls PVE with csi@pve!gateway (stage 10), read from the compute provider. Written once, so a
+    # rotation done in the console stays.
+    - name: Give the provider the CSI gateway token
+      when: pc.mode == 'split' and (pc_service.config.csiGatewayTokenId | default('')) == ''
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service/{{ pc_service.id }}"
+        method: PUT
+        body:
+          name: "{{ pc.provider.name }}"
+          config: {csiGatewayTokenId: csi@pve!gateway}
+          secret: {csiGatewaySecret: "{{ lookup('ansible.builtin.file', pc_gen ~ '/token-gateway') | trim }}"}
+      no_log: true
+    # Layer 1 of the sandbox network: the sync fences every VM of the sandbox pool and takes the unsecured taint off
+    # with the kubeconfig stage 55 minted (nodes only). Workers take no tenant pods until this has run.
+    - name: Give the provider the sandbox workers
+      vars:
+        sandbox:
+          pool: "{{ pc.sandbox.pool }}"
+          nodes: ["{{ pc.sandbox.network.nodes }}"]
+          loadBalancers: ["{{ pc.sandbox.network.metallb }}"]
+          dns: "{{ pc.sandbox.network.dns }}"
+          kubeletSources: "{{ pc.services.network.nodes }}"
+          snat: "{{ pc.sandbox.network.snat | string }}"
+          unsecuredMinAgeMinutes: "{{ pc.sandbox.unsecured_min_age_minutes | int }}"
+          # Stage 56's entry: the workers admit the appliance alone to sandbox-proxy, and the sync keeps the appliance.
+          proxy: >-
+            {{ ({'address': pc.sandbox.proxy.address, 'port': 443}
+                | combine({'entry': {'vmid': pc.sandbox.entry.vmid | int, 'pool': pc.sandbox.entry.pool, 'address': pc.sandbox.entry.address}}
+                          if pc.sandbox.entry.public.bridge else {})) if pc_sandbox_edge_on else {} }}
+          # Stage 55's registry: the one address and port outside the vnet the workers pull images from.
+          registry: "{{ {'address': pc.sandbox.registry.address, 'port': 443} if pc_sandbox_registry_on else {} }}"
+          # The build bucket, where build pods fetch their contexts.
+          buildStorage: "{{ {'address': pc_sbx_builds.address, 'port': pc_sbx_builds.port} if pc_sbx_builds else {} }}"
+          # The portal's API, where sandbox-proxy wakes paused sandboxes (stage 56's wake URL).
+          portal: >-
+            {{ {'address': pc.sandbox.proxy.wake_address or pc_first_mgmt_ip, 'port': 443 if pc_scheme == 'https' else 80}
+               if pc_sandbox_edge_on and pc.sandbox.proxy.wake_address != 'none' else {} }}
+      when:
+        - pc_sandbox_on
+        - (pc_gen ~ '/sandbox-firewall.kubeconfig') is file
+        - (pc_service.config.sandbox | default({})) != sandbox
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service/{{ pc_service.id }}"
+        method: PUT
+        body:
+          name: "{{ pc.provider.name }}"
+          config: {sandbox: "{{ sandbox }}"}
+          secret: {sandboxKubeconfig: "{{ lookup('ansible.builtin.file', pc_gen ~ '/sandbox-firewall.kubeconfig') }}"}
+      no_log: true
+    # The provider tenants create sandboxes on, with the portal's kubeconfig (stage 55). Stored DISABLED: it may go live
+    # only while its release gates hold, and the fence gate needs a sync to have fenced the workers first. The operator
+    # checks the gates and sets the status in the console; a re-run never touches an existing sandbox row (renamed or
+    # not), so an operator's DISABLED stays and an edited template list is kept.
+    - name: Register the sandbox provider
+      when:
+        - pc_sandbox_on
+        - (pc_gen ~ '/sandbox-portal.kubeconfig') is file
+        # by kind, not by name: an operator may rename the row in the console
+        - "'sandbox' not in (pc_services.json.data | map(attribute='config.provider', default='') | list)"
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service"
+        method: POST
+        body:
+          name: "{{ pc.provider.name }} Sandboxes"
+          type: CLOUD
+          status: DISABLED
+          config:
+            provider: sandbox
+            region: "{{ pc.provider.region }}"
+            regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
+            services: {sandbox: "{{ {pc.provider.region: true} }}"}
+            sandbox:
+              proxmoxServiceId: "{{ pc_service.id }}"
+              # With a sandbox domain (stage 56) every sandbox runs envd and the E2B API at /e2b serves this provider.
+              envd: "{{ pc_sandbox_edge_on | bool }}"
+              domain: "{{ pc.sandbox.domain if pc_sandbox_edge_on else '' }}"
+              # the site's list replaces the default one (pc merges dicts, which would always keep python); "pin:<name>"
+              # resolves to the registry's copy, or without a registry to the pinned source
+              templates: >-
+                {{ ((proxcloud | default({})).sandbox | default({})).templates | default(pc.sandbox.templates)
+                   | pc_sandbox_templates(pc_sandbox_pins, pc_sandbox_registry_host) }}
+              limits: "{{ pc.sandbox.limits }}"
+              egressMbps: "{{ pc.sandbox.egress_mbps | int }}"
+              abuse: "{{ pc.sandbox.abuse }}"
+              rotation: "{{ pc.sandbox.rotation }}"
+              templateRegistry: "{{ (pc_sandbox_registry_host ~ '/t') if pc_sandbox_registry_on else '' }}"
+              imageAdoption: "{{ pc.sandbox.registry.adoption if pc_sandbox_registry_on else '' }}"
+              # Custom template builds and the pruning of their images (docs/managed-sandbox.md §7).
+              registryCa: "{{ pc_sbx_reg.ca | default('') }}"
+              registryPrune: "{{ pc.sandbox.registry.prune if pc_sandbox_registry_on else '' }}"
+              buildStorage: >-
+                {{ {'endpoint': pc_sbx_builds.endpoint, 'region': pc_sbx_builds.region, 'bucket': pc_sbx_builds.bucket}
+                   if pc_sbx_builds else {} }}
+          secret: >-
+            {{ {'kubeconfig': lookup('ansible.builtin.file', pc_gen ~ '/sandbox-portal.kubeconfig')}
+               | combine({'registryGcUser': 'gc',
+                          'registryGcPassword': lookup('ansible.builtin.file', pc_gen ~ '/sandbox-registry-gc') | trim,
+                          'buildStorageAccessKey': (pc_sbx_builds.bucket ~ '-svc') if pc.object_store.mode != 'external' else pc.object_store.access_key,
+                          'buildStorageSecretKey': (lookup('ansible.builtin.file', pc_gen ~ '/sandbox-builds-s3-secret') | trim)
+                                                   if pc.object_store.mode != 'external' else pc.object_store.secret_key}
+                         if pc_sbx_builds else {}) }}
+      register: pc_sbx_provider
+      no_log: true
+    - name: Say how the sandbox provider goes live
+      when: pc_sbx_provider is changed
+      ansible.builtin.debug:
+        msg: >-
+          {{ pc.provider.name }} Sandboxes is registered DISABLED. Once a sync has fenced the workers (the
+          proxcloud.io/unsecured taint is gone), open it under Cloud providers, run "Check release gates" and set the
+          status to PUBLIC; tenants get sandboxes once a project has it attached.
+    - name: Test the connection with the platform token
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service/proxmox/auth?externalServiceId={{ pc_service.id }}"
+        method: POST
+        body: {}
+      changed_when: false
+      register: pc_conn
+    - name: Report token warnings
+      when: pc_conn.json.data.warnings | default([]) | length > 0
+      ansible.builtin.debug: {msg: "{{ pc_conn.json.data.warnings }}"}
+    - name: Detect the storage capabilities
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service/{{ pc_service.id }}/storage/detect"
+        method: POST
+        body: {}
+      changed_when: false
+
+    - name: Register the object store
+      when: pc.object_store.mode in ['vm', 'truenas-app']
+      vars:
+        store: "{{ lookup('ansible.builtin.file', pc_gen ~ '/object-store.json') | from_json }}"
+        store_connection:
+          provider: rustfs
+          s3Endpoint: "{{ store.endpoint }}"
+          adminApiUrl: "{{ store.internalEndpoint }}"
+          region: "{{ pc.provider.region }}"
+        store_secret: {adminAccessKey: "{{ pc_rustfs_access_key }}", adminSecretKey: "{{ pc_rustfs_secret_key }}"}
+      block:
+        - name: Check the object store from the API
+          # The API checks a row before storing it, and has to reach the public S3 endpoint to do so. The request carries
+          # the key, hence no_log and the assert that shows the reason.
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service/object-store/test"
+            method: POST
+            body: "{{ store_connection | combine(store_secret) }}"
+            ok_status: [200, 400]
+          changed_when: false
+          register: pc_store_check
+          no_log: true
+        - name: Report the object store check
+          ansible.builtin.assert:
+            that: pc_store_check.status == 200
+            fail_msg: "{{ pc_store_check.json.errors.message | default('The object store check did not pass') }}"
+            quiet: true
+        - name: Create the object store provider
+          when: (pc.provider.name ~ ' S3') not in (pc_services.json.data | map(attribute='name') | list)
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service"
+            method: POST
+            body:
+              name: "{{ pc.provider.name }} S3"
+              type: CLOUD
+              status: PUBLIC
+              config: >-
+                {{ store_connection | combine({'regions': {pc.provider.region: {'displayName': pc.provider.region_name}},
+                  'services': {'object-store': {pc.provider.region: true}}}) }}
+              secret: "{{ store_secret }}"
+          no_log: true
+
+    - name: Register the Ceph RGW object store
+      when: pc.object_store.mode == 'ceph-rgw'
+      vars:
+        rgw_name: "{{ pc.provider.name }} S3"
+        rgw_row: "{{ pc_services.json.data | selectattr('name', 'eq', rgw_name) | list | first | default({}) }}"
+        rgw_connection:
+          s3Endpoint: "{{ pc.object_store.endpoint }}"
+          adminApiUrl: "{{ pc.object_store.endpoint | regex_replace('/+$', '') }}/admin"
+        rgw_secret: {adminAccessKey: "{{ pc.object_store.access_key }}", adminSecretKey: "{{ pc.object_store.secret_key }}"}
+      block:
+        - name: Check the RGW endpoint and admin key
+          # A stored row that cannot reach RGW fails the bootstrap of every new project, so nothing is stored
+          # until this passes. The request carries the key, hence no_log and the assert that shows the reason.
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service/object-store/test"
+            method: POST
+            body: "{{ rgw_connection | combine(rgw_secret) | combine({'region': pc.object_store.region}) }}"
+            ok_status: [200, 400]
+          changed_when: false
+          register: pc_rgw_check
+          no_log: true
+        - name: Report the RGW check
+          ansible.builtin.assert:
+            that: pc_rgw_check.status == 200
+            fail_msg: "{{ pc_rgw_check.json.errors.message | default('The object store check did not pass') }}"
+            quiet: true
+        - name: Refuse to turn another object store's row into Ceph RGW
+          # Its buckets live on the old store, so re-pointing the row would hide them. Not a supported move.
+          when: rgw_row and rgw_row.config.provider != 'ceph-s3'
+          ansible.builtin.fail:
+            msg: "{{ rgw_name }} is a {{ rgw_row.config.provider }} provider. Changing object_store.mode on an installed site is not supported."
+        - name: Create the Ceph RGW provider
+          when: not rgw_row
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service"
+            method: POST
+            body:
+              name: "{{ rgw_name }}"
+              type: CLOUD
+              status: PUBLIC
+              config: >-
+                {{ rgw_connection | combine({'provider': 'ceph-s3',
+                  'region': pc.object_store.region,
+                  'regions': {pc.object_store.region: {'displayName': pc.provider.region_name}},
+                  'services': {'object-store': {pc.object_store.region: true}}}) }}
+              secret: "{{ rgw_secret }}"
+          no_log: true
+        - name: Keep the Ceph RGW connection in line
+          # The inventory owns the endpoint and key: a corrected value or a rotated key lands on a re-run. The
+          # secret cannot be read back to compare, so this always writes.
+          when: rgw_row
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service/{{ rgw_row.id }}"
+            method: PUT
+            body: {config: "{{ rgw_connection }}", secret: "{{ rgw_secret }}"}
+          no_log: true
+        - name: Report a region that no longer applies
+          # Projects store the region at bootstrap, so the row keeps the one it was created with.
+          when: rgw_row and rgw_row.config.region != pc.object_store.region
+          ansible.builtin.debug:
+            msg: "{{ rgw_name }} keeps region {{ rgw_row.config.region }}; object_store.region {{ pc.object_store.region }} applies only when the row is created."
+
+    - name: Has the first-run configuration been seeded
+      ansible.builtin.stat: {path: "{{ pc_gen }}/operator-seeded"}
+      delegate_to: localhost
+      become: false
+      register: pc_seeded
+    - name: Seed the first-run configuration
+      # Platform and billing configuration, flavors, public price plan, default quota. First run only: an
+      # operator's later edits in the admin console win.
+      when: not pc_seeded.stat.exists
+      block:
+        - name: Copy the seed
+          ansible.builtin.copy: {src: "{{ pc_repo_root }}/deploy/seed/", dest: /tmp/proxcloud-seed/, mode: preserve}
+        - name: Run the seed
+          ansible.builtin.command: python3 /tmp/proxcloud-seed/seed-operator.py --provider {{ pc.provider.name | quote }}
+          environment:
+            PROXCLOUD_API: "{{ pc_svc_api }}"
+            PROXCLOUD_TOKEN_URL: "{{ pc_svc_kc }}/realms/{{ pc.keycloak.admin_realm }}/protocol/openid-connect/token"
+            PROXCLOUD_ADMIN_USER: "{{ pc.keycloak.operator.username }}"
+            PROXCLOUD_ADMIN_PASSWORD: "{{ pc_operator_password }}"
+          changed_when: true
+          no_log: "{{ not ansible_verbosity }}"
+        - name: Apply the site's quota
+          proxcloud_api:
+            access_key: "{{ api_key.id }}"
+            secret_key: "{{ api_key.secretKey }}"
+            url: "{{ pc_svc_api }}/admin/service/{{ pc_service.id }}/quota"
+            method: PUT
+            body: "{{ pc.provider.quota }}"
+        - name: Remember the seed
+          ansible.builtin.copy: {dest: "{{ pc_gen }}/operator-seeded", content: "", mode: "0600"}
+          delegate_to: localhost
+          become: false
+    - name: Read the flavors
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/flavors"
+      register: pc_flavors
+    - name: Create the site's extra flavors
+      when: item.slug not in (pc_flavors.json.data | default([], true) | map(attribute='slug') | list)
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/flavors"
+        method: POST
+        body: "{{ item | combine({'active': true}) }}"
+      loop: "{{ pc.flavors }}"
+      loop_control: {label: "{{ item.slug }}"}
+
+    # mode=split: the two providers that write Applications to the services cluster.
+    - name: Read the portal's identity on the services cluster
+      when: pc.mode == 'split'
+      ansible.builtin.shell: |
+        set -eu
+        export KUBECONFIG=/root/services.kubeconfig
+        kubectl -n proxcloud-system get secret proxcloud-token -o jsonpath='{.data.ca\.crt} {.data.token}'
+      changed_when: false
+      register: pc_svc_identity
+      no_log: true
+    - name: Register the managed-service providers
+      when: pc.mode == 'split' and item.name not in (pc_services.json.data | map(attribute='name') | list)
+      vars:
+        kubeconfig: |
+          apiVersion: v1
+          kind: Config
+          current-context: services
+          contexts: [{name: services, context: {cluster: services, user: proxcloud}}]
+          clusters:
+            - name: services
+              cluster:
+                server: https://{{ pc.services.network.endpoint }}:6443
+                certificate-authority-data: {{ pc_svc_identity.stdout.split()[0] }}
+          users:
+            - name: proxcloud
+              user:
+                token: {{ pc_svc_identity.stdout.split()[1] | b64decode }}
+        region: "{{ pc.provider.region }}"
+        region_doc: "{{ {region: {'displayName': pc.provider.region_name}} }}"
+        object_store: "{{ lookup('ansible.builtin.file', pc_gen ~ '/object-store.json') | from_json }}"
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "{{ pc_svc_api }}/admin/service"
+        method: POST
+        body: "{{ item }}"
+      no_log: true
+      loop:
+        - name: "{{ pc.provider.name }} Kubernetes"
+          type: CLOUD
+          status: PUBLIC
+          config:
+            provider: kamaji
+            region: "{{ pc.provider.region }}"
+            regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
+            services: {kubernetes: "{{ {pc.provider.region: true} }}"}
+            argocd:
+              namespace: argocd
+              project: proxcloud-k8s
+              chartRepo: "{{ pc.services.chart_repo }}"
+              chartName: proxmox-kamaji-cluster
+              chartVersion: "{{ pc_chart_kamaji }}"
+            cluster:
+              dataStoreName: default
+              versions: "{{ pc.services.kamaji.version_images }}"
+              rootVolumeGiB: "{{ pc.services.kamaji.root_volume_gib | int }}"
+              workerMtu: "{{ pc.services.kamaji.worker_mtu | int }}"
+              rwxGiB: "{{ pc.services.kamaji.rwx_gib | int }}"
+              pveApiUrl: "{{ pc_portal_pve_url }}"
+          secret: {kubeconfig: "{{ kubeconfig }}"}
+        - name: "{{ pc.provider.name }} Databases"
+          type: CLOUD
+          status: PUBLIC
+          config:
+            provider: dbaas
+            region: "{{ pc.provider.region }}"
+            regions: "{{ {pc.provider.region: {'displayName': pc.provider.region_name}} }}"
+            services: {database: "{{ {pc.provider.region: true} }}"}
+            argocd:
+              namespace: argocd
+              project: proxcloud-dbaas
+              chartRepo: "{{ pc.services.chart_repo }}"
+              chartName: database-cluster
+              chartVersion: "{{ pc_chart_database }}"
+            database:
+              lbAddressPool: services
+              storageClasses: [std]
+              backup:
+                endpoint: "{{ object_store.internalEndpoint | default(object_store.endpoint) }}"
+                bucket: cnpg-backups
+                prefix: backups
+                region: us-east-1
+                pathStyle: true
+              engines:
+                postgresql: {versions: ["17", "18"], default: "18", replicas: [1, 3]}
+          secret:
+            kubeconfig: "{{ kubeconfig }}"
+            backupAccessKey: cnpg-backups-svc
+            backupSecretKey: "{{ lookup('ansible.builtin.file', pc_gen ~ '/rustfs-cnpg-secret') | trim }}"
+      loop_control: {label: "{{ item.name }}"}
+
+- name: Retire the PVE API forward
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  tasks:
+    # Tenant proxmox-csi controllers on the tenant side reached PVE through svc/pve-api; through the CSI gateway nothing
+    # does. A cluster whose resource-set config still holds a token, or whose Application has StorageClasses and no
+    # gateway, has not been moved yet (docs/managed-k8s.md, "Moving a cluster onto the CSI gateway"), so the forward
+    # stays until none is left.
+    - name: Remove the forward once no cluster uses it
+      when: pc.mode == 'split'
+      ansible.builtin.script: files/pve-forward.py
+      environment: {KUBECONFIG: /root/services.kubeconfig}
+      args: {executable: python3}
+      register: pc_forward
+      changed_when: (pc_forward.stdout | trim) == 'removed'
+    - name: Report clusters that still use the forward
+      when: pc.mode == 'split' and pc_forward.stdout is search('kept')
+      ansible.builtin.debug:
+        msg: >-
+          svc/pve-api is kept: {{ pc_forward.stdout_lines[1:] | join(', ') }} show a cluster whose proxmox-csi controller
+          still runs on its own token. Move each cluster onto the CSI gateway (POST /api/v1/admin/service/<k8s provider>/k8s-clusters/<id>/csi-gateway), then
+          run make upgrade again.
+
+- name: Say how to log in
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Print the portal
+      ansible.builtin.debug:
+        msg:
+          - "Customer console  {{ pc_url_app }}"
+          - "Operator console  {{ pc_url_admin }}  login {{ pc.keycloak.operator.username }}, password in {{ pc_gen }}/operator-password"
+          - "API               {{ pc_url_api }}"
+          - "Keycloak          {{ pc_url_id }}  admin password in {{ pc_gen }}/keycloak-admin-password"
+          - "BACK UP {{ pc_gen }}: the encryption key cannot be recovered, and without it stored provider secrets are lost."

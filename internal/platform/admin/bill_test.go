@@ -2,8 +2,11 @@ package admin
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func TestBillUpdateReqDecode(t *testing.T) {
@@ -48,5 +51,43 @@ func TestBillNotFoundInterpolatesID(t *testing.T) {
 	}
 	if !strings.Contains(e.Msg, "abc123") {
 		t.Errorf("message %q should interpolate the id", e.Msg)
+	}
+}
+
+func TestIsValidBillStatus(t *testing.T) {
+	for _, ok := range []string{"OPEN", "SENT", "PAID"} {
+		if !isValidBillStatus(ok) {
+			t.Errorf("%s should be valid", ok)
+		}
+	}
+	for _, bad := range []string{"", "paid", "INVOICED", "CANCELLED"} {
+		if isValidBillStatus(bad) {
+			t.Errorf("%q should be rejected", bad)
+		}
+	}
+}
+
+func TestBillRecordPaymentReqDecode(t *testing.T) {
+	var req billRecordPaymentReq
+	// amount accepts both a JSON number and a decimal string.
+	if err := json.Unmarshal([]byte(`{"amount":12.5,"method":"BANK_TRANSFER","reference":"TRX-1","paidAt":"2026-09-01T00:00:00Z"}`), &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Amount.String() != "12.5" || req.Method != "BANK_TRANSFER" || req.Reference != "TRX-1" {
+		t.Errorf("decoded req mismatch: %+v", req)
+	}
+	if err := json.Unmarshal([]byte(`{"amount":"99.99","method":"OTHER"}`), &req); err != nil || req.Amount.String() != "99.99" {
+		t.Errorf("string amount should decode: %+v err=%v", req, err)
+	}
+	if err := json.Unmarshal([]byte(`{"amount":"abc","method":"OTHER"}`), &req); err == nil {
+		t.Error("non-numeric amount string must fail to decode")
+	}
+}
+
+func TestBillRecordPaymentRouteRegistered(t *testing.T) {
+	router := chi.NewRouter()
+	(&Handler{}).Routes(router)
+	if !router.Match(chi.NewRouteContext(), http.MethodPost, "/admin/bill/bill-1/record-payment") {
+		t.Fatal("POST /admin/bill/{id}/record-payment route is not registered")
 	}
 }

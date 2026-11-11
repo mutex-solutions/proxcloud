@@ -1,0 +1,110 @@
+# Stage 35, images.build only: build the images and the chart from this checkout on the installer host,
+# push them to a registry on the mgmt cluster. Stage 40 then runs exactly as with ghcr: same Application,
+# only other URLs. A tag already in the registry is not rebuilt.
+- name: Run a registry on the mgmt cluster
+  hosts: mgmt[0]
+  gather_facts: false
+  become: true
+  vars:
+    manifest: "{{ lookup('ansible.builtin.template', 'templates/registry.yml.j2') }}"
+  tasks:
+    - name: Skip without images.build
+      ansible.builtin.meta: end_play
+      when: not pc.images.build
+    - name: Apply the registry
+      ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {apply_name: registry}
+    - name: Wait for the registry
+      ansible.builtin.command: k3s kubectl -n proxcloud-registry rollout status deploy/pc-registry --timeout=180s
+      changed_when: false
+    - name: Install helm and skopeo
+      ansible.builtin.shell: |
+        set -eu
+        apt-get update -qq && apt-get install -y -qq skopeo curl
+        curl -fsSL https://get.helm.sh/helm-{{ pc_ver.helm }}-linux-amd64.tar.gz | tar -xz -C /usr/local/bin --strip-components=1 linux-amd64/helm
+      args: {creates: /usr/local/bin/helm}
+    - name: Is this tag pushed already
+      ansible.builtin.uri: {url: "http://{{ pc_local_registry }}/v2/proxcloud-admin/manifests/{{ pc_build_tag }}", status_code: [200, 404], headers: {Accept: "application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"}}
+      register: pc_pushed
+      retries: 10
+      delay: 5
+      until: pc_pushed is succeeded
+
+- name: Build on the installer host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    pushed: "{{ hostvars[groups['mgmt'][0]].pc_pushed.status | default(404) == 200 }}"
+    work: "{{ pc_gen }}/build"
+    builds:
+      - {name: proxcloud-api, context: ".", args: ["-f", "deploy/Dockerfile"]}
+      - {name: proxcloud-web, context: web, args: ["--build-arg", "APP=client"]}
+      - {name: proxcloud-admin, context: web, args: ["--build-arg", "APP=admin"]}
+  tasks:
+    - name: Skip when pushed or without images.build
+      ansible.builtin.meta: end_play
+      when: not pc.images.build or pushed
+    - name: Create the work directory
+      ansible.builtin.file: {path: "{{ work }}", state: directory, mode: "0700"}
+    - name: Build an image
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'build', '-t', item.name ~ ':' ~ pc_build_tag] + item.args + [item.context] }}"
+        chdir: "{{ pc_repo_root }}"
+      changed_when: true
+      loop: "{{ builds }}"
+      loop_control: {label: "{{ item.name }}"}
+    - name: Save an image
+      ansible.builtin.command:
+        argv: [docker, save, -o, "{{ work }}/{{ item.name }}.tar", "{{ item.name }}:{{ pc_build_tag }}"]
+      changed_when: true
+      loop: "{{ builds }}"
+      loop_control: {label: "{{ item.name }}"}
+    - name: Package the chart
+      ansible.builtin.shell: |
+        set -eu
+        export HELM_REPOSITORY_CONFIG={{ work | quote }}/repositories.yaml HELM_REPOSITORY_CACHE={{ work | quote }}/repocache
+        helm repo add codecentric https://codecentric.github.io/helm-charts >/dev/null
+        helm repo add cnpg https://cloudnative-pg.github.io/charts >/dev/null
+        helm dependency build {{ pc_repo_root | quote }}/deploy/charts/proxcloud >/dev/null
+        helm package {{ pc_repo_root | quote }}/deploy/charts/proxcloud --version {{ pc_chart_version | quote }} --app-version {{ pc_build_tag | quote }} -d {{ work | quote }}
+      changed_when: true
+
+- name: Push to the mgmt cluster
+  hosts: mgmt[0]
+  gather_facts: false
+  become: true
+  vars:
+    work: "{{ pc_gen }}/build"
+    tmp: /var/tmp/proxcloud-build
+    names: [proxcloud-api, proxcloud-web, proxcloud-admin]
+  tasks:
+    - name: Skip when pushed or without images.build
+      ansible.builtin.meta: end_play
+      when: not pc.images.build or pc_pushed.status == 200
+    - name: Create the transfer directory
+      ansible.builtin.file: {path: "{{ tmp }}", state: directory, mode: "0700"}
+    - name: Copy an image
+      ansible.builtin.copy: {src: "{{ work }}/{{ item }}.tar", dest: "{{ tmp }}/{{ item }}.tar", mode: "0600"}
+      loop: "{{ names }}"
+    - name: Copy the chart
+      ansible.builtin.copy: {src: "{{ work }}/proxcloud-{{ pc_chart_version }}.tgz", dest: "{{ tmp }}/chart.tgz", mode: "0600"}
+    - name: Push an image
+      ansible.builtin.command: skopeo copy --dest-tls-verify=false docker-archive:{{ tmp }}/{{ item }}.tar docker://{{ pc_local_registry }}/{{ item }}:{{ pc_build_tag }}
+      changed_when: true
+      loop: "{{ names }}"
+    - name: Push the chart
+      ansible.builtin.command: helm push {{ tmp }}/chart.tgz oci://{{ pc_local_registry }}/charts --plain-http
+      changed_when: true
+    - name: Remove the transfer directory
+      ansible.builtin.file: {path: "{{ tmp }}", state: absent}
+    - name: Remove the build output on the installer host
+      delegate_to: localhost
+      become: false
+      ansible.builtin.file: {path: "{{ work }}", state: absent}
+    - name: Remove the local image tags
+      delegate_to: localhost
+      become: false
+      ansible.builtin.command: docker rmi {{ item }}:{{ pc_build_tag }}
+      changed_when: true
+      loop: "{{ names }}"

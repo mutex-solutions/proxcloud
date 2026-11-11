@@ -3,8 +3,6 @@ package pve
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"net/http"
 	"testing"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
@@ -153,30 +151,17 @@ func TestAgentAddresses(t *testing.T) {
 // foreign-pool VM and one pool template.
 func fakeService(t *testing.T) *Service {
 	t.Helper()
-	routes := map[string]func(w http.ResponseWriter, r *http.Request){
-		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":[
-				{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve1","name":"vm-a","status":"running","pool":"st-p1","tags":"proxcloud;fl-std2;img-u24","maxcpu":2,"maxmem":4294967296,"maxdisk":34359738368},
-				{"id":"qemu/102","type":"qemu","vmid":102,"node":"pve1","name":"other","status":"running","pool":"st-OTHER","maxcpu":1,"maxmem":1073741824},
-				{"id":"qemu/9000","type":"qemu","vmid":9000,"node":"pve1","name":"tmpl-u24","status":"stopped","pool":"st-p1","template":1,"maxdisk":10737418240},
-				{"id":"node/pve1","type":"node","node":"pve1","status":"online"}
-			]}`)
-		},
-		"GET /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"data":{"scsi0":"local-zfs:vm-101-disk-0,size=32G","scsi1":"local-zfs:vm-101-disk-1,size=10G","tags":"proxcloud;fl-std2;sp-std"}}`)
-		},
-		"GET /api2/json/nodes/pve1/qemu/101/agent/network-get-interfaces": func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(500)
-			fmt.Fprint(w, `{"errors":{"agent":"No QEMU guest agent configured"}}`)
-		},
-	}
-	_, c := fakePVE(t, routes)
-	return &Service{C: c, ServiceID: "svc-pve", PoolPrefix: "st-"}
+	s, _ := fakeVMInventoryService(t, []ClusterResource{
+		{Type: "qemu", VMID: 101, Name: "vm-a", Node: "n1", Pool: "pc-p1", Status: "running", Tags: "proxcloud;fl-std2;sp-std", MaxCPU: 2, MaxMem: 4 << 30, MaxDisk: 32 << 30},
+		{Type: "qemu", VMID: 102, Name: "other", Node: "n1", Pool: "pc-OTHER", Status: "running"},
+		{Type: "qemu", VMID: 9000, Name: "tmpl-u24", Node: "n1", Pool: "pc-p1", Status: "stopped", Template: 1, MaxDisk: 10 << 30},
+	}, map[int]VMConfig{101: {"scsi0": "local-zfs:vm-101-disk-0,size=32G", "scsi1": "local-zfs:vm-101-disk-1,size=10G"}})
+	return s
 }
 
 func TestServerSyncProviderPoolFilter(t *testing.T) {
 	s := fakeService(t)
-	p := s.ServerSyncProvider("pve", "p1")
+	p := s.ServerSyncProvider("pve", "p1", nil)
 	if p.Type() != cloud.TypeServer || p.ProjectID() != "p1" {
 		t.Fatal("provider identity")
 	}
@@ -216,7 +201,7 @@ func TestVolumeSyncProviderProfileOf(t *testing.T) {
 	s := fakeService(t)
 	// scsi1 was retyped onto a capacity profile: its profile, not the VM's, drives volume_type.
 	profileOf := func(node, storage, vmProfile string) (string, string) {
-		if node != "pve1" || storage != "local-zfs" || vmProfile != "std" {
+		if node != "n1" || storage != "local-zfs" || vmProfile != "std" {
 			t.Errorf("profileOf(%q, %q, %q)", node, storage, vmProfile)
 		}
 		return "capacity", ClassCapacity

@@ -1,0 +1,331 @@
+{
+  "schemaVersion": 1,
+  "auditedAt": "2026-11-10",
+  "sourceCommit": "e65fc35ef8944950f81413214eb0323960995c1b",
+  "source": "current-ui-with-synthetic-documentation-fixtures",
+  "captureDefaults": {
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    },
+    "deviceScaleFactor": 1,
+    "theme": "light",
+    "locale": "en-US",
+    "timezone": "UTC",
+    "network": "fresh localhost mock frontend only; backend/external requests refused"
+  },
+  "scope": {
+    "originalScreenshots": 11,
+    "recapturedOriginalScreenshots": 11,
+    "additionalScreenshots": 12,
+    "brandingSvgInspectedUnchanged": 4,
+    "externalBadgesChecked": 8
+  },
+  "screenshots": [
+    {
+      "app": "client",
+      "file": "create-network.png",
+      "route": "/p/prj-aurora/networks",
+      "state": "Create-network dialog with a synthetic name; not submitted",
+      "documents": [
+        "web/client/src/docs/content/guides/networks.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "261ab367b563341415900883d61283483e5ce6b3f474ef8a404ec58f4c59cb4c"
+    },
+    {
+      "app": "client",
+      "file": "create-server.png",
+      "route": "/p/prj-aurora/servers/new",
+      "state": "Create-server wizard with documentation image/flavor/network selections; not submitted",
+      "documents": [
+        "web/client/src/docs/content/getting-started/first-server.md"
+      ],
+      "width": 1440,
+      "height": 2012,
+      "sha256": "72754bd27435ebdfa92dd3e0d2fcfd7b1b991f0b9cae21405dc051fca1223b8d"
+    },
+    {
+      "app": "client",
+      "file": "create-volume.png",
+      "route": "/p/prj-aurora/volumes",
+      "state": "Create-volume dialog showing capacity-storage warning and synthetic server selection; not submitted",
+      "documents": [
+        "web/client/src/docs/content/guides/volumes.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "04d52da27b33ea7813b57164f6f5178ec1305fd6545ad5b42861228e79cb9b16"
+    },
+    {
+      "app": "client",
+      "file": "join-project-accept.png",
+      "route": "/join-project?invite-token=documentation-invitation",
+      "state": "Synthetic project invitation with accept/decline controls; neither action submitted",
+      "documents": [
+        "web/client/src/docs/content/guides/team-members.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "bfb67b772247cb8e65c32175785628d11dd2c19dab795ef4b0ee9a67de094216"
+    },
+    {
+      "app": "client",
+      "file": "security-group-rules.png",
+      "route": "/p/prj-aurora/security-groups/res-security-group-001",
+      "state": "Read-only example SSH ingress rule: TCP22 from reserved documentation CIDR",
+      "documents": [
+        "web/client/src/docs/content/guides/networks.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "28d8e62d3cd924a335bfb401e8215d17de67d7c9bdf0b09b943ba3e5b811b2b2"
+    },
+    {
+      "app": "client",
+      "file": "server-detail.png",
+      "route": "/p/prj-aurora/servers/res-server-001",
+      "state": "Demo server overview with power controls and synthetic address",
+      "documents": [
+        "web/client/src/docs/content/getting-started/first-server.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "8e5f13cfda6d83d3bc6c8720667337a1125dec50486f7da0066633805696105c"
+    },
+    {
+      "app": "client",
+      "file": "servers-list.png",
+      "route": "/p/prj-aurora/servers",
+      "state": "Servers list with synthetic running/stopped PVE guests and documentation-only addresses",
+      "documents": [
+        "web/client/src/docs/content/getting-started/first-server.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "1445b2655989617a97e84acead2f54b800d00b5e7511a01378403af28fae9ce1"
+    },
+    {
+      "app": "client",
+      "file": "volumes-list.png",
+      "route": "/p/prj-aurora/volumes",
+      "state": "Synthetic boot/data/detached volumes in the current list UI",
+      "documents": [
+        "web/client/src/docs/content/guides/volumes.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "1c68b419b931c85a4e19eec9fc08c7754a2158d92ce450fbeacf04812ceb6ac4"
+    },
+    {
+      "app": "admin",
+      "file": "add-proxmox-provider.png",
+      "route": "/system/cloud-providers",
+      "state": "Add-provider dialog connection fields with example.invalid endpoint and empty secret; not submitted",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/cloud/connect-a-cloud.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "19e95090f5e984b05a661f6eb5f6ed4a07391381903dfe044e7df0d02f1251f9"
+    },
+    {
+      "app": "admin",
+      "file": "billing-configuration-activation.png",
+      "route": "/system/billing-configuration",
+      "state": "Activation tab including synthetic provisioning-credit row; configuration not saved",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/account-activation.md",
+        "web/admin/src/docs/content/platform-admin/billing/signup-credits.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "74c0ab12aebde59a70399eb9984ac9a0fec7afe75b28bed1d3ed338171cc48a3"
+    },
+    {
+      "app": "admin",
+      "file": "billing-configuration-base-currency.png",
+      "route": "/system/billing-configuration",
+      "state": "Business-details tab with currency dropdown open; not saved",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/billing/currency.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "45265ea554290da8da1666e1aca6555dad69e7a5e907be32e3e7902040fa6df3"
+    },
+    {
+      "app": "admin",
+      "file": "billing-configuration-invoice-gateway.png",
+      "route": "/system/billing-configuration",
+      "state": "Business-details tab showing synthetic invoice/mail gateway selectors; not saved",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/billing/invoicing.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "eb4102f2ceb7c10925ca435afd54d9ea74d3babff11666a4d1bf5d4ac576d07a"
+    },
+    {
+      "app": "admin",
+      "file": "enable-disable-services-tab.png",
+      "route": "/system/cloud-providers/svc-proxmox-01",
+      "state": "Provider Services tab with synthetic per-region toggles; no save performed",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/cloud/service-availability.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "4cb2eccf11d387d1e9b81d63374f2578a40710aff46c9412cf77faaa6de1ae20"
+    },
+    {
+      "app": "admin",
+      "file": "price-plan-rule-create.png",
+      "route": "/system/price-plans/pp-0001",
+      "state": "Add-rule dialog with current instance attribute dropdown; not submitted",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/billing/price-plans.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "952739ab6bcc49f55bdc82dee9b365edd6c250fe0c1115a336015fcba7769788"
+    },
+    {
+      "app": "admin",
+      "file": "price-plan-rules.png",
+      "route": "/system/price-plans/pp-0001",
+      "state": "Synthetic public rate-card rule list and sample prices, not a live commercial offer",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/billing/price-plans.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "cd7752ec8f471d71953691354ab2bf6cdfcc5af820cb539ead3b7312fc071188"
+    },
+    {
+      "app": "admin",
+      "file": "price-plans-create.png",
+      "route": "/system/price-plans",
+      "state": "Create-price-plan dialog with synthetic name/access/enabled fields; not submitted",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/billing/price-plans.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "68c480c47d485054117bfd088516f17bd5d20129070e29d208d27d0230ab6716"
+    },
+    {
+      "app": "admin",
+      "file": "provider-storage.png",
+      "route": "/system/cloud-providers/svc-proxmox-01",
+      "state": "Synthetic provider storage capabilities and classes; no re-detect/write performed",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/cloud/connect-a-cloud.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "49cf690f8d04b19af91f8bffef568dc304812fbb7c217c83de0c0412f2fc5212"
+    },
+    {
+      "app": "admin",
+      "file": "savings-plan-discount-tiers.png",
+      "route": "/system/savings-plans",
+      "state": "Create-savings-plan dialog with two synthetic discount tiers; not submitted",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/billing/savings-plans.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "1cde3b6957d4d4eded1fc8310d19eab0d1217c532353b999f4dc5de894d6f190"
+    },
+    {
+      "app": "admin",
+      "file": "savings-plan-targets.png",
+      "route": "/system/savings-plans",
+      "state": "Create-savings-plan dialog with synthetic target/duration and example tier; not submitted",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/billing/savings-plans.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "2f1a15fb8157694ec1073554a63afa21b2280048cdd9e086eecff8ab03918cbf"
+    },
+    {
+      "app": "admin",
+      "file": "suspension-balance.png",
+      "route": "/system/billing-configuration",
+      "state": "Settings tab: unsaved example balance-based suspension policy",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/billing/suspension.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "ec23f063f4360177188a4e19db6960974e1a9aecf6b1c1c9cc428999f6d7cff9"
+    },
+    {
+      "app": "admin",
+      "file": "suspension-due-date.png",
+      "route": "/system/billing-configuration",
+      "state": "Settings tab: unsaved example day-based suspension policy,10days with3/7day notices",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/billing/suspension.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "7397d0267b2158c99d11cc8fba7c5cc3f1b389988ad816d8e00fb841b37f2bf4"
+    },
+    {
+      "app": "admin",
+      "file": "taxes-add-tax.png",
+      "route": "/system/taxes",
+      "state": "Create-tax-rate dialog with synthetic example values; not submitted",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/billing/tax.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "e0a66edc34869338db9b207e6ac34432b7ea154ecb5ded7037bb9d4bf024c549"
+    },
+    {
+      "app": "admin",
+      "file": "validations-queue.png",
+      "route": "/clients/validations",
+      "state": "Synthetic pending validation with approve/reject controls; neither action submitted",
+      "documents": [
+        "web/admin/src/docs/content/platform-admin/account-activation.md"
+      ],
+      "width": 1440,
+      "height": 1000,
+      "sha256": "25729ab92efa4b73a3844a93927b994544b4be11d66349ff15f6a2b433b68fd6"
+    }
+  ],
+  "deferred": [
+    {
+      "items": [
+        "billing-details-form",
+        "savings-plans-purchase",
+        "savings-contracts-table"
+      ],
+      "reason": "These routes import external payment SDKs. The isolated capture refuses those requests; no SDK widget or completion state was fabricated."
+    },
+    {
+      "items": [
+        "customize-keycloak-theme-realm"
+      ],
+      "reason": "Owned by external Keycloak UI/theme/version; not reproducible from the ProxCloud-only mock app. Text steps remain explicit."
+    },
+    {
+      "items": [
+        "billing-profile-activate",
+        "volume-attach",
+        "volume-snapshot",
+        "create-bucket",
+        "bucket-objects",
+        "s3-access-keys",
+        "bucket-settings"
+      ],
+      "reason": "Legacy unreferenced backlog ideas, not existing image files. Not added without a separately verified current UI fixture and matching guide; no placeholder is represented as completed."
+    }
+  ]
+}

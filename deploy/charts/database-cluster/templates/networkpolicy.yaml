@@ -1,14 +1,17 @@
 {{/*
-Per-database NetworkPolicy. The pc-<projectId> namespace gets an ingress
+Per-database NetworkPolicy. The stdb-<projectId> namespace gets an ingress
 default-deny ("proxcloud-default-deny") stamped by proxcloud when it ensures the
 namespace (dbaas.Service.EnsureProjectNamespace — NOT by this chart, whose
 releases share the namespace and would collide on the policy name); this
-policy is the additive allow for one database's pods.
+policy is the additive allow for one database's pods. That namespace holds
+databases ONLY — the stdb- prefix exists so the namespace-wide deny cannot
+reach the Managed-Kubernetes product's pods on the same cluster.
 
 WHY allowedCidrs ARE NOT MIRRORED HERE: client filtering is enforced at the
-LB (spec.loadBalancerSourceRanges on the <id>-lb Service). By the time traffic
-reaches a pod it may have been SNATed by kube-proxy — the source address can
-be a node address, never reliably the client CIDR. Mirroring allowedCidrs here would
+LB (spec.loadBalancerSourceRanges on the <id>-lb Service = the client source
+filter). By the time traffic reaches a pod it has been through the MetalLB
+speaker and kube-proxy — the source address can be a node address, never
+reliably the client CIDR. Mirroring allowedCidrs here would
 therefore block ALL legitimate traffic. Do not "fix" that.
 
 ponytail: the DB-port rule below is source-open (in-cluster pods from other
@@ -34,25 +37,37 @@ spec:
   # TODO-verify(beta) for valkey), and by the chart's own Deployments
   # (mariadb haproxy / ferretdb frontend). EXCEPTIONS — operators that stamp
   # their own cluster label instead: kafka (strimzi.io/cluster) and opensearch
-  # (opster.io/opensearch-cluster; TODO-verify(drill): Dashboards pods carry
-  # opensearch.cluster.dashboards, NOT necessarily the cluster label — if the
-  # drill shows the dash pods outside this selector, the namespace
-  # default-deny blocks the <id>-dash-lb and the selector below needs an OR
-  # via a second policy).
+  # (opensearch.org/opensearch-cluster).
+  #
+  # That opensearch key was `opster.io/opensearch-cluster` and it matched NOTHING
+  # on operator 3.0.2: the labels moved with the api group, so every pod carries
+  # opensearch.org/* only. A podSelector that matches nothing grants nothing,
+  # while the namespace-wide proxcloud-default-deny still applies — so the node
+  # pods could not reach the bootstrap pod on 9300, the cluster never formed
+  # ("cluster-manager not discovered yet ... must discover
+  # cluster-manager-eligible nodes [<id>-bootstrap-0]"), and the node pod
+  # CrashLoopBackOffed while the operator reported RUNNING.
+  #
+  # STILL TODO-verify(drill): Dashboards pods carry opensearch.cluster.dashboards
+  # and may not carry the cluster label — if they fall outside this selector the
+  # default-deny blocks <id>-dash-lb and this needs an OR via a second policy.
+  # Not reachable in this drill (dashboards disabled).
   podSelector:
     matchLabels:
       {{- if eq .Values.engine "kafka" }}
       strimzi.io/cluster: {{ $name }}
       {{- else if eq .Values.engine "opensearch" }}
-      opster.io/opensearch-cluster: {{ $name }}
+      opensearch.org/opensearch-cluster: {{ $name }}
+      {{- else if eq .Values.engine "valkey" }}
+      valkey.io/cluster: {{ $name }}
       {{- else }}
       app.kubernetes.io/instance: {{ $name }}
       {{- end }}
   policyTypes:
     - Ingress
   ingress:
-    # 1. Client traffic on the engine port(s), arriving via the LB (node SNAT
-    #    source). Source-open by design —
+    # 1. Client traffic on the engine port(s), arriving via the LB
+    #    (node SNAT source). Source-open by design —
     #    see header.
     #    opensearch: 9200 client HTTPS, 9300 transport, 5601 Dashboards (via
     #    the <id>-dash-lb). kafka: 9092 internal listener, 9093 (reserved,
@@ -95,7 +110,9 @@ spec:
               {{- if eq .Values.engine "kafka" }}
               strimzi.io/cluster: {{ $name }}
               {{- else if eq .Values.engine "opensearch" }}
-              opster.io/opensearch-cluster: {{ $name }}
+              opensearch.org/opensearch-cluster: {{ $name }}
+              {{- else if eq .Values.engine "valkey" }}
+              valkey.io/cluster: {{ $name }}
               {{- else }}
               app.kubernetes.io/instance: {{ $name }}
               {{- end }}

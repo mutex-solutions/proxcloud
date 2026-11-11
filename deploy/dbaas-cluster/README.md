@@ -12,9 +12,12 @@ Full operator runbook: [`docs/managed-dbaas.md`](../../docs/managed-dbaas.md).
 
 1. **A pre-built cluster** with the standard plumbing already in place — assumed
    pre-existing, NOT installed by anything here:
-   - **A LoadBalancer implementation** — it is what turns the chart's `<id>-lb` Services
-     into reachable endpoints (the whole connectivity model). TODO(P7): MetalLB on the
-     dbaas services subnet.
+   - **MetalLB** — it is what turns the chart's `<id>-lb` Services into reachable endpoints
+     (the whole connectivity model). One `IPAddressPool` on the dbaas services subnet (a
+     routable subnet tenants reach over their normal egress), named in the provider config
+     as `config.database.lbAddressPool`; every tenant-facing LB Service the chart renders
+     carries `metallb.universe.tf/address-pool: <that pool>`. Size it with the address math
+     below. No tenant network is involved anywhere.
    - **A CSI driver** with a default StorageClass — every database volume is a PVC
      (proxmox-csi on Proxmox).
    - **ArgoCD** on this cluster. Any standard install; the manifests here assume the
@@ -26,10 +29,11 @@ Full operator runbook: [`docs/managed-dbaas.md`](../../docs/managed-dbaas.md).
    | operator | install namespace (LOAD-BEARING) | version guidance | engine |
    |---|---|---|---|
    | CloudNativePG | `cnpg-system` | **≥ 1.29.1** | postgresql + the ferretdb backend |
+   | `plugin-barman-cloud` (+ cert-manager) | `cnpg-system` | **0.7.1** (the version the chart was exercised with); needs CNPG ≥ 1.26 and cert-manager for its operator↔plugin mTLS | postgresql/ferretdb **backups and restore** — provides `barmancloud.cnpg.io` `ObjectStore`; without it the Application renders an unknown kind and stays OutOfSync |
    | Percona Operator for MySQL (ps-operator) | `ps-operator` | current stable; verify served CRD version (`kubectl api-resources \| grep ps.percona.com`) | mysql |
    | mariadb-operator | `mariadb-operator` | **26.x** | mariadb |
-   | valkey-operator | `valkey-operator-system` | **only if the valkey beta gate will open** — CRD unverified, see the chart's `templates/valkey/valkey.yaml` header | valkey |
-   | opensearch-k8s-operator | `opensearch-operator-system` | **3.0.2** — 3.x serves both api groups (`opensearch.opster.io` deprecated → `opensearch.org`); the chart renders `opensearch.opster.io/v1`, re-check at the drill (chart's `templates/opensearch/opensearchcluster.yaml` header) | opensearch (+ Dashboards) |
+   | valkey-operator | `valkey-operator-system` | **only if the valkey beta gate will open** — the official `valkey-io/valkey-operator` v0.4.x (CRD `valkey.io/ValkeyCluster`), Valkey 9.x only | valkey |
+   | opensearch-k8s-operator | `opensearch-operator-system` | **3.0.2** — 3.x serves both api groups; the chart renders `opensearch.org/v1` (its webhooks refuse the deprecated `opensearch.opster.io`) | opensearch (+ Dashboards) |
    | Strimzi | `strimzi-system` | **1.1.0**, installed in **watch-all mode** (`watchAnyNamespace: true`) — REQUIRED, databases live in per-project `pc-*` namespaces the operator cannot enumerate up front. 1.x serves ONLY `kafka.strimzi.io/v1`. ⚠ `helm upgrade` does NOT upgrade Strimzi's CRDs — `kubectl apply` the new CRD bundle separately on every operator upgrade | kafka |
    | prometheus-operator CRDs (+ stack) | `monitoring` | optional — required only when databases run with `monitoring.enabled`; **REQUIRED (full kube-prometheus-stack) for the disk-autoscale leg** — it grows volumes off kubelet volume-stats (`kubelet_volume_stats_*`), and the provider then needs `config.metrics {source: prometheus, prometheus: {url: …}}` (same admin Metrics tab as compute providers) | all |
    | Vertical Pod Autoscaler (**autoscaler component only**) | `kube-system` (or upstream default) | install **only if the autoscale feature will be offered**. The **recommender is REQUIRED**; updater and admission-controller are NOT needed — every chart-rendered VPA is `updateMode: Off` (recommendation-only; proxcloud applies the scale-ups itself, a VPA must never evict DB pods) | all (autoscale feature) |
@@ -46,6 +50,11 @@ Full operator runbook: [`docs/managed-dbaas.md`](../../docs/managed-dbaas.md).
    pinned per provider (`config.argocd.chartVersion`) and per existing database; the registry
    must keep every version a live database is pinned to.
 4. **LB address pool** sized for the databases — see the address math below.
+5. **Object store for backups (optional)** — any S3 endpoint (RustFS, Ceph RGW; plain `http`
+   works), a bucket and an access/secret key pair, configured on the provider as
+   `config.database.backup` + `secret.backupAccessKey` / `secret.backupSecretKey`. No change on
+   the DB cluster beyond `plugin-barman-cloud` above; the per-database credential Secret is
+   written by ProxCloud.
 
 ## Apply order
 
@@ -100,10 +109,21 @@ kubectl -n argocd get cm argocd-cm -o jsonpath='{.data}' | grep -o 'resource\.cu
 
 ## LoadBalancer address math
 
-Every customer database is **one LoadBalancer Service** — EXCEPT kafka, which is
-**`instances + 1`**: Strimzi provisions one LB per broker (each broker must be individually
-addressable) plus the external bootstrap LB (see the chart's
-`templates/kafka/kafka.yaml` header). Count kafka databases at N+1 when sizing the LB address
-pool. An exhausted pool surfaces as the LB Service parked `<pending>` — the Application stays
-Progressing and the database never goes READY, with nothing obviously wrong on the k8s side;
-check the address pool first.
+Every customer database is **one LoadBalancer Service** (one address from the pool) — EXCEPT
+kafka, which is **`instances + 1`**: Strimzi provisions one LB per broker (each broker must be
+individually addressable) plus the external bootstrap LB (see the chart's
+`templates/kafka/kafka.yaml` header), and a PostgreSQL database with the read-only endpoint
+enabled is **2** (`<id>-ro-lb`), as is OpenSearch with Dashboards (`<id>-dash-lb`). Count those
+when sizing the pool. An exhausted pool surfaces as the LB Service parked `<pending>` — the
+Application stays Progressing and the database never goes READY, with nothing obviously wrong
+on the k8s side; check the address pool first.
+
+## Replica spread
+
+With `instances > 1` the replicas of one database must land on different values of the node
+label `topology.kubernetes.io/zone` — a **hard** anti-affinity (CNPG `podAntiAffinityType:
+required`, a `requiredDuringSchedulingIgnoredDuringExecution` `podAntiAffinity` on the other
+engines). Label the nodes with their zone, and keep at least as many zones as the largest
+replica count you offer: a surplus replica stays Pending rather than sharing a zone. A site
+with one node or one zone sets `config.database.scheduling.zoneKey` (chart value
+`scheduling.zoneKey`) to a key the nodes do vary on, for example `kubernetes.io/hostname`.

@@ -6,6 +6,8 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
 
@@ -36,9 +38,13 @@ func (r *Repo) InsertSavingsContract(ctx context.Context, c *SavingsContract) er
 }
 
 // CreateSavingsContract creates a savings contract: resolve the available plan, reject a
-// duplicate ACTIVE contract, pick the schedule by duration + the discount tier by committed amount,
-// compute start/end dates, persist an ACTIVE contract. Returns httpx errors (400/404) for the guards.
+// duplicate contract, pick the schedule by duration + the discount tier by committed amount, compute
+// start/end dates, persist. No-upfront is ACTIVE at once, upfront waits for its payment
+// (ActivatePaidSavingsContract). Returns httpx errors (400/404) for the guards.
 func (r *Repo) CreateSavingsContract(ctx context.Context, bpID string, in CreateSavingsContractInput, now time.Time) (*SavingsContract, error) {
+	if !in.MonthlyCommittedAmount.IsPositive() {
+		return nil, httpx.BadRequest("The monthly committed amount must be positive")
+	}
 	plan, err := r.AvailableSavingsPlanByID(ctx, in.SavingsPlanID)
 	if err != nil {
 		return nil, err
@@ -95,10 +101,126 @@ func (r *Repo) CreateSavingsContract(ctx context.Context, bpID string, in Create
 		DurationMonths: in.DurationMonths, DiscountRate: discount, MonthlyCommittedAmount: &monthly,
 		PaidUpfront: in.PaidUpfront,
 	}
+	if in.PaidUpfront {
+		c.Status = SavingsStatusPendingPayment
+		price := upfrontPrice(monthly, in.DurationMonths, *discount)
+		c.UpfrontAmount = &price
+	}
 	if err := r.InsertSavingsContract(ctx, c); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// upfrontPrice is the term's commitment less the contract's discount, in the base currency.
+func upfrontPrice(monthly decimal.Decimal, months int, discountRate decimal.Decimal) decimal.Decimal {
+	full := monthly.Mul(decimal.NewFromInt(int64(months)))
+	return full.Sub(full.Mul(discountRate).Div(decimal.NewFromInt(100))).Round(2)
+}
+
+// ActivatePaidSavingsContract flips a contract from PENDING_PAYMENT to ACTIVE, once: a concurrent
+// settle or cancel loses. Reports whether this caller won.
+func (r *Repo) ActivatePaidSavingsContract(ctx context.Context, c *SavingsContract, txnID string, now time.Time) (bool, error) {
+	return r.activateUpfront(ctx, c, map[string]any{"paymentTransactionId": txnID}, now)
+}
+
+// RecordUpfrontPayment is ActivatePaidSavingsContract for money an operator took outside the portal: they
+// answer for it, where a deposit would be the record.
+func (r *Repo) RecordUpfrontPayment(ctx context.Context, c *SavingsContract, reference, recordedBy string, now time.Time) (bool, error) {
+	return r.activateUpfront(ctx, c, map[string]any{"paymentReference": reference, "paymentRecordedBy": recordedBy}, now)
+}
+
+func (r *Repo) activateUpfront(ctx context.Context, c *SavingsContract, set map[string]any, now time.Time) (won bool, err error) {
+	var activated *SavingsContract
+	err = r.withReminderContract(ctx, c.ID, func(tc context.Context, current *SavingsContract) error {
+		if current == nil || current.Status != SavingsStatusPendingPayment {
+			return nil
+		}
+		// The caller checked price/profile before its gateway work. Refuse a
+		// changed eligibility snapshot; never activate a different-priced term.
+		if current.BillingProfileID != c.BillingProfileID || current.PaidUpfront != c.PaidUpfront || !sameSavingsAmount(current.UpfrontAmount, c.UpfrontAmount) {
+			return nil
+		}
+		set["status"], set["updatedAt"] = SavingsStatusActive, now
+		// Rebase from LOCKED current dates/duration, not a stale caller snapshot.
+		if current.StartDate != nil && current.StartDate.Before(firstOfMonth(now, 0)) {
+			start := firstOfMonth(now, 0)
+			end := start.AddDate(0, current.DurationMonths, 0)
+			set["startDate"], set["endDate"] = start, end
+		}
+		var e error
+		won, e = r.savingCtrs.SetFieldsOne(tc, map[string]any{"_id": current.ID, "status": SavingsStatusPendingPayment}, set, nil)
+		if e != nil || !won {
+			return e
+		}
+		if e = r.cancelReminderRowsTx(tc, current.ID, current.EndDate, now); e != nil {
+			return e
+		}
+		if e = r.cancelSavingsExpiredTx(tc, current.ID); e != nil {
+			return e
+		}
+		activated, e = r.SavingsContractByID(tc, current.ID)
+		return e
+	})
+	if err != nil {
+		return false, err
+	}
+	if won && activated != nil {
+		*c = *activated
+	}
+	return won, nil
+}
+
+func sameSavingsAmount(a, b *decimal.Decimal) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
+}
+
+// HoldUnpaidUpfrontContracts moves the upfront contracts that are ACTIVE with no record of their money to
+// PENDING_PAYMENT, priced, where the customer can pay them and an operator can record a payment taken
+// elsewhere. Those exist because a customer's upfront purchase used to go ACTIVE at once, and they would
+// otherwise discount every bill for nothing. What they already discounted stays on those bills. Runs at
+// boot: a held contract no longer matches, so a second run changes nothing. Returns the ids it moved.
+func (r *Repo) HoldUnpaidUpfrontContracts(ctx context.Context, now time.Time) ([]string, error) {
+	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
+		return nil, err
+	}
+	contracts, err := findTyped[SavingsContract](ctx, r.savingCtrs, map[string]any{"status": SavingsStatusActive, "paidUpfront": true})
+	if err != nil {
+		return nil, err
+	}
+	held := []string{}
+	for i := range contracts {
+		id := contracts[i].ID
+		won := false
+		err := r.withReminderContract(ctx, id, func(tc context.Context, c *SavingsContract) error {
+			if c == nil || c.Status != SavingsStatusActive || !c.UpfrontUnpaid() || (c.EndDate != nil && c.EndDate.Before(now)) {
+				return nil
+			}
+			set := map[string]any{"status": SavingsStatusPendingPayment, "updatedAt": now}
+			if c.MonthlyCommittedAmount != nil && c.DiscountRate != nil {
+				set["upfrontAmount"] = upfrontPrice(*c.MonthlyCommittedAmount, c.DurationMonths, *c.DiscountRate)
+			}
+			var e error
+			won, e = r.savingCtrs.SetFieldsOne(tc, map[string]any{"_id": id, "status": SavingsStatusActive}, set, nil)
+			if e != nil || !won {
+				return e
+			}
+			if e = r.cancelReminderRowsTx(tc, id, c.EndDate, now); e != nil {
+				return e
+			}
+			return r.cancelSavingsExpiredTx(tc, id)
+		})
+		if err != nil {
+			return held, err
+		}
+		if won {
+			held = append(held, id)
+		}
+	}
+	return held, nil
 }
 
 // firstOfMonth returns the first day of the month addMonths from now (UTC midnight).
@@ -106,12 +228,10 @@ func firstOfMonth(now time.Time, addMonths int) time.Time {
 	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, addMonths, 0)
 }
 
-// SavingsService handles the cron-driven parts of the savings-contract service. It covers the
-// pure state transition (expiring contracts); the notification downstream it also fires —
-// cancelling pending reminders + sending the contract-expired email — belongs to the
-// reminder / email subsystems, which are NOT wired (gated like the other notification jobs),
-// so it is intentionally skipped here. The contract status flip is the persisted,
-// billing-relevant effect (only ACTIVE contracts count toward a profile's available contracts).
+// SavingsService owns DB-only expiration decisions. Status affects future discount
+// eligibility, never payment/credit/provision callbacks. A winning decision selects
+// the fixed expired-notice outbox atomically when opted in, otherwise persists a
+// legacy/no-mail tombstone before any postcommit best-effort notifier.
 type SavingsService struct {
 	repo     *Repo
 	now      func() time.Time
@@ -129,6 +249,9 @@ func (s *SavingsService) SetNotifier(n Notifier) { s.notifier = n }
 // endDate is strictly before now flips to EXPIRED and is persisted. Returns the count flipped.
 // Per-contract save errors stop the batch (the loop propagates).
 func (s *SavingsService) ExpireContracts(ctx context.Context) (int, error) {
+	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
+		return 0, err
+	}
 	now := s.now()
 	contracts, err := s.repo.AllSavingsContracts(ctx)
 	if err != nil {
@@ -136,18 +259,31 @@ func (s *SavingsService) ExpireContracts(ctx context.Context) (int, error) {
 	}
 	expired := 0
 	for i := range contracts {
-		c := &contracts[i]
-		if c.Status != SavingsStatusActive || c.EndDate == nil || !c.EndDate.Before(now) {
-			continue
-		}
-		c.Status = SavingsStatusExpired
-		if err := s.repo.SaveSavingsContract(ctx, c); err != nil {
+		var changed *SavingsContract
+		var legacy bool
+		err := s.repo.withReminderContract(ctx, contracts[i].ID, func(tc context.Context, c *SavingsContract) error {
+			if c == nil || c.Status != SavingsStatusActive || c.EndDate == nil || c.EndDate.IsZero() || c.EndDate.Year() < 1 || c.EndDate.Year() > 9999 || !c.EndDate.Before(now) {
+				return nil
+			}
+			var err error
+			legacy, err = s.expireSavingsTermTx(tc, c)
+			if err != nil {
+				return err
+			}
+			changed = c
+			return nil
+		})
+		if err != nil {
 			return expired, err
 		}
-		// Cancel any pending expiry reminders. Best-effort.
-		_ = s.repo.CancelReminders(ctx, ResourceTypeSavingsContract, c.ID)
-		expired++
-		s.notifyExpired(ctx, c)
+		if changed != nil {
+			expired++
+			// Only the FIRST OFF decision may invoke best-effort SMTP, AFTER
+			// its tombstone commits. Crash loses availability, never redrives.
+			if legacy {
+				s.notifyExpired(ctx, changed)
+			}
+		}
 	}
 	return expired, nil
 }
@@ -174,5 +310,5 @@ func (s *SavingsService) notifyExpired(ctx context.Context, c *SavingsContract) 
 	if c.MonthlyCommittedAmount != nil {
 		vars["monthlyCommittedAmount"] = c.MonthlyCommittedAmount.StringFixed(2)
 	}
-	notify(ctx, s.notifier, "savings_contract_expired", profile.Email, vars)
+	notify(ctx, s.notifier, "savings_contract_expired", profile, vars)
 }

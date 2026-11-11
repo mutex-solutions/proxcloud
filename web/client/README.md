@@ -1,34 +1,44 @@
-> **TODO (owner): brand assets.** `public/brand/logo.svg` and `public/brand/favicon.svg` are neutral ProxCloud placeholders. Supply the final logo and favicon before release.
+# ProxCloud customer console
 
-# React + TypeScript + Vite
+The customer-facing React + TypeScript SPA. It uses Vite, Tailwind/shadcn components,
+TanStack Query and OIDC authorization-code + PKCE; the matching Go API supplies
+project-scoped cloud, billing, organization and sandbox endpoints.
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+## Local development
 
-Currently, two official plugins are available:
+Use the repository's supported Node/npm toolchain (CI uses Node 24), then:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```sh
+npm ci
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+For an isolated UI fixture, `npm run dev:mock` runs on port 5273. Mock data does not
+prove API authorization, billing, PVE operations or an install is production-ready.
+For the whole local platform use the root Docker Compose instructions in
+[Development](../../docs/development.md).
+
+Runtime API/OIDC configuration is served from `public/config.js` in development
+and generated at container startup for deployments. Never put credentials in a
+browser config or build-time frontend variable.
+
+## Checks
+
+```sh
+npm run lint
+npm run build
+npx playwright install --only-shell chromium
+npm run test:smoke
+```
+
+`test:smoke` opens the built login surface and checks for runtime errors; it is not
+an authenticated cloud lifecycle test. `test:e2e`, `test:a11y` and `shots` are
+separate Playwright tasks and may need their configured environment. See
+[Testing](../../docs/testing.md).
+
+Embedded help lives under `src/docs/content/`; keep its capability statements in
+sync with server checks, especially managed sandbox saved-lifecycle holds. Do not
+turn historical or untested behavior into customer promises.
+
+> **Owner review:** `public/brand/logo.svg` and `public/brand/favicon.svg` are neutral
+> placeholders. Final brand assets remain a release decision.

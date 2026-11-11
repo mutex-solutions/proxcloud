@@ -1,0 +1,35 @@
+# OPTIONAL operator-reviewed permissions; not applied automatically and warming is
+# OFF by default. Verify the trusted runtime capability before enabling a provider.
+# Pull workers see only the owner's copied pull-only Secret through imagePullSecrets,
+# never a mounted credential, service-account token, CRI socket or privileged host.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: proxcloud-image-warming
+  namespace: sandbox-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "pods"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Copies only per-project pull identities. This namespace is operator-controlled;
+  # the portal's Service implementation independently checks exact project scope.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: proxcloud-image-warming
+  namespace: sandbox-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: proxcloud-image-warming
+subjects:
+  - kind: ServiceAccount
+    name: proxcloud
+    namespace: proxcloud-system
+# Reading each sb-<project>/sandbox-template-pull requires a namespace-scoped
+# get-only Secret rule granted by the operator/provisioner. Do NOT grant a shared
+# all-project registry robot or cluster-wide Secret read to enable this feature.

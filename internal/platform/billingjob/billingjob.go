@@ -12,7 +12,10 @@ package billingjob
 
 import (
 	"context"
+	"sync"
 	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 
 	"github.com/shopspring/decimal"
 
@@ -37,10 +40,17 @@ type Deps struct {
 	Engine           *pricing.Engine
 	Cloud            *cloud.Repo
 	Registry         map[string]billingresource.Provider
-	Now              func() time.Time
+	// DB is the primary store. The durable worker requires it for preflight DDL;
+	// tests/legacy direct callers may omit it and retain lazy table creation.
+	DB  *pgdoc.DB
+	Now func() time.Time
 }
 
-type Service struct{ d Deps }
+type Service struct {
+	d        Deps
+	prepare  sync.Mutex
+	prepared bool
+}
 
 func New(d Deps) *Service {
 	if d.Now == nil {
@@ -70,8 +80,7 @@ func (s *Service) Charge(ctx context.Context, timeUnit string, now time.Time) er
 		return err
 	}
 	bc := s.billingContext(ctx)
-	cycleStart, cycleEnd := monthBounds(now)
-	cycleTimestamp := truncateForTimeUnit(now, timeUnit)
+	cycleStart, cycleEnd, cycleTimestamp := chargeCycle(now, timeUnit)
 	var firstErr error
 	for i := range profiles {
 		if err := s.chargeBillingResource(ctx, &profiles[i], bc, externalServices, timeUnit, cycleTimestamp, cycleStart, cycleEnd); err != nil && firstErr == nil {
@@ -103,6 +112,46 @@ func (s *Service) ActiveProfileIDs(ctx context.Context) ([]string, error) {
 // the in-process Charge loop body (the per-profile consumer). A non-ACTIVE
 // or vanished profile is a no-op (it may have changed since the message was published).
 func (s *Service) ChargeProfileByID(ctx context.Context, profileID, timeUnit string, now time.Time) error {
+	cycle, err := NewCycle(profileID, timeUnit, now)
+	if err != nil {
+		return err
+	}
+	if s.d.DB == nil {
+		return s.chargeProfile(ctx, profileID, timeUnit, cycle.CycleAt)
+	}
+	if err := s.Prepare(ctx); err != nil {
+		return err
+	}
+	return s.d.Pricing.WithChargeReceipt(ctx, profileID, timeUnit, cycle.CycleAt, func(ctx context.Context) error {
+		return s.chargeProfile(ctx, profileID, timeUnit, cycle.CycleAt)
+	})
+}
+
+// Prepare creates the finite set of native cache/config tables BEFORE the worker
+// enters its billing transaction. Missing-table auto-create cannot run in an
+// aborted PostgreSQL transaction. There are no cloud or payment calls here.
+func (s *Service) Prepare(ctx context.Context) error {
+	if s.d.DB == nil {
+		return nil
+	}
+	s.prepare.Lock()
+	defer s.prepare.Unlock()
+	if s.prepared {
+		return nil
+	}
+	for _, table := range []string{"billingConfiguration", "billingProfile", "externalService", "organization", "project", "pricePlan", "pricePlanRule", "priceAdjustmentRule", "savingsContract", "cloudResource", "cloudResourceHistory", "usageMetrics", "meterState"} {
+		if err := s.d.DB.C(table).Ensure(ctx); err != nil {
+			return err
+		}
+	}
+	if err := s.d.Pricing.PrepareCharges(ctx); err != nil {
+		return err
+	}
+	s.prepared = true
+	return nil
+}
+
+func (s *Service) chargeProfile(ctx context.Context, profileID, timeUnit string, now time.Time) error {
 	enabled, err := s.billingEnabled(ctx)
 	if err != nil || !enabled {
 		return err
@@ -119,8 +168,7 @@ func (s *Service) ChargeProfileByID(ctx context.Context, profileID, timeUnit str
 		return err
 	}
 	bc := s.billingContext(ctx)
-	cycleStart, cycleEnd := monthBounds(now)
-	cycleTimestamp := truncateForTimeUnit(now, timeUnit)
+	cycleStart, cycleEnd, cycleTimestamp := chargeCycle(now, timeUnit)
 	return s.chargeBillingResource(ctx, profile, bc, externalServices, timeUnit, cycleTimestamp, cycleStart, cycleEnd)
 }
 
@@ -143,13 +191,18 @@ func (s *Service) chargeBillingResource(
 	for i := range externalServices {
 		es := &externalServices[i]
 		rc := pricing.RatingContext{TimeUnit: timeUnit, CycleTimestamp: cycleTimestamp}
-		resources, err := s.billingResources(ctx, bc, projects, es.ID)
+		resources, err := s.billingResources(ctx, bc, projects, es, timeUnit, cycleStart, cycleTimestamp)
 		if err != nil {
 			return err
 		}
-		plans := pricing.SelectPricePlansForService(s.d.Pricing.PlanSource(ctx), planIDs, includePublic, es.ID)
-		rules := pricing.ApplicableRules(plans, s.d.Pricing.RuleSource(ctx), timeUnit)
-		adjust := s.billAdjuster(ctx, profile, plans, cycleStart, cycleEnd)
+		plans, rules, err := s.d.Pricing.ChargeRules(ctx, planIDs, includePublic, es.ID, timeUnit)
+		if err != nil {
+			return err
+		}
+		adjust, err := s.billAdjuster(ctx, profile, plans, cycleStart, cycleEnd)
+		if err != nil {
+			return err
+		}
 		// THE CHARGE SEAM: everything above is resolution (cloud cache → billable units, in the
 		// billingapi wire contract); everything below is rating (price them onto the bill). When
 		// billing moves out, resolution stays here and the wire resources are POSTed to the billing
@@ -164,15 +217,22 @@ func (s *Service) chargeBillingResource(
 // billAdjuster builds the after-rating bill adjustment closure (the applyPricePlans tail):
 // savings-contract discounts for contracts covering the billing cycle + the price-adjustment rules
 // of the service's price plans. Returns nil if neither applies (cheap no-op for the common case).
-func (s *Service) billAdjuster(ctx context.Context, profile *billing.BillingProfile, plans []pricing.PricePlan, cycleStart, cycleEnd time.Time) func(*pricing.Bill) {
-	savings := s.availableSavingsAdj(ctx, profile.ID, cycleStart, cycleEnd)
+func (s *Service) billAdjuster(ctx context.Context, profile *billing.BillingProfile, plans []pricing.PricePlan, cycleStart, cycleEnd time.Time) (func(*pricing.Bill), error) {
+	contracts, err := s.d.Billing.SavingsContractsByBillingProfile(ctx, profile.ID)
+	if err != nil {
+		return nil, err
+	}
+	savings := savingsAdjOf(contracts, cycleStart, cycleEnd)
 	planIDs := make([]string, 0, len(plans))
 	for i := range plans {
 		planIDs = append(planIDs, plans[i].ID)
 	}
-	rules, _ := s.d.Billing.PriceAdjustmentRulesByPricePlanIDs(ctx, planIDs)
+	rules, err := s.d.Billing.PriceAdjustmentRulesByPricePlanIDs(ctx, planIDs)
+	if err != nil {
+		return nil, err
+	}
 	if len(savings) == 0 && len(rules) == 0 {
-		return nil
+		return nil, nil
 	}
 	// The catalog is produced by the resolution side in the billingapi wire contract; the engine
 	// (rating side) takes its own types.
@@ -180,21 +240,25 @@ func (s *Service) billAdjuster(ctx context.Context, profile *billing.BillingProf
 	return func(bill *pricing.Bill) {
 		s.d.Engine.ApplySavingsContractDiscounts(bill, savings, catalog)
 		s.d.Engine.ApplyPriceAdjustmentRules(bill, rules, catalog)
-	}
+	}, nil
 }
 
-// availableSavingsAdj adapts the profile's savings contracts that cover the whole billing cycle
+// availableSavingsAdj adapts the profile's ACTIVE savings contracts that cover the whole billing cycle
 // (listAvailableContractsByBillingProfileId: startDate ≤ cycleStart AND endDate ≥ cycleEnd) into
-// the pricing-native discount inputs.
+// the pricing-native discount inputs. A cancelled, expired or unpaid contract discounts nothing.
 func (s *Service) availableSavingsAdj(ctx context.Context, bpID string, cycleStart, cycleEnd time.Time) []pricing.SavingsContractAdj {
 	contracts, err := s.d.Billing.SavingsContractsByBillingProfile(ctx, bpID)
 	if err != nil {
 		return nil
 	}
+	return savingsAdjOf(contracts, cycleStart, cycleEnd)
+}
+
+func savingsAdjOf(contracts []billing.SavingsContract, cycleStart, cycleEnd time.Time) []pricing.SavingsContractAdj {
 	out := make([]pricing.SavingsContractAdj, 0, len(contracts))
 	for i := range contracts {
 		c := &contracts[i]
-		if c.StartDate == nil || c.EndDate == nil || c.StartDate.After(cycleStart) || c.EndDate.Before(cycleEnd) {
+		if c.Status != billing.SavingsStatusActive || c.UpfrontUnpaid() || c.StartDate == nil || c.EndDate == nil || c.StartDate.After(cycleStart) || c.EndDate.Before(cycleEnd) {
 			continue
 		}
 		committed, rate := decimal.Zero, decimal.Zero
@@ -240,12 +304,18 @@ func (s *Service) activeProjectsWithServices(ctx context.Context, billingProfile
 	return out, nil
 }
 
-// billingResources builds the billing resources (project-scoped): for each
-// project attached to the external service, dispatch its cloud resources through the
-// type→Provider registry into priced BillingResources.
-func (s *Service) billingResources(ctx context.Context, bc pricing.BillingContext, projects []project.Project, serviceID string) ([]*billingapi.BillingResource, error) {
+// billingResources builds the billing resources (project-scoped): for each project attached to the
+// external service, dispatch its cloud resources through the type→Provider registry into priced
+// BillingResources, plus the rows archived this cycle (their final interval). A month rule is paid
+// up front when first rated, so an archived row owes it nothing.
+//
+// While the provider's state is stale nothing it reports is billed and the elapsed time is written
+// off: the resources behind that time could not be observed (plan decision 12).
+func (s *Service) billingResources(ctx context.Context, bc pricing.BillingContext, projects []project.Project, es *externalservice.ExternalService, timeUnit string, cycleStart, cycleTimestamp time.Time) ([]*billingapi.BillingResource, error) {
 	out := []*billingapi.BillingResource{}
 	pbc := pricing.ToAPIBillingContext(bc)
+	pbc.CycleStart = cycleStart
+	serviceID := es.ID
 	for i := range projects {
 		p := &projects[i]
 		if !p.HasService(serviceID) {
@@ -256,6 +326,25 @@ func (s *Service) billingResources(ctx context.Context, bc pricing.BillingContex
 			return nil, err
 		}
 		out = append(out, brs...)
+		if timeUnit == pricing.TimeUnitMonth {
+			continue
+		}
+		archived, err := billingresource.GetArchivedBillingResources(ctx, s.d.Cloud, s.d.Registry, p.ID, serviceID, cycleStart, pbc)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, archived...)
+	}
+	if es.IsProxmox() && !es.IsDisabled() {
+		state, err := s.d.Cloud.MeterState(ctx, serviceID)
+		if err != nil {
+			return nil, err
+		}
+		if state.Stale(cycleTimestamp) {
+			for _, b := range out {
+				b.NotEligibleForBilling, b.SkipInterval = true, true
+			}
+		}
 	}
 	return out, nil
 }
@@ -290,6 +379,20 @@ func monthBounds(now time.Time) (time.Time, time.Time) {
 	y, m, _ := now.UTC().Date()
 	start := time.Date(y, m, 1, 0, 0, 0, 0, time.UTC)
 	return start, start.AddDate(0, 1, 0)
+}
+
+// chargeCycle returns the billing cycle a charge belongs to and its timestamp. A minute or hour pass
+// bills the interval ending at its timestamp, so the pass landing on the 1st at 00:00 closes the month
+// before it: the bill of the month the time was used in. A month rule is paid up front, so its pass
+// belongs to the month it starts.
+func chargeCycle(now time.Time, timeUnit string) (cycleStart, cycleEnd, cycleTimestamp time.Time) {
+	cycleTimestamp = truncateForTimeUnit(now, timeUnit)
+	if timeUnit == pricing.TimeUnitMonth {
+		cycleStart, cycleEnd = monthBounds(now)
+		return cycleStart, cycleEnd, cycleTimestamp
+	}
+	cycleStart, cycleEnd = monthBounds(cycleTimestamp.Add(-time.Nanosecond))
+	return cycleStart, cycleEnd, cycleTimestamp
 }
 
 // truncateForTimeUnit mirrors Instant.truncatedTo: MINUTE→minute, HOUR→hour, MONTH→day.

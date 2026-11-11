@@ -12,8 +12,9 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
-	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/providers"
+	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
+	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 )
 
 // deletionOrder ranks a cloud-resource type for teardown: LOWER = delete FIRST. Dependents (that
@@ -71,8 +72,8 @@ const teardownSweeps = 3
 // TeardownProject cascade-deletes a project's cloud resources (best-effort, dependency-ordered, with
 // a few retry sweeps), tears down the project's provider-side anchors, then marks the project DELETED. It
 // runs to completion regardless of individual failures; the periodic sync/reconcile is the backstop
-// for anything left behind. Returns a non-nil error summarising what could not be deleted (the
-// project is still marked DELETED — a re-run or the sync job mops up the remainder).
+// for anything left behind. Returns a non-nil error summarising what could not be deleted. A leg that needs a re-run keeps
+// the project DELETE_IN_PROGRESS, so the deletion job retries it; otherwise the project is marked DELETED.
 func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 	p, err := h.svc.GetProjectByID(ctx, projectID)
 	if err != nil {
@@ -83,6 +84,10 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		return err
 	}
 	SortCloudResourcesForDeletion(resources)
+
+	// Sandboxes first: they run customer code and bill by the minute, and nothing else depends on them. Their rows end
+	// at the delete, and the project's sandbox namespace goes after them.
+	resources, sandboxesLeft := h.teardownSandboxes(ctx, p, resources)
 
 	// kamaji + dbaas rows first, split out of the bucket sweep entirely: tryTenantClient below can
 	// never build a client for them, and their delete is an
@@ -210,6 +215,11 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		if ferr != nil {
 			slog.Warn("teardown: kamaji orphan finalize", "project", p.ID, "serviceId", svcID, "pending", pending, "err", ferr)
 			kamajiPending++
+		} else if pending == 0 {
+			if nerr := ks.RemoveProjectNamespace(ctx, p.ID); nerr != nil {
+				slog.Warn("teardown: kamaji namespace", "project", p.ID, "serviceId", svcID, "err", nerr)
+				kamajiPending++
+			}
 		}
 	}
 	// Same finalize + pending signal for dbaas: while a database's delete cascade is in flight,
@@ -229,6 +239,11 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		if ferr != nil {
 			slog.Warn("teardown: dbaas orphan finalize", "project", p.ID, "serviceId", svcID, "pending", pending, "err", ferr)
 			dbaasPending++
+		} else if pending == 0 {
+			if nerr := ds.RemoveProjectNamespace(ctx, p.ID); nerr != nil {
+				slog.Warn("teardown: dbaas namespace", "project", p.ID, "serviceId", svcID, "err", nerr)
+				dbaasPending++
+			}
 		}
 	}
 
@@ -239,6 +254,42 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 	// teardown reports incomplete so a re-run retries (all pve teardown legs are idempotent).
 	pveTeardownFailed := false
 
+	// File shares go first: the project's addresses return to the pools below, and an export still
+	// listing one would hand this project's data to whoever gets it next. Shares left behind therefore
+	// stop the Proxmox teardown, and a re-run retries.
+	sharesLeft := false
+	shareServices, serr := h.trueNASServices(ctx, p)
+	if serr != nil {
+		slog.Error("teardown: list file share providers", "project", p.ID, "err", serr)
+		sharesLeft = true
+	}
+	for _, es := range shareServices {
+		left, terr := h.teardownShares(ctx, p, es, remaining)
+		remaining = left
+		if terr != nil {
+			slog.Error("teardown: file shares", "project", p.ID, "serviceId", es.ID, "err", terr)
+			sharesLeft = true
+		}
+	}
+	if sharesLeft {
+		pveTeardownFailed = true
+	}
+	// DNS zones: one left behind keeps answering for the tenant's domain and holds its name, so a failure asks for a re-run.
+	zonesLeft := false
+	zoneServices, zerr := h.powerDNSServices(ctx, p)
+	if zerr != nil {
+		slog.Error("teardown: list DNS providers", "project", p.ID, "err", zerr)
+		zonesLeft = true
+	}
+	for _, es := range zoneServices {
+		left, terr := h.teardownZones(ctx, p, es, remaining)
+		remaining = left
+		if terr != nil {
+			slog.Error("teardown: DNS zones", "project", p.ID, "serviceId", es.ID, "err", terr)
+			zonesLeft = true
+		}
+	}
+
 	// Delete the per-service anchor the project is bootstrapped on (admin-scoped client, not
 	// project-scoped — a project user cannot delete itself). Best-effort per provider kind.
 	for _, svcID := range p.ServiceIDs() {
@@ -246,7 +297,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		if err != nil || es == nil {
 			continue
 		}
-		if es.IsCephS3() {
+		if es.IsObjectStore() {
 			// ceph-s3: purge the RGW user + ALL its data, then drop the stored credential.
 			// The customer-facing DeleteBucket in the sweep above refuses a NON-EMPTY bucket (S3 semantics),
 			// so those buckets are still in `remaining`. Force-delete each of THIS project's
@@ -265,7 +316,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 					rgwUID = cred.RGWUID
 				}
 			}
-			adminCC, cerr := client.NewCephS3(ctx, es.CephConfig(region, "", "", rgwUID))
+			adminCC, cerr := es.ObjectClient(ctx, region, "", "", rgwUID)
 			if cerr != nil {
 				// Could not even build the admin client → cloud credentials are NOT revoked. Keep every
 				// local credential record so a re-run / operator can still revoke, and report the failure.
@@ -281,12 +332,12 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 					stillLeft = append(stillLeft, *res)
 					continue
 				}
-				if derr := adminCC.ForceDeleteCephBucket(ctx, res.ExternalID); derr != nil {
+				if derr := adminCC.ForceDeleteBucket(ctx, res.ExternalID); derr != nil {
 					stillLeft = append(stillLeft, *res)
 					continue
 				}
 				// The bucket is gone cloud-side; archiving the cache row can still fail. Keep it in
-				// `remaining` so teardown reports it (a re-run's ForceDeleteCephBucket is a no-op and retries
+				// `remaining` so teardown reports it (a re-run's ForceDeleteBucket is a no-op and retries
 				// the archive) rather than silently claiming success with a stale row left behind.
 				if aerr := h.cloud.DeleteAndArchive(ctx, res, now); aerr != nil {
 					slog.Error("teardown: archive ceph bucket row", "project", p.ID, "externalId", res.ExternalID, "err", aerr)
@@ -301,7 +352,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 			if h.cephKeys != nil {
 				if keys, kerr := h.cephKeys.List(ctx, p.ID, svcID); kerr == nil {
 					for i := range keys {
-						if derr := adminCC.DeleteCephChildUser(ctx, keys[i].RGWUID); derr != nil {
+						if derr := adminCC.DeleteChildKey(ctx, keys[i].RGWUID); derr != nil {
 							slog.Error("teardown: purge ceph child key", "project", p.ID, "rgwUid", keys[i].RGWUID, "err", derr)
 							cephRevokeFailed = true
 							continue // keep the local record so the key can still be revoked later
@@ -318,7 +369,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 					cephRevokeFailed = true
 				}
 			}
-			if perr := adminCC.PurgeCephUser(ctx); perr != nil {
+			if perr := adminCC.PurgeProjectUser(ctx); perr != nil {
 				// The parent user (and its keys) is still alive. Keep the stored credential so it can be
 				// revoked on a retry; do not blank the only record that identifies it.
 				slog.Error("teardown: purge ceph user", "project", p.ID, "rgwUid", rgwUID, "err", perr)
@@ -338,7 +389,7 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 			// project's vnets / EVPN zone / security groups. The cache rows
 			// of this service are archived here (their VMs are verifiably gone); a failure keeps
 			// them so a re-run retries.
-			if h.pveFor == nil {
+			if h.pveFor == nil || sharesLeft {
 				pveTeardownFailed = true
 				continue
 			}
@@ -352,6 +403,14 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 			if pool == "" {
 				pool = es.PoolFor(p.ID) // pre-pool-stamp bindings: re-derive
 			}
+			// Archives first: PVE only lets the token delete one while its VM exists.
+			if store := es.PVEBackupStorage(); store != "" {
+				if berr := ps.DeleteProjectBackups(ctx, p.ID, store); berr != nil {
+					slog.Error("teardown: backups", "project", p.ID, "serviceId", svcID, "err", berr)
+					pveTeardownFailed = true
+					continue
+				}
+			}
 			if terr := ps.TeardownProjectPool(ctx, pool); terr != nil {
 				slog.Error("teardown: pve pool", "project", p.ID, "pool", pool, "err", terr)
 				pveTeardownFailed = true
@@ -359,6 +418,11 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 			}
 			if nerr := h.pveTeardownNetworks(ctx, ps, p.ID); nerr != nil {
 				slog.Error("teardown: pve networks", "project", p.ID, "serviceId", svcID, "err", nerr)
+				pveTeardownFailed = true
+				continue
+			}
+			if serr := h.pveReleaseProjectSeeds(ctx, ps, svcID, p.ID); serr != nil {
+				slog.Error("teardown: release seeds", "project", p.ID, "serviceId", svcID, "err", serr)
 				pveTeardownFailed = true
 				continue
 			}
@@ -389,19 +453,33 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		continue
 	}
 
-	// Terminal state: mark the project DELETED (keep the doc for audit history).
-	p.Status = "DELETED"
-	if err := h.svc.Save(ctx, p); err != nil {
+	// ponytail: rows left with no failed leg behind them (a provider since removed) do not ask for a re-run, or a project
+	// could wedge the job's sweep forever. Report them and move on.
+	expect := p.Status
+	teardownOutcome(p, cephRevokeFailed || pveTeardownFailed || zonesLeft || sandboxesLeft || kamajiPending > 0 || dbaasPending > 0)
+	if _, err := h.svc.SaveIfStatus(ctx, p, expect); err != nil {
 		return err
+	}
+	if p.Status == StatusDeleted && h.sbKeys != nil {
+		// The project's E2B keys already answer nothing; a DELETED project keeps no rows of them either.
+		if _, err := h.sbKeys.DeleteMany(ctx, pgdoc.M{"projectId": p.ID}); err != nil {
+			slog.Warn("teardown: delete sandbox API keys", "project", p.ID, "err", err)
+		}
+	}
+	if sandboxesLeft {
+		return fmt.Errorf("teardown could not remove the project's sandboxes or their namespace; the deletion job retries")
+	}
+	if zonesLeft {
+		return fmt.Errorf("teardown could not remove the project's DNS zones; the deletion job retries")
 	}
 	if cephRevokeFailed {
 		return fmt.Errorf("teardown could not revoke some ceph-s3 credentials; their local records were kept for retry")
 	}
 	if pveTeardownFailed {
-		return fmt.Errorf("teardown could not fully tear down the project's Proxmox pool; re-run teardown to retry")
+		return fmt.Errorf("teardown could not fully tear down the project's cloud resources; re-run teardown to retry")
 	}
 	if len(remaining) > 0 {
-		return fmt.Errorf("teardown left %d resource(s) undeleted; the sync job will reconcile them", len(remaining))
+		return fmt.Errorf("teardown left %d resource(s) undeleted; re-run teardown to retry", len(remaining))
 	}
 	if kamajiPending > 0 {
 		return fmt.Errorf("teardown: %d kamaji cluster remnant(s) still finalizing on the management cluster (project teardown deferred) — the periodic sweep GCs them; re-run teardown afterwards (docs/managed-k8s.md)", kamajiPending)
@@ -410,6 +488,46 @@ func (h *Handler) TeardownProject(ctx context.Context, projectID string) error {
 		return fmt.Errorf("teardown: %d managed-database remnant(s) still finalizing on the DB cluster (project teardown deferred) — the periodic sweep GCs them; re-run teardown afterwards (docs/managed-dbaas.md)", dbaasPending)
 	}
 	return nil
+}
+
+// teardownOutcome sets the status one teardown pass leaves. DELETED is terminal: nothing looks at it again, so a pass that
+// needs a re-run stays DELETE_IN_PROGRESS, keeping the past schedule the deletion job selected it by.
+func teardownOutcome(p *Project, retry bool) {
+	if retry {
+		p.Status = StatusDeleteInProgress
+		return
+	}
+	p.Status = StatusDeleted
+}
+
+// teardownShares deletes everything the NAS holds for the project, cached or not, and archives the provider's rows.
+// It returns the rows still to delete; a failure keeps the rows so a re-run retries.
+func (h *Handler) teardownShares(ctx context.Context, p *Project, es *externalservice.ExternalService, rows []cloud.CloudResource) ([]cloud.CloudResource, error) {
+	if err := h.checkShareOwner(ctx, p, es); err != nil {
+		return rows, err
+	}
+	ts, err := es.TrueNASService()
+	if err != nil {
+		return rows, err
+	}
+	defer ts.C.Close()
+	list, err := ts.List(ctx, p.ID)
+	if err != nil {
+		return rows, err
+	}
+	for i := range list {
+		if err := ts.Delete(ctx, p.ID, list[i].Dataset); err != nil {
+			return rows, err
+		}
+	}
+	now := time.Now().UTC()
+	var left []cloud.CloudResource
+	for i := range rows {
+		if rows[i].ServiceID != es.ID || h.cloud.DeleteAndArchive(ctx, &rows[i], now) != nil {
+			left = append(left, rows[i])
+		}
+	}
+	return left, nil
 }
 
 // contains is a tiny []string membership helper (avoids importing slices for one call site).

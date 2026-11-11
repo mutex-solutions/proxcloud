@@ -5,8 +5,10 @@ package admin
 // in externalservicemut.go — no provider push). Shape: {"gpu": {"<model>": n, "*": n}} where
 // model names use the shared GPU alias vocabulary (see internal/cloud/gpu.go), plus the Proxmox
 // resource keys (externalservice.PVEQuotaKeys: servers, vcpus, ramMb, diskGb, networks,
-// floatingIps). Enforcement is the project cloud gate (project/gpuquota.go,
-// project/cloud_quota_pve.go). An empty body clears the quota; a Proxmox project then falls
+// floatingIps), and the sandbox keys (externalservice.SandboxQuotaKeys: sandboxes, sandboxVcpus,
+// sandboxRamMb, sandboxGpus; an absent one falls back to the provider's, then the built-in default).
+// Enforcement is the project cloud gate (project/gpuquota.go, project/cloud_quota_pve.go,
+// project/cloud_sandbox.go). An empty body clears the quota; a Proxmox project then falls
 // back to its provider's default quota.
 
 import (
@@ -15,6 +17,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -49,16 +52,22 @@ func (h *Handler) projectSetQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := maps.Clone(doc)
+	// Only the quota: a replace of the whole doc from this read would put back a status changed since.
+	var err error
 	if len(body) == 0 {
-		delete(doc, "quota")
+		_, err = h.repo.SetAndUnsetFields(r.Context(), projectCollection, id, nil, pgdoc.M{"quota": nil})
 	} else {
-		doc["quota"] = body
+		_, err = h.repo.SetFields(r.Context(), projectCollection, id, pgdoc.M{"quota": body})
 	}
-	if err := h.repo.ReplaceDoc(r.Context(), projectCollection, id, doc); httpx.WriteError(w, err) {
+	if httpx.WriteError(w, err) {
 		return
 	}
-	audit.RecordSnapshots(r.Context(), before, doc)
-	httpx.OK(w, shapeDoc(doc))
+	after, err := h.repo.FindDoc(r.Context(), projectCollection, id)
+	if httpx.WriteError(w, err) {
+		return
+	}
+	audit.RecordSnapshots(r.Context(), before, after)
+	httpx.OK(w, shapeDoc(after))
 }
 
 type projectGPUUsageResponse struct {
@@ -139,7 +148,7 @@ func validateProjectQuota(body pgdoc.M) *httpx.HTTPError {
 // aliases at the write boundary so admin/API/MCP callers all match flavor aliases.
 func normalizeProjectQuota(body pgdoc.M) (pgdoc.M, *httpx.HTTPError) {
 	normalizedBody := maps.Clone(body)
-	for _, key := range externalservice.PVEQuotaKeys {
+	for _, key := range append(slices.Clone(externalservice.PVEQuotaKeys), externalservice.SandboxQuotaKeys...) {
 		v, ok := body[key]
 		if !ok {
 			continue

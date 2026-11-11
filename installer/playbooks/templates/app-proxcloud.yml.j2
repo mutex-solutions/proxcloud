@@ -1,0 +1,143 @@
+{% macro ingress(host) %}
+{ enabled: true, className: traefik, host: {{ host }}{% if pc.ingress.tls == 'acme' %}, annotations: {cert-manager.io/cluster-issuer: letsencrypt}, tls: [{hosts: [{{ host }}], secretName: {{ host | replace('.', '-') }}-tls}]{% elif pc.ingress.tls != 'none' %}, tls: [{hosts: [{{ host }}], secretName: {{ pc.ingress.tls }}}]{% endif %} }
+{% endmacro %}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: proxcloud
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: {{ pc_chart_repo }}
+    chart: proxcloud
+    targetRevision: {{ pc_chart_version | to_json }}
+    helm:
+      releaseName: proxcloud
+      valuesObject:
+        fullnameOverride: proxcloud
+{% if pc.images.pull_secret %}
+        imagePullSecrets: [{name: proxcloud-pull}]
+{% endif %}
+        api:
+          image: {repository: {{ pc_image_prefix }}-api, tag: {{ pc_image_tag | to_json }}}
+          existingSecret: proxcloud-secrets
+          # Writable primary + encryption key; optional db-read-url is for history/metrics ONLY.
+          selfUrls:
+            base: {{ pc_url_app }}
+            api: {{ pc_url_api }}
+            ui: {{ pc_url_app }}
+            admin: {{ pc_url_admin }}
+          jobs:
+            schedulerEnabled: {{ pc.jobs.scheduler_enabled | to_json }}
+            debugTriggers: {{ pc.jobs.debug_triggers | to_json }}
+            workerConcurrency: {{ pc.jobs.worker_concurrency }}
+            pollInterval: {{ pc.jobs.poll_interval | to_json }}
+            leaseDuration: {{ pc.jobs.lease_duration | to_json }}
+          ingress: {{ ingress('api.' ~ pc_domain) | trim }}
+{% if pc.mode == 'split' %}
+          # Tenant clusters' proxmox-csi controllers on the services cluster call this instead of PVE; only the
+          # services nodes may reach it (docs/managed-k8s.md).
+          csiGateway:
+            enabled: true
+            url: https://{{ pc_first_mgmt_ip }}:8443
+            allowedCIDRs: {{ pc.services.network.nodes | pc_ip_cidrs | to_json }}
+{% if pc_gateway_node is defined %}
+          # The gateway Service answers only on a node with an API pod, and its URL names this one.
+          # ponytail: the API follows the first mgmt node; a mgmt VIP for the URL would let it move.
+          affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [{key: kubernetes.io/hostname, operator: In, values: [{{ pc_gateway_node | to_json }}]}]}]}}}
+{% endif %}
+{% endif %}
+        ui:
+          image: {repository: {{ pc_image_prefix }}-web, tag: {{ pc_image_tag | to_json }}}
+          ingress: {{ ingress('app.' ~ pc_domain) | trim }}
+        admin:
+          image: {repository: {{ pc_image_prefix }}-admin, tag: {{ pc_image_tag | to_json }}}
+          ingress: {{ ingress('admin.' ~ pc_domain) | trim }}
+        auth:
+          main:
+            issuer: {{ pc_url_id }}/realms/{{ pc.keycloak.main_realm }}
+            discoveryUri: http://proxcloud-keycloak-http/realms/{{ pc.keycloak.main_realm }}
+          admin:
+            issuer: {{ pc_url_id }}/realms/{{ pc.keycloak.admin_realm }}
+            discoveryUri: http://proxcloud-keycloak-http/realms/{{ pc.keycloak.admin_realm }}
+          adminApi:
+            issuer: {{ pc_url_id }}/realms/{{ pc.keycloak.admin_realm }}
+            discoveryUri: http://proxcloud-keycloak-http/realms/{{ pc.keycloak.admin_realm }}
+          sso:
+            enabled: true
+            # An operator's email domain can never be claimed by a customer organization.
+            reservedDomains: {{ [pc.keycloak.operator.email.split('@')[-1]] | to_json }}
+        jobsMigration:
+          mode: {{ pc.jobs_migration.mode | to_json }}
+          evidence: {{ pc.jobs_migration.evidence | to_json }}
+          producersStopped: {{ pc.jobs_migration.producers_stopped | to_json }}
+          consumersStopped: {{ pc.jobs_migration.consumers_stopped | to_json }}
+          drainedOrReconciled: {{ pc.jobs_migration.drained_or_reconciled | to_json }}
+          retentionPrepared: {{ pc.jobs_migration.retention_prepared | to_json }}
+        rabbitmq: {enabled: false}
+        rabbitmqCluster:
+          enabled: {{ (pc.jobs_migration.mode == 'retain') | to_json }}
+{% if pc.jobs_migration.mode == 'retain' %}
+          name: {{ pc.jobs_migration.legacy_cluster_name | to_json }}
+          # Preserve the exact existing spec; stage 40 refuses retain without this live cluster.
+          retainedSpec: {{ (pc_legacy_brokers | selectattr('metadata.name', 'equalto', pc.jobs_migration.legacy_cluster_name) | first).spec | to_json }}
+{% endif %}
+        cnpg:
+          instances: {{ pc.database.instances }}
+          statusReadReplica: {{ pc.database.status_read_replica | to_json }}
+          existingSecret: proxcloud-db-owner
+          keycloak: {enabled: true, existingSecret: proxcloud-keycloak-db}
+        keycloakx:
+          enabled: true
+          fullnameOverride: proxcloud-keycloak
+          image: {tag: {{ pc_ver.keycloak | to_json }}}
+          command:
+            - /opt/keycloak/bin/kc.sh
+            - start
+            - --http-enabled=true
+            - --http-port=8080
+            - --proxy-headers=xforwarded
+            # Fixed public issuer; pods reach the same realm through the service, hence backchannel-dynamic.
+            - --hostname={{ pc_url_id }}
+            - --hostname-backchannel-dynamic=true
+          extraEnv: |
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: admin
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: proxcloud-keycloak-admin, key: admin-password}
+          database:
+            vendor: postgres
+            hostname: proxcloud-pg-rw
+            port: 5432
+            database: keycloak
+            username: keycloak
+            existingSecret: proxcloud-keycloak-db
+            existingSecretKey: password
+          ingress:
+            enabled: true
+            ingressClassName: traefik
+            rules:
+              - host: id.{{ pc_domain }}
+                paths:
+                  - {path: /, pathType: Prefix}
+{% if pc.ingress.tls == 'acme' %}
+            annotations: {cert-manager.io/cluster-issuer: letsencrypt}
+            tls: [{hosts: [id.{{ pc_domain }}], secretName: id-tls}]
+{% elif pc.ingress.tls != 'none' %}
+            tls: [{hosts: [id.{{ pc_domain }}], secretName: {{ pc.ingress.tls }}}]
+{% endif %}
+        keycloakConfigCli:
+          enabled: true
+          url: http://proxcloud-keycloak-http
+          existingSecret: proxcloud-keycloak-admin
+          sslRequired: {{ 'none' if pc.ingress.tls == 'none' else 'external' }}
+          requirePkce: {{ (pc.ingress.tls != 'none') | to_json }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ pc.namespace }}
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+    retry: {limit: 10, backoff: {duration: 30s, factor: 2, maxDuration: 5m}}

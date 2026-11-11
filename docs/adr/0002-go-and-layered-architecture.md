@@ -49,15 +49,16 @@ Dependencies a package cannot import directly (to avoid import cycles) are passe
 as small function values or interfaces (e.g. the org handler receives a project
 member-adder via a setter). Concurrency uses the standard library: goroutines
 for background connection maintenance and OIDC/cloud discovery, `context` for
-cancellation, `sync/atomic` for the hot-swappable cloud and broker clients.
+cancellation, `sync/atomic` for hot-swappable cloud clients, and bounded workers
+for primary PostgreSQL durable native billing jobs (no runtime broker client).
 
 ## Consequences
 
-- One static binary, no external runtime. Startup does not block on
-  RabbitMQ, the IdP, or the cloud — each is dialed in the background and gated by
-  readiness — so a dependency being briefly unreachable does not deadlock a
-  rollout. (PostgreSQL is the exception: it is connected and pinged eagerly, so a
-  missing database fails the boot.)
+- One static binary, no external runtime. A writable primary PostgreSQL connection
+  is required at boot for schema and durable workers. Configured OIDC discovery and
+  cloud clients have their own readiness/retry paths; no RabbitMQ connection or
+  readiness gate exists. This is not permission to bypass identity readiness or
+  accept a standby for financial writes.
 - The layering is a convention enforced by review, not by the compiler. The
   payoff is that any endpoint can be read top-to-bottom in one domain package.
 - Explicit wiring makes `main.go` long, but it is the single, greppable source

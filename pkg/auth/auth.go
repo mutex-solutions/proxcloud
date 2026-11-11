@@ -10,8 +10,10 @@
 package auth
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
@@ -34,6 +36,27 @@ type Authenticator struct {
 	realms          []Realm
 	hmacLookup      HmacKeyLookup   // hmac_keys resolver for SigV4 (Admin API) — see sigv4.go
 	clientKeyLookup ClientKeyLookup // client_api_keys resolver for `Bearer pk.sk` PATs — see clientkey.go
+	guard           GuardFunc
+}
+
+// GuardFunc gets the last word on an authenticated request; a non-empty result is the refusal code.
+type GuardFunc func(ctx context.Context, rc *httpx.RequestContext) string
+
+// SetGuard installs the guard (per-organization SSO rules). nil means none.
+func (a *Authenticator) SetGuard(g GuardFunc) {
+	a.mu.Lock()
+	a.guard = g
+	a.mu.Unlock()
+}
+
+func (a *Authenticator) refusal(r *http.Request, rc *httpx.RequestContext) string {
+	a.mu.RLock()
+	g := a.guard
+	a.mu.RUnlock()
+	if g == nil {
+		return ""
+	}
+	return g(r.Context(), rc)
 }
 
 func New(log *slog.Logger) *Authenticator {
@@ -68,9 +91,12 @@ var publicPrefix = []string{
 	"/mcp", // MCP endpoint — auth enforced by the MCP handler (see publicExact note)
 	"/api/v1/auth/",
 	"/api/v1/download/",
+	"/api/v1/nocloud/", // server seeds for cloud-init — the per-VM token is the auth
 	"/api/v1/console/", // VNC console WebSocket proxy — the console token is the auth
 	"/api/v1/callbacks/",
 	"/api/v1/admin/onboarding/",
+	"/api/v1/internal/sandboxes/", // sandbox-proxy's wake call — a sandbox provider's proxyWakeToken is the auth
+	"/e2b/",                       // E2B-compatible sandbox API — a project's sandbox API key (X-API-Key) is the auth
 }
 
 // adminJobPrefix drives operator billing/collect/sync jobs — it is NOT public (anon must not be
@@ -100,7 +126,8 @@ func (a *Authenticator) Enforce(next http.Handler) http.Handler {
 			// (the auth context is populated on permitAll paths too) — some public DTOs vary
 			// by auth, e.g. platform-configuration returns `regions` only to authenticated callers.
 			rc := &httpx.RequestContext{}
-			if got, ok := a.authenticate(r); ok {
+			// A refused identity is anonymous here; it never reaches a handler as itself.
+			if got, ok := a.authenticate(r); ok && a.refusal(r, got) == "" {
 				rc = got
 			}
 			next.ServeHTTP(w, r.WithContext(httpx.WithRC(r.Context(), rc)))
@@ -109,6 +136,10 @@ func (a *Authenticator) Enforce(next http.Handler) http.Handler {
 		rc, ok := a.authenticate(r)
 		if !ok {
 			unauthorized(w)
+			return
+		}
+		if code := a.refusal(r, rc); code != "" {
+			httpx.Err(w, http.StatusForbidden, http.StatusForbidden, code)
 			return
 		}
 		// Operator job triggers require an ADMIN credential, not just any authenticated user.
@@ -171,7 +202,7 @@ func (a *Authenticator) verifyJWT(r *http.Request, raw string) (*httpx.RequestCo
 	// clientId. Skip the azp binding there — the token is still fully validated (signature,
 	// issuer, expiry) and the MCP handler's issuer→toolset mapping is the real gate. Every
 	// other path keeps the SPA/API azp binding.
-	skipAzp := strings.HasPrefix(r.URL.Path, "/mcp")
+	skipAzp := azpExempt(r)
 	for _, realm := range realms {
 		if realm.Verifier == nil {
 			continue
@@ -187,6 +218,9 @@ func (a *Authenticator) verifyJWT(r *http.Request, raw string) (*httpx.RequestCo
 			GivenName     string `json:"given_name"`
 			FamilyName    string `json:"family_name"`
 			Azp           string `json:"azp"`
+			Scope         string `json:"scope"`
+			IdP           string `json:"idp"`
+			IdPGroups     any    `json:"idp_groups"`
 		}
 		if err := tok.Claims(&claims); err != nil {
 			continue
@@ -211,9 +245,32 @@ func (a *Authenticator) verifyJWT(r *http.Request, raw string) (*httpx.RequestCo
 			FamilyName:    claims.FamilyName,
 			Issuer:        realm.IssuerURI,
 			Azp:           claims.Azp,
+			IdP:           claims.IdP,
+			IdPGroups:     stringList(claims.IdPGroups),
+			SSOScope:      slices.Contains(strings.Fields(claims.Scope), ssoScope),
 		}, true
 	}
 	return nil, false
+}
+
+// ssoScope is the client scope that carries the idp and idp_groups claims.
+const ssoScope = "proxcloud-sso"
+
+// stringList reads a claim Keycloak renders as a string or a list depending on how many values it has.
+func stringList(v any) []string {
+	switch t := v.(type) {
+	case string:
+		return []string{t}
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // claimTrue reads a boolean claim. Keycloak sends a JSON bool; some IdPs send the
@@ -226,6 +283,24 @@ func claimTrue(v any) bool {
 		return strings.EqualFold(b, "true")
 	}
 	return false
+}
+
+// mcpDispatchKey marks a request the MCP handler builds in-process to run a tool. Only code in this
+// process can set it; an HTTP caller cannot.
+type mcpDispatchKey struct{}
+
+// WithMCPDispatch marks ctx as an MCP tool call re-sent through the router with the bearer /mcp
+// already accepted. Without it the azp binding would refuse, on every tool, the MCP client token
+// that /mcp let in.
+func WithMCPDispatch(ctx context.Context) context.Context {
+	return context.WithValue(ctx, mcpDispatchKey{}, true)
+}
+
+// azpExempt reports whether the azp binding is skipped for r: the /mcp endpoint itself and the tool
+// calls it dispatches. Everything downstream still applies, including the admin console's own
+// check that an admin token comes from the admin client.
+func azpExempt(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/mcp") || r.Context().Value(mcpDispatchKey{}) != nil
 }
 
 // azpAllowed reports whether a token's azp claim is acceptable for a realm: no configured client

@@ -1,0 +1,44 @@
+{{- if and .Values.network.readEndpoint (eq .Values.engine "postgresql") (gt (int .Values.instances) 1) }}
+{{/*
+SECOND LoadBalancer Service, replicas only — the read-only endpoint.
+
+postgresql is the ONLY engine that needs its own LB for this: its readers are
+a different set of PODS (CNPG's replicas), so no port trick reaches them.
+mysql and mariadb route reads through the SAME proxy on a second port, which
+costs nothing extra — see service-lb.yaml. ferretdb would need a second set of
+frontends and is not offered.
+
+Gated on instances > 1: on a single node the "read-only endpoint" would be the
+primary under a different name, which is a lie the customer would pay for.
+*/}}
+{{- $name := include "database-cluster.name" . }}
+{{- $port := include "database-cluster.port" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-ro-lb
+  labels:
+    {{- include "database-cluster.labels" . | nindent 4 }}
+  annotations:
+    {{- include "database-cluster.annotations" . | nindent 4 }}
+    {{- include "database-cluster.lbAnnotations" . | nindent 4 }}
+    {{- with .Values.network.extraAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: LoadBalancer
+  {{- with .Values.network.allowedCidrs }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  ports:
+    - name: {{ .Values.engine }}-ro
+      port: {{ $port }}
+      targetPort: {{ $port }}
+      protocol: TCP
+  selector:
+    cnpg.io/cluster: {{ $name }}
+    {{/* Replicas only. A reader that lands on the primary would still work,
+         but the point of this endpoint is to keep read traffic off it. */}}
+    cnpg.io/instanceRole: replica
+{{- end }}

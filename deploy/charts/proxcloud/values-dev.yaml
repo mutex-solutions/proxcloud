@@ -9,10 +9,16 @@
 api:
   encryptionKey: "insecure-dev-key-change-me"
 
+# Self-contained: the bitnami subcharts, so no operator has to run in the cluster.
+cnpg:
+  enabled: false
+
+rabbitmqCluster:
+  enabled: false
+
 postgresql:
+  enabled: true
   auth:
     password: "proxcloud"
 
-rabbitmq:
-  auth:
-    password: "proxcloud"
+# No RabbitMQ: workers and billing use the writable PostgreSQL primary.

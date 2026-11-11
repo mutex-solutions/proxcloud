@@ -19,11 +19,14 @@ export const sections: DocSection[] = [
     pages: [
       { slug: "guides/servers", title: "Working with servers" },
       { slug: "guides/networks", title: "Networking" },
+      { slug: "guides/load-balancers", title: "Load balancers" },
       { slug: "guides/volumes", title: "Volumes & snapshots" },
       { slug: "guides/object-storage", title: "Object storage buckets" },
+      { slug: "guides/dns", title: "DNS zones" },
       { slug: "guides/team-members", title: "Teammates & invitations" },
       { slug: "guides/savings-plans", title: "Savings plans" },
       { slug: "guides/ai-agents", title: "AI agent access (MCP)" },
+      { slug: "guides/sandboxes", title: "Sandboxes" },
     ],
   },
   {
@@ -32,6 +35,13 @@ export const sections: DocSection[] = [
       { slug: "concepts/billing-and-metering", title: "How metering & billing work" },
       { slug: "concepts/provisioning", title: "How provisioning works" },
       { slug: "concepts/identity", title: "How identity works" },
+    ],
+  },
+  {
+    title: "API",
+    pages: [
+      { slug: "api/sandboxes", title: "Sandbox API" },
+      { slug: "api/e2b", title: "E2B API" },
     ],
   },
   {

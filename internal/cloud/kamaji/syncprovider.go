@@ -2,7 +2,7 @@ package kamaji
 
 import (
 	"context"
-	"strings"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 )
@@ -30,7 +30,7 @@ func (p *ClusterSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 	// Ownership marker in the selector: pre-proxcloud clusters on the same management cluster
 	// (unlabelled) never enter the cache, so they never surface in the UI or billing.
 	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace,
-		LabelProject+"="+p.projectID+","+LabelManagedBy+"="+ManagedByValue)
+		LabelProject+"="+p.projectID+","+LabelService+"="+s.serviceID+","+LabelManagedBy+"="+ManagedByValue)
 	if err != nil {
 		return nil, err
 	}
@@ -56,15 +56,41 @@ func (p *ClusterSyncProvider) List(ctx context.Context) ([]cloud.CloudResource, 
 		if err != nil {
 			return nil, err
 		}
+		data := clusterData(app, tcp, mds)
+		if c := data["cluster"].(map[string]any); settledButProgressing(app, c) {
+			// A failed read keeps Argo's Progressing: the next sync tries again.
+			if parts, err := s.addonParts(ctx, ns); err == nil && readyPastResourceSet(app, parts, time.Now()) {
+				c["status"] = "READY"
+			}
+		}
 		out = append(out, cloud.CloudResource{
 			Type:       cloud.TypeKubernetesCluster,
 			ExternalID: id,
 			Region:     p.region,
 			ProjectID:  p.projectID,
-			Data:       clusterData(app, tcp, mds),
+			Data:       data,
 		})
 	}
 	return out, nil
+}
+
+// addonParts reads the namespace's HelmChartProxies and ClusterResourceSets, keyed Kind/name, for
+// readyPastResourceSet.
+func (s *Service) addonParts(ctx context.Context, ns string) (map[string]map[string]any, error) {
+	parts := map[string]map[string]any{}
+	for _, k := range []struct{ group, version, plural, kind string }{
+		{"addons.cluster.x-k8s.io", "v1alpha1", "helmchartproxies", "HelmChartProxy"},
+		{"addons.cluster.x-k8s.io", "v1beta2", "clusterresourcesets", "ClusterResourceSet"},
+	} {
+		items, err := s.api.ListCRs(ctx, k.group, k.version, k.plural, ns, "")
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range items {
+			parts[k.kind+"/"+digStr(it, "metadata", "name")] = it
+		}
+	}
+	return parts, nil
 }
 
 // clusterData maps Application (+ optional TCP/MachineDeployments) → the cached `data` payload.
@@ -74,7 +100,8 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 	values, _ := dig(app, "spec", "source", "helm", "valuesObject").(map[string]any)
 
 	status := "PENDING"
-	if h := digStr(app, "status", "health", "status"); h != "" {
+	h := digStr(app, "status", "health", "status")
+	if h != "" {
 		// Argo health: Healthy / Progressing / Degraded / Suspended / Missing / Unknown.
 		status = map[string]string{
 			"Healthy":     "READY",
@@ -103,13 +130,22 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 	} else if replicas, ok := dig(values, "kamajiControlPlane", "replicas").(int); ok {
 		c["cp_replicas"] = replicas
 	}
-	// Network placement, read back off the values so the UI can show whether the cluster runs on
-	// a dedicated network or on one of the project's own (BYO). Absent keys mean dedicated.
-	// Immutable after create, so no edit path feeds off these.
-	if netID := digStr(values, "clusterNetworking", "internalNetwork", "networkFilter", "id"); netID != "" {
-		c["network_id"] = netID
-		c["subnet_id"] = digStr(values, "clusterNetworking", "internalNetwork", "subnetFilter", "id")
+	// The vnet of the workers, read back off the values. Immutable after create.
+	if bridge := digStr(values, "proxmox", "network", "bridge"); bridge != "" {
+		c["network_id"] = bridge
 	}
+	// What storage the cluster was given, so the page can say why a claim stays Pending: the
+	// block classes proxmox-csi installs, and whether a NAS dataset backs ReadWriteMany.
+	classes := []any{}
+	if list, ok := dig(values, "proxmox", "csi", "storageClasses").([]any); ok {
+		for _, raw := range list {
+			if m, ok := raw.(map[string]any); ok && m["name"] != nil {
+				classes = append(classes, m["name"])
+			}
+		}
+	}
+	c["storage_classes"] = classes
+	c["rwx"] = digStr(values, "proxmox", "rwx", "server") != ""
 	// Customer add-on toggles, read back for the UI (absent block = chart defaults). Filtered to
 	// the curated menu: a legacy credential-push addon (and any operator hand-edit)
 	// must not surface as a customer toggle — it would round-trip into SET_ADDONS and be
@@ -117,7 +153,7 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 	if adds, ok := dig(values, "addons").(map[string]any); ok {
 		out := map[string]any{}
 		for name, raw := range adds {
-			if _, curated := ClusterAddons[name]; !curated {
+			if _, curated := ClusterAddons[name]; !curated && name != LegacyIngressAddon {
 				continue
 			}
 			if m, ok := raw.(map[string]any); ok {
@@ -156,35 +192,121 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 		}
 	}
 
-	// Desired node groups from values, live replica counts from the MachineDeployments.
+	// Desired node groups from values, live replica counts from the MachineDeployments. A group has
+	// one per PVE node (the chart labels them), so the counts add up.
 	live := map[string]map[string]any{}
 	for _, md := range mds {
-		name := digStr(md, "metadata", "name")
-		entry := map[string]any{}
-		if r, ok := dig(md, "status", "replicas").(float64); ok {
-			entry["replicas"] = r
+		name := digStr(md, "metadata", "labels", labelNodeGroup)
+		if name == "" {
+			continue
 		}
-		if r, ok := dig(md, "status", "readyReplicas").(float64); ok {
-			entry["ready_replicas"] = r
+		entry := live[name]
+		if entry == nil {
+			entry = map[string]any{}
+			live[name] = entry
 		}
-		if phase := digStr(md, "status", "phase"); phase != "" {
+		for src, dst := range map[string]string{"replicas": "replicas", "readyReplicas": "ready_replicas"} {
+			if r, ok := dig(md, "status", src).(float64); ok {
+				prev, _ := entry[dst].(float64)
+				entry[dst] = prev + r
+			}
+		}
+		// The least settled pool speaks for the group.
+		if phase := digStr(md, "status", "phase"); phase != "" && entry["phase"] != "ScalingUp" && entry["phase"] != "ScalingDown" {
 			entry["phase"] = phase
 		}
-		live[name] = entry
 	}
 	groups := []any{}
 	for _, g := range NodeGroupsFromValues(values) {
 		name, _ := g["name"].(string)
-		// MachineDeployment names are chart-derived (typically <cluster>-<group>); match by suffix.
-		for mdName, entry := range live {
-			if name != "" && (mdName == name || strings.HasSuffix(mdName, "-"+name)) {
-				for k, v := range entry {
-					g[k] = v
-				}
-			}
+		for k, v := range live[name] {
+			g[k] = v
 		}
 		groups = append(groups, g)
 	}
 	c["node_groups"] = groups
+
 	return map[string]any{"cluster": c}
+}
+
+// settledButProgressing: Argo still says Progressing, but the control plane, every node group
+// and the sync are done. Only then are the add-on objects worth reading (readyPastResourceSet).
+func settledButProgressing(app, c map[string]any) bool {
+	groups, _ := c["node_groups"].([]any)
+	return digStr(app, "status", "health", "status") == "Progressing" && c["sync_status"] == "Synced" &&
+		c["cp_status"] == "Ready" && c["endpoint"] != nil && groupsReady(groups)
+}
+
+// resourceSetGrace bounds how long a cluster reads READY while its ClusterResourceSet has not
+// applied: past it a CRS that never applies leaves the cluster PROGRESSING, as Argo says. Five lab
+// creates turned Healthy 9.5 to 16 min after the Application was created. ponytail: a fixed value
+// from the Application's creation; a provider setting if a slower site needs one.
+const resourceSetGrace = 30 * time.Minute
+
+// readyPastResourceSet reports whether the one part of the Application still not done is its
+// ClusterResourceSet (the MetalLB address pool, plus the CSI config). It fails until MetalLB's
+// webhook answers, and CAPI's retry backoff then leaves it unapplied for minutes after the
+// cluster works: on the lab it applied 15 min after the Application was created, 8 min past
+// CAPI's Available. Argo 3 no longer keeps per-resource health in app.status.resources, so the
+// HelmChartProxies and the CRS that list names are read off the management cluster
+// (parts, keyed Kind/name). Anything else not done, or a CRS past the grace, keeps Argo's answer.
+func readyPastResourceSet(app map[string]any, parts map[string]map[string]any, now time.Time) bool {
+	created, err := time.Parse(time.RFC3339, digStr(app, "metadata", "creationTimestamp"))
+	if err != nil || now.Sub(created) > resourceSetGrace {
+		return false
+	}
+	resources, _ := dig(app, "status", "resources").([]any)
+	waiting := 0
+	for _, raw := range resources {
+		r, _ := raw.(map[string]any)
+		kind, _ := r["kind"].(string)
+		name, _ := r["name"].(string)
+		obj := parts[kind+"/"+name]
+		switch kind {
+		case "HelmChartProxy":
+			if !conditionTrue(obj, "Ready") {
+				return false
+			}
+		case "ClusterResourceSet":
+			if !conditionTrue(obj, "ResourcesApplied") {
+				waiting++
+			}
+		}
+	}
+	return waiting == 1
+}
+
+func conditionTrue(obj map[string]any, typ string) bool {
+	conds, _ := dig(obj, "status", "conditions").([]any)
+	for _, raw := range conds {
+		if c, _ := raw.(map[string]any); c["type"] == typ {
+			return c["status"] == "True"
+		}
+	}
+	return false
+}
+
+// groupsReady: every node group runs its desired count of Ready nodes.
+func groupsReady(groups []any) bool {
+	for _, raw := range groups {
+		g, _ := raw.(map[string]any)
+		ready, _ := g["ready_replicas"].(float64)
+		if g["phase"] != "Running" || ready < count(g["count"]) {
+			return false
+		}
+	}
+	return true
+}
+
+// count reads a node count: float64 off JSON, int off Go-built values, 1 when unset.
+func count(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return 1
 }

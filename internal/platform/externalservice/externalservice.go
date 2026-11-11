@@ -6,8 +6,15 @@
 package externalservice
 
 import (
+	"context"
+	"fmt"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/client"
 	"github.com/mutex-solutions/proxcloud/internal/cloud/metrics"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/powerdns"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/truenas"
+	"net/netip"
+	"net/url"
+	"time"
 )
 
 // ExternalServiceType values. Only CLOUD matters to the cloud slice.
@@ -38,6 +45,19 @@ type ExternalService struct {
 	// wire: this struct is not serialized to any response — admin reads go through a secret-stripped
 	// path and cloud ops use it only in-memory.
 	Secret any `json:"secret,omitempty"`
+	// ObservationGeneration is derived from the stored encrypted credential before decrypt.
+	// It is transient, never persisted or returned by provider APIs.
+	ObservationGeneration string `json:"-"`
+	// ProvisionError is the last failed attempt to provision a project on this provider, for the operator; a success
+	// clears it. Set through Service.SetProvisionError only.
+	ProvisionError *ProvisionError `json:"provisionError,omitempty"`
+}
+
+// ProvisionError says which project could not be provisioned on a provider, and why.
+type ProvisionError struct {
+	ProjectID string    `json:"projectId"`
+	Message   string    `json:"message"`
+	At        time.Time `json:"at"`
 }
 
 // IsDisabled / IsNotDisabled are the status helpers.
@@ -57,6 +77,92 @@ func (e *ExternalService) Shared() bool     { return boolean(e.Config["shared"])
 // IsCephS3 reports whether this is a Ceph RGW (S3) object-store provider (config.provider == "ceph-s3").
 // Object-store is the only service it serves, driven by the S3 + Admin Ops endpoints below.
 func (e *ExternalService) IsCephS3() bool { return e.Provider() == "ceph-s3" }
+
+// IsRustFS reports a RustFS object store (config.provider == "rustfs"), the Standard-tier S3 product. Same
+// config keys as ceph-s3; adminApiUrl is the base URL the API reaches the admin paths on.
+func (e *ExternalService) IsRustFS() bool { return e.Provider() == "rustfs" }
+
+// IsTrueNAS reports a TrueNAS file-share provider (config.provider == "truenas"). Config: apiUrl, username,
+// fingerprint/insecureTls, parentDataset, mountHost (default: the host of apiUrl), defaultQuotaGiB, region,
+// snatSources (default: none, see ParseSNATSources); secret: apiKey.
+func (e *ExternalService) IsTrueNAS() bool { return e.Provider() == "truenas" }
+
+// IsPowerDNS reports a DNS zone provider (config.provider == "powerdns").
+func (e *ExternalService) IsPowerDNS() bool { return e.Provider() == "powerdns" }
+
+// PowerDNSService builds the zone service: config apiUrl, serverId, nameservers; secret apiKey.
+func (e *ExternalService) PowerDNSService() (*powerdns.Service, error) {
+	return powerdns.New(str(e.Config["apiUrl"]), str(e.Config["serverId"]), str(e.secretMap()["apiKey"]), strList(e.Config["nameservers"]))
+}
+
+// TrueNASService builds the share service. The caller closes its client.
+func (e *ExternalService) TrueNASService() (*truenas.Service, error) {
+	insecure, _ := e.Config["insecureTls"].(bool)
+	c, err := truenas.New(truenas.Config{
+		URL: str(e.Config["apiUrl"]), Username: str(e.Config["username"]), APIKey: str(e.secretMap()["apiKey"]),
+		Fingerprint: str(e.Config["fingerprint"]), InsecureTLS: insecure,
+	})
+	if err != nil {
+		return nil, err
+	}
+	parent := str(e.Config["parentDataset"])
+	if parent == "" {
+		return nil, fmt.Errorf("truenas: parentDataset is required")
+	}
+	host := str(e.Config["mountHost"])
+	if host == "" {
+		if u, err := url.Parse(str(e.Config["apiUrl"])); err == nil {
+			host = u.Hostname()
+		}
+	}
+	snat, err := ParseSNATSources(e.Config["snatSources"])
+	if err != nil {
+		return nil, err
+	}
+	return &truenas.Service{C: c, Parent: parent, Host: host, SNATSources: snat}, nil
+}
+
+// ParseSNATSources reads config.snatSources in export form. Single hosts only: each entry goes on every export of the
+// provider, so a range here would open every share to whole networks.
+func ParseSNATSources(raw any) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("snatSources must be a list of addresses")
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		s, _ := it.(string)
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			a, aerr := netip.ParseAddr(s)
+			if aerr != nil {
+				return nil, fmt.Errorf("snatSources: %q is not an address", s)
+			}
+			p = netip.PrefixFrom(a, a.BitLen())
+		}
+		if !p.IsSingleIP() || p.Addr().IsUnspecified() {
+			return nil, fmt.Errorf("snatSources: %q is not a single host address", s)
+		}
+		out = append(out, p.String())
+	}
+	return out, nil
+}
+
+// IsObjectStore reports a provider that serves only buckets.
+func (e *ExternalService) IsObjectStore() bool { return e.IsCephS3() || e.IsRustFS() }
+
+// ObjectClient builds the object-store client for this provider, scoped to one project user. Empty project
+// keys give an admin-only client.
+func (e *ExternalService) ObjectClient(ctx context.Context, region, projectAccess, projectSecret, uid string) (*client.Client, error) {
+	cfg := e.CephConfig(region, projectAccess, projectSecret, uid)
+	if e.IsRustFS() {
+		return client.NewRustFS(ctx, cfg)
+	}
+	return client.NewCephS3(ctx, cfg)
+}
 
 // S3Endpoint / AdminAPIURL are the ceph-s3 data + Admin Ops endpoints (config.s3Endpoint / config.adminApiUrl).
 func (e *ExternalService) S3Endpoint() string  { return str(e.Config["s3Endpoint"]) }
@@ -116,7 +222,7 @@ func (e *ExternalService) cephAdminKeys() (access, secret string) {
 // rgwUID must ALREADY be the final user id — use RGWUIDFor(projectID) to derive it, or pass the value
 // persisted on the credential/binding. The uidPrefix is NOT re-applied here, or a caller passing a stored
 // (already-prefixed) uid would double-prefix it.
-func (e *ExternalService) CephConfig(region, projectAccess, projectSecret, rgwUID string) client.CephConfig {
+func (e *ExternalService) CephConfig(region, projectAccess, projectSecret, rgwUID string) client.ObjectStoreConfig {
 	if region == "" {
 		region = e.CephRegion()
 	}
@@ -125,7 +231,7 @@ func (e *ExternalService) CephConfig(region, projectAccess, projectSecret, rgwUI
 	if g := e.DefaultQuotaGiB(); g > 0 {
 		quotaBytes = int64(g) * 1073741824
 	}
-	return client.CephConfig{
+	return client.ObjectStoreConfig{
 		S3Endpoint:        e.S3Endpoint(),
 		S3WebsiteEndpoint: e.S3WebsiteEndpoint(),
 		AdminURL:          e.AdminAPIURL(),
@@ -145,6 +251,8 @@ func (e *ExternalService) CephConfig(region, projectAccess, projectSecret, rgwUI
 const (
 	MetricsSourcePrometheus = "prometheus"
 	MetricsSourceNone       = "none"
+	// MetricsSourcePVE is the Proxmox default: public-NIC counters off status/current.
+	MetricsSourcePVE = "pve"
 )
 
 // metricsConfig returns the config.metrics sub-map (nil-safe).
@@ -153,10 +261,14 @@ func (e *ExternalService) metricsConfig() map[string]any {
 	return m
 }
 
-// MetricsSource returns config.metrics.source, defaulting to none for every provider.
+// MetricsSource returns config.metrics.source, defaulting to the native counters on a proxmox
+// provider and to none on every other.
 func (e *ExternalService) MetricsSource() string {
 	if s := str(e.metricsConfig()["source"]); s != "" {
 		return s
+	}
+	if e.IsProxmox() {
+		return MetricsSourcePVE
 	}
 	return MetricsSourceNone
 }

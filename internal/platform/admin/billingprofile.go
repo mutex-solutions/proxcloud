@@ -41,6 +41,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -311,14 +312,27 @@ type billingProfileUpdateReq struct {
 	Email           *string          `json:"email"`
 	Currency        *string          `json:"currency"`
 	PricePlanConfig *json.RawMessage `json:"pricePlanConfig"`
+	// contacts = the extra invoice/billing e-mail recipients (validated + de-duplicated, max 10).
+	Contacts *[]billing.Contact `json:"contacts"`
+	// paymentMode (PREPAID | POSTPAID) + paymentGatewayId — the customer's payment settings.
+	PaymentMode      *string `json:"paymentMode"`
+	PaymentGatewayID *string `json:"paymentGatewayId"`
 }
 
 // setMap builds the update document for the editable fields. Every present field is written (including
 // its zero value); an absent field is left untouched
 // (the loaded doc keeps it). The bool fields are always written (they default to false), so company /
 // taxPayer are set whenever present (which they always are after a full-profile round-trip).
-func (req billingProfileUpdateReq) setMap() pgdoc.M {
+// A bad contact e-mail is a 400.
+func (req billingProfileUpdateReq) setMap() (pgdoc.M, error) {
 	d := pgdoc.M{}
+	if req.Contacts != nil {
+		contacts, err := billing.NormalizeContacts(*req.Contacts)
+		if err != nil {
+			return nil, err
+		}
+		d["contacts"] = contacts
+	}
 	if req.FirstName != nil {
 		d["firstName"] = *req.FirstName
 	}
@@ -370,7 +384,17 @@ func (req billingProfileUpdateReq) setMap() pgdoc.M {
 	if req.PricePlanConfig != nil {
 		d["pricePlanConfig"] = rawJSON(*req.PricePlanConfig)
 	}
-	return d
+	if req.PaymentMode != nil {
+		mode := billing.ValidPaymentMode(*req.PaymentMode)
+		if mode == "" {
+			return nil, httpx.BadRequest("Invalid payment mode: use PREPAID or POSTPAID.")
+		}
+		d["paymentMode"] = mode
+	}
+	if req.PaymentGatewayID != nil {
+		d["paymentGatewayId"] = strings.TrimSpace(*req.PaymentGatewayID)
+	}
+	return d, nil
 }
 
 // billingProfileUpdate loads the profile or 404s → copies the editable fields
@@ -389,7 +413,10 @@ func (h *Handler) billingProfileUpdate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	set := req.setMap()
+	set, err := req.setMap()
+	if httpx.WriteError(w, err) {
+		return
+	}
 	for k, v := range set {
 		existing[k] = v
 	}
@@ -611,12 +638,12 @@ func (h *Handler) billingProfileDelete(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.BadRequest("Billing profile is in use for some bills"))
 		return
 	}
-	// Guard: is the billing profile referenced by any project?
-	inUse, err = h.repo.ExistsByBillingProfileID(r.Context(), "project", id)
+	// Guard: does the billing profile pay for any project, its own or through its organization?
+	paidFor, err := h.repo.ProjectPaidBy(r.Context(), id)
 	if httpx.WriteError(w, err) {
 		return
 	}
-	if inUse {
+	if paidFor != "" {
 		httpx.WriteError(w, httpx.BadRequest("Billing profile is in use for some projects"))
 		return
 	}
@@ -756,11 +783,8 @@ func (h *Handler) billingProfileCreate(w http.ResponseWriter, r *http.Request) {
 
 // ─── POST /validations/{validationId}/status/{status} ────────────────────────────────────────────
 
-// billingProfileValidationStatus parses the status, then updates it
-// (load by id or 404 "Billing profile validation not found." → set status
-// → save). On APPROVED it additionally marks the activation constraint completed +
-// sends the validation notification — cross-service/email effects → not wired. The validation-doc
-// status flip (the persisted core) is faithful and applied first.
+// billingProfileValidationStatus commits the locked approval/mail decision first.
+// Activation remains a postcommit best-effort business tail, NOT mail atomicity.
 func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billingProfileUpdatePerm) {
 		return
@@ -772,21 +796,13 @@ func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.
 		httpx.WriteError(w, httpx.BadRequest(fmt.Sprintf("Invalid validation status %s", status)))
 		return
 	}
-	existing, err := h.repo.FindDoc(r.Context(), billingProfileValidationCollection, validationID)
+	decision, err := h.decideValidationStatus(r.Context(), validationID, status)
 	if httpx.WriteError(w, err) {
 		return
 	}
-	if existing == nil {
-		httpx.WriteError(w, httpx.NotFound("Billing profile validation not found."))
-		return
-	}
-	// Set the status → save (the faithful persisted effect).
-	existing["status"] = status
-	if _, err := h.repo.SetFields(r.Context(), billingProfileValidationCollection, validationID, pgdoc.M{"status": status}); httpx.WriteError(w, err) {
-		return
-	}
+	existing := decision.doc
 	if status == "APPROVED" {
-		if h.activation == nil {
+		if h.validationActivation == nil {
 			// Activation unwired (tests) → the original not-implemented posture.
 			httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 				"validation APPROVED activation/notify not implemented"))
@@ -794,7 +810,7 @@ func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.
 		}
 		// Load the profile referenced by the validation →
 		// mark the activation constraint completed (VALIDATION) → send the validation notification.
-		bpID, _ := existing["billingProfileId"].(string)
+		bpID := decision.profileID
 		bp, err := h.billing.FindByID(r.Context(), bpID)
 		if httpx.WriteError(w, err) {
 			return
@@ -804,10 +820,12 @@ func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.
 			httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("Billing profile with id %s not found. ", bpID)))
 			return
 		}
-		if err := h.activation.Activate(r.Context(), bp, billing.SourceValidation); httpx.WriteError(w, err) {
+		if err := h.validationActivation.Activate(r.Context(), bp, billing.SourceValidation); httpx.WriteError(w, err) {
 			return
 		}
-		h.activation.NotifyValidation(r.Context(), bp)
+		if !decision.suppressLegacy {
+			h.validationActivation.NotifyValidation(r.Context(), bp)
+		}
 	}
 	httpx.OK(w, shapeDoc(existing))
 }

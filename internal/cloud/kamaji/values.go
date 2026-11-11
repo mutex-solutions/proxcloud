@@ -1,7 +1,6 @@
 package kamaji
 
 import (
-	"fmt"
 	"strings"
 )
 
@@ -9,9 +8,6 @@ import (
 // the machine* spelling, and a chart `fail`s the render rather than defaulting when a key is
 // missing — so a typo here is a create that never provisions. TestBuildValues pins every key;
 // keep it that way.
-//
-// TODO(P7): the Proxmox cluster chart (CAPMOX machines, proxmox-csi default StorageClass, MetalLB
-// API-server LoadBalancer) defines the infrastructure keys this builder renders.
 //
 // Fix chart drift HERE only; nothing else in proxcloud knows chart keys.
 
@@ -61,29 +57,12 @@ func BuildValues(cfg Config, spec ClusterSpec) map[string]any {
 		// on the management cluster (plan D7).
 		"cloudCredentialsSecretName": CloudSecretName(spec.ID),
 	}
-	// BYO network: attach to the customer's existing network/subnet instead of creating one.
-	// Ids only — never name filters, which are ambiguous the moment a customer reuses a name.
-	if spec.NetworkID != "" {
-		values["clusterNetworking"] = map[string]any{
-			"internalNetwork": map[string]any{
-				"networkFilter": map[string]any{"id": spec.NetworkID},
-				"subnetFilter":  map[string]any{"id": spec.SubnetID},
-			},
-		}
-	}
+	values["proxmox"] = infraValues(d, spec)
 	if oidc := OIDCValues(spec.OIDC); oidc != nil {
 		values["oidc"] = oidc
 	}
 
 	values["nodeGroups"] = NodeGroupValues(d, spec.Version, spec.NodeGroups)
-
-	// Cluster-autoscaler minor MUST match the cluster's Kubernetes minor (upstream values
-	// comment); the default tag would drift as soon as we offer a different minor.
-	if maj, min, _, err := ParseVersion(spec.Version); err == nil {
-		values["autoscaler"] = map[string]any{
-			"image": map[string]any{"tag": fmt.Sprintf("v%d.%d.0", maj, min)},
-		}
-	}
 
 	// The addons block: the customer's curated toggles (ClusterAddons, one
 	// `addons.<name>.enabled` per pick). No cloud credential ever enters the workload cluster (D7).
@@ -93,10 +72,64 @@ func BuildValues(cfg Config, spec ClusterSpec) map[string]any {
 	return values
 }
 
+// infraValues renders the chart's proxmox block. Secrets stay out: the two names point at Secrets
+// the create path writes next to the Application.
+func infraValues(d ClusterDefaults, spec ClusterSpec) map[string]any {
+	in := spec.Infra
+	classes := make([]any, 0, len(in.StorageClasses))
+	for _, c := range in.StorageClasses {
+		classes = append(classes, map[string]any{"name": c.Name, "storage": c.Storage})
+	}
+	dns := d.DNSServers
+	if len(dns) == 0 {
+		dns = []string{"1.1.1.1", "8.8.8.8"}
+	}
+	csi := map[string]any{
+		"configSecretName": CSISecretName(spec.ID),
+		"storageClasses":   classes,
+	}
+	if in.CSIGateway {
+		csi["gateway"] = map[string]any{
+			"secretName":           CSIGatewaySecretName(spec.ID),
+			"kubeconfigSecretName": AdminKubeconfigSecretName(spec.ID),
+		}
+	}
+	out := map[string]any{
+		"region":  in.Region,
+		"pool":    in.Pool,
+		"storage": in.Storage,
+		"network": map[string]any{
+			"bridge":     in.Bridge,
+			"gateway":    in.Gateway,
+			"prefix":     in.Prefix,
+			"addresses":  anySlice(in.Addresses),
+			"dnsServers": anySlice(dns),
+			"mtu":        d.NodeGroupMTU,
+		},
+		"csi":     csi,
+		"metallb": map[string]any{"addresses": anySlice(in.LBAddresses)},
+	}
+	if in.RWXServer != "" {
+		out["rwx"] = map[string]any{"server": in.RWXServer, "share": in.RWXShare}
+	}
+	return out
+}
+
+func anySlice(in []string) []any {
+	out := make([]any, 0, len(in))
+	for _, v := range in {
+		out = append(out, v)
+	}
+	return out
+}
+
 // AddonValues renders the addons block: the customer's picks as `addons.<name>.enabled`.
 func AddonValues(picks map[string]bool) map[string]any {
 	addons := map[string]any{}
 	for name, enabled := range picks {
+		if _, curated := ClusterAddons[name]; !curated {
+			continue
+		}
 		addons[name] = map[string]any{"enabled": enabled}
 	}
 	return addons
@@ -147,19 +180,10 @@ func NodeGroupValues(d ClusterDefaults, version string, groups []NodeGroup) []an
 		if ng.ImageVariant != "" {
 			g["imageVariant"] = ng.ImageVariant
 		}
-		if ng.Autoscale {
-			g["autoscale"] = true
-			// machineCount is the MachineDeployment's starting size — the floor, so the pool never
-			// has to scale up from zero.
-			g["machineCount"] = ng.Min
-			g["machineCountMin"] = ng.Min
-			g["machineCountMax"] = ng.Max
-		} else {
-			g["autoscale"] = false
-			g["machineCount"] = ng.Count
-			g["machineCountMin"] = ng.Count
-			g["machineCountMax"] = ng.Count
-		}
+		g["machineCount"] = ng.Count
+		g["machineCores"] = ng.Cores
+		g["machineMemoryMiB"] = ng.MemoryMiB
+		g["machineTags"] = anySlice(ng.Tags)
 		if len(ng.Labels) > 0 {
 			labels := map[string]any{}
 			for k, v := range ng.Labels {
@@ -205,13 +229,8 @@ func NodeGroupsFromValues(values map[string]any) []map[string]any {
 		if v, _ := ng["imageVariant"].(string); v != "" {
 			g["image_variant"] = v
 		}
-		if v, ok := ng["autoscale"].(bool); ok {
-			g["autoscale"] = v
-		}
-		for src, dst := range map[string]string{"machineCount": "count", "machineCountMin": "min", "machineCountMax": "max"} {
-			if v, ok := ng[src]; ok {
-				g[dst] = v
-			}
+		if v, ok := ng["machineCount"]; ok {
+			g["count"] = v
 		}
 		if labels, ok := ng["nodeLabels"].(map[string]any); ok && len(labels) > 0 {
 			g["labels"] = labels
