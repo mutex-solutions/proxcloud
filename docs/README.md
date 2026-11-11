@@ -41,6 +41,20 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Public VM artifacts](public-vm-artifacts.md) — portable QCOW2 contract and
+  digest/checksum verification, distinct from site-local Proxmox templates.
+  [Offline sanitization](public-vm-sanitization.md) defines copy-only policy and
+  residual limits; [staging/publication](vm-artifact-publishing.md) separates
+  unprivileged sealed staging, hosted GHCR upload and actual public/boot gates.
+
+- [Native template build disk](template-build-disk.md) — fresh-base-only 20 GiB
+  disk floor, exact readback and bounded cleanup after the Ubuntu 26.04 APT-space
+  canary failure; guest filesystem and full build acceptance remain separate gates.
+
+- [Template OS baseline](template-os-baseline.md) — four native OS choices,
+  Ubuntu-only pinned upstream Kubernetes targets, immutable cache export and
+  explicit build/boot/Goss/seed-cleanup versus supported-product acceptance gates.
+
 - [Frontend runtime baseline](frontend-runtime-baseline.md) — supported Node and
   stable NGINX selection, unchanged app contracts and explicit actual-musl/static
   server versus complete-image/deployment verification boundaries.
