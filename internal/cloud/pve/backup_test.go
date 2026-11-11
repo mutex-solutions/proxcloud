@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/mutex-solutions/proxcloud/internal/cloud"
 )
 
 // heldVolumes is a guard over the fake VM's volumes: on the server since before any archive.
@@ -41,6 +39,8 @@ type backupCluster struct {
 	storeDown bool   // the backup store answers its listing with an error
 	replica   int    // how many more listings still show job 101-0 being removed
 	afterCfg  string // the config a restore leaves, when it differs
+	// requestHook optionally observes/answers one fake HTTP request; nil preserves every existing route.
+	requestHook func(http.ResponseWriter, *http.Request) bool
 	// destroyedAfter is how many archives were gone when the VM was destroyed, -1 while it stands.
 	destroyedAfter int
 }
@@ -64,7 +64,7 @@ func newBackupCluster(t *testing.T) *backupCluster {
 			next(w, r)
 		}
 	}
-	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
+	routes := map[string]func(http.ResponseWriter, *http.Request){
 		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("type") == "storage" {
 				fmt.Fprint(w, `{"data":[{"type":"storage","storage":"z","node":"pve1","status":"available","maxdisk":100,"disk":1}]}`)
@@ -163,7 +163,16 @@ func newBackupCluster(t *testing.T) *backupCluster {
 			}
 			fmt.Fprint(w, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
 		},
-	})
+	}
+	for path, route := range routes {
+		routes[path] = func(w http.ResponseWriter, r *http.Request) {
+			if b.requestHook != nil && b.requestHook(w, r) {
+				return
+			}
+			route(w, r)
+		}
+	}
+	_, c := fakePVE(t, routes)
 	b.s = &Service{C: c, ServiceID: "svc", PoolPrefix: "tp-"}
 	return b
 }
@@ -545,33 +554,12 @@ func TestRetireServer(t *testing.T) {
 // While a restore runs the VM has no disks in its config. Their rows must wait, or the bill stops and the row's age is lost.
 // Once it has failed the disks are gone: the rows must go, with their bill.
 func TestVolumeRowsAcrossARestore(t *testing.T) {
-	row := &cloud.CloudResource{Data: map[string]any{"volume": map[string]any{"vmid": 101}}}
-	keeps := func(t *testing.T, cfg, active string) bool {
+	for _, cfg := range []string{`{"lock":"create","name":"web"}`, `{"memory":"128"}`} {
 		b := newBackupCluster(t)
-		b.cfg, b.active = cfg, active
-		p := b.s.VolumeSyncProvider("r", "p1", nil)
-		rows, err := p.List(context.Background())
-		if err != nil || len(rows) != 0 {
-			t.Fatalf("%v %v", rows, err)
+		b.cfg = cfg
+		if _, err := b.s.VolumeSyncProvider("r", "p1", nil).List(context.Background()); err == nil {
+			t.Fatal("cut-down restore cannot prove inventory, even after a task timeout")
 		}
-		keep, _ := p.KeepUnread(row)
-		return keep
-	}
-	const running = `[{"upid":"u","type":"qmrestore","id":"101","status":"running"}]`
-	if !keeps(t, `{"lock":"create","name":"web"}`, "[]") {
-		t.Fatal("the lock of a restore keeps the rows")
-	}
-	if !keeps(t, `{"memory":"128"}`, running) {
-		t.Fatal("a running restore keeps the rows")
-	}
-	if keeps(t, `{"memory":"128"}`, "[]") {
-		t.Fatal("a failed restore must let the rows go")
-	}
-	if keeps(t, `{"memory":"128"}`, `[{"upid":"u","type":"qmrestore","id":"101","endtime":5,"status":"job errors"}]`) {
-		t.Fatal("a task that has ended is not running")
-	}
-	if !keeps(t, `{"memory":"128"}`, `not json`) {
-		t.Fatal("not knowing keeps the rows")
 	}
 }
 

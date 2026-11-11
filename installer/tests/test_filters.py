@@ -234,4 +234,10 @@ assert f.sandbox_registry_problem({"registry": {"address": "192.0.2.226"}}, "192
 assert "inside" in f.sandbox_registry_problem({"registry": {"address": "192.0.2.230"}}, "192.0.2.210-192.0.2.229", "vm")
 assert "IPv4" in f.sandbox_registry_problem({"registry": {"address": ""}}, "192.0.2.210-192.0.2.229", "vm")
 assert "bucket" in f.sandbox_registry_problem({"registry": {"address": "192.0.2.226"}}, "192.0.2.210-192.0.2.229", "none")
+# Stage 60's connection/trust payload matrix runs with the normal installer test target too.
+import unittest  # noqa: E402
+import test_registration  # noqa: E402
+
+registration = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromModule(test_registration))
+assert registration.wasSuccessful(), "stage 60 registration matrix failed"
 print("ok")

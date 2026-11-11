@@ -44,8 +44,18 @@ func cutPVE(t *testing.T, done *atomic.Bool, lost bool, polled chan<- struct{}, 
 				{"type":"storage","storage":"nas","node":"pve1","status":"available","maxdisk":%d,"disk":0}]}`, 100*g, 100*g)
 			return
 		}
-		fmt.Fprint(w, `{"data":[{"id":"qemu/101","type":"qemu","vmid":101,"name":"a","node":"pve1","pool":"pc-p1"}]}`)
+		fmt.Fprint(w, `{"data":[{"id":"qemu/101","type":"qemu","vmid":101,"name":"a","node":"pve1","pool":"pc-p1","status":"running","maxcpu":1,"maxmem":1073741824,"maxdisk":32212254720}]}`)
 	})
+	mux.HandleFunc("GET /api2/json/nodes", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":[{"node":"pve1","status":"online"}]}`)
+	})
+	mux.HandleFunc("GET /api2/json/pools/pc-p1", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":{"poolid":"pc-p1","members":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve1"}]}}`)
+	})
+	mux.HandleFunc("GET /api2/json/access/permissions", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"data":{%q:{"VM.Audit":1}}}`, r.URL.Query().Get("path"))
+	})
+	mux.HandleFunc("GET /api2/json/nodes/pve1/qemu/101/pending", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"data":[]}`) })
 	mux.HandleFunc("GET /api2/json/storage", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"data":[{"storage":"local-zfs","type":"zfspool","content":"images"},{"storage":"nas","type":"nfs","content":"images"}]}`)
 	})
@@ -54,7 +64,10 @@ func cutPVE(t *testing.T, done *atomic.Bool, lost bool, polled chan<- struct{}, 
 		if started.Load() && done.Load() && exit == "OK" {
 			vol = cutNewVol
 		}
-		fmt.Fprintf(w, `{"data":{"name":"a","scsi0":"local-zfs:vm-101-disk-0,size=10G","scsi1":"%s,size=20G"}}`, vol)
+		fmt.Fprintf(w, `{"data":{"name":"a","smbios1":"uuid=11111111-1111-4111-8111-111111111111","scsi0":"local-zfs:vm-101-disk-0,size=10G","scsi1":"%s,size=20G"}}`, vol)
+	})
+	mux.HandleFunc("GET /api2/json/nodes/pve1/qemu/101/snapshot", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":[{"name":"current","description":"You are here!"}]}`)
 	})
 	mux.HandleFunc("POST /api2/json/nodes/pve1/qemu/101/move_disk", func(w http.ResponseWriter, _ *http.Request) {
 		started.Store(true)

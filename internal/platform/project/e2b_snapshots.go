@@ -61,7 +61,7 @@ const (
 	// pauseRetryEnd: the least a failed pause leaves its sandbox to run, so an autoPause one past its end is not
 	// removed at once but paused again by the next tick.
 	pauseRetryEnd = 5 * time.Minute
-	resumeLease   = 20 * time.Minute // covers waiting for a snapshot still being assembled
+	resumeLease   = snapshotWait + time.Duration(sandbox.MaxStartupSeconds)*time.Second + 2*time.Minute // covers waiting for a snapshot still being assembled
 )
 
 // The E2B SDK gives up on a request after 120 s (request_timeout 60 s, taken as read + write by its transport), and a
@@ -94,8 +94,9 @@ type pausedSandbox struct {
 	// is deleted, "resuming" while a resume brings it back.
 	// LeaseUntil bounds a transition: an expired one is a crashed caller's, and the record counts as paused again (or,
 	// for a pause, as never paused).
-	State      string     `json:"state,omitempty"`
-	LeaseUntil *time.Time `json:"leaseUntil,omitempty"`
+	State           string     `json:"state,omitempty"`
+	LeaseUntil      *time.Time `json:"leaseUntil,omitempty"`
+	ResumeUncertain bool       `json:"resumeUncertain,omitempty"`
 	// Automatic pauses must reauthorize source deletion after the asynchronous
 	// image assembly, including after a portal restart/redrive.
 	AbuseGuard *abusePauseGuard `json:"abuseGuard,omitempty"`
@@ -134,6 +135,34 @@ func (h *Handler) snapshotsOn(c *e2bCaller) error {
 
 func (h *Handler) snapshotsAvailable(cfg sandbox.Config) bool {
 	return h.sbTemplates != nil && h.sbPaused != nil && buildsOn(cfg)
+}
+
+// savedLifecycleAdmission is intentionally independent of snapshot capture/export.
+// Current snapshots always produce managed images; no legacy marker enables restore.
+func savedLifecycleAdmission(cfg sandbox.Config) error {
+	if !sandbox.SavedLifecycleAvailable(cfg) {
+		return sandbox.ErrManagedSavedStartHeld
+	}
+	return nil
+}
+
+// savedLifecycleSourceScope preserves own-resource 404 before capability refusal.
+// It is a read-only scoped DB lookup, never a cluster probe, claim or capture.
+func (h *Handler) savedLifecycleSourceScope(ctx context.Context, c *e2bCaller, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !sandbox.ValidID(id) {
+		return sandbox.ErrNotFound
+	}
+	if p := h.loadPaused(ctx, c.proj.ID, id); p != nil && p.ServiceID == c.es.ID {
+		return nil
+	}
+	row := h.e2bRow(ctx, c, id)
+	if row == nil || row.Data["status"] == sandbox.StatusDeleted {
+		return sandbox.ErrNotFound
+	}
+	return nil
 }
 
 // updatePaused changes the paused record under a row lock. fn returns an error to abort (nothing is written); remove
@@ -227,56 +256,32 @@ func (h *Handler) snapshotSandboxWork(ctx context.Context, c *e2bCaller, id, nam
 	if err := h.snapshotsOn(c); err != nil {
 		return nil, err
 	}
-	ctx = context.WithoutCancel(ctx) // a client that gives up must not leave a half-made snapshot
+	ctx, cancel := context.WithTimeout(ctx, snapshotWait)
+	defer cancel()
 	saved, err := c.ss.SavedSandbox(ctx, c.proj.ID, id)
 	if err != nil {
 		return nil, err
 	}
 	cfg := c.ss.Config()
 	tm := sandbox.TemplateOfSaved(saved)
-	now := time.Now().UTC()
-	var t *sandboxTemplateDoc
-	if name != "" {
-		if !templateTagRe.MatchString(name) {
-			return nil, e2bStatusErr{http.StatusBadRequest, fmt.Sprintf("invalid snapshot name %q", name)}
-		}
-		if _, builtin := cfg.Templates[name]; builtin {
-			return nil, e2bStatusErr{http.StatusConflict, fmt.Sprintf("%q is a built-in template name", name)}
-		}
-		if t, err = h.loadTemplate(ctx, c.proj.ID, name); err != nil {
-			return nil, err
-		}
-		if t != nil && (t.Kind != "snapshot" || t.Internal) {
-			return nil, e2bStatusErr{http.StatusConflict, fmt.Sprintf("a template named %q exists", name)}
-		}
+	active, err := c.ss.ActiveBuildWorkers(ctx, c.proj.ID)
+	if err != nil {
+		return nil, err
 	}
-	created := false
-	if t == nil {
-		if name == "" {
-			name = "snapshot-" + strings.TrimPrefix(id, "sbx-") + "-" + newToken(3)
-		} else if n, err := h.sbTemplates.Count(ctx, pgdoc.M{"projectId": c.proj.ID, "internal": pgdoc.M{"$ne": true}}); err != nil {
-			return nil, err
-		} else if n >= maxTemplatesPerProject {
-			return nil, e2bStatusErr{http.StatusTooManyRequests, fmt.Sprintf("at most %d templates per project", maxTemplatesPerProject)}
-		}
-		t = &sandboxTemplateDoc{ID: newTemplateID(), ProjectID: c.proj.ID, Name: name, Tags: map[string]string{},
-			UploadToken: newToken(24), CreatedAt: &now, Kind: "snapshot", Internal: internal, SourceSandbox: id, ForkUntil: forkUntil}
-		if _, err := h.sbTemplates.InsertOne(ctx, pgdoc.M{"_id": t.ID, "projectId": t.ProjectID, "name": name}); err != nil {
-			return nil, err
-		}
-		created = true
-		if err := h.saveTemplate(ctx, t); err != nil {
-			return nil, err
-		}
+	t, bl, created, err := h.reserveSnapshot(ctx, c, id, name, internal, forkUntil, tm, sandbox.ImageOfSaved(saved), active)
+	if err != nil {
+		return nil, err
 	}
+
 	bs, err := buildStorage(cfg)
 	if err != nil {
 		return nil, err
 	}
-	buildID := uuid.NewString()
+	buildID := bl.BuildID
 	key := contextKey(t.ProjectID, t.ID, snapshotHash(buildID))
 	undo := func(cause error) (*sandboxTemplateDoc, error) {
 		_, _ = bs.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &bs.bucket, Key: &key})
+		h.failSnapshot(ctx, t.ProjectID, t.ID, buildID, cause)
 		if created {
 			_, _ = h.sbTemplates.DeleteOne(ctx, pgdoc.M{"_id": t.ID, "projectId": t.ProjectID})
 		}
@@ -322,11 +327,11 @@ func (h *Handler) snapshotSandboxWork(ctx context.Context, c *e2bCaller, id, nam
 	if t, err = h.loadTemplate(ctx, c.proj.ID, t.ID); err != nil || t == nil {
 		return undo(fmt.Errorf("snapshot record: %v", err))
 	}
-	t.CPU, t.MemoryGiB, t.GPU = tm.CPU, tm.MemoryGiB, tm.GPU
-	bl := templateBuild{BuildID: buildID, Status: sandbox.BuildBuilding, StartCmd: tm.StartCmd, ReadyCmd: tm.ReadyCmd,
-		StartAsRoot: tm.StartAsRoot, User: tm.User, Workdir: tm.Workdir, From: sandbox.ImageOfSaved(saved),
-		Tags: []string{"default"}, CreatedAt: &now, SizeBytes: size}
-	t.Builds = append(t.Builds, bl)
+	reserved := t.build(buildID)
+	if reserved == nil {
+		return undo(errBuildPinState)
+	}
+	reserved.SizeBytes = size
 	if err := h.saveTemplate(ctx, t); err != nil {
 		return undo(err)
 	}
@@ -351,6 +356,79 @@ func (h *Handler) snapshotSandboxWork(ctx context.Context, c *e2bCaller, id, nam
 		}
 	}()
 	return t, nil
+}
+
+// reserveSnapshot serializes absent names with imports, aliases and v3 reservations.
+// Admission/identity are durable before capture starts; this transaction never
+// performs filesystem, object-store or cluster I/O.
+func (h *Handler) reserveSnapshot(ctx context.Context, c *e2bCaller, id, name string, internal bool, forkUntil *time.Time, tm sandbox.Template, image string, active map[string]bool) (*sandboxTemplateDoc, templateBuild, bool, error) {
+	if err := h.sbTemplates.Ensure(ctx); err != nil {
+		return nil, templateBuild{}, false, err
+	}
+	var out *sandboxTemplateDoc
+	var build templateBuild
+	created := false
+	err := h.sbTemplates.DB().WithTx(ctx, func(tc context.Context) error {
+		if err := h.sbTemplates.DB().LockXact(tc, projectTemplateLock(c.proj.ID)); err != nil {
+			return err
+		}
+		if name == "" {
+			name = "snapshot-" + strings.TrimPrefix(id, "sbx-") + "-" + newToken(3)
+		}
+		if !templateTagRe.MatchString(name) {
+			return e2bStatusErr{http.StatusBadRequest, "invalid snapshot name"}
+		}
+		if _, ok := c.ss.Config().Templates[name]; ok {
+			return e2bStatusErr{http.StatusConflict, "snapshot name identifies a built-in template"}
+		}
+		current, err := h.loadTemplate(tc, c.proj.ID, name)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		if current != nil {
+			var locked sandboxTemplateDoc
+			found, err := h.sbTemplates.GetForUpdate(tc, current.ID, &locked)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return sandbox.ErrNotFound
+			}
+			current = &locked
+			if current.Deleting || current.Kind != "snapshot" || current.Internal != internal || current.Name != name {
+				return e2bStatusErr{http.StatusConflict, "snapshot name identifies a different template"}
+			}
+			for _, b := range current.Builds {
+				if b.Import != nil || !buildTerminal(&b) || buildPinActive(b) {
+					return errBuildPinState
+				}
+			}
+		} else {
+			count, err := h.sbTemplates.Count(tc, pgdoc.M{"projectId": c.proj.ID, "internal": pgdoc.M{"$ne": true}})
+			if err != nil {
+				return err
+			}
+			if !internal && count >= maxTemplatesPerProject {
+				return sandbox.ErrQuotaExceeded
+			}
+			current = &sandboxTemplateDoc{ID: newTemplateID(), ProjectID: c.proj.ID, Name: name, Tags: map[string]string{}, UploadToken: newToken(24), CreatedAt: &now, Kind: "snapshot", Internal: internal, SourceSandbox: id, ForkUntil: forkUntil}
+			created = true
+		}
+		if err := h.workerAdmission(tc, c, "", active); err != nil {
+			return err
+		}
+		current.CPU, current.MemoryGiB, current.GPU = tm.CPU, tm.MemoryGiB, tm.GPU
+		build = templateBuild{BuildID: uuid.NewString(), Status: sandbox.BuildBuilding, StartCmd: tm.StartCmd, ReadyCmd: tm.ReadyCmd, StartAsRoot: tm.StartAsRoot, User: tm.User, Workdir: tm.Workdir, From: image, Tags: []string{"default"}, CreatedAt: &now}
+		current.Builds = append(current.Builds, build)
+		current.UpdatedAt = &now
+		if err := h.sbTemplates.Upsert(tc, current.ID, current); err != nil {
+			return err
+		}
+		out = current
+		return nil
+	})
+	return out, build, created, err
 }
 
 func snapshotHash(buildID string) string { return "snapshot-" + buildID }
@@ -446,7 +524,8 @@ func (h *Handler) finishSnapshot(ctx context.Context, c *e2bCaller, t *sandboxTe
 	case st.Status != sandbox.BuildReady && st.Status != sandbox.BuildError:
 		return false, nil
 	}
-	logs := c.ss.BuildLogs(ctx, b.BuildID, maxStoredLogLines)
+	h.captureBuildArchive(ctx, c, t, b)
+	logs := b.Logs
 	reg := strings.TrimRight(c.ss.Config().TemplateRegistry, "/")
 	ft, changed, err := h.finishBuild(ctx, t.ProjectID, t.ID, b.BuildID, func(ft *sandboxTemplateDoc, fb *templateBuild) {
 		fb.Logs = logs
@@ -462,11 +541,12 @@ func (h *Handler) finishSnapshot(ctx context.Context, c *e2bCaller, t *sandboxTe
 		return false, err
 	}
 	if changed {
-		dctx := context.WithoutCancel(ctx)
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
 		if st.Status == sandbox.BuildReady {
 			h.snapshotStorageRow(dctx, c, ft)
 		}
-		_ = c.ss.DeleteBuild(dctx, b.BuildID)
+		// The terminal worker survives until its bounded prefix archive is stable.
 		if bs, err := buildStorage(c.ss.Config()); err == nil {
 			key := contextKey(t.ProjectID, t.ID, snapshotHash(b.BuildID))
 			_, _ = bs.client.DeleteObject(dctx, &s3.DeleteObjectInput{Bucket: &bs.bucket, Key: &key})
@@ -476,20 +556,16 @@ func (h *Handler) finishSnapshot(ctx context.Context, c *e2bCaller, t *sandboxTe
 }
 
 // snapshotStorageRow bills the stored snapshot by size (SANDBOX_SNAPSHOT, hourly per GB) from the moment it is ready.
-// A named snapshot taken again keeps its row and its start; the size is that of every ready build the record keeps
-// (trimBuilds drops a superseded one, and the registry prune then deletes its image).
+// A retaken named snapshot keeps successful history and its original storage-row
+// start. Exact duplicate immutable images count once (max captured layer bytes);
+// distinct retained digests remain additive. Physical registry pruning stays HOLD.
 func (h *Handler) snapshotStorageRow(ctx context.Context, c *e2bCaller, t *sandboxTemplateDoc) {
 	kind := "snapshot"
 	if t.Internal {
 		kind = "pause"
 	}
 	now := time.Now().UTC()
-	var size int64
-	for _, b := range t.Builds {
-		if b.Status == sandbox.BuildReady {
-			size += b.SizeBytes
-		}
-	}
+	size := templateStoredSize(t) // retained build history may name one physical digest repeatedly
 	data := map[string]any{"name": t.Name, "kind": kind, "sizeGB": float64(size) / (1 << 30), "createdAt": now.Format(time.RFC3339)}
 	if cr, _ := h.cloud.FindByServiceIDAndExternalID(ctx, c.es.ID, t.ID); cr != nil && cr.ProjectID == c.proj.ID {
 		if prev, _ := cr.Data["createdAt"].(string); prev != "" {
@@ -521,7 +597,19 @@ func (h *Handler) dropSnapshot(ctx context.Context, c *e2bCaller, templateID str
 	if err != nil || t == nil {
 		return
 	}
-	if err := h.deleteTemplate(ctx, c.ss, t); err != nil {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	// Internal snapshot teardown owns the terminal assembly worker even if its
+	// output archive was awaiting recapture. Remove it before its last DB owner.
+	for _, b := range t.Builds {
+		if buildPinActive(b) {
+			return
+		}
+		if err := c.ss.DeleteBuild(cleanup, b.BuildID); err != nil {
+			return
+		}
+	}
+	if err := h.deleteTemplate(cleanup, c.ss, t); err != nil {
 		slog.Error("e2b: drop snapshot", "template", templateID, "err", err)
 	}
 }
@@ -544,6 +632,15 @@ func (h *Handler) loadPaused(ctx context.Context, projectID, id string) *pausedS
 // image that is pushed lets the sandbox be deleted, and a failed assembly drops the pause, so the sandbox runs on and
 // a pause never loses files it answered 204 for. Files written after the capture are not kept.
 func (h *Handler) pauseSandbox(ctx context.Context, c *e2bCaller, id string) error {
+	if err := h.savedLifecycleSourceScope(ctx, c, id); err != nil {
+		return err
+	}
+	if err := h.snapshotsOn(c); err != nil {
+		return err
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
+		return err
+	}
 	if h.sbSafety != nil && ctx.Value(captureLockKey{}) != id {
 		_, err := h.sbSafety.DB().WithAdvisoryLock(ctx, "sandbox-capture:"+c.es.ID+":"+c.proj.ID+":"+id, false, func() error { return h.pauseSandbox(context.WithValue(ctx, captureLockKey{}, id), c, id) })
 		return err
@@ -633,6 +730,13 @@ var errPauseTaken = errors.New("another driver holds the pause")
 // record, and a State it sets to "" ends the transition (no lease). errPauseMoved: the pause was cancelled, killed or
 // replaced; errPauseTaken: another driver holds it.
 func (h *Handler) driveStep(ctx context.Context, c *e2bCaller, d *pauseDrive, fn func(p *pausedSandbox) (remove bool)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
+		return err
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	lease := time.Now().UTC().Add(pauseLease)
@@ -661,6 +765,11 @@ func (h *Handler) driveStep(ctx context.Context, c *e2bCaller, d *pauseDrive, fn
 
 // renewPause keeps the drive's lease alive until ctx ends; a pause that moved on stops the drive's wait (stop).
 func (h *Handler) renewPause(ctx context.Context, c *e2bCaller, d *pauseDrive, stop context.CancelFunc) {
+	if savedLifecycleAdmission(c.ss.Config()) != nil {
+		stop()
+		return
+	}
+
 	tick := time.NewTicker(pauseRenew)
 	defer tick.Stop()
 	for {
@@ -680,6 +789,10 @@ func (h *Handler) renewPause(ctx context.Context, c *e2bCaller, d *pauseDrive, s
 // redrivePauses takes over the pauses whose driver stopped renewing them (the portal restarted mid-pause) and finishes
 // each as its driver would have, so a pause answered 204 never stays half-done, running and billing.
 func (h *Handler) redrivePauses(ctx context.Context, es *externalservice.ExternalService, ss *sandbox.Service) {
+	if ctx.Err() != nil || savedLifecycleAdmission(ss.Config()) != nil {
+		return
+	}
+
 	var ps []pausedSandbox
 	if err := h.sbPaused.Find(ctx, pgdoc.M{"serviceId": es.ID, "state": pgdoc.M{"$in": []any{pausedPausing, pausedStopping}}}, &ps); err != nil {
 		slog.Warn("autopause: list unfinished pauses", "service", es.ID, "err", err)
@@ -730,6 +843,10 @@ var errPauseMoved = errors.New("the pause moved on")
 // ponytail: no time bound of its own; the build pod's activeDeadlineSeconds (BuildTimeout) ends a slow build, but one
 // never scheduled keeps this drive (and its lease) alive.
 func (h *Handler) finishPause(c *e2bCaller, d *pauseDrive) {
+	if savedLifecycleAdmission(c.ss.Config()) != nil {
+		return
+	}
+
 	id, templateID := d.id, d.templateID
 	ctx := context.Background()
 	held, moved := context.WithCancel(ctx) // ends when the pause moves on (renewPause)
@@ -779,6 +896,13 @@ func (h *Handler) finishPause(c *e2bCaller, d *pauseDrive) {
 }
 
 func (h *Handler) stopPausedSource(ctx context.Context, c *e2bCaller, d *pauseDrive) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
+		return err
+	}
+
 	id := d.id
 	if err := h.driveStep(ctx, c, d, func(p *pausedSandbox) bool {
 		p.State = pausedStopping
@@ -817,6 +941,10 @@ func (h *Handler) stopPausedSource(ctx context.Context, c *e2bCaller, d *pauseDr
 // sandbox keeps running, to its own end again, or a few minutes when that has passed (an autoPause one is then paused
 // again by the next tick instead of removed at once).
 func (h *Handler) abandonPause(ctx context.Context, c *e2bCaller, d *pauseDrive, cause error) {
+	if ctx.Err() != nil || savedLifecycleAdmission(c.ss.Config()) != nil {
+		return
+	}
+
 	// A guarded pause may be abandoned only when the original is positively
 	// known alive. An outage/expired source can leave this image as the only
 	// copy; retain its record for redrive instead of treating unknown as alive.
@@ -873,6 +1001,10 @@ func laterOf(a, b time.Time) time.Time {
 // every file) at once. false: there is no such pause (it is gone, or its sandbox is already being deleted), or the
 // sandbox no longer runs: the snapshot is then the only copy of its files, so the pause goes on and the connect waits.
 func (h *Handler) cancelPause(ctx context.Context, c *e2bCaller, id string) bool {
+	if ctx.Err() != nil || savedLifecycleAdmission(c.ss.Config()) != nil {
+		return false
+	}
+
 	var tpl string
 	if err := h.updatePaused(ctx, c.proj.ID, id, func(p *pausedSandbox) (bool, error) {
 		if p.State != pausedPausing {
@@ -921,19 +1053,49 @@ func (h *Handler) e2bSnapshotFail(w http.ResponseWriter, err error) {
 
 // startSaved creates a sandbox from a saved CR on image (resume or fork), under the project quota, and waits for it.
 func (h *Handler) startSaved(ctx context.Context, c *e2bCaller, saved map[string]any, image string, timeoutSeconds int) (string, error) {
-	shutdown, err := sandbox.ShutdownTimeFor(c.ss.Config(), time.Now(), timeoutSeconds)
-	if err != nil {
-		return "", e2bStatusErr{http.StatusBadRequest, err.Error()}
+	id, _, err := h.startSavedReady(ctx, c, saved, image, timeoutSeconds)
+	return id, err
+}
+func digSavedScope(saved map[string]any, projectID string) error {
+	md, _ := saved["metadata"].(map[string]any)
+	labels, _ := md["labels"].(map[string]any)
+	id, _ := md["name"].(string)
+	if md["namespace"] != sandbox.NamespaceFor(projectID) || labels[sandbox.LabelProject] != projectID || !sandbox.ValidID(id) {
+		return sandbox.ErrNotFound
 	}
+	return nil
+}
+
+func (h *Handler) startSavedReady(ctx context.Context, c *e2bCaller, saved map[string]any, image string, timeoutSeconds int) (string, *cloud.CloudResource, error) {
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
+	if digSavedScope(saved, c.proj.ID) != nil {
+		return "", nil, sandbox.ErrNotFound
+	}
+	if _, err := sandbox.ShutdownTimeFor(c.ss.Config(), time.Now(), timeoutSeconds); err != nil {
+		return "", nil, e2bStatusErr{http.StatusBadRequest, err.Error()}
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
+		return "", nil, err
+	}
+	if err := sandbox.CheckSavedRuntimeImage(c.ss.Config(), c.proj.ID, image); err != nil {
+		return "", nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.ss.Config().Startup.Duration()+time.Minute)
+	defer cancel()
+	sandbox.ArmSavedStartup(saved, c.ss.Config(), timeoutSeconds, time.Now())
 	md, _ := saved["metadata"].(map[string]any)
 	id, _ := md["name"].(string)
-	if ann, ok := md["annotations"].(map[string]any); ok && ann[sandbox.AnnotationAutoPause] == "true" {
-		ann[sandbox.AnnotationEndAt] = shutdown.UTC().Format(time.RFC3339)
-		shutdown = shutdown.Add(sandbox.AutoPauseGrace)
+	spec, _ := saved["spec"].(map[string]any)
+	shutdown, err := time.Parse(time.RFC3339, fmt.Sprint(spec["shutdownTime"]))
+	if err != nil {
+		return "", nil, err
 	}
+
 	q := c.es.SandboxProjectQuota(c.proj.Quota)
 	if err := h.withSandboxStart(ctx, c.es.ID, func(tc context.Context) error { return c.ss.ResumeSandbox(tc, c.proj.ID, saved, image, shutdown, &q) }); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	now := time.Now().UTC()
 	// A new billing row: the old one (DELETED at the pause) is archived, and the charge rates archived rows to their end.
@@ -952,24 +1114,39 @@ func (h *Handler) startSaved(ctx context.Context, c *e2bCaller, saved map[string
 	row, err := h.cloud.Insert(ctx, &cloud.CloudResource{ServiceID: c.es.ID, Region: region, ProjectID: c.proj.ID,
 		Type: cloud.TypeSandbox, ExternalID: id, Data: sandbox.PayloadOf(saved), CreatedAt: &now, UpdatedAt: &now})
 	if err != nil {
-		_ = c.ss.DeleteSandbox(context.WithoutCancel(ctx), c.proj.ID, id)
-		return "", err
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = c.ss.DeleteSandbox(cleanup, c.proj.ID, id)
+		cancel()
+		return "", nil, err
 	}
 	if err := h.e2bWaitReady(ctx, c, row); err != nil {
-		_ = h.sandboxDelete(context.WithoutCancel(ctx), c.es, c.proj, row)
-		return "", e2bStatusErr{http.StatusServiceUnavailable, "the sandbox did not start in time"}
+		h.cleanupFailedStartup(ctx, c, row)
+		return "", nil, e2bStatusErr{http.StatusServiceUnavailable, "the sandbox did not start in time"}
 	}
-	return id, nil
+	if err := startupResponseAlive(ctx, row.Data); err != nil {
+		h.cleanupFailedStartup(ctx, c, row)
+		return "", nil, err
+	}
+	return id, row, nil
 }
 
 // resumePaused brings a paused sandbox back under its id and returns its E2B Sandbox. It passes the usage gate first:
 // a suspended project or profile keeps its snapshot but cannot bring it back (D9).
 func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandbox, timeoutSeconds int) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p == nil || p.ProjectID != c.proj.ID || p.ServiceID != c.es.ID || !sandbox.ValidID(p.ID) {
+		return nil, sandbox.ErrNotFound
+	}
 	if err := h.sandboxUsageGate(ctx, c.proj, c.es); err != nil {
 		return nil, err
 	}
 	if _, err := sandbox.ShutdownTimeFor(c.ss.Config(), time.Now(), timeoutSeconds); err != nil {
 		return nil, e2bStatusErr{http.StatusBadRequest, err.Error()}
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
+		return nil, err
 	}
 	// Claim the resume: exactly one caller brings the sandbox back; a concurrent one waits for it and answers with the
 	// same sandbox; a pause under way is waited for, and one whose image is still not ready after PauseJoinWait is
@@ -1001,7 +1178,10 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 			case <-time.After(time.Second):
 			}
 			continue
-		case claimStalePause, claimStaleResume:
+		case claimStaleResume:
+			// Lease age and Alive/absence are not proof that a prior apply had no effect.
+			return nil, errSandboxBusy
+		case claimStalePause:
 			if c.ss.Alive(ctx, c.proj.ID, p.ID) == nil {
 				// The crashed pause never removed the sandbox, or the crashed resume already started it: it runs.
 				// Finish by dropping the pause (unless a driver took it over meanwhile).
@@ -1045,7 +1225,7 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 	defer cancel()
 	release := func(cause error) (map[string]any, error) {
 		_ = h.updatePaused(context.WithoutCancel(ctx), c.proj.ID, p.ID, func(cur *pausedSandbox) (bool, error) {
-			if cur.State == pausedResuming {
+			if cur.State == pausedResuming && !cur.ResumeUncertain {
 				cur.State, cur.LeaseUntil = "", nil
 			}
 			return false, nil
@@ -1065,17 +1245,47 @@ func (h *Handler) resumePaused(ctx context.Context, c *e2bCaller, p *pausedSandb
 	if t.defaultBuild() == nil {
 		return release(e2bStatusErr{http.StatusInternalServerError, "the paused sandbox's snapshot is not usable"})
 	}
-	id, err := h.startSaved(ctx, c, p.Saved, t.defaultBuild().Image, timeoutSeconds)
+	// Publish the no-takeover marker before the external apply. Any ambiguous
+	// launch/cleanup response retains this owner and snapshot for operator recovery.
+	if err := h.updatePaused(ctx, c.proj.ID, p.ID, func(cur *pausedSandbox) (bool, error) {
+		if cur.State != pausedResuming || cur.ResumeUncertain {
+			return false, errSandboxBusy
+		}
+		cur.ResumeUncertain = true
+		return false, nil
+	}); err != nil {
+		return release(err)
+	}
+	id, readyRow, err := h.startSavedReady(ctx, c, p.Saved, t.defaultBuild().Image, timeoutSeconds)
 	if err != nil {
 		return release(err)
 	}
-	dctx := context.WithoutCancel(ctx) // the sandbox runs: the record must go whatever the client does
-	_, _ = h.sbPaused.DeleteByID(dctx, p.ID)
-	// The snapshot image stays in the registry (the running sandbox uses it); its template record and its storage
-	// billing go.
-	h.dropSnapshot(dctx, c, p.TemplateID)
-	a, err := c.ss.AccessFor(ctx, c.proj.ID, id)
+	// Access is part of usable success. Do not drop the retryable snapshot or
+	// lease while a late/failed access read could leave the caller with no sandbox.
+	a, err := h.savedStartupAccessRow(ctx, c, id, readyRow)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := startupResponseAlive(ctx, readyRow.Data); err != nil {
+		h.cleanupFailedStartup(ctx, c, readyRow)
+		return nil, err
+	}
+	end, _ := time.Parse(time.RFC3339, fmt.Sprint(readyRow.Data["shutdownTime"]))
+	cleanupEnd := time.Now().Add(30 * time.Second)
+	if end.Before(cleanupEnd) {
+		cleanupEnd = end
+	}
+	dctx, cancelDone := context.WithDeadline(ctx, cleanupEnd)
+	defer cancelDone()
+	if _, err := h.sbPaused.DeleteByID(dctx, p.ID); err != nil {
+		return nil, err
+	}
+	h.dropSnapshot(dctx, c, p.TemplateID)
+	if err := startupResponseAlive(ctx, readyRow.Data); err != nil {
+		h.cleanupFailedStartup(ctx, c, readyRow)
 		return nil, err
 	}
 	tpl, _ := sandbox.PayloadOf(p.Saved)["template"].(string)
@@ -1210,7 +1420,19 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
+	if err := ctx.Err(); err != nil {
+		e2bFail(w, err)
+		return
+	}
+	if err := h.savedLifecycleSourceScope(ctx, c, chi.URLParam(r, "sandboxID")); err != nil {
+		e2bFail(w, err)
+		return
+	}
 	if err := h.snapshotsOn(c); err != nil {
+		e2bFail(w, err)
+		return
+	}
+	if err := savedLifecycleAdmission(c.ss.Config()); err != nil {
 		e2bFail(w, err)
 		return
 	}
@@ -1265,27 +1487,51 @@ func (h *Handler) e2bFork(w http.ResponseWriter, r *http.Request) {
 	image := t.defaultBuild().Image
 	// The forks start in parallel: each waits up to e2bReadyTimeout for envd.
 	results := make([]any, count)
+	readyRows := make([]*cloud.CloudResource, count)
 	tpl, _ := sandbox.PayloadOf(saved)["template"].(string)
 	var wg sync.WaitGroup
 	for i := range count {
 		wg.Go(func() {
 			clone, _ := sandbox.CloneSaved(saved)
-			newID, err := h.startSaved(ctx, c, clone, image, timeout)
+			newID, readyRow, err := h.startSavedReady(ctx, c, clone, image, timeout)
 			var a *sandbox.Access
 			if err == nil {
-				a, err = c.ss.AccessFor(ctx, c.proj.ID, newID)
+				a, err = h.savedStartupAccessRow(ctx, c, newID, readyRow)
 			}
 			if err != nil {
 				code, msg := e2bError(err)
 				results[i] = map[string]any{"error": map[string]any{"code": code, "message": msg}}
 				return
 			}
+			readyRows[i] = readyRow
 			results[i] = map[string]any{"sandbox": c.e2bSandbox(newID, tpl, a)}
 		})
 	}
 	wg.Wait()
 	// The forks run from the snapshot image; its template record is not needed any more.
 	h.dropSnapshot(context.WithoutCancel(ctx), c, t.ID)
+	cleanupFork := func(cleanup context.Context, row *cloud.CloudResource) {
+		if err := h.sandboxDelete(cleanup, c.es, c.proj, row); err != nil {
+			slog.Error("e2b: cleanup after expired fork", "sandbox", row.ExternalID, "err", err)
+		}
+	}
+	deferredCleanup := finalizeForkResults(ctx, readyRows, results, time.Now, cleanupFork)
+	// No blocking I/O may run after the final pure lifetime sweep and before
+	// writing the selected response. Deferred cleanup is finite and owner-scoped.
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		for _, row := range deferredCleanup {
+			if cleanup.Err() != nil {
+				return
+			}
+			cleanupFork(cleanup, row)
+		}
+	}()
+	if ctx.Err() != nil {
+		e2bErr(w, http.StatusServiceUnavailable, "fork request canceled before response")
+		return
+	}
 	e2bJSON(w, http.StatusCreated, results)
 }
 
@@ -1326,7 +1572,7 @@ func (h *Handler) AutoPauseSandboxes(ctx context.Context) {
 			continue
 		}
 		ss, err := h.sandboxFor(es)
-		if err != nil || !buildsOn(ss.Config()) {
+		if err != nil || !buildsOn(ss.Config()) || !sandbox.SavedLifecycleAvailable(ss.Config()) {
 			continue
 		}
 		h.redrivePauses(ctx, es, ss) // before listing: a pause taken over is not captured again
@@ -1396,6 +1642,9 @@ func (h *Handler) claimResume(ctx context.Context, projectID string, p *pausedSa
 	err = h.updatePaused(ctx, projectID, p.ID, func(cur *pausedSandbox) (bool, error) {
 		now := time.Now().UTC()
 		switch {
+		case cur.ResumeUncertain:
+			out = claimJoined
+			return false, nil
 		case cur.State == pausedResuming && cur.leased(now):
 			out = claimJoined
 			return false, nil
@@ -1423,12 +1672,15 @@ func (h *Handler) awaitResumed(ctx context.Context, c *e2bCaller, id string) (ma
 	deadline := time.Now().Add(resumeLease)
 	for {
 		if p := h.loadPaused(ctx, c.proj.ID, id); p == nil {
-			d, err := c.ss.GetSandbox(ctx, c.proj.ID, id)
+			d, err := c.ss.WaitReady(ctx, c.proj.ID, id)
 			if err != nil {
 				return nil, err
 			}
-			a, err := c.ss.AccessFor(ctx, c.proj.ID, id)
+			a, err := committedStartupAccess(ctx, d, time.Now, func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, id) })
 			if err != nil {
+				return nil, err
+			}
+			if err := startupResponseAlive(ctx, d); err != nil {
 				return nil, err
 			}
 			tpl, _ := d["template"].(string)
@@ -1452,7 +1704,7 @@ func (h *Handler) awaitResumed(ctx context.Context, c *e2bCaller, id string) (ma
 // holds it.
 func (h *Handler) killPaused(ctx context.Context, c *e2bCaller, p *pausedSandbox) error {
 	err := h.updatePaused(ctx, c.proj.ID, p.ID, func(cur *pausedSandbox) (bool, error) {
-		if cur.State != pausedPausing && cur.leased(time.Now()) { // a pause still assembling ends here; its sandbox runs
+		if cur.ResumeUncertain || cur.State != pausedPausing && cur.leased(time.Now()) { // a pause still assembling ends here; its sandbox runs
 			return false, errSandboxBusy
 		}
 		return true, nil
@@ -1486,7 +1738,7 @@ func (h *Handler) deleteProjectPaused(ctx context.Context, projectID, serviceID 
 
 // e2bWakeLimit bounds one wake: the snapshot wait plus a cold start. The proxy stops waiting earlier (its client gets
 // 503 + Retry-After) while the wake carries on.
-const e2bWakeLimit = 2 * time.Minute
+const e2bWakeLimit = resumeLease - time.Minute
 
 // wakePaused resumes the paused sandbox id for the wake endpoint (sandbox_wake.go). The body's tokens must be the
 // paused sandbox's own (envd's for the envd port, the traffic token for other ports when it has one), so only someone
@@ -1542,7 +1794,7 @@ func (h *Handler) wakePaused(w http.ResponseWriter, r *http.Request, bearer, id 
 	if limit := c.ss.Config().WithDefaults().Limits.MaxTimeoutSeconds; limit > 0 && timeout > limit {
 		timeout = limit
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), e2bWakeLimit)
+	ctx, cancel := context.WithTimeout(r.Context(), e2bWakeLimit)
 	defer cancel()
 	l := slog.With("sandbox", id, "project", p.ProjectID, "port", port)
 	if _, err := h.resumePaused(ctx, c, &p, timeout); err != nil {

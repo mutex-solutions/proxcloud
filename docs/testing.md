@@ -1,9 +1,11 @@
 # Testing
 
-ProxCloud has two test layers: fast **unit tests** that need nothing external, and
-a **hermetic integration suite** that runs against a throwaway PostgreSQL started
-via testcontainers. Both run with plain `go test`; the integration suite is
-behind a build tag so the default run needs no Docker.
+The backend has two main test layers: fast **unit tests** and a **hermetic
+integration suite** against throwaway PostgreSQL started via testcontainers. Both
+use `go test`; integration tests are build-tagged so the default run needs no
+Docker. Hosted CI also builds/smokes both SPAs, checks installer syntax, and runs
+offline image-pipeline/Packer validation. None of those replaces a separately
+approved live installation, cloud lifecycle or template-build acceptance run.
 
 ## Unit tests
 
@@ -31,7 +33,8 @@ integration`), so they are excluded from `go test ./...` and only run when you
 ask for them:
 
 ```sh
-go test -tags=integration ./test/integration/...   # or: make test-integration
+go test -tags=integration ./test/integration/... ./cmd/api/...  # matches hosted CI
+# make test-integration runs the test/integration package subset
 ```
 
 ### What it needs
@@ -72,6 +75,28 @@ reach. Representative areas (one file each, `test/integration/`):
   (`lock_test.go`, `scheduler_test.go`, `activation*_test.go`,
   `suspension_test.go`, `savings_test.go`, `reminder_test.go`,
   `mail_jobs_test.go`, `metricsjob_test.go`, `billingjob_test.go`).
+
+## Frontend, installer and image-pipeline checks
+
+Each frontend has `npm run build`, `npm run lint` and Playwright scripts; use
+`npm ci` with its lockfile. Hosted `test:smoke` opens the built sign-in surface and
+checks runtime errors. It does **not** prove authenticated client/admin workflows,
+external IdP setup, payment delivery or PVE resource lifecycle.
+
+The hosted installer job runs its unit checks and Ansible `--syntax-check`, not an
+installation against a real site. Image-network regressions are safe to run locally:
+
+```sh
+python3 -m unittest discover -s images/tests -v
+bash images/packer/validate.sh
+```
+
+The Packer helper needs the pinned Packer/plugin toolchain and may download plugins,
+but uses documentation-only inputs and performs full configuration validation, not
+`packer build` or PVE writes. Offline/fake-API tests cover failure ordering and seed
+cleanup refusal; they do not prove Ubuntu installer boot, reboot, Goss checks or
+private ISO cleanup on a live Kubernetes-template build. Keep real PVE builds on
+trusted self-hosted workflows, never public-PR runners with infrastructure secrets.
 
 ## Adding a test
 

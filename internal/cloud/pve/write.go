@@ -541,15 +541,59 @@ func (s *Service) PowerAction(ctx context.Context, projectID, externalID, verb s
 
 // ResizeServer applies a new flavor: graceful stop when running, set cores/memory + flavor tag, grow the root disk when the
 // new flavor's is larger, start again if it was running.
-func (s *Service) ResizeServer(ctx context.Context, projectID, externalID string, spec ServerSpec) error {
+func (s *Service) ResizeServer(ctx context.Context, projectID, externalID string, spec ServerSpec, headroomPct float64) error {
 	ctx, cancel := context.WithTimeout(ctx, createTimeout)
 	defer cancel()
+	if s.HolderOperations != nil {
+		var release func()
+		var err error
+		ctx, release, err = s.beginHolders(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	vm, err := s.ResolveVM(ctx, projectID, externalID)
 	if err != nil {
 		return err
 	}
 	if vm == nil {
 		return fmt.Errorf("pve: vm %s not found", externalID)
+	}
+	// Grow first: an unverified/full storage must not stop the VM or change its
+	// flavor. ExtendVolume joins this holder session and preserves R1 intent and
+	// effect checks; failures (including uncertain backend effects) propagate.
+	if spec.DiskGb > 0 {
+		target, err := volumeTargetBytes(spec.DiskGb)
+		if err != nil {
+			return err
+		}
+		cfg, err := s.volumeGrowthConfig(ctx, vm)
+		if err != nil {
+			return err
+		}
+		var root VMDisk
+		for _, slot := range []string{"scsi0", "virtio0", "sata0", "ide0"} {
+			for _, d := range ParseDisks(cfg) {
+				if d.Slot == slot {
+					root = d
+					break
+				}
+			}
+			if root.Slot != "" {
+				break
+			}
+		}
+		current, known := diskSizeBytes(cfg.Str(root.Slot))
+		if !known {
+			return conflictf("The live boot disk size is unknown or invalid")
+		}
+		// A smaller flavor keeps the existing disk; never ask PVE to shrink.
+		if target > current {
+			if err := s.ExtendVolume(ctx, projectID, vm.VMID, root.VolID, spec.DiskGb, headroomPct); err != nil {
+				return err
+			}
+		}
 	}
 	wasRunning := vm.Status == "running"
 	if vm.PoweredOn() {
@@ -586,14 +630,6 @@ func (s *Service) ResizeServer(ctx context.Context, projectID, externalID string
 	}
 	if err != nil {
 		return fmt.Errorf("pve resize: configure: %w", err)
-	}
-	if spec.DiskGb > 0 {
-		if slot := s.bootDiskSlot(ctx, vm.Node, vm.VMID); slot != "" {
-			// Grow-only: PVE rejects a shrink; a smaller flavor keeps the disk (honest).
-			if up, rerr := s.C.ResizeDisk(ctx, vm.Node, vm.VMID, slot, fmt.Sprintf("%dG", spec.DiskGb)); rerr == nil {
-				_ = s.C.WaitTask(ctx, up)
-			}
-		}
 	}
 	if wasRunning {
 		up, err := s.C.StartVM(ctx, vm.Node, vm.VMID)

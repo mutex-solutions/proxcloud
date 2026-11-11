@@ -34,8 +34,8 @@ func TestCheckLayer(t *testing.T) {
 	}
 }
 
-// A snapshot taken again keeps only its tagged ready build (and any still building or failed), so the image billed is
-// the image kept; an ordinary template keeps its older ready builds.
+// Ready snapshot history is retained as an artifact root, like ordinary templates;
+// changing the default tag is not an explicit reference-aware history deletion.
 func TestTrimBuildsSnapshot(t *testing.T) {
 	mk := func(kind string) *sandboxTemplateDoc {
 		return &sandboxTemplateDoc{Kind: kind, Tags: map[string]string{"default": "b2"}, Builds: []templateBuild{
@@ -44,7 +44,7 @@ func TestTrimBuildsSnapshot(t *testing.T) {
 	}
 	s := mk("snapshot")
 	trimBuilds(s)
-	if len(s.Builds) != 3 || s.Builds[0].BuildID != "b2" {
+	if len(s.Builds) != 4 || s.Builds[0].BuildID != "b1" {
 		t.Fatalf("snapshot kept %+v", s.Builds)
 	}
 	tp := mk("")

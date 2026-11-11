@@ -1,9 +1,10 @@
 # Managed sandboxes (gVisor) — design notes and runbook
 
 Sandboxes are short-lived containers for untrusted code (agents, code interpreters), run under gVisor (`runsc`) on a
-Kubernetes cluster that belongs to the platform, with an E2B-compatible API in front. The feature is being ported from
-an earlier implementation by the same owner (called **EE** below). It is not in the product yet: this file starts with
-the lab spike (phase SB0) and grows into the operator runbook as the phases land.
+Kubernetes cluster that belongs to the platform, with an E2B-compatible API in front. This document combines the
+implemented service/runbook with historical porting notes from an earlier implementation (called **EE** below).
+Availability is capability- and provider-gated: code or an old lab drill is not proof that a feature is enabled or
+accepted at a current site. Read the current boundaries below before following historical phases.
 
 > ## Status
 >
@@ -19,11 +20,25 @@ the lab spike (phase SB0) and grows into the operator runbook as the phases land
 > what of E2B does not work is in [e2b-compat.md](e2b-compat.md). SB6a (section 6) adds the sandbox registry: Zot on
 > the services cluster with its blobs in the object store, one pull account per project, the built-in images copied in
 > by digest and pre-pulled on every node. SB6b (section 7) adds custom templates built with the E2B SDKs (a build pod
-> per build, a build account per project, presigned contexts) and the pruning of unreferenced images. SB7 (section 8)
-> adds pause, resume, snapshots and fork of a sandbox's filesystem, autoPause and autoResume through the wake endpoint.
+> per build, a build account per project, presigned contexts). Registry pruning currently supports preview only:
+> physical manifest deletion is held. SB7 (section 8) records the earlier pause/resume/fork algorithm; managed saved
+> lifecycle and AutoPause/AutoResume are currently unavailable. Named filesystem capture/export is separate.
 > SB8 (section 9) adds the `mcp-gateway` template for `Sandbox.create(mcp=...)`: the gateway and its 47-server catalog,
 > each server's keys from the tenant only. Not yet: GPUs (SB9). Section 0 records the hand-built lab spike. Phase order
 > and decisions: the sandbox plan (owner document, not in this repository).
+
+## Current saved-lifecycle admission boundary
+
+**Managed pause/resume/fork is currently unavailable.** A fixed provider-wide saved-lifecycle capability is false: manual/native-abuse/automatic pause, paused CONNECT/wake, fork, and new AutoPause/AutoResume create promises fail closed before their lifecycle effects. There is no enable flag or test exception. The historical SB7 descriptions below document the earlier algorithm, not currently reachable restore-success behavior.
+
+Named snapshot capture/export and ordinary sandbox CREATE—including a pinned CREATE from a ready named snapshot—remain separate capabilities. Running CONNECT/GET/exec/timeout and explicitly authorized discard/teardown retain their existing authorization and uncertainty fences. Retained historical pause and expired internal-fork copies are not automatically discarded by a capability refusal. Existing source shutdownTime may still expire independently; retention does not extend TTL or guarantee that a source runs forever.
+
+See [saved-runtime admission and C4 safety guide](saved-runtime-admission.md) for exact ordering, truthful capability fields, compatibility limits, test transitions and the still-unimplemented source-lineage/old-Apply exclusion prerequisites. Dormant SnapshotProof correlations do not enable a restore or authorize registry GC.
+
+**Registry deletion is also held.** `registryPrune: on` returns an operator HOLD before either scheduled prune or
+project-teardown physical DELETE. `dry-run` may report candidates, but counts are previews, not reclaimed storage.
+Deleting a template/alias record or moving a tag is not evidence that blobs/manifests were deleted. Historical
+sections describing automatic physical prune must not be used as a current cleanup runbook.
 
 ## 0. SB0 lab spike (2026-11-07)
 
@@ -791,8 +806,9 @@ client ──TCP 443──► entry appliance (HAProxy VM: public NIC + NIC on t
 `cmd/sandbox-proxy` and `internal/sandboxproxy`, ported from EE with its routing unchanged: it looks the pod up by
 `proxcloud.io/sandbox-id` (Running, Ready, not being deleted; hits and misses cached two seconds), forwards plain HTTP
 to `<podIP>:<port>` with streaming and WebSocket upgrades, refuses envd's control-plane paths (`/init`, `/freeze`, ...)
-on port 49983, and on every other port wants the sandbox's traffic token in `e2b-traffic-access-token` when the
-sandbox was created with `allowPublicTraffic: false`. EE's trust of `X-Forwarded-Host` is gone: nothing sits between
+on port 49983, and requires the sandbox's traffic token in `e2b-traffic-access-token` on every application
+port when the sandbox was created with `allowPublicTraffic: false`. Port 49983 is exempt only when the pod's
+actual main-container command runs envd; native private services require the traffic token on that port too. EE's trust of `X-Forwarded-Host` is gone: nothing sits between
 the client and the proxy that could set it.
 
 New here (D15): the proxy terminates TLS itself. `SANDBOX_TLS_DIR` holds `tls.crt` and `tls.key` from the mounted
@@ -978,8 +994,9 @@ once. A PAT (`pk.sk`) is not accepted here: it reaches every project of its user
 billing profile 403, a DISABLED provider or a release gate that does not hold 503) and the create carries the project
 quota (429), then creates the sandbox and its row the native API does, so billing, suspension, teardown and the
 cross-project checks are the same. List, get, logs and kill stay open, as on the native API. A create returns once the
-sandbox is ready (envd up, the template's ready command passed), at most 50 s, and records the start on the row then,
-so a sandbox only the E2B API ever touched is billed from that moment. `test/integration/sandbox_e2b_test.go` covers
+sandbox is ready (envd up, the template's ready command passed), under the current phased startup budget rather than
+the old fixed 50 s wait. Runtime TTL and billing start at the first durably committed Ready, not at request creation;
+a late readiness/access read cannot extend that lifetime. `test/integration/sandbox_e2b_test.go` covers
 each gate on each of these routes, and fails with the gate calls taken out.
 
 ### 5.3 envd in the sandbox
@@ -1018,8 +1035,9 @@ TAG=<tag>`, prints each reference with its digest); the `sandbox-templates` work
 | `base` | `sandbox-base`: E2B's base image plus user `user` with passwordless sudo | `"user": "user", "workdir": "/home/user"`, 1-2 vCPU / 1 GiB |
 | `code-interpreter-v1` | `sandbox-code-interpreter`: Jupyter and E2B's code-interpreter server on :49999 (Python, JavaScript, Bash kernels) | `"startCmd": "/root/.jupyter/start-up.sh", "startAsRoot": true, "readyCmd": "curl -fsS localhost:49999/health", "user": "user", "workdir": "/home/user"`, 2 vCPU / 2 GiB |
 
-The code interpreter's start counts towards the create's 50 s: at 1 vCPU on the nested lab it took 37-40 s on an idle
-node and missed the limit when its node was busy, so offer it at 2 vCPU.
+The code interpreter's startup uses the provider's phased readiness budget; size its CPU and timeout for the real
+site. Historical SB5 measurements under the former fixed 50 s limit took 37–40 s at 1 vCPU on an idle nested node
+and failed on a busy node; they are not a current startup SLA.
 
 ### 5.5 Measured on the lab (2026-11-08)
 
@@ -1218,6 +1236,7 @@ SDK ──POST /e2b/v3/templates──► portal (template + build ids, table sa
           fetch  (curl, presigned GETs from the bucket)            no credential
           base   (crane: base image → kaniko's cache, pinned)      the project's build account, or the caller's
           kaniko (the caller's RUN steps, --no-push, offline)      no credential
+          prepare-output (validate + make OCI blobs readable)     no credential; only output mounted
           push   (crane push → <registry>/t/<project>/<template>:<build>)  the project's build account
  GET …/builds/{build}/status (polled by the SDK; job sandboxBuildSync records builds nobody polls) → ready, digest
 Sandbox.create("<name>[:tag]") → <registry>/t/<project>/<template>@<digest>, pulled with the project's pull account
@@ -1243,6 +1262,15 @@ Sandbox.create("<name>[:tag]") → <registry>/t/<project>/<template>@<digest>, p
   and started under a Postgres advisory lock per project, so parallel requests cannot pass the count together and
   fill the namespace quota all projects share), 30 minutes each; a build is billed like a sandbox of the template's size while it runs (row `build-<id>`, template
   `build:<template>`).
+- **Image handoff:** Kaniko uses `--image-format=oci --oci-layout-path=/out/image`; the separate credentialed
+  container runs `crane push /out/image … --image-refs /dev/termination-log`. Both the OCI image format and the
+  directory handoff are required: an OCI layout can contain a Docker manifest, and crane v0.20.3 reconstructs Docker
+  schema 2 when loading a Docker-save tarball. Between Kaniko and push, the credential-free `prepare-output` init
+  mounts only `/out`, rejects symlinks/special files/multiply linked files in the entire image tree before chmod, and
+  makes files `0444` and directories `0555`. This permits the unchanged nonroot push image to read root-produced
+  `0600` blobs; push mounts the output read-only. The helper uses the existing pinned debug image, UID/GID 0, all
+  capabilities dropped, no privilege escalation and read-only root filesystem. No registry acceptance or credential
+  boundary is widened, and no tool-image pin changes.
 - **The template record** (`sandbox_templates`): name, size, tags, the last 10 builds with their logs once the pod is
   gone (kept 10 minutes after it finished), the image digest of each ready build. Trimming to 10 never drops a build
   a tag names or one that is building, however many builds were requested since: the template keeps resolving and
@@ -1281,9 +1309,10 @@ Crane in the base and push containers trusts the registry's CA (`ConfigMap regis
   location's `base` template. An image on the sandbox registry by name is refused: use `fromTemplate`.
 - `fromImageRegistry`: a private image with the caller's credentials, `type` `registry` (username, password) or `gcp`
   (service account JSON). The credentials go into a Secret owned by the build pod and are mounted only into `base`.
-  **`type: aws` is not offered** (400): E2B exchanges the caller's AWS keys for an ECR token server side, which needs
-  the AWS SDK's ECR client; ProxCloud runs on Proxmox only and does not carry that dependency. An ECR image builds with
-  `type: registry`, username `AWS` and the output of `aws ecr get-login-password` (valid 12 h) as the password.
+  `type: aws` exchanges **explicit caller-owned** `awsAccessKeyId`, `awsSecretAccessKey` and `awsRegion` for a
+  region-matching ECR token server-side. The image must name the matching account/region ECR host; only the exchanged
+  token reaches the worker, with no ambient/default AWS credential chain. The `type: registry` alternative also
+  accepts username `AWS` and an already obtained ECR password. See [current E2B compatibility](e2b-compat.md).
 - The build pod reaches the internet (base images, package installs) minus private and link-local ranges, port 25
   closed, plus exactly the registry's address on 443 and the bucket's endpoint. Layer 1 opens the same two to the
   workers: the Proxmox provider's `config.sandbox.buildStorage {address, port}` (stage 60) adds one rule
@@ -1292,21 +1321,19 @@ Crane in the base and push containers trusts the registry's CA (`ConfigMap regis
 
 ### 7.4 Pruning
 
-Job `sandboxRegistryPrune` (hourly at :17), when a sandbox provider sets `config.sandbox.registryPrune` (`on`, or
-`dry-run` to log; installer `sandbox.registry.prune`, default `on`) and holds the `gc` account. It reads, through the
-OCI distribution API of the registry (`/v2/_catalog`, `tags/list`, manifests, the image config's `created`), every
-tagged image under `t/`, and deletes (`DELETE /v2/<repo>/manifests/<digest>`) those that are older than a day,
-in a project this portal knows, and referenced by nothing: no Sandbox CR or build pod on any sandbox provider's cluster,
-no template record (ready image, base, a build in progress), no built-in template. It reads the clusters, the records
-and the clusters again, waits two minutes, reads everything again, and deletes at most 200 per run; any read error
-stops it. Zot's own garbage collection frees the blobs an hour later. An image whose age cannot be read (an index, a
-missing `created`) is never deleted. Providers naming two different registries stop it (each would see the other's
-images as unreferenced). `POST :8081/debug/run-registry-prune?grace=10m` runs it with a lower age floor.
+**Current behavior:** physical registry deletion is disabled by a code-level HOLD, not an operator flag.
+`sandboxRegistryPrune` is registered hourly at :17, but `registryPrune: on` refuses real deletion before HTTP DELETE.
+The same HOLD applies to project teardown; teardown can remain incomplete rather than falsely report cleaned images.
+Do not bypass that boundary with a registry UI or manual wildcard cleanup while live references may exist.
 
-The prune skips repositories of projects it does not know (another portal on the same registry), so a deleted
-project's images go at its teardown instead: after its templates, the teardown deletes every image under
-`t/<project>/` with the `gc` account, following `registryPrune` (`dry-run` logs, unset keeps them). A registry error
-fails the teardown, which the deletion job retries.
+`registryPrune: dry-run` can inspect the OCI catalog and report preview candidates. It considers only known-project
+`t/` repositories, old-enough well-formed artifacts and all provider/workload/template references, with conservative
+read/recheck behavior. Unreadable age, incomplete reads or conflicting registry targets refuse the preview. The
+`run-registry-prune?grace=10m` debug parameter changes only the candidate age floor, **not** the real-delete hold.
+Preview counters do not prove manifests or blobs were reclaimed; storage retention must account for this.
+
+Earlier SB6b drill results below are historical, not current physical-GC acceptance. Safe cross-writer reference
+coverage/adoption and a reviewed deletion protocol remain prerequisites before enabling either physical delete path.
 
 ### 7.5 Installer
 
@@ -1332,7 +1359,55 @@ policy, the registry CA and both Roles, and records the bucket (endpoint, addres
   tests only (build pod shape and accounts, the account sync's rules and Secrets, the OCI client against a fake
   registry, the S3 store against a fake S3, the fence rule, the OpenAPI parity).
 
+### 7.7 SDK custom-build format diagnosis (2026-11-09)
+
+A controlled E2B SDK 2.63 `fromTemplate("base")` + sentinel COPY/RUN reached terminal ERROR: fetch, base and Kaniko
+all exited 0; push exited 1 after uploading its blobs. Its retained push log reported `MANIFEST_INVALID` for
+`application/vnd.docker.distribution.manifest.v2+json`; Zot's matching manifest PUT returned 415. This proves the
+manifest-format failure for that diagnostic attempt, not the original attempt whose terminal evidence was deleted.
+The `--image-refs` flag was supported; digest reporting was not the failure. Native template deletion cleaned both
+attempts; no sandbox was created. Capture sanitized status reason/logs and pod termination states **before** cleanup.
+
+The unchanged, digest-pinned Kaniko v1.29.0 was then tested locally with `--network=none`, no credentials and a tiny
+`FROM scratch`/COPY context. `--oci-layout-path` alone produced Docker manifest/config/layer types; adding
+`--image-format=oci` produced OCI manifest/config/gzip-layer types with a verified manifest digest. Crane v0.20.3's
+directory loader preserves that manifest, unlike its tar loader. This is local format evidence, not a successful
+post-fix SDK acceptance run; the latter remains a separate reviewed rollout check. No registry policy was relaxed.
+
+The first actual OCI-directory attempt exposed a separate handoff failure: Kaniko exited 0, but nonroot crane exited
+1 opening a layer blob with `permission denied`, before any manifest PUT. The initial local format inspection had
+made its fixture readable and therefore did not prove the root-writer/nonroot-reader boundary. The follow-up local
+check preserves untouched root-produced OCI output: UID 65532 cannot read it until the credential-free helper runs;
+afterward all index/manifest/config/layer hashes match and nonroot reads succeed. With the exact pinned shell,
+top/nested symlinks, an outside-canary hardlink and a FIFO are rejected without changing any fixture modes/bytes;
+traversal and batched-chmod failures propagate nonzero. Live SDK acceptance after this handoff change is still a
+separate rollout check. No push-root shortcut, extra capabilities or credential mounts were added.
+
+**Historical startup policy below:** the later phased-startup implementation supersedes the fixed 50/120 s bounds
+and create-time runtime clock described in this drill. Current defaults are 900 s total, 120 s scheduling, 720 s pull
+and 600 s runtime initialization (bounded/clamped); runtime TTL begins at committed Ready. See
+[sandbox runtime parity](sandbox-runtime-parity.md) and [current E2B behavior](e2b-compat.md#what-does-not-work-and-why).
+Do not copy the old `request_timeout=150` as a universal current budget.
+
+The next controlled rollout reached **build READY**: fetch/base/Kaniko/prepare-output/push all exited 0 and Zot
+accepted the OCI digest. Runtime acceptance was still not complete: its cold image pull took 57.813 s (about 494 MB),
+longer than the fixed 50 s create-readiness wait, so the server deleted it and answered 503. The normal project-build
+create path now has a 120 s readiness/access ceiling, bounded by caller cancellation and the immutable saved
+`shutdownTime` minus a 5 s return margin. Built-ins, snapshots, future template kinds, resume and fork remain at 50 s.
+The lifecycle still begins at create, not readiness; cleanup does not bill beyond the captured original end, and the
+existing minimum-minute policy is unchanged. A missing/malformed end only gets the legacy bound. Use create-only
+`request_timeout=150, retries=0` and e.g. `timeout=300` for cold custom images: SDK HTTP timeout and sandbox lifetime
+are separate, and stock defaults do not guarantee the longer wait. No image precache/curated-alias bypass or blind
+create retry is part of this change. Full post-change sandbox command acceptance remains a separate rollout check.
+
 ## 8. Pause, resume, snapshots and fork (SB7)
+
+> **Historical lifecycle design, not an enabled runbook.** Managed pause/resume/fork, paused CONNECT/wake and new
+> AutoPause/AutoResume promises currently return the fixed 403 admission hold described at the top of this document.
+> No template-registry, build-bucket, wake-token or provider setting enables them. The algorithms and old drill
+> expectations in §§8.2–8.5 explain retained state/history only; do not retry them as if restore success is reachable.
+> Named filesystem capture/export and ordinary pinned CREATE from a ready named snapshot remain distinct offered
+> capabilities. Physical image pruning mentioned below remains held as described in §7.4.
 
 Ported from the earlier implementation (`internal/platform/project/e2b_snapshots.go`, `cmd/sandbox-init/snapshot.go`).
 Only the filesystem is kept: gVisor in a pod has no microVM snapshot, so a resume is a cold boot (files back; processes,
@@ -1397,11 +1472,14 @@ newest ready build: the previous one leaves the record, and the registry prune d
   image is ready.
 - **Kill** of a paused sandbox deletes its record and its snapshot; of one still pausing, also the running sandbox.
 
-**Why every call answers within 120 s.** The stock E2B SDK (2.63) sends REST calls through pyqwest with
+**Why snapshot operations retain their short waits (not a universal create deadline).** The stock E2B SDK (2.63) sends REST calls through pyqwest with
 `request_timeout` 60 s, which pyqwest applies as one deadline of read plus write timeouts: 120 s for the whole call.
 A call still waiting then is cut (`operation timed out after 120.0s`) and its work is lost to the client. The first
 pause waited for the image inside the request, as did fork and create from a snapshot, and every one of them on the
-lab was cut at exactly 120 s. The waits are now 60 s for a snapshot plus 50 s for envd, and a pause no longer waits.
+lab was cut at exactly 120 s. Snapshot waits remain 60 s for assembly plus 50 s for envd, and a pause no longer waits.
+Normal project-built template create is a separate cold-image exception (section 7.7): its readiness/access phase may
+wait up to 120 s, bounded by the caller and original lifetime. This is not a claim that every API call or default SDK
+transport finishes within 120 s; configure the create HTTP timeout explicitly for cold custom images.
 
 **Lease serialisation.** Every transition of one id takes a Postgres transaction lock on that id (also before the
 record exists) and writes `state` (`pausing` and `stopping` for 2 minutes, renewed every 30 s by the step that
@@ -1673,7 +1751,10 @@ integration regression executes Store.Get and independent WithTx while holding a
 
 `action: alert` is the default: only durable audit/admin evidence. Mail needs explicit operator `notifyEmails`, a mail
 gateway and enabled `sandbox_abuse_alert` template; no recipient means no email. SMTP failure is logged, audit remains.
-`pause` and `kill` are explicit provider opt-ins for **native-only providers** (`envd:false`). Provider edits, including
+`kill` is an explicitly destructive opt-in for **native-only providers** (`envd:false`). A stored historical `pause`
+policy **cannot execute while `SavedLifecycleAvailable` is false**; no provider setting bypasses the managed
+saved-lifecycle admission hold. The pause mechanics described in the following
+paragraphs are historical, not a currently available recovery promise. Previously, `pause` and `kill` were native-only opt-ins. Provider edits, including
 DISABLED ones, reject either action with envd enabled: a silent SDK streaming exec bypasses the portal and there is no
 trustworthy exec-completion marker. Existing incompatible documents still fail closed at runtime
 (`refused-active-exec-unprovable`); use `alert` on E2B locations. Proxy request counting alone cannot cover detached SDK
@@ -1702,7 +1783,11 @@ It is asynchronous: `ACTION_pause SUCCESS` means
 **requested**, not completed. Existing pause/build logs and the paused state show eventual success/failure. Kill is
 explicitly destructive (ephemeral files lost), unlike pause. No action on a foreign project/provider or reused pod UID.
 
-#### Recover a native automatic pause (no SDK or envd required)
+#### Retained native pause records (saved restore currently held)
+
+**Do not use this as a restore-success recipe.** Resume currently answers the fixed capability 403 before lifecycle
+mutation, including native-only providers. Listing retained state and explicit discard are separate; the older
+success-response shape and retry discussion below describe the historical protocol, not an enablement path.
 
 All routes use normal client authentication and `project:cloud_resource:manage`; IDs are sandbox IDs, **not** billing
 cache IDs (the old row may have been archived). List results contain no saved CR, environment or access tokens.

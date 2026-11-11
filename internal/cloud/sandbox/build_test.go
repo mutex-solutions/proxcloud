@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +91,44 @@ func TestBuildObjects(t *testing.T) {
 	}
 }
 
+// Both flags matter: an OCI layout can contain a Docker manifest, and crane's tar
+// loader reconstructs Docker schema 2 even when kaniko built an OCI image.
+func TestBuildObjectsOCIOutput(t *testing.T) {
+	for _, base := range []string{"scratch", "python:3.12", "registry.example.org/base@sha256:" + strings.Repeat("a", 64)} {
+		t.Run(base, func(t *testing.T) {
+			res, err := RenderDockerfile(base, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			image := testRegistry + "/p1/t1:b1"
+			_, pod := BuildObjects(Config{}, BuildRequest{
+				ProjectID: "p1", TemplateID: "t1", BuildID: "b1", Base: base, Image: image,
+				Result: res, CPU: 1, MemoryGiB: 1, FetchURL: func(string) string { return "" },
+			})
+			kaniko := firstInitContainer(pod, "kaniko")
+			args := kaniko["args"].([]any)
+			for _, want := range []any{"--no-push", "--image-format=oci", "--oci-layout-path=/out/image", "--destination=" + image} {
+				if !slices.Contains(args, want) {
+					t.Errorf("kaniko args lack %s: %v", want, args)
+				}
+			}
+			for _, arg := range args {
+				if strings.HasPrefix(str(arg), "--tar-path") || strings.HasPrefix(str(arg), "--tarPath") {
+					t.Errorf("tar output would lose OCI manifest types on crane load: %v", args)
+				}
+			}
+			push := dig(pod, "spec", "containers").([]any)[0].(map[string]any)
+			wantPush := []any{"push", "/out/image", image, "--image-refs", "/dev/termination-log"}
+			if !slices.Equal(push["args"].([]any), wantPush) {
+				t.Errorf("push must load the OCI directory and report its digest: %v", push["args"])
+			}
+			if kaniko["image"] != kanikoImage || push["image"] != craneImage {
+				t.Error("the output format fix must keep the pinned build tools")
+			}
+		})
+	}
+}
+
 func TestBuildState(t *testing.T) {
 	pod := func(phase string, status map[string]any) map[string]any {
 		st := map[string]any{"phase": phase, "startTime": "2026-11-06T06:00:00Z"}
@@ -103,7 +142,7 @@ func TestBuildState(t *testing.T) {
 		}
 	}
 	ok := pod("Succeeded", map[string]any{"containerStatuses": []any{map[string]any{"name": "push", "state": map[string]any{"terminated": map[string]any{
-		"exitCode": 0, "finishedAt": "2026-11-06T06:02:00Z", "message": testRegistry + "/p1/t1:b1@sha256:abcd\n"}}}}})
+		"exitCode": 0, "startedAt": "2026-11-06T06:00:00Z", "finishedAt": "2026-11-06T06:02:00Z", "message": testRegistry + "/p1/t1:b1@sha256:abcd\n"}}}}})
 	if s := buildStateOf(ok); s.Status != BuildReady || s.Digest != "sha256:abcd" {
 		t.Errorf("ready: %+v", s)
 	}
@@ -120,28 +159,28 @@ func TestBuildState(t *testing.T) {
 	if s := buildStateOf(pod("Running", nil)); s.Status != BuildBuilding {
 		t.Errorf("running: %+v", s)
 	}
-	if d := buildData(pod("Running", nil)); d["status"] != StatusRunning || d["runningSince"] != "2026-11-06T06:00:00Z" {
+	if d := buildData(pod("Running", map[string]any{"containerStatuses": []any{map[string]any{"name": "push", "state": map[string]any{"running": map[string]any{"startedAt": "2026-11-06T06:00:00Z"}}}}})); d["status"] != StatusRunning || d["runningSince"] != "2026-11-06T06:00:00Z" {
 		t.Errorf("running payload: %v", d)
 	}
 }
 
-// A build pod finished long ago is deleted by the listing, but still reported once.
-func TestListBuildsCleansUp(t *testing.T) {
+// Listing never deletes a terminal worker before the platform durably archives its diagnostics.
+func TestListBuildsRetainsForArchive(t *testing.T) {
 	f := newFake()
 	s := NewWithAPI(f, Config{Templates: map[string]Template{"py": {Image: "x"}}}, "svc")
 	s.now = func() time.Time { return time.Date(2026, 11, 6, 8, 0, 0, 0, time.UTC) }
 	pod := map[string]any{
 		"metadata": map[string]any{"name": "build-b1", "namespace": BuildNamespace, "labels": map[string]any{LabelBuild: "b1", LabelProject: "p1", LabelTemplateID: "t1"}},
 		"status": map[string]any{"phase": "Succeeded", "startTime": "2026-11-06T07:00:00Z", "containerStatuses": []any{map[string]any{"name": "push",
-			"state": map[string]any{"terminated": map[string]any{"exitCode": 0, "finishedAt": "2026-11-06T07:05:00Z", "message": "r@sha256:1"}}}}},
+			"state": map[string]any{"terminated": map[string]any{"exitCode": 0, "startedAt": "2026-11-06T07:00:00Z", "finishedAt": "2026-11-06T07:05:00Z", "message": "r@sha256:1"}}}}},
 	}
 	_ = f.ApplyCore(context.Background(), "pods", pod)
 	got, err := s.ListBuilds(context.Background(), "p1")
 	if err != nil || got["build-b1"]["status"] != StatusDeleted {
 		t.Fatalf("finished build must still be reported: %v %v", got, err)
 	}
-	if p, _ := f.GetCore(context.Background(), "pods", BuildNamespace, "build-b1"); p != nil {
-		t.Error("a build pod finished an hour ago must be deleted")
+	if p, _ := f.GetCore(context.Background(), "pods", BuildNamespace, "build-b1"); p == nil {
+		t.Error("a finished build must survive until its durable archive is confirmed")
 	}
 }
 
@@ -176,6 +215,10 @@ func TestAutoPauseLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	cr := f.crs[NamespaceFor("p1")+"/"+sp.ID]
+	cr["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "lastTransitionTime": now.Format(time.RFC3339)}}}
+	if _, err := s.GetSandbox(context.Background(), "p1", sp.ID); err != nil {
+		t.Fatal(err)
+	}
 	if digStr(cr, "metadata", "annotations", AnnotationEndAt) != "2026-11-06T10:10:00Z" || digStr(cr, "spec", "shutdownTime") != "2026-11-06T10:25:00Z" {
 		t.Fatalf("auto-pause end/shutdown: %v / %v", digStr(cr, "metadata", "annotations", AnnotationEndAt), digStr(cr, "spec", "shutdownTime"))
 	}
@@ -191,31 +234,20 @@ func TestAutoPauseLifecycle(t *testing.T) {
 	}
 }
 
-func TestResumeFromPublicImageGetsPullSecret(t *testing.T) {
+func TestSavedResumeOnlyCurrentCuratedLibraryGetsPullSecret(t *testing.T) {
 	f := newFake()
-	cfg := Config{Templates: map[string]Template{"py": {Image: "python:3.12", CPU: 1, MemoryGiB: 2}}}
-	img := testRegistry + "/p1/t1@sha256:1"
-	// No template registry configured: the same image is nobody's private image.
-	cr := BuildCR(cfg, "svc", Spec{ID: "sbx-00000001", ProjectID: "p1", Template: "py", CPU: 1, MemoryGiB: 2}, time.Unix(0, 0))
-	if err := NewWithAPI(f, cfg, "svc").ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0), nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.crs[NamespaceFor("p1")+"/sbx-00000001"]; dig(got, "spec", "podTemplate", "spec", "imagePullSecrets") != nil {
-		t.Fatal("no templateRegistry configured, yet the image got the template pull secret")
-	}
-
-	cfg.TemplateRegistry = testRegistry
-	s := NewWithAPI(f, cfg, "svc")
-	cr = BuildCR(cfg, "svc", Spec{ID: "sbx-00000001", ProjectID: "p1", Template: "py", CPU: 1, MemoryGiB: 2}, time.Unix(0, 0))
-	if dig(cr, "spec", "podTemplate", "spec", "imagePullSecrets") != nil {
-		t.Fatal("a public image needs no pull secret")
-	}
-	if err := s.ResumeSandbox(context.Background(), "p1", cr, img, time.Unix(3600, 0), nil); err != nil {
-		t.Fatal(err)
-	}
-	got := f.crs[NamespaceFor("p1")+"/sbx-00000001"]
-	if firstContainer(got)["image"] != img || dig(got, "spec", "podTemplate", "spec", "imagePullSecrets") == nil {
-		t.Errorf("resumed onto the private snapshot image without a pull secret: %v", dig(got, "spec", "podTemplate", "spec"))
+	cfg := Config{TemplateRegistry: "registry.example/t", Templates: map[string]Template{"py": {Image: "external.example/library/python:3.12", CPU: 1, MemoryGiB: 2}, "library": {Image: "registry.example/library/python:3.12", CPU: 1, MemoryGiB: 2}}}
+	for _, name := range []string{"py", "library"} {
+		s := NewWithAPI(f, cfg, "svc")
+		cr := BuildCR(cfg, "svc", Spec{ID: "sbx-00000001", ProjectID: "p1", Template: name, CPU: 1, MemoryGiB: 2}, time.Now().Add(time.Hour))
+		if e := s.ResumeSandbox(context.Background(), "p1", cr, cfg.Templates[name].Image, time.Now().Add(time.Hour), nil); e != nil {
+			t.Fatal(e)
+		}
+		got := f.crs[NamespaceFor("p1")+"/sbx-00000001"]
+		private := dig(got, "spec", "podTemplate", "spec", "imagePullSecrets") != nil
+		if private != (name == "library") || firstContainer(got)["image"] != cfg.Templates[name].Image {
+			t.Fatal("curated pull-secret/source mismatch")
+		}
 	}
 }
 
@@ -269,10 +301,10 @@ func TestBuildBaseCredentials(t *testing.T) {
 		for _, c := range dig(pod, "spec", "initContainers").([]any) {
 			order = append(order, str(c.(map[string]any)["name"]))
 		}
-		if strings.Join(order, ",") != "fetch,base,kaniko" {
+		if strings.Join(order, ",") != "fetch,base,kaniko,prepare-output" {
 			t.Fatalf("init order = %v", order)
 		}
-		for _, name := range []string{"fetch", "kaniko"} {
+		for _, name := range []string{"fetch", "kaniko", "prepare-output"} {
 			if m := mounts(cs[name]); strings.Contains(m, "secret") || strings.Contains(m, "/docker") {
 				t.Errorf("auth %d: %s mounts a credential: %s", auth, name, m)
 			}

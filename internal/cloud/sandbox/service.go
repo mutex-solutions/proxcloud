@@ -57,10 +57,12 @@ var (
 
 // Service drives one sandbox provider (one sandbox cluster).
 type Service struct {
-	api       K8sAPI
-	cfg       Config
-	serviceID string
-	now       func() time.Time
+	api                      K8sAPI
+	cfg                      Config
+	serviceID                string
+	now                      func() time.Time
+	requireBuildPins         bool
+	requireRuntimeCreatePins bool
 }
 
 // New builds a live Service from the provider config.
@@ -72,7 +74,10 @@ func New(cfg Config, serviceID string) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: cluster kubeconfig: %w", err)
 	}
-	return NewWithAPI(kc, cfg, serviceID), nil
+	s := NewWithAPI(kc, cfg, serviceID)
+	s.requireBuildPins = true
+	s.requireRuntimeCreatePins = true
+	return s, nil
 }
 
 // NewWithAPI builds a Service over any K8sAPI (tests).
@@ -171,11 +176,21 @@ func (s *Service) live(ctx context.Context, projectID string) ([]map[string]any,
 
 // CreateSandbox validates the spec, enforces the per-project concurrency limits against the
 // LIVE cluster (not the cache, which lags), and applies the Sandbox CR. Returns the cache row's
-// data payload. spec.ID is minted here.
+// data payload. A preallocated spec.ID requires its exact opaque CREATE proof;
+// otherwise the service mints a fresh server identity here.
 func (s *Service) CreateSandbox(ctx context.Context, spec *Spec) (map[string]any, error) {
+	// Freeze maps/pointers before validation; the caller only receives server ID.
+	caller := spec
+	frozen := CloneCreateSpec(*spec)
+	spec = &frozen
 	if err := spec.Validate(s.cfg); err != nil {
 		return nil, err
 	}
+	runtimeAnnotations, err := s.consumeRuntimeCreate(spec)
+	if err != nil {
+		return nil, err
+	}
+	caller.ID = spec.ID
 	if err := s.EnsureProjectNamespace(ctx, spec.ProjectID, spec.Quota); err != nil {
 		return nil, fmt.Errorf("sandbox: ensure namespace: %w", err)
 	}
@@ -208,7 +223,6 @@ func (s *Service) CreateSandbox(ctx context.Context, spec *Spec) (map[string]any
 	if err != nil {
 		return nil, err
 	}
-	spec.ID = newSandboxID()
 	if s.cfg.Envd {
 		// envd always requires its access token (E2B's `secure` is always on).
 		spec.envdToken = newToken()
@@ -217,13 +231,20 @@ func (s *Service) CreateSandbox(ctx context.Context, spec *Spec) (map[string]any
 		spec.trafficToken = newToken()
 	}
 	cr := BuildCR(s.cfg, s.serviceID, *spec, shutdown)
+	stampRuntimeCreate(cr, runtimeAnnotations)
+	armStartup(cr, s.cfg, spec.TimeoutSeconds, s.now())
 	if err := s.api.ApplyCR(ctx, CRGroup, CRVersion, CRPlural, cr); err != nil {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_ = s.DeleteSandbox(cleanup, spec.ProjectID, spec.ID)
 		return nil, fmt.Errorf("sandbox: create: %w", err)
 	}
 	// The egress policy is owned by the CR, so it needs the CR's uid. Without it the sandbox has
 	// no internet (fail closed); roll the sandbox back rather than hand out a crippled one.
 	if err := s.applyEgress(ctx, spec.ProjectID, spec.ID, spec.Network); err != nil {
-		_ = s.api.DeleteCR(context.WithoutCancel(ctx), CRGroup, CRVersion, CRPlural, NamespaceFor(spec.ProjectID), spec.ID)
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_ = s.api.DeleteCR(cleanup, CRGroup, CRVersion, CRPlural, NamespaceFor(spec.ProjectID), spec.ID)
 		return nil, fmt.Errorf("sandbox: egress policy: %w", err)
 	}
 	return sandboxData(cr), nil
@@ -350,8 +371,27 @@ func (s *Service) GetSandbox(ctx context.Context, projectID, id string) (map[str
 	if err != nil {
 		return nil, err
 	}
-	s.pinRunningSince(ctx, obj)
-	return s.observed(sandboxData(obj)), nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if dig(obj, "metadata", "deletionTimestamp") != nil {
+		return nil, ErrNotFound
+	}
+	if err := s.pinRunningSince(ctx, obj); err != nil {
+		return nil, err
+	}
+	data := s.observed(sandboxData(obj))
+	if data["ready"] != true {
+		pod, err := s.api.GetCore(ctx, "pods", NamespaceFor(projectID), id)
+		if err != nil {
+			return nil, err
+		}
+		data["startup"] = startupProgress(pod)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 // observed stamps a PENDING payload with when it was read (seenPendingAt): the latest moment the sandbox is known not to
@@ -363,30 +403,99 @@ func (s *Service) observed(d map[string]any) map[string]any {
 	return d
 }
 
-// pinRunningSince records, once, when the sandbox first became Ready (AnnotationRunningSince).
-// The Ready condition's lastTransitionTime moves on every container restart, which customer code
-// can trigger; billing must keep counting from the first start. Best-effort: on a failed patch the
-// next read retries, and sandboxData falls back to the condition.
-func (s *Service) pinRunningSince(ctx context.Context, obj map[string]any) {
-	if digStr(obj, "metadata", "annotations", AnnotationRunningSince) != "" || !conditionTrue(obj, "Ready") {
-		return
+// pinRunningSince commits Ready+TTL only after a UID-scoped candidate is durable.
+// A retry after an ambiguous/failed final patch must retain that candidate across
+// Ready flaps or replicas. Initial candidate writes that never persist cannot prove
+// a historical observation; they return unavailable rather than claim readiness.
+func (s *Service) pinRunningSince(ctx context.Context, obj map[string]any) error {
+	if digStr(obj, "metadata", "annotations", AnnotationRunningSince) != "" {
+		return nil
+	}
+	pending := digStr(obj, "metadata", "annotations", AnnotationStartupPending) == "true"
+	candidate := digStr(obj, "metadata", "annotations", AnnotationReadyCandidate)
+	if !conditionTrue(obj, "Ready") && (!pending || candidate == "") {
+		return nil
+	}
+	rv, uid := digStr(obj, "metadata", "resourceVersion"), digStr(obj, "metadata", "uid")
+	if rv == "" || uid == "" {
+		return fmt.Errorf("sandbox: ready identity/version missing")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if dig(obj, "metadata", "deletionTimestamp") != nil {
+		return ErrNotFound
 	}
 	at := conditionTransition(obj, "Ready")
-	if at == "" {
-		return
+	if pending {
+		if candidate != "" {
+			if digStr(obj, "metadata", "annotations", AnnotationReadyCandidateUID) != uid {
+				return fmt.Errorf("sandbox: ready candidate identity changed")
+			}
+			at = candidate
+		}
+		readyAt, err := time.Parse(time.RFC3339, at)
+		oldEnd, e := time.Parse(time.RFC3339, endOf(obj))
+		if err != nil || e != nil || readyAt.After(s.now()) {
+			return context.DeadlineExceeded
+		}
+		if !s.now().Before(oldEnd) {
+			return errStartupLifetimeExpired
+		}
+		if candidate == "" {
+			patch := map[string]any{"metadata": map[string]any{"uid": uid, "resourceVersion": rv, "annotations": map[string]any{AnnotationReadyCandidate: at, AnnotationReadyCandidateUID: uid}}}
+			observed, err := s.api.MergePatchCR(ctx, CRGroup, CRVersion, CRPlural, digStr(obj, "metadata", "namespace"), digStr(obj, "metadata", "name"), patch)
+			if err != nil {
+				return err
+			}
+			if digStr(observed, "metadata", "uid") != uid || digStr(observed, "metadata", "annotations", AnnotationReadyCandidateUID) != uid || digStr(observed, "metadata", "annotations", AnnotationReadyCandidate) == "" {
+				return fmt.Errorf("sandbox: durable ready candidate was not observed")
+			}
+			// Read the authoritative post-CAS state, including its new resourceVersion.
+			for k, v := range observed {
+				obj[k] = v
+			}
+			return s.pinRunningSince(ctx, obj)
+		}
 	}
-	ns, name := digStr(obj, "metadata", "namespace"), digStr(obj, "metadata", "name")
-	if _, err := s.api.MergePatchCR(ctx, CRGroup, CRVersion, CRPlural, ns, name,
-		map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationRunningSince: at}}}); err != nil {
-		return
+	readyAt, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		return fmt.Errorf("sandbox: ready timestamp missing or invalid")
 	}
-	meta, _ := obj["metadata"].(map[string]any)
-	ann, _ := meta["annotations"].(map[string]any)
-	if ann == nil {
-		ann = map[string]any{}
-		meta["annotations"] = ann
+	annPatch := map[string]any{AnnotationRunningSince: at}
+	patch := map[string]any{"metadata": map[string]any{"uid": uid, "resourceVersion": rv, "annotations": annPatch}}
+	if pending {
+		seconds, err := strconv.Atoi(digStr(obj, "metadata", "annotations", AnnotationRuntimeSeconds))
+		if err != nil || seconds < 1 || seconds > s.cfg.Limits.MaxTimeoutSeconds {
+			return fmt.Errorf("sandbox: runtime timeout missing")
+		}
+		end := readyAt.Add(time.Duration(seconds) * time.Second)
+		// Even a persisted candidate does not grant access after its real runtime end.
+		if !s.now().Before(end) {
+			return errStartupLifetimeExpired
+		}
+		annPatch[AnnotationStartupPending] = nil
+		if digStr(obj, "metadata", "annotations", AnnotationAutoPause) == "true" {
+			annPatch[AnnotationEndAt] = end.UTC().Format(time.RFC3339)
+			end = end.Add(AutoPauseGrace)
+		}
+		patch["spec"] = map[string]any{"shutdownTime": end.UTC().Format(time.RFC3339)}
 	}
-	ann[AnnotationRunningSince] = at
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	observed, err := s.api.MergePatchCR(ctx, CRGroup, CRVersion, CRPlural, digStr(obj, "metadata", "namespace"), digStr(obj, "metadata", "name"), patch)
+	if err != nil {
+		return err
+	}
+	if digStr(observed, "metadata", "uid") != uid || digStr(observed, "metadata", "annotations", AnnotationRunningSince) != at || digStr(observed, "metadata", "annotations", AnnotationStartupPending) == "true" {
+		return fmt.Errorf("sandbox: ready lifetime commit was not observed")
+	}
+	// Update only after the server confirms the exact identity and lifetime commit.
+	for k, v := range observed {
+		obj[k] = v
+	}
+	return ctx.Err()
 }
 
 // DeleteSandbox deletes one sandbox. Already gone = success.
@@ -405,6 +514,12 @@ func (s *Service) DeleteSandbox(ctx context.Context, projectID, id string) error
 func (s *Service) SetTimeout(ctx context.Context, projectID, id string, timeoutSeconds int) (map[string]any, error) {
 	cur, err := s.get(ctx, projectID, id)
 	if err != nil {
+		return nil, err
+	}
+	if !conditionTrue(cur, "Ready") && digStr(cur, "metadata", "annotations", AnnotationStartupPending) == "true" {
+		return nil, ErrNotRunning
+	}
+	if err := s.pinRunningSince(ctx, cur); err != nil {
 		return nil, err
 	}
 	shutdown, err := ShutdownTimeFor(s.cfg, s.now(), timeoutSeconds)
@@ -496,7 +611,9 @@ func (s *Service) ListSandboxes(ctx context.Context, projectID string) (map[stri
 	out := make(map[string]map[string]any, len(items))
 	for _, it := range items {
 		if id := digStr(it, "metadata", "name"); id != "" {
-			s.pinRunningSince(ctx, it)
+			if err := s.pinRunningSince(ctx, it); err != nil {
+				return nil, err
+			}
 			out[id] = s.observed(sandboxData(it))
 		}
 	}
@@ -537,7 +654,7 @@ func sandboxData(obj map[string]any) map[string]any {
 	if runningSince != "" {
 		// Started once: it stays billable while its pod exists, even through a container restart.
 		status = StatusRunning
-	} else if conditionTrue(obj, "Ready") {
+	} else if conditionTrue(obj, "Ready") && digStr(obj, "metadata", "annotations", AnnotationStartupPending) != "true" {
 		status = StatusRunning
 		runningSince = conditionTransition(obj, "Ready")
 	}
@@ -550,8 +667,12 @@ func sandboxData(obj map[string]any) map[string]any {
 		"gpuCount":        intOf(dig(c, "resources", "limits", ResourceGPU)),
 		"gpuModel":        digStr(obj, "spec", "podTemplate", "spec", "nodeSelector", LabelGPU),
 		"status":          status,
+		"ready":           conditionTrue(obj, "Ready") && digStr(obj, "metadata", "annotations", AnnotationStartupPending) != "true",
 		"shutdownTime":    endOf(obj),
 		"egressBandwidth": digStr(obj, "spec", "podTemplate", "metadata", "annotations", "kubernetes.io/egress-bandwidth"),
+	}
+	if digStr(obj, "metadata", "annotations", AnnotationRuntimeSeconds) != "" {
+		d["runtimeClock"] = "ready"
 	}
 	if created := digStr(obj, "metadata", "creationTimestamp"); created != "" {
 		d["startedAt"] = created
@@ -563,7 +684,7 @@ func sandboxData(obj map[string]any) map[string]any {
 	var envNames []any
 	if env, ok := c["env"].([]any); ok {
 		for _, e := range env {
-			if m, ok := e.(map[string]any); ok && !strings.HasPrefix(str(m["name"]), "PROXCLOUD_") {
+			if m, ok := e.(map[string]any); ok && !strings.HasPrefix(str(m["name"]), "PROXCLOUD_") && str(m["name"]) != "E2B_SANDBOX_ID" {
 				envNames = append(envNames, str(m["name"]))
 			}
 		}
@@ -598,7 +719,7 @@ func (s *Service) DueForAutoPause(ctx context.Context) ([]Due, error) {
 	}
 	var out []Due
 	for _, it := range items {
-		if digStr(it, "metadata", "annotations", AnnotationAutoPause) != "true" || dig(it, "metadata", "deletionTimestamp") != nil {
+		if digStr(it, "metadata", "annotations", AnnotationAutoPause) != "true" || digStr(it, "metadata", "annotations", AnnotationStartupPending) == "true" || dig(it, "metadata", "deletionTimestamp") != nil {
 			continue
 		}
 		end, err := time.Parse(time.RFC3339, digStr(it, "metadata", "annotations", AnnotationEndAt))
@@ -654,6 +775,11 @@ func (s *Service) RegistryRefsInUse(ctx context.Context) ([]string, error) {
 			}
 		}
 	}
+	warmRefs, err := s.WarmRegistryRefs(ctx)
+	if err != nil {
+		return nil, err
+	} // unknown intent must block registry pruning
+	refs = append(refs, warmRefs...)
 	return refs, nil
 }
 

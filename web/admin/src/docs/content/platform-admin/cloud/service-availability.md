@@ -6,6 +6,10 @@ Not everything a cluster can run is something you want to sell. ProxCloud lets y
 
 Open **System > Cloud providers**, select the provider, and go to the **Services** tab. Every service shows a toggle for each region. Toggles don't take effect until you press **Save**.
 
+![Current provider Services tab with synthetic enabled and disabled service toggles](/docs-img/enable-disable-services-tab.png)
+
+*Current UI with synthetic local provider state; no provider setting was saved or live service toggled.*
+
 The toggles live in the provider document under `config.services[<slug>][<region>]`. A provider with no `services` map at all counts as having every service on.
 
 ## The services you can toggle

@@ -3,6 +3,8 @@ package cloud
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"time"
 
@@ -59,7 +61,7 @@ func (r *Repo) DeleteAndArchiveIfUnchanged(ctx context.Context, expected *CloudR
 		if !sameInventoryRow(&cur, expected) {
 			return nil
 		}
-		if err := r.archive(tc, &cur, now); err != nil {
+		if err := r.archive(tc, &cur, now, InventorySnapshotHash(&cur)); err != nil {
 			return err
 		}
 		deleted, err = r.resources.DeleteByID(tc, cur.ID)
@@ -93,4 +95,15 @@ func (r *Repo) InsertIfAbsent(ctx context.Context, res *CloudResource) (bool, er
 		return err
 	})
 	return inserted, err
+}
+
+// InventorySnapshotHash binds all persisted CloudResource fields, including Info
+// and updatedAt. Callers use stored snapshots, never a fresh provider projection.
+func InventorySnapshotHash(cr *CloudResource) string {
+	b, err := json.Marshal(cr)
+	if err != nil {
+		return ""
+	}
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
 }

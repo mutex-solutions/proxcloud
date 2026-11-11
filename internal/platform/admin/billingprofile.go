@@ -783,11 +783,8 @@ func (h *Handler) billingProfileCreate(w http.ResponseWriter, r *http.Request) {
 
 // ─── POST /validations/{validationId}/status/{status} ────────────────────────────────────────────
 
-// billingProfileValidationStatus parses the status, then updates it
-// (load by id or 404 "Billing profile validation not found." → set status
-// → save). On APPROVED it additionally marks the activation constraint completed +
-// sends the validation notification — cross-service/email effects → not wired. The validation-doc
-// status flip (the persisted core) is faithful and applied first.
+// billingProfileValidationStatus commits the locked approval/mail decision first.
+// Activation remains a postcommit best-effort business tail, NOT mail atomicity.
 func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.Request) {
 	if !h.require(w, r, billingProfileUpdatePerm) {
 		return
@@ -799,21 +796,13 @@ func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.
 		httpx.WriteError(w, httpx.BadRequest(fmt.Sprintf("Invalid validation status %s", status)))
 		return
 	}
-	existing, err := h.repo.FindDoc(r.Context(), billingProfileValidationCollection, validationID)
+	decision, err := h.decideValidationStatus(r.Context(), validationID, status)
 	if httpx.WriteError(w, err) {
 		return
 	}
-	if existing == nil {
-		httpx.WriteError(w, httpx.NotFound("Billing profile validation not found."))
-		return
-	}
-	// Set the status → save (the faithful persisted effect).
-	existing["status"] = status
-	if _, err := h.repo.SetFields(r.Context(), billingProfileValidationCollection, validationID, pgdoc.M{"status": status}); httpx.WriteError(w, err) {
-		return
-	}
+	existing := decision.doc
 	if status == "APPROVED" {
-		if h.activation == nil {
+		if h.validationActivation == nil {
 			// Activation unwired (tests) → the original not-implemented posture.
 			httpx.WriteError(w, httpx.NewError(http.StatusNotImplemented, http.StatusNotImplemented,
 				"validation APPROVED activation/notify not implemented"))
@@ -821,7 +810,7 @@ func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.
 		}
 		// Load the profile referenced by the validation →
 		// mark the activation constraint completed (VALIDATION) → send the validation notification.
-		bpID, _ := existing["billingProfileId"].(string)
+		bpID := decision.profileID
 		bp, err := h.billing.FindByID(r.Context(), bpID)
 		if httpx.WriteError(w, err) {
 			return
@@ -831,10 +820,12 @@ func (h *Handler) billingProfileValidationStatus(w http.ResponseWriter, r *http.
 			httpx.WriteError(w, httpx.NotFound(fmt.Sprintf("Billing profile with id %s not found. ", bpID)))
 			return
 		}
-		if err := h.activation.Activate(r.Context(), bp, billing.SourceValidation); httpx.WriteError(w, err) {
+		if err := h.validationActivation.Activate(r.Context(), bp, billing.SourceValidation); httpx.WriteError(w, err) {
 			return
 		}
-		h.activation.NotifyValidation(r.Context(), bp)
+		if !decision.suppressLegacy {
+			h.validationActivation.NotifyValidation(r.Context(), bp)
+		}
 	}
 	httpx.OK(w, shapeDoc(existing))
 }

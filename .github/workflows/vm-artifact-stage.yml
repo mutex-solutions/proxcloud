@@ -1,0 +1,73 @@
+name: vm-artifact-stage
+
+# Source-only producer. Bind this temporary label to runner 21 with NO PVE route.
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_name:
+        description: Exact vm-export-<os>-<YYYYMMDDHHMMSS UTC>-<12 lowercase source hex>
+        type: string
+        required: true
+      expected_manifest_sha256:
+        description: Reviewed manifest.json SHA256, 64 lowercase hex
+        type: string
+        required: true
+      expected_disk_sha256:
+        description: Reviewed disk.qcow2 SHA256, 64 lowercase hex
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: vm-artifact-stage
+  cancel-in-progress: false
+jobs:
+  stage:
+    if: github.repository == 'mutex-solutions/proxcloud' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, proxcloud-vm-artifact-stage]
+    timeout-minutes: 30
+    env:
+      ARTIFACT_NAME: ${{ inputs.artifact_name }}
+      EXPECTED_MANIFEST_SHA256: ${{ inputs.expected_manifest_sha256 }}
+      EXPECTED_DISK_SHA256: ${{ inputs.expected_disk_sha256 }}
+    steps:
+      - name: Validate literal dispatch inputs before path consumption
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime, os, re
+          try:
+              found = re.fullmatch(r'vm-export-(ubuntu-2404|ubuntu-2604|debian-12|debian-13)-([0-9]{14})-([0-9a-f]{12})', os.environ['ARTIFACT_NAME'], flags=re.ASCII)
+              if found is None or not all(re.fullmatch(r'[0-9a-f]{64}', os.environ[key], flags=re.ASCII) for key in ('EXPECTED_MANIFEST_SHA256', 'EXPECTED_DISK_SHA256')):
+                  raise ValueError('invalid inputs')
+              datetime.datetime.strptime(found[2], '%Y%m%d%H%M%S')
+          except (ValueError, KeyError):
+              raise SystemExit('VM artifact staging refused: invalid dispatch inputs')
+          PY
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: mutex-solutions/proxcloud
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            images/vm_artifact.py
+            images/vm_publish_stage.py
+            images/vm_stage_local.py
+          sparse-checkout-cone-mode: false
+      - name: Copy and verify only the fixed sealed local payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 images/vm_stage_local.py --artifact-name "$ARTIFACT_NAME" \
+            --expectedmanifestsha "$EXPECTED_MANIFEST_SHA256" --expecteddisksha "$EXPECTED_DISK_SHA256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: |
+            ${{ runner.temp }}/proxcloud-vm-payload/disk.qcow2
+            ${{ runner.temp }}/proxcloud-vm-payload/manifest.json
+            ${{ runner.temp }}/proxcloud-vm-payload/SHA256SUMS
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1

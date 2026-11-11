@@ -1,0 +1,42 @@
+{{- /*
+Gateway API Standard schemas are prerequisites in EACH TENANT cluster, not the management cluster.
+One pinned upstream file per carrier keeps every Secret below Kubernetes' decoded 1 MiB limit.
+CAAPH and ClusterResourceSet reconcile independently: an early Helm discovery failure retries after
+these resources are established. This is eventual convergence, not a cross-controller ordering fence.
+No Job, shell, remote URL, management-cluster CRD grant or application Gateway/listener is created.
+*/ -}}
+{{- if (.Values.addons.nginxGatewayFabric | default dict).enabled }}
+{{- $root := . }}
+{{- $resources := list }}
+{{- range $path, $_ := .Files.Glob "files/gateway-api/v1.6.3/*.yaml" }}
+{{- $suffix := base $path | trimSuffix ".yaml" | trimPrefix "gateway.networking.k8s.io_" | replace "_" "-" }}
+{{- $name := printf "%s-gateway-api-%s" $root.Release.Name $suffix }}
+{{- $resources = append $resources (dict "kind" "Secret" "name" $name) }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  annotations:
+    # Schema lifecycle is independent of toggling the controller; never prune CRDs with live routes.
+    argocd.argoproj.io/sync-options: Prune=false
+type: addons.cluster.x-k8s.io/resource-set
+stringData:
+  gateway-api.yaml: |
+{{ $root.Files.Get $path | indent 4 }}
+{{- end }}
+---
+apiVersion: addons.cluster.x-k8s.io/v1beta2
+kind: ClusterResourceSet
+metadata:
+  name: {{ .Release.Name }}-gateway-api
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  clusterSelector:
+    matchLabels:
+      proxcloud.io/cluster-id: {{ .Release.Name }}
+  strategy: Reconcile
+  resources:
+{{ toYaml $resources | indent 4 }}
+{{- end }}

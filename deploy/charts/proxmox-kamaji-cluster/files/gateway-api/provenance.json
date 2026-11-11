@@ -1,0 +1,77 @@
+{
+  "upstream": "https://github.com/kubernetes-sigs/gateway-api",
+  "tag": "v1.6.3",
+  "commit": "c0836133e24073fcdcdbb1713aba3cc73a89d0b5",
+  "channel": "standard",
+  "files": [
+    {
+      "file": "gateway.networking.k8s.io_gatewayclasses.yaml",
+      "url": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/c0836133e24073fcdcdbb1713aba3cc73a89d0b5/config/crd/standard/gateway.networking.k8s.io_gatewayclasses.yaml",
+      "bytes": 23255,
+      "sha256": "d32070cb6930273a07c5ca183135712b1918cc140c6d9b6cef441cdf0e562345"
+    },
+    {
+      "file": "gateway.networking.k8s.io_gateways.yaml",
+      "url": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/c0836133e24073fcdcdbb1713aba3cc73a89d0b5/config/crd/standard/gateway.networking.k8s.io_gateways.yaml",
+      "bytes": 188714,
+      "sha256": "905c89d8fefaab9088bf9d0a8d47ebd7ec4e653a914d4bfaa575a7716f07a828"
+    },
+    {
+      "file": "gateway.networking.k8s.io_grpcroutes.yaml",
+      "url": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/c0836133e24073fcdcdbb1713aba3cc73a89d0b5/config/crd/standard/gateway.networking.k8s.io_grpcroutes.yaml",
+      "bytes": 122702,
+      "sha256": "a96b307008290c194ad346f9bb9346dd560c12e4d4e7dfbdbe7d2fb5e812d62e"
+    },
+    {
+      "file": "gateway.networking.k8s.io_httproutes.yaml",
+      "url": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/c0836133e24073fcdcdbb1713aba3cc73a89d0b5/config/crd/standard/gateway.networking.k8s.io_httproutes.yaml",
+      "bytes": 429300,
+      "sha256": "a89d17ff5ed060fa0eac015524f9252bb291f616412c13ac8cb952ed9c25c5ad"
+    },
+    {
+      "file": "gateway.networking.k8s.io_referencegrants.yaml",
+      "url": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/c0836133e24073fcdcdbb1713aba3cc73a89d0b5/config/crd/standard/gateway.networking.k8s.io_referencegrants.yaml",
+      "bytes": 14848,
+      "sha256": "ff8db85aaacc91fb4096975afb5782540572bf2f04842a258094cd7f50c7f38a"
+    },
+    {
+      "file": "gateway.networking.k8s.io_backendtlspolicies.yaml",
+      "url": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/c0836133e24073fcdcdbb1713aba3cc73a89d0b5/config/crd/standard/gateway.networking.k8s.io_backendtlspolicies.yaml",
+      "bytes": 78548,
+      "sha256": "d9824b82db284bdea67d2eb0297952be51e0e7a394f02daef0d6f3fefa5d01c0"
+    },
+    {
+      "file": "gateway.networking.k8s.io_listenersets.yaml",
+      "url": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/c0836133e24073fcdcdbb1713aba3cc73a89d0b5/config/crd/standard/gateway.networking.k8s.io_listenersets.yaml",
+      "bytes": 42614,
+      "sha256": "b81f1771dcd96dfb3bb500e07dafef79a2aa58c4a9b4b366d54ca29e8ecccb5e"
+    },
+    {
+      "file": "gateway.networking.k8s.io_tcproutes.yaml",
+      "url": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/c0836133e24073fcdcdbb1713aba3cc73a89d0b5/config/crd/standard/gateway.networking.k8s.io_tcproutes.yaml",
+      "bytes": 73240,
+      "sha256": "5d2891484c870865e9ae61402b412a8b81eea381fbb71fdc56406e533c9643f1"
+    },
+    {
+      "file": "gateway.networking.k8s.io_tlsroutes.yaml",
+      "url": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/c0836133e24073fcdcdbb1713aba3cc73a89d0b5/config/crd/standard/gateway.networking.k8s.io_tlsroutes.yaml",
+      "bytes": 120606,
+      "sha256": "b9277b755ee0f33dd245d3497ba842922ff2e2efe5070b0911e58d072d55ed9c"
+    },
+    {
+      "file": "gateway.networking.k8s.io_udproutes.yaml",
+      "url": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/c0836133e24073fcdcdbb1713aba3cc73a89d0b5/config/crd/standard/gateway.networking.k8s.io_udproutes.yaml",
+      "bytes": 73210,
+      "sha256": "a552a9aa3726367c392000a45d13e6ba07985117a5e6826364640bedfeb5e922"
+    },
+    {
+      "file": "gateway.networking.k8s.io_vap_safeupgrades.yaml",
+      "url": "https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/c0836133e24073fcdcdbb1713aba3cc73a89d0b5/config/crd/standard/gateway.networking.k8s.io_vap_safeupgrades.yaml",
+      "bytes": 2688,
+      "sha256": "66b1d7b2c392c0e4dd4b2950e2af62811f8288a65e50708e2b3d26d4433af84c"
+    }
+  ],
+  "license": "Apache-2.0",
+  "download_only_static_schemas": true,
+  "first_attempt": "Last source path incorrectly omitted standard/ and returned404 beforefilewrite; correctedperofficialkustomization. Existing10filesretained unchanged."
+}

@@ -61,7 +61,7 @@ func TestRegistryDockerConfig(t *testing.T) {
 	}{
 		{"ghcr.io/a", fromRegistry{Type: "registry", Username: "u"}},
 		{"ghcr.io/a", fromRegistry{Type: "gcp", ServiceAccountJSON: "not json"}},
-		{ecr + "/a", fromRegistry{Type: "aws"}}, // not offered here (no AWS SDK exchange)
+		{ecr + "/a", fromRegistry{Type: "aws"}}, // explicit AWS fields are required
 		{"ghcr.io/a", fromRegistry{Type: "azure"}},
 		{"192.0.2.10/t/p/t@sha256:1", fromRegistry{Type: "registry", Username: "u", Password: "p"}}, // our own registry
 	} {
@@ -69,8 +69,8 @@ func TestRegistryDockerConfig(t *testing.T) {
 			t.Errorf("%s %+v: want a 400, got %v", b.image, b.r, err)
 		}
 	}
-	if _, err := registryDockerConfig(testSandboxCfg, ecr+"/a", &fromRegistry{Type: "aws"}); !strings.Contains(err.Error(), "get-login-password") {
-		t.Errorf("the aws refusal must say what to do instead: %v", err)
+	if _, err := registryDockerConfig(testSandboxCfg, ecr+"/a", &fromRegistry{Type: "aws"}); !strings.Contains(err.Error(), "awsAccessKeyId") {
+		t.Errorf("the AWS validation must require explicit credentials: %v", err)
 	}
 }
 
@@ -117,7 +117,7 @@ func TestTrimBuildsKeepsTaggedAndBuilding(t *testing.T) {
 	tpl.Builds[1].Status = sandbox.BuildBuilding
 	tpl.Tags = map[string]string{"default": id(0)}
 	trimBuilds(&tpl)
-	if len(tpl.Builds) != keptBuilds || tpl.build(id(0)) == nil || tpl.build(id(1)) == nil || tpl.build(id(2)) != nil || tpl.build(id(keptBuilds+4)) == nil {
+	if len(tpl.Builds) != keptBuilds+5 || tpl.build(id(0)) == nil || tpl.build(id(1)) == nil || tpl.build(id(2)) == nil || tpl.build(id(keptBuilds+4)) == nil {
 		t.Fatalf("kept %+v", tpl.Builds)
 	}
 }

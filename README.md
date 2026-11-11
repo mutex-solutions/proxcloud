@@ -20,7 +20,7 @@
 
 <p>
   <a href="#-quickstart"><b>Getting Started</b></a>
-  · <a href="https://github.com/mutex-solutions/proxcloud/discussions">Community</a>
+  · <a href="https://github.com/mutex-solutions/proxcloud/issues">Community / support</a>
   · <a href="CHANGELOG.md">Changelog</a>
   · <a href="https://github.com/mutex-solutions/proxcloud/issues">Bug reports</a>
 </p>
@@ -38,8 +38,12 @@ capabilities to AI agents.
 - **API** (Go) — one backend serving three surfaces: the customer API, the SigV4-signed operator API, and an MCP endpoint.
 
 > [!WARNING]
-> **Proxmox VE backend.** ProxCloud provisions against a Proxmox VE cluster through
-> the PVE API. Supported PVE releases are not pinned yet.
+> **Development / preview status.** No versioned ProxCloud release is published yet.
+> The installer targets **Proxmox VE 9.2 or newer** and requires its documented
+> firewall/storage prerequisites; this is a minimum, not a tested compatibility
+> promise for every later PVE version. Debian and Ubuntu OS template pipelines have
+> passed controlled build/smoke runs; the Kubernetes static ISO path still needs a
+> real installer/reboot canary. See [current support and release readiness](docs/release-readiness.md).
 
 ## Contents
 
@@ -64,6 +68,14 @@ capabilities to AI agents.
 - **MCP server** — a Model Context Protocol endpoint so AI agents can drive the platform with the same auth and permissions as a user or operator.
 - **Identity via OIDC** — Keycloak or any OpenID Connect provider, browser sign-in over authorization-code + PKCE.
 
+Features depend on the configured provider and its release gates. Managed sandbox
+pause/resume, paused wake/connect, fork and AutoPause/AutoResume are currently
+**held**, with no configuration override; named capture/export and ordinary pinned
+CREATE are separate capabilities. See the [saved-runtime safety boundary](docs/saved-runtime-admission.md).
+Billing/cloud cron producers are off by default; bounded PostgreSQL workers still
+finish accepted work. This is not a promise that every listed workflow has passed
+fresh-install, upgrade or production acceptance.
+
 ## 🧭 Architecture overview
 
 ```mermaid
@@ -80,7 +92,8 @@ flowchart LR
   M -->|"/admin-api/v1"| API
   API["ProxCloud API<br/>Go, chi router"]
   API --> DB[("PostgreSQL")]
-  API --> MQ[("RabbitMQ")]
+  API --> JOBS["Bounded durable workers<br/>PostgreSQL primary"]
+  JOBS --> DB
   API --> KC["Keycloak / OIDC"]
   API -->|"REST :8006, API token"| PVE["Proxmox VE cluster(s)<br/>API, SDN, firewall, storage"]
   API -->|"RGW Admin Ops and S3"| RGW["Ceph S3 (RGW)<br/>object storage"]
@@ -89,11 +102,20 @@ flowchart LR
 Full context and container views: [C1 context](docs/architecture/c4/c1-context.md)
 and [C2 containers](docs/architecture/c4/c2-containers.md).
 
-One Go process serves all three HTTP surfaces on port `8080` and runs scheduled
-jobs (billing, sync, metrics) internally; a separate management port (`8081`)
-exposes health and operational triggers.
+One Go process serves all three HTTP surfaces on port `8080`, runs bounded
+PostgreSQL durable workers, and optionally schedules jobs (billing, sync, metrics).
+Scheduler/debug gates default off; workers still finish already-enqueued work.
+A separate management port (`8081`) exposes health and operational triggers.
+No RabbitMQ is required. Existing deployments must follow the
+[drain/reconcile and retain cutover runbook](docs/postgres-jobs-migration.md)
+before upgrading; mail durability is a separate follow-up.
 
 ## 🚀 Quickstart
+
+Broker-free defaults target the **v0.4.0-rc.1** API/chart preview. Publication is
+authorized, but until its image and chart artifacts are verified pullable, build
+from a checkout containing the PostgreSQL job engine (installer `images.build: true`) or pin known compatible new images;
+do not use the older Rabbit-dependent API with these defaults.
 
 **[`docs/quickstart.md`](docs/quickstart.md)** takes you from "what do I want" to a running
 install: the components each path deploys, the inventory keys to fill, the one command, the
@@ -129,7 +151,7 @@ Every stage and option: [`docs/install.md`](docs/install.md). Chart values:
 | `cmd/api` | Service entrypoint — HTTP servers + background jobs |
 | `internal/platform` | Business domains: `account`, `org`, `project`, `billing`, `payment`, `pricing`, `catalog`, `order`, `promotion`, `rbac`, `admin`, `adminapi`, `mcp`, `scheduler`, … |
 | `internal/cloud` | Proxmox VE client and services (`pve`), resource cache and sync, Ceph RGW object store, usage metrics, managed K8s/DBaaS, cloud→billing bridge |
-| `internal/{config,server,amqp,oidc,pgdoc,health}` | Wiring: config, HTTP server, messaging, auth, Postgres store, health |
+| `internal/{config,server,oidc,pgdoc,health}` | Wiring: config, HTTP server, auth, Postgres store, health |
 | `pkg` | Reusable libraries: `auth`, `httpx`, `money`, `textcrypt`, `audit` |
 | `deploy` | `Dockerfile`, Helm chart (`chart`), seed data |
 | `installer` | One-shot installer (Ansible): `make install` and the day-2 targets |
@@ -142,7 +164,7 @@ Every stage and option: [`docs/install.md`](docs/install.md). Chart values:
 
 ## 🧰 Tech stack
 
-- **Backend** — Go 1.25, [chi](https://github.com/go-chi/chi) router, PostgreSQL (jsonb document store via [pgx](https://github.com/jackc/pgx)), RabbitMQ, a Proxmox VE REST client (`internal/cloud/pve`), aws-sdk-go-v2 for S3, Stripe, the [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk), and [koanf](https://github.com/knadh/koanf) config (env + `application.yml`).
+- **Backend** — Go 1.25, [chi](https://github.com/go-chi/chi) router, PostgreSQL (jsonb document store and durable jobs via [pgx](https://github.com/jackc/pgx)), a Proxmox VE REST client (`internal/cloud/pve`), aws-sdk-go-v2 for S3, Stripe, the [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk), and [koanf](https://github.com/knadh/koanf) config (env + `application.yml`).
 - **Frontends** — React 19 + Vite + TypeScript, Tailwind CSS v4, shadcn/ui + Radix, TanStack Query, and `react-oidc-context` (authorization-code + PKCE).
 - **Identity** — Keycloak or any OIDC provider.
 
@@ -156,7 +178,7 @@ Every stage and option: [`docs/install.md`](docs/install.md). Chart values:
 - [API overview](docs/api.md) — the `/api/v1`, `/admin-api/v1`, and `/mcp` surfaces + conventions.
 - [Billing](docs/billing.md) — pricing, accrual, bills, transactions, savings, suspension.
 - [Cloud integration](docs/cloud-integration.md) — Proxmox VE providers, resource cache and sync, metrics, Ceph S3.
-- [Jobs & scheduling](docs/jobs-scheduling.md) — the scheduler, distributed locking, charge fan-out.
+- [Jobs & scheduling](docs/jobs-scheduling.md) — the scheduler, distributed locking, durable charge jobs; [existing-site cutover](docs/postgres-jobs-migration.md).
 - [Configuration](docs/configuration.md) — env / `application.yml` / Helm values reference.
 - [Development](docs/development.md) · [Testing](docs/testing.md) · [Glossary](docs/glossary.md) · [Decision records](docs/adr/).
 
@@ -185,16 +207,23 @@ make image             # build the api container image
 Frontends:
 
 ```sh
-cd web/client   # or web/admin
-npm install
+cd web/client   # or web/admin; use Node.js 24 as in hosted CI
+npm ci
 npm run dev     # Vite dev server
 npm run build   # type-check + production build
 npm run lint    # oxlint
 ```
 
-Container images (`proxcloud-api`, `proxcloud-web`, `proxcloud-admin`) and the Helm chart
-are published to `ghcr.io/mutex-solutions` by CI on pushes to `main` and tagged
-releases.
+CI builds five container images: `proxcloud-api`, `proxcloud-web`,
+`proxcloud-admin`, `proxcloud-sandbox-proxy`, and `proxcloud-sandbox-runtime`.
+Image-relevant pushes to `main` publish `dev-<short-sha>` tags; pull requests build
+without pushing. A `v*` tag publishes exact image tags and the app Helm chart in
+separate workflows. The managed Kubernetes and database charts have independent
+release tags; merging to `main` does **not** publish an OCI chart or deploy a site.
+
+No versioned release/chart has been published yet. See [build and release
+operations](docs/ci-release.md) for current triggers, prerelease limitations,
+required permissions and release verification.
 
 </details>
 

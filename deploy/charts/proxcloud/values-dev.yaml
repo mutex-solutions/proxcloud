@@ -21,7 +21,4 @@ postgresql:
   auth:
     password: "proxcloud"
 
-rabbitmq:
-  enabled: true
-  auth:
-    password: "proxcloud"
+# No RabbitMQ: workers and billing use the writable PostgreSQL primary.

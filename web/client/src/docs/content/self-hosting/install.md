@@ -1,12 +1,14 @@
 # Installing on Kubernetes
 
-ProxCloud is delivered as one Helm chart that installs the three application workloads and, by default, every stateful dependency they rely on. A single `helm upgrade --install` yields a complete platform: API, customer portal, admin console, a PostgreSQL cluster and a RabbitMQ cluster (through their operators), plus, optionally, a bundled Keycloak for identity.
+The ProxCloud Helm chart deploys the API, customer portal and admin console, with PostgreSQL and optional Keycloak integration. Native billing uses bounded durable workers on PostgreSQL primary; **RabbitMQ is not required**. The default PostgreSQL `Cluster` needs an existing CloudNativePG operator unless you explicitly bundle the operator or choose another PostgreSQL mode.
+
+Source checkout defaults target a planned broker-free app/chart version. Before using an OCI install command, confirm that the exact chart and matching images are published. Until then, build from a compatible checkout and set matching image tags; an unversioned registry command is not a verified release-install path.
 
 ## Prerequisites
 
 - A working Kubernetes cluster with a default StorageClass.
-- The [CloudNativePG](https://cloudnative-pg.io) operator and the [RabbitMQ Cluster Operator](https://github.com/rabbitmq/cluster-operator), which run the default PostgreSQL and RabbitMQ. Without them, set `cnpg.installOperator: true` (bundles the CloudNativePG operator), use the bitnami subcharts (`-f deploy/charts/proxcloud/values-dev.yaml`), or point at external services (below).
-- For classic ingress: an ingress controller (such as ingress-nginx) and, for TLS, cert-manager with a ClusterIssuer. Gateway API exposure is supported as an alternative.
+- The [CloudNativePG](https://cloudnative-pg.io) operator for the default PostgreSQL mode. Alternatively, set `cnpg.installOperator: true`, use the development PostgreSQL subchart (`-f deploy/charts/proxcloud/values-dev.yaml` with its insecure secrets replaced), or point at an external writable primary (below). No RabbitMQ operator is needed for a fresh current install.
+- Prefer a maintained Gateway API controller such as NGINX Gateway Fabric, with application Gateway/HTTPRoute resources and listener TLS certificates. Do not install retired ingress-nginx for a new cluster. Existing classic Ingress deployments need an explicit, separately tested migration; installing a Gateway API controller does not convert them.
 - DNS names for the portal, the API and the admin console (e.g. `cloud.example.com`, `api.cloud.example.com`, `admin.cloud.example.com`) pointed at your ingress.
 - Helm 3.8+.
 
@@ -24,12 +26,19 @@ Bundled dependencies, each swappable for an external instance:
 | Dependency | Toggle | External counterpart |
 |------------|--------|----------------------|
 | PostgreSQL | `cnpg.enabled` (default: a CloudNativePG `Cluster`), or `postgresql.enabled` (bitnami subchart) | `externalPostgresql.*`, with both off |
-| RabbitMQ | `rabbitmqCluster.enabled` (default: a `RabbitmqCluster`), or `rabbitmq.enabled` (bitnami subchart) | `externalRabbitmq.*`, with both off |
+| Legacy RabbitMQ | `rabbitmqCluster.enabled` and `rabbitmq.enabled` default **off**; migration retention only | No API broker connection; deprecated `externalRabbitmq.*` is unused |
 | Keycloak | `keycloakx.enabled` (off by default) | any external IdP via `auth.*.issuer` (see [How Identity Works](/docs/concepts/identity)) |
 
 The application state lives in one PostgreSQL database (`proxcloud`), one document-per-aggregate in a `jsonb` column. The bundled PostgreSQL (the CloudNativePG cluster, or the subchart) creates the `proxcloud` role and database on first boot, named by `postgresql.auth.*`; set `postgresql.auth.password` (the chart ships no default).
 
 ## A minimal values file
+
+This is a deployment/exposure example, **not a complete identity setup**. Before
+expecting either console to sign in, configure the customer/admin issuer and
+client IDs for an external IdP, or explicitly enable and configure bundled
+Keycloak and its realms. See [How Identity Works](/docs/concepts/identity) and
+[Single Sign-On](/docs/self-hosting/sso). Keep the populated encryption/password
+values private; commit only a secret-free template or use pre-created Secrets.
 
 ```yaml
 # values.yaml
@@ -102,7 +111,7 @@ With ingress on, the API answers on `api.cloud.example.com` (`/api/v1`, `/admin-
 ```sh
 helm upgrade --install proxcloud oci://ghcr.io/mutex-solutions/charts/proxcloud \
   --namespace proxcloud --create-namespace \
-  -f values.yaml
+  --version <published-chart-version> -f values.yaml
 ```
 
 Watch it come up:
@@ -151,7 +160,7 @@ kubectl -n proxcloud get secret proxcloud-api \
   -o jsonpath='{.data.encryption-key}' | base64 -d
 ```
 
-Lose this value and encrypted data cannot be recovered — see [Backup and Recovery](/docs/self-hosting/backup). To supply your own secret instead of the chart-managed one, set `api.existingSecret` to a Secret carrying the keys `db-url`, `rabbitmq-password`, and `encryption-key`.
+Lose this value and encrypted data cannot be recovered — see [Backup and Recovery](/docs/self-hosting/backup). To supply your own secret instead of the chart-managed one, set `api.existingSecret` to a Secret carrying `db-url` and `encryption-key`, optional history-only `db-read-url`, and `sso-client-secret` when organization SSO is enabled. No broker credential is required.
 
 ## Pointing at external dependencies
 
@@ -175,7 +184,7 @@ externalPostgresql:
   # secretKey: db-url
 ```
 
-`externalRabbitmq` follows the same shape (`rabbitmqCluster.enabled: false` plus the `externalRabbitmq` block). For identity, point `auth.*.issuer` at your IdP — see [How Identity Works](/docs/concepts/identity).
+Do not configure an external broker for the current API; legacy broker settings are accepted only for compatibility/retention and do not deliver work. For identity, point `auth.*.issuer` at your IdP — see [How Identity Works](/docs/concepts/identity).
 
 ## Scaling for production
 
@@ -197,13 +206,16 @@ Scale each workload manually with `api.replicas` / `ui.replicas` / `admin.replic
 1. Save the `<release>-api` encryption key offline (as above).
 2. Open `https://admin.cloud.example.com/` and sign in with an admin-realm account.
 
-3. Add your Proxmox VE cluster(s) and API token in the admin console. ProxCloud syncs resource state by polling the PVE API, so there is no event feed to set up.
+3. Add your Proxmox VE cluster(s) and API token in the admin console. Resource state uses PVE polling, not an event feed; turn on `api.jobs.schedulerEnabled` deliberately after validating pricing and integrations. It defaults false. Durable workers always finish existing jobs even while the scheduler is off.
 4. If you enable per-organization SSO, restrict Keycloak's egress first: tenants choose URLs Keycloak will call. See [Required: Keycloak egress policy](/docs/self-hosting/sso#required-keycloak-egress-policy).
 
 ## Upgrading
 
-Re-run the same command with the new chart/app version:
+Pin the new chart and matching image version, back up primary PostgreSQL and the encryption key, and rehearse the upgrade first. If the old deployment used RabbitMQ, **do not just disable/delete the broker**: stop producers/consumers, drain or reconcile ready and unacknowledged work, retain the old volumes and record migration evidence before broker-free cutover. Current workers do not import old queue messages.
 
 ```sh
-helm -n proxcloud upgrade proxcloud oci://ghcr.io/mutex-solutions/charts/proxcloud -f values.yaml
+helm -n proxcloud upgrade proxcloud oci://ghcr.io/mutex-solutions/charts/proxcloud \
+  --version <published-chart-version> -f values.yaml
 ```
+
+The scheduler flag is not an emergency queue stop: workers on the writable primary continue accepted jobs. Follow the release's migration and rollback notes rather than assuming a downgrade can undo already-committed financial work.

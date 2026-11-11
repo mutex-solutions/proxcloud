@@ -18,7 +18,7 @@ charging every billing profile every minute. Two mechanisms make horizontal
 scaling safe:
 
 - **ShedLock** — a PostgreSQL-backed distributed lock. Every scheduled job runs
-  under a named lock, so a given fire executes on exactly one pod fleet-wide.
+  under a named lock while that lease holds. It throttles duplicate dispatch, but a timed-out or uncooperative process is not proven stopped.
 - **Durable competing workers** — native billing publishes a frozen original-cycle
   job per profile on the primary. Delivery is at least once; UUID owner + epoch +
   unexpired database-clock CAS fences completion/retry. The whole-profile financial
@@ -137,8 +137,8 @@ cron specs from `scheduler.go`. All specs are 6-field seconds-first, UTC.
 | `sandboxStateSync` | `10 * * * * *` | every minute at :10 | 2m / 30s | Sandboxes: every enabled project's SANDBOX rows off the sandbox cluster before the minutely charge (pins each start, ends each vanished row) |
 | `sandboxTemplateAdopt` | `0 */5 * * * *` | every 5 minutes | 10m / 1m | Sandboxes: a built-in template moves to the digest the prepull DaemonSet runs once every Ready node has pulled it; only for providers with `imageAdoption` `on` (`dry-run` logs) (docs/managed-sandbox.md §6) |
 | `sandboxBuildSync` | `40 * * * * *` | every minute at :40 | 10m / 20s | Sandboxes: record the result of custom template builds nobody polls, before the build pod is cleaned up |
-| `sandboxAutoPause` | `5 * * * * *` | every minute at :05 | 30m / 20s | Sandboxes: pause the `autoPause` sandboxes past their end (docs/managed-sandbox.md) |
-| `sandboxRegistryPrune` | `0 17 * * * *` | every hour at :17 | 30m / 5m | Sandboxes: delete unreferenced template images older than 24h; only for providers with `registryPrune` on |
+| `sandboxAutoPause` | `5 * * * * *` | every minute at :05 | 30m / 20s | Registered, but skips managed saved-lifecycle work while the fixed capability is false; no AutoPause enable flag |
+| `sandboxRegistryPrune` | `0 17 * * * *` | every hour at :17 | 30m / 5m | `dry-run` previews old unreferenced candidates; configured `on` returns physical-delete HOLD, including project teardown |
 | `pveTaskPoll` | `*/20 * * * * *` | every 20 seconds | 1m / 10s | Proxmox: finished VM tasks past each node's cursor; records them (`LIST_EVENTS`), audits the ones the platform did not run, re-syncs their project |
 | `pveTrafficSample` | `45 * * * * *` | every minute at :45 | 2m / 30s | Proxmox: public-NIC counters of the VMs holding a public IP into `usageMetrics` |
 | `executeProjectDeletion` | `30 * * * * *` | every minute at :30 | 30m / 30s | Delete projects past their deletion grace window (cascade live cloud delete → remove the doc) |
@@ -230,8 +230,8 @@ Each is `POST /debug/<name>` and returns a small JSON result:
 | `run-pve-state` | one Proxmox state sample |
 | `run-sandbox-state` | one sandbox state read |
 | `run-sandbox-builds` | record finished custom template builds |
-| `run-sandbox-autopause` | pause the `autoPause` sandboxes past their end |
-| `run-registry-prune` | prune unreferenced template images (`?grace=10m` lowers the 24h age floor for a drill) |
+| `run-sandbox-autopause` | invokes the same capability-gated runner; does not bypass the saved-lifecycle hold |
+| `run-registry-prune` | preview/HOLD as configured; `?grace=10m` lowers only the candidate age floor, never enables real DELETE |
 | `run-pve-tasks` | one Proxmox task poll |
 | `run-pve-traffic` | one Proxmox public-NIC sample |
 | `run-metrics` | one metrics ingestion pass (prometheus per provider config) |
@@ -302,9 +302,13 @@ rolls back SQL and leaves claims to DB-clock expiry recovery. Retrying poison is
 bounded with exponential backoff/jitter and visible dead letters.
 
 SSE remains an in-memory pool **per API pod**. Competing queue workers are NOT a
-broadcast mechanism and this phase adds no event-stream fan-out. Mail, invitations,
-bill emails, cloud/gateway mutations and the other cron jobs are not made durable
-by this native billing queue; mail outbox integration is a separate next phase.
+broadcast mechanism and this phase adds no event-stream fan-out. The native billing
+queue does not automatically make cloud/gateway calls or every email durable.
+Separate bounded mail-outbox and invitation composition/status machinery now exists,
+with explicit reminder queue-only opt-in and conservative unknown-SMTP outcomes;
+there is no blanket production SMTP dispatcher/recipient rollout or legacy fallback.
+Read [mail outbox safety limits](mail-outbox-safety-limits.md) before enabling any
+producer. Other legacy mail callers retain their documented best-effort behavior.
 
 ---
 

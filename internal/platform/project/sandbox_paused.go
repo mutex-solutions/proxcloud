@@ -11,6 +11,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
 	"github.com/mutex-solutions/proxcloud/internal/platform/rbac"
 	"github.com/mutex-solutions/proxcloud/pkg/httpx"
 )
@@ -59,7 +60,8 @@ func (h *Handler) nativePausedList(w http.ResponseWriter, r *http.Request) {
 		if state == "" {
 			state = "paused"
 		}
-		out = append(out, map[string]any{"sandboxId": p.ID, "serviceId": p.ServiceID, "state": state, "pausedAt": p.PausedAt})
+		out = append(out, map[string]any{"sandboxId": p.ID, "serviceId": p.ServiceID, "state": state, "pausedAt": p.PausedAt,
+			"resumeAvailable": false, "resumeUnavailableReason": sandbox.ErrManagedSavedStartHeld.Error()})
 	}
 	httpx.OK(w, out)
 }

@@ -6,6 +6,11 @@ Provisioning promotional credits are a welcome bonus: a chunk of platform credit
 
 Open **System → Billing configuration**, switch to the **Activation** tab, and find the **Provisioning promotional credits** section. Use **Add credit** to define one or more grants:
 
+![Current Activation tab including a synthetic provisioning promotional credit row](/docs-img/billing-configuration-activation.png)
+
+*The shared Activation illustration uses local mock data; it does not grant real credit.*
+
+
 | Field | Meaning |
 |---|---|
 | Amount | The credit value in the platform currency, e.g. `100`. |

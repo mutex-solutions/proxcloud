@@ -256,7 +256,7 @@ export default function SandboxesPage() {
         </TabsContent>
         {e2b && (
           <TabsContent value="templates">
-            <TemplatesTab pid={pid} />
+            <TemplatesTab key={pid} pid={pid} />
           </TabsContent>
         )}
         <TabsContent value="api-keys">

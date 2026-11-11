@@ -22,6 +22,10 @@ Customers normally register on their own. **Client area → Users → Create use
 
 Open **System → Billing configuration** and switch to the **Activation** tab. Turn on **Auto-activation enabled** and choose the conditions a customer must satisfy for ProxCloud to activate them with no admin in the loop.
 
+![Current Activation tab with synthetic auto-activation constraints and promotional credit example](/docs-img/billing-configuration-activation.png)
+
+*Illustration captured from the current admin UI with synthetic local mock data; it is not evidence of live activation or provisioning.*
+
 Each condition is a constraint set to one of three modes:
 
 | Mode | Effect |
@@ -45,6 +49,10 @@ Filling in the billing address is always part of the flow — a profile with an 
 ## The validation queue
 
 If **Billing profile validation** is enabled, submitted profiles arrive in **Client area → Validations** as `PENDING` entries.
+
+![Current validation queue with a synthetic pending customer and Approve and Reject controls](/docs-img/validations-queue.png)
+
+*Local mock illustration only; no customer decision was submitted.*
 
 For each entry, review the customer's submitted details and any KYC evidence, then:
 

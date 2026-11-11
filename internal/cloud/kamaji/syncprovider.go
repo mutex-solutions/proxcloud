@@ -153,7 +153,7 @@ func clusterData(app, tcp map[string]any, mds []map[string]any) map[string]any {
 	if adds, ok := dig(values, "addons").(map[string]any); ok {
 		out := map[string]any{}
 		for name, raw := range adds {
-			if _, curated := ClusterAddons[name]; !curated {
+			if _, curated := ClusterAddons[name]; !curated && name != LegacyIngressAddon {
 				continue
 			}
 			if m, ok := raw.(map[string]any); ok {

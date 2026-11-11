@@ -25,6 +25,10 @@ Fill these in before your first cycle closes — invoices that have already been
 2. Return to **System → Billing configuration → Business details** and select it in the **Invoice gateway** dropdown.
 3. Save.
 
+![Current Business details tab with a synthetic invoice gateway selection](/docs-img/billing-configuration-invoice-gateway.png)
+
+*Current UI with synthetic local mock data; the selection does not prove a live integration is configured.*
+
 From the next cycle onward, invoice creation is delegated to the chosen gateway. You can switch gateways whenever you like; the change only affects invoices generated afterward. The **Mail gateway** selector beside it picks which mail integration delivers invoice and billing emails.
 
 ## The billing cycle

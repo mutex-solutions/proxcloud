@@ -20,7 +20,9 @@ default path and injects the secret/connection env vars into the pod
 (`deploy/charts/proxcloud/templates/api/configmap.yaml` and `deploy/charts/proxcloud/templates/api/deployment.yaml`).
 
 Required config is validated at startup (`Config.Validate`): the service refuses
-to start without `PROXCLOUD_DB_URL` and a RabbitMQ host.
+to start without `PROXCLOUD_DB_URL` pointing at a **writable primary**. RabbitMQ
+is no longer required. A true legacy fanout flag is a startup **migration error**;
+follow [the cutover runbook](postgres-jobs-migration.md) before clearing it.
 
 ## Configuration reference
 
@@ -40,7 +42,8 @@ Legend: **env** = environment variable, **file** = `application.yml` key, **helm
 
 | Concern | env | file | helm | Default | Meaning |
 |---------|-----|------|------|---------|---------|
-| Connection DSN | `PROXCLOUD_DB_URL` | `db.url` | derived from `cnpg.*`, `postgresql.*` or `externalPostgresql.*` | — (required) | PostgreSQL connection string (`postgres://user:pass@host:port/proxcloud?sslmode=…`). |
+| Primary DSN | `PROXCLOUD_DB_URL` | `db.url` | derived from `cnpg.*`, `postgresql.*` or `externalPostgresql.*`; Secret `db-url` | — (required) | **Writable primary**, also used for durable jobs, leases, retries and all finance. CNPG always uses `-rw`. Supply credentials through a Secret, not a committed DSN example. |
+| Optional reader | `PROXCLOUD_DB_READ_URL` | `db.read-url` | optional `db-read-url` in `api.existingSecret`, `externalPostgresql.readExistingSecret` / `readSecretKey`, or explicit `cnpg.statusReadReplica` | empty → primary | **History/metrics only**; never worker/finance input or writes. A configured failed reader makes those reads fail 503, not silently fall back. |
 
 PostgreSQL is the sole primary datastore: every document kind is a
 `(id text primary key, doc jsonb not null)` table (see
@@ -51,14 +54,22 @@ the credentials come from a secret (or `externalPostgresql.existingSecret`).
 Documents are (de)serialized with the standard-library `encoding/json` (no ORM
 or external codec) and stored verbatim in each table's `doc` jsonb column.
 
-### RabbitMQ (host required)
+The optional reader is not a general read/write split. Leave it empty when no
+replica exists. CNPG `statusReadReplica: false` is the default; opt-in with
+`cnpg.instances >= 2` derives `-ro` only for that status reader. An existing API
+Secret may omit `db-read-url` (optional key reference, primary fallback). An
+explicit external reader Secret/key must exist. Seed jobs use the primary only.
 
-| Concern | env | file | helm | Default | Meaning |
-|---------|-----|------|------|---------|---------|
-| Host | `PROXCLOUD_RABBITMQ_HOST` | `rabbitmq.host` | derived from `rabbitmqCluster.*` (default), `rabbitmq.*` or `externalRabbitmq.host` | — (required) | Broker host. |
-| Port | `PROXCLOUD_RABBITMQ_PORT` | `rabbitmq.port` | derived | `5672` | Broker port. |
-| Username | `PROXCLOUD_RABBITMQ_USERNAME` | `rabbitmq.username` | secret | — | Broker user. |
-| Password | `PROXCLOUD_RABBITMQ_PASSWORD` | `rabbitmq.password` | secret | — | Broker password. |
+### RabbitMQ (deprecated; migration retention only)
+
+The API does not connect to RabbitMQ. Old `PROXCLOUD_RABBITMQ_{HOST,PORT,USERNAME,PASSWORD}`
+/ `rabbitmq.*` file settings are ignored with a warning. Chart broker toggles
+now default false and require explicit legacy-retain migration values; they do
+not wire broker credentials into the API. Existing queues/PVCs are not deleted.
+Protect the live broker **before** removing it from desired state, with a retained
+Helm release phase and Argo pruning protection where applicable. See
+[the drain/reconcile runbook](postgres-jobs-migration.md); flag false alone is
+not evidence that the old queue is empty.
 
 ### Encryption (data-at-rest key)
 
@@ -70,7 +81,8 @@ The chart renders `api.encryptionKey` into a Secret and injects it as
 `PROXCLOUD_ENCRYPTION_DEFAULT_KEY`. It protects provider and integration secrets and the secrets of admin hmac keys, and
 changing it locks all of those out: hmac key rows that no longer decrypt fail authentication until they are minted again.
 Alternatively, point `api.existingSecret` at a
-pre-made Secret carrying `db-url` / `rabbitmq-password` / `encryption-key`.
+pre-made Secret carrying `db-url` / `encryption-key` (and `sso-client-secret` when
+SSO is enabled). No broker credential or replica key is required.
 
 ### Self URLs
 
@@ -136,14 +148,19 @@ clusters with an error.
 
 ### Scheduled jobs (billing / metrics crons)
 
-All **off by default** — a plain deploy stays dormant and never charges bills
-unexpectedly.
+The **scheduler and debug triggers are off by default**: a fresh deploy creates
+no timed billing work. Durable workers nevertheless start on every API pod and
+finish **already-enqueued** work. These are producer/route gates, not a queue
+pause, and there is no `QUEUE_ENABLED` setting.
 
 | Concern | env | file | Default | Meaning |
 |---------|-----|------|---------|---------|
 | Scheduler | `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | `proxcloud.jobs.scheduler-enabled` | `false` | Auto-start the charge/metrics crons (charges bills on a timer). |
 | Debug triggers | `PROXCLOUD_JOBS_DEBUG_TRIGGERS` | `proxcloud.jobs.debug-triggers` | `false` | Expose on-demand `POST :8081/debug/run-*` triggers **without** starting the crons — for deterministic, manual runs. |
-| Rabbit fanout | `PROXCLOUD_JOBS_RABBIT_FANOUT` | `proxcloud.jobs.rabbit-fanout` | `false` | Fan the **native** charge cron out across pods via RabbitMQ (one message per active profile) instead of charging every profile in one pod. Ignored by the external provider. |
+| Worker concurrency | `PROXCLOUD_JOBS_WORKER_CONCURRENCY` | — (env only) | `2` | `1..16` bounded workers per API pod (`api.jobs.workerConcurrency`). Always active, using the writable primary. |
+| Poll interval | `PROXCLOUD_JOBS_POLL_INTERVAL` | — (env only) | `1s` | Go duration, `100ms..1m` (`api.jobs.pollInterval`). |
+| Lease duration | `PROXCLOUD_JOBS_LEASE_DURATION` | — (env only) | `1m` | Go duration, `10s..10m` (`api.jobs.leaseDuration`); engine uses database-time owner+epoch CAS fencing. |
+| Legacy Rabbit fanout | `PROXCLOUD_JOBS_RABBIT_FANOUT` | `proxcloud.jobs.rabbit-fanout` | `false` | **true refuses startup**, including a true YAML setting. Stop producers, drain/reconcile and record old queue evidence before clearing. |
 
 Storage placement is configured per Proxmox provider too, not through env. The
 keys live in the provider's `config` (full shape and behaviour:
@@ -170,6 +187,19 @@ With debug triggers enabled (`PROXCLOUD_JOBS_DEBUG_TRIGGERS`, not the scheduler)
 management port also exposes `POST :8081/debug/gen-hmac-key` (mint an Admin API key,
 see `docs/auth.md`). It is unauthenticated, which is why the scheduler alone never
 turns it on.
+
+### Durable savings reminder enqueue (not delivery)
+
+`PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED` defaults **false** (environment only).
+True requires a >=32-byte `PROXCLOUD_ENCRYPTION_DEFAULT_KEY` and opts savings-expiry
+reminders into atomic rendered/encrypted outbox decisions on PRIMARY. Separate
+bounded outbox/invitation composition and safe status machinery is implemented;
+that infrastructure is not a blanket email-delivery enablement. It starts
+neither a scheduler nor an SMTP dispatcher; configured gateways do not enable
+sending. Queue-only rollout cannot yet deliver these reminders. Other mail remains
+best-effort. Existing durable decisions never fall back to direct SMTP when the
+flag is switched OFF, and keyless cancellation remains active. No production
+recipient rollout or backfill is implicit. See [safety and rollback limits](mail-outbox-safety-limits.md).
 
 ### Billing provider
 
@@ -247,7 +277,7 @@ Toggle the bundled component off and fill in the matching `external*` block:
 | Dependency | Bundle toggle | Bring-your-own |
 |------------|---------------|----------------|
 | PostgreSQL | `cnpg.enabled` (CloudNativePG cluster, the default; needs the operator) or `postgresql.enabled` (bitnami subchart) | `externalPostgresql.*` (both toggles off) |
-| RabbitMQ | `rabbitmqCluster.enabled` (RabbitMQ Cluster Operator, the default; needs the operator) or `rabbitmq.enabled` (bitnami subchart) | `externalRabbitmq.*` (both toggles off) |
+| Legacy RabbitMQ | both `rabbitmqCluster.enabled` and deprecated `rabbitmq.enabled` default **false**; explicit migration retain only | no API broker connection; old `externalRabbitmq.*` accepted but unused |
 | Keycloak (OIDC) | `keycloakx.enabled` (codecentric/keycloakx) | set `auth.main.issuer` / `auth.admin.issuer` (+ `auth.adminApi.issuer`) to the external issuer |
 
 For the deployment side — ingress, TLS, Gateway API routes, secrets wiring, and the

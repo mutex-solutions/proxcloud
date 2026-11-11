@@ -419,10 +419,34 @@ func (c *Client) PodLogs(ctx context.Context, ns, pod, container string, tailLin
 	return string(body), nil
 }
 
+// PodLogPrefix reads a bounded prefix, not a sliding tail. Build archives use it so a
+// positional SDK cursor never changes meaning as more output arrives. Do not use limitBytes:
+// kubelet may select the end of a log with that option. Bound the response locally instead.
+func (c *Client) PodLogPrefix(ctx context.Context, ns, pod, container string, maxBytes int) (string, bool, error) {
+	if maxBytes <= 0 || maxBytes > 1<<20 {
+		maxBytes = 256 << 10
+	}
+	q := url.Values{"container": {container}, "timestamps": {"true"}}
+	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/log?%s", ns, pod, q.Encode())
+	body, err := c.rawLimit(ctx, path, int64(maxBytes)+1)
+	if err != nil {
+		return "", false, err
+	}
+	truncated := len(body) > maxBytes
+	if truncated {
+		body = body[:maxBytes]
+	}
+	return string(body), truncated, nil
+}
+
 // raw GETs a path whose response is NOT JSON (pods/log is plain text). Same auth and transport
 // as do(), and the same 8 MiB read cap. NO Accept header: the apiserver content-negotiates even
 // on pods/log and answers `Accept: text/plain` with 406 — the body is plain text regardless.
 func (c *Client) raw(ctx context.Context, path string) ([]byte, error) {
+	return c.rawLimit(ctx, path, 8<<20)
+}
+
+func (c *Client) rawLimit(ctx context.Context, path string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.rc.server, "/")+path, nil)
 	if err != nil {
 		return nil, err
@@ -435,7 +459,7 @@ func (c *Client) raw(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(res.Body, limit))
 	if err != nil {
 		return nil, err
 	}
@@ -516,6 +540,25 @@ func (c *Client) ApplyCore(ctx context.Context, plural string, obj map[string]an
 	return err
 }
 
+// CreateCore creates (never applies/upserts) a namespaced object. Together with ReplaceCore's
+// resourceVersion check this supports bounded multi-replica controllers without a CRI client.
+func (c *Client) CreateCore(ctx context.Context, plural string, obj map[string]any) error {
+	meta, _ := obj["metadata"].(map[string]any)
+	_, err := c.do(ctx, http.MethodPost, corePath(plural, strValue(meta["namespace"])), nil, obj, "")
+	return err
+}
+func strValue(v any) string { s, _ := v.(string); return s }
+
+// ReplaceCore requires metadata.resourceVersion: stale writers are rejected by Kubernetes.
+func (c *Client) ReplaceCore(ctx context.Context, plural string, obj map[string]any) error {
+	meta, _ := obj["metadata"].(map[string]any)
+	if strValue(meta["resourceVersion"]) == "" {
+		return errors.New("replace core requires resourceVersion")
+	}
+	_, err := c.do(ctx, http.MethodPut, corePath(plural, strValue(meta["namespace"]))+"/"+strValue(meta["name"]), nil, obj, "")
+	return err
+}
+
 // GetCore returns a namespaced core/v1 object, or nil when absent.
 func (c *Client) GetCore(ctx context.Context, plural, ns, name string) (map[string]any, error) {
 	return c.get(ctx, corePath(plural, ns), name)
@@ -524,6 +567,19 @@ func (c *Client) GetCore(ctx context.Context, plural, ns, name string) (map[stri
 // DeleteCore removes a namespaced core/v1 object (absent = success).
 func (c *Client) DeleteCore(ctx context.Context, plural, ns, name string) error {
 	return c.delete(ctx, corePath(plural, ns), name)
+}
+
+// DeleteCoreUID deletes only the independently observed object instance.
+func (c *Client) DeleteCoreUID(ctx context.Context, plural, ns, name, uid string) error {
+	if uid == "" {
+		return errors.New("delete core requires UID")
+	}
+	_, err := c.do(ctx, http.MethodDelete, corePath(plural, ns)+"/"+url.PathEscape(name), nil, map[string]any{"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": map[string]any{"uid": uid}}, "")
+	var ae *APIError
+	if errors.As(err, &ae) && ae.Status == 404 {
+		return nil
+	}
+	return err
 }
 
 // ListPodsAllNamespaces lists pods in every namespace filtered by labelSelector.

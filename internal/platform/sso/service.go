@@ -223,10 +223,27 @@ type PutRequest struct {
 // Draft returns the org's provider, creating the draft that reserves its alias on first sight.
 func (s *Service) Draft(ctx context.Context, orgID string) (*Provider, error) {
 	p, err := s.repo.ProviderForOrg(ctx, orgID)
-	if err != nil || p != nil {
-		return p, err
+	if err != nil {
+		return nil, err
 	}
-	p = &Provider{OrganizationID: orgID, Alias: newAlias()}
+	if p != nil {
+		if gone, err := s.repo.aliasRetired(ctx, p.Alias); err != nil {
+			return nil, err
+		} else if gone {
+			return nil, httpx.NewError(http.StatusConflict, http.StatusConflict, "SSO deletion has started; retry deleting it before configuring a new provider")
+		}
+		return p, nil
+	}
+	for {
+		alias := newAlias()
+		if gone, err := s.repo.aliasRetired(ctx, alias); err != nil {
+			return nil, err
+		} else if gone {
+			continue // even a random collision must not reuse a permanently revoked alias
+		}
+		p = &Provider{OrganizationID: orgID, Alias: alias}
+		break
+	}
 	if err := s.repo.InsertProvider(ctx, p); err != nil {
 		if pgdoc.IsDup(err) { // a concurrent first read won
 			return s.repo.ProviderForOrg(ctx, orgID)
@@ -439,15 +456,26 @@ func representation(p *Provider, imported map[string]string, secret string) map[
 	}
 }
 
-// Delete removes the broker and the org's configuration. Verified domains stay claimed, and users
-// are released from the binding so they can be provisioned again by a future IdP.
+// Delete permanently retires the alias before removing the broker and the org's configuration.
+// A partial failure keeps the alias refused; retry Delete to finish cleanup. Verified domains stay
+// claimed, and users are released from the binding so a future IdP (with a new alias) can provision.
 func (s *Service) Delete(ctx context.Context, actor *user.User, orgID string) error {
+	if err := pgdoc.RejectInheritedTransaction(ctx); err != nil {
+		return err // the retirement must commit before any external effect, not with a caller's tx
+	}
 	p, err := s.repo.ProviderForOrg(ctx, orgID)
 	if err != nil {
 		return err
 	}
 	if p == nil {
 		return httpx.NotFound("SSO is not configured")
+	}
+	// Only a stored, platform-issued alias is retired, never an arbitrary token claim. Commit the
+	// fence first: deleting a Keycloak broker need not invalidate its existing or refreshable sessions.
+	err = s.repo.retireAlias(ctx, p.Alias)
+	s.invalidate() // do not keep a cached allow on this replica, including after a failed/uncertain write
+	if err != nil {
+		return err
 	}
 	if p.Configured() {
 		if err := s.kc.DeleteIdP(ctx, p.Alias); err != nil {
@@ -638,6 +666,13 @@ func (s *Service) Provision(ctx context.Context, rc *httpx.RequestContext, u *us
 	if p == nil || !p.AutoProvision {
 		return nil
 	}
+	// A guard may have accepted an older snapshot just before deletion on another replica. Do not
+	// grant membership from that snapshot once the primary has a durable retirement fence.
+	if gone, err := s.repo.aliasRetired(ctx, p.Alias); err != nil {
+		return err
+	} else if gone {
+		return nil
+	}
 	member, err := s.orgs.FindMember(ctx, p.OrganizationID, u.Sub)
 	if err != nil || member != nil {
 		return err
@@ -751,6 +786,11 @@ func (s *Service) OperatorSetDisabled(ctx context.Context, actorSub, orgID strin
 	if p == nil || !p.Configured() {
 		return httpx.NotFound("SSO is not configured")
 	}
+	if gone, err := s.repo.aliasRetired(ctx, p.Alias); err != nil {
+		return err
+	} else if gone {
+		return httpx.NewError(http.StatusConflict, http.StatusConflict, "SSO deletion has started; retry deleting it before configuring a new provider")
+	}
 	p.OperatorDisabled = disabled
 	if err := s.syncEnabled(ctx, p); err != nil {
 		return keycloakError(err)
@@ -817,6 +857,10 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	retired, err := s.repo.retiredAliases(ctx)
+	if err != nil {
+		return err // never recreate a deletion-in-progress when its durable fence cannot be read
+	}
 	var firstErr error
 	keep := func(err error) {
 		if err != nil && firstErr == nil {
@@ -825,7 +869,7 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	}
 	for i := range providers {
 		p := &providers[i]
-		if !p.Configured() {
+		if _, gone := retired[p.Alias]; gone || !p.Configured() {
 			continue
 		}
 		_, found, err := s.kc.GetIdP(ctx, p.Alias)

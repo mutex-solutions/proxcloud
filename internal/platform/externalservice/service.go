@@ -114,6 +114,12 @@ func (s *Service) EncryptSecret(v any) any {
 func (s *Service) Decrypt(es *ExternalService) *ExternalService { return s.decrypt(es) }
 
 func (s *Service) decrypt(es *ExternalService) *ExternalService {
+	if es.ObservationGeneration == "" {
+		es.ObservationGeneration = RawPVEObservationGeneration(es)
+		if es.IsSandbox() {
+			es.ObservationGeneration = RawSandboxObservationGeneration(es)
+		}
+	}
 	if m, ok := normalize(es.Config).(map[string]any); ok {
 		es.Config = m
 	}

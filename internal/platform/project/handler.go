@@ -55,6 +55,7 @@ type Handler struct {
 	// GET /download/{token}); apiBaseURL builds the token URL. Set via SetDownloads (nil-safe).
 	downloads  *cloud.DownloadRepo
 	apiBaseURL string
+	consoleURL string
 	// customMenu feeds admin Custom Menu items into the /init menu (nil-safe;
 	// merged into the menu build). Set via SetCustomMenu.
 	customMenu *CustomMenuReader
@@ -101,7 +102,9 @@ type Handler struct {
 	// sbKeys holds the sandbox API keys, SHA-256 only (SetSandboxKeys; nil = the E2B API refuses every key).
 	sbKeys *pgdoc.Store
 	// sbTemplates holds the projects' custom templates and their builds (SetSandboxTemplates; nil = off).
-	sbTemplates *pgdoc.Store
+	sbTemplates   *pgdoc.Store
+	sbBuildPinsDB *pgdoc.DB
+	sbRuntimeDB   *pgdoc.DB // standalone CREATE owner and runtime pins on PRIMARY
 	// sbPaused holds the paused sandboxes (SetSandboxPaused; nil = pause and resume off).
 	sbPaused   *pgdoc.Store
 	sbSafety   *pgdoc.Store
@@ -287,6 +290,13 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Post("/project/{id}/sandbox-api-keys", h.sandboxKeyCreate)
 	r.Delete("/project/{id}/sandbox-api-keys/{keyId}", h.sandboxKeyDelete)
 	r.Get("/project/{id}/sandbox-templates", h.consoleTemplateList)
+	r.Get("/project/{id}/sandbox-templates/capabilities", h.consoleTemplateCapabilities)
+	r.Post("/project/{id}/sandbox-templates/import", h.consoleTemplateImport)
+	r.Post("/project/{id}/sandbox-templates/{templateId}/aliases", h.consoleTemplateAliases)
+	r.Delete("/project/{id}/sandbox-templates/{templateId}/aliases", h.consoleTemplateAliases)
+	r.Get("/project/{id}/sandbox-templates/{templateId}/prepare", h.consoleTemplatePrepare)
+	r.Post("/project/{id}/sandbox-templates/{templateId}/prepare", h.consoleTemplatePrepare)
+	r.Post("/project/{id}/sandbox-templates/{templateId}/builds", h.consoleTemplateBuild)
 	r.Get("/project/{id}/sandbox-templates/{templateId}/builds/{buildId}/logs", h.consoleTemplateLogs)
 	r.Delete("/project/{id}/sandbox-templates/{templateId}", h.consoleTemplateDelete)
 	// GET /{id}/public-networks → the provider's router:external networks filtered by the

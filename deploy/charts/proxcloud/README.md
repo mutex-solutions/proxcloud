@@ -1,30 +1,41 @@
 # proxcloud
 
 Helm chart for the ProxCloud platform: the `proxcloud-api` Go service, the
-customer console (`ui`) and the operator console (`admin`), PostgreSQL and
-RabbitMQ, and optionally Keycloak (codecentric/keycloakx, running the official
+customer console (`ui`) and the operator console (`admin`), PostgreSQL-backed
+durable jobs (no broker), and optionally Keycloak (codecentric/keycloakx, running the official
 `quay.io/keycloak/keycloak` image).
 
 Three ways to install it:
 
 | You have | Use | Datastores |
 |---|---|---|
-| Any Kubernetes cluster, nothing else installed | [Quick start](#quick-start-one-command) (`values-quickstart.yaml`) | bitnami PostgreSQL and RabbitMQ subcharts, bundled Keycloak |
-| A cluster running the CloudNativePG and RabbitMQ Cluster operators | [Production install](#production-install) (`values.yaml` defaults) | operator-managed `Cluster` and `RabbitmqCluster` |
+| Any Kubernetes cluster, nothing else installed | [Quick start](#quick-start-one-command) (`values-quickstart.yaml`) | bitnami PostgreSQL, bundled Keycloak; no broker |
+| A cluster running CloudNativePG | [Production install](#production-install) (`values.yaml` defaults) | operator-managed PostgreSQL `Cluster`; no RabbitMQ/operator |
 | Proxmox VE hosts and no cluster yet | [`make install`](../../../docs/install.md), which builds the cluster and deploys this chart | operators |
 
 Docker Compose (`docker compose up` at the repo root) is the fourth option, for a
 single development machine.
 
+**First-release preparation (2026-11-11):** the chart/BOM selects `v0.4.0-rc.1`,
+an authorized preview candidate. It is not published merely by this source change;
+verify the actual public chart and image artifacts before installation. Public development container tags
+are not a versioned release or evidence of a clean install from published
+artifacts. Use the source-build path below or explicitly pin a compatible verified
+set of images; do not treat a successful render/CI run as production acceptance.
+
 ## Quick start (one command)
 
-Brings up api, ui, admin, PostgreSQL, RabbitMQ and Keycloak with its realms on a
+Brings up api, ui, admin, PostgreSQL durable jobs and Keycloak with its realms on a
 fresh cluster (kind, k3d, minikube or a real one) with no operators. Needs
 `helm` 3.8+, `kubectl` and a default StorageClass.
 
 **Images first.** The chart pulls `ghcr.io/mutex-solutions/proxcloud-{api,web,admin}`
-at the chart's `appVersion` (`v0.3.29`). Until that release is published there,
-build the three images from this checkout and load them into the cluster:
+at the chart's candidate `appVersion` (`v0.4.0-rc.1`). **The preview must be
+published and every required artifact verified before using these pull defaults.** Use images built
+from the checkout containing the PostgreSQL job engine, or explicitly pin a known
+compatible new image/tag/digest. Do not point the new chart at a v0.3.x API: it
+requires RabbitMQ and cannot use these defaults. Until publication, build the
+three images from the core-containing checkout and load them into the cluster:
 
 ```sh
 docker build -t proxcloud-api:local -f deploy/Dockerfile .
@@ -52,14 +63,15 @@ helm install proxcloud deploy/charts/proxcloud -n proxcloud --create-namespace -
   -f deploy/charts/proxcloud/values-quickstart.yaml \
   --set api.encryptionKey=$(openssl rand -hex 32) \
   --set postgresql.auth.password=$(openssl rand -hex 16) \
-  --set rabbitmq.auth.password=$(openssl rand -hex 16) \
   --set keycloakConfigCli.adminPassword=$(openssl rand -hex 12)
 ```
 
-No secret has a default: the four `--set` flags generate them, and
-`helm get values proxcloud -n proxcloud` reads them back. On a laptop the install
-takes about three minutes. The API restarts a few times while PostgreSQL starts;
-that is expected.
+No secret has a default: the three `--set` flags generate them, and
+`helm get values proxcloud -n proxcloud` reads them back. Treat that output and Helm
+release metadata as sensitive; for a long-lived site use pre-created Secrets as
+below. Install time depends on image downloads, storage and database/Keycloak
+startup; the API can restart while dependencies become ready. Do not use a fixed
+startup time as an acceptance check.
 
 When it finishes, the release notes print the port-forwards. Run them and keep
 them running:
@@ -97,7 +109,7 @@ Check health on the management port:
 
 ```sh
 kubectl -n proxcloud port-forward svc/proxcloud-api 8181:8081 &
-curl localhost:8181/actuator/health/readiness   # {"status":"UP"} with postgres and rabbit UP
+curl localhost:8181/actuator/health/readiness   # readiness uses PostgreSQL; no RabbitMQ dependency
 ```
 
 The quick start is not for production: one replica of everything, plain HTTP,
@@ -137,9 +149,12 @@ a browser has no WebCrypto outside a secure context, so PKCE cannot work there.
 
 ## Production install
 
-The defaults expect the [CloudNativePG](https://cloudnative-pg.io/) and
-[RabbitMQ Cluster](https://www.rabbitmq.com/kubernetes/operator/operator-overview)
-operators to run in the cluster already:
+This section describes production-oriented configuration, not a certification of
+the unpublished release or a clean public-artifact install. Plan TLS, backups and
+restore validation, OIDC access boundaries, resource capacity and observability
+for your site; the HTTP/one-replica quickstart is not production configuration.
+The defaults expect the [CloudNativePG](https://cloudnative-pg.io/) operator
+to run in the cluster already. No RabbitMQ cluster/operator is required:
 
 ```sh
 helm repo add codecentric https://codecentric.github.io/helm-charts   # once per machine
@@ -161,13 +176,16 @@ complete production set: `installer/playbooks/templates/app-proxcloud.yml.j2`.
 | Value | Default | Meaning |
 |---|---|---|
 | `api.encryptionKey` | — (required) | Data-at-rest key (`PROXCLOUD_ENCRYPTION_DEFAULT_KEY`). Never change it after install: stored secrets become unreadable. |
-| `api.existingSecret` | `""` | Your Secret with `db-url`, `encryption-key`, and `rabbitmq-password` / `sso-client-secret` when used; replaces the chart's. |
+| `api.existingSecret` | `""` | Your Secret with writable-primary `db-url`, `encryption-key` and `sso-client-secret` when SSO is enabled; optional `db-read-url` is history/metrics only. No broker key required. Old Secrets missing the read key still work. |
 | `api.selfUrls.{base,api,ui,admin}` | `""` | Public URLs (`PROXCLOUD_SELF_*`): mail links, redirects, MCP metadata; ui and admin also form the CORS list. |
 | `api.corsAllowedOrigins` | `[]` | Extra CORS origins. |
 | `api.defaultRegion` | `""` (`default`) | Region assumed when a provider names none. |
-| `api.jobs.schedulerEnabled` | `false` | Start the cron jobs (charges bills on a timer). Turn on for production. |
+| `api.jobs.schedulerEnabled` | `false` | Admit new scheduled billing/sync work. Opt in deliberately after fresh-install verification or the migration/cutover checklist; false does not stop existing durable workers. |
 | `api.jobs.debugTriggers` | `false` | On-demand `POST :8081/debug/run-*` triggers. Keep off in production. |
-| `api.jobs.rabbitFanout` | `false` | Spread the native charge run across api pods through RabbitMQ. |
+| `api.jobs.workerConcurrency` | `2` | Bounded workers per API pod, `1..16`; always run even with scheduler/debug off. |
+| `api.jobs.pollInterval`, `api.jobs.leaseDuration` | `1s`, `1m` | Go durations, `100ms..1m` / `10s..10m`. |
+| `api.jobs.rabbitFanout` | `false` | Deprecated; **true is a migration error**, not a legacy consumer opt-in. |
+| `jobsMigration.*` | unset | Existing upgrades require retain/cutover + stopped old producers/consumers, drain/reconciliation and snapshot evidence ([runbook](../../../docs/postgres-jobs-migration.md)). |
 | `api.billing.{provider,url,token,timeout,callbackToken}` | `native` | `external` hands rating to a separate billing service ([`docs/configuration.md`](../../../docs/configuration.md)). |
 | `api.mail.{from,businessName}`, `api.mail.smtp.{host,port,username,existingSecret,passwordKey}` | off | Bootstrap SMTP gateway; operators can also set mail in the console. |
 | `api.csiGateway.{enabled,url,allowedCIDRs,service.*}` | off | Listener for tenant clusters' proxmox-csi controllers ([`docs/managed-k8s.md`](../../../docs/managed-k8s.md)); needs cert-manager. |
@@ -178,18 +196,27 @@ complete production set: `installer/playbooks/templates/app-proxcloud.yml.j2`.
 | `auth.main.issuer` / `auth.admin.issuer` / `auth.adminApi.issuer` | `""` | Public issuer URLs of the customer, operator and machine realms; empty turns a realm off. |
 | `auth.*.discoveryUri` | `""` | Where the api fetches the OIDC metadata when the public URL is not reachable from the pod. |
 | `auth.sso.{enabled,clientSecret,reservedDomains}` | off | Per-organization single sign-on. |
-| `cnpg.{enabled,installOperator,instances,storage.*,existingSecret}` | on, operator present | CloudNativePG `Cluster`. |
+| `cnpg.{enabled,installOperator,instances,storage.*,existingSecret}` | on, operator present | CloudNativePG `Cluster`; API/queue/finance always connect to `-rw`. |
+| `cnpg.statusReadReplica` | `false` | Opt-in status/history/metrics reader at `-ro`, requires `instances >= 2`; never worker/finance input. |
 | `postgresql.enabled` | `false` | bitnami PostgreSQL subchart instead. |
 | `postgresql.auth.{username,password,database}` | `proxcloud`, — (required), `proxcloud` | Database owner, for CloudNativePG and bitnami alike. |
 | `externalPostgresql.*` | — | Your own PostgreSQL (`host`, … or `existingSecret` with the full DSN). |
-| `rabbitmqCluster.{enabled,replicas,storage.*}` | on | `RabbitmqCluster` (operator). |
-| `rabbitmq.enabled`, `rabbitmq.auth.password` | `false`, — | bitnami RabbitMQ subchart instead. |
-| `externalRabbitmq.*` | — | Your own broker. |
+| `externalPostgresql.readExistingSecret`, `readSecretKey` | `""`, `db-read-url` | Optional pre-created reader DSN Secret/key. No inline read password. |
+| `rabbitmqCluster.{enabled,name,retainedSpec}` | **false** | Migration-only retained CR with Helm keep + Argo `Prune=false,Delete=false`; requires existing operator and explicit retain mode. |
+| `rabbitmq.enabled`, `rabbitmq.auth.*` | **false** | Deprecated: retain an old subchart only; do not provision a new broker. Preserve its full old values. |
+| `externalRabbitmq.*` | — | Deprecated/unused by the API; no broker credentials mounted. |
 | `keycloakx.enabled` | `false` | Bundle Keycloak; see the subchart's values for `ingress`, `database`, `command`. |
 | `keycloakConfigCli.{enabled,url,adminUser,adminPassword,existingSecret}` | off | Job that creates the realms and console clients from `auth.*` and `api.selfUrls`. |
 | `seed.enabled`, `seed.platformConfiguration`, `seed.billingConfiguration` | on | First-run configuration documents (below). |
 
 Everything else is in `values.yaml` with comments.
+
+Local regression matrix (Helm, Compose config and actual Ansible migration gates
+against mocked reads; no live resources): `python3 deploy/tests/test_durable_jobs.py`.
+Run after fetching chart dependencies; requires Helm, Docker Compose, PyYAML,
+Jinja2 and `ansible-playbook` on PATH. It covers broker-free defaults, explicit
+legacy retention, optional-reader compatibility, and pre-apply refusal of invalid
+worker/replica settings, unknown/RBAC errors and old Argo source formats.
 
 ## Datastores
 
@@ -202,14 +229,30 @@ builds into its Secret or takes whole from `api.existingSecret` /
 `externalPostgresql.existingSecret`. `cnpg.keycloak` adds a role and database
 for the bundled Keycloak.
 
-**RabbitMQ** (required): `rabbitmqCluster.*` (default; the api reads the
-operator's `<name>-default-user` Secret), the bitnami subchart (`rabbitmq.*`), or
-`externalRabbitmq.*`.
+**Optional reader**: `PROXCLOUD_DB_READ_URL` serves history/metrics reads only.
+Missing/empty means primary fallback; a configured reader failure returns 503 for
+those reads. `cnpg.statusReadReplica` explicitly opts into `-ro` generation, never
+by default. With `api.existingSecret`, supply the optional `db-read-url` yourself;
+its key reference is optional for backward compatibility. A separately configured
+`externalPostgresql.readExistingSecret` key is required. Seed jobs, durable queue
+operations and financial reads/writes always use `PROXCLOUD_DB_URL`.
 
-The bitnami subcharts are a convenience for small installs: Bitnami has moved
-its free images, so RabbitMQ pulls from the frozen `bitnamilegacy` mirror and
-PostgreSQL from the moving `bitnami/postgresql:latest`. Pin them to your own
-registry or use the operators for anything that lasts.
+**RabbitMQ is not an application dependency.** Broker toggles are deprecated and
+default false. Retain only an **existing** broker for migration, and never delete
+its historical data as part of this upgrade. See [Upgrading](#upgrading).
+
+The bitnami PostgreSQL subchart is a convenience for small installs: its image is
+moving `bitnami/postgresql:latest`. Pin your own image or use CloudNativePG for
+anything that lasts. The old RabbitMQ subchart remains for explicit legacy
+retention compatibility, not as a fresh-install dependency.
+
+Scheduler and debug gates default false; durable workers still process existing
+jobs. Current source provisions a dedicated mail outbox and offers separate opt-in
+enqueue paths for savings reminders/expiry, project invites and approved
+validations. These producer flags default off and **do not enable SMTP dispatch**;
+the application does not start the durable SMTP dispatcher. Do not interpret
+billing-worker readiness or an outbox row as proof of delivered mail. Existing
+non-outbox mail paths and the external billing HTTP contract remain separate.
 
 ## Identity
 
@@ -245,27 +288,45 @@ probes and operator triggers) stays cluster-internal; never route to it.
 
 ## Upgrading
 
+**Read [the migration runbook](../../../docs/postgres-jobs-migration.md) first.**
+Existing Helm upgrades fail rendering without explicit `jobsMigration.mode=retain`
+or `cutover`, stopped producers/consumers, recorded queue drain/reconciliation and
+snapshot evidence. Do not treat `rabbitFanout=false` as a drain proof. Legacy
+messages lack the original billing cutoff; replaying them at today's time is unsafe.
+
+Before omission, protect the **live** RabbitmqCluster with Helm keep and Argo
+`Prune=false,Delete=false`. For Helm you must also do a **retained-release transition**:
+first stage annotation-only retention with the **old chart reference/API image**,
+then keep the exact old CR/name/spec enabled in new-chart retain mode after old
+work is reconciled/stopped. Confirm the stored release
+manifest contains `helm.sh/resource-policy: keep`, and only then omit it in cutover
+mode with `retentionPrepared=true`. A live-only annotation is not sufficient for
+Helm's previous-manifest comparison. ArgoCD installer upgrades require the live
+prune/delete protection before stage 40 applies anything; it never auto-patches
+or removes a broker/PVC. An old Bitnami subchart needs its separate manual
+child-resource retention plan before omission.
+
 ```sh
 helm dependency build deploy/charts/proxcloud
-helm upgrade proxcloud deploy/charts/proxcloud -n proxcloud --reuse-values --wait
+# migration-values.yaml: reviewed retain/cutover decision + evidence; keep old secrets.
+helm template proxcloud deploy/charts/proxcloud -n proxcloud --is-upgrade -f my-values.yaml -f migration-values.yaml
+helm upgrade proxcloud deploy/charts/proxcloud -n proxcloud -f my-values.yaml -f migration-values.yaml --wait
 ```
 
-`--reuse-values` keeps the generated secrets of a quick start; with a values
-file, pass the same file and secrets again (`helm get values proxcloud -n proxcloud`
-shows them). The keycloak-config-cli and seed Jobs run again and change nothing
-that exists. Port-forwards end when the pods they point at restart: start them
-again after an upgrade.
+Do not blindly `--reuse-values`: it may carry a true fanout flag or old broker
+toggle. Supply the same encryption/database keys and review saved values. Even a
+broker-free existing release must explicitly record its no-legacy state for the
+first upgrade. Retain migration values for later upgrades. Keycloak-config-cli and
+seed Jobs preserve existing records. Restart port-forwards after pod replacement.
 
 ## Uninstalling
 
-```sh
-helm uninstall proxcloud -n proxcloud
-kubectl -n proxcloud delete pvc --all   # the database and broker volumes outlive the release
-kubectl delete namespace proxcloud
-```
-
-Delete the PVCs only when you want the data gone. Reinstalling over kept volumes
-needs the same `postgresql.auth.password` and `api.encryptionKey` as before.
+Uninstall is **not** a migration step. Back up data, inspect release-managed CRs
+and their deletion policies, and follow a separately approved teardown plan.
+Deleting a RabbitmqCluster or namespace may cascade to its children/PVCs; a keep
+annotation is not protection against explicit Kubernetes deletion. Do not run a
+blanket PVC delete or namespace delete as part of this upgrade. Reinstalling over
+kept PostgreSQL volumes needs the same database credentials and encryption key.
 
 ## Layout conventions
 

@@ -14,6 +14,10 @@ Savings plans swap commitment for a discount: a customer promises a minimum mont
 
 Go to **System → Savings plans** and create one.
 
+![Current Create savings plan dialog with synthetic target resources and duration](/docs-img/savings-plan-targets.png)
+
+*Current UI, synthetic local mock example; not a live offer or saved plan.*
+
 | Field | Meaning |
 |---|---|
 | Name | Customer-visible, e.g. `Compute savings`. |
@@ -23,6 +27,11 @@ Go to **System → Savings plans** and create one.
 | Tiers apply to upfront-paid contracts | Whether this tier set is the **upfront** or the **no-upfront** schedule for that duration. |
 
 Tiers climb with commitment — a bigger committed amount reaches a higher tier and earns a larger discount:
+
+![Current savings plan dialog with two synthetic commitment discount tiers](/docs-img/savings-plan-discount-tiers.png)
+
+*Local mock illustration only; no contract or pricing change was submitted.*
+
 
 ```
 Duration: 12 months, no upfront

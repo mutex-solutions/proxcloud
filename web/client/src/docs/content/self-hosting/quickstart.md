@@ -1,6 +1,8 @@
 # MicroK8s Quickstart
 
-The quickest way to try ProxCloud is a single-node MicroK8s cluster on one VM. It gives you a fully working platform — API, portal, admin console, PostgreSQL, RabbitMQ — on a machine you can discard afterward. Identity is configured separately: enable the bundled Keycloak or point at your own IdP — see [How Identity Works](/docs/concepts/identity).
+A single-node MicroK8s cluster on one VM is one evaluation option for ProxCloud's API, customer/admin consoles and PostgreSQL-backed durable jobs. **No RabbitMQ is required.** This is not a production or all-feature acceptance recipe. Identity is configured separately: enable the bundled Keycloak or point at your own IdP — see [How Identity Works](/docs/concepts/identity).
+
+Verify an exact compatible app/chart version is published before using OCI commands below. If it is not, build images from the current broker-free checkout and install its local chart with matching tags. Do not substitute an older broker-dependent image for the planned source-tree version.
 
 ## What you'll need
 
@@ -105,26 +107,25 @@ postgresql:
     password: "proxcloud"
 ```
 
-The chart's default PostgreSQL and RabbitMQ are run by their operators, so install those first (the versions the installer pins):
+The default PostgreSQL mode needs CloudNativePG; install its operator first (the installer pins this version):
 
 ```sh
 microk8s helm repo add cnpg https://cloudnative-pg.github.io/charts
 microk8s helm upgrade --install cnpg cnpg/cloudnative-pg --version 0.29.1 \
   --namespace cnpg-system --create-namespace --wait
-microk8s kubectl apply -f https://github.com/rabbitmq/cluster-operator/releases/download/v2.23.2/cluster-operator.yml
 ```
 
-(Without the operators, add `-f deploy/charts/proxcloud/values-dev.yaml` from a checkout of the repository instead: it switches to the bitnami subcharts with insecure dev secrets.)
+Without an operator, use the PostgreSQL development subchart from a checkout (`values-dev.yaml`, replacing its insecure secrets), or the repository's `values-quickstart.yaml` path that also provisions evaluation Keycloak realms. No broker operator is necessary.
 
 Then install straight from the OCI registry:
 
 ```sh
 microk8s helm upgrade --install proxcloud oci://ghcr.io/mutex-solutions/charts/proxcloud \
   --namespace proxcloud --create-namespace \
-  -f values.yaml
+  --version <published-chart-version> -f values.yaml
 ```
 
-First boot takes a few minutes: PostgreSQL and RabbitMQ start, and the API restarts until PostgreSQL answers.
+First boot takes a few minutes: PostgreSQL starts, and the API restarts until its writable primary answers. Scheduler and management debug triggers default off; workers still process accepted durable jobs. Turn scheduled billing/sync on deliberately only after your evaluation configuration is ready.
 
 ```sh
 microk8s kubectl -n proxcloud get pods

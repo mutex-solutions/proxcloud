@@ -1,6 +1,6 @@
 # Install ProxCloud
 
-`installer/` brings up the whole platform on a Proxmox VE cluster from one command. Only Proxmox API access is mandatory; everything else has a default and can be overridden.
+`installer/` orchestrates the platform installation from a site inventory. Proxmox API access alone is **not** enough: the selected path also needs management-host SSH/sudo, reachable storage/network/DNS, an unused OS-build address and the dependencies below. Split services and sandboxes require additional prepared templates and network settings; defaults do not allocate safe site addresses for you.
 
 ```sh
 cd installer
@@ -10,9 +10,25 @@ make preflight INVENTORY=inventory/mysite
 make install INVENTORY=inventory/mysite
 ```
 
-Every stage is idempotent: it reads, then writes only the difference, so re-running `make install` changes nothing on a healthy install. A re-run keeps what an operator set on the Proxmox provider in the admin console: its storage profiles, default profile and confirmed classes. A value set in the site's group_vars wins over those; network, API URL and templates always follow the site.
+The stages are designed for convergent re-runs, but `make install` is **not** a read-only check: changed pins/site values can reconcile resources, and some stages execute operational commands. Review the selected playbooks, inventory and migration gates before re-running on an existing site. A re-run preserves the Proxmox provider's console-set storage profiles, default profile and confirmed classes unless site group_vars override them; network, API URL and templates follow the site. Managed-provider registration and immutable machine templates have additional limits described under split mode.
 
 **Back up `inventory/mysite/generated/`.** It holds the encryption key, database passwords and Proxmox token secrets. The encryption key cannot be recovered, and without it the stored provider secrets are lost. The directory is gitignored.
+
+The broker-free chart/API are planned as **v0.4.0, unpublished until separately
+approved**. Use `images.build: true` (default) from a checkout containing the new
+core, or pin a published compatible release once available. `images.build: false`
+with an older Rabbit-dependent release is refused before stage 40 writes secrets;
+the planned pin is not a claim that images/packages already exist. No Git tag or
+release publication is performed by the installer. Public development container
+images do not establish a public chart/release pin or a clean `images.build: false`
+install. That artifact-based install still needs separate acceptance before a
+release is advertised as installable.
+
+**Current evidence (2026-11-10):** Debian 13 and Ubuntu 24.04 OS-template canaries
+completed build, smoke and build-network cleanup on a development PVE 9.2 host.
+The new Kubernetes static ISO seed mode has tests and full Packer configuration
+validation, not a real ISO/reboot/Goss canary. These checks do not certify the
+installer's split path end to end; dated lab reports below remain historical.
 
 ## What you need
 
@@ -21,7 +37,7 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 | Installer host | Linux with `python3`, `openssl`, `docker` and `helm`; `make deps` creates a virtualenv with `ansible-core`. SSH to the management host(s). `docker` and `helm` are for `images.build`, the default. |
 | Proxmox VE | 9.2 or newer, datacenter firewall on, nftables firewall on every node. For EVPN tenant networks, `frr-pythontools` on every node. |
 | Management host | `mgmt.placement: ssh` (default): 1 or 3 Linux hosts with sudo, 4 vCPU and 8 GiB RAM or more, that are **not** Proxmox nodes. `mgmt.placement: pve-vm`: the installer creates the VMs. |
-| Network | The management host reaches the Proxmox API, port 8006, and the internet (k3s, charts, images). The template build needs one free address on the template bridge. |
+| Network | The management host reaches the Proxmox API, port 8006, and the internet (k3s, charts, images). OS-template builds use a reserved unused static address on the template bridge/access VLAN; the build host must reach its SSH port and the guest must reach working DNS/package repositories. DHCP is not required for OS templates. |
 | Credential | A root-equivalent Proxmox credential for the install, in the vault. The portal itself runs on a least-privilege token the installer creates ([proxmox-permissions.md](proxmox-permissions.md)). |
 
 ## Stages
@@ -35,7 +51,7 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 | 20 | `20-templates.yml` | OS templates through [images/build.py](../images/README.md), from the first management host. |
 | 30 | `30-mgmt-cluster.yml` | k3s, always with `--cluster-init`. |
 | 35 | `35-local-images.yml` | `images.build`: builds images and chart from this checkout, into a registry on the management cluster. A tag already there is not rebuilt. |
-| 40 | `40-mgmt-platform.yml` | ArgoCD, then Applications with inline values: cert-manager, CloudNativePG, ProxCloud (API, consoles, Keycloak, PostgreSQL, RabbitMQ). The scheduler is on. |
+| 40 | `40-mgmt-platform.yml` | Read-only existing-site migration gate, then ArgoCD and Applications: cert-manager, CloudNativePG, ProxCloud (API, consoles, Keycloak, PostgreSQL durable jobs). No new RabbitMQ. Scheduler/debug off unless explicitly enabled; workers always finish queued work. |
 | 45 | `45-object-store.yml` | The object store, see below. |
 | 50 | `50-services-cluster.yml` | `mode: split`: Cluster API and CAPMOX on the mgmt cluster, then the services cluster and its platform. See "Split mode" below. |
 | 55 | `55-sandbox-cluster.yml` | `mode: split` with `sandbox.enabled`: the sandbox cluster's vnet, the cluster from the kamaji chart, then `deploy/sandbox-cluster` on it. See "Sandbox cluster" below. |
@@ -43,7 +59,17 @@ Every stage is idempotent: it reads, then writes only the difference, so re-runn
 | 56 | `56-sandbox-edge.yml` | `sandbox.enabled`: the public entry of sandbox ports: `sandbox-proxy` and its MetalLB address, the wildcard certificate on the services cluster and its copy, the DNS record and TSIG key on PowerDNS, the HAProxy entry appliance. Also run by `make upgrade`. See "Sandbox ports" below. |
 | 60 | `60-register.yml` | Logins, an Admin-API key, the Proxmox provider, fio suggestions; on the first run `deploy/seed/seed-operator.py` (platform and billing configuration, flavors, public price plan, quota). Prints the URLs. |
 
-The RabbitMQ Cluster Operator is applied directly from its release manifest, because upstream ships no chart. k3s's bundled Traefik and ServiceLB serve the portal on the management host's ports 80 and 443. MetalLB and the services cluster arrive with split mode.
+Stage 40 no longer installs, waits for, upgrades or removes the RabbitMQ operator.
+Existing brokers/operators/PVCs remain for recovery; new sites need none.
+**Before upgrading an existing site**, complete the
+[stop-producers, drain/reconcile, snapshot and retain runbook](postgres-jobs-migration.md),
+including live Argo `Prune=false,Delete=false` protection. Set
+`proxcloud.jobs_migration` with your explicit retain/cutover decision and evidence;
+stage 40 fails before applying anything if the required proof/protection is missing,
+or cluster discovery is forbidden/unavailable. It never deletes or patches the broker.
+cert-manager stays for TLS/ingress and the CSI gateway. k3s's bundled Traefik and
+ServiceLB serve the portal on the management host's ports 80 and 443. MetalLB and
+the services cluster arrive with split mode.
 
 ## Options
 
@@ -60,6 +86,81 @@ The RabbitMQ Cluster Operator is applied directly from its release manifest, bec
 | `object_store.mode` | `vm` | `vm`, `truenas-app`, `external`, `ceph-rgw` |
 | `templates.per_node` | `auto` | `auto`: a copy per node unless the default profile is on shared storage |
 | `storage_profiles`, `storage_classes` | detected | Override detection; confirm a fio suggestion |
+| `jobs.scheduler_enabled`, `jobs.debug_triggers` | `false`, `false` | Gates for new scheduled work/debug routes, **not** a pause of existing durable jobs. Enable scheduling deliberately after cutover. |
+| `jobs.worker_concurrency`, `jobs.poll_interval`, `jobs.lease_duration` | `2`, `1s`, `1m` | Per-pod worker bounds: `1..16`, `100ms..1m`, `10s..10m`. |
+| `database.instances`, `database.status_read_replica` | `1`, `false` | Replica opt-in for history/metrics only, requires at least two instances. Queue/finance use `-rw`. |
+| `jobs_migration.*` | unset | Existing-site explicit retain/cutover, old producers/consumers stopped, drain/reconciliation and snapshot evidence; [runbook](postgres-jobs-migration.md). |
+
+### Proxmox endpoints and cluster CA (stage 60)
+
+`pve.api_url` is the installer's endpoint; `pve.portal_api_url` is the portal's
+primary endpoint, falling back to `api_url`. They are not interchangeable when the
+installer uses a bastion/forward. To register failover, explicitly supply **every
+additional portal-reachable** endpoint under `pve.portal_api_urls`. Stage 60 copies
+the list, in order, into the existing provider field `config.apiUrls`; it does not
+discover, probe or replace addresses with the installer-side endpoint.
+
+```yaml
+proxcloud:
+  pve:
+    api_url: https://installer-pve.example.org:8006
+    portal_api_url: https://pve1.example.org:8006
+    portal_api_urls:
+      - https://pve2.example.org:8006
+      - https://pve3.example.org:8006
+    # PUBLIC certificate only, obtained and verified through your trusted operator channel.
+    # Never paste a private key. This maps to config.caCert, NOT an ignored config.clusterCA key.
+    cluster_ca: "{{ lookup('ansible.builtin.file', inventory_dir ~ '/pve-root-ca.pem') }}"
+```
+
+The public PVE cluster CA is normally available to an authorized operator as
+`/etc/pve/pve-root-ca.pem`. Do not copy a node's private key or use an unverified
+network download as your trust source. The installer only validates the supplied
+certificate bundle locally (PEM parsing, certificate-only blocks, at most 64 KiB);
+it does not prove that a particular endpoint presents a chain issued by that CA.
+The existing PVE client verifies the certificate chain against `config.caCert`
+without checking the hostname, for PVE node IPs/VIPs. `caCert` takes precedence over
+`fingerprint`, but `insecureTls: true` bypasses both; explicitly supplying a CA
+therefore also writes `insecureTls: false`. An expired, wrong or non-signing CA
+still fails the real connection rather than falling back to a fingerprint or
+insecure TLS. An empty, malformed, missing-file or private-key input stops payload
+resolution before a provider POST/PUT; it never selects another trust mode.
+
+**Existing-site migration / retry rules:**
+
+1. Back up the site's configuration and generated secrets through the existing
+   private backup process. Inspect the registered provider's public connection
+   fields in the admin console; do not export its encrypted credentials.
+2. With both new inputs omitted or `null`, stage 60 keeps installed `apiUrls`,
+   `caCert`, `fingerprint` and `insecureTls` exactly, including absent keys (system-CA
+   verification). A fresh site with no CA retains stage 00's pinned leaf
+   fingerprint. Existing `pve.fingerprint` and `portal_api_url` inputs still work;
+   one leaf pin generally cannot verify different nodes' certificates.
+3. For CA-backed failover, supply the verified public CA and the additional
+   portal-reachable URLs. `portal_api_urls: []` deliberately clears only the
+   additional list. `cluster_ca: ''` is invalid, **not** a request to erase trust;
+   to leave installed trust unchanged, omit it or use `null`. Trust-mode removal
+   remains an explicit admin-console action, not an installer default.
+4. Plan/run stage 60 only under your normal change authorization: the complete
+   playbook also manages logins, seeds and other providers and performs its existing
+   live connection test. `make upgrade` is **not** a registration-only preview; it
+   runs other stages too. This change has only offline test/render/syntax evidence,
+   not fresh-install, failover, restore or live migration acceptance.
+5. Stage 60 requires a unique matching name identifying a valid `CLOUD`/`proxmox`
+   row before and after creation. A duplicate name or collision with another
+   provider kind stops registration; resolve it in the admin console rather than
+   letting the installer repurpose a row. On retry it uses the same row, sends no
+   `secret` on its configuration PUT and keeps rotated `tokenId`, service toggles,
+   detected capabilities and unrelated config. Only connection and the previously
+   installer-owned network/storage/template fields are reconciled; an unchanged
+   payload skips the PUT. This is sequential rerun safety, not cross-process CAS.
+
+Offline regression commands (no endpoint or private inventory required):
+
+```sh
+installer/.venv/bin/python installer/tests/test_registration.py
+installer/.venv/bin/python installer/tests/test_filters.py
+```
 
 ### Access over plain HTTP
 
@@ -136,7 +237,7 @@ a CNI that enforces policies. The installer does not apply one, since the ranges
 
 `proxcloud.mode: split` adds stage 50: Cluster API and CAPMOX on the mgmt cluster build a kubeadm **services cluster** of PVE VMs, which then runs Kamaji, its own Cluster API, ArgoCD, MetalLB, proxmox-csi and the database operators. Stage 60 registers the Kubernetes and database providers. Tenant clusters get persistent volumes from `services.kamaji.rwx_gib` (a NAS dataset per cluster) and from proxmox-csi through the CSI gateway, which stage 40 turns on in split mode: see [managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox). Stage 60 only registers these two providers when they do not exist yet, so `services.kamaji.*` and the chart version count at the first registration, and a re-run changes nothing on them. To change one later, see "Changing a setting later" in [managed-k8s.md](managed-k8s.md#2-provider-setup-admin--cloud-providers--add-provider--kubernetes). `services.iso_storage` (default `local`) receives each new node's kubeadm join token until the node joins: preflight refuses a shared store there, and on an install from before this rule `make upgrade` re-runs stage 10, which narrows the services token to that store and then checks with PVE that it is the only ISO store the token sees (`make identity-check` shows the changes first), see "Bootstrap ISOs" in [managed-k8s.md](managed-k8s.md#9-how-a-cluster-lands-on-proxmox).
 
-1. Build the node templates (`images/k8s-node-template.sh`, see [images/README.md](../images/README.md)).
+1. Build the node templates **separately** (`images/k8s-node-template.sh`, see [images/README.md](../images/README.md#kubernetes-node-templates) and the [static quickstart](quickstart.md#d-managed-kubernetes-databases-and-sandboxes-split)). The GitHub workflow defaults `network_mode=static` and reads cluster values from Repository Secrets; direct script use must explicitly set `PVE_BUILD_NETWORK_MODE=static` or it selects legacy DHCP. Static mode uses a private NoCloud seed ISO, `BUILD_IP`/gateway/DNS and an explicit SSH host; it needs xorriso/OpenSSL and scoped ISO upload/delete access, not a DHCP server or inbound runner HTTP route. Use separate `PVE_TEMPLATE_STORAGE` (`images`) and `PVE_ISO_STORAGE` (`iso`) when needed. Stage 50 only consumes the resulting template IDs; it does not run this builder or consume its Actions Secrets. The static path still requires real ISO/reboot/Goss acceptance for the selected Kubernetes version.
 2. Set `proxcloud.services` in the site's group_vars ([defaults.yml](../installer/playbooks/group_vars/all/defaults.yml) documents it): the network, `templates`, `control_plane`, one `workers` entry per PVE node a zone should exist on, and `kamaji.version_images`. A database with replicas needs a worker per replica, on different nodes. `object_store.mode` must be `vm` or `truenas-app`, because database backups go to the installer's own bucket. Preflight checks all of this.
 3. `make install`.
 
@@ -230,12 +331,13 @@ that reads its own images and the built-in ones only ([managed-sandbox.md §6](m
 5. New template images: merge the `sandbox-templates` workflow's pull request, then `make upgrade`. The portal moves
    the templates to the new digests once every node pre-pulled them (`imageAdoption: on`).
 
-The sync runs from the release's sandbox-proxy image: it needs a release newer than v0.3.28 (the first with
-`sandbox-proxy registry-users`), or `sandbox.proxy.image` set to one. An older image stops with "unknown subcommand".
-The same holds for the images themselves: `proxcloud-sandbox-proxy` and `proxcloud-sandbox-runtime` are first published
-with the release after v0.3.28, and stage 35 does not build them. Until that release is pinned in `versions.yml`, set
-`sandbox.proxy.image` and `sandbox.runtime_image` to images you built and pushed; the defaults
-(`<images.registry>/…:<release>`) do not exist.
+The registry sync invokes `sandbox-proxy registry-users`, so its image must contain that subcommand; an
+older incompatible image stops with "unknown subcommand". The Docker workflow now builds five images, including
+`proxcloud-sandbox-proxy` and `proxcloud-sandbox-runtime`, and development tags are public. **Stage 35 still builds
+only API/web/admin**, and the BOM selects the first preview `v0.4.0-rc.1`; this source pin does not prove publication. On a source-build site,
+explicitly pin `sandbox.proxy.image` and `sandbox.runtime_image` to compatible, pullable development tags or digests;
+do not assume `<images.registry>/…:<release>` exists. A complete split/sandbox installation from coordinated public
+release artifacts has not been accepted yet.
 
 An existing sandbox provider keeps its templates: set `Template registry` (`<address>/t`), `Built-in image updates`
 and the templates' images (the `library/` copies) in the console, and for custom templates "Custom template builds"

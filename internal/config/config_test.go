@@ -27,6 +27,32 @@ func TestDurableJobsNoRabbitDefaultAndMigrationGuard(t *testing.T) {
 	}
 }
 
+func TestReminderOutboxOptInRequiresStrictKeyButNeverDispatch(t *testing.T) {
+	t.Setenv("PROXCLOUD_CONFIG_FILE", t.TempDir()+"/absent")
+	t.Setenv("PROXCLOUD_DB_URL", "postgres://primary/db")
+	t.Setenv("PROXCLOUD_JOBS_RABBIT_FANOUT", "")
+	t.Setenv("PROXCLOUD_ENCRYPTION_DEFAULT_KEY", "legacy-short")
+	t.Setenv("PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED", "")
+	c, err := Load()
+	if err != nil || c.Mail.ReminderOutboxEnabled || c.Validate() != nil {
+		t.Fatal("legacy default changed")
+	}
+	t.Setenv("PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED", "true")
+	c, err = Load()
+	if err != nil || c.Validate() == nil {
+		t.Fatal("short key accepted for durable reminders")
+	}
+	t.Setenv("PROXCLOUD_ENCRYPTION_DEFAULT_KEY", strings.Repeat("fixture-only-", 3))
+	c, err = Load()
+	if err != nil || !c.Mail.ReminderOutboxEnabled || c.Validate() != nil {
+		t.Fatalf("durable enqueue configuration rejected: %v", err)
+	}
+	t.Setenv("PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED", "private-invalid-canary")
+	if _, err := Load(); err == nil || strings.Contains(err.Error(), "canary") {
+		t.Fatal("malformed opt-in accepted or echoed")
+	}
+}
+
 func TestDurableJobBounds(t *testing.T) {
 	t.Setenv("PROXCLOUD_CONFIG_FILE", t.TempDir()+"/absent")
 	t.Setenv("PROXCLOUD_DB_URL", "postgres://primary/db")

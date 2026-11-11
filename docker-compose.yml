@@ -1,4 +1,5 @@
-# Local dev stack: the 3 ProxCloud images + PostgreSQL + RabbitMQ.
+# Local dev stack: the 3 ProxCloud images + PostgreSQL (durable jobs, no broker).
+# Upgrades: follow docs/postgres-jobs-migration.md; replace the API only, never down -v.
 #   docker compose up --build
 # API  -> http://localhost:8080 (mgmt http://localhost:8081)
 # Web  -> http://localhost:8082   Admin -> http://localhost:8083
@@ -18,7 +19,10 @@ services:
     ports:
       - "5432:5432"
 
+  # Migration access ONLY. Keep the service/image and existing anonymous data volume unchanged.
+  # Do not recreate an existing broker or use --remove-orphans; the new API never consumes it.
   rabbitmq:
+    profiles: [legacy-rabbitmq]
     image: rabbitmq:3-management
     restart: unless-stopped
     ports:
@@ -80,20 +84,23 @@ services:
     restart: unless-stopped
     depends_on:
       - postgres
-      - rabbitmq
       - keycloak
     environment:
       PROXCLOUD_DB_URL: postgres://proxcloud:proxcloud@postgres:5432/proxcloud?sslmode=disable
-      PROXCLOUD_RABBITMQ_HOST: rabbitmq
-      PROXCLOUD_RABBITMQ_PORT: "5672"
-      PROXCLOUD_RABBITMQ_USERNAME: guest
-      PROXCLOUD_RABBITMQ_PASSWORD: guest
+      # Optional history/metrics reader only. Billing and durable workers ALWAYS use DB_URL.
+      PROXCLOUD_DB_READ_URL: ${PROXCLOUD_DB_READ_URL:-}
+      PROXCLOUD_JOBS_WORKER_CONCURRENCY: ${PROXCLOUD_JOBS_WORKER_CONCURRENCY:-2}
+      PROXCLOUD_JOBS_POLL_INTERVAL: ${PROXCLOUD_JOBS_POLL_INTERVAL:-1s}
+      PROXCLOUD_JOBS_LEASE_DURATION: ${PROXCLOUD_JOBS_LEASE_DURATION:-1m}
+      # Preserve a stale legacy flag as an explicit startup migration error, not a silent cutover.
+      PROXCLOUD_JOBS_RABBIT_FANOUT: ${PROXCLOUD_JOBS_RABBIT_FANOUT:-false}
       PROXCLOUD_ENCRYPTION_DEFAULT_KEY: dev-encryption-key-change-me
       PROXCLOUD_SELF_API_BASE_URL: http://${PROXCLOUD_HOST:-localhost}:8080
       PROXCLOUD_SELF_UI_BASE_URL: http://${PROXCLOUD_HOST:-localhost}:8082
       PROXCLOUD_SELF_ADMIN_BASE_URL: http://${PROXCLOUD_HOST:-localhost}:8083
-      PROXCLOUD_JOBS_DEBUG_TRIGGERS: "true"
-      PROXCLOUD_JOBS_SCHEDULER_ENABLED: ${PROXCLOUD_JOBS_SCHEDULER_ENABLED:-true}
+      # Off means no NEW timed work/debug routes, not a pause of already-enqueued work.
+      PROXCLOUD_JOBS_DEBUG_TRIGGERS: ${PROXCLOUD_JOBS_DEBUG_TRIGGERS:-false}
+      PROXCLOUD_JOBS_SCHEDULER_ENABLED: ${PROXCLOUD_JOBS_SCHEDULER_ENABLED:-false}
       # Both entry points stay usable (LAN IP for other machines, localhost on this box).
       PROXCLOUD_CORS_ALLOWED_ORIGINS: "http://${PROXCLOUD_HOST:-localhost}:8082,http://${PROXCLOUD_HOST:-localhost}:8083,http://localhost:8082,http://localhost:8083"
       # OIDC realms the API validates tokens against — same issuer/client vars the

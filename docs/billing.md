@@ -16,7 +16,8 @@ arithmetic is exact decimal.
 | `pricing` | `internal/platform/pricing` | The rating core: price-plan/rule domain + the pure rating math, bill assembly, tax, FX, credits, settlement, and the suspension **decision** predicates. Golden-tested, mostly pure. |
 | `billing` | `internal/platform/billing` | The billing-profile aggregate, the PostgreSQL repos, and the stateful services: balance/due, bill send, pay-by-credit, savings contracts + reminders, suspension **orchestration**, gateways, cards, activation. |
 | `billingjob` | `internal/platform/billingjob` | The charge cron driver — loads active profiles + resources and drives `pricing` to accrue costs onto the current bill. |
-| `chargefanout` | `internal/platform/chargefanout` | Optional RabbitMQ fan-out of the charge job (one message per profile) as a multi-pod alternative to the in-process loop. |
+| `chargefanout` | `internal/platform/chargefanout` | Native billing adapter to primary PostgreSQL durable jobs; frozen original profile/cadence/cutoff, no broker. The historical package name does not imply RabbitMQ support. |
+| `durablejobs` | `internal/durablejobs` | Bounded competing workers, DB-clock acquisition fencing, retry/dead-letter state and the financial receipt/ACK transaction. |
 | `payment` | `internal/platform/payment` | Money-in flows: add funds, deposit/collect by card, register card, the Stripe and Airwallex gateways, and the stuck-transaction scanner. |
 | `promotion` | `internal/platform/promotion` | Client promo-code redemption → promotional credit. |
 | `catalog` | `internal/platform/catalog` | Cloud-catalog config reads (flavor categories / image groups). |
@@ -212,15 +213,24 @@ closing pass would open a second bill for a month that has ended and re-bill it.
 So the last hour of each month stays unbilled under `external` until that service
 has the same charge code and `remote.go` sends the closing cycle.
 
-### In-process loop vs RabbitMQ fan-out
+### Native durable dispatch (no RabbitMQ)
 
-By default the cron runs the charge loop **in-process** under a distributed lock.
-When `PROXCLOUD_JOBS_RABBIT_FANOUT=true` (config `proxcloud.jobs.rabbit-fanout`) and a
-broker is up, the cron instead **publishes one message per active profile**
-(`chargefanout.Publish`, queue `proxcloud.charge`), and any pod's consumer charges
-one profile per message (`chargefanout.StartConsumer` →
-`billingjob.ChargeProfileByID`). The per-profile unit of work — and the money math —
-is identical; the fan-out just spreads it across pods and isolates failures.
+With cron producers explicitly enabled, the native charge dispatcher calls
+`chargefanout.Publish` to enqueue one frozen original-cycle payload per active
+profile on **primary PostgreSQL**. Competing bounded workers decode that cycle and
+call the same rating logic. All-service financial mutations, the durable financial
+receipt and ordinary job ACK commit together; current pricing/resource attributes
+are resolved at execution time, so this is not historical-state replay.
+
+Scheduler/debug gates default off. Turning the scheduler off stops new timed work,
+not already-accepted jobs: workers continue draining them. Cron locks suppress
+concurrent tick admission but do not promise exactly-once external side effects.
+See [durable jobs](durable-jobs.md) for fencing, retry and replay boundaries.
+
+`PROXCLOUD_JOBS_RABBIT_FANOUT=true` is now a **startup migration error**, not an
+optional execution mode; no Rabbit consumer is wired. Existing broker messages
+are neither imported nor silently dropped. Follow the
+[drain/reconcile/retain runbook](postgres-jobs-migration.md) before upgrading.
 
 ### Rating math (per resource)
 
@@ -695,6 +705,17 @@ a contract-expired email.
   earlier missed windows as sent without emailing), and flips the doc `DONE` when
   all windows are sent.
 
+That remains the default legacy best-effort mode. Opting in with
+`PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED=true` instead commits the ACTIVE contract /
+canonical expiry generation / tightest window, frozen rendered encrypted outbox
+and `deliveryQueuedAt`/`outboxIds`/skipped markers in one primary transaction.
+It requires the strict >=32-byte key and does **not** enable SMTP dispatch: queued,
+blocked, suppressed and no-recipient states are not delivered. Existing `sentAt`
+means legacy processed/no-resend evidence only. Local cancel/extend/expire and
+admin invalidating edits/delete atomically cancel pre-intent outbox work; no-op
+admin edits preserve future windows. Any durable history prevents direct SMTP
+fallback after disabling the producer. [Rollout/migration limits](mail-outbox-safety-limits.md).
+
 ---
 
 ## 9. Promotions & credits
@@ -918,6 +939,11 @@ consume. Permissions are noted per area.
 
 ## 14. Cron schedule
 
+These producers are registered only when scheduler enablement is explicitly
+configured. Under the native provider the charge rows enqueue durable work; a
+successful enqueue is not completion of billing. External billing retains its
+separate HTTP dispatch and owns its billing-only jobs.
+
 | Job | Spec (`sec min hr dom mon dow`) | Effect |
 |---|---|---|
 | `minutelyCharge` | `30 * * * * *` | accrue `minute`-cadence rules |
@@ -949,10 +975,12 @@ runs each tick.
   to a separate billing service (`PROXCLOUD_BILLING_URL` + `PROXCLOUD_BILLING_TOKEN`
   become required); proxcloud still resolves what to bill. See
   `internal/platform/billingprovider` and `docs/configuration.md`.
-- **`PROXCLOUD_JOBS_RABBIT_FANOUT`** (`proxcloud.jobs.rabbit-fanout`, default off) —
-  fan the native charge cron out across pods via RabbitMQ (one message per active
-  profile) instead of charging every profile in one pod. Ignored by the external
-  provider.
+- **`PROXCLOUD_JOBS_SCHEDULER_ENABLED`** (default false) — allows new scheduled
+  work. `PROXCLOUD_JOBS_DEBUG_TRIGGERS` separately gates management triggers;
+  neither pauses accepted PostgreSQL jobs.
+- **`PROXCLOUD_JOBS_RABBIT_FANOUT`** (`proxcloud.jobs.rabbit-fanout`, default false)
+  is retired; true fails startup with migration guidance. It must not be used to
+  enable or switch native/external dispatch.
 - **`billingConfiguration.baseCurrency`** — the product/base currency all bills
   accrue in.
 - **`billingConfiguration.settings.timeUnitLimits`** — per-time-unit charge caps

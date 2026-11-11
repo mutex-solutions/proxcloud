@@ -35,7 +35,11 @@ func TestUntrustedNetworkSyncSkipsDependentMutations(t *testing.T) {
 		path := strings.TrimPrefix(r.URL.Path, "/api2/json")
 		write := func(v any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": v}) }
 		switch path {
-		case "/cluster/resources", "/nodes", "/storage", "/cluster/firewall/groups":
+		case "/nodes":
+			write([]any{map[string]any{"node": "n1", "status": "online"}})
+		case "/pools/pc-" + f.projectID:
+			write(map[string]any{"poolid": "pc-" + f.projectID, "members": []any{}})
+		case "/cluster/resources", "/storage", "/cluster/firewall/groups":
 			write([]any{})
 		case "/access/acl":
 			write([]any{})

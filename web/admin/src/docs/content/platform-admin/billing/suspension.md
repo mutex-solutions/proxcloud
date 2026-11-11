@@ -20,6 +20,11 @@ Two things are set in the same section:
 
 A sample balance policy:
 
+![Current Settings tab illustrating a synthetic balance-based suspension policy](/docs-img/suspension-balance.png)
+
+*Local mock illustration of balance fields; no suspension policy was saved.*
+
+
 ```
 Type: BALANCE
   Notify at:     0        "your balance is exhausted"
@@ -28,6 +33,11 @@ Type: BALANCE
 ```
 
 A sample due-date policy:
+
+![Current Settings tab illustrating synthetic overdue-day thresholds with balance fields cleared](/docs-img/suspension-due-date.png)
+
+*Local mock illustration of overdue-day fields; no policy or customer state was changed.*
+
 
 ```
 Type: DUE_DATE

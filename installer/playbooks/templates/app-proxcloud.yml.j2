@@ -22,13 +22,18 @@ spec:
         api:
           image: {repository: {{ pc_image_prefix }}-api, tag: {{ pc_image_tag | to_json }}}
           existingSecret: proxcloud-secrets
-          # The Secret holds db-url + encryption-key; RabbitMQ comes from the operator's Secret.
+          # Writable primary + encryption key; optional db-read-url is for history/metrics ONLY.
           selfUrls:
             base: {{ pc_url_app }}
             api: {{ pc_url_api }}
             ui: {{ pc_url_app }}
             admin: {{ pc_url_admin }}
-          jobs: {schedulerEnabled: true}
+          jobs:
+            schedulerEnabled: {{ pc.jobs.scheduler_enabled | to_json }}
+            debugTriggers: {{ pc.jobs.debug_triggers | to_json }}
+            workerConcurrency: {{ pc.jobs.worker_concurrency }}
+            pollInterval: {{ pc.jobs.poll_interval | to_json }}
+            leaseDuration: {{ pc.jobs.lease_duration | to_json }}
           ingress: {{ ingress('api.' ~ pc_domain) | trim }}
 {% if pc.mode == 'split' %}
           # Tenant clusters' proxmox-csi controllers on the services cluster call this instead of PVE; only the
@@ -63,7 +68,24 @@ spec:
             enabled: true
             # An operator's email domain can never be claimed by a customer organization.
             reservedDomains: {{ [pc.keycloak.operator.email.split('@')[-1]] | to_json }}
+        jobsMigration:
+          mode: {{ pc.jobs_migration.mode | to_json }}
+          evidence: {{ pc.jobs_migration.evidence | to_json }}
+          producersStopped: {{ pc.jobs_migration.producers_stopped | to_json }}
+          consumersStopped: {{ pc.jobs_migration.consumers_stopped | to_json }}
+          drainedOrReconciled: {{ pc.jobs_migration.drained_or_reconciled | to_json }}
+          retentionPrepared: {{ pc.jobs_migration.retention_prepared | to_json }}
+        rabbitmq: {enabled: false}
+        rabbitmqCluster:
+          enabled: {{ (pc.jobs_migration.mode == 'retain') | to_json }}
+{% if pc.jobs_migration.mode == 'retain' %}
+          name: {{ pc.jobs_migration.legacy_cluster_name | to_json }}
+          # Preserve the exact existing spec; stage 40 refuses retain without this live cluster.
+          retainedSpec: {{ (pc_legacy_brokers | selectattr('metadata.name', 'equalto', pc.jobs_migration.legacy_cluster_name) | first).spec | to_json }}
+{% endif %}
         cnpg:
+          instances: {{ pc.database.instances }}
+          statusReadReplica: {{ pc.database.status_read_replica | to_json }}
           existingSecret: proxcloud-db-owner
           keycloak: {enabled: true, existingSecret: proxcloud-keycloak-db}
         keycloakx:

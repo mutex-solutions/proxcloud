@@ -11,6 +11,16 @@ on:
       version:
         description: "Kubernetes version, e.g. 1.35.10"
         required: true
+      os:
+        description: "OS for a new node template (does not change existing provider image pins)"
+        type: choice
+        options: [ubuntu-2604, ubuntu-2404]
+        default: ubuntu-2604
+      network_mode:
+        description: "Build network: static needs no DHCP/seed HTTP; dhcp preserves legacy behavior"
+        type: choice
+        options: [static, dhcp]
+        default: static
 
 permissions:
   contents: read
@@ -24,17 +34,86 @@ jobs:
     runs-on: [self-hosted, proxcloud-pve]
     if: github.repository == 'mutex-solutions/proxcloud'
     timeout-minutes: 240
+    # All cluster settings are repository Actions secrets; see .github/pve-actions.env.example.
+    env:
+      K8S_VERSION: ${{ inputs.version }}
+      K8S_OS: ${{ inputs.os || 'ubuntu-2604' }}
+      PVE_URL: ${{ secrets.PVE_URL }}
+      PVE_TOKEN_ID: ${{ secrets.PVE_TOKEN_ID }}
+      PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
+      PVE_NODES: ${{ secrets.PVE_NODES }}
+      PVE_TEMPLATE_STORAGE: ${{ secrets.PVE_TEMPLATE_STORAGE }}
+      PVE_ISO_STORAGE: ${{ secrets.PVE_ISO_STORAGE }}
+      PVE_BRIDGE: ${{ secrets.PVE_BRIDGE }}
+      PVE_BUILD_VLAN: ${{ secrets.PVE_BUILD_VLAN || '0' }}
+      PVE_BUILD_NETWORK_MODE: ${{ inputs.network_mode || 'static' }}
+      BUILD_IP: ${{ secrets.BUILD_IP }}
+      BUILD_GATEWAY: ${{ secrets.BUILD_GATEWAY }}
+      BUILD_NAMESERVER: ${{ secrets.BUILD_NAMESERVER }}
+      # Leave BUILD_DHCP_RANGE unset for static mode or when trusted DHCP already exists.
+      DHCP_RANGE: ${{ secrets.BUILD_DHCP_RANGE }}
+      DHCP_GATEWAY: ${{ secrets.BUILD_GATEWAY }}
     steps:
+      - name: Validate required configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for key in PVE_URL PVE_TOKEN_ID PVE_TOKEN_SECRET PVE_NODES PVE_TEMPLATE_STORAGE PVE_BRIDGE; do
+            value="${!key:-}"
+            if [[ -z "${value//[[:space:]]/}" ]]; then
+              echo "::error::Missing required Actions secret: $key"
+              missing=1
+            fi
+          done
+          case "$K8S_OS" in
+            ubuntu-2404|ubuntu-2604) ;;
+            *) echo '::error::K8S_OS must be ubuntu-2404 or ubuntu-2604'; missing=1 ;;
+          esac
+          if [[ "$PVE_BUILD_NETWORK_MODE" != static && "$PVE_BUILD_NETWORK_MODE" != dhcp ]]; then
+            echo "::error::Build network mode must be static or dhcp"
+            missing=1
+          fi
+          if [[ "$PVE_BUILD_NETWORK_MODE" = static ]]; then
+            for key in BUILD_IP BUILD_GATEWAY BUILD_NAMESERVER; do
+              value="${!key:-}"
+              if [[ -z "${value//[[:space:]]/}" ]]; then
+                echo "::error::Missing required static Actions secret: $key"
+                missing=1
+              fi
+            done
+            if [[ -n "$DHCP_RANGE" ]]; then
+              echo "::error::Static mode refuses BUILD_DHCP_RANGE"
+              missing=1
+            fi
+          fi
+          if [[ -n "$DHCP_RANGE" && -z "${DHCP_GATEWAY//[[:space:]]/}" ]]; then
+            echo "::error::Missing required Actions secret: BUILD_GATEWAY"
+            missing=1
+          fi
+          if [[ -z "${K8S_VERSION//[[:space:]]/}" ]]; then
+            echo "::error::Missing required workflow input: version"
+            missing=1
+          fi
+          if [[ ! "$PVE_BUILD_VLAN" =~ ^(0|[1-9][0-9]{0,3})$ ]] || (( PVE_BUILD_VLAN > 4094 )); then
+            echo "::error::PVE_BUILD_VLAN must be 0 (untagged) or an integer from 1 to 4094"
+            missing=1
+          fi
+          if (( missing )); then exit 1; fi
+          # Mask each node separately: the full space-separated secret may not match logs.
+          for node in $PVE_NODES; do
+            echo "::add-mask::$node"
+          done
+          if [[ "$PVE_BUILD_NETWORK_MODE" = static ]]; then
+            echo "::add-mask::${BUILD_IP%%/*}"
+          fi
       - uses: actions/checkout@v7
+      - name: Require full source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C "$GITHUB_WORKSPACE" sparse-checkout disable
+          test "$(git -C "$GITHUB_WORKSPACE" config --bool --get core.sparseCheckout)" = false
+          test -x "$GITHUB_WORKSPACE/images/k8s-node-template.sh" && test -f "$GITHUB_WORKSPACE/images/k8s-build-config.py"
       - name: Build
-        env:
-          K8S_VERSION: ${{ inputs.version }}
-          PVE_URL: ${{ vars.PVE_URL }}
-          PVE_TOKEN_ID: ${{ vars.PVE_TOKEN_ID }}
-          PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
-          PVE_NODES: ${{ vars.PVE_NODES }}
-          PVE_TEMPLATE_STORAGE: ${{ vars.PVE_TEMPLATE_STORAGE }}
-          PVE_BRIDGE: ${{ vars.PVE_BRIDGE }}
-          DHCP_RANGE: ${{ vars.BUILD_DHCP_RANGE }}
-          DHCP_GATEWAY: ${{ vars.BUILD_GATEWAY }}
         run: images/k8s-node-template.sh

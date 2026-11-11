@@ -23,7 +23,8 @@ flowchart TB
     api["proxcloud-api (Go)<br/>:8080 /api/v1, /admin-api/v1, /e2b, /mcp, SSE<br/>:8081 health, job triggers, callbacks<br/>CSI gateway listener (off by default)"]:::impl
     sched["Scheduler and jobs<br/>in the API process, PostgreSQL lock"]:::impl
     pg["PostgreSQL<br/>pgdoc JSONB document store"]:::impl
-    mq["RabbitMQ<br/>charge fan-out"]:::impl
+    workers["Bounded durable workers<br/>PostgreSQL primary, always running"]:::impl
+    reader["Optional history/metrics replica<br/>explicit opt-in only"]:::impl
     kc["Keycloak<br/>realms + config-cli import"]:::impl
     argo["ArgoCD<br/>managed K8s and DBaaS apps"]:::impl
     capi["Cluster API + CAPMOX"]:::impl
@@ -40,7 +41,9 @@ flowchart TB
   gw --> kc
   api --- sched
   api --> pg
-  api --> mq
+  api --- workers
+  workers -->|"enqueue, lease, retry, finance on primary"| pg
+  api -.->|"history/metrics only; configured failure = 503"| reader
   api -->|"JWKS"| kc
   api -->|"Applications"| argo
   api -->|"API token"| pve
@@ -54,6 +57,14 @@ providers expect an ArgoCD instance on a management cluster and write
 `Application` objects to it (see [managed-k8s.md](../../managed-k8s.md) and
 [managed-dbaas.md](../../managed-dbaas.md)). In split mode the installer builds that
 management cluster, the services cluster, as VMs through Cluster API.
+
+The API and durable workers always use the **writable primary** (`-rw` for CNPG).
+The optional reader is for history/metrics only; empty means primary fallback,
+configured failure means 503 for those reads. It is never a queue/finance endpoint.
+Mail keeps its existing SMTP path until the separate durable outbox is wired.
+Existing deployments follow the [drain/reconcile and retain runbook](../../postgres-jobs-migration.md):
+Helm needs a prior stored retained manifest, Argo needs live `Prune=false,Delete=false`;
+new defaults alone do not protect a historical broker/PVC.
 
 ### API surfaces
 
@@ -101,9 +112,9 @@ flowchart TB
   end
 
   subgraph sys["Platform-owned VMs"]
-    mgmtvm["Management cluster VMs"]:::planned
+    mgmtvm["Management cluster VMs"]:::impl
     svc["Services cluster<br/>Kamaji, DB operators, CSI"]:::impl
-    rfsvm["RustFS VM"]:::planned
+    rfsvm["RustFS VM"]:::impl
     sbx["Sandbox cluster workers<br/>pool proxcloud-sandbox, vnet pcsbx<br/>gVisor, no CSI, no NAS"]:::impl
     sbxe["Sandbox entry appliance<br/>pool proxcloud-sandbox-entry<br/>HAProxy, TCP 443 passthrough"]:::impl
     sbxr["Sandbox registry (Zot)<br/>on the services cluster, MetalLB 443<br/>blobs in RustFS / RGW"]:::impl
@@ -116,7 +127,7 @@ flowchart TB
     nas["Standard tier: TrueNAS<br/>NFS, SMB, iSCSI"]:::impl
   end
 
-  pbs["Proxmox Backup Server"]:::planned
+  pbs["Configured shared backup store / PBS"]:::impl
 
   api -->|"API token"| papi
   papi --> sdn
@@ -141,7 +152,7 @@ flowchart TB
   sbx -->|"build pods: contexts by presigned GET"| sbxb
   sbx -->|"build pods: push, project build account"| sbxr
   sbxr -.->|"Standard: RustFS"| rfsvm
-  papi -.-> pbs
+  papi -->|"configured vzdump / restore target"| pbs
 ```
 
 | Element | What ProxCloud does with it | Status |
@@ -158,9 +169,9 @@ flowchart TB
 | Services cluster VMs | The services cluster, in the same system pool. | Implemented |
 | Sandbox cluster | A platform-owned Kamaji cluster from the cluster chart: control plane on the services cluster, workers in pool `proxcloud-sandbox` on their own vnet, gVisor (`runsc`, systrap, `allow-suid` on by default so `sudo` works as on E2B) for tenant code, a Cilium egress guardrail, no CSI token and no NAS dataset. Its CAPMOX token `capmox@pve!sandbox` sees only a node-local ISO store. Its `node-setup` DaemonSet installs E2B's envd and `sandbox-init` on every node (runtime image `proxcloud-sandbox-runtime`), so a provider with envd on and a sandbox domain runs envd as each sandbox's agent (SB5). Tenants reach it only through the portal: the native API (SB3) and the E2B-compatible API at `/e2b` with a project's sandbox API key (SB5); the portal creates, execs into, reads the logs of and deletes Sandbox CRs with its service account, bills them per minute and refuses all new usage while a release gate does not hold, on both APIs alike. Release gates: isolation drops for the sandbox CIDR in both directions (in place, `sandboxCidrs`), NodeRestriction on its control plane (checked by stage 55), single-stack IPv4 (checked by stage 55), per-NIC VM firewall with address pinning and the `unsecured` taint until it is in place (in place, kept by the portal's sync with a narrow `ProxCloudSandboxGuard` role on the pool). Egress leaves through its own SNAT address on the exit node (`sandbox.network.snat`). The portal checks NodeRestriction, the isolation drops and the fence itself before a sandbox provider goes live and again before each create ([managed-sandbox.md §3](../../managed-sandbox.md#3-tenant-api-billing-quota-suspension-and-release-gates-sb3)). Built by installer stage 55 from `deploy/sandbox-cluster/`, with a `sandbox-system` node group (CAPI-set label, tainted) where `sandbox-proxy` runs apart from tenant code when a sandbox domain is set; stage 60 registers its sandbox provider `DISABLED` for the operator to set live once the gates hold. | Implemented |
 | Sandbox entry | Sandbox ports at `https://<port>-<id>.<domain>` (SB4): a platform HAProxy appliance (the P8-1 appliance with one TCP listener) in its own pool, one NIC public and one on the sandbox vnet, passes 443 to `sandbox-proxy`'s MetalLB address; TLS ends in `sandbox-proxy` with a wildcard certificate cert-manager issues on the services cluster (DNS-01 through PowerDNS with a TSIG key limited to the sandbox zone, or the operator's Secret) and `cert-sync` copies across. The workers' VM firewall admits the appliance alone to that address. Installer stage 56 builds it; the portal's sync keeps the appliance's firewall and HAProxy config ([managed-sandbox.md §4](../../managed-sandbox.md#4-public-entry-tls-and-wake-sb4)). | Implemented |
-| Sandbox registry | Zot on the services cluster behind one MetalLB address, TLS from a CA of its own, its blobs in a bucket of the object store (RustFS on Standard, RGW on Full) with a service user limited to that bucket (SB6a). The sandbox nodes pull the built-in templates and `sandbox-proxy` from it (the envd runtime image of SB5 still comes from `images.registry`), each project with an account of its own that reads `library/**` and its own `t/<project>/**` only; template builds push with a per-project build account that writes only its own `t/<project>/**` (SB6b), and the portal prunes unreferenced template images with a read-and-delete `gc` account. An account sync next to Zot (`sandbox-proxy registry-users`) derives the accounts from the sandbox cluster's tenant namespaces. Installer stage 55 (registry) copies the digest-pinned images of `deploy/templates/images.yaml` in and pre-pulls them on every node; the workers' VM firewall admits that one address and port ([managed-sandbox.md §6](../../managed-sandbox.md#6-the-sandbox-registry-sb6a)). | Implemented |
+| Sandbox registry | Zot on the services cluster behind one MetalLB address, TLS from a CA of its own, its blobs in a bucket of the object store (RustFS on Standard, RGW on Full) with a service user limited to that bucket (SB6a). The sandbox nodes pull the built-in templates and `sandbox-proxy` from it (the envd runtime image of SB5 still comes from `images.registry`), each project with an account of its own that reads `library/**` and its own `t/<project>/**` only; template builds push with a per-project build account that writes only its own `t/<project>/**` (SB6b), and the portal can inspect/dry-run unreferenced candidates with its `gc` credential; both real manifest deletion paths are currently held, so the credential is not an automatic pruning authorization. An account sync next to Zot (`sandbox-proxy registry-users`) derives the accounts from the sandbox cluster's tenant namespaces. Installer stage 55 (registry) copies the digest-pinned images of `deploy/templates/images.yaml` in and pre-pulls them on every node; the workers' VM firewall admits that one address and port ([managed-sandbox.md §6](../../managed-sandbox.md#6-the-sandbox-registry-sb6a)). | Implemented |
 | Template build bucket | A bucket of the same object store as the registry's blobs, its own service user (SB6b). The portal streams E2B build contexts into it (multipart, `UNSIGNED-PAYLOAD`); build pods on the sandbox workers fetch them with presigned GETs, so the workers' VM firewall and the build namespace's policy admit its one endpoint ([managed-sandbox.md §7](../../managed-sandbox.md#7-custom-templates-sb6b)). | Implemented |
-| Proxmox Backup Server | Operator nightly backups, then tenant backup schedules and restore. | Planned |
+| Shared backup storage / PBS | Owned vzdump archives, guarded tenant restore/delete and configured backup-store selection exist; automatic PBS provisioning and universal schedule/storage acceptance are not implied. | Implemented integration; site prerequisites required |
 
 ### Storage tiers
 
@@ -226,6 +237,7 @@ flowchart LR
   inst["Installer (Ansible)<br/>make install, day-2 targets"]:::impl
   vmt["VM template pipeline<br/>build.py, Packer, tags"]:::impl
   k8st["K8s node template pipeline<br/>k8s-node-templates.yml, image-builder"]:::impl
+  k8sseed["Private build seed<br/>local NoCloud cidata ISO"]:::impl
   mgmt["Management cluster"]:::impl
   pve["Proxmox cluster"]:::impl
 
@@ -241,12 +253,29 @@ flowchart LR
   inst -->|"API: roles, tokens, stores, VMs"| pve
   inst --> vmt
   vmt -->|"templates in pc-templates"| pve
-  k8st -->|"node templates"| pve
+  k8st -->|"static mode: private seed generation"| k8sseed
+  k8sseed -->|"exact owned ISO upload; attach for install only"| pve
+  k8st -->|"verify seed detachment/deletion, then tag node templates"| pve
 ```
 
 Both SPA images normalize only nginx's public document root to 0755 directories
 and 0644 files; the entrypoint also sets generated `config.js` to 0644 so nginx
 workers can serve public assets regardless of checkout or runtime umask.
+
+The Kubernetes template workflow's static build mode delivers a private local
+NoCloud `cidata` ISO, not an HTTP seed that depends on a first DHCP lease. Its
+network configuration applies to both the live installer and installed build
+system, with an explicit Packer SSH address. This seed crosses the runner-to-PVE
+storage boundary with temporary build credentials and topology: never publish it
+as an artifact or serve it from a public listener. Final guest sanitization and
+seed media detachment/deletion precede template publication. Failure or forced
+termination is not evidence of cleanup; private per-run state records the exact
+owned seed volume for reviewed recovery without indiscriminate deletion. Static
+mode refuses same-name existing templates rather than treating NIC removal as
+proof of in-guest sanitization. The existing DHCP mode remains an explicit
+alternative, not a reason to enable a competing host DHCP server. This delivery
+path is covered by synthetic tests; full ISO boot/reboot acceptance remains a
+separate controlled canary.
 
 ## Container table
 
@@ -255,9 +284,9 @@ workers can serve public assets regardless of checkout or runtime umask.
 | `web/client` | React, Vite, TypeScript, OIDC PKCE; served by nginx (`web/Dockerfile`) | Management cluster | Implemented |
 | `web/admin` | React, Vite, TypeScript; served by nginx | Management cluster | Implemented |
 | `proxcloud-api` | Go, chi router, one binary (`cmd/api`) | Management cluster | Implemented |
-| Scheduler and jobs | robfig/cron with a PostgreSQL distributed lock (`internal/platform/scheduler`, `lock`); disabled unless `PROXCLOUD_JOBS_SCHEDULER_ENABLED` | Inside the API pod | Implemented |
+| Scheduler and durable workers | Cron producers require `PROXCLOUD_JOBS_SCHEDULER_ENABLED`; bounded durable workers always start, including with scheduler/debug off. Owner+epoch and DB-time CAS fence native per-profile billing attempts | Inside every API pod | Implemented (engine/billing; mail outbox follow-up) |
 | PostgreSQL | JSONB document store via `internal/pgdoc`; CloudNativePG cluster (default), bundled subchart, or external. A chart hook Job (`seed`) writes the platform and billing configuration into empty tables on install and upgrade | Management cluster | Implemented |
-| RabbitMQ | AMQP (`internal/amqp`), optional per-profile charge fan-out; RabbitMQ Cluster Operator (default), bundled subchart, or external | Management cluster | Implemented |
+| Legacy RabbitMQ | Not connected to the API or readiness. Default absent; explicit migration-only retain with Helm keep + Argo prune/delete protection. Drain/reconcile and snapshots required **before** omission; no PVC cleanup | Historical management-cluster resource only | Deprecated, retained for recovery |
 | Keycloak | codecentric keycloakx subchart + keycloak-config-cli realm import, or an external issuer. The API manages per-org identity providers through the Admin API with the `proxcloud-idp-admin` service account | Management cluster | Implemented |
 | Gateway / Ingress | Gateway API `HTTPRoute` or `Ingress` per host (`deploy/charts/proxcloud/templates/gateway`, `api`, `web`) | Management cluster | Implemented |
 | ArgoCD | Reconciles the platform (installer `Application` objects with inline values); receives `Application` objects for managed K8s and DBaaS | Management cluster (deployed by the installer, not the chart) | Implemented |
@@ -269,14 +298,20 @@ workers can serve public assets regardless of checkout or runtime umask.
 | Ceph (Full tier) | RBD/CephFS for disks, RGW for buckets | Ceph cluster | Implemented |
 | TrueNAS (Standard tier) | NFS, SMB, iSCSI, WebSocket API | Appliance outside the Proxmox cluster | Implemented |
 | RustFS (Standard tier) | S3 + admin API, deployed by the installer with internal buckets; also serves tenant buckets (provider `rustfs`, registered by the installer) | VM in the system pool, or TrueNAS app | Implemented |
-| Proxmox Backup Server | vzdump target | Separate machine | Planned |
+| Configured shared backup store / PBS | PVE vzdump/restore target; guarded archive operations in the API, no automatic PBS appliance installation | Operator-provided storage | Implemented integration; site acceptance required |
 | Helm chart `proxcloud` | `deploy/charts/proxcloud` | ghcr OCI | Implemented |
 | Helm chart `database-cluster` | `deploy/charts/database-cluster` | ghcr OCI | Implemented |
 | Helm chart `proxmox-kamaji-cluster` | `deploy/charts/proxmox-kamaji-cluster` (tag `proxmox-kamaji-cluster-v*`) | ghcr OCI | Implemented |
 | CI | GitHub Actions `test.yml`, `docker.yml` (api, web, admin, sandbox-proxy, sandbox-runtime), `helm.yml`, `sandbox-templates.yml`, and the self-hosted `vm-templates.yml` and `k8s-node-templates.yml` | GitHub | Implemented |
-| Installer | Ansible playbooks and Makefile (`installer/`): one-shot install, `allinone` mode, day-2 targets; `split` mode is Planned | Operator workstation | Implemented |
+| Installer | Ansible playbooks and Makefile (`installer/`): allinone, split service stages and day-2 targets exist; published-artifact fresh install and current full split acceptance remain separate | Operator workstation | Implemented code; do not infer production acceptance |
 | VM template pipeline | `images/build.py` + Packer, `vm-templates.yml`; tag-published, one copy per node on local-disk sites | Self-hosted runner in the Proxmox network, or the installer from the first management host | Implemented |
-| K8s node template pipeline | image-builder | Self-hosted runner in the Proxmox network | Implemented, script run by hand |
+| K8s node template pipeline | image-builder; static NoCloud seed ISO or explicit DHCP mode | Self-hosted runner with PVE API and build-guest SSH access; no guest-to-runner HTTP needed in static mode | Implemented; static ISO runtime acceptance pending |
+
+The implemented sandbox components above do not enable managed saved lifecycle:
+[saved-runtime admission](../../saved-runtime-admission.md) keeps pause/resume,
+paused wake/connect, fork and AutoPause/AutoResume held. Registry dry-run metadata
+also does not authorize real manifest deletion. Consult those explicit safety
+boundaries rather than an unqualified `Implemented` component label.
 
 ## Trust boundaries
 

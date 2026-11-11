@@ -8,6 +8,121 @@ invariants the code holds. Four sequence diagrams follow.
 
 Status legend: [README.md](README.md). Everything on this page is **Implemented**.
 
+## Sandbox runtime parity core (EE port)
+
+**What / why:** add bounded phased startup, Ready-clock lifetime, shared environment
+budgets, independent builder resources/diagnostic capture, trusted immutable imports
+and optional pull-only warming without replacing ProxCloud's isolation/OCI/pin guards.
+
+| Component / symbol | Boundary and invariant |
+|---|---|
+| `WaitReady`, `armStartup`, `pinRunningSince` | Per-phase read contexts + total/caller cap; finite provisional end; UID/RV durable Ready candidate then atomic billing-origin/runtime-TTL commit. Retry/flap cannot move the persisted origin; expired originals/replaced UIDs refuse. Billable RUNNING is not usable Ready. |
+| `sandboxenv.Validate`, `ValidateRuntime`, `setSandboxIDEnv`, PID1 `runMode` | Caller256/32KiB/128KiB and merged Linux exec budget; reserved PROXCLOUD_/KUBERNETES_/authoritative sandbox ID; explicit serve args prevent image CMD selecting utility modes. |
+| `BuildConfig.Resources`, `CaptureBuildLogs`, `CleanupBuild` | Independent builder pool/CPU/RAM/disk bounds, stable bounded stage prefixes + terminal tails/loss evidence including prepare-output; terminal cleanup uses UID preconditions, never deadlines/Unknown. OCI directory handoff and P2-A single-use proofs are preserved. |
+| `Policy.Source`, `Destination`, `GuardTransport`, `StartImport` | Operator-only exact HTTPS origin/repository policy; current-project digest default, separate source/push/pull identities, exact registry endpoint grammar, no redirects/foreign layers/cross-repo mounts. Fixed digest-pinned trusted worker and distinct durable import proof before writes; no code execution/unpacking or build billing. |
+| `PrepareImage`, `ReconcileWarming`, `WarmingAvailable` | OFF default; finite current-config intent/node/size/TTL/parallel caps, cancellation-aware local admission + CAS lease; protected operator runtime capability, read-only static pull-only process, observed node cache coverage, owned UID-fenced cleanup only. No CRI/image deletion or cold-start guarantee. |
+
+Optional manifests and bundle markers are source artifacts only: no worker publication,
+RBAC apply, node-label grant or runtime rollout is implied. Snapshot assembly/other
+legacy writers remain separate registry-participation prerequisites; both physical
+registry-delete paths remain HOLD. [Core adaptation and verification contract](../../sandbox-runtime-parity.md).
+
+## Registry BUILD/template participation (P2-A)
+
+**What / why:** custom builds now commit owned BASE+DEST pins before use/project
+transactions, freeze one owner/spec nonce, and require a durable one-shot dispatch
+proof. This closes BUILD admission races without claiming other writer coverage
+or enabling either physical registry-delete path.
+
+| Symbol | Boundary and invariant |
+|---|---|
+| `prepareBuild`, `acquireBuildPins` | PREPARING owner CAS; standalone PRIMARY pins before rendering/use, namespace→parent/current row revalidation of exact candidate/inherited settings. |
+| `AuthorizeBuildDispatch`, `CancelUnusedDispatch`, `StartBuild` | Retained operation-PK dispatch authorization; opaque shared single-use/cancel bit; canceled unused proof permits exact known-no-effect cleanup, consumed/ambiguous proof never remints. Production constructors require proof before Apply. |
+| `RecordBuildPod`, `ObserveBuildPod`, `ReleaseBuildTerminal` | Exact UID/operation/nonce/BASE/DEST; pending alias retained while pod can resolve it; monotonic terminal observations, no timeout/absence release. |
+| `finishPinnedBuild`, `recoverPinnedBuild` | Persist TERMINAL_OBSERVED result before per-pin handoff; exact completed steps resume after old pod removal; SDK READY only after BASE cleanup/DEST durable owner binding. Failed owner CAS cannot poison current finished pins. |
+| `mergeConcurrent`, trim/delete tombstones | Retain frozen operations/newly completed tags without undoing intentional READY tag edits; compact ID/generation tombstones survive receipt cleanup and reject even stale pre-prepare resurrection. Current retained From/Image refs conservatively HOLD parent binding cleanup; not durable provenance pin transfer. |
+| `buildPinSDKStatus`, usable selection | SDK/console projections, default/explicit create and build-parent selection stay building/unusable until handoff finishes; legacy readiness remains unchanged. |
+
+API startup ensures PRIMARY schema and wires BUILD participation only. Other
+sandbox writers/catalog edits and legacy adoption remain separate prerequisites;
+BOTH real manifest-delete entrypoints remain unconditional HOLD. No lease retry,
+clear-UNKNOWN API, registry HTTP or live rollout claim. [Operator contract](../../registry-build-pins.md).
+
+## Dormant registry reference pins and real-delete HOLD (PR1)
+
+**What / why:** add a PRIMARY-only DB fencing core because finite registry scans
+cannot exclude concurrent image acquisition, and DB epochs cannot fence a stale
+HTTP DELETE. This is infrastructure only: no current writer integration, startup
+DDL, registry effects or real-GC authorization is enabled.
+
+| Component / symbol | Boundary and invariant |
+|---|---|
+| `registrypins.New`, `ParseRef`, `BeginPins` | Trusted Config canonical host only; exact project-template tag/digest, explicit project equality and current ENABLED/DISABLED project row. Short READ COMMITTED transaction locks host namespace → project → receipt rows. |
+| `pgdoc.RejectInheritedTransaction` | Reject both owned and cross-DB inherited transactions before a durable fence; no context stripping, hidden nested commit or SQL transaction around network I/O. |
+| `ObserveBinding`, `ReleaseBinding` | Full UUID/operation/project/owner/generation/ref/state/epoch CAS; independently observed binding UID + generation + digest. Immutable requested aliases can converge to one digest without losing separate owners. |
+| `BeginPrune`, `MarkSending`, `PruneUnknown`, `SettleKnown` | Any unreleased repo pin blocks prune; active intent blocks all acquisitions. One durable send authorization, no TTL/replay/takeover/clear-UNKNOWN API; definitive outcome must exclude stale outstanding effects. Core performs no HTTP. |
+| `PruneSandboxRegistryOlderThan`, `deleteProjectImages`, `deleteRepoImages` | Configured real deletion returns typed operator HOLD before registry I/O, including incomplete ON config; teardown remains incomplete. Off/dry-run previews and isolated low-level OCI client tests are preserved. |
+
+Two independent real-PG pools, a both-waiters advisory-lock barrier and RR-default
+pool regression verify admission, generation cleanup, UNKNOWN retention and CAS.
+This is not complete race-free GC: all writer participation and legacy adoption
+(PR2), then separately approved exact current-own scoped GC (PR3), remain required.
+[Operator and next-PR contract](../../durable-registry-pins.md).
+
+## Installer PVE registration connection boundary
+
+**What / why:** stage 60 previously rendered only the primary `apiUrl` and a
+single node's leaf fingerprint. The provider already supports HA `apiUrls` and
+cluster-CA `caCert`; discarding or failing to reconcile these settings can strand
+an installed site on one node or bypass the intended trust policy. This is a
+bounded registration fix, not a new PVE transport or a site/management-HA rewrite.
+
+| Component / symbol | Boundary and invariant |
+|---|---|
+| [Stage 60](../../../installer/playbooks/60-register.yml), `registered_pve_provider` | Read providers before rendering; require at most one matching name and a valid `CLOUD`/`proxmox` row. Revalidate the post-create read. A duplicate/colliding name cannot repurpose another provider's config. |
+| [Filter `pve_connection`](../../../installer/filter_plugins/proxcloud.py) | Site `portal_api_urls` maps to `config.apiUrls`, public `cluster_ca` PEM to canonical `config.caCert`. Null/omitted preserves stored endpoints/trust; explicit `[]` clears only the URL list. No endpoint discovery or network validation. |
+| Optional CA / legacy pin | Explicit CA is bounded certificate-only PEM, parsed offline before provider writes and sets `insecureTls: false` because the existing transport checks that bypass first. Fresh legacy registration still requires its pinned fingerprint; installed system-CA/leaf/CA settings are not silently changed. Never defaults to insecure true. |
+| Stage-60 PUT / `applyServiceConnectionBody` | Compare the effective installer-owned overlay, send only its top-level config keys; the API merges them. No secret in PUT, no token rotation, no replay of the entire provider document. Other operator fields remain untouched; equal sequential retries skip the write. |
+| Secret/log boundary | Connection selection, validation and config writes use `no_log`; validation errors do not include supplied URLs or PEM. Only the fresh creation reads the existing generated platform-token file. Tests use synthetic inputs and a public disposable CA, never a site's generated directory. |
+| Existing `ExternalService.PVEConfig` → `pve.TLSConfigFor` | `apiUrl` + `apiUrls` feed failover; `caCert` feeds `CACert`. CA chain verification intentionally skips hostname checking for PVE IPs/VIPs; insecure mode still has priority. These runtime semantics are unchanged. |
+
+The new inputs default to null; no existing site must adopt the new CA input to
+keep working. Sequential no-op/create-retry/connection-only updates, foreign-name
+refusal and log redaction are checked by the offline Ansible payload matrix in
+[test_registration.py](../../../installer/tests/test_registration.py), also run by
+the normal filter test entry point. This is not evidence of live TLS/failover,
+clean install, disaster restore, concurrent installer CAS or management HA.
+[Operator migration contract](../../install.md#proxmox-endpoints-and-cluster-ca-stage-60).
+
+## Operator PVE incident observations
+
+**Implemented, DB/audit only:** the state sampler issues one provider capture before
+GETs and records even untrusted results. No SMTP dispatcher, recipient integration,
+cloud remediation, cache mutation or billing-policy change is part of the observer.
+
+| Symbol | Observation invariant |
+|---|---|
+| `pveincident.BeginCapture`, `Observe` | PRIMARY DB clock, provider-wide monotonic epoch and 60s admission; 2min TTL, three bad observations spanning 2min to open, two healthy spanning 60s to recover. Unknown/gaps reset streaks, never imply recovery. |
+| `pve.ObserveNodes` | Same product token, root/node Sys.Audit plus full ACL bracket and equal `/nodes`/cluster membership census. Explicit offline is permitted evidence; absence/403/partial/malformed/unreachable is not proof of DOWN. Independent of VM visibility. |
+| `ServerSyncProvider.ObserveVerified` | Only an already verified current pool/config UUID may export exact platform server/project identities. Fresh GET-only protection reads are bracketed by unchanged inventory proof; no StampProtection/ReconcileProtection or guessed cached ownership. |
+| `pveincident.classify`, transition | Fixed safe reason codes, honest unknown/malformed facts, initial replication syncing distinct from degraded. Missing previously known subjects also freeze aggregate visibility recovery. |
+| Incident repository | Version-CAS state + append-only episode/event + synchronous `audit.Log` commit together; duplicate/stale epochs and parallel pods emit no duplicate transitions. Event records freeze evidence quality/completeness at transition time. Audit app timestamp is not the observation clock. |
+| Admin incident reads | Existing `admin:service:read` AND `admin:cloud_resource:read` before existence lookup; provider-bound cursor, cap100, project filter before pagination. Affected DTO contains only platform server/project IDs, no tenant endpoint or foreign-resource details. |
+
+An opaque digest of the stored encrypted PVE credential plus public connection identity
+fences generations; the read service stamps it before decryption, and admission locks
+and revalidates the current raw provider row in the same transaction. Same-token-ID
+credential rotation rejects outstanding old captures; re-encryption conservatively
+starts a new evidence window. Neither plaintext nor ciphertext is retained in incident
+records or read DTOs. Shared protection health additionally requires positive current
+shared-storage definitions and node availability for every attached disk/CD dependency;
+a missing replication job on local ZFS is unknown, never shared healthy.
+The sampler only covers enabled project scopes, so affected IDs are last positively
+verified references and completeness is conservatively false. Historical unknown
+subjects are retained, not silently retired by omission. Existing METERING_STALE
+and 30min billing pause semantics are untouched. Shared-HA reserve/affinity remains
+separate; fixture tests never power off a real node or call external mail.
+
 ## Primary durable native billing
 
 **Why:** original billing cutoff, money mutation, retry ownership and accepted work must survive process crashes without relying on a broker ACK or lagging replica.
@@ -41,6 +156,67 @@ sequenceDiagram
 ```
 
 This is at-least-once execution with atomic native financial effects, NOT exactly-once SMTP/HTTP/cloud execution. External billing HTTP behavior remains separate with no native fallback. Mail/invite delivery remains best-effort; SSE stays pod-local. Schema/resource deployment and legacy queue drain/removal are separate rollout work. [Operator contract](../../durable-jobs.md).
+
+## Durable savings reminder decisions (PR A + enqueue-only PR B)
+
+**Implemented, producer opt-in only:** `PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED=false`
+by default. True requires the strict >=32-byte key and atomically queues savings-expiry
+reminder decisions; it does **not** register production SMTP dispatch or enable other
+notification families. Invoice/Collect, activation/dunning and invitations remain best-effort.
+
+| Business symbol | Atomic boundary / why |
+|---|---|
+| `scheduleDurableReminder`, `queueReminder` | PRIMARY contract -> reminder locks; reread ACTIVE/current UTC expiry generation; deterministic schedule ID and selected window. Render one template snapshot, seal/enqueue and store queued/skipped markers in ONE owned transaction. Failure rolls all back. |
+| `ReminderOutbox`, composition adapter | Narrow billing-owned DTO, no billing->mail dependency; sorted per-event recipient ordinals, no public email hashes. `PrepareTemplateSnapshot` does no SMTP and no second template read. |
+| `MutateSavingsContract`, `WithSavingsContractMutation`, expiration | Client/admin local edits/delete join the same boundary. Expiry/status/profile changes cancel persisted non-dispatching IDs; admin no-op/render-only edits preserve future windows and frozen selections. |
+| `CancelPendingTx` | Keyless capability always wired, even producer OFF. Same primary TX cancels pending/claimed/blocked, fences claim ownership; never cancels DISPATCHING/UNKNOWN/accepted/dead or mutates encrypted payload/attempt journal. |
+| Legacy / OFF behavior | `sentAt` remains processed/no-resend evidence; `deliveryQueuedAt`/outbox IDs never mean delivered. Any durable history prevents OFF-mode random legacy rescheduling or direct SMTP fallback. No historical backfill. |
+
+```mermaid
+sequenceDiagram
+  participant B as Opt-in savings reminder decision
+  participant D as PostgreSQL PRIMARY
+  participant M as Pure template preparation
+  B->>D: WithTx contract lock, reread ACTIVE/endDate/generation
+  B->>D: Lock deterministic reminder; choose tightest due window
+  B->>M: Render one loaded template snapshot, no SMTP
+  M-->>B: Sanitized draft or explicit suppression/error
+  B->>D: EnqueueTx seals single-recipient envelopes
+  B->>D: Save queued IDs/at + skipped markers; COMMIT together
+  Note over B,D: Render/key/enqueue failure rolls back; queued is NOT sent
+  B->>D: Cancel/extend/expire/admin change joins same locks + CancelPendingTx
+  Note over B,D: Producer OFF retains cancellation; no durable-to-legacy SMTP fallback
+```
+
+| Symbol / component | Primary invariant |
+|---|---|
+| `mailoutbox.EnqueueTx` | Exact owning pgdoc transaction; fixed savings-reminder/v1 DTO, event/generation/window/opaque recipient identity, at most 20 single-recipient immutable envelopes; no hidden transaction. |
+| `PrepareReminder`, `textcrypt.BlobKeys` | Stable MIME-safe From/To/subject/Date/Message-ID; max 1 MiB wire, no attachments; strict AEAD bytea with ID/kind/version/key-ID AAD, keyed plaintext fingerprint, retained key IDs and fail-closed missing/corrupt keys. |
+| `Claim`, `Renew`, `BeginDispatch` | Primary DB-clock UUID/epoch leases; post-row-wait fresh clock plus final TTL after journal insert. Expired CLAIMED rescues, but intent commits before connect and expired DISPATCHING becomes UNKNOWN, never a retry candidate. |
+| `DurableSMTP.Deliver` | Context dial + real socket deadlines/cancellation; mandatory TLS outside explicit literal-loopback test adapter; one RCPT; pre-EOD known-unsent vs possible-EOD UNKNOWN; DATA250 accepted even if QUIT fails. |
+| `RecordOutcome`, attempt journal | Append-only attempt-specific receipts. Same UNKNOWN attempt may accept late definitive evidence; older attempt cannot update newer ownership. At most 8 intents, jitter, expiry=min(contract end, frozen decision+30 days). |
+| Read-only admin status | Primary RBAC `admin:bill:read` before opaque IDs/state/reasons/counts/times; no recipient, body, subject, credential or raw SMTP error. No resend/edit/replay API or extra read pool. |
+
+```mermaid
+sequenceDiagram
+  participant B as Opt-in savings reminder producer
+  participant D as PostgreSQL PRIMARY
+  participant W as Explicit local test dispatcher
+  participant S as Loopback SMTP fake
+  B->>D: EnqueueTx joins business commit, sealed immutable envelopes
+  W->>D: T1 claim UUID owner + epoch + DB lease
+  W->>D: T2 row lock, fresh TTL, authenticate payload, append intent
+  W->>D: Final TTL CAS after journal write, COMMIT DISPATCHING
+  Note over W,S: Network runs with NO SQL transaction
+  W->>S: Frozen single-recipient MAIL / RCPT / DATA body
+  W->>S: Separate end-of-DATA terminator
+  S-->>W: DATA250 or definitive refusal or lost reply
+  W->>D: T3 append typed receipt for SAME attempt
+  Note over W,D: Lease/crash/ACK loss after intent becomes UNKNOWN, never redispatch
+```
+
+Relay acceptance is not inbox delivery and stable Message-ID does not provide exactly-once SMTP.
+[Safety limits and local test evidence](../../mail-outbox-safety-limits.md).
 
 ## Holder operation fencing (R1)
 
@@ -81,6 +257,72 @@ The nonexpiring intent closes the check/POST successor gap. It does not make PVE
 exactly once, serialize external administrators or turn a TTL into proof. Unknown
 without UPID is an accepted operator-held availability tradeoff. See the
 [operator contract and test evidence](../../holder-operation-fencing.md).
+
+## VM-family inventory and orphan address proof
+
+**Why:** VM and pool lists are visibility-filtered too. A successful partial page,
+a post-purge403 or an allocation older than two minutes cannot authorize cache
+retirement or address reuse. The read/proof boundary is shared by full and sampled
+SERVER, VOLUME and IMAGE providers; ordinary known refreshes do not need global read.
+
+| Component | Safety boundary |
+|---|---|
+| `readVMInventory`, `VerifyInventory` | Same configured credential; strict positive pool membership, current/merged configuration, UUID, pending state, schema and online node. Verify the whole type/project scope before any update, insert or retirement; one unknown preserves exact rows/timestamps/history. |
+| `completeVMVisibility`, `completeNodes` | Retirement additionally needs existing self `Sys.Audit` on `/access` and `/`, full ACL tree including every restrictive shadow, propagated VM/node visibility, independent cluster membership/quorum and stable bracketed VM/config/pool/permission reads. No alternate seed/root reader or automatic grants. |
+| Pure inventory projections | Config-derived addresses, strict snapshots/protection and detached disk sizes cannot turn null/403/filtered omission into zero. No HA/tag writes during `List`; protection healing runs only after successful project reconciliation and a fresh proof. |
+| `DeleteAndArchiveIfUnchanged` | Existing whole-row lock/CAS plus an optional `History.SourceSnapshotHash` receipt in the same transaction. Native/legacy histories lack the receipt and cannot authorize automatic IP cleanup. |
+| `ProveVMAndAddressUnused`, `ReleaseIfUnchanged` | After SERVER/IMAGE success, fresh complete absence and global current/pending VM/template address reference checks precede a short allocation-lock/row-lock transaction. Match exact allocation ID + whole JSON and archived whole-server receipt; a new cache generation or reallocated IP wins. Never bulk `ReleaseNIC`. |
+
+**Deliberate availability limits:** real out-of-portal absence under a narrow pool
+credential (commonly403 after purge) retains cache and emits repair warnings. An
+empty no-op resource type needs no extra privilege. UUID reuse, `BeforeRow`, no
+original cache receipt, unresolved seed/holder/move intent, LXC or **any other guest
+NIC** retains IPs: declarative configuration cannot prove a static guest is not
+using a copied address. Operators must reconcile those allocations explicitly.
+This is not a distributed PVE CAS; external administrators can race finite read
+proofs. [Repair procedure and focused local evidence](../../vm-inventory-safety.md).
+
+## Volume growth capacity and snapshot retype preflight
+
+**Why:** a cached quota delta is not live storage capacity, and PVE cannot remove
+an old retyped disk while VM snapshots reference it. Refuse before starting work,
+not after leaving a moving mark or stopping a server.
+
+| Symbol | Invariant |
+|---|---|
+| `ExtendVolume`, `diskSizeBytes`, `volumeTargetBytes` | Required provider headroom; bounded positive integer GiB target and exact live byte size. Current=1 config agrees with current=0 and has no pending edits/lock. Missing, malformed or overflowing sizes refuse409, never zero/full-target guesses. |
+| `checkVolumeGrowth` | Same provider token reads the disk's storage definition and node capacity. Active images storage, present bounded total/used metrics and only `target-current` bytes through `StorageHasRoom`; shared/thin storage keeps the existing conservative headroom policy. No cached size, read replica, root fallback or tenant headroom override. |
+| `ResizeServer` | Root growth joins the project holder session and uses `ExtendVolume` before power/flavor writes. A smaller/equal flavor retains the live disk; growth failure propagates instead of silently changing the flavor. |
+| `CheckRetypeVolumeSnapshots`, `checkRetypeSnapshots` | API checks before `MarkMoving`; service repeats under `beginHolders` before the move intent/POST. Ignore only the `current` pseudo-entry, reject ANY real VM snapshot. Null/malformed/permission-failed inventory is unknown409, not snapshot-free evidence. |
+
+```mermaid
+sequenceDiagram
+  participant A as Volume / resize API
+  participant D as PostgreSQL PRIMARY
+  participant P as Same-token PVE client
+  A->>P: RETYPE snapshot preflight, before MarkMoving
+  Note over A,P: Real snapshot or unknown inventory =>409, no moving mark
+  A->>D: Existing renewable project holder lease
+  A->>P: EXTEND current/pending disk + exact storage/node capacity
+  A->>P: RETYPE authoritative snapshot recheck
+  Note over A,P: Refusal =>409 before mutation intent/backend write
+  A->>D: Existing R1 durable mutation intent, commit
+  A->>P: Resize PUT or delete=1 MoveDisk POST
+  A->>P: Existing UPID observation + identity/effect verification
+  A->>D: Existing fenced settlement
+```
+
+Operators: restore the configured token's VM/config/pending/snapshot and storage
+inventory visibility when a verification fails; never bypass it with an operator
+credential. For retype, explicitly decide whether to retain/delete snapshots in
+the server snapshot UI first; the portal never deletes snapshots or forces a move.
+An immediate snapshot refusal returns409 without a moving state. External trusted
+PVE administrators and changing cluster capacity are not serialized by this lease:
+these are conservative admission checks, **not** reserved storage or atomic
+external snapshot/mutation transactions. Create/rebuild/full-copy paths and heavy
+move budgets are unchanged. Focused fake-wire tests cover refusal-before-intent,
+exact byte deltas and root power/config ordering; PostgreSQL retype row-follow tests
+retain the existing cancellation/mark-clear behavior.
 
 ## C4.0 Permission-filtered network inventory and file-share ownership
 
@@ -438,7 +680,7 @@ flowchart TB
 | Symbol | Location | Role |
 |---|---|---|
 | `MinutelyChargeSpec` and siblings | `internal/platform/scheduler/scheduler.go:20` | Charge crons (minute, hour, month) |
-| `nativeProvider.Charge` | `internal/platform/billingprovider/billingprovider.go:72` | In-process loop, or RabbitMQ fan-out when enabled |
+| `nativeProvider.Charge` | `internal/platform/billingprovider/billingprovider.go` | Persist fixed-cutoff per-profile native billing work on the writable PostgreSQL primary; no broker dispatch |
 | `chargeCycle` | `internal/platform/billingjob/billingjob.go:326` | The cycle of a pass: a minute or hour pass on the 1st at 00:00 closes the month before |
 | `Service.Charge`, `ChargeProfileByID` | `internal/platform/billingjob/billingjob.go:56`, `:104` | Per active billing profile |
 | `Service.chargeBillingResource` | `billingjob.go:128` | Per provider: resolve resources, select plans and rules, rate |
@@ -464,7 +706,8 @@ flowchart LR
   eng["pricing.Engine"]:::impl
   bill["current bill<br/>items and adjustments"]:::impl
 
-  cron --> bj
+  queue["PostgreSQL durable jobs<br/>fixed cutoff, bounded workers<br/>owner + epoch, DB-time CAS"]:::impl
+  cron --> queue --> bj
   bj --> brp
   brp --> cache
   bj --> plans
@@ -479,6 +722,49 @@ Public IPs from the Proxmox pool and project templates are not billing units yet
 ---
 
 ## C4.5 Sandboxes: the usage path and the release gates
+
+### Custom template build image handoff
+
+**Why:** the controlled SDK COPY/RUN diagnostic finished Kaniko successfully but its separate push failed on the
+final Docker-schema-2 manifest PUT (Zot 415 / `MANIFEST_INVALID`). `BuildObjects` now forces `--image-format=oci`
+and writes `--oci-layout-path=/out/image`; the unchanged pinned crane pushes that directory and reports its digest
+through `/dev/termination-log`. Both choices matter: a layout can contain Docker manifests, while crane's tar loader
+reconstructs Docker schema 2. Exact pinned Kaniko was checked locally without network/credentials: the explicit
+format yields OCI manifest, config and layer types, unlike layout-only output. SDK post-fix acceptance is a separate
+rollout check, not implied by this local test.
+
+**Readable output boundary:** the first actual OCI-directory rollout exposed a second issue: root-written OCI layer
+blobs may be `0600`, while the pinned push container runs as UID 65532. A credential-free `prepare-output` init now
+runs after Kaniko exits and before push, reusing the pinned debug image with only `/out` mounted. Its fixed script
+validates the whole physical image tree first, rejecting symlinks, special files and multiply linked files, then makes
+files `0444` and directories `0555`. Traversal/chmod errors fail closed. It runs UID/GID 0 with all capabilities
+dropped, no privilege escalation and a read-only root filesystem; nonroot push mounts `/out` read-only. The helper
+never sees base cache, config, registry CA or any credentials. Local exact-image checks cover untouched root-produced
+blobs, identical before/after hashes, nonroot read failure/success, and adversarial rejection before mode changes.
+
+`fetch -> base -> kaniko -> prepare-output -> push` is enforced by normal init sequencing. Project quotas/deadline and
+gVisor are unchanged. User-code Kaniko still has no registry credentials and reads the pinned base cache read-only;
+only base/push have their existing scoped credentials. No tool-image version, snapshot path or registry acceptance
+policy changes. Build status and digest parsing remain unchanged. [Diagnosis and evidence boundary](../../managed-sandbox.md#77-sdk-custom-build-format-diagnosis-2026-11-09).
+
+### Cold project-built template create readiness
+
+**Why:** after both image-format/handoff fixes, the actual SDK build reached READY with all five build containers
+exiting 0, but its first runtime image pull took 57.813 s, exceeding create's 50 s wait. This was a readiness-budget
+failure, not another failed build or proof of no capacity. `resolveCustomTemplateWithKind` takes the ready image and
+kind from the same owned record; only a normal build (`kind == ""`) enters the cold-create path. Built-ins, snapshots,
+unknown future kinds, fork and resume retain their original 50 s behavior, including short-lifetime creates.
+
+The cold path permits at most 120 s across readiness/cache work/final access read, bounded by the original request
+context and the server-generated saved `shutdownTime` minus 5 s. The original expiry is captured before live data can
+replace the cache payload. Checks after slow reads/cache/access prevent a late RUNNING response or shifted live end
+from yielding 201. Missing/malformed expiry never grants the extended budget. Failure uses the same uncancelled
+native cleanup once; `sandboxDeleteAt` physically deletes now but caps financial endedAt/archive time at the original
+expiry. No lifetime extension, quota change or minute-minimum billing-policy change is introduced. SDK HTTP timeout
+is separate: cold custom clients should explicitly allow 150 s, disable retries and request a useful lifecycle such
+as 300 s; stock defaults do not guarantee the longer wait. [Compatibility limits](../../e2b-compat.md#differences-from-e2b).
+
+### Usage and release gates
 
 | Symbol | Location | Role |
 |---|---|---|

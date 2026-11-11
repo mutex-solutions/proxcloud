@@ -166,7 +166,13 @@ func (r *PublicIPRepo) allocate(ctx context.Context, serviceID, projectID, serve
 			ID: serviceID + "/" + pn.ID + "/" + ip, ServiceID: serviceID, NetworkID: pn.ID,
 			IP: ip, Prefix: prefix, ProjectID: projectID, ServerID: serverID, NIC: nic, BeforeRow: beforeRow, CreatedAt: &now,
 		}
-		_, err := r.col.InsertOne(ctx, a)
+		err := r.col.DB().WithTx(ctx, func(tc context.Context) error {
+			if err := r.col.DB().LockXact(tc, allocationLock(serviceID, serverID, nic)); err != nil {
+				return err
+			}
+			_, err := r.col.InsertOne(tc, a)
+			return err
+		})
 		return a, err
 	}
 	return allocatePublicIP(pn, used, insert)

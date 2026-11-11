@@ -125,6 +125,15 @@ func (e *ExternalService) SandboxConfig() sandbox.Config {
 	bs, _ := sb["buildStorage"].(map[string]any)
 	var abuse sandbox.AbusePolicy
 	var rotation sandbox.RotationPolicy
+	var startup sandbox.StartupConfig
+	var build sandbox.BuildConfig
+	var warming sandbox.WarmConfig
+	var imports sandbox.ImportConfig
+	decode := func(key string, dst any) { b, _ := json.Marshal(sb[key]); _ = json.Unmarshal(b, dst) }
+	decode("startup", &startup)
+	decode("build", &build)
+	decode("warming", &warming)
+	decode("import", &imports)
 	if b, err := json.Marshal(sb["abuse"]); err == nil {
 		_ = json.Unmarshal(b, &abuse)
 	}
@@ -134,6 +143,7 @@ func (e *ExternalService) SandboxConfig() sandbox.Config {
 	rotation.Kubeconfig = str(e.secretMap()["rotationKubeconfig"])
 	return sandbox.Config{
 		EgressMbps: intOf(sb["egressMbps"]), Abuse: abuse, Rotation: rotation,
+		Startup: startup, Build: build, Warming: warming, Import: imports,
 		BuildStorage: sandbox.BuildStorage{
 			Endpoint: str(bs["endpoint"]), PodEndpoint: str(bs["podEndpoint"]), Bucket: str(bs["bucket"]), Region: str(bs["region"]),
 			AccessKey: str(e.secretMap()["buildStorageAccessKey"]), SecretKey: str(e.secretMap()["buildStorageSecretKey"]),

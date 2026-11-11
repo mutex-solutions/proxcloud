@@ -8,14 +8,17 @@ import "time"
 // data, createdAt, externalId, projectId (NOT pricePlan/ephemeralData). `deletedAt` is the
 // archive timestamp (set at insert).
 type History struct {
-	ID              string         `json:"id,omitempty"`
-	CloudResourceID string         `json:"cloudResourceId,omitempty"`
-	ProjectID       string         `json:"projectId,omitempty"`
-	ExternalID      string         `json:"externalId,omitempty"`
-	ServiceID       string         `json:"serviceId,omitempty"`
-	Type            string         `json:"type,omitempty"`
-	Region          string         `json:"region,omitempty"`
-	Data            map[string]any `json:"data,omitempty"`
-	CreatedAt       *time.Time     `json:"createdAt,omitempty"`
-	DeletedAt       *time.Time     `json:"deletedAt,omitempty"`
+	// SourceSnapshotHash is the full row receipt from an atomic inventory archive.
+	// Legacy/native archives omit it and cannot authorize orphan IP cleanup.
+	SourceSnapshotHash string         `json:"sourceSnapshotHash,omitempty"`
+	ID                 string         `json:"id,omitempty"`
+	CloudResourceID    string         `json:"cloudResourceId,omitempty"`
+	ProjectID          string         `json:"projectId,omitempty"`
+	ExternalID         string         `json:"externalId,omitempty"`
+	ServiceID          string         `json:"serviceId,omitempty"`
+	Type               string         `json:"type,omitempty"`
+	Region             string         `json:"region,omitempty"`
+	Data               map[string]any `json:"data,omitempty"`
+	CreatedAt          *time.Time     `json:"createdAt,omitempty"`
+	DeletedAt          *time.Time     `json:"deletedAt,omitempty"`
 }

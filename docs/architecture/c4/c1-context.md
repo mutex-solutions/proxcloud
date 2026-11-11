@@ -22,7 +22,7 @@ flowchart LR
 
   subgraph ext["External systems"]
     pve["Proxmox VE cluster(s)"]:::impl
-    pbs["Proxmox Backup Server"]:::planned
+    pbs["Configured shared backup store<br/>PVE / Proxmox Backup Server"]:::impl
     kc["Keycloak<br/>OIDC issuer"]:::impl
     idp["Tenant IdPs<br/>per-org SSO"]:::impl
     stripe["Stripe"]:::impl
@@ -47,7 +47,7 @@ flowchart LR
   pc -->|"token validation, JWKS"| kc
   kc -->|"identity brokering"| idp
   pc -->|"REST :8006, API token"| pve
-  pve -.->|"backups"| pbs
+  pve -->|"vzdump / restore through configured storage"| pbs
   pc -->|"deposits, cards, collect"| stripe
   pc -->|"deposits, cards, collect"| airwallex
   pc -->|"transactional mail"| smtp
@@ -82,7 +82,7 @@ flowchart LR
 | System | Interaction | Status |
 |---|---|---|
 | Proxmox VE cluster(s) | REST API on `:8006` with a least-privilege API token (see [proxmox-permissions.md](../../proxmox-permissions.md)). ProxCloud drives pools, full clones, VM config, SDN zones/vnets/subnets, the cluster and VM firewall, storage and PCI (GPU) mappings, and reads tasks and cluster resources. | Implemented |
-| Proxmox Backup Server | Scheduled VM backups and tenant restore. | Planned |
+| Configured shared backup store / PBS | PVE vzdump, owned archive listing and guarded restore/delete exist for a configured supported shared backup store. This does not install a PBS appliance, promise a backup schedule by default or prove every storage/restore combination. | Implemented; site configuration and acceptance required |
 | Keycloak | OIDC issuer with one realm per audience (customer, admin, admin API). ProxCloud is a resource server: it validates bearer tokens against the realm JWKS and reads `sub`, `email`, `email_verified`, `azp`. The chart can bundle Keycloak or point at an external one. | Implemented |
 | Tenant IdPs | Per-organization OIDC/SAML IdPs brokered through Keycloak. | Implemented |
 | Stripe | Deposits, saved cards, off-session collect, refunds. | Implemented |
@@ -95,5 +95,5 @@ flowchart LR
 | DNS and ACME | Hostnames and TLS certificates for the portal, the API and Keycloak, provided by the hosting cluster (the chart renders the routes, not the certificates). The sandbox domain's wildcard certificate comes from an ACME CA through cert-manager on the services cluster (or a Secret the operator provides). | Implemented |
 | PowerDNS Authoritative | Tenant DNS zones and records over its HTTP API, owned through the zone's account field. The sandbox domain's zone: installer stage 56 writes its wildcard record and a TSIG key that may update that zone alone, which cert-manager on the services cluster uses for the DNS-01 challenge (RFC2136). | Implemented |
 | DNS TXT verification | Per-org SSO uses `_proxcloud-challenge.<domain>`. New tenant zones independently require scoped `_proxcloud-ownership.<zone>` proof through fixed public TCP recursors (operator-only literal-IP trust overrides for controlled labs). No tenant-selected resolver or create-first self-vouch; conventional DNS trust, not DNSSEC. | Implemented |
-| Container registry (ghcr.io) | CI publishes the `proxcloud-api`, `proxcloud-web`, `proxcloud-admin`, `proxcloud-sandbox-proxy` and `proxcloud-sandbox-runtime` images, the built-in sandbox template images (`sandbox-*`, digests pinned in `deploy/templates/images.yaml`) and the Helm charts; deployments pull from it. With a sandbox registry (SB6a) the sandbox nodes pull their templates and `sandbox-proxy` from it, which the installer copies them into; only the runtime image (envd, SB5) still comes from here. | Implemented |
-| VM template pipelines | Image builds that publish OS and Kubernetes node templates into Proxmox. | Planned |
+| Container registry (ghcr.io) | CI has publication paths for five app images, built-in sandbox images and independently tagged Helm charts. Current public dev images do not imply any versioned chart/release or built-in image pin is available. The installer may mirror sandbox artifacts into its private registry; verify exact pins before deployment. | Implemented workflows; first versioned publication pending |
+| VM template pipelines | OS cloud-image/Packer builds and Kubernetes node image-builder publish templates into PVE, not a public VM-file download service. Debian/Ubuntu build+smoke canaries passed; the new static NoCloud Kubernetes ISO path has only synthetic/config validation so far. | Implemented; Kubernetes runtime acceptance pending |

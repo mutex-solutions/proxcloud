@@ -4,6 +4,471 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-11: Managed PostgreSQL patch and fresh catalog baseline
+
+**What changed:** database chart 0.5.1 maps PG majors 15/16/17/18 to patch images
+15.19/16.15/17.11/18.6. A newly registered DBaaS provider offers 17 and 18, defaulting
+to 18. Installer name-absence/POST-only behavior and existing database chart pins
+remain unchanged. Native chart renders and data-only catalog checks are required.
+
+**Why:** security patch freshness and a PG18 offer are separate from existing
+PG17 data migration. Updating a source map must not masquerade as safe major
+upgrade, operator compatibility, backup/restore or deployed digest evidence.
+
+**Views updated:** [version/catalog boundary view](../../managed-postgresql-version-baseline.md),
+chart index and C4 index. No data operation, provider re-pin or publication occurs.
+
+## 2026-11-11: Managed Kubernetes Gateway API addon
+
+**What changed:** tenant chart 0.1.10 adds NGINX Gateway Fabric 2.8.1 and vendored
+Gateway API Standard 1.6.3 carrier Secrets/ClusterResourceSet. The API/UI offer a
+new explicit opt-in, not an alias for ingress-nginx. The actual cluster chart and
+Kubernetes version are checked before effects. Sparse edits preserve newer picks
+and raw legacy ingress values; platform bumps preserve legacy release identity.
+
+**Why:** new clusters should use maintained Gateway API routing, while an unrelated
+edit must not prune an old traffic-bearing release or silently convert its routes.
+Standard CRDs are tenant prerequisites, not management-cluster CRD grants. CAAPH/CRS
+converge independently; Helm wait is not cross-controller dependency ordering.
+
+**Views updated:** [dedicated C1–C4 Gateway API view](../../managed-k8s-gateway-api.md),
+managed Kubernetes runbook and C4 index. No new PVE credential, shared-cluster action,
+automatic Gateway/TLS/DNS object or existing-cluster migration is introduced.
+
+## 2026-11-11: Durable organization SSO alias retirement
+
+**What changed:** an additive primary-only id-keyed retirement table records the
+stored provider alias before Keycloak deletion. The rule snapshot checks exact
+retirement before its zero-provider shortcut and excludes retired providers from
+discovery/enforcement/reconciliation; fresh JIT checks the primary fence too.
+Deletion retries preserve retirement through external and database cleanup errors.
+
+**Why:** removing a broker does not revoke its already issued tokens, and an empty
+provider set cannot turn a retired identity into a legitimate local/social broker.
+Unknown realm-level brokers remain compatible; no token-controlled alias prefix
+is treated as revocation authority. No guessed session-lifetime TTL is used.
+
+**Views updated:** [dedicated C1–C4 lifecycle view](../../sso-alias-retirement.md),
+SSO operator guidance and C4 index. All API readers must upgrade; prior deleted
+aliases are not backfilled and warm-cache behavior during primary outage is not
+promoted to a hard revocation SLA. No real realm, token or identity mutation.
+
+## 2026-11-10: Tenant read, role-assignment and private-traffic boundaries
+
+**What changed:** order reads now resolve the stored billing profile's owning
+organization and require current billing-read permission before a typed response.
+Organization invitations require role management for every custom role, retaining
+ordinary MEMBER invitations and rejecting unknown role names. Sandbox pod lookup
+now identifies actual envd serving mode from the main command and arguments, so
+private native port 49983 cannot receive envd's traffic-token exemption.
+
+**Why:** identifiers and port numbers cannot replace authority. A custom role's
+permissions can change after it is assigned. Existing envd pods need compatible
+classification without a new annotation, credential or workload recreation.
+
+**Views updated:** [dedicated C1–C4 boundary view](../../tenant-authorization-boundaries.md),
+this index, and the managed-sandbox/E2B traffic descriptions. No new container,
+schema or external service; all held mail/lifecycle/registry features remain held.
+
+## 2026-11-10: Legacy SMTP credential TLS enforcement
+
+**What changed:** legacy SMTP credential AUTH now requires an actual completed,
+verified TLS connection and certificate validity for the configured host before
+AUTH capability selection. LOGIN independently checks TLS and the expected host,
+and releases challenge responses only after an accepted Start. NoAuth retains
+its existing unauthenticated-relay behavior; PLAIN preference is unchanged.
+
+**Why:** a stripped STARTTLS advertisement must not select unguarded plaintext
+LOGIN or silently proceed to an unauthenticated message envelope. Certificate
+identity, rather than SNI text, preserves valid DNS and IP-SAN TLS connections.
+No new transport, outbox enablement, schema, dependency or live effect is added.
+
+**Views updated:** [dedicated C1–C4 safety view](../../smtp-credential-tls-safety.md)
+and the C4 index. Production changes are confined to the existing SMTP component;
+new bounded fake-peer tests do not establish live relay or release acceptance.
+
+## 2026-11-10: Documentation reconciliation against current code (PR #176)
+
+**What changed:** corrected current C1/C2 labels for implemented template pipelines,
+split installer stages and configured shared backup integration; qualified GHCR
+publication, runtime acceptance, held sandbox saved lifecycle and registry deletion.
+The C4 legend now distinguishes existing code from enabled/released/accepted
+behavior. Added current support/release and CI operation guides and refreshed
+installer/product/developer documentation. Original ADR decisions and old C4
+entries remain historical with explicit supersession notes where needed.
+
+**Why:** old labels and runbooks still described mandatory RabbitMQ, absent
+pipelines, automatic pruning or publication, and all-feature readiness that the
+current code/configuration does not promise. Documentation changes do not create
+a release, run a cluster operation or certify untested paths.
+
+**Views updated:** C1 external systems, C2 current container/integration status and
+C4 README semantics. No runtime architecture or capability was changed.
+
+## 2026-11-10: Kubernetes template static build seed delivery (PR #175)
+
+**What changed:** the existing node-template workflow gains an explicit static
+network mode. A private local NoCloud `cidata` ISO supplies the live Ubuntu
+installer and installed build VM network, with an explicit Packer SSH host rather
+than DHCP address discovery or an inbound HTTP seed. Temporary build identity,
+static configuration and seed media are sanitized before node-template tagging.
+Existing DHCP mode is preserved as an explicit alternative.
+
+**Why:** an external DHCP server is not a Kubernetes requirement, and an HTTP
+seed cannot supply initial connectivity when the guest has no lease. The seed
+contains temporary credentials/topology; exact object ownership, private file
+permissions and verified detachment/deletion are part of the delivery boundary.
+A cancelled job or failed build does not prove cleanup; no broad storage deletion
+or host DHCP changes are implied.
+
+**Views updated:** C2c build/delivery diagram, container table and trust-boundary
+notes in [C2](c2-containers.md#c2c-build-and-delivery). Synthetic tests and Packer
+configuration validation are not live installer/reboot/tenant-node acceptance.
+
+## 2026-11-10: DBaaS read endpoint / replica invariant
+
+**What changed:** replica scaling revalidates the current Application callback's
+engine, offered count and explicit reader policy before mutation. An enabled
+reader downscale below two returns 409 with an explicit-disable-first instruction.
+The shared CREATE/SET rule retains existing 400 messages; sync projects reader
+flags/host only for supported engines, exact true and a valid declared count >=2.
+
+**Why:** a legacy one-instance reader can have no PostgreSQL RO Service or MariaDB
+reader backend yet remain advertised and marked as a chargeable PostgreSQL reader
+LB. Exclude that structurally impossible projection without rewriting desired
+policy, chart pin or historical money. Configured feature flags are not physical
+LB/readiness proof; full-spec SSA is not backend atomicity or lost-update fencing.
+
+**Views updated:** [bounded C4/safety guide](../../dbaas-read-endpoint-invariant.md)
+(component/validation/sync sequence and acceptance limits), plus C4 index. Local
+fake-action/race and cached Helm rendering are not live DB engine acceptance.
+
+## 2026-11-10: PVE single-backup deletion known-active interlock
+
+**What changed:** the existing single `DELETE_BACKUP` path now reads current VM
+config and the token-visible active restore list after its original VM/archive
+ownership checks, refusing any config lock, active restore or read failure before
+content DELETE. Missing/null config is refused locally; `RestoreRunning` now treats
+missing/null task data as unavailable, while an explicit empty list remains idle.
+
+**Why:** bulk deletion already refused known backup/restore activity, but the single
+archive path could delete a restore's input. This is not an atomic task fence:
+post-check task starts, VMID replacement, external/root writers and timeout/crash
+uncertainty remain outside scope. No new lock, wrapper, schema or operation engine.
+Backup/restore/retire ordering and existing task query/authorization stay intact.
+
+**Views updated:** [bounded C4/safety guide](../../pve-backup-delete-interlock.md)
+(request sequence, token visibility, shared-helper hardening and explicit limits),
+plus C4 index. Hermetic wire/unit/race evidence is not real PVE/PBS acceptance.
+
+## 2026-11-10: managed saved-runtime admission-only safety boundary
+
+**What changed:** a static-false saved-lifecycle capability and strict low-level
+current-curated-image compatibility check now refuse managed resume, paused CONNECT/
+wake, fork, new pause and AutoPause/AutoResume promises before lifecycle effects.
+Unfinished pause drivers and expired internal-fork automatic cleanup retain state;
+capabilities/list metadata, MCP and operator/client guidance report the hold.
+
+**Why:** old issued Apply/controller recreation and complete snapshot source/provider/
+publication lineage are not excluded by CR NotFound, new head CAS, copied CREATE
+annotations or dormant proof correlations. This deliberately reduces availability;
+it is not full B2. No flag/test exception, lease/head protocol, schema or GC is added.
+Capture/export and pinned ordinary CREATE, live access and fenced explicit discard
+remain separate. Source TTL can independently expire and is never secretly rearmed.
+
+**Views updated:** [dedicated C4/safety/compatibility guide](../../saved-runtime-admission.md),
+C4 index, managed-sandbox/E2B references and client help. Tests intentionally replace
+historical managed-success cases with actual admission/retention evidence, not an
+unchanged restore-success claim. Local owned PG/race is not live restore acceptance.
+
+## 2026-11-10: dormant typed snapshot registry dispatch prerequisite
+
+**What changed:** a separate fixed `snapshot/v1` proof and empty dispatch table,
+credential-free frozen source/provider/action correlations, exact full pending pin
+set and role epochs, and reciprocal BUILD/IMPORT/RUNTIME/SNAPSHOT UUID exclusion.
+Typed assembly observation permits managed BASE terminal release and successful
+DEST publication handoff only; failed/published DESTs have no retirement shortcut.
+
+**Why:** snapshot append is not content-preserving import. Reusing producer or
+runtime receipts would skip action/source/publication obligations. Source stamps
+are correlation, not current capture authority; no caller, feature flag, cluster
+or registry I/O, legacy adoption, real DELETE or full-writer coverage is enabled.
+
+**Views updated:** [dedicated C4/safety guide](../../registry-snapshot-core.md)
+(context, owned PRIMARY/RC sequence, source trust boundary, role lifecycle and
+conservative retention), plus C4 index. Owned loopback PostgreSQL and race proofs
+are bounded core evidence, not live snapshot/resume/fork or GC acceptance.
+
+## 2026-11-10: PR #170 typed savings contract-expired outbox (default OFF)
+
+**What changed:** fixed fourth `savings-contract-expired/v1` family, exact validated
+family_v3 CHECK, and private immutable canonical-term history. Owned PRIMARY READ
+COMMITTED expiration commits status, reminder cancellation and frozen mail selection
+together; all four contract mutation paths cancel pre-intent IDs even OFF/keyless.
+
+**Why:** expiration notices must survive the decision boundary without duplicate
+same-EndDate reactivation/reapproval or historical adoption. One notice per canonical
+term is deliberately conservative; no lifecycle UUID, replay endpoint, financial
+posting or SMTP dispatcher activation is introduced.
+
+**Views updated:** [dedicated C4/safety/default-OFF view](../../savings-expired-outbox.md)
+(context, components, transaction sequence, history and cancellation lifecycle),
+and [C4 index](README.md). Original three-family payloads remain unchanged; local
+bounded unit/race and owned PG17 proofs do not authorize deployment or delivery.
+
+## 2026-11-10: typed validation approval outbox (enqueue-only)
+
+**What changed:** new default-OFF `validation-approved/v1` family and fixed
+`billing_profile_validation_approved` system template attest only the approval of
+`billingProfileValidation`, not account activation. An owned PRIMARY RC transaction
+locks validation then current profile, snapshots one fixed template/config and
+recipients, and atomically commits status, fresh generation/history and sealed
+mail. Same-generation repeats and historical APPROVED rows never re-render or
+backfill. Existing pending/rejected decisions cancel unsent IDs even OFF/keyless;
+sticky history prevents legacy fallback. The exact v1-to-v2 CHECK migration admits
+only three version-1 families and leaves prior ciphertext/AAD/wire unchanged.
+
+**Why:** status commit must not rely on later best-effort mail, and the old
+fully-activated wording is untrue before external activation completes. Activate
+stays postcommit; financial/provisioning/cloud effects are outside mail atomicity.
+No production dispatcher, activation retry, delivery or inbox guarantee is added.
+All readers/writers must upgrade before opt-in; older-family binary rollback onto
+the v2 schema is unsupported. Producer OFF is not a schema downgrade.
+
+**Views updated:** [dedicated C4 view](../../c4-validation-approved-outbox.md),
+[safety/default-OFF guide](../../validation-approved-outbox.md), C4 index and docs
+index. Local offline Go1.25 unit/race and owned PG17 proofs are bounded, not a
+whole-suite, deployment, real activation or external SMTP claim.
+
+## 2026-11-10: typed PROJECT_INVITE transactional outbox (enqueue-only)
+
+**What changed:** default-OFF fixed `project-invite/v1` single-recipient family;
+primary invite insert, one template snapshot, sealed enqueue and durable IDs now
+share one owned transaction. All-match accept/decline/expiry deletion atomically
+cancels persisted pre-intent rows even with producer OFF or keys absent. Schema
+Ensure transactionally upgrades the original single-savings CHECK to exactly two
+version-1 families, preserving existing Savings ciphertext/AAD and immutable triggers.
+
+**Why:** a committed invitation token must not depend on a later best-effort mail
+call. Rendered invitation URLs introduce a narrowly reviewed credential-bearing
+AEAD body boundary, not arbitrary event/template/URL jobs. Dispatch remains OFF:
+queueing is not sending, acceptance is not inbox delivery, and already-DISPATCHING
+or UNKNOWN work cannot be unsent/replayed by business deletion or expiry.
+
+**Views updated:** new project-invite-outbox.md (C3/C4 components, transaction,
+credential/storage boundaries, cancellation lifecycle and availability limits),
+README.md navigation and docs/mail-outbox-safety-limits.md compatibility contract.
+All readers/writers must upgrade before separately authorized opt-in. Local Go1.25
+race and owned PG17 evidence is finite; no deployment/SMTP activation/full-suite claim.
+
+## 2026-11-10: fail fast on authoritative sandbox startup lifetime expiry
+
+**What changed:** the existing Ready-clock lifetime guard distinguishes a positively
+expired current provisional end or persisted UID-scoped Ready-candidate runtime end
+from transient control-plane deadlines. `WaitReady` immediately returns a terminal
+runtime startup error with a fixed public reason; the private expiry marker still
+unwraps to `context.DeadlineExceeded` for existing callers.
+
+**Why:** a Ready CR whose authoritative lifetime has already ended cannot become
+usable. Treating its expiry as an unavailable control plane needlessly retried until
+the default 120-second scheduling budget. Transport deadlines remain retryable within
+the original caller/phase/total budgets; malformed/future timestamps and UID/RV CAS
+checks retain their existing behavior. No TTL renewal or pending billing is granted.
+
+**Views updated:** the startup exception in sandbox-runtime-parity.md. Local finite
+Go1.25 unit/race regressions cover one-read/no-patch expiry, unchanged first-candidate
+TTL, no Ready-clock pending billing, and recovery after transient network errors.
+No scheduler wall-time, deployment, registry release or live-runtime claim is made.
+
+## 2026-11-10: dormant typed runtime reference fence (bounded P2-B engine)
+
+**What changed:** distinct RuntimeSpec/RuntimeProof/RuntimePodEvidence, one immutable
+managed consumer pin, durable PRIMARY one-shot runtime marker, shared-copy local
+consume/cancel and global Build/Import/Runtime UUID exclusion. Private typed guards
+compose after both producer guards; only exact independently recorded pod/CR/spec
+provenance binds a running consumer or releases its known terminal incarnation.
+Full marker/receipt epoch CAS, monotone terminal state and nonexpiring UNKNOWN
+retain uncertainty without replay, TTL cleanup or a generic release grant.
+
+**Why:** a runtime is a long-lived image consumer, not a completed image producer.
+Startup Ready must retain the image; copied receipts and CR UID reuse on resume
+cannot grant dispatch or release. Desired owner retirement and exclusion of old
+Apply/controller recreation remain trusted future-caller prerequisites, not a
+claim that pod phase alone proves whole-product release safety.
+
+**Views updated:** dedicated runtime reference context/container/lifecycle contract
+and remaining-writer ledger in runtime-reference-fence.md. This engine is dormant:
+no native/E2B caller wiring or all-writer/adoption claim, and BOTH real-delete HOLD
+paths remain unchanged. Focused Go1.25 unit/race plus opt-in disposable loopback
+PostgreSQL tests cover strict specs, lifecycle, kind/epoch fencing and lock ordering.
+
+## 2026-11-09: sandbox runtime parity core from pinned EE source
+
+**What changed:** phased bounded startup and a finite Ready-clock runtime TTL,
+UID/RV durable Ready candidate/final lifetime commit, authoritative environment/ID
+budgets and PID1 mode guards; independent builder resources and stable diagnostics;
+operator-scoped no-build digest import worker and optional finite pull-only warming.
+
+**Why:** slow image pulls must not consume runtime TTL or fabricate billing/usable
+Ready, retry/flap must not refresh a durable lifetime origin, and source credentials
+must not cross exact repository/project boundaries. Warming is current-policy,
+context-bounded and runtime-capability gated, never customer-code execution/cache GC.
+
+**Views updated:** sandbox core code invariant table and runtime adaptation contract.
+Focused Go1.25 unit/race and loopback OCI tests cover the new contracts; preserve
+ProxCloud's native/egress/readiness/abuse, force-OCI directory handoff, credential-free
+prepare-output and durable BUILD dispatch guards. No live publication, rollout,
+RBAC/labels, arbitrary registry source fallback or real-delete activation is claimed.
+
+## 2026-11-09: registry BUILD/template participation (P2-A)
+
+**What changed:** startup schema + BUILD-only wiring; stable owner/nonce PREPARING,
+BASE+DEST pins committed before use/project TX, locked candidate revalidation and
+one durable dispatch marker. Production StartBuild requires the unique opaque
+proof, copied proofs share use/cancel state, and positively unused cancellation
+keeps its no-remint marker. Exact pod annotations/UID evidence retain BASE aliases
+until terminal; durable terminal owner checkpoints resume per-pin handoff after
+pod removal. READY DEST bindings survive retained historical builds/tag edits;
+trim/delete tombstones retain exact cleanup generations. Compact retired build-ID
+identities survive full receipt cleanup and refuse stale pre-prepare resurrection.
+All public readiness projections/usable selections wait for completed handoff;
+current retained From/Image refs conservatively HOLD parent cleanup, without
+claiming complete durable provenance pin coverage. Independent retired generations
+continue cleanup before aggregated HOLDs return, so an eligible retired child
+cannot starve its held parent forever; same-digest ambiguity remains conservative.
+
+**Why:** retrying an ambiguous apply or independently minting in-memory proofs
+could dispatch twice; stale saves/error handlers could lose completed tags or
+poison a known owner. Full owner CAS and resumable exact terminal transitions keep
+uncertainty visible without a lease, guessed success or SQL transaction around
+new network effects. Other writers/adoption are not covered; BOTH real-delete
+paths stay unconditional HOLD.
+
+**Diagrams updated:** BUILD participation code invariant table and tracked operator
+contract. Focused unit/race + real-PG/fake-K8s/loopback-S3 cover admission/one apply,
+known refusal vs UNKNOWN, proof copy/cancel/no remint, generation cleanup and owned
+BASE+DEST crash checkpoints before/after each handoff with no old pod. No live
+registry/Kubernetes actions or real-GC acceptance are claimed.
+
+## 2026-11-09: dormant durable registry pins and real-delete HOLD (PR1)
+
+**What changed:** add an explicit PRIMARY DB-only pin/prune-intent core, canonical
+trusted-host/current-project scope checks, independent-commit inherited-TX refusal,
+READ COMMITTED namespace-first admission, full owner/generation/epoch receipts,
+observed binding generation cleanup and nonexpiring UNKNOWN/SENDING holds. Both
+scheduled/debug and project-teardown real manifest deletion return typed operator
+HOLD; off/dry-run remain unchanged. No startup schema call, writer integration,
+worker, lease, coverage flag, HTTP effect or new dependency is introduced.
+
+**Why:** finite scans cannot fence a new reference after their last observation;
+lease/epoch changes cannot stop an old registry HTTP DELETE. Missing receipts must
+not auto-expire, resend or silently report completed project cleanup. Preserve
+requested alias identities so different aliases may bind the same digest safely.
+
+**Diagrams updated:** C4 code component/invariant table plus the bounded operator
+contract. Focused race/unit and six local real-PG tests cover both admission orders,
+RR snapshot defaults, same-UID stale-generation cleanup, alias convergence,
+UNKNOWN age/no-replay, project scope/inherited transactions and ON/HTTP0 holds.
+Writer participation + full legacy adoption (PR2), then separately approved exact
+scoped GC (PR3), remain prerequisites; no real-delete acceptance is claimed.
+
+## 2026-11-09: bounded volume headroom and snapshot retype guards
+
+**What changed:** EXTEND takes required provider headroom and verifies current
+nonpending live disk size and same-token node/storage capacity before its existing
+R1 intent. Reserve the exact growth bytes, not the full target. Missing/null,
+negative, over-total or overflowing metrics and unknown disk sizes refuse409.
+SERVER RESIZE root growth joins that guarded path before shutdown/flavor writes;
+growth/backend failures are no longer swallowed. RETYPE checks an authoritative
+snapshot list before `MarkMoving` and repeats inside the service holder session:
+ignore `current`, conservatively refuse any real VM snapshot or unknown inventory.
+
+**Why:** cache quota size is not capacity evidence, thin/shared storage still
+needs the configured safety margin, and a PVE snapshot prevents delete=1 moves.
+A predictable refusal must not leave a moving mark, stop a VM or create a mutation
+intent. No automatic snapshot deletion, root credential fallback, tenant headroom
+override, lease-engine changes or claim of atomicity against external operators.
+
+**Diagrams updated:** C4 guarded volume sequence/invariant table and operator UX
+repair guidance. Existing create/rebuild/full-copy placement and heavy move
+budgets are unchanged. Focused local fake-wire and real PostgreSQL row-follow
+regressions; deployment and owned-fixture acceptance are separate normal gates.
+
+## 2026-11-09: atomic savings reminder decisions (enqueue-only PR B)
+
+**What changed:** an explicit default-false reminder producer flag couples the
+current ACTIVE/expiry-generation/tightest-window decision, one rendered template
+snapshot, strict encrypted outbox enqueue and queued/skipped bookkeeping in one
+PRIMARY transaction. Schedule identity is contract + canonical expiry, not random
+reminder ID; recipient metadata uses per-event ordinals, not email hashes. Local
+client/admin cancel/extend/expiry/delete joins contract -> reminder -> outbox locks
+and cancels only pre-intent work. A keyless cancellation capability stays wired
+when the producer is OFF; any durable history prevents legacy SMTP fallback.
+Admin no-op/render-only edits preserve future windows and immutable selected mail.
+Batch candidates are identity hints only: the candidate row is reread under the
+contract/reminder locks before legacy adoption, so an expiry mutation cannot turn
+a stale snapshot into an empty DONE schedule that poisons the next generation.
+Creation rejects empty window sets; a deterministic PG regression proves both
+client/admin expiry changes still permit the new generation's later due enqueue.
+
+**Why:** SMTP-before-SentAt and save-before-notify had crash gaps; ignored errors
+could mark missing messages as sent. A producer rollback, existing admin raw edit
+or competing scheduler must not reopen or strand an old notification generation.
+Queued/suppressed/blocked/no-recipient are not delivery evidence; legacy processed
+SentAt remains no-resend evidence, with conservative migration for ambiguous history.
+
+**Diagrams updated:** C4 decision+enqueue sequence and contract invariants; safety
+limits document the producer flag, mandatory key, migration/OFF behavior and typed
+counts. SMTP dispatcher remains OFF, other notification families best-effort,
+no resend/backfill/real-recipient rollout or timed billing changes. Targeted real
+PostgreSQL tests cover two schedulers/processors, atomic rollback, keyless OFF
+cancellation, admin edits/no-op/delete, legacy evidence and canceled claim fences.
+
+## 2026-11-09: dormant durable reminder mail infrastructure (PR A)
+
+**What changed:** dedicated primary `mail_outbox`/event fingerprint/append-only attempt tables;
+owned-business-transaction enqueue of one frozen recipient envelope per row, additive strict
+key-ID AEAD blobs, typed bounded SMTP and opaque RBAC read-only status. T2 intent commits before
+connect, no SQL transaction surrounds SMTP, expired intents remain UNKNOWN, and late definitive
+receipts bind only to the same immutable attempt. Dispatch is OFF: no worker registration,
+business producer, cron, backfill, production enable flag or resend API. Legacy mail/textcrypt
+behavior, broker/Compose/chart configuration and all notification callers are unchanged.
+
+**Why:** a database-only durable-job completion cannot atomically ACK SMTP, and a lease cannot
+kill an old SMTP socket. Lost EOD receipts must not silently resend; random ciphertext cannot
+serve immutable deduplication. Per-recipient sealed snapshots, keyed plaintext fingerprints and
+explicit UNKNOWN holds make the uncertainty and privacy boundaries reviewable before PR B's
+atomic savings-reminder decision is added.
+
+**Diagrams updated:** C4 mail-intent sequence/invariant table. [Safety and limits](../../mail-outbox-safety-limits.md)
+document the dormant scope, 20-recipient/1-MiB/8-attempt/30-day bounds, mandatory TLS/key behavior
+and local PostgreSQL + loopback transcript evidence. No actual SMTP recipients or lab changes.
+
+## 2026-11-09: broker-free deployment of PostgreSQL durable jobs
+
+**What changed:** fresh Compose, Helm quickstart/defaults and installer stage 40 need no RabbitMQ
+container, CR, operator, API credential or readiness dependency. The API always runs bounded
+primary-DB workers; scheduler/debug default false controls new timed work/routes, not an existing
+queue pause. Concurrency/poll/lease are wired explicitly. Optional reader DSNs live in Secrets;
+CNPG `-ro` is generated only with explicit status-reader opt-in and replicas, while queue/finance
+remain on writable `-rw`. Old API Secrets may omit the optional reader key. External billing HTTP
+behavior is unchanged; this first slice is engine/native billing, **not durable mail**.
+
+**Why:** PostgreSQL is already authoritative for billing; durable, fenced work should not depend
+on another broker/operator or disappear with an API process. Removing desired resources must not
+remove historical data: existing upgrades require explicit stopped-producer/consumer and
+queue-drain/reconciliation/snapshot evidence. Helm removal needs a prior stored keep-manifest
+transition, Argo pruning needs live Prune/Delete=false protection before applying new state;
+stage 40 only reads and asserts, never patches/deletes a broker/PVC/operator. Compose preserves
+the old service/image and anonymous volume identity behind an explicit legacy profile; operators
+replace only the API, not down/remove/recreate data. A legacy profile/timeUnit message has no
+original cutoff, so automatic current-cycle replay is forbidden by the operator runbook.
+
+**Diagrams updated:** README overview, architecture boot/container views, C2 management workers/reader,
+C3 billing/platform and C4 rating path. [Cutover runbook](../../postgres-jobs-migration.md).
+Validation is local rendering/lint and mocked installer migration gates; no existing lab resource
+or deployment is changed by this PR.
+
 ## 2026-11-09: primary durable native billing and transactional enqueue
 
 **What changed:** the API no longer connects to RabbitMQ. Native dispatch enqueues a versioned original profile/cadence/cutoff on PRIMARY; bounded competing workers use SKIP LOCKED, DB-clock UUID-owner/epoch leases and fenced retry/ACK. The DB-only worker joins all service bill mutations, a retained financial receipt and ACK in one pgdoc transaction; `EnqueueTx` joins the same business commit and rejects wrong-database contexts at every Store boundary. Monthly clock and deletion accrual honor original cutoffs; watermarks never rewind. Issued cycles require reconciliation, and invoice issuance defers on known unresolved backlog. Status is bounded/lag-tolerant with an optional separate read-only pool; authorization/replay/claims/finance never use it. Replay preserves immutable payload and commits operator audit. Legacy fanout true is a migration error, not a silently dropped queue.

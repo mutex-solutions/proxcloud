@@ -150,8 +150,14 @@ func sandboxHTTPError(err error) (status int, msg string, ok bool) {
 	var forbidden sandboxForbidden
 	var kerr *kamajik8s.APIError
 	switch {
+	case errors.Is(err, sandbox.ErrManagedSavedStartHeld):
+		return http.StatusForbidden, sandbox.ErrManagedSavedStartHeld.Error(), true
+	case errors.Is(err, errRuntimePinState):
+		return http.StatusServiceUnavailable, err.Error(), true
 	case errors.As(err, &forbidden):
 		return http.StatusForbidden, "Cannot start a sandbox: " + err.Error(), true
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return http.StatusServiceUnavailable, "sandbox operation did not finish before its deadline", true
 	case errors.Is(err, sandbox.ErrQuotaExceeded):
 		return http.StatusTooManyRequests, err.Error(), true
 	case errors.Is(err, sandbox.ErrNoGPUCapacity):
@@ -195,7 +201,7 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 		return
 	}
 	// A project's own template (E2B-built) by name, name:tag or id; anything else is a built-in.
-	custom, customName, err := h.resolveCustomTemplate(r.Context(), proj.ID, spec.Template)
+	custom, customName, source, err := h.resolveRuntimeCreateTemplate(r.Context(), proj.ID, spec.Template)
 	if errors.Is(err, sandbox.ErrBadTemplate) {
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
@@ -204,6 +210,7 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 		h.fail(w, err)
 		return
 	}
+	spec.RuntimeSource = source
 	if custom != nil {
 		spec.Custom, spec.Template = custom, customName
 	}
@@ -213,8 +220,21 @@ func (h *Handler) sandboxCreate(w http.ResponseWriter, r *http.Request, u *user.
 		h.fail(w, httpx.BadRequest(err.Error()))
 		return
 	}
-	saved, err := h.createSandboxResource(r.Context(), proj, es, ss, &spec)
+	ctx, cancel := context.WithTimeout(r.Context(), ss.Config().Startup.Duration()+time.Minute)
+	defer cancel()
+	saved, err := h.createSandboxResource(ctx, proj, es, ss, &spec)
 	if err != nil {
+		h.sandboxFail(w, err)
+		return
+	}
+	c := &e2bCaller{user: u, proj: proj, es: es, ss: ss}
+	if err := h.waitRuntimeCreateReady(ctx, c, saved, &spec); err != nil {
+		h.cleanupFailedStartup(ctx, c, saved)
+		h.sandboxFail(w, err)
+		return
+	}
+	if err := startupResponseAlive(ctx, saved.Data); err != nil {
+		h.cleanupFailedStartup(ctx, c, saved)
 		h.sandboxFail(w, err)
 		return
 	}
@@ -233,6 +253,8 @@ func (h *Handler) pauseRefusal(cfg sandbox.Config, spec *sandbox.Spec) error {
 		return httpx.BadRequest("autoPause is not available at this location")
 	case spec.AutoResume && cfg.ProxyWakeToken == "":
 		return httpx.BadRequest("autoResume is not available at this location")
+	case (spec.AutoPause || spec.AutoResume) && !sandbox.SavedLifecycleAvailable(cfg):
+		return sandbox.ErrManagedSavedStartHeld
 	}
 	return nil
 }
@@ -244,9 +266,32 @@ func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *
 	if err := h.pauseRefusal(ss.Config(), spec); err != nil {
 		return nil, err
 	}
-	var data map[string]any
-	err := h.withSandboxStart(ctx, es.ID, func(tc context.Context) error { var e error; data, e = ss.CreateSandbox(tc, spec); return e })
+	// This copy owns all mutable maps/pointers from here through low-level Consume.
+	caller := spec
+	frozen := sandbox.CloneCreateSpec(*spec)
+	spec = &frozen
+	owner, pinStore, err := h.prepareRuntimeCreate(ctx, proj, es, ss, spec)
+	caller.ID = spec.ID
 	if err != nil {
+		return nil, err
+	}
+	// Preserve the trusted frozen identity/defaults used by the later CREATE-only
+	// readiness check, not the pre-freeze alias or caller-owned map pointers.
+	*caller = sandbox.CloneCreateSpec(*spec)
+	var data map[string]any
+	err = h.withSandboxStart(ctx, es.ID, func(tc context.Context) error { var e error; data, e = ss.CreateSandbox(tc, spec); return e })
+	caller.ID = spec.ID
+	if err != nil {
+		if owner != nil {
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			defer cancel()
+			if pinStore.CancelUnusedRuntimeDispatch(cleanup, spec.RuntimePins) == nil {
+				h.runtimeFailUnused(cleanup, pinStore, owner)
+			} else {
+				h.runtimeUnknownDetached(cleanup, pinStore, owner)
+			}
+			return nil, &runtimePinHold{operation: owner.ID}
+		}
 		return nil, err
 	}
 	now := time.Now().UTC()
@@ -261,8 +306,14 @@ func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *
 	})
 	if err != nil {
 		// The CR exists but the row does not: delete the CR rather than leave an unbilled sandbox.
-		if derr := ss.DeleteSandbox(context.WithoutCancel(ctx), proj.ID, spec.ID); derr != nil {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if derr := ss.DeleteSandbox(cleanup, proj.ID, spec.ID); derr != nil {
 			slog.Error("sandbox: delete after failed cache insert", "sandbox", spec.ID, "err", derr)
+		}
+		if owner != nil {
+			h.runtimeUnknownDetached(cleanup, pinStore, owner)
+			return nil, &runtimePinHold{operation: owner.ID}
 		}
 		return nil, err
 	}
@@ -273,6 +324,12 @@ func (h *Handler) createSandboxResource(ctx context.Context, proj *Project, es *
 // sandbox that ran keeps its row as DELETED with its end, which the charge bills up to and the next read archives;
 // one that never ran is archived at once.
 func (h *Handler) sandboxDelete(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource) error {
+	return h.sandboxDeleteAt(ctx, es, proj, cr, time.Time{})
+}
+
+// latestEnd is only the original server-generated lifetime of a failed cold create.
+// Cleanup still happens now; only its financial end is capped, never its physical delete.
+func (h *Handler) sandboxDeleteAt(ctx context.Context, es *externalservice.ExternalService, proj *Project, cr *cloud.CloudResource, latestEnd time.Time) error {
 	if h.sandboxFor == nil {
 		return fmt.Errorf("sandboxes are not configured")
 	}
@@ -288,13 +345,17 @@ func (h *Handler) sandboxDelete(ctx context.Context, es *externalservice.Externa
 	if err := ss.DeleteSandbox(ctx, proj.ID, cr.ExternalID); err != nil {
 		return err
 	}
+	end := now
+	if !latestEnd.IsZero() && latestEnd.Before(end) {
+		end = latestEnd
+	}
 	if rs, _ := cr.Data["runningSince"].(string); rs != "" {
-		cr.Data = sandbox.MarkDeleted(cr.Data, now)
+		cr.Data = sandbox.MarkDeleted(cr.Data, end)
 		cr.UpdatedAt = &now
 		_, err := h.cloud.Update(ctx, cr)
 		return err
 	}
-	return h.cloud.DeleteAndArchive(ctx, cr, now)
+	return h.cloud.DeleteAndArchive(ctx, cr, end)
 }
 
 // refreshSandboxRow reads the sandbox before its row ends, so billing sees RUNNING + runningSince and not the PENDING

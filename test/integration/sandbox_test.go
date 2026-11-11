@@ -5,10 +5,12 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -89,6 +91,8 @@ func (c *sbxCluster) ApplyCR(_ context.Context, _, _, plural string, obj map[str
 	defer c.mu.Unlock()
 	m := obj["metadata"].(map[string]any)
 	m["creationTimestamp"] = time.Now().UTC().Format(time.RFC3339)
+	m["uid"] = "sandbox-uid-" + m["name"].(string)
+	m["resourceVersion"] = "1"
 	c.crs[m["namespace"].(string)+"/"+m["name"].(string)] = obj
 	if c.autoReady {
 		obj["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "lastTransitionTime": m["creationTimestamp"]}}}
@@ -98,7 +102,14 @@ func (c *sbxCluster) ApplyCR(_ context.Context, _, _, plural string, obj map[str
 func (c *sbxCluster) GetCR(_ context.Context, _, _, _, ns, name string) (map[string]any, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.crs[ns+"/"+name], nil
+	obj := c.crs[ns+"/"+name]
+	if obj == nil {
+		return nil, nil
+	}
+	raw, _ := json.Marshal(obj)
+	var cp map[string]any
+	_ = json.Unmarshal(raw, &cp)
+	return cp, nil
 }
 func (c *sbxCluster) DeleteCR(_ context.Context, _, _, _, ns, name string) error {
 	c.mu.Lock()
@@ -110,10 +121,26 @@ func (c *sbxCluster) MergePatchCR(_ context.Context, _, _, _, ns, name string, p
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	obj := c.crs[ns+"/"+name]
+	if obj == nil {
+		return nil, sandbox.ErrNotFound
+	}
+	if meta, ok := patch["metadata"].(map[string]any); ok {
+		current := obj["metadata"].(map[string]any)
+		if uid, ok := meta["uid"]; ok && uid != current["uid"] {
+			return nil, fmt.Errorf("UID precondition")
+		}
+		if rv, ok := meta["resourceVersion"]; ok && rv != current["resourceVersion"] {
+			return nil, fmt.Errorf("resourceVersion precondition")
+		}
+	}
 	for _, top := range []string{"spec", "metadata"} {
 		p, _ := patch[top].(map[string]any)
 		dst := obj[top].(map[string]any)
 		for k, v := range p {
+			if v == nil {
+				delete(dst, k)
+				continue
+			}
 			if sub, ok := v.(map[string]any); ok {
 				d, _ := dst[k].(map[string]any)
 				if d == nil {
@@ -121,6 +148,10 @@ func (c *sbxCluster) MergePatchCR(_ context.Context, _, _, _, ns, name string, p
 					dst[k] = d
 				}
 				for sk, sv := range sub {
+					if sv == nil {
+						delete(d, sk)
+						continue
+					}
 					d[sk] = sv
 				}
 				continue
@@ -128,7 +159,13 @@ func (c *sbxCluster) MergePatchCR(_ context.Context, _, _, _, ns, name string, p
 			dst[k] = v
 		}
 	}
-	return obj, nil
+	meta := obj["metadata"].(map[string]any)
+	rv, _ := strconv.Atoi(fmt.Sprint(meta["resourceVersion"]))
+	meta["resourceVersion"] = strconv.Itoa(rv + 1)
+	raw, _ := json.Marshal(obj)
+	var cp map[string]any
+	_ = json.Unmarshal(raw, &cp)
+	return cp, nil
 }
 func (c *sbxCluster) ListCRs(_ context.Context, _, _, _, ns, _ string) ([]map[string]any, error) {
 	c.mu.Lock()
@@ -232,6 +269,9 @@ func (f *sbxFixture) do(sub, method, path, body string) (int, string) {
 // create starts a python sandbox in project pa as tenant A and returns its row.
 func (f *sbxFixture) create() *cloud.CloudResource {
 	f.t.Helper()
+	f.cluster.mu.Lock()
+	f.cluster.autoReady = true
+	f.cluster.mu.Unlock()
 	code, body := f.do(sbxA, http.MethodPost, "/project/pa/cloud", `{"type":"SANDBOX","data":{"template":"python","timeoutSeconds":600}}`)
 	if code != http.StatusOK {
 		f.t.Fatalf("create: %d %s", code, body)
@@ -363,11 +403,12 @@ func TestSandboxUsageGatesFailClosed(t *testing.T) {
 func TestSandboxRunsAreBilled(t *testing.T) {
 	f := newSbxFixture(t, gatesHold)
 	ns := sandbox.NamespaceFor("pa")
-	started := time.Now().Add(-2 * time.Minute).UTC().Truncate(time.Second)
-
 	execd := f.create()
-	if rs := execd.Data["runningSince"]; rs != nil {
-		t.Fatalf("a new sandbox has not run yet: %v", rs)
+	// Native create is now synchronously usable: first Ready is already committed
+	// and exec must preserve that immutable clock despite a later probe timestamp.
+	started, err := time.Parse(time.RFC3339, fmt.Sprint(execd.Data["runningSince"]))
+	if err != nil {
+		t.Fatalf("usable native create must carry first Ready: %v", err)
 	}
 	f.cluster.ready(ns, execd.ExternalID, started)
 	if code, body := f.do(sbxA, http.MethodPost, "/project/pa/cloud/"+execd.ID+"/action", `{"action":"EXEC","data":{"cmd":"echo hi"}}`); code != http.StatusOK {

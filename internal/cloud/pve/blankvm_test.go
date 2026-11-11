@@ -63,38 +63,10 @@ func TestServerSyncSkipsBlankVMs(t *testing.T) {
 	})
 	s := &Service{C: c, PoolPrefix: "tp-"}
 
-	for name, p := range map[string]*ServerSyncProvider{
-		"full": s.ServerSyncProvider("r", "p1", nil),
-	} {
-		rs, err := p.List(context.Background())
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
+	for name, p := range map[string]*ServerSyncProvider{"full": s.ServerSyncProvider("r", "p1", nil)} {
+		if _, err := p.List(context.Background()); err == nil {
+			t.Fatalf("%s: unknown/blank config must retain whole scope", name)
 		}
-		if len(rs) != 1 || rs[0].ExternalID != "202" {
-			t.Fatalf("%s: listed %+v, want only the customer's 202", name, rs)
-		}
-		if _, kept := p.unread[unreadable]; !kept {
-			t.Fatalf("%s: a config that could not be read is an unknown: its cached row stays", name)
-		}
-		if _, kept := p.unread[blank]; kept {
-			t.Fatalf("%s: a blank VM's cached row must go", name)
-		}
-	}
-
-	page, err := c.ClusterResources(context.Background(), "vm")
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := s.SampledServerProvider("r", "p1", page, nil)
-	rs, err := p.List(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rs) != 1 || rs[0].ExternalID != "202" {
-		t.Fatalf("sampled: listed %+v, want only the customer's 202", rs)
-	}
-	if _, kept := p.unread[unreadable]; !kept {
-		t.Fatal("sampled: a config that could not be read is an unknown")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud/sandbox"
+	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 )
 
 const (
@@ -132,14 +134,50 @@ func TestDeleteProjectImages(t *testing.T) {
 	srv := fakeOCI(t, &deleted)
 	defer srv.Close()
 	reg := &ociRegistry{base: srv.URL, cred: sandbox.RegistryCredential{User: "gc", Password: "pw"}, http: srv.Client()}
-	if err := deleteRepoImages(context.Background(), reg, "6a4d47094f34c7e7d800e7b1", false); err != nil || len(deleted) != 0 {
+	if err := deleteRepoImages(context.Background(), reg, "6a4d47094f34c7e7d800e7b1", false); !errors.Is(err, registrypins.ErrOperatorHold) || len(deleted) != 0 {
 		t.Fatalf("another project's images: %v %v", deleted, err)
 	}
 	if err := deleteRepoImages(context.Background(), reg, tProj, true); err != nil || len(deleted) != 0 {
 		t.Fatalf("dry run deleted: %v %v", deleted, err)
 	}
-	if err := deleteRepoImages(context.Background(), reg, tProj, false); err != nil || len(deleted) != 1 || deleted[0] != tDigest {
-		t.Fatalf("deleted %v %v", deleted, err)
+	if err := deleteRepoImages(context.Background(), reg, tProj, false); !errors.Is(err, registrypins.ErrOperatorHold) || len(deleted) != 0 {
+		t.Fatalf("real teardown must hold without DELETE: %v %v", deleted, err)
+	}
+}
+
+func TestRealRegistryPruneEntryPointsHoldWithoutHTTP(t *testing.T) {
+	var requests, deletes int
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method == http.MethodDelete {
+			deletes++
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	reg := &ociRegistry{base: srv.URL, http: srv.Client()}
+	var h Handler // no DB/cluster is needed: HOLD must precede all I/O
+	if n, err := h.pruneRegistry(context.Background(), tHost, nil, reg, false, 0, func(time.Duration) { t.Fatal("real prune waited") }); n != 0 || !errors.Is(err, registrypins.ErrOperatorHold) {
+		t.Fatalf("real scheduled prune=%d %v", n, err)
+	}
+	if err := deleteRepoImages(context.Background(), reg, tProj, false); !errors.Is(err, registrypins.ErrOperatorHold) {
+		t.Fatal(err)
+	}
+	cfg := sandbox.Config{TemplateRegistry: strings.TrimPrefix(srv.URL, "https://") + "/t", RegistryPrune: "on", RegistryGC: sandbox.RegistryCredential{User: "gc", Password: "not-sent"}}
+	if err := deleteProjectImages(context.Background(), cfg, tProj); !errors.Is(err, registrypins.ErrOperatorHold) {
+		t.Fatal(err)
+	}
+	for _, incomplete := range []sandbox.Config{{RegistryPrune: "on"}, {RegistryPrune: "on", TemplateRegistry: tHost + "/t"}, {RegistryPrune: "on", RegistryGC: cfg.RegistryGC}} {
+		if err := deleteProjectImages(context.Background(), incomplete, tProj); !errors.Is(err, registrypins.ErrOperatorHold) {
+			t.Fatalf("incomplete ON config hid hold: %v", err)
+		}
+	}
+	cfg.RegistryPrune = ""
+	if err := deleteProjectImages(context.Background(), cfg, tProj); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 0 || deletes != 0 {
+		t.Fatalf("held/off operations made requests=%d DELETE=%d", requests, deletes)
 	}
 }
 

@@ -9,9 +9,9 @@ ProxCloud is a cloud billing and self-service private-cloud portal sitting in fr
 - **proxcloud-api** — the Go backend that serves the REST API, the admin API, and the background jobs (billing, resource sync, usage metrics).
 - **proxcloud-web** — the customer portal SPA.
 - **proxcloud-admin** — the operator/admin SPA, on its own host.
-- **Dependencies** — **PostgreSQL** (the primary datastore, one JSONB document per aggregate), **RabbitMQ** (messaging), and, optionally, **Keycloak** (OpenID Connect identity — off by default; enable it or point at your own IdP).
+- **Dependencies** — **PostgreSQL** (the primary datastore, JSONB documents plus durable work/financial receipts), and, optionally, **Keycloak** (OpenID Connect identity — off by default; enable it or point at your own IdP). No RabbitMQ connection or broker is required by the current API.
 
-The whole thing is one Helm chart, and every dependency can be bundled with the chart or pointed at an external instance you already run.
+The Helm chart can provision PostgreSQL through an existing CloudNativePG operator, optionally bundle that operator, use the development PostgreSQL subchart, or point at an external writable primary. Keycloak is optional when an external IdP is configured. Before installing from a registry, verify that the exact image/chart version has actually been published; source-tree versions are not publication evidence.
 
 ## Before you start
 
@@ -33,7 +33,7 @@ Identity itself — realms, bundled vs external OIDC — is explained conceptual
 
 ## A sensible order
 
-1. Install on Kubernetes (or run the MicroK8s quickstart first).
-2. Decide on identity: keep the bundled Keycloak, or switch to your own IdP.
+1. Choose and configure identity before expecting a console login: explicitly enable/configure bundled Keycloak, or provide the external issuer/client settings. Bundled Keycloak is off in the base chart defaults.
+2. Install on Kubernetes (or follow the MicroK8s evaluation guide with that identity setup).
 3. Set up backups **before** onboarding real customers — the encryption secret in particular is gone for good if you lose it.
-4. Nothing to wire for resource sync: ProxCloud keeps the customer dashboard current by polling the Proxmox VE API.
+4. Configure the Proxmox provider and deliberately enable scheduled work for your site. The scheduler and debug routes default off; automatic polling/billing does not start merely because the API is running. Bounded PostgreSQL workers still process already-enqueued work, so scheduler-off is not a queue pause.

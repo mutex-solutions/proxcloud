@@ -2,7 +2,6 @@ package pve
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -64,89 +63,37 @@ func TestDownNodeServerRowStays(t *testing.T) {
 	if !page[1].NodeDown || page[1].Status != "unknown" || page[0].NodeDown {
 		t.Fatalf("a stale running row must not survive: %+v", page[:2])
 	}
-	for name, p := range map[string]*ServerSyncProvider{
-		"full":    s.ServerSyncProvider("r", "p1", nil),
-		"sampled": s.SampledServerProvider("r", "p1", page, nil),
-	} {
-		list, err := p.List(ctx)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if len(list) != 1 || list[0].ExternalID != "101" {
-			t.Fatalf("%s: listed %+v, want only the VM that can be read", name, list)
+	for name, p := range map[string]*ServerSyncProvider{"full": s.ServerSyncProvider("r", "p1", nil), "sampled": s.SampledServerProvider("r", "p1", page, nil)} {
+		_, err := p.List(ctx)
+		var unknown *cloud.InventoryUntrustedError
+		if !errors.As(err, &unknown) {
+			t.Fatalf("%s: want unknown scope, got %v", name, err)
 		}
 		row := serverRow("103", "ACTIVE")
-		if keep, changed := p.KeepUnread(row); !keep || !changed {
-			t.Fatalf("%s: keep=%v changed=%v", name, keep, changed)
-		}
-		srv := row.Data["server"].(map[string]any)
-		if srv["status"] != "UNKNOWN" || srv["name"] != "was-here" || srv["addresses"] == nil {
-			t.Fatalf("%s: row = %v, want only the status changed", name, srv)
-		}
-		if keep, changed := p.KeepUnread(row); !keep || changed {
-			t.Fatalf("%s: second pass keep=%v changed=%v, want no write", name, keep, changed)
-		}
-		if keep, _ := p.KeepUnread(serverRow("999", "ACTIVE")); keep {
-			t.Fatalf("%s: a VM PVE no longer lists is gone", name)
+		p.KeepUnread(row)
+		if row.Data["server"].(map[string]any)["status"] != "ACTIVE" {
+			t.Fatal("unknown changed cached payload")
 		}
 	}
 }
-
 func TestDownNodeVolumeAndImageRowsStay(t *testing.T) {
 	s := nodeDownCluster(t)
-	ctx := context.Background()
-	vols := s.VolumeSyncProvider("r", "p1", nil)
-	list, err := vols.List(ctx)
-	if err != nil {
-		t.Fatalf("one dead node must not stop the project's volume sync: %v", err)
-	}
-	if len(list) != 1 || list[0].ExternalID != "ceph-vm:vm-101-disk-0" {
-		t.Fatalf("volumes = %+v", list)
-	}
-	row := func(vmid any) *cloud.CloudResource {
-		return &cloud.CloudResource{Data: map[string]any{"volume": map[string]any{"vmid": vmid}}}
-	}
-	if keep, changed := vols.KeepUnread(row(json.Number("103"))); !keep || changed {
-		t.Fatalf("disk of a VM on the dead node: keep=%v changed=%v", keep, changed)
-	}
-	if keep, _ := vols.KeepUnread(row(json.Number("999"))); keep {
-		t.Fatal("a disk of a VM PVE no longer lists is gone")
-	}
-	if keep, _ := vols.KeepUnread(row(json.Number("105"))); keep {
-		t.Fatal("another project's VM says nothing about this project's rows")
-	}
-
-	imgs := s.ImageSyncProvider("r", "p1")
-	if list, err := imgs.List(ctx); err != nil || len(list) != 0 {
-		t.Fatalf("images = %+v, %v", list, err)
-	}
-	if keep, _ := imgs.KeepUnread(&cloud.CloudResource{ExternalID: "104"}); !keep {
-		t.Fatal("a template on the dead node is not gone")
+	for _, p := range []interface {
+		List(context.Context) ([]cloud.CloudResource, error)
+	}{s.VolumeSyncProvider("r", "p1", nil), s.ImageSyncProvider("r", "p1")} {
+		_, err := p.List(context.Background())
+		var unknown *cloud.InventoryUntrustedError
+		if !errors.As(err, &unknown) {
+			t.Fatalf("want whole-scope retention, got %v", err)
+		}
 	}
 }
-
-// The node died a moment ago and PVE still calls it online: a read failing must not wipe what the row knows.
 func TestUnreadableVMKeepsItsRow(t *testing.T) {
-	_, c := fakePVE(t, map[string]func(http.ResponseWriter, *http.Request){
-		"GET /api2/json/cluster/resources": func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Query().Get("type") == "node" {
-				fmt.Fprint(w, `{"data":[{"type":"node","node":"pve1","status":"online"}]}`)
-				return
-			}
-			fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":101,"node":"pve1","name":"a","status":"running","pool":"tp-p1"}]}`)
-		},
-		"GET /api2/json/nodes/pve1/qemu/101/config": func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(595)
-		},
-	})
-	s := &Service{C: c, PoolPrefix: "tp-"}
-	p := s.ServerSyncProvider("r", "p1", nil)
-	if list, err := p.List(context.Background()); err != nil || len(list) != 0 {
-		t.Fatalf("list = %+v, %v", list, err)
-	}
-	row := serverRow("101", "ACTIVE")
-	if keep, changed := p.KeepUnread(row); !keep || changed {
-		t.Fatalf("keep=%v changed=%v, want the row left alone", keep, changed)
+	s := nodeDownCluster(t)
+	_, err := s.ServerSyncProvider("r", "p1", nil).List(context.Background())
+	var unknown *cloud.InventoryUntrustedError
+	if !errors.As(err, &unknown) {
+		t.Fatal("unreadable scope must stop before writes")
 	}
 }
 

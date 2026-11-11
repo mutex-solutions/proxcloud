@@ -872,7 +872,7 @@ func (h *Handler) pveAction(w http.ResponseWriter, r *http.Request, u *user.User
 		if err := ps.ResizeServer(ctx, proj.ID, cr.ExternalID, pve.ServerSpec{
 			Slug: fl.Slug, VCPUs: fl.VCPUs, RAMMb: fl.RAMMb, DiskGb: fl.DiskGb,
 			StorageProfile: fl.StorageProfile, GPUModel: fl.GPUModel, GPUCount: fl.GPUCount,
-		}); err != nil {
+		}, es.PVEStorageHeadroomPct()); err != nil {
 			h.fail(w, pveVolumeErr(err))
 			return true
 		}
@@ -1507,7 +1507,7 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 			h.fail(w, e)
 			return true
 		}
-		aerr = ps.ExtendVolume(ctx, proj.ID, vmid, cr.ExternalID, size)
+		aerr = ps.ExtendVolume(ctx, proj.ID, vmid, cr.ExternalID, size, es.PVEStorageHeadroomPct())
 	case "DETACH":
 		aerr = ps.DetachVolume(ctx, proj.ID, vmid, cr.ExternalID)
 	case "ATTACH":
@@ -1568,6 +1568,12 @@ func (h *Handler) pveVolumeAction(w http.ResponseWriter, r *http.Request, u *use
 		storage := profile.StorageFor(vm.Node)
 		if storage == "" {
 			h.fail(w, httpx.BadRequest(fmt.Sprintf("Volume type %q is not available on the volume's node", slug)))
+			return true
+		}
+		// Refuse before persisting a move mark; the service repeats this read under
+		// its holder session, before a durable move intent or backend POST.
+		if err := ps.CheckRetypeVolumeSnapshots(ctx, proj.ID, vmid); err != nil {
+			h.fail(w, pveVolumeErr(err))
 			return true
 		}
 		// The move gives the disk a new volid. It is still this disk: the row follows it and keeps its id, which is what

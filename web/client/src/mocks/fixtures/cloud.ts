@@ -1,6 +1,6 @@
 // Cloud resource seeds — one realistic set per resource type. The provider's
 // object lives under data.<kind> (mirrors the API's CloudResource).
-import type { CloudResource } from "@/lib/types"
+import type { CloudResource, ProjectSandboxTemplate } from "@/lib/types"
 import { PID } from "./platform"
 
 const counters: Record<string, number> = {}
@@ -239,6 +239,22 @@ export function seedCloudResources(): CloudResource[] {
       },
     }, { status: "READY", externalId: "pc-d-1a2b3c4d", serviceId: "svc-dbaas-1", region: "RegionOne" }),
   ]
+}
+
+// Private project-scoped fixtures. Distinct IDs and same primary name demonstrate
+// that a URL's project is authoritative; no template belongs to every project.
+export type MockSandboxTemplate = ProjectSandboxTemplate & { projectId: string }
+export function seedSandboxTemplates(): MockSandboxTemplate[] {
+  return [PID, "prj-staging"].map((projectId) => ({
+    id: projectId === PID ? "tpl-web-app" : "tpl-staging-app", projectId,
+    name: "web-app", kind: "template", mode: "build", aliases: ["web-app", "app-stable"],
+    cpu: 2, memoryGiB: 4, status: "error", ready: true,
+    createdAt: "2026-11-01T07:00:00Z", updatedAt: "2026-11-01T08:00:00Z",
+    builds: [
+      { buildID: "build-failed", status: "error", mode: "build", tags: [], reason: "Build step failed (exit 137, OOMKilled)", step: "kaniko", buildResources: { buildCpu: 4, buildMemoryGiB: 16, buildDiskGiB: 80 }, createdAt: "2026-11-01T07:59:00Z", finishedAt: "2026-11-01T08:00:00Z" },
+      { buildID: "build-ready", status: "ready", mode: "build", tags: ["default"], image: `registry.example.com/templates/${projectId}/web-app@sha256:${"a".repeat(64)}`, createdAt: "2026-11-01T07:00:00Z", finishedAt: "2026-11-01T07:01:00Z" },
+    ],
+  }))
 }
 
 export const bucketObjects = [

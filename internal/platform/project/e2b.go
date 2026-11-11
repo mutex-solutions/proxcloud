@@ -66,22 +66,27 @@ func (h *Handler) E2BRoutes(r chi.Router) {
 		r.Post("/sandboxes/{sandboxID}/fork", h.e2bFork)
 		r.Get("/snapshots", h.e2bSnapshotList)
 		r.Get("/templates", h.e2bTemplates)
+		r.Post("/templates/import", h.e2bTemplateImport)
+		r.Post("/templates/{templateID}/aliases", h.e2bTemplateAliases)
+		r.Delete("/templates/{templateID}/aliases", h.e2bTemplateAliases)
+		r.Post("/templates/{templateID}/prepare", h.e2bPrepareTemplate)
+		r.Get("/templates/{templateID}/prepare", h.e2bPrepareTemplate)
 		r.Get("/templates/aliases/{alias}", h.e2bTemplateAlias)
 		r.Get("/templates/{templateID}", h.e2bTemplateGet)
-		r.Delete("/templates/{templateID}", h.e2bTemplateDelete)
+		r.Delete("/templates/{templateID}", h.e2bTemplateDeleteLocked)
 		r.Get("/templates/{templateID}/tags", h.e2bTemplateTags)
 		r.Post("/templates/tags", h.e2bTemplateTagsAssign)
 		r.Delete("/templates/tags", h.e2bTemplateTagsRemove)
-		r.Post("/v3/templates", h.e2bTemplateRequest)
+		r.Post("/v3/templates", h.e2bTemplateRequestLocked)
 		r.Get("/templates/{templateID}/files/{hash}", h.e2bTemplateFile)
-		r.Post("/v2/templates/{templateID}/builds/{buildID}", h.e2bTemplateBuild)
+		r.Post("/v2/templates/{templateID}/builds/{buildID}", h.e2bTemplateBuildLocked)
 		r.Get("/templates/{templateID}/builds/{buildID}/status", h.e2bTemplateBuildStatus)
 	})
 	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
-		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see docs/e2b-compat.md)")
+		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see "+h.e2bDocs()+")")
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
-		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see docs/e2b-compat.md)")
+		e2bErr(w, http.StatusNotFound, "this endpoint is not supported (see "+h.e2bDocs()+")")
 	})
 }
 
@@ -106,6 +111,9 @@ func e2bFail(w http.ResponseWriter, err error) {
 
 // e2bError maps err to the status and message shown to the caller (internals are logged only).
 func e2bError(err error) (int, string) {
+	if errors.Is(err, errBuildPinState) {
+		return http.StatusConflict, "template operation is active, held or requires operator recovery"
+	}
 	var se e2bStatusErr
 	if errors.As(err, &se) {
 		return se.code, se.msg
@@ -345,6 +353,9 @@ func (b *e2bCreateBody) e2bRefusal() string {
 
 func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 	c, arrived := e2bFrom(r), time.Now()
+	ctx, cancel := context.WithTimeout(r.Context(), SnapshotRequestWait+c.ss.Config().Startup.Duration()+time.Minute)
+	defer cancel()
+	r = r.WithContext(ctx)
 	var b e2bCreateBody
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&b); err != nil {
 		e2bErr(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -369,7 +380,7 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		e2bFail(w, err)
 		return
 	}
-	custom, customName, err := h.resolveCustomTemplate(r.Context(), c.proj.ID, b.TemplateID)
+	custom, customName, source, err := h.resolveRuntimeCreateTemplate(r.Context(), c.proj.ID, b.TemplateID)
 	if errors.Is(err, sandbox.ErrBadTemplate) {
 		e2bErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -379,15 +390,16 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec := sandbox.Spec{
-		ProjectID:  c.proj.ID,
-		Template:   b.TemplateID,
-		Custom:     custom,
-		Env:        b.EnvVars,
-		Metadata:   b.Metadata,
-		GPU:        b.GPU,
-		Network:    b.Network.policy(b.AllowInternetAccess),
-		AutoPause:  b.AutoPause,
-		AutoResume: b.AutoResume != nil && b.AutoResume.Enabled,
+		ProjectID:     c.proj.ID,
+		Template:      b.TemplateID,
+		Custom:        custom,
+		RuntimeSource: source,
+		Env:           b.EnvVars,
+		Metadata:      b.Metadata,
+		GPU:           b.GPU,
+		Network:       b.Network.policy(b.AllowInternetAccess),
+		AutoPause:     b.AutoPause,
+		AutoResume:    b.AutoResume != nil && b.AutoResume.Enabled,
 	}
 	if custom != nil {
 		spec.Template = customName
@@ -405,6 +417,10 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 	if b.MemoryMB != nil {
 		spec.MemoryGiB = (*b.MemoryMB + 1023) / 1024
 	}
+	if _, builtin := c.ss.Config().Templates[spec.Template]; custom == nil && !builtin {
+		e2bErr(w, http.StatusBadRequest, h.unknownTemplate(r.Context(), c, b.TemplateID))
+		return
+	}
 	q := c.es.SandboxProjectQuota(c.proj.Quota)
 	spec.Quota = &q
 	if err := spec.Validate(c.ss.Config()); err != nil {
@@ -417,17 +433,24 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.cloudResourceAudit(c.user, c.proj, "CLOUD_RESOURCE_CREATE", "E2B_CREATE", saved)
-	if err := h.e2bWaitReady(r.Context(), c, saved); err != nil {
-		slog.Warn("e2b: sandbox did not become ready; deleting it", "sandbox", spec.ID, "err", err)
-		if derr := h.sandboxDelete(context.WithoutCancel(r.Context()), c.es, c.proj, saved); derr != nil {
-			slog.Error("e2b: delete after failed start", "sandbox", spec.ID, "err", derr)
-		}
-		e2bErr(w, http.StatusServiceUnavailable, "the sandbox did not start in time (no capacity for this size?)")
-		return
-	}
-	a, err := c.ss.AccessFor(r.Context(), c.proj.ID, spec.ID)
+	a, err := e2bColdAccess(r.Context(), c.ss.Config().Startup.Duration(), time.Time{}, time.Now,
+		func(ctx context.Context) error { return h.waitRuntimeCreateReady(ctx, c, saved, &spec) },
+		func(ctx context.Context) (*sandbox.Access, error) {
+			return committedStartupAccess(ctx, saved.Data, time.Now, func(ctx context.Context) (*sandbox.Access, error) { return c.ss.AccessFor(ctx, c.proj.ID, spec.ID) })
+		})
 	if err != nil {
-		e2bFail(w, err)
+		h.runtimeCreateFailure(r.Context(), c, saved.ExternalID)
+		h.cleanupFailedStartup(r.Context(), c, saved)
+		if errors.Is(err, errRuntimePinState) {
+			e2bFail(w, err)
+			return
+		}
+		msg := "sandbox startup failed; check template preparation and location availability"
+		var startup *sandbox.StartupError
+		if errors.As(err, &startup) {
+			msg = startup.Error()
+		}
+		e2bErr(w, http.StatusServiceUnavailable, msg)
 		return
 	}
 	e2bJSON(w, http.StatusCreated, c.e2bSandbox(spec.ID, spec.Template, a))
@@ -436,20 +459,121 @@ func (h *Handler) e2bCreate(w http.ResponseWriter, r *http.Request) {
 // e2bWaitReady polls until the sandbox is RUNNING (envd initialised: the pod's startup probe), then stores the live
 // payload, so billing starts from runningSince even if nothing lists it.
 func (h *Handler) e2bWaitReady(ctx context.Context, c *e2bCaller, cr *cloud.CloudResource) error {
-	ctx, cancel := context.WithTimeout(ctx, e2bReadyTimeout)
+	live, err := c.ss.WaitReady(ctx, c.proj.ID, cr.ExternalID)
+	if err != nil {
+		return err
+	}
+	if err := startupResponseAlive(ctx, live); err != nil {
+		return err
+	}
+	cr.Data = live
+	now := time.Now().UTC()
+	cr.UpdatedAt = &now
+	if _, err := h.cloud.Update(ctx, cr); err != nil {
+		return err
+	}
+	return startupResponseAlive(ctx, live)
+}
+
+const (
+	e2bCustomReadyTimeout = 120 * time.Second
+	e2bReadyReturnGrace   = 5 * time.Second
+)
+
+// Only normal project builds get a cold-pull allowance. Snapshot/future kinds and
+// unknown lifetimes keep the legacy bound; no caller field may select this budget.
+func e2bCreateReadyBudget(custom bool, kind string, data map[string]any, now time.Time) (time.Duration, time.Time) {
+	if !custom || kind != "" {
+		return e2bReadyTimeout, time.Time{}
+	}
+	end, _ := time.Parse(time.RFC3339, fmt.Sprint(data["shutdownTime"]))
+	if end.IsZero() {
+		return e2bReadyTimeout, time.Time{}
+	}
+	return min(e2bCustomReadyTimeout, end.Sub(now)-e2bReadyReturnGrace), end
+}
+
+func e2bReadyAlive(ctx context.Context, expires, now time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !expires.IsZero() && !now.Before(expires) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// One derived deadline covers readiness, cache work and the final live access read.
+func e2bColdAccess(ctx context.Context, budget time.Duration, expires time.Time, now func() time.Time,
+	wait func(context.Context) error, access func(context.Context) (*sandbox.Access, error),
+) (*sandbox.Access, error) {
+	readyBy := now().Add(budget)
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	t := time.NewTicker(250 * time.Millisecond)
-	defer t.Stop()
-	for {
-		live, err := c.ss.GetSandbox(ctx, c.proj.ID, cr.ExternalID)
-		if err == nil && live["status"] == sandbox.StatusRunning {
+	if err := wait(ctx); err != nil {
+		return nil, err
+	}
+	if err := e2bReadyAlive(ctx, expires, now()); err != nil {
+		return nil, err
+	}
+	a, err := access(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := e2bReadyAlive(ctx, expires, now()); err != nil {
+		return nil, err
+	}
+	if !now().Before(readyBy) {
+		return nil, context.DeadlineExceeded
+	}
+	return a, nil
+}
+
+func (h *Handler) e2bWaitReadyWithBudget(ctx context.Context, c *e2bCaller, cr *cloud.CloudResource, budget time.Duration, expires time.Time) error {
+	return e2bPollReady(ctx, budget, expires, time.Now,
+		func(ctx context.Context) (map[string]any, error) {
+			return c.ss.GetSandbox(ctx, c.proj.ID, cr.ExternalID)
+		},
+		func(ctx context.Context, live map[string]any) {
 			cr.Data = live
 			now := time.Now().UTC()
 			cr.UpdatedAt = &now
 			if _, err := h.cloud.Update(ctx, cr); err != nil {
 				slog.Warn("e2b: cache update after start", "sandbox", cr.ExternalID, "err", err)
 			}
-			return nil
+		})
+}
+
+// The per-call clock/read/store seam keeps deadline tests fast without mutable globals.
+func e2bPollReady(ctx context.Context, budget time.Duration, expires time.Time, now func() time.Time,
+	read func(context.Context) (map[string]any, error), store func(context.Context, map[string]any),
+) error {
+	readyBy := now().Add(budget)
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	alive := func() error {
+		at := now()
+		if err := e2bReadyAlive(ctx, expires, at); err != nil {
+			return err
+		}
+		if !at.Before(readyBy) {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	t := time.NewTicker(250 * time.Millisecond)
+	defer t.Stop()
+	for {
+		if err := alive(); err != nil {
+			return err
+		}
+		live, err := read(ctx)
+		if err := alive(); err != nil {
+			return err
+		}
+		if err == nil && live["status"] == sandbox.StatusRunning {
+			store(ctx, live)
+			return alive()
 		}
 		select {
 		case <-ctx.Done():
@@ -901,7 +1025,7 @@ func (h *Handler) e2bTemplateGet(w http.ResponseWriter, r *http.Request) {
 		v := pt.e2bView()
 		builds := []any{}
 		for _, b := range pt.Builds {
-			builds = append(builds, map[string]any{"buildID": b.BuildID, "status": b.Status, "cpuCount": pt.CPU, "memoryMB": pt.MemoryGiB * 1024,
+			builds = append(builds, map[string]any{"buildID": b.BuildID, "status": buildPinSDKStatus(&b), "cpuCount": pt.CPU, "memoryMB": pt.MemoryGiB * 1024,
 				"createdAt": b.CreatedAt, "finishedAt": b.FinishedAt})
 		}
 		v["builds"] = builds

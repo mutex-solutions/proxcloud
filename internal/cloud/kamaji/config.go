@@ -177,9 +177,9 @@ type SharedWorkers struct {
 // `addons.<key>.enabled`; everything else in the addons stack — the CNI, the CSI/credential
 // push, the mirror-registry pins — stays operator territory and is never client-writable.
 var ClusterAddons = map[string]bool{
-	"certManager":   false, // cert-manager (Let's Encrypt & friends)
-	"ingress":       false, // NGINX ingress controller
-	"metricsServer": true,  // kubectl top / HPA metrics
+	"certManager":      false, // cert-manager (Let's Encrypt & friends)
+	GatewayFabricAddon: false, // NGINX Gateway Fabric / Gateway API; legacy ingress is preserved separately
+	"metricsServer":    true,  // kubectl top / HPA metrics
 }
 
 // ClusterFQDN is the cluster's public API hostname (<clusterID>.<dnsZone>) — the name
@@ -323,7 +323,10 @@ func (s ClusterSpec) Validate(d ClusterDefaults) error {
 			return fmt.Errorf("cluster: version %q is not offered by this provider", s.Version)
 		}
 	}
-	for name := range s.Addons {
+	for name, enabled := range s.Addons {
+		if name == LegacyIngressAddon && !enabled {
+			continue // old clients send an explicit false pick; it cannot install the retired addon
+		}
 		if _, ok := ClusterAddons[name]; !ok {
 			return fmt.Errorf("cluster: unknown add-on %q", name)
 		}

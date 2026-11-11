@@ -167,6 +167,25 @@ func (h *BillingHandler) requireBillingProfileRead(w http.ResponseWriter, r *htt
 	return bp, true
 }
 
+// CanReadBillingProfile reports whether sub holds BILLING_PROFILE_READ on the organization that
+// owns the profile: the same rule as requireBillingProfileRead, as a yes/no for callers that
+// answer in their own words (the order read answers 404 either way). A missing profile or
+// organization is false, not an error.
+func (h *BillingHandler) CanReadBillingProfile(ctx context.Context, sub, bpID string) (bool, error) {
+	if sub == "" || bpID == "" {
+		return false, nil
+	}
+	bp, err := h.billing.FindByID(ctx, bpID)
+	if err != nil || bp == nil {
+		return false, err
+	}
+	o, err := h.svc.FindOrganization(ctx, bp.OrganizationID)
+	if err != nil || o == nil {
+		return false, err
+	}
+	return h.policy.HasPermission(ctx, sub, o.ID, rbac.BillingProfileRead), nil
+}
+
 // orgCostInfo handles GET /bill/{billingProfileId}/cost-info: the org-wide billing overview for the
 // org billing dashboard — the profile aggregate plus a per-project breakdown ({projectId: CostInfo},
 // only projects that have billed items). Reuses the same cost breakdown as the project dashboard,
@@ -1177,23 +1196,11 @@ func (h *BillingHandler) cancelSavingsContract(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	if c.Status != billing.SavingsStatusPendingPayment {
-		if c.PaidUpfront {
-			fail(w, httpx.BadRequest("Cannot cancel upfront contracts"))
-			return
-		}
-		if c.Status != billing.SavingsStatusActive {
-			fail(w, httpx.BadRequest("Only active contracts can be cancelled"))
-			return
-		}
-	}
-	c.Status = billing.SavingsStatusCancelled
-	if err := h.billing.SaveSavingsContract(r.Context(), c); err != nil {
+	c, err := h.billing.MutateSavingsContract(r.Context(), c.BillingProfileID, c.ID, false)
+	if err != nil {
 		fail(w, err)
 		return
 	}
-	// cancel → cancelReminders (drop pending expiry reminders). Best-effort.
-	_ = h.billing.CancelReminders(r.Context(), billing.ResourceTypeSavingsContract, c.ID)
 	httpx.OK(w, billing.SavingsContractToDto(c))
 }
 
@@ -1203,26 +1210,11 @@ func (h *BillingHandler) extendSavingsContract(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	if c.Status != billing.SavingsStatusActive {
-		fail(w, httpx.BadRequest("Only active contracts can be extended"))
-		return
-	}
-	// Its discount is prepaid usage, and the extra months were not paid for.
-	if c.PaidUpfront {
-		fail(w, httpx.BadRequest("An upfront contract cannot be extended: buy a new one when it ends"))
-		return
-	}
-	if c.EndDate != nil {
-		ne := c.EndDate.AddDate(0, c.DurationMonths, 0)
-		c.EndDate = &ne
-	}
-	if err := h.billing.SaveSavingsContract(r.Context(), c); err != nil {
+	c, err := h.billing.MutateSavingsContract(r.Context(), c.BillingProfileID, c.ID, true)
+	if err != nil {
 		fail(w, err)
 		return
 	}
-	// extend → cancelReminders: the old window is dropped so the next daily run schedules a
-	// fresh reminder against the new endDate. Best-effort.
-	_ = h.billing.CancelReminders(r.Context(), billing.ResourceTypeSavingsContract, c.ID)
 	httpx.OK(w, billing.SavingsContractToDto(c))
 }
 

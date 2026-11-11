@@ -19,7 +19,7 @@ Head to **Billing → Funds**. If your billing profile is still incomplete, this
 
 Submit the form and the portal acknowledges with "Billing details saved". These values print on every invoice, so keep them aligned with your company or personal records.
 
-<!-- screenshot: /docs-img/billing-details-form.png — Billing > Funds page showing the billing details form (name, phone, address, country fields) before first deposit -->
+*No billing-form screenshot is published in this capture set: the page loads third-party payment SDKs, while documentation capture deliberately permits localhost only. Follow the current form labels above; a screenshot is not payment acceptance evidence.*
 
 ## Set up a way to pay
 

@@ -34,6 +34,7 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/config"
 	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
 	"github.com/mutex-solutions/proxcloud/internal/health"
+	"github.com/mutex-solutions/proxcloud/internal/mailoutbox"
 	"github.com/mutex-solutions/proxcloud/internal/oidc"
 	"github.com/mutex-solutions/proxcloud/internal/pgdoc"
 	"github.com/mutex-solutions/proxcloud/internal/platform/account"
@@ -64,10 +65,12 @@ import (
 	"github.com/mutex-solutions/proxcloud/internal/platform/projectinvite"
 	"github.com/mutex-solutions/proxcloud/internal/platform/promotion"
 	"github.com/mutex-solutions/proxcloud/internal/platform/pveflavor"
+	"github.com/mutex-solutions/proxcloud/internal/platform/pveincident"
 	"github.com/mutex-solutions/proxcloud/internal/platform/scheduler"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sse"
 	"github.com/mutex-solutions/proxcloud/internal/platform/sso"
 	"github.com/mutex-solutions/proxcloud/internal/platform/user"
+	"github.com/mutex-solutions/proxcloud/internal/registrypins"
 	"github.com/mutex-solutions/proxcloud/internal/server"
 	"github.com/mutex-solutions/proxcloud/pkg/auth"
 	"github.com/mutex-solutions/proxcloud/pkg/certfile"
@@ -176,8 +179,38 @@ func run() error {
 	// the billing payment-gateway reads decrypt with the SAME key. Declared here (ahead of esSvc at
 	// its original site) so the mail resolver closure below can capture it.
 	enc := textcrypt.New(cfg.Encryption.DefaultKey)
+	// Provision the dedicated outbox and opaque read-only metadata. PR B's
+	// default-false producer opts only savings reminders into atomic enqueue;
+	// NO dispatcher/background worker is registered. Missing/short legacy keys
+	// keep default-OFF deployments compatible; opt-in validation fails closed.
+	blobKeys, blobErr := textcrypt.NewBlobKeys("default-v1", map[string]string{"default-v1": cfg.Encryption.DefaultKey})
+	if blobErr != nil {
+		log.Warn("mail outbox payload key unavailable; dispatch remains disabled")
+	}
+	mailOutbox := mailoutbox.New(pg, blobKeys)
+	billingRepo.SetReminderCanceler(mailOutbox) // cancellation never needs keys/producer opt-in
+	billingRepo.SetSavingsExpiredCanceler(mailOutbox)
+	if err := billingRepo.EnsureSavingsExpired(ctx); err != nil {
+		return fmt.Errorf("savings expired schema unavailable")
+	}
+	if cfg.Mail.SavingsExpiredOutboxEnabled {
+		if err := prepareSavingsExpiredDependencies(ctx, pg); err != nil {
+			return err
+		}
+	}
+	if err := mailOutbox.Ensure(ctx); err != nil {
+		return fmt.Errorf("mail outbox schema unavailable")
+	}
 	billingRepo.SetEncryptor(enc) // decrypt payment-gateway (Stripe) secrets on GetGateway
 	integrationStore := pg.C("thirdPartyIntegration")
+	if cfg.Mail.ReminderOutboxEnabled {
+		// The strict DB-over-env resolver runs INSIDE the decision transaction.
+		// A missing optional table would abort that transaction before it could
+		// record blocked_config, so ensure it once before serving producers.
+		if err := prepareReminderDependencies(ctx, pg); err != nil {
+			return err
+		}
+	}
 	envMailer := mail.FromEnv()
 	envFrom := os.Getenv("PROXCLOUD_MAIL_FROM")
 	mailSvc := mail.NewService(
@@ -241,6 +274,10 @@ func run() error {
 	// project — set via a setter).
 	orgH.SetProjectMemberAdder(projectSvc)
 	cloudRepo := cloud.NewRepo(pg)
+	incidentRepo := pveincident.New(pg, auditSvc) // operator DB records only; no notification dispatcher
+	if err := incidentRepo.Ensure(ctx); err != nil {
+		return fmt.Errorf("ensure PVE incident records: %w", err)
+	}
 	// esSvc is created here (ahead of the admin handler) so the project handler's client cloud read
 	// endpoints (init menu / project services) can resolve external services too. It shares `enc`
 	// (declared above, near the mail gateway) so write-encrypt and read-decrypt use the same key.
@@ -283,10 +320,19 @@ func run() error {
 	// Sandboxes — enables sandbox provisioning and the SANDBOX surface (Sandbox CRs on the provider's sandbox cluster).
 	// The release gates are wired once the sync job exists, below.
 	projectH.SetSandbox(sandboxServiceFor)
+	projectH.SetE2BConsoleURL(cfg.Self.UIBaseURL)
 	// Sandbox API keys (SHA-256 only) for the E2B-compatible API at /e2b.
 	projectH.SetSandboxKeys(pg.C("sandbox_api_keys"))
 	// Custom templates and their builds (the E2B v3 template API).
 	projectH.SetSandboxTemplates(pg.C("sandbox_templates"))
+	if err := registrypins.EnsureSchema(context.Background(), pg); err != nil {
+		return fmt.Errorf("sandbox build registry pin schema: %w", err)
+	}
+	projectH.SetSandboxBuildPins(pg)
+	if err := project.EnsureSandboxRuntimePins(context.Background(), pg); err != nil {
+		return fmt.Errorf("sandbox runtime CREATE owner schema: %w", err)
+	}
+	projectH.SetSandboxRuntimePins(pg)
 	// Paused sandboxes (E2B pause, autoPause, autoResume): the saved CR and the snapshot each one resumes from.
 	projectH.SetSandboxPaused(pg.C("sandbox_paused"))
 	for _, table := range []string{"sandbox_safety", "auditEvent"} {
@@ -354,12 +400,24 @@ func run() error {
 	})
 	affiliateH := affiliate.NewHandler(affiliate.NewRepo(pg), projectSvc, orgSvc, billingRepo, users)
 	catalogH := catalog.NewHandler(catalog.NewRepo(pg))
-	orderH := order.NewHandler(orderRepo, users)
+	orderH := order.NewHandler(orderRepo, users, billingH.CanReadBillingProfile)
 	inviteRepo := projectinvite.NewRepo(pg)
 	if err := inviteRepo.EnsureIndexes(ctx); err != nil {
 		log.Error("projectInvite TTL index", "err", err)
 	}
+	inviteRepo.SetInviteCanceler(mailOutbox) // keyless and producer-independent
 	inviteH := projectinvite.NewHandler(inviteRepo, users, projectSvc, orgRepo, auditSvc, mailSvc, cfg.Self.UIBaseURL)
+	if cfg.Mail.ProjectInviteOutboxEnabled {
+		if blobErr != nil {
+			return fmt.Errorf("project invite payload key unavailable")
+		}
+		if err := prepareProjectInviteDependencies(ctx, pg); err != nil {
+			return err
+		}
+		inviteH.SetInviteOutbox(projectInviteOutboxAdapter{store: mailOutbox, service: mailSvc, message: msgRepo,
+			config: mail.DurableConfigFromStore(integrationStore, enc)})
+		log.Info("durable project invite enqueue enabled; SMTP dispatch remains disabled")
+	}
 	// adminH is created below, after esSvc (it needs the externalService loader for cloud-admin reads).
 	// SSE real-time stream (StreamingController + SseService). The in-memory pool + handler;
 	// This pool is process-local SSE delivery, not durable queue fan-out.
@@ -468,6 +526,20 @@ func run() error {
 	// Admin handler (needs esSvc + region + the cloud-client factory for cloud-admin live reads).
 	adminH := admin.NewHandler(admin.NewRepo(pg), catalog.NewRepo(pg), users, addFundsSvc, pricingRepo, billingRepo, cloudRepo, platformconfig.NewRepo(pg), auditSvc, esSvc, cfg.DefaultRegion, cfg.Auth.Admin.IssuerURI, cfg.Auth.Admin.ClientID)
 	adminH.SetHmacEncryptor(enc)
+	adminH.SetMailOutbox(mailOutbox)
+	adminH.SetValidationCanceler(mailOutbox) // keyless, even producer OFF
+	if cfg.Mail.ValidationApprovedOutboxEnabled {
+		if blobErr != nil {
+			return fmt.Errorf("validation approval payload key unavailable")
+		}
+		if err := prepareValidationDependencies(ctx, pg); err != nil {
+			return err
+		}
+		adminH.SetValidationOutbox(validationOutboxAdapter{store: mailOutbox, service: mailSvc, message: msgRepo,
+			config: mail.DurableConfigFromStore(integrationStore, enc), loginURL: cfg.Self.UIBaseURL})
+		log.Info("durable validation approval enqueue enabled; SMTP dispatch remains disabled")
+	}
+	adminH.SetPVEIncidents(incidentRepo)
 	adminH.SetCollectChecker(txnScanner)
 	adminH.SetKamaji(kamajiFactory)
 	adminH.SetCSIMigrator(func(ctx context.Context, es *externalservice.ExternalService, ks *kamaji.Service, clusterID string, dryRun, force bool, adoptDetached []string) (any, error) {
@@ -556,8 +628,10 @@ func run() error {
 	metricsJob := metricsjob.New(projectRepo, cloudRepo, esSvc, metrics.NewService(metricsRepo), log).WithDB(pg)
 	syncJob := syncjob.New(projectRepo, esSvc, cloudRepo, log).
 		WithPublicIPs(publicIPRepo.ForProject, publicIPRepo.ReleaseNIC).
+		WithPublicIPInventory(publicIPRepo).
 		WithKamajiFactory(kamajiFactory).
 		WithAudit(auditSvc).
+		WithPVEIncidents(incidentRepo).
 		WithProxmoxFactory(pveWithHolderLock).
 		WithSDNLock(lock.New(pg)).
 		WithShareAccess(projectH.ReconcileShareAccess).
@@ -573,6 +647,15 @@ func run() error {
 	adminH.SetSandboxGates(syncJob.SandboxReleaseGates)
 	savingsSvc := billing.NewSavingsService(billingRepo)
 	savingsSvc.SetNotifier(mailSvc)
+	if cfg.Mail.SavingsExpiredOutboxEnabled {
+		billingRepo.SetSavingsExpiredOutbox(savingsExpiredOutboxAdapter{store: mailOutbox, snapshot: mailSvc, message: msgRepo, config: mail.DurableConfigFromStore(integrationStore, enc)})
+		log.Info("durable savings expired decisions enabled; SMTP dispatch remains disabled")
+	}
+	if cfg.Mail.ReminderOutboxEnabled {
+		billingRepo.SetReminderOutbox(reminderOutboxAdapter{store: mailOutbox, service: mailSvc, message: msgRepo,
+			config: mail.DurableConfigFromStore(integrationStore, enc)})
+		log.Info("durable savings reminder enqueue enabled; SMTP dispatch remains disabled")
+	}
 	suspensionJob := billing.NewSuspensionJob(billingRepo, log)
 	suspensionJob.SetNotifier(mailSvc)
 	suspensionJob.SetAudit(auditSvc) // writes a system audit trail for CREATE/NOTIFY/SUSPEND/UNSUSPEND
@@ -881,8 +964,8 @@ func run() error {
 				if g, err := time.ParseDuration(r.URL.Query().Get("grace")); err == nil && g >= 0 {
 					grace = g
 				}
-				projectH.PruneSandboxRegistryOlderThan(r.Context(), grace)
-				jobResult(w, map[string]any{"ran": "registry-prune", "grace": grace.String()}, nil)
+				err := projectH.PruneSandboxRegistryOlderThan(r.Context(), grace)
+				jobResult(w, map[string]any{"ran": "registry-prune", "grace": grace.String()}, err)
 			},
 			"run-pve-tasks": func(w http.ResponseWriter, r *http.Request) {
 				n, err := syncJob.RunPVETasks(r.Context())
@@ -920,7 +1003,7 @@ func run() error {
 			},
 			"run-reminders": func(w http.ResponseWriter, r *http.Request) {
 				n, err := savingsSvc.ProcessReminderNotifications(r.Context())
-				jobResult(w, map[string]any{"ran": "reminders", "sent": n}, err)
+				jobResult(w, reminderResult(savingsSvc.DurableRemindersEnabled(), n), err)
 			},
 			"run-txn-scan": func(w http.ResponseWriter, r *http.Request) {
 				n, err := txnScanner.Scan(r.Context())
@@ -1164,7 +1247,11 @@ func registerJobs(sched *scheduler.Scheduler, billingProvider string, chargeDisp
 			if n, err := savings.ProcessReminderNotifications(ctx); err != nil {
 				log.Error("reminder notifications dispatch job", "err", err)
 			} else if n > 0 {
-				log.Info("reminder notifications sent", "count", n)
+				if savings.DurableRemindersEnabled() {
+					log.Info("reminder outbox decisions queued; dispatch disabled", "count", n)
+				} else {
+					log.Info("reminder notifications sent", "count", n)
+				}
 			}
 		}},
 		{Name: "paymentGatewayTransactionScanning", Spec: scheduler.TransactionScanSpec, AtMostFor: 10 * time.Minute, AtLeastFor: 30 * time.Second, Fn: func(ctx context.Context) {
