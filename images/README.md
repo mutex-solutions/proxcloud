@@ -68,6 +68,8 @@ The OS cloud-image path does not rely on DHCP or guest-agent address discovery. 
 
 ## Runner
 
+The [OS](<../.github/workflows/vm-templates.yml>), [Kubernetes](<../.github/workflows/k8s-node-templates.yml>) and [sandbox](<../.github/workflows/sandbox-templates.yml>) template workflows explicitly disable inherited Git sparse-checkout immediately after checkout, then verify full-source mode and their fixed entrypoint/companion paths before building. A previous sparse artifact-staging checkout can otherwise leave a successful checkout missing tracked source files on a persistent runner; this is checkout state, not a guest-cleanup regression. The repair only materializes the selected commit in the runner-owned `GITHUB_WORKSPACE` repository: no reset/clean, cache deletion or PVE access. The [offline regression](<tests/test_checkout_workflows.py>) uses a synthetic local Git repository; it is authored but not executed for this source-only change, and a fresh full Kubernetes canary is still required.
+
 The workflows need a repo-scoped **self-hosted** runner labelled `proxcloud-pve`, with PVE API/build-guest SSH reachability, `python3` and `packer` installed (Kubernetes static mode also needs xorriso/OpenSSL). This runner orchestrates PVE; it does not run the nested build VM locally. GitHub-hosted test/container/chart jobs need no PVE runner. Store **all cluster configuration in repository Actions secrets**, not Variables (Settings → Secrets and variables → Actions → Secrets):
 
 | Kind | Name | Required by / value |

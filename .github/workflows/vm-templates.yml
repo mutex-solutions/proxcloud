@@ -72,6 +72,13 @@ jobs:
           done
           echo "::add-mask::${BUILD_IP%%/*}"
       - uses: actions/checkout@v7
+      - name: Require full source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C "$GITHUB_WORKSPACE" sparse-checkout disable
+          test "$(git -C "$GITHUB_WORKSPACE" config --bool --get core.sparseCheckout)" = false
+          test -f "$GITHUB_WORKSPACE/images/build.py" && test -f "$GITHUB_WORKSPACE/images/packer/template.pkr.hcl"
       - name: Build
         # PVE_NODES is space-separated: one on shared VM disks, all of them on local disks.
         # BUILD_IP is a dedicated free CIDR; optional BUILD_NAMESERVER falls back to BUILD_GATEWAY.
