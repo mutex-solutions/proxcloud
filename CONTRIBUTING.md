@@ -8,7 +8,9 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
 ## Prerequisites
 
 - **Go 1.25+** — the backend.
-- **Node.js 20+** and npm — the two React consoles under `web/`.
+- **Node.js 24** and npm — matches hosted frontend CI for both React consoles.
+  The locked Vite toolchain requires at least Node 20.19 or 22.12 on those older
+  release lines; arbitrary Node 20.x is not enough.
 - **Docker** — required for the integration tests (they spin up a throwaway
   PostgreSQL via testcontainers) and for building images / running the local stack.
 - Optional for a full run: an **OpenID Connect** issuer (Keycloak or other) and
@@ -16,8 +18,9 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
 
 ## Getting the app running locally
 
-The fastest path is Docker Compose, which brings up the API, both SPAs, PostgreSQL
-and RabbitMQ:
+The fastest path is Docker Compose, which brings up the API, both SPAs,
+PostgreSQL and a development Keycloak realm. RabbitMQ is absent by default and is
+only retained behind the explicit `legacy-rabbitmq` migration profile:
 
 ```sh
 docker compose up --build
@@ -27,8 +30,16 @@ docker compose up --build
 - Customer console: `http://localhost:8082`
 - Operator console: `http://localhost:8083`
 
-Set OIDC / Proxmox VE values in a `.env` file (keys are documented inline in
-`docker-compose.yml`) to exercise authenticated and cloud flows.
+The bundled realm supplies development logins (`demo`/`demo` and `admin`/`admin`).
+Compose's OIDC/URL overrides are documented in `docker-compose.yml`; put local
+values in an uncommitted `.env` file. Register PVE/S3 providers in the operator
+console rather than assuming `.env` provisions them. Default credentials, plain
+HTTP and open development ports are not production settings.
+
+Scheduler/debug triggers are off by default, while primary PostgreSQL workers
+continue accepted jobs. Existing deployments must follow the
+[jobs migration runbook](docs/postgres-jobs-migration.md): never discard broker
+volumes/backlogs with `down -v` or `--remove-orphans` as an upgrade shortcut.
 
 ### Running pieces individually
 
@@ -46,7 +57,7 @@ Frontends:
 
 ```sh
 cd web/client   # or web/admin
-npm install
+npm ci
 npm run dev
 ```
 
@@ -113,16 +124,23 @@ in `web/`.
 1. Branch off `main` (e.g. `feat/savings-plan-rollover`, `fix/invoice-rounding`).
 2. Keep commits focused. Commit subjects follow a
    [Conventional Commits](https://www.conventionalcommits.org/) style
-   (`feat:`, `fix:`, `chore:`, `docs:`, …) — the same prefixes CI uses for
-   automated chart releases.
+   (`feat:`, `fix:`, `chore:`, `docs:`, …).
 3. Ensure `gofmt`, `go vet`, `go test`, and (for UI changes) `npm run lint` and
    `npm run build` all pass.
 4. Open a pull request against `main` and fill in the
-   [PR template](.github/pull_request_template.md). CI builds the images and, if
-   you touched `deploy/charts/proxcloud/**`, requires a `Chart.yaml` version bump.
+   [PR template](.github/pull_request_template.md). Chart-path PRs run Helm checks;
+   version bumps are a review requirement, not an enforced universal CI gate.
+   Releases are cut by tags, not commit prefixes: a `v*` tag publishes five images
+   and the app chart at the tag's version in separate workflows;
+   `database-cluster-v*` / `proxmox-kamaji-cluster-v*` publish those charts and must
+   match their `Chart.yaml` versions. No chart is published merely by merging.
+   See [CI/release operations](docs/ci-release.md) and
+   [chart publishing](deploy/charts/README.md). Do not create a tag as part of a
+   routine documentation or code PR.
 5. Address review feedback; a maintainer merges once CI is green.
 
 ## Reporting bugs & requesting features
 
 Use the [issue templates](.github/ISSUE_TEMPLATE). For anything security-related,
-please follow [`SECURITY.md`](SECURITY.md) instead of opening a public issue.
+please follow [`SECURITY.md`](SECURITY.md): a minimal public contact request is
+allowed, but never put the full report, exploit steps or sensitive data in an issue.

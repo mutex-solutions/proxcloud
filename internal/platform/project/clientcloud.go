@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
+	"github.com/mutex-solutions/proxcloud/internal/cloud/dbaas"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billing"
 	"github.com/mutex-solutions/proxcloud/internal/platform/externalservice"
 	"github.com/mutex-solutions/proxcloud/internal/platform/feature"
@@ -63,9 +64,8 @@ func (h *Handler) initUI(w http.ResponseWriter, r *http.Request) {
 // cloudFeatures lists the optional client actions a provider's backend serves, keyed into
 // /init features by service id. The client hides an action whose flag is absent, so a flag
 // is added here only once the backend accepts the action. Vocabulary (web/client
-// lib/hooks.ts CloudFeature): serverSnapshots and volumeRetype are served by Proxmox;
-// serverRebuild, serverRescue, serverPassword, userData, createDataVolumes, ports, subnets
-// and volumeSnapshots have no backend yet.
+// lib/hooks.ts CloudFeature): Proxmox serves those appended below; serverRescue,
+// createDataVolumes, ports and volumeSnapshots have no backend yet.
 func cloudFeatures(es *externalservice.ExternalService) []string {
 	out := []string{}
 	if !es.IsProxmox() {
@@ -73,6 +73,19 @@ func cloudFeatures(es *externalservice.ExternalService) []string {
 	}
 	// IMAGE create from a server (pveCreateImage).
 	out = append(out, "serverSnapshots")
+	// NoCloud seed (nocloud_pve.go), guest-agent password, boot-disk swap.
+	out = append(out, "userData", "serverPassword", "serverRebuild")
+	// PVE snapshots, several subnets on a vnet, placement groups.
+	out = append(out, "serverDiskSnapshots", "subnets", "spreadGroups")
+	if len(es.PVENetworkConfig().PublicNetworks) > 0 {
+		out = append(out, "publicIp")
+	}
+	if es.PVEBackupStorage() != "" {
+		out = append(out, "serverBackups")
+	}
+	if es.PVEImportStorage() != "" {
+		out = append(out, "imageImport")
+	}
 	// RETYPE moves a disk to another storage profile, so it needs a second one.
 	if len(es.PVEStorageProfiles()) > 1 {
 		out = append(out, "volumeRetype")
@@ -102,7 +115,7 @@ func (h *Handler) uiMenuItems(r *http.Request) map[string]any {
 		// AND dbaas (database only) all contribute menu items — a ceph-only project must still
 		// get its Object Storage entry, and the kamaji/dbaas slugs are what un-hide the client
 		// Kubernetes/Databases nav (AppShell gates on menu.items).
-		if es.IsDisabled() || (!es.IsCephS3() && !es.IsKamaji() && !es.IsDbaas() && !es.IsProxmox()) {
+		if es.IsDisabled() || (!es.IsObjectStore() && !es.IsKamaji() && !es.IsDbaas() && !es.IsProxmox() && !es.IsTrueNAS() && !es.IsPowerDNS() && !es.IsSandbox()) {
 			continue
 		}
 		svcMap, _ := es.Config["services"].(map[string]any)
@@ -247,7 +260,8 @@ func (h *Handler) projectCostInfo(w http.ResponseWriter, r *http.Request) {
 	if bpID != "" {
 		if bills, err := h.billing.BillsByBillingProfile(r.Context(), bpID); err == nil {
 			// resource-id → createdAt (this project's cache) so each topResourcePrices entry carries
-			// the resource's real creation time; without it the FE renders "a few seconds ago".
+			// the resource's real creation time. Absent = the resource is gone: the console shows
+			// it as deleted and does not link to it.
 			created := map[string]*time.Time{}
 			if rs, e := h.cloud.FindAllByProjectID(r.Context(), p.ID); e == nil {
 				for i := range rs {
@@ -299,7 +313,7 @@ func (h *Handler) projectLocations(w http.ResponseWriter, r *http.Request) {
 		// A ceph-s3 provider is configured with a single config.region (its RGW zonegroup) rather than the
 		// regions map. Without this the Location picker is empty and the create-bucket form can
 		// never send the x-service-id / x-region-id the write path needs.
-		if len(regions) == 0 && es.IsCephS3() {
+		if len(regions) == 0 && (es.IsObjectStore() || es.IsTrueNAS() || es.IsPowerDNS()) {
 			if r := es.CephRegion(); r != "" {
 				regions = map[string]any{r: map[string]any{}}
 			}
@@ -351,8 +365,21 @@ func (h *Handler) projectInit(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	// Entry into a project provisions it on its services (PVE pool, RGW user, …) + ENABLEs (the
-	// cloud-bootstrap slice of project bootstrap). Idempotent — safe on a bootstrapped project.
+	// Entry into an ENABLED project provisions it on its services (PVE pool, RGW user, …): idempotent. A DISABLED one nothing
+	// holds any more (no operator's disable, and billing allows it: an admin API project, or one moved to a paying profile)
+	// comes up the same way, so a suspended profile or an operator is what keeps a project down, never a member's click. Any
+	// other status stays as it is.
+	lift := false
+	if p.IsDisabled() && !p.DisabledByOperator {
+		if lift, err = h.svc.BillingAllowsEnabled(r.Context(), p); err != nil {
+			h.fail(w, err)
+			return
+		}
+	}
+	if !p.IsEnabled() && !lift {
+		httpx.Empty(w)
+		return
+	}
 	if err := h.enableAndBootstrap(r.Context(), p); err != nil {
 		h.fail(w, err)
 		return
@@ -579,6 +606,32 @@ func externalServiceDto(es *externalservice.ExternalService) map[string]any {
 			dto["kubernetesFlavorIds"] = defaults.Flavors
 		}
 	}
+	// sandbox: the template catalog, GPU models and limits feed the client create form.
+	if es.IsSandbox() {
+		scfg := es.SandboxConfig().WithDefaults()
+		templates := []any{}
+		for _, name := range scfg.TemplateNames() {
+			t := scfg.Templates[name]
+			templates = append(templates, map[string]any{
+				"name": name, "image": t.Image, "description": t.Description, "cpu": t.CPU, "memoryGiB": t.MemoryGiB,
+				"gpu": t.GPU, "egressMbps": func() int {
+					if t.EgressMbps > 0 {
+						return t.EgressMbps
+					}
+					return scfg.EgressMbps
+				}(),
+			})
+		}
+		dto["sandboxTemplates"] = templates
+		dto["sandboxGpuModels"] = scfg.GPUModels
+		dto["sandboxE2B"] = scfg.Envd && scfg.Domain != ""
+		l := scfg.Limits
+		dto["sandboxLimits"] = map[string]any{
+			"maxCpu": l.MaxCPU, "maxMemoryGiB": l.MaxMemoryGiB, "maxGpus": l.MaxGPUs,
+			"maxTimeoutSeconds": l.MaxTimeoutSeconds, "defaultTimeoutSeconds": l.DefaultTimeoutSeconds,
+			"maxConcurrent": l.MaxConcurrent, "maxConcurrentGpus": l.MaxConcurrentGPUs, "egressMbps": scfg.EgressMbps,
+		}
+	}
 	// dbaas: the curated engine catalog feeds the client create pickers (versions/replica choices
 	// + the beta badge). Size limits and storage classes ride along for form validation.
 	if es.IsDbaas() {
@@ -603,6 +656,40 @@ func externalServiceDto(es *externalservice.ExternalService) map[string]any {
 		if len(dcfg.StorageClasses) > 0 {
 			dto["databaseStorageClasses"] = dcfg.StorageClasses
 		}
+		// Whether the LOCATION can back anything up. The client hides the whole backup surface
+		// when it cannot — a toggle that writes nowhere is worse than no toggle.
+		dto["databaseBackupConfigured"] = dcfg.Backup.Enabled()
+		// The tunable catalog per engine — the client renders the form from this rather than
+		// carrying its own copy that would drift from the server's allowlist.
+		paramCatalog := map[string]any{}
+		for engine := range dcfg.Engines {
+			list := dbaas.ParamsFor(engine)
+			if len(list) == 0 {
+				continue
+			}
+			out := make([]any, 0, len(list))
+			for _, p := range list {
+				entry := map[string]any{"name": p.Name, "kind": p.Kind, "help": p.Help}
+				for k, v := range map[string]string{"min": p.Min, "max": p.Max} {
+					if v != "" {
+						entry[k] = v
+					}
+				}
+				if len(p.Enum) > 0 {
+					vals := make([]any, 0, len(p.Enum))
+					for _, e := range p.Enum {
+						vals = append(vals, e)
+					}
+					entry["enum"] = vals
+				}
+				if p.Restart {
+					entry["restart"] = true
+				}
+				out = append(out, entry)
+			}
+			paramCatalog[engine] = out
+		}
+		dto["databaseParameters"] = paramCatalog
 		dto["databaseLimits"] = map[string]any{
 			"maxCpu": dcfg.Limits.MaxCPU, "maxMemoryGiB": dcfg.Limits.MaxMemoryGiB, "maxStorageGiB": dcfg.Limits.MaxStorageGiB,
 		}

@@ -11,7 +11,7 @@
 //
 // The split is deliberately narrow. Only the CHARGE step differs between the two:
 //
-//	native    resolve -> rate in-process (optionally fanned out across pods via RabbitMQ)
+//	native    enqueue original cycle -> primary durable worker -> rate transaction
 //	external  resolve -> POST the resolved resources to the billing service, which rates them
 //
 // Everything else — the client and admin REST surfaces, project cost reads, the billing repository
@@ -29,7 +29,6 @@ import (
 
 	"github.com/mutex-solutions/proxcloud/internal/platform/billingclient"
 	"github.com/mutex-solutions/proxcloud/internal/platform/billingjob"
-	"github.com/mutex-solutions/proxcloud/internal/platform/chargefanout"
 )
 
 // Provider names, as they appear in configuration.
@@ -48,49 +47,20 @@ type Provider interface {
 	Charge(ctx context.Context, timeUnit string, now time.Time) error
 }
 
-// Publisher is the RabbitMQ handle the native provider fans out through (satisfied by *amqp.Client).
-type Publisher interface {
-	Publish(ctx context.Context, queue string, body []byte) error
-}
+// NativeDispatch durably publishes the frozen original cycle. A queue failure
+// fails the dispatch: there is no silent in-process bypass of receipt/ACK fencing.
+type NativeDispatch func(context.Context, string, time.Time) error
 
-// nativeProvider charges in-process using the in-tree engine.
-//
-// When fan-out is enabled AND the broker is connected it publishes one message per active profile
-// so any pod can pick it up; otherwise it charges every profile in this process. The fallback is
-// deliberate here (unlike the external provider): both paths run the same engine against the same
-// database, so charging locally when the broker is down is a scaling downgrade, not a correctness
-// risk.
-type nativeProvider struct {
-	job    *billingjob.Service
-	broker func() Publisher // nil, or returns nil, when no broker is connected
-	fanout bool
-	log    *slog.Logger
-}
+type nativeProvider struct{ dispatch NativeDispatch }
 
 func (p *nativeProvider) Name() string { return Native }
-
-func (p *nativeProvider) Charge(ctx context.Context, timeUnit string, now time.Time) error {
-	if p.fanout && p.broker != nil {
-		if rc := p.broker(); rc != nil {
-			n, err := chargefanout.Publish(ctx, rc, p.job, timeUnit)
-			if err == nil {
-				p.log.Info("charge fan-out published", "timeUnit", timeUnit, "count", n)
-			}
-			return err
-		}
-		p.log.Warn("rabbit fan-out on but broker not connected — charging in-process this tick",
-			"timeUnit", timeUnit)
+func (p *nativeProvider) Charge(ctx context.Context, unit string, original time.Time) error {
+	if p.dispatch == nil {
+		return fmt.Errorf("native durable billing dispatch is not configured")
 	}
-	return p.job.Charge(ctx, timeUnit, now)
+	return p.dispatch(ctx, unit, original)
 }
-
-// NewNative returns the in-tree provider. broker may be nil when no message broker is configured.
-func NewNative(job *billingjob.Service, broker func() Publisher, fanout bool, log *slog.Logger) Provider {
-	if log == nil {
-		log = slog.Default()
-	}
-	return &nativeProvider{job: job, broker: broker, fanout: fanout, log: log}
-}
+func NewNative(dispatch NativeDispatch) Provider { return &nativeProvider{dispatch: dispatch} }
 
 // externalProvider resolves locally and hands the rating to a separate billing service.
 //

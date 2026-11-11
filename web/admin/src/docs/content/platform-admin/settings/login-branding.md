@@ -67,5 +67,5 @@ Since the volume is an `emptyDir`, the copy runs on every pod start — bump the
 
 Once the Keycloak pod restarts, the new theme shows up in Keycloak's theme dropdowns. In the Keycloak admin console, open your realm, go to **Realm settings > Themes**, and pick the theme (e.g. `proxcloud`) as the login theme. Save, then load the client portal login page to confirm.
 
-<!-- screenshot: /docs-img/customize-keycloak-theme-realm.png — Keycloak admin console: Realm settings > Themes with the custom proxcloud theme selected as login theme -->
+This is a **Keycloak-owned screen**, not a ProxCloud console page. Its layout varies with the Keycloak version and installed theme; the ProxCloud-only mock capture suite does not provide a screenshot for it. Use the textual steps above and verify the result in your own configured identity provider.
 

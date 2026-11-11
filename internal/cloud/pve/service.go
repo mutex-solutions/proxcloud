@@ -18,6 +18,15 @@ type Service struct {
 	C          *Client
 	ServiceID  string
 	PoolPrefix string
+	// HolderLock serialises holder use per project across API replicas (ShedLock.Wait). Nil = no lock: tools and tests.
+	HolderLock func(ctx context.Context, name string, atMostFor, wait time.Duration) (release func(), acquired bool, err error)
+	// HolderOperations is mandatory in cmd/api; nil retains standalone tool compatibility.
+	HolderOperations HolderOperationStore
+	HolderBudgets    HolderBudgets
+	// SeedArtifacts authorizes exact files created by this installation. SeedReader
+	// is a separately provisioned, globally readable credential (never auto-granted).
+	SeedArtifacts *SeedArtifactRepo
+	SeedReader    *Client
 }
 
 // NewService builds the Service for one provider doc.
@@ -29,7 +38,15 @@ func NewService(cfg Config, serviceID, poolPrefix string) (*Service, error) {
 	if poolPrefix == "" {
 		poolPrefix = "pc-"
 	}
-	return &Service{C: c, ServiceID: serviceID, PoolPrefix: poolPrefix}, nil
+	s := &Service{C: c, ServiceID: serviceID, PoolPrefix: poolPrefix}
+	if cfg.SeedInventoryTokenID != "" && cfg.SeedInventorySecret != "" {
+		cfg.TokenID, cfg.Secret = cfg.SeedInventoryTokenID, cfg.SeedInventorySecret
+		s.SeedReader, err = New(cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
 }
 
 // PoolFor mirrors externalservice.PoolFor — same prefix, same derivation.
@@ -48,6 +65,36 @@ func (s *Service) EnsureProjectPool(ctx context.Context, projectID string) (stri
 // Fail-closed: the first VM that refuses to die aborts the teardown so the caller
 // reports incomplete deprovisioning (ceph teardown discipline).
 func (s *Service) TeardownProjectPool(ctx context.Context, pool string) error {
+	if s.HolderOperations != nil {
+		project, err := s.holderProjectForPool(pool)
+		if err != nil {
+			return err
+		}
+		ctx, release, err := s.beginHolders(ctx, project)
+		if err != nil {
+			return err
+		}
+		defer release()
+		info, err := s.C.GetPool(ctx, pool)
+		if err != nil {
+			return err
+		}
+		if info == nil {
+			return nil
+		}
+		for _, m := range info.Members {
+			if m.Type != "qemu" {
+				continue
+			}
+			if err := s.deleteFencedServer(ctx, project, &ClusterResource{Type: "qemu", Node: m.Node, VMID: m.VMID, Pool: pool}, true); err != nil {
+				return err
+			}
+		}
+		if err := s.holderCheck(ctx); err != nil {
+			return err
+		}
+		return s.C.DeletePool(ctx, pool)
+	}
 	info, err := s.C.GetPool(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("pve teardown: read pool %s: %w", pool, err)
@@ -59,6 +106,11 @@ func (s *Service) TeardownProjectPool(ctx context.Context, pool string) error {
 		if m.Type != "qemu" {
 			continue
 		}
+		// HA would restart what is stopped below, and a replica needs its job to be removed.
+		if err := s.disableProtectionOn(ctx, &ClusterResource{Node: m.Node, VMID: m.VMID}); err != nil {
+			return fmt.Errorf("pve teardown: unprotect vm %d: %w", m.VMID, err)
+		}
+		s.waitReplicaRemoved(ctx, m.VMID)
 		// Stop hard (a running VM refuses destroy), then delete. Best-effort stop:
 		// a stopped VM's stop task fails harmlessly.
 		if upid, err := s.C.StopVM(ctx, m.Node, m.VMID); err == nil {
@@ -85,6 +137,9 @@ const (
 	tagFlavorPref  = "fl-"
 	tagImagePref   = "img-"
 	tagProfilePref = "sp-" // storage profile slug (Phase 5 billing attr)
+	// tagSpreadPref carries a spread group: PVE's own affinity rules are HA-only and strict.
+	tagSpreadPref  = "grp-"
+	tagCreatedPref = "pc-c-"
 )
 
 // JoinTags renders VM tags for create.
@@ -100,9 +155,59 @@ func TagValue(tags, pref string) string {
 	return ""
 }
 
+// SpreadTag is the VM tag of a spread group.
+func SpreadTag(group string) string { return tagSpreadPref + group }
+
+// SpreadGroupSlug normalizes a spread group name into a tag-safe slug ("" = not usable).
+func SpreadGroupSlug(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	if s == "" || len(s) > 40 {
+		return ""
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return ""
+		}
+	}
+	return s
+}
+
 func FlavorTag(slug string) string  { return tagFlavorPref + slug }
 func ImageTag(slug string) string   { return tagImagePref + slug }
 func ProfileTag(slug string) string { return tagProfilePref + slug }
+
+// CreatedTag is a VM's identity stamp (pc-c-<unix>), written by the portal at create. Together with
+// the vmid it tells two VMs apart: PVE hands out the lowest free vmid again, and without the stamp a
+// new VM inherits the old VM's cache row and bill item.
+func CreatedTag(unix int64) string { return tagCreatedPref + strconv.FormatInt(unix, 10) }
+
+// Identity values on SERVER and VOLUME data: "c-<unix>" from the stamp, "m-<ctime>" from the `meta`
+// config key for a VM with no stamp. ctime is the weaker of the two: a clone keeps its source's
+// (verified on PVE 9.2), so clones of one template look alike and only a VM created from scratch
+// has its own. "" = unknown.
+const (
+	identityStamp = "c-"
+	identityMeta  = "m-"
+)
+
+// taggedIdentity reads the stamp, "" when there is none (or the VM is mid-clone and still carries
+// its source's tags).
+func taggedIdentity(tags, lock string) string {
+	if v := TagValue(tags, tagCreatedPref); v != "" && lock != "clone" && lock != "create" {
+		return identityStamp + v
+	}
+	return ""
+}
+
+// metaIdentity reads the ctime PVE keeps in a VM's `meta` config key.
+func metaIdentity(cfg VMConfig) string {
+	for _, kv := range splitCommaKV(cfg.Str("meta")) {
+		if kv[0] == "ctime" {
+			return identityMeta + kv[1]
+		}
+	}
+	return ""
+}
 
 // MapVMStatus maps PVE state → the API's status vocabulary the FE and
 // billing eligibility understand (ACTIVE/SHUTOFF/BUILD/ERROR).
@@ -144,6 +249,7 @@ func ServerData(r ClusterResource, addresses map[string]any, gpuSpecs map[string
 		extraSpecs = map[string]any{}
 	}
 	server := map[string]any{
+		"spreadGroup":      TagValue(r.Tags, tagSpreadPref),
 		"name":             r.Name,
 		"host":             r.Node,
 		"status":           MapVMStatus(r.Status, r.Lock),
@@ -162,12 +268,22 @@ func ServerData(r ClusterResource, addresses map[string]any, gpuSpecs map[string
 	if imageSlug != "" {
 		server["image"] = map[string]any{"id": imageSlug}
 	}
-	return map[string]any{
+	if lb := LBOfTags(r.Tags); lb != "" {
+		server["loadBalancerId"] = lb
+	}
+	data := map[string]any{
 		"flavorName":   flavorSlug,
 		"volumeBacked": true,
 		"server":       server,
 	}
+	if id := taggedIdentity(r.Tags, r.Lock); id != "" {
+		data[dataIdentity] = id
+	}
+	return data
 }
+
+// dataIdentity is the identity key on SERVER and VOLUME data ("" or absent = unknown).
+const dataIdentity = "identity"
 
 // AgentAddresses converts guest-agent NICs into the API's addresses shape:
 // {"private": [{"addr": ..., "version": 4}]}. Loopback and link-local are dropped.

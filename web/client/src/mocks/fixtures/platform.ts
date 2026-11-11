@@ -14,7 +14,7 @@ export const projects: Project[] = [
     organizationId: ORG_ID,
     billingProfileId: BP_ID,
     memberships: [{ sub: mockProfile.sub, roles: ["OWNER"] }],
-    services: [{ serviceId: "svc-proxmox-1" }, { serviceId: "svc-ceph-1" }, { serviceId: "svc-dbaas-1" }],
+    services: [{ serviceId: "svc-proxmox-1" }, { serviceId: "svc-ceph-1" }, { serviceId: "svc-dbaas-1" }, { serviceId: "svc-sandbox-1" }],
     publicNetworksVisible: true,
     gpuCapacityVisible: true,
   },
@@ -87,6 +87,14 @@ export const locations: Location[] = [
     provider: "dbaas",
     serviceName: "ProxCloud DBaaS",
   },
+  {
+    serviceId: "svc-sandbox-1",
+    region: "RegionOne",
+    displayName: "Hanoi Sandboxes",
+    resourceTypes: ["SANDBOX"],
+    provider: "sandbox",
+    serviceName: "ProxCloud Sandboxes",
+  },
 ]
 
 // Sidebar service gating — keys are service slugs (AppShell.tsx).
@@ -100,6 +108,7 @@ export const uiMenu = {
       "object-store": { enabled: true },
       network: { enabled: true },
       database: { enabled: true },
+      sandbox: { enabled: true },
     },
   },
 }

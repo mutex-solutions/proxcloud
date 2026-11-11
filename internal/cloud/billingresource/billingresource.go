@@ -7,6 +7,7 @@ package billingresource
 
 import (
 	"context"
+	"time"
 
 	"github.com/mutex-solutions/proxcloud/internal/cloud"
 	"github.com/mutex-solutions/proxcloud/pkg/billingapi"
@@ -45,6 +46,53 @@ func GetBillingResources(ctx context.Context, repo *cloud.Repo, registry map[str
 	return out, nil
 }
 
+// GetArchivedBillingResources is GetBillingResources over the project's rows archived since `since`
+// (the cycle start), each with DeletedAt set: they owe the interval between their last charge and
+// their deletion, which no live row will ever pay. The rating floor makes re-rating one a no-op, so
+// feeding them on every pass is safe and needs no "already billed" bookkeeping.
+//
+// ponytail: costs a history read per project per charge, growing with the month's churn. Keep a
+// billed marker on the history row if a project ever archives thousands of rows a month.
+func GetArchivedBillingResources(ctx context.Context, repo *cloud.Repo, registry map[string]Provider, projectID, serviceID string, since time.Time, bc billingapi.BillingContext) ([]*billingapi.BillingResource, error) {
+	archived, err := repo.FindArchivedSince(ctx, projectID, serviceID, since)
+	if err != nil {
+		return nil, err
+	}
+	out := []*billingapi.BillingResource{}
+	for i := range archived {
+		h := &archived[i]
+		p, ok := registry[h.Type]
+		if !ok {
+			continue
+		}
+		cr := &cloud.CloudResource{
+			ID: h.CloudResourceID, ProjectID: h.ProjectID, ExternalID: h.ExternalID, ServiceID: h.ServiceID,
+			Type: h.Type, Region: h.Region, Data: h.Data, CreatedAt: h.CreatedAt,
+		}
+		brs, err := p.GetBillingInformation(ctx, bc, cr)
+		if err != nil {
+			return nil, err
+		}
+		stampResourceValues(brs, cr)
+		for _, b := range brs {
+			if b != nil {
+				b.DeletedAt = archivedEnd(b.DeletedAt, h.DeletedAt)
+			}
+		}
+		out = append(out, brs...)
+	}
+	return out, nil
+}
+
+// archivedEnd is where an archived resource's charge stops: its archive time, unless its provider knows an earlier end
+// (an ended sandbox row is archived at the next read after its end, and the time between is not the customer's).
+func archivedEnd(provider, archived *time.Time) *time.Time {
+	if provider != nil && (archived == nil || provider.Before(*archived)) {
+		return provider
+	}
+	return archived
+}
+
 // stampResourceValues runs after each provider builds its BillingResources:
 // inject `region` + `service_id` into
 // the resource Values (so a price-plan rule FILTERED by region/service_id can match) and stamp
@@ -64,9 +112,12 @@ func stampResourceValues(brs []*billingapi.BillingResource, cr *cloud.CloudResou
 		if b.Values == nil {
 			b.Values = map[string]any{}
 		}
-		if created != nil {
-			b.Values["createdAt"] = *created
+		// A resource younger than its row (a server's snapshot) already says when it began.
+		if b.CreatedAt == nil {
 			b.CreatedAt = created
+		}
+		if b.CreatedAt != nil {
+			b.Values["createdAt"] = *b.CreatedAt
 		}
 		// region/service_id are FILTER attributes: applyFilter looks up AttributeTypeByName on the
 		// resource's type, so the value MUST be matched by a declared attribute or the filter errors

@@ -57,4 +57,4 @@ func VNCWebsocketPath(node string, vmid int, port, ticket string) string {
 func (c *Client) AuthHeader() string { return c.token }
 
 // BaseURL exposes the api2/json base for the console WS proxy dial.
-func (c *Client) BaseURL() string { return c.base }
+func (c *Client) BaseURL() string { return c.bases[c.goodIndex()] }

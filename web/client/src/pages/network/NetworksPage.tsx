@@ -58,42 +58,24 @@ export default function NetworksPage() {
 
   // create form
   const [name, setName] = useState("")
-  const [withSubnet, setWithSubnet] = useState(true)
-  const [cidr, setCidr] = useState("10.0.0.0/24")
-  const [dns, setDns] = useState("8.8.8.8, 1.1.1.1")
-  const [gatewayIp, setGatewayIp] = useState("") // blank = auto (first usable); set to a VM IP for a self-hosted router
+  const [cidr, setCidr] = useState("") // blank = the next free range of the provider's pool
+  const [snat, setSnat] = useState(true)
 
   const invalidate = () => void qc.invalidateQueries({ queryKey: ["cloud", pid, "NETWORK"] })
 
   const create = useMutation({
-    mutationFn: () => {
-      const dnsList = dns.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean)
-      const gw = gatewayIp.trim()
-      return apiFetch(`/project/${pid}/cloud`, {
+    mutationFn: () =>
+      apiFetch(`/project/${pid}/cloud`, {
         method: "POST",
         cloud: scope,
-        body: {
-          type: "NETWORK",
-          data: withSubnet
-            ? {
-                name,
-                defaultSubnet: true,
-                cidr,
-                enableDhcp: true,
-                // A custom gateway points the subnet at a self-hosted router VM (e.g. pfSense);
-                // blank uses the default gateway.
-                gateway: true,
-                ...(gw ? { customGatewayIp: true, gatewayIp: gw } : {}),
-                ...(dnsList.length ? { dnsNameServers: dnsList } : {}),
-              }
-            : { name },
-        },
-      })
-    },
+        body: { type: "NETWORK", data: { name, snat, ...(cidr.trim() ? { cidr: cidr.trim() } : {}) } },
+      }),
     onSuccess: () => {
       toast.success(`Network "${name}" created`)
       setCreateOpen(false)
       setName("")
+      setCidr("")
+      setSnat(true)
       invalidate()
     },
     onError: (e: Error) => toast.error(e.message),
@@ -254,55 +236,28 @@ export default function NetworksPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Create network</DialogTitle>
-            <DialogDescription>A private network, optionally with an initial subnet.</DialogDescription>
+            <DialogDescription>A private network with one IPv4 subnet, isolated from other projects.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-2">
             <div className="grid gap-2">
               <Label htmlFor="net-name">Name</Label>
               <Input id="net-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-network" />
             </div>
-            <div className="flex items-center gap-2">
-              <Checkbox id="net-subnet" checked={withSubnet} onCheckedChange={(v) => setWithSubnet(v === true)} />
-              <Label htmlFor="net-subnet">Create a subnet</Label>
+            <div className="grid gap-2">
+              <Label htmlFor="net-cidr">Subnet CIDR (optional)</Label>
+              <Input id="net-cidr" className="font-mono" value={cidr} onChange={(e) => setCidr(e.target.value)} placeholder="Next free range" />
+              <p className="text-xs text-muted-foreground">Must sit inside the range your operator set for networks.</p>
             </div>
-            {withSubnet ? (
-              <>
-                <div className="grid gap-2">
-                  <Label htmlFor="net-cidr">Subnet CIDR</Label>
-                  <Input id="net-cidr" className="font-mono" value={cidr} onChange={(e) => setCidr(e.target.value)} />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="net-dns">DNS servers</Label>
-                  <Input
-                    id="net-dns"
-                    className="font-mono"
-                    value={dns}
-                    onChange={(e) => setDns(e.target.value)}
-                    placeholder="8.8.8.8, 1.1.1.1"
-                  />
-                  <p className="text-xs text-muted-foreground">Comma/space separated. Leave blank for none.</p>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="net-gw">Gateway IP</Label>
-                  <Input
-                    id="net-gw"
-                    className="font-mono"
-                    value={gatewayIp}
-                    onChange={(e) => setGatewayIp(e.target.value)}
-                    placeholder="Auto (first usable)"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Set to a VM's IP to route this subnet through a self-hosted router (e.g. pfSense/OPNsense).
-                  </p>
-                </div>
-              </>
-            ) : null}
+            <div className="flex items-center gap-2">
+              <Checkbox id="net-snat" checked={snat} onCheckedChange={(v) => setSnat(v === true)} />
+              <Label htmlFor="net-snat">Outbound internet access (SNAT)</Label>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={() => create.mutate()} disabled={!name || (withSubnet && !cidr) || create.isPending}>
+            <Button onClick={() => create.mutate()} disabled={!name || create.isPending}>
               {create.isPending ? "Creating…" : "Create network"}
             </Button>
           </DialogFooter>

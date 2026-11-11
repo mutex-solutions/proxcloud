@@ -58,11 +58,16 @@ representative at an online or offline event.
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-**conduct@proxcloud.example**.
-<!-- TODO(owner): replace conduct@proxcloud.example with the real ProxCloud conduct contact before publishing. -->
-All complaints will be reviewed and investigated promptly and fairly.
+For a visible public incident, use GitHub's report-content controls where
+available, or open a minimal [maintainer contact request](https://github.com/mutex-solutions/proxcloud/issues/new)
+without repeating personal data, private messages or sensitive allegations. Ask
+for a private channel before sending confidential details. This project has not
+yet published a verified private conduct email; do not send reports to placeholder
+addresses or treat a public issue as confidential.
+
+Community leaders will review reports they receive and coordinate an appropriate
+private follow-up. For security vulnerabilities, use the separate
+[security reporting guidance](SECURITY.md).
 
 All community leaders are obligated to respect the privacy and security of the
 reporter of any incident.

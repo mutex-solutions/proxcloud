@@ -15,11 +15,26 @@ diagrams changed.
 | [c2-containers.md](c2-containers.md) | C2: Containers | What runs where: management cluster, Proxmox cluster, storage tiers, build and delivery? |
 | [c3-components.md](c3-components.md) | C3: Components | Which Go packages make up `proxcloud-api`, and what is each one responsible for? |
 | [c4-code.md](c4-code.md) | C4: Code | How do the critical paths work: tenant network isolation, VM firewall and public IPs, quota, billing? |
+| [project-invite-outbox.md](project-invite-outbox.md) | C3/C4: Invitation mail | How the default-OFF typed invitation producer atomically seals mail and cancels persisted rows without SMTP. |
+| [Validation approval outbox](../../c4-validation-approved-outbox.md) | C1–C4: Approval-only mail | How the actual validation decision, immutable generation and keyless revocation share a commit, while activation remains outside SQL and delivery remains OFF. |
+| [Savings contract-expired outbox](../../savings-expired-outbox.md) | C1–C4: Expired-term mail | How one canonical-term decision, immutable history and all four keyless cancellation paths share owned SQL boundaries while producer and delivery remain default OFF. |
+| [Dormant snapshot registry core](../../registry-snapshot-core.md) | C1–C4: Snapshot prerequisite | How fixed snapshot envelopes, exact pin-role epochs and typed publication handoff stay dormant without capture callers, DEST retirement or GC authorization. |
+| [Saved-runtime admission](../../saved-runtime-admission.md) | C1–C4: Fail-closed lifecycle | Why managed pause/resume/fork is held before effects while capture/pinned CREATE and explicit discard remain separate. |
+| [DBaaS reader invariant](../../dbaas-read-endpoint-invariant.md) | C3/C4: Reader admission and projection | How current replica/reader policy is checked before scaling while invalid legacy reader flags are excluded without desired-state or financial-history repair. |
+| [PVE backup deletion interlock](../../pve-backup-delete-interlock.md) | C3/C4: Known-active refusal | Why single-archive deletion refuses current VM locks, visible active restores and unreadable state without claiming an atomic task fence. |
+| [Legacy SMTP credential TLS boundary](../../smtp-credential-tls-safety.md) | C1–C4: SMTP authentication | Why legacy credentials require verified configured-host TLS before AUTH, while explicit NoAuth compatibility and dormant outbox boundaries remain unchanged. |
+| [Tenant authorization boundaries](../../tenant-authorization-boundaries.md) | C1–C4: Tenant authorization | Stored-profile order reads, custom-role assignment authority and runtime-aware private traffic checks inside existing components. |
+| [Managed Kubernetes Gateway API](../../managed-k8s-gateway-api.md) | C1–C4: Tenant ingress replacement | Opt-in Gateway Fabric, tenant-scoped Standard schema delivery and explicit preservation of existing ingress traffic. |
+| [SSO alias retirement](../../sso-alias-retirement.md) | C1–C4: Identity lifecycle | Primary retirement fence before broker deletion, exact retained-session refusal and explicit replica/cache recovery limits. |
+| [Managed PostgreSQL version baseline](../../managed-postgresql-version-baseline.md) | C3/C4: DBaaS catalog and image selection | Same-major patch map and fresh-provider PG18 default without re-pinning existing resources or claiming data migration. |
 | [CHANGELOG.md](CHANGELOG.md) | History | What changed in the architecture, in which PR, and why. |
 
 The prose deep dives in [`docs/`](../../README.md) (auth, billing, jobs, data
-model) go further on single subsystems. The C4 files are the map; where the two
-disagree, the C4 status column describes the code on the default branch.
+model) go further on single subsystems. The C4 files are a map of code structure,
+not a stronger authority than the current source/configuration. Report
+contradictions rather than treating an old status row as proof of runtime support.
+See [release readiness](../../release-readiness.md) for availability and validation
+limits; the architecture changelog records historical states.
 
 ## Status legend
 
@@ -29,6 +44,11 @@ Every diagram element and every table row carries one of two statuses.
 |---|---|---|
 | **Implemented** | Exists in the code on the default branch today. | Solid border, green fill, solid arrows. |
 | **Planned** | On the roadmap, not in the code yet. Shown so readers see where the design is heading. | Dashed border, grey fill, dotted arrows. |
+
+`Implemented` means the code exists, **not** that it is enabled, released,
+production-certified or covered by a current live canary. Safety-held/dormant
+subsystems need their explicit qualifiers even when their components are present.
+Historical successful drills do not override later admission holds.
 
 Removed elements are not drawn. Notable removals are recorded in
 [CHANGELOG.md](CHANGELOG.md).

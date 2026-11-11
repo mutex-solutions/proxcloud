@@ -1,16 +1,12 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { loadStripe, type Stripe, type StripeCardElement } from "@stripe/stripe-js"
 import { BadgePercent, CreditCard as CreditCardIcon, Gift, Wallet } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { StatCard } from "@/components/stat-card"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
-} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -21,16 +17,11 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { apiFetch } from "@/lib/api"
 import { fmtMoney, fmtMoneyTight } from "@/lib/format"
 import { useBillingSummary, useProjectId } from "@/lib/hooks"
-import type { CreditCard } from "@/lib/types"
-
-type Gateway = {
-  id?: string
-  name?: string
-  thirdParty?: string
-  addFunds?: boolean
-  minDeposit?: number | string
-  metadata?: { publicKey?: string }
-}
+import type { CreditCard, Gateway } from "@/lib/types"
+import {
+  BankTransferPanel, PendingBankTransfers, transferFromDeposit, type DepositResponse,
+} from "./BankTransferPanel"
+import { NewCardDepositDialog, cardGateways } from "./NewCardDepositDialog"
 
 type Country = { name: string; cca2: string }
 
@@ -42,8 +33,10 @@ export default function FundsPage() {
   const { data: summary, isLoading } = useBillingSummary(pid)
   const bp = summary?.id
   const currency = summary?.currency ?? "USD"
-  // A NEW profile has no billing details yet — filling them activates it.
-  const needsDetails = summary?.status === "NEW" || summary?.hasBillingDetails === false
+  // A NEW profile has no billing details yet — filling them activates it. An operator can also
+  // activate a profile with none: deposits then work, and the address is only asked for.
+  const needsDetails = summary?.status === "NEW"
+  const missingDetails = !needsDetails && summary?.hasBillingDetails === false
 
   return (
     <>
@@ -85,9 +78,22 @@ export default function FundsPage() {
             {needsDetails ? (
               <BillingDetailsCard bp={bp} onSaved={() => void qc.invalidateQueries({ queryKey: ["billing-summary", pid] })} />
             ) : (
-              <DepositCard pid={pid} bp={bp} currency={currency} defaultCardId={summary?.defaultCardId} />
+              <DepositCard
+                pid={pid}
+                bp={bp}
+                currency={currency}
+                defaultCardId={summary?.defaultCardId}
+                preferredGatewayId={summary?.paymentGatewayId}
+              />
             )}
             <PromoCard pid={pid} bp={bp} />
+            {missingDetails ? (
+              <BillingDetailsCard
+                bp={bp}
+                activated
+                onSaved={() => void qc.invalidateQueries({ queryKey: ["billing-summary", pid] })}
+              />
+            ) : null}
           </div>
         </>
       )}
@@ -95,15 +101,19 @@ export default function FundsPage() {
   )
 }
 
-// Deposit via a saved card (POST /payment/deposit/{bp}/card, CollectRequest {cardId, amount})
-// or via a new card (POST /payment/deposit/{bp} → PaymentIntent → Stripe Elements confirm).
+// Deposit via a saved card (POST /payment/deposit/{bp}/card, CollectRequest {cardId, amount}),
+// via a new card (POST /payment/deposit/{bp} → PaymentIntent → Stripe/Airwallex card confirm), or by
+// bank transfer (POST /payment/deposit/{bp} with the BankTransfer gateway → PENDING transfer +
+// reference number; an operator approves it later and the account is credited).
 function DepositCard({
-  pid, bp, currency, defaultCardId,
-}: { pid: string; bp: string; currency: string; defaultCardId?: string }) {
+  pid, bp, currency, defaultCardId, preferredGatewayId,
+}: { pid: string; bp: string; currency: string; defaultCardId?: string; preferredGatewayId?: string }) {
   const qc = useQueryClient()
   const [amount, setAmount] = useState("50")
   const [cardId, setCardId] = useState("")
   const [newCardOpen, setNewCardOpen] = useState(false)
+  const [methodChoice, setMethodChoice] = useState<"card" | "bank">("card")
+  const [bankResult, setBankResult] = useState<DepositResponse | null>(null)
 
   const { data: gateways } = useQuery({
     queryKey: ["payment-gateways", bp],
@@ -122,10 +132,28 @@ function DepositCard({
     }
   }, [cards, defaultCardId, cardId])
 
-  const gw = gateways?.find((g) => g.addFunds)
-  // New-card deposits confirm client-side with Stripe Elements — need the Stripe public key.
-  const stripeGw = gateways?.find((g) => g.addFunds && g.thirdParty === "Stripe" && g.metadata?.publicKey)
+  const cardGw = gateways?.find((g) => g.addFunds && g.thirdParty !== "BankTransfer")
+  const bankGw = gateways?.find((g) => g.addFunds && g.thirdParty === "BankTransfer")
+  // Bank transfer is the only choice when no card gateway exists; otherwise the user picks.
+  const method: "card" | "bank" = bankGw && (!cardGw || methodChoice === "bank") ? "bank" : "card"
+  const gw = method === "bank" ? bankGw : cardGw
+  // New-card deposits confirm client-side with the gateway's card element (Stripe / Airwallex).
+  const newCardGws = cardGateways(gateways, "addFunds")
   const minDeposit = Number(gw?.minDeposit ?? 0)
+
+  const bankDeposit = useMutation({
+    mutationFn: () =>
+      apiFetch<DepositResponse>(`/payment/deposit/${bp}`, {
+        method: "POST",
+        body: { amount: Number(amount), paymentGatewayId: bankGw?.id },
+      }),
+    onSuccess: (resp) => {
+      setBankResult(resp)
+      void qc.invalidateQueries({ queryKey: ["billing-summary", pid] })
+      void qc.invalidateQueries({ queryKey: ["bank-transfers", bp] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
 
   const deposit = useMutation({
     mutationFn: () =>
@@ -191,174 +219,114 @@ function DepositCard({
           </div>
         </div>
 
-        <div>
-          <Label className="mb-2 block">Pay with card</Label>
-          {cardsLoading ? (
-            <Skeleton className="h-9" />
-          ) : cards?.length ? (
-            <Select value={cardId} onValueChange={setCardId}>
-              <SelectTrigger className="w-full font-mono" aria-label="Pay with card">
-                <SelectValue placeholder="Select a saved card" />
+        {bankGw && cardGw ? (
+          <div>
+            <Label className="mb-2 block">Payment method</Label>
+            <Select
+              value={method}
+              onValueChange={(v) => {
+                setMethodChoice(v as "card" | "bank")
+                setBankResult(null)
+              }}
+            >
+              <SelectTrigger className="w-full" aria-label="Payment method">
+                <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {cards.map((c) => (
-                  <SelectItem key={c.id} value={c.id} className="font-mono">
-                    {c.panMasked ?? c.id}
-                  </SelectItem>
-                ))}
+                <SelectItem value="card">Card</SelectItem>
+                <SelectItem value="bank">Bank transfer{bankGw.name ? ` · ${bankGw.name}` : ""}</SelectItem>
               </SelectContent>
             </Select>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              No saved cards.{" "}
-              <Link className="underline" to={`/p/${pid}/billing/cards`}>
-                Add a card
-              </Link>{" "}
-              first.
-            </p>
-          )}
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          <Button
-            onClick={() => deposit.mutate()}
-            disabled={!gw || !cardId || amountInvalid || deposit.isPending}
-          >
-            {deposit.isPending ? "Depositing…" : "Deposit"}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => setNewCardOpen(true)}
-            disabled={!stripeGw || amountInvalid}
-          >
-            Deposit with new card
-          </Button>
-        </div>
-        {!gw && gateways ? (
-          <p className="text-xs text-muted-foreground">No payment gateway is configured for deposits.</p>
+          </div>
         ) : null}
 
-        {stripeGw ? (
+        {method === "bank" && bankGw ? (
+          bankResult ? (
+            <>
+              <BankTransferPanel transfer={transferFromDeposit(bankResult)} gateway={bankGw} bp={bp} currency={currency} onCancelled={() => setBankResult(null)} />
+              <Button variant="outline" onClick={() => setBankResult(null)}>
+                Register another transfer
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button onClick={() => bankDeposit.mutate()} disabled={amountInvalid || bankDeposit.isPending}>
+                {bankDeposit.isPending ? "Registering…" : "Pay by bank transfer"}
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                You will get a reference number and the bank details to transfer the amount (incl. tax). Your
+                account is credited once the transfer is confirmed.
+              </p>
+            </>
+          )
+        ) : (
+          <>
+            <div>
+              <Label className="mb-2 block">Pay with card</Label>
+              {cardsLoading ? (
+                <Skeleton className="h-9" />
+              ) : cards?.length ? (
+                <Select value={cardId} onValueChange={setCardId}>
+                  <SelectTrigger className="w-full font-mono" aria-label="Pay with card">
+                    <SelectValue placeholder="Select a saved card" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {cards.map((c) => (
+                      <SelectItem key={c.id} value={c.id} className="font-mono">
+                        {c.panMasked ?? c.id}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  No saved cards.{" "}
+                  <Link className="underline" to={`/p/${pid}/billing/cards`}>
+                    Add a card
+                  </Link>{" "}
+                  first.
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={() => deposit.mutate()}
+                disabled={!gw || !cardId || amountInvalid || deposit.isPending}
+              >
+                {deposit.isPending ? "Depositing…" : "Deposit"}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setNewCardOpen(true)}
+                disabled={!newCardGws.length || amountInvalid}
+              >
+                Deposit with new card
+              </Button>
+            </div>
+            {!gw && gateways ? (
+              <p className="text-xs text-muted-foreground">No payment gateway is configured for deposits.</p>
+            ) : null}
+          </>
+        )}
+
+        {/* Earlier transfers still awaiting the customer's "I have transferred" / our confirmation. */}
+        <PendingBankTransfers bp={bp} gateway={bankGw} currency={currency} exclude={bankResult?.externalPaymentId} />
+
+        {newCardGws.length ? (
           <NewCardDepositDialog
             open={newCardOpen}
             onOpenChange={setNewCardOpen}
             bp={bp}
             amount={amountNum}
             currency={currency}
-            gatewayId={stripeGw.id ?? ""}
-            publicKey={stripeGw.metadata?.publicKey ?? ""}
+            gateways={newCardGws}
+            preferredGatewayId={preferredGatewayId}
             onDone={() => void qc.invalidateQueries({ queryKey: ["billing-summary", pid] })}
           />
         ) : null}
       </CardContent>
     </Card>
-  )
-}
-
-type DepositResponse = { transactionId?: string; externalPaymentId?: string; metadata?: unknown }
-
-// Card-less deposit: POST /payment/deposit/{bp} {amount, paymentGatewayId} → the response
-// `metadata` IS the PaymentIntent client secret (a string, per the Go AddFunds handler) →
-// Stripe Elements confirmCardPayment → GET the whitelisted funds-confirm callback (302) so the
-// API retrieves the PaymentIntent and mints the account credit.
-function NewCardDepositDialog({
-  open, onOpenChange, bp, amount, currency, gatewayId, publicKey, onDone,
-}: {
-  open: boolean
-  onOpenChange: (o: boolean) => void
-  bp: string
-  amount: number
-  currency: string
-  gatewayId: string
-  publicKey: string
-  onDone: () => void
-}) {
-  const mountRef = useRef<HTMLDivElement>(null)
-  const stripeRef = useRef<Stripe | null>(null)
-  const cardRef = useRef<StripeCardElement | null>(null)
-  const [intent, setIntent] = useState<{ txnId: string; clientSecret: string } | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [paying, setPaying] = useState(false)
-
-  useEffect(() => {
-    if (!open) {
-      setIntent(null)
-      setError(null)
-      return
-    }
-    let cancelled = false
-    ;(async () => {
-      try {
-        const resp = await apiFetch<DepositResponse>(`/payment/deposit/${bp}`, {
-          method: "POST",
-          body: { amount, paymentGatewayId: gatewayId },
-        })
-        const clientSecret = typeof resp?.metadata === "string" ? resp.metadata : undefined
-        if (!resp?.transactionId || !clientSecret) throw new Error("Gateway did not return a payment secret")
-        const stripe = await loadStripe(publicKey)
-        if (cancelled) return
-        if (!stripe) throw new Error("Stripe failed to load")
-        stripeRef.current = stripe
-        const card = stripe.elements().create("card")
-        cardRef.current = card
-        if (mountRef.current) card.mount(mountRef.current)
-        setIntent({ txnId: resp.transactionId, clientSecret })
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
-      }
-    })()
-    return () => {
-      cancelled = true
-      cardRef.current?.unmount()
-      cardRef.current = null
-    }
-  }, [open, bp, gatewayId, publicKey, amount])
-
-  const pay = async () => {
-    const stripe = stripeRef.current
-    const card = cardRef.current
-    if (!stripe || !card || !intent) return
-    setPaying(true)
-    setError(null)
-    try {
-      const res = await stripe.confirmCardPayment(intent.clientSecret, { payment_method: { card } })
-      if (res.error) throw new Error(res.error.message ?? "Payment confirmation failed")
-      // Finalize server-side (whitelisted callback: retrieves the PaymentIntent + mints the
-      // account credit, returns 200; throws here if the server couldn't finalize).
-      await apiFetch(`/callbacks/payment/stripe/funds/confirm/${intent.txnId}`)
-      toast.success(`Deposit of ${fmtMoney(amount, currency)} succeeded`)
-      onDone()
-      onOpenChange(false)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setPaying(false)
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>
-            Deposit <span className="font-mono tabular-nums">{fmtMoney(amount, currency)}</span> with a new card
-          </DialogTitle>
-          <DialogDescription>Card details go directly to Stripe — they never touch ProxCloud.</DialogDescription>
-        </DialogHeader>
-        <div className="rounded-md border bg-muted/30 p-3">
-          <div ref={mountRef} />
-        </div>
-        {error ? <p className="text-sm text-destructive">{error}</p> : null}
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button onClick={() => void pay()} disabled={!intent || paying}>
-            {paying ? "Paying…" : "Pay"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }
 
@@ -405,7 +373,7 @@ function PromoCard({ pid, bp }: { pid: string; bp: string }) {
 }
 
 // First-time billing details (PUT /billing-profile/{bp}) — saving valid details activates a NEW profile.
-function BillingDetailsCard({ bp, onSaved }: { bp: string; onSaved: () => void }) {
+function BillingDetailsCard({ bp, activated = false, onSaved }: { bp: string; activated?: boolean; onSaved: () => void }) {
   const [form, setForm] = useState({
     firstName: "", lastName: "", phone: "", address: "", city: "", zipCode: "", country: "",
   })
@@ -417,7 +385,7 @@ function BillingDetailsCard({ bp, onSaved }: { bp: string; onSaved: () => void }
     mutationFn: () =>
       apiFetch(`/billing-profile/${bp}`, { method: "PUT", body: { ...form, company: false } }),
     onSuccess: () => {
-      toast.success("Billing details saved — profile activated")
+      toast.success(activated ? "Billing details saved" : "Billing details saved — profile activated")
       onSaved()
     },
     onError: (e: Error) => toast.error(e.message),
@@ -431,7 +399,9 @@ function BillingDetailsCard({ bp, onSaved }: { bp: string; onSaved: () => void }
       <CardHeader className="border-b [.border-b]:pb-4">
         <CardTitle className="text-base">Billing details</CardTitle>
         <CardDescription>
-          Fill in your billing address to activate this billing profile and unlock deposits.
+          {activated
+            ? "Your billing profile is active. Add a billing address for your invoices."
+            : "Fill in your billing address to activate this billing profile and unlock deposits."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

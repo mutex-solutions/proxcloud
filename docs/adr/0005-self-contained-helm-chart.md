@@ -2,7 +2,23 @@
 
 ## Status
 
-Accepted
+Accepted design direction; deployment defaults and release details below are
+historical and partially superseded.
+
+## Current implementation note (2026-11-10)
+
+Keep the original decision below as history, not an installation recipe. Current
+[chart defaults](../../deploy/charts/proxcloud/README.md) use operator-managed
+PostgreSQL with no RabbitMQ dependency; the CNPG operator is a prerequisite unless
+explicitly bundled. Keycloak/external OIDC and dev subchart alternatives require
+intentional configuration and real secrets.
+
+The current workflows publish **five** images as `dev-<short-sha>` on
+image-relevant `main` pushes, and publish the app chart only on a `v*` tag in a
+separate workflow. There is no automatic chart-version tag-on-merge or enforced
+version-bump gate. No ProxCloud release/chart is published yet. See
+[CI/release operations](../ci-release.md) before interpreting the historical
+publication claims below.
 
 ## Context
 

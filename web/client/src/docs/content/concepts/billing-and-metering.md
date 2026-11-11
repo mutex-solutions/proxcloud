@@ -8,7 +8,7 @@ The platform continuously tracks the resources in each project — how long a se
 
 ## From usage to a bill
 
-On a recurring cycle, a background billing job turns accumulated usage into a bill:
+When the operator has enabled scheduled billing, recurring producers enqueue work and bounded PostgreSQL workers turn accumulated usage into a bill. A fresh install's scheduler is off by default; accepted jobs continue processing even if scheduled producers are later turned off:
 
 1. Usage over the period is priced at the operator's rates.
 2. Any **savings plan** discount is applied to the usage that matches the plan. The plan's committed amount is a floor — if your matching usage falls below it in a given month, you're billed the committed minimum instead. Upfront savings payments are drawn down against these bills rather than charged again. See [Savings Plans](/docs/guides/savings-plans) for the tiers and terms.

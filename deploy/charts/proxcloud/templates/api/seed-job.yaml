@@ -1,0 +1,80 @@
+{{- /*
+First-run seed: the platform and billing configuration documents a fresh database needs before the billing and
+project endpoints work (the same documents as deploy/seed/). Each is written only while its table is EMPTY, so an
+operator's later edits in the admin console, or deploy/seed/seed-operator.py, always win and an upgrade never
+overwrites them. Runs with the api image, which ships psql, against the api's own DSN.
+*/ -}}
+{{- if .Values.seed.enabled }}
+{{- $docs := dict "platformConfiguration" .Values.seed.platformConfiguration "billingConfiguration" .Values.seed.billingConfiguration }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "proxcloud.fullname" . }}-seed
+  labels:
+    {{- include "proxcloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seed
+data:
+  seed.sql: |
+    {{- range $table, $doc := $docs }}
+    -- Same advisory lock as the api's own table creation (internal/pgdoc), so the two never race.
+    BEGIN;
+    SELECT pg_advisory_xact_lock(hashtext('pgdoc-create:{{ $table }}'));
+    CREATE TABLE IF NOT EXISTS "{{ $table }}" (id text PRIMARY KEY, doc jsonb NOT NULL);
+    INSERT INTO "{{ $table }}" (id, doc)
+      SELECT 'seed', $seed${{ toJson $doc }}$seed$::jsonb
+      WHERE NOT EXISTS (SELECT 1 FROM "{{ $table }}");
+    COMMIT;
+    {{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "proxcloud.fullname" . }}-seed
+  labels:
+    {{- include "proxcloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seed
+  annotations:
+    # ArgoCD maps these to PostSync. Idempotent: re-runs leave existing documents alone.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "proxcloud.selector" (dict "ctx" $ "component" "seed") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: seed
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # The database may still be starting on a fresh install: wait up to 10 minutes.
+              i=0
+              until psql "$PROXCLOUD_DB_URL" -qtAc 'SELECT 1' >/dev/null 2>&1; do
+                i=$((i + 1)); [ "$i" -lt 120 ] || { echo "database not reachable"; exit 1; }
+                sleep 5
+              done
+              psql "$PROXCLOUD_DB_URL" -v ON_ERROR_STOP=1 -q -f /seed/seed.sql
+              echo "seed applied (existing documents kept)"
+          env:
+            {{- include "proxcloud.dbURLEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: seed
+              mountPath: /seed
+              readOnly: true
+      volumes:
+        - name: seed
+          configMap:
+            name: {{ include "proxcloud.fullname" . }}-seed
+{{- end }}

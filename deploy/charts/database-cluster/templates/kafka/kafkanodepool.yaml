@@ -24,6 +24,7 @@ spec:
   roles:
     - controller
     - broker
+  {{- include "database-cluster.strimziPodTemplate" (dict "root" . "spread" true) | nindent 2 }}
   storage:
     type: jbod
     volumes:

@@ -74,11 +74,24 @@ func (r *Repo) Render(ctx context.Context, key string, vars map[string]any) (Ren
 	if err != nil || t == nil || t.Disabled {
 		return Rendered{}, false, err
 	}
-	return Rendered{Title: t.MessageTitle, Body: renderMustache(t.MessageBody, vars)}, true, nil
+	return Rendered{Title: renderMustacheText(t.MessageTitle, vars), Body: renderMustache(t.MessageBody, vars)}, true, nil
 }
 
 // mustacheRe matches {{var}} (HTML-escaped) and {{{var}}} (unescaped) placeholders.
 var mustacheRe = regexp.MustCompile(`\{\{\{?\s*(\w+)\s*\}?\}\}`)
+
+// renderMustacheText substitutes {{var}} placeholders in a plain-text context (the mail
+// subject): no HTML escaping, missing vars render empty.
+func renderMustacheText(tmpl string, vars map[string]any) string {
+	return mustacheRe.ReplaceAllStringFunc(tmpl, func(m string) string {
+		sub := mustacheRe.FindStringSubmatch(m)
+		v, ok := vars[sub[1]]
+		if !ok {
+			return ""
+		}
+		return fmt.Sprintf("%v", v)
+	})
+}
 
 // renderMustache does flat Mustache variable substitution (sufficient for the system templates —
 // they use only {{var}} placeholders, no sections/partials). Missing vars render empty (Mustache).

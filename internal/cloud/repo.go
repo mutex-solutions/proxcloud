@@ -2,6 +2,7 @@ package cloud
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -16,6 +17,8 @@ type Repo struct {
 	db          *pgdoc.DB
 	resources   *pgdoc.Store
 	history     *pgdoc.Store
+	meter       *pgdoc.Store
+	tasks       *pgdoc.Store
 	ensureOnce  sync.Once
 	ensureError error
 }
@@ -25,6 +28,8 @@ func NewRepo(db *pgdoc.DB) *Repo {
 		db:        db,
 		resources: db.C("cloudResource"),
 		history:   db.C("cloudResourceHistory"),
+		meter:     db.C("meterState"),
+		tasks:     db.C("vmTaskEvent"),
 	}
 }
 
@@ -86,17 +91,29 @@ func matchByServiceExternal(r *CloudResource) pgdoc.M {
 // update-or-insert, in one transaction. Creates or replaces the matching doc and returns
 // the post-image. createdAt is written only on the insert leg (immutable thereafter).
 func (r *Repo) Insert(ctx context.Context, res *CloudResource) (*CloudResource, error) {
+	return r.Upsert(ctx, res, nil)
+}
+
+// Upsert is Insert for a caller that read no row for res: should one be there by now (a retype just moved its row
+// onto this id), merge(stored, res) first carries over what res does not know (CacheMerger).
+func (r *Repo) Upsert(ctx context.Context, res *CloudResource, merge func(cached, fresh map[string]any)) (*CloudResource, error) {
 	if err := r.ensure(ctx); err != nil {
 		return nil, err
 	}
 	var out CloudResource
 	err := r.db.WithTx(ctx, func(tc context.Context) error {
+		if err := r.db.LockXact(tc, externalIDLock(res.ServiceID, res.ExternalID)); err != nil {
+			return err
+		}
 		var cur CloudResource
 		id, found, err := r.resources.FindOneForUpdate(tc, matchByServiceExternal(res), &cur)
 		if err != nil {
 			return err
 		}
 		if found {
+			if merge != nil && res.Data != nil {
+				merge(cur.Data, res.Data)
+			}
 			if _, err := r.resources.SetByID(tc, id, toDbRecord(res), nil); err != nil {
 				return err
 			}
@@ -133,9 +150,10 @@ func (r *Repo) Update(ctx context.Context, res *CloudResource) (*CloudResource, 
 		if err != nil || !found {
 			return err
 		}
-		// OCC guard: proceed only when stored updatedAt ≤ incoming. A missing timestamp on
-		// either side rejects the write.
-		if cur.UpdatedAt == nil || res.UpdatedAt == nil || cur.UpdatedAt.After(*res.UpdatedAt) {
+		// OCC guard: proceed only when stored updatedAt ≤ incoming. An incoming write without a
+		// timestamp is rejected. A stored row without one is older than any read: rejecting it
+		// would leave the row out of every sync, for good.
+		if res.UpdatedAt == nil || (cur.UpdatedAt != nil && cur.UpdatedAt.After(*res.UpdatedAt)) {
 			return nil // OCC reject (DB newer) — caller re-reads latest
 		}
 		if _, err := r.resources.SetByID(tc, id, toDbRecord(res), nil); err != nil {
@@ -152,6 +170,64 @@ func (r *Repo) Update(ctx context.Context, res *CloudResource) (*CloudResource, 
 		return nil, err
 	}
 	return out, nil
+}
+
+// ErrRowGone: ChangeExternalID found no row to keep (a sync archived it first).
+var ErrRowGone = errors.New("cloud: the resource's row is gone")
+
+// externalIDLock serialises the writers of one (service, external id): an upsert and a rename to that id.
+func externalIDLock(serviceID, externalID string) string {
+	return "cloudResource:" + serviceID + ":" + externalID
+}
+
+// ChangeExternalID follows a resource whose provider id changed, keeping the row and so its id. A row
+// a sync already made for the new id goes: it is the same resource seen too early. When the row itself
+// is gone (ErrRowGone) nothing changes, so the sync's row stays the one resource left.
+func (r *Repo) ChangeExternalID(ctx context.Context, res *CloudResource, externalID string) error {
+	return r.db.WithTx(ctx, func(tc context.Context) error {
+		// Without the lock an upsert of externalID running now does not see this row under it yet, and adds a second.
+		if err := r.db.LockXact(tc, externalIDLock(res.ServiceID, externalID)); err != nil {
+			return err
+		}
+		var cur CloudResource
+		if found, err := r.resources.Get(tc, res.ID, &cur); err != nil {
+			return err
+		} else if !found {
+			return ErrRowGone
+		}
+		if _, err := r.resources.DeleteMany(tc, pgdoc.M{"externalId": externalID, "serviceId": res.ServiceID, "_id": pgdoc.M{"$ne": res.ID}}); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		if _, err := r.resources.SetByID(tc, res.ID, pgdoc.M{"externalId": externalID, "externalIdSince": now}, []string{"movingSince"}); err != nil {
+			return err
+		}
+		res.ExternalID, res.ExternalIDSince, res.MovingSince = externalID, &now, nil
+		return nil
+	})
+}
+
+// MarkMoving sets (t) or clears (nil) CloudResource.MovingSince.
+func (r *Repo) MarkMoving(ctx context.Context, res *CloudResource, t *time.Time) error {
+	var err error
+	if t == nil {
+		_, err = r.resources.SetByID(ctx, res.ID, nil, []string{"movingSince"})
+	} else {
+		_, err = r.resources.SetByID(ctx, res.ID, pgdoc.M{"movingSince": *t}, nil)
+	}
+	if err == nil {
+		res.MovingSince = t
+	}
+	return err
+}
+
+// SetDataSince records how old the resource's data is (CloudResource.DataSince).
+func (r *Repo) SetDataSince(ctx context.Context, res *CloudResource, t time.Time) error {
+	if _, err := r.resources.SetByID(ctx, res.ID, pgdoc.M{"dataSince": t}, nil); err != nil {
+		return err
+	}
+	res.DataSince = &t
+	return nil
 }
 
 // FindByServiceIDAndExternalID returns the cached resource, or (nil,nil).
@@ -234,6 +310,21 @@ func (r *Repo) FindByServiceProjectAndType(ctx context.Context, serviceID, proje
 	return r.findAll(ctx, pgdoc.M{"serviceId": serviceID, "projectId": projectID, "type": resourceType})
 }
 
+// MarkPausedBySuspension records or clears that a suspension walk paused this VM.
+func (r *Repo) MarkPausedBySuspension(ctx context.Context, res *CloudResource, paused bool) error {
+	if paused {
+		_, err := r.resources.SetFieldsOne(ctx, matchByServiceExternal(res), pgdoc.M{"pausedBySuspension": true}, nil)
+		return err
+	}
+	_, err := r.resources.SetFieldsOne(ctx, matchByServiceExternal(res), nil, []string{"pausedBySuspension"})
+	return err
+}
+
+// FindPausedBySuspension lists the VMs a suspension walk paused and no resume has seen back yet.
+func (r *Repo) FindPausedBySuspension(ctx context.Context) ([]CloudResource, error) {
+	return r.findAll(ctx, pgdoc.M{"pausedBySuspension": true})
+}
+
 func (r *Repo) findAll(ctx context.Context, filter pgdoc.M) ([]CloudResource, error) {
 	out := []CloudResource{}
 	if err := r.resources.Find(ctx, filter, &out); err != nil {
@@ -257,7 +348,7 @@ func (r *Repo) DeleteAndArchive(ctx context.Context, res *CloudResource, now tim
 // archive writes a one-time history copy:
 // no-op if a record already exists for this cloudResourceId; copies only
 // cloudResourceId/region/serviceId/type/data/createdAt/externalId/projectId + deletedAt.
-func (r *Repo) archive(ctx context.Context, res *CloudResource, now time.Time) error {
+func (r *Repo) archive(ctx context.Context, res *CloudResource, now time.Time, sourceHash ...string) error {
 	exists, err := r.history.Exists(ctx, pgdoc.M{"cloudResourceId": res.ID})
 	if err != nil {
 		return err
@@ -265,16 +356,21 @@ func (r *Repo) archive(ctx context.Context, res *CloudResource, now time.Time) e
 	if exists {
 		return nil // idempotent per cloudResourceId
 	}
+	hash := ""
+	if len(sourceHash) == 1 {
+		hash = sourceHash[0]
+	}
 	_, err = r.history.InsertOne(ctx, History{
-		CloudResourceID: res.ID,
-		Region:          res.Region,
-		ServiceID:       res.ServiceID,
-		Type:            res.Type,
-		Data:            res.Data,
-		CreatedAt:       res.CreatedAt,
-		ExternalID:      res.ExternalID,
-		ProjectID:       res.ProjectID,
-		DeletedAt:       &now,
+		SourceSnapshotHash: hash,
+		CloudResourceID:    res.ID,
+		Region:             res.Region,
+		ServiceID:          res.ServiceID,
+		Type:               res.Type,
+		Data:               res.Data,
+		CreatedAt:          res.CreatedAt,
+		ExternalID:         res.ExternalID,
+		ProjectID:          res.ProjectID,
+		DeletedAt:          &now,
 	})
 	return err
 }

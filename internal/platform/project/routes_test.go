@@ -43,6 +43,10 @@ func TestRoutes_registerAndMatch(t *testing.T) {
 		{http.MethodGet, "/project/p1/billing"},
 		{http.MethodGet, "/project/p1/quota-usage"},
 		{http.MethodGet, "/project/p1/gpu-capacity"},
+		{http.MethodPost, "/project/p1/dns-ownership"},
+		{http.MethodGet, "/project/p1/dns-ownership/d1"},
+		{http.MethodPost, "/project/p1/dns-ownership/d1/verify"},
+		{http.MethodDelete, "/project/p1/dns-ownership/d1"},
 	} {
 		rctx := chi.NewRouteContext()
 		if !r.Match(rctx, tc.method, tc.path) {

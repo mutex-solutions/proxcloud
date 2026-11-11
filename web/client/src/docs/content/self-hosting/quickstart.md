@@ -1,11 +1,13 @@
 # MicroK8s Quickstart
 
-The quickest way to try ProxCloud is a single-node MicroK8s cluster on one VM. It gives you a fully working platform — API, portal, admin console, PostgreSQL, RabbitMQ — on a machine you can discard afterward. Identity is configured separately: enable the bundled Keycloak or point at your own IdP — see [How Identity Works](/docs/concepts/identity).
+A single-node MicroK8s cluster on one VM is one evaluation option for ProxCloud's API, customer/admin consoles and PostgreSQL-backed durable jobs. **No RabbitMQ is required.** This is not a production or all-feature acceptance recipe. Identity is configured separately: enable the bundled Keycloak or point at your own IdP — see [How Identity Works](/docs/concepts/identity).
+
+Verify an exact compatible app/chart version is published before using OCI commands below. If it is not, build images from the current broker-free checkout and install its local chart with matching tags. Do not substitute an older broker-dependent image for the planned source-tree version.
 
 ## What you'll need
 
 - An Ubuntu LTS VM with at least 4 vCPU / 8 GB RAM and disk headroom for the bundled databases.
-- A public IP and a DNS record (e.g. `cloud.example.com`) pointing at it — Let's Encrypt has to reach the VM to issue certificates.
+- A public IP and DNS records for `cloud.example.com`, `api.cloud.example.com` and `admin.cloud.example.com` pointing at it — Let's Encrypt has to reach the VM to issue certificates.
 
 ## 1. Install MicroK8s
 
@@ -61,19 +63,23 @@ Write a minimal `values.yaml` — note MicroK8s's ingress class is `public`. The
 ```yaml
 api:
   encryptionKey: "insecure-dev-key-change-me"
+  # One host per component: the consoles are built for /, and the API serves
+  # more than /api (/admin-api/v1, /mcp, /e2b, /.well-known).
   selfUrls:
     base: "https://cloud.example.com"
-  # Ingress is per-component; the three share one host, split by path.
+    api: "https://api.cloud.example.com"
+    ui: "https://cloud.example.com"
+    admin: "https://admin.cloud.example.com"
   ingress:
     enabled: true
     className: "public"
-    host: "cloud.example.com"
-    path: /api
+    host: "api.cloud.example.com"
+    path: /
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt
     tls:
-      - hosts: ["cloud.example.com"]
-        secretName: proxcloud-tls
+      - hosts: ["api.cloud.example.com"]
+        secretName: proxcloud-api-tls
 ui:
   ingress:
     enabled: true
@@ -89,32 +95,37 @@ admin:
   ingress:
     enabled: true
     className: "public"
-    host: "cloud.example.com"
-    path: /proxcloud_admin
+    host: "admin.cloud.example.com"
+    path: /
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt
     tls:
-      - hosts: ["cloud.example.com"]
-        secretName: proxcloud-tls
+      - hosts: ["admin.cloud.example.com"]
+        secretName: proxcloud-admin-tls
 postgresql:
-  auth:
-    password: "proxcloud"
-rabbitmq:
   auth:
     password: "proxcloud"
 ```
 
-(Equivalently, add `-f deploy/charts/proxcloud/values-dev.yaml` to the install for these dev secrets.)
+The default PostgreSQL mode needs CloudNativePG; install its operator first (the installer pins this version):
+
+```sh
+microk8s helm repo add cnpg https://cloudnative-pg.github.io/charts
+microk8s helm upgrade --install cnpg cnpg/cloudnative-pg --version 0.29.1 \
+  --namespace cnpg-system --create-namespace --wait
+```
+
+Without an operator, use the PostgreSQL development subchart from a checkout (`values-dev.yaml`, replacing its insecure secrets), or the repository's `values-quickstart.yaml` path that also provisions evaluation Keycloak realms. No broker operator is necessary.
 
 Then install straight from the OCI registry:
 
 ```sh
 microk8s helm upgrade --install proxcloud oci://ghcr.io/mutex-solutions/charts/proxcloud \
   --namespace proxcloud --create-namespace \
-  -f values.yaml
+  --version <published-chart-version> -f values.yaml
 ```
 
-First boot takes a few minutes: PostgreSQL and RabbitMQ start, and the API waits — via its `wait-for-db` init container — until PostgreSQL answers.
+First boot takes a few minutes: PostgreSQL starts, and the API restarts until its writable primary answers. Scheduler and management debug triggers default off; workers still process accepted durable jobs. Turn scheduled billing/sync on deliberately only after your evaluation configuration is ready.
 
 ```sh
 microk8s kubectl -n proxcloud get pods
@@ -123,7 +134,7 @@ microk8s kubectl -n proxcloud get pods
 ## 4. First login
 
 - Customer portal: `https://cloud.example.com/`
-- Admin console: `https://cloud.example.com/proxcloud_admin`
+- Admin console: `https://admin.cloud.example.com/`
 
 You need an OIDC provider before you can sign in — enable the bundled Keycloak (`keycloakx.enabled: true` plus realm provisioning) or point `auth.*.issuer` at your own IdP; see [How Identity Works](/docs/concepts/identity).
 

@@ -19,6 +19,8 @@ type Resource struct {
 	ID      string            `json:"id"`
 	Name    string            `json:"name"`
 	Metrics map[string]string `json:"metrics"`
+	// Public, when set, is the source's own classification (no PORT rows to match against).
+	Public *bool `json:"-"`
 }
 
 func trimSlash(s string) string {

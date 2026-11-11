@@ -4,7 +4,11 @@ Tax rules tell ProxCloud what percentage to add on top of the net amount when it
 
 ## Adding and editing taxes
 
-Go to **System → Taxes** and use **Add tax**.
+Go to **System → Taxes** and use **Create tax rate**.
+
+![Current Create tax rate dialog with synthetic example name, percentage and country](/docs-img/taxes-add-tax.png)
+
+*Current UI captured locally with mock data; no tax rate was saved or live financial setting changed.*
 
 | Field | Meaning |
 |---|---|

@@ -20,6 +20,7 @@ type Handler struct {
 	users          *user.Repo
 	audit          *audit.Service
 	projectMembers ProjectMemberAdder // nil-safe; set post-construction (avoids the org→project cycle)
+	onMemberRemove func(ctx context.Context, orgID, sub string)
 }
 
 // ProjectMemberAdder propagates a new organization member onto the org's projects.
@@ -36,6 +37,11 @@ func NewHandler(svc *Service, policy *Policy, repo *Repo, users *user.Repo, a *a
 // SetProjectMemberAdder wires the project-membership propagation (called from main.go after the
 // project service is constructed).
 func (h *Handler) SetProjectMemberAdder(p ProjectMemberAdder) { h.projectMembers = p }
+
+// SetMemberRemovedHook is called after a member leaves an organization (SSO revokes API tokens there).
+func (h *Handler) SetMemberRemovedHook(f func(ctx context.Context, orgID, sub string)) {
+	h.onMemberRemove = f
+}
 
 // Routes registers the organization endpoints under the /api/v1 group.
 // The static /self-service segment precedes the /{id} param route (chi matches static first).
@@ -54,9 +60,7 @@ func (h *Handler) Routes(r chi.Router) {
 
 // fail writes a typed *HTTPError envelope, else a 500.
 func (h *Handler) fail(w http.ResponseWriter, err error) {
-	if !httpx.WriteError(w, err) {
-		httpx.Err(w, http.StatusInternalServerError, 500, "internal.error")
-	}
+	httpx.WriteError(w, err)
 }
 
 // principal loads the initialized User (400 if not).
@@ -228,15 +232,21 @@ func (h *Handler) addMember(w http.ResponseWriter, r *http.Request) {
 		Role       string   `json:"role"`
 		ProjectIDs []string `json:"projectIds"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	// Assigning a privileged static role (OWNER/ADMIN) is a role-management action: require
-	// organization:manage_roles too, else a manage_members-only actor could escalate a user to
-	// OWNER/ADMIN.
-	if isPrivilegedRole(req.Role) {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.fail(w, httpx.BadRequest("invalid request body"))
+		return
+	}
+	// Adding an ordinary MEMBER is membership management. Assigning any other role is role
+	// management, including custom roles whose permissions can change after assignment.
+	if roleRequiresManagement(req.Role) {
 		if err := h.policy.RequirePermission(r.Context(), u.Sub, id, rbac.OrganizationManageRoles); err != nil {
 			h.fail(w, err)
 			return
 		}
+	}
+	if err := h.requireKnownRole(r.Context(), id, req.Role); err != nil {
+		h.fail(w, err)
+		return
 	}
 	// Only an IdP-verified email may resolve to a person: anyone can sign up with
 	// an address they do not own.
@@ -282,10 +292,24 @@ func (h *Handler) memberAudit(u *user.User, o *Organization, orgID, action strin
 	h.audit.LogAsync(ev)
 }
 
-// isPrivilegedRole reports whether role is a privileged static role (OWNER/ADMIN) whose assignment
-// must additionally be gated on organization:manage_roles.
-func isPrivilegedRole(role string) bool {
-	return role == rbac.RoleOwner || role == rbac.RoleAdmin
+// roleRequiresManagement covers custom as well as built-in privileged roles. A custom role may
+// carry arbitrary permissions now, or acquire them later; only MEMBER is the ordinary invite role.
+func roleRequiresManagement(role string) bool {
+	return role != rbac.RoleMember
+}
+
+func (h *Handler) requireKnownRole(ctx context.Context, orgID, role string) error {
+	if rbac.IsStaticRole(role) {
+		return nil
+	}
+	def, err := h.repo.FindRoleByOrgAndName(ctx, orgID, role)
+	if err != nil {
+		return err
+	}
+	if def == nil {
+		return httpx.BadRequest("No role named '" + role + "' in this organization")
+	}
+	return nil
 }
 
 // memberSnapshot builds an audit metadata snapshot for a member ("member", user, extra...).
@@ -322,6 +346,9 @@ func (h *Handler) removeMember(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
+	if h.onMemberRemove != nil {
+		h.onMemberRemove(r.Context(), id, sub)
+	}
 	o, _ := h.svc.GetOrganization(r.Context(), id)
 	member, _ := h.users.FindBySub(r.Context(), sub)
 	md := memberSnapshot(member)
@@ -349,7 +376,14 @@ func (h *Handler) updateMemberRole(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Role string `json:"role"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.fail(w, httpx.BadRequest("invalid request body"))
+		return
+	}
+	if err := h.requireKnownRole(r.Context(), id, req.Role); err != nil {
+		h.fail(w, err)
+		return
+	}
 	sub := chi.URLParam(r, "sub")
 	if err := h.repo.UpdateMemberRole(r.Context(), id, sub, req.Role); err != nil {
 		h.fail(w, err)

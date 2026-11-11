@@ -1,0 +1,49 @@
+# Sets pc_pve_headers from the install credential in the vault (token, else user + password) and the
+# facts the stages share. The uri defaults live in each play's module_defaults.
+# Logging in and reading change nothing, so they also run under --check (make identity-check).
+- name: Log in to Proxmox with a password
+  when: not pc_vault.pve_token_id | default('')
+  check_mode: false
+  ansible.builtin.uri:
+    url: "{{ pc_api }}/access/ticket"
+    method: POST
+    body_format: form-urlencoded
+    body: {username: "{{ pc_vault.pve_user | default('root@pam') }}", password: "{{ pc_vault.pve_password }}"}
+    validate_certs: false
+    headers: {}
+  no_log: true
+  register: pc_ticket
+
+- name: Set the Proxmox auth headers
+  no_log: true
+  ansible.builtin.set_fact:
+    pc_pve_headers: >-
+      {{ {'Authorization': 'PVEAPIToken=' ~ pc_vault.pve_token_id ~ '=' ~ pc_vault.pve_token_secret}
+         if pc_vault.pve_token_id | default('') else
+         {'Cookie': 'PVEAuthCookie=' ~ pc_ticket.json.data.ticket,
+          'CSRFPreventionToken': pc_ticket.json.data.CSRFPreventionToken} }}
+
+- name: Read storages and nodes
+  check_mode: false
+  ansible.builtin.uri: {url: "{{ pc_api }}/{{ item }}"}
+  loop: [storage, nodes]
+  register: pc_reads
+
+- name: Classify the storages
+  ansible.builtin.set_fact:
+    pc_nodes: "{{ pc_reads.results[1].json.data | selectattr('status', 'eq', 'online') | map(attribute='node') | sort | list }}"
+    pc_storage_rows: "{{ pc_reads.results[0].json.data }}"
+    pc_detected: "{{ pc_reads.results[0].json.data | pc_classify_storages }}"
+
+- name: Settle the storage profiles
+  vars:
+    profiles: "{{ pc.storage_profiles or pc_detected.profiles }}"
+    default: "{{ profiles | pc_default_profile(pc.provider.default_profile) }}"
+    default_storage: "{{ profiles[default].storages['*'] | default('') if default else '' }}"
+  ansible.builtin.set_fact:
+    pc_profiles: "{{ profiles }}"
+    pc_default_profile: "{{ default }}"
+    pc_default_storage: "{{ default_storage }}"
+    pc_default_shared: "{{ pc_storage_rows | selectattr('storage', 'eq', default_storage) | map(attribute='type') | first | default('') in ['nfs', 'cifs', 'rbd', 'cephfs'] }}"
+    pc_template_storage: "{{ pc.templates.storage or (pc_detected.templates | first | default(default_storage)) }}"
+    pc_import_storage: "{{ pc.templates.import_storage or (pc_detected.imports | difference(['local']) | first | default(pc_detected.imports | first | default('local'))) }}"

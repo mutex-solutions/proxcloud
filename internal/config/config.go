@@ -12,6 +12,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,7 +45,10 @@ type Config struct {
 		Port int
 	}
 	DB struct {
-		URL string // PostgreSQL DSN (primary datastore)
+		URL string // PostgreSQL DSN (writable PRIMARY; all correctness paths)
+		// ReadURL is optional, read-only, lag-tolerant job HISTORY/metrics only.
+		// Empty means primary fallback; it is never passed to repos or workers.
+		ReadURL string
 	}
 	Rabbit struct {
 		Host     string
@@ -54,6 +58,20 @@ type Config struct {
 	}
 	Encryption struct {
 		DefaultKey string
+	}
+	Mail struct {
+		// ReminderOutboxEnabled opts into atomic savings-reminder ENQUEUE only.
+		// It never starts a dispatcher or sends SMTP. Default false keeps legacy behavior.
+		ReminderOutboxEnabled bool
+		// ProjectInviteOutboxEnabled opts only NEW project invites into atomic
+		// enqueue. Cancellation of persisted durable invites is always wired.
+		ProjectInviteOutboxEnabled bool
+		// ValidationApprovedOutboxEnabled opts only new approval transitions into
+		// atomic mail decisions; never starts delivery or activation retries.
+		ValidationApprovedOutboxEnabled bool
+		// SavingsExpiredOutboxEnabled selects one fixed notice per canonical
+		// expired term, never delivery. Default OFF; cancellation stays wired.
+		SavingsExpiredOutboxEnabled bool
 	}
 	Self struct {
 		BaseURL      string
@@ -65,6 +83,14 @@ type Config struct {
 		Main     OAuth2Realm
 		Admin    OAuth2Realm
 		AdminAPI OAuth2Realm
+	}
+	// SSO is per-organization single sign-on. An empty ClientSecret leaves the feature off: it needs
+	// a Keycloak service account in the customer realm to create identity providers.
+	SSO struct {
+		ClientID        string
+		ClientSecret    string
+		ReservedDomains []string // never claimable by an organization
+		AllowInternal   bool     // development only: IdPs on http and on private addresses
 	}
 	// DefaultRegion is the region assumed when a provider doc names none
 	// (PROXCLOUD_DEFAULT_REGION / proxcloud.default-region, default "default").
@@ -78,9 +104,11 @@ type Config struct {
 		// WITHOUT auto-starting the crons — so a deploy can be driven deterministically for the
 		// golden run while staying dormant (no timed bill charging).
 		DebugTriggers bool
-		// RabbitFanout routes the charge cron through RabbitMQ (one message per ACTIVE
-		// profile → a consumer per pod) instead of the in-process loop. Default off.
-		RabbitFanout bool
+		// RabbitFanout is a rejected legacy migration flag, not a live code path.
+		RabbitFanout      bool
+		WorkerConcurrency int
+		PollInterval      time.Duration
+		LeaseDuration     time.Duration
 	}
 	// Billing selects which engine charges bills, and — when that is an external service — how to
 	// reach it.
@@ -111,6 +139,18 @@ type Config struct {
 		// unauthenticated, network policy notwithstanding.
 		CallbackToken string
 	}
+	// CSIGateway is the listener proxmox-csi controllers of tenant clusters call instead of PVE (internal/cloud/csigw).
+	// Empty Addr: not served. TLS only, so a cert and key are required with an address.
+	CSIGateway struct {
+		Addr    string
+		TLSCert string
+		TLSKey  string
+		// URL is the gateway as the services cluster's controllers reach it (https://host:port), CAFile the PEM they
+		// trust its certificate with. Set, new clusters run their proxmox-csi controller there; empty, they keep the
+		// tenant-side one. Independent of Addr: the replica that creates a cluster need not serve the gateway.
+		URL    string
+		CAFile string
+	}
 	LogLevel string
 }
 
@@ -134,6 +174,7 @@ func Load() (*Config, error) {
 
 	// PostgreSQL — the primary datastore; injected purely via env by the chart.
 	c.DB.URL = envOr("PROXCLOUD_DB_URL", k.String("db.url"))
+	c.DB.ReadURL = envOr("PROXCLOUD_DB_READ_URL", k.String("db.read-url"))
 
 	// RabbitMQ — host/port from yaml, creds from env.
 	c.Rabbit.Host = envOr("PROXCLOUD_RABBITMQ_HOST", k.String("rabbitmq.host"))
@@ -146,6 +187,44 @@ func Load() (*Config, error) {
 	// dashed alias, so the key resolves from the same chart value either way.
 	c.Encryption.DefaultKey = envOr("PROXCLOUD_ENCRYPTION_DEFAULT_KEY",
 		firstNonEmpty(k.String("proxcloud.encryption.default.key"), k.String("proxcloud.encryption.default-key")))
+
+	if raw := os.Getenv("PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PROXCLOUD_MAIL_REMINDER_OUTBOX_ENABLED boolean")
+		}
+		c.Mail.ReminderOutboxEnabled = value
+	}
+
+	if raw := os.Getenv("PROXCLOUD_MAIL_PROJECT_INVITE_OUTBOX_ENABLED"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PROXCLOUD_MAIL_PROJECT_INVITE_OUTBOX_ENABLED boolean")
+		}
+		c.Mail.ProjectInviteOutboxEnabled = value
+	}
+
+	if raw := os.Getenv("PROXCLOUD_MAIL_VALIDATION_APPROVED_OUTBOX_ENABLED"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PROXCLOUD_MAIL_VALIDATION_APPROVED_OUTBOX_ENABLED boolean")
+		}
+		c.Mail.ValidationApprovedOutboxEnabled = value
+	}
+
+	if raw := os.Getenv("PROXCLOUD_MAIL_SAVINGS_EXPIRED_OUTBOX_ENABLED"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PROXCLOUD_MAIL_SAVINGS_EXPIRED_OUTBOX_ENABLED boolean")
+		}
+		c.Mail.SavingsExpiredOutboxEnabled = value
+	}
+
+	// Per-organization SSO.
+	c.SSO.ClientID = envOr("PROXCLOUD_SSO_KC_CLIENT_ID", "proxcloud-idp-admin")
+	c.SSO.ClientSecret = os.Getenv("PROXCLOUD_SSO_KC_CLIENT_SECRET")
+	c.SSO.ReservedDomains = strings.Split(os.Getenv("PROXCLOUD_SSO_RESERVED_DOMAINS"), ",")
+	c.SSO.AllowInternal = os.Getenv("PROXCLOUD_SSO_ALLOW_INTERNAL_IDP") == "true"
 
 	// Self URLs.
 	c.Self.BaseURL = envOr("PROXCLOUD_SELF_BASE_URL", k.String("proxcloud.self.base-url"))
@@ -166,6 +245,25 @@ func Load() (*Config, error) {
 	c.Jobs.SchedulerEnabled = boolEnv("PROXCLOUD_JOBS_SCHEDULER_ENABLED") || k.Bool("proxcloud.jobs.scheduler-enabled")
 	c.Jobs.DebugTriggers = boolEnv("PROXCLOUD_JOBS_DEBUG_TRIGGERS") || k.Bool("proxcloud.jobs.debug-triggers")
 	c.Jobs.RabbitFanout = boolEnv("PROXCLOUD_JOBS_RABBIT_FANOUT") || k.Bool("proxcloud.jobs.rabbit-fanout")
+	c.Jobs.WorkerConcurrency = 2
+	if raw := os.Getenv("PROXCLOUD_JOBS_WORKER_CONCURRENCY"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PROXCLOUD_JOBS_WORKER_CONCURRENCY integer")
+		}
+		c.Jobs.WorkerConcurrency = value
+	}
+	c.Jobs.PollInterval = time.Second
+	c.Jobs.LeaseDuration = time.Minute
+	for key, target := range map[string]*time.Duration{"PROXCLOUD_JOBS_POLL_INTERVAL": &c.Jobs.PollInterval, "PROXCLOUD_JOBS_LEASE_DURATION": &c.Jobs.LeaseDuration} {
+		if raw := os.Getenv(key); raw != "" {
+			value, err := time.ParseDuration(raw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid %s duration", key)
+			}
+			*target = value
+		}
+	}
 	// Billing provider. Unset → native, so an existing deployment keeps charging exactly as before.
 	c.Billing.Provider = billingprovider.Normalize(
 		envOr("PROXCLOUD_BILLING_PROVIDER", k.String("proxcloud.billing.provider")))
@@ -180,6 +278,12 @@ func Load() (*Config, error) {
 	c.Billing.Token = envOr("PROXCLOUD_BILLING_TOKEN", k.String("proxcloud.billing.token"))
 	c.Billing.CallbackToken = envOr("PROXCLOUD_BILLING_CALLBACK_TOKEN", k.String("proxcloud.billing.callback-token"))
 
+	c.CSIGateway.Addr = envOr("PROXCLOUD_CSI_GATEWAY_ADDR", k.String("proxcloud.csi-gateway.addr"))
+	c.CSIGateway.TLSCert = envOr("PROXCLOUD_CSI_GATEWAY_TLS_CERT", k.String("proxcloud.csi-gateway.tls-cert"))
+	c.CSIGateway.TLSKey = envOr("PROXCLOUD_CSI_GATEWAY_TLS_KEY", k.String("proxcloud.csi-gateway.tls-key"))
+	c.CSIGateway.URL = envOr("PROXCLOUD_CSI_GATEWAY_URL", k.String("proxcloud.csi-gateway.url"))
+	c.CSIGateway.CAFile = envOr("PROXCLOUD_CSI_GATEWAY_CA_FILE", k.String("proxcloud.csi-gateway.ca-file"))
+
 	c.LogLevel = strings.ToUpper(firstNonEmpty(k.String("logging.level.root"), "INFO"))
 
 	return c, nil
@@ -192,8 +296,23 @@ func (c *Config) Validate() error {
 	if c.DB.URL == "" {
 		missing = append(missing, "PROXCLOUD_DB_URL")
 	}
-	if c.Rabbit.Host == "" {
-		missing = append(missing, "rabbitmq.host / PROXCLOUD_RABBITMQ_HOST")
+	if c.Jobs.RabbitFanout {
+		return fmt.Errorf("PROXCLOUD_JOBS_RABBIT_FANOUT / proxcloud.jobs.rabbit-fanout was removed: stop old producers, drain/reconcile proxcloud.charge, then clear the flag; see docs/durable-jobs.md")
+	}
+	if c.Jobs.WorkerConcurrency < 1 || c.Jobs.WorkerConcurrency > 16 || c.Jobs.PollInterval < 100*time.Millisecond || c.Jobs.PollInterval > time.Minute || c.Jobs.LeaseDuration < 10*time.Second || c.Jobs.LeaseDuration > 10*time.Minute {
+		return fmt.Errorf("invalid durable job settings: concurrency must be 1..16, poll 100ms..1m, lease 10s..10m")
+	}
+	if c.Mail.ReminderOutboxEnabled && len(c.Encryption.DefaultKey) < 32 {
+		return fmt.Errorf("durable reminders require a >=32-byte PROXCLOUD_ENCRYPTION_DEFAULT_KEY; enqueue only, dispatch remains disabled")
+	}
+	if c.Mail.ProjectInviteOutboxEnabled && len(c.Encryption.DefaultKey) < 32 {
+		return fmt.Errorf("durable project invites require a >=32-byte PROXCLOUD_ENCRYPTION_DEFAULT_KEY; enqueue only, dispatch remains disabled")
+	}
+	if c.Mail.ValidationApprovedOutboxEnabled && len(c.Encryption.DefaultKey) < 32 {
+		return fmt.Errorf("durable validation approvals require a >=32-byte PROXCLOUD_ENCRYPTION_DEFAULT_KEY; enqueue only, dispatch remains disabled")
+	}
+	if c.Mail.SavingsExpiredOutboxEnabled && len(c.Encryption.DefaultKey) < 32 {
+		return fmt.Errorf("durable savings expired notices require a >=32-byte PROXCLOUD_ENCRYPTION_DEFAULT_KEY; enqueue only, dispatch remains disabled")
 	}
 	// Remote charging without a billing URL would silently stop charging bills altogether — the
 	// cron would fire, find nowhere to send the work, and log. Fail closed instead.
@@ -211,6 +330,12 @@ func (c *Config) Validate() error {
 		if c.Billing.Token == "" {
 			missing = append(missing, `PROXCLOUD_BILLING_TOKEN (required when PROXCLOUD_BILLING_PROVIDER=external)`)
 		}
+	}
+	if c.CSIGateway.Addr != "" && (c.CSIGateway.TLSCert == "" || c.CSIGateway.TLSKey == "") {
+		missing = append(missing, "PROXCLOUD_CSI_GATEWAY_TLS_CERT and PROXCLOUD_CSI_GATEWAY_TLS_KEY (required with PROXCLOUD_CSI_GATEWAY_ADDR)")
+	}
+	if c.CSIGateway.URL != "" && (c.CSIGateway.CAFile == "" || !strings.HasPrefix(c.CSIGateway.URL, "https://")) {
+		missing = append(missing, "PROXCLOUD_CSI_GATEWAY_CA_FILE and an https:// PROXCLOUD_CSI_GATEWAY_URL (required together)")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required config: %s", strings.Join(missing, ", "))

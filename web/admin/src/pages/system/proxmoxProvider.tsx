@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 import { apiFetch } from "@/lib/api"
 
 export type ProxmoxFormState = {
@@ -20,17 +21,22 @@ export type ProxmoxFormState = {
   tokenId: string
   tokenSecret: string
   fingerprint: string
+  // Failover: other nodes or a VIP, comma or newline separated, with the cluster CA they all chain to
+  apiUrls: string
+  caCert: string
   insecureTls: boolean
   poolPrefix: string
   // config.network.isolation / .evpnController — the tenant network isolation model.
   isolation: PVEIsolation
   evpnController: string
+  // config.network.blockedCidrs: extra networks tenants must not reach, one CIDR per line.
+  blockedCidrs: string
   // Stored config carried through so Save never wipes keys this form does not own
   // (network, storageProfiles, templates, gpus, overcommit, metrics — later phases' tabs).
   storedConfig: Record<string, any>
 }
 
-// "shared": one SDN zone, per-vnet firewall DROPs cross-tenant traffic (default, simplest).
+// "shared": one SDN zone, cluster firewall rules DROP cross-tenant traffic (default, simplest).
 // "evpn-per-project": every project gets its own EVPN zone (VRF) on top of the same DROP rules.
 export type PVEIsolation = "shared" | "evpn-per-project"
 
@@ -41,10 +47,13 @@ export const emptyProxmoxForm: ProxmoxFormState = {
   tokenId: "",
   tokenSecret: "",
   fingerprint: "",
+  apiUrls: "",
+  caCert: "",
   insecureTls: false,
   poolPrefix: "pc-",
   isolation: "shared",
   evpnController: "",
+  blockedCidrs: "",
   storedConfig: {},
 }
 
@@ -54,6 +63,9 @@ export function proxmoxNetworkConfig(f: ProxmoxFormState) {
   const network: Record<string, any> = { ...((f.storedConfig?.network as Record<string, any>) ?? {}), isolation: f.isolation }
   if (f.isolation === "evpn-per-project" && f.evpnController.trim()) network.evpnController = f.evpnController.trim()
   else delete network.evpnController
+  const blocked = f.blockedCidrs.split(/[\s,]+/).filter(Boolean)
+  if (blocked.length) network.blockedCidrs = blocked
+  else delete network.blockedCidrs
   return network
 }
 
@@ -64,7 +76,7 @@ export const proxmoxFormValid = (f: ProxmoxFormState, requireSecret = true) => {
 }
 
 // Keys this form owns; everything else under config passes through untouched.
-const FORM_OWNED_KEYS = ["provider", "region", "regions", "services", "apiUrl", "tokenId", "fingerprint", "insecureTls", "poolPrefix"]
+const FORM_OWNED_KEYS = ["provider", "region", "regions", "services", "apiUrl", "apiUrls", "caCert", "tokenId", "fingerprint", "insecureTls", "poolPrefix"]
 
 export function proxmoxFormToBody(f: ProxmoxFormState) {
   const region = f.region.trim()
@@ -85,11 +97,12 @@ export function proxmoxFormToBody(f: ProxmoxFormState) {
       apiUrl: f.apiUrl.trim().replace(/\/+$/, ""),
       tokenId: f.tokenId.trim(),
       fingerprint: f.fingerprint.trim(),
+      apiUrls: f.apiUrls.split(/[\s,]+/).map((u) => u.trim().replace(/\/+$/, "")).filter(Boolean),
+      caCert: f.caCert.trim(),
       insecureTls: f.insecureTls,
       poolPrefix: f.poolPrefix.trim() || "pc-",
       network: proxmoxNetworkConfig(f),
-      // Traffic billing stays off until a prometheus-pve-exporter is wired (Phase 5).
-      metrics: (f.storedConfig?.metrics as Record<string, any>) ?? { source: "none" },
+      metrics: (f.storedConfig?.metrics as Record<string, any>) ?? { source: "pve" },
     },
     // Secret merge skips blank values server-side, so an empty tokenSecret keeps the stored one.
     secret: f.tokenSecret.trim() ? { tokenSecret: f.tokenSecret.trim() } : {},
@@ -107,10 +120,13 @@ export function proxmoxFormFromService(svc: { name?: string; config?: Record<str
     tokenId: String(cfg.tokenId ?? ""),
     tokenSecret: "", // never returned by the API; blank = keep
     fingerprint: String(cfg.fingerprint ?? ""),
+    apiUrls: ((cfg.apiUrls as string[]) ?? []).join("\n"),
+    caCert: String(cfg.caCert ?? ""),
     insecureTls: !!cfg.insecureTls,
     poolPrefix: String(cfg.poolPrefix ?? "pc-"),
     isolation: cfg.network?.isolation === "evpn-per-project" ? "evpn-per-project" : "shared",
     evpnController: String(cfg.network?.evpnController ?? ""),
+    blockedCidrs: ((cfg.network?.blockedCidrs as string[]) ?? []).join("\n"),
     storedConfig: cfg,
   }
 }
@@ -153,6 +169,7 @@ export function ProxmoxProviderForm({
           tokenId: form.tokenId.trim(),
           tokenSecret: form.tokenSecret.trim(),
           fingerprint: form.fingerprint.trim(),
+          caCert: form.caCert.trim(),
           insecureTls: form.insecureTls,
         },
       })
@@ -198,6 +215,14 @@ export function ProxmoxProviderForm({
         </div>
       </div>
       <div className="grid gap-2">
+        <Label htmlFor="pve-urls">Other API URLs for failover (other nodes or a VIP, optional)</Label>
+        <Textarea id="pve-urls" className="font-mono" rows={2} value={form.apiUrls} onChange={(e) => setForm({ ...form, apiUrls: e.target.value })} placeholder="https://pve2.example:8006" />
+      </div>
+      <div className="grid gap-2">
+        <Label htmlFor="pve-ca">Cluster CA (PEM, /etc/pve/pve-root-ca.pem; needed with several URLs)</Label>
+        <Textarea id="pve-ca" className="font-mono" rows={3} value={form.caCert} onChange={(e) => setForm({ ...form, caCert: e.target.value })} placeholder="-----BEGIN CERTIFICATE-----" />
+      </div>
+      <div className="grid gap-2">
         <Label htmlFor="pve-fp">TLS certificate fingerprint (SHA-256, optional)</Label>
         <Input id="pve-fp" className="font-mono" value={form.fingerprint} onChange={(e) => setForm({ ...form, fingerprint: e.target.value })} placeholder="AA:BB:CC:…" autoComplete="off" />
         <p className="text-xs text-muted-foreground">
@@ -226,13 +251,20 @@ export function ProxmoxProviderForm({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="shared">Shared zone + vnet firewall (default)</SelectItem>
+              <SelectItem value="shared">Shared zone (default)</SelectItem>
               <SelectItem value="evpn-per-project">EVPN zone per project</SelectItem>
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            Both drop cross-tenant traffic with vnet firewall rules inside the network <code>cidrPool</code> (required).
+            Both drop cross-tenant traffic with cluster firewall rules inside the network <code>cidrPool</code> (required).
             Needs the nftables <code>proxmox-firewall</code> on every node.
+          </p>
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="pve-blocked">Networks tenants must not reach</Label>
+          <Textarea id="pve-blocked" className="font-mono" rows={2} value={form.blockedCidrs} onChange={(e) => setForm({ ...form, blockedCidrs: e.target.value })} placeholder="192.0.2.0/24" autoComplete="off" />
+          <p className="text-xs text-muted-foreground">
+            One CIDR per line, on top of the nodes&apos; management networks, which are always blocked. List storage and office networks a server could otherwise reach through an exit node.
           </p>
         </div>
         {form.isolation === "evpn-per-project" ? (

@@ -260,7 +260,8 @@ func decodeCharge(r *http.Request, out *billingclient.ChargeRequest) error {
 // double-billing on retry, silently.
 func TestChargeReplaySafety(t *testing.T) {
 	ctx := context.Background()
-	now := time.Now().UTC()
+	// Reproducible mid-month cycle, independent of the suite's calendar day.
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 
 	t.Run("minute cadence is idempotent on replay", func(t *testing.T) {
 		db := freshPG(t)
@@ -285,6 +286,12 @@ func TestChargeReplaySafety(t *testing.T) {
 	t.Run("month cadence is idempotent on replay (via the cap gate)", func(t *testing.T) {
 		db := freshPG(t)
 		profileID, _, driver := chargeFixture(t, db, now)
+		// MONTH is canonically truncated to the original UTC day. The resource
+		// must already exist at that cutoff, not be created later that afternoon.
+		created := now.Truncate(24 * time.Hour).Add(-time.Hour)
+		if _, err := db.C("cloudResource").SetFields(ctx, nil, pgdoc.M{"createdAt": created}, nil); err != nil {
+			t.Fatal(err)
+		}
 
 		// Price the instance per month so the MONTH cadence has something to charge.
 		mustInsert(t, db, "pricePlanRule", pricing.PricePlanRule{
@@ -334,8 +341,8 @@ func instanceNet(t *testing.T, db *pgdoc.DB, profileID string) decimal.Decimal {
 
 // TestRemoteChargeCreatesBillForProfileWithNoResources guards a difference that is easy to
 // introduce as an "optimisation": the in-process driver calls ChargeBillingResources once per
-// external service whether or not that service has resources, and that call opens the current bill
-// via GetCurrentBill, which CREATES it when absent.
+// external service whether or not that service has resources, and that call CREATES the current
+// bill when absent.
 //
 // So an ACTIVE profile with nothing billable still gets a bill each tick. If the remote path drops
 // empty service groups to save bytes, those profiles silently stop getting bills — visible to the

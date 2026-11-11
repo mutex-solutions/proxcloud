@@ -1,0 +1,139 @@
+# make add-node NODE=pve4 (plan AUTO-G11). The new node must be in the inventory group `pve`, along with
+# at least one existing node. Safe to re-run on a member: the join is skipped and the rest is idempotent.
+- name: Prepare
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  tasks:
+    - name: Check the arguments
+      ansible.builtin.assert:
+        that:
+          - pc_node is defined
+          - pc_node in groups['pve'] | default([])
+        fail_msg: make add-node NODE=<name>, with that name in the inventory group `pve`.
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Read the cluster
+      ansible.builtin.uri: {url: "{{ pc_api }}/{{ item }}"}
+      loop: [cluster/status, version, cluster/sdn/zones]
+      register: pc_c
+    - name: Note the cluster
+      vars:
+        rows: "{{ pc_c.results[0].json.data | selectattr('type', 'eq', 'node') | list }}"
+      ansible.builtin.set_fact:
+        pc_members: "{{ rows | map(attribute='name') | list }}"
+        pc_member_ip: "{{ rows | selectattr('name', 'ne', pc_node) | map(attribute='ip') | first }}"
+        pc_cluster_version: "{{ pc_c.results[1].json.data.version }}"
+        pc_needs_frr: "{{ pc_c.results[2].json.data | selectattr('type', 'eq', 'evpn') | length > 0 }}"
+
+- name: Check and join the node
+  hosts: "{{ pc_node }}"
+  gather_facts: false
+  vars:
+    lh: "{{ hostvars.localhost }}"
+    joining: "{{ pc_node not in lh.pc_members }}"
+  tasks:
+    - name: Read the node
+      ansible.builtin.shell: |
+        pveversion | sed -n 's#^pve-manager/\([^/]*\)/.*#\1#p'
+        (qm list; pct list) 2>/dev/null | grep -cE '^ *[0-9]+' || true
+        chronyc tracking >/dev/null 2>&1 && echo chrony-ok || echo chrony-bad
+        zpool list -H -o name 2>/dev/null | tr '\n' ' '; echo
+        ping -c3 -q {{ lh.pc_member_ip }} | sed -n 's#.*= [0-9.]*/\([0-9.]*\)/.*#\1#p'
+      changed_when: false
+      register: pc_n
+    - name: Check the node
+      vars:
+        f: "{{ pc_n.stdout_lines }}"
+      ansible.builtin.assert:
+        that:
+          - f[0] == lh.pc_cluster_version
+          - not joining or f[1] | int == 0
+          - f[2] == 'chrony-ok'
+          - f[4] | float < 5
+        fail_msg: >-
+          The node needs Proxmox {{ lh.pc_cluster_version }} (has {{ f[0] }}), no guests when joining (has {{ f[1] }}),
+          working chrony ({{ f[2] }}) and under 5 ms to the cluster ({{ f[4] }} ms).
+    - name: Drop the QDevice when the member count turns odd
+      # A QDevice only helps an even member count.
+      when: joining and lh.pc_members | length % 2 == 0
+      ansible.builtin.shell: pvecm status | grep -q Qdevice && pvecm qdevice remove || true
+      delegate_to: "{{ groups['pve'] | difference([pc_node]) | first }}"
+      changed_when: false
+    - name: Join the cluster
+      when: joining
+      ansible.builtin.command: pvecm add {{ lh.pc_member_ip }} --use_ssh --link0 {{ ansible_host }}
+      changed_when: true
+    - name: Install FRR for EVPN
+      when: lh.pc_needs_frr
+      ansible.builtin.apt: {name: [frr, frr-pythontools], state: present, update_cache: true, cache_valid_time: 86400}
+
+- name: Finish on the cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  vars:
+    joined: "{{ pc_node not in pc_members }}"
+  tasks:
+    - name: Log in again
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Apply SDN to reach the new node
+      when: joined
+      ansible.builtin.uri: {url: "{{ pc_api }}/cluster/sdn", method: PUT}
+      changed_when: true
+      register: pc_sdn
+    - name: Wait for SDN
+      when: joined
+      ansible.builtin.include_tasks: tasks/pve-wait.yml
+      vars: {wait_upid: "{{ pc_sdn.json.data }}", wait_node: "{{ pc_nodes[0] }}"}
+    - name: Check the node firewall and the storages
+      ansible.builtin.uri: {url: "{{ pc_api }}/nodes/{{ pc_node }}/{{ item }}"}
+      loop: [firewall/options, storage]
+      register: pc_nf
+    - name: Report what the node can serve
+      ansible.builtin.debug:
+        msg:
+          - "nftables firewall: {{ pc_nf.results[0].json.data.nftables | default(0) }} (must be 1)"
+          - "active storages: {{ pc_nf.results[1].json.data | selectattr('active', 'eq', 1) | map(attribute='storage') | join(', ') }}"
+          - "GPU nodes: add this node to /cluster/mapping/pci for each alias it serves."
+          - "No replication job was added. Protected VMs that can take a replica here are the operator's call."
+          - "A 2-node cluster: pvecm qdevice setup <host>, on a machine outside the cluster."
+
+- name: Give the new node its template copies
+  import_playbook: 20-templates.yml
+
+- name: Re-benchmark the storages
+  import_playbook: 00-preflight.yml
+  vars: {pc_rebench: true}
+
+- name: Tell the portal
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  vars:
+    api_key: "{{ lookup('ansible.builtin.file', pc_gen ~ '/admin-api-key.json') | from_json }}"
+  tasks:
+    - name: Find the API
+      ansible.builtin.command: k3s kubectl -n {{ pc.namespace }} get svc proxcloud-api -o jsonpath={.spec.clusterIP}
+      changed_when: false
+      register: pc_ip
+    - name: Read the providers
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "http://{{ pc_ip.stdout }}:8080/api/v1/admin/service"
+      register: pc_services
+    - name: Re-detect capabilities
+      proxcloud_api:
+        access_key: "{{ api_key.id }}"
+        secret_key: "{{ api_key.secretKey }}"
+        url: "http://{{ pc_ip.stdout }}:8080/api/v1/admin/service/{{ (pc_services.json.data | selectattr('name', 'eq', pc.provider.name) | first).id }}/storage/detect"
+        method: POST
+        body: {}
+      register: pc_caps
+    - name: Show the capabilities
+      ansible.builtin.debug: {msg: "{{ pc_caps.json.data }}"}

@@ -50,6 +50,7 @@ type FirewallRule struct {
 	SPort   string `json:"sport"`
 	Enable  int    `json:"enable"`
 	Comment string `json:"comment"`
+	Digest  string `json:"digest,omitempty"`
 }
 
 func (c *Client) ListFirewallRules(ctx context.Context, group string) ([]FirewallRule, error) {
@@ -65,7 +66,7 @@ func (c *Client) AddFirewallRule(ctx context.Context, group string, r FirewallRu
 	return c.post(ctx, "/cluster/firewall/groups/"+url.PathEscape(group), ruleForm(r), nil)
 }
 
-// ruleForm is the create-rule body shared by group and vnet rules.
+// ruleForm is the create-rule body shared by group and cluster rules.
 func ruleForm(r FirewallRule) url.Values {
 	return formVals{
 		"type":    r.Type,
@@ -93,46 +94,31 @@ func itoa0(n int) string {
 	return itoa(n)
 }
 
-// --- SDN vnet firewall (GET/POST /cluster/sdn/vnets/{vnet}/firewall/rules, PUT .../options) ---
-// Vnet rules are FORWARD-only and see every packet crossing the vnet bridge,
-// including VM <-> gateway (host) traffic. They are NOT SDN-staged: they take
-// effect immediately, no PUT /cluster/sdn needed.
-// The stock iptables pve-firewall IGNORES vnet rules (pve-firewall docs): every
-// node must run the nftables proxmox-firewall (host.fw `nftables: 1`) with the
-// datacenter firewall enabled — test-connection checks both.
+// --- cluster firewall rules (/cluster/firewall/rules): the tenant isolation rules ---
 
-func vnetFirewallPath(vnet string) string {
-	return "/cluster/sdn/vnets/" + url.PathEscape(vnet) + "/firewall"
-}
-
-func (c *Client) ListVnetFirewallRules(ctx context.Context, vnet string) ([]FirewallRule, error) {
+func (c *Client) ListClusterFirewallRules(ctx context.Context) ([]FirewallRule, error) {
 	var out []FirewallRule
-	if err := c.get(ctx, vnetFirewallPath(vnet)+"/rules", nil, &out); err != nil {
+	if err := c.get(ctx, "/cluster/firewall/rules", nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// AddVnetFirewallRule creates a rule. PVE inserts new rules at the TOP (pos 0).
-// TODO(verify-lab): confirm the prepend on PVE 9 (RulesBase create_rule unshift).
-func (c *Client) AddVnetFirewallRule(ctx context.Context, vnet string, r FirewallRule) error {
-	return c.post(ctx, vnetFirewallPath(vnet)+"/rules", ruleForm(r), nil)
+// AddClusterFirewallRule creates a rule. Lab-verified on PVE 9.2: new rules land at pos 0.
+func (c *Client) AddClusterFirewallRule(ctx context.Context, r FirewallRule) error {
+	return c.post(ctx, "/cluster/firewall/rules", ruleForm(r), nil)
 }
 
-func (c *Client) DeleteVnetFirewallRule(ctx context.Context, vnet string, pos int) error {
-	return c.delete(ctx, vnetFirewallPath(vnet)+"/rules/"+itoa0(pos), nil, nil)
-}
-
-// EnableVnetFirewall switches the vnet's rules on (options enable defaults to 0).
-// policy_forward is left at its ACCEPT default so SNAT egress keeps working.
-func (c *Client) EnableVnetFirewall(ctx context.Context, vnet string) error {
-	return c.put(ctx, vnetFirewallPath(vnet)+"/options", formVals{"enable": "1"}.values(), nil)
+// DeleteClusterFirewallRule removes the rule at pos; PVE refuses it when digest (of the list the
+// position came from) no longer matches.
+func (c *Client) DeleteClusterFirewallRule(ctx context.Context, pos int, digest string) error {
+	return c.delete(ctx, "/cluster/firewall/rules/"+itoa0(pos), formVals{"digest": digest}.values(), nil)
 }
 
 // --- datacenter + VM firewall (/cluster/firewall/options, /nodes/{node}/qemu/{vmid}/firewall) ---
 
 // DatacenterFirewallEnabled reads the cluster-wide master switch. Off (the PVE
-// default) means no group, VM or vnet rule is enforced anywhere.
+// default) means no group, VM or cluster rule is enforced anywhere.
 func (c *Client) DatacenterFirewallEnabled(ctx context.Context) (bool, error) {
 	var out struct {
 		Enable int `json:"enable"`
@@ -145,10 +131,10 @@ func (c *Client) DatacenterFirewallEnabled(ctx context.Context) (bool, error) {
 
 // NodesWithoutNFTables lists the online nodes whose host firewall is not the
 // nftables proxmox-firewall (host.fw `nftables: 1`): the stock iptables
-// pve-firewall ignores every vnet rule, so tenant isolation would silently be off
+// pve-firewall ignores FORWARD rules, so tenant isolation would silently be off
 // there. Offline nodes cannot be asked and are skipped.
-// TODO(verify-lab): GET /nodes/{node}/firewall/options reports nftables as 0/1
-// on PVE 9 (absent = 0).
+// Lab-verified (PVE 9.2): GET /nodes/{node}/firewall/options reports nftables as 0/1,
+// readable with PVEAuditor on /nodes (absent = 0).
 func (c *Client) NodesWithoutNFTables(ctx context.Context) ([]string, error) {
 	nodes, err := c.Nodes(ctx)
 	if err != nil {
@@ -188,8 +174,10 @@ func (c *Client) AddVMGroupRule(ctx context.Context, node string, vmid int, grou
 
 // IPSet is one row of GET .../firewall/ipset (or one entry of a set: CIDR).
 type IPSet struct {
-	Name string `json:"name"`
-	CIDR string `json:"cidr"`
+	Name    string `json:"name"`
+	CIDR    string `json:"cidr"`
+	NoMatch int    `json:"nomatch,omitempty"` // entry rows: 1 = an exception (`!cidr`) inside the set
+	Comment string `json:"comment,omitempty"` // set rows
 }
 
 func (c *Client) ListVMIPSets(ctx context.Context, node string, vmid int) ([]IPSet, error) {
@@ -221,4 +209,67 @@ func (c *Client) DeleteVMIPSet(ctx context.Context, node string, vmid int, name 
 
 func (c *Client) AddVMIPSetEntry(ctx context.Context, node string, vmid int, name, cidr string) error {
 	return c.post(ctx, vmFirewallPath(node, vmid)+"/ipset/"+url.PathEscape(name), formVals{"cidr": cidr}.values(), nil)
+}
+
+// GetVMFirewallOptions reads the VM firewall options (absent keys are PVE's defaults).
+func (c *Client) GetVMFirewallOptions(ctx context.Context, node string, vmid int) (map[string]any, error) {
+	out := map[string]any{}
+	if err := c.get(ctx, vmFirewallPath(node, vmid)+"/options", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ListVMFirewallRules lists the VM's own rules, group references included.
+func (c *Client) ListVMFirewallRules(ctx context.Context, node string, vmid int) ([]FirewallRule, error) {
+	var out []FirewallRule
+	if err := c.get(ctx, vmFirewallPath(node, vmid)+"/rules", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DeleteVMFirewallRule removes the VM rule at pos; PVE refuses it when digest no longer matches.
+func (c *Client) DeleteVMFirewallRule(ctx context.Context, node string, vmid, pos int, digest string) error {
+	return c.delete(ctx, vmFirewallPath(node, vmid)+"/rules/"+itoa0(pos), formVals{"digest": digest}.values(), nil)
+}
+
+// --- cluster IP sets (/cluster/firewall/ipset), referenced from rules as +dc/<name> ---
+
+func (c *Client) ListClusterIPSets(ctx context.Context) ([]IPSet, error) {
+	var out []IPSet
+	if err := c.get(ctx, "/cluster/firewall/ipset", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) ListClusterIPSetEntries(ctx context.Context, name string) ([]IPSet, error) {
+	var out []IPSet
+	if err := c.get(ctx, "/cluster/firewall/ipset/"+url.PathEscape(name), nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) CreateClusterIPSet(ctx context.Context, name, comment string) error {
+	return c.post(ctx, "/cluster/firewall/ipset", formVals{"name": name, "comment": comment}.values(), nil)
+}
+
+// AddClusterIPSetEntry adds a CIDR (PVE 9.2 takes no range and no zero prefix there); nomatch makes it an exception.
+func (c *Client) AddClusterIPSetEntry(ctx context.Context, name, cidr string, nomatch bool) error {
+	f := formVals{"cidr": cidr}
+	if nomatch {
+		f["nomatch"] = "1"
+	}
+	return c.post(ctx, "/cluster/firewall/ipset/"+url.PathEscape(name), f.values(), nil)
+}
+
+// DeleteClusterIPSet drops a set with its entries.
+func (c *Client) DeleteClusterIPSet(ctx context.Context, name string) error {
+	err := c.delete(ctx, "/cluster/firewall/ipset/"+url.PathEscape(name), formVals{"force": "1"}.values(), nil)
+	if err != nil && IsNotFound(err) {
+		return nil
+	}
+	return err
 }

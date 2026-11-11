@@ -1,0 +1,1094 @@
+package sandbox
+
+// build.go — custom templates (E2B template builds). A build turns E2B's step list into a
+// Dockerfile and runs it as one gVisor pod in BuildNamespace on the sandbox cluster:
+//
+//	init fetch  (trusted)    downloads the COPY contexts from the build bucket (presigned URLs) into /workspace/files/<hash>
+//	init base   (trusted)    pulls the base image into kaniko's cache (the only container that may hold a pull credential)
+//	init kaniko (user code)  builds the Dockerfile, --no-push, image tarball to /out; holds NO credentials
+//	push        (trusted)    crane pushes the tarball to the template registry; only it mounts the push secret
+//
+// The customer's RUN steps execute inside the kaniko container, which has finished before the
+// push container starts and never sees the registry secret. That secret is the project's own build account
+// (BuildSecretFor: reads library/** and t/<project>/**, writes t/<project>/** only), written into sbx-build by the
+// registry's account sync, so a build cannot write another project's templates or the built-in library/ images.
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"path"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/mutex-solutions/proxcloud/internal/registrypins"
+)
+
+const (
+	BuildNamespace           = "sbx-build"
+	LabelBuild               = "proxcloud.io/sandbox-build"
+	LabelTemplateID          = "proxcloud.io/sandbox-template"
+	AnnotationBuildOperation = "proxcloud.io/build-operation"
+	AnnotationBuildNonce     = "proxcloud.io/build-spec-nonce"
+	AnnotationBuildBase      = "proxcloud.io/build-base"
+	AnnotationBuildDest      = "proxcloud.io/build-destination"
+	// TemplatePullSecret is the project's own registry account in sb-<project> (pull-<project>: library/** and
+	// t/<project>/**), written by the registry's account sync (sandbox-proxy registry-users, docs/managed-sandbox.md §6).
+	TemplatePullSecret = "sandbox-template-pull"
+	BuildTimeout       = 30 * time.Minute
+	buildDiskLimit     = "30Gi"
+	// buildDiskRequest is what a build or snapshot pod asks the scheduler for: with a limit and no request,
+	// Kubernetes requests the limit, and no 30 GB worker has 30Gi allocatable, so the pod would never schedule.
+	buildDiskRequest = "2Gi"
+
+	kanikoImage = "ghcr.io/osscontainertools/kaniko:v1.29.0@sha256:0c0b6c02991bba44090fad918ae177d193e1bd3fd0ccc643e7cc1f9f1a5a373d"
+	fetchImage  = "curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40"
+	craneImage  = "gcr.io/go-containerregistry/crane:v0.20.3@sha256:fc86bcad43a000c2a1ca926a1e167db26c053cebc3fa5d14285c72773fb8c11d"
+	// crane's debug variant has a shell: the snapshot push redirects crane's output to the
+	// termination log.
+	craneDebugImage = "gcr.io/go-containerregistry/crane:debug@sha256:e78770b31258a3846f878036d9c1f63fbe4c871f9f56990bf77fd95c013e3c1b"
+)
+
+// BuildStep is one E2B TemplateStep: type RUN|COPY|ENV|WORKDIR|USER.
+type BuildStep struct {
+	Type      string   `json:"type"`
+	Args      []string `json:"args"`
+	FilesHash string   `json:"filesHash,omitempty"`
+	Force     bool     `json:"force,omitempty"`
+}
+
+// BuildResult is what a rendered build implies for the sandboxes started from it.
+type BuildResult struct {
+	Dockerfile string
+	Hashes     []string // COPY contexts to fetch, in order, deduplicated
+	User       string   // last USER ("" = image default)
+	Workdir    string   // last WORKDIR ("" = image default)
+}
+
+var (
+	ErrBadBuild    = errors.New("invalid template build")
+	ErrBadTemplate = errors.New("template not usable")
+	imageRefRe     = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,254}$`)
+	hashRe         = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
+	userRe         = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,31}(:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,31})?$`)
+	modeRe         = regexp.MustCompile(`^[0-7]{3,4}$`)
+	envKeyRe       = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+)
+
+const maxBuildSteps = 200
+
+func badBuild(format string, a ...any) error {
+	return fmt.Errorf("%w: %s", ErrBadBuild, fmt.Sprintf(format, a...))
+}
+
+// noControl rejects characters that would end a Dockerfile instruction early (injection).
+func noControl(field, s string) error {
+	if strings.ContainsAny(s, "\n\r\x00") {
+		return badBuild("%s must not contain line breaks", field)
+	}
+	return nil
+}
+
+func jsonString(s string) string {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false) // keep && and <> readable in the Dockerfile
+	_ = enc.Encode(s)
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// RenderDockerfile turns E2B steps into a Dockerfile on top of from. Every customer string is
+// either JSON-encoded (exec-form RUN, COPY sources) or validated against a strict pattern, so no
+// step can smuggle in another instruction.
+func RenderDockerfile(from string, steps []BuildStep) (*BuildResult, error) {
+	if !imageRefRe.MatchString(from) {
+		return nil, badBuild("invalid base image %q", from)
+	}
+	if len(steps) > maxBuildSteps {
+		return nil, badBuild("at most %d steps", maxBuildSteps)
+	}
+	var b strings.Builder
+	res := &BuildResult{}
+	seen := map[string]bool{}
+	fmt.Fprintf(&b, "FROM %s\n", from)
+	user := "" // current USER for RUN steps that switch temporarily
+	for i, st := range steps {
+		where := fmt.Sprintf("step %d (%s)", i+1, st.Type)
+		switch st.Type {
+		case "RUN":
+			if len(st.Args) == 0 || strings.TrimSpace(st.Args[0]) == "" {
+				return nil, badBuild("%s: command is required", where)
+			}
+			as := ""
+			if len(st.Args) > 1 && st.Args[1] != "" {
+				if !userRe.MatchString(st.Args[1]) {
+					return nil, badBuild("%s: invalid user %q", where, st.Args[1])
+				}
+				as = st.Args[1]
+			}
+			if as != "" {
+				fmt.Fprintf(&b, "USER %s\n", as)
+			}
+			fmt.Fprintf(&b, "RUN [\"/bin/sh\", \"-c\", %s]\n", jsonString(st.Args[0]))
+			if as != "" {
+				restore := user
+				if restore == "" {
+					restore = "root"
+				}
+				fmt.Fprintf(&b, "USER %s\n", restore)
+			}
+		case "COPY":
+			if len(st.Args) < 2 {
+				return nil, badBuild("%s: source and destination are required", where)
+			}
+			if !hashRe.MatchString(st.FilesHash) {
+				return nil, badBuild("%s: filesHash is required", where)
+			}
+			src, dest := st.Args[0], st.Args[1]
+			if src == "" || path.IsAbs(src) || hasDotDot(src) {
+				return nil, badBuild("%s: source %q must be a relative path inside the context", where, src)
+			}
+			for _, f := range []struct{ n, v string }{{"source", src}, {"destination", dest}} {
+				if err := noControl(where+" "+f.n, f.v); err != nil {
+					return nil, err
+				}
+			}
+			flags := ""
+			if len(st.Args) > 2 && st.Args[2] != "" {
+				if !userRe.MatchString(st.Args[2]) {
+					return nil, badBuild("%s: invalid owner %q", where, st.Args[2])
+				}
+				owner := st.Args[2]
+				if !strings.Contains(owner, ":") {
+					owner += ":" + owner
+				}
+				flags += " --chown=" + owner
+			}
+			if len(st.Args) > 3 && st.Args[3] != "" {
+				if !modeRe.MatchString(st.Args[3]) {
+					return nil, badBuild("%s: invalid mode %q", where, st.Args[3])
+				}
+				flags += " --chmod=" + st.Args[3]
+			}
+			srcPath := path.Join("files", st.FilesHash, strings.TrimPrefix(path.Clean(src), "./"))
+			fmt.Fprintf(&b, "COPY%s [%s, %s]\n", flags, jsonString(srcPath), jsonString(dest))
+			if !seen[st.FilesHash] {
+				seen[st.FilesHash] = true
+				res.Hashes = append(res.Hashes, st.FilesHash)
+			}
+		case "ENV":
+			if len(st.Args) == 0 || len(st.Args)%2 != 0 {
+				return nil, badBuild("%s: expects key/value pairs", where)
+			}
+			var kv []string
+			for j := 0; j < len(st.Args); j += 2 {
+				k, v := st.Args[j], st.Args[j+1]
+				if !envKeyRe.MatchString(k) {
+					return nil, badBuild("%s: invalid variable name %q", where, k)
+				}
+				if err := noControl(where+" "+k, v); err != nil {
+					return nil, err
+				}
+				kv = append(kv, k+"="+jsonString(v))
+			}
+			fmt.Fprintf(&b, "ENV %s\n", strings.Join(kv, " "))
+		case "WORKDIR":
+			if len(st.Args) != 1 || st.Args[0] == "" {
+				return nil, badBuild("%s: one path is required", where)
+			}
+			if err := noControl(where, st.Args[0]); err != nil {
+				return nil, err
+			}
+			fmt.Fprintf(&b, "WORKDIR %s\n", st.Args[0])
+			res.Workdir = st.Args[0]
+		case "USER":
+			if len(st.Args) != 1 || !userRe.MatchString(st.Args[0]) {
+				return nil, badBuild("%s: invalid user", where)
+			}
+			fmt.Fprintf(&b, "USER %s\n", st.Args[0])
+			user = st.Args[0]
+			res.User = strings.SplitN(st.Args[0], ":", 2)[0]
+		default:
+			return nil, badBuild("%s: unknown step type", where)
+		}
+	}
+	// sandbox-init runs as root (PID 1); the template's USER becomes envd's default user instead.
+	if user != "" && user != "root" {
+		b.WriteString("USER root\n")
+	}
+	res.Dockerfile = b.String()
+	return res, nil
+}
+
+// BuildRequest is one build to run on the cluster.
+type BuildRequest struct {
+	ProjectID  string
+	TemplateID string
+	BuildID    string
+	Image      string // destination ref, without digest
+	Result     *BuildResult
+	CPU        int
+	MemoryGiB  int
+	DiskGiB    int // total pod ephemeral-storage budget, independent of runtime size
+	// FetchURL returns where the fetch init container downloads a COPY context (a proxcloud URL
+	// carrying a per-build token).
+	FetchURL func(hash string) string
+	// Base is the image the Dockerfile's FROM names (the first line RenderDockerfile writes). The
+	// `base` init container pulls it into kaniko's cache, so kaniko builds offline and never holds
+	// a credential.
+	Base string
+	// BaseAuth says which credential `base` pulls with; BaseDockerConfig is the user's
+	// dockerconfigjson for BaseAuthUser (put in a Secret owned by the pod, never stored).
+	BaseAuth         BaseAuth
+	BaseDockerConfig []byte
+	// Required for production internal-template destinations. Minted only from
+	// committed pins after the owner won its durable single-dispatch CAS.
+	Pins             *registrypins.BuildProof
+	operation, nonce string
+}
+
+// BaseAuth is the credential the `base` init container pulls the base image with.
+type BaseAuth int
+
+const (
+	BaseAuthNone     BaseAuth = iota // public image
+	BaseAuthRegistry                 // an image on the sandbox registry (built-in or the project's own): its build account
+	BaseAuthUser                     // fromImageRegistry: the user's registry credentials
+)
+
+// BuildSecretFor is the project's build account in sbx-build (user build-<project>), written by the registry's
+// account sync: the push container mounts it, and the base container for an image on the sandbox registry.
+func BuildSecretFor(projectID string) string { return "registry-build-" + projectID }
+
+// BuildRegistryCA is the ConfigMap in sbx-build holding the sandbox registry's CA (ca.crt), written by installer stage
+// 55: crane in the base and push containers trusts it on top of the system roots (SSL_CERT_DIR). Optional, so a
+// registry with a public certificate needs none.
+const BuildRegistryCA = "registry-ca"
+
+// registryTrust is the CA volume and the env that makes crane read it.
+var (
+	registryTrustVolume = map[string]any{"name": "registry-ca", "configMap": map[string]any{"name": BuildRegistryCA, "optional": true}}
+	registryTrustEnv    = map[string]any{"name": "SSL_CERT_DIR", "value": "/registry-ca"}
+)
+
+// baseSecretName is the per-build Secret holding the user's registry credentials.
+func baseSecretName(buildID string) string { return buildName(buildID) + "-base" }
+
+func buildName(buildID string) string { return "build-" + buildID }
+
+// buildOutputScript hands root-produced OCI blobs (which may be 0600) to nonroot crane.
+// No writer remains. Validate the entire physical tree before changing any modes;
+// reject hard links too so chmod cannot change an alias outside the output tree.
+const buildOutputScript = `set -eu
+[ -d /out/image ] && [ ! -L /out/image ] || { echo 'invalid build output directory' >&2; exit 1; }
+bad=$(find /out/image \( ! -type d ! -type f -o -type f -links +1 \) -print -quit)
+[ -z "$bad" ] || { echo 'invalid build output entry' >&2; exit 1; }
+find /out/image -type f -exec chmod 0444 {} +
+find /out/image -type d -exec chmod 0555 {} +
+`
+
+// BuildObjects renders the ConfigMap (Dockerfile + fetch list) and the Pod of a build.
+func BuildObjects(cfg Config, req BuildRequest) (cm, pod map[string]any) {
+	cfg = cfg.WithDefaults()
+	name := buildName(req.BuildID)
+	labels := map[string]any{
+		LabelManagedBy: ManagedByValue, LabelProject: req.ProjectID,
+		LabelBuild: req.BuildID, LabelTemplateID: req.TemplateID,
+	}
+	var fetch strings.Builder
+	for _, h := range req.Result.Hashes {
+		fmt.Fprintf(&fetch, "%s %s\n", h, req.FetchURL(h))
+	}
+	cm = map[string]any{
+		"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{"name": name, "namespace": BuildNamespace, "labels": labels},
+		"data":     map[string]any{"Dockerfile": req.Result.Dockerfile, "fetch.list": fetch.String()},
+	}
+	r, _ := cfg.Build.Resources(BuildResources{CPU: req.CPU, MemoryGiB: req.MemoryGiB, DiskGiB: req.DiskGiB})
+	disk := fmt.Sprintf("%dGi", r.DiskGiB)
+	res := map[string]any{"cpu": strconv.Itoa(r.CPU), "memory": fmt.Sprintf("%dGi", r.MemoryGiB), "ephemeral-storage": disk}
+	small := map[string]any{"cpu": "100m", "memory": "128Mi", "ephemeral-storage": disk}
+	fetchScript := `set -eu
+cp /config/Dockerfile /workspace/Dockerfile
+while read -r hash url; do
+  [ -n "$hash" ] || continue
+  mkdir -p "/workspace/files/$hash"
+  echo "fetching context $hash"
+  curl -fsS --connect-timeout 10 --retry 3 -o /tmp/ctx.tar "$url"
+  tar -xf /tmp/ctx.tar -C "/workspace/files/$hash"
+  rm -f /tmp/ctx.tar
+done < /config/fetch.list
+`
+	// base: pin the base to its linux/amd64 manifest digest, pull it into kaniko's cache (an OCI
+	// layout per digest) and write the Dockerfile kaniko builds, FROM that digest. It is the only
+	// container that may hold a registry credential; kaniko then builds offline.
+	baseScript := `set -eu
+case "$SRC" in *@sha256:*) D="${SRC##*@}";; *) D=$(crane digest --platform linux/amd64 "$SRC");; esac
+case "$D" in sha256:*) ;; *) echo "base image: bad digest" >&2; exit 1;; esac
+H="${D#sha256:}"
+[ ${#H} -eq 64 ] && [ -z "$(printf %s "$H" | tr -d 0-9a-f)" ] || { echo "base image: bad digest" >&2; exit 1; }
+R="${SRC%@*}"; case "${R##*/}" in *:*) R="${R%:*}";; esac
+echo "pulling base image $R@$D"
+crane pull --platform linux/amd64 --format=oci "$R@$D" "/cache/$D"
+{ echo "FROM $R@$D"; tail -n +2 /config/Dockerfile; } > /pinned/Dockerfile
+`
+	baseMounts := []any{mount("config", "/config"), mount("base-cache", "/cache"), mount("pinned", "/pinned"), mount("registry-ca", "/registry-ca")}
+	volumes := []any{
+		registryTrustVolume,
+		map[string]any{"name": "config", "configMap": map[string]any{"name": name}},
+		map[string]any{"name": "workspace", "emptyDir": map[string]any{"sizeLimit": disk}},
+		map[string]any{"name": "out", "emptyDir": map[string]any{"sizeLimit": disk}},
+		map[string]any{"name": "base-cache", "emptyDir": map[string]any{"sizeLimit": disk}},
+		map[string]any{"name": "pinned", "emptyDir": map[string]any{"sizeLimit": "1Mi"}},
+		map[string]any{"name": "push-secret", "secret": map[string]any{
+			"secretName": BuildSecretFor(req.ProjectID),
+			"items":      []any{map[string]any{"key": ".dockerconfigjson", "path": "config.json"}},
+		}},
+	}
+	if secret := map[BaseAuth]string{BaseAuthRegistry: BuildSecretFor(req.ProjectID), BaseAuthUser: baseSecretName(req.BuildID)}[req.BaseAuth]; secret != "" {
+		baseMounts = append(baseMounts, mount("base-secret", "/docker"))
+		volumes = append(volumes, map[string]any{"name": "base-secret", "secret": map[string]any{
+			"secretName": secret,
+			"items":      []any{map[string]any{"key": ".dockerconfigjson", "path": "config.json"}},
+		}})
+	}
+	ro := func(m map[string]any) map[string]any { m["readOnly"] = true; return m }
+	pod = map[string]any{
+		"apiVersion": "v1", "kind": "Pod",
+		"metadata": map[string]any{"name": name, "namespace": BuildNamespace, "labels": labels},
+		"spec": map[string]any{
+			"runtimeClassName":              cfg.RuntimeClass,
+			"nodeSelector":                  cfg.Build.NodeSelector,
+			"restartPolicy":                 "Never",
+			"automountServiceAccountToken":  false,
+			"enableServiceLinks":            false,
+			"activeDeadlineSeconds":         int64(BuildTimeout.Seconds()),
+			"terminationGracePeriodSeconds": int64(5),
+			"initContainers": []any{
+				map[string]any{
+					"name": "fetch", "image": fetchImage, "command": []any{"sh", "-c", fetchScript},
+					"resources":    map[string]any{"requests": withDiskRequest(small), "limits": small},
+					"volumeMounts": []any{mount("config", "/config"), mount("workspace", "/workspace")},
+				},
+				map[string]any{
+					"name": "base", "image": craneDebugImage, "command": []any{"sh", "-c", baseScript},
+					"env": []any{
+						map[string]any{"name": "SRC", "value": req.Base},
+						map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"},
+						registryTrustEnv,
+					},
+					"resources":    map[string]any{"requests": withDiskRequest(small), "limits": map[string]any{"cpu": "1", "memory": "512Mi", "ephemeral-storage": disk}},
+					"volumeMounts": baseMounts,
+				},
+				map[string]any{
+					"name": "kaniko", "image": kanikoImage,
+					"args": []any{
+						"--context=dir:///workspace", "--dockerfile=/pinned/Dockerfile",
+						// Zot requires OCI manifests; crane's tar loader reconstructs Docker schema 2.
+						"--no-push", "--image-format=oci", "--oci-layout-path=/out/image", "--destination=" + req.Image,
+						"--snapshot-mode=redo", "--single-snapshot=false", "--cleanup",
+						// Offline: the base comes from /cache (filled by `base`); no credential helpers.
+						"--cache=true", "--cache-dir=/cache", "--cache-repo=oci:/kaniko/cache-repo",
+						"--cache-run-layers=false", "--cache-copy-layers=false", "--credential-helpers=",
+					},
+					"resources": map[string]any{"requests": withDiskRequest(res), "limits": res},
+					"volumeMounts": []any{mount("workspace", "/workspace"), mount("out", "/out"),
+						ro(mount("base-cache", "/cache")), ro(mount("pinned", "/pinned"))},
+				},
+				map[string]any{
+					"name": "prepare-output", "image": craneDebugImage,
+					"command": []any{"/busybox/sh", "-c", buildOutputScript},
+					"securityContext": map[string]any{
+						"runAsUser": int64(0), "runAsGroup": int64(0),
+						"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
+						"capabilities": map[string]any{"drop": []any{"ALL"}},
+					},
+					"resources":    map[string]any{"requests": withDiskRequest(small), "limits": small},
+					"volumeMounts": []any{mount("out", "/out")},
+				},
+			},
+			"containers": []any{map[string]any{
+				"name": "push", "image": craneImage,
+				"args":         []any{"push", "/out/image", req.Image, "--image-refs", "/dev/termination-log"},
+				"env":          []any{map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}, registryTrustEnv},
+				"resources":    map[string]any{"requests": withDiskRequest(small), "limits": map[string]any{"cpu": "1", "memory": "512Mi", "ephemeral-storage": disk}},
+				"volumeMounts": []any{ro(mount("out", "/out")), mount("push-secret", "/docker"), mount("registry-ca", "/registry-ca")},
+			}},
+			"volumes": volumes,
+		},
+	}
+	if req.operation != "" {
+		for _, obj := range []map[string]any{cm, pod} {
+			obj["metadata"].(map[string]any)["annotations"] = map[string]any{AnnotationBuildOperation: req.operation, AnnotationBuildNonce: req.nonce, AnnotationBuildBase: req.Base, AnnotationBuildDest: req.Image}
+		}
+	}
+	return cm, pod
+}
+
+func mount(name, at string) map[string]any { return map[string]any{"name": name, "mountPath": at} }
+
+// StartBuild creates the build's ConfigMap and Pod. The project's namespace comes first (its quota untouched): the
+// registry's account sync derives the project's accounts from it and writes the build Secret the pod mounts, so a
+// project's first build waits up to one sync pass (30 s) for that volume.
+func (s *Service) StartBuild(ctx context.Context, req BuildRequest) error {
+	r, err := s.cfg.Build.Resources(BuildResources{CPU: req.CPU, MemoryGiB: req.MemoryGiB, DiskGiB: req.DiskGiB})
+	if err != nil {
+		return err
+	}
+	req.CPU, req.MemoryGiB, req.DiskGiB = r.CPU, r.MemoryGiB, r.DiskGiB
+	if s.requireBuildPins || req.Pins != nil {
+		op, nonce, err := req.Pins.Consume(req.ProjectID, req.Base, req.Image)
+		if err != nil {
+			return fmt.Errorf("sandbox: committed build pins required: %w", err)
+		}
+		req.operation, req.nonce = op, nonce
+	}
+	if err := s.ensureTenantNamespace(ctx, req.ProjectID); err != nil {
+		return fmt.Errorf("sandbox: build namespace: %w", err)
+	}
+	cm, pod := BuildObjects(s.cfg, req)
+	if err := s.api.ApplyCore(ctx, "configmaps", cm); err != nil {
+		return fmt.Errorf("sandbox: build config: %w", err)
+	}
+	if err := s.api.ApplyCore(ctx, "pods", pod); err != nil {
+		return fmt.Errorf("sandbox: build pod: %w", err)
+	}
+	if req.BaseAuth != BaseAuthUser {
+		return nil
+	}
+	// The user's credentials go in a Secret created after the pod and owned by it: the pod waits
+	// for the volume, and the Secret goes with the pod (proxcloud cannot delete or read secrets).
+	// If anything fails here, the pod is removed and nothing is left behind.
+	fail := func(err error) error {
+		return fmt.Errorf("sandbox: build credentials: %w", err)
+	}
+	live, err := s.api.GetCore(ctx, "pods", BuildNamespace, buildName(req.BuildID))
+	if err != nil || live == nil {
+		return fail(fmt.Errorf("build pod not found: %v", err))
+	}
+	uid := digStr(live, "metadata", "uid")
+	if uid == "" {
+		return fail(errors.New("build pod has no uid"))
+	}
+	err = s.api.ApplyCore(ctx, "secrets", map[string]any{
+		"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/dockerconfigjson",
+		"metadata": map[string]any{
+			"name": baseSecretName(req.BuildID), "namespace": BuildNamespace,
+			"labels": map[string]any{LabelManagedBy: ManagedByValue, LabelBuild: req.BuildID},
+			"ownerReferences": []any{map[string]any{
+				"apiVersion": "v1", "kind": "Pod", "name": buildName(req.BuildID), "uid": uid,
+			}},
+		},
+		"data": map[string]any{".dockerconfigjson": base64.StdEncoding.EncodeToString(req.BaseDockerConfig)},
+	})
+	if err != nil {
+		return fail(err)
+	}
+	return nil
+}
+
+// Build states as E2B reports them.
+const (
+	BuildWaiting  = "waiting"
+	BuildBuilding = "building"
+	BuildReady    = "ready"
+	BuildError    = "error"
+)
+
+// BuildState is the live state of a build pod.
+type BuildState struct {
+	Status     string
+	Digest     string // pushed image digest (ready only)
+	Reason     string // error only
+	Step       string // container that failed
+	StartedAt  string
+	FinishedAt string
+	Pod        registrypins.BuildPodEvidence
+	PodReason  string
+	PodMessage string
+	Stages     []BuildStage
+}
+
+// BuildPodState reads the build pod. A missing pod is reported as (nil, nil).
+func (s *Service) BuildPodState(ctx context.Context, projectID, buildID string) (*BuildState, error) {
+	pod, err := s.api.GetCore(ctx, "pods", BuildNamespace, buildName(buildID))
+	if err != nil || pod == nil {
+		return nil, err
+	}
+	if digStr(pod, "metadata", "labels", LabelProject) != projectID {
+		return nil, nil
+	}
+	return buildStateOf(pod), nil
+}
+
+func buildStateOf(pod map[string]any) *BuildState {
+	st := &BuildState{Pod: registrypins.BuildPodEvidence{UID: digStr(pod, "metadata", "uid"), Operation: digStr(pod, "metadata", "annotations", AnnotationBuildOperation), Nonce: digStr(pod, "metadata", "annotations", AnnotationBuildNonce), BaseRef: digStr(pod, "metadata", "annotations", AnnotationBuildBase), DestinationRef: digStr(pod, "metadata", "annotations", AnnotationBuildDest), Phase: digStr(pod, "status", "phase")}, StartedAt: digStr(pod, "status", "startTime"), PodReason: digStr(pod, "status", "reason"), PodMessage: buildPodMessage(pod), Stages: buildStages(pod)}
+	for _, key := range []string{"initContainerStatuses", "containerStatuses"} {
+		for _, cs := range containerStatuses(pod, key) {
+			st.FinishedAt = max(st.FinishedAt, digStr(cs, "state", "terminated", "finishedAt"))
+		}
+	}
+	switch digStr(pod, "status", "phase") {
+	case "Pending":
+		st.Status = BuildWaiting
+		if st.StartedAt != "" {
+			st.Status = BuildBuilding
+		}
+	case "Running":
+		st.Status = BuildBuilding
+	case "Succeeded":
+		st.Status = BuildReady
+		for _, cs := range containerStatuses(pod, "containerStatuses") {
+			if str(cs["name"]) == "push" {
+				st.Digest = digestOf(digStr(cs, "state", "terminated", "message"))
+				st.FinishedAt = digStr(cs, "state", "terminated", "finishedAt")
+			}
+		}
+		if st.Digest == "" {
+			st.Status, st.Reason = BuildError, "the image was built but its digest was not reported"
+		}
+	default: // Failed, Unknown
+		st.Status = BuildError
+		for _, stage := range st.Stages {
+			if stage.ExitCode != nil && *stage.ExitCode != 0 && st.Step == "" {
+				st.Step, st.Reason = stage.Phase, stageFailure(stage)
+			}
+		}
+		switch st.PodReason {
+		case "DeadlineExceeded":
+			st.Reason = fmt.Sprintf("the build did not finish within %s (DeadlineExceeded)", BuildTimeout)
+		case "Evicted":
+			st.Reason = "the build was evicted (Evicted): " + st.PodMessage
+		default:
+			if st.PodReason != "" {
+				st.Reason = strings.TrimSpace(st.Reason + " (" + st.PodReason + ")")
+			}
+		}
+		if st.Reason == "" {
+			st.Reason = "the build failed"
+		}
+	}
+	return st
+}
+
+func stepLabel(container string) string {
+	switch container {
+	case "fetch":
+		return "fetching the build context"
+	case "base":
+		return "pulling the base image"
+	case "kaniko":
+		return "a build step"
+	case "prepare-output":
+		return "preparing the built image"
+	case "push":
+		return "pushing the image"
+	}
+	return container
+}
+
+// digestOf extracts sha256:… from crane output (repo@sha256:… or a bare digest).
+func digestOf(refs string) string {
+	for _, line := range strings.Fields(refs) {
+		if strings.HasPrefix(line, "sha256:") {
+			return line
+		}
+		if _, d, ok := strings.Cut(line, "@"); ok && strings.HasPrefix(d, "sha256:") {
+			return d
+		}
+	}
+	return ""
+}
+
+func containerStatuses(pod map[string]any, key string) []map[string]any {
+	raw, _ := dig(pod, "status", key).([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, r := range raw {
+		if m, ok := r.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// BuildLogs returns the build's output in container order, newest maxLines.
+func (s *Service) BuildLogs(ctx context.Context, buildID string, maxLines int) []string {
+	var lines []string
+	for _, c := range []string{"fetch", "base", "kaniko", "prepare-output", "push"} {
+		text, err := s.api.PodLogs(ctx, BuildNamespace, buildName(buildID), c, maxLines)
+		if err != nil {
+			continue
+		}
+		for _, l := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+			if l != "" {
+				lines = append(lines, "["+c+"] "+RedactBuildText(l))
+			}
+		}
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return lines
+}
+
+// DeleteBuild removes a build's pod and ConfigMap (absent = success).
+func (s *Service) DeleteBuild(ctx context.Context, buildID string) error {
+	if err := s.api.DeleteCore(ctx, "pods", BuildNamespace, buildName(buildID)); err != nil {
+		return err
+	}
+	return s.api.DeleteCore(ctx, "configmaps", BuildNamespace, buildName(buildID))
+}
+
+// buildData is the cache payload of a running or finished build: billed like a sandbox of the
+// build's size (BillingResource "sandbox", template "build:<id>"), hidden from sandbox lists.
+func buildData(pod map[string]any) map[string]any {
+	st := buildStateOf(pod)
+	k := firstInitContainer(pod, "kaniko")
+	d := map[string]any{
+		"kind":      "build",
+		"name":      "build " + digStr(pod, "metadata", "labels", LabelTemplateID),
+		"template":  "build:" + digStr(pod, "metadata", "labels", LabelTemplateID),
+		"cpu":       intOf(dig(k, "resources", "limits", "cpu")),
+		"memoryGiB": memGiB(dig(k, "resources", "limits", "memory")),
+		"diskGiB":   memGiB(dig(k, "resources", "limits", "ephemeral-storage")),
+		"status":    StatusPending,
+	}
+	// Pod startTime is set before image pull; pending pulls are not billable. The earliest
+	// actual container start covers fetch/base/kaniko/push under the reserved build size.
+	started := buildRunningSince(pod)
+	if started != "" {
+		d["runningSince"] = started
+		d["status"] = StatusRunning
+	}
+	if st.Status == BuildReady || st.Status == BuildError {
+		end := st.FinishedAt
+		if end == "" {
+			end = time.Now().UTC().Format(time.RFC3339)
+		}
+		if started != "" {
+			d["status"] = StatusDeleted
+			d["endedAt"] = end
+		}
+	}
+	return d
+}
+
+func buildRunningSince(pod map[string]any) string {
+	first := ""
+	for _, key := range []string{"initContainerStatuses", "containerStatuses"} {
+		for _, cs := range containerStatuses(pod, key) {
+			for _, state := range []string{"state", "lastState"} {
+				for _, phase := range []string{"running", "terminated"} {
+					at := digStr(cs, state, phase, "startedAt")
+					if at != "" && (first == "" || at < first) {
+						first = at
+					}
+				}
+			}
+		}
+	}
+	return first
+}
+
+func firstInitContainer(pod map[string]any, name string) map[string]any {
+	cs, _ := dig(pod, "spec", "initContainers").([]any)
+	for _, c := range cs {
+		if m, ok := c.(map[string]any); ok && str(m["name"]) == name {
+			return m
+		}
+	}
+	return map[string]any{}
+}
+
+// ListBuilds returns build pods as cache payloads, including finished builds for billing.
+// It must not delete them: only the platform, after a durable diagnostics archive (or
+// explicit capture-loss record), can safely clean up a build pod.
+func (s *Service) ListBuilds(ctx context.Context, projectID string) (map[string]map[string]any, error) {
+	pods, err := s.api.ListPods(ctx, BuildNamespace, LabelManagedBy+"="+ManagedByValue+","+LabelProject+"="+projectID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]map[string]any{}
+	for _, p := range pods {
+		if digStr(p, "metadata", "labels", "proxcloud.io/sandbox-import") == "true" {
+			continue // imports have no Kaniko compute usage; finalized by the template job
+		}
+		d := buildData(p)
+		out[digStr(p, "metadata", "name")] = d
+	}
+	return out, nil
+}
+
+// ActiveBuildWorkers is admission-only, not billing. Imports and snapshot assembly
+// count alongside Kaniko workers, including pods not yet assigned a phase.
+func (s *Service) ActiveBuildWorkers(ctx context.Context, projectID string) (map[string]bool, error) {
+	pods, err := s.api.ListPods(ctx, BuildNamespace, LabelManagedBy+"="+ManagedByValue+","+LabelProject+"="+projectID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, pod := range pods {
+		if digStr(pod, "metadata", "labels", LabelManagedBy) != ManagedByValue || digStr(pod, "metadata", "labels", LabelProject) != projectID {
+			continue
+		}
+		phase := digStr(pod, "status", "phase")
+		if phase != "Succeeded" && phase != "Failed" {
+			if id := digStr(pod, "metadata", "labels", LabelBuild); id != "" {
+				out[id] = true
+			}
+		}
+	}
+	return out, nil
+}
+
+// BuildData returns one build's cache payload (nil when the pod is gone).
+func (s *Service) BuildData(ctx context.Context, buildID string) (map[string]any, error) {
+	pod, err := s.api.GetCore(ctx, "pods", BuildNamespace, buildName(buildID))
+	if err != nil || pod == nil {
+		return nil, err
+	}
+	if digStr(pod, "metadata", "labels", "proxcloud.io/sandbox-import") == "true" {
+		return nil, nil
+	}
+	return buildData(pod), nil
+}
+
+// BuildResourceID is the cache external id of a build (its pod name).
+func BuildResourceID(buildID string) string { return buildName(buildID) }
+
+func hasDotDot(p string) bool {
+	for _, part := range strings.Split(p, "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// withDiskRequest is r with the ephemeral-storage request a build container makes (buildDiskRequest).
+func withDiskRequest(r map[string]any) map[string]any {
+	disk := buildDiskRequest
+	if n := memGiB(r["ephemeral-storage"]); n > 0 && n < 2 {
+		disk = fmt.Sprintf("%dGi", n)
+	}
+	out := map[string]any{"ephemeral-storage": disk}
+	for k, v := range r {
+		if k != "ephemeral-storage" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// SnapshotRequest appends a sandbox's filesystem changes (one gzip tar) as a layer on Base.
+type SnapshotRequest struct {
+	ProjectID, TemplateID, BuildID string
+	Base                           string // the sandbox's image (pinned)
+	Image                          string // destination ref, without digest
+	LayerURL                       string // where the fetch step downloads the layer (proxcloud, per-build token)
+}
+
+// SnapshotObjects renders the pod that turns a snapshot layer into an image: fetch the layer,
+// then `crane append` it onto the sandbox's image and push. No customer code runs in it.
+func SnapshotObjects(cfg Config, req SnapshotRequest) map[string]any {
+	cfg = cfg.WithDefaults()
+	labels := map[string]any{
+		LabelManagedBy: ManagedByValue, LabelProject: req.ProjectID,
+		LabelBuild: req.BuildID, LabelTemplateID: req.TemplateID, "proxcloud.io/sandbox-kind": "snapshot",
+	}
+	small := map[string]any{"cpu": "100m", "memory": "128Mi"}
+	work := map[string]any{"cpu": "1", "memory": "1Gi", "ephemeral-storage": buildDiskLimit}
+	return map[string]any{
+		"apiVersion": "v1", "kind": "Pod",
+		"metadata": map[string]any{"name": buildName(req.BuildID), "namespace": BuildNamespace, "labels": labels},
+		"spec": map[string]any{
+			"runtimeClassName": cfg.RuntimeClass,
+			// A paused sandbox only exists as this snapshot: retry transient fetch/push failures
+			// (kubelet backoff) until the deadline instead of failing on the first one.
+			"restartPolicy":                 "OnFailure",
+			"automountServiceAccountToken":  false,
+			"enableServiceLinks":            false,
+			"activeDeadlineSeconds":         int64(BuildTimeout.Seconds()),
+			"terminationGracePeriodSeconds": int64(5),
+			"initContainers": []any{map[string]any{
+				"name": "fetch", "image": fetchImage,
+				"command":      []any{"sh", "-c", `set -eu; echo "fetching snapshot layer"; curl -fsS --connect-timeout 10 --retry 3 -o /work/layer.tar.gz "$LAYER_URL"; ls -l /work/layer.tar.gz`},
+				"env":          []any{map[string]any{"name": "LAYER_URL", "value": req.LayerURL}},
+				"resources":    map[string]any{"requests": small, "limits": small},
+				"volumeMounts": []any{mount("work", "/work")},
+			}},
+			"containers": []any{map[string]any{
+				"name": "push", "image": craneDebugImage,
+				"command": []any{"sh", "-c", `set -eu; crane append --platform linux/amd64 -b "$BASE" -f /work/layer.tar.gz -t "$DEST" > /dev/termination-log; cat /dev/termination-log`},
+				"env": []any{
+					map[string]any{"name": "BASE", "value": req.Base}, map[string]any{"name": "DEST", "value": req.Image},
+					map[string]any{"name": "DOCKER_CONFIG", "value": "/docker"}, registryTrustEnv,
+				},
+				"resources":    map[string]any{"requests": withDiskRequest(small), "limits": work},
+				"volumeMounts": []any{mount("work", "/work"), mount("push-secret", "/docker"), mount("registry-ca", "/registry-ca")},
+			}},
+			"volumes": []any{
+				registryTrustVolume,
+				map[string]any{"name": "work", "emptyDir": map[string]any{"sizeLimit": buildDiskLimit}},
+				map[string]any{"name": "push-secret", "secret": map[string]any{
+					"secretName": BuildSecretFor(req.ProjectID),
+					"items":      []any{map[string]any{"key": ".dockerconfigjson", "path": "config.json"}},
+				}},
+			},
+		},
+	}
+}
+
+// StartSnapshot creates the snapshot pod.
+func (s *Service) StartSnapshot(ctx context.Context, req SnapshotRequest) error {
+	if err := s.api.ApplyCore(ctx, "pods", SnapshotObjects(s.cfg, req)); err != nil {
+		return fmt.Errorf("sandbox: snapshot pod: %w", err)
+	}
+	return nil
+}
+
+// SnapshotFS streams the sandbox's filesystem changes since boot (gzip tar) into w, by running
+// `sandbox-init -snapshot` in it.
+func (s *Service) SnapshotFS(ctx context.Context, projectID, id string, w io.Writer) error {
+	obj, err := s.get(ctx, projectID, id)
+	if err != nil {
+		return err
+	}
+	if !conditionTrue(obj, "Ready") {
+		return ErrNotRunning
+	}
+	code, stderr, err := s.api.ExecStream(ctx, NamespaceFor(projectID), id, "main", []string{RuntimeMountPath + "/sandbox-init", "-snapshot"}, w, 4096)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("sandbox: snapshot exited %d: %s", code, strings.TrimSpace(stderr))
+	}
+	return nil
+}
+
+// SavedSandbox is what resuming a paused sandbox needs: its CR as it was, minus server state.
+func (s *Service) SavedSandbox(ctx context.Context, projectID, id string) (map[string]any, error) {
+	obj, err := s.get(ctx, projectID, id)
+	if err != nil {
+		return nil, err
+	}
+	meta, _ := obj["metadata"].(map[string]any)
+	keep := map[string]any{}
+	for _, k := range []string{"name", "namespace", "labels", "annotations"} {
+		if v, ok := meta[k]; ok {
+			keep[k] = v
+		}
+	}
+	if ann, ok := keep["annotations"].(map[string]any); ok {
+		delete(ann, AnnotationRunningSince) // the resumed sandbox starts billing anew
+	}
+	return map[string]any{"apiVersion": obj["apiVersion"], "kind": obj["kind"], "metadata": keep, "spec": obj["spec"]}, nil
+}
+
+// ResumeSandbox recreates a paused sandbox from its saved CR on image (the snapshot), ending at
+// shutdown, with its egress policy. The sandbox keeps its id, tokens, env and metadata. It counts
+// against the same limits as a create: the provider's concurrency limits and the project quota q
+// (nil = none), checked against the live cluster.
+func (s *Service) ResumeSandbox(ctx context.Context, projectID string, saved map[string]any, image string, shutdown time.Time, q *ProjectQuota) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Scope and deadline validation precede the capability result, with no saved
+	// map mutation or cluster access. Copied annotations do not grant admission.
+	if !savedProjectRE.MatchString(projectID) || digStr(saved, "metadata", "namespace") != NamespaceFor(projectID) || digStr(saved, "metadata", "labels", LabelProject) != projectID || !ValidID(digStr(saved, "metadata", "name")) {
+		return ErrNotFound
+	}
+	if digStr(saved, "metadata", "annotations", AnnotationStartupPending) == "true" {
+		armed, err := time.Parse(time.RFC3339, digStr(saved, "spec", "shutdownTime"))
+		if err != nil || !s.now().Before(armed) {
+			return context.DeadlineExceeded
+		}
+	} else if shutdown.IsZero() || !s.now().Before(shutdown) {
+		return context.DeadlineExceeded
+	}
+	if err := CheckSavedRuntimeImage(s.cfg, projectID, image); err != nil {
+		return err
+	}
+	cr := saved
+	// Saved annotations are historical, never an authority for the current cap.
+	mbps := s.cfg.WithDefaults().EgressMbps
+	if t, ok := s.cfg.Templates[digStr(cr, "metadata", "annotations", AnnotationTemplate)]; ok && digStr(cr, "metadata", "annotations", "proxcloud.io/curated-template") == "true" && t.EgressMbps > 0 {
+		mbps = t.EgressMbps
+	}
+	if pm, ok := dig(cr, "spec", "podTemplate", "metadata").(map[string]any); ok {
+		ann, _ := pm["annotations"].(map[string]any)
+		if ann == nil {
+			ann = map[string]any{}
+			pm["annotations"] = ann
+		}
+		ann["kubernetes.io/egress-bandwidth"] = fmt.Sprintf("%dM", mbps)
+	}
+	if digStr(cr, "metadata", "namespace") != NamespaceFor(projectID) || digStr(cr, "metadata", "labels", LabelProject) != projectID {
+		return ErrNotFound
+	}
+	id := digStr(cr, "metadata", "name")
+	if !ValidID(id) {
+		return ErrNotFound
+	}
+	if err := s.EnsureProjectNamespace(ctx, projectID, nil); err != nil {
+		return err
+	}
+	if err := s.checkResumeLimits(ctx, projectID, cr, q); err != nil {
+		return err
+	}
+	if n := gpuCount(cr); n > 0 {
+		if err := s.checkGPUCapacity(ctx, &GPURequest{Model: digStr(cr, "spec", "podTemplate", "spec", "nodeSelector", LabelGPU), Count: n}); err != nil {
+			return err
+		}
+	}
+	if c := firstContainer(cr); len(c) > 0 {
+		c["image"] = image
+		setSandboxIDEnv(c, id)
+		// Saved CRs predate the explicit PID1 args guard.
+		cmd, _ := c["command"].([]any)
+		if len(cmd) == 1 && str(cmd[0]) == RuntimeMountPath+"/sandbox-init" {
+			c["args"] = []any{"--serve"}
+		}
+	}
+	// The snapshot image is private even when the sandbox started from a public one.
+	if ps, ok := dig(cr, "spec", "podTemplate", "spec").(map[string]any); ok && s.cfg.pullsFromRegistry(image) {
+		ps["imagePullSecrets"] = []any{map[string]any{"name": TemplatePullSecret}}
+	}
+	if spec, ok := cr["spec"].(map[string]any); ok {
+		if digStr(cr, "metadata", "annotations", AnnotationStartupPending) == "true" {
+			armed, err := time.Parse(time.RFC3339, str(spec["shutdownTime"]))
+			if err != nil || !s.now().Before(armed) {
+				return context.DeadlineExceeded
+			}
+		} else {
+			spec["shutdownTime"] = shutdown.UTC().Format(time.RFC3339)
+		}
+	}
+	if err := s.api.ApplyCR(ctx, CRGroup, CRVersion, CRPlural, cr); err != nil {
+		return fmt.Errorf("sandbox: resume: %w", err)
+	}
+	var n *Network
+	if raw := digStr(cr, "metadata", "annotations", AnnotationNetwork); raw != "" {
+		n = &Network{}
+		_ = json.Unmarshal([]byte(raw), n)
+	}
+	return s.applyEgress(ctx, projectID, id, n)
+}
+
+// checkResumeLimits is CreateSandbox's limit check for a saved sandbox coming back (resume or fork).
+// ponytail: like the create, checked then created without a lock, so parallel resumes can pass together; the
+// namespace ResourceQuota is the backstop.
+func (s *Service) checkResumeLimits(ctx context.Context, projectID string, saved map[string]any, q *ProjectQuota) error {
+	live, err := s.live(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("sandbox: list: %w", err)
+	}
+	l := s.cfg.WithDefaults().Limits
+	if len(live)+1 > l.MaxConcurrent {
+		return fmt.Errorf("%w: at most %d sandboxes may run at once", ErrQuotaExceeded, l.MaxConcurrent)
+	}
+	t := TemplateOfSaved(saved)
+	spec := &Spec{CPU: t.CPU, MemoryGiB: t.MemoryGiB, GPU: t.GPU}
+	if spec.GPUs() > 0 {
+		held := 0
+		for _, it := range live {
+			held += gpuCount(it)
+		}
+		if held+spec.GPUs() > l.MaxConcurrentGPUs {
+			return fmt.Errorf("%w: at most %d GPUs may be held at once (%d in use)", ErrQuotaExceeded, l.MaxConcurrentGPUs, held)
+		}
+	}
+	if q != nil {
+		return q.check(live, spec)
+	}
+	return nil
+}
+
+// CloneSaved turns a saved sandbox into a new one (fork): new id, new envd and traffic tokens,
+// same template, size, env, metadata and network. The result is ready for ResumeSandbox.
+func CloneSaved(saved map[string]any) (clone map[string]any, id string) {
+	b, _ := json.Marshal(saved)
+	_ = json.Unmarshal(b, &clone)
+	id = newSandboxID()
+	if meta, ok := clone["metadata"].(map[string]any); ok {
+		meta["name"] = id
+	}
+	if pm, ok := dig(clone, "spec", "podTemplate", "metadata").(map[string]any); ok {
+		if l, ok := pm["labels"].(map[string]any); ok {
+			l[LabelSandboxID] = id
+		}
+		if a, ok := pm["annotations"].(map[string]any); ok && a[AnnotationTrafficToken] != nil {
+			a[AnnotationTrafficToken] = newToken()
+		}
+	}
+	if env, ok := firstContainer(clone)["env"].([]any); ok {
+		for _, e := range env {
+			if m, ok := e.(map[string]any); ok && str(m["name"]) == "PROXCLOUD_ENVD_ACCESS_TOKEN" {
+				m["value"] = newToken()
+			}
+		}
+	}
+	setSandboxIDEnv(firstContainer(clone), id)
+	return clone, id
+}
+
+// TemplateOfSaved is the custom-template view of a saved sandbox (for snapshot templates): its
+// size, GPU and the start/ready/user/workdir settings sandbox-init received.
+func TemplateOfSaved(saved map[string]any) Template {
+	c := firstContainer(saved)
+	t := Template{CPU: intOf(dig(c, "resources", "limits", "cpu")), MemoryGiB: memGiB(dig(c, "resources", "limits", "memory"))}
+	if n := gpuCount(saved); n > 0 {
+		t.GPU = &GPURequest{Model: digStr(saved, "spec", "podTemplate", "spec", "nodeSelector", LabelGPU), Count: n}
+	}
+	if env, ok := c["env"].([]any); ok {
+		for _, e := range env {
+			m, _ := e.(map[string]any)
+			switch str(m["name"]) {
+			case "PROXCLOUD_START_CMD":
+				t.StartCmd = str(m["value"])
+			case "PROXCLOUD_READY_CMD":
+				t.ReadyCmd = str(m["value"])
+			case "PROXCLOUD_DEFAULT_USER":
+				t.User = str(m["value"])
+			case "PROXCLOUD_DEFAULT_WORKDIR":
+				t.Workdir = str(m["value"])
+			case "PROXCLOUD_START_AS_ROOT":
+				t.StartAsRoot = str(m["value"]) == "1"
+			}
+		}
+	}
+	return t
+}
+
+// ImageOfSaved is the image a saved sandbox runs.
+func ImageOfSaved(saved map[string]any) string { return str(firstContainer(saved)["image"]) }
+
+// PayloadOf is the cache payload of a saved (or any) Sandbox CR.
+func PayloadOf(cr map[string]any) map[string]any { return sandboxData(cr) }
+
+// ownsBuild independently fences each object before cleanup/diagnostics.
+func (s *Service) ownsBuild(obj map[string]any, projectID, buildID string) bool {
+	return digStr(obj, "metadata", "labels", LabelManagedBy) == ManagedByValue && digStr(obj, "metadata", "labels", LabelProject) == projectID && digStr(obj, "metadata", "labels", LabelBuild) == buildID
+}
+
+// CancelBuild intentionally refuses nonterminal/unknown workers. Only confirmed terminal
+// evidence plus independent object ownership permits deletion; deadline expiry is not evidence.
+func (s *Service) CancelBuild(ctx context.Context, projectID, buildID string) error {
+	st, err := s.BuildPodState(ctx, projectID, buildID)
+	if err != nil {
+		return err
+	}
+	if st == nil {
+		return fmt.Errorf("sandbox: build state is unknown; retain operation pins")
+	}
+	if st.Pod.Phase != "Succeeded" && st.Pod.Phase != "Failed" {
+		return fmt.Errorf("sandbox: build worker is still active; retain operation pins")
+	}
+	return s.CleanupBuild(ctx, projectID, buildID)
+}

@@ -21,15 +21,65 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: '1.26.11'
           cache: true
-      - name: Unit tests
+      - uses: azure/setup-helm@v5
+      - name: Unit tests (including required offline chart renders)
+        env:
+          CI: "1"
         run: go test ./...
       - name: Integration tests (testcontainers PostgreSQL)
-        run: go test -tags=integration ./test/integration/...
+        run: go test -tags=integration ./test/integration/... ./cmd/api/...
+
+  # tsc and vite build stay green on a bundle that renders a white page, so open the real build.
+  spa-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [client, admin]
+    defaults:
+      run:
+        working-directory: web/${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.22.2"
+          cache: npm
+          cache-dependency-path: web/${{ matrix.app }}/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      # No --with-deps: the runner image already has the libraries, and apt fetched the fonts at 20 kB/s.
+      - run: npx playwright install --only-shell chromium
+      - run: npm run test:smoke
 
   # Fails on any old-brand string in file contents or file names. The pattern uses
   # character classes so this file never matches itself.
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3
+        with:
+          version: "1.16.2"
+      - name: Validate Packer expressions and plugin configuration (offline)
+        run: bash images/packer/validate.sh
+      - name: Check the installer
+        working-directory: installer
+        run: |
+          make test
+          .venv/bin/python ../web/tests/test_runtime_baseline.py
+          .venv/bin/python ../.github/scripts/tests/test_release_policy.py
+          ANSIBLE_CONFIG=ansible.cfg .venv/bin/ansible-playbook -i inventory/example/hosts.yml -e pc_site_dir=/tmp/site -e pc_node=x --syntax-check \
+            playbooks/site.yml playbooks/46-rustfs-upgrade.yml playbooks/70-add-node.yml playbooks/71-remove-node.yml
+      - name: Check the image pipeline never runs on PR or fork events
+        run: |
+          python3 -m py_compile images/build.py
+          python3 -m unittest discover -s images/tests -v
+          ! grep -nE '^\s*(pull_request|pull_request_target|issue_comment|workflow_run):' .github/workflows/vm-templates.yml .github/workflows/k8s-node-templates.yml
+
   rebrand-gate:
     runs-on: ubuntu-latest
     env:
@@ -49,14 +99,16 @@ jobs:
       # Names from the previous cloud backend (the backend is Proxmox VE). Terms match at a
       # word start, so camelCase leftovers are caught too; a few short terms also need a word
       # end to skip ordinary English words. The env-key alternative is case-sensitive.
-      # Exclusions: the C4 changelog (history may name the old backend) and countries.json
-      # (place names that collide with the terms).
+      # Exclusions: the C4 changelog (history may name the old backend), countries.json
+      # (place names that collide with the terms) and vendored upstream manifests (the
+      # Kubernetes pod schema names other platforms' in-tree volume plugins).
       - name: Check for previous-backend terms
         env:
           LEGACY_BACKEND_PATTERN: '\b(o[p]enstack|k[e]ystone|n[o]va\b|n[e]utron|g[l]ance|c[i]nder|s[w]ift|o[c]tavia|h[e]at\b|g[n]occhi|c[e]ilometer|b[a]rbican|m[a]nila|m[a]gnum|d[e]signate\b|k[o]lla|v[h]i\b|g[o]phercloud)|(?-i:\bO[S]_(AUTH_URL|REGION_NAME|USERNAME|PASSWORD|USER_DOMAIN_NAME|PROJECT_NAME|PROJECT_DOMAIN_NAME|APPLICATION_CREDENTIAL))'
         run: |
           if rg -i -n --hidden --no-heading -e "$LEGACY_BACKEND_PATTERN" -g '!.git/' \
-               -g '!docs/architecture/c4/CHANGELOG.md' -g '!internal/platform/billing/countries.json' .; then
+               -g '!docs/architecture/c4/CHANGELOG.md' -g '!internal/platform/billing/countries.json' \
+               -g '!deploy/sandbox-cluster/agent-sandbox/**' .; then
             echo "::error::previous-backend terms found"; exit 1
           fi
           if git ls-files | rg -i -e "$LEGACY_BACKEND_PATTERN"; then

@@ -1,0 +1,203 @@
+# Stage 45 (plan S20): the object store. mode vm (default): a RustFS VM with an XFS data disk, on the NAS
+# capacity store when there is one, else the default profile's storage. truenas-app: the TrueNAS catalog
+# app. external / ceph-rgw: only records an endpoint that already exists (stage 60 registers ceph-rgw).
+# The public endpoint is s3.<domain> through the mgmt ingress, with the admin paths blocked; port 9000
+# and the console stay on the mgmt network.
+- name: Create the RustFS VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  vars:
+    v: "{{ pc.object_store.vm }}"
+    node: "{{ v.node or pc_nodes[0] }}"
+    capacity_store: "{{ pc_profiles.capacity.storages['*'] | default('') }}"
+    data_store: "{{ v.data_storage or capacity_store or pc_default_storage }}"
+    data_store_type: "{{ pc_storage_rows | selectattr('storage', 'eq', data_store) | map(attribute='type') | first }}"
+  tasks:
+    - name: Skip unless the mode is vm
+      ansible.builtin.meta: end_play
+      when: pc.object_store.mode != 'vm'
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Find the newest template on the node
+      ansible.builtin.uri: {url: "{{ pc_api }}/cluster/resources?type=vm"}
+      register: pc_vms
+    - name: Pick the template
+      vars:
+        copies: >-
+          {{ pc_vms.json.data | selectattr('template', 'defined') | selectattr('template', 'eq', 1)
+             | selectattr('node', 'eq', node) | selectattr('tags', 'defined')
+             | selectattr('tags', 'search', 'pc-img-' ~ v.os ~ '(;|$)') | selectattr('tags', 'search', 'pc-v-')
+             | sort(attribute='tags') | list }}
+      ansible.builtin.set_fact: {pc_rustfs_source: "{{ (copies | last).vmid }}"}
+    - name: Create the VM
+      ansible.builtin.include_tasks: tasks/clone-vm.yml
+      vars:
+        vm:
+          vmid: "{{ v.vmid }}"
+          name: "{{ v.name }}"
+          node: "{{ node }}"
+          source_vmid: "{{ pc_rustfs_source }}"
+          storage: "{{ v.storage or pc_default_storage }}"
+          cores: "{{ v.cores }}"
+          memory: "{{ v.memory }}"
+          disk: "{{ v.disk }}"
+          bridge: "{{ v.bridge }}"
+          vlan: "{{ v.vlan }}"
+          user: "{{ v.user }}"
+          ip: "{{ v.ip }}"
+          gateway: "{{ v.gateway }}"
+          nameserver: "{{ v.nameserver }}"
+          ssh_key: "{{ pc_ssh_public_key }}"
+          tags: proxcloud;proxcloud-rustfs
+          data_disk: "{{ v.data_disk }}"
+          data_storage: "{{ data_store }}"
+          # qcow2 where the store has no snapshots of its own: make rustfs-upgrade snapshots the VM.
+          data_format: "{{ ',format=qcow2' if data_store_type in ['nfs', 'cifs', 'dir'] else '' }}"
+    - name: Add the VM to the inventory
+      ansible.builtin.add_host:
+        name: pc-rustfs
+        groups: rustfs
+        ansible_host: "{{ v.ip | split('/') | first }}"
+        ansible_user: "{{ v.user }}"
+        ansible_ssh_common_args: "{{ pc.mgmt.ssh_common_args }}"
+      changed_when: false
+
+- name: Install RustFS
+  hosts: rustfs
+  become: true
+  gather_facts: false
+  vars:
+    version: "{{ pc_rustfs_version | default(pc_ver.rustfs) }}"
+    sha256: "{{ pc_ver.rustfs_sha256[version] }}"
+    disk: /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1
+  tasks:
+    - name: Wait for the VM
+      ansible.builtin.wait_for_connection: {timeout: 300}
+    - name: Wait for cloud-init
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+    - name: Install the tools
+      ansible.builtin.apt: {name: [xfsprogs, unzip, curl], update_cache: true, cache_valid_time: 86400}
+    - name: Is the data disk formatted
+      ansible.builtin.command: blkid -s TYPE -o value {{ disk }}
+      changed_when: false
+      failed_when: false
+      register: pc_fs
+    - name: Format the data disk
+      when: pc_fs.stdout != 'xfs'
+      ansible.builtin.command: mkfs.xfs -f {{ disk }}
+      changed_when: true
+    - name: Mount the data disk
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: ' /data xfs '
+        line: "{{ disk }} /data xfs defaults,noatime,nofail 0 2"
+      register: pc_fstab
+    - name: Apply the mount
+      when: pc_fstab is changed
+      ansible.builtin.shell: mkdir -p /data && systemctl daemon-reload && mount /data && mkdir -p /data/rustfs0
+      changed_when: true
+    - name: Read the installed version
+      ansible.builtin.command: /usr/local/bin/rustfs --version
+      changed_when: false
+      failed_when: false
+      register: pc_rustfs_have
+    - name: Install the pinned binary
+      when: version not in pc_rustfs_have.stdout | default('')
+      ansible.builtin.shell: |
+        set -eu
+        curl -fsSLo /tmp/rustfs.zip https://github.com/rustfs/rustfs/releases/download/{{ version }}/rustfs-linux-x86_64-musl-v{{ version }}.zip
+        echo '{{ sha256 }}  /tmp/rustfs.zip' | sha256sum -c -
+        unzip -o -q /tmp/rustfs.zip rustfs -d /usr/local/bin
+        chmod 0755 /usr/local/bin/rustfs
+        rm -f /tmp/rustfs.zip
+      changed_when: true
+      notify: Restart rustfs
+    - name: Configure RustFS
+      no_log: true
+      ansible.builtin.copy:
+        dest: /etc/default/rustfs
+        mode: "0600"
+        content: |
+          RUSTFS_ACCESS_KEY={{ pc_rustfs_access_key }}
+          RUSTFS_SECRET_KEY={{ pc_rustfs_secret_key }}
+          RUSTFS_VOLUMES=/data/rustfs0
+          RUSTFS_ADDRESS=:9000
+          RUSTFS_CONSOLE_ENABLE=true
+          RUSTFS_CONSOLE_ADDRESS=:9001
+          RUSTFS_OBS_LOGGER_LEVEL=error
+          RUSTFS_FTP_ENABLE=false
+          RUSTFS_FTPS_ENABLE=false
+          RUSTFS_SFTP_ENABLE=false
+          RUSTFS_WEBDAV_ENABLE=false
+      notify: Restart rustfs
+    - name: Install the service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/rustfs.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=RustFS object store
+          After=network-online.target data.mount
+          Wants=network-online.target
+          RequiresMountsFor=/data
+          [Service]
+          EnvironmentFile=/etc/default/rustfs
+          ExecStart=/usr/local/bin/rustfs server
+          Restart=always
+          RestartSec=5
+          LimitNOFILE=1048576
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart rustfs
+    - name: Start RustFS
+      ansible.builtin.systemd_service: {name: rustfs, enabled: true, state: started, daemon_reload: true}
+    - name: Apply pending restarts
+      ansible.builtin.meta: flush_handlers
+    - name: Wait for the S3 port
+      ansible.builtin.wait_for: {port: 9000, timeout: 120}
+    - name: Create the internal buckets
+      ansible.builtin.script: files/rustfs-bootstrap.py
+      environment:
+        S3_URL: http://127.0.0.1:9000
+        ROOT_ACCESS: "{{ pc_rustfs_access_key }}"
+        ROOT_SECRET: "{{ pc_rustfs_secret_key }}"
+        BUCKETS: "{{ {'cnpg-backups': lookup('ansible.builtin.password', pc_gen ~ '/rustfs-cnpg-secret ' ~ pc_alnum), 'etcd-snapshots': lookup('ansible.builtin.password', pc_gen ~ '/rustfs-etcd-secret ' ~ pc_alnum)} | to_json }}"
+      args: {executable: python3}
+      register: pc_buckets
+      changed_when: (pc_buckets.stdout | from_json).changed
+      no_log: true
+  handlers:
+    - name: Restart rustfs
+      ansible.builtin.systemd_service: {name: rustfs, state: restarted, daemon_reload: true}
+
+- name: Install RustFS as a TrueNAS app
+  import_playbook: 45-truenas-app.yml
+
+- name: Publish the endpoint
+  hosts: mgmt[0]
+  become: true
+  gather_facts: false
+  vars:
+    upstream_ip: "{{ (pc.object_store.vm.ip | split('/') | first) if pc.object_store.mode == 'vm' else pc.nas.host }}"
+    upstream_port: "{{ 9000 if pc.object_store.mode == 'vm' else pc.object_store.truenas_app.s3_port }}"
+    manifest: "{{ lookup('ansible.builtin.template', 'templates/s3-ingress.yml.j2') }}"
+  tasks:
+    - name: Publish s3.{{ pc_domain }}
+      when: pc.object_store.mode in ['vm', 'truenas-app']
+      ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {apply_name: s3 endpoint}
+    - name: Record the object store
+      delegate_to: localhost
+      become: false
+      ansible.builtin.copy:
+        dest: "{{ pc_gen }}/object-store.json"
+        mode: "0600"
+        content: >-
+          {{ {'mode': pc.object_store.mode,
+              'endpoint': pc.object_store.endpoint or (pc_scheme ~ '://s3.' ~ pc_domain),
+              'internalEndpoint': pc.object_store.endpoint or ('http://' ~ upstream_ip ~ ':' ~ upstream_port)} | to_nice_json }}

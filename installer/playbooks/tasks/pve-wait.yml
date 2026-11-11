@@ -1,0 +1,9 @@
+# Wait for a Proxmox task. vars: wait_upid, wait_node
+- name: Wait for the Proxmox task
+  ansible.builtin.uri:
+    url: "{{ pc_api }}/nodes/{{ wait_node }}/tasks/{{ wait_upid | urlencode }}/status"
+  register: pc_task
+  until: pc_task.json.data.status == 'stopped'
+  retries: 180
+  delay: 5
+  failed_when: pc_task.json.data.status == 'stopped' and pc_task.json.data.exitstatus != 'OK'

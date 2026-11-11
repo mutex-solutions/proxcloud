@@ -4,6 +4,10 @@ A price plan is how ProxCloud knows what to bill. Think of a plan as a bag of pr
 
 ## Building a plan
 
+![Current Create price plan dialog filled with synthetic example values](/docs-img/price-plans-create.png)
+
+*Current admin UI captured locally with mock data; no plan was saved.*
+
 Head to **System → Price plans** and create one.
 
 | Field | Meaning |
@@ -19,6 +23,14 @@ You can clone an existing plan, which duplicates all of its rules — the fastes
 A billing profile is rated against the `PUBLIC` plan unless a `SCOPED` plan has been assigned to it, in which case the scoped plan wins. Reach for scoped plans when you have negotiated or segment-specific pricing, and let the public plan cover everyone else.
 
 ## Pricing rules
+
+![Current rule list with synthetic instance, volume and public IPv4 pricing](/docs-img/price-plan-rules.png)
+
+*Example rates are illustrative mock data, not a published rate card.*
+
+![Current Add rule dialog showing instance pricing attribute options](/docs-img/price-plan-rule-create.png)
+
+*Local mock illustration; no rule was submitted.*
 
 Open a plan to work on its rules.
 

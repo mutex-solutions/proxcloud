@@ -1,83 +1,136 @@
-// Package chargefanout is the RabbitMQ charge fan-out: publish one message per ACTIVE billing
-// profile, and a listener consumes per profile.
-// It is the multi-pod alternative to billingjob's in-process Charge loop: the cron fires
-// Publish (work-list → N messages); any pod's Consumer drains the queue, charging one profile
-// per message so a slow/failing profile can't stall the rest and work spreads across pods.
-//
-// Gated behind PROXCLOUD_JOBS_RABBIT_FANOUT (default off → in-process Charge). The charge math is
-// unchanged (the consumer calls billingjob.ChargeProfileByID = the same per-profile body).
+// Package chargefanout adapts native billing to primary PostgreSQL durable jobs.
+// One frozen original-cycle message per profile; no broker and no processing-time
+// cutoff. Publishing retries are safe, including a partially published profile list.
 package chargefanout
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
+	"fmt"
+	"io"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/mutex-solutions/proxcloud/internal/durablejobs"
+	"github.com/mutex-solutions/proxcloud/internal/platform/billingjob"
 )
 
-// Queue is the charge work queue.
-const Queue = "proxcloud.charge"
-
-// Msg is one unit of charge work: charge ProfileID for the given TimeUnit.
-type Msg struct {
-	ProfileID string `json:"profileId"`
-	TimeUnit  string `json:"timeUnit"`
-}
-
-// Publisher publishes a message body to a queue (satisfied by *amqp.Client).
-type Publisher interface {
-	Publish(ctx context.Context, queue string, body []byte) error
-}
-
-// Consumer subscribes a handler to a queue, returning a stop func (satisfied by *amqp.Client).
-type Consumer interface {
-	Consume(queue string, handler func(body []byte) error) (func() error, error)
-}
-
-// Charger charges one profile (satisfied by *billingjob.Service).
-type Charger interface {
-	ChargeProfileByID(ctx context.Context, profileID, timeUnit string, now time.Time) error
-}
-
-// ProfileLister returns the ACTIVE profile ids to fan out (satisfied by *billingjob.Service).
 type ProfileLister interface {
-	ActiveProfileIDs(ctx context.Context) ([]string, error)
+	ActiveProfileIDs(context.Context) ([]string, error)
+}
+type Charger interface {
+	ChargeProfileByID(context.Context, string, string, time.Time) error
+}
+type Enqueuer interface {
+	Enqueue(context.Context, string, string, []byte, int) (string, error)
 }
 
-// Publish fans out one charge message per ACTIVE profile. Returns the count published.
-func Publish(ctx context.Context, pub Publisher, lister ProfileLister, timeUnit string) (int, error) {
+func Publish(ctx context.Context, q Enqueuer, lister ProfileLister, unit string, original time.Time) (int, error) {
+	// Validate cadence even with an empty profile list.
+	if _, err := billingjob.NewCycle("validation", unit, original); err != nil {
+		return 0, err
+	}
 	ids, err := lister.ActiveProfileIDs(ctx)
 	if err != nil {
 		return 0, err
 	}
+	n := 0
 	for _, id := range ids {
-		body, err := json.Marshal(Msg{ProfileID: id, TimeUnit: timeUnit})
+		cycle, err := billingjob.NewCycle(id, unit, original)
 		if err != nil {
-			return 0, err
+			return n, err
 		}
-		if err := pub.Publish(ctx, Queue, body); err != nil {
-			return 0, err
+		body, err := json.Marshal(cycle)
+		if err != nil {
+			return n, err
 		}
+		if _, err = q.Enqueue(ctx, durablejobs.Billing, cycle.Key(), body, 8); err != nil {
+			return n, err
+		}
+		n++
 	}
-	return len(ids), nil
+	return n, nil
+}
+func strict(body []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return durablejobs.ErrPayload
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return durablejobs.ErrPayload
+	}
+	return nil
+}
+func Decode(j *durablejobs.Job) (billingjob.Cycle, error) {
+	var c billingjob.Cycle
+	if j.Kind != durablejobs.Billing || strict(j.Payload, &c) != nil || c.Validate() != nil || c.Key() != j.Key {
+		return c, durablejobs.ErrPayload
+	}
+	return c, nil
+}
+func Handler(charger Charger) durablejobs.Handler {
+	return func(ctx context.Context, j *durablejobs.Job) error {
+		c, err := Decode(j)
+		if err != nil {
+			return err
+		}
+		return charger.ChargeProfileByID(ctx, c.ProfileID, c.TimeUnit, c.CycleAt)
+	}
 }
 
-// StartConsumer subscribes to the charge queue and charges one profile per message. The
-// returned stop func unsubscribes (call on shutdown).
-func StartConsumer(con Consumer, charger Charger, log *slog.Logger) (func() error, error) {
-	if log == nil {
-		log = slog.Default()
-	}
-	return con.Consume(Queue, func(body []byte) error {
-		var m Msg
-		if err := json.Unmarshal(body, &m); err != nil {
-			log.Error("chargefanout: bad message", "err", err)
-			return err
+type probe struct {
+	Version int    `json:"version"`
+	Nonce   string `json:"nonce"`
+}
+
+func Validate(j *durablejobs.Job) error {
+	switch j.Kind {
+	case durablejobs.Billing:
+		_, err := Decode(j)
+		return err
+	case durablejobs.Selftest:
+		var p probe
+		if strict(j.Payload, &p) != nil || p.Version != 1 || p.Nonce != j.Key {
+			return durablejobs.ErrPayload
 		}
-		if err := charger.ChargeProfileByID(context.Background(), m.ProfileID, m.TimeUnit, time.Now().UTC()); err != nil {
-			log.Error("chargefanout: charge profile", "profileId", m.ProfileID, "timeUnit", m.TimeUnit, "err", err)
-			return err
+		if _, err := uuid.Parse(p.Nonce); err != nil {
+			return durablejobs.ErrPayload
 		}
 		return nil
-	})
+	default:
+		return durablejobs.ErrPayload
+	}
+}
+func SelftestHandler(_ context.Context, j *durablejobs.Job) error { return Validate(j) }
+
+// Selftest exercises the running worker's real enqueue->claim->DB ACK path. It
+// touches no billing data and can be executed with scheduler disabled.
+func Selftest(ctx context.Context, q *durablejobs.Store) (string, error) {
+	nonce := uuid.NewString()
+	body, _ := json.Marshal(probe{Version: 1, Nonce: nonce})
+	id, err := q.Enqueue(ctx, durablejobs.Selftest, nonce, body, 3)
+	if err != nil {
+		return "", err
+	}
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		j, err := q.Get(ctx, id)
+		if err != nil {
+			return id, err
+		}
+		switch j.State {
+		case "succeeded":
+			return id, nil
+		case "dead":
+			return id, fmt.Errorf("selftest job is dead")
+		}
+		select {
+		case <-ctx.Done():
+			return id, ctx.Err()
+		case <-tick.C:
+		}
+	}
 }

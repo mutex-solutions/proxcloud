@@ -3,8 +3,6 @@ package billingprovider
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -113,58 +111,21 @@ func TestExternalProviderDoesNotFallBack(t *testing.T) {
 
 // --- native provider ---------------------------------------------------------------------------
 
-type stubPublisher struct{ published int }
-
-func (p *stubPublisher) Publish(context.Context, string, []byte) error { p.published++; return nil }
-
-// TestNativeProviderName pins the reported name, which the debug trigger echoes back so an operator
-// can see which engine actually ran.
-func TestNativeProviderName(t *testing.T) {
-	if got := NewNative(nil, nil, false, nil).Name(); got != Native {
-		t.Errorf("Name() = %q, want %q", got, Native)
-	}
-}
-
-// TestNativeProviderSkipsFanoutWhenDisabled: with fan-out off the provider must not touch the
-// broker at all, so a deployment with no RabbitMQ still charges.
-func TestNativeProviderSkipsFanoutWhenDisabled(t *testing.T) {
-	pub := &stubPublisher{}
-	called := false
-	p := &nativeProvider{
-		broker: func() Publisher { called = true; return pub },
-		fanout: false,
-		log:    discardLogger(),
-	}
-	// job is nil, so reaching the in-process charge would panic — which is exactly what we want to
-	// detect if the fan-out branch is wrongly skipped in the other direction.
-	defer func() { _ = recover() }()
-	_ = p.Charge(context.Background(), "minute", time.Now().UTC())
-	if called {
-		t.Error("the broker must not be consulted when fan-out is disabled")
-	}
-	if pub.published != 0 {
-		t.Error("nothing should have been published")
-	}
-}
-
-// TestNativeProviderFansOutWhenBrokerIsUp.
-func TestNativeProviderFansOutWhenBrokerIsUp(t *testing.T) {
-	pub := &stubPublisher{}
-	p := &nativeProvider{
-		job:    nil, // never reached: fan-out short-circuits before the in-process charge
-		broker: func() Publisher { return pub },
-		fanout: true,
-		log:    discardLogger(),
-	}
-	// chargefanout.Publish asks the job for the active profile ids, and a nil job would panic —
-	// so this also proves the fan-out path is what ran.
-	defer func() {
-		if recover() == nil && pub.published == 0 {
-			t.Error("expected the fan-out path to be taken")
+func TestNativeDurableDispatchNoFallback(t *testing.T) {
+	boom := errors.New("primary queue unavailable")
+	original := time.Date(2026, 10, 31, 23, 59, 0, 0, time.UTC)
+	calls := 0
+	p := NewNative(func(_ context.Context, unit string, at time.Time) error {
+		calls++
+		if unit != "minute" || !at.Equal(original) {
+			t.Fatal("original dispatch identity changed")
 		}
-	}()
-	_ = p.Charge(context.Background(), "minute", time.Now().UTC())
+		return boom
+	})
+	if p.Name() != Native || !errors.Is(p.Charge(context.Background(), "minute", original), boom) || calls != 1 {
+		t.Fatal("native queue error silently bypassed")
+	}
+	if NewNative(nil).Charge(context.Background(), "minute", original) == nil {
+		t.Fatal("missing queue accepted")
+	}
 }
-
-// discardLogger keeps test output clean.
-func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

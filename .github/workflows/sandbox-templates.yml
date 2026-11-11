@@ -1,0 +1,127 @@
+# Builds the built-in sandbox template images (deploy/templates) and pushes them to ghcr.io/mutex-solutions/sandbox-*.
+# On main it then opens a pull request that pins the new digests in deploy/templates/images.yaml; once merged, the
+# installer mirrors them into each site's sandbox registry and the portal moves the templates over once every node
+# pre-pulled them (docs/managed-sandbox.md §6). A pull request only proves the images build.
+name: sandbox-templates
+
+on:
+  push:
+    branches: [main]
+    paths: ["deploy/templates/**", "!deploy/templates/images.yaml", "cmd/mcp-gateway/**", ".github/workflows/sandbox-templates.yml"]
+  pull_request:
+    paths: ["deploy/templates/**", "!deploy/templates/images.yaml", "cmd/mcp-gateway/**", ".github/workflows/sandbox-templates.yml"]
+  schedule:
+    - cron: "0 3 * * 1" # weekly, for OS security updates of the bases
+  workflow_dispatch:
+    inputs:
+      templates:
+        description: "Space-separated template names (empty = all)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-templates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Pull requests (whose code is not reviewed yet) build with a read-only token: nothing is pushed.
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require full source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C "$GITHUB_WORKSPACE" sparse-checkout disable
+          test "$(git -C "$GITHUB_WORKSPACE" config --bool --get core.sparseCheckout)" = false
+          test -x "$GITHUB_WORKSPACE/deploy/templates/build.sh" && test -f "$GITHUB_WORKSPACE/deploy/templates/images.yaml"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker
+      - name: Build
+        run: deploy/templates/build.sh # PUSH unset: the images stay local
+
+  build:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write       # the pin branch
+      packages: write       # ghcr
+      pull-requests: write  # the pin pull request
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require full source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C "$GITHUB_WORKSPACE" sparse-checkout disable
+          test "$(git -C "$GITHUB_WORKSPACE" config --bool --get core.sparseCheckout)" = false
+          test -x "$GITHUB_WORKSPACE/deploy/templates/build.sh" && test -f "$GITHUB_WORKSPACE/deploy/templates/images.yaml"
+
+      # The docker driver: images built earlier in the run (base) are visible to the ones built FROM them.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        env:
+          TEMPLATES: ${{ github.event.inputs.templates }}
+          PUSH: "1"
+        run: |
+          set -euo pipefail
+          export TAG="$(date -u +%Y%m%d)-${GITHUB_SHA::7}" REGISTRY=ghcr.io/mutex-solutions
+          # shellcheck disable=SC2086
+          deploy/templates/build.sh $TEMPLATES | tee digests.txt
+          {
+            echo "### Sandbox template images"
+            echo '```'
+            cat digests.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # One pull request per run on a branch of its own; a reviewer merges it like any other change.
+      - name: Pin the new digests
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 - digests.txt deploy/templates/images.yaml <<'PY'
+          import re, sys
+          built = dict(l.split() for l in open(sys.argv[1]) if "@sha256:" in l)
+          path = sys.argv[2]
+          lines = open(path).read().splitlines()
+          seen = set()
+          for i, l in enumerate(lines):
+              m = re.match(r"^  ([a-z0-9-]+): ", l)
+              if m and m.group(1) in built:
+                  lines[i] = "  %s: %s" % (m.group(1), built[m.group(1)])
+                  seen.add(m.group(1))
+          lines += ["  %s: %s" % (n, built[n]) for n in sorted(built) if n not in seen]
+          open(path, "w").write("\n".join(lines) + "\n")
+          PY
+          if git diff --quiet -- deploy/templates/images.yaml; then echo "pins already current"; exit 0; fi
+          b="sandbox-templates/${GITHUB_SHA::7}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$b"
+          git commit -m "chore(sandbox): pin sandbox template images ${GITHUB_SHA::7}" -- deploy/templates/images.yaml
+          git push origin "$b"
+          gh pr create --base main --head "$b" --title "chore(sandbox): pin sandbox template images ${GITHUB_SHA::7}" \
+            --body "Digests built by run ${GITHUB_RUN_ID} from ${GITHUB_SHA}. Merging lets the installer mirror them into the sandbox registry (docs/managed-sandbox.md §6)."

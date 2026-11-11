@@ -12,13 +12,14 @@ import (
 // codec in pgdoc. _id is the config-as-code slug string (admin-created plans are a
 // later slice). Read-only here; admin CRUD + bill/credit persistence land separately.
 type Repo struct {
-	db          *pgdoc.DB
-	plans       *pgdoc.Store
-	rules       *pgdoc.Store
-	taxes       *pgdoc.Store
-	bills       *pgdoc.Store
-	ensureOnce  sync.Once
-	ensureError error
+	db            *pgdoc.DB
+	plans         *pgdoc.Store
+	rules         *pgdoc.Store
+	taxes         *pgdoc.Store
+	bills         *pgdoc.Store
+	ensureMu      sync.Mutex
+	billsReady    bool
+	receiptsReady bool
 }
 
 func NewRepo(db *pgdoc.DB) *Repo {
@@ -31,12 +32,20 @@ func NewRepo(db *pgdoc.DB) *Repo {
 	}
 }
 
-// ensureBills creates the bill table on first use. The bill lock/create path
-// runs inside a transaction as its first statement, where the store's
-// on-demand table-create can't fire, so the table must exist beforehand.
+// ensureBills creates the bill table on first use. The charge runs inside a
+// transaction, where the store's on-demand table-create can't fire, so the
+// table must exist beforehand.
 func (r *Repo) ensureBills(ctx context.Context) error {
-	r.ensureOnce.Do(func() { r.ensureError = r.bills.Ensure(ctx) })
-	return r.ensureError
+	r.ensureMu.Lock()
+	defer r.ensureMu.Unlock()
+	if r.billsReady {
+		return nil
+	}
+	if err := r.bills.Ensure(ctx); err != nil {
+		return err
+	}
+	r.billsReady = true
+	return nil
 }
 
 // FindPricePlanByID loads a price plan by id (nil when absent).

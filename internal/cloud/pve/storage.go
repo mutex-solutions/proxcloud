@@ -13,7 +13,10 @@ type StorageDef struct {
 	Nodes   string `json:"nodes"`   // comma-separated node restriction; "" = all nodes
 	Shared  int    `json:"shared"`
 	Disable int    `json:"disable"`
-	Sparse  int    `json:"sparse"` // zfspool / zfs: thin-provisioned zvols
+	Sparse  int    `json:"sparse"`  // zfspool / zfs: thin-provisioned zvols
+	Server  string `json:"server"`  // nfs / cifs / glusterfs: the file server's address
+	Monhost string `json:"monhost"` // rbd / cephfs on an external Ceph: its monitors; empty = the nodes' own Ceph
+	Portal  string `json:"portal"`  // iscsi / iscsidirect: the target's address
 }
 
 // ListStorage lists cluster storage definitions (validates admin storage-profile config).
@@ -55,6 +58,8 @@ type StorageContent struct {
 	Size    int64  `json:"size"`
 	Used    int64  `json:"used"`
 	VMID    int    `json:"vmid"`
+	CTime   int64  `json:"ctime"` // backups: when it was taken
+	Notes   string `json:"notes"` // backups: vzdump's notes-template, rendered
 }
 
 // StorageContents lists a storage's content, optionally filtered by content type

@@ -1,0 +1,57 @@
+# Stage 20: OS templates, built from the first mgmt host (it can reach the build VM). The pipeline in
+# .github/workflows/vm-templates.yml runs the same images/build.py on a schedule; an existing version is
+# left alone here unless `make templates`.
+- name: Work out where templates go
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.uri: {validate_certs: false, headers: "{{ pc_pve_headers | default({}) }}", return_content: true, timeout: 60}
+  tasks:
+    - name: Log in
+      ansible.builtin.include_tasks: tasks/pve-login.yml
+    - name: Decide the nodes
+      ansible.builtin.set_fact:
+        pc_template_nodes: "{{ pc_nodes | pc_template_nodes(pc_default_shared | bool, pc.templates.per_node) }}"
+
+- name: Build the templates
+  hosts: mgmt[0]
+  gather_facts: false
+  vars:
+    lh: "{{ hostvars.localhost }}"
+    jobs: "{{ pc.templates.os | product(lh.pc_template_nodes) | list }}"
+    force: "{{ pc_templates_force | default(false) | bool }}"
+  tasks:
+    - name: Install packer
+      become: true
+      ansible.builtin.shell: |
+        set -eu
+        apt-get update -qq && apt-get install -y -qq unzip curl python3
+        curl -fsSLo /tmp/packer.zip https://releases.hashicorp.com/packer/{{ pc_ver.packer }}/packer_{{ pc_ver.packer }}_linux_amd64.zip
+        unzip -o -q /tmp/packer.zip -d /usr/local/bin packer
+        rm -f /tmp/packer.zip
+      args:
+        creates: /usr/local/bin/packer
+    - name: Copy the image pipeline
+      ansible.builtin.copy:
+        src: "{{ pc_repo_root }}/images/"
+        dest: /tmp/proxcloud-images/
+        mode: preserve
+    - name: Build a template
+      # ponytail: serial, one build VM IP; a per-node parallel build needs a pool of IPs.
+      ansible.builtin.command:
+        argv: >-
+          {{ ['python3', '/tmp/proxcloud-images/build.py', 'build', '--os', item[0], '--node', item[1],
+              '--storage', lh.pc_template_storage, '--import-storage', lh.pc_import_storage,
+              '--bridge', pc.templates.bridge, '--vlan', pc.templates.vlan | string,
+              '--build-ip', pc.templates.build_ip, '--build-gateway', pc.templates.build_gateway,
+              '--nameserver', pc.templates.nameserver or pc.templates.build_gateway,
+              '--keep', pc.templates.keep | string] + ([] if force else ['--if-missing']) }}
+      environment:
+        PVE_URL: "{{ pc_portal_pve_url }}"
+        PVE_TOKEN_ID: images@pve!packer
+        PVE_TOKEN_SECRET: "{{ lookup('ansible.builtin.file', pc_gen ~ '/token-packer') }}"
+      register: pc_build
+      changed_when: pc_build.rc == 0 and (pc_build.stdout | from_json).built
+      loop: "{{ jobs }}"
+      loop_control: {label: "{{ item | join(' on ') }}"}

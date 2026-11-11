@@ -13,12 +13,20 @@ updates:
     directory: "/web/client"
     schedule:
       interval: "weekly"
+    groups:
+      # react and react-dom must carry the same version: a mismatch blanks the SPA at load.
+      react:
+        patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
 
   # Operator console (React SPA)
   - package-ecosystem: "npm"
     directory: "/web/admin"
     schedule:
       interval: "weekly"
+    groups:
+      # react and react-dom must carry the same version: a mismatch blanks the SPA at load.
+      react:
+        patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
 
   # GitHub Actions workflows
   - package-ecosystem: "github-actions"

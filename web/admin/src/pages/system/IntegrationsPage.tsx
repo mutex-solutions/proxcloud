@@ -45,7 +45,7 @@ const STATS_PATH = "/admin/integrations/stats"
 
 type FieldType = "text" | "number" | "password" | "textarea" | "switch"
 type Field = { key: string; label: string; type: FieldType; placeholder?: string }
-type VendorSchema = { config: Field[]; secret: Field[] }
+type VendorSchema = { config: Field[]; secret: Field[]; help?: React.ReactNode }
 
 // Per-vendor field schemas (keys match the Go create/update reads exactly). Any vendor without an
 // entry falls back to raw config/secret JSON textareas so all 4 catalog entries are configurable.
@@ -59,6 +59,24 @@ const SCHEMAS: Record<string, VendorSchema> = {
       { key: "callback", label: "Use callback flow", type: "switch" },
     ],
     secret: [{ key: "privateKey", label: "Secret key", type: "password", placeholder: "sk_…" }],
+  },
+  Airwallex: {
+    config: [
+      { key: "clientId", label: "Client ID", type: "text" },
+      { key: "minDeposit", label: "Minimum deposit", type: "number", placeholder: "10" },
+      { key: "sandbox", label: "Sandbox (demo) account", type: "switch" },
+    ],
+    secret: [{ key: "apiKey", label: "API key", type: "password" }],
+    help: (
+      <>
+        Create a scoped API key in the Airwallex web app (Developer → API keys) with Payment Acceptance access;
+        use a sandbox account from{" "}
+        <a href="https://www.sandbox.airwallex.com" target="_blank" rel="noreferrer" className="underline">
+          https://www.sandbox.airwallex.com
+        </a>{" "}
+        with Sandbox mode ON for testing.
+      </>
+    ),
   },
   SMTP: {
     config: [
@@ -142,7 +160,9 @@ export default function IntegrationsPage() {
     onSuccess: () => toast.success("Health check passed"),
     onError: (e) => {
       const msg = (e as Error).message || ""
-      toast.message(/implement|seam|501/i.test(msg) ? "Health check not available for this provider" : `Health check failed: ${msg}`)
+      if (/implement|seam|501/i.test(msg)) toast.message("Health check not available for this provider")
+      // the API's 400 already reads "Health check failed: …" — don't double the prefix
+      else toast.error(/^health check failed/i.test(msg) ? msg : `Health check failed: ${msg}`)
     },
   })
 
@@ -420,6 +440,7 @@ function ConfigDialog({ target, onClose, onSaved }: { target: EditTarget; onClos
         <div className="space-y-3">
           {schema ? (
             <>
+              {schema.help && <p className="text-sm text-muted-foreground">{schema.help}</p>}
               {schema.config.map((f) => (
                 <FieldInput key={f.key} field={f} value={config[f.key]} onChange={(v) => setCfg(f.key, v)} />
               ))}

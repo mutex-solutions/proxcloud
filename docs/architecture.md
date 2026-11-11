@@ -4,7 +4,7 @@ ProxCloud is a self-service private-cloud portal for Proxmox VE: it lets custome
 manage cloud resources (servers, volumes, networks, security groups, public
 IPs, buckets, …), and it meters that usage, prices it, bills it,
 and collects payment. It is a single Go service (`proxcloud-api`) fronting a
-PostgreSQL primary datastore, a RabbitMQ broker, an OIDC identity provider
+PostgreSQL primary datastore and durable job engine, an OIDC identity provider
 (Keycloak), and one or more Proxmox VE clusters.
 
 This document is the system-level map: how the process boots, how requests are
@@ -15,7 +15,7 @@ deep dives live in sibling docs:
 - **[auth.md](auth.md)** — token validation, the RBAC permission kernel, the SigV4 admin-API scheme.
 - **[billing.md](billing.md)** — billing profiles, rating/pricing, bills, payments, suspension.
 - **[cloud-integration.md](cloud-integration.md)** — the Proxmox VE client and services, the resource cache, sync, metrics.
-- **[jobs-scheduling.md](jobs-scheduling.md)** — the cron catalog, cross-fleet locking, and the RabbitMQ charge fan-out.
+- **[jobs-scheduling.md](jobs-scheduling.md)** — the cron catalog, cross-fleet locking, and PostgreSQL durable billing work. Existing-site broker retention: [migration runbook](postgres-jobs-migration.md).
 
 **Architecture diagrams (C4):** [architecture/c4/](architecture/c4/README.md) — context, containers, components and code views with Implemented/Planned status, plus a change log of why the architecture changed.
 
@@ -30,45 +30,57 @@ flowchart TB
         ADMIN["Admin SPA<br/>(operator console)"]
         MCPC["MCP clients<br/>(agents / tools)"]
         M2M["Machine-to-machine<br/>(SigV4 API keys)"]
+        E2BC["E2B SDK clients<br/>(sandbox API keys)"]
     end
 
     subgraph ProxCloud["proxcloud-api (Go process)"]
-        APP["App router :8080<br/>/api/v1, /admin-api/v1, /mcp"]
+        APP["App router :8080<br/>/api/v1, /admin-api/v1, /mcp, /e2b"]
         MGMT["Mgmt router :8081<br/>/actuator/*, /debug/*"]
         JOBS["Scheduler + jobs<br/>(in-process crons)"]
     end
 
     KC["Keycloak<br/>(OIDC issuer / IdP)"]
     PG[("PostgreSQL<br/>primary datastore")]
-    RABBIT["RabbitMQ<br/>(charge fan-out)"]
+    WORK["Bounded durable workers<br/>owner + epoch, DB-time CAS"]
     PVE["Proxmox VE cluster(s)<br/>REST :8006: VMs, SDN, firewall, storage"]
     RGW["Ceph RGW<br/>S3 + Admin Ops"]
     SMTP["SMTP relay<br/>(transactional mail)"]
+    SBX["Sandbox cluster<br/>(gVisor, Kubernetes API)"]
 
     UI -->|bearer JWT| APP
     ADMIN -->|bearer JWT| APP
     MCPC -->|JWT or pk.sk key| APP
     M2M -->|AWS SigV4| APP
+    E2BC -->|e2b_ key| APP
 
     APP -->|validate tokens / JWKS| KC
     APP <-->|read / write| PG
-    APP -->|publish / consume| RABBIT
+    APP -->|enqueue| PG
+    WORK <-->|claim / retry / complete on primary| PG
     APP -->|"provision / read"| PVE
     APP -->|"buckets, keys"| RGW
     JOBS <--> PG
-    JOBS -->|per-profile charge msgs| RABBIT
+    JOBS -->|per-profile native billing jobs| WORK
     JOBS -->|"sync"| PVE
     APP -->|send templated mail| SMTP
+    APP -->|"sandboxes, templates"| SBX
+    JOBS -->|"sandbox state"| SBX
 ```
+
+Not drawn: the other provider kinds the app router reaches the same way, per
+provider on demand (RustFS, TrueNAS, PowerDNS, and the Kamaji and DBaaS management
+clusters through ArgoCD); see [cloud-integration.md](cloud-integration.md).
 
 The process listens on **two ports**. `:8080` is the public API surface behind
 the ingress; `:8081` is the management/operations port (health probes, on-demand
 job triggers, billing callbacks) and is never exposed to the internet.
 
 PostgreSQL is connected **eagerly at startup** — dialed and pinged before the
-service listens, so a failed connection aborts the boot — while RabbitMQ and OIDC
-discovery happen on background goroutines, so those unreachable dependencies
-degrade a capability rather than blocking the boot. Proxmox and other cloud
+service listens, so a failed connection aborts the boot. It must be the **writable
+primary**, including the queue/lease/finance path. OIDC discovery happens on
+background goroutines; no RabbitMQ connection or readiness block exists. Optional
+`PROXCLOUD_DB_READ_URL` serves history/metrics only (empty means primary; configured
+reader failure returns 503 for those reads). Proxmox and other cloud
 clients are not dialed at boot at all: they are built per provider on demand.
 
 ---
@@ -92,7 +104,8 @@ sequenceDiagram
 
     M->>Cfg: load YAML + env, Validate() (fail-closed)
     M->>PG: pgdoc.Connect (dial + ping, fatal on failure)
-    M->>BG: maintainRabbit (connect + auto-reconnect loop)
+    M->>PG: ensure durable-job schema on writable primary
+    M->>BG: start bounded durable workers (always, even scheduler off)
     M->>BG: oidc.Discover → authn.SetRealms (per-realm verifiers)
     M->>Wire: build repos, services, handlers per domain
     Note over Wire: message.SeedSystemTemplates (idempotent)
@@ -100,7 +113,7 @@ sequenceDiagram
     alt PROXCLOUD_JOBS_SCHEDULER_ENABLED
         M->>Sched: Start (crons begin firing)
     else default
-        Note over Sched: wired but dormant (no timed billing)
+        Note over Sched: no NEW timed work; existing durable jobs still run
     end
     M->>Srv: serve :8080 (AppRouter) + :8081 (MgmtRouter)
     Srv-->>M: block until SIGINT/SIGTERM → graceful Shutdown
@@ -123,8 +136,9 @@ Key properties of the boot, all visible in `run()`:
   cannot be reached.
 - **Jobs are wired but gated.** Every cron is registered, but the scheduler only
   `Start()`s when `PROXCLOUD_JOBS_SCHEDULER_ENABLED=true`. A plain deploy therefore
-  never charges a bill on a timer; operators drive the flow deterministically via
-  the `:8081` `/debug/run-*` triggers when those are enabled.
+  enqueues no new timed billing work. **Workers always start** and finish existing
+  jobs even with both gates off. Operators deliberately expose the `:8081`
+  `/debug/run-*` triggers only on an isolated management port when needed.
 - **Cross-service wiring uses setters to break import cycles.** For example the
   org handler can't import project, so `orgH.SetProjectMemberAdder(projectSvc)`
   injects the project service after both exist. The same pattern wires the
@@ -160,32 +174,37 @@ flowchart LR
   needs a valid credential or gets a `401` with an empty body and
   `WWW-Authenticate: Bearer`. See [auth.md](auth.md).
 
-**Three route surfaces** share the port:
+**Four route surfaces** share the port:
 
 | Surface | Prefix | Auth scheme | Purpose |
 |---|---|---|---|
-| Client + operator API | `/api/v1/*` | OIDC bearer (client & admin realms) | The whole product: account, org, project, billing, cloud, admin. Admin endpoints live under `/api/v1/admin/**` and are gated by an `adminPermission` record, not a separate realm. |
+| Client + operator API | `/api/v1/*` | OIDC bearer (client & admin realms), or a customer's `pk.sk` personal access token | The whole product: account, org, project, billing, cloud, admin. Admin endpoints live under `/api/v1/admin/**` and are gated by an `adminPermission` record, not a separate realm. |
 | Public Admin API | `/admin-api/v1/*` | AWS SigV4 (hmac keys) **or** dedicated admin-api OIDC realm | Machine-to-machine integration surface with snake_case envelopes and keyset pagination. |
-| MCP | `/mcp` | Dual scheme: realm JWT **or** `Bearer pk.sk` key | Model Context Protocol endpoint; tool calls dispatch back through the app router in-process. |
+| MCP | `/mcp` | Dual scheme: realm JWT **or** `Bearer pk.sk` key (a customer's personal access token → client tools, an admin hmac key → admin tools) | Model Context Protocol endpoint; tool calls dispatch back through the app router in-process. |
+| E2B-compatible sandboxes | `/e2b/*` | A project's `e2b_` sandbox API key (`X-API-Key` or bearer) | The E2B SDK's API over the platform's sandboxes ([e2b-compat.md](e2b-compat.md)). |
 
 **Public-path whitelist** (`pkg/auth`, `IsPublic`): exact paths (`/error`,
 `/api/v1/platform-configuration/default`, the billing config country/currency
 lists, the RFC 9728 resource-metadata doc) and prefixes (`/openapi.json`, `/mcp`,
-`/api/v1/auth/`, `/api/v1/download/`, `/api/v1/callbacks/`, `/api/v1/payments/`, `/api/v1/admin/job/`,
-`/api/v1/admin/onboarding/`, `/api/v1/webhooks/`,
-`/api/v1/events/`). These are the webhook, download-token, SSE, and operator
-callback paths that authenticate by their own scheme (token in the URL, SigV4,
-signed webhook) rather than a bearer header.
+`/api/v1/auth/`, `/api/v1/download/`, `/api/v1/nocloud/`, `/api/v1/console/`,
+`/api/v1/callbacks/`, `/api/v1/admin/onboarding/`, `/api/v1/internal/sandboxes/`,
+`/e2b/`). These authenticate by their own scheme rather than a bearer the gate
+checks: a token in the URL (download, VM seed, console), the MCP handler's own
+gate, a sandbox provider's `proxyWakeToken` (the wake call), or a project's `e2b_`
+sandbox API key. `/api/v1/admin/job/` is not public: the gate requires an admin
+credential there.
 
 ### Management router (`:8081`)
 
 A plain `net/http.ServeMux`: `GET /actuator/health` (liveness),
-`GET /actuator/health/readiness` (PostgreSQL ping + RabbitMQ health),
+`GET /actuator/health/readiness` (PostgreSQL; no broker health dependency),
 `GET /actuator/info`, a build probe, the billing-service callbacks (when a shared
 token is configured), and — when jobs are enabled or debug-triggers are on — a family of
-`POST /debug/run-*` triggers to drive crons on demand (sync, metrics, charge,
-collect, dunning, savings expiry, project deletion, HMAC key minting, mail send,
-RabbitMQ self-test).
+`POST /debug/run-*` triggers to drive crons on demand (sync, the Proxmox state,
+task and traffic samples, the sandbox state, builds, auto-pause and registry prune, SSO
+reconcile, metrics, charge, collect, dunning, review, savings expiry, project
+deletion and mail send). HMAC key minting (`gen-hmac-key`) is
+unauthenticated, so only debug-triggers exposes it, never the scheduler alone.
 
 ---
 
@@ -282,7 +301,7 @@ initialized" if absent.
 The code is organized as one Go module (`github.com/mutex-solutions/proxcloud`) with
 `internal/platform/*` domain packages, an `internal/cloud/*` Proxmox / object-store subsystem,
 and a handful of infrastructure packages (`internal/{config,server,oidc,pgdoc,
-amqp,health}`, `pkg/{auth,httpx,textcrypt,money,audit}`).
+health,sandboxproxy}`, `pkg/{auth,httpx,textcrypt,money,audit,billingapi,certfile,safeurl}`).
 
 ```mermaid
 flowchart TB
@@ -293,6 +312,7 @@ flowchart TB
         project["project"]
         rbac["rbac"]
         projectinvite["projectinvite"]
+        sso["sso"]
     end
     subgraph BILL["Billing & payments"]
         billing["billing"]
@@ -301,11 +321,13 @@ flowchart TB
         promotion["promotion"]
         catalog["catalog"]
         billingjob["billingjob"]
-        chargefanout["chargefanout"]
+        durablejobs["durable job engine<br/>bounded workers on primary"]
+        billingprovider["billingprovider<br/>billingclient, billingcallback"]
     end
     subgraph CLOUD["Cloud"]
         externalservice["externalservice"]
-        cloudpkg["internal/cloud/*<br/>(pve, providers, syncjob,<br/>metrics, metricsjob,<br/>billingresource, client, kamaji, dbaas)"]
+        pveflavor["pveflavor"]
+        cloudpkg["internal/cloud/*<br/>(pve, providers, syncjob,<br/>metrics, metricsjob,<br/>billingresource, client, kamaji, dbaas,<br/>sandbox, csigw, truenas, powerdns)"]
     end
     subgraph PLAT["Platform & operations"]
         platformconfig["platformconfig"]
@@ -323,6 +345,7 @@ flowchart TB
         scheduler["scheduler"]
         lock["lock"]
         job["job"]
+        paging["paging"]
     end
 ```
 
@@ -336,6 +359,7 @@ flowchart TB
 | `project` | Project slice: project CRUD, embedded memberships, project-level RBAC, and the client cloud read/write endpoints. |
 | `rbac` | Pure authorization kernel: permission keys, the wildcard permission matcher, and the built-in role→permission tables (no DB). |
 | `projectinvite` | Create/lookup/accept/decline project invitations (TTL-indexed), with the invite email and audit trail. |
+| `sso` | Per-organization SSO: organization identity providers and verified domains in Keycloak, and the guard that refuses a session that must come through its organization's IdP. |
 
 ### Billing & payments
 
@@ -347,14 +371,16 @@ flowchart TB
 | `promotion` | Promotion/deposit config reads and promo-code redemption into promotional credit. |
 | `catalog` | Cloud-catalog config reads: flavor categories, image groups/categories, instance-metadata options (admin-configured document tables). |
 | `billingjob` | The charge-cron driver: load active profiles + services, and rate each billable cloud resource per time unit. |
-| `chargefanout` | The multi-pod alternative to the in-process charge loop: publish one RabbitMQ message per active profile; any pod's consumer drains the queue. |
+| Durable job engine | Persist native per-profile billing work in PostgreSQL with a fixed cutoff, bounded workers, retries and owner+epoch fencing. No broker consumer. Separate bounded mail-outbox/invitation machinery exists, but is not blanket production SMTP delivery or rollout. |
+| `billingprovider`, `billingclient`, `billingcallback` | The charge seam: `native` (in-process engine) or `external` (a separate billing service over `pkg/billingapi`), the client for that service, and its callbacks into ProxCloud (suspend/resume, activate projects, mail). |
 
 ### Cloud
 
 | Module | Responsibility |
 |---|---|
 | `externalservice` | The `externalService` table: one record per provider (Proxmox API token, Ceph RGW keys, Kamaji/DBaaS kubeconfigs) with an encrypted-at-rest `secret` decrypted on read. |
-| `internal/cloud/*` | The cloud subsystem (see §6): `pve` (client, services, networks, firewall, scheduler, sync providers), `providers` (Reconcile), the resource cache + history, `syncjob`, `metrics`/`metricsjob` (Prometheus), `billingresource`, `client` (ceph-s3), `cephcred`, `kamaji`, `dbaas`. Package map: [C3 components](architecture/c4/c3-components.md). |
+| `pveflavor` | The Proxmox flavor catalog (sizes, GPU model and count) servers are created from. |
+| `internal/cloud/*` | The cloud subsystem (see §6): `pve` (client, services, networks, firewall, scheduler, sync providers), `providers` (Reconcile), the resource cache + history, `syncjob`, `metrics`/`metricsjob` (Prometheus), `billingresource`, `client` (ceph-s3), `cephcred`, `kamaji`, `dbaas`, `sandbox` (the sandbox cluster), `csigw` (the CSI gateway), `truenas` (file shares), `powerdns` (DNS zones). Package map: [C3 components](architecture/c4/c3-components.md). |
 
 ### Platform & operations
 
@@ -374,7 +400,9 @@ flowchart TB
 | `crm` | CRM-sync integration point (contacts/segments/user sync) with a stub provider until a CRM is connected. |
 | `scheduler` | The cron engine (seconds-enabled cron) wrapping each job in a cross-fleet lock. |
 | `lock` | The `shedLock`-backed distributed lock so a scheduled job runs once across the pod fleet. |
-| `job` | The operator job-trigger endpoints under `/api/v1/admin/job/*` (whitelisted; runs the in-process job, else returns 202). |
+| `job` | The operator job-trigger endpoints under `/api/v1/admin/job/*` (admin credential required: an hmac key or an admin-realm bearer; runs the in-process job, else returns 202). |
+| `paging` | Keyset pagination helpers shared by the list endpoints. |
+| `internal/sandboxproxy` | sandbox-proxy's routing of `https://<port>-<sandboxId>.<domain>`, the wake call and the certificate sync (`cmd/sandbox-proxy`). |
 
 ---
 
@@ -403,7 +431,7 @@ flowchart LR
   resources, QEMU, storage, SDN, firewall, pools, tasks, PCI mappings) and the
   project-scoped `pve.Service` (create/delete/resize/power servers, project
   templates, volumes, GPU slots, console). Networks (`network.go`) are SDN vnets
-  with per-vnet isolation; security groups are cluster firewall groups
+  with cluster firewall isolation; security groups are cluster firewall groups
   (`firewallsvc.go`); `PickNode` places VMs by capacity, the nodes where the
   storage profile is active, free space on that storage and free GPU slots;
   `capability.go` detects what each storage supports.
@@ -412,27 +440,29 @@ flowchart LR
   pool VMs, disks, templates, owned vnets and groups to cache rows; `Reconcile`
   creates, updates and archives rows against the live list, with a
   `cloudResourceHistory` soft-delete. The types produced are `SERVER`, `VOLUME`,
-  `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`, plus `BUCKET` (Ceph RGW) and
-  `KUBERNETES_CLUSTER` / `DATABASE_CLUSTER` (ArgoCD).
+  `IMAGE`, `KEYPAIR`, `NETWORK`, `SECURITY_GROUP`, `FLOATING_IP` and `LOAD_BALANCER`
+  (Proxmox), `BUCKET` (Ceph RGW, RustFS), `SHARE` (TrueNAS), `DNS_ZONE` (PowerDNS),
+  `KUBERNETES_CLUSTER` / `DATABASE_CLUSTER` (ArgoCD) and `SANDBOX` / `SANDBOX_SNAPSHOT` (the sandbox cluster).
 - **`syncjob`** — every 15 minutes walks every `ENABLED` project and, per attached
   provider and enabled service, reconciles the cache. Write paths update the cache
   directly, and a server GET does a best-effort live refresh.
 - **`client`** — the Ceph RGW (S3 and Admin Ops) client, built with
   `client.NewCephS3`; with `cephcred` it holds the per-project RGW user and keys.
 - **`metrics` / `metricsjob`** — opt-in traffic ingestion from a
-  Prometheus-compatible source per provider (`config.metrics.source`; Proxmox
-  defaults to `none`). Results land in the `usageMetrics` table.
+  source per provider (`config.metrics.source`; Proxmox defaults to `pve`, its
+  public-NIC counters, sampled every minute). Results land in the `usageMetrics` table.
 - **`billingresource`** — the cloud→billing bridge: turns cached resources (plus
   traffic usage) into the priced `BillingResource`s the rating loop consumes:
-  instance (+ instance traffic), volume, bucket, kubernetes cluster, database
-  cluster. The floating-IP and load-balancer providers remain but no Proxmox
-  resource produces those types yet.
+  instance (+ instance traffic, server snapshots, server protection), volume,
+  floating IP, image, bucket, share, kubernetes cluster, database cluster, sandbox
+  and sandbox snapshot. A load balancer bills as the VM, disk and address it is
+  made of.
 - **`kamaji` / `kamajik8s` / `dbaas`** — managed Kubernetes and databases. A
   provider is a management cluster reached over a stored kubeconfig; each
   customer cluster is one ArgoCD `Application` written to that cluster's API.
-  Read, sync and delete work today; creating a cluster or database on a Proxmox
-  provider is planned (stubs `cloud_kamaji_create.go` and
-  `cloud_dbaas_create.go` return an explicit error). Guides:
+  A database's endpoint is a MetalLB address, with no tenant network involved; a
+  cluster's workers land in the project's pool and vnet through CAPMOX
+  (`cloud_kamaji_create.go`). Guides:
   **[managed-k8s.md](managed-k8s.md)**, **[managed-dbaas.md](managed-dbaas.md)**.
 
 ---
@@ -455,26 +485,56 @@ in **[auth.md](auth.md)**.
 
 `config.Load()` reads a mounted YAML file overlaid by environment variables (env
 always wins), and `Validate()` fails closed. Config groups: server/management
-ports, the PostgreSQL DSN (`PROXCLOUD_DB_URL`), RabbitMQ, the data-at-rest `Encryption.DefaultKey` (used by
+ports, the writable-primary DSN (`PROXCLOUD_DB_URL`), optional history/metrics-only
+reader (`PROXCLOUD_DB_READ_URL`), the data-at-rest `Encryption.DefaultKey` (used by
 `pkg/textcrypt` to decrypt external-service secrets), self URLs (API/UI/admin base
 URLs, which also seed CORS), the three auth realms, the default-region fallback
-(`PROXCLOUD_DEFAULT_REGION` / `proxcloud.default-region`, default `default`), and the `Jobs` gates (`SchedulerEnabled`, `DebugTriggers`,
-`RabbitFanout`).
+(`PROXCLOUD_DEFAULT_REGION` / `proxcloud.default-region`, default `default`),
+`Jobs.SchedulerEnabled` / `DebugTriggers` gates, worker concurrency, poll interval
+and lease duration. Legacy `RabbitFanout=true`
+is a migration error, not a supported dispatch mode.
 
-### Async & scheduling (`internal/amqp`, `scheduler`, `lock`)
+### Async & scheduling (PostgreSQL durable jobs, `scheduler`, `lock`)
 
 Scheduled work is driven by a seconds-enabled cron; every job is wrapped in a
-`shedLock`-backed distributed lock (`atMostFor` / `atLeastFor`) so it runs **once
-across the fleet**, not once per pod. The catalog is registered in
+`shedLock`-backed distributed lock (`atMostFor` / `atLeastFor`) to throttle duplicate
+dispatch across the fleet, rather than dispatching independently per pod. Lease
+expiry does not prove an old process stopped; durable identities/receipts supply
+separate mutation safety. The catalog is registered in
 `main.registerJobs` — the minutely/hourly/monthly charge crons, Prometheus traffic metrics (`usageMetricsFetch`),
-services sync, savings expiry + reminders, transaction scan, auto-suspension
-(dunning), monthly bill finalization, monthly collect, and project deletion.
+services sync, the minutely Proxmox state sample (`pveStateSync`), task poll
+(`pveTaskPoll`) and public-NIC traffic sample (`pveTrafficSample`), the sandbox
+jobs (`sandboxStateSync`, `sandboxTemplateAdopt`, `sandboxBuildSync`,
+`sandboxRegistryPrune`, `sandboxAutoPause`), savings expiry + reminders, transaction scan,
+auto-suspension (dunning), monthly bill finalization, monthly collect, and project
+deletion. Under the external billing provider the seven billing jobs (savings
+expiry and reminders, reminder dispatch, transaction scan, auto-suspension,
+monthly bill, monthly collect) are not scheduled: the billing service runs its own.
+Registration is not availability: managed sandbox pause/resume/fork and AutoPause
+are currently held by a fixed capability check, and physical registry deletion is
+held even when `registryPrune` is configured `on`. Named capture/export and dry-run
+registry candidate reporting remain distinct. See [saved-runtime admission](saved-runtime-admission.md).
 
-The charge cron has two execution modes: an **in-process loop** by default, or a
-**RabbitMQ fan-out** (`PROXCLOUD_JOBS_RABBIT_FANOUT=true`) that publishes one
-message per active billing profile so any pod's consumer can charge one profile —
-isolating per-profile failures across the fleet. RabbitMQ itself is maintained by
-a background reconnect loop so readiness self-heals after a dropped connection.
+Native billing dispatch persists per-profile work in the **same writable PostgreSQL
+primary**, retaining the original cutoff across attempts. A custom bounded engine
+uses database-time leases and owner+epoch compare-and-swap fencing, so another pod
+can resume a crashed worker's work without a stale owner completing the new claim.
+Defaults per API pod are concurrency 2 (`1..16`), poll 1s (`100ms..1m`) and lease
+1m (`10s..10m`). The scheduler/debug gates control new producers/routes, not workers;
+workers always start to finish existing work. Queue, leases, finance and worker
+inputs never use the optional status/history/metrics replica.
+
+**Why replace the broker:** billing already requires PostgreSQL. Keeping durable
+work alongside its authoritative finance state removes a separate broker/operator,
+its credentials and readiness coupling without discarding failed work at process
+exit. This is not a promise of exactly-once external side effects: retries, fence
+loss and external HTTP/SMTP results still need their domain's safety rules. External
+billing HTTP behavior is unchanged. Separate bounded mail-outbox/invitation
+composition, status and SMTP receipt machinery exists, but production delivery and
+recipient rollout are not universally enabled; the savings reminder flag is queue-only,
+not a dispatcher. Legacy mail callers remain best-effort unless explicitly adapted.
+See [mail outbox safety limits](mail-outbox-safety-limits.md). Old RabbitMQ work is not imported or consumed; a documented
+[operator drain/reconcile and retain cutover](postgres-jobs-migration.md) is required.
 Full catalog + cron expressions in **[jobs-scheduling.md](jobs-scheduling.md)**.
 
 ### Audit (`internal/platform/audit`)

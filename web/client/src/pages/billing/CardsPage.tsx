@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ColumnDef } from "@tanstack/react-table"
 import { toast } from "sonner"
-import { loadStripe, type Stripe, type StripeCardElement } from "@stripe/stripe-js"
 import { CreditCard as CreditCardIcon, MoreHorizontal, Plus, Star, Trash2 } from "lucide-react"
 import { PageHeader } from "@/components/layout/PageHeader"
 import { DataTable, sortableHeader } from "@/components/data-table"
@@ -17,12 +16,19 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Skeleton } from "@/components/ui/skeleton"
 import { apiFetch } from "@/lib/api"
-import { fmtDate } from "@/lib/format"
+import { fmtDate, fmtMoney } from "@/lib/format"
 import { useBillingSummary, useProjectId } from "@/lib/hooks"
-import type { CreditCard } from "@/lib/types"
+import type { CreditCard, Gateway } from "@/lib/types"
+import {
+  GatewaySelect, cardGateways, defaultGatewayId, errMsg, gatewaySlug, useCardElement,
+} from "./NewCardDepositDialog"
 
-type Gateway = { id?: string; thirdParty?: string; addCard?: boolean; metadata?: { publicKey?: string } }
-type AddCardResponse = { transactionId?: string; externalPaymentId?: string; metadata?: { client_secret?: string } }
+type AddCardResponse = {
+  transactionId?: string
+  externalPaymentId?: string
+  thirdParty?: string
+  metadata?: { client_secret?: string; customerId?: string; currency?: string; verificationAmount?: string }
+}
 
 export default function CardsPage() {
   const pid = useProjectId()
@@ -41,7 +47,7 @@ export default function CardsPage() {
     queryFn: () => apiFetch<Gateway[]>(`/payment/${bp}/gateway`),
     enabled: !!bp,
   })
-  const gateway = gateways?.find((g) => g.addCard && g.metadata?.publicKey)
+  const cardGws = cardGateways(gateways, "addCard")
 
   const [addOpen, setAddOpen] = useState(false)
   const [deleting, setDeleting] = useState<CreditCard | null>(null)
@@ -151,7 +157,7 @@ export default function CardsPage() {
         eyebrow="Billing"
         description="Saved payment cards on this billing profile."
         actions={
-          <Button size="sm" onClick={() => setAddOpen(true)} disabled={!bp || !gateway}>
+          <Button size="sm" onClick={() => setAddOpen(true)} disabled={!bp || !cardGws.length}>
             <Plus className="size-4" /> Add card
           </Button>
         }
@@ -163,9 +169,9 @@ export default function CardsPage() {
         <EmptyState
           icon={CreditCardIcon}
           title="No cards yet"
-          hint="Add a card to enable deposits and automatic bill collection."
+          hint={`Add a card to enable deposits and automatic bill collection. To verify it we place a temporary ${fmtMoney(1, summary?.currency)} hold that is released immediately — nothing is charged.`}
           action={
-            <Button onClick={() => setAddOpen(true)} disabled={!gateway}>
+            <Button onClick={() => setAddOpen(true)} disabled={!cardGws.length}>
               <Plus className="size-4" /> Add card
             </Button>
           }
@@ -179,13 +185,14 @@ export default function CardsPage() {
         />
       )}
 
-      {bp && gateway ? (
+      {bp && cardGws.length ? (
         <AddCardDialog
           open={addOpen}
           onOpenChange={setAddOpen}
           bp={bp}
-          gatewayId={gateway.id ?? ""}
-          publicKey={gateway.metadata?.publicKey ?? ""}
+          gateways={cardGws}
+          preferredGatewayId={summary?.paymentGatewayId}
+          currency={summary?.currency}
           onAdded={invalidate}
         />
       ) : null}
@@ -217,98 +224,112 @@ export default function CardsPage() {
   )
 }
 
-// Add-card flow: POST /card/{bp}/add {paymentGatewayId} → SetupIntent client_secret →
-// Stripe Elements card → stripe.confirmCardSetup → GET the card-confirm callback so the
-// API retrieves the SetupIntent and stores the CreditCard.
+// Add-card flow ("like GCP"): POST /card/{bp}/add {paymentGatewayId} → a manual-capture 1.00
+// verification PaymentIntent (client_secret + customer) → confirm it with the gateway's card
+// element (Stripe confirmCardPayment / Airwallex card.confirm with a merchant-initiated consent)
+// → GET the card-confirm callback so the API stores the card and releases the hold.
 function AddCardDialog({
-  open, onOpenChange, bp, gatewayId, publicKey, onAdded,
+  open, onOpenChange, bp, gateways, preferredGatewayId, currency, onAdded,
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
   bp: string
-  gatewayId: string
-  publicKey: string
+  gateways: Gateway[]
+  preferredGatewayId?: string
+  currency?: string
   onAdded: () => void
 }) {
-  const mountRef = useRef<HTMLDivElement>(null)
-  const stripeRef = useRef<Stripe | null>(null)
-  const cardRef = useRef<StripeCardElement | null>(null)
-  const [setup, setSetup] = useState<{ txnId: string; clientSecret: string } | null>(null)
+  const [gwId, setGwId] = useState(() => defaultGatewayId(gateways, preferredGatewayId))
+  const gateway = gateways.find((g) => g.id === gwId)
+  const el = useCardElement(gateway, open)
+  const [setup, setSetup] = useState<{
+    txnId: string; intentId: string; clientSecret: string; customerId?: string; currency?: string; verificationAmount?: string
+  } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
+    setSetup(null)
+    setError(null)
     if (!open) {
-      setSetup(null)
-      setError(null)
+      setGwId(defaultGatewayId(gateways, preferredGatewayId))
       return
     }
+    if (!gwId) return
     let cancelled = false
     ;(async () => {
       try {
         const resp = await apiFetch<AddCardResponse>(`/card/${bp}/add`, {
           method: "POST",
-          body: { paymentGatewayId: gatewayId },
+          body: { paymentGatewayId: gwId },
         })
-        const clientSecret = resp?.metadata?.client_secret
-        if (!resp?.transactionId || !clientSecret) throw new Error("Gateway did not return a setup secret")
-        const stripe = await loadStripe(publicKey)
+        const md = resp?.metadata
+        if (!resp?.transactionId || !md?.client_secret) throw new Error("Gateway did not return a verification secret")
         if (cancelled) return
-        if (!stripe) throw new Error("Stripe failed to load")
-        stripeRef.current = stripe
-        const card = stripe.elements().create("card")
-        cardRef.current = card
-        if (mountRef.current) card.mount(mountRef.current)
-        setSetup({ txnId: resp.transactionId, clientSecret })
+        setSetup({
+          txnId: resp.transactionId, intentId: resp.externalPaymentId ?? "", clientSecret: md.client_secret,
+          customerId: md.customerId, currency: md.currency, verificationAmount: md.verificationAmount,
+        })
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+        if (!cancelled) setError(errMsg(e))
       }
     })()
     return () => {
       cancelled = true
-      cardRef.current?.unmount()
-      cardRef.current = null
     }
-  }, [open, bp, gatewayId, publicKey])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, bp, gwId])
 
   const confirm = async () => {
-    const stripe = stripeRef.current
-    const card = cardRef.current
-    if (!stripe || !card || !setup) return
+    if (!setup) return
     setSaving(true)
     setError(null)
     try {
-      const res = await stripe.confirmCardSetup(setup.clientSecret, { payment_method: { card } })
-      if (res.error) throw new Error(res.error.message ?? "Card confirmation failed")
-      // Finalize server-side (whitelisted callback: retrieves the SetupIntent + stores the card,
-      // returns 200; throws here if the server couldn't finalize).
-      await apiFetch(`/callbacks/payment/stripe/card/confirm/${setup.txnId}`)
+      await el.confirm({
+        clientSecret: setup.clientSecret,
+        intentId: setup.intentId,
+        // Airwallex only: save the card for merchant-initiated (unscheduled) charges, hold only.
+        airwallex: {
+          customer_id: setup.customerId,
+          payment_method_options: { card: { auto_capture: false } },
+          payment_consent: { next_triggered_by: "merchant", merchant_trigger_reason: "unscheduled" },
+        },
+      })
+      // Finalize server-side (whitelisted callback: retrieves the intent, stores the card and
+      // releases the hold; throws here if the server couldn't finalize).
+      await apiFetch(`/callbacks/payment/${gatewaySlug(gateway)}/card/confirm/${setup.txnId}`)
       toast.success("Card added")
       onAdded()
       onOpenChange(false)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errMsg(e))
     } finally {
       setSaving(false)
     }
   }
 
+  const hold = fmtMoney(setup?.verificationAmount ?? 1, setup?.currency ?? currency)
+  const shownError = error ?? el.error
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Add card</DialogTitle>
-          <DialogDescription>Card details go directly to Stripe — they never touch ProxCloud.</DialogDescription>
+          <DialogDescription>
+            To verify the card we place a temporary {hold} hold that is released immediately — nothing is
+            charged. Card details go directly to {gateway?.thirdParty ?? "the payment gateway"} — they never touch ProxCloud.
+          </DialogDescription>
         </DialogHeader>
+        <GatewaySelect gateways={gateways} value={gwId} onChange={setGwId} disabled={saving} />
         <div className="rounded-md border bg-muted/30 p-3">
-          <div ref={mountRef} />
+          <div ref={el.mountRef} />
         </div>
-        {error ? <p className="text-sm text-destructive">{error}</p> : null}
+        {shownError ? <p className="text-sm text-destructive">{shownError}</p> : null}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button onClick={() => void confirm()} disabled={!setup || saving}>
+          <Button onClick={() => void confirm()} disabled={!setup || !el.ready || saving}>
             {saving ? "Saving…" : "Save card"}
           </Button>
         </DialogFooter>

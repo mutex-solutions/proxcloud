@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"strings"
@@ -21,6 +22,7 @@ type K8sAPI interface {
 	GetNamespace(ctx context.Context, name string) (map[string]any, error)
 	DeleteNamespace(ctx context.Context, name string) error
 	ApplySecret(ctx context.Context, ns, name string, stringData map[string]string, labels, annotations map[string]string) error
+	ApplyResourceSetSecret(ctx context.Context, ns, name string, stringData, labels map[string]string) error
 	GetSecretData(ctx context.Context, ns, name string) (map[string][]byte, error)
 	ListSecrets(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
 	ListSecretsAllNamespaces(ctx context.Context, labelSelector string) ([]map[string]any, error)
@@ -33,6 +35,8 @@ type K8sAPI interface {
 	GetTenantControlPlane(ctx context.Context, ns, name string) (map[string]any, error)
 	ListTenantControlPlanes(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
 	ListMachineDeployments(ctx context.Context, ns, labelSelector string) ([]map[string]any, error)
+	ListCRs(ctx context.Context, group, version, plural, ns, labelSelector string) ([]map[string]any, error)
+	ListPersistentVolumes(ctx context.Context) ([]map[string]any, error)
 }
 
 // defaultFinalizeGrace: a cloud credentials secret younger than this is never treated as an orphan.
@@ -48,7 +52,38 @@ type Service struct {
 	cfg           Config
 	serviceID     string
 	finalizeGrace time.Duration
+	onClusterGone func(ctx context.Context, computeServiceID, projectID, clusterID string) error
+	onClusterLive func(ctx context.Context, computeServiceID, projectID, clusterID string) error
 }
+
+// OnClusterLive registers what the sweep runs on every live cluster it passes: bringing a cluster made by an older
+// release onto the current grants. An error is logged and changes nothing else.
+func (s *Service) OnClusterLive(f func(ctx context.Context, computeServiceID, projectID, clusterID string) error) {
+	s.onClusterLive = f
+}
+
+// OnClusterGone registers what must outlive the delete cascade and run after it: revoking the
+// cluster's PVE tokens and freeing its addresses. CAPMOX deletes the workers with that very token,
+// so the delete path cannot do this itself. An error keeps the secret, so the next sweep retries.
+func (s *Service) OnClusterGone(f func(ctx context.Context, computeServiceID, projectID, clusterID string) error) {
+	s.onClusterGone = f
+}
+
+// ClusterSecrets is what a cluster runs under, written next to its Application and never into it.
+type ClusterSecrets struct {
+	// Cloud is the CAPMOX credential: url, token, secret.
+	Cloud map[string]string
+	// CSIManifest is the tenant-side proxmox-csi config, delivered by a ClusterResourceSet.
+	CSIManifest string
+	// CSIGateway is the data of the controller's Secret on the services cluster (CSIGatewaySecretName): its config
+	// and the gateway's CA. Empty: no controller there.
+	CSIGateway map[string]string
+	// ComputeServiceID names the proxmox provider hosting the workers; the reaper needs it.
+	ComputeServiceID string
+}
+
+// annotationComputeService records ClusterSecrets.ComputeServiceID on the cloud secret.
+const annotationComputeService = "proxcloud.io/compute-service"
 
 // New builds a live Service from the provider config.
 func New(cfg Config, serviceID string) (*Service, error) {
@@ -81,21 +116,41 @@ func (s *Service) EnsureProjectNamespace(ctx context.Context, projectID string) 
 }
 
 // CreateCluster provisions one cluster: cloud credentials secret (mgmt-side only) + Application
-// CR. creds is the secret's data — the credential the cluster's infrastructure provider runs
-// under. Returns the initial cached data payload (status PENDING until the first sync reads real
+// CR. Returns the initial cached data payload (status PENDING until the first sync reads real
 // health).
-func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, creds map[string]string) (map[string]any, error) {
+func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, sec ClusterSecrets) (map[string]any, error) {
 	if err := spec.Validate(s.cfg.Defaults); err != nil {
+		return nil, err
+	}
+	if err := ValidateCreateAddons(s.cfg.ChartVersion, spec.Addons); err != nil {
+		return nil, err
+	}
+	if err := ValidateGatewayFabricKubernetes(spec.Version, spec.Addons); err != nil {
 		return nil, err
 	}
 	ns := NamespaceFor(spec.ProjectID)
 	if err := s.EnsureProjectNamespace(ctx, spec.ProjectID); err != nil {
 		return nil, fmt.Errorf("kamaji: ensure namespace: %w", err)
 	}
-	if err := s.api.ApplySecret(ctx, ns, CloudSecretName(spec.ID), creds,
-		map[string]string{LabelProject: spec.ProjectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue},
-		nil); err != nil {
+	labels := map[string]string{LabelProject: spec.ProjectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue}
+	if err := s.api.ApplySecret(ctx, ns, CloudSecretName(spec.ID), sec.Cloud, labels,
+		map[string]string{annotationComputeService: sec.ComputeServiceID}); err != nil {
 		return nil, fmt.Errorf("kamaji: apply cloud credentials secret: %w", err)
+	}
+	if sec.CSIManifest != "" {
+		if err := s.api.ApplyResourceSetSecret(ctx, ns, CSISecretName(spec.ID),
+			map[string]string{"csi.yaml": sec.CSIManifest}, labels); err != nil {
+			return nil, fmt.Errorf("kamaji: apply csi secret: %w", err)
+		}
+	}
+	if len(sec.CSIGateway) > 0 {
+		if err := s.api.ApplySecret(ctx, ns, CSIGatewaySecretName(spec.ID), sec.CSIGateway, labels, nil); err != nil {
+			return nil, fmt.Errorf("kamaji: apply csi gateway secret: %w", err)
+		}
+	}
+	if err := s.api.ApplySecret(ctx, ns, MarkerSecretName(spec.ID), nil, labels,
+		map[string]string{annotationComputeService: sec.ComputeServiceID}); err != nil {
+		return nil, fmt.Errorf("kamaji: apply marker secret: %w", err)
 	}
 	values := BuildValues(s.cfg, spec)
 	app := BuildApplication(s.cfg, spec, s.serviceID, s.cfg.ChartVersion, values)
@@ -103,6 +158,37 @@ func (s *Service) CreateCluster(ctx context.Context, spec ClusterSpec, creds map
 		return nil, fmt.Errorf("kamaji: apply application: %w", err)
 	}
 	return clusterData(app, nil, nil), nil
+}
+
+// RecordCluster writes the marker before a create takes anything, so whatever it takes can be released by the sweep
+// even if the create dies halfway. CreateCluster writes the same marker again.
+func (s *Service) RecordCluster(ctx context.Context, projectID, clusterID, computeServiceID string) error {
+	if err := s.EnsureProjectNamespace(ctx, projectID); err != nil {
+		return fmt.Errorf("kamaji: ensure namespace: %w", err)
+	}
+	labels := map[string]string{LabelProject: projectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue}
+	if err := s.api.ApplySecret(ctx, NamespaceFor(projectID), MarkerSecretName(clusterID), nil, labels,
+		map[string]string{annotationComputeService: computeServiceID}); err != nil {
+		return fmt.Errorf("kamaji: apply marker secret: %w", err)
+	}
+	return nil
+}
+
+// AbandonCluster undoes a create that failed: it releases what the cluster took now, then its secrets. Any error leaves
+// the marker, and the sweep retries after the grace window.
+func (s *Service) AbandonCluster(ctx context.Context, projectID, clusterID, computeServiceID string) error {
+	if s.onClusterGone != nil {
+		if err := s.onClusterGone(ctx, computeServiceID, projectID, clusterID); err != nil {
+			return err
+		}
+	}
+	ns := NamespaceFor(projectID)
+	for _, name := range []string{CSISecretName(clusterID), CSIGatewaySecretName(clusterID), CloudSecretName(clusterID), MarkerSecretName(clusterID)} {
+		if err := s.api.DeleteSecret(ctx, ns, name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DeleteCluster removes the cluster: Application delete only (the resources-finalizer cascades
@@ -181,11 +267,21 @@ func (s *Service) FinalizeAllOrphans(ctx context.Context) (int, error) {
 func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, secrets []map[string]any) (int, error) {
 	var errs []error
 	pending, reaped := 0, 0
+	marked := map[string]bool{}
+	for _, sec := range secrets {
+		if cid, ok := strings.CutSuffix(digStr(sec, "metadata", "name"), markerSuffix); ok {
+			marked[cid] = true
+		}
+	}
 	for _, sec := range secrets {
 		name := digStr(sec, "metadata", "name")
-		cid, isCloud := strings.CutSuffix(name, cloudSecretSuffix)
-		if !isCloud {
-			continue
+		cid, isMarker := strings.CutSuffix(name, markerSuffix)
+		if !isMarker {
+			// A cluster from before the marker still has its cloud secret until the cascade collects it.
+			var isCloud bool
+			if cid, isCloud = strings.CutSuffix(name, cloudSecretSuffix); !isCloud || marked[cid] {
+				continue
+			}
 		}
 		if created, err := time.Parse(time.RFC3339, digStr(sec, "metadata", "creationTimestamp")); err == nil {
 			if time.Since(created) < s.finalizeGrace {
@@ -202,6 +298,10 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		if app != nil {
 			if dig(app, "metadata", "deletionTimestamp") != nil {
 				pending++ // delete cascade in flight
+			} else if compute := digStr(sec, "metadata", "annotations", annotationComputeService); s.onClusterLive != nil && compute != "" {
+				if err := s.onClusterLive(ctx, compute, projectID, cid); err != nil {
+					slog.Warn("kamaji: live cluster hook", "cluster", cid, "err", err) // the sweep and teardown go on
+				}
 			}
 			continue // cluster alive (or deleting) — its secret is in use
 		}
@@ -217,8 +317,30 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 			pending++
 			continue
 		}
-		if err := s.api.DeleteSecret(ctx, ns, name); err != nil {
+		if s.onClusterGone != nil {
+			if err := s.onClusterGone(ctx, digStr(sec, "metadata", "annotations", annotationComputeService), projectID, cid); err != nil {
+				errs = append(errs, fmt.Errorf("cluster %s: release infrastructure: %w", cid, err))
+				pending++
+				continue
+			}
+		}
+		if err := s.api.DeleteSecret(ctx, ns, CSISecretName(cid)); err != nil {
+			errs = append(errs, fmt.Errorf("cluster %s: delete csi secret: %w", cid, err))
+			pending++
+			continue
+		}
+		if err := s.api.DeleteSecret(ctx, ns, CSIGatewaySecretName(cid)); err != nil {
+			errs = append(errs, fmt.Errorf("cluster %s: delete csi gateway secret: %w", cid, err))
+			pending++
+			continue
+		}
+		if err := s.api.DeleteSecret(ctx, ns, CloudSecretName(cid)); err != nil {
 			errs = append(errs, fmt.Errorf("cluster %s: delete cloud secret: %w", cid, err))
+			pending++
+			continue
+		}
+		if err := s.api.DeleteSecret(ctx, ns, MarkerSecretName(cid)); err != nil {
+			errs = append(errs, fmt.Errorf("cluster %s: delete marker secret: %w", cid, err))
 			pending++
 			continue
 		}
@@ -238,6 +360,17 @@ func (s *Service) finalizeNamespace(ctx context.Context, ns, projectID string, s
 		}
 	}
 	return pending, errors.Join(errs...)
+}
+
+// RemoveProjectNamespace deletes the namespace of a project being torn down, which its bootstrap made whether or not it
+// ever held any clusters. finalizeNamespace leaves that one alone on purpose, since a live project keeps it. The caller has
+// seen FinalizeOrphans report nothing pending. An Application still there keeps the namespace.
+func (s *Service) RemoveProjectNamespace(ctx context.Context, projectID string) error {
+	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelProject+"="+projectID+","+LabelManagedBy+"="+ManagedByValue)
+	if err != nil || len(apps) > 0 {
+		return err
+	}
+	return s.gcNamespace(ctx, NamespaceFor(projectID))
 }
 
 // gcNamespace deletes the project namespace once it demonstrably holds no cluster remnants —
@@ -435,6 +568,9 @@ func (s *Service) SetChartVersion(ctx context.Context, clusterID, version string
 		if src == nil {
 			return fmt.Errorf("kamaji: cluster %s: application carries no source", clusterID)
 		}
+		if err := validateAddonChartTransition(app, version); err != nil {
+			return err
+		}
 		src["targetRevision"] = version
 		return nil
 	})
@@ -451,7 +587,7 @@ type ClusterPin struct {
 // ListClusterPins lists every proxcloud-managed cluster on this provider with its chart pin
 // (ownership-labelled Applications only — pre-proxcloud clusters stay invisible).
 func (s *Service) ListClusterPins(ctx context.Context) ([]ClusterPin, error) {
-	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelManagedBy+"="+ManagedByValue)
+	apps, err := s.api.ListApplications(ctx, s.cfg.ArgoNamespace, LabelService+"="+s.serviceID+","+LabelManagedBy+"="+ManagedByValue)
 	if err != nil {
 		return nil, err
 	}

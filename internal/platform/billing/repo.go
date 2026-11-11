@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -18,26 +19,31 @@ import (
 // base currency, bill for the restricted check, identityValidation for /validation,
 // and the billing-domain list collections for the client list endpoints).
 type Repo struct {
-	profiles    *pgdoc.Store
-	configs     *pgdoc.Store
-	bills       *pgdoc.Store
-	validations *pgdoc.Store
-	credits     *pgdoc.Store         // accountCreditTransaction (the txn log)
-	acctCredits *pgdoc.Store         // accountCredit (the spendable balance docs)
-	promoCredit *pgdoc.Store         // promotionalCredit
-	collects    *pgdoc.Store         // collectTransaction
-	savingPlans *pgdoc.Store         // savingsPlan
-	savingCtrs  *pgdoc.Store         // savingsContract
-	priceAdjust *pgdoc.Store         // priceAdjustmentRule
-	suspensions *pgdoc.Store         // suspension (SuspensionProcess)
-	gateways    *pgdoc.Store         // thirdPartyIntegration (payment gateways live here too)
-	bankXfers   *pgdoc.Store         // bankTransfer (manual bank-transfer deposits)
-	cards       *pgdoc.Store         // creditCard (saved cards)
-	cardTxns    *pgdoc.Store         // creditCardTransaction
-	promoCodes  *pgdoc.Store         // promotionCode (admin-created codes)
-	promoRedeem *pgdoc.Store         // promotionCodeRedemption (per-org redemption record)
-	reminders   *pgdoc.Store         // reminderNotification (savings-contract expiry reminders)
-	enc         *textcrypt.Encryptor // OPTIONAL, nil-safe: decrypts payment-gateway secrets on read
+	profiles               *pgdoc.Store
+	configs                *pgdoc.Store
+	bills                  *pgdoc.Store
+	validations            *pgdoc.Store
+	credits                *pgdoc.Store         // accountCreditTransaction (the txn log)
+	acctCredits            *pgdoc.Store         // accountCredit (the spendable balance docs)
+	promoCredit            *pgdoc.Store         // promotionalCredit
+	collects               *pgdoc.Store         // collectTransaction
+	savingPlans            *pgdoc.Store         // savingsPlan
+	savingCtrs             *pgdoc.Store         // savingsContract
+	priceAdjust            *pgdoc.Store         // priceAdjustmentRule
+	suspensions            *pgdoc.Store         // suspension (SuspensionProcess)
+	gateways               *pgdoc.Store         // thirdPartyIntegration (payment gateways live here too)
+	bankXfers              *pgdoc.Store         // bankTransfer (manual bank-transfer deposits)
+	cards                  *pgdoc.Store         // creditCard (saved cards)
+	cardTxns               *pgdoc.Store         // creditCardTransaction
+	promoCodes             *pgdoc.Store         // promotionCode (admin-created codes)
+	promoRedeem            *pgdoc.Store         // promotionCodeRedemption (per-org redemption record)
+	reminders              *pgdoc.Store         // reminderNotification (savings-contract expiry reminders)
+	counters               *pgdoc.Store         // counters (invoice-number sequences, one doc per year)
+	enc                    *textcrypt.Encryptor // OPTIONAL, nil-safe: decrypts payment-gateway secrets on read
+	reminderOutbox         ReminderOutbox       // opt-in atomic savings reminder producer, never SMTP
+	reminderCanceler       ReminderCanceler     // remains available even when producer is OFF
+	savingsExpiredOutbox   SavingsExpiredOutbox // fixed expired-notice selection, default OFF
+	savingsExpiredCanceler ReminderCanceler     // keyless, independent of producer
 }
 
 // SetEncryptor wires the at-rest secret encryptor used to DECRYPT payment-gateway secrets
@@ -66,6 +72,7 @@ func NewRepo(db *pgdoc.DB) *Repo {
 		priceAdjust: db.C("priceAdjustmentRule"),
 		reminders:   db.C("reminderNotification"),
 		bankXfers:   db.C("bankTransfer"),
+		counters:    db.C("counters"),
 	}
 }
 
@@ -86,15 +93,64 @@ func (r *Repo) CreateBankTransfer(ctx context.Context, doc pgdoc.M) (string, err
 	return r.bankXfers.InsertOne(ctx, doc)
 }
 
+// BankTransferByID loads a bank transfer by id (raw doc, `_id` injected); nil,nil when absent.
+func (r *Repo) BankTransferByID(ctx context.Context, id string) (pgdoc.M, error) {
+	var doc pgdoc.M
+	found, err := r.bankXfers.Get(ctx, id, &doc)
+	if err != nil || !found {
+		return nil, err
+	}
+	return doc, nil
+}
+
+// ListBankTransfers returns a billing profile's bank transfers, newest first (never nil).
+func (r *Repo) ListBankTransfers(ctx context.Context, bpID string) ([]pgdoc.M, error) {
+	return r.listRaw(ctx, r.bankXfers, pgdoc.M{"billingProfileId": bpID}, pgdoc.Sort(pgdoc.DescK("createdAt", pgdoc.KTime)))
+}
+
+// UpdateBankTransfer merges set into the transfer doc.
+// ResolveBankTransfer moves a PENDING transfer on, once: of an approve, a reject and a customer cancel
+// racing each other only one wins. unset names fields to drop. Reports whether this caller won.
+func (r *Repo) ResolveBankTransfer(ctx context.Context, id string, set pgdoc.M, unset ...string) (bool, error) {
+	return r.bankXfers.SetFieldsOne(ctx, pgdoc.M{"_id": id, "status": "PENDING"}, set, unset)
+}
+
+func (r *Repo) UpdateBankTransfer(ctx context.Context, id string, set pgdoc.M) error {
+	_, err := r.bankXfers.SetByID(ctx, id, set, nil)
+	return err
+}
+
+// BankTransferPublic shapes a stored bank transfer for the API: `_id` → `id`, `_class` dropped, and the customer's
+// proof file is reduced to its metadata (the bytes stream from the dedicated /proof routes).
+// Returns a shallow copy; nil-safe.
+func BankTransferPublic(doc pgdoc.M) pgdoc.M {
+	if doc == nil {
+		return nil
+	}
+	out := make(pgdoc.M, len(doc))
+	for k, v := range doc {
+		out[k] = v
+	}
+	if v, ok := out["_id"]; ok {
+		out["id"] = v
+		delete(out, "_id")
+	}
+	delete(out, "_class") // legacy discriminator, not part of the API shape
+	if p, ok := out["proof"].(map[string]any); ok {
+		out["proof"] = pgdoc.M{"fileName": p["fileName"], "contentType": p["contentType"], "size": p["size"]}
+	}
+	return out
+}
+
 // listRaw returns the matching docs as raw maps (never nil). NOTE: this handles the
 // EMPTY-STATE case — under the default seed these collections are empty, so the
 // client list endpoints return []. The per-element DTO mapping (BillDto gross/tax/FX,
 // credit/transaction/savings shapes) is deferred to later when these get populated; a
 // non-empty raw passthrough would NOT match the canonical DTOs and would fail loudly,
 // signalling that the DTO work is due.
-func (r *Repo) listRaw(ctx context.Context, col *pgdoc.Store, filter pgdoc.M) ([]pgdoc.M, error) {
+func (r *Repo) listRaw(ctx context.Context, col *pgdoc.Store, filter pgdoc.M, opts ...pgdoc.FindOpt) ([]pgdoc.M, error) {
 	out := []pgdoc.M{}
-	if err := col.Find(ctx, filter, &out); err != nil {
+	if err := col.Find(ctx, filter, &out, opts...); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -150,7 +206,9 @@ func (r *Repo) AllBills(ctx context.Context) ([]pricing.Bill, error) {
 // AllBillingProfiles — every profile. The collect cron fans out over
 // every profile (NOT only ACTIVE — the collect job skips SUSPENDED).
 func (r *Repo) AllBillingProfiles(ctx context.Context) ([]BillingProfile, error) {
-	return findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{})
+	bps, err := findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{})
+	r.fillCurrency(ctx, bps)
+	return bps, err
 }
 
 // PromotionalCreditsByBillingProfile — all of a profile's promotional credits (the
@@ -277,10 +335,12 @@ func (r *Repo) SavingsContractByID(ctx context.Context, id string) (*SavingsCont
 	return &c, nil
 }
 
-// ExistsActiveSavingsContract reports whether the profile already has an ACTIVE contract for the plan.
+// ExistsActiveSavingsContract reports whether the profile already holds a contract for the plan, ACTIVE
+// or awaiting its payment: paying two of them would stack their discounts.
 func (r *Repo) ExistsActiveSavingsContract(ctx context.Context, planID, bpID string) (bool, error) {
 	return r.savingCtrs.Exists(ctx, pgdoc.M{
-		"savingsPlanId": planID, "billingProfileId": bpID, "status": SavingsStatusActive,
+		"savingsPlanId": planID, "billingProfileId": bpID,
+		"status": pgdoc.M{"$in": []string{SavingsStatusActive, SavingsStatusPendingPayment}},
 	})
 }
 
@@ -377,14 +437,13 @@ func (r *Repo) CountSentBills(ctx context.Context, bpID string) (int64, error) {
 	return r.bills.Count(ctx, pgdoc.M{"billingProfileId": bpID, "status": "SENT"})
 }
 
-// HasOverdueBills reports whether the profile has any SENT bill sent more than 3 days
-// ago (status SENT, cutoff = now − 3 days).
+// HasOverdueBills reports whether the profile has a SENT bill past its due date (dueAt < now) —
+// the same date the invoice and the bill mail print.
 func (r *Repo) HasOverdueBills(ctx context.Context, bpID string) (bool, error) {
-	cutoff := time.Now().UTC().AddDate(0, 0, -3)
 	return r.bills.Exists(ctx, pgdoc.M{
 		"billingProfileId": bpID,
 		"status":           "SENT",
-		"sentAt":           pgdoc.M{"$lt": cutoff},
+		"dueAt":            pgdoc.M{"$lt": time.Now().UTC()},
 	})
 }
 
@@ -409,6 +468,7 @@ func (r *Repo) CreateForOrganization(ctx context.Context, orgID string, owner Ow
 	currency, _ := r.BaseCurrency(ctx) // null/"" when unconfigured
 	bp := &BillingProfile{
 		OrganizationID:  orgID,
+		Sub:             owner.Sub,
 		Status:          StatusNew,
 		Email:           owner.Email,
 		FirstName:       owner.FirstName,
@@ -483,13 +543,45 @@ func (r *Repo) FindByID(ctx context.Context, id string) (*BillingProfile, error)
 	if err != nil || !found {
 		return nil, err
 	}
-	return &bp, nil
+	one := []BillingProfile{bp}
+	r.fillCurrency(ctx, one)
+	return &one[0], nil
 }
 
 // FindByStatus returns every billing profile in the given status —
 // the charge cron loads the ACTIVE profiles.
 func (r *Repo) FindByStatus(ctx context.Context, status string) ([]BillingProfile, error) {
-	return findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{"status": status})
+	bps, err := findTyped[BillingProfile](ctx, r.profiles, pgdoc.M{"status": status})
+	r.fillCurrency(ctx, bps)
+	return bps, err
+}
+
+// fillCurrency backfills an ACTIVE profile with no currency: an operator could activate a profile
+// before it had billing details (activation now sets it), and every bill read of such a profile
+// failed on the blank currency. It bills in the base currency, as saving its details would have
+// set, filled in memory and written once where the stored currency is still blank. A failed write
+// only leaves the fill to the next read.
+func (r *Repo) fillCurrency(ctx context.Context, bps []BillingProfile) {
+	base := ""
+	for i := range bps {
+		bp := &bps[i]
+		if bp.Status != StatusActive || bp.Currency != "" {
+			continue
+		}
+		if base == "" {
+			b, err := r.BaseCurrency(ctx)
+			if err != nil || b == "" {
+				return
+			}
+			base = b
+		}
+		bp.Currency = base
+		if _, err := r.profiles.SetFieldsOne(ctx, pgdoc.M{"_id": bp.ID, "status": StatusActive,
+			"$or": []pgdoc.M{{"currency": pgdoc.M{"$exists": false}}, {"currency": ""}}},
+			pgdoc.M{"currency": base}, nil); err != nil {
+			slog.Warn("billing profile currency backfill", "billingProfile", bp.ID, "err", err)
+		}
+	}
 }
 
 // Exists reports whether a billing profile with the given _id exists
