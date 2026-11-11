@@ -91,6 +91,16 @@ func (s *Service) SwitchCSIGateway(ctx context.Context, projectID, clusterID, ch
 	if !ChartHasGatewayCSI(chartVersion) {
 		return fmt.Errorf("kamaji: chart %s has no services-side csi controller, %s or later is needed", chartVersion, GatewayChartVersion)
 	}
+	app, err := s.api.GetApplication(ctx, s.cfg.ArgoNamespace, clusterID)
+	if err != nil {
+		return err
+	}
+	if app == nil || !managedBy(app) || digStr(app, "metadata", "labels", LabelProject) != projectID {
+		return fmt.Errorf("kamaji: cluster %s not found", clusterID)
+	}
+	if err := validateAddonChartTransition(app, chartVersion); err != nil {
+		return err
+	}
 	ns := NamespaceFor(projectID)
 	labels := map[string]string{LabelProject: projectID, LabelService: s.serviceID, LabelManagedBy: ManagedByValue}
 	if err := s.api.ApplySecret(ctx, ns, CSIGatewaySecretName(clusterID), controllerSecret, labels, nil); err != nil {
@@ -104,6 +114,9 @@ func (s *Service) SwitchCSIGateway(ctx context.Context, projectID, clusterID, ch
 		csi, _ := dig(app, "spec", "source", "helm", "valuesObject", "proxmox", "csi").(map[string]any)
 		if src == nil || csi == nil {
 			return fmt.Errorf("kamaji: cluster %s: application carries no csi values", clusterID)
+		}
+		if err := validateAddonChartTransition(app, chartVersion); err != nil {
+			return err
 		}
 		src["targetRevision"] = chartVersion
 		csi["gateway"] = map[string]any{

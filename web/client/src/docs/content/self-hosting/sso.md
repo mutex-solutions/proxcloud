@@ -109,7 +109,7 @@ An operator can stop any provider under **System, Organization SSO**. Its sessio
 
 - One provider per organization.
 - Roles do not follow group changes after the first sign-in, and a person removed at the provider keeps their session until it expires. Set the realm's SSO Session Max to what you can accept.
-- Prefer disabling to deleting a provider. Deleting it removes its links in Keycloak, so returning people need the email round trip to link again.
+- Prefer disabling to deleting a provider. Deletion permanently retires its platform-issued alias before removing Keycloak links, so retained brokered tokens are refused even if it was the last configured provider. Returning people use a new provider alias and may need the email-link round trip. Cleanup failures stay retired; retry DELETE using an authorized non-retired local/break-glass session. All API replicas must run retirement-aware code. Existing cached rules on other replicas can remain stale during a primary database outage; this is not a hard one-minute outage revocation SLA. Previously deleted aliases cannot be reconstructed automatically.
 - A domain stays verified after the TXT record is removed.
 
 ## Layering extras onto the bundled Keycloak

@@ -306,7 +306,7 @@ func TestClusterAddons(t *testing.T) {
 	// the client wizard's), or a wizard that always sends the full set silently diverges from
 	// what an API user gets by omitting the block. Update all three together, deliberately.
 	want := map[string]bool{
-		"certManager": false, "ingress": false, "metricsServer": true,
+		"certManager": false, GatewayFabricAddon: false, "metricsServer": true,
 	}
 	if len(ClusterAddons) != len(want) {
 		t.Errorf("ClusterAddons = %v, want %v", ClusterAddons, want)

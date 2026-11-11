@@ -24,10 +24,11 @@ const (
 
 // snapshot is the read side of the rules, cached for a minute so the guard costs nothing per request.
 type snapshot struct {
-	byAlias   map[string]*Provider // active and disabled, drafts excluded
+	byAlias   map[string]*Provider // active and disabled, drafts and retired aliases excluded
 	byOrg     map[string]*Provider
-	domainOrg map[string]string // verified domain -> org
-	enforcing []*Provider       // active providers with enforcement on
+	domainOrg map[string]string   // verified domain -> org
+	enforcing []*Provider         // active providers with enforcement on
+	retired   map[string]struct{} // permanently retired platform-issued aliases, including when no providers remain
 }
 
 type snapshotCache struct {
@@ -45,29 +46,36 @@ func (s *Service) snapshot(ctx context.Context) (*snapshot, error) {
 		return s.snap.cur, nil
 	}
 	providers, err := s.repo.AllProviders(ctx)
+	var domains []Domain
 	if err == nil {
-		var domains []Domain
-		if domains, err = s.repo.VerifiedDomains(ctx); err == nil {
-			next := &snapshot{byAlias: map[string]*Provider{}, byOrg: map[string]*Provider{}, domainOrg: map[string]string{}}
-			for i := range providers {
-				p := &providers[i]
-				if !p.Configured() {
-					continue
-				}
-				next.byAlias[p.Alias] = p
-				next.byOrg[p.OrganizationID] = p
-				if p.Active() && p.EnforceSSO {
-					next.enforcing = append(next.enforcing, p)
-				}
-			}
-			for _, d := range domains {
-				next.domainOrg[d.Domain] = d.OrganizationID
-			}
-			s.snap.cur, s.snap.load = next, time.Now()
-			return next, nil
-		}
+		domains, err = s.repo.VerifiedDomains(ctx)
 	}
-	if s.snap.cur != nil { // a stale rule set beats refusing everyone during a blip
+	var retired map[string]struct{}
+	if err == nil {
+		retired, err = s.repo.retiredAliases(ctx)
+	}
+	if err == nil {
+		next := &snapshot{byAlias: map[string]*Provider{}, byOrg: map[string]*Provider{}, domainOrg: map[string]string{}, retired: retired}
+		for i := range providers {
+			p := &providers[i]
+			if _, gone := retired[p.Alias]; gone || !p.Configured() {
+				continue
+			}
+			next.byAlias[p.Alias] = p
+			next.byOrg[p.OrganizationID] = p
+			if p.Active() && p.EnforceSSO {
+				next.enforcing = append(next.enforcing, p)
+			}
+		}
+		for _, d := range domains {
+			next.domainOrg[d.Domain] = d.OrganizationID
+		}
+		s.snap.cur, s.snap.load = next, time.Now()
+		return next, nil
+	}
+	if s.snap.cur != nil { // retain the existing stale-rule policy, including retired aliases
+		// On other replicas an outage can delay new revocations beyond the normal one-minute TTL.
+		// A fresh or locally invalidated cache has no fallback and fails closed instead.
 		s.log.Warn("sso: keeping the previous rules", "err", err)
 		return s.snap.cur, nil
 	}
@@ -93,6 +101,12 @@ func (s *Service) Guard(ctx context.Context, rc *httpx.RequestContext) string {
 	snap, err := s.snapshot(ctx)
 	if err != nil {
 		return RefusedUnavailable
+	}
+	// identity_provider is a realm-wide session note: unknown aliases may be legitimate social
+	// brokers added by the operator. Revoke only aliases durably retired from our provider docs,
+	// before the no-org-providers shortcut; a prefix or an unknown alias is not a tombstone.
+	if _, gone := snap.retired[rc.IdP]; rc.IdP != "" && gone {
+		return s.refuse(rc, "", RefusedIdPDisabled)
 	}
 	if len(snap.byAlias) == 0 || operatorClient {
 		return ""
