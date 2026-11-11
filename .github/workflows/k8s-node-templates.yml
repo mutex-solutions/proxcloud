@@ -11,6 +11,11 @@ on:
       version:
         description: "Kubernetes version, e.g. 1.35.10"
         required: true
+      os:
+        description: "OS for a new node template (does not change existing provider image pins)"
+        type: choice
+        options: [ubuntu-2604, ubuntu-2404]
+        default: ubuntu-2604
       network_mode:
         description: "Build network: static needs no DHCP/seed HTTP; dhcp preserves legacy behavior"
         type: choice
@@ -32,6 +37,7 @@ jobs:
     # All cluster settings are repository Actions secrets; see .github/pve-actions.env.example.
     env:
       K8S_VERSION: ${{ inputs.version }}
+      K8S_OS: ${{ inputs.os || 'ubuntu-2604' }}
       PVE_URL: ${{ secrets.PVE_URL }}
       PVE_TOKEN_ID: ${{ secrets.PVE_TOKEN_ID }}
       PVE_TOKEN_SECRET: ${{ secrets.PVE_TOKEN_SECRET }}
@@ -60,6 +66,10 @@ jobs:
               missing=1
             fi
           done
+          case "$K8S_OS" in
+            ubuntu-2404|ubuntu-2604) ;;
+            *) echo '::error::K8S_OS must be ubuntu-2404 or ubuntu-2604'; missing=1 ;;
+          esac
           if [[ "$PVE_BUILD_NETWORK_MODE" != static && "$PVE_BUILD_NETWORK_MODE" != dhcp ]]; then
             echo "::error::Build network mode must be static or dhcp"
             missing=1

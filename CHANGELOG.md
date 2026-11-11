@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add native OS-template choices for Ubuntu 26.04 and Debian 12 while retaining
+  Ubuntu 24.04 and Debian 13. New Kubernetes node builds select Ubuntu 26.04 by
+  default, retain explicit 24.04 and verify the exact image-builder v0.1.55 commit.
+  Bind OS target, seed, checksum, names and tags; export immutable upstream objects
+  instead of trusting cached worktree bytes. Debian Kubernetes nodes remain unsupported
+  by this pinned Proxmox route. Keep serial canary and cleanup/publication gates.
+
 ## [0.4.0-rc.1] - Unpublished preview
 
 First broker-free ProxCloud release candidate, **not a stable release**. The owner

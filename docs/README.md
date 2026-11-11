@@ -41,6 +41,10 @@ selling, billing, and operating Proxmox VE private-cloud capacity (a Go backend,
 
 ## Subsystems
 
+- [Template OS baseline](template-os-baseline.md) — four native OS choices,
+  Ubuntu-only pinned upstream Kubernetes targets, immutable cache export and
+  explicit build/boot/Goss/seed-cleanup versus supported-product acceptance gates.
+
 - [Frontend runtime baseline](frontend-runtime-baseline.md) — supported Node and
   stable NGINX selection, unchanged app contracts and explicit actual-musl/static
   server versus complete-image/deployment verification boundaries.
