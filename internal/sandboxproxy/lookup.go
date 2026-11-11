@@ -13,6 +13,9 @@ import (
 type Pod struct {
 	IP           string
 	TrafficToken string // empty = no token required
+	// Envd says envd is what listens on EnvdPort. In a native sandbox that port is the tenant's
+	// own, like any other.
+	Envd bool
 }
 
 // ErrNotFound means no running pod carries the sandbox id.
@@ -52,7 +55,7 @@ func K8sLookup(c PodLister) Lookup {
 			}
 			ann, _ := md["annotations"].(map[string]any)
 			tok, _ := ann[sandbox.AnnotationTrafficToken].(string)
-			return Pod{IP: ip, TrafficToken: tok}, nil
+			return Pod{IP: ip, TrafficToken: tok, Envd: sandbox.PodRunsEnvd(it)}, nil
 		}
 		if starting {
 			return Pod{}, ErrNotReady

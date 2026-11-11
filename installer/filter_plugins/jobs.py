@@ -8,6 +8,15 @@ _DURATION_UNITS = {"ns": Decimal("0.000000001"), "us": Decimal("0.000001"), "µs
                    "μs": Decimal("0.000001"), "ms": Decimal("0.001"), "s": Decimal(1), "m": Decimal(60),
                    "h": Decimal(3600)}
 
+# SemVer numeric identifiers have no leading zeroes; build identifiers may have
+# them. Full matching also rejects whitespace/newlines, unlike a trailing "$".
+_SEMVER_NUMBER = r"(?:0|[1-9][0-9]*)"
+_PRERELEASE_ID = rf"(?:{_SEMVER_NUMBER}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+_RELEASE_VERSION = re.compile(
+    rf"v?({_SEMVER_NUMBER})\.({_SEMVER_NUMBER})\.({_SEMVER_NUMBER})"
+    rf"(?:-{_PRERELEASE_ID}(?:\.{_PRERELEASE_ID})*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?")
+
 
 def _seconds(value):
     """Parse Go's duration unit syntax for positive bounded worker settings (not floats)."""
@@ -50,9 +59,11 @@ def jobs_config_problem(config, release=""):
     if not isinstance(config.get("images", {}).get("build", True), bool):
         return "images.build must be a YAML boolean"
     if not config.get("images", {}).get("build", True):
-        version = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:\+[^\s]+)?", str(release))
+        version = _RELEASE_VERSION.fullmatch(str(release))
+        # This is a broker-free *base* version floor, not SemVer precedence:
+        # 0.4.0 prereleases (including rc.1) are allowed once actually published.
         if not version or tuple(map(int, version.groups())) < (0, 4, 0):
-            return "images.build=false requires a published broker-free release >= v0.4.0; use images.build=true before publication"
+            return "images.build=false requires a published broker-free release with base version >= v0.4.0 (prereleases allowed); use images.build=true before publication"
     return ""
 
 

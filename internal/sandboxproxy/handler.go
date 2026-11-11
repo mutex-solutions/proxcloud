@@ -87,7 +87,10 @@ func WakingHandler(domain string, lookup Lookup, waker *Waker, forget func(id st
 			writeJSON(w, http.StatusBadGateway, map[string]any{"sandboxId": id, "message": "Sandbox lookup failed", "code": 502})
 			return
 		}
-		if port != EnvdPort && pod.TrafficToken != "" {
+		// envd checks its own access token, so its port needs no traffic token. That holds only
+		// where envd listens: in a native sandbox the same port number is the tenant's own service
+		// and a private sandbox must ask for the token there too.
+		if !(port == EnvdPort && pod.Envd) && pod.TrafficToken != "" {
 			got := r.Header.Get(TrafficTokenHeader)
 			msg := ""
 			if got == "" {

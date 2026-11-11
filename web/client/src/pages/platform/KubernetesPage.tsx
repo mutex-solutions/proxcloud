@@ -118,9 +118,19 @@ const emptyGroup: NodeGroupRow = {
 const ADDONS = [
   { key: "metricsServer", label: "Metrics Server", hint: "kubectl top and autoscaling (HPA) metrics", on: true },
   { key: "certManager", label: "cert-manager", hint: "TLS certificates from Let's Encrypt or private CAs", on: false },
-  { key: "ingress", label: "NGINX Ingress", hint: "HTTP(S) ingress controller for your Services", on: false },
+  { key: "nginxGatewayFabric", label: "NGINX Gateway Fabric", hint: "Gateway API controller and nginx GatewayClass; create Gateway/HTTPRoute and TLS listeners separately", on: false },
 ] as const
 const defaultAddons = () => Object.fromEntries(ADDONS.map((a) => [a.key, a.on])) as Record<string, boolean>
+const gatewayFabricChartSupported = (pin: string) => {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(pin)
+  if (!match) return false
+  const [, major, minor, patch] = match.map(Number)
+  return major > 0 || minor > 1 || (minor === 1 && patch >= 10)
+}
+const gatewayFabricKubernetesSupported = (version: string) => {
+  const match = /^v?1\.(\d+)(?:\.\d+)?$/.exec(version)
+  return !!match && Number(match[1]) >= 32
+}
 
 function cluster(r: CloudResource): Cluster {
   return (r.data?.cluster as Cluster) ?? {}
@@ -419,7 +429,7 @@ export default function KubernetesPage() {
   const pid = useProjectId()
   const navigate = useNavigate()
   const {
-    kLocs, kScope, clusters, versionsFor, variantsFor, rowServiceId, rowScope, flavorOptionsFor, invalidate,
+    kLocs, kScope, clusters, versionsFor, variantsFor, platformVersionFor, rowServiceId, rowScope, flavorOptionsFor, invalidate,
   } = useKubernetesData(pid)
   const { data, isLoading, isError, error, refetch, isFetching } = clusters
 
@@ -596,6 +606,7 @@ export default function KubernetesPage() {
           title="Create Kubernetes cluster"
           submitLabel="Create cluster"
           versions={createVersions}
+          platformVersion={platformVersionFor(createLoc?.serviceId)}
           variantsForVersion={(v) => variantsFor(createLoc?.serviceId, v)}
           flavors={createFlavorOptions}
          
@@ -743,11 +754,12 @@ export function KubernetesClusterDetailPage() {
 
 // ── create/edit form ─────────────────────────────────────────────────────────
 function ClusterFormDialog({
-  title, submitLabel, versions, variantsForVersion, flavors, networks, locations, locKey, onLocKey, onClose, onSubmit,
+  title, submitLabel, versions, platformVersion, variantsForVersion, flavors, networks, locations, locKey, onLocKey, onClose, onSubmit,
 }: {
   title: string
   submitLabel: string
   versions: string[]
+  platformVersion: string
   variantsForVersion: (version: string) => string[]
   flavors: FlavorOption[]
   networks: NetworkOption[]
@@ -766,6 +778,7 @@ function ClusterFormDialog({
   const [ha, setHa] = useState(true)
   const [groups, setGroups] = useState<NodeGroupRow[]>([{ ...emptyGroup }])
   const [addons, setAddons] = useState<Record<string, boolean>>(defaultAddons)
+  const gatewayAvailable = gatewayFabricChartSupported(platformVersion) && gatewayFabricKubernetesSupported(version)
   const [oidcOpen, setOidcOpen] = useState(false)
   const [oidc, setOidc] = useState<OidcDraft>({ ...emptyOidc })
   const [allowedCidrs, setAllowedCidrs] = useState("")
@@ -773,7 +786,7 @@ function ClusterFormDialog({
   const [pending, setPending] = useState(false)
 
   const valid =
-    !!name.trim() && !!version && groups.length > 0 && groups.every(groupValid)
+    !!name.trim() && !!version && groups.length > 0 && groups.every(groupValid) && (!addons.nginxGatewayFabric || gatewayAvailable)
 
   const submit = async () => {
     setPending(true)
@@ -891,8 +904,9 @@ function ClusterFormDialog({
             <div>
               <Label>Add-ons</Label>
               <p className="text-xs text-muted-foreground">
-                Installed into the cluster and managed for you. The defaults suit most clusters.
+                Installed into the cluster and managed for you. Gateway API application routes and listener TLS remain yours to configure.
               </p>
+              {!gatewayAvailable && <p className="text-xs text-muted-foreground">Gateway Fabric needs platform chart 0.1.10+ and Kubernetes 1.32+. The backend rechecks the selected provider before provisioning.</p>}
             </div>
             {ADDONS.map((a) => (
               <div key={a.key} className="flex items-center justify-between gap-3">
@@ -902,6 +916,7 @@ function ClusterFormDialog({
                 </div>
                 <Switch
                   id={`addon-${a.key}`}
+                  disabled={a.key === "nginxGatewayFabric" && !gatewayAvailable && !addons[a.key]}
                   checked={addons[a.key] ?? false}
                   onCheckedChange={(on) => setAddons({ ...addons, [a.key]: on })}
                 />
@@ -1197,6 +1212,8 @@ function ClusterDetail({
   // Opt-in platform update: offered only when the provider's pinned platform version is known
   // and this cluster sits on an older one. Applying is the customer's call, never automatic.
   const chartVersion = (c.chart_version as string) || ""
+  const legacyIngress = addonStates?.ingress === true
+  const gatewayFabricAvailable = gatewayFabricChartSupported(chartVersion) && gatewayFabricKubernetesSupported(String(c.version ?? ""))
   const updateAvailable = !!platformVersion && !!chartVersion && chartVersion !== platformVersion
   const [platformOpen, setPlatformOpen] = useState(false)
   const [upgradeOpen, setUpgradeOpen] = useState(false)
@@ -1331,7 +1348,11 @@ function ClusterDetail({
             <Button size="sm" variant="outline" onClick={() => setOidcEditOpen(true)}>
               Configure OIDC
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setAddonsOpen(true)}>
+            <Button size="sm" variant="outline" onClick={() => {
+              const latest = (c.addons as Record<string, boolean>) ?? {}
+              setAddonsDraft(Object.fromEntries(ADDONS.map((a) => [a.key, latest[a.key] ?? a.on])))
+              setAddonsOpen(true)
+            }}>
               Manage add-ons
             </Button>
             <Button size="sm" variant="destructive" onClick={onDeleted}>
@@ -1396,7 +1417,8 @@ function ClusterDetail({
               {ADDONS.filter((a) => addonStates[a.key]).map((a) => (
                 <Badge key={a.key} variant="outline">{a.label}</Badge>
               ))}
-              {ADDONS.every((a) => !addonStates[a.key]) ? <span>none</span> : null}
+              {legacyIngress && <Badge variant="outline">Legacy ingress-nginx — migration required</Badge>}
+              {ADDONS.every((a) => !addonStates[a.key]) && !legacyIngress ? <span>none</span> : null}
             </div>
           )}
 
@@ -1492,14 +1514,15 @@ function ClusterDetail({
           </div>
         </div>
 
-        {/* Add-ons — same curated menu as the create wizard, SET_ADDONS full replace. */}
+        {/* Modern curated menu; the server preserves legacy ingress and omitted newer picks. */}
         <Dialog open={addonsOpen} onOpenChange={setAddonsOpen}>
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Manage add-ons</DialogTitle>
               <DialogDescription>
-                Add-ons are installed and managed for you. Turning one off removes it from the
-                cluster (its data is not kept).
+                Controller changes are explicit. Disabling a controller can stop application traffic.
+                Gateway API schemas are retained; applications own Gateway, HTTPRoute and listener TLS.
+                Legacy ingress-nginx is preserved and needs a separate operator traffic migration.
               </DialogDescription>
             </DialogHeader>
             <div className="grid gap-3 py-2">
@@ -1511,19 +1534,25 @@ function ClusterDetail({
                   </div>
                   <Switch
                     id={`m-addon-${a.key}`}
+                    disabled={a.key === "nginxGatewayFabric" && (legacyIngress || !gatewayFabricAvailable)}
                     checked={addonsDraft[a.key] ?? false}
                     onCheckedChange={(on) => setAddonsDraft({ ...addonsDraft, [a.key]: on })}
                   />
                 </div>
               ))}
             </div>
+            {(legacyIngress || !gatewayFabricAvailable) && (
+              <p className="text-sm text-muted-foreground">
+                {legacyIngress ? "Existing ingress traffic is not automatically migrated. Contact your operator before changing controllers." : "Gateway Fabric requires platform chart 0.1.10 or later. Apply an offered platform update first."}
+              </p>
+            )}
             <DialogFooter>
               <Button variant="outline" onClick={() => setAddonsOpen(false)}>Cancel</Button>
               <Button
                 onClick={() => {
                   act("SET_ADDONS", { addons: addonsDraft })
                     .then(() => {
-                      onPatch({ addons: { ...addonsDraft } })
+                      onPatch({ addons: { ...(addonStates ?? {}), ...addonsDraft } })
                       toast.success("Add-on changes are being applied")
                       setAddonsOpen(false)
                     })
@@ -1544,7 +1573,7 @@ function ClusterDetail({
               <DialogDescription>
                 Updates the cluster's managed platform components from{" "}
                 <span className="font-mono">{chartVersion}</span> to{" "}
-                <span className="font-mono">{platformVersion}</span>. Components restart with a
+                <span className="font-mono">{platformVersion}</span>. This does not migrate existing ingress traffic or convert Ingress resources to Gateway API. Components restart with a
                 rolling update; if the node template changed, worker nodes are replaced one at a
                 time (a new node comes up and is drained into before the old one is removed).
                 Your Kubernetes version, workloads and data are untouched.

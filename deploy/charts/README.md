@@ -38,16 +38,16 @@ own cadence). All three go to `oci://ghcr.io/mutex-solutions/charts`.
 | `database-cluster` | `database-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 | `proxmox-kamaji-cluster` | `proxmox-kamaji-cluster-vX.Y.Z` | `Chart.yaml` — the tag must match or the job fails |
 
-As of 2026-11-10, no ProxCloud tag/release or OCI chart has been published. Local
-chart rendering is not proof that these pull URLs exist. App chart/BOM `v0.4.0`
-is a planned pin, not a released artifact. Use the source-build path until a
-separately approved release is published and tested; see
+First-release preparation selects app chart/BOM `v0.4.0-rc.1` as an authorized
+preview candidate. Local rendering and a source pin are not proof that pull URLs
+exist. Use the source-build path until the required release images and charts
+have been published and verified; see
 [release readiness](../../docs/release-readiness.md).
 
 For `database-cluster` and `proxmox-kamaji-cluster`, bump `version:` in `Chart.yaml`
 in the PR that changes the chart, merge, then have a maintainer deliberately cut
-the matching tag. The current source versions are database `0.5.0` and Kubernetes
-`0.1.9`; they are independent of the app's `0.4.0`. Publishing is idempotent — an
+the matching tag. The current source versions are database `0.5.1` and Kubernetes
+`0.1.10`; they are independent of the app's `0.4.0-rc.1`. Publishing is idempotent — an
 already-published version is skipped, so a reused version does not update an old
 artifact. These are release operations, not commands to run during normal setup.
 See [CI/release operations](../../docs/ci-release.md) for full verification.
