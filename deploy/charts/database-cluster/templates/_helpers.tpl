@@ -98,9 +98,11 @@ listener port, used by the NetworkPolicy).
 engineVersion -> image, per engine. Ops-updatable per chart release: bump a
 tag here -> bump Chart.yaml version -> re-pin providers. A version with no
 mapping fails the render — better a loud sync error than a silently wrong
-major. Every tag below was verified to exist against its registry's tags API
-on 2026-08-03 (Docker Hub / ghcr), and the mysql tags are exactly the builds
-Percona documents as tested with ps-operator 1.2.0.
+major. The original map recorded registry tag checks on 2026-08-03 (Docker
+Hub / ghcr). PostgreSQL 15–18 patch targets now follow official metadata
+collected on 2026-11-10; this source update does not recheck registry tags or
+digests. See docs/managed-postgresql-version-baseline.md for release limits.
+Other engine images are unchanged.
 
 opensearch/kafka have NO map here BY DESIGN: both operators resolve images
 from the version field natively (OpenSearchCluster spec.general.version,
@@ -129,10 +131,10 @@ of a database that never boots.
 {{- $maps := dict
       "postgresql" (dict
         "14" "ghcr.io/cloudnative-pg/postgresql:14.23"
-        "15" "ghcr.io/cloudnative-pg/postgresql:15.18"
-        "16" "ghcr.io/cloudnative-pg/postgresql:16.14"
-        "17" "ghcr.io/cloudnative-pg/postgresql:17.10"
-        "18" "ghcr.io/cloudnative-pg/postgresql:18.4")
+        "15" "ghcr.io/cloudnative-pg/postgresql:15.19"
+        "16" "ghcr.io/cloudnative-pg/postgresql:16.15"
+        "17" "ghcr.io/cloudnative-pg/postgresql:17.11"
+        "18" "ghcr.io/cloudnative-pg/postgresql:18.6")
       "mysql" (dict
         "8.0" "docker.io/percona/percona-server:8.0.46-37"
         "8.4" "docker.io/percona/percona-server:8.4.10-10")

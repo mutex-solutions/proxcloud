@@ -2,10 +2,13 @@
 
 Fresh installs need **only a writable PostgreSQL primary** for application data and
 durable jobs. There is no broker connection, broker readiness check, or queue-enable
-switch. This release wires the engine and native billing jobs; **mail is not a durable
-outbox yet**. External billing's HTTP calls and failure behavior are unchanged.
+switch. This release wires the engine and native billing jobs. Mail has separate
+bounded default-OFF outbox infrastructure and typed enqueue producers, not enabled
+production delivery; see [mail safety limits](mail-outbox-safety-limits.md).
+External billing's HTTP calls and failure behavior are unchanged.
 
-The planned broker-free release is **v0.4.0, unpublished until separately approved**.
+The first broker-free preview candidate is **v0.4.0-rc.1**. Publication is authorized,
+but its tag, images and chart must still be verified rather than inferred from a source pin.
 Use a core-containing source build (`images.build: true`) or a known compatible
 new API image; do not deploy this chart against old v0.3.x binaries. Render/lint
 success does not prove that the planned package/image is published.
