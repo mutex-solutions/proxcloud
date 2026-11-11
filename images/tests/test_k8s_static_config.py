@@ -48,7 +48,8 @@ class StaticPreparationTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256((FIXTURES / filename).read_bytes()).hexdigest(), checksum)
         for os_slug in ("ubuntu-2404", "ubuntu-2604"):
             with self.subTest(os=os_slug), tempfile.TemporaryDirectory() as tmp:
-                run = Path(tmp); capi = run / "image-builder/images/capi"; upstream(capi)
+                run = Path(tmp); capi = run / "image-builder/images/capi"; template = upstream(capi)
+                before = json.loads(template.read_text())
                 # Remove the other OS seed: a selector must not fall back to it.
                 other = "26.04" if os_slug == "ubuntu-2404" else "24.04"
                 (capi / ("packer/proxmox/linux/ubuntu/http/" + other + "/user-data.tmpl")).unlink()
@@ -59,6 +60,17 @@ class StaticPreparationTests(unittest.TestCase):
                 self.assertEqual(variables["iso_url"], config.K8S_IMAGES[os_slug]["iso_url"])
                 self.assertIn("  network:", (run / "seed/user-data").read_text())
                 self.assertIn("mirror-selection:", (run / "seed/user-data").read_text())
+                after = json.loads((capi / "packer/proxmox/packer.json").read_text())
+                expected = before["provisioners"][:-1]
+                expected[2]["pause_before"] = "90s"  # Existing reconnect grace, not a shutdown delay.
+                self.assertEqual(after["provisioners"][:-1], expected)  # Reboot + goss are not waived.
+                final = after["provisioners"][-1]
+                self.assertEqual(final["script"], str(run / "cleanup.sh"))
+                self.assertEqual(final["execute_command"], "sudo -n bash '{{.Path}}'")
+                self.assertFalse(final["expect_disconnect"])
+                self.assertNotIn("inline", final)
+                self.assertNotIn("shutdown_command", after["builders"][0])  # Preserve plugin-owned phase.
+                self.assertEqual((run / "cleanup.sh").read_text(), (ROOT / "images/k8s-build-cleanup.sh").read_text())
 
     def test_selector_default_and_rejected_os_or_pin_do_not_disclose_values(self):
         self.assertEqual(config.settings({"K8S_VERSION": "1.35.10"})["os"], "ubuntu-2604")
@@ -147,12 +159,16 @@ class StaticPreparationTests(unittest.TestCase):
                 identities.append((run/"seed/meta-data").read_text())
         self.assertNotEqual(*identities)
 
-    def test_cleanup_does_not_restart_network_and_follows_goss(self):
+    def test_cleanup_returns_without_power_or_network_changes(self):
         text=(ROOT/"images/k8s-build-cleanup.sh").read_text()
-        for phrase in ("netplan apply","systemctl restart","dhclient"):self.assertNotIn(phrase,text)
-        for phrase in ("/var/log/installer", "subiquity-disable-cloudinit-networking.cfg", "cloud-init clean", "usermod -p '!' builder", "shutdown -h now"):
-            self.assertIn(phrase,text)
-        self.assertLess(text.index("usermod -p"), text.index("shutdown -h now"))
+        commands = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+        for phrase in ("netplan apply", "systemctl restart", "dhclient"):
+            self.assertNotIn(phrase, commands)
+        self.assertNotRegex(commands, r"\b(?:shutdown|reboot|poweroff|halt)\b|\binit\s+[06]\b|/proc/sysrq-trigger")
+        self.assertNotIn("expect_disconnect", commands)
+        for phrase in ("set -euo pipefail", "/var/log/installer", "subiquity-disable-cloudinit-networking.cfg", "cloud-init clean", "usermod -p '!' builder", "/home/builder/.ssh", "/etc/ssh/ssh_host_", "/etc/sudoers.d/*", "[ ! -d /var/lib/cloud/seed ]", "[ \"$(getent shadow builder | cut -d: -f2)\" = '!' ]"):
+            self.assertIn(phrase, text)
+        self.assertEqual(commands.rstrip().splitlines()[-1], "sync")
 
 
 class CheckoutTests(unittest.TestCase):

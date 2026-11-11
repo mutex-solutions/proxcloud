@@ -298,8 +298,10 @@ def prepare(capi, run, env):
         final = doc["provisioners"][-1]
         if final.get("type") != "shell" or not final.get("expect_disconnect") or not any("shutdown" in line for line in final.get("inline", [])):
             fail("Pinned final shutdown provisioner contract changed")
-        # Final goss/reboot checks remain untouched. One root session cleans secrets
-        # then shuts down; removing builder sudo cannot break a later sudo command.
+        # Keep goss/reboot checks intact. This root session only cleans secrets and
+        # returns: Packer must remove its uploaded script before the builder stops
+        # the VM. No later sudo command may depend on the removed builder grant.
+        final["expect_disconnect"] = False
         final.pop("inline", None)
         final.pop("inline_shebang", None)
         cleanup = Path(__file__).with_name("k8s-build-cleanup.sh").read_text()
