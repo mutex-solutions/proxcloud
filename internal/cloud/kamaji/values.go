@@ -127,6 +127,9 @@ func anySlice(in []string) []any {
 func AddonValues(picks map[string]bool) map[string]any {
 	addons := map[string]any{}
 	for name, enabled := range picks {
+		if _, curated := ClusterAddons[name]; !curated {
+			continue
+		}
 		addons[name] = map[string]any{"enabled": enabled}
 	}
 	return addons

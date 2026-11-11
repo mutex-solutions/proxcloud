@@ -12,7 +12,8 @@ name: docker
 # On a `v*` tag, once every image is built the `release` job creates the
 # matching GitHub Release (the chart is published in parallel by helm.yml). Its
 # notes are the CHANGELOG.md section for that version (if present) followed by
-# GitHub's auto-generated commit list.
+# GitHub's auto-generated commit list. Stable vX.Y.Z releases become latest;
+# vX.Y.Z-rc.N releases are explicitly prerelease/non-latest. Other tags fail closed.
 #
 # Auth is the built-in GITHUB_TOKEN (packages: write / contents: write) — no
 # external secrets.
@@ -120,8 +121,9 @@ jobs:
           MANUAL_TAG: ${{ github.event.inputs.image_tag }}   # kept out of the script text (no ${{ }} splice)
         run: |
           set -euo pipefail
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            # Validate before any image build/push; read the tag from the environment.
+            python3 .github/scripts/release_policy.py >> "$GITHUB_OUTPUT"
           elif [ -n "${MANUAL_TAG}" ]; then
             # Sanitize the operator-supplied suffix: a Docker tag component is [A-Za-z0-9._-];
             # rejecting anything else also blocks newlines (which would inject extra
@@ -159,10 +161,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Validate app release tag and compute policy
+        id: policy
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: python3 .github/scripts/release_policy.py >> "$GITHUB_OUTPUT"
+
       - name: Assemble release notes from CHANGELOG
+        env:
+          RELEASE_VERSION: ${{ steps.policy.outputs.version }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"          # v0.3.26 -> 0.3.26
+          version="$RELEASE_VERSION"
           # Pull the "## [<version>] …" section out of CHANGELOG.md (empty if absent).
           # Literal index() matching avoids awk's bracket-regex escaping pitfalls; the
           # section ends at the next "## " header or the trailing "[link]:" definitions.
@@ -181,18 +191,23 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.policy.outputs.tag }}
+          RELEASE_FLAGS: ${{ steps.policy.outputs.flags }}
         run: |
           set -euo pipefail
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists — nothing to do."
+          # Policy output contains only fixed flags. Read into an array, never eval.
+          # rc.N => --prerelease --latest=false; stable => --latest.
+          read -r -a release_flags <<< "$RELEASE_FLAGS"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG already exists — nothing to do."
             exit 0
           fi
           # The CHANGELOG body (if any) is pre-pended to GitHub's auto-generated
           # commit/PR notes (--generate-notes).
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
+            --title "$RELEASE_TAG" \
             --notes-file /tmp/notes.md \
             --generate-notes \
             --verify-tag \
-            --latest
+            "${release_flags[@]}"

@@ -5,6 +5,13 @@ CSI token (a Secret the portal writes, never in this document) and the MetalLB c
 the chart's CRDs first (ClusterResourceSet retries until they exist).
 */ -}}
 {{- $root := . }}
+{{- $fabric := (.Values.addons.nginxGatewayFabric | default dict).enabled | default false }}
+{{- if and $fabric ((.Values.addons.ingress | default dict).enabled | default false) }}
+{{- fail "legacy ingress-nginx must be explicitly migrated before enabling NGINX Gateway Fabric" }}
+{{- end }}
+{{- if and $fabric (not (semverCompare ">=1.32.0-0 <2.0.0-0" (.Values.kubernetesVersion | trimPrefix "v"))) }}
+{{- fail "NGINX Gateway Fabric requires Kubernetes >=1.32 in the supported 1.x series" }}
+{{- end }}
 {{- $proxies := list }}
 {{- $proxies = append $proxies (dict "key" "cilium" "ns" "kube-system" "values" (dict "kubeProxyReplacement" false "bandwidthManager" (dict "enabled" (.Values.sandboxBandwidth | default false)) "cni" (dict "customConf" (.Values.sandboxBandwidth | default false)) "ipam" (dict "mode" "kubernetes") "routingMode" "tunnel" "tunnelProtocol" "vxlan" "operator" (dict "replicas" 1) "hubble" (dict "enabled" false))) }}
 {{- $classes := list }}
@@ -38,6 +45,10 @@ replicas (the chart's top-level replicaCount; it has no controller.replicaCount)
 {{- $proxies = append $proxies (dict "key" $key "ns" (get $ns $key) "values" $v) }}
 {{- end }}
 {{- end }}
+{{- if $fabric }}
+{{- $fabricValues := dict "nginxGateway" (dict "gatewayClassName" "nginx" "gatewayControllerName" "gateway.nginx.org/nginx-gateway-controller" "productTelemetry" (dict "enable" false)) "nginx" (dict "service" (dict "type" "LoadBalancer" "externalTrafficPolicy" "Local")) "gateways" (list) }}
+{{- $proxies = append $proxies (dict "key" "nginxGatewayFabric" "ns" "nginx-gateway" "values" $fabricValues) }}
+{{- end }}
 {{- range $p := $proxies }}
 {{- $chart := get $root.Values.addonCharts $p.key }}
 ---
@@ -55,7 +66,7 @@ spec:
   namespace: {{ $p.ns }}
   releaseName: {{ $p.key | lower }}
   options:
-    wait: false
+    wait: {{ eq $p.key "nginxGatewayFabric" }}
     timeout: 10m
     install:
       createNamespace: true

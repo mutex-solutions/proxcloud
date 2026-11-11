@@ -9,9 +9,11 @@ on:
   workflow_dispatch:
     inputs:
       os:
-        description: "One OS, blank = all"
+        description: "One OS canary; all explicitly builds four (legacy blank keeps the old two)"
+        type: choice
+        options: [debian-13, debian-12, ubuntu-2404, ubuntu-2604, all]
         required: false
-        default: ""
+        default: debian-13
   schedule:
     - cron: "17 3 * * 1" # weekly, for vendor security updates
   push:
@@ -70,14 +72,28 @@ jobs:
           done
           echo "::add-mask::${BUILD_IP%%/*}"
       - uses: actions/checkout@v7
+      - name: Require full source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C "$GITHUB_WORKSPACE" sparse-checkout disable
+          test "$(git -C "$GITHUB_WORKSPACE" config --bool --get core.sparseCheckout)" = false
+          test -f "$GITHUB_WORKSPACE/images/build.py" && test -f "$GITHUB_WORKSPACE/images/packer/template.pkr.hcl"
       - name: Build
         # PVE_NODES is space-separated: one on shared VM disks, all of them on local disks.
         # BUILD_IP is a dedicated free CIDR; optional BUILD_NAMESERVER falls back to BUILD_GATEWAY.
         env:
-          OS_LIST: ${{ inputs.os || 'debian-13 ubuntu-2404' }}
+          OS_CHOICE: ${{ inputs.os }}
         shell: bash
         run: |
           set -euo pipefail
+          # Schedule/push and old blank dispatches keep the original two, not four.
+          case "$OS_CHOICE" in
+            '') OS_LIST='debian-13 ubuntu-2404' ;;
+            all) OS_LIST='debian-13 debian-12 ubuntu-2404 ubuntu-2604' ;;
+            debian-13|debian-12|ubuntu-2404|ubuntu-2604) OS_LIST="$OS_CHOICE" ;;
+            *) echo '::error::Unsupported OS choice'; exit 1 ;;
+          esac
           for os in $OS_LIST; do
             for node in $PVE_NODES; do
               python3 images/build.py build --os "$os" --node "$node" --storage "$PVE_TEMPLATE_STORAGE" \

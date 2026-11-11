@@ -4,6 +4,72 @@ Every architecture change lands here in the same PR that changes the code and th
 diagrams: what changed, why, and which diagrams were updated. Newest first. Format
 and rules: [README.md](README.md#maintenance-rule).
 
+## 2026-11-11: Managed PostgreSQL patch and fresh catalog baseline
+
+**What changed:** database chart 0.5.1 maps PG majors 15/16/17/18 to patch images
+15.19/16.15/17.11/18.6. A newly registered DBaaS provider offers 17 and 18, defaulting
+to 18. Installer name-absence/POST-only behavior and existing database chart pins
+remain unchanged. Native chart renders and data-only catalog checks are required.
+
+**Why:** security patch freshness and a PG18 offer are separate from existing
+PG17 data migration. Updating a source map must not masquerade as safe major
+upgrade, operator compatibility, backup/restore or deployed digest evidence.
+
+**Views updated:** [version/catalog boundary view](../../managed-postgresql-version-baseline.md),
+chart index and C4 index. No data operation, provider re-pin or publication occurs.
+
+## 2026-11-11: Managed Kubernetes Gateway API addon
+
+**What changed:** tenant chart 0.1.10 adds NGINX Gateway Fabric 2.8.1 and vendored
+Gateway API Standard 1.6.3 carrier Secrets/ClusterResourceSet. The API/UI offer a
+new explicit opt-in, not an alias for ingress-nginx. The actual cluster chart and
+Kubernetes version are checked before effects. Sparse edits preserve newer picks
+and raw legacy ingress values; platform bumps preserve legacy release identity.
+
+**Why:** new clusters should use maintained Gateway API routing, while an unrelated
+edit must not prune an old traffic-bearing release or silently convert its routes.
+Standard CRDs are tenant prerequisites, not management-cluster CRD grants. CAAPH/CRS
+converge independently; Helm wait is not cross-controller dependency ordering.
+
+**Views updated:** [dedicated C1–C4 Gateway API view](../../managed-k8s-gateway-api.md),
+managed Kubernetes runbook and C4 index. No new PVE credential, shared-cluster action,
+automatic Gateway/TLS/DNS object or existing-cluster migration is introduced.
+
+## 2026-11-11: Durable organization SSO alias retirement
+
+**What changed:** an additive primary-only id-keyed retirement table records the
+stored provider alias before Keycloak deletion. The rule snapshot checks exact
+retirement before its zero-provider shortcut and excludes retired providers from
+discovery/enforcement/reconciliation; fresh JIT checks the primary fence too.
+Deletion retries preserve retirement through external and database cleanup errors.
+
+**Why:** removing a broker does not revoke its already issued tokens, and an empty
+provider set cannot turn a retired identity into a legitimate local/social broker.
+Unknown realm-level brokers remain compatible; no token-controlled alias prefix
+is treated as revocation authority. No guessed session-lifetime TTL is used.
+
+**Views updated:** [dedicated C1–C4 lifecycle view](../../sso-alias-retirement.md),
+SSO operator guidance and C4 index. All API readers must upgrade; prior deleted
+aliases are not backfilled and warm-cache behavior during primary outage is not
+promoted to a hard revocation SLA. No real realm, token or identity mutation.
+
+## 2026-11-10: Tenant read, role-assignment and private-traffic boundaries
+
+**What changed:** order reads now resolve the stored billing profile's owning
+organization and require current billing-read permission before a typed response.
+Organization invitations require role management for every custom role, retaining
+ordinary MEMBER invitations and rejecting unknown role names. Sandbox pod lookup
+now identifies actual envd serving mode from the main command and arguments, so
+private native port 49983 cannot receive envd's traffic-token exemption.
+
+**Why:** identifiers and port numbers cannot replace authority. A custom role's
+permissions can change after it is assigned. Existing envd pods need compatible
+classification without a new annotation, credential or workload recreation.
+
+**Views updated:** [dedicated C1–C4 boundary view](../../tenant-authorization-boundaries.md),
+this index, and the managed-sandbox/E2B traffic descriptions. No new container,
+schema or external service; all held mail/lifecycle/registry features remain held.
+
 ## 2026-11-10: Legacy SMTP credential TLS enforcement
 
 **What changed:** legacy SMTP credential AUTH now requires an actual completed,

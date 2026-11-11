@@ -806,8 +806,9 @@ client ──TCP 443──► entry appliance (HAProxy VM: public NIC + NIC on t
 `cmd/sandbox-proxy` and `internal/sandboxproxy`, ported from EE with its routing unchanged: it looks the pod up by
 `proxcloud.io/sandbox-id` (Running, Ready, not being deleted; hits and misses cached two seconds), forwards plain HTTP
 to `<podIP>:<port>` with streaming and WebSocket upgrades, refuses envd's control-plane paths (`/init`, `/freeze`, ...)
-on port 49983, and on every other port wants the sandbox's traffic token in `e2b-traffic-access-token` when the
-sandbox was created with `allowPublicTraffic: false`. EE's trust of `X-Forwarded-Host` is gone: nothing sits between
+on port 49983, and requires the sandbox's traffic token in `e2b-traffic-access-token` on every application
+port when the sandbox was created with `allowPublicTraffic: false`. Port 49983 is exempt only when the pod's
+actual main-container command runs envd; native private services require the traffic token on that port too. EE's trust of `X-Forwarded-Host` is gone: nothing sits between
 the client and the proxy that could set it.
 
 New here (D15): the proxy terminates TLS itself. `SANDBOX_TLS_DIR` holds `tls.crt` and `tls.key` from the mounted
