@@ -31,9 +31,21 @@ IMAGES = {
         "algorithm": "sha512",
         "user": "debian",
     },
+    "debian-12": {
+        "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
+        "sums": "https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS",
+        "algorithm": "sha512",
+        "user": "debian",
+    },
     "ubuntu-2404": {
         "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
         "sums": "https://cloud-images.ubuntu.com/noble/current/SHA256SUMS",
+        "algorithm": "sha256",
+        "user": "ubuntu",
+    },
+    "ubuntu-2604": {
+        "url": "https://cloud-images.ubuntu.com/releases/resolute/release-20261016/ubuntu-26.04-server-cloudimg-amd64.img",
+        "sums": "https://cloud-images.ubuntu.com/releases/resolute/release-20261016/SHA256SUMS",
         "algorithm": "sha256",
         "user": "ubuntu",
     },
