@@ -334,7 +334,7 @@ that reads its own images and the built-in ones only ([managed-sandbox.md §6](m
 The registry sync invokes `sandbox-proxy registry-users`, so its image must contain that subcommand; an
 older incompatible image stops with "unknown subcommand". The Docker workflow now builds five images, including
 `proxcloud-sandbox-proxy` and `proxcloud-sandbox-runtime`, and development tags are public. **Stage 35 still builds
-only API/web/admin**, and the BOM's planned `v0.4.0` release tag remains unpublished. On a source-build site,
+only API/web/admin**, and the BOM selects the first preview `v0.4.0-rc.1`; this source pin does not prove publication. On a source-build site,
 explicitly pin `sandbox.proxy.image` and `sandbox.runtime_image` to compatible, pullable development tags or digests;
 do not assume `<images.registry>/…:<release>` exists. A complete split/sandbox installation from coordinated public
 release artifacts has not been accepted yet.

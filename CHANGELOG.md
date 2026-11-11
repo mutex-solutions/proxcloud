@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-rc.1] - Unpublished preview
+
+First broker-free ProxCloud release candidate, **not a stable release**. The owner
+has authorized publication and released-artifact evaluation; preparation of this
+section does not mean a tag, chart or image has been published or installed.
+The five source security fixes cover SMTP credential TLS, stored-profile order
+read authorization, custom-role assignment permission, native sandbox traffic
+tokens and exact SSO alias retirement; details and limits are below. This is not
+live installer (P6) or split/managed-service (P7) acceptance. Scheduling remains
+off, mail delivery and saved sandbox lifecycle remain held, and existing broker
+data still requires explicit migration/retention evidence.
+
 ### Changed
 
 - Offer NGINX Gateway Fabric 2.8.1 with Gateway API Standard 1.6.3 for new managed

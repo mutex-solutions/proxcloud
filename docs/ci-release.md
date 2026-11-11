@@ -1,9 +1,12 @@
 # CI, template builds and release operations
 
 This page describes the checked-in workflows, not a guarantee that a release has
-already been published. As of **2026-11-10**, GHCR has public development images;
-ProxCloud has no versioned GitHub Release/tag or published OCI chart. Read
-[release readiness](release-readiness.md) before planning the first publication.
+already been published. As of **2026-11-11**, GHCR has public development images;
+ProxCloud has no versioned GitHub Release/tag or published OCI chart. The owner has
+authorized first app/chart release CI for `v0.4.0-rc.1`, installation from its
+released artifacts and later controlled PVE template canaries. This source change
+does none of those operations. Read [release readiness](release-readiness.md)
+before publication or evaluation.
 
 ## Workflow map
 
@@ -37,9 +40,20 @@ No image is produced for some documentation/chart-only commits.
 The configured destination for app Helm publication is
 `oci://ghcr.io/mutex-solutions/charts`; no app chart has been published there yet.
 On an app release tag, the workflow sets chart version to the tag without `v` and
-appVersion to the full tag, matching the image tags. Managed charts use their own
-`Chart.yaml` versions and reject a mismatching tag. Re-publishing an already
-existing chart version is skipped; it does not replace old contents. See the
+appVersion to the full tag, matching the image tags. The prepared contract is app
+chart `0.4.0-rc.1`, appVersion/image tag and installer BOM `v0.4.0-rc.1`.
+Keep `images.build: true` until the exact chart and images are published and
+verified; use `false` explicitly for released-artifact evaluation after that.
+The installer's broker-free floor compares the SemVer **base** against `0.4.0`:
+valid prereleases and build metadata are accepted syntactically, not verified as
+published. App publication tags are narrower (stable/RC, no build metadata), since
+images use the raw tag and Docker tags cannot contain `+`.
+
+Managed charts use their own metadata versions and reject a mismatching tag.
+`database-cluster` `0.5.1` and `proxmox-kamaji-cluster` `0.1.10` need separate
+publication checks/tags; the app tag does not publish them or move existing
+provider pins or managed data. Re-publishing an already existing chart version is
+skipped; it does not replace old contents. See the
 [chart overview](../deploy/charts/README.md).
 
 `make image` / `make push` build/push **only the API**. `make deploy` sets only
@@ -110,13 +124,20 @@ The workflows currently **do not** provide a single atomic release gate:
   test workflow. Choose an exact commit whose tests completed successfully.
 - GitHub Release creation waits for all five image builds, but not for the
   separate Helm publication workflow. Verify both before telling users to install.
-- The Release job calls `gh release create ... --latest` without explicit
-  prerelease handling. A tag suffix such as `-rc.1` alone is not a reviewed
-  prerelease/non-latest policy. Fix that behavior before the first RC.
+- The Release job validates the tag from the environment with the stdlib
+  [release policy](../.github/scripts/release_policy.py). Only `vX.Y.Z` and
+  `vX.Y.Z-rc.N` (no leading zeroes) pass. RCs use `--prerelease --latest=false`;
+  stable releases use `--latest`. The same policy validates tags before image
+  build/push and app-chart publication; invalid tags fail before those effects or
+  notes/release creation. Existing GitHub Releases are skipped, not silently
+  reclassified.
 - No workflow automatically installs/upgrades a production site. Publication is
   not deployment, acceptance, backup verification or rollback readiness.
 
-This page documents those limitations; it does not silently change workflow
-behavior. Routine docs updates must not create tags or trigger a real PVE build.
+Owner authorization permits the first preview publication, but does not replace
+exact-commit checks or evidence. A `v*` tag triggers the app Docker and Helm
+workflows, not either PVE template workflow. Keep later template canaries on their
+separately reviewed branch/run path; do not change credentials, secrets or runner
+routing as part of the app release. Routine docs updates must not create tags.
 For the first preview, use the checklist in
 [release readiness](release-readiness.md#minimum-gate-before-a-first-previewrc).
