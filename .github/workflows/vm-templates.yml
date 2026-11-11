@@ -113,7 +113,7 @@ jobs:
           rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
           path.write_text("".join(json.dumps({key: row[key] for key in ("os", "built", "version") if key in row}) + "\n" for row in rows))
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: templates-${{ github.run_id }}
           path: manifest.jsonl
