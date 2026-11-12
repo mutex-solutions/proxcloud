@@ -49,7 +49,13 @@ func (h *Handler) projectGPUCapacity(w http.ResponseWriter, r *http.Request) {
 		httpx.OK(w, resp)
 		return
 	}
-	serviceID := h.resolveServiceID(r, proj)
+	// An explicit service the project is not attached to is refused (#215), not answered with
+	// another provider's capacity.
+	serviceID, err := h.resolveServiceID(r, proj)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
 	if serviceID == "" || h.esSvc == nil {
 		resp.Warnings = append(resp.Warnings, "GPU capacity is unavailable for this project.")
 		httpx.OK(w, resp)

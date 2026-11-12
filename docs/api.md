@@ -79,6 +79,16 @@ address from that network's pool, pinned by the VM firewall's ipfilter
 project's allow-list. Attaching again while the NIC is plugged answers 409 and
 leaves it alone; an address held by a NIC that never got plugged is plugged.
 
+Cloud service selection: the project cloud routes (`/project/{id}/cloud`, its
+actions and deletes, `quota-usage`, `gpu-capacity`, `public-networks`, the S3
+key routes) run against the service named by the `x-service-id` header (with
+`x-region-id`), else `?serviceId=`. A named service the project is not attached
+to is refused with `400 Project is not attached to service <id>` before any
+provider is called. A provider registered after a project was created is not
+attached to it until an operator attaches it (admin project page → Cloud
+services → Attach provider). Without a named service the call goes to the
+project's Proxmox service, else its first attached one.
+
 ## Admin API — `/admin-api/v1`
 
 A machine-to-machine surface (`internal/platform/adminapi`). Authenticated with an

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -34,19 +35,32 @@ import (
 // their own services; ceph-s3 bucket writes + cache go through providers.WriteService over the
 // project's ceph client.
 
-// resolveServiceID picks the externalService for a cloud write: the FE's `x-service-id` header (or
-// `?serviceId=`) when the project is attached to it, else the project's first attached service.
-// "" = the project has no cloud service (→ 400, the no-service guard).
-func (h *Handler) resolveServiceID(r *http.Request, p *Project) string {
-	if hd := r.Header.Get("x-service-id"); hd != "" && p.HasService(hd) {
-		return hd
+// resolveServiceID picks the externalService a project cloud call runs against. An explicit choice
+// — the FE's `x-service-id` header, else `?serviceId=` — must name a service the project is attached
+// to: anything else is a 400 (errNotAttached), decided before any provider is touched. Falling back
+// to the default would run the call on another provider (#215: a BUCKET create for an S3 store the
+// project was never attached to went to Proxmox). Only when the request names no service does it
+// default: a Proxmox service, else the project's first attached one. ("", nil) = the project has
+// no cloud service (the callers' no-service guard).
+func (h *Handler) resolveServiceID(r *http.Request, p *Project) (string, error) {
+	explicit := ""
+	for _, id := range []string{r.Header.Get("x-service-id"), r.URL.Query().Get("serviceId")} {
+		if id == "" {
+			continue
+		}
+		if !p.HasService(id) {
+			return "", errNotAttached(id)
+		}
+		if explicit == "" { // the header wins over the query when both name attached services
+			explicit = id
+		}
 	}
-	if q := r.URL.Query().Get("serviceId"); q != "" && p.HasService(q) {
-		return q
+	if explicit != "" {
+		return explicit, nil
 	}
 	ids := p.ServiceIDs()
 	if len(ids) == 0 {
-		return ""
+		return "", nil
 	}
 	// No explicit service → prefer a Proxmox one. A ceph-s3 provider serves ONLY object-store
 	// (a kamaji provider ONLY kubernetes clusters, a dbaas provider ONLY databases), so the
@@ -55,10 +69,23 @@ func (h *Handler) resolveServiceID(r *http.Request, p *Project) string {
 	// Location picker) or resolve the service from the resource itself.
 	for _, id := range ids {
 		if es, err := h.esSvc.Get(r.Context(), id); err == nil && es != nil && es.IsProxmox() {
-			return id
+			return id, nil
 		}
 	}
-	return ids[0] // ceph/kamaji/dbaas-only project
+	return ids[0], nil // ceph/kamaji/dbaas-only project
+}
+
+// echoableServiceID is what errNotAttached repeats back: a service id's own alphabet (externalservice's
+// serviceIDRe), so a header carrying anything else is not reflected into the answer.
+var echoableServiceID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// errNotAttached refuses a request that names a service the project is not attached to (a provider
+// registered after the project was created stays unattached until an operator attaches it).
+func errNotAttached(id string) error {
+	if !echoableServiceID.MatchString(id) {
+		return httpx.BadRequest("Project is not attached to the requested service")
+	}
+	return httpx.BadRequest("Project is not attached to service " + id)
 }
 
 // tenantWriteService builds the bucket WriteService for a ceph-s3 provider — the
@@ -373,7 +400,11 @@ func (h *Handler) cloudCreate(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	svcID := h.resolveServiceID(r, proj)
+	svcID, err := h.resolveServiceID(r, proj)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
 	if svcID == "" {
 		h.fail(w, httpx.BadRequest("Project has no cloud service"))
 		return
@@ -512,7 +543,11 @@ func (h *Handler) cloudDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	svcID := h.resolveServiceID(r, proj)
+	svcID, err := h.resolveServiceID(r, proj)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
 	if svcID == "" {
 		h.fail(w, httpx.BadRequest("Project has no cloud service"))
 		return
@@ -674,7 +709,11 @@ func (h *Handler) cloudBulkAction(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, httpx.BadRequest("invalid request body"))
 		return
 	}
-	svcID := h.resolveServiceID(r, proj)
+	svcID, err := h.resolveServiceID(r, proj)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
 	// proxmox: catalog feeds come from the flavor catalog + template config.
 	if es, err := h.esSvc.Get(r.Context(), svcID); err == nil && es != nil && es.IsProxmox() {
 		if h.pveBulkAction(w, r, proj, es, req.Action) {
@@ -705,7 +744,11 @@ func (h *Handler) cloudAction(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, errProjectDeleting)
 		return
 	}
-	svcID := h.resolveServiceID(r, proj)
+	svcID, err := h.resolveServiceID(r, proj)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
 	if svcID == "" {
 		h.fail(w, httpx.BadRequest("Project has no cloud service"))
 		return

@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provisioned the project on the provider, now answers 405 and changes nothing (#214). The
   attach stays idempotent: re-attaching a service the project already carries makes no
   provider call and adds no second binding. Scripts calling the old `GET` must switch to `POST`.
+- A project cloud call that names a service (`x-service-id` or `?serviceId=`) the project is
+  not attached to is now refused with `400 Project is not attached to service <id>` before any
+  provider is called, instead of silently running on the project's Proxmox service (#215: a
+  BUCKET create for a newly registered S3 store failed on Proxmox). This covers creates,
+  actions, deletes and the reads `quota-usage`, `gpu-capacity`, `public-networks` and the S3
+  key routes. Requests naming no service keep the Proxmox default. Existing projects still
+  need an operator to attach a provider registered after they were created.
 
 ## [0.4.0] - 2026-11-12
 
