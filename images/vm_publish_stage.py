@@ -22,6 +22,27 @@ MAX_PAYLOAD_BYTES = sum(MEMBERS.values())
 MAX_ARCHIVE_BYTES = MAX_PAYLOAD_BYTES + 1024 ** 2
 MAX_METADATA_BYTES = 1024 ** 2
 NAME = r"vm-export-(ubuntu-2404|ubuntu-2604|debian-12|debian-13)-([0-9]{14})-([0-9a-f]{12})"
+# Separate, narrower selector for the single accepted Kubernetes node template line.
+K8S_NAME = r"vm-k8s-export-(ubuntu-2604)-([0-9]{14})-([0-9a-f]{12})"
+K8S_VERSION = "1.35.10"
+
+
+def selector(name):
+    """(os, build_version, source_prefix, variant) or refusal; never a free-form variant."""
+    require(type(name) is str)
+    for pattern, variant in ((NAME, "os"), (K8S_NAME, "kubernetes")):
+        found = re.fullmatch(pattern, name, flags=re.ASCII)
+        if found is not None:
+            datetime.datetime.strptime(found[2], "%Y%m%d%H%M%S")
+            return found[1], found[2], found[3], variant
+    require(False)
+
+
+def manifest_matches(manifest, os_name, build_version, source_prefix, variant):
+    require(manifest["variant"] == variant and manifest["os"] == os_name)
+    require(manifest["build_version"] == build_version)
+    require(manifest["source_commit"].startswith(source_prefix))
+    require(variant == "os" or manifest.get("kubernetes_version") == K8S_VERSION)
 
 
 def require(ok):
@@ -37,13 +58,10 @@ def inputs(run_id, artifact_name, manifest_sha, disk_sha, publisher_sha, reposit
     require(contract.match(r"[1-9][0-9]{0,19}", run_id) and repository == REPOSITORY)
     require(all(contract.match(r"[0-9a-f]{64}", value) for value in (manifest_sha, disk_sha)))
     require(contract.match(r"[0-9a-f]{40}", publisher_sha))
-    require(type(artifact_name) is str)
-    found = re.fullmatch(NAME, artifact_name, flags=re.ASCII)
-    require(found is not None)
-    datetime.datetime.strptime(found[2], "%Y%m%d%H%M%S")
+    os_name, build_version, source_prefix, variant = selector(artifact_name)
     return dict(run_id=int(run_id), artifact_name=artifact_name, manifest_sha=manifest_sha,
-                disk_sha=disk_sha, publisher_sha=publisher_sha, os=found[1],
-                build_version=found[2], source_prefix=found[3])
+                disk_sha=disk_sha, publisher_sha=publisher_sha, os=os_name,
+                build_version=build_version, source_prefix=source_prefix, variant=variant)
 
 
 def authorize(workflow, run, listing, selected):
@@ -160,10 +178,10 @@ def publication_plan(staging_dir, selected):
         manifest = contract.verify(fd, selected["manifest_sha"], selected["disk_sha"])
     finally:
         os.close(fd)
-    # The initial publication bridge supports native OS disks only, not Kubernetes exports.
-    require(manifest["variant"] == "os" and manifest["os"] == selected["os"])
-    require(manifest["build_version"] == selected["build_version"])
-    require(manifest["source_commit"].startswith(selected["source_prefix"]))
+    # Variant comes from the artifact-name selector; a native name never admits a K8s manifest
+    # (or vice versa), and K8s is pinned to the single accepted 1.35.10 template line.
+    manifest_matches(manifest, selected["os"], selected["build_version"], selected["source_prefix"],
+                     selected.get("variant", "os"))
     plan = contract.plan(manifest)  # Keep this local helper's acceptance gates false.
     plan.update(package=plan["reference"].split(":", 1)[0], source_commit=manifest["source_commit"],
                 expected_manifest_sha256=selected["manifest_sha"], expected_disk_sha256=selected["disk_sha"])

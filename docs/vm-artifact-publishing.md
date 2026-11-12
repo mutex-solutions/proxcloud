@@ -4,7 +4,7 @@
 
 This is **source-only publication plumbing**, not evidence of a published/public disk. No commands, tests, network calls, image exports, PVE operations, Actions runs, registry pushes, visibility changes or boot acceptance were executed for this change. The [publisher](<../.github/workflows/vm-artifacts.yml>) handles actual QCOW2 **bytes** only after an independently reviewed exporter has produced a sealed, sanitized bundle; it never fabricates an empty/example disk to satisfy a release gate.
 
-The initial bridge accepts native OS exports (`variant: os`) for `ubuntu-2404`, `ubuntu-2604`, `debian-12` and `debian-13`. Kubernetes publication is deliberately refused even though the [local artifact contract](<../images/vm_artifact.py>) can describe it. No OS choice, package override, URL, command, tag, VMID, node, path, deployment, registry credential or PVE credential is a dispatch input. No PVE rights are added. Existing template builders, provider pins and tenant VMs are unchanged.
+The bridge accepts native OS exports (`variant: os`) for `ubuntu-2404`, `ubuntu-2604`, `debian-12` and `debian-13`, and **only** the accepted Kubernetes node template line (`variant: kubernetes`, `os: ubuntu-2604`, `kubernetes_version: 1.35.10`) under a separate artifact name. The variant is derived from the artifact name, never a free input. A native name never admits a Kubernetes manifest, the reverse is also refused, and any other Kubernetes OS or version is refused. Kubernetes bundles publish to `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s` with tags `ubuntu-2604-k8s-1.35.10-<UTC build>-<12 hex>`. Their disk must come from the root-only `--k8s-os` sanitizer path ([sanitization boundary](<public-vm-sanitization.md>)), which never exports the template's EFI vars or cloud-init media and preserves kubelet enablement. Kubernetes runtime acceptance is still required: actual inventory, sanitize, fresh postscan, cold boot via fresh cloud-init and anonymous full pull. No OS choice, package override, URL, command, tag, VMID, node, path, deployment, registry credential or PVE credential is a dispatch input. No PVE rights are added. Existing template builders, provider pins and tenant VMs are unchanged.
 
 ## Authority before bytes
 
@@ -15,7 +15,7 @@ Required inputs are strings, checked before checkout/API access and again by the
 | Input | Required form and source |
 |---|---|
 | `staging_run_id` | Positive decimal run ID, 1–20 digits; no leading zero |
-| `artifact_name` | Exactly `vm-export-<supported-os>-<YYYYMMDDHHMMSS>-<12 lowercase hex>`; timestamp must be a real UTC calendar date/time |
+| `artifact_name` | Exactly `vm-export-<supported-os>-<YYYYMMDDHHMMSS>-<12 lowercase hex>`, or `vm-k8s-export-ubuntu-2604-<YYYYMMDDHHMMSS>-<12 lowercase hex>` for the Kubernetes variant; timestamp must be a real UTC calendar date/time |
 | `expected_manifest_sha256` | Literal 64 lowercase hex from independent trusted review; no `sha256:` prefix |
 | `expected_disk_sha256` | Literal 64 lowercase hex from independent trusted review; no `sha256:` prefix |
 
@@ -56,7 +56,7 @@ The [artifact verifier](<../images/vm_artifact.py>) is then called with **both r
 
 The official ORAS setup action is pinned to `22ce207df3b08e061f537244349aac6ae1d214f6` (official v1 revision supplied by independent owner review), requesting ORAS **1.3.0**. Checkout is also pinned to an immutable action revision. Action/source/tool integrity and first live operation still require owner review; source-only tests are not proof of a successful hosted setup.
 
-Only the job's short-lived GitHub token logs into GHCR via stdin; no PAT or PVE secret is requested. Package and unique tag come only from the verified manifest using the existing helper's plan. Native packages are `ghcr.io/mutex-solutions/proxcloud-vm-<os>`; tags are `<os>-os-<UTC build>-<12 source hex>`. There is no `latest`, mutable channel, caller tag or overwrite flag.
+Only the job's short-lived GitHub token logs into GHCR via stdin; no PAT or PVE secret is requested. Package and unique tag come only from the verified manifest using the existing helper's plan. Native packages are `ghcr.io/mutex-solutions/proxcloud-vm-<os>`; tags are `<os>-os-<UTC build>-<12 source hex>`. The Kubernetes package is `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s` with `ubuntu-2604-k8s-1.35.10-<UTC build>-<12 source hex>` tags. There is no `latest`, mutable channel, caller tag or overwrite flag.
 
 Before upload, the publisher checks the exact manifest tag through the fixed GHCR API. **Only HTTP 404 with an explicit `MANIFEST_UNKNOWN`/`NAME_UNKNOWN` registry error permits a first push.** Existing tags, authentication/authorization errors, timeouts, malformed responses and other failures stop publication. This serializes this workflow but does not make GHCR tags immutable against another authorized writer racing outside it; restrict other package writers and use immutable digests for consumers.
 

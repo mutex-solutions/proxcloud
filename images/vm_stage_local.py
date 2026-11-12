@@ -2,13 +2,11 @@
 """Copy three pinned local files only; exporter assertions are NOT attested here."""
 import argparse
 import contextlib
-import datetime
 import os
-import re
 import sys
 
 import vm_artifact as contract
-from vm_publish_stage import MEMBERS, NAME
+from vm_publish_stage import MEMBERS, manifest_matches, selector
 
 # Owner installs/configures this fixed location separately; no CLI/env source override.
 SOURCE_ROOT = "/home/gha-runner-01/proxcloud-vm-artifacts/staging"
@@ -17,10 +15,7 @@ DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 def inputs(name, manifest_sha, disk_sha):
     contract.require(all(contract.match(r"[0-9a-f]{64}", pin) for pin in (manifest_sha, disk_sha)))
-    found = re.fullmatch(NAME, name, flags=re.ASCII) if type(name) is str else None
-    contract.require(found is not None)
-    datetime.datetime.strptime(found[2], "%Y%m%d%H%M%S")
-    return found.groups()
+    return selector(name)  # (os, build_version, source_prefix, variant); os vs vm-k8s-export names.
 
 
 @contextlib.contextmanager
@@ -57,8 +52,8 @@ def private(fd):
 def verify(fd, selected, manifest_sha, disk_sha):
     contract.require(set(os.listdir(fd)) == MEMBERS.keys())
     manifest = contract.verify(fd, manifest_sha, disk_sha)
-    contract.require(manifest["variant"] == "os")
-    contract.require((manifest["os"], manifest["build_version"], manifest["source_commit"][:12]) == selected)
+    manifest_matches(manifest, *selected)
+    contract.require(manifest["source_commit"][:12] == selected[2])
     return manifest
 
 
