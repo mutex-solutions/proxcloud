@@ -45,7 +45,8 @@ apt-get install -y --no-install-recommends \
     ca-certificates debian-archive-keyring python3 gnupg gpgv \
     gcc g++ make pkg-config libc6-dev binutils libssl-dev bison byacc \
     autoconf gettext flex dejagnu expect tcl libcmocka-dev liblmdb-dev \
-    libldap2-dev libsasl2-dev libkeyutils-dev
+    libldap2-dev libsasl2-dev libkeyutils-dev \
+    softhsm2 opensc python3-pyrad python3-kdcproxy libresolv-wrapper systemd
 mkdir /build /staging /out
 # BuildKit discards failed-layer files: expose bounded fixed diagnostics in its
 # retained outer log without suppressing the original failure or skipping tests.
@@ -154,8 +155,28 @@ make -j2 > /out/build.log 2>&1
 # disposable builder. No existing realm, credentials or external services allowed.
 make check > /out/check.log 2>&1
 # Upstream can return success while omitting optional tests: fail closed instead.
+# Test dependencies available in Debian 13 are installed above (SoftHSM/OpenSC
+# PKCS11, pyrad OTP, kdcproxy, resolv_wrapper URI discovery, socket activation).
+# Only these exact skips are reviewed as environment-inherent; any other skip fails:
+#  - keyring ccache/collection: container seccomp denies keyctl/add_key, so keyctl
+#    is deliberately not installed (installing it turns the skip into false failures);
+#  - t_locate_kdc: needs public DNS SRV records for ATHENA.MIT.EDU (not hermetic);
+#  - LDAP KDB: server-side KDB plugin (not built here), irrelevant to client libraries.
 [ -f skiptests ]
-[ ! -s skiptests ]
+cp skiptests /out/skiptests.txt
+python3 - <<'PY'
+from pathlib import Path
+reviewed = {
+    'Skipped keyring collection tests: keyring support not built',
+    'Skipped keyring ccache tests: keyring support not built',
+    'Skipped t_locate_kdc test: known DNS name not found',
+    'Skipped LDAP KDB tests: LDAP KDB module not built',
+}
+lines = [line.strip() for line in Path('/out/skiptests.txt').read_text().splitlines() if line.strip()]
+unexpected = sorted(set(lines) - reviewed)
+if unexpected:
+    raise SystemExit('unreviewed skipped tests: ' + '; '.join(unexpected))
+PY
 make DESTDIR=/staging install > /out/install.log 2>&1
 # Static ELF inspection, not execution of the newly built programs/libraries.
 python3 - <<'PY'
@@ -198,7 +219,7 @@ manifest = {
     'keyring_sha256': os.environ['MIT_KEYRING_SHA256'],
     'release_signer': 'C4493CB739F4A89F9852CBC20CBA08575F8372DF',
     'required_sonames': required, 'files': files,
-    'tests': 'make check passed; skiptests empty; NOT Debian/OpenSSH ABI or GSS proof',
+    'tests': 'make check passed; only reviewed environment skips (see skiptests.txt); NOT Debian/OpenSSH ABI or GSS proof',
     'contents': 'FULL upstream install including KDC/admin/daemon tools; artifact only',
     'promotion': 'BLOCKED: proper Debian13 source packaging + ABI/GSS/Trivy gates',
     'runtime': 'NOT integrated; no dpkg replacement or old-library shadowing',

@@ -57,7 +57,16 @@ class Krb5SourceTests(unittest.TestCase):
                         'autoconf', 'gettext', 'flex', 'libcmocka-dev', 'liblmdb-dev'):
             self.assertIn(package, self.script)
         self.assertIn('make check > /out/check.log 2>&1', self.script)
-        self.assertIn('[ ! -s skiptests ]', self.script)
+        # Skips fail closed except an exact, reviewed, environment-inherent list.
+        self.assertIn("raise SystemExit('unreviewed skipped tests: '", self.script)
+        self.assertLess(self.script.index('make check >'), self.script.index("unreviewed skipped tests"))
+        self.assertLess(self.script.index("unreviewed skipped tests"), self.script.index('make DESTDIR=/staging install'))
+        reviewed = self.script.split('reviewed = {', 1)[1].split('}', 1)[0]
+        self.assertEqual(reviewed.count("'Skipped "), 4)
+        for allowed in ('keyring collection tests', 'keyring ccache tests', 't_locate_kdc test', 'LDAP KDB tests'):
+            self.assertIn(allowed, reviewed)
+        for required in ('softhsm2', 'opensc', 'python3-pyrad', 'python3-kdcproxy', 'libresolv-wrapper'):
+            self.assertIn(required, self.script)
         self.assertIn('make DESTDIR=/staging install', self.script)
         self.assertIn('--disable-static --enable-shared --without-system-verto', self.script)
         for bypass in ('--disable-gssapi', '--without-krb5', '--disable-tests',

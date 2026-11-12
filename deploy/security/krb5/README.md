@@ -34,8 +34,8 @@ Bound hosted jobs; no PVE, real realm or production credentials.
 Live apt: recorded, not snapshot-pinned.
 
 Full generated configure, shared libraries, clients, modules and support data
-are retained. `make check` is mandatory; any failure or recorded skipped test
-fails closed (dependency gaps require review, never waiver). Temporary local
+are retained. `make check` is mandatory; failures and unreviewed skips fail
+closed (only 4 reviewed environment skips, listed in the build script). Temporary local
 KDC/realm test processes are expected. Full DESTDIR staging is exported under
 `EXPERIMENTAL_PREFIX` with file hashes and manifest: **NOT_FOR_INSTALL**, includes
 KDC/admin/daemon tools, not a runtime image or Debian package. Never copy this
