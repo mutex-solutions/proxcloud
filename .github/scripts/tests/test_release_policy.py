@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Data-only release policy, installer version floor and first-RC contract tests.
+"""Data-only release policy, installer version floor and app release contract tests.
 
 Uses the installer lane's existing Python/PyYAML; no subprocesses, publication,
 package installation, registry probes, Ansible execution or cluster access.
@@ -123,14 +123,17 @@ class InstallerReleaseFloorTests(unittest.TestCase):
                 self.assertIn(section + "." + key, jobs.jobs_config_problem(config, "v0.4.0-rc.1"))
 
 
-class FirstRCContractTests(unittest.TestCase):
-    def test_chart_images_and_installer_pin_exact_same_preview(self):
+class ReleaseContractTests(unittest.TestCase):
+    def test_chart_images_and_installer_pin_exact_same_stable_release(self):
         chart = read_yaml("deploy/charts/proxcloud/Chart.yaml")
         versions = read_yaml("installer/playbooks/group_vars/all/versions.yml")["pc_versions"]
-        self.assertEqual(chart["version"], "0.4.0-rc.1")
-        self.assertEqual(chart["appVersion"], "v0.4.0-rc.1")
+        self.assertEqual(chart["version"], "0.4.0")
+        self.assertEqual(chart["appVersion"], "v0.4.0")
         self.assertEqual(versions["proxcloud"], chart["appVersion"])
-        self.assertEqual(policy.release_policy(versions["proxcloud"])["version"], chart["version"])
+        pinned = policy.release_policy(versions["proxcloud"])
+        self.assertEqual(pinned["version"], chart["version"])
+        # The pinned app release is stable: published as latest, never a prerelease.
+        self.assertEqual(pinned["flags"], ["--latest"])
         defaults = read_yaml("installer/playbooks/group_vars/all/defaults.yml")["pc_defaults"]
         self.assertIs(defaults["images"]["build"], True)
         self.assertIs(defaults["jobs"]["scheduler_enabled"], False)

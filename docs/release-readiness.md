@@ -1,18 +1,20 @@
 # Current support boundaries and first-release readiness
 
-Status snapshot: **2026-11-11**, preparing the first `v0.4.0-rc.1` preview.
-This is an evidence summary, not a release announcement or a production SLA. The
-owner has authorized first app/chart release CI, released-artifact installation
-and later controlled PVE template canaries; this source change does not publish
-artifacts or perform live acceptance. Check GitHub's Releases/Actions pages again
-before choosing a deployment commit.
+Status snapshot: **2026-11-12**, preparing the first stable `v0.4.0` release
+(owner decision 2026-11-12). This is an evidence summary, not a release
+announcement or a production SLA. `v0.4.0-rc.1` (tag 2026-11-11) was published as
+a non-latest prerelease. Pushing the `v0.4.0` tag publishes the stable images, app
+chart and GitHub Release. This source change publishes nothing and performs no live
+acceptance. Check GitHub's Releases/Actions pages before choosing a deployment
+commit.
 
 ## What is available now
 
-- Source on `main` and public development container images on GHCR. There are
-  **no published ProxCloud tags, GitHub Releases or OCI charts yet**. The prepared
-  app chart `0.4.0-rc.1`, appVersion and installer BOM `v0.4.0-rc.1` describe the
-  first preview, not stable or an already-existing registry artifact.
+- Source on `main`, public development container images on GHCR and the
+  `v0.4.0-rc.1` prerelease (images and app chart `0.4.0-rc.1`). The app chart
+  `0.4.0`, appVersion and installer BOM `v0.4.0` name the first stable release;
+  its tag publishes those artifacts. Verify they are pullable before using
+  `images.build: false`; a source pin is not proof that a registry artifact exists.
 - The installer defaults to `images.build: true`, building the API and two
   consoles plus app chart from the checkout. A source/local-registry installation
   is a different path from pulling a released chart with `images.build: false`.
@@ -66,15 +68,16 @@ registration belongs in public documentation or release artifacts.
   users/passwords and single-replica convenience services require deliberate TLS,
   identity, key management, backups and availability design before real use.
 
-## Minimum gate before a first preview/RC
+## Minimum gate for a release
 
-The owner has authorized this narrowly scoped core preview and evaluation; it
-need not claim every managed service. Authorization is not evidence of publication
-or installation. Before reporting the first RC as usable:
+The owner decided on 2026-11-12 to release `v0.4.0` as stable, with a narrowly
+scoped core and explicitly held features; it need not claim every managed service.
+That decision is not evidence of publication or installation. For `v0.4.0` (and
+any later release):
 
-1. Review the exact release commit for `v0.4.0-rc.1` and its supported core surface
-   and explicit experimental/held features. This prepared version is not an
-   already-published tag.
+1. Review the exact release commit for `v0.4.0` and its supported core surface
+   and explicit experimental/held features. The version is not published until
+   its tag's workflows succeed.
 2. Verify app/chart/installer BOM alignment with that exact version. Keep managed
    charts independent: `database-cluster` `0.5.1` and `proxmox-kamaji-cluster`
    `0.1.10` need their own tag/publication checks. Do not move existing provider
@@ -88,14 +91,21 @@ or installation. Before reporting the first RC as usable:
    image and Helm workflows are independent; image completion alone is not chart
    completion or a deployment. Keep the default `images.build: true` meanwhile.
 5. After publication, install the exact released chart/images with
-   `images.build: false` on a clean evaluation site. The installer accepts valid
+   `images.build: false` on a clean evaluation site (not yet performed for
+   `v0.4.0` when this was prepared). The installer accepts valid
    SemVer with **base version >= 0.4.0**, including prereleases; this local guard
    does not prove publication or a stable release. Check login/client/admin,
    provider connection, one basic server create/delete, configuration/secrets and
    the explicit scheduler choice. A source-build installation is not this acceptance.
-6. Record rollback/backup/migration limits. Keep the release a truthful prerelease;
-   neither this preparation nor a green build clears full live installer (P6) or
-   split/managed-service (P7) acceptance. Intentional safety holds stay in place.
+6. Record rollback/backup/migration limits. `v0.4.0` is stable by owner decision,
+   **not** by acceptance: neither this preparation nor a green build clears full
+   live installer (P6) or split/managed-service (P7) acceptance, which the owner
+   deferred. Intentional safety holds stay in place.
+7. Confirm the exact-commit `security-scan` gate passed. Fixable HIGH/CRITICAL
+   findings block; findings without an upstream fix are tracked (not blocking)
+   until 2026-12-12; raw upstream bases are report-only; the GPU/CUDA template is
+   not scanned. Built-in sandbox template digests in `deploy/templates/images.yaml`
+   must come from a `sandbox-templates` build of the release sources.
 
 A `v*` tag is an app publication trigger, not a PVE template trigger. Later
 owner-authorized template canaries remain separate reviewed branch/run operations;

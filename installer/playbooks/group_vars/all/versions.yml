@@ -7,10 +7,10 @@ pc_versions:
   cert_manager_chart: v1.20.2  # ingress TLS and CSI gateway certificates; retained without RabbitMQ
   keycloak: "26.8.2"
   # Chart + image tag of ProxCloud itself, with images.build=false. It must be a published release.
-  # Owner-approved first preview, NOT YET PUBLISHED: keep images.build=true until
-  # the v0.4.0-rc.1 chart and images are published and verified. This is not stable.
+  # First stable broker-free release; the v0.4.0 tag publishes its chart and images. Keep the
+  # default images.build=true until they are verified pullable at your site.
   # Do not override to an older Rabbit-dependent release with this broker-free installer.
-  proxcloud: v0.4.0-rc.1
+  proxcloud: v0.4.0
   rustfs: 1.0.4
   # The sandbox registry (stage 55, docs/managed-sandbox.md §6): Zot, minimal build (no extensions), and the pause
   # image the template prepull DaemonSet idles in.

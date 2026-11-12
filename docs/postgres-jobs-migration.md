@@ -7,11 +7,13 @@ bounded default-OFF outbox infrastructure and typed enqueue producers, not enabl
 production delivery; see [mail safety limits](mail-outbox-safety-limits.md).
 External billing's HTTP calls and failure behavior are unchanged.
 
-The first broker-free preview candidate is **v0.4.0-rc.1**. Publication is authorized,
-but its tag, images and chart must still be verified rather than inferred from a source pin.
-Use a core-containing source build (`images.build: true`) or a known compatible
-new API image; do not deploy this chart against old v0.3.x binaries. Render/lint
-success does not prove that the planned package/image is published.
+The first stable broker-free release is **v0.4.0** (after the `v0.4.0-rc.1`
+prerelease). Its tag publishes the images and chart, but verify them rather than
+inferring publication from a source pin. Use a core-containing source build
+(`images.build: true`) or a known compatible new API image; do not deploy this
+chart against old v0.3.x binaries. Render/lint success does not prove that a
+package/image is published. Being stable does not change this runbook: existing
+broker state still needs the explicit drain/reconcile and retention below.
 
 This is an **operator-controlled cutover**, not a queue importer or broker cleanup.
 Neither a false `rabbitFanout` flag nor an empty-looking console proves a safe drain.

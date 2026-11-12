@@ -7,17 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-12
+
+First stable ProxCloud release, superseding the `v0.4.0-rc.1` prerelease. It is
+broker-free: fresh installs need only a writable PostgreSQL primary for application
+data and durable jobs, with no RabbitMQ. It builds with Go 1.27.4 and adds a
+fresh-scan security gate. "Stable" here does not mean full acceptance.
+Live installer (P6) and split/managed-service (P7) acceptance were **not**
+performed; the owner deferred them. The job scheduler and debug triggers stay off by
+default. Production mail delivery and the managed-sandbox saved lifecycle remain
+held. Existing broker-era installations must explicitly drain/reconcile and retain
+their RabbitMQ data before upgrading, because the new API does not consume old
+queues. Under the security gate policy, HIGH/CRITICAL findings without an upstream
+fix are tracked, not blocking, until 2026-12-12. Raw upstream bases are report-only.
+The GPU/CUDA code-interpreter template is neither built nor scanned by the gate.
+The `v0.4.0` tag publishes the images and app chart `0.4.0`. Verify that they can
+be pulled before installing with `images.build: false`.
+
+### Security
+
+- Add a fresh-scan security gate (`security-scan` workflow) for every PR and `main`
+  push. It checks out the exact head commit, not GitHub's synthetic merge commit. It
+  uses a checksum-verified Trivy 0.76.2 binary and a vulnerability database that must
+  be less than 24 hours old. Scan targets:
+  - source lockfiles, including development dependencies;
+  - six locally built product images: API, customer and admin consoles, sandbox
+    proxy, runtime and importer;
+  - eleven non-GPU sandbox template outputs;
+  - thirteen deduplicated upstream base/builder/donor images, read as registry
+    blobs and never executed;
+  - a nondefault controlled-base prototype.
+
+  Nothing is pushed or published. A required `security-gate` job needs every scan
+  leg to succeed. On PRs, a decorated, size-bounded comment lists the CVE tables for
+  each target.
+- Apply the owner-approved gate policy (2026-11-12):
+  - fixable HIGH/CRITICAL findings and end-of-life image OSes block;
+  - HIGH/CRITICAL findings without an upstream fix are listed and counted as
+    tracked, but do not block until 2026-12-12 (UTC); after that date they block
+    again until re-reviewed;
+  - raw upstream base findings are report-only, but missing, stale or invalid base
+    scans still fail;
+  - exactly one expiring VEX (until 2026-12-31) covers CVE-2025-47273, where
+    setuptools 70.3.0 appears only in pip 26.3's vendored SBOM and the vulnerable
+    module is not shipped.
+
+  No other ignore, allowlist, suppression or severity change exists.
+- Remediate fixable HIGH/CRITICAL findings in the eleven non-GPU built-in sandbox
+  templates and ship the rebuilt templates as this release's digest pins. Every rebuilt template
+  applies its distribution's available package updates. Per template:
+  - base: Node 22.23.5 with npm 11.21.2, corepack 0.36.0 and yarn 1.22.22 replaces
+    the obsolete Node/npm payload; pip 26.3, setuptools 84.2.1, wheel 0.48.0 and
+    packaging 26.3 are upgraded;
+  - node: moves to npm 11.21.2 (undici 6.29.1, brace-expansion 5.0.12);
+  - browser: upgrades setuptools 84.2.1, virtualenv 21.15.6 (bundling pip 26.3),
+    certifi, filelock, msgpack and urllib3, and drops the stale virtualenv seed
+    cache;
+  - code-interpreter: moves to Node 22, npm 11.21.2 and pip 26.3, and smoke-tests
+    every installed kernel during the build;
+  - mcp-gateway: installs its npm servers as one private project with
+    `@modelcontextprotocol/sdk` 1.32.2 and `basic-ftp` 6.2.6 overrides, and the
+    build checks every installed copy. It also refreshes the Node 22 donor and
+    moves to uv 0.13.4.
+- Refresh `libxslt` in both console images (CVE-2026-87636, CVE-2026-9947). Pin
+  fixed transitive brace-expansion, fast-uri and systeminformation versions in both
+  SPA lockfiles, and nanoid and source-map-js in the customer console. The sandbox
+  runtime donor moves from BusyBox to an upgraded Alpine 3.24.4, so its BusyBox/musl
+  packages are visible to scans.
+
 ### Changed
 
-- Build and test with Go 1.27.4, the current stable release, in all six Go builder
-  stages and the hosted test workflow. Raise the module minimum to `go 1.26.0`,
-  which Testcontainers 0.45 and `golang.org/x/crypto` 0.58 require, so source builds
-  with Go 1.25 no longer work. Keep the compiler pin and module minimum as separate,
-  tested declarations.
+- Build and test with Go 1.27.4, the current stable release, in all six release Go
+  builder stages (now `golang:1.27.4-alpine`) and the hosted test workflow. The module
+  minimum rises to `go 1.26.0`, which Testcontainers 0.45 and `golang.org/x/crypto`
+  0.58 require, so source builds with Go 1.25 no longer work. The compiler pin and
+  the module minimum remain separate, tested declarations.
 - Update Testcontainers core and PostgreSQL modules to 0.45.0 and `golang.org/x/crypto`
-  to 0.58.0 (with `x/net` 0.60.0 and `x/sync` 0.24.0) as one coherent graph, keeping
-  pgx 5.12.0 and the AWS SDK versions already on `main`. This supersedes the separate
-  dependency updates in #182, #183 and #32.
+  to 0.58.0 (with `x/net` 0.62.0 and `x/sync` 0.24.0) as one coherent graph. Indirect
+  modules move too, for example go-jose 4.1.6, docker/cli 29.2.0, `x/sys` 0.49.0 and
+  `x/text` 0.43.0. pgx 5.12.0 and the AWS SDK versions already on `main` are kept.
+  This supersedes the separate dependency updates in #182, #183 and #32.
+- Move the API runtime image from Debian bookworm-slim to an upgraded Alpine 3.24.4.
+  The image still runs as UID 10001, and the Go binary stays static. It ships bash
+  and the PostgreSQL 18 `psql` client for config-as-code seeding with password or
+  TLS authentication. That client cannot seed through Kerberos/GSSAPI; for that, use
+  a suitable `psql` elsewhere, such as in the database pod.
 - Run the tagged build-archive integration test in hosted CI.
 
 ### Fixed
@@ -26,16 +100,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before template conversion or first-boot package provisioning. Preserve larger
   upstream disks, validate exact ownership/digest/readback and bound failure cleanup
   to the confirmed new VM; do not resize existing templates or tenant disks.
+- Kubernetes node-template builds:
+  - The final cleanup provisioner returns without shutting the guest down. Packer
+    can then remove its temporary script before the Proxmox builder stops and
+    converts the VM (#204).
+  - After a successful build, only this run's final template is discovered. The
+    search polls for at most 120 seconds and rejects pre-existing VMIDs and any
+    ambiguous or mismatched candidate (#208).
+- Before building, the OS, Kubernetes and sandbox template workflows disable any
+  inherited sparse checkout and verify that the full source is present (#206).
 
 ### Added
 
+- Export the Ubuntu 26.04 / Kubernetes 1.35.10 node template line through the
+  public VM image pipeline as `ghcr.io/mutex-solutions/proxcloud-vm-ubuntu-2604-k8s`.
+  The export has its own `--k8s-os ubuntu-2604` sanitizer path and
+  `vm-k8s-export-ubuntu-2604-…` artifact name:
+  - The only input is the raw 20 GiB root disk. Its hash is bound to the
+    parent-reviewed source before any image parser runs. EFI vars and cloud-init
+    media are never exported.
+  - A pure copy policy checks a read-only inventory before any write. Unknown or
+    unexpected facts make it refuse rather than delete. These include existing
+    cluster state, swap, registry credentials, proxies, lab addresses,
+    systemd/snapd secrets, unknown accounts and unreviewed cloud-init drop-ins.
+  - Kubelet enablement and the exact Kubernetes packages are preserved.
+  - The publisher refuses any other Kubernetes OS or version, and any mix of
+    native and Kubernetes names and manifests.
+
+  This release does not include runtime acceptance of the Kubernetes image (real
+  inventory, sanitize, postscan, cold boot, anonymous pull). Its publication is a
+  separate, manually dispatched step that the `v0.4.0` tag does not perform.
 - Define portable native VM-disk QCOW2 artifacts for public GHCR distribution,
   with strict versioned manifests, checksums, unsigned exporter facts and explicit
   sanitization/pull/import/boot gates. Add a copy-only offline sanitizer and a
   manual sealed three-file staging → hosted ORAS publisher bridge, without giving
   the image runner PVE-root or package-write access. Publication plumbing does not
   imply a public artifact exists; package visibility and anonymous retrieval remain
-  separately verified, and Kubernetes disk export is not yet enabled.
+  separately verified.
+- Add evaluation-only security recipes. None of them is integrated into a default
+  image or published, and none waives a scan finding:
+  - an OpenSSH client backport (CVE-2026-60002);
+  - a source-built GitHub CLI;
+  - an MIT krb5 1.22.3 source build;
+  - a nondefault controlled base-template prototype with five optional variant
+    recipes.
+
+  The OpenSSH, GitHub CLI and krb5 workflows run only on PRs that touch them and
+  produce artifacts only.
 
 - Add native OS-template choices for Ubuntu 26.04 and Debian 12 while retaining
   Ubuntu 24.04 and Debian 13. New Kubernetes node builds select Ubuntu 26.04 by
@@ -44,15 +155,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of trusting cached worktree bytes. Debian Kubernetes nodes remain unsupported
   by this pinned Proxmox route. Keep serial canary and cleanup/publication gates.
 
-## [0.4.0-rc.1] - Unpublished preview
+## [0.4.0-rc.1] - 2026-11-11
 
-First broker-free ProxCloud release candidate, **not a stable release**. The owner
-has authorized publication and released-artifact evaluation; preparation of this
-section does not mean a tag, chart or image has been published or installed.
-The five source security fixes cover SMTP credential TLS, stored-profile order
-read authorization, custom-role assignment permission, native sandbox traffic
-tokens and exact SSO alias retirement; details and limits are below. This is not
-live installer (P6) or split/managed-service (P7) acceptance. Scheduling remains
+First broker-free ProxCloud release candidate, **not a stable release**; published
+as a non-latest GitHub prerelease. The five source security fixes cover SMTP
+credential TLS, stored-profile order read authorization, custom-role assignment
+permission, native sandbox traffic tokens and exact SSO alias retirement; details
+and limits are below. This is not live installer (P6) or split/managed-service (P7)
+acceptance. Scheduling remains
 off, mail delivery and saved sandbox lifecycle remain held, and existing broker
 data still requires explicit migration/retention evidence.
 
@@ -134,7 +244,6 @@ data still requires explicit migration/retention evidence.
   parent dataset before share/export mutations or duplicate share caching, rather
   than letting different provider settings repeatedly rewrite the same exports.
 
-Initial ProxCloud development line: a self-service private-cloud and billing portal
-for Proxmox VE. No versioned release has been published yet; the first preview needs
-coherent artifact/BOM pins and published-artifact installation acceptance. History
-from the product this codebase was forked from is not carried over.
+Before `0.4.0-rc.1`, ProxCloud was an untagged development line: a self-service
+private-cloud and billing portal for Proxmox VE. History from the product this
+codebase was forked from is not carried over.

@@ -16,12 +16,14 @@ Three ways to install it:
 Docker Compose (`docker compose up` at the repo root) is the fourth option, for a
 single development machine.
 
-**First-release preparation (2026-11-11):** the chart/BOM selects `v0.4.0-rc.1`,
-an authorized preview candidate. It is not published merely by this source change;
-verify the actual public chart and image artifacts before installation. Public development container tags
-are not a versioned release or evidence of a clean install from published
-artifacts. Use the source-build path below or explicitly pin a compatible verified
-set of images; do not treat a successful render/CI run as production acceptance.
+**Release status (2026-11-12):** the chart/BOM selects `v0.4.0`, the first stable
+release (after the `v0.4.0-rc.1` prerelease). Its tag publishes this chart version
+and the images; verify the actual public chart and image artifacts before
+installation. Public development container tags are not a versioned release. A
+clean install from the published artifacts and live installer/split-mode
+acceptance have not been performed for this release. Use the source-build path
+below or explicitly pin a compatible verified set of images; do not treat a
+successful render/CI run as production acceptance.
 
 ## Quick start (one command)
 
@@ -30,12 +32,13 @@ fresh cluster (kind, k3d, minikube or a real one) with no operators. Needs
 `helm` 3.8+, `kubectl` and a default StorageClass.
 
 **Images first.** The chart pulls `ghcr.io/mutex-solutions/proxcloud-{api,web,admin}`
-at the chart's candidate `appVersion` (`v0.4.0-rc.1`). **The preview must be
-published and every required artifact verified before using these pull defaults.** Use images built
-from the checkout containing the PostgreSQL job engine, or explicitly pin a known
-compatible new image/tag/digest. Do not point the new chart at a v0.3.x API: it
-requires RabbitMQ and cannot use these defaults. Until publication, build the
-three images from the core-containing checkout and load them into the cluster:
+at the chart's `appVersion` (`v0.4.0`). **Verify the release's images are
+published and pullable before using these pull defaults.** Otherwise use images
+built from the checkout containing the PostgreSQL job engine, or explicitly pin a
+known compatible new image/tag/digest. Do not point the new chart at a v0.3.x API:
+it requires RabbitMQ and cannot use these defaults. Until the release images are
+verified pullable, build the three images from the core-containing checkout and
+load them into the cluster:
 
 ```sh
 docker build -t proxcloud-api:local -f deploy/Dockerfile .
@@ -150,7 +153,7 @@ a browser has no WebCrypto outside a secure context, so PKCE cannot work there.
 ## Production install
 
 This section describes production-oriented configuration, not a certification of
-the unpublished release or a clean public-artifact install. Plan TLS, backups and
+the release or a clean public-artifact install. Plan TLS, backups and
 restore validation, OIDC access boundaries, resource capacity and observability
 for your site; the HTTP/one-replica quickstart is not production configuration.
 The defaults expect the [CloudNativePG](https://cloudnative-pg.io/) operator
