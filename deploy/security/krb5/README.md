@@ -1,13 +1,13 @@
 # MIT krb5 1.22.3 — experimental source-only candidate
 
-NOT_READY: reviewed MIT public keyring/SHA256 required. No build or signature
-verification performed; no controlled/default image uses this.
+Reviewed public keyring supplied; offline release signature verified. Full build,
+ABI/GSS and runtime integration remain NOT_READY; no default image uses this.
 
 ## Verified public source metadata (2026-11-12)
 
 [MIT listing](https://web.mit.edu/kerberos/dist/krb5/1.22/) and
 [release notes](https://web.mit.edu/kerberos/krb5-1.22/) independently identify
-1.22.3. Official listing supplies these exact names, not guessed URLs:
+1.22.3. Official source files:
 
 - `krb5-1.22.3.tar.gz`: 8758584 bytes, SHA256
   `fe90af8441ad9fa9b064b8e53077cefb782a96f8a68276b031dc54af1789ff0b`
@@ -17,9 +17,9 @@ verification performed; no controlled/default image uses this.
 Hashes are independently computed HTTPS content observations, NOT published MIT
 checksums or verified signatures. [MIT trust page](https://web.mit.edu/kerberos/dist/)
 publishes `C4493CB739F4A89F9852CBC20CBA08575F8372DF`; the signature's issuer
-metadata matches, but this is NOT cryptographic verification. Future builder must
-hash-check an offline reviewed keyring and require gpgv + this exact VALIDSIG
-before extraction. No keyserver import, signature bypass or secret key needed.
+metadata matches. Offline isolated GnuPG verified self/binding signatures, key
+validity and the release signature. The builder repeats exact fingerprint,
+keyring hash, validity and gpgv checks before extraction. No keyserver import, signature bypass or secret key needed.
 
 ## Future authorized hosted build only
 
@@ -31,7 +31,7 @@ explicitly prepared build context, and
 no named-context registry fallback is used.
 Select `--target artifacts --output type=local,dest=<disposable-artifacts>`.
 Bound hosted jobs; no PVE, real realm or production credentials.
-Live apt dependencies are recorded, not snapshot pins.
+Live apt: recorded, not snapshot-pinned.
 
 Full generated configure, shared libraries, clients, modules and support data
 are retained. `make check` is mandatory; any failure or recorded skipped test

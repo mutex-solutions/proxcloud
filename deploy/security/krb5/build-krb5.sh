@@ -90,7 +90,24 @@ gpgv --homedir /build/gnupg --keyring /trust/mit-krb5-release.gpg \
     > /out/signature-status.txt
 python3 - <<'PY'
 from pathlib import Path
+import subprocess
+import time
+listing = subprocess.check_output(['gpg', '--batch', '--no-options', '--homedir', '/build/gnupg',
+    '--no-auto-key-retrieve', '--auto-key-locate', 'clear', '--with-colons',
+    '--with-fingerprint', '--show-keys', '/trust/mit-krb5-release.gpg'], text=True)
+rows = [line.split(':') for line in listing.splitlines()]
+if len([r for r in rows if r[0] == 'pub']) != 1 or any(r[0] in ('sec', 'ssb') for r in rows):
+    raise SystemExit('unexpected trust key contents')
+if next(r[9] for r in rows if r[0] == 'fpr') != 'C4493CB739F4A89F9852CBC20CBA08575F8372DF':
+    raise SystemExit('unexpected trust primary fingerprint')
+for row in rows:
+    if row[0] in ('pub', 'sub') and (row[1] in ('r', 'e', 'd', 'i') or (row[6] and int(row[6]) <= int(time.time()))):
+        raise SystemExit('revoked, expired or invalid trust key')
+Path('/out/key-validity.txt').write_text(listing)
 records = Path('/out/signature-status.txt').read_text().splitlines()
+if any(line.startswith('[GNUPG:] ' + code) for line in records for code in
+       ('BADSIG', 'ERRSIG', 'REVKEYSIG', 'EXPKEYSIG', 'EXPSIG', 'KEYEXPIRED', 'SIGEXPIRED', 'NO_PUBKEY', 'FAILURE')):
+    raise SystemExit('invalid release signature status')
 valid = [s.split() for s in records if s.startswith('[GNUPG:] VALIDSIG ')]
 if len(valid) != 1 or valid[0][2] != 'C4493CB739F4A89F9852CBC20CBA08575F8372DF':
     raise SystemExit('unexpected MIT release signer')

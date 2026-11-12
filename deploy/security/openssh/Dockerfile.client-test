@@ -16,8 +16,8 @@ ENV DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 PATH=/usr/bin:/bin
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
     && chmod 0755 /usr/sbin/policy-rc.d \
     && apt-get update --error-on=any \
-    && apt-get install -y --no-install-recommends openssh-server openssh-client python3 \
-    && useradd --uid 1000 --create-home --shell /bin/sh --password NP testclient \
+    && apt-get install -y --no-install-recommends openssh-server openssh-client python3 passwd \
+    && /usr/sbin/useradd --uid 1000 --create-home --shell /bin/sh --password NP testclient \
     && mkdir -p /run/sshd
 # NP is an invalid, non-locked password marker, NOT a usable credential.
 # Password and keyboard-interactive authentication are also disabled in sshd.

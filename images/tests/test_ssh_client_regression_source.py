@@ -41,7 +41,8 @@ class SSHClientRegressionSourceTests(unittest.TestCase):
     def test_autostart_denied_before_apt_then_complete_custom_package(self):
         self.assertLess(self.instructions.index('exit 101'),
                         self.instructions.index('apt-get update --error-on=any'))
-        self.assertIn('openssh-server openssh-client python3', self.instructions)
+        self.assertIn('openssh-server openssh-client python3 passwd', self.instructions)
+        self.assertIn('&& /usr/sbin/useradd ', self.instructions)
         self.assertIn('useradd --uid 1000 --create-home --shell /bin/sh --password NP testclient',
                       self.instructions)
         self.assertIn('dpkg -i /tmp/openssh-client.deb', self.instructions)

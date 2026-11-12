@@ -1,0 +1,60 @@
+name: krb5-source-build
+
+# Experimental full-prefix evidence, NOT an installable/runtime replacement.
+# No production realm, source credentials, registry publication or scanner waiver.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/security/krb5/**'
+      - 'images/tests/test_krb5_source.py'
+      - '.github/workflows/krb5-source-build.yml'
+permissions:
+  contents: read
+concurrency:
+  group: krb5-source-build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  build:
+    name: experimental-krb5-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+      DEBIAN_BASE: debian:trixie-slim@sha256:7378260c0a098d27ac206225db5e7d92b8c7c84ea7afccc86eeb513756bbd392
+      MIT_KEYRING_SHA256: 967d7d0f24d9ca3bbb61d4bee737ead5bfa9f9a3debe317bf28ae9360d2e50c2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Check source and pinned public trust input
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p result
+          printf '%s\n' "$SOURCE_SHA" > result/source-sha.txt
+          printf '%s  %s\n' "$MIT_KEYRING_SHA256" deploy/security/krb5/trust/mit-krb5-release.gpg | sha256sum --check --strict -
+          sh -n deploy/security/krb5/build-krb5.sh
+          python3 -m unittest discover -s images/tests -p test_krb5_source.py -v
+      - uses: docker/setup-buildx-action@v4
+      - name: Verify signature then compile and test full upstream prefix
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 --pull --target artifacts \
+            --build-arg "DEBIAN_BASE=$DEBIAN_BASE" \
+            --build-arg "MIT_KEYRING_SHA256=$MIT_KEYRING_SHA256" \
+            --output type=local,dest=result/krb5-source \
+            --file deploy/security/krb5/Dockerfile deploy/security/krb5 \
+            2>&1 | tee result/build.log
+          test -s result/krb5-source/build-manifest.json
+      - name: Preserve experimental provenance on failure too
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: experimental-krb5-source-${{ github.event.pull_request.head.sha }}
+          path: result/
+          if-no-files-found: error
+          retention-days: 3
