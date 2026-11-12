@@ -69,7 +69,7 @@ class Evidence:
         path = self.root / relative
         if not path.is_relative_to(self.root) or ".." in path.parts or any(p.is_symlink() for p in (path, *path.parents)):
             raise ValueError("unsafe evidence path")
-        ceiling = 16 * 1024 * 1024 if document else 512
+        ceiling = 32 * 1024 * 1024 if document else 512
         fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             for part in path.relative_to(self.root).parts[:-1]:
@@ -85,7 +85,7 @@ class Evidence:
                 raise ValueError("evidence size/type invalid")
             self.files += int(document)
             self.total += info.st_size
-            if self.files > 30 or self.total > 64 * 1024 * 1024:
+            if self.files > 30 or self.total > 256 * 1024 * 1024:
                 raise ValueError("evidence budget exceeded")
             raw = handle.read(ceiling + 1)
         if len(raw) > ceiling:

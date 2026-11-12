@@ -96,6 +96,16 @@ class CommentTests(unittest.TestCase):
         self.assertIn("INVALID evidence", self.render())
         self.assertRaises(ValueError, R.Evidence(self.root).read, "../outside")
 
+    def test_large_template_inventory_keeps_findings_visible(self):
+        folder, data = self.fixture("template/base", vulns=[self.vuln()])
+        # Actual package-inclusive reports from the inherited base exceed 20 MiB.
+        data["Results"][0]["Packages"] = [{"Name": "fixture", "Description": "x" * (20 * 1024 * 1024)}]
+        (folder / "scan.json").write_text(json.dumps(data))
+        body = self.render()
+        self.assertIn("| template/base | 0 | 1 |", body)
+        self.assertIn("CVE-2026-1001", body)
+        self.assertNotIn("| template/base | N/A", body)
+
     def test_advisory_allowlist_rejects_injection(self):
         for url in ("https://github.com@evil.invalid/advisories/X", "https://nvd.nist.gov:443/vuln/detail/CVE-2026-1001", "https://github.com/advisories/x?q=a", "https://github.com/advisories/x\n", "https://github.com/../advisories/x", "https://pkg.go.dev/evil"):
             self.assertIsNone(R.advisory_url(url))

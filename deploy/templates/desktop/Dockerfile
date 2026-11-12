@@ -6,7 +6,8 @@ FROM docker.io/library/ubuntu@sha256:8a2321a92b438238f93b4346fff61bc4259c99fdd4d
 ENV DEBIAN_FRONTEND=noninteractive DEBIAN_PRIORITY=high \
     PIP_DEFAULT_TIMEOUT=100 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y \
+ && apt-get install -y --no-install-recommends \
       xserver-xorg x11-xserver-utils xvfb x11-utils xauth xfce4 xfce4-goodies util-linux sudo \
       curl git wget python3-pip xdotool scrot ffmpeg x11vnc net-tools netcat x11-apps libreoffice \
       xpdf gedit xpaint tint2 galculator pcmanfm software-properties-common apt-transport-https \

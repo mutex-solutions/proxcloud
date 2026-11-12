@@ -12,13 +12,15 @@ ENV PIP_DEFAULT_TIMEOUT=100 \
     DEBIAN_FRONTEND=noninteractive
 USER root
 WORKDIR /root
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y \
+ && apt-get install -y --no-install-recommends \
       build-essential curl git util-linux jq sudo fonts-noto-cjk ca-certificates gnupg \
- && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+ && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
+ && npm install -g npm@11.21.2 \
  && rm -rf /var/lib/apt/lists/* \
  && echo 'export NODE_OPTIONS="--use-openssl-ca${NODE_OPTIONS:+ $NODE_OPTIONS}"' > /etc/profile.d/node-ca.sh
-RUN python -m pip install --upgrade pip==26.2.2
+RUN python -m pip install --upgrade pip==26.3
 COPY --from=upstream template/charts charts
 COPY --from=upstream template/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt \
@@ -28,7 +30,7 @@ RUN npm install -g --unsafe-perm git+https://github.com/e2b-dev/ijavascript.git#
  && pip install --no-cache-dir bash_kernel && python -m bash_kernel.install
 COPY --from=upstream template/server .server
 RUN python -m venv .server/.venv \
- && .server/.venv/bin/python -m pip install --upgrade pip==26.2.2 \
+ && .server/.venv/bin/python -m pip install --upgrade pip==26.3 \
  && .server/.venv/bin/pip install --no-cache-dir -r .server/requirements.txt
 COPY --from=upstream template/matplotlibrc .config/matplotlib/.matplotlibrc
 COPY --from=upstream template/jupyter-healthcheck.sh template/start-up.sh template/jupyter_server_config.py .jupyter/
