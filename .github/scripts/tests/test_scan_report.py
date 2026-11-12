@@ -39,6 +39,11 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(GATE.validate_report(report()), ([], False))
         self.assertEqual(GATE.validate_report(report(True), IMAGE_ID), ([], False))
 
+    def test_filesystem_git_checkout_repository_type_valid(self):
+        data = report()
+        data["ArtifactType"] = "repository"
+        self.assertEqual(GATE.validate_report(data), ([], False))
+
     def test_image_requires_matching_os_package_scan_result(self):
         for results in ([], [{"Target": "binary", "Class": "lang-pkgs", "Type": "gobinary"}],
                         [{"Target": "other OS", "Class": "os-pkgs", "Type": "alpine"}]):

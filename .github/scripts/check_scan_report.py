@@ -88,8 +88,9 @@ def validate_report(report, expected_image_id=None):
         # Trivy omits false Eosl in JSON; absence is not an unknown OS when
         # Family and Name are present. The scanner also uses --exit-on-eol 1.
         eol = os_info.get("Eosl", False)
-    elif artifact_type != "filesystem":
-        raise InvalidReport("expected a filesystem report")
+    elif artifact_type not in {"filesystem", "repository"}:
+        # Trivy identifies a git checkout scanned with `fs` as a repository.
+        raise InvalidReport("expected a filesystem or repository report")
     results = report.get("Results")
     if not isinstance(results, list):
         raise InvalidReport("Results must be an array (empty is valid)")

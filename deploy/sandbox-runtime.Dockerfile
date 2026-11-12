@@ -21,7 +21,10 @@ COPY pkg ./pkg
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/sandbox-init ./cmd/sandbox-init \
  && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/sandbox-netguard ./cmd/sandbox-netguard
 
-FROM busybox:1.37
+# Keep a real maintained OS package database so BusyBox/musl are included in
+# vulnerability scans; this donor image does not replace tenant or host OSes.
+FROM alpine:3.24.4
+RUN apk upgrade --no-cache
 ARG E2B_INFRA_REF=e85b9f5f6de6c92b002f376b4f91b1652d3c942e
 COPY --from=envd /out/envd /proxcloud-sandbox/bin/envd
 COPY --from=init /out/sandbox-init /proxcloud-sandbox/bin/sandbox-init

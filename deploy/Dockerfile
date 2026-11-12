@@ -14,10 +14,13 @@ COPY internal ./internal
 COPY pkg ./pkg
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/proxcloud-api ./cmd/api
 
-FROM debian:bookworm-slim
+# Debian 13 carries maintained fixes absent from the older runtime base. This
+# changes the API container only, not database/server major versions or data.
+FROM debian:trixie-slim
 # ca-certificates for outbound TLS; postgresql-client so the config-as-code seed
 # (deploy/seed) can `psql` from this pod against PROXCLOUD_DB_URL; bash for exec/debug.
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends bash ca-certificates postgresql-client \
  && rm -rf /var/lib/apt/lists/*
 
