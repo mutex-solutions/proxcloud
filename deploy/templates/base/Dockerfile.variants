@@ -1,0 +1,85 @@
+# SOURCEONLY — NONDEFAULT optional recipes; notbuilt/unvalidated.
+# Owner approved splitting five inherited groups, NOT changing the default base.
+# Context: deploy/templates. Future caller MUST select --target explicitly:
+# media | xml | gui | database-dev | vcs. Without --target Docker selects the
+# final require-explicit-target guard, which fails instead of choosing a variant.
+# BASE is REQUIRED: provide a reviewed controlled-core LOCAL tag explicitly.
+# No vendor/default/remote-tag fallback. ARG cannot enforce provenance: caller
+# must verify the local image is the reviewed Dockerfile.controlled prototype.
+# Before use/publish: resolve candidate names against official Debian 13 APT
+# metadata, build explicitly, test capabilities/SDK, inventory and freshly scan
+# each output. Adding dependencies can add CVEs; no automatic security clearance.
+# Preserve BASE UID/home/code/sudo and Python/pip/Node payloads; no setup scripts.
+ARG BASE
+
+FROM ${BASE} AS media
+USER root
+LABEL org.proxcloud.variant="media" \
+      org.proxcloud.variant.source-category="image_processing,media" \
+      org.proxcloud.variant.status="notbuilt/unvalidated"
+# imagemagick is a candidate metapackage, NOT a promise of ImageMagick 6 ABI/CLI.
+# Do not copy Debian 12 binary names (e.g. imagemagick-6*) into Debian 13 blindly.
+RUN apt-get update && apt-get upgrade -y \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      imagemagick libmagickwand-dev libopenexr-dev libheif-dev libaom-dev \
+      libjpeg-dev libpng-dev libtiff-dev libwebp-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /home/user
+
+FROM ${BASE} AS xml
+USER root
+LABEL org.proxcloud.variant="xml" \
+      org.proxcloud.variant.source-category="xml_glib" \
+      org.proxcloud.variant.status="notbuilt/unvalidated"
+RUN apt-get update && apt-get upgrade -y \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libxml2-dev libxslt1-dev libglib2.0-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /home/user
+
+FROM ${BASE} AS gui
+USER root
+LABEL org.proxcloud.variant="gui" \
+      org.proxcloud.variant.source-category="x11_tk_rendering_fonts" \
+      org.proxcloud.variant.status="notbuilt/unvalidated"
+# tk-dev does NOT add _tkinter to an existing CPython built without Tcl/Tk.
+# Tkinter NOT supported until a Python build with _tkinter or a separate
+# validated target is accepted. X11 libraries do not provide a display server.
+RUN apt-get update && apt-get upgrade -y \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libx11-dev libxext-dev libxrender-dev libxt-dev libsm-dev libice-dev \
+      libcairo2-dev tk-dev fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /home/user
+
+FROM ${BASE} AS database-dev
+USER root
+LABEL org.proxcloud.variant="database-dev" \
+      org.proxcloud.variant.source-category="database_auth_headers" \
+      org.proxcloud.variant.status="notbuilt/unvalidated"
+# default-libmysqlclient-dev delegates to Debian's maintained client provider.
+# libldap-dev is a candidate Debian 13 name; official APT resolution is pending.
+# Old inventory proved LDAP runtime only; these LDAP headers are an addition.
+# Kerberos development libraries are not a configured GSS realm/auth service.
+RUN apt-get update && apt-get upgrade -y \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libpq-dev default-libmysqlclient-dev libkrb5-dev libldap-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /home/user
+
+FROM ${BASE} AS vcs
+USER root
+LABEL org.proxcloud.variant="vcs" \
+      org.proxcloud.variant.source-category="legacy_vcs" \
+      org.proxcloud.variant.status="notbuilt/unvalidated"
+# Git/gh and SSH remain core responsibilities; no credentials or SSH server.
+RUN apt-get update && apt-get upgrade -y \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      mercurial subversion \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /home/user
+
+# Non-feature sentinel: never silently build/publish the last optional variant.
+FROM ${BASE} AS require-explicit-target
+USER root
+RUN printf '%s\n' 'Select --target media|xml|gui|database-dev|vcs explicitly.' >&2; exit 1

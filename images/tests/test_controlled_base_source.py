@@ -57,6 +57,11 @@ class ControlledBaseSourceTests(unittest.TestCase):
             link = "ln -sfn ../lib/node_modules/npm/bin/" + script + " /usr/local/bin/" + executable
             self.assertLess(self.docker.index(link), install)
         self.assertIn("npm@11.21.2 corepack@0.36.0 yarn@1.22.22", self.docker)
+        after_install = self.docker[install:]
+        for script, executable in (("npm-cli.js", "npm"), ("npx-cli.js", "npx")):
+            link = "ln -sfn ../lib/node_modules/npm/bin/" + script + " /usr/local/bin/" + executable
+            self.assertIn(link, after_install)
+            self.assertLess(after_install.index(link), after_install.index("&& npm cache clean --force"))
         for script, executable in (("corepack/dist/corepack.js", "corepack"),
                                    ("yarn/bin/yarn.js", "yarn"), ("yarn/bin/yarn.js", "yarnpkg")):
             self.assertIn("ln -sfn ../lib/node_modules/" + script + " /usr/local/bin/" + executable, self.docker)

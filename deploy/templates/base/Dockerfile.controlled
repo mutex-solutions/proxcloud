@@ -30,10 +30,13 @@ RUN /usr/local/bin/python3 -m pip install --no-cache-dir --only-binary=:all: --n
       pip==26.3 setuptools==84.2.1 wheel==0.48.0 packaging==26.3
 COPY --from=node-toolchain /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-toolchain /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
-# Python base has no npm links: bootstrap these BEFORE invoking npm itself.
+# Bootstrap npm/npx before install, then rebind after npm's self-upgrade:
+# even --bin-links=false can remove the previous version's existing links.
 RUN ln -sfn ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && ln -sfn ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
  && npm install -g --bin-links=false npm@11.21.2 corepack@0.36.0 yarn@1.22.22 \
+ && ln -sfn ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && ln -sfn ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
  && ln -sfn ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
  && ln -sfn ../lib/node_modules/yarn/bin/yarn.js /usr/local/bin/yarn \
  && ln -sfn ../lib/node_modules/yarn/bin/yarn.js /usr/local/bin/yarnpkg \
