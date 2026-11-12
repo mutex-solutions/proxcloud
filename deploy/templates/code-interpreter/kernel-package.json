@@ -1,0 +1,12 @@
+{
+  "name": "proxcloud-interpreter-kernel",
+  "private": true,
+  "dependencies": {
+    "ijavascript": "git+https://github.com/e2b-dev/ijavascript.git#79cb7d56dcfe0df9ff55eff0ca4dc920a6dcc361"
+  },
+  "overrides": {
+    "zeromq": {
+      "nan": "2.30.0"
+    }
+  }
+}

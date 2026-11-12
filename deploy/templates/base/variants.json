@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "status": "notbuilt/unvalidated",
+  "scope": "SOURCEONLY; NONDEFAULT optional recipes; owner explicitly approved splitting all five groups. No build, package resolution, execution, network, scan, SDK acceptance or publication performed by this change.",
+  "recipe": "deploy/templates/base/Dockerfile.variants",
+  "context": "deploy/templates",
+  "default_changed": false,
+  "default_policy": "Existing default remains unchanged until actual controlled prototype build, security and SDK acceptance plus owner promotion approval. These recipes are not automatically selected by build.sh, workflows or scanner references.",
+  "source_matrix": "/home/mishuhashi/security-audit-skill/proxcloud/run-1/cve-pr209/controlled-base-feature-matrix.json",
+  "source_matrix_note": "Saved Debian 12 installed inventory suggests capabilities, not working APIs/ABIs. The original matrix predates the owner's explicit five-group split approval. This file records the approved narrower optional recipe design, not proof of full inventory restoration.",
+  "base_contract": {
+    "argument": "BASE",
+    "required": true,
+    "default": null,
+    "source": "Caller-supplied reviewed controlled-core local image tag from deploy/templates/base/Dockerfile.controlled; never infer a published/default/vendor image.",
+    "provenance_enforcement": "Docker ARG alone cannot verify provenance or require a local image. Future caller must inspect the supplied local image and reviewed build receipt before building; do not allow a missing tag to resolve remotely.",
+    "retained_from_base": ["uid 1000 user", "/home/user", "writable /code", "passwordless sudo", "Python 3.11 and pip toolchain", "Node/npm toolchain", "git and gh", "openssh-client", "core SQLite/OpenSSL development support", "basic fonts"],
+    "inheritance_note": "Each target starts separately from BASE; no target inherits another optional target. apt-get upgrade and dependency resolution may change OS package versions; language-toolchain stability still requires acceptance tests. No explicit UID, permissions, pip/npm or core setup changes. Final USER root and WORKDIR /home/user match the existing template convention."
+  },
+  "selection": {
+    "must_supply_target": true,
+    "targets": ["media", "xml", "gui", "database-dev", "vcs"],
+    "no_target_behavior": "Docker selects the final require-explicit-target guard if --target is omitted; that stage fails intentionally instead of building an optional variant. BASE is independently required with no fallback.",
+    "default_guard_stage": "require-explicit-target",
+    "combined_target": null,
+    "future_build_only": "docker build --pull=false --file deploy/templates/base/Dockerfile.variants --build-arg BASE=<REVIEWED_CONTROLLED_CORE_LOCAL_TAG> --target <EXPLICIT_VARIANT> --tag <NEW_LOCAL_VARIANT_TAG> deploy/templates",
+    "command_note": "Reference only, NOT executed or authorized by this source change. Replace angle-bracket placeholders explicitly after local provenance and official APT metadata review. No push/publish command is provided."
+  },
+  "package_resolution": {
+    "status": "TODO: official Debian 13 APT metadata validation before any future build/publish",
+    "policy": "Lists are exact explicit install allowlists, not full transitive closures. No version or binary availability claim is made from Debian 12 evidence. Resolve candidates and dependencies using official metadata for the supplied BASE release; stop on missing/renamed packages, do not silently substitute or drop a feature.",
+    "release": "Debian 13 (trixie), contingent on reviewed controlled BASE",
+    "special_review": [
+      "imagemagick and libmagickwand-dev: resolve maintained Debian 13 binary/metapackage names and selected major version; do not assume the old ImageMagick 6 packages or CLI/ABI survive. ImageMagick 7 selection is not verified here.",
+      "libldap-dev: candidate Debian 13 development binary name; validate official metadata rather than reusing libldap2-dev speculatively. Old matrix observed libldap-2.5-0 runtime, not LDAP headers.",
+      "default-libmysqlclient-dev: validate Debian 13 metapackage dependency/provider (expected MariaDB) and mysqlclient build compatibility; no provider version claim here.",
+      "libjpeg-dev and tk-dev: validate selected development-provider versions and dependencies. All other allowlisted names also require official metadata resolution; none were checked over network in this source-only task."
+    ]
+  },
+  "variants": {
+    "media": {
+      "source_groups": ["image_processing", "media"],
+      "packages": ["imagemagick", "libmagickwand-dev", "libopenexr-dev", "libheif-dev", "libaom-dev", "libjpeg-dev", "libpng-dev", "libtiff-dev", "libwebp-dev"],
+      "capability_examples": ["ImageMagick image conversion and identification", "Wand/native image extension development", "OpenEXR/HEIF/AV1/JPEG/PNG/TIFF/WebP development headers"],
+      "gaps_and_required_checks": ["Test CLI names and ImageMagick major-version ABI with actual client code.", "Headers do not prove enabled runtime codecs/delegates; validate actual read/write fixtures, including HEIF/AV1 and inherited HEVC needs.", "No ffmpeg or libvips baseline was observed; neither is promised or installed explicitly.", "Fresh scan must include ImageMagick, OpenEXR, libaom and all transitive packages; no inherited CVE assumed cleared."]
+    },
+    "xml": {
+      "source_groups": ["xml_glib"],
+      "packages": ["libxml2-dev", "libxslt1-dev", "libglib2.0-dev"],
+      "capability_examples": ["Native libxml2/libxslt extension development", "Potential lxml source-build prerequisites", "GLib native development"],
+      "gaps_and_required_checks": ["Build and test representative lxml/native clients before claiming support.", "No automatic GLib/XML CVE clearance; resolve and scan actual dependencies."]
+    },
+    "gui": {
+      "source_groups": ["x11_tk_rendering_fonts"],
+      "packages": ["libx11-dev", "libxext-dev", "libxrender-dev", "libxt-dev", "libsm-dev", "libice-dev", "libcairo2-dev", "tk-dev", "fonts-dejavu-core"],
+      "capability_examples": ["X11/Cairo native development", "Tcl/Tk development headers", "Basic DejaVu font availability already intended in core"],
+      "tkinter_support": "NOT supported with current CPython built without _tkinter; installing tk-dev does not rebuild Python. Require a Python build including _tkinter or a separately validated target before any Tkinter claim.",
+      "gaps_and_required_checks": ["No desktop, display server, Xvfb, xauth or GTK promised.", "Not full inherited GdkPixbuf/Pango development parity; those are not explicit installs in this narrower allowlist.", "Validate headless Cairo/font rendering separately; X11 client libraries alone do not provide a display."]
+    },
+    "database-dev": {
+      "source_groups": ["database_auth_headers"],
+      "packages": ["libpq-dev", "default-libmysqlclient-dev", "libkrb5-dev", "libldap-dev"],
+      "capability_examples": ["PostgreSQL and MySQL-compatible client development prerequisites", "Potential psycopg2/mysqlclient source builds", "Kerberos development headers", "LDAP development headers as an explicit added capability"],
+      "gaps_and_required_checks": ["LDAP headers are an addition, not an inherited capability proved by the old runtime inventory; python-ldap build/auth support is unvalidated.", "No PostgreSQL/MariaDB/LDAP/Kerberos servers or configured realms, tickets, keytabs, credentials or working GSS authentication.", "Validate GSS/LDAP authentication and source builds separately; installation alone does not establish them.", "Old libdb5.3-dev was observed but Berkeley DB development is not included in this narrower optional allowlist; no full old DB header parity claim.", "SSH remains in BASE; these recipes do not replace or remove its client/authentication requirements."]
+    },
+    "vcs": {
+      "source_groups": ["legacy_vcs"],
+      "packages": ["mercurial", "subversion"],
+      "capability_examples": ["hg and svn clients", "Potential pip hg+ and svn+ VCS dependency support"],
+      "gaps_and_required_checks": ["Validate hg/svn clients and pip VCS integrations; APT may add Debian's system Python alongside retained /usr/local Python.", "No bzr baseline was observed; bzr is not installed or promised.", "No server, credential provisioning or repository access is configured."]
+    }
+  },
+  "acceptance_before_selection_or_publish": [
+    "Review official APT candidate metadata for all explicit and transitive packages, including binary renames, provider versions and architecture.",
+    "Build the controlled core and each explicitly selected target; retain image identity, complete package databases/SBOM and build receipts.",
+    "Fresh raw/final vulnerability scans for each target and dependencies; unresolved required vulnerabilities block unchanged gates, not justify deletion, suppression or automatic clearance.",
+    "Verify retained UID/home/code/sudo/toolchains and core SDK/MCP compatibility; these source contracts are not baseline SDK acceptance.",
+    "Run per-target native/API/codec/rendering/VCS/auth tests appropriate to the claimed feature set and document remaining gaps.",
+    "No default switch or publication until actual prototype security/SDK acceptance and explicit owner approval; current source status remains notbuilt/unvalidated."
+  ]
+}

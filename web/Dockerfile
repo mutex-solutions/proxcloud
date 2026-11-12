@@ -8,6 +8,9 @@ COPY ${APP}/ ./
 RUN npm run build
 
 FROM nginx:1.30.6-alpine
+# Refresh the distro-patched XSLT library (CVE-2026-87636/CVE-2026-9947);
+# a fresh base pull alone may still carry the earlier Alpine package revision.
+RUN apk upgrade --no-cache libxslt
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY docker-entrypoint.sh /docker-entrypoint-proxcloud.sh

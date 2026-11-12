@@ -1,0 +1,100 @@
+name: openssh-backport
+
+# Experimental build/test evidence only: no host/production installation, registry
+# publication, selected-runtime change, vulnerability ignore/VEX or merge clearance.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/security/openssh/**'
+      - 'images/tests/test_openssh_backport_source.py'
+      - '.github/workflows/openssh-backport.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openssh-backport-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build-client:
+    name: experimental-openssh-client
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+      DEBIAN_BASE: debian:trixie-slim@sha256:7378260c0a098d27ac206225db5e7d92b8c7c84ea7afccc86eeb513756bbd392
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Check exact source and source-only guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p result
+          printf '%s\n' "$SOURCE_SHA" > result/source-sha.txt
+          printf '%s\n' "$DEBIAN_BASE" > result/debian-base.txt
+          sh -n deploy/security/openssh/build-backport.sh
+          python3 -m unittest discover -s images/tests -p test_openssh_backport_source.py -v
+          python3 -m unittest discover -s images/tests -p test_ssh_client_regression_source.py -v
+      - uses: docker/setup-buildx-action@v4
+      - name: Build authenticated Debian client package without installing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 --pull \
+            --build-arg "DEBIAN_BASE=$DEBIAN_BASE" --target artifacts \
+            --output type=local,dest=result/ssh-backport \
+            --file deploy/security/openssh/Dockerfile deploy/security/openssh \
+            2>&1 | tee result/build.log
+          test -s result/ssh-backport/backport-manifest.json
+      - name: Bind built package and prepare disposable loopback test image
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import shutil
+          root = Path('result/ssh-backport')
+          manifest = json.loads((root / 'backport-manifest.json').read_text())
+          name = 'openssh-client_10.0p1-7+deb13u4+proxcloud1_amd64.deb'
+          package = root / name
+          expected = manifest['files'][name]
+          assert manifest['backport_version'] == '1:10.0p1-7+deb13u4+proxcloud1'
+          assert package.is_file() and not package.is_symlink()
+          assert package.stat().st_size == expected['bytes']
+          assert hashlib.sha256(package.read_bytes()).hexdigest() == expected['sha256']
+          target = Path('deploy/security/openssh/client-package')
+          target.mkdir()
+          shutil.copyfile(package, target / 'openssh-client.deb')
+          PY
+          docker build --file deploy/security/openssh/Dockerfile.client-test \
+            --tag proxcloud-ssh-client-test deploy/security/openssh \
+            2>&1 | tee result/client-test-build.log
+      - name: Run nonroot capless client regression using only private loopback
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fixed name permits cleanup after the outer watchdog, not unknown containers.
+          name="ssh-client-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || :' EXIT
+          timeout --kill-after=5s 200s docker run --name "$name" --rm \
+            --network none --user 1000:1000 --cap-drop ALL \
+            --security-opt no-new-privileges --pids-limit 128 --memory 1g \
+            --memory-swap 1g --cpus 2 --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=128m \
+            proxcloud-ssh-client-test 2>&1 | tee result/client-test.log
+      - name: Preserve experimental build evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: experimental-openssh-client-${{ github.event.pull_request.head.sha }}
+          path: result/
+          if-no-files-found: error
+          retention-days: 3

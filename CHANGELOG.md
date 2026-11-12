@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Build and test with Go 1.27.4, the current stable release, in all six Go builder
+  stages and the hosted test workflow. Raise the module minimum to `go 1.26.0`,
+  which Testcontainers 0.45 and `golang.org/x/crypto` 0.58 require, so source builds
+  with Go 1.25 no longer work. Keep the compiler pin and module minimum as separate,
+  tested declarations.
+- Update Testcontainers core and PostgreSQL modules to 0.45.0 and `golang.org/x/crypto`
+  to 0.58.0 (with `x/net` 0.60.0 and `x/sync` 0.24.0) as one coherent graph, keeping
+  pgx 5.12.0 and the AWS SDK versions already on `main`. This supersedes the separate
+  dependency updates in #182, #183 and #32.
+- Run the tagged build-archive integration test in hosted CI.
+
 ### Fixed
 
 - Grow only a freshly created native OS-template base to a verified minimum 20 GiB

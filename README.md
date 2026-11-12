@@ -164,7 +164,7 @@ Every stage and option: [`docs/install.md`](docs/install.md). Chart values:
 
 ## 🧰 Tech stack
 
-- **Backend** — Go 1.25, [chi](https://github.com/go-chi/chi) router, PostgreSQL (jsonb document store and durable jobs via [pgx](https://github.com/jackc/pgx)), a Proxmox VE REST client (`internal/cloud/pve`), aws-sdk-go-v2 for S3, Stripe, the [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk), and [koanf](https://github.com/knadh/koanf) config (env + `application.yml`).
+- **Backend** — Go 1.26+ minimum; [supported build/test target Go 1.27.4](docs/supported-go-build-baseline.md) (fresh validation pending), [chi](https://github.com/go-chi/chi) router, PostgreSQL (jsonb document store and durable jobs via [pgx](https://github.com/jackc/pgx)), a Proxmox VE REST client (`internal/cloud/pve`), aws-sdk-go-v2 for S3, Stripe, the [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk), and [koanf](https://github.com/knadh/koanf) config (env + `application.yml`).
 - **Frontends** — React 19 + Vite + TypeScript, Tailwind CSS v4, shadcn/ui + Radix, TanStack Query, and `react-oidc-context` (authorization-code + PKCE).
 - **Identity** — Keycloak or any OIDC provider.
 

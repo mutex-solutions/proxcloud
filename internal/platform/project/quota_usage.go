@@ -55,12 +55,12 @@ func pveQuotaMetrics(limits map[string]any, u pveQuotaDemand) (*computeQuota, *s
 		return quotaMetric{Used: used, Limit: limit}
 	}
 	return &computeQuota{
-			Instances: metric("servers", u.Servers),
-			Cores:     metric("vcpus", u.VCPUs),
-			RAMMb:     metric("ramMb", u.RAMMb),
-		}, &storageQuota{
-			Gigabytes: metric("diskGb", u.DiskGb),
-		}
+		Instances: metric("servers", u.Servers),
+		Cores:     metric("vcpus", u.VCPUs),
+		RAMMb:     metric("ramMb", u.RAMMb),
+	}, &storageQuota{
+		Gigabytes: metric("diskGb", u.DiskGb),
+	}
 }
 
 // quotaUsage reports the ProxCloud-managed quota (GPU + resource keys) with usage

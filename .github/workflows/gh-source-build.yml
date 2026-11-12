@@ -1,0 +1,58 @@
+name: gh-source-build
+
+# Experimental binary evidence only; no runtime installation, image publication,
+# CVE ignore/VEX, default template change or security-gate relaxation.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/security/gh/**'
+      - 'images/tests/test_gh_source_build.py'
+      - '.github/workflows/gh-source-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gh-source-build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: experimental-gh-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Check exact source and data-only contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p result
+          printf '%s\n' "$SOURCE_SHA" > result/source-sha.txt
+          python3 -m unittest discover -s images/tests -p test_gh_source_build.py -v
+      - uses: docker/setup-buildx-action@v4
+      - name: Build candidate binary without installation or publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 --pull --target artifacts \
+            --output type=local,dest=result/gh-source \
+            --file deploy/security/gh/Dockerfile deploy/security/gh \
+            2>&1 | tee result/build.log
+          test -s result/gh-source/go-buildinfo.txt
+          test -s result/gh-source/source-dependency-diff.patch
+      - name: Preserve experimental evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: experimental-gh-source-${{ github.event.pull_request.head.sha }}
+          path: result/
+          if-no-files-found: error
+          retention-days: 3
