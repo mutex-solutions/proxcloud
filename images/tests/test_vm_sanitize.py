@@ -254,8 +254,10 @@ class SanitizeTests(unittest.TestCase):
         self.assertEqual(err.getvalue(), "sanitization refused\n")
 
 
-PRESERVE = b"#cloud-config\nsystem_info: {default_user: {name: builder, lock_passwd: true}}\n"
+PRESERVE_NAME = "05_logging.cfg"  # Name class of the real package-owned (cloud-init-base) vendor drop-in.
+PRESERVE = b"## synthetic packaged vendor drop-in, NOT the real file bytes\n_log: []\n"
 REMOVE_BUILD = b"network: {config: disabled}\n"
+UUID = "0f1e2d3c-4b5a-4978-8a6b-5c4d3e2f1a0b"  # Synthetic, canonical lowercase.
 
 
 class FakeK8sGuestFS(FakeGuestFS):
@@ -264,6 +266,7 @@ class FakeK8sGuestFS(FakeGuestFS):
         super().__init__("ubuntu-2604")
         for path in [p for p in self.nodes if p == "/home/ubuntu" or p.startswith("/home/ubuntu/")]:
             del self.nodes[path]
+        self.uuids = {UUID: "/dev/sda1"}  # Filesystem uuid -> device, as findfs_uuid resolves it.
         self.mounts = {"/": "/dev/sda1"}
         self.filesystems = {"/dev/sda1": "ext4"}
         self.features = {"/dev/sda1": "has_journal extents"}
@@ -285,21 +288,34 @@ class FakeK8sGuestFS(FakeGuestFS):
             self.mkdir_p(path)
         self.put("/etc/containerd/config.toml", b'version = 3\n[plugins."io.containerd.cri.v1.runtime"]\n')
         self.put("/etc/apt/sources.list.d/kubernetes.list", b"deb https://pkgs.k8s.io/core:/stable:/v1.35/deb/ /\n")
-        self.put("/etc/cloud/cloud.cfg.d/90-builder-user.cfg", PRESERVE)
+        self.put("/etc/cloud/cloud.cfg.d/" + PRESERVE_NAME, PRESERVE)
         self.put("/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg", REMOVE_BUILD)
         self.put("/home/builder/.ssh/authorized_keys", b"ssh-ed25519 AAAA synthetic\n")
         self.calls.clear()
     def part_get_parttype(self, device): return self.parttype
     def part_list(self, device): return self.partitions
     def readlink(self, path): return self.nodes[path][1]
+    def findfs_uuid(self, uuid):
+        self.calls.append(("findfs_uuid", uuid))
+        if uuid not in self.uuids:
+            raise RuntimeError("findfs_uuid: synthetic unresolvable " + uuid)
+        return self.uuids[uuid]
+
+
+class IntBoolK8sGuestFS(FakeK8sGuestFS):
+    """Like the real Python binding: predicate calls return int 0/1, not bool."""
+    def is_symlink(self, path): return int(super().is_symlink(path))
+    def exists(self, path): return int(super().exists(path))
+    def is_file(self, path, followsymlinks=True): return int(super().is_file(path, followsymlinks))
+    def is_dir(self, path, followsymlinks=True): return int(super().is_dir(path, followsymlinks))
 
 
 def k8s_review(**changes):
     review = dict(kubernetes_version="1.35.10", source_raw_sha256="e" * 64, source_hash_verified=True, source_stopped=True, bios="seabios",
                   kubelet_active=False, runtime_version="2.1.0", retained_package_policy_reviewed=True,
                   package_policy_sha256="c" * 64, network_backend="netplan-systemd-networkd",
-                  cloud_default_user="builder", cloud_base_config_reviewed=True,
-                  reviewed_dropins=(("90-builder-user.cfg", hashlib.sha256(PRESERVE).hexdigest(), "preserve_vendor"),
+                  cloud_default_user="ubuntu", cloud_base_config_reviewed=True,
+                  reviewed_dropins=((PRESERVE_NAME, hashlib.sha256(PRESERVE).hexdigest(), "preserve_vendor"),
                                     ("99-disable-network-config.cfg", hashlib.sha256(REMOVE_BUILD).hexdigest(),
                                      "remove_build")))
     review.update(changes)
@@ -317,8 +333,10 @@ class KubernetesSanitizeTests(unittest.TestCase):
         g.put("/etc/kubernetes/bootstrap-token.txt", b"synthetic-prejoin\n")  # Curated leaf, not cluster state.
         s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
         self.assertEqual(g.nodes[s.KUBELET_WANTS][0], "link")  # enabled=True preserved, never toggled.
-        self.assertEqual(g.ls("/etc/cloud/cloud.cfg.d"), ["90-builder-user.cfg"])
-        self.assertEqual(g.read_file("/etc/cloud/cloud.cfg.d/90-builder-user.cfg"), PRESERVE)
+        self.assertEqual(g.ls("/etc/cloud/cloud.cfg.d"), [PRESERVE_NAME])
+        self.assertEqual(g.read_file("/etc/cloud/cloud.cfg.d/" + PRESERVE_NAME), PRESERVE)
+        self.assertNotIn("/etc/sudoers.d/90-cloud", g.nodes)  # builder NOPASSWD drop-in removed.
+        self.assertFalse([p for p in g.nodes if p == "/home/ubuntu" or p.startswith("/home/ubuntu/")])
         for gone in ("/home/builder/.ssh", "/etc/kubernetes/bootstrap-token.txt", "/var/lib/cloud"):
             self.assertNotIn(gone, g.nodes)
         for kept in ("/etc/containerd/config.toml", "/var/lib/dpkg/status", "/etc/kubernetes/manifests", "/opt/cni/bin"):
@@ -355,9 +373,9 @@ class KubernetesSanitizeTests(unittest.TestCase):
     def test_dropins_require_exact_reviewed_decisions_no_blanket_wipe(self):
         g = FakeK8sGuestFS(); g.put("/etc/cloud/cloud.cfg.d/50-unreviewed.cfg", b"#cloud-config\n")
         self.refuses(g)
-        g = FakeK8sGuestFS(); g.put("/etc/cloud/cloud.cfg.d/90-builder-user.cfg", PRESERVE + b"# changed\n")
+        g = FakeK8sGuestFS(); g.put("/etc/cloud/cloud.cfg.d/" + PRESERVE_NAME, PRESERVE + b"# changed\n")
         self.refuses(g)
-        g = FakeK8sGuestFS(); g.nodes["/etc/cloud/cloud.cfg.d/90-builder-user.cfg"] = ("link", "/etc/shadow")
+        g = FakeK8sGuestFS(); g.nodes["/etc/cloud/cloud.cfg.d/" + PRESERVE_NAME] = ("link", "/etc/shadow")
         self.refuses(g)
         self.refuses(FakeK8sGuestFS(), k8s_review(reviewed_dropins=()))
         self.refuses(FakeK8sGuestFS(), k8s_review(reviewed_dropins=k8s_review()["reviewed_dropins"][:1]))
@@ -385,17 +403,54 @@ class KubernetesSanitizeTests(unittest.TestCase):
         g = FakeK8sGuestFS(); g.put("/etc/passwd", g.read_file("/etc/passwd") + b"orphan:x:5:5::/:/usr/sbin/nologin\n")
         self.refuses(g)  # passwd row without a shadow row refuses before the policy.
 
-    def test_swap_files_fstab_rows_and_units_refuse_never_wipe(self):
+    def test_upstream_ubuntu_default_user_and_locked_builder(self):
+        # Owner decision: cloud-init's upstream default user `ubuntu` is created at FIRST BOOT.
+        self.refuses(FakeK8sGuestFS(), k8s_review(cloud_default_user="builder"))  # builder is no default user.
+        # A pre-existing ubuntu account (any shape) refuses in the policy itself.
+        for row in (b"ubuntu:x:1001:1001::/home/ubuntu:/bin/bash\n", b"ubuntu:x:999:999::/nonexistent:/usr/sbin/nologin\n"):
+            g = FakeK8sGuestFS()
+            g.put("/etc/passwd", g.read_file("/etc/passwd") + row)
+            g.put("/etc/shadow", g.read_file("/etc/shadow") + b"ubuntu:!:1:2:3:4:5:6:7\n")
+            self.policy_refuses(g)
+        g = FakeK8sGuestFS(); g.mkdir_p("/home/ubuntu")  # Stale home without an account refuses too.
+        self.refuses(g)
+        g = FakeK8sGuestFS(); g.put("/etc/group", g.read_file("/etc/group") + b"ubuntu:x:1001:\n")
+        self.refuses(g)  # useradd at first boot would collide with an existing group.
+        # builder must be locked: an unlocked or recoverable-hash shadow field refuses.
+        for marker in (b"$6$synthetic", b"!$6$synthetic", b""):
+            g = FakeK8sGuestFS()
+            g.put("/etc/shadow", g.read_file("/etc/shadow").replace(b"builder:!:", b"builder:" + marker + b":"))
+            self.policy_refuses(g)
+        # A NOPASSWD builder rule in sudoers.d is removed; in the main sudoers it refuses (no rewrite).
+        g = FakeK8sGuestFS()
+        g.put("/etc/sudoers", g.read_file("/etc/sudoers") + b"builder ALL=(ALL) NOPASSWD:ALL\n")
+        with self.assertRaises(ValueError): s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        g = FakeK8sGuestFS()
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertNotIn("/etc/sudoers.d/90-cloud", g.nodes)
+        self.assertNotIn("/home/builder/.ssh/authorized_keys", g.nodes)
+        self.assertIn(b"builder:!:", g.read_file("/etc/shadow"))
+        self.assertIn(b"builder:x:1000:1000::/home/builder:/bin/bash", g.read_file("/etc/passwd"))
+
+    def test_swap_files_active_fstab_rows_and_units_refuse_never_wipe(self):
         for change in (lambda g: g.put("/swap.img", b"\0"), lambda g: g.put("/swapfile", b"\0"),
                        lambda g: g.nodes.__setitem__("/swap.img", ("link", "/dev/sda2")),
                        lambda g: g.put("/etc/fstab", g.read_file("/etc/fstab") + b"/swap.img none swap sw 0 0\n"),
-                       lambda g: g.put("/etc/fstab", g.read_file("/etc/fstab") + b"#/swap.img\tnone\tswap\tsw\t0\t0\n"),
-                       lambda g: g.put("/etc/fstab", g.read_file("/etc/fstab") + b"  # /swapfile none swap sw 0 0\n"),
-                       lambda g: g.put("/etc/systemd/system/swap.img.swap", b"[Swap]\nWhat=/swap.img\n")):
+                       lambda g: g.put("/etc/fstab", g.read_file("/etc/fstab") + b"  /swapfile\tnone\tswap\tsw\t0\t0\n"),
+                       lambda g: g.put("/etc/fstab", g.read_file("/etc/fstab") + b"UUID=x none swap sw 0 0 # comment\n"),
+                       lambda g: g.put("/etc/fstab", g.read_file("/etc/fstab") + b"#/swap.img none swap sw 0 0\n"
+                                                                                b"/swap.img none swap sw 0 0\n"),
+                       lambda g: g.put("/etc/systemd/system/swap.img.swap", b"[Swap]\nWhat=/swap.img\n"),
+                       lambda g: g.put("/etc/systemd/system/dev-sda2.swap", b"")):
             g = FakeK8sGuestFS(); change(g)
             self.policy_refuses(g)
-        g = FakeK8sGuestFS(); g.put("/etc/fstab", g.read_file("/etc/fstab") + b"# no swapping here\n")
-        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))  # Prose mentioning swap is not an entry.
+        # Commented rows (image-builder late-command `s/^#?/#/`) and prose are inert, not entries.
+        for extra in (b"#/swap.img\tnone\tswap\tsw\t0\t0\n", b"  # /swapfile none swap sw 0 0\n",
+                      b"##/swap.img none swap sw 0 0\n", b"# no swapping here\n"):
+            with self.subTest(extra=extra):
+                g = FakeK8sGuestFS(); g.put("/etc/fstab", g.read_file("/etc/fstab") + extra)
+                s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+                self.assertIn(extra, g.read_file("/etc/fstab"))  # Not rewritten.
 
     def test_kubelet_registry_state_secrets_and_proxy_refuse(self):
         # Hardcoded on purpose: emptying the constant must not silently drop these cases.
@@ -417,7 +472,7 @@ class KubernetesSanitizeTests(unittest.TestCase):
                     lambda g: g.put("/etc/systemd/system/containerd.service.d/http-proxy.conf",
                                     b'[Service]\nEnvironment="HTTP_PROXY=http://proxy.test:3128"\n'),
                     lambda g: g.put("/var/lib/systemd/credential.secret", b"synthetic"),
-                    lambda g: g.put("/var/lib/snapd/device/private-keys-v1/key", b"synthetic")]
+                    lambda g: g.nodes.__setitem__("/var/lib/systemd/credential.secret", ("link", "/dev/null"))]
         for index, change in enumerate(changes):
             with self.subTest(index=index):
                 g = FakeK8sGuestFS(); change(g)
@@ -429,6 +484,40 @@ class KubernetesSanitizeTests(unittest.TestCase):
         g.mkdir_p("/var/lib/snapd/device/private-keys-v1")  # Empty directory is accepted.
         s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
         self.assertIn("/var/lib/kubelet/kubeadm-flags.env", g.nodes)
+
+    def test_snapd_device_key_is_copy_only_wipe_then_verified_empty(self):
+        keys = s.K8S_SNAPD_KEYS
+        self.assertEqual(keys, "/var/lib/snapd/device/private-keys-v1")
+        self.assertIn(keys + "/*", k8s_copy_policy.COPY_WIPE)
+        g = FakeK8sGuestFS()
+        g.put(keys + "/n92-synthetic-device-key-id", b"-----BEGIN SYNTHETIC-----\n")  # Seeding-time machine key.
+        g.put("/var/lib/snapd/device/serial-placeholder", b"kept")  # Only the key entries are wiped.
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertTrue(g.is_dir(keys))
+        self.assertEqual(g.ls(keys), [])  # snapd regenerates on first boot.
+        self.assertIn("/var/lib/snapd/device/serial-placeholder", g.nodes)
+        # Not cleanly wipeable by the exact `<dir>/*` row: still an unclassified credential -> refuse.
+        for change in (lambda g: g.put(keys + "/.hidden-key", b"synthetic"),  # Dot entry: not glob-matched.
+                       lambda g: (g.mkdir_p(keys), g.nodes.__setitem__(keys + "/link", ("link", "/etc/shadow"))),
+                       lambda g: g.put(keys + "/subdir/key", b"synthetic"),
+                       lambda g: (g.mkdir_p("/var/lib/snapd/device"),
+                                  g.nodes.__setitem__(keys, ("link", "/srv/keys"))),
+                       lambda g: g.put(keys, b"not a directory")):
+            g = FakeK8sGuestFS(); change(g)
+            self.policy_refuses(g)
+        # credential.secret stays a refusal even next to a wipeable snapd key.
+        g = FakeK8sGuestFS(); g.put(keys + "/k", b"synthetic"); g.put("/var/lib/systemd/credential.secret", b"x")
+        self.policy_refuses(g)
+
+    def test_snapd_key_dir_must_be_empty_after_cleanup(self):
+        g = FakeK8sGuestFS()
+        g.put(s.K8S_SNAPD_KEYS + "/k", b"synthetic")
+        real_rm_rf = g.rm_rf
+        def stubborn(path):  # A wipe that silently leaves the key behind must not pass verification.
+            if not path.startswith(s.K8S_SNAPD_KEYS + "/"):
+                real_rm_rf(path)
+        g.rm_rf = stubborn
+        with self.assertRaises(ValueError): s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
 
     def test_masked_or_redirected_kubelet_refuses(self):
         for change in (lambda g: g.nodes.__setitem__(s.KUBELET_MASK, ("link", "/dev/null")),
@@ -448,11 +537,117 @@ class KubernetesSanitizeTests(unittest.TestCase):
         g = FakeK8sGuestFS(); g.put("/etc/cloud/cloud.cfg.d/README.txt", notice)
         self.policy_refuses(g, k8s_review(reviewed_dropins=k8s_review()["reviewed_dropins"] + (("README.txt",) + row[1:],)))
 
+    def test_observed_dropin_classes_by_exact_parent_rows(self):
+        """Real name classes (synthetic bytes): 05_logging.cfg + README owned by cloud-init-base are
+        preserve_vendor; 20-disable-cc-dpkg-grub.cfg + 90_dpkg.cfg are not package-owned -> remove_build.
+        Decisions/hashes come only from the parent review rows, never from source constants."""
+        files = {"05_logging.cfg": (b"## synthetic logging\n", "preserve_vendor"),
+                 "README": (b"# synthetic notice\n", "preserve_vendor"),
+                 "20-disable-cc-dpkg-grub.cfg": (b"grub_dpkg: {enabled: false}\n", "remove_build"),
+                 "90_dpkg.cfg": (b"datasource_list: [ NoCloud, None ]\n", "remove_build")}
+        def fresh():
+            g = FakeK8sGuestFS()
+            for name in g.ls("/etc/cloud/cloud.cfg.d"):
+                del g.nodes["/etc/cloud/cloud.cfg.d/" + name]
+            for name, (data, _) in files.items():
+                g.put("/etc/cloud/cloud.cfg.d/" + name, data)
+            return g
+        rows = tuple((n, hashlib.sha256(d).hexdigest(), a) for n, (d, a) in sorted(files.items()))
+        g = fresh()
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(reviewed_dropins=rows), dict(PARENT))
+        self.assertEqual(g.ls("/etc/cloud/cloud.cfg.d"), ["05_logging.cfg", "README"])
+        for name in ("05_logging.cfg", "README"):
+            self.assertEqual(g.read_file("/etc/cloud/cloud.cfg.d/" + name), files[name][0])
+        self.policy_refuses(fresh(), k8s_review(reviewed_dropins=rows[:-1]))  # Every observed file needs a row.
+        self.policy_refuses(fresh(), k8s_review(reviewed_dropins=tuple(  # Hash must match exactly.
+            (n, "f" * 64 if n == "90_dpkg.cfg" else h, a) for n, h, a in rows)))
+
     def test_root_only_mount_checked_before_mounting(self):
-        for mounts in ({"/": "/dev/sda1", "/boot": "/dev/sda2"}, {"/": "/dev/sda1", "/boot/efi": "/dev/sda2"}):
+        for mounts in ({"/": "/dev/sda1", "/boot": "/dev/sda2"}, {"/": "/dev/sda1", "/boot/efi": "/dev/sda2"},
+                       {"/": "/dev/disk/by-uuid/" + UUID, "/boot": "/dev/sda2"}):
             g = FakeK8sGuestFS(); g.mounts = mounts; g.filesystems["/dev/sda2"] = "ext4"
             self.refuses(g)
             self.assertFalse([c for c in g.calls if c[0] == "mount"])
+
+    def test_curtin_by_uuid_root_resolved_exactly_then_mounted_by_device(self):
+        g = FakeK8sGuestFS(); g.mounts = {"/": "/dev/disk/by-uuid/" + UUID}  # curtin fstab spec, unresolved.
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        mounts = [c for c in g.calls if c[0] == "mount"]
+        self.assertTrue(mounts)
+        self.assertEqual(set(mounts), {("mount", "/dev/sda1", "/")})  # Every (re)mount uses the device.
+        self.assertEqual([c for c in g.calls if c[0] == "findfs_uuid"], [("findfs_uuid", UUID)])
+        self.assertEqual([c for c in g.calls if c[0] in ("journal", "zero")],
+                         [("journal", "/dev/sda1", False), ("zero", "/"), ("journal", "/dev/sda1", True)])
+        for spec, uuids in (("/dev/disk/by-label/cloudimg-rootfs", None), ("/dev/disk/by-partuuid/" + UUID, None),
+                            ("LABEL=cloudimg-rootfs", None), ("UUID=" + UUID, None),
+                            ("/dev/disk/by-uuid/" + UUID.upper(), None),  # Non-canonical case.
+                            ("/dev/disk/by-uuid/" + UUID[:-1], None), ("/dev/disk/by-uuid/" + UUID + "/", None),
+                            ("/dev/disk/by-uuid/../../sda1", None), ("/dev/sda2", None),
+                            ("/dev/disk/by-uuid/" + UUID, {}),  # Unresolvable.
+                            ("/dev/disk/by-uuid/" + UUID, {UUID: "/dev/sda2"}),  # Resolves to non-root.
+                            ("/dev/disk/by-uuid/" + UUID, {UUID: "/dev/sda"})):
+            with self.subTest(spec=spec, uuids=uuids):
+                g = FakeK8sGuestFS(); g.mounts = {"/": spec}; g.filesystems["/dev/sda2"] = "ext4"
+                if uuids is not None:
+                    g.uuids = uuids
+                self.assertEqual(self.refuses(g), "sanitization refused")
+                self.assertFalse([c for c in g.calls if c[0] == "mount"])
+
+    def test_held_or_installed_k8s_packages_only(self):
+        held = lambda g, name: g.put("/var/lib/dpkg/status", g.read_file("/var/lib/dpkg/status").replace(  # noqa: E731
+            b"Package: %s\nStatus: install ok installed" % name, b"Package: %s\nStatus: hold ok installed" % name))
+        g = FakeK8sGuestFS()
+        for name in (b"kubeadm", b"kubelet", b"kubectl"):  # image-builder apt-marks all three hold.
+            held(g, name)
+        self.assertEqual(g.read_file("/var/lib/dpkg/status").count(b"Status: hold ok installed"), 3)
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        for status in (b"deinstall ok installed", b"purge ok installed", b"hold ok half-installed",
+                       b"hold reinstreq installed", b"install ok unpacked", b"hold ok installed ",
+                       b"Hold ok installed", b"hold  ok installed"):
+            with self.subTest(status=status):
+                g = FakeK8sGuestFS()
+                g.put("/var/lib/dpkg/status", g.read_file("/var/lib/dpkg/status").replace(
+                    b"Package: kubelet\nStatus: install ok installed", b"Package: kubelet\nStatus: " + status))
+                self.refuses(g)
+        g = FakeK8sGuestFS(); held(g, b"kubelet")  # Version still must be exactly the pinned deb release.
+        g.put("/var/lib/dpkg/status", g.read_file("/var/lib/dpkg/status").replace(
+            b"Package: kubelet\nStatus: hold ok installed\nVersion: 1.35.10-1.1",
+            b"Package: kubelet\nStatus: hold ok installed\nVersion: 1.35.10-2.1"))
+        self.policy_refuses(g)
+
+    def test_static_manifests_exclude_only_empty_kubelet_keep_placeholder(self):
+        keep = "/etc/kubernetes/manifests/.kubelet-keep"
+        g = FakeK8sGuestFS(); g.put(keep, b"")  # image-builder placeholder, as observed.
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertEqual(g.read_file(keep), b"")  # Retained, never wiped.
+        for change in (lambda g: g.put(keep, b"\n"),  # Non-empty placeholder.
+                       lambda g: g.nodes.__setitem__(keep, ("link", "/dev/null")),
+                       lambda g: g.mkdir_p(keep),
+                       lambda g: (g.put(keep, b""), g.put("/etc/kubernetes/manifests/kube-vip.yaml", b"")),
+                       lambda g: g.put("/etc/kubernetes/manifests/.kubelet-keep.yaml", b""),
+                       lambda g: g.put("/etc/kubernetes/manifests/kubelet-keep", b""),
+                       lambda g: g.put("/etc/kubernetes/manifests/.Kubelet-keep", b""),
+                       lambda g: g.nodes.__setitem__("/etc/kubernetes/manifests", ("link", "/srv/manifests"))):
+            g = FakeK8sGuestFS(); change(g)
+            self.policy_refuses(g)
+
+    def test_guestfs_int_predicates_are_cast_to_policy_bools(self):
+        # Real-image defect: drop-in regular_no_symlinks reached the policy as int 1 and refused.
+        g = IntBoolK8sGuestFS()
+        _, facts, _ = s.k8s_inventory(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertTrue(facts["cloud_dropins"])
+        for d in facts["cloud_dropins"]:
+            self.assertIs(d["regular_no_symlinks"], True)
+        self.assertIs(facts["k8s"]["kubelet_enabled"], True)
+        self.assertIs(facts["layout"]["external_fstab"], False)
+        for key in ("swap_entries", "unsafe_links"):
+            self.assertIs(type(facts["layout"][key]), int)
+        for value in list(facts["k8s"]["cluster"].values()) + list(facts["hygiene"].values()):
+            self.assertIs(type(value), int)
+        g = IntBoolK8sGuestFS()
+        s.sanitize_k8s(g, "ubuntu-2604", k8s_review(), dict(PARENT))
+        self.assertIs(s.exists(IntBoolK8sGuestFS(), "/etc"), True)
+        self.assertIs(s.exists(IntBoolK8sGuestFS(), "/nonexistent"), False)
 
     def test_layout_package_kubelet_network_and_hygiene_unknowns_refuse(self):
         changes = [lambda g: setattr(g, "parttype", "gpt"), lambda g: g.partitions.append({"part_num": 2}),
@@ -474,7 +669,9 @@ class KubernetesSanitizeTests(unittest.TestCase):
 
     def test_review_and_parent_facts_fail_closed(self):
         for key, value in (("kubernetes_version", "1.35.11"), ("kubelet_active", True), ("bios", "ovmf"),
-                           ("cloud_default_user", "ubuntu"), ("network_backend", "UNKNOWN"),
+                           ("cloud_default_user", "Ubuntu"),
+                           ("cloud_default_user", "builder"), ("cloud_default_user", "root"),
+                           ("network_backend", "UNKNOWN"),
                            ("cloud_base_config_reviewed", False), ("retained_package_policy_reviewed", 1),
                            ("source_hash_verified", False)):
             with self.subTest(key=key):

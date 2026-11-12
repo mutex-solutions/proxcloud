@@ -32,7 +32,7 @@ def fixture():
                       "kind": "root", "passwd_marker": "x", "shadow_marker": "*"},
                      {"name": "builder", "uid": 1000, "home": "/home/builder", "shell": "/bin/bash",
                       "kind": "native_login", "passwd_marker": "x", "shadow_marker": "!"}],
-        "firstboot": {"network_backend": "netplan-systemd-networkd", "cloud_default_user": "builder",
+        "firstboot": {"network_backend": "netplan-systemd-networkd", "cloud_default_user": "ubuntu",
                       "cloud_base_config_reviewed": True},
         "k8s": {"version": "1.35.10", "kubelet_enabled": True, "kubelet_active": False,
                 "runtime_version": "2.1.0", "cluster": dict.fromkeys(CLUSTER, 0),
@@ -61,6 +61,11 @@ class CopyPolicyTests(unittest.TestCase):
         self.assertEqual(CopyPlan().status, "NEEDS_INSPECTION")
         self.assertNotIn("/etc/cloud/cloud.cfg.d/*", plan.wipe)
         self.assertNotIn("/etc/kubernetes", plan.wipe)
+        self.assertNotIn("/etc/kubernetes/manifests", plan.wipe)  # Placeholder is retained, not wiped.
+        # Snapd device key: exact entries-only COPY wipe; credential.secret is never a wipe target.
+        self.assertIn("/var/lib/snapd/device/private-keys-v1/*", plan.wipe)
+        self.assertFalse([p for p in plan.wipe if "snapd" in p and p != "/var/lib/snapd/device/private-keys-v1/*"])
+        self.assertFalse([p for p in plan.wipe if "credential" in p])
         self.assertIn("/etc/containerd", plan.retain)
         self.assertIn("kubelet units and enabled=True/active=False", plan.retain)
 
@@ -150,7 +155,9 @@ class CopyPolicyTests(unittest.TestCase):
             del f[section][key]
             self.refuses(f)
         for section, key, wrong in (("firstboot", "network_backend", "NetworkManager"),
-                                   ("firstboot", "cloud_default_user", "ubuntu"),
+                                   ("firstboot", "cloud_default_user", "builder"),
+                                   ("firstboot", "cloud_default_user", "root"),
+                                   ("firstboot", "cloud_default_user", "Ubuntu"),
                                    ("firstboot", "cloud_base_config_reviewed", 1),
                                    ("layout", "partition_count", 2),
                                    ("layout", "partition_count", True),
@@ -209,6 +216,27 @@ class CopyPolicyTests(unittest.TestCase):
             self.refuses(f)
         f = fixture()
         del f["layout"]["swap_entries"]
+        self.refuses(f)
+
+    def test_upstream_ubuntu_default_user_and_locked_builder(self):
+        # Owner decision: cloud-init's upstream default user `ubuntu`, created at first boot.
+        self.assertEqual(validate_inventory(fixture()).status, "COPY_POLICY_ONLY_NEEDS_REVIEW")
+        f = fixture()
+        f["firstboot"]["cloud_default_user"] = "builder"  # builder is never the cloud default user.
+        self.refuses(f)
+        for account in ({"name": "ubuntu", "uid": 1001, "home": "/home/ubuntu", "shell": "/bin/bash",
+                         "kind": "native_login", "passwd_marker": "x", "shadow_marker": "!"},
+                        {"name": "ubuntu", "uid": 999, "home": "/nonexistent", "shell": "/usr/sbin/nologin",
+                         "kind": "system", "passwd_marker": "x", "shadow_marker": "!*"}):
+            f = fixture()
+            f["accounts"].append(account)  # A pre-existing ubuntu account refuses, whatever its shape.
+            self.refuses(f)
+        for marker in ("$6$synthetic", "!$6$synthetic", "", "UNKNOWN"):
+            f = fixture()
+            f["accounts"][1]["shadow_marker"] = marker  # builder must stay locked, unrecoverably.
+            self.refuses(f)
+        f = fixture()
+        del f["accounts"][1]  # builder remains the exact retained native_login account.
         self.refuses(f)
 
     def test_readme_only_by_exact_reviewed_row(self):

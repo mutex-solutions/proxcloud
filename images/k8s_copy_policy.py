@@ -15,10 +15,12 @@ root volume ONLY: old EFI vars and cloud-init media are never candidate artifact
 Per-build cloud drop-in review must come independently of inventory, with exact name/hash
 coverage (including 50-cloud-init/network-disable/lab files if present). There is
 NO Ubuntu26 vendor whitelist yet. Never supply synthetic fixtures as evidence.
-Network backend and base cloud config/default user are UNKNOWN for the actual
-source. This deliberately narrow prototype only models independently reviewed
-netplan-systemd-networkd plus an existing locked builder default user. An ubuntu
-default user, missing account, unknown backend/config, or another partition needs
+Reviewed against a read-only inventory of the real template root (owner decision):
+netplan-systemd-networkd, and the UPSTREAM cloud-init default user `ubuntu` from the
+packaged base cloud.cfg. cloud-init creates `ubuntu` at first boot, so it must NOT
+pre-exist; `builder` stays the exact retained native_login account, locked, with no
+SSH keys and no sudo rule after cleanup. Another default user, a pre-existing ubuntu
+account, missing builder, unknown backend/config, or another partition needs
 inspection and separate policy review, NOT guessing or rewriting source facts.
 No return value satisfies vm_artifact checks or changes its kubernetes contract.
 """
@@ -32,12 +34,17 @@ COPY_WIPE = ("/home/builder/.ssh", "/root/.ssh", "/etc/ssh/ssh_host_*",
              "/var/lib/cloud", "/run/cloud-init", "/var/log/cloud-init*",
              "/var/log/installer", "/var/lib/dbus/machine-id", "/etc/apt/auth.conf",
              "/etc/apt/auth.conf.d/*", "/root/.docker/config.json",
-             "/home/builder/.docker/config.json")
+             "/home/builder/.docker/config.json",
+             # snapd's machine-specific device key from image seeding; snapd regenerates it on first
+             # boot. Backend must verify the directory is EMPTY afterwards (not a refusal anymore).
+             "/var/lib/snapd/device/private-keys-v1/*")
+DEFAULT_USER = "ubuntu"  # Upstream cloud-init default user (owner decision); created at first boot.
 RETAIN = ("/etc/kubernetes", "/etc/containerd", "/etc/crictl.yaml",
           "/etc/cni/net.d", "/opt/cni/bin", "/var/lib/dpkg", "/var/lib/apt/extended_states",
           "kubeadm/kubelet/kubectl and CRI binaries", "package holds and runtime versions",
           "kernel/initramfs/GRUB", "kubelet units and enabled=True/active=False",
-          "reviewed netplan-systemd-networkd mechanism and builder default-user base cloud config")
+          "reviewed netplan-systemd-networkd mechanism and upstream ubuntu default-user base cloud config",
+          "locked builder local account (no keys, no sudo rule)")
 CLUSTER = {"kubernetes_pki", "admin_conf", "bootstrap_kubelet_conf", "kubelet_conf",
            "kubelet_pki", "etcd_db", "etcd_other", "static_manifests", "workloads"}
 
@@ -92,13 +99,20 @@ def validate_inventory(facts, reviewed_dropins=()):
     Exact schema below; booleans are bool, counts/versions are int, never 0/1 bool
     substitutes. accounts contains passwd *markers*, not shadow hash bytes;
     shadow_marker accepts only unrecoverable locked markers. No auto-normalizing.
-    cluster counts include symlink/dangling entries: never follow or ignore them.
+    cluster counts include symlink/dangling entries: never follow or ignore them. The
+    producer excludes from static_manifests ONLY image-builder's exact 0-byte regular
+    non-symlink `.kubelet-keep` placeholder; any other entry still counts and refuses.
+    hygiene.unclassified_credentials excludes ONLY regular, non-dot snapd device-key
+    files that the `private-keys-v1/*` COPY_WIPE removes; systemd credential.secret,
+    and any other/irregular entry there, still counts and refuses.
     bootstrap_token_files is only a bounded count of reviewed prejoin token files;
     backend must curate exact guest leaves separately, not erase cluster identity.
     reviewed_dropins: tuple of (basename, sha256, 'preserve_vendor'|'remove_build'),
     independently approved for THIS source; default is deliberately no whitelist.
     firstboot.cloud_base_config_reviewed must cover observed base config and the
     effective default user/network mechanism, not just presence of cloud-init.
+    firstboot.cloud_default_user must be exactly the upstream "ubuntu", which must not
+    already exist in accounts (cloud-init creates it); builder is never the default user.
     retained_package_policy_reviewed/package_policy_sha256 are parent review
     preconditions binding observed package versions, holds, CRI config and exact
     runtime baseline. This pure validator cannot authenticate that review or hash;
@@ -128,8 +142,9 @@ def validate_inventory(facts, reviewed_dropins=()):
         _need(type(l[key]) is int and l[key] == 1)
     _need(type(l["mountpoints"]) is list and l["mountpoints"] == ["/"])
     _need(l["external_fstab"] is False)
-    # swap_entries: swap files (/swap.img, /swapfile), fstab swap rows (commented or not) and
-    # swap units. Refusal, never removal, so the parent learns the template's real state.
+    # swap_entries: swap files (/swap.img, /swapfile), ACTIVE (uncommented) fstab swap rows and
+    # swap units; a commented fstab row is inert and not counted by the producer. Refusal,
+    # never removal, so the parent learns the template's real state.
     for key in ("esp_count", "extra_filesystems", "unsafe_links", "swap_entries"):
         _count(l[key])
         _need(l[key] == 0)
@@ -159,8 +174,10 @@ def validate_inventory(facts, reviewed_dropins=()):
     b = facts["firstboot"]
     _keys(b, ("network_backend", "cloud_default_user", "cloud_base_config_reviewed"))
     _need(type(b["network_backend"]) is str and b["network_backend"] == "netplan-systemd-networkd")
-    _need(type(b["cloud_default_user"]) is str and b["cloud_default_user"] == "builder")
-    _need(b["cloud_default_user"] in seen and b["cloud_base_config_reviewed"] is True)
+    _need(type(b["cloud_default_user"]) is str and b["cloud_default_user"] == DEFAULT_USER)
+    # cloud-init creates the default user at first boot: a pre-existing ubuntu account refuses,
+    # whatever its kind/shell (a nologin uid<1000 'system' ubuntu row is not acceptable either).
+    _need(DEFAULT_USER not in seen and b["cloud_base_config_reviewed"] is True)
     k = facts["k8s"]
     _keys(k, ("version", "kubelet_enabled", "kubelet_active", "cluster", "runtime_version",
               "bootstrap_token_files", "kubernetes_packages", "retained_package_policy_reviewed",
@@ -204,7 +221,8 @@ def validate_inventory(facts, reviewed_dropins=()):
         _need(d["sha256"] == reviewed[d["name"]][0])
     _need(observed == set(reviewed))
     return CopyPlan(status="COPY_POLICY_ONLY_NEEDS_REVIEW", wipe=COPY_WIPE, retain=RETAIN,
-                    reset=("empty /etc/machine-id", "lock account tables; preserve builder account",
+                    reset=("empty /etc/machine-id", "lock account tables; preserve locked builder account",
+                           "ubuntu default user is created by cloud-init at first boot, not shipped",
                            "generic personal-state/network cleanup and journal/free-space reset",
                            "curate reviewed prejoin bootstrap-token leaves; never cluster state"),
                     reviewed_dropins=reviewed_dropins)
